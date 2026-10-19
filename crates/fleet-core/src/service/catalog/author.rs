@@ -770,6 +770,30 @@ pub fn create_in(
     })
 }
 
+/// Add a whole asset that is not in `target` yet: a gallery definition
+/// (`service::fleet_agents::gallery`). `E_ASSET_EXISTS` when the name is
+/// taken; the source is cleared and the asset private, as a copy's is.
+pub fn install_in(
+    target: CatalogTarget<'_>,
+    mut asset: Asset,
+    store: &Mutex<Store>,
+) -> Result<WriteResult, IpcError> {
+    check_name(&asset.header.name)?;
+    asset.header.source = None;
+    asset.header.scope = Scope::Private;
+    let root = target.root(store)?;
+    let message = format!(
+        "catalog: install {}/{}",
+        asset.kind().as_str(),
+        asset.header.name
+    );
+    let commit = write_commit_reload(target, &root, &asset, false, &message, store)?;
+    Ok(WriteResult {
+        commit,
+        lint: lint_in_repo(target, &asset, &root),
+    })
+}
+
 /// Save an edited asset. Lints first and writes nothing when there are
 /// errors (`E_LINT`, `details` = the report). The write overwrites and
 /// prunes `resources/…` files the asset no longer lists.
@@ -1267,6 +1291,35 @@ mod tests {
 
     fn fields(findings: &[Finding]) -> Vec<&str> {
         findings.iter().map(|f| f.field.as_str()).collect()
+    }
+
+    #[test]
+    fn a_gallery_definition_installs_once_and_is_marked_installed() {
+        use crate::service::fleet_agents::gallery;
+        let _g = lock_registry_for_test();
+        let root = init_repo("gallery");
+        let store = configured_store(&root);
+        let marked = |name: &str| {
+            gallery::gallery()
+                .into_iter()
+                .find(|e| e.view.name == name)
+                .unwrap()
+                .installed
+        };
+        let done = gallery::install(&store, "issue-triage").unwrap();
+        assert!(done.lint.errors.is_empty(), "{:?}", done.lint);
+        assert_eq!(
+            subjects(&root)[0],
+            "catalog: install fleet_agent/issue-triage"
+        );
+        assert!(root.join("fleet-agents/issue-triage/skill.md").exists());
+        assert!(marked("issue-triage") && !marked("pr-questions"));
+        // The catalog's copy is the person's: a second install never overwrites it.
+        let again = gallery::install(&store, "issue-triage").unwrap_err();
+        assert_eq!(again.code, crate::ipc_error::codes::E_ASSET_EXISTS);
+        let missing = gallery::install(&store, "nope").unwrap_err();
+        assert_eq!(missing.code, crate::ipc_error::codes::E_NOTFOUND);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     // ---------------------------------------------------------- templates

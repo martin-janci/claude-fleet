@@ -763,3 +763,50 @@ mod grant_form {
         assert_eq!(forms::validate(&spec), Vec::<String>::new());
     }
 }
+
+/// The gallery ships every definition in catalog-seed/fleet-agents/, each
+/// valid: what a person installs grants without an edit.
+#[test]
+fn the_gallery_is_the_seed_directory_and_every_entry_is_valid() {
+    let mut on_disk: Vec<String> =
+        std::fs::read_dir(crate::repo_files::path("catalog-seed/fleet-agents"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+    on_disk.sort();
+    let mut shipped: Vec<String> = super::gallery::SEEDS
+        .iter()
+        .map(|s| s.name.to_string())
+        .collect();
+    shipped.sort();
+    assert_eq!(shipped, on_disk, "SEEDS lists the seed directory");
+    for e in super::gallery::entries(|n| n == "proposer") {
+        assert!(
+            e.view.problems.is_empty(),
+            "{}: {:?}",
+            e.view.name,
+            e.view.problems
+        );
+        assert!(!e.view.description.is_empty() && e.view.trigger.is_some());
+        assert_eq!(e.installed, e.view.name == "proposer");
+    }
+}
+
+/// The three gallery agents for everyday work: a triage on a tracker, an
+/// answer on GitHub, a digest on a schedule.
+#[test]
+fn the_everyday_gallery_agents_read_and_write_where_they_say() {
+    use definition::TriggerSource;
+    let triage = seeded("issue-triage");
+    assert_eq!(
+        triage.definition.trigger.source,
+        TriggerSource::TrackerComments
+    );
+    assert!(triage.skill.contains("never") && triage.skill.contains("instruction"));
+    let ask = seeded("pr-questions");
+    assert_eq!(ask.definition.trigger.source, TriggerSource::GithubComments);
+    assert_eq!(ask.definition.actions[0].kind.word(), "pr_comment");
+    let digest = seeded("daily-digest");
+    assert_eq!(digest.definition.trigger.source, TriggerSource::Schedule);
+    assert!(digest.definition.run.diagnostics);
+}

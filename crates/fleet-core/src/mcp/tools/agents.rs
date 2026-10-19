@@ -19,7 +19,9 @@ impl FleetTools {
         project_id?, config?, hours?, definition? (fleet), bindings? (fleet: \
         one per store role; each MCP binding is asked for its tools on the \
         host first; or answers: the grant form's)}, definitions (the \
-        catalog's fleet agents), form {definition, id?} (a fleet agent's \
+        catalog's fleet agents), gallery (the fleet agents claude-fleet \
+        ships, each marked installed or not), install {definition} (add a \
+        gallery definition to the catalog), form {definition, id?} (a fleet agent's \
         grant form, prefilled from rule id), revoke {id}, pause_all, approve \
         {id}, reject {id}, run {id, request?, run_scope? {minutes?, host?, \
         session?, component?}} (a manual or scheduled fleet agent, now). \

@@ -27,8 +27,8 @@ pub const MAX_RULE_HOURS: i64 = 24 * 90;
 #[derive(Debug, Clone, Default, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars", rename = "AgentsParams")]
 pub struct AgentsArgs {
-    /// status | explain | job | definitions | form | grant | revoke | pause_all |
-    /// approve | reject | run.
+    /// status | explain | job | definitions | gallery | form | grant | install |
+    /// revoke | pause_all | approve | reject | run.
     pub action: String,
     /// grant: review | support | fleet; status: only this agent's jobs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -53,7 +53,8 @@ pub struct AgentsArgs {
     /// grant: the rule ends after this many hours (default never).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hours: Option<i64>,
-    /// grant (fleet): the catalog fleet_agent the rule runs.
+    /// grant (fleet): the catalog fleet_agent the rule runs; install: the
+    /// gallery definition to add to the catalog.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub definition: Option<String>,
     /// grant (fleet): one binding per store role, a JSON array of
@@ -87,7 +88,7 @@ impl AgentsArgs {
     pub fn is_read(&self) -> bool {
         matches!(
             self.action.as_str(),
-            "status" | "explain" | "job" | "definitions" | "form"
+            "status" | "explain" | "job" | "definitions" | "gallery" | "form"
         )
     }
 }
@@ -461,9 +462,21 @@ pub fn call(
             crate::service::fleet_agents::form::definitions()?,
         )),
         "form" => to_json(serde_json::to_value(fleet_form(store, args)?)),
+        "gallery" => to_json(serde_json::to_value(
+            crate::service::fleet_agents::gallery::gallery(),
+        )),
+        "install" => {
+            let name = args
+                .definition
+                .as_deref()
+                .ok_or_else(|| invalid("install needs definition (a gallery name)"))?;
+            to_json(serde_json::to_value(
+                crate::service::fleet_agents::gallery::install(store, name)?,
+            ))
+        }
         other => Err(invalid(format!(
             "unknown agents action {other:?}: status | explain | job | grant | revoke | pause_all | \
-             approve | reject | run | definitions | form"
+             approve | reject | run | definitions | gallery | form | install"
         ))),
     }
 }
