@@ -194,7 +194,7 @@
               class="mute"
               data-testid="control-thread-mute"
               aria-pressed={t.muted}
-              title="Mute: Control stops hearing about it"
+              title={t.muted ? 'Muted: click so Control hears about it again' : 'Mute: Control stops hearing about it'}
               aria-label={`Mute ${t.title}`}
               onclick={() => void toggleMute(t)}><Icon name={t.muted ? 'bell-off' : 'bell'} size={12} /></button
             >
