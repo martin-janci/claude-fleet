@@ -883,7 +883,7 @@ pub(super) fn reconcile_write_one_host(
             // Mark host unreachable; surface last-known sessions so the UI
             // can render them dimmed/red. We KEEP them (no delete).
             let now = now_unix();
-            let agent_offline = e.code == codes::E_AGENT_OFFLINE;
+            let agent_offline = crate::agent::registry::connection_gone(e);
             match down_hosts().note_down(&host.alias, &e.message, agent_offline, now) {
                 DownLog::Hold => {
                     tracing::debug!(host = %host.alias, "[reconcile] no agent connected yet; waiting for it to redial");

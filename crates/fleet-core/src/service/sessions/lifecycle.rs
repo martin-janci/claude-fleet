@@ -1870,10 +1870,21 @@ pub(super) async fn kill_session_with(
             .unwrap_or_else(|| args.name.trim_start_matches("bg:").to_string());
         let status = claude_status.as_deref();
         let agents = if bg_kill_needs_listing(&kind, status) {
+            // A listing that failed is not an empty one: read as "already
+            // gone", the agent would keep running behind a kill reported
+            // as done (and a stop limit closed for good).
             exec_for(&args.host_alias, ssh)
                 .list_claude_agents()
                 .await
-                .unwrap_or_default()
+                .ok_or_else(|| {
+                    IpcError::new(
+                        codes::E_SSH,
+                        format!(
+                            "could not list the background agents on {}; {} was not stopped",
+                            args.host_alias, args.name
+                        ),
+                    )
+                })?
         } else {
             Vec::new()
         };

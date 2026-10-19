@@ -311,14 +311,19 @@ impl AgentRegistry {
             return Err(offline(alias));
         }
         // …and it could have been replaced between the lookup and the insert,
-        // in which case nobody will ever answer this slot.
+        // in which case nobody will ever answer this slot. From here on the
+        // frame is queued on that connection and may have reached the agent,
+        // which runs it whether or not the answer gets back: not "offline"
+        // (nothing ran, retry elsewhere) but lost mid-request, a code
+        // `codes::may_have_run` counts, so a billed usage call or a
+        // `gh repo create` is not fired a second time.
         if self.live(alias).map(|c| c.id) != Some(conn.id) {
-            return Err(offline(alias));
+            return Err(lost_mid_request(alias));
         }
         match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(answer)) => Ok(answer),
             // The sender was dropped: the connection was replaced or closed.
-            Ok(Err(_)) => Err(offline(alias)),
+            Ok(Err(_)) => Err(lost_mid_request(alias)),
             // `E_SSH_TIMEOUT`, not `E_TIMEOUT`, even though no ssh is
             // involved: it is the code EVERY `SshExec` returns for a blown
             // wall clock (`ssh::wall_clock_error`, shared by `SshClient`,
@@ -416,6 +421,32 @@ impl Drop for PendingGuard {
             });
         }
     }
+}
+
+/// The connection ended after the request was sent: its outcome is unknown.
+/// `details.connection_lost` lets a reader that only cares whether the agent
+/// is there (the reconcile's redial grace) treat it like `E_AGENT_OFFLINE`.
+fn lost_mid_request(alias: &str) -> IpcError {
+    IpcError {
+        details: Some(serde_json::json!({ "connection_lost": true })),
+        ..IpcError::new(
+            codes::E_AGENT_PROTOCOL,
+            format!(
+                "the connection to {alias}'s agent ended mid-request; the command may have run"
+            ),
+        )
+    }
+}
+
+/// Whether `e` says the host's agent connection is gone: not connected, or
+/// lost while a request was in flight.
+pub fn connection_gone(e: &IpcError) -> bool {
+    e.code == codes::E_AGENT_OFFLINE
+        || e.details
+            .as_ref()
+            .and_then(|d| d.get("connection_lost"))
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
 }
 
 fn offline(alias: &str) -> IpcError {
@@ -681,7 +712,8 @@ mod tests {
     }
 
     /// The spec's "a call racing a disconnect": the caller must be told the
-    /// agent is gone, not left waiting out the whole wall clock.
+    /// agent is gone, not left waiting out the whole wall clock. The frame
+    /// was already sent, so the code is one `may_have_run` counts.
     #[tokio::test]
     async fn an_in_flight_request_fails_offline_when_the_connection_drops() {
         let reg = AgentRegistry::new();
@@ -695,7 +727,10 @@ mod tests {
         let started = Instant::now();
         agent.disconnect();
         let err = call.await.unwrap().unwrap_err();
-        assert_eq!(err.code, codes::E_AGENT_OFFLINE);
+        assert_eq!(err.code, codes::E_AGENT_PROTOCOL);
+        assert!(codes::may_have_run(&err.code));
+        // …yet it still reads as "the agent is gone" for the redial grace.
+        assert!(connection_gone(&err));
         assert!(
             started.elapsed() < Duration::from_millis(500),
             "waited {:?} after the disconnect",

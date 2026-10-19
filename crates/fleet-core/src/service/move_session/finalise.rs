@@ -145,6 +145,12 @@ pub(super) async fn finalise_source(
         let repointed_prompts = lock(store)?
             .repoint_deferred_prompts(a.source_row_id, a.target_row_id)
             .map_err(|e| tag_step("re-pointing the queued prompts", e.into()))?;
+        // So do its open tasks: the conversation goes on there and prints
+        // its done marker on the target, which must find them; left on the
+        // source they fail as lost the moment it is killed.
+        let (moved_work, moved_waits) = lock(store)?
+            .repoint_open_tasks(a.source_row_id, a.target_row_id)
+            .map_err(|e| tag_step("re-pointing the open tasks", e))?;
         // A pin follows the session: the target took it at the carry step,
         // so the source's is lifted, or its kill would refuse (E_PINNED).
         // Kept, to put back if the kill fails: the source then lives on, and
@@ -193,6 +199,17 @@ pub(super) async fn finalise_source(
             // guesswork; it follows the identity back to the source, which is
             // where the live endpoint is.) A failure here can only be logged:
             // the kill error is the one that has to reach the caller.
+            if !moved_work.is_empty() || !moved_waits.is_empty() {
+                if let Err(re) = lock(store).and_then(|s| {
+                    s.restore_task_sessions(&moved_work, &moved_waits, a.source_row_id)
+                }) {
+                    tracing::warn!(
+                        session_id = a.source_row_id,
+                        error = %re.message,
+                        "move_session: the kill failed and the open tasks stay on the target"
+                    );
+                }
+            }
             if repointed_prompts > 0 {
                 if let Err(re) = lock(store)
                     .and_then(|s| Ok(s.repoint_deferred_prompts(a.target_row_id, a.source_row_id)?))

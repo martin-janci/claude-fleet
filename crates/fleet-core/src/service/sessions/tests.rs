@@ -8683,3 +8683,37 @@ fn a_pinned_ghost_is_not_dismissed() {
         .unwrap()
         .is_none());
 }
+
+/// A live bg agent whose host's `claude agents` listing fails is not taken
+/// as already gone: the kill reports the failure (and records no kill), so
+/// a stop limit or a person's Kill is retried rather than closed while the
+/// agent keeps running.
+#[tokio::test]
+async fn a_bg_kill_whose_listing_failed_is_not_reported_as_done() {
+    let s = Store::open_in_memory().unwrap();
+    let host = "nohost.invalid";
+    s.upsert_host(host).unwrap();
+    s.upsert_bg_session(host, "bg:job-1", None, "job-1", Some("working"), 1, "bg", 1)
+        .unwrap();
+    let store = Mutex::new(s);
+    let ssh = Arc::new(crate::ssh::SshClient::new());
+    let err = kill_session(
+        KillSessionArgs {
+            host_alias: host.into(),
+            name: "bg:job-1".into(),
+            force: false,
+        },
+        &store,
+        &ssh,
+    )
+    .await
+    .unwrap_err();
+    assert!(err.message.contains("was not stopped"), "{err:?}");
+    let row = store
+        .lock()
+        .unwrap()
+        .get_session("bg:job-1", host)
+        .unwrap()
+        .expect("row kept");
+    assert_eq!(row.status, "running");
+}
