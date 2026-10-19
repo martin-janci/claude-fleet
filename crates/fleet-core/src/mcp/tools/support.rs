@@ -2534,28 +2534,38 @@ impl FleetTools {
             }));
         }
         let mut queued = delivery_gate(row, force, submit)?;
-        // An idle session gets one prompt per idle moment, whoever types it:
-        // this send takes the moment, or the queue already did and the REPL
-        // will hold this one behind that turn.
-        if submit
-            && !queued
-            && !crate::service::sessions::deferred::claim_moment_for_direct_send(
+        let ack_state = || -> Result<_, crate::ipc_error::IpcError> {
+            Ok(lock(&self.store)?.prompt_ack_state(row.id)?)
+        };
+        let before = if submit && !queued {
+            // An idle session gets one prompt per idle moment, whoever types
+            // it: this send takes the moment, or the queue already did and
+            // the REPL will hold this one behind that turn. Either way it is
+            // typed in the session's typing lane, after any paste in flight;
+            // a send that fails and typed nothing gives the moment back.
+            let body = prompt.clone();
+            let (got, before) = crate::service::sessions::deferred::send_direct(
                 &self.store,
                 row,
-                &prompt,
+                &body,
                 crate::store::now_unix(),
+                |_| async move {
+                    let before = ack_state()?;
+                    send(prompt).await?;
+                    Ok(before)
+                },
             )
-            .map_err(to_mcp_err)?
-            && crate::service::sessions::deferred::idle_for_prompt(row)
-        {
-            queued = true;
-        }
-        let before = {
-            let s = lock(&self.store).map_err(to_mcp_err)?;
-            s.prompt_ack_state(row.id)
-                .map_err(|e| to_mcp_err(e.into()))?
+            .await
+            .map_err(to_mcp_err)?;
+            if !got && crate::service::sessions::deferred::idle_for_prompt(row) {
+                queued = true;
+            }
+            before
+        } else {
+            let before = ack_state().map_err(to_mcp_err)?;
+            send(prompt).await.map_err(to_mcp_err)?;
+            before
         };
-        send(prompt).await.map_err(to_mcp_err)?;
         let acked = match before {
             Some(st) if ack_knowable(submit, queued, st.hooks_seen) => {
                 Some(await_prompt_ack(&self.store, row.id, st.prompt_submit_seq, ACK_WAIT).await?)

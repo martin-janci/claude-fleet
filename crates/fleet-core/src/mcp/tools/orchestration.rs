@@ -535,8 +535,13 @@ impl FleetTools {
         };
         self.recheck_now(&recheck)?;
         let prompt = apply_marker(p.prompt, &marker_origin(&caller), &caller, p.raw)?;
-        let before = row.turn_seq;
-        self.deliver_prompt(&row, prompt, true, false).await?;
+        // The turn this prompt's reply ends, not `row.turn_seq` itself: a
+        // queued prompt that took the idle moment first runs its turn ahead
+        // of this one, and that turn's Stop is not this prompt's answer.
+        let delivered = self.deliver_prompt(&row, prompt, true, false).await?;
+        let before = delivered["turn_seq_before"]
+            .as_i64()
+            .unwrap_or(row.turn_seq);
         let out = tasks::wait_for_session(
             &self.store,
             row.id,

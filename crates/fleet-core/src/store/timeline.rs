@@ -742,6 +742,17 @@ impl Store {
         let params = params_then(rusqlite::params![at], ids);
         Ok(self.conn.execute(&sql, params.as_slice())?)
     }
+
+    /// Undo [`Self::mark_messages_delivered`] for one message whose wake
+    /// paste, stamped ahead of the send, typed nothing: the next hook
+    /// response hands it over instead.
+    pub fn unmark_message_delivered(&self, id: i64) -> Result<(), crate::ipc_error::IpcError> {
+        self.conn.execute(
+            "UPDATE session_messages SET delivered_at = NULL WHERE id = ?1",
+            [id],
+        )?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
