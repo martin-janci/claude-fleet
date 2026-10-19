@@ -128,9 +128,13 @@ const SEND_TIMEOUT: Duration = Duration::from_secs(300);
 /// How long closing the socket may take.
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// How long a write in flight when a newer connection takes over may still
+/// finish before the socket is dropped under it.
+const TAKEOVER_GRACE: Duration = Duration::from_secs(1);
+
 /// Close a connection with a reason an agent can log and act on — a version
-/// refusal, currently the only case that needs one on this side; every other
-/// refusal here still just closes bare.
+/// refusal, or a connection a newer one replaced; every other refusal here
+/// still just closes bare.
 async fn close_with_reason(sink: &mut SplitSink<WebSocket, Message>, code: u16, reason: String) {
     let frame = CloseFrame {
         code,
@@ -604,6 +608,7 @@ async fn serve(socket: WebSocket, session: Session, limits: Limits, hello_deadli
     // Fires when this stops being the live connection, so the socket can be
     // torn down even while the writer is stuck in a send.
     let gone = registry.gone(&alias, conn_id);
+    let superseded = registry.superseded(&alias, conn_id);
     tracing::info!(host = %alias, conn = conn_id, "[agent] connected");
 
     let budgets = Arc::new(Mutex::new(Budgets::default()));
@@ -617,6 +622,7 @@ async fn serve(socket: WebSocket, session: Session, limits: Limits, hello_deadli
         Arc::clone(&budgets),
         alias.clone(),
         conn_id,
+        superseded.clone(),
     ));
     let who = Registered {
         registry: &registry,
@@ -646,6 +652,17 @@ async fn serve(socket: WebSocket, session: Session, limits: Limits, hello_deadli
         End::Writer => {}
         // The writer may be blocked in a send nobody will ever finish:
         // dropping it, with the read half below, closes the socket.
+        // Replaced by a newer connection: the writer is not stuck, it is
+        // closing with the superseded code, which is what keeps the old
+        // agent from dialling straight back. Bounded all the same.
+        End::Gone if superseded.is_cancelled() => {
+            if tokio::time::timeout(CLOSE_TIMEOUT * 2, &mut writer)
+                .await
+                .is_err()
+            {
+                writer.abort();
+            }
+        }
         End::Gone => writer.abort(),
         // The writer closes the socket itself, within its own timeouts.
         End::Reader => {
@@ -749,6 +766,7 @@ async fn write_loop(
     budgets: Arc<Mutex<Budgets>>,
     alias: String,
     conn_id: ConnId,
+    superseded: tokio_util::sync::CancellationToken,
 ) {
     // Small frames first, then pings, then bulk ones (an upload's chunks,
     // a big upload): an `exec` or a `cancel` queued behind a 200 MiB file
@@ -759,6 +777,12 @@ async fn write_loop(
     let mut bulk: std::collections::VecDeque<HubFrame> = Default::default();
     let mut closed = false;
     loop {
+        // Taken over: the requests behind anything still queued were already
+        // failed (`abort_pending`), so nothing more is worth sending. Close,
+        // with the code that tells the old agent not to dial straight back.
+        if superseded.is_cancelled() {
+            break;
+        }
         while let Ok(frame) = rx.try_recv() {
             if is_bulk(&frame) {
                 bulk.push_back(frame);
@@ -793,6 +817,7 @@ async fn write_loop(
                 },
                 // Disabled once the read loop has dropped its sender.
                 Some(ping) = pings.recv() => ping,
+                () = superseded.cancelled() => break,
             },
         };
         // Armed BEFORE the frame goes out, so the answer can never beat its
@@ -806,10 +831,20 @@ async fn write_loop(
         match encode_hub_frame(&frame) {
             Ok(text) => {
                 // Bounded: a peer that stops reading must not hold this task,
-                // and its buffers, for ever.
-                match tokio::time::timeout(SEND_TIMEOUT, sink.send(Message::Text(text.into())))
-                    .await
-                {
+                // and its buffers, for ever. Nor past a takeover: a send
+                // still stuck a moment after it is abandoned, socket and all
+                // (there is no closing a socket mid-frame).
+                let send =
+                    tokio::time::timeout(SEND_TIMEOUT, sink.send(Message::Text(text.into())));
+                let taken_over = async {
+                    superseded.cancelled().await;
+                    tokio::time::sleep(TAKEOVER_GRACE).await;
+                };
+                let sent = tokio::select! {
+                    sent = send => sent,
+                    () = taken_over => return,
+                };
+                match sent {
                     Ok(Ok(())) => {}
                     Ok(Err(_)) => break,
                     Err(_) => {
@@ -830,6 +865,11 @@ async fn write_loop(
                 "[agent] could not encode a frame; its caller will time out"
             ),
         }
+    }
+    if superseded.is_cancelled() {
+        let reason = "another agent connected with this host's token".to_string();
+        close_with_reason(&mut sink, fleet_proto::SUPERSEDED_CLOSE_CODE, reason).await;
+        return;
     }
     let _ = tokio::time::timeout(CLOSE_TIMEOUT, sink.close()).await;
 }
@@ -1969,6 +2009,45 @@ mod tests {
         let snap = hub.registry.snapshot();
         assert_eq!(snap.len(), 1);
         assert_eq!(snap[0].agent_version, "2.0.0");
+    }
+
+    /// The replaced agent hears WHY: a close carrying the superseded code,
+    /// which is what tells a second agent on the same token to back off
+    /// instead of dialling straight back and taking the connection over.
+    #[tokio::test]
+    async fn a_replaced_connection_is_closed_with_the_superseded_code() {
+        let hub = hub().await;
+        let mut first = connected_as(&hub, LAPTOP_TOKEN, "laptop", "1.0.0").await;
+        let _second = connected_as(&hub, LAPTOP_TOKEN, "laptop", "2.0.0").await;
+        let (code, reason) = close_reason(&mut first).await;
+        assert_eq!(code, fleet_proto::SUPERSEDED_CLOSE_CODE, "{reason}");
+        assert!(reason.contains("another agent"), "{reason}");
+    }
+
+    /// A connection that is merely dropped (its token revoked) is not told
+    /// it was replaced: only a takeover carries the superseded code.
+    #[tokio::test]
+    async fn a_disconnected_connection_is_not_closed_as_superseded() {
+        let hub = hub().await;
+        let mut ws = connected(&hub, LAPTOP_TOKEN, "laptop").await;
+        hub.store
+            .lock()
+            .unwrap()
+            .upsert_host_token("laptop", "rotated-token")
+            .unwrap();
+        hub.beat();
+        let deadline = Instant::now() + PATIENCE;
+        loop {
+            match tokio::time::timeout_at(deadline, ws.next()).await {
+                Ok(Some(Ok(WsMessage::Close(Some(frame))))) => {
+                    assert_ne!(u16::from(frame.code), fleet_proto::SUPERSEDED_CLOSE_CODE);
+                    break;
+                }
+                Ok(Some(Ok(_))) => continue,
+                Ok(_) => break,
+                Err(_) => panic!("the dropped connection was never closed"),
+            }
+        }
     }
 
     /// The replaced agent may be wedged, not merely restarted: it never
