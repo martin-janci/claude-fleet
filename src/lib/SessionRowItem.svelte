@@ -1033,6 +1033,10 @@
               resetsAt={$attentionFacts?.limited_accounts?.[sess.account_uuid ?? '']?.resets_at ?? null}
               accountName={(u) => accountLabel($accountByUuid.get(u))}
             />
+          {:else if triage.bucket === 'no_credentials'}
+            <!-- Signed out (review w03-3): the same restart under another
+                 login applies; there is no reset to wait for. -->
+            <LimitActions {sess} resetsAt={null} signedOut accountName={(u) => accountLabel($accountByUuid.get(u))} />
           {/if}
           {#if !compact && $showRowDetails}
             <SessionRowDetails {sess} {nowSec} {secondaryName} />

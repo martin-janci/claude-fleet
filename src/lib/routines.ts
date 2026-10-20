@@ -12,8 +12,11 @@ import { RUN_CHANGED_EVENT } from './events';
 import { pollWhileShown } from './window_hidden';
 import type { AccountRow } from './accounts';
 import { sessions } from './sessions';
+import { hosts } from './hosts';
 import { selectSessionExplicitly } from './selection';
 import { goTo } from './destination';
+import { requestHostsView } from './app_views';
+import { openAccount } from './account_pill';
 import { automationTab } from './automation';
 import type { RunRow } from './runs';
 import type { OfState } from './kit/status';
@@ -491,14 +494,29 @@ export function openRoutines(r: Omit<RoutinesRequest, 'at'> = {}): void {
  * host, a refused start) opens the routine's definition instead. Answers
  * what it opened.
  */
+/** The account the run's login bills, from the host rows: the profile's
+ *  account, else the host's own. `null` when the hosts do not say. */
+function routineAccountUuid(f: FailingRoutine): string | null {
+  const alias = f.run.host_alias ?? f.routine.host_alias;
+  const h = get(hosts).find((x) => x.alias === alias);
+  if (!h) return null;
+  const p = f.routine.profile;
+  return (p ? h.claude_profiles?.find((x) => x.name === p)?.account_uuid : h.account_uuid) ?? null;
+}
+
 export function fixRoutine(f: FailingRoutine): 'session' | 'definition' | 'host' | 'accounts' | 'retry' {
   const action = f.fix?.action;
   if (action === 'host') {
+    // The run's host, focused (review w03-6).
+    requestHostsView(f.run.host_alias ?? f.routine.host_alias);
     goTo('hosts');
     return 'host';
   }
   if (action === 'accounts') {
-    goTo('accounts');
+    // The routine's own account, not the page's first (review w03-6).
+    const uuid = routineAccountUuid(f);
+    if (uuid) openAccount(uuid);
+    else goTo('accounts');
     return 'accounts';
   }
   if (action === 'retry') {

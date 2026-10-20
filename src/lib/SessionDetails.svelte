@@ -319,10 +319,14 @@
       { value: '', name: 'Host login', email: hostUuid ? ($accountByUuid.get(hostUuid)?.email ?? null) : null, uuid: hostUuid, loggedIn: true },
       ...loginChoices.map((p) => ({ value: p.name, name: p.name, email: p.email, uuid: p.account_uuid, loggedIn: p.account_uuid != null || p.email != null })),
     ];
+    // A login fleet knows is signed out opens `/login` whatever its last
+    // reading says (review w02-4): it reads "signed out", not its headroom.
+    const signedOut = new Set((hostRow?.signed_out_logins ?? []).map((l) => l.profile ?? ''));
     return rows.map((o) => ({
       ...o,
       current: o.value === current,
-      headroom: o.uuid ? loginHeadroomText($accountUsage[o.uuid] ?? null, nowSec) : null,
+      signedOut: signedOut.has(o.value),
+      headroom: signedOut.has(o.value) ? 'signed out' : o.uuid ? loginHeadroomText($accountUsage[o.uuid] ?? null, nowSec) : null,
     }));
   });
   function loginOptionText(o: (typeof loginOptions)[number]): string {

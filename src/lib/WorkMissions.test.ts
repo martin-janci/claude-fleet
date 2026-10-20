@@ -1324,6 +1324,10 @@ describe('missions helpers', () => {
     expect(eventSentence({ id: 4, at: 1, kind: 'dep_added', actor: 'fleet', work_item_id: 3, payload: { depends_on: 2 } })).toBe(
       'Task 3 waits for 2',
     );
+    // Review w03-5: a hold says why.
+    expect(eventSentence({ id: 5, at: 1, kind: 'account_limit', actor: 'loop', payload: { why: 'work is 95% used' } })).toBe(
+      'Waiting for the account: work is 95% used',
+    );
   });
 });
 
