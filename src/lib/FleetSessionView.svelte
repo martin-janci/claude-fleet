@@ -15,7 +15,6 @@
   } from './fleets';
   import { sessionStatusWord } from './attention';
   import type { SessionRow } from './sessions';
-  import { push } from './toasts';
   import ConversationPanel from './ConversationPanel.svelte';
   import FleetTerminal from './FleetTerminal.svelte';
   import Button from './kit/Button.svelte';
