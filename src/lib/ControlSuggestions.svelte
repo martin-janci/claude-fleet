@@ -2,22 +2,32 @@
   Gap plan G3.9: "Suggested from your fleet" above Control's composer
   (`control_suggestions.ts`). A failing PR opens its session or asks
   Control to finish CI; a mass loss opens its host, where "Restore n lost
-  sessions" runs the dry run and the confirm it always has. "Ask Control"
-  only fills the box. ✕ hides a card for this run of the app.
+  sessions" runs the dry run and the confirm it always has; finished
+  sessions open the tidy sheet or ask Control to /tidy. "Ask Control" only
+  fills the box. ✕ hides a card for a week; with the escalation scope on
+  "Control's threads" only Control's own sessions raise one (w04-14).
 -->
 <script lang="ts">
   import { sessions } from './sessions';
   import { insertIntoComposer } from './conversation';
   import { openInControl } from './control_room';
   import { requestHostsView } from './app_views';
-  import { dismissedSuggestions, fleetSuggestions, type Suggestion } from './control_suggestions';
+  import { dismissSuggestion, dismissedSuggestions, fleetSuggestions, type Suggestion } from './control_suggestions';
+  import { controlSessionIds, escalationScope } from './control_escalations';
+  import { handoffs } from './handoffs';
+  import { threadFollows } from './control_journal';
+  import { refreshTidy, requestTidy, tidyReport } from './tidy';
+  import { onMount } from 'svelte';
 
   let { sessionId }: { sessionId: number } = $props();
 
-  const cards = $derived(fleetSuggestions($sessions, $dismissedSuggestions));
+  onMount(() => void refreshTidy());
+
+  const scope = $derived($escalationScope === 'fleet' ? null : controlSessionIds($sessions, $handoffs, $threadFollows));
+  const cards = $derived(fleetSuggestions($sessions, $dismissedSuggestions, { scope, tidy: $tidyReport.candidates }));
 
   function dismiss(s: Suggestion) {
-    dismissedSuggestions.update((d) => new Set([...d, s.id]));
+    dismissSuggestion(s.id);
   }
 </script>
 
@@ -35,6 +45,9 @@
             <button type="button" class="btn btn--quiet" data-testid="control-suggestion-open" onclick={() => openInControl(s.sessionId, s.label)}
               >Open session</button
             >
+          {:else if s.kind === 'tidy'}
+            {@const ids = s.sessionIds}
+            <button type="button" class="btn btn--quiet" data-testid="control-suggestion-open" onclick={() => requestTidy(ids)}>Review</button>
           {:else}
             <button type="button" class="btn btn--quiet" data-testid="control-suggestion-open" onclick={() => requestHostsView(s.host)}
               >Review on {s.host}</button

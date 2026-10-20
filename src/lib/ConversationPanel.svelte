@@ -15,11 +15,11 @@
   // would have received. bg / external rows have no REPL to type into, so
   // they stay read-only.
   import { conversationFindRequest } from './search_api';
-  import { untrack, tick, setContext, type Snippet } from 'svelte';
+  import { untrack, tick, setContext, onDestroy, type Snippet } from 'svelte';
   import { requestOpenPath, OPEN_PATH_CONTEXT, type OpenPathFn } from './app_views';
   import { sendPrompt, hasNoPane, sessions, sessionAgent, restartSession, type SessionRow } from './sessions';
   import AnswerPrompt from './AnswerPrompt.svelte';
-  import { canStop, cancelInto, drop, due, heldPreview, hold, STOP_KEY, type HeldLine } from './composer_hold';
+  import { canStop, cancelInto, drop, due, heldPreview, hold, parkHeld, unparkHeld, STOP_KEY, type HeldLine } from './composer_hold';
   import FormCard from './forms/FormCard.svelte';
   import ChatWizards from './forms/ChatWizards.svelte';
   import { answerFingerprint, pendingInputFor } from './pending_input';
@@ -1306,10 +1306,12 @@
   // F4 (review 2026-10-17): what the gate holds instead of refusing. A line
   // typed while busy waits here as a "queued · cancel" chip and goes out,
   // one per turn, when the gate opens (`composer_hold.ts`).
-  let held = $state<HeldLine[]>([]);
-  $effect(() => {
-    void sessionId;
-    held = [];
+  // Review w04-6: they outlive the panel. Leaving Control unmounts it and a
+  // move gives Control a new row; either way the lines are parked and come
+  // back with the next gated panel (`parkHeld`), never dropped unseen.
+  let held = $state<HeldLine[]>(untrack(() => blockWhileBusy) ? unparkHeld() : []);
+  onDestroy(() => {
+    if (held.length > 0) parkHeld(held);
   });
   $effect(() => {
     const next = due(held, busyBlocked, writeBlocked !== null || viewing !== null);

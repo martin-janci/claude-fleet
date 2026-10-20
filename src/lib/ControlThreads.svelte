@@ -34,7 +34,7 @@
   import { money } from './automation';
   import { leave } from './destination';
   import { sidebarView } from './work_view';
-  import { mutedThreads, refreshMutes, setThreadMuted } from './control_journal';
+  import { mutedThreads, refreshMutes, setThreadMuted, threadFollows } from './control_journal';
 
   let { oncollapse }: { oncollapse: () => void } = $props();
 
@@ -84,6 +84,7 @@
       operatorId: $operatorRow?.id ?? null,
       opts: $visibleFleet.opts,
       muted: $mutedThreads,
+      follows: $threadFollows,
     }),
   );
   const counts = $derived(threadCounts(threads));
@@ -185,7 +186,9 @@
               <span class="dot"><StatusDot state={t.state} /></span>
               <span class="text">
                 <span class="ttl">{t.title}</span>
-                <span class="ln" class:waiting={t.group === 'needs'}>{t.muted ? `Muted · ${t.line}` : t.line}</span>
+                <span class="ln" class:waiting={t.group === 'needs'} data-testid="control-thread-line"
+                  >{t.muted ? `Muted · ${t.line}` : t.unfollowed ? `${t.line} · not followed (${t.unfollowed})` : t.line}</span
+                >
               </span>
               {#if t.at > 0}<span class="age">{shortAge(t.at, nowSec)}</span>{/if}
             </button>

@@ -32,6 +32,7 @@ import { operatorState, operatorSession } from './operator';
 import { sessionConversation, sessionActivity, listConversations, toolDetail } from './conversation';
 import { sendPrompt, sessions, applySessionEvents, type SessionRow } from './sessions';
 import { outbox } from './outbox';
+import { resetHeldForTests } from './composer_hold';
 
 const mockedConv = sessionConversation as unknown as ReturnType<typeof vi.fn>;
 const mockedAct = sessionActivity as unknown as ReturnType<typeof vi.fn>;
@@ -84,6 +85,7 @@ function row(over: Partial<SessionRow> = {}): SessionRow {
 
 beforeEach(() => {
   invoke.mockReset();
+  resetHeldForTests();
   // The panel wakes the agent on mount (Control, 9.1): it is there already.
   invoke.mockImplementation(async (cmd: string) =>
     cmd === 'operator_status' ? { ready: true, session: row(), blocked: null } : null,
@@ -229,6 +231,34 @@ describe('the sheet feeds the one composer its live state', () => {
     await waitFor(() =>
       expect(screen.getByTestId('conv-composer-status').textContent).toMatch(/trust/i),
     );
+  });
+
+  it('a mission thread open in Control is the context: its chip and the steer prefix (w04-13)', async () => {
+    const { activeThread } = await import('./control_room');
+    const { missionList } = await import('./mission_room');
+    mockedSend.mockResolvedValue({ ok: true, value: undefined });
+    const listed = [{ id: 5, name: 'Hub federation v2', state: 'active' }];
+    invoke.mockImplementation(async (cmd: string) =>
+      cmd === 'operator_status' ? { ready: true, session: row(), blocked: null } : cmd === 'work_missions' ? listed : null,
+    );
+    missionList.set({ loaded: true, error: null, missions: listed as never });
+    activeThread.set({ kind: 'mission', id: 5 });
+    try {
+      render(AgentPanel, {
+        contextInput: { view: 'hosts', session: null, hostAlias: 'alpha', branch: null, friendly: true },
+      });
+      await settle();
+      expect(screen.getByTestId('agent-context-chip').textContent).toContain('Mission Hub federation v2');
+      const box = screen.getByPlaceholderText(/ask the fleet/i) as HTMLTextAreaElement;
+      await fireEvent.input(box, { target: { value: 'pause it' } });
+      await fireEvent.click(screen.getByTestId('conv-composer-send'));
+      await waitFor(() => expect(mockedSend).toHaveBeenCalled());
+      expect(mockedSend.mock.calls[0][2]).toContain('About mission #5 "Hub federation v2":');
+      expect(mockedSend.mock.calls[0][2]).not.toContain('alpha');
+    } finally {
+      activeThread.set(null);
+      missionList.set({ loaded: false, missions: [], error: null });
+    }
   });
 
   it('a dropped chip comes back when the context changes, and its prefix is sent again', async () => {
