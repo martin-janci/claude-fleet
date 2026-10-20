@@ -219,8 +219,8 @@ docker compose exec fleet-hub fleet-hub --version    # fleet-hub 0.2.41
 docker compose images fleet-hub                      # the tag and image id in use
 ```
 
-Over the network, and only with the master token, `fleet_health` reports the
-same string in its `version` field (see the `curl` under *Setup* above). To see
+Over the network, with any client token (a readonly one is enough),
+`fleet_health` reports the same string in its `version` field (see the `curl` under *Setup* above). To see
 which exact image — not just which version — is running:
 
 ```bash
