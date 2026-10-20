@@ -2352,6 +2352,38 @@ async fn dispatch_new_worker_asks_before_starting_past_pause_at() {
     assert!(!past.starts_with("E_ACCOUNT_LIMIT"), "{past}");
 }
 
+/// A restart onto another login is a start on it: past `accounts.pause_at`
+/// it is refused with `E_ACCOUNT_LIMIT` unless the person chose it. A plain
+/// restart (same login) is recovery and is never held.
+#[tokio::test]
+async fn a_restart_onto_a_login_past_pause_at_asks_first() {
+    use super::params::RestartSessionParams;
+    let (s, _, on_b) = two_host_store();
+    let now = crate::store::now_unix();
+    crate::service::account_limits::seed_usage(&s, "hostb", Some("full"), "acct-full", 95.0, now);
+    let t = test_tools(s);
+    let call = |args: serde_json::Value| {
+        let t = &t;
+        async move {
+            let p = serde_json::from_value::<RestartSessionParams>(args).unwrap();
+            t.restart_session(Extension(operator()), Parameters(p))
+                .await
+                .err()
+                .map(|e| e.message)
+                .unwrap_or_default()
+        }
+    };
+    let refused = call(serde_json::json!({ "session_id": on_b, "profile": "full" })).await;
+    assert!(refused.starts_with("E_ACCOUNT_LIMIT"), "{refused}");
+    for args in [
+        serde_json::json!({ "session_id": on_b, "profile": "full", "over_limit_ok": true }),
+        serde_json::json!({ "session_id": on_b }),
+    ] {
+        let past = call(args).await;
+        assert!(!past.starts_with("E_ACCOUNT_LIMIT"), "{past}");
+    }
+}
+
 #[tokio::test]
 async fn per_host_callers_cannot_recreate_or_dismiss_on_another_host() {
     let (s, _pid, on_b) = two_host_store();
@@ -21508,6 +21540,21 @@ async fn session_care_lets_the_operator_restart_and_retire_its_own_sessions() {
     let stranger = s
         .upsert_session("dev-c", "hostb", None, None, 1, 1, "running", None)
         .unwrap();
+    // A person's session Control only sent a prompt to: an open handoff for
+    // prompts, never one care restarts or retires.
+    let briefed = s
+        .upsert_session("dev-d", "hostb", None, None, 1, 1, "running", None)
+        .unwrap();
+    s.insert_control_handoff(
+        &crate::store::NewHandoff {
+            tool: "send_prompt".into(),
+            kind: "session",
+            session_id: Some(briefed),
+            ..Default::default()
+        },
+        1,
+    )
+    .unwrap();
     s.conn_ref()
         .execute(
             "UPDATE sessions SET origin = 'operator' WHERE id = ?1",
@@ -21576,6 +21623,12 @@ async fn session_care_lets_the_operator_restart_and_retire_its_own_sessions() {
         .await
         .unwrap_err();
     confirm_nonce_of(&asked);
+    // Only briefed: asks, at Within your brief and at Autopilot alike.
+    let asked = t
+        .restart_session(Extension(operator()), Parameters(restart(briefed)))
+        .await
+        .unwrap_err();
+    confirm_nonce_of(&asked);
 
     // Autopilot: retiring its own session goes too.
     set_position(&t, Position::Autopilot);
@@ -21585,6 +21638,12 @@ async fn session_care_lets_the_operator_restart_and_retire_its_own_sessions() {
     .await;
     not_asked(&out);
     assert_eq!(approval, Some(crate::store::APPROVAL_PRE_APPROVED));
+
+    let asked = t
+        .safe_kill_session(Extension(operator()), Parameters(retire(briefed)))
+        .await
+        .unwrap_err();
+    confirm_nonce_of(&asked);
 
     // Ask first: everything asks again, care or not.
     set_position(&t, Position::Ask);

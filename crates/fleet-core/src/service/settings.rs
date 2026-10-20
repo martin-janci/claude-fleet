@@ -408,7 +408,7 @@ pub const CONTROL_SWITCH_AT_LIMIT: &str = "control.switch_at_limit";
 /// (`service::control_sweep`), so Control fixes or reports it.
 pub const CONTROL_SWEEP: &str = "control.sweep";
 /// Session care: at "Within your brief" Control restarts a session it
-/// started or briefed (a wedged REPL, or under another login after a limit)
+/// started itself (a wedged REPL, or under another login after a limit)
 /// without a card, and at "Autopilot" also retires one with
 /// `safe_kill_session` (`mcp::guard::OPERATOR_CARE_TOOLS`). Off: both ask.
 pub const CONTROL_SESSION_CARE: &str = "control.session_care";
@@ -1073,7 +1073,7 @@ pub const SPECS: &[Spec] = &[
         "false",
         Kind::Bool,
         "Control looks after its sessions",
-        "Within your brief, Control restarts a stuck session it started or briefed without asking, also under another login after a limit. At Autopilot it also retires one whose work is done, after committing and pushing it. Off, or at Ask first: both wait for you.",
+        "Within your brief, Control restarts a stuck session it started itself without asking, also under another login after a limit. At Autopilot it also retires one whose work is done, after committing and pushing it. Off, or at Ask first: both wait for you.",
     ),
     Spec::new(
         CONTROL_FOLLOW_QUIET_HOURS,
