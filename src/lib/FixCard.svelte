@@ -11,7 +11,7 @@
   import ConfirmDialog from './ConfirmDialog.svelte';
   import AddAccountDialog from './AddAccountDialog.svelte';
   import { push } from './toasts';
-  import { applyFinding, canApplyFixes, dismissFinding, stateWords, subjectWords, type Finding } from './autofix';
+  import { applyFinding, autoWords, canApplyFixes, dismissFinding, stateWords, subjectWords, type Finding } from './autofix';
 
   let { finding, compact = false }: { finding: Finding; compact?: boolean } = $props();
 
@@ -23,6 +23,7 @@
 
   const fix = $derived(finding.fix ?? null);
   const status = $derived(stateWords(finding));
+  const autoLine = $derived(autoWords(finding, Date.now() / 1000));
   const running = $derived(
     finding.state === 'verifying' && finding.last_attempt_at != null && Date.now() / 1000 - finding.last_attempt_at < 60,
   );
@@ -79,12 +80,12 @@
       {#if fix}
         <p class="label">What the fix does{fix.reversible ? '' : ' (cannot be undone)'}</p>
         <ul>{#each fix.changes as c, i (i)}<li>{c}</li>{/each}</ul>
-        {#if fix.safety === 'safe' && fix.auto}<p class="meta">Safe: fleet runs this fix by itself unless automatic fixes are off.</p>{/if}
       {/if}
     </div>
   {/if}
   {#if status}<p class="status" class:warn={finding.state === 'apply_failed'} data-testid="fix-card-status">{status}</p>{/if}
   {#if failure}<p class="status warn" role="alert" data-testid="fix-card-failure">{failure}</p>{/if}
+  {#if autoLine}<p class="meta" data-testid="fix-card-auto">{autoLine}</p>{/if}
   <div class="actions">
     {#if fix}
       {#if $canApplyFixes}

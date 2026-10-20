@@ -99,7 +99,7 @@ pub struct OrgAdminArgs {
     /// A paired device, by name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device: Option<String>,
-    /// full|readonly (pair_device, set_device_mode).
+    /// full|answer|readonly (pair_device, set_device_mode).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<String>,
     /// Its prompts reach agents unmarked.

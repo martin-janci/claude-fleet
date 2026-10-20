@@ -8,7 +8,17 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 
 import LimitActions from './LimitActions.svelte';
-import { headroomForAccount, moveToAccount, moveToHeadroom, resetText, waitingOut } from './account_limits';
+import {
+  freestLogin,
+  headroomForAccount,
+  moveToAccount,
+  moveToHeadroom,
+  nextReset,
+  resetText,
+  switchCheck,
+  usedText,
+  waitingOut,
+} from './account_limits';
 import type { Result } from './result';
 import { RESET_WEEK, session } from './hosts_fixture';
 import { autoSwitchState } from './account_switch';
@@ -220,5 +230,75 @@ describe('moveToAccount', () => {
     const r = await moveToAccount([{ host_alias: 'mac', tmux_name: 'a', account_uuid: 'acc-work' }], null, restart);
     expect(r.moved).toBe(1);
     expect(restart).toHaveBeenCalledWith('mac', 'a', 'spare');
+  });
+});
+
+// Review w02-4: a signed-out login is never proposed, whatever its reading.
+describe('signed-out logins', () => {
+  const logins = [
+    { profile: null, account_uuid: 'acc-own', used_pct: 95 },
+    { profile: 'gone', account_uuid: 'acc-gone', used_pct: 5, signed_out: true },
+    { profile: 'spare', account_uuid: 'acc-spare', used_pct: 30 },
+  ];
+  const h = { pause_at_pct: 90, chosen: logins[0], over: true, suggestion: null, logins };
+
+  it('are left out of the suggestion and the New session default, and read "signed out"', () => {
+    expect(headroomForAccount(h, 'acc-own').suggestion?.profile).toBe('spare');
+    expect(freestLogin(logins)?.profile).toBe('spare');
+    expect(usedText(logins[1])).toBe('signed out');
+  });
+});
+
+// Review w03-3: a signed-out row offers Switch account (no Wait, no
+// automatic move) to any signed-in login with room.
+describe('LimitActions on a signed-out row', () => {
+  it('proposes another signed-in login even though its own account is not over', async () => {
+    const logins = [
+      { profile: 'gone', account_uuid: 'acc-own', used_pct: 10, signed_out: true },
+      { profile: null, account_uuid: 'acc-host', used_pct: 40 },
+    ];
+    answer({ pause_at_pct: 90, chosen: logins[0], over: false, suggestion: null, logins });
+    autoSwitchState.set({ enabled: true, continue_after: false, fleet_enabled: true });
+    const sess = session('mac', 'a', { claude_profile: 'gone', account_uuid: 'acc-own' });
+    render(LimitActions, { props: { sess, resetsAt: null, signedOut: true, accountName: name } });
+    expect(screen.queryByTestId('limit-auto')).toBeNull();
+    expect(screen.queryByTestId('limit-wait')).toBeNull();
+    await fireEvent.click(screen.getByTestId('limit-switch'));
+    await vi.waitFor(() => expect(screen.getByTestId('limit-switch-ask').textContent).toContain('40% used'));
+  });
+});
+
+// Review w03-9: a failed check is an error, never "no room".
+describe('switchCheck', () => {
+  it('keeps an error an error', async () => {
+    invoke.mockImplementation(async () => {
+      throw { code: 'E_UNREACHABLE', message: 'mac is unreachable' };
+    });
+    const r = await switchCheck({ host_alias: 'mac' });
+    expect(r.ok).toBe(false);
+  });
+
+  it('names the soonest reset among the logins for the no-room line', () => {
+    const logins = [
+      { profile: null, account_uuid: 'a', used_pct: 95 },
+      { profile: 'w', account_uuid: 'b', used_pct: 99 },
+    ];
+    const usage = {
+      a: { usage: { five_hour: { utilization: 95, resets_at: 5000 }, seven_day: { utilization: 20, resets_at: 9000 } } },
+      b: { usage: { five_hour: { utilization: 99, resets_at: 3000 }, seven_day: { utilization: 91, resets_at: 8000 } } },
+    };
+    const next = nextReset({ pause_at_pct: 90, chosen: logins[0], over: true, suggestion: null, logins }, usage, 1000);
+    expect(next).toEqual({ login: logins[0], at: 5000 });
+  });
+});
+
+// Review w03-12: the reset reads as the Accounts card reads it.
+describe('resetText', () => {
+  const now = Date.UTC(2026, 9, 19, 12) / 1000; // Mon 12:00 UTC
+  const o = { now, locale: 'en-GB', timeZone: 'UTC' };
+  it('a clock within five hours, a weekday within the week, a date beyond', () => {
+    expect(resetText(now + 2 * 3600, o)).toBe('14:00');
+    expect(resetText(now + 2 * 86400, o)).toBe('Wed 12:00');
+    expect(resetText(now + 6 * 86400 + 23 * 3600, o)).toBe('Oct 26 11:00');
   });
 });

@@ -643,6 +643,15 @@ export function isPinned(row: Pick<SessionRow, 'pinned_at'>): boolean {
   return row.pinned_at != null;
 }
 
+/** Why a pinned session cannot be closed. */
+export const PINNED_BLOCK = 'Pinned: unpin it first';
+
+/** Why closing `s` (kill, safe remove, clean up, dismiss) is refused for its
+ *  pin, or null. The hub answers the same calls with `E_PINNED`. */
+export function pinnedBlock(s: Pick<SessionRow, 'pinned_at'>): string | null {
+  return isPinned(s) ? PINNED_BLOCK : null;
+}
+
 /** Restart the session in place. With `profile`, resume its conversation
  *  under that credential profile instead (`''` = the host's own login): a
  *  running `claude` cannot change its login, so a switch is a restart.

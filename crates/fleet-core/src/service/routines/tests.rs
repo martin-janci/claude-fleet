@@ -742,6 +742,52 @@ async fn a_fire_on_an_account_over_the_line_is_skipped() {
     assert_eq!(runs_of(&f, r.id)[1].state, "running");
 }
 
+/// Review w02-6: a login fleet knows is signed out is treated like one past
+/// the line. The fallback takes the run; without one, the fire skips and
+/// says how to sign in again, instead of starting a session at `/login`.
+#[tokio::test]
+async fn a_fire_on_a_signed_out_login_goes_to_the_fallback_or_skips() {
+    let f = fx();
+    let r = new_routine(&f, input(&f));
+    reachable(&f, "mac", true);
+    reachable(&f, "nas", true);
+    lock(&f.store)
+        .unwrap()
+        .set_host_signed_out_logins(
+            "mac",
+            &[crate::store::SignedOutLogin {
+                profile: Some("work".into()),
+                since: OCT8 - 24 * H,
+                checked_at: OCT8,
+            }],
+        )
+        .unwrap();
+    due_at(&f, r.id, OCT8 + 9 * H);
+    tick_once(&f.deps, OCT8 + 9 * H).await;
+    let runs = runs_of(&f, r.id);
+    assert_eq!(runs[0].state, "skipped");
+    let why = runs[0].reason.as_deref().unwrap();
+    assert!(
+        why.contains("profile work on mac is signed out") && why.contains("/login"),
+        "{why}"
+    );
+    assert!(f.fake.started.lock().unwrap().is_empty());
+    let mut i = input(&f);
+    i.fallback_host = Some("nas".into());
+    let fb = new_routine(&f, i);
+    let ana = person(&f.store, None, f.ana);
+    let moved = run_now(&f.deps, &ana, fb.id, OCT8 + 10 * H).await.unwrap();
+    assert_eq!(moved.host_alias.as_deref(), Some("nas"));
+    assert!(
+        moved
+            .reason
+            .as_deref()
+            .unwrap()
+            .starts_with("on nas: profile work on mac is signed out"),
+        "{moved:?}"
+    );
+}
+
 /// Redesign 8.7: a routine names the account it runs as.
 #[test]
 fn a_routine_names_the_account_it_bills() {
@@ -2875,6 +2921,43 @@ async fn a_retry_held_at_a_limit_outlasts_the_retry_window() {
     assert_retry_of(&runs[1], run.id);
 }
 
+/// Review w02-10: a rate-limited retry is held only when a fire now would
+/// be skipped too. With a fallback host that can take it, the retry goes
+/// there instead of waiting for the primary's reset.
+#[tokio::test]
+async fn a_rate_limited_retry_goes_to_the_fallback_a_fire_would_use() {
+    let f = fx();
+    let mut i = input(&f);
+    i.retry_once = Some(true);
+    i.fallback_host = Some("nas".into());
+    let r = new_routine(&f, i);
+    reachable(&f, "mac", true);
+    reachable(&f, "nas", true);
+    let ana = person(&f.store, None, f.ana);
+    let run = run_now(&f.deps, &ana, r.id, OCT8).await.unwrap();
+    assert_eq!(run.host_alias.as_deref(), Some("mac"));
+    crate::service::account_limits::seed_usage(
+        &lock(&f.store).unwrap(),
+        "mac",
+        Some("work"),
+        "work",
+        93.0,
+        OCT8,
+    );
+    lock(&f.store)
+        .unwrap()
+        .insert_session_event(
+            run.session_id.unwrap(),
+            "stop_failure",
+            Some("rate_limit (429)"),
+        )
+        .unwrap();
+    tick_once(&f.deps, OCT8 + 20).await;
+    let runs = runs_of(&f, r.id);
+    assert_eq!(runs.len(), 2, "not held: {runs:?}");
+    assert_eq!(runs[1].host_alias.as_deref(), Some("nas"));
+}
+
 #[tokio::test]
 async fn a_run_that_found_nothing_doubles_the_gap_when_backoff_is_on() {
     let f = fx();
@@ -3181,4 +3264,193 @@ fn a_mission_that_completes_writes_a_fleet_event() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].subject, format!("mission:{}", m.id));
     assert_eq!(rows[0].person_id, Some(f.ana));
+}
+
+// ---- Review w06: what an event run is told, and what its trace keeps ----
+
+fn owned_session(f: &Fx, name: &str, host: &str) -> i64 {
+    let s = lock(&f.store).unwrap();
+    let id = s
+        .upsert_session(name, host, None, None, 1, 1, "running", None)
+        .unwrap();
+    s.claim_if_unclaimed(id, Some(f.ana)).unwrap();
+    id
+}
+
+#[tokio::test]
+async fn a_session_event_run_is_told_which_session_started_it() {
+    let f = fx();
+    let r = event_routine(&f, "stuck", |_| {});
+    let mine = owned_session(&f, "api", "nas");
+    lock(&f.store)
+        .unwrap()
+        .insert_session_event(mine, "stuck", Some("no output for 30 min"))
+        .unwrap();
+    tick_once(&f.deps, OCT8).await;
+    let runs = runs_of(&f, r.id);
+    assert_eq!(runs.len(), 1, "{runs:?}");
+    let prompt = queued_prompt(&f, runs[0].session_id.unwrap());
+    assert!(
+        prompt.ends_with(&format!(
+            "Started because session #{mine} \"api\" on nas is stuck (no output for 30 min)."
+        )),
+        "{prompt}"
+    );
+}
+
+#[tokio::test]
+async fn the_retry_of_an_event_run_is_told_what_started_it() {
+    let f = fx();
+    let r = event_routine(&f, "stuck", |i| i.retry_once = Some(true));
+    let mine = owned_session(&f, "api", "mac");
+    f.fake.fail.store(true, Ordering::SeqCst);
+    event(&f, mine, "stuck");
+    tick_once(&f.deps, OCT8).await;
+    let runs = runs_of(&f, r.id);
+    assert_eq!(runs[0].state, "failed", "{runs:?}");
+    f.fake.fail.store(false, Ordering::SeqCst);
+    tick_once(&f.deps, OCT8 + 20).await;
+    let runs = runs_of(&f, r.id);
+    assert_eq!(runs.len(), 2, "{runs:?}");
+    assert_eq!(
+        runs[1].trigger_ref.as_deref(),
+        Some(&*format!("retry:{}", runs[0].id))
+    );
+    let prompt = queued_prompt(&f, runs[1].session_id.unwrap());
+    assert!(
+        prompt.ends_with(&format!(
+            "Started because session #{mine} \"api\" on mac is stuck."
+        )),
+        "{prompt}"
+    );
+}
+
+#[test]
+fn a_retry_rebuilds_the_line_of_a_pr_or_fleet_event() {
+    let f = fx();
+    let sid = pr_session(&f, "api", f.ana);
+    see_pr(&f, sid, PR, "OPEN", None, None);
+    let s = lock(&f.store).unwrap();
+    let eid = s.latest_session_event_id().unwrap();
+    let pr = s.pull_request_by_url(PR).unwrap().unwrap();
+    assert_eq!(
+        tick::context_of_ref(&s, Some(&format!("pr:{}:{eid}", pr.id))).as_deref(),
+        Some(&*format!("Started because pull request {PR} was opened."))
+    );
+    let id = s
+        .insert_fleet_event(&crate::store::NewFleetEvent {
+            kind: "host_offline",
+            subject: "host:mac",
+            detail: Some("host mac is unreachable"),
+            host_alias: Some("mac"),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(
+        tick::context_of_ref(&s, Some(&format!("fleet:host:mac:{id}"))).as_deref(),
+        Some("Started because host mac is unreachable.")
+    );
+    assert_eq!(tick::context_of_ref(&s, Some("retry:4")), None);
+    assert_eq!(tick::context_of_ref(&s, None), None);
+}
+
+#[tokio::test]
+async fn the_events_a_filter_keeps_out_are_one_trace_row_per_pass() {
+    let f = fx();
+    let r = event_routine(&f, "turn_done", |i| i.event_host = Some("nas".into()));
+    let on_mac = owned_session(&f, "web", "mac");
+    for _ in 0..5 {
+        event(&f, on_mac, "turn_done");
+    }
+    tick_once(&f.deps, OCT8).await;
+    let v = verdicts(&f, r.id);
+    let filtered: Vec<_> = v.iter().filter(|(k, _)| k == "filtered").collect();
+    assert_eq!(filtered.len(), 1, "{v:?}");
+    assert!(
+        filtered[0].1.starts_with("5 turn_done events filtered: #"),
+        "{v:?}"
+    );
+    assert!(filtered[0].1.ends_with("; and 2 more"), "{v:?}");
+}
+
+#[tokio::test]
+async fn a_move_fires_once_on_the_row_it_moved_to() {
+    let f = fx();
+    let r = event_routine(&f, "session_moved", |i| i.event_host = Some("nas".into()));
+    let from = owned_session(&f, "api", "mac");
+    let to = owned_session(&f, "api", "nas");
+    let detail = serde_json::json!({
+        "from_host": "mac",
+        "to_host": "nas",
+        "from_session_id": from,
+        "to_session_id": to,
+    })
+    .to_string();
+    {
+        let s = lock(&f.store).unwrap();
+        for sid in [from, to] {
+            s.insert_session_event(sid, "session_moved", Some(&detail))
+                .unwrap();
+        }
+    }
+    tick_once(&f.deps, OCT8).await;
+    let runs = runs_of(&f, r.id);
+    assert_eq!(runs.len(), 1, "{runs:?}");
+    assert!(runs[0]
+        .trigger_ref
+        .as_deref()
+        .unwrap()
+        .starts_with(&format!("session:{to}:")));
+    let prompt = queued_prompt(&f, runs[0].session_id.unwrap());
+    assert!(
+        prompt.ends_with("on nas was moved from mac to nas."),
+        "{prompt}"
+    );
+    let v = verdicts(&f, r.id);
+    assert!(!v.iter().any(|(k, _)| k == "filtered"), "{v:?}");
+}
+
+#[tokio::test]
+async fn a_retry_held_at_a_limit_says_so_once_and_when_a_newer_run_drops_it() {
+    let f = fx();
+    let mut i = input(&f);
+    i.retry_once = Some(true);
+    let r = new_routine(&f, i);
+    let ana = person(&f.store, None, f.ana);
+    let run = run_now(&f.deps, &ana, r.id, OCT8).await.unwrap();
+    crate::service::account_limits::seed_usage(
+        &lock(&f.store).unwrap(),
+        "mac",
+        Some("work"),
+        "work",
+        93.0,
+        OCT8,
+    );
+    lock(&f.store)
+        .unwrap()
+        .insert_session_event(
+            run.session_id.unwrap(),
+            "stop_failure",
+            Some("rate_limit (429)"),
+        )
+        .unwrap();
+    tick_once(&f.deps, OCT8 + 20).await;
+    tick_once(&f.deps, OCT8 + 40).await;
+    let waits = |f: &Fx| {
+        verdicts(f, r.id)
+            .into_iter()
+            .filter(|(k, why)| k == "skipped" && why.contains("waits"))
+            .count()
+    };
+    assert_eq!(waits(&f), 1, "{:?}", verdicts(&f, r.id));
+    let next = run_now(&f.deps, &ana, r.id, OCT8 + 60).await.unwrap();
+    let v = verdicts(&f, r.id);
+    let dropped = format!(
+        "retry of run #{} dropped: run #{} ran since",
+        run.id, next.id
+    );
+    assert!(
+        v.iter().any(|(k, why)| k == "dropped" && *why == dropped),
+        "{v:?}"
+    );
 }

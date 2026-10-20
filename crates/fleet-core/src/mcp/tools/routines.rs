@@ -178,7 +178,7 @@ impl FleetTools {
                 format!(
                     "action must be list | get | runs | failing | budget | save | preview | delete | \
                      set_enabled | skip_next | run_now | set_run_outcome | explain | decisions | \
-                     dry_run, got {other:?}"
+                     dry_run | tune_prompt, got {other:?}"
                 ),
                 None,
             )),

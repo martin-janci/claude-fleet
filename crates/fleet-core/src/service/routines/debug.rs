@@ -416,8 +416,8 @@ fn judge_event(
         ));
         return Ok((v, None));
     }
-    if !tick::needs_you(kind, detail.as_deref()) {
-        v.reason = Some("it waits on nobody".into());
+    if !tick::reads_event(kind, sid, detail.as_deref()) {
+        v.reason = Some(tick::not_read_words(kind).into());
         return Ok((v, None));
     }
     let verdict = tick::event_fire(s, r, kind, eid, sid, detail.as_deref())?;
@@ -540,7 +540,7 @@ pub fn explain(
                 if recent.len() as i64 >= EVENTS_SHOWN {
                     break;
                 }
-                if !tick::needs_you(kind, ev.3.as_deref()) {
+                if !tick::reads_event(kind, ev.1, ev.3.as_deref()) {
                     continue;
                 }
                 if sees_session(&s, scope, Some(ev.1))? {
@@ -677,7 +677,7 @@ pub fn dry_run(
                 Some(kind) => {
                     let mut newest = None;
                     for e in s.recent_events_of_kind(stored_kind(kind), EVENTS_SCANNED)? {
-                        if !tick::needs_you(kind, e.3.as_deref()) {
+                        if !tick::reads_event(kind, e.1, e.3.as_deref()) {
                             continue;
                         }
                         if sees_session(&s, scope, Some(e.1))? {

@@ -13,6 +13,8 @@
     removeFleet,
     retryFleet,
     connectionWord,
+    fleetTrouble,
+    nextFleetColor,
     startFleets,
   } from './fleets';
   import Button from './kit/Button.svelte';
@@ -20,7 +22,11 @@
   let url = $state('');
   let code = $state('');
   let label = $state('');
-  let color = $state('');
+  // The colour the backend would pick, so the swatch never shows black while
+  // the fleet gets orange (review w01-14). Follows the list until touched.
+  let colorTouched = $state(false);
+  let picked = $state('');
+  const color = $derived(colorTouched ? picked : nextFleetColor($fleets));
   let plaintext = $state(false);
   let plaintextAsk = $state(false);
   let busy = $state(false);
@@ -39,12 +45,13 @@
       url: url.trim(),
       code: code.trim(),
       label: label.trim() || undefined,
-      color: color.trim() || undefined,
+      color: colorTouched ? picked : undefined,
       allow_plaintext: plaintext,
     });
     busy = false;
     if (r.ok) {
-      url = code = label = color = '';
+      url = code = label = '';
+      colorTouched = false;
       plaintext = plaintextAsk = false;
       return;
     }
@@ -74,6 +81,7 @@
   <ul class="fleet-list" data-testid="fleets-list">
     {#each $fleets as f (f.id)}
       {@const cw = connectionWord(f)}
+      {@const trouble = fleetTrouble(f)}
       <li style="--fleet: {f.color}" data-testid="fleets-row-{f.id}">
         <span class="swatch" aria-hidden="true"></span>
         <strong>{f.label}</strong>
@@ -93,6 +101,10 @@
         {/if}
       </li>
       {#if f.unavailable}<li class="err">{f.unavailable}</li>{/if}
+      {#if f.duplicate_of}
+        <li class="err" data-testid="fleets-duplicate-{f.id}">Same hub as {f.duplicate_of}; remove this one.</li>
+      {/if}
+      {#if trouble}<li class="err" data-testid="fleets-trouble-{f.id}">{trouble}</li>{/if}
       {#if removeAsk === f.id}
         <li class="hook-desc">
           Remove forgets this hub's URL and token <em>on this machine</em>. It
@@ -119,7 +131,16 @@
     <input bind:value={url} placeholder="https://fleet.example.com" aria-label="Hub address" data-testid="fleets-add-url" />
     <input bind:value={code} placeholder="pairing code" aria-label="Pairing code" data-testid="fleets-add-code" />
     <input bind:value={label} placeholder="label (optional)" aria-label="Label" />
-    <input bind:value={color} type="color" aria-label="Colour" />
+    <input
+      value={color}
+      oninput={(e) => {
+        picked = e.currentTarget.value;
+        colorTouched = true;
+      }}
+      type="color"
+      aria-label="Colour"
+      data-testid="fleets-add-color"
+    />
     {#if plaintextAsk}
       <label class="plain">
         <input type="checkbox" bind:checked={plaintext} />

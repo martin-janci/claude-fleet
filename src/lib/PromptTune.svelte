@@ -1,11 +1,39 @@
+<script lang="ts" module>
+  import type { Result as R } from './result';
+  import type { TuneAnswer as T } from './prompt_tune';
+
+  /** A run the panel stopped waiting for (closed, or Stop waiting) while it
+   *  was still going: the host still runs it and books it, so reopening the
+   *  tuner on the same draft picks it up instead of paying for another. */
+  interface Left {
+    promise: Promise<R<T>>;
+    /** The draft in the box it was asked from. */
+    from: string;
+    ask: string;
+    at: number;
+  }
+  const left = new Map<string, Left>();
+  /** How long a left run is kept for a reopen. */
+  export const LEFT_TUNE_TTL_MS = 10 * 60_000;
+  function leftKey(testid: string, from: string): string {
+    return `${testid}\u0000${from}`;
+  }
+  /** Tests: forget every left run. */
+  export function _forgetLeftTunes(): void {
+    left.clear();
+  }
+</script>
+
 <script lang="ts">
   // The prompt tuner (`prompt_tune.ts`): a model rewrites the draft into a
   // clearer prompt for the agent. The panel asks, then shows the rewrite
   // beside the draft (editable, or as the changes) with what changed; the
   // person accepts it into the box (`onaccept`), or discards it. Nothing is
   // ever sent from here.
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import DraftedLabel from './DraftedLabel.svelte';
+  import CopyButton from './CopyButton.svelte';
+  import { push as pushToast } from './toasts';
   import { draftedBy } from './ai_proposal';
   import { lineDiff } from './tool_view';
   import { tablistKeys } from './tablist_keys';
@@ -25,8 +53,11 @@
     model: string;
     /** The draft as it is in the box now. */
     draft: string;
-    tune: (ask: string) => Promise<Result<TuneAnswer>>;
-    /** Put the (possibly edited) rewrite in the box. */
+    /** Tune `from`: the box's draft, or the rewrite on screen once there is
+     *  one (Tune again and the quick asks build on it). */
+    tune: (ask: string, from: string) => Promise<Result<TuneAnswer>>;
+    /** Put the (possibly edited) rewrite in the box; called again with the
+     *  draft as it was when the person picks the toast's Undo. */
     onaccept: (prompt: string) => void;
     onclose: () => void;
     acceptLabel?: string;
@@ -45,33 +76,78 @@
   let input: HTMLInputElement | undefined = $state();
 
   const blocked = $derived(tuneBlocked(draft));
+  /** The run being waited for, and its number: a stale number's answer is
+   *  dropped (Stop waiting, or a newer run). */
+  let pending: Left | null = null;
+  let seq = 0;
   const diff = $derived(answer ? lineDiff(tunedFrom, edited) : null);
   const meta = $derived(answer ? draftedBy(answer.model, answer.host_alias || null) : '');
   /** The box changed since this tune: accepting would drop what was typed. */
   const stale = $derived(answer !== null && draft !== tunedFrom);
 
-  onMount(() => input?.focus());
+  onMount(() => {
+    input?.focus();
+    // A run this panel was closed on, for the same draft: show it (still
+    // going, or done) rather than start another paid one.
+    const key = leftKey(testid, draft);
+    const was = left.get(key);
+    left.delete(key);
+    if (was && Date.now() - was.at < LEFT_TUNE_TTL_MS) {
+      ask = was.ask;
+      void wait(was);
+    }
+  });
 
-  async function run(a = ask) {
-    if (busy || blocked) return;
+  onDestroy(() => leave());
+
+  /** Stop waiting for the run in flight; keep it for a reopen. */
+  function leave() {
+    if (!pending) return;
+    left.set(leftKey(testid, pending.from), { ...pending, at: Date.now() });
+    pending = null;
+    seq++;
+    busy = false;
+  }
+
+  async function wait(p: Left) {
+    const mine = ++seq;
+    pending = p;
     busy = true;
     error = null;
-    const from = draft;
-    const r = await tune(a);
+    const r = await p.promise;
+    if (mine !== seq) return;
+    pending = null;
     busy = false;
     if (r.ok) {
       answer = r.value;
       edited = r.value.prompt;
-      tunedFrom = from;
+      tunedFrom = p.from;
       view = 'rewrite';
     } else {
       error = r.error.message;
     }
   }
 
+  async function run(a = ask) {
+    if (busy || blocked) return;
+    // Once a rewrite is on screen (and the box has not changed since),
+    // tune that, with the person's edits; the diff and the stale check
+    // still compare against the draft it all started from.
+    const onRewrite = answer !== null && !answer.unchanged && !stale && edited.trim() !== '';
+    const from = onRewrite ? tunedFrom : draft;
+    await wait({ promise: tune(a, onRewrite ? edited : draft), from, ask: a, at: 0 });
+  }
+
+  /** A chip's words after what the person typed, so a tap never throws
+   *  their words away; the field keeps only what they typed. */
   function quick(a: string) {
-    ask = a;
-    void run(a);
+    const typed = ask.trim();
+    if (typed === '' || (TUNE_ASKS as readonly string[]).includes(typed)) {
+      ask = a;
+      void run(a);
+    } else {
+      void run(`${typed}; ${a}`);
+    }
   }
 
   function onKey(e: KeyboardEvent) {
@@ -88,8 +164,11 @@
 
   function accept() {
     if (!answer || stale || edited.trim() === '') return;
+    const before = draft;
     onaccept(edited);
     onclose();
+    // Set from code, so the box's own Ctrl+Z cannot bring the draft back.
+    pushToast({ kind: 'info', message: 'Draft replaced', action: { label: 'Undo', run: () => onaccept(before) } });
   }
 
   // Esc anywhere in the panel (a chip, Use this, ×) closes the tuner and
@@ -103,7 +182,7 @@
 </script>
 
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-<section class="tune" data-testid={testid} aria-label="Tune prompt with {model}" onkeydown={onPanelKey}>
+<section class="tune" data-testid={testid} aria-label="Tune prompt with {model}" aria-busy={busy} onkeydown={onPanelKey}>
   <div class="head">
     <h3>Tune prompt</h3>
     <span class="muted">{model} rewrites your draft for the agent. Nothing is sent.</span>
@@ -131,10 +210,22 @@
       class="btn btn--primary"
       data-testid="{testid}-run"
       disabled={busy || blocked !== null}
-      title={blocked ?? 'Tune (Enter)'}
+      title={blocked ?? (answer && !answer.unchanged && !stale ? 'Tune the rewrite again (Enter)' : 'Tune (Enter)')}
       onclick={() => void run()}>{busy ? 'Tuning…' : answer ? 'Tune again' : 'Tune'}</button
     >
+    {#if busy}
+      <button
+        type="button"
+        class="btn"
+        data-testid="{testid}-stop"
+        title="Stop waiting. The run still finishes on the host and is billed; reopen the tuner on this draft to see it."
+        onclick={leave}>Stop waiting</button
+      >
+    {/if}
   </div>
+  {#if blocked && !busy}
+    <p class="muted" data-testid="{testid}-blocked">{blocked}.</p>
+  {/if}
   <div class="quick" role="group" aria-label="Quick asks">
     {#each TUNE_ASKS as a (a)}
       <button
@@ -150,13 +241,18 @@
   {#if error}
     <p class="error" role="alert" data-testid="{testid}-error">{error}</p>
   {/if}
-  {#if answer}
-    {#if answer.notes}
-      <p class="notes" data-testid="{testid}-notes">{answer.notes}</p>
+  <div class="said" aria-live="polite">
+    {#if answer}
+      {#if answer.notes}
+        <p class="notes" data-testid="{testid}-notes">{answer.notes}</p>
+      {/if}
+      {#if answer.unchanged}
+        <p class="muted" data-testid="{testid}-unchanged">Your draft already reads clearly; nothing was changed.</p>
+      {/if}
     {/if}
-    {#if answer.unchanged}
-      <p class="muted" data-testid="{testid}-unchanged">Your draft already reads clearly; nothing was changed.</p>
-    {:else}
+  </div>
+  {#if answer}
+    {#if !answer.unchanged}
       <div class="tabs" role="tablist" aria-label="Rewrite view" use:tablistKeys>
         <button
           type="button"
@@ -189,6 +285,9 @@
             if (e.key === 'Escape') {
               e.preventDefault();
               onclose();
+            } else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+              e.preventDefault();
+              accept();
             }
           }}
         ></textarea>
@@ -202,6 +301,11 @@
       {#if stale}
         <p class="muted" data-testid="{testid}-stale">Your draft changed since this tune. Tune again to use it.</p>
       {/if}
+      {#if answer.cut}
+        <p class="warn" data-testid="{testid}-cut">
+          The rewrite ran past the limit and was cut at its end (…). Read its end before you use it.
+        </p>
+      {/if}
       <div class="actions">
         <button
           type="button"
@@ -210,9 +314,10 @@
           disabled={stale || edited.trim() === ''}
           title={stale
             ? 'Your draft changed since this tune: tune again so nothing you typed is lost.'
-            : 'Replace the draft in the box with this. It is not sent: your Send sends it.'}
-          onclick={accept}>{acceptLabel}</button
+            : 'Replace the draft in the box with this (Mod+Enter in the rewrite). It is not sent: your Send sends it.'}
+          onclick={accept}>{answer.cut ? `${acceptLabel} (cut)` : acceptLabel}</button
         >
+        <CopyButton text={edited} label="Copy rewrite" />
         <button type="button" class="btn" data-testid="{testid}-discard" onclick={onclose}>Discard</button>
       </div>
     {/if}
@@ -311,6 +416,14 @@
     flex-wrap: wrap;
     align-items: center;
     gap: 6px;
+  }
+  .warn {
+    margin: 0;
+    font-size: var(--text-2xs);
+    color: var(--status-waiting);
+  }
+  .said:empty {
+    display: none;
   }
   .error {
     margin: 0;

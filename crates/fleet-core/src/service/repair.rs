@@ -2164,6 +2164,7 @@ async fn ensure_workspace_reporting(
             // the host's login as it is NOW (`clear_host_login_account`).
             if report.tmux.is_some() {
                 crate::service::sessions::record_relaunched_login(&s, sid, None)?;
+                crate::service::sessions::settle_relaunched_waits(&s, sid);
             }
             if !report.actions.is_empty() {
                 if let Err(e) =

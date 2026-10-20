@@ -31,6 +31,7 @@
   import { draftedBy } from './ai_proposal';
   import { askBlocked, type HelpAnswer } from './context_help';
   import type { Result } from './result';
+  import { push as pushToast } from './toasts';
 
   let {
     model,
@@ -41,6 +42,7 @@
     onclose,
     insertLabel = 'Insert',
     insertBlocked = null,
+    replaces = false,
     testid = 'context-help',
   }: {
     /** Who answers, for the heading (`haiku`). */
@@ -57,6 +59,9 @@
     /** Why the proposal cannot go on the line now (a program is running
      *  in the shell); Copy still works. */
     insertBlocked?: string | null;
+    /** `oninsert` replaces what the person typed (a composer's draft):
+     *  offer Undo, which calls `oninsert` with `line` as it was. */
+    replaces?: boolean;
     testid?: string;
   } = $props();
 
@@ -124,8 +129,12 @@
 
   function insert() {
     if (!answer?.command || insertBlocked !== null) return;
+    const before = line;
     oninsert(answer.command);
     onclose();
+    if (replaces) {
+      pushToast({ kind: 'info', message: 'Draft replaced', action: { label: 'Undo', run: () => oninsert(before) } });
+    }
   }
 </script>
 

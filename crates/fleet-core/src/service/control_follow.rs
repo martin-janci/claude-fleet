@@ -152,26 +152,9 @@ pub fn follows(s: &Store, exclude: Option<i64>, now: i64) -> Vec<Follow> {
     let muted = |kind: &str, id: i64| mutes.contains(&(kind.to_string(), id));
     let mut out = Vec::new();
     for (id, brief_at) in s.control_follow_candidates(exclude).unwrap_or_default() {
-        let Ok(Some(row)) = s.get_session_by_id(id) else {
-            continue;
-        };
-        let mut f = session_facts(&row, brief_at);
-        f.muted = muted("session", id);
-        f.merged = s
-            .session_event_at_or_after(
-                id,
-                crate::store::PR_EVENT_MERGED,
-                brief_at.max(row.created_at),
-            )
-            .unwrap_or(false);
-        out.push(Follow {
-            kind: "session".into(),
-            id,
-            state: follow_state(&f, now, quiet),
-            name: row.tmux_name.clone(),
-            host_alias: Some(row.host_alias.clone()),
-            muted: f.muted,
-        });
+        if let Some(f) = session_follow(s, id, brief_at, muted("session", id), now, quiet) {
+            out.push(f);
+        }
     }
     for id in s.handed_off_sessions_gone().unwrap_or_default() {
         out.push(Follow {
@@ -202,6 +185,58 @@ pub fn follows(s: &Store, exclude: Option<i64>, now: i64) -> Vec<Follow> {
         });
     }
     out
+}
+
+/// One candidate session's [`Follow`] (`None` when its row is gone).
+fn session_follow(
+    s: &Store,
+    id: i64,
+    brief_at: i64,
+    muted: bool,
+    now: i64,
+    quiet: i64,
+) -> Option<Follow> {
+    let row = s.get_session_by_id(id).ok().flatten()?;
+    let mut f = session_facts(&row, brief_at);
+    f.muted = muted;
+    f.merged = s
+        .session_event_at_or_after(
+            id,
+            crate::store::PR_EVENT_MERGED,
+            brief_at.max(row.created_at),
+        )
+        .unwrap_or(false);
+    Some(Follow {
+        kind: "session".into(),
+        id,
+        state: follow_state(&f, now, quiet),
+        name: row.tmux_name,
+        host_alias: Some(row.host_alias),
+        muted: f.muted,
+    })
+}
+
+/// Whether Control follows the session `id` now, as [`follows`] decides
+/// it: a session it started or briefed that is not muted, killed, merged,
+/// done or quiet. The operator guard's "Within your brief" pre-approval
+/// needs this as well as a live row (review w04-4): a thread the person
+/// muted, whose pull request merged or that went quiet is no longer
+/// "within your brief", so a prompt into it asks again.
+pub fn session_followed(s: &Store, id: i64, now: i64) -> bool {
+    let Some(brief_at) = s
+        .control_follow_candidates(None)
+        .unwrap_or_default()
+        .into_iter()
+        .find_map(|(sid, at)| (sid == id).then_some(at))
+    else {
+        return false;
+    };
+    let muted = s
+        .control_mutes()
+        .unwrap_or_default()
+        .iter()
+        .any(|(k, m)| k == "session" && *m == id);
+    session_follow(s, id, brief_at, muted, now, quiet_secs(s)).is_some_and(|f| f.state.following())
 }
 
 /// The session ids Control follows now (see [`follows`]).

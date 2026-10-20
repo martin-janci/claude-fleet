@@ -604,7 +604,7 @@
 {#if showAddPicker}
   {#if $hubStatus.remote}
     <!-- Paired: the hub discovers, probes and adds (HubAddHostDialog). -->
-    <HubAddHostDialog onClose={() => (showAddPicker = false)} />
+    <HubAddHostDialog onClose={() => (showAddPicker = false)} {onNewSession} />
   {:else}
     <!-- The add-host wizard (4.9). -->
     <AddHostWizard onClose={() => (showAddPicker = false)} {onNewSession} />

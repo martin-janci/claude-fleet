@@ -541,6 +541,29 @@ fn analyses_and_proposals_show_what_agents_concluded_and_proposed() {
             now,
         )
         .unwrap();
+        // w08-6: a setting carries its fingerprint; an older task names it
+        // in its body only; the agent's own memory is not a proposal.
+        s.insert_agent_action(
+            job.id,
+            "setting",
+            &json!({ "body": "Max retries → 5", "fingerprint": "tune:max-retries" }).to_string(),
+            now - 1,
+        )
+        .unwrap();
+        s.insert_agent_action(
+            job.id,
+            "work_task",
+            &json!({ "body": "Old\n\nEffort S, risk low. Fingerprint: old:fp" }).to_string(),
+            now - 2,
+        )
+        .unwrap();
+        s.insert_agent_action(
+            job.id,
+            "record",
+            &json!({ "body": "Remember", "key": "host:htz-swap" }).to_string(),
+            now - 3,
+        )
+        .unwrap();
     }
     let s = st.lock().unwrap();
     let got = analyses(&s, &json!({}), now).unwrap();
@@ -561,5 +584,108 @@ fn analyses_and_proposals_show_what_agents_concluded_and_proposed() {
         .as_str()
         .unwrap()
         .starts_with("Swap storm"));
+    assert!(p["items"][0]["fingerprint"].is_null());
+    let fps: Vec<(&str, &Value)> = p["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| (i["kind"].as_str().unwrap(), &i["fingerprint"]))
+        .collect();
+    assert_eq!(
+        fps,
+        [
+            ("work_task", &Value::Null),
+            ("setting", &json!("tune:max-retries")),
+            ("work_task", &json!("old:fp")),
+        ]
+    );
+    let records = proposals(&s, &json!({ "kind": "record" }), now).unwrap();
+    assert_eq!(records["proposals"], 1);
     assert!(proposals(&s, &json!({ "days": 0 }), now).is_err());
+}
+
+/// Review w08-2: a secret holding `"` or `\` is escaped in the JSON text
+/// (`pa\"ss`), so masking only the serialized answer missed it; and a
+/// secret that crossed the line cut kept its first characters.
+#[test]
+fn a_secret_is_masked_when_escaped_or_split_by_the_line_cut() {
+    const QUOTED: &str = r#"pa"ss\word-Zq9-odd"#;
+    const SPLIT: &str = "split-odd-shaped-secret-K7";
+    let st = store();
+    let now = crate::store::now_unix();
+    {
+        let s = st.lock().unwrap();
+        for (name, value) in [("Q", QUOTED), ("S", SPLIT)] {
+            s.set_env_var(
+                "global",
+                "",
+                name,
+                &crate::store::EnvValue::Secret(crate::store::Secret::new(value)),
+            )
+            .unwrap();
+        }
+        // The cut keeps LINE_MAX_CHARS characters: the first 10 of SPLIT.
+        let long = format!("{} {SPLIT} tail", "y".repeat(LINE_MAX_CHARS - 11));
+        s.insert_reports(
+            "hub",
+            &[
+                Report::error("x", &format!("auth failed with {QUOTED}")),
+                Report::error("x", &long),
+            ],
+            now,
+        )
+        .unwrap();
+    }
+    let clients = Mutex::new(ClientLogs::default());
+    let src = Sources {
+        log_dir: None,
+        version: "0.6.3",
+        clients: &clients,
+    };
+    let got = call(&st, &src, &json!({ "name": "errors" }), now);
+    let text = got["content"][0]["text"].as_str().unwrap();
+    let escaped = Value::String(QUOTED.into()).to_string();
+    assert!(!text.contains(&escaped[1..escaped.len() - 1]), "{text}");
+    assert!(!text.contains(QUOTED), "{text}");
+    assert!(!text.contains(&SPLIT[..PARTIAL_SECRET_MIN]), "{text}");
+    assert!(text.contains(&format!("{}…", logging::REDACTED)), "{text}");
+    assert!(text.contains("auth failed with [REDACTED]"), "{text}");
+}
+
+#[test]
+fn redact_leaf_masks_only_a_trailing_start_of_a_secret() {
+    let secrets = vec!["abcdefgh-secret".to_string()];
+    assert_eq!(redact_leaf("keep abcdefgh…", &secrets), "keep [REDACTED]…");
+    // Shorter than PARTIAL_SECRET_MIN: left alone.
+    assert_eq!(redact_leaf("keep abc…", &secrets), "keep abc…");
+    // Not a cut string: a lone prefix is ordinary text.
+    assert_eq!(redact_leaf("keep abcdefgh", &secrets), "keep abcdefgh");
+}
+
+/// Review w08-8: simplify's and refactor's findings reach the proposer
+/// with something to rank them by.
+#[test]
+fn a_simplify_finding_stands_in_for_severity_component_and_cause() {
+    let f = finding_json(&json!({
+        "title": "Two quote helpers", "kind": "duplication", "files": ["src/a.rs"],
+        "why": "same code twice", "effort": "S", "risk": "low", "fingerprint": "dup:quote"
+    }));
+    assert_eq!(f["severity"], "low");
+    assert_eq!(f["component"], "duplication");
+    assert_eq!(f["cause"], "same code twice");
+    assert_eq!(f["effort"], "S");
+    let f = finding_json(&json!({ "title": "t", "files": ["src/b.rs"] }));
+    assert_eq!(f["component"], "src/b.rs");
+    let own = finding_json(
+        &json!({ "title": "t", "severity": "major", "component": "hub", "cause": "c" }),
+    );
+    assert_eq!(
+        (
+            own["severity"].as_str(),
+            own["component"].as_str(),
+            own["cause"].as_str()
+        ),
+        (Some("major"), Some("hub"), Some("c"))
+    );
+    assert!(own.get("effort").is_none());
 }

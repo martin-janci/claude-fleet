@@ -60,6 +60,7 @@ impl AgentExecutor for FakeExecutor {
     async fn execute(&self, action: &crate::store::AgentActionRow) -> ActionResult {
         match action.kind.as_str() {
             "ok" => ActionResult::Executed,
+            "made" => ActionResult::Done("created task 42".into()),
             "late" => ActionResult::Expired("moved".into()),
             _ => ActionResult::Failed("boom".into()),
         }
@@ -326,4 +327,51 @@ async fn approved_actions_are_carried_out_and_pending_ones_wait() {
         ids.map(state),
         ["executed", "expired", "failed", "pending"].map(String::from)
     );
+}
+
+/// Review w08-3: what an approved action made reaches the person: the line
+/// is kept on the row and `status.recent` carries it (a person's approvals
+/// only, not a rule's own).
+#[tokio::test]
+async fn a_done_line_is_kept_and_status_shows_recent_outcomes() {
+    let (st, _) = store_with_rule(None);
+    let (reg, _) = registry(vec![("gh:o/r#1", "a")], done());
+    poll_with(&st, &reg, NOW).await;
+    let (made, bad, by_rule) = {
+        let s = st.lock().unwrap();
+        let jid = s.list_agent_jobs(None, 1).unwrap()[0].id;
+        let made = s.insert_agent_action(jid, "made", "{}", NOW).unwrap();
+        let bad = s.insert_agent_action(jid, "bad", "{}", NOW).unwrap();
+        s.decide_agent_action(made, true, "laptop", NOW).unwrap();
+        s.decide_agent_action(bad, true, "phone", NOW).unwrap();
+        let by_rule = s
+            .insert_approved_agent_action(jid, "made", "{}", "rule:act", NOW)
+            .unwrap();
+        (made, bad, by_rule)
+    };
+    assert_eq!(execute_approved(&st, &reg).await, 3);
+    let now = crate::store::now_unix();
+    let status = admin::status(&st, &admin::AgentsArgs::default(), now).unwrap();
+    let recent: Vec<(i64, &str, Option<&str>)> = status
+        .recent
+        .iter()
+        .map(|a| (a.id, a.state.as_str(), a.error.as_deref()))
+        .collect();
+    assert!(
+        recent.contains(&(made, "executed", Some("created task 42"))),
+        "{recent:?}"
+    );
+    assert!(
+        recent.contains(&(bad, "failed", Some("boom"))),
+        "{recent:?}"
+    );
+    assert!(!recent.iter().any(|r| r.0 == by_rule), "{recent:?}");
+    // A day later they are gone.
+    let later = admin::status(
+        &st,
+        &admin::AgentsArgs::default(),
+        now + admin::RECENT_WINDOW_SECS + 1,
+    )
+    .unwrap();
+    assert!(later.recent.is_empty());
 }

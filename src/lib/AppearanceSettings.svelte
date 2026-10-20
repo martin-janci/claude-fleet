@@ -17,7 +17,7 @@
     type UiDensity,
   } from './prefs';
   import { TEXT_SIZES, textSize, textSizeLabel, type TextSize } from './text_size';
-  import { accentPref, applyTheme, contrastPref, moodLine, theme, type ContrastPref, type Theme } from './theme';
+  import { accentPref, applyTheme, contrastPref, moodLine, theme, THEMES, type ContrastPref } from './theme';
   import { ACCENTS, type AccentId } from './palette';
   import { motionPref, type MotionPref } from './motion';
 
@@ -26,12 +26,7 @@
     { id: 'comfortable', label: 'Comfortable' },
   ] as const satisfies readonly { id: UiDensity; label: string }[];
 
-  const themes = [
-    { id: 'sun', label: 'Sun' },
-    { id: 'auto', label: 'System' },
-    { id: 'light', label: 'Light' },
-    { id: 'dark', label: 'Dark' },
-  ] as const satisfies readonly { id: Theme; label: string }[];
+  const themes = THEMES;
 
   const contrasts = [
     { id: 'system', label: 'System' },
@@ -70,7 +65,7 @@
     <div class="pref-text">
       <span class="lbl">Theme</span>
       <p class="hook-desc">
-        Sun is light while the sun is up where you are and dark after sunset, easing through golden hour, blue
+        Sun is light while the sun is up in your time zone and dark after sunset, easing through golden hour, blue
         hour and night. System follows your light/dark setting.
       </p>
     </div>

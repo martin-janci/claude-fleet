@@ -103,7 +103,7 @@ pub fn download_script(base: &str, version: &str, target: &str) -> String {
          f=\"fleet-agent-$v-$t.tar.gz\"\n\
          command -v curl >/dev/null 2>&1 || {{ echo 'error=curl is not installed'; exit 4; }}\n\
          d=$(mktemp -d); trap 'rm -rf \"$d\"' EXIT; cd \"$d\"\n\
-         curl -fsSL -o \"$f\" \"$base/$f\" || {{ echo \"error=could not download $f\"; exit 4; }}\n\
+         curl -fsSL -o \"$f\" \"$base/$f\" || {{ echo \"error=could not download $base/$f: the release may have been pruned (dev builds keep only the newest), or this host cannot reach it: pass another version, or point FLEET_AGENT_DIST on the hub at a mirror\"; exit 4; }}\n\
          curl -fsSL -o SHA256SUMS \"$base/SHA256SUMS\" || {{ echo 'error=could not download SHA256SUMS'; exit 4; }}\n\
          want=$(awk -v f=\"$f\" '$2==f || $2==\"*\"f {{print $1}}' SHA256SUMS)\n\
          got=$(sha256sum \"$f\" | cut -d' ' -f1)\n\
@@ -118,6 +118,26 @@ pub fn download_script(base: &str, version: &str, target: &str) -> String {
     )
 }
 
+/// Where `sudo fleet-agent install` (docs/hub.md, step 4) puts its unit.
+pub const SYSTEM_UNIT: &str = "/etc/systemd/system/fleet-agent.service";
+
+/// Step 3's guard (review w14-9): a system unit already running on the host
+/// would hold the same token as the user unit or nohup agent this job starts,
+/// and the two would take the host's connection from each other for good.
+/// It prints `error=…` and exits 4 when `unit` exists and `systemctl` says
+/// it is active; otherwise it prints nothing.
+pub fn system_unit_guard(unit: &str) -> String {
+    format!(
+        "if [ -f {u} ] && command -v systemctl >/dev/null 2>&1 \
+            && systemctl is-active --quiet fleet-agent >/dev/null 2>&1; then\n\
+           echo 'error=a system fleet-agent service already runs here: stop it \
+         (sudo systemctl disable --now fleet-agent) or reuse it'\n\
+           exit 4\n\
+         fi\n",
+        u = shq(unit),
+    )
+}
+
 /// Step 3's script. The token is read from stdin; `insecure` only for a
 /// plain-http hub on loopback (the agent refuses it anywhere else).
 pub fn start_script(hub_url: &str, insecure: bool) -> String {
@@ -125,6 +145,7 @@ pub fn start_script(hub_url: &str, insecure: bool) -> String {
     format!(
         "set -e\n\
          umask 077\n\
+         {guard}\
          bin=\"$HOME/.local/bin/fleet-agent\"; hub={h}\n\
          if [ -z \"${{FLEET_AGENT_NO_SYSTEMD:-}}\" ] && [ -d /run/systemd/system ] \
             && command -v systemctl >/dev/null 2>&1; then\n\
@@ -143,6 +164,7 @@ pub fn start_script(hub_url: &str, insecure: bool) -> String {
            echo started=nohup\n\
          fi\n",
         h = shq(hub_url),
+        guard = system_unit_guard(SYSTEM_UNIT),
     )
 }
 
@@ -525,6 +547,9 @@ async fn run(
         .map_err(|e| fail("could not start the agent", e))?;
     let text = String::from_utf8_lossy(&out.stdout).to_string();
     if !out.status.success() {
+        if let Some(why) = line_value(&text, "error") {
+            return Err(format!("could not start the agent: {why}"));
+        }
         let err = String::from_utf8_lossy(&out.stderr);
         return Err(format!(
             "could not start the agent: {}",
@@ -669,6 +694,62 @@ mod tests {
             line_value(&String::from_utf8_lossy(&out.stdout), "tmux"),
             Some("present")
         );
+    }
+
+    /// Review w14-9: a system unit left from a manual `sudo fleet-agent
+    /// install` that is still active stops the job before it starts a second
+    /// agent on the same token; an inactive or absent one does not.
+    #[cfg(unix)]
+    #[test]
+    fn the_start_step_refuses_a_host_where_a_system_agent_runs() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let unit = dir.path().join("fleet-agent.service");
+        let systemctl = bin.join("systemctl");
+        let set_active = |active: bool| {
+            std::fs::write(
+                &systemctl,
+                format!("#!/bin/sh\nexit {}\n", if active { 0 } else { 3 }),
+            )
+            .unwrap();
+            std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        let run = || {
+            crate::proc::std_command("/bin/bash")
+                .args([
+                    "-c",
+                    &format!("{}echo passed", system_unit_guard(unit.to_str().unwrap())),
+                ])
+                .env("PATH", &bin)
+                .output()
+                .unwrap()
+        };
+        // No unit file: nothing to say, even with systemctl answering active.
+        set_active(true);
+        let out = run();
+        assert!(out.status.success(), "{out:?}");
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "passed");
+        // The unit is there but stopped: the job may go on.
+        std::fs::write(&unit, "[Unit]\n").unwrap();
+        set_active(false);
+        assert!(run().status.success());
+        // There and active: refused, saying how to stop it.
+        set_active(true);
+        let out = run();
+        assert_eq!(out.status.code(), Some(4));
+        let text = String::from_utf8_lossy(&out.stdout).to_string();
+        let why = line_value(&text, "error").unwrap();
+        assert!(
+            why.contains("system fleet-agent service already runs here"),
+            "{why}"
+        );
+        assert!(
+            why.contains("sudo systemctl disable --now fleet-agent"),
+            "{why}"
+        );
+        assert!(start_script("https://hub.example", false).contains(SYSTEM_UNIT));
     }
 
     /// Review r18 A3: a hub stopped while a job waited for the agent to
@@ -897,6 +978,29 @@ mod tests {
         let text = String::from_utf8_lossy(&out.stdout);
         assert!(line_value(&text, "error").unwrap().contains("checksum"));
         assert!(!home.path().join(".local/bin/fleet-agent").exists());
+    }
+
+    /// Review w14-11: a release that is not there (a pruned dev build, or
+    /// a host that cannot reach the source) names the URL and what to do.
+    #[cfg(unix)]
+    #[test]
+    fn a_missing_release_names_the_url_and_what_to_do() {
+        let dist = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let t = "x86_64-unknown-linux-gnu";
+        let base = format!("file://{}", dist.path().display());
+        let out = bash(&download_script(&base, "0.0.1-dev.3", t), home.path(), "");
+        assert_eq!(out.status.code(), Some(4));
+        let text = String::from_utf8_lossy(&out.stdout);
+        let why = line_value(&text, "error").unwrap();
+        assert!(
+            why.contains(&format!("{base}/fleet-agent-0.0.1-dev.3-{t}.tar.gz")),
+            "{why}"
+        );
+        assert!(
+            why.contains("pruned") && why.contains("another version"),
+            "{why}"
+        );
     }
 
     fn store_with_ssh_host() -> Arc<Mutex<Store>> {

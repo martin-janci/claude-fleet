@@ -671,3 +671,36 @@ describe('the Work view org chord and archived tasks', () => {
     expect(activeFilterCount({ archived: true })).toBe(0);
   });
 });
+
+describe('personArchived (review w10-8/9/10)', () => {
+  it('an item a person archived is hidden, unless a session runs on it', async () => {
+    const { personArchived } = await import('./work_view');
+    expect(personArchived(task({ archived: true, archived_at: 100 }))).toBe(true);
+    // The hub keeps `archived` false while a session is active: the task stays.
+    expect(personArchived(task({ archived: false, archived_at: 100 }))).toBe(false);
+    // An older hub sends no `archived`: the stamp decides.
+    expect(personArchived(task({ archived: undefined, archived_at: 100 }))).toBe(true);
+    // Done, not archived by a person.
+    expect(personArchived(task({ archived: true, archived_at: null }))).toBe(false);
+  });
+
+  it('a bare task archived from its page (no item, no stamp) is hidden too', async () => {
+    const { personArchived, withoutPersonArchived } = await import('./work_view');
+    const bare = task({ task_id: 'ref:owner/repo#333', item_id: null, archived: true, archived_at: null });
+    expect(personArchived(bare)).toBe(true);
+    expect(withoutPersonArchived([bare], false)).toEqual([]);
+    expect(withoutPersonArchived([bare], true)).toEqual([bare]);
+  });
+
+  it("the List's Tasks tab count leaves out what the List hides", async () => {
+    const { taskTabCount } = await import('./work_tab_counts');
+    const open = (n: number, over: Partial<ReturnType<typeof task>> = {}) =>
+      task({ task_id: `item:${n}`, item_id: n, status_category: 'todo', archived: false, archived_at: null, sessions: [], ...over });
+    const page = {
+      tasks: [open(1), open(2), open(3, { archived: true, archived_at: 100 }), open(4, { archived: true, archived_at: 100 })],
+      total: 4,
+    };
+    expect(taskTabCount(page, true)).toBe(2);
+    expect(taskTabCount(page, true, true)).toBe(4);
+  });
+});

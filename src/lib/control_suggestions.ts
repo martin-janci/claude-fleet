@@ -8,16 +8,50 @@
 // - a host that lost several restorable sessions at once (the sidebar's
 //   fold, `lost_fold.ts`): open the host, whose "Restore n lost sessions"
 //   is the restore with its dry run and confirm, or ask Control which are
-//   worth restoring.
+//   worth restoring;
+// - finished sessions the tidy-up report lists (done or PR merged, and
+//   idle): review them in the tidy sheet, or ask Control to `/tidy`.
 //
 // A card is a suggestion, so it says why it is there and can be dismissed;
-// the person's press is what runs anything.
+// the person's press is what runs anything. A dismissal holds across
+// restarts for a week (prefs, as Control's escalations' Later does), and
+// with the escalation scope on "Control's threads" a card about a session
+// is raised only for Control's own (review w04-14).
 import { writable } from 'svelte/store';
 import type { SessionRow } from './sessions';
 import { lostFolds } from './lost_fold';
+import { pruneLater } from './control_escalations';
+import { readPref, writePref } from './prefs';
+import type { TidyCandidate } from './tidy';
 
-/** Cards the person dismissed, for this run of the app. */
-export const dismissedSuggestions = writable<ReadonlySet<string>>(new Set());
+/** The pref dismissals are kept in: `[id, unix seconds]` pairs. */
+export const DISMISSED_PREF = 'control.suggestionsDismissed';
+
+type Dismissal = [string, number];
+const isDismissals = (v: unknown): v is Dismissal[] =>
+  Array.isArray(v) && v.every((e) => Array.isArray(e) && e.length === 2 && typeof e[0] === 'string' && typeof e[1] === 'number');
+const nowSecs = () => Math.floor(Date.now() / 1000);
+let dismissals: Dismissal[] = pruneLater(readPref<Dismissal[]>(DISMISSED_PREF, [], isDismissals), nowSecs());
+
+/** Cards the person dismissed, kept a week across restarts. */
+export const dismissedSuggestions = writable<ReadonlySet<string>>(new Set(dismissals.map(([k]) => k)));
+
+/** Dismiss the card `id` (✕). */
+export function dismissSuggestion(id: string): void {
+  dismissals = pruneLater([...dismissals.filter(([k]) => k !== id), [id, nowSecs()]], nowSecs());
+  writePref(DISMISSED_PREF, dismissals);
+  dismissedSuggestions.set(new Set(dismissals.map(([k]) => k)));
+}
+
+/** Test seam: nothing dismissed, nothing remembered. */
+export function resetSuggestionsForTests(): void {
+  dismissals = [];
+  writePref(DISMISSED_PREF, dismissals);
+  dismissedSuggestions.set(new Set());
+}
+
+/** The tidy-up reasons a `/tidy` card is raised for: finished work. */
+const TIDY_CARD_REASONS: ReadonlySet<string> = new Set(['done_idle', 'pr_merged_idle']);
 
 export type Suggestion =
   | {
@@ -28,6 +62,14 @@ export type Suggestion =
       sessionId: number;
       label: string;
       /** What "Ask Control" puts in the box. */
+      ask: string;
+    }
+  | {
+      kind: 'tidy';
+      id: string;
+      title: string;
+      why: string;
+      sessionIds: number[];
       ask: string;
     }
   | {
@@ -52,11 +94,26 @@ export function prShort(url: string): string {
   return m ? `#${m[1]}` : url;
 }
 
-/** The cards to show, most pressing first: failing CI, then mass losses. */
-export function fleetSuggestions(rows: readonly SessionRow[], dismissed: ReadonlySet<string> = new Set()): Suggestion[] {
+export interface SuggestionInput {
+  /** Control's sessions (`controlSessionIds`): a card about a session is
+   *  raised only for these. `null`: the whole fleet. */
+  scope?: ReadonlySet<number> | null;
+  /** The tidy-up report's candidates (`tidyReport`). */
+  tidy?: readonly TidyCandidate[];
+}
+
+/** The cards to show, most pressing first: failing CI, then mass losses,
+ *  then finished sessions to tidy. */
+export function fleetSuggestions(
+  rows: readonly SessionRow[],
+  dismissed: ReadonlySet<string> = new Set(),
+  input: SuggestionInput = {},
+): Suggestion[] {
+  const scope = input.scope ?? null;
   const out: Suggestion[] = [];
   for (const s of rows) {
     if (s.lost_at != null || !s.pr_url || s.ci_status !== 'failing') continue;
+    if (scope && !scope.has(s.id)) continue;
     const pr = prShort(s.pr_url);
     const failing = s.pr_evidence?.checks?.failing?.map((c) => c.name).filter(Boolean) ?? [];
     const label = labelOf(s);
@@ -79,6 +136,19 @@ export function fleetSuggestions(rows: readonly SessionRow[], dismissed: Readonl
       host: f.host,
       sessionIds: f.rows.map((r) => r.id),
       ask: `${f.rows.length} sessions stopped together on ${f.host}. Which are worth restoring, and which should be tidied?`,
+    });
+  }
+  const done = (input.tidy ?? []).filter((c) => TIDY_CARD_REASONS.has(c.reason) && (!scope || scope.has(c.session_id)));
+  if (done.length > 0) {
+    const ids = done.map((c) => c.session_id).sort((a, b) => a - b);
+    const n = ids.length;
+    out.push({
+      kind: 'tidy',
+      id: `tidy:${ids.join(',')}`,
+      title: `Tidy ${n} finished session${n === 1 ? '' : 's'}`,
+      why: 'done or their PR merged, and idle since',
+      sessionIds: ids,
+      ask: '/tidy',
     });
   }
   return out.filter((x) => !dismissed.has(x.id)).slice(0, MAX_SUGGESTIONS);

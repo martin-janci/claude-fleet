@@ -172,6 +172,20 @@ pub fn close_all_shell_terminals_script(session: &str) -> String {
     )
 }
 
+/// Close the terminals left behind by an ended session of this name: every
+/// `<session>--sh<N>`, but only while no tmux session `session` exists, so a
+/// live session's own terminals are never touched. Run before a new session
+/// takes the name (review w27-8): a session that ended without fleet's Kill
+/// (`/exit`, an OOM kill, `tmux kill-session` by hand) left them running
+/// unseen, and the new session's strip would show them as its own.
+pub fn close_orphan_shell_terminals_script(session: &str) -> String {
+    format!(
+        "tmux has-session -t {target} 2>/dev/null || {{ {close}; }}; true",
+        target = quote(&format!("={session}")),
+        close = close_all_shell_terminals_script(session),
+    )
+}
+
 /// Rename every terminal of `old` to the same terminal of `new`: a renamed
 /// session keeps its terminals.
 pub fn rename_shell_terminals_script(old: &str, new: &str) -> String {

@@ -82,9 +82,14 @@ that the hub refuses with `E_HUB_CONTRACT` can still ask what to install.
   tell it now.
 - **Pin a version.** `update_admin { action: pin, component, version,
   target? }` pins a whole component, or one target when `target` is set.
-  `action: unpin` removes the pin. A pin below the installed version is a
+  `action: unpin` removes the pin. A pin holds its target on that version
+  while the channel moves on: Settings → Updates says "Pinned to X" until it
+  is unpinned. A pin below the installed version is a
   rollback. A pin the publisher does not permit (withdrawn, below its signed
-  minimum) is held, never served.
+  minimum) is held, never served. A hub pin to a release whose manifest's
+  `store.schema_to` is below the hub's database schema is refused: that
+  build cannot open the database the newer one migrated (see *Going back*
+  below).
 - **Pushed from the release.** Once a release or a phone's amendment is
   listed, the release workflows `POST /update/poke` to every hub in the
   repository variable `FLEET_HUB_POKE_URLS` (space-separated base URLs, e.g.
@@ -109,7 +114,11 @@ that the hub refuses with `E_HUB_CONTRACT` can still ask what to install.
   version? }` installs at once, whatever the mode: a mandatory pin to
   `version` (default: the channel's recommended release) for the component
   or one target, and every updater that can be woken is. A target with such
-  a pin to reach asks again within two minutes instead of hours.
+  a pin to reach asks again within two minutes instead of hours. The pin
+  lifts itself once it has done its job — a target's own when that target
+  reports `success` on the version, a component's once every target of it
+  has — so the target follows the channel again; `unpin` does it sooner.
+  An operator's own `pin` is never lifted.
   - **Agents:** the hub runs one line through each agent (every agent host,
     or the one named), which drops `update-now` in the agent's runtime
     directory; `fleet-agent-update.path` (from `install --auto-update`)
@@ -117,8 +126,11 @@ that the hub refuses with `E_HUB_CONTRACT` can still ask what to install.
     offline agent installs on its next timer pass; an agent installed
     before this needs `install --auto-update` again for the trigger).
   - **The hub:** `<data_dir>/update-now`. `fleet-updater`'s loop takes it
-    within five seconds; `fleet-hub-update.path` starts `fleet-hub update
-    apply`.
+    within five seconds; `fleet-updater.path` (the timer layout) starts one
+    `fleet-updater once`; `fleet-hub-update.path` starts `fleet-hub update
+    apply`. The answer's `hub_woken` is `false` while no updater has ever
+    checked in for `hub:self`, and its `note` says so: nothing installs the
+    hub until one runs.
   - **Desktops and phones:** the decision moves to `update_required`
     (`update:decision` reaches them at once), so they show the required
     banner or card; a person still installs.
@@ -331,10 +343,22 @@ goes on the updater's bad list so it is never retried by itself. Then:
 - **The previous build does not come back either**: `rollback_failed`. The
   updater stops the hub, leaves every container and file where it is, and
   does nothing more until an operator has sorted it out and run
-  `docker compose run --rm updater clear`. It never loops.
+  `docker compose run --rm updater clear`. It never loops. `clear` also
+  reaches an updater that is still running: it leaves `clear-requested` in
+  the state volume and wakes the loop, which clears what it holds.
 
-After a `success` there is no automatic rollback. Going back is an
-operator's pin to the older version.
+The reason a candidate failed travels with the `recovered` report too, so
+`update_status.last_error` and `fleet_health.updates` still say why after
+the rollback.
+
+After a `success` there is no automatic rollback. **Going back** is an
+operator's pin to the older version — only while that version can open the
+database. A release that migrated the store (its manifest's
+`store.schema_to` is above the older one's) cannot be pinned back: the hub
+refuses the pin, since the older build would refuse the database, fail its
+gate, and be bad-listed. Going back across a migration is a restore of a
+backup taken before the newer release, by hand (docs/hub.md → Restore
+drill).
 
 ### Turning it on
 
@@ -361,6 +385,17 @@ nothing else; `fleet-hub client revoke updater` takes it away. The service mount
 `WorkingDirectory` to the compose directory) and do not start the profile's
 service. The timer runs one pass, `docker compose --profile auto-update run
 --rm updater once`, every 6 hours; the socket is mounted only for that run.
+Add `deploy/hub/fleet-updater.path` (set `PathExists` to the hub-data
+volume's directory on the host) so `update_now` starts a pass at once
+instead of at the next timer run.
+
+**Updating the updater itself**: `up -d` does not re-pull `:latest`. Now and
+then:
+
+```bash
+docker compose --profile auto-update pull updater
+docker compose --profile auto-update up -d updater
+```
 
 **After it has updated the hub**, the version pinned in
 `docker-compose.yml` (or `FLEET_HUB_TAG` in `.env` behind a proxy) is no
@@ -592,13 +627,6 @@ being validated are lost, as with `fleet-updater`. `fleet-hub update apply
   target's reported build or phase, a pin, or the verified channel
   changes. A per-host token and an org-bound client never receive it; they
   read their own row through `update_status`.
-- **Decisions.** `/events` also carries `update:decision` (`{target, status,
-  version}`) when what the hub would tell a target moves — an operator's
-  pin, a newly verified channel, an `update.*` setting — so a desktop checks
-  again within seconds instead of at its next interval. A target seen for
-  the first time is not pushed: it was just told by its own check. The same
-  streams receive it as `update:changed`; `fleet-updater` (whose token
-  reaches `/update/*` only) keeps to its interval.
 - **Decisions.** `/events` also carries `update:decision` (`{target, status,
   version}`) when what the hub would tell a target moves — an operator's
   pin, a newly verified channel, an `update.*` setting — so a desktop checks

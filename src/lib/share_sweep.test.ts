@@ -858,7 +858,7 @@ const EXEMPT_SITES: Record<string, readonly Exemption[]> = {
   './FleetSessionView.svelte': [
     { writer: 'fleetSendPrompt', action: 'send_prompt', sites: ['fleetSendPrompt(fleet.id, session, text)'], why: EXTRA_FLEET_WHY, pins: EXTRA_FLEET_PINS },
     { writer: 'fleetSendKey', action: 'send_prompt', sites: ['fleetSendKey(fleet.id, session, k)'], why: EXTRA_FLEET_WHY, pins: EXTRA_FLEET_PINS },
-    { writer: 'fleetTouchViewed', action: 'touch_session_viewed', sites: ['fleetTouchViewed(fleet.id, session)'], why: EXTRA_FLEET_WHY, pins: EXTRA_FLEET_PINS },
+    { writer: 'fleetTouchViewed', action: 'touch_session_viewed', sites: ['fleetTouchViewed(at, { id })'], why: EXTRA_FLEET_WHY, pins: EXTRA_FLEET_PINS },
   ],
   './ReplyActions.svelte': [
     {

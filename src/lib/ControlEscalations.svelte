@@ -8,10 +8,12 @@
   Needs you tab.
 -->
 <script lang="ts">
-  import { onDestroy } from 'svelte';
+  import { onDestroy, onMount } from 'svelte';
   import {
     ESCALATIONS_SHOWN,
+    controlMissionIds,
     controlSessionIds,
+    missionEscalations,
     escalationScope,
     escalations,
     forgetRecoveredHosts,
@@ -25,6 +27,9 @@
   import { followHandoffs, handoffs } from './handoffs';
   import { refreshMutes, threadFollows } from './control_journal';
   import { hosts } from './hosts';
+  import { loadMissionList, missionList } from './mission_room';
+  import { openMission } from './missions';
+  import { onWorkChangedDebounced } from './work';
 
   const release = followHandoffs();
   onDestroy(release);
@@ -37,10 +42,27 @@
   const stopHosts = hosts.subscribe((h) => forgetRecoveredHosts(h));
   onDestroy(stopHosts);
 
+  // The missions, for those that wait on the person (w04-7).
+  onMount(() => {
+    void loadMissionList();
+    return onWorkChangedDebounced(
+      () => void loadMissionList(),
+      () => 500,
+      () => 3000,
+    );
+  });
+
   const mine = $derived(controlSessionIds($visibleFleet.rows, $handoffs, $threadFollows));
+  const myMissions = $derived(controlMissionIds($handoffs, $threadFollows));
   const opId = $derived($operatorSession?.id ?? null);
-  const fleetAll = $derived(escalations($visibleFleet.rows, $visibleFleet.opts, opId, $laterEscalations, $hosts));
-  const ours = $derived(escalations($visibleFleet.rows, $visibleFleet.opts, opId, $laterEscalations, $hosts, mine));
+  const fleetAll = $derived([
+    ...missionEscalations($missionList.missions, $laterEscalations),
+    ...escalations($visibleFleet.rows, $visibleFleet.opts, opId, $laterEscalations, $hosts),
+  ]);
+  const ours = $derived([
+    ...missionEscalations($missionList.missions, $laterEscalations, myMissions),
+    ...escalations($visibleFleet.rows, $visibleFleet.opts, opId, $laterEscalations, $hosts, mine),
+  ]);
   const all = $derived($escalationScope === 'fleet' ? fleetAll : ours);
   const shown = $derived(all.slice(0, ESCALATIONS_SHOWN));
   const more = $derived(all.length - shown.length);
@@ -65,6 +87,9 @@
             data-testid="control-escalation-open"
             onclick={() => openInControl(s.id, displayName(s, true))}>Open</button
           >
+        {:else if e.missionId != null}
+          {@const id = e.missionId}
+          <button type="button" class="btn btn--chip" data-testid="control-escalation-open" onclick={() => openMission(id)}>Open</button>
         {/if}
         <button type="button" class="btn btn--quiet" data-testid="control-escalation-later" onclick={() => putOff(e.key)}>Later</button>
       </li>

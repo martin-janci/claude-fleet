@@ -18,6 +18,7 @@
   import { refreshTrackersHealth, trackerAttentionItems, trackersHealth } from './tracker_health';
   import { decideAttentionItem, decideHealth } from './decide_health';
   import { orgBudgetItems, orgBudgets } from './org_budget';
+  import { updateAttentionItems, updatesHealth } from './update_health';
   import { windowHidden } from './window_hidden';
 
   /** Tracker health moves on the sync's scale (minutes). */
@@ -30,6 +31,9 @@
   // An org over its budget (org administration phase C): one item each, to
   // Settings → Organisations.
   const budgets = $derived(orgBudgetItems($orgBudgets));
+  // The fleet's own updates (review w26-3): a rollback, a failure, a stale
+  // channel. One item each, to Settings → Updates.
+  const updates = $derived(updateAttentionItems($updatesHealth));
 
   onMount(() => {
     const t = setInterval(() => {
@@ -40,11 +44,16 @@
   });
 </script>
 
-{#if items.length > 0 || jev || budgets.length > 0}
+{#if items.length > 0 || jev || budgets.length > 0 || updates.length > 0}
   <div class="trackers" data-testid="tracker-attention">
     {#each budgets as b (b.key)}
       <button class="pill hot" data-testid="org-budget-item" title={b.detail} onclick={() => openSettingsAt(b.page)}>
         <Icon name="warning" size={12} /> {b.label} →
+      </button>
+    {/each}
+    {#each updates as u (u.key)}
+      <button class="pill hot" data-testid="update-attention-item" title={u.detail} onclick={() => openSettingsAt(u.section)}>
+        <Icon name="warning" size={12} /> {u.label} →
       </button>
     {/each}
     {#if jev}

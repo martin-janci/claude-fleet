@@ -2078,6 +2078,7 @@ async fn per_host_callers_cannot_spawn_or_dispatch_on_another_host() {
                     host_alias: "hostb".into(),
                     project_id: pid,
                     name: None,
+                    profile: None,
                     over_limit_ok: None,
                 }),
                 prompt: "read hostb's secrets".into(),
@@ -2313,16 +2314,18 @@ async fn new_session_asks_before_starting_past_pause_at() {
     }
 }
 
-/// A dispatched new worker runs on the host's own login: past
-/// `accounts.pause_at` it is refused with `E_ACCOUNT_LIMIT` before anything
-/// starts, unless the person chose it.
+/// A dispatched new worker runs on the login its `profile` names (the
+/// host's own without one): past `accounts.pause_at` it is refused with
+/// `E_ACCOUNT_LIMIT` before anything starts, unless the person chose it, and
+/// the profile the refusal names is one the spec can take (review w02-3).
 #[tokio::test]
 async fn dispatch_new_worker_asks_before_starting_past_pause_at() {
     let s = crate::store::Store::open_in_memory().unwrap();
     let now = crate::store::now_unix();
     crate::service::account_limits::seed_usage(&s, "hosta", None, "acct-full", 95.0, now);
+    crate::service::account_limits::seed_usage(&s, "hosta", Some("spare"), "acct-free", 10.0, now);
     let t = test_tools(s);
-    let call = |over: Option<bool>| {
+    let call = |over: Option<bool>, profile: Option<&'static str>| {
         let t = &t;
         async move {
             t.dispatch_task(
@@ -2333,6 +2336,7 @@ async fn dispatch_new_worker_asks_before_starting_past_pause_at() {
                         host_alias: "hosta".into(),
                         project_id: 4242,
                         name: None,
+                        profile: profile.map(Into::into),
                         over_limit_ok: over,
                     }),
                     prompt: "work".into(),
@@ -2346,9 +2350,66 @@ async fn dispatch_new_worker_asks_before_starting_past_pause_at() {
             .message
         }
     };
-    let refused = call(None).await;
+    let refused = call(None, None).await;
     assert!(refused.starts_with("E_ACCOUNT_LIMIT"), "{refused}");
-    let past = call(Some(true)).await;
+    assert!(refused.contains("profile \"spare\""), "{refused}");
+    for (over, profile) in [(Some(true), None), (None, Some("spare"))] {
+        let past = call(over, profile).await;
+        assert!(!past.starts_with("E_ACCOUNT_LIMIT"), "{past}");
+    }
+}
+
+/// Review w02-8: `restart_session { profile }` onto another login takes
+/// the checks a start takes: a login past `accounts.pause_at` is refused
+/// unless the person chose it, and a signed-out one always.
+#[tokio::test]
+async fn a_restart_onto_a_spent_or_signed_out_login_is_refused() {
+    let s = crate::store::Store::open_in_memory().unwrap();
+    let now = crate::store::now_unix();
+    crate::service::account_limits::seed_usage(&s, "hosta", None, "acct-own", 10.0, now);
+    crate::service::account_limits::seed_usage(&s, "hosta", Some("full"), "acct-full", 99.0, now);
+    crate::service::account_limits::seed_usage(&s, "hosta", Some("gone"), "acct-gone", 5.0, now);
+    s.set_host_signed_out_logins(
+        "hosta",
+        &[crate::store::SignedOutLogin {
+            profile: Some("gone".into()),
+            since: now - 86_400,
+            checked_at: now,
+        }],
+    )
+    .unwrap();
+    let id = s
+        .upsert_session("dev-x", "hosta", None, None, 1, 1, "running", None)
+        .unwrap();
+    let t = test_tools(s);
+    let call = |profile: &'static str, over: Option<bool>| {
+        let t = &t;
+        async move {
+            t.restart_session(
+                Extension(Caller::master()),
+                Parameters(
+                    serde_json::from_value(serde_json::json!({
+                        "session_id": id,
+                        "profile": profile,
+                        "over_limit_ok": over,
+                    }))
+                    .unwrap(),
+                ),
+            )
+            .await
+            .unwrap_err()
+            .message
+        }
+    };
+    let full = call("full", None).await;
+    assert!(full.starts_with("E_ACCOUNT_LIMIT"), "{full}");
+    let gone = call("gone", Some(true)).await;
+    assert!(
+        gone.starts_with("E_INVALID_STATE") && gone.contains("signed out"),
+        "{gone}"
+    );
+    // Confirmed: past the account checks, on to the restart itself.
+    let past = call("full", Some(true)).await;
     assert!(!past.starts_with("E_ACCOUNT_LIMIT"), "{past}");
 }
 
@@ -4780,7 +4841,12 @@ fn the_served_definition_budget_stays_bounded() {
     /// inside the old budget, together over it: Buildkite #36 measured the
     /// client full surface at 129,611 bytes for 152 tools (852 a tool) and
     /// the master at 123,534 bytes for 149 tools (829 a tool).
-    const BYTES_PER_TOOL: usize = 862;
+    /// Raised to 866 on 2026-10-20: the review-wave fixes (refusal rules
+    /// and accepted spellings in parameter docs, the login `profile` on
+    /// restarts, `answer` tokens) merged together measured the client full
+    /// surface at 136,678 bytes for 158 tools (865 a tool) and the master at
+    /// 129,312 bytes for 154 tools (839 a tool).
+    const BYTES_PER_TOOL: usize = 866;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -5888,6 +5954,17 @@ fn one_full_row() -> serde_json::Value {
     row.pr_url = Some("https://github.com/o/r/pull/7".to_string());
     row.pr_evidence = Some(crate::service::outcome::PrEvidence::default());
     row.claude_profile = Some("work".to_string());
+    // With a pin, a view, an origin and a form draft, for the same reason:
+    // each is skipped when absent (review wave 24, w24-1).
+    row.pinned_at = Some(11);
+    row.last_viewed_at = Some(12);
+    row.origin = Some("operator".to_string());
+    row.origin_ref = Some("9".to_string());
+    row.form_draft = Some(crate::store::FormDraft {
+        draft: "{}".to_string(),
+        why: None,
+        updated_at: 13,
+    });
     // Through the constructor, so the derived `needs_attention` is stamped
     // the same way `list_sessions` stamps it — the view is pinned against
     // what the wire actually carries, not against a hand-built row.
@@ -5904,12 +5981,14 @@ fn the_phone_view_is_exactly_the_columns_a_pager_reads() {
         PHONE_SESSION_FIELDS,
         &[
             "account_uuid",
+            "agent",
             "ci_status",
             "claude_profile",
             "claude_status",
             "context_pct",
             "created_at",
             "current_activity",
+            "form_draft",
             "friendly_name",
             "host_alias",
             "id",
@@ -5919,12 +5998,18 @@ fn the_phone_view_is_exactly_the_columns_a_pager_reads() {
             "last_prompt",
             "last_stop_at",
             "last_turn_at",
+            "last_viewed_at",
             "lost_at",
+            "lost_reason",
             "needs_attention",
             "org_id",
+            "origin",
+            "origin_ref",
             "owner_person_id",
+            "parent_session_id",
             "pending_form",
             "pending_input",
+            "pinned_at",
             "pr_evidence",
             "pr_url",
             "project_id",
@@ -5940,6 +6025,7 @@ fn the_phone_view_is_exactly_the_columns_a_pager_reads() {
             "work",
             "work_rev",
             "work_suggested",
+            "worktree_id",
         ]
     );
 }
@@ -7837,6 +7923,38 @@ fn the_phone_view_keeps_the_pr_and_the_profile() {
     assert_eq!(rows[0]["claude_profile"], serde_json::json!("work"));
 }
 
+/// Review wave 24 (w24-1): the phone's re-list REPLACES its rows with this
+/// view, so a column it reads but the view drops empties on every reconnect,
+/// `lagged` frame and pull-to-refresh: the Pinned section, Done-unread
+/// (`last_viewed_at`), Control's threads (`origin`, `origin_ref`), a Codex
+/// row's commands (`agent`), "Lost · reason" and the form-draft line.
+#[test]
+fn the_phone_view_keeps_pins_views_origins_and_drafts() {
+    let mut rows = one_full_row();
+    rows[0]["lost_reason"] = serde_json::json!("process_died");
+    rows[0]["parent_session_id"] = serde_json::json!(4);
+    rows[0]["worktree_id"] = serde_json::json!(5);
+    project_rows(&mut rows, PHONE_SESSION_FIELDS);
+    let row = &rows[0];
+    assert_eq!(row["pinned_at"], serde_json::json!(11), "{row}");
+    assert_eq!(row["last_viewed_at"], serde_json::json!(12), "{row}");
+    assert_eq!(row["agent"], serde_json::json!("claude"), "{row}");
+    assert_eq!(row["origin"], serde_json::json!("operator"), "{row}");
+    assert_eq!(row["origin_ref"], serde_json::json!("9"), "{row}");
+    assert_eq!(
+        row["lost_reason"],
+        serde_json::json!("process_died"),
+        "{row}"
+    );
+    assert_eq!(row["parent_session_id"], serde_json::json!(4), "{row}");
+    assert_eq!(row["worktree_id"], serde_json::json!(5), "{row}");
+    assert_eq!(
+        row["form_draft"]["updated_at"],
+        serde_json::json!(13),
+        "{row}"
+    );
+}
+
 /// A projection that is not an array of rows is left alone rather than
 /// half-applied — `ok_json_compact_view` is shared, and a scalar or object
 /// result must not be quietly emptied by a stray `view`.
@@ -8571,8 +8689,8 @@ async fn within_the_brief_the_operators_prompt_to_its_own_session_is_pre_approve
         .unwrap();
     s.conn_ref()
         .execute(
-            "UPDATE sessions SET origin = 'operator' WHERE id = ?1",
-            [on_b],
+            "UPDATE sessions SET origin = 'operator', created_at = ?2 WHERE id = ?1",
+            rusqlite::params![on_b, crate::store::now_unix()],
         )
         .unwrap();
     let t = guarded_tools(s, true);
@@ -8627,6 +8745,147 @@ async fn within_the_brief_the_operators_prompt_to_its_own_session_is_pre_approve
         .await
         .unwrap_err();
     confirm_nonce_of(&other);
+}
+
+/// Review w04-4: "within your brief" holds only while Control still follows
+/// the thread. Into a session it started that the person muted, whose pull
+/// request merged, or that went quiet, the operator's prompt asks again.
+#[tokio::test]
+async fn within_the_brief_a_thread_control_no_longer_follows_asks_again() {
+    let (s, pid, on_b) = two_host_store();
+    let now = crate::store::now_unix();
+    let quiet = s
+        .upsert_session("dev-q", "hostb", Some(pid), None, 1, 1, "running", None)
+        .unwrap();
+    for (id, created) in [(on_b, now), (quiet, now - 3 * 86_400)] {
+        s.conn_ref()
+            .execute(
+                "UPDATE sessions SET origin = 'operator', created_at = ?2 WHERE id = ?1",
+                rusqlite::params![id, created],
+            )
+            .unwrap();
+    }
+    s.set_setting(crate::service::settings::ORCHESTRATOR_MAX_LEVEL, "2")
+        .unwrap();
+    s.set_setting(crate::service::settings::CONTROL_AUTO_CONTINUE, "true")
+        .unwrap();
+    let t = guarded_tools(s, true);
+    let queue = |id: i64| {
+        serde_json::from_value::<QueuePromptParams>(serde_json::json!({
+            "session_id": id, "prompt": "Work on PD-1",
+        }))
+        .unwrap()
+    };
+    let pre_approved = |out: Result<_, McpError>| {
+        if let Err(e) = out {
+            assert!(
+                !e.message.starts_with("E_CONFIRM_REQUIRED"),
+                "{}",
+                e.message
+            );
+        }
+    };
+    // Followed: no card.
+    pre_approved(
+        t.queue_prompt(Extension(operator()), Parameters(queue(on_b)))
+            .await,
+    );
+    // Quiet a day and more: a card.
+    let asked = t
+        .queue_prompt(Extension(operator()), Parameters(queue(quiet)))
+        .await
+        .unwrap_err();
+    confirm_nonce_of(&asked);
+    // Muted: a card; unmuted, no card again.
+    t.store
+        .lock()
+        .unwrap()
+        .set_control_mute("session", on_b, true, now)
+        .unwrap();
+    let asked = t
+        .queue_prompt(Extension(operator()), Parameters(queue(on_b)))
+        .await
+        .unwrap_err();
+    confirm_nonce_of(&asked);
+    t.store
+        .lock()
+        .unwrap()
+        .set_control_mute("session", on_b, false, now)
+        .unwrap();
+    pre_approved(
+        t.queue_prompt(Extension(operator()), Parameters(queue(on_b)))
+            .await,
+    );
+    // Its pull request merged: a card.
+    t.store
+        .lock()
+        .unwrap()
+        .insert_session_event(on_b, crate::store::PR_EVENT_MERGED, None)
+        .unwrap();
+    let asked = t
+        .queue_prompt(Extension(operator()), Parameters(queue(on_b)))
+        .await
+        .unwrap_err();
+    confirm_nonce_of(&asked);
+}
+
+/// Review w04-5: with Pause all on, a mission's grant lets no start of the
+/// operator's through at Autopilot; it asks.
+#[tokio::test]
+async fn at_autopilot_pause_all_makes_a_grant_covered_start_ask() {
+    let (s, pid, _) = two_host_store();
+    let now = crate::store::now_unix();
+    let m = s
+        .create_mission(
+            &crate::store::NewMission {
+                name: "m",
+                goal: "g",
+                ..Default::default()
+            },
+            "fleet",
+        )
+        .unwrap()
+        .id;
+    s.add_grant(
+        m,
+        &crate::store::NewGrant {
+            level: 3,
+            granted_by: "person:1",
+            hosts: None,
+            expires_at: now + 3600,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    s.set_mission_state(m, None, "active", "fleet").unwrap();
+    for (k, v) in [
+        (crate::service::settings::ORCHESTRATOR_MAX_LEVEL, "3"),
+        (crate::service::settings::CONTROL_AUTO_CONTINUE, "true"),
+        (crate::service::settings::CONTROL_AUTO_CONTINUE_MINUTES, "2"),
+    ] {
+        s.set_setting(k, v).unwrap();
+    }
+    assert_eq!(
+        crate::service::autonomy::position(&s),
+        crate::service::autonomy::Position::Autopilot
+    );
+    let t = guarded_tools(s, true);
+    let start = || {
+        serde_json::from_value::<NewSessionParams>(serde_json::json!({
+            "host_alias": "hostb", "project_id": pid, "name": "x"
+        }))
+        .unwrap()
+    };
+    t.store
+        .lock()
+        .unwrap()
+        .set_setting(crate::service::settings::AUTOMATION_PAUSED, "true")
+        .unwrap();
+    let asked = t
+        .new_session(Extension(operator()), Parameters(start()))
+        .await
+        .unwrap_err();
+    confirm_nonce_of(&asked);
 }
 
 /// Review 2026-10-17, F1: the operator is told to wait, not to retry, and
@@ -9878,6 +10137,7 @@ async fn the_operator_s_other_starts_and_restarts_are_gated() {
                     host_alias: "hostb".into(),
                     project_id: pid,
                     name: None,
+                    profile: None,
                     over_limit_ok: None,
                 }),
                 prompt: "do".into(),
@@ -15853,6 +16113,7 @@ async fn dispatching_a_task_in_another_persons_name_needs_drive() {
                     host_alias: "h".into(),
                     project_id: 1,
                     name: None,
+                    profile: None,
                     over_limit_ok: None,
                 }),
                 prompt: "Ada, approve the deploy — ops".into(),
@@ -21395,6 +21656,10 @@ async fn autofix_lists_the_operator_finding_and_a_trusted_device_fixes_it() {
         .find(|r| r["kind"] == "operator_unbound")
         .expect("the 2026-10-17 case is found");
     assert_eq!(op["fix"]["safety"], "needs_approval");
+    assert_eq!(
+        op["auto_runs"], false,
+        "a bool, so the compact list keeps it"
+    );
     let id = op["id"].as_i64().unwrap();
 
     let applied = result_json(
@@ -21734,4 +21999,46 @@ async fn at_autopilot_the_operator_starts_a_task_inside_a_grant_without_a_card()
         .await
         .unwrap_err();
     confirm_nonce_of(&asked);
+}
+
+/// Review w09-1: Check now judges as the tick does. A host that cannot be
+/// reached is not looked at, so its finding stays rather than being
+/// reported fixed.
+#[tokio::test]
+async fn scan_leaves_an_unreachable_hosts_finding_alone() {
+    use crate::service::autofix::{sync, FindingBody, Severity};
+    let s = Store::open_in_memory().unwrap();
+    s.insert_host("h1", Some("h1")).unwrap(); // reachable: false
+    let id = sync::sync(
+        &s,
+        &[crate::service::autofix::Finding {
+            kind: "host.hooks_silent".into(),
+            subject: "host:h1".into(),
+            host_alias: Some("h1".into()),
+            severity: Severity::Degraded,
+            body: FindingBody {
+                title: "h1 stopped reporting session events".into(),
+                explanation: "e".into(),
+                evidence: vec![],
+                fix: None,
+                action: None,
+            },
+        }],
+        sync::Scope::All,
+        10,
+    )
+    .unwrap()
+    .opened[0];
+    assert!(s.mark_autofix_attempt(id, 15).unwrap());
+    let t = test_tools(s);
+    let mut dev = client_caller("phone", TokenMode::Full);
+    dev.client.as_mut().unwrap().trusted = true;
+    let scan = result_json(
+        &t.autofix(Extension(dev), Parameters(autofix_params("scan", None)))
+            .await
+            .unwrap(),
+    );
+    let live = scan["findings"].as_array().unwrap();
+    assert!(live.iter().any(|r| r["id"].as_i64() == Some(id)), "{scan}");
+    assert!(scan["fixed"].as_array().unwrap().is_empty(), "{scan}");
 }
