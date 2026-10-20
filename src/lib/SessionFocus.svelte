@@ -86,7 +86,7 @@
     {#if session.last_prompt}<p class="prompt">{promptPreview(session.last_prompt, 160)}</p>{/if}
   </div>
   <div class="conv">
-    <ConversationPanel {session} visible={true} />
+    <ConversationPanel {session} visible={true} advanceOnAnswer={false} />
   </div>
 </div>
 
