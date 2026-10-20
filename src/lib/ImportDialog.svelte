@@ -3,6 +3,7 @@
   import { HOST_KINDS, importHost, importOnlyFor, KIND_LABEL, type AssetKind, type ImportReport } from './assets';
   import { hosts } from './hosts';
   import Modal from './Modal.svelte';
+  import { formKeys, platformSubmitHint } from './forms/form_frame';
   import TransferMark from './TransferMark.svelte';
 
   let {
@@ -28,6 +29,12 @@
     report = null;
   }
 
+  // ⌘↵ takes the next step (review w18-6): a dry run first, then Import.
+  const hint = platformSubmitHint();
+  const canDry = $derived(!busy && !(only.length === 0 && what.length === 0));
+  const canImport = $derived(!busy && !!report?.dry_run);
+  const next = $derived<'dry' | 'import'>(report?.dry_run ? 'import' : 'dry');
+
   async function run(dryRun: boolean) {
     if (asked.length === 0 && what.length === 0) return;
     busy = true; error = null;
@@ -40,7 +47,7 @@
 </script>
 
 <Modal title="Import from host" {onclose} width="520px" testid="import-dialog">
-  <div class="dialog">
+  <div class="dialog" use:formKeys={{ submit: () => void run(next === 'dry'), enabled: next === 'dry' ? canDry : canImport }}>
     <p class="muted">Reads the host's Claude config and writes new assets into the catalog working tree. Existing catalog assets are never overwritten. Nothing is committed.</p>
     <label>Host
       <select bind:value={hostAlias} data-testid="import-host">
@@ -72,8 +79,8 @@
     {/if}
     <div class="actions">
       <button onclick={onclose}>Close</button>
-      <button onclick={() => run(true)} disabled={busy || (only.length === 0 && what.length === 0)} data-testid="import-dry-run">Dry run</button>
-      <button class="btn btn--primary" onclick={() => run(false)} disabled={busy || !report?.dry_run} data-testid="import-confirm" title={report?.dry_run ? '' : 'Run a dry run first'}>Import</button>
+      <button onclick={() => run(true)} disabled={!canDry} data-shortcut={next === 'dry' && !busy ? hint.label : undefined} aria-keyshortcuts={next === 'dry' ? hint.aria : undefined} data-testid="import-dry-run">Dry run</button>
+      <button class="btn btn--primary" onclick={() => run(false)} disabled={!canImport} data-shortcut={next === 'import' && !busy ? hint.label : undefined} aria-keyshortcuts={next === 'import' ? hint.aria : undefined} data-testid="import-confirm" title={report?.dry_run ? '' : 'Run a dry run first'}>Import</button>
     </div>
   </div>
 </Modal>

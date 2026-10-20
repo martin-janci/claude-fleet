@@ -9,6 +9,7 @@
   // Save waits for the preview of exactly what is on screen.
   import { onDestroy, untrack } from 'svelte';
   import Modal from './Modal.svelte';
+  import { formKeys, platformSubmitHint } from './forms/form_frame';
   import { trackers as trackerStore } from './trackers';
   import { hubStatus, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
@@ -201,6 +202,11 @@
     });
   }
 
+  // ⌘↵ saves, once the preview is current (review w18-6): the form has no
+  // submit button, so neither Enter nor ⌘↵ saved before.
+  const hint = platformSubmitHint();
+  const canSave = $derived(previewCurrent && !busy && saveBlocked === null);
+
   async function remove() {
     if (start.id == null || busy || deleteBlocked !== null) return;
     busy = true;
@@ -220,6 +226,7 @@
 <Modal title={start.id != null ? 'Edit placement rule' : 'Make a rule for similar tasks'} {onclose} width="520px" testid="work-rule-editor">
   <form
     class="form"
+    use:formKeys={{ submit: () => void save(), enabled: canSave }}
     onsubmit={(e) => {
       e.preventDefault();
       if (previewCurrent) void save();
@@ -349,7 +356,9 @@
         type="button"
         class="btn btn--primary"
         data-testid="rule-save"
-        disabled={!previewCurrent || busy || saveBlocked !== null}
+        disabled={!canSave}
+        data-shortcut={busy ? undefined : hint.label}
+        aria-keyshortcuts={hint.aria}
         title={saveBlocked ?? (previewCurrent ? 'Save the rule' : 'Wait for the preview of this rule')}
         onclick={() => void save()}>Save rule</button
       >

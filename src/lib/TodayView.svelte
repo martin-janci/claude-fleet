@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { IS_MAC, shortcutLabel } from './shortcuts';
   // The Today view (work graph M9.1): what waits on you, grouped by work;
   // what is in progress; what shipped today; what went stale. It is the
   // empty state of Details and opens over a selected session with ⌘⇧T.
@@ -316,7 +317,7 @@
 
   {#if view}
     {#if isEmptyView(view)}
-      <p class="empty" data-testid="details-empty">Nothing running today. Pick a session, or start work from ⌘K.</p>
+      <p class="empty" data-testid="details-empty">Nothing running today. Pick a session, or start work from {shortcutLabel('switcher', IS_MAC)}.</p>
     {/if}
     {#if view.waiting.length > 0 || (view.missions?.length ?? 0) > 0}
       <section class="block">

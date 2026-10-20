@@ -1,6 +1,7 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import Modal from './Modal.svelte';
+  import { formKeys, platformSubmitHint } from './forms/form_frame';
   import { hubActionBlocked, hubStatus } from './hub';
   import { hubConnection } from './hub_connection';
   import { sessionIdBlocked } from './share';
@@ -180,6 +181,10 @@
     ondone?.();
     onclose();
   }
+
+  // The form rule (review w18-6): ⌘↵ submits from any field; a bare Enter
+  // only in a one-field form (`formKeys`).
+  const hint = platformSubmitHint();
 </script>
 
 <Modal
@@ -188,7 +193,7 @@
   width="420px"
   testid="name-work-dialog"
 >
-  <form class="form" onsubmit={submit}>
+  <form class="form" use:formKeys onsubmit={submit}>
     <label class="field">
       <span>Title</span>
       <input
@@ -273,6 +278,8 @@
         class="primary"
         disabled={!canSubmit}
         title={blocked ?? ''}
+        data-shortcut={hint.label}
+        aria-keyshortcuts={hint.aria}
         data-testid="name-work-submit">{naming ? 'Name' : 'Rename'}</button
       >
     </div>

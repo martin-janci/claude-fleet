@@ -25,6 +25,7 @@ import { displayKey, keyFamily, type TicketRow } from './trackers';
 import type { WorkTreeFacets, WorkTreeFilters } from './work_view';
 import type { SearchHit } from './search_api';
 import { rowMatches, sessionFilterRow, type FilterRow } from './sidebar_index';
+import type { Mission } from './missions';
 
 /** A cached tracker ticket or own task and the section it is listed under. */
 export interface SwitcherTicket {
@@ -165,6 +166,40 @@ export function planningEntries(facets: WorkTreeFacets | null | undefined): Swit
   return out;
 }
 
+
+/** A palette id that opens a mission's room: `mission.open.<id>`. */
+export const MISSION_OPEN = 'mission.open.';
+/** A palette id that opens a routine in Automation: `routine.open.<id>`. */
+export const ROUTINE_OPEN = 'routine.open.';
+
+/** Missions by name (review w18-5): Enter opens its room. Like the
+ *  palette's commands, they wait for a query. */
+export function missionEntries(missions: readonly Mission[]): SwitcherEntry[] {
+  return missions.map((m) => ({
+    kind: 'command',
+    key: `mission:${m.id}`,
+    label: m.name,
+    description: `Mission · ${m.state}${m.goal ? ` · ${m.goal}` : ''}`,
+    meta: 'Mission',
+    fields: [m.name, m.goal ?? '', 'mission'].filter(Boolean),
+    action: `${MISSION_OPEN}${m.id}`,
+    section: 'Missions',
+  }));
+}
+
+/** Routines by name (review w18-5): Enter opens Automation on it. */
+export function routineEntries(routines: readonly { id: number; name: string; enabled: boolean }[]): SwitcherEntry[] {
+  return routines.map((r) => ({
+    kind: 'command',
+    key: `routine:${r.id}`,
+    label: r.name,
+    description: `Routine${r.enabled ? '' : ' · paused'}`,
+    meta: 'Routine',
+    fields: [r.name, 'routine'],
+    action: `${ROUTINE_OPEN}${r.id}`,
+    section: 'Routines',
+  }));
+}
 
 /** What a command row asks the Assets panel to run (`app_views.ts`). */
 export type AssetsCommand = 'rescan' | 'sync' | 'propose';

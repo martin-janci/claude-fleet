@@ -30,6 +30,7 @@
   import { accessOf, noAttachReason } from './access';
   import { sessionBlocked } from './share';
   import { matchShortcut } from './shortcuts';
+  import { destination, goTo } from './destination';
   import {
     shellTerminals,
     shellTerminalName,
@@ -48,7 +49,7 @@
   import { askContextHelp, helpModel, screenHistory } from './context_help';
   import { fleetSettings, settingBool, SETTING_KEYS } from './fleet_settings';
   import { AGENT_LABELS } from './row_groups';
-  import { agentTabLabel, agentTabName } from './prefs';
+  import { agentTabLabel, agentTabName, sessionView } from './prefs';
   import Self from './TerminalView.svelte';
   import HostOffline from './states/HostOffline.svelte';
   import { errorText } from './error_copy';
@@ -299,6 +300,7 @@
     seenRequest = req.seq;
     untrack(() => {
       if (req.to === 'agent') selectTab(null);
+      else if (req.to === 'new') void newTerminal();
       else if (req.n != null && listed && shells.includes(req.n)) selectTab(req.n);
       else {
         // Before the list: the terminal it names is the one showShells
@@ -422,15 +424,21 @@
   function onTerminalChord(e: KeyboardEvent) {
     if (!showStrip) return;
     const id = matchShortcut('global', e, isMac);
-    if (id === 'new-terminal') {
-      e.preventDefault();
-      e.stopPropagation();
-      void newTerminal();
-    } else if (id === 'next-terminal') {
-      e.preventDefault();
-      e.stopPropagation();
-      selectTab(nextTerminalTab(activeShell, shells));
-    }
+    if (id !== 'new-terminal' && id !== 'next-terminal') return;
+    // Only where the terminal can be shown (review w18-2): not under a
+    // dialog, and not from Control, Automation or another fleet page, where
+    // the pane stays mounted but a new tmux window would open unseen.
+    const dest = get(destination);
+    if (dest !== 'session' && dest !== 'details') return;
+    if ((e.target as HTMLElement | null)?.closest?.('dialog')) return;
+    e.preventDefault();
+    e.stopPropagation();
+    // Then show the terminal, as the session bar's Terminals tab does: from
+    // the Conversation view or Details the chord would otherwise act unseen.
+    sessionView.set('terminal');
+    if (dest !== 'session') goTo('session');
+    if (id === 'new-terminal') void newTerminal();
+    else selectTab(nextTerminalTab(activeShell, shells));
   }
 
   $effect(() => {

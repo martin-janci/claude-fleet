@@ -8,6 +8,7 @@
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
   import Modal from './Modal.svelte';
+  import { formKeys, platformSubmitHint } from './forms/form_frame';
   import { commitMessageFor, repoStatus, repoStatusStore, type RepoChange } from './assets';
 
   let {
@@ -36,6 +37,9 @@
   const STATUS_WORD: Record<string, string> = { A: 'added', M: 'changed', D: 'removed' };
   const ok = $derived(message.trim() !== '');
 
+  // ⌘↵ runs the primary verb (review w18-6): Commit and push when offered.
+  const hint = platformSubmitHint();
+
   function submit(push: boolean) {
     if (!ok) return;
     oncommit(message.trim(), push);
@@ -58,6 +62,7 @@
       {/each}
     </ul>
   {/if}
+  <div class="keys" use:formKeys={{ submit: () => submit(canPush), enabled: ok }}>
   <label class="msg">
     <span>Message <span class="from" data-testid="commit-assets-from">from the changes</span></span>
     <textarea
@@ -70,17 +75,21 @@
   <div class="actions">
     <button type="button" onclick={oncancel}>Cancel</button>
     <button type="button" class:primary={!canPush} disabled={!ok} onclick={() => submit(false)} data-testid="commit-assets-commit"
+      data-shortcut={canPush ? undefined : hint.label} aria-keyshortcuts={canPush ? undefined : hint.aria}
       >Commit</button
     >
     {#if canPush}
       <button type="button" class="primary" disabled={!ok} onclick={() => submit(true)} data-testid="commit-assets-push"
+        data-shortcut={hint.label} aria-keyshortcuts={hint.aria}
         >Commit and push</button
       >
     {/if}
   </div>
+  </div>
 </Modal>
 
 <style>
+  .keys { display: contents; }
   .changes { list-style: none; margin: 0 0 10px; padding: 0; display: flex; flex-direction: column; gap: 2px; max-height: 200px; overflow: auto; }
   .changes li { display: flex; justify-content: space-between; gap: 8px; font-size: var(--text-xs); }
   .changes code { font-family: var(--font-mono); overflow-wrap: anywhere; }

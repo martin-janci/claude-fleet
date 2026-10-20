@@ -298,6 +298,27 @@
     return () => document.removeEventListener('mousedown', away);
   });
 
+  // Esc closes the ▾ menu and gives focus back to its caret; ↑/↓ walk its
+  // items (review w18-11). Esc is the menu's, not the page's.
+  let caretBtn: HTMLButtonElement | undefined = $state();
+  function onMenuKeys(e: KeyboardEvent) {
+    if (!menuOpen) return;
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      menuOpen = false;
+      caretBtn?.focus();
+      return;
+    }
+    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+    const items = Array.from(root?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not(:disabled)') ?? []);
+    if (items.length === 0) return;
+    e.preventDefault();
+    const at = items.indexOf(document.activeElement as HTMLButtonElement);
+    const next = at < 0 ? (e.key === 'ArrowDown' ? 0 : items.length - 1) : (at + (e.key === 'ArrowDown' ? 1 : items.length - 1)) % items.length;
+    items[next].focus();
+  }
+
   // The list's keyboard (`s` runs the primary half, ⇧S opens the popover).
   const off = registerWorkButton(() => task.task_id, {
     primary: () => primary(),
@@ -306,7 +327,8 @@
   onDestroy(off);
 </script>
 
-<span class="wb wb--{variant}" bind:this={root} data-testid="work-button">
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<span class="wb wb--{variant}" bind:this={root} data-testid="work-button" onkeydown={onMenuKeys}>
   <span class="split">
     <button
       class="btn main"
@@ -330,6 +352,7 @@
       aria-haspopup="menu"
       aria-expanded={menuOpen}
       aria-label="More ways to work on this task"
+      bind:this={caretBtn}
       data-testid="work-button-menu"
       disabled={busy}
       onclick={() => (menuOpen = !menuOpen)}>▾</button

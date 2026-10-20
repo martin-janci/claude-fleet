@@ -419,6 +419,15 @@ export async function loadFailing(): Promise<void> {
  *  read failed; the line is then left out. */
 export const nextRoutine = writable<RoutineRow | null>(null);
 
+/** The routines ⌘K finds by name (review w18-5), read each time it opens.
+ *  A failed read leaves the last list. */
+export const switcherRoutines = writable<RoutineRow[]>([]);
+
+export async function loadSwitcherRoutines(): Promise<void> {
+  const r = await listRoutines();
+  if (r.ok && Array.isArray(r.value)) switcherRoutines.set(r.value);
+}
+
 export async function loadNextRoutine(nowSec = Math.floor(Date.now() / 1000)): Promise<void> {
   const r = await listRoutines();
   nextRoutine.set(r.ok && Array.isArray(r.value) ? soonestRoutine(r.value, nowSec) : null);
