@@ -408,7 +408,7 @@
     {:else if active === 'library'}
       <LibraryView />
     {:else if active === 'today'}
-      <TodayView />
+      <TodayView onopen={openRow} />
     {/if}
   </div>
   <ControlMissions />

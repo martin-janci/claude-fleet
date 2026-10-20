@@ -449,8 +449,14 @@ export function nextRoutineLine(r: Pick<RoutineRow, 'name' | 'next_run_at'>, now
   return `The next routine is ${r.name} ${when}.`;
 }
 
-/** How many failed runs the Inbox shows: added to its Needs you count. */
-export const failingCount = derived(failing, ($f) => $f.length);
+/** How many failed runs the Inbox counts: added to its Needs you count.
+ *  Only the ones this viewer may change (review w11-6): a teammate's
+ *  routine has no button here, so it would hold the badge until its owner
+ *  acts. Those are listed, uncounted (`failingOthersCount`). */
+export const failingCount = derived(failing, ($f) => $f.filter((f) => f.may_change).length);
+
+/** The failed routines listed for the viewer to see but not to change. */
+export const failingOthersCount = derived(failing, ($f) => $f.filter((f) => !f.may_change).length);
 
 /** Retry: run it again now; the newer run takes it out of the Inbox. */
 export async function retryRoutine(f: FailingRoutine): Promise<Result<RoutineRunRow>> {

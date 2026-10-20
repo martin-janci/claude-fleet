@@ -56,7 +56,7 @@
   import PrimaryFleetHeader from './PrimaryFleetHeader.svelte';
   import { anchor, primaryFleetOpen, primaryHiddenByAnchor } from './fleet_filters';
   import FleetInbox from './FleetInbox.svelte';
-  import { failingCount, loadFailing, loadNextRoutine, nextRoutine, nextRoutineLine } from './routines';
+  import { failingCount, failingOthersCount, loadFailing, loadNextRoutine, nextRoutine, nextRoutineLine } from './routines';
   import { loadWaitingMissions, waitingMissionCount } from './mission_waits';
   import { matchesAllWords, sessionMatchesSearch } from './search';
   import { sessionFocus } from './session_focus';
@@ -870,8 +870,11 @@
   // worktree id → branch, and the sessions that carry a work key (tag,
   // branch or worktree name — see work_keys.ts). Only built in work mode.
   const branchById = $derived(worktreeBranchById($projects));
+  // Not in the Inbox (review w11-2): its pool is the tree's split, and a
+  // work group would take every keyed session out of it, while the Inbox's
+  // own Group menu shows `inboxGroupBy`, not this.
   const workIndex = $derived(
-    $sidebarGroupBy === 'work'
+    $sidebarGroupBy === 'work' && $sidebarView !== 'inbox'
       ? buildSessionsByWork(
           $sessions,
           viewHost,
@@ -1085,6 +1088,7 @@
     inboxSections(inboxPool, attentionOpts, $inboxGroupBy, {
       missions: $waitingMissionCount,
       failingRoutines: $failingCount,
+      failingOthers: $failingOthersCount,
       proposed: inboxProposed.length,
       agentActions: $pendingAgentCount,
     }),
@@ -1644,6 +1648,7 @@
     {onRefresh}
     {onCollapse}
     needsYouCount={needsYouTotal}
+    inboxNeedsCount={inboxNeeding}
     {selectMode}
     {toggleSelectMode}
     selectedCount={selectedIds.size}
