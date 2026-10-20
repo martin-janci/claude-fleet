@@ -25,7 +25,6 @@
   } from './sessions';
   import { diskMeter } from './hosts_view';
   import { hosts, hostFilter, effectiveHostFilter } from './hosts';
-  import { fleetHostFilterOptions, hostFilterLabel, showPrimary } from './fleets';
   import { hintAnchor } from './hints';
   import { accountByUuid, accounts, accountLabel as accountName } from './accounts';
   import { attentionIdleMinutes } from './notify';
@@ -66,6 +65,20 @@
   } from './work_filters';
   import { clearWorkFilterPatch, sessionFacets, type SessionFacetId } from './filter_facets';
   import { AGENT_FILTERS, agentFilter, agentFilterLabel } from './session_scope';
+  import { fleets, multiFleet, PRIMARY, visibleExtraFleets, showPrimary } from './fleets';
+  import { fleetHostChoices } from './fleets';
+  import {
+    anchor,
+    clearMachineOrg,
+    fleetHostFilter,
+    fleetScopeFilter,
+    fleetScopesOf,
+    pickFleetHost,
+    pickFleetScope,
+    pickPrimaryHost,
+    pickPrimaryScope,
+    scopeLabelIn,
+  } from './fleet_filters';
 
   const isMac = detectMac(typeof navigator === 'undefined' ? undefined : navigator);
   const workViewChord = workViewChordLabel(isMac);
@@ -159,20 +172,45 @@
   );
 
   // ── The summary strip and the panel ──
-  // With more than one hub the fleet filter decides whose machines are
-  // offered: this window's own when it shows them, then each extra fleet's
-  // under its label.
-  const visibleHosts = $derived($showPrimary ? $hosts.filter((h) => !h.hidden) : []);
+  const visibleHosts = $derived($hosts.filter((h) => !h.hidden));
   const scopeLabel = $derived(
     $effectiveScope === UNASSIGNED ? 'Unassigned' : ($scopes.find((s) => s.id === $effectiveScope)?.label ?? $effectiveScope),
   );
+  // ── Extra fleets (multi-hub Phase 3a) ──
+  // Each fleet the switcher shows offers its own machines and orgs, under
+  // its own label and colour; a choice belongs to that fleet only
+  // (`fleet_filters.ts`). With no extra fleet nothing here renders.
+  const primaryLabel = $derived($fleets.find((f) => f.primary)?.label ?? 'This fleet');
+  const primaryColor = $derived($fleets.find((f) => f.primary)?.color);
+  const extraFilterGroups = $derived(
+    $multiFleet
+      ? $visibleExtraFleets
+          .filter(({ fleet }) => !fleet.duplicate_of && !fleet.unavailable)
+          .map(({ fleet, rows }) => ({ fleet, hosts: fleetHostChoices(rows), scopes: fleetScopesOf(rows) }))
+      : [],
+  );
+  /** The primary's own chips carry its name only beside another fleet's. */
+  const primaryNamed = $derived($multiFleet && $showPrimary);
+  const orgSectionShown = $derived($scopeSelectorShown || extraFilterGroups.some((g) => g.scopes.length > 0));
+  /** "Org: Papaya POS · rlt": with two fleets, every Machine and Org chip in
+   *  the strip names its fleet, so a filter is never read as everyone's. */
+  const ofPrimary = (text: string) => ($multiFleet ? `${text} · ${primaryLabel}` : text);
+  const fleetFacets = $derived.by(() => {
+    const a = $anchor;
+    if (!a || a.fleet === PRIMARY || !sessionsList) return [];
+    const g = extraFilterGroups.find((x) => x.fleet.id === a.fleet);
+    const label = g?.fleet.label ?? a.fleet;
+    const out: { id: string; label: string }[] = [];
+    if (a.scope !== null) out.push({ id: 'fleet-scope', label: `Org: ${scopeLabelIn(g?.scopes ?? [], a.scope)} · ${label}` });
+    if (a.host !== null) out.push({ id: 'fleet-host', label: `Host: ${a.host} · ${label}` });
+    return out;
+  });
   const facets = $derived(
     sessionsList
       ? sessionFacets({
           scope: $scopeSelectorShown ? $effectiveScope : 'all',
-          scopeLabel,
-          host: $effectiveHostFilter,
-          hostLabel: $hostFilterLabel($effectiveHostFilter),
+          scopeLabel: ofPrimary(scopeLabel),
+          host: $effectiveHostFilter === 'all' ? 'all' : ofPrimary($effectiveHostFilter),
           agent: $agentFilter === 'any' ? undefined : agentFilterLabel($agentFilter),
           recency,
           search,
@@ -187,9 +225,7 @@
   // you show their state in their own controls already. (The empty state
   // names them all.) Needs you is in the panel, so it
   // joins the strip.
-  const stripFacets = $derived(
-    facets.filter((f) => f.id !== 'search'),
-  );
+  const stripFacets = $derived([...facets.filter((f) => f.id !== 'search'), ...fleetFacets]);
   const panelCount = $derived(stripFacets.length);
 
   let panelOpen = $state(false);
@@ -200,6 +236,8 @@
   }
 
   function clearFacet(id: string) {
+    if (id === 'fleet-host') return fleetHostFilter.set(null);
+    if (id === 'fleet-scope') return fleetScopeFilter.set(null);
     const fid = id as SessionFacetId;
     const patch = clearWorkFilterPatch(fid);
     if (patch) return setWork(patch);
@@ -226,6 +264,7 @@
   }
   function clearAll() {
     for (const f of facets) clearFacet(f.id);
+    clearMachineOrg();
     workFilters.set({ ...DEFAULT_WORK_FILTERS });
   }
 
@@ -284,42 +323,70 @@
           </section>
         <section>
           <h3>Scope</h3>
-          {#if $scopeSelectorShown}
+          {#if orgSectionShown}
+            <!-- With extra fleets each fleet lists its own orgs, under its
+                 label and colour: an org id means something on one hub only.
+                 "Any" clears the org of every fleet. -->
             <FilterChipGroup
-              label="Organisation"
-              value={$effectiveScope}
+              label={primaryNamed && $scopeSelectorShown ? `Organisation · ${primaryLabel}` : 'Organisation'}
+              swatch={primaryNamed && $scopeSelectorShown ? primaryColor : undefined}
+              value={$anchor && $anchor.fleet !== PRIMARY && $anchor.scope !== null ? '' : $effectiveScope}
               options={[
                 { id: 'all', label: 'Any' },
-                ...$scopes.map((sc) => ({ id: sc.id, label: sc.label })),
-                { id: UNASSIGNED, label: 'Unassigned' },
+                ...($scopeSelectorShown && $showPrimary
+                  ? [...$scopes.map((sc) => ({ id: sc.id, label: sc.label })), { id: UNASSIGNED, label: 'Unassigned' }]
+                  : []),
               ]}
               testidFor={(id) => (id === 'all' ? 'filter-scope' : `filter-scope-${id}`)}
-              onchange={(id) => scopeFilter.set(id)}
+              onchange={(id) => pickPrimaryScope(id)}
             />
+            {#each extraFilterGroups.filter((g) => g.scopes.length > 0) as g (g.fleet.id)}
+              <FilterChipGroup
+                label="Organisation · {g.fleet.label}"
+                swatch={g.fleet.color}
+                value={$anchor?.fleet === g.fleet.id && $anchor.scope !== null ? $anchor.scope : ''}
+                options={[
+                  ...g.scopes.map((sc) => ({ id: sc.id, label: sc.label })),
+                  { id: UNASSIGNED, label: 'Unassigned' },
+                ]}
+                testidFor={(id) => `filter-fleet-scope-${g.fleet.id}-${id}`}
+                onchange={(id) => pickFleetScope(g.fleet.id, id)}
+              />
+            {/each}
           {/if}
           <nav class="hosts" aria-label="host filter">
             <FilterChipGroup
-              label="Machine"
-              value={$effectiveHostFilter}
+              label={primaryNamed ? `Machine · ${primaryLabel}` : 'Machine'}
+              swatch={primaryNamed ? primaryColor : undefined}
+              value={$anchor && $anchor.fleet !== PRIMARY && $anchor.host !== null ? '' : $effectiveHostFilter}
               options={[
                 { id: 'all', label: 'Any' },
-                ...visibleHosts.map((h) => ({
+                ...(!$showPrimary ? [] : visibleHosts).map((h) => ({
                   id: h.alias,
                   label: h.alias,
                   title: hostTitle(h),
                   dot: h.reachable ? ('on' as const) : ('off' as const),
                   alert: diskMeter(h)?.level === 'crit' ? 'disk almost full' : undefined,
                 })),
-                ...$fleetHostFilterOptions.map((o) => ({
-                  id: o.id,
-                  label: `${o.fleet.label} · ${o.host.alias}`,
-                  title: `${o.host.alias} on ${o.fleet.label}${o.host.reachable ? '' : ' (unreachable)'}`,
-                  dot: o.host.reachable ? ('on' as const) : ('off' as const),
-                })),
               ]}
               testidFor={(id) => `filter-host-${id}`}
-              onchange={(id) => hostFilter.set(id)}
+              onchange={(id) => pickPrimaryHost(id)}
             />
+            {#each extraFilterGroups.filter((g) => g.hosts.length > 0) as g (g.fleet.id)}
+              <FilterChipGroup
+                label="Machine · {g.fleet.label}"
+                swatch={g.fleet.color}
+                value={$anchor?.fleet === g.fleet.id && $anchor.host !== null ? $anchor.host : ''}
+                options={g.hosts.map((h) => ({
+                  id: h.alias,
+                  label: h.alias,
+                  title: `${h.alias} on ${g.fleet.label} — ${h.reachable ? 'reachable' : 'unreachable'}`,
+                  dot: h.reachable ? ('on' as const) : ('off' as const),
+                }))}
+                testidFor={(id) => `filter-fleet-host-${g.fleet.id}-${id}`}
+                onchange={(id) => pickFleetHost(g.fleet.id, id)}
+              />
+            {/each}
           </nav>
           <!-- The Sessions board's "Agent: any": which agent the rows run. -->
           <FilterChipGroup

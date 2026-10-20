@@ -5,6 +5,13 @@
   // close, start a session, copy the attach command. A row's name opens the
   // session in the main view (`FleetSessionView`, Phase 2), and a row that
   // needs you says so with the same table the Inbox uses.
+  //
+  // Phase 3a: the rows pass the same Search, Last active, Agent, Needs you
+  // and Background agents filters as this window's own list, and the
+  // Machine / Organisation filters when this fleet anchors them
+  // (`fleet_filters.ts`). When ANOTHER fleet anchors them, the group says
+  // how many of its sessions that hides and offers the way back, rather
+  // than vanishing.
   import {
     visibleExtraFleets,
     connectionWord,
@@ -26,7 +33,22 @@
     type FleetInfo,
     type FleetRows,
   } from './fleets';
-  import type { SessionRow } from './sessions';
+  import { sessionAgent, showBgAgents, type SessionRow } from './sessions';
+  import { AGENT_LABELS } from './row_groups';
+  import { agentFilter } from './session_scope';
+  import type { Recency } from './session_status';
+  import { scopes as primaryScopes } from './orgs';
+  import { readPref, writePref } from './prefs';
+  import {
+    anchor,
+    anchorFacetWord,
+    anchorText,
+    clearMachineOrg,
+    fleetListView,
+    fleetScopesOf,
+    scopeLabelIn,
+  } from './fleet_filters';
+  import { fleets, fleetRows, PRIMARY } from './fleets';
   import { copyText } from './clipboard';
   import { push } from './toasts';
   import Button from './kit/Button.svelte';
@@ -34,16 +56,40 @@
   const NONE: ReadonlySet<number> = new Set();
 
   let {
-    match = () => true,
-    filtered = false,
+    search = '',
+    recency = 'all',
+    needsYouOnly = false,
   }: {
-    /** The sidebar's filters, for an extra fleet's row (Sidebar's
-     *  `fleetMatch`): its fleet, the row, its project's name there and
-     *  whether it needs you. */
-    match?: (fleet: string, s: SessionRow, proj: string, needs: boolean) => boolean;
-    /** A filter narrows the list, so an empty group says so. */
-    filtered?: boolean;
+    /** The Sessions list's own search, Last active and Needs you (Sidebar
+     *  state, not stores), applied to every fleet alike. */
+    search?: string;
+    recency?: Recency;
+    needsYouOnly?: boolean;
   } = $props();
+
+  // A coarse clock for Last active, as the primary's list keeps.
+  let nowSec = $state(Math.floor(Date.now() / 1000));
+  $effect(() => {
+    const t = setInterval(() => (nowSec = Math.floor(Date.now() / 1000)), 30_000);
+    return () => clearInterval(t);
+  });
+
+  // Folded fleets, per viewer.
+  const isFolds = (v: unknown): v is string[] => Array.isArray(v) && v.every((x) => typeof x === 'string');
+  let folded = $state<string[]>(readPref('fleet-groups-folded', [], isFolds));
+  function toggleFold(id: string) {
+    folded = folded.includes(id) ? folded.filter((x) => x !== id) : [...folded, id];
+    writePref('fleet-groups-folded', folded);
+  }
+
+  /** The anchor in words, for the notice on a fleet it hides. */
+  const anchorWords = $derived.by(() => {
+    const a = $anchor;
+    if (!a) return '';
+    const list =
+      a.fleet === PRIMARY ? $primaryScopes : fleetScopesOf($fleetRows.get(a.fleet) ?? { sessions: new Map(), projects: [] });
+    return anchorText(a, $fleets, (id) => scopeLabelIn(list, id));
+  });
 
   // Which row has which inline form open, by fleet-qualified key.
   let open = $state<{ key: string; kind: 'prompt' | 'rename' | 'close' } | null>(null);
@@ -59,10 +105,9 @@
    *  project, like the primary's tree); `Other` for one with none. Each
    *  project is named once and each row's key computed once, not per
    *  comparison. */
-  function sorted(rows: FleetRows): { s: SessionRow; proj: string }[] {
+  function sorted(rows: FleetRows, list: SessionRow[]): { s: SessionRow; proj: string }[] {
     const names = new Map(rows.projects.map((t) => [t.project.id, `${t.project.owner}/${t.project.repo}`]));
-    return [...rows.sessions.values()]
-      .filter((s) => s.status !== 'lost')
+    return list
       .map((s) => ({ s, proj: (s.project_id == null ? undefined : names.get(s.project_id)) ?? 'Other' }))
       .sort(
         (a, b) =>
@@ -124,13 +169,31 @@
 {#each $visibleExtraFleets as { fleet: f, rows } (f.id)}
   {@const cw = connectionWord(f)}
   {@const needs = $fleetNeedsIds.get(f.id) ?? NONE}
-  {@const all = sorted(rows)}
-  {@const list = all.filter(({ s, proj }) => match(f.id, s, proj, needs.has(s.id)))}
+  {@const view = fleetListView(f.id, rows, {
+    anchor: $anchor,
+    search,
+    recency,
+    nowSec,
+    showBg: $showBgAgents,
+    agent: $agentFilter,
+    needsYouOnly,
+    needs,
+  })}
+  {@const list = sorted(rows, view.shown)}
+  {@const isFolded = folded.includes(f.id)}
   <section class="fleet-group" style="--fleet: {f.color}" data-testid="fleet-group-{f.id}">
     <header class="head">
+      <button
+        type="button"
+        class="fold"
+        aria-expanded={!isFolded}
+        aria-label="{isFolded ? 'Show' : 'Hide'} the sessions of {f.label}"
+        data-testid="fleet-fold-{f.id}"
+        onclick={() => toggleFold(f.id)}><span class="caret" class:collapsed={isFolded}>▾</span></button
+      >
       <span class="badge" data-testid="fleet-badge-{f.id}">{f.label}</span>
       <span class="state {cw.tone}" data-testid="fleet-state-{f.id}">{cw.word}</span>
-      <span class="count">{filtered && list.length !== all.length ? `${list.length} of ${all.length}` : list.length}</span>
+      <span class="count" data-testid="fleet-count-{f.id}">{list.length}</span>
       <span class="grow"></span>
       {#if cw.tone === 'bad' || cw.tone === 'warn'}
         <Button size="sm" variant="quiet" testid="fleet-retry-{f.id}" onclick={() => void retryFleet(f.id)}>Retry</Button>
@@ -140,6 +203,15 @@
         <Button size="sm" variant="quiet" testid="fleet-new-{f.id}" onclick={() => startForm(f, rows)}>New…</Button>
       {/if}
     </header>
+    {#if view.hiddenByAnchor > 0}
+      <p class="note hidden-note" data-testid="fleet-hidden-{f.id}">
+        {view.hiddenByAnchor} {view.hiddenByAnchor === 1 ? 'session' : 'sessions'} on {f.label} hidden: the
+        {$anchor ? anchorFacetWord($anchor) : 'filter'} ({anchorWords}) applies to that fleet only.
+        <button type="button" class="link" data-testid="fleet-hidden-clear-{f.id}" onclick={clearMachineOrg}
+          >Show every fleet</button
+        >
+      </p>
+    {/if}
     {#if f.duplicate_of}
       <p class="note err" data-testid="fleet-duplicate-{f.id}">
         This is the same hub as {f.duplicate_of}, so its sessions are shown there. Remove one of the two in Settings → Hub &amp; sync.
@@ -172,9 +244,7 @@
         <Button size="sm" variant="primary" type="submit" {busy} busyLabel="Starting…" disabled={!newHost || newProject === null || !newName.trim()}>Start</Button>
       </form>
     {/if}
-    {#if filtered && list.length === 0 && all.length > 0}
-      <p class="note" data-testid="fleet-filtered-{f.id}">No session here matches the filters.</p>
-    {/if}
+    {#if !isFolded}
     <ul class="rows">
       {#each list as { s, proj }, i (s.id)}
         {@const key = fleetKey(f.id, s.id)}
@@ -196,6 +266,8 @@
             >{#if s.pinned_at}<span class="pin" aria-label="pinned">◆</span>{/if}{label(s)}</button>
             {#if needs.has(s.id)}<span class="needs" data-testid="fleet-needs-{f.id}-{s.id}">needs you</span>{/if}
             <span class="host">{s.host_alias}</span>
+            {#if s.kind === 'bg'}<span class="kind" data-testid="fleet-bg-{f.id}-{s.id}" title="Background agent">bg</span>{/if}
+            {#if sessionAgent(s) !== 'claude'}<span class="kind">{AGENT_LABELS[sessionAgent(s)]}</span>{/if}
             {#if s.claude_status}<span class="status">{s.claude_status}</span>{/if}
           </div>
           <div class="actions">
@@ -241,9 +313,12 @@
           {/if}
         </li>
       {:else}
-        {#if !f.unavailable}<li class="note">No sessions on {f.label}.</li>{/if}
+        {#if !f.unavailable && view.hiddenByAnchor === 0}<li class="note" data-testid="fleet-empty-{f.id}"
+            >{rows.sessions.size > 0 ? `No session on ${f.label} matches the filters.` : `No sessions on ${f.label}.`}</li
+          >{/if}
       {/each}
     </ul>
+    {/if}
   </section>
 {/each}
 
@@ -258,6 +333,40 @@
     align-items: center;
     gap: var(--space-1);
     font-size: var(--text-xs);
+  }
+  .fold {
+    background: none;
+    border: 0;
+    padding: 0;
+    color: var(--fg-muted);
+    cursor: pointer;
+    font: inherit;
+  }
+  .caret {
+    display: inline-block;
+    transition: transform var(--dur-fast);
+  }
+  .caret.collapsed {
+    transform: rotate(-90deg);
+  }
+  .kind {
+    color: var(--fg-muted);
+    font-size: var(--text-xs);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-xs);
+    padding: 0 3px;
+  }
+  .hidden-note {
+    color: var(--fg-muted);
+  }
+  .link {
+    background: none;
+    border: 0;
+    padding: 0;
+    color: var(--accent);
+    cursor: pointer;
+    font: inherit;
+    text-decoration: underline;
   }
   .badge {
     padding: 0 var(--space-1);

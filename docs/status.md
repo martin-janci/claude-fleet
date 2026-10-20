@@ -1387,7 +1387,14 @@ and what the device may change there is that hub's `org_admin` rule
 (`company_access.ts`: a fleet admin's unbound device or an org admin's,
 trusted `full` to change anything) — on a paired primary too, which before
 showed the Company pages read-only. The other Settings pages still act on
-the primary only.
+the primary only. Phase 3a landed: the sidebar's Machine
+and Organisation filters list every shown fleet's machines and orgs under
+that fleet's label and colour (`list_orgs` joined `FLEET_SCOPED`); a choice
+belongs to one fleet (`src/lib/fleet_filters.ts`) and hides the other
+fleets' rows with a counted "hidden by the … filter · Show every fleet"
+line rather than silently; the shared filters (search, Last active, Needs
+you, Agent, Background agents) apply to the extra fleets' groups too; the
+primary's list sits under a folding fleet header beside another fleet.
 Phase 3 (one id space, the full panes per fleet) is not started.
 
 Application updates: design

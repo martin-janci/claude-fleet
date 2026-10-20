@@ -262,6 +262,27 @@ primary.
   judging what the device may change by that hub's own answers. The other
   Settings pages act on the primary.
 
+### Phase 3a — the sidebar's filters across fleets (landed)
+
+Observed live (2026-10-19, two fleets: primary "rlt", extra "Papaya POS
+(hub)"): the Machine filter listed only the primary's hosts, the
+Organisation filter only the primary's orgs; with a primary org chosen
+nothing of the extra fleet was visible and nothing said why; and the extra
+fleet's sessions were easy to miss below a long primary list (an idle
+background agent shows nowhere else, since it never needs you).
+
+| # | Decision | Why |
+|---|----------|-----|
+| D14 | **Machine and Organisation list every shown fleet**, one chip group per fleet, labelled `Machine · <fleet>` / `Organisation · <fleet>` with the fleet's colour. An extra fleet's orgs come from its own hub (`list_orgs` joined `FLEET_SCOPED`); its scopes follow the primary's rule (named orgs, then uncovered project owners) over its own rows. | A host alias and an org id mean something on one hub only (both hubs have a `mac`, both an org 3), so a chip is always qualified by its fleet. |
+| D15 | **A Machine / Organisation choice belongs to one fleet, the anchor.** The primary's stays in `hostFilter` / `scopeFilter` (a one-hub window is unchanged); an extra fleet's is `{fleet, alias}` / `{fleet, scope}` (`src/lib/fleet_filters.ts`). Choosing in one fleet clears both facets in every other; *Any* clears that facet everywhere. | Applying a primary org to another hub's rows has no meaning (its ids are another hub's), and "match by name" would guess. One anchor keeps the two facets from contradicting each other. |
+| D16 | **While a fleet anchors, the other fleets' rows are hidden and each says so in place**: "N sessions on <fleet> hidden: the org filter (Org: Papaya POS on rlt) applies to that fleet only · Show every fleet". The strip names the fleet too (`Org: Papaya POS · rlt`). | The live complaint was a silent empty list. Hiding is honest (the person asked for one machine or org); hiding *without a word* is not. |
+| D17 | **The fleet switcher wins**: an anchor in a fleet the switcher hides is ignored, and the panel offers only the shown fleets' chips. | The switcher is the stronger, always-visible choice; it must never show an empty fleet because of a filter set for another. |
+| D18 | **Shared filters apply to every fleet** — search (with the row's `owner/repo`), Last active, Needs you, Agent, Background agents. Work filters (tracker, status, assignee) stay the primary's. | They are not hub-relative; the work filters read the primary's trackers. |
+| D19 | **Every fleet is a group in the Sessions list.** Beside another fleet the primary's list sits under its own folding header (badge, link state, count); each extra fleet's group folds too and lists every live session, background agents marked `bg`. Opening a row is still `FleetSessionView`. | An extra fleet's idle background agent showed only below the whole primary tree; folding the primary puts every fleet a click away. |
+
+Not changed: Inbox (needs-you is never hidden by a scope, plan decision 6),
+the Hosts page, the Work view.
+
 ### Phase 3 — one id space
 
 - Re-key every store to `(fleet, id)`; the primary becomes an ordinary slot,

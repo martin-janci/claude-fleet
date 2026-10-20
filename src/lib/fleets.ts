@@ -18,13 +18,14 @@ import { listen } from '@tauri-apps/api/event';
 import { invokeCmd, type IpcError, type Result } from './result';
 import type { HubConnection } from './hub_connection';
 import { sessionIdentity, sessionIsStale, type SessionRow } from './sessions';
-import { applyPing, extraHostFilterIds, type HostPing, type HostRow } from './hosts';
+import { applyPing, type HostPing, type HostRow } from './hosts';
 import type { ProjectRow, ProjectTreeRow } from './projects';
 import { readPref, writePref } from './prefs';
 import { attentionState, byTriage, countsTowardBadge } from './attention';
 import { attentionFactsFrom } from './attention_facts';
 import { attentionIdleMinutes } from './notify';
 import type { PrFilter, PrList } from './prs';
+import type { OrgDetail } from './orgs';
 import { createListRace, type ListRace } from './row_store';
 
 /** The slot id of the launch-time fleet (`backend::fleets::PRIMARY`). */
@@ -147,6 +148,10 @@ export interface FleetRows {
   sessions: Map<number, SessionRow>;
   hosts: Map<string, HostRow>;
   projects: ProjectTreeRow[];
+  /** Its orgs as that hub lists them to this device (Phase 3a: the
+   *  sidebar's Organisation filter). Absent until read; a hub that will not
+   *  list them leaves it absent, which is not an error. */
+  orgs?: OrgDetail[];
   /** A list call failed; shown on the fleet's header. */
   error: string | null;
 }
@@ -236,52 +241,6 @@ export const visibleExtraFleets = derived(
       // A duplicate's rows are the other fleet's twice over: never shown.
       .map((f) => ({ fleet: f, rows: f.duplicate_of ? emptyRows() : ($rows.get(f.id) ?? emptyRows()) })),
 );
-
-// ── the sidebar's filters ──────────────────────────────────────────────
-
-/** The sidebar's Machine filter value for an extra fleet's host. A plain
- *  alias is this window's own host; an extra fleet's alias may name another
- *  machine here, so its value carries the fleet. */
-export function fleetHostFilterId(fleet: string, alias: string): string {
-  return `fleet:${fleet}:${alias}`;
-}
-
-/** The fleet and alias a Machine filter value names, or null for `all` and
- *  this window's own aliases. */
-export function parseFleetHostFilter(v: string): { fleet: string; alias: string } | null {
-  if (!v.startsWith('fleet:')) return null;
-  const at = v.indexOf(':', 6);
-  if (at < 0) return null;
-  return { fleet: v.slice(6, at), alias: v.slice(at + 1) };
-}
-
-/** An extra fleet's session passes the Machine filter: `all`, or the filter
- *  names this fleet's host. A filter on one of this window's own hosts
- *  shows none of the extra fleets' rows. */
-export function fleetHostPasses(filter: string, fleet: string, alias: string): boolean {
-  if (filter === 'all') return true;
-  const p = parseFleetHostFilter(filter);
-  return p !== null && p.fleet === fleet && p.alias === alias;
-}
-
-/** The Machine filter's chips for the extra fleets the fleet filter shows,
- *  each host under its fleet's label. */
-export const fleetHostFilterOptions = derived(visibleExtraFleets, ($v) =>
-  $v.flatMap(({ fleet, rows }) =>
-    [...rows.hosts.values()]
-      .filter((h) => !h.hidden)
-      .sort((a, b) => a.alias.localeCompare(b.alias))
-      .map((h) => ({ id: fleetHostFilterId(fleet.id, h.alias), fleet, host: h })),
-  ),
-);
-fleetHostFilterOptions.subscribe(($o) => extraHostFilterIds.set(new Set($o.map((o) => o.id))));
-
-/** How a Machine filter value reads: an extra fleet's host as
- *  `work · mercury`, anything else as itself. */
-export const hostFilterLabel = derived(fleetHostFilterOptions, ($o) => (v: string): string => {
-  const o = $o.find((x) => x.id === v);
-  return o ? `${o.fleet.label} · ${o.host.alias}` : v;
-});
 
 // ── applying events ─────────────────────────────────────────────────────
 
@@ -473,6 +432,7 @@ function patchRows(fleet: string, fn: (rows: FleetRows) => void, parts: readonly
       sessions: parts.includes('sessions') ? new Map(rows.sessions) : rows.sessions,
       hosts: parts.includes('hosts') ? new Map(rows.hosts) : rows.hosts,
       projects: parts.includes('projects') ? [...rows.projects] : rows.projects,
+      orgs: rows.orgs,
       error: rows.error,
     };
     fn(copy);
@@ -542,10 +502,11 @@ export async function loadFleetRows(fleet: string): Promise<void> {
   const ts = race.sessions.begin();
   const th = race.hosts.begin();
   const tp = race.projects.begin();
-  const [s, h, p] = await Promise.all([
+  const [s, h, p, o] = await Promise.all([
     invokeCmd<SessionRow[]>('list_sessions', { fleet }),
     invokeCmd<HostRow[]>('list_hosts', { fleet }),
     invokeCmd<ProjectTreeRow[]>('list_projects', { fleet }),
+    invokeCmd<OrgDetail[]>('list_orgs', { fleet }),
   ]);
   patchRows(fleet, (rows) => {
     if (s.ok && Array.isArray(s.value)) {
@@ -563,6 +524,9 @@ export async function loadFleetRows(fleet: string): Promise<void> {
     if (p.ok && Array.isArray(p.value)) {
       rows.projects = race.projects.mergeList(rows.projects, p.value, tp, (t) => t.project.id) ?? rows.projects;
     }
+    // Orgs only name the Organisation filter's chips: a hub that will not
+    // list them to this device keeps the last answer and raises nothing.
+    if (o.ok && Array.isArray(o.value)) rows.orgs = o.value;
     const failed = [s, h, p].find((r) => !r.ok) as { ok: false; error: IpcError } | undefined;
     rows.error = failed ? failed.error.message : null;
   });

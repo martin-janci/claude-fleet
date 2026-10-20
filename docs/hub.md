@@ -3917,12 +3917,6 @@ Settings → **Hub & sync** → *Fleets* → *Add a hub*: run
   you. Control's Hosts view and the status bar's host chip list the extra
   fleets' hosts' CPU, memory and disk too, and the chip follows an open
   extra fleet session's host.
-- **The sidebar's filters reach the extra fleets.** The Machine filter
-  offers each shown fleet's hosts (`work · mercury`), and search,
-  needs-you, last active, agent and background agents narrow the extra
-  fleets' groups as they do this window's list. The org scope, the work
-  filters and the Mine / Shared tabs stay with this window's own rows: they
-  read its ids, which an extra fleet's collide with.
 - **One hub added twice is spotted.** Each hub names its fleet id in the
   `/events` `ready` frame (`fleet_id`, minted at `serve` start; `null` until
   then). An extra fleet whose id is the primary's, or an earlier extra
@@ -3933,6 +3927,21 @@ Settings → **Hub & sync** → *Fleets* → *Add a hub*: run
   prompt's untrusted-sender line that is a federation address
   (`<fleet-uuid>/session/<host>/<name>`) reads `company › mac/dev-x` when
   this window shows that fleet, and opens that session.
+
+- **The sidebar's filters know every fleet** (Phase 3a). *Machine* and
+  *Organisation* list each shown fleet's machines and orgs in a group of
+  their own, under the fleet's label and colour (`Machine · Papaya POS
+  (hub)`), because a host alias or an org id means something on one hub
+  only. A choice belongs to that one fleet: picking a machine or org in one
+  fleet clears the Machine and Organisation choice of every other, and while
+  it stands every other fleet's rows are hidden **with a line saying so** —
+  "1 session on Papaya POS (hub) hidden: the org filter (Org: Papaya POS on
+  rlt) applies to that fleet only · Show every fleet". The fleet switcher
+  wins over both: a choice in a fleet it hides is ignored. Search, Last
+  active, Needs you, Agent and Background agents apply to every fleet alike.
+  Beside another fleet this window's own list sits under its fleet header,
+  which folds, and every fleet's group (background agents included) lists
+  its sessions in the Sessions list, not only in the Inbox.
 
 Limits (Phase 3): this window's own panes — the full Conversation panel,
 Files, Repo, Rewind and Fork, forms, the session's terminals — are still
