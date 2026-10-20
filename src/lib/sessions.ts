@@ -997,7 +997,10 @@ export function applyStartProgress(f: StartProgressFrame): void {
  *  follows them until it is. */
 export const startedIds = writable<ReadonlySet<number>>(new Set());
 
-function markStarting(row: Pick<SessionRow, 'id' | 'kind' | 'claude_status'> | null): void {
+/** Follow `row` until its agent is up (the start Pulse). Every create path
+ *  calls it: `newSessionAbortable` here, `startWork` / `startWorkMulti` for a
+ *  ticket start (review w12-4). */
+export function markStarting(row: Pick<SessionRow, 'id' | 'kind' | 'claude_status'> | null): void {
   if (!row || row.kind === 'shell' || row.claude_status !== null) return;
   startedIds.update((s) => new Set([...s, row.id]));
 }
@@ -1383,6 +1386,9 @@ export async function newBgSession(
   /** The session asking for this one; the new row becomes its child. Null
    *  from the desktop dialog — nobody asked for it from inside a session. */
   requesterSessionId: number | null = null,
+  /** Start in this project's checkout on the host (review w12-9); null runs
+   *  in the host's home folder, as the sidebar's ⚡ dialog does. */
+  projectId: number | null = null,
 ): Promise<Result<NewBgSessionResult>> {
   const r = await invokeCmd<NewBgSessionResult>('new_bg_session', {
     args: {
@@ -1390,6 +1396,7 @@ export async function newBgSession(
       name,
       prompt,
       requester_session_id: requesterSessionId,
+      ...(projectId != null ? { project_id: projectId } : {}),
     },
   });
   if (r.ok && r.value?.session) acceptCommandRow(r.value.session);

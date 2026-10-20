@@ -7,7 +7,7 @@
 
 import { writable } from 'svelte/store';
 import { invokeCmd, type Result } from './result';
-import { acceptCommandRow, type SessionRow } from './sessions';
+import { acceptCommandRow, markStarting, type SessionRow } from './sessions';
 import { bumpWorkChanged, type EstimateUnit, type WorkPriority } from './work';
 import { confidenceWord } from './ai_proposal';
 import { offerRuleAfterStart } from './rule_offer_toast';
@@ -224,6 +224,8 @@ export async function startWork(args: StartWorkArgs): Promise<Result<SessionRow>
   const r = await invokeCmd<SessionRow>('start_work', { args });
   if (r.ok) {
     acceptCommandRow(r.value);
+    // The new session waits on its agent like a ⌘N start (review w12-4).
+    markStarting(r.value);
     bumpWorkChanged();
     // A start can be the one that makes fleet offer a start rule (8.11).
     void offerRuleAfterStart(r.value.work?.key);
