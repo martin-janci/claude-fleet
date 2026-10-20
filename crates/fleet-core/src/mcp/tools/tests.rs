@@ -4841,7 +4841,12 @@ fn the_served_definition_budget_stays_bounded() {
     /// inside the old budget, together over it: Buildkite #36 measured the
     /// client full surface at 129,611 bytes for 152 tools (852 a tool) and
     /// the master at 123,534 bytes for 149 tools (829 a tool).
-    const BYTES_PER_TOOL: usize = 862;
+    /// Raised to 866 on 2026-10-20: the review-wave fixes (refusal rules
+    /// and accepted spellings in parameter docs, the login `profile` on
+    /// restarts, `answer` tokens) merged together measured the client full
+    /// surface at 136,678 bytes for 158 tools (865 a tool) and the master at
+    /// 129,312 bytes for 154 tools (839 a tool).
+    const BYTES_PER_TOOL: usize = 866;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()

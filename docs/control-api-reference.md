@@ -63,7 +63,7 @@ Parameters (* required): `alias`
 
 ### `agent_status`
 
-Which agent hosts (transport "agent") have a fleet-agent connected: since (unix s), version, host name, OS. Offline ones show connected=false; a call for one fails fast with E_AGENT_OFFLINE. enabled=false where no agents are accepted (the desktop).
+Which agent hosts (transport "agent") have a fleet-agent connected: since (unix s), version, host name, OS. Offline ones show connected=false; a call for one fails fast with E_AGENT_OFFLINE. duplicate (since, takeovers, peers) when two fleet-agents keep taking one host's token from each other. enabled=false where no agents are accepted (the desktop).
 
 Access: the master, a paired device or a per-host token · readonly tokens too · deadline 60 s.
 
@@ -885,7 +885,7 @@ Restart a tmux session in place (kill and recreate): for a wedged Claude REPL wh
 
 Access: the master, a paired device or a per-host token · deadline 300 s.
 
-Parameters (* required): `confirm_nonce`, `effort`, `force`, `host_alias`, `model`, `name`, `profile`, `session_id`
+Parameters (* required): `confirm_nonce`, `effort`, `force`, `host_alias`, `model`, `name`, `over_limit_ok`, `profile`, `session_id`
 
 ### `restore_host_sessions`
 
@@ -1602,6 +1602,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::pages::setting_proposals`
 - `commands::pages::decide_setting_proposals`
 - `commands::autofix::autofix_findings`
+- `commands::autofix::autofix_scan`
 - `commands::autofix::autofix_apply`
 - `commands::autofix::autofix_dismiss`
 - `commands::pages::list_guides`

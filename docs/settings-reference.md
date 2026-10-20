@@ -77,8 +77,8 @@ Scope says where a value lives: *fleet* is one value for the whole fleet, kept o
 
 | Setting | Default | Range | Scope | What it does |
 |---|---|---|---|---|
-| `autofix.auto_safe` | `true` | on / off | fleet | Fix problems whose fix only touches fleet's own files and can be undone, then tell you. Fixes that touch tokens, sign-in or running sessions always wait for you. |
-| `autofix.max_attempts` | `3` | 0–10, `0` = never | fleet | How many times one problem is fixed automatically before it waits for you. |
+| `autofix.auto_safe` | `true` | on / off | fleet | Apply fixes marked safe without asking, then tell you: refreshing fleet's files on a host, and re-adding or repairing fleet's entry in a host's ~/.claude.json (written with that host's own fleet token). Replacing a token, signing in and typing into sessions always wait for you. |
+| `autofix.max_attempts` | `3` | 0–10, `0` = never | fleet | How many times fleet tries to fix one problem by itself in 24 hours (a problem that keeps coming back counts as one) before it waits for you. |
 | `autofix.detector.operator_unbound` | `true` | on / off | fleet | Notice when Control's token belongs to nobody, which leaves it unable to see any session. |
 | `autofix.detector.host` | `true` | on / off | fleet | Notice hosts with out-of-date fleet files, silent hooks, or an old agent or Claude Code. |
 | `autofix.detector.host_mcp_entry` | `true` | on / off | fleet | Every 10 minutes, read the fleet entry in each host's ~/.claude.json (its token is hashed on the host and never sent) and notice one that is missing, points elsewhere or carries the wrong token. |

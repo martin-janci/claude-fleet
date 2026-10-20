@@ -581,7 +581,7 @@
         "level": "none"
       },
       "default": "true",
-      "help": "Fix problems whose fix only touches fleet's own files and can be undone, then tell you. Fixes that touch tokens, sign-in or running sessions always wait for you.",
+      "help": "Apply fixes marked safe without asking, then tell you: refreshing fleet's files on a host, and re-adding or repairing fleet's entry in a host's ~/.claude.json (written with that host's own fleet token). Replacing a token, signing in and typing into sessions always wait for you.",
       "key": "autofix.auto_safe",
       "kind": {
         "type": "bool"
@@ -600,7 +600,7 @@
         "level": "none"
       },
       "default": "3",
-      "help": "How many times one problem is fixed automatically before it waits for you.",
+      "help": "How many times fleet tries to fix one problem by itself in 24 hours (a problem that keeps coming back counts as one) before it waits for you.",
       "key": "autofix.max_attempts",
       "kind": {
         "max": 10,

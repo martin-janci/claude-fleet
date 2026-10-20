@@ -2288,9 +2288,16 @@ async fn an_update_now_pin_is_lifted_once_its_version_succeeds() {
     let key = TestKey::new(9);
     let (store, _) = published_store(&key).await;
     let k = keys(&key);
-    let c = client(1, TokenMode::Full, None);
+    // A pin names a live client, so pair one first.
+    let id = lock(&store)
+        .unwrap()
+        .insert_client_token("desk", "sha-desk", "full")
+        .unwrap()
+        .id;
+    let target = format!("client:{id}");
+    let c = client(id, TokenMode::Full, None);
     check(&store, &c, &desktop_req("0.3.3"), &k, NOW).unwrap();
-    update_now(&store, "desktop", "client:1", None, &k, NOW).unwrap();
+    update_now(&store, "desktop", &target, None, &k, NOW).unwrap();
     let pins = || lock(&store).unwrap().update_desired_all().unwrap();
     assert_eq!(pins().len(), 1);
     // In flight, and a success of some other version, keep it.
@@ -2312,7 +2319,7 @@ async fn an_update_now_pin_is_lifted_once_its_version_succeeds() {
     assert!(pins().is_empty(), "{:?}", pins());
 
     // The operator's own pin to the same version is not touched.
-    pin(&store, "desktop", "client:1", "0.3.4", false, None, NOW + 3).unwrap();
+    pin(&store, "desktop", &target, "0.3.4", false, None, NOW + 3).unwrap();
     report(
         &store,
         &c,
