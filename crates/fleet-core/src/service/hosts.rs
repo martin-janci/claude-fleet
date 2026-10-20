@@ -126,6 +126,11 @@ pub struct AgentHostStatus {
     pub agent_version: Option<String>,
     pub host_name: Option<String>,
     pub os: Option<String>,
+    /// Two fleet-agents keep taking this host's connection from each other
+    /// (the same token on two machines, or a leftover service beside a
+    /// reinstall): since when, how often, and which. Absent when not.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duplicate: Option<crate::agent::DuplicateAgent>,
 }
 
 /// What `agent_status` answers.
@@ -158,6 +163,7 @@ pub fn agent_status(
         .into_iter()
         .map(|alias| match live.iter().find(|a| a.alias == alias) {
             Some(a) => AgentHostStatus {
+                duplicate: registry.and_then(|r| r.duplicate(&alias)),
                 alias,
                 connected: true,
                 connected_at: Some(a.connected_at),
@@ -166,6 +172,7 @@ pub fn agent_status(
                 os: Some(a.os.clone()),
             },
             None => AgentHostStatus {
+                duplicate: registry.and_then(|r| r.duplicate(&alias)),
                 alias,
                 connected: false,
                 connected_at: None,
@@ -1105,6 +1112,25 @@ mod tests {
             (desk.connected_at, desk.agent_version.as_deref()),
             (None, None)
         );
+        assert_eq!(laptop.duplicate, None, "one agent is no duplicate");
+        let json = serde_json::to_value(laptop).unwrap();
+        assert!(json.get("duplicate").is_none(), "absent, not null: {json}");
+
+        // Review w14-1: two more agents on laptop's token take it in turn.
+        let _b = crate::agent::fake::FakeAgent::connect(
+            &reg,
+            "laptop",
+            crate::agent::fake::answer_exit(0),
+        );
+        let _c = crate::agent::fake::FakeAgent::connect(
+            &reg,
+            "laptop",
+            crate::agent::fake::answer_exit(0),
+        );
+        let report = agent_status(&store, Some(&reg)).unwrap();
+        let dup = report.hosts[1].duplicate.as_ref().expect("flagged");
+        assert_eq!(dup.takeovers, 2);
+        assert_eq!(report.hosts[0].duplicate, None);
 
         // The desktop routes nothing: the agent hosts are still listed, all
         // offline, and it says it is not accepting agents at all.

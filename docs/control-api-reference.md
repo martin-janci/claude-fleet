@@ -49,7 +49,7 @@ Parameters: `alias`
 
 ### `agent_status`
 
-Which agent hosts (transport "agent") have a fleet-agent connected: since (unix s), version, host name, OS. Offline ones show connected=false; a call for one fails fast with E_AGENT_OFFLINE. enabled=false where no agents are accepted (the desktop).
+Which agent hosts (transport "agent") have a fleet-agent connected: since (unix s), version, host name, OS. Offline ones show connected=false; a call for one fails fast with E_AGENT_OFFLINE. duplicate (since, takeovers, peers) when two fleet-agents keep taking one host's token from each other. enabled=false where no agents are accepted (the desktop).
 
 ### `agents`
 

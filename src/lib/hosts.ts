@@ -224,12 +224,15 @@ export async function discoverHosts(): Promise<Result<SshHost[]>> {
   return invokeCmd<SshHost[]>('discover_hosts');
 }
 
+/** Add a host. `transport: 'agent'` (a hub only) registers one the hub
+ *  cannot reach, without an SSH probe: its fleet-agent dials in later. */
 export async function addHost(
   alias: string,
   sshAlias: string,
+  transport?: 'agent',
 ): Promise<Result<HostRow>> {
   const r = await invokeCmd<HostRow>('add_host', {
-    args: { alias, ssh_alias: sshAlias },
+    args: transport ? { alias, ssh_alias: sshAlias, transport } : { alias, ssh_alias: sshAlias },
   });
   if (r.ok) {
     // An explicit re-add overrides any lingering tombstone from a recent
