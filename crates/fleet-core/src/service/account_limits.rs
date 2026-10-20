@@ -565,6 +565,17 @@ fn host_and_line(
     Ok((host, pause_at_pct(s), s.list_accounts()?))
 }
 
+/// Test seam: mark `alias` reachable with a Claude Code that can take work.
+#[cfg(test)]
+pub(crate) fn ready_host(s: &Store, alias: &str) {
+    s.conn_for_test()
+        .execute(
+            "UPDATE hosts SET reachable = 1, claude_version = '2.1' WHERE alias = ?1",
+            [alias],
+        )
+        .unwrap();
+}
+
 /// Test seam: put `host_alias`'s login `profile` (its own for `None`) on
 /// account `uuid`, with a stored reading of `pct` used in both windows.
 #[cfg(test)]
@@ -661,12 +672,7 @@ mod tests {
         let s = Store::open_in_memory().unwrap();
         seed_usage(&s, "mac", None, "acct-full", 95.0, NOW);
         seed_usage(&s, "htz", Some("spare"), "acct-spare", 15.0, NOW);
-        s.conn_for_test()
-            .execute(
-                "UPDATE hosts SET reachable = 1, claude_version = '2.1' WHERE alias = 'htz'",
-                [],
-            )
-            .unwrap();
+        ready_host(&s, "htz");
         let err = refuse_over_limit(&s, "mac", None, NOW).unwrap_err();
         assert!(
             err.message

@@ -249,22 +249,27 @@ async fn pause_all_stops_control_continue() {
     assert_eq!(load(&s).unwrap().state, PickState::Waiting);
 }
 
+/// Control at level 2 with its operator session `h/fleet-operator` running;
+/// returns that session's id.
+fn with_operator(s: &Store) -> i64 {
+    s.upsert_host("h").unwrap();
+    s.set_setting(settings::ORCHESTRATOR_MAX_LEVEL, "2")
+        .unwrap();
+    s.set_setting(
+        crate::service::operator::SETTING_OPERATOR_SESSION,
+        "h/fleet-operator",
+    )
+    .unwrap();
+    s.upsert_session("fleet-operator", "h", None, None, 1, 1, "running", None)
+        .unwrap()
+}
+
 #[tokio::test]
 async fn controls_stop_hook_records_the_pick_and_one_pass_sends_it_once() {
     let store = Mutex::new(Store::open_in_memory().unwrap());
     let id = {
         let s = store.lock().unwrap();
-        s.upsert_host("h").unwrap();
-        s.set_setting(settings::ORCHESTRATOR_MAX_LEVEL, "2")
-            .unwrap();
-        s.set_setting(
-            crate::service::operator::SETTING_OPERATOR_SESSION,
-            "h/fleet-operator",
-        )
-        .unwrap();
-        let id = s
-            .upsert_session("fleet-operator", "h", None, None, 1, 1, "running", None)
-            .unwrap();
+        let id = with_operator(&s);
         on_stop(&s, id, Some(CARD), 1000).unwrap();
         let p = load(&s).unwrap();
         assert_eq!((p.session_id, p.state), (id, PickState::Waiting));
@@ -317,17 +322,7 @@ async fn a_failed_send_marks_only_its_own_pick_failed() {
         let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
         {
             let s = store.lock().unwrap();
-            s.upsert_host("h").unwrap();
-            s.set_setting(settings::ORCHESTRATOR_MAX_LEVEL, "2")
-                .unwrap();
-            s.set_setting(
-                crate::service::operator::SETTING_OPERATOR_SESSION,
-                "h/fleet-operator",
-            )
-            .unwrap();
-            let id = s
-                .upsert_session("fleet-operator", "h", None, None, 1, 1, "running", None)
-                .unwrap();
+            let id = with_operator(&s);
             on_stop(&s, id, Some(CARD), 1000).unwrap();
         }
         let exec = FailAfter {

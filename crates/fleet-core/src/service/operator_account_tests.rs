@@ -2,7 +2,7 @@
 //! birth takes, and what a pass does (the switch itself is a fake).
 
 use super::*;
-use crate::service::account_limits::seed_usage;
+use crate::service::account_limits::{ready_host, seed_usage};
 use crate::service::placement::Candidate;
 
 const NOW: i64 = 1_000_000;
@@ -235,12 +235,7 @@ async fn with_no_login_left_on_its_host_control_moves_and_a_failure_is_recorded(
     let (s, id) = fleet();
     seed_usage(&s, "mac", Some("work"), "acct-work", 100.0, NOW);
     seed_usage(&s, "htz", None, "acct-htz", 5.0, NOW);
-    s.conn_for_test()
-        .execute(
-            "UPDATE hosts SET reachable = 1, claude_version = '2.1' WHERE alias = 'htz'",
-            [],
-        )
-        .unwrap();
+    ready_host(&s, "htz");
     let store = Mutex::new(s);
     let exec = FakeExec::default();
     assert!(!run_with(&store, &exec, &Mutex::new(None), NOW)

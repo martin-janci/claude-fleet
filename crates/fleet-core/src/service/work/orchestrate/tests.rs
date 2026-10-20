@@ -850,12 +850,8 @@ fn a_run_goes_to_the_best_host_inside_its_grant() {
     seed(&s, "mac", None, "acct-mac", 80.0, now);
     seed(&s, "htz", None, "acct-htz", 70.0, now);
     seed(&s, "htz", Some("spare"), "acct-spare", 5.0, now);
-    s.conn_for_test()
-        .execute(
-            "UPDATE hosts SET reachable = 1, claude_version = '2.1' WHERE alias IN ('mac', 'htz')",
-            [],
-        )
-        .unwrap();
+    crate::service::account_limits::ready_host(&s, "mac");
+    crate::service::account_limits::ready_host(&s, "htz");
     let start = start_for(&s, &fx.m, item, &Actor::Loop, Some(&g)).unwrap();
     assert_eq!(start.host_alias.as_deref(), Some("htz"));
     assert_eq!(

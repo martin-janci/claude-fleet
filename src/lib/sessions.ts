@@ -379,7 +379,7 @@ export function formatCostMicros(micros: number | null | undefined): string {
 // newest row's id goes to the next insert, whose `row_version` starts again
 // at 0. Compared across that reuse, the dead row's higher version would win
 // and the new session would stay hidden behind it.
-function sessionIsStale(incoming: SessionRow, current: SessionRow): boolean {
+export function sessionIsStale(incoming: SessionRow, current: SessionRow): boolean {
   return (
     sessionIdentity(incoming) === sessionIdentity(current) &&
     incoming.row_version !== undefined &&
@@ -388,7 +388,7 @@ function sessionIsStale(incoming: SessionRow, current: SessionRow): boolean {
   );
 }
 
-function sessionIdentity(s: SessionRow): string {
+export function sessionIdentity(s: SessionRow): string {
   return `${s.host_alias}\u0000${s.tmux_name}\u0000${s.created_at}`;
 }
 
