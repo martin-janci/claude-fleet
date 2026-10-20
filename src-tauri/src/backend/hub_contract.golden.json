@@ -463,6 +463,7 @@
       "last_reachable_at",
       "latency_ms",
       "load_1m",
+      "login_split",
       "mem_avail_kb",
       "mem_low",
       "mem_pressure",

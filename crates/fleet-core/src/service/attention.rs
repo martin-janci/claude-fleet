@@ -1161,6 +1161,7 @@ mod tests {
             mem_low: false,
             cpu_saturated: false,
             signed_out_logins: Vec::new(),
+            login_split: None,
             harnesses: None,
         };
         let snap = |uuid: &str, status: UsageOutcomeKind, five: f64, week: f64, resets: i64| {

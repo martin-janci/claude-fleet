@@ -1003,6 +1003,16 @@ fn work_items_has_held_at(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 203.
+fn hosts_has_login_split(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('hosts') WHERE name = 'login_split'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 111.
 fn hosts_has_auth_overrides(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
@@ -2281,6 +2291,11 @@ const MIGRATIONS: &[Migration] = &[
         version: 202,
         sql: include_str!("../../migrations/202_deferred_prompts_session_index.sql"),
         already_applied: None,
+    },
+    Migration {
+        version: 203,
+        sql: include_str!("../../migrations/203_host_login_split.sql"),
+        already_applied: Some(hosts_has_login_split),
     },
 ];
 

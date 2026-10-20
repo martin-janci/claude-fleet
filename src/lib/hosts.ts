@@ -102,6 +102,11 @@ export interface HostRow {
    *  `service::login_health`): `profile` null is the host's own. Absent when
    *  none, and from an older hub. */
   signed_out_logins?: SignedOutLogin[];
+  /** macOS (migration 203): the host's default Claude login is kept both in the
+   *  Keychain and in ~/.claude/.credentials.json, so the two copies log each
+   *  other out (`service::login_conflicts`). Absent when not macOS, unknown, or
+   *  from an older hub. */
+  login_split?: boolean | null;
 }
 
 /** One signed-out login on a host. */
@@ -143,6 +148,8 @@ export interface HostHealth {
   mem_pressure?: number | null;
   mem_low?: boolean;
   cpu_saturated?: boolean;
+  /** Migration 203; absent from an older hub's ping and off macOS. */
+  login_split?: boolean | null;
 }
 
 export interface SshHost {

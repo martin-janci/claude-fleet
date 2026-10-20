@@ -238,6 +238,8 @@ pub(crate) fn sample_host() -> HostRow {
         mem_low: true,
         cpu_saturated: true,
         signed_out_logins: Vec::new(),
+        // Some so the name is in the golden.
+        login_split: Some(true),
     }
 }
 
@@ -432,6 +434,9 @@ fn sample_health() -> Health {
             mem_pressure: Some(41),
             mem_low: true,
             cpu_saturated: true,
+            login_conflicts: vec![
+                fleet_core::service::login_conflicts::LoginConflict::KeychainAndFile,
+            ],
         }],
         hub: Some(sample_hub_health()),
         tunnels_mode: Some("none".into()),

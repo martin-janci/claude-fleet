@@ -11,6 +11,7 @@ import {
   healthSampleFresh,
   HEALTH_SAMPLE_FRESH_SECS,
   hostAttention,
+  loginConflicts,
   memUsedPct,
   NO_ACCOUNT_LABEL,
   newestClaudeVersion,
@@ -276,6 +277,58 @@ describe('host health helpers', () => {
     // none set, or unknown (older hub), earns no mark
     expect(hostAttention({ ...base, host: host('ok', { auth_overrides: [] }) })).toBeNull();
     expect(hostAttention({ ...base, host: host('old', { auth_overrides: null }) })).toBeNull();
+  });
+
+  it('login_conflict names two copies of one login and outranks disk_low', () => {
+    const base = {
+      hasToken: true,
+      tokensLoaded: true,
+      hook: { state: 'seen' as const, lastAt: NOW },
+      sessionCount: 1,
+      newestClaude: null,
+      now: NOW,
+      versionMaxAgeSecs: 86400,
+      diskLowPct: 90,
+      hubVersion: null,
+    };
+    // The Mac in the field: the Keychain and a file, and profile Primary on
+    // the host login's own account.
+    const mac = host('mac', {
+      login_split: true,
+      account_uuid: 'a',
+      claude_profiles: [
+        { name: 'Primary', account_uuid: 'a', email: 'mj@x' },
+        { name: 'work', account_uuid: 'b', email: 'b@x' },
+      ],
+      disk_home_free_kb: 3_600_000,
+      disk_home_total_kb: 150_000_000,
+      health_at: NOW,
+    });
+    const a = hostAttention({ ...base, host: mac });
+    expect(a?.kind).toBe('login_conflict');
+    expect(a?.title).toContain('macOS Keychain');
+    expect(a?.title).toContain('the host login and profile Primary are both signed into mj@x');
+    // One login per account, or nothing known, earns no mark.
+    const clean = host('ok', {
+      login_split: false,
+      account_uuid: 'a',
+      claude_profiles: [{ name: 'work', account_uuid: 'b' }, { name: 'new' }],
+    });
+    expect(hostAttention({ ...base, host: clean })).toBeNull();
+    expect(hostAttention({ ...base, host: host('old', {}) })).toBeNull();
+  });
+
+  it('loginConflicts groups profiles on one account without the host login', () => {
+    expect(
+      loginConflicts({
+        login_split: null,
+        account_uuid: 'a',
+        claude_profiles: [
+          { name: 'one', account_uuid: 'b' },
+          { name: 'two', account_uuid: 'b', email: 'b@x' },
+        ],
+      }),
+    ).toEqual([{ kind: 'shared_account', logins: ['one', 'two'], email: 'b@x' }]);
   });
 
   it('disk_low outranks claude_old; agent_old fires when the agent is older than the hub version', () => {

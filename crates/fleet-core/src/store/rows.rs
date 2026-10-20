@@ -1333,6 +1333,14 @@ pub struct HostRow {
     /// an older hub omits it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub signed_out_logins: Vec<SignedOutLogin>,
+    /// macOS: the host's default login is kept both in the Keychain and in
+    /// `~/.claude/.credentials.json` (migration 203, `credsplit=` of
+    /// [`crate::tmux::HOST_HEALTH_SCRIPT`]), so the two copies revoke each
+    /// other's refresh token (`service::login_conflicts`). `None`: not
+    /// macOS, never sampled, or the host could not tell. Per-field default:
+    /// an older hub omits it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub login_split: Option<bool>,
 }
 
 /// One signed-out login on a host ([`HostRow::signed_out_logins`]).
@@ -1402,6 +1410,9 @@ pub struct HostHealth {
     pub mem_low: bool,
     #[serde(default)]
     pub cpu_saturated: bool,
+    /// Migration 203. Per-field default: an older hub's ping omits it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub login_split: Option<bool>,
 }
 
 impl HostHealth {
@@ -1425,6 +1436,7 @@ impl HostHealth {
             mem_pressure: row.mem_pressure,
             mem_low: row.mem_low,
             cpu_saturated: row.cpu_saturated,
+            login_split: row.login_split,
         }
     }
 }
@@ -1455,7 +1467,7 @@ pub(super) const HOST_COLUMNS: &str =
      harnesses, provision_warning, auth_overrides, claude_profiles, cpu_count, mem_total_kb, \
      boot_at, latency_ms, worktree_kb, worktree_at, agents_on_path, \
      last_reachable_at, last_probe_error_code, last_probe_error, \
-     cpu_pct, mem_pressure, mem_low, cpu_saturated, signed_out_logins";
+     cpu_pct, mem_pressure, mem_low, cpu_saturated, signed_out_logins, login_split";
 
 /// Map a row selected with [`HOST_COLUMNS`].
 pub(super) fn map_host_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostRow> {
@@ -1533,6 +1545,8 @@ pub(super) fn map_host_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostRow>
             .get::<_, Option<String>>(41)?
             .and_then(|t| serde_json::from_str::<Vec<SignedOutLogin>>(&t).ok())
             .unwrap_or_default(),
+        // Migration 203.
+        login_split: row.get::<_, Option<i64>>(42)?.map(|v| v != 0),
     })
 }
 
