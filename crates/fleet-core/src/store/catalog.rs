@@ -448,6 +448,20 @@ impl Store {
         Ok(out)
     }
 
+    /// Every catalog secret value, global and per-host, for literal masking
+    /// in text that leaves the hub (`service::diagnostics::known_secrets`).
+    /// Empty values are left out: masking "" would be a no-op at best.
+    pub fn catalog_secret_literals(&self) -> Result<Vec<String>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT value FROM catalog_secrets WHERE value <> '' \
+             UNION SELECT value FROM catalog_secrets_host WHERE value <> ''",
+        )?;
+        let out = stmt
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(out)
+    }
+
     /// Upsert a secret's value: global (`host_alias: None`) or a per-host
     /// override.
     pub fn set_secret(

@@ -6,12 +6,14 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import {
   actionBody,
+  actionOutcome,
   actionTitle,
   agents,
   agentState,
   answerAgentAction,
   jobLine,
   pendingAgentCount,
+  recentAgentOutcomes,
   ruleLine,
   trackAgents,
   type AgentAction,
@@ -158,6 +160,21 @@ describe('agents (design step 5)', () => {
     expect(agentState('review', null)).toBe('not reported');
     expect(agentState('support', status())).toBe('off · no rule');
     expect(agentState('review', status({ jobs: [job({ state: 'running' })] }))).toBe('1 rule · 1 working · 1 waiting for you');
+  });
+
+  it('says what an approved action came to (review w08-3)', () => {
+    const task = { kind: 'work_task', payload: JSON.stringify({ action: 'task', title: 'Flaky reconnect' }) };
+    const title = actionTitle(task);
+    expect(actionOutcome({ ...task, state: 'executed', error: 'created task 42' })).toBe(`Done: ${title} — created task 42`);
+    expect(actionOutcome({ ...task, state: 'executed', error: null })).toBe(`Done: ${title}`);
+    expect(actionOutcome({ ...task, state: 'failed', error: 'task 17 created; the session did not start: x' })).toBe(
+      `Failed: ${title} — task 17 created; the session did not start: x`,
+    );
+    agents.set(status({ recent: [action({ state: 'executed', error: 'posted' })] }));
+    expect(get(recentAgentOutcomes)).toHaveLength(1);
+    // An older hub sends no `recent`.
+    agents.set(status());
+    expect(get(recentAgentOutcomes)).toEqual([]);
   });
 
   it('counts the pending actions and reads again after an answer', async () => {
