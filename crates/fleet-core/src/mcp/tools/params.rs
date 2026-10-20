@@ -281,15 +281,15 @@ pub struct RestartSessionParams {
     /// Switch login profile ("" = host login).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
+    /// The person chose to switch onto a login past `accounts.pause_at`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub over_limit_ok: Option<bool>,
     /// Relaunch under this model ("" = host default); how a Codex session changes model.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     /// Relaunch at this reasoning effort ("" = host default).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
-    /// The person chose to switch to a login past `accounts.pause_at`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub over_limit_ok: Option<bool>,
     /// Approved confirmation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confirm_nonce: Option<String>,
@@ -835,6 +835,10 @@ pub struct NewWorkerSpec {
     /// tmux name; omit to let new_session pick one.
     #[serde(default)]
     pub name: Option<String>,
+    /// Login to run under: a credential profile on the host; omit or "" for
+    /// the host's own login. A limit refusal names the one to pass here.
+    #[serde(default)]
+    pub profile: Option<String>,
     /// The person chose to start on a login past `accounts.pause_at`.
     #[serde(default)]
     pub over_limit_ok: Option<bool>,

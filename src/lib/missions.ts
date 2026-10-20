@@ -620,6 +620,9 @@ export function eventSentence(e: MissionEvent): string {
     case 'budget':
     case 'no_progress':
       return `Paused: ${String(p.why ?? '')}`;
+    case 'account_limit':
+      // The loop holds its runs (review w03-5): say why, not just the kind.
+      return p.why ? `Waiting for the account: ${String(p.why)}` : 'Waiting for the account';
     case 'integration':
       return `Tasks ${String(p.a ?? '')} and ${String(p.b ?? '')} conflict`;
     case 'note':

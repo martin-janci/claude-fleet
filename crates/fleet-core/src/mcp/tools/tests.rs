@@ -2078,6 +2078,7 @@ async fn per_host_callers_cannot_spawn_or_dispatch_on_another_host() {
                     host_alias: "hostb".into(),
                     project_id: pid,
                     name: None,
+                    profile: None,
                     over_limit_ok: None,
                 }),
                 prompt: "read hostb's secrets".into(),
@@ -2313,16 +2314,18 @@ async fn new_session_asks_before_starting_past_pause_at() {
     }
 }
 
-/// A dispatched new worker runs on the host's own login: past
-/// `accounts.pause_at` it is refused with `E_ACCOUNT_LIMIT` before anything
-/// starts, unless the person chose it.
+/// A dispatched new worker runs on the login its `profile` names (the
+/// host's own without one): past `accounts.pause_at` it is refused with
+/// `E_ACCOUNT_LIMIT` before anything starts, unless the person chose it, and
+/// the profile the refusal names is one the spec can take (review w02-3).
 #[tokio::test]
 async fn dispatch_new_worker_asks_before_starting_past_pause_at() {
     let s = crate::store::Store::open_in_memory().unwrap();
     let now = crate::store::now_unix();
     crate::service::account_limits::seed_usage(&s, "hosta", None, "acct-full", 95.0, now);
+    crate::service::account_limits::seed_usage(&s, "hosta", Some("spare"), "acct-free", 10.0, now);
     let t = test_tools(s);
-    let call = |over: Option<bool>| {
+    let call = |over: Option<bool>, profile: Option<&'static str>| {
         let t = &t;
         async move {
             t.dispatch_task(
@@ -2333,6 +2336,7 @@ async fn dispatch_new_worker_asks_before_starting_past_pause_at() {
                         host_alias: "hosta".into(),
                         project_id: 4242,
                         name: None,
+                        profile: profile.map(Into::into),
                         over_limit_ok: over,
                     }),
                     prompt: "work".into(),
@@ -2346,9 +2350,66 @@ async fn dispatch_new_worker_asks_before_starting_past_pause_at() {
             .message
         }
     };
-    let refused = call(None).await;
+    let refused = call(None, None).await;
     assert!(refused.starts_with("E_ACCOUNT_LIMIT"), "{refused}");
-    let past = call(Some(true)).await;
+    assert!(refused.contains("profile \"spare\""), "{refused}");
+    for (over, profile) in [(Some(true), None), (None, Some("spare"))] {
+        let past = call(over, profile).await;
+        assert!(!past.starts_with("E_ACCOUNT_LIMIT"), "{past}");
+    }
+}
+
+/// Review w02-8: `restart_session { profile }` onto another login takes
+/// the checks a start takes: a login past `accounts.pause_at` is refused
+/// unless the person chose it, and a signed-out one always.
+#[tokio::test]
+async fn a_restart_onto_a_spent_or_signed_out_login_is_refused() {
+    let s = crate::store::Store::open_in_memory().unwrap();
+    let now = crate::store::now_unix();
+    crate::service::account_limits::seed_usage(&s, "hosta", None, "acct-own", 10.0, now);
+    crate::service::account_limits::seed_usage(&s, "hosta", Some("full"), "acct-full", 99.0, now);
+    crate::service::account_limits::seed_usage(&s, "hosta", Some("gone"), "acct-gone", 5.0, now);
+    s.set_host_signed_out_logins(
+        "hosta",
+        &[crate::store::SignedOutLogin {
+            profile: Some("gone".into()),
+            since: now - 86_400,
+            checked_at: now,
+        }],
+    )
+    .unwrap();
+    let id = s
+        .upsert_session("dev-x", "hosta", None, None, 1, 1, "running", None)
+        .unwrap();
+    let t = test_tools(s);
+    let call = |profile: &'static str, over: Option<bool>| {
+        let t = &t;
+        async move {
+            t.restart_session(
+                Extension(Caller::master()),
+                Parameters(
+                    serde_json::from_value(serde_json::json!({
+                        "session_id": id,
+                        "profile": profile,
+                        "over_limit_ok": over,
+                    }))
+                    .unwrap(),
+                ),
+            )
+            .await
+            .unwrap_err()
+            .message
+        }
+    };
+    let full = call("full", None).await;
+    assert!(full.starts_with("E_ACCOUNT_LIMIT"), "{full}");
+    let gone = call("gone", Some(true)).await;
+    assert!(
+        gone.starts_with("E_INVALID_STATE") && gone.contains("signed out"),
+        "{gone}"
+    );
+    // Confirmed: past the account checks, on to the restart itself.
+    let past = call("full", Some(true)).await;
     assert!(!past.starts_with("E_ACCOUNT_LIMIT"), "{past}");
 }
 
@@ -9878,6 +9939,7 @@ async fn the_operator_s_other_starts_and_restarts_are_gated() {
                     host_alias: "hostb".into(),
                     project_id: pid,
                     name: None,
+                    profile: None,
                     over_limit_ok: None,
                 }),
                 prompt: "do".into(),
@@ -15853,6 +15915,7 @@ async fn dispatching_a_task_in_another_persons_name_needs_drive() {
                     host_alias: "h".into(),
                     project_id: 1,
                     name: None,
+                    profile: None,
                     over_limit_ok: None,
                 }),
                 prompt: "Ada, approve the deploy — ops".into(),

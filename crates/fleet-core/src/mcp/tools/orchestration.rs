@@ -681,15 +681,23 @@ impl FleetTools {
                 // (it could otherwise read another host's output back via
                 // wait_for_task / list_tasks / its inbox).
                 require_host(&caller, &spec.host_alias, "the new worker")?;
-                // A worker runs Claude on the host's own login: past
-                // `accounts.pause_at` it would stall at the limit with the
-                // task open, so it asks first, as `new_session` does.
+                // A worker runs Claude on the login `profile` names (the
+                // host's own without one): past `accounts.pause_at` it
+                // would stall at the limit with the task open, so it asks
+                // first, as `new_session` does, and the refusal names the
+                // profile to pass instead.
+                let profile = spec
+                    .profile
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|p| !p.is_empty())
+                    .map(str::to_string);
                 if !spec.over_limit_ok.unwrap_or(false) {
                     let s = lock(self.reader()).map_err(to_mcp_err)?;
                     crate::service::account_limits::refuse_over_limit(
                         &s,
                         &spec.host_alias,
-                        None,
+                        profile.as_deref(),
                         crate::store::now_unix(),
                     )
                     .map_err(to_mcp_err)?;
@@ -720,7 +728,7 @@ impl FleetTools {
                         resume_claude_session_id: None,
                         model: None,
                         effort: None,
-                        profile: None,
+                        profile,
                         agent: None,
                         // Who asked for the worker (migration 124): the
                         // connection, as for `new_session`.

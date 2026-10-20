@@ -13,7 +13,9 @@
   import { sessionBlocked } from './share';
   import {
     loginLabel,
+    nextReset,
     resetText,
+    switchCheck,
     switchTarget,
     usedText,
     waitingOut,
@@ -21,17 +23,24 @@
     type HostLogin,
   } from './account_limits';
   import { nowTick } from './now_tick';
+  import { accountUsage } from './account_usage_store';
+  import { get } from 'svelte/store';
   import { autoSwitchState, loadAutoSwitch, switchesAutomatically } from './account_switch';
 
   let {
     sess,
     resetsAt,
     accountName,
+    signedOut = false,
   }: {
     sess: SessionRow;
     /** When the limit resets (unix seconds); `null` when the reading has none. */
     resetsAt: number | null;
     accountName: (uuid: string) => string;
+    /** The row is blocked because its login is signed out, not at a limit
+     *  (review w03-3): Switch account only, to any signed-in login with
+     *  room; the automatic switch does not apply. */
+    signedOut?: boolean;
   } = $props();
 
   // Switching is a restart, so it takes restart's access answer.
@@ -42,7 +51,7 @@
   let busy = $state(false);
   let target = $state<HostLogin | null>(null);
 
-  const auto = $derived(switchesAutomatically($autoSwitchState));
+  const auto = $derived(!signedOut && switchesAutomatically($autoSwitchState));
   /** Where the automatic switch will take it: `undefined` while unknown,
    *  `null` when no login on the host has room. */
   let autoTarget = $state<HostLogin | null | undefined>(undefined);
@@ -76,10 +85,27 @@
   async function propose(e: MouseEvent) {
     e.stopPropagation();
     busy = true;
-    const t = await switchTarget(sess);
+    const r = await switchCheck(sess, { signedOut });
     busy = false;
-    if (t) target = t;
-    else push({ kind: 'info', message: `No other login on ${sess.host_alias} has room left` });
+    // A check that failed is an error, never "no room" (review w03-9).
+    if (!r.ok) {
+      pushError(r.error, 'Checking the other logins failed');
+      return;
+    }
+    if (r.value.target) {
+      target = r.value.target;
+      return;
+    }
+    const next = r.value.headroom
+      ? nextReset(r.value.headroom, get(accountUsage), Math.floor(Date.now() / 1000))
+      : null;
+    push({
+      kind: 'info',
+      message: `No other login on ${sess.host_alias} has room left`,
+      sub: next
+        ? `Next reset: ${loginLabel(next.login, accountName)} ${resetText(next.at)} · another host may have room`
+        : 'Another host may have room',
+    });
   }
 
   async function confirm(e: MouseEvent) {

@@ -742,6 +742,52 @@ async fn a_fire_on_an_account_over_the_line_is_skipped() {
     assert_eq!(runs_of(&f, r.id)[1].state, "running");
 }
 
+/// Review w02-6: a login fleet knows is signed out is treated like one past
+/// the line. The fallback takes the run; without one, the fire skips and
+/// says how to sign in again, instead of starting a session at `/login`.
+#[tokio::test]
+async fn a_fire_on_a_signed_out_login_goes_to_the_fallback_or_skips() {
+    let f = fx();
+    let r = new_routine(&f, input(&f));
+    reachable(&f, "mac", true);
+    reachable(&f, "nas", true);
+    lock(&f.store)
+        .unwrap()
+        .set_host_signed_out_logins(
+            "mac",
+            &[crate::store::SignedOutLogin {
+                profile: Some("work".into()),
+                since: OCT8 - 24 * H,
+                checked_at: OCT8,
+            }],
+        )
+        .unwrap();
+    due_at(&f, r.id, OCT8 + 9 * H);
+    tick_once(&f.deps, OCT8 + 9 * H).await;
+    let runs = runs_of(&f, r.id);
+    assert_eq!(runs[0].state, "skipped");
+    let why = runs[0].reason.as_deref().unwrap();
+    assert!(
+        why.contains("profile work on mac is signed out") && why.contains("/login"),
+        "{why}"
+    );
+    assert!(f.fake.started.lock().unwrap().is_empty());
+    let mut i = input(&f);
+    i.fallback_host = Some("nas".into());
+    let fb = new_routine(&f, i);
+    let ana = person(&f.store, None, f.ana);
+    let moved = run_now(&f.deps, &ana, fb.id, OCT8 + 10 * H).await.unwrap();
+    assert_eq!(moved.host_alias.as_deref(), Some("nas"));
+    assert!(
+        moved
+            .reason
+            .as_deref()
+            .unwrap()
+            .starts_with("on nas: profile work on mac is signed out"),
+        "{moved:?}"
+    );
+}
+
 /// Redesign 8.7: a routine names the account it runs as.
 #[test]
 fn a_routine_names_the_account_it_bills() {
@@ -2873,6 +2919,43 @@ async fn a_retry_held_at_a_limit_outlasts_the_retry_window() {
     let runs = runs_of(&f, r.id);
     assert_eq!(runs.len(), 2, "{runs:?}");
     assert_retry_of(&runs[1], run.id);
+}
+
+/// Review w02-10: a rate-limited retry is held only when a fire now would
+/// be skipped too. With a fallback host that can take it, the retry goes
+/// there instead of waiting for the primary's reset.
+#[tokio::test]
+async fn a_rate_limited_retry_goes_to_the_fallback_a_fire_would_use() {
+    let f = fx();
+    let mut i = input(&f);
+    i.retry_once = Some(true);
+    i.fallback_host = Some("nas".into());
+    let r = new_routine(&f, i);
+    reachable(&f, "mac", true);
+    reachable(&f, "nas", true);
+    let ana = person(&f.store, None, f.ana);
+    let run = run_now(&f.deps, &ana, r.id, OCT8).await.unwrap();
+    assert_eq!(run.host_alias.as_deref(), Some("mac"));
+    crate::service::account_limits::seed_usage(
+        &lock(&f.store).unwrap(),
+        "mac",
+        Some("work"),
+        "work",
+        93.0,
+        OCT8,
+    );
+    lock(&f.store)
+        .unwrap()
+        .insert_session_event(
+            run.session_id.unwrap(),
+            "stop_failure",
+            Some("rate_limit (429)"),
+        )
+        .unwrap();
+    tick_once(&f.deps, OCT8 + 20).await;
+    let runs = runs_of(&f, r.id);
+    assert_eq!(runs.len(), 2, "not held: {runs:?}");
+    assert_eq!(runs[1].host_alias.as_deref(), Some("nas"));
 }
 
 #[tokio::test]
