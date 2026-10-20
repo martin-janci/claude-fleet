@@ -1,5 +1,25 @@
 import { invokeCmd, type Result } from './result';
 import { mergeSession, type SessionRow } from './sessions';
+import { composerDrafts, composerTrays, rememberDraft, rememberTray } from './conversation';
+import { recallScroll, rememberScroll } from './conversation_nav';
+
+/** A move gives the session a new row id (review w13-10): what the person
+ *  left in its composer (text and files) and where they were scrolled
+ *  follow it, instead of staying under the dead id while the moved session
+ *  opens with an empty box. The source keeps its own when it is kept. */
+export function carryComposer(fromId: number, toId: number, keepSource: boolean): void {
+  if (fromId === toId) return;
+  const draft = composerDrafts.get(fromId);
+  if (draft !== undefined && !composerDrafts.has(toId)) rememberDraft(toId, draft);
+  const tray = composerTrays.get(fromId);
+  if (tray !== undefined && !composerTrays.has(toId)) rememberTray(toId, tray);
+  const snap = recallScroll(fromId);
+  if (snap && !recallScroll(toId)) rememberScroll(toId, snap);
+  if (!keepSource) {
+    composerDrafts.delete(fromId);
+    composerTrays.delete(fromId);
+  }
+}
 
 /** What a move carried besides the transcript (mirrors `carry::CarryReport`). */
 export interface CarryReport {
@@ -155,6 +175,7 @@ export async function moveSession(
   if (!r.ok) return r;
   if (r.value.kind === 'moved') {
     mergeSession(r.value.target);
+    carryComposer(sessionId, r.value.target.id, opts.keepSource ?? false);
     return { ok: true, value: r.value };
   }
   if (r.value.kind === 'waiting') {

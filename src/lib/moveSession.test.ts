@@ -10,8 +10,10 @@ vi.mock('./sessions', async (importOriginal) => {
 });
 import { invokeCmd, type Result } from './result';
 import { mergeSession, type SessionRow } from './sessions';
+import { composerDrafts, composerTrays } from './conversation';
 import {
   moveSession,
+  carryComposer,
   previewMove,
   cancelMoveWait,
   type MoveReport,
@@ -291,5 +293,32 @@ describe('cancelMoveWait', () => {
     invoked.mockResolvedValueOnce(err('E_MOVE_MIDOP', 'mid-merge'));
     const r = await cancelMoveWait(7, 'beta');
     expect(!r.ok && r.error.code).toBe('E_MOVE_MIDOP');
+  });
+});
+
+describe('moveSession carries the composer to the new row (review w13-10)', () => {
+  beforeEach(() => {
+    composerDrafts.clear();
+    composerTrays.clear();
+  });
+
+  it('the draft follows the moved session and leaves the dead id', async () => {
+    composerDrafts.set(5, 'half a prompt');
+    invoked.mockResolvedValueOnce(ok({ kind: 'moved', ...reportFixture }));
+    const r = await moveSession(5, 'beta');
+    expect(r.ok).toBe(true);
+    expect(composerDrafts.get(target.id)).toBe('half a prompt');
+    expect(composerDrafts.has(5)).toBe(false);
+  });
+
+  it('keepSource copies instead, and an existing draft on the target wins', () => {
+    composerDrafts.set(1, 'source');
+    carryComposer(1, 2, true);
+    expect(composerDrafts.get(1)).toBe('source');
+    expect(composerDrafts.get(2)).toBe('source');
+    composerDrafts.set(3, 'mine');
+    carryComposer(1, 3, false);
+    expect(composerDrafts.get(3)).toBe('mine');
+    expect(composerDrafts.has(1)).toBe(false);
   });
 });
