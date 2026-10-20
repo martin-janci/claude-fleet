@@ -15,7 +15,8 @@
   // stays literal text.
   import { onDestroy } from 'svelte';
   import { get } from 'svelte/store';
-  import { sessions } from './sessions';
+  import { isInactiveAgent, sessions } from './sessions';
+  import { insertIntoComposer } from './conversation';
   import { selectSessionExplicitly, taskLinksLoaded } from './selection';
   import { orgs as orgStore } from './orgs';
   import { openExternal } from './open_external';
@@ -43,7 +44,7 @@
   import { tablistKeys } from './tablist_keys';
   import MarkdownView from './MarkdownView.svelte';
   import TaskResultPanel from './TaskResultPanel.svelte';
-  import { workResult, type TaskResultView } from './task_result';
+  import { ASK_ABOUT_RESULT, workResult, type TaskResultView } from './task_result';
   import Icon from './kit/Icon.svelte';
   import { copyText } from './clipboard';
   import { finishesWhen } from './handoffs';
@@ -319,6 +320,21 @@
     }
   }
 
+  // Ask about result (review w09-9): the worker session is not on screen
+  // here, so it is opened first and the question lands in its composer. Not
+  // offered once that session is gone, lost or a stopped agent.
+  const askRow = $derived.by(() => {
+    const id = result?.session_id;
+    const row = id != null ? rowsById.get(id) : undefined;
+    return row && row.lost_at == null && !isInactiveAgent(row) ? row : undefined;
+  });
+  function askAboutResult() {
+    const row = askRow;
+    if (!row) return;
+    selectSessionExplicitly(row);
+    insertIntoComposer(row.id, ASK_ABOUT_RESULT);
+  }
+
   function openLink(l: WorkTaskLink) {
     const row = l.session_id != null ? get(sessions).find((r) => r.id === l.session_id) : undefined;
     if (row) selectSessionExplicitly(row);
@@ -472,10 +488,17 @@
   // every link is, which `archived` already says.
   const canArchive = (t: WorkTask): boolean => t.item_id != null || (t.counts?.ended ?? 0) > 0;
   const isArchived = (t: WorkTask): boolean => (t.item_id != null ? t.archived_at != null : !!t.archived);
+  // A bare task's Archive stamps only its ended links: while a session still
+  // runs on it the task stays unarchived, so the press would change nothing
+  // visible (review w10-13). Said on the button instead.
+  const archiveLiveBlock = (t: WorkTask): string | null =>
+    t.item_id == null && !isArchived(t) && (t.counts?.active ?? 0) > 0
+      ? 'A session is still running on it; end it to archive the task'
+      : null;
   let archiveBusy = $state(false);
   async function toggleArchived() {
     const t = task;
-    if (!t || !canArchive(t) || archiveBusy) return;
+    if (!t || !canArchive(t) || archiveLiveBlock(t) !== null || archiveBusy) return;
     archiveBusy = true;
     statusError = null;
     const r =
@@ -616,8 +639,9 @@
             class="btn"
             type="button"
             data-testid="work-task-archive"
-            disabled={archiveBlocked !== null || archiveBusy}
+            disabled={archiveBlocked !== null || archiveLiveBlock(task) !== null || archiveBusy}
             title={archiveBlocked ??
+              archiveLiveBlock(task) ??
               (isArchived(task)
                 ? 'Bring it back to the ticket lists and the Work view'
                 : 'Hide it from the ticket lists and the Work view (the Archived filter still shows it); nothing changes in its tracker')}
@@ -646,7 +670,7 @@
           <span class="chip chip--status chip--{task.status_category ?? 'todo'}" data-testid="work-task-status">{taskStatus(task)}</span>
         {/if}
         {#if task.resolution}<span class="chip">{task.resolution}</span>{/if}
-        {#if task.archived_at != null}<span class="chip" data-testid="work-task-archived-chip" title="Archived {timeAgo(task.archived_at)}">Archived</span>{/if}
+        {#if isArchived(task)}<span class="chip" data-testid="work-task-archived-chip" title={task.archived_at != null ? `Archived ${timeAgo(task.archived_at)}` : 'Archived'}>Archived</span>{/if}
         {#if task.priority === 'urgent' || task.priority === 'high'}
           <span class="chip chip--prio-{task.priority}" data-testid="work-task-priority-chip"
             ><span class="prio-dot prio-dot--{task.priority}" aria-hidden="true"></span>{priorityLabel(task.priority)}</span
@@ -1033,7 +1057,8 @@
             <TaskResultPanel
               {result}
               title={task.title ?? task.key ?? ''}
-              sessionId={result.session_id}
+              sessionId={askRow ? askRow.id : null}
+              onAsk={askAboutResult}
               canMarkDone={task.kind === 'local' && task.item_id != null && task.status_category !== 'done'}
               onOpenTask={(id) => selectedTaskId.set(`item:${id}`)}
               onChanged={() => void load(taskId)}
@@ -1041,8 +1066,9 @@
           </section>
         {/if}
 
-        <!-- The result panel replaces "Last outcome" when a result exists (design 2026-10-13 D6). -->
-        {#if !result && detail?.last_outcome}
+        <!-- The result panel replaces "Last outcome" when a result exists (design 2026-10-13 D6),
+             unless a session ended after that result: its outcome is newer news (review w09-10). -->
+        {#if detail?.last_outcome && (!result || detail.last_outcome.at > result.at)}
           {@const o = detail.last_outcome}
           <section aria-label="Last outcome">
             <h3>Last outcome</h3>

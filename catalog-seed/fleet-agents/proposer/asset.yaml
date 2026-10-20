@@ -54,6 +54,7 @@ actions:
     each: proposals
     when: { field: kind, eq: task }
     do: work_task
+    fingerprint: "{{item.fingerprint}}"
     summary: "{{item.title}}"
     body: "{{item.why}}\n\nFingerprint: {{item.fingerprint}}"
     steps: "{{item.steps}}"
@@ -61,6 +62,7 @@ actions:
     each: proposals
     when: { field: kind, eq: fix }
     do: fix_session
+    fingerprint: "{{item.fingerprint}}"
     project: "{{item.project}}"
     host: "{{item.host}}"
     summary: "{{item.title}}"
@@ -69,6 +71,7 @@ actions:
     each: proposals
     when: { field: kind, eq: setting }
     do: setting
+    fingerprint: "{{item.fingerprint}}"
     key: "{{item.settingKey}}"
     value: "{{item.settingValue}}"
     body: "{{item.title}}: {{item.why}}"
@@ -76,6 +79,7 @@ actions:
     each: proposals
     when: { field: kind, eq: recover }
     do: session_recover
+    fingerprint: "{{item.fingerprint}}"
     target: "{{item.session}}"
     host: "{{item.host}}"
     body: "{{item.title}}: {{item.why}}"
@@ -83,6 +87,7 @@ actions:
     each: proposals
     when: { field: kind, eq: issue }
     do: tracker_issue
+    fingerprint: "{{item.fingerprint}}"
     tracker: "{{issue_tracker}}"
     project: "{{issue_project}}"
     summary: "{{item.title}}"

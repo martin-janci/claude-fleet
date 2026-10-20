@@ -87,9 +87,56 @@ fn ask_first_or_the_setting_off_keeps_it_from_running() {
     assert!(!enabled_by(true, Position::Custom));
     assert!(!enabled_by(false, Position::Autopilot));
     let p = pending(4, 0);
-    assert_eq!(
-        decide(Some(&p), Some(op(4)), false, 10, 10_000),
-        Step::Wait("off")
+    assert_eq!(decide(Some(&p), Some(op(4)), false, 10, 10_000), Step::Drop);
+}
+
+/// Review w27-7: a card that ended while auto-continue was off (or the dial
+/// at Ask first) is never sent once it is turned on: the Stop hook records
+/// no pick while off, and a pass settles one already waiting.
+#[tokio::test]
+async fn a_card_from_while_it_was_off_is_not_sent_when_it_is_turned_on() {
+    let store = Mutex::new(Store::open_in_memory().unwrap());
+    {
+        let s = store.lock().unwrap();
+        s.upsert_host("h").unwrap();
+        s.set_setting(
+            crate::service::operator::SETTING_OPERATOR_SESSION,
+            "h/fleet-operator",
+        )
+        .unwrap();
+        let id = s
+            .upsert_session("fleet-operator", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+        // The dial at Within your brief, the setting off.
+        s.set_setting(settings::ORCHESTRATOR_MAX_LEVEL, "2")
+            .unwrap();
+        s.set_setting(settings::CONTROL_AUTO_CONTINUE, "false")
+            .unwrap();
+        on_stop(&s, id, Some(CARD), 1000).unwrap();
+        assert!(load(&s).is_none(), "no pick is recorded while off");
+        // A pick recorded while it was on, then it was turned off.
+        save(
+            &s,
+            Some(&Pending {
+                session_id: id,
+                ..pending(0, 1000)
+            }),
+        )
+        .unwrap();
+    }
+    let exec = Count(Mutex::new(Vec::new()));
+    let later = 1000 + 6 * 3600;
+    assert!(!run_with(&store, &exec, later).await);
+    {
+        let s = store.lock().unwrap();
+        assert_eq!(load(&s).unwrap().state, PickState::Superseded);
+        s.set_setting(settings::CONTROL_AUTO_CONTINUE, "true")
+            .unwrap();
+    }
+    assert!(!run_with(&store, &exec, later + 30).await);
+    assert!(
+        exec.0.lock().unwrap().is_empty(),
+        "the old card is never sent"
     );
 }
 

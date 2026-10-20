@@ -334,7 +334,9 @@ side are in `hub.md` → *A host that cannot be reached*; this is the contract.
   answers `503`.
 
 Tools see an agent host through the same calls as an SSH host. `agent_status`
-reports which agent hosts are connected. `add_host { transport: "agent" }`
+reports which agent hosts are connected, and flags `duplicate` on one whose
+token two fleet-agents keep taking from each other (two takeovers within
+five minutes; the hub log names both). `add_host { transport: "agent" }`
 registers one without an SSH probe. `install_agent` does the whole *Set it
 up* of `docs/hub.md` for a host the hub already reaches over SSH.
 
@@ -1514,7 +1516,10 @@ not a JSON-RPC error. The text block is the documented `E_CODE: message` line;
 `structuredContent` carries `{ code, message, details }` (for example the
 candidate rows of `E_AMBIGUOUS` or the `confirm_nonce` of
 `E_CONFIRM_REQUIRED`). JSON-RPC errors are reserved for protocol failures:
-an unknown tool name or arguments that do not match the schema.
+an unknown tool name, or arguments that do not parse (a wrong type, a missing
+required field). Most tools ignore an argument they do not take; the fan-outs
+and `kill_session` (`broadcast_prompt`, `provision_hosts`, `kill_session`)
+refuse one instead, because a misspelled filter there would widen the call.
 
 Three codes are specific to agent hosts:
 - `E_AGENT_OFFLINE`: no `fleet-agent` is connected for the host. It is
@@ -2129,9 +2134,10 @@ automatically on app start.
   (`send_prompt`, `run_prompt`, `queue_prompt`, and `dispatch_task` to a
   worker that already exists: review round 15, F21 — nothing an LLM composes
   reaches a session without a person; since the 2026-10-17 review's F2 the
-  autonomy position lets those four through into a live session the operator
-  started or briefed at "Within your brief", and a Claude start inside a
-  running mission's grant at "Autopilot" — `guard::operator_must_confirm`),
+  autonomy position lets those four through at "Within your brief" and
+  "Autopilot" into a live session the operator started or briefed and still
+  follows — not muted, merged, done or quiet; a start always asks —
+  `guard::operator_must_confirm`),
   and every tool above return
   `E_CONFIRM_REQUIRED` until a person approves them: on the desktop in its
   dialog or Control's cards, and on a hub from a fleet admin's paired device,

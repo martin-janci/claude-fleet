@@ -293,3 +293,51 @@ async fn a_read_error_leaves_the_cursor_and_the_next_pass_still_sends() {
     assert!(run_with(&w.store, &fake, now).await.sent);
     assert_eq!(fake.sent.lock().unwrap().len(), 1);
 }
+
+/// Review w04-11: a steer from the Mission room makes the mission one of
+/// Control's threads, so the feed tells Control what happens on it next.
+#[test]
+fn a_steer_follows_its_mission() {
+    let w = world();
+    let m = w
+        .store
+        .lock()
+        .unwrap()
+        .create_mission(
+            &crate::store::NewMission {
+                name: "m",
+                goal: "g",
+                ..Default::default()
+            },
+            "fleet",
+        )
+        .unwrap()
+        .id;
+    assert!(!w
+        .store
+        .lock()
+        .unwrap()
+        .handed_off_mission_ids()
+        .unwrap()
+        .contains(&m));
+    let args = |thread: &str, id: i64| JournalArgs {
+        action: Some("follow".into()),
+        thread: Some(thread.into()),
+        id: Some(id),
+        text: Some("pause it when wave 2 finishes".into()),
+    };
+    assert!(call(&w.store, &args("mission", m), 5).is_ok());
+    let s = w.store.lock().unwrap();
+    assert!(s.handed_off_mission_ids().unwrap().contains(&m));
+    let h = &s.list_control_handoffs(1).unwrap()[0];
+    assert_eq!((h.tool.as_str(), h.mission_id), ("steer", Some(m)));
+    drop(s);
+    assert_eq!(
+        call(&w.store, &args("session", 1), 5).unwrap_err().code,
+        codes::E_INVALID
+    );
+    assert_eq!(
+        call(&w.store, &args("mission", 9_999), 5).unwrap_err().code,
+        codes::E_NOTFOUND
+    );
+}

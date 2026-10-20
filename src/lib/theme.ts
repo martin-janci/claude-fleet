@@ -4,7 +4,8 @@ import { ACCENTS, defaultPlace, orbitPalette, sunHeight, sunTimes, type AccentId
 
 /**
  * The theme (dynamic day/night, "Mission HUD" look). `sun` follows the sun
- * where you are: light while it is up, dark while it is down, drifting
+ * in your time zone (palette.ts `defaultPlace`: the zone's meridian at a fixed
+ * latitude, not your location): light while it is up, dark while it is down, drifting
  * through golden hour, blue hour and night in between (palette.ts). `auto`
  * follows the system's light/dark setting; `light` and `dark` hold noon and
  * a mid-night. Every mode is painted by the palette engine, so Contrast and
@@ -15,6 +16,24 @@ export type Theme = 'sun' | 'auto' | 'light' | 'dark';
 const KEY = 'cf:theme';
 const ORDER: Theme[] = ['sun', 'auto', 'light', 'dark'];
 const isTheme = (v: unknown): v is Theme => ORDER.includes(v as Theme);
+
+/** Each theme's name as Settings and the command palette show it. */
+export const THEMES = [
+  { id: 'sun', label: 'Sun' },
+  { id: 'auto', label: 'System' },
+  { id: 'light', label: 'Light' },
+  { id: 'dark', label: 'Dark' },
+] as const satisfies readonly { id: Theme; label: string }[];
+
+export const themeLabel = (t: Theme): string => THEMES.find((x) => x.id === t)!.label;
+
+/**
+ * The last palette `paint()` wrote, which public/theme-boot.js replays in
+ * <head> before any stylesheet paints, so a launch opens on the engine's
+ * colours instead of flashing app.css's first. Keep the key and shape in
+ * step with that file.
+ */
+export const BOOT_KEY = 'cf:theme-paint';
 
 export type ContrastPref = 'system' | ContrastLevel;
 export const CONTRAST_PREFS: readonly ContrastPref[] = ['system', 'soft', 'std', 'high'];
@@ -60,6 +79,16 @@ export function resolveContrast(pref: ContrastPref, systemMore: boolean): Contra
 }
 
 let painted: Record<string, string> = {};
+
+/** The tokens the boot snapshot holds (what theme-boot.js may have set). */
+function bootVars(): Record<string, string> {
+  try {
+    const v = JSON.parse(localStorage.getItem(BOOT_KEY) ?? '{}')?.vars;
+    return v && typeof v === 'object' ? v : {};
+  } catch {
+    return {};
+  }
+}
 let lastDark: boolean | null = null;
 let fadeTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -79,12 +108,22 @@ export function paint(now: Date = new Date()): void {
     if (fadeTimer) clearTimeout(fadeTimer);
     fadeTimer = setTimeout(() => root.removeAttribute('data-theme-fade'), 1200);
   }
+  // The first paint also clears what theme-boot.js replayed from an older
+  // engine that this one no longer writes.
+  const before = lastDark === null ? { ...bootVars(), ...painted } : painted;
   lastDark = dark;
   root.setAttribute('data-theme', dark ? 'dark' : 'light');
+  for (const name of Object.keys(before)) if (!(name in next)) root.style.removeProperty(`--${name}`);
   for (const [name, value] of Object.entries(next)) {
     if (painted[name] !== value) root.style.setProperty(`--${name}`, value);
   }
   painted = next;
+  try {
+    const snap = JSON.stringify({ theme: dark ? 'dark' : 'light', vars: next });
+    if (localStorage.getItem(BOOT_KEY) !== snap) localStorage.setItem(BOOT_KEY, snap);
+  } catch {
+    /* no storage: the next launch paints app.css first, as before */
+  }
 }
 
 export function applyTheme(next: Theme): void {

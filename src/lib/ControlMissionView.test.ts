@@ -36,7 +36,7 @@ beforeEach(() => {
 });
 
 describe('ControlMissionView', () => {
-  it('lists the missions, and one opens with its graph; Open in Work leaves for Work', async () => {
+  it('lists the missions, and one opens with its graph; Open mission room leaves for its room', async () => {
     render(ControlMissionView);
     await fireEvent.click(await screen.findByTestId('control-mission-row'));
     expect(get(controlMission)).toBe(5);
@@ -45,7 +45,19 @@ describe('ControlMissionView', () => {
     destination.set('control');
     await fireEvent.click(screen.getByTestId('control-mission-work'));
     expect(get(missionOpenRequest)).toEqual({ id: 5 });
+    expect(screen.getByTestId('control-mission-work').textContent).toContain('Open mission room');
+    expect(screen.queryByTestId('control-mission-wait')).toBeNull();
     await fireEvent.click(screen.getByTestId('control-mission-back'));
     expect(get(controlMission)).toBeNull();
+  });
+
+  it('a mission waiting on the person says on what and offers Answer (w04-8)', async () => {
+    const waiting = { ...mission, waiting_on: { reason: 'sign_grant' } };
+    inv.mockImplementation(async (cmd: string) => (cmd === 'work_mission' ? { mission: waiting, items: [], graph: { nodes: [], waves: 0 } } : null));
+    controlMission.set(5);
+    render(ControlMissionView);
+    expect((await screen.findByTestId('control-mission-wait')).textContent).toContain('Grant needs signing');
+    await fireEvent.click(screen.getByTestId('control-mission-answer'));
+    expect(get(missionOpenRequest)).toEqual({ id: 5 });
   });
 });

@@ -1437,6 +1437,51 @@ impl Store {
         self.emit_session(id)
     }
 
+    /// Settle every safe-kill request stamped before `cutoff` whose session
+    /// is not mid-turn (`claude_status` other than `working`) as `failed`
+    /// with `detail`, so the person can retry it (review w27-5). Returns the
+    /// ids settled. Emits session_updated for each.
+    pub fn expire_safe_kill_requests(
+        &self,
+        cutoff: i64,
+        detail: &str,
+    ) -> Result<Vec<i64>, rusqlite::Error> {
+        let ids: Vec<i64> = self
+            .conn
+            .prepare(
+                "UPDATE sessions SET safe_kill_state = 'failed', safe_kill_detail = ?2 \
+                 WHERE safe_kill_state = 'requested' \
+                   AND COALESCE(safe_kill_requested_at, 0) < ?1 \
+                   AND COALESCE(claude_status, '') <> 'working' \
+                 RETURNING id",
+            )?
+            .query_map(rusqlite::params![cutoff, detail], |r| r.get(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for &id in &ids {
+            self.emit_session(id)?;
+        }
+        Ok(ids)
+    }
+
+    /// Drop a safe-kill request that is still waiting for its marker (a
+    /// relaunched pane will never print it); a `failed` one is left for the
+    /// person to resolve. Emits session_updated when it changed a row.
+    pub fn clear_requested_safe_kill(&self, id: i64) -> Result<bool, rusqlite::Error> {
+        let n = self.conn.execute(
+            "UPDATE sessions
+                SET safe_kill_state=NULL,
+                    safe_kill_nonce=NULL,
+                    safe_kill_detail=NULL,
+                    safe_kill_requested_at=NULL
+              WHERE id=?1 AND safe_kill_state='requested'",
+            rusqlite::params![id],
+        )?;
+        if n > 0 {
+            self.emit_session(id)?;
+        }
+        Ok(n > 0)
+    }
+
     /// Transition a session back to running (clears `lost_at`). Called by the
     /// `recreate_session` flow after `new_session` rebuilds the tmux session on
     /// the host — for both ghost and live (RAM/wedged) recreates.

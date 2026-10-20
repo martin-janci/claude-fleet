@@ -320,6 +320,10 @@ async fn run<R: Runtime>(
 ) -> Result<ExitCode, String> {
     if cmd == "clear" {
         u.clear();
+        // A long-running updater holds the old state in memory: leave it a
+        // marker, and wake it the way `update_now` does.
+        u.request_clear()?;
+        let _ = std::fs::write(u.cfg.data_mount.join(common::UPDATE_NOW_FILE), b"");
         log!("cleared; the next pass checks again");
         return Ok(ExitCode::SUCCESS);
     }
@@ -334,6 +338,9 @@ async fn run<R: Runtime>(
         u.cfg.soak.as_secs()
     );
     if cmd == "once" {
+        // Run from fleet-updater.path too: take the trigger that started
+        // this pass, or the path unit would start it again at once.
+        common::take_trigger(&u.cfg.data_mount.join(common::UPDATE_NOW_FILE));
         let (o, _) = u.tick().await;
         return Ok(match o {
             Outcome::Failed(_) | Outcome::RollbackFailed(_) | Outcome::RolledBack { .. } => {

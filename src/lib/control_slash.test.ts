@@ -9,6 +9,7 @@ import {
   commandReceipts,
   debugOutcome,
   proposeOutcome,
+  queuedTail,
   debugPoll,
   parseControlCommand,
   parseDue,
@@ -288,6 +289,15 @@ describe('/debug', () => {
     expect(parseControlCommand('/debug 30m')).toEqual({ ok: true, command: { cmd: 'debug', scope: { minutes: 30 } } });
     expect(parseControlCommand('/debug part:kernel x')).toMatchObject({ ok: false });
     expect(parseControlCommand('/debug 8d')).toMatchObject({ ok: false });
+    // Review w08-13: the scope comes from the leading words only.
+    expect(parseControlCommand('/debug why does the 2h backup fail @htz')).toEqual({
+      ok: true,
+      command: { cmd: 'debug', request: 'why does the 2h backup fail @htz' },
+    });
+    expect(parseControlCommand('/debug 6h why does the 2h backup fail')).toEqual({
+      ok: true,
+      command: { cmd: 'debug', request: 'why does the 2h backup fail', scope: { minutes: 360 } },
+    });
   });
 
   it('queues the self debug agent and shows its findings worst first', async () => {
@@ -381,6 +391,36 @@ describe('/propose', () => {
     expect(calls('agents_fleet')[0]).toMatchObject({ action: 'run', id: 22, request: 'the hub' });
     expect(r.line).toBe('Two repeats this week. 1 proposal waits in the Inbox.');
     expect(r.rows).toEqual([{ label: 'setting', text: 'Raise the probe timeout · seen 7 times', level: 'warn' }]);
+  });
+
+  it('counts what was queued, not what was answered (review w08-9)', () => {
+    const result = (actions: unknown[]) =>
+      JSON.stringify({
+        answer: { summary: 'S.', proposals: [{ title: 'a', kind: 'setting' }, { title: 'b', kind: 'task' }] },
+        actions,
+      });
+    const remember = { id: 'remember', do: 'record', state: 'pending' };
+    // At watch nothing reaches the Inbox.
+    expect(
+      proposeOutcome({ state: 'done', error: null, result: result([remember, { id: 'tune', do: 'setting', state: 'kept' }, { id: 'task', do: 'work_task', state: 'kept' }]) }).line,
+    ).toBe('S. 2 proposals kept, not queued: the rule is at watch.');
+    // A skipped setting is not counted, and says why; the memory row is not a proposal.
+    expect(
+      proposeOutcome({
+        state: 'done',
+        error: null,
+        result: result([remember, { id: 'task', do: 'work_task', state: 'pending' }, { id: 'tune', state: 'skipped', why: 'the setting is not one an agent may propose' }]),
+      }).line,
+    ).toBe('S. 1 proposal waits in the Inbox. Skipped 1: the setting is not one an agent may propose.');
+    expect(queuedTail(JSON.stringify({ actions: [{ do: 'work_task', state: 'approved' }] }))).toBe('1 goes ahead on its own (the rule is at act).');
+    expect(queuedTail('{}')).toBeNull();
+    // /debug says what self-debug queued, too.
+    const job = {
+      state: 'done',
+      error: null,
+      result: JSON.stringify({ answer: { summary: 'One leak.', findings: [{ title: 'Leak' }] }, actions: [{ do: 'work_task', state: 'pending' }] }),
+    };
+    expect(debugOutcome(job).line).toBe('One leak. 1 proposal waits in the Inbox.');
   });
 
   it('says where to add the proposer, and reads a quiet day', async () => {

@@ -1,6 +1,7 @@
 # fleet-updater without a long-running container holding the Docker socket:
 # one pass (`fleet-updater once`) from a timer, the socket mounted only for
-# that run. docs/updates.md → fleet-updater → "From a systemd timer".
+# that run. docs/updates.md → fleet-updater → "Without a long-running container".
+# fleet-updater.path starts a pass at once on `update_admin update_now`.
 #
 #   sudo cp fleet-updater.service fleet-updater.timer /etc/systemd/system/
 #   # set WorkingDirectory to this compose directory, then:

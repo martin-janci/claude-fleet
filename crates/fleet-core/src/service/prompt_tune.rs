@@ -77,6 +77,10 @@ pub struct TuneAnswer {
     /// The rewrite is the draft as it was: nothing worth changing.
     #[serde(default)]
     pub unchanged: bool,
+    /// The model ran past the target's limit and the rewrite was cut there
+    /// (ending in `…`): the client warns before it is used as-is.
+    #[serde(default)]
+    pub cut: bool,
     /// Who rewrote it (`haiku`), as the Drafted label names it.
     pub model: String,
     /// Where it ran.
@@ -265,8 +269,9 @@ fn redact_keeping_draft(text: &str, draft: &str) -> String {
 /// around the rewrite is stripped; control characters other than newline
 /// and tab are refused. Redacted (except for values `draft` itself holds)
 /// and capped at `max_chars` (at most [`PROMPT_MAX_CHARS`]), saying so in
-/// the notes when it was cut; `None` when no rewrite is left.
-pub fn parse_reply(reply: &str, draft: &str, max_chars: usize) -> Option<(String, String)> {
+/// the notes and the third value when it was cut; `None` when no rewrite is
+/// left.
+pub fn parse_reply(reply: &str, draft: &str, max_chars: usize) -> Option<(String, String, bool)> {
     let reply = reply.trim();
     let json = reply
         .find('{')
@@ -322,7 +327,7 @@ pub fn parse_reply(reply: &str, draft: &str, max_chars: usize) -> Option<(String
             "The rewrite ran past the {max}-character limit and was cut there."
         ));
     }
-    Some((prompt, notes))
+    Some((prompt, notes, over))
 }
 
 /// Ask `model` to tune `req` for `target`.
@@ -348,7 +353,7 @@ pub async fn tune(
     }
     let context = context_text(target, req);
     let done = model.complete(TUNE_INSTRUCTION, &context).await?;
-    let (prompt, notes) = parse_reply(&done.text, &req.draft, target.max_chars)
+    let (prompt, notes, cut) = parse_reply(&done.text, &req.draft, target.max_chars)
         .ok_or_else(|| IpcError::new(codes::E_CLAUDE_CLI, "the tuner run proposed no prompt"))?;
     let unchanged = prompt.trim() == req.draft.trim();
     Ok((
@@ -356,6 +361,7 @@ pub async fn tune(
             prompt,
             notes,
             unchanged,
+            cut,
             model: model.model(),
             host_alias: model.host(),
             at: crate::store::now_unix(),
@@ -421,6 +427,7 @@ pub async fn tune_for_session(
         host: row.host_alias.clone(),
         profile: profile.filter(|p| !p.is_empty()),
         model,
+        what: "the tune",
     };
     let (answer, usage) = tune(&model, &target, req).await?;
     book(store, &answer, usage.as_ref(), row.org_id);
@@ -468,6 +475,7 @@ pub async fn tune_for_routine(
         host: alias.to_string(),
         profile: input.profile.clone().filter(|p| !p.is_empty()),
         model,
+        what: "the tune",
     };
     let req = TuneRequest {
         draft: input.prompt.clone(),

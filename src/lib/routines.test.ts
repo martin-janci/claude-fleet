@@ -45,6 +45,9 @@ import {
   type RoutineRow,
 } from './routines';
 import { inboxCount } from './inbox';
+import { accountsPageRequest } from './account_pill';
+import { hostsViewRequest } from './app_views';
+import { hosts } from './hosts';
 import { sessions } from './sessions';
 import { selectedSession } from './selection';
 
@@ -156,6 +159,14 @@ describe('the Inbox', () => {
     // The definition opens in Automation's Routines tab (8.4).
     expect(get(destination)).toBe('automation');
     expect(get(automationTab)).toBe('routines');
+  });
+
+  it("Fix opens the routine's own account and the run's host (review w03-6)", () => {
+    hosts.set([{ alias: 'mac', account_uuid: 'acct-own', claude_profiles: [{ name: 'work', account_uuid: 'acct-work', email: null }] } as never]);
+    expect(fixRoutine(failed({ routine: routine({ profile: 'work' }), fix: { action: 'accounts' } as never }))).toBe('accounts');
+    expect(get(accountsPageRequest)).toBe('acct-work');
+    expect(fixRoutine(failed({ run: { ...failed().run, host_alias: 'nas' }, fix: { action: 'host' } as never }))).toBe('host');
+    expect(get(hostsViewRequest)).toEqual({ host: 'nas' });
   });
 
   it('keeps the list fresh, and stops asking an older hub', async () => {
@@ -314,7 +325,7 @@ describe('automation guards in words (G3.8)', () => {
     expect(autonomyWords(undefined)).toBe('L2 · pushes and opens PRs');
     expect(onFailureWords({ retry_once: true })).toMatch(/^Retry once/);
     expect(startedByWords({ trigger: 'cron', trigger_ref: 'retry:4' })).toBe('its schedule, retried once after run 4 failed');
-    expect(startedByWords({ trigger: 'event', trigger_ref: 'pr:2:9' })).toBe('an event (pr:2:9)');
+    expect(startedByWords({ trigger: 'event', trigger_ref: 'pr:2:9' })).toBe('an event on a pull request');
     expect(fixLabel(undefined)).toBe('Fix');
   });
 });

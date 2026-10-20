@@ -243,15 +243,20 @@
   // background run are Claude Code's own paths, so they keep it.
   let chosenAgent = $state<PickerAgent>('claude');
   const agentOptions = $derived(
-    agentChoices(
-      chosenHost,
-      $hosts.find((h) => h.alias === chosenHost),
-    ).map((c) =>
+    hostAgentChoices().map((c) =>
       c.agent !== 'claude' && c.enabled && ticket
         ? { ...c, enabled: false, reason: `A ticket starts with Claude Code`, tag: null }
         : c,
     ),
   );
+  /** The agents the host the session starts on has: on an extra fleet, its
+   *  host's (review w01-2). A function so it may read the fleet picker's
+   *  state, declared further down. */
+  function hostAgentChoices() {
+    return fleetChoice
+      ? agentChoices(fleetHost, fleetHosts.find((h) => h.alias === fleetHost))
+      : agentChoices(chosenHost, $hosts.find((h) => h.alias === chosenHost));
+  }
   $effect(() => {
     const next = keepAgent(untrack(() => chosenAgent), agentOptions);
     untrack(() => {
@@ -911,6 +916,13 @@
       friendly_name: friendlyName.trim() || null,
       new_worktree: fleetBranch.trim() ? finalizeBranchSlug(slugifyBranch(fleetBranch.trim())) : null,
       kind: chosenKind,
+      // The agent, model and effort picked above go to that hub as they go
+      // to this one (review w01-2). The login does not: this window's
+      // accounts are its own hub's, so the fleet's host uses its own.
+      start_command: chosenKind === 'shell' ? startCommand.trim() || null : null,
+      model: runsClaude && chosenModel ? chosenModel : runsCodex && codexModel ? codexModel : null,
+      effort: runsClaude && chosenEffort ? chosenEffort : runsCodex && codexEffort ? codexEffort : null,
+      agent: chosenKind === 'work' && chosenAgent !== 'claude' ? chosenAgent : null,
     });
     busy = false;
     if (!r.ok) {
@@ -1699,7 +1711,10 @@
             {/each}
           </select>
         </div>
-        {#if hostLogins && hostLogins.length > 0 && !otherProfile}
+        {#if fleetChoice}
+          <!-- This window's logins are its own hub's (review w01-2). -->
+          <p class="work-note" data-testid="fleet-login-note">Uses the login {fleetChoice.fleet.label} has on that host.</p>
+        {:else if hostLogins && hostLogins.length > 0 && !otherProfile}
           <div class="launch-field">
             <label for="launch-account">Account</label>
             <select

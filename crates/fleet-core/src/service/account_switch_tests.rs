@@ -257,6 +257,7 @@ fn the_pick_is_the_least_used_and_the_hosts_own_wins_a_tie() {
         profile: p.map(str::to_string),
         account_uuid: p.unwrap_or("own").to_string(),
         used_pct: Some(u),
+        signed_out: false,
     };
     let c = [l(None, 20.0), l(Some("a"), 20.0), l(Some("b"), 30.0)];
     assert_eq!(pick(&c).unwrap().profile, None);

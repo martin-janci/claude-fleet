@@ -61,3 +61,17 @@ export function agentContext(input: AgentContextInput): AgentContext | null {
   }
   return null;
 }
+
+/** The context of a mission thread open in Control (review w04-13): the
+ *  chip names the mission and the prefix is the Mission room's steer
+ *  prefix, so "pause it" reaches Control as being about that mission and
+ *  not about whichever session was selected before. */
+export function missionContext(m: { id: number; name: string }): AgentContext {
+  return { chipLabel: `Mission ${m.name}`, prefix: steerPrefix(m) };
+}
+
+/** What rides in front of a message about a mission, so Control knows
+ *  which one (the Mission room's Steer and a mission thread in Control). */
+export function steerPrefix(m: { id: number; name: string }): string {
+  return `About mission #${m.id} "${m.name}":`;
+}

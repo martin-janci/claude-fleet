@@ -4,7 +4,15 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import type { Wizard } from './wizards';
-import { addHostTarget, addHostWizard, runAddHost, TYPED } from './add_host_wizard';
+import {
+  addHostTarget,
+  addHostWizard,
+  agentSetupCommands,
+  hubAddHostWizard,
+  runAddHost,
+  TYPED,
+  VIA_AGENT,
+} from './add_host_wizard';
 import type { SetupCheck } from '../add_host_wizard';
 import { hubStatus, STANDALONE } from '../hub';
 
@@ -109,5 +117,32 @@ describe('add_host as a dialog', () => {
     const r = await runAddHost({ pick: 'mercury' });
     expect(r.ok).toBe(false);
     expect(inv.mock.calls.map((c) => c[0])).toEqual(['add_host']);
+  });
+
+  // Review w14-10: the paired form says what really runs.
+  it('the paired wizard names the hub’s probe, not this machine’s checks', () => {
+    const w = hubAddHostWizard([]);
+    expect(w.spec.intro).toContain('The hub connects over its own SSH');
+    expect(w.spec.intro).not.toContain('tmux');
+    expect(w.spec.submit).toBe('Add');
+    expect(fieldOf(w, 'via')?.value).toBe('ssh');
+    // The chat's spec is untouched.
+    expect(fieldOf(addHostWizard([]), 'via')).toBeUndefined();
+  });
+
+  // Review w14-2: a host the hub cannot reach is added for fleet-agent,
+  // with no probe.
+  it('paired, "the hub can’t reach it" adds an agent host without a probe', async () => {
+    hubStatus.set({ ...STANDALONE, remote: true, url: 'https://fleet.example.com' });
+    inv.mockImplementation(async (cmd: string) => (cmd === 'add_host' ? { alias: 'laptop' } : null));
+    const r = await runAddHost({ pick: TYPED, ssh_alias: 'laptop', alias: '', via: VIA_AGENT });
+    expect(r.ok).toBe(true);
+    expect(inv.mock.calls).toEqual([
+      ['add_host', { args: { alias: 'laptop', ssh_alias: 'laptop', transport: 'agent' } }],
+    ]);
+    expect(agentSetupCommands('laptop', 'https://fleet.example.com')).toEqual({
+      token: 'fleet-hub agent-token laptop',
+      install: 'fleet-agent install --user --hub https://fleet.example.com --token-file -',
+    });
   });
 });

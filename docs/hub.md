@@ -219,8 +219,8 @@ docker compose exec fleet-hub fleet-hub --version    # fleet-hub 0.2.41
 docker compose images fleet-hub                      # the tag and image id in use
 ```
 
-Over the network, and only with the master token, `fleet_health` reports the
-same string in its `version` field (see the `curl` under *Setup* above). To see
+Over the network, with any client token (a readonly one is enough),
+`fleet_health` reports the same string in its `version` field (see the `curl` under *Setup* above). To see
 which exact image — not just which version — is running:
 
 ```bash
@@ -2591,7 +2591,12 @@ session card's `is_controller`, `tags`, `turn_seq`, `safe_kill_state`,
 `started_at`, `last_turn_at`, `last_stop_at`, `usage_cost_micros`,
 `usage_model`, plus the work graph's `work` (the row's primary work link)
 and the PR fact, CI check count and Switch account's `pr_url`,
-`pr_evidence` and `claude_profile`. The first cut — the list's sixteen alone — measured
+`pr_evidence` and `claude_profile`, and the Pinned section's `pinned_at`,
+Done-unread's `last_viewed_at`, Control's threads' `origin` / `origin_ref`,
+`agent`, `lost_reason`, `form_draft`, `parent_session_id` and `worktree_id`
+(review wave 24: the phone's re-list replaces its rows with this view, so a
+column it reads but the view drops resets on every reconnect;
+`views.rs` lists them all). The first cut — the list's sixteen alone — measured
 **46 990 → 16 733 B of JSON (−64 %), 7 712 → 3 023 B gzipped** on the same
 44-session fleet; the card's nine are short scalars and do not change that
 picture. The first cut left the card's columns out, and a phone that
@@ -4108,8 +4113,8 @@ deliberately.
   since review round 15 (F21), everything it WRITES into a session as well:
   `send_prompt`, `run_prompt`, `queue_prompt`, and `dispatch_task` to an
   existing worker (the 2026-10-17 review's F2: the autonomy position
-  pre-approves these into a session the operator started or briefed, and a
-  start inside a mission's grant at Autopilot; see `docs/status.md`). An
+  pre-approves these into a session the operator started or briefed and
+  still follows; its starts always ask; see `docs/status.md`). An
   approved call runs on the hub itself and the operator is told in a
   `[fleet] approved: …` note (F1). The toggle lifts none of it; a caller that is not the
   operator client is ungated for the prompts (they are `confirm: false`). On a hub

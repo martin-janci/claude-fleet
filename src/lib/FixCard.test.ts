@@ -20,6 +20,7 @@ import {
   fixedRecently,
   loadFindings,
   operatorFinding,
+  autoWords,
   stateWords,
   subjectWords,
   type Finding,
@@ -102,6 +103,28 @@ describe('the findings store', () => {
     expect(subjectWords('session:12')).toBe('session #12');
     expect(stateWords(finding({ state: 'apply_failed', last_error: 'boom' }))).toBe('The fix did not work: boom');
     expect(stateWords(finding())).toBeNull();
+  });
+});
+
+describe('autoWords (review w09-4)', () => {
+  const safe = { summary: 's', changes: [], safety: 'safe' as const, reversible: true, auto: true };
+  it('says when fleet tries again, or that it stopped', () => {
+    expect(autoWords(finding(), 1000)).toBeNull();
+    expect(autoWords(finding({ fix: safe }), 1000)).toContain('unless automatic fixes are off');
+    expect(autoWords(finding({ fix: safe, auto_runs: true, auto_next_at: 1000 }), 1000)).toContain('next check');
+    expect(autoWords(finding({ fix: safe, state: 'apply_failed', attempts: 1, auto_runs: true, auto_next_at: 1600 }), 1000)).toBe(
+      'Fleet tries this fix again by itself in ~10 min.',
+    );
+    expect(autoWords(finding({ fix: safe, state: 'apply_failed', attempts: 3, auto_runs: false }), 1000)).toBe(
+      'Fleet tried this fix 3 times and stopped trying by itself; fix it here.',
+    );
+    expect(autoWords(finding({ fix: safe, auto_runs: false }), 1000)).toContain('automatic fixes are off');
+  });
+
+  it('shows on the card without opening Details', () => {
+    render(FixCard, { props: { finding: finding({ fix: safe, state: 'apply_failed', attempts: 3, auto_runs: false }) } });
+    expect(screen.getByTestId('fix-card-auto').textContent).toContain('3 times');
+    expect(screen.queryByText(/unless automatic fixes are off/)).toBeNull();
   });
 });
 

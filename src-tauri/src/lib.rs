@@ -658,6 +658,7 @@ pub fn run() {
             commands::pages::setting_proposals,
             commands::pages::decide_setting_proposals,
             commands::autofix::autofix_findings,
+            commands::autofix::autofix_scan,
             commands::autofix::autofix_apply,
             commands::autofix::autofix_dismiss,
             commands::pages::list_guides,

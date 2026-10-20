@@ -32,6 +32,7 @@ use crate::net::https::{HttpTransport, Request};
 use crate::store::{TrackerConfig, TrackerCredential};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 /// `s` with the old key `k` it was asked under recorded as an alias.
@@ -54,6 +55,9 @@ pub struct JiraDc {
     config: TrackerConfig,
     cred: Option<TrackerCredential>,
     transport: Arc<dyn HttpTransport>,
+    /// `/myself` answered during this provider's life (one sync pass): see
+    /// [`JiraDc::confirm_identity`].
+    identity_ok: AtomicBool,
 }
 
 impl JiraDc {
@@ -68,6 +72,7 @@ impl JiraDc {
             config,
             cred,
             transport,
+            identity_ok: AtomicBool::new(false),
         }
     }
 
@@ -135,6 +140,26 @@ impl JiraDc {
         f.extend(self.config.epic_field.clone());
         f.extend(self.config.points_field.clone());
         f
+    }
+
+    /// A site that lets anonymous users browse can answer a dead token's
+    /// search as an anonymous caller's: a 200 with no issues, where only
+    /// `/myself` says 401. So an answer with nothing in it is checked here
+    /// before it is believed — at most once per provider, which a sync
+    /// builds per pass — and a dead token fails the pass as `auth_failed`
+    /// instead of emptying views and calling every linked ticket
+    /// unavailable (as Jira Cloud does: `JiraCloud::confirm_identity`).
+    async fn confirm_identity(&self) -> Result<(), TrackerError> {
+        if self.identity_ok.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+        self.call(
+            Request::get(self.url("/rest/api/2/myself")),
+            CallKind::Identity,
+        )
+        .await?;
+        self.identity_ok.store(true, Ordering::Relaxed);
+        Ok(())
     }
 
     async fn call(&self, req: Request, call: CallKind) -> Result<Value, TrackerError> {
@@ -731,6 +756,9 @@ impl TrackerProvider for JiraDc {
         let (issues, next) = self
             .search(&jql, self.fields(), start, false, CallKind::View)
             .await?;
+        if start == 0 && issues.is_empty() {
+            self.confirm_identity().await?;
+        }
         Ok(Page {
             items: self.snapshots(&issues),
             next: next.map(|n| n.to_string()),
@@ -814,6 +842,10 @@ impl TrackerProvider for JiraDc {
                     answers[i] = Some(with_alias(s, &k));
                 }
             }
+        }
+        // Nothing found at all may be a dead token, not missing tickets.
+        if !askable.is_empty() && answers.iter().all(Option::is_none) {
+            self.confirm_identity().await?;
         }
         Ok(refs
             .iter()

@@ -10,6 +10,7 @@
 // strip gains Tasks (☑, the Work tree's tasks by status, with bulk Start
 // new, Assign and Done) and Routines (◷); Open elsewhere gains Routines in
 // Automation.
+import { isFinal, type Mission } from './missions';
 import { derived, writable } from 'svelte/store';
 import { inboxQueue, inboxRows } from './inbox';
 import { attentionState, type AttentionOptions } from './attention';
@@ -167,6 +168,18 @@ export function setViewsOpen(open: boolean): void {
 /** Needs you: the Inbox's own rows (`inboxQueue`), so the panel, the Inbox
  *  and the rail's badge ask one attention query. */
 export const needsYouList = inboxQueue;
+
+/** The missions that wait on a person and are not finished: a grant to
+ *  sign, a question, a step to OK (review w04-7). */
+export function missionsWaiting(missions: readonly Mission[]): Mission[] {
+  return missions.filter((m) => m.waiting_on != null && !isFinal(m.state));
+}
+
+/** Needs you's count: its session rows, Control's approvals waiting on a
+ *  card, and the missions waiting on a person (review w04-7). */
+export function needsYouCount(rows: number, operatorConfirms: number, missions: readonly Mission[]): number {
+  return rows + operatorConfirms + missionsWaiting(missions).length;
+}
 
 // ── Needs you folds and search (G3.10, board MissionControl) ──
 

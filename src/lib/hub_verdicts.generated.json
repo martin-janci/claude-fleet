@@ -90,6 +90,7 @@
     "autofix_apply",
     "autofix_dismiss",
     "autofix_findings",
+    "autofix_scan",
     "bind_device_org",
     "boot_debug_device",
     "cancel_queued_prompt",

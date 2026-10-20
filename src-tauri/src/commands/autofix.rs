@@ -22,6 +22,17 @@ pub async fn autofix_findings(
     routed::autofix_findings(&backend, &store).await
 }
 
+/// Check now: re-read every host's MCP entry, re-run the detectors, and
+/// return the list as `autofix_findings` does. Applies nothing.
+#[tauri::command]
+pub async fn autofix_scan(
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<Findings, IpcError> {
+    routed::autofix_scan(&backend, &store, &ssh).await
+}
+
 /// Fix: run one finding's fix and re-check; the row as it now stands.
 #[tauri::command]
 pub async fn autofix_apply(
@@ -59,6 +70,24 @@ pub mod routed {
                     .await
             }
             None => api::list(&*lock(store)?, None, true, fleet_core::store::now_unix()),
+        }
+    }
+
+    pub async fn autofix_scan(
+        backend: &FleetBackend,
+        store: &Mutex<Store>,
+        ssh: &Arc<SshClient>,
+    ) -> Result<Findings, IpcError> {
+        match backend.hub() {
+            Some(hub) => {
+                hub.route("autofix_scan", &json!({ "action": "scan" }))
+                    .await
+            }
+            None => {
+                let now = fleet_core::store::now_unix();
+                fleet_core::service::autofix::tick::scan_now(store, ssh, now).await?;
+                api::list(&*lock(store)?, None, true, now)
+            }
         }
     }
 

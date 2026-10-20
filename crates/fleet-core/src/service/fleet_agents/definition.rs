@@ -491,6 +491,7 @@ impl ActionKind {
                     "body_template",
                     "labels",
                     "link",
+                    "fingerprint",
                 ],
                 &["project", "summary", "body"],
             ),
@@ -509,17 +510,27 @@ impl ActionKind {
                 &["store", "key", "value", "expires_secs"],
                 &["store", "key", "value"],
             ),
-            ActionKind::WorkTask => (&["summary", "body", "body_template", "steps"], &["summary"]),
+            ActionKind::WorkTask => (
+                &["summary", "body", "body_template", "steps", "fingerprint"],
+                &["summary"],
+            ),
             ActionKind::FixSession => (
-                &["project", "host", "summary", "body", "body_template"],
+                &[
+                    "project",
+                    "host",
+                    "summary",
+                    "body",
+                    "body_template",
+                    "fingerprint",
+                ],
                 &["project", "summary", "body"],
             ),
             ActionKind::Setting => (
-                &["key", "value", "body", "body_template"],
+                &["key", "value", "body", "body_template", "fingerprint"],
                 &["key", "value", "body"],
             ),
             ActionKind::SessionRecover => (
-                &["target", "host", "body", "body_template"],
+                &["target", "host", "body", "body_template", "fingerprint"],
                 &["target", "body"],
             ),
         }
@@ -598,6 +609,12 @@ pub struct Action {
     /// `fix_session`, `session_recover`: the host (a template).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<String>,
+    /// `work_task`, `fix_session`, `setting`, `session_recover`,
+    /// `tracker_issue`: what the finding is (a template), kept on the
+    /// action so a later run can tell it was proposed (and rejected)
+    /// before (the diagnostics `proposals` tool answers it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<String>,
 }
 
 /// Most items one `each` action is planned for.
@@ -631,6 +648,7 @@ impl Action {
         put("expires_secs", self.expires_secs.is_some());
         put("steps", self.steps.is_some());
         put("host", self.host.is_some());
+        put("fingerprint", self.fingerprint.is_some());
         out
     }
 }
@@ -1270,6 +1288,7 @@ pub fn problems(d: &Definition, templates: &BTreeMap<String, String>) -> Vec<Str
             ("key", &a.key),
             ("steps", &a.steps),
             ("host", &a.host),
+            ("fingerprint", &a.fingerprint),
         ] {
             if let Some(v) = v {
                 check_template(v, &format!("{at} › {k}"), after_run, &mut out);

@@ -17,7 +17,7 @@
 // backend command that exists today; one whose backend does not exist yet
 // (a read-only link) is not listed, never shown as a dead button.
 import { derived, get, writable, type Readable } from 'svelte/store';
-import { hasNoPane, isInactiveAgent, isPinned, pinSession, type SessionRow } from './sessions';
+import { hasNoPane, isInactiveAgent, isPinned, pinSession, pinnedBlock, type SessionRow } from './sessions';
 import { hostByAlias } from './hosts';
 import { canMoveSession, moveBlockedReason } from './moveEligibility';
 import { hubActionBlocked, hubBlock, hubStatus, type HubStatus } from './hub';
@@ -168,13 +168,7 @@ export function noOtherLogin(s: SessionRow, host: HostLogins): string | null {
   return `${s.host_alias} has no other login. Add a login profile under Accounts first.`;
 }
 
-/** Why a pinned session cannot be closed. */
-export const PINNED_BLOCK = 'Pinned: unpin it first';
-
-/** Why closing `s` (kill, safe remove) is refused for its pin, or null. */
-export function pinnedBlock(s: Pick<SessionRow, 'pinned_at'>): string | null {
-  return isPinned(s) ? PINNED_BLOCK : null;
-}
+export { PINNED_BLOCK, pinnedBlock } from './sessions';
 
 /** The pin action's label for `s`: Unpin when it is pinned. */
 export function pinLabel(s: Pick<SessionRow, 'pinned_at'>): string {

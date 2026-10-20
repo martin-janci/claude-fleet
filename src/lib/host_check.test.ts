@@ -99,6 +99,14 @@ describe('host health checklist', () => {
     expect(row(rows({ host: agentHost(null) }), 'agent').state).toBe('fail');
   });
 
+  it('an agent host whose agent is gone fails its row, naming the last version seen (w14-3)', () => {
+    const gone = host('trn', { transport: 'agent', agent_version: '0.5.4', reachable: false });
+    expect(row(rows({ host: gone, hubVersion: '0.5.4' }), 'agent')).toMatchObject({
+      state: 'fail',
+      detail: 'not connected · last seen 0.5.4',
+    });
+  });
+
   it('drifted or missing skills warn with counts; an unscanned host is unknown', () => {
     const rs = rows({ inventory: [skill('a', 'drifted'), skill('b', 'missing'), skill('c', 'in_sync')] });
     expect(row(rs, 'skills')).toMatchObject({ state: 'warn', detail: '1 drifted · 1 missing' });

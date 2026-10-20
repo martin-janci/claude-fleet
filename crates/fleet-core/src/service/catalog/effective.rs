@@ -333,7 +333,7 @@ fn compose<'r>(
     let Some(personal) = catalogs.values().find(|c| c.org_id.is_none()) else {
         return Err(IpcError::new(
             super::E_CATALOG_NOT_CONFIGURED,
-            "catalog not loaded; call catalog_load",
+            super::NOT_LOADED,
         ));
     };
 

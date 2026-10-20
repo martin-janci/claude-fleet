@@ -157,11 +157,14 @@ export function parseControlCommand(text: string, now: Date = new Date()): Parse
       return { ok: true, command: { cmd: 'graph', ...(target ? { target } : {}) } };
     }
     case 'debug': {
+      // The scope is read from the leading words only: once a plain word
+      // starts the request, `2h` in "why does the 2h backup fail" is text.
       const scope: RunScope = {};
       const words: string[] = [];
       for (const t of toks) {
         const span = /^(\d+)([mhd])$/i.exec(t);
-        if (t.startsWith('@') && t.length > 1 && scope.host === undefined) scope.host = t.slice(1);
+        if (words.length > 0) words.push(t);
+        else if (t.startsWith('@') && t.length > 1 && scope.host === undefined) scope.host = t.slice(1);
         else if (span && scope.minutes === undefined) {
           const n = Number(span[1]) * ({ m: 1, h: 60, d: 1440 } as Record<string, number>)[span[2].toLowerCase()];
           if (n < 1 || n > DEBUG_MAX_MINUTES) return bad('debug');
@@ -329,6 +332,44 @@ type Outcome = Omit<CommandReceipt, 'id' | 'typed'>;
  *  timeout plus a pass to pick it up). Test seam. */
 export const debugPoll = { everyMs: 10_000, forMs: 20 * 60_000 };
 
+/** One entry of a fleet job's `result.actions` (runner `queue_actions`). */
+interface QueuedAction {
+  do?: unknown;
+  state?: unknown;
+  why?: unknown;
+}
+
+/** What became of a run's actions, as one sentence: how many wait in the
+ *  Inbox, run on their own, were kept (the rule is at watch) or were
+ *  skipped and why. An agent's own memory (`record`) is not counted. Null
+ *  when the result names no actions. */
+export function queuedTail(result: string | null): string | null {
+  let actions: QueuedAction[] = [];
+  try {
+    const r = JSON.parse(result ?? '{}') as { actions?: unknown };
+    if (!Array.isArray(r.actions)) return null;
+    actions = r.actions as QueuedAction[];
+  } catch {
+    return null;
+  }
+  const real = actions.filter((a) => a.do !== 'record');
+  const count = (state: string) => real.filter((a) => a.state === state).length;
+  const n = (k: number, one: string, many: string) => (k === 1 ? `1 ${one}` : `${k} ${many}`);
+  const parts: string[] = [];
+  const pending = count('pending');
+  if (pending > 0) parts.push(`${n(pending, 'proposal waits', 'proposals wait')} in the Inbox.`);
+  const approved = count('approved');
+  if (approved > 0) parts.push(`${approved === 1 ? '1 goes ahead on its own' : `${approved} go ahead on their own`} (the rule is at act).`);
+  const kept = count('kept');
+  if (kept > 0) parts.push(`${n(kept, 'proposal', 'proposals')} kept, not queued: the rule is at watch.`);
+  const skipped = real.filter((a) => a.state === 'skipped' || (typeof a.state === 'string' && a.state.startsWith('not queued')));
+  if (skipped.length > 0) {
+    const whys = [...new Set(skipped.map((a) => (typeof a.why === 'string' && a.why ? a.why : String(a.state))))];
+    parts.push(`Skipped ${skipped.length}: ${whys.join('; ')}.`);
+  }
+  return parts.length > 0 ? parts.join(' ') : null;
+}
+
 interface Finding {
   title?: unknown;
   severity?: unknown;
@@ -363,7 +404,9 @@ export function debugOutcome(job: Pick<AgentJob, 'state' | 'error' | 'result'>):
     }))
     .sort((a, b) => rank(a.level) - rank(b.level));
   const summary = typeof answer.summary === 'string' && answer.summary ? answer.summary : null;
-  const line = summary ?? (rows.length === 0 ? 'No problems found.' : `${rows.length} findings.`);
+  const said = summary ?? (rows.length === 0 ? 'No problems found.' : `${rows.length} findings.`);
+  const tail = queuedTail(job.result);
+  const line = tail ? `${said} ${tail}` : said;
   return { state: 'done', line, open, ...(rows.length > 0 ? { rows } : {}) };
 }
 
@@ -393,7 +436,13 @@ export function proposeOutcome(job: Pick<AgentJob, 'state' | 'error' | 'result'>
     level: findingLevel(p.severity),
   }));
   const summary = typeof answer.summary === 'string' && answer.summary ? answer.summary : null;
-  const waits = rows.length === 0 ? 'Nothing to propose.' : rows.length === 1 ? '1 proposal waits in the Inbox.' : `${rows.length} proposals wait in the Inbox.`;
+  // What was queued, from the run's own record of it (a rule at watch keeps
+  // them, a setting no agent may change is skipped), not the answer's count.
+  const tail = queuedTail(job.result);
+  const waits =
+    rows.length === 0
+      ? 'Nothing to propose.'
+      : (tail ?? (rows.length === 1 ? '1 proposal waits in the Inbox.' : `${rows.length} proposals wait in the Inbox.`));
   return { state: 'done', line: summary ? `${summary} ${rows.length > 0 ? waits : ''}`.trim() : waits, open, ...(rows.length > 0 ? { rows } : {}) };
 }
 

@@ -450,6 +450,26 @@ describe('HostDetail restore lost sessions', () => {
     expect(screen.getByTestId('restore-lost')).not.toBeDisabled();
   });
 
+  it('an offline host keeps Restore dead and says why (review w14-5)', () => {
+    const rows = [lost('mefistos', 'a')];
+    mount('mefistos', { host: host('mefistos', { reachable: false }), hostSessions: rows });
+    const btn = screen.getByTestId('restore-lost');
+    expect(btn).toBeDisabled();
+    expect(btn.getAttribute('title')).toBe('mefistos is offline: restore once it answers');
+  });
+
+  it('a restore error started from Lost & found shows on that tab (review w14-5)', async () => {
+    const rows = [lost('mefistos', 'a')];
+    mockedRestore.mockResolvedValueOnce({ ok: false, error: { code: 'E_HOST_OFFLINE', message: 'host mefistos is not reachable' } });
+    mount('mefistos', { hostSessions: rows });
+    await fireEvent.click(screen.getByTestId('detail-tab-lost'));
+    await fireEvent.click(screen.getByTestId('restore-lost'));
+    await tick();
+    const err = screen.getByTestId('restore-error');
+    expect(err.textContent).toContain('not reachable');
+    expect(err.closest('[hidden]')).toBeNull();
+  });
+
   it('shows an inline error when the dry run fails, without opening the dialog', async () => {
     const rows = [lost('mefistos', 'a')];
     mockedRestore.mockResolvedValueOnce({

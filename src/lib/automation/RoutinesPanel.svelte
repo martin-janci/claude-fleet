@@ -9,7 +9,7 @@
   // and kill switches on the right. A failed run carries Fix, Retry and
   // Pause, as in the Inbox. New starts from a template (the first is
   // Morning PR sweep) or a blank one.
-  import { onDestroy, onMount } from 'svelte';
+  import { onDestroy, onMount, tick } from 'svelte';
   import { get } from 'svelte/store';
   import { hosts } from '../hosts';
   import { sessions } from '../sessions';
@@ -29,7 +29,7 @@
   import type { OfState } from '../kit/status';
   import NewRoutineMenu from './NewRoutineMenu.svelte';
   import RoutineEditor from './RoutineEditor.svelte';
-  import { draftInput, draftMissing, draftOf, type RoutineDraft } from './routine_draft';
+  import { draftInput, draftMissing, draftOf, stashDraft, takeStashedDraft, type RoutineDraft } from './routine_draft';
   import RoutineDebug from './RoutineDebug.svelte';
   import DestructiveConfirm from '../forms/DestructiveConfirm.svelte';
   import type { IpcError } from '../result';
@@ -101,8 +101,32 @@
   let loopSel = $state<string | null>(null);
   /** Each routine's newest run, for the list's dot and line. */
   let lastRuns = $state<Map<number, RunRow>>(new Map());
+  // A changed draft left open when this tab last closed comes back
+  // (review w05-2).
+  const restored = takeStashedDraft();
   /** The editor's draft: a new routine (`id` absent) or a change. */
-  let draft = $state<RoutineDraft | null>(null);
+  let draft = $state<RoutineDraft | null>(restored?.draft ?? null);
+  /** The editor's draft as it was opened, to tell an unsaved change. */
+  let draftBase = $state(restored?.base ?? '');
+  const dirty = $derived(!!draft && JSON.stringify(draft) !== draftBase);
+  /** The open editor, which asks "Discard changes?" before a changed draft goes. */
+  let editor: { askLeave: (then: () => void) => void } | undefined = $state();
+  let root: HTMLDivElement | undefined = $state();
+
+  /** Every way out that replaces the draft (another routine, a built-in
+   *  one, New, a template, the Inbox's Fix) asks first when it is changed
+   *  (review w05-1). */
+  function leaveDraft(then: () => void) {
+    if (draft && dirty && editor) editor.askLeave(then);
+    else then();
+  }
+
+  /** Close the editor and put focus on the routine it leaves selected
+   *  (review w05-12). */
+  async function focusSelectedRow() {
+    await tick();
+    root?.querySelector<HTMLElement>('[data-testid="routine-row"][aria-selected="true"]')?.focus();
+  }
   /** Saving the draft failed: the editor's banner (input kept). */
   let saveError = $state<IpcError | null>(null);
 
@@ -142,11 +166,13 @@
   }
 
   function pick(id: number) {
-    selected = id;
-    loopSel = null;
-    draft = null;
-    confirmDelete = false;
-    void loadDetail();
+    leaveDraft(() => {
+      selected = id;
+      loopSel = null;
+      draft = null;
+      confirmDelete = false;
+      void loadDetail();
+    });
   }
 
   /** Run one action, then re-read the list, the routine and the Inbox. */
@@ -198,6 +224,10 @@
   }
 
   function newFrom(template: string | null) {
+    leaveDraft(() => openTemplate(template));
+  }
+
+  function openTemplate(template: string | null) {
     loopSel = null;
     const host = $hosts.find((h) => !h.hidden)?.alias ?? '';
     const proj = pickable[0]?.project;
@@ -217,7 +247,7 @@
 
   /** Save the draft; answers the saved routine, or null on a refusal. */
   async function saveDraft(undoable = true): Promise<RoutineRow | null> {
-    if (!draft || draftMissing(draft)) return null;
+    if (!draft || draftMissing(draft, $projects.length ? $projects.map((p) => p.project.id) : undefined)) return null;
     const d = draft;
     busy = true;
     saveError = null;
@@ -240,14 +270,11 @@
     };
     savedWithUndo(`${saved.name} saved`, undoable ? undo : undefined);
     await reload();
+    void focusSelectedRow();
     return r.value;
   }
 
   // ---- Run once now (gap plan G2.3) ------------------------------------------
-
-  /** The editor's draft as it was opened, to tell an unsaved change. */
-  let draftBase = $state('');
-  const dirty = $derived(!!draft && JSON.stringify(draft) !== draftBase);
 
   /** Run once now: the saved routine as it is; a new or changed one is
    *  saved first, since a run is a saved routine's. */
@@ -296,16 +323,23 @@
 
   const unsub = routinesRequest.subscribe((req) => {
     if (!req) return;
-    if (req.template) newFrom(req.template === 'blank' ? null : req.template);
-    if (req.select !== undefined) {
-      selected = req.select;
-      draft = null;
-      void loadDetail();
-    }
-    if (req.tab) tab = req.tab;
+    leaveDraft(() => {
+      if (req.template) openTemplate(req.template === 'blank' ? null : req.template);
+      if (req.select !== undefined) {
+        selected = req.select;
+        draft = null;
+        void loadDetail();
+      }
+      if (req.tab) tab = req.tab;
+    });
     routinesRequest.set(null);
   });
   onDestroy(unsub);
+  onDestroy(() => {
+    const d = draft ? ($state.snapshot(draft) as RoutineDraft) : null;
+    // Compared here, not through `dirty`: a derived is not re-read on teardown.
+    stashDraft(d && JSON.stringify(d) !== draftBase ? { draft: d, base: draftBase } : null);
+  });
 
   onMount(() => void reload());
 
@@ -419,11 +453,13 @@
   }
 
   function pickLoop(name: string) {
-    loopSel = name;
-    selected = null;
-    draft = null;
-    confirmDelete = false;
-    detail = null;
+    leaveDraft(() => {
+      loopSel = name;
+      selected = null;
+      draft = null;
+      confirmDelete = false;
+      detail = null;
+    });
   }
 
   const loop = $derived(loopSel === null ? undefined : loops.find((l) => l.name === loopSel));
@@ -453,7 +489,7 @@
   </li>
 {/snippet}
 
-<div class="routines" class:fill data-testid="routines-panel">
+<div class="routines" class:fill data-testid="routines-panel" bind:this={root}>
   <div class="list">
     {#if listHead}
       {@render listHead()}
@@ -521,6 +557,7 @@
   <div class="detail">
     {#if draft}
       <RoutineEditor
+        bind:this={editor}
         bind:draft
         enabled={enabledOf(draft)}
         {dirty}
@@ -528,7 +565,10 @@
         error={saveError}
         onsave={() => void saveDraft()}
         onrunonce={() => void runOnce()}
-        oncancel={() => (draft = null)}
+        oncancel={() => {
+          draft = null;
+          void focusSelectedRow();
+        }}
         ontemplate={(t) => newFrom(t === 'blank' ? null : t)} />
     {:else if loop}
       {@const stands = paused && loop.pausable}

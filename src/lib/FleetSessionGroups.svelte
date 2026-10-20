@@ -24,6 +24,7 @@
     fleetNewSession,
     fleetAttachCommand,
     fleetAttachRefusal,
+    fleetTrouble,
     fleetHostChoices,
     defaultFleetHost,
     fleetKey,
@@ -218,6 +219,8 @@
       </p>
     {:else if f.unavailable}
       <p class="note err" data-testid="fleet-unavailable-{f.id}">{f.unavailable}</p>
+    {:else if fleetTrouble(f)}
+      <p class="note err" data-testid="fleet-trouble-{f.id}">{fleetTrouble(f)}</p>
     {:else if rows.error}
       <p class="note err">{rows.error}</p>
     {/if}
