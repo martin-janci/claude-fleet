@@ -689,15 +689,14 @@ impl FleetTools {
                     )
                     .map_err(to_mcp_err)?;
                 }
-                // A new worker is a start: the operator's needs a person (D12).
+                // A new worker is a start: the operator's needs a person (D12)
+                // at every position — it is not a mission task (review w04-5).
                 self.confirm_gate_target(
                     "dispatch_task",
                     p.confirm_nonce.as_deref(),
                     &dispatch_new_worker_summary(&spec, p.requester_session_id, p.raw, &p.prompt),
                     &caller,
-                    GateTarget::Start {
-                        host: &spec.host_alias,
-                    },
+                    GateTarget::Other,
                 )?;
                 let name = spec.name.unwrap_or_default();
                 let row = sessions::new_session(

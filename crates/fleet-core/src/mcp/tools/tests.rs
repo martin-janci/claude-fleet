@@ -8539,8 +8539,8 @@ async fn within_the_brief_the_operators_prompt_to_its_own_session_is_pre_approve
         .unwrap();
     s.conn_ref()
         .execute(
-            "UPDATE sessions SET origin = 'operator' WHERE id = ?1",
-            [on_b],
+            "UPDATE sessions SET origin = 'operator', created_at = ?2 WHERE id = ?1",
+            rusqlite::params![on_b, crate::store::now_unix()],
         )
         .unwrap();
     let t = guarded_tools(s, true);
@@ -8595,6 +8595,153 @@ async fn within_the_brief_the_operators_prompt_to_its_own_session_is_pre_approve
         .await
         .unwrap_err();
     confirm_nonce_of(&other);
+}
+
+/// Review w04-4: "within your brief" holds only while Control still follows
+/// the thread. Into a session it started that the person muted, whose pull
+/// request merged, or that went quiet, the operator's prompt asks again.
+#[tokio::test]
+async fn within_the_brief_a_thread_control_no_longer_follows_asks_again() {
+    let (s, pid, on_b) = two_host_store();
+    let now = crate::store::now_unix();
+    let quiet = s
+        .upsert_session("dev-q", "hostb", Some(pid), None, 1, 1, "running", None)
+        .unwrap();
+    for (id, created) in [(on_b, now), (quiet, now - 3 * 86_400)] {
+        s.conn_ref()
+            .execute(
+                "UPDATE sessions SET origin = 'operator', created_at = ?2 WHERE id = ?1",
+                rusqlite::params![id, created],
+            )
+            .unwrap();
+    }
+    s.set_setting(crate::service::settings::ORCHESTRATOR_MAX_LEVEL, "2")
+        .unwrap();
+    s.set_setting(crate::service::settings::CONTROL_AUTO_CONTINUE, "true")
+        .unwrap();
+    let t = guarded_tools(s, true);
+    let queue = |id: i64| {
+        serde_json::from_value::<QueuePromptParams>(serde_json::json!({
+            "session_id": id, "prompt": "Work on PD-1",
+        }))
+        .unwrap()
+    };
+    let pre_approved = |out: Result<_, McpError>| {
+        if let Err(e) = out {
+            assert!(
+                !e.message.starts_with("E_CONFIRM_REQUIRED"),
+                "{}",
+                e.message
+            );
+        }
+    };
+    // Followed: no card.
+    pre_approved(
+        t.queue_prompt(Extension(operator()), Parameters(queue(on_b)))
+            .await,
+    );
+    // Quiet a day and more: a card.
+    let asked = t
+        .queue_prompt(Extension(operator()), Parameters(queue(quiet)))
+        .await
+        .unwrap_err();
+    confirm_nonce_of(&asked);
+    // Muted: a card; unmuted, no card again.
+    t.store
+        .lock()
+        .unwrap()
+        .set_control_mute("session", on_b, true, now)
+        .unwrap();
+    let asked = t
+        .queue_prompt(Extension(operator()), Parameters(queue(on_b)))
+        .await
+        .unwrap_err();
+    confirm_nonce_of(&asked);
+    t.store
+        .lock()
+        .unwrap()
+        .set_control_mute("session", on_b, false, now)
+        .unwrap();
+    pre_approved(
+        t.queue_prompt(Extension(operator()), Parameters(queue(on_b)))
+            .await,
+    );
+    // Its pull request merged: a card.
+    t.store
+        .lock()
+        .unwrap()
+        .insert_session_event(on_b, crate::store::PR_EVENT_MERGED, None)
+        .unwrap();
+    let asked = t
+        .queue_prompt(Extension(operator()), Parameters(queue(on_b)))
+        .await
+        .unwrap_err();
+    confirm_nonce_of(&asked);
+}
+
+/// Review w04-5: at Autopilot the operator's own start is NOT let through by
+/// a mission's grant on that host — the session would count against no
+/// grant's budget or parallel cap — and Pause all changes nothing about it.
+#[tokio::test]
+async fn at_autopilot_the_operators_start_asks_even_inside_a_mission_grant() {
+    let (s, pid, _) = two_host_store();
+    let now = crate::store::now_unix();
+    let m = s
+        .create_mission(
+            &crate::store::NewMission {
+                name: "m",
+                goal: "g",
+                ..Default::default()
+            },
+            "fleet",
+        )
+        .unwrap()
+        .id;
+    s.add_grant(
+        m,
+        &crate::store::NewGrant {
+            level: 3,
+            granted_by: "person:1",
+            hosts: None,
+            expires_at: now + 3600,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    s.set_mission_state(m, None, "active", "fleet").unwrap();
+    for (k, v) in [
+        (crate::service::settings::ORCHESTRATOR_MAX_LEVEL, "3"),
+        (crate::service::settings::CONTROL_AUTO_CONTINUE, "true"),
+        (crate::service::settings::CONTROL_AUTO_CONTINUE_MINUTES, "2"),
+    ] {
+        s.set_setting(k, v).unwrap();
+    }
+    assert_eq!(
+        crate::service::autonomy::position(&s),
+        crate::service::autonomy::Position::Autopilot
+    );
+    let t = guarded_tools(s, true);
+    let start = || {
+        serde_json::from_value::<NewSessionParams>(serde_json::json!({
+            "host_alias": "hostb", "project_id": pid, "name": "x"
+        }))
+        .unwrap()
+    };
+    let asked = t
+        .new_session(Extension(operator()), Parameters(start()))
+        .await
+        .unwrap_err();
+    confirm_nonce_of(&asked);
+    t.store
+        .lock()
+        .unwrap()
+        .set_setting(crate::service::settings::AUTOMATION_PAUSED, "true")
+        .unwrap();
+    let asked = t
+        .new_session(Extension(operator()), Parameters(start()))
+        .await
+        .unwrap_err();
+    confirm_nonce_of(&asked);
 }
 
 /// Review 2026-10-17, F1: the operator is told to wait, not to retry, and

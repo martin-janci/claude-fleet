@@ -449,20 +449,14 @@ impl FleetTools {
             )
             .map_err(to_mcp_err)?;
         }
-        // A Claude start inside a running mission's grant goes without a
-        // card at Autopilot (F2); a shell or another agent never does.
+        // The operator's start always asks: it is not tied to a mission, so
+        // no grant's budget or parallel cap would count it (review w04-5).
         self.confirm_gate_target(
             "new_session",
             p.confirm_nonce.as_deref(),
             &new_session_summary(&p),
             &caller,
-            if runs_claude {
-                GateTarget::Start {
-                    host: &p.host_alias,
-                }
-            } else {
-                GateTarget::Other
-            },
+            GateTarget::Other,
         )?;
         let args = sessions::NewSessionArgs {
             host_alias: p.host_alias,

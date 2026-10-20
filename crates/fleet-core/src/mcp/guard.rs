@@ -1868,9 +1868,12 @@ pub fn operator_gated(name: &str) -> bool {
 /// even with `mcp.confirm_destructive` off, at autonomy `position`.
 ///
 /// - `own_handoff`: the call's target is a live session Control started or
-///   briefed (`Store::is_open_control_handoff`);
-/// - `inside_grant`: the call starts a session inside a running mission's
-///   grant (`Store::start_inside_mission_grant`).
+///   briefed (`Store::is_open_control_handoff`) and still follows
+///   (`service::control_follow::session_followed`, review w04-4);
+/// - `inside_grant`: the call starts a session tied to a running mission,
+///   inside that mission's grant. No start tool ties its session to a
+///   mission, so the tool layer passes `false` (review w04-5: an untied
+///   start would count against no grant's budget or parallel cap).
 ///
 /// At **Ask first** (and **Custom**, which grants what Ask first does) every
 /// gated tool asks, as before. **Within your brief** lets a prompt or task
@@ -2258,12 +2261,22 @@ pub enum ConfirmState {
     RunByFleet,
 }
 
+/// How a card of the operator's ended, as its [`ConfirmReplay`] is told.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfirmAnswer {
+    Approved,
+    Denied,
+    /// Nobody answered within [`CONFIRM_TTL`] (review w04-3): the card is
+    /// gone and nothing ran, so Control must hear it rather than wait on.
+    Expired,
+}
+
 /// What fleet does with an answered confirmation of the operator's (F1):
 /// called once with the answer, it runs the approved call and tells
-/// Control the result, or tells it the call was denied. Attached by
-/// `FleetTools::call_tool` to the nonce it just minted.
+/// Control the result, or tells it the call was denied or expired.
+/// Attached by `FleetTools::call_tool` to the nonce it just minted.
 pub type ConfirmReplay =
-    Box<dyn FnOnce(bool) -> futures_util::future::BoxFuture<'static, ()> + Send + 'static>;
+    Box<dyn FnOnce(ConfirmAnswer) -> futures_util::future::BoxFuture<'static, ()> + Send + 'static>;
 
 tokio::task_local! {
     /// The nonce whose approved call fleet is running now ([`as_replay`]).
@@ -2455,12 +2468,14 @@ impl PendingConfirms {
             }
         };
         if let Some(run) = replay {
-            match tokio::runtime::Handle::try_current() {
-                Ok(h) => {
-                    h.spawn(run(approved));
-                }
-                Err(_) => tracing::warn!("confirm answered outside a runtime; not replayed"),
-            }
+            spawn_replay(
+                run,
+                if approved {
+                    ConfirmAnswer::Approved
+                } else {
+                    ConfirmAnswer::Denied
+                },
+            );
         }
         true
     }
@@ -2560,8 +2575,34 @@ impl PendingConfirms {
     }
 }
 
+/// Drop the requests past [`CONFIRM_TTL`]. An unanswered one that carries
+/// a replay is told [`ConfirmAnswer::Expired`] (review w04-3), so Control —
+/// told "do not retry, fleet runs it and tells you" — hears that nobody
+/// answered instead of waiting for a note that never comes.
 fn prune(entries: &mut HashMap<String, Pending>, now: Instant) {
-    entries.retain(|_, p| now.saturating_duration_since(p.created) < CONFIRM_TTL);
+    let mut expired = Vec::new();
+    entries.retain(|_, p| {
+        let keep = now.saturating_duration_since(p.created) < CONFIRM_TTL;
+        if !keep && p.waiting() {
+            if let Some(run) = p.replay.take() {
+                expired.push(run);
+            }
+        }
+        keep
+    });
+    for run in expired {
+        spawn_replay(run, ConfirmAnswer::Expired);
+    }
+}
+
+/// Run `replay` with `answer` on a task of its own.
+fn spawn_replay(replay: ConfirmReplay, answer: ConfirmAnswer) {
+    match tokio::runtime::Handle::try_current() {
+        Ok(h) => {
+            h.spawn(replay(answer));
+        }
+        Err(_) => tracing::warn!(?answer, "confirm ended outside a runtime; not replayed"),
+    }
 }
 
 // --- long-poll concurrency ----------------------------------------------------
@@ -3133,13 +3174,50 @@ mod tests {
     }
 
     /// A replay that records the answers it was handed.
-    fn recording(log: &Arc<Mutex<Vec<bool>>>) -> ConfirmReplay {
+    fn recording(log: &Arc<Mutex<Vec<ConfirmAnswer>>>) -> ConfirmReplay {
         let log = log.clone();
-        Box::new(move |approved| {
+        Box::new(move |answer| {
             Box::pin(async move {
-                log.lock().unwrap().push(approved);
+                log.lock().unwrap().push(answer);
             })
         })
+    }
+
+    /// Review w04-3: a card nobody answered in time tells its replay it
+    /// expired, once; an answered one is not told again when it goes.
+    #[tokio::test]
+    async fn an_unanswered_card_that_expires_tells_its_replay() {
+        let pc = PendingConfirms::new();
+        let lapsed = pc.request_from("new_session", "host=h", "client:ux-agent", true);
+        let answered = pc.request_from("send_prompt", "s=1", "client:ux-agent", true);
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let other = Arc::new(Mutex::new(Vec::new()));
+        assert!(pc.attach_replay(&lapsed.nonce, recording(&log)));
+        assert!(pc.attach_replay(&answered.nonce, recording(&other)));
+        assert!(pc.answer(&answered.nonce, false));
+        let Some(long_ago) = Instant::now().checked_sub(CONFIRM_TTL + Duration::from_secs(1))
+        else {
+            return;
+        };
+        {
+            let mut e = pc.entries.lock().unwrap();
+            e.get_mut(&lapsed.nonce).unwrap().created = long_ago;
+            e.get_mut(&answered.nonce).unwrap().created = long_ago;
+        }
+        assert_eq!(pc.prune_expired(), 1);
+        assert_eq!(pc.prune_expired(), 0);
+        for _ in 0..50 {
+            if !log.lock().unwrap().is_empty() && !other.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert_eq!(*log.lock().unwrap(), vec![ConfirmAnswer::Expired]);
+        assert_eq!(
+            *other.lock().unwrap(),
+            vec![ConfirmAnswer::Denied],
+            "an answered card is told once, by its answer"
+        );
     }
 
     /// Review 2026-10-17, F1: an approval hands the call to fleet exactly
@@ -3163,7 +3241,7 @@ mod tests {
             }
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
-        assert_eq!(*log.lock().unwrap(), vec![true]);
+        assert_eq!(*log.lock().unwrap(), vec![ConfirmAnswer::Approved]);
         assert!(
             pc.pending().is_empty(),
             "an answered request leaves the cards"
@@ -3199,7 +3277,7 @@ mod tests {
             }
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
-        assert_eq!(*log.lock().unwrap(), vec![false]);
+        assert_eq!(*log.lock().unwrap(), vec![ConfirmAnswer::Denied]);
         assert_eq!(
             pc.consume(&req.nonce, "send_prompt", "s=1"),
             ConfirmState::Denied

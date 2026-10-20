@@ -1822,13 +1822,11 @@ pub(super) fn usage_scope(
 /// What a gated call acts on, for the operator's pre-approval (review
 /// 2026-10-17, F2, `guard::operator_must_confirm`).
 #[derive(Clone, Copy, Debug)]
-pub(super) enum GateTarget<'a> {
+pub(super) enum GateTarget {
     /// Nothing the autonomy position can pre-approve.
     Other,
     /// A prompt or task into this existing session.
     Session(i64),
-    /// A new Claude session on this host.
-    Start { host: &'a str },
 }
 
 /// The timeline event a pre-approved operator call leaves on its target.
@@ -1884,36 +1882,47 @@ impl FleetTools {
         nonce: Option<&str>,
         summary: &str,
         caller: &Caller,
-        target: GateTarget<'_>,
+        target: GateTarget,
     ) -> Result<(), McpError> {
         self.confirm_gate_inner(tool, nonce, summary, caller, false, target)
     }
 
     /// The operator's facts [`guard::operator_must_confirm`] decides on:
     /// the autonomy position, whether `target` is one of Control's open
-    /// handoffs, and whether it is a start inside a running mission's grant.
+    /// handoffs it still follows, and whether it is a start tied to a
+    /// mission inside that mission's grant (never, today: review w04-5).
     fn operator_gate_facts(
         &self,
-        target: GateTarget<'_>,
+        target: GateTarget,
     ) -> Result<(crate::service::autonomy::Position, bool, bool), McpError> {
         let s = lock(&self.store).map_err(to_mcp_err)?;
         let position = crate::service::autonomy::position(&s);
         if position.is_ask_first() {
             return Ok((position, false, false));
         }
+        // An open handoff Control still FOLLOWS (review w04-4): a thread
+        // the person muted, whose pull request merged, that is done or went
+        // quiet is no longer "within your brief", so a prompt into it asks.
         let own = match target {
-            GateTarget::Session(id) => s
-                .is_open_control_handoff(id)
-                .map_err(|e| to_mcp_err(IpcError::from(e)))?,
+            GateTarget::Session(id) => {
+                s.is_open_control_handoff(id)
+                    .map_err(|e| to_mcp_err(IpcError::from(e)))?
+                    && crate::service::control_follow::session_followed(
+                        &s,
+                        id,
+                        crate::store::now_unix(),
+                    )
+            }
             _ => false,
         };
-        let grant = match target {
-            GateTarget::Start { host } => s
-                .start_inside_mission_grant(host, crate::store::now_unix())
-                .map_err(to_mcp_err)?,
-            _ => false,
-        };
-        Ok((position, own, grant))
+        // A start would go without a card at Autopilot only when it is
+        // TIED to the mission whose grant covers it, so that grant's budget
+        // and parallel cap count it, and never under Pause all (review
+        // w04-5). No start tool ties its session to a mission — `new_session`
+        // and `dispatch_task`'s new worker are not mission tasks; a
+        // mission's own workers are started by the mission loop — so every
+        // start the operator makes asks (`inside_grant` is false).
+        Ok((position, own, false))
     }
 
     fn confirm_gate_inner(
@@ -1923,7 +1932,7 @@ impl FleetTools {
         summary: &str,
         caller: &Caller,
         person: bool,
-        target: GateTarget<'_>,
+        target: GateTarget,
     ) -> Result<(), McpError> {
         debug_assert!(
             guard::needs_confirmation(tool) || guard::OPERATOR_CONFIRMS.contains(&tool),
@@ -2044,7 +2053,7 @@ impl FleetTools {
         tool: &str,
         summary: &str,
         position: crate::service::autonomy::Position,
-        target: GateTarget<'_>,
+        target: GateTarget,
     ) {
         audit(
             "operator_pre_approved",

@@ -28,7 +28,8 @@ pub enum Position {
     /// Within your brief: prompts and tasks to Control's own open handoffs
     /// go without a card.
     Brief,
-    /// Autopilot: also new sessions inside a running mission's grant.
+    /// Autopilot: as Within your brief for Control's own calls (a start
+    /// always asks, review w04-5); missions run further on their own.
     Autopilot,
     /// A mix of the four settings the dial does not name.
     Custom,
@@ -116,12 +117,13 @@ impl Position {
     pub fn rule(self) -> &'static str {
         match self.grants() {
             Position::Brief => {
-                "prompts and tasks to sessions you started or briefed go without a card; \
-                 anything new still asks"
+                "prompts and tasks to sessions you started or briefed and still follow go \
+                 without a card; anything new still asks"
             }
             Position::Autopilot => {
-                "prompts and tasks to your sessions, and new sessions inside a running \
-                 mission's grant, go without a card; anything else still asks"
+                "prompts and tasks to sessions you started or briefed and still follow go \
+                 without a card, and missions run further on their own; any start or kill \
+                 still asks"
             }
             _ => "every start, prompt and kill waits for a person's approval",
         }
@@ -183,12 +185,14 @@ until one arrives, act as at Ask first.
 - **Ask first** (and **Custom**, a mix the chip does not name): every start, \
   prompt, task and kill you make waits for a person's approval on a card.
 - **Within your brief**: `send_prompt`, `queue_prompt`, `run_prompt` and \
-  `dispatch_task` to a session you started or briefed, while that handoff is \
-  open, go without a card. New sessions, kills, restarts, rewinds, restores \
-  and new projects still ask.
-- **Autopilot**: also starting a session inside a running mission's grant \
-  (its hosts, hours and budget). Nothing else changes: kills, restarts, \
-  rewinds, restores and new projects always ask.
+  `dispatch_task` to a session you started or briefed, while you still \
+  follow it, go without a card. One the person muted, whose pull request \
+  merged, that is done or went quiet asks again. New sessions, kills, \
+  restarts, rewinds, restores and new projects still ask.
+- **Autopilot**: the same for your own calls; missions go further on their \
+  own inside their signed grants. A session you start yourself still asks \
+  (it would not count against any mission's budget), and so do kills, \
+  restarts, rewinds, restores and new projects.
 
 A call that went without a card is still audited and shows in the chat as \
 pre-approved, so say what you did in one line. When a call returns \

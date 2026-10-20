@@ -4068,8 +4068,8 @@ deliberately.
   since review round 15 (F21), everything it WRITES into a session as well:
   `send_prompt`, `run_prompt`, `queue_prompt`, and `dispatch_task` to an
   existing worker (the 2026-10-17 review's F2: the autonomy position
-  pre-approves these into a session the operator started or briefed, and a
-  start inside a mission's grant at Autopilot; see `docs/status.md`). An
+  pre-approves these into a session the operator started or briefed and
+  still follows; its starts always ask; see `docs/status.md`). An
   approved call runs on the hub itself and the operator is told in a
   `[fleet] approved: …` note (F1). The toggle lifts none of it; a caller that is not the
   operator client is ungated for the prompts (they are `confirm: false`). On a hub

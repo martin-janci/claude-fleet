@@ -53,11 +53,14 @@ from `autonomy.ts`; Custom grants what Ask first does), and since the
 - **Pre-approval (F2, owner-approved; reverses review round 15 F21 for these
   cases only).** At Within your brief the operator's `send_prompt`,
   `queue_prompt`, `run_prompt` and `dispatch_task` into a live session it
-  started or briefed (`Store::is_open_control_handoff`) go without a card;
-  at Autopilot so does a Claude `new_session` (or `dispatch_task`
-  `new_worker`) on a host inside an active mission's live grant — its
-  hosts, expiry and budget, and parallel cap (`start_inside_mission_grant`).
-  Kills, restarts, rewinds, restores, add_project and every `confirm: true`
+  started or briefed (`Store::is_open_control_handoff`) and still follows
+  (`control_follow::session_followed`: not muted, merged, done or quiet;
+  review w04-4) go without a card. The operator's starts (`new_session`,
+  `dispatch_task` `new_worker`) ask at every position, Autopilot included:
+  such a session is not a mission task, so no grant's budget or parallel
+  cap would count it and Pause all would not stop it (review w04-5; until
+  2026-10-19 Autopilot let one through on a host inside any active
+  mission's grant). Kills, restarts, rewinds, restores, add_project and every `confirm: true`
   tool always ask. The rule is one pure function,
   `guard::operator_must_confirm(tool, position, own_handoff, inside_grant)`,
   with a truth-table test. A pre-approved call writes a

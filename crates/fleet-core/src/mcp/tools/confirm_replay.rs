@@ -12,7 +12,9 @@
 //!   approval, once; Control's own retry is told `RunByFleet`), and a
 //!   `[fleet] approved: <call> → <result>` note is queued for Control's next
 //!   idle moment;
-//! - denied: a `[fleet] denied: <call>` note.
+//! - denied: a `[fleet] denied: <call>` note;
+//! - expired (nobody answered within `guard::CONFIRM_TTL`, review w04-3): a
+//!   `[fleet] expired: <call>` note, so Control does not wait on forever.
 //!
 //! The nonce keeps its TTL: an unanswered request expires with its replay,
 //! and an answer to an expired one runs nothing.
@@ -58,6 +60,17 @@ pub fn answered_note(tool: &str, summary: &str, outcome: Option<Result<&str, &st
     }
 }
 
+/// PURE: the note Control is queued when its card expired unanswered
+/// (review w04-3). Opens with `[fleet]`, as [`answered_note`] does.
+pub fn expired_note(tool: &str, summary: &str) -> String {
+    let call = one_line(&format!("{tool} {summary}"), 200);
+    let mins = guard::CONFIRM_TTL.as_secs() / 60;
+    format!(
+        "[fleet] expired: {call} — nobody answered in {mins} min, so the card is gone and \
+         nothing ran. Ask again if it still matters."
+    )
+}
+
 /// The nonce an `E_CONFIRM_REQUIRED` result carries, if this is one.
 pub(super) fn confirm_nonce_of(result: &CallToolResult) -> Option<String> {
     if !result.is_error.unwrap_or(false) {
@@ -96,9 +109,15 @@ impl FleetTools {
         mut context: RequestContext<RoleServer>,
     ) -> guard::ConfirmReplay {
         let this = self.clone();
-        Box::new(move |approved| {
+        Box::new(move |answer| {
             Box::pin(async move {
                 let tool = request.name.to_string();
+                if answer == guard::ConfirmAnswer::Expired {
+                    audit("confirm_replay", &format!("tool={tool} expired=true"));
+                    this.note_operator(expired_note(&tool, &summary)).await;
+                    return;
+                }
+                let approved = answer == guard::ConfirmAnswer::Approved;
                 let outcome = if approved {
                     let args = request.arguments.get_or_insert_with(Default::default);
                     args.insert(
@@ -196,6 +215,20 @@ mod tests {
             "{denied}"
         );
         assert!(crate::service::prompt_origin::is_fleet_prompt(&denied));
+    }
+
+    /// Review w04-3: an expired card is one fleet line saying nothing ran.
+    #[test]
+    fn an_expired_card_is_told_as_fleets_line() {
+        let note = expired_note("new_session", "host=h project=1");
+        assert!(
+            note.starts_with(
+                "[fleet] expired: new_session host=h project=1 — nobody answered in 10 min"
+            ),
+            "{note}"
+        );
+        assert!(note.contains("nothing ran"), "{note}");
+        assert!(crate::service::prompt_origin::is_fleet_prompt(&note));
     }
 
     #[test]
