@@ -2338,7 +2338,7 @@ What else to know:
 The hub (or a standalone desktop) plans tidy-up on every GC sweep
 (`gc.sweep_interval_secs`) and on request (`work { action: "tidy" }`, the
 desktop's "Tidy up · n"). Suggestions only, by default. The settings, all
-under Settings → Work → Lifecycle or `set_fleet_setting`:
+under Settings → Work & trackers → Tidy-up or `set_fleet_setting`:
 
 | Setting | Default | Meaning |
 |---|---|---|
@@ -4102,7 +4102,12 @@ deliberately.
   `send_prompt`, `run_prompt`, `queue_prompt`, and `dispatch_task` to an
   existing worker (the 2026-10-17 review's F2: the autonomy position
   pre-approves these into a session the operator started or briefed and
-  still follows; its starts always ask; see `docs/status.md`). An
+  still follows; at Autopilot also a start inside a running mission's live
+  grant; and with session care, `control.session_care`, on by default, a
+  `restart_session` of a session the operator started itself at Within
+  your brief and Autopilot and its `safe_kill_session` at Autopilot; the
+  rest always ask: `guard::operator_must_confirm_with`, see
+  `docs/status.md`). An
   approved call runs on the hub itself and the operator is told in a
   `[fleet] approved: …` note (F1). The toggle lifts none of it; a caller that is not the
   operator client is ungated for the prompts (they are `confirm: false`). On a hub
