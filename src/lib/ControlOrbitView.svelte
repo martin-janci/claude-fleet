@@ -17,6 +17,7 @@
   import { windowHidden } from './window_hidden';
   import { readErrorText } from './work_view';
   import type { IpcError } from './result';
+  import Skeleton from './states/Skeleton.svelte';
 
   let { onfocus }: { onfocus?: (s: SessionRow) => void } = $props();
 
@@ -100,6 +101,9 @@
       now={nowSec}
       onpick={(r) => (openRunId = r.id)}
     />
+  {:else}
+    <!-- Review w17-11: the first read in flight is a skeleton, not a blank. -->
+    <Skeleton rows={3} label="Loading runs" />
   {/if}
 </div>
 

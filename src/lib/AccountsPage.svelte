@@ -9,7 +9,8 @@
   // (`account_spend`, the `usage_daily_account` roll-up of step 4.2; local
   // only, so a paired desktop shows no $), and how many sessions its limit
   // paused, with Show and a one-click Switch to the account with headroom.
-  import { accounts } from './accounts';
+  import { accounts, accountsLoad, loadAccounts } from './accounts';
+  import ListGate from './states/ListGate.svelte';
   import { hosts } from './hosts';
   import { sessions } from './sessions';
   import { accountUsage, refreshAccountUsage } from './account_usage_store';
@@ -421,9 +422,11 @@
   {/if}
 
   {#if list.length === 0}
-    <p class="empty" data-testid="accounts-empty">
-      No Claude account yet. Add one, or log a host in to it.
-    </p>
+    <ListGate load={$accountsLoad} what="accounts" onretry={() => void loadAccounts()} testid="accounts">
+      <p class="empty" data-testid="accounts-empty">
+        No Claude account yet. Add one, or log a host in to it.
+      </p>
+    </ListGate>
   {:else}
     <div class="split">
       <ul class="list" role="listbox" aria-label="Claude accounts" tabindex="-1" onkeydown={onListKeydown}>

@@ -11,6 +11,7 @@
   import { listRuns, type RunRow } from './runs';
   import { readErrorText } from './work_view';
   import type { IpcError } from './result';
+  import Skeleton from './states/Skeleton.svelte';
 
   let routines = $state<RoutineRow[]>([]);
   let last = $state<Map<number, RunRow>>(new Map());
@@ -58,7 +59,10 @@
     <p class="muted" role="alert" data-testid="control-routines-error">
       {readErrorText(loadError)} <button type="button" class="btn" onclick={() => void load()}>Retry</button>
     </p>
-  {:else if loaded && rows.length === 0}
+  {:else if !loaded}
+    <!-- Review w17-11: the first read in flight is a skeleton, not a blank. -->
+    <Skeleton rows={3} label="Loading routines" />
+  {:else if rows.length === 0}
     <div class="empty" data-testid="control-routines-empty">
       <p class="muted">No routines yet. A routine is a saved prompt that starts a session on a schedule or an event.</p>
       <button type="button" class="btn" data-testid="control-routines-template" onclick={() => openRoutines({ template: 'morning-pr-sweep' })}

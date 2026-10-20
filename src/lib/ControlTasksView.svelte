@@ -20,6 +20,7 @@
     type TaskChips,
   } from './control_views';
   import type { IpcError } from './result';
+  import Skeleton from './states/Skeleton.svelte';
 
   let chips = $state<TaskChips>({ mine: false, claude: false });
   let tasks = $state<WorkTask[]>([]);
@@ -167,7 +168,10 @@
     <p class="muted" role="alert" data-testid="control-tasks-error">
       {readErrorText(loadError)} <button type="button" class="btn quiet" onclick={() => void load()}>Retry</button>
     </p>
-  {:else if loaded && shownCount === 0}
+  {:else if !loaded}
+    <!-- Review w17-11: the first read in flight is a skeleton, not a blank. -->
+    <Skeleton rows={3} label="Loading tasks" />
+  {:else if shownCount === 0}
     <p class="muted empty" data-testid="control-tasks-empty">
       {chips.mine || chips.claude ? 'No tasks match these filters.' : 'No tasks yet. Ask Control to plan one, or type /task in the chat.'}
     </p>
