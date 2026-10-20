@@ -371,6 +371,19 @@ describe('an org’s members (phase D)', () => {
     expect(screen.queryByTestId('member-pairing')).toBeNull();
   });
 
+  it('a pairing started on another hub’s org of the same id is not shown here', async () => {
+    route([team]);
+    memberPairing.set({ fleet: 'company', org_id: 1, person: 'cleo', pairing });
+    render(ResourcePage, { props: { page, resource } });
+    await openTab('Members');
+    await screen.findByTestId('member-pair-3');
+    expect(screen.queryByTestId('member-pairing')).toBeNull();
+    expect(screen.queryByTestId('pairing-code')).toBeNull();
+    // The primary's own pairing on that org is.
+    memberPairing.set({ fleet: null, org_id: 1, person: 'cleo', pairing });
+    await waitFor(() => expect(screen.getByTestId('pairing-code').textContent).toBe('M4D-82P-QX7'));
+  });
+
   it('says why when no code can be minted (a standalone desktop)', async () => {
     route([team]);
     invoke.mockImplementation(async (cmd: string) => {

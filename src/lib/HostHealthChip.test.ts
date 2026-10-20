@@ -15,6 +15,15 @@ import { operatorHost } from './operator';
 import { hostsViewRequest } from './app_views';
 import { host, session } from './hosts_fixture';
 import { expectAccessible } from './a11y_check';
+import {
+  PRIMARY,
+  emptyRows,
+  openFleetSession,
+  _resetFleetsForTest,
+  _setFleetRowsForTest,
+  _setFleetsForTest,
+  type FleetInfo,
+} from './fleets';
 
 // Thread room (2026-10-14): the status bar's host health chip and its popover.
 
@@ -70,6 +79,41 @@ describe('HostHealthChip', () => {
     await Promise.resolve();
     await new Promise((r) => setTimeout(r));
     expect(screen.getByTestId('host-health-chip').textContent).toContain('htz');
+  });
+
+  it("follows an extra fleet's open session, but not under Control, which covers it", async () => {
+    const base: FleetInfo = {
+      id: PRIMARY,
+      label: 'home',
+      url: null,
+      color: '#5b8def',
+      primary: true,
+      local: true,
+      client_name: null,
+      connection: null,
+      unavailable: null,
+    };
+    const company: FleetInfo = { ...base, id: 'company', label: 'Company', url: 'https://c.example.com', primary: false, local: false };
+    _setFleetsForTest([base, company]);
+    _setFleetRowsForTest('company', {
+      ...emptyRows(),
+      hosts: new Map([['box', load('box', 40, 20)]]),
+      sessions: new Map([[9, session('box', 'away', { id: 9 })]]),
+    });
+    try {
+      openFleetSession('company', 9);
+      render(HostHealthChip);
+      expect(screen.getByTestId('host-health-chip').textContent).toContain('Company · box');
+      destination.set('control');
+      await Promise.resolve();
+      await new Promise((r) => setTimeout(r));
+      const chip = screen.getByTestId('host-health-chip');
+      expect(chip.textContent).not.toContain('box');
+      expect(chip.textContent).toContain('mac');
+      expect(chip.getAttribute('title')).toContain("Control's host");
+    } finally {
+      _resetFleetsForTest();
+    }
   });
 
   it('a click lists every host; a name opens it in Hosts; Esc closes', async () => {

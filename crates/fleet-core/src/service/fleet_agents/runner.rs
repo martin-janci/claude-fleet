@@ -597,6 +597,87 @@ pub trait FleetHost: Send + Sync {
     }
 }
 
+/// One page of synced items, each with its newest comments from `provider`
+/// when one is given (`None`: comments not asked for). `max` is the page
+/// size the store was asked for: a page that came back full has more after
+/// it. A tracker that refuses every call for now (rate limit, network,
+/// credential) stops the page at the item before; on the first item that is
+/// the poll's error.
+pub(crate) async fn read_item_page(
+    tracker: i64,
+    items: Vec<(crate::store::WorkItemRow, crate::store::ItemMeta)>,
+    max: usize,
+    provider: Option<&dyn crate::service::trackers::TrackerProvider>,
+) -> Result<ItemsRead, String> {
+    use crate::service::trackers::{IssueComment, ItemRef, TrackerError};
+    let full = items.len() >= max;
+    // The last row this page is done with.
+    let mut last = None;
+    let mut read = ItemsRead::default();
+    for (row, meta) in items {
+        let mark = (row.updated_at, row.id);
+        let Some(key) = row.key.clone() else {
+            last = Some(mark);
+            continue;
+        };
+        let r = match &row.external_id {
+            Some(id) => ItemRef::Id(id.clone()),
+            None => ItemRef::parse(&key),
+        };
+        let comments = match &provider {
+            None => Vec::new(),
+            Some(p) => match p.comments(&r, ITEM_COMMENTS).await {
+                Ok(c) => c,
+                // The tracker says no to every call for now: stop here,
+                // and the next poll starts from this item.
+                Err(
+                    e @ (TrackerError::RateLimited { .. }
+                    | TrackerError::Unreachable(_)
+                    | TrackerError::Auth(_)
+                    | TrackerError::Captcha
+                    | TrackerError::Unconfigured),
+                ) => {
+                    if last.is_none() {
+                        return Err(format!("tracker {tracker}: {}", e.explain()));
+                    }
+                    tracing::warn!(tracker, key, error = %e.explain(), "[agents] fleet: comments, stopping");
+                    read.more = last;
+                    return Ok(read);
+                }
+                // An item whose comments cannot be read is still assigned.
+                Err(e) => {
+                    tracing::warn!(tracker, key, error = %e.explain(), "[agents] fleet: comments");
+                    Vec::new()
+                }
+            },
+        };
+        last = Some(mark);
+        read.items.push(ItemThread {
+            thread: IssueThread {
+                key,
+                summary: row.title,
+                description: meta.description.unwrap_or_default(),
+                assignee_id: meta.assignee_id,
+                status: row.status_name.unwrap_or(row.status_category),
+                updated: row.updated_ext,
+                comments: comments
+                    .into_iter()
+                    .map(|c| IssueComment {
+                        id: c.id,
+                        author_id: None,
+                        author: c.author,
+                        body: c.body,
+                        created: Some(c.created_at),
+                    })
+                    .collect(),
+            },
+            url: row.url,
+        });
+    }
+    read.more = if full { last } else { None };
+    Ok(read)
+}
+
 /// The production host.
 pub struct LiveFleetHost {
     pub store: Arc<Mutex<Store>>,
@@ -656,7 +737,6 @@ impl FleetHost for LiveFleetHost {
     }
 
     async fn item_threads(&self, tracker: i64, page: ItemPage) -> Result<ItemsRead, String> {
-        use crate::service::trackers::{IssueComment, ItemRef, TrackerError};
         // With the sync off nothing new is ever written: say so rather than
         // finding nothing on every poll.
         if crate::service::trackers::sync::interval(&self.store).is_none() {
@@ -670,80 +750,15 @@ impl FleetHost for LiveFleetHost {
             s.tracker_items_written_since(tracker, page.after, page.until, page.max)
                 .map_err(|e| e.message)?
         };
-        let full = items.len() >= page.max;
-        // The last row this page is done with.
-        let mut last = None;
-        let mut read = ItemsRead::default();
         if items.is_empty() {
-            return Ok(read);
+            return Ok(ItemsRead::default());
         }
         let provider = if page.comments {
             Some(self.base.provider(tracker)?)
         } else {
             None
         };
-        for (row, meta) in items {
-            let mark = (row.updated_at, row.id);
-            let Some(key) = row.key.clone() else {
-                last = Some(mark);
-                continue;
-            };
-            let r = match &row.external_id {
-                Some(id) => ItemRef::Id(id.clone()),
-                None => ItemRef::parse(&key),
-            };
-            let comments = match &provider {
-                None => Vec::new(),
-                Some(p) => match p.comments(&r, ITEM_COMMENTS).await {
-                    Ok(c) => c,
-                    // The tracker says no to every call for now: stop here,
-                    // and the next poll starts from this item.
-                    Err(
-                        e @ (TrackerError::RateLimited { .. }
-                        | TrackerError::Unreachable(_)
-                        | TrackerError::Auth(_)
-                        | TrackerError::Captcha
-                        | TrackerError::Unconfigured),
-                    ) => {
-                        if last.is_none() {
-                            return Err(format!("tracker {tracker}: {}", e.explain()));
-                        }
-                        tracing::warn!(tracker, key, error = %e.explain(), "[agents] fleet: comments, stopping");
-                        read.more = last;
-                        return Ok(read);
-                    }
-                    // An item whose comments cannot be read is still assigned.
-                    Err(e) => {
-                        tracing::warn!(tracker, key, error = %e.explain(), "[agents] fleet: comments");
-                        Vec::new()
-                    }
-                },
-            };
-            last = Some(mark);
-            read.items.push(ItemThread {
-                thread: IssueThread {
-                    key,
-                    summary: row.title,
-                    description: meta.description.unwrap_or_default(),
-                    assignee_id: meta.assignee_id,
-                    status: row.status_name.unwrap_or(row.status_category),
-                    updated: row.updated_ext,
-                    comments: comments
-                        .into_iter()
-                        .map(|c| IssueComment {
-                            id: c.id,
-                            author_id: None,
-                            author: c.author,
-                            body: c.body,
-                            created: Some(c.created_at),
-                        })
-                        .collect(),
-                },
-                url: row.url,
-            });
-        }
-        read.more = if full { last } else { None };
-        Ok(read)
+        read_item_page(tracker, items, page.max, provider.as_deref()).await
     }
 
     async fn open_prs(&self, host: &str, repo: &str) -> Result<Vec<OpenPr>, String> {

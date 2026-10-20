@@ -606,6 +606,15 @@ function forgetFleet(id: string): void {
   const map = readPref<Record<string, string>>(FLEET_BY_REPO_PREF, {}, isRepoMap);
   const kept = Object.fromEntries(Object.entries(map).filter(([, f]) => f !== id));
   if (Object.keys(kept).length !== Object.keys(map).length) writePref(FLEET_BY_REPO_PREF, kept);
+  for (const fn of forgetHooks) fn(id);
+}
+
+/** What other modules keep per fleet slot (the sidebar's Machine / Org
+ *  picks and folds, `fleet_filters.ts`) forgets it here too. A hook rather
+ *  than an import: those modules import this one. */
+const forgetHooks: ((id: string) => void)[] = [];
+export function onFleetForgotten(fn: (id: string) => void): void {
+  forgetHooks.push(fn);
 }
 
 /** An extra fleet's Retry. */

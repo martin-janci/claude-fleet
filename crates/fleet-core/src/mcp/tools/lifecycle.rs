@@ -304,7 +304,15 @@ impl FleetTools {
         // A switch onto another login (review w02-8) takes the checks a
         // start on it takes: not onto a login fleet knows is signed out
         // (the pane would ask for `/login`), and not past
-        // `accounts.pause_at` unless the person chose it.
+        // `accounts.pause_at` unless the person chose it. A person's own
+        // device picking a login in Switch account HAS chosen it (the picker
+        // shows each login's headroom, and neither the desktop nor the phone
+        // sends `over_limit_ok` on a restart), so only the operator, an
+        // agent's per-host token and the master are held — as a standalone
+        // desktop's `sessions::restart_session` lets the person's switch
+        // through.
+        let person_chose = p.over_limit_ok.unwrap_or(false)
+            || (caller.is_person_device() && !caller.is_operator());
         if let Some(target) = p.profile.as_deref() {
             let target = Some(target.trim()).filter(|t| !t.is_empty());
             let s = lock(self.reader()).map_err(to_mcp_err)?;
@@ -326,7 +334,7 @@ impl FleetTools {
                         format!("{why}; sign it in again or switch to another login"),
                     )));
                 }
-                if !p.over_limit_ok.unwrap_or(false) {
+                if !person_chose {
                     crate::service::account_limits::refuse_over_limit(
                         &s,
                         &host_alias,
