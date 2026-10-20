@@ -39,7 +39,7 @@ export const AUTONOMY: readonly AutonomyPosition[] = [
   {
     id: 'brief',
     label: 'Within your brief',
-    blurb: 'Prompts and briefs the sessions it started or briefed without asking you, and goes on with a recommended choice after 10 minutes. Asks before starting, stopping or restarting anything.',
+    blurb: 'Prompts and briefs the sessions it started or briefed without asking you, and goes on with a recommended choice after 10 minutes. Asks before starting, stopping or restarting anything, unless “Control looks after its sessions” is on: then it restarts a stuck one itself.',
     maxLevel: 2,
     autoContinue: true,
     minutes: 10,
@@ -48,7 +48,7 @@ export const AUTONOMY: readonly AutonomyPosition[] = [
   {
     id: 'autopilot',
     label: 'Autopilot',
-    blurb: "Also starts sessions inside a mission's grant (its hosts, hours and budget) and creates its tasks, and goes on with a recommended choice after 2 minutes. Kills, restarts and deletes still ask.",
+    blurb: "Also starts sessions inside a mission's grant (its hosts, hours and budget) and creates and starts its tasks, and goes on with a recommended choice after 2 minutes. Kills, restarts and deletes still ask, unless “Control looks after its sessions” is on: then it also restarts a stuck session and retires a finished one after pushing its work.",
     maxLevel: 3,
     autoContinue: true,
     minutes: 2,

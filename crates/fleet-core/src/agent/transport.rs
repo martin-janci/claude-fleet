@@ -507,6 +507,37 @@ mod tests {
         }
     }
 
+    /// A connection that drops while an exec is in flight reaches the
+    /// `SshExec` caller with the registry's `details.connection_lost` intact:
+    /// the reconcile's redial grace (`registry::connection_gone`) reads it
+    /// through this seam, so a re-wrap that kept only code and message would
+    /// mark a restarting agent host unreachable.
+    #[tokio::test]
+    async fn a_connection_lost_mid_exec_keeps_its_details_through_the_transport() {
+        let reg = AgentRegistry::new();
+        let agent = FakeAgent::connect(&reg, "laptop", silent());
+        let t = Arc::new(AgentTransport::new(Arc::clone(&reg)));
+        let t2 = Arc::clone(&t);
+        let call = tokio::spawn(async move {
+            t2.run("laptop", &["bash", "-lc", "true"], Duration::from_secs(60))
+                .await
+        });
+        for _ in 0..100_000 {
+            if reg.pending_len("laptop") == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(reg.pending_len("laptop"), 1, "the exec never went out");
+        agent.disconnect();
+        let err = call.await.unwrap().unwrap_err();
+        assert_eq!(err.code, codes::E_AGENT_PROTOCOL);
+        assert!(
+            crate::agent::registry::connection_gone(&err),
+            "details lost on the way out: {err:?}"
+        );
+    }
+
     // ── the argv trap ───────────────────────────────────────────────────────
 
     /// `SshExec`'s `args` are **not** an argv: ssh joins them with spaces and

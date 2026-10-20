@@ -199,17 +199,21 @@ function feedLine(r: RunRow): OrbitFeed {
  * long one that shares its leading segments (split on `-`, `_`, `.`) with
  * another host drops them, so `claude-fleet-ci` and `claude-fleet-trn`
  * read `ci` and `trn` instead of two clipped `claude-fl…`. The full alias
- * stays in the tooltip and the accessible name.
+ * stays in the tooltip and the accessible name. Two shortened labels that
+ * would print the same (`prod-eu-web1` and `prod-us-web1` both `web1`) put
+ * back leading segments until they differ, so no two planets share a name.
  */
 export function hostLabels(aliases: string[]): Map<string, string> {
   const seg = (a: string) => a.split(/(?<=[-_.])/);
-  const out = new Map<string, string>();
+  const segs = new Map<string, string[]>();
+  const drop = new Map<string, number>();
   for (const a of aliases) {
+    const mine = seg(a);
+    segs.set(a, mine);
     if (a.length <= LABEL_MAX) {
-      out.set(a, a);
+      drop.set(a, 0);
       continue;
     }
-    const mine = seg(a);
     let shared = 0;
     for (const b of aliases) {
       if (b === a) continue;
@@ -218,8 +222,32 @@ export function hostLabels(aliases: string[]): Map<string, string> {
       while (n < mine.length - 1 && n < theirs.length && mine[n] === theirs[n]) n++;
       shared = Math.max(shared, n);
     }
-    out.set(a, shared > 0 ? mine.slice(shared).join('') : a);
+    drop.set(a, shared);
   }
+  const label = (a: string) => (segs.get(a) ?? [a]).slice(drop.get(a) ?? 0).join('');
+  // Each pass puts one segment back on every shortened label that collides;
+  // a label with nothing dropped is its full alias, unique by definition.
+  for (;;) {
+    const byLabel = new Map<string, string[]>();
+    for (const a of drop.keys()) {
+      const l = label(a);
+      byLabel.set(l, [...(byLabel.get(l) ?? []), a]);
+    }
+    let changed = false;
+    for (const group of byLabel.values()) {
+      if (group.length < 2) continue;
+      for (const a of group) {
+        const d = drop.get(a) ?? 0;
+        if (d > 0) {
+          drop.set(a, d - 1);
+          changed = true;
+        }
+      }
+    }
+    if (!changed) break;
+  }
+  const out = new Map<string, string>();
+  for (const a of drop.keys()) out.set(a, label(a));
   return out;
 }
 

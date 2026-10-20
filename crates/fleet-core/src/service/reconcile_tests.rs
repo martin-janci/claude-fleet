@@ -1571,7 +1571,7 @@ async fn a_single_host_reconcile_outdates_a_parked_late_probe() {
     // single-host reconcile then writes a newer view of that host. The late
     // probe, written at the next pass's start, must not put the older view
     // back: the single-host write is recorded as the newest for the host.
-    let f = parked_late_probe_then(true).await;
+    let (f, _) = parked_late_probe_then(true).await;
     let row = f.row("job", "slow");
     assert_eq!(row.status, "running", "the late probe was skipped: {row:?}");
     assert!(f.reachable("slow"));
@@ -1579,10 +1579,19 @@ async fn a_single_host_reconcile_outdates_a_parked_late_probe() {
 
 /// The control for the test above: with no newer write, the same late probe
 /// IS written at the next pass's start — so that test's assertions would see
-/// it if the skip broke.
+/// it if the skip broke. Only that write can stamp `slow`: the first pass
+/// parked it unwritten and the drain pass's own probe hangs past its budget.
 #[tokio::test]
 async fn a_parked_late_probe_is_written_when_nothing_newer_was() {
-    let f = parked_late_probe_then(false).await;
+    let (f, parked_from) = parked_late_probe_then(false).await;
+    let newest = f
+        .deps
+        .newest_written("slow")
+        .expect("the drain pass wrote the late probe");
+    assert!(
+        (parked_from..=now_unix()).contains(&newest),
+        "the stamp is the parked probe's start ({parked_from}..): {newest}"
+    );
     let probe_view = (
         f.try_row("job", "slow").map(|r| r.status),
         f.reachable("slow"),
@@ -1599,8 +1608,9 @@ async fn a_parked_late_probe_is_written_when_nothing_newer_was() {
 /// later second while it is parked, wait for the late probe to answer, and
 /// run the pass that drains it — with that pass's own fresh probe of `slow`
 /// hanging too, so whatever it finds is not written in that pass. The
-/// single-host write must record itself as `slow`'s newest.
-async fn parked_late_probe_then(single_host: bool) -> Fleet {
+/// single-host write must record itself as `slow`'s newest. Returns the unix
+/// second before the parked probe started.
+async fn parked_late_probe_then(single_host: bool) -> (Fleet, i64) {
     let mut f = Fleet::new(&["slow"]);
     f.deps = f.deps.with_pass_budget(Duration::from_millis(100));
     f.list("slow", "job|1|2|0|/tmp/j|%4\n");
@@ -1612,6 +1622,7 @@ async fn parked_late_probe_then(single_host: bool) -> Fleet {
             for_: Duration::from_millis(400),
         },
     );
+    let parked_from = now_unix();
     f.pass().await;
     assert!(f.deps.probe_in_flight("slow"));
     assert_eq!(f.deps.newest_written("slow"), None, "nothing written yet");
@@ -1643,7 +1654,7 @@ async fn parked_late_probe_then(single_host: bool) -> Fleet {
         },
     );
     f.pass().await;
-    f
+    (f, parked_from)
 }
 
 #[tokio::test]

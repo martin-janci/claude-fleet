@@ -61,13 +61,16 @@ export interface SessionFacetInput {
   /** The effective work filters (`effectiveWorkFilters`). */
   work: WorkFilters;
   trackerName?: (id: number) => string | undefined;
+  /** How the Machine filter's value reads, where it is not a plain alias
+   *  (an extra fleet's host: `work · mercury`). */
+  hostLabel?: string;
 }
 
 export function sessionFacets(i: SessionFacetInput): (Facet & { id: SessionFacetId })[] {
   const out: (Facet & { id: SessionFacetId })[] = [];
   if (i.needsYou) out.push({ id: 'needs-you', label: 'Needs you' });
   if (i.scope !== 'all') out.push({ id: 'scope', label: `Org: ${i.scopeLabel ?? i.scope}` });
-  if (i.host !== 'all') out.push({ id: 'host', label: `Host: ${i.host}` });
+  if (i.host !== 'all') out.push({ id: 'host', label: `Host: ${i.hostLabel ?? i.host}` });
   if (i.agent) out.push({ id: 'agent', label: `Agent: ${i.agent}` });
   if (i.recency !== 'all') out.push({ id: 'recency', label: `Last ${i.recency}` });
   const q = i.search.trim();

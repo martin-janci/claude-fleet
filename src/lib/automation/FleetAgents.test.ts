@@ -141,6 +141,35 @@ describe('the fleet agents on the Agents tab', () => {
     expect((await screen.findByTestId('fleet-agents-note')).textContent).toContain('issue-triage added to the catalog');
   });
 
+  it("adds a gallery entry once, names it, and announces and focuses the result", async () => {
+    const pending: { finish?: (v: unknown) => void } = {};
+    const base = invoke.getMockImplementation() as (
+      cmd: string,
+      a: { action: string },
+    ) => Promise<unknown>;
+    invoke.mockImplementation(async (cmd: string, a: { action: string }) =>
+      cmd === "agents_fleet" && a.action === "install"
+        ? new Promise((res) => (pending.finish = res))
+        : base(cmd, a),
+    );
+    render(FleetAgents, { props: { rules: [] } });
+    const button = await screen.findByRole("button", {
+      name: "Add issue-triage to catalog",
+    });
+    await fireEvent.click(button);
+    expect((button as HTMLButtonElement).disabled).toBe(true);
+    await fireEvent.click(button);
+    const installs = () =>
+      invoke.mock.calls.filter(
+        (c) => c[0] === "agents_fleet" && c[1].action === "install",
+      ).length;
+    expect(installs()).toBe(1);
+    pending.finish?.({ commit: "abc", lint: { errors: [], warnings: [] } });
+    const note = await screen.findByRole("status");
+    expect(note.textContent).toContain("issue-triage added to the catalog");
+    await waitFor(() => expect(document.activeElement).toBe(note));
+  });
+
   it('names a rule by its agent or its definition', () => {
     expect(ruleAgentName({ agent: 'review' })).toBe('PR reviewer');
     expect(ruleAgentName({ agent: 'fleet', definition: 'l2-support' })).toBe('l2-support');

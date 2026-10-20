@@ -142,8 +142,10 @@ and nobody answers, fleet sends that option's `prompt` once
 the fleet runs (`service::control_continue`), so with no window open and
 only once, as a `[fleet]` note quoting the option. A countdown above the
 box offers *Send now* and *Cancel*, and typing or any newer turn stops it.
-An option or a question that names a push, a delete or another step that
-is hard to undo (`decide::quick_answer::risky`) is never sent this way, nor
+Only a card in a tagged fence (```` ```fleet-ui ```` or ```` ```json ````)
+is sent this way: one in an untagged fence reads as quoted output and is
+drawn but waits for a click. An option or a question that names a push, a
+delete or another step that is hard to undo (`decide::quick_answer::risky`) is never sent this way, nor
 a card from a reply more than a day old.
 
 ### `form`

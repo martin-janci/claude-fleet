@@ -13,6 +13,11 @@
 //!   handed-off PR that conflicts or went red and a handed-off mission that
 //!   stalled; the rule says what Control does with it at each autonomy
 //!   position.
+//! * **Carry your tasks through** and **Look after your sessions**: what
+//!   Control does with a digest line about one of its sessions (the line
+//!   names the task it works on, `operator_feed`) without being asked.
+//!   Whether a step needs a card is still `mcp::guard`'s rule, session care
+//!   included.
 
 /// The section, appended after the base instructions.
 pub const SECTION: &str = "\
@@ -43,6 +48,42 @@ step still goes through the usual confirmation. Then tell the person once,\n\
 in one line, what you did. `sweep: report` means the person keeps the\n\
 wheel (Ask first): tell them in one line and propose, nothing more.\n\
 \n\
+## Carry your tasks through\n\
+\n\
+A `[fleet events]` line that names `task KEY` is about a session working on\n\
+that task. Do not wait to be asked what happened:\n\
+\n\
+- **finished its turn**: read where it stopped (`session_conversation`, its\n\
+  pull request). If the task is done, ask it for its result (`work_link`\n\
+  `wrap_up`), record it (`work_link` `comment`, `set_status` for work with\n\
+  no ticket, `followup` for what is left) and say so in one line. If it is\n\
+  not done and the next step follows from the task, brief the session on\n\
+  it; if it needs a decision, ask the person.\n\
+- **then the next one**: in a mission, take its next step (`work_link`\n\
+  `mission_start`); otherwise look at what is ready (`work` `today`,\n\
+  `tree`) and start or propose the next task (`work_link` `start` or\n\
+  `run`, on the host `suggest_placement` picks).\n\
+- **failed** or **has failing checks**: read why and brief the session to\n\
+  fix it once; when it fails again the same way, stop and tell the person.\n\
+\n\
+## Look after your sessions\n\
+\n\
+For a session you started or briefed:\n\
+\n\
+- **is waiting on an answer**: read the question (`session_conversation`).\n\
+  Answer it with `send_prompt` when the answer follows from the brief and is\n\
+  not a risky step; otherwise ask the person, quoting the question.\n\
+- **stuck** (no output, a dialog it cannot leave, the same error over and\n\
+  over): `restart_session` it. Parked at a usage limit with no automatic\n\
+  resume: `restart_session` with another signed-in `profile` that has\n\
+  headroom (`diagnose` names them).\n\
+- **done** (its work pushed or merged, nothing left in its brief): retire\n\
+  it with `safe_kill_session`, which commits and pushes before it closes\n\
+  anything. Never `kill_session` a session with work in it.\n\
+\n\
+Whether each of these needs a card is the autonomy rule above (session\n\
+care); when one does, say in one line what waits for the person.\n\
+\n\
 ## Going on with your recommended option\n\
 \n\
 When nobody answers a `choices` card you ended on, fleet may send its\n\
@@ -60,6 +101,59 @@ mod tests {
         assert_eq!(md.matches("## Check before you tell the person").count(), 1);
         assert_eq!(md.matches("## Sweep what you handed out").count(), 1);
         assert!(md.starts_with(crate::service::operator::claude_md()));
+    }
+
+    #[test]
+    fn the_task_and_care_rules_name_only_real_tools_and_actions() {
+        for heading in ["## Carry your tasks through", "## Look after your sessions"] {
+            assert_eq!(
+                crate::service::operator::claude_md_full()
+                    .matches(heading)
+                    .count(),
+                1
+            );
+        }
+        for action in [
+            "wrap_up",
+            "comment",
+            "set_status",
+            "followup",
+            "mission_start",
+            "start",
+            "run",
+        ] {
+            assert!(
+                crate::service::work::WORK_LINK_ACTIONS.contains(&action),
+                "{action} is not a work_link action"
+            );
+            assert!(SECTION.contains(&format!("`{action}`")), "{action}");
+        }
+        for action in ["today", "tree"] {
+            assert!(
+                crate::service::work::WORK_ACTIONS
+                    .iter()
+                    .any(|(a, _)| *a == action),
+                "{action} is not a work action"
+            );
+        }
+        for tool in [
+            "session_conversation",
+            "send_prompt",
+            "suggest_placement",
+            "diagnose",
+            "kill_session",
+        ]
+        .iter()
+        .chain(crate::mcp::guard::OPERATOR_CARE_TOOLS)
+        {
+            assert!(
+                crate::mcp::guard::policy(tool).is_some(),
+                "{tool} is not a tool"
+            );
+            assert!(SECTION.contains(&format!("`{tool}`")), "{tool}");
+        }
+        // The task the rule reads is the one the feed's lines name.
+        assert!(SECTION.contains("`task KEY`"));
     }
 
     #[test]

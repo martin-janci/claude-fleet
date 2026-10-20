@@ -114,7 +114,7 @@ impl FleetTools {
                 p.session_id, p.host_alias, p.tmux_name
             ),
         );
-        let (host_alias, tmux_name) = self.resolve_target(
+        let row = self.resolve_target_row(
             &caller,
             p.session_id,
             p.host_alias.as_deref(),
@@ -124,11 +124,15 @@ impl FleetTools {
             Reach::Own,
             "the session to retire",
         )?;
-        self.confirm_gate(
+        let (host_alias, tmux_name) = (row.host_alias, row.tmux_name);
+        // Session care: the operator retires its own handoff without a card
+        // at Autopilot (`guard::OPERATOR_CARE_TOOLS`).
+        self.confirm_gate_target(
             "safe_kill_session",
             p.confirm_nonce.as_deref(),
             &format!("host={host_alias} name={tmux_name}"),
             &caller,
+            GateTarget::Session(row.id),
         )?;
         let args = safe_kill::SafeKillSessionArgs {
             host_alias,
@@ -285,7 +289,7 @@ impl FleetTools {
                 p.session_id, p.host_alias, p.name
             ),
         );
-        let (host_alias, name) = self.resolve_target(
+        let row = self.resolve_target_row(
             &caller,
             p.session_id,
             p.host_alias.as_deref(),
@@ -295,8 +299,11 @@ impl FleetTools {
             Reach::Own,
             "the session to restart",
         )?;
-        // The operator's restarts (a kill and a start) need a person (D12).
-        self.confirm_gate(
+        let (host_alias, name) = (row.host_alias, row.tmux_name);
+        // The operator's restarts (a kill and a start) need a person (D12),
+        // unless session care lets one of its own handoffs through
+        // (`guard::OPERATOR_CARE_TOOLS`).
+        self.confirm_gate_target(
             "restart_session",
             p.confirm_nonce.as_deref(),
             &format!(
@@ -309,6 +316,7 @@ impl FleetTools {
                 bound_text(p.effort.as_deref())
             ),
             &caller,
+            GateTarget::Session(row.id),
         )?;
         let args = sessions::RestartSessionArgs {
             host_alias,

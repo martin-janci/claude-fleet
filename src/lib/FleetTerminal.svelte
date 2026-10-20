@@ -1,3 +1,8 @@
+<script lang="ts" module>
+  // Each view's own pty id suffix (`fleetPtyId`'s `view`).
+  let nextView = 0;
+</script>
+
 <script lang="ts">
   // An extra fleet's session, attached (multi-hub Phase 2). The attach is
   // this machine's own `ssh … tmux attach` (`pty_open`, the same in both
@@ -38,6 +43,7 @@
   let screen: Screen | null = null;
   let version = $state(0);
   let ptyId: string | null = null;
+  const viewNo = ++nextView;
   let generation: number | null = null;
   let open = $state(false);
   let error = $state<string | null>(null);
@@ -159,7 +165,7 @@
     version++;
     error = null;
     ended = false;
-    ptyId = fleetPtyId(fleet, session);
+    ptyId = fleetPtyId(fleet, session, viewNo);
     try {
       const opened = await invoke<unknown>('pty_open', {
         args: { id: ptyId, session_name: session.tmux_name, host_alias: session.host_alias, cols, rows },
