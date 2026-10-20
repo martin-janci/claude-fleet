@@ -1557,22 +1557,24 @@ pub(super) fn with_current_setting(
     if p.kind != "setting" {
         return Ok(());
     }
-    let Ok(mut payload) = serde_json::from_str::<super::actions::SettingPayload>(&p.payload) else {
+    // Edited as JSON so keys the struct does not name (`fingerprint`) stay.
+    let Ok(mut payload) = serde_json::from_str::<Value>(&p.payload) else {
         return Ok(());
     };
-    let Some(was) = crate::service::settings::effective_value(s, &payload.key) else {
+    let key = payload["key"].as_str().unwrap_or_default().to_string();
+    let value = payload["value"].as_str().unwrap_or_default().to_string();
+    let Some(was) = crate::service::settings::effective_value(s, &key) else {
         return Ok(());
     };
-    if was.trim() == payload.value.trim() {
-        return Err(format!("{} is already {}", payload.key, payload.value));
+    if was.trim() == value.trim() {
+        return Err(format!("{key} is already {value}"));
     }
-    let label = crate::service::settings::spec(&payload.key).map_or("", |sp| sp.label);
-    payload.body = format!(
-        "{label} ({}): {was} → {}\n\n{}",
-        payload.key, payload.value, payload.why
-    );
-    payload.was = was;
-    p.body.clone_from(&payload.body);
-    p.payload = serde_json::to_string(&payload).unwrap_or_default();
+    let label = crate::service::settings::spec(&key).map_or("", |sp| sp.label);
+    let why = payload["why"].as_str().unwrap_or_default();
+    let body = format!("{label} ({key}): {was} → {value}\n\n{why}");
+    payload["body"] = Value::String(body.clone());
+    payload["was"] = Value::String(was);
+    p.body = body;
+    p.payload = payload.to_string();
     Ok(())
 }

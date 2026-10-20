@@ -1254,13 +1254,7 @@ async fn a_pr_answer_comments_and_labels_within_the_repos() {
     );
     let ex = f.executor();
     for a in f.actions() {
-        // A fleet write answers with what it made (w08-3).
-        let got = ex.execute(&a).await;
-        assert!(
-            got == ActionResult::Executed || got == ActionResult::Done("done".into()),
-            "{}: {got:?}",
-            a.kind
-        );
+        assert_eq!(ex.execute(&a).await, ActionResult::Executed, "{}", a.kind);
     }
     let writes = f.world.gh_writes.lock().unwrap().clone();
     assert!(
@@ -1435,10 +1429,16 @@ async fn each_finding_becomes_its_own_fleet_proposal() {
         first.starts_with("Flaky reconnect") && first.contains("- Fix the backoff"),
         "{first}"
     );
-    // Approved: the executor hands each to fleet.
+    // Approved: the executor hands each to fleet, which answers with what
+    // it made (w08-3).
     let ex = f.executor();
     for a in f.actions() {
-        assert_eq!(ex.execute(&a).await, ActionResult::Executed, "{}", a.kind);
+        assert_eq!(
+            ex.execute(&a).await,
+            ActionResult::Done("done".into()),
+            "{}",
+            a.kind
+        );
     }
     let ops = f.world.fleet_ops.lock().unwrap().clone();
     assert_eq!(ops.len(), 4);

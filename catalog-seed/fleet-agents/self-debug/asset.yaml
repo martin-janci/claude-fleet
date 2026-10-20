@@ -99,7 +99,6 @@ actions:
   - id: issue
     when: { all: [ { field: fileIssue, truthy: true }, { field: topTitle, truthy: true } ] }
     do: tracker_issue
-    fingerprint: "{{item.fingerprint}}"
     tracker: "{{issue_tracker}}"
     project: "{{issue_project}}"
     summary: "{{answer.topTitle}}"
