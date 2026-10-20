@@ -165,19 +165,18 @@ pub fn next_fire(
 }
 
 /// Whether a `retry_once` retry of `run` waits: it ended at a rate limit
-/// and its routine's account is still over the line.
+/// and a fire now would not start either, because its routine's own login
+/// is over the line and its fallback cannot take it (review w02-10: the
+/// retry goes where [`super::tick::plan`] would send a fire, not back to
+/// the run's host).
 pub fn retry_waits(s: &Store, r: &RoutineRow, run: &RoutineRunRow, now: i64) -> bool {
     settings::get_bool(s, settings::ROUTINES_PAUSE_AT_LIMIT)
         && run.error_code.as_deref() == Some(super::fix::E_TURN_RATE_LIMIT)
-        && crate::service::account_limits::over_limit(
-            s,
-            run.host_alias.as_deref().unwrap_or(&r.host_alias),
-            r.profile.as_deref(),
-            now,
-        )
-        .ok()
-        .flatten()
-        .is_some()
+        && crate::service::account_limits::over_limit(s, &r.host_alias, r.profile.as_deref(), now)
+            .ok()
+            .flatten()
+            .is_some()
+        && matches!(super::tick::plan(s, r, now), Ok(super::tick::Plan::Skip(_)))
 }
 
 #[cfg(test)]

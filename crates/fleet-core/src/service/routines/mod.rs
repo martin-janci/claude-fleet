@@ -1163,6 +1163,7 @@ pub(crate) fn record_skip(
         error_code: None,
         host_alias: None,
     })?;
+    tick::note_dropped_retry(s, r, &run, now);
     let checks = debug::fire_checks(s, r, now).unwrap_or_default();
     let mut steps = trace::opening(r, &run, &checks, Some(reason), now);
     steps.push(trace::settle_step("skipped", Some(reason), None, 0, now));

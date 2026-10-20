@@ -11,8 +11,8 @@
   import ConfirmDialog from '../ConfirmDialog.svelte';
   import { setFleetSetting, type SettingKey } from '../fleet_settings';
   import { push } from '../toasts';
-  import { homeOf, searchSettings, type Descriptor, type Page } from './pages';
-  import { navGroups } from '../settings_tree';
+  import { homeOf, needsConfirm, searchSettings, type Descriptor, type Page } from './pages';
+  import { navGroups, searchLeaves } from '../settings_tree';
   import { valueInWords } from './review';
   import { interpret } from './settings_nl';
 
@@ -40,6 +40,8 @@
 
   let query = $state('');
   const hits = $derived(searchSettings(query, pages, descs, values));
+  /** Screens whose name (or a panel's keywords) matches, listed first. */
+  const leafHits = $derived(searchLeaves(query, pages));
   const nl = $derived(canWrite ? interpret(query, descs.values()) : null);
   const change = $derived(nl?.kind === 'change' ? nl : null);
   const unchanged = $derived(change !== null && (values[change.d.key] ?? change.d.value) === change.value);
@@ -50,7 +52,7 @@
 
   async function applyChange(confirmed = false) {
     if (!change || unchanged || busy) return;
-    if (!confirmed && change.d.danger.level === 'confirm') {
+    if (!confirmed && needsConfirm(change.d, change.value)) {
       confirming = true;
       return;
     }
@@ -80,6 +82,8 @@
       query = '';
     } else if (e.key === 'Enter' && change) {
       void applyChange();
+    } else if (e.key === 'Enter' && leafHits[0]) {
+      onselect(leafHits[0].id);
     } else if (e.key === 'Enter' && hits[0]) {
       onselect(hits[0].page, hits[0].key);
     }
@@ -133,15 +137,29 @@
   {/if}
   {#if query.trim() && !nl}
     <ul class="hits" data-testid="settings-search-hits">
+      {#each leafHits as r (r.id)}
+        <li>
+          <button type="button" data-testid={`settings-leaf-hit-${r.id}`} onclick={() => onselect(r.id)}>
+            <span>{r.label}</span>
+            <span class="where">{r.group}</span>
+          </button>
+        </li>
+      {/each}
       {#each hits as h (h.key)}
         <li>
-          <button type="button" data-testid={`settings-hit-${h.key}`} onclick={() => onselect(h.page, h.key)}>
-            <span>{h.label}</span>
+          <button
+            type="button"
+            class:hidden-hit={h.hidden}
+            data-testid={`settings-hit-${h.key}`}
+            onclick={() => onselect(h.page, h.key)}>
+            <span>{h.label}{#if h.hidden}<span class="hidden-note" data-testid={`settings-hit-hidden-${h.key}`}
+                  >{h.hidden}</span
+                >{/if}</span>
             <span class="where">{h.pageTitle}</span>
           </button>
         </li>
       {:else}
-        <li class="none">No setting matches.</li>
+        {#if leafHits.length === 0}<li class="none">No setting matches.</li>{/if}
       {/each}
     </ul>
   {:else if !nl}
@@ -257,6 +275,14 @@
   .where {
     color: var(--fg-muted);
     font-size: var(--text-2xs);
+  }
+  .hidden-hit {
+    color: var(--fg-muted);
+  }
+  .hidden-note {
+    display: block;
+    font-size: var(--text-2xs);
+    font-style: italic;
   }
   .none {
     font-size: var(--text-2xs);

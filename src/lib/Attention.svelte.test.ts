@@ -13,6 +13,7 @@ import { toasts, clearToasts } from './toasts';
 import { notifyStuckOs, notifyStuckToast } from './notify';
 import { fleetSettings } from './fleet_settings';
 import { failing, type FailingRoutine } from './routines';
+import { PRIMARY, _resetFleetsForTest, _setFleetRowsForTest, _setFleetsForTest, emptyRows, type FleetInfo } from './fleets';
 
 let nextId = 1;
 function row(over: Partial<SessionRow> = {}): SessionRow {
@@ -175,6 +176,62 @@ describe('Attention: the notifications matrix (11.9)', () => {
     sessions.set([{ ...a, claude_status: 'blocked' }, { ...b, claude_status: 'failed' }]);
     await tick();
     expect(shown).toEqual([]);
+  });
+
+  describe('extra fleets (review w01)', () => {
+    const base: FleetInfo = {
+      id: PRIMARY,
+      label: 'home',
+      url: null,
+      color: '#5b8def',
+      primary: true,
+      local: true,
+      client_name: null,
+      connection: null,
+      unavailable: null,
+    };
+    const extra = (id: string, over: Partial<FleetInfo> = {}): FleetInfo => ({
+      ...base,
+      id,
+      label: id,
+      url: `https://${id}.example.com`,
+      primary: false,
+      local: false,
+      connection: { state: 'connected' },
+      ...over,
+    });
+    const rowsOf = (list: SessionRow[], loaded = true) => ({ ...emptyRows(), loaded, sessions: new Map(list.map((r) => [r.id, r])) });
+    afterEach(() => _resetFleetsForTest());
+
+    it('w01-3: a duplicate fleet never notifies, the fleet it duplicates does', async () => {
+      _setFleetsForTest([base, extra('company'), extra('again', { duplicate_of: 'company' })]);
+      const a = row({ tmux_name: 'pos', claude_status: 'working' });
+      const b = row({ tmux_name: 'pos-dup', claude_status: 'working' });
+      render(Attention);
+      _setFleetRowsForTest('company', rowsOf([a]));
+      _setFleetRowsForTest('again', rowsOf([b]));
+      await tick();
+      _setFleetRowsForTest('company', rowsOf([{ ...a, claude_status: 'blocked' }]));
+      _setFleetRowsForTest('again', rowsOf([{ ...b, claude_status: 'blocked' }]));
+      await tick();
+      expect(shown).toEqual(['pos needs you']);
+    });
+
+    it("w01-13: an event before a fleet's first list is no baseline", async () => {
+      _setFleetsForTest([base, extra('company')]);
+      const a = row({ tmux_name: 'early', claude_status: 'working' });
+      const b = row({ tmux_name: 'waiting-1', claude_status: 'blocked' });
+      const c = row({ tmux_name: 'waiting-2', claude_status: 'blocked' });
+      render(Attention);
+      _setFleetRowsForTest('company', rowsOf([a], false));
+      await tick();
+      _setFleetRowsForTest('company', rowsOf([a, b, c]));
+      await tick();
+      expect(shown).toEqual([]);
+      _setFleetRowsForTest('company', rowsOf([{ ...a, claude_status: 'blocked' }, b, c]));
+      await tick();
+      expect(shown).toEqual(['early needs you']);
+    });
   });
 
   it('announces a routine run that fails after the app opened', async () => {

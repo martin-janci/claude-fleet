@@ -175,6 +175,15 @@ export function checklistRows(args: {
       state: "fail",
       detail: "never said hello",
     });
+  } else if (!host.reachable) {
+    // The version is the last hello's, never cleared: beside the offline
+    // banner a ✓ would say the agent is fine when it is gone (review w14-3).
+    rows.push({
+      key: "agent",
+      label: "fleet-agent",
+      state: "fail",
+      detail: `not connected · last seen ${host.agent_version}`,
+    });
   } else if (hubVersion && host.agent_version !== hubVersion) {
     rows.push({
       key: "agent",

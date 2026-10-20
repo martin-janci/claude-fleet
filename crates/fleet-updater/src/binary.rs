@@ -764,7 +764,8 @@ impl<H: Host> BinaryUpdater<H> {
                         "lost": if restored { "writes the candidate made while it was being validated" } else { "nothing" },
                         "backup": prev.backup,
                     }),
-                    None,
+                    // Why it came back: the hub keeps the last report's error.
+                    self.state.last_error.clone(),
                 )
                 .await;
                 self.log(&format!(

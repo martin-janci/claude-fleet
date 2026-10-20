@@ -21,7 +21,10 @@
 //!
 //! What keeps it from acting where a person must:
 //! * `control.auto_continue` off, or the autonomy dial at "Ask first"
-//!   (or Custom, which acts as it: `autonomy::Position::is_ask_first`): never;
+//!   (or Custom, which acts as it: `autonomy::Position::is_ask_first`): never,
+//!   and no pick is kept for later: [`on_stop`] records none, and a pass
+//!   settles a waiting one as superseded, so turning it on never answers a
+//!   card from hours ago at once (review w27-7);
 //! * an option or question naming a push, a delete or another step hard to
 //!   undo (`decide::quick_answer::risky`): never recorded;
 //! * a newer turn (the person said something else), a busy or blocked
@@ -271,15 +274,20 @@ pub fn on_stop(s: &Store, session_id: i64, reply: Option<&str>, now: i64) -> Res
     if !is_operator(s, &row) {
         return Ok(());
     }
-    let next = reply.and_then(recommended_pick).map(|p| Pending {
-        session_id,
-        turn_seq: row.turn_seq,
-        label: p.label,
-        prompt: p.prompt,
-        ended_at: now,
-        state: PickState::Waiting,
-        settled_at: None,
-    });
+    // Off (or Ask first): no pick to send later. Recorded now, it would wait
+    // out the hours until auto-continue is turned on and go at once.
+    let next = reply
+        .filter(|_| enabled(s))
+        .and_then(recommended_pick)
+        .map(|p| Pending {
+            session_id,
+            turn_seq: row.turn_seq,
+            label: p.label,
+            prompt: p.prompt,
+            ended_at: now,
+            state: PickState::Waiting,
+            settled_at: None,
+        });
     if next.is_none() && load(s).is_none() {
         return Ok(());
     }
@@ -294,7 +302,7 @@ pub enum Step {
     Nothing,
     /// Not yet, in words.
     Wait(&'static str),
-    /// Settle it without sending (a newer turn, too old).
+    /// Settle it without sending (a newer turn, too old, auto-continue off).
     Drop,
     Send,
 }
@@ -323,8 +331,10 @@ pub fn decide(
     let Some(p) = p.filter(|p| p.state == PickState::Waiting) else {
         return Step::Nothing;
     };
+    // Off: a pick still waiting from before is settled, never kept for the
+    // moment it is turned on again (review w27-7).
     if !enabled {
-        return Step::Wait("off");
+        return Step::Drop;
     }
     let Some(op) = op else {
         return Step::Wait("no_operator");

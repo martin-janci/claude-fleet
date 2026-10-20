@@ -9,6 +9,7 @@ import {
   navGroups,
   reachablePages,
   resolveSection,
+  searchLeaves,
 } from './settings_tree';
 
 // Redesign step 7.1: one Settings tree. Its check is that every generated
@@ -100,5 +101,17 @@ describe('the Settings tree', () => {
     expect(resolveSection('hub', pages)).toBe('hub');
     expect(resolveSection('nope', pages)).toBeUndefined();
     expect(leafById('voice', pages)?.section).toBe('Voice');
+  });
+
+  it('search finds a screen by its name or what its panel holds (review w15-1)', () => {
+    const ids = (q: string) => searchLeaves(q, pages).map((r) => r.id);
+    expect(ids('notifications')).toContain('notifications');
+    expect(ids('theme')).toEqual(['appearance']);
+    expect(ids('shortcuts')).toEqual(['shortcuts']);
+    expect(ids('hub url')).toEqual(['hub']);
+    expect(ids('pair')).toContain('hub');
+    expect(searchLeaves('voice', pages)[0]).toMatchObject({ id: 'voice', group: 'General' });
+    expect(ids('@modified')).toEqual([]);
+    expect(ids('')).toEqual([]);
   });
 });

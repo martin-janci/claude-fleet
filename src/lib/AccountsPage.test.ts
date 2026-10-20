@@ -177,6 +177,34 @@ describe('AccountsPage', () => {
     expect(screen.queryByTestId('account-missing')).toBeNull();
   });
 
+  it('a signed-out login says so, with its sign-in command, and why usage is missing (review w03-1)', async () => {
+    const aug9 = Date.UTC(2026, 7, 9, 12) / 1000;
+    hosts.set(
+      fleetHosts().map((h) =>
+        h.alias === 'mefistos' ? { ...h, signed_out_logins: [{ profile: null, since: aug9, checked_at: aug9 }] } : h,
+      ),
+    );
+    accountUsage.set({
+      ...fleetUsage(),
+      [ADMIN.uuid]: snapshot(ADMIN.uuid, { status: 'login_expired', source_host: 'mefistos' }),
+    });
+    accountsPageRequest.set(ADMIN.uuid);
+    render(AccountsPage, props);
+    const out = await screen.findByTestId('account-login-signed-out');
+    expect(out.textContent).toBe('signed out since Aug 9');
+    expect(screen.getByTestId('account-login-copy').getAttribute('title')).toContain('ssh mefistos then claude /login');
+    expect(screen.getAllByTestId('account-status-line').map((l) => l.textContent).join(' ')).toContain(
+      'Claude login expired on mefistos',
+    );
+  });
+
+  it('renames the account in place (review w03-13)', async () => {
+    accountsPageRequest.set(ADMIN.uuid);
+    render(AccountsPage, props);
+    await fireEvent.click(screen.getByTestId('account-nickname'));
+    expect(screen.getByTestId('account-nickname-input')).toBeTruthy();
+  });
+
   it('has an empty state with no accounts', () => {
     accounts.set([]);
     render(AccountsPage, props);
@@ -287,6 +315,55 @@ describe('AccountsPage: spend, routines and paused sessions (4.1 / 4.2)', () => 
     await fireEvent.click(wait);
     expect(get(waitingOut).size).toBe(2);
     expect(inv.mock.calls.some((c) => c[0] === 'restart_session')).toBe(false);
+  });
+
+  it('the Switch target is asked again when usage moves, and says when no login has room (reviews w02-11, w03-8)', async () => {
+    accountUsage.set(atLimit());
+    render(AccountsPage, props);
+    expect((await screen.findByTestId('account-paused-switch')).textContent).toBe(`Switch to ${WORK.email}`);
+    const base = inv.getMockImplementation() as (cmd: string, payload?: unknown) => Promise<unknown>;
+    inv.mockImplementation(async (cmd: string, payload?: unknown) => {
+      if (cmd === 'check_account_headroom') {
+        const admin = { profile: null, account_uuid: ADMIN.uuid, used_pct: 100 };
+        const work = { profile: 'work', account_uuid: WORK.uuid, used_pct: 97 };
+        return { pause_at_pct: 90, chosen: admin, over: true, suggestion: null, logins: [admin, work] };
+      }
+      return base(cmd, payload);
+    });
+    // A new reading for WORK: the cached "Switch to work" does not stay.
+    const next = atLimit();
+    next[WORK.uuid] = { ...next[WORK.uuid], fetched_at: (next[WORK.uuid].fetched_at ?? 0) + 60 };
+    accountUsage.set(next);
+    await waitFor(() => expect(screen.queryByTestId('account-paused-switch')).toBeNull());
+    expect(screen.getByTestId('account-paused-noroom').textContent).toBe('No other login has room');
+  });
+
+  it('names no single target when the paused rows\' hosts disagree (review w02-11)', async () => {
+    accountUsage.set(atLimit());
+    const base = inv.getMockImplementation() as (cmd: string, payload?: unknown) => Promise<unknown>;
+    inv.mockImplementation(async (cmd: string, payload?: { args?: Record<string, unknown> }) => {
+      if (cmd === 'check_account_headroom') {
+        const admin = { profile: null, account_uuid: ADMIN.uuid, used_pct: 100 };
+        const to =
+          payload?.args?.host_alias === 'mefistos'
+            ? { profile: 'work', account_uuid: WORK.uuid, used_pct: 12 }
+            : { profile: 'spare', account_uuid: SPARE.uuid, used_pct: 20 };
+        return { pause_at_pct: 90, chosen: admin, over: true, suggestion: to, logins: [admin, to] };
+      }
+      return base(cmd, payload);
+    });
+    render(AccountsPage, props);
+    await waitFor(() => expect(screen.getByTestId('account-paused-switch').textContent).toBe('Switch to logins with room'));
+  });
+
+  it('the paused filter says nothing is paused once nothing is (review w03-10)', async () => {
+    accountUsage.set(atLimit());
+    render(AccountsPage, props);
+    await fireEvent.click(await screen.findByTestId('account-paused-show'));
+    accountUsage.set(fleetUsage());
+    await waitFor(() =>
+      expect(screen.getByTestId('account-sessions-empty').textContent?.trim()).toBe('Nothing is paused by this limit now.'),
+    );
   });
 
   it('the header reads when usage was refreshed, and Refresh reads every account again (M15 G7.12)', async () => {

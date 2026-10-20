@@ -367,9 +367,10 @@ export function toDisplay(d: Descriptor, raw: string): string {
   return Number.isInteger(shown) ? String(shown) : String(Math.round(shown * 100) / 100);
 }
 
-/** A typed number back to the stored text, or why it cannot be sent. The
- *  backend still owns the range check; this only refuses what is not a
- *  number, or a non-zero entry that would round to 0 (which means "off"). */
+/** A typed number back to the stored text, or why it cannot be sent: not a
+ *  number, a non-zero entry that would round to 0 (which means "off"), or
+ *  out of the setting's range, said in the unit the row shows (the
+ *  backend still checks, but counts in stored units). */
 export function fromDisplay(d: Descriptor, typed: string): { value: string } | { error: string } {
   const t = typed.trim();
   if (t === '') return { error: 'enter a number' };
@@ -378,11 +379,29 @@ export function fromDisplay(d: Descriptor, typed: string): { value: string } | {
   const f = unitFactor(d);
   if (f === 1) {
     if (!Number.isInteger(n)) return { error: 'enter a whole number' };
-    return { value: String(n) };
+    return inRange(d, n);
   }
   const stored = Math.round(n * f);
   if (stored === 0 && n !== 0) return { error: `too small: under one second` };
+  return inRange(d, stored);
+}
+
+function inRange(d: Descriptor, stored: number): { value: string } | { error: string } {
+  if (d.kind.type === 'int' && (stored < d.kind.min || stored > d.kind.max)) {
+    return { error: `enter ${rangeText(d).split(';')[0]}` };
+  }
+  if (d.kind.type === 'secs' && (stored < d.kind.min || stored > d.kind.max)) {
+    if (stored < d.kind.min) return { error: `enter ${rangeText(d).split(';')[0]}` };
+    return { error: 'too large' };
+  }
   return { value: String(stored) };
+}
+
+/** A minimum in the shown unit, rounded UP to two places like `toDisplay`
+ *  rounds, so the number shown is one the backend accepts. */
+function shownMin(min: number, f: number): string {
+  const shown = min / f;
+  return Number.isInteger(shown) ? String(shown) : String(Math.ceil(shown * 100) / 100);
 }
 
 export const UNIT_WORDS: Record<Unit, string> = {
@@ -407,7 +426,7 @@ export function rangeText(d: Descriptor): string {
   let base = '';
   if (d.kind.type === 'int') base = `${d.kind.min}–${d.kind.max}${u ? ` ${u}` : ''}`;
   else if (d.kind.type === 'secs' && d.kind.min > 0)
-    base = `at least ${d.kind.min / f}${u ? ` ${u}` : ''}`;
+    base = `at least ${shownMin(d.kind.min, f)}${u ? ` ${u}` : ''}`;
   else if (d.kind.type === 'secs') base = u;
   if (d.zero) base = base ? `${base}; 0 = ${d.zero}` : `0 = ${d.zero}`;
   return base;
@@ -415,6 +434,32 @@ export function rangeText(d: Descriptor): string {
 
 export function optionLabel(d: Descriptor, value: string): string {
   return d.option_labels?.find(([v]) => v === value)?.[1] ?? value;
+}
+
+/** A change to a setting that needs confirming asks first, unless it goes
+ *  back to the default (the safe value). FieldRow and the plain-words
+ *  command both ask by this rule. */
+export function needsConfirm(d: Descriptor, next: string): boolean {
+  return d.danger.level === 'confirm' && next !== d.default;
+}
+
+/** A condition in words, naming its settings by label: "Second opinion
+ *  from Claude is on". */
+export function conditionWords(c: Condition, descs: Map<string, Descriptor>): string {
+  if (c.all) return c.all.map((x) => conditionWords(x, descs)).join(' and ');
+  if (c.any) return c.any.map((x) => conditionWords(x, descs)).join(' or ');
+  if (c.not) {
+    const n = c.not;
+    if (n.key !== undefined && n.truthy !== undefined) return conditionWords({ key: n.key, truthy: !n.truthy }, descs);
+    return `not (${conditionWords(n, descs)})`;
+  }
+  const d = c.key !== undefined ? descs.get(c.key) : undefined;
+  const label = d?.label ?? c.key ?? 'another setting';
+  const opt = (v: string) => (d ? optionLabel(d, v) : v);
+  if (c.truthy !== undefined) return `${label} is ${c.truthy ? 'on' : 'off'}`;
+  if (c.eq !== undefined) return `${label} is ${opt(c.eq)}`;
+  if (c.in !== undefined) return `${label} is ${c.in.map(opt).join(' or ')}`;
+  return label;
 }
 
 // ── the page tree and search ──
@@ -448,11 +493,13 @@ export interface SearchHit {
   page: string;
   pageTitle: string;
   tab: number;
+  /** The page does not show the field now: "shown when ‹condition›". */
+  hidden?: string;
 }
 
 /**
  * Settings matching `query` across every page: each word must appear in the
- * label, key, help or tags. `@modified` keeps only settings off their
+ * label, key, help, tags, section title or page title. `@modified` keeps only settings off their
  * default; `@tag:<tag>` only those with the tag. Hits are in page order.
  */
 export function searchSettings(
@@ -470,13 +517,21 @@ export function searchSettings(
         if (item.type !== 'field') continue;
         const d = descs.get(item.key);
         if (!d) continue;
-        const hay = `${d.label} ${d.key} ${d.help} ${d.tags.join(' ')} ${section.title}`.toLowerCase();
+        const hay =
+          `${d.label} ${d.key} ${d.help} ${d.tags.join(' ')} ${section.title} ${p.title}`.toLowerCase();
         const ok = words.every((w) => {
           if (w === '@modified') return (values[d.key] ?? d.value) !== d.default;
           if (w.startsWith('@tag:')) return d.tags.includes(w.slice(5) as Descriptor['tags'][number]);
           return hay.includes(w);
         });
-        if (ok) hits.push({ key: d.key, label: d.label, page: p.id, pageTitle: p.title, tab });
+        if (!ok) continue;
+        // A field a `when` hides opens to nothing: say what shows it.
+        const off = [tab >= 0 ? p.tabs?.[tab]?.when : undefined, section.when, item.when].find(
+          (c) => c !== undefined && !evalCondition(c, values),
+        );
+        const hit: SearchHit = { key: d.key, label: d.label, page: p.id, pageTitle: p.title, tab };
+        if (off) hit.hidden = `shown when ${conditionWords(off, descs)}`;
+        hits.push(hit);
       }
     }
   }

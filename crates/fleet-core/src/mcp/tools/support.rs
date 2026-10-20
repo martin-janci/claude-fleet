@@ -791,8 +791,17 @@ pub(super) fn dispatch_new_worker_summary(
     raw: bool,
     prompt: &str,
 ) -> String {
+    // `profile=` only when one is named, so a summary without one reads as
+    // it always has.
+    let profile = spec
+        .profile
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(|p| format!(" profile={}", bound_text(Some(p))))
+        .unwrap_or_default();
     format!(
-        "new_worker host={} project_id={} name={} requester_session_id={:?} raw={} prompt={}",
+        "new_worker host={}{profile} project_id={} name={} requester_session_id={:?} raw={} prompt={}",
         bound_text(Some(&spec.host_alias)),
         spec.project_id,
         bound_text(spec.name.as_deref()),
@@ -1904,20 +1913,31 @@ impl FleetTools {
         if position.is_ask_first() {
             return Ok((position, guard::OperatorFacts::default()));
         }
-        let own = match target {
+        let open = match target {
             GateTarget::Session(id) => s
                 .is_open_control_handoff(id)
                 .map_err(|e| to_mcp_err(IpcError::from(e)))?,
             _ => false,
         };
+        // A prompt goes only into an open handoff Control still FOLLOWS
+        // (review w04-4): a thread the person muted, whose pull request
+        // merged, that is done or went quiet is no longer "within your
+        // brief". Session care is not narrowed: a wedged session is quiet.
+        let own = match target {
+            GateTarget::Session(id) if open => {
+                crate::service::control_follow::session_followed(&s, id, crate::store::now_unix())
+            }
+            _ => false,
+        };
         let own_start = match target {
-            GateTarget::Session(id) if own => s
+            GateTarget::Session(id) if open => s
                 .is_control_started_session(id)
                 .map_err(|e| to_mcp_err(IpcError::from(e)))?,
             _ => false,
         };
+        // Pause all stops every grant-covered start too (review w04-5).
         let grant = match target {
-            GateTarget::Start { host } => s
+            GateTarget::Start { host } if !crate::service::loops::paused(&s) => s
                 .start_inside_mission_grant(host, crate::store::now_unix())
                 .map_err(to_mcp_err)?,
             _ => false,
@@ -1997,7 +2017,7 @@ impl FleetTools {
                 ConfirmState::Denied => {
                     return Err(mcp_err(
                         "E_FORBIDDEN",
-                        format!("{tool} was denied on the desktop"),
+                        format!("{tool} was denied in the fleet app"),
                         None,
                     ))
                 }
@@ -2005,7 +2025,7 @@ impl FleetTools {
                     return Err(mcp_err(
                         codes::E_CONFIRM_REQUIRED,
                         format!(
-                            "{tool} is awaiting approval on the desktop; retry with the same confirm_nonce once approved"
+                            "{tool} is awaiting approval in the fleet app (desktop or phone); retry with the same confirm_nonce once approved"
                         ),
                         Some(serde_json::json!({ "confirm_nonce": n })),
                     ))
@@ -2044,7 +2064,7 @@ impl FleetTools {
         Err(mcp_err(
             codes::E_CONFIRM_REQUIRED,
             format!(
-                "{tool} needs approval on the claude-fleet desktop ({}); \
+                "{tool} needs approval in the fleet app, desktop or phone ({}); \
                  ask the user to approve it there, then retry with confirm_nonce={}",
                 if person && !caller.is_operator() {
                     "a person approves this call whoever makes it"

@@ -351,7 +351,7 @@
           disabled={!h.mission_name}
           onclick={() => openMissionChip(h)}
         >
-          <span class="what">Sent to a mission</span>
+          <span class="what">{h.tool === 'steer' ? 'You steered' : 'Sent to a mission'}</span>
           <span class="target">{h.mission_name ?? 'a deleted mission'}</span>
           {#if h.mission_state}<StatusChip state={workState(h.mission_state)} />{/if}
         </button>

@@ -409,6 +409,8 @@ export const ROUTED_ACTIONS = [
   'add_host',
   // A host's health checklist, run by the hub over its own SSH.
   'check_host',
+  // The fleet-agent install job, run by the hub over its own SSH (4.9).
+  'install_agent',
   // An account's nickname: the hub's set_account_nickname.
   'set_account_nickname',
   'move_session',

@@ -315,7 +315,7 @@
   // G3.3: the counts after the tabs. Tasks comes from the page shown;
   // Missions and Pull requests are read on their own, on mount and when
   // work changes.
-  const tasksCount = $derived(taskTabCount(listMode ? listPage : page, listMode));
+  const tasksCount = $derived(taskTabCount(listMode ? listPage : page, listMode, $workViewFilters.archived === true));
   let otherCounts = $state<{ missions: number | null; prs: number | null }>({ missions: null, prs: null });
   let countsSeq = 0;
   async function loadCounts() {

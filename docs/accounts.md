@@ -206,8 +206,26 @@ host's idle CPU and free memory; the host the work ran on before wins a
 near tie. Control is told to call it before it starts anything, a mission's
 run takes the best place inside its grant (its hosts, its login when it
 names one), a start that names no host takes the best host that has run the
-project, and the over-limit refusal names a login on another host when none
-on its own has room.
+project and the login placement ranked first there (a start rule's or
+placement rule's login, or `profile` on `work_link { start }`, wins), and
+the over-limit refusal names a login on another host when none on its own
+has room. `dispatch_task { new_worker }` takes `profile` too, so Control can
+start the worker on the login a refusal named.
+
+A resume (`work_link { resume }`, Resume in the desktop) runs under the
+login `profile` names (`""` = the host's own); without one, under the past
+session's login when its row is still known and the resume lands on the
+same host, else the host's own login, or the login on the host with
+headroom when the host's own is past `accounts.pause_at`. Neither a ticket
+start nor a resume refuses an over-limit login: they are how Control
+recovers work, so a spent login is the session's to report.
+
+Automation leaves a login alone that is past `accounts.pause_at` or that
+fleet knows is signed out: a routine's fire goes to its fallback host, else
+skips and says why (with the reset time, or the sign-in command); a
+mission's run waits. A `restart_session { profile }` onto another login is
+refused for a signed-out login, and for one past the line unless
+`over_limit_ok` says the person chose it.
 
 ### Signed-out logins
 

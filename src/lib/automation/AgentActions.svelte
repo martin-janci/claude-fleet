@@ -5,10 +5,20 @@
   // changes, 2 comments"), shows what it will post on Show, and takes
   // Approve or Reject. An approved action is carried out by its agent on
   // the next run pass (`service::agents::execute_approved`); its count is
-  // part of the Needs you badge (`pendingAgentCount`).
+  // part of the Needs you badge (`pendingAgentCount`). What the person's
+  // approvals of the last day came to ("Done: … — created task 42",
+  // "Failed: … — why") shows under them (`status.recent`, review w08-3).
   import { shortAge } from '../session_status';
   import { push, pushError } from '../toasts';
-  import { actionBody, actionTitle, answerAgentAction, pendingAgentActions, type AgentAction } from '../agents';
+  import {
+    actionBody,
+    actionOutcome,
+    actionTitle,
+    answerAgentAction,
+    pendingAgentActions,
+    recentAgentOutcomes,
+    type AgentAction,
+  } from '../agents';
 
   let busy = $state<number | null>(null);
   let shown = $state<number | null>(null);
@@ -18,7 +28,7 @@
     const r = await answerAgentAction(a.id, approve);
     busy = null;
     if (!r.ok) pushError(r.error, approve ? 'Approve failed' : 'Reject failed');
-    else push({ kind: 'success', message: approve ? 'Approved: it goes out on the next pass' : 'Rejected' });
+    else push({ kind: 'success', message: approve ? 'Approved: it runs within a minute, and what it did shows here' : 'Rejected' });
   }
 </script>
 
@@ -50,12 +60,28 @@
     {/each}
   </div>
 {/if}
+{#if $recentAgentOutcomes.length > 0}
+  <div class="actions-list" data-testid="agent-outcomes" role="group" aria-label="What your approvals did">
+    {#each $recentAgentOutcomes as a (a.id)}
+      <div class="item" data-testid="agent-outcome">
+        <span class="dot" class:failed={a.state === 'failed'} class:done={a.state !== 'failed'} aria-hidden="true"></span>
+        <div class="text">
+          <span class="outcome">{actionOutcome(a)}</span>
+          {#if a.executed_at}<span class="line">{shortAge(a.executed_at)}</span>{/if}
+        </div>
+      </div>
+    {/each}
+  </div>
+{/if}
 
 <style>
   .actions-list { display: flex; flex-direction: column; gap: 2px; padding: 4px 8px; }
   .item { display: flex; gap: 8px; align-items: flex-start; padding: 6px 4px; border-radius: var(--radius-md); }
   .item:hover { background: var(--bg-hover); }
   .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--status-waiting); margin-top: 5px; flex: none; }
+  .dot.done { background: var(--status-done); }
+  .dot.failed { background: var(--status-failed); }
+  .outcome { color: var(--fg); overflow-wrap: anywhere; font-size: var(--text-xs); }
   .text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
   .name { color: var(--fg); font-weight: 500; overflow-wrap: anywhere; }
   .chip { font-size: var(--text-2xs); color: var(--fg-muted); border: 1px solid var(--border); border-radius: var(--radius-pill); padding: 0 6px; font-weight: 400; }

@@ -97,6 +97,32 @@ impl Connection {
     }
 }
 
+/// How far back takeovers are counted for [`AgentRegistry::duplicate`].
+pub const DUPLICATE_WINDOW_SECS: i64 = 300;
+
+/// Takeovers within [`DUPLICATE_WINDOW_SECS`] that mean two agents share one
+/// host's token (review w14-1). A restarted agent replaces its old
+/// connection once; two agents on one token keep taking it from each other
+/// (#965 only slows that down), whether or not their host names differ: a
+/// cloned VM keeps its hostname, and a leftover service beside a reinstall
+/// runs on the same machine.
+pub const DUPLICATE_TAKEOVERS: usize = 2;
+
+/// Two agents are taking one host's connection from each other.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct DuplicateAgent {
+    /// Unix seconds of the first takeover still in the window.
+    pub since: i64,
+    /// Takeovers in the window.
+    pub takeovers: usize,
+    /// The agents that said hello in those takeovers, as
+    /// `"<host_name> (fleet-agent <version>)"`, each once.
+    pub peers: Vec<String>,
+}
+
+/// One takeover: when, and the two connections' labels (replaced, new).
+type Takeover = (i64, String, String);
+
 /// Is `credential` still current for `alias`? See [`AgentRegistry::verify_with`].
 type Verifier = Box<dyn Fn(&str, &str) -> bool + Send + Sync>;
 
@@ -105,6 +131,9 @@ pub struct AgentRegistry {
     conns: DashMap<String, Arc<Connection>>,
     next_id: AtomicU64,
     verifier: std::sync::OnceLock<Verifier>,
+    /// Alias → its recent takeovers, oldest first, pruned to
+    /// [`DUPLICATE_WINDOW_SECS`].
+    takeovers: DashMap<String, Vec<Takeover>>,
 }
 
 impl AgentRegistry {
@@ -113,6 +142,7 @@ impl AgentRegistry {
             conns: DashMap::new(),
             next_id: AtomicU64::new(1),
             verifier: std::sync::OnceLock::new(),
+            takeovers: DashMap::new(),
         })
     }
 
@@ -174,19 +204,59 @@ impl AgentRegistry {
             superseded: tokio_util::sync::CancellationToken::new(),
         });
         let host_name = conn.hello.host_name.clone();
+        let label = peer_label(&conn.hello);
         if let Some(previous) = self.conns.insert(alias.to_string(), conn) {
-            if previous.hello.host_name != host_name {
+            let replaced = peer_label(&previous.hello);
+            let duplicate = self.note_takeover(alias, now_unix(), replaced.clone(), label.clone());
+            if previous.hello.host_name != host_name || duplicate.is_some() {
+                let peers = duplicate
+                    .map(|d| d.peers.join(", "))
+                    .unwrap_or_else(|| format!("{replaced}, {label}"));
                 tracing::warn!(
                     host = %alias,
-                    "[agent] {} replaced the agent on {}: two agents are using this host's token",
+                    "[agent] {} replaced the agent on {}: two agents are using this host's token \
+                     ({}). Stop one, or rotate the token",
                     fleet_proto::sanitize_for_log(&host_name, 64),
                     fleet_proto::sanitize_for_log(&previous.hello.host_name, 64),
+                    fleet_proto::sanitize_for_log(&peers, 256),
                 );
             }
             previous.superseded.cancel();
             previous.abort_pending();
         }
         id
+    }
+
+    /// Record a takeover of `alias` at `at` and answer the duplicate it now
+    /// amounts to, if any.
+    fn note_takeover(
+        &self,
+        alias: &str,
+        at: i64,
+        replaced: String,
+        new: String,
+    ) -> Option<DuplicateAgent> {
+        let mut entry = self.takeovers.entry(alias.to_string()).or_default();
+        entry.push((at, replaced, new));
+        entry.retain(|(t, _, _)| at - *t <= DUPLICATE_WINDOW_SECS);
+        duplicate_of(&entry)
+    }
+
+    /// Two agents are taking `alias`'s connection from each other: at least
+    /// [`DUPLICATE_TAKEOVERS`] takeovers in the last
+    /// [`DUPLICATE_WINDOW_SECS`]. `agent_status` reports it per host.
+    pub fn duplicate(&self, alias: &str) -> Option<DuplicateAgent> {
+        self.duplicate_at(alias, now_unix())
+    }
+
+    fn duplicate_at(&self, alias: &str, now: i64) -> Option<DuplicateAgent> {
+        let entry = self.takeovers.get(alias)?;
+        let recent: Vec<Takeover> = entry
+            .iter()
+            .filter(|(t, _, _)| now - *t <= DUPLICATE_WINDOW_SECS)
+            .cloned()
+            .collect();
+        duplicate_of(&recent)
     }
 
     /// Deregister `conn`, if it is still the live connection for `alias`. A
@@ -521,6 +591,30 @@ fn agent_frame_id(frame: &AgentFrame) -> Option<&str> {
     }
 }
 
+/// How a connection reads in a duplicate warning.
+fn peer_label(hello: &AgentHello) -> String {
+    format!("{} (fleet-agent {})", hello.host_name, hello.agent_version)
+}
+
+fn duplicate_of(takeovers: &[Takeover]) -> Option<DuplicateAgent> {
+    if takeovers.len() < DUPLICATE_TAKEOVERS {
+        return None;
+    }
+    let mut peers: Vec<String> = Vec::new();
+    for (_, a, b) in takeovers {
+        for p in [a, b] {
+            if !peers.contains(p) {
+                peers.push(p.clone());
+            }
+        }
+    }
+    Some(DuplicateAgent {
+        since: takeovers[0].0,
+        takeovers: takeovers.len(),
+        peers,
+    })
+}
+
 fn now_unix() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -651,6 +745,46 @@ mod tests {
     }
 
     // ── reconnection ────────────────────────────────────────────────────────
+
+    /// Review w14-1: one takeover is a restart; two within the window are
+    /// two agents on one token, flagged even when both say the same host
+    /// name (a cloned VM), naming each agent once. Older takeovers age out.
+    #[tokio::test]
+    async fn repeated_takeovers_flag_two_agents_on_one_token() {
+        let reg = AgentRegistry::new();
+        let _a = FakeAgent::connect(&reg, "laptop", answer_exit(0));
+        assert_eq!(reg.duplicate("laptop"), None);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let other = AgentHello {
+            agent_version: "1.0.0".into(),
+            ..hello()
+        };
+        reg.connect("laptop", other, tx);
+        assert_eq!(reg.duplicate("laptop"), None, "one takeover is a restart");
+        let _c = FakeAgent::connect(&reg, "laptop", answer_exit(0));
+        let dup = reg
+            .duplicate("laptop")
+            .expect("two takeovers in the window");
+        assert_eq!(dup.takeovers, 2);
+        assert_eq!(
+            dup.peers,
+            vec![
+                "fake-host (fleet-agent 9.9.9)".to_string(),
+                "fake-host (fleet-agent 1.0.0)".to_string()
+            ]
+        );
+        assert_eq!(reg.duplicate("desk"), None);
+        // Past the window, the same takeovers no longer count.
+        assert_eq!(
+            reg.duplicate_at("laptop", dup.since + DUPLICATE_WINDOW_SECS + 1),
+            None
+        );
+        let label = || "x (fleet-agent 1)".to_string();
+        assert!(reg.note_takeover("desk", 1_000, label(), label()).is_none());
+        assert!(reg
+            .note_takeover("desk", 1_000 + DUPLICATE_WINDOW_SECS + 1, label(), label())
+            .is_none());
+    }
 
     /// A restarted agent must take over without waiting for a timeout.
     #[tokio::test]

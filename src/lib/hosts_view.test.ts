@@ -295,6 +295,11 @@ describe('host health helpers', () => {
     expect(hostAttention({ ...base, host: full })?.title).toContain('98%');
     const agent = host('trn', { transport: 'agent', agent_version: '0.2.26' });
     expect(hostAttention({ ...base, host: agent })?.kind).toBe('agent_old');
+    // Agents update themselves; the hint names that and the by-hand command,
+    // never a systemctl restart of a unit the job installs as --user (w14-8).
+    const agentTitle = hostAttention({ ...base, host: agent })?.title ?? '';
+    expect(agentTitle).toContain('fleet-agent update');
+    expect(agentTitle).not.toContain('systemctl');
     expect(hostAttention({ ...base, host: host('ok', { transport: 'agent', agent_version: '0.3.1' }) })).toBeNull();
     // After a hub rollback the agent is ahead: no "upgrade the agent" mark.
     expect(hostAttention({ ...base, host: host('ahead', { transport: 'agent', agent_version: '0.4.0' }) })).toBeNull();

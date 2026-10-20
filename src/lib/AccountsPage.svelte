@@ -22,6 +22,7 @@
     severityLeft,
     severity,
     severityBadge,
+    statusMessage,
     windowOf,
     type UsageWindowKind,
   } from './account_usage';
@@ -50,8 +51,11 @@
   import { hubStatus, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
   import { bulkTargets, sessionBlocked } from './share';
-  import { moveToHeadroom, resetText, switchTarget, waitOut } from './account_limits';
+  import { moveToHeadroom, resetText, switchCheck, waitOut } from './account_limits';
   import LimitActions from './LimitActions.svelte';
+  import AccountNickname from './AccountNickname.svelte';
+  import { dayLabel, loginCardText } from './control_escalations';
+  import { copyText } from './clipboard';
   import { push } from './toasts';
   import { displayName } from './attention';
   import { showFriendlyNames } from './sessions';
@@ -146,22 +150,57 @@
     pausedOnly = uuid;
   }
 
-  // "Switch to <account>": the login with the most headroom on the first
-  // paused session's host names the target before anyone presses; the press
+  // "Switch to <account>": the login with the most headroom on each paused
+  // session's host names the target before anyone presses; the press
   // resumes each paused session this person may restart under the login
-  // with the most headroom on its own host (step 4.4's bulk move).
+  // with the most headroom on its own host (step 4.4's bulk move). Asked
+  // again whenever the paused rows or the usage readings change (reviews
+  // w02-11, w03-8), never cached for the page's life. The answer per
+  // account: the account every host agrees on, `MIXED` when the hosts
+  // differ (or some have none), `null` when no host has a login with room,
+  // and no entry while unknown or when a check failed.
+  const MIXED = '*';
   let switchTo = $state<Record<string, string | null>>({});
   let switching = $state<string | null>(null);
   const restartBlocked = $derived(hubActionBlocked('restart_session', $hubStatus, $hubConnection));
+  /** The paused rows per account, one per host, as a key that changes only
+   *  when they or the usage readings do (not on the 30 s tick). */
+  const switchKey = $derived(
+    JSON.stringify([
+      list.map((a) => [a.uuid, [...new Set(pausedOf(a).map((s) => `${s.host_alias}/${s.claude_profile ?? ''}/${s.account_uuid ?? ''}`))]]),
+      Object.values($accountUsage).map((u) => [u.account_uuid, u.fetched_at]),
+    ]),
+  );
   $effect(() => {
-    for (const a of list) {
-      const first = pausedOf(a)[0];
-      if (!first || a.uuid in untrack(() => switchTo)) continue;
-      switchTo = { ...untrack(() => switchTo), [a.uuid]: null };
-      void switchTarget(first).then((t) => {
-        switchTo = { ...switchTo, [a.uuid]: t ? t.account_uuid : null };
-      });
-    }
+    void switchKey;
+    let live = true;
+    const jobs = untrack(() =>
+      list
+        .map((a) => {
+          const perHost = new Map<string, SessionRow>();
+          for (const s of pausedOf(a)) if (!perHost.has(s.host_alias)) perHost.set(s.host_alias, s);
+          return { uuid: a.uuid, rows: [...perHost.values()] };
+        })
+        .filter((j) => j.rows.length > 0),
+    );
+    void Promise.all(
+      jobs.map(async (j) => {
+        const answers = await Promise.all(j.rows.map((s) => switchCheck(s)));
+        if (answers.some((r) => !r.ok)) return [j.uuid, undefined] as const;
+        const targets = answers.map((r) => (r.ok ? (r.value.target?.account_uuid ?? null) : null));
+        const named = new Set(targets.filter((x): x is string => x !== null));
+        const answer = named.size === 0 ? null : named.size === 1 && !targets.includes(null) ? [...named][0] : MIXED;
+        return [j.uuid, answer] as const;
+      }),
+    ).then((pairs) => {
+      if (!live) return;
+      const next: Record<string, string | null> = {};
+      for (const [uuid, answer] of pairs) if (answer !== undefined) next[uuid] = answer;
+      switchTo = next;
+    });
+    return () => {
+      live = false;
+    };
   });
   async function switchPaused(a: AccountSummary) {
     const rows = bulkTargets(pausedOf(a), 'restart_session', $sessionBlocked);
@@ -172,9 +211,6 @@
     switching = a.uuid;
     const r = await moveToHeadroom(rows, restartSession);
     switching = null;
-    const { [a.uuid]: _gone, ...rest } = switchTo;
-    void _gone;
-    switchTo = rest;
     const parts = [
       r.moved > 0 ? `Switched ${r.moved} session${r.moved === 1 ? '' : 's'}` : 'Nothing switched',
       r.nowhere > 0 ? `${r.nowhere} with no other login that has room` : '',
@@ -182,6 +218,8 @@
     ].filter(Boolean);
     push({ message: parts.join(' · '), kind: r.failed > 0 ? 'error' : r.moved > 0 ? 'success' : 'info' });
   }
+  const nicknameBlocked = $derived(hubActionBlocked('set_account_nickname', $hubStatus, $hubConnection));
+  let nickEditing = $state<string | null>(null);
   let picked = $state<string | null>(null);
   // A pill elsewhere (step 4.3) asked for one account: show it, then clear
   // the request so a later visit keeps whatever was picked by hand.
@@ -255,7 +293,14 @@
     const at = limitOf(a.uuid);
     if (at == null) return;
     for (const s of pausedOf(a)) waitOut(s.id, at);
-    push({ kind: 'info', message: `Waiting until ${resetText(at)}; the paused sessions resume then.` });
+    // Wait sends nothing (review w03-4): the rows read "Waiting until …" and
+    // are ready again once the limit resets; a turn the limit cut off stays
+    // where it stopped.
+    push({
+      kind: 'info',
+      message: `Waiting until ${resetText(at, { now, locale, timeZone })}`,
+      sub: 'Nothing is sent; the paused sessions are ready again once the limit resets.',
+    });
   }
 
   interface WindowView {
@@ -442,10 +487,12 @@
                     onclick={(e) => {
                       e.stopPropagation();
                       waitAll(a);
-                    }}>Wait until {resetText(limitOf(a.uuid) ?? 0)}</button
+                    }}>Wait until {resetText(limitOf(a.uuid) ?? 0, { now, locale, timeZone })}</button
                   >
                 {/if}
-                {#if target}
+                {#if target === null}
+                  <span class="sub" data-testid="account-paused-noroom">No other login has room</span>
+                {:else if target}
                   <button
                     type="button"
                     class="btn"
@@ -456,7 +503,11 @@
                       e.stopPropagation();
                       void switchPaused(a);
                     }}
-                    >{switching === a.uuid ? 'Switching…' : `Switch to ${$accountByUuid.get(target) ? labelOf($accountByUuid.get(target)) : target.slice(0, 8)}`}</button
+                    >{switching === a.uuid
+                      ? 'Switching…'
+                      : target === MIXED
+                        ? 'Switch to logins with room'
+                        : `Switch to ${$accountByUuid.get(target) ? labelOf($accountByUuid.get(target)) : target.slice(0, 8)}`}</button
                   >
                 {/if}
               </div>
@@ -472,7 +523,19 @@
         <div class="detail" data-testid="account-detail">
           <div class="d-head">
             <div>
-              <h3>{a.label}</h3>
+              <h3>
+                <!-- Rename here too (review w03-13), as Hosts does. -->
+                <AccountNickname
+                  account={a.account}
+                  editing={nickEditing === a.uuid}
+                  onedit={() => {
+                    if (nicknameBlocked === null) nickEditing = a.uuid;
+                  }}
+                  ondone={() => (nickEditing = null)}
+                  testid="account-nickname"
+                  blocked={nicknameBlocked}
+                />
+              </h3>
               <div class="sub">
                 {#if a.account.email && a.account.email !== a.label}{a.account.email} · {/if}
                 {a.plan ?? 'plan unknown'}
@@ -490,6 +553,12 @@
             <div class="sub" data-testid="account-checked">
               {checkedAgo(a.usage.fetched_at, now)}{#if a.usage.source_host} via {a.usage.source_host}{/if}
             </div>
+          {/if}
+          {#if a.usage && a.usage.status !== 'ok'}
+            <!-- Why the usage is missing or old (review w03-1), worded as the Usage page words it. -->
+            {#each statusMessage(a.usage, a.account, [], now, locale, timeZone).lines.filter((l) => l.kind !== 'age') as line, i (i)}
+              <div class="sub status-line" data-tone={line.tone} data-testid="account-status-line">{line.text}</div>
+            {/each}
           {/if}
           {#if spend && (spend.get(a.uuid) ?? 0) > 0}
             <div class="sub" data-testid="account-spend">{spendText(a.uuid)} today</div>
@@ -558,6 +627,18 @@
                     onclick={() => requestHostsView(l.host)}>{l.host}</button
                   >
                   <span class="sub">{l.profile ? `profile ${l.profile}` : 'host login'}</span>
+                  {#if l.signedOutSince != null}
+                    {@const card = loginCardText(l.host, { profile: l.profile, since: l.signedOutSince, checked_at: 0 })}
+                    <span class="signed-out" data-testid="account-login-signed-out">signed out since {dayLabel(l.signedOutSince)}</span>
+                    <button
+                      type="button"
+                      class="link"
+                      data-testid="account-login-copy"
+                      title={card}
+                      onclick={() => void copyText(card.slice(card.indexOf(' · ') + 3)).then((ok) => ok && push({ kind: 'info', message: 'Sign-in command copied' }))}
+                      >Copy sign-in command</button
+                    >
+                  {/if}
                 </li>
               {/each}
             </ul>
@@ -568,7 +649,9 @@
             {#if onlyPaused}<button type="button" class="link" data-testid="account-paused-all" onclick={() => (pausedOnly = null)}>Show all</button>{/if}
           </h4>
           {#if rows.length === 0}
-            <p class="sub">No session runs on this account.</p>
+            <p class="sub" data-testid="account-sessions-empty">
+              {onlyPaused ? 'Nothing is paused by this limit now.' : 'No session runs on this account.'}
+            </p>
           {:else}
             <ul class="rows" data-testid="account-sessions">
               {#each rows as s (s.id)}
@@ -592,7 +675,7 @@
                   <li>
                     <span>{r.name}</span>
                     <span class="sub"
-                      >Routine · its runs meet the limit{#if limitOf(a.uuid) != null} until {resetText(limitOf(a.uuid) ?? 0)}, then run again on their own{/if}</span
+                      >Routine · its runs meet the limit{#if limitOf(a.uuid) != null} until {resetText(limitOf(a.uuid) ?? 0, { now, locale, timeZone })}, then run again on their own{/if}</span
                     >
                   </li>
                 {/each}
@@ -610,6 +693,13 @@
 </section>
 
 <style>
+  .signed-out {
+    color: var(--danger);
+    font-size: var(--text-2xs);
+  }
+  .status-line[data-tone='alarm'] {
+    color: var(--danger);
+  }
   .accounts {
     display: flex;
     flex-direction: column;

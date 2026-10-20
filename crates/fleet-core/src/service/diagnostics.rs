@@ -223,8 +223,9 @@ fn tunnel_detail(alias: &str, tunnels: &HashMap<String, TunnelHealth>) -> Option
 /// Every secret the store knows, to mask literally in text that leaves the
 /// hub with [`logging::redact_secrets`]: host tokens, the master token,
 /// tracker credentials (the token and its Basic-auth encoding, whichever an
-/// error string or log line might carry), the decision model's API key and
-/// session environment secrets.
+/// error string or log line might carry), the decision model's API key,
+/// session environment secrets and the asset catalog's secrets (global and
+/// per-host), which sync renders into hosts' MCP configs.
 pub fn known_secrets(s: &Store) -> Result<Vec<String>, IpcError> {
     let mut secrets: Vec<String> = s.list_host_tokens()?.into_iter().map(|t| t.token).collect();
     if let Some(m) = crate::mcp::settings::McpSettings::read(s)?.token {
@@ -233,6 +234,7 @@ pub fn known_secrets(s: &Store) -> Result<Vec<String>, IpcError> {
     secrets.extend(s.tracker_secret_literals()?);
     secrets.extend(s.decision_secret_literals()?);
     secrets.extend(s.env_secret_literals()?);
+    secrets.extend(s.catalog_secret_literals()?);
     Ok(secrets)
 }
 
@@ -434,6 +436,10 @@ mod tests {
     const TRACKER_TOK: &str = "jira-odd-shaped-secret-7Q";
     /// A stored session-environment secret of no recognisable shape.
     const ENV_SECRET: &str = "env-odd-shaped-secret-4Kx";
+    /// Asset-catalog secrets (global and a per-host override), which sync
+    /// renders into a host's MCP config, so a pane or log can echo them.
+    const CATALOG_SECRET: &str = "catalog-odd-shaped-secret-8Rw";
+    const CATALOG_HOST_SECRET: &str = "catalog-host-odd-secret-3Pz";
 
     fn seeded_store() -> Mutex<Store> {
         let s = Store::open_in_memory().unwrap();
@@ -457,6 +463,10 @@ mod tests {
             &crate::store::EnvValue::Secret(crate::store::Secret::new(ENV_SECRET)),
         )
         .unwrap();
+        s.set_secret("LINEAR_API_KEY", None, CATALOG_SECRET)
+            .unwrap();
+        s.set_secret("LINEAR_API_KEY", Some("mefistos"), CATALOG_HOST_SECRET)
+            .unwrap();
         Mutex::new(s)
     }
 
@@ -496,6 +506,8 @@ mod tests {
                  WARN odd token {ODD_TOK} seen\n\
                  WARN jira sync failed with {TRACKER_TOK}\n\
                  WARN launch env had {ENV_SECRET} in it\n\
+                 INFO .mcp.json LINEAR_API_KEY={CATALOG_SECRET}\n\
+                 INFO override {CATALOG_HOST_SECRET}\n\
                  INFO plain line\n"
             ),
         )
@@ -504,7 +516,15 @@ mod tests {
         let store = seeded_store();
         let b = collect(&store, inputs(tmp.path(), &logs)).unwrap();
 
-        for secret in [MASTER, HOST_TOK, ODD_TOK, TRACKER_TOK, ENV_SECRET] {
+        for secret in [
+            MASTER,
+            HOST_TOK,
+            ODD_TOK,
+            TRACKER_TOK,
+            ENV_SECRET,
+            CATALOG_SECRET,
+            CATALOG_HOST_SECRET,
+        ] {
             assert!(
                 !b.text.contains(secret),
                 "bundle leaked {secret}:\n{}",
@@ -528,7 +548,7 @@ mod tests {
         );
         assert!(b.text.contains("reconcile.interval_secs = "));
         assert!(b.text.contains("INFO plain line"));
-        assert!(b.text.contains("== Recent log (last 6 lines) =="));
+        assert!(b.text.contains("== Recent log (last 8 lines) =="));
         assert_eq!(b.log_dir, logs.display().to_string());
         assert!(b.log_file.unwrap().ends_with("claude-fleet.2026-09-11.log"));
     }

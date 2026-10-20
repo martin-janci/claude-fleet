@@ -15,9 +15,21 @@ const FILES = readdirSync('src', { recursive: true })
   .filter((p) => p.endsWith('.svelte'))
   .map((p) => `src/${p.replaceAll('\\', '/')}`);
 
-/** Lines of a file's <style> blocks, numbered as in the file, comments blanked. */
-function styleLines(src: string): [number, string][] {
+/** The shared stylesheets components import (review w20-9). The loader kit's
+ *  are left out: its stage values are the board's own, documented there. */
+const SHEETS = readdirSync('src/lib')
+  .filter((f) => f.endsWith('.css') && !f.startsWith('loader-kit'))
+  .map((f) => `src/lib/${f}`);
+
+/** Lines of a file's <style> blocks (all of a .css file), numbered as in
+ *  the file, comments blanked. */
+function styleLines(src: string, file = ''): [number, string][] {
   const out: [number, string][] = [];
+  if (file.endsWith('.css')) {
+    const body = src.replace(/\/\*[\s\S]*?\*\//g, (c) => c.replace(/[^\n]/g, ' '));
+    body.split('\n').forEach((line, i) => out.push([i + 1, line]));
+    return out;
+  }
   for (const m of src.matchAll(/<style[^>]*>([\s\S]*?)<\/style>/g)) {
     const first = src.slice(0, (m.index ?? 0) + m[0].indexOf('>') + 1).split('\n').length - 1;
     const body = m[1].replace(/\/\*[\s\S]*?\*\//g, (c) => c.replace(/[^\n]/g, ' '));
@@ -29,7 +41,7 @@ function styleLines(src: string): [number, string][] {
 /** What each rule refuses, as `file:line text`. */
 export function tokenFindings(file: string, src: string): string[] {
   const out: string[] = [];
-  for (const [n, line] of styleLines(src)) {
+  for (const [n, line] of styleLines(src, file)) {
     const hit = (what: string) => out.push(`${file}:${n} ${what}: ${line.trim()}`);
     if (/font-size:\s*[0-9.]+(px|rem)\b/.test(line)) hit('font-size');
     const radius = /border(?:-(?:top|bottom)-(?:left|right))?-radius:\s*([^;}]+)/.exec(line);
@@ -70,5 +82,14 @@ describe('style tokens (review r10)', () => {
 
   it('no component uses a literal type size, radius, font or named colour', () => {
     expect(FILES.flatMap((f) => tokenFindings(f, readFileSync(f, 'utf8')))).toEqual([]);
+  });
+
+  it('reads a shared .css file whole', () => {
+    expect(tokenFindings('x.css', '.a {\n  font-size: 11px; /* 12px */\n}').map((l) => l.split(' ')[0] + ' ' + l.split(' ')[1])).toEqual(['x.css:2 font-size:']);
+  });
+
+  it('no shared stylesheet in src/lib uses a literal type size, radius, font or named colour (review w20-9)', () => {
+    expect(SHEETS.length).toBeGreaterThan(0);
+    expect(SHEETS.flatMap((f) => tokenFindings(f, readFileSync(f, 'utf8')))).toEqual([]);
   });
 });

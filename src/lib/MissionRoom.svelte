@@ -60,6 +60,7 @@
   import { outbox, receipt as outboxReceipt } from './outbox';
   import type { NextStep } from './mission_triage';
   import type { IpcError, Result } from './result';
+  import { parkedHeld } from './composer_hold';
   import {
     acceptWorkProposals,
     autonomyWords,
@@ -128,6 +129,7 @@
     showMissionPanel,
     startNewMission,
     steerBlocked,
+    steerBusy,
     steerPrefix,
     steerReceipts,
     type MissionPanelTab,
@@ -694,12 +696,17 @@
 
   let steerText = $state('');
   const blocked = $derived(steerBlocked($operatorRow));
+  const outboxStore = outbox.store;
+  const operatorOutboxBusy = $derived(
+    ($outboxStore.msgs[$operatorRow?.id ?? -1] ?? []).some((m) => m.state === 'waiting' || m.state === 'sending' || m.state === 'sent'),
+  );
+  const steerWait = $derived(blocked ? null : steerBusy($operatorRow, operatorOutboxBusy, $parkedHeld.length));
   const myReceipts = $derived(mission ? $steerReceipts.filter((r) => r.missionId === mission.id) : []);
 
   function steer() {
     const text = steerText.trim();
     const row = get(operatorRow);
-    if (!mission || !text || !row || steerBlocked(row)) return;
+    if (!mission || !text || !row || steerBlocked(row) || steerWait) return;
     sendSteer(mission, text, row);
     steerText = '';
   }
@@ -715,7 +722,6 @@
     const m = ($outboxStore.msgs[operatorId] ?? []).find((x) => x.id === key);
     return m ? outboxReceipt(m, false, Date.now()).label : 'Sent';
   }
-  const outboxStore = outbox.store;
 
   let stopWatching: (() => void) | null = null;
   onMount(() => {
@@ -1130,7 +1136,7 @@
             onkeydown={steerKey}
             data-testid="mission-steer-input"
           ></textarea>
-          <button class="btn send" type="submit" disabled={!!blocked || !steerText.trim()} aria-label="Send to Control" data-testid="mission-steer-send"
+          <button class="btn send" type="submit" disabled={!!blocked || !!steerWait || !steerText.trim()} aria-label="Send to Control" data-testid="mission-steer-send"
             >↵</button
           >
         </div>
@@ -1138,6 +1144,11 @@
           <p class="muted small" data-testid="mission-steer-blocked">
             {blocked}
             <button class="link" type="button" onclick={() => openControl('chat')}>Open Control</button>
+          </p>
+        {:else if steerWait}
+          <p class="muted small" data-testid="mission-steer-busy">
+            {steerWait}
+            {#if $parkedHeld.length > 0}<button class="link" type="button" onclick={() => openControl('chat')}>Open Control</button>{/if}
           </p>
         {:else}
           <p class="muted small hint">Goes to Control, about this mission.</p>
