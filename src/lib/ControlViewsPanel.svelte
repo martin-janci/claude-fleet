@@ -48,7 +48,8 @@
   import { openRuns } from './automation';
   import LimitActions from './LimitActions.svelte';
   import FixCard from './FixCard.svelte';
-  import { fixedRecently, fixedWords, hiddenFindings, openFindings, subjectWords, watchFindings } from './autofix';
+  import { fixedRecently, fixedWords, hiddenFindings, openFindings, scanFindings, subjectWords, watchFindings } from './autofix';
+  import { push } from './toasts';
   import { onMount } from 'svelte';
   import { classify } from './attention';
   import { attentionFacts } from './attention_facts';
@@ -73,6 +74,16 @@
 
   // Problems & fixes (autofix): kept fresh while the panel is up.
   onMount(() => watchFindings());
+  /** Check now: the hub re-reads its hosts at once rather than at its next
+   *  pass (a login or a hand-fixed ~/.claude.json shows straight away). */
+  let checking = $state(false);
+  async function checkNow() {
+    if (checking) return;
+    checking = true;
+    const r = await scanFindings();
+    checking = false;
+    if (!r.ok) push({ kind: 'error', message: `Could not check now: ${r.error.message}` });
+  }
 
   const shown = $derived(shownViews($controlViews));
   const active = $derived($controlViews.active);
@@ -261,7 +272,12 @@
       </div>
       {#if $openFindings.length > 0 || $hiddenFindings.length > 0 || $fixedRecently.length > 0}
         <section class="problems" aria-label="Problems & fixes" data-testid="control-problems">
-          <h3 class="problems-title">Problems &amp; fixes{#if $openFindings.length > 0}{' '}<span class="count">{$openFindings.length}</span>{/if}</h3>
+          <h3 class="problems-title">
+            Problems &amp; fixes{#if $openFindings.length > 0}{' '}<span class="count">{$openFindings.length}</span>{/if}
+            <button type="button" class="link check-now" disabled={checking} data-testid="control-problems-check" onclick={() => void checkNow()}
+              >{checking ? 'Checking…' : 'Check now'}</button
+            >
+          </h3>
           {#each $openFindings as f (f.id)}
             <FixCard finding={f} compact={true} />
           {/each}
@@ -556,6 +572,10 @@
     font-size: var(--text-xs);
     font-weight: 600;
     color: var(--fg-2);
+  }
+  .check-now {
+    margin-left: var(--space-2);
+    font-weight: 400;
   }
   .fixed {
     margin: var(--space-1) 0 0;

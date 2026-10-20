@@ -21363,6 +21363,10 @@ async fn autofix_lists_the_operator_finding_and_a_trusted_device_fixes_it() {
         .find(|r| r["kind"] == "operator_unbound")
         .expect("the 2026-10-17 case is found");
     assert_eq!(op["fix"]["safety"], "needs_approval");
+    assert_eq!(
+        op["auto_runs"], false,
+        "a bool, so the compact list keeps it"
+    );
     let id = op["id"].as_i64().unwrap();
 
     let applied = result_json(
@@ -21475,4 +21479,46 @@ async fn dismiss_refuses_an_until_in_the_past() {
         .unwrap_err();
     assert!(err.message.starts_with("E_INVALID"), "{err:?}");
     assert!(err.message.contains("in the future"), "{err:?}");
+}
+
+/// Review w09-1: Check now judges as the tick does. A host that cannot be
+/// reached is not looked at, so its finding stays rather than being
+/// reported fixed.
+#[tokio::test]
+async fn scan_leaves_an_unreachable_hosts_finding_alone() {
+    use crate::service::autofix::{sync, FindingBody, Severity};
+    let s = Store::open_in_memory().unwrap();
+    s.insert_host("h1", Some("h1")).unwrap(); // reachable: false
+    let id = sync::sync(
+        &s,
+        &[crate::service::autofix::Finding {
+            kind: "host.hooks_silent".into(),
+            subject: "host:h1".into(),
+            host_alias: Some("h1".into()),
+            severity: Severity::Degraded,
+            body: FindingBody {
+                title: "h1 stopped reporting session events".into(),
+                explanation: "e".into(),
+                evidence: vec![],
+                fix: None,
+                action: None,
+            },
+        }],
+        sync::Scope::All,
+        10,
+    )
+    .unwrap()
+    .opened[0];
+    assert!(s.mark_autofix_attempt(id, 15).unwrap());
+    let t = test_tools(s);
+    let mut dev = client_caller("phone", TokenMode::Full);
+    dev.client.as_mut().unwrap().trusted = true;
+    let scan = result_json(
+        &t.autofix(Extension(dev), Parameters(autofix_params("scan", None)))
+            .await
+            .unwrap(),
+    );
+    let live = scan["findings"].as_array().unwrap();
+    assert!(live.iter().any(|r| r["id"].as_i64() == Some(id)), "{scan}");
+    assert!(scan["fixed"].as_array().unwrap().is_empty(), "{scan}");
 }

@@ -1,6 +1,6 @@
 //! Eligibility, execution and the apply → re-scan step.
 
-use super::sync::{sync, sync_with, Scope};
+use super::sync::{sync, sync_with, Judge, Scope, SyncOutcome};
 use super::{detector_of, scan_all, Finding, FindingBody, Fix, FixPlan, Safety, ScanCx};
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::service::playbooks::PressEnterOutcome;
@@ -111,15 +111,75 @@ pub fn auto_eligible(
     budget: &AutofixBudget,
     now: i64,
 ) -> bool {
+    auto_next_at(row, fix, cfg, budget, now).is_some_and(|t| t <= now)
+}
+
+/// When the runner will next try `fix` by itself: `now` when it is due on
+/// the next pass, later while the retry gap runs, `None` when it will not
+/// (not a safe automatic fix, automatic fixes off, the detector off, the
+/// row not open, or the attempt budget for the last 24 h spent).
+pub fn auto_next_at(
+    row: &AutofixRow,
+    fix: &Fix,
+    cfg: &Config,
+    budget: &AutofixBudget,
+    now: i64,
+) -> Option<i64> {
     let attempts = budget.attempts.max(row.attempts);
     let last = budget.last_attempt_at.max(row.last_attempt_at);
-    fix.safety == Safety::Safe
+    let will = fix.safety == Safety::Safe
         && fix.auto
         && cfg.auto_safe
         && cfg.detector_on(&row.kind)
         && matches!(row.state.as_str(), "open" | "apply_failed")
-        && attempts < cfg.max_attempts
-        && last.is_none_or(|t| now - t >= AUTOFIX_RETRY_SECS)
+        && attempts < cfg.max_attempts;
+    will.then(|| last.map_or(now, |t| (t + AUTOFIX_RETRY_SECS).max(now)))
+}
+
+/// [`auto_next_at`] for a stored row, `None` while automation is paused.
+pub fn auto_next_at_of(s: &Store, row: &AutofixRow, now: i64) -> Result<Option<i64>, IpcError> {
+    let Some(fix) = body_of(row).ok().and_then(|b| b.fix) else {
+        return Ok(None);
+    };
+    if crate::service::loops::paused(s) {
+        return Ok(None);
+    }
+    let cfg = Config::read(s);
+    Ok(auto_next_at(row, &fix, &cfg, &budget_of(s, row, now)?, now))
+}
+
+/// Sync a whole scan of `cx`: rows on a host no detector could reach are
+/// left as they are, and rows whose detector is off or whose host or
+/// session is gone are retired rather than cleared (they were not fixed).
+pub fn sync_scan(
+    s: &Store,
+    cx: &ScanCx,
+    cfg: &Config,
+    found: &[Finding],
+    now: i64,
+) -> Result<SyncOutcome, IpcError> {
+    let retire = |r: &AutofixRow| !cfg.detector_on(&r.kind) || subject_gone(cx, &r.subject);
+    let judge = Judge {
+        unjudged_hosts: cx
+            .health
+            .iter()
+            .filter(|h| !h.reachable)
+            .map(|h| h.alias.as_str())
+            .collect(),
+        retire: Some(&retire),
+    };
+    sync_with(s, found, Scope::All, &judge, now)
+}
+
+/// Whether the host or session a subject names no longer exists.
+fn subject_gone(cx: &ScanCx, subject: &str) -> bool {
+    match subject.split_once(':') {
+        Some(("host", alias)) => !cx.hosts.iter().any(|h| h.alias == alias),
+        Some(("session", id)) => id
+            .parse::<i64>()
+            .is_ok_and(|id| !cx.sessions.iter().any(|r| r.id == id)),
+        _ => false,
+    }
 }
 
 fn budget_of(s: &Store, row: &AutofixRow, now: i64) -> Result<AutofixBudget, IpcError> {
@@ -599,15 +659,7 @@ pub(crate) async fn run_pass_with(
         let cfg = Config::read(&s);
         let cx = gather(&s, live_agents, now)?;
         let found = only_enabled(scan(&cx), &cfg);
-        // A host that cannot be reached is not judged by any detector this
-        // pass: its rows are left as they are rather than cleared.
-        let unjudged: std::collections::BTreeSet<&str> = cx
-            .health
-            .iter()
-            .filter(|h| !h.reachable)
-            .map(|h| h.alias.as_str())
-            .collect();
-        let synced = sync_with(&s, &found, Scope::All, &unjudged, now)?;
+        let synced = sync_scan(&s, &cx, &cfg, &found, now)?;
         s.prune_autofix_findings(now - AUTOFIX_RETENTION_SECS)?;
         let due: Vec<i64> = if crate::service::loops::paused(&s) {
             Vec::new()
@@ -1497,6 +1549,77 @@ mod tests {
         );
         assert!(!off.is_empty(), "the operator detector still runs");
         assert!(off.iter().all(|f| !f.kind.starts_with("host.")), "{off:?}");
+    }
+
+    #[test]
+    fn auto_next_at_says_when_fleet_tries_again_or_that_it_will_not() {
+        let b = AutofixBudget::default();
+        let fix = safe_fix(true);
+        assert_eq!(
+            auto_next_at(&open_row(0, None), &fix, &cfg(), &b, 1000),
+            Some(1000)
+        );
+        assert_eq!(
+            auto_next_at(&open_row(1, Some(900)), &fix, &cfg(), &b, 1000),
+            Some(900 + AUTOFIX_RETRY_SECS),
+            "the retry gap"
+        );
+        assert_eq!(
+            auto_next_at(&open_row(3, Some(0)), &fix, &cfg(), &b, 100_000),
+            None,
+            "tries spent"
+        );
+        let off = Config {
+            auto_safe: false,
+            ..cfg()
+        };
+        assert_eq!(auto_next_at(&open_row(0, None), &fix, &off, &b, 1000), None);
+    }
+
+    /// Review w09-2: a row dropped because its detector was switched off, or
+    /// because its host is gone, was not fixed and must not say so.
+    #[tokio::test]
+    async fn a_switched_off_detector_or_removed_host_retires_rows_instead_of_fixing_them() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        {
+            let s = store.lock().unwrap();
+            s.insert_host("h1", Some("h1")).unwrap();
+        }
+        let exec = FakeExec {
+            fail: true,
+            ..Default::default()
+        };
+        run_pass_with(&store, &exec, &[], 10, |_| vec![hooks_silent_finding()])
+            .await
+            .unwrap();
+        assert_eq!(exec.provisions.load(Ordering::SeqCst), 1, "tried once");
+        {
+            let s = store.lock().unwrap();
+            crate::service::settings::set(&s, settings::AUTOFIX_DETECTOR_HOST, "false").unwrap();
+        }
+        // The detector is off: the scan reports nothing for it.
+        let out = run_pass_with(&store, &exec, &[], 20, |_| vec![])
+            .await
+            .unwrap();
+        assert!(out.sync.cleared.is_empty(), "{out:?}");
+        {
+            let s = store.lock().unwrap();
+            assert!(s.live_autofix_findings().unwrap().is_empty());
+            assert!(s.recently_fixed_autofix_findings(0).unwrap().is_empty());
+            crate::service::settings::set(&s, settings::AUTOFIX_DETECTOR_HOST, "true").unwrap();
+        }
+        // The host is removed: its subject is gone.
+        run_pass_with(&store, &exec, &[], 30, |_| vec![hooks_silent_finding()])
+            .await
+            .unwrap();
+        store.lock().unwrap().delete_host("h1").unwrap();
+        let out = run_pass_with(&store, &exec, &[], 40, |_| vec![])
+            .await
+            .unwrap();
+        assert!(out.sync.cleared.is_empty(), "{out:?}");
+        let s = store.lock().unwrap();
+        assert!(s.live_autofix_findings().unwrap().is_empty());
+        assert!(s.recently_fixed_autofix_findings(0).unwrap().is_empty());
     }
 
     #[tokio::test]

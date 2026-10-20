@@ -183,11 +183,11 @@ impl Store {
         )
     }
 
-    /// Delete cleared episodes last seen before `before`. Live rows are
+    /// Delete cleared and retired episodes last seen before `before`. Live rows are
     /// never touched.
     pub fn prune_autofix_findings(&self, before: i64) -> Result<usize> {
         self.conn.execute(
-            "DELETE FROM autofix_findings WHERE state = 'cleared' AND last_seen_at < ?1",
+            "DELETE FROM autofix_findings WHERE state IN ('cleared', 'retired') AND last_seen_at < ?1",
             [before],
         )
     }

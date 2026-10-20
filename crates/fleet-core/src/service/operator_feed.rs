@@ -513,9 +513,10 @@ pub fn mission_condition(id: i64, name: &str, reason: &str) -> Condition {
 
 /// PURE: the autofix lines. A live finding whose fix needs a person (or
 /// that has no fix fleet can run, or whose automatic fix stopped working)
-/// is a problem; a safe fix fleet applied by itself and that cleared within
-/// [`EVENT_MAX_AGE_SECS`] is news. A safe fix still to run, or one a loop
-/// owns (`auto: false`), says nothing yet. Titles are fleet's own words
+/// is a problem, as is a safe fix fleet will not run by itself
+/// (`auto_runs` is false); a safe fix fleet applied by itself and that
+/// cleared within [`EVENT_MAX_AGE_SECS`] is news. A safe fix still to run,
+/// or one a loop owns (`auto: false`), says nothing yet. Titles are fleet's own words
 /// (the detectors'), never a session's.
 pub fn autofix_conditions(
     live: &[crate::service::autofix::api::FindingView],
@@ -535,6 +536,9 @@ pub fn autofix_conditions(
             Some(x) if x.auto && f.state == "apply_failed" => {
                 "the automatic fix did not work; it needs you"
             }
+            // Automatic fixes are off (or paused, or out of tries): a safe
+            // fix that will not run by itself waits like any other.
+            Some(x) if x.auto && f.auto_runs == Some(false) => "fix waiting for you",
             Some(_) => continue,
             None => "fleet has no fix for it; it needs you",
         };
