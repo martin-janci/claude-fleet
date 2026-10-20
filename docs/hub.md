@@ -2580,7 +2580,12 @@ session card's `is_controller`, `tags`, `turn_seq`, `safe_kill_state`,
 `started_at`, `last_turn_at`, `last_stop_at`, `usage_cost_micros`,
 `usage_model`, plus the work graph's `work` (the row's primary work link)
 and the PR fact, CI check count and Switch account's `pr_url`,
-`pr_evidence` and `claude_profile`. The first cut — the list's sixteen alone — measured
+`pr_evidence` and `claude_profile`, and the Pinned section's `pinned_at`,
+Done-unread's `last_viewed_at`, Control's threads' `origin` / `origin_ref`,
+`agent`, `lost_reason`, `form_draft`, `parent_session_id` and `worktree_id`
+(review wave 24: the phone's re-list replaces its rows with this view, so a
+column it reads but the view drops resets on every reconnect;
+`views.rs` lists them all). The first cut — the list's sixteen alone — measured
 **46 990 → 16 733 B of JSON (−64 %), 7 712 → 3 023 B gzipped** on the same
 44-session fleet; the card's nine are short scalars and do not change that
 picture. The first cut left the card's columns out, and a phone that
