@@ -15,7 +15,8 @@
   // stays literal text.
   import { onDestroy } from 'svelte';
   import { get } from 'svelte/store';
-  import { sessions } from './sessions';
+  import { isInactiveAgent, sessions } from './sessions';
+  import { insertIntoComposer } from './conversation';
   import { selectSessionExplicitly, taskLinksLoaded } from './selection';
   import { orgs as orgStore } from './orgs';
   import { openExternal } from './open_external';
@@ -43,7 +44,7 @@
   import { tablistKeys } from './tablist_keys';
   import MarkdownView from './MarkdownView.svelte';
   import TaskResultPanel from './TaskResultPanel.svelte';
-  import { workResult, type TaskResultView } from './task_result';
+  import { ASK_ABOUT_RESULT, workResult, type TaskResultView } from './task_result';
   import Icon from './kit/Icon.svelte';
   import { copyText } from './clipboard';
   import { finishesWhen } from './handoffs';
@@ -317,6 +318,21 @@
       default:
         return l.ended_at ? `ended ${timeAgo(l.ended_at)}` : 'ended';
     }
+  }
+
+  // Ask about result (review w09-9): the worker session is not on screen
+  // here, so it is opened first and the question lands in its composer. Not
+  // offered once that session is gone, lost or a stopped agent.
+  const askRow = $derived.by(() => {
+    const id = result?.session_id;
+    const row = id != null ? rowsById.get(id) : undefined;
+    return row && row.lost_at == null && !isInactiveAgent(row) ? row : undefined;
+  });
+  function askAboutResult() {
+    const row = askRow;
+    if (!row) return;
+    selectSessionExplicitly(row);
+    insertIntoComposer(row.id, ASK_ABOUT_RESULT);
   }
 
   function openLink(l: WorkTaskLink) {
@@ -1033,7 +1049,8 @@
             <TaskResultPanel
               {result}
               title={task.title ?? task.key ?? ''}
-              sessionId={result.session_id}
+              sessionId={askRow ? askRow.id : null}
+              onAsk={askAboutResult}
               canMarkDone={task.kind === 'local' && task.item_id != null && task.status_category !== 'done'}
               onOpenTask={(id) => selectedTaskId.set(`item:${id}`)}
               onChanged={() => void load(taskId)}
@@ -1041,8 +1058,9 @@
           </section>
         {/if}
 
-        <!-- The result panel replaces "Last outcome" when a result exists (design 2026-10-13 D6). -->
-        {#if !result && detail?.last_outcome}
+        <!-- The result panel replaces "Last outcome" when a result exists (design 2026-10-13 D6),
+             unless a session ended after that result: its outcome is newer news (review w09-10). -->
+        {#if detail?.last_outcome && (!result || detail.last_outcome.at > result.at)}
           {@const o = detail.last_outcome}
           <section aria-label="Last outcome">
             <h3>Last outcome</h3>

@@ -181,6 +181,55 @@ describe('WorkTaskDetail', () => {
     expect(get(selectedTaskId)).toBe('item:81');
   });
 
+  const resultAt = (at: number, session_id: number | null = 9) => () => ({
+    task_id: 5,
+    item_id: 77,
+    session_id,
+    role: 'wrapup',
+    at,
+    marker: 'FLEET_TASK_DONE_x',
+    report: { summary: 'Cache cleaned.', outcome: 'done' },
+    gate: { state: 'passed', checks: [], open_children: [] },
+  });
+
+  it('shows Last outcome beside the result when a session ended after it (review w09-10)', async () => {
+    const lastOutcome = { at: 2000, name: 'rework', host: 'h-a', branch: null, pr_url: null, summary: 'Stopped: tests failed.' };
+    handlers.work_task = () => ({ ...localTask, last_outcome: lastOutcome });
+    handlers.work_result = resultAt(1000);
+    render(WorkTaskDetail, { taskId: 'item:77' });
+    await flush();
+    await fireEvent.click(screen.getByTestId('work-task-tab-activity'));
+    expect(screen.getByTestId('work-task-result')).toBeTruthy();
+    expect(screen.getByTestId('work-task-outcome').textContent).toContain('Stopped: tests failed.');
+  });
+
+  it('keeps an older Last outcome hidden behind the result', async () => {
+    handlers.work_task = () => ({ ...localTask, last_outcome: { at: 500, name: 'x', host: null, branch: null, pr_url: null, summary: 'old' } });
+    handlers.work_result = resultAt(1000);
+    render(WorkTaskDetail, { taskId: 'item:77' });
+    await flush();
+    await fireEvent.click(screen.getByTestId('work-task-tab-activity'));
+    expect(screen.queryByTestId('work-task-outcome')).toBeNull();
+  });
+
+  it('Ask about result opens the worker session first (review w09-9)', async () => {
+    handlers.work_result = resultAt(1000);
+    render(WorkTaskDetail, { taskId: 'item:77' });
+    await flush();
+    await fireEvent.click(screen.getByTestId('work-task-tab-activity'));
+    await fireEvent.click(screen.getByTestId('task-result-ask'));
+    expect(get(selectedSession)?.id).toBe(9);
+  });
+
+  it('offers no Ask about result once the worker session is gone', async () => {
+    handlers.work_result = resultAt(1000, 404);
+    render(WorkTaskDetail, { taskId: 'item:77' });
+    await flush();
+    await fireEvent.click(screen.getByTestId('work-task-tab-activity'));
+    expect(screen.getByTestId('work-task-result')).toBeTruthy();
+    expect(screen.queryByTestId('task-result-ask')).toBeNull();
+  });
+
   it('a task with no result shows no result panel', async () => {
     render(WorkTaskDetail, { taskId: 'item:77' });
     await flush();
