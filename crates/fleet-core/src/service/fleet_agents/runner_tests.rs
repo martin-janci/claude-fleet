@@ -109,9 +109,10 @@ struct World {
     gh_writes: Mutex<Vec<String>>,
     /// Fleet-own actions carried out, in order.
     fleet_ops: Mutex<Vec<super::actions::FleetOp>>,
-    /// A tracker that is not Jira: its synced items, and the windows asked.
+    /// A tracker that is not Jira: its synced items (written when the
+    /// tracker updated them, the id their place), and the pages asked.
     items: Mutex<Vec<ItemThread>>,
-    item_since: Mutex<Vec<i64>>,
+    item_pages: Mutex<Vec<ItemPage>>,
 }
 
 #[async_trait::async_trait]
@@ -156,22 +157,34 @@ impl FleetHost for World {
                 .unwrap_or_else(|| "jira_cloud".into()),
         )
     }
-    async fn item_threads(
-        &self,
-        _: i64,
-        since: i64,
-        max: usize,
-    ) -> Result<Vec<ItemThread>, String> {
-        self.item_since.lock().unwrap().push(since);
-        Ok(self
+    async fn item_threads(&self, _: i64, page: ItemPage) -> Result<ItemsRead, String> {
+        self.item_pages.lock().unwrap().push(page);
+        let mut rows: Vec<((i64, i64), ItemThread)> = self
             .items
             .lock()
             .unwrap()
             .iter()
-            .filter(|i| i.thread.updated.is_some_and(|u| u >= since))
-            .take(max)
-            .cloned()
-            .collect())
+            .enumerate()
+            .map(|(id, i)| ((i.thread.updated.unwrap_or(0), id as i64), i.clone()))
+            .filter(|(mark, _)| *mark > page.after && mark.0 < page.until)
+            .collect();
+        rows.sort_by_key(|(mark, _)| *mark);
+        rows.truncate(page.max);
+        let more = (rows.len() == page.max)
+            .then(|| rows.last().map(|(m, _)| *m))
+            .flatten();
+        Ok(ItemsRead {
+            items: rows
+                .into_iter()
+                .map(|(_, mut i)| {
+                    if !page.comments {
+                        i.thread.comments.clear();
+                    }
+                    i
+                })
+                .collect(),
+            more,
+        })
     }
     async fn open_prs(
         &self,
@@ -300,7 +313,7 @@ fn fx(loaded: Loaded, config: Value, bindings: Value, project: bool) -> Fx {
         gh_writes: Mutex::default(),
         fleet_ops: Mutex::default(),
         items: Mutex::default(),
-        item_since: Mutex::default(),
+        item_pages: Mutex::default(),
     });
     Fx {
         store: Arc::new(Mutex::new(s)),
@@ -326,7 +339,14 @@ impl Fx {
         AgentCursorRow {
             rule_id: self.rule.id,
             polled_at: since,
-            cursor: Some(Cursor { since, scan }.text()),
+            cursor: Some(
+                Cursor {
+                    since,
+                    scan,
+                    ..Cursor::default()
+                }
+                .text(),
+            ),
         }
     }
     /// Record `jobs` and claim them back as rows.
@@ -335,6 +355,11 @@ impl Fx {
         s.record_agent_poll(self.rule.id, 0, None, jobs).unwrap();
         s.claim_agent_jobs(&[AGENT], i64::MAX / 4, 10, 60).unwrap()
     }
+}
+
+/// A small definition on `trigger`, with no stores, inputs or bindings.
+fn trigger_fx(trigger: Value) -> Fx {
+    fx(small(trigger, json!([])), json!({}), json!([]), false)
 }
 
 fn l2_fx() -> Fx {
@@ -383,7 +408,8 @@ async fn the_first_poll_sets_the_clock_and_a_comment_with_a_phrase_is_a_job() {
         Some(
             Cursor {
                 since: 1000,
-                scan: None
+                start: Some(1000),
+                ..Cursor::default()
             }
             .text()
         )
@@ -505,6 +531,17 @@ fn a_schedule_fires_once_for_its_newest_missed_slot() {
         Some(4 * 3600)
     );
     assert!(schedule_fire("not cron", 0, 1).is_err());
+}
+
+#[test]
+fn a_kept_subject_is_seen_however_long_its_dedup_key() {
+    let store = Mutex::new(Store::open_in_memory().unwrap());
+    let long = "k".repeat(400);
+    assert!(!subject_seen(&store, 1, &long, 10).unwrap());
+    keep_subject(&store, 1, &long, &json!({ "n": 1 }), 10).unwrap();
+    // The record keeps the key cut to 300 characters; the lookup must cut it too.
+    assert!(subject_seen(&store, 1, &long, 10).unwrap());
+    assert!(!subject_seen(&store, 2, &long, 10).unwrap());
 }
 
 const GOOD: &str = r#"Here it is: {"summary":"Gateway key expired","rootCause":"The key","confidence":"high","severity":"critical","extra":"dropped"}"#;
@@ -634,12 +671,7 @@ async fn an_answer_off_the_schema_fails_the_job() {
 
 #[tokio::test]
 async fn a_person_runs_a_manual_agent_with_a_request() {
-    let f = fx(
-        small(json!({ "source": "manual" }), json!([])),
-        json!({}),
-        json!([]),
-        false,
-    );
+    let f = trigger_fx(json!({ "source": "manual" }));
     let src = super::definition::TriggerSource::Manual;
     // The subject is kept for its TTL from now; the run reads it at now.
     let now = crate::store::now_unix();
@@ -757,15 +789,7 @@ fn run_now_on_a_scheduled_agent_keeps_its_focus() {
     let src = super::definition::TriggerSource::Schedule;
     let now = crate::store::now_unix();
     for request in [Some("the hub"), None] {
-        let f = fx(
-            small(
-                json!({ "source": "schedule", "cron": "0 7 * * *" }),
-                json!([]),
-            ),
-            json!({}),
-            json!([]),
-            false,
-        );
+        let f = trigger_fx(json!({ "source": "schedule", "cron": "0 7 * * *" }));
         queue_manual(&f.store, &f.rule, src, request, None, now).unwrap();
         let jobs = f
             .store
@@ -1466,16 +1490,8 @@ fn gh_item(updated: i64, comments: &[(&str, &str, i64)]) -> ItemThread {
 
 #[tokio::test]
 async fn another_trackers_synced_items_are_polled_and_their_subject_kept() {
-    let f = fx(
-        small(
-            json!({ "source": "tracker_comments", "tracker": "3",
-                "match": { "any_phrase": "/ask" } }),
-            json!([]),
-        ),
-        json!({}),
-        json!([]),
-        false,
-    );
+    let f = trigger_fx(json!({ "source": "tracker_comments", "tracker": "3",
+        "match": { "any_phrase": "/ask" } }));
     *f.world.provider.lock().unwrap() = Some("github".into());
     let now = crate::store::now_unix();
     let since = now - 300;
@@ -1488,8 +1504,12 @@ async fn another_trackers_synced_items_are_polled_and_their_subject_kept() {
                 ("c3", "/ask again [fleet-agent:x]", now - 12),
             ],
         ),
-        // A comment from before the window is not asked again.
-        gh_item(now - 60, &[("c0", "/ask old", now - 4000)]),
+        // A comment from before the rule's start is not asked again.
+        {
+            let mut old = gh_item(now - 60, &[("c0", "/ask old", now - 4000)]);
+            old.thread.key = "o/r#13".into();
+            old
+        },
     ];
     let p = f.poller();
     let polled = p
@@ -1499,9 +1519,14 @@ async fn another_trackers_synced_items_are_polled_and_their_subject_kept() {
     let keys: Vec<&str> = polled.jobs.iter().map(|j| j.dedup_key.as_str()).collect();
     assert_eq!(keys, [format!("r{}:tracker:3:o/r#12#cc1", f.rule.id)]);
     assert_eq!(
-        f.world.item_since.lock().unwrap()[0],
-        since - SYNC_LAG_SECS - POLL_SLACK_SECS,
-        "read back further by a sync's lag"
+        f.world.item_pages.lock().unwrap()[0],
+        ItemPage {
+            after: (since - POLL_SLACK_SECS, 0),
+            until: now,
+            max: ITEM_POLL_MAX,
+            comments: true,
+        },
+        "a cursor from before the page mark reads from its last poll"
     );
     assert!(f.world.base.jql.lock().unwrap().is_empty(), "no JQL");
     // The same comment, seen again within the lag, is not a second job.
@@ -1533,16 +1558,8 @@ async fn another_trackers_synced_items_are_polled_and_their_subject_kept() {
 
 #[tokio::test]
 async fn another_tracker_takes_an_assignment_and_refuses_a_jql_query() {
-    let assigned = fx(
-        small(
-            json!({ "source": "tracker_assigned", "tracker": "3",
-                "match": { "assignee": "octocat" } }),
-            json!([]),
-        ),
-        json!({}),
-        json!([]),
-        false,
-    );
+    let assigned = trigger_fx(json!({ "source": "tracker_assigned", "tracker": "3",
+        "match": { "assignee": "octocat" } }));
     *assigned.world.provider.lock().unwrap() = Some("linear".into());
     let now = crate::store::now_unix();
     *assigned.world.items.lock().unwrap() = vec![gh_item(now - 5, &[])];
@@ -1555,6 +1572,10 @@ async fn another_tracker_takes_an_assignment_and_refuses_a_jql_query() {
         polled.jobs[0].dedup_key,
         format!("r{}:tracker:3:o/r#12#assigned:octocat", assigned.rule.id)
     );
+    assert!(
+        !assigned.world.item_pages.lock().unwrap()[0].comments,
+        "an assignment needs no comments call"
+    );
 
     let f = l2_fx();
     *f.world.provider.lock().unwrap() = Some("asana".into());
@@ -1564,4 +1585,81 @@ async fn another_tracker_takes_an_assignment_and_refuses_a_jql_query() {
         .await
         .unwrap_err();
     assert!(err.contains("query is JQL"), "{err}");
+}
+
+/// The cursor a poll answered, as the next poll reads it.
+fn next_cursor(f: &Fx, polled: &crate::service::agents::Polled) -> AgentCursorRow {
+    AgentCursorRow {
+        rule_id: f.rule.id,
+        polled_at: 0,
+        cursor: polled.cursor.clone(),
+    }
+}
+
+#[tokio::test]
+async fn another_trackers_burst_is_paged_and_a_late_synced_comment_still_counts() {
+    let f = fx(
+        small(
+            json!({ "source": "tracker_comments", "tracker": "3",
+                "match": { "any_phrase": "/ask" } }),
+            json!([]),
+        ),
+        json!({}),
+        json!([]),
+        false,
+    );
+    *f.world.provider.lock().unwrap() = Some("github".into());
+    let now = crate::store::now_unix();
+    let p = f.poller();
+    let first = p.poll(&f.rule, None, now - 7200).await.unwrap();
+    // A burst of 30 items written in one window, more than one page.
+    *f.world.items.lock().unwrap() = (0..30)
+        .map(|n| {
+            let mut i = gh_item(now - 100 + n, &[(&format!("c{n}"), "/ask", now - 200)]);
+            i.thread.key = format!("o/r#{n}");
+            i
+        })
+        .collect();
+    let a = p
+        .poll(&f.rule, Some(&next_cursor(&f, &first)), now)
+        .await
+        .unwrap();
+    assert_eq!(a.jobs.len(), ITEM_POLL_MAX);
+    let b = p
+        .poll(&f.rule, Some(&next_cursor(&f, &a)), now + 1)
+        .await
+        .unwrap();
+    let keys: Vec<&str> = b.jobs.iter().map(|j| j.dedup_key.as_str()).collect();
+    assert_eq!(
+        keys,
+        (25..30)
+            .map(|n| format!("r{}:tracker:3:o/r#{n}#cc{n}", f.rule.id))
+            .collect::<Vec<_>>(),
+        "the rest of the burst, oldest first"
+    );
+    // Nothing is read twice once the page caught up.
+    let c = p
+        .poll(&f.rule, Some(&next_cursor(&f, &b)), now + 2)
+        .await
+        .unwrap();
+    assert!(c.jobs.is_empty());
+    assert_eq!(
+        f.world.item_pages.lock().unwrap()[2].after,
+        (now, i64::MAX),
+        "the last page read everything before its poll"
+    );
+
+    // A sync that ran an hour late: the comment is older than any lag
+    // window, but the hub wrote the item only now, after the last poll.
+    f.world
+        .items
+        .lock()
+        .unwrap()
+        .push(gh_item(now + 5, &[("late", "/ask late", now - 3600)]));
+    let d = p
+        .poll(&f.rule, Some(&next_cursor(&f, &c)), now + 10)
+        .await
+        .unwrap();
+    let keys: Vec<&str> = d.jobs.iter().map(|j| j.dedup_key.as_str()).collect();
+    assert_eq!(keys, [format!("r{}:tracker:3:o/r#12#clate", f.rule.id)]);
 }

@@ -535,8 +535,13 @@ impl FleetTools {
         };
         self.recheck_now(&recheck)?;
         let prompt = apply_marker(p.prompt, &marker_origin(&caller), &caller, p.raw)?;
-        let before = row.turn_seq;
-        self.deliver_prompt(&row, prompt, true, false).await?;
+        // The turn this prompt's reply ends, not `row.turn_seq` itself: a
+        // queued prompt that took the idle moment first runs its turn ahead
+        // of this one, and that turn's Stop is not this prompt's answer.
+        let delivered = self.deliver_prompt(&row, prompt, true, false).await?;
+        let before = delivered["turn_seq_before"]
+            .as_i64()
+            .unwrap_or(row.turn_seq);
         let out = tasks::wait_for_session(
             &self.store,
             row.id,
@@ -696,7 +701,7 @@ impl FleetTools {
                     &dispatch_new_worker_summary(&spec, p.requester_session_id, p.raw, &p.prompt),
                     &caller,
                     GateTarget::Start {
-                        host: &spec.host_alias,
+                        host: Some(&spec.host_alias),
                     },
                 )?;
                 let name = spec.name.unwrap_or_default();
@@ -1537,13 +1542,19 @@ impl FleetTools {
         if caller.is_operator() && matches!(args.action.as_str(), "resume" | "start" | "run") {
             // Only ever gates the operator (D12): a session is about to exist.
             // (`work_link` is `confirm: true` for M7's tidy kills; a person's
-            // start or resume is never gated.)
+            // start or resume is never gated.) A task's session is a start
+            // like `new_session`'s: inside a running mission's grant it goes
+            // without a card at Autopilot (F2). With no host fleet places it,
+            // which only a grant naming no hosts covers.
             let repos = self.repo_labels(args.project_ids.as_deref().unwrap_or_default())?;
-            self.confirm_gate(
+            self.confirm_gate_target(
                 "work_link",
                 args.confirm_nonce.as_deref(),
                 &work_link_start_summary(&args, &repos),
                 &caller,
+                GateTarget::Start {
+                    host: args.host_alias.as_deref(),
+                },
             )?;
         }
         if args.action == "draft_title" {

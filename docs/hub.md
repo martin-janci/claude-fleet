@@ -3914,7 +3914,15 @@ Settings → **Hub & sync** → *Fleets* → *Add a hub*: run
   count include the extra fleets' sessions that need you, the PRs list reads
   every shown fleet, and an extra fleet's session notifies like one of this
   window's, named with its fleet. A fleet chip counts its sessions that need
-  you.
+  you. Control's Hosts view and the status bar's host chip list the extra
+  fleets' hosts' CPU, memory and disk too, and the chip follows an open
+  extra fleet session's host.
+- **The sidebar's filters reach the extra fleets.** The Machine filter
+  offers each shown fleet's hosts (`work · mercury`), and search,
+  needs-you, last active, agent and background agents narrow the extra
+  fleets' groups as they do this window's list. The org scope, the work
+  filters and the Mine / Shared tabs stay with this window's own rows: they
+  read its ids, which an extra fleet's collide with.
 - **One hub added twice is spotted.** Each hub names its fleet id in the
   `/events` `ready` frame (`fleet_id`, minted at `serve` start; `null` until
   then). An extra fleet whose id is the primary's, or an earlier extra

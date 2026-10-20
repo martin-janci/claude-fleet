@@ -657,7 +657,7 @@ Parameters: `host_alias`
 
 Restart a tmux session in place (kill and recreate): for a wedged Claude REPL whose tmux and worktree are fine; cheaper than recreate_session. Returns the updated row.
 
-Parameters: `confirm_nonce`, `effort`, `force`, `host_alias`, `model`, `name`, `profile`, `session_id`
+Parameters: `confirm_nonce`, `effort`, `force`, `host_alias`, `model`, `name`, `over_limit_ok`, `profile`, `session_id`
 
 ### `restore_host_sessions`
 

@@ -33,6 +33,18 @@
 
   const NONE: ReadonlySet<number> = new Set();
 
+  let {
+    match = () => true,
+    filtered = false,
+  }: {
+    /** The sidebar's filters, for an extra fleet's row (Sidebar's
+     *  `fleetMatch`): its fleet, the row, its project's name there and
+     *  whether it needs you. */
+    match?: (fleet: string, s: SessionRow, proj: string, needs: boolean) => boolean;
+    /** A filter narrows the list, so an empty group says so. */
+    filtered?: boolean;
+  } = $props();
+
   // Which row has which inline form open, by fleet-qualified key.
   let open = $state<{ key: string; kind: 'prompt' | 'rename' | 'close' } | null>(null);
   let text = $state('');
@@ -111,13 +123,14 @@
 
 {#each $visibleExtraFleets as { fleet: f, rows } (f.id)}
   {@const cw = connectionWord(f)}
-  {@const list = sorted(rows)}
   {@const needs = $fleetNeedsIds.get(f.id) ?? NONE}
+  {@const all = sorted(rows)}
+  {@const list = all.filter(({ s, proj }) => match(f.id, s, proj, needs.has(s.id)))}
   <section class="fleet-group" style="--fleet: {f.color}" data-testid="fleet-group-{f.id}">
     <header class="head">
       <span class="badge" data-testid="fleet-badge-{f.id}">{f.label}</span>
       <span class="state {cw.tone}" data-testid="fleet-state-{f.id}">{cw.word}</span>
-      <span class="count">{list.length}</span>
+      <span class="count">{filtered && list.length !== all.length ? `${list.length} of ${all.length}` : list.length}</span>
       <span class="grow"></span>
       {#if cw.tone === 'bad' || cw.tone === 'warn'}
         <Button size="sm" variant="quiet" testid="fleet-retry-{f.id}" onclick={() => void retryFleet(f.id)}>Retry</Button>
@@ -158,6 +171,9 @@
         <input bind:value={newName} placeholder="session name" aria-label="Session name" />
         <Button size="sm" variant="primary" type="submit" {busy} busyLabel="Starting…" disabled={!newHost || newProject === null || !newName.trim()}>Start</Button>
       </form>
+    {/if}
+    {#if filtered && list.length === 0 && all.length > 0}
+      <p class="note" data-testid="fleet-filtered-{f.id}">No session here matches the filters.</p>
     {/if}
     <ul class="rows">
       {#each list as { s, proj }, i (s.id)}

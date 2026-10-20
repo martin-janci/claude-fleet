@@ -163,6 +163,36 @@ pub fn digest_header(p: Position) -> String {
     format!("Autonomy: {} — {}.", p.label(), p.rule())
 }
 
+/// PURE: the line under the header when session care is on and the
+/// position lets it act (`control.session_care`,
+/// `mcp::guard::OPERATOR_CARE_TOOLS`); `None` otherwise.
+pub fn care_line(p: Position, care: bool) -> Option<&'static str> {
+    if !care {
+        return None;
+    }
+    match p.grants() {
+        Position::Brief => Some(
+            "Session care: on — restarting a session you started yourself goes without a card.",
+        ),
+        Position::Autopilot => Some(
+            "Session care: on — restarting a session you started yourself, and retiring one \
+             with safe_kill_session once its work is done, go without a card.",
+        ),
+        _ => None,
+    }
+}
+
+/// PURE: [`with_header`], plus [`care_line`] under the header when it
+/// applies.
+pub fn with_header_care(digest: &str, p: Position, care: bool) -> String {
+    let headed = with_header(digest, p);
+    let Some(line) = care_line(p, care) else {
+        return headed;
+    };
+    let header = digest_header(p);
+    headed.replacen(&header, &format!("{header}\n{line}"), 1)
+}
+
 /// PURE: `digest` with [`digest_header`] as its second line, right under
 /// the `[fleet events]` line, so the mark still opens it.
 pub fn with_header(digest: &str, p: Position) -> String {
@@ -187,8 +217,16 @@ until one arrives, act as at Ask first.
   open, go without a card. New sessions, kills, restarts, rewinds, restores \
   and new projects still ask.
 - **Autopilot**: also starting a session inside a running mission's grant \
-  (its hosts, hours and budget). Nothing else changes: kills, restarts, \
-  rewinds, restores and new projects always ask.
+  (its hosts, hours and budget), with `new_session`, `dispatch_task` or a \
+  task's `work_link` `start`, `run` or `resume` (name the host, or the grant \
+  must name none). Nothing else changes: kills, restarts, rewinds, restores \
+  and new projects ask.
+- **Session care** (a setting, off unless the digest says `Session care: \
+  on`): at Within your brief, `restart_session` of a session you started or \
+  briefed goes without a card (a wedged REPL, or back under another login \
+  with `profile` after a limit); at Autopilot, so does retiring one with \
+  `safe_kill_session` once its work is pushed or merged. `kill_session`, \
+  rewinds and moves always ask.
 
 A call that went without a card is still audited and shows in the chat as \
 pre-approved, so say what you did in one line. When a call returns \
@@ -243,6 +281,36 @@ mod tests {
         s.set_setting(settings::CONTROL_AUTO_CONTINUE, "true")
             .unwrap();
         assert_eq!(position(&s), Position::Brief);
+    }
+
+    #[test]
+    fn session_care_shows_only_where_it_acts() {
+        let d = "[fleet events] What changed.\n- a";
+        assert_eq!(
+            with_header_care(d, Position::Brief, false),
+            with_header(d, Position::Brief)
+        );
+        assert_eq!(
+            with_header_care(d, Position::Ask, true),
+            with_header(d, Position::Ask)
+        );
+        assert_eq!(
+            with_header_care(d, Position::Custom, true),
+            with_header(d, Position::Custom)
+        );
+        let b = with_header_care(d, Position::Brief, true);
+        let lines: Vec<&str> = b.lines().collect();
+        assert_eq!(lines[0], "[fleet events] What changed.");
+        assert!(lines[1].starts_with("Autonomy: Within your brief"), "{b}");
+        assert!(lines[2].starts_with("Session care: on"), "{b}");
+        assert!(!lines[2].contains("safe_kill_session"), "{b}");
+        assert_eq!(lines[3], "- a");
+        let a = with_header_care(d, Position::Autopilot, true);
+        assert!(
+            a.lines().nth(2).unwrap().contains("safe_kill_session"),
+            "{a}"
+        );
+        assert!(SECTION.contains("Session care: on"));
     }
 
     #[test]

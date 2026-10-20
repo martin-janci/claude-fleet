@@ -17,8 +17,8 @@ import { derived, get, writable, type Readable } from 'svelte/store';
 import { listen } from '@tauri-apps/api/event';
 import { invokeCmd, type IpcError, type Result } from './result';
 import type { HubConnection } from './hub_connection';
-import type { SessionRow } from './sessions';
-import { applyPing, type HostPing, type HostRow } from './hosts';
+import { sessionIdentity, sessionIsStale, type SessionRow } from './sessions';
+import { applyPing, extraHostFilterIds, type HostPing, type HostRow } from './hosts';
 import type { ProjectRow, ProjectTreeRow } from './projects';
 import { readPref, writePref } from './prefs';
 import { attentionState, byTriage, countsTowardBadge } from './attention';
@@ -237,6 +237,52 @@ export const visibleExtraFleets = derived(
       .map((f) => ({ fleet: f, rows: f.duplicate_of ? emptyRows() : ($rows.get(f.id) ?? emptyRows()) })),
 );
 
+// ── the sidebar's filters ──────────────────────────────────────────────
+
+/** The sidebar's Machine filter value for an extra fleet's host. A plain
+ *  alias is this window's own host; an extra fleet's alias may name another
+ *  machine here, so its value carries the fleet. */
+export function fleetHostFilterId(fleet: string, alias: string): string {
+  return `fleet:${fleet}:${alias}`;
+}
+
+/** The fleet and alias a Machine filter value names, or null for `all` and
+ *  this window's own aliases. */
+export function parseFleetHostFilter(v: string): { fleet: string; alias: string } | null {
+  if (!v.startsWith('fleet:')) return null;
+  const at = v.indexOf(':', 6);
+  if (at < 0) return null;
+  return { fleet: v.slice(6, at), alias: v.slice(at + 1) };
+}
+
+/** An extra fleet's session passes the Machine filter: `all`, or the filter
+ *  names this fleet's host. A filter on one of this window's own hosts
+ *  shows none of the extra fleets' rows. */
+export function fleetHostPasses(filter: string, fleet: string, alias: string): boolean {
+  if (filter === 'all') return true;
+  const p = parseFleetHostFilter(filter);
+  return p !== null && p.fleet === fleet && p.alias === alias;
+}
+
+/** The Machine filter's chips for the extra fleets the fleet filter shows,
+ *  each host under its fleet's label. */
+export const fleetHostFilterOptions = derived(visibleExtraFleets, ($v) =>
+  $v.flatMap(({ fleet, rows }) =>
+    [...rows.hosts.values()]
+      .filter((h) => !h.hidden)
+      .sort((a, b) => a.alias.localeCompare(b.alias))
+      .map((h) => ({ id: fleetHostFilterId(fleet.id, h.alias), fleet, host: h })),
+  ),
+);
+fleetHostFilterOptions.subscribe(($o) => extraHostFilterIds.set(new Set($o.map((o) => o.id))));
+
+/** How a Machine filter value reads: an extra fleet's host as
+ *  `work · mercury`, anything else as itself. */
+export const hostFilterLabel = derived(fleetHostFilterOptions, ($o) => (v: string): string => {
+  const o = $o.find((x) => x.id === v);
+  return o ? `${o.fleet.label} · ${o.host.alias}` : v;
+});
+
 // ── applying events ─────────────────────────────────────────────────────
 
 export function emptyRows(): FleetRows {
@@ -285,20 +331,6 @@ type RowPart = keyof FleetRaces;
 /** How long a killed session's id refuses a late `session:updated`. */
 export const FLEET_TOMBSTONE_MS = 5000;
 
-/** The same rule as `sessions.ts::sessionIsStale`: only a KNOWN older
- *  version of the SAME session (ids are reused after a kill) is stale. */
-function fleetSessionIdentity(s: SessionRow): string {
-  return `${s.host_alias}\u0000${s.tmux_name}\u0000${s.created_at}`;
-}
-function fleetSessionIsStale(incoming: SessionRow, current: SessionRow): boolean {
-  return (
-    fleetSessionIdentity(incoming) === fleetSessionIdentity(current) &&
-    incoming.row_version !== undefined &&
-    current.row_version !== undefined &&
-    incoming.row_version < current.row_version
-  );
-}
-
 /** Per fleet, per killed id: until when, and which session it was (null when
  *  the kill named only the id of a row this window never held). */
 const tombstones = new Map<string, Map<number, { until: number; identity: string | null }>>();
@@ -325,11 +357,11 @@ function admitSession(
   const tomb = liveTombstone(fleet, row.id);
   if (tomb) {
     if (how === 'updated') return false;
-    if (tomb.identity === null || tomb.identity === fleetSessionIdentity(row)) return false;
+    if (tomb.identity === null || tomb.identity === sessionIdentity(row)) return false;
     tombstones.get(fleet!)?.delete(row.id);
   }
   const current = rows.sessions.get(row.id);
-  return !(current && fleetSessionIsStale(row, current));
+  return !(current && sessionIsStale(row, current));
 }
 
 function putSession(fleet: string | undefined, rows: FleetRows, row: SessionRow, how: 'updated' | 'created' | 'command'): void {
@@ -345,7 +377,11 @@ function dropSession(fleet: string | undefined, rows: FleetRows, id: number): vo
   racesFor(fleet).sessions.touch(id);
   let m = tombstones.get(fleet);
   if (!m) tombstones.set(fleet, (m = new Map()));
-  m.set(id, { until: Date.now() + FLEET_TOMBSTONE_MS, identity: current ? fleetSessionIdentity(current) : null });
+  // A second drop of a row already gone (the kill's own answer, then its
+  // `session:killed` frame) keeps the identity the first one recorded: a
+  // null one would refuse a new session that reuses the id.
+  const identity = current ? sessionIdentity(current) : (liveTombstone(fleet, id)?.identity ?? null);
+  m.set(id, { until: Date.now() + FLEET_TOMBSTONE_MS, identity });
 }
 
 /** The event names that change an extra fleet's rows, and which of its
@@ -517,7 +553,7 @@ export async function loadFleetRows(fleet: string): Promise<void> {
       // brings it back or rolls it back.
       // (An older one stays listed so `keepCurrent` keeps the held row.)
       const listed = s.value.filter((r) => admitSession(fleet, rows, r, 'command') || rows.sessions.has(r.id));
-      const out = race.sessions.mergeList([...rows.sessions.values()], listed, ts, (r) => r.id, (r, cur) => fleetSessionIsStale(r, cur));
+      const out = race.sessions.mergeList([...rows.sessions.values()], listed, ts, (r) => r.id, sessionIsStale);
       if (out) rows.sessions = new Map(out.map((r) => [r.id, r]));
     }
     if (h.ok && Array.isArray(h.value)) {
@@ -702,9 +738,12 @@ export function fleetCaptureSession(fleet: string, s: SessionRow, scrollback = 2
 }
 
 /** The pty id an extra fleet's terminal attaches under: never one the
- *  primary's panes use (`agent`, `shell-N`, a pop-out's label). */
-export function fleetPtyId(fleet: string, s: Pick<SessionRow, 'id'>): string {
-  return `fleet-${fleet}-${s.id}`;
+ *  primary's panes use (`agent`, `shell-N`, a pop-out's label). `view`
+ *  names the terminal view that owns it: the backend opens and closes by id
+ *  alone, so a view remounted while the last one's open is still in flight
+ *  must not share its id, or that view's late close ends the new attach. */
+export function fleetPtyId(fleet: string, s: Pick<SessionRow, 'id'>, view?: number): string {
+  return view === undefined ? `fleet-${fleet}-${s.id}` : `fleet-${fleet}-${s.id}.${view}`;
 }
 
 // ── New session: which fleet (Phase 2) ──────────────────────────────────

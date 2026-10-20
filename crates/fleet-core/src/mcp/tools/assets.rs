@@ -894,7 +894,7 @@ fn may_admin_catalog_row(
 }
 
 /// [`may_admin_catalog_row`] by name, for a caller that has not read the row.
-fn may_admin_catalog(
+pub(super) fn may_admin_catalog(
     caller: &Caller,
     store: &std::sync::Mutex<Store>,
     name: &str,

@@ -32,9 +32,25 @@ const PLAIN: Record<string, string> = {
 
 const CODE_PREFIX = /^E_[A-Z_]+:\s*/;
 
+/** An agent connection that dropped or was replaced while a request was in
+ *  flight (`agent::registry::lost_mid_request`). It travels as
+ *  `E_AGENT_PROTOCOL` because `may_have_run` must count it, but it is not a
+ *  version mismatch, and the person needs to know the action may have run
+ *  before they retry it. */
+const CONNECTION_LOST = "The connection to the host's agent dropped mid-request; it may have gone through";
+
+function connectionLost(e: Pick<IpcError, 'details'>): boolean {
+  return (e.details as { connection_lost?: unknown } | null | undefined)?.connection_lost === true;
+}
+
+function plainFor(e: Pick<IpcError, 'code' | 'details'>): string | undefined {
+  if (connectionLost(e)) return CONNECTION_LOST;
+  return PLAIN[e.code];
+}
+
 /** The sentence to show for `e`, never an `E_*` code. */
-export function errorText(e: Pick<IpcError, 'code' | 'message'>): string {
-  const plain = PLAIN[e.code];
+export function errorText(e: Pick<IpcError, 'code' | 'message' | 'details'>): string {
+  const plain = plainFor(e);
   if (plain) return plain;
   const msg = (e.message ?? '').replace(CODE_PREFIX, '').trim();
   return msg || 'Something went wrong';
@@ -42,13 +58,13 @@ export function errorText(e: Pick<IpcError, 'code' | 'message'>): string {
 
 /** What goes under Details: the code and, when the sentence replaced it, the
  *  original message. */
-export function errorDetail(e: Pick<IpcError, 'code' | 'message'>): string {
+export function errorDetail(e: Pick<IpcError, 'code' | 'message' | 'details'>): string {
   const msg = (e.message ?? '').trim();
-  return PLAIN[e.code] && msg ? `${e.code}: ${msg}` : e.code;
+  return plainFor(e) && msg ? `${e.code}: ${msg}` : e.code;
 }
 
 /** `errorText` as a sentence ending in one full stop. */
-export function errorSentence(e: Pick<IpcError, 'code' | 'message'>): string {
+export function errorSentence(e: Pick<IpcError, 'code' | 'message' | 'details'>): string {
   const t = errorText(e);
   return /[.!?…]$/.test(t) ? t : `${t}.`;
 }

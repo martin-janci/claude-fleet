@@ -29,6 +29,12 @@ use std::time::Duration;
 pub const TICK_EVERY: Duration = Duration::from_secs(20);
 /// A run whose session finished no turn in this long is failed.
 pub const RUN_STALE_SECS: i64 = 6 * 3600;
+
+/// How long a run's prompt may stay untyped before the run fails as
+/// undelivered. Typing gives up well inside it (90 s, plus 15 min for a
+/// dialog a person must clear); a run past it lost its typing to a hub
+/// restart, and would otherwise hold `overlap: skip` for six hours.
+pub const PROMPT_DELIVERY_SECS: i64 = 30 * 60;
 /// Session events one event routine reads per pass.
 pub const EVENTS_PER_PASS: i64 = 50;
 /// A failed run older than this is not retried (`retry_once`): a pass
@@ -330,7 +336,7 @@ pub async fn fire_with(
                 trace::write_one(&s, run_id, step.ms(ms));
             }
             if let Err(why) = delivered {
-                undelivered(&store, run_id, &why, now);
+                undelivered(&store, run_id, &why, now, Some(handover));
             }
         });
     }
@@ -353,17 +359,32 @@ fn spawn_step(
 }
 
 /// Fail run `run_id` whose prompt was not typed, unless it has already
-/// closed.
-pub(super) fn undelivered(store: &Mutex<Store>, run_id: i64, why: &str, now: i64) {
+/// closed. Its queued `handover` is retired with it: left queued, the next
+/// prompt a person typed into the session (its fix is "Open its session")
+/// carried the routine's prompt along, and the work ran a second time
+/// beside `retry_once`'s fresh run.
+pub(super) fn undelivered(
+    store: &Mutex<Store>,
+    run_id: i64,
+    why: &str,
+    now: i64,
+    handover: Option<i64>,
+) {
     let res = lock(store).and_then(|s| match s.get_routine_run(run_id)? {
-        Some(run) if run.state == "running" => fail(
-            &s,
-            run.id,
-            E_PROMPT_NOT_DELIVERED,
-            &format!("its prompt was not delivered: {why}"),
-            run.cost_micros,
-            now,
-        ),
+        Some(run) if run.state == "running" => {
+            fail(
+                &s,
+                run.id,
+                E_PROMPT_NOT_DELIVERED,
+                &format!("its prompt was not delivered: {why}"),
+                run.cost_micros,
+                now,
+            )?;
+            if let Some(id) = handover {
+                s.mark_handovers_delivered(&[id], None)?;
+            }
+            Ok(())
+        }
         _ => Ok(()),
     });
     if let Err(e) = res {
@@ -609,6 +630,22 @@ pub fn settle(s: &Store, now: i64) -> Result<Vec<StopTurn>, IpcError> {
             );
             fail(s, run.id, E_RUN_TIME_CAP, &why, cost, now)?;
             stop.push((row.host_alias.clone(), row.tmux_name.clone()));
+        } else if let Some(untyped) = (now - run.started_at > PROMPT_DELIVERY_SECS)
+            .then(|| s.undelivered_handovers(sid))
+            .transpose()?
+            .map(|w| w.iter().map(|h| h.id).collect::<Vec<_>>())
+            .filter(|ids| !ids.is_empty())
+        {
+            // Retired with the run, as `undelivered` does.
+            s.mark_handovers_delivered(&untyped, None)?;
+            fail(
+                s,
+                run.id,
+                E_PROMPT_NOT_DELIVERED,
+                "its prompt was never typed into its session (the hub restarted while it was being typed?)",
+                cost,
+                now,
+            )?;
         } else if now - run.started_at > RUN_STALE_SECS {
             fail(
                 s,

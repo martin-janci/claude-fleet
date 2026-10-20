@@ -558,8 +558,14 @@ impl Store {
     /// revoked, not expired — its hours — and signed for the plan it has
     /// now) whose hosts include `host` (or name none), whose budget is not
     /// spent and whose parallel cap has room. The operator guard lets such
-    /// a start through without a card at Autopilot only.
-    pub fn start_inside_mission_grant(&self, host: &str, now: i64) -> Result<bool, IpcError> {
+    /// a start through without a card at Autopilot only. `host` is `None`
+    /// when fleet picks it (a task's start with no host): only a grant that
+    /// names no hosts covers that.
+    pub fn start_inside_mission_grant(
+        &self,
+        host: Option<&str>,
+        now: i64,
+    ) -> Result<bool, IpcError> {
         let ids: Vec<i64> = self
             .conn
             .prepare_cached("SELECT id FROM orchestration_projects WHERE state = 'active'")?
@@ -571,7 +577,7 @@ impl Store {
             };
             if g.hosts
                 .as_ref()
-                .is_some_and(|hs| !hs.iter().any(|h| h == host))
+                .is_some_and(|hs| !host.is_some_and(|host| hs.iter().any(|h| h == host)))
             {
                 continue;
             }
