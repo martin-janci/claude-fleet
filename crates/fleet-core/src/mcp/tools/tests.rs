@@ -21581,6 +21581,11 @@ async fn session_care_lets_the_operator_restart_and_retire_its_own_sessions() {
     };
 
     // Care off: a restart asks even at Autopilot.
+    t.store
+        .lock()
+        .unwrap()
+        .set_setting(crate::service::settings::CONTROL_SESSION_CARE, "false")
+        .unwrap();
     set_position(&t, Position::Autopilot);
     let asked = t
         .restart_session(Extension(operator()), Parameters(restart(on_b)))

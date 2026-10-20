@@ -275,7 +275,7 @@ export const SETTING_DEFAULTS: Record<SettingKey, string> = {
   'control.feed_min_interval_secs': '900',
   'control.switch_at_limit': 'true',
   'control.sweep': 'true',
-  'control.session_care': 'false',
+  'control.session_care': 'true',
   'control.follow_quiet_hours': '24',
   'control.journal': 'true',
   'playbooks.press_enter': 'false',
