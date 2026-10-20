@@ -321,7 +321,7 @@
         <PromptTune
           model={helpModel($fleetSettings)}
           draft={draft.prompt}
-          tune={(ask) => tuneRoutinePrompt(draftInput(draft, enabled, deviceZone()), ask)}
+          tune={(ask, from) => tuneRoutinePrompt(draftInput(draft, enabled, deviceZone()), ask, from)}
           testid="routine-tune"
           onaccept={(p) => (draft.prompt = p)}
           onclose={closeTune}
@@ -332,7 +332,10 @@
             size="sm"
             testid="routine-tune-open"
             disabled={tuneWhy !== null || draft.prompt.trim() === ''}
-            title={tuneWhy ?? `Tune: ${helpModel($fleetSettings)} rewrites the prompt into a clearer one. You choose whether to use it.`}
+            title={tuneWhy ??
+              (draft.prompt.trim() === ''
+                ? 'Write a prompt first: Tune rewrites it'
+                : `Tune: ${helpModel($fleetSettings)} rewrites the prompt into a clearer one. You choose whether to use it.`)}
             onclick={() => (tuneOpen = true)}>✦ Tune prompt</Button
           >
         </div>

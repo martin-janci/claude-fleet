@@ -213,6 +213,7 @@ async fn fleets_model_runs_one_isolated_claude_on_the_host_and_is_booked() {
         host: "mercury".into(),
         profile: Some("work".into()),
         model: "haiku".into(),
+        what: "the help",
     };
     let (a, usage) = ask(
         &model,
@@ -260,6 +261,7 @@ async fn fleets_model_says_why_it_gave_no_answer() {
             host: "mercury".into(),
             profile: None,
             model: "haiku".into(),
+            what: "the help",
         };
         ask(&model, Surface::Shell, &req("why?", ""), None)
             .await
@@ -276,6 +278,32 @@ async fn fleets_model_says_why_it_gave_no_answer() {
     assert_eq!(e.code, codes::E_TIMEOUT);
     let e = run(Reply::fail(1, "Invalid API key · Please run /login")).await;
     assert!(e.message.contains("claude /login"), "{e:?}");
+}
+
+/// The prompt tuner shares the runner; its errors name the tune, not the
+/// help (review w07-5).
+#[tokio::test]
+async fn the_runner_names_its_own_run_in_errors() {
+    let fake = FakeSsh::new();
+    fake.on_host(
+        "mercury",
+        Match::Any,
+        Reply::Exit {
+            code: 124,
+            stdout: format!("{HELP_TAG}run\n").into_bytes(),
+            stderr: Vec::new(),
+        },
+    );
+    let model = ClaudeOnHost {
+        exec: &fake,
+        host: "mercury".into(),
+        profile: None,
+        model: "haiku".into(),
+        what: "the tune",
+    };
+    let e = model.complete("i", "c").await.unwrap_err();
+    assert_eq!(e.code, codes::E_TIMEOUT);
+    assert!(e.message.starts_with("the tune took longer"), "{e:?}");
 }
 
 #[test]
