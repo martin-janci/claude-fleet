@@ -791,8 +791,17 @@ pub(super) fn dispatch_new_worker_summary(
     raw: bool,
     prompt: &str,
 ) -> String {
+    // `profile=` only when one is named, so a summary without one reads as
+    // it always has.
+    let profile = spec
+        .profile
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(|p| format!(" profile={}", bound_text(Some(p))))
+        .unwrap_or_default();
     format!(
-        "new_worker host={} project_id={} name={} requester_session_id={:?} raw={} prompt={}",
+        "new_worker host={}{profile} project_id={} name={} requester_session_id={:?} raw={} prompt={}",
         bound_text(Some(&spec.host_alias)),
         spec.project_id,
         bound_text(spec.name.as_deref()),

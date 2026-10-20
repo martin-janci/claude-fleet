@@ -74,9 +74,10 @@ pub struct NewSessionArgs {
     pub origin: Option<crate::store::SessionOrigin>,
     /// The person was asked about `accounts.pause_at` (redesign step 4.4)
     /// and chose to start on that login anyway. The MCP / hub `new_session`
-    /// refuses a login at or past the line without it
-    /// (`E_CONFIRM_REQUIRED`, naming the login with headroom); the
-    /// desktop's own dialog asks first and sets it.
+    /// tool reads it and refuses a login at or past the line without it
+    /// (`account_limits::refuse_over_limit`: `E_ACCOUNT_LIMIT`, naming the
+    /// login with headroom); the desktop's own dialog asks first and sets
+    /// it. The service itself does not read it.
     #[serde(default)]
     pub over_limit_ok: bool,
     /// Whose session this is to be (multi-user M1, T5): the `people` row the

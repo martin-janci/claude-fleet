@@ -118,6 +118,35 @@ pub fn is_signed_out(host: &HostRow, profile: Option<&str>) -> bool {
         .any(|l| l.profile.as_deref() == profile)
 }
 
+/// Why the login `profile` on `host` cannot take automation's run (a
+/// routine, a mission step), when fleet knows it
+/// is signed out (`hosts.signed_out_logins`): "the login … is signed out
+/// since Aug 9 · ssh … claude /login".
+pub fn signed_out_reason(
+    s: &crate::store::Store,
+    host: &str,
+    profile: Option<&str>,
+) -> Result<Option<String>, crate::ipc_error::IpcError> {
+    let Some(row) = s.get_host_row(host)? else {
+        return Ok(None);
+    };
+    Ok(row
+        .signed_out_logins
+        .iter()
+        .find(|l| l.profile.as_deref() == profile)
+        .map(|l| {
+            let who = match profile {
+                Some(p) => format!("profile {p} on {host}"),
+                None => format!("{host}'s own login"),
+            };
+            format!(
+                "{who} is signed out since {} · {}",
+                day_label(l.since),
+                login_command(host, profile)
+            )
+        }))
+}
+
 /// PURE: what a person types to sign the login in again.
 pub fn login_command(host_alias: &str, profile: Option<&str>) -> String {
     match profile {

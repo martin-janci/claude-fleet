@@ -1075,6 +1075,7 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
         profile: Some("work".into()),
         account_uuid: "u".into(),
         used_pct: Some(40.0),
+        signed_out: false,
     };
     put("HostLogin", wire_keys(&login));
     put(

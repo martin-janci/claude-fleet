@@ -295,6 +295,42 @@ impl FleetTools {
             Reach::Own,
             "the session to restart",
         )?;
+        // A switch onto another login (review w02-8) takes the checks a
+        // start on it takes: not onto a login fleet knows is signed out
+        // (the pane would ask for `/login`), and not past
+        // `accounts.pause_at` unless the person chose it.
+        if let Some(target) = p.profile.as_deref() {
+            let target = Some(target.trim()).filter(|t| !t.is_empty());
+            let s = lock(self.reader()).map_err(to_mcp_err)?;
+            let switches = s
+                .get_session(&name, &host_alias)
+                .map_err(|e| to_mcp_err(e.into()))?
+                .is_some_and(|r| {
+                    r.agent == crate::store::AGENT_CLAUDE
+                        && r.kind != "shell"
+                        && r.claude_profile.as_deref() != target
+                });
+            if switches {
+                if let Some(why) =
+                    crate::service::login_health::signed_out_reason(&s, &host_alias, target)
+                        .map_err(to_mcp_err)?
+                {
+                    return Err(to_mcp_err(IpcError::new(
+                        codes::E_INVALID_STATE,
+                        format!("{why}; sign it in again or switch to another login"),
+                    )));
+                }
+                if !p.over_limit_ok.unwrap_or(false) {
+                    crate::service::account_limits::refuse_over_limit(
+                        &s,
+                        &host_alias,
+                        target,
+                        crate::store::now_unix(),
+                    )
+                    .map_err(to_mcp_err)?;
+                }
+            }
+        }
         // The operator's restarts (a kill and a start) need a person (D12).
         self.confirm_gate(
             "restart_session",

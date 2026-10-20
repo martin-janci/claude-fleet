@@ -8,8 +8,9 @@
 //! `accounts.pause_at` would stall at the limit within the hour, so the New
 //! session dialog asks first and offers the login with the most headroom;
 //! a "Paused · limit" row's Switch account restarts under that login
-//! (`restart_session { profile }`). This module only answers the question;
-//! nothing here refuses a start or moves a session.
+//! (`restart_session { profile }`). This module answers the question and
+//! holds the refusals the MCP / hub paths raise ([`refuse_over_limit`],
+//! [`refuse_over_daily_limit`]); it never moves a session itself.
 //!
 //! On the desktop, usage comes from the same cache the Hosts view and the
 //! Accounts page read (`service::account_usage`). On a hub it comes from what
@@ -45,6 +46,11 @@ pub struct HostLogin {
     /// Percent used of the account's tighter window that has not reset yet;
     /// `None` without a reading.
     pub used_pct: Option<f64>,
+    /// Fleet knows this login is signed out (`hosts.signed_out_logins`):
+    /// a start or switch onto it opens `/login`, whatever its last reading
+    /// says (review w02-4).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub signed_out: bool,
 }
 
 /// The answer for one start or switch.
@@ -97,16 +103,20 @@ pub fn host_logins(host: &HostRow, usage: &[AccountUsageSnapshot], now: i64) -> 
 }
 
 fn logins_with(host: &HostRow, used: impl Fn(&str) -> Option<f64>) -> Vec<HostLogin> {
+    let signed_out =
+        |profile: Option<&str>| crate::service::login_health::is_signed_out(host, profile);
     let own = host.account_uuid.as_deref().map(|uuid| HostLogin {
         profile: None,
         account_uuid: uuid.to_string(),
         used_pct: used(uuid),
+        signed_out: signed_out(None),
     });
     let profiles = host.claude_profiles.iter().flatten().filter_map(|p| {
         p.account_uuid.as_deref().map(|uuid| HostLogin {
             profile: Some(p.name.clone()),
             account_uuid: uuid.to_string(),
             used_pct: used(uuid),
+            signed_out: signed_out(Some(&p.name)),
         })
     });
     own.into_iter().chain(profiles).collect()
@@ -166,24 +176,81 @@ pub struct OverLimit {
     /// M15 step G2.9) that is spent, not its usage window.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub daily: Option<DailyLimitHit>,
+    /// The account's email, for the reason's words.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    /// When the windows past the line have all reset (unix seconds), from
+    /// the reading; `None` without one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resets_at: Option<i64>,
 }
 
 impl OverLimit {
-    /// Why a run was skipped, for a run row or a mission event.
+    /// Why a run was skipped, for a run row or a mission event (review
+    /// w03-7: the account by name, plain words, and when it resets):
+    /// "profile work on mac (ada@x) is 95% used, past the 90% pause line ·
+    /// resets Oct 24 11:00 UTC; the next run goes then".
     pub fn reason(&self) -> String {
+        match (self.daily.is_none(), self.resets_at) {
+            (true, Some(_)) => format!("{}; the next run goes then", self.state()),
+            _ => self.state(),
+        }
+    }
+
+    /// [`Self::reason`] without what it means for the next run: the login,
+    /// how far past the line it is, and when it resets.
+    pub fn state(&self) -> String {
         let who = match &self.login.profile {
             Some(p) => format!("profile {p} on {}", self.host_alias),
             None => format!("{}'s own login", self.host_alias),
         };
+        let who = match &self.email {
+            Some(e) => format!("{who} ({e})"),
+            None => who,
+        };
         if let Some(d) = &self.daily {
             return format!("the account of {who} {}", d.reason());
         }
+        let reset = match self.resets_at {
+            Some(at) => format!(" · resets {}", utc_stamp(at)),
+            None => String::new(),
+        };
         format!(
-            "the account of {who} is at {:.0}%, over accounts.pause_at ({:.0}%)",
+            "{who} is {:.0}% used, past the {:.0}% pause line{reset}",
             self.login.used_pct.unwrap_or_default(),
             self.pause_at_pct
         )
     }
+}
+
+/// "Oct 24 11:00 UTC": a server-side time in words that do not depend on
+/// where the reader is.
+fn utc_stamp(at: i64) -> String {
+    let secs = at.rem_euclid(86_400);
+    format!(
+        "{} {:02}:{:02} UTC",
+        crate::service::login_health::day_label(at),
+        secs / 3600,
+        (secs % 3600) / 60
+    )
+}
+
+/// When every window of `usage` at or past `pause_at` has reset: the latest
+/// of their `resets_at`; `None` when none is past the line or none says.
+fn over_resets_at(usage: &AccountUsage, fetched_at: i64, pause_at: f64, now: i64) -> Option<i64> {
+    use crate::service::account_usage::{FIVE_HOUR_SECS, WEEK_SECS};
+    [
+        (&usage.five_hour, FIVE_HOUR_SECS),
+        (&usage.seven_day, WEEK_SECS),
+    ]
+    .into_iter()
+    .filter_map(|(w, len)| {
+        w.as_ref()
+            .filter(|w| w.utilization >= pause_at && w.live_at(Some(fetched_at), len, now))
+    })
+    .map(|w| w.resets_at)
+    .collect::<Option<Vec<i64>>>()
+    .and_then(|v| v.into_iter().max())
 }
 
 /// The account a login bills, for automation that names it ("runs as … on
@@ -355,14 +422,52 @@ pub fn over_limit(
     profile: Option<&str>,
     now: i64,
 ) -> Result<Option<OverLimit>, IpcError> {
-    Ok(login_account(s, host_alias, profile, now)?
-        .filter(|a| a.over)
-        .map(|a| OverLimit {
-            host_alias: a.host_alias,
-            login: a.login,
-            pause_at_pct: pause_at_pct(s),
-            daily: a.daily,
-        }))
+    let Some(a) = login_account(s, host_alias, profile, now)?.filter(|a| a.over) else {
+        return Ok(None);
+    };
+    let pause_at = pause_at_pct(s);
+    let resets_at = s
+        .latest_usage_snapshots()?
+        .into_iter()
+        .find(|r| r.account_uuid == a.login.account_uuid)
+        .and_then(|r| over_resets_at(&r.usage, r.fetched_at, pause_at, now));
+    Ok(Some(OverLimit {
+        host_alias: a.host_alias,
+        login: a.login,
+        pause_at_pct: pause_at,
+        daily: a.daily,
+        email: a.email,
+        resets_at,
+    }))
+}
+
+/// The login on `host_alias` with the most headroom on an account other than
+/// `not_account`: signed in, with a reading under `accounts.pause_at` (from
+/// the store's newest snapshots). `None` when no such login exists or the
+/// host is unknown.
+pub fn freer_login(
+    s: &Store,
+    host_alias: &str,
+    not_account: &str,
+    now: i64,
+) -> Result<Option<HostLogin>, IpcError> {
+    let Some(host) = s.get_host_row(host_alias)? else {
+        return Ok(None);
+    };
+    let snaps = s.latest_usage_snapshots()?;
+    let pause_at = pause_at_pct(s);
+    Ok(logins_with(&host, |uuid| {
+        snaps
+            .iter()
+            .find(|r| r.account_uuid == uuid)
+            .and_then(|r| used_pct_of(&r.usage, Some(r.fetched_at), now))
+    })
+    .into_iter()
+    .filter(|l| l.account_uuid != not_account)
+    .filter(|l| !crate::service::login_health::is_signed_out(&host, l.profile.as_deref()))
+    .filter_map(|l| l.used_pct.filter(|u| *u < pause_at).map(|u| (u, l)))
+    .min_by(|(a, _), (b, _)| a.total_cmp(b))
+    .map(|(_, l)| l))
 }
 
 /// Step 4.4 on a start that did not come through the desktop's own dialog
@@ -386,23 +491,8 @@ pub fn refuse_over_limit(
         // does not pass it (`sessions::new_session` refuses it too).
         return refuse_over_daily_limit(s, host_alias, profile, now);
     }
-    let Some(host) = s.get_host_row(host_alias)? else {
-        return Ok(());
-    };
-    let snaps = s.latest_usage_snapshots()?;
     let pause_at = over.pause_at_pct;
-    let suggestion = logins_with(&host, |uuid| {
-        snaps
-            .iter()
-            .find(|r| r.account_uuid == uuid)
-            .and_then(|r| used_pct_of(&r.usage, Some(r.fetched_at), now))
-    })
-    .into_iter()
-    .filter(|l| l.account_uuid != over.login.account_uuid)
-    .filter(|l| !crate::service::login_health::is_signed_out(&host, l.profile.as_deref()))
-    .filter_map(|l| l.used_pct.filter(|u| *u < pause_at).map(|u| (u, l)))
-    .min_by(|(a, _), (b, _)| a.total_cmp(b))
-    .map(|(_, l)| l);
+    let suggestion = freer_login(s, host_alias, &over.login.account_uuid, now)?;
     let email = |uuid: &str| {
         s.list_accounts()
             .ok()
@@ -457,8 +547,12 @@ pub fn refuse_over_limit(
     Err(IpcError::new(
         codes::E_ACCOUNT_LIMIT,
         format!(
-            "{account}: {}{instead}, or pass over_limit_ok: true once the person chose to start anyway",
-            over.reason()
+            "{}{instead}, or pass over_limit_ok: true once the person chose to start anyway",
+            // The state names the account by email when it knows one.
+            match &over.email {
+                Some(_) => over.state(),
+                None => format!("{account}: {}", over.state()),
+            }
         ),
     )
     .with_details(serde_json::json!({
@@ -850,6 +944,19 @@ mod tests {
         assert_eq!(over.login.used_pct, Some(95.0));
         assert!(over.reason().contains("95%"), "{}", over.reason());
         assert!(over.reason().contains("90%"), "{}", over.reason());
+        // Review w03-7: plain words and the reset, not the setting key.
+        assert!(
+            !over.reason().contains("accounts.pause_at"),
+            "{}",
+            over.reason()
+        );
+        assert_eq!(over.resets_at, Some(NOW + 3_600));
+        assert!(
+            over.reason().contains("pause line · resets ")
+                && over.reason().ends_with("UTC; the next run goes then"),
+            "{}",
+            over.reason()
+        );
         assert_eq!(over_limit(&s, "mac", Some("work"), NOW).unwrap(), None);
         // A window that reset says nothing; an unknown host or login neither.
         assert_eq!(over_limit(&s, "mac", None, NOW + 7_200).unwrap(), None);
@@ -930,6 +1037,7 @@ mod tests {
                 profile: Some("work".into()),
                 account_uuid: "u1".into(),
                 used_pct: Some(12.0),
+                signed_out: false,
             },
             email: Some("me@x.com".into()),
             over: false,

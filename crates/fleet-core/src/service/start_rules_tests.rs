@@ -768,3 +768,34 @@ async fn a_placement_rule_names_the_host_and_account_when_no_start_rule_does() {
         "the account still applies"
     );
 }
+
+/// Review w02-1: a start that names no host takes the LOGIN placement chose
+/// along with the host, not the host's own login it ranked below.
+#[tokio::test]
+async fn an_unhosted_start_runs_under_the_login_placement_chose() {
+    let w = w();
+    w.host("h", true);
+    let first = w.item("PD-1");
+    w.start(first, w.pos, Decider::Person).await;
+    {
+        let s = w.store.lock().unwrap();
+        let now = crate::store::now_unix();
+        // Placement ranks only a host that has claude.
+        s.conn_for_test()
+            .execute(
+                "UPDATE hosts SET claude_version = '2.0.0' WHERE alias = 'h'",
+                [],
+            )
+            .unwrap();
+        crate::service::account_limits::seed_usage(&s, "h", None, "acct-own", 95.0, now);
+        crate::service::account_limits::seed_usage(&s, "h", Some("work"), "acct-work", 10.0, now);
+    }
+    let second = w.item("PD-2");
+    let plan = w.preview_unhosted(second).await.plan.unwrap();
+    assert_eq!(plan.host_alias, "h");
+    assert_eq!(
+        plan.profile.as_deref(),
+        Some("work"),
+        "the start bills the login placement ranked first"
+    );
+}

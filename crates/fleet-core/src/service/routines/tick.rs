@@ -458,7 +458,10 @@ pub(super) fn plan(s: &Store, r: &RoutineRow, now: i64) -> Result<Plan, IpcError
         Ok(s.get_host_row(h)?.is_some_and(|row| row.reachable))
     };
     let down = !reachable(&r.host_alias)?;
-    if over.is_none() && !down {
+    // A login fleet knows is signed out answers a run with `/login` (review
+    // w02-6): like one past the line, the fallback takes it, else it skips.
+    let signed_out = crate::service::login_health::signed_out_reason(s, &r.host_alias, profile)?;
+    if over.is_none() && signed_out.is_none() && !down {
         return Ok(Plan::Start {
             host: r.host_alias.clone(),
             note: None,
@@ -466,10 +469,14 @@ pub(super) fn plan(s: &Store, r: &RoutineRow, now: i64) -> Result<Plan, IpcError
     }
     if let Some(fb) = r.fallback_host.as_deref() {
         let fb_over = crate::service::account_limits::over_limit(s, fb, profile, now)?;
-        if fb_over.is_none() && reachable(fb)? {
-            let why = match &over {
-                Some(o) => o.reason(),
-                None => format!("{} was unreachable", r.host_alias),
+        if fb_over.is_none()
+            && reachable(fb)?
+            && crate::service::login_health::signed_out_reason(s, fb, profile)?.is_none()
+        {
+            let why = match (&over, &signed_out) {
+                (Some(o), _) => o.reason(),
+                (None, Some(why)) => why.clone(),
+                (None, None) => format!("{} was unreachable", r.host_alias),
             };
             return Ok(Plan::Start {
                 host: fb.to_string(),
@@ -477,9 +484,10 @@ pub(super) fn plan(s: &Store, r: &RoutineRow, now: i64) -> Result<Plan, IpcError
             });
         }
     }
-    Ok(match over {
-        Some(o) => Plan::Skip(o.reason()),
-        None => Plan::Start {
+    Ok(match (over, signed_out) {
+        (Some(o), _) => Plan::Skip(o.reason()),
+        (None, Some(why)) => Plan::Skip(why),
+        (None, None) => Plan::Start {
             host: r.host_alias.clone(),
             note: None,
         },
