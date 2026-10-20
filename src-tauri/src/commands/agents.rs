@@ -109,7 +109,7 @@ pub(crate) mod routed {
 
     pub async fn agents_fleet(
         backend: &FleetBackend,
-        store: &Mutex<Store>,
+        store: &Arc<Mutex<Store>>,
         ssh: &SshClient,
         call: FleetCall,
     ) -> Result<serde_json::Value, IpcError> {
@@ -137,7 +137,9 @@ pub(crate) mod routed {
                 IpcError::new(fleet_core::ipc_error::codes::E_INTERNAL, e.to_string())
             });
         }
-        admin::call(store, &args, "desktop", now)
+        // `install` writes the catalog: under the authoring lock, off the
+        // async workers.
+        admin::call_async(store, &args, "desktop", now).await
     }
 
     pub fn status_args(agent: Option<String>, limit: Option<u32>) -> AgentsArgs {

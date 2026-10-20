@@ -1855,8 +1855,36 @@ pub const OPERATOR_PROMPT_TOOLS: &[&str] =
 
 /// The operator's calls that start a Claude session: pre-approved at
 /// "Autopilot" inside a running mission's grant (F2). `dispatch_task` is here
-/// for its `new_worker` form.
-pub const OPERATOR_START_TOOLS: &[&str] = &["new_session", "dispatch_task"];
+/// for its `new_worker` form, `work_link` for `start`, `run` and `resume`
+/// (a task's session): its call site passes a start target only for those,
+/// so its `tidy_apply` kills still ask.
+pub const OPERATOR_START_TOOLS: &[&str] = &["new_session", "dispatch_task", "work_link"];
+
+/// Session care (`control.session_care`, off by default): the operator's
+/// calls that look after a session it started or briefed. `restart_session`
+/// (a wedged REPL, or back under another login after a limit) goes without a
+/// card at "Within your brief" and "Autopilot"; `safe_kill_session` (commit
+/// and push, then retire) at "Autopilot" only.
+pub const OPERATOR_CARE_TOOLS: &[&str] = &["restart_session", "safe_kill_session"];
+
+/// The facts besides the position that [`operator_must_confirm_with`]
+/// decides on.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct OperatorFacts {
+    /// The call's target is a live session Control started or briefed
+    /// (`Store::is_open_control_handoff`).
+    pub own_handoff: bool,
+    /// The call starts a session inside a running mission's grant
+    /// (`Store::start_inside_mission_grant`).
+    pub inside_grant: bool,
+    /// The person turned session care on (`control.session_care`).
+    pub session_care: bool,
+    /// The call's target is a live session Control itself started
+    /// (`Store::is_control_started_session`). Session care restarts and
+    /// retires only these: a session Control merely sent a prompt to is
+    /// still the person's.
+    pub own_start: bool,
+}
 
 /// Whether a tool the operator calls is one a person approves at "Ask
 /// first": every `confirm: true` tool and every [`OPERATOR_CONFIRMS`] one.
@@ -1885,18 +1913,43 @@ pub fn operator_must_confirm(
     own_handoff: bool,
     inside_grant: bool,
 ) -> bool {
+    operator_must_confirm_with(
+        name,
+        position,
+        OperatorFacts {
+            own_handoff,
+            inside_grant,
+            session_care: false,
+            own_start: false,
+        },
+    )
+}
+
+/// [`operator_must_confirm`] with session care in the facts: with it on,
+/// [`OPERATOR_CARE_TOOLS`] on an open handoff go without a card as that
+/// list says. `work_link` is `confirm: true` for its tidy kills, so a start
+/// target is the only way it goes without a card.
+pub fn operator_must_confirm_with(
+    name: &str,
+    position: crate::service::autonomy::Position,
+    facts: OperatorFacts,
+) -> bool {
     use crate::service::autonomy::Position;
     if !operator_gated(name) {
         return false;
     }
-    if needs_confirmation(name) {
+    let start = OPERATOR_START_TOOLS.contains(&name) && facts.inside_grant;
+    if needs_confirmation(name) && !start {
         return true;
     }
-    let prompt = OPERATOR_PROMPT_TOOLS.contains(&name) && own_handoff;
-    let start = OPERATOR_START_TOOLS.contains(&name) && inside_grant;
+    let own = facts.own_handoff;
+    let prompt = OPERATOR_PROMPT_TOOLS.contains(&name) && own;
+    let care = facts.session_care && facts.own_start;
+    let restart = care && name == "restart_session";
+    let retire = care && name == "safe_kill_session";
     match position.grants() {
-        Position::Brief => !prompt,
-        Position::Autopilot => !(prompt || start),
+        Position::Brief => !(prompt || restart),
+        Position::Autopilot => !(prompt || start || restart || retire),
         _ => true,
     }
 }
@@ -1912,6 +1965,16 @@ pub fn caller_must_confirm(
     inside_grant: bool,
 ) -> bool {
     is_operator && operator_must_confirm(name, position, own_handoff, inside_grant)
+}
+
+/// [`caller_must_confirm`] with every fact, session care included.
+pub fn caller_must_confirm_with(
+    is_operator: bool,
+    name: &str,
+    position: crate::service::autonomy::Position,
+    facts: OperatorFacts,
+) -> bool {
+    is_operator && operator_must_confirm_with(name, position, facts)
 }
 
 /// WHY the operator's call needs a person, in the words of the rule that
@@ -1930,6 +1993,13 @@ pub fn operator_confirm_reason(tool: &str) -> &'static str {
             "what the operator writes reaches a session without a person only at \
              \"Within your brief\" or \"Autopilot\", and only into a session it \
              started or briefed, whatever mcp.confirm_destructive says"
+        }
+        // Session care, off by default.
+        "restart_session" | "safe_kill_session" => {
+            "the operator's restarts and kills ask unless session care \
+             (control.session_care) is on and the session is one it started or \
+             briefed: restarts at \"Within your brief\" or \"Autopilot\", retiring at \
+             \"Autopilot\" only, whatever mcp.confirm_destructive says"
         }
         // D12.
         _ => {
@@ -2927,7 +2997,6 @@ mod tests {
             "restart_session",
             "rewind_conversation",
             "safe_kill_session",
-            "work_link",
             "kill_session",
             "broadcast_prompt",
             "move_session",
@@ -2951,15 +3020,75 @@ mod tests {
                             "{t} ({pos:?}, own={own}, grant={grant})"
                         );
                     }
-                    assert_eq!(
-                        operator_must_confirm("new_session", pos, own, grant),
-                        !(grant && pos == Autopilot),
-                        "new_session ({pos:?}, own={own}, grant={grant})"
-                    );
+                    // `work_link` gets a start target only for its
+                    // start, run and resume; its tidy kills ask.
+                    for t in ["new_session", "work_link"] {
+                        assert_eq!(
+                            operator_must_confirm(t, pos, own, grant),
+                            !(grant && pos == Autopilot),
+                            "{t} ({pos:?}, own={own}, grant={grant})"
+                        );
+                    }
                     // An ungated tool stays ungated.
                     assert!(!operator_must_confirm("list_sessions", pos, own, grant));
                 }
             }
+        }
+    }
+
+    /// Session care: with it off nothing changes; with it on, a restart of
+    /// an open handoff goes without a card at Within your brief and
+    /// Autopilot, retiring one at Autopilot only, and nothing else moves.
+    #[test]
+    fn session_care_truth_table() {
+        use Position::{Ask, Autopilot, Brief, Custom};
+        for pos in [Ask, Brief, Autopilot, Custom] {
+            for (own_handoff, own_start) in [(false, false), (true, false), (true, true)] {
+                for inside_grant in [false, true] {
+                    let off = OperatorFacts {
+                        own_handoff,
+                        inside_grant,
+                        session_care: false,
+                        own_start,
+                    };
+                    let on = OperatorFacts {
+                        session_care: true,
+                        ..off
+                    };
+                    for t in OPERATOR_CONFIRMS.iter().chain(CONFIRM_TOOLS) {
+                        assert_eq!(
+                            operator_must_confirm_with(t, pos, off),
+                            operator_must_confirm(t, pos, own_handoff, inside_grant),
+                            "{t}: care off is the old rule"
+                        );
+                        let free = match *t {
+                            "restart_session" => own_start && matches!(pos, Brief | Autopilot),
+                            "safe_kill_session" => own_start && pos == Autopilot,
+                            _ => !operator_must_confirm_with(t, pos, off),
+                        };
+                        assert_eq!(
+                            operator_must_confirm_with(t, pos, on),
+                            !free,
+                            "{t} ({pos:?}, own={own_handoff}, grant={inside_grant})"
+                        );
+                    }
+                }
+            }
+        }
+        // Kills, rewinds and moves never ride on it.
+        let all = OperatorFacts {
+            own_handoff: true,
+            inside_grant: true,
+            session_care: true,
+            own_start: true,
+        };
+        for t in [
+            "kill_session",
+            "rewind_conversation",
+            "move_session",
+            "recreate_session",
+        ] {
+            assert!(operator_must_confirm_with(t, Autopilot, all), "{t}");
         }
     }
 

@@ -3366,6 +3366,18 @@
       ]
     },
     {
+      "default_widget": "switch",
+      "key": "control.session_care",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Control looks after its sessions",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
       "default_widget": "number",
       "key": "control.follow_quiet_hours",
       "kind": {

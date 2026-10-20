@@ -2277,6 +2277,11 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/201_fleet_events.sql"),
         already_applied: Some(routines_has_event_host),
     },
+    Migration {
+        version: 202,
+        sql: include_str!("../../migrations/202_deferred_prompts_session_index.sql"),
+        already_applied: None,
+    },
 ];
 
 /// The settings row [`Store::finish_realm_upgrade`] writes once migration

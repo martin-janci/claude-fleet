@@ -652,6 +652,13 @@ bullet for the area you are about to change.
   `Fleets::select` refuses an extra fleet whose id another fleet already has.
   A declarative resource page can be pointed at an extra fleet
   (`ResourcePage`'s `fleet` prop, used by Settings › Environment through
-  `EnvironmentSettings.svelte`): `resources.ts::fleetArgs` sends `fleet` with
-  a `FLEET_SCOPED` command and refuses any other, which the backend would
-  otherwise run against the primary.
+  `EnvironmentSettings.svelte`, and by Settings › Company through
+  `CompanySettings.svelte`, both with `FleetPicker.svelte`):
+  `fleets.ts::fleetArgs` sends `fleet` with a `FLEET_SCOPED` command and
+  refuses any other, which the backend would otherwise run against the
+  primary. A component inside the page that calls a command of its own (an
+  org rule's preview, a member's Trust, a pairing code) reads the page's
+  fleet from `pages/resource_fleet.ts` and calls `invokeOnFleet`; an extra
+  fleet's option selects read that hub's lists (`resources.ts::loadSourceRows`),
+  never the primary's stores. `tests_fleets::every_company_resource_command_is_fleet_scoped`
+  fails a new Company action that is not fleet-scoped.

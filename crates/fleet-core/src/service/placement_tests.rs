@@ -193,19 +193,13 @@ fn the_preferred_host_wins_a_near_tie_and_loses_a_clear_one() {
 
 #[test]
 fn the_store_wrapper_reads_logins_usage_health_and_the_project() {
-    use crate::service::account_limits::seed_usage;
+    use crate::service::account_limits::{ready_host, seed_usage};
     let s = Store::open_in_memory().unwrap();
     let now = 1_000_000;
     seed_usage(&s, "mac", None, "acct-mac", 30.0, now);
     seed_usage(&s, "htz", None, "acct-htz", 5.0, now);
-    for h in ["mac", "htz"] {
-        s.conn_for_test()
-            .execute(
-                "UPDATE hosts SET reachable = 1, claude_version = '2.1' WHERE alias = ?1",
-                [h],
-            )
-            .unwrap();
-    }
+    ready_host(&s, "mac");
+    ready_host(&s, "htz");
     // htz has the most headroom, but its login is signed out.
     login_health::record(
         &s,
@@ -284,18 +278,13 @@ fn live_sessions_spread_picks_across_logins() {
 /// next pick of the same pass does not land on that login again.
 #[test]
 fn the_store_wrapper_charges_live_sessions_linked_or_not_yet() {
-    use crate::service::account_limits::seed_usage;
+    use crate::service::account_limits::{ready_host, seed_usage};
     let now = 1_000_000;
     let fresh = || {
         let s = Store::open_in_memory().unwrap();
         seed_usage(&s, "mac", None, "acct-a", 70.0, now);
         seed_usage(&s, "mac", Some("b"), "acct-b", 60.0, now);
-        s.conn_for_test()
-            .execute(
-                "UPDATE hosts SET reachable = 1, claude_version = '2.1' WHERE alias = 'mac'",
-                [],
-            )
-            .unwrap();
+        ready_host(&s, "mac");
         s
     };
     let top = |s: &Store| {

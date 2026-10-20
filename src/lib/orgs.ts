@@ -15,6 +15,7 @@ import type { Descriptor } from './pages/pages';
 import type { AdminNeed, OrgAccount, OrgShare, PersonSpend, RemovedMember, TeamMember } from './pages/resources';
 import { writable, derived, get } from 'svelte/store';
 import { invokeCmd, type Result } from './result';
+import { invokeOnFleet } from './fleets';
 import type { Pairing } from './devices';
 import { readPref, writePref } from './prefs';
 import { sessions, type SessionRow } from './sessions';
@@ -152,14 +153,14 @@ export interface MemberGrants {
  *  Drive narrowed to Watch, or left as they are. */
 export type GrantsOnRemove = 'revoke' | 'narrow' | 'keep';
 
-export function orgMemberGrants(orgId: number, personId: number): Promise<Result<MemberGrants>> {
-  return invokeCmd<MemberGrants>('org_member_grants', { args: { org_id: orgId, person_id: personId } });
+export function orgMemberGrants(orgId: number, personId: number, fleet?: string | null): Promise<Result<MemberGrants>> {
+  return invokeOnFleet<MemberGrants>('org_member_grants', { args: { org_id: orgId, person_id: personId } }, fleet);
 }
 
 /** Mint a one-time pairing code for a member's new device, fenced to the
  *  org and theirs. A standalone desktop refuses: a code is the hub's. */
-export function pairMemberDevice(orgId: number, person: string, device: string): Promise<Result<Pairing>> {
-  return invokeCmd<Pairing>('pair_device', { args: { device, mode: 'full', org_id: orgId, person } });
+export function pairMemberDevice(orgId: number, person: string, device: string, fleet?: string | null): Promise<Result<Pairing>> {
+  return invokeOnFleet<Pairing>('pair_device', { args: { device, mode: 'full', org_id: orgId, person } }, fleet);
 }
 
 /** A member's pairing in progress on an org's page. Kept here, not in the

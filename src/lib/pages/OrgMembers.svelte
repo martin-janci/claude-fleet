@@ -9,6 +9,7 @@
   import PairingResult from './PairingResult.svelte';
   import { trustDevice } from '../devices';
   import { buildArgs, type ActionSpec, type ResourceRecord } from './resources';
+  import { useResourceFleet } from './resource_fleet';
   import {
     memberPairing,
     memberSessionsWord,
@@ -44,6 +45,9 @@
     now?: () => number;
   } = $props();
 
+  /** The fleet the enclosing resource page acts on: a trust, a member's
+   *  shares and a pairing code go to that fleet's hub. */
+  const resourceFleet = useResourceFleet();
   const orgId = $derived(Number(record.id));
   const orgName = $derived(String(record.name ?? 'the org'));
   const showDevices = $derived(members.some((m) => m.devices !== undefined));
@@ -86,7 +90,7 @@
   async function askRemove(m: OrgMember) {
     choice = 'revoke';
     removing = { member: m, grants: null, loading: true };
-    const r = await orgMemberGrants(orgId, m.person_id);
+    const r = await orgMemberGrants(orgId, m.person_id, resourceFleet().fleet);
     if (removing?.member !== m) return;
     const g = r.ok && r.value && typeof r.value.watch === 'number' ? r.value : null;
     removing = { member: m, grants: g, loading: false };
@@ -140,7 +144,7 @@
    *  trust: say that it is waiting, rather than a raw "not found". */
   async function trust(device: string, person: string) {
     trusting = device;
-    const r = await trustDevice(device);
+    const r = await trustDevice(device, resourceFleet().fleet);
     trusting = null;
     if (r.ok) {
       trustNote = { ...trustNote, [device]: '' };
@@ -159,7 +163,7 @@
     const p = pairingHere;
     if (!p || !device.trim()) return;
     minting = true;
-    const r = await pairMemberDevice(orgId, p.person, device.trim());
+    const r = await pairMemberDevice(orgId, p.person, device.trim(), resourceFleet().fleet);
     minting = false;
     if (r.ok) memberPairing.set({ ...p, pairing: r.value });
     else pairError = r.error.message;

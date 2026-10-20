@@ -4,6 +4,7 @@
 // hub's `org_admin` on a paired desktop.
 import { writable } from 'svelte/store';
 import { invokeCmd, type Result } from './result';
+import { invokeOnFleet } from './fleets';
 
 /** `list_devices`: a person's paired device (never a peer link or an
  *  updater token). */
@@ -74,8 +75,8 @@ export async function loadPeople(): Promise<Result<PersonSummary[]>> {
 /** Trust a paired device (M15 G7.14: from an org's member row). Its
  *  prompts then reach agents unmarked; the hub refuses a caller that may
  *  not. */
-export function trustDevice(device: string): Promise<Result<DeviceSummary>> {
-  return invokeCmd<DeviceSummary>('update_device', { args: { device, trusted: true } });
+export function trustDevice(device: string, fleet?: string | null): Promise<Result<DeviceSummary>> {
+  return invokeOnFleet<DeviceSummary>('update_device', { args: { device, trusted: true } }, fleet);
 }
 
 /** Re-read the devices. A failure (a readonly device the hub refuses, an

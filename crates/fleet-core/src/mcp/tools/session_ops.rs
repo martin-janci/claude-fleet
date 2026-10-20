@@ -458,7 +458,7 @@ impl FleetTools {
             &caller,
             if runs_claude {
                 GateTarget::Start {
-                    host: &p.host_alias,
+                    host: Some(&p.host_alias),
                 }
             } else {
                 GateTarget::Other

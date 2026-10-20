@@ -226,7 +226,19 @@ Phase 3's re-key. `FLEET_SCOPED` grew by `session_conversation`,
 `list_pull_requests`, and later by Settings › Environment's `env_vars`,
 `env_vars_list`, `env_var_set`, `env_var_unset` plus the two reads that say
 what the device may change there, `my_grants` and `setting_proposals`
-(a Fleet picker on that page). The New session default is: the fleet last used for
+(a Fleet picker on that page), and then by Settings › Company's commands
+(Organisations, Devices, People, Groups): every `list_*`, action and
+preview their resources name (`list_orgs`, `add_org` … `narrow_org_share`,
+`org_rule_preview`, `org_member_grants`, `list_devices`, `pair_device`,
+`update_device`, `revoke_device`, `bind_device_org`, `grant_device_catalog`,
+`list_people`, `add_person`, `rename_person`, `disable_person`,
+`list_groups`) plus the option lists their selects read on an extra fleet
+(`list_trackers`, `catalog_list_catalogs`; `list_hosts` already was). The
+same Fleet picker (`FleetPicker.svelte`) sits on both pages; Company reads
+that hub's `setting_proposals` (served only to a fleet admin's unbound
+device) and `list_devices` (this device's trust and mode) to decide what it
+offers, as `org_admin` decides (`company_access.ts`). `org_suggestions`
+stays the primary's. The New session default is: the fleet last used for
 the repository, else the extra fleet whose label or host name is the
 repository's owner, else the primary (the org rule, read from what the
 window knows; the hubs' org rows are not compared). Repo reads stay on the
@@ -244,6 +256,11 @@ primary.
 - `fleet_id` in the `ready` frame; federation addresses rendered as
   `<fleet label> › host/name`; duplicate detection by fleet id.
 - Per-fleet error reports (`/report`) and update checks stay on the primary.
+- Settings per fleet (landed for two pages): Environment and Company
+  (Organisations, Devices, People, Groups) carry a Fleet picker, shown only
+  with more than one fleet, routing their reads and writes by `fleet` and
+  judging what the device may change by that hub's own answers. The other
+  Settings pages act on the primary.
 
 ### Phase 3a — the sidebar's filters across fleets (landed)
 

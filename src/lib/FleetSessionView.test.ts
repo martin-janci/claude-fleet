@@ -109,6 +109,32 @@ describe('FleetSessionView', () => {
     expect(screen.getByTestId('fleet-session-prompt').textContent).toBe('for four');
   });
 
+  it('a send that answers after a switch away and back keeps the newer draft and allows no second send', async () => {
+    let answerSend!: (v: unknown) => void;
+    inv.mockImplementation((cmd: string) => {
+      if (cmd === 'send_prompt') return new Promise((r) => (answerSend = r));
+      return Promise.resolve(null);
+    });
+    const view = render(FleetSessionView, { props: { fleet: company, session } });
+    await tick();
+    const composer = () => screen.getByTestId('fleet-session-composer') as HTMLTextAreaElement;
+    await fireEvent.input(composer(), { target: { value: 'first' } });
+    await fireEvent.click(screen.getByTestId('fleet-session-send'));
+    await vi.waitFor(() => expect(inv.mock.calls.filter(([cmd]) => cmd === 'send_prompt')).toHaveLength(1));
+    const other = { ...session, id: 4, tmux_name: 'pos-4' } as SessionRow;
+    await view.rerender({ fleet: company, session: other });
+    await view.rerender({ fleet: company, session });
+    await fireEvent.input(composer(), { target: { value: 'second' } });
+    await fireEvent.keyDown(composer(), { key: 'Enter' });
+    await tick();
+    // The first send is still out: no second one goes alongside it.
+    expect(inv.mock.calls.filter(([cmd]) => cmd === 'send_prompt')).toHaveLength(1);
+    answerSend(null);
+    await tick();
+    await tick();
+    expect(composer().value).toBe('second');
+  });
+
   it("offers no attach for a session on that hub's own machine", async () => {
     const local = { ...session, host_alias: 'local' } as SessionRow;
     render(FleetSessionView, { props: { fleet: company, session: local } });

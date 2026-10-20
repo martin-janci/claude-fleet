@@ -4,7 +4,7 @@
 // an action's arguments, say a sub-item, list the badges. Actions run the
 // existing desktop commands they name, so every hub verdict applies as is.
 import { invokeCmd, type Result } from '../result';
-import { FLEET_SCOPED, PRIMARY } from '../fleets';
+import { fleetArgs, invokeOnFleet } from '../fleets';
 import { loadOrgs, ruleChip, type OrgRuleRow } from '../orgs';
 import { loadTrackers } from '../trackers';
 import { loadCatalogStatuses } from '../assets_workspace';
@@ -626,22 +626,6 @@ export function formValues(action: ActionSpec, params: Record<string, string>): 
   return Object.fromEntries(action.params.map((p) => [p.name, paramValue(p, params)]));
 }
 
-/**
- * The envelope that sends `command` to `fleet`: nothing extra for the
- * primary, `{ fleet }` for an extra fleet — and a refusal when the command
- * is not fleet-scoped, since the backend would ignore an argument it does
- * not take and act on the PRIMARY fleet instead (multi-hub design D6).
- */
-function fleetArgs(command: string, fleet: string | null | undefined): Result<Record<string, unknown>> {
-  if (!fleet || fleet === PRIMARY) return { ok: true, value: {} };
-  if (!(FLEET_SCOPED as readonly string[]).includes(command))
-    return {
-      ok: false,
-      error: { code: 'E_INVALID', message: `${command} cannot be sent to another fleet from this window` },
-    };
-  return { ok: true, value: { fleet } };
-}
-
 export async function runAction(action: ActionSpec, args: Record<string, unknown>, fleet?: string | null): Promise<Result<unknown>> {
   const f = fleetArgs(action.command, fleet);
   if (!f.ok) return f;
@@ -651,9 +635,11 @@ export async function runAction(action: ActionSpec, args: Record<string, unknown
 /** An action's preview (`ActionSpec.preview`): its one-line answer, or
  *  null when it has none, the form is not filled in yet, or the command
  *  refused (the form says why on Add). */
-export async function previewAction(action: ActionSpec, args: Record<string, unknown>): Promise<string | null> {
+export async function previewAction(action: ActionSpec, args: Record<string, unknown>, fleet?: string | null): Promise<string | null> {
   if (!action.preview) return null;
-  const r = await invokeCmd<{ sentence?: string }>(action.preview, { args });
+  const f = fleetArgs(action.preview, fleet);
+  if (!f.ok) return null;
+  const r = await invokeCmd<{ sentence?: string }>(action.preview, { args, ...f.value });
   return r.ok && typeof r.value?.sentence === 'string' ? r.value.sentence : null;
 }
 
@@ -662,6 +648,70 @@ export async function listRecords(r: ResourceType, fleet?: string | null): Promi
   const f = fleetArgs(r.list, fleet);
   if (!f.ok) return f;
   return Object.keys(f.value).length ? invokeCmd<ResourceRecord[]>(r.list, f.value) : invokeCmd<ResourceRecord[]>(r.list);
+}
+
+/** An option source's choices from its rows (a store's on the primary, a
+ *  list read from the hub on an extra fleet): hosts by alias, trackers by
+ *  id, the rest by name; a disabled person is not offered. */
+export function sourceOptionsFrom(source: OptionSource, rows: readonly object[]): { value: string; label: string }[] {
+  const all = rows as readonly Record<string, unknown>[];
+  const str = (v: unknown) => (v === undefined || v === null ? '' : String(v));
+  if (source === 'hosts') return all.map((h) => ({ value: str(h.alias), label: str(h.alias) }));
+  if (source === 'trackers') return all.map((t) => ({ value: str(t.id), label: str(t.name) }));
+  if (source === 'people')
+    return all
+      .filter((p) => p.disabled_at === undefined || p.disabled_at === null)
+      .map((p) => {
+        const name = str(p.name);
+        const shown = str(p.display_name);
+        return { value: name, label: shown && shown !== name ? `${shown} (${name})` : name };
+      });
+  return all.map((r) => ({ value: str(r.name), label: str(r.name) }));
+}
+
+/** The list command each option source reads (all fleet-scoped). */
+const SOURCE_LISTS: Record<OptionSource, string> = {
+  hosts: 'list_hosts',
+  trackers: 'list_trackers',
+  orgs: 'list_orgs',
+  devices: 'list_devices',
+  catalogs: 'catalog_list_catalogs',
+  people: 'list_people',
+};
+
+/** Every option source a resource's forms and pickers read (Pair a device's
+ *  wizard picks an org too). */
+export function optionSourcesOf(r: ResourceType): OptionSource[] {
+  const out = new Set<OptionSource>();
+  const fromParams = (a: ActionSpec | undefined) => {
+    for (const p of a?.params ?? []) if (p.type === 'options' || p.type === 'suggest') out.add(p.source);
+  };
+  for (const a of [r.create, r.update, r.delete, ...(r.actions ?? [])]) fromParams(a);
+  for (const f of r.fields) {
+    if (f.type === 'pick') out.add(f.source);
+    if (f.type === 'items') [f.remove, ...f.add, ...(f.each ?? [])].forEach(fromParams);
+  }
+  if (r.id === 'device' && r.create) out.add('orgs');
+  return [...out];
+}
+
+/**
+ * The rows of `sources`, read from `fleet`'s hub: what an extra fleet's
+ * resource page offers in its selects, since the primary's stores hold the
+ * primary's hosts, orgs and people. A source whose read fails offers
+ * nothing rather than another fleet's values.
+ */
+export async function loadSourceRows(
+  sources: readonly OptionSource[],
+  fleet: string | null,
+): Promise<Partial<Record<OptionSource, object[]>>> {
+  const read = await Promise.all(
+    sources.map(async (s) => {
+      const r = await invokeOnFleet<object[]>(SOURCE_LISTS[s], {}, fleet);
+      return [s, r.ok && Array.isArray(r.value) ? r.value : []] as const;
+    }),
+  );
+  return Object.fromEntries(read);
 }
 
 /**

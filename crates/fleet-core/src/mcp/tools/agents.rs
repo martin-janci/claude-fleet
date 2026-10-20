@@ -62,7 +62,26 @@ impl FleetTools {
             .map_err(to_mcp_err)?;
             return ok_json_compact(&done);
         }
-        ok_json_compact(&admin::call(&self.store, &args, &by, now).map_err(to_mcp_err)?)
+        if args.action == "install"
+            && !super::assets::may_admin_catalog(&caller, &self.store, catalog::catalogs::PERSONAL)?
+        {
+            // The same gate every other personal-catalog write runs
+            // (`catalog_admin`): a trusted device still needs the assets grant.
+            return Err(mcp_err(
+                "E_FORBIDDEN",
+                format!(
+                    "install writes the asset catalog: it needs a paired client granted it \
+                     ({} refused); on the hub: fleet-hub client grant <name> assets",
+                    caller.label()
+                ),
+                None,
+            ));
+        }
+        ok_json_compact(
+            &admin::call_async(&self.store, &args, &by, now)
+                .await
+                .map_err(to_mcp_err)?,
+        )
     }
 }
 

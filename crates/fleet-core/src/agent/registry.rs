@@ -451,7 +451,7 @@ impl Drop for PendingGuard {
 /// The connection ended after the request was sent: its outcome is unknown.
 /// `details.connection_lost` lets a reader that only cares whether the agent
 /// is there (the reconcile's redial grace) treat it like `E_AGENT_OFFLINE`.
-fn lost_mid_request(alias: &str) -> IpcError {
+pub(crate) fn lost_mid_request(alias: &str) -> IpcError {
     IpcError {
         details: Some(serde_json::json!({ "connection_lost": true })),
         ..IpcError::new(

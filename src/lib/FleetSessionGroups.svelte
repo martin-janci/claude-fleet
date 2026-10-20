@@ -344,7 +344,7 @@
   }
   .caret {
     display: inline-block;
-    transition: transform 0.1s;
+    transition: transform var(--dur-fast);
   }
   .caret.collapsed {
     transform: rotate(-90deg);
