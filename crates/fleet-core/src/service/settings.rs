@@ -1119,14 +1119,14 @@ pub const SPECS: &[Spec] = &[
         "true",
         Kind::Bool,
         "Apply safe fixes automatically",
-        "Fix problems whose fix only touches fleet's own files and can be undone, then tell you. Fixes that touch tokens, sign-in or running sessions always wait for you.",
+        "Apply fixes marked safe without asking, then tell you: refreshing fleet's files on a host, and re-adding or repairing fleet's entry in a host's ~/.claude.json (written with that host's own fleet token). Replacing a token, signing in and typing into sessions always wait for you.",
     ),
     Spec::new(
         AUTOFIX_MAX_ATTEMPTS,
         "3",
         Kind::Int { min: 0, max: 10 },
         "Automatic fix attempts",
-        "How many times one problem is fixed automatically before it waits for you.",
+        "How many times fleet tries to fix one problem by itself in 24 hours (a problem that keeps coming back counts as one) before it waits for you.",
     )
     .unit(Unit::Count)
     .zero("never"),

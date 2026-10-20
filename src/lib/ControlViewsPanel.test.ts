@@ -266,4 +266,13 @@ describe('Problems & fixes (autofix)', () => {
     expect(row.textContent).toContain('Update the agent on mercury · 2 tries');
     expect(row.textContent).toContain('host mercury');
   });
+
+  it('Check now asks the hub to look again at once (review w09-6)', async () => {
+    const { invoke } = await import('@tauri-apps/api/core');
+    findings.set([base]);
+    const { getByTestId } = render(ControlViewsPanel);
+    vi.mocked(invoke).mockClear();
+    await fireEvent.click(getByTestId('control-problems-check'));
+    expect(vi.mocked(invoke).mock.calls.map((c) => c[0])).toContain('autofix_scan');
+  });
 });
