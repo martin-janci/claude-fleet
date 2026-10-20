@@ -3322,6 +3322,23 @@ describe('Inbox (redesign step 3.3)', () => {
     expect(screen.getAllByTestId('sess-row')).toHaveLength(3);
   });
 
+  it('w11-2: Sessions grouped by work does not take keyed sessions out of the Inbox', async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const keyed = { ...sessionFor(2, 'dev-pay'), tags: ['PAY-7'], claude_status: 'blocked' as const, last_activity_at: now };
+    mockBackend(fakeProjects, [...fleet(), keyed]);
+    sidebarGroupBy.set('work');
+    sidebarView.set('inbox');
+    try {
+      render(Sidebar);
+      await tick(); await tick();
+      const shown = screen.getAllByTestId('sess-row').map((r) => r.textContent ?? '');
+      expect(shown.some((t) => t.includes('dev-pay'))).toBe(true);
+      expect(screen.getByTestId('inbox-head').textContent).toContain('3 need you');
+    } finally {
+      sidebarGroupBy.set('project');
+    }
+  });
+
   // G3.1: the Main board's Inbox, from the one attention model.
   it('groups by state: Needs you with its missions and "+1 proposed", then Failed', async () => {
     const now = Math.floor(Date.now() / 1000);
@@ -3350,6 +3367,8 @@ describe('Inbox (redesign step 3.3)', () => {
     expect(within(failed).getByTestId('inbox-section-head').textContent).toMatch(/Failed\s*1/);
     expect(within(failed).getByTestId('sess-row').textContent).toContain('dev-crashed');
     expect(screen.getByTestId('inbox-head').textContent).toContain('3 need you');
+    // w11-7: the title's badge counts what the header counts, the mission too.
+    expect(screen.getByTestId('inbox-title').textContent).toBe('Inbox3');
     // "Not waiting" sets the reading aside: the row and "+1 proposed" go.
     await fireEvent.click(within(proposed).getByTestId('inbox-proposed-by-change'));
     await tick();

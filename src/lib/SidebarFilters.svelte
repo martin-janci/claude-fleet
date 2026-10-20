@@ -81,6 +81,7 @@
     onCollapse,
     headActions,
     needsYouCount,
+    inboxNeedsCount = needsYouCount,
     selectMode,
     toggleSelectMode,
     selectedCount,
@@ -109,6 +110,10 @@
     /** The list's own actions beside its title (UX audit L4: + New ⌘N). */
     headActions?: Snippet;
     needsYouCount: number;
+    /** The Inbox title's badge: what its own header counts (sessions,
+     *  missions, approvals, failed routines, fleets), not the sessions-only
+     *  Needs you pill (review w11-7). */
+    inboxNeedsCount?: number;
     selectMode: boolean;
     toggleSelectMode: () => void;
     selectedCount: number;
@@ -496,8 +501,8 @@
       <!-- The Inbox (redesign step 3.3). Today was its second tab until
            Control (9.1) took it; ⌘⇧T opens it there. -->
       <h2 class="list-title" data-testid="inbox-title"
-        >Inbox{#if needsYouCount > 0}<span class="tab-badge hot" title="{needsYouCount} waiting on you"
-            >{needsYouCount}</span
+        >Inbox{#if inboxNeedsCount > 0}<span class="tab-badge hot" title="{inboxNeedsCount} waiting on you"
+            >{inboxNeedsCount}</span
           >{/if}</h2
       >
     {:else if listView === 'work'}

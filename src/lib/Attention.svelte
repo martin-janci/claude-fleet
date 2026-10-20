@@ -49,6 +49,15 @@
   import { failing } from './routines';
   import type { AttentionState } from './attention';
   import { push } from './toasts';
+  import { selectSessionExplicitly } from './selection';
+  import { sidebarView } from './work_view';
+
+  /** Open a session of this window's fleet from a toast or a notification:
+   *  the live row, if it is still there (review w11-4, w11-12). */
+  function openRow(id: number) {
+    const row = get(sessions).find((r) => r.id === id);
+    if (row) selectSessionExplicitly(row);
+  }
 
   /** Latest announcement for the live region (screen readers read changes). */
   let announcement = $state('');
@@ -59,13 +68,23 @@
     const messages = rows.map((r) => stuckMessage(r, friendly));
     announcement = messages.join('. ');
     if (get(notifyStuckToast)) {
-      for (const m of messages) push({ kind: 'error', code: 'STUCK', message: m, sticky: false, timeoutMs: 8000 });
+      rows.forEach((r, i) =>
+        push({
+          kind: 'error',
+          code: 'STUCK',
+          message: messages[i],
+          sticky: false,
+          timeoutMs: 8000,
+          action: { label: 'Open', run: () => openRow(r.id) },
+        }),
+      );
     }
     // A stuck session is Blocked in the hub's notifications matrix (11.9):
     // the desktop column and quiet hours decide the OS notification.
     if (get(notifyStuckOs) && notificationAllowed('desktop', 'blocked', get(fleetSettings))) {
       for (let i = 0; i < rows.length; i++) {
-        showOsNotification('Orbit Fleet: session stuck', messages[i], `stuck-${rows[i].id}`);
+        const id = rows[i].id;
+        showOsNotification('Orbit Fleet: session stuck', messages[i], `stuck-${id}`, () => openRow(id));
       }
     }
     const away = typeof document !== 'undefined' && !document.hasFocus();
@@ -82,10 +101,17 @@
 
   /** OS notification and chime for one matrix state, by the hub's columns.
    *  Returns whether it chimed, so a batch makes one sound. */
-  function notifyMatrix(state: NotifyState, title: string, body: string, tag: string, mayChime: boolean): boolean {
+  function notifyMatrix(
+    state: NotifyState,
+    title: string,
+    body: string,
+    tag: string,
+    mayChime: boolean,
+    onclick?: () => void,
+  ): boolean {
     if (typeof document !== 'undefined' && document.hasFocus()) return false;
     const settings = get(fleetSettings);
-    if (get(notifyStuckOs) && notificationAllowed('desktop', state, settings)) showOsNotification(title, body, tag);
+    if (get(notifyStuckOs) && notificationAllowed('desktop', state, settings)) showOsNotification(title, body, tag, onclick);
     return mayChime && notificationAllowed('sound', state, settings) && playChime();
   }
 
@@ -114,7 +140,9 @@
       let chimed = false;
       for (const { row, state } of newlyNotifiable(before, rows, opts)) {
         const name = friendly && row.friendly_name ? row.friendly_name : row.tmux_name;
-        chimed = notifyMatrix(state, `${name} ${TITLES[state]}`, row.host_alias, `${state}-${row.id}`, !chimed) || chimed;
+        const id = row.id;
+        chimed =
+          notifyMatrix(state, `${name} ${TITLES[state]}`, row.host_alias, `${state}-${id}`, !chimed, () => openRow(id)) || chimed;
       }
     });
     const unsubRuns = failing.subscribe((list) => {
@@ -124,7 +152,11 @@
         seenRuns.add(f.run.id);
         if ((f.run.finished_at ?? f.run.started_at) < openedAt) continue;
         const title = `Routine ${f.routine.name} failed`;
-        chimed = notifyMatrix('routine_failed', title, f.run.reason ?? '', `routine-${f.run.id}`, !chimed) || chimed;
+        // A failed routine is listed in the Inbox, with its Fix and Retry.
+        chimed =
+          notifyMatrix('routine_failed', title, f.run.reason ?? '', `routine-${f.run.id}`, !chimed, () =>
+            sidebarView.set('inbox'),
+          ) || chimed;
       }
     });
     const fleetPrev = new Map<string, Map<number, AttentionState>>();
