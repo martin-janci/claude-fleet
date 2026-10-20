@@ -6,6 +6,7 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import AutomationView from './AutomationView.svelte';
 import { automationTab } from './automation';
+import { stashDraft } from './automation/routine_draft';
 
 const invoke = mockedInvoke as ReturnType<typeof vi.fn>;
 const now = Math.floor(Date.now() / 1000);
@@ -35,6 +36,8 @@ function route() {
 }
 
 beforeEach(() => {
+  // A changed draft an earlier test left open must not come back (review w05-2).
+  stashDraft(null);
   invoke.mockReset();
   paused = false;
   automationTab.set('routines');

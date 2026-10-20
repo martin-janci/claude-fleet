@@ -1,4 +1,5 @@
 import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
+import { tick } from 'svelte';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
@@ -13,7 +14,8 @@ import { destination } from '../destination';
 import { automationTab } from '../automation';
 import { clearToasts, toasts } from '../toasts';
 import { fleetSettings, SETTING_DEFAULTS } from '../fleet_settings';
-import { deviceOffsetMin, failing, nextRunLabel, zoneChoices, zoneOffsetMin, type RoutineRow, type RoutineRunRow } from '../routines';
+import { deviceOffsetMin, failing, openRoutines, nextRunLabel, zoneChoices, zoneOffsetMin, type RoutineRow, type RoutineRunRow } from '../routines';
+import { stashDraft, zoneOfSaved } from './routine_draft';
 
 const inv = mockedInvoke as ReturnType<typeof vi.fn>;
 
@@ -89,6 +91,8 @@ function route(list: RoutineRow[] = [sweep], runs: RoutineRunRow[] = [ok, bad], 
 }
 
 beforeEach(() => {
+  // A changed draft an earlier test left open must not come back (review w05-2).
+  stashDraft(null);
   hosts.set([{ alias: 'mac', hidden: false } as never]);
   projects.set([{ project: { id: 1, owner: 'martin-janci', repo: 'claude-fleet', system: false }, worktrees: [] } as never]);
   failing.set([]);
@@ -454,7 +458,8 @@ describe('the routine editor (G2.3: schedule picker, next run, account, dry run,
     await screen.findByTestId('routine-title');
     await fireEvent.click(screen.getByTestId('routine-edit'));
     const acct = screen.getByTestId('routine-account') as HTMLSelectElement;
-    await waitFor(() => expect(Array.from(acct.options).map((o) => o.textContent)).toEqual(["me@x.com · the host's own login", 'work@x.com · profile work']));
+    await waitFor(() => expect(Array.from(acct.options).map((o) => o.textContent)).toEqual(['me@x.com · own login', 'work@x.com · profile work']));
+    expect(acct.options[0].title).toBe("me@x.com · the host's own login");
     await fireEvent.change(acct, { target: { value: 'work' } });
     expect((screen.getByTestId('routine-profile') as HTMLInputElement).value).toBe('work');
     await waitFor(() => expect(argsOf('preview')?.routine.profile).toBe('work'));
@@ -505,8 +510,9 @@ describe('the routine editor (G7.4: time zone select, Undo on save)', () => {
     await screen.findByTestId('routine-title');
     await fireEvent.click(screen.getByTestId('routine-edit'));
     const select = screen.getByTestId('routine-zone-select') as HTMLSelectElement;
-    // A routine saved before zones were stored opens on this device's.
-    expect(select.value).toBe('');
+    // A routine saved before zones were stored opens in the zone of its
+    // offset, so saving does not move it (review w05-3).
+    expect(select.value).toBe(zoneOfSaved({ utc_offset_min: 120 }).zone);
     await fireEvent.change(select, { target: { value: 'Asia/Tokyo' } });
     expect(screen.getByTestId('routine-zone').textContent).toContain('Asia/Tokyo · saved as UTC+09:00');
     await fireEvent.click(screen.getByTestId('routine-save'));
@@ -650,10 +656,175 @@ describe('the routine form (FormsAutomation board)', () => {
       expect(screen.getByTestId('routine-tune')).toBeInTheDocument();
       await fireEvent.click(screen.getByTestId('routine-use-template'));
       await fireEvent.click(screen.getByTestId('routine-template-morning-pr-sweep'));
+      // The typed prompt would go: it asks first (review w05-1).
+      await fireEvent.click(screen.getByTestId('form-discard'));
       expect((screen.getByTestId('routine-name') as HTMLInputElement).value).toBe('Morning PR sweep');
       expect(screen.queryByTestId('routine-tune')).toBeNull();
     } finally {
       fleetSettings.set({ ...SETTING_DEFAULTS });
     }
+  });
+});
+
+describe('the routine editor (review w05)', () => {
+  async function openBlankOver(list: RoutineRow[] = [sweep]) {
+    route(list);
+    const v = render(RoutinesPanel);
+    if (list.length) await screen.findByTestId('routine-title');
+    else await screen.findByTestId('routines-empty');
+    await fireEvent.click(screen.getByTestId('routine-new'));
+    await fireEvent.click(screen.getByTestId('routine-template-blank'));
+    return v;
+  }
+
+  it('w05-1: picking another routine, New or a request from elsewhere asks before a changed draft goes', async () => {
+    await openBlankOver();
+    await fireEvent.input(screen.getByTestId('routine-name'), { target: { value: 'Nightly' } });
+    await fireEvent.click(screen.getByTestId('routine-row'));
+    expect(screen.getByTestId('form-discard-ask')).toBeInTheDocument();
+    await fireEvent.click(screen.getByTestId('form-keep-editing'));
+    expect((screen.getByTestId('routine-name') as HTMLInputElement).value).toBe('Nightly');
+
+    // A template over it asks too.
+    await fireEvent.click(screen.getByTestId('routine-new'));
+    await fireEvent.click(screen.getByTestId('routine-template-morning-pr-sweep'));
+    expect(screen.getByTestId('form-discard-ask')).toBeInTheDocument();
+    expect((screen.getByTestId('routine-name') as HTMLInputElement).value).toBe('Nightly');
+    await fireEvent.click(screen.getByTestId('form-keep-editing'));
+
+    // The Inbox's Fix (a request to select a routine) asks as well.
+    openRoutines({ select: 3 });
+    await tick();
+    expect(screen.getByTestId('form-discard-ask')).toBeInTheDocument();
+    await fireEvent.click(screen.getByTestId('form-discard'));
+    expect(screen.queryByTestId('routine-editor')).toBeNull();
+    expect(screen.getByTestId('routine-title').textContent).toBe('Morning PR sweep');
+  });
+
+  it('w05-1: an untouched draft goes without asking', async () => {
+    await openBlankOver();
+    await fireEvent.click(screen.getByTestId('routine-row'));
+    expect(screen.queryByTestId('routine-editor')).toBeNull();
+  });
+
+  it('w05-2: a changed draft survives the tab closing under it; an untouched one does not', async () => {
+    const v = await openBlankOver();
+    await fireEvent.input(screen.getByTestId('routine-name'), { target: { value: 'Nightly' } });
+    v.unmount();
+    render(RoutinesPanel);
+    expect(((await screen.findByTestId('routine-name')) as HTMLInputElement).value).toBe('Nightly');
+    // Still a changed draft: Cancel asks.
+    await fireEvent.click(screen.getByTestId('routine-cancel'));
+    expect(screen.getByTestId('form-discard-ask')).toBeInTheDocument();
+  });
+
+  it('w05-3: a routine saved without a zone at UTC is saved back at UTC', async () => {
+    route([{ ...sweep, utc_offset_min: 0 }]);
+    render(RoutinesPanel);
+    await screen.findByTestId('routine-title');
+    await fireEvent.click(screen.getByTestId('routine-edit'));
+    await fireEvent.input(screen.getByTestId('routine-name'), { target: { value: 'Evening sweep' } });
+    await fireEvent.click(screen.getByTestId('routine-save'));
+    await waitFor(() => expect(argsOf('save')).toBeDefined());
+    expect(argsOf('save').routine.utc_offset_min).toBe(0);
+  });
+
+  it('w05-4: a refused save scrolls to the banner and focuses it, and the footer says it did not save', async () => {
+    await openBlankOver([]);
+    inv.mockImplementation(async (cmd: string, a: { args: { action: string } }) => {
+      if (cmd !== 'routines') return null;
+      if (a.args.action === 'save') throw { code: 'E_INVALID', message: 'the fallback host nas is in another organisation than mac' };
+      if (a.args.action === 'preview') return previewAnswer;
+      return [];
+    });
+    await fireEvent.input(screen.getByTestId('routine-name'), { target: { value: 'Nightly' } });
+    await fireEvent.input(screen.getByTestId('routine-prompt'), { target: { value: 'Tidy up.' } });
+    await fireEvent.click(screen.getByTestId('routine-save'));
+    const banner = await screen.findByTestId('routine-save-error');
+    await waitFor(() => expect(document.activeElement?.contains(banner)).toBe(true));
+    expect(screen.getByTestId('routine-save-why').textContent).toContain('Not saved');
+  });
+
+  it('w05-5/6: a budget or cap it cannot read is said on blur and blocks Save', async () => {
+    await openBlankOver([]);
+    await fireEvent.input(screen.getByTestId('routine-name'), { target: { value: 'Nightly' } });
+    await fireEvent.input(screen.getByTestId('routine-prompt'), { target: { value: 'Tidy up.' } });
+    await fireEvent.input(screen.getByTestId('routine-budget-run'), { target: { value: '1.255' } });
+    await fireEvent.blur(screen.getByTestId('routine-budget-run'));
+    expect(screen.getByTestId('routine-budget-run-error').textContent).toContain('amount like 5');
+    expect((screen.getByTestId('routine-save') as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByTestId('routine-save-why').textContent).toBe('Fix the budget per run.');
+    await fireEvent.input(screen.getByTestId('routine-budget-run'), { target: { value: '5,50' } });
+    await fireEvent.input(screen.getByTestId('routine-cap'), { target: { value: '400' } });
+    await fireEvent.blur(screen.getByTestId('routine-cap'));
+    expect(screen.getByTestId('routine-cap-error').textContent).toContain('1 to 360');
+    await fireEvent.input(screen.getByTestId('routine-cap'), { target: { value: '30' } });
+    await fireEvent.click(screen.getByTestId('routine-save'));
+    await waitFor(() => expect(argsOf('save')?.routine).toMatchObject({ budget_run_micros: 5_500_000, run_max_secs: 1800 }));
+  });
+
+  it('w05-8: a cron line that does not read says why under it, not "never runs"', async () => {
+    previewAnswer = { next_runs: [], utc_offset_min: 0, problem: 'hour: "25" is not a number from 0 to 23', logins: [] };
+    await openBlankOver([]);
+    await fireEvent.change(screen.getByTestId('routine-days'), { target: { value: 'custom' } });
+    await fireEvent.input(screen.getByTestId('routine-cron'), { target: { value: '0 25 * * *' } });
+    expect((await screen.findByTestId('routine-cron-error')).textContent).toContain('hour');
+    expect(screen.getByTestId('routine-cron').getAttribute('aria-invalid')).toBe('true');
+    expect(screen.getByTestId('routine-next-run').textContent).not.toContain('never runs');
+  });
+
+  it('w05-9: a dry run that fails says so with Retry, not "checking…" forever', async () => {
+    route([]);
+    const base = inv.getMockImplementation() as (cmd: string, a: unknown) => Promise<unknown>;
+    let down = true;
+    inv.mockImplementation(async (cmd: string, a: { args: { action: string } }) => {
+      if (cmd === 'routines' && a.args.action === 'preview' && down) throw { code: 'E_UNREACHABLE', message: 'the hub is not reachable' };
+      return base(cmd, a);
+    });
+    render(RoutinesPanel);
+    await screen.findByTestId('routines-empty');
+    await fireEvent.click(screen.getByTestId('routines-empty-new'));
+    await waitFor(() => expect(screen.getByTestId('routine-dry-run').textContent).toContain('Dry run unavailable'));
+    down = false;
+    await fireEvent.click(screen.getByTestId('routine-dry-run-retry'));
+    await waitFor(() => expect(screen.getByTestId('routine-dry-run').textContent).not.toContain('unavailable'));
+  });
+
+  it('w05-11: a hidden host, a deleted project and another organisation are shown as such', async () => {
+    hosts.set([
+      { alias: 'mac', hidden: true, org_id: 1 } as never,
+      { alias: 'pi', hidden: false, org_id: 1 } as never,
+      { alias: 'nas', hidden: false, org_id: 2 } as never,
+    ]);
+    route([{ ...sweep, project_id: 9 }]);
+    render(RoutinesPanel);
+    await screen.findByTestId('routine-title');
+    await fireEvent.click(screen.getByTestId('routine-edit'));
+    const host = screen.getByTestId('routine-host') as HTMLSelectElement;
+    expect(host.value).toBe('mac');
+    expect(host.selectedOptions[0].textContent).toBe('mac (hidden)');
+    const project = screen.getByTestId('routine-project') as HTMLSelectElement;
+    expect(project.selectedOptions[0].textContent).toBe('project 9 (deleted)');
+    expect(screen.getByTestId('routine-save-why').textContent).toBe('Pick a project: its project is gone.');
+    const fallback = screen.getByTestId('routine-fallback') as HTMLSelectElement;
+    expect(Array.from(fallback.options).map((o) => o.value)).toEqual(['', 'pi']);
+  });
+
+  it('w05-12: the form takes focus on open, and Cancel gives it back to the routine', async () => {
+    await openBlankOver();
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByTestId('routine-name')));
+    await fireEvent.click(screen.getByTestId('routine-cancel'));
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByTestId('routine-row')));
+  });
+
+  it('w05-13: Autonomy reads short, and the prompt counts toward the hub limit', async () => {
+    await openBlankOver([]);
+    const auto = screen.getByTestId('routine-autonomy') as HTMLSelectElement;
+    expect(auto.selectedOptions[0].textContent).toBe('L2 · pushes and opens PRs');
+    const prompt = screen.getByTestId('routine-prompt') as HTMLTextAreaElement;
+    expect(prompt.maxLength).toBe(4000);
+    expect(screen.queryByTestId('routine-prompt-count')).toBeNull();
+    await fireEvent.input(prompt, { target: { value: 'x'.repeat(3600) } });
+    expect(screen.getByTestId('routine-prompt-count').textContent).toBe('3600 / 4000 characters');
   });
 });

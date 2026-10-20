@@ -794,11 +794,49 @@ export function dollars(micros: number | undefined): string {
   return `$${((micros ?? 0) / 1_000_000).toFixed(2)}`;
 }
 
-/** Dollars typed by a person as micro-dollars; empty or bad is no limit. */
+/** Dollars typed by a person as micro-dollars; empty or bad is no limit
+ *  (`budgetProblem` says which, so a bad one never saves as none). A
+ *  comma is a decimal point too ("5,50", the Slovak way). */
 export function microsOf(text: string): number | undefined {
-  const t = text.trim().replace(/^\$/, '');
+  const t = text.trim().replace(/^\$\s*/, '').replace(',', '.');
   if (t === '' || !/^\d+(\.\d{1,2})?$/.test(t)) return undefined;
   return Math.round(Number(t) * 1_000_000);
+}
+
+/** What is wrong with a budget field, or null when it is empty (no
+ *  limit) or an amount above $0 (review w05-5, w05-6). */
+export function budgetProblem(text: string): string | null {
+  if (text.trim() === '') return null;
+  const m = microsOf(text);
+  if (m === undefined) return 'Write an amount like 5 or 5.50.';
+  return m > 0 ? null : 'A budget is above $0; leave it empty for no limit.';
+}
+
+/** The longest time cap in minutes: six hours, past which the hub fails any run. */
+export const CAP_MAX_MIN = 360;
+
+/** What is wrong with the Time cap field, or null when it is empty (no
+ *  cap) or whole minutes from 1 to 360 (the hub's 60 s to six hours). */
+export function capProblem(text: string): string | null {
+  const t = text.trim();
+  if (t === '') return null;
+  const n = Number(t);
+  return /^\d+$/.test(t) && n >= 1 && n <= CAP_MAX_MIN ? null : `Whole minutes, 1 to ${CAP_MAX_MIN}; leave it empty for no cap.`;
+}
+
+/** "once per 30 minutes": an event rate in words, for one the presets lack. */
+export function rateLabel(secs: number): string {
+  const unit = (n: number, w: string) => (n === 1 ? `once per ${w}` : `once per ${n} ${w}s`);
+  if (secs % 86400 === 0) return unit(secs / 86400, 'day');
+  if (secs % 3600 === 0) return unit(secs / 3600, 'hour');
+  if (secs % 60 === 0) return unit(secs / 60, 'minute');
+  return unit(secs, 'second');
+}
+
+/** A preview `problem` that is about the cron line itself (it does not
+ *  parse, or never fires), as the cron parser words it. */
+export function isCronProblem(problem: string | undefined): boolean {
+  return !!problem && /^(a schedule has five fields|(minute|hour|day of month|month|weekday): )|never fires$|needs cron$/.test(problem);
 }
 
 // ---- templates ------------------------------------------------------------
