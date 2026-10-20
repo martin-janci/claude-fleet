@@ -15,6 +15,7 @@
   Control about it until it is unmuted (`control_journal`).
 -->
 <script lang="ts">
+  import { errorText } from './error_copy';
   import { onDestroy, onMount } from 'svelte';
   import StatusDot from './kit/StatusDot.svelte';
   import Icon from './kit/Icon.svelte';
@@ -105,7 +106,7 @@
   let muteError = $state<string | null>(null);
   async function toggleMute(t: ControlThread) {
     const r = await setThreadMuted(t.kind, t.id, !t.muted);
-    muteError = r.ok ? null : r.error.message;
+    muteError = r.ok ? null : errorText(r.error);
   }
 
   function isActive(t: ControlThread): boolean {

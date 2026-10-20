@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { errorText } from './error_copy';
   import { untrack } from 'svelte';
   import Loader from './Loader.svelte';
   import Modal from './Modal.svelte';
@@ -51,7 +52,7 @@
     const r = await createAsset(kind, name, duplicateFrom === '' ? undefined : duplicateFrom);
     busy = false;
     if (!r.ok) {
-      error = r.error.message;
+      error = errorText(r.error);
       return;
     }
     onsaved(kind, name);

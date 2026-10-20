@@ -21,8 +21,9 @@ export function pushRestartError(
   hostAlias: string,
   name: string,
   restartForced: () => void,
+  repair?: () => void,
 ): number {
-  if (error.code !== 'E_SELF_TARGET') return pushError(error, 'Restart failed');
+  if (error.code !== 'E_SELF_TARGET') return pushError(error, 'Restart failed', undefined, { repair });
   return push({
     kind: 'warning',
     code: error.code,

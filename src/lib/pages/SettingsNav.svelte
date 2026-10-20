@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { errorText } from '../error_copy';
   // The Settings tree and search (design §6; redesign step 7.1): the groups
   // of `settings_tree.ts` in one 240 px column, the active leaf marked, plus
   // a search over every setting's label, key, help and tags. `@modified` lists what is off its
@@ -62,7 +63,7 @@
     const r = await setFleetSetting(d.key as SettingKey, value);
     busy = false;
     if (!r.ok) {
-      nlError = r.error.message;
+      nlError = errorText(r.error);
       return;
     }
     push({ kind: 'success', message: `${d.label}: ${valueInWords(d, value)}` });

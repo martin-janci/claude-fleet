@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { errorText } from './error_copy';
   // Open offline (redesign step 3.15, offline.ts): this computer's sessions
   // while the hub cannot be reached, and nothing of the hub's fleet. A layer
   // over the window, like the splash it replaces; it steps aside when the hub
@@ -24,7 +25,7 @@
   async function load() {
     loading = true;
     const r = await loadOfflineSessions();
-    error = r.ok ? null : r.error.message;
+    error = r.ok ? null : errorText(r.error);
     now = Math.floor(Date.now() / 1000);
     loading = false;
   }

@@ -7,6 +7,7 @@
   skip it and say so. A row opens the task in Work.
 -->
 <script lang="ts">
+  import { errorText } from './error_copy';
   import { onMount } from 'svelte';
   import { workChanged, editWorkItem, parseAssignees, setWorkStatus, ownerDueChip } from './work';
   import { startWork } from './trackers';
@@ -87,7 +88,7 @@
     for (const t of toStart) {
       const r = await startWork(t.item_id != null ? { item_id: t.item_id, with_brief: true } : { reference: t.key!, with_brief: true });
       if (r.ok) ok++;
-      else failed.push(`${taskLabel(t)}: ${r.error.message}`);
+      else failed.push(`${taskLabel(t)}: ${errorText(r.error)}`);
     }
     busy = false;
     note = [ok ? `Started ${ok} ${ok === 1 ? 'session' : 'sessions'}.` : '', ...failed].filter(Boolean).join(' ');
@@ -100,7 +101,7 @@
     const fails: string[] = [];
     for (const t of native) {
       const r = await setWorkStatus(t.item_id, 'done');
-      if (!r.ok) fails.push(`${taskLabel(t)}: ${r.error.message}`);
+      if (!r.ok) fails.push(`${taskLabel(t)}: ${errorText(r.error)}`);
     }
     busy = false;
     note = (fails.join(' ') || `Moved ${native.length} to Done.`) + skipped('change');
@@ -115,7 +116,7 @@
     const fails: string[] = [];
     for (const t of native) {
       const r = await editWorkItem(t.item_id, { assignees: who });
-      if (!r.ok) fails.push(`${taskLabel(t)}: ${r.error.message}`);
+      if (!r.ok) fails.push(`${taskLabel(t)}: ${errorText(r.error)}`);
     }
     busy = false;
     assigning = false;

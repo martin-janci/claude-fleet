@@ -2009,7 +2009,7 @@ describe('Sidebar: a hub contract skew', () => {
     expect((screen.getByTestId('add-create') as HTMLButtonElement).disabled).toBe(true);
     const why = screen.getByTestId('add-blocked');
     expect(why.textContent).toContain('unreachable');
-    expect(why.textContent).toContain('fleet.example.com');
+    expect(why.textContent).toContain("Try again once it's back");
   });
 });
 

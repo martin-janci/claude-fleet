@@ -9,6 +9,7 @@ import { writable, get } from 'svelte/store';
 import { listen } from '@tauri-apps/api/event';
 import { invokeCmd, type Result } from './result';
 import { subscribeToRowEvents } from './events';
+import { errorText } from './error_copy';
 
 /** Mirror of `self_update::DesktopUpdate`. */
 export interface DesktopUpdate {
@@ -124,7 +125,7 @@ export async function installUpdate(): Promise<Result<void>> {
   // On success the app restarts and nothing after this runs.
   if (!r.ok) {
     updateProgress.set(null);
-    updateError.set(r.error.message);
+    updateError.set(errorText(r.error));
   }
   return r;
 }

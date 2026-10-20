@@ -313,7 +313,7 @@
     } else {
       healthError = `${hr0.error.code}: ${hr0.error.message}`;
       healthText = errorText(hr0.error);
-      push({ kind: 'error', code: hr0.error.code, message: `Health check failed: ${hr0.error.message}` });
+      pushError(hr0.error, 'Health check failed');
     }
     // Subscribed BEFORE the first list: a `session:updated` that lands while
     // the list is in flight would otherwise be emitted to no listener and

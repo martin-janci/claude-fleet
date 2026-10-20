@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { errorText } from './error_copy';
   // Quick switcher — ⌘K / ⌘P on macOS, Ctrl+Shift+K / Ctrl+Shift+P elsewhere
   // (plain Ctrl+K / Ctrl+P stay with the terminal: readline kill-line and
   // previous-history). One text box, fuzzy-ranked sessions (recent first)
@@ -937,7 +938,7 @@
         selectSessionExplicitly(live);
         // A lost race: this start's own session spawned and runs unlinked.
         // The hub names it; say so rather than leave it to be found.
-        if (d.orphan_session_id != null) push({ kind: 'warning', message: r.error.message });
+        if (d.orphan_session_id != null) push({ kind: 'warning', message: errorText(r.error) });
         return;
       }
     }

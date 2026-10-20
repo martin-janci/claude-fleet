@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { errorText } from '../error_copy';
   // One setting on a generated page. Everything shown comes from the
   // registry's descriptor — label, help, bounds, unit, danger, restart,
   // owner — so a page spec only says *where* the setting goes. Writes go
@@ -131,7 +132,7 @@
     error = null;
     const r = save ? await save(next) : await setFleetSetting(d.key as SettingKey, next);
     busy = false;
-    if (!r.ok) error = r.error.message;
+    if (!r.ok) error = errorText(r.error);
     return r.ok;
   }
 
@@ -219,7 +220,7 @@
     error = null;
     const r = await decideProposals(apply ? [proposal.id] : [], apply ? [] : [proposal.id]);
     busy = false;
-    if (!r.ok) error = r.error.message;
+    if (!r.ok) error = errorText(r.error);
     else if (r.value.failed.length) error = r.value.failed[0].error;
   }
 
@@ -230,7 +231,7 @@
     if (!historyOpen) return;
     const r = await settingHistory(d.key);
     if (r.ok) history = r.value;
-    else error = r.error.message;
+    else error = errorText(r.error);
   }
 
   const ids = $derived.by<number[]>(() => {

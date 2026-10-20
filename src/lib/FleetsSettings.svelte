@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { errorText } from './error_copy';
   // Settings → Hub & sync → Fleets (multi-hub design): every hub this window
   // shows. The primary is the pairing above (or this machine's own fleet) and
   // is listed read-only; each extra fleet is its own pairing, made here with a
@@ -67,7 +68,7 @@
       return;
     }
     if (r.error.code === 'E_HUB_PLAINTEXT') plaintextAsk = true;
-    error = r.error.message;
+    error = errorText(r.error);
   }
 
   async function remove(id: string) {
@@ -75,7 +76,7 @@
     const r = await removeFleet(id);
     busy = false;
     removeAsk = null;
-    error = r.ok ? null : r.error.message;
+    error = r.ok ? null : errorText(r.error);
   }
 </script>
 

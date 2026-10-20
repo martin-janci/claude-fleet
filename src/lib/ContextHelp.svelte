@@ -1,4 +1,5 @@
 <script lang="ts" module>
+  import { errorText } from './error_copy';
   /** Questions asked this run, oldest first, shared by every prompt line:
    *  the question box's own ↑ / ↓ recall. */
   const asked: string[] = [];
@@ -91,7 +92,7 @@
     const r = await ask(question);
     busy = false;
     if (r.ok) answer = r.value;
-    else error = r.error.message;
+    else error = errorText(r.error);
   }
 
   function recall(dir: -1 | 1): boolean {

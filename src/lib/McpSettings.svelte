@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { errorText } from './error_copy';
   import type { Result } from './result';
   import { copyText } from './clipboard';
   import {
@@ -44,7 +45,7 @@
       mcp = r.value;
       portInput = r.value.port;
     } else if (!r.ok) {
-      mcpError = r.error.message;
+      mcpError = errorText(r.error);
     }
   }
 
@@ -62,7 +63,7 @@
       mcp = r.value;
       portInput = r.value.port;
     } else if (!r.ok) {
-      mcpError = r.error.message;
+      mcpError = errorText(r.error);
     }
   }
 
@@ -99,7 +100,7 @@
     if (r.ok && r.value) {
       provisionResults = r.value;
     } else if (!r.ok) {
-      provisionError = r.error.message;
+      provisionError = errorText(r.error);
     }
     await onProvisioned();
   }

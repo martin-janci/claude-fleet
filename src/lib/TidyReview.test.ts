@@ -627,7 +627,7 @@ describe('TidyReview', () => {
     await tick();
     const sheet = screen.getByTestId('tidy-sheet');
     const note = screen.getByRole('note');
-    expect(note.textContent).toContain('https://fleet.example.com is unreachable right now');
+    expect(note.textContent).toContain('The hub is unreachable');
     // The rows are still listed and ticked — only the sending is off.
     const checks = screen.getAllByTestId('tidy-check') as HTMLInputElement[];
     expect(checks.map((c) => c.checked)).toEqual([true, true]);

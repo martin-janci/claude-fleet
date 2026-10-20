@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { errorText } from './error_copy';
   import { onDestroy, onMount, tick, untrack } from 'svelte';
   import { get } from 'svelte/store';
   import {
@@ -101,9 +102,9 @@
     // own failure (the Retry pane), never a spinner that never ends.
     if (!a.ok && !get(catalog)) {
       catalogLoad = 'failed';
-      catalogLoadError = a.error.message;
-    } else if (!a.ok) error = a.error.message;
-    if (!i.ok) error = i.error.message;
+      catalogLoadError = errorText(a.error);
+    } else if (!a.ok) error = errorText(a.error);
+    if (!i.ok) error = errorText(i.error);
   }
 
   // Shared by every path that needs to re-read the catalog: `pull: false`
@@ -115,7 +116,7 @@
     catalogLoad = 'loading';
     catalogLoadError = null;
     const l = await loadCatalog(pull);
-    if (!l.ok) { catalogLoad = 'failed'; catalogLoadError = l.error.message; return l.error; }
+    if (!l.ok) { catalogLoad = 'failed'; catalogLoadError = errorText(l.error); return l.error; }
     catalogLoad = 'loaded';
     await refresh();
     return null;
@@ -204,7 +205,7 @@
     }
     overviewLoad = 'failed';
     overviewNotConfigured = r.error.code === 'E_CATALOG_NOT_CONFIGURED';
-    overviewError = r.error.message;
+    overviewError = errorText(r.error);
   }
   $effect(() => {
     if (!hubOverview || !visible || hubAdmin !== 'denied') return;
@@ -215,7 +216,7 @@
     busy = 'scan'; error = null; scanResults = null;
     const r = await scanHosts();
     busy = '';
-    if (!r.ok) { error = r.error.message; return; }
+    if (!r.ok) { error = errorText(r.error); return; }
     scanResults = r.value;
     await loadOverview();
   }
@@ -318,7 +319,7 @@
   async function setup() {
     busy = 'setup'; error = null;
     const c = await configureCatalog(setupPath, setupRemote);
-    if (!c.ok) { error = c.error.message; busy = ''; return; }
+    if (!c.ok) { error = errorText(c.error); busy = ''; return; }
     const wantPush = setupRemote.trim() !== '' && autoPushOn;
     if (wantPush !== settingBool($fleetSettings, SETTING_KEYS.catalogAutoPush)) {
       const s = await setFleetSetting(SETTING_KEYS.catalogAutoPush, wantPush ? 'true' : 'false');
@@ -341,7 +342,7 @@
   async function scan() {
     busy = 'scan'; error = null; scanResults = null;
     const r = await scanHosts();
-    if (!r.ok) error = r.error.message; else { scanResults = r.value; await refresh(); }
+    if (!r.ok) error = errorText(r.error); else { scanResults = r.value; await refresh(); }
     busy = '';
   }
 
@@ -419,7 +420,7 @@
     syncFilter = filter;
     const r = await planSync(filter);
     busy = '';
-    if (!r.ok) { error = r.error.message; return; }
+    if (!r.ok) { error = errorText(r.error); return; }
     syncPlan = r.value;
     lastPlan = r.value;
   }

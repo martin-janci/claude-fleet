@@ -127,11 +127,29 @@ describe('toasts store', () => {
   });
 });
 
-// Requirement (c): the trap. With `mcp.confirm_destructive` on, a hub refuses
+// Requirement (c): with `mcp.confirm_destructive` on, a hub holds
 // kill_session / delete_worktree / move_session / cancel_task until someone
-// approves them — and this desktop's confirmation dialog answers its OWN
-// queue, which in remote mode is always empty. Nothing in the interface said
-// where to go, so this is the one place every backend failure passes through.
+// approves them. The request opens in this window's dialog (its queue is the
+// hub's since redesign 9.2) and on the phone; the toast says so (review w16-3).
+// Review w16-12: E_REPAIR_REQUIRED names one next step, Repair workspace,
+// and a caller that knows the session offers it as the button.
+describe('pushError with a repair', () => {
+  it('offers Repair workspace for E_REPAIR_REQUIRED', () => {
+    const repair = vi.fn();
+    pushError({ code: 'E_REPAIR_REQUIRED', message: 'the workspace needs an explicit repair' }, 'Restart failed', undefined, { repair });
+    const t = get(toasts).at(-1)!;
+    expect(t.action?.label).toBe('Repair workspace…');
+    t.action!.run();
+    expect(repair).toHaveBeenCalled();
+  });
+
+  it('leaves any other error with its Retry', () => {
+    const repair = vi.fn();
+    pushError({ code: 'E_IO', message: 'disk full' }, 'Restart failed', () => {}, { repair });
+    expect(get(toasts).at(-1)!.action?.label).toBe('Retry');
+  });
+});
+
 describe('pushError on a hub client', () => {
   it('adds the next step to a confirmation the hub is waiting on', async () => {
     const { hubStatus, STANDALONE } = await import('./hub');
@@ -146,9 +164,8 @@ describe('pushError on a hub client', () => {
       const t = get(toasts)[0];
       expect(t.code).toBe('E_CONFIRM_REQUIRED');
       expect(t.message).toContain('Kill failed');
-      expect(t.message.toLowerCase()).toContain('on the hub');
-      expect(t.message).toContain('fleet.example.com');
-      expect(t.message.toLowerCase()).toContain('approve it on the hub — this window will follow');
+      expect(t.message).toContain('approve it in the confirmation that just opened, or on your phone');
+      expect(t.message).not.toContain('fleet.example.com');
     } finally {
       hubStatus.set({ ...STANDALONE });
     }

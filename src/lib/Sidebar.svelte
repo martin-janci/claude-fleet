@@ -1375,7 +1375,7 @@
         renameValue,
       );
       if (outcome.kind === 'error') {
-        renameError = outcome.error.message;
+        renameError = errorText(outcome.error);
         return;
       }
       // If the renamed session was the selected one, follow the rename.

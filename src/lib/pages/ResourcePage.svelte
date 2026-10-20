@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { errorText } from '../error_copy';
   // Layout L2 (master_detail): a resource's records in a list beside one
   // record's editor. The list reads through the resource's list command
   // (which routes to the hub on a paired desktop, so the page shows the
@@ -137,7 +138,7 @@
     const r = await pairDevice(v, fleet);
     wizardBusy = false;
     if (!r.ok) {
-      wizardError = r.error.message;
+      wizardError = errorText(r.error);
       return;
     }
     wizardOpen = false;
@@ -156,7 +157,7 @@
     const r = await runAction(c, buildArgs(c, null, null, { url: String(v.url ?? '').trim(), code: String(v.code ?? '').trim() }), fleet);
     wizardBusy = false;
     if (!r.ok) {
-      wizardError = r.error.message;
+      wizardError = errorText(r.error);
       return;
     }
     wizardOpen = false;

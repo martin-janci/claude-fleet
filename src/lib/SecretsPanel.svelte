@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { errorText } from './error_copy';
   import { onMount } from 'svelte';
   import Modal from './Modal.svelte';
   import { listSecrets, setSecret, deleteSecret, type SecretRow } from './assets';
@@ -34,7 +35,7 @@
       rows = r.value;
       loaded = true;
       loadError = null;
-    } else if (loaded) error = r.error.message;
+    } else if (loaded) error = errorText(r.error);
     else loadError = r.error;
   }
   async function retryLoad() {
@@ -94,7 +95,7 @@
         ? async () => {
             for (const t of fresh) {
               const r = await deleteSecret(name, t);
-              if (!r.ok) error = `Undo: ${name} is still on ${where(t)}: ${r.error.message}`;
+              if (!r.ok) error = `Undo: ${name} is still on ${where(t)}: ${errorText(r.error)}`;
             }
             await reload();
           }
@@ -113,7 +114,7 @@
     const r = await setSecret(name, value, target);
     busy = null;
     if (!r.ok) {
-      error = r.error.message;
+      error = errorText(r.error);
       return;
     }
     valueDrafts = { ...valueDrafts, [name]: '' };
@@ -147,7 +148,7 @@
     for (const t of targets) {
       const was = isSet(name, t);
       const r = await setSecret(name, value, t);
-      if (!r.ok) failed.push(`${t ?? 'every host'}: ${r.error.message}`);
+      if (!r.ok) failed.push(`${t ?? 'every host'}: ${errorText(r.error)}`);
       else if (was) replaced.push(t);
       else fresh.push(t);
     }
@@ -167,7 +168,7 @@
     const r = await deleteSecret(name, hostAlias === '' ? undefined : hostAlias);
     busy = null;
     if (!r.ok) {
-      error = r.error.message;
+      error = errorText(r.error);
       return;
     }
     await reload();

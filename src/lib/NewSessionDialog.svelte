@@ -1182,7 +1182,7 @@
         briefDraft = before.text;
         briefEdited = before.edited;
       }
-      draftError = r.error.message;
+      draftError = errorText(r.error);
       return;
     }
     briefDraft = r.value.brief;
@@ -1390,7 +1390,7 @@
           // than switch silently (review w12-8).
           push(
             d.orphan_session_id != null
-              ? { kind: 'warning', message: r.error.message }
+              ? { kind: 'warning', message: errorText(r.error) }
               : { kind: 'info', message: `${t.key} already runs as ${liveName} — opened it` },
           );
           onCancel();
