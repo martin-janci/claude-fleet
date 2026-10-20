@@ -60,8 +60,8 @@ from `autonomy.ts`; Custom grants what Ask first does), and since the
   budget, and parallel cap (`start_inside_mission_grant`; a task start
   with no host is inside only a grant naming no hosts).
   Kills, rewinds, restores, add_project and every other `confirm: true`
-  tool always ask. **Session care** (`control.session_care`, OFF by
-  default, 2026-10-20): with it on, `restart_session` of an open handoff
+  tool always ask. **Session care** (`control.session_care`, ON by
+  default since 2026-10-20, the owner's choice): with it on, `restart_session` of an open handoff
   goes without a card at Within your brief and Autopilot, and
   `safe_kill_session` of one at Autopilot (`guard::OPERATOR_CARE_TOOLS`);
   the digest says `Session care: on` under its autonomy line. The rule is
