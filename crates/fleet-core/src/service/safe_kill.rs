@@ -5,6 +5,12 @@
 //! Lifecycle (column = `sessions.safe_kill_state`):
 //!   NULL → "requested" → ("ready" → row gone) | "failed" → user resolves
 //!
+//! A request whose marker never arrives (Esc, a question back, a limit, an
+//! omitted line) settles as "failed" once it is [`REQUEST_TIMEOUT_SECS`]
+//! old and the session is not mid-turn ([`expire_stale_requests`], on the
+//! reconcile tick), and `safe_kill_session` re-arms such a request at once.
+//! A relaunch (restart, recreate, restore) drops a "requested" one.
+//!
 //! Detection runs on the Stop hook: when Claude finishes a turn, fleet
 //! captures pane scrollback, finds the last line containing the per-request
 //! nonce, and branches on whether the marker says READY or FAILED.
@@ -32,6 +38,48 @@ const FAILED_PLACEHOLDER: &str = "<one-line reason>";
 /// enough to cover a multi-step push-and-PR turn without dragging in unrelated
 /// history.
 const MARKER_SCAN_LINES: u32 = 3000;
+
+/// How long a "requested" safe remove waits for its marker before it
+/// settles as "failed" (review w27-5): the stale-working timeout's default
+/// (`reconcile.stale_working_secs`, 1800 s), the time after which fleet
+/// already reads a silent turn as over. A session still `working` keeps
+/// waiting, so a long commit-and-push turn is not cut short.
+pub(crate) const REQUEST_TIMEOUT_SECS: i64 = 1800;
+
+/// The `safe_kill_detail` of a request settled by the timeout.
+pub(crate) const TIMED_OUT_DETAIL: &str =
+    "no safe-remove report came back within 30 minutes; try again or kill the session";
+
+/// Whether a "requested" row has waited out [`REQUEST_TIMEOUT_SECS`] and is
+/// not mid-turn — the same test [`Store::expire_safe_kill_requests`] applies.
+fn request_timed_out(row: &SessionRow, now: i64) -> bool {
+    row.safe_kill_requested_at.unwrap_or(0) < now - REQUEST_TIMEOUT_SECS
+        && row.claude_status.as_deref() != Some("working")
+}
+
+/// The tick: settle every request older than [`REQUEST_TIMEOUT_SECS`] whose
+/// session is not mid-turn as "failed" ([`TIMED_OUT_DETAIL`]), so the pill
+/// stops saying "in progress" and Safe remove can be pressed again. Returns
+/// the number settled. Best-effort.
+pub fn expire_stale_requests(store: &Mutex<Store>, now: i64) -> usize {
+    let Ok(s) = lock(store) else { return 0 };
+    match s.expire_safe_kill_requests(now - REQUEST_TIMEOUT_SECS, TIMED_OUT_DETAIL) {
+        Ok(ids) => {
+            for &id in &ids {
+                let _ = s.insert_session_event(id, "safe_kill_timed_out", None);
+                tracing::info!(
+                    session_id = id,
+                    "[safe_kill] request timed out; settled as failed"
+                );
+            }
+            ids.len()
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "[safe_kill] expiring stale requests failed");
+            0
+        }
+    }
+}
 
 #[derive(Serialize, Deserialize)]
 pub struct SafeKillSessionArgs {
@@ -136,7 +184,8 @@ pub fn build_safe_kill_prompt(nonce: &str) -> String {
 /// to the session. Returns the updated session row.
 ///
 /// Refuses if the session is not alive (already ghost/dead) or if a request
-/// is already in flight (`safe_kill_state == "requested"`). A prior "failed"
+/// is already in flight (`safe_kill_state == "requested"`) and has not yet
+/// timed out ([`REQUEST_TIMEOUT_SECS`]). A prior "failed" or timed-out
 /// request can be retried freely.
 pub async fn safe_kill_session(
     args: SafeKillSessionArgs,
@@ -202,7 +251,9 @@ pub async fn safe_kill_session(
                 format!("session {} is not running", args.tmux_name),
             ));
         }
-        if row.safe_kill_state.as_deref() == Some("requested") {
+        if row.safe_kill_state.as_deref() == Some("requested")
+            && !request_timed_out(&row, now_secs())
+        {
             return Err(IpcError::new(
                 codes::E_SAFE_KILL_IN_PROGRESS,
                 "a safe-kill request is already in flight for this session",
@@ -927,6 +978,56 @@ fn exec_for(host: &str, ssh: &Arc<SshClient>) -> Box<dyn crate::tmux::TmuxExec> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Review w27-5: a request whose marker never came back settles as
+    /// `failed` once it is `REQUEST_TIMEOUT_SECS` old and its session is not
+    /// mid-turn, so Safe remove can be pressed again; a fresh request and
+    /// one whose session is still working keep waiting.
+    #[test]
+    fn a_request_with_no_marker_times_out_to_failed() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("h").unwrap();
+        let mk = |n: &str| {
+            s.upsert_session(n, "h", None, None, 1, 1, "running", None)
+                .unwrap()
+        };
+        let (stale, fresh, busy) = (mk("stale"), mk("fresh"), mk("busy"));
+        let now = 100_000;
+        s.set_safe_kill_requested(stale, "n1", now - REQUEST_TIMEOUT_SECS - 1)
+            .unwrap();
+        s.set_safe_kill_requested(fresh, "n2", now - 60).unwrap();
+        s.set_safe_kill_requested(busy, "n3", now - REQUEST_TIMEOUT_SECS - 1)
+            .unwrap();
+        s.conn_ref()
+            .execute(
+                "UPDATE sessions SET claude_status = 'working' WHERE id = ?1",
+                [busy],
+            )
+            .unwrap();
+        let store = Mutex::new(s);
+
+        assert_eq!(expire_stale_requests(&store, now), 1);
+        let s = store.lock().unwrap();
+        let row = |id| s.get_session_by_id(id).unwrap().unwrap();
+        assert_eq!(row(stale).safe_kill_state.as_deref(), Some("failed"));
+        assert_eq!(
+            row(stale).safe_kill_detail.as_deref(),
+            Some(TIMED_OUT_DETAIL)
+        );
+        assert_eq!(row(fresh).safe_kill_state.as_deref(), Some("requested"));
+        assert_eq!(row(busy).safe_kill_state.as_deref(), Some("requested"));
+        assert!(s
+            .list_session_events(stale, 10)
+            .unwrap()
+            .iter()
+            .any(|e| e.kind == "safe_kill_timed_out"));
+        // `safe_kill_session` re-arms by the same test.
+        assert!(!request_timed_out(&row(busy), now));
+        assert!(!request_timed_out(&row(fresh), now));
+        let mut idle = row(busy);
+        idle.claude_status = Some("idle".into());
+        assert!(request_timed_out(&idle, now));
+    }
 
     /// A worktree whose `git status` fails is not reported clean: the
     /// script exits non-zero, which the caller turns into an error and
