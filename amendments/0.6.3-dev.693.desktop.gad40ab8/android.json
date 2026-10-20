@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "version": "0.6.3-dev.693.desktop.gad40ab8",
+  "mobile_accepts": [
+    0,
+    18
+  ],
+  "components": {
+    "android": {
+      "version": "0.6.3-dev.693.desktop.gad40ab8",
+      "artifacts": [
+        {
+          "kind": "apk",
+          "url": "https://github.com/martin-janci/fleet-mobile/releases/download/v0.6.3-dev.693.desktop.gad40ab8/fleet-mobile-0.6.3-dev.693.desktop.gad40ab8.apk",
+          "sha256": "3e1462efb8af8214826a151abf64bf04cb90666ab661002286f494bcbde695f6",
+          "size": 18303240,
+          "version_code": 421255,
+          "signer_sha256": "87081ff376e7ad2cb3082bf8f48dac2f451bffda66693b575c31cd4c354b9a15"
+        }
+      ]
+    }
+  }
+}

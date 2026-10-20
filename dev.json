@@ -1,9 +1,9 @@
 {
   "schema": 1,
   "track": "dev",
-  "sequence": 150,
-  "generated_at": "2026-10-20T12:15:23Z",
-  "expires_at": "2026-11-03T12:15:23Z",
+  "sequence": 151,
+  "generated_at": "2026-10-20T13:08:35Z",
+  "expires_at": "2026-11-03T13:08:35Z",
   "current": "0.6.3-dev.693.desktop.gad40ab8",
   "recommended": "0.6.3-dev.693.desktop.gad40ab8",
   "minimum_supported": {},
@@ -14,7 +14,14 @@
     {
       "version": "0.6.3-dev.693.desktop.gad40ab8",
       "manifest": "https://github.com/martin-janci/claude-fleet/releases/download/v0.6.3-dev.693.desktop.gad40ab8/release-manifest.json",
-      "manifest_sha256": "ce14daaf735a2bbc5399821e9f1492a86934d1bef69d47848ae5d71ea50f0601"
+      "manifest_sha256": "ce14daaf735a2bbc5399821e9f1492a86934d1bef69d47848ae5d71ea50f0601",
+      "amendments": [
+        {
+          "component": "android",
+          "manifest": "https://raw.githubusercontent.com/martin-janci/claude-fleet/update-channels/amendments/0.6.3-dev.693.desktop.gad40ab8/android.json",
+          "manifest_sha256": "dc29356fafe8b4d3c0a0855364c0b8d0db69e82f4594a03075002fc98a654d46"
+        }
+      ]
     },
     {
       "version": "0.6.3-dev.688.desktop.ge8e8fab",
