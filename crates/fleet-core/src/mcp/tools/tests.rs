@@ -5856,6 +5856,17 @@ fn one_full_row() -> serde_json::Value {
     row.pr_url = Some("https://github.com/o/r/pull/7".to_string());
     row.pr_evidence = Some(crate::service::outcome::PrEvidence::default());
     row.claude_profile = Some("work".to_string());
+    // With a pin, a view, an origin and a form draft, for the same reason:
+    // each is skipped when absent (review wave 24, w24-1).
+    row.pinned_at = Some(11);
+    row.last_viewed_at = Some(12);
+    row.origin = Some("operator".to_string());
+    row.origin_ref = Some("9".to_string());
+    row.form_draft = Some(crate::store::FormDraft {
+        draft: "{}".to_string(),
+        why: None,
+        updated_at: 13,
+    });
     // Through the constructor, so the derived `needs_attention` is stamped
     // the same way `list_sessions` stamps it — the view is pinned against
     // what the wire actually carries, not against a hand-built row.
@@ -5872,12 +5883,14 @@ fn the_phone_view_is_exactly_the_columns_a_pager_reads() {
         PHONE_SESSION_FIELDS,
         &[
             "account_uuid",
+            "agent",
             "ci_status",
             "claude_profile",
             "claude_status",
             "context_pct",
             "created_at",
             "current_activity",
+            "form_draft",
             "friendly_name",
             "host_alias",
             "id",
@@ -5887,12 +5900,18 @@ fn the_phone_view_is_exactly_the_columns_a_pager_reads() {
             "last_prompt",
             "last_stop_at",
             "last_turn_at",
+            "last_viewed_at",
             "lost_at",
+            "lost_reason",
             "needs_attention",
             "org_id",
+            "origin",
+            "origin_ref",
             "owner_person_id",
+            "parent_session_id",
             "pending_form",
             "pending_input",
+            "pinned_at",
             "pr_evidence",
             "pr_url",
             "project_id",
@@ -5908,6 +5927,7 @@ fn the_phone_view_is_exactly_the_columns_a_pager_reads() {
             "work",
             "work_rev",
             "work_suggested",
+            "worktree_id",
         ]
     );
 }
@@ -7803,6 +7823,38 @@ fn the_phone_view_keeps_the_pr_and_the_profile() {
     );
     assert!(rows[0]["pr_evidence"].is_object(), "{}", rows[0]);
     assert_eq!(rows[0]["claude_profile"], serde_json::json!("work"));
+}
+
+/// Review wave 24 (w24-1): the phone's re-list REPLACES its rows with this
+/// view, so a column it reads but the view drops empties on every reconnect,
+/// `lagged` frame and pull-to-refresh: the Pinned section, Done-unread
+/// (`last_viewed_at`), Control's threads (`origin`, `origin_ref`), a Codex
+/// row's commands (`agent`), "Lost · reason" and the form-draft line.
+#[test]
+fn the_phone_view_keeps_pins_views_origins_and_drafts() {
+    let mut rows = one_full_row();
+    rows[0]["lost_reason"] = serde_json::json!("process_died");
+    rows[0]["parent_session_id"] = serde_json::json!(4);
+    rows[0]["worktree_id"] = serde_json::json!(5);
+    project_rows(&mut rows, PHONE_SESSION_FIELDS);
+    let row = &rows[0];
+    assert_eq!(row["pinned_at"], serde_json::json!(11), "{row}");
+    assert_eq!(row["last_viewed_at"], serde_json::json!(12), "{row}");
+    assert_eq!(row["agent"], serde_json::json!("claude"), "{row}");
+    assert_eq!(row["origin"], serde_json::json!("operator"), "{row}");
+    assert_eq!(row["origin_ref"], serde_json::json!("9"), "{row}");
+    assert_eq!(
+        row["lost_reason"],
+        serde_json::json!("process_died"),
+        "{row}"
+    );
+    assert_eq!(row["parent_session_id"], serde_json::json!(4), "{row}");
+    assert_eq!(row["worktree_id"], serde_json::json!(5), "{row}");
+    assert_eq!(
+        row["form_draft"]["updated_at"],
+        serde_json::json!(13),
+        "{row}"
+    );
 }
 
 /// A projection that is not an array of rows is left alone rather than
