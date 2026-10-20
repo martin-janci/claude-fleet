@@ -18,6 +18,8 @@
     startFleets,
   } from './fleets';
   import Button from './kit/Button.svelte';
+  import FleetProfiles from './FleetProfiles.svelte';
+  import { multiFleet } from './fleets';
 
   let url = $state('');
   let code = $state('');
@@ -151,6 +153,10 @@
   </form>
   {#if error}<p class="err" data-testid="fleets-error">{error}</p>{/if}
 </section>
+{#if $multiFleet}
+  <!-- Phase 3b: who this device is on each fleet. -->
+  <FleetProfiles />
+{/if}
 
 <style>
   .fleet-list {

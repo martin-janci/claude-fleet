@@ -66,10 +66,12 @@ pub mod hosts;
 pub mod hub;
 pub mod library;
 pub mod local_sync;
+pub mod login_conflicts;
 pub mod login_health;
 pub mod loops;
 pub mod messages;
 pub mod move_session;
+pub mod my_profile;
 pub mod names;
 #[cfg(feature = "nl-detect")]
 pub mod nl;

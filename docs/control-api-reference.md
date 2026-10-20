@@ -535,6 +535,12 @@ Who you are on this fleet and every live grant TO you: { person_id, grants: [{ s
 
 Access: the master or a paired device; not a per-host token · readonly tokens too · deadline 60 s.
 
+### `my_profile`
+
+Who you are on this fleet, for a client that shows several fleets: { person_id, name, display_name, email, is_owner, sso: [{ issuer }], env: [{ name, secret, is_ref }], git: { name, email } } — your own person only. Variables are listed by name, never by value (the git name and e-mail excepted, when plain).
+
+Access: the master or a paired device; not a per-host token · readonly tokens too · deadline 60 s.
+
 ### `new_bg_session`
 
 Launch a supervised headless (background) Claude session on a host with an initial prompt, which becomes its default friendly name. Returns the claude_session_id AND the fleet row (`session`; absent until reconcile matches it, on the next tick) for session_transcript { session_id }. agent "codex" needs project_id and takes no read_only or stop limits.
@@ -1558,6 +1564,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::sessions::session_narrow`
 - `commands::sessions::session_access`
 - `commands::sessions::my_grants`
+- `commands::sessions::my_profile`
 - `commands::sessions::session_ask_access`
 - `commands::sessions::access_requests`
 - `commands::sessions::restart_session`

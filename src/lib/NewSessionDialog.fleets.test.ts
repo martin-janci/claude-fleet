@@ -106,6 +106,30 @@ describe('New session on an extra fleet', () => {
   });
 });
 
+// Multi-hub Phase 3b: the dialog says which profile the session runs as.
+describe('New session names its profile', () => {
+  it('follows the fleet picked, read from that fleet', async () => {
+    seedCompany();
+    const { setProfileLabel, _resetProfilesForTest } = await import('./fleet_profiles');
+    _resetProfilesForTest();
+    setProfileLabel('papayapos', 'Work');
+    inv.mockImplementation(async (cmd: string, args: { fleet?: string }) => {
+      if (cmd === 'my_profile')
+        return args?.fleet === 'papayapos'
+          ? { person_id: 4, name: 'martin', email: 'martin@papayapos.example' }
+          : { person_id: 1, name: 'martin', email: 'me@home.example' };
+      return null;
+    });
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await vi.waitFor(() =>
+      expect(screen.getByTestId('new-session-profile').textContent).toBe('Runs as Work · martin · martin@papayapos.example'),
+    );
+    await fireEvent.click(screen.getByTestId(`new-session-fleet-${PRIMARY}`));
+    await vi.waitFor(() => expect(screen.getByTestId('new-session-profile').textContent).toContain('me@home.example'));
+    expect(inv.mock.calls.filter(([cmd]) => cmd === 'my_profile').map(([, a]) => a)).toEqual([{ fleet: 'papayapos' }, {}]);
+  });
+});
+
 describe('New session on an extra fleet: launch choices (review w01-2)', () => {
   const started = { id: 7, tmux_name: 'pos-1', host_alias: 'mac', status: 'running', last_activity_at: 1 };
 

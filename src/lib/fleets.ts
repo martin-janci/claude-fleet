@@ -90,6 +90,8 @@ export const FLEET_SCOPED = [
   'list_groups',
   'list_trackers',
   'catalog_list_catalogs',
+  // Phase 3b: who this device is on each fleet.
+  'my_profile',
 ] as const;
 export type FleetScopedCommand = (typeof FLEET_SCOPED)[number];
 

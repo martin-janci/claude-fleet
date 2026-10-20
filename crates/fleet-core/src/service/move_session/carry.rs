@@ -571,6 +571,12 @@ fail() {{ printf '{FAILED} %s\n' "$1" >&2; exit 5; }}
 run() {{ s=$1; shift; e=$("$@" 2>&1 >/dev/null) || fail "$s: $(printf '%s' "$e" | tr '\n' ' ' | cut -c1-400)"; }}
 run verify git -C "$r" bundle verify "$b"
 run fetch git -C "$r" fetch -q "$b" "+refs/fleet/transfer/$id/*:refs/fleet/transfer/$id/*"
+# `git bundle create` leaves out a ref whose tip the target already has, so
+# when the source HEAD was pushed the bundle carries no `head`. Both snapshot
+# commits are built on HEAD: `wt`'s parent is it.
+if ! git -C "$r" rev-parse --verify -q "refs/fleet/transfer/$id/head" >/dev/null; then
+  run head git -C "$r" update-ref "refs/fleet/transfer/$id/head" "refs/fleet/transfer/$id/wt^{{commit}}^"
+fi
 if ! git -C "$r" show-ref --verify --quiet "refs/heads/$br"; then
   run branch git -C "$r" branch -- "$br" "refs/fleet/transfer/$id/head"
   if git -C "$r" config --get remote.origin.url >/dev/null 2>&1 \
@@ -1586,6 +1592,27 @@ pub(crate) mod tests {
             assert_eq!(
                 git(root, &["rev-parse", "refs/remotes/origin/feat"]).trim(),
                 base
+            );
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn round_trip_into_a_target_that_already_has_the_source_head() {
+        // Everything committed was pushed: the target's origin/feat IS the
+        // source HEAD, so `git bundle create` leaves `$ref/head` out of the
+        // bundle (its tip is excluded) and the fetch must still produce it.
+        round_trip(dirty_source, |src, root, _base| {
+            std::fs::create_dir_all(root).unwrap();
+            git(root, &["init", "-q", "-b", "main"]);
+            git(
+                root,
+                &[
+                    "fetch",
+                    "-q",
+                    src.to_str().unwrap(),
+                    "feat:refs/remotes/origin/feat",
+                ],
             );
         });
     }

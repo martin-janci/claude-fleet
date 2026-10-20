@@ -307,4 +307,8 @@
 //!   same name, and the phone's). The desktop no longer runs a clock of its
 //!   own, so against a hub without the tool (`E_HUB_PROTOCOL`) nothing goes
 //!   on by itself; the desktop's bar says the hub needs updating instead.
+//!   Multi-hub profiles (Phase 3b) are new without a bump: the read-only
+//!   `my_profile` tool (the desktop's command of the same name). A hub
+//!   without it answers `E_HUB_PROTOCOL`, and the desktop pieces the
+//!   profile together from `my_grants` and `env_vars` instead.
 pub const CONTRACT_REVISION: u32 = 18;

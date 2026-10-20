@@ -773,6 +773,22 @@ pub async fn my_grants(
     routed::my_grants(&backend, &store).await
 }
 
+/// Who this device is on a fleet: its own person's name, sign-in issuers,
+/// the NAMES of its person-scope variables and its git identity (multi-hub
+/// Phase 3b: the fleet switcher, Settings › Fleets › Profiles, New
+/// session). No arguments, like `my_grants`: the hub answers for its own
+/// connection; `fleet` picks only which hub is asked.
+#[tauri::command]
+pub async fn my_profile(
+    fleet: Option<String>,
+    backend: State<'_, Arc<FleetBackend>>,
+    fleets: State<'_, Arc<crate::backend::fleets::Fleets>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<fleet_core::service::my_profile::MyProfile, IpcError> {
+    let backend = fleets.select(backend.inner(), fleet.as_deref())?;
+    routed::my_profile(&backend, &store).await
+}
+
 /// `session_ask_access`'s arguments — `SessionAskAccessParams` field for
 /// field.
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -1487,6 +1503,21 @@ pub(crate) mod routed {
                 // `who == None` answers an EMPTY grant set, never every
                 // grant — `sharing::my_grants`' own first line.
                 sessions::my_grants(&s, who)
+            }
+        }
+    }
+
+    pub async fn my_profile(
+        backend: &FleetBackend,
+        store: &Arc<Mutex<Store>>,
+    ) -> Result<fleet_core::service::my_profile::MyProfile, IpcError> {
+        match backend.hub() {
+            // No arguments: the hub answers for the CONNECTION's own person.
+            Some(hub) => hub.route("my_profile", &serde_json::json!({})).await,
+            None => {
+                let who = sessions::hub_personal_owner(store);
+                let s = lock(store)?;
+                fleet_core::service::my_profile::my_profile(&s, who)
             }
         }
     }

@@ -182,6 +182,24 @@ impl FleetTools {
         ok_json(&answer)
     }
 
+    #[tool(description = "Who you are on this fleet, for a client that shows \
+        several fleets: { person_id, name, display_name, email, is_owner, \
+        sso: [{ issuer }], env: [{ name, secret, is_ref }], git: { name, \
+        email } } — your own person only. Variables are listed by name, \
+        never by value (the git name and e-mail excepted, when plain).")]
+    pub(super) async fn my_profile(
+        &self,
+        Extension(caller): Extension<Caller>,
+    ) -> Result<CallToolResult, McpError> {
+        audit("my_profile", "");
+        let s = lock(self.reader()).map_err(to_mcp_err)?;
+        // The caller's own person, as `my_grants` resolves it; `None` answers
+        // the empty profile, never anybody's.
+        let who = super::fleet::owner_for(&caller, &s);
+        let answer = crate::service::my_profile::my_profile(&s, who).map_err(to_mcp_err)?;
+        ok_json(&answer)
+    }
+
     #[tool(description = "Ask the owner of a session shared with you for a \
         wider level (answer or drive). Confers nothing until they grant it; \
         one open ask per session. Errors: E_NOTFOUND, E_FORBIDDEN, \
