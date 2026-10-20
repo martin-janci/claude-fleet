@@ -14,7 +14,7 @@
   side panel.
 -->
 <script lang="ts">
-  import { orbitModel, type OrbitModel } from '../orbit_map';
+  import { clockLabel, orbitModel, type OrbitModel } from '../orbit_map';
   import { countRoll, toastIn } from '../motion_catalog';
   import type { RunRow } from '../runs';
 
@@ -38,10 +38,6 @@
 
   const model: OrbitModel = $derived(orbitModel({ runs, hostAliases, sessions, routines, now }));
   const byId = $derived(new Map(runs.map((r) => [r.id, r])));
-  const clock = (sec: number) => {
-    const d = new Date(sec * 1000);
-    return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
-  };
   function pick(id: string) {
     const r = byId.get(id);
     if (r) onpick?.(r);
@@ -63,7 +59,7 @@
           x2={h.x}
           y2={h.y}
           class="spoke"
-          class:live={h.comets.length > 0 || h.working > 0}
+          class:live={h.busy}
           class:warm={h.heat > 0}
           style:--heat={h.heat}
         />
@@ -81,7 +77,7 @@
       </div>
     {/each}
     <span class="nowmark" aria-hidden="true"></span>
-    <span class="nowlabel xs tnum">now {clock(now)}</span>
+    <span class="nowlabel xs tnum">now {clockLabel(now)}</span>
     <span class="half past xs">past 12h</span>
     <span class="half next xs">next 12h</span>
 
@@ -97,7 +93,7 @@
     {#each model.hosts as h (h.alias)}
       <div
         class="host"
-        class:busy={h.comets.length > 0 || h.working > 0}
+        class:busy={h.busy}
         style:left={`${h.x}%`}
         style:top={`${h.y}%`}
         style:--s={h.scale}
@@ -178,7 +174,7 @@
       {#if model.feed.length === 0}<span class="xs muted">Nothing ran recently.</span>{/if}
       {#each model.feed as e (e.run_id)}
         <div class="feed" in:toastIn>
-          <span class="xs muted tnum">{clock(e.at)}</span>
+          <span class="xs muted tnum">{clockLabel(e.at)}</span>
           <span class={`fdot ${e.tone}`}></span>
           <span class="xs what" title={`${e.who} ${e.what}`}><b>{e.who}</b> <span class="fg2">{e.what}</span></span>
         </div>

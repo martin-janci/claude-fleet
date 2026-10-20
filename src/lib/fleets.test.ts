@@ -111,8 +111,9 @@ describe('fleet rows', () => {
     expect(rows.hosts.size).toBe(0);
     applyFleetEvent(rows, { name: 'project:updated', payload: { id: 7, owner: 'papayapos', repo: 'pos' } });
     expect(rows.projects[0].project.repo).toBe('pos');
-    expect(applyFleetEvent(rows, { name: 'task:updated', payload: { id: 1 } })).toBeNull();
-    expect(applyFleetEvent(rows, { name: 'session:updated', payload: 'garbage' })).toBeNull();
+    applyFleetEvent(rows, { name: 'task:updated', payload: { id: 1 } });
+    applyFleetEvent(rows, { name: 'session:updated', payload: 'garbage' });
+    expect([rows.sessions.size, rows.hosts.size, rows.projects.length]).toEqual([0, 0, 1]);
   });
 
   it('copies nothing for an event it does not keep', () => {

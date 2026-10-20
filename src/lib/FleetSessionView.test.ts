@@ -25,6 +25,9 @@ const company: FleetInfo = {
   fleet_id: 'bbbbbbbb-2222',
 };
 
+/** A conversation whose one turn's prompt is `prompt`. */
+const conv = (prompt: string) => ({ truncated: false, context: null, events: [], turns: [{ prompt, at: null, ended_at: null, items: [] }] });
+
 const session = { id: 3, tmux_name: 'pos-3', host_alias: 'mac', status: 'running', last_activity_at: 1, claude_status: 'idle' } as SessionRow;
 
 beforeEach(() => {
@@ -94,7 +97,7 @@ describe('FleetSessionView', () => {
     inv.mockImplementation((cmd: string, a: { args?: { session_id?: number } }) => {
       if (cmd !== 'session_conversation') return Promise.resolve(null);
       if (a?.args?.session_id === 3) return new Promise((r) => (answerFirst = r));
-      return Promise.resolve({ truncated: false, context: null, events: [], turns: [{ prompt: 'for four', at: null, ended_at: null, items: [] }] });
+      return Promise.resolve(conv('for four'));
     });
     const view = render(FleetSessionView, { props: { fleet: company, session } });
     await tick();
@@ -103,7 +106,7 @@ describe('FleetSessionView', () => {
     await view.rerender({ fleet: company, session: other });
     expect((screen.getByTestId('fleet-session-composer') as HTMLTextAreaElement).value).toBe('');
     await vi.waitFor(() => expect(screen.getByTestId('fleet-session-prompt').textContent).toBe('for four'));
-    answerFirst({ truncated: false, context: null, events: [], turns: [{ prompt: 'for three', at: null, ended_at: null, items: [] }] });
+    answerFirst(conv('for three'));
     await tick();
     await tick();
     expect(screen.getByTestId('fleet-session-prompt').textContent).toBe('for four');
@@ -143,29 +146,5 @@ describe('FleetSessionView', () => {
     await fireEvent.click(screen.getByTestId('fleet-session-tab-terminal'));
     await vi.waitFor(() => expect(screen.getByTestId('fleet-terminal-refused')).toBeTruthy());
     expect(inv.mock.calls.some(([cmd]) => cmd === 'pty_open')).toBe(false);
-  });
-
-  it('a late read of the session shown before does not paint over the current one', async () => {
-    const pending = new Map<number, (v: unknown) => void>();
-    const conv = (text: string) => ({
-      truncated: false,
-      context: null,
-      events: [],
-      turns: [{ prompt: text, at: null, ended_at: null, items: [{ kind: 'text', text: `reply to ${text}` }] }],
-    });
-    inv.mockImplementation((cmd: string, a: { args?: { session_id?: number } }) => {
-      if (cmd !== 'session_conversation') return Promise.resolve(null);
-      const id = a.args!.session_id!;
-      if (id === 4) return Promise.resolve(conv('second'));
-      return new Promise((r) => pending.set(id, r));
-    });
-    const { rerender } = render(FleetSessionView, { props: { fleet: company, session } });
-    await vi.waitFor(() => expect(pending.has(3)).toBe(true));
-    await rerender({ fleet: company, session: { ...session, id: 4, tmux_name: 'pos-4' } });
-    await vi.waitFor(() => expect(screen.getByTestId('fleet-session-prompt').textContent).toBe('second'));
-    pending.get(3)!(conv('first'));
-    await tick();
-    await tick();
-    expect(screen.getByTestId('fleet-session-prompt').textContent).toBe('second');
   });
 });

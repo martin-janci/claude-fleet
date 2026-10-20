@@ -25,8 +25,6 @@
   import {
     closeFleetSession,
     connectionWord,
-    fleetAttachCommand,
-    fleetAttachRefusal,
     fleetCaptureSession,
     fleetSendKey,
     fleetSendPrompt,
@@ -40,12 +38,12 @@
   } from './fleets';
   import { sessionStatusWord } from './attention';
   import type { SessionRow } from './sessions';
-  import { copyText } from './clipboard';
   import { push } from './toasts';
   import Markdown from './MarkdownView.svelte';
   import ToolLine from './ToolLine.svelte';
   import FleetTerminal from './FleetTerminal.svelte';
   import Button from './kit/Button.svelte';
+  import FleetAttachButton from './FleetAttachButton.svelte';
   import { tablistKeys } from './tablist_keys';
 
   let { fleet, session }: { fleet: FleetInfo; session: SessionRow } = $props();
@@ -65,7 +63,6 @@
   const cw = $derived(connectionWord(fleet));
   const name = $derived(session.friendly_name || session.tmux_name);
   const key = $derived(`${fleet.id}:${session.id}`);
-  const attachRefusal = $derived(fleetAttachRefusal(session));
 
   // Every read goes to another hub over the network, so an answer can land
   // after the person moved to another session, or after a newer read: only
@@ -202,11 +199,6 @@
     if (t === 'snapshot') void loadSnapshot();
     if (t === 'conversation') void loadConversation();
   }
-
-  async function copyAttach() {
-    if (attachRefusal) return;
-    if (await copyText(fleetAttachCommand(session))) push({ kind: 'success', message: 'Attach command copied' });
-  }
 </script>
 
 <section class="fleet-session" style="--fleet: {fleet.color}" data-testid="fleet-session-view">
@@ -229,14 +221,7 @@
         >
       {/each}
     </div>
-    <Button
-      size="sm"
-      variant="quiet"
-      testid="fleet-session-copy-attach"
-      disabled={!!attachRefusal}
-      title={attachRefusal ?? undefined}
-      onclick={() => void copyAttach()}>Copy attach</Button
-    >
+    <FleetAttachButton {session} testid="fleet-session-copy-attach" />
     <Button size="sm" variant="quiet" testid="fleet-session-close" onclick={closeFleetSession}>Close</Button>
   </header>
 

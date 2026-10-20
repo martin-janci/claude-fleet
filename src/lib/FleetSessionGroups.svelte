@@ -22,8 +22,6 @@
     fleetRenameSession,
     fleetPinSession,
     fleetNewSession,
-    fleetAttachCommand,
-    fleetAttachRefusal,
     fleetHostChoices,
     defaultFleetHost,
     fleetKey,
@@ -49,9 +47,9 @@
     scopeLabelIn,
   } from './fleet_filters';
   import { fleets, fleetRows, PRIMARY } from './fleets';
-  import { copyText } from './clipboard';
   import { push } from './toasts';
   import Button from './kit/Button.svelte';
+  import FleetAttachButton from './FleetAttachButton.svelte';
 
   const NONE: ReadonlySet<number> = new Set();
 
@@ -142,11 +140,6 @@
     } else {
       push({ kind: 'error', message: `${what} failed`, detail: r.error?.message });
     }
-  }
-
-  async function copyAttach(s: SessionRow) {
-    if (fleetAttachRefusal(s)) return;
-    if (await copyText(fleetAttachCommand(s))) push({ kind: 'success', message: 'Attach command copied' });
   }
 
   function startForm(f: FleetInfo, rows: FleetRows) {
@@ -274,13 +267,7 @@
             <Button size="sm" variant="quiet" testid="fleet-prompt-{f.id}-{s.id}" onclick={() => toggle(f.id, s, 'prompt')}>Prompt…</Button>
             <Button size="sm" variant="quiet" onclick={() => toggle(f.id, s, 'rename')}>Rename…</Button>
             <Button size="sm" variant="quiet" onclick={() => void run('Pinning', fleetPinSession(f.id, s, !s.pinned_at))}>{s.pinned_at ? 'Unpin' : 'Pin'}</Button>
-            <Button
-              size="sm"
-              variant="quiet"
-              disabled={!!fleetAttachRefusal(s)}
-              title={fleetAttachRefusal(s) ?? undefined}
-              onclick={() => void copyAttach(s)}>Copy attach</Button
-            >
+            <FleetAttachButton session={s} />
             <Button size="sm" variant="quiet" testid="fleet-close-{f.id}-{s.id}" onclick={() => toggle(f.id, s, 'close')}>Close…</Button>
           </div>
           {#if open?.key === key && open.kind === 'prompt'}

@@ -17,7 +17,7 @@
   // (`fleetPtyId`), with none of that.
   import { onDestroy, onMount } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
-  import { Screen, rowToRuns, runStyleCss, type Run } from './ansi';
+  import { Screen, rowRunsCache, runStyleCss, type Run } from './ansi';
   import { keyToBytes, detectMac } from './terminal_keys';
   import { createDrainLoop } from './terminal_drain';
   import { fitCells } from './terminal_size';
@@ -59,30 +59,10 @@
   // Each row's runs, re-derived only when `Screen.rowVersion` says the row
   // changed (as TerminalView's `visibleRows` does): a drain that touched two
   // rows re-encodes two rows, not the whole grid.
-  let rowCache: { ver: number; runs: Run[] }[] = [];
-  let cacheScreen: Screen | null = null;
+  const rowsOf = rowRunsCache((_, runs) => runs);
   const view = $derived.by(() => {
     void version;
-    const scr = screen;
-    if (!scr) return [] as Run[][];
-    if (cacheScreen !== scr) {
-      rowCache = [];
-      cacheScreen = scr;
-    }
-    const out: Run[][] = new Array(scr.rows);
-    for (let r = 0; r < scr.rows; r++) {
-      const ver = scr.rowVersion[r];
-      const cached = rowCache[r];
-      if (cached !== undefined && cached.ver === ver) {
-        out[r] = cached.runs;
-        continue;
-      }
-      const runs = rowToRuns(scr.cells[r]);
-      rowCache[r] = { ver, runs };
-      out[r] = runs;
-    }
-    if (rowCache.length > scr.rows) rowCache.length = scr.rows;
-    return out;
+    return screen ? rowsOf(screen) : ([] as Run[][]);
   });
 
   function measure() {

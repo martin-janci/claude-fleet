@@ -67,6 +67,8 @@
     fleets,
     fleetRows,
     fleetChoicesFor,
+    fleetHostChoices,
+    defaultFleetHost,
     defaultFleetFor,
     rememberedFleetFor,
     rememberFleetFor,
@@ -872,14 +874,13 @@
   const fleetChoice = $derived(
     ticket || asBackground ? null : (fleetOptions.find((c) => c.fleet.id === chosenFleet) ?? null),
   );
-  const fleetHosts = $derived(
-    fleetChoice ? [...($fleetRows.get(fleetChoice.fleet.id)?.hosts.values() ?? [])].filter((h) => !h.hidden) : [],
-  );
+  const chosenFleetRows = $derived(fleetChoice ? $fleetRows.get(fleetChoice.fleet.id) : undefined);
+  const fleetHosts = $derived(chosenFleetRows ? fleetHostChoices(chosenFleetRows) : []);
   let fleetHost = $state('');
   $effect(() => {
     const list = fleetHosts;
     untrack(() => {
-      if (!list.some((h) => h.alias === fleetHost)) fleetHost = list.find((h) => h.reachable)?.alias ?? list[0]?.alias ?? '';
+      if (!list.some((h) => h.alias === fleetHost)) fleetHost = chosenFleetRows ? defaultFleetHost(chosenFleetRows) : '';
     });
   });
   let fleetBranch = $state('');
