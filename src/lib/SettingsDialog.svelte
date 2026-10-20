@@ -73,6 +73,9 @@
     ownsTheFleet,
     plainUnavailableReason,
   } from './hub';
+  import { hubConnection } from './hub_connection';
+  import LoadError from './states/LoadError.svelte';
+  import type { IpcError } from './result';
   import {
     attentionIdleMinutes,
     notificationPermission,
@@ -206,7 +209,12 @@
   // settings, read (and, when the hub's operator trusts this device,
   // written) through it. `off` until they load; a refusal keeps the reason.
   let hubPages = $state<'off' | 'loading' | 'ok'>('off');
-  let hubPagesError = $state<string | null>(null);
+  let hubPagesError = $state<IpcError | null>(null);
+  /** Review w17-2: only a refusal means "this hub does not serve its
+   *  settings"; a link blip or a timeout is a failed read, with Retry. */
+  const hubPagesRefused = $derived(
+    hubPagesError === null || ['E_FORBIDDEN', 'E_HUB_PROTOCOL', 'E_INVALID'].includes(hubPagesError.code),
+  );
   /** The generated pages have the fleet's settings to show here. */
   const pagesHere = $derived(ownsFleet || hubPages === 'ok');
   const leaf = $derived(leafById(view, $allPages) ?? leafById(DEFAULT_LEAF, $allPages));
@@ -267,13 +275,26 @@
     const failed = !ds.ok ? ds : !fs.ok ? fs : null;
     if (failed && !failed.ok) {
       hubPages = 'off';
-      hubPagesError = failed.error.message;
+      hubPagesError = failed.error;
       return;
     }
     hubPages = 'ok';
+    hubPagesError = null;
     resetProjectDrafts();
     await subscribeSettings();
   }
+
+  // Review w17-2: a read that failed while the link was down is read again
+  // when it comes back, so Settings need not be closed and reopened.
+  let lastLink = $hubConnection.state;
+  $effect(() => {
+    const now = $hubConnection.state;
+    const was = lastLink;
+    lastLink = now;
+    if (now === 'connected' && was !== 'connected' && hubPages === 'off' && hubPagesError && !hubPagesRefused) {
+      void loadHubPages();
+    }
+  });
 
   onMount(async () => {
     hubUrlDraft = $hubStatus.configured_url ?? '';
@@ -1093,9 +1114,15 @@
           <div class="section-header"><h4>{leaf?.section ?? currentPage.title}</h4></div>
           {#if hubPages === 'loading'}
             <p class="hook-desc">Reading the hub’s settings…</p>
+          {:else if !hubPagesRefused && hubPagesError}
+            <LoadError
+              title="Couldn't read the hub's settings"
+              error={hubPagesError}
+              onretry={() => void loadHubPages()}
+              testid="pages-remote-load-error" />
           {:else}
             <p class="hook-desc">{hubBlock('fleet_settings', $hubStatus)}</p>
-            {#if hubPagesError}<p class="hook-desc" data-testid="pages-remote-error">The hub answered: {hubPagesError}</p>{/if}
+            {#if hubPagesError}<p class="hook-desc" data-testid="pages-remote-error">The hub answered: {hubPagesError.message}</p>{/if}
           {/if}
         </section>
       {:else}

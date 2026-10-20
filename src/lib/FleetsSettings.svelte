@@ -18,6 +18,8 @@
     startFleets,
   } from './fleets';
   import Button from './kit/Button.svelte';
+  import LoadError from './states/LoadError.svelte';
+  import type { IpcError } from './result';
 
   let url = $state('');
   let code = $state('');
@@ -33,9 +35,18 @@
   let error = $state<string | null>(null);
   let removeAsk = $state<string | null>(null);
 
+  // Review w17-13: a failed list read says so with Retry; otherwise the
+  // section is an empty list and the add form, with not even the primary.
+  let loadError = $state<IpcError | null>(null);
+  let retrying = $state(false);
+  async function reloadFleets() {
+    const r = await loadFleets();
+    loadError = r.ok ? null : r.error;
+  }
+
   onMount(() => {
     void startFleets();
-    void loadFleets();
+    void reloadFleets();
   });
 
   async function add() {
@@ -78,6 +89,18 @@
     and each hub has its own pairing, its own token and its own trust: a
     device trusted on one hub is not trusted on another.
   </p>
+  {#if loadError}
+    <LoadError
+      title="Couldn't load the fleets"
+      error={loadError}
+      {retrying}
+      onretry={async () => {
+        retrying = true;
+        await reloadFleets();
+        retrying = false;
+      }}
+      testid="fleets-load-error" />
+  {/if}
   <ul class="fleet-list" data-testid="fleets-list">
     {#each $fleets as f (f.id)}
       {@const cw = connectionWord(f)}

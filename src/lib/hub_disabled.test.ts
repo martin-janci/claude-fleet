@@ -204,6 +204,28 @@ describe('the asset catalog on a hub client', () => {
     expect((await screen.findByTestId('assets-grant-error')).textContent).toContain('update the hub');
   });
 
+  // Review w17-3: a probe that failed (not a refusal) offers Retry, and a
+  // granted client then gets the full panel without restarting the app.
+  it('a failed probe can be retried, and a grant then opens the full panel', async () => {
+    hubStatus.set(remote);
+    let fail = true;
+    inv().mockImplementation(async (cmd: string) => {
+      if (cmd === 'catalog_config') {
+        if (fail) throw { code: 'E_HUB_TIMEOUT', message: 'the hub did not answer in time' };
+        return null;
+      }
+      return null;
+    });
+    render(AssetsPanel, { props: { visible: true } });
+    await screen.findByTestId('assets-grant-error');
+    fail = false;
+    await fireEvent.click(screen.getByTestId('assets-grant-error-retry'));
+    await waitFor(() => expect(screen.queryByTestId('assets-grant-error')).toBeNull());
+    expect(inv().mock.calls.filter((c) => c[0] === 'catalog_config')).toHaveLength(2);
+    // Granted with no catalog configured: the setup form, not the overview.
+    expect(await screen.findByTestId('assets-setup')).toBeTruthy();
+  });
+
   // The list and the scan route for every paired client (the hub's
   // list_assets / scan_assets), so the refused panel is a read-only overview
   // of the hub's catalog rather than a dead end.

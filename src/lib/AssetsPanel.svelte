@@ -17,6 +17,7 @@
   import { push, pushError } from './toasts';
   import { fleetSettings, loadFleetSettings, setFleetSetting, settingBool, SETTING_KEYS } from './fleet_settings';
   import type { IpcError } from './result';
+  import LoadError from './states/LoadError.svelte';
   import ImportDialog from './ImportDialog.svelte';
   import SecretsPanel from './SecretsPanel.svelte';
   import NewAssetDialog from './NewAssetDialog.svelte';
@@ -96,7 +97,12 @@
     void loadChangesets();
     void loadLayers();
     const [a, i] = await Promise.all([loadAssets(), loadInventory()]);
-    if (!a.ok) error = a.error.message;
+    // Review w17-9: with nothing listed yet, a failed listing is the load's
+    // own failure (the Retry pane), never a spinner that never ends.
+    if (!a.ok && !get(catalog)) {
+      catalogLoad = 'failed';
+      catalogLoadError = a.error.message;
+    } else if (!a.ok) error = a.error.message;
     if (!i.ok) error = i.error.message;
   }
 
@@ -134,14 +140,17 @@
   let hubAdmin = $state<'idle' | 'probing' | 'granted' | 'denied'>('idle');
   // Why the probe did not grant: E_FORBIDDEN is the ordinary answer (not
   // granted); anything else (an old hub, the link down) is shown as is.
-  let hubAdminError = $state<string | null>(null);
+  // Review w17-3: kept as the error, so the line offers Retry (a re-probe)
+  // and Refresh re-probes too — a blip never leaves a granted client on the
+  // read-only overview for the rest of the session.
+  let hubAdminError = $state<IpcError | null>(null);
   async function probeHubAdmin() {
     hubAdmin = 'probing';
     hubAdminError = null;
     const c = await loadCatalogConfig();
     if (!c.ok) {
       hubAdmin = 'denied';
-      if (c.error.code !== 'E_FORBIDDEN') hubAdminError = c.error.message;
+      if (c.error.code !== 'E_FORBIDDEN') hubAdminError = c.error;
       return;
     }
     hubAdmin = 'granted';
@@ -458,7 +467,13 @@
           {/if}
         </div>
       {/snippet}
-      {#if hubAdminError}<p class="error" data-testid="assets-grant-error">{hubAdminError}</p>{/if}
+      {#if hubAdminError}
+        <LoadError
+          title="Couldn't ask the hub whether this device may manage the catalog — showing the read-only overview"
+          error={hubAdminError}
+          onretry={() => void probeHubAdmin()}
+          testid="assets-grant-error" />
+      {/if}
       <AssetsWorkspace
         readOnly
         readOnlyClient={$hubStatus.client_name}
@@ -475,7 +490,7 @@
         onscan={scanOnHub}
         onsync={() => {}}
         onimport={() => {}}
-        onrefresh={() => void loadOverview()}
+        onrefresh={() => void (hubAdminError ? probeHubAdmin() : loadOverview())}
       />
     {:else}
       <div class="setup" data-testid="assets-remote">

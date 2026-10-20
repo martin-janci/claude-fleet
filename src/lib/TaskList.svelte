@@ -17,6 +17,7 @@
     selectedTaskId,
     workTree,
     workViewFilters,
+    activeWorkViewId,
     personArchived,
     withoutPersonArchived,
     type WorkTask,
@@ -41,6 +42,8 @@
     type TaskNode,
   } from './task_list';
   import type { IpcError } from './result';
+  import Skeleton from './states/Skeleton.svelte';
+  import { facetSentence, workFacets } from './filter_facets';
 
   let {
     /** The refetch debounce, ms; injectable for tests. */
@@ -68,6 +71,10 @@
   const taskById = (id: string) => byId.get(id);
   let loaded = $state(false);
   let error = $state<IpcError | null>(null);
+  /** Review w17-7: a re-read of the list shown (same filters) failed; the
+   *  tasks stay, with a one-line note, as WorkTree does. */
+  let refreshError = $state<IpcError | null>(null);
+  let shownKey: string | null = null;
   let doneOpen = $state(false);
   let addTitle = $state('');
   /** The New task dialog is open (▾; G2.1), seeded with `addTitle`. */
@@ -91,14 +98,19 @@
   let seq = 0;
   async function load() {
     const mine = ++seq;
-    const r = await workTree({ filters: { ...get(workViewFilters), archived: true }, limit: 200, per_task: 3 });
+    const filters = { ...get(workViewFilters), archived: true };
+    const key = JSON.stringify(filters);
+    const r = await workTree({ filters, limit: 200, per_task: 3 });
     if (mine !== seq) return;
     loaded = true;
     if (!r.ok) {
-      error = r.error;
+      if (shownKey === key && !error) refreshError = r.error;
+      else error = r.error;
       return;
     }
     error = null;
+    refreshError = null;
+    shownKey = key;
     read = Array.isArray(r.value?.tasks) ? r.value.tasks : [];
     const orgs = Array.isArray(r.value?.orgs) ? r.value.orgs : [];
     onpage?.({
@@ -215,10 +227,34 @@
       <button class="btn btn--quiet" type="button" onclick={() => void load()}>Retry</button>
     </p>
   {:else if !loaded}
-    <p class="muted" data-testid="task-list-loading">Loading tasks…</p>
+    <div data-testid="task-list-loading"><Skeleton rows={4} label="Loading tasks" /></div>
   {:else if tasks.length === 0}
-    <p class="muted" data-testid="task-list-empty">No tasks match. Type one above and press Enter.</p>
+    {@const facets = workFacets($workViewFilters)}
+    {#if facets.length > 0}
+      <!-- Review w17-8: a filter that hides every task says which, with the
+           way out, as the tree and the board do. -->
+      <p class="muted" data-testid="task-list-empty">
+        No tasks match <strong>{facetSentence(facets)}</strong>.
+        <button
+          class="btn btn--quiet"
+          type="button"
+          data-testid="task-list-clear"
+          onclick={() => {
+            activeWorkViewId.set(null);
+            workViewFilters.set({});
+          }}>Clear filters</button
+        >
+      </p>
+    {:else}
+      <p class="muted" data-testid="task-list-empty">No tasks yet. Type one above and press Enter.</p>
+    {/if}
   {:else}
+    {#if refreshError}
+      <p class="refresh-error" role="status" data-testid="task-list-refresh-error">
+        Couldn't refresh ({readErrorText(refreshError)}) — showing what was loaded.
+        <button class="btn btn--quiet" type="button" data-testid="task-list-refresh-retry" onclick={() => void load()}>Retry</button>
+      </p>
+    {/if}
     <!-- An empty section is a word in one line, not a heading with nothing
          under it (redesign 1.4). -->
     {#if sections.todo.length > 0}{@render section('todo', 'To do', sections.todo, true)}{/if}
@@ -453,6 +489,11 @@
     color: var(--fg-muted);
     padding: 6px 12px;
     margin: 0;
+  }
+  .refresh-error {
+    margin: 0;
+    font-size: var(--text-2xs);
+    color: var(--usage-warn);
   }
   .err {
     color: var(--usage-crit);

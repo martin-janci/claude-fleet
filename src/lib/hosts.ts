@@ -1,5 +1,6 @@
 import { writable, derived } from 'svelte/store';
 import { createRowStore } from './row_store';
+import { createListLoad } from './list_load';
 import { invokeCmd, type Result } from './result';
 import { readPref, writePref } from './prefs';
 
@@ -212,9 +213,13 @@ export const effectiveHostFilter = derived([hostFilter, hosts, extraHostFilterId
   effectiveHostOf(f, list, extra),
 );
 
+/** Review w17-1: whether the hosts list has loaded, so an empty list is not
+ *  read as a first run while it loads or after its read failed. */
+export const hostsLoad = createListLoad();
+
 export async function loadHosts(): Promise<Result<HostRow[]>> {
   const token = rows.beginList();
-  const r = await invokeCmd<HostRow[]>('list_hosts');
+  const r = await hostsLoad.track(invokeCmd<HostRow[]>('list_hosts'));
   // A probe or a remove that landed while the list was in flight wins.
   if (r.ok) rows.applyList(r.value, token);
   return r;

@@ -9,6 +9,7 @@ import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import SettingsDialog from './SettingsDialog.svelte';
 import { hosts } from './hosts';
 import { hubStatus, STANDALONE, type HubStatus } from './hub';
+import { hubConnection } from './hub_connection';
 import { allDescriptors, bundle } from './pages/testing';
 import { settingProposals, settingsWritable } from './pages/review';
 
@@ -559,6 +560,23 @@ describe('the hub’s settings on a paired desktop (P6)', () => {
     await waitFor(() => expect(note.textContent).toContain('did not serve its settings'));
     expect(screen.getByTestId('pages-remote-error').textContent).toContain('not a client-callable tool');
     expect(screen.queryByTestId('setting-row-playbooks.press_enter')).toBeNull();
+  });
+
+  // Review w17-2: a link blip is a failed read with Retry, not "this hub is
+  // too old", and the read runs again when the link comes back.
+  it('a timed-out read says so with Retry, and re-reads when the link returns', async () => {
+    hubConnection.set({ state: 'reconnecting', attempt: 1, retry_in_secs: 2, reason: 'timeout' });
+    const inv = route({ describe_fleet_settings: ipcError('E_HUB_UNREACHABLE', 'hub link is down') });
+    render(SettingsDialog, { props: { onClose: () => {} } });
+    await fireEvent.click(await screen.findByTestId('settings-nav-automation'));
+    const err = await screen.findByTestId('pages-remote-load-error');
+    expect(err.textContent).toContain("Couldn't read the hub's settings");
+    expect(screen.getByTestId('pages-remote').textContent).not.toContain('did not serve its settings');
+    const reads = () => inv.mock.calls.filter(([c]) => c === 'describe_fleet_settings').length;
+    const before = reads();
+    hubConnection.set({ state: 'connected' });
+    await waitFor(() => expect(reads()).toBeGreaterThan(before));
+    hubConnection.set({ state: 'standalone' });
   });
 });
 
