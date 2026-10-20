@@ -605,3 +605,28 @@ describe('Settings → Environment on a paired desktop', () => {
     expect(Array.from(scope.options).map((o) => o.value)).toEqual(['person']);
   });
 });
+
+// Company per fleet: Settings → Organisations on a paired desktop is gated by
+// the hub's own org_admin rule (`company_access.ts`), not shown read-only
+// whatever the device may do.
+describe('Settings → Company on a paired desktop', () => {
+  it('a trusted fleet admin’s device edits the hub’s orgs; an untrusted one is told the trust command', async () => {
+    hubStatus.set(remote);
+    settingsWritable.set(false);
+    const org = { id: 1, name: 'Acme', created_at: 1, rules: [], hosts: [], trackers: [] };
+    const me = { name: 'laptop', mode: 'full', trusted: true, created_at: 1, catalogs: [], this_device: true };
+    route({ list_orgs: [org], setting_proposals: { can_write: true, proposals: [] }, list_devices: [me] });
+    const { unmount } = render(SettingsDialog, { props: { onClose: () => {} } });
+    await fireEvent.click(await screen.findByTestId('settings-nav-orgs'));
+    expect(await screen.findByTestId('edit-name')).toBeInTheDocument();
+    expect(screen.queryByTestId('resource-readonly')).toBeNull();
+    unmount();
+
+    route({ list_orgs: [org], setting_proposals: { can_write: false, proposals: [] }, list_devices: [{ ...me, trusted: false }] });
+    render(SettingsDialog, { props: { onClose: () => {} } });
+    await fireEvent.click(await screen.findByTestId('settings-nav-orgs'));
+    const reason = await screen.findByTestId('resource-readonly');
+    expect(reason.textContent).toContain('fleet-hub client trust laptop');
+    expect(screen.queryByTestId('edit-name')).toBeNull();
+  });
+});
