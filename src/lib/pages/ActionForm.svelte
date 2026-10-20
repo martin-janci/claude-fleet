@@ -4,6 +4,7 @@
   // narrowed to what the record does not hold.
   import Loader from '../Loader.svelte';
   import { formReady, formValues, paramValue, previewAction, type ActionSpec } from './resources';
+  import { useResourceFleet } from './resource_fleet';
 
   let {
     action,
@@ -27,6 +28,8 @@
     testid?: string;
   } = $props();
 
+  /** The fleet the enclosing resource page acts on: a preview goes there too. */
+  const resourceFleet = useResourceFleet();
   let values = $state<Record<string, string>>({});
   const ready = $derived(formReady(action, values));
 
@@ -42,7 +45,7 @@
       return;
     }
     const t = setTimeout(async () => {
-      const line = await previewAction(action, argsFor!(want));
+      const line = await previewAction(action, argsFor!(want), resourceFleet().fleet);
       if (seq === previewSeq) preview = line;
     }, previewDelayMs);
     return () => clearTimeout(t);

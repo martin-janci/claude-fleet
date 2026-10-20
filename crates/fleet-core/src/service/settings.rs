@@ -411,6 +411,8 @@ pub const CONTROL_SWEEP: &str = "control.sweep";
 /// started itself (a wedged REPL, or under another login after a limit)
 /// without a card, and at "Autopilot" also retires one with
 /// `safe_kill_session` (`mcp::guard::OPERATOR_CARE_TOOLS`). Off: both ask.
+/// On by default (the owner's choice, 2026-10-20): it acts only at the two
+/// positions a person turns on.
 pub const CONTROL_SESSION_CARE: &str = "control.session_care";
 /// Control review F10: hours without a turn after which Control stops
 /// following a session it started or briefed (`service::control_follow`).
@@ -1070,7 +1072,7 @@ pub const SPECS: &[Spec] = &[
     ),
     Spec::new(
         CONTROL_SESSION_CARE,
-        "false",
+        "true",
         Kind::Bool,
         "Control looks after its sessions",
         "Within your brief, Control restarts a stuck session it started itself without asking, also under another login after a limit. At Autopilot it also retires one whose work is done, after committing and pushing it. Off, or at Ask first: both wait for you.",

@@ -55,8 +55,70 @@ export const FLEET_SCOPED = [
   'env_var_unset',
   'my_grants',
   'setting_proposals',
+  // Settings › Company per fleet: the org_admin / realm_admin pages
+  // (Organisations, Devices, People, Groups) on each hub, judged by that
+  // hub, and the lists their option selects read.
+  'list_orgs',
+  'add_org',
+  'update_org',
+  'remove_org',
+  'add_org_rule',
+  'remove_org_rule',
+  'org_rule_preview',
+  'set_org_setting',
+  'add_org_project',
+  'remove_org_project',
+  'assign_host_org',
+  'assign_tracker_org',
+  'set_org_member',
+  'remove_org_member',
+  'org_member_grants',
+  'revoke_org_member_grants',
+  'revoke_org_share',
+  'narrow_org_share',
+  'list_devices',
+  'pair_device',
+  'update_device',
+  'revoke_device',
+  'bind_device_org',
+  'grant_device_catalog',
+  'list_people',
+  'add_person',
+  'rename_person',
+  'disable_person',
+  'list_groups',
+  'list_trackers',
+  'catalog_list_catalogs',
 ] as const;
 export type FleetScopedCommand = (typeof FLEET_SCOPED)[number];
+
+/**
+ * The envelope that sends `command` to `fleet`: nothing extra for the
+ * primary, `{ fleet }` for an extra fleet — and a refusal when the command
+ * is not fleet-scoped, since the backend would ignore an argument it does
+ * not take and act on the PRIMARY fleet instead (multi-hub design D6).
+ */
+export function fleetArgs(command: string, fleet: string | null | undefined): Result<Record<string, unknown>> {
+  if (!fleet || fleet === PRIMARY) return { ok: true, value: {} };
+  if (!(FLEET_SCOPED as readonly string[]).includes(command))
+    return {
+      ok: false,
+      error: { code: 'E_INVALID', message: `${command} cannot be sent to another fleet from this window` },
+    };
+  return { ok: true, value: { fleet } };
+}
+
+/**
+ * `invokeCmd` on `fleet` (the primary when null): `payload` plus the
+ * envelope `fleetArgs` gives, or its refusal. A call with nothing to send
+ * passes no payload at all, as the primary's callers always have.
+ */
+export function invokeOnFleet<T>(command: string, payload: Record<string, unknown>, fleet?: string | null): Promise<Result<T>> {
+  const f = fleetArgs(command, fleet);
+  if (!f.ok) return Promise.resolve(f);
+  const all = { ...payload, ...f.value };
+  return Object.keys(all).length ? invokeCmd<T>(command, all) : invokeCmd<T>(command);
+}
 
 /** One fleet, as `fleets_list` answers it. Carries no token. */
 export interface FleetInfo {
@@ -114,6 +176,33 @@ export const extraFleets = derived(fleetsStore, ($f) => $f.filter((f) => !f.prim
 /** Whether this window shows more than one fleet — the switcher, badges and
  *  extra groups appear only then. */
 export const multiFleet = derived(extraFleets, ($x) => $x.length > 0);
+
+/** The fleets a per-fleet Settings page (Environment, Company) offers in its
+ *  Fleet picker: every one but a duplicate, whose calls are refused. */
+export function fleetChoices(list: readonly FleetInfo[]): FleetInfo[] {
+  return list.filter((f) => !f.duplicate_of);
+}
+
+/**
+ * How a per-fleet Settings page names the fleet `id` picked in its Fleet
+ * picker: `where` for its sentences ("https://hub" or "Company
+ * (https://hub)"), the name this device is paired under there (for the
+ * operator's `fleet-hub client trust <name>`), and the extra fleet's row
+ * (null for the primary, or a fleet that is gone).
+ */
+export function fleetPlace(
+  id: string,
+  list: readonly FleetInfo[],
+  primary: { url: string | null; client_name: string | null },
+): { where: string; clientName: string | null; current: FleetInfo | null } {
+  if (id === PRIMARY) return { where: primary.url ?? 'the hub', clientName: primary.client_name, current: null };
+  const current = fleetChoices(list).find((f) => f.id === id) ?? null;
+  return {
+    where: current ? `${current.label} (${current.url ?? 'its hub'})` : 'that hub',
+    clientName: current?.client_name ?? null,
+    current,
+  };
+}
 
 /** A key unique across fleets, for any flat collection that has to hold rows
  *  from more than one hub (`company\u0000 12`). */

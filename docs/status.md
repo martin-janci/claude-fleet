@@ -63,8 +63,8 @@ from `autonomy.ts`; Custom grants what Ask first does), and since the
   with no host is inside only a grant naming no hosts), never while Pause
   all is on (review w04-5).
   Kills, rewinds, restores, add_project and every other `confirm: true`
-  tool always ask. **Session care** (`control.session_care`, OFF by
-  default, 2026-10-20): with it on, `restart_session` of an open handoff
+  tool always ask. **Session care** (`control.session_care`, ON by
+  default since 2026-10-20, the owner's choice): with it on, `restart_session` of an open handoff
   goes without a card at Within your brief and Autopilot, and
   `safe_kill_session` of one at Autopilot (`guard::OPERATOR_CARE_TOOLS`);
   the digest says `Session care: on` under its autonomy line. The rule is
@@ -1393,8 +1393,14 @@ primary), the Hosts page, Inbox (and the rail count), PRs and notifications
 follow the fleet filter, and the hub's `ready` frame names its `fleet_id`
 (minted at `serve` start) so one hub added twice is refused. The fleet id
 needs a hub with this change; an older one just never reads as a duplicate.
-Settings › Environment is per fleet too (a Fleet picker); the other Settings
-pages still act on the primary only.
+Settings › Environment and Settings › Company (Organisations, Devices,
+People, Groups) are per fleet too, each with the same Fleet picker
+(`FleetPicker.svelte`); Company's reads and writes route to the picked hub
+and what the device may change there is that hub's `org_admin` rule
+(`company_access.ts`: a fleet admin's unbound device or an org admin's,
+trusted `full` to change anything) — on a paired primary too, which before
+showed the Company pages read-only. The other Settings pages still act on
+the primary only.
 Phase 3 (one id space, the full panes per fleet) is not started.
 
 Application updates: design
