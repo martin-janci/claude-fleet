@@ -1232,7 +1232,9 @@ all a poll sees there; the gallery (`fleet_agents/gallery.rs`: the
 `catalog-seed/fleet-agents/` definitions embedded, listed under Automation ›
 Agents › Gallery and added to the catalog with *Add to catalog*, `agents {
 install }`), with `issue-triage`, `pr-questions` and `daily-digest` added to
-it; not `pr_review` or restating the built-in agents.
+it; `pr_review` (a review of the PR's head with line comments placed on
+the diff, sent only while that head is current, never an unattended
+APPROVE); not restating the built-in agents.
 
 The self debug agent (thread "Self debug agent", 2026-10-17), the hub and
 desktop parts: a fleet agent definition that sets `run.diagnostics` gets
