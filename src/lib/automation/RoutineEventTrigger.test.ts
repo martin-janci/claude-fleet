@@ -11,6 +11,7 @@ import RoutinesPanel from './RoutinesPanel.svelte';
 import { hosts } from '../hosts';
 import { projects } from '../projects';
 import { EVENT_CHOICES, eventFilterInput, eventFilterOf, eventFilterWords, eventLabel, failing, triggerWords, type RoutineRow } from '../routines';
+import { stashDraft } from './routine_draft';
 
 const inv = mockedInvoke as ReturnType<typeof vi.fn>;
 
@@ -56,6 +57,8 @@ function route(list: RoutineRow[]) {
 }
 
 beforeEach(() => {
+  // A changed draft an earlier test left open must not come back (review w05-2).
+  stashDraft(null);
   hosts.set([{ alias: 'mac', hidden: false } as never]);
   projects.set([{ project: { id: 1, owner: 'martin-janci', repo: 'claude-fleet', system: false }, worktrees: [] } as never]);
   failing.set([]);
@@ -155,5 +158,17 @@ describe('fleet events and the host filter', () => {
     await fireEvent.click(screen.getByTestId('routine-save'));
     await waitFor(() => expect(argsOf('save')).toBeDefined());
     expect(argsOf('save').routine).toMatchObject({ trigger: 'event', event: 'host_offline', event_host: 'mac' });
+  });
+});
+
+describe('a rate no preset names (review w05-10)', () => {
+  it('opens on the saved rate in words, not a blank select', async () => {
+    route([{ ...onReview, event: 'stuck', event_repo: undefined, event_author: undefined, event_rate_secs: 1800 }]);
+    render(RoutinesPanel);
+    await screen.findByTestId('routine-title');
+    await fireEvent.click(screen.getByTestId('routine-edit'));
+    const rate = screen.getByTestId('routine-event-rate') as HTMLSelectElement;
+    expect(rate.value).toBe('1800');
+    expect(rate.selectedOptions[0].textContent).toBe('once per session per 30 minutes');
   });
 });
