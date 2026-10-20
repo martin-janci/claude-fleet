@@ -13,6 +13,15 @@ use rusqlite::{OptionalExtension, Result};
 /// row is then marked failed and stays visible with its error.
 pub const DEFERRED_MAX_ATTEMPTS: i64 = 3;
 
+/// How long a typed prompt holds its session's idle moment when no turn
+/// followed. A prompt whose turn ended within the second it was typed (a
+/// fast credit or limit error), or that started no turn at all (a local
+/// `/clear`, a paste the REPL swallowed), left the session idle with the
+/// same moment: past this, the moment counts as spent and the next
+/// waiting prompt may go, rather than the queue stalling until some other
+/// turn ends.
+pub const DEFERRED_MOMENT_HOLD_SECS: i64 = 300;
+
 /// One deferred prompt, as `queued_prompts` lists it.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DeferredPromptRow {
@@ -188,9 +197,14 @@ impl Store {
                 "UPDATE deferred_prompts SET delivered_at = ?2 WHERE id = ?1 AND {PENDING} \
                  AND NOT EXISTS (SELECT 1 FROM deferred_prompts d \
                    WHERE d.session_id = deferred_prompts.session_id \
-                     AND d.delivered_at >= ?3)"
+                     AND d.delivered_at >= ?3 AND d.delivered_at > ?4)"
             ))?
-            .execute(rusqlite::params![id, now, idle_since])?;
+            .execute(rusqlite::params![
+                id,
+                now,
+                idle_since,
+                now - DEFERRED_MOMENT_HOLD_SECS
+            ])?;
         Ok(n == 1)
     }
 
@@ -369,6 +383,13 @@ mod tests {
         );
         assert!(s.claim_deferred_prompt_in(b, 30, Some(25)).unwrap());
         let r = s.get_deferred_prompt(a).unwrap().unwrap();
+        // A turn that ended in the very second its prompt was typed leaves
+        // the same moment: held a while, then spent.
+        let c = s.insert_deferred_prompt(sid, "c", 31).unwrap();
+        assert!(!s.claim_deferred_prompt_in(c, 31, Some(30)).unwrap());
+        assert!(s
+            .claim_deferred_prompt_in(c, 30 + DEFERRED_MOMENT_HOLD_SECS + 1, Some(30))
+            .unwrap());
         assert_eq!((r.delivered_at, r.failed_at), (Some(20), Some(21)));
         let listed: Vec<i64> = s
             .list_deferred_prompts(Some(sid))

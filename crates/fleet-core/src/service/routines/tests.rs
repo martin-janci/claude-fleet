@@ -86,10 +86,15 @@ impl tick::Spawn for FakeSpawn {
             .push((host_alias.to_string(), tmux_name.to_string()));
         Ok(())
     }
-    async fn deliver(&self, row: &SessionRow, prompt: &str, _handover: i64) -> Result<(), String> {
+    async fn deliver(&self, row: &SessionRow, prompt: &str, handover: i64) -> Result<(), String> {
         if let Some(why) = self.untypable.lock().unwrap().clone() {
             return Err(why);
         }
+        // As `seed_routine` does once the prompt is in.
+        lock(&self.store)
+            .unwrap()
+            .mark_handovers_delivered(&[handover], None)
+            .unwrap();
         self.typed
             .lock()
             .unwrap()
@@ -335,6 +340,56 @@ async fn a_run_whose_prompt_was_not_typed_fails() {
         (named.label.as_str(), named.action.as_str()),
         ("Open its session", "session")
     );
+    // Its queued prompt is retired: a person typing into the session later
+    // must not hand Claude the routine's work a second time.
+    let left = lock(&f.store)
+        .unwrap()
+        .undelivered_handovers(run.session_id.unwrap())
+        .unwrap();
+    assert!(left.is_empty(), "{left:?}");
+}
+
+/// The hub restarted while a run's prompt was being typed: nothing will
+/// ever type it, so past `PROMPT_DELIVERY_SECS` the run fails as
+/// undelivered (and its queued prompt is retired) instead of holding the
+/// routine for six hours as "still going".
+#[tokio::test]
+async fn a_run_whose_typing_was_lost_fails_as_undelivered() {
+    let f = fx();
+    let r = new_routine(&f, input(&f));
+    // Fired without the background typing ever running (a restart).
+    let run = tick::fire(&f.deps, &r, "run_now", None, None, OCT8)
+        .await
+        .unwrap();
+    let sid = run.session_id.unwrap();
+    // Undo the fake's typing: the restart lost it.
+    lock(&f.store)
+        .unwrap()
+        .conn_ref()
+        .execute(
+            "UPDATE work_journal SET delivered_at = NULL WHERE kind = 'handover'",
+            [],
+        )
+        .unwrap();
+    tick::settle(&lock(&f.store).unwrap(), OCT8 + 60).unwrap();
+    assert_eq!(
+        runs_of(&f, r.id)[0].state,
+        "running",
+        "still inside the budget"
+    );
+    tick::settle(
+        &lock(&f.store).unwrap(),
+        OCT8 + tick::PROMPT_DELIVERY_SECS + 1,
+    )
+    .unwrap();
+    let run = runs_of(&f, r.id).pop().unwrap();
+    assert_eq!(run.state, "failed");
+    assert_eq!(run.error_code.as_deref(), Some(fix::E_PROMPT_NOT_DELIVERED));
+    assert!(lock(&f.store)
+        .unwrap()
+        .undelivered_handovers(sid)
+        .unwrap()
+        .is_empty());
 }
 
 /// A run that closed before its typing gave up keeps how it closed.
@@ -347,7 +402,7 @@ async fn a_late_typing_failure_leaves_a_closed_run_alone() {
         .unwrap();
     event(&f, run.session_id.unwrap(), "turn_done");
     tick::settle(&lock(&f.store).unwrap(), OCT8 + 60).unwrap();
-    tick::undelivered(&f.store, run.id, "too late", OCT8 + 120);
+    tick::undelivered(&f.store, run.id, "too late", OCT8 + 120, None);
     let run = runs_of(&f, r.id).pop().unwrap();
     assert_eq!(run.state, "done");
     assert_eq!(run.error_code, None);
@@ -523,6 +578,7 @@ async fn a_run_settles_on_its_sessions_turn() {
     let removed = run_now(&f.deps, &ana, r.id, OCT8).await.unwrap();
     let quiet = run_now(&f.deps, &ana, r.id, OCT8).await.unwrap();
     let going = run_now(&f.deps, &ana, r.id, OCT8).await.unwrap();
+    typing_done().await;
     spend(&f, done.session_id.unwrap(), 420_000);
     event(&f, done.session_id.unwrap(), "turn_done");
     event(&f, errored.session_id.unwrap(), "stop_failure");
@@ -1341,10 +1397,18 @@ fn pr_routine(f: &Fx, event: &str, change: impl FnOnce(&mut RoutineInput)) -> Ro
     new_routine(f, i)
 }
 
+/// The prompt a run queued for its session, typed or not.
 fn queued_prompt(f: &Fx, sid: i64) -> String {
     let s = lock(&f.store).unwrap();
-    let rows = s.undelivered_handovers(sid).unwrap();
-    rows[0].body.clone().unwrap_or_default()
+    s.conn_ref()
+        .query_row(
+            "SELECT body FROM work_journal WHERE kind = 'handover' AND participant_id IN \
+               (SELECT id FROM participants WHERE session_id = ?1) ORDER BY id LIMIT 1",
+            [sid],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .unwrap()
+        .unwrap_or_default()
 }
 
 #[test]
