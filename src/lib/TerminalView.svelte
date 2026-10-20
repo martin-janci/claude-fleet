@@ -671,7 +671,15 @@
   function pointOverGrid(position: { x: number; y: number }): boolean {
     if (!container) return false;
     const { x, y } = dropPoint(position);
-    return pointInRect(x, y, container.getBoundingClientRect());
+    if (!pointInRect(x, y, container.getBoundingClientRect())) return false;
+    // The grid stays mounted and laid out under every `.view-slot.overlay`
+    // (Conversation, Control, Files, fleet pages), at these same coordinates.
+    // Without asking what is actually on top there, a file dropped on the
+    // Conversation composer was also scp'd here and its path typed, unseen,
+    // into Claude's prompt (review w13-1). `elementFromPoint` answers for
+    // every overlay without this view having to know about any of them.
+    const top = typeof document.elementFromPoint === 'function' ? document.elementFromPoint(x, y) : null;
+    return !top || container.contains(top);
   }
 
   async function handleDrop(paths: string[]) {

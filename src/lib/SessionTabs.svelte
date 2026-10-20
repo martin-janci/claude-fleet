@@ -177,7 +177,9 @@
         class="btn btn--quiet head-btn inspector-toggle"
         aria-pressed={inspectorOpen}
         disabled={!inspectorAvailable}
-        title={`Inspector (${inspectorChord})`}
+        title={inspectorAvailable
+          ? `Inspector (${inspectorChord})`
+          : 'No room for the inspector in this view (wide layout, Details, board or missions)'}
         aria-label="Inspector"
         data-testid="inspector-toggle"
         onclick={oninspector}

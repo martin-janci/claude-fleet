@@ -71,7 +71,7 @@ describe('AutoContinueBar', () => {
 
   it("shows the fleet's countdown and never sends by itself", async () => {
     const onSend = vi.fn();
-    render(AutoContinueBar, { sessionId: 7, turnSeq: 4, typing: false, onSend });
+    render(AutoContinueBar, { sessionId: 7, turnSeq: 4, edits: 0, onSend });
     await vi.advanceTimersByTimeAsync(0);
     expect(screen.getByTestId('auto-continue-clock').textContent).toBe('1:00');
     await vi.advanceTimersByTimeAsync(120_000);
@@ -80,7 +80,7 @@ describe('AutoContinueBar', () => {
 
   it('Send now takes the card and sends its prompt once', async () => {
     const onSend = vi.fn();
-    render(AutoContinueBar, { sessionId: 7, turnSeq: 4, typing: false, onSend });
+    render(AutoContinueBar, { sessionId: 7, turnSeq: 4, edits: 0, onSend });
     await vi.advanceTimersByTimeAsync(0);
     await fireEvent.click(screen.getByTestId('auto-continue-now'));
     await vi.advanceTimersByTimeAsync(0);
@@ -91,7 +91,7 @@ describe('AutoContinueBar', () => {
 
   it('Send now after the fleet already sent it sends nothing', async () => {
     const onSend = vi.fn();
-    render(AutoContinueBar, { sessionId: 7, turnSeq: 4, typing: false, onSend });
+    render(AutoContinueBar, { sessionId: 7, turnSeq: 4, edits: 0, onSend });
     await vi.advanceTimersByTimeAsync(0);
     state = view({}, pick({ state: 'sent' }));
     await fireEvent.click(screen.getByTestId('auto-continue-now'));
@@ -101,7 +101,7 @@ describe('AutoContinueBar', () => {
 
   it('Cancel and typing settle the card', async () => {
     const onSend = vi.fn();
-    render(AutoContinueBar, { sessionId: 7, turnSeq: 4, typing: false, onSend });
+    render(AutoContinueBar, { sessionId: 7, turnSeq: 4, edits: 0, onSend });
     await vi.advanceTimersByTimeAsync(0);
     await fireEvent.click(screen.getByTestId('auto-continue-cancel'));
     await vi.advanceTimersByTimeAsync(0);
@@ -109,14 +109,20 @@ describe('AutoContinueBar', () => {
     expect(state.pending?.state).toBe('cancelled');
 
     state = view();
-    render(AutoContinueBar, { sessionId: 7, turnSeq: 4, typing: true, onSend });
+    mocked.mockClear();
+    const bar = render(AutoContinueBar, { sessionId: 7, turnSeq: 4, edits: 3, onSend });
+    await vi.advanceTimersByTimeAsync(0);
+    // Text already in the box (edits made before the card) cancels nothing (w13-8).
+    expect(mocked).not.toHaveBeenCalledWith('control_auto_continue', { action: 'cancel', turnSeq: 4 });
+    expect(screen.getByTestId('auto-continue')).toBeTruthy();
+    await bar.rerender({ sessionId: 7, turnSeq: 4, edits: 4, onSend });
     await vi.advanceTimersByTimeAsync(0);
     expect(mocked).toHaveBeenCalledWith('control_auto_continue', { action: 'cancel', turnSeq: 4 });
     expect(onSend).not.toHaveBeenCalled();
   });
 
   it('an older status answer landing after Cancel does not bring the card back', async () => {
-    render(AutoContinueBar, { sessionId: 7, turnSeq: 4, typing: false, onSend: vi.fn() });
+    render(AutoContinueBar, { sessionId: 7, turnSeq: 4, edits: 0, onSend: vi.fn() });
     await vi.advanceTimersByTimeAsync(0);
     // The next poll's status is held in flight while the person cancels.
     let release: (v: AutoContinueView) => void = () => {};
@@ -132,7 +138,7 @@ describe('AutoContinueBar', () => {
   });
 
   it('reads again 3 s after the card is due, so the bar clears', async () => {
-    render(AutoContinueBar, { sessionId: 7, turnSeq: 4, typing: false, onSend: vi.fn() });
+    render(AutoContinueBar, { sessionId: 7, turnSeq: 4, edits: 0, onSend: vi.fn() });
     await vi.advanceTimersByTimeAsync(0);
     await vi.advanceTimersByTimeAsync(60_000); // due now; the 10 s polls have read it
     state = view({}, pick({ state: 'sent' }));
@@ -146,7 +152,7 @@ describe('AutoContinueBar', () => {
     mocked.mockImplementation(async () => {
       throw { code: 'E_HUB_PROTOCOL', message: 'unknown tool control_auto_continue' };
     });
-    render(AutoContinueBar, { sessionId: 7, turnSeq: 4, typing: false, onSend: vi.fn() });
+    render(AutoContinueBar, { sessionId: 7, turnSeq: 4, edits: 0, onSend: vi.fn() });
     await vi.advanceTimersByTimeAsync(0);
     expect(screen.getByTestId('auto-continue-unsupported')).toBeTruthy();
     const calls = mocked.mock.calls.length;
@@ -156,7 +162,7 @@ describe('AutoContinueBar', () => {
 
   it('draws nothing when the fleet has it off (Ask first)', async () => {
     state = view({ enabled: false });
-    render(AutoContinueBar, { sessionId: 7, turnSeq: 4, typing: false, onSend: vi.fn() });
+    render(AutoContinueBar, { sessionId: 7, turnSeq: 4, edits: 0, onSend: vi.fn() });
     await vi.advanceTimersByTimeAsync(0);
     expect(screen.queryByTestId('auto-continue')).toBeNull();
   });
