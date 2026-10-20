@@ -96,6 +96,13 @@ pub struct RoutineRow {
     /// it, a session on it, a pull request seen there.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub event_host: Option<String>,
+    /// The notebooks its runs read and may rewrite (migration 204):
+    /// `routine` | `project` | `both`; absent = none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory: Option<String>,
+    /// The fleet notes each finished run in the notebook.
+    #[serde(default)]
+    pub memory_auto: bool,
 }
 
 /// What a person writes: every field of a routine but its identity and the
@@ -124,6 +131,8 @@ pub struct RoutineFields {
     pub retry_once: bool,
     pub autonomy: Option<i64>,
     pub event_host: Option<String>,
+    pub memory: Option<String>,
+    pub memory_auto: bool,
 }
 
 /// One run of a routine.
@@ -196,7 +205,7 @@ const COLS: &str = "id, org_id, owner_person_id, name, enabled, trigger, cron, u
                     budget_run_micros, budget_day_micros, overlap, next_run_at, skip_next, \
                     paused_reason, created_at, updated_at, event_repo, event_author, \
                     event_rate_secs, time_zone, run_max_secs, fallback_host, retry_once, \
-                    autonomy, event_host";
+                    autonomy, event_host, memory, memory_auto";
 
 fn routine(r: &rusqlite::Row<'_>) -> rusqlite::Result<RoutineRow> {
     Ok(RoutineRow {
@@ -231,6 +240,8 @@ fn routine(r: &rusqlite::Row<'_>) -> rusqlite::Result<RoutineRow> {
         retry_once: r.get::<_, i64>(28)? != 0,
         autonomy: r.get(29)?,
         event_host: r.get(30)?,
+        memory: r.get(31)?,
+        memory_auto: r.get::<_, i64>(32)? != 0,
     })
 }
 
@@ -238,7 +249,13 @@ const RUN_COLS: &str = "id, routine_id, trigger, trigger_ref, state, reason, ses
                         cost_micros, scheduled_for, started_at, finished_at, outcome, \
                         outcome_source, error_code, host_alias";
 
-fn run(r: &rusqlite::Row<'_>) -> rusqlite::Result<RoutineRunRow> {
+/// [`RUN_COLS`] of `routine_runs rr`, for a query that joins it.
+pub(super) const RUN_COLS_RR: &str = "rr.id, rr.routine_id, rr.trigger, rr.trigger_ref, \
+                        rr.state, rr.reason, rr.session_id, rr.cost_micros, rr.scheduled_for, \
+                        rr.started_at, rr.finished_at, rr.outcome, rr.outcome_source, \
+                        rr.error_code, rr.host_alias";
+
+pub(super) fn run(r: &rusqlite::Row<'_>) -> rusqlite::Result<RoutineRunRow> {
     Ok(RoutineRunRow {
         id: r.get(0)?,
         // NULL once its routine is deleted (166): read as 0.
@@ -276,9 +293,9 @@ impl Store {
                utc_offset_min, event, event_cursor, host_alias, project_id, profile, prompt, \
                budget_run_micros, budget_day_micros, overlap, next_run_at, created_at, updated_at, \
                event_repo, event_author, event_rate_secs, time_zone, run_max_secs, fallback_host, \
-               retry_once, autonomy, event_host) \
+               retry_once, autonomy, event_host, memory, memory_auto) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?18, \
-               ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27)",
+               ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29)",
             rusqlite::params![
                 org_id,
                 owner_person_id,
@@ -306,7 +323,9 @@ impl Store {
                 f.fallback_host,
                 f.retry_once as i64,
                 f.autonomy,
-                f.event_host
+                f.event_host,
+                f.memory,
+                f.memory_auto as i64
             ],
         )?;
         let id = self.conn.last_insert_rowid();
@@ -329,7 +348,8 @@ impl Store {
                budget_day_micros = ?13, overlap = ?14, next_run_at = ?15, skip_next = 0, \
                paused_reason = NULL, updated_at = ?16, event_repo = ?18, event_author = ?19, \
                event_rate_secs = ?20, time_zone = ?21, run_max_secs = ?22, fallback_host = ?23, \
-               retry_once = ?24, autonomy = ?25, event_host = ?26 \
+               retry_once = ?24, autonomy = ?25, event_host = ?26, memory = ?27, \
+               memory_auto = ?28 \
              WHERE id = ?17",
             rusqlite::params![
                 f.name,
@@ -357,7 +377,9 @@ impl Store {
                 f.fallback_host,
                 f.retry_once as i64,
                 f.autonomy,
-                f.event_host
+                f.event_host,
+                f.memory,
+                f.memory_auto as i64
             ],
         )?;
         self.get_routine(id)
@@ -391,6 +413,11 @@ impl Store {
         tx.execute(
             "UPDATE routine_runs SET routine_name = \
                (SELECT name FROM routines WHERE id = ?1) WHERE routine_id = ?1",
+            [id],
+        )?;
+        // Its own notebook goes with it; its project's stays (migration 204).
+        tx.execute(
+            "DELETE FROM routine_memory WHERE scope = 'routine' AND owner_id = ?1",
             [id],
         )?;
         let gone = tx.execute("DELETE FROM routines WHERE id = ?1", [id])? == 1;

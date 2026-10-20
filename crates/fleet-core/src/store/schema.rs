@@ -401,6 +401,17 @@ fn routines_has_event_host(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 204: `routine_runs` already has its
+/// `memory_read_at` column (the last column it adds).
+fn routine_runs_has_memory_read_at(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('routine_runs') WHERE name = 'memory_read_at'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 fn routine_runs_has_host(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('routine_runs') WHERE name = 'host_alias'",
@@ -2296,6 +2307,13 @@ const MIGRATIONS: &[Migration] = &[
         version: 203,
         sql: include_str!("../../migrations/203_host_login_split.sql"),
         already_applied: Some(hosts_has_login_split),
+    },
+    // Routine memory: `routine_memory` and the routines' `memory` /
+    // `memory_auto`, the runs' `memory_read_at`. ADD COLUMNs, so guarded.
+    Migration {
+        version: 204,
+        sql: include_str!("../../migrations/204_routine_memory.sql"),
+        already_applied: Some(routine_runs_has_memory_read_at),
     },
 ];
 

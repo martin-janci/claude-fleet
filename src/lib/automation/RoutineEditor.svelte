@@ -21,6 +21,7 @@
   import { CloseGuard } from '../forms/close_guard.svelte';
   import NewRoutineMenu from './NewRoutineMenu.svelte';
   import RoutineEventTrigger from './RoutineEventTrigger.svelte';
+  import RoutineMemory from './RoutineMemory.svelte';
   import {
     AUTONOMY_CHOICES,
     budgetProblem,
@@ -83,6 +84,8 @@
   ];
 
   const isNew = $derived(draft.id === undefined);
+  /** The notebooks show once the routine is saved with the memory the form shows. */
+  const savedMemory = $derived(!dirty);
   // The prompt tuner (`prompt_tune.ts`): a model rewrites the prompt on the
   // routine's host and profile, saved or not; "Use this" writes draft.prompt.
   const tuneOn = $derived(settingBool($fleetSettings, SETTING_KEYS.workPromptTune));
@@ -541,6 +544,36 @@
       the line, or its start fails. Autonomy is told to the agent under the prompt: sessions run without permission prompts, so it is an instruction,
       not a sandbox.
     </p>
+
+    <h4 class="grp">Memory</h4>
+    <div class="two">
+      <label class="f">
+        <span class="fl">Notebooks</span>
+        <select
+          class="inp"
+          data-testid="routine-memory-mode"
+          bind:value={draft.memory}
+          onchange={() => {
+            if (!draft.memory) draft.memory_auto = false;
+          }}>
+          <option value="">None: each run starts fresh</option>
+          <option value="routine">This routine's own</option>
+          <option value="project">The project's, shared by its routines</option>
+          <option value="both">Both</option>
+        </select>
+      </label>
+      <label class="ck">
+        <input type="checkbox" data-testid="routine-memory-auto" bind:checked={draft.memory_auto} disabled={!draft.memory} />
+        <span>Note each finished run in the notebook</span>
+      </label>
+    </div>
+    <p class="help">
+      The fleet keeps notebooks in its own database, outside the repo and the host, so the next run reads them on any host. A run rewrites one by
+      ending its reply with a &lt;routine-memory&gt; block; the prompt tells it how.
+    </p>
+    {#if draft.id !== undefined && draft.memory && savedMemory}
+      <RoutineMemory routineId={draft.id} />
+    {/if}
 
     <label class="f">
       <span class="fl">Profile<span class="opt-l">optional</span></span>
