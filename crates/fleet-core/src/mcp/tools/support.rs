@@ -2017,7 +2017,7 @@ impl FleetTools {
                 ConfirmState::Denied => {
                     return Err(mcp_err(
                         "E_FORBIDDEN",
-                        format!("{tool} was denied on the desktop"),
+                        format!("{tool} was denied in the fleet app"),
                         None,
                     ))
                 }
@@ -2025,7 +2025,7 @@ impl FleetTools {
                     return Err(mcp_err(
                         codes::E_CONFIRM_REQUIRED,
                         format!(
-                            "{tool} is awaiting approval on the desktop; retry with the same confirm_nonce once approved"
+                            "{tool} is awaiting approval in the fleet app (desktop or phone); retry with the same confirm_nonce once approved"
                         ),
                         Some(serde_json::json!({ "confirm_nonce": n })),
                     ))
@@ -2064,7 +2064,7 @@ impl FleetTools {
         Err(mcp_err(
             codes::E_CONFIRM_REQUIRED,
             format!(
-                "{tool} needs approval on the claude-fleet desktop ({}); \
+                "{tool} needs approval in the fleet app, desktop or phone ({}); \
                  ask the user to approve it there, then retry with confirm_nonce={}",
                 if person && !caller.is_operator() {
                     "a person approves this call whoever makes it"

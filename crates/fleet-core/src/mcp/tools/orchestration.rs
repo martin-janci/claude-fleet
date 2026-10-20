@@ -474,7 +474,7 @@ impl FleetTools {
         session_transcript in one call. Returns { turn_seq, status: \
         satisfied | timeout, transcript } (the reply as plain text; null \
         with transcript_error when unreadable). Marked untrusted unless \
-        raw=true (master token only).")]
+        raw=true (master) or the caller is a trusted client.")]
     pub(super) async fn run_prompt(
         &self,
         Extension(caller): Extension<Caller>,
@@ -579,7 +579,8 @@ impl FleetTools {
         that paragraph as `result` (also sent to the requester's inbox as \
         kind=task_result). Returns the task row; follow with wait_for_task. \
         A per-host token must name a requester on its own host. Marked \
-        untrusted unless raw=true (master only).")]
+        untrusted unless raw=true (master) or the caller is a trusted \
+        client.")]
     pub(super) async fn dispatch_task(
         &self,
         Extension(caller): Extension<Caller>,
@@ -955,8 +956,8 @@ impl FleetTools {
 
     #[tool(description = "Cancel a queued or running task (E_TASK_TERMINAL \
         if it already finished). The worker session keeps running: kill or \
-        re-prompt it separately. May return E_CONFIRM_REQUIRED when desktop \
-        confirmation is on. A per-host token may only cancel tasks it can \
+        re-prompt it separately. May return E_CONFIRM_REQUIRED when confirmation is on \
+        (mcp.confirm_destructive). A per-host token may only cancel tasks it can \
         see (E_FORBIDDEN).")]
     pub(super) async fn cancel_task(
         &self,

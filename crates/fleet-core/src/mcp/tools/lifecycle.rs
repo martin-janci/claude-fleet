@@ -14,7 +14,8 @@ impl FleetTools {
         E_INVALID_STATE: close them where they run. For disposable or \
         already-pushed work you want gone NOW; prefer safe_kill_session when \
         the worktree may hold unpushed work. Returns the killed id. May \
-        return E_CONFIRM_REQUIRED when desktop confirmation is on.")]
+        return E_CONFIRM_REQUIRED when confirmation is on \
+        (mcp.confirm_destructive).")]
     pub(super) async fn kill_session(
         &self,
         Extension(caller): Extension<Caller>,
@@ -502,9 +503,11 @@ impl FleetTools {
         E_CLIPBOARD_UNAVAILABLE if none is installed.")]
     pub(super) async fn get_clipboard(
         &self,
+        Extension(caller): Extension<Caller>,
         Parameters(args): Parameters<crate::service::clipboard::GetClipboardArgs>,
     ) -> Result<CallToolResult, McpError> {
         audit("get_clipboard", &format!("host={}", args.host_alias));
+        self.require_clipboard_host(&caller, &args.host_alias)?;
         let text = crate::service::clipboard::get_clipboard(args, &self.ssh)
             .await
             .map_err(to_mcp_err)?;
@@ -521,7 +524,8 @@ impl FleetTools {
 
     #[tool(description = "Write a host's system clipboard, via wl-copy, \
         xclip, xsel or pbcopy. E_CLIPBOARD_UNAVAILABLE if none is installed. \
-        May return E_CONFIRM_REQUIRED when desktop confirmation is on.")]
+        May return E_CONFIRM_REQUIRED when confirmation is on \
+        (mcp.confirm_destructive).")]
     pub(super) async fn set_clipboard(
         &self,
         Extension(caller): Extension<Caller>,
@@ -532,6 +536,7 @@ impl FleetTools {
             "set_clipboard",
             &format!("host={} bytes={}", p.host_alias, p.content.len()),
         );
+        self.require_clipboard_host(&caller, &p.host_alias)?;
         self.confirm_gate(
             "set_clipboard",
             p.confirm_nonce.as_deref(),
@@ -761,6 +766,19 @@ impl FleetTools {
     }
 }
 
+impl FleetTools {
+    /// The clipboard tools' host fence (review w25-1): a host's clipboard is
+    /// whatever the person at that keyboard last copied, a password
+    /// included. A per-host token reaches only its own host's (the session
+    /// on `build-box` must not read the Mac's), and an org-bound client only
+    /// its org's hosts'.
+    fn require_clipboard_host(&self, caller: &Caller, host_alias: &str) -> Result<(), McpError> {
+        require_host(caller, host_alias, "the clipboard")?;
+        let s = lock(&self.store).map_err(to_mcp_err)?;
+        require_bound_client_sees_host(&s, caller, host_alias)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -801,5 +819,131 @@ mod tests {
         let text = format!("{err:?}");
         assert!(!text.contains("E_UNSUPPORTED"), "{text}");
         assert!(text.contains("no project to fork"), "{text}");
+    }
+
+    fn clipboard_tools() -> FleetTools {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("mac").unwrap();
+        s.upsert_host("build-box").unwrap();
+        let org = s.add_org("Acme", None, false).unwrap().id;
+        s.set_host_org("build-box", Some(org)).unwrap();
+        s.set_setting(crate::service::hub::SETTING_LOCAL_HOST, "false")
+            .unwrap();
+        FleetTools::new(
+            Arc::new(Mutex::new(s)),
+            Arc::new(SshClient::new()),
+            CancellationRegistry::new(),
+            Arc::new(crate::service::tunnel::TunnelSupervisor::new()),
+            McpGuards::new(Arc::new(|_: &guard::ConfirmRequest| {})),
+        )
+    }
+
+    fn host_token(alias: &str) -> Caller {
+        Caller {
+            api: None,
+            host_alias: Some(alias.into()),
+            client: None,
+            mode: crate::mcp::auth::TokenMode::Full,
+            pane: None,
+            is_personal_owner: false,
+            is_fleet_admin: false,
+        }
+    }
+
+    fn org_bound_client(org_id: i64) -> Caller {
+        Caller {
+            api: None,
+            host_alias: None,
+            client: Some(crate::mcp::auth::ClientRef {
+                id: 7,
+                name: "acme-phone".into(),
+                trusted: false,
+                org_id: Some(org_id),
+                person_id: Some(2),
+            }),
+            mode: crate::mcp::auth::TokenMode::Full,
+            pane: None,
+            is_personal_owner: false,
+            is_fleet_admin: false,
+        }
+    }
+
+    fn assert_forbidden(r: Result<CallToolResult, McpError>) {
+        let e = r.expect_err("the fence refuses");
+        assert!(e.message.starts_with("E_FORBIDDEN"), "{}", e.message);
+    }
+
+    /// Review w25-1: the session on `build-box` must not read or replace
+    /// what the owner last copied on the Mac. Both tools refuse before any
+    /// SSH, and before `set_clipboard`'s confirm gate.
+    #[tokio::test]
+    async fn a_host_token_reaches_no_other_hosts_clipboard() {
+        let t = clipboard_tools();
+        assert_forbidden(
+            t.get_clipboard(
+                Extension(host_token("build-box")),
+                Parameters(crate::service::clipboard::GetClipboardArgs {
+                    host_alias: "mac".into(),
+                }),
+            )
+            .await,
+        );
+        assert_forbidden(
+            t.set_clipboard(
+                Extension(host_token("build-box")),
+                Parameters(SetClipboardParams {
+                    host_alias: "mac".into(),
+                    content: "rm -rf ~".into(),
+                    confirm_nonce: None,
+                }),
+            )
+            .await,
+        );
+        // Its own host's clipboard stays reachable.
+        assert!(t
+            .require_clipboard_host(&host_token("build-box"), "build-box")
+            .is_ok());
+        assert!(t.require_clipboard_host(&Caller::master(), "mac").is_ok());
+    }
+
+    /// Review w25-1: an org-bound client reaches only its org's hosts'
+    /// clipboards.
+    #[tokio::test]
+    async fn an_org_bound_client_reaches_only_its_orgs_clipboards() {
+        let t = clipboard_tools();
+        let org = {
+            let s = lock(&t.store).unwrap();
+            s.host_org("build-box").unwrap().unwrap()
+        };
+        let other = {
+            let s = lock(&t.store).unwrap();
+            let o = s.add_org("Other", None, false).unwrap().id;
+            s.set_host_org("mac", Some(o)).unwrap();
+            o
+        };
+        assert_ne!(org, other);
+        assert_forbidden(
+            t.get_clipboard(
+                Extension(org_bound_client(org)),
+                Parameters(crate::service::clipboard::GetClipboardArgs {
+                    host_alias: "mac".into(),
+                }),
+            )
+            .await,
+        );
+        assert_forbidden(
+            t.set_clipboard(
+                Extension(org_bound_client(org)),
+                Parameters(SetClipboardParams {
+                    host_alias: "mac".into(),
+                    content: "x".into(),
+                    confirm_nonce: None,
+                }),
+            )
+            .await,
+        );
+        assert!(t
+            .require_clipboard_host(&org_bound_client(org), "build-box")
+            .is_ok());
     }
 }

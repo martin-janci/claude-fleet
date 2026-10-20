@@ -159,6 +159,26 @@ pub async fn safe_kill_session(
             &args.tmux_name,
             "safe_kill_session",
         )?;
+        // The fleet controller is protected here as from kill, recreate and
+        // restart (review w25-10): this path ends in a forced kill, and it
+        // takes no `force` of its own, so `kill_session {force: true}` is
+        // the one way to end the controller.
+        crate::service::sessions::guard_not_controller(
+            s.get_controller()?.as_ref(),
+            &args.host_alias,
+            &args.tmux_name,
+            false,
+        )
+        .map_err(|e| {
+            IpcError::new(
+                &e.code,
+                format!(
+                    "{} on {} is the registered fleet controller; safe_kill_session does \
+                     not retire it (kill_session with force=true does)",
+                    args.tmux_name, args.host_alias
+                ),
+            )
+        })?;
     }
 
     // Read + state-update happens under one lock; the SSH send afterwards is
@@ -1232,5 +1252,37 @@ SAFE_REMOVE_READY_n1";
         assert_eq!((t.session_id, t.tmux_name.as_str()), (killed, "killed"));
         assert_eq!(t.nonce, "n1");
         assert!(marker_check_target(&s, other).unwrap().is_none());
+    }
+
+    /// Review w25-10: safe-kill ends in a forced kill, so it refuses the
+    /// registered fleet controller as kill/recreate/restart do, before it
+    /// stamps the row or types anything into the pane.
+    #[tokio::test]
+    async fn safe_kill_refuses_the_fleet_controller() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("mac").unwrap();
+        s.upsert_session("ctl", "mac", None, None, 0, 0, "running", None)
+            .unwrap();
+        s.set_controller("mac", "ctl").unwrap();
+        let store = Mutex::new(s);
+        let ssh = Arc::new(SshClient::new());
+        let err = safe_kill_session(
+            SafeKillSessionArgs {
+                host_alias: "mac".into(),
+                tmux_name: "ctl".into(),
+            },
+            &store,
+            &ssh,
+        )
+        .await
+        .expect_err("the controller is protected");
+        assert_eq!(err.code, codes::E_SELF_TARGET, "{}", err.message);
+        assert!(err.message.contains("force=true"), "{}", err.message);
+        let row = lock(&store)
+            .unwrap()
+            .get_session("ctl", "mac")
+            .unwrap()
+            .unwrap();
+        assert!(row.safe_kill_state.is_none(), "nothing was stamped");
     }
 }
