@@ -3282,6 +3282,14 @@ async fn a_start_records_its_steps_and_only_its_own_checkout_may_be_cancelled() 
     assert_eq!(p.worktree_path, "/p/acme/app/.worktrees/abc-3");
     assert_eq!(p.project_base, "/p/acme/app");
 
+    // Pinned, the cancel is refused before anything is checked or recorded
+    // (review w10-7): the kill it ends in would refuse it anyway.
+    s.set_session_pinned(row.id, Some(100)).unwrap();
+    let e = plan_abandon(&s, row.id).unwrap_err();
+    assert_eq!(e.code, codes::E_PINNED);
+    s.set_session_pinned(row.id, None).unwrap();
+    plan_abandon(&s, row.id).expect("unpinned, the cancel is offered again");
+
     // The same session, its record saying the checkout was reused.
     let reused = StartSpawned {
         new_worktree: false,

@@ -900,6 +900,10 @@ impl Store {
 
         // ── Phase 2 prep: collect already-ghost IDs BEFORE Phase 1 modifies rows
         // so that sessions newly ghosted in Phase 1 are not immediately deleted.
+        // A pinned ghost is never reaped: `dismiss_ghost_session` refuses it
+        // (E_PINNED) because dropping it loses the pin and the resumable
+        // conversation, and the reaper must not do silently what the person
+        // cannot do by hand. It stays until it is unpinned and dismissed.
         let pre_ghost_ids: Vec<i64> = {
             // Placeholders are numbered as `head` grows, so `exempt` never
             // has to know whether its neighbour is present; the keep names'
@@ -949,7 +953,8 @@ impl Store {
             }
             let sql = format!(
                 "SELECT id FROM sessions
-                 WHERE host_alias=?1 AND status='ghost' AND {kind_filter}{exempt}{not_in}"
+                 WHERE host_alias=?1 AND status='ghost' AND pinned_at IS NULL \
+                   AND {kind_filter}{exempt}{not_in}"
             );
             let params = params_then(&head, keep_names);
             tx.prepare(&sql)?

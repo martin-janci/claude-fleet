@@ -6337,6 +6337,74 @@ async fn an_unreadable_identity_leaves_today_s_behaviour_intact() {
     );
 }
 
+/// Review w10-6: the reaper never deletes a pinned ghost.
+/// `dismiss_ghost_session` refuses one (`E_PINNED`), so Phase 2 must not drop
+/// the same row (its pin, events and resumable conversation) by itself once
+/// the floor has passed. Unpinned, the same row is reaped on the next pass.
+#[tokio::test]
+async fn the_reaper_keeps_a_pinned_ghost_past_the_floor() {
+    let store = Mutex::new(Store::open_in_memory().expect("store"));
+    store.lock().unwrap().upsert_host("mefistos").unwrap();
+    let deps = identity_deps("mefistos", vec![tmux_session("p")], None, vec![]);
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    {
+        let s = store.lock().unwrap();
+        s.mark_sessions_reconciled("mefistos", &["p".to_string()], 1)
+            .unwrap();
+        s.conn_ref()
+            .execute(
+                "UPDATE sessions SET pinned_at = 100 WHERE tmux_name = 'p'",
+                [],
+            )
+            .unwrap();
+    }
+    // "p" disappears: ghosted as 'missing'.
+    let deps = identity_deps("mefistos", vec![], None, vec![]);
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    let age_past_floor = |store: &Mutex<Store>| {
+        store
+            .lock()
+            .unwrap()
+            .conn_ref()
+            .execute(
+                "UPDATE sessions SET lost_at = lost_at - ?1 WHERE tmux_name = 'p'",
+                [crate::service::sessions::reconcile::GHOST_MIN_AGE_SECS + 1],
+            )
+            .unwrap();
+    };
+    age_past_floor(&store);
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    let row = store
+        .lock()
+        .unwrap()
+        .get_session("p", "mefistos")
+        .unwrap()
+        .expect("a pinned ghost is never reaped");
+    assert_eq!(row.status, "ghost");
+    assert_eq!(row.pinned_at, Some(100));
+
+    // Unpinned, the routine reap applies again.
+    store
+        .lock()
+        .unwrap()
+        .conn_ref()
+        .execute(
+            "UPDATE sessions SET pinned_at = NULL WHERE tmux_name = 'p'",
+            [],
+        )
+        .unwrap();
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    assert!(
+        store
+            .lock()
+            .unwrap()
+            .get_session("p", "mefistos")
+            .unwrap()
+            .is_none(),
+        "an unpinned ghost past the floor is reaped as before"
+    );
+}
+
 /// `skip_prune` in isolation from the TTL exemption: with
 /// `sessions.lost_ttl_secs` set to `0` (the exemption disabled — every
 /// mass-loss row reaps on the routine one-cycle schedule same as a
