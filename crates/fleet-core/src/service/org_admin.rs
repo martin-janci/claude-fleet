@@ -492,9 +492,7 @@ impl EffectiveRoleSummary {
     }
 }
 
-fn is_zero(n: &u32) -> bool {
-    *n == 0
-}
+use crate::serde_util::is_zero_u32 as is_zero;
 
 /// Fill each member's live and private counts (redesign 11.7c) as `viewer`
 /// may learn them: every live session of `org` the member owns, and of those

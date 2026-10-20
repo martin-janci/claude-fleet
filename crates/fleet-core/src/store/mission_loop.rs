@@ -672,8 +672,11 @@ impl Store {
         )?)
     }
 
-    /// Bump the mission's plan version: a change to what it may do (a repo
-    /// added, the policy raised) voids the grants signed for the old plan.
+    /// Bump the mission's plan version: a change to what it may do voids the
+    /// grants signed for the old plan. A repo added
+    /// ([`Self::set_mission_repo`]) calls it. Raising the policy is meant to
+    /// as well, but which policy or level changes count as raised is not
+    /// decided yet, so `update_mission` does not call it.
     pub fn bump_plan_version(&self, mission_id: i64) -> Result<(), IpcError> {
         self.conn.execute(
             "UPDATE orchestration_projects SET plan_version = plan_version + 1 WHERE id = ?1",

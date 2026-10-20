@@ -431,3 +431,49 @@ fn a_task_start_is_inside_only_its_own_missions_grant() {
     // The new-session form still asks whether any grant covers the host.
     assert!(s.start_inside_mission_grant(None, now).unwrap());
 }
+
+/// Review w29-16: a repo added widens what a mission may do, so the grant
+/// signed before it no longer covers a start; a role change or a removal
+/// leaves the grant standing.
+#[test]
+fn adding_a_repo_voids_the_grant_signed_for_the_old_plan() {
+    let s = Store::open_in_memory().unwrap();
+    let m = mission(&s);
+    let api = s.upsert_project("acme", "api", "/src/api").unwrap();
+    let web = s.upsert_project("acme", "web", "/src/web").unwrap();
+    s.set_mission_repo(m, api, None, true, "fleet").unwrap();
+    s.set_mission_state(m, None, "active", "fleet").unwrap();
+    let now = now_unix();
+    let grant = NewGrant {
+        level: 2,
+        granted_by: "person:1",
+        hosts: Some(vec!["h".into()]),
+        expires_at: now + 3600,
+        ..Default::default()
+    };
+    s.add_grant(m, &grant).unwrap();
+    assert!(s.start_inside_mission_grant(Some("h"), now).unwrap());
+
+    s.set_mission_repo(m, api, Some("backend"), true, "fleet")
+        .unwrap();
+    s.set_mission_repo(m, web, None, false, "fleet").unwrap();
+    assert!(
+        s.start_inside_mission_grant(Some("h"), now).unwrap(),
+        "a role change, or removing a repo it never had, changes no plan"
+    );
+
+    let before = s.get_mission(m).unwrap().unwrap().plan_version;
+    s.set_mission_repo(m, web, None, true, "fleet").unwrap();
+    assert_eq!(s.get_mission(m).unwrap().unwrap().plan_version, before + 1);
+    assert_eq!(s.live_mission_grant(m, now).unwrap(), None);
+    assert!(
+        !s.start_inside_mission_grant(Some("h"), now).unwrap(),
+        "the grant was signed for the plan without acme/web"
+    );
+
+    s.add_grant(m, &grant).unwrap();
+    assert!(
+        s.start_inside_mission_grant(Some("h"), now).unwrap(),
+        "a grant signed for the new plan covers it again"
+    );
+}

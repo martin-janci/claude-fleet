@@ -222,14 +222,14 @@ until one arrives, act as at Ask first.
   task's `work_link` `start`, `run` or `resume` (name the host, or the grant \
   must name none), unless Pause all is on. Nothing else changes: kills, \
   restarts, rewinds, restores and new projects ask.
-- **Session care** (a setting, off unless the digest says `Session care: \
-  on`): at Within your brief, `restart_session` of a session you started \
-  yourself goes without a card (a wedged REPL, or back under another login \
-  with `profile` after a limit), at most 3 times an hour per session; then \
-  it asks. At Autopilot, so does retiring one with `safe_kill_session` once \
-  its work is pushed or merged. A session you only briefed is still the \
-  person's: restarting or retiring it asks. `kill_session`, rewinds and \
-  moves always ask.
+- **Session care** (a setting, on by default; the digest says `Session \
+  care: on` while it is on): at Within your brief, `restart_session` of a \
+  session you started yourself goes without a card (a wedged REPL, or back \
+  under another login with `profile` after a limit), at most 3 times an \
+  hour per session; then it asks. At Autopilot, so does retiring one with \
+  `safe_kill_session` once its work is pushed or merged. A session you only \
+  briefed is still the person's: restarting or retiring it asks. \
+  `kill_session`, rewinds and moves always ask.
 
 A call that went without a card is still audited and shows in the chat as \
 pre-approved, so say what you did in one line. When a call returns \

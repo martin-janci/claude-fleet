@@ -7,7 +7,7 @@
  */
 
 import { invokeCmd, type Result } from './result';
-import { acceptCommandRow, type SessionRow } from './sessions';
+import { acceptCommandRow, markStarting, type SessionRow } from './sessions';
 import type { ProjectTreeRow } from './projects';
 import type { StartWorkArgs } from './trackers';
 import type { WorkLink } from './work';
@@ -53,7 +53,10 @@ export async function startWorkMulti(
 ): Promise<Result<MultiStart>> {
   const r = await invokeCmd<MultiStart>('start_work_multi', { args });
   if (r.ok) {
-    for (const row of r.value.started ?? []) acceptCommandRow(row);
+    for (const row of r.value.started ?? []) {
+      acceptCommandRow(row);
+      markStarting(row);
+    }
     // The dialog's own repository counts toward a start rule (8.11).
     if ((r.value.started ?? []).length > 0) void offerRuleAfterStart(r.value.key);
   }

@@ -24,8 +24,11 @@
 //! [`Store::rename_ticket_prefix`] changes it, Jira-like: every key in the
 //! space follows, and the old prefix keeps resolving.
 
+#[cfg(test)]
 use super::work::{map_item, ITEM_COLUMNS};
-use super::{now_unix, Store, WorkItemRow};
+#[cfg(test)]
+use super::WorkItemRow;
+use super::{now_unix, Store};
 use crate::ipc_error::{codes, IpcError};
 use rusqlite::OptionalExtension;
 
@@ -446,6 +449,7 @@ impl Store {
     }
 
     /// The item whose ticket key is `key` (current or a former prefix's).
+    #[cfg(test)]
     pub fn item_by_ticket_key(&self, key: &str) -> Result<Option<WorkItemRow>, IpcError> {
         let key = super::normalize_work_ref(key)?;
         let find = |k: &str| -> Result<Option<WorkItemRow>, IpcError> {

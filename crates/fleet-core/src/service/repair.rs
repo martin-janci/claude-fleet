@@ -900,7 +900,7 @@ pub fn plan_with(
                 // someone else's: ambiguous, so explicit-only (and guarded in
                 // `ensure_workspace`).
                 warnings.push(format!(
-                    "branch {} is checked out at {}, not at {}; only an explicit repair adopts it",
+                    "branch {} is checked out at {}, not at {}; Repair workspace adopts it",
                     w.branch, other.path, w.path
                 ));
                 git.push((
@@ -1078,8 +1078,8 @@ pub fn plan_with(
                         // (c) a checkout with a `.git` file that git no
                         // longer lists: explicit re-link; verify decides.
                         warnings.push(format!(
-                            "{} has a .git link git no longer lists; only an explicit repair \
-                             runs git worktree repair",
+                            "{} has a .git link git no longer lists; Repair workspace \
+                             re-links it",
                             w.path
                         ));
                         git.push((

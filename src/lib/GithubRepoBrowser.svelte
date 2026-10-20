@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { errorText } from './error_copy';
   // The Add-project dialog's "From GitHub" source (redesign 6.11, the
   // AddProject board): the repositories `gh` can see on one host, for one
   // owner, filtered client-side. Rows are ticked, not picked: the dialog
@@ -57,7 +58,7 @@
       // gh's own stderr (not installed, "run gh auth login"…) is shown
       // verbatim — never an empty list pretending there are no repos.
       if (!r.ok) {
-        list = { status: 'error', message: r.error.message };
+        list = { status: 'error', message: errorText(r.error) };
         return;
       }
       // A hub older than 6.11 ignores `owner` and answers the login's own

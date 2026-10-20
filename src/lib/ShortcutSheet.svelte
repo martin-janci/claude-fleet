@@ -6,16 +6,7 @@
   // dialog; a view with its own `?` (the Hosts legend) keeps it.
   import Modal from './Modal.svelte';
   import { shortcutSheetOpen } from './app_views';
-  import {
-    SCOPE_TITLES,
-    SHORTCUTS,
-    bindingsFor,
-    formatBinding,
-    matchShortcut,
-    type Binding,
-    type Scope,
-    type Shortcut,
-  } from './shortcuts';
+  import { SCOPE_TITLES, SHORTCUTS, bindingsFor, chordText, matchShortcut, type Scope } from './shortcuts';
   import { detectMac, isEditable } from './terminal_keys';
 
   let { isMac = detectMac(typeof navigator === 'undefined' ? undefined : navigator) }: { isMac?: boolean } =
@@ -23,21 +14,11 @@
 
   const open = shortcutSheetOpen;
 
-  /** One row's chords as a label. Global rows show their advertised chord
-   *  only (the rest are kept, not advertised); a run of nine reads as a
-   *  range. */
-  function chordText(s: Shortcut): string {
-    const bs: readonly Binding[] = bindingsFor(s, isMac);
-    if (bs.length >= 9) return `${formatBinding(bs[0], isMac)}–${formatBinding(bs[8], isMac)}`;
-    const shown = s.scope === 'global' ? bs.slice(0, 1) : bs;
-    return shown.map((b) => formatBinding(b, isMac)).join(' or ');
-  }
-
   const sections = $derived.by(() => {
     const out: { scope: Scope; title: string; rows: { id: string; action: string; chord: string }[] }[] = [];
     for (const scope of Object.keys(SCOPE_TITLES) as Scope[]) {
       const rows = SHORTCUTS.filter((s) => s.scope === scope && s.status === 'live' && bindingsFor(s, isMac).length > 0)
-        .map((s) => ({ id: s.id, action: s.action, chord: chordText(s) }));
+        .map((s) => ({ id: s.id, action: s.action, chord: chordText(s, isMac) }));
       if (rows.length > 0) out.push({ scope, title: SCOPE_TITLES[scope], rows });
     }
     return out;

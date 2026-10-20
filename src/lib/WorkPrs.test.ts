@@ -1,6 +1,6 @@
 // Work › Pull requests (redesign 6.4): the PRs sessions opened, filtered by
 // state, each opening on GitHub and naming the session that opened it.
-import { render, screen, fireEvent, within } from '@testing-library/svelte';
+import { render, screen, fireEvent, within, waitFor } from '@testing-library/svelte';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { tick } from 'svelte';
 
@@ -62,6 +62,35 @@ describe('WorkPrs', () => {
       const items = rows.filter((r) => st === 'all' || r.state === st.toUpperCase());
       return { items, total: items.length };
     });
+  });
+
+  // Review w17-12: a new tab never shows the old tab's list.
+  it('switching the filter drops the old list until the hub answers', async () => {
+    render(WorkPrs);
+    await flush();
+    expect(screen.getAllByTestId('work-pr')).toHaveLength(1);
+    let answer: (v: unknown) => void = () => {};
+    vi.mocked(invoke).mockImplementation(() => new Promise((r) => (answer = r)));
+    await fireEvent.click(screen.getByTestId('work-prs-filter-merged'));
+    await flush();
+    expect(screen.queryAllByTestId('work-pr')).toHaveLength(0);
+    answer({ items: [rows[1]], total: 1 });
+    await flush();
+    expect(screen.getAllByTestId('work-pr')).toHaveLength(1);
+    expect(screen.getByTestId('work-pr').dataset.state).toBe('MERGED');
+  });
+
+  // Review w17-7: a failed background refresh keeps the list shown.
+  it('a failed refresh keeps the list, with a Retry line', async () => {
+    render(WorkPrs);
+    await flush();
+    vi.mocked(invoke).mockImplementation(async () => {
+      throw { code: 'E_HUB_TIMEOUT', message: 'slow' };
+    });
+    sessions.set([session('mefistos', 'api', { id: 7, pr_url: 'https://github.com/o/r/pull/42' })]);
+    await waitFor(() => expect(screen.getByTestId('work-prs-refresh-error')).toBeTruthy(), { timeout: 2000 });
+    expect(screen.getAllByTestId('work-pr')).toHaveLength(1);
+    expect(screen.queryByTestId('work-prs-error')).toBeNull();
   });
 
   it('opens on the open PRs, with state, CI, review and the session that opened it', async () => {

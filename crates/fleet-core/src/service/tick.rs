@@ -118,12 +118,7 @@ pub fn tick_stats() -> Arc<TickStats> {
     Arc::clone(&STATS)
 }
 
-fn unix_now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
+use crate::store::now_unix as unix_now;
 
 /// Runs `on_tick` once per tick of `ticker`, checking `token` for
 /// cancellation only BETWEEN passes (issue #144): a pass already running

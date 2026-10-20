@@ -13,7 +13,7 @@
     sessions,
     type SessionRow,
   } from './sessions';
-  import { pinnedBlock } from './session_actions';
+  import { pinnedBlock, requestSessionAction } from './session_actions';
   import { get } from 'svelte/store';
   import { selectedSession } from './selection';
   import { hostByAlias } from './hosts';
@@ -192,7 +192,7 @@
     // reactive, but the keyboard and a stale render are not it.
     if ($sessionBlocked(sess, 'recreate_session') !== null) return;
     const r = await recreateSession(sess.id);
-    if (!r.ok) pushError(r.error, 'Recreate failed');
+    if (!r.ok) pushError(r.error, 'Recreate failed', undefined, { repair: () => requestSessionAction(sess, 'repair') });
   }
 
   async function doDismissGhost(sess: SessionRow, e?: Event) {

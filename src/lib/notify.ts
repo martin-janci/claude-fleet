@@ -7,6 +7,7 @@
 // prefs and fires. Every call is guarded — a webview without `Notification`
 // simply gets the in-app toast + aria-live announcement.
 import { writable } from 'svelte/store';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import { readPref, writePref } from './prefs';
 import { attentionState, type AttentionOptions, type AttentionState } from './attention';
 import type { SessionRow } from './sessions';
@@ -60,12 +61,38 @@ export async function requestNotificationPermission(): Promise<NotificationPermi
   }
 }
 
-/** Fire an OS notification if permitted. Returns true when one was shown. */
-export function showOsNotification(title: string, body: string, tag?: string): boolean {
+/** Bring the app's window forward: the webview's own focus, and the
+ *  native window's in Tauri (a webview cannot raise its window itself). */
+export function focusAppWindow(): void {
+  try {
+    globalThis.focus?.();
+  } catch {
+    /* no window */
+  }
+  try {
+    void getCurrentWindow()
+      .setFocus()
+      .catch(() => {});
+  } catch {
+    /* outside Tauri */
+  }
+}
+
+/** Fire an OS notification if permitted. Returns true when one was shown.
+ *  `onclick` runs when the person clicks it, after the window comes forward
+ *  (review w11-4: a click used to do nothing visible). */
+export function showOsNotification(title: string, body: string, tag?: string, onclick?: () => void): boolean {
   const api = notificationApi();
   if (!api || api.permission !== 'granted') return false;
   try {
-    new api(title, { body, tag });
+    const n = new api(title, { body, tag }) as { onclick?: ((e: Event) => void) | null } | undefined;
+    if (n && typeof n === 'object') {
+      n.onclick = (e: Event) => {
+        e?.preventDefault?.();
+        focusAppWindow();
+        onclick?.();
+      };
+    }
     return true;
   } catch {
     return false;

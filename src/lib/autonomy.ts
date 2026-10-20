@@ -11,6 +11,7 @@
 // pre-approves the operator's calls by it (`guard::operator_must_confirm`):
 // Custom grants what Ask first does.
 import { setFleetSetting, settingBool, settingInt, SETTING_KEYS, type FleetSettings, type SettingKey } from './fleet_settings';
+import { errorText } from './error_copy';
 
 export type AutonomyId = 'ask' | 'brief' | 'autopilot';
 
@@ -89,7 +90,7 @@ export function autonomyWrites(id: AutonomyId, map: FleetSettings): [SettingKey,
 export async function setAutonomy(id: AutonomyId, map: FleetSettings): Promise<string | null> {
   for (const [key, value] of autonomyWrites(id, map)) {
     const r = await setFleetSetting(key, value);
-    if (!r.ok) return `Couldn't set ${key}: ${r.error.message}`;
+    if (!r.ok) return `Couldn't set ${key}: ${errorText(r.error)}`;
   }
   return null;
 }

@@ -52,9 +52,17 @@ export function proposalKey(s: Pick<SessionRow, 'id' | 'last_stop_at'>): string 
   return `${s.id}:${s.last_stop_at ?? 0}`;
 }
 
-/** The readings the person set aside with "Not waiting" on this device.
- *  The next hook clears Jev's reading on the hub anyway. */
-export const notWaitingSaid = writable<ReadonlySet<string>>(new Set());
+/** How many readings "Not waiting" remembers; the oldest go first. A key
+ *  names one turn, so an old one never hides anything new. */
+const NOT_WAITING_KEPT = 200;
+const NOT_WAITING_PREF = 'inbox.not-waiting';
+const isKeyList = (v: unknown): v is string[] => Array.isArray(v) && v.every((k) => typeof k === 'string');
+
+/** The readings the person set aside with "Not waiting" on this device,
+ *  kept across a relaunch (review w11-11): Jev's reading clears only on the
+ *  next hook, so an idle session would come back as "probably waiting". */
+export const notWaitingSaid = writable<ReadonlySet<string>>(new Set(readPref(NOT_WAITING_PREF, [], isKeyList)));
+notWaitingSaid.subscribe((set) => writePref(NOT_WAITING_PREF, [...set].slice(-NOT_WAITING_KEPT)));
 
 export function sayNotWaiting(s: Pick<SessionRow, 'id' | 'last_stop_at'>): void {
   notWaitingSaid.update((set) => new Set([...set, proposalKey(s)]));
@@ -149,6 +157,9 @@ export interface InboxSection {
 export interface InboxExtras {
   missions: number;
   failingRoutines: number;
+  /** Failed routines listed but not counted: the viewer may not change
+   *  them (review w11-6). Absent is 0. */
+  failingOthers?: number;
   proposed: number;
   /** Agent actions waiting for a person (`pendingAgentCount`); absent is 0. */
   agentActions?: number;
@@ -168,9 +179,10 @@ export function inboxSections(
 ): InboxSection[] {
   const queue = inboxRows(rows, opts);
   const agentActions = extra.agentActions ?? 0;
+  const others = extra.failingOthers ?? 0;
   if (by === 'none') {
     const count = queue.length + extra.missions + extra.failingRoutines + agentActions;
-    if (count === 0 && extra.proposed === 0) return [];
+    if (count === 0 && extra.proposed === 0 && others === 0) return [];
     return [{ key: 'all', label: null, rows: queue, count, missions: true, routines: true, proposed: true, agents: true }];
   }
   const groups = groupRows(queue, 'state', opts, new Set());
@@ -190,7 +202,7 @@ export function inboxSections(
     });
   }
   const failed = of('failed');
-  if (failed.length + extra.failingRoutines > 0) {
+  if (failed.length + extra.failingRoutines + others > 0) {
     out.push({
       key: 'failed',
       label: 'Failed',
@@ -222,15 +234,19 @@ export const inboxCount = derived(
     pendingAgentCount,
     showPrimary,
     fleetInboxCount,
+    attentionFacts,
   ],
-  ([$sessions, $host, $bg, $scope, $of, $idle, $failing, $missions, $agentActions, $showPrimary, $fleets]) => {
+  ([$sessions, $host, $bg, $scope, $of, $idle, $failing, $missions, $agentActions, $showPrimary, $fleets, $facts]) => {
     const scope = $scope === 'all' ? null : { id: $scope, of: $of };
     // Multi-hub Phase 2: the extra fleets the fleet filter shows count too,
     // and this window's own rows only while the filter shows them.
     const visible = $showPrimary ? $sessions.filter((s) => sessionVisible(s, $host, $bg, null, scope)) : [];
     return (
       $fleets +
-      countNeedsYou(visible, { idleSecs: $idle * 60, now: Math.floor(Date.now() / 1000) }) +
+      // The attention facts (review w11-1): without them a session blocked
+      // on a down host or an account limit is not counted, while the Inbox
+      // lists it and Attention notifies about it.
+      countNeedsYou(visible, { idleSecs: $idle * 60, now: Math.floor(Date.now() / 1000), facts: $facts }) +
       $failing +
       $missions +
       $agentActions

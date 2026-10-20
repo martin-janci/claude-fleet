@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { errorText } from './error_copy';
   import { viewKey } from './shortcuts';
   // Work graph M7.3: Tidy up and Reopened, in the attention strip.
   //
@@ -175,7 +176,7 @@
       const r = await restoreHostSessions(b.host, { sessionIds: b.ids });
       if (!r.ok) {
         total += b.ids.length;
-        failed.push(`${b.host}: ${r.error.message ?? 'restore failed'}`);
+        failed.push(`${b.host}: ${errorText(r.error) ?? 'restore failed'}`);
         continue;
       }
       for (const x of r.value.results) {

@@ -1,7 +1,7 @@
 // The task board (sprints design 2026-09-28 §6c): one `work_tree` read with
 // the Work view's filters (archived on, status off), columns by status, a
 // native card moved by drag or ← →, a tracker card refused on the card.
-import { render, screen, fireEvent } from '@testing-library/svelte';
+import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { tick } from 'svelte';
 import { get } from 'svelte/store';
@@ -15,6 +15,7 @@ import { selectedTaskId, sidebarView, workViewFilters, type WorkTreePage } from 
 import { activeHintId, hintDef, markSeen, resetHints } from './hints';
 import { onboardingWelcomed } from './onboarding';
 import { boardScope } from './work_buckets';
+import { bumpWorkChanged } from './work';
 
 const NOW = Math.floor(Date.now() / 1000);
 const page = (): WorkTreePage => ({
@@ -88,6 +89,20 @@ describe('WorkBoard', () => {
     markSeen('board-move');
     expect(get(activeHintId)).not.toBe('board-move');
     resetHints();
+  });
+
+  // Review w17-7: a failed background refresh keeps the board.
+  it('a failed refresh keeps the cards, with a Retry line', async () => {
+    render(WorkBoard);
+    await flush();
+    expect(card('Write notes')).toBeTruthy();
+    (invoke as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      throw { code: 'E_HUB_TIMEOUT', message: 'slow' };
+    });
+    bumpWorkChanged();
+    await waitFor(() => expect(screen.getByTestId('work-board-refresh-error')).toBeTruthy(), { timeout: 2000 });
+    expect(card('Write notes')).toBeTruthy();
+    expect(screen.queryByTestId('work-board-error')).toBeNull();
   });
 
   it('reads with the filters, archived on and the status filter off', async () => {

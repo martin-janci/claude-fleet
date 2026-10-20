@@ -927,11 +927,11 @@ Parameters (* required): `anchor_uuid`, `confirm_nonce`, `mode`*, `new_worktree`
 
 ### `routines`
 
-Routines: a saved prompt that starts a session on cron, a session or PR event or Run now. list; get {routine_id}: runs and fixes; runs {routine_id, limit?}; failing: Inbox; budget: fleet spend today; save {routine, routine_id?}: the whole routine; preview: save's dry run; delete; set_enabled {enabled}; skip_next {skip?}; run_now; set_run_outcome {run_id, outcome}: a person's did_work | nothing | needs_person (needs_person lands it in the Inbox). Debugging, nothing written: explain {routine_id, limit?}: why it does or does not fire, check by check, its recent events judged and its decision trace; decisions {routine_id, limit?}: the trace alone; dry_run {routine_id, event_id?}: what a fire now would start and the exact prompt. tune_prompt {routine, ask?}: the prompt tuner on a draft routine's prompt, on its host and profile: { prompt, notes, unchanged, model, host_alias, at }, a proposal never saved (E_INVALID_STATE while work.prompt_tune is off). Pause all stops the schedule, not run_now. E_NOTFOUND, E_INVALID.
+Routines: a saved prompt that starts a session on cron, a session or PR event or Run now. list; get {routine_id}: runs and fixes; runs {routine_id, limit?}; failing: Inbox; budget: fleet spend today; save {routine, routine_id?}: the whole routine; preview: save's dry run; delete; set_enabled {enabled}; skip_next {skip?}; run_now; set_run_outcome {run_id, outcome}: a person's did_work | nothing | needs_person (that lands it in the Inbox). Debugging, nothing written: explain {routine_id, limit?}: why it does or does not fire, check by check, recent events judged and the decision trace; decisions {routine_id, limit?}: the trace alone; dry_run {routine_id, event_id?}: what a fire now would start and the exact prompt. memory; set_memory {notebook, text}. tune_prompt {routine, ask?}: the prompt tuner on a draft's prompt, on its host and profile: { prompt, notes, unchanged, model, host_alias, at }, a proposal never saved (E_INVALID_STATE while work.prompt_tune is off). Pause all stops the schedule, not run_now. E_NOTFOUND, E_INVALID.
 
 Access: the master or a paired device; not a per-host token · deadline 300 s.
 
-Parameters (* required): `action`*, `ask`, `enabled`, `event_id`, `limit`, `outcome`, `routine`, `routine_id`, `run_id`, `skip`
+Parameters (* required): `action`*, `ask`, `enabled`, `event_id`, `limit`, `notebook`, `outcome`, `routine`, `routine_id`, `run_id`, `skip`, `text`
 
 ### `run_prompt`
 

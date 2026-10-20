@@ -14,6 +14,7 @@
   // send-keys into the REPL), so anything typed here is what the terminal
   // would have received. bg / external rows have no REPL to type into, so
   // they stay read-only.
+  import { errorText } from './error_copy';
   import { conversationFindRequest } from './search_api';
   import { untrack, tick, setContext, onDestroy, type Snippet } from 'svelte';
   import { requestOpenPath, OPEN_PATH_CONTEXT, type OpenPathFn } from './app_views';
@@ -38,6 +39,7 @@
   import ReplyActions from './ReplyActions.svelte';
   import ForkSheet from './ForkSheet.svelte';
   import SendLaterSheet from './SendLaterSheet.svelte';
+  import ScheduledPrompts from './ScheduledPrompts.svelte';
   import ContextHelp from './ContextHelp.svelte';
   import PromptTune from './PromptTune.svelte';
   import { tuneComposerPrompt } from './prompt_tune';
@@ -103,6 +105,8 @@
     hasPendingCall,
     formatDuration,
     composerDrafts,
+    composerTrays,
+    rememberTray,
     composerInsert,
     rememberDraft,
     newItemCount,
@@ -234,6 +238,11 @@
     // A `#TASK` / `@host` / `@session` the person wrote, drawn as a chip in
     // the chat look; the host opens it (Control: the right panel).
     onOpenRef,
+    // Review w13-2: an answered card moves the Session view on to the next
+    // inbox session (`afterAnswer`). A host that is not the Session view
+    // (Control's chat, a thread room's or a mission's Session tab) passes
+    // false: jumping there would throw the person out of Control.
+    advanceOnAnswer = true,
   }: {
     session: SessionRow;
     visible: boolean;
@@ -255,6 +264,7 @@
     autoContinue?: boolean;
     look?: 'transcript' | 'chat';
     onOpenRef?: (ref: ChatRef) => void;
+    advanceOnAnswer?: boolean;
   } = $props();
 
   const chatLook = $derived(look === 'chat');
@@ -302,6 +312,8 @@
   // on this, not on the prop, so a session switch can never write the old
   // text into the new session's slot whatever order the effects run in.
   let draftFor = $state<number | null>(null);
+  /** The composer's attachment tray (see "Attachments" below). */
+  let attachments = $state<Attachment[]>([]);
   // Only a bare key press (the press_enter chip) is sent directly; its
   // failure is the one the line above the chips reports.
   let sending = $state(false);
@@ -455,7 +467,7 @@
       }
     } else {
       errorCode = r.error.code;
-      errorMsg = r.error.message;
+      errorMsg = errorText(r.error);
     }
   }
 
@@ -540,8 +552,10 @@
       // picked path stays valid for four hours. So a tile left here would
       // stage the old session's file into the NEW session's worktree, on the
       // new host, and name it in the new prompt. Nothing downstream can
-      // catch that; it has to be dropped here.
-      attachments = [];
+      // catch that; it has to be dropped here. It is not lost, though: it
+      // waits under its own session (`composerTrays`, review w13-6) and
+      // comes back with the draft when that session is shown again.
+      attachments = composerTrays.get(session.id) ?? [];
       attachErrors = [];
       // The tuner and the help panel answer about the session they were
       // opened on: left open, "Use this" would put the old session's
@@ -1324,7 +1338,7 @@
     draft = cancelInto(draft, line);
     box?.focus();
   }
-  const showStop = $derived(canStop(blockWhileBusy, busyNote));
+  const showStop = $derived(canStop(liveStatus, liveStuck));
   let stopping = $state(false);
   /** Interrupt the running turn: the REPL's own Escape. */
   async function stopTurn() {
@@ -1332,7 +1346,7 @@
     stopping = true;
     const r = await sendPrompt(session.host_alias, session.tmux_name, '', { keys: STOP_KEY });
     stopping = false;
-    if (!r.ok) sendError = r.error.message;
+    if (!r.ok) sendError = errorText(r.error);
   }
 
   // ── May this client write into this session at all? (multi-user M1) ─────
@@ -1393,9 +1407,22 @@
   const rewindBlocked = $derived(
     hubActionBlocked('rewind_conversation', $hubStatus, $hubConnection) ?? rewindShareBlocked,
   );
+  // Review w13-3: while a permission or question dialog is up, a typed line
+  // and its Enter land in the dialog's menu (standalone) or are refused by
+  // the hub with copy meant for MCP callers (paired). An ungated composer
+  // keeps the line in the box until the dialog is answered; the note under
+  // the box (`composerStatus`) says so. A gated one holds it (F4) as it does
+  // any line typed while busy, and it goes once the dialog is gone.
+  const dialogUp = $derived(liveStatus === 'blocked');
+  // Review w13-7: files alone are a message too ("see the attached log").
+  // A held line is text only, so a tray with no text waits for the turn.
+  const filesOnly = $derived(draft.trim().length === 0 && attachments.some((a) => a.path !== '' && a.state === 'ready'));
   const canSend = $derived(
     // A gated composer that is busy still takes the line: it is held (F4).
-    draft.trim().length > 0 && viewing === null && writeBlocked === null,
+    (draft.trim().length > 0 || (filesOnly && !busyBlocked)) &&
+      viewing === null &&
+      writeBlocked === null &&
+      (busyBlocked || !dialogUp),
   );
   // A one-gesture chip send is held while the session is waiting on an
   // answer: a permission or choice prompt (`blocked`) or any stuck screen.
@@ -1465,7 +1492,7 @@
     const r = await restartSession(session.host_alias, session.tmux_name, undefined, { [pick.cmd]: pick.value });
     relaunching = false;
     if (!r.ok) {
-      pushToast({ kind: 'error', message: `Could not relaunch ${agentName}: ${r.error.message}` });
+      pushToast({ kind: 'error', message: `Could not relaunch ${agentName}: ${errorText(r.error)}` });
       return;
     }
     {
@@ -1631,8 +1658,11 @@
     return true;
   }
 
+  /** Edits the person made in the box (AutoContinueBar cancels on one). */
+  let composerEdits = $state(0);
   function onComposerInput() {
     histIndex = null;
+    composerEdits++;
   }
   const slashOpen = $derived(slashMatches.length > 0);
 
@@ -1700,8 +1730,13 @@
 
   async function send() {
     const text = draft.trim();
-    if (!text) return;
-    await sendText(text, { fromDraft: true });
+    if (text) {
+      await sendText(text, { fromDraft: true });
+      return;
+    }
+    // Files with no text: a prompt of the attachment block alone. Never the
+    // `key` kind an empty string would derive (a bare Enter).
+    if (filesOnly && !busyBlocked) await sendText('', { fromDraft: true, kind: 'prompt' });
   }
 
   /** What a send IS, which is what decides the prefix, the attachments, the
@@ -1732,18 +1767,29 @@
    *  nothing is shown for it. Anything else goes into the outbox, which
    *  shows it at once and sends it in line — the box is free again the
    *  moment Enter is pressed. */
-  async function sendText(text: string, opts: { fromDraft?: boolean } = {}) {
+  async function sendText(text: string, opts: { fromDraft?: boolean; kind?: SendKind } = {}) {
     if (viewing !== null) return;
     // Before the key branch, not after it: every kind here ends in a pane
     // write, and the outbox's upload runs ahead of the routed send.
     if (writeBlocked !== null) return;
-    const kind = sendKind(text);
+    const kind = opts.kind ?? sendKind(text);
     if (kind === 'key') {
       await sendKey();
       return;
     }
     if (kind === 'command' && runCommand?.(text)) {
       if (opts.fromDraft) draft = '';
+      histIndex = null;
+      box?.focus();
+      return;
+    }
+    if (dialogUp && !busyBlocked) {
+      // w13-3: never typed into a dialog. A draft stays in the box; a chip
+      // or picker line fills it, the way a held chip does.
+      if (!opts.fromDraft) {
+        draft = text;
+        slashDismissedFor = draft;
+      }
       histIndex = null;
       box?.focus();
       return;
@@ -1818,7 +1864,7 @@
     const r = await sendPrompt(session.host_alias, session.tmux_name, '');
     sending = false;
     if (session?.id !== id) return;
-    if (!r.ok) sendError = r.error.message;
+    if (!r.ok) sendError = errorText(r.error);
   }
 
   /** Take a failed message back into the box to change it. Text the user
@@ -2016,12 +2062,19 @@
   // window event puts the paths on the allow-list before the webview sees
   // anything). A pasted file has neither, and `addFiles` says so.
 
-  let attachments = $state<Attachment[]>([]);
+  // (`attachments` is declared beside `draft`, above: Send reads both.)
+  // Keep the tray across tab switches and session switches, beside the
+  // draft (review w13-6): the panel unmounts on the Terminal tab.
+  $effect(() => {
+    if (draftFor !== null) rememberTray(draftFor, attachments);
+  });
   // Send later (gap plan G2.7, the FormsSession board's "composer › Send
   // later"): the draft goes into the session's prompt queue with a time
   // (G1.8). Its own question: `queue_prompt`, `drive` like a send. Text
   // only, so a tray with files keeps them for a send now.
   let sendLaterOpen = $state(false);
+  /** Bumped when a prompt is scheduled, so the Scheduled row reads again. */
+  let scheduledKey = $state(0);
   // Context help (`context_help.ts`): ask Haiku about the draft, with the
   // earlier prompts (the ↑ recall list) and the commands the box accepts as
   // context. `session_context_help` runs it on the hub when paired, so a
@@ -2050,7 +2103,10 @@
   const tuneOn = $derived(settingBool($fleetSettings, SETTING_KEYS.workPromptTune));
   const tuneBlocked = $derived(
     hubActionBlocked('session_prompt_tune', $hubStatus, $hubConnection) ??
-      $sessionBlocked(session, 'session_prompt_tune'),
+      $sessionBlocked(session, 'session_prompt_tune') ??
+      // Review w30-8: nothing to tune yet (the phone hides Tune too). An open
+      // tuner keeps its button, so it can still be closed.
+      (!tuneOpen && draft.trim() === '' ? 'Type a draft to tune first' : null),
   );
   function openTune() {
     tuneOpen = true;
@@ -2127,17 +2183,24 @@
     // `error`, never `reading`. Previewing one would come back E_FORBIDDEN
     // (no path was ever authorised) and replace an honest sentence with a
     // permission error.
+    // The tray's session: by the time a preview lands the person may be on
+    // another session, or on the Terminal tab (this panel gone), and the
+    // tile then waits in `composerTrays` — it must not stay "reading".
+    const owner = draftFor;
     for (const a of next.filter((x) => !x.pasted && x.state === 'reading')) {
       const r = await invokeCmd<string | null>('attachment_preview', { path: a.path });
-      attachments = attachments.map((x) =>
-        x.id !== a.id
-          ? x
-          : r.ok
-            ? // null is an ordinary answer: not an inlineable image, or over
-              // 2 MiB. The tile falls back to its extension, not to an error.
-              { ...x, thumb: r.value, state: 'ready' as const }
-            : { ...x, state: 'error' as const, error: r.error.message },
-      );
+      const withPreview = (list: Attachment[]) =>
+        list.map((x) =>
+          x.id !== a.id
+            ? x
+            : r.ok
+              ? // null is an ordinary answer: not an inlineable image, or over
+                // 2 MiB. The tile falls back to its extension, not to an error.
+                { ...x, thumb: r.value, state: 'ready' as const }
+              : { ...x, state: 'error' as const, error: errorText(r.error) },
+        );
+      if (owner !== null) rememberTray(owner, withPreview(composerTrays.get(owner) ?? []));
+      if (owner === draftFor) attachments = withPreview(attachments);
     }
   }
 
@@ -2161,7 +2224,7 @@
     if (shareBlocked !== null) return;
     const r = await invokeCmd<PickedFile[]>('pick_attachments', {});
     if (r.ok) await attach(r.value ?? []);
-    else attachErrors = [r.error.message];
+    else attachErrors = [errorText(r.error)];
   }
 
   function onShellDragEnter(e: DragEvent) {
@@ -2217,7 +2280,7 @@
   async function describeDroppedPaths(paths: string[]) {
     const r = await invokeCmd<PickedFile[]>('attachment_describe', { paths });
     if (r.ok) await attach(r.value ?? []);
-    else attachErrors = [r.error.message];
+    else attachErrors = [errorText(r.error)];
   }
 
   function onDroppedPaths(paths: string[]) {
@@ -2794,7 +2857,7 @@
             {session}
             view={answerView}
             onOpenTerminal={writeBlocked === null ? onOpenTerminal : undefined}
-            onAnswered={afterAnswer}
+            onAnswered={advanceOnAnswer ? afterAnswer : undefined}
             onGone={dismissGoneAnswer}
             onOwnWords={showComposer && writeBlocked === null ? () => void tick().then(() => box?.focus()) : undefined}
             readOnlyNote={recipientLevel === 'watch' ? readOnlyAnswerLine(sharerName(session, $myGrantInfo.get(session.id), $orgList)) : undefined}
@@ -2906,9 +2969,14 @@
     <AutoContinueBar
       sessionId={session.id}
       turnSeq={session.turn_seq}
-      typing={draft.trim() !== ''}
+      edits={composerEdits}
       onSend={(text) => void sendText(text)}
     />
+  {/if}
+  {#if showComposer && canPrompt && bgEntry === null && viewing === null}
+    <!-- Review w13-9: Send later's waiting prompts, with a cancel each. A new
+         turn may be one of them going out, so it reads again on each. -->
+    <ScheduledPrompts sessionId={session.id} refreshKey={scheduledKey + (session.turn_seq ?? 0)} />
   {/if}
   {#if held.length > 0 && showComposer && canPrompt && bgEntry === null}
     <div class="held-lines" data-testid="conv-held-lines">
@@ -3266,6 +3334,7 @@
     blocked={sendLaterBlocked}
     onscheduled={(m) => {
       if (draft.trim() === m) draft = '';
+      scheduledKey++;
     }}
     onclose={() => {
       sendLaterOpen = false;

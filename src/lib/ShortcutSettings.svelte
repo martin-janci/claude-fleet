@@ -3,14 +3,13 @@
   // chord in the shortcut registry (`shortcuts.ts`, step 0.3), Mac beside
   // Windows and Linux, grouped by where it works. Read-only: the registry is
   // the one source, so this list cannot drift from what the keys do.
-  import { SCOPE_TITLES, SHORTCUTS, bindingsFor, formatBinding, type Scope, type Shortcut } from './shortcuts';
+  import { SCOPE_TITLES, SHORTCUTS, chordText, type Scope, type Shortcut } from './shortcuts';
 
   let query = $state('');
 
-  const chords = (s: Shortcut, isMac: boolean) =>
-    bindingsFor(s, isMac)
-      .map((b) => formatBinding(b, isMac))
-      .join(' · ');
+  // The same text as the `?` sheet (review w18-9): the advertised chord of a
+  // global row, a range for ⌘1–9.
+  const chords = (s: Shortcut, isMac: boolean) => chordText(s, isMac, ' · ');
 
   const groups = $derived.by(() => {
     const q = query.trim().toLowerCase();
@@ -58,7 +57,7 @@
     <p class="none">No shortcut matches.</p>
   {/each}
   <p class="note">
-    Single keys act only when no text box has focus. Every key from 0.5.3 does what it did then.
+    Single keys act only when no text box has focus.
   </p>
 </section>
 

@@ -373,6 +373,20 @@
   ];
   let filters = $state<Filter[]>([]);
   let filtersOpen = $state(false);
+  let filterMenuEl: HTMLDivElement | undefined = $state();
+  // The Filters menu closes on Esc and on a press outside it (review
+  // w18-11), as ControlPlusMenu does: Esc is the menu's, not App's (which
+  // would leave Automation), and focus goes back to its trigger.
+  function onFilterMenuKey(e: KeyboardEvent) {
+    if (!filtersOpen || e.key !== 'Escape') return;
+    e.preventDefault();
+    e.stopPropagation();
+    filtersOpen = false;
+    filterMenuEl?.querySelector<HTMLElement>('[data-testid="routine-filters"]')?.focus();
+  }
+  function onDocPointerDown(e: PointerEvent) {
+    if (filtersOpen && filterMenuEl && !filterMenuEl.contains(e.target as Node)) filtersOpen = false;
+  }
   let grouping = $state<'owner' | 'state'>('owner');
 
   interface Item {
@@ -467,6 +481,8 @@
   const pauseAt = $derived(settingInt($fleetSettings, SETTING_KEYS.accountsPauseAt));
 </script>
 
+<svelte:document onpointerdown={onDocPointerDown} />
+
 {#snippet row(it: Item)}
   <li>
     <button
@@ -500,7 +516,8 @@
       </div>
     {/if}
     <div class="filters">
-      <div class="filter-menu">
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div class="filter-menu" bind:this={filterMenuEl} onkeydown={onFilterMenuKey}>
         <Button testid="routine-filters" onclick={() => (filtersOpen = !filtersOpen)}
           ><Icon name="filter" size={12} />Filters{#if filters.length}{' '}<Count n={filters.length} />{/if}</Button
         >

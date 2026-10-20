@@ -71,9 +71,4 @@ pub use self::sharing::*;
 pub use self::targeting::*;
 pub use self::terminals::*;
 
-fn now_unix() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
+use crate::store::now_unix;

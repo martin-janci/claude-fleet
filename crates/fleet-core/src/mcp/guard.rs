@@ -1870,12 +1870,12 @@ pub const OPERATOR_PROMPT_TOOLS: &[&str] =
 pub const OPERATOR_START_TOOLS: &[&str] = &["new_session", "dispatch_task", "work_link"];
 
 /// Session care (`control.session_care`, on by default): the operator's
-/// calls that look after a session it started itself (a session it only
-/// briefed is still the person's). `restart_session` (a wedged REPL, or back
-/// under another login after a limit) goes without a card at "Within your
-/// brief" and "Autopilot", at most [`CARE_RESTARTS_PER_HOUR`] times an hour
-/// per session; `safe_kill_session` (commit and push, then retire) at
-/// "Autopilot" only.
+/// calls that look after a session it started itself (not one it only
+/// briefed; [`OperatorFacts::own_start`]). `restart_session`
+/// (a wedged REPL, or back under another login after a limit) goes without a
+/// card at "Within your brief" and "Autopilot", at most
+/// [`CARE_RESTARTS_PER_HOUR`] times an hour per session; `safe_kill_session`
+/// (commit and push, then retire) at "Autopilot" only.
 pub const OPERATOR_CARE_TOOLS: &[&str] = &["restart_session", "safe_kill_session"];
 
 /// How many card-free care restarts one session gets in an hour: a session
@@ -1926,10 +1926,13 @@ pub fn operator_gated(name: &str) -> bool {
 /// At **Ask first** (and **Custom**, which grants what Ask first does) every
 /// gated tool asks, as before. **Within your brief** lets a prompt or task
 /// to an open handoff through ([`OPERATOR_PROMPT_TOOLS`]). **Autopilot** also
-/// lets a start inside a grant through ([`OPERATOR_START_TOOLS`]). Kills,
-/// restarts, rewinds, restores, new projects and every `confirm: true` tool
-/// ask at every position. This reverses review round 15, F21 for those two
-/// cases only (the 2026-10-17 review's F2, approved by the owner).
+/// lets a start inside a grant through ([`OPERATOR_START_TOOLS`]). This
+/// function passes no session care, so here kills, restarts, rewinds,
+/// restores, new projects and every `confirm: true` tool ask at every
+/// position; [`operator_must_confirm_with`] adds session care's exception
+/// for [`OPERATOR_CARE_TOOLS`] on a session Control started itself. This
+/// reverses review round 15, F21 for those cases only (the 2026-10-17
+/// review's F2, approved by the owner).
 pub fn operator_must_confirm(
     name: &str,
     position: crate::service::autonomy::Position,
@@ -1950,7 +1953,8 @@ pub fn operator_must_confirm(
 }
 
 /// [`operator_must_confirm`] with session care in the facts: with it on,
-/// [`OPERATOR_CARE_TOOLS`] on an open handoff go without a card as that
+/// [`OPERATOR_CARE_TOOLS`] on a session Control started itself
+/// ([`OperatorFacts::own_start`]) go without a card as that
 /// list says. `work_link` is `confirm: true` for its tidy kills, so a start
 /// target is the only way it goes without a card.
 pub fn operator_must_confirm_with(

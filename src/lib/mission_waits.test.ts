@@ -1,7 +1,7 @@
 // G1.6: missions waiting on a person, as the Inbox and Today read them.
 import { describe, it, expect } from 'vitest';
 import { get } from 'svelte/store';
-import { loadWaitingMissions, waitingMissions, waitingOf, waitWords } from './mission_waits';
+import { loadWaitingMissions, waitingMissions, waitingOf, waitWords, missionInScope } from './mission_waits';
 import type { Mission } from './missions';
 
 const m = (id: number, over: Partial<Mission> = {}): Mission => ({
@@ -39,5 +39,16 @@ describe('mission waits', () => {
     waitingMissions.set(waitingOf([m(1, { waiting_on: { reason: 'confirm', since: 1, open_cards: 1 } })]));
     await loadWaitingMissions(async () => ({ ok: false, error: { code: 'E_INVALID', message: 'no' } }) as never);
     expect(get(waitingMissions)).toEqual([]);
+  });
+});
+
+describe('missionInScope (review w11-9)', () => {
+  it('scopes a waiting mission by its org, as Today does', () => {
+    expect(missionInScope({ org_id: 1 }, 'all')).toBe(true);
+    expect(missionInScope({ org_id: 1 }, 'org:1')).toBe(true);
+    expect(missionInScope({ org_id: 1 }, 'org:2')).toBe(false);
+    expect(missionInScope({ org_id: null }, 'org:2')).toBe(false);
+    expect(missionInScope({ org_id: null }, 'unassigned')).toBe(true);
+    expect(missionInScope({ org_id: 1 }, 'unassigned')).toBe(false);
   });
 });

@@ -47,6 +47,10 @@
   let total = $state(0);
   let loaded = $state(false);
   let loadError = $state<IpcError | null>(null);
+  /** Review w17-7: a re-read of the list shown failed; the list stays. */
+  let refreshError = $state<IpcError | null>(null);
+  /** The filter the items shown were read for. */
+  let shownFilter: PrFilter | null = null;
   /** Fleets whose hub could not answer while others did (review w01-7):
    *  said above the list, so it never looks complete when it is not. */
   let fleetErrors = $state<{ label: string; message: string }[]>([]);
@@ -65,7 +69,8 @@
     // The primary alone failing is the page's error; beside extra fleets it
     // is one fleet's note, and theirs stay on screen.
     if (r && !r.ok && extras.length === 0) {
-      loadError = r.error;
+      if (shownFilter === filter && !loadError) refreshError = r.error;
+      else loadError = r.error;
       return;
     }
     const failed: { label: string; message: string }[] = [];
@@ -90,6 +95,8 @@
     total = count;
     fleetErrors = failed;
     loadError = null;
+    refreshError = null;
+    shownFilter = filter;
   }
 
   // The fleet filter moved: re-read for the fleets it now shows.
@@ -105,6 +112,11 @@
   function pick(f: PrFilter) {
     if (f === filter) return;
     filter = f;
+    // Review w17-12: the old filter's list never stands under the new tab;
+    // the skeleton shows (after its delay) until the hub answers.
+    loaded = false;
+    loadError = null;
+    refreshError = null;
     void load();
   }
 
@@ -191,6 +203,12 @@
       {filter === 'all' ? 'No pull requests yet. A session’s PR shows here once fleet sees it.' : `No ${filter} pull requests.`}
     </p>
   {:else}
+    {#if refreshError}
+      <p class="refresh-error" role="status" data-testid="work-prs-refresh-error">
+        Couldn't refresh ({readErrorText(refreshError)}) — showing what was loaded.
+        <button class="btn btn--quiet" type="button" data-testid="work-prs-refresh-retry" onclick={() => void load()}>Retry</button>
+      </p>
+    {/if}
     <ul class="items">
       {#each items as pr (`${pr.fleet?.id ?? PRIMARY}:${pr.id}`)}
         {@const checks = prChecksLabel(pr)}
@@ -324,6 +342,11 @@
   }
   .link:hover {
     text-decoration: underline;
+  }
+  .refresh-error {
+    margin: 0;
+    font-size: var(--text-2xs);
+    color: var(--usage-warn);
   }
   .muted {
     color: var(--fg-muted);
