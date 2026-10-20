@@ -1913,20 +1913,31 @@ impl FleetTools {
         if position.is_ask_first() {
             return Ok((position, guard::OperatorFacts::default()));
         }
-        let own = match target {
+        let open = match target {
             GateTarget::Session(id) => s
                 .is_open_control_handoff(id)
                 .map_err(|e| to_mcp_err(IpcError::from(e)))?,
             _ => false,
         };
+        // A prompt goes only into an open handoff Control still FOLLOWS
+        // (review w04-4): a thread the person muted, whose pull request
+        // merged, that is done or went quiet is no longer "within your
+        // brief". Session care is not narrowed: a wedged session is quiet.
+        let own = match target {
+            GateTarget::Session(id) if open => {
+                crate::service::control_follow::session_followed(&s, id, crate::store::now_unix())
+            }
+            _ => false,
+        };
         let own_start = match target {
-            GateTarget::Session(id) if own => s
+            GateTarget::Session(id) if open => s
                 .is_control_started_session(id)
                 .map_err(|e| to_mcp_err(IpcError::from(e)))?,
             _ => false,
         };
+        // Pause all stops every grant-covered start too (review w04-5).
         let grant = match target {
-            GateTarget::Start { host } => s
+            GateTarget::Start { host } if !crate::service::loops::paused(&s) => s
                 .start_inside_mission_grant(host, crate::store::now_unix())
                 .map_err(to_mcp_err)?,
             _ => false,

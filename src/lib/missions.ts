@@ -409,6 +409,13 @@ export function finalMoveQuestion(name: string, to: string): string {
 }
 
 /** A mission that no longer changes. */
+/** Why a mission waits on a person, in words (`MissionWait.reason`). */
+export const WAIT_WORDS: Record<string, string> = {
+  question: 'Asks a question',
+  sign_grant: 'Grant needs signing',
+  confirm: 'A step waits for your OK',
+};
+
 export function isFinal(state: string): boolean {
   return state === 'completed' || state === 'failed' || state === 'cancelled';
 }

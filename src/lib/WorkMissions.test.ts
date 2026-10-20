@@ -18,6 +18,7 @@ import { get } from 'svelte/store';
 import { sessions as sessionStore } from './sessions';
 import { session } from './hosts_fixture';
 import { clearSelection, selectedSession, selectedTaskId, taskFocused } from './selection';
+import { outbox } from './outbox';
 import {
   filterMissions,
   missionFilterChoices,
@@ -97,6 +98,7 @@ const item = (id: number, title: string) => ({
 beforeEach(() => {
   localStorage.removeItem('cf:pref:work.missions.view');
   resetMissionRoomForTests();
+  outbox.resetForTests();
 });
 
 /** Work → Missions as the app draws it: the sidebar's list and the room. */
@@ -1173,6 +1175,22 @@ describe('WorkMissions', () => {
       await flush();
       expect(calls('send_prompt')).toHaveLength(0);
       expect((screen.getByTestId('mission-steer-send') as HTMLButtonElement).disabled).toBe(false);
+    });
+
+    it('while Control is mid-turn the box stays open and Send waits (w04-12)', async () => {
+      const { operatorSession } = await import('./operator');
+      const working = { ...operator, claude_status: 'working' as const };
+      sessionStore.set([working]);
+      operatorSession.set(working);
+      await openIt();
+      const box = screen.getByTestId('mission-steer-input') as HTMLTextAreaElement;
+      expect(box.disabled).toBe(false);
+      await fireEvent.input(box, { target: { value: 'pause it' } });
+      await fireEvent.keyDown(box, { key: 'Enter' });
+      await flush();
+      expect(calls('send_prompt')).toHaveLength(0);
+      expect((screen.getByTestId('mission-steer-send') as HTMLButtonElement).disabled).toBe(true);
+      expect(screen.getByTestId('mission-steer-busy').textContent).toContain('mid-turn');
     });
 
     it('with no Control agent the composer is off and says why', async () => {

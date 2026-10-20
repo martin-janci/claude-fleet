@@ -64,6 +64,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { fleetSettings, SETTING_DEFAULTS } from './fleet_settings';
 import type { PickedFile } from './attachments';
 import { outbox } from './outbox';
+import { resetHeldForTests } from './composer_hold';
 import { toasts, clearToasts } from './toasts';
 
 const REMOTE: HubStatus = {
@@ -168,6 +169,7 @@ beforeEach(() => {
   composerDrafts.clear();
   scrollMemory.clear();
   outbox.resetForTests();
+  resetHeldForTests();
   composerPresets.set([
     { label: 'Clear', text: '/clear' },
     { label: 'Compact', text: '/compact' },
@@ -888,6 +890,37 @@ describe('ConversationPanel composer', () => {
     await settle();
     expect(mockedSend).toHaveBeenCalledWith('local', 'ctl', 'while you work');
     expect(screen.queryByTestId('conv-held')).toBeNull();
+  });
+
+  it('a held line survives leaving Control and a move to a new row (w04-6)', async () => {
+    mockedConv.mockReturnValue(ok(conv()));
+    mockedSend.mockResolvedValue({ ok: true, value: undefined });
+    const row = session({ claude_status: 'working' });
+    sessions.set([row]);
+    const first = render(ConversationPanel, { session: row, visible: true, blockWhileBusy: true });
+    await settle();
+    const box = screen.getByTestId('conv-composer-input') as HTMLTextAreaElement;
+    await fireEvent.input(box, { target: { value: 'keep me' } });
+    await fireEvent.keyDown(box, { key: 'Enter' });
+    await settle();
+    first.unmount();
+    // Another conversation (not gated) never takes Control's lines.
+    const other = render(ConversationPanel, { session: row, visible: true });
+    await settle();
+    expect(screen.queryByTestId('conv-held')).toBeNull();
+    other.unmount();
+    // Control again, on a new row after a move: the line is still queued.
+    const moved: SessionRow = { ...row, id: row.id + 100 };
+    sessions.set([moved]);
+    const back = render(ConversationPanel, { session: moved, visible: true, blockWhileBusy: true });
+    await settle();
+    expect(screen.getByTestId('conv-held').textContent).toContain('keep me');
+    const idle: SessionRow = { ...moved, claude_status: 'idle' };
+    sessions.set([idle]);
+    await back.rerender({ session: idle, visible: true, blockWhileBusy: true });
+    await settle();
+    await settle();
+    expect(mockedSend).toHaveBeenCalledWith('local', 'ctl', 'keep me');
   });
 
   it('cancel takes a held line back into the box', async () => {

@@ -4,13 +4,14 @@
   graph" opens that mission here, with its state, progress and the full
   task graph (MissionGraph, read-only as it is in Work); a live session on
   it opens in the Session tab. With no mission chosen it lists the
-  missions. The mission itself is edited in Work ("Open in Work ↗").
+  missions. The mission itself is edited in its Mission room ("Open mission
+  room ↗"); one that waits on the person says on what, with "Answer ›".
 -->
 <script lang="ts">
   import { onDestroy } from 'svelte';
   import MissionGraph from './MissionGraph.svelte';
   import StatusDot from './kit/StatusDot.svelte';
-  import { getMission, listMissions, openMission, progressLabel, stateLabel, type Mission, type MissionDetail } from './missions';
+  import { getMission, isFinal, listMissions, openMission, progressLabel, stateLabel, WAIT_WORDS, type Mission, type MissionDetail } from './missions';
   import { defaultLaneBy, type LaneBy } from './mission_graph';
   import { workState } from './handoffs';
   import { onWorkChangedDebounced } from './work';
@@ -58,6 +59,13 @@
   onDestroy(stop);
 
   const lane = $derived(laneBy ?? (detail ? defaultLaneBy(detail) : 'none'));
+
+  /** What the mission waits on, in words, while it is not finished. */
+  function waitOf(m: Mission): string | null {
+    if (!m.waiting_on || isFinal(m.state)) return null;
+    return WAIT_WORDS[m.waiting_on.reason] ?? 'Waits on you';
+  }
+  const wait = $derived(detail ? waitOf(detail.mission) : null);
 </script>
 
 <div class="missions" data-testid="control-missions-view">
@@ -66,17 +74,28 @@
       <button type="button" class="back" data-testid="control-mission-back" onclick={() => controlMission.set(null)}>‹ Missions</button>
       {#if detail}
         <div class="title-row">
-          <StatusDot state={workState(detail.mission.state)} />
+          <StatusDot state={wait ? 'waiting' : workState(detail.mission.state)} />
           <span class="name" data-testid="control-mission-name">{detail.mission.name}</span>
           <button
             type="button"
             class="link"
             data-testid="control-mission-work"
-            title="Open the mission in Work, where it is edited"
-            onclick={() => openMission(detail!.mission.id)}>Open in Work ↗</button
+            title="Open the mission's room, where it is edited and answered"
+            onclick={() => openMission(detail!.mission.id)}>Open mission room ↗</button
           >
         </div>
         <span class="meta">{stateLabel(detail.mission.state, detail.phase)} · {progressLabel(detail.mission)}</span>
+        {#if wait}
+          <div class="wait" data-testid="control-mission-wait">
+            <span>{wait}</span>
+            <button
+              type="button"
+              class="btn btn--primary"
+              data-testid="control-mission-answer"
+              onclick={() => openMission(detail!.mission.id)}>Answer ›</button
+            >
+          </div>
+        {/if}
       {/if}
     </div>
     {#if error}
@@ -101,7 +120,7 @@
       {#each list as m (m.id)}
         <li>
           <button type="button" class="row" data-testid="control-mission-row" onclick={() => controlMission.set(m.id)}>
-            <StatusDot state={m.waiting_on ? 'waiting' : workState(m.state)} />
+            <StatusDot state={waitOf(m) ? 'waiting' : workState(m.state)} />
             <span class="name">{m.name}</span>
             <span class="meta">{progressLabel(m)}</span>
           </button>
@@ -123,6 +142,12 @@
     gap: var(--space-1);
     padding: var(--space-2) var(--space-3);
     border-bottom: 1px solid var(--border);
+  }
+  .wait {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    color: var(--status-waiting);
   }
   .title-row {
     display: flex;
