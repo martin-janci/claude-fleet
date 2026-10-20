@@ -1425,10 +1425,22 @@ impl FleetRunner {
         answer: &Value,
         now: i64,
     ) -> Value {
-        let (planned, unplanned) =
+        let (mut planned, mut unplanned) =
             super::actions::plan(inst, rule.id, &rule.scope, subject, answer, now);
         let s = lock(&self.store).ok();
         let mut out: Vec<Value> = Vec::new();
+        if let Some(s) = &s {
+            planned.retain_mut(|p| match with_current_setting(s, p) {
+                Ok(()) => true,
+                Err(why) => {
+                    unplanned.push(super::actions::Unplanned {
+                        id: p.id.clone(),
+                        why,
+                    });
+                    false
+                }
+            });
+        }
         for p in &planned {
             let state = match (rule.level.as_str(), &s) {
                 ("watch", _) => "kept".to_string(),
@@ -1531,4 +1543,36 @@ impl AgentRunner for FleetRunner {
             },
         }
     }
+}
+
+/// A `setting` action as a person reads it: `was` filled with the key's
+/// current value and the body saying "from → to", so the Inbox shows
+/// whether it goes up or down (review w08-5). `Err` (the action is
+/// skipped) when the setting already has that value. Any other action is
+/// left as it is.
+pub(super) fn with_current_setting(
+    s: &Store,
+    p: &mut super::actions::Planned,
+) -> Result<(), String> {
+    if p.kind != "setting" {
+        return Ok(());
+    }
+    let Ok(mut payload) = serde_json::from_str::<super::actions::SettingPayload>(&p.payload) else {
+        return Ok(());
+    };
+    let Some(was) = crate::service::settings::effective_value(s, &payload.key) else {
+        return Ok(());
+    };
+    if was.trim() == payload.value.trim() {
+        return Err(format!("{} is already {}", payload.key, payload.value));
+    }
+    let label = crate::service::settings::spec(&payload.key).map_or("", |sp| sp.label);
+    payload.body = format!(
+        "{label} ({}): {was} → {}\n\n{}",
+        payload.key, payload.value, payload.why
+    );
+    payload.was = was;
+    p.body.clone_from(&payload.body);
+    p.payload = serde_json::to_string(&payload).unwrap_or_default();
+    Ok(())
 }

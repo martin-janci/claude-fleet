@@ -67,6 +67,7 @@ actions:
     each: findings
     when: { field: next, eq: task }
     do: work_task
+    fingerprint: "{{item.fingerprint}}"
     summary: "{{item.title}}"
     body: "{{item.cause}}\n\nFix: {{item.fix}}\n\nFingerprint: {{item.fingerprint}}"
     steps: "{{item.steps}}"
@@ -74,6 +75,7 @@ actions:
     each: findings
     when: { field: next, eq: fix }
     do: fix_session
+    fingerprint: "{{item.fingerprint}}"
     project: "{{item.project}}"
     host: "{{item.host}}"
     summary: "{{item.title}}"
@@ -82,6 +84,7 @@ actions:
     each: findings
     when: { field: next, eq: setting }
     do: setting
+    fingerprint: "{{item.fingerprint}}"
     key: "{{item.settingKey}}"
     value: "{{item.settingValue}}"
     body: "{{item.title}}: {{item.cause}}"
@@ -89,12 +92,14 @@ actions:
     each: findings
     when: { field: next, eq: recover }
     do: session_recover
+    fingerprint: "{{item.fingerprint}}"
     target: "{{item.session}}"
     host: "{{item.host}}"
     body: "{{item.title}}: {{item.cause}}"
   - id: issue
     when: { all: [ { field: fileIssue, truthy: true }, { field: topTitle, truthy: true } ] }
     do: tracker_issue
+    fingerprint: "{{item.fingerprint}}"
     tracker: "{{issue_tracker}}"
     project: "{{issue_project}}"
     summary: "{{answer.topTitle}}"

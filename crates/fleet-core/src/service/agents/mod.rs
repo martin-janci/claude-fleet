@@ -144,6 +144,9 @@ pub trait AgentRunner: Send + Sync {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ActionResult {
     Executed,
+    /// It ran, and this line says what it made (`created task 42`,
+    /// `started fix-x on mercury`); kept on the row so the person sees it.
+    Done(String),
     /// It ran and failed; the reason is kept.
     Failed(String),
     /// It no longer applies (the head moved, the ticket closed); not run.
@@ -456,6 +459,7 @@ pub async fn execute_approved(store: &Mutex<Store>, reg: &Registry) -> usize {
         let result = exec.execute(&action).await;
         let (state, error) = match &result {
             ActionResult::Executed => ("executed", None),
+            ActionResult::Done(line) => ("executed", Some(line.as_str())),
             ActionResult::Failed(e) => ("failed", Some(e.as_str())),
             ActionResult::Expired(e) => ("expired", Some(e.as_str())),
         };

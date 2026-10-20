@@ -109,7 +109,17 @@ pub struct AgentsStatus {
     pub jobs: Vec<AgentJobRow>,
     /// Actions waiting for a person.
     pub pending: Vec<AgentActionRow>,
+    /// Actions a person approved that ran (or failed) in the last
+    /// [`RECENT_WINDOW_SECS`], newest first, at most [`RECENT_MAX`]: an
+    /// executed one's `error` says what it made, a failed one's why.
+    #[serde(default)]
+    pub recent: Vec<AgentActionRow>,
 }
+
+/// How far back `status.recent` reaches.
+pub const RECENT_WINDOW_SECS: i64 = 24 * 3600;
+/// Most rows `status.recent` carries.
+pub const RECENT_MAX: usize = 5;
 
 /// What a rule write answers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -316,6 +326,9 @@ pub fn status(store: &Mutex<Store>, args: &AgentsArgs, now: i64) -> Result<Agent
             .list_agent_jobs(args.agent.as_deref(), limit)
             .map_err(db)?,
         pending: s.list_agent_actions(Some("pending"), limit).map_err(db)?,
+        recent: s
+            .recent_decided_agent_actions(now - RECENT_WINDOW_SECS, RECENT_MAX)
+            .map_err(db)?,
     })
 }
 

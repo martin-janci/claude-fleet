@@ -730,6 +730,25 @@ impl Store {
         rows.collect()
     }
 
+    /// The actions a person approved that were carried out (`executed`,
+    /// with what they made in `error`) or failed since `since`, newest
+    /// first: what the Inbox shows after Approve. A rule's own (`act`)
+    /// actions are left out.
+    pub fn recent_decided_agent_actions(
+        &self,
+        since: i64,
+        limit: usize,
+    ) -> Result<Vec<AgentActionRow>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {ACTION_COLS} FROM agent_actions \
+             WHERE state IN ('executed', 'failed') AND executed_at >= ?1 \
+               AND decided_by IS NOT NULL AND decided_by NOT LIKE 'rule:%' \
+             ORDER BY executed_at DESC, id DESC LIMIT ?2"
+        ))?;
+        let rows = stmt.query_map(params![since, limit as i64], action_row)?;
+        rows.collect()
+    }
+
     /// A person's answer to a pending action: `approved` or `rejected`.
     /// Only a `pending` action changes; the answer is the row as it is
     /// afterwards, or `None` when no action has that id.

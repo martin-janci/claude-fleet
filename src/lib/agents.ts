@@ -96,6 +96,10 @@ export interface AgentsStatus {
   jobs: AgentJob[];
   /** Actions waiting for a person. */
   pending: AgentAction[];
+  /** Actions a person approved that ran or failed in the last day, newest
+   *  first: an executed one's `error` is what it made (`created task 42`),
+   *  a failed one's is why. Absent from a hub older than review w08. */
+  recent?: AgentAction[];
 }
 
 export function agentsStatus(
@@ -191,6 +195,20 @@ export const agents = writable<AgentsStatus | null>(null);
 
 /** The actions waiting for a person: the Inbox's Needs you carries them. */
 export const pendingAgentActions = derived(agents, ($a) => $a?.pending ?? []);
+/** What the person's recent approvals came to: under the pending ones. */
+export const recentAgentOutcomes = derived(agents, ($a) => $a?.recent ?? []);
+
+/** "Done: Create the task Flaky reconnect — created task 42", or
+ *  "Failed: … — why". */
+export function actionOutcome(
+  a: Pick<AgentAction, "kind" | "payload" | "state" | "error">,
+): string {
+  const what = actionTitle(a);
+  const line = a.error?.trim();
+  const head = a.state === "failed" ? "Failed" : "Done";
+  return line ? `${head}: ${what} — ${line}` : `${head}: ${what}`;
+}
+
 export const pendingAgentCount = derived(
   pendingAgentActions,
   ($p) => $p.length,
