@@ -692,6 +692,55 @@ fn a_late_or_replayed_report_never_overwrites_a_newer_attempt() {
     assert_eq!(observed().0, "a3");
 }
 
+/// w26-2: the reason a candidate failed survives the rollback that follows.
+#[test]
+fn a_rollback_keeps_the_failed_reports_reason() {
+    let store = Mutex::new(Store::open_in_memory().unwrap());
+    let c = client(1, TokenMode::Full, None);
+    let mut failed = desktop_report("a1", UpdatePhase::Failed, "0.3.4");
+    failed.error = Some("reconcile failures rose from 0 to 3".into());
+    assert!(report(&store, &c, &failed, NOW).unwrap());
+    for (i, p) in [UpdatePhase::RollingBack, UpdatePhase::Recovered]
+        .into_iter()
+        .enumerate()
+    {
+        assert!(report(
+            &store,
+            &c,
+            &desktop_report("a1", p, "0.3.3"),
+            NOW + 1 + i as i64
+        )
+        .unwrap());
+    }
+    let o = lock(&store)
+        .unwrap()
+        .update_observed("client:1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(o.phase, "recovered");
+    assert_eq!(
+        o.last_error.as_deref(),
+        Some("reconcile failures rose from 0 to 3")
+    );
+    // A new attempt starts clean.
+    assert!(report(
+        &store,
+        &c,
+        &desktop_report("a2", UpdatePhase::Recovered, "0.3.3"),
+        NOW + 9
+    )
+    .unwrap());
+    assert_eq!(
+        lock(&store)
+            .unwrap()
+            .update_observed("client:1")
+            .unwrap()
+            .unwrap()
+            .last_error,
+        None
+    );
+}
+
 /// r18-U6: within one attempt, a delayed earlier phase is logged, not state.
 #[test]
 fn a_late_earlier_phase_of_the_same_attempt_does_not_move_it_back() {
@@ -2120,6 +2169,12 @@ async fn update_now_pins_as_required_and_names_the_agents_to_wake() {
     let r = update_now(&store, "desktop", "", None, &k, NOW).unwrap();
     assert_eq!((r.pin.version.as_str(), r.pin.mandatory), ("0.3.4", true));
     assert!(r.agents.is_empty());
+    assert!(r.note.contains("lifts itself"), "{}", r.note);
+    // No updater has ever checked in for the hub: nothing is woken (w26-8).
+    let r = update_now(&store, "hub", "", None, &k, NOW).unwrap();
+    assert!(!r.hub_woken);
+    assert!(r.note.contains("No updater"), "{}", r.note);
+    unpin(&store, "hub", "").unwrap();
     let d = check(
         &store,
         &client(1, TokenMode::Full, None),
@@ -2159,4 +2214,111 @@ async fn update_now_pins_as_required_and_names_the_agents_to_wake() {
     let empty = Mutex::new(Store::open_in_memory().unwrap());
     let e = update_now(&empty, "desktop", "", None, &k, NOW).unwrap_err();
     assert_eq!(e.code, codes::E_UPDATE_UNVERIFIED);
+}
+
+// ── review w26-5 / w26-6 ──
+
+/// `publish`, with `store.schema_to` in each release's manifest.
+fn publish_with_schemas(fetch: &MapFetch, key: &TestKey, schemas: [(&str, i64); 2]) {
+    let hub_contract = crate::wire_contract::CONTRACT_REVISION;
+    let mut releases = Vec::new();
+    for (v, schema_to) in schemas {
+        let mut m: serde_json::Value = serde_json::from_str(&manifest_json(
+            v,
+            hub_contract,
+            [hub_contract, hub_contract],
+            1,
+            [1, 1],
+        ))
+        .unwrap();
+        m["compatibility"]["store"] =
+            serde_json::json!({"schema_to": schema_to, "opens_down_to": 1});
+        let m = m.to_string();
+        let url = format!("https://github.com/martin-janci/claude-fleet/releases/download/v{v}/release-manifest.json");
+        fetch.put(&url, &m);
+        fetch.put(&format!("{url}.minisig"), &key.sign(m.as_bytes()));
+        releases.push(serde_json::json!({"version": v, "manifest": url, "manifest_sha256": sha256_hex(m.as_bytes())}));
+    }
+    let ch = serde_json::json!({
+        "schema": 1, "track": "stable", "sequence": 10,
+        "generated_at": "2026-09-30T00:00:00Z", "expires_at": "2026-10-14T00:00:00Z",
+        "current": "0.3.4", "recommended": "0.3.4", "rollback": "0.3.3",
+        "releases": releases
+    })
+    .to_string();
+    fetch.put(&format!("{BASE}stable.json"), &ch);
+    fetch.put(
+        &format!("{BASE}stable.json.minisig"),
+        &key.sign(ch.as_bytes()),
+    );
+}
+
+/// w26-6: a hub pin to a release that cannot open the database it would
+/// find is refused, not handed to the updater to fail and bad-list.
+#[tokio::test]
+async fn a_hub_pin_below_the_databases_schema_is_refused() {
+    let key = TestKey::new(9);
+    let k = keys(&key);
+    let store = Mutex::new(Store::open_in_memory().unwrap());
+    let db = lock(&store).unwrap().schema_version().unwrap();
+    let fetch = MapFetch::default();
+    publish_with_schemas(&fetch, &key, [("0.3.3", db - 5), ("0.3.4", db)]);
+    refresh(&store, &fetch, BASE, &k, NOW).await.unwrap();
+
+    let e = pin_checked(&store, "hub", "", "0.3.3", false, None, &k, NOW).unwrap_err();
+    assert_eq!(e.code, codes::E_INVALID);
+    assert!(e.message.contains("cannot open"), "{}", e.message);
+    assert!(lock(&store)
+        .unwrap()
+        .update_desired_all()
+        .unwrap()
+        .is_empty());
+    let e = update_now(&store, "hub", "", Some("0.3.3"), &k, NOW).unwrap_err();
+    assert_eq!(e.code, codes::E_INVALID);
+
+    // A release that opens it is pinned; other parts have no hub database.
+    pin_checked(&store, "hub", "", "0.3.4", false, None, &k, NOW).unwrap();
+    pin_checked(&store, "desktop", "", "0.3.3", false, None, &k, NOW).unwrap();
+}
+
+/// w26-5: `update_now`'s pin is lifted once its version is in and healthy;
+/// an operator's own pin stays.
+#[tokio::test]
+async fn an_update_now_pin_is_lifted_once_its_version_succeeds() {
+    let key = TestKey::new(9);
+    let (store, _) = published_store(&key).await;
+    let k = keys(&key);
+    let c = client(1, TokenMode::Full, None);
+    check(&store, &c, &desktop_req("0.3.3"), &k, NOW).unwrap();
+    update_now(&store, "desktop", "client:1", None, &k, NOW).unwrap();
+    let pins = || lock(&store).unwrap().update_desired_all().unwrap();
+    assert_eq!(pins().len(), 1);
+    // In flight, and a success of some other version, keep it.
+    report(
+        &store,
+        &c,
+        &desktop_report("a1", UpdatePhase::Installing, "0.3.3"),
+        NOW + 1,
+    )
+    .unwrap();
+    assert_eq!(pins().len(), 1);
+    report(
+        &store,
+        &c,
+        &desktop_report("a1", UpdatePhase::Success, "0.3.4"),
+        NOW + 2,
+    )
+    .unwrap();
+    assert!(pins().is_empty(), "{:?}", pins());
+
+    // The operator's own pin to the same version is not touched.
+    pin(&store, "desktop", "client:1", "0.3.4", false, None, NOW + 3).unwrap();
+    report(
+        &store,
+        &c,
+        &desktop_report("a2", UpdatePhase::Success, "0.3.4"),
+        NOW + 4,
+    )
+    .unwrap();
+    assert_eq!(pins().len(), 1);
 }
