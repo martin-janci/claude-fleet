@@ -98,7 +98,7 @@
         type="text"
         list="org-setting-keys"
         maxlength="128"
-        placeholder="sessions.max_parallel"
+        placeholder="budget.org_daily_usd"
         aria-label="Key"
         data-testid="org-setting-set-key"
         disabled={busy}

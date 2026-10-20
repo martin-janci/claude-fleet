@@ -3780,7 +3780,7 @@
         "min": 1,
         "type": "int"
       },
-      "label": "Download: file cap",
+      "label": "Downloads: largest file",
       "widgets": [
         "number",
         "readonly"
@@ -3794,7 +3794,7 @@
         "min": 1,
         "type": "int"
       },
-      "label": "Downloads: space",
+      "label": "Downloads: total space",
       "widgets": [
         "number",
         "readonly"

@@ -1278,7 +1278,7 @@ pub const SPECS: &[Spec] = &[
         "{}",
         Kind::PathMap,
         "Projects roots",
-        "Per-host folder that holds your repositories. A host with no entry uses $CLAUDE_FLEET_PROJECTS_BASE (local only), then the layout default.",
+        "Per-host folder that holds your repositories. A host with no entry uses this machine's default projects folder, then the layout default.",
     ),
     Spec::new(
         PROJECTS_LAYOUT,
@@ -1317,7 +1317,7 @@ pub const SPECS: &[Spec] = &[
         DOWNLOADS_MAX_FILE_MB,
         "100",
         Kind::Int { min: 1, max: 4096 },
-        "Download: file cap",
+        "Downloads: largest file",
         "Largest file a session can send to your devices; a bigger one is refused.",
     )
     .unit(Unit::Mib),
@@ -1328,7 +1328,7 @@ pub const SPECS: &[Spec] = &[
             min: 1,
             max: 1_048_576,
         },
-        "Downloads: space",
+        "Downloads: total space",
         "How much the kept downloads may take together. A new file pushes out the oldest ones.",
     )
     .unit(Unit::Mib),
@@ -1562,7 +1562,7 @@ pub const SPECS: &[Spec] = &[
         "90",
         Kind::Int { min: 50, max: 100 },
         "CPU busy at",
-        "Busy share of a host's CPUs at which the host reads as saturated, when two samples in a row reach it.",
+        "Busy share of a host's CPUs at which the host reads as saturated, when two samples in a row reach it. Sessions killed there wait to be brought back until it calms down.",
     )
     .unit(Unit::Percent)
     .tags(&[Tag::Advanced]),
@@ -1911,7 +1911,7 @@ pub const SPECS: &[Spec] = &[
         "Rollout wave soak",
         "How long each wave of a staged rollout runs before the next opens, if its failure ratio stays under the rollout's halt ratio.",
     )
-    .unit(Unit::Hours),
+    .unit(Unit::Minutes),
     Spec::new(
         UPDATE_MIRROR,
         "false",
@@ -2211,7 +2211,7 @@ pub const SPECS: &[Spec] = &[
         "",
         Kind::Text { max: 64 },
         "Second opinion: host",
-        "The host whose Claude account answers. Only questions about its own organisation are sent to it.",
+        "The host whose Claude account answers: the alias of a host in the fleet. Only questions about its own organisation are sent to it.",
     )
     .tags(&[Tag::Experimental]),
     Spec::new(
@@ -2276,7 +2276,7 @@ pub const SPECS: &[Spec] = &[
         "",
         Kind::Text { max: 8192 },
         "Jev: fitted floors",
-        "Per-feature confidence floors fitted from runs a person confirmed, corrected or rejected (fleet-hub decide floor fit). A fitted floor only raises a feature's built-in one, and only for the question version and model it was fitted against.",
+        "Confidence floors fitted from runs a person confirmed, corrected or rejected, written by fleet-hub decide floor fit --apply: not for editing by hand. A fitted floor only raises a feature's built-in one, for the question version and model it was fitted against.",
     )
     .tags(&[Tag::Advanced]),
     // ── read-only: owned and written elsewhere (D-P7) ──
@@ -2544,16 +2544,18 @@ pub fn validate(key: &str, value: &str) -> Result<(), IpcError> {
     let spec = spec(key)
         .ok_or_else(|| IpcError::new(codes::E_INVALID, format!("unknown setting {key}")))?;
     let v = value.trim();
+    // A person reads this beside the field, an agent beside the key: name both.
+    let who = format!("{} ({key})", spec.label);
     match spec.kind {
         Kind::Bool if v == "true" || v == "false" => Ok(()),
         Kind::Bool => Err(IpcError::new(
             codes::E_INVALID,
-            format!("{key} must be \"true\" or \"false\""),
+            format!("{who} must be \"true\" or \"false\""),
         )),
         Kind::Secs if v.parse::<u64>().is_ok_and(|n| n <= MAX_SECS) => Ok(()),
         Kind::Secs => Err(IpcError::new(
             codes::E_INVALID,
-            format!("{key} must be an integer number of seconds between 0 and {MAX_SECS}"),
+            format!("{who} must be an integer number of seconds between 0 and {MAX_SECS}"),
         )),
         Kind::SecsMin(min)
             if v.parse::<u64>()
@@ -2563,20 +2565,20 @@ pub fn validate(key: &str, value: &str) -> Result<(), IpcError> {
         }
         Kind::SecsMin(min) => Err(IpcError::new(
             codes::E_INVALID,
-            format!("{key} must be an integer number of seconds between {min} and {MAX_SECS}"),
+            format!("{who} must be an integer number of seconds between {min} and {MAX_SECS}"),
         )),
         Kind::Int { min, max } if v.parse::<u64>().is_ok_and(|n| (min..=max).contains(&n)) => {
             Ok(())
         }
         Kind::Int { min, max } => Err(IpcError::new(
             codes::E_INVALID,
-            format!("{key} must be an integer between {min} and {max}"),
+            format!("{who} must be an integer between {min} and {max}"),
         )),
         Kind::ChoiceSet(options) => parse_choice_set(key, options, v).map(|_| ()),
         Kind::Choice(options) if options.contains(&v) => Ok(()),
         Kind::Choice(options) => Err(IpcError::new(
             codes::E_INVALID,
-            format!("{key} must be one of: {}", options.join(", ")),
+            format!("{who} must be one of: {}", options.join(", ")),
         )),
         Kind::PathMap => parse_path_map(key, v).map(|_| ()),
         Kind::IdSet => parse_id_set(v)
@@ -2588,16 +2590,21 @@ pub fn validate(key: &str, value: &str) -> Result<(), IpcError> {
                 crate::service::decide::floor::parse(v)
                     .map_err(|e| IpcError::new(codes::E_INVALID, format!("{key}: {e}")))?;
             }
+            if key == DECIDE_HAIKU_HOST && !v.is_empty() {
+                crate::validate::host_alias_syntax(v).map_err(|e| {
+                    IpcError::new(codes::E_INVALID, format!("{who}: {}", e.message))
+                })?;
+            }
             Ok(())
         }
         Kind::Text { max } => Err(IpcError::new(
             codes::E_INVALID,
-            format!("{key} must be one line of at most {max} characters"),
+            format!("{who} must be one line of at most {max} characters"),
         )),
         Kind::TimeRange => parse_time_range(v).map(|_| ()).ok_or_else(|| {
             IpcError::new(
                 codes::E_INVALID,
-                format!("{key} must be a time range like 22:00-07:30, or empty for none"),
+                format!("{who} must be a time range like 22:00-07:30, or empty for none"),
             )
         }),
     }
@@ -3026,6 +3033,13 @@ pub fn set_by(
     proposal: Option<i64>,
 ) -> Result<(), IpcError> {
     let stored = normalize(key, value)?;
+    if key == DECIDE_HAIKU_HOST && !stored.is_empty() && s.get_host_row(&stored)?.is_none() {
+        // A host nobody has: the second opinion would quietly never be asked.
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            format!("no host called {stored}: the second opinion asks a host in the fleet"),
+        ));
+    }
     let before = if spec(key).is_some() {
         Some(s.get_setting(key)?)
     } else {
@@ -3332,6 +3346,37 @@ mod tests {
             "E_INVALID"
         );
         assert!(validate(PLAYBOOK_PRESS_ENTER, "true").is_ok());
+    }
+
+    /// Review w15-4: the refusal a row shows names the setting as the row
+    /// does, with the key beside it for an agent.
+    #[test]
+    fn a_refusal_names_the_setting_by_its_label() {
+        let e = validate(UPDATE_CHECK_INTERVAL_SECS, "1").unwrap_err();
+        assert!(
+            e.message
+                .starts_with("Update check interval (update.check_interval_secs) must be"),
+            "{}",
+            e.message
+        );
+    }
+
+    /// Review w15-11: a second-opinion host is an alias the fleet has; a
+    /// typo is refused instead of quietly never asking.
+    #[test]
+    fn the_second_opinion_host_must_be_a_known_host() {
+        assert_eq!(
+            validate(DECIDE_HAIKU_HOST, "no spaces").unwrap_err().code,
+            "E_INVALID"
+        );
+        assert!(validate(DECIDE_HAIKU_HOST, "").is_ok());
+        let s = Store::open_in_memory().unwrap();
+        let e = set(&s, DECIDE_HAIKU_HOST, "mercuy").unwrap_err();
+        assert_eq!(e.code, "E_INVALID");
+        assert!(e.message.contains("no host called mercuy"), "{}", e.message);
+        s.upsert_host("mercury").unwrap();
+        set(&s, DECIDE_HAIKU_HOST, "mercury").unwrap();
+        set(&s, DECIDE_HAIKU_HOST, "").unwrap();
     }
 
     #[test]

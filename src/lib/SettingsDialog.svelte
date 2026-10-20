@@ -1123,6 +1123,7 @@
             actions={$pagesBundle.actions}
             {focusKey}
             section={leaf?.section}
+            hideKeys={leaf?.panelKeys}
             proposals={$settingProposals}
             onnavigate={(id) => select(id)}
             onopen={(id, key) => select(id, key)} />

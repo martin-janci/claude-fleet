@@ -38,6 +38,12 @@ export interface SettingsLeaf {
   /** The leaf points at a rail view (marked ↗): its panel says what is there
    *  and opens it. Settings holds preferences, not that view's content. */
   elsewhere?: boolean;
+  /** Words a search finds this leaf by besides its label: what a
+   *  hand-written panel holds, which no page field describes. */
+  keywords?: string;
+  /** Settings the panel edits that `page` also lists: hidden from the page
+   *  under the panel, so they are not shown twice (review w15-7). */
+  panelKeys?: string[];
 }
 
 export interface SettingsGroup {
@@ -49,9 +55,20 @@ export const SETTINGS_TREE: readonly SettingsGroup[] = [
   {
     title: 'General',
     items: [
-      { id: 'appearance', label: 'Appearance', panel: 'appearance' },
-      { id: 'notifications', label: 'Notifications', panel: 'notifications', page: 'settings.notifications' },
-      { id: 'shortcuts', label: 'Shortcuts', panel: 'shortcuts' },
+      {
+        id: 'appearance',
+        label: 'Appearance',
+        panel: 'appearance',
+        keywords: 'theme dark light contrast accent colour color density motion badge tabs tour hints checklist copy on select',
+      },
+      {
+        id: 'notifications',
+        label: 'Notifications',
+        panel: 'notifications',
+        page: 'settings.notifications',
+        keywords: 'notify alerts sound stuck idle attention',
+      },
+      { id: 'shortcuts', label: 'Shortcuts', panel: 'shortcuts', keywords: 'keyboard keys hotkeys keybindings' },
       { id: 'voice', label: 'Voice', page: 'settings.limits', section: 'Voice' },
       { id: 'downloads', label: 'Downloads', page: 'settings.limits', section: 'Downloads' },
       { id: 'updates', label: 'Updates', page: 'settings.updates' },
@@ -66,6 +83,7 @@ export const SETTINGS_TREE: readonly SettingsGroup[] = [
         panel: 'composer',
         page: 'settings.limits',
         section: 'Sessions and tasks',
+        keywords: 'composer conversation',
       },
       {
         id: 'projects',
@@ -94,7 +112,7 @@ export const SETTINGS_TREE: readonly SettingsGroup[] = [
     items: [
       { id: 'work', label: 'Work & trackers', panel: 'work', page: 'settings.work' },
       { id: 'trackers', label: 'Trackers', page: 'settings.trackers' },
-      { id: 'ticket-keys', label: 'Ticket keys', panel: 'ticket-keys' },
+      { id: 'ticket-keys', label: 'Ticket keys', panel: 'ticket-keys', keywords: 'jira linear issue prefix' },
       { id: 'decisions', label: 'Decisions', page: 'settings.decisions' },
       { id: 'playbooks', label: 'Playbooks', page: 'settings.automation', section: 'Playbooks' },
       { id: 'catalogs', label: 'Catalogs', page: 'settings.catalogs' },
@@ -114,14 +132,22 @@ export const SETTINGS_TREE: readonly SettingsGroup[] = [
   {
     title: 'System',
     items: [
-      { id: 'hub', label: 'Hub & sync', panel: 'hub', page: 'settings.hub' },
-      { id: 'control-api', label: 'Control API', panel: 'mcp', page: 'settings.control_api' },
+      { id: 'hub', label: 'Hub & sync', panel: 'hub', page: 'settings.hub', keywords: 'pair pairing unpair url token server' },
+      {
+        id: 'control-api',
+        label: 'Control API',
+        panel: 'mcp',
+        page: 'settings.control_api',
+        keywords: 'mcp port token',
+        panelKeys: ['mcp.enabled', 'mcp.port', 'mcp.confirm_destructive'],
+      },
       {
         id: 'error-reports',
         label: 'Error reports',
         panel: 'diagnostics',
         page: 'settings.limits',
         section: 'Error reports',
+        keywords: 'diagnostics logs',
       },
       {
         id: 'repair',
@@ -146,7 +172,7 @@ export const SETTINGS_TREE: readonly SettingsGroup[] = [
   {
     title: 'Elsewhere',
     items: [
-      { id: 'accounts-hosts', label: 'Accounts & hosts', panel: 'hosts', elsewhere: true },
+      { id: 'accounts-hosts', label: 'Accounts & hosts', panel: 'hosts', elsewhere: true, keywords: 'ssh machines' },
       // M15 G7.13: the routines' daily budget and Pause all live in the
       // Automation view (SettingsHub board, Elsewhere).
       { id: 'automation-limits', label: 'Automation limits', panel: 'automation-limits', elsewhere: true },
@@ -210,6 +236,29 @@ export function navGroups(pages: Page[], tree: readonly SettingsGroup[] = SETTIN
     });
   }
   return groups;
+}
+
+/** A nav row a search found, with the group it sits in. */
+export interface LeafHit extends NavRow {
+  group: string;
+}
+
+/**
+ * The nav rows whose label, keywords or section name hold every word of
+ * `query` ("notifications", "theme", "hub url"), in nav order. A filter
+ * word (`@modified`, `@tag:…`) is about settings, so it finds no screen.
+ */
+export function searchLeaves(query: string, pages: Page[]): LeafHit[] {
+  const words = query.toLowerCase().split(/\s+/).filter(Boolean);
+  if (words.length === 0 || words.some((w) => w.startsWith('@'))) return [];
+  return navGroups(pages).flatMap((g) =>
+    g.rows
+      .filter((r) => {
+        const hay = `${r.label} ${r.leaf.keywords ?? ''} ${r.leaf.section ?? ''}`.toLowerCase();
+        return words.every((w) => hay.includes(w));
+      })
+      .map((r) => ({ ...r, group: g.title })),
+  );
 }
 
 /** Every leaf the nav shows, in order. */

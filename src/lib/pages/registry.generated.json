@@ -984,7 +984,7 @@
         "level": "none"
       },
       "default": "{}",
-      "help": "Per-host folder that holds your repositories. A host with no entry uses $CLAUDE_FLEET_PROJECTS_BASE (local only), then the layout default.",
+      "help": "Per-host folder that holds your repositories. A host with no entry uses this machine's default projects folder, then the layout default.",
       "key": "projects.base_path",
       "kind": {
         "type": "path_map"
@@ -1107,7 +1107,7 @@
         "min": 1,
         "type": "int"
       },
-      "label": "Download: file cap",
+      "label": "Downloads: largest file",
       "modified": false,
       "restart": "none",
       "scope": "fleet",
@@ -1128,7 +1128,7 @@
         "min": 1,
         "type": "int"
       },
-      "label": "Downloads: space",
+      "label": "Downloads: total space",
       "modified": false,
       "restart": "none",
       "scope": "fleet",
@@ -1664,7 +1664,7 @@
         "level": "none"
       },
       "default": "90",
-      "help": "Busy share of a host's CPUs at which the host reads as saturated, when two samples in a row reach it.",
+      "help": "Busy share of a host's CPUs at which the host reads as saturated, when two samples in a row reach it. Sessions killed there wait to be brought back until it calms down.",
       "key": "health.cpu_busy_pct",
       "kind": {
         "max": 100,
@@ -2609,7 +2609,7 @@
       "restart": "none",
       "scope": "fleet",
       "tags": [],
-      "unit": "hours",
+      "unit": "minutes",
       "value": "3600"
     },
     {
@@ -3748,7 +3748,7 @@
         "level": "none"
       },
       "default": "",
-      "help": "The host whose Claude account answers. Only questions about its own organisation are sent to it.",
+      "help": "The host whose Claude account answers: the alias of a host in the fleet. Only questions about its own organisation are sent to it.",
       "key": "decide.haiku.host",
       "kind": {
         "max": 64,
@@ -3910,7 +3910,7 @@
         "level": "none"
       },
       "default": "",
-      "help": "Per-feature confidence floors fitted from runs a person confirmed, corrected or rejected (fleet-hub decide floor fit). A fitted floor only raises a feature's built-in one, and only for the question version and model it was fitted against.",
+      "help": "Confidence floors fitted from runs a person confirmed, corrected or rejected, written by fleet-hub decide floor fit --apply: not for editing by hand. A fitted floor only raises a feature's built-in one, for the question version and model it was fitted against.",
       "key": "decide.jev.floors",
       "kind": {
         "max": 8192,
@@ -5548,8 +5548,10 @@
               "type": "field"
             },
             {
+              "hint": "Reset clears them, back to the built-in floors.",
               "key": "decide.jev.floors",
-              "type": "field"
+              "type": "field",
+              "widget": "readonly"
             },
             {
               "key": "decide.jev.timeout_ms",
