@@ -117,7 +117,7 @@
   .errt { margin: 0; font-size: var(--text-xs); line-height: 16px; color: var(--status-failed); }
   .row { display: flex; gap: var(--space-2); }
   .inp { box-sizing: border-box; width: 100%; min-width: 0; padding: 6px 8px; border: 1px solid var(--control-border-strong, var(--border)); border-radius: var(--radius-sm); background: var(--bg-pane); color: var(--fg); font: inherit; font-size: var(--text-sm); }
-  .inp:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+  .inp:focus { border-color: var(--accent); outline: var(--ring-w) solid var(--ring); outline-offset: 1px; }
   .inp[aria-invalid='true'] { border-color: var(--status-failed); }
   .area { font-family: var(--font-mono); font-size: var(--text-xs); resize: vertical; }
 </style>

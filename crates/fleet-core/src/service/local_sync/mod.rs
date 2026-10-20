@@ -86,12 +86,7 @@ fn is_blocked(blocked: &HashSet<String>, links: &HashSet<String>, p: &str) -> bo
     false
 }
 
-fn now_secs() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
+use crate::store::now_unix as now_secs;
 
 fn now_ns() -> i64 {
     std::time::SystemTime::now()

@@ -1,6 +1,6 @@
 // Settings → Hub & sync → Fleets (review w01): what a row says about a fleet
 // that is not usable, and the colour the Add form starts on.
-import { render, screen } from '@testing-library/svelte';
+import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { tick } from 'svelte';
 
@@ -47,6 +47,22 @@ async function show(list: FleetInfo[]) {
 }
 
 describe('FleetsSettings (review w01)', () => {
+  it('w17-13: a failed list read says so with Retry', async () => {
+    let fail = true;
+    inv.mockImplementation(async (cmd: string) => {
+      if (cmd !== 'fleets_list') return [];
+      if (fail) throw { code: 'E_DB', message: 'database is locked' };
+      return [primary];
+    });
+    render(FleetsSettings);
+    const box = await screen.findByTestId('fleets-load-error');
+    expect(box.textContent).toContain("Couldn't load the fleets");
+    fail = false;
+    await fireEvent.click(screen.getByTestId('fleets-load-error-retry'));
+    await waitFor(() => expect(screen.queryByTestId('fleets-load-error')).toBeNull());
+    expect(screen.getByTestId(`fleets-row-${PRIMARY}`)).toBeTruthy();
+  });
+
   it('w01-6: a duplicate reads "duplicate" and says to remove it', async () => {
     await show([primary, extra('again', { duplicate_of: 'home' })]);
     expect(screen.getByTestId('fleets-row-again').textContent).toContain('duplicate');

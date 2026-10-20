@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { errorText } from './error_copy';
   import { onDestroy, onMount, tick, untrack } from 'svelte';
   import { get } from 'svelte/store';
   import {
@@ -17,6 +18,7 @@
   import { push, pushError } from './toasts';
   import { fleetSettings, loadFleetSettings, setFleetSetting, settingBool, SETTING_KEYS } from './fleet_settings';
   import type { IpcError } from './result';
+  import LoadError from './states/LoadError.svelte';
   import ImportDialog from './ImportDialog.svelte';
   import SecretsPanel from './SecretsPanel.svelte';
   import NewAssetDialog from './NewAssetDialog.svelte';
@@ -96,8 +98,13 @@
     void loadChangesets();
     void loadLayers();
     const [a, i] = await Promise.all([loadAssets(), loadInventory()]);
-    if (!a.ok) error = a.error.message;
-    if (!i.ok) error = i.error.message;
+    // Review w17-9: with nothing listed yet, a failed listing is the load's
+    // own failure (the Retry pane), never a spinner that never ends.
+    if (!a.ok && !get(catalog)) {
+      catalogLoad = 'failed';
+      catalogLoadError = errorText(a.error);
+    } else if (!a.ok) error = errorText(a.error);
+    if (!i.ok) error = errorText(i.error);
   }
 
   // Shared by every path that needs to re-read the catalog: `pull: false`
@@ -109,7 +116,7 @@
     catalogLoad = 'loading';
     catalogLoadError = null;
     const l = await loadCatalog(pull);
-    if (!l.ok) { catalogLoad = 'failed'; catalogLoadError = l.error.message; return l.error; }
+    if (!l.ok) { catalogLoad = 'failed'; catalogLoadError = errorText(l.error); return l.error; }
     catalogLoad = 'loaded';
     await refresh();
     return null;
@@ -134,14 +141,17 @@
   let hubAdmin = $state<'idle' | 'probing' | 'granted' | 'denied'>('idle');
   // Why the probe did not grant: E_FORBIDDEN is the ordinary answer (not
   // granted); anything else (an old hub, the link down) is shown as is.
-  let hubAdminError = $state<string | null>(null);
+  // Review w17-3: kept as the error, so the line offers Retry (a re-probe)
+  // and Refresh re-probes too — a blip never leaves a granted client on the
+  // read-only overview for the rest of the session.
+  let hubAdminError = $state<IpcError | null>(null);
   async function probeHubAdmin() {
     hubAdmin = 'probing';
     hubAdminError = null;
     const c = await loadCatalogConfig();
     if (!c.ok) {
       hubAdmin = 'denied';
-      if (c.error.code !== 'E_FORBIDDEN') hubAdminError = c.error.message;
+      if (c.error.code !== 'E_FORBIDDEN') hubAdminError = c.error;
       return;
     }
     hubAdmin = 'granted';
@@ -195,7 +205,7 @@
     }
     overviewLoad = 'failed';
     overviewNotConfigured = r.error.code === 'E_CATALOG_NOT_CONFIGURED';
-    overviewError = r.error.message;
+    overviewError = errorText(r.error);
   }
   $effect(() => {
     if (!hubOverview || !visible || hubAdmin !== 'denied') return;
@@ -206,7 +216,7 @@
     busy = 'scan'; error = null; scanResults = null;
     const r = await scanHosts();
     busy = '';
-    if (!r.ok) { error = r.error.message; return; }
+    if (!r.ok) { error = errorText(r.error); return; }
     scanResults = r.value;
     await loadOverview();
   }
@@ -309,7 +319,7 @@
   async function setup() {
     busy = 'setup'; error = null;
     const c = await configureCatalog(setupPath, setupRemote);
-    if (!c.ok) { error = c.error.message; busy = ''; return; }
+    if (!c.ok) { error = errorText(c.error); busy = ''; return; }
     const wantPush = setupRemote.trim() !== '' && autoPushOn;
     if (wantPush !== settingBool($fleetSettings, SETTING_KEYS.catalogAutoPush)) {
       const s = await setFleetSetting(SETTING_KEYS.catalogAutoPush, wantPush ? 'true' : 'false');
@@ -332,7 +342,7 @@
   async function scan() {
     busy = 'scan'; error = null; scanResults = null;
     const r = await scanHosts();
-    if (!r.ok) error = r.error.message; else { scanResults = r.value; await refresh(); }
+    if (!r.ok) error = errorText(r.error); else { scanResults = r.value; await refresh(); }
     busy = '';
   }
 
@@ -410,7 +420,7 @@
     syncFilter = filter;
     const r = await planSync(filter);
     busy = '';
-    if (!r.ok) { error = r.error.message; return; }
+    if (!r.ok) { error = errorText(r.error); return; }
     syncPlan = r.value;
     lastPlan = r.value;
   }
@@ -458,7 +468,13 @@
           {/if}
         </div>
       {/snippet}
-      {#if hubAdminError}<p class="error" data-testid="assets-grant-error">{hubAdminError}</p>{/if}
+      {#if hubAdminError}
+        <LoadError
+          title="Couldn't ask the hub whether this device may manage the catalog — showing the read-only overview"
+          error={hubAdminError}
+          onretry={() => void probeHubAdmin()}
+          testid="assets-grant-error" />
+      {/if}
       <AssetsWorkspace
         readOnly
         readOnlyClient={$hubStatus.client_name}
@@ -475,7 +491,7 @@
         onscan={scanOnHub}
         onsync={() => {}}
         onimport={() => {}}
-        onrefresh={() => void loadOverview()}
+        onrefresh={() => void (hubAdminError ? probeHubAdmin() : loadOverview())}
       />
     {:else}
       <div class="setup" data-testid="assets-remote">

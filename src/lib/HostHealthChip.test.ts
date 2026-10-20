@@ -82,6 +82,8 @@ describe('HostHealthChip', () => {
     await expectAccessible(pop);
     await fireEvent.keyDown(pop, { key: 'Escape' });
     expect(screen.queryByTestId('host-health-popover')).toBeNull();
+    // Review w19-6: Escape gives focus back to the chip.
+    expect(document.activeElement).toBe(screen.getByTestId('host-health-chip'));
     await fireEvent.click(screen.getByTestId('host-health-chip'));
     await fireEvent.click(screen.getAllByTestId('host-health-open')[1]);
     expect(get(hostsViewRequest)).toEqual({ host: 'mercury' });

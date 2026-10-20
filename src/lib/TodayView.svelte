@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { IS_MAC, shortcutLabel } from './shortcuts';
   // The Today view (work graph M9.1): what waits on you, grouped by work;
   // what is in progress; what shipped today; what went stale. It is the
   // empty state of Details and opens over a selected session with ⌘⇧T.
@@ -17,9 +18,10 @@
   import { classify } from './attention';
   import { attentionFacts } from './attention_facts';
   import { accountByUuid, accountLabel } from './accounts';
-  import { hosts } from './hosts';
+  import { effectiveHostFilter, hosts } from './hosts';
+  import { sessionVisible } from './sidebar_index';
   import { attentionIdleMinutes } from './notify';
-  import { sessions, type SessionRow } from './sessions';
+  import { sessions, showBgAgents, type SessionRow } from './sessions';
   import { selectSessionExplicitly } from './selection';
   import { effectiveScope, scopeOf } from './orgs';
   import { copyText } from './clipboard';
@@ -31,6 +33,7 @@
   import MissionNudge from './MissionNudge.svelte';
   import { openMission } from './missions';
   import { waitWords } from './mission_waits';
+  import { notWaitingSaid, proposalKey } from './inbox';
   import Skeleton from './states/Skeleton.svelte';
   import { errorText } from './error_copy';
   import {
@@ -54,10 +57,14 @@
 
   let {
     onclose,
+    onopen,
     now = () => Date.now(),
   }: {
     /** Present when the view covers a selected session (⌘⇧T). */
     onclose?: () => void;
+    /** Opens a session in place, where the host has its own (Control's
+     *  panel, with "‹ Today" back; review w11-10). Absent: the app jumps. */
+    onopen?: (row: SessionRow) => void;
     /** Milliseconds; injectable for tests. */
     now?: () => number;
   } = $props();
@@ -124,7 +131,11 @@
     clearTimeout(copyTimer);
   });
 
-  const view = $derived(today ? scopeToday(today, $effectiveScope, $sessions, $scopeOf) : null);
+  const view = $derived(
+    today
+      ? scopeToday(today, $effectiveScope, $sessions, $scopeOf, (r) => sessionVisible(r, $effectiveHostFilter, $showBgAgents))
+      : null,
+  );
 
   // Work graph M9 follow-up: the stale sessions fleet also suggests tidying
   // (M7) open the Tidy-up sheet with just those picked.
@@ -158,6 +169,10 @@
   let allInProgress = $state(false);
   const inProgressShown = $derived(view ? (allInProgress ? view.inProgress : view.inProgress.slice(0, IN_PROGRESS_SHOWN)) : []);
 
+  /** Sessions whose Jev reading the person set aside with "Not waiting"
+   *  in the Inbox: Today does not call them probably waiting (w11-11). */
+  const setAside = $derived(new Set($sessions.filter((r) => $notWaitingSaid.has(proposalKey(r))).map((r) => r.id)));
+
   /** The live row behind a digest session, when it is paused on a limit:
    *  its Switch account and Wait go right on the row. */
   function limited(s: TodaySession): SessionRow | null {
@@ -170,7 +185,8 @@
   /** The row's dot: a failed turn reads red, a wait amber, live work blue,
    *  stale grey (the status colours the session list draws). */
   function sessionTone(s: TodaySession, bucket: TodayBucket): string {
-    if (bucket === 'waiting') return s.attention === 'failed' ? 'failed' : 'waiting';
+    // A waiting group's working siblings stay blue (review w11-3).
+    if (bucket === 'waiting' && s.attention) return s.attention === 'failed' ? 'failed' : 'waiting';
     if (bucket === 'stale') return 'idle';
     return 'working';
   }
@@ -178,6 +194,10 @@
   function jump(s: TodaySession) {
     const row: SessionRow | undefined = $sessions.find((r) => r.id === s.id);
     if (!row) return;
+    if (onopen) {
+      onopen(row);
+      return;
+    }
     selectSessionExplicitly(row);
     onclose?.();
   }
@@ -218,7 +238,7 @@
                   type="button"
                   data-testid="today-session"
                   title={`${s.host_alias} · active ${timeAgo(s.last_activity_at, now())}`}
-                  onclick={() => jump(s)}>{sessionPhrase(s, bucket)}</button
+                  onclick={() => jump(s)}>{sessionPhrase(s, bucket, setAside.has(s.id))}</button
                 >
                 <span class="meta"
                   >{s.host_alias}{#if s.ci_status}{` · CI ${s.ci_status}`}{/if}{` · ${timeAgo(s.last_activity_at, now())}`}</span
@@ -297,7 +317,7 @@
 
   {#if view}
     {#if isEmptyView(view)}
-      <p class="empty" data-testid="details-empty">Nothing running today. Pick a session, or start work from ⌘K.</p>
+      <p class="empty" data-testid="details-empty">Nothing running today. Pick a session, or start work from {shortcutLabel('switcher', IS_MAC)}.</p>
     {/if}
     {#if view.waiting.length > 0 || (view.missions?.length ?? 0) > 0}
       <section class="block">

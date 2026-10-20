@@ -28,10 +28,12 @@ describe('composer_hold', () => {
     expect(p.endsWith('…')).toBe(true);
   });
 
-  it('Stop shows on a gated composer while the session is busy, and presses Escape', () => {
-    expect(canStop(true, 'Claude is working')).toBe(true);
-    expect(canStop(true, null)).toBe(false);
-    expect(canStop(false, 'Claude is working')).toBe(false);
+  it('Stop shows while a turn runs, never while stuck, and presses Escape (w13-4/5)', () => {
+    expect(canStop('working', null)).toBe(true);
+    expect(canStop('idle', null)).toBe(false);
+    expect(canStop(null, null)).toBe(false);
+    expect(canStop('working', 'trust_prompt')).toBe(false);
+    expect(canStop('idle', 'auth_menu')).toBe(false);
     expect(STOP_KEY).toBe('Escape');
   });
 });

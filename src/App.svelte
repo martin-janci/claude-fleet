@@ -84,6 +84,7 @@
     appChord,
     assetsViewRequest,
     hostsViewRequest,
+    inspectorToggleRequest,
     onHostsCloseRequested,
     openPathRequest,
     requestNewSessionOnHost,
@@ -313,7 +314,7 @@
     } else {
       healthError = `${hr0.error.code}: ${hr0.error.message}`;
       healthText = errorText(hr0.error);
-      push({ kind: 'error', code: hr0.error.code, message: `Health check failed: ${hr0.error.message}` });
+      pushError(hr0.error, 'Health check failed');
     }
     // Subscribed BEFORE the first list: a `session:updated` that lands while
     // the list is in flight would otherwise be emitted to no listener and
@@ -954,8 +955,18 @@
     }
   }
   function toggleInspector() {
+    // Review w30-7: where the inspector cannot show, the chord leaves the pref alone.
+    if (!inspectorRoom) return;
     inspectorOpen = !inspectorOpen;
   }
+  // ⌘K's Inspector row (review w18-4): the same toggle as ⌥⌘B.
+  $effect(() => {
+    if ($inspectorToggleRequest === 0) return;
+    untrack(() => {
+      inspectorToggleRequest.set(0);
+      toggleInspector();
+    });
+  });
 
   // Footer usage segment: whether to look at usage, not the numbers. A coarse
   // clock is enough for "3m" ages and staleness.
@@ -1044,10 +1055,14 @@
   function onKeydown(e: KeyboardEvent) {
     if (e.key !== 'Escape') return;
     const target = e.target as HTMLElement | null;
+    // An Esc a view's own handler took (review w18-1) is not the page's. The
+    // terminal's hidden input proxy also takes Esc (it writes it to the pty),
+    // but under a fleet page the terminal is covered: that Esc still leaves.
+    const taken = e.defaultPrevented && target?.dataset?.imeProxy === undefined;
     // Settings, the same rule as the fleet pages: Esc goes back to what was
     // open under it, not while typing in a field or inside a dialog.
     if ($settingsOpen) {
-      if (e.defaultPrevented || isEditable(target) || target?.closest?.('dialog')) return;
+      if (taken || isEditable(target) || target?.closest?.('dialog')) return;
       settingsOpen.set(false);
       return;
     }
@@ -1056,36 +1071,36 @@
     // typing in a field such as the file filter, where Esc belongs to that
     // input and exiting the whole panel would be surprising.
     if ($destination === 'files') {
-      if (isEditable(target)) return;
+      if (taken || isEditable(target)) return;
       leave('files');
       return;
     }
     // Assets is an overlay with no Esc handling of its own; the same rule as
     // Files applies (not while typing in the catalog's filter field).
     if ($destination === 'assets') {
-      if (isEditable(target) || target?.closest?.('dialog')) return;
+      if (taken || isEditable(target) || target?.closest?.('dialog')) return;
       leave('assets');
       return;
     }
     // Accounts, the same rule as Assets.
     if ($destination === 'accounts') {
-      if (isEditable(target) || target?.closest?.('dialog')) return;
+      if (taken || isEditable(target) || target?.closest?.('dialog')) return;
       leave('accounts');
       return;
     }
     // Control, the same rule (its composer keeps Esc while you type).
     if ($destination === 'control') {
-      if (isEditable(target) || target?.closest?.('dialog')) return;
+      if (taken || isEditable(target) || target?.closest?.('dialog')) return;
       leave('control');
       return;
     }
     if ($destination === 'automation') {
-      if (isEditable(target) || target?.closest?.('dialog')) return;
+      if (taken || isEditable(target) || target?.closest?.('dialog')) return;
       leave('automation');
       return;
     }
     if ($destination === 'dashboard') {
-      if (isEditable(target) || target?.closest?.('dialog')) return;
+      if (taken || isEditable(target) || target?.closest?.('dialog')) return;
       leave('dashboard');
       return;
     }

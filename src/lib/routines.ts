@@ -463,6 +463,15 @@ export async function loadFailing(): Promise<void> {
  *  read failed; the line is then left out. */
 export const nextRoutine = writable<RoutineRow | null>(null);
 
+/** The routines ⌘K finds by name (review w18-5), read each time it opens.
+ *  A failed read leaves the last list. */
+export const switcherRoutines = writable<RoutineRow[]>([]);
+
+export async function loadSwitcherRoutines(): Promise<void> {
+  const r = await listRoutines();
+  if (r.ok && Array.isArray(r.value)) switcherRoutines.set(r.value);
+}
+
 export async function loadNextRoutine(nowSec = Math.floor(Date.now() / 1000)): Promise<void> {
   const r = await listRoutines();
   nextRoutine.set(r.ok && Array.isArray(r.value) ? soonestRoutine(r.value, nowSec) : null);
@@ -493,8 +502,14 @@ export function nextRoutineLine(r: Pick<RoutineRow, 'name' | 'next_run_at'>, now
   return `The next routine is ${r.name} ${when}.`;
 }
 
-/** How many failed runs the Inbox shows: added to its Needs you count. */
-export const failingCount = derived(failing, ($f) => $f.length);
+/** How many failed runs the Inbox counts: added to its Needs you count.
+ *  Only the ones this viewer may change (review w11-6): a teammate's
+ *  routine has no button here, so it would hold the badge until its owner
+ *  acts. Those are listed, uncounted (`failingOthersCount`). */
+export const failingCount = derived(failing, ($f) => $f.filter((f) => f.may_change).length);
+
+/** The failed routines listed for the viewer to see but not to change. */
+export const failingOthersCount = derived(failing, ($f) => $f.filter((f) => !f.may_change).length);
 
 /** Retry: run it again now; the newer run takes it out of the Inbox. */
 export async function retryRoutine(f: FailingRoutine): Promise<Result<RoutineRunRow>> {

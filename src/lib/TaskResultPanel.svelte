@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { errorText } from './error_copy';
   // One panel for a task's result (design 2026-10-13, D6): the verdict and
   // what was done first, then what speaks for it, then the detail folded.
   // The report is what the worker said ("reported"); the gate, the changes
@@ -94,7 +95,7 @@
       created = { ...created, [index]: r.value.id };
       rowError = { ...rowError, [index]: '' };
       onChanged?.();
-    } else rowError = { ...rowError, [index]: r.error.message };
+    } else rowError = { ...rowError, [index]: errorText(r.error) };
   }
 
   async function createOwn() {
@@ -109,7 +110,7 @@
       ownTitle = '';
       ownError = null;
       onChanged?.();
-    } else ownError = r.error.message;
+    } else ownError = errorText(r.error);
   }
 
   async function markDone() {
@@ -120,7 +121,7 @@
     if (r.ok) {
       markError = null;
       onChanged?.();
-    } else markError = r.error.message;
+    } else markError = errorText(r.error);
   }
 
   function prLabel(pr: ResultPr): string {

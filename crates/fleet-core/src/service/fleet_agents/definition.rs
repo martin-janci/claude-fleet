@@ -198,15 +198,6 @@ impl TriggerSource {
         }
     }
 
-    pub fn is_tracker(self) -> bool {
-        matches!(
-            self,
-            TriggerSource::TrackerComments
-                | TriggerSource::TrackerAssigned
-                | TriggerSource::TrackerQuery
-        )
-    }
-
     pub fn is_github(self) -> bool {
         matches!(
             self,
@@ -460,17 +451,6 @@ impl ActionKind {
             ActionKind::Setting => "setting",
             ActionKind::SessionRecover => "session_recover",
         }
-    }
-
-    /// Acts on fleet itself rather than a tracker, GitHub or a store.
-    pub fn is_fleet_own(self) -> bool {
-        matches!(
-            self,
-            ActionKind::WorkTask
-                | ActionKind::FixSession
-                | ActionKind::Setting
-                | ActionKind::SessionRecover
-        )
     }
 
     /// The action keys this kind takes (besides id, when, do, auto, stop),

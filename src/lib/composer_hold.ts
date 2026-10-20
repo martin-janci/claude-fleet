@@ -79,8 +79,11 @@ export function heldPreview(text: string, max = 60): string {
 /** The key that interrupts Claude Code's running turn. */
 export const STOP_KEY = 'Escape';
 
-/** Whether the Stop button shows: on a gated composer, while the session is
- *  busy (`busyNote` is the composer's own "working" sentence). */
-export function canStop(gatedComposer: boolean, busyNote: string | null): boolean {
-  return gatedComposer && busyNote !== null;
+/** Whether the Stop button shows: on every composer while a turn is running
+ *  (review w13-4: the Session view's Conversation tab had no interrupt at
+ *  all), and never while the session is stuck (w13-5): at a trust prompt or
+ *  a login menu Escape means "No, exit" or backs out, not "stop the turn",
+ *  and the stuck row carries its own recovery chip. */
+export function canStop(claudeStatus: string | null, stuckKind: string | null): boolean {
+  return claudeStatus === 'working' && !stuckKind;
 }

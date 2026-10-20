@@ -20,13 +20,21 @@
     type AgentAction,
   } from '../agents';
 
-  let busy = $state<number | null>(null);
+  // One id per call in flight (review w11-13): a single id let the first
+  // call's return re-enable a second item's buttons mid-call.
+  let busy = $state<ReadonlySet<number>>(new Set());
+  const setBusy = (id: number, on: boolean) => {
+    const next = new Set(busy);
+    if (on) next.add(id);
+    else next.delete(id);
+    busy = next;
+  };
   let shown = $state<number | null>(null);
 
   async function answer(a: AgentAction, approve: boolean) {
-    busy = a.id;
+    setBusy(a.id, true);
     const r = await answerAgentAction(a.id, approve);
-    busy = null;
+    setBusy(a.id, false);
     if (!r.ok) pushError(r.error, approve ? 'Approve failed' : 'Reject failed');
     else push({ kind: 'success', message: approve ? 'Approved: it runs within a minute, and what it did shows here' : 'Rejected' });
   }
@@ -42,10 +50,10 @@
           <span class="name">{actionTitle(a)} <span class="chip">agent</span></span>
           <span class="line">proposed {shortAge(a.created_at)}</span>
           <span class="buttons">
-            <button type="button" class="btn btn--chip" data-testid="agent-action-approve" disabled={busy === a.id} onclick={() => answer(a, true)}
+            <button type="button" class="btn btn--chip" data-testid="agent-action-approve" disabled={busy.has(a.id)} onclick={() => answer(a, true)}
               >Approve</button
             >
-            <button type="button" class="btn btn--chip" data-testid="agent-action-reject" disabled={busy === a.id} onclick={() => answer(a, false)}
+            <button type="button" class="btn btn--chip" data-testid="agent-action-reject" disabled={busy.has(a.id)} onclick={() => answer(a, false)}
               >Reject</button
             >
             {#if body}

@@ -51,6 +51,17 @@ describe('runCardVerb', () => {
     await runCardVerb('apply', 3, { setBusy: () => {}, onchanged: () => {} });
     expect(get(toasts).at(-1)!.message).toMatch(/^The hub is older than this desktop/);
   });
+  // Review w16-10: a card refused for a missing secret opens the Secrets panel.
+  it('offers Open Secrets for a missing secret', async () => {
+    invoke.mockRejectedValue({ code: 'E_SECRET_MISSING', message: 'no value for GITHUB_TOKEN; set them (catalog_set_secret), then apply this card again' });
+    const opensecrets = vi.fn();
+    await runCardVerb('apply', 12, { setBusy: () => {}, onchanged: () => {}, opensecrets });
+    const t = get(toasts).at(-1)!;
+    expect(t.message).toBe('Apply card 12: No value for GITHUB_TOKEN. Add it under Secrets, then apply again');
+    expect(t.action?.label).toBe('Open Secrets');
+    t.action!.run();
+    expect(opensecrets).toHaveBeenCalled();
+  });
   it('names the verb in a refusal', async () => {
     invoke.mockRejectedValue({ code: 'E_IO', message: 'disk full' });
     await runCardVerb('dismiss', 5, { setBusy: () => {}, onchanged: () => {} });

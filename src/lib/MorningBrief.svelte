@@ -5,6 +5,7 @@
   `claude -p` on a host of the brief's org and books the run as `morning_brief`.
 -->
 <script lang="ts">
+  import { errorText } from './error_copy';
   import { onMount } from 'svelte';
   import DraftField from './DraftField.svelte';
   import { HUB_HAS_NO_DRAFTS, draftedAt, todayBrief, type Draft } from './drafts';
@@ -36,11 +37,11 @@
     if (r.ok) {
       show(r.value?.draft);
     } else if (r.error.code === 'E_FORBIDDEN') {
-      refused = r.error.message;
+      refused = errorText(r.error);
     } else if (!refresh && HUB_HAS_NO_DRAFTS.includes(r.error.code)) {
       served = false;
     } else {
-      error = r.error.message;
+      error = errorText(r.error);
     }
   }
 

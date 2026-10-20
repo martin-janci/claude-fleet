@@ -16,11 +16,22 @@
   import { workState } from './handoffs';
   import { onWorkChangedDebounced } from './work';
   import { controlMission, openInControl } from './control_room';
-  import { showTaskInWorkView } from './work_view';
+  import { readErrorText, showTaskInWorkView } from './work_view';
+  import LoadError from './states/LoadError.svelte';
+  import Skeleton from './states/Skeleton.svelte';
+  import type { IpcError } from './result';
 
   let detail = $state<MissionDetail | null>(null);
   let list = $state<Mission[]>([]);
-  let error = $state<string | null>(null);
+  // Review w17-5: what the view says is told apart — still loading (a
+  // skeleton, never "No missions yet"), a first read that failed (Retry), a
+  // mission that is gone, and a re-read that failed while something is on
+  // screen (kept, with a one-line note).
+  let listLoaded = $state(false);
+  let listError = $state<IpcError | null>(null);
+  let detailError = $state<IpcError | null>(null);
+  let gone = $state<string | null>(null);
+  let refreshError = $state<IpcError | null>(null);
   let laneBy = $state<LaneBy | null>(null);
   let gen = 0;
 
@@ -30,24 +41,42 @@
       detail = null;
       const r = await listMissions();
       if (mine !== gen) return;
-      if (r.ok && Array.isArray(r.value)) list = r.value.filter((m) => m.state !== 'cancelled');
-      error = r.ok ? null : r.error.message;
+      if (r.ok) {
+        list = Array.isArray(r.value) ? r.value.filter((m) => m.state !== 'cancelled') : [];
+        listLoaded = true;
+        listError = null;
+        refreshError = null;
+      } else if (listLoaded) {
+        refreshError = r.error;
+      } else {
+        listError = r.error;
+      }
       return;
     }
+    if (detail && detail.mission.id !== id) detail = null;
     const r = await getMission(id);
     if (mine !== gen) return;
     if (r.ok && r.value?.mission) {
       detail = r.value;
-      error = null;
-    } else {
+      detailError = null;
+      gone = null;
+      refreshError = null;
+    } else if (r.ok) {
       detail = null;
-      error = r.ok ? 'That mission is not in the fleet any more.' : r.error.message;
+      gone = 'That mission is not in the fleet any more.';
+    } else if (detail?.mission.id === id) {
+      refreshError = r.error;
+    } else {
+      detailError = r.error;
     }
   }
 
   $effect(() => {
     const id = $controlMission;
     laneBy = null;
+    detailError = null;
+    gone = null;
+    refreshError = null;
     void load(id);
   });
 
@@ -98,9 +127,17 @@
         {/if}
       {/if}
     </div>
-    {#if error}
-      <p class="empty">{error}</p>
+    {#if gone}
+      <p class="empty" data-testid="control-mission-gone">{gone}</p>
+    {:else if detailError}
+      <LoadError title="Couldn't load the mission" error={detailError} onretry={() => void load($controlMission)} testid="control-mission-load-error" />
     {:else if detail}
+      {#if refreshError}
+        <p class="refresh-error" role="status" data-testid="control-missions-refresh-error">
+          Couldn't refresh ({readErrorText(refreshError)}) — showing what was loaded.
+          <button class="btn btn--quiet" type="button" data-testid="control-missions-refresh-retry" onclick={() => void load($controlMission)}>Retry</button>
+        </p>
+      {/if}
       <div class="graph">
         <MissionGraph
           {detail}
@@ -111,11 +148,21 @@
         />
       </div>
     {:else}
-      <p class="empty">Loading the mission…</p>
+      <Skeleton rows={4} label="Loading the mission" />
     {/if}
+  {:else if listError}
+    <LoadError title="Couldn't load missions" error={listError} onretry={() => void load(null)} testid="control-missions-load-error" />
+  {:else if !listLoaded}
+    <Skeleton rows={3} label="Loading missions" />
   {:else if list.length === 0}
-    <p class="empty">{error ?? 'No missions yet. Ask Control to plan one, or create one in Work.'}</p>
+    <p class="empty" data-testid="control-missions-empty">No missions yet. Ask Control to plan one, or create one in Work.</p>
   {:else}
+    {#if refreshError}
+      <p class="refresh-error" role="status" data-testid="control-missions-refresh-error">
+        Couldn't refresh ({readErrorText(refreshError)}) — showing what was loaded.
+        <button class="btn btn--quiet" type="button" data-testid="control-missions-refresh-retry" onclick={() => void load(null)}>Retry</button>
+      </p>
+    {/if}
     <ul class="list">
       {#each list as m (m.id)}
         <li>
@@ -170,6 +217,12 @@
   .empty {
     margin: 0;
     padding: var(--space-3);
+  }
+  .refresh-error {
+    margin: 0;
+    padding: var(--space-1) var(--space-3);
+    font-size: var(--text-2xs);
+    color: var(--usage-warn);
   }
   .back,
   .link {

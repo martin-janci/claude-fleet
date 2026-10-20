@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { errorText } from './error_copy';
   // One autofix finding (src/lib/autofix.ts): what is wrong, in plain words,
   // and its one-click fix. Shared by the Needs-you "Problems & fixes" rows,
   // the `fix` chat card and Control's own finding in the Agent panel.
@@ -37,7 +38,7 @@
     const r = await applyFinding(finding.id);
     busy = false;
     if (!r.ok) {
-      failure = r.error.message;
+      failure = errorText(r.error);
       return;
     }
     if (r.value.state === 'cleared') push({ kind: 'success', message: `Fixed: ${finding.title ?? finding.kind}` });
@@ -50,7 +51,7 @@
     failure = null;
     const r = await dismissFinding(finding.id);
     busy = false;
-    if (!r.ok) failure = r.error.message;
+    if (!r.ok) failure = errorText(r.error);
   }
 </script>
 
@@ -83,7 +84,16 @@
       {/if}
     </div>
   {/if}
-  {#if status}<p class="status" class:warn={finding.state === 'apply_failed'} data-testid="fix-card-status">{status}</p>{/if}
+  <!-- Review w19-10: the progress is announced; a failed fix says its error
+       once, in the alert, not again in the status line. -->
+  {#if status && !(failure && finding.state === 'apply_failed')}<p
+      class="status"
+      class:warn={finding.state === 'apply_failed'}
+      role="status"
+      data-testid="fix-card-status"
+    >
+      {status}
+    </p>{/if}
   {#if failure}<p class="status warn" role="alert" data-testid="fix-card-failure">{failure}</p>{/if}
   {#if autoLine}<p class="meta" data-testid="fix-card-auto">{autoLine}</p>{/if}
   <div class="actions">

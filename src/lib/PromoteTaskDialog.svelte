@@ -1,6 +1,7 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import Modal from './Modal.svelte';
+  import { formKeys, platformSubmitHint } from './forms/form_frame';
   import { hubActionBlocked, hubStatus } from './hub';
   import { hubConnection } from './hub_connection';
   import { readErrorText } from './work_view';
@@ -70,10 +71,14 @@
     ondone?.();
     onclose();
   }
+
+  // The form rule (review w18-6): ⌘↵ submits from any field; a bare Enter
+  // only in a one-field form (`formKeys`).
+  const hint = platformSubmitHint();
 </script>
 
 <Modal title="Promote to a ticket" {onclose} width="440px" testid="promote-task-dialog">
-  <form class="form" onsubmit={submit}>
+  <form class="form" use:formKeys onsubmit={submit}>
     <p class="note">
       “{title}” becomes a ticket. Its sessions, comments, subtasks and sprint stay with it; its fleet key
       still finds it.
@@ -130,7 +135,7 @@
     {/if}
     <div class="actions">
       <button type="button" onclick={onclose}>Cancel</button>
-      <button type="submit" class="primary" disabled={!canSubmit} title={blocked ?? ''} data-testid="promote-task-submit"
+      <button type="submit" class="primary" disabled={!canSubmit} title={blocked ?? ''} data-shortcut={hint.label} aria-keyshortcuts={hint.aria} data-testid="promote-task-submit"
         >Create ticket</button
       >
     </div>

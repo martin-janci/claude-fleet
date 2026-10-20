@@ -2162,8 +2162,15 @@ automatically on app start.
   reaches a session without a person; since the 2026-10-17 review's F2 the
   autonomy position lets those four through at "Within your brief" and
   "Autopilot" into a live session the operator started or briefed and still
-  follows — not muted, merged, done or quiet; a start always asks —
-  `guard::operator_must_confirm`),
+  follows — not muted, merged, done or quiet. "Autopilot" also lets a
+  start (`new_session`, `dispatch_task` `new_worker`, a task's `work_link`
+  `start` / `run` / `resume`) through on a host inside a running mission's
+  live grant, never while Pause all is on. With session care
+  (`control.session_care`, on by default) `restart_session` of a session
+  the operator started itself (not one it only briefed) goes without a card
+  at "Within your brief" and "Autopilot", and `safe_kill_session` of one at
+  "Autopilot". Every other call above asks at every position —
+  `guard::operator_must_confirm_with`; `docs/status.md` has the rule),
   and every tool above return
   `E_CONFIRM_REQUIRED` until a person approves them: on the desktop in its
   dialog or Control's cards, and on a hub from a fleet admin's paired device,

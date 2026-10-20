@@ -1,4 +1,5 @@
 <script lang="ts" module>
+  import { errorText } from './error_copy';
   import type { BranchDiff, ChangedFile, DiffRange, RepoTree } from './files';
   import type { CommitDraft } from './history';
   import type { Result } from './result';
@@ -119,7 +120,7 @@
       draft = r.value;
       commitMsg = r.value.message;
     } else {
-      draftError = r.error.message;
+      draftError = errorText(r.error);
     }
   }
 

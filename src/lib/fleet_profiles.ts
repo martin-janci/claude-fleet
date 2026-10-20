@@ -24,7 +24,22 @@ import { derived, get, writable } from 'svelte/store';
 import { invokeCmd, type IpcError } from './result';
 import { PRIMARY, fleets, type FleetInfo } from './fleets';
 import { readPref, writePref } from './prefs';
-import type { EnvVarRow } from './env_vars';
+
+/** One `env_vars_list` row. A secret or a reference is write-only: a row
+ *  carries `value` for a plain entry only. */
+export interface EnvVarRow {
+  id: number;
+  /** global < host < project < person < session (the narrower wins). */
+  scope: 'global' | 'host' | 'project' | 'person' | 'session';
+  /** '' for global, a host alias, owner/repo, a person id, or a session id. */
+  scope_key: string;
+  name: string;
+  /** Present for a plain, non-reference entry only. */
+  value?: string;
+  secret: boolean;
+  is_ref: boolean;
+  updated_at: number;
+}
 
 /** `my_profile`'s answer (`fleet_core::service::my_profile::MyProfile`). */
 export interface MyProfile {

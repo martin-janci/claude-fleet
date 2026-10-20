@@ -105,15 +105,18 @@ impl Store {
     }
 
     /// A mission's booked runs, newest first.
+    #[cfg(test)]
     pub fn mission_aux_usage(&self, mission_id: i64) -> Result<Vec<AuxUsageRow>, IpcError> {
         self.aux_usage_where("mission_id = ?1", mission_id)
     }
 
     /// The runs booked with `origin`, newest first.
+    #[cfg(test)]
     pub fn aux_usage_of_origin(&self, origin: &str) -> Result<Vec<AuxUsageRow>, IpcError> {
         self.aux_usage_where("origin = ?1", origin)
     }
 
+    #[cfg(test)]
     fn aux_usage_where(
         &self,
         filter: &str,

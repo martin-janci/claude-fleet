@@ -133,12 +133,6 @@ impl GrantSet {
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
-
-    /// Every grant, as the store handed them over. `my_grants` serves these
-    /// pairs as they are.
-    pub fn as_map(&self) -> &BTreeMap<i64, String> {
-        &self.0
-    }
 }
 
 /// Whose hosts' unclaimed counts a caller is served
@@ -333,8 +327,9 @@ impl ViewScope {
     }
 
     /// Does this person watch `row` only as a teammate — in reach through
-    /// [`TeamReach`], neither owned nor granted? The org page's Team panel
-    /// names such a session; `count_member_sessions` counts it as open.
+    /// [`TeamReach`], neither owned nor granted? (tests; production code,
+    /// `count_member_sessions` among it, asks [`TeamReach::covers`] directly.)
+    #[cfg(test)]
     pub fn watches_as_teammate(&self, row: &SessionRow) -> bool {
         self.team.covers(row.org_id, row.owner_person_id)
     }

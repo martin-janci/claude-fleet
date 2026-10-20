@@ -231,16 +231,22 @@
   {/if}
 
   <div class="list-scroll">
-    {#if $missionList.error}
+    {#if $missionList.error && !$missionList.read}
       <div class="state error" role="alert" data-testid="missions-error">
         <p>{$missionList.error}</p>
         <button class="btn" type="button" onclick={() => void loadMissionList()}>Retry</button>
       </div>
     {:else if !$missionList.loaded}
       <div data-testid="missions-loading"><Skeleton rows={3} label="Loading missions" /></div>
-    {:else if missions.length === 0}
+    {:else if missions.length === 0 && !$missionList.error}
       <p class="muted empty" data-testid="missions-empty">No missions yet. A mission is a goal with the tasks that reach it.</p>
     {:else}
+      {#if $missionList.error}
+        <p class="refresh-error" role="status" data-testid="missions-refresh-error">
+          Couldn't refresh ({$missionList.error}) — showing what was loaded.
+          <button class="btn btn--quiet" type="button" data-testid="missions-refresh-retry" onclick={() => void loadMissionList()}>Retry</button>
+        </p>
+      {/if}
       {#each groups as g (g.key)}
         {@const folds = g.key === 'earlier'}
         {#if g.label}
@@ -316,6 +322,12 @@
 </div>
 
 <style>
+  .refresh-error {
+    margin: 0;
+    padding: 0.2rem 0.4rem;
+    font-size: var(--text-2xs);
+    color: var(--usage-warn);
+  }
   .missions {
     display: flex;
     flex-direction: column;

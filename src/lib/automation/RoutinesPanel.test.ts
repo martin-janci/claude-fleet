@@ -245,6 +245,24 @@ describe('the Automation board (list, detail, inspector)', () => {
     expect(document.querySelector('[data-testid^="routine-section-"]')?.textContent).toContain('Failed');
   });
 
+  it('the Filters menu closes on Esc, keeping the Esc from the page, and on a press outside (review w18-11)', async () => {
+    render(RoutinesPanel, { props: { loops, nowSec: now } });
+    await screen.findByTestId('routine-title');
+    await fireEvent.click(screen.getByTestId('routine-filters'));
+    const item = screen.getByTestId('routine-filter-failed');
+    item.focus();
+    const esc = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+    item.dispatchEvent(esc);
+    await tick();
+    expect(esc.defaultPrevented).toBe(true);
+    expect(screen.queryByTestId('routine-filters-menu')).toBeNull();
+    expect(document.activeElement).toBe(screen.getByTestId('routine-filters'));
+    await fireEvent.click(screen.getByTestId('routine-filters'));
+    expect(screen.getByTestId('routine-filters-menu')).toBeTruthy();
+    await fireEvent.pointerDown(document.body);
+    expect(screen.queryByTestId('routine-filters-menu')).toBeNull();
+  });
+
   it('the inspector says the limits, with the day spent against its budget, and Duplicate saves a copy', async () => {
     route([{ ...sweep, budget_day_micros: 5_000_000 }], [{ ...ok, started_at: now - 60, finished_at: now }]);
     render(RoutinesPanel, { props: { nowSec: now } });

@@ -126,11 +126,17 @@ MCP: `restart_session { session_id, profile: "work" }` restarts the session,
 resuming its conversation under that login, and stores the new profile once
 the relaunch succeeded (a failed one leaves the row as it was).
 `profile: ""` switches back to the host's login; leaving `profile` out keeps
-the current one. Restart, recreate, repair, rewind and move all relaunch
-with the stored profile (`sessions.claude_profile`, migration 113).
+the current one. Restart, recreate, repair and rewind all relaunch with the
+stored profile (`sessions.claude_profile`, migration 113).
 
-A moved session keeps its profile name; on the target host that name is a
-separate profile, which asks for its own `/login` the first time.
+A move keeps the login by account, not by name. On the target it takes the
+same profile name when that profile is signed in to the same account there;
+else the target's signed-in login on that account (the host's own login
+first); else the same name when the target has a signed-in profile of that
+name on another account; else the target's own login. A signed-out login is
+skipped, and a move never lands on an empty profile that asks for `/login`.
+When fleet does not know the session's account, the profile name is kept
+as it was.
 
 ### Switch automatically
 

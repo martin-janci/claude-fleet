@@ -14,7 +14,7 @@
   side panel.
 -->
 <script lang="ts">
-  import { orbitModel, type OrbitModel } from '../orbit_map';
+  import { orbitModel, orbitStageLabel, type OrbitModel } from '../orbit_map';
   import { countRoll, toastIn } from '../motion_catalog';
   import type { RunRow } from '../runs';
 
@@ -52,7 +52,7 @@
   <div
     class="stage"
     role="group"
-    aria-label={`${model.running} running and ${model.working} working across ${model.hosts.length} hosts`}
+    aria-label={orbitStageLabel(model)}
   >
     <div class="ring outer"></div>
     <svg class="spokes" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">

@@ -21798,10 +21798,11 @@ fn set_position(t: &FleetTools, position: crate::service::autonomy::Position) {
     assert_eq!(crate::service::autonomy::position(&st), position);
 }
 
-/// Session care (`control.session_care`): off, the operator's restart of
-/// its own session asks at every position; on, it goes without a card at
-/// Within your brief (audited on the session), retiring one only at
-/// Autopilot, and a session that is not its handoff still asks.
+/// Session care (`control.session_care`, on by default): off, the
+/// operator's restart of its own session asks at every position; on, it
+/// goes without a card at Within your brief (audited on the session),
+/// retiring one only at Autopilot, and a session that is not its handoff
+/// still asks.
 #[tokio::test]
 async fn session_care_lets_the_operator_restart_and_retire_its_own_sessions() {
     use super::params::{RestartSessionParams, SafeKillSessionParams};
@@ -21849,6 +21850,21 @@ async fn session_care_lets_the_operator_restart_and_retire_its_own_sessions() {
             );
         }
     };
+
+    // Review w30-10: care is on by default (the owner's 2026-10-20 choice):
+    // on a store that never set it, a restart of its own session at Within
+    // your brief goes without a card.
+    assert!(crate::service::settings::get_bool(
+        &t.store.lock().unwrap(),
+        crate::service::settings::CONTROL_SESSION_CARE
+    ));
+    set_position(&t, Position::Brief);
+    let (out, approval) = guard::tracking_approval(
+        t.restart_session(Extension(operator()), Parameters(restart(on_b))),
+    )
+    .await;
+    not_asked(&out);
+    assert_eq!(approval, Some(crate::store::APPROVAL_PRE_APPROVED));
 
     // Care off: a restart asks even at Autopilot.
     t.store
