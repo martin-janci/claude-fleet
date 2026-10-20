@@ -325,7 +325,7 @@ describe('automation guards in words (G3.8)', () => {
     expect(autonomyWords(undefined)).toBe('L2 · pushes and opens PRs');
     expect(onFailureWords({ retry_once: true })).toMatch(/^Retry once/);
     expect(startedByWords({ trigger: 'cron', trigger_ref: 'retry:4' })).toBe('its schedule, retried once after run 4 failed');
-    expect(startedByWords({ trigger: 'event', trigger_ref: 'pr:2:9' })).toBe('an event (pr:2:9)');
+    expect(startedByWords({ trigger: 'event', trigger_ref: 'pr:2:9' })).toBe('an event on a pull request');
     expect(fixLabel(undefined)).toBe('Fix');
   });
 });

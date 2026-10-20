@@ -371,7 +371,7 @@
         {/if}
       {:else if draft.trigger === 'event'}
         <div class="event">
-          <RoutineEventTrigger bind:event={draft.event} bind:filter={draft.filter} repos={pickable.map((p) => `${p.project.owner}/${p.project.repo}`)} />
+          <RoutineEventTrigger bind:event={draft.event} bind:filter={draft.filter} routineHost={draft.host_alias} repos={pickable.map((p) => `${p.project.owner}/${p.project.repo}`)} />
         </div>
       {:else}
         <p class="help" data-testid="routine-manual-note">It never starts on its own: Run now starts it, here or from the phone.</p>

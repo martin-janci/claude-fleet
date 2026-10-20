@@ -8,7 +8,7 @@
   // requests, and the fleet's hosts, accounts and missions (migration 201).
   // The hub checks every field again (`service::routines::event_filters`);
   // this only offers what it accepts.
-  import { EVENT_GROUPS, RATE_CHOICES, eventLabel, rateLabel, isFleetEvent, isPrEvent, rateSubject, takesHostFilter, type EventFilter } from '../routines';
+  import { EVENT_GROUPS, RATE_CHOICES, eventHostChoices, eventLabel, rateLabel, isFleetEvent, isPrEvent, rateSubject, takesHostFilter, type EventFilter } from '../routines';
   import { hosts } from '../hosts';
 
   interface Props {
@@ -16,12 +16,15 @@
     filter: EventFilter;
     /** `owner/repo` of the fleet's projects, offered for the repo filter. */
     repos?: readonly string[];
+    /** The routine's own host: a fleet event's "Only on host" offers only
+     *  the hosts of its org, as the hub refuses the rest. */
+    routineHost?: string;
   }
-  let { event = $bindable(), filter = $bindable(), repos = [] }: Props = $props();
+  let { event = $bindable(), filter = $bindable(), repos = [], routineHost }: Props = $props();
 
   const pr = $derived(isPrEvent(event));
   const per = $derived(rateSubject(event));
-  const hostAliases = $derived($hosts.filter((h) => !h.hidden).map((h) => h.alias));
+  const hostAliases = $derived(eventHostChoices($hosts, event, routineHost));
 </script>
 
 <label class="field"
@@ -67,6 +70,7 @@
       {#each hostAliases as h (h)}<option value={h}>{h}</option>{/each}
       {#if filter.host && !hostAliases.includes(filter.host)}<option value={filter.host}>{filter.host}</option>{/if}
     </select>
+    {#if event === 'session_moved'}<span class="hint">A move matches the host the session moved to.</span>{/if}
   </label>
 {/if}
 <label class="field"
@@ -83,6 +87,7 @@
       >{/if}
   </select>
   {#if pr}<span class="hint">The run's prompt names the pull request that started it.</span>{/if}
+  {#if !pr && !isFleetEvent(event)}<span class="hint">The run's prompt names the session that started it and what happened to it.</span>{/if}
   {#if isFleetEvent(event)}<span class="hint">Fires once when it happens, not again while it lasts. The run's prompt says what happened.</span>{/if}
 </label>
 

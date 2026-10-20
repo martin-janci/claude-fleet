@@ -10,7 +10,7 @@ import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import RoutinesPanel from './RoutinesPanel.svelte';
 import { hosts } from '../hosts';
 import { projects } from '../projects';
-import { EVENT_CHOICES, eventFilterInput, eventFilterOf, eventFilterWords, eventLabel, failing, triggerWords, type RoutineRow } from '../routines';
+import { EVENT_CHOICES, eventFilterInput, eventFilterOf, eventFilterWords, eventHostChoices, eventLabel, failing, startedByWords, triggerWords, type RoutineRow } from '../routines';
 import { stashDraft } from './routine_draft';
 
 const inv = mockedInvoke as ReturnType<typeof vi.fn>;
@@ -170,5 +170,42 @@ describe('a rate no preset names (review w05-10)', () => {
     const rate = screen.getByTestId('routine-event-rate') as HTMLSelectElement;
     expect(rate.value).toBe('1800');
     expect(rate.selectedOptions[0].textContent).toBe('once per session per 30 minutes');
+  });
+});
+
+describe('review w06: event words, rate, host choices and run refs', () => {
+  it('names the failing session events whole, as the phone does', () => {
+    expect(eventLabel('stop_failure')).toBe('A session’s turn fails');
+    expect(eventLabel('auto_restore_failed')).toBe('An automatic restore attempt fails');
+    expect(eventLabel('account_switch_failed')).toBe('An account switch fails');
+    expect(triggerWords({ trigger: 'event', event: 'stop_failure' })).toBe('When a session’s turn fails');
+    expect(triggerWords({ trigger: 'event', event: 'auto_restore_failed' })).toBe('When an automatic restore attempt fails');
+  });
+
+  it('counts a signed-out login per login, as the hub does', () => {
+    expect(eventFilterWords({ event: 'login_signed_out', event_rate_secs: 3600 })).toBe('once per login per hour');
+  });
+
+  it('offers a fleet event only the hosts of the routine host’s org', () => {
+    const list = [
+      { alias: 'mac', hidden: false, org_id: 1 },
+      { alias: 'nas', hidden: false, org_id: 2 },
+      { alias: 'pi', hidden: false, org_id: 1 },
+      { alias: 'old', hidden: true, org_id: 1 },
+    ];
+    expect(eventHostChoices(list, 'host_offline', 'mac')).toEqual(['mac', 'pi']);
+    expect(eventHostChoices(list, 'stuck', 'mac')).toEqual(['mac', 'nas', 'pi']);
+    expect(eventHostChoices(list, 'host_offline', undefined)).toEqual(['mac', 'nas', 'pi']);
+    expect(eventHostChoices([{ alias: 'a' }, { alias: 'b', org_id: 3 }], 'host_low', 'a')).toEqual(['a']);
+  });
+
+  it('says what an event run was about, not its raw ref', () => {
+    expect(startedByWords({ trigger: 'event', trigger_ref: 'session:12:345' })).toBe('an event on session #12');
+    expect(startedByWords({ trigger: 'event', trigger_ref: 'pr:2:9' })).toBe('an event on a pull request');
+    expect(startedByWords({ trigger: 'event', trigger_ref: 'fleet:host:mac:42' })).toBe('an event on host mac');
+    expect(startedByWords({ trigger: 'event', trigger_ref: 'fleet:mission:4:7' })).toBe('an event on mission #4');
+    expect(startedByWords({ trigger: 'event', trigger_ref: 'fleet:account:u-1:8' })).toBe('an event on account u-1');
+    expect(startedByWords({ trigger: 'event', trigger_ref: 'fleet:login:mac:work:9' })).toBe('an event on the work login on mac');
+    expect(startedByWords({ trigger: 'event', trigger_ref: 'odd' })).toBe('an event (odd)');
   });
 });
