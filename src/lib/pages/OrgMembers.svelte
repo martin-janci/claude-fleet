@@ -110,7 +110,10 @@
 
   // --- add, then pair --------------------------------------------------------
 
-  const pairingHere = $derived($memberPairing && $memberPairing.org_id === orgId ? $memberPairing : null);
+  // A pairing started on another hub's org of the same id is not this one's.
+  const pairingHere = $derived(
+    $memberPairing && $memberPairing.org_id === orgId && $memberPairing.fleet === resourceFleet().fleet ? $memberPairing : null,
+  );
   let device = $state('');
   // The editor is rebuilt when the list is re-read after the add, so a
   // pairing started there arrives through the store: name its device here.
@@ -124,7 +127,7 @@
   function startPairing(person: string) {
     device = `${person}-device`;
     pairError = null;
-    memberPairing.set({ org_id: orgId, person });
+    memberPairing.set({ fleet: resourceFleet().fleet, org_id: orgId, person });
   }
 
   async function add(params: Record<string, string>) {

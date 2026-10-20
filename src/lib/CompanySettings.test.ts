@@ -192,6 +192,19 @@ describe('Settings › Company with a second fleet', () => {
     await waitFor(() => expect(screen.queryByTestId('edit-name')).toBeNull());
   });
 
+  it('reads that hub’s list and option sources once per pick, after its access', async () => {
+    hubStatus.set(remote);
+    _setFleetsForTest([fleet('primary', true), fleet('company', false)]);
+    const inv = route(twoHubs(true));
+    show('settings.orgs', false);
+    await pickCompany();
+    await screen.findByTestId('resource-readonly');
+    await waitFor(() => expect(onCompany(inv, 'list_hosts').length).toBeGreaterThan(0));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(onCompany(inv, 'list_orgs')).toHaveLength(1);
+    expect(onCompany(inv, 'list_hosts')).toHaveLength(1);
+  });
+
   it('the option selects offer that hub’s hosts, never the primary’s', async () => {
     hubStatus.set(remote);
     _setFleetsForTest([fleet('primary', true), fleet('company', false)]);
