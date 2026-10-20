@@ -1166,6 +1166,32 @@ Index by area (names only; see the reference for details):
   only a scheduled fire must also pass. An event or decision on a session
   the caller may not read is left out, and `dry_run` on such an event
   answers `E_NOTFOUND`.
+  Memory (migration 204, `service/routines/memory.rs`): notebooks the
+  fleet keeps in its own database, outside any git repo and any host's
+  `~/.claude`, so the next run reads them on whatever host it starts. A
+  routine's `memory` in `save` names the ones its runs use: `routine` (its
+  own), `project` (its project's, shared by every routine of that project
+  in the same circle: its org, else its owner) or `both`; absent or `""`
+  is none. `memory_auto: true` (needs `memory`) adds one line per finished
+  run, `- [run <id> · <UTC time> · <state>] <first line of its reply>`
+  (or the failure's reason), to the first notebook it uses; the oldest such
+  lines go first when the notebook is full. A run's prompt carries each
+  notebook it uses under the autonomy line, fenced as untrusted text, and
+  says how to rewrite one; `dry_run` shows it. A finished run's reply is
+  read off its transcript within the hour (a transcript that cannot be read
+  is tried again for ten minutes, then the run is noted without it): a
+  `<routine-memory scope="routine|project">…</routine-memory>` block
+  replaces that notebook, the last block of a scope winning, and a scope
+  the routine does not use is ignored; the run's trace says what changed.
+  A notebook is at most 4000 characters (a longer block is cut). `memory {
+  routine_id }` answers `{ routine_id, memory?, memory_auto, routine?,
+  project?, max_chars, may_change }`, each notebook `{ scope, owner_id,
+  circle, body, updated_at, updated_by: person | run | fleet,
+  updated_run_id? }` once anything wrote it; `set_memory { routine_id,
+  notebook: routine | project, text }` rewrites one (`""` clears it), with
+  the fence of changing the routine (`E_INVALID` for a notebook it does not
+  use or text past the cap). Deleting a routine deletes its own notebook;
+  its project's stays. The operator may read them, not write them.
 - **Start rules** — `start_rules`, by `action` (Orbit Fleet 8.11): a task
   key pattern (`PD-*`, `*` for any run of characters, any case) that names
   the project, and optionally the host, a start of a matching task lands

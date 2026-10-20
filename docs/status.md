@@ -1106,6 +1106,15 @@ fires included), `routines { explain | decisions | dry_run }` and the
 routine's Debug tab; `agents { explain | job }` (the desktop's
 `agents_debug`, Automation › Agents › Debug, with each rule's last poll
 error per process) and `pr_shepherd { explain }` (no UI). All read only.
+Routine memory (migration 204, `routines/memory.rs`): a routine may keep
+notebooks in the fleet's database, outside git and the host: its own, its
+project's (shared by the project's routines in one org, or one owner's), or
+both. Each run reads them under its prompt and rewrites one with a
+`<routine-memory>` block at the end of its reply, read off the transcript
+once the run finishes; `memory_auto` also notes each finished run in it. The
+routine editor's Memory group picks them and shows the saved notebooks to
+read, edit or clear (`routines { memory | set_memory }`). Off by default
+per routine. The phone shows nothing of it yet.
 
 The prompt tuner is landed and OFF by default (`work.prompt_tune`;
 `service/prompt_tune.rs`, `PromptTune.svelte`, mechanics in
