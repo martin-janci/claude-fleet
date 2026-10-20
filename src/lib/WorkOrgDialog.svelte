@@ -14,6 +14,7 @@
   // gains access (the people whose org-bound devices do) and where the
   // task's spend stays.
   import Modal from './Modal.svelte';
+  import { formKeys, platformSubmitHint } from './forms/form_frame';
   import { orgs as orgStore } from './orgs';
   import { hubStatus, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
@@ -134,13 +135,17 @@
     return reason ?? 'The hub does not allow this move.';
   }
 
+  // ⌘↵ moves it, once the impact is read (review w18-6).
+  const hint = platformSubmitHint();
+  const canMove = $derived(!!impact && impact.allowed && !!impact.impact_token && !busy && blocked === null);
+
   function plural(n: number, one: string, many = `${one}s`): string {
     return `${n} ${n === 1 ? one : many}`;
   }
 </script>
 
 <Modal title="Assign organisation" {onclose} width="520px" testid="work-org-dialog">
-  <div class="form">
+  <div class="form" use:formKeys={{ submit: () => void confirm(), enabled: canMove }}>
     <p class="what">{taskLabel(task)}</p>
     <p class="note">
       Now: <strong>{orgName(currentOrg)}</strong>{#if inferredOrg != null}
@@ -228,7 +233,9 @@
         type="button"
         class="btn btn--primary"
         data-testid="work-org-confirm"
-        disabled={!impact || !impact.allowed || !impact.impact_token || busy || blocked !== null}
+        disabled={!canMove}
+        data-shortcut={busy ? undefined : hint.label}
+        aria-keyshortcuts={hint.aria}
         onclick={() => void confirm()}>Move to {targetId === null ? '…' : orgName(targetId)}</button
       >
     </div>

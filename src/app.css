@@ -522,3 +522,11 @@ html, body, #app {
   font-family: var(--font-sans);
   font-size: 14px;
 }
+
+/* A dialog's primary verb names its submit key ("Launch ⌘↵", review w18-6):
+   `formKeys` dialogs set `data-shortcut` from `submitHint`, as DialogSheet does. */
+button[data-shortcut]::after {
+  content: ' ' attr(data-shortcut);
+  opacity: 0.7;
+  font-size: 0.9em;
+}

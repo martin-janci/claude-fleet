@@ -174,3 +174,36 @@ describe('session commands: push and open in editor (3.9, 5.5)', () => {
     expect(get(toasts).at(-1)?.message).toContain('outside tmux');
   });
 });
+
+describe('every live chord has a palette row (review w18-4)', () => {
+  afterEach(() => destination.set('session'));
+
+  // These act on what is under the keyboard, not on the app: the switcher
+  // itself, the list's ⌘1–9, the terminal walk and the Files tab's finder.
+  const KEYS_ONLY = new Set(['switcher', 'jump-n', 'next-terminal', 'go-to-file']);
+
+  it('each live global chord, but the keys-only ones, is a command carrying its id', async () => {
+    const { SHORTCUTS } = await import('./shortcuts');
+    const carried = new Set(
+      paletteCommands({ selected: session('mac', 'a'), sessionView: 'conversation' }).map((c) => c.shortcut),
+    );
+    const missing = SHORTCUTS.filter(
+      (s) => s.scope === 'global' && s.status === 'live' && !KEYS_ONLY.has(s.id) && !carried.has(s.id),
+    ).map((s) => s.id);
+    expect(missing).toEqual([]);
+  });
+
+  it('the rail items have rows too, and a new routine opens the editor', async () => {
+    const ctx = { selected: null, sessionView: 'conversation' as const };
+    const ids = paletteCommands(ctx).map((c) => c.id);
+    expect(ids).toEqual(expect.arrayContaining(['app.control', 'app.inbox', 'app.toolkit', 'app.new-routine']));
+    const { routinesRequest } = await import('./routines');
+    await runCommand('app.new-routine', ctx);
+    expect(get(destination)).toBe('automation');
+    expect(get(routinesRequest)?.template).toBe('blank');
+    routinesRequest.set(null);
+    const { workspaceLanding } = await import('./workspace');
+    await runCommand('app.inbox', ctx);
+    expect(get(workspaceLanding)?.rail).toBe('inbox');
+  });
+});

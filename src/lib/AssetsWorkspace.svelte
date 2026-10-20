@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { viewKey } from './shortcuts';
+  import { IS_MAC, viewKey } from './shortcuts';
+  import { platformChord } from './kit/kbd';
   import Loader from './Loader.svelte';
   import ListLoading from './ListLoading.svelte';
   import { tick, untrack, type Snippet } from 'svelte';
@@ -617,7 +618,7 @@
         >
         {#if !readOnly}
           <button type="button" class="btn" class:btn--primary={!cardPrimary && !syncPlanOpen && !creatingShown} onclick={() => onsync({})} disabled={busy !== ''} data-testid="assets-sync"
-            >{busy === 'plan' ? 'Planning…' : 'Sync fleet'}{#if !cardPrimary && !planOpen && !creatingShown} <kbd>⌘↵</kbd>{/if}</button
+            >{busy === 'plan' ? 'Planning…' : 'Sync fleet'}{#if !cardPrimary && !planOpen && !creatingShown} <kbd>{platformChord('⌘↵', IS_MAC)}</kbd>{/if}</button
           >
         {/if}
       </div>

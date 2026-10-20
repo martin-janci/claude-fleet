@@ -7,6 +7,9 @@
   import { hubStatus, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
   import Modal from './Modal.svelte';
+  import { formKeys, platformSubmitHint } from './forms/form_frame';
+
+  const hint = platformSubmitHint();
 
   // new_bg_session routes, so it only needs the live connection to be up.
   const bgSessionBlocked = $derived(hubActionBlocked('new_bg_session', $hubStatus, $hubConnection));
@@ -36,6 +39,10 @@
     if (!isPickableHost($hosts, bgModalHost)) bgModalHost = defaultHost($hosts);
   });
 
+  const canLaunch = $derived(
+    !bgModalLoading && !!bgModalName.trim() && !!bgModalPrompt.trim() && bgSessionBlocked === null,
+  );
+
   async function doNewBgSession() {
     bgModalError = null;
     bgModalLoading = true;
@@ -57,7 +64,7 @@
 </script>
 
 <Modal title="New background session" onclose={() => onClose()} width="420px" testid="bg-session-modal">
-  <div class="modal">
+  <div class="modal" use:formKeys={{ submit: () => void doNewBgSession(), enabled: canLaunch }}>
     <label class="modal-field">
       <span>Host</span>
       <select bind:value={bgModalHost}>
@@ -92,8 +99,10 @@
       <button
         class="btn btn--primary"
         onclick={doNewBgSession}
-        disabled={bgModalLoading || !bgModalName.trim() || !bgModalPrompt.trim() || bgSessionBlocked !== null}
+        disabled={!canLaunch}
         title={bgSessionBlocked ?? ''}
+        data-shortcut={bgModalLoading ? undefined : hint.label}
+        aria-keyshortcuts={hint.aria}
         data-testid="bg-session-submit"
       >
         {#if bgModalLoading}<Loader name="comet" size={12} class="btn-loader" />{/if}{bgModalLoading ? 'Launching…' : 'Launch'}

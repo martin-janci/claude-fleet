@@ -67,7 +67,11 @@
     recentQueries,
     noteQuery,
     foundEntries,
+    missionEntries,
+    routineEntries,
   } from './quick_switcher';
+  import { missionList, loadMissionList } from './mission_room';
+  import { switcherRoutines, loadSwitcherRoutines } from './routines';
   import { requestConversationFind, searchEverything, type SearchHit } from './search_api';
   import { matchRanges } from './fuzzy';
   import {
@@ -306,6 +310,8 @@
         ...(settingChange ? [settingChange] : []),
         ...ticketRows,
         ...planningEntries($knownWorkFacets),
+        ...missionEntries($missionList.missions),
+        ...routineEntries($switcherRoutines),
         ...foundEntries(
           found,
           new Set($sessions.map((x) => x.id)),
@@ -528,6 +534,10 @@
     searchSince = searchNow = Date.now();
     void loadTickets();
     void loadWorkFacets();
+    // Missions and routines by name (review w18-5): the mission list when
+    // nothing has read it yet, the routines each open.
+    if (!get(missionList).read) void loadMissionList();
+    void loadSwitcherRoutines();
     // Fresh picks for the NEXT open: this one's view is frozen.
     if (next === 'new') void loadProjectPicks();
   }

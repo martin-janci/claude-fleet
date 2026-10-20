@@ -3268,6 +3268,33 @@ describe('List keys (redesign step 3.8)', () => {
     expect(get(selectedSession)?.id).toBe(rows[2].id);
   });
 
+  it('the next-needs-you chord wins over a focused terminal (review w18-3)', async () => {
+    const rows = three();
+    mockBackend(fakeProjects, rows);
+    selectSession(null);
+    render(Sidebar);
+    await tick(); await tick();
+    // Stands in for the terminal's IME proxy, whose keydown writes the
+    // chord to the pty and prevents it.
+    const proxy = document.createElement('textarea');
+    proxy.dataset.imeProxy = '';
+    const wrote = vi.fn();
+    proxy.addEventListener('keydown', (e) => {
+      wrote();
+      e.preventDefault();
+    });
+    document.body.appendChild(proxy);
+    try {
+      const isMac = /Mac/.test(navigator.platform) || /Macintosh/.test(navigator.userAgent);
+      const chord = isMac ? { key: 'n', metaKey: true, altKey: true } : { key: 'n', ctrlKey: true, altKey: true };
+      await fireEvent.keyDown(proxy, chord);
+      expect(get(selectedSession)?.id).toBe(rows[2].id);
+      expect(wrote).not.toHaveBeenCalled();
+    } finally {
+      proxy.remove();
+    }
+  });
+
   it('⌘2 opens the second row on a Mac', async () => {
     const plat = Object.getOwnPropertyDescriptor(Navigator.prototype, 'platform');
     Object.defineProperty(navigator, 'platform', { value: 'MacIntel', configurable: true });

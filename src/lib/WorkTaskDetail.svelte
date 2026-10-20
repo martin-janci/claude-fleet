@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { IS_MAC, shortcutLabel } from './shortcuts';
   // A task in Details (work graph M14), opened from the Work view: what the
   // tracker says (title, status, link, assignees, a description excerpt),
   // where its organisation and its group come from, its repositories, EVERY
@@ -1226,7 +1227,7 @@
                   Also post to {commentsTracker}
                 </label>
               {/if}
-              <span class="muted small hint-keys">Markdown · ⌘↵ to post</span>
+              <span class="muted small hint-keys">Markdown · {shortcutLabel('form.submit', IS_MAC)} to post</span>
               <button
                 class="btn"
                 type="submit"

@@ -19,10 +19,13 @@
   import { errorText } from './error_copy';
   import Loader from './Loader.svelte';
   import Modal from './Modal.svelte';
+  import { formKeys, platformSubmitHint } from './forms/form_frame';
   import { untrack } from 'svelte';
   import { spawnAuthorSession } from './assets';
   import { hosts } from './hosts';
   import { selectSessionExplicitly } from './selection';
+
+  const hint = platformSubmitHint();
 
   let {
     kind,
@@ -81,6 +84,8 @@
 </script>
 
 <Modal title="Write it with Claude" onclose={busy ? undefined : onclose} width="480px" testid="author-session-dialog">
+  <!-- The form rule (review w18-6): ⌘↵ opens the session from the text box. -->
+  <div class="keys" use:formKeys={{ submit: () => void openSession(), enabled: !busy && instructions.trim() !== '' }}>
   <p class="muted">
     {#if kind && name}Opens a session that edits {name} in the catalog folder.{:else}Opens a session that writes a new asset in the catalog folder.{/if}
   </p>
@@ -103,12 +108,16 @@
       class="primary"
       onclick={openSession}
       disabled={busy || instructions.trim() === ''}
+      data-shortcut={busy ? undefined : hint.label}
+      aria-keyshortcuts={hint.aria}
       data-testid="author-open"
     >{#if busy}<Loader name="comet" size={12} class="btn-loader" />{/if}{busy ? 'Opening…' : 'Open session'}</button>
+  </div>
   </div>
 </Modal>
 
 <style>
+  .keys { display: contents; }
   .muted { color: var(--fg-muted); font-size: var(--text-xs); margin: 0 0 8px; }
   label { display: flex; flex-direction: column; gap: 4px; font-size: var(--text-xs); color: var(--fg-muted); margin-bottom: 8px; }
   select { font: inherit; padding: 4px 6px; border: 1px solid var(--border); background: var(--bg-pane); color: var(--fg); border-radius: var(--radius-sm); }

@@ -10,6 +10,7 @@
   // row when what is typed is not one of them.
   import { untrack } from 'svelte';
   import Modal from './Modal.svelte';
+  import { formKeys, platformSubmitHint } from './forms/form_frame';
   import { hubStatus, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
   import {
@@ -141,6 +142,10 @@
       else onreload?.();
     });
   }
+
+  // The form rule (review w18-6): ⌘↵ submits from any field; a bare Enter
+  // only in a one-field form (`formKeys`).
+  const hint = platformSubmitHint();
 </script>
 
 <Modal title="Place in group" {onclose} width="440px" testid="work-place-dialog">
@@ -167,6 +172,7 @@
   {:else}
     <form
       class="form"
+      use:formKeys
       onsubmit={(e) => {
         e.preventDefault();
         if (label.trim()) void place(label);
@@ -265,6 +271,7 @@
         {/if}
         <button type="button" class="btn btn--quiet" onclick={onclose}>Cancel</button>
         <button type="submit" class="btn btn--primary" data-testid="work-place-submit" disabled={busy || !label.trim() || blocked !== null}
+          data-shortcut={busy ? undefined : hint.label} aria-keyshortcuts={hint.aria}
           >Place</button
         >
       </div>
