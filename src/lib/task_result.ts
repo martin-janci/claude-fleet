@@ -8,13 +8,13 @@
 
 import { invokeCmd, type Result } from './result';
 import { reportFromValue, type TaskReport } from './rich_blocks';
-import type { TaskEvidence } from './missions';
+import type { RunEvidence, TaskEvidence } from './missions';
 import { outcomeLabel } from './mission_triage';
 import type { TaskRow } from './tasks';
 import type { WorkItemRow } from './trackers';
 import { bumpWorkChanged } from './work';
 
-export type { TaskEvidence };
+export type { RunEvidence, TaskEvidence };
 
 /** One `done_when` line and what fleet found for it (`service::work::gate`). */
 export interface GateCheck {
@@ -25,12 +25,15 @@ export interface GateCheck {
   detail: string;
 }
 
-/** The completion gate: `blocked` when a check failed or a subtask is open,
- *  `unverified` when lines exist and not all passed, `passed` otherwise. */
+/** The completion gate: `blocked` when a check failed, a subtask is open or
+ *  the implement run left no evidence, `unverified` when lines exist and not
+ *  all passed, `passed` otherwise. */
 export interface Gate {
   state: 'passed' | 'unverified' | 'blocked';
   checks: GateCheck[];
   open_children: { id: number; title: string }[];
+  /** The latest implement run's git evidence; `null` when none ran. */
+  evidence?: RunEvidence | null;
 }
 
 export interface ResultPr {
@@ -82,7 +85,12 @@ export function normalizeResult(v: TaskResultView): TaskResultView {
       ci_status: p.ci_status ?? null,
       review_decision: p.review_decision ?? null,
     })),
-    gate: { state: v.gate.state, checks: v.gate.checks ?? [], open_children: v.gate.open_children ?? [] },
+    gate: {
+      state: v.gate.state,
+      checks: v.gate.checks ?? [],
+      open_children: v.gate.open_children ?? [],
+      evidence: v.gate.evidence ?? null,
+    },
     followups: (v.followups ?? []).map((f) => ({ text: f.text, item_id: f.item_id ?? null })),
   };
 }
@@ -112,11 +120,16 @@ export async function createFollowupTask(
 export type ValidationState = 'pass' | 'fail' | 'pending' | 'reported';
 
 /** What speaks for the result: the gate's checks first (fleet read them),
- *  then the tests the worker says it ran, marked as reported. */
+ *  then the run's git evidence, then the tests the worker says it ran,
+ *  marked as reported. */
 export function validationLines(v: TaskResultView): { label: string; state: ValidationState }[] {
   const state = (s: string): ValidationState => (s === 'pass' ? 'pass' : s === 'fail' ? 'fail' : 'pending');
+  const ev = v.gate.evidence;
+  const evState = (s: string): ValidationState =>
+    s === 'present' || s === 'overridden' ? 'pass' : s === 'missing' ? 'fail' : 'pending';
   return [
     ...v.gate.checks.map((c) => ({ label: c.line, state: state(c.state) })),
+    ...(ev ? [{ label: `Run evidence: ${ev.detail}`, state: evState(ev.state) }] : []),
     ...v.report.tests_run.map((t) => ({ label: t, state: 'reported' as const })),
   ];
 }

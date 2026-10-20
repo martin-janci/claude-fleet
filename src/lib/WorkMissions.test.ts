@@ -753,6 +753,54 @@ describe('WorkMissions', () => {
     expect(calls('set_work_done_when')[0]).toEqual({ item_id: 11, done_when: ['review', 'ci:test'] });
   });
 
+  it('shows missing run evidence on the card and overrides it with a reason', async () => {
+    handlers.work_mission = () => ({
+      mission: current,
+      items: [item(10, 'Payments v2'), item(11, 'Schema')],
+      graph: {
+        nodes: [
+          {
+            item_id: 10,
+            state: 'verifying',
+            wave: 1,
+            evidence: { state: 'missing', task_id: 5, detail: 'the implement run committed nothing and changed no file' },
+          },
+          {
+            item_id: 11,
+            state: 'verifying',
+            wave: 1,
+            evidence: { state: 'present', task_id: 6, commits: 2, files: 3, detail: '2 commit(s), 3 file(s) changed' },
+          },
+        ],
+        waves: 1,
+      },
+      events: [],
+      may_change: true,
+    });
+    handlers.verify_work_item = () => ({ item_id: 10, changed: true });
+    renderMissions();
+    await flush();
+    await fireEvent.click(screen.getByTestId('mission-row'));
+    await flush();
+    // Only the task with nothing to show says so.
+    const rows = screen.getAllByTestId('mission-evidence');
+    expect(rows).toHaveLength(1);
+    expect(rows[0].dataset.state).toBe('missing');
+    expect(rows[0].textContent).toContain('No run evidence');
+    expect(rows[0].textContent).toContain('committed nothing');
+    await fireEvent.click(screen.getByTestId('mission-evidence-override'));
+    expect((screen.getByTestId('mission-evidence-save') as HTMLButtonElement).disabled).toBe(true);
+    await fireEvent.input(screen.getByTestId('mission-evidence-reason'), { target: { value: ' a config change on the host ' } });
+    await fireEvent.click(screen.getByTestId('mission-evidence-save'));
+    await flush();
+    expect(calls('verify_work_item')[0]).toEqual({
+      item_id: 10,
+      line: 'run evidence',
+      ok: true,
+      note: 'a config change on the host',
+    });
+  });
+
   describe('the planner in words (step 1.3)', () => {
     const loopDetail = () => ({
       mission: current,

@@ -519,6 +519,20 @@ async fn apply_step_inner(
                 .item_id
                 .ok_or_else(|| IpcError::new(codes::E_INVALID, "a close step names its item"))?;
             let s = lock(&deps.store)?;
+            // The completion gate's evidence: the loop never closes an item
+            // whose implement run shows no commits or files. A person's
+            // press is never refused (they see it on the card).
+            if *actor == Actor::Loop {
+                if let Some(e) =
+                    crate::service::work::gate::item_run_evidence(&s, item_id, now_unix())?
+                        .filter(|e| e.state == "missing" || e.state == "pending")
+                {
+                    return Err(IpcError::new(
+                        codes::E_INVALID_STATE,
+                        format!("no run evidence: {}", e.detail),
+                    ));
+                }
+            }
             s.set_item_status(item_id, "done")?;
             s.wake_mission(m.id)?;
             Ok(("closed".into(), None))

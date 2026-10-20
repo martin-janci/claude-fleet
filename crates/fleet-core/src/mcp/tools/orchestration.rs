@@ -1478,7 +1478,9 @@ impl FleetTools {
         mission_delete; mission_import {plan}. dep {item_id, depends_on, on?}; hold {item_id, on?}; \
         propose_tree {parent, tree}; accept_many | undo_accept {item_ids}. \
         done_when {item_id, done_when: [ci[:check] | review | test[:cmd] | \
-        person | text]}; verify {item_id, line, ok, note?}: a person's check. \
+        person | text]}; verify {item_id, line, ok, note?}: a person's check \
+        (line \"run evidence\" with a note: accept an implement run with no \
+        commits or files). \
         mission_start {mission_id, step?}: take the next steps; retry \
         {item_id, note?}; mission_plan: ask the planner; card_decide \
         {card_id, ok, note?}; mission_grant {mission_id, level, hours?, \

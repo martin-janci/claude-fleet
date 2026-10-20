@@ -111,6 +111,7 @@ fn worker_text_is_fenced_and_the_snapshot_stays_in_budget() {
             waiting_for: vec![],
             verification: None,
             attempt: None,
+            evidence: None,
         }],
         ..Default::default()
     };

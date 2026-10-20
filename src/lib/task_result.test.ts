@@ -7,6 +7,7 @@ import {
   createFollowupTask,
   headline,
   requestWorkResult,
+  normalizeResult,
   validationLines,
   workResult,
   type TaskResultView,
@@ -40,6 +41,16 @@ describe('task result', () => {
       'pending',
       'reported',
     ]);
+  });
+  it('puts the run evidence between the gate lines and the reported tests', () => {
+    const missing = { state: 'missing', task_id: 9, detail: 'the implement run committed nothing and changed no file' };
+    expect(validationLines({ ...base, gate: { ...base.gate, state: 'blocked', evidence: missing } })).toEqual([
+      { label: 'Run evidence: the implement run committed nothing and changed no file', state: 'fail' },
+      { label: 'cargo fleet-test', state: 'reported' },
+    ]);
+    const waived = { ...missing, state: 'overridden', detail: 'a config change on the host' };
+    expect(validationLines({ ...base, gate: { ...base.gate, evidence: waived } })[0].state).toBe('pass');
+    expect(normalizeResult({ ...base, gate: { state: 'passed', checks: [], open_children: [] } }).gate.evidence).toBeNull();
   });
   it('says completed only when the report is done and the gate passed', () => {
     expect(headline(base)).toEqual({ label: 'Task completed', tone: 'success' });
