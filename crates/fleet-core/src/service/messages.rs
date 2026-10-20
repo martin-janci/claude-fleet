@@ -54,9 +54,7 @@ pub struct SendMessageArgs {
     pub wake: bool,
 }
 
-fn default_true() -> bool {
-    true
-}
+use crate::serde_util::default_true;
 
 #[derive(Debug, serde::Serialize)]
 pub struct SendMessageResult {

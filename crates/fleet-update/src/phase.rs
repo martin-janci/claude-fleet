@@ -79,27 +79,6 @@ impl UpdatePhase {
             _ => false,
         }
     }
-
-    /// Phases after which the installed build may already have changed:
-    /// a failure here needs `rolling_back` (where the platform can), a failure
-    /// before it is harmless.
-    pub fn touches_install(self) -> bool {
-        matches!(
-            self,
-            UpdatePhase::Installing | UpdatePhase::Validating | UpdatePhase::RollingBack
-        )
-    }
-
-    /// Nothing is in flight.
-    pub fn is_settled(self) -> bool {
-        matches!(
-            self,
-            UpdatePhase::Idle
-                | UpdatePhase::Success
-                | UpdatePhase::Recovered
-                | UpdatePhase::RollbackFailed
-        )
-    }
 }
 
 /// `(version, digest)` pairs a target failed on (design §7.2's loop breaker):

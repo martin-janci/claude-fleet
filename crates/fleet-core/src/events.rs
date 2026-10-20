@@ -1031,13 +1031,7 @@ pub const EVENT_KINDS: [&str; 23] = [
     "run",
 ];
 
-/// Seconds since the Unix epoch (0 on a clock set before 1970).
-fn unix_now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
+use crate::store::now_unix as unix_now;
 
 /// Ring size for [`BroadcastEventBus`]. Reconcile holds its emits until the
 /// transaction commits and then flushes them in one burst (one pass every

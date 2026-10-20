@@ -61,12 +61,7 @@ pub struct DiagnosticsBundle {
     pub log_file: Option<String>,
 }
 
-fn now_unix() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
+use crate::store::now_unix;
 
 /// `2026-09-28T10:00:00Z` — the same clock the log lines are stamped with,
 /// so a host's last ping can be lined up against the log by eye.

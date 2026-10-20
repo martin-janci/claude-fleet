@@ -97,14 +97,13 @@ impl Kind {
 
     /// Whether assets of this kind are installed on hosts. A fleet agent's
     /// definition is the hub's alone: every harness renders it as nothing.
+    #[cfg(test)]
     pub fn installs_on_hosts(&self) -> bool {
         !matches!(self, Kind::FleetAgent)
     }
 }
 
-fn default_true() -> bool {
-    true
-}
+use crate::serde_util::default_true;
 fn default_version() -> String {
     "1".to_string()
 }

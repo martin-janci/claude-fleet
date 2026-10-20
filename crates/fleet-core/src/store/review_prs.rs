@@ -323,17 +323,6 @@ impl Store {
         tx.commit()
     }
 
-    /// One review record by id.
-    pub fn review_record(&self, id: i64) -> Result<Option<ReviewRecordRow>, rusqlite::Error> {
-        self.conn
-            .query_row(
-                &format!("SELECT {RECORD_COLS} FROM review_records WHERE id = ?1"),
-                params![id],
-                record_row,
-            )
-            .optional()
-    }
-
     /// The newest review of a pull request.
     pub fn last_review_record(
         &self,

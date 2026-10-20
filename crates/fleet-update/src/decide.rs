@@ -44,15 +44,6 @@ pub struct HubSpeaks {
     pub agent_proto_accepts: Window,
 }
 
-impl HubSpeaks {
-    pub fn from_compat(c: &Compatibility) -> Self {
-        HubSpeaks {
-            contract_serves: c.contract.hub_serves,
-            agent_proto_accepts: c.agent_proto.hub_accepts,
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct Pin {
     pub version: Version,
