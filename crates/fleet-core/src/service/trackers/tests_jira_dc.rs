@@ -969,3 +969,46 @@ async fn data_center_gets_the_support_agents_writes_as_wiki_text() {
     );
     assert_eq!(sent[1].json_body().unwrap()["body"], "h3. Investigation");
 }
+
+/// A dead token answered as an anonymous caller (a site that lets
+/// anonymous users browse): an empty search, where only `/myself` says
+/// 401. Neither an empty view nor an all-missing fetch is believed then.
+#[tokio::test]
+async fn an_all_empty_answer_from_a_dead_token_is_auth_not_unavailable() {
+    let empty = || {
+        Ok(Response::json(
+            200,
+            &json!({"startAt": 0, "maxResults": 50, "total": 0, "issues": []}),
+        ))
+    };
+    let f = FakeTransport::new();
+    f.once(Method::Post, "/rest/api/2/search", empty()).once(
+        Method::Get,
+        "/rest/api/2/myself",
+        Ok(Response::new(401, "")),
+    );
+    let e = dc(&f).list(&mine(), None, None).await.unwrap_err();
+    assert_eq!(e.state(), Some("auth_failed"), "{e:?}");
+
+    let f = FakeTransport::new();
+    f.once(Method::Post, "/rest/api/2/search", empty()).once(
+        Method::Get,
+        "/rest/api/2/myself",
+        Ok(Response::new(401, "")),
+    );
+    let e = dc(&f)
+        .fetch(&[ItemRef::Id("40001".into())])
+        .await
+        .unwrap_err();
+    assert_eq!(e.state(), Some("auth_failed"), "{e:?}");
+
+    // A live token that truly sees none of them: unavailable, as before.
+    let f = FakeTransport::new();
+    f.once(Method::Post, "/rest/api/2/search", empty()).once(
+        Method::Get,
+        "/rest/api/2/myself",
+        ok("myself.json"),
+    );
+    let got = dc(&f).fetch(&[ItemRef::Id("40001".into())]).await.unwrap();
+    assert!(matches!(got[0], Fetched::Unavailable { .. }), "{got:?}");
+}
