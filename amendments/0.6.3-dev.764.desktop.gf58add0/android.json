@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "version": "0.6.3-dev.764.desktop.gf58add0",
+  "mobile_accepts": [
+    0,
+    18
+  ],
+  "components": {
+    "android": {
+      "version": "0.6.3-dev.764.desktop.gf58add0",
+      "artifacts": [
+        {
+          "kind": "apk",
+          "url": "https://github.com/martin-janci/fleet-mobile/releases/download/v0.6.3-dev.764.desktop.gf58add0/fleet-mobile-0.6.3-dev.764.desktop.gf58add0.apk",
+          "sha256": "f7c808b5bb88ea5acb1617aa9011ebda6603d8bbf880a3e38fc3ef2aaf8a7086",
+          "size": 18303240,
+          "version_code": 421308,
+          "signer_sha256": "87081ff376e7ad2cb3082bf8f48dac2f451bffda66693b575c31cd4c354b9a15"
+        }
+      ]
+    }
+  }
+}
