@@ -5,7 +5,23 @@
   // a dot for its live link; the word beside the dot says the state, so the
   // colour never carries it alone. An extra fleet's chip counts its sessions
   // that need you (Phase 2), whatever the filter shows.
+  //
+  // Phase 3b: each chip carries the profile this device is on that fleet —
+  // its local label under the fleet's, and in the tooltip the person, e-mail
+  // and label (`fleet_profiles.ts`).
   import { fleets, fleetFilter, multiFleet, connectionWord, fleetNeedsCount } from './fleets';
+  import { loadProfiles, profileLines } from './fleet_profiles';
+
+  // Read each fleet's profile once the switcher shows, and again when the
+  // set of fleets changes.
+  let loadedFor = '';
+  $effect(() => {
+    const key = $multiFleet ? $fleets.map((f) => `${f.id}:${f.connection?.state ?? ''}`).join(',') : '';
+    if (key && key !== loadedFor) {
+      loadedFor = key;
+      void loadProfiles();
+    }
+  });
 </script>
 
 {#if $multiFleet}
@@ -26,12 +42,15 @@
         class="chip"
         style="--fleet: {f.color}"
         aria-checked={$fleetFilter === f.id}
-        title="{f.label}{f.url ? ` · ${f.url}` : ''} · {cw.word}"
+        title="{f.label}{f.url ? ` · ${f.url}` : ''} · {cw.word}{$profileLines.get(f.id) ? `\nProfile: ${$profileLines.get(f.id)?.line}` : ''}"
         data-testid="fleet-filter-{f.id}"
         onclick={() => fleetFilter.set(f.id)}
       >
         <span class="swatch" aria-hidden="true"></span>
         {f.label}
+        {#if $profileLines.get(f.id)?.custom}<span class="profile" data-testid="fleet-profile-chip-{f.id}"
+            >{$profileLines.get(f.id)?.label}</span
+          >{/if}
         <span class="dot {cw.tone}" aria-label={cw.word}></span>
         {#if ($fleetNeedsCount.get(f.id) ?? 0) > 0}
           <span class="needs" data-testid="fleet-needs-count-{f.id}" aria-label="{$fleetNeedsCount.get(f.id)} need you"
@@ -66,6 +85,10 @@
   .chip[aria-checked='true'] {
     background: var(--control-bg-active);
     border-color: var(--control-border-strong);
+  }
+  .profile {
+    color: var(--fg-muted);
+    font-size: var(--text-2xs);
   }
   .swatch {
     width: 8px;
