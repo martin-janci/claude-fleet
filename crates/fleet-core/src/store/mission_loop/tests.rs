@@ -372,3 +372,62 @@ fn a_hostless_start_is_inside_only_a_grant_naming_no_hosts() {
     assert!(s.start_inside_mission_grant(None, now).unwrap());
     assert!(s.start_inside_mission_grant(Some("any"), now).unwrap());
 }
+
+/// Review r3: a `work_link` start on a task is inside a grant only when the
+/// task belongs to the granting mission, and every session it starts fits
+/// the mission's parallel cap.
+#[test]
+fn a_task_start_is_inside_only_its_own_missions_grant() {
+    let s = Store::open_in_memory().unwrap();
+    let granting = mission(&s);
+    let other = mission(&s);
+    let now = now_unix();
+    s.add_grant(
+        granting,
+        &NewGrant {
+            level: 3,
+            granted_by: "person:1",
+            hosts: None,
+            max_parallel: Some(2),
+            expires_at: now + 3600,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    s.set_mission_state(granting, None, "active", "fleet")
+        .unwrap();
+    s.set_mission_state(other, None, "active", "fleet").unwrap();
+    let item = |key: &str, m: Option<i64>| -> i64 {
+        s.conn
+            .execute(
+                "INSERT INTO work_items (source, key, title, origin, created_at, updated_at, \
+                 orchestration_project_id) VALUES ('local', ?1, ?1, 'person', 1, 1, ?2)",
+                rusqlite::params![key, m],
+            )
+            .unwrap();
+        s.conn.last_insert_rowid()
+    };
+    let member = item("M-1", Some(granting));
+    let foreign = item("O-1", Some(other));
+    let plain = item("P-1", None);
+    assert_eq!(s.work_item_mission(member).unwrap(), Some(granting));
+    assert_eq!(s.work_item_mission(foreign).unwrap(), Some(other));
+    assert_eq!(s.work_item_mission(plain).unwrap(), None);
+    assert!(s
+        .mission_start_inside_grant(granting, None, 1, now)
+        .unwrap());
+    assert!(s
+        .mission_start_inside_grant(granting, None, 2, now)
+        .unwrap());
+    assert!(
+        !s.mission_start_inside_grant(granting, None, 3, now)
+            .unwrap(),
+        "three siblings do not fit a cap of two"
+    );
+    assert!(
+        !s.mission_start_inside_grant(other, None, 1, now).unwrap(),
+        "another mission's grant does not cover this one's task"
+    );
+    // The new-session form still asks whether any grant covers the host.
+    assert!(s.start_inside_mission_grant(None, now).unwrap());
+}

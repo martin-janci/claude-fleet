@@ -2445,6 +2445,38 @@ async fn a_restart_onto_a_login_past_pause_at_asks_first() {
     }
 }
 
+/// A person's own device switching login (Switch account on a hub-paired
+/// desktop or the phone) has chosen the login it picked: neither client
+/// sends `over_limit_ok` on a restart, so the hub lets it past
+/// `accounts.pause_at` as a standalone desktop does. The operator, on the
+/// same arguments, is still held.
+#[tokio::test]
+async fn a_persons_switch_onto_a_login_past_pause_at_goes_through() {
+    use super::params::RestartSessionParams;
+    let (s, _, on_b) = two_host_store();
+    let now = crate::store::now_unix();
+    crate::service::account_limits::seed_usage(&s, "hostb", Some("full"), "acct-full", 95.0, now);
+    let t = test_tools(s);
+    let call = |caller: Caller| {
+        let t = &t;
+        async move {
+            let p = serde_json::from_value::<RestartSessionParams>(
+                serde_json::json!({ "session_id": on_b, "profile": "full" }),
+            )
+            .unwrap();
+            t.restart_session(Extension(caller), Parameters(p))
+                .await
+                .err()
+                .map(|e| e.message)
+                .unwrap_or_default()
+        }
+    };
+    let phone = call(client_caller("phone", TokenMode::Full)).await;
+    assert!(!phone.starts_with("E_ACCOUNT_LIMIT"), "{phone}");
+    let held = call(operator()).await;
+    assert!(held.starts_with("E_ACCOUNT_LIMIT"), "{held}");
+}
+
 #[tokio::test]
 async fn per_host_callers_cannot_recreate_or_dismiss_on_another_host() {
     let (s, _pid, on_b) = two_host_store();
@@ -21924,6 +21956,63 @@ async fn session_care_lets_the_operator_restart_and_retire_its_own_sessions() {
     confirm_nonce_of(&asked);
 }
 
+/// Session care's restarts are budgeted per session: a session that wedges
+/// again after every restart is restarted without a card at most
+/// `guard::CARE_RESTARTS_PER_HOUR` times an hour, then the restart asks and
+/// says why. Another session's budget is its own.
+#[tokio::test]
+async fn session_care_restarts_ask_once_a_sessions_hourly_budget_is_spent() {
+    use super::params::RestartSessionParams;
+    use crate::service::autonomy::Position;
+    let (s, _, on_b) = two_host_store();
+    let on_a = s
+        .upsert_session("dev-e", "hostb", None, None, 1, 1, "running", None)
+        .unwrap();
+    s.conn_ref()
+        .execute(
+            "UPDATE sessions SET origin = 'operator' WHERE id IN (?1, ?2)",
+            [on_a, on_b],
+        )
+        .unwrap();
+    s.set_setting(crate::service::settings::CONTROL_SESSION_CARE, "true")
+        .unwrap();
+    let t = guarded_tools(s, true);
+    set_position(&t, Position::Brief);
+    let restart = |id: i64| {
+        serde_json::from_value::<RestartSessionParams>(serde_json::json!({ "session_id": id }))
+            .unwrap()
+    };
+    for _ in 0..guard::CARE_RESTARTS_PER_HOUR {
+        let (out, approval) = guard::tracking_approval(
+            t.restart_session(Extension(operator()), Parameters(restart(on_b))),
+        )
+        .await;
+        if let Err(e) = &out {
+            assert!(
+                !e.message.starts_with("E_CONFIRM_REQUIRED"),
+                "{}",
+                e.message
+            );
+        }
+        assert_eq!(approval, Some(crate::store::APPROVAL_PRE_APPROVED));
+    }
+    let asked = t
+        .restart_session(Extension(operator()), Parameters(restart(on_b)))
+        .await
+        .unwrap_err();
+    confirm_nonce_of(&asked);
+    assert!(
+        asked.message.contains("an hour per session"),
+        "{}",
+        asked.message
+    );
+    let (_, approval) = guard::tracking_approval(
+        t.restart_session(Extension(operator()), Parameters(restart(on_a))),
+    )
+    .await;
+    assert_eq!(approval, Some(crate::store::APPROVAL_PRE_APPROVED));
+}
+
 /// A task's start is a start like `new_session`'s (F2): at Autopilot,
 /// inside a running mission's grant, the operator's `work_link start` goes
 /// without a card even with `mcp.confirm_destructive` on (that toggle is
@@ -21937,21 +22026,36 @@ async fn at_autopilot_the_operator_starts_a_task_inside_a_grant_without_a_card()
     s.set_setting(guard::SETTING_CONFIRM_DESTRUCTIVE, "true")
         .unwrap();
     let t = guarded_tools(s, true);
-    // An unknown item: the start itself fails locally, after the gate.
-    let start = |host: Option<&str>| WorkLinkArgs {
+    // Items with no project: the start itself fails locally, after the gate.
+    let start = |item: i64, host: Option<&str>| WorkLinkArgs {
         action: "start".into(),
-        item_id: Some(9_999),
+        item_id: Some(item),
         host_alias: host.map(String::from),
         ..Default::default()
     };
+    let item = |key: &str, mission: Option<i64>| -> i64 {
+        let st = t.store.lock().unwrap();
+        st.conn_ref()
+            .execute(
+                "INSERT INTO work_items (source, key, title, origin, created_at, updated_at, \
+                 orchestration_project_id) VALUES ('local', ?1, ?1, 'person', 1, 1, ?2)",
+                rusqlite::params![key, mission],
+            )
+            .unwrap();
+        st.conn_ref().last_insert_rowid()
+    };
+    let plain = item("PLAIN-1", None);
     set_position(&t, Position::Autopilot);
     let asked = t
-        .work_link(Extension(operator()), Parameters(start(Some("hostb"))))
+        .work_link(
+            Extension(operator()),
+            Parameters(start(plain, Some("hostb"))),
+        )
         .await
         .unwrap_err();
     confirm_nonce_of(&asked);
 
-    {
+    let m = {
         let st = t.store.lock().unwrap();
         let m = st
             .create_mission(
@@ -21976,18 +22080,37 @@ async fn at_autopilot_the_operator_starts_a_task_inside_a_grant_without_a_card()
         )
         .unwrap();
         st.set_mission_state(m, None, "active", "fleet").unwrap();
-    }
-    let (out, approval) = guard::tracking_approval(
-        t.work_link(Extension(operator()), Parameters(start(Some("hostb")))),
-    )
+        m
+    };
+    let member = item("MEMBER-1", Some(m));
+    let (out, approval) = guard::tracking_approval(t.work_link(
+        Extension(operator()),
+        Parameters(start(member, Some("hostb"))),
+    ))
     .await;
     let e = out.unwrap_err();
-    assert!(e.message.starts_with("E_NOTFOUND"), "{}", e.message);
+    assert!(
+        !e.message.starts_with("E_CONFIRM_REQUIRED"),
+        "{}",
+        e.message
+    );
     assert_eq!(approval, Some(crate::store::APPROVAL_PRE_APPROVED));
     // A host the grant does not name, or none (fleet would place it): asks.
     for host in [Some("hosta"), None] {
         let asked = t
-            .work_link(Extension(operator()), Parameters(start(host)))
+            .work_link(Extension(operator()), Parameters(start(member, host)))
+            .await
+            .unwrap_err();
+        confirm_nonce_of(&asked);
+    }
+    // Review r3: a task of no mission, or an unknown one, is not inside
+    // the grant, whichever host it names.
+    for other in [plain, 9_999] {
+        let asked = t
+            .work_link(
+                Extension(operator()),
+                Parameters(start(other, Some("hostb"))),
+            )
             .await
             .unwrap_err();
         confirm_nonce_of(&asked);
@@ -21995,7 +22118,10 @@ async fn at_autopilot_the_operator_starts_a_task_inside_a_grant_without_a_card()
     // Within your brief: a start always asks.
     set_position(&t, Position::Brief);
     let asked = t
-        .work_link(Extension(operator()), Parameters(start(Some("hostb"))))
+        .work_link(
+            Extension(operator()),
+            Parameters(start(member, Some("hostb"))),
+        )
         .await
         .unwrap_err();
     confirm_nonce_of(&asked);

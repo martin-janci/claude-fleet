@@ -1840,10 +1840,23 @@ pub(super) enum GateTarget<'a> {
     /// task's start with no host), which only a grant naming no hosts
     /// covers.
     Start { host: Option<&'a str> },
+    /// `sessions` new Claude sessions for a task of this mission
+    /// (`work_link` start / run / resume): only that mission's own grant
+    /// covers them, with room in its cap for all of them.
+    MissionStart {
+        mission: i64,
+        host: Option<&'a str>,
+        sessions: i64,
+    },
 }
 
 /// The timeline event a pre-approved operator call leaves on its target.
 pub const EVENT_PRE_APPROVED: &str = "control_pre_approved";
+
+/// How a pre-approved `restart_session`'s [`EVENT_PRE_APPROVED`] detail
+/// begins (`note_pre_approved` writes `<tool> · <position>`): the care
+/// restart budget counts these.
+const CARE_RESTART_DETAIL: &str = "restart_session · ";
 
 impl FleetTools {
     /// True when the operator turned on desktop confirmation for
@@ -1940,10 +1953,32 @@ impl FleetTools {
             GateTarget::Start { host } if !crate::service::loops::paused(&s) => s
                 .start_inside_mission_grant(host, crate::store::now_unix())
                 .map_err(to_mcp_err)?,
+            GateTarget::MissionStart {
+                mission,
+                host,
+                sessions,
+            } if !crate::service::loops::paused(&s) => s
+                .mission_start_inside_grant(mission, host, sessions, crate::store::now_unix())
+                .map_err(to_mcp_err)?,
             _ => false,
         };
         let session_care =
             crate::service::settings::get_bool(&s, crate::service::settings::CONTROL_SESSION_CARE);
+        // Care restarts are budgeted per session (guard::CARE_RESTARTS_PER_HOUR),
+        // counted from the pre-approvals `note_pre_approved` leaves.
+        let care_restarts_spent = match target {
+            GateTarget::Session(id) if session_care && own_start => {
+                s.count_session_events_with_detail_since(
+                    id,
+                    EVENT_PRE_APPROVED,
+                    CARE_RESTART_DETAIL,
+                    crate::store::now_unix() - 3600,
+                )
+                .map_err(to_mcp_err)?
+                    >= guard::CARE_RESTARTS_PER_HOUR
+            }
+            _ => false,
+        };
         Ok((
             position,
             guard::OperatorFacts {
@@ -1951,6 +1986,7 @@ impl FleetTools {
                 inside_grant: grant,
                 session_care,
                 own_start,
+                care_restarts_spent,
             },
         ))
     }
@@ -2577,38 +2613,44 @@ impl FleetTools {
                 "acked": serde_json::Value::Null,
             }));
         }
-        let mut queued = delivery_gate(row, force, submit)?;
+        // Refused up front on the row the caller resolved, and again on the
+        // row read in the typing lane: a dialog may have opened during the
+        // wait, and every number reported below comes from that later read.
+        delivery_gate(row, force, submit)?;
         let ack_state = || -> Result<_, crate::ipc_error::IpcError> {
             Ok(lock(&self.store)?.prompt_ack_state(row.id)?)
         };
-        let before = if submit && !queued {
+        let (queued, turn_seq, before) = if submit {
             // An idle session gets one prompt per idle moment, whoever types
-            // it: this send takes the moment, or the queue already did and
-            // the REPL will hold this one behind that turn. Either way it is
-            // typed in the session's typing lane, after any paste in flight;
-            // a send that fails and typed nothing gives the moment back.
+            // it: this send takes the moment, or another prompt already did
+            // and the REPL will hold this one behind that turn. A session
+            // already `working` queues it too. Either way it is typed in the
+            // session's typing lane, after any paste in flight; a send that
+            // fails and typed nothing gives the moment back.
             let body = prompt.clone();
-            let (got, before) = crate::service::sessions::deferred::send_direct(
+            let (_, out) = crate::service::sessions::deferred::send_direct(
                 &self.store,
                 row,
                 &body,
-                crate::store::now_unix(),
-                |_| async move {
+                |d| async move {
+                    if let Err(e) = delivery_gate(&d.row, force, submit) {
+                        return Ok(Err(e));
+                    }
                     let before = ack_state()?;
                     send(prompt).await?;
-                    Ok(before)
+                    Ok(Ok((d.behind_a_turn, d.row.turn_seq, before)))
                 },
             )
             .await
             .map_err(to_mcp_err)?;
-            if !got && crate::service::sessions::deferred::idle_for_prompt(row) {
-                queued = true;
-            }
-            before
+            out?
         } else {
+            // Staged text, no Enter: no idle moment to take, but still one
+            // typing at a time into the pane.
+            let _lane = crate::service::sessions::deferred::typing_lane(&self.store, row.id).await;
             let before = ack_state().map_err(to_mcp_err)?;
             send(prompt).await.map_err(to_mcp_err)?;
-            before
+            (false, row.turn_seq, before)
         };
         let acked = match before {
             Some(st) if ack_knowable(submit, queued, st.hooks_seen) => {
@@ -2619,7 +2661,7 @@ impl FleetTools {
         Ok(serde_json::json!({
             "delivered": true,
             "session_id": row.id,
-            "turn_seq_before": turn_seq_before(row.turn_seq, queued, acked),
+            "turn_seq_before": turn_seq_before(turn_seq, queued, acked),
             "queued": queued,
             "acked": acked,
         }))
