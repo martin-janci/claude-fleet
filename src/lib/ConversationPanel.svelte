@@ -2058,10 +2058,10 @@
       if (session.id === id) helpCommands = matchSlashCommands('/', list).map(commandLine);
     });
   }
-  function runTune(ask: string) {
+  function runTune(ask: string, from: string = draft) {
     const blocked = $sessionBlocked(session, 'session_prompt_tune');
     if (blocked) return Promise.resolve({ ok: false as const, error: { code: 'E_FORBIDDEN', message: blocked } });
-    return tuneComposerPrompt(session.id, { draft, history, commands: helpCommands }, ask);
+    return tuneComposerPrompt(session.id, { draft: from, history, commands: helpCommands }, ask);
   }
   function askHelp(question: string) {
     // The grant can narrow while the panel is open: ask again at the call.
@@ -2998,6 +2998,7 @@
           what="your earlier prompts"
           ask={askHelp}
           insertLabel="Put in the box"
+          replaces
           testid="conv-help"
           oninsert={(c) => {
             draft = c;
