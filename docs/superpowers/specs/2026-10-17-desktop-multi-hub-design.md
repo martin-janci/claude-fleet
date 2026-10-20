@@ -305,6 +305,17 @@ SSO account) and private on the personal one. The window now says which.
   default and the verdict table gains nothing (a fleet is always a hub).
 - Moving work between fleets, if ever, as a federation feature.
 
+Step 1 (landed): one id space for the conversation panel. `fleets.ts` stamps
+`fleet` on every extra fleet's session row, and `sessionKey(row)` keys what
+the panel keeps per session: the id itself for the primary (no store written
+for it changes), a stable negative number per (fleet, id) otherwise, since
+hubs number sessions from 1. `keyTarget` maps a key back. The panel routes
+each call by `row.fleet` (`invokeCmd(…, { args, fleet })`), the outbox
+carries the fleet on its target, and for an extra fleet's row asks only
+that fleet's link (`fleetBlocked`); its hub judges access. The parts whose
+commands are not fleet-scoped yet are hidden or disabled for such a row
+rather than sent to the primary.
+
 ## Testing
 
 - Rust, `src-tauri`: `backend::fleets` unit tests (record round-trip, slot

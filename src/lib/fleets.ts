@@ -92,6 +92,10 @@ export const FLEET_SCOPED = [
   'catalog_list_catalogs',
   // Phase 3b: who this device is on each fleet.
   'my_profile',
+  // Phase 3: an extra fleet's session in the full conversation panel.
+  'session_conversations',
+  'session_activity',
+  'restart_session',
 ] as const;
 export type FleetScopedCommand = (typeof FLEET_SCOPED)[number];
 
@@ -283,6 +287,51 @@ function racesFor(fleet: string): FleetRaces {
 /** The collections of one fleet's rows. */
 type RowPart = keyof FleetRaces;
 
+// ── one id space (Phase 3) ──────────────────────────────────────────────
+//
+// An extra fleet's session row carries its fleet (`SessionRow.fleet`), so
+// whatever holds the row can send each call to the right hub. And every
+// store keyed by session id keys it by `sessionKey`: the id itself for a
+// primary row, as it always was, and a negative number for an extra fleet's
+// (fleet, id) pair. Hubs number sessions from 1, so the two never collide,
+// and a store written for the primary needs no other change to hold both.
+
+function withFleet(row: SessionRow, fleet: string): SessionRow {
+  return fleet === PRIMARY || row.fleet === fleet ? row : { ...row, fleet };
+}
+
+const keyOfPair = new Map<string, number>();
+const pairOfKey = new Map<number, { fleet: string; id: number }>();
+
+/** The key a session is stored under in this window (see above). Stable
+ *  for the life of the window; never sent to a hub. */
+export function sessionKey(s: Pick<SessionRow, 'id' | 'fleet'>): number {
+  const fleet = s.fleet;
+  if (!fleet || fleet === PRIMARY) return s.id;
+  const pair = `${fleet}\u0000${s.id}`;
+  let key = keyOfPair.get(pair);
+  if (key === undefined) {
+    key = -(keyOfPair.size + 1);
+    keyOfPair.set(pair, key);
+    pairOfKey.set(key, { fleet, id: s.id });
+  }
+  return key;
+}
+
+/** The fleet and hub id a `sessionKey` stands for: the primary's own id for
+ *  a non-negative key, null for a negative key this window never handed out. */
+export function keyTarget(key: number): { fleet: string; id: number } | null {
+  return key >= 0 ? { fleet: PRIMARY, id: key } : (pairOfKey.get(key) ?? null);
+}
+
+/** The live row behind a key: the extra fleet's row, or undefined. The
+ *  primary's rows live in `sessions.ts`, which the caller reads itself. */
+export function awayRow(key: number): SessionRow | undefined {
+  const t = keyTarget(key);
+  if (!t || t.fleet === PRIMARY) return undefined;
+  return get(rowsStore).get(t.fleet)?.sessions.get(t.id);
+}
+
 // ── the guards the primary's session store has (`sessions.ts`) ──────────
 //
 // An extra fleet's rows race the same way the primary's do: a command's
@@ -331,7 +380,7 @@ function admitSession(
 
 function putSession(fleet: string | undefined, rows: FleetRows, row: SessionRow, how: 'updated' | 'created' | 'command'): void {
   if (!admitSession(fleet, rows, row, how)) return;
-  rows.sessions.set(row.id, row);
+  rows.sessions.set(row.id, fleet === undefined ? row : withFleet(row, fleet));
   if (fleet !== undefined) racesFor(fleet).sessions.touch(row.id);
 }
 
@@ -531,7 +580,13 @@ export async function loadFleetRows(fleet: string): Promise<void> {
       // brings it back or rolls it back.
       // (An older one stays listed so `keepCurrent` keeps the held row.)
       const listed = s.value.filter((r) => admitSession(fleet, rows, r, 'command') || rows.sessions.has(r.id));
-      const out = race.sessions.mergeList([...rows.sessions.values()], listed, ts, (r) => r.id, sessionIsStale);
+      const out = race.sessions.mergeList(
+        [...rows.sessions.values()],
+        listed.map((r) => withFleet(r, fleet)),
+        ts,
+        (r) => r.id,
+        sessionIsStale,
+      );
       if (out) rows.sessions = new Map(out.map((r) => [r.id, r]));
       rows.loaded = true;
     }
@@ -652,6 +707,33 @@ export function fleetSendKey(fleet: string, s: SessionRow, key: 'Enter' | 'Escap
     args: { host_alias: s.host_alias, tmux_name: s.tmux_name, prompt: '', submit: false, keys: key },
   });
 }
+
+/** Relaunch an extra fleet's session under another model or effort (the
+ *  conversation panel's picker), on its own hub. */
+export async function fleetRestartSession(
+  fleet: string,
+  s: Pick<SessionRow, 'host_alias' | 'tmux_name'>,
+  launch: { model?: string; effort?: string },
+): Promise<Result<SessionRow>> {
+  const r = await fleetCmd<SessionRow>('restart_session', fleet, {
+    args: { host_alias: s.host_alias, name: s.tmux_name, ...launch },
+  });
+  if (r.ok) acceptFleetRow(fleet, r.value);
+  return r;
+}
+
+/** Why nothing can be written to `fleet`'s sessions right now (its link is
+ *  down or it is not in use), or null. Only the link: what a person may do
+ *  on that hub is that hub's call, and it answers each write itself. */
+export const fleetBlocked = derived(fleetsStore, ($fleets) => (fleet: string | null | undefined): string | null => {
+  if (!fleet || fleet === PRIMARY) return null;
+  const f = $fleets.find((x) => x.id === fleet);
+  if (!f) return 'That fleet is no longer connected to this window.';
+  if (f.unavailable) return f.unavailable;
+  if (f.duplicate_of) return `${f.label} is the same hub as ${f.duplicate_of}.`;
+  const cw = connectionWord(f);
+  return cw.tone === 'ok' ? null : `${f.label} is ${cw.word}, so nothing can be sent there right now.`;
+});
 
 export async function fleetKillSession(fleet: string, s: SessionRow): Promise<Result<number>> {
   const r = await fleetCmd<number>('kill_session', fleet, { args: { host_alias: s.host_alias, name: s.tmux_name } });

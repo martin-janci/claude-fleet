@@ -1454,7 +1454,17 @@ person-scope variables, its git identity; an older hub falls back to
 the same name, a local per-fleet profile label (`src/lib/fleet_profiles.ts`),
 shown on the switcher's chips, in Settings › Fleets › Profiles and as "Runs
 as …" in New session.
-Phase 3 (one id space, the full panes per fleet) is not started.
+Phase 3 step 1 landed: one id space for the conversation panel. An extra
+fleet's session row carries its fleet (`SessionRow.fleet`), stores keyed by
+session id key it by `sessionKey` (the primary's id, or a negative stand-in
+for an extra fleet's (fleet, id)), and the session opens in the full
+ConversationPanel inside `FleetSessionView`: reads, the conversation list,
+the activity probe, the outbox, dialog answers and the model relaunch go to
+its hub (`session_conversations`, `session_activity`, `restart_session`
+joined `FLEET_SCOPED`). Still off for another fleet's session: attachments,
+fork / rewind, send later, writing help, forms, devices, task results. Not
+started: TerminalView and the other stores per (fleet, id) (step 2), every
+command fleet-aware and promoting another hub to primary (step 3).
 
 Application updates: design
 `docs/superpowers/specs/2026-09-28-update-channel-design.md` (with
