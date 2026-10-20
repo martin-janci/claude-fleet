@@ -5,6 +5,7 @@
   one there and then; editing lives in Automation.
 -->
 <script lang="ts">
+  import { errorText } from './error_copy';
   import { onMount } from 'svelte';
   import StatusDot from './kit/StatusDot.svelte';
   import { listRoutines, lastRunByRoutine, openRoutines, routineDot, routineLine, runRoutineNow, type RoutineRow } from './routines';
@@ -48,7 +49,7 @@
     busy = r.id;
     const res = await runRoutineNow(r.id);
     busy = null;
-    note = res.ok ? `${r.name} started.` : res.error.message;
+    note = res.ok ? `${r.name} started.` : errorText(res.error);
     if (res.ok) void load();
   }
 </script>

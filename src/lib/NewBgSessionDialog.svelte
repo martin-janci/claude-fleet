@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { errorText } from './error_copy';
   import Loader from './Loader.svelte';
   import { newBgSession } from './sessions';
   import { untrack } from 'svelte';
@@ -45,7 +46,7 @@
         bgModalName = '';
         bgModalPrompt = '';
       } else {
-        bgModalError = result.error.message;
+        bgModalError = errorText(result.error);
       }
     } catch (e: unknown) {
       bgModalError = e instanceof Error ? e.message : String(e);

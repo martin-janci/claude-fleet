@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { errorText } from './error_copy';
   // "Assign org…" (work graph M14): move a LOCAL task to another
   // organisation. The org is the access boundary, so this is a security
   // change: the hub first says exactly what would change (`org_impact`) —
@@ -115,7 +116,7 @@
         await review();
         return;
       }
-      failure = r.error.message;
+      failure = errorText(r.error);
       return;
     }
     ondone?.(r.value);

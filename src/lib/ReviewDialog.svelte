@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { errorText } from './error_copy';
   // Start a review run (step 5.10's one dialog pattern): who reviews (a skill
   // on the session's host, run by Claude Code or Codex, M15 G7.12) and what
   // it reads (the scope).
@@ -74,7 +75,7 @@
         selectSessionExplicitly(r.value);
         onClose();
       } else if (r.error.code !== 'E_CANCELLED') {
-        error = r.error.message;
+        error = errorText(r.error);
       }
     } finally {
       spawning = false;

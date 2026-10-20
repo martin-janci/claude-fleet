@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { errorText } from './error_copy';
   import { untrack } from 'svelte';
   import { HOST_KINDS, importHost, importOnlyFor, KIND_LABEL, type AssetKind, type ImportReport } from './assets';
   import { hosts } from './hosts';
@@ -33,7 +34,7 @@
     busy = true; error = null;
     const r = await importHost(hostAlias, dryRun, asked);
     busy = false;
-    if (!r.ok) { error = r.error.message; return; }
+    if (!r.ok) { error = errorText(r.error); return; }
     report = r.value;
     if (!dryRun) ondone();
   }

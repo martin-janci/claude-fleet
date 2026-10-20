@@ -355,7 +355,7 @@ describe('LinkReview', () => {
     await tick();
     const sheet = screen.getByTestId('link-review-sheet');
     expect(screen.getByRole('note').textContent).toContain(
-      'https://fleet.example.com is unreachable right now (reconnecting, attempt 2)',
+      'The hub is unreachable; reconnecting.',
     );
     expect(screen.getAllByTestId('link-review-row')).toHaveLength(2);
     for (const b of [...screen.getAllByTestId('link-review-yes'), ...screen.getAllByTestId('link-review-no')]) {

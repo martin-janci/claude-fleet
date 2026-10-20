@@ -565,6 +565,10 @@ pub fn refuse_over_limit(
                 .or_else(|| elsewhere.as_ref().map(|c| c.account_uuid.clone())),
             "suggested_host": suggestion.as_ref().map(|_| host_alias.to_string())
                 .or_else(|| elsewhere.as_ref().map(|c| c.host_alias.clone())),
+            // Review w16-2: the desktop builds its sentence from these
+            // details, and names the login with room by its account.
+            "suggested_email": suggestion.as_ref().map(|l| email(&l.account_uuid))
+                .or_else(|| elsewhere.as_ref().map(|c| email(&c.account_uuid))),
     })))
 }
 
@@ -749,6 +753,9 @@ mod tests {
         let details = err.details.clone().unwrap();
         assert_eq!(details["suggested_profile"], "work");
         assert_eq!(details["suggested_account_uuid"], "acct-free");
+        // Review w16-2: the account the desktop names (its uuid here, with no
+        // email known; the desktop shows only an address).
+        assert_eq!(details["suggested_email"], "acct-free");
         // The login with headroom starts, and an unknown login is not refused.
         assert!(refuse_over_limit(&s, "mac", Some("work"), NOW).is_ok());
         assert!(refuse_over_limit(&s, "mac", Some("fresh"), NOW).is_ok());

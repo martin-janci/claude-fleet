@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { errorText } from './error_copy';
   // One autofix finding (src/lib/autofix.ts): what is wrong, in plain words,
   // and its one-click fix. Shared by the Needs-you "Problems & fixes" rows,
   // the `fix` chat card and Control's own finding in the Agent panel.
@@ -37,7 +38,7 @@
     const r = await applyFinding(finding.id);
     busy = false;
     if (!r.ok) {
-      failure = r.error.message;
+      failure = errorText(r.error);
       return;
     }
     if (r.value.state === 'cleared') push({ kind: 'success', message: `Fixed: ${finding.title ?? finding.kind}` });
@@ -50,7 +51,7 @@
     failure = null;
     const r = await dismissFinding(finding.id);
     busy = false;
-    if (!r.ok) failure = r.error.message;
+    if (!r.ok) failure = errorText(r.error);
   }
 </script>
 

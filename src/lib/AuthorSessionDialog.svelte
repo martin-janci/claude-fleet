@@ -16,6 +16,7 @@
 </script>
 
 <script lang="ts">
+  import { errorText } from './error_copy';
   import Loader from './Loader.svelte';
   import Modal from './Modal.svelte';
   import { untrack } from 'svelte';
@@ -66,7 +67,7 @@
     busy = false;
     controller = null;
     if (!r.ok) {
-      error = r.error.message;
+      error = errorText(r.error);
       return;
     }
     authorSessionOpened = true;

@@ -9,6 +9,7 @@ import { newSessionAbortable, type NewSessionArgs, type SessionRow } from '../se
 import type { ChatFormOutcome } from './ChatForm.svelte';
 import type { FieldProblem, Values } from './forms';
 import { WIZARDS, withChoices, type Wizard } from './wizards';
+import { errorText } from '../error_copy';
 
 /** The `worktree` value for a new worktree; an existing one is its id. */
 export const NEW_WORKTREE = 'new';
@@ -90,5 +91,5 @@ export async function startNewSession(
   const a = newSessionArgs(v);
   if ('problems' in a) return { ok: false, problems: a.problems };
   const r = await newSessionAbortable(a.args);
-  return r.ok ? { ok: true, row: r.value } : { ok: false, error: r.error.message };
+  return r.ok ? { ok: true, row: r.value } : { ok: false, error: errorText(r.error) };
 }

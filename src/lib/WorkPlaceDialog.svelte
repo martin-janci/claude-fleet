@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { errorText } from './error_copy';
   // "Place in group…" (work graph M14): put one task under a group of the
   // Work view — an existing group's label or a new one — with an optional
   // note. Local placement only: a tracker's project is never changed. After
@@ -114,7 +115,7 @@
         };
         onreload?.();
       } else {
-        failure = r.error.message;
+        failure = errorText(r.error);
       }
       return;
     }

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { errorText } from './error_copy';
   // The ticket context card in Details (work graph M9.2): the session's
   // ticket — title, status, a link — and its acceptance criteria from the
   // hub's cached description. "Insert into composer" puts the hub-built,
@@ -36,7 +37,7 @@
     void loadTicketCard(k).then((r) => {
       if (loadedFor !== k) return;
       if (r.ok) card = r.value;
-      else error = r.error.message;
+      else error = errorText(r.error);
     });
   });
   $effect(() => () => clearTimeout(timer));
@@ -88,7 +89,7 @@
     if (r.ok) {
       finishAsked = true;
       push({ kind: 'success', message: `Asked for the ${key} result; it shows when the reply ends` });
-    } else if (r.error.code === 'E_EXISTS') finishError = r.error.message;
+    } else if (r.error.code === 'E_EXISTS') finishError = errorText(r.error);
     else pushError(r.error, 'Asking for the result failed');
   }
   // Another session, another request.

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { errorText } from './error_copy';
   import Loader from './Loader.svelte';
   import { untrack } from 'svelte';
   import { invokeCmd } from './result';
@@ -66,7 +67,7 @@
     const r = await lintAsset(draft.kind, draft.name);
     linting = false;
     if (!r.ok) {
-      lintNote = r.error.message;
+      lintNote = errorText(r.error);
       return;
     }
     serverLint = r.value;
@@ -256,7 +257,7 @@
     // webview never names a path the backend will read (SEC-9).
     const pickedR = await invokeCmd<PickedFile[]>('pick_attachments', {});
     if (!pickedR.ok) {
-      resourceError = pickedR.error.message;
+      resourceError = errorText(pickedR.error);
       return;
     }
     if (pickedR.value.length === 0) return;
@@ -265,7 +266,7 @@
       const r = await addResource(draft.kind, draft.name, file.path);
       resourceBusy = null;
       if (!r.ok) {
-        resourceError = r.error.message;
+        resourceError = errorText(r.error);
         break;
       }
     }
@@ -289,7 +290,7 @@
     const r = await removeResource(draft.kind, draft.name, relPath);
     resourceBusy = null;
     if (!r.ok) {
-      resourceError = r.error.message;
+      resourceError = errorText(r.error);
       return;
     }
     await refreshResources();
@@ -313,7 +314,7 @@
       if (r.error.code === 'E_LINT' && r.error.details) {
         serverLint = r.error.details as LintReport;
       }
-      saveError = r.error.message;
+      saveError = errorText(r.error);
       return;
     }
     // Undo writes back the header, body and fields the editor opened with.

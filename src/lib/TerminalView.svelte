@@ -15,6 +15,7 @@
   import { toIpcError } from './result';
   import { push, pushError } from './toasts';
   import { repairSession, hasNoPane, showFriendlyNames, sessionsAnswered, sessionAgent } from './sessions';
+  import { requestSessionAction } from './session_actions';
   import { splashShown } from './startup';
   import Loader from './Loader.svelte';
   import { displayName } from './attention';
@@ -872,7 +873,7 @@
       mouse.reset();
       screen.onClipboard = (text) => {
         void nativeWriteText(text).then((r) => {
-          if (!r.ok && !openIsStale(gen, target)) openError = `Clipboard write failed: ${r.error.message}`;
+          if (!r.ok && !openIsStale(gen, target)) openError = `Clipboard write failed: ${errorText(r.error)}`;
         });
       };
       renderVersion++;
@@ -913,9 +914,13 @@
             push({ kind: 'info', message: `Repaired workspace for ${sess.tmux_name}: ${actions.join('; ')}${branch}` });
           }
           if (v?.needs_explicit_repair || v?.tmux_cwd_stale) {
+            // A warning with the button, not a 4 s info toast with none: the
+            // person has to act, and the action is Repair workspace (w16-12).
             push({
-              kind: 'info',
-              message: `${sess.tmux_name} needs Repair workspace: ${(v.warnings ?? []).join('; ')}`,
+              kind: 'warning',
+              message: `${displayName(sess, $showFriendlyNames)} needs Repair workspace: ${(v.warnings ?? []).join('; ')}`,
+              action: { label: 'Repair workspace…', run: () => requestSessionAction(sess, 'repair') },
+              sticky: true,
             });
           }
         } else if (rep.error.code !== 'E_HOST_OFFLINE') {

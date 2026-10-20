@@ -35,6 +35,8 @@ export async function runCardVerb(
     onchanged: () => Promise<void> | void;
     /** Select a card (the held-hosts warning's Show). */
     select?: (id: number) => void;
+    /** Open the Secrets panel: a card refused for a missing secret offers it. */
+    opensecrets?: () => void;
   },
 ): Promise<ChangesetView | null> {
   opts.setBusy('card');
@@ -52,7 +54,10 @@ export async function runCardVerb(
   if (!r.ok) {
     const older = olderHubWords(r.error, DO[verb].toLowerCase() + ' this');
     if (older) push({ kind: 'error', message: older });
-    else pushError(r.error, `${DO[verb]} card ${id}`);
+    else {
+      const secrets = r.error.code === 'E_SECRET_MISSING' && opts.opensecrets;
+      pushError(r.error, `${DO[verb]} card ${id}`, undefined, secrets ? { action: { label: 'Open Secrets', run: secrets } } : {});
+    }
     return null;
   }
   const v = r.value;

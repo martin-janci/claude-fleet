@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { errorText } from './error_copy';
   // + Add account's sign-in step (M15 step G2.9): the login pane fleet
   // opened on the host (`fleet-login--<name>`, running `claude /login`).
   // Its last lines, the sign-in link (Open, Copy), its numbered choices and
@@ -57,7 +58,7 @@
     stepError = null;
     await endLogin(login.host, login.profile);
     const r = await startLogin(login.host, login.profile);
-    if (!r.ok) stepError = r.error.message;
+    if (!r.ok) stepError = errorText(r.error);
     linkSeen = null;
     void poll();
   }
@@ -72,7 +73,7 @@
   async function press(key: LoginKey) {
     stepError = null;
     const r = await loginKey(login.host, login.profile, key);
-    if (!r.ok) stepError = r.error.message;
+    if (!r.ok) stepError = errorText(r.error);
     void poll();
   }
 
@@ -83,7 +84,7 @@
     const r = await loginCode(login.host, login.profile, code);
     sending = false;
     if (r.ok) code = '';
-    else stepError = r.error.message;
+    else stepError = errorText(r.error);
     void poll();
   }
 

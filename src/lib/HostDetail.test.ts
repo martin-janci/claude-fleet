@@ -466,7 +466,8 @@ describe('HostDetail restore lost sessions', () => {
     await fireEvent.click(screen.getByTestId('restore-lost'));
     await tick();
     const err = screen.getByTestId('restore-error');
-    expect(err.textContent).toContain('not reachable');
+    // Review w16-1: the sentence, not the backend's log text.
+    expect(err.textContent).toContain('The host is offline');
     expect(err.closest('[hidden]')).toBeNull();
   });
 
@@ -561,7 +562,7 @@ describe('HostDetail find lost conversations', () => {
     await tick();
 
     expect(screen.queryByTestId('discover-resume')).toBeNull();
-    expect(screen.getByTestId('discover-hub-note').textContent).toContain('https://hub.example');
+    expect(screen.getByTestId('discover-hub-note').textContent).toContain('The hub is unreachable');
     expect(screen.getByTestId('discover-list').textContent).toContain('resume unavailable');
     expect(mockedNewSession).not.toHaveBeenCalled();
   });
@@ -677,6 +678,37 @@ describe('HostDetail find lost conversations', () => {
     expect(screen.getByTestId('discover-resume')).toBeInTheDocument();
   });
 
+  // Review w16-2: the hub's E_ACCOUNT_LIMIT is written for an agent ("pass
+  // over_limit_ok: true …"). The row says it in words and offers the choice
+  // New session gives.
+  it('words an over-limit refusal and offers Start anyway, which passes over_limit_ok', async () => {
+    const resumable = candidate();
+    mockedDiscover.mockResolvedValueOnce({ ok: true, value: [resumable] });
+    mockedNewSession.mockResolvedValueOnce({
+      ok: false,
+      error: {
+        code: 'E_ACCOUNT_LIMIT',
+        message: 'a@b.com: 96% …; c@d.com has headroom (12% used): start with profile "work", or pass over_limit_ok: true once the person chose to start anyway',
+        details: { used_pct: 96, pause_at_pct: 90, suggested_host: 'mefistos', suggested_email: 'c@d.com' },
+      },
+    });
+    mockedNewSession.mockResolvedValueOnce({ ok: true, value: session('mefistos', 'proj-a') });
+    mount('mefistos');
+    await fireEvent.click(screen.getByTestId('discover-lost'));
+    await tick();
+    await fireEvent.click(screen.getByTestId('discover-resume'));
+    await tick();
+
+    const why = screen.getByTestId('discover-item-error').textContent ?? '';
+    expect(why).toContain('This login is at 96% of its limit');
+    expect(why).toContain('c@d.com on mefistos has room');
+    expect(why).not.toContain('over_limit_ok');
+    await fireEvent.click(screen.getByTestId('discover-item-start-anyway'));
+    await tick();
+    expect(mockedNewSession).toHaveBeenLastCalledWith(expect.objectContaining({ resume_claude_session_id: 'cs-a', over_limit_ok: true }));
+    expect(screen.getByTestId('discover-list').textContent).toContain('resumed');
+  });
+
   it('renders the transcript age from the seconds-based now prop, not a raw ms mismatch', async () => {
     const threeHoursAgo = candidate({ claude_session_id: 'cs-age', transcript_mtime: NOW - 3 * 3600 });
     mockedDiscover.mockResolvedValueOnce({ ok: true, value: [threeHoursAgo] });
@@ -764,7 +796,7 @@ describe('HostDetail Codex assets (F3a)', () => {
     mount('mefistos');
     const sel = screen.getByTestId('detail-codex') as HTMLSelectElement;
     expect(sel.disabled).toBe(true);
-    expect(sel.title).toContain('https://hub.example');
+    expect(sel.title).toContain('The hub is unreachable');
   });
 });
 

@@ -9,6 +9,7 @@ import { CHECK_KEYS, checkLoader, discardHostSetup, runHostSetupCheck, type Setu
 import type { ChatFormOutcome } from './ChatForm.svelte';
 import type { Values } from './forms';
 import { WIZARDS, withChoices, type Wizard } from './wizards';
+import { errorText } from '../error_copy';
 
 /** The `pick` value that means "type the alias". An SSH alias is never `*`
  *  (that is a config wildcard, which discovery leaves out). */
@@ -99,19 +100,19 @@ export async function runAddHost(v: Values, onprogress?: (text: string) => void)
       // No probe: the hub cannot reach it, and its agent dials in later.
       onprogress?.(`Adding ${alias} for fleet-agent…`);
       const added = await addHost(alias, sshAlias, 'agent');
-      if (!added.ok) return { ok: false, error: added.error.message };
+      if (!added.ok) return { ok: false, error: errorText(added.error) };
       return { ok: true, summary: `${alias} added on the hub; it shows offline until its fleet-agent connects` };
     }
     onprogress?.(`The hub is checking ${sshAlias}…`);
     const added = await addHost(alias, sshAlias);
-    if (!added.ok) return { ok: false, error: added.error.message };
+    if (!added.ok) return { ok: false, error: errorText(added.error) };
     return { ok: true, summary: `${alias} added on the hub` };
   }
   const checks: SetupCheck[] = [];
   for (const key of CHECK_KEYS) {
     onprogress?.(checkLoader(key, sshAlias)!.text);
     const r = await runHostSetupCheck(sshAlias, key);
-    const c: SetupCheck = r.ok ? r.value : { key, state: 'fail', label: key, detail: r.error.message };
+    const c: SetupCheck = r.ok ? r.value : { key, state: 'fail', label: key, detail: errorText(r.error) };
     checks.push(c);
     if (key === 'ssh' && c.state !== 'ok') {
       return { ok: false, error: `Fleet can't reach ${sshAlias} over SSH: ${c.detail || 'no answer'}` };
@@ -119,7 +120,7 @@ export async function runAddHost(v: Values, onprogress?: (text: string) => void)
   }
   onprogress?.(`Adding ${alias}…`);
   const added = await addHost(alias, sshAlias);
-  if (!added.ok) return { ok: false, error: added.error.message };
+  if (!added.ok) return { ok: false, error: errorText(added.error) };
   // The checks keep a draft for the guided wizard to resume; this one is done.
   await discardHostSetup(sshAlias);
   const ok = checks.filter((c) => c.state === 'ok').length;

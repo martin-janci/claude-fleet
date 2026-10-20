@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { errorText } from './error_copy';
   import { untrack } from 'svelte';
   import Modal from './Modal.svelte';
   import { hubActionBlocked, hubStatus } from './hub';
@@ -174,7 +175,7 @@
         : await renameWorkItem(t.itemId, title);
     busy = false;
     if (!r.ok) {
-      failure = r.error.message;
+      failure = errorText(r.error);
       return;
     }
     ondone?.();

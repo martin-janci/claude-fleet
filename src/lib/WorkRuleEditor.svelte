@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { errorText } from './error_copy';
   // A placement rule (work graph M14): "tasks like these go under group X".
   // Navigation only — a rule never links a session, never changes access,
   // and never touches the tracker. A rule is saved only after a preview of
@@ -119,7 +120,7 @@
     if (mine !== previewSeq) return;
     previewing = false;
     if (!r.ok) {
-      failure = r.error.message;
+      failure = errorText(r.error);
       return;
     }
     failure = null;
@@ -179,7 +180,7 @@
             : 'A rule like this was saved elsewhere at the same time. Check the new preview before saving.';
         return;
       }
-      failure = r.error.message;
+      failure = errorText(r.error);
       return;
     }
     onsaved?.(r.value);
@@ -209,7 +210,7 @@
     busy = false;
     confirmDelete = false;
     if (!r.ok) {
-      failure = conflictOf(r.error) ? 'This rule changed elsewhere. Close it and open it again before deleting.' : r.error.message;
+      failure = conflictOf(r.error) ? 'This rule changed elsewhere. Close it and open it again before deleting.' : errorText(r.error);
       return;
     }
     ondeleted?.(start.name ?? name);

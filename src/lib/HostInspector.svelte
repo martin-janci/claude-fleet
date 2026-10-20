@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { errorText } from './error_copy';
   import Inspector from './Inspector.svelte';
   import { PERSONAL, hostProvenance, type ResolutionView } from './assets_workspace';
   import { olderHubWords } from './assets_cards';
@@ -28,7 +29,7 @@
       if (stale) return;
       loading = false;
       if (r.ok) view = r.value;
-      else problem = olderHubWords(r.error, 'show what a host receives') ?? r.error.message;
+      else problem = olderHubWords(r.error, 'show what a host receives') ?? errorText(r.error);
     });
     return () => (stale = true);
   });

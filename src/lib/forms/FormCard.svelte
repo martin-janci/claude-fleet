@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { errorText } from '../error_copy';
   // The chat form card: who asks, why, the wizard, Decline, when it
   // expires. A decided form collapses to its receipt (step 10.1): how it
   // ended, a one-line summary of the answers, the answers behind "Show
@@ -47,7 +48,7 @@
     void getForm(id).then((r) => {
       if (id !== formId) return;
       if (r.ok) form = r.value;
-      else error = r.error.message;
+      else error = errorText(r.error);
     });
   });
 
@@ -78,7 +79,7 @@
     const details = (r.error as { details?: { problems?: FieldProblem[] } }).details;
     if (details?.problems) problems = details.problems;
     else {
-      error = r.error.message;
+      error = errorText(r.error);
       void reread();
     }
   }
@@ -102,7 +103,7 @@
       wizard?.forgetSaved();
       form = r.value;
     } else {
-      error = r.error.message;
+      error = errorText(r.error);
       void reread();
     }
   }

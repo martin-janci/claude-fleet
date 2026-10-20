@@ -14,6 +14,7 @@
   // send-keys into the REPL), so anything typed here is what the terminal
   // would have received. bg / external rows have no REPL to type into, so
   // they stay read-only.
+  import { errorText } from './error_copy';
   import { conversationFindRequest } from './search_api';
   import { untrack, tick, setContext, onDestroy, type Snippet } from 'svelte';
   import { requestOpenPath, OPEN_PATH_CONTEXT, type OpenPathFn } from './app_views';
@@ -466,7 +467,7 @@
       }
     } else {
       errorCode = r.error.code;
-      errorMsg = r.error.message;
+      errorMsg = errorText(r.error);
     }
   }
 
@@ -1345,7 +1346,7 @@
     stopping = true;
     const r = await sendPrompt(session.host_alias, session.tmux_name, '', { keys: STOP_KEY });
     stopping = false;
-    if (!r.ok) sendError = r.error.message;
+    if (!r.ok) sendError = errorText(r.error);
   }
 
   // ── May this client write into this session at all? (multi-user M1) ─────
@@ -1491,7 +1492,7 @@
     const r = await restartSession(session.host_alias, session.tmux_name, undefined, { [pick.cmd]: pick.value });
     relaunching = false;
     if (!r.ok) {
-      pushToast({ kind: 'error', message: `Could not relaunch ${agentName}: ${r.error.message}` });
+      pushToast({ kind: 'error', message: `Could not relaunch ${agentName}: ${errorText(r.error)}` });
       return;
     }
     {
@@ -1863,7 +1864,7 @@
     const r = await sendPrompt(session.host_alias, session.tmux_name, '');
     sending = false;
     if (session?.id !== id) return;
-    if (!r.ok) sendError = r.error.message;
+    if (!r.ok) sendError = errorText(r.error);
   }
 
   /** Take a failed message back into the box to change it. Text the user
@@ -2193,7 +2194,7 @@
               ? // null is an ordinary answer: not an inlineable image, or over
                 // 2 MiB. The tile falls back to its extension, not to an error.
                 { ...x, thumb: r.value, state: 'ready' as const }
-              : { ...x, state: 'error' as const, error: r.error.message },
+              : { ...x, state: 'error' as const, error: errorText(r.error) },
         );
       if (owner !== null) rememberTray(owner, withPreview(composerTrays.get(owner) ?? []));
       if (owner === draftFor) attachments = withPreview(attachments);
@@ -2220,7 +2221,7 @@
     if (shareBlocked !== null) return;
     const r = await invokeCmd<PickedFile[]>('pick_attachments', {});
     if (r.ok) await attach(r.value ?? []);
-    else attachErrors = [r.error.message];
+    else attachErrors = [errorText(r.error)];
   }
 
   function onShellDragEnter(e: DragEvent) {
@@ -2276,7 +2277,7 @@
   async function describeDroppedPaths(paths: string[]) {
     const r = await invokeCmd<PickedFile[]>('attachment_describe', { paths });
     if (r.ok) await attach(r.value ?? []);
-    else attachErrors = [r.error.message];
+    else attachErrors = [errorText(r.error)];
   }
 
   function onDroppedPaths(paths: string[]) {

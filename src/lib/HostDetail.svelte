@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { errorText } from './error_copy';
   // The Hosts view's detail pane (spec: "The Hosts view" → Detail sections).
   // In order: header, usage, sessions, integration, danger. ("Today" is left
   // out: the frontend has per-session lifetime totals only, no per-day figure,
@@ -322,13 +323,18 @@
     const r = await discoverLostSessions(host.alias);
     discoverBusy = false;
     if (!r.ok) {
-      discoverError = r.error.message;
+      discoverError = errorText(r.error);
       return;
     }
     discoverList = r.value;
   }
 
-  async function onResumeCandidate(c: LostCandidate) {
+  /** Rows whose Resume was refused for a login past `accounts.pause_at`
+   *  (`E_ACCOUNT_LIMIT`, from the hub's `new_session`): they offer "Start
+   *  anyway", the choice New session gives (review w16-2). */
+  let overLimitIds = $state<Set<string>>(new Set());
+
+  async function onResumeCandidate(c: LostCandidate, overLimitOk = false) {
     if (!c.resumable || c.project_id === null || c.derived_tmux_name === null) return;
     // Re-asked at the write: the discovered list stays on screen, and nothing
     // in it moves when a grant is narrowed.
@@ -339,6 +345,11 @@
     }
     const { [c.claude_session_id]: _dropped, ...rest } = resumeErrors;
     resumeErrors = rest;
+    if (overLimitIds.has(c.claude_session_id)) {
+      const next = new Set(overLimitIds);
+      next.delete(c.claude_session_id);
+      overLimitIds = next;
+    }
     resumingId = c.claude_session_id;
     const r = await newSessionAbortable({
       host_alias: host.alias,
@@ -346,12 +357,14 @@
       worktree_id: c.worktree_id,
       name: c.derived_tmux_name,
       resume_claude_session_id: c.claude_session_id,
+      ...(overLimitOk ? { over_limit_ok: true } : {}),
     });
     resumingId = null;
     if (r.ok) {
       resumedIds = new Set(resumedIds).add(c.claude_session_id);
     } else {
-      resumeErrors = { ...resumeErrors, [c.claude_session_id]: r.error.message };
+      resumeErrors = { ...resumeErrors, [c.claude_session_id]: errorText(r.error) };
+      if (r.error.code === 'E_ACCOUNT_LIMIT' && !overLimitOk) overLimitIds = new Set(overLimitIds).add(c.claude_session_id);
     }
   }
 
@@ -499,7 +512,7 @@
     const refused = adoptBlocked(s);
     if (refused !== null) return refused;
     const r = await adoptSession(s.id, projectId);
-    if (!r.ok) return r.error.message;
+    if (!r.ok) return errorText(r.error);
     adoptingId = null;
     push({ kind: 'success', message: `${s.tmux_name} adopted` });
     return null;
@@ -514,7 +527,7 @@
       claude_session_id: c.claude_session_id,
       project_id: projectId,
     });
-    if (!placed.ok) return placed.error.message;
+    if (!placed.ok) return errorText(placed.error);
     const r = await newSessionAbortable({
       host_alias: host.alias,
       project_id: projectId,
@@ -522,13 +535,13 @@
       name: placed.value.tmux_name,
       resume_claude_session_id: c.claude_session_id,
     });
-    if (!r.ok) return r.error.message;
+    if (!r.ok) return errorText(r.error);
     restoringId = null;
     resumedIds = new Set(resumedIds).add(c.claude_session_id);
     // J10: the ticket the branch names, when the person kept it ticked.
     if (ticket !== null) {
       const linked = await linkSessionWork(r.value.id, { key: ticket });
-      if (!linked.ok) push({ kind: 'error', message: `Restored, but not linked to ${ticket}: ${linked.error.message}` });
+      if (!linked.ok) push({ kind: 'error', message: `Restored, but not linked to ${ticket}: ${errorText(linked.error)}` });
     }
     return null;
   }
@@ -594,7 +607,7 @@
     const r = await restoreHostSessions(host.alias, { dryRun: true });
     busy = false;
     if (!r.ok) {
-      restoreError = r.error.message;
+      restoreError = errorText(r.error);
       return;
     }
     restorePlan = r.value.plan;
@@ -636,7 +649,7 @@
           .map((x) => ({ name: x.tmux_name, error: x.error ?? 'unknown error' })),
       };
     } else {
-      restoreError = r.error.message;
+      restoreError = errorText(r.error);
     }
   }
 </script>
@@ -979,6 +992,15 @@
                   >
                   {#if resumeErrors[c.claude_session_id]}
                     <p class="error" data-testid="discover-item-error">{resumeErrors[c.claude_session_id]}</p>
+                    {#if overLimitIds.has(c.claude_session_id)}
+                      <button
+                        type="button"
+                        class="small"
+                        data-testid="discover-item-start-anyway"
+                        disabled={resumingId !== null}
+                        onclick={() => onResumeCandidate(c, true)}>Start anyway</button
+                      >
+                    {/if}
                   {/if}
                 {:else if needsRestoreInto(c)}
                   {#if restoringId === c.claude_session_id}

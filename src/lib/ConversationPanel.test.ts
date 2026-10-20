@@ -315,7 +315,7 @@ describe('ConversationPanel', () => {
     await Promise.resolve();
     await tick();
 
-    expect(screen.getByTestId('conv-error').textContent).toContain('connection refused');
+    expect(screen.getByTestId('conv-error').textContent).toContain("Couldn't reach the host over SSH");
     expect(screen.getByTestId('conv-prompt').textContent).toContain('fix the bug');
 
     mockedConv.mockReturnValueOnce(ok(conv()));
@@ -2572,7 +2572,7 @@ describe('ConversationPanel second review-round fixes', () => {
     vi.advanceTimersByTime(QUIET_POLL_MS);
     await settle();
     expect(mockedConv).toHaveBeenCalledTimes(2);
-    expect(screen.getByTestId('conv-error').textContent).toContain('hiccup');
+    expect(screen.getByTestId('conv-error').textContent).toContain("Couldn't reach the host over SSH");
     // the failure did not restart the quiet clock: the very next tick retries
     mockedConv.mockReturnValue(ok(conv()));
     vi.advanceTimersByTime(CONVERSATION_POLL_MS);
