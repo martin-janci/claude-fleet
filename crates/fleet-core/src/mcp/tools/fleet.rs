@@ -249,8 +249,9 @@ impl FleetTools {
     #[tool(description = "Which agent hosts (transport \"agent\") have a \
         fleet-agent connected: since (unix s), version, host name, OS. \
         Offline ones show connected=false; a call for one fails fast with \
-        E_AGENT_OFFLINE. enabled=false where no agents are accepted (the \
-        desktop).")]
+        E_AGENT_OFFLINE. duplicate (since, takeovers, peers) when two \
+        fleet-agents keep taking one host's token from each other. \
+        enabled=false where no agents are accepted (the desktop).")]
     pub(super) async fn agent_status(&self) -> Result<CallToolResult, McpError> {
         audit("agent_status", "");
         let registry = self.ssh.agent_registry().map(|r| r.as_ref());

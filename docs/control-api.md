@@ -334,7 +334,9 @@ side are in `hub.md` → *A host that cannot be reached*; this is the contract.
   answers `503`.
 
 Tools see an agent host through the same calls as an SSH host. `agent_status`
-reports which agent hosts are connected. `add_host { transport: "agent" }`
+reports which agent hosts are connected, and flags `duplicate` on one whose
+token two fleet-agents keep taking from each other (two takeovers within
+five minutes; the hub log names both). `add_host { transport: "agent" }`
 registers one without an SSH probe. `install_agent` does the whole *Set it
 up* of `docs/hub.md` for a host the hub already reaches over SSH.
 
