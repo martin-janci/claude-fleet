@@ -1438,6 +1438,13 @@ fleets' rows with a counted "hidden by the … filter · Show every fleet"
 line rather than silently; the shared filters (search, Last active, Needs
 you, Agent, Background agents) apply to the extra fleets' groups too; the
 primary's list sits under a folding fleet header beside another fleet.
+Phase 3b landed: profiles — the hub's read-only `my_profile` tool (no
+contract bump; the caller's own person, SSO issuers, the names of its
+person-scope variables, its git identity; an older hub falls back to
+`my_grants` + `env_vars_list`), the routed fleet-scoped desktop command of
+the same name, a local per-fleet profile label (`src/lib/fleet_profiles.ts`),
+shown on the switcher's chips, in Settings › Fleets › Profiles and as "Runs
+as …" in New session.
 Phase 3 (one id space, the full panes per fleet) is not started.
 
 Application updates: design

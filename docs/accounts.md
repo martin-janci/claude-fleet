@@ -245,6 +245,29 @@ an hour. Placement leaves it out, Control's chat shows one card per login
 for a profile, `CLAUDE_CONFIG_DIR=~/.claude-profiles/<name> claude
 /login`), and Control's feed says it once. Only a person can sign it in.
 
+### Two copies of one login
+
+Every OAuth refresh hands out a new refresh token and revokes the old one.
+Two copies of the same login on one host refresh on their own schedules, so
+the first to refresh leaves the other with a revoked token, and its next
+refresh fails with "Login expired · Please run /login". Signing in again
+only starts the next round. Fleet flags such a host in Hosts (⚿) and in
+`fleet_health` (`hosts[].login_conflicts`, `service::login_conflicts`):
+
+- **Keychain and file** (macOS). Claude Code keeps the default login in the
+  login Keychain, but a `claude` started over SSH, as fleet's tmux sessions
+  are, finds the Keychain locked and falls back to
+  `~/.claude/.credentials.json`. The desktop app or a local terminal then
+  refreshes one copy and fleet's sessions the other. The health probe asks
+  whether both exist (`security find-generic-password` without `-w`, so
+  never the secret; migration 203, `hosts.login_split`).
+- **Shared account.** The host's login and a login profile, or two
+  profiles, signed into the same account.
+
+Fix it by keeping one login per account on a host: run fleet's sessions on
+that host under a profile on another account, or sign the desktop app (or
+the duplicate profile) into another account.
+
 ### Control's own login
 
 `operator_status` reports the login Control runs under, its account and

@@ -1742,6 +1742,15 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
+    // Multi-hub Phase 3b: the caller's own profile (person, sign-in, the
+    // names of its own variables). Person-only like `my_grants`.
+    ToolPolicy {
+        name: "my_profile",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
     // Gap plan G4.2: a recipient's ask for a wider level, and the owner's
     // list and answer. Person-only like the rest of this block. Neither is
     // readonly (`access_requests` grants and declines) nor confirm-gated:
@@ -2080,6 +2089,7 @@ pub const NOT_FOR_HOST_TOKENS: &[&str] = &[
     "session_narrow",
     "session_access",
     "my_grants",
+    "my_profile",
     "session_ask_access",
     "access_requests",
     "session_presence",
