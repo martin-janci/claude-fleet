@@ -1511,7 +1511,10 @@ not a JSON-RPC error. The text block is the documented `E_CODE: message` line;
 `structuredContent` carries `{ code, message, details }` (for example the
 candidate rows of `E_AMBIGUOUS` or the `confirm_nonce` of
 `E_CONFIRM_REQUIRED`). JSON-RPC errors are reserved for protocol failures:
-an unknown tool name or arguments that do not match the schema.
+an unknown tool name, or arguments that do not parse (a wrong type, a missing
+required field). Most tools ignore an argument they do not take; the fan-outs
+and `kill_session` (`broadcast_prompt`, `provision_hosts`, `kill_session`)
+refuse one instead, because a misspelled filter there would widen the call.
 
 Three codes are specific to agent hosts:
 - `E_AGENT_OFFLINE`: no `fleet-agent` is connected for the host. It is
