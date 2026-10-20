@@ -284,7 +284,7 @@ export function hostAttention(args: {
     return {
       kind: 'agent_old',
       icon: 'upgrade',
-      title: `fleet-agent ${host.agent_version} on ${host.alias}, hub ${hubVersion}: upgrade the agent (fleet-agent install with the existing token, then systemctl restart fleet-agent).`,
+      title: `fleet-agent ${host.agent_version} on ${host.alias}, hub ${hubVersion}: it updates itself as Settings → Updates (fleet-agent) says; by hand on the host: fleet-agent update (--user for a user unit).`,
     };
   }
   // ux F-13: only a version read from the host recently earns the mark; a

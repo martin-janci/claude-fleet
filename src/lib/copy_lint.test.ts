@@ -36,6 +36,9 @@ const SELF_GATED: Record<string, string | null> = {
   ShortcutSheet: 'shortcutSheetOpen',
   // Opened by an agent's MCP call, never by a button.
   McpConfirmDialog: null,
+  // HostsView mounts it behind its own showAddPicker; its `{#if added}` only
+  // swaps the form for what to do next (review w14).
+  HubAddHostDialog: null,
 };
 
 // Findings that wait, each with why. An entry that no longer matches a finding

@@ -277,6 +277,39 @@ fn a_fleets_default_label_is_its_registrable_name() {
     assert_eq!(default_label("http://10.0.0.5:8787"), "10.0.0.5");
 }
 
+#[test]
+fn a_default_label_another_fleet_already_reads_as_falls_back_to_the_first_host_label() {
+    assert_eq!(
+        default_label_among("https://company.rlt.sk", &["lab"]),
+        "rlt"
+    );
+    assert_eq!(
+        default_label_among("https://company.rlt.sk", &["RLT"]),
+        "company"
+    );
+    assert_eq!(
+        default_label_among("https://company.rlt.sk", &["rlt", "company"]),
+        "company.rlt.sk"
+    );
+    assert_eq!(
+        default_label_among("http://10.0.0.5:8787", &["10.0.0.5"]),
+        "10.0.0.5"
+    );
+}
+
+#[test]
+fn a_hub_on_the_primarys_domain_is_not_labelled_like_the_primary() {
+    let w = world(&[], Tokens::with(&[]));
+    let transport = pair("cl_new");
+    let info = block_on(w.fleets.add(
+        &transport,
+        &paired_to("https://fleet.rlt.sk"),
+        add_args("https://company.rlt.sk"),
+    ))
+    .unwrap();
+    assert_eq!(info.label, "company");
+}
+
 // --- loading -----------------------------------------------------------------
 
 #[test]
@@ -762,6 +795,30 @@ fn removing_a_fleet_stops_it_and_forgets_its_token_and_row() {
         .select(&Arc::new(FleetBackend::local()), Some("company"))
         .unwrap_err();
     assert_eq!(err.code, codes::E_NOTFOUND);
+}
+
+#[test]
+fn a_remove_the_keychain_refuses_keeps_the_fleet_listed_to_try_again() {
+    let tokens = Arc::new(Tokens {
+        failing: Some("keychain locked".into()),
+        ..Tokens::default()
+    });
+    let w = world(&[record("company", "https://fleet.papayapos.dev")], tokens);
+    let err = w.fleets.remove("company").unwrap_err();
+    assert_eq!(err.code, codes::E_IO);
+    let listed = w.fleets.list(&standalone());
+    let company = listed
+        .iter()
+        .find(|f| f.id == "company")
+        .expect("still listed");
+    assert!(
+        company
+            .unavailable
+            .as_deref()
+            .is_some_and(|u| u.starts_with("remove did not finish")),
+        "{company:?}"
+    );
+    assert_eq!(read_records(&w.store).unwrap().len(), 1, "the row stays");
 }
 
 #[test]

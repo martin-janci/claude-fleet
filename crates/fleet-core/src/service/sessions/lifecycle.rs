@@ -74,9 +74,10 @@ pub struct NewSessionArgs {
     pub origin: Option<crate::store::SessionOrigin>,
     /// The person was asked about `accounts.pause_at` (redesign step 4.4)
     /// and chose to start on that login anyway. The MCP / hub `new_session`
-    /// refuses a login at or past the line without it
-    /// (`E_CONFIRM_REQUIRED`, naming the login with headroom); the
-    /// desktop's own dialog asks first and sets it.
+    /// tool reads it and refuses a login at or past the line without it
+    /// (`account_limits::refuse_over_limit`: `E_ACCOUNT_LIMIT`, naming the
+    /// login with headroom); the desktop's own dialog asks first and sets
+    /// it. The service itself does not read it.
     #[serde(default)]
     pub over_limit_ok: bool,
     /// Whose session this is to be (multi-user M1, T5): the `people` row the
@@ -1340,6 +1341,9 @@ pub(super) async fn new_session_inner(
 
     progress.advance(StartStep::Tmux);
     let tmux = exec_for(&args.host_alias, ssh);
+    // An ended session of this name may have left terminals running unseen
+    // (review w27-8): close them, or this session's strip shows them.
+    super::terminals::close_orphans_before_create(&*tmux, &args.name).await;
     tmux.new_session(&args.name, &path, &pane_cmd).await?;
 
     // AFTER the create, like every other create site (the one rule, and
@@ -1914,6 +1918,9 @@ pub(super) async fn kill_session_with(
         return Ok(id);
     }
     let tmux = (deps.exec)(&args.host_alias);
+    // `Some(e)`: the kill was sent but its outcome is unknown, and the host
+    // could not say whether the session is gone either (review w27-6).
+    let mut unconfirmed: Option<IpcError> = None;
     let tmux_gone = match tmux.kill_session(&args.name).await {
         Ok(()) => false,
         // A ghost: its tmux session (or the whole server) is already gone,
@@ -1923,11 +1930,33 @@ pub(super) async fn kill_session_with(
             tracing::info!(session_id = id, error = %e.message, "[kill] tmux already gone");
             true
         }
+        // Sent, outcome unknown (a timeout after the kill ran). Returning at
+        // once skipped the bookkeeping: had it been the host's last session,
+        // the next pass read `tmux_server_gone`, a resumable loss, and
+        // auto-restore brought the killed session back (review w27-6). Ask
+        // the host: gone means the kill landed; listed means it did not; no
+        // answer means the person's intent stands and the row is marked
+        // killed, but the error still goes back.
+        Err(e) if codes::may_have_run(&e.code) => match tmux.list_sessions().await {
+            Ok(live) if live.iter().any(|t| t.name == args.name) => return Err(e),
+            Ok(_) => {
+                tracing::info!(session_id = id, error = %e.message, "[kill] outcome unknown; the session is gone");
+                true
+            }
+            Err(list_err) => {
+                tracing::warn!(session_id = id, error = %e.message, list_error = %list_err.message, "[kill] outcome unknown; marking the row killed");
+                unconfirmed = Some(e);
+                false
+            }
+        },
         Err(e) => return Err(e),
     };
     // Its shell terminals (step 5.3) go with it. Best-effort: a terminal
-    // left behind is no session row, only a stray tmux session.
-    super::terminals::close_all_after_kill(&*tmux, &args.name).await;
+    // left behind is no session row, only a stray tmux session. Not on a
+    // host that just stopped answering.
+    if unconfirmed.is_none() {
+        super::terminals::close_all_after_kill(&*tmux, &args.name).await;
+    }
     // Task G: record the kill before reconcile reaps the row. Best-effort.
     // Then ghost the row as fleet's OWN kill (`lost_reason='killed'`)
     // before the reconcile below probes the host: tmux exits with its last
@@ -1955,6 +1984,9 @@ pub(super) async fn kill_session_with(
                 tracing::warn!(session_id = id, error = %e, "[kill] marking the killed row failed");
             }
         }
+    }
+    if let Some(e) = unconfirmed {
+        return Err(e);
     }
     super::reconcile::reconcile_one_host_with(store, deps, &args.host_alias)
         .await
@@ -2573,6 +2605,7 @@ pub async fn restart_session(
             "restarted",
         )
         .await?;
+        settle_relaunched_waits(&*lock(store)?, id);
     }
     if launch_switched {
         if let Some(id) = session_id {
@@ -2684,6 +2717,31 @@ pub(crate) fn record_relaunched_login(
         s.set_session_profile(session_id, profile.as_deref())?;
     }
     s.clear_host_login_account(session_id)
+}
+
+/// Settle what a relaunched pane's old process was waiting on. Restart,
+/// recreate, repair, Switch account and rewind all replace that process, so
+/// once the relaunch has succeeded (best-effort, as [`record_kill`]'s cancel
+/// is):
+///
+/// - its pending form is cancelled (review w27-4): left `pending`, it read
+///   "waiting for your answer" for a day, swallowed the answer, and refused
+///   the resumed agent's next `ask` with `E_CONFLICT`;
+/// - a safe remove still waiting for its marker is dropped (review w27-5):
+///   the new process never saw the request and will never print it.
+pub(crate) fn settle_relaunched_waits(s: &Store, session_id: i64) {
+    if let Err(e) = s.cancel_forms_of_session(session_id) {
+        tracing::warn!(session_id, error = %e, "[forms] cancel on relaunch failed");
+    }
+    match s.clear_requested_safe_kill(session_id) {
+        Ok(true) => {
+            let _ = s.insert_session_event(session_id, "safe_kill_dropped", Some("relaunched"));
+        }
+        Ok(false) => {}
+        Err(e) => {
+            tracing::warn!(session_id, error = %e, "[safe_kill] clear on relaunch failed")
+        }
+    }
 }
 
 /// `restart_session`'s controller guard: refuse to restart the registered
@@ -2992,6 +3050,7 @@ pub async fn recreate_session(
         if sess.agent == crate::store::AGENT_CLAUDE && sess.kind != "shell" {
             record_relaunched_login(&s, sess.id, None)?;
         }
+        settle_relaunched_waits(&s, sess.id);
         let row = s
             .restore_session(sess.id)?
             .ok_or_else(|| IpcError::new(codes::E_INTERNAL, "session vanished after restore"))?;

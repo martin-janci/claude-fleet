@@ -16,6 +16,7 @@
     hasNoPane,
     sessionAgent,
     isPinned,
+    PINNED_BLOCK,
     type SessionRow,
   } from './sessions';
   import { describePurge, purgeHostsForProject } from './purge';
@@ -598,9 +599,12 @@
    * outright would take the first away to prevent the second.
    */
   // A pinned row is never closed: Kill and Clean up pass it by.
-  const bulkKillTargets = $derived(
-    bulkTargets(selectedRows, 'kill_session', $sessionBlocked).filter((s) => !isPinned(s)),
-  );
+  const bulkKillAllowed = $derived(bulkTargets(selectedRows, 'kill_session', $sessionBlocked));
+  const bulkKillTargets = $derived(bulkKillAllowed.filter((s) => !isPinned(s)));
+  /** Rows this person may kill but that are pinned: told apart from the
+   *  rows refused by grant, because the way back differs (unpin). */
+  const bulkKillPinned = $derived(bulkKillAllowed.length - bulkKillTargets.length);
+  const bulkKillNotYours = $derived(selectedRows.length - bulkKillAllowed.length);
   const bulkPromptTargets = $derived(bulkTargets(selectedRows, 'send_prompt', $sessionBlocked));
 
   /** Clean up was accepted. A direct remove already dropped the row, so
@@ -645,10 +649,15 @@
     push({ message: parts.join(' · '), kind: r.failed > 0 ? 'error' : r.moved > 0 ? 'success' : 'info' });
   }
   /** Clean up's targets: the rows this person may Safe remove (`own`). */
-  const bulkCleanUpTargets = $derived(bulkTargets(selectedRows, 'safe_kill_session', $sessionBlocked));
+  const bulkCleanUpAllowed = $derived(bulkTargets(selectedRows, 'safe_kill_session', $sessionBlocked));
+  const bulkCleanUpTargets = $derived(bulkCleanUpAllowed.filter((s) => !isPinned(s)));
   const bulkCleanUpBlocked = $derived(
     hubActionBlocked('safe_kill_session', $hubStatus, $hubConnection) ??
-      (selectedRows.length > 0 && bulkCleanUpTargets.length === 0 ? 'None of the selected sessions is yours to clean up.' : null),
+      (selectedRows.length > 0 && bulkCleanUpTargets.length === 0
+        ? bulkCleanUpAllowed.length > 0
+          ? PINNED_BLOCK
+          : 'None of the selected sessions is yours to clean up.'
+        : null),
   );
 
   async function confirmBulkKill() {
@@ -684,6 +693,7 @@
   // here doesn't become an extra tracked dependency of whichever effect is
   // calling it.
   function expandAndScrollTo(sess: SessionRow): void {
+    if (splitPinned && sess.kind !== 'external' && isPinned(sess)) pinnedOpen = true;
     if (sess.project_id !== null && collapsed.has(sess.project_id)) {
       const next = new Set(collapsed);
       next.delete(sess.project_id);
@@ -2078,9 +2088,9 @@
           </li>
         {/each}
       </ul>
-    {:else if listUnavailable && orphanSessions.length === 0 && sharedWithMe.length === 0 && workGroups.length === 0 && pastOnlyGroups.length === 0}
+    {:else if listUnavailable && orphanSessions.length === 0 && sharedWithMe.length === 0 && workGroups.length === 0 && pastOnlyGroups.length === 0 && pinnedRows.length === 0}
       {@render listState('sessions')}
-    {:else if !loadError && orphanSessions.length === 0 && sharedWithMe.length === 0 && workGroups.length === 0 && pastOnlyGroups.length === 0}
+    {:else if !loadError && orphanSessions.length === 0 && sharedWithMe.length === 0 && workGroups.length === 0 && pastOnlyGroups.length === 0 && pinnedRows.length === 0}
       {#if !hubSkewEmptyMessage && listFacets.length > 0 && $projects.length > 0}
         <!-- Filters hide every row: say which, and offer the way back,
              instead of "no sessions" over a fleet that has some, as the states
@@ -2292,20 +2302,29 @@
     confirmTestId="confirm-bulk-kill"
   >
     {#snippet notes()}
-      {#if bulkKillTargets.length === 0}
+      {#if bulkKillTargets.length === 0 && bulkKillNotYours === 0 && bulkKillPinned > 0}
+        <span data-testid="bulk-kill-none"
+          >{bulkKillPinned === 1 ? 'The selected session is' : 'Every selected session is'} pinned — unpin it first.</span
+        >
+      {:else if bulkKillTargets.length === 0}
         <span data-testid="bulk-kill-none"
           >None of the selected sessions is yours to kill — a session shared with you
-          can be watched or driven, never killed.</span
+          can be watched or driven, never killed.{bulkKillPinned > 0
+            ? ` ${bulkKillPinned} pinned (unpin first).`
+            : ''}</span
         >
       {:else if bulkKillTargets.length < selectedRows.length}
         <!-- Said out loud rather than silently dropped: the count in the title
              no longer matches the selection, and the reason is a rule. -->
         <span data-testid="bulk-kill-skipped"
-          >{selectedRows.length - bulkKillTargets.length} selected session{selectedRows.length -
-            bulkKillTargets.length ===
-          1
-            ? ' is'
-            : 's are'} not yours to kill and will be left alone.</span
+          >{[
+            bulkKillNotYours > 0
+              ? `${bulkKillNotYours} selected session${bulkKillNotYours === 1 ? ' is' : 's are'} not yours to kill`
+              : '',
+            bulkKillPinned > 0 ? `${bulkKillPinned} pinned (unpin first)` : '',
+          ]
+            .filter(Boolean)
+            .join('; ')} — left alone.</span
         >
       {/if}
     {/snippet}

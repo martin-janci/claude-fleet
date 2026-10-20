@@ -321,7 +321,9 @@ impl Store {
     /// 2026-10-17, F2): a live session (`running`, not lost) that Control
     /// started (`origin = 'operator'`) or briefed (a receipt names it). The
     /// operator guard pre-approves a prompt or task to such a session at
-    /// "Within your brief" and "Autopilot" (`mcp::guard::operator_must_confirm`).
+    /// "Within your brief" and "Autopilot" (`mcp::guard::operator_must_confirm`)
+    /// when Control also still follows it (`service::control_follow::
+    /// session_followed`, review w04-4).
     pub fn is_open_control_handoff(&self, session_id: i64) -> Result<bool> {
         self.conn
             .prepare_cached(

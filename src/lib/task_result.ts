@@ -109,14 +109,18 @@ export async function createFollowupTask(
   return r;
 }
 
+/** What "Ask about result" puts in the session's composer. */
+export const ASK_ABOUT_RESULT = 'About the result of this task: ';
+
 export type ValidationState = 'pass' | 'fail' | 'pending' | 'reported';
 
-/** What speaks for the result: the gate's checks first (fleet read them),
- *  then the tests the worker says it ran, marked as reported. */
+/** What speaks for the result: the gate's passed checks first (fleet read
+ *  them), then the tests the worker says it ran, marked as reported. A check
+ *  that failed or is still pending is listed once, with its detail, under
+ *  the gate's own "Blocks completion" / "Not verified yet" group. */
 export function validationLines(v: TaskResultView): { label: string; state: ValidationState }[] {
-  const state = (s: string): ValidationState => (s === 'pass' ? 'pass' : s === 'fail' ? 'fail' : 'pending');
   return [
-    ...v.gate.checks.map((c) => ({ label: c.line, state: state(c.state) })),
+    ...v.gate.checks.filter((c) => c.state === 'pass').map((c) => ({ label: c.line, state: 'pass' as const })),
     ...v.report.tests_run.map((t) => ({ label: t, state: 'reported' as const })),
   ];
 }

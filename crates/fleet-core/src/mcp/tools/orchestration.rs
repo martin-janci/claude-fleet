@@ -474,7 +474,7 @@ impl FleetTools {
         session_transcript in one call. Returns { turn_seq, status: \
         satisfied | timeout, transcript } (the reply as plain text; null \
         with transcript_error when unreadable). Marked untrusted unless \
-        raw=true (master token only).")]
+        raw=true (master) or the caller is a trusted client.")]
     pub(super) async fn run_prompt(
         &self,
         Extension(caller): Extension<Caller>,
@@ -579,7 +579,8 @@ impl FleetTools {
         that paragraph as `result` (also sent to the requester's inbox as \
         kind=task_result). Returns the task row; follow with wait_for_task. \
         A per-host token must name a requester on its own host. Marked \
-        untrusted unless raw=true (master only).")]
+        untrusted unless raw=true (master) or the caller is a trusted \
+        client.")]
     pub(super) async fn dispatch_task(
         &self,
         Extension(caller): Extension<Caller>,
@@ -681,15 +682,23 @@ impl FleetTools {
                 // (it could otherwise read another host's output back via
                 // wait_for_task / list_tasks / its inbox).
                 require_host(&caller, &spec.host_alias, "the new worker")?;
-                // A worker runs Claude on the host's own login: past
-                // `accounts.pause_at` it would stall at the limit with the
-                // task open, so it asks first, as `new_session` does.
+                // A worker runs Claude on the login `profile` names (the
+                // host's own without one): past `accounts.pause_at` it
+                // would stall at the limit with the task open, so it asks
+                // first, as `new_session` does, and the refusal names the
+                // profile to pass instead.
+                let profile = spec
+                    .profile
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|p| !p.is_empty())
+                    .map(str::to_string);
                 if !spec.over_limit_ok.unwrap_or(false) {
                     let s = lock(self.reader()).map_err(to_mcp_err)?;
                     crate::service::account_limits::refuse_over_limit(
                         &s,
                         &spec.host_alias,
-                        None,
+                        profile.as_deref(),
                         crate::store::now_unix(),
                     )
                     .map_err(to_mcp_err)?;
@@ -720,7 +729,7 @@ impl FleetTools {
                         resume_claude_session_id: None,
                         model: None,
                         effort: None,
-                        profile: None,
+                        profile,
                         agent: None,
                         // Who asked for the worker (migration 124): the
                         // connection, as for `new_session`.
@@ -947,8 +956,8 @@ impl FleetTools {
 
     #[tool(description = "Cancel a queued or running task (E_TASK_TERMINAL \
         if it already finished). The worker session keeps running: kill or \
-        re-prompt it separately. May return E_CONFIRM_REQUIRED when desktop \
-        confirmation is on. A per-host token may only cancel tasks it can \
+        re-prompt it separately. May return E_CONFIRM_REQUIRED when confirmation is on \
+        (mcp.confirm_destructive). A per-host token may only cancel tasks it can \
         see (E_FORBIDDEN).")]
     pub(super) async fn cancel_task(
         &self,

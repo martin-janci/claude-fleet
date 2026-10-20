@@ -65,10 +65,15 @@ impl Fx {
         s.set_tracker_state(t, "ok", None).unwrap();
         s.upsert_host("h").unwrap();
         bus.take();
+        // The token is alive unless a test says otherwise: an all-empty
+        // answer is checked against `/myself` (a dead Jira token reads as
+        // an anonymous caller's empty answer).
+        let fake = FakeTransport::new();
+        fake.always(Method::Get, "/myself", ok("myself.json"));
         Fx {
             store: Mutex::new(s),
             bus,
-            fake: FakeTransport::new(),
+            fake,
             tracker: t,
         }
     }
@@ -257,7 +262,9 @@ async fn linked_items_refresh_by_id_status_moves_are_journaled_and_missing_ones_
             "/search/jql",
             Ok(Response::json(200, &json!({"issues": [], "isLast": true}))),
         )
-        .once(Method::Post, "/issue/bulkfetch", ok("bulkfetch.json"));
+        .once(Method::Post, "/issue/bulkfetch", ok("bulkfetch.json"))
+        // The empty view is checked against `/myself`: the token is alive.
+        .always(Method::Get, "/myself", ok("myself.json"));
     let p = sync.run_pass(&fx.store).await.unwrap().remove(0);
     assert_eq!(p.unavailable, 1, "{p:?}");
     let body = fx

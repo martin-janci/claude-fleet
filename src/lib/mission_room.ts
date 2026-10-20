@@ -18,9 +18,10 @@ import { get, writable } from 'svelte/store';
 import { destinationFlag, goTo } from './destination';
 import { readPref, writePref } from './prefs';
 import { rightPanelWidth } from './control_room';
-import { WAIT_WORDS } from './control_threads';
 import { workState } from './handoffs';
 import { outbox } from './outbox';
+import { controlJournal } from './control_journal';
+import { steerPrefix } from './agent_context';
 import { sessionActionBlocked } from './share';
 import { readErrorText } from './work_view';
 import type { OfState } from './kit/status';
@@ -31,6 +32,7 @@ import {
   missionReason,
   openProposals,
   waitsOnPerson,
+  WAIT_WORDS,
   withoutConfigKeys,
   type Mission,
   type MissionDetail,
@@ -238,15 +240,26 @@ export function proposalSummary(detail: MissionDetail): { ids: number[]; waves: 
 // ── Steer: the composer hands the text to Control ──
 
 /** What rides in front of a steer, so Control knows which mission. */
-export function steerPrefix(m: Pick<Mission, 'id' | 'name'>): string {
-  return `About mission #${m.id} "${m.name}":`;
-}
+export { steerPrefix } from './agent_context';
 
 /** Why the composer may not send now, or null. */
 export function steerBlocked(operator: SessionRow | null): string | null {
   if (!operator) return "Control's agent isn't running, so there is no one to steer through. Open Control to start it.";
   if (operator.lost_at != null) return "Control's agent was lost. Open Control to bring it back.";
   return sessionActionBlocked(operator, 'send_prompt');
+}
+
+/** Why Send waits now, or null (review w04-12): a steer goes into
+ *  Control's REPL as Control's own composer would, so it waits as that
+ *  composer's gate does — while Control is mid-turn, while its last message
+ *  is not taken yet, and behind lines already queued in Control's composer,
+ *  which go first. The box stays open; only Send waits. */
+export function steerBusy(operator: SessionRow | null, outboxBusy: boolean, queuedInControl: number): string | null {
+  if (queuedInControl > 0) {
+    return `Control has ${queuedInControl === 1 ? 'a line' : `${queuedInControl} lines`} queued from its chat; they go first. Open Control to send them.`;
+  }
+  if (operator?.claude_status === 'working' || outboxBusy) return 'Control is mid-turn. Send opens when it finishes, so this is not typed into its turn.';
+  return null;
 }
 
 /** One steer sent: the room's receipt line. */
@@ -276,6 +289,10 @@ export function sendSteer(m: Pick<Mission, 'id' | 'name'>, text: string, operato
   );
   const receipt: SteerReceipt = { key, missionId: m.id, operatorId: operator.id, text, at: Date.now() };
   steerReceipts.update((rs) => [...rs, receipt].slice(-MAX_STEER_RECEIPTS));
+  // Control follows the mission from now on (review w04-11): a `steer`
+  // receipt, so the feed tells it what happens next. Best effort: the steer
+  // itself went already.
+  void controlJournal({ action: 'follow', thread: 'mission', id: m.id, text });
   return receipt;
 }
 

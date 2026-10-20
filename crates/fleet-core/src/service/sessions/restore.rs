@@ -208,34 +208,66 @@ pub(crate) const CONTROLLER_SKIP_REASON: &str =
 /// (no existence oracle on another person's session).
 pub const NOT_ON_THIS_HOST: &str = "not found on this host";
 
+/// The skip reason for Control's own session (the operator):
+/// `recreate_session` refuses it (`refuse_if_operator`), so a batch would
+/// only record a failure on it. It comes back through its panel's Restart,
+/// and auto-restore's `restart_operator` brings it back on its own.
+pub(crate) const OPERATOR_SKIP_REASON: &str = "Control restarts on its own (Restart in its panel)";
+
 /// Whether `row` is the registered fleet controller — the same test
 /// `guard_not_controller` applies (host + tmux name).
 fn is_controller(controller: Option<&(String, String)>, row: &SessionRow) -> bool {
     controller.is_some_and(|(h, n)| *h == row.host_alias && *n == row.tmux_name)
 }
 
+/// Whether a lost row is one the person did not end: its `lost_reason` is
+/// one auto-restore would resume too ([`crate::store::RESUMABLE_LOST_REASONS`]
+/// — a `missing` row is a clean `/exit`, a `killed` one a Kill whose
+/// trailing reconcile failed), and no safe remove is waiting on it.
+fn lost_unintentionally(r: &SessionRow) -> bool {
+    r.lost_reason
+        .as_deref()
+        .is_some_and(|x| crate::store::RESUMABLE_LOST_REASONS.contains(&x))
+        && r.safe_kill_state.as_deref() != Some("requested")
+}
+
 /// Every lost, resumable session on the host, ordered by `lost_at` then `id`
-/// — the `session_ids`-less plan. The fleet controller is listed as a skip
-/// ([`CONTROLLER_SKIP_REASON`]), since the batch cannot recreate it.
+/// — the `session_ids`-less plan. Only rows lost for a reason the person did
+/// not choose ([`lost_unintentionally`]) are planned, as auto-restore does.
+/// The fleet controller and Control's own session are listed as skips
+/// ([`CONTROLLER_SKIP_REASON`], [`OPERATOR_SKIP_REASON`]), since the batch
+/// cannot recreate them.
 fn plan_all_lost(s: &Store, rows: &[SessionRow]) -> Result<Vec<RestorePlanEntry>, IpcError> {
     let controller = s.get_controller()?;
     let mut candidates: Vec<&SessionRow> = rows
         .iter()
-        .filter(|r| r.lost_at.is_some() && is_tmux_kind(&r.kind) && r.claude_session_id.is_some())
+        .filter(|r| {
+            r.lost_at.is_some()
+                && is_tmux_kind(&r.kind)
+                && r.claude_session_id.is_some()
+                && lost_unintentionally(r)
+        })
         .collect();
     candidates.sort_by_key(|r| (r.lost_at.unwrap_or(i64::MAX), r.id));
     Ok(candidates
         .into_iter()
         .map(|r| {
-            let controller = is_controller(controller.as_ref(), r);
+            let reason = if is_controller(controller.as_ref(), r) {
+                Some(CONTROLLER_SKIP_REASON)
+            } else if crate::service::operator::is_operator_session(s, &r.host_alias, &r.tmux_name)
+            {
+                Some(OPERATOR_SKIP_REASON)
+            } else {
+                None
+            };
             RestorePlanEntry {
                 session_id: r.id,
                 tmux_name: Some(r.tmux_name.clone()),
                 cwd: plan_cwd(s, r),
                 claude_session_id: r.claude_session_id.clone(),
                 friendly_name: r.friendly_name.clone(),
-                action: if controller { "skip" } else { "restore" }.into(),
-                reason: controller.then(|| CONTROLLER_SKIP_REASON.to_string()),
+                action: if reason.is_some() { "skip" } else { "restore" }.into(),
+                reason: reason.map(str::to_string),
             }
         })
         .collect())
@@ -304,6 +336,13 @@ fn plan_one_explicit(s: &Store, host_alias: &str, id: i64) -> Result<RestorePlan
         return Ok(RestorePlanEntry {
             action: "skip".into(),
             reason: Some(CONTROLLER_SKIP_REASON.to_string()),
+            ..base
+        });
+    }
+    if crate::service::operator::is_operator_session(s, &row.host_alias, &row.tmux_name) {
+        return Ok(RestorePlanEntry {
+            action: "skip".into(),
+            reason: Some(OPERATOR_SKIP_REASON.to_string()),
             ..base
         });
     }
@@ -612,6 +651,12 @@ pub struct RestoreAll {
     pub hosts: usize,
     pub restored: usize,
     pub failed: usize,
+    /// Sessions that came back another way before the batch reached them
+    /// (auto-restore, a manual recreate): neither restored here nor failed.
+    pub already_back: usize,
+    /// Hosts skipped because a restore of them was already running; their
+    /// sessions are on their way back and are not counted as failed.
+    pub busy_hosts: Vec<String>,
     /// The toast's sentence.
     pub summary: String,
 }
@@ -651,7 +696,8 @@ where
     Fut: Future<Output = Result<RestoreReport, IpcError>>,
 {
     let plan = lost_by_host(&*lock(store)?)?;
-    let (mut restored, mut failed) = (0, 0);
+    let (mut restored, mut failed, mut already_back) = (0, 0, 0);
+    let mut busy_hosts = Vec::new();
     for (host, n) in &plan {
         let args = RestoreHostSessionsArgs {
             host_alias: host.clone(),
@@ -660,8 +706,21 @@ where
         };
         match restore(args).await {
             Ok(r) => {
-                restored += r.results.iter().filter(|o| o.ok).count();
-                failed += r.results.iter().filter(|o| !o.ok).count();
+                for o in &r.results {
+                    if o.ok {
+                        restored += 1;
+                    } else if o.error.as_deref() == Some(RESTORED_ELSEWHERE) {
+                        already_back += 1;
+                    } else {
+                        failed += 1;
+                    }
+                }
+            }
+            // `RestoresInFlight::claim`: a restore of this host is already
+            // running and brings these sessions back; they did not fail.
+            Err(e) if e.code == codes::E_INVALID_STATE => {
+                tracing::info!(host = %host, "[restore] restore all: host already being restored");
+                busy_hosts.push(host.clone());
             }
             Err(e) => {
                 tracing::warn!(host = %host, error = %e.message, "[restore] restore all: host failed");
@@ -678,6 +737,19 @@ where
             plan.len(),
             if plan.len() == 1 { "" } else { "s" }
         );
+        if already_back > 0 {
+            s.push_str(&format!(
+                "; {already_back} {} already back",
+                if already_back == 1 { "was" } else { "were" }
+            ));
+        }
+        if !busy_hosts.is_empty() {
+            s.push_str(&format!(
+                "; {} {} already being restored",
+                busy_hosts.join(", "),
+                if busy_hosts.len() == 1 { "is" } else { "are" }
+            ));
+        }
         if failed > 0 {
             s.push_str(&format!("; {failed} could not be restored"));
         }
@@ -688,6 +760,8 @@ where
         hosts: plan.len(),
         restored,
         failed,
+        already_back,
+        busy_hosts,
         summary,
     })
 }
@@ -1676,5 +1750,169 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r.summary, "No lost session to restore.");
+    }
+
+    /// Review w27-1: the no-ids plan (Restore all, the host's "Restore lost
+    /// sessions") takes only rows lost for a reason the person did not
+    /// choose, as auto-restore does: a clean `/exit` (`missing`), a landed
+    /// Kill (`killed`) and a row with a safe remove in flight stay put.
+    #[test]
+    fn the_batch_plan_leaves_ended_killed_and_safe_removing_rows_alone() {
+        let mut s = Store::open_in_memory().expect("open");
+        s.upsert_host("h").unwrap();
+        let mk = |s: &mut Store, n: &str| {
+            let id = s
+                .upsert_session(n, "h", None, None, 1, 1, "running", None)
+                .unwrap();
+            s.set_claude_session_id(id, &format!("c-{n}")).unwrap();
+            id
+        };
+        let exited = mk(&mut s, "exited");
+        let killed = mk(&mut s, "killed");
+        let removing = mk(&mut s, "removing");
+        let rebooted = mk(&mut s, "rebooted");
+        let keep = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+        s.mark_host_sessions_lost(
+            "h",
+            "missing",
+            &keep(&["killed", "removing", "rebooted"]),
+            100,
+            0,
+        )
+        .unwrap();
+        s.mark_host_sessions_lost("h", "killed", &keep(&["removing", "rebooted"]), 100, 0)
+            .unwrap();
+        s.set_safe_kill_requested(removing, "nonce", 90).unwrap();
+        s.mark_host_sessions_lost("h", "host_reboot", &[], 100, 0)
+            .unwrap();
+
+        let plan = plan_restore(&s, &run_args("h")).unwrap();
+        let planned: Vec<i64> = plan.iter().map(|e| e.session_id).collect();
+        assert_eq!(planned, vec![rebooted], "only the rebooted row is planned");
+        assert_eq!(lost_by_host(&s).unwrap(), vec![("h".to_string(), 1)]);
+
+        // Naming a row explicitly still restores it: a person picked it.
+        let explicit = plan_restore(
+            &s,
+            &RestoreHostSessionsArgs {
+                session_ids: Some(vec![exited, killed]),
+                ..run_args("h")
+            },
+        )
+        .unwrap();
+        assert!(explicit.iter().all(|e| e.action == "restore"));
+    }
+
+    /// Review w27-2: Control's own session is a skip in both plans, so the
+    /// batch never calls `recreate_session` on it (which refuses it and
+    /// would record a `session_restore_failed` on its row).
+    #[tokio::test]
+    async fn control_s_own_session_is_skipped_with_a_reason() {
+        let mut s = Store::open_in_memory().expect("open");
+        let ids = seed_reachable_lost(&mut s, "h", &["fleet-operator", "other"]);
+        let (op, other) = (ids[0], ids[1]);
+        crate::service::operator::set_operator_ref(
+            &s,
+            &crate::service::operator::OperatorRef {
+                host_alias: "h".into(),
+                tmux_name: "fleet-operator".into(),
+            },
+        )
+        .unwrap();
+        s.set_setting("restore.stagger_ms", "0").unwrap();
+        let explicit = plan_restore(
+            &s,
+            &RestoreHostSessionsArgs {
+                session_ids: Some(vec![op]),
+                ..run_args("h")
+            },
+        )
+        .unwrap();
+        assert_eq!(explicit[0].action, "skip");
+        assert_eq!(explicit[0].reason.as_deref(), Some(OPERATOR_SKIP_REASON));
+        assert_eq!(lost_by_host(&s).unwrap(), vec![("h".to_string(), 1)]);
+
+        let store = Mutex::new(s);
+        let store_ref = &store;
+        let recreated = std::sync::Mutex::new(Vec::<i64>::new());
+        let recreated_ref = &recreated;
+        let report = restore_host_sessions_with(
+            run_args("h"),
+            &store,
+            &RestoresInFlight::default(),
+            move |id| async move {
+                recreated_ref.lock().unwrap().push(id);
+                Ok(lock(store_ref)
+                    .unwrap()
+                    .get_session_by_id(id)
+                    .unwrap()
+                    .unwrap())
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(*recreated.lock().unwrap(), vec![other]);
+        let op_entry = report.plan.iter().find(|e| e.session_id == op).unwrap();
+        assert_eq!(op_entry.action, "skip");
+        assert_eq!(op_entry.reason.as_deref(), Some(OPERATOR_SKIP_REASON));
+    }
+
+    /// Review w27-3: a row that came back another way is "already back", not
+    /// a failure, and a host whose restore is already running is named as
+    /// such without counting its rows as failed.
+    #[tokio::test]
+    async fn restore_all_does_not_count_rows_coming_back_another_way_as_failed() {
+        let (s, (lost1, lost2, lost3, ..)) = seed_mixed_host("mercury");
+        let store = Mutex::new(s);
+        let r = restore_all_lost_with(&store, |args| {
+            let results = [
+                (lost1, Ok(())),
+                (lost2, Err(RESTORED_ELSEWHERE)),
+                (lost3, Err("no")),
+            ]
+            .into_iter()
+            .map(|(id, res)| RestoreOutcome {
+                session_id: id,
+                tmux_name: format!("t{id}"),
+                ok: res.is_ok(),
+                error: res.err().map(str::to_string),
+                code: None,
+            })
+            .collect();
+            async move {
+                Ok(RestoreReport {
+                    host_alias: args.host_alias,
+                    dry_run: false,
+                    plan: vec![],
+                    results,
+                })
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!((r.restored, r.already_back, r.failed), (1, 1, 1));
+        assert_eq!(
+            r.summary,
+            "Restored 1 lost session on 1 host; 1 was already back; 1 could not be restored."
+        );
+
+        let in_flight = RestoresInFlight::default();
+        let _claim = in_flight.claim("mercury").unwrap();
+        let in_flight_ref = &in_flight;
+        let store_ref = &store;
+        let r = restore_all_lost_with(&store, |args| async move {
+            restore_host_sessions_with(args, store_ref, in_flight_ref, |_| async {
+                Err(IpcError::new(codes::E_INTERNAL, "must not run"))
+            })
+            .await
+        })
+        .await
+        .unwrap();
+        assert_eq!((r.restored, r.failed), (0, 0));
+        assert_eq!(r.busy_hosts, vec!["mercury".to_string()]);
+        assert_eq!(
+            r.summary,
+            "Restored 0 lost sessions on 1 host; mercury is already being restored."
+        );
     }
 }

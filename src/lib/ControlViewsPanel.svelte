@@ -48,8 +48,13 @@
   import { openRuns } from './automation';
   import LimitActions from './LimitActions.svelte';
   import FixCard from './FixCard.svelte';
-  import { fixedRecently, fixedWords, hiddenFindings, openFindings, subjectWords, watchFindings } from './autofix';
+  import { fixedRecently, fixedWords, hiddenFindings, openFindings, scanFindings, subjectWords, watchFindings } from './autofix';
+  import { push } from './toasts';
   import { onMount } from 'svelte';
+  import { confirmQueue } from './confirms';
+  import { loadMissionList, missionList } from './mission_room';
+  import { openMission, WAIT_WORDS } from './missions';
+  import { onWorkChangedDebounced } from './work';
   import { classify } from './attention';
   import { attentionFacts } from './attention_facts';
   import { accountByUuid, accountLabel } from './accounts';
@@ -62,6 +67,8 @@
     fleetLine,
     visibleFleet,
     moveView,
+    missionsWaiting,
+    needsYouCount,
     needsYouList,
     openElsewhere,
     selectView,
@@ -73,6 +80,29 @@
 
   // Problems & fixes (autofix): kept fresh while the panel is up.
   onMount(() => watchFindings());
+  // Needs you also counts Control's approvals and the missions waiting on
+  // the person (review w04-7), not only session rows.
+  onMount(() => {
+    void loadMissionList();
+    return onWorkChangedDebounced(
+      () => void loadMissionList(),
+      () => 500,
+      () => 3000,
+    );
+  });
+  const approvals = $derived($confirmQueue.filter((r) => r.operator));
+  const waitingMissions = $derived(missionsWaiting($missionList.missions));
+  const needsCount = $derived(needsYouCount($needsYouList.length, approvals.length, $missionList.missions));
+  /** Check now: the hub re-reads its hosts at once rather than at its next
+   *  pass (a login or a hand-fixed ~/.claude.json shows straight away). */
+  let checking = $state(false);
+  async function checkNow() {
+    if (checking) return;
+    checking = true;
+    const r = await scanFindings();
+    checking = false;
+    if (!r.ok) push({ kind: 'error', message: `Could not check now: ${r.error.message}` });
+  }
 
   const shown = $derived(shownViews($controlViews));
   const active = $derived($controlViews.active);
@@ -175,7 +205,7 @@
           }}
         >
           <span class="name">{v.label}</span>
-          {#if v.id === 'needs-you' && $needsYouList.length > 0}<span class="count">{$needsYouList.length}</span>{/if}
+          {#if v.id === 'needs-you' && needsCount > 0}<span class="count">{needsCount}</span>{/if}
         </button>
       {/each}
     </div>
@@ -261,7 +291,12 @@
       </div>
       {#if $openFindings.length > 0 || $hiddenFindings.length > 0 || $fixedRecently.length > 0}
         <section class="problems" aria-label="Problems & fixes" data-testid="control-problems">
-          <h3 class="problems-title">Problems &amp; fixes{#if $openFindings.length > 0}{' '}<span class="count">{$openFindings.length}</span>{/if}</h3>
+          <h3 class="problems-title">
+            Problems &amp; fixes{#if $openFindings.length > 0}{' '}<span class="count">{$openFindings.length}</span>{/if}
+            <button type="button" class="link check-now" disabled={checking} data-testid="control-problems-check" onclick={() => void checkNow()}
+              >{checking ? 'Checking…' : 'Check now'}</button
+            >
+          </h3>
           {#each $openFindings as f (f.id)}
             <FixCard finding={f} compact={true} />
           {/each}
@@ -288,8 +323,26 @@
           {/if}
         </section>
       {/if}
+      {#if !query.trim() && (approvals.length > 0 || waitingMissions.length > 0)}
+        <ul class="rows asks" data-testid="control-needs-you-asks">
+          {#each approvals as c (c.nonce)}
+            <li class="ask" data-testid="control-needs-you-approval">
+              Control asks to run <span class="tool">{c.tool}</span> · answer on its card in the chat
+            </li>
+          {/each}
+          {#each waitingMissions as m (m.id)}
+            <li>
+              <button type="button" class="ask link-row" data-testid="control-needs-you-mission" onclick={() => openMission(m.id)}
+                >{m.name} · {WAIT_WORDS[m.waiting_on?.reason ?? ''] ?? 'Waits on you'} ›</button
+              >
+            </li>
+          {/each}
+        </ul>
+      {/if}
       {#if folds.needs.length === 0}
-        <p class="empty">{query.trim() ? 'Nothing that needs you matches.' : 'Nothing needs you.'}</p>
+        {#if query.trim() || (approvals.length === 0 && waitingMissions.length === 0)}
+          <p class="empty">{query.trim() ? 'Nothing that needs you matches.' : 'Nothing needs you.'}</p>
+        {/if}
       {:else}
         <ul class="rows">
           {#each folds.needs as s (s.id)}
@@ -332,7 +385,7 @@
           {#snippet back()}
             {#if fromDef}
               <button type="button" class="icon back" data-testid="control-session-back" title="Back to {fromDef.label} (Esc)" onclick={goBack}
-                >‹ {fromDef.label}{#if from === 'needs-you' && $needsYouList.length > 0}{' '}<span class="count">{$needsYouList.length}</span>{/if}</button
+                >‹ {fromDef.label}{#if from === 'needs-you' && needsCount > 0}{' '}<span class="count">{needsCount}</span>{/if}</button
               >
             {/if}
           {/snippet}
@@ -487,6 +540,28 @@
     margin: 0;
     padding: 0;
   }
+  .asks {
+    margin-bottom: var(--space-2);
+  }
+  .ask {
+    display: block;
+    width: 100%;
+    padding: var(--space-1) var(--space-2);
+    color: var(--status-waiting);
+    font-size: var(--text-xs);
+    text-align: left;
+  }
+  .link-row {
+    background: none;
+    border: 0;
+    cursor: pointer;
+  }
+  .link-row:hover {
+    background: var(--bg-hover);
+  }
+  .tool {
+    font-family: var(--font-mono);
+  }
   .menu li {
     display: flex;
     align-items: center;
@@ -556,6 +631,10 @@
     font-size: var(--text-xs);
     font-weight: 600;
     color: var(--fg-2);
+  }
+  .check-now {
+    margin-left: var(--space-2);
+    font-weight: 400;
   }
   .fixed {
     margin: var(--space-1) 0 0;

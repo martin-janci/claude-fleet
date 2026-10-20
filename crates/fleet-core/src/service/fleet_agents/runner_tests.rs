@@ -1356,7 +1356,8 @@ fn proposing() -> Loaded {
               "steps": "{{item.steps}}" },
             { "id": "tune", "do": "setting", "each": "findings",
               "when": { "field": "kind", "eq": "setting" },
-              "key": "{{item.key}}", "value": "{{item.value}}", "body": "{{item.title}}" },
+              "key": "{{item.key}}", "value": "{{item.value}}", "body": "{{item.title}}",
+              "fingerprint": "tune:{{item.key}}" },
             { "id": "recover", "do": "session_recover", "each": "findings",
               "when": { "field": "kind", "eq": "recover" },
               "target": "{{item.session}}", "body": "{{item.title}}" },
@@ -1397,7 +1398,12 @@ async fn each_finding_becomes_its_own_fleet_proposal() {
         .unwrap();
     let key = crate::service::settings::SPECS
         .iter()
-        .find(|sp| sp.ai != crate::service::settings::AiPolicy::Never && sp.owned_by.is_none())
+        .find(|sp| {
+            sp.ai != crate::service::settings::AiPolicy::Never
+                && sp.owned_by.is_none()
+                && sp.default != "1"
+                && crate::service::settings::validate(sp.key, "1").is_ok()
+        })
         .unwrap()
         .key;
     let answer = json!({ "summary": "two problems", "findings": [
@@ -1430,15 +1436,33 @@ async fn each_finding_becomes_its_own_fleet_proposal() {
         .map(|(a, b)| (a.to_string(), b.to_string())),
         "a work_task may run alone at act; the others wait; a key no agent may set is skipped"
     );
+    // The setting carries its finding's fingerprint (w08-6).
+    let tune_row = f
+        .actions()
+        .into_iter()
+        .find(|a| a.kind == "setting")
+        .unwrap();
+    let payload: Value = serde_json::from_str(&tune_row.payload).unwrap();
+    assert_eq!(payload["fingerprint"], format!("tune:{key}"));
+    // The setting says what it changes from (w08-5).
+    let was = crate::service::settings::effective_value(&f.store.lock().unwrap(), key).unwrap();
+    let tune = r["actions"][2]["body"].as_str().unwrap();
+    assert!(tune.contains(&format!("({key}): {was} → 1")), "{tune}");
     let first = r["actions"][0]["body"].as_str().unwrap();
     assert!(
         first.starts_with("Flaky reconnect") && first.contains("- Fix the backoff"),
         "{first}"
     );
-    // Approved: the executor hands each to fleet.
+    // Approved: the executor hands each to fleet, which answers with what
+    // it made (w08-3).
     let ex = f.executor();
     for a in f.actions() {
-        assert_eq!(ex.execute(&a).await, ActionResult::Executed, "{}", a.kind);
+        assert_eq!(
+            ex.execute(&a).await,
+            ActionResult::Done("done".into()),
+            "{}",
+            a.kind
+        );
     }
     let ops = f.world.fleet_ops.lock().unwrap().clone();
     assert_eq!(ops.len(), 4);
@@ -1662,4 +1686,43 @@ async fn another_trackers_burst_is_paged_and_a_late_synced_comment_still_counts(
         .unwrap();
     let keys: Vec<&str> = d.jobs.iter().map(|j| j.dedup_key.as_str()).collect();
     assert_eq!(keys, [format!("r{}:tracker:3:o/r#12#clate", f.rule.id)]);
+}
+
+#[test]
+fn a_setting_already_at_its_value_is_skipped_and_others_say_from_what() {
+    let store = Store::open_in_memory().unwrap();
+    let sp = crate::service::settings::SPECS
+        .iter()
+        .find(|sp| {
+            sp.ai != crate::service::settings::AiPolicy::Never
+                && sp.owned_by.is_none()
+                && !sp.default.is_empty()
+        })
+        .unwrap();
+    let planned = |value: &str| super::actions::Planned {
+        id: "tune".into(),
+        kind: "setting",
+        payload: serde_json::to_string(&super::actions::SettingPayload {
+            action: "tune".into(),
+            key: sp.key.into(),
+            value: value.into(),
+            was: String::new(),
+            why: "because".into(),
+            body: String::new(),
+        })
+        .unwrap(),
+        body: String::new(),
+        auto: false,
+    };
+    let mut same = planned(sp.default);
+    assert!(super::runner::with_current_setting(&store, &mut same).is_err());
+    let mut other = planned("zz-other");
+    super::runner::with_current_setting(&store, &mut other).unwrap();
+    let p: super::actions::SettingPayload = serde_json::from_str(&other.payload).unwrap();
+    assert_eq!(p.was, sp.default);
+    assert!(
+        other.body.contains(&format!("{} → zz-other", sp.default)),
+        "{}",
+        other.body
+    );
 }

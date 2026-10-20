@@ -6,9 +6,7 @@
 use super::*;
 use crate::ipc_error::lock;
 use crate::service::autofix::api;
-use crate::service::autofix::apply::{
-    apply_one, gather, live_agents, scan_enabled, sync_scan, Actor, Config, SshFixExec,
-};
+use crate::service::autofix::apply::{apply_one, live_agents, Actor, SshFixExec};
 use crate::store::now_unix;
 
 /// Only a person's trusted full device decides a fix. Control may list and
@@ -64,11 +62,9 @@ impl FleetTools {
         match p.action.as_str() {
             "list" | "scan" => {
                 if p.action == "scan" {
-                    let live = live_agents(&self.ssh);
-                    let s = lock(&self.store).map_err(to_mcp_err)?;
-                    let cx = gather(&s, &live, now).map_err(to_mcp_err)?;
-                    let found = scan_enabled(&cx, &Config::read(&s));
-                    sync_scan(&s, &cx, &found, now).map_err(to_mcp_err)?;
+                    crate::service::autofix::tick::scan_now(&self.store, &self.ssh, now)
+                        .await
+                        .map_err(to_mcp_err)?;
                 }
                 let s = lock(&self.store).map_err(to_mcp_err)?;
                 let can_apply = autofix_writer(&caller).is_ok();
@@ -78,7 +74,7 @@ impl FleetTools {
             "explain" => {
                 let id = need_id()?;
                 let s = lock(&self.store).map_err(to_mcp_err)?;
-                ok_json(&api::get(&s, id).map_err(to_mcp_err)?)
+                ok_json(&api::get(&s, id, now).map_err(to_mcp_err)?)
             }
             "apply" => {
                 autofix_writer(&caller)?;

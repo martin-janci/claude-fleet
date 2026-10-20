@@ -107,6 +107,15 @@ use serde_json::Value;
 ///   away, each vanished on a full refresh until a `session:updated` frame
 ///   carried the whole row back.
 ///
+/// * `pinned_at`, `last_viewed_at`, `agent`, `origin`, `origin_ref`,
+///   `lost_reason`, `form_draft`, `parent_session_id`, `worktree_id` — the
+///   phone's Pinned section and its Kill refusal, Done-unread, Control's
+///   threads, a Codex row's commands, "Lost · reason", the form-draft line
+///   and the subagent / worktree links. Projected away, each fell back on
+///   every reconnect, `lagged` frame and pull-to-refresh until a
+///   `session:updated` frame carried the whole row back (review wave 24,
+///   w24-1).
+///
 /// Added 2026-09-23 when fleet-mobile's pager (its PR #19) began reading
 /// them: the first cut of this view was taken against the list screen alone.
 ///
@@ -116,12 +125,14 @@ use serde_json::Value;
 /// a phone that then draws a blank column.
 pub(super) const PHONE_SESSION_FIELDS: &[&str] = &[
     "account_uuid",
+    "agent",
     "ci_status",
     "claude_profile",
     "claude_status",
     "context_pct",
     "created_at",
     "current_activity",
+    "form_draft",
     "friendly_name",
     "host_alias",
     "id",
@@ -131,12 +142,18 @@ pub(super) const PHONE_SESSION_FIELDS: &[&str] = &[
     "last_prompt",
     "last_stop_at",
     "last_turn_at",
+    "last_viewed_at",
     "lost_at",
+    "lost_reason",
     "needs_attention",
     "org_id",
+    "origin",
+    "origin_ref",
     "owner_person_id",
+    "parent_session_id",
     "pending_form",
     "pending_input",
+    "pinned_at",
     "pr_evidence",
     "pr_url",
     "project_id",
@@ -152,6 +169,7 @@ pub(super) const PHONE_SESSION_FIELDS: &[&str] = &[
     "work",
     "work_rev",
     "work_suggested",
+    "worktree_id",
 ];
 
 /// A named projection a caller may ask `list_sessions` for.

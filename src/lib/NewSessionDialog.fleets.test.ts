@@ -129,3 +129,47 @@ describe('New session names its profile', () => {
     expect(inv.mock.calls.filter(([cmd]) => cmd === 'my_profile').map(([, a]) => a)).toEqual([{ fleet: 'papayapos' }, {}]);
   });
 });
+
+describe('New session on an extra fleet: launch choices (review w01-2)', () => {
+  const started = { id: 7, tmux_name: 'pos-1', host_alias: 'mac', status: 'running', last_activity_at: 1 };
+
+  it("sends the model and effort to that hub, and offers no login of this window's", async () => {
+    seedCompany();
+    inv.mockImplementation(async (cmd: string) => (cmd === 'new_session' ? started : null));
+    const onCancel = vi.fn();
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel } });
+    await tick();
+    expect(screen.queryByTestId('launch-account')).toBeNull();
+    expect(screen.queryByTestId('launch-profile')).toBeNull();
+    expect(screen.getByTestId('fleet-login-note').textContent).toContain('papayapos');
+    await fireEvent.change(screen.getByTestId('launch-model'), { target: { value: 'opus' } });
+    await fireEvent.change(screen.getByTestId('launch-effort'), { target: { value: 'high' } });
+    await fireEvent.click(screen.getByTestId('create-btn'));
+    await vi.waitFor(() => expect(onCancel).toHaveBeenCalled());
+    const call = inv.mock.calls.find(([cmd]) => cmd === 'new_session')!;
+    expect(call[1]).toMatchObject({ fleet: 'papayapos', args: { model: 'opus', effort: 'high', agent: null } });
+  });
+
+  it("offers the agents the fleet's host has, and starts that agent there", async () => {
+    seedCompany();
+    _setFleetRowsForTest('papayapos', {
+      ...emptyRows(),
+      hosts: new Map([
+        ['mac', { alias: 'mac', ssh_alias: 'mac', reachable: true, claude_version: null, tmux_version: null, hidden: false, last_pinged_at: 1, account_uuid: null, provisioned: false, transport: 'ssh', agents_on_path: ['codex'] }],
+      ]),
+      projects: [{ project: { id: 42, owner: 'papayapos', repo: 'pos', base_path: '', last_session_at: null, adopted: false, system: false }, worktrees: [] }],
+    });
+    inv.mockImplementation(async (cmd: string) => (cmd === 'new_session' ? started : null));
+    const onCancel = vi.fn();
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel } });
+    await tick();
+    const codex = screen.getByTestId('agent-codex') as HTMLButtonElement;
+    expect(codex.disabled).toBe(false);
+    await fireEvent.click(codex);
+    await tick();
+    await fireEvent.click(screen.getByTestId('create-btn'));
+    await vi.waitFor(() => expect(onCancel).toHaveBeenCalled());
+    const call = inv.mock.calls.find(([cmd]) => cmd === 'new_session')!;
+    expect(call[1]).toMatchObject({ fleet: 'papayapos', args: { agent: 'codex' } });
+  });
+});

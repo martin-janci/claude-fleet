@@ -609,7 +609,9 @@ fn eligible(row: &SessionRow, controller: Option<&(String, String)>) -> bool {
         && !crate::store::has_no_pane(&row.kind)
         && row.kind != "shell"
         && row.agent != crate::store::AGENT_SHELL
-        && row.safe_kill_state.is_none()
+        // A safe remove still waiting for its marker means the person is
+        // ending it; a `failed` one is no reason to leave it lost (w27-5).
+        && row.safe_kill_state.as_deref() != Some("requested")
         && !controller.is_some_and(|(h, n)| *h == row.host_alias && *n == row.tmux_name)
 }
 
@@ -1155,6 +1157,25 @@ mod tests {
             host_alias: format!("h{id}"),
             ..cand(id, reason, lost_at)
         }
+    }
+
+    /// Review w27-5: only a safe remove still waiting keeps a lost row out
+    /// of auto-restore; one that failed earlier does not leave it lost.
+    #[test]
+    fn a_failed_safe_remove_does_not_keep_a_lost_row_from_auto_restore() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("h").unwrap();
+        let id = s
+            .upsert_session("a", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+        s.set_claude_session_id(id, "c-a").unwrap();
+        s.mark_host_sessions_lost("h", "host_reboot", &[], 100, 0)
+            .unwrap();
+        s.set_safe_kill_requested(id, "n", 50).unwrap();
+        assert!(!eligible(&s.get_session_by_id(id).unwrap().unwrap(), None));
+        s.set_safe_kill_outcome(id, "failed", Some("push rejected"))
+            .unwrap();
+        assert!(eligible(&s.get_session_by_id(id).unwrap().unwrap(), None));
     }
 
     #[test]

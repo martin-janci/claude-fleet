@@ -76,13 +76,14 @@ impl FleetTools {
                     .version
                     .as_deref()
                     .ok_or_else(|| mcp_err(codes::E_INVALID, "pin needs a version", None))?;
-                let row = update::pin(
+                let row = update::pin_checked(
                     &self.store,
                     component()?,
                     target,
                     version,
                     p.mandatory.unwrap_or(false),
                     p.reason.clone(),
+                    &update::trusted_keys(),
                     now,
                 )
                 .map_err(to_mcp_err)?;
@@ -140,6 +141,7 @@ impl FleetTools {
                     "pin": r.pin,
                     "hub_woken": r.hub_woken,
                     "agents": agents,
+                    "note": r.note,
                 }))
             }
             "set_policy" | "clear_policy" => {

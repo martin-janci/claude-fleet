@@ -1506,10 +1506,22 @@ impl FleetRunner {
         answer: &Value,
         now: i64,
     ) -> Value {
-        let (planned, unplanned) =
+        let (mut planned, mut unplanned) =
             super::actions::plan(inst, rule.id, &rule.scope, subject, answer, now);
         let s = lock(&self.store).ok();
         let mut out: Vec<Value> = Vec::new();
+        if let Some(s) = &s {
+            planned.retain_mut(|p| match with_current_setting(s, p) {
+                Ok(()) => true,
+                Err(why) => {
+                    unplanned.push(super::actions::Unplanned {
+                        id: p.id.clone(),
+                        why,
+                    });
+                    false
+                }
+            });
+        }
         for p in &planned {
             let state = match (rule.level.as_str(), &s) {
                 ("watch", _) => "kept".to_string(),
@@ -1612,4 +1624,38 @@ impl AgentRunner for FleetRunner {
             },
         }
     }
+}
+
+/// A `setting` action as a person reads it: `was` filled with the key's
+/// current value and the body saying "from → to", so the Inbox shows
+/// whether it goes up or down (review w08-5). `Err` (the action is
+/// skipped) when the setting already has that value. Any other action is
+/// left as it is.
+pub(super) fn with_current_setting(
+    s: &Store,
+    p: &mut super::actions::Planned,
+) -> Result<(), String> {
+    if p.kind != "setting" {
+        return Ok(());
+    }
+    // Edited as JSON so keys the struct does not name (`fingerprint`) stay.
+    let Ok(mut payload) = serde_json::from_str::<Value>(&p.payload) else {
+        return Ok(());
+    };
+    let key = payload["key"].as_str().unwrap_or_default().to_string();
+    let value = payload["value"].as_str().unwrap_or_default().to_string();
+    let Some(was) = crate::service::settings::effective_value(s, &key) else {
+        return Ok(());
+    };
+    if was.trim() == value.trim() {
+        return Err(format!("{key} is already {value}"));
+    }
+    let label = crate::service::settings::spec(&key).map_or("", |sp| sp.label);
+    let why = payload["why"].as_str().unwrap_or_default();
+    let body = format!("{label} ({key}): {was} → {value}\n\n{why}");
+    payload["body"] = Value::String(body.clone());
+    payload["was"] = Value::String(was);
+    p.body = body;
+    p.payload = payload.to_string();
+    Ok(())
 }

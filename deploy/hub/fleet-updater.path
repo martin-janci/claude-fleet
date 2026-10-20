@@ -1,0 +1,22 @@
+# Starts one `fleet-updater once` pass at once when the hub's
+# `update_admin update_now` writes update-now into its data volume, so the
+# timer layout installs now instead of at its next 6-hourly pass. Install
+# beside fleet-updater.service / fleet-updater.timer:
+#
+#   sudo cp fleet-updater.path /etc/systemd/system/
+#   # PathExists is the hub-data volume's directory on the host:
+#   #   docker volume inspect -f '{{.Mountpoint}}' <project>_hub-data
+#   # (<project> is this compose directory's name), or the bind-mounted
+#   # directory if you mount one instead; then:
+#   sudo systemctl daemon-reload && sudo systemctl enable --now fleet-updater.path
+#
+# The pass removes update-now as it starts.
+[Unit]
+Description=claude-fleet hub: run an update pass now, when the operator says so
+
+[Path]
+PathExists=/var/lib/docker/volumes/fleet-hub_hub-data/_data/update-now
+Unit=fleet-updater.service
+
+[Install]
+WantedBy=paths.target

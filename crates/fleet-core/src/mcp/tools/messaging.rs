@@ -8,7 +8,7 @@ impl FleetTools {
     #[tool(description = "Send and SUBMIT a prompt to a Claude \
         session's REPL (pasted, then one Enter); the first prompt to an \
         unnamed session also names it. Marked untrusted unless raw=true \
-        (master only) or a trusted client. Returns { delivered, session_id, turn_seq_before, queued, acked }: \
+        (master) or the caller is a trusted client. Returns { delivered, session_id, turn_seq_before, queued, acked }: \
         pass turn_seq_before to wait_for_session { until: \"turn_gt\" } or \
         session_transcript { since_turn } for the reply (run_prompt does all \
         three). Refuses a blocked or stuck session (E_INVALID_STATE) unless \
@@ -182,7 +182,8 @@ impl FleetTools {
         (never into a dialog). Send later: not_before (unix secs) holds it \
         until then, until_limit_reset while the account is at its limit, \
         skip_if_archived drops it if the session is archived first. Marked \
-        untrusted unless raw=true (master only). Returns { session_id, \
+        untrusted unless raw=true (master) or the caller is a trusted \
+        client. Returns { session_id, \
         delivered, queued_id }.")]
     pub(super) async fn queue_prompt(
         &self,
@@ -270,9 +271,9 @@ impl FleetTools {
         (not the controller), skipping blocked or stuck ones unless \
         status=\"blocked\". Returns per-session results. Rate-limited per \
         caller (default one call per 30 s; E_RATE_LIMITED with \
-        retry_after_secs). Marked untrusted unless raw=true (master token \
-        only). May return E_CONFIRM_REQUIRED when desktop confirmation is \
-        on.")]
+        retry_after_secs). Marked untrusted unless raw=true (master) or \
+        the caller is a trusted client. May return E_CONFIRM_REQUIRED when confirmation is on \
+        (mcp.confirm_destructive).")]
     pub(super) async fn broadcast_prompt(
         &self,
         Extension(caller): Extension<Caller>,
@@ -286,6 +287,9 @@ impl FleetTools {
                 p.host, p.project_id, p.status
             ),
         );
+        // An unknown status matched nothing and answered `{sent: 0}`
+        // (review w25-4); refuse it before the confirm gate asks a person.
+        super::session_ops::check_claude_status_filter(p.status.as_deref())?;
         let filter_summary = broadcast_summary(
             p.host.as_deref(),
             p.project_id,
@@ -496,7 +500,8 @@ impl FleetTools {
         to_addr) to the recipient's inbox; deliver also pastes it into the \
         pane, wake nudges an idle one. reply_to threads an answer. A \
         per-host token needs its own host (E_FORBIDDEN); the body is marked \
-        untrusted unless raw=true (master only).")]
+        untrusted unless raw=true (master) or the caller is a trusted \
+        client.")]
     pub(super) async fn send_message(
         &self,
         Extension(caller): Extension<Caller>,

@@ -458,41 +458,54 @@ impl SelfUpdate {
         app.restart();
     }
 
-    /// A launch after an install: report how it ended. Once per launch.
+    /// A launch after an install: report how it ended. The record of the
+    /// attempt is kept until the hub has the final report (review w26-11): a
+    /// hub that is briefly unreachable right after the restart would
+    /// otherwise leave this desktop "Installing" on it until the next update.
+    /// Replays are harmless; the hub records each `(attempt, phase)` once.
     async fn finish_pending(&self, backend: &Arc<FleetBackend>, data_dir: &Path) {
         let path = data_dir.join(PENDING_FILE);
         let Some(p) = std::fs::read(&path)
             .ok()
             .and_then(|b| serde_json::from_slice::<Pending>(&b).ok())
         else {
+            let _ = std::fs::remove_file(&path);
             return;
         };
-        let _ = std::fs::remove_file(&path);
-        let Some(ch) = hub_channel(backend, data_dir) else {
-            return;
+        let told = match hub_channel(backend, data_dir) {
+            Some(ch) => report_pending(&ch, &p, &installed_version()).await,
+            // Standalone: there is no one to tell.
+            None => true,
         };
-        let now = installed_version();
-        let _ = ch
-            .report(&report(
-                UpdatePhase::Validating,
-                &p.attempt,
-                &p.from,
-                &p.to,
-                None,
-            ))
-            .await;
-        let (phase, error) = if now == p.to {
-            (UpdatePhase::Success, None)
-        } else {
-            (
-                UpdatePhase::Failed,
-                Some(format!("installed {}, but {now} started", p.to)),
-            )
-        };
-        let _ = ch
-            .report(&report(phase, &p.attempt, &p.from, &p.to, error))
-            .await;
+        if told {
+            let _ = std::fs::remove_file(&path);
+        }
     }
+}
+
+/// Tell the hub how the install `p` ended, now that `now` runs. `true` once
+/// it took the final report.
+async fn report_pending<C: UpdateChannel + ?Sized>(ch: &C, p: &Pending, now: &Version) -> bool {
+    let _ = ch
+        .report(&report(
+            UpdatePhase::Validating,
+            &p.attempt,
+            &p.from,
+            &p.to,
+            None,
+        ))
+        .await;
+    let (phase, error) = if now == &p.to {
+        (UpdatePhase::Success, None)
+    } else {
+        (
+            UpdatePhase::Failed,
+            Some(format!("installed {}, but {now} started", p.to)),
+        )
+    };
+    ch.report(&report(phase, &p.attempt, &p.from, &p.to, error))
+        .await
+        .is_ok()
 }
 
 fn update_error(e: UpdateError) -> IpcError {
@@ -610,6 +623,50 @@ async fn serve_loopback_once(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A hub that takes reports, or (while `down`) refuses them.
+    struct FakeHub {
+        down: Mutex<bool>,
+        got: Mutex<Vec<UpdatePhase>>,
+    }
+
+    #[async_trait]
+    impl UpdateChannel for FakeHub {
+        fn source(&self) -> fleet_update::Source {
+            fleet_update::Source::Hub
+        }
+        async fn check(&self, _: &CheckRequest) -> Result<CheckOutcome, UpdateError> {
+            unreachable!()
+        }
+        async fn report(&self, r: &Report) -> Result<(), UpdateError> {
+            if *self.down.lock().unwrap() {
+                return Err(UpdateError::Transport("hub restarting".into()));
+            }
+            self.got.lock().unwrap().push(r.phase);
+            Ok(())
+        }
+    }
+
+    /// w26-11: the install's record survives a hub that missed the report.
+    #[tokio::test]
+    async fn a_missed_final_report_is_sent_again() {
+        let hub = FakeHub {
+            down: Mutex::new(true),
+            got: Mutex::new(Vec::new()),
+        };
+        let p = Pending {
+            attempt: "a1".into(),
+            from: Version::new(0, 5, 4),
+            to: Version::new(0, 5, 5),
+        };
+        assert!(!report_pending(&hub, &p, &Version::new(0, 5, 5)).await);
+        *hub.down.lock().unwrap() = false;
+        assert!(report_pending(&hub, &p, &Version::new(0, 5, 5)).await);
+        assert_eq!(
+            *hub.got.lock().unwrap(),
+            [UpdatePhase::Validating, UpdatePhase::Success]
+        );
+    }
 
     #[test]
     fn the_header_names_this_build_and_its_contract_window() {

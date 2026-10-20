@@ -653,6 +653,9 @@ pub fn plan(
                     {
                         return Err(skip("the setting is not one an agent may propose"));
                     }
+                    if let Err(e) = crate::service::settings::validate(&key, &value) {
+                        return Err(skip(&e.message));
+                    }
                     let body = format!("{} ({key}) → {value}\n\n{why}", spec.label);
                     let p = SettingPayload {
                         action: a.id.clone(),
@@ -689,6 +692,7 @@ pub fn plan(
             })();
             match made {
                 Ok((payload, body)) => {
+                    let payload = with_fingerprint(payload, a.fingerprint.as_deref(), &ctx);
                     let auto = a.auto
                         && match a.kind {
                             ActionKind::McpCall => d
@@ -719,6 +723,23 @@ pub fn plan(
         }
     }
     (planned, skipped)
+}
+
+/// PURE: the payload with the action's rendered `fingerprint` added, so a
+/// later run's `proposals` can tell this finding was proposed before (the
+/// executors read only their own keys). Unchanged when there is none.
+fn with_fingerprint(payload: String, fingerprint: Option<&str>, ctx: &Value) -> String {
+    let Some(t) = fingerprint else {
+        return payload;
+    };
+    let fp = fit(template::render(t, ctx).trim(), 120);
+    match serde_json::from_str::<Value>(&payload) {
+        Ok(Value::Object(mut m)) if !fp.is_empty() => {
+            m.insert("fingerprint".into(), Value::String(fp));
+            Value::Object(m).to_string()
+        }
+        _ => payload,
+    }
 }
 
 /// PURE: `steps` rendered: a template that is one array path gives its
@@ -1193,7 +1214,7 @@ impl FleetExecutor {
 
     async fn fleet(&self, op: FleetOp) -> ActionResult {
         match self.host.fleet_op(op).await {
-            Ok(_) => ActionResult::Executed,
+            Ok(line) => ActionResult::Done(line),
             Err(e) => ActionResult::Failed(e),
         }
     }

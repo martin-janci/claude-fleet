@@ -18,6 +18,9 @@ export interface TuneAnswer {
   notes: string;
   /** The rewrite is the draft as it was. */
   unchanged: boolean;
+  /** The model ran past the limit and the rewrite was cut there (ends in
+   *  `…`). Absent from a hub older than review w07. */
+  cut?: boolean;
   /** Who rewrote it (`haiku`). */
   model: string;
   host_alias: string;
@@ -44,10 +47,21 @@ export function tuneComposerPrompt(
   });
 }
 
+/** What a routine Tune says when the hub predates `tune_prompt`. */
+export const TUNE_NEEDS_NEWER_HUB = 'The prompt tuner needs the hub updated first';
+
 /** Tune a routine's prompt while it is being written: on its host and
- *  profile, saved or not. */
-export function tuneRoutinePrompt(routine: RoutineInput, ask: string): Promise<Result<TuneAnswer>> {
-  return invokeCmd<TuneAnswer>('routines', { args: { action: 'tune_prompt', routine, ask: ask.trim() } });
+ *  profile, saved or not. `from` tunes that text in place of the routine's
+ *  prompt (the rewrite on screen, for Tune again). A hub from before the
+ *  tuner refuses the action as unknown; that reads as needing an update. */
+export async function tuneRoutinePrompt(routine: RoutineInput, ask: string, from?: string): Promise<Result<TuneAnswer>> {
+  const r = await invokeCmd<TuneAnswer>('routines', {
+    args: { action: 'tune_prompt', routine: from === undefined ? routine : { ...routine, prompt: from }, ask: ask.trim() },
+  });
+  if (!r.ok && r.error.message.includes('got "tune_prompt"')) {
+    return { ok: false, error: { ...r.error, code: 'E_HUB_PROTOCOL', message: TUNE_NEEDS_NEWER_HUB } };
+  }
+  return r;
 }
 
 /** The longest draft the tuner reads whole; mirrors

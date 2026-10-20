@@ -662,3 +662,19 @@ bullet for the area you are about to change.
   fleet's option selects read that hub's lists (`resources.ts::loadSourceRows`),
   never the primary's stores. `tests_fleets::every_company_resource_command_is_fleet_scoped`
   fails a new Company action that is not fleet-scoped.
+- **Theme engine** (`src/lib/palette.ts`, `src/lib/theme.ts`; fleet-mobile's
+  `OrbitPalette.kt` is its port): the colours the app shows are solved at run
+  time from the sun's height, a Contrast level and an Accent hue, and
+  `theme.ts::paint` writes them onto `<html>` as the same custom properties
+  `app.css` declares. Sun (the default) follows the sun in the device's time
+  zone (`defaultPlace`: the zone's meridian at a fixed 48° N, not a
+  location); System, Light and Dark are fixed sun heights. `app.css`'s four
+  theme blocks are only the first paint and the fallback, and
+  `public/theme-boot.js` replays the last painted palette (`BOOT_KEY`) in
+  `<head>` so a launch does not flash them. Brand, terminal, loader and
+  destructive-fill colours are not the engine's. `palette.test.ts` holds
+  every `CONTRAST_PAIRS` floor at every sun height, level and accent, and the
+  golden vectors in `docs/design/palette-golden.json`, which fleet-mobile
+  copies unchanged for `OrbitPaletteTest`; after a deliberate engine change
+  run `REGEN_PALETTE_GOLDEN=1 pnpm exec vitest run src/lib/palette.test.ts`
+  and copy the file to fleet-mobile.

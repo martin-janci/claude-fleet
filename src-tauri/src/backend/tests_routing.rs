@@ -3617,6 +3617,17 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
             }),
         ),
         (
+            "autofix_scan",
+            "autofix",
+            json!({ "action": "scan" }),
+            r#"{"findings":[],"fixed":[],"can_apply":true}"#,
+            Box::new(|b, s, h| {
+                let f = block_on(commands::autofix::routed::autofix_scan(b, s, h))?;
+                assert!(f.can_apply && f.findings.is_empty());
+                Ok(())
+            }),
+        ),
+        (
             "autofix_dismiss",
             "autofix",
             json!({ "action": "dismiss", "id": 3, "until": null }),

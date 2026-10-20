@@ -37,6 +37,11 @@ impl FleetTools {
         // caller a refusal, not a reconcile pass whose result it then
         // cannot have.
         let view = p.view.as_deref().map(SessionView::parse).transpose()?;
+        // Same rule for the two status filters (review w25-4): a typo
+        // (`waiting`, `Idle`) used to answer `[]`, read as "nothing needs
+        // attention".
+        check_session_status_filter(p.status.as_deref())?;
+        check_claude_status_filter(p.claude_status.as_deref())?;
         // A forced pass reads its rows back through the writer that wrote
         // them; a listing served from the store reads through the pool.
         let rows = if p.force {
@@ -263,7 +268,8 @@ impl FleetTools {
     }
 
     #[tool(description = "Mark the calling session as the fleet controller; \
-        kill/recreate/restart refuse to target it without force. A per-host \
+        kill/recreate/restart refuse to target it without force, and \
+        safe_kill_session refuses it outright. A per-host \
         token may only register a session on its own host (E_FORBIDDEN).")]
     pub(super) async fn register_self(
         &self,
@@ -1262,6 +1268,46 @@ impl FleetTools {
     }
 }
 
+/// The store-level `status` values a session row carries.
+const SESSION_STATUSES: [&str; 2] = ["running", "ghost"];
+
+/// `list_sessions`' `status` filter: `running` or `ghost`, else E_INVALID
+/// (review w25-4).
+pub(super) fn check_session_status_filter(status: Option<&str>) -> Result<(), McpError> {
+    match status {
+        Some(st) if !SESSION_STATUSES.contains(&st) => Err(mcp_err(
+            codes::E_INVALID,
+            format!(
+                "unknown status {st:?}; one of {} (claude_status is the agent's state)",
+                SESSION_STATUSES.join(" | ")
+            ),
+            None,
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// A `claude_status` filter (`list_sessions.claude_status`,
+/// `broadcast_prompt.status`): one of [`ClaudeStatus::ALL`], else E_INVALID
+/// quoting the vocabulary (review w25-4), as `list_tasks` refuses an unknown
+/// state.
+///
+/// [`ClaudeStatus::ALL`]: crate::service::pane_intel::ClaudeStatus::ALL
+pub(super) fn check_claude_status_filter(status: Option<&str>) -> Result<(), McpError> {
+    use crate::service::pane_intel::ClaudeStatus;
+    match status {
+        Some(st) if st.parse::<ClaudeStatus>().is_err() => Err(mcp_err(
+            codes::E_INVALID,
+            format!(
+                "unknown claude_status {st:?}; one of {}",
+                ClaudeStatus::vocabulary_doc()
+            ),
+            None,
+        )),
+        _ => Ok(()),
+    }
+}
+
 /// What [`FleetTools::gate_restore_plan`] decided.
 enum GatedRestore {
     /// Run this request, then append these refusals to the report's plan.
@@ -1312,4 +1358,62 @@ fn list_sessions_resource_key(p: &ListSessionsParams) -> String {
     };
     let json = serde_json::to_string(&fp).expect("fixed-shape fingerprint always serializes");
     fresh::snapshot_hash(&json)
+}
+
+#[cfg(test)]
+mod status_filter_tests {
+    use super::*;
+
+    fn invalid(r: Result<CallToolResult, McpError>) -> String {
+        let e = r.expect_err("an unknown status is refused");
+        assert!(e.message.starts_with("E_INVALID"), "{}", e.message);
+        e.message.to_string()
+    }
+
+    /// Review w25-4: a status typo is refused with the vocabulary, not
+    /// answered `[]` / `{sent: 0}`.
+    #[tokio::test]
+    async fn an_unknown_status_filter_is_refused_not_matched_against_nothing() {
+        let t = super::super::tests::test_tools(Store::open_in_memory().unwrap());
+        let list =
+            |v: serde_json::Value| -> ListSessionsParams { serde_json::from_value(v).unwrap() };
+        let msg = invalid(
+            t.list_sessions(
+                Extension(Caller::master()),
+                Parameters(list(serde_json::json!({"claude_status": "waiting"}))),
+            )
+            .await,
+        );
+        assert!(msg.contains("working | blocked"), "{msg}");
+        invalid(
+            t.list_sessions(
+                Extension(Caller::master()),
+                Parameters(list(serde_json::json!({"status": "idle"}))),
+            )
+            .await,
+        );
+        let b: BroadcastPromptParams =
+            serde_json::from_value(serde_json::json!({"status": "busy", "prompt": "go"})).unwrap();
+        invalid(
+            t.broadcast_prompt(Extension(Caller::master()), Parameters(b))
+                .await,
+        );
+
+        // The real values pass the check.
+        for st in [
+            "working",
+            "blocked",
+            "completed",
+            "failed",
+            "stopped",
+            "idle",
+        ] {
+            assert!(check_claude_status_filter(Some(st)).is_ok(), "{st}");
+        }
+        for st in ["running", "ghost"] {
+            assert!(check_session_status_filter(Some(st)).is_ok(), "{st}");
+        }
+        assert!(check_claude_status_filter(None).is_ok());
+        assert!(check_session_status_filter(None).is_ok());
+    }
 }

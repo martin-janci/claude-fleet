@@ -64,12 +64,16 @@ describe('palette commands', () => {
     expect(flip?.label).toBe('Show the conversation');
   });
 
-  it('the theme command names the theme it switches to, in the sidebar toggle order', async () => {
-    applyTheme('auto');
-    const label = () => paletteCommands({ selected: null, sessionView: 'conversation' }).find((c) => c.id === 'app.theme')?.label;
-    expect(label()).toBe('Theme: light');
-    await runCommand('app.theme', { selected: null, sessionView: 'conversation' });
-    expect(label()).toBe('Theme: dark');
+  it('offers one row per other theme, by the names Settings uses (review w20-11)', async () => {
+    applyTheme('sun');
+    const rows = () => paletteCommands({ selected: null, sessionView: 'conversation' }).filter((c) => c.id.startsWith('app.theme.'));
+    expect(rows().map((c) => c.label)).toEqual(['Theme: System', 'Theme: Light', 'Theme: Dark']);
+    expect(rows()[0].description).toBe('Now Sun');
+    // "dark" from Sun is one run, not three.
+    const dark = rows().find((c) => c.synonyms.includes('night'))!;
+    await runCommand(dark.id, { selected: null, sessionView: 'conversation' });
+    expect(get(theme)).toBe('dark');
+    expect(rows().map((c) => c.label)).toEqual(['Theme: Sun', 'Theme: System', 'Theme: Light']);
     applyTheme('auto');
   });
 
@@ -89,15 +93,14 @@ describe('palette commands in the New layout', () => {
     applyTheme('auto');
   });
 
-  it('New layout: the theme command names the theme it switches to, and switches it', async () => {
+  it('New layout: a theme row names its theme and switches to it', async () => {
     applyTheme('auto');
     const ctx = { selected: null, sessionView: 'conversation' as const };
-    const label = () => paletteCommands(ctx).find((c) => c.id === 'app.theme')?.label;
-    expect(label()).toBe('Theme: light');
-    await runCommand('app.theme', ctx);
+    const ids = () => paletteCommands(ctx).filter((c) => c.id.startsWith('app.theme.')).map((c) => c.id);
+    expect(ids()).toEqual(['app.theme.sun', 'app.theme.light', 'app.theme.dark']);
+    await runCommand('app.theme.light', ctx);
     expect(get(theme)).toBe('light');
-    expect(label()).toBe('Theme: dark');
-    await runCommand('app.theme', ctx);
+    await runCommand('app.theme.dark', ctx);
     expect(get(theme)).toBe('dark');
   });
 });
