@@ -39,12 +39,7 @@ pub use crate::ipc_error::codes::{
 pub const NOT_LOADED: &str = "catalog not loaded; load it from the app's Assets \
     screen, or catalog_admin {action: load} (configure first)";
 
-pub fn now_secs() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
+pub use crate::store::now_unix as now_secs;
 
 /// The `registry` module and `HOME` are process-global, so tests that write
 /// either must serialise on this lock.

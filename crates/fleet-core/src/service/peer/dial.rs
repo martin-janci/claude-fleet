@@ -36,12 +36,7 @@ const POLL_FLOOR: Duration = Duration::from_millis(500);
 /// releasing this one. The next call waits out the backoff instead (G3).
 const EMPTY_POLL_FLOOR: Duration = Duration::from_secs(1);
 
-fn now_unix() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
+use crate::store::now_unix;
 
 #[derive(Debug)]
 pub enum CallError {

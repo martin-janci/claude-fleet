@@ -286,9 +286,7 @@ pub fn report(name: &str, outcome: impl Into<Outcome>, next_in: Option<Duration>
     registry().record(name, now_unix(), outcome.into(), next_in);
 }
 
-fn now_unix() -> i64 {
-    crate::store::now_unix()
-}
+use crate::store::now_unix;
 
 #[cfg(test)]
 mod tests {

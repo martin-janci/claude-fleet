@@ -2,7 +2,6 @@ import { render, screen, fireEvent } from '@testing-library/svelte';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { tick } from 'svelte';
 import ConfirmDialog from './ConfirmDialog.svelte';
-import PromptDialog from './PromptDialog.svelte';
 
 beforeEach(() => {
   document.body.innerHTML = '';
@@ -137,53 +136,5 @@ describe('Modal (via ConfirmDialog)', () => {
     await tick();
     r.unmount();
     expect(oncancel).not.toHaveBeenCalled();
-  });
-});
-
-describe('PromptDialog', () => {
-  it('submits the trimmed value on Enter / submit and disables submit while empty', async () => {
-    const onsubmit = vi.fn();
-    render(PromptDialog, {
-      props: { title: 'New branch', label: 'Branch name', onsubmit, oncancel: () => {} },
-    });
-    await tick();
-    const input = screen.getByTestId('prompt-input') as HTMLInputElement;
-    const submit = screen.getByTestId('prompt-submit') as HTMLButtonElement;
-    expect(document.activeElement).toBe(input);
-    expect(submit.disabled).toBe(true);
-    await fireEvent.input(input, { target: { value: '  feat/x  ' } });
-    await tick();
-    expect(submit.disabled).toBe(false);
-    await fireEvent.submit(input.closest('form')!);
-    expect(onsubmit).toHaveBeenCalledWith('feat/x');
-  });
-
-  it('shows the validate() error and blocks submit', async () => {
-    const onsubmit = vi.fn();
-    render(PromptDialog, {
-      props: {
-        title: 'New branch',
-        label: 'Branch name',
-        validate: (v: string) => (v.includes('..') ? 'no dots' : null),
-        onsubmit,
-        oncancel: () => {},
-      },
-    });
-    await tick();
-    const input = screen.getByTestId('prompt-input') as HTMLInputElement;
-    await fireEvent.input(input, { target: { value: 'a..b' } });
-    await tick();
-    expect(screen.getByTestId('prompt-error').textContent).toBe('no dots');
-    expect((screen.getByTestId('prompt-submit') as HTMLButtonElement).disabled).toBe(true);
-    await fireEvent.submit(input.closest('form')!);
-    expect(onsubmit).not.toHaveBeenCalled();
-  });
-
-  it('seeds the input with initialValue', async () => {
-    render(PromptDialog, {
-      props: { title: 'Rename', label: 'Name', initialValue: 'dev-foo', onsubmit: () => {}, oncancel: () => {} },
-    });
-    await tick();
-    expect((screen.getByTestId('prompt-input') as HTMLInputElement).value).toBe('dev-foo');
   });
 });

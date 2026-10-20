@@ -544,15 +544,6 @@ impl Store {
         )
     }
 
-    /// The roles mapped to a person directly (not through a group or a
-    /// composite), by (client, name).
-    pub fn person_roles(&self, person: i64) -> Result<Vec<RoleRow>, IpcError> {
-        self.roles_where(
-            "SELECT role_id FROM user_role_mappings WHERE person_id = ?1",
-            person,
-        )
-    }
-
     fn roles_where(&self, ids_sql: &str, id: i64) -> Result<Vec<RoleRow>, IpcError> {
         let sql = format!(
             "{ROLE_SELECT} WHERE r.id IN ({ids_sql}) \
