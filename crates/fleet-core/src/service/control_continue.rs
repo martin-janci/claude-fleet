@@ -140,6 +140,14 @@ fn closes(line: &str, marker: &str) -> bool {
 /// spec's own name, `fleet.ui`), or a ```` ```json ```` or untagged one whose
 /// object says `"spec": "fleet.ui/1"`, that passes the check.
 pub fn ui_blocks(text: &str) -> Vec<Value> {
+    blocks_in(text, true)
+}
+
+/// PURE: [`ui_blocks`], and with `untagged` false only the fences Control
+/// tags as a card (```` ```fleet-ui ````, its aliases, or ```` ```json ````):
+/// an untagged fence is how Control quotes pane output, logs or an issue
+/// verbatim, so a card inside one is drawn but never sent by itself.
+fn blocks_in(text: &str, untagged: bool) -> Vec<Value> {
     let lines: Vec<&str> = text.lines().collect();
     let mut out = Vec::new();
     let mut i = 0;
@@ -157,7 +165,8 @@ pub fn ui_blocks(text: &str) -> Vec<Value> {
             lang.as_str(),
             "fleet-ui" | "fleet.ui" | "fleet_ui" | "fleetui"
         );
-        let json_card = matches!(lang.as_str(), "json" | "jsonc" | "")
+        let json_card = (matches!(lang.as_str(), "json" | "jsonc")
+            || (untagged && lang.is_empty()))
             && raw.starts_with('{')
             && raw.contains(chat_blocks::UI_SPEC);
         if (tagged || json_card) && chat_blocks::check_text(raw).is_ok() {
@@ -174,9 +183,10 @@ pub fn ui_blocks(text: &str) -> Vec<Value> {
 
 /// PURE: the recommended option of the LAST `choices` card in `text`, or
 /// `None`, also when the option or the card's question or title names a
-/// risky step.
+/// risky step. A card in an untagged fence does not count: that is quoted
+/// text (a pane, a log, an issue body), not Control's own choice.
 pub fn recommended_pick(text: &str) -> Option<Pick> {
-    let last = ui_blocks(text)
+    let last = blocks_in(text, false)
         .into_iter()
         .rfind(|v| v.get("kind").and_then(Value::as_str) == Some("choices"))?;
     let s = |k: &str| last.get(k).and_then(Value::as_str).unwrap_or("");

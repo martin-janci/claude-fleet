@@ -10,7 +10,8 @@
   import PageView from './pages/PageView.svelte';
   import type { Descriptor, Page, PageAction, SourceSpec } from './pages/pages';
   import type { ResourceType } from './pages/resources';
-  import { extraFleets, fleets, PRIMARY } from './fleets';
+  import FleetPicker from './FleetPicker.svelte';
+  import { fleetPlace, fleets, PRIMARY } from './fleets';
   import { hubStatus } from './hub';
   import {
     NO_ACCESS,
@@ -59,13 +60,9 @@
   /** Bumped by Try again after an access read that did not get through. */
   let retry = $state(0);
 
-  // A duplicate is the other fleet twice over: its calls are refused.
-  const choices = $derived($fleets.filter((f) => !f.duplicate_of));
-  // A fleet removed while picked falls back to the primary.
-  const current = $derived(choices.find((f) => f.id === fleet) ?? null);
-  $effect(() => {
-    if (fleet !== PRIMARY && $fleets.length > 0 && !current) fleet = PRIMARY;
-  });
+  // Where the picked fleet is, and the name this device has there.
+  const place = $derived(fleetPlace(fleet, $fleets, $hubStatus));
+  const current = $derived(place.current);
   const own = $derived(fleet === PRIMARY && ownsFleet);
 
   $effect(() => {
@@ -89,10 +86,8 @@
     };
   });
 
-  const where = $derived(
-    fleet === PRIMARY ? ($hubStatus.url ?? 'the hub') : current ? `${current.label} (${current.url ?? 'its hub'})` : 'that hub',
-  );
-  const clientName = $derived(fleet === PRIMARY ? $hubStatus.client_name : (current?.client_name ?? null));
+  const where = $derived(place.where);
+  const clientName = $derived(place.clientName);
   const shownResources = $derived(
     resources.map((r) => (r.id === page.resource ? envResourceFor(r, access) : r)),
   );
@@ -136,16 +131,7 @@
 </script>
 
 <div class="env-settings" data-testid="env-settings">
-  {#if $extraFleets.length > 0}
-    <label class="fleet-pick">
-      <span>Fleet</span>
-      <select data-testid="env-fleet" value={fleet} onchange={(e) => (fleet = e.currentTarget.value)}>
-        {#each choices as f (f.id)}
-          <option value={f.id}>{f.primary ? `${f.label} (this window’s own)` : f.label}</option>
-        {/each}
-      </select>
-    </label>
-  {/if}
+  <FleetPicker bind:value={fleet} testid="env-fleet" />
 
   {#key `${fleet}:${accessLoaded}:${tick}`}
     <PageView
@@ -212,13 +198,6 @@
   }
   .retry {
     align-self: flex-start;
-  }
-  .fleet-pick {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    font-size: var(--text-2xs);
-    color: var(--fg-muted);
   }
   .git form {
     display: grid;

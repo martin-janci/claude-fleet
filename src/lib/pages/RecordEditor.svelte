@@ -21,6 +21,7 @@
   import type { TrackerRow } from '../trackers';
   import { evalCondition, type Section, type Tab } from './pages';
   import { hubStatus } from '../hub';
+  import { useResourceFleet } from './resource_fleet';
   import {
     ago,
     applies,
@@ -97,7 +98,8 @@
 
   /** What the record is, in a line over its title: "Organisation · owns
    *  the hub fleet.example · you are an admin" (M15 G7.14). */
-  const kicker = $derived(badgesOf(resource, record, hubHost($hubStatus.url)));
+  const resourceFleet = useResourceFleet();
+  const kicker = $derived(badgesOf(resource, record, hubHost(resourceFleet().hubUrl ?? $hubStatus.url)));
   const recordActions = $derived((resource.actions ?? []).filter((a) => applies(resource, a, record)));
   /** The record action whose form is open. */
   let openAction = $state<string | null>(null);

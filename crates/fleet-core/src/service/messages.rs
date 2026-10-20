@@ -371,25 +371,8 @@ pub async fn send_message_scoped(
             }
             WakeAction::Paste => {
                 let header = pane_header(id, &from_row.tmux_name, &from_row.host_alias, &args.body);
-                match sessions::send_system_prompt(
-                    &to_row.host_alias,
-                    &to_row.tmux_name,
-                    &header,
-                    true,
-                    store,
-                    ssh,
-                )
-                .await
-                {
-                    Ok(()) => {
-                        woke = true;
-                        // The paste carried the whole body: the turn it starts
-                        // must not get it again as the hook's context.
-                        if let Err(e) = lock(store).and_then(|s| s.mark_messages_delivered(&[id])) {
-                            tracing::warn!(message = id, error = %e.message,
-                                "[messages] a woken message stays undelivered; the hook repeats it");
-                        }
-                    }
+                match wake_paste(store, ssh, &to_row, id, &header).await {
+                    Ok(pasted) => woke = pasted,
                     Err(e) => deliver_error = Some(merge_error(deliver_error, e.message)),
                 }
             }
@@ -402,6 +385,71 @@ pub async fn send_message_scoped(
         deliver_error,
         woke,
     })
+}
+
+/// The wake paste, as one more prompt into the recipient's idle moment
+/// (`sessions::deferred`): in its typing lane, and only when it gets the
+/// moment. A queued prompt that already took it starts a turn, and that
+/// turn's hook hands this message over, so nothing is pasted on top.
+/// Answers whether it pasted.
+///
+/// The message is stamped delivered BEFORE the paste, under the lock:
+/// Claude Code fires UserPromptSubmit the moment Enter lands, before the
+/// send returns, and that hook must not pack the body the paste carries a
+/// second time. A paste that fails having typed nothing reopens it (and
+/// hands the moment back); one that may have landed keeps both.
+async fn wake_paste(
+    store: &Mutex<Store>,
+    ssh: &Arc<SshClient>,
+    to_row: &crate::store::SessionRow,
+    id: i64,
+    header: &str,
+) -> Result<bool, IpcError> {
+    use sessions::deferred;
+    let _lane = deferred::typing_lane(store, to_row.id).await;
+    let now = crate::store::now_unix();
+    let fresh = lock(store)?
+        .get_session_by_id(to_row.id)?
+        .unwrap_or_else(|| to_row.clone());
+    let Some(claim) = deferred::claim_moment_for_direct_send(store, &fresh, header, now)? else {
+        return Ok(false);
+    };
+    let stamped = match lock(store).and_then(|s| s.mark_messages_delivered(&[id])) {
+        Ok(0) => {
+            // A hook already handed it over: a turn started, nothing to wake.
+            let gone = IpcError::new(codes::E_INVALID_STATE, "already delivered by a hook");
+            deferred::settle_direct_send(store, Some(claim), &gone, now);
+            return Ok(false);
+        }
+        Ok(_) => true,
+        Err(e) => {
+            tracing::warn!(message = id, error = %e.message,
+                "[messages] a woken message stays undelivered; the hook may repeat it");
+            false
+        }
+    };
+    match sessions::send_system_prompt(
+        &to_row.host_alias,
+        &to_row.tmux_name,
+        header,
+        true,
+        store,
+        ssh,
+    )
+    .await
+    {
+        Ok(()) => Ok(true),
+        Err(e) => {
+            if stamped && !codes::may_have_run(&e.code) {
+                if let Err(u) = lock(store).and_then(|s| s.unmark_message_delivered(id)) {
+                    tracing::warn!(message = id, error = %u.message,
+                        "[messages] a message whose wake failed stays marked delivered");
+                }
+            }
+            deferred::settle_direct_send(store, Some(claim), &e, now);
+            Err(e)
+        }
+    }
 }
 
 /// What `wake` should do, given the recipient's pane-delivery outcome and

@@ -433,6 +433,10 @@ pub async fn run_with(store: &Mutex<Store>, reg: &Registry, now: i64) -> usize {
 /// Most approved actions one pass carries out.
 pub const ACTIONS_PER_PASS: usize = 10;
 
+/// How long a claimed action may go without an answer before it is taken
+/// as abandoned (its process stopped mid-way) and failed, never re-run.
+pub const ACTION_ABANDONED_SECS: i64 = 3600;
+
 /// Carry out the approved actions (a person's approval, or an `act`
 /// rule's own): each by its agent's executor, recorded executed, failed or
 /// expired. An action whose agent has no executor waits. Returns how many
@@ -445,6 +449,10 @@ pub async fn execute_approved(store: &Mutex<Store>, reg: &Registry) -> usize {
         if crate::service::loops::paused(&s) {
             return 0;
         }
+        let before = crate::store::now_unix() - ACTION_ABANDONED_SECS;
+        if let Err(e) = s.fail_abandoned_agent_actions(before) {
+            tracing::warn!(error = %e, "[agents] failing abandoned actions failed");
+        }
         s.approved_agent_actions(ACTIONS_PER_PASS)
             .unwrap_or_default()
     };
@@ -453,6 +461,17 @@ pub async fn execute_approved(store: &Mutex<Store>, reg: &Registry) -> usize {
         let Some(exec) = reg.executor(&agent) else {
             continue;
         };
+        // Claimed before the side effect: a second pass, another process on
+        // this store, or a restart after a crash never carries it out again.
+        let claimed = match store.lock() {
+            Ok(s) => s
+                .claim_agent_action(action.id, crate::store::now_unix())
+                .unwrap_or(false),
+            Err(_) => return done,
+        };
+        if !claimed {
+            continue;
+        }
         let result = exec.execute(&action).await;
         let (state, error) = match &result {
             ActionResult::Executed => ("executed", None),

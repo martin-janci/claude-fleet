@@ -821,7 +821,17 @@ fn every_fleet_scoped_command_selects_and_no_other_takes_a_fleet() {
             include_str!("../commands/env_vars.rs"),
         ),
         ("commands/pages.rs", include_str!("../commands/pages.rs")),
+        // Settings › Company per fleet.
         ("commands/orgs.rs", include_str!("../commands/orgs.rs")),
+        (
+            "commands/org_devices.rs",
+            include_str!("../commands/org_devices.rs"),
+        ),
+        (
+            "commands/trackers.rs",
+            include_str!("../commands/trackers.rs"),
+        ),
+        ("commands/assets.rs", include_str!("../commands/assets.rs")),
     ];
     for name in FLEET_SCOPED {
         let body = files
@@ -862,22 +872,28 @@ fn every_fleet_scoped_command_selects_and_no_other_takes_a_fleet() {
     }
 }
 
-/// Retry and remove reach the OS keychain, which can wait on an unlock
-/// prompt: a sync command would run them on the macOS main thread.
+/// Settings › Company acts on whichever fleet its picker names: every
+/// command its resources (Organisations, Devices, People, Groups) list, run
+/// or preview through must route by `fleet`, or a write meant for an extra
+/// fleet's hub would be refused by the frontend (`resources.ts::fleetArgs`)
+/// rather than reach it — and a new action added to one of them later must
+/// join `FLEET_SCOPED` with it.
 #[test]
-fn fleet_commands_that_touch_the_keychain_are_off_the_main_thread() {
-    let src = include_str!("../commands/fleets.rs");
-    for name in ["fleet_retry_now", "fleet_remove"] {
-        let at = src
-            .find(&format!("pub fn {name}("))
-            .or_else(|| src.find(&format!("pub async fn {name}(")))
-            .unwrap_or_else(|| panic!("{name} not found"));
-        let head = &src[..at];
-        let attr = &head[head.rfind("#[tauri::command").expect("an attribute")..];
-        assert!(
-            attr.starts_with("#[tauri::command(async)]") || src[at..].starts_with("pub async fn"),
-            "{name} must be an async command"
-        );
+fn every_company_resource_command_is_fleet_scoped() {
+    use fleet_core::pages::resources::resource;
+    for id in ["org", "device", "person", "group"] {
+        let r = resource(id).unwrap_or_else(|| panic!("no resource {id}"));
+        let mut names = vec![r.list];
+        for a in r.actions() {
+            names.push(a.command);
+            names.extend(a.preview);
+        }
+        for name in names {
+            assert!(
+                FLEET_SCOPED.contains(&name),
+                "{id}: {name} is not fleet-scoped, so the Company page cannot send it to an extra fleet"
+            );
+        }
     }
 }
 

@@ -2239,6 +2239,17 @@ pairs a phone with a one-time code and QR (`pair_device`, a person's device
 only — peer links and updater tokens stay `fleet-hub pair --mode`), and
 never revokes, untrusts, binds or hands over the device it is used from.
 `fleet-hub org|client|person` stay the operator's side on this machine.
+An org admin's device (one fenced to the org they administer) gets the
+same pages for that org: its own org changes, the others are shown, and
+Add organisation, + Person and a person's name stay a fleet admin's. The
+page decides what to offer from the hub's own answers — `setting_proposals`
+is served only to a fleet admin's unbound device, `list_devices` marks this
+device's row with its trust and mode — and says why the rest is read-only,
+naming the `fleet-hub client trust <name>` it takes. With a second fleet
+added (Settings › Hub & sync › Fleets) a Fleet picker routes the Company
+pages to that hub, judged by that hub (every command their resources
+list, run or preview is fleet-scoped, with `list_trackers` and
+`catalog_list_catalogs` for their selects).
 
 Organisations are optional. With none, the desktop's scope selector offers
 the GitHub owners of the live sessions (only when there are two or more) and
@@ -3903,7 +3914,9 @@ Settings → **Hub & sync** → *Fleets* → *Add a hub*: run
   count include the extra fleets' sessions that need you, the PRs list reads
   every shown fleet, and an extra fleet's session notifies like one of this
   window's, named with its fleet. A fleet chip counts its sessions that need
-  you.
+  you. Control's Hosts view and the status bar's host chip list the extra
+  fleets' hosts' CPU, memory and disk too, and the chip follows an open
+  extra fleet session's host.
 - **One hub added twice is spotted.** Each hub names its fleet id in the
   `/events` `ready` frame (`fleet_id`, minted at `serve` start; `null` until
   then). An extra fleet whose id is the primary's, or an earlier extra

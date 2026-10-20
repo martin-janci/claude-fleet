@@ -287,6 +287,9 @@ pub struct RestartSessionParams {
     /// Relaunch at this reasoning effort ("" = host default).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+    /// The person chose to switch to a login past `accounts.pause_at`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub over_limit_ok: Option<bool>,
     /// Approved confirmation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confirm_nonce: Option<String>,

@@ -1611,7 +1611,8 @@ impl crate::tmux::TmuxExec for RebootedTmux {
             .push(format!("new {name} in {} running {cmd}", cwd.display()));
         Ok(())
     }
-    async fn kill_session(&self, _: &str) -> Result<(), IpcError> {
+    async fn kill_session(&self, name: &str) -> Result<(), IpcError> {
+        self.calls.lock().unwrap().push(format!("kill {name}"));
         Ok(())
     }
     async fn rename_session(&self, _: &str, _: &str) -> Result<(), IpcError> {
@@ -2066,4 +2067,60 @@ async fn a_login_switch_restart_does_not_revive_a_killed_session() {
         crate::ipc_error::codes::E_INVALID_STATE,
         "{err:?}"
     );
+}
+
+/// The re-check after a login-switch relaunch: a row killed (or removed)
+/// while the relaunch ran reads as killed; a live one, or a ghost lost for
+/// another reason, does not.
+#[test]
+fn a_kill_during_a_login_switch_restart_is_seen_by_the_recheck() {
+    use super::lifecycle::killed_since_switch_began;
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("h").unwrap();
+    let id = s
+        .upsert_session("dev-a", "h", None, None, 1, 1, "running", None)
+        .unwrap();
+    assert!(!killed_since_switch_began(&s, id).unwrap());
+    s.mark_session_killed(id, 2).unwrap();
+    assert!(killed_since_switch_began(&s, id).unwrap());
+    assert!(killed_since_switch_began(&s, id + 99).unwrap());
+    let lost = s
+        .upsert_session("dev-b", "h", None, None, 1, 1, "ghost", None)
+        .unwrap();
+    assert!(!killed_since_switch_began(&s, lost).unwrap());
+}
+
+/// A restart (or recreate) racing a person's Kill: the row read live, the
+/// relaunch spent seconds of SSH, and the person killed it meanwhile. The
+/// pane the relaunch started is killed again and the kill is remembered; a
+/// row that was already killed when the relaunch read it (a person's
+/// deliberate revive) is left to come back.
+#[tokio::test]
+async fn a_relaunch_racing_a_kill_leaves_the_session_killed() {
+    let store = Mutex::new(Store::open_in_memory().unwrap());
+    let id = {
+        let s = store.lock().unwrap();
+        s.upsert_host("mac").unwrap();
+        s.upsert_session("dev", "mac", None, None, 1, 1, "running", None)
+            .unwrap()
+    };
+    let tmux = RebootedTmux::listing(&[]);
+    // Not killed: nothing happens.
+    leave_killed_if_killed_meanwhile(&store, &tmux, "mac", "dev", id, false, "restarted")
+        .await
+        .unwrap();
+    assert!(tmux.calls().is_empty());
+    store.lock().unwrap().mark_session_killed(id, 100).unwrap();
+    // Killed meanwhile: the new pane goes and the restart says so.
+    let err = leave_killed_if_killed_meanwhile(&store, &tmux, "mac", "dev", id, false, "restarted")
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, crate::ipc_error::codes::E_INVALID_STATE);
+    assert!(err.message.contains("left it killed"), "{}", err.message);
+    assert_eq!(tmux.calls(), ["kill dev"]);
+    // Killed before the restart read it: a revive, left alone.
+    leave_killed_if_killed_meanwhile(&store, &tmux, "mac", "dev", id, true, "restarted")
+        .await
+        .unwrap();
+    assert_eq!(tmux.calls().len(), 1);
 }
