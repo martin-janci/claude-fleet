@@ -37,7 +37,7 @@ use crate::service::view_scope::ViewScope;
 use crate::ssh::SshClient;
 use crate::store::{
     CardRow, Decider, GrantRow, MissionRow, MissionTaskCounts, NewCard, NewGrant, NewMissionEvent,
-    Store, TaskRow, WorkItemRow, GRANT_MAX_SECS,
+    Store, TaskRow, WorkItemRow, GRANT_MAX_SECS, GRANT_UNTIL_COMPLETE,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -1481,10 +1481,17 @@ pub async fn plan_now(
     .await
 }
 
-/// `work_link { action: mission_grant, mission_id, level, hours, budget_cents?,
-/// hosts?, max_parallel?, profile? }`: a person signs what the loop may do by itself,
-/// for this plan, until it expires. Never an agent's: the scope must be a
-/// person's own, and the mission theirs to change.
+/// `work_link { action: mission_grant, mission_id, level, hours?, until_complete?,
+/// budget_cents?, hosts?, max_parallel?, profile? }`: a person signs what the loop
+/// may do by itself, for this plan, until it expires — or, with
+/// `until_complete`, until the finite mission completes, bounded by its
+/// budget. Never an agent's: the scope must be a person's own, and the
+/// mission theirs to change.
+///
+/// Signing a level above the one the mission asks raises the ask to it:
+/// autonomy is the least of the ask, the fleet's ceiling and the grant, so
+/// an L2 grant on a mission that asks L0 or L1 left the loop pressing
+/// nothing by itself, and nothing said why.
 pub fn grant(
     args: &WorkLinkArgs,
     store: &Mutex<Store>,
@@ -1498,8 +1505,21 @@ pub fn grant(
     if !(1..=3).contains(&level) {
         return Err(IpcError::new(codes::E_INVALID, "a grant's level is 1 to 3"));
     }
+    let until_complete = args.until_complete.unwrap_or(false);
+    if until_complete && args.hours.is_some() {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            "a grant until the mission completes takes no hours",
+        ));
+    }
+    if until_complete && args.budget_cents.is_none() {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            "a grant until the mission completes needs a budget (budget_cents)",
+        ));
+    }
     let hours = args.hours.unwrap_or(8) as i64;
-    if !(1..=GRANT_MAX_SECS / 3600).contains(&hours) {
+    if !until_complete && !(1..=GRANT_MAX_SECS / 3600).contains(&hours) {
         return Err(IpcError::new(
             codes::E_INVALID,
             format!("a grant runs 1 to {} hours", GRANT_MAX_SECS / 3600),
@@ -1523,7 +1543,7 @@ pub fn grant(
         .map(|p| crate::validate::claude_profile(p).map(|()| p.to_string()))
         .transpose()?;
     let s = lock(store)?;
-    let m = changeable(&s, scope, id)?;
+    let mut m = changeable(&s, scope, id)?;
     not_a_plan(&m)?;
     if crate::store::MISSION_FINAL_STATES.contains(&m.state.as_str()) {
         return Err(IpcError::new(
@@ -1531,7 +1551,28 @@ pub fn grant(
             format!("{} is {}", m.name, m.state),
         ));
     }
+    if until_complete && m.mode != "finite" {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            format!(
+                "{} is {}: only a finite mission completes; sign it for some hours",
+                m.name, m.mode
+            ),
+        ));
+    }
     let who = super::graph::actor(scope);
+    let raised_from = (m.level < level).then_some(m.level);
+    if raised_from.is_some() {
+        m = s.update_mission(
+            id,
+            None,
+            &crate::store::MissionPatch {
+                level: Some(level),
+                ..Default::default()
+            },
+            &who,
+        )?;
+    }
     s.revoke_grants(id)?;
     let g = s.add_grant(
         id,
@@ -1542,16 +1583,32 @@ pub fn grant(
             budget_micros: args.budget_cents.map(|c| c * 10_000),
             max_parallel: args.max_parallel.map(|p| p as i64),
             profile: profile.clone(),
-            expires_at: now_unix() + hours * 3600,
+            expires_at: if until_complete {
+                GRANT_UNTIL_COMPLETE
+            } else {
+                now_unix() + hours * 3600
+            },
         },
     )?;
+    // What the loop now takes by itself, and what holds it back: a grant
+    // the fleet's ceiling caps says so on the timeline.
+    let a = autonomy(&s, &m, now_unix())?;
     event(
         &s,
         id,
         "grant",
         &who,
         None,
-        serde_json::json!({ "level": level, "hours": hours, "budget_cents": args.budget_cents, "profile": profile }),
+        serde_json::json!({
+            "level": level,
+            "hours": (!until_complete).then_some(hours),
+            "until_complete": until_complete,
+            "budget_cents": args.budget_cents,
+            "profile": profile,
+            "raised_level_from": raised_from,
+            "effective": a.effective,
+            "why": a.why,
+        }),
     );
     s.wake_mission(id)?;
     Ok(g)

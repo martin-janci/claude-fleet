@@ -178,6 +178,9 @@ pub struct GrantMissionArgs {
     pub level: i64,
     #[serde(default)]
     pub hours: Option<u32>,
+    /// Until the finite mission completes, bounded by `budget_cents`.
+    #[serde(default)]
+    pub until_complete: Option<bool>,
     #[serde(default)]
     pub budget_cents: Option<i64>,
     #[serde(default)]
@@ -808,6 +811,7 @@ pub(crate) mod routed {
         let wire = WorkLinkArgs {
             level: Some(args.level),
             hours: args.hours,
+            until_complete: args.until_complete,
             budget_cents: args.budget_cents,
             hosts: args.hosts,
             max_parallel: args.max_parallel,

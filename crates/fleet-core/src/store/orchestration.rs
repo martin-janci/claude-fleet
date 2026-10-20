@@ -873,6 +873,15 @@ impl Store {
                 now,
             )?;
         }
+        // A finished mission's grants end with it: one signed until it
+        // completes must not come back when it is reopened.
+        if finished_at.is_some() {
+            tx.execute(
+                "UPDATE orchestration_grants SET revoked_at = ?1 \
+                 WHERE orchestration_project_id = ?2 AND revoked_at IS NULL",
+                rusqlite::params![now, id],
+            )?;
+        }
         tx.commit()?;
         self.require_mission(id)
     }

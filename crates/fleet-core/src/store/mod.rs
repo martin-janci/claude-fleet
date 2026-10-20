@@ -183,7 +183,7 @@ pub use local_workspaces::{
 };
 pub use mission_loop::{
     CardRow, GrantRow, MissionTaskCounts, NewCard, NewGrant, CARDS_OPEN_CAP, CARD_KINDS,
-    CARD_STATES, GRANT_MAX_SECS, MISSION_LEASE_SECS,
+    CARD_STATES, GRANT_MAX_SECS, GRANT_UNTIL_COMPLETE, MISSION_LEASE_SECS,
 };
 pub use nl_census::{
     CensusItem, CensusJournal, CensusPair, CensusPrompt, NL_CENSUS_JOURNAL_KINDS,

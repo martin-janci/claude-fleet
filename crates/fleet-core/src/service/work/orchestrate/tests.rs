@@ -920,3 +920,163 @@ fn a_run_goes_to_the_best_host_inside_its_grant() {
     assert_eq!(start.host_alias.as_deref(), Some("mac"));
     assert_eq!(start.profile, None);
 }
+
+/// TASK-293: a finite mission's grant may last until it completes, bounded
+/// by its budget; it needs the budget, takes no hours, and ends with the
+/// mission.
+#[test]
+fn a_grant_until_the_mission_completes_is_bounded_by_its_budget() {
+    let fx = fixture();
+    let until = |budget: Option<i64>, hours: Option<u32>| WorkLinkArgs {
+        level: Some(2),
+        until_complete: Some(true),
+        budget_cents: budget,
+        hours,
+        ..by_id("mission_grant", fx.m.id)
+    };
+    let e = grant(&until(None, None), &fx.deps.store, &fx.me).unwrap_err();
+    assert_eq!(e.code, codes::E_INVALID);
+    assert!(e.message.contains("budget"), "{}", e.message);
+    assert_eq!(
+        grant(&until(Some(500), Some(4)), &fx.deps.store, &fx.me)
+            .unwrap_err()
+            .code,
+        codes::E_INVALID
+    );
+    let g = grant(&until(Some(500), None), &fx.deps.store, &fx.me).unwrap();
+    assert!(g.until_complete);
+    assert_eq!(g.budget_micros, Some(5_000_000));
+    {
+        let s = lock(&fx.deps.store).unwrap();
+        let later = now_unix() + 30 * 24 * 3600;
+        let live = s.live_mission_grant(fx.m.id, later).unwrap().unwrap();
+        assert!(live.until_complete, "past any timed grant's end");
+        let e = s
+            .mission_events(fx.m.id, None, 10)
+            .unwrap()
+            .into_iter()
+            .find(|e| e.kind == "grant")
+            .unwrap();
+        let p = e.payload.unwrap();
+        assert_eq!(p["until_complete"], true);
+        assert!(p["hours"].is_null(), "{p}");
+        // The mission ending ends the grant: reopening it brings none back.
+        s.set_mission_state(fx.m.id, None, "cancelled", "fleet")
+            .unwrap();
+        assert!(s.live_mission_grant(fx.m.id, now_unix()).unwrap().is_none());
+    }
+    // A timed grant is not one.
+    let fx = fixture();
+    let g = grant(
+        &WorkLinkArgs {
+            level: Some(2),
+            hours: Some(2),
+            ..by_id("mission_grant", fx.m.id)
+        },
+        &fx.deps.store,
+        &fx.me,
+    )
+    .unwrap();
+    assert!(!g.until_complete);
+    assert!(serde_json::to_value(&g)
+        .unwrap()
+        .get("until_complete")
+        .is_none());
+}
+
+/// TASK-293: only a finite mission completes, so a continuous one is
+/// signed for hours.
+#[test]
+fn a_continuous_mission_is_not_granted_until_it_completes() {
+    let fx = fixture();
+    lock(&fx.deps.store)
+        .unwrap()
+        .update_mission(
+            fx.m.id,
+            None,
+            &crate::store::MissionPatch {
+                mode: Some("continuous".into()),
+                ..Default::default()
+            },
+            "fleet",
+        )
+        .unwrap();
+    let e = grant(
+        &WorkLinkArgs {
+            level: Some(2),
+            until_complete: Some(true),
+            budget_cents: Some(500),
+            ..by_id("mission_grant", fx.m.id)
+        },
+        &fx.deps.store,
+        &fx.me,
+    )
+    .unwrap_err();
+    assert_eq!(e.code, codes::E_INVALID);
+    assert!(e.message.contains("finite"), "{}", e.message);
+}
+
+/// TASK-293 (mission #4): an L2 grant on a mission that asked less left the
+/// loop at L1, pressing nothing, and nothing said why. Signing raises the
+/// ask; the fleet's ceiling still holds it, and the timeline says so.
+#[test]
+fn a_grant_raises_the_missions_ask_and_names_the_ceiling_that_holds_it() {
+    let fx = fixture();
+    lock(&fx.deps.store)
+        .unwrap()
+        .update_mission(
+            fx.m.id,
+            None,
+            &crate::store::MissionPatch {
+                level: Some(0),
+                ..Default::default()
+            },
+            "fleet",
+        )
+        .unwrap();
+    grant(
+        &WorkLinkArgs {
+            level: Some(2),
+            ..by_id("mission_grant", fx.m.id)
+        },
+        &fx.deps.store,
+        &fx.me,
+    )
+    .unwrap();
+    let m = mission_now(&fx);
+    assert_eq!(m.level, 2, "the ask is raised to what was signed");
+    let s = lock(&fx.deps.store).unwrap();
+    let a = autonomy(&s, &m, now_unix()).unwrap();
+    assert_eq!((a.asked, a.ceiling, a.effective), (2, 1, 1));
+    assert!(a.why.contains("ceiling"), "{}", a.why);
+    let p = s
+        .mission_events(fx.m.id, None, 10)
+        .unwrap()
+        .into_iter()
+        .find(|e| e.kind == "grant")
+        .unwrap()
+        .payload
+        .unwrap();
+    assert_eq!(p["raised_level_from"], 0);
+    assert_eq!(p["effective"], 1);
+    assert!(p["why"].as_str().unwrap().contains("ceiling"), "{p}");
+    s.set_setting(settings::ORCHESTRATOR_MAX_LEVEL, "3")
+        .unwrap();
+    assert_eq!(
+        autonomy(&s, &m, now_unix()).unwrap().effective,
+        AUTO_LEVEL,
+        "with the ceiling raised the loop runs by itself"
+    );
+    drop(s);
+    // A lower grant never lowers the ask.
+    grant(
+        &WorkLinkArgs {
+            level: Some(1),
+            ..by_id("mission_grant", fx.m.id)
+        },
+        &fx.deps.store,
+        &fx.me,
+    )
+    .unwrap();
+    assert_eq!(mission_now(&fx).level, 2);
+}

@@ -270,6 +270,8 @@ export interface MissionGrant {
   created_at: number;
   expires_at: number;
   revoked_at?: number | null;
+  /** Lasts until the finite mission completes, bounded by its budget. */
+  until_complete?: boolean;
 }
 
 export interface MissionAutonomy {
@@ -820,6 +822,8 @@ export function decideMissionCard(cardId: number, ok: boolean, note?: string): P
 export interface GrantInput {
   level: number;
   hours?: number;
+  /** Until the finite mission completes; needs `budget_cents`, takes no `hours`. */
+  until_complete?: boolean;
   budget_cents?: number;
   hosts?: string[];
   max_parallel?: number;
@@ -945,10 +949,17 @@ export interface AutonomyWords {
   hint: string | null;
 }
 
+/** How long a grant lasts, in words: "until 14:30", or "until the
+ *  mission completes" for one its budget bounds. */
+export function grantUntil(g: MissionGrant, time: 'short' | 'full' = 'short'): string {
+  if (g.until_complete) return 'until the mission completes';
+  const d = new Date(g.expires_at * 1000);
+  return `until ${time === 'full' ? d.toLocaleString() : d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+}
+
 export function autonomyWords(a: MissionAutonomy, now = Date.now() / 1000): AutonomyWords {
   const g = a.grant && (a.grant.revoked_at == null && a.grant.expires_at > now) ? a.grant : null;
-  const until = g ? new Date(g.expires_at * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
-  const parts = [`L${a.asked} asked`, `L${a.ceiling} ceiling`, g ? `L${g.level} grant until ${until}` : 'no grant'];
+  const parts = [`L${a.asked} asked`, `L${a.ceiling} ceiling`, g ? `L${g.level} grant ${grantUntil(g)}` : 'no grant'];
   let hint: string | null = null;
   if (!a.enabled) hint = 'The mission loop is off for the whole fleet. Turn it on in Settings.';
   else if (a.effective >= a.asked) hint = null;

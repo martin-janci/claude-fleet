@@ -396,6 +396,10 @@ pub struct WorkLinkArgs {
     /// mission_grant: how long it lasts (default 8).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hours: Option<u32>,
+    /// mission_grant: it lasts until the finite mission completes, bounded
+    /// by budget_cents (required), instead of hours.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until_complete: Option<bool>,
     /// mission_grant: what its workers may spend, in cents.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget_cents: Option<i64>,

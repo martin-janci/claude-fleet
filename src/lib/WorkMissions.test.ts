@@ -28,6 +28,7 @@ import {
   eventSentence,
   moveLabel,
   autonomyWords,
+  grantUntil,
   plannerError,
   plannerRefusal,
   policyWith,
@@ -950,6 +951,46 @@ describe('WorkMissions', () => {
       await flush();
       expect(calls('grant_mission')[0]).toEqual({ mission_id: 4, level: 2, hours: 8, hosts: ['trn'] });
       hosts.set([]);
+    });
+
+    it('a finite mission is granted until it completes, with a budget and no hours', async () => {
+      current = mission({ state: 'active', level: 2 });
+      handlers.work_mission = () => detailOf(current);
+      handlers.grant_mission = () => ({ id: 1, mission_id: 4, plan_version: 1, level: 2, granted_by: 'fleet', created_at: 1, expires_at: 2 });
+      renderMissions();
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-row'));
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-grant'));
+      await flush();
+      expect(screen.getByTestId('mission-grant-ceiling').textContent).toContain("The fleet's ceiling is L1");
+      await fireEvent.click(screen.getByTestId('mission-grant-until-done'));
+      await flush();
+      expect((screen.getByTestId('mission-grant-save') as HTMLButtonElement).disabled).toBe(true);
+      await fireEvent.input(screen.getByTestId('mission-grant-budget'), { target: { value: '5' } });
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-grant-save'));
+      await flush();
+      expect(calls('grant_mission')[0]).toEqual({ mission_id: 4, level: 2, until_complete: true, budget_cents: 500 });
+    });
+
+    it('a continuous mission is granted for hours only', async () => {
+      current = mission({ state: 'active', level: 2, mode: 'continuous' });
+      handlers.work_mission = () => detailOf(current);
+      renderMissions();
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-row'));
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-grant'));
+      await flush();
+      expect(screen.queryByTestId('mission-grant-until-done')).toBeNull();
+    });
+
+    it('words a grant that lasts until the mission completes', () => {
+      const base = { asked: 2, ceiling: 3, effective: 2, why: '', enabled: true };
+      const grant = { id: 1, mission_id: 4, plan_version: 1, level: 2, granted_by: 'p', created_at: 0, expires_at: 253_402_300_799, until_complete: true };
+      expect(autonomyWords({ ...base, grant }, 1_000).limits).toBe('L2 asked · L3 ceiling · L2 grant until the mission completes');
+      expect(grantUntil(grant, 'full')).toBe('until the mission completes');
     });
 
     it('words every limit', () => {
