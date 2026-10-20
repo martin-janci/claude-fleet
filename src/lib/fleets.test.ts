@@ -142,6 +142,19 @@ describe('fleet rows', () => {
     expect(get(fleetRows).get('company')?.sessions.get(1)?.tmux_name).toBe('other');
   });
 
+  it("a kill's own answer and its frame together still let a new session take the id", async () => {
+    _setFleetsForTest([fleet(PRIMARY), fleet('company')]);
+    onFleetEvent({ fleet: 'company', name: 'session:updated', payload: session(1) });
+    inv.mockResolvedValue(1);
+    await fleetKillSession('company', session(1));
+    // The hub's frame for the same kill drops a row already gone.
+    onFleetEvent({ fleet: 'company', name: 'session:killed', payload: { id: 1 } });
+    onFleetEvent({ fleet: 'company', name: 'session:updated', payload: session(1) });
+    expect(get(fleetRows).get('company')?.sessions.has(1)).toBe(false);
+    onFleetEvent({ fleet: 'company', name: 'session:created', payload: session(1, { tmux_name: 'other' }) });
+    expect(get(fleetRows).get('company')?.sessions.get(1)?.tmux_name).toBe('other');
+  });
+
   it("a command's older snapshot does not overwrite a newer event", async () => {
     _setFleetsForTest([fleet(PRIMARY), fleet('company')]);
     onFleetEvent({ fleet: 'company', name: 'session:updated', payload: session(1, { row_version: 5, claude_status: 'idle' }) });
@@ -342,6 +355,19 @@ describe('Phase 2: an extra fleet as a window', () => {
     );
     onFleetEvent({ fleet: 'company', name: 'hub:connection', payload: { state: 'connected' } });
     await vi.waitFor(() => expect(get(visibleExtraFleets)[0].fleet.fleet_id).toBe('f-1'));
+  });
+
+  it("re-lists a fleet after its bridge's gap and when its link comes up", async () => {
+    _setFleetsForTest([fleet(PRIMARY), fleet('company', { connection: { state: 'connecting' } })]);
+    onFleetEvent({ fleet: 'company', name: 'hub:connection', payload: { state: 'connected' } });
+    onFleetEvent({ fleet: 'company', name: 'hub:resynced', payload: null });
+    await vi.waitFor(() => expect(inv.mock.calls.filter(([cmd]) => cmd === 'list_sessions')).toHaveLength(2));
+    for (const [, a] of inv.mock.calls.filter(([cmd]) => cmd === 'list_sessions')) expect(a).toEqual({ fleet: 'company' });
+    expect(get(visibleExtraFleets)[0].fleet.connection).toEqual({ state: 'connected' });
+    // A gap on the primary's own bridge is not this view's to re-list.
+    onFleetEvent({ fleet: PRIMARY, name: 'hub:resynced', payload: null });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(inv.mock.calls.filter(([cmd]) => cmd === 'list_sessions')).toHaveLength(2);
   });
 
   it("re-reads the fleet list when the primary's own link comes up, so a same-hub-twice fleet is caught", async () => {

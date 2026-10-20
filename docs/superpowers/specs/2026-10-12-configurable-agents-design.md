@@ -617,13 +617,25 @@ run real instances.
    store).
 
    Polling a tracker that is not Jira, built 2026-10-18: no provider grows
-   `issue_threads`. The poll reads the items the hub's tracker sync saw
-   updated since the last poll, less `SYNC_LAG_SECS` (30 minutes: the sync
-   lags the tracker), at most 25 (`ITEM_POLL_MAX`,
-   `Store::tracker_items_updated_since`), and each one's newest 20 comments
-   through its provider's `comments`. The job keys are the Jira poll's
-   (`<tracker>:<key>#c<id>`, `#assigned:<who>`), so the longer window finds
-   nothing twice. The subject is kept when the job is found, the item's own
+   `issue_threads`. The poll pages through the items the hub's tracker sync
+   wrote (`updated_at`, the local write, which a sync moves only on a real
+   change; not the tracker's own update time, so a sync that runs late
+   loses nothing), oldest first, from where the last poll stopped
+   (`Cursor::items`, `(updated_at, id)`), at most 25 a poll (`ITEM_POLL_MAX`,
+   `Store::tracker_items_written_since`): a burst bigger than a page is read
+   over the next polls, and an unchanged item is not read again. For
+   `tracker_comments` it reads each one's newest 20 comments through its
+   provider's `comments`; `tracker_assigned` makes no comments call. A rate
+   limit or an outage stops the page at the item before, for the next poll.
+   A comment counts from the rule's first poll (`Cursor::start`), and no
+   further back than a kept job key lives (30 days). With the tracker sync
+   off (`work.sync_interval_secs = 0`) the poll fails and says so. The job
+   keys are the Jira poll's (`<tracker>:<key>#c<id>`, `#assigned:<who>`), so
+   an item read again finds nothing twice. The sync holds what its views
+   read: on GitHub and Linear only the items assigned to the tracker's own
+   account (`assignee:@me`, `isMe`), on Asana those or a `project:` view's.
+   So `tracker_comments` there sees comments on those items only, and a
+   `tracker_assigned` whose `match.assignee` is anyone else never matches. The subject is kept when the job is found, the item's own
    URL with it, and the run reads it back rather than asking the tracker
    again. `match.assignee` is the account id as the sync stores it (a GitHub
    login, a Linear or Asana user id). A comment there has no author id, so

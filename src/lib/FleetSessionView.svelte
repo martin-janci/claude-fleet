@@ -75,6 +75,12 @@
   let convSeq = 0;
   let convInFlight = 0;
   let snapshotSeq = 0;
+  // Bumped when the composer is reset for another session, so a send that
+  // resolves after a switch away and back does not clear the newer draft;
+  // and the sessions with a send still in flight, so coming back to one
+  // does not allow a second send alongside it.
+  let sendSeq = 0;
+  const sendsInFlight = new Set<string>();
 
   async function loadConversation(opts: { poll?: boolean } = {}) {
     if (opts.poll && convInFlight > 0) return;
@@ -121,8 +127,9 @@
       snapshot = null;
       snapshotError = null;
       snapshotSeq++;
+      sendSeq++;
       draft = '';
-      sending = false;
+      sending = sendsInFlight.has(key);
       tab = 'conversation';
       void loadConversation();
       void fleetTouchViewed(fleet.id, session);
@@ -161,15 +168,19 @@
     const text = draft.trim();
     if (!text || sending) return;
     const at = key;
+    const seq = ++sendSeq;
     const who = `${name} on ${fleet.label}`;
     sending = true;
+    sendsInFlight.add(at);
     const r = await fleetSendPrompt(fleet.id, session, text);
+    sendsInFlight.delete(at);
     if (!r.ok) push({ kind: 'error', message: `Sending to ${who} failed`, detail: r.error.message });
-    // Moved to another session meanwhile: its composer is not this one's.
-    if (at !== key) return;
-    sending = false;
+    if (at === key) sending = false;
+    // Moved to another session meanwhile (even if back again since): the
+    // composer has been reset and what it holds is no longer this send's.
+    if (seq !== sendSeq) return;
     if (r.ok) {
-      draft = '';
+      if (draft.trim() === text) draft = '';
       void loadConversation();
     }
   }

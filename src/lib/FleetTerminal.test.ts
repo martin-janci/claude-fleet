@@ -33,10 +33,32 @@ describe('FleetTerminal', () => {
     const closesBefore = calls('pty_close').length;
     finishOpen(7);
     await vi.waitFor(() => expect(calls('pty_close').length).toBeGreaterThan(closesBefore));
-    expect(calls('pty_close').at(-1)![1]).toEqual({ args: { id: 'fleet-company-3' } });
+    expect(calls('pty_close').at(-1)![1]).toEqual({ args: { id: calls('pty_open')[0][1].args.id } });
     // Nothing drains a terminal nobody shows.
     await new Promise((r) => setTimeout(r, 50));
     expect(calls('pty_drain')).toHaveLength(0);
+  });
+
+  it("a view remounted while the last one's open was in flight keeps its terminal when that open ends", async () => {
+    const finishes: ((gen: number) => void)[] = [];
+    inv.mockImplementation((cmd: string) => {
+      if (cmd === 'pty_open') return new Promise((r) => finishes.push(r));
+      return Promise.resolve(null);
+    });
+    const first = render(FleetTerminal, { props: { fleet: 'company', session } });
+    await vi.waitFor(() => expect(calls('pty_open')).toHaveLength(1));
+    first.unmount();
+    render(FleetTerminal, { props: { fleet: 'company', session } });
+    await vi.waitFor(() => expect(calls('pty_open')).toHaveLength(2));
+    const [oldId, newId] = calls('pty_open').map(([, a]) => a.args.id as string);
+    expect(oldId).not.toBe(newId);
+    expect(newId).toMatch(/^fleet-company-3\.\d+$/);
+    expect(newId).toMatch(/^[A-Za-z0-9_.:-]{1,64}$/);
+    finishes[1](8);
+    finishes[0](7);
+    await vi.waitFor(() => expect(calls('pty_close').some(([, a]) => a.args.id === oldId)).toBe(true));
+    // The old view's late close ends its own attach, never the new one's.
+    expect(calls('pty_close').some(([, a]) => a.args.id === newId)).toBe(false);
   });
 
   it("never opens this machine's tmux for a session on that hub's own machine", async () => {

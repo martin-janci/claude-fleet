@@ -566,6 +566,25 @@ async fn apply_with(
         .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, format!("no finding {id}")))
 }
 
+/// Sync one full scan's `found`, leaving the rows of every host no detector
+/// could judge as they are: an unreachable host is skipped by each detector,
+/// and a finding that was not looked for is not one that went away. The
+/// tick's pass and the tool's `scan` (Check now) both sync through here.
+pub fn sync_scan(
+    s: &Store,
+    cx: &ScanCx,
+    found: &[Finding],
+    now: i64,
+) -> Result<super::sync::SyncOutcome, IpcError> {
+    let unjudged: std::collections::BTreeSet<&str> = cx
+        .health
+        .iter()
+        .filter(|h| !h.reachable)
+        .map(|h| h.alias.as_str())
+        .collect();
+    sync_with(s, found, Scope::All, &unjudged, now)
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct PassOutcome {
     pub sync: super::sync::SyncOutcome,
@@ -599,15 +618,7 @@ pub(crate) async fn run_pass_with(
         let cfg = Config::read(&s);
         let cx = gather(&s, live_agents, now)?;
         let found = only_enabled(scan(&cx), &cfg);
-        // A host that cannot be reached is not judged by any detector this
-        // pass: its rows are left as they are rather than cleared.
-        let unjudged: std::collections::BTreeSet<&str> = cx
-            .health
-            .iter()
-            .filter(|h| !h.reachable)
-            .map(|h| h.alias.as_str())
-            .collect();
-        let synced = sync_with(&s, &found, Scope::All, &unjudged, now)?;
+        let synced = sync_scan(&s, &cx, &found, now)?;
         s.prune_autofix_findings(now - AUTOFIX_RETENTION_SECS)?;
         let due: Vec<i64> = if crate::service::loops::paused(&s) {
             Vec::new()
@@ -1497,6 +1508,29 @@ mod tests {
         );
         assert!(!off.is_empty(), "the operator detector still runs");
         assert!(off.iter().all(|f| !f.kind.starts_with("host.")), "{off:?}");
+    }
+
+    /// Check now (the tool's `scan`) syncs like the tick: a row on a host
+    /// that cannot be reached is left live, not cleared as fixed.
+    #[test]
+    fn a_full_scan_sync_leaves_an_unreachable_hosts_rows_alone() {
+        let s = Store::open_in_memory().unwrap();
+        let id = sync(&s, &[hooks_silent_finding()], Scope::All, 10)
+            .unwrap()
+            .opened[0];
+        assert!(s.mark_autofix_attempt(id, 15).unwrap());
+        let mut cx = gather(&s, &[], 20).unwrap();
+        cx.health = vec![crate::service::health::HostHealthRow {
+            alias: "h1".into(),
+            reachable: false,
+            ..Default::default()
+        }];
+        let o = sync_scan(&s, &cx, &[], 20).unwrap();
+        assert!(o.cleared.is_empty(), "{o:?}");
+        assert_eq!(s.autofix_finding(id).unwrap().unwrap().state, "verifying");
+        cx.health[0].reachable = true;
+        let o = sync_scan(&s, &cx, &[], 30).unwrap();
+        assert_eq!(o.cleared, vec![id], "judged and gone: cleared");
     }
 
     #[tokio::test]

@@ -1202,9 +1202,11 @@ agent drafts one in a chat with a `wizard: fleet_agent` block, which the
 person sends; the phone lists the instances with Revoke. Step 6 in part: the
 `github_prs` and `github_comments` sources, `pr_comment` and `pr_labels`,
 and comments and new items on trackers other than Jira, whose
-`tracker_comments` and `tracker_assigned` polls read the hub's synced items
-(updated since the poll, less a sync's lag) and each one's comments through
-its provider; the gallery (`fleet_agents/gallery.rs`: the
+`tracker_comments` and `tracker_assigned` polls page through the hub's synced
+items (by when the hub wrote them, from where the last poll stopped) and, for
+comments, each one's comments through its provider — the sync holds only the
+items assigned to the tracker's own account on GitHub and Linear, so those are
+all a poll sees there; the gallery (`fleet_agents/gallery.rs`: the
 `catalog-seed/fleet-agents/` definitions embedded, listed under Automation ›
 Agents › Gallery and added to the catalog with *Add to catalog*, `agents {
 install }`), with `issue-triage`, `pr-questions` and `daily-digest` added to

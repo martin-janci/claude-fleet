@@ -435,7 +435,30 @@ pub fn fleet_form(
     Ok(form::grant_form(&sources.definition, &ctx, rule.as_ref()))
 }
 
+/// [`call`], plus `install`: a gallery install writes the personal catalog,
+/// so it waits for the PF7 authoring lock and runs its git on a blocking
+/// thread ([`gallery::install_locked`](crate::service::fleet_agents::gallery::install_locked)).
+/// The caller has already checked the device may write (and, for an
+/// install, may write the personal catalog).
+pub async fn call_async(
+    store: &std::sync::Arc<Mutex<Store>>,
+    args: &AgentsArgs,
+    by: &str,
+    now: i64,
+) -> Result<serde_json::Value, IpcError> {
+    if args.action != "install" {
+        return call(store, args, by, now);
+    }
+    let name = args
+        .definition
+        .as_deref()
+        .ok_or_else(|| invalid("install needs definition (a gallery name)"))?;
+    let done = crate::service::fleet_agents::gallery::install_locked(store, name).await?;
+    serde_json::to_value(done).map_err(|e| IpcError::new(codes::E_INTERNAL, e.to_string()))
+}
+
 /// Dispatch one call. The caller has already checked the device may write.
+/// `install` goes through [`call_async`].
 pub fn call(
     store: &Mutex<Store>,
     args: &AgentsArgs,
@@ -465,15 +488,12 @@ pub fn call(
         "gallery" => to_json(serde_json::to_value(
             crate::service::fleet_agents::gallery::gallery(),
         )),
-        "install" => {
-            let name = args
-                .definition
-                .as_deref()
-                .ok_or_else(|| invalid("install needs definition (a gallery name)"))?;
-            to_json(serde_json::to_value(
-                crate::service::fleet_agents::gallery::install(store, name)?,
-            ))
-        }
+        // A catalog write: it holds the authoring lock, so only
+        // [`call_async`] runs it.
+        "install" => Err(IpcError::new(
+            codes::E_INTERNAL,
+            "agents install runs through admin::call_async",
+        )),
         other => Err(invalid(format!(
             "unknown agents action {other:?}: status | explain | job | grant | revoke | pause_all | \
              approve | reject | run | definitions | gallery | form | install"

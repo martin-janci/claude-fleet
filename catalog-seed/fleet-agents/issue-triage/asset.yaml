@@ -3,7 +3,7 @@ name: issue-triage
 description: "Triages an issue when someone asks for it in a comment (/triage by default): reads the project's code, says what kind of issue it is, how severe, where in the code it likely lives and what to do next, and asks for what is missing."
 inputs:
   - { name: tracker, type: tracker, label: Tracker, required: true }
-  - { name: query, type: text, label: "Jira only: JQL the issues must match (optional)", help: 'e.g. project = "WEB". Leave it empty on GitHub, Linear or Asana.' }
+  - { name: query, type: text, label: "Jira only: JQL the issues must match (optional)", help: 'e.g. project = "WEB". Leave it empty on GitHub, Linear or Asana. There fleet reads the hub''s synced issues, which on GitHub and Linear are the ones assigned to the tracker''s own account: a /triage comment on any other issue is not seen.' }
   - { name: phrases, type: text, label: Trigger phrases, value: "/triage" }
 stores:
   - { role: seen, kind: fleet, label: Issues triaged before }

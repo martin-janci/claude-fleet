@@ -13,7 +13,7 @@ use crate::service::catalog::author::{self, WriteResult};
 use crate::service::catalog::model::{Asset, Kind};
 use crate::service::catalog::CatalogTarget;
 use serde::{Deserialize, Serialize};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use crate::store::Store;
 
@@ -145,4 +145,59 @@ pub fn install(store: &Mutex<Store>, name: &str) -> Result<WriteResult, IpcError
         .asset()
         .map_err(|e| IpcError::new(codes::E_INTERNAL, format!("{name}: {e}")))?;
     author::install_in(CatalogTarget::Personal, asset, store)
+}
+
+/// [`install`] the way every catalog write runs: under the PF7 authoring
+/// lock, so it cannot land in the middle of a changeset apply or undo (be
+/// committed as the card's, or deleted by its failure reset), and with its
+/// sync git on a blocking thread, off the async workers (review r06).
+pub async fn install_locked(
+    store: &Arc<Mutex<Store>>,
+    name: &str,
+) -> Result<WriteResult, IpcError> {
+    let _busy = crate::service::catalog::changesets::authoring_lock().await;
+    let store = Arc::clone(store);
+    let name = name.to_string();
+    tokio::task::spawn_blocking(move || install(&store, &name))
+        .await
+        .map_err(|e| IpcError::new(codes::E_INTERNAL, format!("gallery install: {e}")))?
+}
+
+#[cfg(test)]
+mod lock_tests {
+    use super::*;
+
+    /// PF7: an install waits for a changeset apply or undo in flight.
+    #[tokio::test]
+    async fn an_install_waits_for_the_authoring_lock() {
+        let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+        let held = crate::service::catalog::changesets::authoring_lock().await;
+        let task = {
+            let store = Arc::clone(&store);
+            tokio::spawn(async move { install_locked(&store, "no-such-seed").await })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(!task.is_finished(), "the install ran under an apply");
+        drop(held);
+        let e = task.await.unwrap().unwrap_err();
+        assert_eq!(e.code, codes::E_NOTFOUND, "{e:?}");
+    }
+
+    /// The sync dispatcher never runs an install unlocked; `call_async` does.
+    #[tokio::test]
+    async fn only_call_async_installs() {
+        use crate::service::agents::admin::{call, call_async, AgentsArgs};
+        let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+        let args = AgentsArgs {
+            action: "install".into(),
+            definition: Some("no-such-seed".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            call(&store, &args, "x", 0).unwrap_err().code,
+            codes::E_INTERNAL
+        );
+        let e = call_async(&store, &args, "x", 0).await.unwrap_err();
+        assert_eq!(e.code, codes::E_NOTFOUND, "{e:?}");
+    }
 }

@@ -7,9 +7,8 @@ use super::*;
 use crate::ipc_error::lock;
 use crate::service::autofix::api;
 use crate::service::autofix::apply::{
-    apply_one, gather, live_agents, scan_enabled, Actor, Config, SshFixExec,
+    apply_one, gather, live_agents, scan_enabled, sync_scan, Actor, Config, SshFixExec,
 };
-use crate::service::autofix::sync::{sync, Scope};
 use crate::store::now_unix;
 
 /// Only a person's trusted full device decides a fix. Control may list and
@@ -69,7 +68,7 @@ impl FleetTools {
                     let s = lock(&self.store).map_err(to_mcp_err)?;
                     let cx = gather(&s, &live, now).map_err(to_mcp_err)?;
                     let found = scan_enabled(&cx, &Config::read(&s));
-                    sync(&s, &found, Scope::All, now).map_err(to_mcp_err)?;
+                    sync_scan(&s, &cx, &found, now).map_err(to_mcp_err)?;
                 }
                 let s = lock(&self.store).map_err(to_mcp_err)?;
                 let can_apply = autofix_writer(&caller).is_ok();

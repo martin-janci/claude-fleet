@@ -127,4 +127,20 @@ describe('hostLabels', () => {
     expect(l.get('mac')).toBe('mac');
     expect(l.get('buildbox-primary')).toBe('buildbox-primary');
   });
+
+  it('puts segments back until two shortened labels differ', () => {
+    const l = hostLabels(['prod-eu-web1', 'prod-eu-db01', 'prod-us-web1', 'prod-us-db01']);
+    expect(l.get('prod-eu-web1')).toBe('eu-web1');
+    expect(l.get('prod-us-web1')).toBe('us-web1');
+    expect(l.get('prod-eu-db01')).toBe('eu-db01');
+    expect(l.get('prod-us-db01')).toBe('us-db01');
+    expect(new Set(l.values()).size).toBe(4);
+  });
+
+  it('never prints a shortened label equal to another host\'s short alias', () => {
+    const l = hostLabels(['web1', 'claude-fleet-web1', 'claude-fleet-ci']);
+    expect(l.get('web1')).toBe('web1');
+    expect(l.get('claude-fleet-web1')).toBe('fleet-web1');
+    expect(l.get('claude-fleet-ci')).toBe('ci');
+  });
 });

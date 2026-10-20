@@ -302,7 +302,11 @@ function dropSession(fleet: string | undefined, rows: FleetRows, id: number): vo
   racesFor(fleet).sessions.touch(id);
   let m = tombstones.get(fleet);
   if (!m) tombstones.set(fleet, (m = new Map()));
-  m.set(id, { until: Date.now() + FLEET_TOMBSTONE_MS, identity: current ? fleetSessionIdentity(current) : null });
+  // A second drop of a row already gone (the kill's own answer, then its
+  // `session:killed` frame) keeps the identity the first one recorded: a
+  // null one would refuse a new session that reuses the id.
+  const identity = current ? fleetSessionIdentity(current) : (liveTombstone(fleet, id)?.identity ?? null);
+  m.set(id, { until: Date.now() + FLEET_TOMBSTONE_MS, identity });
 }
 
 /** The event names that change an extra fleet's rows, and which of its
@@ -659,9 +663,12 @@ export function fleetCaptureSession(fleet: string, s: SessionRow, scrollback = 2
 }
 
 /** The pty id an extra fleet's terminal attaches under: never one the
- *  primary's panes use (`agent`, `shell-N`, a pop-out's label). */
-export function fleetPtyId(fleet: string, s: Pick<SessionRow, 'id'>): string {
-  return `fleet-${fleet}-${s.id}`;
+ *  primary's panes use (`agent`, `shell-N`, a pop-out's label). `view`
+ *  names the terminal view that owns it: the backend opens and closes by id
+ *  alone, so a view remounted while the last one's open is still in flight
+ *  must not share its id, or that view's late close ends the new attach. */
+export function fleetPtyId(fleet: string, s: Pick<SessionRow, 'id'>, view?: number): string {
+  return view === undefined ? `fleet-${fleet}-${s.id}` : `fleet-${fleet}-${s.id}.${view}`;
 }
 
 // ── New session: which fleet (Phase 2) ──────────────────────────────────
