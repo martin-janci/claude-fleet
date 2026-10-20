@@ -51,7 +51,7 @@
   import ProposedBy from './ProposedBy.svelte';
   import FleetSwitcher from './FleetSwitcher.svelte';
   import FleetSessionGroups from './FleetSessionGroups.svelte';
-  import { showPrimary, fleetInboxCount } from './fleets';
+  import { showPrimary, fleetInboxCount, hostFilterLabel, fleetHostPasses } from './fleets';
   import FleetInbox from './FleetInbox.svelte';
   import { failingCount, loadFailing, loadNextRoutine, nextRoutine, nextRoutineLine } from './routines';
   import { loadWaitingMissions, waitingMissionCount } from './mission_waits';
@@ -347,6 +347,31 @@
       work,
     );
   }
+  /** The extra fleets' rows under the same filters (multi-hub): Machine,
+   *  background agents, needs-you, last active, agent and search. Not the
+   *  org scope, the work filters, the folds or the Mine / Shared tabs: those
+   *  read this window's own ids, which an extra fleet's collide with. A
+   *  focus is one of this window's sessions, so it hides them. */
+  const fleetMatch = $derived.by(() => {
+    if (focus) return () => false;
+    const host = viewHost;
+    const bg = viewBg;
+    const q = viewSearch;
+    const nyo = needsYouOnly;
+    const r = recency;
+    const now = attentionOpts.now;
+    const ag = $agentFilter;
+    return (fleet: string, s: SessionRow, proj: string, needs: boolean): boolean =>
+      fleetHostPasses(host, fleet, s.host_alias) &&
+      sessionVisible(s, 'all', bg) &&
+      (!nyo || needs) &&
+      (r === 'all' || withinRecency(s.last_activity_at, r, now)) &&
+      (ag === 'any' || sessionAgent(s) === ag) &&
+      sessionMatchesSearch(s, q, proj);
+  });
+  const fleetFiltered = $derived(
+    !!focus || viewHost !== 'all' || needsYouOnly || recency !== 'all' || $agentFilter !== 'any' || viewSearch.trim() !== '',
+  );
   const rowBase = $derived.by((): SessionPredicate => {
     if (focus) {
       const id = focus.id;
@@ -478,6 +503,7 @@
           scopeLabel:
             $effectiveScope === UNASSIGNED ? 'Unassigned' : $scopes.find((x) => x.id === $effectiveScope)?.label,
           host: $effectiveHostFilter,
+          hostLabel: $hostFilterLabel($effectiveHostFilter),
           agent: $agentFilter === 'any' ? undefined : agentFilterLabel($agentFilter),
           recency,
           search: searchQuery,
@@ -2229,7 +2255,7 @@
     {/if}
     <!-- Extra fleets (multi-hub design): each fleet the filter shows, under
          its own badge, after this window's own list. -->
-    <FleetSessionGroups />
+    <FleetSessionGroups match={fleetMatch} filtered={fleetFiltered} />
   </div>
   {/if}
 
