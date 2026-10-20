@@ -316,6 +316,14 @@ that fleet's link (`fleetBlocked`); its hub judges access. The parts whose
 commands are not fleet-scoped yet are hidden or disabled for such a row
 rather than sent to the primary.
 
+Step 2a (landed): `TerminalView` takes an optional `session`. Handed an extra
+fleet's row it attaches under `fleetPtyId(fleet, row, view)`, refuses
+`local` / `wsl-…` through `fleetAttachRefusal`, and runs nothing that names
+the row's id to the primary (workspace check, shell terminals, voice follow,
+un-archive, upload, host lookups). Only the main window's own pane (no
+`session` prop) publishes `terminalPane`, takes bar requests and releases the
+microphone. `FleetTerminal` was removed.
+
 ## Testing
 
 - Rust, `src-tauri`: `backend::fleets` unit tests (record round-trip, slot

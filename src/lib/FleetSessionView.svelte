@@ -2,8 +2,9 @@
   // An extra fleet's session, opened (multi-hub): its conversation in the
   // same ConversationPanel the primary's sessions use (Phase 3: the row
   // carries its fleet, so every call the panel makes goes to that fleet's
-  // hub and what it keeps is keyed by `sessionKey`), its terminal attached
-  // from this machine, and a read-only pane snapshot.
+  // hub and what it keeps is keyed by `sessionKey`), its terminal in the
+  // same TerminalView (attached from this machine, under its own pty id), and
+  // a read-only pane snapshot.
   import { untrack } from 'svelte';
   import { errorText } from './error_copy';
   import {
@@ -20,7 +21,7 @@
   import { copyText } from './clipboard';
   import { push } from './toasts';
   import ConversationPanel from './ConversationPanel.svelte';
-  import FleetTerminal from './FleetTerminal.svelte';
+  import TerminalView from './TerminalView.svelte';
   import Button from './kit/Button.svelte';
   import { tablistKeys } from './tablist_keys';
   import { readable, writable } from 'svelte/store';
@@ -135,7 +136,9 @@
       </div>
     {:else if tab === 'terminal'}
       {#key key}
-        <FleetTerminal fleet={fleet.id} {session} />
+        <div class="term" data-testid="fleet-session-terminal">
+          <TerminalView session={row} />
+        </div>
       {/key}
     {:else}
       <div class="snapshot" data-testid="fleet-session-snapshot">
@@ -229,7 +232,8 @@
     gap: var(--space-2);
   }
   /* The panel is the primary's own: it lays itself out edge to edge. */
-  .conv {
+  .conv,
+  .term {
     flex: 1;
     min-height: 0;
     position: relative;
