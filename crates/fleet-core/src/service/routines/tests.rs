@@ -3454,3 +3454,30 @@ async fn a_retry_held_at_a_limit_says_so_once_and_when_a_newer_run_drops_it() {
         "{v:?}"
     );
 }
+
+/// Review w30-5: every event a routine may fire on has a label on the
+/// desktop (`src/lib/routines.ts`), so a new kind cannot show as its raw key.
+#[test]
+fn every_event_has_a_desktop_label() {
+    let ts = crate::repo_files::read("src/lib/routines.ts");
+    let table = |name: &str| -> String {
+        let head = format!("const {name}: Record<string, string> = {{");
+        let start = ts
+            .find(&head)
+            .unwrap_or_else(|| panic!("{name} in routines.ts"));
+        let body = &ts[start..];
+        body[..body.find("\n};").unwrap()].to_string()
+    };
+    let tables = [
+        table("EVENT_WORDS"),
+        table("FLEET_EVENT_LABELS"),
+        table("PR_EVENT_LABELS"),
+    ];
+    for e in EVENTS {
+        let key = format!("\n  {e}:");
+        assert!(
+            tables.iter().any(|t| t.contains(&key)),
+            "{e} has no label in EVENT_WORDS, FLEET_EVENT_LABELS or PR_EVENT_LABELS"
+        );
+    }
+}

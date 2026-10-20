@@ -2103,7 +2103,10 @@
   const tuneOn = $derived(settingBool($fleetSettings, SETTING_KEYS.workPromptTune));
   const tuneBlocked = $derived(
     hubActionBlocked('session_prompt_tune', $hubStatus, $hubConnection) ??
-      $sessionBlocked(session, 'session_prompt_tune'),
+      $sessionBlocked(session, 'session_prompt_tune') ??
+      // Review w30-8: nothing to tune yet (the phone hides Tune too). An open
+      // tuner keeps its button, so it can still be closed.
+      (!tuneOpen && draft.trim() === '' ? 'Type a draft to tune first' : null),
   );
   function openTune() {
     tuneOpen = true;

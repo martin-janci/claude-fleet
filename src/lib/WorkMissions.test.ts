@@ -180,6 +180,20 @@ describe('WorkMissions', () => {
     expect(screen.queryByTestId('mission-refresh-error')).toBeNull();
   });
 
+  // Review w30-1: a mission deleted elsewhere closes the room with a notice.
+  it('a mission gone from the hub closes the room and says so', async () => {
+    renderMissions();
+    await flush();
+    openMissionRoom(4);
+    await flush();
+    expect(screen.getByTestId('mission-detail').textContent).toContain('Cards and refunds');
+    handlers.work_mission = () => Object.assign(new Error('no such mission'), { code: 'E_NOTFOUND' });
+    bumpWorkChanged();
+    await waitFor(() => expect(get(roomMissionId)).toBeNull(), { timeout: 2000 });
+    expect(screen.queryByTestId('mission-refresh-error')).toBeNull();
+    expect(screen.getByTestId('mission-notice').textContent).toContain('not in the fleet any more');
+  });
+
   it('creates a mission from a name and a goal, then opens it', async () => {
     handlers.work_missions = () => [];
     renderMissions();

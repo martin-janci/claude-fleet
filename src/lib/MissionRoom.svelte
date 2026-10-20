@@ -214,12 +214,15 @@
       detail = r.value;
       refreshError = null;
       if (first) missionPanelTab.set(defaultPanelTab(r.value));
-    } else if (!r.ok && detail?.mission.id === id) {
+    } else if (!r.ok && r.error.code !== 'E_NOTFOUND' && detail?.mission.id === id) {
       // Review w17-4: a failed background re-read is not "the mission is
       // gone": the room, an open goal edit and a half-typed answer stay.
+      // E_NOTFOUND is (the hub answers a deleted or no-longer-visible
+      // mission with it, never with `ok` and no mission): review w30-1.
       refreshError = r.error;
     } else {
-      notice = r.ok ? 'That mission is not in the fleet any more.' : readErrorText(r.error);
+      notice =
+        r.ok || r.error.code === 'E_NOTFOUND' ? 'That mission is not in the fleet any more.' : readErrorText(r.error);
       detail = null;
       roomMissionId.set(null);
       openedId = null;

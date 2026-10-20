@@ -405,9 +405,35 @@ async fn wake_paste(
     id: i64,
     header: &str,
 ) -> Result<bool, IpcError> {
+    let now = crate::store::now_unix();
+    wake_paste_with(store, to_row, id, header, now, || {
+        sessions::send_system_prompt(
+            &to_row.host_alias,
+            &to_row.tmux_name,
+            header,
+            true,
+            store,
+            ssh,
+        )
+    })
+    .await
+}
+
+/// [`wake_paste`] with the typing step handed in (review w30-4).
+async fn wake_paste_with<F, Fut>(
+    store: &Mutex<Store>,
+    to_row: &crate::store::SessionRow,
+    id: i64,
+    header: &str,
+    now: i64,
+    type_it: F,
+) -> Result<bool, IpcError>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<(), IpcError>>,
+{
     use sessions::deferred;
     let _lane = deferred::typing_lane(store, to_row.id).await;
-    let now = crate::store::now_unix();
     let fresh = lock(store)?
         .get_session_by_id(to_row.id)?
         .unwrap_or_else(|| to_row.clone());
@@ -428,16 +454,7 @@ async fn wake_paste(
             false
         }
     };
-    match sessions::send_system_prompt(
-        &to_row.host_alias,
-        &to_row.tmux_name,
-        header,
-        true,
-        store,
-        ssh,
-    )
-    .await
-    {
+    match type_it().await {
         Ok(()) => Ok(true),
         Err(e) => {
             if stamped && !codes::may_have_run(&e.code) {
@@ -1765,6 +1782,161 @@ mod tests {
     }
 
     // ---- wake_action (pure decision table) ----
+
+    // ---- wake_paste (review w30-4) ----
+
+    /// A message from `a` to an idle `b` (idle since `now - 10`): its id and
+    /// `b`'s row as the wake reads it.
+    async fn idle_wake(
+        store: &Mutex<Store>,
+        ssh: &Arc<SshClient>,
+        a: i64,
+        b: i64,
+        now: i64,
+    ) -> (i64, crate::store::SessionRow) {
+        let id = send_message(args(a, b, "wake up"), store, ssh)
+            .await
+            .unwrap()
+            .id;
+        let s = store.lock().unwrap();
+        s.conn_ref()
+            .execute(
+                "UPDATE sessions SET claude_status = 'idle', idle_since = ?2 WHERE id = ?1",
+                rusqlite::params![b, now - 10],
+            )
+            .unwrap();
+        (id, s.get_session_by_id(b).unwrap().unwrap())
+    }
+
+    fn message_delivered(store: &Mutex<Store>, id: i64) -> bool {
+        store
+            .lock()
+            .unwrap()
+            .conn_ref()
+            .query_row(
+                "SELECT delivered_at IS NOT NULL FROM session_messages WHERE id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    /// Whether the idle moment is still free: a later direct send gets it.
+    fn moment_free(store: &Mutex<Store>, b: i64, now: i64) -> bool {
+        let row = store.lock().unwrap().get_session_by_id(b).unwrap().unwrap();
+        sessions::deferred::claim_moment_for_direct_send(store, &row, "probe", now + 1)
+            .unwrap()
+            .is_some()
+    }
+
+    #[tokio::test]
+    async fn wake_paste_types_the_message_once_and_marks_it_delivered() {
+        let (store, ssh, a, b) = fixture();
+        let now = crate::store::now_unix();
+        let (id, row) = idle_wake(&store, &ssh, a, b, now).await;
+        let typed = std::sync::atomic::AtomicUsize::new(0);
+        let pasted = wake_paste_with(&store, &row, id, "[msg]", now, || async {
+            typed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            // Stamped before the paste: the hook Enter fires must not pack it again.
+            assert!(message_delivered(&store, id));
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert!(pasted);
+        assert_eq!(typed.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(message_delivered(&store, id));
+        assert!(
+            !moment_free(&store, b, now),
+            "the paste's turn holds the moment"
+        );
+    }
+
+    /// (a) A prompt that already took the idle moment starts a turn whose
+    /// hook hands the message over: nothing is pasted on top.
+    #[tokio::test]
+    async fn wake_paste_pastes_nothing_when_a_prompt_holds_the_moment() {
+        let (store, ssh, a, b) = fixture();
+        let now = crate::store::now_unix();
+        let (id, row) = idle_wake(&store, &ssh, a, b, now).await;
+        assert!(
+            sessions::deferred::claim_moment_for_direct_send(&store, &row, "queued", now)
+                .unwrap()
+                .is_some()
+        );
+        let pasted = wake_paste_with(&store, &row, id, "[msg]", now, || async {
+            panic!("pasted on top of the prompt that holds the moment")
+        })
+        .await
+        .unwrap();
+        assert!(!pasted);
+        assert!(!message_delivered(&store, id), "the hook still carries it");
+    }
+
+    /// (b) A hook already handed the message over: nothing is pasted, and
+    /// the moment the wake claimed goes back.
+    #[tokio::test]
+    async fn wake_paste_pastes_nothing_when_a_hook_already_delivered_it() {
+        let (store, ssh, a, b) = fixture();
+        let now = crate::store::now_unix();
+        let (id, row) = idle_wake(&store, &ssh, a, b, now).await;
+        assert_eq!(
+            store
+                .lock()
+                .unwrap()
+                .mark_messages_delivered(&[id])
+                .unwrap(),
+            1
+        );
+        let pasted = wake_paste_with(&store, &row, id, "[msg]", now, || async {
+            panic!("pasted a message a hook already handed over")
+        })
+        .await
+        .unwrap();
+        assert!(!pasted);
+        assert!(message_delivered(&store, id));
+        assert!(moment_free(&store, b, now), "the moment was given back");
+    }
+
+    /// (c) A paste that failed having typed nothing reopens the message
+    /// (`unmark_message_delivered`) and gives the moment back.
+    #[tokio::test]
+    async fn wake_paste_that_typed_nothing_reopens_the_message_and_the_moment() {
+        let (store, ssh, a, b) = fixture();
+        let now = crate::store::now_unix();
+        let (id, row) = idle_wake(&store, &ssh, a, b, now).await;
+        let typed = std::sync::atomic::AtomicUsize::new(0);
+        let err = wake_paste_with(&store, &row, id, "[msg]", now, || async {
+            typed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(IpcError::new(codes::E_TMUX, "no pane"))
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, codes::E_TMUX);
+        assert_eq!(typed.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(
+            !message_delivered(&store, id),
+            "the next hook hands it over"
+        );
+        assert!(moment_free(&store, b, now));
+    }
+
+    /// (d) A paste that may have landed keeps the message delivered and the
+    /// moment claimed: neither the hook nor a queued prompt goes in again.
+    #[tokio::test]
+    async fn wake_paste_that_may_have_typed_keeps_the_message_and_the_moment() {
+        let (store, ssh, a, b) = fixture();
+        let now = crate::store::now_unix();
+        let (id, row) = idle_wake(&store, &ssh, a, b, now).await;
+        let err = wake_paste_with(&store, &row, id, "[msg]", now, || async {
+            Err(IpcError::new(codes::E_SSH_TIMEOUT, "wall clock"))
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, codes::E_SSH_TIMEOUT);
+        assert!(message_delivered(&store, id));
+        assert!(!moment_free(&store, b, now));
+    }
 
     #[test]
     fn wake_action_never_pastes_twice_when_deliver_already_did() {

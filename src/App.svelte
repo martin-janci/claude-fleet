@@ -955,6 +955,8 @@
     }
   }
   function toggleInspector() {
+    // Review w30-7: where the inspector cannot show, the chord leaves the pref alone.
+    if (!inspectorRoom) return;
     inspectorOpen = !inspectorOpen;
   }
   // ⌘K's Inspector row (review w18-4): the same toggle as ⌥⌘B.

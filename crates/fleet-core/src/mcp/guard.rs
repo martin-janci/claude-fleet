@@ -2001,11 +2001,11 @@ pub fn operator_confirm_reason(tool: &str) -> &'static str {
              \"Within your brief\" or \"Autopilot\", and only into a session it \
              started or briefed, whatever mcp.confirm_destructive says"
         }
-        // Session care, off by default.
+        // Session care, on by default.
         "restart_session" | "safe_kill_session" => {
             "the operator's restarts and kills ask unless session care \
-             (control.session_care) is on and the session is one it started or \
-             briefed: restarts at \"Within your brief\" or \"Autopilot\", retiring at \
+             (control.session_care) is on and the session is one it started \
+             itself: restarts at \"Within your brief\" or \"Autopilot\", retiring at \
              \"Autopilot\" only, whatever mcp.confirm_destructive says"
         }
         // D12.

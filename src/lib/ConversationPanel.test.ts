@@ -5270,6 +5270,23 @@ describe('ConversationPanel composer access (multi-user M1)', () => {
     }
   });
 
+  // Review w30-8: an empty draft has nothing to tune.
+  it('the tune button is disabled on an empty draft and says why', async () => {
+    fleetSettings.set({ ...SETTING_DEFAULTS, 'work.prompt_tune': 'true' });
+    try {
+      await renderShared('answer');
+      const tune = screen.getByTestId('conv-tune-button') as HTMLButtonElement;
+      expect(tune.disabled).toBe(true);
+      expect(tune.title).toBe('Type a draft to tune first');
+      await fireEvent.input(box(), { target: { value: '   ' } });
+      expect(tune.disabled).toBe(true);
+      await fireEvent.input(box(), { target: { value: 'fix test' } });
+      expect(tune.disabled).toBe(false);
+    } finally {
+      fleetSettings.set({ ...SETTING_DEFAULTS });
+    }
+  });
+
   it('a watch grantee’s ? is disabled and names the level it needs', async () => {
     fleetSettings.set({ ...SETTING_DEFAULTS, 'work.context_help': 'true' });
     try {
