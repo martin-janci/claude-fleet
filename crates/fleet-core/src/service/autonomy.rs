@@ -222,9 +222,10 @@ until one arrives, act as at Ask first.
   task's `work_link` `start`, `run` or `resume` (name the host, or the grant \
   must name none), unless Pause all is on. Nothing else changes: kills, \
   restarts, rewinds, restores and new projects ask.
-- **Session care** (a setting, off unless the digest says `Session care: \
-  on`): at Within your brief, `restart_session` of a session you started or \
-  briefed goes without a card (a wedged REPL, or back under another login \
+- **Session care** (a setting, on by default; the digest says `Session \
+  care: on` while it is on): at Within your brief, `restart_session` of a \
+  session you started yourself goes without a card (a wedged REPL, or back \
+  under another login \
   with `profile` after a limit); at Autopilot, so does retiring one with \
   `safe_kill_session` once its work is pushed or merged. `kill_session`, \
   rewinds and moves always ask.

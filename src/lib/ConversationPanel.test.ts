@@ -51,7 +51,7 @@ import { sendPrompt, sessions, startedIds, type SessionRow } from './sessions';
 import { selectSessionExplicitly } from './selection';
 import { tasks, type TaskRow } from './tasks';
 import { composerPresets } from './composer_presets';
-import { composerDrafts, insertIntoComposer } from './conversation';
+import { composerDrafts, composerTrays, insertIntoComposer } from './conversation';
 import { scrollMemory } from './conversation_nav';
 import { openPathRequest } from './app_views';
 import { dispatchTimelineEvents, dispatchConversationsChanged } from './live_events';
@@ -167,6 +167,7 @@ beforeEach(() => {
   mockedList.mockResolvedValue({ ok: true, value: [] });
   mockedAct.mockResolvedValue({ ok: false, error: { code: 'E_INVALID_STATE', message: 'no pane' } });
   composerDrafts.clear();
+  composerTrays.clear();
   scrollMemory.clear();
   outbox.resetForTests();
   resetHeldForTests();
@@ -314,7 +315,7 @@ describe('ConversationPanel', () => {
     await Promise.resolve();
     await tick();
 
-    expect(screen.getByTestId('conv-error').textContent).toContain('connection refused');
+    expect(screen.getByTestId('conv-error').textContent).toContain("Couldn't reach the host over SSH");
     expect(screen.getByTestId('conv-prompt').textContent).toContain('fix the bug');
 
     mockedConv.mockReturnValueOnce(ok(conv()));
@@ -923,6 +924,22 @@ describe('ConversationPanel composer', () => {
     expect(mockedSend).toHaveBeenCalledWith('local', 'ctl', 'keep me');
   });
 
+  it('a typed prompt is not sent into a dialog; it stays in the box with a note (w13-3)', async () => {
+    mockedConv.mockReturnValue(ok(conv()));
+    const row = session({ claude_status: 'blocked' });
+    sessions.set([row]);
+    render(ConversationPanel, { session: row, visible: true });
+    await settle();
+    const box = screen.getByTestId('conv-composer-input') as HTMLTextAreaElement;
+    await fireEvent.input(box, { target: { value: 'no, use make clean' } });
+    await fireEvent.keyDown(box, { key: 'Enter' });
+    await settle();
+    expect(mockedSend).not.toHaveBeenCalled();
+    expect(box.value).toBe('no, use make clean');
+    expect((screen.getByTestId('conv-composer-send') as HTMLButtonElement).disabled).toBe(true);
+    expect(document.body.textContent).toContain('waiting on a question above');
+  });
+
   it('cancel takes a held line back into the box', async () => {
     mockedConv.mockReturnValue(ok(conv()));
     const row = session({ claude_status: 'working' });
@@ -940,16 +957,18 @@ describe('ConversationPanel composer', () => {
     expect(mockedSend).not.toHaveBeenCalled();
   });
 
-  it('Stop interrupts the running turn with Escape, only on a gated composer', async () => {
+  it('Stop interrupts the running turn with Escape on every composer, never while stuck (w13-4/5)', async () => {
     mockedConv.mockReturnValue(ok(conv()));
     mockedSend.mockResolvedValue({ ok: true, value: undefined });
-    const row = session({ claude_status: 'working' });
-    sessions.set([row]);
-    const first = render(ConversationPanel, { session: row, visible: true });
+    const stuck = session({ claude_status: 'working', stuck_kind: 'trust_prompt' });
+    sessions.set([stuck]);
+    const first = render(ConversationPanel, { session: stuck, visible: true, blockWhileBusy: true });
     await settle();
     expect(screen.queryByTestId('conv-composer-stop')).toBeNull();
     first.unmount();
-    render(ConversationPanel, { session: row, visible: true, blockWhileBusy: true });
+    const row = session({ claude_status: 'working' });
+    sessions.set([row]);
+    render(ConversationPanel, { session: row, visible: true });
     await settle();
     await fireEvent.click(screen.getByTestId('conv-composer-stop'));
     await settle();
@@ -1875,6 +1894,22 @@ describe('ConversationPanel live indicator', () => {
       expect(selectSessionExplicitlySpy).toHaveBeenLastCalledWith(expect.objectContaining({ id: 1 }));
     });
 
+    it('a host outside the Session view stays put after an answer (w13-2)', async () => {
+      const here = session({ claude_status: 'blocked', pending_input: PUSH });
+      const next = session({ id: 2, tmux_name: 'other', friendly_name: 'Fix the flake', claude_status: 'blocked', pending_input: DIALOG });
+      sessions.set([here, next]);
+      mockedConv.mockReturnValue(ok(conv()));
+      mockedAct.mockResolvedValue({ ok: true, value: probe({ claude_status: 'blocked', waiting_for: 'permission', pending_input: PUSH }) });
+      mockedSend.mockResolvedValue({ ok: true, value: undefined });
+      render(ConversationPanel, { session: here, visible: true, advanceOnAnswer: false });
+      await settle();
+      await fireEvent.click(screen.getAllByTestId('answer-option')[0]);
+      await settle();
+      await settle();
+      expect(mockedSend).toHaveBeenCalled();
+      expect(selectSessionExplicitlySpy).not.toHaveBeenCalled();
+    });
+
     it('stays put when nothing else needs you', async () => {
       const here = session({ claude_status: 'blocked', pending_input: PUSH });
       sessions.set([here]);
@@ -2537,7 +2572,7 @@ describe('ConversationPanel second review-round fixes', () => {
     vi.advanceTimersByTime(QUIET_POLL_MS);
     await settle();
     expect(mockedConv).toHaveBeenCalledTimes(2);
-    expect(screen.getByTestId('conv-error').textContent).toContain('hiccup');
+    expect(screen.getByTestId('conv-error').textContent).toContain("Couldn't reach the host over SSH");
     // the failure did not restart the quiet clock: the very next tick retries
     mockedConv.mockReturnValue(ok(conv()));
     vi.advanceTimersByTime(CONVERSATION_POLL_MS);
@@ -4688,6 +4723,24 @@ describe('ConversationPanel attachments', () => {
     expect(screen.queryByTestId('conv-attach-error')).toBeNull();
   });
 
+  it('the tray waits under its own session and comes back with it, and across an unmount (w13-6)', async () => {
+    const a = { id: 1, host_alias: 'alpha', tmux_name: 'a' };
+    const rerender = await renderPanel(a);
+    await addAttachments([{ path: '/tmp/a.png', name: 'a.png', size: 1024, kind: 'image' }]);
+    await rerender({ session: session({ id: 2, host_alias: 'beta', tmux_name: 'b' }), visible: true });
+    await settle();
+    expect(screen.queryByTestId('conv-attachments')).toBeNull();
+    await rerender({ session: session(a), visible: true });
+    await settle();
+    expect(screen.getAllByTestId('conv-attachment')).toHaveLength(1);
+    // The Terminal tab unmounts the panel; coming back finds the file.
+    cleanup();
+    render(ConversationPanel, { session: session(a), visible: true });
+    await settle();
+    expect(screen.getAllByTestId('conv-attachment')).toHaveLength(1);
+    expect(screen.getByTestId('conv-attachment').getAttribute('title')).toContain('a.png');
+  });
+
   it('a send after a session switch uploads nothing of the previous session', async () => {
     const rerender = await renderPanel({ id: 1, host_alias: 'alpha', tmux_name: 'a' });
     await addAttachments([{ path: '/tmp/a.png', name: 'a.png', size: 1024, kind: 'image' }]);
@@ -4853,6 +4906,26 @@ describe('ConversationPanel attachments', () => {
     expect(order).toEqual(['upload_attachments', 'send_prompt']);
     // Sent successfully: the tray is spent along with the draft.
     expect(screen.queryAllByTestId('conv-attachment')).toHaveLength(0);
+  });
+
+  it('files alone can be sent: a prompt of the attachment block, never a bare Enter (w13-7)', async () => {
+    await renderPanel();
+    mockedInvoke.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === 'pick_attachments') return [{ path: '/tmp/a.log', name: 'a.log', size: 1024, kind: 'text' }];
+      if (cmd === 'attachment_preview') return null;
+      if (cmd === 'upload_attachments') return ['/w/p/.claude-fleet-attachments/a.log'];
+      return baseInvoke(cmd, args);
+    });
+    const send = screen.getByTestId('conv-composer-send') as HTMLButtonElement;
+    expect(send.disabled).toBe(true);
+    await fireEvent.click(screen.getByTestId('conv-attach-button'));
+    for (let i = 0; i < 4; i++) await settle();
+    expect(send.disabled).toBe(false);
+    await fireEvent.keyDown(screen.getByTestId('conv-composer-input'), { key: 'Enter' });
+    await settle();
+    await settle();
+    expect(mockedSend).toHaveBeenCalledWith('local', 'ctl', 'Attached files:\n/w/p/.claude-fleet-attachments/a.log');
+    expect(mockedSend).not.toHaveBeenCalledWith('local', 'ctl', '', expect.anything());
   });
 
   it('a failed upload fails the message without sending; Edit gives back the text and a tile flagged for reattaching', async () => {
@@ -5192,6 +5265,23 @@ describe('ConversationPanel composer access (multi-user M1)', () => {
       const tune = screen.getByTestId('conv-tune-button') as HTMLButtonElement;
       expect(tune.disabled).toBe(true);
       expect(tune.title).toMatch(/answer/i);
+    } finally {
+      fleetSettings.set({ ...SETTING_DEFAULTS });
+    }
+  });
+
+  // Review w30-8: an empty draft has nothing to tune.
+  it('the tune button is disabled on an empty draft and says why', async () => {
+    fleetSettings.set({ ...SETTING_DEFAULTS, 'work.prompt_tune': 'true' });
+    try {
+      await renderShared('answer');
+      const tune = screen.getByTestId('conv-tune-button') as HTMLButtonElement;
+      expect(tune.disabled).toBe(true);
+      expect(tune.title).toBe('Type a draft to tune first');
+      await fireEvent.input(box(), { target: { value: '   ' } });
+      expect(tune.disabled).toBe(true);
+      await fireEvent.input(box(), { target: { value: 'fix test' } });
+      expect(tune.disabled).toBe(false);
     } finally {
       fleetSettings.set({ ...SETTING_DEFAULTS });
     }

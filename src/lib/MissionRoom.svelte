@@ -141,6 +141,9 @@
   const missions = $derived($missionList.missions);
   let detail = $state.raw<MissionDetail | null>(null);
   let notice = $state<string | null>(null);
+  /** Review w17-4: the last re-read of the open mission failed; what was
+   *  loaded stays on screen. */
+  let refreshError = $state<IpcError | null>(null);
   let busy = $state(false);
   /** The last planner press that failed, in words (step 1.3). */
   let plannerFailure = $state<HumanError | null>(null);
@@ -209,9 +212,17 @@
     if (r.ok && r.value?.mission) {
       const first = detail?.mission.id !== id;
       detail = r.value;
+      refreshError = null;
       if (first) missionPanelTab.set(defaultPanelTab(r.value));
+    } else if (!r.ok && r.error.code !== 'E_NOTFOUND' && detail?.mission.id === id) {
+      // Review w17-4: a failed background re-read is not "the mission is
+      // gone": the room, an open goal edit and a half-typed answer stay.
+      // E_NOTFOUND is (the hub answers a deleted or no-longer-visible
+      // mission with it, never with `ok` and no mission): review w30-1.
+      refreshError = r.error;
     } else {
-      notice = r.ok ? 'That mission is not in the fleet any more.' : readErrorText(r.error);
+      notice =
+        r.ok || r.error.code === 'E_NOTFOUND' ? 'That mission is not in the fleet any more.' : readErrorText(r.error);
       detail = null;
       roomMissionId.set(null);
       openedId = null;
@@ -243,6 +254,7 @@
     moreOpen = false;
     confirmMove = null;
     notice = null;
+    refreshError = null;
     plannerFailure = null;
     importOpen = false;
     importText = '';
@@ -867,6 +879,12 @@
       <div class="scroll">
         <div class="col" data-testid="mission-detail-centre">
           {#if notice}<p class="notice" role="status" data-testid="mission-notice">{notice}</p>{/if}
+          {#if refreshError}
+            <p class="refresh-error" role="status" data-testid="mission-refresh-error">
+              Couldn't refresh ({readErrorText(refreshError)}) — showing what was loaded.
+              <button class="btn btn--quiet" type="button" data-testid="mission-refresh-retry" onclick={() => openedId != null && void loadDetail(openedId)}>Retry</button>
+            </p>
+          {/if}
 
           {#if graph}
             <TaskGraphCard {graph} kind="mission" onopen={() => ((tasksView = 'graph'), showMissionPanel('plan'))} />
@@ -2134,6 +2152,11 @@
   .notice {
     margin: 0;
     color: var(--danger);
+  }
+  .refresh-error {
+    margin: 0;
+    font-size: var(--text-2xs);
+    color: var(--usage-warn);
   }
   .planner-error {
     border-color: var(--danger);

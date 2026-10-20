@@ -14,7 +14,6 @@ pub(crate) mod tests;
 use crate::ipc_error::{codes, IpcError};
 use std::ops::RangeInclusive;
 use std::sync::{Arc, Mutex};
-use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpListener;
 use tokio::task::AbortHandle;
 
@@ -43,10 +42,10 @@ pub fn check_port(port: u16) -> Result<(), IpcError> {
     ))
 }
 
-/// A bidirectional byte stream.
-pub trait Stream: AsyncRead + AsyncWrite + Unpin + Send {}
-impl<T: AsyncRead + AsyncWrite + Unpin + Send> Stream for T {}
-pub type BoxedStream = Box<dyn Stream>;
+/// A bidirectional byte stream: the same blanket trait and boxed type the
+/// network layer uses.
+pub use crate::net::conn::Duplex as Stream;
+pub type BoxedStream = crate::net::conn::Stream;
 
 /// Opens one stream to `127.0.0.1:<port>` on `host`.
 #[async_trait::async_trait]

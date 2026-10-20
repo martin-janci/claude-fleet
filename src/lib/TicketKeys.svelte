@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { errorText } from './error_copy';
   // Settings → Ticket keys: the prefix each project (and each GitHub
   // repository no project claims, and each Asana tracker) numbers its tickets
   // under — `CF-12` rather than `owner/repo#12` or a 16-digit Asana id
@@ -30,7 +31,7 @@
       rows = r.value;
       loadError = null;
     } else {
-      loadError = r.error.message;
+      loadError = errorText(r.error);
     }
   }
 

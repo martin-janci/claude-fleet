@@ -544,8 +544,9 @@ decides what each sighting becomes:
 A project becomes trusted when you tick **Trust branch keys in this repo**
 in the popover, or automatically after you confirmed three branch
 suggestions in it (a suggestion only a pull request made, or one an agent
-confirmed, does not count). Settings → Limits → Lifecycle shows how many projects are trusted and has a
-**Trust none** button.
+confirmed, does not count). Settings → Work & trackers → Detection →
+*Linking* shows how many projects are trusted (*Trusted branch projects*)
+and has a **Clear** button that trusts none.
 
 ### The chip and its popover
 
@@ -1171,8 +1172,8 @@ candidates whose reason is in `work.auto_tidy_reasons` by itself, with safe
 kill or archive only, never a plain kill. `idle_unlinked` can never be
 auto-tidied (decision D19). An org can override `work.auto_tidy` for its own
 sessions (`on` / `off` / `inherit`). Every action is written to the
-session's timeline and its work journal. Settings → Limits → Lifecycle
-previews what auto-tidy would act on.
+session's timeline and its work journal. Settings → Work & trackers →
+Tidy-up → *Auto-tidy* previews what auto-tidy would act on.
 
 > **[Screenshot placeholder]** The Tidy up sheet with a done ticket and an
 > idle unlinked session.
@@ -1486,7 +1487,8 @@ asks you to confirm, like any kill.
 ## Settings
 
 Every `work.*` setting, with its default. On a standalone desktop they are
-in Settings → Limits (with its *Retention* and *Lifecycle* groups); on a hub, set them with `set_setting` (master token), read
+in Settings → Work & trackers (its *Detection*, *Tidy-up* and *Retention*
+tabs); on a hub, set them with `set_setting` (master token), read
 them with `get_settings`. This table is generated from
 `service/settings.rs` (`settings_docs_are_current`); every setting is also
 in [the settings reference](settings-reference.md).

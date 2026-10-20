@@ -9,6 +9,7 @@ import { killSession, restartSession, sessions, type SessionRow } from './sessio
 import { sessionActionBlocked } from './share';
 import { pushError } from './toasts';
 import { pushRestartError } from './restart';
+import { errorText } from './error_copy';
 
 export type OperatorBlocked =
   | 'absent'
@@ -313,7 +314,7 @@ export async function restartOperator(opts: { force?: boolean } = {}): Promise<v
   }
   const r = await restartSession(session.host_alias, session.tmux_name, undefined, {}, { force: opts.force });
   if (!r.ok) {
-    operatorError.set(`Restart failed: ${r.error.message}`);
+    operatorError.set(`Restart failed: ${errorText(r.error)}`);
     // `E_SELF_TARGET` (a hub where the agent was once registered as the
     // fleet controller) offers "Restart anyway": this funnel again, forced.
     pushRestartError(r.error, session.host_alias, session.tmux_name, () => void restartOperator({ force: true }));
@@ -343,7 +344,7 @@ export async function replaceOperator(): Promise<void> {
   }
   const r = await killSession(session.host_alias, session.tmux_name);
   if (!r.ok) {
-    operatorError.set(`Kill failed: ${r.error.message}`);
+    operatorError.set(`Kill failed: ${errorText(r.error)}`);
     pushError(r.error, 'Kill failed');
     return;
   }

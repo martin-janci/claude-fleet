@@ -1,9 +1,12 @@
 <script lang="ts">
+  import { errorText } from './error_copy';
   import { onMount } from 'svelte';
   import Modal from './Modal.svelte';
   import { listSecrets, setSecret, deleteSecret, type SecretRow } from './assets';
   import { hosts } from './hosts';
   import { savedWithUndo } from './forms/form_frame';
+  import LoadError from './states/LoadError.svelte';
+  import type { IpcError } from './result';
 
   // `names` is the union of names collected from the last computed sync
   // plan's actions (`secrets` + `missing_secrets`) — stored names come from
@@ -20,10 +23,25 @@
   let hostDrafts = $state<Record<string, string>>({});
   let busy = $state<string | null>(null);
 
+  // Review w17-6: until the list has been read, no name is "not set" — it
+  // is unknown, and Set/Delete wait (a failed read would otherwise have the
+  // user re-enter values that are already there).
+  let loaded = $state(false);
+  let loadError = $state<IpcError | null>(null);
+  let retrying = $state(false);
   async function reload() {
     const r = await listSecrets();
-    if (r.ok) rows = r.value;
-    else error = r.error.message;
+    if (r.ok) {
+      rows = r.value;
+      loaded = true;
+      loadError = null;
+    } else if (loaded) error = errorText(r.error);
+    else loadError = r.error;
+  }
+  async function retryLoad() {
+    retrying = true;
+    await reload();
+    retrying = false;
   }
 
   onMount(reload);
@@ -46,10 +64,12 @@
     hostDrafts = { ...hostDrafts, [name]: (e.currentTarget as HTMLSelectElement).value };
   }
 
-  function globalStatus(name: string): 'set' | 'not set' {
+  function globalStatus(name: string): 'set' | 'not set' | 'unknown' {
+    if (!loaded) return 'unknown';
     return rows.some((r) => r.name === name && r.host_alias === null) ? 'set' : 'not set';
   }
-  function hostStatus(name: string, hostAlias: string): 'set' | 'not set' {
+  function hostStatus(name: string, hostAlias: string): 'set' | 'not set' | 'unknown' {
+    if (!loaded) return 'unknown';
     return rows.some((r) => r.name === name && r.host_alias === hostAlias) ? 'set' : 'not set';
   }
 
@@ -75,7 +95,7 @@
         ? async () => {
             for (const t of fresh) {
               const r = await deleteSecret(name, t);
-              if (!r.ok) error = `Undo: ${name} is still on ${where(t)}: ${r.error.message}`;
+              if (!r.ok) error = `Undo: ${name} is still on ${where(t)}: ${errorText(r.error)}`;
             }
             await reload();
           }
@@ -94,7 +114,7 @@
     const r = await setSecret(name, value, target);
     busy = null;
     if (!r.ok) {
-      error = r.error.message;
+      error = errorText(r.error);
       return;
     }
     valueDrafts = { ...valueDrafts, [name]: '' };
@@ -113,7 +133,7 @@
   const NAME_OK = /^[A-Z0-9_]+$/;
   const addNameNorm = $derived(secretName.trim().toUpperCase());
   const writeHosts = $derived(visibleHosts.filter((h) => addHosts[h.alias] === 'write').map((h) => h.alias));
-  const canAdd = $derived(NAME_OK.test(addNameNorm) && addValue !== '' && (addGlobal || writeHosts.length > 0) && !adding);
+  const canAdd = $derived(loaded && NAME_OK.test(addNameNorm) && addValue !== '' && (addGlobal || writeHosts.length > 0) && !adding);
 
   async function addSecret() {
     if (!canAdd) return;
@@ -128,7 +148,7 @@
     for (const t of targets) {
       const was = isSet(name, t);
       const r = await setSecret(name, value, t);
-      if (!r.ok) failed.push(`${t ?? 'every host'}: ${r.error.message}`);
+      if (!r.ok) failed.push(`${t ?? 'every host'}: ${errorText(r.error)}`);
       else if (was) replaced.push(t);
       else fresh.push(t);
     }
@@ -148,7 +168,7 @@
     const r = await deleteSecret(name, hostAlias === '' ? undefined : hostAlias);
     busy = null;
     if (!r.ok) {
-      error = r.error.message;
+      error = errorText(r.error);
       return;
     }
     await reload();
@@ -158,6 +178,9 @@
 <Modal title="Secrets" onclose={onclose} width="580px" testid="secrets-panel">
   <p class="muted">Values are write-only: fleet never reads or displays a secret once it is set.</p>
   {#if error}<p class="error" data-testid="secrets-error">{error}</p>{/if}
+  {#if loadError}
+    <LoadError title="Couldn't read which secrets are set" error={loadError} onretry={() => void retryLoad()} {retrying} testid="secrets-load-error" />
+  {/if}
   <form class="add-secret" data-testid="secrets-add" onsubmit={(e) => { e.preventDefault(); void addSecret(); }}>
     <p class="muted">Assets read it as ${'{'}NAME{'}'}. Its value goes to hosts and is never shown again.</p>
     <div class="add-row">
@@ -209,12 +232,12 @@
               <option value={h.alias}>{h.alias} ({hostStatus(name, h.alias)})</option>
             {/each}
           </select>
-          <button onclick={() => set(name)} disabled={busy === name || draftValue(name) === ''} data-testid={`secret-set-${name}`}>Set</button>
-          <button onclick={() => del(name)} disabled={busy === name} data-testid={`secret-delete-${name}`}>Delete</button>
+          <button onclick={() => set(name)} disabled={!loaded || busy === name || draftValue(name) === ''} data-testid={`secret-set-${name}`}>Set</button>
+          <button onclick={() => del(name)} disabled={!loaded || busy === name} data-testid={`secret-delete-${name}`}>Delete</button>
         </div>
       </div>
     {/each}
-    {#if visibleNames.length === 0}<p class="muted">No secrets known yet.</p>{/if}
+    {#if visibleNames.length === 0 && loaded}<p class="muted">No secrets known yet.</p>{/if}
   </div>
   <div class="actions">
     <button onclick={onclose}>Close</button>

@@ -5,6 +5,7 @@
   import { cardMayApply, cardOwns } from './assets_cards';
   import { onMount, tick, untrack } from 'svelte';
   import { applySync, isDestructive, planSync, syncProgress, type SyncPlan, type SyncRunSummary } from './assets';
+  import { errorSentence, errorText } from './error_copy';
 
   /** A host plan skipped because the host has no layers assigned — the
    *  fleet-core detail always starts with this (see `UNLAYERED_DETAIL` in
@@ -93,7 +94,7 @@
     replanError = null;
     const r = await planSync({ ...filter, hostAlias, allowUnlayered: true });
     replanning = false;
-    if (!r.ok) { replanError = r.error.message; void refocus(); return; }
+    if (!r.ok) { replanError = errorText(r.error); void refocus(); return; }
     onreplanned?.(r.value);
     void refocus();
   }
@@ -134,7 +135,9 @@
     onapplying?.(false);
     controller = null;
     if (!r.ok) {
-      error = r.error.message;
+      // Review w16-10: the person's way past a missing secret is the Secrets
+      // panel or the "Apply anyway" box below, not `force_partial`.
+      error = r.error.code === 'E_SECRET_MISSING' ? `${errorSentence(r.error)} Or tick “Apply anyway”.` : errorText(r.error);
       if (r.error.code === 'E_SECRET_MISSING') sawSecretMissing = true;
       void refocus();
       return;

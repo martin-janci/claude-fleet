@@ -9,6 +9,7 @@
 </script>
 
 <script lang="ts">
+  import { errorText } from './error_copy';
   // Bulk "send prompt" for the sidebar's multi-select (FE-4), in the one
   // dialog pattern (step 5.10). Each target gets the same text as a new turn
   // through `queue_prompt`: an idle session gets it at once, a busy one
@@ -70,7 +71,7 @@
       sendable.map(async (t) => {
         const r = await queuePrompt(t.id, prompt);
         if (r.ok) outcome[t.id] = r.value.delivered ? 'sent' : 'queued';
-        else errors[t.id] = r.error.message;
+        else errors[t.id] = errorText(r.error);
       }),
     );
     sending = false;

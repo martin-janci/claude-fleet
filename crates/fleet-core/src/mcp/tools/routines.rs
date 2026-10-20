@@ -15,13 +15,14 @@ impl FleetTools {
         save {routine, routine_id?}: the whole routine; preview: save's dry \
         run; delete; set_enabled {enabled}; skip_next {skip?}; run_now; \
         set_run_outcome {run_id, outcome}: a person's did_work | nothing | \
-        needs_person (needs_person lands it in the Inbox). Debugging, nothing \
+        needs_person (that lands it in the Inbox). Debugging, nothing \
         written: explain {routine_id, limit?}: why it does or does not fire, \
-        check by check, its recent events judged and its decision trace; \
+        check by check, recent events judged and the decision trace; \
         decisions {routine_id, limit?}: the trace alone; dry_run \
         {routine_id, event_id?}: what a fire now would start and the exact \
-        prompt. tune_prompt {routine, ask?}: the prompt tuner on a draft \
-        routine's prompt, on its host and profile: { prompt, notes, \
+        prompt. memory; set_memory {notebook, text}. \
+        tune_prompt {routine, ask?}: the prompt tuner on a draft's \
+        prompt, on its host and profile: { prompt, notes, \
         unchanged, model, host_alias, at }, a proposal never saved \
         (E_INVALID_STATE while work.prompt_tune is off). Pause all stops the \
         schedule, not run_now. E_NOTFOUND, E_INVALID.")]
@@ -43,7 +44,10 @@ impl FleetTools {
         // between (transition plan, "Where AI never decides"). The operator
         // is an unbound client, so nothing below would stop it.
         if caller.is_operator()
-            && matches!(p.action.as_str(), "save" | "run_now" | "set_run_outcome")
+            && matches!(
+                p.action.as_str(),
+                "save" | "run_now" | "set_run_outcome" | "set_memory"
+            )
         {
             return Err(mcp_err(
                 codes::E_FORBIDDEN,
@@ -153,6 +157,29 @@ impl FleetTools {
                 &routines::dry_run(store, &scope, id()?, p.event_id, crate::store::now_unix())
                     .map_err(to_mcp_err)?,
             ),
+            "memory" => ok_json_compact(
+                &routines::memory::get(store, &scope, id()?).map_err(to_mcp_err)?,
+            ),
+            "set_memory" => {
+                let notebook = p.notebook.as_deref().ok_or_else(|| {
+                    mcp_err(codes::E_INVALID, "set_memory needs notebook", None)
+                })?;
+                let text = p
+                    .text
+                    .as_deref()
+                    .ok_or_else(|| mcp_err(codes::E_INVALID, "set_memory needs text", None))?;
+                ok_json_compact(
+                    &routines::memory::set(
+                        store,
+                        &scope,
+                        id()?,
+                        notebook,
+                        text,
+                        crate::store::now_unix(),
+                    )
+                    .map_err(to_mcp_err)?,
+                )
+            }
             "set_run_outcome" => {
                 let run_id = p
                     .run_id
@@ -178,7 +205,7 @@ impl FleetTools {
                 format!(
                     "action must be list | get | runs | failing | budget | save | preview | delete | \
                      set_enabled | skip_next | run_now | set_run_outcome | explain | decisions | \
-                     dry_run | tune_prompt, got {other:?}"
+                     dry_run | tune_prompt | memory | set_memory, got {other:?}"
                 ),
                 None,
             )),

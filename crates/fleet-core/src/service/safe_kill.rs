@@ -134,13 +134,7 @@ pub struct DiscardKillSessionArgs {
     pub tmux_name: String,
 }
 
-fn now_secs() -> i64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
+use crate::store::now_unix as now_secs;
 
 /// 8 random hex chars — enough entropy to make collision with arbitrary pane
 /// text vanishingly unlikely while keeping the marker short for the prompt.

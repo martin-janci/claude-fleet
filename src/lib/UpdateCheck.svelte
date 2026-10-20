@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { errorText } from './error_copy';
   // "Check for updates" (Settings → About): a person's ask, so the hub
   // re-reads the published channel before it answers (`checkForUpdate(true)`).
   // An update it finds shows in the window's banner, as one found on the
@@ -17,7 +18,7 @@
     const r = await checkForUpdate(true);
     busy = false;
     if (r.ok) dismissUpdate(null);
-    line = r.ok ? checkedLine(r.value) : `Could not check: ${r.error.message}`;
+    line = r.ok ? checkedLine(r.value) : `Could not check: ${errorText(r.error)}`;
   }
 </script>
 

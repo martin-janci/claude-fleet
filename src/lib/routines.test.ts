@@ -139,6 +139,13 @@ describe('the Inbox', () => {
     expect(get(inboxCount)).toBe(1);
   });
 
+  it("w11-6: a teammate's failed routine, which the viewer may not change, does not raise it", () => {
+    failing.set([failed({ may_change: false })]);
+    expect(get(inboxCount)).toBe(0);
+    failing.set([failed(), failed({ routine: routine({ id: 4 }), may_change: false })]);
+    expect(get(inboxCount)).toBe(1);
+  });
+
   it('Retry runs it now and Pause switches it off, each re-reading the list', async () => {
     inv.mockImplementation(async (_c: string, a: { args: { action: string } }) => (a.args.action === 'failing' ? [] : {}));
     failing.set([failed()]);

@@ -15,6 +15,7 @@
   import { toIpcError } from './result';
   import { push, pushError } from './toasts';
   import { repairSession, hasNoPane, showFriendlyNames, sessionsAnswered, sessionAgent } from './sessions';
+  import { requestSessionAction } from './session_actions';
   import { splashShown } from './startup';
   import Loader from './Loader.svelte';
   import { displayName } from './attention';
@@ -30,6 +31,7 @@
   import { accessOf, noAttachReason } from './access';
   import { sessionBlocked } from './share';
   import { matchShortcut } from './shortcuts';
+  import { destination, goTo } from './destination';
   import {
     shellTerminals,
     shellTerminalName,
@@ -48,7 +50,7 @@
   import { askContextHelp, helpModel, screenHistory } from './context_help';
   import { fleetSettings, settingBool, SETTING_KEYS } from './fleet_settings';
   import { AGENT_LABELS } from './row_groups';
-  import { agentTabLabel, agentTabName } from './prefs';
+  import { agentTabLabel, agentTabName, sessionView } from './prefs';
   import Self from './TerminalView.svelte';
   import HostOffline from './states/HostOffline.svelte';
   import { errorText } from './error_copy';
@@ -299,6 +301,7 @@
     seenRequest = req.seq;
     untrack(() => {
       if (req.to === 'agent') selectTab(null);
+      else if (req.to === 'new') void newTerminal();
       else if (req.n != null && listed && shells.includes(req.n)) selectTab(req.n);
       else {
         // Before the list: the terminal it names is the one showShells
@@ -422,15 +425,21 @@
   function onTerminalChord(e: KeyboardEvent) {
     if (!showStrip) return;
     const id = matchShortcut('global', e, isMac);
-    if (id === 'new-terminal') {
-      e.preventDefault();
-      e.stopPropagation();
-      void newTerminal();
-    } else if (id === 'next-terminal') {
-      e.preventDefault();
-      e.stopPropagation();
-      selectTab(nextTerminalTab(activeShell, shells));
-    }
+    if (id !== 'new-terminal' && id !== 'next-terminal') return;
+    // Only where the terminal can be shown (review w18-2): not under a
+    // dialog, and not from Control, Automation or another fleet page, where
+    // the pane stays mounted but a new tmux window would open unseen.
+    const dest = get(destination);
+    if (dest !== 'session' && dest !== 'details') return;
+    if ((e.target as HTMLElement | null)?.closest?.('dialog')) return;
+    e.preventDefault();
+    e.stopPropagation();
+    // Then show the terminal, as the session bar's Terminals tab does: from
+    // the Conversation view or Details the chord would otherwise act unseen.
+    sessionView.set('terminal');
+    if (dest !== 'session') goTo('session');
+    if (id === 'new-terminal') void newTerminal();
+    else selectTab(nextTerminalTab(activeShell, shells));
   }
 
   $effect(() => {
@@ -671,7 +680,15 @@
   function pointOverGrid(position: { x: number; y: number }): boolean {
     if (!container) return false;
     const { x, y } = dropPoint(position);
-    return pointInRect(x, y, container.getBoundingClientRect());
+    if (!pointInRect(x, y, container.getBoundingClientRect())) return false;
+    // The grid stays mounted and laid out under every `.view-slot.overlay`
+    // (Conversation, Control, Files, fleet pages), at these same coordinates.
+    // Without asking what is actually on top there, a file dropped on the
+    // Conversation composer was also scp'd here and its path typed, unseen,
+    // into Claude's prompt (review w13-1). `elementFromPoint` answers for
+    // every overlay without this view having to know about any of them.
+    const top = typeof document.elementFromPoint === 'function' ? document.elementFromPoint(x, y) : null;
+    return !top || container.contains(top);
   }
 
   async function handleDrop(paths: string[]) {
@@ -864,7 +881,7 @@
       mouse.reset();
       screen.onClipboard = (text) => {
         void nativeWriteText(text).then((r) => {
-          if (!r.ok && !openIsStale(gen, target)) openError = `Clipboard write failed: ${r.error.message}`;
+          if (!r.ok && !openIsStale(gen, target)) openError = `Clipboard write failed: ${errorText(r.error)}`;
         });
       };
       renderVersion++;
@@ -905,9 +922,13 @@
             push({ kind: 'info', message: `Repaired workspace for ${sess.tmux_name}: ${actions.join('; ')}${branch}` });
           }
           if (v?.needs_explicit_repair || v?.tmux_cwd_stale) {
+            // A warning with the button, not a 4 s info toast with none: the
+            // person has to act, and the action is Repair workspace (w16-12).
             push({
-              kind: 'info',
-              message: `${sess.tmux_name} needs Repair workspace: ${(v.warnings ?? []).join('; ')}`,
+              kind: 'warning',
+              message: `${displayName(sess, $showFriendlyNames)} needs Repair workspace: ${(v.warnings ?? []).join('; ')}`,
+              action: { label: 'Repair workspace…', run: () => requestSessionAction(sess, 'repair') },
+              sticky: true,
             });
           }
         } else if (rep.error.code !== 'E_HOST_OFFLINE') {

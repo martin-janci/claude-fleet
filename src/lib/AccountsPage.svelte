@@ -9,7 +9,8 @@
   // (`account_spend`, the `usage_daily_account` roll-up of step 4.2; local
   // only, so a paired desktop shows no $), and how many sessions its limit
   // paused, with Show and a one-click Switch to the account with headroom.
-  import { accounts } from './accounts';
+  import { accounts, accountsLoad, loadAccounts } from './accounts';
+  import ListGate from './states/ListGate.svelte';
   import { hosts } from './hosts';
   import { sessions } from './sessions';
   import { accountUsage, refreshAccountUsage } from './account_usage_store';
@@ -421,52 +422,52 @@
   {/if}
 
   {#if list.length === 0}
-    <p class="empty" data-testid="accounts-empty">
-      No Claude account yet. Add one, or log a host in to it.
-    </p>
+    <ListGate load={$accountsLoad} what="accounts" onretry={() => void loadAccounts()} testid="accounts">
+      <p class="empty" data-testid="accounts-empty">
+        No Claude account yet. Add one, or log a host in to it.
+      </p>
+    </ListGate>
   {:else}
     <div class="split">
-      <ul class="list" role="listbox" aria-label="Claude accounts" tabindex="-1" onkeydown={onListKeydown}>
+      <!-- Review w19-2: a list of cards, each with a pressed-state button
+           for the pick and the paused-session actions beside it (an ARIA
+           option makes everything inside it presentational). -->
+      <ul class="list" aria-label="Claude accounts">
         {#each list as a (a.uuid)}
           {@const five = windowView(a, '5h')}
           {@const week = windowView(a, 'weekly')}
           {@const paused = pausedOf(a)}
-          <li
-            class="card"
-            class:active={a.uuid === selected?.uuid}
-            role="option"
-            aria-selected={a.uuid === selected?.uuid}
-            tabindex={a.uuid === selected?.uuid ? 0 : -1}
-            data-account={a.uuid}
-            data-testid="account-card"
-            onclick={() => (picked = a.uuid)}
-            onkeydown={(e) => {
-              if (e.key === 'Enter' || e.key === ' ') {
-                e.preventDefault();
-                picked = a.uuid;
-              }
-            }}
-          >
-            <div class="card-head">
-              <span class="label">{a.label}</span>
-              {#if a.plan}<span class="plan">{a.plan}</span>{/if}
-            </div>
-            {#each [five, week] as w (w.kind)}
-              <div class="line" data-level={w.level}>
-                <span class="w-title">{w.title}</span>
-                <span class="w-val">
-                  {#if w.unknown}? left{:else if w.left === null}—{:else}{w.left}% left{#if w.resetShort} · {w.resetShort}{/if}{/if}
+          <li class="card" class:active={a.uuid === selected?.uuid}>
+            <button
+              type="button"
+              class="pick"
+              aria-pressed={a.uuid === selected?.uuid}
+              data-account={a.uuid}
+              data-testid="account-card"
+              onclick={() => (picked = a.uuid)}
+              onkeydown={onListKeydown}
+            >
+              <span class="card-head">
+                <span class="label">{a.label}</span>
+                {#if a.plan}<span class="plan">{a.plan}</span>{/if}
+              </span>
+              {#each [five, week] as w (w.kind)}
+                <span class="line" data-level={w.level}>
+                  <span class="w-title">{w.title}</span>
+                  <span class="w-val">
+                    {#if w.unknown}? left{:else if w.left === null}—{:else}{w.left}% left{#if w.resetShort} · {w.resetShort}{/if}{/if}
+                  </span>
                 </span>
-              </div>
-            {/each}
-            <div class="meta" data-testid="account-counts">
-              {countLine(
-                a.sessions.length,
-                routinesOn(a.uuid, routines, $hosts),
-                spendText(a.uuid),
-                fallbackRoutinesOn(a.uuid, routines, $hosts),
-              )}
-            </div>
+              {/each}
+              <span class="meta" data-testid="account-counts">
+                {countLine(
+                  a.sessions.length,
+                  routinesOn(a.uuid, routines, $hosts),
+                  spendText(a.uuid),
+                  fallbackRoutinesOn(a.uuid, routines, $hosts),
+                )}
+              </span>
+            </button>
             {#if paused.length > 0}
               {@const target = switchTo[a.uuid]}
               <div class="paused" data-testid="account-paused">
@@ -795,7 +796,18 @@
     border-color: var(--accent);
     background: var(--accent-soft);
   }
-  .card:focus-visible {
+  .pick {
+    display: block;
+    width: 100%;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+  .pick:focus-visible {
     outline: var(--ring-w) solid var(--ring);
     outline-offset: var(--ring-offset);
   }
@@ -833,6 +845,7 @@
     color: var(--usage-warn);
   }
   .meta {
+    display: block;
     margin-top: var(--space-1);
     font-size: var(--text-xs);
     color: var(--fg-muted);

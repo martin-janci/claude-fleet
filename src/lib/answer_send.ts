@@ -14,6 +14,7 @@ import { sessionActionBlocked } from './share';
 import { answerDialog, type SessionRow } from './sessions';
 import { answerFingerprint, pendingInputFor, type AnswerView } from './pending_input';
 import { fleetBlocked } from './fleets';
+import { errorText } from './error_copy';
 
 export type AnswerOutcome =
   | { ok: true }
@@ -29,7 +30,7 @@ export type AnswerOutcome =
  *  this check exists to distrust. */
 async function reread(session: SessionRow): Promise<{ view: AnswerView | null } | { error: string }> {
   const r = await (session.fleet ? sessionActivity(session.id, session.fleet) : sessionActivity(session.id));
-  if (!r.ok) return { error: r.error.message };
+  if (!r.ok) return { error: errorText(r.error) };
   if (!r.value) return { view: null };
   const fresh = pendingInputFor({
     rowStatus: session.claude_status,
@@ -73,6 +74,6 @@ export async function sendAnswer(session: SessionRow, view: AnswerView, key: str
   if (r.ok) return { ok: true };
   // The backend's own check, made right before its press: the dialog moved
   // between this read and the key.
-  if (r.error.code === 'E_CONFLICT') return { ok: false, stale: r.error.message };
-  return { ok: false, error: r.error.message };
+  if (r.error.code === 'E_CONFLICT') return { ok: false, stale: errorText(r.error) };
+  return { ok: false, error: errorText(r.error) };
 }

@@ -5,6 +5,7 @@
   // hub and what it keeps is keyed by `sessionKey`), its terminal attached
   // from this machine, and a read-only pane snapshot.
   import { untrack } from 'svelte';
+  import { errorText } from './error_copy';
   import {
     closeFleetSession,
     connectionWord,
@@ -53,7 +54,7 @@
       snapshot = r.value;
       snapshotError = null;
     } else {
-      snapshotError = r.error.message;
+      snapshotError = errorText(r.error);
     }
   }
 

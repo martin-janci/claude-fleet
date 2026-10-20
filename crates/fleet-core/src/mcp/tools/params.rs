@@ -366,9 +366,7 @@ pub struct NewBgSessionParams {
     pub confirm_nonce: Option<String>,
 }
 
-fn default_true() -> bool {
-    true
-}
+use crate::serde_util::default_true;
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct QueuePromptParams {
@@ -1502,6 +1500,12 @@ pub struct RoutinesParams {
     /// set_run_outcome: did_work | nothing | needs_person.
     #[serde(default)]
     pub outcome: Option<String>,
+    /// routine | project.
+    #[serde(default)]
+    pub notebook: Option<String>,
+    /// Its new text.
+    #[serde(default)]
+    pub text: Option<String>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]

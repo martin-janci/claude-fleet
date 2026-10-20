@@ -34,6 +34,7 @@ import { withAttachments, tooLong } from './attach_prompt';
 import { recordAttachments } from './library';
 import { carriedCount, normalizePrompt, type Conversation } from './conversation';
 import { awayRow, fleetBlocked, fleetRows, keyTarget } from './fleets';
+import { errorText } from './error_copy';
 
 export type OutboxState = 'waiting' | 'sending' | 'sent' | 'queued' | 'received' | 'failed';
 
@@ -312,7 +313,7 @@ export function createOutbox(deps: OutboxDeps) {
       if (!up.ok) {
         // `upload_attachments` consumes each path's allow-list entry as it
         // clears the budget, so the same paths cannot be uploaded twice.
-        patch(sid, id, { state: 'failed', error: up.error.message, retryable: false });
+        patch(sid, id, { state: 'failed', error: errorText(up.error), retryable: false });
         return;
       }
       paths = up.value;
@@ -340,7 +341,7 @@ export function createOutbox(deps: OutboxDeps) {
     const r = await deps.send(target.host_alias, target.tmux_name, body, target.fleet);
     if (mine !== epoch) return;
     if (!r.ok) {
-      patch(sid, id, { state: 'failed', error: r.error.message, retryable: true, acked: false });
+      patch(sid, id, { state: 'failed', error: errorText(r.error), retryable: true, acked: false });
       return;
     }
     stamp += 1;

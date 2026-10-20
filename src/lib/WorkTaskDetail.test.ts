@@ -521,6 +521,23 @@ describe('WorkTaskDetail', () => {
     expect(get(selectedSession)?.id).toBe(12);
   });
 
+  it('Esc closes the ▾ menu and gives focus back to its caret; ↓ walks its items (review w18-11)', async () => {
+    render(WorkTaskDetail, { taskId: 'item:12' });
+    await flush();
+    const caret = within(bar()).getByTestId('work-button-menu');
+    await fireEvent.click(caret);
+    await flush();
+    const list = within(bar()).getByTestId('work-button-menu-list');
+    await fireEvent.keyDown(list, { key: 'ArrowDown' });
+    expect(document.activeElement?.getAttribute('role')).toBe('menuitem');
+    const esc = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+    document.activeElement!.dispatchEvent(esc);
+    await flush();
+    expect(esc.defaultPrevented).toBe(true);
+    expect(within(bar()).queryByTestId('work-button-menu-list')).toBeNull();
+    expect(document.activeElement).toBe(caret);
+  });
+
   it('Start with last settings opens the popover on those settings when something is in the way', async () => {
     handlers.preview_start_work = () => ({
       key: 'ABC-12', title: 'Login', item_id: 12,

@@ -9,6 +9,8 @@
   import AccountNickname from './AccountNickname.svelte';
   import EmbedSlot from './pages/EmbedSlot.svelte';
   import EmptyState from './states/EmptyState.svelte';
+  import ListGate from './states/ListGate.svelte';
+  import { hostsLoad, loadHosts } from './hosts';
   import { hubStatus, hubActionBlocked } from './hub';
   import { hubConnection, connectionBanner } from './hub_connection';
   import type { HostGroup, HostRowInfo } from './hosts_view';
@@ -164,15 +166,17 @@
           testid="hosts-empty"
           title={`No host matches “${filter}”.`}
           actions={[{ label: 'Clear the filter', onclick: () => (filter = ''), testid: 'hosts-clear-filter' }]} />
+      {:else if hubSkewEmptyMessage}
+        <EmptyState kind="calm" testid="hosts-empty" title={hubSkewEmptyMessage} />
       {:else}
-        <EmptyState
-          kind={hubSkewEmptyMessage ? 'calm' : 'first'}
-          testid="hosts-empty"
-          title={hubSkewEmptyMessage ?? 'Start with one host'}
-          body={hubSkewEmptyMessage ? null : 'Sessions run in tmux on a host you can reach over SSH.'}
-          actions={!hubSkewEmptyMessage && onaddhost
-            ? [{ label: 'Add a host…', onclick: onaddhost, primary: true, testid: 'hosts-empty-add' }]
-            : []} />
+        <ListGate load={$hostsLoad} what="hosts" onretry={() => void loadHosts()} testid="hosts">
+          <EmptyState
+            kind="first"
+            testid="hosts-empty"
+            title="Start with one host"
+            body="Sessions run in tmux on a host you can reach over SSH."
+            actions={onaddhost ? [{ label: 'Add a host…', onclick: onaddhost, primary: true, testid: 'hosts-empty-add' }] : []} />
+        </ListGate>
       {/if}
     {/each}
   </div>

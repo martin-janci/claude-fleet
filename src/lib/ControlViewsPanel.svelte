@@ -22,6 +22,7 @@
   mission a thread or a chip opened, with its task graph.
 -->
 <script lang="ts">
+  import { errorText } from './error_copy';
   import { tablistKeys } from './tablist_keys';
   import { tabStrip } from './tab_strip';
   import { selectSession, selectSessionExplicitly, selectedSession } from './selection';
@@ -101,7 +102,7 @@
     checking = true;
     const r = await scanFindings();
     checking = false;
-    if (!r.ok) push({ kind: 'error', message: `Could not check now: ${r.error.message}` });
+    if (!r.ok) push({ kind: 'error', message: `Could not check now: ${errorText(r.error)}` });
   }
 
   const shown = $derived(shownViews($controlViews));
@@ -408,7 +409,7 @@
     {:else if active === 'library'}
       <LibraryView />
     {:else if active === 'today'}
-      <TodayView />
+      <TodayView onopen={openRow} />
     {/if}
   </div>
   <ControlMissions />

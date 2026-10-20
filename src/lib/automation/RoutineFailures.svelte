@@ -20,23 +20,31 @@
     type FailingRoutine,
   } from '../routines';
 
-  let busy = $state<number | null>(null);
+  // One id per call in flight (review w11-13): a single id let the first
+  // call's return re-enable a second item's buttons mid-call.
+  let busy = $state<ReadonlySet<number>>(new Set());
+  const setBusy = (id: number, on: boolean) => {
+    const next = new Set(busy);
+    if (on) next.add(id);
+    else next.delete(id);
+    busy = next;
+  };
 
   // `trackFailingRoutines` (main.ts) keeps the list fresh; opening the Inbox
   // reads it once more (Sidebar.svelte), so it is current as it shows.
 
   async function retry(f: FailingRoutine) {
-    busy = f.routine.id;
+    setBusy(f.routine.id, true);
     const r = await retryRoutine(f);
-    busy = null;
+    setBusy(f.routine.id, false);
     if (!r.ok) pushError(r.error, `Retry ${f.routine.name} failed`);
     else push({ kind: 'success', message: `${f.routine.name} is running again` });
   }
 
   async function pause(f: FailingRoutine) {
-    busy = f.routine.id;
+    setBusy(f.routine.id, true);
     const r = await pauseRoutine(f);
-    busy = null;
+    setBusy(f.routine.id, false);
     if (!r.ok) pushError(r.error, `Pause ${f.routine.name} failed`);
     else push({ kind: 'success', message: `${f.routine.name} paused` });
   }
@@ -56,15 +64,18 @@
           {#if f.may_change}
             <span class="actions">
               <button type="button" class="btn btn--chip" data-testid="routine-failure-fix" title={f.fix ? `${f.fix.code}${f.fix.host ? ` on ${f.fix.host}` : ''}` : undefined} onclick={() => fixRoutine(f)}>{fixLabel(f.fix)}</button>
-              <button type="button" class="btn btn--chip" data-testid="routine-failure-retry" disabled={busy === f.routine.id} onclick={() => retry(f)}
+              <button type="button" class="btn btn--chip" data-testid="routine-failure-retry" disabled={busy.has(f.routine.id)} onclick={() => retry(f)}
                 >Retry</button
               >
               {#if f.routine.enabled}
-                <button type="button" class="btn btn--chip" data-testid="routine-failure-pause" disabled={busy === f.routine.id} onclick={() => pause(f)}
+                <button type="button" class="btn btn--chip" data-testid="routine-failure-pause" disabled={busy.has(f.routine.id)} onclick={() => pause(f)}
                   >Pause</button
                 >
               {/if}
             </span>
+          {:else}
+            <!-- Review w11-6: not counted in the badge; its owner acts. -->
+            <span class="line" data-testid="routine-failure-owner">Only its owner can change it</span>
           {/if}
         </div>
       </div>
