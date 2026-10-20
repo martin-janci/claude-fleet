@@ -1738,7 +1738,7 @@ pub const SPECS: &[Spec] = &[
         WORK_HELP_MODEL,
         "haiku",
         Kind::Choice(SUMMARY_MODELS),
-        "Context help model",
+        "Writing help model",
         "The model that answers a question asked at a terminal or composer prompt line, and that tunes a prompt, on the session's own host and account.",
     )
     .tags(&[Tag::Ai]),
@@ -1747,7 +1747,7 @@ pub const SPECS: &[Spec] = &[
         "false",
         Kind::Bool,
         "Prompt tuner",
-        "Composer and routine prompt: Tune has a model rewrite your draft into a clearer prompt for the agent, on the session's or routine's host. You see the rewrite beside your draft and accept, edit or discard it; nothing is sent.",
+        "Composer and routine prompt: Tune has a model rewrite your draft into a clearer prompt for the agent, on the session's or routine's host. It runs on the Writing help model. You see the rewrite beside your draft and accept, edit or discard it; nothing is sent.",
     )
     .tags(&[Tag::Ai]),
     Spec::new(

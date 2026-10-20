@@ -2133,7 +2133,7 @@
         ],
         "type": "choice"
       },
-      "label": "Context help model",
+      "label": "Writing help model",
       "modified": false,
       "restart": "none",
       "scope": "fleet",
@@ -2149,7 +2149,7 @@
         "level": "none"
       },
       "default": "false",
-      "help": "Composer and routine prompt: Tune has a model rewrite your draft into a clearer prompt for the agent, on the session's or routine's host. You see the rewrite beside your draft and accept, edit or discard it; nothing is sent.",
+      "help": "Composer and routine prompt: Tune has a model rewrite your draft into a clearer prompt for the agent, on the session's or routine's host. It runs on the Writing help model. You see the rewrite beside your draft and accept, edit or discard it; nothing is sent.",
       "key": "work.prompt_tune",
       "kind": {
         "type": "bool"

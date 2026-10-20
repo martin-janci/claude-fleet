@@ -110,16 +110,16 @@ fn the_draft_survives_a_long_history() {
 
 #[test]
 fn the_reply_is_read_as_json_or_as_plain_text() {
-    let (p, n) = parse_reply(
+    let (p, n, _) = parse_reply(
         r#"Sure: {"prompt": "Do X.\nThen Y.", "notes": "Split it."}"#,
         "",
         DRAFT_MAX_CHARS,
     )
     .unwrap();
     assert_eq!((p.as_str(), n.as_str()), ("Do X.\nThen Y.", "Split it."));
-    let (p, n) = parse_reply("Just do X.", "", DRAFT_MAX_CHARS).unwrap();
+    let (p, n, _) = parse_reply("Just do X.", "", DRAFT_MAX_CHARS).unwrap();
     assert_eq!((p.as_str(), n.as_str()), ("Just do X.", ""));
-    let (p, _) = parse_reply(r#"{"prompt": "```\nDo X.\n```"}"#, "", DRAFT_MAX_CHARS).unwrap();
+    let (p, _, _) = parse_reply(r#"{"prompt": "```\nDo X.\n```"}"#, "", DRAFT_MAX_CHARS).unwrap();
     assert_eq!(p, "Do X.", "a fence is stripped");
     assert_eq!(
         parse_reply(r#"{"prompt": "", "notes": "n"}"#, "", DRAFT_MAX_CHARS),
@@ -191,7 +191,7 @@ async fn the_drafts_own_hashes_survive_redaction_and_new_ones_do_not() {
     let other = "cd".repeat(32);
     let reply =
         format!(r#"{{"prompt": "Verify that the release checksum equals {sha} (not {other})."}}"#);
-    let (p, _) = parse_reply(&reply, &draft, DRAFT_MAX_CHARS).unwrap();
+    let (p, _, _) = parse_reply(&reply, &draft, DRAFT_MAX_CHARS).unwrap();
     assert!(p.contains(&sha), "the draft's own value is kept: {p}");
     assert!(
         !p.contains(&other),
@@ -208,12 +208,32 @@ fn the_rewrite_is_capped_at_the_targets_limit() {
         r#"{{"prompt": "{}", "notes": "Longer."}}"#,
         "y".repeat(5_000)
     );
-    let (p, n) = parse_reply(&reply, "short", 4_000).unwrap();
+    let (p, n, cut) = parse_reply(&reply, "short", 4_000).unwrap();
     assert_eq!(p.chars().count(), 4_000);
     assert!(n.starts_with("Longer.\n"), "{n}");
     assert!(n.contains("4000-character limit"), "{n}");
-    let (p, n) = parse_reply(r#"{"prompt": "ok"}"#, "short", 4_000).unwrap();
-    assert_eq!((p.as_str(), n.as_str()), ("ok", ""));
+    assert!(cut, "the answer says it was cut");
+    let (p, n, cut) = parse_reply(r#"{"prompt": "ok"}"#, "short", 4_000).unwrap();
+    assert_eq!((p.as_str(), n.as_str(), cut), ("ok", "", false));
+}
+
+/// The answer carries the cut, so a client can warn before "Use this"
+/// rather than leave it to a line in the notes (review w07-7).
+#[tokio::test]
+async fn a_cut_rewrite_says_so_in_the_answer() {
+    let long = format!(r#"{{"prompt": "{}"}}"#, "y".repeat(DRAFT_MAX_CHARS + 10));
+    let (a, _) = tune(&Says::new(&long), &target(), &req("fix it"))
+        .await
+        .unwrap();
+    assert!(a.cut, "{a:?}");
+    let (a, _) = tune(
+        &Says::new(r#"{"prompt": "Fix it."}"#),
+        &target(),
+        &req("fix it"),
+    )
+    .await
+    .unwrap();
+    assert!(!a.cut, "{a:?}");
 }
 
 #[tokio::test]

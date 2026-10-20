@@ -4427,7 +4427,7 @@
         ],
         "type": "choice"
       },
-      "label": "Context help model",
+      "label": "Writing help model",
       "widgets": [
         "select",
         "radio",
