@@ -20,7 +20,8 @@
   //
   // Multi-hub Phase 2: an extra fleet's sessions notify the same way, by
   // the same table, named with their fleet. A fleet's first non-empty list
-  // is its baseline, as the primary's bootstrap fill is.
+  // (`FleetRows.loaded`) is its baseline, as the primary's bootstrap fill is.
+  // A duplicate fleet never notifies.
   import { onMount } from 'svelte';
   import { get } from 'svelte/store';
   import {
@@ -133,7 +134,14 @@
       const idleSecs = get(attentionIdleMinutes) * 60;
       const friendly = get(showFriendlyNames);
       let chimed = false;
+      const known = get(fleets);
+      const watched = new Set<string>();
       for (const [fid, rows] of all) {
+        // A duplicate is another fleet's hub twice: its rows notify there
+        // (review w01-3). A fleet not yet listed has no baseline: rows an
+        // event brought first would make every listed row look new (w01-13).
+        if (known.find((f) => f.id === fid)?.duplicate_of || !rows.loaded) continue;
+        watched.add(fid);
         const list = [...rows.sessions.values()];
         const opts = { idleSecs, now, facts: attentionFactsFrom([...rows.hosts.values()], {}, now) };
         const before = fleetPrev.get(fid);
@@ -141,7 +149,7 @@
         fleetPrev.set(fid, notifySnapshot(list, opts));
         fleetStuckPrev.set(fid, stuckSnapshot(list));
         if (!before || before.size === 0) continue;
-        const label = get(fleets).find((f) => f.id === fid)?.label ?? fid;
+        const label = known.find((f) => f.id === fid)?.label ?? fid;
         for (const { row, state } of newlyNotifiable(before, list, opts)) {
           const name = friendly && row.friendly_name ? row.friendly_name : row.tmux_name;
           chimed = notifyMatrix(state, `${name} ${TITLES[state]}`, `${label} · ${row.host_alias}`, `${state}-${fid}-${row.id}`, !chimed) || chimed;
@@ -155,9 +163,9 @@
           }
         }
       }
-      // A fleet that is gone forgets its baseline.
+      // A fleet that is gone (or not watched now) forgets its baseline.
       for (const fid of [...fleetPrev.keys()]) {
-        if (!all.has(fid)) {
+        if (!watched.has(fid)) {
           fleetPrev.delete(fid);
           fleetStuckPrev.delete(fid);
         }

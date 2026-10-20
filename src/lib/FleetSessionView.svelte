@@ -47,6 +47,8 @@
   import FleetTerminal from './FleetTerminal.svelte';
   import Button from './kit/Button.svelte';
   import { tablistKeys } from './tablist_keys';
+  import { readable, writable } from 'svelte/store';
+  import { trackViewedSession } from './session_viewed';
 
   let { fleet, session }: { fleet: FleetInfo; session: SessionRow } = $props();
 
@@ -132,8 +134,24 @@
       sending = sendsInFlight.has(key);
       tab = 'conversation';
       void loadConversation();
-      void fleetTouchViewed(fleet.id, session);
     });
+  });
+
+  // Its finished turns read as seen on its own hub, by the primary's rule
+  // (`session_viewed.ts`): stamped when it opens and again for each turn that
+  // ends while it is on screen, never while the window is hidden (review
+  // w01-8). This view is mounted only while no fleet page covers it, so it
+  // is on screen while it exists. One tracker per session and fleet.
+  const viewedRow = writable<SessionRow | null>(null);
+  $effect(() => {
+    viewedRow.set(session);
+  });
+  // By its id: a new `fleet` object for the same fleet must not restart it.
+  const fleetId = $derived(fleet.id);
+  $effect(() => {
+    void key;
+    const at = fleetId;
+    return untrack(() => trackViewedSession(viewedRow, (id) => fleetTouchViewed(at, { id }), undefined, readable(true)));
   });
 
   // Re-read when the row says something moved, and on the panel's cadence.
