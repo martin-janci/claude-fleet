@@ -139,7 +139,7 @@ describe('FleetSessionView', () => {
     await tick();
     expect((screen.getByTestId('fleet-session-copy-attach') as HTMLButtonElement).disabled).toBe(true);
     await fireEvent.click(screen.getByTestId('fleet-session-tab-terminal'));
-    await vi.waitFor(() => expect(screen.getByTestId('fleet-terminal-refused')).toBeTruthy());
+    await vi.waitFor(() => expect(screen.getByTestId('terminal-no-attach')).toBeTruthy());
     expect(inv.mock.calls.some(([cmd]) => cmd === 'pty_open')).toBe(false);
   });
 
