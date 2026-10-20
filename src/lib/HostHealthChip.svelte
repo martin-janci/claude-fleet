@@ -15,7 +15,7 @@
   import HostHealthList from './HostHealthList.svelte';
   import { hosts } from './hosts';
   import { selectedSession } from './selection';
-  import { destination } from './destination';
+  import { destination, isFleetPage } from './destination';
   import { controlViews } from './control_views';
   import { operatorHost } from './operator';
   import { fleetSettings, settingInt, SETTING_KEYS } from './fleet_settings';
@@ -48,8 +48,11 @@
     chipHost({ inControl, sessionShown, selectedHost: $selectedSession?.host_alias ?? null, operatorHost: $operatorHost }),
   );
   const loads = $derived(fleetLoads($hosts, focus, nowSec, limits));
-  // An extra fleet's open session: its host, read from that fleet's rows.
-  const away = $derived($selectedFleetSession);
+  // An extra fleet's open session: its host, read from that fleet's rows —
+  // only while it is on screen. A fleet page (Control, Hosts, …) covers it
+  // though it stays selected, and there the chip keeps Control's host and
+  // its open findings, as it does for a primary session.
+  const away = $derived(isFleetPage($destination) ? null : $selectedFleetSession);
   const awayLoads = $derived(
     away ? fleetLoads([...($fleetRows.get(away.fleet.id)?.hosts.values() ?? [])], away.row.host_alias, nowSec, limits) : [],
   );

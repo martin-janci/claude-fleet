@@ -20,15 +20,19 @@
   let {
     count,
     hiddenCount,
+    focused = false,
   }: {
     /** The rows this list shows now. */
     count: number;
-    /** Its live sessions, for the notice while another fleet's filter hides them. */
+    /** Its sessions that pass the filters every fleet shares, for the
+     *  notice while another fleet's filter hides them. */
     hiddenCount: number;
+    /** A session focus shows this list past the anchor and the fold. */
+    focused?: boolean;
   } = $props();
 
   const primary = $derived($fleets.find((f) => f.primary) ?? null);
-  const hidden = $derived(primaryHiddenByAnchor($anchor));
+  const hidden = $derived(!focused && primaryHiddenByAnchor($anchor));
   const words = $derived.by(() => {
     const a = $anchor;
     if (!a || !hidden) return '';

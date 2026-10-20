@@ -16,10 +16,18 @@ import {
   _resetFleetsForTest,
   _setFleetRowsForTest,
   _setFleetsForTest,
+  removeFleet,
   type FleetInfo,
   type FleetRows,
 } from './fleets';
-import { _resetFleetFiltersForTest, fleetHostFilter, pickFleetHost } from './fleet_filters';
+import {
+  _resetFleetFiltersForTest,
+  fleetGroupsFolded,
+  fleetHostFilter,
+  fleetScopeFilter,
+  pickFleetHost,
+  pickFleetScope,
+} from './fleet_filters';
 import { hostFilter, hosts, type HostRow } from './hosts';
 import { scopeFilter, orgs, type OrgDetail } from './orgs';
 import { showBgAgents, type SessionRow } from './sessions';
@@ -101,6 +109,26 @@ describe('FleetSessionGroups', () => {
     orgs.set([]);
   });
 
+  it("a session focus on the primary list leaves no extra fleet's rows beside it", async () => {
+    render(FleetSessionGroups, { props: { focused: true } });
+    await tick();
+    expect(screen.queryByTestId('fleet-group-company')).toBeNull();
+    expect(screen.queryByTestId('fleet-session-company-7')).toBeNull();
+  });
+
+  it("a removed fleet's machine, org and fold go with it: its slot id is reused by label", async () => {
+    pickFleetHost('company', 'eva-air');
+    pickFleetScope('company', 'org:3');
+    render(FleetSessionGroups);
+    await tick();
+    await fireEvent.click(screen.getByTestId('fleet-fold-company'));
+    expect(get(fleetGroupsFolded)).toEqual(['company']);
+    await removeFleet('company');
+    expect(get(fleetHostFilter)).toBeNull();
+    expect(get(fleetScopeFilter)).toBeNull();
+    expect(get(fleetGroupsFolded)).toEqual([]);
+  });
+
   it("narrows to an extra fleet's machine", async () => {
     pickFleetHost('company', 'papayapos-dev');
     render(FleetSessionGroups);
@@ -123,6 +151,14 @@ describe('PrimaryFleetHeader', () => {
     expect(note.textContent).toContain('Machine: eva-air on Papaya POS (hub)');
     await fireEvent.click(screen.getByTestId('primary-fleet-hidden-clear'));
     expect(get(fleetHostFilter)).toBeNull();
+  });
+
+  it('a session focus shows this list past the anchor, so it says nothing is hidden', async () => {
+    pickFleetHost('company', 'eva-air');
+    render(PrimaryFleetHeader, { props: { count: 1, hiddenCount: 4, focused: true } });
+    await tick();
+    expect(screen.queryByTestId('primary-fleet-hidden')).toBeNull();
+    expect(screen.getByTestId('primary-fleet-count').textContent).toBe('1');
   });
 });
 

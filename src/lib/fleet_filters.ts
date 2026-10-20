@@ -21,12 +21,22 @@
 // Search, Last active, Needs you, Agent and Background agents are not
 // per-hub: they apply to every fleet's rows alike.
 import { derived, writable, get } from 'svelte/store';
-import { PRIMARY, filterShows, fleetFilter, fleetRows, fleets, type FleetInfo, type FleetRows } from './fleets';
+import {
+  PRIMARY,
+  filterShows,
+  fleetFilter,
+  fleetRows,
+  fleets,
+  onFleetForgotten,
+  type FleetInfo,
+  type FleetRows,
+} from './fleets';
 import { hostFilter, effectiveHostFilter } from './hosts';
 import {
   ALL_SCOPES,
   UNASSIGNED,
   buildScopes,
+  cycleScope,
   effectiveScope,
   ownersByProject,
   scopeFilter,
@@ -71,6 +81,28 @@ const isBool = (v: unknown): v is boolean => typeof v === 'boolean';
  *  beside another fleet). Per viewer. */
 export const primaryFleetOpen = writable<boolean>(readPref('primary-fleet-open', true, isBool));
 primaryFleetOpen.subscribe((v) => writePref('primary-fleet-open', v));
+
+const isFolds = (v: unknown): v is string[] => Array.isArray(v) && v.every((x) => typeof x === 'string');
+/** The extra fleets folded under their header (`FleetSessionGroups`), by
+ *  slot id. Per viewer. */
+export const fleetGroupsFolded = writable<string[]>(readPref('fleet-groups-folded', [], isFolds));
+fleetGroupsFolded.subscribe((v) => writePref('fleet-groups-folded', v));
+
+/** Fold or unfold one extra fleet's group. */
+export function toggleFleetGroupFold(id: string): void {
+  fleetGroupsFolded.update((f) => (f.includes(id) ? f.filter((x) => x !== id) : [...f, id]));
+}
+
+/** A removed fleet's picks and fold go with it. Slot ids are reused by
+ *  label, so another hub added as "Work" must not inherit the old one's
+ *  machine or org — an alias like `mac` or an org id like `org:3` can mean
+ *  something there too, and would hide every other fleet behind it. */
+export function forgetFleetFilters(id: string): void {
+  if (get(fleetHostFilter)?.fleet === id) fleetHostFilter.set(null);
+  if (get(fleetScopeFilter)?.fleet === id) fleetScopeFilter.set(null);
+  if (get(fleetGroupsFolded).includes(id)) fleetGroupsFolded.update((f) => f.filter((x) => x !== id));
+}
+onFleetForgotten(forgetFleetFilters);
 
 // ── one fleet's scopes ──────────────────────────────────────────────────
 
@@ -277,6 +309,21 @@ export function pickPrimaryScope(id: ScopeId): void {
   fleetScopeFilter.set(null);
 }
 
+/** Show a primary session the person asked for (a reveal, a focus): an
+ *  extra fleet's anchor would hide the primary list it is in, so it goes,
+ *  and a folded primary list unfolds. The primary's own choices stay — the
+ *  caller widens those as it needs. */
+export function showPrimaryList(): void {
+  fleetHostFilter.set(null);
+  fleetScopeFilter.set(null);
+  primaryFleetOpen.set(true);
+}
+
+/** ⌘⇧O / Ctrl+Shift+O on the primary's orgs (`orgs.ts::cycleScope`). */
+export function cyclePrimaryScope(): void {
+  cycleScope(pickPrimaryScope);
+}
+
 /** An extra fleet's machine; picking the chosen one again clears it. The
  *  primary's choices, and any other fleet's, go. */
 export function pickFleetHost(fleet: string, alias: string): void {
@@ -301,4 +348,5 @@ export function _resetFleetFiltersForTest(): void {
   primaryFleetOpen.set(true);
   fleetHostFilter.set(null);
   fleetScopeFilter.set(null);
+  fleetGroupsFolded.set([]);
 }

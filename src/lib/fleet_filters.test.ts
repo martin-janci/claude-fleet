@@ -29,6 +29,11 @@ import {
   pickPrimaryScope,
   primaryHiddenByAnchor,
   clearMachineOrg,
+  cyclePrimaryScope,
+  forgetFleetFilters,
+  fleetGroupsFolded,
+  primaryFleetOpen,
+  showPrimaryList,
   _resetFleetFiltersForTest,
   type AnchorInput,
   type FleetListCtx,
@@ -230,6 +235,30 @@ describe('choosing keeps one anchor', () => {
     pickPrimaryHost('mac');
     clearMachineOrg();
     expect([get(hostFilter), get(scopeFilter), get(fleetHostFilter), get(fleetScopeFilter)]).toEqual(['all', 'all', null, null]);
+  });
+
+  it("a primary jump (reveal, ⌘⇧O) drops an extra fleet's choice and unfolds the primary", () => {
+    pickFleetHost('company', 'eva-air');
+    pickFleetScope('company', 'org:3');
+    primaryFleetOpen.set(false);
+    showPrimaryList();
+    expect([get(fleetHostFilter), get(fleetScopeFilter), get(primaryFleetOpen)]).toEqual([null, null, true]);
+    // ⌘⇧O is a no-op with fewer than two primary scopes, and must not drop
+    // anything then; with two it picks through pickPrimaryScope.
+    pickFleetHost('company', 'eva-air');
+    cyclePrimaryScope();
+    expect(get(fleetHostFilter)).toEqual({ fleet: 'company', alias: 'eva-air' });
+  });
+
+  it("forgetting a fleet drops only that fleet's choices and fold", () => {
+    pickFleetHost('company', 'eva-air');
+    pickFleetScope('company', 'org:3');
+    fleetGroupsFolded.set(['company', 'lab']);
+    forgetFleetFilters('lab');
+    expect(get(fleetHostFilter)).toEqual({ fleet: 'company', alias: 'eva-air' });
+    expect(get(fleetGroupsFolded)).toEqual(['company']);
+    forgetFleetFilters('company');
+    expect([get(fleetHostFilter), get(fleetScopeFilter), get(fleetGroupsFolded)]).toEqual([null, null, []]);
   });
 
   it('the anchor store follows the stores', () => {

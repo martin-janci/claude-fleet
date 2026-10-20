@@ -3,7 +3,8 @@
   import StatusBar from './lib/kit/StatusBar.svelte';
   import MoodLine from './lib/MoodLine.svelte';
   import { applyWorkEvents, loadTrackers, sessionsMentioning } from './lib/trackers';
-  import { loadOrgs, cycleScope } from './lib/orgs';
+  import { loadOrgs } from './lib/orgs';
+  import { cyclePrimaryScope } from './lib/fleet_filters';
   import type { WorkEvent } from './lib/trackers';
   import { onMount, onDestroy, tick, untrack } from 'svelte';
   import Pane from './lib/Pane.svelte';
@@ -1042,7 +1043,7 @@
     // ⌘E opens Control (step 9.1).
     else if (chord === 'agent') toggleControl('chat');
     // The Work view has its own org filter: the chord cycles that one there.
-    else if (chord === 'scope') (get(sidebarView) === 'work' ? cycleWorkOrg : cycleScope)();
+    else if (chord === 'scope') (get(sidebarView) === 'work' ? cycleWorkOrg : cyclePrimaryScope)();
     else if (chord === 'today') toggleToday();
     else if (chord === 'inspector') toggleInspector();
     else if (chord === 'open-in-editor') void openInEditorIfAllowed($selectedSession, selAccess);

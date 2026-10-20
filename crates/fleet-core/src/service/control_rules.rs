@@ -76,7 +76,9 @@ For a session you started or briefed:\n\
 - **stuck** (no output, a dialog it cannot leave, the same error over and\n\
   over): `restart_session` it. Parked at a usage limit with no automatic\n\
   resume: `restart_session` with another signed-in `profile` that has\n\
-  headroom (`diagnose` names them).\n\
+  headroom (`diagnose` names them). When it wedges again after three\n\
+  restarts in an hour, stop restarting it: the next one asks, so tell the\n\
+  person what keeps it stuck.\n\
 - **done** (its work pushed or merged, nothing left in its brief): retire\n\
   it with `safe_kill_session`, which commits and pushes before it closes\n\
   anything. Never `kill_session` a session with work in it.\n\

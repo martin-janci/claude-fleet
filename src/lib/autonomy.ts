@@ -49,7 +49,7 @@ export const AUTONOMY: readonly AutonomyPosition[] = [
   {
     id: 'autopilot',
     label: 'Autopilot',
-    blurb: "Also starts sessions inside a mission's grant (its hosts, hours and budget) and creates and starts its tasks, and goes on with a recommended choice after 2 minutes. Kills, restarts and deletes still ask, unless “Control looks after its sessions” is on: then it also restarts a stuck session and retires a finished one after pushing its work.",
+    blurb: "Also starts sessions inside a mission's grant (its hosts, hours and budget) and creates and starts its tasks, and goes on with a recommended choice after 2 minutes. Kills, restarts and deletes still ask, unless “Control looks after its sessions” is on: then it also restarts a stuck session it started itself and retires a finished one of its own after pushing its work.",
     maxLevel: 3,
     autoContinue: true,
     minutes: 2,

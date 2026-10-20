@@ -1552,18 +1552,26 @@ impl FleetTools {
             // Only ever gates the operator (D12): a session is about to exist.
             // (`work_link` is `confirm: true` for M7's tidy kills; a person's
             // start or resume is never gated.) A task's session is a start
-            // like `new_session`'s: inside a running mission's grant it goes
-            // without a card at Autopilot (F2). With no host fleet places it,
-            // which only a grant naming no hosts covers.
+            // like `new_session`'s: inside the grant of the running mission
+            // the task belongs to it goes without a card at Autopilot (F2);
+            // a task of no mission, or another mission's grant, never does
+            // (review r3). With no host fleet places it, which only a grant
+            // naming no hosts covers.
             let repos = self.repo_labels(args.project_ids.as_deref().unwrap_or_default())?;
+            let target = match self.work_link_mission(&args)? {
+                Some(mission) => GateTarget::MissionStart {
+                    mission,
+                    host: args.host_alias.as_deref(),
+                    sessions: multi.as_ref().map_or(1, |ids| ids.len() as i64),
+                },
+                None => GateTarget::Other,
+            };
             self.confirm_gate_target(
                 "work_link",
                 args.confirm_nonce.as_deref(),
                 &work_link_start_summary(&args, &repos),
                 &caller,
-                GateTarget::Start {
-                    host: args.host_alias.as_deref(),
-                },
+                target,
             )?;
         }
         if args.action == "draft_title" {
@@ -3321,6 +3329,25 @@ fn graph_item(args: &crate::service::work::WorkLinkArgs) -> Result<i64, McpError
 }
 
 impl super::FleetTools {
+    /// The mission of the work item a `work_link` start / run / resume
+    /// names (`item_id`, else `key`), for the operator's grant check. `None`
+    /// for a ticket URL, an unknown key, or an item of no mission.
+    fn work_link_mission(
+        &self,
+        args: &crate::service::work::WorkLinkArgs,
+    ) -> Result<Option<i64>, McpError> {
+        let s = lock(&self.store).map_err(to_mcp_err)?;
+        let item = match (args.item_id, args.key.as_deref()) {
+            (Some(id), _) => Some(id),
+            (None, Some(key)) => s.work_item_by_key(key).map_err(to_mcp_err)?.map(|i| i.id),
+            (None, None) => None,
+        };
+        match item {
+            Some(id) => s.work_item_mission(id).map_err(to_mcp_err),
+            None => Ok(None),
+        }
+    }
+
     /// What the mission loop needs to take a step from this server.
     fn mission_deps(&self) -> crate::service::work::orchestrate::Deps {
         crate::service::work::orchestrate::Deps {
