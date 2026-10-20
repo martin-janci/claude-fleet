@@ -1334,3 +1334,40 @@ async fn asset_history_reads_the_named_catalogs_log_for_a_granted_caller_only() 
     let got = json_of(call_on(&t, &m, "asset_history", none, None).await);
     assert_eq!(got, json!([]));
 }
+
+/// `agents { action: install }` writes the personal catalog, so it needs the
+/// same assets grant `catalog_admin` does, on top of a trusted full device.
+#[tokio::test]
+async fn a_gallery_install_needs_the_assets_grant_too() {
+    let s = Store::open_in_memory().unwrap();
+    let desk = s.insert_owned_client_token("desk", "aa11", "full").unwrap();
+    s.set_client_assets_admin("desk", true).unwrap();
+    let plain = s
+        .insert_owned_client_token("plain", "bb22", "full")
+        .unwrap();
+    let t = tools(s);
+    let trusted = |id| {
+        let mut c = client(id, TokenMode::Full, None);
+        c.client.as_mut().unwrap().trusted = true;
+        c
+    };
+    let install = |caller: Caller| {
+        let t = &t;
+        async move {
+            t.agents(
+                Extension(caller),
+                Parameters(crate::service::agents::admin::AgentsArgs {
+                    action: "install".into(),
+                    definition: Some("no-such-seed".into()),
+                    ..Default::default()
+                }),
+            )
+            .await
+        }
+    };
+    let r = install(trusted(plain.id)).await;
+    assert_eq!(code_of(&r), "E_FORBIDDEN", "{:?}", r.err());
+    // Granted: the gate lets it through, to the gallery's own answer.
+    let r = install(trusted(desk.id)).await;
+    assert_eq!(code_of(&r), "E_NOTFOUND", "{:?}", r.err());
+}

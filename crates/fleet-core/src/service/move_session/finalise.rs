@@ -129,7 +129,7 @@ pub(super) async fn finalise_source(
         // source row (see `store::sessions::delete_session`). No participant
         // exists when nothing was ever addressed to the source — nothing to
         // carry, so this is a no-op then.
-        let repointed: Option<i64> = {
+        let participant: Option<i64> = {
             let s = lock(store)?;
             match s.participant_for_session(a.source_row_id)? {
                 Some(p) => {
@@ -140,18 +140,49 @@ pub(super) async fn finalise_source(
                 None => None,
             }
         };
+        let mut repointed = Repointed {
+            participant,
+            ..Repointed::default()
+        };
+        // Each re-point below is its own write, so one that fails puts back
+        // the ones before it: the source is still alive then, and must keep
+        // its identity, its prompts and its tasks.
         // Prompts queued for the source (Send later, or behind a busy turn)
         // follow it too: the source's row is deleted with them otherwise.
-        let repointed_prompts = lock(store)?
-            .repoint_deferred_prompts(a.source_row_id, a.target_row_id)
-            .map_err(|e| tag_step("re-pointing the queued prompts", e.into()))?;
+        match lock(store)
+            .and_then(|s| Ok(s.repoint_deferred_prompts(a.source_row_id, a.target_row_id)?))
+        {
+            Ok(n) => repointed.prompts = n,
+            Err(e) => {
+                repointed.undo(store, a.source_row_id, a.target_row_id);
+                return Err(tag_step("re-pointing the queued prompts", e));
+            }
+        }
+        // So do its open tasks: the conversation goes on there and prints
+        // its done marker on the target, which must find them; left on the
+        // source they fail as lost the moment it is killed.
+        match lock(store).and_then(|s| s.repoint_open_tasks(a.source_row_id, a.target_row_id)) {
+            Ok((work, waits)) => {
+                repointed.work = work;
+                repointed.waits = waits;
+            }
+            Err(e) => {
+                repointed.undo(store, a.source_row_id, a.target_row_id);
+                return Err(tag_step("re-pointing the open tasks", e));
+            }
+        }
         // A pin follows the session: the target took it at the carry step,
         // so the source's is lifted, or its kill would refuse (E_PINNED).
         // Kept, to put back if the kill fails: the source then lives on, and
         // `resolve_move` assumes it still holds its own pin.
-        let source_pinned_at: Option<i64> = lock(store)?
-            .get_session_by_id(a.source_row_id)?
-            .and_then(|r| r.pinned_at);
+        let source_pinned_at: Option<i64> =
+            match lock(store).and_then(|s| Ok(s.get_session_by_id(a.source_row_id)?)) {
+                Ok(row) => row.and_then(|r| r.pinned_at),
+                Err(e) => {
+                    repointed.undo(store, a.source_row_id, a.target_row_id);
+                    return Err(e);
+                }
+            };
         if let Ok(s) = store.lock() {
             if let Err(e) = s.set_session_pinned(a.source_row_id, None) {
                 tracing::warn!(session_id = a.source_row_id, error = %e, "[move_session] unpinning the source failed");
@@ -193,32 +224,7 @@ pub(super) async fn finalise_source(
             // guesswork; it follows the identity back to the source, which is
             // where the live endpoint is.) A failure here can only be logged:
             // the kill error is the one that has to reach the caller.
-            if repointed_prompts > 0 {
-                if let Err(re) = lock(store)
-                    .and_then(|s| Ok(s.repoint_deferred_prompts(a.target_row_id, a.source_row_id)?))
-                {
-                    tracing::warn!(
-                        session_id = a.source_row_id,
-                        error = %re.message,
-                        "move_session: the kill failed and the queued prompts stay on the target"
-                    );
-                }
-            }
-            if let Some(pid) = repointed {
-                match lock(store).and_then(|s| s.repoint_participant(pid, a.source_row_id)) {
-                    Ok(()) => tracing::info!(
-                        participant = pid,
-                        session_id = a.source_row_id,
-                        "move_session: the kill failed, so the participant is back on the source"
-                    ),
-                    Err(re) => tracing::warn!(
-                        participant = pid,
-                        session_id = a.source_row_id,
-                        error = %re.message,
-                        "move_session: the kill failed AND the participant could not be put back; mail for the source lands on the target until resolve_move runs"
-                    ),
-                }
-            }
+            repointed.undo(store, a.source_row_id, a.target_row_id);
             return Err(tag_step(
                 &format!(
                     "killing the source {} on {}",
@@ -319,4 +325,63 @@ pub(super) async fn finalise_source(
         source_killed,
         warnings,
     })
+}
+
+/// What [`finalise_source`] re-pointed from the source to the target, so a
+/// move that stops before the source is gone can put exactly that back.
+#[derive(Default)]
+struct Repointed {
+    participant: Option<i64>,
+    prompts: usize,
+    work: Vec<i64>,
+    waits: Vec<i64>,
+}
+
+impl Repointed {
+    /// Put every re-point back on the source. Best-effort: each failure is
+    /// logged, since the error that stopped the move is the one the caller
+    /// has to see. (A collision merge the participant re-point may have
+    /// performed is not undone — the target's own mail has already been
+    /// folded into this identity, and re-splitting it would be guesswork; it
+    /// follows the identity back to the source, which is where the live
+    /// endpoint is.)
+    fn undo(&self, store: &Mutex<Store>, source: i64, target: i64) {
+        if !self.work.is_empty() || !self.waits.is_empty() {
+            if let Err(re) =
+                lock(store).and_then(|s| s.restore_task_sessions(&self.work, &self.waits, source))
+            {
+                tracing::warn!(
+                    session_id = source,
+                    error = %re.message,
+                    "move_session: the move stopped and the open tasks stay on the target"
+                );
+            }
+        }
+        if self.prompts > 0 {
+            if let Err(re) =
+                lock(store).and_then(|s| Ok(s.repoint_deferred_prompts(target, source)?))
+            {
+                tracing::warn!(
+                    session_id = source,
+                    error = %re.message,
+                    "move_session: the move stopped and the queued prompts stay on the target"
+                );
+            }
+        }
+        if let Some(pid) = self.participant {
+            match lock(store).and_then(|s| s.repoint_participant(pid, source)) {
+                Ok(()) => tracing::info!(
+                    participant = pid,
+                    session_id = source,
+                    "move_session: the move stopped, so the participant is back on the source"
+                ),
+                Err(re) => tracing::warn!(
+                    participant = pid,
+                    session_id = source,
+                    error = %re.message,
+                    "move_session: the move stopped AND the participant could not be put back; mail for the source lands on the target until resolve_move runs"
+                ),
+            }
+        }
+    }
 }

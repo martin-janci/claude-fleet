@@ -53,7 +53,7 @@ Which agent hosts (transport "agent") have a fleet-agent connected: since (unix 
 
 ### `agents`
 
-The agents (PR reviewer, support, fleet agents from the catalog): status {agent?, limit?} (rules, newest jobs, actions waiting for a person), explain (per rule: polls or why not, next poll, last poll error, jobs by state, the next and the last failed job), job {id} (one job whole, its proposed actions included), grant {agent: review | support | fleet, scope: gh:<owner>/<repo> | jira:<tracker id>:<PROJECT> | <instance name>, host, level: watch | propose | act, project_id?, config?, hours?, definition? (fleet), bindings? (fleet: one per store role; each MCP binding is asked for its tools on the host first; or answers: the grant form's)}, definitions (the catalog's fleet agents), form {definition, id?} (a fleet agent's grant form, prefilled from rule id), revoke {id}, pause_all, approve {id}, reject {id}, run {id, request?, run_scope? {minutes?, host?, session?, component?}} (a manual or scheduled fleet agent, now). The owner's own device; writes need a trusted full device.
+The agents (PR reviewer, support, fleet agents from the catalog): status {agent?, limit?} (rules, newest jobs, actions waiting for a person), explain (per rule: polls or why not, next poll, last poll error, jobs by state, the next and the last failed job), job {id} (one job whole, its proposed actions included), grant {agent: review | support | fleet, scope: gh:<owner>/<repo> | jira:<tracker id>:<PROJECT> | <instance name>, host, level: watch | propose | act, project_id?, config?, hours?, definition? (fleet), bindings? (fleet: one per store role; each MCP binding is asked for its tools on the host first; or answers: the grant form's)}, definitions (the catalog's fleet agents), gallery (the fleet agents claude-fleet ships, each marked installed or not), install {definition} (add a gallery definition to the catalog), form {definition, id?} (a fleet agent's grant form, prefilled from rule id), revoke {id}, pause_all, approve {id}, reject {id}, run {id, request?, run_scope? {minutes?, host?, session?, component?}} (a manual or scheduled fleet agent, now). The owner's own device; writes need a trusted full device.
 
 Parameters: `action`, `agent`, `answers`, `bindings`, `config`, `definition`, `host`, `hours`, `id`, `level`, `limit`, `project_id`, `request`, `run_scope`, `scope`
 
@@ -89,7 +89,7 @@ Parameters: `continue_after`, `enabled`
 
 ### `autofix`
 
-Known broken fleet states, each with a plain-language explanation and, where one exists, a fix: list {state?} (the live ones: open, verifying, apply_failed, dismissed; also `fixed`, cleared in the last day after a fix ran), explain {id}, scan (check now), apply {id}, dismiss {id, until?} (later; default 24 h). Safe fixes run by themselves (setting autofix.auto_safe); the rest wait for a person. apply and dismiss need a trusted full device; Control may list and explain only, and shows the person a finding with a `fix` chat card (`{"spec":"fleet.ui/1","kind":"fix","finding_id":<id>}`).
+Known broken fleet states, each with a plain-language explanation and, where one exists, a fix: list {state?} (the live ones: open, verifying, apply_failed, dismissed; also `fixed`, cleared in the last day after a fix ran), explain {id}, scan (check now), apply {id}, dismiss {id, until?} (later; default 24 h). Safe fixes run by themselves (setting autofix.auto_safe); the rest wait for a person. apply and dismiss need a trusted full device; Control may list and explain only, and shows the person a finding with a `fix` chat card: a ```fleet-ui fenced block holding `{"spec":"fleet.ui/1","kind":"fix","finding_id":<id>}`.
 
 Parameters: `action`, `id`, `state`, `until`
 
@@ -657,7 +657,7 @@ Parameters: `host_alias`
 
 Restart a tmux session in place (kill and recreate): for a wedged Claude REPL whose tmux and worktree are fine; cheaper than recreate_session. Returns the updated row.
 
-Parameters: `confirm_nonce`, `effort`, `force`, `host_alias`, `model`, `name`, `profile`, `session_id`
+Parameters: `confirm_nonce`, `effort`, `force`, `host_alias`, `model`, `name`, `over_limit_ok`, `profile`, `session_id`
 
 ### `restore_host_sessions`
 

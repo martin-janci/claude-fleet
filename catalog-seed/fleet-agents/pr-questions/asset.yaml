@@ -1,0 +1,39 @@
+kind: fleet_agent
+name: pr-questions
+description: "Answers a question asked in an issue or pull request comment (/ask by default) from the project's code, and posts the answer as a reply."
+inputs:
+  - { name: repo, type: text, label: Repository (owner/repo), required: true, help: "e.g. martin-janci/claude-fleet" }
+  - { name: phrases, type: text, label: Trigger phrases, value: "/ask" }
+stores:
+  - { role: answered, kind: fleet, label: Questions answered before }
+trigger:
+  source: github_comments
+  repo: "{{repo}}"
+  match: { any_phrase: "{{phrases}}" }
+run:
+  workspace: project
+  max_turns: 30
+  timeout_secs: 900
+  context:
+    - { store: answered, recent: 20 }
+  output_schema:
+    type: object
+    required: [answer, confidence]
+    properties:
+      answer: { type: string, maxLength: 3000 }
+      confidence: { enum: [high, medium, low] }
+      files: { type: array, items: { type: string, maxLength: 200 } }
+actions:
+  - id: reply
+    do: pr_comment
+    target: "{{subject.number}}"
+    body: "{{answer.answer}}\n\nSources: {{answer.files}} (confidence: {{answer.confidence}})"
+    auto: true
+  - id: remember
+    do: record
+    store: answered
+    key: "{{subject.repo}}#{{subject.number}}:{{subject.comment.id}}"
+    value: { confidence: "{{answer.confidence}}", answered: "{{now}}" }
+    auto: true
+limits:
+  max_body_chars: 4000

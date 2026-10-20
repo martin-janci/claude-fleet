@@ -320,17 +320,21 @@ fn a_start_is_inside_a_grant_only_on_its_hosts_while_it_holds() {
     )
     .unwrap();
     assert!(
-        !s.start_inside_mission_grant("h", now).unwrap(),
+        !s.start_inside_mission_grant(Some("h"), now).unwrap(),
         "a mission that is not running grants nothing"
     );
     s.set_mission_state(m, None, "active", "fleet").unwrap();
-    assert!(s.start_inside_mission_grant("h", now).unwrap());
+    assert!(s.start_inside_mission_grant(Some("h"), now).unwrap());
     assert!(
-        !s.start_inside_mission_grant("other", now).unwrap(),
+        !s.start_inside_mission_grant(Some("other"), now).unwrap(),
         "not its host"
     );
     assert!(
-        !s.start_inside_mission_grant("h", now + 3601).unwrap(),
+        !s.start_inside_mission_grant(None, now).unwrap(),
+        "a start fleet places may land outside the grant's hosts"
+    );
+    assert!(
+        !s.start_inside_mission_grant(Some("h"), now + 3601).unwrap(),
         "expired"
     );
     s.conn
@@ -341,7 +345,30 @@ fn a_start_is_inside_a_grant_only_on_its_hosts_while_it_holds() {
         )
         .unwrap();
     assert!(
-        !s.start_inside_mission_grant("h", now).unwrap(),
+        !s.start_inside_mission_grant(Some("h"), now).unwrap(),
         "budget spent"
     );
+}
+
+/// A task's start with no host (fleet places it) is inside a grant only when
+/// the grant names no hosts.
+#[test]
+fn a_hostless_start_is_inside_only_a_grant_naming_no_hosts() {
+    let s = Store::open_in_memory().unwrap();
+    let m = mission(&s);
+    let now = now_unix();
+    s.add_grant(
+        m,
+        &NewGrant {
+            level: 3,
+            granted_by: "person:1",
+            hosts: None,
+            expires_at: now + 3600,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    s.set_mission_state(m, None, "active", "fleet").unwrap();
+    assert!(s.start_inside_mission_grant(None, now).unwrap());
+    assert!(s.start_inside_mission_grant(Some("any"), now).unwrap());
 }

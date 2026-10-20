@@ -543,6 +543,11 @@
       // catch that; it has to be dropped here.
       attachments = [];
       attachErrors = [];
+      // The tuner and the help panel answer about the session they were
+      // opened on: left open, "Use this" would put the old session's
+      // rewrite into this session's draft.
+      tuneOpen = false;
+      helpOpen = false;
       // Restore where the returning session was left, once its fetch lands —
       // a snapshot only exists when it was scrolled away from the bottom
       // (`rememberScroll` drops an at-bottom one), so recalling one always
@@ -1754,7 +1759,12 @@
     // authorised it for the Rust allow-list, so it is never uploaded. It
     // stays in the tray with its own honest error rather than being spent
     // by a send it was never part of; the rest travel with the message.
-    const going = attachments.filter((a) => a.path !== '');
+    // Same for any other `error` tile — above all one Edit brought back from
+    // a failed send (`NEEDS_REATTACH`): its allow-list entry is spent, so
+    // uploading it again can only fail with "not attached by the user", and
+    // that refusal would sink the whole message. It stays in the tray,
+    // saying why it did not go, until the user attaches the file again.
+    const going = attachments.filter((a) => a.path !== '' && a.state !== 'error');
     // The prefix rides in front of a `prompt` ONLY. Not a `command` —
     // `/clear` with a paragraph glued to its nose is not a command the REPL
     // runs (the outbox applies the same rule when it builds the body).

@@ -167,9 +167,6 @@ pub fn start_cursor(s: &Store, event: Option<&str>) -> Result<i64, IpcError> {
     }
 }
 
-/// A host filter, in characters.
-pub const EVENT_HOST_MAX_CHARS: usize = 64;
-
 /// `event_author` values: `me` (the same as absent) | `anyone`.
 pub const EVENT_AUTHORS: [&str; 2] = ["me", "anyone"];
 /// The longest event rate: a week.
@@ -525,10 +522,6 @@ fn check(
         Some(e) => event_filters(input, e)?,
         None => (None, None, None),
     };
-    let event_host = match event.as_deref() {
-        Some(e) => event_host_filter(s, scope, input, e)?,
-        None => None,
-    };
     crate::validate::host_alias(&input.host_alias)?;
     if s.get_host_row(&input.host_alias)?.is_none() {
         return Err(host_not_found(&input.host_alias));
@@ -537,6 +530,10 @@ fn check(
     if !scope.org.sees_org(org) {
         return Err(host_not_found(&input.host_alias));
     }
+    let event_host = match event.as_deref() {
+        Some(e) => event_host_filter(s, scope, input, e, org)?,
+        None => None,
+    };
     if s.get_project(input.project_id)?.is_none() {
         return Err(orgs::not_found("project", input.project_id));
     }
@@ -771,12 +768,15 @@ fn event_filters(
 }
 
 /// The host filter `input` writes: a host this caller sees, on an event
-/// that is about a host.
+/// that is about a host. A fleet event fires a routine only from its own
+/// org (`tick::fleet_event_fire`), so on a hub with people the filter of
+/// one names a host of the routine's `org`: another's would never fire.
 fn event_host_filter(
     s: &Store,
     scope: &ViewScope,
     input: &RoutineInput,
     event: &str,
+    org: Option<i64>,
 ) -> Result<Option<String>, IpcError> {
     let Some(h) = input
         .event_host
@@ -792,15 +792,21 @@ fn event_host_filter(
             format!("{event} is about no host; it takes no host filter"),
         ));
     }
-    if h.chars().count() > EVENT_HOST_MAX_CHARS {
+    crate::validate::host_alias(h)?;
+    let host_org = s.host_org(h)?;
+    if s.get_host_row(h)?.is_none() || !scope.org.sees_org(host_org) {
+        return Err(host_not_found(h));
+    }
+    // The owner `save` gives the routine: none only on a hub with no people.
+    let peopleless = scope.person.is_none() && s.personal_owner_id()?.is_none();
+    if is_fleet_event(event) && host_org != org && !peopleless {
         return Err(IpcError::new(
             codes::E_INVALID,
-            format!("event_host is a host alias of at most {EVENT_HOST_MAX_CHARS} characters"),
+            format!(
+                "event_host {h} is in another organisation than the routine's host; \
+                 its {event} events never fire this routine"
+            ),
         ));
-    }
-    crate::validate::host_alias(h)?;
-    if s.get_host_row(h)?.is_none() || !scope.org.sees_org(s.host_org(h)?) {
-        return Err(host_not_found(h));
     }
     Ok(Some(h.to_string()))
 }

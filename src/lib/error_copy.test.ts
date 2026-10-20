@@ -16,6 +16,17 @@ describe('error copy', () => {
     expect(errorText({ code: 'E_X', message: '' })).toBe('Something went wrong');
   });
 
+  it('says a dropped agent connection may have run, not that the versions disagree', () => {
+    const message = "the connection to mefistos's agent ended mid-request; the command may have run";
+    const lost = { code: 'E_AGENT_PROTOCOL', message, details: { connection_lost: true } };
+    expect(errorText(lost)).toBe("The connection to the host's agent dropped mid-request; it may have gone through");
+    expect(errorText(lost)).not.toMatch(/version/);
+    expect(errorDetail(lost)).toBe(`E_AGENT_PROTOCOL: ${message}`);
+    // A real protocol error keeps its own sentence.
+    const garbled = { code: 'E_AGENT_PROTOCOL', message: 'unexpected frame', details: { connection_lost: false } };
+    expect(errorText(garbled)).toBe("The host's agent answered in a way this version doesn't understand");
+  });
+
   it('ends a sentence with one full stop', () => {
     expect(errorSentence({ code: 'E_HUB_UNREACHABLE', message: 'x' })).toBe("Couldn't reach the hub.");
     expect(errorSentence({ code: 'E_INVALID', message: 'Pick a host first.' })).toBe('Pick a host first.');

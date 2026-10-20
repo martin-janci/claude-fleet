@@ -844,7 +844,8 @@ const EXTRA_FLEET_WHY =
 const EXTRA_FLEET_PINS = [
   { file: './fleets.ts', needle: 'return invokeCmd<T>(cmd, { ...args, fleet });' },
   { file: './FleetSessionGroups.svelte', needle: "push({ kind: 'error', message: `${what} failed`" },
-  { file: './FleetSessionView.svelte', needle: "push({ kind: 'error', message: `Sending to ${name} on ${fleet.label} failed`" },
+  { file: './FleetSessionView.svelte', needle: "const who = `${name} on ${fleet.label}`;" },
+  { file: './FleetSessionView.svelte', needle: "push({ kind: 'error', message: `Sending to ${who} failed`" },
 ] as const;
 
 const EXEMPT_SITES: Record<string, readonly Exemption[]> = {

@@ -1171,6 +1171,58 @@ impl Drop for PlannerSlot {
     }
 }
 
+/// The planner's cards the loop applies itself at `auto_level`, in order;
+/// the rest are returned as they are, for a person.
+async fn loop_apply_cards(
+    deps: &Deps,
+    m: &MissionRow,
+    cards: Vec<CardRow>,
+    auto_level: i64,
+    accept_created: bool,
+) -> Result<Vec<CardRow>, IpcError> {
+    let mut shown = Vec::with_capacity(cards.len());
+    for c in cards {
+        if loop_applies_card(&c.kind, auto_level) {
+            // Each earlier card's apply may take an SSH start, so this one
+            // sat `open` meanwhile, where a person can dismiss or apply it.
+            // Claimed as a person's decision is, and re-read: a card decided
+            // in that window is theirs, never applied a second time.
+            let Ok(_claim) = CardClaim::take(c.id) else {
+                shown.push(c);
+                continue;
+            };
+            let current = lock(&deps.store)?.get_card(c.id)?;
+            match current {
+                Some(card) if card.state == "open" => {}
+                other => {
+                    shown.push(other.unwrap_or(c));
+                    continue;
+                }
+            }
+            let res = apply_card(
+                deps,
+                m,
+                &c,
+                &Actor::Loop,
+                &ViewScope::internal(),
+                None,
+                accept_created,
+            )
+            .await;
+            let s = lock(&deps.store)?;
+            let (state, note) = match res {
+                Ok(d) => ("applied", d),
+                Err(e) => ("refused", e.message),
+            };
+            s.decide_card(c.id, state, "loop", Some(&note))?;
+            shown.push(s.get_card(c.id)?.unwrap_or(c));
+        } else {
+            shown.push(c);
+        }
+    }
+    Ok(shown)
+}
+
 /// Ask the planner about `m` now, and card its answer.
 pub async fn run_planner(
     deps: &Deps,
@@ -1292,30 +1344,7 @@ pub async fn run_planner(
     };
     let cards = card_commands(deps, m, &commands, now)?;
     // What the autonomy covers is applied now; the rest waits for a person.
-    let mut shown = Vec::with_capacity(cards.len());
-    for c in cards {
-        if loop_applies_card(&c.kind, auto_level) {
-            let res = apply_card(
-                deps,
-                m,
-                &c,
-                &Actor::Loop,
-                &ViewScope::internal(),
-                None,
-                accept_created,
-            )
-            .await;
-            let s = lock(&deps.store)?;
-            let (state, note) = match res {
-                Ok(d) => ("applied", d),
-                Err(e) => ("refused", e.message),
-            };
-            s.decide_card(c.id, state, "loop", Some(&note))?;
-            shown.push(s.get_card(c.id)?.unwrap_or(c));
-        } else {
-            shown.push(c);
-        }
-    }
+    let shown = loop_apply_cards(deps, m, cards, auto_level, accept_created).await?;
     Ok(PlanOutcome {
         mission_id: m.id,
         cards: shown,

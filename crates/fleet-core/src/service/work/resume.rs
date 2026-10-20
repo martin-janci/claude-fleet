@@ -1251,7 +1251,10 @@ pub fn spawn_start_prompt(
 /// [`spawn_start_prompt`] for a run's worker: a prompt that could not be
 /// typed fails `task_id` (when it is still open), so the attempt shows and
 /// the mission can retry it rather than hold a parallel slot until the
-/// task's age limit.
+/// task's age limit. The mission's own worker is then stopped, as the
+/// `cancel` card stops it: a transport error typing the prompt may come
+/// after the keys went in, and a worker that carried on would race the
+/// retry; one that never started would sit idle on the account.
 pub fn spawn_run_prompt(
     store: Arc<Mutex<Store>>,
     ssh: Arc<SshClient>,
@@ -1264,23 +1267,63 @@ pub fn spawn_run_prompt(
         let typed =
             sessions::seed::seed_background(&store, &ssh, &row, &prompt, sessions::seed::HANDOVER)
                 .await;
-        if !typed {
-            run_prompt_undelivered(&store, task_id);
+        if typed {
+            return;
+        }
+        let Some((host_alias, name)) = run_prompt_undelivered(&store, task_id) else {
+            return;
+        };
+        if let Err(e) = sessions::kill_session(
+            sessions::KillSessionArgs {
+                host_alias: host_alias.clone(),
+                name: name.clone(),
+                force: false,
+            },
+            &store,
+            &ssh,
+        )
+        .await
+        {
+            tracing::warn!(host = %host_alias, session = %name, error = %e,
+                "[work] an undelivered run's worker was not stopped");
         }
     });
 }
 
-/// The failure branch of [`spawn_run_prompt`].
-pub(crate) fn run_prompt_undelivered(store: &Mutex<Store>, task_id: i64) {
-    if let Ok(s) = store.lock() {
-        if let Err(e) = crate::service::tasks::fail_task(
-            &s,
-            task_id,
-            "its prompt was not typed into the session (the REPL did not come up or a dialog stayed open)",
-        ) {
-            tracing::warn!(task = task_id, error = %e, "[work] could not fail an undelivered run");
-        }
+/// The failure branch of [`spawn_run_prompt`]: fails the task when it is
+/// still open, and answers the worker to stop — `(host, tmux name)` of its
+/// session when that is still running and a mission's own. `None` when the
+/// task had already finished (its worker is no longer this path's).
+pub(crate) fn run_prompt_undelivered(
+    store: &Mutex<Store>,
+    task_id: i64,
+) -> Option<(String, String)> {
+    let s = store.lock().ok()?;
+    let open = s
+        .get_task(task_id)
+        .ok()
+        .flatten()
+        .is_some_and(|t| matches!(t.state.as_str(), "queued" | "running"));
+    if !open {
+        return None;
     }
+    let task = match crate::service::tasks::fail_task(
+        &s,
+        task_id,
+        "its prompt was not typed into the session (the REPL did not come up or a dialog stayed open)",
+    ) {
+        Ok(t) => t?,
+        Err(e) => {
+            tracing::warn!(task = task_id, error = %e, "[work] could not fail an undelivered run");
+            return None;
+        }
+    };
+    let w = s
+        .get_session_by_id(task.worker_session_id?)
+        .ok()
+        .flatten()?;
+    (w.status == "running" && w.origin.as_deref() == Some("mission"))
+        .then_some((w.host_alias, w.tmux_name))
 }
 
 #[cfg(test)]

@@ -302,4 +302,9 @@
 //!   `control_journal` tool (the desktop's command of the same name). A hub
 //!   without it refuses it as a protocol error, which the desktop reads as
 //!   nothing muted.
+//!   Control's auto-continue clock moved to the fleet (review F17) without a
+//!   bump: the `control_auto_continue` tool (the desktop's command of the
+//!   same name, and the phone's). The desktop no longer runs a clock of its
+//!   own, so against a hub without the tool (`E_HUB_PROTOCOL`) nothing goes
+//!   on by itself; the desktop's bar says the hub needs updating instead.
 pub const CONTRACT_REVISION: u32 = 18;

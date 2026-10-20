@@ -120,6 +120,16 @@ pub const RESTORE_SETTLE_SECS: i64 = 120;
 /// that restore back to the budget (see the module doc's Bounds).
 pub const MASS_LOSS_REFUND_SECS: i64 = 900;
 
+/// A transport failure under one row's recreate (an SSH flap) is taken as
+/// the host's, not the session's, and spends no budget — at most this many
+/// times per loss episode, counted from the row's `session_restore_failed`
+/// events. Past it the failure is recorded like any other, so a recreate
+/// that always runs past its SSH timeout still reaches `budget_spent`.
+pub const TRANSPORT_GRACE_PER_EPISODE: u32 = 3;
+
+/// The event the batch restore writes for each row it failed to recreate.
+const ROW_RESTORE_FAILED: &str = "session_restore_failed";
+
 /// The `lost_reason`s of a whole-host loss.
 pub const MASS_LOSS_REASONS: &[&str] = &["tmux_server_gone", "host_reboot"];
 
@@ -207,6 +217,9 @@ pub struct Candidate {
     pub attempts: u32,
     /// Of those, the failed ones.
     pub failed_attempts: u32,
+    /// `session_restore_failed` events this loss episode (any restore's),
+    /// which bound [`TRANSPORT_GRACE_PER_EPISODE`].
+    pub row_failures: u32,
     /// The [`EVENT_SKIPPED`] details already written this loss episode.
     pub skipped: Vec<String>,
     /// An [`EVENT_DEFERRED`] was already written this loss episode.
@@ -792,6 +805,9 @@ fn candidates(s: &Store, cfg: &AutoRestoreConfig, now: i64) -> Option<Vec<Candid
                     }),
                     attempts,
                     failed_attempts,
+                    row_failures: s
+                        .count_session_events_since(r.id, &[ROW_RESTORE_FAILED], lost_at)
+                        .unwrap_or(0),
                     skipped: s
                         .session_event_details_since(r.id, EVENT_SKIPPED, lost_at)
                         .unwrap_or_default(),
@@ -833,13 +849,33 @@ fn not_now(e: &IpcError) -> bool {
     e.code == codes::E_INVALID_STATE || e.code == codes::E_HOST_OFFLINE
 }
 
-/// [`not_now`] for one row of a batch, by its code: the same two, and a
-/// transport that failed under that row's recreate (an SSH flap is the
-/// host's, not the session's, and must not spend its budget).
-fn row_not_now(code: &str) -> bool {
-    code == codes::E_INVALID_STATE
-        || code == codes::E_HOST_OFFLINE
-        || codes::is_transport_failure(code)
+/// [`not_now`] for one row of a batch, by its code. Unlike a whole call's,
+/// a row's answer can repeat on every attempt, so each "not now" is bounded:
+/// - `E_HOST_OFFLINE`: the host is marked down, and the planner waits for it;
+/// - a transport failure (an SSH flap is the host's, not the session's):
+///   forgiven [`TRANSPORT_GRACE_PER_EPISODE`] times per loss episode;
+/// - `E_INVALID_STATE`: only when the row moved on meanwhile (killed, or no
+///   longer resumable), which ends the episode. One that is still eligible
+///   was refused for its own spec or workspace — a failure, recorded.
+fn row_not_now(store: &Mutex<Store>, code: &str, session_id: i64, row_failures: u32) -> bool {
+    if code == codes::E_HOST_OFFLINE {
+        return true;
+    }
+    if codes::is_transport_failure(code) {
+        return row_failures < TRANSPORT_GRACE_PER_EPISODE;
+    }
+    if code == codes::E_INVALID_STATE {
+        let Ok(s) = store.lock() else {
+            return true;
+        };
+        let controller = s.get_controller().ok().flatten();
+        return !s
+            .get_session_by_id(session_id)
+            .ok()
+            .flatten()
+            .is_some_and(|r| eligible(&r, controller.as_ref()));
+    }
+    false
 }
 
 /// Plan, consult the advisor where the rule has a doubt, and execute one
@@ -952,6 +988,12 @@ pub async fn run_with(
                 .map(|c| c.lost_reason.clone())
                 .unwrap_or_default()
         };
+        let row_failures_of = |id: i64| {
+            cands
+                .iter()
+                .find(|c| c.session_id == id)
+                .map_or(0, |c| c.row_failures)
+        };
         match exec.restore(&host, ids.clone()).await {
             Ok(r) => {
                 for o in r.results {
@@ -964,7 +1006,9 @@ pub async fn run_with(
                     {
                         // A person (or another restore) got there first:
                         // not an attempt of ours.
-                    } else if o.code.as_deref().is_some_and(row_not_now) {
+                    } else if o.code.as_deref().is_some_and(|code| {
+                        row_not_now(store, code, o.session_id, row_failures_of(o.session_id))
+                    }) {
                         // The host dropped (or the row moved on) mid-restore:
                         // the next tick tries again, budget untouched.
                         tracing::debug!(host = %host, session_id = o.session_id, "[auto-restore] host dropped mid-restore; next tick");
@@ -1088,6 +1132,7 @@ mod tests {
             operator: false,
             attempts: 0,
             failed_attempts: 0,
+            row_failures: 0,
             skipped: vec![],
             deferred_noted: false,
             host_ready: true,
@@ -1582,6 +1627,53 @@ mod tests {
         };
         run_with(&store, &fake, &NoAdvice, &CFG, now).await;
         assert_eq!(events(&store, ids[0])[0].0, EVENT_FAILED);
+    }
+
+    #[tokio::test]
+    async fn a_transport_failure_that_keeps_coming_back_is_recorded_after_the_grace() {
+        let now = crate::store::now_unix();
+        let (store, ids) = store_with(&[("a", "process_died")], now - 120);
+        let fake = Fake {
+            row_fails_with: Some(codes::E_SSH_TIMEOUT),
+            ..Default::default()
+        };
+        let mut failed = 0;
+        for _ in 0..TRANSPORT_GRACE_PER_EPISODE + 3 {
+            failed += run_with(&store, &fake, &NoAdvice, &CFG, now).await.failed;
+            // What the real batch restore writes for the row it failed.
+            event_at(&store, ids[0], ROW_RESTORE_FAILED, "timed out", now);
+        }
+        let ev = events(&store, ids[0]);
+        assert_eq!(failed, CFG.max_attempts as usize, "{ev:?}");
+        assert!(
+            ev.iter()
+                .any(|(k, d)| k == EVENT_SKIPPED && d.as_deref() == Some(SKIP_BUDGET)),
+            "the episode ends in budget_spent: {ev:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_invalid_state_row_that_is_still_lost_is_a_failure() {
+        let now = crate::store::now_unix();
+        let (store, ids) = store_with(&[("a", "process_died")], now - 120);
+        let fake = Fake {
+            row_fails_with: Some(codes::E_INVALID_STATE),
+            ..Default::default()
+        };
+        let r = run_with(&store, &fake, &NoAdvice, &CFG, now).await;
+        assert_eq!(r.failed, 1);
+        assert_eq!(events(&store, ids[0])[0].0, EVENT_FAILED);
+        // One killed meanwhile is not an attempt of ours.
+        store
+            .lock()
+            .unwrap()
+            .conn_ref()
+            .execute(
+                "UPDATE sessions SET lost_reason = 'killed' WHERE id = ?1",
+                [ids[0]],
+            )
+            .unwrap();
+        assert!(row_not_now(&store, codes::E_INVALID_STATE, ids[0], 0));
     }
 
     #[tokio::test]

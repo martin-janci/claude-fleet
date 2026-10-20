@@ -50,7 +50,17 @@ export function tuneRoutinePrompt(routine: RoutineInput, ask: string): Promise<R
   return invokeCmd<TuneAnswer>('routines', { args: { action: 'tune_prompt', routine, ask: ask.trim() } });
 }
 
-/** Why Tune cannot run, or `null`: it rewrites what is in the box. */
+/** The longest draft the tuner reads whole; mirrors
+ *  `prompt_tune::DRAFT_MAX_CHARS`. A longer one is refused rather than cut,
+ *  since accepting the rewrite replaces the whole box. */
+export const TUNE_DRAFT_MAX_CHARS = 12_000;
+
+/** Why Tune cannot run, or `null`: it rewrites what is in the box, whole. */
 export function tuneBlocked(draft: string): string | null {
-  return draft.trim() === '' ? 'Write a draft first: Tune rewrites what is in the box' : null;
+  const text = draft.trim();
+  if (text === '') return 'Write a draft first: Tune rewrites what is in the box';
+  if ([...text].length > TUNE_DRAFT_MAX_CHARS) {
+    return `The draft is too long to tune (at most ${TUNE_DRAFT_MAX_CHARS.toLocaleString('en-US')} characters): tune a shorter part of it`;
+  }
+  return null;
 }

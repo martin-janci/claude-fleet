@@ -86,6 +86,7 @@ pub fn fix(r: &RoutineRow, run: &RoutineRunRow) -> Option<RunFix> {
         | codes::E_SSH_TIMEOUT
         | codes::E_HOST_OFFLINE
         | codes::E_AGENT_OFFLINE
+        | codes::E_AGENT_PROTOCOL
         | codes::E_PROBE => match r.fallback_host.as_deref() {
             Some(_) => (format!("Check {host}"), "host"),
             None => (format!("Check {host}, or give it a fallback host"), "host"),

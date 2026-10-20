@@ -115,6 +115,18 @@ describe('splitRich', () => {
     expect(splitRich(plain)).toEqual([{ t: 'md', source: plain }]);
   });
 
+  it('draws a fence tagged with the spec name, or untagged, as a card', () => {
+    const fix = '{"spec":"fleet.ui/1","kind":"fix","finding_id":14}';
+    for (const lang of ['fleet.ui', 'fleet_ui', 'FLEET.UI', '']) {
+      const segs = splitRich(`Approve it.\n\n\`\`\`${lang}\n${fix}\n\`\`\``);
+      expect(segs.map((s) => s.t)).toEqual(['md', 'ui']);
+    }
+    const plain = '```\n{"kind": "fix", "finding_id": 14}\n```';
+    expect(splitRich(plain)).toEqual([{ t: 'md', source: plain }]);
+    const other = '```yaml\n{"spec":"fleet.ui/1","kind":"fix","finding_id":14}\n```';
+    expect(splitRich(other)).toEqual([{ t: 'md', source: other }]);
+  });
+
   it('keeps an unclosed fleet-ui fence as Markdown while it streams', () => {
     expect(splitRich('```fleet-ui\n{"spec": "fleet.ui/1",').map((s) => s.t)).toEqual(['md']);
   });

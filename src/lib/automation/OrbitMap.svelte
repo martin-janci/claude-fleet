@@ -234,6 +234,7 @@
   /* The name and caption hang under the planet, never inside it: a long
      alias ellipsises against the stage, not against a 40 px circle. */
   .label { position: absolute; top: 72%; left: 50%; transform: translateX(-50%); width: max-content; max-width: 34cqw; display: flex; flex-direction: column; align-items: center; gap: 1px; text-align: center; pointer-events: none; }
+  /* Moons (z-index 1) sit above the label, so a lower moon under the name stays clickable. */
   .name, .caption { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; pointer-events: auto; }
   .name { font-size: var(--text-xs); font-weight: 600; color: var(--fg); padding: 0 4px; border-radius: var(--radius-xs); background: color-mix(in srgb, var(--bg-sunk) 80%, transparent); }
   .caption { font-size: var(--text-2xs); }
@@ -250,7 +251,7 @@
   .sat { position: absolute; inset: 16%; border-radius: 50%; pointer-events: none; animation: orbit calc(var(--loop-slow) * 5) linear infinite; animation-delay: calc(var(--loop-slow) * -5 * var(--phase)); }
   .sathead { position: absolute; left: calc(50% - 3px); top: -3px; width: 6px; height: 6px; border-radius: 50%; background: var(--status-working); box-shadow: 0 0 6px 1px color-mix(in srgb, var(--status-working) 70%, transparent); }
   /* Moons: a 24 px target, drawn as an 8 px dot. */
-  .moon { position: absolute; width: 24px; height: 24px; transform: translate(-50%, -50%); padding: 0; border: 0; background: transparent; cursor: pointer; border-radius: 50%; }
+  .moon { position: absolute; z-index: 1; width: 24px; height: 24px; transform: translate(-50%, -50%); padding: 0; border: 0; background: transparent; cursor: pointer; border-radius: 50%; }
   .moon::after { content: ''; position: absolute; left: 8px; top: 8px; width: 8px; height: 8px; border-radius: 50%; background: var(--fg-muted); box-shadow: 0 0 0 2px var(--bg-sunk); }
   .moon.done::after { background: var(--status-done); }
   .moon.failed::after { background: var(--status-failed); }

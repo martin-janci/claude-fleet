@@ -1,0 +1,40 @@
+kind: fleet_agent
+name: daily-digest
+description: "Every workday evening, reads what the fleet did that day (sessions, agent runs, failures, host health) and keeps a short digest: what got done, what went wrong, what needs a person tomorrow."
+stores:
+  - { role: digests, kind: fleet, label: Digests kept before }
+trigger:
+  source: schedule
+  cron: "0 17 * * 1-5"
+run:
+  workspace: home
+  max_turns: 30
+  timeout_secs: 900
+  diagnostics: true
+  context:
+    - { store: digests, recent: 5 }
+  output_schema:
+    type: object
+    required: [summary, done, problems, tomorrow]
+    properties:
+      summary: { type: string, maxLength: 600 }
+      done: { type: array, items: { type: string, maxLength: 200 } }
+      problems:
+        type: array
+        items:
+          type: object
+          required: [what, severity]
+          properties:
+            what: { type: string, maxLength: 300 }
+            severity: { enum: [critical, major, minor] }
+            where: { type: string, maxLength: 120 }
+      tomorrow: { type: array, items: { type: string, maxLength: 200 } }
+actions:
+  - id: keep
+    do: record
+    store: digests
+    key: "{{now}}"
+    value: { summary: "{{answer.summary}}", tomorrow: "{{answer.tomorrow}}" }
+    auto: true
+limits:
+  max_body_chars: 4000

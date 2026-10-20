@@ -13,6 +13,15 @@ use rusqlite::{OptionalExtension, Result};
 /// row is then marked failed and stays visible with its error.
 pub const DEFERRED_MAX_ATTEMPTS: i64 = 3;
 
+/// How long a typed prompt holds its session's idle moment when no turn
+/// followed. A prompt whose turn ended within the second it was typed (a
+/// fast credit or limit error), or that started no turn at all (a local
+/// `/clear`, a paste the REPL swallowed), left the session idle with the
+/// same moment: past this, the moment counts as spent and the next
+/// waiting prompt may go, rather than the queue stalling until some other
+/// turn ends.
+pub const DEFERRED_MOMENT_HOLD_SECS: i64 = 300;
+
 /// One deferred prompt, as `queued_prompts` lists it.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DeferredPromptRow {
@@ -188,9 +197,14 @@ impl Store {
                 "UPDATE deferred_prompts SET delivered_at = ?2 WHERE id = ?1 AND {PENDING} \
                  AND NOT EXISTS (SELECT 1 FROM deferred_prompts d \
                    WHERE d.session_id = deferred_prompts.session_id \
-                     AND d.delivered_at >= ?3)"
+                     AND d.delivered_at >= ?3 AND d.delivered_at > ?4)"
             ))?
-            .execute(rusqlite::params![id, now, idle_since])?;
+            .execute(rusqlite::params![
+                id,
+                now,
+                idle_since,
+                now - DEFERRED_MOMENT_HOLD_SECS
+            ])?;
         Ok(n == 1)
     }
 
@@ -217,12 +231,15 @@ impl Store {
 
     /// A claimed prompt whose typing may have landed (the SSH call timed out
     /// after the paste could have run): failed for good rather than handed
-    /// back, so it is never typed twice.
+    /// back, so it is never typed twice. `delivered_at` stays: the paste may
+    /// have started a turn, so the idle moment it claimed stays claimed
+    /// ([`Self::claim_deferred_prompt_in`]) and no second prompt goes in on
+    /// top of it. [`Self::list_deferred_prompts`] still lists it, as failed.
     pub fn fail_deferred_prompt(&self, id: i64, error: &str, now: i64) -> Result<()> {
         self.conn
             .prepare_cached(
                 "UPDATE deferred_prompts SET attempts = attempts + 1, error = ?2, \
-                 delivered_at = NULL, failed_at = ?3 WHERE id = ?1",
+                 failed_at = ?3 WHERE id = ?1",
             )?
             .execute(rusqlite::params![id, error, now])?;
         Ok(())
@@ -261,16 +278,33 @@ impl Store {
 
     /// What is waiting, and what failed, for one session or for every
     /// session; delivered, cancelled and skipped rows are history and left
-    /// out.
+    /// out. A failed row is listed even with `delivered_at` set: a typing
+    /// that may have landed keeps its claim ([`Self::fail_deferred_prompt`]).
+    ///
+    /// One statement per shape, so the one-session read (every tick, from
+    /// the operator feed and the Control journal) uses
+    /// `deferred_prompts_session` (migration 202) instead of scanning the
+    /// table's whole history.
     pub fn list_deferred_prompts(&self, session_id: Option<i64>) -> Result<Vec<DeferredPromptRow>> {
-        let mut st = self.conn.prepare_cached(&format!(
-            "SELECT {COLS} FROM deferred_prompts \
-             WHERE (?1 IS NULL OR session_id = ?1) \
-               AND delivered_at IS NULL AND cancelled_at IS NULL AND skipped_at IS NULL \
-             ORDER BY id"
-        ))?;
-        let rows = st.query_map([session_id], row)?;
-        rows.collect()
+        const LISTED: &str = "(delivered_at IS NULL OR failed_at IS NOT NULL) \
+                              AND cancelled_at IS NULL AND skipped_at IS NULL";
+        match session_id {
+            Some(id) => {
+                let mut st = self.conn.prepare_cached(&format!(
+                    "SELECT {COLS} FROM deferred_prompts \
+                     WHERE session_id = ?1 AND {LISTED} ORDER BY id"
+                ))?;
+                let rows = st.query_map([id], row)?;
+                rows.collect()
+            }
+            None => {
+                let mut st = self.conn.prepare_cached(&format!(
+                    "SELECT {COLS} FROM deferred_prompts WHERE {LISTED} ORDER BY id"
+                ))?;
+                let rows = st.query_map([], row)?;
+                rows.collect()
+            }
+        }
     }
 }
 
@@ -332,6 +366,71 @@ mod tests {
             s.list_deferred_prompts(None).unwrap().len(),
             1,
             "a failed row stays listed"
+        );
+    }
+
+    #[test]
+    fn a_typing_that_may_have_landed_keeps_its_idle_moment() {
+        let (s, sid) = store_with_session();
+        let a = s.insert_deferred_prompt(sid, "a", 10).unwrap();
+        let b = s.insert_deferred_prompt(sid, "b", 11).unwrap();
+        assert!(s.claim_deferred_prompt_in(a, 20, Some(15)).unwrap());
+        s.fail_deferred_prompt(a, "may have been typed", 21)
+            .unwrap();
+        assert!(
+            !s.claim_deferred_prompt_in(b, 22, Some(15)).unwrap(),
+            "the moment `a` may have used is still taken"
+        );
+        assert!(s.claim_deferred_prompt_in(b, 30, Some(25)).unwrap());
+        let r = s.get_deferred_prompt(a).unwrap().unwrap();
+        // A turn that ended in the very second its prompt was typed leaves
+        // the same moment: held a while, then spent.
+        let c = s.insert_deferred_prompt(sid, "c", 31).unwrap();
+        assert!(!s.claim_deferred_prompt_in(c, 31, Some(30)).unwrap());
+        assert!(s
+            .claim_deferred_prompt_in(c, 30 + DEFERRED_MOMENT_HOLD_SECS + 1, Some(30))
+            .unwrap());
+        assert_eq!((r.delivered_at, r.failed_at), (Some(20), Some(21)));
+        let listed: Vec<i64> = s
+            .list_deferred_prompts(Some(sid))
+            .unwrap()
+            .iter()
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(listed, vec![a], "still listed, as failed");
+        assert_eq!(s.list_deferred_prompts(None).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn the_per_session_reads_use_the_session_index() {
+        let (s, _sid) = store_with_session();
+        let plan = |sql: &str| -> String {
+            let mut st = s
+                .conn
+                .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+                .unwrap();
+            let rows = st
+                .query_map(rusqlite::params![1, 2, 3], |r| r.get::<_, String>(3))
+                .unwrap();
+            rows.map(|r| r.unwrap()).collect::<Vec<_>>().join("\n")
+        };
+        let claim = plan(&format!(
+            "UPDATE deferred_prompts SET delivered_at = ?2 WHERE id = ?1 AND {PENDING} \
+             AND NOT EXISTS (SELECT 1 FROM deferred_prompts d \
+               WHERE d.session_id = deferred_prompts.session_id AND d.delivered_at >= ?3)"
+        ));
+        assert!(
+            claim.contains("deferred_prompts_session"),
+            "the idle-moment check scans: {claim}"
+        );
+        let list = plan(
+            "SELECT id FROM deferred_prompts WHERE session_id = ?1 \
+             AND (delivered_at IS NULL OR failed_at IS NOT NULL) \
+             AND cancelled_at IS NULL AND skipped_at IS NULL AND ?2 = ?2 AND ?3 = ?3 ORDER BY id",
+        );
+        assert!(
+            !list.contains("SCAN deferred_prompts"),
+            "the listing scans: {list}"
         );
     }
 

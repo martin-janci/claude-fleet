@@ -199,6 +199,23 @@ export function putOff(key: string): void {
   laterEscalations.set(new Set(laterEntries.map(([k]) => k)));
 }
 
+/** PURE: `entries` without the host-down cards of hosts that are up again. A
+ *  host-down key names the host, not the outage, so a Later on one outage
+ *  must end when the host recovers or it would hide the next outage too. */
+export function dropRecoveredHosts(entries: readonly LaterEntry[], hosts: readonly HostRow[]): LaterEntry[] {
+  const up = new Set(hosts.filter((h) => h.reachable).map((h) => `host:${h.alias}`));
+  return entries.filter(([k]) => !up.has(k));
+}
+
+/** Forget the Later of every host-down card whose host is reachable again. */
+export function forgetRecoveredHosts(hosts: readonly HostRow[]): void {
+  const kept = dropRecoveredHosts(laterEntries, hosts);
+  if (kept.length === laterEntries.length) return;
+  laterEntries = kept;
+  writePref(LATER_PREF, laterEntries);
+  laterEscalations.set(new Set(laterEntries.map(([k]) => k)));
+}
+
 /** `control`: only Control's threads raise a card (the default); `fleet`: every session. */
 export type EscalationScope = 'control' | 'fleet';
 export const SCOPE_PREF = 'control.escalationsScope';

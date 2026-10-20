@@ -8683,3 +8683,95 @@ fn a_pinned_ghost_is_not_dismissed() {
         .unwrap()
         .is_none());
 }
+
+/// A live bg agent whose host's `claude agents` listing fails is not taken
+/// as already gone: the kill reports the failure (and records no kill), so
+/// a stop limit or a person's Kill is retried rather than closed while the
+/// agent keeps running.
+#[tokio::test]
+async fn a_bg_kill_whose_listing_failed_is_not_reported_as_done() {
+    let s = Store::open_in_memory().unwrap();
+    let host = "nohost.invalid";
+    s.upsert_host(host).unwrap();
+    s.upsert_bg_session(host, "bg:job-1", None, "job-1", Some("working"), 1, "bg", 1)
+        .unwrap();
+    let store = Mutex::new(s);
+    let ssh = Arc::new(crate::ssh::SshClient::new());
+    let err = kill_session(
+        KillSessionArgs {
+            host_alias: host.into(),
+            name: "bg:job-1".into(),
+            force: false,
+        },
+        &store,
+        &ssh,
+    )
+    .await
+    .unwrap_err();
+    assert!(err.message.contains("was not stopped"), "{err:?}");
+    let row = store
+        .lock()
+        .unwrap()
+        .get_session("bg:job-1", host)
+        .unwrap()
+        .expect("row kept");
+    assert_eq!(row.status, "running");
+}
+
+/// #964/#965: an agent connection that drops (or is taken over by a second
+/// agent on the same token) while the probe is in flight comes back as
+/// `E_AGENT_PROTOCOL` with `details.connection_lost`, not `E_AGENT_OFFLINE`.
+/// The reconcile must still give it the redial grace: the pass writes
+/// nothing and the host stays reachable. The same code WITHOUT the flag is a
+/// real failure and is written at once.
+#[test]
+fn a_connection_lost_mid_probe_gets_the_redial_grace() {
+    // Its own alias: `down_hosts()` is process-global.
+    let alias = "lost-mid-probe";
+    let mut s = Store::open_in_memory().unwrap();
+    s.upsert_host(alias).unwrap();
+    let host = |s: &Store| {
+        s.list_hosts()
+            .unwrap()
+            .into_iter()
+            .find(|h| h.alias == alias)
+            .unwrap()
+    };
+    let probe = |s: &Store, result: Result<Vec<_>, IpcError>| HostProbe {
+        host: host(s),
+        result,
+        agent_rows: Some(Vec::new()),
+        agent_mtimes: Some(std::collections::HashMap::new()),
+        intel: PaneIntelMap::new(),
+        pane_tails: Default::default(),
+        account: None,
+        profiles: None,
+        pr_info: PrInfoMap::new(),
+        identity: None,
+        versions: None,
+        health: None,
+        started_at: now_unix(),
+        worktree_kb: None,
+        codex_rollouts: Default::default(),
+    };
+    let good = probe(&s, Ok(Vec::new()));
+    reconcile_write_one_host(&mut s, &good, &[]).unwrap();
+    assert!(host(&s).reachable, "a good pass marks it reachable");
+
+    let lost = crate::agent::registry::lost_mid_request(alias);
+    assert_eq!(lost.code, codes::E_AGENT_PROTOCOL);
+    let held = probe(&s, Err(lost));
+    reconcile_write_one_host(&mut s, &held, &[]).unwrap();
+    assert!(
+        host(&s).reachable,
+        "a connection lost mid-probe is held like E_AGENT_OFFLINE, not written as unreachable"
+    );
+
+    let garbled = IpcError::new(codes::E_AGENT_PROTOCOL, "unexpected frame");
+    let failed = probe(&s, Err(garbled));
+    reconcile_write_one_host(&mut s, &failed, &[]).unwrap();
+    assert!(
+        !host(&s).reachable,
+        "a protocol error with no connection_lost flag is a real failure"
+    );
+}

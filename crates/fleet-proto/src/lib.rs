@@ -164,6 +164,14 @@ const _: () = assert!(MIN_SUPPORTED_PROTO <= PROTO_VERSION);
 /// `fleet-agent` do, here.
 pub const VERSION_REFUSED_CLOSE_CODE: u16 = 4001;
 
+/// WebSocket close code for "another agent connected with this host's token
+/// and took the connection over". Two agents installed with one token (a
+/// cloned VM, a reinstall that left the old service running) used to replace
+/// each other about once a second: each heard the hub before the close, so
+/// each reset its backoff and dialled straight back. An agent that reads this
+/// code backs off at the slowest interval instead, and says why.
+pub const SUPERSEDED_CLOSE_CODE: u16 = 4002;
+
 /// The verdict on a peer's `proto`, judged against this binary's own
 /// compiled [`PROTO_VERSION`]/[`MIN_SUPPORTED_PROTO`] window. See
 /// [`judge_proto`].

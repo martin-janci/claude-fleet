@@ -55,12 +55,21 @@ from `autonomy.ts`; Custom grants what Ask first does), and since the
   `queue_prompt`, `run_prompt` and `dispatch_task` into a live session it
   started or briefed (`Store::is_open_control_handoff`) go without a card;
   at Autopilot so does a Claude `new_session` (or `dispatch_task`
-  `new_worker`) on a host inside an active mission's live grant — its
-  hosts, expiry and budget, and parallel cap (`start_inside_mission_grant`).
-  Kills, restarts, rewinds, restores, add_project and every `confirm: true`
-  tool always ask. The rule is one pure function,
-  `guard::operator_must_confirm(tool, position, own_handoff, inside_grant)`,
-  with a truth-table test. A pre-approved call writes a
+  `new_worker`, or a task's `work_link` `start` / `run` / `resume`) on a
+  host inside an active mission's live grant — its hosts, expiry and
+  budget, and parallel cap (`start_inside_mission_grant`; a task start
+  with no host is inside only a grant naming no hosts).
+  Kills, rewinds, restores, add_project and every other `confirm: true`
+  tool always ask. **Session care** (`control.session_care`, OFF by
+  default, 2026-10-20): with it on, `restart_session` of an open handoff
+  goes without a card at Within your brief and Autopilot, and
+  `safe_kill_session` of one at Autopilot (`guard::OPERATOR_CARE_TOOLS`);
+  the digest says `Session care: on` under its autonomy line. The rule is
+  one pure function, `guard::operator_must_confirm_with(tool, position,
+  OperatorFacts)`, with truth-table tests. Control's CLAUDE.md also
+  carries "Carry your tasks through" and "Look after your sessions"
+  (`service/control_rules.rs`), and each digest line names the task its
+  session works on (`task KEY`). A pre-approved call writes a
   `control_pre_approved` event on its target and its receipt carries
   `approval = pre_approved` (migration 196), drawn "pre-approved" on the
   chip.
@@ -1193,9 +1202,15 @@ agent drafts one in a chat with a `wizard: fleet_agent` block, which the
 person sends; the phone lists the instances with Revoke. Step 6 in part: the
 `github_prs` and `github_comments` sources, `pr_comment` and `pr_labels`,
 and comments and new items on trackers other than Jira, whose
-`tracker_comments` and `tracker_assigned` polls read the hub's synced items
-(updated since the poll, less a sync's lag) and each one's comments through
-its provider; not `pr_review` or restating the built-in agents.
+`tracker_comments` and `tracker_assigned` polls page through the hub's synced
+items (by when the hub wrote them, from where the last poll stopped) and, for
+comments, each one's comments through its provider — the sync holds only the
+items assigned to the tracker's own account on GitHub and Linear, so those are
+all a poll sees there; the gallery (`fleet_agents/gallery.rs`: the
+`catalog-seed/fleet-agents/` definitions embedded, listed under Automation ›
+Agents › Gallery and added to the catalog with *Add to catalog*, `agents {
+install }`), with `issue-triage`, `pr-questions` and `daily-digest` added to
+it; not `pr_review` or restating the built-in agents.
 
 The self debug agent (thread "Self debug agent", 2026-10-17), the hub and
 desktop parts: a fleet agent definition that sets `run.diagnostics` gets

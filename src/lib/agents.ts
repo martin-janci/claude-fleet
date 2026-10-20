@@ -316,6 +316,21 @@ function fleetCmd<T>(
   });
 }
 
+/** A definition claude-fleet ships, and whether the catalog has it yet. */
+export interface GalleryEntry extends FleetDefinition {
+  installed: boolean;
+}
+
+/** The gallery: the fleet agents claude-fleet ships (`catalog-seed/fleet-agents/`). */
+export function fleetGallery(): Promise<Result<GalleryEntry[]>> {
+  return fleetCmd<GalleryEntry[]>('gallery');
+}
+
+/** Add gallery definition `name` to the catalog; it never overwrites one there. */
+export function installFleet(name: string): Promise<Result<{ commit: string }>> {
+  return fleetCmd('install', { definition: name });
+}
+
 export function fleetDefinitions(): Promise<Result<FleetDefinition[]>> {
   return fleetCmd<FleetDefinition[]>('definitions');
 }

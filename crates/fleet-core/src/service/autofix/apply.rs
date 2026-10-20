@@ -1,6 +1,6 @@
 //! Eligibility, execution and the apply → re-scan step.
 
-use super::sync::{sync, Scope};
+use super::sync::{sync, sync_with, Scope};
 use super::{detector_of, scan_all, Finding, FindingBody, Fix, FixPlan, Safety, ScanCx};
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::service::playbooks::PressEnterOutcome;
@@ -228,11 +228,13 @@ impl FixExec for SshFixExec<'_> {
         };
         crate::service::provision::rewrite_mcp_entry(self.ssh.as_ref(), host, &base, &token)
             .await?;
-        let probe = mcp_entry::probe(self.ssh.as_ref(), host)
-            .await
-            .ok()
-            .flatten();
-        mcp_entry::remember(host, crate::store::now_unix(), probe);
+        // A re-probe that cannot judge keeps the earlier reading (the row
+        // stays `verifying`, never `cleared` unseen) and is due again on the
+        // next pass.
+        match mcp_entry::probe(self.ssh.as_ref(), host).await {
+            Ok(Some(p)) => mcp_entry::remember(host, crate::store::now_unix(), Some(p)),
+            _ => mcp_entry::mark_due(host),
+        }
         Ok(())
     }
 
@@ -364,8 +366,21 @@ async fn execute(store: &Mutex<Store>, exec: &dyn FixExec, plan: &FixPlan) -> Re
             tmux_name,
             stuck_kind,
         } => {
-            still_stuck(store, *session_id, stuck_kind)?;
-            match exec.press_enter(host, tmux_name).await? {
+            // The keys go to the pane the checks just ran on: a plan made
+            // before a rename (or a move) names a pane that may now be
+            // someone else's, so it is refused rather than followed.
+            let row = still_stuck(store, *session_id, stuck_kind)?;
+            if row.host_alias != *host || row.tmux_name != *tmux_name {
+                return Err(IpcError::new(
+                    codes::E_INVALID,
+                    format!(
+                        "that session is now {} on {}, not the {tmux_name} on {host} this \
+                         finding named; nothing was sent (the next pass refreshes it)",
+                        row.tmux_name, row.host_alias
+                    ),
+                ));
+            }
+            match exec.press_enter(&row.host_alias, &row.tmux_name).await? {
                 PressEnterOutcome::Sent => Ok(()),
                 PressEnterOutcome::SkippedAttached => Err(IpcError::new(
                     codes::E_INVALID,
@@ -551,6 +566,25 @@ async fn apply_with(
         .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, format!("no finding {id}")))
 }
 
+/// Sync one full scan's `found`, leaving the rows of every host no detector
+/// could judge as they are: an unreachable host is skipped by each detector,
+/// and a finding that was not looked for is not one that went away. The
+/// tick's pass and the tool's `scan` (Check now) both sync through here.
+pub fn sync_scan(
+    s: &Store,
+    cx: &ScanCx,
+    found: &[Finding],
+    now: i64,
+) -> Result<super::sync::SyncOutcome, IpcError> {
+    let unjudged: std::collections::BTreeSet<&str> = cx
+        .health
+        .iter()
+        .filter(|h| !h.reachable)
+        .map(|h| h.alias.as_str())
+        .collect();
+    sync_with(s, found, Scope::All, &unjudged, now)
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct PassOutcome {
     pub sync: super::sync::SyncOutcome,
@@ -584,7 +618,7 @@ pub(crate) async fn run_pass_with(
         let cfg = Config::read(&s);
         let cx = gather(&s, live_agents, now)?;
         let found = only_enabled(scan(&cx), &cfg);
-        let synced = sync(&s, &found, Scope::All, now)?;
+        let synced = sync_scan(&s, &cx, &found, now)?;
         s.prune_autofix_findings(now - AUTOFIX_RETENTION_SECS)?;
         let due: Vec<i64> = if crate::service::loops::paused(&s) {
             Vec::new()
@@ -959,6 +993,30 @@ mod tests {
             .unwrap();
         assert_eq!(exec.presses.load(Ordering::SeqCst), 0);
         assert_eq!(row.state, "apply_failed");
+    }
+
+    #[tokio::test]
+    async fn a_renamed_session_gets_no_keys_from_a_plan_naming_its_old_pane() {
+        let (store, id, sid) = stuck_seed("trust_prompt", press_plan("trust_prompt"));
+        {
+            let s = store.lock().unwrap();
+            s.rename_session_row("h1", "work-1", "work-2", 15).unwrap();
+            // A new session takes the old name: the plan's pane is now its.
+            s.upsert_session("work-1", "h1", None, None, 0, 0, "running", None)
+                .unwrap();
+            assert!(s
+                .list_all_sessions()
+                .unwrap()
+                .iter()
+                .any(|r| r.id == sid && r.tmux_name == "work-2"));
+        }
+        let exec = FakeExec::default();
+        let row = apply_with(&store, &exec, id, &test_actor(), 20, false, &still_there)
+            .await
+            .unwrap();
+        assert_eq!(exec.presses.load(Ordering::SeqCst), 0);
+        assert_eq!(row.state, "apply_failed");
+        assert!(row.last_error.unwrap().contains("nothing was sent"));
     }
 
     #[tokio::test]
@@ -1450,6 +1508,29 @@ mod tests {
         );
         assert!(!off.is_empty(), "the operator detector still runs");
         assert!(off.iter().all(|f| !f.kind.starts_with("host.")), "{off:?}");
+    }
+
+    /// Check now (the tool's `scan`) syncs like the tick: a row on a host
+    /// that cannot be reached is left live, not cleared as fixed.
+    #[test]
+    fn a_full_scan_sync_leaves_an_unreachable_hosts_rows_alone() {
+        let s = Store::open_in_memory().unwrap();
+        let id = sync(&s, &[hooks_silent_finding()], Scope::All, 10)
+            .unwrap()
+            .opened[0];
+        assert!(s.mark_autofix_attempt(id, 15).unwrap());
+        let mut cx = gather(&s, &[], 20).unwrap();
+        cx.health = vec![crate::service::health::HostHealthRow {
+            alias: "h1".into(),
+            reachable: false,
+            ..Default::default()
+        }];
+        let o = sync_scan(&s, &cx, &[], 20).unwrap();
+        assert!(o.cleared.is_empty(), "{o:?}");
+        assert_eq!(s.autofix_finding(id).unwrap().unwrap().state, "verifying");
+        cx.health[0].reachable = true;
+        let o = sync_scan(&s, &cx, &[], 30).unwrap();
+        assert_eq!(o.cleared, vec![id], "judged and gone: cleared");
     }
 
     #[tokio::test]

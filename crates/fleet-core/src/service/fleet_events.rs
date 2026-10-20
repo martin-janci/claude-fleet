@@ -99,11 +99,26 @@ pub fn event_of(key: &str, raised: bool) -> Option<(&'static str, String)> {
     }
 }
 
+/// PURE: whether the subject of a condition's `key` is still watched: its
+/// host is among the active `hosts`, its account on one of them. A key
+/// whose subject left (a host hidden, removed, or `local` turned off) did
+/// not clear; it is forgotten without an event.
+pub fn key_watched(key: &str, hosts: &[String], accounts: &[String]) -> bool {
+    let parts: Vec<&str> = key.split(':').collect();
+    match parts.as_slice() {
+        ["h" | "l", host, ..] => hosts.iter().any(|h| h == host),
+        ["a", uuid, ..] => accounts.iter().any(|a| a == uuid),
+        _ => true,
+    }
+}
+
 /// PURE: the change one pass tells, and the state after it. `now_raised`
-/// is every condition true now; a key not in it is cleared.
+/// is every condition true now; a key not in it is cleared, unless
+/// `watching` says its subject is no longer watched: then it is forgotten.
 pub fn diff<'a>(
     state: &mut WatchState,
     now_raised: &'a [Watched],
+    watching: &dyn Fn(&str) -> bool,
     now: i64,
 ) -> Vec<(&'static str, String, Option<&'a Watched>, String)> {
     let mut out = Vec::new();
@@ -126,6 +141,10 @@ pub fn diff<'a>(
     keys.dedup();
     for key in keys {
         let current = now_raised.iter().find(|w| w.cond.key == key);
+        if current.is_none() && !watching(&key) {
+            state.told.remove(&key);
+            continue;
+        }
         let want = current.is_some();
         let last = state.told.get(&key).copied();
         let differs = match last {
@@ -188,11 +207,18 @@ fn account_org(s: &Store, hosts: &[HostRow], uuid: &str) -> Option<i64> {
     }
 }
 
-/// Every watched condition now.
-fn watched(s: &Store, now: i64) -> Vec<Watched> {
+/// What one pass reads: every watched condition now, over these active hosts.
+struct Pass {
+    raised: Vec<Watched>,
+    hosts: Vec<HostRow>,
+}
+
+/// Every watched condition now, or the store's error: a pass that could not
+/// read a source must not read its conditions as cleared.
+fn watched(s: &Store, now: i64) -> Result<Pass, rusqlite::Error> {
     use crate::service::health;
     let local = crate::service::hub::local_host_enabled();
-    let hosts = crate::service::hosts::active_hosts(s.list_hosts().unwrap_or_default(), local);
+    let hosts = crate::service::hosts::active_hosts(s.list_hosts()?, local);
     let t = health::host_thresholds(s);
     let mut out = Vec::new();
     for h in &hosts {
@@ -211,7 +237,7 @@ fn watched(s: &Store, now: i64) -> Vec<Watched> {
             });
         }
     }
-    for cond in crate::service::account_feed::conditions(s, &hosts, now) {
+    for cond in crate::service::account_feed::try_conditions(s, &hosts, now)? {
         let parts: Vec<&str> = cond.key.split(':').collect();
         let (host, org) = match parts.as_slice() {
             ["a", uuid, "limit"] => (None, account_org(s, &hosts, uuid)),
@@ -220,24 +246,37 @@ fn watched(s: &Store, now: i64) -> Vec<Watched> {
         };
         out.push(Watched { cond, host, org });
     }
-    out
+    Ok(Pass { raised: out, hosts })
 }
 
 /// One pass: read the conditions, write a row for each change. Returns how
 /// many rows it wrote.
 pub fn run_once(s: &Store, now: i64) -> usize {
     let mut state = WatchState::load(s);
-    let now_raised = watched(s, now);
-    let changes = diff(&mut state, &now_raised, now);
+    let pass = match watched(s, now) {
+        Ok(p) => p,
+        Err(e) => {
+            // Skip the pass: diffing a partial read would tell every
+            // condition it missed as cleared.
+            tracing::warn!(error = %e, "[fleet-events] conditions not read; pass skipped");
+            return 0;
+        }
+    };
+    let aliases: Vec<String> = pass.hosts.iter().map(|h| h.alias.clone()).collect();
+    let accounts = crate::service::account_usage_poll::distinct_account_uuids(&pass.hosts);
+    let watching = |key: &str| key_watched(key, &aliases, &accounts);
+    let changes = diff(&mut state, &pass.raised, &watching, now);
     let mut wrote = 0;
     for (kind, subject, w, words) in &changes {
-        // A cleared condition has no row now: its host is in its subject.
+        // A cleared condition has no row now: its host (or account) is in
+        // its subject, and its org is worked out as when it was raised.
         let host = w
             .and_then(|w| w.host.clone())
             .or_else(|| subject.strip_prefix("host:").map(str::to_string));
-        let org = match w {
-            Some(w) => w.org,
-            None => host.as_deref().and_then(|h| s.host_org(h).ok().flatten()),
+        let org = match (w, subject.strip_prefix("account:")) {
+            (Some(w), _) => w.org,
+            (None, Some(uuid)) => account_org(s, &pass.hosts, uuid),
+            (None, None) => host.as_deref().and_then(|h| s.host_org(h).ok().flatten()),
         };
         let e = NewFleetEvent {
             kind,
@@ -272,6 +311,8 @@ pub fn maybe_run(store: &Mutex<Store>) {
 mod tests {
     use super::*;
 
+    const ALL: fn(&str) -> bool = |_| true;
+
     fn w(key: &str) -> Watched {
         Watched {
             cond: Condition {
@@ -286,12 +327,12 @@ mod tests {
     #[test]
     fn the_first_pass_learns_and_tells_nothing() {
         let mut st = WatchState::default();
-        assert!(diff(&mut st, &[w("h:mac:down")], 100).is_empty());
+        assert!(diff(&mut st, &[w("h:mac:down")], &ALL, 100).is_empty());
         assert!(st.seeded);
         // Still down: nothing.
-        assert!(diff(&mut st, &[w("h:mac:down")], 100 + FLAP_SECS).is_empty());
+        assert!(diff(&mut st, &[w("h:mac:down")], &ALL, 100 + FLAP_SECS).is_empty());
         // Back up: host_online.
-        let got = diff(&mut st, &[], 100 + FLAP_SECS);
+        let got = diff(&mut st, &[], &ALL, 100 + FLAP_SECS);
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].0, HOST_ONLINE);
         assert_eq!(got[0].1, "host:mac");
@@ -305,23 +346,23 @@ mod tests {
             ..Default::default()
         };
         let down = [w("h:nas:down")];
-        let got = diff(&mut st, &down, 1000);
+        let got = diff(&mut st, &down, &ALL, 1000);
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].0, HOST_OFFLINE);
         assert_eq!(got[0].3, "text of h:nas:down");
-        assert!(diff(&mut st, &[w("h:nas:down")], 1020).is_empty());
+        assert!(diff(&mut st, &[w("h:nas:down")], &ALL, 1020).is_empty());
         // Back within the window: held.
-        assert!(diff(&mut st, &[], 1040).is_empty());
+        assert!(diff(&mut st, &[], &ALL, 1040).is_empty());
         // Down again before the window ends: nothing to tell at all.
-        assert!(diff(&mut st, &[w("h:nas:down")], 1060).is_empty());
+        assert!(diff(&mut st, &[w("h:nas:down")], &ALL, 1060).is_empty());
         // Up, and still up after the window: told once.
-        assert!(diff(&mut st, &[], 1100).is_empty());
-        let got = diff(&mut st, &[], 1000 + FLAP_SECS);
+        assert!(diff(&mut st, &[], &ALL, 1100).is_empty());
+        let got = diff(&mut st, &[], &ALL, 1000 + FLAP_SECS);
         assert_eq!(
             got.iter().map(|g| g.0).collect::<Vec<_>>(),
             vec![HOST_ONLINE]
         );
-        assert!(diff(&mut st, &[], 1000 + 2 * FLAP_SECS).is_empty());
+        assert!(diff(&mut st, &[], &ALL, 1000 + 2 * FLAP_SECS).is_empty());
     }
 
     #[test]
@@ -370,5 +411,117 @@ mod tests {
         assert_eq!(run_once(&s, 1030 + FLAP_SECS), 1);
         let rows = s.fleet_events_of_kind_after(0, HOST_ONLINE, 10).unwrap();
         assert_eq!(rows[0].host_alias.as_deref(), Some("mac"));
+    }
+
+    #[test]
+    fn a_hidden_down_host_is_forgotten_without_a_host_online_row() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("mac").unwrap();
+        s.conn_ref()
+            .execute("UPDATE hosts SET reachable = 1 WHERE alias = 'mac'", [])
+            .unwrap();
+        assert_eq!(run_once(&s, 1000), 0);
+        s.conn_ref()
+            .execute("UPDATE hosts SET reachable = 0 WHERE alias = 'mac'", [])
+            .unwrap();
+        assert_eq!(run_once(&s, 1010), 1);
+        // The person hides the dead box: it did not come back.
+        s.set_host_hidden("mac", true).unwrap();
+        assert_eq!(run_once(&s, 1020 + FLAP_SECS), 0);
+        assert!(s
+            .fleet_events_of_kind_after(0, HOST_ONLINE, 10)
+            .unwrap()
+            .is_empty());
+        assert!(!WatchState::load(&s).told.contains_key("h:mac:down"));
+    }
+
+    #[test]
+    fn a_pass_that_cannot_read_the_store_writes_nothing() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("mac").unwrap();
+        s.conn_ref()
+            .execute("UPDATE hosts SET reachable = 0 WHERE alias = 'mac'", [])
+            .unwrap();
+        assert_eq!(run_once(&s, 1000), 0);
+        let before = WatchState::load(&s);
+        assert!(before.told.contains_key("h:mac:down"));
+        s.conn_ref()
+            .execute("UPDATE hosts SET reachable = 1 WHERE alias = 'mac'", [])
+            .unwrap();
+        s.conn_ref()
+            .execute_batch("DROP TABLE account_usage_snapshots")
+            .unwrap();
+        assert_eq!(run_once(&s, 1000 + 2 * FLAP_SECS), 0);
+        assert_eq!(WatchState::load(&s), before, "the pass is skipped");
+    }
+
+    #[test]
+    fn an_account_available_row_carries_the_accounts_org() {
+        use crate::service::account_usage::{AccountUsage, Window};
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("mac").unwrap();
+        s.conn_ref()
+            .execute("UPDATE hosts SET reachable = 1 WHERE alias = 'mac'", [])
+            .unwrap();
+        s.upsert_account(&crate::store::AccountRow {
+            uuid: "acct-1".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        s.set_host_account("mac", Some("acct-1")).unwrap();
+        let org = s.add_org("acme", None, false).unwrap();
+        s.set_host_org("mac", Some(org.id)).unwrap();
+        assert_eq!(run_once(&s, 1000), 0);
+        let full = |u: f64| {
+            Some(Window {
+                utilization: u,
+                resets_at: Some(1000 + 3600),
+            })
+        };
+        s.insert_usage_snapshot(&crate::store::UsageSnapshotRow {
+            account_uuid: "acct-1".into(),
+            fetched_at: 1005,
+            usage: AccountUsage {
+                five_hour: full(100.0),
+                seven_day: full(20.0),
+                seven_day_opus: None,
+                seven_day_sonnet: None,
+            },
+            subscription: None,
+            source_host: None,
+        })
+        .unwrap();
+        assert_eq!(run_once(&s, 1010), 1);
+        let limited = s
+            .fleet_events_of_kind_after(0, ACCOUNT_LIMITED, 10)
+            .unwrap();
+        assert_eq!(limited[0].org_id, Some(org.id));
+        // The window resets: under its limit again, in the same org.
+        assert_eq!(run_once(&s, 1000 + 3600 + FLAP_SECS), 1);
+        let available = s
+            .fleet_events_of_kind_after(0, ACCOUNT_AVAILABLE, 10)
+            .unwrap();
+        assert_eq!(available.len(), 1);
+        assert_eq!(available[0].subject, "account:acct-1");
+        assert_eq!(available[0].org_id, Some(org.id));
+    }
+
+    #[test]
+    fn a_key_is_watched_while_its_host_or_account_is() {
+        let hosts = vec!["mac".to_string()];
+        let accounts = vec!["u-1".to_string()];
+        assert!(key_watched("h:mac:down", &hosts, &accounts));
+        assert!(!key_watched("h:nas:down", &hosts, &accounts));
+        assert!(key_watched("a:u-1:limit", &hosts, &accounts));
+        assert!(!key_watched("a:u-2:limit", &hosts, &accounts));
+        assert!(!key_watched("l:nas:-:out", &hosts, &accounts));
+        let mut st = WatchState {
+            seeded: true,
+            ..Default::default()
+        };
+        assert_eq!(diff(&mut st, &[w("h:nas:down")], &ALL, 1000).len(), 1);
+        let gone = |k: &str| key_watched(k, &hosts, &accounts);
+        assert!(diff(&mut st, &[], &gone, 1000 + FLAP_SECS).is_empty());
+        assert!(st.told.is_empty());
     }
 }

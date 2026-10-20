@@ -47,6 +47,22 @@ fn the_recommended_option_of_the_last_choices_card_is_the_pick() {
     assert_eq!(recommended_pick(&json).unwrap().label, "Write the docs");
     let plain = CARD.replace("```fleet-ui", "```js");
     assert!(recommended_pick(&plain).is_none());
+    // A fence tagged with the spec's name still counts.
+    let alias = CARD.replace("```fleet-ui", "```fleet.ui");
+    assert_eq!(recommended_pick(&alias).unwrap().label, "Write the docs");
+}
+
+/// An untagged fence is how Control quotes a pane, a log or an issue: a card
+/// inside one is drawn (`ui_blocks`) but never sent for the person.
+#[test]
+fn a_card_quoted_in_an_untagged_fence_is_drawn_but_never_picked() {
+    let quoted = CARD.replace("```fleet-ui", "```");
+    assert_eq!(ui_blocks(&quoted).len(), 1, "still drawn as a card");
+    assert!(recommended_pick(&quoted).is_none());
+    // Control's own card before the quote is not the last one either way:
+    // the quoted one is skipped, so Control's card decides.
+    let both = format!("{CARD}\nThe pane printed:\n{quoted}");
+    assert_eq!(recommended_pick(&both).unwrap().label, "Write the docs");
 }
 
 #[test]
@@ -233,22 +249,27 @@ async fn pause_all_stops_control_continue() {
     assert_eq!(load(&s).unwrap().state, PickState::Waiting);
 }
 
+/// Control at level 2 with its operator session `h/fleet-operator` running;
+/// returns that session's id.
+fn with_operator(s: &Store) -> i64 {
+    s.upsert_host("h").unwrap();
+    s.set_setting(settings::ORCHESTRATOR_MAX_LEVEL, "2")
+        .unwrap();
+    s.set_setting(
+        crate::service::operator::SETTING_OPERATOR_SESSION,
+        "h/fleet-operator",
+    )
+    .unwrap();
+    s.upsert_session("fleet-operator", "h", None, None, 1, 1, "running", None)
+        .unwrap()
+}
+
 #[tokio::test]
 async fn controls_stop_hook_records_the_pick_and_one_pass_sends_it_once() {
     let store = Mutex::new(Store::open_in_memory().unwrap());
     let id = {
         let s = store.lock().unwrap();
-        s.upsert_host("h").unwrap();
-        s.set_setting(settings::ORCHESTRATOR_MAX_LEVEL, "2")
-            .unwrap();
-        s.set_setting(
-            crate::service::operator::SETTING_OPERATOR_SESSION,
-            "h/fleet-operator",
-        )
-        .unwrap();
-        let id = s
-            .upsert_session("fleet-operator", "h", None, None, 1, 1, "running", None)
-            .unwrap();
+        let id = with_operator(&s);
         on_stop(&s, id, Some(CARD), 1000).unwrap();
         let p = load(&s).unwrap();
         assert_eq!((p.session_id, p.state), (id, PickState::Waiting));
@@ -275,4 +296,46 @@ async fn controls_stop_hook_records_the_pick_and_one_pass_sends_it_once() {
     assert_eq!(load(&s).unwrap().state, PickState::Sent);
     on_stop(&s, id, Some("done."), due + 60).unwrap();
     assert!(load(&s).is_none());
+}
+
+/// Fails the send, after Control finished another turn mid-send when
+/// `newer` is set (its Stop hook saved a new card).
+struct FailAfter {
+    store: Arc<Mutex<Store>>,
+    newer: bool,
+}
+
+#[async_trait::async_trait]
+impl ContinueExec for FailAfter {
+    async fn queue(&self, _session_id: i64, _body: String) -> Result<(), IpcError> {
+        if self.newer {
+            let s = self.store.lock().unwrap();
+            save(&s, Some(&pending(5, 2_000))).unwrap();
+        }
+        Err(IpcError::new(codes::E_INVALID, "ssh down"))
+    }
+}
+
+#[tokio::test]
+async fn a_failed_send_marks_only_its_own_pick_failed() {
+    for newer in [false, true] {
+        let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+        {
+            let s = store.lock().unwrap();
+            let id = with_operator(&s);
+            on_stop(&s, id, Some(CARD), 1000).unwrap();
+        }
+        let exec = FailAfter {
+            store: store.clone(),
+            newer,
+        };
+        assert!(!run_with(&store, &exec, 1000 + 10 * 60).await);
+        let s = store.lock().unwrap();
+        let p = load(&s).unwrap();
+        if newer {
+            assert_eq!((p.turn_seq, p.state), (5, PickState::Waiting), "{p:?}");
+        } else {
+            assert_eq!(p.state, PickState::Failed);
+        }
+    }
 }

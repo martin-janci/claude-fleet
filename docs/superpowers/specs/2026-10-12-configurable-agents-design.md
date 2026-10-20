@@ -2,8 +2,8 @@
 
 Status: steps 1 to 5 built, and step 6's GitHub sources, PR comments and
 labels, and writes to other trackers, 2026-10-14 (the phone's part in
-martin-janci/fleet-mobile); polling other trackers, 2026-10-18. The rest of
-step 6 not built.
+martin-janci/fleet-mobile); polling other trackers and the gallery,
+2026-10-18. The rest of step 6 not built.
 Asked for by the owner after the built-in reviewer and support agent landed
 (`2026-10-11-review-and-support-agents-design.md`, PRs
 martin-janci/claude-fleet#871, martin-janci/fleet-mobile#217,
@@ -598,16 +598,44 @@ run real instances.
    `tracker_issue` creates an item in the project (`WriteOp::CreateItem`);
    an issue link is Jira's, so a link, or an issue with one, is refused
    there. Not built: `pr_review` (the reviewer's placed, verified review
-   stays the PR reviewer's), restating the built-in agents, and a gallery.
+   stays the PR reviewer's) and restating the built-in agents.
+
+   The gallery, built 2026-10-18 (`service/fleet_agents/gallery.rs`): the
+   definitions in `catalog-seed/fleet-agents/`, embedded in fleet-core
+   (`SEEDS`; a test checks it lists the directory and that each loads
+   clean). The `agents` tool's `gallery` lists them, each marked whether the
+   catalog has one of that name; `install {definition}` adds one to the
+   personal catalog as a commit (`catalog::author::install_in`), private and
+   with no source, and refuses a name the catalog has, so an edited copy is
+   never overwritten. Automation › Agents shows the ones not installed under
+   *Gallery* with *Add to catalog*. Next to the self debug agent, the
+   proposer, simplify and refactor, it ships three for everyday work:
+   `issue-triage` (`tracker_comments` on `/triage`: a triage comment, or a
+   question when the issue is too vague), `pr-questions` (`github_comments`
+   on `/ask`: an answer from the code as a `pr_comment`) and `daily-digest`
+   (a workday `schedule` reading `fleet-diagnostics`, kept in a fleet
+   store).
 
    Polling a tracker that is not Jira, built 2026-10-18: no provider grows
-   `issue_threads`. The poll reads the items the hub's tracker sync saw
-   updated since the last poll, less `SYNC_LAG_SECS` (30 minutes: the sync
-   lags the tracker), at most 25 (`ITEM_POLL_MAX`,
-   `Store::tracker_items_updated_since`), and each one's newest 20 comments
-   through its provider's `comments`. The job keys are the Jira poll's
-   (`<tracker>:<key>#c<id>`, `#assigned:<who>`), so the longer window finds
-   nothing twice. The subject is kept when the job is found, the item's own
+   `issue_threads`. The poll pages through the items the hub's tracker sync
+   wrote (`updated_at`, the local write, which a sync moves only on a real
+   change; not the tracker's own update time, so a sync that runs late
+   loses nothing), oldest first, from where the last poll stopped
+   (`Cursor::items`, `(updated_at, id)`), at most 25 a poll (`ITEM_POLL_MAX`,
+   `Store::tracker_items_written_since`): a burst bigger than a page is read
+   over the next polls, and an unchanged item is not read again. For
+   `tracker_comments` it reads each one's newest 20 comments through its
+   provider's `comments`; `tracker_assigned` makes no comments call. A rate
+   limit or an outage stops the page at the item before, for the next poll.
+   A comment counts from the rule's first poll (`Cursor::start`), and no
+   further back than a kept job key lives (30 days). With the tracker sync
+   off (`work.sync_interval_secs = 0`) the poll fails and says so. The job
+   keys are the Jira poll's (`<tracker>:<key>#c<id>`, `#assigned:<who>`), so
+   an item read again finds nothing twice. The sync holds what its views
+   read: on GitHub and Linear only the items assigned to the tracker's own
+   account (`assignee:@me`, `isMe`), on Asana those or a `project:` view's.
+   So `tracker_comments` there sees comments on those items only, and a
+   `tracker_assigned` whose `match.assignee` is anyone else never matches. The subject is kept when the job is found, the item's own
    URL with it, and the run reads it back rather than asking the tracker
    again. `match.assignee` is the account id as the sync stores it (a GitHub
    login, a Linear or Asana user id). A comment there has no author id, so

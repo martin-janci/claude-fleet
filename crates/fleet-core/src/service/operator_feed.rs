@@ -89,6 +89,8 @@ pub const MAX_DIGESTS_PER_HOUR: usize = 6;
 pub const MAX_LINES: usize = 12;
 /// Events older than this when a digest goes out are dropped.
 pub const EVENT_MAX_AGE_SECS: i64 = 3600;
+/// The characters of a task key a digest line shows.
+pub const TASK_KEY_MAX: usize = 40;
 /// Events read per pass. The cursor advances only past what was read, so a
 /// longer backlog goes out over the next passes.
 pub const READ_LIMIT: i64 = 500;
@@ -255,11 +257,19 @@ pub struct FeedLine {
 fn line_of(e: &FeedEventRow) -> Option<(FeedLine, What)> {
     let what = classify(&e.kind, e.detail.as_deref())?;
     let key = format!("s{}:{}", e.session_id, what.slot());
-    let who = if e.started_by_control {
-        ", you started it"
-    } else {
-        ""
-    };
+    let mut who = String::new();
+    if e.started_by_control {
+        who.push_str(", you started it");
+    }
+    if let Some(key) = e.task_key.as_deref().filter(|k| !k.trim().is_empty()) {
+        // A tracker's key: data, not words, so it is cut and kept on one line.
+        let key: String = key
+            .chars()
+            .filter(|c| !c.is_control())
+            .take(TASK_KEY_MAX)
+            .collect();
+        who.push_str(&format!(", task {key}"));
+    }
     let text = format!(
         "session {} on {} (#{}{who}) {}",
         e.tmux_name,
@@ -758,7 +768,11 @@ fn digest_pending(s: &Store, session_id: i64) -> bool {
 /// Every standing condition now: hosts as `fleet_health` judges them (the
 /// hidden and disabled left out), and the handed-off missions waiting on a
 /// person.
-fn conditions(s: &Store, now: i64) -> Vec<Condition> {
+fn conditions(
+    s: &Store,
+    follows: &[crate::service::control_follow::Follow],
+    now: i64,
+) -> Vec<Condition> {
     use crate::service::health;
     let local = crate::service::hub::local_host_enabled();
     let hosts = crate::service::hosts::active_hosts(s.list_hosts().unwrap_or_default(), local);
@@ -800,6 +814,7 @@ fn conditions(s: &Store, now: i64) -> Vec<Condition> {
     out.extend(crate::service::control_sweep::conditions(
         s,
         operator_row(s).map(|r| r.id),
+        follows,
         now,
     ));
     out
@@ -857,11 +872,17 @@ pub async fn run_with(
             .operator_feed_events(cursor, Some(op.id), &KINDS, READ_LIMIT)
             .unwrap_or_default();
         state.cursor = Some(events.last().map_or(cursor, |e| e.id));
-        // F10: only the sessions Control still follows ([`told_of`]).
-        let follows = crate::service::control_follow::follows(&s, Some(op.id), now);
+        // F10: only the sessions Control still follows ([`told_of`]). Read
+        // once per pass: the sweep's conditions reuse it, and with nothing
+        // read and the sweep off nobody needs it.
+        let follows = if events.is_empty() && !settings::get_bool(&s, settings::CONTROL_SWEEP) {
+            Vec::new()
+        } else {
+            crate::service::control_follow::follows(&s, Some(op.id), now)
+        };
         events.retain(|e| told_of(&follows, e.session_id, &e.kind));
         fold(&mut state, &events, now);
-        let now_raised = conditions(&s, now);
+        let now_raised = conditions(&s, &follows, now);
         let mut fresh: Vec<String> = now_raised
             .iter()
             .filter(|c| !state.raised.contains(&c.key))
@@ -891,7 +912,11 @@ pub async fn run_with(
             };
         }
         let body = build_digest(&digest_lines(&state, &fresh)).map(|d| {
-            crate::service::autonomy::with_header(&d, crate::service::autonomy::position(&s))
+            crate::service::autonomy::with_header_care(
+                &d,
+                crate::service::autonomy::position(&s),
+                settings::get_bool(&s, settings::CONTROL_SESSION_CARE),
+            )
         });
         state.backlog.clear();
         state.away = Away::default();

@@ -59,6 +59,20 @@ describe('env access', () => {
     expect(envReadonlyReason({ person: false, shared: false }, 'h', null)).toContain('fleet-hub client trust <name>');
   });
 
+  it('keeps a read that did not get through apart from a hub that answered no', async () => {
+    const inv = mockedInvoke as ReturnType<typeof vi.fn>;
+    inv.mockImplementation(async () => {
+      throw { code: 'E_HUB_UNREACHABLE', message: 'connection refused' };
+    });
+    const a = await loadEnvAccess('company');
+    expect(a).toMatchObject({ person: false, shared: false });
+    expect(a.error).toBeTruthy();
+    const why = envReadonlyReason(a, 'company', 'laptop')!;
+    expect(why).toContain('Could not read');
+    expect(why).not.toContain('client trust');
+    expect(why).not.toContain('speaks for no person');
+  });
+
   it('reads an extra fleet’s access through `fleet`, and a refusal is no access', async () => {
     const inv = mockedInvoke as ReturnType<typeof vi.fn>;
     inv.mockImplementation(async (cmd: string) => {

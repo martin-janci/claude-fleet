@@ -5529,6 +5529,45 @@ mod tests {
         }
     }
 
+    /// A re-point that fails before the kill puts back the ones before it:
+    /// the source lives on, so its identity and its queued prompts must not
+    /// stay on the target.
+    #[tokio::test]
+    async fn a_failed_task_repoint_puts_the_participant_and_prompts_back() {
+        let (f, _bus) = recorded_fixture();
+        dirty_unpushed_carry(&f);
+        let (pid, prompt, task) = {
+            let s = f.store.lock().unwrap();
+            let pid = s.ensure_participant_for_session(f.source_id).unwrap();
+            let prompt = s.insert_deferred_prompt(f.source_id, "later", 1).unwrap();
+            let task = s.insert_task(None, Some(f.source_id), "w", "n1").unwrap();
+            s.conn_for_test()
+                .execute_batch(
+                    "CREATE TEMP TRIGGER no_task_repoint BEFORE UPDATE OF worker_session_id \
+                     ON tasks BEGIN SELECT RAISE(ABORT, 'refused'); END;",
+                )
+                .unwrap();
+            (pid, prompt, task)
+        };
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let err = run(&f, &hooks, false).await.unwrap_err();
+        assert_eq!(err.code, codes::E_MOVE_PARTIAL, "{}", err.message);
+        let s = f.store.lock().unwrap();
+        assert_eq!(
+            s.participant_by_id(pid).unwrap().unwrap().session_id,
+            Some(f.source_id)
+        );
+        assert_eq!(
+            s.get_deferred_prompt(prompt).unwrap().unwrap().session_id,
+            f.source_id
+        );
+        assert_eq!(
+            s.get_task(task.id).unwrap().unwrap().worker_session_id,
+            Some(f.source_id)
+        );
+        assert!(s.get_session_by_id(f.source_id).unwrap().is_some());
+    }
+
     /// A pinned session whose move stops at a failed source kill keeps its
     /// pin: both sessions live on, and `resolve_move`'s undo kills the
     /// target trusting the source still holds its own.

@@ -416,10 +416,11 @@ pub async fn discard_kill_session(
         };
         // A tree another session still works in stays; only this session
         // goes.
-        let removable = if tree_shared_with_another_session(&s, row.id, row.worktree_id)? {
+        let tree = tree_of(&s, row.id, row.worktree_id)?;
+        let removable = if tree_shared_with_another_session(&s, row.id, tree)? {
             None
         } else {
-            removable_worktree(&s, row.worktree_id, base.as_deref())?
+            removable_worktree(&s, tree, base.as_deref())?
         };
         (row.id, removable, base)
     };
@@ -504,6 +505,29 @@ pub(crate) fn tree_shared_with_another_session(
             && (r.status == "running"
                 || (r.lost_at.is_some() && r.lost_reason.as_deref() != Some("killed")))
     }))
+}
+
+/// The worktree row of the tree `session_id` runs in: `worktree_id`, its
+/// own link, or else this host's row named by its `worktree_key` in its
+/// project (`worktrees.name` is the key). A review is linked to no row, so
+/// when it is the last to leave a tree its source left to it (the source
+/// row is reaped after its kill), the key is all that names the tree;
+/// without this nobody would ever remove it.
+pub(crate) fn tree_of(
+    s: &Store,
+    session_id: i64,
+    worktree_id: Option<i64>,
+) -> Result<Option<i64>, IpcError> {
+    let Some(me) = s.get_session_by_id(session_id)? else {
+        return Ok(worktree_id);
+    };
+    if let Some(wid) = worktree_id.or(me.worktree_id) {
+        return Ok(Some(wid));
+    }
+    let (Some(pid), Some(key)) = (me.project_id, me.worktree_key.as_deref()) else {
+        return Ok(None);
+    };
+    Ok(s.worktree_id_named(&me.host_alias, pid, key)?)
 }
 
 /// The tree safe kill and discard may `git worktree remove` for a session:
@@ -745,10 +769,11 @@ async fn finalize_safe_kill(
         };
         // A tree another session (its review, a second pane) still works in
         // is left to it: this session is killed, the checkout stays.
-        let removable = if tree_shared_with_another_session(&s, session_id, worktree_id)? {
+        let tree = tree_of(&s, session_id, worktree_id)?;
+        let removable = if tree_shared_with_another_session(&s, session_id, tree)? {
             None
         } else {
-            removable_worktree(&s, worktree_id, proj_base.as_deref())?
+            removable_worktree(&s, tree, proj_base.as_deref())?
         };
         (removable, proj_base)
     };
@@ -1082,6 +1107,51 @@ SAFE_REMOVE_READY_n1";
         // Once the review is killed, the tree is the source's alone again.
         s.mark_session_killed(review, 5).unwrap();
         assert!(!tree_shared_with_another_session(&s, source, None).unwrap());
+    }
+
+    #[test]
+    fn a_review_left_last_in_its_sources_tree_names_that_tree() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("h").unwrap();
+        s.upsert_host("other").unwrap();
+        let pid = s.upsert_project("o", "r", "/tmp/o/r").unwrap();
+        let mk = |name: &str, host: &str| {
+            let id = s
+                .upsert_session(name, host, Some(pid), None, 1, 1, "running", None)
+                .unwrap();
+            s.conn_for_test()
+                .execute(
+                    "UPDATE sessions SET worktree_key = 'feat' WHERE id = ?1",
+                    [id],
+                )
+                .unwrap();
+            id
+        };
+        let source = mk("src", "h");
+        let review = mk("src-review", "h");
+        assert_eq!(tree_of(&s, review, None).unwrap(), None);
+        // Another host's checkout of the branch is not this tree.
+        s.upsert_worktree_on("other", pid, "feat", "/x/r-feat", Some("feat"))
+            .unwrap();
+        assert_eq!(tree_of(&s, review, None).unwrap(), None);
+        let wid = s
+            .upsert_worktree_on("h", pid, "feat", "/tmp/o/r-feat", Some("feat"))
+            .unwrap();
+        s.link_session_worktree(source, wid).unwrap();
+        // The source was killed (and reaped) while its review ran: the tree
+        // stayed, and the review's key still names it.
+        s.mark_session_killed(source, 5).unwrap();
+        s.conn_for_test()
+            .execute("DELETE FROM sessions WHERE id = ?1", [source])
+            .unwrap();
+        assert_eq!(tree_of(&s, review, None).unwrap(), Some(wid));
+        assert!(!tree_shared_with_another_session(&s, review, Some(wid)).unwrap());
+        assert_eq!(
+            removable_worktree(&s, Some(wid), Some("/tmp/o/r")).unwrap(),
+            Some((wid, "/tmp/o/r-feat".to_string()))
+        );
+        // A link of its own wins.
+        assert_eq!(tree_of(&s, review, Some(99)).unwrap(), Some(99));
     }
 
     #[test]

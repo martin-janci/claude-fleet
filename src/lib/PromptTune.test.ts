@@ -25,8 +25,8 @@ function setup(over: Partial<{ draft: string; reply: Result<TuneAnswer> }> = {})
   const tune = vi.fn(async () => over.reply ?? ({ ok: true, value: answer } as Result<TuneAnswer>));
   const onaccept = vi.fn();
   const onclose = vi.fn();
-  render(PromptTune, { model: 'haiku', draft: over.draft ?? 'Fix the failing login test.', tune, onaccept, onclose });
-  return { tune, onaccept, onclose, ask: screen.getByTestId('prompt-tune-ask') as HTMLInputElement };
+  const { rerender } = render(PromptTune, { model: 'haiku', draft: over.draft ?? 'Fix the failing login test.', tune, onaccept, onclose });
+  return { tune, onaccept, onclose, rerender, ask: screen.getByTestId('prompt-tune-ask') as HTMLInputElement };
 }
 
 describe('PromptTune', () => {
@@ -88,5 +88,37 @@ describe('PromptTune', () => {
     await flush();
     expect(screen.getByTestId('prompt-tune-unchanged')).toBeTruthy();
     expect(screen.queryByTestId('prompt-tune-accept')).toBeNull();
+  });
+
+  it('Esc on any of its buttons closes the tuner and goes no further', async () => {
+    const { onclose, ask } = setup();
+    const outer = vi.fn();
+    document.body.addEventListener('keydown', outer);
+    try {
+      await fireEvent.keyDown(ask, { key: 'Enter' });
+      await flush();
+      for (const id of ['prompt-tune-accept', 'prompt-tune-discard', 'prompt-tune-close', 'prompt-tune-run']) {
+        await fireEvent.keyDown(screen.getByTestId(id), { key: 'Escape' });
+      }
+      await fireEvent.keyDown(screen.getAllByTestId('prompt-tune-quick')[0], { key: 'Escape' });
+      expect(onclose).toHaveBeenCalledTimes(5);
+      expect(outer).not.toHaveBeenCalled();
+    } finally {
+      document.body.removeEventListener('keydown', outer);
+    }
+  });
+
+  it('will not use a rewrite once the draft in the box has changed since the tune', async () => {
+    const { onaccept, ask, rerender } = setup();
+    await fireEvent.keyDown(ask, { key: 'Enter' });
+    await flush();
+    expect(screen.queryByTestId('prompt-tune-stale')).toBeNull();
+    await rerender({ draft: 'Fix the failing login test, and the signup one.' });
+    await flush();
+    expect(screen.getByTestId('prompt-tune-stale')).toBeTruthy();
+    const use = screen.getByTestId('prompt-tune-accept') as HTMLButtonElement;
+    expect(use.disabled).toBe(true);
+    await fireEvent.click(use);
+    expect(onaccept).not.toHaveBeenCalled();
   });
 });

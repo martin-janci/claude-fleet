@@ -1827,8 +1827,10 @@ pub(super) enum GateTarget<'a> {
     Other,
     /// A prompt or task into this existing session.
     Session(i64),
-    /// A new Claude session on this host.
-    Start { host: &'a str },
+    /// A new Claude session on this host; `None` when fleet picks it (a
+    /// task's start with no host), which only a grant naming no hosts
+    /// covers.
+    Start { host: Option<&'a str> },
 }
 
 /// The timeline event a pre-approved operator call leaves on its target.
@@ -1889,21 +1891,28 @@ impl FleetTools {
         self.confirm_gate_inner(tool, nonce, summary, caller, false, target)
     }
 
-    /// The operator's facts [`guard::operator_must_confirm`] decides on:
-    /// the autonomy position, whether `target` is one of Control's open
-    /// handoffs, and whether it is a start inside a running mission's grant.
+    /// The operator's facts [`guard::operator_must_confirm_with`] decides
+    /// on: the autonomy position, whether `target` is one of Control's open
+    /// handoffs, whether it is a start inside a running mission's grant, and
+    /// whether session care is on.
     fn operator_gate_facts(
         &self,
         target: GateTarget<'_>,
-    ) -> Result<(crate::service::autonomy::Position, bool, bool), McpError> {
+    ) -> Result<(crate::service::autonomy::Position, guard::OperatorFacts), McpError> {
         let s = lock(&self.store).map_err(to_mcp_err)?;
         let position = crate::service::autonomy::position(&s);
         if position.is_ask_first() {
-            return Ok((position, false, false));
+            return Ok((position, guard::OperatorFacts::default()));
         }
         let own = match target {
             GateTarget::Session(id) => s
                 .is_open_control_handoff(id)
+                .map_err(|e| to_mcp_err(IpcError::from(e)))?,
+            _ => false,
+        };
+        let own_start = match target {
+            GateTarget::Session(id) if own => s
+                .is_control_started_session(id)
                 .map_err(|e| to_mcp_err(IpcError::from(e)))?,
             _ => false,
         };
@@ -1913,7 +1922,17 @@ impl FleetTools {
                 .map_err(to_mcp_err)?,
             _ => false,
         };
-        Ok((position, own, grant))
+        let session_care =
+            crate::service::settings::get_bool(&s, crate::service::settings::CONTROL_SESSION_CARE);
+        Ok((
+            position,
+            guard::OperatorFacts {
+                own_handoff: own,
+                inside_grant: grant,
+                session_care,
+                own_start,
+            },
+        ))
     }
 
     fn confirm_gate_inner(
@@ -1936,14 +1955,19 @@ impl FleetTools {
         let operator_gated = caller.is_operator() && guard::operator_gated(tool);
         let forced = person
             || (operator_gated && {
-                let (position, own, grant) = self.operator_gate_facts(target)?;
-                let must = guard::caller_must_confirm(true, tool, position, own, grant);
+                let (position, facts) = self.operator_gate_facts(target)?;
+                let must = guard::caller_must_confirm_with(true, tool, position, facts);
                 if !must {
                     self.note_pre_approved(tool, summary, position, target);
                 }
                 must
             });
-        if !forced && (!guard::needs_confirmation(tool) || !self.confirm_enabled()?) {
+        // An operator call the position pre-approved is done here, even for
+        // a `confirm: true` tool: `work_link` is one for its tidy kills, and
+        // a task's start inside a grant is not one of those.
+        if !forced
+            && (operator_gated || !guard::needs_confirmation(tool) || !self.confirm_enabled()?)
+        {
             return Ok(());
         }
         if forced && !self.guards.approver {
@@ -2534,28 +2558,38 @@ impl FleetTools {
             }));
         }
         let mut queued = delivery_gate(row, force, submit)?;
-        // An idle session gets one prompt per idle moment, whoever types it:
-        // this send takes the moment, or the queue already did and the REPL
-        // will hold this one behind that turn.
-        if submit
-            && !queued
-            && !crate::service::sessions::deferred::claim_moment_for_direct_send(
+        let ack_state = || -> Result<_, crate::ipc_error::IpcError> {
+            Ok(lock(&self.store)?.prompt_ack_state(row.id)?)
+        };
+        let before = if submit && !queued {
+            // An idle session gets one prompt per idle moment, whoever types
+            // it: this send takes the moment, or the queue already did and
+            // the REPL will hold this one behind that turn. Either way it is
+            // typed in the session's typing lane, after any paste in flight;
+            // a send that fails and typed nothing gives the moment back.
+            let body = prompt.clone();
+            let (got, before) = crate::service::sessions::deferred::send_direct(
                 &self.store,
                 row,
-                &prompt,
+                &body,
                 crate::store::now_unix(),
+                |_| async move {
+                    let before = ack_state()?;
+                    send(prompt).await?;
+                    Ok(before)
+                },
             )
-            .map_err(to_mcp_err)?
-            && crate::service::sessions::deferred::idle_for_prompt(row)
-        {
-            queued = true;
-        }
-        let before = {
-            let s = lock(&self.store).map_err(to_mcp_err)?;
-            s.prompt_ack_state(row.id)
-                .map_err(|e| to_mcp_err(e.into()))?
+            .await
+            .map_err(to_mcp_err)?;
+            if !got && crate::service::sessions::deferred::idle_for_prompt(row) {
+                queued = true;
+            }
+            before
+        } else {
+            let before = ack_state().map_err(to_mcp_err)?;
+            send(prompt).await.map_err(to_mcp_err)?;
+            before
         };
-        send(prompt).await.map_err(to_mcp_err)?;
         let acked = match before {
             Some(st) if ack_knowable(submit, queued, st.hooks_seen) => {
                 Some(await_prompt_ack(&self.store, row.id, st.prompt_submit_seq, ACK_WAIT).await?)

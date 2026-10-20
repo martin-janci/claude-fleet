@@ -7,9 +7,8 @@ use super::*;
 use crate::ipc_error::lock;
 use crate::service::autofix::api;
 use crate::service::autofix::apply::{
-    apply_one, gather, live_agents, scan_enabled, Actor, Config, SshFixExec,
+    apply_one, gather, live_agents, scan_enabled, sync_scan, Actor, Config, SshFixExec,
 };
-use crate::service::autofix::sync::{sync, Scope};
 use crate::store::now_unix;
 
 /// Only a person's trusted full device decides a fix. Control may list and
@@ -47,7 +46,7 @@ impl FleetTools {
         description = "Known broken fleet states, each with a plain-language explanation and, where one exists, a fix: \
         list {state?} (the live ones: open, verifying, apply_failed, dismissed; also `fixed`, cleared in the last day after a fix ran), explain {id}, scan (check now), apply {id}, dismiss {id, until?} (later; default 24 h). \
         Safe fixes run by themselves (setting autofix.auto_safe); the rest wait for a person. \
-        apply and dismiss need a trusted full device; Control may list and explain only, and shows the person a finding with a `fix` chat card (`{\"spec\":\"fleet.ui/1\",\"kind\":\"fix\",\"finding_id\":<id>}`)."
+        apply and dismiss need a trusted full device; Control may list and explain only, and shows the person a finding with a `fix` chat card: a ```fleet-ui fenced block holding `{\"spec\":\"fleet.ui/1\",\"kind\":\"fix\",\"finding_id\":<id>}`."
     )]
     pub(super) async fn autofix(
         &self,
@@ -69,7 +68,7 @@ impl FleetTools {
                     let s = lock(&self.store).map_err(to_mcp_err)?;
                     let cx = gather(&s, &live, now).map_err(to_mcp_err)?;
                     let found = scan_enabled(&cx, &Config::read(&s));
-                    sync(&s, &found, Scope::All, now).map_err(to_mcp_err)?;
+                    sync_scan(&s, &cx, &found, now).map_err(to_mcp_err)?;
                 }
                 let s = lock(&self.store).map_err(to_mcp_err)?;
                 let can_apply = autofix_writer(&caller).is_ok();

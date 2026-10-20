@@ -458,7 +458,7 @@ impl FleetTools {
             &caller,
             if runs_claude {
                 GateTarget::Start {
-                    host: &p.host_alias,
+                    host: Some(&p.host_alias),
                 }
             } else {
                 GateTarget::Other
@@ -1147,11 +1147,14 @@ impl FleetTools {
         Parameters(args): Parameters<crate::service::control_diagnose::DiagnoseArgs>,
     ) -> Result<CallToolResult, McpError> {
         audit("diagnose", args.host.as_deref().unwrap_or(""));
-        // Control and the master see every paired client; any other client
-        // only itself.
-        let only = match &caller.client {
-            Some(c) if !caller.is_operator() => Some(c.id),
-            _ => None,
+        // Control and the master see every paired client; any other caller
+        // only itself. A caller with no client row of its own (a per-host
+        // token, which `NOT_FOR_HOST_TOKENS` refuses before this) matches
+        // none: client ids are rowids, never negative.
+        let only = if caller.is_operator() || caller.speaks_for_owner() {
+            None
+        } else {
+            Some(caller.client.as_ref().map_or(-1, |c| c.id))
         };
         let d = crate::service::control_diagnose::diagnose(
             &self.store,
@@ -1172,6 +1175,15 @@ impl FleetTools {
         Parameters(args): Parameters<crate::service::control_continue::AutoContinueArgs>,
     ) -> Result<CallToolResult, McpError> {
         audit("control_auto_continue", &args.action);
+        // Control's pending pick and its owner's countdown: Control, the
+        // master and the fleet admin's own device only, as `control_journal`
+        // (a per-host token is refused before this, `NOT_FOR_HOST_TOKENS`).
+        if !(caller.is_operator() || caller.is_master() || caller.is_fleet_admin_device()) {
+            return Err(to_mcp_err(crate::ipc_error::IpcError::new(
+                crate::ipc_error::codes::E_FORBIDDEN,
+                "auto-continue is Control's and its owner's",
+            )));
+        }
         // The countdown answers for the person: Control may read it, never
         // stop or take its own.
         if caller.is_operator() && args.action != "status" {

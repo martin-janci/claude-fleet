@@ -115,6 +115,45 @@ describe('AutoContinueBar', () => {
     expect(onSend).not.toHaveBeenCalled();
   });
 
+  it('an older status answer landing after Cancel does not bring the card back', async () => {
+    render(AutoContinueBar, { sessionId: 7, turnSeq: 4, typing: false, onSend: vi.fn() });
+    await vi.advanceTimersByTimeAsync(0);
+    // The next poll's status is held in flight while the person cancels.
+    let release: (v: AutoContinueView) => void = () => {};
+    const stale = state;
+    mocked.mockImplementationOnce(() => new Promise((res) => (release = res as typeof release)));
+    await vi.advanceTimersByTimeAsync(10_000);
+    await fireEvent.click(screen.getByTestId('auto-continue-cancel'));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(screen.queryByTestId('auto-continue')).toBeNull();
+    release(stale);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(screen.queryByTestId('auto-continue')).toBeNull();
+  });
+
+  it('reads again 3 s after the card is due, so the bar clears', async () => {
+    render(AutoContinueBar, { sessionId: 7, turnSeq: 4, typing: false, onSend: vi.fn() });
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(60_000); // due now; the 10 s polls have read it
+    state = view({}, pick({ state: 'sent' }));
+    const before = mocked.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(3_500);
+    expect(mocked.mock.calls.length).toBeGreaterThan(before);
+    expect(screen.queryByTestId('auto-continue')).toBeNull();
+  });
+
+  it('says the hub needs updating when it has no auto-continue tool', async () => {
+    mocked.mockImplementation(async () => {
+      throw { code: 'E_HUB_PROTOCOL', message: 'unknown tool control_auto_continue' };
+    });
+    render(AutoContinueBar, { sessionId: 7, turnSeq: 4, typing: false, onSend: vi.fn() });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(screen.getByTestId('auto-continue-unsupported')).toBeTruthy();
+    const calls = mocked.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(mocked.mock.calls.length).toBe(calls);
+  });
+
   it('draws nothing when the fleet has it off (Ask first)', async () => {
     state = view({ enabled: false });
     render(AutoContinueBar, { sessionId: 7, turnSeq: 4, typing: false, onSend: vi.fn() });

@@ -138,9 +138,15 @@ describe('ControlThreads', () => {
     const row = () => screen.getAllByTestId('control-thread').find((r) => (r.textContent ?? '').includes('fix-flake'))!;
     const bell = () => row().parentElement!.querySelector('[data-testid="control-thread-mute"]') as HTMLElement;
     expect(bell().getAttribute('aria-pressed')).toBe('false');
+    expect(bell().title).toBe('Mute: Control stops hearing about it');
     await fireEvent.click(bell());
     await waitFor(() => expect(row().dataset.muted).toBe('true'));
     expect(row().textContent).toContain('Muted ·');
+    // A toggle keeps its name; only the pressed state says it is muted.
+    expect(bell().getAttribute('aria-pressed')).toBe('true');
+    expect(bell().getAttribute('aria-label')).toBe('Mute fix-flake');
+    // The hover hint says what the click will do now: unmute.
+    expect(bell().title).toBe('Muted: click so Control hears about it again');
     expect(inv).toHaveBeenCalledWith('control_journal', { args: { action: 'mute', thread: 'session', id: flake.id } });
     await fireEvent.click(bell());
     await waitFor(() => expect(row().dataset.muted).toBeUndefined());

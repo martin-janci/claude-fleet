@@ -82,6 +82,69 @@ describe('FleetSessionView', () => {
     expect(cap[1]).toMatchObject({ fleet: 'company' });
   });
 
+  it('reads the conversation once when it opens', async () => {
+    render(FleetSessionView, { props: { fleet: company, session } });
+    await vi.waitFor(() => expect(screen.getByTestId('fleet-session-prompt')).toBeTruthy());
+    await tick();
+    expect(inv.mock.calls.filter(([cmd]) => cmd === 'session_conversation')).toHaveLength(1);
+  });
+
+  it("starts another session with an empty composer, and never shows the last one's late answer", async () => {
+    let answerFirst!: (v: unknown) => void;
+    inv.mockImplementation((cmd: string, a: { args?: { session_id?: number } }) => {
+      if (cmd !== 'session_conversation') return Promise.resolve(null);
+      if (a?.args?.session_id === 3) return new Promise((r) => (answerFirst = r));
+      return Promise.resolve({ truncated: false, context: null, events: [], turns: [{ prompt: 'for four', at: null, ended_at: null, items: [] }] });
+    });
+    const view = render(FleetSessionView, { props: { fleet: company, session } });
+    await tick();
+    await fireEvent.input(screen.getByTestId('fleet-session-composer'), { target: { value: 'meant for three' } });
+    const other = { ...session, id: 4, tmux_name: 'pos-4', last_activity_at: 2 } as SessionRow;
+    await view.rerender({ fleet: company, session: other });
+    expect((screen.getByTestId('fleet-session-composer') as HTMLTextAreaElement).value).toBe('');
+    await vi.waitFor(() => expect(screen.getByTestId('fleet-session-prompt').textContent).toBe('for four'));
+    answerFirst({ truncated: false, context: null, events: [], turns: [{ prompt: 'for three', at: null, ended_at: null, items: [] }] });
+    await tick();
+    await tick();
+    expect(screen.getByTestId('fleet-session-prompt').textContent).toBe('for four');
+  });
+
+  it('a send that answers after a switch away and back keeps the newer draft and allows no second send', async () => {
+    let answerSend!: (v: unknown) => void;
+    inv.mockImplementation((cmd: string) => {
+      if (cmd === 'send_prompt') return new Promise((r) => (answerSend = r));
+      return Promise.resolve(null);
+    });
+    const view = render(FleetSessionView, { props: { fleet: company, session } });
+    await tick();
+    const composer = () => screen.getByTestId('fleet-session-composer') as HTMLTextAreaElement;
+    await fireEvent.input(composer(), { target: { value: 'first' } });
+    await fireEvent.click(screen.getByTestId('fleet-session-send'));
+    await vi.waitFor(() => expect(inv.mock.calls.filter(([cmd]) => cmd === 'send_prompt')).toHaveLength(1));
+    const other = { ...session, id: 4, tmux_name: 'pos-4' } as SessionRow;
+    await view.rerender({ fleet: company, session: other });
+    await view.rerender({ fleet: company, session });
+    await fireEvent.input(composer(), { target: { value: 'second' } });
+    await fireEvent.keyDown(composer(), { key: 'Enter' });
+    await tick();
+    // The first send is still out: no second one goes alongside it.
+    expect(inv.mock.calls.filter(([cmd]) => cmd === 'send_prompt')).toHaveLength(1);
+    answerSend(null);
+    await tick();
+    await tick();
+    expect(composer().value).toBe('second');
+  });
+
+  it("offers no attach for a session on that hub's own machine", async () => {
+    const local = { ...session, host_alias: 'local' } as SessionRow;
+    render(FleetSessionView, { props: { fleet: company, session: local } });
+    await tick();
+    expect((screen.getByTestId('fleet-session-copy-attach') as HTMLButtonElement).disabled).toBe(true);
+    await fireEvent.click(screen.getByTestId('fleet-session-tab-terminal'));
+    await vi.waitFor(() => expect(screen.getByTestId('fleet-terminal-refused')).toBeTruthy());
+    expect(inv.mock.calls.some(([cmd]) => cmd === 'pty_open')).toBe(false);
+  });
+
   it('a late read of the session shown before does not paint over the current one', async () => {
     const pending = new Map<number, (v: unknown) => void>();
     const conv = (text: string) => ({

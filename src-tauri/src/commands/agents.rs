@@ -109,18 +109,18 @@ pub(crate) mod routed {
 
     pub async fn agents_fleet(
         backend: &FleetBackend,
-        store: &Mutex<Store>,
+        store: &Arc<Mutex<Store>>,
         ssh: &SshClient,
         call: FleetCall,
     ) -> Result<serde_json::Value, IpcError> {
         let action = &call.action;
         if !matches!(
             action.as_str(),
-            "definitions" | "form" | "grant" | "revoke" | "run"
+            "definitions" | "gallery" | "form" | "grant" | "install" | "revoke" | "run"
         ) {
             return Err(IpcError::new(
                 fleet_core::ipc_error::codes::E_INVALID,
-                format!("agents_fleet action must be definitions | form | grant | revoke | run, got {action:?}"),
+                format!("agents_fleet action must be definitions | gallery | form | grant | install | revoke | run, got {action:?}"),
             ));
         }
         let args = fleet_args(call);
@@ -137,7 +137,9 @@ pub(crate) mod routed {
                 IpcError::new(fleet_core::ipc_error::codes::E_INTERNAL, e.to_string())
             });
         }
-        admin::call(store, &args, "desktop", now)
+        // `install` writes the catalog: under the authoring lock, off the
+        // async workers.
+        admin::call_async(store, &args, "desktop", now).await
     }
 
     pub fn status_args(agent: Option<String>, limit: Option<u32>) -> AgentsArgs {

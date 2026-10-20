@@ -673,7 +673,8 @@ impl Store {
             .join(", ");
         let mut stmt = self.conn.prepare(&format!(
             "SELECT j.agent, {cols} FROM agent_actions a JOIN agent_jobs j ON j.id = a.job_id \
-             WHERE a.state = 'approved' ORDER BY a.decided_at, a.id LIMIT ?1"
+             WHERE a.state = 'approved' AND a.executed_at IS NULL \
+             ORDER BY a.decided_at, a.id LIMIT ?1"
         ))?;
         let rows = stmt.query_map(params![limit as i64], |r| {
             let agent: String = r.get(0)?;
@@ -694,6 +695,31 @@ impl Store {
             ))
         })?;
         rows.collect()
+    }
+
+    /// Claim an approved action for its executor: stamps `executed_at`
+    /// while it is still `approved` and unclaimed. `false` when another pass
+    /// (or another process on this store) has it already. A claimed action
+    /// is never handed out again, so an executor's side effect (a review
+    /// posted, a ticket moved) happens at most once, even across a crash.
+    pub fn claim_agent_action(&self, id: i64, now: i64) -> Result<bool, rusqlite::Error> {
+        Ok(self.conn.execute(
+            "UPDATE agent_actions SET executed_at = ?2 \
+             WHERE id = ?1 AND state = 'approved' AND executed_at IS NULL",
+            params![id, now],
+        )? == 1)
+    }
+
+    /// Fail the actions claimed before `before` that never got an answer:
+    /// the process carrying them out stopped mid-way, so whether they ran is
+    /// unknown. Said so, rather than run again. Returns how many.
+    pub fn fail_abandoned_agent_actions(&self, before: i64) -> Result<usize, rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE agent_actions SET state = 'failed', \
+               error = 'stopped while it was being carried out; check whether it ran' \
+             WHERE state = 'approved' AND executed_at IS NOT NULL AND executed_at < ?1",
+            params![before],
+        )
     }
 
     /// Record what the executor did with an approved action: `executed`,
@@ -1012,6 +1038,13 @@ mod tests {
                 .map(|(a, r)| (a.as_str(), r.id))
                 .collect::<Vec<_>>(),
             [("review", aid), ("review", auto)]
+        );
+        assert!(s.claim_agent_action(aid, 1350).unwrap());
+        assert!(!s.claim_agent_action(aid, 1351).unwrap(), "claimed once");
+        assert_eq!(
+            s.approved_agent_actions(10).unwrap().len(),
+            1,
+            "a claimed action is not handed out again"
         );
         s.finish_agent_action(aid, "executed", None, 1400).unwrap();
         s.finish_agent_action(auto, "failed", Some("422"), 1400)

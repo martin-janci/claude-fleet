@@ -28,6 +28,11 @@ import { HAS_FILTERS, STATUS_FILTERS, WORK_GROUP_BY, WORK_STAGES } from './work_
 export const UI_SPEC = 'fleet.ui/1';
 /** The fence language that marks a block as a card. */
 export const UI_FENCE = 'fleet-ui';
+/** Fence languages an agent writes for a card by mistake (the spec's own
+ *  name, mostly): drawn as one, like a self-declaring json block. */
+const UI_FENCE_ALIASES = new Set(['fleet.ui', 'fleet_ui', 'fleetui']);
+/** Fence languages whose block is a card when its object says it is one. */
+const SELF_DECLARED_LANGS = new Set(['json', 'jsonc', '']);
 /** Largest block JSON drawn as a card (bytes of the fence body). */
 export const UI_MAX_BYTES = 32 * 1024;
 
@@ -400,10 +405,10 @@ function handoverAfter(lines: string[], i: number): { seg: RichSegment; end: num
 /** The card a closed fence stands for, or null when it is ordinary code. */
 function uiSegment(f: Fence): RichSegment | null {
   const raw = f.body.trim();
-  const tagged = f.lang === UI_FENCE;
+  const tagged = f.lang === UI_FENCE || UI_FENCE_ALIASES.has(f.lang);
   if (!tagged) {
-    // A ```json block is a card only when it says it is one.
-    if (f.lang !== 'json' || !raw.startsWith('{') || !raw.includes(UI_SPEC)) return null;
+    // A ```json (or untagged) block is a card only when it says it is one.
+    if (!SELF_DECLARED_LANGS.has(f.lang) || !raw.startsWith('{') || !raw.includes(UI_SPEC)) return null;
     const p = parseJson(raw);
     if (!p.ok || !isObject(p.value) || p.value.spec !== UI_SPEC) return null;
   }

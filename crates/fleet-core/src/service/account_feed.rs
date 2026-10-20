@@ -100,9 +100,33 @@ fn account_label(s: &Store, uuid: &str) -> String {
 
 /// Every account condition now, over the active `hosts`.
 pub fn conditions(s: &Store, hosts: &[HostRow], now: i64) -> Vec<Condition> {
+    conditions_over(
+        s,
+        hosts,
+        now,
+        &s.latest_usage_snapshots().unwrap_or_default(),
+    )
+}
+
+/// [`conditions`], or the store's error when the usage readings could not
+/// be read: a caller that tells a missing condition as cleared (the fleet
+/// event watcher) must skip the pass rather than read "no account limited".
+pub fn try_conditions(
+    s: &Store,
+    hosts: &[HostRow],
+    now: i64,
+) -> Result<Vec<Condition>, rusqlite::Error> {
+    Ok(conditions_over(s, hosts, now, &s.latest_usage_snapshots()?))
+}
+
+fn conditions_over(
+    s: &Store,
+    hosts: &[HostRow],
+    now: i64,
+    snaps: &[UsageSnapshotRow],
+) -> Vec<Condition> {
     let mut out = Vec::new();
     let accounts: Vec<String> = crate::service::account_usage_poll::distinct_account_uuids(hosts);
-    let snaps = s.latest_usage_snapshots().unwrap_or_default();
     for uuid in &accounts {
         if let Some(reset) = snaps
             .iter()
