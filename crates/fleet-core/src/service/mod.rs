@@ -66,6 +66,7 @@ pub mod hosts;
 pub mod hub;
 pub mod library;
 pub mod local_sync;
+pub mod login_conflicts;
 pub mod login_health;
 pub mod loops;
 pub mod messages;
