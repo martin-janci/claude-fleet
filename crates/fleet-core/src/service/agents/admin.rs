@@ -19,6 +19,10 @@ use std::sync::Mutex;
 /// Most jobs and actions one `status` answers.
 pub const STATUS_MAX_LIMIT: u32 = 200;
 const STATUS_DEFAULT_LIMIT: u32 = 20;
+/// How many pending actions `status` lists, whatever `limit` asks for the
+/// jobs (review w11-5): the Inbox counts them, so a cap of 20 hid the
+/// oldest behind the newest and the badge stopped at 20.
+pub const STATUS_PENDING_MAX: usize = STATUS_MAX_LIMIT as usize;
 /// Longest a granted rule may run before it ends on its own.
 pub const MAX_RULE_HOURS: i64 = 24 * 90;
 
@@ -325,7 +329,9 @@ pub fn status(store: &Mutex<Store>, args: &AgentsArgs, now: i64) -> Result<Agent
         jobs: s
             .list_agent_jobs(args.agent.as_deref(), limit)
             .map_err(db)?,
-        pending: s.list_agent_actions(Some("pending"), limit).map_err(db)?,
+        pending: s
+            .list_agent_actions(Some("pending"), STATUS_PENDING_MAX)
+            .map_err(db)?,
         recent: s
             .recent_decided_agent_actions(now - RECENT_WINDOW_SECS, RECENT_MAX)
             .map_err(db)?,
