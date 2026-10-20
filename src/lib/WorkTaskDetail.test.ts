@@ -253,9 +253,32 @@ describe('WorkTaskDetail', () => {
     await flush();
     expect(calls('set_work_archived')).toEqual([{ task_id: 'ref:martin-janci/claude-fleet#333', on: true }]);
     expect(screen.getByTestId('work-task-archive').textContent).toBe('Unarchive');
+    // No item, so no stamp: the chip still says it is archived (review w10-9).
+    expect(screen.getByTestId('work-task-archived-chip').getAttribute('title')).toBe('Archived');
     await fireEvent.click(screen.getByTestId('work-task-archive'));
     await flush();
     expect(calls('set_work_archived')[1]).toEqual({ task_id: 'ref:martin-janci/claude-fleet#333', on: false });
+    expect(screen.queryByTestId('work-task-archived-chip')).toBeNull();
+  });
+
+  it('a bare task with a session still running cannot be archived, and says why (review w10-13)', async () => {
+    handlers.work_task = () => ({
+      ...trackerTask,
+      task: {
+        ...trackerTask.task,
+        task_id: 'ref:martin-janci/claude-fleet#334',
+        key: 'martin-janci/claude-fleet#334',
+        item_id: null,
+        archived: false,
+        counts: { active: 1, ended: 1, suggested: 0 },
+      },
+    });
+    render(WorkTaskDetail, { taskId: 'ref:martin-janci/claude-fleet#334' });
+    await flush();
+    const btn = screen.getByTestId('work-task-archive') as HTMLButtonElement;
+    expect(btn.textContent).toBe('Archive');
+    expect(btn.disabled).toBe(true);
+    expect(btn.title).toMatch(/still running/);
   });
 
   it('a task nobody is asked about, and a ticket, show no close question', async () => {

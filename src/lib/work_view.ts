@@ -1901,15 +1901,22 @@ export function noteWorkChanged(changes: readonly WorkChanged[]): void {
   if (changes.length > 0) bumpWorkChanged(...new Set(changes.map((c) => c.what)));
 }
 
-/** A person archived it (Archive in the task pane; `archived_at`). The List,
- *  the Board and Control read with `archived: true` so Done keeps its rows,
- *  which would mix these back in: they leave out the tasks this says, unless
- *  the Archived switch is on (`show`). */
-export function personArchived(t: Pick<WorkTask, 'archived_at'>): boolean {
-  return t.archived_at != null;
+/** A person archived it (Archive in the task pane). The List, the Board and
+ *  Control read with `archived: true` so Done keeps its rows, which would
+ *  mix these back in: they leave out the tasks this says, unless the
+ *  Archived switch is on (`show`).
+ *
+ *  An item carries `archived_at`; a bare task (`ref:KEY`, no item) has none
+ *  and is archived when every link is, which the hub's `archived` says. The
+ *  hub's `archived` is false while a session runs on the task, and that
+ *  wins: a task someone is working on stays in the lists (review w10-8/9).
+ *  `archived` absent (an older hub) leaves `archived_at` to decide. */
+export function personArchived(t: Pick<WorkTask, 'archived_at' | 'archived' | 'item_id'>): boolean {
+  if (t.archived === false) return false;
+  return t.archived_at != null || (t.archived === true && t.item_id == null);
 }
 
 /** [tasks] without the person-archived ones, unless [show]. */
-export function withoutPersonArchived<T extends Pick<WorkTask, 'archived_at'>>(tasks: readonly T[], show: boolean): T[] {
+export function withoutPersonArchived<T extends Pick<WorkTask, 'archived_at' | 'archived' | 'item_id'>>(tasks: readonly T[], show: boolean): T[] {
   return show ? [...tasks] : tasks.filter((t) => !personArchived(t));
 }
