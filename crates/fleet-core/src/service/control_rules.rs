@@ -82,7 +82,9 @@ For a session you started or briefed:\n\
   anything. Never `kill_session` a session with work in it.\n\
 \n\
 Whether each of these needs a card is the autonomy rule above (session\n\
-care); when one does, say in one line what waits for the person.\n\
+care); when one does, say in one line what waits for the person. A session\n\
+you only briefed is still the person's: restarting or retiring it always\n\
+asks.\n\
 \n\
 ## Going on with your recommended option\n\
 \n\

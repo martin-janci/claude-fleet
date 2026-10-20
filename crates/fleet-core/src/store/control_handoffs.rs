@@ -333,6 +333,21 @@ impl Store {
             .query_row([session_id], |r| r.get(0))
     }
 
+    /// Whether `session_id` is a live session Control itself started
+    /// (`origin = 'operator'`): what session care may restart or retire
+    /// without a card. A session Control only briefed (a `send_prompt`
+    /// receipt) is an open handoff for prompts, but it is still the
+    /// person's, so care never retires it.
+    pub fn is_control_started_session(&self, session_id: i64) -> Result<bool> {
+        self.conn
+            .prepare_cached(
+                "SELECT EXISTS (SELECT 1 FROM sessions s \
+                  WHERE s.id = ?1 AND s.status = 'running' AND s.lost_at IS NULL \
+                    AND s.origin = 'operator')",
+            )?
+            .query_row([session_id], |r| r.get(0))
+    }
+
     /// The missions Control handed off (a receipt names them), newest
     /// receipt first, without repeats.
     pub fn handed_off_mission_ids(&self) -> Result<Vec<i64>> {
@@ -471,6 +486,11 @@ mod tests {
             "a dead session is closed"
         );
         assert!(!s.is_open_control_handoff(9_999).unwrap());
+        // Session care's narrower set: started, not merely briefed.
+        assert!(s.is_control_started_session(started).unwrap());
+        assert!(!s.is_control_started_session(briefed).unwrap());
+        assert!(!s.is_control_started_session(stranger).unwrap());
+        assert!(!s.is_control_started_session(gone).unwrap());
     }
 
     #[test]

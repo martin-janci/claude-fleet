@@ -1879,6 +1879,11 @@ pub struct OperatorFacts {
     pub inside_grant: bool,
     /// The person turned session care on (`control.session_care`).
     pub session_care: bool,
+    /// The call's target is a live session Control itself started
+    /// (`Store::is_control_started_session`). Session care restarts and
+    /// retires only these: a session Control merely sent a prompt to is
+    /// still the person's.
+    pub own_start: bool,
 }
 
 /// Whether a tool the operator calls is one a person approves at "Ask
@@ -1915,6 +1920,7 @@ pub fn operator_must_confirm(
             own_handoff,
             inside_grant,
             session_care: false,
+            own_start: false,
         },
     )
 }
@@ -1938,7 +1944,7 @@ pub fn operator_must_confirm_with(
     }
     let own = facts.own_handoff;
     let prompt = OPERATOR_PROMPT_TOOLS.contains(&name) && own;
-    let care = facts.session_care && own;
+    let care = facts.session_care && facts.own_start;
     let restart = care && name == "restart_session";
     let retire = care && name == "safe_kill_session";
     match position.grants() {
@@ -3037,12 +3043,13 @@ mod tests {
     fn session_care_truth_table() {
         use Position::{Ask, Autopilot, Brief, Custom};
         for pos in [Ask, Brief, Autopilot, Custom] {
-            for own_handoff in [false, true] {
+            for (own_handoff, own_start) in [(false, false), (true, false), (true, true)] {
                 for inside_grant in [false, true] {
                     let off = OperatorFacts {
                         own_handoff,
                         inside_grant,
                         session_care: false,
+                        own_start,
                     };
                     let on = OperatorFacts {
                         session_care: true,
@@ -3055,8 +3062,8 @@ mod tests {
                             "{t}: care off is the old rule"
                         );
                         let free = match *t {
-                            "restart_session" => own_handoff && matches!(pos, Brief | Autopilot),
-                            "safe_kill_session" => own_handoff && pos == Autopilot,
+                            "restart_session" => own_start && matches!(pos, Brief | Autopilot),
+                            "safe_kill_session" => own_start && pos == Autopilot,
                             _ => !operator_must_confirm_with(t, pos, off),
                         };
                         assert_eq!(
@@ -3073,6 +3080,7 @@ mod tests {
             own_handoff: true,
             inside_grant: true,
             session_care: true,
+            own_start: true,
         };
         for t in [
             "kill_session",

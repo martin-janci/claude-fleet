@@ -2358,10 +2358,14 @@ pub async fn restart_session(
     // restarted shell session comes back as a shell, not a Claude pane. Read
     // the controller under the same lock and refuse to restart ourselves
     // unless forced ([`restart_guard`], which exempts the operator).
+    let was_killed;
     let (kind, agent, claude_id, session_id, project_id, launch, gone_cwd) = {
         let s = lock(store)?;
         restart_guard(&s, &args.host_alias, &args.name, args.force)?;
         let row = s.get_session(&args.name, &args.host_alias)?;
+        was_killed = row
+            .as_ref()
+            .is_some_and(|r| r.lost_reason.as_deref() == Some("killed"));
         let gone_cwd = gone_pane_cwd(&s, row.as_ref(), &args.host_alias, &args.name)?;
         match row {
             // Killed while an account switch was on its way: the switch
@@ -2555,6 +2559,21 @@ pub async fn restart_session(
         Ok(())
     })
     .await?;
+    // The relaunch took seconds of SSH. A person who killed the session
+    // meanwhile (an automatic restart racing their Kill) has the newer
+    // word: the pane just started goes again and the kill stays remembered.
+    if let Some(id) = session_id {
+        leave_killed_if_killed_meanwhile(
+            store,
+            &*tmux,
+            &args.host_alias,
+            &args.name,
+            id,
+            was_killed,
+            "restarted",
+        )
+        .await?;
+    }
     if launch_switched {
         if let Some(id) = session_id {
             // The pane already runs with the new values; a failed write only
@@ -2598,6 +2617,41 @@ pub(super) fn killed_since_switch_began(s: &Store, session_id: i64) -> Result<bo
         None => true,
         Some(r) => r.status == "ghost" && r.lost_reason.as_deref() == Some("killed"),
     })
+}
+
+/// After a relaunch of row `id` (a restart, a recreate): when the row was
+/// killed or reaped while the relaunch ran, and was not killed when the
+/// relaunch read it, kill the pane it just started, remember the kill, and
+/// refuse with `E_INVALID_STATE`. A person's Kill during the seconds of SSH
+/// a relaunch takes is the newer word, and must not come back as a live
+/// Claude (possibly on another login) the UI says is killed.
+pub(super) async fn leave_killed_if_killed_meanwhile(
+    store: &Mutex<Store>,
+    tmux: &dyn TmuxExec,
+    host_alias: &str,
+    name: &str,
+    id: i64,
+    was_killed: bool,
+    verb: &str,
+) -> Result<(), IpcError> {
+    let killed_meanwhile = {
+        let s = lock(store)?;
+        match s.get_session_by_id(id)? {
+            None => true,
+            Some(now) => now.lost_reason.as_deref() == Some("killed") && !was_killed,
+        }
+    };
+    if !killed_meanwhile {
+        return Ok(());
+    }
+    let _ = tmux.kill_session(name).await;
+    if let Ok(s) = store.lock() {
+        s.note_kill(host_alias, name, now_unix());
+    }
+    Err(IpcError::new(
+        codes::E_INVALID_STATE,
+        format!("{name} on {host_alias} was killed while it was being {verb}; left it killed"),
+    ))
 }
 
 /// Run `relaunch` (a restart's repair + respawn), then record the login the
@@ -2922,29 +2976,16 @@ pub async fn recreate_session(
     // dismissed it while the workspace was being rebuilt (seconds of SSH,
     // a re-clone at worst). Their word is the newer one: the pane just
     // started goes again, and the kill stays remembered.
-    let killed_meanwhile = {
-        let s = lock(store)?;
-        match s.get_session_by_id(sess.id)? {
-            None => true,
-            Some(now) => {
-                now.lost_reason.as_deref() == Some("killed")
-                    && sess.lost_reason.as_deref() != Some("killed")
-            }
-        }
-    };
-    if killed_meanwhile {
-        let _ = tmux.kill_session(&sess.tmux_name).await;
-        if let Ok(s) = store.lock() {
-            s.note_kill(&sess.host_alias, &sess.tmux_name, now_unix());
-        }
-        return Err(IpcError::new(
-            codes::E_INVALID_STATE,
-            format!(
-                "{} on {} was killed while it was being recreated; left it killed",
-                sess.tmux_name, sess.host_alias
-            ),
-        ));
-    }
+    leave_killed_if_killed_meanwhile(
+        store,
+        &*tmux,
+        &sess.host_alias,
+        &sess.tmux_name,
+        sess.id,
+        sess.lost_reason.as_deref() == Some("killed"),
+        "recreated",
+    )
+    .await?;
     let row = {
         let s = lock(store)?;
         // The rebuilt `claude` reads the host's login afresh.

@@ -172,10 +172,10 @@ pub fn care_line(p: Position, care: bool) -> Option<&'static str> {
     }
     match p.grants() {
         Position::Brief => Some(
-            "Session care: on — restarting a session you started or briefed goes without a card.",
+            "Session care: on — restarting a session you started yourself goes without a card.",
         ),
         Position::Autopilot => Some(
-            "Session care: on — restarting a session you started or briefed, and retiring one \
+            "Session care: on — restarting a session you started yourself, and retiring one \
              with safe_kill_session once its work is done, go without a card.",
         ),
         _ => None,

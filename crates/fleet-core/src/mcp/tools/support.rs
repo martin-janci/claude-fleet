@@ -1910,6 +1910,12 @@ impl FleetTools {
                 .map_err(|e| to_mcp_err(IpcError::from(e)))?,
             _ => false,
         };
+        let own_start = match target {
+            GateTarget::Session(id) if own => s
+                .is_control_started_session(id)
+                .map_err(|e| to_mcp_err(IpcError::from(e)))?,
+            _ => false,
+        };
         let grant = match target {
             GateTarget::Start { host } => s
                 .start_inside_mission_grant(host, crate::store::now_unix())
@@ -1924,6 +1930,7 @@ impl FleetTools {
                 own_handoff: own,
                 inside_grant: grant,
                 session_care,
+                own_start,
             },
         ))
     }

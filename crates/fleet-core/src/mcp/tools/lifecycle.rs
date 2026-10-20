@@ -300,6 +300,22 @@ impl FleetTools {
             "the session to restart",
         )?;
         let (host_alias, name) = (row.host_alias, row.tmux_name);
+        // A restart onto another login is a start on that login: past
+        // `accounts.pause_at` it would stall at the limit again, so it asks
+        // first, as `new_session` does. A plain restart (same login) is
+        // recovery and is never held here.
+        if let Some(profile) = p.profile.as_deref() {
+            if !p.over_limit_ok.unwrap_or(false) {
+                let s = lock(self.reader()).map_err(to_mcp_err)?;
+                crate::service::account_limits::refuse_over_limit(
+                    &s,
+                    &host_alias,
+                    Some(profile).filter(|p| !p.is_empty()),
+                    crate::store::now_unix(),
+                )
+                .map_err(to_mcp_err)?;
+            }
+        }
         // The operator's restarts (a kill and a start) need a person (D12),
         // unless session care lets one of its own handoffs through
         // (`guard::OPERATOR_CARE_TOOLS`).
