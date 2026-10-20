@@ -395,10 +395,6 @@
   button.tool:hover {
     color: var(--fg);
   }
-  button.tool:focus-visible {
-    outline: 1px solid var(--accent);
-    outline-offset: 1px;
-  }
   .chev {
     flex: 0 0 auto;
     display: inline-block;

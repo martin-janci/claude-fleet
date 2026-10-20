@@ -6,10 +6,11 @@
   // colour never carries it alone. An extra fleet's chip counts its sessions
   // that need you (Phase 2), whatever the filter shows.
   import { fleets, fleetFilter, multiFleet, connectionWord, fleetNeedsCount } from './fleets';
+  import { radiogroupKeys } from './radiogroup_keys';
 </script>
 
 {#if $multiFleet}
-  <div class="fleet-switcher" role="radiogroup" aria-label="Fleet" data-testid="fleet-switcher">
+  <div class="fleet-switcher" role="radiogroup" aria-label="Fleet" data-testid="fleet-switcher" use:radiogroupKeys>
     <button
       type="button"
       role="radio"
@@ -32,10 +33,13 @@
       >
         <span class="swatch" aria-hidden="true"></span>
         {f.label}
-        <span class="dot {cw.tone}" aria-label={cw.word}></span>
+        <!-- Review w19-8: the words are text, not an aria-label on a role-less span. -->
+        <span class="dot {cw.tone}" aria-hidden="true"></span><span class="sr-only" data-testid="fleet-state-{f.id}">{cw.word}</span>
         {#if ($fleetNeedsCount.get(f.id) ?? 0) > 0}
-          <span class="needs" data-testid="fleet-needs-count-{f.id}" aria-label="{$fleetNeedsCount.get(f.id)} need you"
-            >{$fleetNeedsCount.get(f.id)}</span
+          <span class="needs" data-testid="fleet-needs-count-{f.id}"
+            ><span aria-hidden="true">{$fleetNeedsCount.get(f.id)}</span><span class="sr-only"
+              >, {$fleetNeedsCount.get(f.id)} need you</span
+            ></span
           >
         {/if}
       </button>
@@ -93,8 +97,16 @@
     padding: 0 4px;
     border-radius: var(--radius-pill);
     background: var(--status-waiting);
-    color: var(--bg);
+    color: var(--on-waiting);
     font-weight: 600;
     text-align: center;
+  }
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
   }
 </style>

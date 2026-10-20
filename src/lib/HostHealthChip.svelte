@@ -72,6 +72,7 @@
 
   let open = $state(false);
   let root: HTMLElement | undefined = $state();
+  let chipEl: HTMLButtonElement | undefined = $state();
 
   function onDocDown(e: PointerEvent) {
     if (open && root && !root.contains(e.target as Node)) open = false;
@@ -81,6 +82,9 @@
       e.preventDefault();
       e.stopPropagation();
       open = false;
+      // Escape from inside the popover would leave focus on a node about to
+      // go: give it back to the chip (review w19-6).
+      chipEl?.focus();
     }
   }
   function openHost(alias: string) {
@@ -96,6 +100,7 @@
   <span class="wrap" bind:this={root} onkeydown={onKey}>
     <button
       type="button"
+      bind:this={chipEl}
       class="chip"
       class:alert={!!mine?.trouble}
       data-testid="host-health-chip"

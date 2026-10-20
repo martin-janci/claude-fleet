@@ -145,6 +145,26 @@ describe('FixCard', () => {
     expect(get(fixedRecently).map((f) => f.id)).toEqual([7]);
   });
 
+  it('review w19-10: the status line is live, and a failed fix states its error once', async () => {
+    const failed = finding({ state: 'apply_failed', last_error: 'boom', attempts: 1 });
+    live = [finding()];
+    await loadFindings();
+    inv.mockImplementation(async (cmd: string, args: unknown) => {
+      calls.push({ cmd, args });
+      if (cmd === 'autofix_findings') return { findings: live, fixed, can_apply: true };
+      if (cmd === 'autofix_apply') return failed;
+      return null;
+    });
+    const r = render(FixCard, { props: { finding: finding({ state: 'verifying' }) } });
+    expect(screen.getByTestId('fix-card-status').getAttribute('role')).toBe('status');
+    await fireEvent.click(screen.getByTestId('fix-card-fix'));
+    await fireEvent.click(await screen.findByTestId('fix-card-confirm'));
+    await waitFor(() => expect(screen.getByTestId('fix-card-failure').textContent).toBe('boom'));
+    await r.rerender({ finding: failed });
+    expect(screen.queryByTestId('fix-card-status')).toBeNull();
+    expect(screen.getAllByText(/boom/)).toHaveLength(1);
+  });
+
   it('offers no Fix or Later on a device that may not apply', async () => {
     live = [finding()];
     canApply = false;

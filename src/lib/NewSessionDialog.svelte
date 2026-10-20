@@ -71,6 +71,7 @@
   import { submitHint, submitKey } from './forms/form_frame';
   import { detectMac } from './terminal_keys';
   import { openNewSessionPicker } from './switcher_request';
+  import { radiogroupKeys } from './radiogroup_keys';
   import { agentChoices, keepAgent, type PickerAgent } from './agent_picker';
   import {
     PRIMARY,
@@ -1614,7 +1615,7 @@
     />
 
   {#if fleetOptions.length > 0 && !ticket && !asBackground}
-    <div class="fleet-pick" role="radiogroup" aria-label="Fleet" data-testid="new-session-fleet">
+    <div class="fleet-pick" role="radiogroup" aria-label="Fleet" data-testid="new-session-fleet" use:radiogroupKeys>
       <span class="field-label">Fleet</span>
       {#each [{ id: PRIMARY, label: $fleets.find((f) => f.primary)?.label ?? 'This window', color: $fleets.find((f) => f.primary)?.color ?? 'var(--accent)' }, ...fleetOptions.map((c) => ({ id: c.fleet.id, label: c.fleet.label, color: c.fleet.color }))] as f (f.id)}
         <button

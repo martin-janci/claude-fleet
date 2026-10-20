@@ -6,7 +6,7 @@
   // few seconds, and settles the card when the person acts. Typing answers
   // the card in the person's own words, so it cancels it.
   import { onDestroy, untrack } from 'svelte';
-  import { autoContinue, countdown, hubLacksAutoContinue, liveCountdown, type AutoContinueView } from './auto_continue';
+  import { autoContinue, countdown, hubLacksAutoContinue, spokenCountdown, liveCountdown, type AutoContinueView } from './auto_continue';
   import { fleetSettings, settingBool, SETTING_KEYS } from './fleet_settings';
 
   let {
@@ -112,8 +112,13 @@
 </script>
 
 {#if left !== null && live}
-  <div class="auto-continue" role="status" data-testid="auto-continue">
-    <span class="line"
+  <div class="auto-continue" data-testid="auto-continue">
+    <!-- The live region holds words that change once a minute; the ticking
+         clock beside it is hidden from screen readers (review w19-1). -->
+    <span class="sr-only" role="status" data-testid="auto-continue-spoken"
+      >Going on with {live.pick.label} in {spokenCountdown(left)}.</span
+    >
+    <span class="line" aria-hidden="true"
       >Going on with <strong>{live.pick.label}</strong> in <span class="clock" data-testid="auto-continue-clock"
         >{countdown(left)}</span
       ></span
@@ -142,6 +147,14 @@
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
     white-space: nowrap;
   }
   .clock {

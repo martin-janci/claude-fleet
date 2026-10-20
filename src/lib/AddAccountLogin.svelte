@@ -6,6 +6,7 @@
   // host reports the login; Done and Cancel close the pane. "Run it there
   // instead" is the command for a terminal on the host, whatever the CLI's
   // flow becomes.
+  import { tick } from 'svelte';
   import Modal from './Modal.svelte';
   import { copyText } from './clipboard';
   import { openExternal } from './open_external';
@@ -42,6 +43,14 @@
   let code = $state('');
   let sending = $state(false);
   let stepError = $state<string | null>(null);
+  let doneBtn = $state<HTMLButtonElement | null>(null);
+
+  // Review w19-9: signing in replaces the body (and the focused Send code
+  // button) with "Signed in as …": move focus to Done, which is now on.
+  const signedIn = $derived(!!status?.logged_in);
+  $effect(() => {
+    if (signedIn) void tick().then(() => doneBtn?.focus());
+  });
 
   async function poll() {
     const r = await loginStatus(login.host, login.profile);
@@ -111,7 +120,7 @@
   <div class="sheet">
     <h3>Sign in {login.profile} on {login.host}</h3>
     {#if status?.logged_in}
-      <p class="done" data-testid="add-account-signed-in">
+      <p class="done" role="status" data-testid="add-account-signed-in">
         Signed in{status.email ? ` as ${status.email}` : ''}. New sessions on {login.host} can bill it.
       </p>
     {:else}
@@ -176,7 +185,7 @@
           >{sending ? 'Sending…' : 'Send code'}</button
         >
       </form>
-      {#if stepError}<p class="err" data-testid="add-account-step-error">{stepError}</p>{/if}
+      {#if stepError}<p class="err" role="alert" data-testid="add-account-step-error">{stepError}</p>{/if}
       <details class="fallback">
         <summary>Run it there instead</summary>
         <p>In a terminal on {login.host}:</p>
@@ -194,7 +203,7 @@
       {#if !status?.logged_in}
         <button type="button" class="btn" data-testid="add-account-cancel" onclick={() => void finish()}>Cancel</button>
       {/if}
-      <button type="button" class="btn primary" data-testid="add-account-done" disabled={!status?.logged_in} onclick={() => void finish()}
+      <button bind:this={doneBtn} type="button" class="btn primary" data-testid="add-account-done" disabled={!status?.logged_in} onclick={() => void finish()}
         >Done</button
       >
     </div>

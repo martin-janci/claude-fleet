@@ -14,6 +14,7 @@
   import { automationPaused, money, setAutomationPaused } from './automation';
   import { AUTONOMY, autonomyLabel, autonomyOf, setAutonomy, type AutonomyId } from './autonomy';
   import Meter from './kit/Meter.svelte';
+  import { radiogroupKeys } from './radiogroup_keys';
 
   const current = $derived(autonomyOf($fleetSettings));
   let open = $state(false);
@@ -21,6 +22,15 @@
   let error = $state<string | null>(null);
   let budget = $state<FleetBudget | null>(null);
   let root: HTMLElement | undefined = $state();
+  let chipEl: HTMLButtonElement | undefined = $state();
+
+  /** Close from inside the popover (a pick, Escape) and give focus back to
+   *  the chip, as WorkButton does: the focused option is about to go
+   *  (review w19-6). A pointer-down outside just closes. */
+  function closeToChip() {
+    open = false;
+    chipEl?.focus();
+  }
 
   async function loadBudget() {
     const r = await routineBudget();
@@ -33,7 +43,7 @@
     busy = true;
     error = await setAutonomy(id, $fleetSettings);
     busy = false;
-    if (!error) open = false;
+    if (!error) closeToChip();
   }
 
   function toggle() {
@@ -51,7 +61,7 @@
     if (open && e.key === 'Escape') {
       e.preventDefault();
       e.stopPropagation();
-      open = false;
+      closeToChip();
     }
   }
 
@@ -68,6 +78,7 @@
 <span class="wrap" bind:this={root} onkeydown={onKey}>
   <button
     type="button"
+    bind:this={chipEl}
     class="btn btn--chip chip"
     data-testid="autonomy-chip"
     data-level={current}
@@ -78,7 +89,9 @@
   >
   {#if open}
     <div class="pop" role="dialog" aria-label="Autonomy" data-testid="autonomy-popover">
-      <div class="options" role="radiogroup" aria-label="Autonomy">
+      <!-- Review w19-8: one Tab stop, arrows move; a pick rewrites settings
+           and closes, so arrows only move focus and Enter or Space picks. -->
+      <div class="options" role="radiogroup" aria-label="Autonomy" use:radiogroupKeys={{ select: false }}>
         {#each AUTONOMY as p (p.id)}
           <button
             type="button"
