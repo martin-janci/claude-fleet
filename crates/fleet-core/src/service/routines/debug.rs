@@ -718,7 +718,11 @@ pub fn dry_run(
             profile: r.profile.clone(),
             owner_person_id: owner,
         },
-        prompt: tick::run_prompt(&r, fire.as_ref().and_then(|f| f.context.as_deref())),
+        prompt: tick::run_prompt(
+            &r,
+            super::memory::prompt_block(&super::memory::RunMemory::of(&s, &r)?).as_deref(),
+            fire.as_ref().and_then(|f| f.context.as_deref()),
+        ),
         event,
         scheduled_only,
     })

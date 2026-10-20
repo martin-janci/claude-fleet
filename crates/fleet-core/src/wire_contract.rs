@@ -311,4 +311,11 @@
 //!   `my_profile` tool (the desktop's command of the same name). A hub
 //!   without it answers `E_HUB_PROTOCOL`, and the desktop pieces the
 //!   profile together from `my_grants` and `env_vars` instead.
+//!   Routine memory (migration 204) is new without a bump: a routine row
+//!   carries `memory` and `memory_auto` (additive, absent when off), its
+//!   input takes them, and `routines` gains `memory` and `set_memory`. The
+//!   desktop sends the input fields only when a routine keeps a notebook,
+//!   so a hub without them still saves every other routine; one that has
+//!   no `memory` action answers `E_INVALID`, which the editor shows as no
+//!   notebook.
 pub const CONTRACT_REVISION: u32 = 18;

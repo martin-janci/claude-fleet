@@ -67,6 +67,39 @@ export interface RoutineRow {
   retry_once?: boolean;
   /** 0 report only | 1 ask before push; absent = push and open PRs. */
   autonomy?: number;
+  /** The notebooks its runs read and rewrite (migration 204); absent = none. */
+  memory?: RoutineMemoryMode;
+  /** The fleet notes each finished run in the notebook. */
+  memory_auto?: boolean;
+}
+
+/** `routines.memory`: which notebooks a routine's runs use. */
+export type RoutineMemoryMode = 'routine' | 'project' | 'both';
+/** A notebook: the routine's own, or its project's (shared by its routines). */
+export type RoutineNotebook = 'routine' | 'project';
+
+/** One notebook (fleet-core `store::RoutineMemoryRow`). */
+export interface RoutineMemoryRow {
+  scope: RoutineNotebook;
+  owner_id: number;
+  circle?: number;
+  body: string;
+  updated_at: number;
+  /** person | run | fleet */
+  updated_by: string;
+  updated_run_id?: number;
+}
+
+/** `memory`: the notebooks a routine uses (fleet-core
+ *  `routines::memory::RoutineMemory`). A notebook nothing wrote is absent. */
+export interface RoutineMemory {
+  routine_id: number;
+  memory?: RoutineMemoryMode;
+  memory_auto: boolean;
+  routine?: RoutineMemoryRow;
+  project?: RoutineMemoryRow;
+  max_chars: number;
+  may_change: boolean;
 }
 
 /** One run of a routine. */
@@ -181,6 +214,9 @@ export interface RoutineInput {
   fallback_host?: string;
   retry_once?: boolean;
   autonomy?: number;
+  /** Sent only when it keeps a notebook, so a hub without memory still saves it. */
+  memory?: RoutineMemoryMode;
+  memory_auto?: boolean;
 }
 
 /** `preview`: the editor's dry run (gap plan G2.3, fleet-core
@@ -223,6 +259,7 @@ export function routineInputOf(r: RoutineRow): RoutineInput {
     fallback_host: r.fallback_host,
     retry_once: r.retry_once,
     autonomy: r.autonomy,
+    ...(r.memory ? { memory: r.memory, memory_auto: r.memory_auto ?? false } : {}),
   };
 }
 
@@ -236,6 +273,8 @@ type Args = {
   run_id?: number;
   outcome?: string;
   event_id?: number;
+  notebook?: RoutineNotebook;
+  text?: string;
 };
 
 function call<T>(args: Args): Promise<Result<T>> {
@@ -261,6 +300,11 @@ export const runRoutineNow = (id: number) => call<RoutineRunRow>({ action: 'run_
 export type PersonOutcome = 'did_work' | 'nothing' | 'needs_person';
 export const setRunOutcome = (id: number, runId: number, outcome: PersonOutcome) =>
   call<RoutineRunRow>({ action: 'set_run_outcome', routine_id: id, run_id: runId, outcome });
+/** The notebooks a routine's runs read and rewrite (migration 204). */
+export const routineMemory = (id: number) => call<RoutineMemory>({ action: 'memory', routine_id: id });
+/** Rewrite one notebook; `''` clears it. */
+export const setRoutineMemory = (id: number, notebook: RoutineNotebook, text: string) =>
+  call<RoutineMemory>({ action: 'set_memory', routine_id: id, notebook, text });
 
 // ---- debugging (migration 186; `service::routines::debug`) -----------------
 

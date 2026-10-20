@@ -58,6 +58,11 @@
 //! prompt saying how far the run may go (report, ask before push, push). A
 //! failed run carries an error code, read as a named fix ([`fix`]).
 //!
+//! **Memory** ([`memory`], migration 204): a routine may keep notebooks in
+//! the fleet's database, its own and its project's, that each run reads
+//! under its prompt and rewrites with a `<routine-memory>` block in its
+//! reply; `memory_auto` also notes each finished run there.
+//!
 //! **Debugging** ([`debug`], migration 186): every scheduler decision is a
 //! row of the routine's trace (`routine_decisions`, the newest 200), the
 //! event fires dropped and the events filtered out included, and
@@ -68,6 +73,7 @@ pub mod backoff;
 pub mod cron;
 pub mod debug;
 pub mod fix;
+pub mod memory;
 pub mod outcome;
 pub mod tick;
 pub mod trace;
@@ -247,6 +253,14 @@ pub struct RoutineInput {
     // 0 report only | 1 ask before push | 2 push (the default).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub autonomy: Option<i64>,
+    // Routine memory (migration 204; docs/control-api.md): the notebooks
+    // its runs read and may rewrite, routine | project | both; absent =
+    // none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory: Option<String>,
+    // The fleet notes each finished run in the notebook. Needs memory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_auto: Option<bool>,
 }
 
 /// The shortest time cap: a minute.
@@ -553,6 +567,7 @@ fn check(
         }
     }
     let guards = guards(s, scope, input, org)?;
+    let (memory_mode, memory_auto) = memory::check_input(input)?;
     let overlap = input.overlap.as_deref().unwrap_or("skip");
     if !ROUTINE_OVERLAPS.contains(&overlap) {
         return Err(invalid(format!(
@@ -583,6 +598,8 @@ fn check(
             fallback_host: guards.fallback_host,
             retry_once: guards.retry_once,
             autonomy: guards.autonomy,
+            memory: memory_mode,
+            memory_auto,
         },
         org,
     ))

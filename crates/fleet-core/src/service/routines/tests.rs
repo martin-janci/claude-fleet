@@ -3454,3 +3454,294 @@ async fn a_retry_held_at_a_limit_says_so_once_and_when_a_newer_run_drops_it() {
         "{v:?}"
     );
 }
+
+// ---- routine memory (migration 204, `memory`) -------------------------------
+
+#[test]
+fn a_reply_names_its_notebooks_with_routine_memory_blocks() {
+    let text = "Done.\n<routine-memory scope=\"routine\">\nA\nB\n</routine-memory>\n\
+                <routine-memory>plain</routine-memory>\
+                <routine-memory scope='project'>P</routine-memory>\
+                <routine-memoryx>not a tag</routine-memory>\
+                <routine-memory scope=\"routine\">unclosed";
+    assert_eq!(
+        memory::parse_blocks(text, "project"),
+        vec![("routine", "A\nB"), ("project", "plain"), ("project", "P")]
+    );
+    assert!(memory::parse_blocks("no tags", "routine").is_empty());
+    assert_eq!(
+        memory::summary("<routine-memory>x</routine-memory>\n\n## Opened 2 PRs\nmore").as_deref(),
+        Some("Opened 2 PRs")
+    );
+    assert_eq!(memory::summary("  \n"), None);
+}
+
+#[test]
+fn a_full_notebook_drops_its_oldest_notes_first() {
+    let body =
+        "Keep: deploys go out on Fridays.\n- [run 1 · x · done] one\n- [run 2 · x · done] two";
+    let next = memory::append_note(body, "- [run 3 · x · done] three", 80);
+    assert!(next.chars().count() <= 80, "{next}");
+    assert!(
+        next.starts_with("Keep: deploys"),
+        "a person's text stays: {next}"
+    );
+    assert!(!next.contains("run 1 "), "the oldest note went: {next}");
+    assert!(next.ends_with("three"), "{next}");
+    // Room enough: nothing goes.
+    let roomy = memory::append_note("a\n\n", "- [run 9 · x · done] b", 4000);
+    assert_eq!(roomy, "a\n- [run 9 · x · done] b");
+}
+
+#[test]
+fn memory_is_checked_when_a_routine_is_saved() {
+    let f = fx();
+    let ana = person(&f.store, None, f.ana);
+    let mut bad = input(&f);
+    bad.memory = Some("everything".into());
+    assert_eq!(
+        save(&f.store, &ana, None, &bad).unwrap_err().code,
+        codes::E_INVALID
+    );
+    let mut auto_only = input(&f);
+    auto_only.memory_auto = Some(true);
+    assert_eq!(
+        save(&f.store, &ana, None, &auto_only).unwrap_err().code,
+        codes::E_INVALID
+    );
+    let mut ok = input(&f);
+    ok.memory = Some("both".into());
+    ok.memory_auto = Some(true);
+    let r = save(&f.store, &ana, None, &ok).unwrap();
+    assert_eq!((r.memory.as_deref(), r.memory_auto), (Some("both"), true));
+    // "" is none.
+    ok.memory = Some(String::new());
+    ok.memory_auto = None;
+    let r = save(&f.store, &ana, Some(r.id), &ok).unwrap();
+    assert_eq!((r.memory, r.memory_auto), (None, false));
+}
+
+fn memory_routine(f: &Fx, mode: &str, auto: bool) -> RoutineRow {
+    let mut i = input(f);
+    i.memory = Some(mode.into());
+    i.memory_auto = Some(auto);
+    i.overlap = Some("parallel".into());
+    new_routine(f, i)
+}
+
+#[tokio::test]
+async fn a_run_reads_its_notebooks_under_its_prompt() {
+    let f = fx();
+    let ana = person(&f.store, None, f.ana);
+    let r = memory_routine(&f, "both", false);
+    memory::set(&f.store, &ana, r.id, "routine", "PR 12 waits on Bo.", OCT8).unwrap();
+    let run = run_now(&f.deps, &ana, r.id, OCT8).await.unwrap();
+    let prompt = queued_prompt(&f, run.session_id.unwrap());
+    assert!(prompt.starts_with("Review my open PRs"), "{prompt}");
+    assert!(prompt.contains("PR 12 waits on Bo."), "{prompt}");
+    assert!(
+        prompt.contains(&crate::mcp::guard::untrusted_marker("routine memory")),
+        "fenced: {prompt}"
+    );
+    assert!(prompt.contains("The project's notebook (shared by its routines) is empty."));
+    assert!(
+        prompt.contains("<routine-memory scope=\"routine\">"),
+        "{prompt}"
+    );
+    // The dry run shows the same prompt.
+    let dry = dry_run(&f.store, &ana, r.id, None, OCT8).unwrap();
+    assert!(dry.prompt.contains("PR 12 waits on Bo."));
+    // A routine without memory says nothing of it.
+    let plain = new_routine(&f, input(&f));
+    let run = run_now(&f.deps, &ana, plain.id, OCT8).await.unwrap();
+    assert!(!queued_prompt(&f, run.session_id.unwrap()).contains("Memory:"));
+}
+
+struct FakeReplies {
+    texts: Vec<String>,
+    fail: AtomicBool,
+    reads: AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl memory::ReplyReader for FakeReplies {
+    async fn replies(&self, _row: &SessionRow) -> Result<Vec<String>, IpcError> {
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        if self.fail.load(Ordering::SeqCst) {
+            return Err(IpcError::new(codes::E_SSH, "host unreachable"));
+        }
+        Ok(self.texts.clone())
+    }
+}
+
+fn replies(texts: &[&str]) -> FakeReplies {
+    FakeReplies {
+        texts: texts.iter().map(|t| t.to_string()).collect(),
+        fail: AtomicBool::new(false),
+        reads: AtomicUsize::new(0),
+    }
+}
+
+async fn finished_run(f: &Fx, r: &RoutineRow, at: i64) -> RoutineRunRow {
+    let ana = person(&f.store, None, f.ana);
+    let run = run_now(&f.deps, &ana, r.id, at).await.unwrap();
+    event(f, run.session_id.unwrap(), "turn_done");
+    tick_once(&f.deps, at + 30).await;
+    run_row(f, run.id)
+}
+
+#[tokio::test]
+async fn a_finished_runs_reply_rewrites_its_notebooks_and_the_fleet_notes_it() {
+    let f = fx();
+    let ana = person(&f.store, None, f.ana);
+    let r = memory_routine(&f, "both", true);
+    let run = finished_run(&f, &r, OCT8).await;
+    assert_eq!(run.state, "done");
+    let reader = replies(&[
+        "Looking.",
+        "Opened PR 14.\n<routine-memory scope=\"routine\">old</routine-memory>",
+        "<routine-memory scope=\"routine\">PR 14 is open.</routine-memory>\
+         <routine-memory scope=\"project\">CI is slow on Mondays.</routine-memory>",
+    ]);
+    memory::read_finished(&f.store, &reader, OCT8 + 60).await;
+    let m = memory::get(&f.store, &ana, r.id).unwrap();
+    let own = m.routine.unwrap();
+    assert!(
+        own.body.starts_with("PR 14 is open.\n- [run "),
+        "{}",
+        own.body
+    );
+    assert!(
+        own.body.ends_with("done] Opened PR 14."),
+        "the note reads the reply: {}",
+        own.body
+    );
+    assert_eq!(own.updated_by, "fleet");
+    let project = m.project.unwrap();
+    assert_eq!(
+        (
+            project.body.as_str(),
+            project.updated_by.as_str(),
+            project.updated_run_id
+        ),
+        ("CI is slow on Mondays.", "run", Some(run.id))
+    );
+    // Read once: a later pass does not read it again or note it twice.
+    memory::read_finished(&f.store, &reader, OCT8 + 120).await;
+    assert_eq!(reader.reads.load(Ordering::SeqCst), 1);
+    // Its trace says what changed.
+    let s = lock(&f.store).unwrap();
+    let steps = s
+        .run_trace(&crate::service::run_trace::routine_ref(run.id), 0, 500)
+        .unwrap();
+    assert!(
+        steps.iter().any(|t| t.kind == "memory"),
+        "{:?}",
+        steps.iter().map(|t| &t.kind).collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+async fn a_reply_reaches_only_the_notebooks_its_routine_names() {
+    let f = fx();
+    let ana = person(&f.store, None, f.ana);
+    let r = memory_routine(&f, "routine", false);
+    finished_run(&f, &r, OCT8).await;
+    let reader = replies(&["<routine-memory scope=\"project\">sneaky</routine-memory>"]);
+    memory::read_finished(&f.store, &reader, OCT8 + 60).await;
+    let m = memory::get(&f.store, &ana, r.id).unwrap();
+    assert!(m.routine.is_none() && m.project.is_none(), "{m:?}");
+    let s = lock(&f.store).unwrap();
+    assert!(s
+        .get_routine_memory("project", f.project, -f.ana)
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn an_unread_transcript_is_tried_again_then_noted_without_it() {
+    let f = fx();
+    let ana = person(&f.store, None, f.ana);
+    let r = memory_routine(&f, "routine", true);
+    let run = finished_run(&f, &r, OCT8).await;
+    let finished = run.finished_at.unwrap();
+    let reader = replies(&["<routine-memory>never read</routine-memory>"]);
+    reader.fail.store(true, Ordering::SeqCst);
+    memory::read_finished(&f.store, &reader, finished + 60).await;
+    assert!(
+        memory::get(&f.store, &ana, r.id).unwrap().routine.is_none(),
+        "retried later"
+    );
+    memory::read_finished(&f.store, &reader, finished + memory::GIVE_UP_SECS + 1).await;
+    let own = memory::get(&f.store, &ana, r.id).unwrap().routine.unwrap();
+    assert!(
+        own.body.starts_with("- [run ") && own.body.ends_with("done] done"),
+        "{}",
+        own.body
+    );
+    assert_eq!(reader.reads.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn a_project_notebook_is_shared_only_within_its_circle() {
+    let f = fx();
+    let ana = person(&f.store, None, f.ana);
+    let bo = person(&f.store, None, f.bo);
+    let mut i = input(&f);
+    i.memory = Some("project".into());
+    let a1 = save(&f.store, &ana, None, &i).unwrap();
+    let a2 = save(&f.store, &ana, None, &i).unwrap();
+    let b1 = save(&f.store, &bo, None, &i).unwrap();
+    memory::set(&f.store, &ana, a1.id, "project", "shared note", OCT8).unwrap();
+    let body = |scope: &ViewScope, id: i64| {
+        memory::get(&f.store, scope, id)
+            .unwrap()
+            .project
+            .map(|p| p.body)
+    };
+    assert_eq!(body(&ana, a2.id).as_deref(), Some("shared note"));
+    assert_eq!(
+        body(&bo, b1.id),
+        None,
+        "another person's routine reads its own"
+    );
+}
+
+#[test]
+fn a_notebook_takes_the_routines_fence_and_goes_with_it() {
+    let f = fx();
+    let ana = person(&f.store, None, f.ana);
+    let bo = person(&f.store, None, f.bo);
+    let mut i = input(&f);
+    i.memory = Some("routine".into());
+    let r = save(&f.store, &ana, None, &i).unwrap();
+    assert_eq!(
+        memory::get(&f.store, &bo, r.id).unwrap_err().code,
+        codes::E_NOTFOUND
+    );
+    assert_eq!(
+        memory::set(&f.store, &bo, r.id, "routine", "x", OCT8)
+            .unwrap_err()
+            .code,
+        codes::E_NOTFOUND
+    );
+    assert_eq!(
+        memory::set(&f.store, &ana, r.id, "project", "x", OCT8)
+            .unwrap_err()
+            .code,
+        codes::E_INVALID,
+        "it keeps no project notebook"
+    );
+    let long = "x".repeat(memory::MEMORY_MAX_CHARS + 1);
+    assert_eq!(
+        memory::set(&f.store, &ana, r.id, "routine", &long, OCT8)
+            .unwrap_err()
+            .code,
+        codes::E_INVALID
+    );
+    let m = memory::set(&f.store, &ana, r.id, "routine", "kept", OCT8).unwrap();
+    assert_eq!(m.routine.unwrap().updated_by, "person");
+    assert!(delete(&f.store, &ana, r.id).unwrap());
+    let s = lock(&f.store).unwrap();
+    assert!(s.get_routine_memory("routine", r.id, 0).unwrap().is_none());
+}

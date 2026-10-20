@@ -60,6 +60,11 @@ pub trait Spawn: Send + Sync {
     fn tools(&self) -> Option<Arc<dyn super::work_steps::ToolReader>> {
         None
     }
+    /// Reads a finished run's replies for its routine's notebooks
+    /// (migration 204); `None` where no transcript can be read (tests).
+    fn replies(&self) -> Option<Arc<dyn super::memory::ReplyReader>> {
+        None
+    }
     /// Stops the turn of a run past its time cap (G3.8): Escape in its
     /// pane, so the session stays for a person to read. Nothing in tests.
     async fn stop_turn(&self, _host_alias: &str, _tmux_name: &str) -> Result<(), IpcError> {
@@ -97,6 +102,12 @@ impl Spawn for LiveSpawn {
     }
     fn tools(&self) -> Option<Arc<dyn super::work_steps::ToolReader>> {
         Some(Arc::new(super::work_steps::TranscriptTools {
+            store: Arc::clone(&self.store),
+            ssh: Arc::clone(&self.ssh),
+        }))
+    }
+    fn replies(&self) -> Option<Arc<dyn super::memory::ReplyReader>> {
+        Some(Arc::new(super::memory::TranscriptReplies {
             store: Arc::clone(&self.store),
             ssh: Arc::clone(&self.ssh),
         }))
@@ -245,7 +256,13 @@ pub async fn fire_with(
     let (state, reason, code, session_id) = match spawned {
         Ok(row) => {
             let meta = serde_json::json!({ "routine_id": r.id, "source": "routine" }).to_string();
-            let prompt = run_prompt(r, context);
+            let memory = super::memory::RunMemory::of(&s, r)
+                .map(|m| super::memory::prompt_block(&m))
+                .unwrap_or_else(|e| {
+                    tracing::warn!(routine = r.id, error = %e.message, "[routines] notebooks not read for its run");
+                    None
+                });
+            let prompt = run_prompt(r, memory.as_deref(), context);
             match s.enqueue_handover(row.id, &prompt, Some(&meta)) {
                 Ok(handover) => {
                     steps.push(
@@ -393,11 +410,12 @@ pub(super) fn undelivered(
     }
 }
 
-/// The prompt a run of `r` queues: its own, the autonomy line (G3.8) and
-/// the line on what fired it.
-pub(super) fn run_prompt(r: &RoutineRow, context: Option<&str>) -> String {
+/// The prompt a run of `r` queues: its own, the autonomy line (G3.8), its
+/// notebooks (migration 204, [`super::memory::prompt_block`]) and the line
+/// on what fired it.
+pub(super) fn run_prompt(r: &RoutineRow, memory: Option<&str>, context: Option<&str>) -> String {
     let mut prompt = r.prompt.clone();
-    for line in [super::autonomy_line(r.autonomy), context]
+    for line in [super::autonomy_line(r.autonomy), memory, context]
         .into_iter()
         .flatten()
     {
@@ -1405,6 +1423,11 @@ pub async fn tick_once(deps: &Deps, now: i64) {
     // reads, so it runs while paused too.
     if let Some(tools) = deps.spawn.tools() {
         super::work_steps::spawn_pass(&deps.store, tools, now);
+    }
+    // The finished runs' replies go into their routines' notebooks, off
+    // this path; a run is only read, so it runs while paused too.
+    if let Some(replies) = deps.spawn.replies() {
+        super::memory::spawn_pass(&deps.store, replies, now);
     }
     let (due, events) = match work {
         Ok(Some(w)) => w,

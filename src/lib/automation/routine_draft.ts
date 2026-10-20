@@ -15,6 +15,7 @@ import {
   zoneOffsetMin,
   type EventFilter,
   type RoutineInput,
+  type RoutineMemoryMode,
   type RoutineTrigger,
   type ScheduleDays,
 } from '../routines';
@@ -42,6 +43,10 @@ export interface RoutineDraft {
   fallback_host: string;
   retry_once: boolean;
   autonomy: number;
+  /** The notebooks its runs read and rewrite (migration 204); '' = none. */
+  memory?: RoutineMemoryMode | '';
+  /** The fleet notes each finished run in the notebook. */
+  memory_auto?: boolean;
   /** The schedule's zone (G7.4's Time zone select); '' = this device's. */
   zone: string;
   /** A routine saved without a zone at an offset no zone here stands for
@@ -106,6 +111,8 @@ export function draftOf(i: RoutineInput, id?: number): RoutineDraft {
     fallback_host: i.fallback_host ?? '',
     retry_once: i.retry_once ?? false,
     autonomy: i.autonomy ?? 2,
+    memory: i.memory ?? '',
+    memory_auto: i.memory_auto ?? false,
     zone: z.zone,
     ...(z.offset !== undefined ? { saved_offset: z.offset } : {}),
   };
@@ -201,5 +208,8 @@ export function draftInput(d: RoutineDraft, enabled: boolean, device: string | n
     fallback_host: d.fallback_host || undefined,
     retry_once: d.retry_once,
     autonomy: d.autonomy < 2 ? d.autonomy : undefined,
+    // Only when it keeps a notebook: a hub that predates memory refuses
+    // the fields, and every other routine still saves there.
+    ...(d.memory ? { memory: d.memory, memory_auto: d.memory_auto ?? false } : {}),
   };
 }
