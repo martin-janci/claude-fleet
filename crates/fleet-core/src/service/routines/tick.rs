@@ -278,6 +278,7 @@ pub async fn fire_with(
         error_code: code.as_deref(),
         host_alias: Some(&host),
     })?;
+    note_dropped_retry(&s, r, &run, now);
     let mut trace_steps = trace::opening(r, &run, &checks, None, now);
     trace_steps.append(&mut steps);
     trace::write(&s, &run, trace_steps);
@@ -637,17 +638,27 @@ async fn retry_failed(deps: &Deps, now: i64) -> Result<(), IpcError> {
         };
         // A run that ended at a rate limit is retried once the limit lifts,
         // not into it (Control review F16).
-        let waits = super::backoff::retry_waits(&*lock(&deps.store)?, &r, &run, now);
+        let waits = {
+            let s = lock(&deps.store)?;
+            let waits = super::backoff::retry_waits(&s, &r, &run, now);
+            if waits {
+                note_retry_waits(&s, &r, &run, now)?;
+            }
+            waits
+        };
         if waits {
             continue;
         }
         let reference = format!("retry:{}", run.id);
-        let retry = fire(
+        // An event run's retry says what started it, as its first run did.
+        let context = context_of_ref(&*lock(&deps.store)?, run.trigger_ref.as_deref());
+        let retry = fire_with(
             deps,
             &r,
             &run.trigger,
             Some(&reference),
             run.scheduled_for,
+            context.as_deref(),
             now,
         )
         .await?;
@@ -666,6 +677,81 @@ async fn retry_failed(deps: &Deps, now: i64) -> Result<(), IpcError> {
         );
     }
     Ok(())
+}
+
+/// Say once, in the routine's trace, that the retry of `run` waits for its
+/// account's limit to lift: a held retry left no trace, and the run showed
+/// Failed with nothing pending (review w06-13).
+fn note_retry_waits(
+    s: &Store,
+    r: &RoutineRow,
+    run: &RoutineRunRow,
+    now: i64,
+) -> Result<(), IpcError> {
+    let noted = s
+        .routine_decisions(r.id, crate::store::ROUTINE_DECISIONS_KEPT)?
+        .iter()
+        .any(|d| d.run_id == Some(run.id) && d.verdict == "skipped");
+    if !noted {
+        decide(
+            s,
+            r,
+            Decision {
+                trigger: "retry",
+                verdict: "skipped",
+                reason: Some(&format!(
+                    "retry of run #{} waits: its account is over its limit",
+                    run.id
+                )),
+                run_id: Some(run.id),
+                ..Decision::default()
+            },
+            now,
+        );
+    }
+    Ok(())
+}
+
+/// A run `new` just recorded ends the wait of a `retry_once` retry held at
+/// a rate limit: only the newest failed run is retried. Say so in the
+/// trace, or the pending retry vanished with no row saying why (review
+/// w06-13). The retry itself (`retry:<id>`) is not a run that ran since.
+pub(super) fn note_dropped_retry(s: &Store, r: &RoutineRow, new: &RoutineRunRow, now: i64) {
+    if !r.retry_once {
+        return;
+    }
+    let Ok(runs) = s.routine_runs(r.id, 2) else {
+        return;
+    };
+    let Some(prev) = runs.iter().find(|p| p.id != new.id) else {
+        return;
+    };
+    let held = prev.state == "failed"
+        && prev.id < new.id
+        && prev.error_code.as_deref() == Some(super::fix::E_TURN_RATE_LIMIT)
+        && !prev
+            .trigger_ref
+            .as_deref()
+            .is_some_and(|t| t.starts_with("retry:"))
+        && prev.started_at >= now - RATE_LIMIT_RETRY_WITHIN_SECS
+        && new.trigger_ref.as_deref() != Some(&*format!("retry:{}", prev.id));
+    if held {
+        decide(
+            s,
+            r,
+            Decision {
+                trigger: "retry",
+                verdict: "dropped",
+                reason: Some(&format!(
+                    "retry of run #{} dropped: run #{} ran since",
+                    prev.id, new.id
+                )),
+                run_id: Some(prev.id),
+                ..Decision::default()
+            },
+            now,
+        );
+    }
 }
 
 /// Whether an event on session `sid` may fire `r`: a session its owner
@@ -717,8 +803,114 @@ fn pr_event_words(kind: &str, pr: &crate::store::PullRequestRow) -> String {
         crate::store::PR_EVENT_CI_FAILED => "has failing checks".into(),
         crate::store::PR_EVENT_CI_PASSED => "has its checks passing".into(),
         crate::store::PR_EVENT_MERGED => "was merged".into(),
+        crate::store::PR_EVENT_OPENED => "was opened".into(),
         other => other.replace('_', " "),
     }
+}
+
+/// The line under a pull request event's prompt.
+fn pr_context(kind: &str, pr: &crate::store::PullRequestRow) -> String {
+    format!(
+        "Started because pull request {} {}.",
+        pr.url,
+        pr_event_words(kind, pr)
+    )
+}
+
+/// The line under a fleet event's prompt.
+fn fleet_context(e: &FleetEventRow) -> String {
+    format!(
+        "Started because {}.",
+        e.detail.as_deref().unwrap_or(&e.kind.replace('_', " "))
+    )
+}
+
+/// The longest event detail quoted in a session event's line.
+const DETAIL_MAX_CHARS: usize = 200;
+
+/// What a session event says about its session, for the line under the
+/// prompt (review w06-1): "is stuck", "had its turn fail (rate_limit)".
+fn session_event_words(kind: &str, detail: Option<&str>) -> String {
+    use crate::service::{account_switch, auto_restore, move_session};
+    let words = match kind {
+        "turn_done" => "finished a turn",
+        "stop_failure" => "had its turn fail",
+        "stuck" => "is stuck",
+        "lost" => "was lost",
+        "task_done" => "finished its task",
+        "task_failed" => "failed at its task",
+        "session_restore_failed" => "was not restored after a reboot",
+        "workspace_repair_failed" => "was left with a broken workspace",
+        NEEDS_YOU | "notification" => "is waiting for you",
+        auto_restore::EVENT_RESTORED => "was brought back automatically",
+        auto_restore::EVENT_FAILED => "had an automatic restore attempt fail",
+        account_switch::EVENT_SWITCHED => "was moved to another account",
+        account_switch::EVENT_SWITCH_FAILED => "could not switch accounts",
+        move_session::EVENT_MOVED => {
+            // Its detail is the move's JSON: say where from and to.
+            let v = detail.and_then(|d| serde_json::from_str::<serde_json::Value>(d).ok());
+            let host = |k: &str| {
+                v.as_ref()
+                    .and_then(|v| v.get(k))
+                    .and_then(|h| h.as_str())
+                    .map(str::to_string)
+            };
+            return match (host("from_host"), host("to_host")) {
+                (Some(from), Some(to)) => format!("was moved from {from} to {to}"),
+                _ => "was moved to another host".into(),
+            };
+        }
+        other => return other.replace('_', " "),
+    };
+    match detail
+        .map(str::trim)
+        .filter(|d| !d.is_empty() && !d.starts_with('{'))
+    {
+        Some(d) => {
+            let d: String = d.chars().take(DETAIL_MAX_CHARS).collect();
+            format!("{words} ({d})")
+        }
+        None => words.to_string(),
+    }
+}
+
+/// The line under a session event's prompt: which session, on which host,
+/// and what happened to it, so the run knows what it is for.
+fn session_context(s: &Store, kind: &str, sid: i64, detail: Option<&str>) -> String {
+    let words = session_event_words(kind, detail);
+    match s.get_session_by_id(sid).ok().flatten() {
+        Some(row) => format!(
+            "Started because session #{sid} \"{}\" on {} {words}.",
+            row.friendly_name.as_deref().unwrap_or(&row.tmux_name),
+            row.host_alias
+        ),
+        None => format!("Started because session #{sid} {words}."),
+    }
+}
+
+/// The line a retry of an event run adds under its prompt: the one its
+/// first run had, rebuilt from that run's `trigger_ref` (review w06-2).
+/// `None` for a run no event started, or an event since pruned.
+pub(super) fn context_of_ref(s: &Store, reference: Option<&str>) -> Option<String> {
+    let reference = reference?;
+    if let Some(rest) = reference.strip_prefix("fleet:") {
+        let id: i64 = rest.rsplit(':').next()?.parse().ok()?;
+        return s
+            .fleet_event_by_id(id)
+            .ok()
+            .flatten()
+            .map(|e| fleet_context(&e));
+    }
+    if !(reference.starts_with("session:") || reference.starts_with("pr:")) {
+        return None;
+    }
+    let eid: i64 = reference.rsplit(':').next()?.parse().ok()?;
+    let (sid, kind, _, detail) = s.session_event_by_id(eid).ok().flatten()?;
+    if PR_EVENTS.contains(&kind.as_str()) {
+        let pr = s.pull_request_by_url(detail.as_deref()?).ok().flatten()?;
+        return Some(pr_context(&kind, &pr));
+    }
+    Some(session_context(s, &kind, sid, detail.as_deref()))
 }
 
 /// Whether event `eid` of `kind` on session `sid` may fire `r`, and how.
@@ -749,7 +941,7 @@ pub(super) fn event_fire(
         return Ok(passes.map(|()| EventFire {
             reference: format!("session:{sid}:{eid}"),
             subject: format!("session:{sid}:"),
-            context: None,
+            context: Some(session_context(s, kind, sid, detail)),
         }));
     }
     let Some(pr) = detail
@@ -798,11 +990,7 @@ pub(super) fn event_fire(
     Ok(passes.map(|()| EventFire {
         reference: format!("pr:{}:{eid}", pr.id),
         subject: format!("pr:{}:", pr.id),
-        context: Some(format!(
-            "Started because pull request {} {}.",
-            pr.url,
-            pr_event_words(kind, &pr)
-        )),
+        context: Some(pr_context(kind, &pr)),
     }))
 }
 
@@ -823,6 +1011,31 @@ pub(super) fn needs_you(kind: &str, detail: Option<&str>) -> bool {
     kind != NEEDS_YOU
         || detail
             .is_some_and(|d| crate::service::operator_feed::BLOCKING_NOTIFICATIONS.contains(&d))
+}
+
+/// Whether a routine on `kind` reads timeline event `(sid, detail)` at all:
+/// a `needs_you` routine only a notification that waits on a person
+/// ([`needs_you`]); a `session_moved` routine only the copy on the row the
+/// session moved to, not the source row's (review w06-7): one move, one
+/// fire, and a host filter matches where it went.
+pub(super) fn reads_event(kind: &str, sid: i64, detail: Option<&str>) -> bool {
+    if kind == crate::service::move_session::EVENT_MOVED {
+        let to = detail
+            .and_then(|d| serde_json::from_str::<serde_json::Value>(d).ok())
+            .and_then(|v| v.get("to_session_id").and_then(serde_json::Value::as_i64));
+        // A detail with no target (an older row) is read as before.
+        return to.is_none_or(|to| to == sid);
+    }
+    needs_you(kind, detail)
+}
+
+/// Why [`reads_event`] reads past an event, for `explain`.
+pub(super) fn not_read_words(kind: &str) -> &'static str {
+    if kind == crate::service::move_session::EVENT_MOVED {
+        "it is the move's source row; the routine reads the row it moved to"
+    } else {
+        "it waits on nobody"
+    }
 }
 
 /// Whether fleet event `e` may fire `r`, and how: the routine's org (a
@@ -855,10 +1068,7 @@ pub(super) fn fleet_event_fire(
     Ok(passes.map(|()| EventFire {
         reference: format!("fleet:{}:{}", e.subject, e.id),
         subject: format!("fleet:{}:", e.subject),
-        context: Some(format!(
-            "Started because {}.",
-            e.detail.as_deref().unwrap_or(&e.kind.replace('_', " "))
-        )),
+        context: Some(fleet_context(e)),
     }))
 }
 
@@ -948,13 +1158,77 @@ pub(super) fn read_events(
     }
     for (eid, sid, detail) in s.events_of_kind_after(cursor, stored_kind(kind), EVENTS_PER_PASS)? {
         out.last = Some(eid);
-        if !needs_you(kind, detail.as_deref()) {
+        if !reads_event(kind, sid, detail.as_deref()) {
             continue;
         }
         let verdict = event_fire(s, r, kind, eid, sid, detail.as_deref())?;
         out.events.push((eid, Some(sid), verdict));
     }
     Ok(out)
+}
+
+/// The filtered reasons one folded decision quotes; the rest are counted.
+const FILTERED_QUOTED: usize = 3;
+
+/// The events a pass read but its filters keep from firing `r`: one
+/// `filtered` decision per session per pass (per pass for fleet events,
+/// which have none), not one per event, so a burst of "not its event" rows
+/// does not push the routine's real decisions out of its trace (review
+/// w06-6). Folded per session, not across sessions: a reader sees only
+/// the decisions about sessions they may see. One event keeps its own row;
+/// `explain` still judges each recent event live.
+fn record_filtered(
+    s: &Store,
+    r: &RoutineRow,
+    kind: &str,
+    filtered: &[(i64, Option<i64>, String)],
+    now: i64,
+) {
+    let mut sessions: Vec<Option<i64>> = filtered.iter().map(|(_, sid, _)| *sid).collect();
+    sessions.sort();
+    sessions.dedup();
+    for sid in sessions {
+        let group: Vec<&(i64, Option<i64>, String)> =
+            filtered.iter().filter(|(_, s, _)| *s == sid).collect();
+        let (reason, event_id) = match group.as_slice() {
+            [] => continue,
+            [(eid, _, why)] => (format!("{kind} #{eid}: {why}"), Some(*eid)),
+            many => {
+                let quoted: Vec<String> = many
+                    .iter()
+                    .take(FILTERED_QUOTED)
+                    .map(|(eid, _, why)| format!("#{eid}: {why}"))
+                    .collect();
+                let rest = many.len().saturating_sub(FILTERED_QUOTED);
+                let more = if rest > 0 {
+                    format!("; and {rest} more")
+                } else {
+                    String::new()
+                };
+                (
+                    format!(
+                        "{} {kind} events filtered: {}{more}",
+                        many.len(),
+                        quoted.join("; ")
+                    ),
+                    many.last().map(|(eid, _, _)| *eid),
+                )
+            }
+        };
+        decide(
+            s,
+            r,
+            Decision {
+                trigger: "event",
+                verdict: "filtered",
+                reason: Some(&reason),
+                event_id,
+                session_id: sid,
+                ..Decision::default()
+            },
+            now,
+        );
+    }
 }
 
 /// One event routine, under its lease: fire once per new event of its
@@ -993,24 +1267,14 @@ pub(super) async fn tick_event(deps: &Deps, r: &RoutineRow, now: i64) -> Result<
         };
         s.set_routine_event_cursor(r.id, last)?;
         let mut fires = Vec::new();
+        let mut filtered = Vec::new();
         for (eid, sid, verdict) in judged.events {
             match verdict {
                 Ok(f) => fires.push((eid, sid, f)),
-                Err(why) => decide(
-                    &s,
-                    &r,
-                    Decision {
-                        trigger: "event",
-                        verdict: "filtered",
-                        reason: Some(&format!("{kind} #{eid}: {why}")),
-                        event_id: Some(eid),
-                        session_id: sid,
-                        ..Decision::default()
-                    },
-                    now,
-                ),
+                Err(why) => filtered.push((eid, sid, why)),
             }
         }
+        record_filtered(&s, &r, &kind, &filtered, now);
         (r, kind, fires)
     };
     let r = &r;
