@@ -167,9 +167,17 @@ impl Fx {
         s.upsert_host("hosta").unwrap();
         s.upsert_host("hostb").unwrap();
         let pid = s.upsert_project("acme", "app", "/p/acme/app").unwrap();
+        // The token is alive unless a test says otherwise: an all-empty
+        // answer is checked against `/myself`.
+        let fake = FakeTransport::new();
+        fake.always(
+            Method::Get,
+            "/myself",
+            Ok(Response::json(200, &json!({"accountId": "me"}))),
+        );
         Fx {
             store: Arc::new(Mutex::new(s)),
-            fake: FakeTransport::new(),
+            fake,
             pid,
         }
     }
