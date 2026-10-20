@@ -82,6 +82,9 @@ export function sessionAgent(row: Pick<SessionRow, 'agent' | 'kind'>): SessionAg
 
 export interface SessionRow {
   id: number;
+  /** The extra fleet this row came from (multi-hub Phase 3), stamped by
+   *  `fleets.ts` and absent on the primary's own rows. Never from a hub. */
+  fleet?: string;
   tmux_name: string;
   host_alias: string;
   project_id: number | null;
@@ -1115,10 +1118,12 @@ export async function sendPrompt(
   hostAlias: string,
   tmuxName: string,
   prompt: string,
-  opts: { keys?: string } = {},
+  opts: { keys?: string; fleet?: string } = {},
 ): Promise<Result<void>> {
   return invokeCmd<void>('send_prompt', {
     args: { host_alias: hostAlias, tmux_name: tmuxName, prompt, keys: opts.keys ?? null },
+    // `fleet` (multi-hub): an extra fleet's session is written on its own hub.
+    ...(opts.fleet === undefined ? {} : { fleet: opts.fleet }),
   });
 }
 
@@ -1136,9 +1141,11 @@ export async function answerDialog(
   tmuxName: string,
   key: string,
   expect?: ExpectDialog,
+  fleet?: string,
 ): Promise<Result<void>> {
   return invokeCmd<void>('send_prompt', {
     args: { host_alias: hostAlias, tmux_name: tmuxName, prompt: '', keys: key, ...(expect ? { expect } : {}) },
+    ...(fleet === undefined ? {} : { fleet }),
   });
 }
 

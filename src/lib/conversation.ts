@@ -133,10 +133,9 @@ export function sessionConversation(
 }
 
 /** The session's conversations, newest first (backend caps `limit` at 500). */
-export function listConversations(sessionId: number, limit = 50): Promise<Result<ConversationSummary[]>> {
-  return invokeCmd<ConversationSummary[]>('session_conversations', {
-    args: { session_id: sessionId, limit },
-  });
+export function listConversations(sessionId: number, limit = 50, fleet?: string): Promise<Result<ConversationSummary[]>> {
+  const args = { session_id: sessionId, limit };
+  return invokeCmd<ConversationSummary[]>('session_conversations', fleet === undefined ? { args } : { args, fleet });
 }
 
 /** The file change of an Edit / MultiEdit / Write call (`session_tool_detail`). */
@@ -1171,8 +1170,9 @@ export interface ActivityProbe {
   pending_input: SessionRow['pending_input'];
 }
 
-export function sessionActivity(sessionId: number): Promise<Result<ActivityProbe>> {
-  return invokeCmd<ActivityProbe>('session_activity', { args: { session_id: sessionId } });
+export function sessionActivity(sessionId: number, fleet?: string): Promise<Result<ActivityProbe>> {
+  const args = { session_id: sessionId };
+  return invokeCmd<ActivityProbe>('session_activity', fleet === undefined ? { args } : { args, fleet });
 }
 
 /** Probe cadence while the indicator is live (working / sent / blocked). */

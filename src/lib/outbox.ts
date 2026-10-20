@@ -33,13 +33,18 @@ import { markNeedsReattach, type Attachment } from './attachments';
 import { withAttachments, tooLong } from './attach_prompt';
 import { recordAttachments } from './library';
 import { carriedCount, normalizePrompt, type Conversation } from './conversation';
+import { awayRow, fleetBlocked, fleetRows, keyTarget } from './fleets';
 
 export type OutboxState = 'waiting' | 'sending' | 'sent' | 'queued' | 'received' | 'failed';
 
 export interface OutboxTarget {
+  /** The session's `sessionKey` (fleets.ts): its id, or an extra fleet's
+   *  stand-in, so two fleets' sessions never share a line. */
   id: number;
   host_alias: string;
   tmux_name: string;
+  /** The extra fleet the session lives on (multi-hub); absent for the primary. */
+  fleet?: string;
 }
 
 /** The part of a session row the receipts read. */
@@ -78,8 +83,8 @@ export interface OutboxMessage {
 }
 
 export interface OutboxDeps {
-  send(host: string, tmux: string, body: string): Promise<Result<void>>;
-  upload(host: string, tmux: string, localPaths: string[]): Promise<Result<string[]>>;
+  send(host: string, tmux: string, body: string, fleet?: string): Promise<Result<void>>;
+  upload(host: string, tmux: string, localPaths: string[], fleet?: string): Promise<Result<string[]>>;
   row(sessionId: number): OutboxRow | undefined;
   /**
    * Why this client may not write to `sessionId` RIGHT NOW, or null.
@@ -301,6 +306,7 @@ export function createOutbox(deps: OutboxDeps) {
         target.host_alias,
         target.tmux_name,
         m.attachments.map((a) => a.path),
+        target.fleet,
       );
       if (mine !== epoch) return;
       if (!up.ok) {
@@ -331,7 +337,7 @@ export function createOutbox(deps: OutboxDeps) {
 
     const before = deps.row(sid);
     patch(sid, id, { turnSeqAtSend: before?.turn_seq ?? null });
-    const r = await deps.send(target.host_alias, target.tmux_name, body);
+    const r = await deps.send(target.host_alias, target.tmux_name, body, target.fleet);
     if (mine !== epoch) return;
     if (!r.ok) {
       patch(sid, id, { state: 'failed', error: r.error.message, retryable: true, acked: false });
@@ -451,13 +457,20 @@ export type Outbox = ReturnType<typeof createOutbox>;
  *  attachments through `upload_attachments`, and receipts come off the
  *  sessions store's row events. */
 export const outbox = createOutbox({
-  send: (host, tmux, body) => sendPrompt(host, tmux, body),
+  send: (host, tmux, body, fleet) => (fleet === undefined ? sendPrompt(host, tmux, body) : sendPrompt(host, tmux, body, { fleet })),
   // The access half, resolved from the id the queue carries. The pure form
   // rather than the store: a send runs from a `.finally`, not from a reactive
   // position, so the `get()` defaults are what is wanted — and a row the
   // client can no longer see fails closed (`UNKNOWN_SESSION_REASON`).
-  blocked: (id) => sessionIdActionBlocked(id, 'send_prompt'),
-  upload: async (host, tmux, localPaths) => {
+  // An extra fleet's session (a negative key): its own link, and its hub
+  // judges the write.
+  blocked: (id) => (id < 0 ? get(fleetBlocked)(keyTarget(id)?.fleet) : sessionIdActionBlocked(id, 'send_prompt')),
+  upload: async (host, tmux, localPaths, fleet) => {
+    // An upload is this machine's own copy onto the host, which an extra
+    // fleet's hub reaches and this machine may not: its composer offers no
+    // attachments, and none is sent there.
+    if (fleet !== undefined)
+      return { ok: false, error: { code: 'E_INVALID', message: 'Files cannot be attached to another fleet’s session yet.' } };
     const r = await invokeCmd<string[]>('upload_attachments', {
       args: { host_alias: host, session_name: tmux, local_paths: localPaths },
     });
@@ -465,7 +478,7 @@ export const outbox = createOutbox({
     if (r.ok) recordAttachments(host, tmux, r.value);
     return r;
   },
-  row: (id) => get(sessions).find((s) => s.id === id),
+  row: (id) => (id < 0 ? awayRow(id) : get(sessions).find((s) => s.id === id)),
 });
 
 // Only a session with messages out needs its row events read.
@@ -474,5 +487,17 @@ sessions.subscribe((rows) => {
   for (const key of Object.keys(out)) {
     const row = rows.find((s) => s.id === Number(key));
     if (row) outbox.observeRow(row.id, row);
+  }
+});
+
+// An extra fleet's sessions (negative keys) take their receipts off that
+// fleet's rows.
+fleetRows.subscribe(() => {
+  const out = get(outbox.store).msgs;
+  for (const key of Object.keys(out)) {
+    const id = Number(key);
+    if (id >= 0) continue;
+    const row = awayRow(id);
+    if (row) outbox.observeRow(id, row);
   }
 });

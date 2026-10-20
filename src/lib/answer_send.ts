@@ -13,6 +13,7 @@ import { hubConnection } from './hub_connection';
 import { sessionActionBlocked } from './share';
 import { answerDialog, type SessionRow } from './sessions';
 import { answerFingerprint, pendingInputFor, type AnswerView } from './pending_input';
+import { fleetBlocked } from './fleets';
 
 export type AnswerOutcome =
   | { ok: true }
@@ -27,7 +28,7 @@ export type AnswerOutcome =
  *  the row when handed no probe, and the row is precisely the stale value
  *  this check exists to distrust. */
 async function reread(session: SessionRow): Promise<{ view: AnswerView | null } | { error: string }> {
-  const r = await sessionActivity(session.id);
+  const r = await (session.fleet ? sessionActivity(session.id, session.fleet) : sessionActivity(session.id));
   if (!r.ok) return { error: r.error.message };
   if (!r.value) return { view: null };
   const fresh = pendingInputFor({
@@ -53,15 +54,22 @@ export async function sendAnswer(session: SessionRow, view: AnswerView, key: str
   if (answerFingerprint(fresh.view) !== answerFingerprint(view)) {
     return { ok: false, stale: 'The dialog changed — nothing was sent.' };
   }
-  const why = hubActionBlocked('send_prompt', get(hubStatus), get(hubConnection)) ?? sessionActionBlocked(session, 'answer_dialog');
+  // An extra fleet's session: its own link is the one to ask, and its hub
+  // judges the write (multi-hub Phase 3).
+  const why = session.fleet
+    ? get(fleetBlocked)(session.fleet)
+    : (hubActionBlocked('send_prompt', get(hubStatus), get(hubConnection)) ?? sessionActionBlocked(session, 'answer_dialog'));
   if (why !== null) return { ok: false, blocked: why };
-  const r = await answerDialog(session.host_alias, session.tmux_name, key, {
+  const expect = {
     kind: fresh.view.kind,
     question: fresh.view.question,
     options: fresh.view.options.map((o) => ({ n: o.n, label: o.label })),
     detail: fresh.view.detail,
     selected: fresh.view.options.find((o) => o.selected)?.n ?? null,
-  });
+  };
+  const r = await (session.fleet
+    ? answerDialog(session.host_alias, session.tmux_name, key, expect, session.fleet)
+    : answerDialog(session.host_alias, session.tmux_name, key, expect));
   if (r.ok) return { ok: true };
   // The backend's own check, made right before its press: the dialog moved
   // between this read and the key.

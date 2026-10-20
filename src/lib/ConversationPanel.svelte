@@ -98,6 +98,7 @@
     pickerCommand,
     modelShortLabel,
     sessionActivity,
+    splitMarker,
     indicatorFor,
     doingNow,
     hasPendingCall,
@@ -159,6 +160,16 @@
   import { hosts as hostRows } from './hosts';
   import { refIndex, refSegments, type ChatRef } from './chat_refs';
   import { fleetLine, parseFleetPrompt } from './fleet_events';
+  import {
+    fleetAddress,
+    fleetBlocked,
+    fleetRestartSession,
+    fleetRows,
+    fleets,
+    fleetSessionAt,
+    openFleetSession,
+    sessionKey,
+  } from './fleets';
 
   let {
     session,
@@ -258,6 +269,18 @@
   } = $props();
 
   const chatLook = $derived(look === 'chat');
+  // One id space (multi-hub Phase 3): an extra fleet's session carries its
+  // fleet, and every call this panel makes goes to that fleet's hub. What
+  // the panel keeps per session (draft, outbox, scroll, in-flight reads) is
+  // keyed by `sKey`, which never collides with the primary's own ids. Parts
+  // that cannot reach another hub yet (attachments, fork and rewind, send
+  // later, writing help, forms, devices, task results) stay off for it.
+  const sFleet = $derived(session.fleet);
+  const away = $derived(sFleet !== undefined);
+  const sKey = $derived(sessionKey(session));
+  /** Why nothing can be written to this extra fleet's session now (its link). */
+  const awayBlocked = $derived(away ? $fleetBlocked(sFleet) : null);
+  const AWAY_ONLY = 'Not available for another fleet’s session yet';
   /** What a reference in a sent message may name: only read in the chat
    *  look, and only when a host opens them. */
   const refs = $derived(chatLook && onOpenRef ? refIndex($sessions, $hostRows.map((h) => h.alias)) : null);
@@ -301,14 +324,14 @@
   // The session the current `draft` was loaded for. The remember effect keys
   // on this, not on the prop, so a session switch can never write the old
   // text into the new session's slot whatever order the effects run in.
-  let draftFor = $state<number | null>(null);
+  let draftFor = $state<number | null>(null); // a `sKey`
   // Only a bare key press (the press_enter chip) is sent directly; its
   // failure is the one the line above the chips reports.
   let sending = $state(false);
   let sendError = $state<string | null>(null);
   const outboxStore = outbox.store;
-  const outgoing = $derived($outboxStore.msgs[session.id] ?? []);
-  const lastSent = $derived($outboxStore.lastSent[session.id] ?? null);
+  const outgoing = $derived($outboxStore.msgs[sKey] ?? []);
+  const lastSent = $derived($outboxStore.lastSent[sKey] ?? null);
   let box: HTMLTextAreaElement | undefined = $state();
   // The chip row holds one line; whatever does not fit collapses behind
   // "More". Measured, not computed, since it depends on layout.
@@ -361,7 +384,7 @@
   const inFlight = new Map<number, number>();
   // Keyed on the id, not the row object: a store patch hands a new object
   // for the same session, which must neither reset nor refetch.
-  const sessionId = $derived(session.id);
+  const sessionId = $derived(sKey);
 
   // Conversations this session has run (header switcher), newest first.
   let conversations = $state<ConversationSummary[]>([]);
@@ -387,7 +410,7 @@
   // Two groups, each sorted running-first on its own. Sorting across them
   // would interleave exactly what the headings exist to keep apart.
   const bgTranscript = $derived(conv ? transcriptBackground(conv.turns) : []);
-  const bgFleet = $derived(fleetBackground($sessions, $tasks, session.id));
+  const bgFleet = $derived(away ? [] : fleetBackground($sessions, $tasks, session.id));
   const bgGroups = $derived(
     [
       { title: 'In this conversation', entries: bgTranscript },
@@ -399,10 +422,15 @@
   const bgEntry = $derived(bgEntries.find((e) => e.key === background) ?? null);
 
   // Paths in reply text open in the Files tab (MarkdownInline reads this).
-  setContext<OpenPathFn>(OPEN_PATH_CONTEXT, (path, line) => requestOpenPath(sessionId, path, line));
+  // An extra fleet's worktree is not this window's Files tab: no link there.
+  setContext<OpenPathFn>(OPEN_PATH_CONTEXT, (path, line) => {
+    if (!away) requestOpenPath(sessionId, path, line);
+  });
 
   async function load(opts: { poll?: boolean; older?: boolean } = {}) {
-    const id = session.id;
+    const id = sKey;
+    const hubId = session.id;
+    const from = sFleet;
     if (!session.claude_session_id) return;
     if (opts.poll && (inFlight.get(id) ?? 0) > 0) return;
     // Name the conversation explicitly (the current one too): the backend's
@@ -416,7 +444,7 @@
     inFlight.set(id, (inFlight.get(id) ?? 0) + 1);
     let r: Awaited<ReturnType<typeof sessionConversation>>;
     try {
-      r = await sessionConversation(id, turnsWanted, cid);
+      r = await (from ? sessionConversation(hubId, turnsWanted, cid, from) : sessionConversation(hubId, turnsWanted, cid));
     } finally {
       const left = (inFlight.get(id) ?? 1) - 1;
       if (left > 0) inFlight.set(id, left);
@@ -425,7 +453,7 @@
     // Drop a stale response: either a newer fetch has started, or the
     // session prop moved on while this one was in flight (or went: the panel
     // is torn down when the selection empties, its prop reading null).
-    if (mine !== seq || session?.id !== id) return;
+    if (mine !== seq || !session || sessionKey(session) !== id) return;
     loading = false;
     if (r.ok) {
       // Stamped on success only: a failed read on a quiet session is retried
@@ -460,10 +488,10 @@
   }
 
   async function loadConversations() {
-    const id = session.id;
+    const id = sKey;
     const mine = ++listSeq;
-    const r = await listConversations(id);
-    if (mine !== listSeq || session?.id !== id) return;
+    const r = await (sFleet ? listConversations(session.id, undefined, sFleet) : listConversations(session.id));
+    if (mine !== listSeq || !session || sessionKey(session) !== id) return;
     // A failed (or malformed) read keeps the list we had.
     if (r.ok && Array.isArray(r.value)) conversations = r.value;
   }
@@ -524,8 +552,8 @@
       newerAvailable = false;
       switchNotice = null;
       conversations = [];
-      draft = composerDrafts.get(session.id) ?? '';
-      draftFor = session.id;
+      draft = composerDrafts.get(sKey) ?? '';
+      draftFor = sKey;
       // What the person had seen before this visit (redesign 5.9): read
       // once, before this visit's own stamp moves `last_viewed_at`.
       seenAt = session.last_viewed_at ?? null;
@@ -758,7 +786,7 @@
   // A different dialog (another fingerprint) or another session shows.
   let goneAnswer = $state<{ sessionId: number; fp: string } | null>(null);
   const answerView = $derived(
-    shownAnswer !== null && goneAnswer !== null && goneAnswer.sessionId === session.id && goneAnswer.fp === answerFingerprint(shownAnswer)
+    shownAnswer !== null && goneAnswer !== null && goneAnswer.sessionId === sKey && goneAnswer.fp === answerFingerprint(shownAnswer)
       ? null
       : shownAnswer,
   );
@@ -767,12 +795,12 @@
     if (shownAnswer === null && untrack(() => goneAnswer) !== null) goneAnswer = null;
   });
   function dismissGoneAnswer() {
-    if (shownAnswer !== null) goneAnswer = { sessionId: session.id, fp: answerFingerprint(shownAnswer) };
+    if (shownAnswer !== null) goneAnswer = { sessionId: sKey, fp: answerFingerprint(shownAnswer) };
   }
 
   // Chat forms: the form this session's agent waits on. `closedForm` keeps
   // the last one for a line saying how it ended, once the row drops it.
-  const pendingForm = $derived(viewing === null ? (session.pending_form ?? null) : null);
+  const pendingForm = $derived(viewing === null && !away ? (session.pending_form ?? null) : null);
   let closedForm = $state<string | null>(null);
   // A form the row still lists but its card was dismissed (it could not be
   // read, or it ended and the row has not caught up).
@@ -780,11 +808,12 @@
   let lastFormId: string | null = null;
   let lastFormSessionId: number | null = null;
   $effect(() => {
-    const id = session.pending_form?.form_id ?? null;
-    if (session.id !== lastFormSessionId) {
+    // Forms are read from this window's own hub: none for another fleet's.
+    const id = away ? null : (session.pending_form?.form_id ?? null);
+    if (sKey !== lastFormSessionId) {
       // This panel is one instance across sessions: a different session is
       // not a form that closed, and its predecessor's line does not follow.
-      lastFormSessionId = session.id;
+      lastFormSessionId = sKey;
       closedForm = null;
       lastFormId = id;
       return;
@@ -812,7 +841,7 @@
   // The loaders (redesign step 5.13): a session this window
   // just started shows the Pulse sequence until its agent reports a status;
   // a working agent gets the Atom beside what it is doing.
-  const starting = $derived($startingSessions.has(session.id));
+  const starting = $derived(!away && $startingSessions.has(session.id));
   const thinking = $derived(
     indicator?.kind === 'working'
       ? thinkingLabel(doing ? { label: doing.label, since: doing.sinceMs !== null ? formatDuration(doing.sinceMs) : null } : null)
@@ -850,6 +879,8 @@
   // already; Undo takes you back to it, it cannot unsend a key.
   function afterAnswer(label: string) {
     const from = session;
+    // The inbox is this window's own fleet: an answer elsewhere stays put.
+    if (away) return;
     const next = nextInInbox($inboxQueue, from.id);
     if (!next) return;
     const verb = /^(yes|approve|allow)\b/i.test(label.trim()) ? 'Approved' : `Answered “${label}”`;
@@ -964,7 +995,7 @@
   // ⌘K found this session by what was said in it: Find opens on the query.
   $effect(() => {
     const req = $conversationFindRequest;
-    if (!req || req.sessionId !== session.id || !visible || !threadShown) return;
+    if (!req || req.sessionId !== sKey || !visible || !threadShown) return;
     conversationFindRequest.set(null);
     findQuery = req.query;
     findIndex = 0;
@@ -1148,15 +1179,15 @@
   async function probeNow() {
     if (probing) return;
     probing = true;
-    const id = session.id;
+    const id = sKey;
     const mine = ++probeSeq;
     let r: Awaited<ReturnType<typeof sessionActivity>>;
     try {
-      r = await sessionActivity(id);
+      r = await (sFleet ? sessionActivity(session.id, sFleet) : sessionActivity(session.id));
     } finally {
       probing = false;
     }
-    if (session?.id !== id || mine !== probeSeq) return;
+    if (!session || sessionKey(session) !== id || mine !== probeSeq) return;
     if (!r.ok) {
       // A permanent refusal stops the loop instead of being repeated every
       // 2 s per open panel for as long as the panel is open. A transient one
@@ -1227,7 +1258,7 @@
   const canPrompt = $derived(!hasNoPane(session));
   // A reply's cards (rich_blocks.ts) act by filling this composer, so they
   // act only where it is drawn and holds the conversation on screen.
-  const cardsAct = $derived(showComposer && canPrompt && bgEntry === null && viewing === null);
+  const cardsAct = $derived(showComposer && canPrompt && bgEntry === null && viewing === null && !away);
 
   // The result of the task this session works on (design 2026-10-13, D6):
   // the reply whose done marker it was read from draws as the result panel.
@@ -1245,7 +1276,8 @@
     if (mine !== resultSeq) return;
     taskResult = r.ok ? r.value : null;
   }
-  const workLinkId = $derived(session.work?.link_id ?? null);
+  // A work link is this window's own fleet's (Work view): none for another's.
+  const workLinkId = $derived(away ? null : (session.work?.link_id ?? null));
   $effect(() => {
     const id = session.id;
     const linked = workLinkId !== null;
@@ -1270,13 +1302,13 @@
   // end. It is never sent from here.
   $effect(() => {
     const ins = $composerInsert;
-    if (!ins || ins.sessionId !== session.id) return;
+    if (!ins || ins.sessionId !== sKey) return;
     untrack(() => {
       // The store keeps the last insert: on a later mount it must not undo
       // what was typed since — only a draft still equal to it is adopted.
-      if (composerDrafts.get(session.id) !== ins.draft) return;
+      if (composerDrafts.get(sKey) !== ins.draft) return;
       draft = ins.draft;
-      draftFor = session.id;
+      draftFor = sKey;
       void tick().then(() => {
         box?.focus();
         box?.setSelectionRange(draft.length, draft.length);
@@ -1330,7 +1362,7 @@
   async function stopTurn() {
     if (stopping || writeBlocked !== null) return;
     stopping = true;
-    const r = await sendPrompt(session.host_alias, session.tmux_name, '', { keys: STOP_KEY });
+    const r = await sendPrompt(session.host_alias, session.tmux_name, '', { keys: STOP_KEY, ...(sFleet ? { fleet: sFleet } : {}) });
     stopping = false;
     if (!r.ok) sendError = r.error.message;
   }
@@ -1367,15 +1399,20 @@
   // `send_prompt` is the action to ask about: it is `drive` in
   // `share.ts::SESSION_TIER`, so a `drive` grantee keeps the whole composer
   // and a `watch` grantee loses it.
-  const shareBlocked = $derived($sessionBlocked(session, 'send_prompt'));
+  // An extra fleet's session: no access gate here (that hub answers each
+  // write itself), and no tray: an upload is this machine's own copy onto a
+  // host only that fleet's hub reaches.
+  const shareBlocked = $derived(away ? null : $sessionBlocked(session, 'send_prompt'));
+  const attachBlocked = $derived(away ? AWAY_ONLY : shareBlocked);
   /** The grant level this person holds on someone else's session, or null
    *  for their own (gap plan G4.2: the answer card shows to a recipient). */
   const recipientLevel = $derived.by(() => {
+    if (away) return null;
     const a = $accessOf(session);
     return isSharedAccess(a) ? a : null;
   });
   const writeBlocked = $derived(
-    hubActionBlocked('send_prompt', $hubStatus, $hubConnection) ?? shareBlocked,
+    away ? awayBlocked : (hubActionBlocked('send_prompt', $hubStatus, $hubConnection) ?? shareBlocked),
   );
   /**
    * The reply actions' own question, which is a DIFFERENT one: Fork, Rewind
@@ -1389,7 +1426,7 @@
    * handed down, because it needs the session ROW and that component is given
    * only an id, a host and a tmux name.
    */
-  const rewindShareBlocked = $derived($sessionBlocked(session, 'rewind_conversation'));
+  const rewindShareBlocked = $derived(away ? AWAY_ONLY : $sessionBlocked(session, 'rewind_conversation'));
   const rewindBlocked = $derived(
     hubActionBlocked('rewind_conversation', $hubStatus, $hubConnection) ?? rewindShareBlocked,
   );
@@ -1424,7 +1461,7 @@
   let effortSent = $state<Record<number, string>>({});
   const currentModel = $derived(modelShortLabel(session.model));
   const currentEffort = $derived(
-    (modelProfile.mode === 'command' ? effortSent[session.id] : undefined) ?? session.effort_level ?? '',
+    (modelProfile.mode === 'command' ? effortSent[sKey] : undefined) ?? session.effort_level ?? '',
   );
   // Each picker sends `/model` or `/effort` through the outbox, or restarts
   // the pane, so it is a write like any other.
@@ -1446,7 +1483,7 @@
     const line = pickerCommand(cmd, value);
     if (cmd === 'model') el.value = '';
     if (!line) return;
-    if (cmd === 'effort') effortSent = { ...effortSent, [session.id]: value };
+    if (cmd === 'effort') effortSent = { ...effortSent, [sKey]: value };
     void sendText(line);
   }
   async function confirmRelaunch() {
@@ -1455,14 +1492,18 @@
     if (!pick || relaunching) return;
     // A relaunch is `restart_session` (the `own` tier), not the
     // `send_prompt` a `/model` line is, so it has its own gate.
-    const blocked =
-      hubActionBlocked('restart_session', $hubStatus, $hubConnection) ?? $sessionBlocked(session, 'restart_session');
+    const blocked = away
+      ? awayBlocked
+      : (hubActionBlocked('restart_session', $hubStatus, $hubConnection) ?? $sessionBlocked(session, 'restart_session'));
     if (blocked !== null) {
       pushToast({ kind: 'error', message: blocked });
       return;
     }
     relaunching = true;
-    const r = await restartSession(session.host_alias, session.tmux_name, undefined, { [pick.cmd]: pick.value });
+    const launch = { [pick.cmd]: pick.value };
+    const r = sFleet
+      ? await fleetRestartSession(sFleet, session, launch)
+      : await restartSession(session.host_alias, session.tmux_name, undefined, launch);
     relaunching = false;
     if (!r.ok) {
       pushToast({ kind: 'error', message: `Could not relaunch ${agentName}: ${r.error.message}` });
@@ -1583,10 +1624,11 @@
   // `$name`, not `/name`, so only its built-ins are offered.
   const builtinCmds = $derived(slashCommandsFor(agent));
   $effect(() => {
-    if (!slashDraft || agent === 'codex') return;
+    // Another fleet's project is not read from here: its built-ins only.
+    if (!slashDraft || agent === 'codex' || away) return;
     const id = session.id;
     void projectSkills(id).then((list) => {
-      if (session.id === id) projectCmds = list;
+      if (session.id === id && !session.fleet) projectCmds = list;
     });
   });
   const slashMatches = $derived(
@@ -1772,7 +1814,7 @@
     // runs (the outbox applies the same rule when it builds the body).
     const prefix = kind === 'prompt' ? promptPrefix : null;
     outbox.enqueue(
-      { id: session.id, host_alias: session.host_alias, tmux_name: session.tmux_name },
+      { id: sKey, host_alias: session.host_alias, tmux_name: session.tmux_name, ...(sFleet ? { fleet: sFleet } : {}) },
       {
         kind,
         text,
@@ -1814,17 +1856,19 @@
     if (sending || writeBlocked !== null) return;
     sending = true;
     sendError = null;
-    const id = session.id;
-    const r = await sendPrompt(session.host_alias, session.tmux_name, '');
+    const id = sKey;
+    const r = await (sFleet
+      ? sendPrompt(session.host_alias, session.tmux_name, '', { fleet: sFleet })
+      : sendPrompt(session.host_alias, session.tmux_name, ''));
     sending = false;
-    if (session?.id !== id) return;
+    if (!session || sessionKey(session) !== id) return;
     if (!r.ok) sendError = r.error.message;
   }
 
   /** Take a failed message back into the box to change it. Text the user
    *  had started meanwhile is kept, after it. */
   function editOutgoing(id: string) {
-    const back = outbox.edit(session.id, id);
+    const back = outbox.edit(sKey, id);
     if (!back) return;
     draft = draft.trim() ? `${back.text}\n\n${draft}` : back.text;
     attachments = [...attachments, ...back.attachments];
@@ -2028,7 +2072,7 @@
   // session shared at `answer` or `drive` has it too; a watcher does not.
   let helpOpen = $state(false);
   /** Writing help's "Context help" toggle, off by default. */
-  const helpOn = $derived(settingBool($fleetSettings, SETTING_KEYS.workContextHelp));
+  const helpOn = $derived(!away && settingBool($fleetSettings, SETTING_KEYS.workContextHelp));
   let helpCommands = $state<string[]>([]);
   const helpBlocked = $derived(
     hubActionBlocked('session_context_help', $hubStatus, $hubConnection) ??
@@ -2047,7 +2091,7 @@
   // on the person's "Use this", never sent. `session_prompt_tune`, routed.
   let tuneOpen = $state(false);
   /** Writing help's "Prompt tuner" toggle, off by default. */
-  const tuneOn = $derived(settingBool($fleetSettings, SETTING_KEYS.workPromptTune));
+  const tuneOn = $derived(!away && settingBool($fleetSettings, SETTING_KEYS.workPromptTune));
   const tuneBlocked = $derived(
     hubActionBlocked('session_prompt_tune', $hubStatus, $hubConnection) ??
       $sessionBlocked(session, 'session_prompt_tune'),
@@ -2074,7 +2118,9 @@
   const sendLaterBlocked = $derived(
     viewing !== null
       ? 'Viewing an earlier conversation — go back to current to send.'
-      : (hubActionBlocked('queue_prompt', $hubStatus, $hubConnection) ?? $sessionBlocked(session, 'queue_prompt')),
+      : away
+        ? AWAY_ONLY
+        : (hubActionBlocked('queue_prompt', $hubStatus, $hubConnection) ?? $sessionBlocked(session, 'queue_prompt')),
   );
   const sendLaterWhy = $derived(
     sendLaterBlocked ??
@@ -2088,9 +2134,10 @@
    *  and neither can clear the other's state. */
   let dragOverShell = $state(false);
   let shellEl = $state<HTMLDivElement | null>(null);
-  // `shareBlocked`, not `writeBlocked`: staging a file is local, and an
-  // offline hub link is no reason to refuse the drop (see the gate above).
-  const dragging = $derived(shareBlocked === null && (dragDepth > 0 || dragOverShell));
+  // `attachBlocked` (access, and no tray for another fleet's session), not
+  // `writeBlocked`: staging a file is local, and an offline hub link is no
+  // reason to refuse the drop (see the gate above).
+  const dragging = $derived(attachBlocked === null && (dragDepth > 0 || dragOverShell));
 
   /**
    * Every sentence the composer owes the user about attaching: the
@@ -2116,7 +2163,7 @@
     // accepted into the tray is a file `outbox.ts` scps onto the owner's host
     // with `upload_attachments` — no hub in the path — the moment anything is
     // sent, so this is the gate, not the Send button (see `writeBlocked`).
-    if (shareBlocked !== null) return;
+    if (attachBlocked !== null) return;
     const { next, rejected } = addFiles(attachments, picked);
     // Appended, not replaced: two gestures that each rejected a file owe the
     // user two sentences. `attachNotes` dedupes, so a repeat says it once,
@@ -2158,7 +2205,7 @@
   async function pickFiles() {
     // The button is disabled; this is the keyboard/programmatic path, kept
     // from opening a native dialog whose result `attach` would then drop.
-    if (shareBlocked !== null) return;
+    if (attachBlocked !== null) return;
     const r = await invokeCmd<PickedFile[]>('pick_attachments', {});
     if (r.ok) await attach(r.value ?? []);
     else attachErrors = [r.error.message];
@@ -2224,7 +2271,7 @@
     if (paths.length === 0) return;
     // Ahead of `attachment_describe`: no veil was drawn for this drop (see
     // `dragging`), so nothing should measure the files either.
-    if (shareBlocked !== null) return;
+    if (attachBlocked !== null) return;
     // These paths are already on the Rust allow-list — `lib.rs` recorded them
     // from this very event before the webview heard about it.
     const real = paths.filter((p) => p !== '');
@@ -2275,7 +2322,7 @@
     // A file paste is an attach by another gesture. Returning before
     // `preventDefault` leaves the event alone, which is right: the box is
     // disabled in this state and a file paste puts no text in it anyway.
-    if (shareBlocked !== null) return;
+    if (attachBlocked !== null) return;
     // A rich-text paste carries both; the text half wins.
     if (dt.getData('text/plain').trim().length > 0) return;
     e.preventDefault();
@@ -2403,7 +2450,7 @@
     </div>
   {/if}
   <!-- The debug devices this session holds or waits for; nothing when none. -->
-  <SessionDevices {session} />
+  {#if !away}<SessionDevices {session} />{/if}
   <div class="thread-area">
   {#if bgEntry}
     <BackgroundDetail entry={bgEntry} onBack={() => (background = null)} onOpenSession={goToSession} />
@@ -2522,10 +2569,24 @@
                   </ul>
                 </details>
               {:else if turn.prompt !== null}
-                {@const long = isLongPrompt(turn.prompt)}
+                <!-- The hub's untrusted-sender line names who wrote it: a
+                     federation address reads by the fleet this window knows
+                     it as, and opens there when that fleet shows it. -->
+                {@const marked = splitMarker(turn.prompt)}
+                {@const long = isLongPrompt(marked.text)}
                 <div class="prompt" data-testid="conv-prompt">
                   <div class="prompt-head">
-                    <span class="who">You</span>
+                    {#if marked.from}
+                      {@const sender = fleetAddress(marked.from, $fleets)}
+                      {@const at = fleetSessionAt(marked.from, $fleets, $fleetRows)}
+                      <span class="who" data-testid="conv-prompt-from"
+                        >from {#if at}<button type="button" class="linkish" onclick={() => openFleetSession(at.fleet, at.id)}
+                            >{sender.text}</button
+                          >{:else}{sender.text}{/if} · untrusted</span
+                      >
+                    {:else}
+                      <span class="who">You</span>
+                    {/if}
                     <span class="head-right">
                       <span class="copy-slot"><CopyButton text={turn.prompt} label="Copy prompt" /></span>
                       {#if turn.at}
@@ -2539,7 +2600,7 @@
                     class="prompt-text"
                     class:clamped={long && !expanded.has(turnKey(turn, i))}
                     style:--clamp-lines={PROMPT_CLAMP_LINES}
-                  >{@render promptBody(turn.prompt)}</div>
+                  >{@render promptBody(marked.text)}</div>
                   {#if long}
                     <button type="button" class="linkish" data-testid="conv-prompt-toggle" onclick={() => togglePrompt(turnKey(turn, i))}
                       >{expanded.has(turnKey(turn, i)) ? 'Show less' : 'Show more'}</button
@@ -2593,7 +2654,7 @@
                       >
                       <div class="tools-body">
                         {#each g.tools as line, k (k)}
-                          <ToolLine {line} sessionId={session.id} claudeSessionId={detailCid} {nowMs} live={turnLive} />
+                          <ToolLine {line} sessionId={session.id} fleet={sFleet} claudeSessionId={detailCid} {nowMs} live={turnLive} />
                         {/each}
                       </div>
                     </details>
@@ -2699,10 +2760,10 @@
                           index={i}
                           truncated={conv.truncated}
                           text={replyText}
-                          sessionId={session.id}
+                          sessionId={sKey}
                           hostAlias={session.host_alias}
                           tmuxName={session.tmux_name}
-                          supported={viewing === null}
+                          supported={viewing === null && !away}
                           accessBlocked={rewindShareBlocked}
                           onFork={(anchor) => openForkSheet(anchor)}
                         />
@@ -2760,11 +2821,11 @@
                         data-testid="conv-outgoing-retry"
                         disabled={writeBlocked !== null}
                         title={writeBlocked ?? ''}
-                        onclick={() => writeBlocked === null && outbox.retry(session.id, m.id)}
+                        onclick={() => writeBlocked === null && outbox.retry(sKey, m.id)}
                         >Retry</button>
                     {/if}
                     <button type="button" class="linkish" data-testid="conv-outgoing-edit" onclick={() => editOutgoing(m.id)}>Edit</button>
-                    <button type="button" class="linkish" data-testid="conv-outgoing-discard" onclick={() => outbox.discard(session.id, m.id)}>Discard</button>
+                    <button type="button" class="linkish" data-testid="conv-outgoing-discard" onclick={() => outbox.discard(sKey, m.id)}>Discard</button>
                   </span>
                 {/if}
               </div>
@@ -2849,7 +2910,7 @@
         {#if closedForm && !pendingForm}
           <FormCard formId={closedForm} sessionName={session.friendly_name ?? session.tmux_name} blocked={null} closed ondismiss={() => (closedForm = null)} />
         {/if}
-        <ChatWizards {session} {agentName} live={viewing === null} />
+        {#if !away}<ChatWizards {session} {agentName} live={viewing === null} />{/if}
       </div>
     </div>
     {#if turnEntries.length > 1 || !atBottom}
@@ -3156,8 +3217,8 @@
             class="btn btn--icon btn--quiet"
             data-testid="conv-attach-button"
             aria-label="Attach files"
-            title={shareBlocked ?? 'Attach files'}
-            disabled={shareBlocked !== null}
+            title={attachBlocked ?? 'Attach files'}
+            disabled={attachBlocked !== null}
             onclick={pickFiles}>⌾</button>
           <select
             class="composer-pick"

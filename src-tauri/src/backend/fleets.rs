@@ -119,6 +119,10 @@ pub const FLEET_SCOPED: &[&str] = &[
     "catalog_list_catalogs",
     // Phase 3b: who this device is on each fleet.
     "my_profile",
+    // Phase 3: an extra fleet's session in the full conversation panel.
+    "session_conversations",
+    "session_activity",
+    "restart_session",
 ];
 
 /// Colours offered to a new fleet, in order; the first one no fleet uses is
