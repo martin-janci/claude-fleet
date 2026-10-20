@@ -143,3 +143,24 @@ describe('FleetSessionView', () => {
     expect(screen.getByTestId('fleet-session-prompt').textContent).toBe('second');
   });
 });
+
+describe('FleetSessionView: viewed stamps (review w01-8)', () => {
+  const touches = () => inv.mock.calls.filter(([cmd]) => cmd === 'touch_session_viewed').length;
+
+  it('stamps again when a turn ends while it is on screen, and not while the window is hidden', async () => {
+    const seen = { ...session, last_viewed_at: 10, last_stop_at: 5 } as SessionRow;
+    const { rerender } = render(FleetSessionView, { props: { fleet: company, session: seen } });
+    await tick();
+    expect(touches()).toBe(0);
+    await rerender({ fleet: company, session: { ...seen, last_stop_at: 20 } });
+    await vi.waitFor(() => expect(touches()).toBe(1));
+    const hidden = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden');
+    try {
+      await rerender({ fleet: company, session: { ...seen, last_stop_at: 30 } });
+      await tick();
+      expect(touches()).toBe(1);
+    } finally {
+      hidden.mockRestore();
+    }
+  });
+});
