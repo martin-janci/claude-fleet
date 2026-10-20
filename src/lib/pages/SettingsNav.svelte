@@ -294,7 +294,7 @@
     padding: 0 0.35rem;
     border-radius: var(--radius-pill);
     background: var(--accent);
-    color: var(--bg);
+    color: var(--accent-fg);
     font-size: var(--text-2xs);
   }
   .nl {

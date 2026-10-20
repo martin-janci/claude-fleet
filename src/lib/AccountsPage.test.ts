@@ -6,6 +6,7 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import AccountsPage from './AccountsPage.svelte';
+import { expectAccessible } from './a11y_check';
 import { get } from 'svelte/store';
 import { hostsViewRequest } from './app_views';
 import { accountsPageRequest, accountsPausedRequest, openPausedSessions } from './account_pill';
@@ -169,7 +170,7 @@ describe('AccountsPage', () => {
     await waitFor(() => expect(screen.getByTestId('account-missing')).toBeTruthy());
     expect(screen.queryByTestId('account-detail')).toBeNull();
     for (const c of screen.getAllByTestId('account-card')) {
-      expect(c.getAttribute('aria-selected')).toBe('false');
+      expect(c.getAttribute('aria-pressed')).toBe('false');
     }
     // Picking one by hand afterwards shows it.
     await fireEvent.click(screen.getAllByTestId('account-card')[0]);
@@ -294,6 +295,20 @@ describe('AccountsPage: spend, routines and paused sessions (4.1 / 4.2)', () => 
     expect(inv.mock.calls.find((c) => c[0] === 'restart_session')?.[1]).toEqual({
       args: { host_alias: 'mefistos', name: 'admin-1', profile: 'work' },
     });
+  });
+
+  it('review w19-2: the paused actions are buttons outside the pick, and the list passes axe', async () => {
+    accountUsage.set(atLimit());
+    const { container } = render(AccountsPage, props);
+    const paused = await screen.findByTestId('account-paused');
+    expect(container.querySelector('[role="listbox"], [role="option"]')).toBeNull();
+    expect(paused.closest('button')).toBeNull();
+    const card = paused.closest('li')!;
+    const pick = within(card).getByTestId('account-card');
+    expect(pick.tagName).toBe('BUTTON');
+    expect(pick.contains(paused)).toBe(false);
+    expect(within(paused).getAllByRole('button').length).toBeGreaterThan(0);
+    await expectAccessible(container);
   });
 
   it('the limit-hit toast\'s Show paused sessions opens the account narrowed to its paused sessions (G4.8)', async () => {

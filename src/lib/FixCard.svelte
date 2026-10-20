@@ -83,7 +83,16 @@
       {/if}
     </div>
   {/if}
-  {#if status}<p class="status" class:warn={finding.state === 'apply_failed'} data-testid="fix-card-status">{status}</p>{/if}
+  <!-- Review w19-10: the progress is announced; a failed fix says its error
+       once, in the alert, not again in the status line. -->
+  {#if status && !(failure && finding.state === 'apply_failed')}<p
+      class="status"
+      class:warn={finding.state === 'apply_failed'}
+      role="status"
+      data-testid="fix-card-status"
+    >
+      {status}
+    </p>{/if}
   {#if failure}<p class="status warn" role="alert" data-testid="fix-card-failure">{failure}</p>{/if}
   {#if autoLine}<p class="meta" data-testid="fix-card-auto">{autoLine}</p>{/if}
   <div class="actions">

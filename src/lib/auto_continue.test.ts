@@ -7,7 +7,7 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 
 import { invoke } from '@tauri-apps/api/core';
 import AutoContinueBar from './AutoContinueBar.svelte';
-import { countdown, liveCountdown, type AutoContinueView, type PendingPick } from './auto_continue';
+import { countdown, liveCountdown, spokenCountdown, type AutoContinueView, type PendingPick } from './auto_continue';
 
 const NOW = Date.parse('2026-10-11T12:00:00Z');
 const NOW_S = NOW / 1000;
@@ -49,6 +49,17 @@ describe('countdown', () => {
   });
 });
 
+describe('spokenCountdown', () => {
+  it('changes at whole minutes and once at ten seconds', () => {
+    expect(spokenCountdown(3 * 60_000)).toBe('about 3 minutes');
+    expect(spokenCountdown(2 * 60_000 + 1_000)).toBe('about 3 minutes');
+    expect(spokenCountdown(60_000)).toBe('under a minute');
+    expect(spokenCountdown(11_000)).toBe('under a minute');
+    expect(spokenCountdown(10_000)).toBe('a few seconds');
+    expect(spokenCountdown(-5)).toBe('a few seconds');
+  });
+});
+
 describe('AutoContinueBar', () => {
   const mocked = vi.mocked(invoke);
   let state: AutoContinueView;
@@ -74,6 +85,15 @@ describe('AutoContinueBar', () => {
     render(AutoContinueBar, { sessionId: 7, turnSeq: 4, edits: 0, onSend });
     await vi.advanceTimersByTimeAsync(0);
     expect(screen.getByTestId('auto-continue-clock').textContent).toBe('1:00');
+    // Review w19-1: the live region is not the ticking clock.
+    const spoken = screen.getByTestId('auto-continue-spoken');
+    expect(spoken.getAttribute('role')).toBe('status');
+    expect(screen.getByTestId('auto-continue').getAttribute('role')).toBeNull();
+    expect(screen.getByTestId('auto-continue-clock').closest('[aria-hidden="true"]')).not.toBeNull();
+    const first = spoken.textContent;
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(screen.getByTestId('auto-continue-clock').textContent).toBe('0:57');
+    expect(spoken.textContent).toBe(first);
     await vi.advanceTimersByTimeAsync(120_000);
     expect(onSend).not.toHaveBeenCalled();
   });
