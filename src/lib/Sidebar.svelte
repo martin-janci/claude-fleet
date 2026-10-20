@@ -54,7 +54,7 @@
   import FleetSessionGroups from './FleetSessionGroups.svelte';
   import { showPrimary, fleetInboxCount, multiFleet } from './fleets';
   import PrimaryFleetHeader from './PrimaryFleetHeader.svelte';
-  import { anchor, primaryFleetOpen, primaryHiddenByAnchor } from './fleet_filters';
+  import { anchor, primaryFleetOpen, primaryHiddenByAnchor, showPrimaryList } from './fleet_filters';
   import FleetInbox from './FleetInbox.svelte';
   import { failingCount, loadFailing, loadNextRoutine, nextRoutine, nextRoutineLine } from './routines';
   import { loadWaitingMissions, waitingMissionCount } from './mission_waits';
@@ -537,6 +537,21 @@
     for (const s of pinnedRows) ids.add(s.id);
     return ids;
   });
+  // The primary's rows another fleet's Machine / Org choice hides, counted
+  // as an extra fleet's are (`fleetListView().hiddenByAnchor`): the rows
+  // that pass the filters every fleet shares — Background agents, Last
+  // active, Agent, Needs you, Search — whatever their machine or org.
+  const primaryHiddenCount = $derived.by(() => {
+    const shared = triagePredicate(null);
+    const q = searchQuery;
+    return $sessions.filter(
+      (s) =>
+        s.kind !== 'external' &&
+        s.status !== 'lost' &&
+        sessionVisible(s, 'all', $showBgAgents, shared, null) &&
+        sessionMatchesSearch(s, q, projectLabelOf(s.project_id)),
+    ).length;
+  });
   $effect(() => {
     const vis = visibleIds;
     const cur = untrack(() => selectedIds);
@@ -768,6 +783,9 @@
       if (!sess) return;
       revealedId = sess.id;
       if ($effectiveHostFilter !== 'all' && $effectiveHostFilter !== sess.host_alias) hostFilter.set('all');
+      // An extra fleet's Machine / Org choice, or the primary's fold, would
+      // keep the whole list the row is in off screen.
+      if (primaryHiddenByAnchor($anchor) || ($multiFleet && !$primaryFleetOpen)) showPrimaryList();
       expandAndScrollTo(sess);
     });
   });
@@ -1781,10 +1799,13 @@
     {#if $multiFleet && $showPrimary}
       <PrimaryFleetHeader
         count={visibleIds.size + sharedWithMe.length}
-        hiddenCount={$sessions.filter((s) => s.kind !== 'external' && s.status !== 'lost').length}
+        hiddenCount={primaryHiddenCount}
+        focused={!!focus}
       />
     {/if}
-    {#if $showPrimary && !primaryHiddenByAnchor($anchor) && (!$multiFleet || $primaryFleetOpen)}
+    <!-- A focus ("Showing only X") is past every filter, the anchor and the
+         fold included: its one row is in this list. -->
+    {#if $showPrimary && (focus || (!primaryHiddenByAnchor($anchor) && (!$multiFleet || $primaryFleetOpen)))}
     {#if pinnedRows.length > 0}
       <div class="orphan-section pinned-section" data-testid="pinned-sessions">
         <button
@@ -2250,7 +2271,7 @@
     {/if}
     <!-- Extra fleets (multi-hub design): each fleet the filter shows, under
          its own badge, after this window's own list. -->
-    <FleetSessionGroups search={searchQuery} {recency} {needsYouOnly} />
+    <FleetSessionGroups search={searchQuery} {recency} {needsYouOnly} focused={!!focus} />
   </div>
   {/if}
 

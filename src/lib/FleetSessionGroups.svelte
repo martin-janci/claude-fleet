@@ -39,15 +39,16 @@
   import { agentFilter } from './session_scope';
   import type { Recency } from './session_status';
   import { scopes as primaryScopes } from './orgs';
-  import { readPref, writePref } from './prefs';
   import {
     anchor,
     anchorFacetWord,
     anchorText,
     clearMachineOrg,
     fleetListView,
+    fleetGroupsFolded,
     fleetScopesOf,
     scopeLabelIn,
+    toggleFleetGroupFold as toggleFold,
   } from './fleet_filters';
   import { fleets, fleetRows, PRIMARY } from './fleets';
   import { copyText } from './clipboard';
@@ -60,12 +61,16 @@
     search = '',
     recency = 'all',
     needsYouOnly = false,
+    focused = false,
   }: {
     /** The Sessions list's own search, Last active and Needs you (Sidebar
      *  state, not stores), applied to every fleet alike. */
     search?: string;
     recency?: Recency;
     needsYouOnly?: boolean;
+    /** The primary list is narrowed to one session (`session_focus.ts`):
+     *  no extra fleet's rows show beside it. */
+    focused?: boolean;
   } = $props();
 
   // A coarse clock for Last active, as the primary's list keeps.
@@ -75,13 +80,9 @@
     return () => clearInterval(t);
   });
 
-  // Folded fleets, per viewer.
-  const isFolds = (v: unknown): v is string[] => Array.isArray(v) && v.every((x) => typeof x === 'string');
-  let folded = $state<string[]>(readPref('fleet-groups-folded', [], isFolds));
-  function toggleFold(id: string) {
-    folded = folded.includes(id) ? folded.filter((x) => x !== id) : [...folded, id];
-    writePref('fleet-groups-folded', folded);
-  }
+  // Folded fleets, per viewer (`fleetGroupsFolded`: a removed fleet's fold
+  // goes with it).
+  const folded = $derived($fleetGroupsFolded);
 
   /** The anchor in words, for the notice on a fleet it hides. */
   const anchorWords = $derived.by(() => {
@@ -167,7 +168,7 @@
   }
 </script>
 
-{#each $visibleExtraFleets as { fleet: f, rows } (f.id)}
+{#each focused ? [] : $visibleExtraFleets as { fleet: f, rows } (f.id)}
   {@const cw = connectionWord(f)}
   {@const needs = $fleetNeedsIds.get(f.id) ?? NONE}
   {@const view = fleetListView(f.id, rows, {

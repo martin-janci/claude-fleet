@@ -33,6 +33,7 @@ import { UNKNOWN_SESSION_REASON } from './share';
 import { hubConnection } from './hub_connection';
 import { ADMIN, GMAIL, NOW, fleetHosts, fleetSessions, fleetUsage, host, session } from './hosts_fixture';
 import { viewHostSessions } from './host_actions';
+import { fleetHostFilter, fleetScopeFilter } from './fleet_filters';
 import { hostFilter, setHostHarnesses } from './hosts';
 import { onHostsCloseRequested } from './app_views';
 import { lostTarget, placeTranscript } from './lost_found';
@@ -192,6 +193,15 @@ describe('viewHostSessions', () => {
     expect(get(hostFilter)).toBe('mefistos');
     expect(onCloseRequested).toHaveBeenCalledTimes(1);
     unsub();
+  });
+
+  it("drops an extra fleet's Machine / Org choice, which would keep the primary list hidden", () => {
+    fleetHostFilter.set({ fleet: 'company', alias: 'mac' });
+    fleetScopeFilter.set({ fleet: 'company', scope: 'org:3' });
+    viewHostSessions('mefistos');
+    expect(get(hostFilter)).toBe('mefistos');
+    expect(get(fleetHostFilter)).toBeNull();
+    expect(get(fleetScopeFilter)).toBeNull();
   });
 });
 
