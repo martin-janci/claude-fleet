@@ -13,6 +13,7 @@ import { push } from './toasts';
 import {
   discardKillSession,
   inspectSafeKill,
+  pinnedBlock,
   safeKillSession,
   type DirtyFile,
   type SessionRow,
@@ -60,7 +61,8 @@ export const FILES_SHOWN = 5;
 export function cleanUpBlocked(row: SessionRow): string | null {
   return (
     hubActionBlocked('safe_kill_session', get(hubStatus), get(hubConnection)) ??
-    sessionActionBlocked(row, 'safe_kill_session')
+    sessionActionBlocked(row, 'safe_kill_session') ??
+    pinnedBlock(row)
   );
 }
 

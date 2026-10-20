@@ -488,10 +488,17 @@
   // every link is, which `archived` already says.
   const canArchive = (t: WorkTask): boolean => t.item_id != null || (t.counts?.ended ?? 0) > 0;
   const isArchived = (t: WorkTask): boolean => (t.item_id != null ? t.archived_at != null : !!t.archived);
+  // A bare task's Archive stamps only its ended links: while a session still
+  // runs on it the task stays unarchived, so the press would change nothing
+  // visible (review w10-13). Said on the button instead.
+  const archiveLiveBlock = (t: WorkTask): string | null =>
+    t.item_id == null && !isArchived(t) && (t.counts?.active ?? 0) > 0
+      ? 'A session is still running on it; end it to archive the task'
+      : null;
   let archiveBusy = $state(false);
   async function toggleArchived() {
     const t = task;
-    if (!t || !canArchive(t) || archiveBusy) return;
+    if (!t || !canArchive(t) || archiveLiveBlock(t) !== null || archiveBusy) return;
     archiveBusy = true;
     statusError = null;
     const r =
@@ -632,8 +639,9 @@
             class="btn"
             type="button"
             data-testid="work-task-archive"
-            disabled={archiveBlocked !== null || archiveBusy}
+            disabled={archiveBlocked !== null || archiveLiveBlock(task) !== null || archiveBusy}
             title={archiveBlocked ??
+              archiveLiveBlock(task) ??
               (isArchived(task)
                 ? 'Bring it back to the ticket lists and the Work view'
                 : 'Hide it from the ticket lists and the Work view (the Archived filter still shows it); nothing changes in its tracker')}
@@ -662,7 +670,7 @@
           <span class="chip chip--status chip--{task.status_category ?? 'todo'}" data-testid="work-task-status">{taskStatus(task)}</span>
         {/if}
         {#if task.resolution}<span class="chip">{task.resolution}</span>{/if}
-        {#if task.archived_at != null}<span class="chip" data-testid="work-task-archived-chip" title="Archived {timeAgo(task.archived_at)}">Archived</span>{/if}
+        {#if isArchived(task)}<span class="chip" data-testid="work-task-archived-chip" title={task.archived_at != null ? `Archived ${timeAgo(task.archived_at)}` : 'Archived'}>Archived</span>{/if}
         {#if task.priority === 'urgent' || task.priority === 'high'}
           <span class="chip chip--prio-{task.priority}" data-testid="work-task-priority-chip"
             ><span class="prio-dot prio-dot--{task.priority}" aria-hidden="true"></span>{priorityLabel(task.priority)}</span

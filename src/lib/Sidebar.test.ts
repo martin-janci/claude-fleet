@@ -3940,4 +3940,92 @@ describe('Pinned sessions', () => {
     expect(kill.disabled).toBe(true);
     expect(kill.title).toBe('Pinned: unpin it first');
   });
+  it('shows no empty state under a Pinned section when every session is pinned', async () => {
+    const a = { ...sessionFor(1, 'dev-a'), pinned_at: 100 };
+    const b = { ...sessionFor(null, 'dev-b'), pinned_at: 200 };
+    mockBackend(fakeProjects, [a, b]);
+    render(Sidebar);
+    await tick(); await tick();
+    await screen.findByTestId('pinned-sessions');
+    expect(screen.queryByTestId('sidebar-empty')).toBeNull();
+  });
+
+  it('a search that matches only a pinned row shows no "No sessions match"', async () => {
+    const p = { ...sessionFor(null, 'dev-alpha'), pinned_at: 100 };
+    const loose = sessionFor(1, 'dev-beta');
+    mockBackend(fakeProjects, [p, loose]);
+    render(Sidebar);
+    await tick(); await tick();
+    await screen.findByTestId('pinned-sessions');
+    const search = screen.getByPlaceholderText(/search/i) as HTMLInputElement;
+    await fireEvent.input(search, { target: { value: 'alpha' } });
+    await waitFor(() => {
+      expect(screen.getAllByTestId('sess-row')).toHaveLength(1);
+    });
+    expect(within(screen.getByTestId('pinned-sessions')).getAllByTestId('sess-row')).toHaveLength(1);
+    expect(screen.queryByTestId('sidebar-empty')).toBeNull();
+  });
+
+  it('opening a pinned session from outside opens a collapsed Pinned section', async () => {
+    const p = { ...sessionFor(1, 'dev-pinned'), pinned_at: 100 };
+    mockBackend(fakeProjects, [p, sessionFor(1, 'dev-loose')]);
+    render(Sidebar);
+    await tick(); await tick();
+    const section = await screen.findByTestId('pinned-sessions');
+    await fireEvent.click(within(section).getByTestId('pinned-toggle'));
+    expect(within(section).queryAllByTestId('sess-row')).toHaveLength(0);
+    const row = get(sessions).find((x) => x.tmux_name === 'dev-pinned')!;
+    selectSession(row);
+    await tick(); await tick(); await Promise.resolve();
+    expect(within(screen.getByTestId('pinned-sessions')).getAllByTestId('sess-row')).toHaveLength(1);
+  });
+
+  it('bulk Kill of pinned rows says they are pinned, not that they are not yours', async () => {
+    const a = { ...sessionFor(1, 'dev-a'), pinned_at: 100 };
+    const b = { ...sessionFor(1, 'dev-b'), pinned_at: 200 };
+    mockBackend(fakeProjects, [a, b]);
+    render(Sidebar);
+    await tick(); await tick();
+    const rows = screen.getAllByTestId('sess-row');
+    await fireEvent.click(rows[0], { shiftKey: true });
+    await fireEvent.click(rows[1], { metaKey: true });
+    await tick();
+    await fireEvent.click(screen.getByTestId('bulk-kill'));
+    await tick();
+    const none = screen.getByTestId('bulk-kill-none').textContent ?? '';
+    expect(none).toMatch(/pinned/i);
+    expect(none).not.toMatch(/not yours|never killed/i);
+  });
+
+  it('bulk Kill on a mixed selection counts the pinned row as pinned', async () => {
+    const a = { ...sessionFor(1, 'dev-a'), pinned_at: 100 };
+    const b = sessionFor(1, 'dev-b');
+    mockBackend(fakeProjects, [a, b]);
+    render(Sidebar);
+    await tick(); await tick();
+    const rows = screen.getAllByTestId('sess-row');
+    await fireEvent.click(rows[0], { shiftKey: true });
+    await fireEvent.click(rows[1], { metaKey: true });
+    await tick();
+    await fireEvent.click(screen.getByTestId('bulk-kill'));
+    await tick();
+    const skipped = screen.getByTestId('bulk-kill-skipped').textContent ?? '';
+    expect(skipped).toMatch(/1 pinned \(unpin first\)/);
+    expect(skipped).not.toMatch(/not yours/);
+  });
+
+  it('bulk Clean up leaves a pinned row out of its targets', async () => {
+    const a = { ...sessionFor(1, 'dev-a'), pinned_at: 100 };
+    const b = sessionFor(1, 'dev-b');
+    mockBackend(fakeProjects, [a, b]);
+    render(Sidebar);
+    await tick(); await tick();
+    const rows = screen.getAllByTestId('sess-row');
+    await fireEvent.click(rows[0], { shiftKey: true });
+    await fireEvent.click(rows[1], { metaKey: true });
+    await tick();
+    await fireEvent.click(screen.getByTestId('bulk-cleanup'));
+    await tick();
+    expect(screen.getByRole('dialog').textContent).toMatch(/Clean up session\?/);
+  });
 });

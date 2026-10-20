@@ -268,7 +268,8 @@
   );
   const ghostDismissBlocked = $derived(
     hubActionBlocked('dismiss_ghost_session', $hubStatus, $hubConnection) ??
-      $sessionBlocked(sess, 'dismiss_ghost_session'),
+      $sessionBlocked(sess, 'dismiss_ghost_session') ??
+      pinnedBlock(sess),
   );
   const workBlocked = $derived(
     hubActionBlocked('link_session_work', $hubStatus, $hubConnection) ??
