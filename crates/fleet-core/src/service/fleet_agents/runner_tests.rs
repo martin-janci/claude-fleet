@@ -1622,16 +1622,8 @@ fn next_cursor(f: &Fx, polled: &crate::service::agents::Polled) -> AgentCursorRo
 
 #[tokio::test]
 async fn another_trackers_burst_is_paged_and_a_late_synced_comment_still_counts() {
-    let f = fx(
-        small(
-            json!({ "source": "tracker_comments", "tracker": "3",
-                "match": { "any_phrase": "/ask" } }),
-            json!([]),
-        ),
-        json!({}),
-        json!([]),
-        false,
-    );
+    let f = trigger_fx(json!({ "source": "tracker_comments", "tracker": "3",
+        "match": { "any_phrase": "/ask" } }));
     *f.world.provider.lock().unwrap() = Some("github".into());
     let now = crate::store::now_unix();
     let p = f.poller();

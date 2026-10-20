@@ -1184,7 +1184,7 @@ impl FleetTools {
         // Control's pending pick and its owner's countdown: Control, the
         // master and the fleet admin's own device only, as `control_journal`
         // (a per-host token is refused before this, `NOT_FOR_HOST_TOKENS`).
-        if !(caller.is_operator() || caller.is_master() || caller.is_fleet_admin_device()) {
+        if !caller.is_control_or_owner() {
             return Err(to_mcp_err(crate::ipc_error::IpcError::new(
                 crate::ipc_error::codes::E_FORBIDDEN,
                 "auto-continue is Control's and its owner's",

@@ -657,6 +657,16 @@ impl<F: Fn() + Send + Sync> PairTransport for PairWhile<F> {
     }
 }
 
+/// A pairing for `cl_lab` that, while in flight, writes `row` as the only
+/// extra fleet.
+fn pair_writing(w: &World, row: ExtraFleet) -> PairWhile<impl Fn() + Send + Sync> {
+    let store = Arc::clone(&w.store);
+    PairWhile {
+        inner: pair("cl_lab"),
+        during: move || write_records(&store, std::slice::from_ref(&row)).unwrap(),
+    }
+}
+
 #[test]
 fn an_add_keeps_the_rows_written_while_its_pairing_was_in_flight() {
     let w = world(
@@ -665,13 +675,7 @@ fn an_add_keeps_the_rows_written_while_its_pairing_was_in_flight() {
     );
     // While the pairing is in flight: `company` is removed and another add
     // takes the slot `lab` would have had.
-    let store = Arc::clone(&w.store);
-    let transport = PairWhile {
-        inner: pair("cl_lab"),
-        during: move || {
-            write_records(&store, &[record("lab", "https://other.example.com")]).unwrap();
-        },
-    };
+    let transport = pair_writing(&w, record("lab", "https://other.example.com"));
     let info = block_on(w.fleets.add(
         &transport,
         &standalone(),
@@ -704,13 +708,7 @@ fn an_add_keeps_the_rows_written_while_its_pairing_was_in_flight() {
 #[test]
 fn a_hub_added_while_its_pairing_was_in_flight_is_not_added_twice() {
     let w = world(&[], Tokens::with(&[]));
-    let store = Arc::clone(&w.store);
-    let transport = PairWhile {
-        inner: pair("cl_lab"),
-        during: move || {
-            write_records(&store, &[record("lab", "https://lab.example.com")]).unwrap();
-        },
-    };
+    let transport = pair_writing(&w, record("lab", "https://lab.example.com"));
     let err = block_on(w.fleets.add(
         &transport,
         &standalone(),

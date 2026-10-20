@@ -1127,7 +1127,7 @@ impl FleetTools {
         audit("control_journal", action);
         // Control's own state and the owner's words to it: Control, the
         // master and the fleet admin's own device only.
-        if !(caller.is_operator() || caller.is_master() || caller.is_fleet_admin_device()) {
+        if !caller.is_control_or_owner() {
             return Err(mcp_err(
                 "E_FORBIDDEN",
                 "control_journal is Control's and its owner's",
