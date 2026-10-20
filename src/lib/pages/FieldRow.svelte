@@ -15,6 +15,7 @@
   import type { Result } from '../result';
   import {
     fromDisplay,
+    needsConfirm as confirmFirst,
     optionLabel,
     rangeText,
     toDisplay,
@@ -123,9 +124,7 @@
   let error = $state<string | null>(null);
   let pending = $state<string | null>(null);
 
-  function needsConfirm(next: string): boolean {
-    return d.danger.level === 'confirm' && next !== d.default;
-  }
+  const needsConfirm = (next: string) => confirmFirst(d, next);
 
   async function commit(next: string): Promise<boolean> {
     busy = true;
@@ -259,7 +258,9 @@
       <span class="label" id={`${id}-label`}>{d.label}</span>
     {/if}
     {#if d.tags.includes('experimental')}<span class="tag">experimental</span>{/if}
-    {#if d.restart === 'app'}<span class="tag" title="Read once at launch">applies after a restart</span>{/if}
+    {#if d.restart === 'app'}<span class="tag" title="Read once at launch" data-testid={`setting-restart-${d.key}`}
+        >{remote ? 'applies after the hub restarts' : 'applies after the app restarts'}</span
+      >{/if}
     {#if d.restart === 'hooks'}<span class="tag" title="Takes effect on each host's next hook install">applies when hooks are reinstalled</span>{/if}
     {#if !readonly && !save && d.owned_by === undefined}
       <button
@@ -641,6 +642,7 @@
   .readonly {
     font-family: var(--mono);
     font-size: var(--control-font);
+    overflow-wrap: anywhere;
   }
   .help {
     margin: 0.15rem 0 0;

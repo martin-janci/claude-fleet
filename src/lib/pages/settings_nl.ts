@@ -6,7 +6,7 @@
 // come out. The result is a confirm row; nothing is written until the
 // person presses Enter or Apply (and a setting that needs confirming asks
 // first, as its field does).
-import { fromDisplay, type Descriptor } from './pages';
+import { fromDisplay, optionLabel, type Descriptor } from './pages';
 
 export type NlResult =
   | { kind: 'change'; d: Descriptor; value: string }
@@ -73,6 +73,12 @@ export function rankSettings(phrase: string, descs: Iterable<Descriptor>): { d: 
   return scored.sort((a, b) => b.score - a.score);
 }
 
+/** The option `text` names, by its stored value or its label. */
+function optionNamed(d: Descriptor, options: readonly string[], text: string): string | undefined {
+  const t = text.trim().toLowerCase();
+  return options.find((o) => o.toLowerCase() === t || optionLabel(d, o).toLowerCase() === t);
+}
+
 /** `text` as the value `d` stores, or why it cannot be. */
 export function parseValue(d: Descriptor, text: string): { value: string } | { error: string } {
   const t = text.trim().toLowerCase();
@@ -82,18 +88,28 @@ export function parseValue(d: Descriptor, text: string): { value: string } | { e
       if (OFF.has(t)) return { value: 'false' };
       return { error: 'say on or off' };
     case 'choice': {
-      const hit = d.kind.options.find((o) => {
-        const label = (d.option_labels?.find(([v]) => v === o)?.[1] ?? o).toLowerCase();
-        return o.toLowerCase() === t || label === t;
-      });
-      return hit ? { value: hit } : { error: `one of: ${d.kind.options.join(', ')}` };
+      const hit = optionNamed(d, d.kind.options, t);
+      return hit ? { value: hit } : { error: `one of: ${d.kind.options.map((o) => optionLabel(d, o)).join(', ')}` };
     }
     case 'choice_set': {
       const opts = d.kind.options;
-      const parts = t.split(/\s*(?:,|\band\b)\s*/).filter(Boolean);
-      const bad = parts.filter((p) => !opts.some((o) => o.toLowerCase() === p));
-      if (bad.length) return { error: `not an option: ${bad.join(', ')}` };
-      return { value: opts.filter((o) => parts.includes(o.toLowerCase())).join(',') };
+      // Commas first; " and " only splits a part that is not itself an
+      // option's label ("Done and idle").
+      const parts = t
+        .split(/\s*,\s*/)
+        .filter(Boolean)
+        .flatMap((p) => (optionNamed(d, opts, p) ? [p] : p.split(/\s+and\s+/).filter(Boolean)));
+      const picked = new Set<string>();
+      const bad: string[] = [];
+      for (const p of parts) {
+        const o = optionNamed(d, opts, p);
+        if (o) picked.add(o);
+        else bad.push(p);
+      }
+      if (bad.length) {
+        return { error: `not an option: ${bad.join(', ')} (one or more of: ${opts.map((o) => optionLabel(d, o)).join(', ')})` };
+      }
+      return { value: opts.filter((o) => picked.has(o)).join(',') };
     }
     case 'secs':
     case 'int': {
