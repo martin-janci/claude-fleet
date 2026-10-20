@@ -71,7 +71,9 @@ instances side by side.
   - a built-in write (a tracker comment, an issue, a link, a PR review);
   - `mcp_call`: one named write tool on one bound store, with arguments the
     model proposed and the definition's allow-list and schema checked;
-  - `record`: a fleet-store write.
+  - `record`: a fleet-store write;
+  - fleet's own writes, for agents that read the fleet itself: `work_task`,
+    `fix_session`, `setting`, `session_recover` (see the action table).
 - The reviewer and the support agent stay as they are. Each can later be
   restated as a definition (*Migration*). The generic runtime does not need
   them to move.
@@ -326,6 +328,31 @@ person at `propose`, run at `act` when `auto` is true.
 | `pr_comment`, `pr_labels` | as the reviewer's | gh |
 | `mcp_call` | `{binding, tool, arguments}` | calls the tool over stdio on the host with the binding rendered, as the scanner does |
 | `record` | `{namespace, key, value, expires_at?}` | `agent_records` upsert |
+| `work_task` | `{title, notes, steps[]}` from `summary`, `body`, `steps` | a Work task, its steps proposed as subtasks (`fleet_ops::work_task`) |
+| `fix_session` | `{project, host?, title, prompt}` from `project`, `host`, `summary`, `body` | a Work task and a Claude session started on it (`start_work`) |
+| `setting` | `{key, value, was, why}` from `key`, `value`, `body` | a settings-review proposal, applied as the person's (`settings_review`) |
+| `session_recover` | `{session, host?, why}` from `target`, `host`, `body` | a lost session restored, a live one restarted |
+
+The four fleet-own writes (`work_task`, `fix_session`, `setting`,
+`session_recover`) and `tracker_issue` also take `fingerprint` (a template):
+what the finding is, kept on the payload so the `fleet-diagnostics`
+`proposals` tool can tell a later run it was proposed, or rejected, before.
+Only `work_task` may be `auto`; `fix_session`, `setting` and
+`session_recover` **never** run without a person, and a definition that
+says `auto: true` on one is refused. A `setting` is planned only for a key
+an agent may propose (`ai` not `never`, not owned by another subsystem) and
+a value the key accepts; queued, it records the value it had (`was`), and
+one already at that value is skipped.
+
+**`each`.** An action with `each: <array field of the answer>` is planned
+once per item (at most `MAX_EACH`, 10), its templates reading the item as
+`{{item.…}}` and its `when` tested on the item. The self debug agent's
+`findings` and the proposer's `proposals` use it.
+
+**`run.diagnostics: true`** gives the run `fleet-diagnostics`, the hub's
+read-only MCP server over the fleet's own logs, error reports, runs, host
+health, sessions, the agents' analyses and their proposals. Every answer is
+masked with every secret the store knows before the run sees it.
 
 **Guardrails**, checked by the executor at send time (not only at plan
 time):
