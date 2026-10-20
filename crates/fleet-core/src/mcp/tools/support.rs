@@ -1827,8 +1827,10 @@ pub(super) enum GateTarget<'a> {
     Other,
     /// A prompt or task into this existing session.
     Session(i64),
-    /// A new Claude session on this host.
-    Start { host: &'a str },
+    /// A new Claude session on this host; `None` when fleet picks it (a
+    /// task's start with no host), which only a grant naming no hosts
+    /// covers.
+    Start { host: Option<&'a str> },
 }
 
 /// The timeline event a pre-approved operator call leaves on its target.
@@ -1889,17 +1891,18 @@ impl FleetTools {
         self.confirm_gate_inner(tool, nonce, summary, caller, false, target)
     }
 
-    /// The operator's facts [`guard::operator_must_confirm`] decides on:
-    /// the autonomy position, whether `target` is one of Control's open
-    /// handoffs, and whether it is a start inside a running mission's grant.
+    /// The operator's facts [`guard::operator_must_confirm_with`] decides
+    /// on: the autonomy position, whether `target` is one of Control's open
+    /// handoffs, whether it is a start inside a running mission's grant, and
+    /// whether session care is on.
     fn operator_gate_facts(
         &self,
         target: GateTarget<'_>,
-    ) -> Result<(crate::service::autonomy::Position, bool, bool), McpError> {
+    ) -> Result<(crate::service::autonomy::Position, guard::OperatorFacts), McpError> {
         let s = lock(&self.store).map_err(to_mcp_err)?;
         let position = crate::service::autonomy::position(&s);
         if position.is_ask_first() {
-            return Ok((position, false, false));
+            return Ok((position, guard::OperatorFacts::default()));
         }
         let own = match target {
             GateTarget::Session(id) => s
@@ -1913,7 +1916,16 @@ impl FleetTools {
                 .map_err(to_mcp_err)?,
             _ => false,
         };
-        Ok((position, own, grant))
+        let session_care =
+            crate::service::settings::get_bool(&s, crate::service::settings::CONTROL_SESSION_CARE);
+        Ok((
+            position,
+            guard::OperatorFacts {
+                own_handoff: own,
+                inside_grant: grant,
+                session_care,
+            },
+        ))
     }
 
     fn confirm_gate_inner(
@@ -1936,14 +1948,19 @@ impl FleetTools {
         let operator_gated = caller.is_operator() && guard::operator_gated(tool);
         let forced = person
             || (operator_gated && {
-                let (position, own, grant) = self.operator_gate_facts(target)?;
-                let must = guard::caller_must_confirm(true, tool, position, own, grant);
+                let (position, facts) = self.operator_gate_facts(target)?;
+                let must = guard::caller_must_confirm_with(true, tool, position, facts);
                 if !must {
                     self.note_pre_approved(tool, summary, position, target);
                 }
                 must
             });
-        if !forced && (!guard::needs_confirmation(tool) || !self.confirm_enabled()?) {
+        // An operator call the position pre-approved is done here, even for
+        // a `confirm: true` tool: `work_link` is one for its tidy kills, and
+        // a task's start inside a grant is not one of those.
+        if !forced
+            && (operator_gated || !guard::needs_confirmation(tool) || !self.confirm_enabled()?)
+        {
             return Ok(());
         }
         if forced && !self.guards.approver {

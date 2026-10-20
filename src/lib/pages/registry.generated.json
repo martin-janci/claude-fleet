@@ -459,6 +459,25 @@
       "danger": {
         "level": "none"
       },
+      "default": "false",
+      "help": "Within your brief, Control restarts a stuck session it started or briefed without asking, also under another login after a limit. At Autopilot it also retires one whose work is done, after committing and pushing it. Off, or at Ask first: both wait for you.",
+      "key": "control.session_care",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Control looks after its sessions",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [],
+      "unit": "none",
+      "value": "false"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
       "default": "24",
       "help": "Control stops following a session it started or briefed once it is done, killed or its pull request merged, or after this long without a turn. Briefing it again follows it again.",
       "key": "control.follow_quiet_hours",
@@ -5668,6 +5687,10 @@
                 "key": "control.react_to_events",
                 "truthy": true
               }
+            },
+            {
+              "key": "control.session_care",
+              "type": "field"
             },
             {
               "key": "control.follow_quiet_hours",
