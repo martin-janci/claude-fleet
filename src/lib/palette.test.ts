@@ -1,3 +1,4 @@
+import { readFileSync, writeFileSync } from 'node:fs';
 import { describe, it, expect } from 'vitest';
 import { ACCENTS, orbitPalette, sunHeight, sunTimes, type ContrastLevel } from './palette';
 import { THEME, CONTRAST_PAIRS, composite, contrastRatio, relativeLuminance } from './tokens';
@@ -68,6 +69,18 @@ describe('orbitPalette holds every documented pair through the day', () => {
     expect(relativeLuminance(night.fg)).toBeLessThan(relativeLuminance(blue.fg));
   });
 
+  it('leaves the loader accent alone: the particle stage is dark in both themes (review w20-2)', () => {
+    // loader-kit.css's `.ofl--stage` ground; the engine's day accent is dark
+    // and vanished on it (2.7:1), so the brand value from app.css stays.
+    const STAGE = '#141a22';
+    for (const contrast of LEVELS)
+      for (const accent of ACCENTS)
+        for (const sun of SUNS) {
+          const t = painted(sun, contrast, accent.hue);
+          expect(contrastRatio(t['loader-accent']!, STAGE)).toBeGreaterThanOrEqual(4.5);
+        }
+  });
+
   it('glows only in the dark', () => {
     expect(orbitPalette({ sun: 0.5, contrast: 'std', hue: 205 }).glow).toBe('none');
     expect(orbitPalette({ sun: -0.5, contrast: 'std', hue: 205 }).glow).toMatch(/^0 0 0 1px rgba\(/);
@@ -100,5 +113,46 @@ describe('the sun', () => {
     expect(sunHeight(18.1, t)).toBeLessThan(0);
     // A window that crosses midnight.
     expect(sunHeight(23, { rise: 22, set: 2 })).toBeCloseTo(Math.sin(Math.PI / 4), 5);
+  });
+});
+
+// Review w20-12: the golden vectors, shared with fleet-mobile's
+// OrbitPaletteTest through docs/design/palette-golden.json (copied unchanged,
+// like tokens.json). A change to the engine changes this file; the phone's
+// copy then fails its drift check until its port paints the same.
+// Regenerate after a deliberate engine change (the run fails on purpose; read
+// the diff and run again without the variable):
+//   REGEN_PALETTE_GOLDEN=1 pnpm exec vitest run src/lib/palette.test.ts
+describe('the golden vectors (docs/design/palette-golden.json)', () => {
+  const FILE = 'docs/design/palette-golden.json';
+  const CASES: [number, ContrastLevel, number][] = [
+    [1, 'std', 205],
+    [0.3, 'soft', 258],
+    [0.05, 'high', 290],
+    [-0.1, 'std', 205],
+    [-0.5, 'soft', 168],
+    [-1, 'high', 45],
+  ];
+  /** The solid colours only: rgba() tints and the glow follow from them. */
+  const solid = (p: Record<string, string>) => Object.fromEntries(Object.entries(p).filter(([, v]) => /^#[0-9a-f]{6}$/.test(v)));
+  const render = () =>
+    JSON.stringify(
+      {
+        comment:
+          "Golden values of claude-fleet's palette engine (src/lib/palette.ts), held by palette.test.ts there and by OrbitPaletteTest in fleet-mobile, which keeps an unchanged copy. Generated: REGEN_PALETTE_GOLDEN=1 pnpm exec vitest run src/lib/palette.test.ts",
+        cases: CASES.map(([sun, contrast, hue]) => ({ sun, contrast, hue, colors: solid(orbitPalette({ sun, contrast, hue })) })),
+      },
+      null,
+      2,
+    ) + '\n';
+
+  it('palette.ts paints exactly the golden values', () => {
+    const want = render();
+    const env = (globalThis as { process?: { env: Record<string, string | undefined> } }).process?.env ?? {};
+    if (env.REGEN_PALETTE_GOLDEN) {
+      writeFileSync(FILE, want);
+      throw new Error(`wrote ${FILE}: read the diff, then run again without REGEN_PALETTE_GOLDEN`);
+    }
+    expect(readFileSync(FILE, 'utf8'), `${FILE} is stale: REGEN_PALETTE_GOLDEN=1 pnpm exec vitest run src/lib/palette.test.ts`).toBe(want);
   });
 });
