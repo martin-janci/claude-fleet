@@ -9,6 +9,8 @@ import {
   scopeToday,
   standupText,
   isEmptyView,
+  todayKpis,
+  sessionPhrase,
   type Today,
   type TodaySession,
 } from './today';
@@ -177,5 +179,32 @@ describe('shippedWhen and the standup provenance (G7.9)', () => {
   it('the standup names where a shipped entry came from', () => {
     const t = { since: 0, now: 10, groups: [], shipped: [{ how: 'pr', key: 'A-1', title: 'Sweep', at: 5, from: 'Morning PR sweep' }] };
     expect(standupText(scopeToday(t, ALL_SCOPES, [], () => ALL_SCOPES))).toContain('· from Morning PR sweep');
+  });
+});
+
+describe('todayKpis (review w11-3)', () => {
+  it('counts the sessions that wait, not their working siblings', () => {
+    const k = todayKpis(scopeToday(digest, ALL_SCOPES, rows(), () => ALL_SCOPES));
+    // PAY-7 waits on `pay` only; `pay-tests` is in progress with ledger and scratch.
+    expect(k.needsYou).toBe(1);
+    expect(k.inProgress).toBe(3);
+    expect(k.stale).toBe(1);
+  });
+});
+
+describe('sessionPhrase (review w11-11)', () => {
+  it('drops "probably waiting" for a reading set aside with Not waiting', () => {
+    const p = s(7, 'maybe', { proposed: 'probably_waiting' });
+    expect(sessionPhrase(p, 'in_progress')).toBe('maybe (probably waiting)');
+    expect(sessionPhrase(p, 'in_progress', true)).toBe('maybe');
+  });
+});
+
+describe('scopeToday under the host filter (review w11-8)', () => {
+  it('drops a session whose live row the filter hides', () => {
+    const r = rows().map((x) => (x.id === 3 ? { ...x, host_alias: 'mercury' } : x));
+    const v = scopeToday(digest, 'all', r, scopeOf, (row) => row.host_alias === 'mefistos');
+    expect(v.inProgress.flatMap((g) => g.sessions.map((s) => s.id))).not.toContain(3);
+    expect(v.waiting.flatMap((g) => g.sessions.map((s) => s.id))).toContain(1);
   });
 });

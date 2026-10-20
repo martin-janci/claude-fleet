@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { errorText } from './error_copy';
   import { onDestroy, tick, untrack } from 'svelte';
   import {
     sessions,
@@ -546,7 +547,7 @@
     confirmingRestart = false;
     const { host_alias, tmux_name } = session;
     const r = await restartSession(host_alias, tmux_name, undefined, {}, { force });
-    if (!r.ok) pushRestartError(r.error, host_alias, tmux_name, () => void onRestart(true));
+    if (!r.ok) pushRestartError(r.error, host_alias, tmux_name, () => void onRestart(true), askRepair);
   }
 
   // Make the worktree directory + tmux pane healthy again (deleted dir,
@@ -656,7 +657,7 @@
     if (r.ok) {
       inspection = r.value;
     } else {
-      inspectError = r.error.message;
+      inspectError = errorText(r.error);
     }
   }
   function cancelSafeKill() {
@@ -823,7 +824,7 @@
     confirmingRecreate = false;
     const r = await recreateSession(session.id);
     if (!r.ok) {
-      pushError(r.error, 'Recreate failed');
+      pushError(r.error, 'Recreate failed', undefined, { repair: askRepair });
       return;
     }
     // kill-session severed the PTY; same tmux_name won't auto-reopen. This

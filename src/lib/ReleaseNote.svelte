@@ -5,6 +5,7 @@
   `release_note`; Copy puts the text, as edited, on the clipboard.
 -->
 <script lang="ts">
+  import { errorText } from './error_copy';
   import DraftField from './DraftField.svelte';
   import { copyText } from './clipboard';
   import { draftReleaseNote, type Draft } from './drafts';
@@ -32,7 +33,7 @@
     } else if (r.error.code === 'E_HUB_PROTOCOL' || r.error.code === 'E_FORBIDDEN') {
       error = 'This hub cannot draft release notes yet.';
     } else {
-      error = r.error.message;
+      error = errorText(r.error);
     }
   }
 

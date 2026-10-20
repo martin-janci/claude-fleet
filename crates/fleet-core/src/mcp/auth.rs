@@ -729,17 +729,6 @@ pub fn is_loopback_host(value: &str) -> bool {
     fleet_proto::net::is_loopback(&authority_host(value))
 }
 
-/// True if an `Origin` header value is a loopback `http(s)` origin. Anything
-/// else — a remote origin, the opaque `null` origin, a non-http scheme — is
-/// treated as cross-origin and rejected.
-// Kept as a public, independently-tested special case of `origin_allowed`
-// (empty allowlist) even though production code now calls `check_origin`
-// directly; not currently called outside its own test.
-#[allow(dead_code)]
-pub fn origin_is_loopback(origin: &str) -> bool {
-    origin_allowed(origin, &[])
-}
-
 /// Lower-cased, trimmed allowlist entries (`host` or `host:port`), empties
 /// dropped. Built once at server start from the hub's configuration.
 pub fn normalize_allowed_hosts(list: &[String]) -> Vec<String> {
@@ -1334,14 +1323,24 @@ mod tests {
     }
 
     #[test]
-    fn origin_is_loopback_accepts_local_and_rejects_remote() {
-        assert!(origin_is_loopback("http://127.0.0.1:4180"));
-        assert!(origin_is_loopback("http://localhost:4180"));
-        assert!(origin_is_loopback("https://[::1]"));
-        assert!(!origin_is_loopback("http://evil.com"));
-        assert!(!origin_is_loopback("https://evil.com:4180"));
-        assert!(!origin_is_loopback("null"));
-        assert!(!origin_is_loopback("file://"));
+    fn an_empty_allowlist_admits_only_loopback_origins() {
+        // Anything else — a remote origin, the opaque `null` origin, a
+        // non-http scheme — is treated as cross-origin and rejected.
+        for o in [
+            "http://127.0.0.1:4180",
+            "http://localhost:4180",
+            "https://[::1]",
+        ] {
+            assert!(origin_allowed(o, &[]), "should accept {o}");
+        }
+        for o in [
+            "http://evil.com",
+            "https://evil.com:4180",
+            "null",
+            "file://",
+        ] {
+            assert!(!origin_allowed(o, &[]), "should reject {o}");
+        }
     }
 
     fn headers(pairs: &[(&str, &str)]) -> HeaderMap {

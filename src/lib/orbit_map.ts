@@ -388,3 +388,16 @@ export function orbitModel(args: {
     jev: runs.filter((r) => r.source === 'jev' && now - r.started_at <= SPARK_SECS).length,
   };
 }
+
+/** The stage's accessible name (review w19-12): the counts, and which hosts
+ *  have a run waiting for you or one that failed lately, which the map
+ *  shows only as an amber halo and a red spark. */
+export function orbitStageLabel(m: Pick<OrbitModel, 'hosts' | 'running' | 'working'>): string {
+  const base = `${m.running} running and ${m.working} working across ${m.hosts.length} hosts`;
+  const waits = m.hosts.filter((h) => h.needs).map((h) => h.alias);
+  const failed = m.hosts.filter((h) => h.failed).map((h) => h.alias);
+  const parts = [base];
+  if (waits.length) parts.push(`a run waits for you on ${waits.join(', ')}`);
+  if (failed.length) parts.push(`a run failed lately on ${failed.join(', ')}`);
+  return parts.join(' · ');
+}

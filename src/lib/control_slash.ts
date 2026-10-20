@@ -50,6 +50,7 @@ import { graphFromMission, graphProgress, type GraphCard } from './task_graph_ca
 import { controlVersions, versionsSummary } from './control_versions';
 import { agentsStatus, runFleetAgent, SCOPE_COMPONENTS, type AgentJob, type RunScope } from './agents';
 import { openRuns } from './automation';
+import { errorText } from './error_copy';
 
 export type ControlCommand =
   | { cmd: 'task'; title: string; due?: string; owner?: string }
@@ -237,7 +238,7 @@ export async function undoCommand(id: number): Promise<void> {
   const undo = r.undo;
   put({ ...r, undo: undefined, line: `${r.line} Undoing…` });
   const out = await undo();
-  put({ ...r, undo: undefined, line: out.ok ? 'Undone.' : `Undo failed: ${out.error.message}` });
+  put({ ...r, undo: undefined, line: out.ok ? 'Undone.' : `Undo failed: ${errorText(out.error)}` });
 }
 
 function sessionLabel(s: SessionRow): string {
@@ -254,7 +255,7 @@ export function sessionsNamed(name: string, rows: readonly SessionRow[]): Sessio
 
 async function resolveItem(key: string): Promise<{ ok: true; itemId: number; status: string; title: string } | { ok: false; line: string }> {
   const r = await workTask(`ref:${key}`);
-  if (!r.ok) return { ok: false, line: r.error.code === 'E_NOTFOUND' ? `No task ${key}.` : r.error.message };
+  if (!r.ok) return { ok: false, line: r.error.code === 'E_NOTFOUND' ? `No task ${key}.` : errorText(r.error) };
   const t = r.value.task;
   if (t.item_id == null) return { ok: false, line: `${key} is not a task Fleet can change here.` };
   return { ok: true, itemId: t.item_id, status: t.status_category ?? 'todo', title: t.title ?? key };
@@ -291,7 +292,7 @@ function health(host: string | undefined): Omit<CommandReceipt, 'id' | 'typed'> 
 /** The mission `/graph` means: by its root task's key, by name, or the only active one. */
 async function missionFor(target: string | undefined): Promise<{ ok: true; mission: Mission } | { ok: false; line: string }> {
   const list = await listMissions();
-  if (!list.ok) return { ok: false, line: list.error.message };
+  if (!list.ok) return { ok: false, line: errorText(list.error) };
   const missions = list.value;
   if (target === undefined) {
     const active = missions.filter((m) => m.state === 'active');
@@ -320,7 +321,7 @@ async function graph(target: string | undefined): Promise<Omit<CommandReceipt, '
   const m = found.mission;
   const open = { kind: 'mission' as const, id: m.id };
   const d = await getMission(m.id);
-  if (!d.ok) return { state: 'failed', line: d.error.message, open };
+  if (!d.ok) return { state: 'failed', line: errorText(d.error), open };
   const g = graphFromMission(d.value);
   if (!g) return { state: 'done', line: `${m.name} has no tasks yet.`, open };
   return { state: 'done', line: `${m.name} · ${graphProgress(g)}`, open, graph: g };
@@ -453,11 +454,11 @@ async function follow(
   update: (o: Outcome) => void,
 ): Promise<Outcome> {
   const st = await agentsStatus('fleet');
-  if (!st.ok) return { state: 'failed', line: st.error.message };
+  if (!st.ok) return { state: 'failed', line: errorText(st.error) };
   const rule = st.value.rules.find((r) => r.active && r.definition === c.definition);
   if (!rule) return { state: 'failed', line: `No ${c.name} yet: add one under Automation, Agents.` };
   const q = await runFleetAgent(rule.id, c.request, c.scope);
-  if (!q.ok) return { state: 'failed', line: q.error.message };
+  if (!q.ok) return { state: 'failed', line: errorText(q.error) };
   const key = q.value.job;
   const open = { kind: 'runs' as const };
   update({ state: 'running', line: `Queued: the ${c.name} is ${c.doing}.`, open });
@@ -493,7 +494,7 @@ async function run(c: ControlCommand, update: (o: Outcome) => void): Promise<Out
       return graph(c.target);
     case 'task': {
       const r = await createWorkTask({ title: c.title });
-      if (!r.ok) return { state: 'failed', line: r.error.message };
+      if (!r.ok) return { state: 'failed', line: errorText(r.error) };
       const item = r.value;
       const name = item.key ?? `#${item.id}`;
       const open = { kind: 'task' as const, taskId: `item:${item.id}` };
@@ -504,7 +505,7 @@ async function run(c: ControlCommand, update: (o: Outcome) => void): Promise<Out
         ...(c.due !== undefined ? { due_at: c.due } : {}),
         ...(c.owner !== undefined ? { assignees: [c.owner] } : {}),
       });
-      if (!e.ok) return { state: 'failed', line: `Created ${name}, but its owner and due date were not set: ${e.error.message}`, open };
+      if (!e.ok) return { state: 'failed', line: `Created ${name}, but its owner and due date were not set: ${errorText(e.error)}`, open };
       const extra = [c.owner ? `owner ${c.owner}` : null, c.due ? `due ${c.due}` : null].filter(Boolean).join(', ');
       return { state: 'done', line: `Created ${name} · ${item.title} (${extra}).`, open };
     }
@@ -514,7 +515,7 @@ async function run(c: ControlCommand, update: (o: Outcome) => void): Promise<Out
       const open = { kind: 'task' as const, taskId: `item:${it.itemId}` };
       if (it.status === 'done') return { state: 'done', line: `${c.key} was already done.`, open };
       const r = await setWorkStatus(it.itemId, 'done');
-      if (!r.ok) return { state: 'failed', line: r.error.message, open };
+      if (!r.ok) return { state: 'failed', line: errorText(r.error), open };
       const back = (it.status === 'in_progress' ? 'in_progress' : 'todo') as WorkItemStatus;
       return { state: 'done', line: `${c.key} · ${it.title} is done.`, open, undo: () => setWorkStatus(it.itemId, back) };
     }
@@ -528,7 +529,7 @@ async function run(c: ControlCommand, update: (o: Outcome) => void): Promise<Out
       const blocked = hubActionBlocked('link_session_work') ?? sessionActionBlocked(s, 'link_session_work');
       if (blocked !== null) return { state: 'failed', line: blocked };
       const r = await linkSessionWork(s.id, { key: c.key });
-      if (!r.ok) return { state: 'failed', line: r.error.message };
+      if (!r.ok) return { state: 'failed', line: errorText(r.error) };
       return {
         state: 'done',
         line: `${c.key} is assigned to ${sessionLabel(s)}.`,
@@ -539,7 +540,7 @@ async function run(c: ControlCommand, update: (o: Outcome) => void): Promise<Out
       const base = baseStartArgs({ item_id: null, key: c.key, project_id: null });
       if (c.host) base.host_alias = c.host;
       const p = await previewStartWork(base);
-      if (!p.ok) return { state: 'failed', line: p.error.message };
+      if (!p.ok) return { state: 'failed', line: errorText(p.error) };
       const preview = p.value;
       const open = { kind: 'task' as const, taskId: preview.item_id != null ? `item:${preview.item_id}` : `ref:${c.key}` };
       if (!previewIsClean(preview)) {
@@ -547,7 +548,7 @@ async function run(c: ControlCommand, update: (o: Outcome) => void): Promise<Out
         return { state: 'failed', line: `${c.key} did not start: ${why}. Start it from Work.`, open };
       }
       const r = await startFromPreview(base, preview);
-      if (!r.ok) return { state: 'failed', line: r.error.message, open };
+      if (!r.ok) return { state: 'failed', line: errorText(r.error), open };
       const s = r.value;
       return {
         state: 'done',

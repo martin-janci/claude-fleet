@@ -1,7 +1,11 @@
 <script lang="ts">
+  import { errorText } from './error_copy';
   import { untrack } from 'svelte';
   import Loader from './Loader.svelte';
   import Modal from './Modal.svelte';
+  import { formKeys, platformSubmitHint } from './forms/form_frame';
+
+  const hint = platformSubmitHint();
   import { catalog, catalogOf, createAsset, KIND_ORDER, KIND_ONE, type AssetKind } from './assets';
 
   let {
@@ -51,7 +55,7 @@
     const r = await createAsset(kind, name, duplicateFrom === '' ? undefined : duplicateFrom);
     busy = false;
     if (!r.ok) {
-      error = r.error.message;
+      error = errorText(r.error);
       return;
     }
     onsaved(kind, name);
@@ -60,6 +64,7 @@
 
 <Modal title="New asset" onclose={busy ? undefined : onclose} width="420px" testid="new-asset-dialog">
   <p class="intro">Skills, agents, commands, hooks, MCP servers and plugins live in one catalog.</p>
+  <div class="keys" use:formKeys={{ submit: () => void create(), enabled: canCreate }}>
   <label>Kind
     <select bind:value={kind} disabled={busy} data-testid="new-asset-kind">
       {#each KIND_ORDER as k (k)}<option value={k}>{KIND_ONE[k]}</option>{/each}
@@ -87,11 +92,13 @@
       >
     {/if}
     <button onclick={onclose} disabled={busy}>Cancel</button>
-    <button class="primary" onclick={create} disabled={!canCreate} data-testid="new-asset-create">{#if busy}<Loader name="comet" size={12} class="btn-loader" />{/if}{busy ? 'Creating…' : 'Create'}</button>
+    <button class="primary" onclick={create} disabled={!canCreate} data-shortcut={busy ? undefined : hint.label} aria-keyshortcuts={hint.aria} data-testid="new-asset-create">{#if busy}<Loader name="comet" size={12} class="btn-loader" />{/if}{busy ? 'Creating…' : 'Create'}</button>
+  </div>
   </div>
 </Modal>
 
 <style>
+  .keys { display: contents; }
   label { display: flex; flex-direction: column; gap: 4px; font-size: var(--text-xs); color: var(--fg-muted); margin-bottom: 8px; }
   input, select { font: inherit; padding: 4px 6px; border: 1px solid var(--border); background: var(--bg-pane); color: var(--fg); border-radius: var(--radius-sm); }
   .intro { margin: 0 0 8px; font-size: var(--text-xs); color: var(--fg-muted); }

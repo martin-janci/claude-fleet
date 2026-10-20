@@ -30,7 +30,6 @@ export const STATUS_CLASSES = [
   'stuck-chip',
   'inactive-chip',
   'status-word',
-  'state-chip',
   'sub-status',
   'bg-status',
   'bg-item-status',

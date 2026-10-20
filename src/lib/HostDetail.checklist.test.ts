@@ -118,7 +118,7 @@ describe('HostDetail: health checklist', () => {
     mount();
     const run = screen.getByTestId('detail-run-checks') as HTMLButtonElement;
     expect(run.disabled).toBe(true);
-    expect(run.title).toMatch(/hub\.example/);
+    expect(run.title).toMatch(/The hub is unreachable/);
   });
 
   // mefistos (2026-10-11): the button sat disabled on every paired desktop.

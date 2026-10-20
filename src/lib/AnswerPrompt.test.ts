@@ -144,7 +144,7 @@ describe('AnswerPrompt', () => {
     await settle();
 
     expect(mockedSend).not.toHaveBeenCalled();
-    expect(screen.getByTestId('answer-error').textContent).toContain('host offline');
+    expect(screen.getByTestId('answer-error').textContent).toContain("Couldn't reach the host over SSH");
   });
 
   it('sends nothing when the probe comes back empty', async () => {

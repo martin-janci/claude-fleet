@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { viewKey } from './shortcuts';
+  import { IS_MAC, viewKey } from './shortcuts';
+  import { platformChord } from './kit/kbd';
   import Loader from './Loader.svelte';
   import ListLoading from './ListLoading.svelte';
   import { tick, untrack, type Snippet } from 'svelte';
@@ -282,7 +283,7 @@
   const setCardBusy = (b: string) => (cardBusy = b);
   const cardVerbs: CardVerbs & { reject: (id: number, positions: number[]) => void } = {
     apply: (id, positions) =>
-      void runCardVerb('apply', id, { positions, setBusy: setCardBusy, onchanged: changed, select: (c) => select(keyOf({ type: 'card', id: c })) }),
+      void runCardVerb('apply', id, { positions, setBusy: setCardBusy, onchanged: changed, select: (c) => select(keyOf({ type: 'card', id: c })), opensecrets: onsecrets }),
     dismiss: (id) => void runCardVerb('dismiss', id, { setBusy: setCardBusy, onchanged: changed }),
     undo: (id) => void runCardVerb('undo', id, { setBusy: setCardBusy, onchanged: changed }),
     reject: (id, positions) => void runCardVerb('reject', id, { positions, setBusy: setCardBusy, onchanged: changed }),
@@ -617,7 +618,7 @@
         >
         {#if !readOnly}
           <button type="button" class="btn" class:btn--primary={!cardPrimary && !syncPlanOpen && !creatingShown} onclick={() => onsync({})} disabled={busy !== ''} data-testid="assets-sync"
-            >{busy === 'plan' ? 'Planning…' : 'Sync fleet'}{#if !cardPrimary && !planOpen && !creatingShown} <kbd>⌘↵</kbd>{/if}</button
+            >{busy === 'plan' ? 'Planning…' : 'Sync fleet'}{#if !cardPrimary && !planOpen && !creatingShown} <kbd>{platformChord('⌘↵', IS_MAC)}</kbd>{/if}</button
           >
         {/if}
       </div>

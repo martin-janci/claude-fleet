@@ -9,7 +9,8 @@ vi.mock('@tauri-apps/api/core', () => ({
 
 import Attention from './Attention.svelte';
 import { sessions, sessionsLoaded, type SessionRow } from './sessions';
-import { toasts, clearToasts } from './toasts';
+import { toasts, clearToasts, runToastAction } from './toasts';
+import { clearSelection, selectedSession } from './selection';
 import { notifyStuckOs, notifyStuckToast } from './notify';
 import { fleetSettings } from './fleet_settings';
 import { failing, type FailingRoutine } from './routines';
@@ -84,6 +85,20 @@ describe('Attention', () => {
     expect(get(toasts)).toHaveLength(1);
   });
 
+  it('w11-12: the stuck toast opens the session', async () => {
+    const a = row({ tmux_name: 'dev-open', host_alias: 'mefistos' });
+    sessions.set([a]);
+    clearSelection();
+    render(Attention);
+    await tick();
+    sessions.set([{ ...a, stuck_kind: 'press_enter' }]);
+    await tick();
+    const t = get(toasts)[0];
+    expect(t.action?.label).toBe('Open');
+    runToastAction(t.id);
+    expect(get(selectedSession)?.id).toBe(a.id);
+  });
+
   it('does not replay stuck rows delivered by the bootstrap fill', async () => {
     // App.svelte mounts the sidebar (and this watcher) before the first
     // list_sessions resolves: the store goes [] -> [rows]. That fill is
@@ -130,11 +145,14 @@ describe('Attention', () => {
 });
 
 const shown: string[] = [];
+const made: FakeNotification[] = [];
 class FakeNotification {
   static permission = 'granted';
   static requestPermission = async () => 'granted';
+  onclick: ((e: Event) => void) | null = null;
   constructor(title: string) {
     shown.push(title);
+    made.push(this);
   }
 }
 
@@ -160,6 +178,20 @@ describe('Attention: the notifications matrix (11.9)', () => {
     sessions.set([{ ...a, claude_status: 'blocked' }]);
     await tick();
     expect(shown).toEqual(['dev-q needs you']);
+  });
+
+  it('w11-4: clicking the notification opens the session', async () => {
+    const a = row({ tmux_name: 'dev-click', claude_status: 'working' });
+    sessions.set([a]);
+    clearSelection();
+    made.length = 0;
+    render(Attention);
+    await tick();
+    sessions.set([{ ...a, claude_status: 'blocked' }]);
+    await tick();
+    expect(made).toHaveLength(1);
+    made[0].onclick?.(new Event('click'));
+    expect(get(selectedSession)?.id).toBe(a.id);
   });
 
   it('stays quiet for a state the column leaves out, and while the window has focus', async () => {

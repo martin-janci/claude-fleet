@@ -1295,12 +1295,7 @@ pub fn blank_rollups(h: &mut Health) {
     h.org_budgets.clear();
 }
 
-fn now_unix() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
+use crate::store::now_unix;
 
 pub fn health_check(store: &Mutex<Store>) -> Health {
     // A poisoned store mutex IS an unhealthy state — report db_ready=false

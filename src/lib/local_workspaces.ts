@@ -10,7 +10,7 @@
 
 import { get, writable } from 'svelte/store';
 import { invokeCmd, type Result } from './result';
-import { push } from './toasts';
+import { pushError } from './toasts';
 
 export type LocalWorkspaceState =
   | 'synced'
@@ -235,7 +235,7 @@ async function act(
 ): Promise<LocalWorkspace | null> {
   const r = await invokeCmd<LocalWorkspace>(cmd, { args });
   if (!r.ok) {
-    push({ kind: 'error', code: r.error.code, message: `${what}: ${r.error.message}` });
+    pushError(r.error, `${what}`);
     return null;
   }
   if (r.value && typeof r.value === 'object') replace(r.value);
@@ -269,7 +269,7 @@ export const resolveLocalConflict = (id: number, path: string, keep: 'local' | '
 export async function disconnectLocalWorkspace(id: number): Promise<boolean> {
   const r = await invokeCmd<null>('disconnect_local_workspace', { args: { id } });
   if (!r.ok) {
-    push({ kind: 'error', code: r.error.code, message: `Disconnect: ${r.error.message}` });
+    pushError(r.error, 'Disconnect');
     return false;
   }
   localWorkspaces.set(get(localWorkspaces).filter((w) => w.id !== id));
@@ -297,7 +297,7 @@ export function _resetLocalWorkspacesForTests(): void {
 async function call<T>(what: string, cmd: string, args: Record<string, unknown>): Promise<T | null> {
   const r = await invokeCmd<T>(cmd, { args });
   if (!r.ok) {
-    push({ kind: 'error', code: r.error.code, message: `${what}: ${r.error.message}` });
+    pushError(r.error, `${what}`);
     return null;
   }
   return r.value;
@@ -307,7 +307,7 @@ async function call<T>(what: string, cmd: string, args: Record<string, unknown>)
 export async function openLocalWorkspace(id: number, app: OpenApp): Promise<boolean> {
   const r = await invokeCmd<null>('open_local_workspace', { args: { id, app } });
   if (!r.ok) {
-    push({ kind: 'error', code: r.error.code, message: `Open: ${r.error.message}` });
+    pushError(r.error, 'Open');
     return false;
   }
   return true;

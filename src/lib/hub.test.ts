@@ -15,7 +15,7 @@ import {
   hubActionBlocked,
   HUB_ACTIONS,
   ROUTED_ACTIONS,
-  plainUnavailableReason,
+  unavailableReason,
   type HubStatus,
 } from './hub';
 import type { HubConnection } from './hub_connection';
@@ -77,22 +77,26 @@ describe('hubBlock', () => {
     }
   });
 
-  it('names the hub in every reason, so the sentence is actionable', () => {
+  // Review w16-6: each reason is a whole sentence of its own. No URL, no
+  // backticks, and no "Do it on the hub" tacked onto reasons that say to do
+  // it here ("edit the asset here instead") or that the hub cannot do it.
+  it('every reason is a sentence with no URL, backtick or tacked-on "do it on the hub"', () => {
     for (const action of HUB_ACTIONS) {
-      const why = hubBlock(action, remote);
-      expect(why, action).not.toBeNull();
-      expect(why, action).toContain('fleet.example.com');
+      const why = hubBlock(action, remote)!;
+      expect(why, action).toMatch(/^[A-Z]/);
+      expect(why, action).toMatch(/[.!?]$/);
+      expect(why, action).not.toContain('fleet.example.com');
+      expect(why, action).not.toContain('`');
+      expect(why.toLowerCase(), action).not.toContain('do it on the hub');
     }
   });
 
-  // The design's rule: the honest answer is never "you cannot do this", it is
-  // "not from here".
-  it('every reason says where the action does work', () => {
-    for (const action of HUB_ACTIONS) {
-      expect(hubBlock(action, remote)!.toLowerCase(), action).toMatch(
-        /on the hub|from the hub|standalone|disconnect/,
-      );
-    }
+  it('sends administration to the hub’s operator, naming the command where there is one', () => {
+    expect(hubBlock('add_tracker', remote)).toContain('Ask the hub’s operator to do it (fleet-hub tracker add).');
+    expect(hubBlock('remove_host', remote)).toMatch(/Ask the hub’s operator to do it\.$/);
+    // A reason that says what to use here instead sends nobody anywhere.
+    expect(hubBlock('dismiss_agent_session', remote)).toMatch(/^Use Kill instead/);
+    expect(hubBlock('catalog_spawn_author_session', remote)).not.toContain('operator');
   });
 
   it('the fleet-administration actions say a client is not the administrator', () => {
@@ -127,39 +131,42 @@ describe('hubBlock, configured hub unavailable', () => {
     for (const action of HUB_ACTIONS) {
       const why = hubBlock(action, unavailable);
       expect(why, action).not.toBeNull();
-      expect(why, action).toContain('no client token is stored');
+      expect(why, action).toContain("isn't paired with the hub");
+      expect(why, action).not.toContain('client token');
       expect(why!.toLowerCase(), action).toContain('settings');
     }
   });
 });
 
 describe('hubNextStep', () => {
-  // Requirement (c), the real trap: with confirm-destructive on, the hub
-  // refuses and the desktop's own confirm dialog answers THIS process's
-  // queue, not the hub's. Someone would click, see a refusal, and have
-  // nowhere to go.
-  it('tells a hub client that a confirmation has to be approved on the hub', () => {
-    const step = hubNextStep({ code: 'E_CONFIRM_REQUIRED', message: 'confirm' }, remote);
-    expect(step).toBeTruthy();
-    expect(step!.toLowerCase()).toContain('on the hub');
-    expect(step).toContain('fleet.example.com');
-    // The ledger's exact copy. Once the operator approves, the change comes
-    // back over the event bridge and this window updates itself, so telling
+  // Review w16-3: since redesign 9.2 a paired desktop's confirmation queue is
+  // the hub's, so the request opens in this window's own dialog, and the phone
+  // answers it in Control. The old sentence ("this desktop's dialog answers
+  // only its own queue, which is empty") was false.
+  it('points a hub client at the confirmation that opened here, or the phone', () => {
+    const step = hubNextStep({ code: 'E_CONFIRM_REQUIRED', message: 'confirm' }, remote)!;
+    expect(step).toContain('approve it in the confirmation that just opened, or on your phone');
+    expect(step).toContain('This window follows.');
+    expect(step).not.toContain('fleet.example.com');
+    expect(step.toLowerCase()).not.toContain('empty');
+    // Once approved the change comes back over the event bridge, so telling
     // anyone to "refresh" would send them to a button that does nothing new.
-    expect(step!.toLowerCase()).toContain('approve it on the hub — this window will follow');
-    expect(step!.toLowerCase()).not.toContain('refresh');
+    expect(step.toLowerCase()).not.toContain('refresh');
+  });
+
+  it('sends a read-only client to the owner, who can answer it', () => {
+    const step = hubNextStep({ code: 'E_CONFIRM_REQUIRED', message: 'confirm' }, { ...remote, client_mode: 'readonly' })!;
+    expect(step).toContain('owner’s device');
   });
 
   it('says nothing about confirmations in standalone mode, where the dialog works', () => {
     expect(hubNextStep({ code: 'E_CONFIRM_REQUIRED', message: 'confirm' }, STANDALONE)).toBeNull();
   });
 
-  it('sends a revoked client back to Settings', () => {
-    const step = hubNextStep({ code: 'E_UNAUTHORIZED', message: 'revoked' }, remote);
-    expect(step!.toLowerCase()).toContain('settings');
-  });
-
+  // Review w16-4: E_UNAUTHORIZED has its own sentence in error_copy; adding
+  // this one said the same thing twice.
   it('adds nothing to an error that already explains itself', () => {
+    expect(hubNextStep({ code: 'E_UNAUTHORIZED', message: 'revoked' }, remote)).toBeNull();
     expect(hubNextStep({ code: 'E_LOCAL_ONLY', message: '…; do it on the hub' }, remote)).toBeNull();
     expect(hubNextStep({ code: 'E_SSH', message: 'timed out' }, remote)).toBeNull();
   });
@@ -309,7 +316,7 @@ describe('hubActionBlocked', () => {
   it('a configured-but-unavailable hub blocks a routed action as well as a refused one', () => {
     const why = hubActionBlocked('kill_session', unavailable, CONNECTED);
     expect(why).not.toBeNull();
-    expect(why).toContain('no client token is stored');
+    expect(why).toContain("isn't paired with the hub");
     expect(why!.toLowerCase()).toContain('settings');
   });
 
@@ -362,23 +369,19 @@ describe('hubActionBlocked', () => {
   });
 });
 
-describe('plainUnavailableReason', () => {
+describe('unavailableReason', () => {
   // The raw reasons Backend::resolve produces (src-tauri/src/backend/mod.rs).
+  // Review w16-5: one mapper (error_copy's hubUnavailableWords) for the
+  // banner, Settings and every disabled control's tooltip.
   it.each([
-    ['https://h is configured but no client token is stored', 'no saved pairing'],
-    ['cannot read the client token for https://h (keychain locked)', 'could not be read'],
-    ['hub.remote_url is not a usable hub address (relative URL)', 'not a valid URL'],
-    [
-      'http://h is plain http to a host that is not loopback, so … Use https://, or set hub.client_plaintext_token=true if …',
-      'use https://',
-    ],
-  ])('says %j without setting keys', (raw, want) => {
-    const got = plainUnavailableReason(raw);
-    expect(got).toContain(want);
-    expect(got).not.toMatch(/hub\.[a-z_]+|client token/);
-  });
-
-  it('falls back to a generic sentence, never the raw text', () => {
-    expect(plainUnavailableReason('hub.weird_key broke')).not.toContain('hub.weird_key');
+    'https://h is configured but no client token is stored',
+    'cannot read the client token for https://h (keychain locked)',
+    'hub.remote_url is not a usable hub address (relative URL without a base)',
+    'http://h is plain http to a host that is not loopback, so … Use https://, or set hub.client_plaintext_token=true if …',
+    'hub.weird_key broke',
+  ])('says %j without setting keys', (raw) => {
+    const got = unavailableReason({ ...STANDALONE, unavailable: raw })!;
+    expect(got).not.toMatch(/hub\.[a-z_]+|client token|keychain/);
+    expect(got).toContain('Settings → Hub & sync');
   });
 });

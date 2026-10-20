@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { errorText } from './error_copy';
   import ConfirmDialog from './ConfirmDialog.svelte';
   import DiffView from './DiffView.svelte';
   import { driftDiff, type ChangesetView, type DriftDiff, type DriftFile } from './assets_workspace';
@@ -43,7 +44,7 @@
         diff = r.value;
         if (r.value.merges_only) note = 'This asset lives in a config file (an MCP entry); its diff is not shown, so no secret leaves the host.';
       } else {
-        note = olderHubWords(r.error, 'show this diff') ?? `Could not read the two copies: ${r.error.message}`;
+        note = olderHubWords(r.error, 'show this diff') ?? `Could not read the two copies: ${errorText(r.error)}`;
       }
     });
     return () => (live = false);

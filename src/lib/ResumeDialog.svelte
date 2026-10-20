@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { errorText } from './error_copy';
   // Resume past work (roadmap M2.5): where the session would land, the three
   // modes with the hub's reason for any that is not possible, and — for
   // "Fresh with brief" — the brief itself, editable before anything starts
@@ -97,7 +98,7 @@
     const r = await summarizePastWork(workKey, id);
     changedBusy = false;
     if (!r.ok) {
-      error = r.error.message;
+      error = errorText(r.error);
       return;
     }
     changedBy = r.value;
@@ -156,7 +157,7 @@
     error = null;
     const r = await workResumePlan(workKey, { linkId, hostAlias: hostOverride });
     if (!r.ok) {
-      error = r.error.message;
+      error = errorText(r.error);
       plan = null;
       return;
     }
@@ -177,7 +178,7 @@
       briefSummary = changedBy && changed.trim() !== '' ? changed : null;
       changedStale = false;
     } else {
-      error = r.error.message;
+      error = errorText(r.error);
     }
   }
 
@@ -218,7 +219,7 @@
     });
     busy = false;
     if (!r.ok) {
-      error = r.error.message;
+      error = errorText(r.error);
       return;
     }
     selectSessionExplicitly(r.value);

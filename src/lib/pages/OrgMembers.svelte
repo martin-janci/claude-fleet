@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { errorText } from '../error_copy';
   // An org's members (redesign 11.2, board OrgMembers): a table of who is
   // in it, their role, their devices (for whoever administers it) and since
   // when an org share reaches them. Removing one asks what happens to what
@@ -155,7 +156,7 @@
     }
     trustNote = {
       ...trustNote,
-      [device]: r.error.code === 'E_NOTFOUND' ? `Waiting for ${person} to pair…` : r.error.message,
+      [device]: r.error.code === 'E_NOTFOUND' ? `Waiting for ${person} to pair…` : errorText(r.error),
     };
   }
 
@@ -166,7 +167,7 @@
     const r = await pairMemberDevice(orgId, p.person, device.trim(), resourceFleet().fleet);
     minting = false;
     if (r.ok) memberPairing.set({ ...p, pairing: r.value });
-    else pairError = r.error.message;
+    else pairError = errorText(r.error);
   }
 </script>
 

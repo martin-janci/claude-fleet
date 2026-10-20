@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { errorText } from './error_copy';
   import ListLoading from './ListLoading.svelte';
   import { untrack } from 'svelte';
   import type { SessionRow } from './sessions';
@@ -141,7 +142,7 @@
       selectedPath = null;
       openCommit = null;
     } else {
-      error = r.error.message;
+      error = errorText(r.error);
     }
   }
 

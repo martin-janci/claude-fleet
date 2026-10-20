@@ -1,7 +1,7 @@
 // The routine draft's pure helpers (review wave w05).
 import { describe, it, expect } from 'vitest';
-import { draftCron, draftMissing, draftOf, withDays, zoneOfSaved } from './routine_draft';
-import { budgetProblem, capProblem, isCronProblem, microsOf, rateLabel } from '../routines';
+import { draftCron, draftInput, draftMissing, draftOf, withDays, zoneOfSaved } from './routine_draft';
+import { budgetProblem, capProblem, isCronProblem, microsOf, rateLabel, routineInputOf, type RoutineRow } from '../routines';
 
 const base = { name: 'N', trigger: 'cron' as const, cron: '30 7 * * 1-5', host_alias: 'mac', project_id: 1, prompt: 'P' };
 
@@ -96,5 +96,23 @@ describe('rateLabel and isCronProblem', () => {
     expect(isCronProblem('"0 0 31 2 *" never fires')).toBe(true);
     expect(isCronProblem('host gone not found')).toBe(false);
     expect(isCronProblem(undefined)).toBe(false);
+  });
+});
+
+describe('memory (migration 204)', () => {
+  it('sends memory only when the routine keeps a notebook, so an older hub still saves the rest', () => {
+    const plain = draftInput(draftOf(base), true, 'UTC');
+    expect('memory' in plain).toBe(false);
+    expect('memory_auto' in plain).toBe(false);
+    const d = draftOf({ ...base, memory: 'both', memory_auto: true });
+    expect(d.memory).toBe('both');
+    const i = draftInput(d, true, 'UTC');
+    expect(i.memory).toBe('both');
+    expect(i.memory_auto).toBe(true);
+  });
+  it('a saved routine opens with its memory and without it when it keeps none', () => {
+    const row = { ...base, id: 3, enabled: true, utc_offset_min: 0, overlap: 'skip', skip_next: false, created_at: 0, updated_at: 0 } as RoutineRow;
+    expect('memory' in routineInputOf(row)).toBe(false);
+    expect(routineInputOf({ ...row, memory: 'project' })).toMatchObject({ memory: 'project', memory_auto: false });
   });
 });

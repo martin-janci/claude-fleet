@@ -55,9 +55,7 @@ pub struct DeferredPromptRow {
     pub skipped_at: Option<i64>,
 }
 
-fn is_false(b: &bool) -> bool {
-    !*b
-}
+use crate::serde_util::is_false;
 
 /// When a deferred prompt may be typed, besides "the session is idle".
 /// `Default` is the plain step 5.10 prompt: the next idle moment.

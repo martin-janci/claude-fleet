@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { errorText } from './error_copy';
   // An extra fleet's session, opened (multi-hub Phase 2): its conversation
   // read from its own hub, a composer that prompts it there, its terminal
   // attached from this machine, and a read-only pane snapshot.
@@ -97,7 +98,7 @@
       convError = null;
       if (!sameConversation(conv, r.value)) conv = reuseTurns(conv, r.value);
     } else {
-      convError = r.error.message;
+      convError = errorText(r.error);
     }
   }
 
@@ -110,7 +111,7 @@
       snapshot = r.value;
       snapshotError = null;
     } else {
-      snapshotError = r.error.message;
+      snapshotError = errorText(r.error);
     }
   }
 

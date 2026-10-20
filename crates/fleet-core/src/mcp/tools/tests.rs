@@ -4846,7 +4846,12 @@ fn the_served_definition_budget_stays_bounded() {
     /// restarts, `answer` tokens) merged together measured the client full
     /// surface at 136,678 bytes for 158 tools (865 a tool) and the master at
     /// 129,312 bytes for 154 tools (839 a tool).
-    const BYTES_PER_TOOL: usize = 866;
+    /// Raised to 867 on 2026-10-20: routine memory (`routines { memory |
+    /// set_memory }` and their `notebook` / `text`, the description already
+    /// trimmed to make room) measured the client full surface at 136,874
+    /// bytes for 158 tools (866 a tool) and the master at 129,508 bytes for
+    /// 154 tools (840 a tool).
+    const BYTES_PER_TOOL: usize = 867;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -21793,10 +21798,11 @@ fn set_position(t: &FleetTools, position: crate::service::autonomy::Position) {
     assert_eq!(crate::service::autonomy::position(&st), position);
 }
 
-/// Session care (`control.session_care`): off, the operator's restart of
-/// its own session asks at every position; on, it goes without a card at
-/// Within your brief (audited on the session), retiring one only at
-/// Autopilot, and a session that is not its handoff still asks.
+/// Session care (`control.session_care`, on by default): off, the
+/// operator's restart of its own session asks at every position; on, it
+/// goes without a card at Within your brief (audited on the session),
+/// retiring one only at Autopilot, and a session that is not its handoff
+/// still asks.
 #[tokio::test]
 async fn session_care_lets_the_operator_restart_and_retire_its_own_sessions() {
     use super::params::{RestartSessionParams, SafeKillSessionParams};
@@ -21844,6 +21850,21 @@ async fn session_care_lets_the_operator_restart_and_retire_its_own_sessions() {
             );
         }
     };
+
+    // Review w30-10: care is on by default (the owner's 2026-10-20 choice):
+    // on a store that never set it, a restart of its own session at Within
+    // your brief goes without a card.
+    assert!(crate::service::settings::get_bool(
+        &t.store.lock().unwrap(),
+        crate::service::settings::CONTROL_SESSION_CARE
+    ));
+    set_position(&t, Position::Brief);
+    let (out, approval) = guard::tracking_approval(
+        t.restart_session(Extension(operator()), Parameters(restart(on_b))),
+    )
+    .await;
+    not_asked(&out);
+    assert_eq!(approval, Some(crate::store::APPROVAL_PRE_APPROVED));
 
     // Care off: a restart asks even at Autopilot.
     t.store

@@ -69,6 +69,9 @@ export interface MissionListState {
   loaded: boolean;
   missions: Mission[];
   error: string | null;
+  /** Review w17-7: a read has answered at least once, so `missions` is a
+   *  real list and a later failure is a failed refresh (the list stays). */
+  read?: boolean;
 }
 
 export const missionList = writable<MissionListState>({ loaded: false, missions: [], error: null });
@@ -81,7 +84,7 @@ export async function loadMissionList(): Promise<void> {
   const r = await listMissions();
   if (mine !== listSeq) return;
   if (r.ok) {
-    missionList.set({ loaded: true, missions: Array.isArray(r.value) ? r.value : [], error: null });
+    missionList.set({ loaded: true, missions: Array.isArray(r.value) ? r.value : [], error: null, read: true });
   } else {
     missionList.update((s) => ({ ...s, loaded: true, error: withoutConfigKeys(readErrorText(r.error)) }));
   }

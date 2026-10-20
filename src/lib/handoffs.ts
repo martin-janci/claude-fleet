@@ -14,6 +14,7 @@ import { onWorkChangedDebounced, decideWorkProposal } from './work';
 import { acceptWorkProposals, createMission, setMissionItem, undoWorkAccept } from './missions';
 import type { SessionRow } from './sessions';
 import type { OfState } from './kit/status';
+import { errorText } from './error_copy';
 
 export type HandoffKind = 'session' | 'mission' | 'task' | 'tree';
 
@@ -242,17 +243,17 @@ export async function createFromTree(
   const drop = open.filter((id) => !ticked.includes(id));
   if (keep.length === 0) return 'Tick at least one task to create.';
   const accepted = await acceptWorkProposals(keep);
-  if (!accepted.ok) return accepted.error.message;
+  if (!accepted.ok) return errorText(accepted.error);
   for (const id of drop) {
     const r = await decideWorkProposal(id, false);
-    if (!r.ok) return r.error.message;
+    if (!r.ok) return errorText(r.error);
   }
   if (asMission && h.item) {
     const m = await createMission({ name: h.item.title, goal: h.item.title }, h.item.id);
-    if (!m.ok) return m.error.message;
+    if (!m.ok) return errorText(m.error);
     for (const id of keep) {
       const r = await setMissionItem(m.value.id, id, true);
-      if (!r.ok) return r.error.message;
+      if (!r.ok) return errorText(r.error);
     }
   }
   await refreshHandoffs();
@@ -265,7 +266,7 @@ export async function createFromTree(
 export async function rejectTree(h: ControlHandoff): Promise<string | null> {
   for (const i of openProposals(h)) {
     const r = await decideWorkProposal(i.id, false);
-    if (!r.ok) return r.error.message;
+    if (!r.ok) return errorText(r.error);
   }
   await refreshHandoffs();
   return null;
@@ -276,7 +277,7 @@ export async function undoTree(h: ControlHandoff, nowSec: number): Promise<strin
   const ids = undoable(h, nowSec).map((i) => i.id);
   if (ids.length === 0) return null;
   const r = await undoWorkAccept(ids);
-  if (!r.ok) return r.error.message;
+  if (!r.ok) return errorText(r.error);
   await refreshHandoffs();
   return null;
 }

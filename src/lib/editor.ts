@@ -2,7 +2,7 @@
 // VS Code on this machine, locally for a `local` session and through
 // Remote - SSH for any other host. The backend asks the pane for its folder.
 import { invokeCmd } from './result';
-import { push } from './toasts';
+import { push, pushError } from './toasts';
 import { hasNoPane, type SessionRow } from './sessions';
 import { noAttachReason, type SessionAccess } from './access';
 
@@ -24,7 +24,7 @@ export async function openSessionInEditor(s: Target): Promise<boolean> {
     args: { host_alias: s.host_alias, tmux_name: s.tmux_name },
   });
   if (!r.ok) {
-    push({ kind: 'error', code: r.error.code, message: `Open in VS Code: ${r.error.message}` });
+    pushError(r.error, 'Open in VS Code');
     return false;
   }
   return true;

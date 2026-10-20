@@ -1,4 +1,5 @@
 <script lang="ts" module>
+  import { errorText } from './error_copy';
   import type { Result as R } from './result';
   import type { TuneAnswer as T } from './prompt_tune';
 
@@ -124,7 +125,7 @@
       tunedFrom = p.from;
       view = 'rewrite';
     } else {
-      error = r.error.message;
+      error = errorText(r.error);
     }
   }
 

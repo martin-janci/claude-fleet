@@ -57,12 +57,7 @@ pub fn normalize_done_when(lines: &[String]) -> Result<Vec<String>, IpcError> {
     Ok(out)
 }
 
-fn now_unix() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
+use crate::store::now_unix;
 
 impl Store {
     /// Replace an item's condition lines. Answers whether anything changed;
