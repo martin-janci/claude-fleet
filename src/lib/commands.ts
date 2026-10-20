@@ -15,7 +15,7 @@ import { goTo } from './destination';
 import { pauseAllMissions } from './missions';
 import { sessionView } from './prefs';
 import type { SessionView } from './session_view';
-import { theme, cycleTheme, type Theme } from './theme';
+import { theme, applyTheme, themeLabel, THEMES, type Theme } from './theme';
 import { openToday } from './control';
 import { toggleSidebarView } from './work_view';
 import { pendingInputFor, type AnswerView } from './pending_input';
@@ -163,8 +163,6 @@ export function paletteCommands(ctx: CommandContext): PaletteCommand[] {
       synonyms: ['today', 'digest'], shortcut: 'today' },
     { id: 'app.work-view', label: 'Switch Sessions and Work', section: 'Commands', description: 'Left list',
       synonyms: ['work', 'sessions', 'switch'], shortcut: 'work-view' },
-    { id: 'app.theme', label: `Theme: ${themeAfter(get(theme))}`, section: 'Commands',
-      description: `Now ${get(theme)}`, synonyms: ['theme', 'dark', 'light', 'auto', 'sun', 'night', 'appearance'] },
     { id: 'app.shortcuts', label: 'Keyboard shortcuts', section: 'Commands', description: 'Every chord',
       synonyms: ['keys', 'keyboard', 'shortcuts', 'help'], shortcut: 'shortcut-sheet' },
     // Pause all missions pauses each active mission, as before; Pause all
@@ -182,6 +180,13 @@ export function paletteCommands(ctx: CommandContext): PaletteCommand[] {
     { id: 'app.dashboard', label: 'Open dashboard', section: 'Commands', description: 'This workspace’s numbers',
       synonyms: ['dashboard', 'dashboards', 'stats', 'sprint', 'health', 'charts'] },
   );
+  // One row per theme not active, by the names Settings uses (review w20-11).
+  const now = get(theme);
+  for (const t of THEMES) {
+    if (t.id === now) continue;
+    out.push({ id: `${THEME}${t.id}`, label: `Theme: ${t.label}`, section: 'Commands', description: `Now ${themeLabel(now)}`,
+      synonyms: ['theme', 'appearance', t.label.toLowerCase(), ...THEME_WORDS[t.id]] });
+  }
   // Workspaces (persona design 2026-10-11): one row per workspace not active.
   const active = get(workspace);
   for (const w of WORKSPACES) {
@@ -192,11 +197,8 @@ export function paletteCommands(ctx: CommandContext): PaletteCommand[] {
   return out;
 }
 
-const THEME_NEXT: Record<Theme, Theme> = { sun: 'auto', auto: 'light', light: 'dark', dark: 'sun' };
-/** The theme the command switches to: the sidebar toggle's order. */
-function themeAfter(t: Theme): Theme {
-  return THEME_NEXT[t];
-}
+/** Words besides its name that find a theme's row. */
+const THEME_WORDS: Record<Theme, string[]> = { sun: ['day', 'sunset', 'dynamic'], auto: ['auto', 'os'], light: ['day'], dark: ['night'] };
 
 /** Switcher rows for `cmds`, each carrying the chord the platform shows. */
 export function commandRows(cmds: readonly PaletteCommand[], isMac: boolean): SwitcherEntry[] {
@@ -233,6 +235,9 @@ export function settingRow(rest: string, descs: Iterable<Descriptor>, canWrite: 
   };
 }
 
+/** A palette id that switches theme: `app.theme.<id>`. */
+const THEME = 'app.theme.';
+
 /** A palette id that switches workspace: `app.workspace.<id>`. */
 const WORKSPACE = 'app.workspace.';
 
@@ -246,6 +251,11 @@ export async function runCommand(id: string, ctx: CommandContext): Promise<void>
     // Details runs it, with its own gate, confirm and dialog, as it does for
     // the row menu; the request opens the inspector or the Details tab.
     if (s && s.status !== 'ghost') requestSessionAction(s, id.slice(SESSION_ACTION.length) as SessionActionId);
+    return;
+  }
+  if (id.startsWith(THEME)) {
+    const to = THEMES.find((t) => `${THEME}${t.id}` === id);
+    if (to) applyTheme(to.id);
     return;
   }
   if (id.startsWith(WORKSPACE)) {
@@ -311,9 +321,6 @@ export async function runCommand(id: string, ctx: CommandContext): Promise<void>
       return;
     case 'app.work-view':
       toggleSidebarView();
-      return;
-    case 'app.theme':
-      cycleTheme();
       return;
     case 'app.shortcuts':
       shortcutSheetOpen.set(true);

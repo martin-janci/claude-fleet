@@ -117,6 +117,16 @@ accepts a revision-16 to 18 hub; 18 adds session environment variables
 (`env_vars`, `new_session { env }`, a form's `env_target`), whose Settings
 page a revision-17 hub answers with an unknown tool.
 
+**The dynamic day/night theme** is landed and ON by default (#936,
+fleet-mobile #234): Settings › Appearance's Theme defaults to Sun, which is
+light while the sun is up in the device's time zone and dark after sunset;
+Contrast (System by default on the desktop) and Accent (Cyan) apply to every
+mode (`docs/architecture.md` → *Theme engine*). Sun works from the time
+zone's meridian at a fixed 48° N, so it is off by hours far from that
+latitude and seasons are inverted in the southern hemisphere; a real
+location or fixed hours ("Schedule") waits on the owner (review w20-1). The
+phone has no System contrast yet (w20-8).
+
 Ticket keys (2026-10, migration 169, `store/ticket_keys.rs`). Fleet
 administers Jira-style keys: each ticket space (a project, a GitHub
 repository no project claims, an Asana tracker) has an upper-case prefix

@@ -73,6 +73,27 @@ for (const src of [
   for (const m of src.matchAll(/setProperty\(\s*['"`](--[a-z0-9-]+)/g)) DECLARED.add(m[1]);
 }
 
+/** The shared stylesheets components import (review w20-9); the loader
+ *  kit's stage values are the board's own, documented in loader-kit.css. */
+const SHEETS = readdirSync('src/lib')
+  .filter((f) => f.endsWith('.css') && !f.startsWith('loader-kit'))
+  .map((f) => ({ path: `lib/${f}`, css: readFileSync(`src/lib/${f}`, 'utf8').replace(/\/\*[\s\S]*?\*\//g, '') }));
+
+describe('light mode: shared stylesheets colour only through tokens', () => {
+  it('finds them', () => {
+    expect(SHEETS.map((s) => s.path)).toContain('lib/settings_dialog.css');
+  });
+  for (const { path, css } of SHEETS) {
+    it(`${path} has no colour literal`, () => {
+      expect(literalLines(css)).toEqual([]);
+    });
+    it(`${path} uses only declared custom properties`, () => {
+      const undeclared = [...css.matchAll(/var\((--[a-z0-9-]+)/g)].map((m) => m[1]).filter((name) => !DECLARED.has(name));
+      expect([...new Set(undeclared)]).toEqual([]);
+    });
+  }
+});
+
 describe('light mode: components colour only through tokens', () => {
   it('finds the components', () => {
     expect(FILES.length).toBeGreaterThan(100);
