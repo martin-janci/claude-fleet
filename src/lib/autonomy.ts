@@ -11,6 +11,7 @@
 // pre-approves the operator's calls by it (`guard::operator_must_confirm`):
 // Custom grants what Ask first does.
 import { setFleetSetting, settingBool, settingInt, SETTING_KEYS, type FleetSettings, type SettingKey } from './fleet_settings';
+import { errorText } from './error_copy';
 
 export type AutonomyId = 'ask' | 'brief' | 'autopilot';
 
@@ -48,7 +49,7 @@ export const AUTONOMY: readonly AutonomyPosition[] = [
   {
     id: 'autopilot',
     label: 'Autopilot',
-    blurb: "Also starts sessions inside a mission's grant (its hosts, hours and budget) and creates and starts its tasks, and goes on with a recommended choice after 2 minutes. Kills, restarts and deletes still ask, unless “Control looks after its sessions” is on: then it also restarts a stuck session and retires a finished one after pushing its work.",
+    blurb: "Also starts sessions inside a mission's grant (its hosts, hours and budget) and creates and starts its tasks, and goes on with a recommended choice after 2 minutes. Kills, restarts and deletes still ask, unless “Control looks after its sessions” is on: then it also restarts a stuck session it started itself and retires a finished one of its own after pushing its work.",
     maxLevel: 3,
     autoContinue: true,
     minutes: 2,
@@ -89,7 +90,7 @@ export function autonomyWrites(id: AutonomyId, map: FleetSettings): [SettingKey,
 export async function setAutonomy(id: AutonomyId, map: FleetSettings): Promise<string | null> {
   for (const [key, value] of autonomyWrites(id, map)) {
     const r = await setFleetSetting(key, value);
-    if (!r.ok) return `Couldn't set ${key}: ${r.error.message}`;
+    if (!r.ok) return `Couldn't set ${key}: ${errorText(r.error)}`;
   }
   return null;
 }

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { errorText } from './error_copy';
   // A placement rule (work graph M14): "tasks like these go under group X".
   // Navigation only — a rule never links a session, never changes access,
   // and never touches the tracker. A rule is saved only after a preview of
@@ -9,6 +10,7 @@
   // Save waits for the preview of exactly what is on screen.
   import { onDestroy, untrack } from 'svelte';
   import Modal from './Modal.svelte';
+  import { formKeys, platformSubmitHint } from './forms/form_frame';
   import { trackers as trackerStore } from './trackers';
   import { hubStatus, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
@@ -119,7 +121,7 @@
     if (mine !== previewSeq) return;
     previewing = false;
     if (!r.ok) {
-      failure = r.error.message;
+      failure = errorText(r.error);
       return;
     }
     failure = null;
@@ -179,7 +181,7 @@
             : 'A rule like this was saved elsewhere at the same time. Check the new preview before saving.';
         return;
       }
-      failure = r.error.message;
+      failure = errorText(r.error);
       return;
     }
     onsaved?.(r.value);
@@ -201,6 +203,11 @@
     });
   }
 
+  // ⌘↵ saves, once the preview is current (review w18-6): the form has no
+  // submit button, so neither Enter nor ⌘↵ saved before.
+  const hint = platformSubmitHint();
+  const canSave = $derived(previewCurrent && !busy && saveBlocked === null);
+
   async function remove() {
     if (start.id == null || busy || deleteBlocked !== null) return;
     busy = true;
@@ -209,7 +216,7 @@
     busy = false;
     confirmDelete = false;
     if (!r.ok) {
-      failure = conflictOf(r.error) ? 'This rule changed elsewhere. Close it and open it again before deleting.' : r.error.message;
+      failure = conflictOf(r.error) ? 'This rule changed elsewhere. Close it and open it again before deleting.' : errorText(r.error);
       return;
     }
     ondeleted?.(start.name ?? name);
@@ -220,6 +227,7 @@
 <Modal title={start.id != null ? 'Edit placement rule' : 'Make a rule for similar tasks'} {onclose} width="520px" testid="work-rule-editor">
   <form
     class="form"
+    use:formKeys={{ submit: () => void save(), enabled: canSave }}
     onsubmit={(e) => {
       e.preventDefault();
       if (previewCurrent) void save();
@@ -349,7 +357,9 @@
         type="button"
         class="btn btn--primary"
         data-testid="rule-save"
-        disabled={!previewCurrent || busy || saveBlocked !== null}
+        disabled={!canSave}
+        data-shortcut={busy ? undefined : hint.label}
+        aria-keyshortcuts={hint.aria}
         title={saveBlocked ?? (previewCurrent ? 'Save the rule' : 'Wait for the preview of this rule')}
         onclick={() => void save()}>Save rule</button
       >

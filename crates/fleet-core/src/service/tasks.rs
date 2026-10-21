@@ -838,12 +838,7 @@ pub fn clamp_task_limit(limit: i64) -> i64 {
     limit.clamp(1, MAX_TASK_PAGE)
 }
 
-fn now_unix() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
+use crate::store::now_unix;
 
 // ── task result as untrusted input (S6) ───────────────────────────────────
 

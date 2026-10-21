@@ -23,6 +23,6 @@ pub mod router;
 pub mod transport;
 pub mod ws;
 
-pub use registry::{AgentHello, AgentRegistry, AgentStatus, ConnId};
+pub use registry::{AgentHello, AgentRegistry, AgentStatus, ConnId, DuplicateAgent};
 pub use router::HostRouter;
 pub use transport::AgentTransport;

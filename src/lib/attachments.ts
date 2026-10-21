@@ -31,6 +31,9 @@ export interface Attachment {
    * always added as an `error` tile rather than a `reading` one.
    */
   pasted: boolean;
+  /** When this window made the tile (ms since the epoch): its allow-list
+   *  entry was granted just before, and lapses `PICKED_ALLOW_TTL` later. */
+  attachedAt?: number;
 }
 
 export const MAX_FILES = 10;
@@ -102,6 +105,7 @@ function readingTile(f: PickedFile): Attachment {
     state: 'reading',
     error: null,
     pasted: false,
+    attachedAt: Date.now(),
   };
 }
 
@@ -214,6 +218,28 @@ export function addFiles(
 export function markNeedsReattach(list: Attachment[], ids: Set<string>): Attachment[] {
   if (ids.size === 0) return list;
   return list.map((a) => (ids.has(a.id) ? { ...a, state: 'error' as const, error: NEEDS_REATTACH } : a));
+}
+
+/** How long a tile's authorisation is trusted: `PICKED_ALLOW_TTL` (4 h,
+ *  `src-tauri/src/commands/upload.rs`) less a minute, since the backend's
+ *  clock started a little before the tile was made. */
+export const TRAY_AUTH_TTL_MS = 4 * 60 * 60 * 1000 - 60 * 1000;
+
+/**
+ * A remembered tray (`composerTrays`) brought back to the box: a tile
+ * attached longer ago than the allow-list keeps a path is spent, so it is
+ * marked `NEEDS_REATTACH` here rather than looking ready and sinking the
+ * whole message at Send. Tiles with no `attachedAt`, pasted ones and those
+ * already in error are left as they are. Returns `list` itself when nothing
+ * changes.
+ */
+export function expireTray(list: Attachment[], now: number): Attachment[] {
+  const stale = new Set(
+    list
+      .filter((a) => a.state !== 'error' && !a.pasted && a.attachedAt !== undefined && now - a.attachedAt > TRAY_AUTH_TTL_MS)
+      .map((a) => a.id),
+  );
+  return markNeedsReattach(list, stale);
 }
 
 /**

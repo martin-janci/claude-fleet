@@ -292,7 +292,7 @@ describe('noAttachReason', () => {
 
   it('blames the hub when the hub is the problem, not the session', () => {
     const why = noAttachReason(null, unavailable) ?? '';
-    expect(why).toContain('no stored token');
+    expect(why).toContain("can't use the hub");
     expect(why).not.toContain('not yours');
     expect(why).not.toContain('Shared with you');
   });

@@ -24,6 +24,9 @@ export interface UsageSnapshotRow {
 export interface AccountLogin {
   host: string;
   profile: string | null;
+  /** When fleet first saw this login signed out (`hosts.signed_out_logins`,
+   *  review w03-1); absent while it is signed in. */
+  signedOutSince?: number;
 }
 
 export interface AccountSummary {
@@ -50,9 +53,13 @@ export function loginsFor(uuid: string, hosts: readonly HostRow[]): AccountLogin
   const out: AccountLogin[] = [];
   const sorted = [...hosts].sort((a, b) => a.alias.localeCompare(b.alias));
   for (const h of sorted) {
-    if (h.account_uuid === uuid) out.push({ host: h.alias, profile: null });
+    const since = (profile: string | null) => {
+      const l = (h.signed_out_logins ?? []).find((x) => (x.profile ?? null) === profile);
+      return l ? { signedOutSince: l.since } : {};
+    };
+    if (h.account_uuid === uuid) out.push({ host: h.alias, profile: null, ...since(null) });
     for (const p of h.claude_profiles ?? []) {
-      if (p.account_uuid === uuid) out.push({ host: h.alias, profile: p.name });
+      if (p.account_uuid === uuid) out.push({ host: h.alias, profile: p.name, ...since(p.name) });
     }
   }
   return out;

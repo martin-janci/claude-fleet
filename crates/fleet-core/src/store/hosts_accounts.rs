@@ -323,7 +323,8 @@ impl Store {
             "UPDATE hosts SET disk_home_free_kb = ?1, disk_home_total_kb = ?2, \
              disk_tmp_free_kb = ?3, load_1m = ?4, mem_avail_kb = ?5, uptime_secs = ?6, \
              health_at = ?7, auth_overrides = ?8, cpu_count = ?9, mem_total_kb = ?10, \
-             boot_at = ?11, latency_ms = ?12, agents_on_path = ?14 WHERE alias = ?13",
+             boot_at = ?11, latency_ms = ?12, agents_on_path = ?14, login_split = ?15 \
+             WHERE alias = ?13",
             rusqlite::params![
                 h.disk_home_free_kb,
                 h.disk_home_total_kb,
@@ -343,6 +344,7 @@ impl Store {
                 h.agents_on_path
                     .as_ref()
                     .map(|v| serde_json::to_string(v).unwrap_or_else(|_| "[]".into())),
+                h.login_split,
             ],
         )?;
         Ok(())

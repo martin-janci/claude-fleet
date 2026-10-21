@@ -5,28 +5,18 @@
   // an overlay. The decision and the install are the backend's
   // (src/lib/updates.ts); this only shows them.
   import { openUrl } from '@tauri-apps/plugin-opener';
-  import { bannerFor, desktopUpdate, installUpdate, updateError, updateProgress } from './updates';
-
-  const DISMISS_KEY = 'claude-fleet.update.dismissed';
-  let dismissed = $state<string | null>(readDismissed());
-  function readDismissed(): string | null {
-    try {
-      return sessionStorage.getItem(DISMISS_KEY);
-    } catch {
-      return null;
-    }
-  }
-  function dismiss(version: string | null) {
-    dismissed = version;
-    try {
-      if (version) sessionStorage.setItem(DISMISS_KEY, version);
-    } catch {
-      // Not remembered across reloads; the banner still goes away now.
-    }
-  }
+  import {
+    bannerFor,
+    desktopUpdate,
+    dismissUpdate,
+    dismissedUpdate,
+    installUpdate,
+    updateError,
+    updateProgress,
+  } from './updates';
 
   const u = $derived($desktopUpdate);
-  const banner = $derived(bannerFor(u, dismissed));
+  const banner = $derived(bannerFor(u, $dismissedUpdate));
   const progress = $derived($updateProgress);
   const percent = $derived(
     progress && progress.total ? Math.min(100, Math.round((progress.downloaded / progress.total) * 100)) : null,
@@ -56,7 +46,7 @@
     {/if}
     {#if $updateError}<span class="error" data-testid="update-error">{$updateError}</span>{/if}
     {#if banner.dismissible && !progress}
-      <button type="button" class="close" aria-label="Not now" data-testid="update-dismiss" onclick={() => dismiss(u?.version ?? null)}>×</button>
+      <button type="button" class="close" aria-label="Not now" data-testid="update-dismiss" onclick={() => dismissUpdate(u?.version ?? null)}>×</button>
     {/if}
   </div>
 {/if}

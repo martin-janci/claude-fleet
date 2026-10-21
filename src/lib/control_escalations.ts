@@ -19,6 +19,7 @@ import { classify, displayName, type AttentionOptions, type TriageBucket } from 
 import { stillFollowed, type FollowMark } from './control_journal';
 import type { ControlHandoff } from './handoffs';
 import type { HostRow, SignedOutLogin } from './hosts';
+import { isFinal, type Mission } from './missions';
 import { readPref, writePref } from './prefs';
 import type { SessionRow } from './sessions';
 
@@ -38,8 +39,10 @@ export interface Escalation {
   /** The card's identity: the session, why, and its turn, so a dismissed card
    *  comes back when the same session needs you again later. */
   key: string;
-  /** The session to open; null for a card about a login, not a session. */
+  /** The session to open; null for a card about a login or a mission. */
   session: SessionRow | null;
+  /** The mission to open, for a mission that waits on the person (w04-7). */
+  missionId?: number;
   bucket: TriageBucket;
   /** "fed-v2 is waiting for your answer". */
   line: string;
@@ -112,12 +115,64 @@ export function controlSessionIds(
     if (h.session_id != null && (h.kind === 'session' || h.kind === 'task')) ids.add(h.session_id);
     if (h.mission_id != null && followed(`m:${h.mission_id}`)) missions.add(h.mission_id);
   }
+  // The hub names every thread of its last 500 receipts; `handoffs` holds
+  // only the newest 20 (review w04-1).
+  for (const [key, mark] of follows ?? []) {
+    const id = Number(key.slice(2));
+    if (!Number.isFinite(id) || !stillFollowed(mark)) continue;
+    if (key.startsWith('s:')) ids.add(id);
+    else if (key.startsWith('m:')) missions.add(id);
+  }
   for (const s of rows) {
     if (s.origin === 'operator') ids.add(s.id);
     else if (s.origin === 'mission' && s.origin_ref && missions.has(Number(s.origin_ref))) ids.add(s.id);
   }
   for (const id of [...ids]) if (!followed(`s:${id}`)) ids.delete(id);
   return ids;
+}
+
+/** How a mission card says what it waits on (`MissionWait.reason`). */
+const MISSION_WHY: Record<string, string> = {
+  sign_grant: 'needs its grant signed',
+  question: 'asks you a question',
+  confirm: 'has a step waiting for your OK',
+};
+
+/** The missions that are Control's threads: those a receipt or the hub's
+ *  follows name, still followed (not muted, not finished). */
+export function controlMissionIds(
+  handoffs: readonly ControlHandoff[],
+  follows: ReadonlyMap<string, FollowMark> | null = null,
+): Set<number> {
+  const ids = new Set<number>();
+  for (const h of handoffs) if (h.mission_id != null) ids.add(h.mission_id);
+  for (const key of follows?.keys() ?? []) if (key.startsWith('m:')) ids.add(Number(key.slice(2)));
+  for (const id of [...ids]) if (!stillFollowed(follows?.get(`m:${id}`))) ids.delete(id);
+  return ids;
+}
+
+/**
+ * A card for each unfinished mission that waits on the person — a grant to
+ * sign, a question, a step to OK (review w04-7) — minus those put off.
+ * `scope`, when given, keeps only those missions (Control's); `null` is the
+ * whole fleet. A card put off comes back when the mission waits on
+ * something else.
+ */
+export function missionEscalations(
+  missions: readonly Mission[],
+  later: ReadonlySet<string>,
+  scope: ReadonlySet<number> | null = null,
+): Escalation[] {
+  const out: Escalation[] = [];
+  for (const m of missions) {
+    const reason = m.waiting_on?.reason;
+    if (!reason || isFinal(m.state)) continue;
+    if (scope && !scope.has(m.id)) continue;
+    const key = `mission:${m.id}:${reason}`;
+    if (later.has(key)) continue;
+    out.push({ key, session: null, missionId: m.id, bucket: 'waiting', line: `${m.name} ${MISSION_WHY[reason] ?? 'waits on you'}`, detail: null });
+  }
+  return out;
 }
 
 /**

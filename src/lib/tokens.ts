@@ -174,9 +174,9 @@ export const CONTRAST_PAIRS: ContrastPair[] = [
   { fg: 'fg-2', bg: 'chip-bg', min: 4.5, note: 'chip text' },
   { fg: 'term-fg', bg: 'term-bg', min: 4.5, note: 'terminal text on its own ground, both themes' },
   { fg: 'fg', bg: 'count-bg', min: 4.5, note: 'count badges' },
-  { fg: 'fg-2', bg: 'count-bg', min: 4.5, note: '.count-badge text' },
-  { fg: 'status-working', bg: 'chip-bg', min: 4.5, note: '.state-chip--working' },
-  { fg: 'status-idle', bg: 'chip-bg', min: 4.5, note: '.state-chip--idle' },
+  { fg: 'fg-2', bg: 'count-bg', min: 4.5, note: 'secondary text on a count (TodayView, ControlThreads)' },
+  { fg: 'status-working', bg: 'chip-bg', min: 4.5, note: 'a working status word on a chip' },
+  { fg: 'status-idle', bg: 'chip-bg', min: 4.5, note: 'an idle status word on a chip' },
   // Action and focus.
   { fg: 'accent', bg: 'bg', min: 3, note: 'focus ring' },
   { fg: 'ring', bg: 'bg', min: 3, note: 'the focus ring alias' },

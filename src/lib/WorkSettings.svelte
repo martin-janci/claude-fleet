@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { IS_MAC, shortcutLabel } from './shortcuts';
   // Settings → Work & trackers (General → Work before step 7.1): what is left of the hand-written Work panel
   // since declarative pages P4. Trackers and organisations are generated
   // pages (Settings → Trackers, Settings → Organisations: `settings.trackers`
@@ -31,7 +32,7 @@
   <div class="section-header"><h4>Work</h4></div>
   <p class="blurb">
     Trackers add a ticket's title and status to the sessions working on it, and list your tickets
-    in ⌘K. Nothing needs one: keys in branch names group sessions without any tracker. Trackers and
+    in {shortcutLabel('switcher', IS_MAC)}. Nothing needs one: keys in branch names group sessions without any tracker. Trackers and
     organisations have their own pages in the list on the left.
   </p>
   <div class="pref">

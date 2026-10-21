@@ -12,7 +12,6 @@
   import type { ResourceType } from './pages/resources';
   import { fleetPlace, fleets, PRIMARY } from './fleets';
   import { hubStatus } from './hub';
-  import { memberPairing } from './orgs';
   import {
     NO_COMPANY,
     OWN_COMPANY,
@@ -53,7 +52,10 @@
   } = $props();
 
   let access = $state<CompanyAccess>(NO_COMPANY);
-  let accessLoaded = $state(false);
+  /** The fleet `access` was read for. Derived against `fleet`, so a switch
+   *  hides the page in the same render rather than once more after it. */
+  let accessFor = $state<string | null>(null);
+  const accessLoaded = $derived(accessFor === fleet);
   /** Bumped by Try again after an access read that did not get through. */
   let retry = $state(0);
 
@@ -65,29 +67,20 @@
     void retry;
     if (own) {
       access = OWN_COMPANY;
-      accessLoaded = true;
+      accessFor = f;
       return;
     }
-    accessLoaded = false;
+    accessFor = null;
     access = NO_COMPANY;
     let stale = false;
     void loadCompanyAccess(f).then((a) => {
       if (stale) return;
       access = a;
-      accessLoaded = true;
+      accessFor = f;
     });
     return () => {
       stale = true;
     };
-  });
-
-  // A member's pairing in progress belongs to the fleet it was minted on.
-  let pairedOn = PRIMARY;
-  $effect(() => {
-    if (fleet !== pairedOn) {
-      pairedOn = fleet;
-      memberPairing.set(null);
-    }
   });
 
   const resourceId = $derived(page.resource ?? '');
@@ -95,12 +88,16 @@
   const readonly = $derived(!access.write || !access.admin);
   const reason = $derived(accessLoaded && !own ? companyReadonlyReason(access, place.where, place.clientName) : null);
   const routedFleet = $derived(fleet === PRIMARY ? null : fleet);
+  const fleetLabel = $derived($fleets.find((f) => f.id === fleet)?.label ?? fleet);
 </script>
 
 <div class="company-settings" data-testid="company-settings">
   <FleetPicker bind:value={fleet} testid="company-fleet" />
 
-  {#key `${fleet}:${accessLoaded}`}
+  <!-- Mounted once the fleet's access is known: the page reads its list and
+       option sources on mount, and readonly / reason / canChange flow in as
+       props, so mounting before the access read would read everything twice. -->
+  {#if accessLoaded}
     <PageView
       {page}
       {pages}
@@ -116,7 +113,13 @@
       fleet={routedFleet}
       canChange={(r) => companyRecordWritable(access, resourceId, r)}
       {onnavigate} />
-  {/key}
+  {:else}
+    <!-- A remote hub's access read can take a while (and a Try again
+         repeats it): say so rather than leave only the picker. -->
+    <p class="loading" role="status" aria-busy="true" data-testid="company-access-loading">
+      Reading what this device may change on {fleetLabel}…
+    </p>
+  {/if}
 
   {#if accessLoaded && access.error}
     <button type="button" class="btn btn--quiet retry" data-testid="company-access-retry" onclick={() => (retry += 1)}>Try again</button>
@@ -131,5 +134,9 @@
   }
   .retry {
     align-self: flex-start;
+  }
+  .loading {
+    margin: 0;
+    color: var(--fg-muted);
   }
 </style>

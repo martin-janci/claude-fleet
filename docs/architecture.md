@@ -645,8 +645,10 @@ bullet for the area you are about to change.
   `fleet: Option<String>` + `fleets.select(backend.inner(), fleet.as_deref())?`,
   a `FLEET_SCOPED` entry in both `fleets.rs` and `fleets.ts`
   (`tests_fleets`, `fleets.test.ts` hold them together). Phase 2: an extra
-  fleet's session opens in `FleetSessionView` (+ `FleetTerminal`, its own
-  pty id `fleet-<slot>-<id>`), never as `selectedSession`; `fleetSelection`
+  fleet's session opens in `FleetSessionView`, never as `selectedSession`
+  (Phase 3: it hosts the same `ConversationPanel` and `TerminalView`, handed
+  the row with `fleet` stamped; the terminal attaches under its own pty id
+  `fleet-<slot>-<id>.<view>`); `fleetSelection`
   holds `{fleet, id}`. The hub's `ready` frame carries `fleet_id`; the
   bridge reports it through `ConnectionReporter::hub_fleet_id`, and
   `Fleets::select` refuses an extra fleet whose id another fleet already has.
@@ -662,3 +664,19 @@ bullet for the area you are about to change.
   fleet's option selects read that hub's lists (`resources.ts::loadSourceRows`),
   never the primary's stores. `tests_fleets::every_company_resource_command_is_fleet_scoped`
   fails a new Company action that is not fleet-scoped.
+- **Theme engine** (`src/lib/palette.ts`, `src/lib/theme.ts`; fleet-mobile's
+  `OrbitPalette.kt` is its port): the colours the app shows are solved at run
+  time from the sun's height, a Contrast level and an Accent hue, and
+  `theme.ts::paint` writes them onto `<html>` as the same custom properties
+  `app.css` declares. Sun (the default) follows the sun in the device's time
+  zone (`defaultPlace`: the zone's meridian at a fixed 48° N, not a
+  location); System, Light and Dark are fixed sun heights. `app.css`'s four
+  theme blocks are only the first paint and the fallback, and
+  `public/theme-boot.js` replays the last painted palette (`BOOT_KEY`) in
+  `<head>` so a launch does not flash them. Brand, terminal, loader and
+  destructive-fill colours are not the engine's. `palette.test.ts` holds
+  every `CONTRAST_PAIRS` floor at every sun height, level and accent, and the
+  golden vectors in `docs/design/palette-golden.json`, which fleet-mobile
+  copies unchanged for `OrbitPaletteTest`; after a deliberate engine change
+  run `REGEN_PALETTE_GOLDEN=1 pnpm exec vitest run src/lib/palette.test.ts`
+  and copy the file to fleet-mobile.

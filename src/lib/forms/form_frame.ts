@@ -13,6 +13,7 @@ import { errorText } from '../error_copy';
 import type { IpcError } from '../result';
 import { matchShortcut, shortcutLabel, type KeyEventLike } from '../shortcuts';
 import { push } from '../toasts';
+import { detectMac } from '../terminal_keys';
 
 /** The controls a person fills in, for "is this a one-field form". */
 const CONTROLS =
@@ -53,6 +54,72 @@ export function submitHint(isMac: boolean): { label: string; aria: string } {
   return {
     label: isMac ? label.replace(/Enter$/, '↵') : label,
     aria: isMac ? 'Meta+Enter' : 'Control+Enter',
+  };
+}
+
+/** `submitHint` for this machine, for a dialog that uses `formKeys`. */
+export function platformSubmitHint(): { label: string; aria: string } {
+  return submitHint(detectMac(typeof navigator === 'undefined' ? undefined : navigator));
+}
+
+export interface FormKeysOptions {
+  /** What the primary verb does. Left out on a `<form>`: its submit
+   *  button's form is submitted, unless that button is disabled. */
+  submit?: () => void;
+  /** False while the verb may not run (the primary button is disabled). */
+  enabled?: boolean;
+}
+
+/**
+ * The form rule for a dialog that is not a DialogSheet (review w18-6):
+ * ⌘↵ / Ctrl+Enter submits from any field, a bare Enter only in a one-field
+ * form (`submitKey`), and a bare Enter in one text field of a several-field
+ * `<form>` no longer submits it natively. Put it on the element holding the
+ * fields (the `<form>` itself when there is one).
+ */
+export function formKeys(node: HTMLElement, options: FormKeysOptions = {}) {
+  let opts = options;
+  const isMac = detectMac(typeof navigator === 'undefined' ? undefined : navigator);
+  function run() {
+    if (opts.enabled === false) return;
+    if (opts.submit) {
+      opts.submit();
+      return;
+    }
+    if (!(node instanceof HTMLFormElement)) return;
+    const btn = node.querySelector<HTMLButtonElement>('button[type="submit"]');
+    if (btn?.disabled) return;
+    node.requestSubmit(btn ?? undefined);
+  }
+  function onkeydown(e: KeyboardEvent) {
+    if (e.defaultPrevented) return;
+    if (submitKey(e, fieldCount(node), isMac)) {
+      e.preventDefault();
+      run();
+      return;
+    }
+    // A several-field form: Enter in a text field is not a submit.
+    const t = e.target as HTMLInputElement | null;
+    if (
+      e.key === 'Enter' &&
+      !e.metaKey &&
+      !e.ctrlKey &&
+      !e.altKey &&
+      t?.tagName === 'INPUT' &&
+      !NOT_TEXT.includes(t.type) &&
+      t.form != null
+    ) {
+      e.preventDefault();
+    }
+  }
+  node.addEventListener('keydown', onkeydown);
+  return {
+    update(next: FormKeysOptions = {}) {
+      opts = next;
+    },
+    destroy() {
+      node.removeEventListener('keydown', onkeydown);
+    },
   };
 }
 

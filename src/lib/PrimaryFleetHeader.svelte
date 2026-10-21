@@ -20,15 +20,22 @@
   let {
     count,
     hiddenCount,
+    focused = false,
   }: {
     /** The rows this list shows now. */
     count: number;
-    /** Its live sessions, for the notice while another fleet's filter hides them. */
+    /** Its sessions that pass the filters every fleet shares, for the
+     *  notice while another fleet's filter hides them. */
     hiddenCount: number;
+    /** A session focus shows this list past the anchor and the fold. */
+    focused?: boolean;
   } = $props();
 
   const primary = $derived($fleets.find((f) => f.primary) ?? null);
-  const hidden = $derived(primaryHiddenByAnchor($anchor));
+  const hidden = $derived(!focused && primaryHiddenByAnchor($anchor));
+  // Whether the list under this header is on screen: a focus shows it past
+  // the fold, so the button must not say "collapsed" over a visible list.
+  const open = $derived(focused || ($primaryFleetOpen && !hidden));
   const words = $derived.by(() => {
     const a = $anchor;
     if (!a || !hidden) return '';
@@ -44,12 +51,12 @@
       <button
         type="button"
         class="fold"
-        aria-expanded={$primaryFleetOpen && !hidden}
-        aria-label="{$primaryFleetOpen ? 'Hide' : 'Show'} the sessions of {primary.label}"
+        aria-expanded={open}
+        aria-label="{open ? 'Hide' : 'Show'} the sessions of {primary.label}"
         data-testid="primary-fleet-fold"
-        disabled={hidden}
+        disabled={hidden || focused}
         onclick={() => primaryFleetOpen.update((v) => !v)}
-        ><span class="caret" class:collapsed={!$primaryFleetOpen || hidden}>▾</span></button
+        ><span class="caret" class:collapsed={!open}>▾</span></button
       >
       <span class="badge" data-testid="primary-fleet-badge">{primary.label}</span>
       <span class="state {cw.tone}">{cw.word}</span>

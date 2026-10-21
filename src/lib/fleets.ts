@@ -90,6 +90,12 @@ export const FLEET_SCOPED = [
   'list_groups',
   'list_trackers',
   'catalog_list_catalogs',
+  // Phase 3b: who this device is on each fleet.
+  'my_profile',
+  // Phase 3: an extra fleet's session in the full conversation panel.
+  'session_conversations',
+  'session_activity',
+  'restart_session',
 ] as const;
 export type FleetScopedCommand = (typeof FLEET_SCOPED)[number];
 
@@ -154,6 +160,10 @@ export interface FleetRows {
   orgs?: OrgDetail[];
   /** A list call failed; shown on the fleet's header. */
   error: string | null;
+  /** Its sessions have been listed once. Until then the rows hold only what
+   *  events brought, so they are no baseline for notifications (review
+   *  w01-13; the primary's `sessionsLoaded`). */
+  loaded?: boolean;
 }
 
 /** The envelope of `fleet:event`. */
@@ -245,7 +255,7 @@ export const visibleExtraFleets = derived(
 // ── applying events ─────────────────────────────────────────────────────
 
 export function emptyRows(): FleetRows {
-  return { sessions: new Map(), hosts: new Map(), projects: [], error: null };
+  return { sessions: new Map(), hosts: new Map(), projects: [], error: null, loaded: false };
 }
 
 function isObj(v: unknown): v is Record<string, unknown> {
@@ -276,6 +286,51 @@ function racesFor(fleet: string): FleetRaces {
 
 /** The collections of one fleet's rows. */
 type RowPart = keyof FleetRaces;
+
+// ── one id space (Phase 3) ──────────────────────────────────────────────
+//
+// An extra fleet's session row carries its fleet (`SessionRow.fleet`), so
+// whatever holds the row can send each call to the right hub. And every
+// store keyed by session id keys it by `sessionKey`: the id itself for a
+// primary row, as it always was, and a negative number for an extra fleet's
+// (fleet, id) pair. Hubs number sessions from 1, so the two never collide,
+// and a store written for the primary needs no other change to hold both.
+
+function withFleet(row: SessionRow, fleet: string): SessionRow {
+  return fleet === PRIMARY || row.fleet === fleet ? row : { ...row, fleet };
+}
+
+const keyOfPair = new Map<string, number>();
+const pairOfKey = new Map<number, { fleet: string; id: number }>();
+
+/** The key a session is stored under in this window (see above). Stable
+ *  for the life of the window; never sent to a hub. */
+export function sessionKey(s: Pick<SessionRow, 'id' | 'fleet'>): number {
+  const fleet = s.fleet;
+  if (!fleet || fleet === PRIMARY) return s.id;
+  const pair = `${fleet}\u0000${s.id}`;
+  let key = keyOfPair.get(pair);
+  if (key === undefined) {
+    key = -(keyOfPair.size + 1);
+    keyOfPair.set(pair, key);
+    pairOfKey.set(key, { fleet, id: s.id });
+  }
+  return key;
+}
+
+/** The fleet and hub id a `sessionKey` stands for: the primary's own id for
+ *  a non-negative key, null for a negative key this window never handed out. */
+export function keyTarget(key: number): { fleet: string; id: number } | null {
+  return key >= 0 ? { fleet: PRIMARY, id: key } : (pairOfKey.get(key) ?? null);
+}
+
+/** The live row behind a key: the extra fleet's row, or undefined. The
+ *  primary's rows live in `sessions.ts`, which the caller reads itself. */
+export function awayRow(key: number): SessionRow | undefined {
+  const t = keyTarget(key);
+  if (!t || t.fleet === PRIMARY) return undefined;
+  return get(rowsStore).get(t.fleet)?.sessions.get(t.id);
+}
 
 // ── the guards the primary's session store has (`sessions.ts`) ──────────
 //
@@ -325,7 +380,7 @@ function admitSession(
 
 function putSession(fleet: string | undefined, rows: FleetRows, row: SessionRow, how: 'updated' | 'created' | 'command'): void {
   if (!admitSession(fleet, rows, row, how)) return;
-  rows.sessions.set(row.id, row);
+  rows.sessions.set(row.id, fleet === undefined ? row : withFleet(row, fleet));
   if (fleet !== undefined) racesFor(fleet).sessions.touch(row.id);
 }
 
@@ -356,17 +411,16 @@ const ROW_EVENTS = new Map<string, RowPart>([
   ['project:updated', 'projects'],
 ]);
 
-/** Apply one `fleet:event` to that fleet's rows, in place. Returns what the
- *  caller has to do beyond that: `relist` after a gap the bridge could not
- *  replay, `connection` when the link moved. Unknown names are ignored —
- *  this fleet's view keeps sessions, hosts and projects only (Phase 1).
+/** Apply one row event (`ROW_EVENTS`) to that fleet's rows, in place.
+ *  Unknown names are ignored — this fleet's view keeps sessions, hosts and
+ *  projects only (Phase 1); `onFleetEvent` handles the `hub:*` frames.
  *  With `fleet`, that fleet's stale-row and tombstone guards apply and each
  *  frame touches the key it changed in the fleet's race. */
 export function applyFleetEvent(
   rows: FleetRows,
   e: Pick<FleetEvent, 'name' | 'payload'>,
   fleet?: string,
-): 'relist' | 'connection' | null {
+): void {
   const race = fleet === undefined ? undefined : racesFor(fleet);
   const p = e.payload;
   switch (e.name) {
@@ -374,17 +428,17 @@ export function applyFleetEvent(
     case 'session:updated':
       if (isObj(p) && typeof p.id === 'number')
         putSession(fleet, rows, p as unknown as SessionRow, e.name === 'session:created' ? 'created' : 'updated');
-      return null;
+      break;
     case 'session:killed':
       if (isObj(p) && typeof p.id === 'number') dropSession(fleet, rows, p.id);
-      return null;
+      break;
     case 'host:added':
     case 'host:probed':
       if (isObj(p) && typeof p.alias === 'string') {
         rows.hosts.set(p.alias, p as unknown as HostRow);
         race?.hosts.touch(p.alias);
       }
-      return null;
+      break;
     case 'host:pinged':
       if (isObj(p) && typeof p.alias === 'string') {
         const old = rows.hosts.get(p.alias);
@@ -395,13 +449,13 @@ export function applyFleetEvent(
           race?.hosts.touch(p.alias);
         }
       }
-      return null;
+      break;
     case 'host:removed':
       if (isObj(p) && typeof p.alias === 'string') {
         rows.hosts.delete(p.alias);
         race?.hosts.touch(p.alias);
       }
-      return null;
+      break;
     case 'project:updated':
       if (isObj(p) && typeof p.id === 'number') {
         const row = p as unknown as ProjectRow;
@@ -410,13 +464,7 @@ export function applyFleetEvent(
         if (at >= 0) rows.projects[at] = { ...rows.projects[at], project: row };
         else rows.projects.push({ project: row, worktrees: [] });
       }
-      return null;
-    case 'hub:resynced':
-      return 'relist';
-    case 'hub:connection':
-      return 'connection';
-    default:
-      return null;
+      break;
   }
 }
 
@@ -434,11 +482,16 @@ function patchRows(fleet: string, fn: (rows: FleetRows) => void, parts: readonly
       projects: parts.includes('projects') ? [...rows.projects] : rows.projects,
       orgs: rows.orgs,
       error: rows.error,
+      loaded: rows.loaded,
     };
     fn(copy);
     next.set(fleet, copy);
     return next;
   });
+}
+
+function isDuplicate(fleet: string): boolean {
+  return !!get(fleetsStore).find((f) => f.id === fleet)?.duplicate_of;
 }
 
 function setConnection(fleet: string, c: HubConnection): void {
@@ -451,7 +504,10 @@ export function onFleetEvent(e: FleetEvent): void {
   const fleet = e.fleet;
   const part = ROW_EVENTS.get(e.name);
   if (part) {
-    patchRows(fleet, (rows) => void applyFleetEvent(rows, e, fleet), [part]);
+    // A duplicate's rows are another fleet's twice over: never kept, so they
+    // never notify twice (review w01-3).
+    if (isDuplicate(fleet)) return;
+    patchRows(fleet, (rows) => applyFleetEvent(rows, e, fleet), [part]);
   } else if (e.name === 'hub:connection' && isObj(e.payload)) {
     setConnection(fleet, e.payload as unknown as HubConnection);
     if ((e.payload as { state?: string }).state === 'connected') {
@@ -486,8 +542,9 @@ export async function loadFleets(): Promise<Result<FleetInfo[]>> {
   if (r.ok && !Array.isArray(r.value)) return { ok: false, error: { code: 'E_PARSE', message: 'fleets_list answered no list' } };
   if (r.ok) {
     fleetsStore.set(r.value);
-    // Drop the rows of a fleet that is gone.
-    const ids = new Set(r.value.map((f) => f.id));
+    // Drop the rows of a fleet that is gone, and of one that turned out to
+    // be a duplicate (it may have listed before the primary named its id).
+    const ids = new Set(r.value.filter((f) => !f.duplicate_of).map((f) => f.id));
     rowsStore.update((m) => new Map([...m].filter(([id]) => ids.has(id))));
   }
   return r;
@@ -497,7 +554,7 @@ export async function loadFleets(): Promise<Result<FleetInfo[]>> {
  *  list merges through the fleet's race (`FleetRaces`) rather than replacing
  *  what a frame applied while it was in flight. */
 export async function loadFleetRows(fleet: string): Promise<void> {
-  if (fleet === PRIMARY) return;
+  if (fleet === PRIMARY || isDuplicate(fleet)) return;
   const race = racesFor(fleet);
   const ts = race.sessions.begin();
   const th = race.hosts.begin();
@@ -508,14 +565,23 @@ export async function loadFleetRows(fleet: string): Promise<void> {
     invokeCmd<ProjectTreeRow[]>('list_projects', { fleet }),
     invokeCmd<OrgDetail[]>('list_orgs', { fleet }),
   ]);
+  // The list of fleets may have named it a duplicate while these were out.
+  if (isDuplicate(fleet)) return;
   patchRows(fleet, (rows) => {
     if (s.ok && Array.isArray(s.value)) {
       // Killed (tombstoned) or older than the row held: the list never
       // brings it back or rolls it back.
       // (An older one stays listed so `keepCurrent` keeps the held row.)
       const listed = s.value.filter((r) => admitSession(fleet, rows, r, 'command') || rows.sessions.has(r.id));
-      const out = race.sessions.mergeList([...rows.sessions.values()], listed, ts, (r) => r.id, sessionIsStale);
+      const out = race.sessions.mergeList(
+        [...rows.sessions.values()],
+        listed.map((r) => withFleet(r, fleet)),
+        ts,
+        (r) => r.id,
+        sessionIsStale,
+      );
       if (out) rows.sessions = new Map(out.map((r) => [r.id, r]));
+      rows.loaded = true;
     }
     if (h.ok && Array.isArray(h.value)) {
       const out = race.hosts.mergeList([...rows.hosts.values()], h.value, th, (r) => r.alias);
@@ -570,10 +636,33 @@ export async function addFleet(args: FleetAdd): Promise<Result<FleetInfo>> {
 export async function removeFleet(id: string): Promise<Result<null>> {
   const r = await invokeCmd<null>('fleet_remove', { args: { id } });
   if (r.ok) {
-    if (get(fleetFilter) === id) fleetFilter.set('all');
+    forgetFleet(id);
     await loadFleets();
   }
   return r;
+}
+
+/** Forget what this window keeps about a removed fleet's slot. Slot ids are
+ *  reused by label, so a fleet added again as "company" (or another hub that
+ *  takes the label) must not inherit the open session, the races, the
+ *  tombstones or the remembered repositories of the old one (review w01-12). */
+function forgetFleet(id: string): void {
+  if (get(fleetFilter) === id) fleetFilter.set('all');
+  if (get(fleetSelection)?.fleet === id) closeFleetSession();
+  races.delete(id);
+  tombstones.delete(id);
+  const map = readPref<Record<string, string>>(FLEET_BY_REPO_PREF, {}, isRepoMap);
+  const kept = Object.fromEntries(Object.entries(map).filter(([, f]) => f !== id));
+  if (Object.keys(kept).length !== Object.keys(map).length) writePref(FLEET_BY_REPO_PREF, kept);
+  for (const fn of forgetHooks) fn(id);
+}
+
+/** What other modules keep per fleet slot (the sidebar's Machine / Org
+ *  picks and folds, `fleet_filters.ts`) forgets it here too. A hook rather
+ *  than an import: those modules import this one. */
+const forgetHooks: ((id: string) => void)[] = [];
+export function onFleetForgotten(fn: (id: string) => void): void {
+  forgetHooks.push(fn);
 }
 
 /** An extra fleet's Retry. */
@@ -612,6 +701,33 @@ export function fleetSendKey(fleet: string, s: SessionRow, key: 'Enter' | 'Escap
   });
 }
 
+/** Relaunch an extra fleet's session under another model or effort (the
+ *  conversation panel's picker), on its own hub. */
+export async function fleetRestartSession(
+  fleet: string,
+  s: Pick<SessionRow, 'host_alias' | 'tmux_name'>,
+  launch: { model?: string; effort?: string },
+): Promise<Result<SessionRow>> {
+  const r = await fleetCmd<SessionRow>('restart_session', fleet, {
+    args: { host_alias: s.host_alias, name: s.tmux_name, ...launch },
+  });
+  if (r.ok) acceptFleetRow(fleet, r.value);
+  return r;
+}
+
+/** Why nothing can be written to `fleet`'s sessions right now (its link is
+ *  down or it is not in use), or null. Only the link: what a person may do
+ *  on that hub is that hub's call, and it answers each write itself. */
+export const fleetBlocked = derived(fleetsStore, ($fleets) => (fleet: string | null | undefined): string | null => {
+  if (!fleet || fleet === PRIMARY) return null;
+  const f = $fleets.find((x) => x.id === fleet);
+  if (!f) return 'That fleet is no longer connected to this window.';
+  if (f.unavailable) return f.unavailable;
+  if (f.duplicate_of) return `${f.label} is the same hub as ${f.duplicate_of}.`;
+  const cw = connectionWord(f);
+  return cw.tone === 'ok' ? null : `${f.label} is ${cw.word}, so nothing can be sent there right now.`;
+});
+
 export async function fleetKillSession(fleet: string, s: SessionRow): Promise<Result<number>> {
   const r = await fleetCmd<number>('kill_session', fleet, { args: { host_alias: s.host_alias, name: s.tmux_name } });
   if (r.ok) patchRows(fleet, (rows) => dropSession(fleet, rows, s.id), ['sessions']);
@@ -642,6 +758,13 @@ export interface FleetNewSession {
   friendly_name?: string | null;
   /** A branch for a fresh worktree; null works in the project's checkout. */
   new_worktree?: string | null;
+  /** A shell session's command run on start. */
+  start_command?: string | null;
+  /** The launch choices `new_session` takes on every hub (review w01-2):
+   *  null is that host's default, and Claude Code for `agent`. */
+  model?: string | null;
+  effort?: string | null;
+  agent?: string | null;
 }
 
 export async function fleetNewSession(fleet: string, a: FleetNewSession): Promise<Result<SessionRow>> {
@@ -654,8 +777,11 @@ export async function fleetNewSession(fleet: string, a: FleetNewSession): Promis
       new_worktree: a.new_worktree ?? null,
       base_branch: null,
       kind: a.kind ?? 'work',
-      start_command: null,
+      start_command: a.start_command ?? null,
       friendly_name: a.friendly_name ?? null,
+      model: a.model ?? null,
+      effort: a.effort ?? null,
+      agent: a.agent ?? null,
     },
   });
   if (r.ok) acceptFleetRow(fleet, r.value);
@@ -691,7 +817,7 @@ export function closeFleetSession(): void {
 }
 
 /** Its finished turns read as seen, on its own hub. */
-export async function fleetTouchViewed(fleet: string, s: SessionRow): Promise<void> {
+export async function fleetTouchViewed(fleet: string, s: Pick<SessionRow, 'id'>): Promise<void> {
   const r = await fleetCmd<SessionRow>('touch_session_viewed', fleet, { args: { session_id: s.id } });
   if (r.ok) acceptFleetRow(fleet, r.value);
 }
@@ -723,8 +849,18 @@ const sameText = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 /** Lower-case letters and digits only: `PapayaPOS` and `papayapos` agree. */
 const squash = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
 
+/** The connection states in which a fleet cannot start a session now. */
+const DOWN_STATES = new Set(['offline', 'hub_too_old', 'hub_too_new']);
+
+/** Whether a fleet's link is down (offline, or a hub this app cannot talk to). */
+export function fleetIsDown(f: Pick<FleetInfo, 'connection'>): boolean {
+  return DOWN_STATES.has(f.connection?.state ?? '');
+}
+
 /** The extra fleets that have `owner/repo` among their projects and can be
- *  used now (connected or connecting, not a duplicate, not unavailable). */
+ *  used now (connected or connecting, not a duplicate, not unavailable). The
+ *  projects of a fleet that went offline stay cached, so its link decides
+ *  (review w01-5). */
 export function fleetChoicesFor(
   owner: string,
   repo: string,
@@ -733,7 +869,7 @@ export function fleetChoicesFor(
 ): FleetChoice[] {
   const out: FleetChoice[] = [];
   for (const f of known) {
-    if (f.primary || f.unavailable || f.duplicate_of) continue;
+    if (f.primary || f.unavailable || f.duplicate_of || fleetIsDown(f)) continue;
     const p = rows.get(f.id)?.projects.find((t) => !t.project.system && sameText(t.project.owner, owner) && sameText(t.project.repo, repo));
     if (p) out.push({ fleet: f, projectId: p.project.id });
   }
@@ -886,6 +1022,10 @@ export function fleetAttachCommand(s: Pick<SessionRow, 'host_alias' | 'tmux_name
  *  machine's tmux (a different session that may share the name, typed into
  *  blind) and the copied `ssh -t local …` reaches nothing. */
 export function fleetAttachRefusal(s: Pick<SessionRow, 'host_alias'>): string | null {
+  // `wsl-<distro>` is the same hazard: `pty_open` resolves it to THIS
+  // desktop's WSL distribution when it has one by that name (review w01-9).
+  if (/^wsl-/.test(s.host_alias))
+    return `This session runs in that hub's own WSL ("${s.host_alias}"). From here that name would mean this machine's WSL, so it cannot be attached from here: use the Conversation and Snapshot tabs, or attach on that machine.`;
   if (s.host_alias !== 'local') return null;
   return "This session runs on that hub's own machine, which it calls \"local\". From here \"local\" would mean this machine, so it cannot be attached from here: use the Conversation and Snapshot tabs, or attach on that machine.";
 }
@@ -896,8 +1036,7 @@ export function fleetHostChoices(rows: Pick<FleetRows, 'hosts'>): HostRow[] {
 }
 
 /** The host that form starts on: the first offered one that is reachable,
- *  else the first offered one — never a hidden host the picker cannot show
- *  (NewSessionDialog's `fleetHost` rule). */
+ *  else the first offered one — never a hidden host the picker cannot show. */
 export function defaultFleetHost(rows: Pick<FleetRows, 'hosts'>): string {
   const list = fleetHostChoices(rows);
   return list.find((h) => h.reachable)?.alias ?? list[0]?.alias ?? '';
@@ -908,11 +1047,13 @@ export function defaultFleetHost(rows: Pick<FleetRows, 'hosts'>): string {
 export const fleetNeedsIds = derived(fleetInbox, ($g) => new Map($g.map((g) => [g.fleet.id, new Set(g.rows.map((s) => s.id))])));
 
 /** A fleet's connection, as one short word for its header and chip. */
-export function connectionWord(f: Pick<FleetInfo, 'connection' | 'unavailable' | 'local'>): {
+export function connectionWord(f: Pick<FleetInfo, 'connection' | 'unavailable' | 'local' | 'duplicate_of'>): {
   word: string;
   tone: 'ok' | 'warn' | 'bad' | 'idle';
 } {
   if (f.unavailable) return { word: 'unavailable', tone: 'bad' };
+  // Live, but the same hub as another fleet: not shown, so not "live".
+  if (f.duplicate_of) return { word: 'duplicate', tone: 'warn' };
   if (f.local) return { word: 'this machine', tone: 'ok' };
   switch (f.connection?.state) {
     case 'connected':
@@ -930,6 +1071,34 @@ export function connectionWord(f: Pick<FleetInfo, 'connection' | 'unavailable' |
     default:
       return { word: 'not connected', tone: 'idle' };
   }
+}
+
+/** The line under a fleet's row or header that says why it is not live, or
+ *  null when there is nothing to say. The reason arrives redacted, on one
+ *  line and capped (`hub_connection.ts`); it is capped again here. A 401 is
+ *  a revoked pairing, which Retry cannot mend: an extra fleet is paired
+ *  again only by removing it and adding it with a fresh code (review w01-4). */
+export function fleetTrouble(f: Pick<FleetInfo, 'connection' | 'unavailable' | 'url' | 'duplicate_of'>): string | null {
+  if (f.unavailable || f.duplicate_of) return null;
+  const c = f.connection;
+  if (!c || (c.state !== 'offline' && c.state !== 'reconnecting')) return null;
+  const reason = (c.reason ?? '').trim();
+  if (/\b401\b/.test(reason))
+    return `This desktop's pairing was revoked on ${f.url ?? 'that hub'}. Remove it and add it again with a fresh code.`;
+  if (!reason) return null;
+  return reason.length > 200 ? `${reason.slice(0, 199)}…` : reason;
+}
+
+/** The fleet colours, mirroring `backend::fleets::PALETTE` (`fleets.test.ts`
+ *  holds the two together). The first is the primary's. */
+export const FLEET_PALETTE = ['#5b8def', '#e8833a', '#3fb27f', '#c95fd1', '#d4b13c', '#e05a6d'] as const;
+
+/** The colour the backend gives a fleet added without one
+ *  (`backend::fleets::next_color`): the first extra colour no extra fleet
+ *  uses. What the Add form's colour input starts on (review w01-14). */
+export function nextFleetColor(known: readonly Pick<FleetInfo, 'color' | 'primary'>[]): string {
+  const used = new Set(known.filter((f) => !f.primary).map((f) => f.color.toLowerCase()));
+  return FLEET_PALETTE.slice(1).find((c) => !used.has(c)) ?? FLEET_PALETTE[1];
 }
 
 /** Test seam: reset module state. */

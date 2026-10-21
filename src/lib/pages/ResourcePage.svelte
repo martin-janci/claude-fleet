@@ -1,10 +1,14 @@
 <script lang="ts">
+  import { errorText } from '../error_copy';
   // Layout L2 (master_detail): a resource's records in a list beside one
   // record's editor. The list reads through the resource's list command
   // (which routes to the hub on a paired desktop, so the page shows the
   // hub's records there, read-only); every change runs one of the
   // resource's declared actions, then re-reads the list.
   import { onMount } from 'svelte';
+  import LoadError from '../states/LoadError.svelte';
+  import Skeleton from '../states/Skeleton.svelte';
+  import type { IpcError } from '../result';
   import { get } from 'svelte/store';
   import RecordEditor from './RecordEditor.svelte';
   import ResourceGraph from './ResourceGraph.svelte';
@@ -98,7 +102,10 @@
 
   let records = $state<ResourceRecord[]>([]);
   let loaded = $state(false);
-  let error = $state<string | null>(null);
+  // Review w17-10: the list read's failure in a sentence with Retry (codes
+  // under Details), and a skeleton until the first answer.
+  let error = $state<IpcError | null>(null);
+  let retrying = $state(false);
   let selected = $state<string | null>(null);
   /** Bumped on every re-read, so the editor's draft restarts from it. */
   let version = $state(0);
@@ -131,7 +138,7 @@
     const r = await pairDevice(v, fleet);
     wizardBusy = false;
     if (!r.ok) {
-      wizardError = r.error.message;
+      wizardError = errorText(r.error);
       return;
     }
     wizardOpen = false;
@@ -150,7 +157,7 @@
     const r = await runAction(c, buildArgs(c, null, null, { url: String(v.url ?? '').trim(), code: String(v.code ?? '').trim() }), fleet);
     wizardBusy = false;
     if (!r.ok) {
-      wizardError = r.error.message;
+      wizardError = errorText(r.error);
       return;
     }
     wizardOpen = false;
@@ -165,7 +172,7 @@
     const r = await listRecords(resource, fleet);
     loaded = true;
     if (!r.ok) {
-      error = r.error.message;
+      error = r.error;
       return;
     }
     error = null;
@@ -323,7 +330,21 @@
       {#if loaded && records.length === 0 && !error}
         <p class="empty" data-testid="resource-empty">{resource.empty}</p>
       {/if}
-      {#if error}<p class="err" role="alert">{error}</p>{/if}
+      {#if !loaded}
+        <Skeleton rows={3} label={`Loading ${resource.plural.toLowerCase()}`} />
+      {/if}
+      {#if error}
+        <LoadError
+          title={`Couldn't load ${resource.plural.toLowerCase()}`}
+          {error}
+          {retrying}
+          onretry={async () => {
+            retrying = true;
+            await reload();
+            retrying = false;
+          }}
+          testid="resource-load-error" />
+      {/if}
       {#if !readonly && resource.create_flow}
         <button type="button" class="btn" data-testid="resource-add" disabled={adding} onclick={() => (adding = true)}
           >Add {resource.label.toLowerCase()}</button

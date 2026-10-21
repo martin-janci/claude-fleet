@@ -32,6 +32,7 @@ import {
   sendSteer,
   startNewMission,
   steerBlocked,
+  steerBusy,
   steerPrefix,
   steerReceipts,
 } from './mission_room';
@@ -223,11 +224,23 @@ describe('Steer: the composer routes to Control', () => {
         keys: null,
       },
     });
+    // Control follows the mission from now on (w04-11).
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith('control_journal', {
+      args: { action: 'follow', thread: 'mission', id: 4, text: 'Retry step 2 on htz' },
+    });
   });
 
   it('says why it cannot send with no operator, or a lost one', () => {
     expect(steerBlocked(null)).toContain("Control's agent isn't running");
     expect(steerBlocked(session('local', 'op', { id: 1, lost_at: 5 }))).toContain('was lost');
     expect(steerBlocked(session('local', 'op', { id: 1 }))).toBeNull();
+  });
+
+  it("waits while Control is mid-turn, and behind lines queued in Control's chat (w04-12)", () => {
+    const idle = session('local', 'op', { id: 1, claude_status: 'idle' });
+    expect(steerBusy(idle, false, 0)).toBeNull();
+    expect(steerBusy({ ...idle, claude_status: 'working' }, false, 0)).toContain('mid-turn');
+    expect(steerBusy(idle, true, 0)).toContain('mid-turn');
+    expect(steerBusy(idle, false, 2)).toContain('2 lines queued');
   });
 });

@@ -80,8 +80,15 @@ export interface AgentAction {
 export interface AgentsStatus {
   rules: AgentRule[];
   jobs: AgentJob[];
-  /** Actions waiting for a person. */
+  /** Actions waiting for a person, newest first, at most 200. */
   pending: AgentAction[];
+  /** How many actions are waiting, uncapped (more than `pending.length`
+   *  past the cap). Absent from an older hub. */
+  pending_total?: number;
+  /** Actions a person approved that ran or failed in the last day, newest
+   *  first: an executed one's `error` is what it made (`created task 42`),
+   *  a failed one's is why. Absent from a hub older than review w08. */
+  recent?: AgentAction[];
 }
 
 export function agentsStatus(agent?: AgentKind, limit?: number): Promise<Result<AgentsStatus>> {
@@ -156,7 +163,24 @@ export const agents = writable<AgentsStatus | null>(null);
 
 /** The actions waiting for a person: the Inbox's Needs you carries them. */
 export const pendingAgentActions = derived(agents, ($a) => $a?.pending ?? []);
-export const pendingAgentCount = derived(pendingAgentActions, ($p) => $p.length);
+/** What the person's recent approvals came to: under the pending ones. */
+export const recentAgentOutcomes = derived(agents, ($a) => $a?.recent ?? []);
+
+/** "Done: Create the task Flaky reconnect — created task 42", or
+ *  "Failed: … — why". */
+export function actionOutcome(
+  a: Pick<AgentAction, "kind" | "payload" | "state" | "error">,
+): string {
+  const what = actionTitle(a);
+  const line = a.error?.trim();
+  const head = a.state === "failed" ? "Failed" : "Done";
+  return line ? `${head}: ${what} — ${line}` : `${head}: ${what}`;
+}
+
+export const pendingAgentCount = derived(
+  agents,
+  ($a) => Math.max($a?.pending_total ?? 0, $a?.pending.length ?? 0),
+);
 
 export async function loadAgents(): Promise<void> {
   const r = await agentsStatus(undefined, 20);
@@ -238,6 +262,11 @@ export function actionTitle(a: Pick<AgentAction, 'kind' | 'payload'>): string {
   if (a.kind === 'record' && p) return `Remember ${p.key} in ${p.store}`;
   if (a.kind === 'mcp_call' && p) return `Call ${p.binding}.${p.tool}`;
   if (a.kind === 'pr_comment' && p) return `Comment on ${p.repo}#${p.number}`;
+  if (a.kind === 'pr_review' && p) {
+    const event = String(p.event ?? 'COMMENT').toLowerCase().replace('_', ' ');
+    const n = Array.isArray(p.findings) ? p.findings.length : 0;
+    return `Review ${p.repo}#${p.number}: ${event}, ${n} line comment${n === 1 ? '' : 's'}`;
+  }
   // Fleet's own: what an analysis proposes (self debug, proposer, simplify, refactor).
   if (a.kind === 'work_task' && p) {
     const n = Array.isArray(p.steps) ? p.steps.length : 0;

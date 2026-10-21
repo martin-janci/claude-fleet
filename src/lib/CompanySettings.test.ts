@@ -192,6 +192,19 @@ describe('Settings › Company with a second fleet', () => {
     await waitFor(() => expect(screen.queryByTestId('edit-name')).toBeNull());
   });
 
+  it('reads that hub’s list and option sources once per pick, after its access', async () => {
+    hubStatus.set(remote);
+    _setFleetsForTest([fleet('primary', true), fleet('company', false)]);
+    const inv = route(twoHubs(true));
+    show('settings.orgs', false);
+    await pickCompany();
+    await screen.findByTestId('resource-readonly');
+    await waitFor(() => expect(onCompany(inv, 'list_hosts').length).toBeGreaterThan(0));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(onCompany(inv, 'list_orgs')).toHaveLength(1);
+    expect(onCompany(inv, 'list_hosts')).toHaveLength(1);
+  });
+
   it('the option selects offer that hub’s hosts, never the primary’s', async () => {
     hubStatus.set(remote);
     _setFleetsForTest([fleet('primary', true), fleet('company', false)]);
@@ -229,6 +242,22 @@ describe('Settings › Company with a second fleet', () => {
     expect((await screen.findAllByTestId('resource-row'))[0].textContent).toContain('ada');
     expect(screen.queryByTestId('resource-add')).toBeNull();
     expect(screen.queryByTestId('edit-name')).toBeNull();
+  });
+
+  it('says the access is being read while that hub answers, then shows the page', async () => {
+    hubStatus.set(remote);
+    _setFleetsForTest([fleet('primary', true), fleet('company', false)]);
+    let answer: (v: unknown) => void = () => {};
+    const answers = twoHubs(true);
+    route({ ...answers, list_devices: (a: Args) => (a?.fleet === 'company' ? new Promise((r) => (answer = r)) : (answers.list_devices as (x: Args) => unknown)(a)) });
+    show('settings.orgs', false);
+    await pickCompany();
+    const loading = await screen.findByTestId('company-access-loading');
+    expect(loading.getAttribute('role')).toBe('status');
+    expect(loading.textContent).toContain('on company');
+    answer([me(true)]);
+    await screen.findByTestId('resource-readonly');
+    expect(screen.queryByTestId('company-access-loading')).toBeNull();
   });
 
   it('a device that administers nothing there says so', async () => {

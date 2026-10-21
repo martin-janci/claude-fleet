@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { errorText } from './error_copy';
   // The add-host wizard (Orbit Fleet redesign step 4.9, board Wizard). Five
   // steps on a left rail; the "Check the host" step runs its live checks one
   // at a time so each row lands as its answer comes back. Every step change
@@ -83,7 +84,7 @@
     loading = false;
     if (d.ok) drafts = d.value ?? [];
     if (h.ok) discovered = h.value ?? [];
-    else error = h.error.message;
+    else error = errorText(h.error);
   });
 
   function pickAlias(a: string) {
@@ -102,7 +103,7 @@
   async function save() {
     if (!sshAlias.trim()) return;
     const r = await saveHostSetup({ ssh_alias: sshAlias.trim(), alias: alias.trim(), step, answers });
-    if (!r.ok) error = r.error.message;
+    if (!r.ok) error = errorText(r.error);
   }
 
   function resume(d: HostSetup) {
@@ -119,7 +120,7 @@
   async function discard(d: HostSetup) {
     const r = await discardHostSetup(d.ssh_alias);
     if (!r.ok) {
-      error = r.error.message;
+      error = errorText(r.error);
       return;
     }
     drafts = drafts.filter((x) => x.ssh_alias !== d.ssh_alias);
@@ -137,7 +138,7 @@
       if (mine !== pass) return;
       const answer: SetupCheck = r.ok
         ? r.value
-        : { key, state: 'fail', label: key, detail: r.error.message };
+        : { key, state: 'fail', label: key, detail: errorText(r.error) };
       checks = [...checks.filter((c) => c.key !== key), answer];
       // No SSH, no point asking the rest: each would time out the same way.
       if (key === 'ssh' && answer.state !== 'ok') break;
@@ -153,7 +154,7 @@
       answers = { ...answers, account: a ? (a.email ?? a.display_name ?? a.uuid) : null };
       await save();
     } else {
-      error = r.error.message;
+      error = errorText(r.error);
     }
     accountRead = 'done';
   }
@@ -182,7 +183,7 @@
     const r = await addHost(alias.trim(), sshAlias.trim());
     adding = false;
     if (!r.ok) {
-      error = r.error.message;
+      error = errorText(r.error);
       return;
     }
     await discardHostSetup(sshAlias.trim());
@@ -190,7 +191,7 @@
     // the host is in fleet. The last step follows the job.
     if (answers.install_agent) {
       const j = await installAgent(alias.trim(), $appVersion);
-      if (!j.ok) error = `fleet-agent was not installed: ${j.error.message}`;
+      if (!j.ok) error = `fleet-agent was not installed: ${errorText(j.error)}`;
     }
     added = true;
   }

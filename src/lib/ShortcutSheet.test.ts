@@ -25,6 +25,10 @@ describe('ShortcutSheet', () => {
     const scopes = screen.getAllByTestId('shortcut-section').map((s) => s.dataset.scope);
     expect(scopes[0]).toBe('global');
     expect(scopes).toContain('hosts');
+    // The message box's keys (review w18-8).
+    expect(scopes).toContain('composer');
+    expect(row('composer.send')?.textContent).toContain('Enter');
+    expect(row('composer.newline')?.textContent).toContain('⇧Enter or ⌥Enter');
   });
 
   it('spells chords for Linux and Windows off the Mac, and leaves out Mac-only ones', async () => {

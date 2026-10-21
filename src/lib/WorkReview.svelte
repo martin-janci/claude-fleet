@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { errorText } from './error_copy';
   import { viewKey } from './shortcuts';
   // The Review tab of the Work view (work graph M14): link suggestions and
   // conflicts (a cross-org link, an unavailable ticket, a session with work
@@ -329,13 +330,13 @@
       return 'this session is not yours to change';
     }
     const now = await workSessionTasks(sessionId);
-    if (!now.ok) return now.error.message;
+    if (!now.ok) return errorText(now.error);
     const l = linkTo(now.value?.links ?? [], to);
     if (!l) return null;
     const r = had
       ? await reconsiderWorkLink(sessionId, l.link_id, l.link_version)
       : await unlinkSessionWork(sessionId, l.link_id, { expectedVersion: l.link_version });
-    return r.ok ? null : r.error.message;
+    return r.ok ? null : errorText(r.error);
   }
 
   // ── several at once ──

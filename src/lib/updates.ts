@@ -9,6 +9,7 @@ import { writable, get } from 'svelte/store';
 import { listen } from '@tauri-apps/api/event';
 import { invokeCmd, type Result } from './result';
 import { subscribeToRowEvents } from './events';
+import { errorText } from './error_copy';
 
 /** Mirror of `self_update::DesktopUpdate`. */
 export interface DesktopUpdate {
@@ -31,6 +32,27 @@ export const desktopUpdate = writable<DesktopUpdate | null>(null);
 /** `downloaded / total` bytes while installing, else null. */
 export const updateProgress = writable<{ downloaded: number; total: number | null } | null>(null);
 export const updateError = writable<string | null>(null);
+
+const DISMISS_KEY = 'claude-fleet.update.dismissed';
+function readDismissed(): string | null {
+  try {
+    return sessionStorage.getItem(DISMISS_KEY);
+  } catch {
+    return null;
+  }
+}
+/** The version whose banner a person dismissed this session (×), if any. */
+export const dismissedUpdate = writable<string | null>(readDismissed());
+
+export function dismissUpdate(version: string | null): void {
+  dismissedUpdate.set(version);
+  try {
+    if (version) sessionStorage.setItem(DISMISS_KEY, version);
+    else sessionStorage.removeItem(DISMISS_KEY);
+  } catch {
+    // Not remembered across reloads; the banner still goes away now.
+  }
+}
 
 export interface Banner {
   tone: 'info' | 'warn';
@@ -103,7 +125,7 @@ export async function installUpdate(): Promise<Result<void>> {
   // On success the app restarts and nothing after this runs.
   if (!r.ok) {
     updateProgress.set(null);
-    updateError.set(r.error.message);
+    updateError.set(errorText(r.error));
   }
   return r;
 }
@@ -170,8 +192,11 @@ export function checkedLine(u: DesktopUpdate | null): string | null {
     case 'up_to_date':
       return `Up to date (${u.installed}).`;
     case 'update_available':
+      if (!u.version) return u.reason;
+      return u.mandatory ? `claude-fleet ${u.version} is required.` : `claude-fleet ${u.version} is available.`;
     case 'update_required':
-      return u.version ? `claude-fleet ${u.version} is available.` : u.reason;
+      // The banner says "Update required"; this line must not call it an offer (review w26-10).
+      return u.version ? `claude-fleet ${u.version} is required: ${u.reason}` : `Update required: ${u.reason}`;
     default:
       return u.reason || `No update (${u.installed}).`;
   }

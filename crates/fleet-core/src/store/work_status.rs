@@ -333,6 +333,7 @@ pub struct StatusLogRow {
 
 impl Store {
     /// An item's status history, oldest first.
+    #[cfg(test)]
     pub fn status_log(&self, item_id: i64) -> Result<Vec<StatusLogRow>, IpcError> {
         let mut stmt = self.conn.prepare(
             "SELECT item_id, at, category, status_name, set_by FROM work_status_log \

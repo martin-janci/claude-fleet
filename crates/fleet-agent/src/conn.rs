@@ -2772,19 +2772,12 @@ mod tests {
     /// with its reason, not the generic `Closed`.
     #[tokio::test]
     async fn a_close_carrying_the_version_code_is_read_as_a_version_refusal() {
-        let mut p = pair().await;
-        let frame = CloseFrame {
-            code: CloseCode::from(VERSION_REFUSED_CLOSE_CODE),
-            reason: "fleet-agent speaks protocol v1; the hub needs at least v2 — update \
-                     fleet-agent"
-                .into(),
-        };
-        p.hub.send(Message::Close(Some(frame))).await.unwrap();
-        let served = tokio::time::timeout(PATIENCE, p.served)
-            .await
-            .unwrap()
-            .unwrap();
-        match served.end {
+        let end = end_after_close(
+            VERSION_REFUSED_CLOSE_CODE,
+            "fleet-agent speaks protocol v1; the hub needs at least v2 — update fleet-agent",
+        )
+        .await;
+        match end {
             SessionEnd::VersionRefused(reason) => {
                 assert!(reason.contains("update fleet-agent"), "{reason}");
             }
@@ -2796,20 +2789,30 @@ mod tests {
     /// `SessionEnd::Superseded`, which `run_with` backs off at the cap on.
     #[tokio::test]
     async fn a_close_carrying_the_superseded_code_is_read_as_superseded() {
-        let mut p = pair().await;
-        let frame = CloseFrame {
-            code: CloseCode::from(fleet_proto::SUPERSEDED_CLOSE_CODE),
-            reason: "another agent connected with this host's token".into(),
-        };
-        p.hub.send(Message::Close(Some(frame))).await.unwrap();
-        let served = tokio::time::timeout(PATIENCE, p.served)
-            .await
-            .unwrap()
-            .unwrap();
-        match served.end {
+        let end = end_after_close(
+            fleet_proto::SUPERSEDED_CLOSE_CODE,
+            "another agent connected with this host's token",
+        )
+        .await;
+        match end {
             SessionEnd::Superseded(reason) => assert!(reason.contains("another agent"), "{reason}"),
             other => panic!("expected Superseded, got {other:?}"),
         }
+    }
+
+    /// How the session ends when the hub closes it with `code` and `reason`.
+    async fn end_after_close(code: u16, reason: &str) -> SessionEnd {
+        let mut p = pair().await;
+        let frame = CloseFrame {
+            code: CloseCode::from(code),
+            reason: reason.to_owned().into(),
+        };
+        p.hub.send(Message::Close(Some(frame))).await.unwrap();
+        tokio::time::timeout(PATIENCE, p.served)
+            .await
+            .unwrap()
+            .unwrap()
+            .end
     }
 
     /// A hub predating this protocol version sends no `welcome` at all —

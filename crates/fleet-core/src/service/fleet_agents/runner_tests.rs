@@ -113,6 +113,10 @@ struct World {
     /// tracker updated them, the id their place), and the pages asked.
     items: Mutex<Vec<ItemThread>>,
     item_pages: Mutex<Vec<ItemPage>>,
+    /// GitHub: the diff a review is placed on, and whether the PR is the
+    /// host's own (GitHub refuses to approve it).
+    diff: Mutex<String>,
+    own_pr: Mutex<bool>,
 }
 
 #[async_trait::async_trait]
@@ -223,6 +227,36 @@ impl FleetHost for World {
         ));
         Ok(())
     }
+    async fn pr_diff(&self, _: &str, repo: &str, number: i64) -> Result<String, String> {
+        self.gh_writes
+            .lock()
+            .unwrap()
+            .push(format!("diff {repo}#{number}"));
+        Ok(self.diff.lock().unwrap().clone())
+    }
+    async fn post_pr_review(
+        &self,
+        req: &crate::service::agents::review::post::ReviewRequest,
+        event: &str,
+    ) -> Result<i64, String> {
+        if *self.own_pr.lock().unwrap() && event != "COMMENT" {
+            return Err("Can not approve your own pull request".into());
+        }
+        let lines: Vec<String> = req
+            .comments
+            .iter()
+            .map(|c| format!("{}:{} {}", c.path, c.line, c.body))
+            .collect();
+        self.gh_writes.lock().unwrap().push(format!(
+            "review {}#{} {event} @{}: {} || {}",
+            req.repo,
+            req.number,
+            req.sha,
+            req.body,
+            lines.join(" | ")
+        ));
+        Ok(77)
+    }
     fn base(&self) -> &dyn SupportHost {
         &self.base
     }
@@ -314,6 +348,8 @@ fn fx(loaded: Loaded, config: Value, bindings: Value, project: bool) -> Fx {
         fleet_ops: Mutex::default(),
         items: Mutex::default(),
         item_pages: Mutex::default(),
+        diff: Mutex::default(),
+        own_pr: Mutex::default(),
     });
     Fx {
         store: Arc::new(Mutex::new(s)),
@@ -1309,6 +1345,153 @@ async fn a_pr_answer_comments_and_labels_within_the_repos() {
     assert_eq!(ex.execute(&a).await, ActionResult::Executed, "limits.repos");
 }
 
+/// A definition triggered by github_prs whose answer is a review.
+fn review_fx(auto: bool) -> Fx {
+    let d = definition::parse_value(&json!({
+        "inputs": [{ "name": "repo", "type": "text", "label": "Repo", "required": true }],
+        "trigger": { "source": "github_prs", "repo": "{{repo}}" },
+        "run": { "workspace": "home", "output_schema": { "type": "object",
+            "required": ["verdict", "summary", "findings"], "properties": {
+                "verdict": { "enum": ["APPROVE", "REQUEST_CHANGES", "COMMENT"] },
+                "summary": { "type": "string" },
+                "findings": { "type": "array", "items": { "type": "object",
+                    "required": ["path", "line", "body"], "properties": {
+                        "path": { "type": "string" }, "line": { "type": "integer" },
+                        "body": { "type": "string" } } } } } } },
+        "actions": [
+            { "id": "review", "do": "pr_review", "target": "{{subject.number}}",
+              "verdict": "{{answer.verdict}}", "body": "{{answer.summary}}",
+              "findings": "findings", "auto": auto }
+        ]
+    }))
+    .unwrap();
+    assert_eq!(
+        definition::problems(&d, &BTreeMap::new()),
+        Vec::<String>::new()
+    );
+    let loaded = Loaded {
+        name: "rv".into(),
+        definition: d,
+        skill: "Review the PR.".into(),
+        templates: BTreeMap::new(),
+    };
+    fx(loaded, json!({ "repo": "acme/pos" }), json!([]), false).at("act")
+}
+
+const REVIEW_DIFF: &str = "diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1,3 +1,4 @@\n fn a() {\n+    let x = 1;\n     b();\n }\n";
+
+/// Run the review fixture on PR 4 at `abc`; the review action.
+async fn reviewed(f: &Fx, answer: &str) -> crate::store::AgentActionRow {
+    *f.world.prs.lock().unwrap() = vec![pr(4, "abc", false)];
+    *f.world.diff.lock().unwrap() = REVIEW_DIFF.into();
+    let now = crate::store::now_unix();
+    let polled = f
+        .poller()
+        .poll(&f.rule, Some(&f.cursor(now - 100, None)), now)
+        .await
+        .unwrap();
+    let jobs = f.claim(&polled.jobs);
+    *f.world.base.answer.lock().unwrap() = Some(PrintOutcome::Answered {
+        text: answer.into(),
+        cost_micros: 0,
+    });
+    let out = f.runner().run(&jobs[0], Some(&f.rule)).await;
+    assert!(matches!(out, RunOutcome::Done { .. }), "{out:?}");
+    f.actions()
+        .into_iter()
+        .find(|a| a.kind == "pr_review")
+        .unwrap()
+}
+
+#[tokio::test]
+async fn a_review_places_its_findings_on_the_diff_and_lists_the_rest() {
+    let f = review_fx(false);
+    let a = reviewed(
+        &f,
+        r#"{"verdict":"APPROVE","summary":"Fine overall.","findings":[
+            {"path":"src/a.rs","line":2,"body":"x is unused"},
+            {"path":"src/a.rs","line":40,"body":"far away"},
+            {"path":"","line":1,"body":"no path"}]}"#,
+    )
+    .await;
+    assert_eq!(
+        a.state, "pending",
+        "a review waits for a person unless auto"
+    );
+    let p: Value = serde_json::from_str(&a.payload).unwrap();
+    assert_eq!(
+        (p["event"].as_str(), p["sha"].as_str()),
+        (Some("APPROVE"), Some("abc"))
+    );
+    assert_eq!(p["findings"].as_array().unwrap().len(), 2, "{p}");
+    let done = f.executor().execute(&a).await;
+    assert!(
+        matches!(&done, ActionResult::Done(l) if l.contains("1 line comments")),
+        "{done:?}"
+    );
+    let writes = f.world.gh_writes.lock().unwrap().clone();
+    let review = writes.iter().find(|w| w.starts_with("review")).unwrap();
+    assert!(
+        review.starts_with("review acme/pos#4 APPROVE @abc: Fine overall."),
+        "{review}"
+    );
+    assert!(
+        review.contains("Outside the diff:\n- `src/a.rs:40`: far away"),
+        "{review}"
+    );
+    assert!(
+        review.contains("|| src/a.rs:2 x is unused\n\n[fleet-agent:inst]"),
+        "{review}"
+    );
+    assert!(
+        !review.contains("no path"),
+        "an item without a path is dropped"
+    );
+
+    // GitHub refuses to approve one's own PR: it goes as a comment.
+    *f.world.own_pr.lock().unwrap() = true;
+    f.world.gh_writes.lock().unwrap().clear();
+    assert!(matches!(
+        f.executor().execute(&a).await,
+        ActionResult::Done(_)
+    ));
+    assert!(f
+        .world
+        .gh_writes
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|w| w.starts_with("review acme/pos#4 COMMENT")));
+
+    // A head that moved on, or a PR no longer open, is not reviewed.
+    *f.world.prs.lock().unwrap() = vec![pr(4, "def", false)];
+    assert!(
+        matches!(f.executor().execute(&a).await, ActionResult::Expired(e) if e.contains("head moved"))
+    );
+    f.world.prs.lock().unwrap().clear();
+    assert!(
+        matches!(f.executor().execute(&a).await, ActionResult::Expired(e) if e.contains("not open"))
+    );
+}
+
+#[tokio::test]
+async fn an_unattended_review_never_approves() {
+    let f = review_fx(true);
+    let a = reviewed(
+        &f,
+        r#"{"verdict":"APPROVE","summary":"Ship it.","findings":[]}"#,
+    )
+    .await;
+    assert_eq!(a.state, "approved");
+    let p: Value = serde_json::from_str(&a.payload).unwrap();
+    assert_eq!(p["event"], "COMMENT", "an approval is a person's");
+    assert_eq!(
+        super::actions::review_event("request_changes", true),
+        "REQUEST_CHANGES"
+    );
+    assert_eq!(super::actions::review_event("LGTM", false), "COMMENT");
+}
+
 #[tokio::test]
 async fn another_tracker_gets_a_plain_comment_and_no_link() {
     let (f, _) = l2_run("propose", found()).await;
@@ -1356,7 +1539,8 @@ fn proposing() -> Loaded {
               "steps": "{{item.steps}}" },
             { "id": "tune", "do": "setting", "each": "findings",
               "when": { "field": "kind", "eq": "setting" },
-              "key": "{{item.key}}", "value": "{{item.value}}", "body": "{{item.title}}" },
+              "key": "{{item.key}}", "value": "{{item.value}}", "body": "{{item.title}}",
+              "fingerprint": "tune:{{item.key}}" },
             { "id": "recover", "do": "session_recover", "each": "findings",
               "when": { "field": "kind", "eq": "recover" },
               "target": "{{item.session}}", "body": "{{item.title}}" },
@@ -1397,7 +1581,12 @@ async fn each_finding_becomes_its_own_fleet_proposal() {
         .unwrap();
     let key = crate::service::settings::SPECS
         .iter()
-        .find(|sp| sp.ai != crate::service::settings::AiPolicy::Never && sp.owned_by.is_none())
+        .find(|sp| {
+            sp.ai != crate::service::settings::AiPolicy::Never
+                && sp.owned_by.is_none()
+                && sp.default != "1"
+                && crate::service::settings::validate(sp.key, "1").is_ok()
+        })
         .unwrap()
         .key;
     let answer = json!({ "summary": "two problems", "findings": [
@@ -1430,15 +1619,33 @@ async fn each_finding_becomes_its_own_fleet_proposal() {
         .map(|(a, b)| (a.to_string(), b.to_string())),
         "a work_task may run alone at act; the others wait; a key no agent may set is skipped"
     );
+    // The setting carries its finding's fingerprint (w08-6).
+    let tune_row = f
+        .actions()
+        .into_iter()
+        .find(|a| a.kind == "setting")
+        .unwrap();
+    let payload: Value = serde_json::from_str(&tune_row.payload).unwrap();
+    assert_eq!(payload["fingerprint"], format!("tune:{key}"));
+    // The setting says what it changes from (w08-5).
+    let was = crate::service::settings::effective_value(&f.store.lock().unwrap(), key).unwrap();
+    let tune = r["actions"][2]["body"].as_str().unwrap();
+    assert!(tune.contains(&format!("({key}): {was} → 1")), "{tune}");
     let first = r["actions"][0]["body"].as_str().unwrap();
     assert!(
         first.starts_with("Flaky reconnect") && first.contains("- Fix the backoff"),
         "{first}"
     );
-    // Approved: the executor hands each to fleet.
+    // Approved: the executor hands each to fleet, which answers with what
+    // it made (w08-3).
     let ex = f.executor();
     for a in f.actions() {
-        assert_eq!(ex.execute(&a).await, ActionResult::Executed, "{}", a.kind);
+        assert_eq!(
+            ex.execute(&a).await,
+            ActionResult::Done("done".into()),
+            "{}",
+            a.kind
+        );
     }
     let ops = f.world.fleet_ops.lock().unwrap().clone();
     assert_eq!(ops.len(), 4);
@@ -1598,16 +1805,8 @@ fn next_cursor(f: &Fx, polled: &crate::service::agents::Polled) -> AgentCursorRo
 
 #[tokio::test]
 async fn another_trackers_burst_is_paged_and_a_late_synced_comment_still_counts() {
-    let f = fx(
-        small(
-            json!({ "source": "tracker_comments", "tracker": "3",
-                "match": { "any_phrase": "/ask" } }),
-            json!([]),
-        ),
-        json!({}),
-        json!([]),
-        false,
-    );
+    let f = trigger_fx(json!({ "source": "tracker_comments", "tracker": "3",
+        "match": { "any_phrase": "/ask" } }));
     *f.world.provider.lock().unwrap() = Some("github".into());
     let now = crate::store::now_unix();
     let p = f.poller();
@@ -1662,4 +1861,250 @@ async fn another_trackers_burst_is_paged_and_a_late_synced_comment_still_counts(
         .unwrap();
     let keys: Vec<&str> = d.jobs.iter().map(|j| j.dedup_key.as_str()).collect();
     assert_eq!(keys, [format!("r{}:tracker:3:o/r#12#clate", f.rule.id)]);
+}
+
+#[test]
+fn a_setting_already_at_its_value_is_skipped_and_others_say_from_what() {
+    let store = Store::open_in_memory().unwrap();
+    let sp = crate::service::settings::SPECS
+        .iter()
+        .find(|sp| {
+            sp.ai != crate::service::settings::AiPolicy::Never
+                && sp.owned_by.is_none()
+                && !sp.default.is_empty()
+        })
+        .unwrap();
+    let planned = |value: &str| super::actions::Planned {
+        id: "tune".into(),
+        kind: "setting",
+        payload: serde_json::to_string(&super::actions::SettingPayload {
+            action: "tune".into(),
+            key: sp.key.into(),
+            value: value.into(),
+            was: String::new(),
+            why: "because".into(),
+            body: String::new(),
+        })
+        .unwrap(),
+        body: String::new(),
+        auto: false,
+    };
+    let mut same = planned(sp.default);
+    assert!(super::runner::with_current_setting(&store, &mut same).is_err());
+    let mut other = planned("zz-other");
+    super::runner::with_current_setting(&store, &mut other).unwrap();
+    let p: super::actions::SettingPayload = serde_json::from_str(&other.payload).unwrap();
+    assert_eq!(p.was, sp.default);
+    assert!(
+        other.body.contains(&format!("{} → zz-other", sp.default)),
+        "{}",
+        other.body
+    );
+}
+
+// ── the real paged read under `LiveFleetHost::item_threads` ─────────────
+
+mod item_page {
+    use super::super::runner::{read_item_page, ItemsRead, LiveFleetHost};
+    use crate::service::agents::review::SshReviewHost;
+    use crate::service::agents::support::LiveSupportHost;
+    use crate::service::trackers::{
+        Caps, Fetched, ItemRef, Page, RefCtx, TrackerComment, TrackerError, TrackerInfo,
+        TrackerProvider, ViewDef,
+    };
+    use crate::store::{ItemMeta, Store, TrackerConfig, WorkItemRow};
+    use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    /// Comments for every item; from call `fail_from` (1-based) on, the
+    /// tracker answers `error` instead.
+    struct Comments {
+        calls: AtomicUsize,
+        fail_from: usize,
+        error: fn() -> TrackerError,
+    }
+
+    impl Comments {
+        fn failing_from(fail_from: usize, error: fn() -> TrackerError) -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+                fail_from,
+                error,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl TrackerProvider for Comments {
+        fn caps(&self) -> Caps {
+            Caps::default()
+        }
+        async fn probe(&self) -> Result<TrackerInfo, TrackerError> {
+            unreachable!()
+        }
+        async fn views(&self, _: &TrackerConfig) -> Result<Vec<ViewDef>, TrackerError> {
+            unreachable!()
+        }
+        async fn list(
+            &self,
+            _: &ViewDef,
+            _: Option<i64>,
+            _: Option<String>,
+        ) -> Result<Page, TrackerError> {
+            unreachable!()
+        }
+        async fn fetch(&self, _: &[ItemRef]) -> Result<Vec<Fetched>, TrackerError> {
+            unreachable!()
+        }
+        fn recognize(&self, _: &str, _: RefCtx<'_>) -> Vec<ItemRef> {
+            Vec::new()
+        }
+        async fn comments(
+            &self,
+            r: &ItemRef,
+            _: usize,
+        ) -> Result<Vec<TrackerComment>, TrackerError> {
+            let n = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+            if n >= self.fail_from {
+                return Err((self.error)());
+            }
+            Ok(vec![TrackerComment {
+                id: format!("c{n}"),
+                author: "someone".into(),
+                body: format!("on {r:?}"),
+                created_at: 100,
+                url: None,
+            }])
+        }
+    }
+
+    fn row(id: i64, key: Option<&str>) -> (WorkItemRow, ItemMeta) {
+        let row: WorkItemRow = serde_json::from_value(json!({
+            "id": id,
+            "source": "github",
+            "key": key,
+            "title": format!("item {id}"),
+            "status_category": "todo",
+            "created_at": 1,
+            "updated_at": 10 * id,
+            "tracker_id": 7,
+            "external_id": key.map(|_| format!("ext{id}")),
+        }))
+        .unwrap();
+        (row, ItemMeta::default())
+    }
+
+    fn keys(read: &ItemsRead) -> Vec<&str> {
+        read.items.iter().map(|i| i.thread.key.as_str()).collect()
+    }
+
+    fn rate_limited() -> TrackerError {
+        TrackerError::RateLimited {
+            retry_after_secs: Some(60),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_full_page_carries_on_from_its_last_row_and_a_short_one_is_done() {
+        let rows = || vec![row(1, Some("A-1")), row(2, Some("A-2"))];
+        let full = read_item_page(7, rows(), 2, None).await.unwrap();
+        assert_eq!(keys(&full), ["A-1", "A-2"]);
+        assert_eq!(full.more, Some((20, 2)));
+        assert!(full.items.iter().all(|i| i.thread.comments.is_empty()));
+        let short = read_item_page(7, rows(), 3, None).await.unwrap();
+        assert_eq!(short.more, None);
+    }
+
+    #[tokio::test]
+    async fn a_page_of_keyless_rows_still_moves_the_watermark() {
+        let read = read_item_page(7, vec![row(1, None), row(2, None)], 2, None)
+            .await
+            .unwrap();
+        assert!(read.items.is_empty());
+        assert_eq!(read.more, Some((20, 2)), "the next page starts after them");
+        // A keyless row before a refusal is done with too.
+        let p = Comments::failing_from(1, rate_limited);
+        let read = read_item_page(7, vec![row(1, None), row(2, Some("A-2"))], 5, Some(&p))
+            .await
+            .unwrap();
+        assert!(read.items.is_empty());
+        assert_eq!(read.more, Some((10, 1)));
+    }
+
+    #[tokio::test]
+    async fn a_refusal_stops_the_page_at_the_item_before_and_keeps_what_was_read() {
+        let p = Comments::failing_from(3, rate_limited);
+        let rows = (1..=4).map(|i| row(i, Some(&format!("A-{i}")))).collect();
+        // The page is short (max 10): without the refusal `more` would be None.
+        let read = read_item_page(7, rows, 10, Some(&p)).await.unwrap();
+        assert_eq!(keys(&read), ["A-1", "A-2"], "the items read before stay");
+        assert_eq!(read.items[0].thread.comments.len(), 1);
+        assert_eq!(
+            read.more,
+            Some((20, 2)),
+            "the next poll starts with A-3, the item refused"
+        );
+        assert_eq!(p.calls.load(Ordering::SeqCst), 3, "nothing asked after it");
+    }
+
+    #[tokio::test]
+    async fn a_refusal_on_the_first_item_is_the_polls_error() {
+        for error in [
+            rate_limited as fn() -> TrackerError,
+            || TrackerError::Unreachable("dns".into()),
+            || TrackerError::Auth("401".into()),
+            || TrackerError::Captcha,
+            || TrackerError::Unconfigured,
+        ] {
+            let p = Comments::failing_from(1, error);
+            let err = read_item_page(7, vec![row(1, Some("A-1"))], 1, Some(&p))
+                .await
+                .unwrap_err();
+            assert!(err.starts_with("tracker 7: "), "{err}");
+        }
+    }
+
+    #[tokio::test]
+    async fn one_item_whose_comments_cannot_be_read_is_still_read() {
+        let p = Comments::failing_from(1, || TrackerError::NotFound);
+        let rows = vec![row(1, Some("A-1")), row(2, Some("A-2"))];
+        let read = read_item_page(7, rows, 10, Some(&p)).await.unwrap();
+        assert_eq!(keys(&read), ["A-1", "A-2"]);
+        assert!(read.items.iter().all(|i| i.thread.comments.is_empty()));
+        assert_eq!(read.more, None);
+    }
+
+    #[tokio::test]
+    async fn with_the_tracker_sync_off_the_poll_says_so() {
+        let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+        store
+            .lock()
+            .unwrap()
+            .set_setting(crate::service::settings::WORK_SYNC_INTERVAL_SECS, "0")
+            .unwrap();
+        let ssh = Arc::new(crate::ssh::SshClient::new());
+        let host = LiveFleetHost {
+            store: Arc::clone(&store),
+            ssh: Arc::clone(&ssh),
+            base: LiveSupportHost {
+                store: Arc::clone(&store),
+                ssh: Arc::clone(&ssh),
+            },
+            gh: SshReviewHost {
+                store: Arc::clone(&store),
+                ssh,
+            },
+        };
+        let page = super::super::runner::ItemPage {
+            after: (0, 0),
+            until: i64::MAX,
+            max: 10,
+            comments: true,
+        };
+        let err = super::super::runner::FleetHost::item_threads(&host, 7, page)
+            .await
+            .unwrap_err();
+        assert!(err.contains("tracker sync is off"), "{err}");
+    }
 }

@@ -49,6 +49,12 @@ import {
   fleetPinSession,
   fleetTouchViewed,
   onPrimaryConnection,
+  FLEET_PALETTE,
+  fleetIsDown,
+  fleetTrouble,
+  loadFleets,
+  nextFleetColor,
+  removeFleet,
   type FleetInfo,
 } from './fleets';
 import type { SessionRow } from './sessions';
@@ -111,8 +117,9 @@ describe('fleet rows', () => {
     expect(rows.hosts.size).toBe(0);
     applyFleetEvent(rows, { name: 'project:updated', payload: { id: 7, owner: 'papayapos', repo: 'pos' } });
     expect(rows.projects[0].project.repo).toBe('pos');
-    expect(applyFleetEvent(rows, { name: 'task:updated', payload: { id: 1 } })).toBeNull();
-    expect(applyFleetEvent(rows, { name: 'session:updated', payload: 'garbage' })).toBeNull();
+    applyFleetEvent(rows, { name: 'task:updated', payload: { id: 1 } });
+    applyFleetEvent(rows, { name: 'session:updated', payload: 'garbage' });
+    expect([rows.sessions.size, rows.hosts.size, rows.projects.length]).toEqual([0, 0, 1]);
   });
 
   it('copies nothing for an event it does not keep', () => {
@@ -454,5 +461,112 @@ describe('Phase 2: attention and addresses per fleet', () => {
     expect(fleetSessionAt('aaaaaaaa-1111/session/mac/dev-x', known, rows)).toBeNull();
     expect(fleetAddress('cccccccc-3333/session/mac/x', known)).toEqual({ text: 'cccccccc-3333/session/mac/x', fleet: null, host: 'mac', name: 'x' });
     expect(fleetAddress('session 12 on mefistos', known).fleet).toBeNull();
+  });
+});
+
+// ── review w01 ──────────────────────────────────────────────────────────
+
+describe('review w01: multi-hub gaps', () => {
+  const project = (id: number, owner: string, repo: string) => ({
+    project: { id, owner, repo, base_path: '', last_session_at: null, adopted: false, system: false },
+    worktrees: [],
+  });
+
+  it('w01-3: drops row events for a duplicate fleet, and its rows once the list names it one', async () => {
+    _setFleetsForTest([fleet(PRIMARY), fleet('again', { duplicate_of: 'primary' })]);
+    onFleetEvent({ fleet: 'again', name: 'session:updated', payload: session(1) });
+    expect(get(fleetRows).has('again')).toBe(false);
+
+    _setFleetsForTest([fleet(PRIMARY), fleet('later')]);
+    onFleetEvent({ fleet: 'later', name: 'session:updated', payload: session(1) });
+    expect(get(fleetRows).get('later')?.sessions.size).toBe(1);
+    inv.mockImplementation(async (cmd: string) =>
+      cmd === 'fleets_list' ? [fleet(PRIMARY), fleet('later', { duplicate_of: 'primary' })] : [],
+    );
+    await loadFleets();
+    expect(get(fleetRows).has('later')).toBe(false);
+  });
+
+  it('w01-13: a fleet is loaded only once its sessions were listed, not by an event', async () => {
+    _setFleetsForTest([fleet(PRIMARY), fleet('company')]);
+    onFleetEvent({ fleet: 'company', name: 'session:updated', payload: session(1) });
+    expect(get(fleetRows).get('company')?.loaded).toBe(false);
+    inv.mockImplementation(async (cmd: string) => (cmd === 'list_sessions' ? [session(1), session(2)] : []));
+    await loadFleetRows('company');
+    expect(get(fleetRows).get('company')?.loaded).toBe(true);
+    onFleetEvent({ fleet: 'company', name: 'session:updated', payload: session(3) });
+    expect(get(fleetRows).get('company')?.loaded).toBe(true);
+  });
+
+  it('w01-5: never offers or defaults to a fleet whose link is down', () => {
+    const known = [
+      fleet(PRIMARY),
+      fleet('company', { url: 'https://fleet.papayapos.dev', connection: { state: 'offline', attempt: 3, retry_in_secs: 30, reason: 'refused' } }),
+      fleet('lab', { connection: { state: 'reconnecting', attempt: 1, retry_in_secs: 2, reason: 'x' } }),
+      fleet('old', { connection: { state: 'hub_too_old', hub_contract: 1, min_contract: 9 } }),
+    ];
+    const rows = new Map(known.slice(1).map((f) => [f.id, { ...emptyRows(), projects: [project(9, 'PapayaPOS', 'pos')] }]));
+    const got = fleetChoicesFor('papayapos', 'pos', known, rows);
+    expect(got.map((c) => c.fleet.id)).toEqual(['lab']);
+    expect(defaultFleetFor('PapayaPOS', got, 'company')).toBe(PRIMARY);
+    expect(fleetIsDown(known[1])).toBe(true);
+    expect(fleetIsDown(known[2])).toBe(false);
+  });
+
+  it('w01-6: a duplicate reads "duplicate", not "live"', () => {
+    expect(connectionWord({ connection: { state: 'connected' }, unavailable: null, local: false, duplicate_of: 'primary' })).toEqual({
+      word: 'duplicate',
+      tone: 'warn',
+    });
+  });
+
+  it("w01-9: refuses to attach a session on another hub's WSL host", () => {
+    expect(fleetAttachRefusal({ host_alias: 'wsl-ubuntu' })).toContain('WSL');
+    expect(fleetAttachRefusal({ host_alias: 'local' })).not.toBeNull();
+    expect(fleetAttachRefusal({ host_alias: 'mac' })).toBeNull();
+  });
+
+  it('w01-4: says why a fleet is offline, and that a 401 means pairing again', () => {
+    const offline = (reason: string) =>
+      fleet('company', { connection: { state: 'offline', attempt: 2, retry_in_secs: 30, reason } });
+    expect(fleetTrouble(offline('the hub answered 401 Unauthorized to GET /events'))).toBe(
+      "This desktop's pairing was revoked on https://company.example.com. Remove it and add it again with a fresh code.",
+    );
+    expect(fleetTrouble(offline('connection refused'))).toBe('connection refused');
+    expect(fleetTrouble(offline('x'.repeat(500)))!.length).toBe(200);
+    expect(fleetTrouble(fleet('company'))).toBeNull();
+    expect(fleetTrouble({ ...offline('refused'), duplicate_of: 'primary' })).toBeNull();
+  });
+
+  it('w01-12: removing a fleet forgets its open session and its remembered repositories', async () => {
+    _setFleetsForTest([fleet(PRIMARY), fleet('company'), fleet('lab')]);
+    openFleetSession('company', 12);
+    rememberFleetFor('PapayaPOS', 'pos', 'company');
+    rememberFleetFor('me', 'exp', 'lab');
+    // Review w30-9: the filter and a kill's tombstone are the old fleet's too.
+    fleetFilter.set('company');
+    onFleetEvent({ fleet: 'company', name: 'session:updated', payload: session(12) });
+    onFleetEvent({ fleet: 'company', name: 'session:killed', payload: { id: 12 } });
+    inv.mockImplementation(async (cmd: string) => (cmd === 'fleets_list' ? [fleet(PRIMARY), fleet('lab')] : null));
+    const r = await removeFleet('company');
+    expect(r.ok).toBe(true);
+    expect(get(fleetSelection)).toBeNull();
+    expect(rememberedFleetFor('PapayaPOS', 'pos')).toBeNull();
+    expect(rememberedFleetFor('me', 'exp')).toBe('lab');
+    expect(get(fleetFilter)).toBe('all');
+    // Added again under the same label: its session #12 is listed, not hidden
+    // behind the old fleet's tombstone.
+    _setFleetsForTest([fleet(PRIMARY), fleet('company'), fleet('lab')]);
+    onFleetEvent({ fleet: 'company', name: 'session:updated', payload: session(12) });
+    expect(get(fleetRows).get('company')?.sessions.has(12)).toBe(true);
+  });
+
+  it("w01-14: the Add form's colour is the one the backend would pick, from the same palette", () => {
+    const rs = readFileSync('src-tauri/src/backend/fleets.rs', 'utf8');
+    const m = /pub const PALETTE: &\[&str\] = &\[(.*?)\];/s.exec(rs);
+    expect(m).not.toBeNull();
+    expect([...FLEET_PALETTE]).toEqual([...m![1].matchAll(/"([^"]+)"/g)].map((x) => x[1]));
+    expect(nextFleetColor([fleet(PRIMARY)])).toBe('#e8833a');
+    expect(nextFleetColor([fleet(PRIMARY), fleet('company', { color: '#E8833A' })])).toBe('#3fb27f');
   });
 });

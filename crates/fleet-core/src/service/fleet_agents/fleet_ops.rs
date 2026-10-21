@@ -148,8 +148,33 @@ fn setting(store: &Mutex<Store>, p: &SettingPayload) -> Result<String, String> {
     let done = crate::service::settings_review::decide_as(&s, &[proposal.id], &[], Actor::Person)
         .map_err(|e| e.message)?;
     match done.failed.first() {
-        Some(f) => Err(format!("{}: {f:?}", p.key)),
+        Some(f) => Err(format!("{}: {}", p.key, f.error)),
         None => Ok(format!("{} = {}", p.key, p.value)),
+    }
+}
+
+/// PURE: what restoring session `id` came to. `restore_host_sessions`
+/// answers `Ok` for the batch even when this session's restore failed or
+/// the plan skipped it (a controller row, no Claude id), so the action
+/// fails on either rather than reading `executed`.
+fn restore_line(
+    report: &crate::service::sessions::RestoreReport,
+    id: i64,
+    name: &str,
+) -> Result<String, String> {
+    if let Some(o) = report.results.iter().find(|o| o.session_id == id) {
+        return match (o.ok, &o.error) {
+            (true, _) => Ok(format!("restored {name} on {}", report.host_alias)),
+            (false, Some(e)) => Err(format!("{name} was not restored: {e}")),
+            (false, None) => Err(format!("{name} was not restored")),
+        };
+    }
+    match report.plan.iter().find(|e| e.session_id == id) {
+        Some(e) if e.action == "skip" => Err(format!(
+            "{name} was not restored: {}",
+            e.reason.as_deref().unwrap_or("the restore plan skipped it")
+        )),
+        _ => Err(format!("{name} was not restored: it is no longer lost")),
     }
 }
 
@@ -179,7 +204,7 @@ async fn recover(
         )
         .await
         .map_err(|e| e.message)?;
-        return Ok(format!("restored {}: {report:?}", row.tmux_name));
+        return restore_line(&report, row.id, &row.tmux_name);
     }
     let r = crate::service::sessions::restart_session(
         crate::service::sessions::RestartSessionArgs {
@@ -254,6 +279,55 @@ mod tests {
             ..p
         };
         assert!(setting(&store, &p).is_err());
+    }
+
+    #[test]
+    fn a_failed_or_skipped_restore_fails_the_action() {
+        use crate::service::sessions::{RestoreOutcome, RestorePlanEntry, RestoreReport};
+        let entry = |action: &str, reason: Option<&str>| RestorePlanEntry {
+            session_id: 7,
+            tmux_name: Some("api-fix".into()),
+            cwd: None,
+            claude_session_id: None,
+            friendly_name: None,
+            action: action.into(),
+            reason: reason.map(Into::into),
+        };
+        let outcome = |ok: bool, error: Option<&str>| RestoreOutcome {
+            session_id: 7,
+            tmux_name: "api-fix".into(),
+            ok,
+            error: error.map(Into::into),
+            code: None,
+        };
+        let report = |plan, results| RestoreReport {
+            host_alias: "mercury".into(),
+            dry_run: false,
+            plan: vec![plan],
+            results,
+        };
+        assert_eq!(
+            restore_line(
+                &report(entry("restore", None), vec![outcome(true, None)]),
+                7,
+                "api-fix"
+            ),
+            Ok("restored api-fix on mercury".into())
+        );
+        let failed = report(
+            entry("restore", None),
+            vec![outcome(false, Some("tmux died"))],
+        );
+        assert_eq!(
+            restore_line(&failed, 7, "api-fix"),
+            Err("api-fix was not restored: tmux died".into())
+        );
+        let skipped = report(entry("skip", Some("no claude session id")), vec![]);
+        assert_eq!(
+            restore_line(&skipped, 7, "api-fix"),
+            Err("api-fix was not restored: no claude session id".into())
+        );
+        assert!(restore_line(&skipped, 8, "other").is_err());
     }
 
     #[test]

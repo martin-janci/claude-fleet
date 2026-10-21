@@ -2,7 +2,7 @@
 // failure reads, and the Undo toast after a save.
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { get } from 'svelte/store';
-import { fieldCount, formFailure, savedWithUndo, submitHint, submitKey } from './form_frame';
+import { fieldCount, formFailure, formKeys, savedWithUndo, submitHint, submitKey } from './form_frame';
 import { clearToasts, runToastAction, toasts } from '../toasts';
 import { findConflicts } from '../shortcuts';
 
@@ -104,5 +104,58 @@ describe('submitHint (G7.4)', () => {
   it('reads ⌘↵ on the Mac and Ctrl+Enter elsewhere', () => {
     expect(submitHint(true)).toEqual({ label: '⌘↵', aria: 'Meta+Enter' });
     expect(submitHint(false)).toEqual({ label: 'Ctrl+Enter', aria: 'Control+Enter' });
+  });
+});
+
+describe('formKeys (review w18-6)', () => {
+  // jsdom is not a Mac: the chord is Ctrl+Enter.
+  function press(target: Element, init: KeyboardEventInit): KeyboardEvent {
+    const e = new KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...init });
+    target.dispatchEvent(e);
+    return e;
+  }
+
+  it('Ctrl+Enter in a textarea runs the verb; a disabled verb does not run', () => {
+    const root = el('<div><input type="text"><textarea></textarea></div>');
+    const submit = vi.fn();
+    const action = formKeys(root, { submit, enabled: true });
+    const ta = root.querySelector('textarea')!;
+    expect(press(ta, { key: 'Enter', ctrlKey: true }).defaultPrevented).toBe(true);
+    expect(submit).toHaveBeenCalledTimes(1);
+    // A bare Enter in the textarea is a new line.
+    expect(press(ta, { key: 'Enter' }).defaultPrevented).toBe(false);
+    action.update({ submit, enabled: false });
+    press(ta, { key: 'Enter', ctrlKey: true });
+    expect(submit).toHaveBeenCalledTimes(1);
+    action.destroy();
+  });
+
+  it('a several-field <form> no longer submits on a bare Enter; Ctrl+Enter submits it', () => {
+    const form = el(
+      '<form><input type="text" name="a"><input type="text" name="b"><button type="submit">Go</button></form>',
+    ).firstElementChild as HTMLFormElement;
+    document.body.appendChild(form);
+    const submitted = vi.fn((e: Event) => e.preventDefault());
+    form.addEventListener('submit', submitted);
+    const action = formKeys(form);
+    const a = form.querySelector('input')!;
+    expect(press(a, { key: 'Enter' }).defaultPrevented).toBe(true);
+    expect(submitted).not.toHaveBeenCalled();
+    press(a, { key: 'Enter', ctrlKey: true });
+    expect(submitted).toHaveBeenCalledTimes(1);
+    // A disabled submit button keeps the form from submitting.
+    form.querySelector('button')!.disabled = true;
+    press(a, { key: 'Enter', ctrlKey: true });
+    expect(submitted).toHaveBeenCalledTimes(1);
+    action.destroy();
+    form.remove();
+  });
+
+  it('a one-field form still submits on Enter', () => {
+    const root = el('<div><input type="text"></div>');
+    const submit = vi.fn();
+    formKeys(root, { submit });
+    press(root.querySelector('input')!, { key: 'Enter' });
+    expect(submit).toHaveBeenCalledTimes(1);
   });
 });

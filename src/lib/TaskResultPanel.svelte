@@ -1,10 +1,12 @@
 <script lang="ts">
+  import { errorText } from './error_copy';
   // One panel for a task's result (design 2026-10-13, D6): the verdict and
   // what was done first, then what speaks for it, then the detail folded.
   // The report is what the worker said ("reported"); the gate, the changes
   // and the PRs are what fleet read itself. A follow-up becomes a task here
   // instead of only filling the composer.
   import {
+    ASK_ABOUT_RESULT,
     createFollowupTask,
     headline,
     validationLines,
@@ -12,7 +14,8 @@
     type TaskResultView,
     type ValidationState,
   } from './task_result';
-  import { setWorkStatus } from './work';
+  import { LOCAL_WORK_TITLE_MAX, setWorkStatus } from './work';
+  import { timeAgo } from './session_status';
   import { insertIntoComposer } from './conversation';
   import { openExternal } from './open_external';
   import type { OfState } from './kit/status';
@@ -27,6 +30,7 @@
     canMarkDone = false,
     onOpenTask,
     onChanged,
+    onAsk,
   }: {
     result: TaskResultView;
     title: string;
@@ -35,6 +39,10 @@
     canMarkDone?: boolean;
     onOpenTask?: (id: number) => void;
     onChanged?: () => void;
+    /** Ask about result, where the session is not on screen: the parent
+     *  opens it before the question goes in its composer. Without it the
+     *  question goes straight into `sessionId`'s composer. */
+    onAsk?: () => void;
   } = $props();
 
   const TONE_STATE: Record<'success' | 'warning' | 'danger', OfState> = {
@@ -50,6 +58,8 @@
   };
 
   const head = $derived(headline(result));
+  const ROLE: Record<string, string> = { implement: 'Run', review: 'Review', test: 'Test', wrapup: 'Wrap-up' };
+  const roleWord = $derived(ROLE[result.role] ?? result.role.charAt(0).toUpperCase() + result.role.slice(1));
   const report = $derived(result.report);
   const lines = $derived(validationLines(result));
   const unmet = $derived(result.gate.checks.filter((c) => c.state !== 'pass'));
@@ -85,7 +95,7 @@
       created = { ...created, [index]: r.value.id };
       rowError = { ...rowError, [index]: '' };
       onChanged?.();
-    } else rowError = { ...rowError, [index]: r.error.message };
+    } else rowError = { ...rowError, [index]: errorText(r.error) };
   }
 
   async function createOwn() {
@@ -100,7 +110,7 @@
       ownTitle = '';
       ownError = null;
       onChanged?.();
-    } else ownError = r.error.message;
+    } else ownError = errorText(r.error);
   }
 
   async function markDone() {
@@ -111,7 +121,7 @@
     if (r.ok) {
       markError = null;
       onChanged?.();
-    } else markError = r.error.message;
+    } else markError = errorText(r.error);
   }
 
   function prLabel(pr: ResultPr): string {
@@ -129,6 +139,7 @@
     <strong>{title}</strong>
     <Badge label="reported" tone="muted" title="What the session said; the checks, changes and PRs are what fleet read itself" />
     {#if report.confidence}<Badge label={`confidence ${report.confidence}`} tone="muted" />{/if}
+    <span class="when" data-testid="task-result-when">{roleWord} · finished {timeAgo(result.at)}</span>
   </header>
 
   {#if report.summary}
@@ -289,10 +300,13 @@
         class="grow"
         placeholder="Another follow-up…"
         aria-label="Follow-up title"
-        maxlength="200"
+        maxlength={LOCAL_WORK_TITLE_MAX}
         data-testid="task-result-followup-title"
         bind:value={ownTitle}
       />
+      {#if ownTitle.length > LOCAL_WORK_TITLE_MAX - 20}<span class="muted" data-testid="task-result-followup-count"
+          >{[...ownTitle].length}/{LOCAL_WORK_TITLE_MAX}</span
+        >{/if}
       <button type="submit" class="ghost" data-testid="task-result-followup-own" disabled={ownBusy || !ownTitle.trim()}
         >{ownBusy ? 'Creating…' : 'Create follow-up'}</button
       >
@@ -308,7 +322,10 @@
           class="ghost"
           data-testid="task-result-ask"
           title="Put a question about this result in the composer"
-          onclick={() => sessionId !== null && insertIntoComposer(sessionId, 'About the result of this task: ')}
+          onclick={() => {
+            if (onAsk) onAsk();
+            else if (sessionId !== null) insertIntoComposer(sessionId, ASK_ABOUT_RESULT);
+          }}
           >Ask about result</button
         >
       {/if}
@@ -354,6 +371,11 @@
     align-items: center;
   }
   .summary { font-size: 0.92em; }
+  .when {
+    margin-left: auto;
+    font-size: var(--text-2xs);
+    color: var(--fg-muted);
+  }
   h6 {
     margin: 0 0 0.2rem;
     font-size: var(--text-2xs);

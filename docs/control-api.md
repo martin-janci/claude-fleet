@@ -334,7 +334,9 @@ side are in `hub.md` → *A host that cannot be reached*; this is the contract.
   answers `503`.
 
 Tools see an agent host through the same calls as an SSH host. `agent_status`
-reports which agent hosts are connected. `add_host { transport: "agent" }`
+reports which agent hosts are connected, and flags `duplicate` on one whose
+token two fleet-agents keep taking from each other (two takeovers within
+five minutes; the hub log names both). `add_host { transport: "agent" }`
 registers one without an SSH probe. `install_agent` does the whole *Set it
 up* of `docs/hub.md` for a host the hub already reaches over SSH.
 
@@ -433,7 +435,10 @@ Index by area (names only; see the reference for details):
   `session_access` (who holds a live grant on your session), `my_grants`
   (who *you* are on this fleet and every live grant to you, which is what a
   client derives access from together with each row's `owner_person_id` and
-  `visibility`), `session_ask_access` (someone a session is shared with
+  `visibility`), `my_profile` (who *you* are on this fleet in words, for a
+  desktop showing several fleets: your person's name and e-mail, the
+  sign-in issuers linked to it, the names — never the values — of your own
+  person-scope variables, and your commit identity), `session_ask_access` (someone a session is shared with
   asks its owner for `answer` or `drive`; it confers nothing, one open ask
   each, and a decline holds a repeat back an hour), `access_requests` (the
   owner's open asks: `list`, then `grant`, which revokes the asker's share
@@ -1161,6 +1166,36 @@ Index by area (names only; see the reference for details):
   only a scheduled fire must also pass. An event or decision on a session
   the caller may not read is left out, and `dry_run` on such an event
   answers `E_NOTFOUND`.
+  Memory (migration 204, `service/routines/memory.rs`): notebooks the
+  fleet keeps in its own database, outside any git repo and any host's
+  `~/.claude`, so the next run reads them on whatever host it starts. A
+  routine's `memory` in `save` names the ones its runs use: `routine` (its
+  own), `project` (its project's, shared by every routine of that project
+  in the same circle: its org, else its owner) or `both`; `""` is none,
+  and so is absent for a new routine, while a change without `memory`
+  keeps the routine's (an older client's edit does not turn it off). `memory_auto: true` (needs `memory`) adds one line per finished
+  run, `- [run <id> · <UTC time> · <state>] <first line of its reply>`
+  (or the failure's reason), to the first notebook it uses; the oldest such
+  lines go first when the notebook is full. A run's prompt carries each
+  notebook it uses under the autonomy line, fenced as untrusted text, and
+  says how to rewrite one; `dry_run` shows it. A finished run's reply is
+  read off its transcript within the hour (a transcript that cannot be read
+  is tried again a minute later, for ten minutes, then the run is noted
+  without it, `done (reply not read)`, and its trace says so): a
+  `<routine-memory scope="routine|project">…</routine-memory>` block
+  replaces that notebook, the last block of a scope winning, and a scope
+  the routine does not use is ignored, as is a block of a run older than
+  the notebook's last writer; the run's trace says what changed.
+  A notebook is at most 4000 characters (a longer block is cut). `memory {
+  routine_id }` answers `{ routine_id, memory?, memory_auto, routine?,
+  project?, max_chars, may_change }`, each notebook `{ scope, owner_id,
+  circle, body, updated_at, updated_by: person | run | fleet,
+  updated_run_id? }` once anything wrote it; `set_memory { routine_id,
+  notebook: routine | project, text }` rewrites one (`""` clears it), with
+  the fence of changing the routine (`E_INVALID` for a notebook it does not
+  use or text past the cap). Deleting a routine deletes its own notebook;
+  its project's stays until the project is removed. The operator may
+  read them, fenced as untrusted text, not write them.
 - **Start rules** — `start_rules`, by `action` (Orbit Fleet 8.11): a task
   key pattern (`PD-*`, `*` for any run of characters, any case) that names
   the project, and optionally the host, a start of a matching task lands
@@ -1519,7 +1554,10 @@ not a JSON-RPC error. The text block is the documented `E_CODE: message` line;
 `structuredContent` carries `{ code, message, details }` (for example the
 candidate rows of `E_AMBIGUOUS` or the `confirm_nonce` of
 `E_CONFIRM_REQUIRED`). JSON-RPC errors are reserved for protocol failures:
-an unknown tool name or arguments that do not match the schema.
+an unknown tool name, or arguments that do not parse (a wrong type, a missing
+required field). Most tools ignore an argument they do not take; the fan-outs
+and `kill_session` (`broadcast_prompt`, `provision_hosts`, `kill_session`)
+refuse one instead, because a misspelled filter there would widen the call.
 
 Three codes are specific to agent hosts:
 - `E_AGENT_OFFLINE`: no `fleet-agent` is connected for the host. It is
@@ -2134,9 +2172,17 @@ automatically on app start.
   (`send_prompt`, `run_prompt`, `queue_prompt`, and `dispatch_task` to a
   worker that already exists: review round 15, F21 — nothing an LLM composes
   reaches a session without a person; since the 2026-10-17 review's F2 the
-  autonomy position lets those four through into a live session the operator
-  started or briefed at "Within your brief", and a Claude start inside a
-  running mission's grant at "Autopilot" — `guard::operator_must_confirm`),
+  autonomy position lets those four through at "Within your brief" and
+  "Autopilot" into a live session the operator started or briefed and still
+  follows — not muted, merged, done or quiet. "Autopilot" also lets a
+  start (`new_session`, `dispatch_task` `new_worker`, a task's `work_link`
+  `start` / `run` / `resume`) through on a host inside a running mission's
+  live grant, never while Pause all is on. With session care
+  (`control.session_care`, on by default) `restart_session` of a session
+  the operator started itself (not one it only briefed) goes without a card
+  at "Within your brief" and "Autopilot", and `safe_kill_session` of one at
+  "Autopilot". Every other call above asks at every position —
+  `guard::operator_must_confirm_with`; `docs/status.md` has the rule),
   and every tool above return
   `E_CONFIRM_REQUIRED` until a person approves them: on the desktop in its
   dialog or Control's cards, and on a hub from a fleet admin's paired device,

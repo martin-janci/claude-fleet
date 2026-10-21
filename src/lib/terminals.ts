@@ -115,10 +115,11 @@ export const terminalPane = writable<TerminalPaneState>({ sessionId: null, shell
 
 /** A tab-bar click the pane carries out: `agent` goes back to the agent,
  *  `shells` to the last terminal picked, opening one when there is none, or
- *  to terminal `n` when it is open (a pop-out popping back in). */
+ *  to terminal `n` when it is open (a pop-out popping back in); `new`
+ *  opens another one (⌘K's New terminal, review w18-4). */
 export interface TerminalRequest {
   seq: number;
-  to: 'agent' | 'shells';
+  to: 'agent' | 'shells' | 'new';
   n?: number;
 }
 

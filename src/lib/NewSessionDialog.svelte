@@ -26,7 +26,7 @@
     type HostLogin,
   } from './account_limits';
   import { push, pushError } from './toasts';
-  import { errorDetail, errorSentence } from './error_copy';
+  import { errorDetail, errorSentence, errorText } from './error_copy';
   import type { IpcError } from './result';
   import type { PickerItem } from './PickerList.svelte';
   import {
@@ -59,20 +59,35 @@
     type ResumeOrNew,
   } from './resume_or_new';
   import DraftField from './DraftField.svelte';
-  import { draftBrief, draftSource, previewStartWork, siblingProposal, type BriefDraft } from './start_preview';
+  import {
+    draftBrief,
+    draftSource,
+    previewStartWork,
+    siblingProposal,
+    type BriefDraft,
+    type StartConflict,
+  } from './start_preview';
+  import { newStartToken, NO_START_STEPS } from './start_steps';
+  import { submitHint, submitKey } from './forms/form_frame';
+  import { detectMac } from './terminal_keys';
   import { openNewSessionPicker } from './switcher_request';
+  import { radiogroupKeys } from './radiogroup_keys';
   import { agentChoices, keepAgent, type PickerAgent } from './agent_picker';
   import {
     PRIMARY,
     fleets,
     fleetRows,
     fleetChoicesFor,
+    fleetHostChoices,
+    defaultFleetHost,
     defaultFleetFor,
     rememberedFleetFor,
     rememberFleetFor,
     fleetNewSession,
     openFleetSession,
+    multiFleet,
   } from './fleets';
+  import { fleetProfiles, loadProfile, profileLines } from './fleet_profiles';
 
   let {
     project,
@@ -236,20 +251,29 @@
 
   // "work" runs Claude Code in the pane; "shell" runs a plain login shell.
   let chosenKind = $state<'work' | 'shell'>(untrack(() => initialKind ?? memory?.kind ?? 'work'));
+  // Whether the person picked the kind here. A kind the opener preset
+  // (`initialKind`, the Hosts view's "Open a shell") is for this open only and
+  // is not remembered as the project's (review w12-12).
+  let kindPicked = false;
   // Which agent a "work" session runs (redesign 12.4): Claude Code, or an
   // agent the chosen host has on its PATH. A ticket's start and a
   // background run are Claude Code's own paths, so they keep it.
   let chosenAgent = $state<PickerAgent>('claude');
   const agentOptions = $derived(
-    agentChoices(
-      chosenHost,
-      $hosts.find((h) => h.alias === chosenHost),
-    ).map((c) =>
+    hostAgentChoices().map((c) =>
       c.agent !== 'claude' && c.enabled && ticket
         ? { ...c, enabled: false, reason: `A ticket starts with Claude Code`, tag: null }
         : c,
     ),
   );
+  /** The agents the host the session starts on has: on an extra fleet, its
+   *  host's (review w01-2). A function so it may read the fleet picker's
+   *  state, declared further down. */
+  function hostAgentChoices() {
+    return fleetChoice
+      ? agentChoices(fleetHost, fleetHosts.find((h) => h.alias === fleetHost))
+      : agentChoices(chosenHost, $hosts.find((h) => h.alias === chosenHost));
+  }
   $effect(() => {
     const next = keepAgent(untrack(() => chosenAgent), agentOptions);
     untrack(() => {
@@ -381,16 +405,26 @@
     }
     busy = true;
     error = null;
-    const bgName = friendlyName.trim() || name.trim() || nameWords(generateName(takenSlugs));
-    const r = await newBgSession(chosenHost, bgName, bgPrompt.trim());
+    const host = chosenHost;
+    const bgName = friendlyName.trim() || nameWords(generateName(takenSlugs));
+    // In this project's checkout on the host, not its home folder (review
+    // w12-9): the dialog is "New session — owner/repo".
+    const r = await newBgSession(host, bgName, bgPrompt.trim(), null, projectId);
     busy = false;
     if (!r.ok) {
       if (destroyed) pushError(r.error, 'Background session failed');
-      else error = r.error.message;
+      else error = r.error;
       return;
     }
-    push({ kind: 'info', message: `Started ${bgName} in the background on ${chosenHost}` });
-    onCancel();
+    // "Over pause_at", "no session id, limits not recorded" (review w12-10).
+    if (r.value?.warning) push({ kind: 'warning', message: r.value.warning });
+    const row = r.value?.session ?? null;
+    if (row) {
+      finished(row, host);
+      return;
+    }
+    push({ kind: 'info', message: `Started ${bgName} in the background on ${host}` });
+    closeSelf();
   }
   const profileInvalid = $derived(
     chosenProfile.trim() !== '' && !/^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/.test(chosenProfile.trim()),
@@ -852,8 +886,49 @@
   );
 
   let busy = $state(false);
-  let error: string | null = $state(null);
-  let createController: AbortController | null = null;
+  // A string is the dialog's own sentence; an `IpcError` is shown as one
+  // plain sentence with the backend's words under Details (review w12-6).
+  let error: string | IpcError | null = $state(null);
+  // Only a plain create can be cancelled: "Cancel creation" shows while this
+  // is set, never for a ticket, multi-repo, background or fleet start, nor
+  // during the limit check (review w12-3).
+  let createController = $state<AbortController | null>(null);
+  let errorEl: HTMLDivElement | undefined = $state();
+  $effect(() => {
+    // The failure sits under the fields, which scroll; bring it into view.
+    if (error) errorEl?.scrollIntoView?.({ block: 'nearest' });
+  });
+
+  /** A start that finished: open it. When the dialog was closed (Escape)
+   *  while it ran, say so in a toast instead, so a later New session dialog
+   *  is never closed and the selection never jumps under the person
+   *  (review w12-5). */
+  function finished(row: SessionRow, host: string) {
+    if (destroyed) {
+      push({
+        kind: 'success',
+        message: `Started ${row.friendly_name || row.tmux_name} on ${host}`,
+        action: { label: 'Open', run: () => selectSessionExplicitly(row) },
+      });
+      return;
+    }
+    onCreate(row);
+  }
+  /** Close this dialog, unless it is already gone (review w12-5). */
+  function closeSelf() {
+    if (!destroyed) onCancel();
+  }
+
+  /** A ticket start in flight shows the start Pulse too (review w12-4).
+   *  `start_work` reports no steps, so it shows the first one running. */
+  async function withStartPulse<T>(host: string, run: () => Promise<T>): Promise<T> {
+    creatingStart.set({ host_alias: host, name: friendlyName.trim(), kind: 'work', token: newStartToken(), steps: NO_START_STEPS });
+    try {
+      return await run();
+    } finally {
+      creatingStart.set(null);
+    }
+  }
 
   // ── Which fleet (multi-hub Phase 2) ──────────────────────────────────
   // The extra fleets that also have this repository. Picking one starts the
@@ -872,17 +947,28 @@
   const fleetChoice = $derived(
     ticket || asBackground ? null : (fleetOptions.find((c) => c.fleet.id === chosenFleet) ?? null),
   );
-  const fleetHosts = $derived(
-    fleetChoice ? [...($fleetRows.get(fleetChoice.fleet.id)?.hosts.values() ?? [])].filter((h) => !h.hidden) : [],
-  );
+  const chosenFleetRows = $derived(fleetChoice ? $fleetRows.get(fleetChoice.fleet.id) : undefined);
+  const fleetHosts = $derived(chosenFleetRows ? fleetHostChoices(chosenFleetRows) : []);
   let fleetHost = $state('');
   $effect(() => {
     const list = fleetHosts;
     untrack(() => {
-      if (!list.some((h) => h.alias === fleetHost)) fleetHost = list.find((h) => h.reachable)?.alias ?? list[0]?.alias ?? '';
+      if (!list.some((h) => h.alias === fleetHost)) fleetHost = chosenFleetRows ? defaultFleetHost(chosenFleetRows) : '';
     });
   });
   let fleetBranch = $state('');
+
+  // Phase 3b: which profile the session runs as — this device's person on
+  // the chosen fleet, under the label given here. A read that failed earlier
+  // is asked again when the fleet is picked (its line says it failed).
+  const runsOnFleet = $derived(fleetChoice ? fleetChoice.fleet.id : PRIMARY);
+  const runsAs = $derived($multiFleet ? ($profileLines.get(runsOnFleet)?.line ?? null) : null);
+  $effect(() => {
+    const id = runsOnFleet;
+    if (!$multiFleet) return;
+    const st = untrack(() => $fleetProfiles.get(id));
+    if (!st || st.error) void loadProfile(id);
+  });
 
   function pickFleet(id: string) {
     fleetPicked = true;
@@ -900,14 +986,30 @@
       friendly_name: friendlyName.trim() || null,
       new_worktree: fleetBranch.trim() ? finalizeBranchSlug(slugifyBranch(fleetBranch.trim())) : null,
       kind: chosenKind,
+      // The agent, model and effort picked above go to that hub as they go
+      // to this one (review w01-2). The login does not: this window's
+      // accounts are its own hub's, so the fleet's host uses its own.
+      start_command: chosenKind === 'shell' ? startCommand.trim() || null : null,
+      model: runsClaude && chosenModel ? chosenModel : runsCodex && codexModel ? codexModel : null,
+      effort: runsClaude && chosenEffort ? chosenEffort : runsCodex && codexEffort ? codexEffort : null,
+      agent: chosenKind === 'work' && chosenAgent !== 'claude' ? chosenAgent : null,
     });
     busy = false;
     if (!r.ok) {
       if (destroyed) pushError(r.error, `New session on ${choice.fleet.label} failed`);
-      else error = r.error.message;
+      else error = r.error;
       return;
     }
     rememberFleetFor(owner, repo, choice.fleet.id);
+    if (destroyed) {
+      const id = r.value.id;
+      push({
+        kind: 'success',
+        message: `Started a session on ${choice.fleet.label}`,
+        action: { label: 'Open', run: () => openFleetSession(choice.fleet.id, id) },
+      });
+      return;
+    }
     openFleetSession(choice.fleet.id, r.value.id);
     onCancel();
   }
@@ -938,12 +1040,14 @@
   );
 
   function onPickKind(kind: 'work' | 'shell') {
+    kindPicked = true;
     chosenKind = kind;
     chosenAgent = 'claude';
     nameOverride = null;
   }
 
   function onPickAgent(agent: PickerAgent) {
+    kindPicked = true;
     chosenKind = 'work';
     chosenAgent = agent;
     nameOverride = null;
@@ -1029,7 +1133,7 @@
     const prev = readPref<ProjectMemory | null>(memoryKey, null, (v): v is ProjectMemory | null => v === null || isMemory(v));
     writePref<ProjectMemory>(memoryKey, {
       host,
-      kind: chosenKind,
+      kind: kindPicked || !initialKind ? chosenKind : (prev?.kind ?? 'work'),
       worktrees: {
         ...(prev?.worktree !== undefined ? { local: prev.worktree } : {}),
         ...(prev?.worktrees ?? {}),
@@ -1093,7 +1197,7 @@
         briefDraft = before.text;
         briefEdited = before.edited;
       }
-      draftError = r.error.message;
+      draftError = errorText(r.error);
       return;
     }
     briefDraft = r.value.brief;
@@ -1140,20 +1244,50 @@
   // project and host.
   let siblingAsk = $state<ProposalLike | null>(null);
   let alsoTouched = $state(false);
+  // The preview's conflicts (review w12-7, w12-8): a start across
+  // organisations needs the person's tick, as StartPopover asks; a live
+  // session on the key offers "Start another" beside "Open it".
+  let startConflicts = $state<StartConflict[]>([]);
+  let forceCrossOrg = $state(false);
+  /** The refusal's own words when the preview did not see the cross-org rule. */
+  let crossOrgRefused = $state<string | null>(null);
   $effect(() => {
     const id = ticket?.id;
     const host = chosenHost;
     const pid = projectId;
     siblingAsk = null;
     alsoTouched = false;
+    startConflicts = [];
+    untrack(() => {
+      forceCrossOrg = false;
+      crossOrgRefused = null;
+    });
     if (id == null || !host) return;
     void previewStartWork({ item_id: id, project_id: pid, host_alias: host, with_brief: true }).then((r) => {
       // A hub with nothing to preview answers no preview at all; an answer
       // for a ticket, host or project left behind is not this one's.
       if (ticket?.id !== id || chosenHost !== host || projectId !== pid || !r.ok || !r.value) return;
       siblingAsk = siblingProposal(r.value);
+      startConflicts = Array.isArray(r.value.conflicts) ? r.value.conflicts : [];
     });
   });
+  const crossOrg = $derived(
+    ticket ? (startConflicts.find((c) => c.kind === 'cross_org')?.message ?? crossOrgRefused) : null,
+  );
+  const liveConflict = $derived(ticket ? (startConflicts.find((c) => c.kind === 'live_session') ?? null) : null);
+  const liveConflictRow = $derived(
+    liveConflict?.session_id != null ? ($sessions.find((x) => x.id === liveConflict.session_id) ?? null) : null,
+  );
+  /** "Start another": a second session on this ticket, in a checkout of its
+   *  own (`parallel`), rather than opening the live one (review w12-8). */
+  function startAnother() {
+    void submit({ parallel: true });
+  }
+  function openLiveConflict() {
+    if (!liveConflictRow) return;
+    selectSessionExplicitly(liveConflictRow);
+    onCancel();
+  }
   const proposedSibling = $derived.by(() => {
     const v = preselect('sibling', siblingAsk);
     const id = v == null ? null : Number(v);
@@ -1166,7 +1300,7 @@
   });
   const multiBlocked = $derived(hubActionBlocked('start_work_multi', $hubStatus, $hubConnection));
 
-  async function submitMulti(t: TicketRow, host: string, extra: number[]) {
+  async function submitMulti(t: TicketRow, host: string, extra: number[], parallel: boolean) {
     if (multiBlocked) return;
     busy = true;
     error = null;
@@ -1180,12 +1314,14 @@
       // The brief and name as edited, the same as a single start: the
       // backend applies them to every sibling.
       brief: briefOn && briefEdited ? briefDraft : undefined,
+      ...(forceCrossOrg ? { force_cross_org: true } : {}),
+      ...(parallel ? { parallel: true } : {}),
     };
-    const r = await startWorkMulti(args);
+    const r = await withStartPulse(host, () => startWorkMulti(args));
     busy = false;
     if (!r.ok) {
       if (destroyed) pushError(r.error, 'Start work failed');
-      else error = r.error.message;
+      else error = r.error;
       return;
     }
     const labelOf = (id: number) => {
@@ -1203,10 +1339,10 @@
       return;
     }
     if (toast) push(toast);
-    onCreate(first);
+    finished(first, host);
   }
 
-  async function submitTicket(t: TicketRow) {
+  async function submitTicket(t: TicketRow, parallel = false) {
     if (startBlocked) return;
     if (inNewMode) {
       const cleaned = finalizeBranchSlug(newWorktreeName);
@@ -1221,7 +1357,7 @@
     // Only repositories still offered: never one the dialog does not show.
     const extra = shownSiblings(alsoIn, siblings);
     if (extra.length > 0) {
-      await submitMulti(t, submittedHost, extra);
+      await submitMulti(t, submittedHost, extra, parallel);
       if (!error) {
         remember(submittedHost, submittedWorktreeId);
         answerHostProposal(submittedHost);
@@ -1230,7 +1366,7 @@
     }
     busy = true;
     error = null;
-    const r = await startWork({
+    const args = {
       ...ticketRef(t),
       project_id: project.project.id,
       host_alias: submittedHost,
@@ -1238,38 +1374,94 @@
       worktree: inNewMode ? newWorktreeName.trim() : (chosenWorktree?.name ?? undefined),
       with_brief: briefOn,
       brief: briefOn && briefEdited ? briefDraft : undefined,
-    });
+      // The person ticked "Start across organisations" (review w12-7).
+      ...(forceCrossOrg ? { force_cross_org: true } : {}),
+      // "Start another" beside the live session on this key (review w12-8).
+      ...(parallel ? { parallel: true } : {}),
+    };
+    const r = await withStartPulse(submittedHost, () => startWork(args));
     busy = false;
     if (!r.ok) {
-      const d = r.error.details as { session_id?: number; orphan_session_id?: number } | null | undefined;
+      const d = r.error.details as
+        | { session_id?: number; orphan_session_id?: number; cross_org?: boolean }
+        | null
+        | undefined;
       if (r.error.code === 'E_EXISTS' && d?.session_id != null) {
         const live = $sessions.find((x) => x.id === d.session_id);
         if (live) {
+          const liveName = live.friendly_name || live.tmux_name;
+          if (destroyed) {
+            push({
+              kind: 'info',
+              message: `${t.key} already runs as ${liveName}`,
+              action: { label: 'Open', run: () => selectSessionExplicitly(live) },
+            });
+            return;
+          }
           selectSessionExplicitly(live);
           // A lost race: this start's own session spawned and runs unlinked.
           // The hub names it; say so rather than leave it to be found.
-          if (d.orphan_session_id != null) push({ kind: 'warning', message: r.error.message });
+          // Otherwise say why the dialog closed into another session rather
+          // than switch silently (review w12-8).
+          push(
+            d.orphan_session_id != null
+              ? { kind: 'warning', message: errorText(r.error) }
+              : { kind: 'info', message: `${t.key} already runs as ${liveName} — opened it` },
+          );
           onCancel();
           return;
         }
       }
+      if (d?.cross_org === true && !destroyed) {
+        // The refusal tells an API caller to pass `force_cross_org`; a person
+        // gets the tick instead (review w12-7).
+        crossOrgRefused = errorText(r.error);
+        error = 'This ticket belongs to another organisation than this repository. Tick "Start across organisations" to start it anyway.';
+        return;
+      }
       if (destroyed) pushError(r.error, 'Start work failed');
-      else error = r.error.message;
+      else error = r.error;
       return;
     }
     remember(submittedHost, submittedWorktreeId);
     answerHostProposal(submittedHost);
-    onCreate(r.value);
+    finished(r.value, submittedHost);
   }
 
-  async function submit() {
+  /** Why the start cannot go yet, or null: the Create button's `disabled`
+   *  and title, and the keyboard's guard (review w12-2). */
+  const cannotSubmit = $derived.by((): string | null => {
+    if (fleetChoice) return fleetHost ? null : `Pick a host on ${fleetChoice.fleet.label}`;
+    if (asBackground) {
+      return bgSessionBlocked ?? (bgPrompt.trim() ? null : 'A background session needs its first prompt');
+    }
+    if (inNewMode && !newWorktreeName.trim()) return 'Worktree name required';
+    if (chosenKind === 'work' && profileInvalid) {
+      return 'A login profile is a name of letters, digits, - and _ (up to 32), such as work';
+    }
+    if (ticket && chosenKind === 'work') {
+      if (startBlocked !== null) return startBlocked;
+      if (crossOrg && !forceCrossOrg) return 'Tick "Start across organisations" to start this ticket here';
+      return null;
+    }
+    return newSessionBlocked;
+  });
+
+  async function submit(opts: { parallel?: boolean } = {}) {
     if (busy) return;
+    // Enter and ⌘↵ read the same predicate the Create button's `disabled`
+    // does, so the keyboard cannot send what the button would not (review
+    // w12-2: an invalid login profile went to the backend from Enter).
+    if (cannotSubmit) {
+      error = cannotSubmit;
+      return;
+    }
     if (fleetChoice) {
       await submitFleet(fleetChoice);
       return;
     }
     if (ticket && chosenKind === 'work') {
-      await submitTicket(ticket);
+      await submitTicket(ticket, opts.parallel === true);
       return;
     }
     // The Create button's `disabled` reads the same derived, but Enter in
@@ -1349,7 +1541,7 @@
         if (destroyed) {
           pushError(r.error, 'New session failed');
         } else {
-          error = r.error.message;
+          error = r.error;
         }
       }
       return;
@@ -1357,7 +1549,7 @@
     remember(submittedHost, submittedWorktreeId);
     answerHostProposal(submittedHost);
     if (fleetOptions.length > 0) rememberFleetFor(owner, repo, PRIMARY);
-    onCreate(r.value);
+    finished(r.value, submittedHost);
   }
 
   // The picker's ⌘↵ (project picker spec v2): once this host's worktree
@@ -1399,15 +1591,25 @@
     return () => window.removeEventListener('keydown', onWindowKeydown, true);
   });
 
-  // Enter in any field creates. Escape is handled by <Modal>.
+  // The form rule (`submitKey`, forms/form_frame.ts): ⌘↵ / Ctrl+Enter in
+  // any field creates, and so does a bare Enter in a text input — this form
+  // is built for Enter-to-create — but not on a checkbox, a radio or a
+  // button, and Enter in a textarea is a new line (review w12-2). Escape is
+  // handled by <Modal>.
+  const isMac = detectMac(typeof navigator === 'undefined' ? undefined : navigator);
+  const createHint = submitHint(isMac);
+  const rerollKey = isMac ? '⌘R' : 'Ctrl+R';
+  let dialogEl: HTMLDivElement | undefined = $state();
   function onKeydown(e: KeyboardEvent) {
-    if (e.key === 'Enter' && !e.shiftKey && !e.altKey) {
-      const tag = (e.target as HTMLElement | null)?.tagName;
-      if (tag === 'INPUT') {
-        e.preventDefault();
-        void submit();
-      }
-    }
+    // A nested sheet (Resume, which renders inside this div) answers its own
+    // keys: its Enter or ⌘↵ must never also start a new session behind it
+    // (review w12-1).
+    if (e.key !== 'Enter' || e.defaultPrevented) return;
+    const t = e.target as HTMLElement | null;
+    if (t?.closest?.('dialog') !== (dialogEl?.closest('dialog') ?? null)) return;
+    if (!submitKey(e, 1, isMac)) return;
+    e.preventDefault();
+    void submit();
   }
   /** Writing help's "Draft agent briefs" (G4.6), off by default. */
   const draftsBriefs = $derived(settingBool($fleetSettings, SETTING_KEYS.workDraftBriefs));
@@ -1415,7 +1617,7 @@
 
 <Modal label="New session" onclose={onCancel} width="520px">
 <!-- svelte-ignore a11y_no_static_element_interactions -->
-<div class="dialog" onkeydown={onKeydown}>
+<div class="dialog" bind:this={dialogEl} onkeydown={onKeydown}>
   <h3>New session — {owner}/{repo}</h3>
     <ProposedBy
       {proposal}
@@ -1428,7 +1630,7 @@
     />
 
   {#if fleetOptions.length > 0 && !ticket && !asBackground}
-    <div class="fleet-pick" role="radiogroup" aria-label="Fleet" data-testid="new-session-fleet">
+    <div class="fleet-pick" role="radiogroup" aria-label="Fleet" data-testid="new-session-fleet" use:radiogroupKeys>
       <span class="field-label">Fleet</span>
       {#each [{ id: PRIMARY, label: $fleets.find((f) => f.primary)?.label ?? 'This window', color: $fleets.find((f) => f.primary)?.color ?? 'var(--accent)' }, ...fleetOptions.map((c) => ({ id: c.fleet.id, label: c.fleet.label, color: c.fleet.color }))] as f (f.id)}
         <button
@@ -1443,6 +1645,9 @@
         >
       {/each}
     </div>
+  {/if}
+  {#if runsAs && !ticket && !asBackground}
+    <p class="runs-as" data-testid="new-session-profile">Runs as {runsAs}</p>
   {/if}
 
   <div class="fields">
@@ -1462,7 +1667,7 @@
         class="dice"
         data-testid="reroll-name"
         onclick={reroll}
-        title="Roll a new name (Ctrl/⌘+R)"
+        title="Roll a new name ({rerollKey})"
         aria-label="Roll a new name"
       ><Icon name="dice" size={14} /></button>
     </div>
@@ -1476,6 +1681,16 @@
             <button type="button" class="linkish" data-testid="open-duplicate" onclick={openDuplicate}
               >Open it</button
             >
+            {#if ticket && chosenKind === 'work'}
+              or
+              <button
+                type="button"
+                class="linkish"
+                data-testid="start-another"
+                disabled={busy || cannotSubmit !== null}
+                onclick={startAnother}>Start another</button
+              >
+            {/if}
           </span>
         {:else if pastWork && resumeShown && resumeShown.value !== START_FRESH}
           <span class="dup" data-testid="work-past">
@@ -1523,6 +1738,29 @@
           <span class="k">ticket</span> <code>{ticket.key}</code>
           {ticket.title}{#if ticket.status_name}<span class="muted"> — {ticket.status_name}</span>{/if}
         </p>
+        {#if chosenKind === 'work' && liveConflict && !duplicateOf}
+          <p class="work-note" data-testid="ticket-live">
+            <span class="dup">{liveConflict.message}</span>
+            {#if liveConflictRow}
+              <button type="button" class="linkish" data-testid="ticket-live-open" onclick={openLiveConflict}>Open it</button>
+              or
+            {/if}
+            <button
+              type="button"
+              class="linkish"
+              data-testid="start-another"
+              disabled={busy || cannotSubmit !== null}
+              onclick={startAnother}>Start another</button
+            >
+          </p>
+        {/if}
+        {#if chosenKind === 'work' && crossOrg}
+          <label class="brief-toggle" data-testid="ticket-cross-org">
+            <input type="checkbox" data-testid="ticket-cross-org-on" bind:checked={forceCrossOrg} />
+            Start across organisations
+          </label>
+          <p class="muted small" data-testid="ticket-cross-org-why">{crossOrg}</p>
+        {/if}
         {#if chosenKind === 'work'}
           <label class="brief-toggle">
             <input type="checkbox" data-testid="ticket-brief-on" bind:checked={briefOn} />
@@ -1685,7 +1923,10 @@
             {/each}
           </select>
         </div>
-        {#if hostLogins && hostLogins.length > 0 && !otherProfile}
+        {#if fleetChoice}
+          <!-- This window's logins are its own hub's (review w01-2). -->
+          <p class="work-note" data-testid="fleet-login-note">Uses the login {fleetChoice.fleet.label} has on that host.</p>
+        {:else if hostLogins && hostLogins.length > 0 && !otherProfile}
           <div class="launch-field">
             <label for="launch-account">Account</label>
             <select
@@ -1742,7 +1983,7 @@
           aria-pressed={runBackground}
           data-testid="run-background"
           onclick={() => (runBackground = true)}
-          title="A supervised background session on the host, outside this project's worktree"
+          title="A supervised background session on the host, in this project's checkout, with no pane"
         >
           In background
         </button>
@@ -1751,7 +1992,7 @@
         <label for="bg-prompt">First prompt</label>
         <textarea id="bg-prompt" data-testid="bg-prompt" rows="3" bind:value={bgPrompt} placeholder="What should Claude work on?"></textarea>
         <p class="work-note" data-testid="bg-note">
-          Runs supervised on {chosenHost} in its home folder, with no pane; it shows in the list when it starts.
+          Runs supervised on {chosenHost} in {repo}'s checkout, with no pane; it shows in the list when it starts.
         </p>
       {/if}
     {/if}
@@ -1812,8 +2053,10 @@
       </p>
     {/if}
 
+    {#if !asBackground}
     <!-- Not a <label>: the picker is a listbox, which a label cannot name
-         (it names itself with ariaLabel). -->
+         (it names itself with ariaLabel). A background run takes none of
+         the worktree rows: it starts in the project's checkout (w12-9). -->
     <span class="field-label" aria-hidden="true">Worktree</span>
     {#if hostWorktrees.status === 'error' && hostWorktrees.error}
       <div class="wt-status err" role="alert" data-testid="wt-status">
@@ -1860,7 +2103,9 @@
       />
     {/if}
     {/if}
+    {/if}
 
+    {#if !asBackground}
     <label for="session-name">tmux name</label>
     <input
       id="session-name"
@@ -1874,22 +2119,35 @@
       <span class="k">cwd</span> <code>{pathPreview}</code>
     </p>
     {/if}
-
-    {#if error}
-      <p class="err">{error}</p>
-    {/if}
-    {#if busy && $creatingStart}
-      <!-- Redesign step 5.13: the backend reports the create's worktree,
-           tmux and agent steps (`start:progress`) while it is in flight; the
-           dialog then closes into the same Pulse in the new session's
-           conversation, which waits on the agent's first status. -->
-      {@const c = $creatingStart}
-      <StartPulse start={c} title="Starting {c.name || 'a session'} on {c.host_alias}" />
     {/if}
   </div>
 
+  <!-- Outside the scrolling fields, beside the buttons: a failure or the
+       start's progress is never below the fold (review w12-6). -->
+  {#if error}
+    <div class="err" role="alert" data-testid="new-session-error" bind:this={errorEl}>
+      {#if typeof error === 'string'}
+        {error}
+      {:else}
+        <span data-testid="new-session-error-text">{errorSentence(error)}</span>
+        <details class="wt-details">
+          <summary>Details</summary>
+          <code data-testid="new-session-error-details">{errorDetail(error)}</code>
+        </details>
+      {/if}
+    </div>
+  {/if}
+  {#if busy && $creatingStart}
+    <!-- Redesign step 5.13: the backend reports the create's worktree,
+         tmux and agent steps (`start:progress`) while it is in flight; the
+         dialog then closes into the same Pulse in the new session's
+         conversation, which waits on the agent's first status. -->
+    {@const c = $creatingStart}
+    <div class="pulse-row"><StartPulse start={c} title="Starting {c.name || 'a session'} on {c.host_alias}" /></div>
+  {/if}
+
   <div class="actions">
-    <span class="hint">↵ create · Ctrl/⌘R re-roll</span>
+    <span class="hint">↵ or {createHint.label} create · {rerollKey} re-roll</span>
     {#if limitAsk && limitAsk.chosen}
       <div class="limit-ask" role="alert" data-testid="limit-ask">
         <span
@@ -1908,21 +2166,20 @@
     <button onclick={onCancel} disabled={busy}>Cancel</button>
     {#if hubCreateNote && !fleetChoice}
       <span class="hub-create-note" data-testid="hub-create-note" title={hubCreateNote}>{hubCreateNote}</span>
-    {:else if busy && !fleetChoice}
+    {:else if busy && createController}
       <button type="button" data-testid="cancel-create" onclick={cancelCreate}>Cancel creation</button>
+    {:else if busy}
+      <!-- Nothing to cancel: a ticket, multi-repo, background or fleet start
+           and the limit check run to the end (review w12-3). -->
+      <span class="hub-create-note" data-testid="create-busy" role="status">Starting…</span>
     {:else}
       <button
         class="primary"
-        onclick={submit}
+        onclick={() => void submit()}
         data-testid="create-btn"
-        disabled={fleetChoice ? !fleetHost : (inNewMode && !newWorktreeName.trim()) ||
-          (chosenKind === 'work' && profileInvalid) ||
-          (asBackground
-            ? bgSessionBlocked !== null || !bgPrompt.trim()
-            : ticket && chosenKind === 'work'
-              ? startBlocked !== null
-              : newSessionBlocked !== null)}
-        title={(asBackground ? bgSessionBlocked : ticket && chosenKind === 'work' ? startBlocked : newSessionBlocked) ?? ''}
+        disabled={cannotSubmit !== null}
+        title={cannotSubmit ?? ''}
+        aria-keyshortcuts={createHint.aria}
       >{fleetChoice ? `Create on ${fleetChoice.fleet.label}` : asBackground ? 'Start in background' : ticket && chosenKind === 'work' ? 'Start work' : 'Create'}</button>
     {/if}
   </div>
@@ -1958,6 +2215,11 @@
     min-height: 0;
   }
   .dialog h3 { margin: 0 0 0.3rem 0; font-size: var(--text-sm); flex: 0 0 auto; }
+  .runs-as {
+    margin: 0 0 var(--space-2);
+    color: var(--fg-muted);
+    font-size: var(--text-xs);
+  }
   .fleet-pick {
     display: flex;
     align-items: center;
@@ -2064,6 +2326,9 @@
   .preview .k { text-transform: uppercase; font-size: var(--text-2xs); margin-right: 0.3rem; }
   .preview code { font-family: var(--font-mono); }
   .err { color: var(--danger); font-size: var(--text-2xs); margin: 0; }
+  /* Pinned with the buttons, outside the scrolling fields (review w12-6). */
+  .dialog > .err,
+  .pulse-row { flex: 0 0 auto; }
   .wt-status { font-size: var(--text-2xs); color: var(--fg-muted); margin: 0 0 0.2rem; }
   .wt-status.err { color: var(--danger); }
   .wt-rescan { font: inherit; color: var(--fg); background: none; border: 0; padding: 0; margin-left: 0.4rem; text-decoration: underline; cursor: pointer; }

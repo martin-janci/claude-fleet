@@ -1,6 +1,15 @@
 import { describe, expect, it, vi } from 'vitest';
 import { invoke } from '@tauri-apps/api/core';
-import { bannerFor, checkForUpdate, checkedLine, nextCheckMs, type DesktopUpdate } from './updates';
+import { get } from 'svelte/store';
+import {
+  bannerFor,
+  checkForUpdate,
+  checkedLine,
+  dismissUpdate,
+  dismissedUpdate,
+  nextCheckMs,
+  type DesktopUpdate,
+} from './updates';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 
@@ -82,6 +91,26 @@ describe('checkedLine', () => {
     expect(checkedLine(u({ status: 'up_to_date', version: null }))).toBe('Up to date (0.5.4).');
     expect(checkedLine(u())).toBe('claude-fleet 0.5.5 is available.');
     expect(checkedLine(u({ status: 'hold', reason: 'Held: manual mode.' }))).toBe('Held: manual mode.');
+  });
+
+  it('never calls a required update available (review w26-10)', () => {
+    expect(checkedLine(u({ status: 'update_required', reason: 'This hub no longer serves 0.5.4.' }))).toBe(
+      'claude-fleet 0.5.5 is required: This hub no longer serves 0.5.4.',
+    );
+    expect(checkedLine(u({ mandatory: true }))).toBe('claude-fleet 0.5.5 is required.');
+  });
+});
+
+describe('dismissUpdate', () => {
+  it('remembers the dismissed version for the session, and a check clears it (review w26-9)', () => {
+    dismissUpdate('0.5.5');
+    expect(get(dismissedUpdate)).toBe('0.5.5');
+    expect(sessionStorage.getItem('claude-fleet.update.dismissed')).toBe('0.5.5');
+    expect(bannerFor(u(), get(dismissedUpdate))).toBeNull();
+    dismissUpdate(null);
+    expect(get(dismissedUpdate)).toBeNull();
+    expect(sessionStorage.getItem('claude-fleet.update.dismissed')).toBeNull();
+    expect(bannerFor(u(), get(dismissedUpdate))?.action).toBe('restart');
   });
 });
 

@@ -15,7 +15,7 @@ import type { Descriptor } from './pages/pages';
 import type { AdminNeed, OrgAccount, OrgShare, PersonSpend, RemovedMember, TeamMember } from './pages/resources';
 import { writable, derived, get } from 'svelte/store';
 import { invokeCmd, type Result } from './result';
-import { invokeOnFleet } from './fleets';
+import { invokeOnFleet, onFleetForgotten } from './fleets';
 import type { Pairing } from './devices';
 import { readPref, writePref } from './prefs';
 import { sessions, type SessionRow } from './sessions';
@@ -164,8 +164,13 @@ export function pairMemberDevice(orgId: number, person: string, device: string, 
 }
 
 /** A member's pairing in progress on an org's page. Kept here, not in the
- *  editor, because the editor is rebuilt on every re-read of the list. */
-export const memberPairing = writable<{ org_id: number; person: string; pairing?: Pairing } | null>(null);
+ *  editor, because the editor is rebuilt on every re-read of the list.
+ *  `fleet` is the hub it was started on (null: the primary): org ids are
+ *  per hub, so only that hub's org of that id shows it. */
+export const memberPairing = writable<{ fleet: string | null; org_id: number; person: string; pairing?: Pairing } | null>(null);
+// A removed fleet's slot id is reused by label (fleets.ts::forgetFleet): a
+// pairing started there must not show on the next hub's org of that id.
+onFleetForgotten((id) => memberPairing.update((p) => (p?.fleet === id ? null : p)));
 
 /** One per-org setting on an org's page: the setting described with the
  *  fleet's value, and the org's own when it set one. */
@@ -327,14 +332,16 @@ export function needsYouElsewhere(
 }
 
 /** ⌘⇧O / Ctrl+Shift+O: the next scope after the chosen one (wrapping
- *  through "all"). A no-op while the selector is hidden. */
-export function cycleScope(): void {
+ *  through "all"). A no-op while the selector is hidden. `set` writes it —
+ *  the app passes `fleet_filters.pickPrimaryScope`, which also drops an
+ *  extra fleet's Machine / Org choice that would hide the primary list. */
+export function cycleScope(set: (id: ScopeId) => void = (id) => scopeFilter.set(id)): void {
   const list = get(scopes);
   if (list.length < 2) return;
   const ids = [ALL_SCOPES, ...list.map((x) => x.id)];
   const cur = effectiveScopeOf(get(scopeFilter), list);
   const i = ids.indexOf(cur);
-  scopeFilter.set(ids[(i + 1) % ids.length]);
+  set(ids[(i + 1) % ids.length]);
 }
 
 // --- administration: the hub's master-only `work_admin`; LocalOnly on a

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { errorText } from './error_copy';
   // Settings → Hub & sync → Fleets (multi-hub design): every hub this window
   // shows. The primary is the pairing above (or this machine's own fleet) and
   // is listed read-only; each extra fleet is its own pairing, made here with a
@@ -13,23 +14,42 @@
     removeFleet,
     retryFleet,
     connectionWord,
+    fleetTrouble,
+    nextFleetColor,
     startFleets,
   } from './fleets';
   import Button from './kit/Button.svelte';
+  import LoadError from './states/LoadError.svelte';
+  import type { IpcError } from './result';
+  import FleetProfiles from './FleetProfiles.svelte';
+  import { multiFleet } from './fleets';
 
   let url = $state('');
   let code = $state('');
   let label = $state('');
-  let color = $state('');
+  // The colour the backend would pick, so the swatch never shows black while
+  // the fleet gets orange (review w01-14). Follows the list until touched.
+  let colorTouched = $state(false);
+  let picked = $state('');
+  const color = $derived(colorTouched ? picked : nextFleetColor($fleets));
   let plaintext = $state(false);
   let plaintextAsk = $state(false);
   let busy = $state(false);
   let error = $state<string | null>(null);
   let removeAsk = $state<string | null>(null);
 
+  // Review w17-13: a failed list read says so with Retry; otherwise the
+  // section is an empty list and the add form, with not even the primary.
+  let loadError = $state<IpcError | null>(null);
+  let retrying = $state(false);
+  async function reloadFleets() {
+    const r = await loadFleets();
+    loadError = r.ok ? null : r.error;
+  }
+
   onMount(() => {
     void startFleets();
-    void loadFleets();
+    void reloadFleets();
   });
 
   async function add() {
@@ -39,17 +59,18 @@
       url: url.trim(),
       code: code.trim(),
       label: label.trim() || undefined,
-      color: color.trim() || undefined,
+      color: colorTouched ? picked : undefined,
       allow_plaintext: plaintext,
     });
     busy = false;
     if (r.ok) {
-      url = code = label = color = '';
+      url = code = label = '';
+      colorTouched = false;
       plaintext = plaintextAsk = false;
       return;
     }
     if (r.error.code === 'E_HUB_PLAINTEXT') plaintextAsk = true;
-    error = r.error.message;
+    error = errorText(r.error);
   }
 
   async function remove(id: string) {
@@ -57,7 +78,7 @@
     const r = await removeFleet(id);
     busy = false;
     removeAsk = null;
-    error = r.ok ? null : r.error.message;
+    error = r.ok ? null : errorText(r.error);
   }
 </script>
 
@@ -71,9 +92,22 @@
     and each hub has its own pairing, its own token and its own trust: a
     device trusted on one hub is not trusted on another.
   </p>
+  {#if loadError}
+    <LoadError
+      title="Couldn't load the fleets"
+      error={loadError}
+      {retrying}
+      onretry={async () => {
+        retrying = true;
+        await reloadFleets();
+        retrying = false;
+      }}
+      testid="fleets-load-error" />
+  {/if}
   <ul class="fleet-list" data-testid="fleets-list">
     {#each $fleets as f (f.id)}
       {@const cw = connectionWord(f)}
+      {@const trouble = fleetTrouble(f)}
       <li style="--fleet: {f.color}" data-testid="fleets-row-{f.id}">
         <span class="swatch" aria-hidden="true"></span>
         <strong>{f.label}</strong>
@@ -93,6 +127,10 @@
         {/if}
       </li>
       {#if f.unavailable}<li class="err">{f.unavailable}</li>{/if}
+      {#if f.duplicate_of}
+        <li class="err" data-testid="fleets-duplicate-{f.id}">Same hub as {f.duplicate_of}; remove this one.</li>
+      {/if}
+      {#if trouble}<li class="err" data-testid="fleets-trouble-{f.id}">{trouble}</li>{/if}
       {#if removeAsk === f.id}
         <li class="hook-desc">
           Remove forgets this hub's URL and token <em>on this machine</em>. It
@@ -119,7 +157,16 @@
     <input bind:value={url} placeholder="https://fleet.example.com" aria-label="Hub address" data-testid="fleets-add-url" />
     <input bind:value={code} placeholder="pairing code" aria-label="Pairing code" data-testid="fleets-add-code" />
     <input bind:value={label} placeholder="label (optional)" aria-label="Label" />
-    <input bind:value={color} type="color" aria-label="Colour" />
+    <input
+      value={color}
+      oninput={(e) => {
+        picked = e.currentTarget.value;
+        colorTouched = true;
+      }}
+      type="color"
+      aria-label="Colour"
+      data-testid="fleets-add-color"
+    />
     {#if plaintextAsk}
       <label class="plain">
         <input type="checkbox" bind:checked={plaintext} />
@@ -130,6 +177,10 @@
   </form>
   {#if error}<p class="err" data-testid="fleets-error">{error}</p>{/if}
 </section>
+{#if $multiFleet}
+  <!-- Phase 3b: who this device is on each fleet. -->
+  <FleetProfiles />
+{/if}
 
 <style>
   .fleet-list {

@@ -5,6 +5,12 @@
 //! Lifecycle (column = `sessions.safe_kill_state`):
 //!   NULL → "requested" → ("ready" → row gone) | "failed" → user resolves
 //!
+//! A request whose marker never arrives (Esc, a question back, a limit, an
+//! omitted line) settles as "failed" once it is [`REQUEST_TIMEOUT_SECS`]
+//! old and the session is not mid-turn ([`expire_stale_requests`], on the
+//! reconcile tick), and `safe_kill_session` re-arms such a request at once.
+//! A relaunch (restart, recreate, restore) drops a "requested" one.
+//!
 //! Detection runs on the Stop hook: when Claude finishes a turn, fleet
 //! captures pane scrollback, finds the last line containing the per-request
 //! nonce, and branches on whether the marker says READY or FAILED.
@@ -32,6 +38,48 @@ const FAILED_PLACEHOLDER: &str = "<one-line reason>";
 /// enough to cover a multi-step push-and-PR turn without dragging in unrelated
 /// history.
 const MARKER_SCAN_LINES: u32 = 3000;
+
+/// How long a "requested" safe remove waits for its marker before it
+/// settles as "failed" (review w27-5): the stale-working timeout's default
+/// (`reconcile.stale_working_secs`, 1800 s), the time after which fleet
+/// already reads a silent turn as over. A session still `working` keeps
+/// waiting, so a long commit-and-push turn is not cut short.
+pub(crate) const REQUEST_TIMEOUT_SECS: i64 = 1800;
+
+/// The `safe_kill_detail` of a request settled by the timeout.
+pub(crate) const TIMED_OUT_DETAIL: &str =
+    "no safe-remove report came back within 30 minutes; try again or kill the session";
+
+/// Whether a "requested" row has waited out [`REQUEST_TIMEOUT_SECS`] and is
+/// not mid-turn — the same test [`Store::expire_safe_kill_requests`] applies.
+fn request_timed_out(row: &SessionRow, now: i64) -> bool {
+    row.safe_kill_requested_at.unwrap_or(0) < now - REQUEST_TIMEOUT_SECS
+        && row.claude_status.as_deref() != Some("working")
+}
+
+/// The tick: settle every request older than [`REQUEST_TIMEOUT_SECS`] whose
+/// session is not mid-turn as "failed" ([`TIMED_OUT_DETAIL`]), so the pill
+/// stops saying "in progress" and Safe remove can be pressed again. Returns
+/// the number settled. Best-effort.
+pub fn expire_stale_requests(store: &Mutex<Store>, now: i64) -> usize {
+    let Ok(s) = lock(store) else { return 0 };
+    match s.expire_safe_kill_requests(now - REQUEST_TIMEOUT_SECS, TIMED_OUT_DETAIL) {
+        Ok(ids) => {
+            for &id in &ids {
+                let _ = s.insert_session_event(id, "safe_kill_timed_out", None);
+                tracing::info!(
+                    session_id = id,
+                    "[safe_kill] request timed out; settled as failed"
+                );
+            }
+            ids.len()
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "[safe_kill] expiring stale requests failed");
+            0
+        }
+    }
+}
 
 #[derive(Serialize, Deserialize)]
 pub struct SafeKillSessionArgs {
@@ -86,13 +134,7 @@ pub struct DiscardKillSessionArgs {
     pub tmux_name: String,
 }
 
-fn now_secs() -> i64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
+use crate::store::now_unix as now_secs;
 
 /// 8 random hex chars — enough entropy to make collision with arbitrary pane
 /// text vanishingly unlikely while keeping the marker short for the prompt.
@@ -132,11 +174,65 @@ pub fn build_safe_kill_prompt(nonce: &str) -> String {
     )
 }
 
+/// Refuse a session that shows a dialog (`blocked`) or is stuck: the
+/// safe-kill prompt ends with Enter, which would answer it, choosing
+/// whatever is highlighted (the check `delivery_gate` makes for a send).
+fn refuse_if_waiting_on_a_dialog(row: &SessionRow) -> Result<(), IpcError> {
+    let Some(what) = dialog_waited_on(row) else {
+        return Ok(());
+    };
+    Err(IpcError::new(
+        codes::E_INVALID_STATE,
+        format!(
+            "session {} is waiting on {what}; Enter would answer it — resolve it in the \
+             terminal before asking it to wrap up",
+            row.tmux_name
+        ),
+    ))
+}
+
+/// A safe-kill prompt's send failed. One that typed nothing rolls the
+/// request back so the user can retry (the worktree is untouched). One that
+/// may have landed (`codes::may_have_run`: a timeout, a dropped agent
+/// connection) keeps the request stamped, as a direct send keeps its claim:
+/// a marker Claude prints is still acted on, and a retry waits for
+/// [`REQUEST_TIMEOUT_SECS`] instead of typing a second prompt.
+fn settle_failed_request(store: &Mutex<Store>, session_id: i64, e: &IpcError) {
+    let Ok(s) = store.lock() else {
+        return;
+    };
+    if codes::may_have_run(&e.code) {
+        let detail = format!("may have been typed: {}", e.message);
+        let _ = s.insert_session_event(session_id, "safe_kill_send_failed", Some(&detail));
+    } else {
+        let _ = s.clear_safe_kill(session_id);
+        let _ = s.insert_session_event(session_id, "safe_kill_send_failed", Some(&e.message));
+    }
+}
+
+/// What the session waits on that Enter would answer (a stuck kind, or a
+/// dialog for a `blocked` row): [`safe_kill_session`] refuses it.
+fn dialog_waited_on(row: &SessionRow) -> Option<String> {
+    match (row.claude_status.as_deref(), row.stuck_kind.as_deref()) {
+        (_, Some(kind)) => Some(kind.to_string()),
+        (Some("blocked"), None) => Some("a dialog".to_string()),
+        _ => None,
+    }
+}
+
+/// Would [`safe_kill_session`] refuse this row as waiting on a dialog? For
+/// callers that pick a safe-kill unattended (the gc sweep), to leave the row
+/// alone instead of failing on it every pass.
+pub(crate) fn waits_on_a_dialog(row: &SessionRow) -> bool {
+    dialog_waited_on(row).is_some()
+}
+
 /// Kick off a safe-kill request: stamp the DB, send the marker-baked prompt
 /// to the session. Returns the updated session row.
 ///
 /// Refuses if the session is not alive (already ghost/dead) or if a request
-/// is already in flight (`safe_kill_state == "requested"`). A prior "failed"
+/// is already in flight (`safe_kill_state == "requested"`) and has not yet
+/// timed out ([`REQUEST_TIMEOUT_SECS`]). A prior "failed" or timed-out
 /// request can be retried freely.
 pub async fn safe_kill_session(
     args: SafeKillSessionArgs,
@@ -159,11 +255,31 @@ pub async fn safe_kill_session(
             &args.tmux_name,
             "safe_kill_session",
         )?;
+        // The fleet controller is protected here as from kill, recreate and
+        // restart (review w25-10): this path ends in a forced kill, and it
+        // takes no `force` of its own, so `kill_session {force: true}` is
+        // the one way to end the controller.
+        crate::service::sessions::guard_not_controller(
+            s.get_controller()?.as_ref(),
+            &args.host_alias,
+            &args.tmux_name,
+            false,
+        )
+        .map_err(|e| {
+            IpcError::new(
+                &e.code,
+                format!(
+                    "{} on {} is the registered fleet controller; safe_kill_session does \
+                     not retire it (kill_session with force=true does)",
+                    args.tmux_name, args.host_alias
+                ),
+            )
+        })?;
     }
 
     // Read + state-update happens under one lock; the SSH send afterwards is
     // off-lock.
-    let (session_id, nonce) = {
+    let (row, nonce) = {
         let s = lock(store)?;
         let row = s
             .get_session(&args.tmux_name, &args.host_alias)?
@@ -182,7 +298,10 @@ pub async fn safe_kill_session(
                 format!("session {} is not running", args.tmux_name),
             ));
         }
-        if row.safe_kill_state.as_deref() == Some("requested") {
+        refuse_if_waiting_on_a_dialog(&row)?;
+        if row.safe_kill_state.as_deref() == Some("requested")
+            && !request_timed_out(&row, now_secs())
+        {
             return Err(IpcError::new(
                 codes::E_SAFE_KILL_IN_PROGRESS,
                 "a safe-kill request is already in flight for this session",
@@ -192,27 +311,36 @@ pub async fn safe_kill_session(
         s.set_safe_kill_requested(row.id, &nonce, now_secs())?;
         // Best-effort timeline entry.
         let _ = s.insert_session_event(row.id, "safe_kill_requested", Some(&nonce));
-        (row.id, nonce)
+        (row, nonce)
     };
+    let session_id = row.id;
 
     let prompt = build_safe_kill_prompt(&nonce);
     // Reuse the existing send-keys path. send_prompt validates inputs again
-    // (harmless) and records a `prompt_sent` timeline entry.
-    if let Err(e) = crate::service::sessions::send_system_prompt(
-        &args.host_alias,
-        &args.tmux_name,
-        &prompt,
-        true,
-        store,
-        ssh,
-    )
-    .await
-    {
-        // Roll back state so the user can retry; the worktree is untouched.
-        if let Ok(s) = store.lock() {
-            let _ = s.clear_safe_kill(session_id);
-            let _ = s.insert_session_event(session_id, "safe_kill_send_failed", Some(&e.message));
+    // (harmless) and records a `prompt_sent` timeline entry. Typed as a
+    // direct send: in the session's typing lane, taking its idle moment, so
+    // a queued prompt the Stop hook delivers is never pasted into the same
+    // input line; and checked again on the row read in the lane, since
+    // Enter into a dialog that opened meanwhile would answer it.
+    let sent = crate::service::sessions::deferred::send_direct(store, &row, &prompt, |d| {
+        let prompt = &prompt;
+        let args = &args;
+        async move {
+            refuse_if_waiting_on_a_dialog(&d.row)?;
+            crate::service::sessions::send_system_prompt(
+                &args.host_alias,
+                &args.tmux_name,
+                prompt,
+                true,
+                store,
+                ssh,
+            )
+            .await
         }
+    })
+    .await;
+    if let Err(e) = sent {
+        settle_failed_request(store, session_id, &e);
         return Err(e);
     }
 
@@ -416,12 +544,7 @@ pub async fn discard_kill_session(
         };
         // A tree another session still works in stays; only this session
         // goes.
-        let tree = tree_of(&s, row.id, row.worktree_id)?;
-        let removable = if tree_shared_with_another_session(&s, row.id, tree)? {
-            None
-        } else {
-            removable_worktree(&s, tree, base.as_deref())?
-        };
+        let removable = removable_tree(&s, row.id, row.worktree_id, base.as_deref())?;
         (row.id, removable, base)
     };
     let worktree_id = removable.as_ref().map(|(wid, _)| *wid);
@@ -505,6 +628,21 @@ pub(crate) fn tree_shared_with_another_session(
             && (r.status == "running"
                 || (r.lost_at.is_some() && r.lost_reason.as_deref() != Some("killed")))
     }))
+}
+
+/// The tree `session_id` runs in, when killing it may remove it: not while
+/// another session still works there. `(worktree id, path)`.
+fn removable_tree(
+    s: &Store,
+    session_id: i64,
+    worktree_id: Option<i64>,
+    base: Option<&str>,
+) -> Result<Option<(i64, String)>, IpcError> {
+    let tree = tree_of(s, session_id, worktree_id)?;
+    if tree_shared_with_another_session(s, session_id, tree)? {
+        return Ok(None);
+    }
+    removable_worktree(s, tree, base)
 }
 
 /// The worktree row of the tree `session_id` runs in: `worktree_id`, its
@@ -769,12 +907,7 @@ async fn finalize_safe_kill(
         };
         // A tree another session (its review, a second pane) still works in
         // is left to it: this session is killed, the checkout stays.
-        let tree = tree_of(&s, session_id, worktree_id)?;
-        let removable = if tree_shared_with_another_session(&s, session_id, tree)? {
-            None
-        } else {
-            removable_worktree(&s, tree, proj_base.as_deref())?
-        };
+        let removable = removable_tree(&s, session_id, worktree_id, proj_base.as_deref())?;
         (removable, proj_base)
     };
     let worktree_id = removable.as_ref().map(|(wid, _)| *wid);
@@ -907,6 +1040,56 @@ fn exec_for(host: &str, ssh: &Arc<SshClient>) -> Box<dyn crate::tmux::TmuxExec> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Review w27-5: a request whose marker never came back settles as
+    /// `failed` once it is `REQUEST_TIMEOUT_SECS` old and its session is not
+    /// mid-turn, so Safe remove can be pressed again; a fresh request and
+    /// one whose session is still working keep waiting.
+    #[test]
+    fn a_request_with_no_marker_times_out_to_failed() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("h").unwrap();
+        let mk = |n: &str| {
+            s.upsert_session(n, "h", None, None, 1, 1, "running", None)
+                .unwrap()
+        };
+        let (stale, fresh, busy) = (mk("stale"), mk("fresh"), mk("busy"));
+        let now = 100_000;
+        s.set_safe_kill_requested(stale, "n1", now - REQUEST_TIMEOUT_SECS - 1)
+            .unwrap();
+        s.set_safe_kill_requested(fresh, "n2", now - 60).unwrap();
+        s.set_safe_kill_requested(busy, "n3", now - REQUEST_TIMEOUT_SECS - 1)
+            .unwrap();
+        s.conn_ref()
+            .execute(
+                "UPDATE sessions SET claude_status = 'working' WHERE id = ?1",
+                [busy],
+            )
+            .unwrap();
+        let store = Mutex::new(s);
+
+        assert_eq!(expire_stale_requests(&store, now), 1);
+        let s = store.lock().unwrap();
+        let row = |id| s.get_session_by_id(id).unwrap().unwrap();
+        assert_eq!(row(stale).safe_kill_state.as_deref(), Some("failed"));
+        assert_eq!(
+            row(stale).safe_kill_detail.as_deref(),
+            Some(TIMED_OUT_DETAIL)
+        );
+        assert_eq!(row(fresh).safe_kill_state.as_deref(), Some("requested"));
+        assert_eq!(row(busy).safe_kill_state.as_deref(), Some("requested"));
+        assert!(s
+            .list_session_events(stale, 10)
+            .unwrap()
+            .iter()
+            .any(|e| e.kind == "safe_kill_timed_out"));
+        // `safe_kill_session` re-arms by the same test.
+        assert!(!request_timed_out(&row(busy), now));
+        assert!(!request_timed_out(&row(fresh), now));
+        let mut idle = row(busy);
+        idle.claude_status = Some("idle".into());
+        assert!(request_timed_out(&idle, now));
+    }
 
     /// A worktree whose `git status` fails is not reported clean: the
     /// script exits non-zero, which the caller turns into an error and
@@ -1232,5 +1415,170 @@ SAFE_REMOVE_READY_n1";
         assert_eq!((t.session_id, t.tmux_name.as_str()), (killed, "killed"));
         assert_eq!(t.nonce, "n1");
         assert!(marker_check_target(&s, other).unwrap().is_none());
+    }
+
+    /// Review r3: the safe-kill prompt ends with Enter, so a session showing
+    /// a dialog or stuck is refused before anything is stamped or typed.
+    #[tokio::test]
+    async fn safe_kill_refuses_a_session_waiting_on_a_dialog() {
+        for (status, stuck) in [("blocked", None), ("idle", Some("trust"))] {
+            let s = Store::open_in_memory().unwrap();
+            s.upsert_host("mac").unwrap();
+            let id = s
+                .upsert_session("w", "mac", None, None, 0, 0, "running", None)
+                .unwrap();
+            s.conn_ref()
+                .execute(
+                    "UPDATE sessions SET claude_status = ?2, stuck_kind = ?3 WHERE id = ?1",
+                    rusqlite::params![id, status, stuck],
+                )
+                .unwrap();
+            let store = Mutex::new(s);
+            let ssh = Arc::new(SshClient::new());
+            let err = safe_kill_session(
+                SafeKillSessionArgs {
+                    host_alias: "mac".into(),
+                    tmux_name: "w".into(),
+                },
+                &store,
+                &ssh,
+            )
+            .await
+            .expect_err("Enter would answer the dialog");
+            assert_eq!(
+                err.code,
+                codes::E_INVALID_STATE,
+                "{status}: {}",
+                err.message
+            );
+            let row = lock(&store)
+                .unwrap()
+                .get_session_by_id(id)
+                .unwrap()
+                .unwrap();
+            assert!(
+                row.safe_kill_state.is_none(),
+                "{status}: nothing was stamped"
+            );
+        }
+    }
+
+    /// Review r5: a dialog that opens while the safe-kill waits on the
+    /// session's typing lane is caught by the re-check on the row read in
+    /// the lane: nothing typed, the request rolled back, the moment free.
+    #[tokio::test]
+    async fn safe_kill_refuses_a_dialog_that_opened_while_it_waited_on_the_lane() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("mac").unwrap();
+        let id = s
+            .upsert_session("w", "mac", None, None, 0, 0, "running", None)
+            .unwrap();
+        let now = now_secs();
+        s.conn_ref()
+            .execute(
+                "UPDATE sessions SET claude_status = 'idle', idle_since = ?2 WHERE id = ?1",
+                rusqlite::params![id, now - 30],
+            )
+            .unwrap();
+        let store = Mutex::new(s);
+        let ssh = Arc::new(SshClient::new());
+        let lane = crate::service::sessions::deferred::typing_lane(&store, id).await;
+        let kill = safe_kill_session(
+            SafeKillSessionArgs {
+                host_alias: "mac".into(),
+                tmux_name: "w".into(),
+            },
+            &store,
+            &ssh,
+        );
+        let open_dialog = async {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            lock(&store)
+                .unwrap()
+                .conn_ref()
+                .execute(
+                    "UPDATE sessions SET claude_status = 'blocked' WHERE id = ?1",
+                    [id],
+                )
+                .unwrap();
+            drop(lane);
+        };
+        let (res, ()) = tokio::join!(kill, open_dialog);
+        let err = res.expect_err("Enter would answer the dialog");
+        assert_eq!(err.code, codes::E_INVALID_STATE, "{}", err.message);
+        let row = lock(&store)
+            .unwrap()
+            .get_session_by_id(id)
+            .unwrap()
+            .unwrap();
+        assert!(row.safe_kill_state.is_none(), "the request was rolled back");
+        assert_eq!(
+            lock(&store).unwrap().latest_deferred_claim_at(id).unwrap(),
+            None,
+            "the idle moment it claimed was handed back"
+        );
+    }
+
+    /// Review r5: a send that may have typed the safe-kill prompt keeps the
+    /// request stamped, so its marker is acted on; one that typed nothing
+    /// rolls it back for a retry.
+    #[test]
+    fn a_failed_safe_kill_send_keeps_the_request_only_when_it_may_have_typed() {
+        for (code, kept) in [
+            (codes::E_TMUX, false),
+            (codes::E_TIMEOUT, true),
+            (codes::E_SSH_TIMEOUT, true),
+        ] {
+            let s = Store::open_in_memory().unwrap();
+            s.upsert_host("mac").unwrap();
+            let id = s
+                .upsert_session("w", "mac", None, None, 0, 0, "running", None)
+                .unwrap();
+            s.set_safe_kill_requested(id, "n0nce", now_secs()).unwrap();
+            let store = Mutex::new(s);
+            settle_failed_request(&store, id, &IpcError::new(code, "x"));
+            let row = lock(&store)
+                .unwrap()
+                .get_session_by_id(id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                row.safe_kill_state.as_deref() == Some("requested"),
+                kept,
+                "{code}"
+            );
+        }
+    }
+
+    /// Review w25-10: safe-kill ends in a forced kill, so it refuses the
+    /// registered fleet controller as kill/recreate/restart do, before it
+    /// stamps the row or types anything into the pane.
+    #[tokio::test]
+    async fn safe_kill_refuses_the_fleet_controller() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("mac").unwrap();
+        s.upsert_session("ctl", "mac", None, None, 0, 0, "running", None)
+            .unwrap();
+        s.set_controller("mac", "ctl").unwrap();
+        let store = Mutex::new(s);
+        let ssh = Arc::new(SshClient::new());
+        let err = safe_kill_session(
+            SafeKillSessionArgs {
+                host_alias: "mac".into(),
+                tmux_name: "ctl".into(),
+            },
+            &store,
+            &ssh,
+        )
+        .await
+        .expect_err("the controller is protected");
+        assert_eq!(err.code, codes::E_SELF_TARGET, "{}", err.message);
+        assert!(err.message.contains("force=true"), "{}", err.message);
+        let row = lock(&store)
+            .unwrap()
+            .get_session("ctl", "mac")
+            .unwrap()
+            .unwrap();
+        assert!(row.safe_kill_state.is_none(), "nothing was stamped");
     }
 }
