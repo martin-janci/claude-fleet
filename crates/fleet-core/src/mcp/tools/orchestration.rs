@@ -1558,11 +1558,11 @@ impl FleetTools {
             // (review r3). With no host fleet places it, which only a grant
             // naming no hosts covers.
             let repos = self.repo_labels(args.project_ids.as_deref().unwrap_or_default())?;
-            let target = match self.work_link_mission(&args)? {
-                Some(mission) => GateTarget::MissionStart {
+            let target = match self.work_link_mission(&args, multi.as_deref())? {
+                Some((mission, sessions)) => GateTarget::MissionStart {
                     mission,
                     host: args.host_alias.as_deref(),
-                    sessions: multi.as_ref().map_or(1, |ids| ids.len() as i64),
+                    sessions,
                 },
                 None => GateTarget::Other,
             };
@@ -3330,22 +3330,82 @@ fn graph_item(args: &crate::service::work::WorkLinkArgs) -> Result<i64, McpError
 
 impl super::FleetTools {
     /// The mission of the work item a `work_link` start / run / resume
-    /// names (`item_id`, else `key`), for the operator's grant check. `None`
-    /// for a ticket URL, an unknown key, or an item of no mission.
-    fn work_link_mission(
+    /// names, for the operator's grant check, with how many sessions the
+    /// call would start. The item is the one the action resolves: `item_id`,
+    /// else the key normalised as the action normalises it (review 456).
+    /// `None` — no grant covers it — for a ticket URL (the start takes the
+    /// URL over a key, so a key beside it says nothing about what starts),
+    /// an unknown key, an item of no mission, or a key whose items do not
+    /// all belong to the one mission (two trackers can hold the same key,
+    /// and the start may resolve the other one).
+    ///
+    /// A multi-repo start counts only the repos it would start in: one
+    /// where the key already has a live session is skipped, and that
+    /// session is already on the mission's count.
+    pub(super) fn work_link_mission(
         &self,
         args: &crate::service::work::WorkLinkArgs,
-    ) -> Result<Option<i64>, McpError> {
-        let s = lock(&self.store).map_err(to_mcp_err)?;
-        let item = match (args.item_id, args.key.as_deref()) {
-            (Some(id), _) => Some(id),
-            (None, Some(key)) => s.work_item_by_key(key).map_err(to_mcp_err)?.map(|i| i.id),
-            (None, None) => None,
-        };
-        match item {
-            Some(id) => s.work_item_mission(id).map_err(to_mcp_err),
-            None => Ok(None),
+        multi: Option<&[i64]>,
+    ) -> Result<Option<(i64, i64)>, McpError> {
+        if args.url.is_some() {
+            return Ok(None);
         }
+        let s = lock(&self.store).map_err(to_mcp_err)?;
+        let (mission, item, key) = match (args.item_id, args.key.as_deref()) {
+            (Some(id), _) => {
+                let Some(mission) = s.work_item_mission(id).map_err(to_mcp_err)? else {
+                    return Ok(None);
+                };
+                let key = s.get_work_item(id).map_err(to_mcp_err)?.and_then(|i| i.key);
+                (mission, Some(id), key)
+            }
+            (None, Some(raw)) => {
+                let Ok(key) = crate::store::normalize_work_ref(raw) else {
+                    return Ok(None);
+                };
+                let mut ids: Vec<i64> = s
+                    .work_items_by_key(&key)
+                    .map_err(to_mcp_err)?
+                    .into_iter()
+                    .chain(s.tracker_items_for_key(&key).map_err(to_mcp_err)?)
+                    .map(|i| i.id)
+                    .collect();
+                ids.sort_unstable();
+                ids.dedup();
+                let mut mission = None;
+                for id in &ids {
+                    match (mission, s.work_item_mission(*id).map_err(to_mcp_err)?) {
+                        (_, None) => return Ok(None),
+                        (None, Some(m)) => mission = Some(m),
+                        (Some(a), Some(b)) if a != b => return Ok(None),
+                        _ => {}
+                    }
+                }
+                let Some(mission) = mission else {
+                    return Ok(None);
+                };
+                let item = (ids.len() == 1).then(|| ids[0]);
+                (mission, item, Some(key))
+            }
+            (None, None) => return Ok(None),
+        };
+        let sessions = match (multi, key) {
+            (Some(ids), Some(key)) if !args.parallel.unwrap_or(false) => {
+                let item_org = item
+                    .map(|id| s.item_org(id))
+                    .transpose()
+                    .map_err(to_mcp_err)?
+                    .flatten();
+                let live = crate::service::trackers::tickets::live_work_on(&s, &key, item_org)
+                    .map_err(to_mcp_err)?;
+                ids.iter()
+                    .filter(|pid| !live.iter().any(|(_, r)| r.project_id == Some(**pid)))
+                    .count() as i64
+            }
+            (Some(ids), _) => ids.len() as i64,
+            (None, _) => 1,
+        };
+        Ok(Some((mission, sessions)))
     }
 
     /// What the mission loop needs to take a step from this server.

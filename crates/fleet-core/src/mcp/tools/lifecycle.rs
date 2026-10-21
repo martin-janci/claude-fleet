@@ -304,15 +304,20 @@ impl FleetTools {
         // A switch onto another login (review w02-8) takes the checks a
         // start on it takes: not onto a login fleet knows is signed out
         // (the pane would ask for `/login`), and not past
-        // `accounts.pause_at` unless the person chose it. A person's own
+        // `accounts.pause_at` unless the person chose it. A person's
         // device picking a login in Switch account HAS chosen it (the picker
-        // shows each login's headroom, and neither the desktop nor the phone
-        // sends `over_limit_ok` on a restart), so only the operator, an
-        // agent's per-host token and the master are held — as a standalone
-        // desktop's `sessions::restart_session` lets the person's switch
-        // through.
-        let person_chose = p.over_limit_ok.unwrap_or(false)
-            || (caller.is_person_device() && !caller.is_operator());
+        // shows each login's headroom, and the desktop sends no
+        // `over_limit_ok` on a restart), so only the operator, an agent's
+        // per-host token, a single-purpose token and the master are held —
+        // as a standalone desktop's `sessions::restart_session` lets the
+        // person's switch through. Any paired device counts, an org-bound
+        // one too (`fleet-hub pair --org` is still somebody's device):
+        // `is_person_device` leaves those out, which this check must not.
+        let persons_device = caller.is_client()
+            && caller.host_alias.is_none()
+            && !caller.mode.is_single_purpose()
+            && !caller.is_operator();
+        let person_chose = p.over_limit_ok.unwrap_or(false) || persons_device;
         if let Some(target) = p.profile.as_deref() {
             let target = Some(target.trim()).filter(|t| !t.is_empty());
             let s = lock(self.reader()).map_err(to_mcp_err)?;
