@@ -108,6 +108,7 @@
     composerDrafts,
     composerTrays,
     rememberTray,
+    onTrayTaken,
     composerInsert,
     rememberDraft,
     newItemCount,
@@ -2114,6 +2115,15 @@
   $effect(() => {
     if (draftFor !== null) rememberTray(draftFor, attachments);
   });
+  // A move carried the shown session's tray to its new row (`takeTray`):
+  // the tiles leave this box too, or a kept source would still send them
+  // (spending the picked paths' one-use allow-list entries) and the effect
+  // above would write them back under the source.
+  $effect(() =>
+    onTrayTaken((id) => {
+      if (id === draftFor) attachments = [];
+    }),
+  );
   // Send later (gap plan G2.7, the FormsSession board's "composer › Send
   // later"): the draft goes into the session's prompt queue with a time
   // (G1.8). Its own question: `queue_prompt`, `drive` like a send. Text

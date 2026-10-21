@@ -10,7 +10,7 @@ vi.mock('./sessions', async (importOriginal) => {
 });
 import { invokeCmd, type Result } from './result';
 import { mergeSession, type SessionRow } from './sessions';
-import { composerDrafts, composerTrays } from './conversation';
+import { composerDrafts, composerTrays, onTrayTaken } from './conversation';
 import { dispatchTimelineEvents } from './live_events';
 import type { Attachment } from './attachments';
 import {
@@ -337,6 +337,21 @@ describe('moveSession carries the composer to the new row (review w13-10)', () =
     expect(composerTrays.get(2)).toEqual([tile]);
     expect(composerTrays.has(1)).toBe(false);
     expect(composerDrafts.get(1)).toBe('source');
+  });
+
+  it('tells a panel showing the kept source to empty its live tray', () => {
+    const heard: number[] = [];
+    const off = onTrayTaken((id) => heard.push(id));
+    composerTrays.set(1, [tile]);
+    carryComposer(1, 2, true);
+    expect(heard).toEqual([1]);
+    // Nothing moved (the target already has a tray): the source keeps its tiles.
+    composerTrays.set(3, [tile]);
+    composerTrays.set(4, [tile]);
+    carryComposer(3, 4, true);
+    expect(heard).toEqual([1]);
+    expect(composerTrays.get(3)).toEqual([tile]);
+    off();
   });
 
   it('a move that waited for idle carries when its session_moved arrives', async () => {

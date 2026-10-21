@@ -49,7 +49,12 @@ describe('ControlEscalations', () => {
         h.alias === 'mefistos' ? { ...h, signed_out_logins: [{ profile: null, since, checked_at: since }] } : h,
       ),
     );
+    // A form field in the transcript comes first in document order; focus
+    // must still land in the Prompt box, not there.
+    const decoy = document.createElement('textarea');
+    document.body.appendChild(decoy);
     const box = document.createElement('textarea');
+    box.dataset.testid = 'conv-composer-input';
     document.body.appendChild(box);
     try {
       render(ControlEscalations);
@@ -63,6 +68,7 @@ describe('ControlEscalations', () => {
       expect(screen.queryByTestId('control-escalations')).toBeNull();
       expect(document.activeElement).toBe(box);
     } finally {
+      decoy.remove();
       box.remove();
     }
   });

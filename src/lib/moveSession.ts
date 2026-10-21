@@ -1,6 +1,6 @@
 import { invokeCmd, type Result } from './result';
 import { mergeSession, type SessionRow } from './sessions';
-import { composerDrafts, composerTrays, rememberDraft, rememberTray } from './conversation';
+import { composerDrafts, composerTrays, rememberDraft, rememberTray, takeTray } from './conversation';
 import { recallScroll, rememberScroll } from './conversation_nav';
 import { onAnyTimelineEvent } from './live_events';
 import type { SessionEvent } from './timeline';
@@ -19,13 +19,15 @@ export function carryComposer(fromId: number, toId: number, keepSource: boolean)
   const tray = composerTrays.get(fromId);
   if (tray !== undefined && !composerTrays.has(toId)) {
     rememberTray(toId, tray);
-    composerTrays.delete(fromId);
+    // Through `takeTray`, not the map alone: a panel still showing the kept
+    // source would otherwise keep the tiles live and write them back.
+    takeTray(fromId);
   }
   const snap = recallScroll(fromId);
   if (snap && !recallScroll(toId)) rememberScroll(toId, snap);
   if (!keepSource) {
     composerDrafts.delete(fromId);
-    composerTrays.delete(fromId);
+    if (composerTrays.has(fromId)) takeTray(fromId);
   }
 }
 

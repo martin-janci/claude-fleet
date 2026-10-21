@@ -51,7 +51,7 @@ import { sendPrompt, sessions, startedIds, type SessionRow } from './sessions';
 import { selectSessionExplicitly } from './selection';
 import { tasks, type TaskRow } from './tasks';
 import { composerPresets } from './composer_presets';
-import { composerDrafts, composerTrays, insertIntoComposer } from './conversation';
+import { composerDrafts, composerTrays, insertIntoComposer, takeTray } from './conversation';
 import { scrollMemory } from './conversation_nav';
 import { openPathRequest } from './app_views';
 import { dispatchTimelineEvents, dispatchConversationsChanged } from './live_events';
@@ -4739,6 +4739,24 @@ describe('ConversationPanel attachments', () => {
     await settle();
     expect(screen.getAllByTestId('conv-attachment')).toHaveLength(1);
     expect(screen.getByTestId('conv-attachment').getAttribute('title')).toContain('a.png');
+  });
+
+  // A move carries the tray to the new row; a kept source still on screen
+  // must not keep the tiles live and write them back under its own id.
+  it('empties the shown tray when a move takes it, and does not write it back', async () => {
+    const rerender = await renderPanel({ id: 1, host_alias: 'alpha', tmux_name: 'a' });
+    await addAttachments([{ path: '/tmp/a.png', name: 'a.png', size: 1024, kind: 'image' }]);
+    expect(composerTrays.get(1)).toHaveLength(1);
+    takeTray(2);
+    await settle();
+    expect(screen.getAllByTestId('conv-attachment')).toHaveLength(1);
+    takeTray(1);
+    await settle();
+    expect(screen.queryByTestId('conv-attachments')).toBeNull();
+    expect(composerTrays.has(1)).toBe(false);
+    await rerender({ session: session({ id: 3, host_alias: 'beta', tmux_name: 'b' }), visible: true });
+    await settle();
+    expect(composerTrays.has(1)).toBe(false);
   });
 
   it('a send after a session switch uploads nothing of the previous session', async () => {

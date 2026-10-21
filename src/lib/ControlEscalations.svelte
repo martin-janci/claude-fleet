@@ -89,11 +89,13 @@
     next?.focus();
   }
 
-  /** The closest textarea in or above `el`'s ancestors: the composer the
-   *  cards sit over. */
+  /** The composer box the cards sit over, found from `el` up. Its own
+   *  test id, not any textarea: the panel above holds the transcript first,
+   *  and a chat form's field or an open PromptTune box would win in
+   *  document order. */
   function composerNear(el: HTMLElement | null): HTMLElement | null {
     for (let at = el; at; at = at.parentElement) {
-      const box = at.querySelector<HTMLElement>('textarea:not([disabled])');
+      const box = at.querySelector<HTMLElement>('textarea[data-testid="conv-composer-input"]:not([disabled])');
       if (box) return box;
     }
     return null;
