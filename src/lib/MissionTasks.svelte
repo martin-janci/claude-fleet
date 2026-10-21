@@ -26,7 +26,9 @@
     checkGlyph,
     checkable,
     doneWhenRows,
+    evidenceMissing,
     nodeLabel,
+    overrideRunEvidence,
     retryWorkItem,
     sessionsByItem,
     setMissionItem,
@@ -114,6 +116,15 @@
   async function saveConds() {
     if (condsFor == null) return;
     if (await act(setWorkDoneWhen(condsFor, doneWhenRows(condText)))) condsFor = null;
+  }
+
+  // The task whose missing run evidence a person is overriding, and why.
+  let overrideFor = $state<number | null>(null);
+  let overrideText = $state('');
+
+  async function saveOverride() {
+    if (overrideFor == null || !overrideText.trim()) return;
+    if (await act(overrideRunEvidence(overrideFor, overrideText))) overrideFor = null;
   }
 
   async function retry(itemId: number) {
@@ -211,6 +222,40 @@
                       </li>
                     {/each}
                   </ul>
+                {/if}
+                {#if n.evidence && (evidenceMissing(n.evidence) || n.evidence.state === 'overridden')}
+                  <span class="evidence ev-{n.evidence.state}" data-testid="mission-evidence" data-state={n.evidence.state}>
+                    <span class="glyph" aria-hidden="true">{checkGlyph(evidenceMissing(n.evidence) ? 'fail' : 'pass')}</span>
+                    <span>{evidenceMissing(n.evidence) ? 'No run evidence' : 'Done without evidence'}:</span>
+                    <span class="muted">{n.evidence.detail}</span>
+                    {#if detail.may_change && evidenceMissing(n.evidence) && overrideFor !== n.item_id}
+                      <button
+                        class="btn btn--chip"
+                        type="button"
+                        title="Accept this run without commits or files, and say why"
+                        disabled={busy}
+                        data-testid="mission-evidence-override"
+                        onclick={() => ((overrideFor = n.item_id), (overrideText = ''))}>Override…</button
+                      >
+                    {/if}
+                  </span>
+                  {#if overrideFor === n.item_id}
+                    <form class="conds" onsubmit={(e) => (e.preventDefault(), void saveOverride())}>
+                      <input
+                        type="text"
+                        aria-label="Why the task is done without commits or files"
+                        placeholder="Why it is done without commits or files"
+                        bind:value={overrideText}
+                        data-testid="mission-evidence-reason"
+                      />
+                      <span class="row">
+                        <button class="btn" type="submit" disabled={busy || !overrideText.trim()} data-testid="mission-evidence-save"
+                          >Override</button
+                        >
+                        <button class="btn btn--quiet" type="button" onclick={() => (overrideFor = null)}>Cancel</button>
+                      </span>
+                    </form>
+                  {/if}
                 {/if}
                 {#if condsFor === n.item_id}
                   <form class="conds" onsubmit={(e) => (e.preventDefault(), void saveConds())}>
@@ -460,6 +505,19 @@
   }
   .checks .c-fail .glyph {
     color: var(--danger);
+  }
+  .evidence {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.3rem;
+    align-items: baseline;
+    font-size: var(--text-2xs);
+  }
+  .evidence.ev-missing .glyph {
+    color: var(--danger);
+  }
+  .evidence.ev-overridden .glyph {
+    color: var(--status-done);
   }
   .conds {
     display: flex;
