@@ -1,10 +1,14 @@
 // Multi-hub: an extra fleet's session opens in the full conversation panel
 // (Phase 3), and every read and write in it names that fleet.
 import { render, screen, fireEvent } from '@testing-library/svelte';
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { tick } from 'svelte';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
+vi.mock('@tauri-apps/api/webview', () => ({
+  getCurrentWebview: () => ({ onDragDropEvent: async () => () => {} }),
+}));
+vi.mock('@tauri-apps/plugin-clipboard-manager', () => ({ readText: vi.fn(), writeText: vi.fn() }));
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import FleetSessionView from './FleetSessionView.svelte';
 import { PRIMARY, _resetFleetsForTest, _setFleetsForTest, type FleetInfo } from './fleets';
@@ -38,12 +42,21 @@ const session = {
   turn_seq: 1,
 } as SessionRow;
 
+class FakeResizeObserver {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+}
+afterEach(() => vi.unstubAllGlobals());
+
 beforeEach(() => {
+  vi.stubGlobal('ResizeObserver', FakeResizeObserver);
   inv.mockReset();
   _resetFleetsForTest();
   _setFleetsForTest([{ ...company, id: PRIMARY, primary: true, label: 'home', fleet_id: 'aaaaaaaa-1111' }, company]);
   inv.mockImplementation(async (cmd: string) => {
     if (cmd === 'session_activity') return PROBE;
+    if (cmd === 'pty_drain') return { data: '', bytes: 0 };
     if (cmd === 'session_conversation')
       return {
         truncated: false,
@@ -90,11 +103,35 @@ describe('FleetSessionView', () => {
     expect(screen.getByTestId('conv-outgoing')).toBeTruthy();
   });
 
-  it('the snapshot tab reads the pane from that fleet', async () => {
+  it('opens in the same header and tabs as a session of this window, with what reaches this hub left out', async () => {
     render(FleetSessionView, { props: { fleet: company, session } });
     await tick();
+    expect(screen.getByTestId('session-head-name').textContent).toBe('pos-3');
+    expect(screen.getByTestId('fleet-session-badge').textContent).toBe('company');
+    for (const t of ['terminals', 'files', 'details']) {
+      expect((screen.getByTestId(`stab-${t}`) as HTMLButtonElement).disabled).toBe(true);
+    }
+    expect((screen.getByTestId('stab-agent') as HTMLButtonElement).disabled).toBe(false);
+    for (const id of ['share-from-header', 'open-in-editor', 'inspector-toggle']) {
+      expect(screen.queryByTestId(id)).toBeNull();
+    }
+  });
+
+  it('its terminal attaches from this machine under that fleet’s own pty id', async () => {
+    render(FleetSessionView, { props: { fleet: company, session } });
+    await fireEvent.click(screen.getByTestId('stab-agent'));
+    await vi.waitFor(() => expect(inv.mock.calls.some(([cmd]) => cmd === 'pty_open')).toBe(true));
+    const open = inv.mock.calls.find(([cmd]) => cmd === 'pty_open')!;
+    expect(open[1].args).toMatchObject({ session_name: 'pos-3', host_alias: 'mac' });
+    expect(open[1].args.id).toMatch(/^fleet-company-3\.\d+$/);
+    expect(screen.queryByTestId('fleet-session-conversation')).toBeNull();
+  });
+
+  it('a session on that hub’s own machine shows its pane read through that fleet', async () => {
+    render(FleetSessionView, { props: { fleet: company, session: { ...session, host_alias: 'local' } as SessionRow } });
+    await tick();
     inv.mockImplementation(async (cmd: string) => (cmd === 'capture_session' ? 'claude> _' : null));
-    await fireEvent.click(screen.getByTestId('fleet-session-tab-snapshot'));
+    await fireEvent.click(screen.getByTestId('stab-agent'));
     await vi.waitFor(() => expect(screen.getByTestId('fleet-session-snapshot').textContent).toContain('claude> _'));
     const cap = inv.mock.calls.find(([cmd]) => cmd === 'capture_session')!;
     expect(cap[1]).toMatchObject({ fleet: 'company' });
@@ -138,7 +175,7 @@ describe('FleetSessionView', () => {
     render(FleetSessionView, { props: { fleet: company, session: local } });
     await tick();
     expect((screen.getByTestId('fleet-session-copy-attach') as HTMLButtonElement).disabled).toBe(true);
-    await fireEvent.click(screen.getByTestId('fleet-session-tab-terminal'));
+    await fireEvent.click(screen.getByTestId('stab-agent'));
     await vi.waitFor(() => expect(screen.getByTestId('terminal-no-attach')).toBeTruthy());
     expect(inv.mock.calls.some(([cmd]) => cmd === 'pty_open')).toBe(false);
   });
