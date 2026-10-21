@@ -55,6 +55,9 @@ pub struct SetMissionStateArgs {
     pub state: String,
     #[serde(default)]
     pub expected_version: Option<i64>,
+    /// Complete despite failing CI on the mission's pull requests.
+    #[serde(default)]
+    pub ci_override: Option<bool>,
 }
 
 /// `set_mission_repo`.
@@ -530,6 +533,7 @@ pub(crate) mod routed {
         let wire = WorkLinkArgs {
             status: Some(args.state),
             expected_version: args.expected_version,
+            ci_override: args.ci_override,
             ..write("mission_state", Some(args.mission_id))
         };
         match backend.hub() {

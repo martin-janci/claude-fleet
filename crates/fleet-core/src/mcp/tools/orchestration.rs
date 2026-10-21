@@ -1486,8 +1486,9 @@ impl FleetTools {
         container?}: make it a ticket. propose {parent, title, why?}: a subtask a person accepts \
         or rejects {item_id, no session_id}. bucket_add|bucket_remove \
         {bucket_id, item_id}: sprint/release. mission_save {mission, \
-        mission_id?, item_id?: root}; mission_state {mission_id, status} (paused \
-        reopens a finished one); \
+        mission_id?, item_id?: root}; mission_state {mission_id, status, ci_override?} \
+        (paused reopens a finished one; failing CI on its open or merged PRs \
+        refuses completed with E_CI_FAILING unless a person sets ci_override); \
         mission_repo {project_id, role?, on?}; mission_item {item_id, on?}; \
         mission_delete; mission_import {plan}. dep {item_id, depends_on, on?}; hold {item_id, on?}; \
         propose_tree {parent, tree}; accept_many | undo_accept {item_ids}. \

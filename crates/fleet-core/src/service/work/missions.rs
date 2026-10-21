@@ -505,13 +505,98 @@ pub fn set_state(
         )
     })?;
     let s = lock(store)?;
-    changeable(&s, scope, id)?;
-    s.set_mission_state(
+    let m = changeable(&s, scope, id)?;
+    let red = if to == "completed" && m.state != "completed" {
+        red_prs(&s, scope, id)?
+    } else {
+        Vec::new()
+    };
+    let overridden = args.ci_override == Some(true);
+    if !overridden {
+        if let Some(e) = ci_refusal(&red) {
+            return Err(e);
+        }
+    }
+    let row = s.set_mission_state(
         id,
         args.expected_version.filter(|v| *v != 0),
         to,
         &actor(scope),
-    )
+    )?;
+    if !red.is_empty() {
+        s.record_mission_event(
+            id,
+            &crate::store::NewMissionEvent {
+                kind: "ci_override",
+                actor: &actor(scope),
+                work_item_id: None,
+                task_id: None,
+                decision_id: None,
+                payload: Some(serde_json::json!({ "prs": red })),
+            },
+        )?;
+    }
+    Ok(row)
+}
+
+/// The pull requests of mission `id` whose CI was last seen failing, as
+/// `scope` may name them: an open or merged one (a closed, unmerged one was
+/// given up). A PR the caller may not see still counts, unnamed (`""`).
+pub(crate) fn red_prs(s: &Store, scope: &ViewScope, id: i64) -> Result<Vec<String>, IpcError> {
+    let mut out = Vec::new();
+    for url in s.mission_pr_urls(id)? {
+        let Some(pr) = s.pull_request_by_url(&url)? else {
+            continue;
+        };
+        if pr.state == "CLOSED" || pr.ci_status.as_deref() != Some("failing") {
+            continue;
+        }
+        out.push(if crate::service::prs::visible(s, scope, &pr)? {
+            pr_label(&pr)
+        } else {
+            String::new()
+        });
+    }
+    out.sort();
+    Ok(out)
+}
+
+fn pr_label(pr: &PullRequestRow) -> String {
+    match (&pr.repo, pr.number) {
+        (Some(r), Some(n)) => format!("{r}#{n}"),
+        _ => pr.url.clone(),
+    }
+}
+
+/// PURE: the refusal of a completion while `red` (from [`red_prs`]) holds
+/// a pull request; `None` when CI is not red.
+pub(crate) fn ci_refusal(red: &[String]) -> Option<IpcError> {
+    if red.is_empty() {
+        return None;
+    }
+    let named: Vec<&str> = red
+        .iter()
+        .map(String::as_str)
+        .filter(|l| !l.is_empty())
+        .collect();
+    let hidden = red.len() - named.len();
+    let mut what = named.join(", ");
+    if hidden > 0 {
+        if !what.is_empty() {
+            what.push_str(" and ");
+        }
+        what.push_str(&if hidden == 1 {
+            "a pull request you cannot see".to_string()
+        } else {
+            format!("{hidden} pull requests you cannot see")
+        });
+    }
+    Some(IpcError::new(
+        codes::E_CI_FAILING,
+        format!(
+            "CI is failing on {what}; fix it, or a person completes the mission anyway (ci_override)"
+        ),
+    ))
 }
 
 /// `work_link { action: mission_repo, mission_id, project_id, role?, on? }`.
@@ -584,6 +669,52 @@ pub fn delete(
         return Err(not_found(id));
     }
     Ok(MissionDeleted { removed: id })
+}
+
+/// Test fixture: a live session of `owner`'s on `item`, whose pull request
+/// `number` is in `state` with CI `ci`. Answers the session.
+#[cfg(test)]
+pub(crate) fn test_mission_pr(
+    s: &Store,
+    item: i64,
+    owner: i64,
+    number: i64,
+    state: &str,
+    ci: &str,
+) -> i64 {
+    let name = format!("pr-{number}");
+    let url = format!("https://github.com/acme/pay/pull/{number}");
+    s.upsert_host("pr-host").unwrap();
+    let pid = s.upsert_project("acme", "pay", "/src/pay").unwrap();
+    let sid = s
+        .upsert_session(&name, "pr-host", Some(pid), None, 1, 1, "running", None)
+        .unwrap();
+    s.conn_ref()
+        .execute(
+            "UPDATE sessions SET owner_person_id = ?1, pr_url = ?2 WHERE id = ?3",
+            rusqlite::params![owner, url, sid],
+        )
+        .unwrap();
+    s.link_session_work(sid, crate::store::WorkTarget::Item(item), "manual")
+        .unwrap();
+    Store::upsert_pull_request_in_tx(
+        s.conn_ref(),
+        &url,
+        Some(ci),
+        Some(&crate::service::outcome::PrEvidence {
+            state: Some(state.into()),
+            ..Default::default()
+        }),
+        crate::store::PrSeenBy {
+            session_id: sid,
+            session_name: &name,
+            host_alias: "pr-host",
+            project_id: None,
+        },
+        100,
+    )
+    .unwrap();
+    sid
 }
 
 #[cfg(test)]

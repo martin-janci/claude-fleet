@@ -226,6 +226,10 @@ pub struct WorkLinkArgs {
     /// Link across orgs anyway.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub force_cross_org: Option<bool>,
+    /// mission_state completed: complete despite failing CI on the
+    /// mission's pull requests (a person's override, recorded).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ci_override: Option<bool>,
     /// Start: beside a live one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parallel: Option<bool>,

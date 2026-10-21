@@ -753,16 +753,20 @@ export function updateMission(
   });
 }
 
+/** `ciOverride`: a person completes the mission despite failing CI on its
+ *  pull requests (the refusal is `E_CI_FAILING`). */
 export function setMissionState(
   missionId: number,
   state: string,
   expectedVersion?: number,
+  ciOverride?: boolean,
 ): Promise<Result<Mission>> {
   return invokeCmd<Mission>('set_mission_state', {
     args: {
       mission_id: missionId,
       state,
       ...(expectedVersion != null ? { expected_version: expectedVersion } : {}),
+      ...(ciOverride ? { ci_override: true } : {}),
     },
   });
 }

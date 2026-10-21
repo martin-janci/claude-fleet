@@ -291,10 +291,12 @@
   async function act<T>(p: Promise<Result<T>>): Promise<T | null> {
     busy = true;
     notice = null;
+    ciRed = false;
     try {
       const r = await p;
       if (!r.ok) {
         notice = readErrorText(r.error);
+        ciRed = r.error.code === 'E_CI_FAILING';
         if (r.error.code === 'E_CONFLICT') await load();
         return null;
       }
@@ -413,9 +415,13 @@
   let confirmMove = $state<string | null>(null);
   let moreEl = $state<HTMLElement>();
 
-  async function move(to: string) {
+  /** The last Complete was refused for red CI on the mission's PRs: offer
+   *  a person's override under the notice. */
+  let ciRed = $state(false);
+
+  async function move(to: string, ciOverride = false) {
     if (!mission) return;
-    await act(setMissionState(mission.id, to, mission.version));
+    await act(setMissionState(mission.id, to, mission.version, ciOverride));
   }
 
   function pickFinal(to: string) {
@@ -891,6 +897,19 @@
               onclick={() => void confirmFinal()}>{moveLabel(mission.state, confirmMove)}</button
             >
             <button class="btn btn--quiet" type="button" data-testid="mission-move-keep" onclick={() => (confirmMove = null)}>Keep</button>
+          </div>
+        {/if}
+        {#if mayChange && ciRed}
+          <div class="row confirm-move" role="alertdialog" aria-label="CI is failing" data-testid="mission-ci-override-row">
+            <span>CI is failing on this mission's pull requests. Complete it anyway? Fleet records that you did.</span>
+            <button
+              class="btn btn--danger"
+              type="button"
+              disabled={busy || changeBlocked}
+              data-testid="mission-ci-override"
+              onclick={() => void move('completed', true)}>Complete anyway</button
+            >
+            <button class="btn btn--quiet" type="button" data-testid="mission-ci-keep" onclick={() => (ciRed = false)}>Keep</button>
           </div>
         {/if}
       </header>
