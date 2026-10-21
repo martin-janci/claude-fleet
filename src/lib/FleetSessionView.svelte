@@ -10,18 +10,16 @@
   import {
     closeFleetSession,
     connectionWord,
-    fleetAttachCommand,
     fleetAttachRefusal,
     fleetCaptureSession,
     fleetTouchViewed,
     type FleetInfo,
   } from './fleets';
   import { showFriendlyNames, type SessionRow } from './sessions';
-  import { copyText } from './clipboard';
-  import { push } from './toasts';
   import ConversationPanel from './ConversationPanel.svelte';
   import TerminalView from './TerminalView.svelte';
   import Button from './kit/Button.svelte';
+  import FleetAttachButton from './FleetAttachButton.svelte';
   import SessionTabs from './SessionTabs.svelte';
   import { detectMac } from './terminal_keys';
   import { readable, writable } from 'svelte/store';
@@ -93,11 +91,6 @@
     tab = t;
     if (t === 'agent' && attachRefusal) void loadSnapshot();
   }
-
-  async function copyAttach() {
-    if (attachRefusal) return;
-    if (await copyText(fleetAttachCommand(session))) push({ kind: 'success', message: 'Attach command copied' });
-  }
 </script>
 
 <section class="fleet-session" style="--fleet: {fleet.color}" data-testid="fleet-session-view">
@@ -115,14 +108,7 @@
     {#snippet extra()}
       <span class="badge" data-testid="fleet-session-badge">{fleet.label}</span>
       {#if cw.tone !== 'ok'}<span class="state {cw.tone}" data-testid="fleet-session-link">{cw.word}</span>{/if}
-      <Button
-        size="sm"
-        variant="quiet"
-        testid="fleet-session-copy-attach"
-        disabled={!!attachRefusal}
-        title={attachRefusal ?? undefined}
-        onclick={() => void copyAttach()}>Copy attach</Button
-      >
+      <FleetAttachButton {session} testid="fleet-session-copy-attach" />
       <Button size="sm" variant="quiet" testid="fleet-session-close" onclick={closeFleetSession}>Close</Button>
     {/snippet}
   </SessionTabs>

@@ -14,7 +14,7 @@
   import type { SessionRow } from './sessions';
   import PaneUnreadableNotice from './PaneUnreadableNotice.svelte';
   import { hostByAlias } from './hosts';
-  import { Screen, rowToRuns, runsKey, runStyleCss, type Run, type RowShift } from './ansi';
+  import { Screen, rowRunsCache, runsKey, runStyleCss, type Run, type RowShift } from './ansi';
   import { pointInRect, dropPoint } from './geometry';
   import { selectionRects, shiftSelection, type CellPos } from './terminal_selection';
   import { nativeWriteText } from './clipboard_native';
@@ -1474,11 +1474,9 @@
     mouse.dispose();
   });
 
-  // Per-row render cache, keyed by the Screen instance so it resets on a
-  // session switch. Each entry holds the row's `Screen.rowVersion` at build
-  // time plus its derived `key` + `runs`.
-  let rowCache: { ver: number; key: string; runs: Run[] }[] = [];
-  let cacheScreen: Screen | null = null;
+  // Per-row render cache (`rowRunsCache`): it resets on a session switch,
+  // and each entry is the row's styled runs plus its content-derived `key`.
+  const rowsOf = rowRunsCache((r, runs) => ({ key: runsKey(r, runs), runs }));
 
   // Derived view: a list of rows, each carrying its styled runs plus a
   // content-derived `key`. Reading `renderVersion` makes Svelte recompute
@@ -1498,27 +1496,7 @@
   const visibleRows = $derived.by<{ key: string; runs: Run[] }[]>(() => {
     // Touch the version so the derived recomputes; also gate on screen.
     void renderVersion;
-    const scr = screen;
-    if (!scr) return [];
-    if (cacheScreen !== scr) {
-      rowCache = [];
-      cacheScreen = scr;
-    }
-    const out: { key: string; runs: Run[] }[] = new Array(scr.rows);
-    for (let r = 0; r < scr.rows; r++) {
-      const ver = scr.rowVersion[r];
-      const cached = rowCache[r];
-      if (cached !== undefined && cached.ver === ver) {
-        out[r] = cached;
-        continue;
-      }
-      const runs = rowToRuns(scr.cells[r]);
-      const entry = { ver, key: runsKey(r, runs), runs };
-      rowCache[r] = entry;
-      out[r] = entry;
-    }
-    if (rowCache.length > scr.rows) rowCache.length = scr.rows;
-    return out;
+    return screen ? rowsOf(screen) : [];
   });
 
   // Memoized: a screen uses only a handful of distinct (fg, bg, attrs)

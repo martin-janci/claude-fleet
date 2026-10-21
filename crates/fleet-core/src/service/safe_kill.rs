@@ -514,12 +514,7 @@ pub async fn discard_kill_session(
         };
         // A tree another session still works in stays; only this session
         // goes.
-        let tree = tree_of(&s, row.id, row.worktree_id)?;
-        let removable = if tree_shared_with_another_session(&s, row.id, tree)? {
-            None
-        } else {
-            removable_worktree(&s, tree, base.as_deref())?
-        };
+        let removable = removable_tree(&s, row.id, row.worktree_id, base.as_deref())?;
         (row.id, removable, base)
     };
     let worktree_id = removable.as_ref().map(|(wid, _)| *wid);
@@ -603,6 +598,21 @@ pub(crate) fn tree_shared_with_another_session(
             && (r.status == "running"
                 || (r.lost_at.is_some() && r.lost_reason.as_deref() != Some("killed")))
     }))
+}
+
+/// The tree `session_id` runs in, when killing it may remove it: not while
+/// another session still works there. `(worktree id, path)`.
+fn removable_tree(
+    s: &Store,
+    session_id: i64,
+    worktree_id: Option<i64>,
+    base: Option<&str>,
+) -> Result<Option<(i64, String)>, IpcError> {
+    let tree = tree_of(s, session_id, worktree_id)?;
+    if tree_shared_with_another_session(s, session_id, tree)? {
+        return Ok(None);
+    }
+    removable_worktree(s, tree, base)
 }
 
 /// The worktree row of the tree `session_id` runs in: `worktree_id`, its
@@ -867,12 +877,7 @@ async fn finalize_safe_kill(
         };
         // A tree another session (its review, a second pane) still works in
         // is left to it: this session is killed, the checkout stays.
-        let tree = tree_of(&s, session_id, worktree_id)?;
-        let removable = if tree_shared_with_another_session(&s, session_id, tree)? {
-            None
-        } else {
-            removable_worktree(&s, tree, proj_base.as_deref())?
-        };
+        let removable = removable_tree(&s, session_id, worktree_id, proj_base.as_deref())?;
         (removable, proj_base)
     };
     let worktree_id = removable.as_ref().map(|(wid, _)| *wid);

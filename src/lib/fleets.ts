@@ -411,17 +411,16 @@ const ROW_EVENTS = new Map<string, RowPart>([
   ['project:updated', 'projects'],
 ]);
 
-/** Apply one `fleet:event` to that fleet's rows, in place. Returns what the
- *  caller has to do beyond that: `relist` after a gap the bridge could not
- *  replay, `connection` when the link moved. Unknown names are ignored —
- *  this fleet's view keeps sessions, hosts and projects only (Phase 1).
+/** Apply one row event (`ROW_EVENTS`) to that fleet's rows, in place.
+ *  Unknown names are ignored — this fleet's view keeps sessions, hosts and
+ *  projects only (Phase 1); `onFleetEvent` handles the `hub:*` frames.
  *  With `fleet`, that fleet's stale-row and tombstone guards apply and each
  *  frame touches the key it changed in the fleet's race. */
 export function applyFleetEvent(
   rows: FleetRows,
   e: Pick<FleetEvent, 'name' | 'payload'>,
   fleet?: string,
-): 'relist' | 'connection' | null {
+): void {
   const race = fleet === undefined ? undefined : racesFor(fleet);
   const p = e.payload;
   switch (e.name) {
@@ -429,17 +428,17 @@ export function applyFleetEvent(
     case 'session:updated':
       if (isObj(p) && typeof p.id === 'number')
         putSession(fleet, rows, p as unknown as SessionRow, e.name === 'session:created' ? 'created' : 'updated');
-      return null;
+      break;
     case 'session:killed':
       if (isObj(p) && typeof p.id === 'number') dropSession(fleet, rows, p.id);
-      return null;
+      break;
     case 'host:added':
     case 'host:probed':
       if (isObj(p) && typeof p.alias === 'string') {
         rows.hosts.set(p.alias, p as unknown as HostRow);
         race?.hosts.touch(p.alias);
       }
-      return null;
+      break;
     case 'host:pinged':
       if (isObj(p) && typeof p.alias === 'string') {
         const old = rows.hosts.get(p.alias);
@@ -450,13 +449,13 @@ export function applyFleetEvent(
           race?.hosts.touch(p.alias);
         }
       }
-      return null;
+      break;
     case 'host:removed':
       if (isObj(p) && typeof p.alias === 'string') {
         rows.hosts.delete(p.alias);
         race?.hosts.touch(p.alias);
       }
-      return null;
+      break;
     case 'project:updated':
       if (isObj(p) && typeof p.id === 'number') {
         const row = p as unknown as ProjectRow;
@@ -465,13 +464,7 @@ export function applyFleetEvent(
         if (at >= 0) rows.projects[at] = { ...rows.projects[at], project: row };
         else rows.projects.push({ project: row, worktrees: [] });
       }
-      return null;
-    case 'hub:resynced':
-      return 'relist';
-    case 'hub:connection':
-      return 'connection';
-    default:
-      return null;
+      break;
   }
 }
 
@@ -514,7 +507,7 @@ export function onFleetEvent(e: FleetEvent): void {
     // A duplicate's rows are another fleet's twice over: never kept, so they
     // never notify twice (review w01-3).
     if (isDuplicate(fleet)) return;
-    patchRows(fleet, (rows) => void applyFleetEvent(rows, e, fleet), [part]);
+    patchRows(fleet, (rows) => applyFleetEvent(rows, e, fleet), [part]);
   } else if (e.name === 'hub:connection' && isObj(e.payload)) {
     setConnection(fleet, e.payload as unknown as HubConnection);
     if ((e.payload as { state?: string }).state === 'connected') {
@@ -1043,8 +1036,7 @@ export function fleetHostChoices(rows: Pick<FleetRows, 'hosts'>): HostRow[] {
 }
 
 /** The host that form starts on: the first offered one that is reachable,
- *  else the first offered one — never a hidden host the picker cannot show
- *  (NewSessionDialog's `fleetHost` rule). */
+ *  else the first offered one — never a hidden host the picker cannot show. */
 export function defaultFleetHost(rows: Pick<FleetRows, 'hosts'>): string {
   const list = fleetHostChoices(rows);
   return list.find((h) => h.reachable)?.alias ?? list[0]?.alias ?? '';

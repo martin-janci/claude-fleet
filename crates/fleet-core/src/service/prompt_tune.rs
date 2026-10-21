@@ -186,11 +186,17 @@ fn sections(target: &TuneTarget, req: &TuneRequest) -> (String, String, String) 
 /// [`tune`] refuses such a draft rather than rewrite a cut one, since
 /// accepting the rewrite replaces the whole box.
 pub fn draft_too_long(target: &TuneTarget, req: &TuneRequest) -> bool {
+    tune_context(target, req).is_none()
+}
+
+/// [`context_text`] for a draft [`tune`] takes, building the sections
+/// once; `None` when the draft is too long ([`draft_too_long`]).
+fn tune_context(target: &TuneTarget, req: &TuneRequest) -> Option<String> {
     if req.draft.trim().chars().count() > DRAFT_MAX_CHARS {
-        return true;
+        return None;
     }
-    let (head, _, tail) = sections(target, req);
-    head.len() + tail.len() > context_help::CONTEXT_MAX_BYTES
+    let (head, middle, tail) = sections(target, req);
+    (head.len() + tail.len() <= context_help::CONTEXT_MAX_BYTES).then(|| fit(&head, &middle, &tail))
 }
 
 /// PURE: the context the model reads on stdin, at most
@@ -200,8 +206,14 @@ pub fn draft_too_long(target: &TuneTarget, req: &TuneRequest) -> bool {
 /// refused by [`tune`] before this runs.
 pub fn context_text(target: &TuneTarget, req: &TuneRequest) -> String {
     let (head, middle, tail) = sections(target, req);
+    fit(&head, &middle, &tail)
+}
+
+/// The sections cut to [`context_help::CONTEXT_MAX_BYTES`]: the middle
+/// (history, then commands) first.
+fn fit(head: &str, middle: &str, tail: &str) -> String {
     let budget = context_help::CONTEXT_MAX_BYTES.saturating_sub(head.len() + tail.len());
-    let out = format!("{head}{}{tail}", tail_bytes(&middle, budget));
+    let out = format!("{head}{}{tail}", tail_bytes(middle, budget));
     tail_bytes(&out, context_help::CONTEXT_MAX_BYTES).to_string()
 }
 
@@ -342,7 +354,7 @@ pub async fn tune(
             "write a draft first: the tuner rewrites what is in the box",
         ));
     }
-    if draft_too_long(target, req) {
+    let Some(context) = tune_context(target, req) else {
         return Err(IpcError::new(
             codes::E_INVALID,
             format!(
@@ -350,8 +362,7 @@ pub async fn tune(
                  fewer for non-Latin text): tune a shorter part of it"
             ),
         ));
-    }
-    let context = context_text(target, req);
+    };
     let done = model.complete(TUNE_INSTRUCTION, &context).await?;
     let (prompt, notes, cut) = parse_reply(&done.text, &req.draft, target.max_chars)
         .ok_or_else(|| IpcError::new(codes::E_CLAUDE_CLI, "the tuner run proposed no prompt"))?;

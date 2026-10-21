@@ -983,23 +983,11 @@ pub async fn run_with(
     }
     for (host, cands) in by_host {
         let ids: Vec<i64> = cands.iter().map(|c| c.session_id).collect();
-        let reason_of = |id: i64| {
-            cands
-                .iter()
-                .find(|c| c.session_id == id)
-                .map(|c| c.lost_reason.clone())
-                .unwrap_or_default()
-        };
-        let row_failures_of = |id: i64| {
-            cands
-                .iter()
-                .find(|c| c.session_id == id)
-                .map_or(0, |c| c.row_failures)
-        };
-        match exec.restore(&host, ids.clone()).await {
+        match exec.restore(&host, ids).await {
             Ok(r) => {
                 for o in r.results {
-                    let reason = reason_of(o.session_id);
+                    let cand = cands.iter().find(|c| c.session_id == o.session_id);
+                    let reason = cand.map(|c| c.lost_reason.clone()).unwrap_or_default();
                     if o.ok {
                         record(store, o.session_id, EVENT_RESTORED, &reason);
                         report.restored += 1;
@@ -1009,7 +997,12 @@ pub async fn run_with(
                         // A person (or another restore) got there first:
                         // not an attempt of ours.
                     } else if o.code.as_deref().is_some_and(|code| {
-                        row_not_now(store, code, o.session_id, row_failures_of(o.session_id))
+                        row_not_now(
+                            store,
+                            code,
+                            o.session_id,
+                            cand.map_or(0, |c| c.row_failures),
+                        )
                     }) {
                         // The host dropped (or the row moved on) mid-restore:
                         // the next tick tries again, budget untouched.
@@ -1031,9 +1024,14 @@ pub async fn run_with(
             }
             Err(e) => {
                 tracing::warn!(host = %host, error = %e.message, "[auto-restore] restore failed");
-                for id in ids {
-                    let reason = reason_of(id);
-                    record(store, id, EVENT_FAILED, &format!("{reason}: {}", e.message));
+                for c in &cands {
+                    let reason = &c.lost_reason;
+                    record(
+                        store,
+                        c.session_id,
+                        EVENT_FAILED,
+                        &format!("{reason}: {}", e.message),
+                    );
                     report.failed += 1;
                 }
             }

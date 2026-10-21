@@ -227,13 +227,12 @@ pub struct ItemsRead {
 
 /// PURE: the subject a job found on a tracker that is not Jira keeps: the
 /// item, and the comment the job's key names.
-pub fn item_subject(tracker: i64, it: &ItemThread, dedup_key: &str) -> Value {
-    let t = &it.thread;
+pub fn item_subject(tracker: i64, t: &IssueThread, url: Option<&str>, dedup_key: &str) -> Value {
     let comment = dedup_key
         .rsplit_once("#c")
         .and_then(|(_, id)| t.comments.iter().find(|c| c.id == id));
     let mut v = issue_subject(tracker, None, t, comment);
-    v["url"] = json!(it.url);
+    v["url"] = json!(url);
     v
 }
 
@@ -616,7 +615,7 @@ pub(crate) async fn read_item_page(
     let mut read = ItemsRead::default();
     for (row, meta) in items {
         let mark = (row.updated_at, row.id);
-        let Some(key) = row.key.clone() else {
+        let Some(key) = row.key else {
             last = Some(mark);
             continue;
         };
@@ -1198,20 +1197,26 @@ impl AgentPoller for FleetPoller {
                     let read = self.host.item_threads(tracker, page).await?;
                     // Read through `until`, or stopped at `more`.
                     c.items = Some(read.more.unwrap_or((now - 1, i64::MAX)));
-                    let items = read.items;
+                    let (threads, urls): (Vec<IssueThread>, Vec<Option<String>>) =
+                        read.items.into_iter().map(|i| (i.thread, i.url)).unzip();
                     // A comment counts from the rule's start, and no further
                     // back than a kept job key lives.
                     let since = start.max(now - SUBJECT_TTL_SECS);
-                    let threads: Vec<IssueThread> =
-                        items.iter().map(|i| i.thread.clone()).collect();
                     let planned =
                         plan_tracker_jobs(rule.id, &inst, &ctx, tracker, &threads, since, now)?
                             .into_iter()
                             .map(|job| {
                                 let key = parse_job_key(&job.subject, tracker);
-                                let it = items.iter().find(|i| Some(i.thread.key.as_str()) == key);
-                                let subject = it
-                                    .map(|i| item_subject(tracker, i, &job.dedup_key))
+                                let at = threads.iter().position(|t| Some(t.key.as_str()) == key);
+                                let subject = at
+                                    .map(|i| {
+                                        item_subject(
+                                            tracker,
+                                            &threads[i],
+                                            urls[i].as_deref(),
+                                            &job.dedup_key,
+                                        )
+                                    })
                                     .unwrap_or(Value::Null);
                                 (job, subject)
                             })

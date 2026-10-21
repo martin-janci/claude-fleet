@@ -279,6 +279,13 @@ impl Caller {
         self.is_fleet_admin && self.is_person_device()
     }
 
+    /// Control's own surfaces (`control_journal`, `control_auto_continue`):
+    /// Control itself, the master, or the fleet admin's own device. Unlike
+    /// `is_master_or_fleet_admin_device`, the master needs no named owner.
+    pub fn is_control_or_owner(&self) -> bool {
+        self.is_operator() || self.is_master() || self.is_fleet_admin_device()
+    }
+
     /// The callers that administer the fleet (`Access::Person`): the master
     /// or a person device, and in both cases only while `is_fleet_admin`
     /// holds. A master counts only while the hub names its owner; with no

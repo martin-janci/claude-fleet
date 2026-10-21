@@ -255,11 +255,10 @@ impl Store {
                     ("worker_session_id", worker),
                     ("requester_session_id", requester),
                 ] {
+                    let mut stmt =
+                        conn.prepare(&format!("UPDATE tasks SET {col} = ?1 WHERE id = ?2"))?;
                     for id in ids {
-                        conn.execute(
-                            &format!("UPDATE tasks SET {col} = ?1 WHERE id = ?2"),
-                            rusqlite::params![to, id],
-                        )?;
+                        stmt.execute(rusqlite::params![to, id])?;
                     }
                 }
                 Ok(())
