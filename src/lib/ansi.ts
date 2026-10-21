@@ -1795,6 +1795,35 @@ function isColorByte(v: number): boolean {
   return v >= 0 && v <= 255;
 }
 
+/** A per-row render cache over one `Screen`: each row's `entry(row, runs)`,
+ *  re-derived only when `Screen.rowVersion` says the row changed, so an idle
+ *  screen costs almost nothing and an update re-encodes only the rows that
+ *  moved. A new `Screen` (a session switch) starts the cache over. */
+export function rowRunsCache<E>(entry: (row: number, runs: Run[]) => E): (scr: Screen) => E[] {
+  let cache: { ver: number; entry: E }[] = [];
+  let cacheScreen: Screen | null = null;
+  return (scr) => {
+    if (cacheScreen !== scr) {
+      cache = [];
+      cacheScreen = scr;
+    }
+    const out: E[] = new Array(scr.rows);
+    for (let r = 0; r < scr.rows; r++) {
+      const ver = scr.rowVersion[r];
+      const cached = cache[r];
+      if (cached !== undefined && cached.ver === ver) {
+        out[r] = cached.entry;
+        continue;
+      }
+      const e = entry(r, rowToRuns(scr.cells[r]));
+      cache[r] = { ver, entry: e };
+      out[r] = e;
+    }
+    if (cache.length > scr.rows) cache.length = scr.rows;
+    return out;
+  };
+}
+
 /** Group a row's cells into adjacent runs sharing fg/bg/attrs. Trailing
  *  default-styled blanks are kept so the column grid stays aligned in the
  *  rendered output. Each run records how many cells it covers.

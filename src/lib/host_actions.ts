@@ -6,7 +6,8 @@
 // logic exists twice.
 import { writable } from 'svelte/store';
 import { requestCloseHosts } from './app_views';
-import { hideHost, hostFilter, probeHost, type HostRow } from './hosts';
+import { pickPrimaryHost } from './fleet_filters';
+import { hideHost, probeHost, type HostRow } from './hosts';
 import { sidebarView } from './work_view';
 import {
   listHostTokens,
@@ -89,7 +90,9 @@ export async function hideHostWithUndo(alias: string): Promise<Result<HostRow>> 
  * sessions, per the views/filters UX review.
  */
 export function viewHostSessions(alias: string): void {
-  hostFilter.set(alias);
+  // Through the picker: an extra fleet's Machine / Org choice would keep
+  // the primary list (this host's sessions) hidden.
+  pickPrimaryHost(alias);
   // The host filter narrows the Sessions list, not the Work view.
   sidebarView.set('sessions');
   requestCloseHosts();

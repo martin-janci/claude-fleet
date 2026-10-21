@@ -36,7 +36,7 @@ use tokio::time::Instant;
 
 use crate::runtime::{Run, Runtime};
 use crate::state::{Build, Previous, State};
-use fleet_updater::common::{attempt_id, known, prune_backups, safe, stamp};
+use fleet_updater::common::{attempt_id, known, prune_backups, safe, stamp, take_trigger};
 pub use fleet_updater::common::{now_unix, restore_db, wants_install};
 
 /// To stderr, ignoring a failed write: `eprintln!` would panic the sidecar
@@ -81,6 +81,9 @@ impl Config {
 
 /// The data dir the hub image uses when the container sets none.
 pub const HUB_DATA_DIR: &str = "/var/lib/fleet-hub";
+
+/// Beside `state.json`: `fleet-updater clear` asks the running loop to clear.
+pub const CLEAR_FILE: &str = "clear-requested";
 
 /// `fleet-hub healthcheck --ready --json` (crates/fleet-hub/src/ready.rs).
 #[derive(Debug, Clone, Deserialize)]
@@ -253,6 +256,13 @@ impl<R: Runtime> Updater<R> {
 
     /// One pass. Returns what it did and how long to wait before the next.
     pub async fn tick(&mut self) -> (Outcome, Duration) {
+        // `fleet-updater clear` runs as its own process; the state it wrote
+        // would be overwritten by this one's next save, so it leaves a marker
+        // and this loop applies the clear to what it holds.
+        if take_trigger(&self.cfg.state_dir.join(CLEAR_FILE)) {
+            log!("cleared by an operator; checking again");
+            self.clear();
+        }
         self.flush_reports().await;
         if let Some(o) = self.resume().await {
             return (o, self.cfg.poll);
@@ -720,7 +730,8 @@ impl<R: Runtime> Updater<R> {
                         "lost": if restored { "writes the candidate made while it was being validated" } else { "nothing" },
                         "backup": prev.backup,
                     }),
-                    None,
+                    // Why it came back: the hub keeps the last report's error.
+                    self.state.last_error.clone(),
                 )
                 .await;
                 log!(
@@ -973,6 +984,16 @@ impl<R: Runtime> Updater<R> {
                 Some(self.roll_back().await)
             }
         }
+    }
+
+    /// `fleet-updater clear` run beside a long-running updater: the marker
+    /// its next [`Updater::tick`] takes, so the clear is not undone by the
+    /// state that loop still holds.
+    pub fn request_clear(&self) -> Result<(), String> {
+        let p = self.cfg.state_dir.join(CLEAR_FILE);
+        std::fs::create_dir_all(&self.cfg.state_dir)
+            .and_then(|()| std::fs::write(&p, b""))
+            .map_err(|e| format!("{}: {e}", p.display()))
     }
 
     /// `fleet-updater clear`: an operator sorted a rollback failure out.

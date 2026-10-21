@@ -77,6 +77,10 @@ pub struct TuneAnswer {
     /// The rewrite is the draft as it was: nothing worth changing.
     #[serde(default)]
     pub unchanged: bool,
+    /// The model ran past the target's limit and the rewrite was cut there
+    /// (ending in `…`): the client warns before it is used as-is.
+    #[serde(default)]
+    pub cut: bool,
     /// Who rewrote it (`haiku`), as the Drafted label names it.
     pub model: String,
     /// Where it ran.
@@ -182,11 +186,17 @@ fn sections(target: &TuneTarget, req: &TuneRequest) -> (String, String, String) 
 /// [`tune`] refuses such a draft rather than rewrite a cut one, since
 /// accepting the rewrite replaces the whole box.
 pub fn draft_too_long(target: &TuneTarget, req: &TuneRequest) -> bool {
+    tune_context(target, req).is_none()
+}
+
+/// [`context_text`] for a draft [`tune`] takes, building the sections
+/// once; `None` when the draft is too long ([`draft_too_long`]).
+fn tune_context(target: &TuneTarget, req: &TuneRequest) -> Option<String> {
     if req.draft.trim().chars().count() > DRAFT_MAX_CHARS {
-        return true;
+        return None;
     }
-    let (head, _, tail) = sections(target, req);
-    head.len() + tail.len() > context_help::CONTEXT_MAX_BYTES
+    let (head, middle, tail) = sections(target, req);
+    (head.len() + tail.len() <= context_help::CONTEXT_MAX_BYTES).then(|| fit(&head, &middle, &tail))
 }
 
 /// PURE: the context the model reads on stdin, at most
@@ -196,8 +206,14 @@ pub fn draft_too_long(target: &TuneTarget, req: &TuneRequest) -> bool {
 /// refused by [`tune`] before this runs.
 pub fn context_text(target: &TuneTarget, req: &TuneRequest) -> String {
     let (head, middle, tail) = sections(target, req);
+    fit(&head, &middle, &tail)
+}
+
+/// The sections cut to [`context_help::CONTEXT_MAX_BYTES`]: the middle
+/// (history, then commands) first.
+fn fit(head: &str, middle: &str, tail: &str) -> String {
     let budget = context_help::CONTEXT_MAX_BYTES.saturating_sub(head.len() + tail.len());
-    let out = format!("{head}{}{tail}", tail_bytes(&middle, budget));
+    let out = format!("{head}{}{tail}", tail_bytes(middle, budget));
     tail_bytes(&out, context_help::CONTEXT_MAX_BYTES).to_string()
 }
 
@@ -265,8 +281,9 @@ fn redact_keeping_draft(text: &str, draft: &str) -> String {
 /// around the rewrite is stripped; control characters other than newline
 /// and tab are refused. Redacted (except for values `draft` itself holds)
 /// and capped at `max_chars` (at most [`PROMPT_MAX_CHARS`]), saying so in
-/// the notes when it was cut; `None` when no rewrite is left.
-pub fn parse_reply(reply: &str, draft: &str, max_chars: usize) -> Option<(String, String)> {
+/// the notes and the third value when it was cut; `None` when no rewrite is
+/// left.
+pub fn parse_reply(reply: &str, draft: &str, max_chars: usize) -> Option<(String, String, bool)> {
     let reply = reply.trim();
     let json = reply
         .find('{')
@@ -322,7 +339,7 @@ pub fn parse_reply(reply: &str, draft: &str, max_chars: usize) -> Option<(String
             "The rewrite ran past the {max}-character limit and was cut there."
         ));
     }
-    Some((prompt, notes))
+    Some((prompt, notes, over))
 }
 
 /// Ask `model` to tune `req` for `target`.
@@ -337,7 +354,7 @@ pub async fn tune(
             "write a draft first: the tuner rewrites what is in the box",
         ));
     }
-    if draft_too_long(target, req) {
+    let Some(context) = tune_context(target, req) else {
         return Err(IpcError::new(
             codes::E_INVALID,
             format!(
@@ -345,10 +362,9 @@ pub async fn tune(
                  fewer for non-Latin text): tune a shorter part of it"
             ),
         ));
-    }
-    let context = context_text(target, req);
+    };
     let done = model.complete(TUNE_INSTRUCTION, &context).await?;
-    let (prompt, notes) = parse_reply(&done.text, &req.draft, target.max_chars)
+    let (prompt, notes, cut) = parse_reply(&done.text, &req.draft, target.max_chars)
         .ok_or_else(|| IpcError::new(codes::E_CLAUDE_CLI, "the tuner run proposed no prompt"))?;
     let unchanged = prompt.trim() == req.draft.trim();
     Ok((
@@ -356,6 +372,7 @@ pub async fn tune(
             prompt,
             notes,
             unchanged,
+            cut,
             model: model.model(),
             host_alias: model.host(),
             at: crate::store::now_unix(),
@@ -421,6 +438,7 @@ pub async fn tune_for_session(
         host: row.host_alias.clone(),
         profile: profile.filter(|p| !p.is_empty()),
         model,
+        what: "the tune",
     };
     let (answer, usage) = tune(&model, &target, req).await?;
     book(store, &answer, usage.as_ref(), row.org_id);
@@ -468,6 +486,7 @@ pub async fn tune_for_routine(
         host: alias.to_string(),
         profile: input.profile.clone().filter(|p| !p.is_empty()),
         model,
+        what: "the tune",
     };
     let req = TuneRequest {
         draft: input.prompt.clone(),

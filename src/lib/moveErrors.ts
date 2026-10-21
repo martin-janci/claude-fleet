@@ -4,6 +4,7 @@
 import type { MoveStep } from './moveProgress';
 import type { IpcError } from './result';
 import { crossOrgOf } from './work';
+import { errorText } from './error_copy';
 
 export interface MoveFailure {
   what: string;
@@ -174,7 +175,7 @@ function forbiddenWhat(
   orgName: (id: number) => string | undefined,
 ): { what: string; action: Action } {
   const c = crossOrgOf(error);
-  if (!c) return { what: error.message, action: { kind: 'retry' } };
+  if (!c) return { what: errorText(error), action: { kind: 'retry' } };
   const w = orgName(c.workOrgId) ?? `organisation ${c.workOrgId}`;
   const s = orgName(c.sessionOrgId) ?? `organisation ${c.sessionOrgId}`;
   return {
@@ -183,6 +184,24 @@ function forbiddenWhat(
       "Fleet does not carry one company's work into another's session by mistake.",
     action: { kind: 'force_cross_org' },
   };
+}
+
+/** `E_MOVE_TOO_LARGE` (`move_session::too_large` / `bundle_too_large`):
+ *  the same move again is refused the same way, so it gets no Retry, and the
+ *  person gets the backend's next step in words (review w16-9). */
+function tooLargeWhat(details: unknown): string {
+  const d = details as { payload?: unknown; bytes?: unknown; cap_bytes?: unknown } | null | undefined;
+  const mb = (n: unknown) => (typeof n === 'number' ? `${Math.max(1, Math.round(n / (1024 * 1024)))} MB` : null);
+  const size = mb(d?.bytes);
+  const cap = mb(d?.cap_bytes);
+  const sizes = size && cap ? ` is ${size}; a move carries up to ${cap}` : ' is larger than a move carries';
+  if (d?.payload === 'bundle') {
+    return `The branch's unpushed commits${sizes}. Push the branch first, or raise the limit in Settings → Move to host.`;
+  }
+  if (d?.payload === 'transcript') {
+    return `The conversation${sizes}. Run /compact in the session, or raise the limit in Settings → Move to host.`;
+  }
+  return 'The work to carry is larger than a move carries. Raise the limit in Settings → Move to host.';
 }
 
 function what(
@@ -211,7 +230,7 @@ function what(
     case 'E_MOVE_TARGET_DIRTY':
       return targetDirtyWhat(error.details, toHost);
     case 'E_MOVE_TOO_LARGE':
-      return { what: 'The work to carry is too large for a move.', action: { kind: 'retry' } };
+      return { what: tooLargeWhat(error.details), action: null };
     case 'E_LOCAL_ONLY':
       return {
         what: 'This desktop is a window onto a hub, and the hub refused the move.',
@@ -225,7 +244,7 @@ function what(
         };
       }
       // A skew: the message already says which side to update.
-      return { what: error.message, action: null };
+      return { what: errorText(error), action: null };
     case 'E_INVALID_STATE':
       if (error.message.includes(ALREADY_WAITING)) {
         return {
@@ -246,13 +265,13 @@ function what(
           action: { kind: 'retry' },
         };
       }
-      return { what: error.message, action: { kind: 'retry' } };
+      return { what: errorText(error), action: { kind: 'retry' } };
     case 'E_MOVE_PARTIAL':
       return { what: partialWhat(error.details, toHost), action: null };
     case 'E_MOVE_CARRY': {
       const step = field(error.details, 'step');
       const sentence = step === null ? undefined : CARRY_STEP[step];
-      if (sentence === undefined) return { what: error.message, action: { kind: 'retry' } };
+      if (sentence === undefined) return { what: errorText(error), action: { kind: 'retry' } };
       const text = TIMEOUTS.has(field(error.details, 'cause_code') ?? '')
         ? `${sentence} The host timed out.`
         : sentence;
@@ -264,7 +283,7 @@ function what(
         action: null,
       };
     default:
-      return { what: error.message, action: { kind: 'retry' } };
+      return { what: errorText(error), action: { kind: 'retry' } };
   }
 }
 

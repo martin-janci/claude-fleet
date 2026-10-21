@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { errorText } from './error_copy';
   import type { SessionRow } from './sessions';
   import {
     repoBlame,
@@ -154,7 +155,7 @@
         cachePut(diffCache, k, r.value);
         diff = r.value;
       } else {
-        error = r.error.message;
+        error = errorText(r.error);
       }
     } else {
       const cached = fileCache.get(k);
@@ -170,7 +171,7 @@
         cachePut(fileCache, k, r.value);
         file = r.value;
       } else {
-        error = r.error.message;
+        error = errorText(r.error);
       }
     }
   }
@@ -214,7 +215,7 @@
       cachePut(blameCache, k, r.value);
       blame = r.value;
     } else {
-      blameError = r.error.message;
+      blameError = errorText(r.error);
     }
   }
 

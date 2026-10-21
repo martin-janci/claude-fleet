@@ -110,10 +110,11 @@ describe('resource commands addressed to a fleet', () => {
 
   it('refuse any other command rather than let it reach the primary', async () => {
     const inv = mockedInvoke as ReturnType<typeof vi.fn>;
-    const org = bundle.resources.find((r) => r.id === 'org') as ResourceType;
-    const r = await listRecords(org, 'company');
+    // Debug devices are not per fleet (their commands are not fleet-scoped).
+    const dbg = bundle.resources.find((r) => r.id === 'debug_device') as ResourceType;
+    const r = await listRecords(dbg, 'company');
     expect(r.ok).toBe(false);
-    const a = await runAction(org.create!, {}, 'company');
+    const a = await runAction(dbg.actions![0], {}, 'company');
     expect(a.ok).toBe(false);
     expect(inv).not.toHaveBeenCalled();
   });

@@ -281,31 +281,44 @@ export function clearToasts(): void {
   droppedToasts.set(0);
 }
 
+/** What else a caller can hand `pushError`. */
+export interface PushErrorOptions {
+  /** Opens Repair workspace for the session the call was about. With it, an
+   *  `E_REPAIR_REQUIRED` toast carries a "Repair workspace…" button, the one
+   *  next step that refusal names (review w16-12). */
+  repair?: () => void;
+  /** A button of the caller's own in place of Retry ("Open Secrets"). */
+  action?: ToastAction;
+  /** The failed call was a read: a timeout gets no "it may have gone
+   *  through" sentence (`ErrorTextOptions.read`). */
+  read?: boolean;
+}
+
 /** Sticky error toast for a backend `IpcError`. The line is a sentence
  *  (`errorText`); the `E_*` code and the backend's own words sit under
  *  Details (review r13, step 1.3: no raw codes in user text). `context`
  *  prefixes the message ("Kill failed: …"); `retry` adds a Retry button.
  *
  *  A hub client gets one sentence more, for the errors whose next step is
- *  different here and is written down nowhere else. `E_CONFIRM_REQUIRED` is
- *  the one that matters: with `mcp.confirm_destructive` on, the hub refuses a
- *  kill, a worktree delete, a move or a task cancel until someone approves
- *  it — and this desktop's confirmation dialog answers ITS OWN queue, which
- *  in remote mode is always empty. Without the sentence a person clicks, sees
- *  a refusal, and has nowhere to go. This is the one place every backend
- *  failure passes through, which is why it is here and not at each call
- *  site; in standalone mode `hubNextStep` returns null and nothing changes. */
-export function pushError(error: IpcError, context?: string, retry?: () => void): number {
-  const text = errorText(error);
+ *  different there (`hubNextStep`): an `E_CONFIRM_REQUIRED` from the hub
+ *  waits for a yes in this window's own confirmation dialog or on the phone.
+ *  This is the one place every backend failure passes through, which is why
+ *  it is here and not at each call site; in standalone mode `hubNextStep`
+ *  returns null and nothing changes. */
+export function pushError(error: IpcError, context?: string, retry?: () => void, opts: PushErrorOptions = {}): number {
+  // An error toast mostly reports a failed action, so a timed-out one may
+  // have run; a caller toasting a failed read says so (`opts.read`).
+  const text = errorText(error, { read: opts.read === true });
   const base = context ? `${context}: ${text}` : text;
   const next = hubNextStep(error);
   reportError('frontend', context ? `${context}: ${error.message}` : error.message, error.code ?? null);
+  const repair = error.code === 'E_REPAIR_REQUIRED' && opts.repair ? { label: 'Repair workspace…', run: opts.repair } : undefined;
   return push({
     kind: 'error',
     code: error.code,
     message: next ? `${base} — ${next}` : base,
     detail: errorDetail(error),
-    action: retry ? { label: 'Retry', run: retry } : undefined,
+    action: repair ?? opts.action ?? (retry ? { label: 'Retry', run: retry } : undefined),
     sticky: true,
   });
 }

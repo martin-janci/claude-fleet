@@ -250,6 +250,16 @@ pub(super) async fn close_all_after_kill(tmux: &dyn TmuxExec, session: &str) {
     }
 }
 
+/// Best-effort: before a new session takes `session`'s name, close the
+/// terminals an ended session of that name left behind
+/// ([`crate::tmux::close_orphan_shell_terminals_script`]).
+pub(super) async fn close_orphans_before_create(tmux: &dyn TmuxExec, session: &str) {
+    let script = crate::tmux::close_orphan_shell_terminals_script(session);
+    if let Err(e) = tmux.run_script(&script).await {
+        tracing::debug!(session, error = %e, "[terminals] closing an ended session's terminals failed");
+    }
+}
+
 /// Best-effort: carry a renamed session's terminals over to its new name.
 pub(super) async fn rename_after_rename(tmux: &dyn TmuxExec, old: &str, new: &str) {
     let script = crate::tmux::rename_shell_terminals_script(old, new);
@@ -595,5 +605,23 @@ mod tests {
             .status
             .success());
         assert_eq!(t.names(), ["web", "x--sh1"]);
+    }
+
+    /// Review w27-8: before a new session takes a name, the terminals an
+    /// ended session of that name left behind are closed; a live session's
+    /// own terminals, and other sessions', are left alone.
+    #[test]
+    fn a_new_session_does_not_inherit_an_ended_sessions_terminals() {
+        let Some(t) = Tmux::new() else { return };
+        assert!(t
+            .sh("tmux new-session -d -s api--sh1 'sleep 60' && tmux new-session -d -s web 'sleep 60' \
+                 && tmux new-session -d -s web--sh1 'sleep 60'")
+            .status
+            .success());
+        let script = crate::tmux::close_orphan_shell_terminals_script;
+        assert!(t.sh(&script("web")).status.success());
+        assert_eq!(t.names(), ["api--sh1", "web", "web--sh1"]);
+        assert!(t.sh(&script("api")).status.success());
+        assert_eq!(t.names(), ["web", "web--sh1"]);
     }
 }

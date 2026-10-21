@@ -9,7 +9,8 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
   import HostHealthList from './HostHealthList.svelte';
-  import { hosts } from './hosts';
+  import { hosts, hostsLoad, loadHosts } from './hosts';
+  import ListGate from './states/ListGate.svelte';
   import { operatorHost } from './operator';
   import { fleetSettings, settingInt, SETTING_KEYS } from './fleet_settings';
   import { requestHostsView } from './app_views';
@@ -36,7 +37,9 @@
   {:else if !$showPrimary}
     <p class="empty" data-testid="control-hosts-primary-filtered">This window's own hosts are hidden by the fleet filter in the sidebar.</p>
   {:else if !$multiFleet}
-    <p class="empty">No hosts yet.</p>
+    <ListGate load={$hostsLoad} what="hosts" onretry={() => void loadHosts()} testid="control-hosts">
+      <p class="empty" data-testid="control-hosts-empty">No hosts yet.</p>
+    </ListGate>
   {/if}
   {#if $multiFleet}
     <FleetHostHealth now={nowSec} {limits} />

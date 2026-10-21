@@ -10,6 +10,7 @@ import type { ChatFormOutcome } from './ChatForm.svelte';
 import type { FieldProblem, Values } from './forms';
 import { NEW_WORKTREE, startNewSession } from './new_session_wizard';
 import { WIZARDS, withChoices, type Wizard } from './wizards';
+import { errorText } from '../error_copy';
 
 // A form's select takes at most 50 options.
 const MAX = 50;
@@ -46,7 +47,7 @@ export async function buildFirstFleet(
   let project = Number(v.project);
   if (source) {
     const r = await addProject(host, source);
-    if (!r.ok) return { ok: false, error: r.error.message };
+    if (!r.ok) return { ok: false, error: errorText(r.error) };
     project = r.value.project.id;
   } else if (!Number.isInteger(project) || project <= 0) {
     return { ok: false, problems: [{ field: 'project', problem: 'Pick a project.' }] };

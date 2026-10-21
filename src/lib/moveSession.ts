@@ -1,5 +1,59 @@
 import { invokeCmd, type Result } from './result';
 import { mergeSession, type SessionRow } from './sessions';
+import { composerDrafts, composerTrays, rememberDraft, rememberTray, takeTray } from './conversation';
+import { recallScroll, rememberScroll } from './conversation_nav';
+import { onAnyTimelineEvent } from './live_events';
+import type { SessionEvent } from './timeline';
+
+/** A move gives the session a new row id (review w13-10): what the person
+ *  left in its composer (text and files) and where they were scrolled
+ *  follow it, instead of staying under the dead id while the moved session
+ *  opens with an empty box. A kept source keeps its draft text, but the
+ *  attachment tray moves either way: a picked path's allow-list entry is
+ *  good for one upload, so a tile copied into both sessions would sink the
+ *  second one's send. */
+export function carryComposer(fromId: number, toId: number, keepSource: boolean): void {
+  if (fromId === toId) return;
+  const draft = composerDrafts.get(fromId);
+  if (draft !== undefined && !composerDrafts.has(toId)) rememberDraft(toId, draft);
+  const tray = composerTrays.get(fromId);
+  if (tray !== undefined && !composerTrays.has(toId)) {
+    rememberTray(toId, tray);
+    // Through `takeTray`, not the map alone: a panel still showing the kept
+    // source would otherwise keep the tiles live and write them back.
+    takeTray(fromId);
+  }
+  const snap = recallScroll(fromId);
+  if (snap && !recallScroll(toId)) rememberScroll(toId, snap);
+  if (!keepSource) {
+    composerDrafts.delete(fromId);
+    if (composerTrays.has(fromId)) takeTray(fromId);
+  }
+}
+
+/** Carry the composer from a recorded `session_moved` (written on both rows
+ *  once a move finishes, `finalise.rs`): a move that waited for idle, or was
+ *  started on another device or over MCP, finishes after any answer this
+ *  window could act on, and this is where it hears the new row id. Carrying
+ *  twice is a no-op, so the immediate path above and both rows' copies of
+ *  the event are harmless. */
+export function carryFromMovedEvent(e: SessionEvent): void {
+  if (e.kind !== 'session_moved' || e.detail === null) return;
+  let d: unknown;
+  try {
+    d = JSON.parse(e.detail);
+  } catch {
+    return;
+  }
+  if (typeof d !== 'object' || d === null) return;
+  const { from_session_id: from, to_session_id: to, kept_source: kept } = d as Record<string, unknown>;
+  if (typeof from !== 'number' || typeof to !== 'number') return;
+  // An event that does not say keeps the source's draft: never drop text
+  // on a guess.
+  carryComposer(from, to, kept !== false);
+}
+
+onAnyTimelineEvent(carryFromMovedEvent);
 
 /** What a move carried besides the transcript (mirrors `carry::CarryReport`). */
 export interface CarryReport {
@@ -155,6 +209,7 @@ export async function moveSession(
   if (!r.ok) return r;
   if (r.value.kind === 'moved') {
     mergeSession(r.value.target);
+    carryComposer(sessionId, r.value.target.id, opts.keepSource ?? false);
     return { ok: true, value: r.value };
   }
   if (r.value.kind === 'waiting') {

@@ -10,8 +10,10 @@ import { describe, it, expect } from 'vitest';
 
 /** A declaration that removes the outline. */
 const NO_OUTLINE = /(?<![-\w])outline\s*:\s*(none|0)\s*(;|$)/;
-/** A declaration that draws a ring: a real outline or a box-shadow. */
-const DRAWS_RING = /(?<![-\w])outline\s*:(?!\s*(none|0)\b)[^;]+|box-shadow\s*:(?!\s*none\b)[^;]+/;
+/** A declaration that draws a ring: a real outline or a box-shadow. A
+ *  box-shadow built from a `*-soft` tint is a halo of about 1.2:1, not a
+ *  ring (review w19-3). */
+const DRAWS_RING = /(?<![-\w])outline\s*:(?!\s*(none|0)\b)[^;]+|box-shadow\s*:(?!\s*none\b)(?![^;]*-soft\b)[^;]+/;
 /** Elements that take focus without a tabindex. */
 const FOCUSABLE_TAG = /^(input|textarea|select|button|summary|a)$/;
 
@@ -82,6 +84,23 @@ export function ringless(file: string, src: string): string[] {
   return out;
 }
 
+/** An outline thinner than the house `--ring-w` (2 px). */
+const THIN_OUTLINE = /(?<![-\w])outline(-width)?\s*:\s*(0?\.\d+|1)px\b/;
+
+/** Every focus rule that swaps the 2 px ring for a thinner one (review
+ *  w19-4: a 1 px accent hairline on every tool line and screenshot). */
+export function thinRings(file: string, src: string): string[] {
+  return rulesOf(file, src)
+    .filter((r) => THIN_OUTLINE.test(r.body))
+    .flatMap((r) =>
+      r.selector
+        .split(',')
+        .map((p) => p.trim())
+        .filter((p) => /:focus(-visible)?\b/.test(p))
+        .map((p) => `${file}:${r.line} ${p}`),
+    );
+}
+
 /**
  * Rules that drop the outline on purpose, each with where its focus shows
  * instead. Keyed `file selector`; a row nothing matches any more fails, so
@@ -115,6 +134,21 @@ describe('focus ring', () => {
     const src = '<div class="list" tabindex="0"></div>\n<style>\n  .list { outline: none; }\n</style>';
     expect(ringless('src/lib/X.svelte', src)).toEqual(['src/lib/X.svelte:3 .list']);
     expect(ringless('src/lib/X.svelte', src.replace('tabindex="0"', 'tabindex="-1"'))).toEqual([]);
+  });
+
+  it('does not count a *-soft box-shadow halo as a ring (review w19-3)', () => {
+    const src = '<input class="inp" />\n<style>\n  .inp:focus { outline: none; box-shadow: 0 0 0 2px var(--accent-soft); }\n</style>';
+    expect(ringless('src/lib/X.svelte', src)).toEqual(['src/lib/X.svelte:3 .inp:focus']);
+    expect(ringless('src/lib/X.svelte', src.replace('--accent-soft', '--ring'))).toEqual([]);
+  });
+
+  it('reads a focus rule that draws a ring thinner than --ring-w (review w19-4)', () => {
+    const src = '<button class="t">x</button>\n<style>\n  .t:focus-visible { outline: 1px solid var(--accent); }\n  .t { outline: 1px solid red; }\n</style>';
+    expect(thinRings('src/lib/X.svelte', src)).toEqual(['src/lib/X.svelte:3 .t:focus-visible']);
+  });
+
+  it('no focus rule draws a ring thinner than --ring-w', () => {
+    expect(appStyleFiles().flatMap((f) => thinRings(f, readFileSync(f, 'utf8')))).toEqual([]);
   });
 
   it('no component hides keyboard focus without a ring of its own', () => {

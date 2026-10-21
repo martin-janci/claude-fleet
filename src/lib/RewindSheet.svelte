@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { errorText } from './error_copy';
   // Rewind… from the session's own actions (gap plan G1.11): the per-turn
   // Rewind under a reply (ReplyActions), with the turn picked from a list
   // instead of from the conversation. The same engine call
@@ -38,7 +39,7 @@
   async function load() {
     const r = await sessionConversation(session.id, TURNS);
     if (!r.ok) {
-      loadError = r.error.message;
+      loadError = errorText(r.error);
       return;
     }
     choices = rewindChoices(r.value.turns, r.value.truncated);
@@ -54,7 +55,7 @@
     const r = await rewindConversation(session.id, 'rewind', c.anchor);
     busy = false;
     if (!r.ok) {
-      error = r.error.message;
+      error = errorText(r.error);
       return;
     }
     if (c.prompt) insertIntoComposer(session.id, c.prompt);

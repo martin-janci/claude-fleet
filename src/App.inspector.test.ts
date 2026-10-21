@@ -109,6 +109,20 @@ describe('App: session tabs and the inspector (step 3.5)', () => {
     expect(screen.getByTestId('inspector')).toBeTruthy();
   });
 
+  // Review w30-7: on the Details tab the chord does nothing, and the
+  // inspector is still open back on the agent tab.
+  it('the inspector chord on the Details tab leaves the inspector pref alone', async () => {
+    await mountApp();
+    selectSession(rows[0]);
+    await screen.findByTestId('inspector');
+    await fireEvent.click(screen.getByTestId('stab-details'));
+    expect(screen.queryByTestId('inspector')).toBeNull();
+    await inspectorChord();
+    expect(localStorage.getItem('cf:pref:layout.inspector')).not.toBe('false');
+    await fireEvent.click(screen.getByTestId('stab-agent'));
+    expect(screen.getByTestId('inspector')).toBeTruthy();
+  });
+
   it('Open in VS Code: the header button and its chord open the selected session (step 5.5)', async () => {
     await mountApp();
     selectSession(rows[0]);

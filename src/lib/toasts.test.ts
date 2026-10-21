@@ -96,6 +96,17 @@ describe('toasts store', () => {
     expect(retry).toHaveBeenCalledOnce();
   });
 
+  // Review w16-8: a timed-out action may have run; a failed read says so.
+  it('pushError says a timed-out action may have gone through, and a read does not', () => {
+    pushError({ code: 'E_SSH_TIMEOUT', message: 'timed out' }, 'Kill failed');
+    pushError({ code: 'E_SSH_TIMEOUT', message: 'timed out' }, 'Refresh sessions failed', undefined, { read: true });
+    const messages = get(toasts).map((t) => t.message);
+    expect(messages).toContain(
+      'Kill failed: The host took too long to answer over SSH. It may have gone through anyway. The list refreshes; check it before trying again',
+    );
+    expect(messages).toContain('Refresh sessions failed: The host took too long to answer over SSH');
+  });
+
   it('pushError also reports to the hub error channel', () => {
     pushError({ code: 'E_SSH', message: 'ssh refused' }, 'Opening terminal');
     const reported = inv().mock.calls.filter((c) => c[0] === 'report_client_error');
@@ -127,11 +138,29 @@ describe('toasts store', () => {
   });
 });
 
-// Requirement (c): the trap. With `mcp.confirm_destructive` on, a hub refuses
+// Requirement (c): with `mcp.confirm_destructive` on, a hub holds
 // kill_session / delete_worktree / move_session / cancel_task until someone
-// approves them — and this desktop's confirmation dialog answers its OWN
-// queue, which in remote mode is always empty. Nothing in the interface said
-// where to go, so this is the one place every backend failure passes through.
+// approves them. The request opens in this window's dialog (its queue is the
+// hub's since redesign 9.2) and on the phone; the toast says so (review w16-3).
+// Review w16-12: E_REPAIR_REQUIRED names one next step, Repair workspace,
+// and a caller that knows the session offers it as the button.
+describe('pushError with a repair', () => {
+  it('offers Repair workspace for E_REPAIR_REQUIRED', () => {
+    const repair = vi.fn();
+    pushError({ code: 'E_REPAIR_REQUIRED', message: 'the workspace needs an explicit repair' }, 'Restart failed', undefined, { repair });
+    const t = get(toasts).at(-1)!;
+    expect(t.action?.label).toBe('Repair workspace…');
+    t.action!.run();
+    expect(repair).toHaveBeenCalled();
+  });
+
+  it('leaves any other error with its Retry', () => {
+    const repair = vi.fn();
+    pushError({ code: 'E_IO', message: 'disk full' }, 'Restart failed', () => {}, { repair });
+    expect(get(toasts).at(-1)!.action?.label).toBe('Retry');
+  });
+});
+
 describe('pushError on a hub client', () => {
   it('adds the next step to a confirmation the hub is waiting on', async () => {
     const { hubStatus, STANDALONE } = await import('./hub');
@@ -146,9 +175,8 @@ describe('pushError on a hub client', () => {
       const t = get(toasts)[0];
       expect(t.code).toBe('E_CONFIRM_REQUIRED');
       expect(t.message).toContain('Kill failed');
-      expect(t.message.toLowerCase()).toContain('on the hub');
-      expect(t.message).toContain('fleet.example.com');
-      expect(t.message.toLowerCase()).toContain('approve it on the hub — this window will follow');
+      expect(t.message).toContain('approving the request won’t run it from here');
+      expect(t.message).not.toContain('fleet.example.com');
     } finally {
       hubStatus.set({ ...STANDALONE });
     }

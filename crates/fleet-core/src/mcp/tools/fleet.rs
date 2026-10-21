@@ -249,8 +249,9 @@ impl FleetTools {
     #[tool(description = "Which agent hosts (transport \"agent\") have a \
         fleet-agent connected: since (unix s), version, host name, OS. \
         Offline ones show connected=false; a call for one fails fast with \
-        E_AGENT_OFFLINE. enabled=false where no agents are accepted (the \
-        desktop).")]
+        E_AGENT_OFFLINE. duplicate (since, takeovers, peers) when two \
+        fleet-agents keep taking one host's token from each other. \
+        enabled=false where no agents are accepted (the desktop).")]
     pub(super) async fn agent_status(&self) -> Result<CallToolResult, McpError> {
         audit("agent_status", "");
         let registry = self.ssh.agent_registry().map(|r| r.as_ref());
@@ -586,7 +587,8 @@ impl FleetTools {
         (a reverse SSH tunnel when the hub is loopback-only). Returns \
         per-host status; each host must restart Claude to load it. host: \
         one alias; content_only: skills, CLAUDE.md and hooks only, no token. \
-        The hub owner's device may run content_only for one host only.")]
+        The master, or a fleet admin's own device for content_only on one \
+        host only.")]
     pub(super) async fn provision_hosts(
         &self,
         Extension(caller): Extension<Caller>,
@@ -627,8 +629,9 @@ impl FleetTools {
         (not a token) travels in the URL FRAGMENT, so no proxy or access log \
         sees it; the device posts it to /pair once for a token of its own. \
         name: 1-64 chars, no control characters, not a live client's. mode \
-        full drives sessions fleet-wide, readonly observes, peer is another \
-        hub's link (see peer_exchange), updater is fleet-updater's (/update \
+        full drives sessions fleet-wide, readonly observes, answer observes \
+        and answers dialogs and forms but never types a prompt, peer is \
+        another hub's link (see peer_exchange), updater is fleet-updater's (/update \
         only); fleet-admin tools stay out of a \
         client's reach. Codes are in memory only: a hub restart voids them. \
         org_id binds it to one org (its work and sessions only). person names \
@@ -937,7 +940,7 @@ impl FleetTools {
 
     #[tool(description = "Operator settings (ticks, GC, playbooks, projects \
         roots, move, usage, reports, work graph), each key's effective value. \
-        Master token or a paired device bound to no org.")]
+        The master or a fleet admin's own device.")]
     pub(super) async fn get_settings(
         &self,
         Parameters(p): Parameters<GetSettingsParams>,
@@ -955,8 +958,9 @@ impl FleetTools {
     }
 
     #[tool(description = "Change one get_settings key, validated; E_INVALID \
-        otherwise. mcp.*, hub.* and controller.* are refused. Master, or a \
-        trusted device. Returns the settings, or with propose the proposal.")]
+        otherwise. mcp.*, hub.* and controller.* are refused. The master or \
+        a fleet admin's own device (a write needs it trusted and full). \
+        Returns the settings, or with propose the proposal.")]
     pub(super) async fn set_setting(
         &self,
         Extension(caller): Extension<Caller>,
@@ -1123,7 +1127,7 @@ impl FleetTools {
         audit("control_journal", action);
         // Control's own state and the owner's words to it: Control, the
         // master and the fleet admin's own device only.
-        if !(caller.is_operator() || caller.is_master() || caller.is_fleet_admin_device()) {
+        if !caller.is_control_or_owner() {
             return Err(mcp_err(
                 "E_FORBIDDEN",
                 "control_journal is Control's and its owner's",

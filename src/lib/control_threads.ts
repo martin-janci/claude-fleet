@@ -10,16 +10,19 @@
 // from the transcript's text.
 import { attentionState, claudeStatusLabel, countsTowardBadge, displayName, type AttentionOptions } from './attention';
 import { sessionState, workState, type ControlHandoff } from './handoffs';
-import type { Mission } from './missions';
+import { isFinal, WAIT_WORDS, type Mission } from './missions';
+import { missionRowLine } from './mission_room';
+import type { FollowMark } from './control_journal';
 import type { SessionRow } from './sessions';
 import type { OfState } from './kit/status';
 import { localMidnight } from './today';
 
-export type ThreadGroup = 'needs' | 'working' | 'done' | 'earlier';
+export type ThreadGroup = 'needs' | 'working' | 'paused' | 'done' | 'earlier';
 
 export const THREAD_GROUPS: readonly { id: ThreadGroup; label: string }[] = [
   { id: 'needs', label: 'Needs you' },
   { id: 'working', label: 'Working' },
+  { id: 'paused', label: 'Draft and paused' },
   { id: 'done', label: 'Done today' },
   { id: 'earlier', label: 'Earlier' },
 ];
@@ -37,6 +40,9 @@ interface ThreadBase {
   at: number;
   /** Muted: fleet stops telling Control about it (Control review F10). */
   muted: boolean;
+  /** Why Control no longer follows it, in words ("went quiet"), or null
+   *  while it does (or the hub did not say). Muted is `muted`'s. */
+  unfollowed: string | null;
 }
 
 export interface SessionThread extends ThreadBase {
@@ -65,6 +71,24 @@ export interface ThreadInput {
   since?: number;
   /** The muted threads' keys (`s:<id>`, `m:<id>`, `control_journal`). */
   muted?: ReadonlySet<string>;
+  /** What the hub follows (`threadFollows`, the journal's `follows`): every
+   *  thread Control started or was handed, from up to 500 receipts — the
+   *  column's list (review w04-1), where `handoffs` (the chips' newest 20)
+   *  only adds receipt times and names. `null` from an older hub. */
+  follows?: ReadonlyMap<string, FollowMark> | null;
+}
+
+/** Why a thread is no longer followed, by the journal's state. */
+const UNFOLLOWED_WORDS: Record<string, string> = {
+  quiet: 'went quiet',
+  done: 'done',
+  merged: 'PR merged',
+  killed: 'ended',
+};
+
+function unfollowedWhy(mark: FollowMark | undefined): string | null {
+  if (!mark || mark.muted || mark.state === 'following') return null;
+  return UNFOLLOWED_WORDS[mark.state] ?? mark.state;
 }
 
 function sessionGroup(s: SessionRow, opts: AttentionOptions, since: number): ThreadGroup {
@@ -81,19 +105,41 @@ function sessionLine(s: SessionRow): string {
 }
 
 /** Why a mission waits on a person, in words (`MissionWait.reason`). */
-export const WAIT_WORDS: Record<string, string> = {
-  question: 'Asks a question',
-  sign_grant: 'Grant needs signing',
-  confirm: 'A step waits for your OK',
-};
+export { WAIT_WORDS };
 
+/** A mission's group, as the Mission room groups it (`roomGroupOf`), with
+ *  today for its week: one that ended goes by when it did — a failure today
+ *  needs you, a cancel never does, and any of them older is Earlier
+ *  (review w04-2); a draft or a paused one is Draft and paused (w04-9). */
 function missionGroup(state: string, waiting: boolean, finishedAt: number | null, since: number): ThreadGroup {
+  if (isFinal(state)) {
+    const recent = (finishedAt ?? 0) >= since;
+    if (!recent) return 'earlier';
+    return state === 'failed' ? 'needs' : 'done';
+  }
   if (waiting) return 'needs';
-  const w = workState(state);
-  if (w === 'working') return 'working';
-  if (w === 'failed') return 'needs';
-  if ((finishedAt ?? 0) >= since) return 'done';
-  return 'earlier';
+  if (workState(state) === 'working') return 'working';
+  return 'paused';
+}
+
+/** A mission's dot: cancelled, draft and paused are idle, not failed. */
+function missionDot(state: string, waiting: boolean): OfState {
+  if (waiting && !isFinal(state)) return 'waiting';
+  if (state === 'cancelled' || state === 'draft' || state === 'paused') return 'idle';
+  return workState(state);
+}
+
+/** A mission's second line: what it waits on, its progress while it works,
+ *  else the Mission room's row line ("Draft · not planned yet", "Paused",
+ *  "Finished · 6 tasks"). */
+function missionLine(m: Mission | undefined, state: string): string {
+  if (m?.waiting_on && !isFinal(state)) return WAIT_WORDS[m.waiting_on.reason] ?? 'Waits on you';
+  const total = m?.total ?? 0;
+  if (state === 'active' && total > 0) return `Mission · ${m?.done ?? 0} of ${total} done`;
+  if (m) return missionRowLine(m);
+  if (state === 'draft') return 'Draft · not planned yet';
+  if (state === 'paused') return 'Paused';
+  return 'Mission';
 }
 
 /** Every thread Control handed out, newest first within its group. */
@@ -116,13 +162,21 @@ export function buildThreads(input: ThreadInput): ControlThread[] {
       if (!prev || h.at > prev.at) missionReceipts.set(h.mission_id, h);
     }
   }
+  // The hub's follows: every thread it knows, past the newest receipts.
+  const missionIds = new Set<number>(missionReceipts.keys());
+  for (const key of input.follows?.keys() ?? []) {
+    const id = Number(key.slice(2));
+    if (!Number.isFinite(id)) continue;
+    if (key.startsWith('s:') && id !== input.operatorId && byId.has(id)) sessionIds.add(id);
+    else if (key.startsWith('m:')) missionIds.add(id);
+  }
   const out: ControlThread[] = [];
   const muted = input.muted ?? new Set<string>();
   const missionById = new Map(input.missions.map((m) => [m.id, m]));
   for (const id of sessionIds) {
     const row = byId.get(id)!;
     // A mission's worker belongs to the mission's thread, not its own.
-    if (row.origin === 'mission' && row.origin_ref && missionReceipts.has(Number(row.origin_ref))) continue;
+    if (row.origin === 'mission' && row.origin_ref && missionIds.has(Number(row.origin_ref))) continue;
     out.push({
       kind: 'session',
       key: `s:${id}`,
@@ -133,30 +187,28 @@ export function buildThreads(input: ThreadInput): ControlThread[] {
       title: displayName(row, true),
       line: sessionLine(row),
       at: Math.max(row.last_activity_at ?? 0, handedAt.get(id) ?? 0, row.created_at ?? 0),
-      muted: muted.has(`s:${id}`),
+      muted: muted.has(`s:${id}`) || !!input.follows?.get(`s:${id}`)?.muted,
+      unfollowed: unfollowedWhy(input.follows?.get(`s:${id}`)),
     });
   }
-  for (const [id, h] of missionReceipts) {
+  for (const id of missionIds) {
+    const h = missionReceipts.get(id);
     const m = missionById.get(id);
-    const state = m?.state ?? h.mission_state ?? 'draft';
-    const waiting = !!m?.waiting_on;
-    const done = m?.done ?? 0;
-    const total = m?.total ?? 0;
-    const line = waiting
-      ? (WAIT_WORDS[m!.waiting_on!.reason] ?? 'Waits on you')
-      : total > 0
-        ? `Mission · ${done} of ${total} done`
-        : 'Mission';
+    const mark = input.follows?.get(`m:${id}`);
+    const state = m?.state ?? h?.mission_state ?? 'draft';
+    const waiting = !!m?.waiting_on && !isFinal(state);
     out.push({
       kind: 'mission',
       key: `m:${id}`,
       id,
-      group: missionGroup(state, waiting, m?.finished_at ?? null, since),
-      state: waiting ? 'waiting' : workState(state),
-      title: m?.name ?? h.mission_name ?? `Mission ${id}`,
-      line,
-      at: Math.max(m?.updated_at ?? 0, h.at),
-      muted: muted.has(`m:${id}`),
+      group: missionGroup(state, waiting, m ? (m.finished_at ?? m.updated_at) : null, since),
+      state: missionDot(state, waiting),
+      title: m?.name ?? h?.mission_name ?? mark?.name ?? `Mission ${id}`,
+      line: missionLine(m, state),
+      at: Math.max(m?.updated_at ?? 0, h?.at ?? 0),
+      muted: muted.has(`m:${id}`) || !!mark?.muted,
+      // A finished mission is not followed because it finished: no news.
+      unfollowed: isFinal(state) ? null : unfollowedWhy(mark),
     });
   }
   out.sort((a, b) => b.at - a.at);

@@ -84,3 +84,25 @@ export function sendLaterPlan(
     }
   }
 }
+
+/** The prompts of a `queued_prompts` answer that are still waiting to go out
+ *  (review w13-9): not delivered, failed, cancelled or skipped. */
+export function waitingPrompts<
+  T extends { delivered_at?: number | null; failed_at?: number | null; cancelled_at?: number | null; skipped_at?: number | null },
+>(rows: readonly T[]): T[] {
+  return rows.filter((q) => !q.delivered_at && !q.failed_at && !q.cancelled_at && !q.skipped_at);
+}
+
+/** When a waiting prompt goes, in the words the sheet used to schedule it. */
+export function scheduledWhen(
+  q: { not_before?: number | null; until_limit_reset?: boolean },
+  nowMs: number,
+  locale?: string,
+): string {
+  if (q.not_before && q.not_before * 1000 > nowMs) {
+    const at = `at ${whenAt(new Date(q.not_before * 1000), locale)}`;
+    return q.until_limit_reset ? `${at}, after the usage limit resets` : at;
+  }
+  if (q.until_limit_reset) return 'when the usage limit resets';
+  return 'when it is idle';
+}

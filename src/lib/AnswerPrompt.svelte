@@ -31,6 +31,7 @@
   import { hubActionBlocked, hubStatus } from './hub';
   import { hubConnection } from './hub_connection';
   import { sessionBlocked } from './share';
+  import { fleetBlocked } from './fleets';
   import ProposedBy from './ProposedBy.svelte';
   import { quickOrder, quickProposal } from './quick_answer';
   import { untrack } from 'svelte';
@@ -86,7 +87,10 @@
    * revoke that lands during `await reread()` is seen by the check below it.
    */
   const writeBlocked = $derived(
-    hubActionBlocked('send_prompt', $hubStatus, $hubConnection) ?? $sessionBlocked(session, 'answer_dialog'),
+    // An extra fleet's session: its own link, and its hub judges the write.
+    session.fleet
+      ? $fleetBlocked(session.fleet)
+      : (hubActionBlocked('send_prompt', $hubStatus, $hubConnection) ?? $sessionBlocked(session, 'answer_dialog')),
   );
 
   /** Boxes this card toggled that no reading of the pane shows yet: a toggle

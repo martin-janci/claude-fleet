@@ -1926,9 +1926,7 @@ pub struct ToolImage {
     pub data: String,
 }
 
-fn is_zero_u32(n: &u32) -> bool {
-    *n == 0
-}
+use crate::serde_util::is_zero_u32;
 
 /// PURE: the image blocks of a tool_result's content, within the caps,
 /// and how many were left out. Claude Code writes an image as

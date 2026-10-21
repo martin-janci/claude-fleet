@@ -71,6 +71,12 @@ export const settingsOpen = writable(false);
 /** The `?` keyboard-shortcut sheet (redesign step 3.8; ⌘K opens it too). */
 export const shortcutSheetOpen = writable(false);
 
+/** ⌘K's rows for chords whose state lives in a component (review w18-4):
+ *  each bump asks it to act as its chord does. App toggles the inspector;
+ *  the Sidebar opens the next session that needs you. */
+export const inspectorToggleRequest = writable(0);
+export const nextNeedsYouRequest = writable(0);
+
 /** The Settings section to scroll to when the dialog opens (`work`: the
  *  work section, e.g. from a "Reconnect Jira (acme)" Attention item). The
  *  dialog clears it once it has scrolled. */

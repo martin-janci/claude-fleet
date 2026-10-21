@@ -6,6 +6,7 @@
   (`onstep`): nothing here completes, cancels or verifies anything.
 -->
 <script lang="ts">
+  import { errorText } from './error_copy';
   import DraftField from './DraftField.svelte';
   import ProposedBy from './ProposedBy.svelte';
   import StatusChip from './kit/StatusChip.svelte';
@@ -50,7 +51,7 @@
     if (mine !== gen) return;
     if (r.ok) triage = r.value;
     else if (HUB_HAS_NO_TRIAGE.includes(r.error.code)) triage = null;
-    else error = r.error.message;
+    else error = errorText(r.error);
   }
 
   async function drawCard() {
@@ -63,7 +64,7 @@
       draft = r.value.card ?? null;
       text = draft?.text ?? '';
     } else {
-      error = r.error.message;
+      error = errorText(r.error);
     }
   }
 

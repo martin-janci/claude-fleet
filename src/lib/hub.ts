@@ -26,6 +26,7 @@
 import { get, writable } from 'svelte/store';
 import { invokeCmd, type IpcError, type Result } from './result';
 import { hubConnection, type HubConnection } from './hub_connection';
+import { hubUnavailableWords } from './error_copy';
 
 /** Mirrors the backend `HubStatus` (`src-tauri/src/commands/hub.rs`). */
 export interface HubStatus {
@@ -136,109 +137,105 @@ export async function hubStrandedToken(): Promise<Result<boolean>> {
 // ---- what a hub client cannot do from here ---------------------------------
 
 /**
- * The half of each reason that is specific to the action. `hubBlock` adds the
- * hub's name, so every sentence ends up naming both what and where.
+ * Why each action is unavailable on a paired desktop, as a whole sentence
+ * (review w16-6). `operator`, when set, is the one thing to tell a person who
+ * cannot do it at all: an administration step the hub's operator runs, in
+ * the words of its CLI. A reason without one says itself where the action
+ * does work, or what to use here instead — `hubBlock` adds no "do it on the
+ * hub", which was false for half of them ("edit the asset here instead",
+ * "use Kill instead").
  *
  * The keys are the command names wherever there is one, so a reader can find
  * the matching `backend.local_only(...)` in `src-tauri/src/commands/`.
  */
+interface Reason {
+  text: string;
+  /** Administration a client never does: `true` sends the person to the
+   *  hub's operator, a string also names the operator's command. */
+  operator?: string | true;
+}
+
+const NOT_ADMIN = 'This desktop is a paired client, and a client never administers the fleet.';
+const SETUP_WIZARD =
+  'The add-host wizard works from this machine’s SSH config, and this desktop is a paired client. Add host asks the hub to add one instead.';
+
 const REASONS = {
   // --- fleet administration: refused to a client by design -----------------
   // (No `add_host` / `discover_hosts`: since contract 13 the hub adds a host
   // for its owner's trusted full device, so both route — Add host reads the
   // hub's ~/.ssh/config and the hub probes what it adds, as the phone's does.)
-  remove_host:
-    'this desktop is a paired client, and a client is never the fleet’s administrator',
-  hide_host:
-    'this desktop is a paired client, and a client is never the fleet’s administrator',
-  list_host_setups:
-    'the add-host wizard adds hosts from this machine’s SSH config, and a paired client does not administer the fleet',
-  save_host_setup:
-    'the add-host wizard adds hosts from this machine’s SSH config, and a paired client does not administer the fleet',
-  discard_host_setup:
-    'the add-host wizard adds hosts from this machine’s SSH config, and a paired client does not administer the fleet',
-  run_host_setup_check:
-    'the add-host wizard checks a host over this app’s own SSH, and a paired client does not administer the fleet',
+  remove_host: { text: NOT_ADMIN, operator: true },
+  hide_host: { text: NOT_ADMIN, operator: true },
+  list_host_setups: { text: SETUP_WIZARD },
+  save_host_setup: { text: SETUP_WIZARD },
+  discard_host_setup: { text: SETUP_WIZARD },
+  run_host_setup_check: { text: SETUP_WIZARD },
   // Not a command: `provision_hosts` for every host (Settings → Control
   // API). One host's content refresh routes — HostDetail's "Re-provision this
   // host" is `ROUTED_ACTIONS`' `provision_hosts`.
-  provision_all:
-    'provisioning every host mints tokens and rewrites each host’s hook block, which is the hub operator’s. The hub refreshes a stale host’s skills and hooks by itself, and one host’s page can ask for it now',
-  install_fleet_hook:
-    'the hook points at a control API this app is not running, because a paired client runs none',
-  host_tokens:
-    'these are a fleet owner’s per-host tokens; this desktop is a paired client and has none',
-  mcp_configure:
-    'starting a second control API against a fleet that already has one is the failure remote mode exists to prevent',
+  provision_all: {
+    text: 'Provisioning every host mints tokens and rewrites each host’s hooks, which is the hub operator’s job. The hub refreshes a stale host by itself, and a host’s own page can ask for it now.',
+  },
+  install_fleet_hook: { text: 'The hook would point at a control API, and this app runs none while it is paired with a hub.' },
+  host_tokens: { text: 'Per-host tokens belong to the fleet’s owner; a paired client has none.' },
+  mcp_configure: { text: 'The hub already runs this fleet’s control API, and a second one against the same fleet is what pairing exists to prevent.' },
   // Trackers (work graph M3): the hub's work_admin is master-only.
-  add_tracker:
-    'trackers and their credentials are fleet administration, and a client is never the fleet’s administrator — use `fleet-hub tracker add`',
-  update_tracker:
-    'trackers and their credentials are fleet administration, and a client is never the fleet’s administrator — use `fleet-hub tracker`',
-  set_tracker_credential:
-    'tracker credentials live on the hub, and a client is never the fleet’s administrator — use `fleet-hub tracker set-credential`',
-  test_tracker:
-    'the hub tests its trackers with its own credentials, and a client is never the fleet’s administrator — use `fleet-hub tracker test`',
-  remove_tracker:
-    'trackers and their credentials are fleet administration, and a client is never the fleet’s administrator — use `fleet-hub tracker remove`',
-  tracker_sync_metrics:
-    'sync metrics live in the hub’s memory, and a client is never the fleet’s administrator — use `fleet-hub tracker status`',
+  add_tracker: { text: `Trackers and their credentials are fleet administration. ${NOT_ADMIN}`, operator: 'fleet-hub tracker add' },
+  update_tracker: { text: `Trackers and their credentials are fleet administration. ${NOT_ADMIN}`, operator: 'fleet-hub tracker' },
+  set_tracker_credential: { text: `Tracker credentials live on the hub. ${NOT_ADMIN}`, operator: 'fleet-hub tracker set-credential' },
+  test_tracker: { text: `The hub tests its trackers with its own credentials. ${NOT_ADMIN}`, operator: 'fleet-hub tracker test' },
+  remove_tracker: { text: `Trackers and their credentials are fleet administration. ${NOT_ADMIN}`, operator: 'fleet-hub tracker remove' },
+  tracker_sync_metrics: { text: `Sync metrics live in the hub’s memory. ${NOT_ADMIN}`, operator: 'fleet-hub tracker status' },
   // Ticket keys: a project's prefix is `work_admin`, master-only.
-  ticket_prefixes:
-    'which prefix a project’s ticket keys carry is fleet administration, and a client is never the fleet’s administrator — use `fleet-hub tracker prefixes`',
-  set_ticket_prefix:
-    'which prefix a project’s ticket keys carry is fleet administration, and a client is never the fleet’s administrator — use `fleet-hub tracker prefix <PREFIX> --project <id>`',
+  ticket_prefixes: { text: `Which prefix a project’s ticket keys carry is fleet administration. ${NOT_ADMIN}`, operator: 'fleet-hub tracker prefixes' },
+  set_ticket_prefix: { text: `Which prefix a project’s ticket keys carry is fleet administration. ${NOT_ADMIN}`, operator: 'fleet-hub tracker prefix <PREFIX> --project <id>' },
   // Jev's Asana section proposals: applying one is `work_admin update`.
-  status_map_proposals:
-    'section proposals are tracker administration, and a client is never the fleet’s administrator — use `fleet-hub decide proposals`',
-  decide_status_map_proposal:
-    'applying a section proposal writes the tracker’s section map, and a client is never the fleet’s administrator — use `fleet-hub decide proposals apply|reject`',
+  status_map_proposals: { text: `Section proposals are tracker administration. ${NOT_ADMIN}`, operator: 'fleet-hub decide proposals' },
+  decide_status_map_proposal: { text: `Applying a section proposal changes the tracker’s section map, which is fleet administration. ${NOT_ADMIN}`, operator: 'fleet-hub decide proposals apply|reject' },
   // Asset catalogs (Assets M6, R11): which catalogs exist is the master's
   // alone (`add_catalog` / `remove_catalog` are `MasterOnly`). Both commands
   // ROUTE, so this is not a command-named key: Settings → Catalogs shows a
   // paired desktop this reason (`resourceBlock`), and the commands keep their
   // routed verdicts.
-  catalog_registry:
-    'which catalogs exist, and who may change them, is fleet administration, and a client is never the fleet’s administrator — use `fleet-hub catalog add` / `remove`, and `fleet-hub client grant`',
+  catalog_registry: {
+    text: `Which catalogs exist, and who may change them, is fleet administration. ${NOT_ADMIN}`,
+    operator: 'fleet-hub catalog add or remove, and fleet-hub client grant',
+  },
 
   // --- things about THIS machine ------------------------------------------
   // (No `terminal` key: the terminal is not blocked by being a hub client.
   // `pty_open` spawns this machine's own `ssh`/`tmux`, so a paired desktop
   // attaches exactly as a standalone one does. The one session it cannot
   // attach is one on an agent host, and that is not the hub's doing — nothing
-  // anywhere has an SSH route to it — so TerminalView says that itself rather
-  // than through a reason ending "Do it on the hub".)
-  check_local_prereqs:
-    'the setup checklist is about running a fleet from this machine, which the hub is doing instead',
-  tunnel_status: 'the tunnels belong to whichever process owns the fleet',
-  mcp_status: 'this app runs no embedded control API while a hub owns the fleet',
-  catalog_spawn_author_session:
-    'an author session is a Claude session in the catalog’s checkout on the hub’s machine, and the hub has no tool that starts one — edit the asset here instead',
+  // anywhere has an SSH route to it — so TerminalView says that itself.)
+  check_local_prereqs: { text: 'The setup checklist is about running a fleet from this machine, and the hub runs it instead.' },
+  tunnel_status: { text: 'The tunnels belong to the hub, which runs the fleet.' },
+  mcp_status: { text: 'The hub runs this fleet’s control API; this app runs none while it is paired.' },
+  catalog_spawn_author_session: {
+    text: 'An author session would run in the catalog’s checkout on the hub’s machine, and the hub can’t start one. Edit the asset here instead.',
+  },
   // Not a command: the fleet's settings route to the hub (declarative pages
   // P6); this is what a paired desktop says when the hub serves them none.
-  fleet_settings:
-    'the hub did not serve its settings to this device — a hub older than this app, or a device bound to one organisation, reads none; the hub’s operator changes them with fleet-hub settings or set_setting',
-  refresh_account_usage:
-    'it reads the account’s usage over this machine’s SSH connection to the host',
-  account_usage_history:
-    'this app does not poll account usage while a hub owns the fleet, so it keeps no history',
-  account_spend:
-    'this app collects no usage while a hub owns the fleet, so it has no spend per account',
-  record_host_placement: 'the decision model’s runs are recorded on the hub that owns the fleet; nothing to record here',
+  fleet_settings: {
+    text: 'The hub didn’t send its settings to this device: the hub is older than this app, or this device belongs to one organisation.',
+    operator: 'fleet-hub settings, or set_setting',
+  },
+  refresh_account_usage: { text: 'This reads usage over this machine’s own SSH, which a paired desktop doesn’t use for the fleet.' },
+  account_usage_history: { text: 'This app keeps no usage history while a hub runs the fleet.' },
+  account_spend: { text: 'This app collects no usage while a hub runs the fleet, so it has no spend per account.' },
+  record_host_placement: { text: 'The hub records placement decisions; there is nothing to record here.' },
 
   // --- acted out over this machine's SSH, and the hub has no tool for it ---
-  repo_write:
-    'the hub exposes no git-write tool — a remote client must not stage or commit under a running agent; do it in the session',
-  purge_project:
-    'it deletes Claude Code state on every host over this machine’s SSH connections, and the hub exposes no tool for it',
-  inspect_safe_kill:
-    'it inspects the worktree over this machine’s SSH connection, and the hub exposes no tool for it',
-  discard_kill_session:
-    'the hub exposes no tool that discards a worktree and kills in one step — use Safe remove’s "Ask Claude" path, or do it from the hub',
-  dismiss_agent_session:
-    'use Kill instead: the hub’s kill_session removes an inactive agent from the list exactly as this would',
-
-} as const;
+  repo_write: {
+    text: 'The hub has no way to stage or commit for a paired desktop, so nothing writes under a running agent. Ask Claude to do it in the session.',
+  },
+  purge_project: {
+    text: 'This deletes Claude Code state on every host over this machine’s SSH, and the hub can’t do it for a paired desktop.',
+  },
+  inspect_safe_kill: { text: 'This inspects the worktree over this machine’s SSH, and the hub can’t do it for a paired desktop. Ask Claude to check it in the session.' },
+  discard_kill_session: { text: 'The hub can’t discard a worktree and kill in one step. Use Safe remove’s “Ask Claude” instead.' },
+  dismiss_agent_session: { text: 'Use Kill instead: it removes an inactive agent from the list the same way.' },
+} as const satisfies Record<string, Reason>;
 
 export type HubAction = keyof typeof REASONS;
 
@@ -272,32 +269,9 @@ export function ownsTheFleet(status: HubStatus = get(hubStatus)): boolean {
 export function unavailableReason(status: HubStatus): string | null {
   if (!status.unavailable) return null;
   // Not "do it on the hub": the hub is the problem, and every action is
-  // refused until it is fixed.
-  return `Not available: ${status.unavailable}. This app is set to use that hub, so it manages no fleet of its own until that is fixed — pair again, or Disconnect, in Settings → Hub & sync.`;
-}
-
-/**
- * The backend's reason a configured hub is unusable this launch, in a
- * person's words. The raw reason (`HubStatus.unavailable`) names setting keys
- * such as `hub.client_plaintext_token`; it stays available for a details
- * disclosure, but the sentence a person reads first must not need them. The
- * patterns follow `Backend::resolve` in `src-tauri/src/backend/mod.rs`; an
- * unrecognised reason gets a generic sentence rather than the raw text.
- */
-export function plainUnavailableReason(reason: string): string {
-  if (reason.includes('no client token is stored')) {
-    return 'this machine has no saved pairing for that hub';
-  }
-  if (reason.includes('cannot read the client token')) {
-    return 'the saved pairing could not be read (the system keychain may be locked, or access to it was denied)';
-  }
-  if (reason.includes('not a usable hub address')) {
-    return 'the saved hub address is not a valid URL';
-  }
-  if (reason.includes('plain http')) {
-    return 'the address uses plain http to another machine, which would send this app\'s credential unencrypted — use https:// instead';
-  }
-  return 'its hub settings could not be used';
+  // refused until it is fixed. The raw reason names settings keys; it stays
+  // under the banner's and Settings' Details (review w16-5).
+  return `Not available: ${hubUnavailableWords(status.unavailable)}. This app is set to use that hub, so it manages no fleet of its own until that is fixed — pair again, or Disconnect, in Settings → Hub & sync.`;
 }
 
 /**
@@ -309,8 +283,9 @@ export function hubBlock(action: HubAction, status: HubStatus = get(hubStatus)):
   const unavailable = unavailableReason(status);
   if (unavailable) return unavailable;
   if (!status.remote) return null;
-  const where = status.url ?? 'the hub';
-  return `${REASONS[action]}. Do it on the hub (${where}).`;
+  const r: Reason = REASONS[action];
+  if (r.operator === true) return `${r.text} Ask the hub’s operator to do it.`;
+  return r.operator ? `${r.text} Ask the hub’s operator to do it (${r.operator}).` : r.text;
 }
 
 /**
@@ -409,6 +384,8 @@ export const ROUTED_ACTIONS = [
   'add_host',
   // A host's health checklist, run by the hub over its own SSH.
   'check_host',
+  // The fleet-agent install job, run by the hub over its own SSH (4.9).
+  'install_agent',
   // An account's nickname: the hub's set_account_nickname.
   'set_account_nickname',
   'move_session',
@@ -513,19 +490,19 @@ const ROUTED_ACTION_SET: ReadonlySet<string> = new Set(ROUTED_ACTIONS);
 /** The offline banner's sentence, reworded as a per-control reason: what a
  *  click would need instead of what the whole window is missing. `null` for
  *  `standalone` / `connected`, which never block a routed action. */
-function offlineReason(conn: HubConnection, url: string | null): string | null {
-  const hub = url ?? 'the hub';
+function offlineReason(conn: HubConnection): string | null {
+  // Review w16-13: no URL and no attempt counter in a tooltip; the banner
+  // names the hub and carries the contract revisions under its Details.
   switch (conn.state) {
     case 'connecting':
-      return `Still connecting to ${hub} — try again once it's connected.`;
+      return "Still connecting to the hub. Try again once it's connected.";
     case 'reconnecting':
-      return `${hub} is unreachable right now (reconnecting, attempt ${conn.attempt}) — try again once it's back.`;
     case 'offline':
-      return `${hub} is unreachable right now (retrying, attempt ${conn.attempt}) — try again once it's back.`;
+      return "The hub is unreachable; reconnecting. Try again once it's back.";
     case 'hub_too_old':
-      return `${hub}'s version is incompatible with this app — its wire contract (revision ${conn.hub_contract}) is older than the ${conn.min_contract} this app requires. Update the hub.`;
+      return 'The hub is older than this app supports, so the two are incompatible. Update the hub.';
     case 'hub_too_new':
-      return `${hub}'s version is incompatible with this app — its wire contract (revision ${conn.hub_contract}) is newer than the ${conn.max_contract} this app understands. Update this app.`;
+      return 'The hub is newer than this app understands, so the two are incompatible. Update this app.';
     default:
       return null;
   }
@@ -554,38 +531,33 @@ export function hubActionBlocked(
   if (unavailable) return unavailable;
   if (!status.remote) return null;
   if (conn.state === 'connected') return null;
-  return offlineReason(conn, status.url);
+  return offlineReason(conn);
 }
 
 /**
  * The next step a hub client needs for an error that does not carry one.
  *
- * `E_CONFIRM_REQUIRED` is the trap this exists for. With
- * `mcp.confirm_destructive` on, the hub refuses `kill_session`,
- * `delete_worktree`, `move_session`, `cancel_task` and `repair_session` until
- * someone approves them — and the desktop's own confirmation dialog answers
- * **this process's** queue, which in remote mode is always empty. So the
- * click is refused, the dialog never appears, and without this sentence
- * there is nothing anywhere saying that the approval has to happen on the
- * hub.
+ * `E_CONFIRM_REQUIRED`: with `mcp.confirm_destructive` on, the hub holds
+ * `kill_session`, `delete_worktree`, `move_session`, `cancel_task` and
+ * `repair_session` until someone approves them. The request does show in this
+ * window's confirmation queue and on the phone (`mcp_pending_confirms` routes,
+ * review w16-3), but a yes only marks the hub's nonce approved: the hub
+ * replays an approved call for its operator alone (`confirm_replay.rs`), and
+ * this window's routed commands never retry with the `confirm_nonce`. So the
+ * sentence must not promise that approving runs it, or that this window
+ * follows — clicking again only mints a fresh request. It names who can do
+ * it instead.
  *
- * "This window will follow" is a consequence of the event bridge, not a hope:
- * once the operator approves, the hub emits `session:killed` /
- * `worktree:removed` / `task:updated` like any other change and the bridge
- * re-emits it here. So the sentence must not say "then refresh".
+ * (`E_UNAUTHORIZED` has its own sentence in `error_copy.ts` now; a second one
+ * here said the same thing twice, with the URL in it — review w16-4.)
  */
 export function hubNextStep(
   error: IpcError,
   status: HubStatus = get(hubStatus),
 ): string | null {
   if (!status.remote) return null;
-  const where = status.url ?? 'the hub';
-  switch (error.code) {
-    case 'E_CONFIRM_REQUIRED':
-      return `${where} is holding this until someone confirms it there, and this desktop's confirmation dialog answers only its own queue, which is empty. Approve it on the hub — this window will follow.`;
-    case 'E_UNAUTHORIZED':
-      return `${where} no longer accepts this desktop's client token. Pair again in Settings → Hub & sync.`;
-    default:
-      return null;
-  }
+  if (error.code !== 'E_CONFIRM_REQUIRED') return null;
+  const held = 'The hub asks for a yes before this, and this window can’t carry a yes back to it yet, so approving the request won’t run it from here.';
+  if (status.client_mode === 'readonly') return `${held} Ask the fleet’s owner to do it.`;
+  return `${held} Ask the hub’s operator to do it, or to turn off confirming destructive actions on the hub.`;
 }

@@ -233,7 +233,7 @@ describe('ReplyActions', () => {
     await confirmRetry();
     await settle();
     expect(bubbles()).toHaveLength(1);
-    expect(bubbles()[0]).toMatchObject({ state: 'failed', text: 'two', error: 'busy', retryable: true });
+    expect(bubbles()[0]).toMatchObject({ state: 'failed', text: 'two', error: 'The terminal is busy; try again in a moment', retryable: true });
   });
 
   it('offers no Retry on an anchored turn with no prompt text', async () => {

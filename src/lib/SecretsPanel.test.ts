@@ -170,4 +170,26 @@ describe('SecretsPanel: Add a secret', () => {
       expect(get(toasts).at(-1)!.action).toBeNull();
     });
   });
+
+  // Review w17-6: a failed list read never labels a secret "not set".
+  it('a failed read says the status is unknown, holds Set/Delete, and Retry reads again', async () => {
+    let fail = true;
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === 'catalog_list_secrets') {
+        if (fail) throw { code: 'E_HUB_TIMEOUT', message: 'slow' };
+        return [{ name: 'GH_TOKEN', host_alias: null, updated_at: 1 }];
+      }
+      throw { code: 'E_TEST', message: `unexpected ${cmd}` };
+    });
+    render(SecretsPanel, { names: ['GH_TOKEN'], onclose: () => {} });
+    await screen.findByTestId('secrets-load-error');
+    const row = screen.getByTestId('secret-row-GH_TOKEN');
+    expect(row.textContent).toContain('global: unknown');
+    expect(row.textContent).not.toContain('not set');
+    expect((screen.getByTestId('secret-delete-GH_TOKEN') as HTMLButtonElement).disabled).toBe(true);
+    fail = false;
+    await fireEvent.click(screen.getByTestId('secrets-load-error-retry'));
+    await waitFor(() => expect(screen.getByTestId('secret-row-GH_TOKEN').textContent).toContain('global: set'));
+    expect(screen.queryByTestId('secrets-load-error')).toBeNull();
+  });
 });

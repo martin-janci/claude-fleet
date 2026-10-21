@@ -31,15 +31,15 @@ describe('task result', () => {
       { label: 'cargo fleet-test', state: 'reported' },
     ]);
   });
-  it('reads a check that is neither passed nor failed as pending', () => {
+  it('leaves a failed or pending check to the gate group, so it is listed once (review w09-11)', () => {
     const checks = [
       { line: 'a', kind: 'ci', state: 'fail', detail: '' },
       { line: 'b', kind: 'manual', state: 'unknown', detail: '' },
+      { line: 'c', kind: 'ci', state: 'pass', detail: '' },
     ];
-    expect(validationLines({ ...base, gate: { ...base.gate, checks } }).map((l) => l.state)).toEqual([
-      'fail',
-      'pending',
-      'reported',
+    expect(validationLines({ ...base, gate: { ...base.gate, checks } })).toEqual([
+      { label: 'c', state: 'pass' },
+      { label: 'cargo fleet-test', state: 'reported' },
     ]);
   });
   it('puts the run evidence between the gate lines and the reported tests', () => {

@@ -4,7 +4,9 @@
 //! lets its owner's own device list them and a trusted `full` one change
 //! them, and never lets a device lock itself out. Standalone, they run
 //! `service::org_admin` on this desktop's store, where a pairing code
-//! cannot be minted (`pair_device` says so).
+//! cannot be minted (`pair_device` says so). The ones Settings › Company
+//! uses are fleet-scoped (`backend::fleets::FLEET_SCOPED`): `fleet` names an
+//! extra fleet, whose hub then decides the same way.
 
 use crate::backend::FleetBackend;
 use fleet_core::ipc_error::IpcError;
@@ -138,17 +140,23 @@ pub struct Pairing {
 #[tauri::command]
 pub async fn list_devices(
     backend: State<'_, Arc<FleetBackend>>,
+    fleet: Option<String>,
+    fleets: State<'_, Arc<crate::backend::fleets::Fleets>>,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<Vec<DeviceSummary>, IpcError> {
+    let backend = fleets.select(backend.inner(), fleet.as_deref())?;
     decode(routed::list_devices(&backend, &store, OrgAdminArgs::new("list_devices")).await?)
 }
 
 #[tauri::command]
 pub async fn pair_device(
     backend: State<'_, Arc<FleetBackend>>,
+    fleet: Option<String>,
+    fleets: State<'_, Arc<crate::backend::fleets::Fleets>>,
     args: PairDeviceArgs,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<Pairing, IpcError> {
+    let backend = fleets.select(backend.inner(), fleet.as_deref())?;
     decode(
         routed::pair_device(
             &backend,
@@ -170,9 +178,12 @@ pub async fn pair_device(
 #[tauri::command]
 pub async fn revoke_device(
     backend: State<'_, Arc<FleetBackend>>,
+    fleet: Option<String>,
+    fleets: State<'_, Arc<crate::backend::fleets::Fleets>>,
     args: DeviceArgs,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<serde_json::Value, IpcError> {
+    let backend = fleets.select(backend.inner(), fleet.as_deref())?;
     routed::revoke_device(
         &backend,
         &store,
@@ -211,18 +222,24 @@ pub async fn set_device_trust(
 #[tauri::command]
 pub async fn update_device(
     backend: State<'_, Arc<FleetBackend>>,
+    fleet: Option<String>,
+    fleets: State<'_, Arc<crate::backend::fleets::Fleets>>,
     args: UpdateDeviceArgs,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<DeviceSummary, IpcError> {
+    let backend = fleets.select(backend.inner(), fleet.as_deref())?;
     decode(routed::update_device(&backend, &store, args).await?)
 }
 
 #[tauri::command]
 pub async fn bind_device_org(
     backend: State<'_, Arc<FleetBackend>>,
+    fleet: Option<String>,
+    fleets: State<'_, Arc<crate::backend::fleets::Fleets>>,
     args: BindDeviceArgs,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<DeviceSummary, IpcError> {
+    let backend = fleets.select(backend.inner(), fleet.as_deref())?;
     decode(
         routed::bind_device_org(
             &backend,
@@ -261,9 +278,12 @@ pub async fn set_device_person(
 #[tauri::command]
 pub async fn grant_device_catalog(
     backend: State<'_, Arc<FleetBackend>>,
+    fleet: Option<String>,
+    fleets: State<'_, Arc<crate::backend::fleets::Fleets>>,
     args: DeviceCatalogArgs,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<DeviceSummary, IpcError> {
+    let backend = fleets.select(backend.inner(), fleet.as_deref())?;
     decode(
         routed::grant_device_catalog(
             &backend,
@@ -282,8 +302,11 @@ pub async fn grant_device_catalog(
 #[tauri::command]
 pub async fn list_people(
     backend: State<'_, Arc<FleetBackend>>,
+    fleet: Option<String>,
+    fleets: State<'_, Arc<crate::backend::fleets::Fleets>>,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<Vec<PersonSummary>, IpcError> {
+    let backend = fleets.select(backend.inner(), fleet.as_deref())?;
     decode(routed::list_people(&backend, &store, OrgAdminArgs::new("list_people")).await?)
 }
 
@@ -308,8 +331,11 @@ pub struct GroupSummary {
 #[tauri::command]
 pub async fn list_groups(
     backend: State<'_, Arc<FleetBackend>>,
+    fleet: Option<String>,
+    fleets: State<'_, Arc<crate::backend::fleets::Fleets>>,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<Vec<GroupSummary>, IpcError> {
+    let backend = fleets.select(backend.inner(), fleet.as_deref())?;
     decode(
         routed::list_groups(
             &backend,
@@ -326,9 +352,12 @@ pub async fn list_groups(
 #[tauri::command]
 pub async fn add_person(
     backend: State<'_, Arc<FleetBackend>>,
+    fleet: Option<String>,
+    fleets: State<'_, Arc<crate::backend::fleets::Fleets>>,
     args: AddPersonArgs,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<serde_json::Value, IpcError> {
+    let backend = fleets.select(backend.inner(), fleet.as_deref())?;
     routed::add_person(
         &backend,
         &store,
@@ -344,9 +373,12 @@ pub async fn add_person(
 #[tauri::command]
 pub async fn rename_person(
     backend: State<'_, Arc<FleetBackend>>,
+    fleet: Option<String>,
+    fleets: State<'_, Arc<crate::backend::fleets::Fleets>>,
     args: RenamePersonArgs,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<serde_json::Value, IpcError> {
+    let backend = fleets.select(backend.inner(), fleet.as_deref())?;
     routed::rename_person(
         &backend,
         &store,
@@ -363,9 +395,12 @@ pub async fn rename_person(
 #[tauri::command]
 pub async fn disable_person(
     backend: State<'_, Arc<FleetBackend>>,
+    fleet: Option<String>,
+    fleets: State<'_, Arc<crate::backend::fleets::Fleets>>,
     args: PersonIdArgs,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<serde_json::Value, IpcError> {
+    let backend = fleets.select(backend.inner(), fleet.as_deref())?;
     routed::disable_person(
         &backend,
         &store,

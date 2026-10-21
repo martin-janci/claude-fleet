@@ -30,9 +30,7 @@ const MAX_CHECK_LABEL: usize = 80;
 const TEXT_LEN: (u32, u32) = (500, 2000);
 const TEXTAREA_LEN: (u32, u32) = (5000, 20000);
 
-fn is_false(b: &bool) -> bool {
-    !*b
-}
+use crate::serde_util::is_false;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]

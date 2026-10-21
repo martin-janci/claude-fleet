@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { errorText } from './error_copy';
   // Read-only session event timeline (Q9). Renders the `session_events`
   // rows the backend already records (status changes, prompts, stuck,
   // kills, repairs, …) newest first, with filter chips.
@@ -66,7 +67,7 @@
       error = null;
       onEvents?.(events);
     } else {
-      error = r.error.message;
+      error = errorText(r.error);
     }
   }
 

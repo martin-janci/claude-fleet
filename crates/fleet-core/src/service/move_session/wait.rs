@@ -148,12 +148,7 @@ fn set_moving(key: WaitKey, moving: bool) {
     }
 }
 
-pub(super) fn now_unix() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
+pub(super) use crate::store::now_unix;
 
 /// Effective `move.wait_max_mins`: stored value if positive and registered
 /// (capped at `MOVE_WAIT_MAX_MINS_MAX`), else [`DEFAULT_WAIT_MAX_MINS`] — the

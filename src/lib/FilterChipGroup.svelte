@@ -9,6 +9,7 @@
     onchange,
     testidFor,
     hint,
+    swatch,
   }: {
     label: string;
     /** `alert`: a red mark after the label, its text the mark's aria-label
@@ -19,11 +20,15 @@
     testidFor?: (id: T) => string;
     /** A short note after the label ("group by work only"). */
     hint?: string;
+    /** A colour mark before the label: the fleet a group belongs to (multi-hub
+     *  Phase 3a), so two fleets' `mac` never read as one machine. */
+    swatch?: string;
   } = $props();
 </script>
 
 <div class="fgroup" role="group" aria-label={label}>
-  <span class="fgroup-label">{label}{#if hint}<span class="hint"> · {hint}</span>{/if}</span>
+  <span class="fgroup-label"
+    >{#if swatch}<span class="swatch" style="background: {swatch}" aria-hidden="true"></span>{/if}{label}{#if hint}<span class="hint"> · {hint}</span>{/if}</span>
   <div class="chips">
     {#each options as o (o.id)}
       <button
@@ -54,6 +59,13 @@
     font-size: var(--control-font-sm);
     font-weight: 600;
     color: var(--fg-muted);
+  }
+  .swatch {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: var(--radius-xs);
+    margin-right: 4px;
   }
   .hint {
     font-weight: 400;
