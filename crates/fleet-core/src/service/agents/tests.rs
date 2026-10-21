@@ -399,5 +399,27 @@ async fn status_lists_every_pending_action_whatever_the_limit() {
     };
     let status = admin::status(&st, &args, NOW + 30).unwrap();
     assert_eq!(status.pending.len(), 26);
+    assert_eq!(status.pending_total, 26);
     assert!(status.pending.iter().any(|a| a.id == first));
+}
+
+/// Past [`admin::STATUS_PENDING_MAX`] the list is cut, but `pending_total`
+/// still counts every waiting action, so the badge does not stop at the cap.
+#[tokio::test]
+async fn status_counts_pending_actions_past_the_list_cap() {
+    let (st, _) = store_with_rule(None);
+    let (reg, _) = registry(vec![("gh:o/r#1", "a")], done());
+    poll_with(&st, &reg, NOW).await;
+    let over = admin::STATUS_PENDING_MAX as i64 + 7;
+    {
+        let s = st.lock().unwrap();
+        let jid = s.list_agent_jobs(None, 1).unwrap()[0].id;
+        for i in 0..over {
+            s.insert_agent_action(jid, "kb_learn", "{}", NOW + i)
+                .unwrap();
+        }
+    }
+    let status = admin::status(&st, &admin::AgentsArgs::default(), NOW + over).unwrap();
+    assert_eq!(status.pending.len(), admin::STATUS_PENDING_MAX);
+    assert_eq!(status.pending_total, over as u64);
 }

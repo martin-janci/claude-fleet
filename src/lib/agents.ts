@@ -80,8 +80,11 @@ export interface AgentAction {
 export interface AgentsStatus {
   rules: AgentRule[];
   jobs: AgentJob[];
-  /** Actions waiting for a person. */
+  /** Actions waiting for a person, newest first, at most 200. */
   pending: AgentAction[];
+  /** How many actions are waiting, uncapped (more than `pending.length`
+   *  past the cap). Absent from an older hub. */
+  pending_total?: number;
   /** Actions a person approved that ran or failed in the last day, newest
    *  first: an executed one's `error` is what it made (`created task 42`),
    *  a failed one's is why. Absent from a hub older than review w08. */
@@ -175,8 +178,8 @@ export function actionOutcome(
 }
 
 export const pendingAgentCount = derived(
-  pendingAgentActions,
-  ($p) => $p.length,
+  agents,
+  ($a) => Math.max($a?.pending_total ?? 0, $a?.pending.length ?? 0),
 );
 
 export async function loadAgents(): Promise<void> {
