@@ -290,7 +290,7 @@ export interface PushErrorOptions {
   /** A button of the caller's own in place of Retry ("Open Secrets"). */
   action?: ToastAction;
   /** The failed call was a read: a timeout gets no "it may have gone
-   *  through" sentence (`ErrorTextOptions.write`). */
+   *  through" sentence (`ErrorTextOptions.read`). */
   read?: boolean;
 }
 
@@ -308,7 +308,7 @@ export interface PushErrorOptions {
 export function pushError(error: IpcError, context?: string, retry?: () => void, opts: PushErrorOptions = {}): number {
   // An error toast mostly reports a failed action, so a timed-out one may
   // have run; a caller toasting a failed read says so (`opts.read`).
-  const text = errorText(error, { write: opts.read !== true });
+  const text = errorText(error, { read: opts.read === true });
   const base = context ? `${context}: ${text}` : text;
   const next = hubNextStep(error);
   reportError('frontend', context ? `${context}: ${error.message}` : error.message, error.code ?? null);

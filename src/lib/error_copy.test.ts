@@ -11,22 +11,24 @@ describe('error copy', () => {
   });
 
   // Review w16-8: these were sent and their outcome is unknown
-  // (`IpcError::may_have_run`); "failed" sent the person to try again. Only a
-  // write says so: a read has nothing to go through, and Retry is its step.
-  it('says a timed-out write may have gone through, and a read does not', () => {
+  // (`IpcError::may_have_run`); "failed" sent the person to try again. Every
+  // call says so unless it was a read (`{ read: true }`): most call sites are
+  // actions, and one that forgets to opt out must not invite a second send.
+  it('says a timed-out call may have gone through unless it was a read', () => {
     const e = { code: 'E_SSH_TIMEOUT', message: 'ssh mercury: timed out after 10 s' };
-    expect(errorText(e, { write: true })).toBe(
+    expect(errorText(e)).toBe(
       'The host took too long to answer over SSH. It may have gone through anyway. The list refreshes; check it before trying again',
     );
-    expect(errorText({ code: 'E_TIMEOUT', message: 'x' }, { write: true })).toMatch(/^That took too long to answer\. It may have gone through/);
-    expect(errorText({ code: 'E_HUB_TIMEOUT', message: 'x', details: { outcome_unknown: true } }, { write: true })).toContain('may have gone through');
-    expect(errorText({ code: 'E_HUB_TIMEOUT', message: 'x', details: { outcome_unknown: false } }, { write: true })).toBe('The hub took too long to answer');
+    expect(errorText({ code: 'E_TIMEOUT', message: 'x' })).toMatch(/^That took too long to answer\. It may have gone through/);
+    expect(errorText({ code: 'E_HUB_TIMEOUT', message: 'x', details: { outcome_unknown: true } })).toContain('may have gone through');
+    expect(errorText({ code: 'E_HUB_TIMEOUT', message: 'x', details: { outcome_unknown: false } })).toBe('The hub took too long to answer');
     expect(errorText({ code: 'E_TIMEOUT', message: 'x' })).not.toContain('stopped');
+    expect(errorSentence({ code: 'E_AGENT_PROTOCOL', message: 'x' })).toContain('It may have gone through');
     expect(errorDetail(e)).toBe('E_SSH_TIMEOUT: ssh mercury: timed out after 10 s');
-    // A read (the default: LoadError, readErrorText) gets the sentence alone.
-    expect(errorText(e)).toBe('The host took too long to answer over SSH');
-    expect(errorSentence({ code: 'E_TIMEOUT', message: 'x' })).toBe('That took too long to answer.');
-    expect(errorText({ code: 'E_AGENT_PROTOCOL', message: 'x' })).not.toContain('gone through');
+    // A read (LoadError, a list refresh) gets the sentence alone.
+    expect(errorText(e, { read: true })).toBe('The host took too long to answer over SSH');
+    expect(errorSentence({ code: 'E_TIMEOUT', message: 'x' }, { read: true })).toBe('That took too long to answer.');
+    expect(errorText({ code: 'E_AGENT_PROTOCOL', message: 'x' }, { read: true })).not.toContain('gone through');
   });
 
   it("keeps a backend sentence as it is, minus a leading code", () => {
@@ -43,7 +45,7 @@ describe('error copy', () => {
     expect(errorDetail(lost)).toBe(`E_AGENT_PROTOCOL: ${message}`);
     // A real protocol error keeps its own sentence.
     const garbled = { code: 'E_AGENT_PROTOCOL', message: 'unexpected frame', details: { connection_lost: false } };
-    expect(errorText(garbled, { write: true })).toMatch(/^The host's agent answered in a way this version doesn't understand\. It may have gone through/);
+    expect(errorText(garbled)).toMatch(/^The host's agent answered in a way this version doesn't understand\. It may have gone through/);
   });
 
   // Review w16-4: the hub's 401 says it once, with no full URL or status

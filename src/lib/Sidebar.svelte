@@ -805,13 +805,13 @@
     // Review r13: the line under the toolbar is a sentence; the toast keeps
     // the code under Details.
     if (!pr.ok) {
-      loadError = `Couldn't refresh projects: ${errorText(pr.error)}`;
+      loadError = `Couldn't refresh projects: ${errorText(pr.error, { read: true })}`;
       refreshError = pr.error;
-      pushError(pr.error, 'Refresh projects failed');
+      pushError(pr.error, 'Refresh projects failed', undefined, { read: true });
     } else if (!sr.ok) {
-      loadError = `Couldn't refresh sessions: ${errorText(sr.error)}`;
+      loadError = `Couldn't refresh sessions: ${errorText(sr.error, { read: true })}`;
       refreshError = sr.error;
-      pushError(sr.error, 'Refresh sessions failed');
+      pushError(sr.error, 'Refresh sessions failed', undefined, { read: true });
     } else {
       bootstrapError.set(null);
     }

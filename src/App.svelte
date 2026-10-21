@@ -210,7 +210,7 @@
     // failed. Stacking up to four more sticky toasts on top of that would
     // just be the #166 "toast storm" repeated — so this is the one code that
     // does not also toast. Every other failure still does.
-    if (r.error.code !== 'E_HUB_CONTRACT') pushError(r.error, `Failed to load ${what}`);
+    if (r.error.code !== 'E_HUB_CONTRACT') pushError(r.error, `Failed to load ${what}`, undefined, { read: true });
     return `${what}: ${r.error.code}`;
   }
 

@@ -35,8 +35,11 @@ const PLAIN: Record<string, string> = {
 /** Review w16-8: these codes mean the request was sent and its outcome is
  *  unknown (`IpcError::may_have_run` in `ipc_error.rs`), so the sentence must
  *  not read as "it failed": a second Kill after a timed-out first one only
- *  finds nothing to kill. Only for a write (`ErrorTextOptions.write`): a read
- *  has nothing to go through, and Retry is its next step. */
+ *  finds nothing to kill. Every call gets it unless it says it was a read
+ *  (`ErrorTextOptions.read`): a read has nothing to go through, and Retry is
+ *  its next step. The safe wording is the default because most call sites
+ *  report actions, and one that forgets to say so must not invite a second
+ *  send, move or resume. */
 const MAY_HAVE_RUN = new Set(['E_SSH_TIMEOUT', 'E_TIMEOUT', 'E_AGENT_PROTOCOL']);
 const MAY_HAVE_RUN_TAIL = 'It may have gone through anyway. The list refreshes; check it before trying again';
 
@@ -104,14 +107,15 @@ function plainFor(e: Pick<IpcError, 'code' | 'details'>): string | undefined {
 }
 
 export interface ErrorTextOptions {
-  /** The failed call was a write (an action), so a timed-out one may have
-   *  run: the sentence says so. Leave it off for a read. */
-  write?: boolean;
+  /** The failed call was a read, so a timeout has nothing to go through and
+   *  the sentence stands alone. Leave it off for a write (an action): a
+   *  timed-out one may have run, and the sentence says so. */
+  read?: boolean;
 }
 
 /** The sentence to show for `e`, never an `E_*` code. */
 export function errorText(e: Pick<IpcError, 'code' | 'message' | 'details'>, opts: ErrorTextOptions = {}): string {
-  const tail = opts.write === true && mayHaveRun(e);
+  const tail = opts.read !== true && mayHaveRun(e);
   const plain = plainFor(e);
   if (plain) return tail ? `${plain}. ${MAY_HAVE_RUN_TAIL}` : plain;
   const msg = (e.message ?? '').replace(CODE_PREFIX, '').trim();

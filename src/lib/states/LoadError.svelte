@@ -23,7 +23,7 @@
 
 <div class="load-error" role="alert" data-testid={testid}>
   <p class="title">{title}</p>
-  <p class="body" data-testid="{testid}-text">{errorSentence(error)}</p>
+  <p class="body" data-testid="{testid}-text">{errorSentence(error, { read: true })}</p>
   <details class="details">
     <summary>Details</summary>
     <code data-testid="{testid}-code">{errorDetail(error)}</code>

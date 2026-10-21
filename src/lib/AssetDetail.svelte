@@ -107,7 +107,7 @@
     const r = await deleteAsset(detail.asset.kind, detail.asset.name);
     deleting = false;
     if (!r.ok) {
-      deleteError = errorText(r.error, { write: true });
+      deleteError = errorText(r.error);
       return;
     }
     showDeleteConfirm = false;
