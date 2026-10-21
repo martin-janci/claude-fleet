@@ -245,6 +245,7 @@ pub fn import(
     if new_rows > 0 {
         s.check_mission_room(id, new_rows)?;
     }
+    check_merge_waves(&s, root, &members, &by_step, &rows)?;
 
     let mut out = PlanImport::default();
     let mut ids: HashMap<String, i64> = HashMap::new();
@@ -330,6 +331,71 @@ pub fn import(
         }
     }
     Ok(out)
+}
+
+/// The planner's merge-wave rule (TASK-294), for a table: the mission as it
+/// would be after this import — its titles, new steps and edges, the way
+/// [`import`] writes them — must not leave a merge-wave step short of an
+/// item of its wave it was not already short of. Read before anything is
+/// written, so a refusal changes nothing.
+fn check_merge_waves(
+    s: &Store,
+    root: Option<i64>,
+    members: &[WorkItemRow],
+    by_step: &HashMap<String, WorkItemRow>,
+    rows: &[PlanRow],
+) -> Result<(), IpcError> {
+    use crate::service::work::orchestrate::planner::{check_merge_change, member_nodes, PlanNode};
+    let member_ids: Vec<i64> = members.iter().map(|i| i.id).collect();
+    let before = member_nodes(members, &s.item_deps(&member_ids)?, root);
+    // A new step has no id yet: it stands in as -(its row + 1).
+    let mut ids: HashMap<&str, i64> = by_step
+        .iter()
+        .map(|(step, it)| (step.as_str(), it.id))
+        .collect();
+    for (i, r) in rows.iter().enumerate() {
+        ids.entry(r.step.as_str()).or_insert(-(i as i64) - 1);
+    }
+    let steps: HashMap<i64, &str> = ids.iter().map(|(step, id)| (*id, *step)).collect();
+    let plan_items: BTreeSet<i64> = rows.iter().map(|r| ids[r.step.as_str()]).collect();
+    let mut after = before.clone();
+    for r in rows {
+        let item = ids[r.step.as_str()];
+        let want: Vec<i64> = r
+            .needs
+            .iter()
+            .filter_map(|n| ids.get(n.as_str()).copied())
+            .collect();
+        let node = match after.iter_mut().find(|n| n.item_id == item) {
+            Some(n) => n,
+            None => {
+                after.push(PlanNode {
+                    item_id: item,
+                    title: String::new(),
+                    depends_on: Vec::new(),
+                    rejected: false,
+                    pending: false,
+                });
+                after.last_mut().expect("just pushed")
+            }
+        };
+        // `import` retitles only a local task.
+        if by_step.get(&r.step).is_none_or(|it| it.source == "local") {
+            node.title = format!("{} {}", r.step, r.title);
+        }
+        node.depends_on
+            .retain(|d| !plan_items.contains(d) || want.contains(d));
+        for d in want {
+            if !node.depends_on.contains(&d) {
+                node.depends_on.push(d);
+            }
+        }
+    }
+    check_merge_change(&before, &after, |id| match steps.get(&id) {
+        Some(step) => format!("step {step}"),
+        None => format!("item {id}"),
+    })
+    .map_err(invalid)
 }
 
 #[cfg(test)]

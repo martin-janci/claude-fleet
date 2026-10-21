@@ -241,3 +241,121 @@ fn a_scoped_caller_never_accepts() {
         codes::E_FORBIDDEN
     );
 }
+
+#[test]
+fn accepting_a_tree_whose_merge_misses_its_wave_is_refused() {
+    // The lanes wait for schema, so the tree is wave 2 on its own.
+    let (st, me, m, [schema, ..]) = fixture();
+    let root = m.root_item_id.unwrap();
+    let entry = |title: &str, deps: Vec<TreeRef>| TreeEntry {
+        title: title.into(),
+        depends_on: deps,
+        ..Default::default()
+    };
+    let made = lock(&st)
+        .unwrap()
+        .propose_tree(
+            root,
+            &[
+                entry("lane a", vec![TreeRef::Item(schema)]),
+                entry("lane b", vec![TreeRef::Item(schema)]),
+                entry("Merge wave 2: both lanes", vec![TreeRef::Entry(0)]),
+            ],
+            "agent",
+        )
+        .unwrap();
+    let ids: Vec<i64> = made.iter().map(|i| i.id).collect();
+    let accept = |set: &[i64]| {
+        accept_many(
+            &WorkLinkArgs {
+                action: "accept_many".into(),
+                item_ids: Some(set.to_vec()),
+                ..Default::default()
+            },
+            &st,
+            &me,
+        )
+    };
+
+    let e = accept(&ids).unwrap_err();
+    assert_eq!(e.code, codes::E_INVALID);
+    assert!(
+        e.message.contains(&format!(
+            "item {} \"Merge wave 2: both lanes\" merges wave 2 but does not depend on item {}",
+            ids[2], ids[1]
+        )),
+        "{}",
+        e.message
+    );
+    assert_eq!(state_of(&graph(&st, &me, m.id), ids[0]).0, "proposed");
+    // A merge nothing has accepted merges nothing yet; leaving lane b for
+    // later does not help the merge, though: it still counts as a proposal.
+    accept(&ids[..1]).unwrap();
+    assert!(accept(&ids[2..]).is_err());
+
+    // A person rejects lane b; the merge then covers its wave.
+    lock(&st).unwrap().decide_proposal(ids[1], false).unwrap();
+    accept(&ids[2..]).unwrap();
+    assert_eq!(state_of(&graph(&st, &me, m.id), ids[2]).0, "waiting");
+}
+
+#[test]
+fn a_single_accept_that_leaves_a_merge_short_is_refused() {
+    let (st, me, m, [schema, ..]) = fixture();
+    let root = m.root_item_id.unwrap();
+    let made = lock(&st)
+        .unwrap()
+        .propose_tree(
+            root,
+            &[
+                TreeEntry {
+                    title: "lane a".into(),
+                    depends_on: vec![TreeRef::Item(schema)],
+                    ..Default::default()
+                },
+                TreeEntry {
+                    title: "Merge wave 2".into(),
+                    depends_on: vec![TreeRef::Entry(0)],
+                    ..Default::default()
+                },
+                TreeEntry {
+                    title: "lane b".into(),
+                    depends_on: vec![TreeRef::Item(schema)],
+                    ..Default::default()
+                },
+            ],
+            "agent",
+        )
+        .unwrap();
+    let ids: Vec<i64> = made.iter().map(|i| i.id).collect();
+    accept_many(
+        &WorkLinkArgs {
+            action: "accept_many".into(),
+            item_ids: Some(ids[..1].to_vec()),
+            ..Default::default()
+        },
+        &st,
+        &me,
+    )
+    .unwrap();
+    let decide = |id: i64| {
+        crate::service::work::local::decide(
+            &WorkLinkArgs {
+                action: "accept".into(),
+                item_id: Some(id),
+                ..Default::default()
+            },
+            &st,
+            &crate::service::orgs::OrgScope::All,
+            true,
+        )
+    };
+    let e = decide(ids[1]).unwrap_err();
+    assert!(e.message.contains("merges wave 2"), "{}", e.message);
+    // Once the merge waits for lane b too, the same accept goes through.
+    lock(&st)
+        .unwrap()
+        .add_item_dep(ids[1], ids[2], "person", "person:1")
+        .unwrap();
+    decide(ids[1]).unwrap();
+}

@@ -1271,7 +1271,7 @@ pub async fn run_planner(
                 .unwrap_or_else(|| planner::PLANNER_DEFAULT_MODEL.into()),
             a.effective,
             a.effective >= 3 && m.policy.task_creation == "auto",
-            planner::plan_nodes(&items, &graph),
+            planner::plan_nodes(&items, &graph, m.root_item_id),
         )
     };
     let script = planner::planner_script(&model, &prompt);
