@@ -129,7 +129,7 @@
   } from './conversation';
   import { highlightNames, highlightCss, paintHighlights, clearHighlights } from './conversation_highlight';
   import { invokeCmd } from './result';
-  import { addFiles, pastedName, fmtBytes, clearSent, type Attachment, type PickedFile } from './attachments';
+  import { addFiles, pastedName, fmtBytes, clearSent, expireTray, type Attachment, type PickedFile } from './attachments';
   import { getCurrentWebview } from '@tauri-apps/api/webview';
   import { pointInRect, dropPoint } from './geometry';
   import Markdown from './MarkdownView.svelte';
@@ -583,7 +583,9 @@
       // catch that; it has to be dropped here. It is not lost, though: it
       // waits under its own session (`composerTrays`, review w13-6) and
       // comes back with the draft when that session is shown again.
-      attachments = composerTrays.get(sKey) ?? [];
+      // A tray kept past the allow-list's four hours comes back marked
+      // "attach it again" rather than failing the whole send (w13-6).
+      attachments = expireTray(composerTrays.get(sKey) ?? [], Date.now());
       attachErrors = [];
       // The tuner and the help panel answer about the session they were
       // opened on: left open, "Use this" would put the old session's

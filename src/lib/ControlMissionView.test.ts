@@ -90,4 +90,31 @@ describe('ControlMissionView', () => {
     expect(screen.getByTestId('control-mission-name').textContent).toBe('Hub federation v2');
     expect(screen.getByTestId('control-missions-view').querySelector('svg')).not.toBeNull();
   });
+
+  // Review w30-1 for Control: a deleted or hidden mission answers E_NOTFOUND,
+  // which is "gone", not a failed refresh with a Retry that cannot work.
+  it('a mission deleted while open says it is gone, with no stale graph', async () => {
+    controlMission.set(5);
+    render(ControlMissionView);
+    await screen.findByTestId('control-mission-name');
+    inv.mockImplementation(async (cmd: string) => {
+      if (cmd === 'work_mission') throw { code: 'E_NOTFOUND', message: 'mission 5 not found' };
+      return null;
+    });
+    bumpWorkChanged();
+    await waitFor(() => expect(screen.getByTestId('control-missions-view').textContent).toContain('not in the fleet any more'), { timeout: 2000 });
+    expect(screen.queryByTestId('control-mission-name')).toBeNull();
+    expect(screen.queryByTestId('control-missions-refresh-error')).toBeNull();
+  });
+
+  it('opening a mission that is already gone says so, without Retry', async () => {
+    inv.mockImplementation(async (cmd: string) => {
+      if (cmd === 'work_mission') throw { code: 'E_NOTFOUND', message: 'mission 9 not found' };
+      return null;
+    });
+    controlMission.set(9);
+    render(ControlMissionView);
+    await waitFor(() => expect(screen.getByTestId('control-missions-view').textContent).toContain('not in the fleet any more'));
+    expect(screen.getByTestId('control-missions-view').textContent).not.toContain("Couldn't load the mission");
+  });
 });

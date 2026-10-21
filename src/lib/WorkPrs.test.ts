@@ -11,7 +11,7 @@ import { openExternal } from './open_external';
 import WorkPrs from './WorkPrs.svelte';
 import { expectAccessible } from './a11y_check';
 import { sessions } from './sessions';
-import { PRIMARY, _resetFleetsForTest, _setFleetRowsForTest, _setFleetsForTest, emptyRows, type FleetInfo } from './fleets';
+import { PRIMARY, _resetFleetsForTest, _setFleetRowsForTest, _setFleetsForTest, emptyRows, fleetFilter, type FleetInfo } from './fleets';
 import { session } from './hosts_fixture';
 import { prChecksLabel, prDiffstat, prRef, prStateLabel, type PullRequestRow } from './prs';
 
@@ -239,6 +239,33 @@ describe('WorkPrs with extra fleets (review w01)', () => {
       expect(calls().length).toBeGreaterThan(before);
     } finally {
       vi.useRealTimers();
+    }
+  });
+
+  // Review 115: the kept list is the one read for the same fleets, so a
+  // failed read after hiding a fleet never keeps that fleet's PRs on screen.
+  it("a failed read after hiding a fleet does not keep that fleet's PRs", async () => {
+    _setFleetsForTest([primary, company]);
+    let primaryFails = false;
+    vi.mocked(invoke).mockImplementation(async (cmd: string, raw?: unknown) => {
+      if (cmd !== 'list_pull_requests') return null;
+      const fleet = (raw as { fleet?: string }).fleet;
+      if (fleet === 'company') return { items: [pr({ id: 9, title: 'Company PR' })], total: 1 };
+      if (primaryFails) throw { code: 'E_HUB_TIMEOUT', message: 'slow' };
+      return { items: [pr()], total: 1 };
+    });
+    try {
+      render(WorkPrs);
+      await flush();
+      expect(screen.getAllByTestId('work-pr')).toHaveLength(2);
+      primaryFails = true;
+      fleetFilter.set(PRIMARY);
+      await flush();
+      expect(screen.queryByTestId('work-prs-refresh-error')).toBeNull();
+      expect(screen.getByTestId('work-prs-error')).toBeTruthy();
+      expect(screen.queryByText('Company PR')).toBeNull();
+    } finally {
+      fleetFilter.set('all');
     }
   });
 });

@@ -6,6 +6,8 @@
 <script lang="ts">
   import { onDestroy, tick, untrack } from 'svelte';
   import { get } from 'svelte/store';
+  import { settingsOpen } from './app_views';
+  import { selectedTaskId, sidebarView, taskDetailOpen } from './work_view';
   import { invoke } from '@tauri-apps/api/core';
   import { unarchiveSession } from './tidy';
   import { getCurrentWebview } from '@tauri-apps/api/webview';
@@ -459,6 +461,10 @@
     const dest = get(destination);
     if (dest !== 'session' && dest !== 'details') return;
     if ((e.target as HTMLElement | null)?.closest?.('dialog')) return;
+    // Settings and a Work task's detail cover the pane while the destination
+    // stays 'session': a terminal opened there would open unseen too.
+    if (get(settingsOpen)) return;
+    if (get(sidebarView) === 'work' && get(selectedTaskId) && get(taskDetailOpen)) return;
     e.preventDefault();
     e.stopPropagation();
     // Then show the terminal, as the session bar's Terminals tab does: from

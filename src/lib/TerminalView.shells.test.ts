@@ -257,6 +257,14 @@ describe('shell terminals strip (step 5.3)', () => {
     await settle();
     expect(opens()).toBe(0);
     dlg.remove();
+    // Nor behind the Settings page, which covers the pane without leaving
+    // the Session destination (review 113).
+    const { settingsOpen } = await import('./app_views');
+    settingsOpen.set(true);
+    await fireEvent.keyDown(window, { key: 't', ctrlKey: true, altKey: true });
+    await settle();
+    expect(opens()).toBe(0);
+    settingsOpen.set(false);
     // From the Conversation view it opens one and shows the terminal.
     sessionView.set('conversation');
     await fireEvent.keyDown(window, { key: 't', ctrlKey: true, altKey: true });

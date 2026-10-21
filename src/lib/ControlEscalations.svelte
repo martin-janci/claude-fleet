@@ -74,15 +74,29 @@
 
   /** Later removes the card under the focused button: focus the Later on
    *  the card that takes its place (or the one before it), else a button
-   *  in the foot, so focus never falls to the page (review w19-11). */
+   *  in the foot, so focus never falls to the page (review w19-11). The
+   *  last card gone unmounts the list: focus goes to the nearest composer
+   *  box around it instead. */
   async function later(key: string, at: number) {
     const hadFocus = list?.contains(document.activeElement) ?? false;
+    const around = list?.parentElement ?? null;
     putOff(key);
     if (!hadFocus) return;
     await tick();
     const lefts = Array.from(list?.querySelectorAll<HTMLElement>('[data-testid="control-escalation-later"]') ?? []);
-    const next = lefts[Math.min(at, lefts.length - 1)] ?? list?.querySelector<HTMLElement>('.foot button');
+    const next =
+      lefts[Math.min(at, lefts.length - 1)] ?? list?.querySelector<HTMLElement>('.foot button') ?? composerNear(around);
     next?.focus();
+  }
+
+  /** The closest textarea in or above `el`'s ancestors: the composer the
+   *  cards sit over. */
+  function composerNear(el: HTMLElement | null): HTMLElement | null {
+    for (let at = el; at; at = at.parentElement) {
+      const box = at.querySelector<HTMLElement>('textarea:not([disabled])');
+      if (box) return box;
+    }
+    return null;
   }
 </script>
 

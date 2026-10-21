@@ -61,8 +61,12 @@
       detailError = null;
       gone = null;
       refreshError = null;
-    } else if (r.ok) {
+    } else if (r.ok || r.error.code === 'E_NOTFOUND') {
+      // The hub answers a deleted or no-longer-visible mission with
+      // E_NOTFOUND, never with `ok` and no mission (review w30-1).
       detail = null;
+      refreshError = null;
+      detailError = null;
       gone = 'That mission is not in the fleet any more.';
     } else if (detail?.mission.id === id) {
       refreshError = r.error;

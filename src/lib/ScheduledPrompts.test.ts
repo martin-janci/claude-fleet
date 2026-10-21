@@ -51,6 +51,65 @@ describe('ScheduledPrompts', () => {
     expect(screen.getAllByTestId('conv-scheduled-item')).toHaveLength(1);
   });
 
+  it('names each cancel button after its prompt', async () => {
+    render(ScheduledPrompts, { sessionId: 7 });
+    await settle();
+    const names = screen.getAllByTestId('conv-scheduled-cancel').map((b) => b.getAttribute('aria-label'));
+    expect(names[0]).toContain('run the release checklist');
+    expect(names[1]).toContain('after the limit');
+    expect(new Set(names).size).toBe(2);
+  });
+
+  it("drops the previous session's list at once on a switch, and cancels for the session it was read for", async () => {
+    const { rerender } = render(ScheduledPrompts, { sessionId: 7 });
+    await settle();
+    expect(screen.getAllByTestId('conv-scheduled-item')).toHaveLength(2);
+    let answer: (v: unknown) => void = () => {};
+    mocked.mockImplementation((cmd) => (cmd === 'queued_prompts' ? new Promise((r) => (answer = r)) : Promise.resolve(null)));
+    await rerender({ sessionId: 8 });
+    await settle();
+    expect(screen.queryByTestId('conv-scheduled')).toBeNull();
+    answer([{ id: 40, session_id: 8, body: 'for eight', created_at: 1 }]);
+    await settle();
+    expect(screen.getAllByTestId('conv-scheduled-item')).toHaveLength(1);
+    await fireEvent.click(screen.getByTestId('conv-scheduled-cancel'));
+    await settle();
+    expect(mocked).toHaveBeenCalledWith('cancel_queued_prompt', { args: { session_id: 8, id: 40 } });
+  });
+
+  it('a late read for the previous session does not land on the new one', async () => {
+    let answer: (v: unknown) => void = () => {};
+    mocked.mockImplementation((cmd) => (cmd === 'queued_prompts' ? new Promise((r) => (answer = r)) : Promise.resolve(null)));
+    const { rerender } = render(ScheduledPrompts, { sessionId: 7 });
+    await settle();
+    const first = answer;
+    await rerender({ sessionId: 8 });
+    await settle();
+    first(rows);
+    await settle();
+    expect(screen.queryByTestId('conv-scheduled')).toBeNull();
+  });
+
+  it('a transient failed re-read keeps the list with a note; an older hub clears it', async () => {
+    const { rerender } = render(ScheduledPrompts, { sessionId: 7, refreshKey: 0 });
+    await settle();
+    mocked.mockImplementation(async (cmd) => {
+      if (cmd === 'queued_prompts') throw { code: 'E_HUB_TIMEOUT', message: 'slow' };
+      return null;
+    });
+    await rerender({ sessionId: 7, refreshKey: 1 });
+    await settle();
+    expect(screen.getAllByTestId('conv-scheduled-item')).toHaveLength(2);
+    expect(screen.getByTestId('conv-scheduled-stale')).toBeTruthy();
+    mocked.mockImplementation(async (cmd) => {
+      if (cmd === 'queued_prompts') throw { code: 'E_HUB_PROTOCOL', message: 'unknown command' };
+      return null;
+    });
+    await rerender({ sessionId: 7, refreshKey: 2 });
+    await settle();
+    expect(screen.queryByTestId('conv-scheduled')).toBeNull();
+  });
+
   it('shows nothing when nothing waits', async () => {
     rows = [];
     render(ScheduledPrompts, { sessionId: 7 });

@@ -41,4 +41,29 @@ describe('ControlEscalations', () => {
     expect(document.activeElement).toBe(now[0]);
     expect(document.getElementById(now[0].getAttribute('aria-describedby') ?? '')?.textContent).toBe(secondLine);
   });
+
+  it('Later on the last card moves focus to the composer, not the page', async () => {
+    const since = Date.UTC(2026, 7, 10, 12) / 1000;
+    hosts.set(
+      fleetHosts().map((h) =>
+        h.alias === 'mefistos' ? { ...h, signed_out_logins: [{ profile: null, since, checked_at: since }] } : h,
+      ),
+    );
+    const box = document.createElement('textarea');
+    document.body.appendChild(box);
+    try {
+      render(ControlEscalations);
+      await tick();
+      const lefts = screen.getAllByTestId('control-escalation-later');
+      expect(lefts).toHaveLength(1);
+      lefts[0].focus();
+      await fireEvent.click(lefts[0]);
+      await tick();
+      await tick();
+      expect(screen.queryByTestId('control-escalations')).toBeNull();
+      expect(document.activeElement).toBe(box);
+    } finally {
+      box.remove();
+    }
+  });
 });
