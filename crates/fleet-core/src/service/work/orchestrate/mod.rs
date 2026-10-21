@@ -518,6 +518,20 @@ async fn apply_step_inner(
                 .item_id
                 .ok_or_else(|| IpcError::new(codes::E_INVALID, "a close step names its item"))?;
             let s = lock(&deps.store)?;
+            // The completion gate's evidence: the loop never closes an item
+            // whose implement run shows no commits or files. A person's
+            // press is never refused (they see it on the card).
+            if *actor == Actor::Loop {
+                if let Some(e) =
+                    crate::service::work::gate::item_run_evidence(&s, item_id, now_unix())?
+                        .filter(|e| e.state == "missing" || e.state == "pending")
+                {
+                    return Err(IpcError::new(
+                        codes::E_INVALID_STATE,
+                        format!("no run evidence: {}", e.detail),
+                    ));
+                }
+            }
             s.set_item_status(item_id, "done")?;
             s.wake_mission(m.id)?;
             Ok(("closed".into(), None))
@@ -1248,7 +1262,7 @@ pub async fn run_planner(
 ) -> Result<PlanOutcome, IpcError> {
     let _slot = PlannerSlot::take(deps, m)?;
     let now = now_unix();
-    let (mut login, grant, prompt, model, auto_level, accept_created) = {
+    let (mut login, grant, prompt, model, auto_level, accept_created, plan_nodes) = {
         let s = lock(&deps.store)?;
         let a = autonomy(&s, m, now)?;
         let runs = s.mission_planner_runs_since(m.id, now - 3600)?;
@@ -1298,6 +1312,7 @@ pub async fn run_planner(
                 .unwrap_or_else(|| planner::PLANNER_DEFAULT_MODEL.into()),
             a.effective,
             a.effective >= 3 && m.policy.task_creation == "auto",
+            planner::plan_nodes(&items, &graph),
         )
     };
     let mut attempts = 0;
@@ -1376,7 +1391,9 @@ pub async fn run_planner(
             Err(wait) => return Ok(waiting_outcome(&s, m, wait)),
         }
     };
-    let commands = match planner::parse_commands(&answer) {
+    let commands = match planner::parse_commands(&answer)
+        .and_then(|c| planner::check_merge_waves(&c, &plan_nodes).map(|()| c))
+    {
         Ok(c) => c,
         Err(mut why) => {
             if answer.trim().is_empty() && !stderr.is_empty() {
