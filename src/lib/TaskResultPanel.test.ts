@@ -173,6 +173,23 @@ describe('TaskResultPanel', () => {
     expect(gate).not.toContain('Docs updated');
   });
 
+  it('names missing run evidence in the gate, once', () => {
+    const result: TaskResultView = {
+      ...base,
+      gate: {
+        state: 'blocked',
+        checks: [],
+        open_children: [],
+        evidence: { state: 'missing', task_id: 1, detail: 'the implement run committed nothing and changed no file' },
+      },
+    };
+    const { getByTestId, getAllByText } = render(TaskResultPanel, { result, title: 'T' });
+    const row = getByTestId('task-result-run-evidence').textContent ?? '';
+    expect(row).toContain('no run evidence');
+    expect(row).toContain('committed nothing');
+    expect(getAllByText(/committed nothing/)).toHaveLength(1);
+  });
+
   it('lets a person mark the task done past a gate that is not passed', async () => {
     setWorkStatus.mockResolvedValue({ ok: true, value: { id: 2 } });
     const onChanged = vi.fn();

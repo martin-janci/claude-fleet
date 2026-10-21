@@ -1017,7 +1017,11 @@ finite mission whose checks all hold. A locked `claude -p` planner
 at most `policy.max_planner_runs_per_hour`) breaks a goal down and decides
 what a failure needs; its commands become cards in the mission's confirm
 queue. `git merge-tree` checks the finished branches against each other and
-proposes a resolve task for a conflict (`integrate.rs`). What the loop does by
+proposes ONE task per repo that integrates every live branch into one
+(`integrate.rs`); a branch another member's head already contains is left
+out, so a finished integration supersedes what it merged, and no new card is
+raised while one is open (before 2026-10-21 each conflicting pair got its
+own task and the resolutions conflicted again). What the loop does by
 itself is the least of the mission's level, `orchestrator.max_level`
 (default 1: a person presses every step) and a person's grant
 (`work_link { mission_grant }`: level, hours, budget, hosts, and the login
