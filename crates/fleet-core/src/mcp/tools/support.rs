@@ -1044,6 +1044,7 @@ pub(super) fn bypasses_gate(body: &str) -> bool {
 /// `raw` dispatch has no untrusted block at all.
 pub(super) fn task_delivery_body(
     prompt: &str,
+    task_id: i64,
     nonce: &str,
     caller: &Caller,
     raw: bool,
@@ -1059,7 +1060,7 @@ pub(super) fn task_delivery_body(
     } else {
         format!("{marked}\n{}", guard::UNTRUSTED_END)
     };
-    Ok(tasks::with_instruction(&block, nonce))
+    Ok(tasks::with_instruction(&block, task_id, nonce))
 }
 
 /// Validate `set_session_tags` input: at most 16 tags, each 1–32 chars of

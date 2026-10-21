@@ -3106,7 +3106,7 @@ async fn wait_for_task_marks_the_worker_result_as_untrusted() {
 #[test]
 fn task_delivery_body_keeps_the_fleet_instruction_outside_the_untrusted_block() {
     let agent = host_caller("mefistos", TokenMode::Full);
-    let body = task_delivery_body("fix the test\n", "n0nce", &agent, false).unwrap();
+    let body = task_delivery_body("fix the test\n", 7, "n0nce", &agent, false).unwrap();
     let lines: Vec<&str> = body.lines().collect();
     assert_eq!(
         lines[0],
@@ -3114,15 +3114,15 @@ fn task_delivery_body_keeps_the_fleet_instruction_outside_the_untrusted_block() 
     );
     assert_eq!(lines[1], "fix the test");
     assert_eq!(lines[2], guard::UNTRUSTED_END);
-    let instr = crate::service::tasks::task_instruction("n0nce");
+    let instr = crate::service::tasks::task_instruction(7, "n0nce");
     assert_eq!(*lines.last().unwrap(), instr);
     // Nothing between the marker and the end line mentions the marker.
     assert!(!lines[..3].iter().any(|l| l.contains("FLEET_TASK_DONE")));
     // Master raw: no untrusted block, instruction still last.
-    let raw = task_delivery_body("do it", "n0nce", &Caller::master(), true).unwrap();
+    let raw = task_delivery_body("do it", 7, "n0nce", &Caller::master(), true).unwrap();
     assert_eq!(raw, format!("do it\n\n{instr}"));
     // A per-host raw request is refused outright.
-    assert!(task_delivery_body("x", "n", &agent, true).is_err());
+    assert!(task_delivery_body("x", 7, "n", &agent, true).is_err());
 }
 
 // ---- orchestration helpers ----
@@ -12320,6 +12320,9 @@ pub(super) const SESSION_REACH: &[(&str, &[&str])] = &[
     ("wait_for_reply", &["Read"]),
     // orchestration.rs
     ("cancel_task", &["Drive"]),
+    // The worker's own pane passes `drive`; the tool then holds the caller
+    // to the task's worker and its nonce.
+    ("task_report", &["Drive"]),
     ("decide_related_session", &["Own"]),
     // Both ends are `Drive`. Naming a session as the REQUESTER writes to it
     // three ways — a `tasks` row, a `task_done` timeline row and, on the
@@ -14586,6 +14589,86 @@ async fn list_tasks_mine_lists_the_callers_own_tasks_and_marks_its_end() {
         .await
         .expect_err("one filter at a time");
     assert!(e.message.starts_with("E_INVALID"), "{}", e.message);
+}
+
+/// `task_report` is the worker's explicit way to finish its task: the
+/// task's worker, by its pane, with the task's nonce, completes it with its
+/// report; anyone else, or a wrong nonce, is refused; a second call changes
+/// nothing.
+#[tokio::test]
+async fn task_report_completes_the_callers_own_task_with_its_report() {
+    let g = gate_fixture();
+    let (a_row, found) = (g.a_row, g.found);
+    let mine =
+        crate::service::tasks::create_task(&g.store, Some(found), Some(a_row), "for you").unwrap();
+    let theirs =
+        crate::service::tasks::create_task(&g.store, Some(a_row), Some(found), "not you").unwrap();
+    let t = test_tools(g.store);
+    let report = |caller: Caller, task_id: i64, nonce: &str| {
+        t.task_report(
+            Extension(caller),
+            Parameters(TaskReportParams {
+                task_id,
+                nonce: nonce.to_string(),
+                summary: "Fixed the flaky test.".into(),
+                outcome: "done".into(),
+                done: vec!["pinned the clock".into()],
+                decisions: vec![],
+                remaining: vec![],
+                context: vec![],
+                tests_run: vec!["cargo test flaky".into()],
+                warnings: vec![],
+                blockers: vec![],
+                followups: vec!["drop the retry".into()],
+                confidence: Some("high".into()),
+            }),
+        )
+    };
+    let me = pane_caller(Some("%7"));
+    let body = |out: &CallToolResult| -> serde_json::Value {
+        serde_json::from_str(text_of(&out.content[0])).expect("an object")
+    };
+
+    // (A person's device that sees the task is `E_NOT_A_SESSION`: the
+    // session matrix's `task_report` row holds that.) A host token whose pane proves no session does not see the task at all.
+    let e = report(pane_caller(None), mine.id, &mine.nonce)
+        .await
+        .expect_err("no pane, no task");
+    assert!(e.message.starts_with("E_NOTFOUND"), "{}", e.message);
+    // Another session's task, even with its right nonce.
+    let e = report(me.clone(), theirs.id, &theirs.nonce)
+        .await
+        .expect_err("not the worker");
+    assert!(e.message.starts_with("E_FORBIDDEN"), "{}", e.message);
+    // The right task with a wrong nonce.
+    let e = report(me.clone(), mine.id, "0123456789abcdef")
+        .await
+        .expect_err("wrong nonce");
+    assert!(e.message.starts_with("E_FORBIDDEN"), "{}", e.message);
+    {
+        let s = t.store.lock().unwrap();
+        assert_eq!(s.get_task(mine.id).unwrap().unwrap().state, "queued");
+        assert_eq!(s.get_task(theirs.id).unwrap().unwrap().state, "queued");
+    }
+
+    let out = body(&report(me.clone(), mine.id, &mine.nonce).await.unwrap());
+    assert_eq!(out["status"], "done");
+    assert_eq!(out["task"]["state"], "done");
+    {
+        let s = t.store.lock().unwrap();
+        let row = s.get_task(mine.id).unwrap().unwrap();
+        assert_eq!(row.result.as_deref(), Some("Fixed the flaky test."));
+        let rep = row.report.expect("the report is stored");
+        assert_eq!(rep.outcome, "done");
+        assert_eq!(rep.tests_run, vec!["cargo test flaky"]);
+        assert_eq!(rep.followups, vec!["drop the retry"]);
+        assert_eq!(rep.confidence.as_deref(), Some("high"));
+    }
+
+    // Repeating the call is a no-op, and says so.
+    let again = body(&report(me, mine.id, &mine.nonce).await.unwrap());
+    assert_eq!(again["status"], "already_finished");
+    assert_eq!(again["task"]["state"], "done");
 }
 
 /// `work { session_tasks }` without `session_id` reads the caller's own

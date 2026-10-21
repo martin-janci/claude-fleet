@@ -1286,6 +1286,15 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: true,
         deadline: Deadline::Quick,
     },
+    // A worker's own report that its task is finished (the explicit path
+    // beside the marker scan). Only the task's worker passes the tool's gate.
+    ToolPolicy {
+        name: "task_report",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
     ToolPolicy {
         name: "decide_related_session",
         access: Access::Client,

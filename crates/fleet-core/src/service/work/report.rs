@@ -1,8 +1,9 @@
 //! A run's result (orchestration O3, design 2026-10-07 §6): the report the
 //! worker is asked for, and the evidence fleet reads from git itself.
 //!
-//! - **The report.** A run's prompt asks the worker to follow its done
-//!   marker with one fenced JSON block (`summary`, `outcome`, `done`,
+//! - **The report.** A run's prompt asks the worker to call the
+//!   `task_report` tool with its report, and to follow its done marker with
+//!   the same report as one fenced JSON block (`summary`, `outcome`, `done`,
 //!   `decisions`, `remaining`, `context`, `tests_run`, `warnings`,
 //!   `blockers`, `followups`, `confidence`). [`parse_report`] is
 //!   tolerant: a missing or broken block leaves the paragraph in
@@ -29,27 +30,35 @@ pub const SUMMARY_MAX_CHARS: usize = 4_000;
 /// Most lines after the marker searched for the JSON block.
 const REPORT_SCAN_LINES: usize = 400;
 
-/// The instruction appended to a run's prompt: the marker, then the block.
-/// The marker stands inline in the sentence, so the prompt's echo in the
-/// pane never reads as the worker's emission.
-pub fn run_instruction(nonce: &str) -> String {
+/// The instruction appended to a run's prompt: the `task_report` tool call
+/// first, then the marker and the block as the fallback for a worker without
+/// fleet's MCP. The marker stands inline in the sentence, so the prompt's
+/// echo in the pane never reads as the worker's emission.
+pub fn run_instruction(task_id: i64, nonce: &str) -> String {
     format!(
-        "When finished, print exactly {} on its own line, followed by one fenced \
-         ```json block with these keys: \"summary\" (one paragraph), \"outcome\" \
+        "When finished, call the claude-fleet MCP tool {} with task_id {task_id}, \
+         nonce \"{nonce}\" and your report: \"summary\" (one paragraph), \"outcome\" \
          (done | partial | blocked | failed), \"done\" (what you did), \
          \"decisions\" (choices the next task must keep), \"remaining\" (work \
          left), \"context\" (facts a fresh session needs to continue), \
          \"tests_run\" (the commands you ran), \"warnings\", \"blockers\", \
          \"followups\" (each a task title) — all lists of short strings — and \
-         \"confidence\" (low | medium | high). Fleet reads your commits and \
+         \"confidence\" (low | medium | high). Then also print exactly {} on its \
+         own line, followed by the same report as one fenced ```json block: fleet \
+         reads that when the tool is not available. Fleet reads your commits and \
          changed files from git itself; do not list them.",
+        crate::service::tasks::REPORT_TOOL,
         crate::service::tasks::done_marker(nonce)
     )
 }
 
 /// A run's prompt as delivered: the text, a blank line, the instruction.
-pub fn with_run_instruction(prompt: &str, nonce: &str) -> String {
-    format!("{}\n\n{}", prompt.trim_end(), run_instruction(nonce))
+pub fn with_run_instruction(prompt: &str, task_id: i64, nonce: &str) -> String {
+    format!(
+        "{}\n\n{}",
+        prompt.trim_end(),
+        run_instruction(task_id, nonce)
+    )
 }
 
 fn clip(s: &str, max: usize) -> String {

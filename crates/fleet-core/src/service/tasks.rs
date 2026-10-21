@@ -9,7 +9,14 @@
 //! third session. On every Stop hook of a worker with open tasks fleet reads
 //! the worker's transcript (falling back to a pane capture), scans for the
 //! marker and flips the task to `done` with the paragraph as `result`. A
-//! Stop without the marker leaves the task `running`.
+//! Stop without the marker leaves the task `running`, and logs a warning
+//! naming what was read.
+//!
+//! The explicit path comes first: the instruction asks the worker to call
+//! the `task_report` MCP tool ([`report_task_done`]) with the task id, the
+//! nonce and its structured report, and to print the marker as well. The
+//! tool and the scan end in the same [`complete_task_reported`], so whichever
+//! lands first flips the task and the other is a no-op.
 //!
 //! The wait primitives are bounded long-polls over the store: they lock,
 //! read one row, unlock, sleep — never holding the mutex across the sleep.
@@ -49,18 +56,31 @@ pub fn done_marker(nonce: &str) -> String {
     format!("{DONE_PREFIX}{nonce}")
 }
 
-/// The instruction line appended to every dispatched prompt.
-pub fn task_instruction(nonce: &str) -> String {
+/// Name of the MCP tool a worker reports a finished task with.
+pub const REPORT_TOOL: &str = "task_report";
+
+/// The instruction line appended to every dispatched prompt: the
+/// [`REPORT_TOOL`] call first, the marker as the fallback for a worker
+/// without fleet's MCP. The marker stands inline in the sentence, so the
+/// prompt's echo in the pane never reads as the worker's emission.
+pub fn task_instruction(task_id: i64, nonce: &str) -> String {
     format!(
-        "When finished, print exactly {} on its own line followed by a one-paragraph result.",
+        "When finished, call the claude-fleet MCP tool {REPORT_TOOL} with task_id {task_id}, \
+         nonce \"{nonce}\", outcome (done | partial | blocked | failed) and a one-paragraph \
+         summary. Then also print exactly {} on its own line followed by a one-paragraph \
+         result: fleet reads that when the tool is not available.",
         done_marker(nonce)
     )
 }
 
 /// The prompt as delivered to the worker: the requester's text plus the
 /// instruction, separated by a blank line.
-pub fn with_instruction(prompt: &str, nonce: &str) -> String {
-    format!("{}\n\n{}", prompt.trim_end(), task_instruction(nonce))
+pub fn with_instruction(prompt: &str, task_id: i64, nonce: &str) -> String {
+    format!(
+        "{}\n\n{}",
+        prompt.trim_end(),
+        task_instruction(task_id, nonce)
+    )
 }
 
 /// Strip TUI chrome a captured pane puts in front of assistant text
@@ -523,6 +543,46 @@ pub fn complete_task_reported(
         }
     }
     Ok(true)
+}
+
+/// A worker's own report that `task` is finished (the `task_report` tool).
+/// `worker` is the session the caller's per-host token and pane prove; it
+/// must be the task's worker, and `nonce` the task's nonce (`E_FORBIDDEN`
+/// otherwise). A task already `done` / `failed` / `cancelled` is left as it
+/// is: `Ok((row, false))`, so a repeated call is harmless. Otherwise the
+/// task completes exactly as a scanned marker does, through
+/// [`complete_task_reported`], with the report's summary as `result`.
+pub fn report_task_done(
+    s: &Store,
+    task: &TaskRow,
+    worker: i64,
+    nonce: &str,
+    report: &crate::store::TaskReport,
+) -> Result<(TaskRow, bool), IpcError> {
+    if task.worker_session_id != Some(worker) {
+        return Err(IpcError::new(
+            codes::E_FORBIDDEN,
+            format!(
+                "task {} is not your session's task: only its worker reports it",
+                task.id
+            ),
+        ));
+    }
+    if task.nonce != nonce.trim() {
+        return Err(IpcError::new(
+            codes::E_FORBIDDEN,
+            format!(
+                "the nonce does not match task {}: pass the one its prompt gave",
+                task.id
+            ),
+        ));
+    }
+    if is_terminal(&task.state) {
+        return Ok((task.clone(), false));
+    }
+    let changed = complete_task_reported(s, task, &report.summary, Some(report))?;
+    let row = s.get_task(task.id)?.unwrap_or_else(|| task.clone());
+    Ok((row, changed))
 }
 
 /// Shared work context (design 2026-09-29): a dispatched job becomes an
@@ -1056,6 +1116,23 @@ pub async fn handle_stop_for_worker(
             ),
         }
     }
+    // A silent miss left a task `running` until the max-age sweep failed it
+    // (mission #6, 2026-10-21): say which tasks stayed open and what was read.
+    for t in open
+        .iter()
+        .filter(|t| !resolved.iter().any(|(id, _)| *id == t.id))
+    {
+        tracing::warn!(
+            task = t.id,
+            worker = worker.id,
+            host = %worker.host_alias,
+            tmux = %worker.tmux_name,
+            transcript = %source_size(transcript.as_deref()),
+            pane = %source_size(pane.as_deref()),
+            "[tasks] Stop of a task worker found no done marker; the task stays {}",
+            t.state
+        );
+    }
     let mut finished: Vec<TaskRow> = Vec::new();
     {
         let Ok(s) = store.lock() else { return };
@@ -1094,6 +1171,15 @@ pub async fn handle_stop_for_worker(
             &finished,
         )
         .await;
+    }
+}
+
+/// How a scanned source reads in a log line: its size, or that it was not
+/// read at all.
+fn source_size(text: Option<&str>) -> String {
+    match text {
+        Some(t) => format!("{} bytes", t.len()),
+        None => "not read".to_string(),
     }
 }
 
@@ -1336,11 +1422,101 @@ mod tests {
         assert_eq!(n.len(), 32, "16 random bytes");
         assert_ne!(n, make_nonce());
         assert!(n.chars().all(|c| c.is_ascii_hexdigit()));
-        let p = with_instruction("do the thing\n", "abcd1234");
+        let p = with_instruction("do the thing\n", 42, "abcd1234");
         assert_eq!(
             p,
-            "do the thing\n\nWhen finished, print exactly FLEET_TASK_DONE_abcd1234 on its own line followed by a one-paragraph result."
+            "do the thing\n\nWhen finished, call the claude-fleet MCP tool task_report with \
+             task_id 42, nonce \"abcd1234\", outcome (done | partial | blocked | failed) and a \
+             one-paragraph summary. Then also print exactly FLEET_TASK_DONE_abcd1234 on its own \
+             line followed by a one-paragraph result: fleet reads that when the tool is not \
+             available."
         );
+        // The tool first, the marker as the fallback; one line, so the
+        // prompt's echo is never a marker line.
+        let i = task_instruction(42, "abcd1234");
+        assert!(i.find(REPORT_TOOL).unwrap() < i.find(DONE_PREFIX).unwrap());
+        assert_eq!(i.lines().count(), 1);
+        assert_eq!(scan_for_done(&p, "abcd1234"), None);
+    }
+
+    // ---- task_report ----
+
+    fn report(summary: &str) -> crate::store::TaskReport {
+        crate::store::TaskReport {
+            summary: summary.into(),
+            outcome: "done".into(),
+            tests_run: vec!["cargo test".into()],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_workers_report_completes_its_task_as_a_scanned_marker_does() {
+        let s = Store::open_in_memory().unwrap();
+        let req = seed(&s, "local", "ctl");
+        let w = seed(&s, "local", "w");
+        let t = create_task(&s, Some(req), Some(w), "do it").unwrap();
+        let t = start_task(&s, &t).unwrap();
+        let (row, changed) = report_task_done(&s, &t, w, &t.nonce, &report("all done")).unwrap();
+        assert!(changed);
+        assert_eq!(row.state, "done");
+        assert_eq!(row.result.as_deref(), Some("all done"));
+        assert_eq!(row.report.expect("stored").tests_run, vec!["cargo test"]);
+        // The same side effects as the marker: the requester's inbox and the
+        // `task_done` timeline row on both ends.
+        let inbox = s.list_inbox(req, true, 10).unwrap();
+        assert_eq!(inbox.len(), 1);
+        assert_eq!(inbox[0].kind, "task_result");
+        for sid in [req, w] {
+            let kinds: Vec<String> = s
+                .list_session_events(sid, 50)
+                .unwrap()
+                .into_iter()
+                .map(|e| e.kind)
+                .collect();
+            assert!(kinds.iter().any(|k| k == "task_done"), "{sid}: {kinds:?}");
+        }
+    }
+
+    #[test]
+    fn a_report_from_another_session_or_with_a_wrong_nonce_is_refused() {
+        let s = Store::open_in_memory().unwrap();
+        let req = seed(&s, "local", "ctl");
+        let w = seed(&s, "local", "w");
+        let t = start_task(&s, &create_task(&s, Some(req), Some(w), "do it").unwrap()).unwrap();
+        let e = report_task_done(&s, &t, req, &t.nonce, &report("x")).unwrap_err();
+        assert_eq!(e.code, codes::E_FORBIDDEN);
+        let e = report_task_done(&s, &t, w, "ffffffff", &report("x")).unwrap_err();
+        assert_eq!(e.code, codes::E_FORBIDDEN);
+        assert_eq!(s.get_task(t.id).unwrap().unwrap().state, "running");
+    }
+
+    #[test]
+    fn a_repeated_report_changes_nothing() {
+        let s = Store::open_in_memory().unwrap();
+        let req = seed(&s, "local", "ctl");
+        let w = seed(&s, "local", "w");
+        let t = start_task(&s, &create_task(&s, Some(req), Some(w), "do it").unwrap()).unwrap();
+        assert!(
+            report_task_done(&s, &t, w, &t.nonce, &report("first"))
+                .unwrap()
+                .1
+        );
+        let t = s.get_task(t.id).unwrap().unwrap();
+        let (row, changed) = report_task_done(&s, &t, w, &t.nonce, &report("second")).unwrap();
+        assert!(!changed);
+        assert_eq!(row.result.as_deref(), Some("first"));
+        assert_eq!(
+            s.list_inbox(req, true, 10).unwrap().len(),
+            1,
+            "one result, once"
+        );
+        // A cancelled task stays cancelled.
+        let c = create_task(&s, Some(req), Some(w), "other").unwrap();
+        let c = cancel_task(&s, c.id, "not needed").unwrap();
+        let (row, changed) = report_task_done(&s, &c, w, &c.nonce, &report("late")).unwrap();
+        assert!(!changed);
+        assert_eq!(row.state, "cancelled");
     }
 
     #[test]

@@ -146,6 +146,7 @@ pub async fn request(
     };
     let prompt = crate::service::work::report::with_run_instruction(
         task.prompt.as_deref().unwrap_or_default(),
+        task.id,
         &task.nonce,
     );
     if let Err(e) = crate::service::sessions::send_system_prompt(

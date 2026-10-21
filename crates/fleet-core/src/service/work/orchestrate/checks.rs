@@ -347,7 +347,7 @@ pub async fn try_start(
             }
         }
     };
-    let prompt = report::with_run_instruction(&prompt, &task.nonce);
+    let prompt = report::with_run_instruction(&prompt, task.id, &task.nonce);
     let store = Arc::clone(&deps.store);
     let ssh = Arc::clone(&deps.ssh);
     let mission = m.id;

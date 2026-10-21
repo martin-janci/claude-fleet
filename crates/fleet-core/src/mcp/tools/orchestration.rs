@@ -798,7 +798,7 @@ impl FleetTools {
                 return Err(to_mcp_err(e));
             }
         }
-        let body = task_delivery_body(&p.prompt, &task.nonce, &caller, p.raw)?;
+        let body = task_delivery_body(&p.prompt, task.id, &task.nonce, &caller, p.raw)?;
         match self.deliver_prompt(&worker, body, true, false).await {
             Ok(_) => {}
             Err(e) => {
@@ -979,6 +979,81 @@ impl FleetTools {
         let row = tasks::cancel_task(&s, task.id, &format!("cancelled by {}", caller.label()))
             .map_err(to_mcp_err)?;
         ok_json(&row)
+    }
+
+    #[tool(description = "From a task's worker: report it finished, with \
+        the task_id and nonce its prompt gave. Completes it as the \
+        FLEET_TASK_DONE marker does; a finished task answers \
+        already_finished.")]
+    pub(super) async fn task_report(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(p): Parameters<TaskReportParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "task_report",
+            &format!("task_id={} outcome={}", p.task_id, p.outcome),
+        );
+        // `drive`: completing a task writes its row, the requester's inbox
+        // and the mission it belongs to. The worker's own pane passes it.
+        let task = self.visible_task(&caller, p.task_id, Reach::Drive)?;
+        let worker = self.own_session(&caller)?.ok_or_else(|| {
+            mcp_err(
+                codes::E_NOT_A_SESSION,
+                "task_report answers only from inside the task's worker session (its \
+                 per-host token and X-Fleet-Pane)",
+                None,
+            )
+        })?;
+        let report = crate::service::work::report::report_from_value(&serde_json::json!({
+            "summary": p.summary,
+            "outcome": p.outcome,
+            "done": p.done,
+            "decisions": p.decisions,
+            "remaining": p.remaining,
+            "context": p.context,
+            "tests_run": p.tests_run,
+            "warnings": p.warnings,
+            "blockers": p.blockers,
+            "followups": p.followups,
+            "confidence": p.confidence,
+        }))
+        .unwrap_or_default();
+        let (row, changed, checkout) = {
+            let s = lock(&self.store).map_err(to_mcp_err)?;
+            let (row, changed) = tasks::report_task_done(&s, &task, worker, &p.nonce, &report)
+                .map_err(to_mcp_err)?;
+            // Where the run's checkout is: the worker's worktree, as the Stop
+            // path falls back to when the hook gave no `cwd`.
+            // Best-effort, as the evidence itself is.
+            let checkout = match (changed, row.work_item_id) {
+                (true, Some(_)) => s.get_session_by_id(worker).ok().flatten().and_then(|w| {
+                    let wt = w.worktree_id?;
+                    let dir = s.worktree_path(wt).ok().flatten()?;
+                    Some((w.host_alias, dir, row.clone()))
+                }),
+                _ => None,
+            };
+            (tasks::mark_task_result(&s, row), changed, checkout)
+        };
+        if changed {
+            tracing::info!("task {} done (worker {}, reported)", row.id, worker);
+        }
+        // A run's evidence, as the Stop path reads it after a scanned marker:
+        // mission integration reads `evidence.head`. A host round trip, so it
+        // runs after the reply.
+        if let Some((host, dir, done)) = checkout {
+            let store = Arc::clone(&self.store);
+            let ssh = Arc::clone(&self.ssh);
+            crate::rt::spawn(async move {
+                crate::service::work::report::collect_evidence(&store, &ssh, &host, &dir, &[done])
+                    .await;
+            });
+        }
+        ok_json(&serde_json::json!({
+            "status": if changed { "done" } else { "already_finished" },
+            "task": row,
+        }))
     }
 
     #[tool(description = "Replace a session's tags (short labels such as \
