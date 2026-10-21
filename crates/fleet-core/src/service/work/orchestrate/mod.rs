@@ -1845,11 +1845,11 @@ pub async fn tick_mission(deps: &Deps, id: i64, now: i64) -> Result<(), IpcError
                 return Ok(());
             }
         }
-        if counts.open > 0
-            && counts
-                .last_activity_at
-                .is_some_and(|at| now - at > m.policy.no_progress_secs as i64)
-        {
+        // A person's resume restarts the window: braking on the same stale
+        // run that paused it would pause the mission again before this tick
+        // ever tried to start a step.
+        let since = counts.last_activity_at.max(s.mission_resumed_at(id)?);
+        if counts.open > 0 && since.is_some_and(|at| now - at > m.policy.no_progress_secs as i64) {
             brake(
                 &s,
                 &m,
