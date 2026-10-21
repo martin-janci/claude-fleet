@@ -630,8 +630,14 @@ export function eventSentence(e: MissionEvent): string {
     case 'account_limit':
       // The loop holds its runs (review w03-5): say why, not just the kind.
       return p.why ? `Waiting for the account: ${String(p.why)}` : 'Waiting for the account';
-    case 'integration':
+    case 'integration': {
+      // One integration names every branch it merges; older events a pair.
+      const items = Array.isArray(p.items) ? (p.items as unknown[]).map(String) : [];
+      if (items.length > 1) {
+        return `Tasks ${items.slice(0, -1).join(', ')} and ${items[items.length - 1]} need one integration`;
+      }
       return `Tasks ${String(p.a ?? '')} and ${String(p.b ?? '')} conflict`;
+    }
     case 'note':
       return String(p.text ?? 'Note');
     case 'digest':
