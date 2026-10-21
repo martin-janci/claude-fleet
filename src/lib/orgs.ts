@@ -15,7 +15,7 @@ import type { Descriptor } from './pages/pages';
 import type { AdminNeed, OrgAccount, OrgShare, PersonSpend, RemovedMember, TeamMember } from './pages/resources';
 import { writable, derived, get } from 'svelte/store';
 import { invokeCmd, type Result } from './result';
-import { invokeOnFleet } from './fleets';
+import { invokeOnFleet, onFleetForgotten } from './fleets';
 import type { Pairing } from './devices';
 import { readPref, writePref } from './prefs';
 import { sessions, type SessionRow } from './sessions';
@@ -168,6 +168,9 @@ export function pairMemberDevice(orgId: number, person: string, device: string, 
  *  `fleet` is the hub it was started on (null: the primary): org ids are
  *  per hub, so only that hub's org of that id shows it. */
 export const memberPairing = writable<{ fleet: string | null; org_id: number; person: string; pairing?: Pairing } | null>(null);
+// A removed fleet's slot id is reused by label (fleets.ts::forgetFleet): a
+// pairing started there must not show on the next hub's org of that id.
+onFleetForgotten((id) => memberPairing.update((p) => (p?.fleet === id ? null : p)));
 
 /** One per-org setting on an org's page: the setting described with the
  *  fleet's value, and the org's own when it set one. */

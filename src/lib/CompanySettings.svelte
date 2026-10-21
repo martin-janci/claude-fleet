@@ -88,6 +88,7 @@
   const readonly = $derived(!access.write || !access.admin);
   const reason = $derived(accessLoaded && !own ? companyReadonlyReason(access, place.where, place.clientName) : null);
   const routedFleet = $derived(fleet === PRIMARY ? null : fleet);
+  const fleetLabel = $derived($fleets.find((f) => f.id === fleet)?.label ?? fleet);
 </script>
 
 <div class="company-settings" data-testid="company-settings">
@@ -112,6 +113,12 @@
       fleet={routedFleet}
       canChange={(r) => companyRecordWritable(access, resourceId, r)}
       {onnavigate} />
+  {:else}
+    <!-- A remote hub's access read can take a while (and a Try again
+         repeats it): say so rather than leave only the picker. -->
+    <p class="loading" role="status" aria-busy="true" data-testid="company-access-loading">
+      Reading what this device may change on {fleetLabel}…
+    </p>
   {/if}
 
   {#if accessLoaded && access.error}
@@ -127,5 +134,9 @@
   }
   .retry {
     align-self: flex-start;
+  }
+  .loading {
+    margin: 0;
+    color: var(--fg-muted);
   }
 </style>
