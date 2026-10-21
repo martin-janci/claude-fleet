@@ -347,6 +347,29 @@ depends_on}; remove_dep {item_id, depends_on}; run {item_id, role?: implement | 
 /// is `--output-format json`'s envelope, so the run's cost can be booked
 /// (redesign 8.2); [`planner_answer`] takes the model's text out of it.
 pub fn planner_script(model: &str, prompt: &str) -> String {
+    script_with_env(model, prompt, String::new())
+}
+
+/// PURE: [`planner_script`] under the login profile `profile` (`None`: the
+/// host's own login), as `checks::check_script` runs one. `Err` for a
+/// profile name that is not one.
+pub fn planner_script_as(
+    model: &str,
+    prompt: &str,
+    profile: Option<&str>,
+) -> Result<String, String> {
+    let env = match profile {
+        Some(_) => format!(
+            "{}{}",
+            crate::service::headless::default_agent().login_env(profile)?,
+            crate::tmux::PROFILE_API_KEY
+        ),
+        None => String::new(),
+    };
+    Ok(script_with_env(model, prompt, env))
+}
+
+fn script_with_env(model: &str, prompt: &str, env: String) -> String {
     let agent = crate::service::headless::default_agent();
     let claude = agent.command(&crate::service::headless::HeadlessJob {
         model,
@@ -356,7 +379,7 @@ pub fn planner_script(model: &str, prompt: &str) -> String {
         ..Default::default()
     });
     format!(
-        "{} {}",
+        "{} {env}{}",
         agent.missing_check(PLANNER_TAG),
         claude_print::run_capped(
             PLANNER_TAG,

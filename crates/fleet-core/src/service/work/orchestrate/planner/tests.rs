@@ -141,6 +141,22 @@ fn the_script_runs_claude_locked_and_its_output_is_tagged() {
     assert_eq!(parse_planner_output("nothing here"), PlannerOutput::Nothing);
 }
 
+/// TASK-291: the planner can run under another login on its host, the way
+/// a check does; the host's own login leaves the script as it was.
+#[test]
+fn the_script_runs_under_a_login_profile_when_asked() {
+    let own = planner_script_as("sonnet", "p", None).unwrap();
+    assert_eq!(own, planner_script("sonnet", "p"));
+    assert!(!own.contains("CLAUDE_CONFIG_DIR"));
+    let work = planner_script_as("sonnet", "p", Some("work")).unwrap();
+    assert!(
+        work.contains("export CLAUDE_CONFIG_DIR=\"$HOME/.claude-profiles/\"'work'; "),
+        "{work}"
+    );
+    assert!(work.contains(crate::tmux::PROFILE_API_KEY));
+    assert!(planner_script_as("sonnet", "p", Some("../x")).is_err());
+}
+
 fn member(id: i64, title: &str, depends_on: &[i64]) -> PlanNode {
     PlanNode {
         item_id: id,

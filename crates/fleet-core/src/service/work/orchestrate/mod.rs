@@ -19,6 +19,7 @@ pub mod checks;
 pub mod drafts;
 pub mod guard;
 pub mod integrate;
+pub mod limit;
 pub mod planner;
 pub mod steps;
 pub mod triage;
@@ -50,6 +51,9 @@ pub const TICK_EVERY: Duration = Duration::from_secs(20);
 pub const RUNNING_RECHECK_SECS: i64 = 300;
 /// An idle finite mission is looked at again within this.
 pub const IDLE_RECHECK_SECS: i64 = 3600;
+/// The soonest a mission whose planner waits on a usage limit is looked at
+/// again, however near the reset.
+pub const RESET_RECHECK_SECS: i64 = 60;
 /// A continuous mission's timer when its policy names none (O8).
 pub const CONTINUOUS_DEFAULT_WAKE_SECS: u64 = 1800;
 /// Cards a mission's detail shows.
@@ -1011,6 +1015,12 @@ pub struct PlanOutcome {
     /// Why the answer was refused, when it was.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refused: Option<String>,
+    /// The usage limit the ask ended on (TASK-291): the mission's wait when
+    /// every login the planner may use is at one, else the last login's
+    /// when its tries ran out. Not a refused answer; the loop asks again
+    /// once a login has headroom.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting: Option<limit::LimitWait>,
 }
 
 /// The host the planner runs on: the policy's, the grant's first, else the
@@ -1022,19 +1032,37 @@ pub struct PlanOutcome {
 /// or grant host that is not refuses with `E_FORBIDDEN`, and a worker on
 /// such a host is passed over.
 fn planner_host(s: &Store, m: &MissionRow, grant: Option<&GrantRow>) -> Result<String, IpcError> {
-    let named = m
-        .policy
-        .planner_host
-        .as_ref()
-        .map(|h| (h, "policy.planner_host"));
-    let granted = grant
-        .and_then(|g| g.hosts.as_ref())
-        .and_then(|h| h.first())
-        .map(|h| (h, "the grant's first host"));
-    if let Some((h, from)) = named.or(granted) {
-        require_host_sees_org(s, h, m.org_id, from)?;
-        return Ok(h.clone());
+    Ok(planner_hosts(s, m, grant)?.swap_remove(0))
+}
+
+/// Every host the planner may run on, [`planner_host`]'s first (TASK-291:
+/// the rest are where it goes when that one's logins are at their usage
+/// limit): the policy's host alone, else the grant's hosts of the
+/// mission's org, else the hosts of the mission's workers that see it, by
+/// item and task. Never empty.
+fn planner_hosts(
+    s: &Store,
+    m: &MissionRow,
+    grant: Option<&GrantRow>,
+) -> Result<Vec<String>, IpcError> {
+    if let Some(h) = &m.policy.planner_host {
+        require_host_sees_org(s, h, m.org_id, "policy.planner_host")?;
+        return Ok(vec![h.clone()]);
     }
+    if let Some(hosts) = grant
+        .and_then(|g| g.hosts.as_ref())
+        .filter(|h| !h.is_empty())
+    {
+        require_host_sees_org(s, &hosts[0], m.org_id, "the grant's first host")?;
+        let mut out = vec![hosts[0].clone()];
+        for h in &hosts[1..] {
+            if !out.contains(h) && host_sees_org(s, h, m.org_id)? {
+                out.push(h.clone());
+            }
+        }
+        return Ok(out);
+    }
+    let mut out: Vec<String> = Vec::new();
     let mut passed_over = None;
     for i in s.mission_items(m.id)? {
         for t in s.tasks_for_item(i.id)? {
@@ -1042,12 +1070,19 @@ fn planner_host(s: &Store, m: &MissionRow, grant: Option<&GrantRow>) -> Result<S
                 .worker_session_id
                 .and_then(|w| s.get_session_by_id(w).ok().flatten())
             {
-                if host_sees_org(s, &w.host_alias, m.org_id)? {
-                    return Ok(w.host_alias);
+                if out.contains(&w.host_alias) {
+                    continue;
                 }
-                passed_over.get_or_insert(w.host_alias);
+                if host_sees_org(s, &w.host_alias, m.org_id)? {
+                    out.push(w.host_alias);
+                } else {
+                    passed_over.get_or_insert(w.host_alias);
+                }
             }
         }
+    }
+    if !out.is_empty() {
+        return Ok(out);
     }
     if let Some(h) = passed_over {
         return Err(other_org_host(&h, "its workers' host"));
@@ -1227,7 +1262,7 @@ pub async fn run_planner(
 ) -> Result<PlanOutcome, IpcError> {
     let _slot = PlannerSlot::take(deps, m)?;
     let now = now_unix();
-    let (host, prompt, model, auto_level, accept_created, plan_nodes) = {
+    let (mut login, grant, prompt, model, auto_level, accept_created, plan_nodes) = {
         let s = lock(&deps.store)?;
         let a = autonomy(&s, m, now)?;
         let runs = s.mission_planner_runs_since(m.id, now - 3600)?;
@@ -1239,7 +1274,12 @@ pub async fn run_planner(
                 ),
             ));
         }
-        let host = planner_host(&s, m, a.grant.as_ref())?;
+        // TASK-291: a login at its usage limit is passed over; with none
+        // left the mission waits for the reset, and nothing is asked.
+        let login = match limit::choose(&s, m, a.grant.as_ref(), now)? {
+            Ok(l) => l,
+            Err(wait) => return Ok(waiting_outcome(&s, m, wait)),
+        };
         let items = s.mission_items(m.id)?;
         let graph = super::graph::build(&s, &ViewScope::internal(), &items)?;
         let steps = steps_for(&s, m, &a)?;
@@ -1260,10 +1300,11 @@ pub async fn run_planner(
             "planned",
             &actor.name(),
             None,
-            serde_json::json!({ "why": why, "host": host }),
+            serde_json::json!({ "why": why, "host": login.host, "profile": login.profile }),
         );
         (
-            host,
+            login,
+            a.grant.clone(),
             format!("{}\n\n{snap}", planner::PLANNER_PROMPT),
             m.policy
                 .planner_model
@@ -1274,42 +1315,80 @@ pub async fn run_planner(
             planner::plan_nodes(&items, &graph, m.root_item_id),
         )
     };
-    let script = planner::planner_script(&model, &prompt);
-    let out = crate::ssh::run_shell_bounded(
-        deps.ssh.as_ref(),
-        &host,
-        &script,
-        Duration::from_secs(10),
-        Duration::from_secs(planner::PLANNER_HOST_TIMEOUT_SECS + 20),
-    )
-    .await?;
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let answer = match planner::parse_planner_output(&stdout) {
-        PlannerOutput::Ran(ran) => {
-            let (answer, usage) = planner::planner_answer(ran);
-            let s = lock(&deps.store)?;
-            book_planner_run(&s, m, &host, &model, usage.as_ref(), now_unix());
-            // Claude Code's own "Login expired" is not a malformed answer:
-            // say whose login it is and how to sign it in again.
-            if claude_print::run_signed_out(usage.as_ref(), &answer, &out.stderr) {
-                return Err(claude_print::signed_out_error(&host, None));
+    let mut attempts = 0;
+    let (answer, stderr) = loop {
+        attempts += 1;
+        let (host, profile) = (login.host.as_str(), login.profile.as_deref());
+        let script = planner::planner_script_as(&model, &prompt, profile)
+            .map_err(|e| IpcError::new(codes::E_INVALID, e))?;
+        let out = crate::ssh::run_shell_bounded(
+            deps.ssh.as_ref(),
+            host,
+            &script,
+            Duration::from_secs(10),
+            Duration::from_secs(planner::PLANNER_HOST_TIMEOUT_SECS + 20),
+        )
+        .await?;
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let answer = match planner::parse_planner_output(&stdout) {
+            PlannerOutput::Ran(ran) => {
+                let (answer, usage) = planner::planner_answer(ran);
+                let s = lock(&deps.store)?;
+                book_planner_run(&s, m, host, &model, usage.as_ref(), now_unix());
+                // Claude Code's own "Login expired" is not a malformed answer:
+                // say whose login it is and how to sign it in again.
+                if claude_print::run_signed_out(usage.as_ref(), &answer, &out.stderr) {
+                    return Err(claude_print::signed_out_error(host, profile));
+                }
+                answer
             }
-            answer
-        }
-        PlannerOutput::NoClaude => {
-            return Err(IpcError::new(
-                codes::E_INVALID_STATE,
-                format!("claude is not on {host}'s PATH"),
-            ))
-        }
-        PlannerOutput::Nothing if claude_print::run_signed_out(None, "", &out.stderr) => {
-            return Err(claude_print::signed_out_error(&host, None))
-        }
-        PlannerOutput::Nothing => {
-            return Err(IpcError::new(
-                codes::E_SHELL,
-                format!("the planner on {host} gave no answer"),
-            ))
+            PlannerOutput::NoClaude => {
+                return Err(IpcError::new(
+                    codes::E_INVALID_STATE,
+                    format!("claude is not on {host}'s PATH"),
+                ))
+            }
+            PlannerOutput::Nothing if claude_print::run_signed_out(None, "", &out.stderr) => {
+                return Err(claude_print::signed_out_error(host, profile))
+            }
+            // The limit said on stderr alone is read below.
+            PlannerOutput::Nothing if claude_print::run_usage_limit("", &out.stderr).is_some() => {
+                String::new()
+            }
+            PlannerOutput::Nothing => {
+                return Err(IpcError::new(
+                    codes::E_SHELL,
+                    format!("the planner on {host} gave no answer"),
+                ))
+            }
+        };
+        // A command array never opens with Claude's limit words, so only an
+        // answer that is not one is read for them.
+        let hit = match planner::parse_commands(&answer) {
+            Ok(_) => None,
+            Err(_) => claude_print::run_usage_limit(&answer, &out.stderr),
+        };
+        let Some(hit) = hit else {
+            break (answer, out.stderr);
+        };
+        let s = lock(&deps.store)?;
+        let now = now_unix();
+        limit::record(&s, m.id, &limit::answered(&s, &login, &hit, now));
+        match limit::choose(&s, m, grant.as_ref(), now)? {
+            Ok(next) if attempts < limit::LIMIT_ATTEMPTS => login = next,
+            Ok(_) => {
+                // Another login has headroom; the loop asks there next.
+                let wait = limit::open_waits(&s, m.id, now)?
+                    .into_iter()
+                    .find(|w| w.login.as_ref() == Some(&login));
+                return Ok(PlanOutcome {
+                    mission_id: m.id,
+                    cards: vec![],
+                    refused: None,
+                    waiting: wait,
+                });
+            }
+            Err(wait) => return Ok(waiting_outcome(&s, m, wait)),
         }
     };
     let commands = match planner::parse_commands(&answer)
@@ -1317,11 +1396,11 @@ pub async fn run_planner(
     {
         Ok(c) => c,
         Err(mut why) => {
-            if answer.trim().is_empty() && !out.stderr.is_empty() {
+            if answer.trim().is_empty() && !stderr.is_empty() {
                 // `claude` printed nothing: what it said went to stderr.
                 why.push_str(&format!(
                     "; claude said: {}",
-                    crate::service::work::summary::last_error_line(&out.stderr)
+                    crate::service::work::summary::last_error_line(&stderr)
                 ));
             }
             let s = lock(&deps.store)?;
@@ -1337,6 +1416,7 @@ pub async fn run_planner(
                 mission_id: m.id,
                 cards: vec![],
                 refused: Some(why),
+                waiting: None,
             });
         }
     };
@@ -1347,7 +1427,20 @@ pub async fn run_planner(
         mission_id: m.id,
         cards: shown,
         refused: None,
+        waiting: None,
     })
+}
+
+/// Record that the mission waits on `wait` and say so as the planner's
+/// outcome.
+fn waiting_outcome(s: &Store, m: &MissionRow, wait: limit::LimitWait) -> PlanOutcome {
+    limit::record(s, m.id, &wait);
+    PlanOutcome {
+        mission_id: m.id,
+        cards: vec![],
+        refused: None,
+        waiting: Some(wait),
+    }
 }
 
 /// The planner's commands as cards: every `create_item` of the answer in
@@ -1710,17 +1803,27 @@ fn next_wake(m: &MissionRow, counts: &MissionTaskCounts, now: i64) -> i64 {
 /// a mission with nothing planned under its root, or one that needs a
 /// person's answer since its last call, and only when something happened
 /// since that call.
+///
+/// A planner whose last ask ended at a usage limit (TASK-291) is asked again
+/// as soon as a login it may use has headroom (the reset passed, or another
+/// login is under the line), and never before.
 fn planner_wanted(
     s: &Store,
     m: &MissionRow,
     steps: &[Step],
     counts: &MissionTaskCounts,
+    grant: Option<&GrantRow>,
+    now: i64,
 ) -> Result<Option<&'static str>, IpcError> {
     if s.mission_cards(m.id, CARDS_SHOWN)?
         .iter()
         .any(|c| c.state == "open" && c.source == "planner")
     {
         return Ok(None);
+    }
+    if limit::waiting(s, m.id)? {
+        let free = matches!(limit::choose(s, m, grant, now), Ok(Ok(_)));
+        return Ok(free.then_some("the usage limit it waited on is over"));
     }
     let last_plan = s
         .mission_events(m.id, None, 200)?
@@ -1951,7 +2054,7 @@ pub async fn tick_mission(deps: &Deps, id: i64, now: i64) -> Result<(), IpcError
     let want = {
         let s = lock(&deps.store)?;
         if a.effective >= 1 {
-            planner_wanted(&s, &m, &steps, &counts)?
+            planner_wanted(&s, &m, &steps, &counts, a.grant.as_ref(), now)?
         } else {
             None
         }
@@ -1969,7 +2072,12 @@ pub async fn tick_mission(deps: &Deps, id: i64, now: i64) -> Result<(), IpcError
     let s = lock(&deps.store)?;
     let counts = s.mission_task_counts(id)?;
     let m = s.get_mission(id)?.unwrap_or(m);
-    s.release_mission_lease(id, Some(next_wake(&m, &counts, now)), Some(now))?;
+    // A planner waiting on a usage limit is asked again at its reset.
+    let wake = match limit::wake_at(&s, id, now)? {
+        Some(reset) => next_wake(&m, &counts, now).min(reset.max(now + RESET_RECHECK_SECS)),
+        None => next_wake(&m, &counts, now),
+    };
+    s.release_mission_lease(id, Some(wake), Some(now))?;
     Ok(())
 }
 
