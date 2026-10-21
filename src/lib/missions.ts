@@ -128,6 +128,32 @@ export interface GraphNode {
   verification?: Verification | null;
   /** Its latest attempt, when this reader may see the task. */
   attempt?: AttemptBrief | null;
+  /** What git showed from its latest implement run; absent before any. */
+  evidence?: RunEvidence | null;
+}
+
+/** The line a person's run-evidence override is recorded under
+ *  (`service::work::gate::EVIDENCE_LINE`). */
+export const EVIDENCE_LINE = 'run evidence';
+
+/** The completion gate's run evidence (`service::work::gate::RunEvidence`):
+ *  an implement item closes only on commits or files from its latest
+ *  implement run, or on a person's override with a reason. */
+export interface RunEvidence {
+  /** present | missing | pending | overridden — tolerant of more. */
+  state: string;
+  task_id: number;
+  commits?: number;
+  files?: number;
+  /** What is missing, or the person's reason. */
+  detail: string;
+  by?: string | null;
+  at?: number | null;
+}
+
+/** Whether `e` stands between its item and done. */
+export function evidenceMissing(e: RunEvidence | null | undefined): boolean {
+  return e?.state === 'missing';
 }
 
 /** One done_when line's answer (`service::work::verify::CondCheck`). */
@@ -632,8 +658,14 @@ export function eventSentence(e: MissionEvent): string {
     case 'account_limit':
       // The loop holds its runs (review w03-5): say why, not just the kind.
       return p.why ? `Waiting for the account: ${String(p.why)}` : 'Waiting for the account';
-    case 'integration':
+    case 'integration': {
+      // One integration names every branch it merges; older events a pair.
+      const items = Array.isArray(p.items) ? (p.items as unknown[]).map(String) : [];
+      if (items.length > 1) {
+        return `Tasks ${items.slice(0, -1).join(', ')} and ${items[items.length - 1]} need one integration`;
+      }
       return `Tasks ${String(p.a ?? '')} and ${String(p.b ?? '')} conflict`;
+    }
     case 'note':
       return String(p.text ?? 'Note');
     case 'digest':
@@ -782,6 +814,12 @@ export interface VerifyOutcome {
 
 export function setWorkDoneWhen(itemId: number, lines: string[]): Promise<Result<VerifyOutcome>> {
   return invokeCmd<VerifyOutcome>('set_work_done_when', { args: { item_id: itemId, done_when: lines } });
+}
+
+/** A person accepts an implement run that left no commits or files, and
+ *  says why (the reason is required). */
+export function overrideRunEvidence(itemId: number, reason: string): Promise<Result<VerifyOutcome>> {
+  return verifyWorkItem(itemId, EVIDENCE_LINE, true, reason);
 }
 
 export function verifyWorkItem(itemId: number, line: string, ok: boolean, note?: string): Promise<Result<VerifyOutcome>> {

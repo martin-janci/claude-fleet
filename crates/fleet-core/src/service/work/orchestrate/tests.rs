@@ -226,6 +226,7 @@ async fn a_person_closes_an_implemented_item_and_the_mission_completes() {
             ..Default::default()
         };
         crate::service::tasks::complete_task_reported(&s, &t, "", Some(&report)).unwrap();
+        s.set_task_evidence(t.id, &evidence(2, 3)).unwrap();
     }
     let plan = {
         let m = mission_now(&fx);
@@ -272,6 +273,117 @@ async fn a_person_closes_an_implemented_item_and_the_mission_completes() {
         .unwrap();
     assert!(out.results.iter().all(|r| r.ok), "{:?}", out.results);
     assert_eq!(mission_now(&fx).state, "completed");
+}
+
+fn evidence(commits: u32, files: u32) -> crate::store::TaskEvidence {
+    crate::store::TaskEvidence {
+        at: 1,
+        commits_total: commits,
+        files_total: files,
+        ..Default::default()
+    }
+}
+
+/// The completion gate's run evidence (mission #4): an implement run that
+/// reports done but committed nothing and changed no file is not closed by
+/// the loop. It asks a person, naming what is missing, until a person
+/// overrides it with a reason.
+#[tokio::test]
+async fn the_loop_does_not_close_an_implement_item_with_no_run_evidence() {
+    let fx = granted();
+    let item = member(&fx, "one");
+    {
+        let s = lock(&fx.deps.store).unwrap();
+        let t = s.insert_task(None, None, "go", "n-1").unwrap();
+        s.set_task_run(t.id, item, 1, "implement").unwrap();
+        let t = s.get_task(t.id).unwrap().unwrap();
+        let report = TaskReport {
+            summary: "did it".into(),
+            outcome: "done".into(),
+            ..Default::default()
+        };
+        crate::service::tasks::complete_task_reported(&s, &t, "", Some(&report)).unwrap();
+        s.set_task_evidence(t.id, &evidence(0, 0)).unwrap();
+    }
+    let steps = {
+        let m = mission_now(&fx);
+        let s = lock(&fx.deps.store).unwrap();
+        plan_for(&s, &m).unwrap().unwrap().steps
+    };
+    assert!(!steps.iter().any(|st| st.kind == "close"), "{steps:?}");
+    let ask = steps
+        .iter()
+        .find(|st| st.kind == "ask" && st.item_id == Some(item))
+        .unwrap_or_else(|| panic!("{steps:?}"));
+    assert!(ask.reason.contains("no run evidence"), "{}", ask.reason);
+    assert!(
+        ask.context
+            .as_deref()
+            .is_some_and(|c| c.contains("committed nothing")),
+        "{ask:?}"
+    );
+    // A stale plan's close is refused for the loop.
+    let close = Step {
+        kind: "close".into(),
+        item_id: Some(item),
+        role: None,
+        reason: "stale".into(),
+        context: None,
+        auto: true,
+    };
+    let r = apply_step(
+        &fx.deps,
+        &fx.m,
+        &close,
+        &Actor::Loop,
+        &ViewScope::internal(),
+    )
+    .await;
+    assert!(!r.ok);
+    assert!(r.detail.contains("no run evidence"), "{}", r.detail);
+    assert_ne!(
+        lock(&fx.deps.store)
+            .unwrap()
+            .get_work_item(item)
+            .unwrap()
+            .unwrap()
+            .status_category,
+        "done"
+    );
+    // A person's override, with a reason, lets the close through.
+    crate::service::work::verify::verify(
+        &WorkLinkArgs {
+            action: "verify".into(),
+            item_id: Some(item),
+            line: Some(crate::service::work::gate::EVIDENCE_LINE.into()),
+            ok: Some(true),
+            note: Some("the fix was a host config change".into()),
+            ..Default::default()
+        },
+        &fx.deps.store,
+        &fx.me,
+    )
+    .unwrap();
+    let steps = {
+        let m = mission_now(&fx);
+        let s = lock(&fx.deps.store).unwrap();
+        plan_for(&s, &m).unwrap().unwrap().steps
+    };
+    assert!(
+        steps
+            .iter()
+            .any(|st| st.kind == "close" && st.item_id == Some(item)),
+        "{steps:?}"
+    );
+    let r = apply_step(
+        &fx.deps,
+        &fx.m,
+        &close,
+        &Actor::Loop,
+        &ViewScope::internal(),
+    )
+    .await;
+    assert!(r.ok, "{}", r.detail);
 }
 
 /// The loop applies the planner's cards one by one, each perhaps after an
