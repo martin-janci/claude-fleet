@@ -588,16 +588,23 @@
   let grantLevel = $state(2);
   let grantHours = $state(8);
   let grantBudget = $state('');
+  /** Until the mission completes (a finite mission's), bounded by the budget. */
+  let grantUntilDone = $state(false);
   /** Hosts the grant lets the loop run on; none ticked: any host. */
   let grantHosts = $state<string[]>([]);
 
   async function grant() {
     if (!mission) return;
     const cents = Math.round(Number(grantBudget) * 100);
+    const untilDone = grantUntilDone && mission.mode === 'finite';
+    if (untilDone && !(grantBudget.trim() && cents > 0)) {
+      notice = 'A grant until the mission completes needs a budget.';
+      return;
+    }
     const out = await act(
       grantMission(mission.id, {
         level: grantLevel,
-        hours: grantHours,
+        ...(untilDone ? { until_done: true } : { hours: grantHours }),
         ...(grantBudget.trim() && cents > 0 ? { budget_cents: cents } : {}),
         ...(grantHosts.length > 0 ? { hosts: [...grantHosts] } : {}),
       }),
@@ -605,6 +612,7 @@
     if (out) {
       granting = false;
       grantHosts = [];
+      grantUntilDone = false;
     }
   }
 
@@ -1369,7 +1377,9 @@
                   >
                   {#if plan.autonomy.grant}
                     <button class="btn btn--quiet" type="button" disabled={busy || changeBlocked} data-testid="mission-revoke" onclick={() => void revokeGrant()}
-                      >End the grant (L{plan.autonomy.grant.level}, until {new Date(plan.autonomy.grant.expires_at * 1000).toLocaleString()})</button
+                      >End the grant (L{plan.autonomy.grant.level}, {plan.autonomy.grant.until_done
+                        ? 'until the mission completes'
+                        : `until ${new Date(plan.autonomy.grant.expires_at * 1000).toLocaleString()}`})</button
                     >
                   {:else}
                     <button class="btn btn--quiet" type="button" disabled={busy || changeBlocked} data-testid="mission-grant" onclick={() => (granting = !granting)}
@@ -1388,9 +1398,24 @@
                       </select></label
                     >
                     <div class="row">
-                      <label class="field inline">Hours <input type="number" min="1" max="168" bind:value={grantHours} class="role" /></label>
-                      <label class="field inline">Budget $ <input placeholder="none" bind:value={grantBudget} class="role" data-testid="mission-grant-budget" /></label>
+                      {#if !(grantUntilDone && mission.mode === 'finite')}
+                        <label class="field inline">Hours <input type="number" min="1" max="168" bind:value={grantHours} class="role" /></label>
+                      {/if}
+                      <label class="field inline"
+                        >Budget $ <input
+                          placeholder={grantUntilDone && mission.mode === 'finite' ? 'required' : 'none'}
+                          bind:value={grantBudget}
+                          class="role"
+                          data-testid="mission-grant-budget"
+                        /></label
+                      >
                     </div>
+                    {#if mission.mode === 'finite'}
+                      <label class="field inline"
+                        ><input type="checkbox" bind:checked={grantUntilDone} data-testid="mission-grant-until-done" /> Until the mission completes
+                        <span class="muted small">(the budget is its only bound)</span></label
+                      >
+                    {/if}
                     {#if $hosts.length > 0}
                       <fieldset class="hosts" data-testid="mission-grant-hosts">
                         <legend>Hosts <span class="muted small">(none ticked: any)</span></legend>

@@ -1498,7 +1498,7 @@ impl FleetTools {
         mission_start {mission_id, step?}: take the next steps; retry \
         {item_id, note?}; mission_plan: ask the planner; card_decide \
         {card_id, ok, note?}; mission_grant {mission_id, level, hours?, \
-        budget_cents?, hosts?, max_parallel?, profile?}; mission_revoke; \
+        budget_cents?, until_done?, hosts?, max_parallel?, profile?}; mission_revoke; \
         missions_pause_all. mission_release_note {mission_id}: a drafted \
         release note of a completed mission; today_brief {refresh?, org_id?, \
         since?}: Today's morning brief, drafted only on refresh; \
