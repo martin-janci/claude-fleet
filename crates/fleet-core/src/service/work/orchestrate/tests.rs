@@ -773,6 +773,43 @@ async fn the_loop_never_completes_a_mission() {
     assert_eq!(mission_now(&fx).state, "completed");
 }
 
+/// TASK-295: red CI on a mission's pull request holds a person's complete
+/// step too; only the mission's own Complete takes the override.
+#[tokio::test]
+async fn red_ci_holds_the_complete_step() {
+    let fx = fixture();
+    let item = member(&fx, "one");
+    let ana = fx.me.person.unwrap();
+    {
+        let s = lock(&fx.deps.store).unwrap();
+        missions::test_mission_pr(&s, item, ana, 476, "MERGED", "failing");
+    }
+    let step = Step {
+        kind: "complete".into(),
+        item_id: Some(fx.root),
+        role: None,
+        reason: "every task is done".into(),
+        context: None,
+        auto: false,
+    };
+    let m = mission_now(&fx);
+    let r = apply_step(
+        &fx.deps,
+        &m,
+        &step,
+        &Actor::Person(format!("person:{ana}")),
+        &fx.me,
+    )
+    .await;
+    assert!(!r.ok);
+    assert!(
+        r.detail.contains("CI is failing on acme/pay#476"),
+        "{}",
+        r.detail
+    );
+    assert_eq!(mission_now(&fx).state, "active");
+}
+
 /// Contract 14: the missions list carries each mission's spend and its
 /// grant's budget, and the plan an average run's cost for the run cards.
 #[test]

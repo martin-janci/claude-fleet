@@ -359,6 +359,29 @@ describe('WorkMissions', () => {
       expect(screen.queryByTestId('mission-more')).toBeNull();
     });
 
+    it('red CI on its PRs holds Complete until a person completes it anyway (TASK-295)', async () => {
+      handlers.set_mission_state = (a) =>
+        a.ci_override
+          ? (current = mission({ state: 'completed', version: 2 }))
+          : Object.assign(new Error('CI is failing on acme/pay#476; fix it, or a person completes the mission anyway (ci_override)'), {
+              code: 'E_CI_FAILING',
+            });
+      await openActive();
+      await fireEvent.click(screen.getByTestId('mission-more'));
+      await fireEvent.click(screen.getByTestId('mission-menu-completed'));
+      await fireEvent.click(screen.getByTestId('mission-move-confirm'));
+      await flush();
+      expect(screen.getByTestId('mission-notice').textContent).toContain('acme/pay#476');
+      expect(screen.getByTestId('mission-ci-override-row')).toBeTruthy();
+      await fireEvent.click(screen.getByTestId('mission-ci-override'));
+      await flush();
+      expect(calls('set_mission_state')).toEqual([
+        { mission_id: 4, state: 'completed', expected_version: 1 },
+        { mission_id: 4, state: 'completed', expected_version: 1, ci_override: true },
+      ]);
+      expect(screen.queryByTestId('mission-ci-override-row')).toBeNull();
+    });
+
     it('New: Esc closes the menu and a draft offers only Cancel in it', async () => {
       renderMissions();
       await flush();

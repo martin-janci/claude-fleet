@@ -1495,6 +1495,14 @@ derive from them.
   pull requests its work opened, as `prs { list }` rows behind the same
   fence. A finished mission reopens with `work_link { mission_state,
   status: paused }`; it does not go straight back to active.
+- **Completing with red CI** (TASK-295): `mission_state { status:
+  completed }` and the `complete` step are refused with `E_CI_FAILING` while
+  any open or merged pull request of the mission (`finish.prs`' set) last
+  showed failing CI; a closed, unmerged one does not count, and one the
+  caller may not see is counted unnamed. A person completes it anyway with
+  `ci_override: true` on `mission_state` (the step takes no override); the
+  mission records a `ci_override` event naming the PRs. Pending CI does not
+  hold it.
 - **`sessions`** (on `work { mission }`, any state; optional, absent when
   there are none and from an older hub): the mission's child sessions, the
   running sessions on its member items that the caller may see, with the

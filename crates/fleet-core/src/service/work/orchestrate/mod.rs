@@ -532,6 +532,12 @@ async fn apply_step_inner(
                 ));
             }
             let s = lock(&deps.store)?;
+            // Red CI on its pull requests holds the step; only the
+            // mission's own Complete takes a person's override.
+            if let Some(e) = super::missions::ci_refusal(&super::missions::red_prs(&s, view, m.id)?)
+            {
+                return Err(e);
+            }
             if let Some(root) = m.root_item_id {
                 s.set_item_status(root, "done")?;
             }
