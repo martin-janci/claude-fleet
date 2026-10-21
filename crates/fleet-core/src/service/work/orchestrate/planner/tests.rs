@@ -147,6 +147,7 @@ fn member(id: i64, title: &str, depends_on: &[i64]) -> PlanNode {
         title: title.into(),
         depends_on: depends_on.to_vec(),
         rejected: false,
+        pending: false,
     }
 }
 

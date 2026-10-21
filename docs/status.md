@@ -1021,6 +1021,11 @@ queue. An answer is refused when it leaves a merge-wave item (titled
 the latest wave it waits for — counting this answer's creates and edges;
 a gap a person already accepted does not refuse later answers
 (`check_merge_waves`), and the next snapshot shows why it was refused.
+The same rule refuses a plan import (`mission_import`, before any row is
+written, naming steps) and a person's accept (`accept_many`, a single
+accept) that would leave a merge-wave item short; a proposal still
+waiting counts toward its wave but merges nothing until accepted, and
+the mission's root is no item of a wave (`check_merge_change`).
 `git merge-tree` checks the finished branches against each other and
 proposes ONE task per repo that integrates every live branch into one
 (`integrate.rs`); a branch another member's head already contains is left
