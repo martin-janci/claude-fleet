@@ -10,14 +10,21 @@
 // settings change applies on Enter exactly as Settings' own plain-words row
 // does, and one whose setting asks for confirmation opens Settings instead.
 import { get } from 'svelte/store';
-import { settingsOpen, requestHostsView, shortcutSheetOpen } from './app_views';
+import { settingsOpen, requestHostsView, shortcutSheetOpen, inspectorToggleRequest, nextNeedsYouRequest } from './app_views';
 import { goTo } from './destination';
 import { pauseAllMissions } from './missions';
 import { sessionView } from './prefs';
 import type { SessionView } from './session_view';
-import { theme, cycleTheme, type Theme } from './theme';
-import { openToday } from './control';
-import { toggleSidebarView } from './work_view';
+import { theme, applyTheme, themeLabel, THEMES, type Theme } from './theme';
+import { openControl, openToday } from './control';
+import { cycleWorkOrg, selectedTaskId, sidebarView, taskDetailOpen, toggleSidebarView } from './work_view';
+import { cycleScope } from './orgs';
+import { openNewSessionPicker } from './switcher_request';
+import { openRoutines } from './routines';
+import { openMissionRoom } from './mission_room';
+import { requestTerminalTab } from './terminals';
+import { fleetFilter, fleets, multiFleet } from './fleets';
+import { hasNoPane } from './sessions';
 import { pendingInputFor, type AnswerView } from './pending_input';
 import { sendAnswer } from './answer_send';
 import { hubActionBlocked, hubBlock, hubStatus } from './hub';
@@ -35,8 +42,8 @@ import type { Descriptor } from './pages/pages';
 import type { SessionRow } from './sessions';
 import { shortcutLabel } from './shortcuts';
 import { requestSessionAction, sessionMenuItems, type SessionActionId } from './session_actions';
-import type { SwitcherEntry } from './quick_switcher';
-import { WORKSPACES, switchWorkspace, workspace, type WorkspaceId } from './workspace';
+import { MISSION_OPEN, ROUTINE_OPEN, type SwitcherEntry } from './quick_switcher';
+import { WORKSPACES, landOn, switchWorkspace, workspace, type WorkspaceId } from './workspace';
 
 export type PrefixMode = 'all' | 'commands' | 'work' | 'hosts';
 
@@ -153,6 +160,17 @@ export function paletteCommands(ctx: CommandContext): PaletteCommand[] {
       synonyms: ['editor', 'vs code', 'vscode', 'code', 'open in editor'],
       shortcut: 'open-in-editor',
     });
+    // ⌥⌘T's row: only on a session whose terminals are yours to open.
+    if (get(accessOf)(s) === 'own' && !hasNoPane(s)) {
+      out.push({
+        id: 'session.new-terminal',
+        label: 'New terminal',
+        section: 'This session',
+        description: `${name} · a shell beside the agent`,
+        synonyms: ['terminal', 'shell', 'new terminal', 'tab'],
+        shortcut: 'new-terminal',
+      });
+    }
   }
   out.push(
     { id: 'app.settings', label: 'Open Settings', section: 'Commands', description: 'Settings',
@@ -163,8 +181,6 @@ export function paletteCommands(ctx: CommandContext): PaletteCommand[] {
       synonyms: ['today', 'digest'], shortcut: 'today' },
     { id: 'app.work-view', label: 'Switch Sessions and Work', section: 'Commands', description: 'Left list',
       synonyms: ['work', 'sessions', 'switch'], shortcut: 'work-view' },
-    { id: 'app.theme', label: `Theme: ${themeAfter(get(theme))}`, section: 'Commands',
-      description: `Now ${get(theme)}`, synonyms: ['theme', 'dark', 'light', 'auto', 'sun', 'night', 'appearance'] },
     { id: 'app.shortcuts', label: 'Keyboard shortcuts', section: 'Commands', description: 'Every chord',
       synonyms: ['keys', 'keyboard', 'shortcuts', 'help'], shortcut: 'shortcut-sheet' },
     // Pause all missions pauses each active mission, as before; Pause all
@@ -181,7 +197,44 @@ export function paletteCommands(ctx: CommandContext): PaletteCommand[] {
       synonyms: ['automation', 'routines', 'runs', 'agents', 'loops'] },
     { id: 'app.dashboard', label: 'Open dashboard', section: 'Commands', description: 'This workspace’s numbers',
       synonyms: ['dashboard', 'dashboards', 'stats', 'sprint', 'health', 'charts'] },
+    // The rail items and live chords the palette lacked (review w18-4).
+    { id: 'app.new-session', label: 'New session', section: 'Commands', description: 'Start Claude on a host',
+      synonyms: ['new', 'new session', 'start', 'session', 'launch'], shortcut: 'new-session' },
+    { id: 'app.control', label: 'Open Control', section: 'Commands', description: 'The fleet agent',
+      synonyms: ['control', 'agent', 'fleet agent', 'chat', 'orbit'], shortcut: 'agent' },
+    { id: 'app.inbox', label: 'Open Inbox', section: 'Commands', description: 'What needs you',
+      synonyms: ['inbox', 'needs you', 'attention', 'triage'] },
+    { id: 'app.next-needs-you', label: 'Next session that needs you', section: 'Commands', description: 'Session list',
+      synonyms: ['next', 'needs you', 'attention', 'waiting', 'blocked'], shortcut: 'next-needs-you' },
+    { id: 'app.toolkit', label: 'Open Toolkit', section: 'Commands', description: 'Skills, agents and assets',
+      synonyms: ['toolkit', 'assets', 'skills', 'catalog', 'plugins'] },
+    { id: 'app.inspector', label: 'Show or hide the inspector', section: 'Commands', description: 'Right column',
+      synonyms: ['inspector', 'details', 'panel', 'right column'], shortcut: 'inspector' },
+    { id: 'app.scope', label: 'Next organisation scope', section: 'Commands', description: 'Which organisation the lists show',
+      synonyms: ['scope', 'organisation', 'organization', 'org', 'filter'], shortcut: 'scope' },
+    { id: 'app.new-routine', label: 'New routine', section: 'Commands', description: 'Automation',
+      synonyms: ['new routine', 'routine', 'schedule', 'automation', 'cron'] },
   );
+  // One row per fleet not shown, once this window shows more than one.
+  if (get(multiFleet)) {
+    const shown = get(fleetFilter);
+    if (shown !== 'all') {
+      out.push({ id: `${FLEET}all`, label: 'Show all fleets', section: 'Commands', description: 'Fleet filter',
+        synonyms: ['fleet', 'fleets', 'all fleets', 'hub'] });
+    }
+    for (const f of get(fleets)) {
+      if (f.id === shown) continue;
+      out.push({ id: `${FLEET}${f.id}`, label: `Show fleet ${f.label}`, section: 'Commands', description: 'Fleet filter',
+        synonyms: ['fleet', 'fleets', 'hub', f.label.toLowerCase()] });
+    }
+  }
+  // One row per theme not active, by the names Settings uses (review w20-11).
+  const now = get(theme);
+  for (const t of THEMES) {
+    if (t.id === now) continue;
+    out.push({ id: `${THEME}${t.id}`, label: `Theme: ${t.label}`, section: 'Commands', description: `Now ${themeLabel(now)}`,
+      synonyms: ['theme', 'appearance', t.label.toLowerCase(), ...THEME_WORDS[t.id]] });
+  }
   // Workspaces (persona design 2026-10-11): one row per workspace not active.
   const active = get(workspace);
   for (const w of WORKSPACES) {
@@ -192,11 +245,8 @@ export function paletteCommands(ctx: CommandContext): PaletteCommand[] {
   return out;
 }
 
-const THEME_NEXT: Record<Theme, Theme> = { sun: 'auto', auto: 'light', light: 'dark', dark: 'sun' };
-/** The theme the command switches to: the sidebar toggle's order. */
-function themeAfter(t: Theme): Theme {
-  return THEME_NEXT[t];
-}
+/** Words besides its name that find a theme's row. */
+const THEME_WORDS: Record<Theme, string[]> = { sun: ['day', 'sunset', 'dynamic'], auto: ['auto', 'os'], light: ['day'], dark: ['night'] };
 
 /** Switcher rows for `cmds`, each carrying the chord the platform shows. */
 export function commandRows(cmds: readonly PaletteCommand[], isMac: boolean): SwitcherEntry[] {
@@ -233,6 +283,12 @@ export function settingRow(rest: string, descs: Iterable<Descriptor>, canWrite: 
   };
 }
 
+/** A palette id that switches theme: `app.theme.<id>`. */
+const THEME = 'app.theme.';
+
+/** A palette id that sets the fleet filter: `app.fleet.<id>` (or `all`). */
+const FLEET = 'app.fleet.';
+
 /** A palette id that switches workspace: `app.workspace.<id>`. */
 const WORKSPACE = 'app.workspace.';
 
@@ -246,6 +302,25 @@ export async function runCommand(id: string, ctx: CommandContext): Promise<void>
     // Details runs it, with its own gate, confirm and dialog, as it does for
     // the row menu; the request opens the inspector or the Details tab.
     if (s && s.status !== 'ghost') requestSessionAction(s, id.slice(SESSION_ACTION.length) as SessionActionId);
+    return;
+  }
+  if (id.startsWith(THEME)) {
+    const to = THEMES.find((t) => `${THEME}${t.id}` === id);
+    if (to) applyTheme(to.id);
+    return;
+  }
+  if (id.startsWith(MISSION_OPEN)) {
+    const n = Number(id.slice(MISSION_OPEN.length));
+    if (Number.isInteger(n)) openMissionRoom(n);
+    return;
+  }
+  if (id.startsWith(ROUTINE_OPEN)) {
+    const n = Number(id.slice(ROUTINE_OPEN.length));
+    if (Number.isInteger(n)) openRoutines({ select: n });
+    return;
+  }
+  if (id.startsWith(FLEET)) {
+    fleetFilter.set(id.slice(FLEET.length));
     return;
   }
   if (id.startsWith(WORKSPACE)) {
@@ -312,9 +387,6 @@ export async function runCommand(id: string, ctx: CommandContext): Promise<void>
     case 'app.work-view':
       toggleSidebarView();
       return;
-    case 'app.theme':
-      cycleTheme();
-      return;
     case 'app.shortcuts':
       shortcutSheetOpen.set(true);
       return;
@@ -323,6 +395,40 @@ export async function runCommand(id: string, ctx: CommandContext): Promise<void>
       return;
     case 'app.dashboard':
       goTo('dashboard');
+      return;
+    case 'session.new-terminal':
+      if (!s) return;
+      // Settings and a Work task's detail cover the pane without changing
+      // the destination, so goTo alone would open the terminal unseen.
+      settingsOpen.set(false);
+      if (get(sidebarView) === 'work' && get(selectedTaskId)) taskDetailOpen.set(false);
+      sessionView.set('terminal');
+      goTo('session');
+      requestTerminalTab('new');
+      return;
+    case 'app.new-session':
+      openNewSessionPicker();
+      return;
+    case 'app.control':
+      openControl('chat');
+      return;
+    case 'app.inbox':
+      landOn('inbox');
+      return;
+    case 'app.toolkit':
+      landOn('toolkit');
+      return;
+    case 'app.next-needs-you':
+      nextNeedsYouRequest.update((n) => n + 1);
+      return;
+    case 'app.inspector':
+      inspectorToggleRequest.update((n) => n + 1);
+      return;
+    case 'app.scope':
+      (get(sidebarView) === 'work' ? cycleWorkOrg : cycleScope)();
+      return;
+    case 'app.new-routine':
+      openRoutines({ template: 'blank' });
       return;
     case 'app.automation-pause': {
       const on = !settingBool(get(fleetSettings), SETTING_KEYS.automationPaused);

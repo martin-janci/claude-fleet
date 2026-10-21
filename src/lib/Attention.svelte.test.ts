@@ -9,10 +9,12 @@ vi.mock('@tauri-apps/api/core', () => ({
 
 import Attention from './Attention.svelte';
 import { sessions, sessionsLoaded, type SessionRow } from './sessions';
-import { toasts, clearToasts } from './toasts';
+import { toasts, clearToasts, runToastAction } from './toasts';
+import { clearSelection, selectedSession } from './selection';
 import { notifyStuckOs, notifyStuckToast } from './notify';
 import { fleetSettings } from './fleet_settings';
 import { failing, type FailingRoutine } from './routines';
+import { PRIMARY, _resetFleetsForTest, _setFleetRowsForTest, _setFleetsForTest, emptyRows, type FleetInfo } from './fleets';
 
 let nextId = 1;
 function row(over: Partial<SessionRow> = {}): SessionRow {
@@ -83,6 +85,20 @@ describe('Attention', () => {
     expect(get(toasts)).toHaveLength(1);
   });
 
+  it('w11-12: the stuck toast opens the session', async () => {
+    const a = row({ tmux_name: 'dev-open', host_alias: 'mefistos' });
+    sessions.set([a]);
+    clearSelection();
+    render(Attention);
+    await tick();
+    sessions.set([{ ...a, stuck_kind: 'press_enter' }]);
+    await tick();
+    const t = get(toasts)[0];
+    expect(t.action?.label).toBe('Open');
+    runToastAction(t.id);
+    expect(get(selectedSession)?.id).toBe(a.id);
+  });
+
   it('does not replay stuck rows delivered by the bootstrap fill', async () => {
     // App.svelte mounts the sidebar (and this watcher) before the first
     // list_sessions resolves: the store goes [] -> [rows]. That fill is
@@ -129,11 +145,14 @@ describe('Attention', () => {
 });
 
 const shown: string[] = [];
+const made: FakeNotification[] = [];
 class FakeNotification {
   static permission = 'granted';
   static requestPermission = async () => 'granted';
+  onclick: ((e: Event) => void) | null = null;
   constructor(title: string) {
     shown.push(title);
+    made.push(this);
   }
 }
 
@@ -161,6 +180,20 @@ describe('Attention: the notifications matrix (11.9)', () => {
     expect(shown).toEqual(['dev-q needs you']);
   });
 
+  it('w11-4: clicking the notification opens the session', async () => {
+    const a = row({ tmux_name: 'dev-click', claude_status: 'working' });
+    sessions.set([a]);
+    clearSelection();
+    made.length = 0;
+    render(Attention);
+    await tick();
+    sessions.set([{ ...a, claude_status: 'blocked' }]);
+    await tick();
+    expect(made).toHaveLength(1);
+    made[0].onclick?.(new Event('click'));
+    expect(get(selectedSession)?.id).toBe(a.id);
+  });
+
   it('stays quiet for a state the column leaves out, and while the window has focus', async () => {
     const a = row({ tmux_name: 'dev-r', claude_status: 'working' });
     const b = row({ tmux_name: 'dev-s', claude_status: 'working' });
@@ -175,6 +208,62 @@ describe('Attention: the notifications matrix (11.9)', () => {
     sessions.set([{ ...a, claude_status: 'blocked' }, { ...b, claude_status: 'failed' }]);
     await tick();
     expect(shown).toEqual([]);
+  });
+
+  describe('extra fleets (review w01)', () => {
+    const base: FleetInfo = {
+      id: PRIMARY,
+      label: 'home',
+      url: null,
+      color: '#5b8def',
+      primary: true,
+      local: true,
+      client_name: null,
+      connection: null,
+      unavailable: null,
+    };
+    const extra = (id: string, over: Partial<FleetInfo> = {}): FleetInfo => ({
+      ...base,
+      id,
+      label: id,
+      url: `https://${id}.example.com`,
+      primary: false,
+      local: false,
+      connection: { state: 'connected' },
+      ...over,
+    });
+    const rowsOf = (list: SessionRow[], loaded = true) => ({ ...emptyRows(), loaded, sessions: new Map(list.map((r) => [r.id, r])) });
+    afterEach(() => _resetFleetsForTest());
+
+    it('w01-3: a duplicate fleet never notifies, the fleet it duplicates does', async () => {
+      _setFleetsForTest([base, extra('company'), extra('again', { duplicate_of: 'company' })]);
+      const a = row({ tmux_name: 'pos', claude_status: 'working' });
+      const b = row({ tmux_name: 'pos-dup', claude_status: 'working' });
+      render(Attention);
+      _setFleetRowsForTest('company', rowsOf([a]));
+      _setFleetRowsForTest('again', rowsOf([b]));
+      await tick();
+      _setFleetRowsForTest('company', rowsOf([{ ...a, claude_status: 'blocked' }]));
+      _setFleetRowsForTest('again', rowsOf([{ ...b, claude_status: 'blocked' }]));
+      await tick();
+      expect(shown).toEqual(['pos needs you']);
+    });
+
+    it("w01-13: an event before a fleet's first list is no baseline", async () => {
+      _setFleetsForTest([base, extra('company')]);
+      const a = row({ tmux_name: 'early', claude_status: 'working' });
+      const b = row({ tmux_name: 'waiting-1', claude_status: 'blocked' });
+      const c = row({ tmux_name: 'waiting-2', claude_status: 'blocked' });
+      render(Attention);
+      _setFleetRowsForTest('company', rowsOf([a], false));
+      await tick();
+      _setFleetRowsForTest('company', rowsOf([a, b, c]));
+      await tick();
+      expect(shown).toEqual([]);
+      _setFleetRowsForTest('company', rowsOf([{ ...a, claude_status: 'blocked' }, b, c]));
+      await tick();
+      expect(shown).toEqual(['early needs you']);
+    });
   });
 
   it('announces a routine run that fails after the app opened', async () => {

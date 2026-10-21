@@ -49,6 +49,7 @@ actions:
     each: findings
     when: { field: next, eq: task }
     do: work_task
+    fingerprint: "{{item.fingerprint}}"
     summary: "{{item.title}}"
     body: "{{item.why}}\n\nChange: {{item.change}}\n\nEffort {{item.effort}}, risk {{item.risk}}. Fingerprint: {{item.fingerprint}}"
     steps: "{{item.steps}}"
@@ -56,6 +57,7 @@ actions:
     each: findings
     when: { field: next, eq: fix }
     do: fix_session
+    fingerprint: "{{item.fingerprint}}"
     project: "{{repo}}"
     host: "{{fix_host}}"
     summary: "{{item.title}}"

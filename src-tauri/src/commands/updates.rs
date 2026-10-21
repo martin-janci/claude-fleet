@@ -64,6 +64,12 @@ struct Target {
     reported_at: i64,
     status: String,
     target_version: Option<String>,
+    /// Why it failed or was rolled back, for the cell's tooltip.
+    #[serde(default)]
+    last_error: Option<String>,
+    /// `pinned` when an operator's pin decides it.
+    #[serde(default)]
+    reason_code: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -85,29 +91,63 @@ fn part(component: &str) -> String {
         "hub" => "Hub",
         "agent" => "Agent",
         "desktop" => "Desktop",
-        "mobile" => "Phone",
+        "android" | "ios" | "mobile" => "Phone",
         other => other,
     }
     .into()
 }
 
+/// A desktop or a phone: a person installs it, and nothing rolls it back.
+fn is_client_part(component: &str) -> bool {
+    matches!(component, "desktop" | "android" | "ios" | "mobile")
+}
+
 fn update(t: &Target) -> String {
-    if matches!(t.phase.as_str(), "failed" | "rollback_failed") {
-        return "Update failed".into();
+    match t.phase.as_str() {
+        "rollback_failed" if t.component == "hub" => return "Rollback failed — hub stopped".into(),
+        "rollback_failed" => return "Rollback failed".into(),
+        "failed" => return "Update failed".into(),
+        // The updater bad-listed the version it tried; it will not retry it
+        // whatever the hub still offers (review w26-7).
+        "recovered" => return "Rolled back".into(),
+        _ => {}
     }
     if let Some((words, _)) = in_flight(&t.phase) {
         return words.into();
     }
+    let pinned = t.reason_code.as_deref() == Some("pinned");
     match t.status.as_str() {
-        "up_to_date" => "Up to date",
-        "update_available" => "Update available",
-        "update_required" => "Update required",
-        "client_too_new" => "Newer than the hub",
-        "rollback" => "Rolling back",
-        "hold" => "Held",
-        _ => "Unknown",
+        // An operator's pin holds it there while the channel moves on
+        // (review w26-5): say so rather than "Up to date".
+        "up_to_date" if pinned => format!("Pinned to {}", t.version),
+        "up_to_date" => "Up to date".into(),
+        "update_available" => "Update available".into(),
+        "update_required" => "Update required".into(),
+        "client_too_new" => "Newer than the hub".into(),
+        // Desktops and phones never apply a rollback themselves.
+        "rollback" if is_client_part(&t.component) => "Older version pinned".into(),
+        "rollback" => "Rolling back".into(),
+        "hold" if pinned => "Pin held back".into(),
+        "hold" => "Held".into(),
+        _ => "Unknown".into(),
     }
-    .into()
+}
+
+/// The phases after which the updater will not retry what it was offered.
+fn ended_badly(phase: &str) -> bool {
+    matches!(phase, "failed" | "recovered" | "rollback_failed")
+}
+
+/// The `update` cell: its words, and after a failure the reason the
+/// updater gave (review w26-7).
+fn update_cell(t: &Target) -> String {
+    let words = update(t);
+    match &t.last_error {
+        Some(e) if ended_badly(&t.phase) && !e.trim().is_empty() => {
+            format!("{words}: {}", e.trim())
+        }
+        _ => words,
+    }
 }
 
 /// The table's rows from an `update_status` answer, hub first, then by part
@@ -126,11 +166,12 @@ fn rows(status: Value) -> Result<Vec<UpdateTargetRow>, IpcError> {
             device: device(&t.target),
             part: part(&t.component),
             version: t.version.clone(),
-            update: update(t),
+            update: update_cell(t),
             offers: t
                 .target_version
                 .clone()
-                .filter(|v| *v != t.version && t.status != "up_to_date"),
+                .filter(|v| *v != t.version && t.status != "up_to_date")
+                .filter(|_| !ended_badly(&t.phase)),
             reported_at: t.reported_at,
             transfer: in_flight(&t.phase).map(|(_, percent)| RowTransfer {
                 column: "update".into(),
@@ -279,6 +320,51 @@ mod tests {
         assert_eq!(by("mars").update, "Installing");
         assert_eq!(by("mars").transfer.and_then(|t| t.percent), Some(50));
         assert_eq!(by("Hub").transfer, None);
+    }
+
+    /// w26-7: after a failure the row says what happened and why, and
+    /// offers nothing the updater will not retry.
+    #[test]
+    fn a_rollback_says_so_and_why() {
+        let mut rec = target("hub:self", "hub", "update_available", Some("0.5.4"));
+        rec["phase"] = json!("recovered");
+        rec["last_error"] = json!("reconcile failures rose from 0 to 3");
+        let mut stuck = target("agent:venus", "agent", "up_to_date", None);
+        stuck["phase"] = json!("rollback_failed");
+        let mut hub_stuck = target("hub:self", "hub", "up_to_date", None);
+        hub_stuck["phase"] = json!("rollback_failed");
+        let got = rows(json!({ "targets": [rec, stuck] })).unwrap();
+        assert_eq!(
+            got[0].update,
+            "Rolled back: reconcile failures rose from 0 to 3"
+        );
+        assert_eq!(got[0].offers, None);
+        assert_eq!(got[1].update, "Rollback failed");
+        let got = rows(json!({ "targets": [hub_stuck] })).unwrap();
+        assert_eq!(got[0].update, "Rollback failed — hub stopped");
+    }
+
+    /// w26-7: a desktop or phone given an older pin never rolls back itself.
+    #[test]
+    fn an_older_pin_on_a_client_is_not_a_rollback_in_flight() {
+        let desk = target("client:3", "desktop", "rollback", Some("0.5.2"));
+        let phone = target("client:4", "android", "rollback", Some("0.5.2"));
+        let hub = target("hub:self", "hub", "rollback", Some("0.5.2"));
+        let got = rows(json!({ "targets": [desk, phone, hub] })).unwrap();
+        let by = |d: &str| got.iter().find(|r| r.device == d).unwrap().clone();
+        assert_eq!(by("Hub").update, "Rolling back");
+        assert_eq!(by("Device 3").update, "Older version pinned");
+        assert_eq!(by("Device 4").update, "Older version pinned");
+        assert_eq!(by("Device 4").part, "Phone");
+    }
+
+    /// w26-5: a pin that holds a part where it is says so.
+    #[test]
+    fn a_pinned_part_says_pinned_not_up_to_date() {
+        let mut t = target("hub:self", "hub", "up_to_date", Some("0.5.3"));
+        t["reason_code"] = json!("pinned");
+        let got = rows(json!({ "targets": [t] })).unwrap();
+        assert_eq!(got[0].update, "Pinned to 0.5.3");
     }
 
     #[test]

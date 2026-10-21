@@ -60,6 +60,7 @@
   import { outbox, receipt as outboxReceipt } from './outbox';
   import type { NextStep } from './mission_triage';
   import type { IpcError, Result } from './result';
+  import { parkedHeld } from './composer_hold';
   import {
     acceptWorkProposals,
     autonomyWords,
@@ -128,6 +129,7 @@
     showMissionPanel,
     startNewMission,
     steerBlocked,
+    steerBusy,
     steerPrefix,
     steerReceipts,
     type MissionPanelTab,
@@ -139,6 +141,9 @@
   const missions = $derived($missionList.missions);
   let detail = $state.raw<MissionDetail | null>(null);
   let notice = $state<string | null>(null);
+  /** Review w17-4: the last re-read of the open mission failed; what was
+   *  loaded stays on screen. */
+  let refreshError = $state<IpcError | null>(null);
   let busy = $state(false);
   /** The last planner press that failed, in words (step 1.3). */
   let plannerFailure = $state<HumanError | null>(null);
@@ -207,9 +212,17 @@
     if (r.ok && r.value?.mission) {
       const first = detail?.mission.id !== id;
       detail = r.value;
+      refreshError = null;
       if (first) missionPanelTab.set(defaultPanelTab(r.value));
+    } else if (!r.ok && r.error.code !== 'E_NOTFOUND' && detail?.mission.id === id) {
+      // Review w17-4: a failed background re-read is not "the mission is
+      // gone": the room, an open goal edit and a half-typed answer stay.
+      // E_NOTFOUND is (the hub answers a deleted or no-longer-visible
+      // mission with it, never with `ok` and no mission): review w30-1.
+      refreshError = r.error;
     } else {
-      notice = r.ok ? 'That mission is not in the fleet any more.' : readErrorText(r.error);
+      notice =
+        r.ok || r.error.code === 'E_NOTFOUND' ? 'That mission is not in the fleet any more.' : readErrorText(r.error);
       detail = null;
       roomMissionId.set(null);
       openedId = null;
@@ -241,6 +254,7 @@
     moreOpen = false;
     confirmMove = null;
     notice = null;
+    refreshError = null;
     plannerFailure = null;
     importOpen = false;
     importText = '';
@@ -697,12 +711,17 @@
 
   let steerText = $state('');
   const blocked = $derived(steerBlocked($operatorRow));
+  const outboxStore = outbox.store;
+  const operatorOutboxBusy = $derived(
+    ($outboxStore.msgs[$operatorRow?.id ?? -1] ?? []).some((m) => m.state === 'waiting' || m.state === 'sending' || m.state === 'sent'),
+  );
+  const steerWait = $derived(blocked ? null : steerBusy($operatorRow, operatorOutboxBusy, $parkedHeld.length));
   const myReceipts = $derived(mission ? $steerReceipts.filter((r) => r.missionId === mission.id) : []);
 
   function steer() {
     const text = steerText.trim();
     const row = get(operatorRow);
-    if (!mission || !text || !row || steerBlocked(row)) return;
+    if (!mission || !text || !row || steerBlocked(row) || steerWait) return;
     sendSteer(mission, text, row);
     steerText = '';
   }
@@ -718,7 +737,6 @@
     const m = ($outboxStore.msgs[operatorId] ?? []).find((x) => x.id === key);
     return m ? outboxReceipt(m, false, Date.now()).label : 'Sent';
   }
-  const outboxStore = outbox.store;
 
   let stopWatching: (() => void) | null = null;
   onMount(() => {
@@ -864,6 +882,12 @@
       <div class="scroll">
         <div class="col" data-testid="mission-detail-centre">
           {#if notice}<p class="notice" role="status" data-testid="mission-notice">{notice}</p>{/if}
+          {#if refreshError}
+            <p class="refresh-error" role="status" data-testid="mission-refresh-error">
+              Couldn't refresh ({readErrorText(refreshError)}) — showing what was loaded.
+              <button class="btn btn--quiet" type="button" data-testid="mission-refresh-retry" onclick={() => openedId != null && void loadDetail(openedId)}>Retry</button>
+            </p>
+          {/if}
 
           {#if graph}
             <TaskGraphCard {graph} kind="mission" onopen={() => ((tasksView = 'graph'), showMissionPanel('plan'))} />
@@ -1133,7 +1157,7 @@
             onkeydown={steerKey}
             data-testid="mission-steer-input"
           ></textarea>
-          <button class="btn send" type="submit" disabled={!!blocked || !steerText.trim()} aria-label="Send to Control" data-testid="mission-steer-send"
+          <button class="btn send" type="submit" disabled={!!blocked || !!steerWait || !steerText.trim()} aria-label="Send to Control" data-testid="mission-steer-send"
             >↵</button
           >
         </div>
@@ -1141,6 +1165,11 @@
           <p class="muted small" data-testid="mission-steer-blocked">
             {blocked}
             <button class="link" type="button" onclick={() => openControl('chat')}>Open Control</button>
+          </p>
+        {:else if steerWait}
+          <p class="muted small" data-testid="mission-steer-busy">
+            {steerWait}
+            {#if $parkedHeld.length > 0}<button class="link" type="button" onclick={() => openControl('chat')}>Open Control</button>{/if}
           </p>
         {:else}
           <p class="muted small hint">Goes to Control, about this mission.</p>
@@ -2144,6 +2173,11 @@
   .notice {
     margin: 0;
     color: var(--danger);
+  }
+  .refresh-error {
+    margin: 0;
+    font-size: var(--text-2xs);
+    color: var(--usage-warn);
   }
   .planner-error {
     border-color: var(--danger);

@@ -223,7 +223,9 @@
         },
         {
           "type": "field",
-          "key": "decide.jev.floors"
+          "key": "decide.jev.floors",
+          "widget": "readonly",
+          "hint": "Reset clears them, back to the built-in floors."
         },
         {
           "type": "field",

@@ -1,10 +1,14 @@
 <script lang="ts">
+  import { errorText } from '../error_copy';
   // Layout L2 (master_detail): a resource's records in a list beside one
   // record's editor. The list reads through the resource's list command
   // (which routes to the hub on a paired desktop, so the page shows the
   // hub's records there, read-only); every change runs one of the
   // resource's declared actions, then re-reads the list.
   import { onMount } from 'svelte';
+  import LoadError from '../states/LoadError.svelte';
+  import Skeleton from '../states/Skeleton.svelte';
+  import type { IpcError } from '../result';
   import { get } from 'svelte/store';
   import RecordEditor from './RecordEditor.svelte';
   import ResourceGraph from './ResourceGraph.svelte';
@@ -27,6 +31,8 @@
   import { WIZARDS } from '../forms/wizards';
   import type { Page, PageAction } from './pages';
   import PageActionButton from './PageActionButton.svelte';
+  import { fleets, PRIMARY } from '../fleets';
+  import { provideResourceFleet } from './resource_fleet';
   import {
     afterChange,
     badgesOf,
@@ -36,7 +42,10 @@
     itemValue,
     itemsOf,
     listRecords,
+    loadSourceRows,
+    optionSourcesOf,
     runAction,
+    sourceOptionsFrom,
     titleOf,
     type ActionSpec,
     type FieldSpec,
@@ -73,12 +82,30 @@
     canChange?: (record: ResourceRecord) => boolean;
   } = $props();
 
-  /** The primary's stores follow a change; an extra fleet's are not those. */
-  const followUp = (r: ResourceType) => (fleet && fleet !== 'primary' ? Promise.resolve() : afterChange(r));
+  /** An extra fleet's page: its rows, its option lists and its hub, never
+   *  the primary's stores. */
+  const extra = $derived(!!fleet && fleet !== PRIMARY);
+  provideResourceFleet(() =>
+    extra ? { fleet, hubUrl: $fleets.find((f) => f.id === fleet)?.url ?? null } : { fleet: null, hubUrl: null },
+  );
+  /** An extra fleet's option rows, by source, read from its hub
+   *  (`loadSourceRows`); the primary's come from the stores. */
+  let fleetSources = $state<Partial<Record<OptionSource, object[]>>>({});
+  /** After a change: the primary's stores follow it; an extra fleet's
+   *  option lists are read again from its hub. */
+  const followUp = async (r: ResourceType) => {
+    if (!extra) return afterChange(r);
+    const f = fleet;
+    const rows = await loadSourceRows(optionSourcesOf(r), f);
+    if (f === fleet) fleetSources = rows;
+  };
 
   let records = $state<ResourceRecord[]>([]);
   let loaded = $state(false);
-  let error = $state<string | null>(null);
+  // Review w17-10: the list read's failure in a sentence with Retry (codes
+  // under Details), and a skeleton until the first answer.
+  let error = $state<IpcError | null>(null);
+  let retrying = $state(false);
   let selected = $state<string | null>(null);
   /** Bumped on every re-read, so the editor's draft restarts from it. */
   let version = $state(0);
@@ -108,16 +135,16 @@
   async function pairFromWizard(v: Values) {
     wizardBusy = true;
     wizardError = null;
-    const r = await pairDevice(v);
+    const r = await pairDevice(v, fleet);
     wizardBusy = false;
     if (!r.ok) {
-      wizardError = r.error.message;
+      wizardError = errorText(r.error);
       return;
     }
     wizardOpen = false;
     pairing = r.value;
     await reload();
-    await afterChange(resource);
+    await followUp(resource);
     const made = records.find((x) => titleOf(resource, x) === r.value.name);
     if (made) selected = idOf(resource, made);
   }
@@ -127,16 +154,16 @@
     if (!c) return;
     wizardBusy = true;
     wizardError = null;
-    const r = await runAction(c, buildArgs(c, null, null, { url: String(v.url ?? '').trim(), code: String(v.code ?? '').trim() }));
+    const r = await runAction(c, buildArgs(c, null, null, { url: String(v.url ?? '').trim(), code: String(v.code ?? '').trim() }), fleet);
     wizardBusy = false;
     if (!r.ok) {
-      wizardError = r.error.message;
+      wizardError = errorText(r.error);
       return;
     }
     wizardOpen = false;
     push({ kind: 'success', message: 'Linked. The hubs connect within seconds.' });
     await reload();
-    await afterChange(resource);
+    await followUp(resource);
     const made = (r.value as { id?: unknown } | null)?.id;
     if (made !== undefined && records.some((x) => idOf(resource, x) === String(made))) selected = String(made);
   }
@@ -145,7 +172,7 @@
     const r = await listRecords(resource, fleet);
     loaded = true;
     if (!r.ok) {
-      error = r.error.message;
+      error = r.error;
       return;
     }
     error = null;
@@ -210,18 +237,26 @@
     }
   }
 
-  /** What an option source offers, from the store the renderer already holds. */
-  function sourceOptions(source: OptionSource): { value: string; label: string }[] {
-    if (source === 'hosts') return get(hosts).map((h) => ({ value: h.alias, label: h.alias }));
-    if (source === 'orgs') return get(orgs).map((o) => ({ value: o.name, label: o.name }));
-    if (source === 'devices') return get(devices).map((d) => ({ value: d.name, label: d.name }));
-    if (source === 'catalogs') return (get(catalogStatuses) ?? []).map((c) => ({ value: c.name, label: c.name }));
-    if (source === 'people')
-      return get(people)
-        .filter((p) => p.disabled_at === undefined || p.disabled_at === null)
-        .map((p) => ({ value: p.name, label: p.display_name && p.display_name !== p.name ? `${p.display_name} (${p.name})` : p.name }));
-    return get(trackers).map((t) => ({ value: String(t.id), label: t.name }));
+  /** The rows an option source offers: the store the renderer already
+   *  holds, or on an extra fleet the list read from its hub. */
+  function sourceRows(source: OptionSource): readonly object[] {
+    if (extra) return fleetSources[source] ?? [];
+    if (source === 'hosts') return get(hosts);
+    if (source === 'orgs') return get(orgs);
+    if (source === 'devices') return get(devices);
+    if (source === 'catalogs') return get(catalogStatuses) ?? [];
+    if (source === 'people') return get(people);
+    return get(trackers);
   }
+
+  function sourceOptions(source: OptionSource): { value: string; label: string }[] {
+    return sourceOptionsFrom(source, sourceRows(source));
+  }
+
+  /** The orgs Pair a device's wizard offers, from the fleet it pairs on. */
+  const wizardOrgs = $derived(
+    extra ? ((fleetSources.orgs ?? []) as { id: number; name: string }[]) : $orgs,
+  );
 
   /** A select's choices for a list field's add form: the source's values,
    *  minus the ones the record already has. */
@@ -253,7 +288,8 @@
     {#each page.list_items ?? [] as item, i (i)}
       {#if item.type === 'notice'}
         <p class={`notice ${item.tone}`}>{item.text}</p>
-      {:else if item.type === 'custom' && item.component === 'org_suggestions'}
+      {:else if item.type === 'custom' && item.component === 'org_suggestions' && !extra}
+        <!-- Suggestions read the primary's sessions: not offered for another fleet. -->
         <OrgSuggestions onchanged={() => void reload()} />
       {:else if item.type === 'action'}
         <!-- A page action over the whole list (G4.5: Scan all hosts). -->
@@ -286,7 +322,7 @@
                 <span class="swatch" style:background={String(r[resource.color_field] ?? '') || 'transparent'}></span>
               {/if}
               <span class="title">{titleOf(resource, r)}</span>
-              {#each badgesOf(resource, r, hubHost($hubStatus.url)) as b (b)}<span class="badge" data-testid="resource-badge">{b}</span>{/each}
+              {#each badgesOf(resource, r, hubHost(extra ? ($fleets.find((f) => f.id === fleet)?.url ?? null) : $hubStatus.url)) as b (b)}<span class="badge" data-testid="resource-badge">{b}</span>{/each}
             </button>
           </li>
         {/each}
@@ -294,7 +330,21 @@
       {#if loaded && records.length === 0 && !error}
         <p class="empty" data-testid="resource-empty">{resource.empty}</p>
       {/if}
-      {#if error}<p class="err" role="alert">{error}</p>{/if}
+      {#if !loaded}
+        <Skeleton rows={3} label={`Loading ${resource.plural.toLowerCase()}`} />
+      {/if}
+      {#if error}
+        <LoadError
+          title={`Couldn't load ${resource.plural.toLowerCase()}`}
+          {error}
+          {retrying}
+          onretry={async () => {
+            retrying = true;
+            await reload();
+            retrying = false;
+          }}
+          testid="resource-load-error" />
+      {/if}
       {#if !readonly && resource.create_flow}
         <button type="button" class="btn" data-testid="resource-add" disabled={adding} onclick={() => (adding = true)}
           >Add {resource.label.toLowerCase()}</button
@@ -311,7 +361,7 @@
         >
         {#if wizardOpen}
           <WizardDialog
-            wizard={linkWizard ? WIZARDS.link_peer : pairDeviceWizard($orgs)}
+            wizard={linkWizard ? WIZARDS.link_peer : pairDeviceWizard(wizardOrgs)}
             busy={wizardBusy}
             error={wizardError}
             run={(v) => void (linkWizard ? linkFromWizard(v) : pairFromWizard(v))}
@@ -342,7 +392,7 @@
             push({ kind: 'success', message });
             void reload().then(() => {
               if (recordId !== null) selected = String(recordId);
-              void afterChange(resource);
+              void followUp(resource);
             });
           }} />
       {:else if current}

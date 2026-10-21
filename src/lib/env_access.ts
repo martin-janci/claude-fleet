@@ -157,7 +157,7 @@ export async function setPersonVars(
       args: { scope: 'person', scope_key: null, name: w.name, value: w.value, secret: w.secret },
       ...where,
     });
-    if (!r.ok) return { set, error: r.error.message };
+    if (!r.ok) return { set, error: errorText(r.error) };
     set += 1;
   }
   return { set, error: null };

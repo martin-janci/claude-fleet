@@ -11,1005 +11,1357 @@ Auto-generated from the embedded MCP tool router. See [`control-api.md`](control
 
 Asks for a wider level on sessions you OWN. list (default; session_id narrows it), grant {id} (re-shares at the asked level) or decline {id}. Errors: E_NOTFOUND, E_FORBIDDEN, E_VALIDATE, E_INVALID_STATE (the asker's share is gone).
 
-Parameters: `action`, `id`, `session_id`
+Access: the master or a paired device; not a per-host token · deadline 60 s.
+
+Parameters (* required): `action`, `id`, `session_id`
 
 ### `account_usage`
 
 Each Claude account's latest plan usage: 5-hour and weekly utilization with reset times, status, fetched_at. Never fetches.
 
+Access: the master, a paired device or a per-host token · readonly tokens too · deadline 60 s.
+
 ### `add_account`
 
 Add a Claude login profile on a host: a subscription login or an API key.
 
-Parameters: `action`, `api_key`, `code`, `daily_limit_usd`, `host_alias`, `key`, `nickname`, `profile`
+Access: the master or a fleet admin's own device · deadline 300 s.
+
+Parameters (* required): `action`*, `api_key`, `code`, `daily_limit_usd`, `host_alias`*, `key`, `nickname`, `profile`*
 
 ### `add_host`
 
 Register a host. transport "ssh" (default) is probed first and persisted only if reachable; "agent" (a host the hub cannot reach; it runs fleet-agent and dials in) is persisted unprobed, unreachable until its agent connects (token: `fleet-hub agent-token <alias>` on the hub). Returns the host row.
 
-Parameters: `alias`, `ssh_alias`, `transport`
+Access: the master or a fleet admin's own device · deadline 300 s.
+
+Parameters (* required): `alias`*, `ssh_alias`*, `transport`
 
 ### `add_project`
 
 Add a project on a host: clone a GitHub URL, adopt a folder (the hub's local host only) or create a new repository (create_remote is refused once with a confirm token to send back). git and gh run on the host with its own credentials. Returns the project row.
 
-Parameters: `confirm_nonce`, `host_alias`, `source`
+Access: the master, a paired device or a per-host token · deadline 660 s.
+
+Parameters (* required): `confirm_nonce`, `host_alias`*, `source`*
 
 ### `adopt_session`
 
 Adopt a live tmux session fleet did not start (started_at null: someone ran tmux by hand on the host). Fleet runs it from now on: started_at is set and the caller becomes its owner when it has none. project_id puts it in that project (lost_target proposes one). The pane is untouched. Errors with E_INVALID_STATE for a row fleet already runs, a lost one (use restore_host_sessions) or one with no pane (bg, external).
 
-Parameters: `project_id`, `session_id`
+Access: the master, a paired device or a per-host token · deadline 60 s.
+
+Parameters (* required): `project_id`, `session_id`*
 
 ### `agent_installs`
 
 fleet-agent install jobs, newest first: state, step, detail.
 
-Parameters: `alias`
+Access: the master, a paired device or a per-host token · readonly tokens too · deadline 60 s.
+
+Parameters (* required): `alias`
 
 ### `agent_status`
 
-Which agent hosts (transport "agent") have a fleet-agent connected: since (unix s), version, host name, OS. Offline ones show connected=false; a call for one fails fast with E_AGENT_OFFLINE. enabled=false where no agents are accepted (the desktop).
+Which agent hosts (transport "agent") have a fleet-agent connected: since (unix s), version, host name, OS. Offline ones show connected=false; a call for one fails fast with E_AGENT_OFFLINE. duplicate (since, takeovers, peers) when two fleet-agents keep taking one host's token from each other. enabled=false where no agents are accepted (the desktop).
+
+Access: the master, a paired device or a per-host token · readonly tokens too · deadline 60 s.
 
 ### `agents`
 
 The agents (PR reviewer, support, fleet agents from the catalog): status {agent?, limit?} (rules, newest jobs, actions waiting for a person), explain (per rule: polls or why not, next poll, last poll error, jobs by state, the next and the last failed job), job {id} (one job whole, its proposed actions included), grant {agent: review | support | fleet, scope: gh:<owner>/<repo> | jira:<tracker id>:<PROJECT> | <instance name>, host, level: watch | propose | act, project_id?, config?, hours?, definition? (fleet), bindings? (fleet: one per store role; each MCP binding is asked for its tools on the host first; or answers: the grant form's)}, definitions (the catalog's fleet agents), gallery (the fleet agents claude-fleet ships, each marked installed or not), install {definition} (add a gallery definition to the catalog), form {definition, id?} (a fleet agent's grant form, prefilled from rule id), revoke {id}, pause_all, approve {id}, reject {id}, run {id, request?, run_scope? {minutes?, host?, session?, component?}} (a manual or scheduled fleet agent, now). The owner's own device; writes need a trusted full device.
 
-Parameters: `action`, `agent`, `answers`, `bindings`, `config`, `definition`, `host`, `hours`, `id`, `level`, `limit`, `project_id`, `request`, `run_scope`, `scope`
+Access: a fleet admin's own device (not the master) · deadline 60 s.
+
+Parameters (* required): `action`*, `agent`, `answers`, `bindings`, `config`, `definition`, `host`, `hours`, `id`, `level`, `limit`, `project_id`, `request`, `run_scope`, `scope`
 
 ### `answer_mcp_confirm`
 
 Approve or deny one waiting call by nonce; false if already answered or expired.
 
-Parameters: `approved`, `nonce`
+Access: a fleet admin's own device (not the master) · deadline 60 s.
+
+Parameters (* required): `approved`*, `nonce`*
 
 ### `api_tokens`
 
 Named Control API tokens. list; create {name, scope: read | act | admin, expires_in_days?, hosts?} answers the token ONCE, with env_line; revoke {name}. A device creates read or act only, and needs trust.
 
-Parameters: `action`, `expires_in_days`, `hosts`, `name`, `scope`
+Access: the master or a fleet admin's own device · deadline 60 s.
+
+Parameters (* required): `action`*, `expires_in_days`, `hosts`, `name`, `scope`
 
 ### `apply_sync`
 
 Apply a plan_sync plan: writes files with compare-and-swap, backs up overwritten files, merges config (files end up mode 0600), installs plugins, writes the managed manifest, then re-scans. Master token only; requires confirmation. restart_required marks hosts whose Claude must be restarted.
 
-Parameters: `confirm_nonce`, `force_partial`, `plan_id`
+Access: the master token only · confirm-gated (mcp.confirm_destructive) · deadline 900 s.
+
+Parameters (* required): `confirm_nonce`, `force_partial`, `plan_id`*
 
 ### `ask`
 
 Chat forms: `form` (fleet.form/1) opens a form in YOUR session's chat and waits ≤600 s for the person's answers (status answered | pending | declined | cancelled | expired; on pending call `wait`). `draft` shows it while written. `cancel` withdraws. A person's side: list, get, answer, decline. Spec: docs/forms.md.
 
-Parameters: `answer`, `cancel`, `decline`, `draft`, `form`, `get`, `list`, `note`, `timeout_s`, `values`, `wait`, `why`
+Access: the master, a paired device or a per-host token · deadline 660 s.
+
+Parameters (* required): `answer`, `cancel`, `decline`, `draft`, `form`, `get`, `list`, `note`, `timeout_s`, `values`, `wait`, `why`
 
 ### `auto_switch_account`
 
 Your own answer to automatic account switching: when one of your sessions' Claude account runs out, resume it under the login on its host with the most headroom. Pass enabled to turn it on or off for your sessions; leave it out to read it. continue_after: also type 'Continue where you left off.' into a switched session whose turn the limit cut off (off by default). It only acts while the fleet's accounts.auto_switch is on too. Returns { enabled, continue_after, fleet_enabled }.
 
-Parameters: `continue_after`, `enabled`
+Access: the master or a paired device; not a per-host token · deadline 60 s.
+
+Parameters (* required): `continue_after`, `enabled`
 
 ### `autofix`
 
 Known broken fleet states, each with a plain-language explanation and, where one exists, a fix: list {state?} (the live ones: open, verifying, apply_failed, dismissed; also `fixed`, cleared in the last day after a fix ran), explain {id}, scan (check now), apply {id}, dismiss {id, until?} (later; default 24 h). Safe fixes run by themselves (setting autofix.auto_safe); the rest wait for a person. apply and dismiss need a trusted full device; Control may list and explain only, and shows the person a finding with a `fix` chat card: a ```fleet-ui fenced block holding `{"spec":"fleet.ui/1","kind":"fix","finding_id":<id>}`.
 
-Parameters: `action`, `id`, `state`, `until`
+Access: a fleet admin's own device (not the master) · deadline 300 s.
+
+Parameters (* required): `action`*, `id`, `state`, `until`
 
 ### `broadcast_prompt`
 
-Send one prompt to every matching work session (not the controller), skipping blocked or stuck ones unless status="blocked". Returns per-session results. Rate-limited per caller (default one call per 30 s; E_RATE_LIMITED with retry_after_secs). Marked untrusted unless raw=true (master token only). May return E_CONFIRM_REQUIRED when desktop confirmation is on.
+Send one prompt to every matching work session (not the controller), skipping blocked or stuck ones unless status="blocked". Returns per-session results. Rate-limited per caller (default one call per 30 s; E_RATE_LIMITED with retry_after_secs). Marked untrusted unless raw=true (master) or the caller is a trusted client. May return E_CONFIRM_REQUIRED when confirmation is on (mcp.confirm_destructive).
 
-Parameters: `confirm_nonce`, `host`, `project_id`, `prompt`, `raw`, `status`, `submit`
+Access: the master, a paired device or a per-host token · confirm-gated (mcp.confirm_destructive) · deadline 900 s.
+
+Parameters (* required): `confirm_nonce`, `host`, `project_id`, `prompt`*, `raw`, `status`, `submit`
 
 ### `cancel_task`
 
-Cancel a queued or running task (E_TASK_TERMINAL if it already finished). The worker session keeps running: kill or re-prompt it separately. May return E_CONFIRM_REQUIRED when desktop confirmation is on. A per-host token may only cancel tasks it can see (E_FORBIDDEN).
+Cancel a queued or running task (E_TASK_TERMINAL if it already finished). The worker session keeps running: kill or re-prompt it separately. May return E_CONFIRM_REQUIRED when confirmation is on (mcp.confirm_destructive). A per-host token may only cancel tasks it can see (E_FORBIDDEN).
 
-Parameters: `confirm_nonce`, `task_id`
+Access: the master, a paired device or a per-host token · confirm-gated (mcp.confirm_destructive) · deadline 660 s.
+
+Parameters (* required): `confirm_nonce`, `task_id`*
 
 ### `capture_session`
 
 Capture a session's terminal: the visible tmux pane, plus scrollback_lines of history. Use after send_prompt to read the reply. Returns plain text, not JSON.
 
-Parameters: `max_lines`, `scrollback_lines`, `session_id`
+Access: the master, a paired device or a per-host token · readonly tokens too · deadline 60 s.
+
+Parameters (* required): `max_lines`, `scrollback_lines`, `session_id`*
 
 ### `catalog_admin`
 
 The Assets tab's catalog operations as one tool, plus the set of catalogs and host admissions. Master, or a client granted the catalog the action touches; list_catalogs an unbound one, add/remove_catalog the master.
 
-Parameters: `action`, `args`, `catalog`, `confirm_nonce`
+Access: the master or a paired device; not a per-host token · deadline 300 s.
+
+Parameters (* required): `action`*, `args`, `catalog`, `confirm_nonce`
 
 ### `changesets`
 
 Changeset cards that adopt, sync and fix assets: list (one in full with id), propose (rebuild from the last scan), propose_layer (a layer change as a card), apply (positions picks items; a drift card takes one), undo (the latest applied card per catalog), dismiss, reject_item. Mutating actions need a grant on every catalog the card names.
 
-Parameters: `action`, `change`, `confirm_nonce`, `id`, `positions`
+Access: the master or a paired device; not a per-host token · deadline 300 s.
+
+Parameters (* required): `action`*, `change`, `confirm_nonce`, `id`, `positions`
 
 ### `check_account_headroom`
 
 Whether starting or switching a session on host_alias under login `profile` (a profile name; omitted or "" for the host's own) crosses accounts.pause_at, and the login on that host with the most headroom: {pause_at_pct, chosen?, over, suggestion?, logins:[{profile?, account_uuid, used_pct?}]}. From the usage account_usage serves; never fetches. Errors: E_NOTFOUND (no such host), E_INVALID.
 
-Parameters: `host_alias`, `profile`
+Access: the master, a paired device or a per-host token · readonly tokens too · deadline 60 s.
+
+Parameters (* required): `host_alias`*, `profile`
 
 ### `check_host`
 
 A host's health checklist over SSH: tmux, the agents on PATH, fleet's hooks and worker guard in ~/.claude/settings.json; base_path: whether it exists and is writable. Reads only.
 
-Parameters: `alias`, `base_path`
+Access: the master or a fleet admin's own device · readonly tokens too · deadline 300 s.
+
+Parameters (* required): `alias`*, `base_path`
 
 ### `control_auto_continue`
 
 Control's auto-continue, which fleet runs: action status (the recommended option it will send and when, due_at), cancel (stop it) or take (Send now: settles it and returns the prompt for the client to send). turn_seq names the card. Not for Control itself.
 
-Parameters: `action`, `turn_seq`
+Access: the master or a paired device; not a per-host token · deadline 60 s.
+
+Parameters (* required): `action`*, `turn_seq`
 
 ### `control_handoffs`
 
 What the agent handed on, newest first: prompts and tasks sent to sessions, new sessions, missions, tasks and proposed trees, each with its target's state now.
 
-Parameters: `limit`
+Access: a fleet admin's own device (not the master) · readonly tokens too · deadline 60 s.
+
+Parameters (* required): `limit`
 
 ### `control_journal`
 
 Control's journal, which fleet keeps for a new conversation: threads followed (state, muted), open asks to the person, their last words, notes, pending approvals. note|ask {text} adds one (an ask clears when the person answers); mute|unmute {thread: session|mission, id}.
 
-Parameters: `action`, `id`, `text`, `thread`
+Access: the master or a paired device; not a per-host token · deadline 60 s.
+
+Parameters (* required): `action`, `id`, `text`, `thread`
 
 ### `control_route`
 
 Where a message just sent in Control goes (propose {text}), or record the person's pick (follow {run_id, chosen}).
 
-Parameters: `action`, `chosen`, `run_id`, `text`
+Access: a fleet admin's own device (not the master) · deadline 60 s.
+
+Parameters (* required): `action`*, `chosen`, `run_id`, `text`
 
 ### `dashboards`
 
 The person's pinned dashboards (`dashboard` blocks): list | get {id} | pin {dashboard, why?} | unpin {id}. The agent only reads (E_FORBIDDEN).
 
-Parameters: `action`, `dashboard`, `id`, `why`
+Access: the master or a paired device; not a per-host token · deadline 60 s.
+
+Parameters (* required): `action`*, `dashboard`, `id`, `why`
 
 ### `debug_devices`
 
 Phones, emulators and simulators on any fleet host, used from any session that may see them; commands run on the device's host. run: one adb / simctl / devicectl command. install copies the app from your host. screenshot answers an image. A claim keeps others off (E_CONFLICT); use extends it. claim with queue waits in line for a held one; it is yours when your turn comes.
 
-Parameters: `action`, `args`, `claim_s`, `contains`, `device`, `downgrade`, `filter`, `host`, `label`, `lines`, `name`, `note`, `path`, `queue`, `refresh`, `shared`, `since_s`, `timeout_s`
+Access: the master, a paired device or a per-host token · deadline 660 s.
+
+Parameters (* required): `action`*, `args`, `claim_s`, `contains`, `device`, `downgrade`, `filter`, `host`, `label`, `lines`, `name`, `note`, `path`, `queue`, `refresh`, `shared`, `since_s`, `timeout_s`
 
 ### `decide_related_session`
 
 Answer a session's related_session proposal {session_id, run_id, linked}: linked=true (Link) keeps the other session listed as linked, false (Not related) withdraws it. Nothing is stopped or merged. Returns the session's row.
 
-Parameters: `linked`, `run_id`, `session_id`
+Access: the master, a paired device or a per-host token · deadline 60 s.
+
+Parameters (* required): `linked`*, `run_id`*, `session_id`*
 
 ### `decide_setting_proposals`
 
 Apply or reject settings proposals by id, each on its own; a trusted device only.
 
-Parameters: `accept`, `reject`
+Access: a fleet admin's own device (not the master) · deadline 60 s.
+
+Parameters (* required): `accept`, `reject`
 
 ### `delete_worktree`
 
-Delete a git worktree on its host (no --force) and drop fleet's row. Refuses if an alive session points at it, unless force. Errors: E_WORKTREE_BUSY, E_NOTFOUND, E_GIT, E_CONFIRM_REQUIRED (desktop confirmation on).
+Delete a git worktree on its host (no --force) and drop fleet's row. Refuses if an alive session points at it, unless force. Errors: E_WORKTREE_BUSY, E_NOTFOUND, E_GIT, E_CONFIRM_REQUIRED (when mcp.confirm_destructive is on).
 
-Parameters: `confirm_nonce`, `force`, `worktree_id`
+Access: the master, a paired device or a per-host token · confirm-gated (mcp.confirm_destructive) · deadline 900 s.
+
+Parameters (* required): `confirm_nonce`, `force`, `worktree_id`*
 
 ### `diagnose`
 
 Check before you tell the person: where Control runs and whether its host, login and account are healthy, why a host cannot be reached (host), and which clients the person uses with what each can show. Each finding says checked or inferred. Read-only.
 
-Parameters: `host`
+Access: the master or a paired device; not a per-host token · readonly tokens too · deadline 60 s.
+
+Parameters (* required): `host`
 
 ### `discover_hosts`
 
 SSH hosts in the user's ~/.ssh/config: candidates for add_host.
 
+Access: the master, a paired device or a per-host token · readonly tokens too · deadline 60 s.
+
 ### `discover_lost_sessions`
 
 Read-only: scan ~/.claude/projects on a host for conversations fleet has no live pane for, ranked against the host's boot (rank_hint: before_boot | after_boot | stale | unknown), with project_id, worktree_id and existing_session_id (set when a fleet row, live or lost, holds it: restore_host_sessions handles that one). resumable is true only when the pane would start in exactly the transcript's cwd; anywhere else claude --resume silently starts an empty conversation, so do not resume it. Resume with new_session { host_alias, project_id, worktree_id, name: derived_tmux_name (a hint), resume_claude_session_id }.
 
-Parameters: `host_alias`, `limit`
+Access: the master, a paired device or a per-host token · readonly tokens too · deadline 300 s.
+
+Parameters (* required): `host_alias`*, `limit`
 
 ### `dismiss_ghost_session`
 
 Permanently delete a ghost session's row (lost from tmux, not worth reviving). Errors if it is not a ghost.
 
-Parameters: `session_id`
+Access: the master, a paired device or a per-host token · deadline 60 s.
+
+Parameters (* required): `session_id`*
 
 ### `dispatch_task`
 
-Dispatch work to a worker session and track it as a task. The prompt gets an appended instruction to print FLEET_TASK_DONE_<nonce> on its own line followed by a one-paragraph result; on the worker's next Stop fleet flips the task to done with that paragraph as `result` (also sent to the requester's inbox as kind=task_result). Returns the task row; follow with wait_for_task. A per-host token must name a requester on its own host. Marked untrusted unless raw=true (master only).
+Dispatch work to a worker session and track it as a task. The prompt gets an appended instruction to print FLEET_TASK_DONE_<nonce> on its own line followed by a one-paragraph result; on the worker's next Stop fleet flips the task to done with that paragraph as `result` (also sent to the requester's inbox as kind=task_result). Returns the task row; follow with wait_for_task. A per-host token must name a requester on its own host. Marked untrusted unless raw=true (master) or the caller is a trusted client.
 
-Parameters: `confirm_nonce`, `new_worker`, `prompt`, `raw`, `requester_session_id`, `worker_session_id`
+Access: the master, a paired device or a per-host token · deadline 300 s.
+
+Parameters (* required): `confirm_nonce`, `new_worker`, `prompt`*, `raw`, `requester_session_id`, `worker_session_id`
 
 ### `ensure_operator`
 
 Ensure the UX agent's operator session exists on a reachable host; returns its row.
 
+Access: the master, a paired device or a per-host token · deadline 300 s.
+
 ### `env_vars`
 
 Session environment variables for the next start; global < host < project < person < session (person: the session owner's, yours only, scope_key '' = you). list; set {scope, scope_key, name, value|ref, secret?}; unset {scope, scope_key, name}. Secrets and refs are never listed; ref (env:NAME|file:/abs) is master-only. E_INVALID, E_FORBIDDEN.
 
-Parameters: `action`, `name`, `ref`, `scope`, `scope_key`, `secret`, `value`
+Access: the master, a fleet admin's own device or any person's device · deadline 60 s.
+
+Parameters (* required): `action`*, `name`, `ref`, `scope`, `scope_key`, `secret`, `value`
 
 ### `fleet_health`
 
 Backend health: app and schema version, database readiness, the cached fleet roll-up, per-host reverse-tunnel health (tunnels_flapping: supervised but crash-looping, so the Control API is unreachable from that host), and ESTIMATED token usage and cost (micro-USD) per host and UTC day for 7 days, and trackers (each ok/degraded/failing, failures in a row, last error and success; detection_backlog: suggestions undecided for detection_backlog_days). A per-host token sees its own host's usage and its org's trackers. hub: uptime and last reconcile pass; tunnels_mode none|reverse; peer_links_total. devices: {paired, last_seen_at, last_sync_at}. playbooks_week: runs per kind. hosts[]: per host disk_home_pct/disk_low, claude_behind, agent_behind, hooks_silent. decide (master only): Jev's last hour, degraded if its breaker is open or >20% failed; week: 7 days' answers. loops[]: each background job's last and next run and result (ok/error/paused); automation_paused.
 
+Access: the master, a paired device or a per-host token · readonly tokens too · deadline 60 s.
+
 ### `forget_project`
 
 Drop a project row and its worktrees (ghost sessions go with it); E_INVALID_STATE while a live session references it. Master only.
 
-Parameters: `project_id`
+Access: the master token only · deadline 60 s.
+
+Parameters (* required): `project_id`*
 
 ### `get_clipboard`
 
 Read a host's system clipboard (what Ctrl+V gives there), via wl-paste, xclip, xsel or pbpaste. E_CLIPBOARD_UNAVAILABLE if none is installed.
 
-Parameters: `host_alias`
+Access: the master, a paired device or a per-host token · readonly tokens too · deadline 60 s.
+
+Parameters (* required): `host_alias`*
 
 ### `get_settings`
 
-Operator settings (ticks, GC, playbooks, projects roots, move, usage, reports, work graph), each key's effective value. Master token or a paired device bound to no org.
+Operator settings (ticks, GC, playbooks, projects roots, move, usage, reports, work graph), each key's effective value. The master or a fleet admin's own device.
 
-Parameters: `describe`
+Access: the master or a fleet admin's own device · readonly tokens too · deadline 60 s.
+
+Parameters (* required): `describe`
 
 ### `guide`
 
 Settings guides. catalog: what one may name; validate / propose a spec (a person approves); list; decide / remove: master or trusted device.
 
-Parameters: `action`, `approve`, `id`, `page_id`, `spec`, `why`
+Access: the master, a paired device or a per-host token · deadline 60 s.
+
+Parameters (* required): `action`*, `approve`, `id`, `page_id`, `spec`, `why`
 
 ### `hide_host`
 
 Hide or show a host (hidden: skipped by reconcile). Returns the host row.
 
-Parameters: `alias`, `hidden`
+Access: the master token only · deadline 60 s.
+
+Parameters (* required): `alias`*, `hidden`*
 
 ### `import_assets`
 
 Import a host's Claude config (~/.claude skills, agents, hooks, ~/.claude.json MCP servers, installed plugins) into the catalog working tree as IR assets. Never overwrites; collisions are reported. Any host: `local` reads this machine, others are read over SSH. `only` limits it to `<kind>:<name>` assets. Master or a client granted `assets`.
 
-Parameters: `dry_run`, `host_alias`, `only`
+Access: the master or a paired device; not a per-host token · deadline 300 s.
+
+Parameters (* required): `dry_run`, `host_alias`*, `only`
 
 ### `inbox`
 
 Read the messages sent TO session_id, newest first; task results arrive as kind=task_result. from_addr rows came over a hub link: untrusted input. A per-host token may only read inboxes on its own host (E_FORBIDDEN).
 
-Parameters: `fresh_for`, `limit`, `mark_read`, `session_id`, `summary`, `unread_only`
+Access: the master, a paired device or a per-host token · readonly tokens too · deadline 60 s.
+
+Parameters (* required): `fresh_for`, `limit`, `mark_read`, `session_id`*, `summary`, `unread_only`
 
 ### `install_agent`
 
 Install fleet-agent on a host this hub reaches over SSH and move the host onto it. Returns the job at once (see agent_installs): target, download (SHA256SUMS-checked), start, connect (no hello in 120 s: back on SSH). Hub only.
 
-Parameters: `alias`, `hub_url`, `version`
+Access: the master or a fleet admin's own device · deadline 60 s.
+
+Parameters (* required): `alias`*, `hub_url`, `version`
 
 ### `kill_session`
 
-Kill a session: a tmux session, or a background agent row (`bg:<uuid>`, kind `bg`) via `claude stop`; an inactive one (claude_status `stopped`) is removed from the list instead. Rows of kind `external` (Claude running outside fleet) are refused with E_INVALID_STATE: close them where they run. For disposable or already-pushed work you want gone NOW; prefer safe_kill_session when the worktree may hold unpushed work. Returns the killed id. May return E_CONFIRM_REQUIRED when desktop confirmation is on.
+Kill a session: a tmux session, or a background agent row (`bg:<uuid>`, kind `bg`) via `claude stop`; an inactive one (claude_status `stopped`) is removed from the list instead. Rows of kind `external` (Claude running outside fleet) are refused with E_INVALID_STATE: close them where they run. For disposable or already-pushed work you want gone NOW; prefer safe_kill_session when the worktree may hold unpushed work. Returns the killed id. May return E_CONFIRM_REQUIRED when confirmation is on (mcp.confirm_destructive).
 
-Parameters: `confirm_nonce`, `force`, `host_alias`, `name`, `session_id`
+Access: the master, a paired device or a per-host token · confirm-gated (mcp.confirm_destructive) · deadline 900 s.
+
+Parameters (* required): `confirm_nonce`, `force`, `host_alias`, `name`, `session_id`
 
 ### `library`
 
 Library: files a person put on a host (Upload or a prompt's attachment). list {session_id?, host_alias?, limit?}: {items}; add {kind: upload|attachment, session_id, files: [{path, name?, size?}]} records files already on the session's host; remove {id} drops a row, never the file. Downloads: list_downloads. E_NOTFOUND, E_INVALID.
 
-Parameters: `action`, `files`, `host_alias`, `id`, `kind`, `limit`, `session_id`
+Access: the master or a paired device; not a per-host token · deadline 60 s.
+
+Parameters (* required): `action`*, `files`, `host_alias`, `id`, `kind`, `limit`, `session_id`
 
 ### `link_peer`
 
 Link this hub to another fleet's hub: redeem a peer code minted there (fleet-hub pair --mode peer) against its https URL. Answers the new link; it connects within seconds. The master, or the hub owner's trusted full device.
 
-Parameters: `code`, `url`
+Access: the master or a fleet admin's own device · deadline 60 s.
+
+Parameters (* required): `code`*, `url`*
 
 ### `list_accounts`
 
 The cached Claude accounts seen across hosts.
 
+Access: the master, a paired device or a per-host token · readonly tokens too · deadline 60 s.
+
 ### `list_assets`
 
 The asset catalog (skills, agents, hooks, MCP servers, plugin refs) with each asset's per-host drift state from the last scan, plus unmanaged assets on hosts and catalog parse problems. E_CATALOG_NOT_CONFIGURED until a catalog is set (in the app, or `fleet-hub catalog set` on a hub).
 
-Parameters: `all_catalogs`
+Access: the master, a paired device or a per-host token · readonly tokens too · deadline 60 s.
+
+Parameters (* required): `all_catalogs`
 
 ### `list_clients`
 
 Paired client devices and what each token may do. The token digest is never returned: a token exists in plaintext only in the /pair response that minted it. Read-only but master token only (it names every paired device). Rows: { id, name, mode, created_at, last_seen_at, revoked_at, trusted, assets_admin, org_id, person_id, trusted_at, assets_admin_at }; trusted/assets_admin are the person's, the _at columns the per-device mirror.
 
-Parameters: `include_revoked`
+Access: the master token only · readonly tokens too · deadline 60 s.
+
+Parameters (* required): `include_revoked`
 
 ### `list_downloads`
 
 Files sent to the user's devices, newest first: {downloads, total_bytes, max_total_bytes, max_file_bytes}. Bytes: GET /downloads/<id>.
 
-Parameters: `limit`, `session_id`
+Access: the master or a paired device; not a per-host token · readonly tokens too · deadline 60 s.
+
+Parameters (* required): `limit`, `session_id`
 
 ### `list_github_repos`
 
 Repositories gh on the host can see, for choosing what to clone with add_project.
 
-Parameters: `host_alias`, `owner`
+Access: the master, a paired device or a per-host token · readonly tokens too · deadline 60 s.
+
+Parameters (* required): `host_alias`*, `owner`
 
 ### `list_host_worktrees`
 
 Scan one host over SSH for a project's git worktrees and cache them. Returns {host_alias, project_id, cloned, worktrees}; cloned=false: not checked out there yet. Prefer list_worktrees (a store read) unless you need a REMOTE host's worktrees: stored rows cover the local host only. Errors: E_NOTFOUND, E_GIT_SETUP, E_SSH.
 
-Parameters: `host_alias`, `project_id`
+Access: the master, a paired device or a per-host token · readonly tokens too · deadline 60 s.
+
+Parameters (* required): `host_alias`*, `project_id`*
 
 ### `list_hosts`
 
 Registered hosts: reachability, claude/tmux versions, linked account. unclaimed_sessions is how many sessions on that host nobody owns, served to a one-person fleet and to who administers the host: null means not told, 0 means none.
 
+Access: the master, a paired device or a per-host token · readonly tokens too · deadline 60 s.
+
 ### `list_layers`
 
-The catalog's layer definitions (layers/*.yaml) and each host's role + active contexts. Read-only. Requires catalog_configure + catalog_load in the app.
+The catalog's layer definitions (layers/*.yaml) and each host's role + active contexts. Read-only. Needs a loaded catalog: catalog_admin {action: load} (configure first).
+
+Access: the master, a paired device or a per-host token · readonly tokens too · deadline 60 s.
 
 ### `list_pages`
 
 The settings page specs, data source shapes, resources and page actions a device renders.
 
+Access: a fleet admin's own device (not the master) · readonly tokens too · deadline 60 s.
+
 ### `list_peer_links`
 
 List this hub's links to other fleets' hubs: fleet, role, state, pending count, last exchange and error. Never a token. Read-only; the master or the hub owner's own device.
+
+Access: the master or a fleet admin's own device · readonly tokens too · deadline 60 s.
 
 ### `list_projects`
 
 Discovered projects (repos fleet can spawn sessions in).
 
-Parameters: `has_sessions`, `limit`, `summary`
+Access: the master, a paired device or a per-host token · readonly tokens too · deadline 60 s.
+
+Parameters (* required): `has_sessions`, `limit`, `summary`
 
 ### `list_sessions`
 
 List tmux sessions across reachable hosts: slim rows unless summary=false; the filters combine. claude_status is one of working | blocked | completed | failed | stopped | idle; stuck_kind is one of auth_menu | reconnect | trust_prompt | oom | press_enter; ci_status (full rows) is one of passing | failing | pending (null without a PR or checks).
 
-Parameters: `claude_status`, `force`, `fresh_for`, `host_alias`, `include_lost`, `limit`, `needs_attention`, `project_id`, `status`, `summary`, `tag`, `view`
+Access: the master, a paired device or a per-host token · readonly tokens too · deadline 60 s.
+
+Parameters (* required): `claude_status`, `force`, `fresh_for`, `host_alias`, `include_lost`, `limit`, `needs_attention`, `project_id`, `status`, `summary`, `tag`, `view`
 
 ### `list_tasks`
 
 Tasks, newest first. Read-only. A per-host token sees only tasks it requested from its host or whose worker is on its host. `mine: true` from inside a fleet session lists the tasks your own session dispatched or was given; every row names your end (`is_self_requester` / `is_self_worker`).
 
-Parameters: `limit`, `mine`, `requester_session_id`, `state`, `worker_session_id`
+Access: the master, a paired device or a per-host token · readonly tokens too · deadline 60 s.
+
+Parameters (* required): `limit`, `mine`, `requester_session_id`, `state`, `worker_session_id`
 
 ### `list_worktrees`
 
 Git worktrees fleet knows about, with their alive-session occupants (0 = free to delete via delete_worktree). Returns {total, worktrees}: total counts every match. Narrow with project_id / host_alias: a fleet-wide call answers hundreds of rows.
 
-Parameters: `host_alias`, `limit`, `project_id`, `summary`
+Access: the master, a paired device or a per-host token · readonly tokens too · deadline 60 s.
+
+Parameters (* required): `host_alias`, `limit`, `project_id`, `summary`
 
 ### `lost_target`
 
 Read-only: the project a Lost and found entry would go into, to prefill Adopt or Restore. Pass session_id (a pane fleet did not start) or host_alias, claude_session_id, cwd and git_branch (a conversation discover_lost_sessions found). A directory inside a fleet project answers source rule; otherwise, with decide.jev.adopt_target / restore_target at assist, Jev may answer source jev with a confidence, or unsure (leave the form blank). Never adopts or restores anything.
 
-Parameters: `claude_session_id`, `cwd`, `git_branch`, `host_alias`, `session_id`
+Access: the master, a paired device or a per-host token · readonly tokens too · deadline 60 s.
+
+Parameters (* required): `claude_session_id`, `cwd`, `git_branch`, `host_alias`, `session_id`
 
 ### `mcp_confirms`
 
 Calls waiting for your OK (the agent's starts and kills), oldest first.
 
+Access: a fleet admin's own device (not the master) · readonly tokens too · deadline 60 s.
+
 ### `merge_host`
 
 Fold host `from` into `into` in one transaction: worktrees, fingerprints, dismissals, layers and daily usage move (usage sums), sessions move unless `into` already has the same claude_session_id or tmux_name (those are dropped), then `from` is deleted. For a renamed host (`local` -> `mac`). Master only; may return E_CONFIRM_REQUIRED.
 
-Parameters: `confirm_nonce`, `from`, `into`
+Access: the master token only · confirm-gated (mcp.confirm_destructive) · deadline 660 s.
+
+Parameters (* required): `confirm_nonce`, `from`*, `into`*
 
 ### `move_session`
 
 Move a work session to another host, carrying its work as it is: the transcript, unpushed commits, staged/modified/untracked and small git-ignored files (.env), plus the session's Claude directory and the project's Claude memory (added without replacing anything; these two only warn). Nothing is pushed, committed or stashed and the source worktree is never modified; the target resumes the conversation and the source is killed only once the target runs. strict refuses instead of carrying. Errors: E_MOVE_MIDOP, E_MOVE_TARGET_DIRTY, E_MOVE_TOO_LARGE, E_MOVE_CARRY, E_MOVE_PARTIAL (target started, both sessions left), E_CONFIRM_REQUIRED, E_FORBIDDEN (cross-org; see force_cross_org). Needs a token allowed on BOTH hosts (in practice the master). Returns a moved report, a preview or a wait.
 
-Parameters: `clean_target`, `confirm_nonce`, `dry_run`, `force_cross_org`, `keep_source`, `session_id`, `strict`, `target_host_alias`, `when`
+Access: the master, a paired device or a per-host token · confirm-gated (mcp.confirm_destructive) · deadline 900 s.
+
+Parameters (* required): `clean_target`, `confirm_nonce`, `dry_run`, `force_cross_org`, `keep_source`, `session_id`*, `strict`, `target_host_alias`*, `when`
 
 ### `my_grants`
 
 Who you are on this fleet and every live grant TO you: { person_id, grants: [{ session_id, level }] }. With each row's owner_person_id and visibility, this is what a client derives its access from. Re-read after a reconnect the hub could not replay.
 
+Access: the master or a paired device; not a per-host token · readonly tokens too · deadline 60 s.
+
+### `my_profile`
+
+Who you are on this fleet, for a client that shows several fleets: { person_id, name, display_name, email, is_owner, sso: [{ issuer }], env: [{ name, secret, is_ref }], git: { name, email } } — your own person only. Variables are listed by name, never by value (the git name and e-mail excepted, when plain).
+
+Access: the master or a paired device; not a per-host token · readonly tokens too · deadline 60 s.
+
 ### `new_bg_session`
 
 Launch a supervised headless (background) Claude session on a host with an initial prompt, which becomes its default friendly name. Returns the claude_session_id AND the fleet row (`session`; absent until reconcile matches it, on the next tick) for session_transcript { session_id }. agent "codex" needs project_id and takes no read_only or stop limits.
 
-Parameters: `agent`, `confirm_nonce`, `host_alias`, `name`, `project_id`, `prompt`, `read_only`, `requester_session_id`, `stop_after_secs`, `stop_after_usd`
+Access: the master, a paired device or a per-host token · deadline 300 s.
+
+Parameters (* required): `agent`, `confirm_nonce`, `host_alias`*, `name`*, `project_id`, `prompt`*, `read_only`, `requester_session_id`, `stop_after_secs`, `stop_after_usd`
 
 ### `new_session`
 
 Create a Claude Code tmux session on a host, in a project (and optional worktree, or a fresh one with new_worktree). Auto-clones the repo on remote hosts.
 
-Parameters: `agent`, `base_branch`, `confirm_nonce`, `effort`, `env`, `friendly_name`, `host_alias`, `kind`, `model`, `name`, `new_worktree`, `over_limit_ok`, `profile`, `project_id`, `resume_claude_session_id`, `start_command`, `start_token`, `worktree_id`
+Access: the master, a paired device or a per-host token · deadline 300 s.
+
+Parameters (* required): `agent`, `base_branch`, `confirm_nonce`, `effort`, `env`, `friendly_name`, `host_alias`*, `kind`, `model`, `name`*, `new_worktree`, `over_limit_ok`, `profile`, `project_id`*, `resume_claude_session_id`, `start_command`, `start_token`, `worktree_id`
 
 ### `new_shell_session`
 
 Create a plain-shell tmux session (an interactive login shell, no Claude Code): new_session's project/worktree plumbing plus a start_command. Steer it with send_prompt and read it with capture_session.
 
-Parameters: `base_branch`, `confirm_nonce`, `host_alias`, `name`, `new_worktree`, `project_id`, `start_command`, `worktree_id`
+Access: the master, a paired device or a per-host token · deadline 300 s.
+
+Parameters (* required): `base_branch`, `confirm_nonce`, `host_alias`*, `name`*, `new_worktree`, `project_id`*, `start_command`, `worktree_id`
 
 ### `operator_status`
 
 Whether the UX agent can work, and why not: absent|lost|no_mcp|token_revoked|no_host|host_down; fallback: where ensure_operator moves it.
 
+Access: the master, a paired device or a per-host token · readonly tokens too · deadline 60 s.
+
 ### `org_admin`
 
 Administer the company: orgs (work_admin's org actions), devices (list, pair_device → code + QR, revoke, trust, bind, hand over, grant a catalog), people and members (roles, a member's grants). Hub owner's device: all; an org admin's: their org. Changes need a trusted full device, never locking out the one in use.
 
-Parameters: `action`, `admins_see_unclaimed`, `auto_tidy`, `bound_sees_unassigned`, `catalog`, `color`, `device`, `display_name`, `grant_id`, `host_alias`, `hosts`, `isolate_sessions`, `jev`, `jev_reply`, `keep_grants`, `key`, `members_own_sessions_only`, `mode`, `name`, `on`, `org`, `org_id`, `owner`, `owns_hub`, `path`, `path_prefix`, `person`, `person_id`, `project_id`, `remote`, `repo`, `role`, `rule_id`, `tracker_id`, `trusted`, `ttl_s`, `value`
+Access: a person's paired device (not the master) · deadline 60 s.
+
+Parameters (* required): `action`*, `admins_see_unclaimed`, `auto_tidy`, `bound_sees_unassigned`, `catalog`, `color`, `device`, `display_name`, `grant_id`, `host_alias`, `hosts`, `isolate_sessions`, `jev`, `jev_reply`, `keep_grants`, `key`, `members_own_sessions_only`, `mode`, `name`, `on`, `org`, `org_id`, `owner`, `owns_hub`, `path`, `path_prefix`, `person`, `person_id`, `project_id`, `remote`, `repo`, `role`, `rule_id`, `tracker_id`, `trusted`, `ttl_s`, `value`
 
 ### `pair_client`
 
-Mint a single-use pairing code for a new client device (phone, browser) and return the URL to show as a QR. The code (not a token) travels in the URL FRAGMENT, so no proxy or access log sees it; the device posts it to /pair once for a token of its own. name: 1-64 chars, no control characters, not a live client's. mode full drives sessions fleet-wide, readonly observes, peer is another hub's link (see peer_exchange), updater is fleet-updater's (/update only); fleet-admin tools stay out of a client's reach. Codes are in memory only: a hub restart voids them. org_id binds it to one org (its work and sessions only). person names whose device it is; the default is this hub's owner, and its sessions are private to that person. Master token only. Returns { url, code, expires_in_s, name, mode, trusted, org_id, person }.
+Mint a single-use pairing code for a new client device (phone, browser) and return the URL to show as a QR. The code (not a token) travels in the URL FRAGMENT, so no proxy or access log sees it; the device posts it to /pair once for a token of its own. name: 1-64 chars, no control characters, not a live client's. mode full drives sessions fleet-wide, readonly observes, answer observes and answers dialogs and forms but never types a prompt, peer is another hub's link (see peer_exchange), updater is fleet-updater's (/update only); fleet-admin tools stay out of a client's reach. Codes are in memory only: a hub restart voids them. org_id binds it to one org (its work and sessions only). person names whose device it is; the default is this hub's owner, and its sessions are private to that person. Master token only. Returns { url, code, expires_in_s, name, mode, trusted, org_id, person }.
 
-Parameters: `mode`, `name`, `org_id`, `person`, `trusted`, `ttl_s`
+Access: the master token only · deadline 60 s.
+
+Parameters (* required): `mode`, `name`*, `org_id`, `person`, `trusted`, `ttl_s`
 
 ### `pause_download`
 
 Pause (paused: true) or resume a sent file's copy in flight; it stops between slices. Answers the row. E_INVALID_STATE when it is not being copied.
 
-Parameters: `id`, `paused`
+Access: the master or a paired device; not a per-host token · deadline 60 s.
+
+Parameters (* required): `id`*, `paused`*
 
 ### `peer_exchange`
 
 Hub-to-hub link exchange (peer tokens only): deliver messages and acks, receive this hub's messages for the caller. Long-polls up to wait_ms. See docs/hub.md, Link two hubs.
 
-Parameters: `after`, `fleet_id`, `proto`, `results`, `send`, `wait_ms`
+Access: the master, a paired device or a per-host token · deadline 60 s.
+
+Parameters (* required): `after`, `fleet_id`*, `proto`*, `results`, `send`, `wait_ms`
 
 ### `peer_status`
 
 What is a peer session doing: claude_status, current_activity, stuck_kind, context_pct (plus host/name/status). Cheap check before send_message or broadcast_prompt.
 
-Parameters: `session_id`
+Access: the master, a paired device or a per-host token · readonly tokens too · deadline 60 s.
+
+Parameters (* required): `session_id`*
 
 ### `pin_session`
 
 Pin or unpin a session. A pinned session is listed in the Pinned section, and kill_session, safe_kill_session and tidy-up refuse it (E_PINNED) until it is unpinned. Returns the row.
 
-Parameters: `pinned`, `session_id`
+Access: the master, a paired device or a per-host token · deadline 60 s.
+
+Parameters (* required): `pinned`*, `session_id`*
 
 ### `place_transcript`
 
 Restore into a project: copy a conversation discover_lost_sessions found (not resumable where it ran) under the directory Claude Code keys that project's root by, on the same host, so claude --resume finds it there. Never moves or overwrites a transcript. Then resume with new_session { host_alias, project_id, name: tmux_name, resume_claude_session_id }.
 
-Parameters: `claude_session_id`, `host_alias`, `project_id`
+Access: the master, a paired device or a per-host token · deadline 60 s.
+
+Parameters (* required): `claude_session_id`*, `host_alias`*, `project_id`*
 
 ### `plan_sync`
 
 Compute a sync plan: scan the hosts, compare every catalog asset with what is installed, and return per-host actions (create | update | overwrite | adopt | remove | plugin_install | plugin_update | noop | blocked) plus a plan_id for apply_sync. plugin_update fires when a pinned plugin's catalog version changes; a host left on the old version stays blocked. orphan: in the host's fleet manifest, no longer in the catalog. A remote host with no layers assigned is skipped (it would otherwise get the whole catalog) unless allow_unlayered is set. Nothing is written.
 
-Parameters: `allow_unlayered`, `host_alias`, `kind`, `name`
+Access: the master, a paired device or a per-host token · deadline 300 s.
+
+Parameters (* required): `allow_unlayered`, `host_alias`, `kind`, `name`
 
 ### `pr_shepherd`
 
 The PR shepherd's standing rules per project: status (rules, episodes, merges), explain (what the next tick makes of each session in a ruled project, and why), grant {project_id, level: watch | nudge | merge, hours?, recipes?}, revoke {project_id}, pause_all. The owner's own device; writes need a trusted full device.
 
-Parameters: `action`, `hours`, `level`, `limit`, `project_id`, `recipes`
+Access: a fleet admin's own device (not the master) · deadline 60 s.
+
+Parameters (* required): `action`*, `hours`, `level`, `limit`, `project_id`, `recipes`
 
 ### `probe_host`
 
 Re-probe a host's reachability and versions. Returns the host row.
 
-Parameters: `alias`
+Access: the master, a paired device or a per-host token · readonly tokens too · deadline 300 s.
+
+Parameters (* required): `alias`*
 
 ### `project_picks`
 
 The New session picker's choices per project: pinned, vis (hide|keep), group.
 
+Access: a fleet admin's own device (not the master) · readonly tokens too · deadline 60 s.
+
 ### `propose_host_placement`
 
 Jev's host for a new session of project_id: {host_alias, confidence_pct, run_id}, or null (off, one candidate, unsure). E_FORBIDDEN for an org-bound client.
 
-Parameters: `project_id`
+Access: the master or a paired device; not a per-host token · readonly tokens too · deadline 300 s.
+
+Parameters (* required): `project_id`*
 
 ### `propose_layers`
 
 Propose a layer split from the last scan, grouping assets by the exact set of hosts they are on: the largest group becomes 'core'; single-host assets come back separately for triage. Read-only.
 
+Access: the master, a paired device or a per-host token · readonly tokens too · deadline 60 s.
+
 ### `provision_hosts`
 
-Install fleet skills, the Stop / UserPromptSubmit / EnterWorktree http hooks and this fleet's MCP server entry (per-host bearer token) into every reachable host's ~/.claude.json (a reverse SSH tunnel when the hub is loopback-only). Returns per-host status; each host must restart Claude to load it. host: one alias; content_only: skills, CLAUDE.md and hooks only, no token. The hub owner's device may run content_only for one host only.
+Install fleet skills, the Stop / UserPromptSubmit / EnterWorktree http hooks and this fleet's MCP server entry (per-host bearer token) into every reachable host's ~/.claude.json (a reverse SSH tunnel when the hub is loopback-only). Returns per-host status; each host must restart Claude to load it. host: one alias; content_only: skills, CLAUDE.md and hooks only, no token. The master, or a fleet admin's own device for content_only on one host only.
 
-Parameters: `content_only`, `host`, `rotate`
+Access: the master or a fleet admin's own device · deadline 300 s.
+
+Parameters (* required): `content_only`, `host`, `rotate`
 
 ### `prs`
 
 Pull requests sessions opened, newest first, with state, CI, merge time and opener.
 
-Parameters: `action`, `limit`, `project_id`, `state`
+Access: the master, a paired device or a per-host token · readonly tokens too · deadline 60 s.
+
+Parameters (* required): `action`, `limit`, `project_id`, `state`
 
 ### `queue_prompt`
 
-Send a prompt as a new turn when the session is idle: typed now if it is, else kept and typed once its turn ends (never into a dialog). Send later: not_before (unix secs) holds it until then, until_limit_reset while the account is at its limit, skip_if_archived drops it if the session is archived first. Marked untrusted unless raw=true (master only). Returns { session_id, delivered, queued_id }.
+Send a prompt as a new turn when the session is idle: typed now if it is, else kept and typed once its turn ends (never into a dialog). Send later: not_before (unix secs) holds it until then, until_limit_reset while the account is at its limit, skip_if_archived drops it if the session is archived first. Marked untrusted unless raw=true (master) or the caller is a trusted client. Returns { session_id, delivered, queued_id }.
 
-Parameters: `confirm_nonce`, `not_before`, `prompt`, `raw`, `session_id`, `skip_if_archived`, `until_limit_reset`
+Access: the master, a paired device or a per-host token · deadline 60 s.
+
+Parameters (* required): `confirm_nonce`, `not_before`, `prompt`*, `raw`, `session_id`*, `skip_if_archived`, `until_limit_reset`
 
 ### `queued_prompts`
 
 A session's prompts from queue_prompt still waiting, and any whose typing failed. cancel=<id> takes one back instead.
 
-Parameters: `cancel`, `session_id`
+Access: the master, a paired device or a per-host token · deadline 60 s.
+
+Parameters (* required): `cancel`, `session_id`*
 
 ### `quick_replies`
 
 Read or replace the fleet's quick replies: the chip row the desktop and phone composers draw above the prompt box, as [{label, text, auto_send}] in order. No arguments reads; `set` replaces the whole list (max 24, [] restores the defaults; not a host token or the operator). Errors: E_INVALID, E_CONFLICT, E_FORBIDDEN.
 
-Parameters: `expected`, `set`
+Access: the master, a paired device or a per-host token · deadline 60 s.
+
+Parameters (* required): `expected`, `set`
 
 ### `realm_admin`
 
 Realm: users, groups (tree, members), realm and client roles (composites), role mappings, effective roles, the audit log. Fleet admin's device: all; an org admin's: their org's groups' members. Changes need a trusted full device.
 
-Parameters: `action`, `child`, `client`, `description`, `group`, `limit`, `name`, `parent`, `profile`, `role`, `since`, `user`
+Access: a person's paired device (not the master) · deadline 60 s.
+
+Parameters (* required): `action`*, `child`, `client`, `description`, `group`, `limit`, `name`, `parent`, `profile`, `role`, `since`, `user`
 
 ### `recreate_session`
 
 Recreate a session: kill its tmux session and rebuild it in the same worktree, resuming the same Claude conversation. For a frozen, OOM-killed or out-of-context session, or to revive a ghost: the conversation survives, the process does not. Returns the row.
 
-Parameters: `confirm_nonce`, `force`, `session_id`
+Access: the master, a paired device or a per-host token · deadline 300 s.
+
+Parameters (* required): `confirm_nonce`, `force`, `session_id`*
 
 ### `refresh_projects`
 
 Rescan the local projects directory for new or removed repositories and worktrees; returns the project list. On a hub with hub.local_host off there is no local projects directory: nothing is scanned and the stored list is returned.
 
+Access: the master, a paired device or a per-host token · readonly tokens too · deadline 300 s.
+
 ### `register_self`
 
-Mark the calling session as the fleet controller; kill/recreate/restart refuse to target it without force. A per-host token may only register a session on its own host (E_FORBIDDEN).
+Mark the calling session as the fleet controller; kill/recreate/restart refuse to target it without force, and safe_kill_session refuses it outright. A per-host token may only register a session on its own host (E_FORBIDDEN).
 
-Parameters: `host_alias`, `session_id`, `tmux_name`
+Access: the master, a paired device or a per-host token · deadline 60 s.
+
+Parameters (* required): `host_alias`, `session_id`, `tmux_name`
 
 ### `related_sessions`
 
 Sessions sharing this session's project and worktree.
 
-Parameters: `session_id`
+Access: the master, a paired device or a per-host token · readonly tokens too · deadline 60 s.
+
+Parameters (* required): `session_id`*
 
 ### `remove_download`
 
 Remove a sent file and its copy: {removed}.
 
-Parameters: `id`
+Access: the master or a paired device; not a per-host token · deadline 60 s.
+
+Parameters (* required): `id`*
 
 ### `remove_host`
 
 Remove a host; its sessions are orphaned. Returns the removed row.
 
-Parameters: `alias`
+Access: the master token only · deadline 60 s.
+
+Parameters (* required): `alias`*
 
 ### `rename_session`
 
 Rename a tmux session. Returns the updated row.
 
-Parameters: `host_alias`, `new_name`, `old_name`, `session_id`
+Access: the master, a paired device or a per-host token · deadline 60 s.
+
+Parameters (* required): `host_alias`, `new_name`*, `old_name`, `session_id`
 
 ### `repair_session`
 
 Repair a session workspace (the Repair workspace button): make its directory a healthy git worktree on its branch with its tmux session running there. Goes past the automatic checks: may unregister a stale worktree entry, adopt its branch checkout elsewhere, recreate the branch from base once origin confirms it is gone, and respawn a pane whose directory vanished. No-op when healthy. Call it after any tool answers E_REPAIR_REQUIRED, then retry that tool. progress_token: steps arrive as repair:progress. Returns a RepairReport. Errors: E_REPO_MISSING, E_BRANCH_CHECKED_OUT, E_WORKSPACE_LOCKED, E_REPAIR_FAILED, E_HOST_OFFLINE, E_CONFIRM_REQUIRED (gated by mcp.confirm_destructive).
 
-Parameters: `confirm_nonce`, `host_alias`, `name`, `progress_token`, `session_id`
+Access: the master, a paired device or a per-host token · confirm-gated (mcp.confirm_destructive) · deadline 900 s.
+
+Parameters (* required): `confirm_nonce`, `host_alias`, `name`, `progress_token`, `session_id`
 
 ### `repo_blame`
 
 Blame of one worktree file as runs of lines: {path, hunks: [{start, lines, hash, author, time, summary, uncommitted}], truncated}.
 
-Parameters: `path`, `session_id`
+Access: the master, a paired device or a per-host token · readonly tokens too · deadline 60 s.
+
+Parameters (* required): `path`*, `session_id`*
 
 ### `repo_branch_diff`
 
 What a session's branch carries: the commits no remote has and the files they change, and the files it changes against the base branch: {branch, upstream, unpushed, unpushedFiles, truncated, base, aheadOfBase, baseFiles, behindBase}.
 
-Parameters: `session_id`
+Access: the master, a paired device or a per-host token · readonly tokens too · deadline 60 s.
+
+Parameters (* required): `session_id`*
 
 ### `repo_branches`
 
 Local + remote branches of a session's worktree, with ahead/behind and `merged` (the base branch contains the tip).
 
-Parameters: `session_id`
+Access: the master, a paired device or a per-host token · readonly tokens too · deadline 60 s.
+
+Parameters (* required): `session_id`*
 
 ### `repo_changes`
 
 A session's changed files (git status) in its worktree, each with added/removed line counts against HEAD when git diffs it.
 
-Parameters: `session_id`
+Access: the master, a paired device or a per-host token · readonly tokens too · deadline 60 s.
+
+Parameters (* required): `session_id`*
 
 ### `repo_commit`
 
 One commit's metadata + changed files with added/removed line counts: {hash, subject, body, author, date, files, pushed}.
 
-Parameters: `hash`, `session_id`
+Access: the master, a paired device or a per-host token · readonly tokens too · deadline 60 s.
+
+Parameters (* required): `hash`*, `session_id`*
 
 ### `repo_commit_diff`
 
 One file's diff within a commit: {path, diff, binary, truncated}.
 
-Parameters: `hash`, `path`, `session_id`
+Access: the master, a paired device or a per-host token · readonly tokens too · deadline 60 s.
+
+Parameters (* required): `hash`*, `path`*, `session_id`*
 
 ### `repo_diff`
 
 Unified diff of one worktree file vs HEAD (untracked: all added): {path, diff, binary, truncated}.
 
-Parameters: `fresh_for`, `path`, `session_id`
+Access: the master, a paired device or a per-host token · readonly tokens too · deadline 60 s.
+
+Parameters (* required): `fresh_for`, `path`*, `session_id`*
 
 ### `repo_file`
 
 One worktree file's contents (capped): {path, content, truncated, binary, size}.
 
-Parameters: `path`, `session_id`
+Access: the master, a paired device or a per-host token · readonly tokens too · deadline 60 s.
+
+Parameters (* required): `path`*, `session_id`*
 
 ### `repo_log`
 
 Commit log (branch graph) of a session's worktree, newest first, with parents + ref decorations; `skip` pages back.
 
-Parameters: `all`, `limit`, `session_id`, `skip`
+Access: the master, a paired device or a per-host token · readonly tokens too · deadline 60 s.
+
+Parameters (* required): `all`, `limit`, `session_id`*, `skip`
 
 ### `repo_range_diff`
 
 One file's diff over a session's unpushed commits (range `unpushed`) or against the base branch (range `base`): {path, diff, binary, truncated}.
 
-Parameters: `path`, `range`, `session_id`
+Access: the master, a paired device or a per-host token · readonly tokens too · deadline 60 s.
+
+Parameters (* required): `path`*, `range`*, `session_id`*
 
 ### `repo_tree`
 
 A session's worktree files (tracked + untracked, gitignore respected): {entries, truncated}.
 
-Parameters: `session_id`
+Access: the master, a paired device or a per-host token · readonly tokens too · deadline 60 s.
+
+Parameters (* required): `session_id`*
 
 ### `resolve_move`
 
 Finish or undo a partial move (E_MOVE_PARTIAL). finish kills the source; undo kills the target and is refused if it took a turn or isn't idle.
 
-Parameters: `action`, `confirm_nonce`, `session_id`
+Access: the master, a paired device or a per-host token · confirm-gated (mcp.confirm_destructive) · deadline 900 s.
+
+Parameters (* required): `action`*, `confirm_nonce`, `session_id`*
 
 ### `resolve_preview`
 
-One host's effective asset set after its role and contexts resolve: provenance, what was excluded and why, every refused asset (scope or collision), every private asset an org host withheld silently, and each held-back catalog with why. Nothing is written. Requires catalog_configure + catalog_load in the app.
+One host's effective asset set after its role and contexts resolve: provenance, what was excluded and why, every refused asset (scope or collision), every private asset an org host withheld silently, and each held-back catalog with why. Nothing is written. Needs a loaded catalog: catalog_admin {action: load} (configure first).
 
-Parameters: `host_alias`
+Access: the master, a paired device or a per-host token · readonly tokens too · deadline 60 s.
+
+Parameters (* required): `host_alias`*
 
 ### `restart_session`
 
 Restart a tmux session in place (kill and recreate): for a wedged Claude REPL whose tmux and worktree are fine; cheaper than recreate_session. Returns the updated row.
 
-Parameters: `confirm_nonce`, `effort`, `force`, `host_alias`, `model`, `name`, `over_limit_ok`, `profile`, `session_id`
+Access: the master, a paired device or a per-host token · deadline 300 s.
+
+Parameters (* required): `confirm_nonce`, `effort`, `force`, `host_alias`, `model`, `name`, `over_limit_ok`, `profile`, `session_id`
 
 ### `restore_host_sessions`
 
 Restore sessions a host lost to a reboot or tmux restart: resume each one's conversation in its original worktree under its original name. Call dry_run first, and again after a timeout to see what is still lost. One failing session never fails the others; every outcome is listed. One restore per host at a time (E_INVALID_STATE otherwise); a lost fleet controller is skipped (recreate_session force=true). Paced by restore.batch_size / restore.stagger_ms.
 
-Parameters: `confirm_nonce`, `dry_run`, `host_alias`, `session_ids`
+Access: the master, a paired device or a per-host token · deadline 300 s.
+
+Parameters (* required): `confirm_nonce`, `dry_run`, `host_alias`*, `session_ids`
 
 ### `resume_or_new`
 
 Whether a new session on a work key should resume a past session or start fresh (propose {key}), or record the person's pick (follow {key, chosen}).
 
-Parameters: `action`, `chosen`, `key`
+Access: a fleet admin's own device (not the master) · deadline 60 s.
+
+Parameters (* required): `action`*, `chosen`, `key`*
 
 ### `revoke_client`
 
 Revoke a paired client's token by name: its next request is refused and the name is free to pair again; the row is kept, revoked, for the audit trail. E_NOTFOUND when no live client has that name. Master token only.
 
-Parameters: `name`
+Access: the master token only · deadline 60 s.
+
+Parameters (* required): `name`*
 
 ### `rewind_conversation`
 
 Truncate a session's transcript into a new conversation: "fork" starts a new session there, "rewind" restarts this one. The original is unchanged. Returns the row (a fork's is the new session).
 
-Parameters: `anchor_uuid`, `confirm_nonce`, `mode`, `new_worktree`, `session_id`
+Access: the master, a paired device or a per-host token · deadline 300 s.
+
+Parameters (* required): `anchor_uuid`, `confirm_nonce`, `mode`*, `new_worktree`, `session_id`*
 
 ### `routines`
 
-Routines: a saved prompt that starts a session on cron, a session or PR event or Run now. list; get {routine_id}: runs and fixes; runs {routine_id, limit?}; failing: Inbox; budget: fleet spend today; save {routine, routine_id?}: the whole routine; preview: save's dry run; delete; set_enabled {enabled}; skip_next {skip?}; run_now; set_run_outcome {run_id, outcome}: a person's did_work | nothing | needs_person (needs_person lands it in the Inbox). Debugging, nothing written: explain {routine_id, limit?}: why it does or does not fire, check by check, its recent events judged and its decision trace; decisions {routine_id, limit?}: the trace alone; dry_run {routine_id, event_id?}: what a fire now would start and the exact prompt. tune_prompt {routine, ask?}: the prompt tuner on a draft routine's prompt, on its host and profile: { prompt, notes, unchanged, model, host_alias, at }, a proposal never saved (E_INVALID_STATE while work.prompt_tune is off). Pause all stops the schedule, not run_now. E_NOTFOUND, E_INVALID.
+Routines: a saved prompt that starts a session on cron, a session or PR event or Run now. list; get {routine_id}: runs and fixes; runs {routine_id, limit?}; failing: Inbox; budget: fleet spend today; save {routine, routine_id?}: the whole routine; preview: save's dry run; delete; set_enabled {enabled}; skip_next {skip?}; run_now; set_run_outcome {run_id, outcome}: a person's did_work | nothing | needs_person (that lands it in the Inbox). Debugging, nothing written: explain {routine_id, limit?}: why it does or does not fire, check by check, recent events judged and the decision trace; decisions {routine_id, limit?}: the trace alone; dry_run {routine_id, event_id?}: what a fire now would start and the exact prompt. memory; set_memory {notebook, text}. tune_prompt {routine, ask?}: the prompt tuner on a draft's prompt, on its host and profile: { prompt, notes, unchanged, model, host_alias, at }, a proposal never saved (E_INVALID_STATE while work.prompt_tune is off). Pause all stops the schedule, not run_now. E_NOTFOUND, E_INVALID.
 
-Parameters: `action`, `ask`, `enabled`, `event_id`, `limit`, `outcome`, `routine`, `routine_id`, `run_id`, `skip`
+Access: the master or a paired device; not a per-host token · deadline 300 s.
+
+Parameters (* required): `action`*, `ask`, `enabled`, `event_id`, `limit`, `notebook`, `outcome`, `routine`, `routine_id`, `run_id`, `skip`, `text`
 
 ### `run_prompt`
 
-send_prompt + wait_for_session(turn_gt) + session_transcript in one call. Returns { turn_seq, status: satisfied | timeout, transcript } (the reply as plain text; null with transcript_error when unreadable). Marked untrusted unless raw=true (master token only).
+send_prompt + wait_for_session(turn_gt) + session_transcript in one call. Returns { turn_seq, status: satisfied | timeout, transcript } (the reply as plain text; null with transcript_error when unreadable). Marked untrusted unless raw=true (master) or the caller is a trusted client.
 
-Parameters: `confirm_nonce`, `max_chars`, `prompt`, `raw`, `session_id`, `timeout_s`
+Access: the master, a paired device or a per-host token · deadline 660 s.
+
+Parameters (* required): `confirm_nonce`, `max_chars`, `prompt`*, `raw`, `session_id`*, `timeout_s`
 
 ### `runs`
 
 Runs, newest first: tasks, mission steps, Jev decisions, planner and summary runs, routine fires. list: {runs, total}; each run has kind, owner, outcome (ok | failed | needs_person | nothing_to_do | running), duration_ms, cost_micros and session_ids. trace {run_id, after_seq?}: a routine or agent run's steps, oldest first ({steps, more}; each has seq, phase, kind, actor, summary, data).
 
-Parameters: `action`, `after_seq`, `kind`, `limit`, `mission_id`, `offset`, `org_id`, `outcome`, `routine_id`, `run_id`, `session_id`, `since`, `until`
+Access: the master or a paired device; not a per-host token · readonly tokens too · deadline 60 s.
+
+Parameters (* required): `action`*, `after_seq`, `kind`, `limit`, `mission_id`, `offset`, `org_id`, `outcome`, `routine_id`, `run_id`, `session_id`, `since`, `until`
 
 ### `safe_kill_session`
 
 Ask a running Claude session to persist its work (commit + push), then arm deletion of its worktree + tmux session: for retiring a session that may hold unpushed work. Returns the row with safe_kill_state=requested; the delete fires only after the SAFE_REMOVE_READY marker AND a clean-tree check ('ready' / 'failed' arrive as row events).
 
-Parameters: `confirm_nonce`, `host_alias`, `session_id`, `tmux_name`
+Access: the master, a paired device or a per-host token · deadline 300 s.
+
+Parameters (* required): `confirm_nonce`, `host_alias`, `session_id`, `tmux_name`
 
 ### `scan_assets`
 
 Scan hosts for installed skills/agents/hooks/MCP servers/plugins and recompute each catalog asset's state (in_sync | drifted | missing | unmanaged | unsupported | orphan). Read-only on hosts.
 
-Parameters: `host_alias`
+Access: the master, a paired device or a per-host token · readonly tokens too · deadline 300 s.
+
+Parameters (* required): `host_alias`
 
 ### `search`
 
 Search everything the hub indexes: tasks and tickets (key, title, brief, description), sessions (name, host, branch, tags, last prompt, notes), conversations (first prompt), pull requests, the work journal, and conversation text when the hub indexes transcripts (setting search.index_transcripts, off by default). Every word must match, in any order; case and accents are ignored and each word matches as a prefix. Only what you may see is returned. Returns { hits: [{ kind, ref, title, title_marks?, snippet, snippet_marks?, at, session_id?, session_name?, host_alias?, claude_session_id?, task_id?, key? }], transcripts_indexed }; marks are [start, end) in UTF-16 units.
 
-Parameters: `kinds`, `limit`, `query`
+Access: the master, a paired device or a per-host token · readonly tokens too · deadline 60 s.
+
+Parameters (* required): `kinds`, `limit`, `query`*
 
 ### `send_file`
 
 Send a file from a session's host to the user's phone and desktop (copied in the background, ≤ downloads.max_file_mb; zip a folder first). Your session_id: whoami. path: absolute or relative to the session's worktree root. E_NOTFOUND, E_LIMIT.
 
-Parameters: `note`, `path`, `session_id`
+Access: the master, a paired device or a per-host token · deadline 60 s.
+
+Parameters (* required): `note`, `path`*, `session_id`*
 
 ### `send_message`
 
-Send a peer-to-peer message (to_session_id or to_addr) to the recipient's inbox; deliver also pastes it into the pane, wake nudges an idle one. reply_to threads an answer. A per-host token needs its own host (E_FORBIDDEN); the body is marked untrusted unless raw=true (master only).
+Send a peer-to-peer message (to_session_id or to_addr) to the recipient's inbox; deliver also pastes it into the pane, wake nudges an idle one. reply_to threads an answer. A per-host token needs its own host (E_FORBIDDEN); the body is marked untrusted unless raw=true (master) or the caller is a trusted client.
 
-Parameters: `body`, `client_msg_id`, `deliver`, `from_session_id`, `kind`, `raw`, `reply_to`, `submit`, `to_addr`, `to_session_id`, `wake`
+Access: the master, a paired device or a per-host token · deadline 60 s.
+
+Parameters (* required): `body`*, `client_msg_id`, `deliver`, `from_session_id`*, `kind`, `raw`, `reply_to`, `submit`, `to_addr`, `to_session_id`*, `wake`
 
 ### `send_prompt`
 
-Send and SUBMIT a prompt to a Claude session's REPL (pasted, then one Enter); the first prompt to an unnamed session also names it. Marked untrusted unless raw=true (master only) or a trusted client. Returns { delivered, session_id, turn_seq_before, queued, acked }: pass turn_seq_before to wait_for_session { until: "turn_gt" } or session_transcript { since_turn } for the reply (run_prompt does all three). Refuses a blocked or stuck session (E_INVALID_STATE) unless force=true; a working one queues it. acked: true = hook-confirmed, false = not within 1.5 s (check capture_session), null = unknowable.
+Send and SUBMIT a prompt to a Claude session's REPL (pasted, then one Enter); the first prompt to an unnamed session also names it. Marked untrusted unless raw=true (master) or the caller is a trusted client. Returns { delivered, session_id, turn_seq_before, queued, acked }: pass turn_seq_before to wait_for_session { until: "turn_gt" } or session_transcript { since_turn } for the reply (run_prompt does all three). Refuses a blocked or stuck session (E_INVALID_STATE) unless force=true; a working one queues it. acked: true = hook-confirmed, false = not within 1.5 s (check capture_session), null = unknowable.
 
-Parameters: `client_msg_id`, `confirm_nonce`, `expect`, `force`, `host_alias`, `keys`, `prompt`, `raw`, `session_id`, `submit`, `tmux_name`
+Access: the master, a paired device or a per-host token · deadline 60 s.
+
+Parameters (* required): `client_msg_id`, `confirm_nonce`, `expect`, `force`, `host_alias`, `keys`, `prompt`*, `raw`, `session_id`, `submit`, `tmux_name`
 
 ### `session_access`
 
 Who holds a live grant on your session (a person or an org), the level, who granted it and when. Owner only: it names others. Errors: E_NOTFOUND, E_FORBIDDEN.
 
-Parameters: `session_id`
+Access: the master or a paired device; not a per-host token · readonly tokens too · deadline 60 s.
+
+Parameters (* required): `session_id`*
 
 ### `session_activity`
 
 What the session's pane shows now: claude_status, stuck_kind, current_activity, waiting_for and the spinner line. One capture, nothing stored: the cheap read behind a live indicator (capture_session is the whole pane). E_INVALID_STATE outside tmux.
 
-Parameters: `session_id`
+Access: the master, a paired device or a per-host token · readonly tokens too · deadline 60 s.
+
+Parameters (* required): `session_id`*
 
 ### `session_ask_access`
 
 Ask the owner of a session shared with you for a wider level (answer or drive). Confers nothing until they grant it; one open ask per session. Errors: E_NOTFOUND, E_FORBIDDEN, E_VALIDATE, E_EXISTS, E_INVALID_STATE (declined within the hour).
 
-Parameters: `level`, `session_id`
+Access: the master or a paired device; not a per-host token · deadline 60 s.
+
+Parameters (* required): `level`*, `session_id`*
 
 ### `session_claim`
 
 Claim the unclaimed session THIS pane is in for a person: it becomes theirs and private. Only the session whose active pane this request's X-Fleet-Pane header names — being on the same host is not enough. Errors: E_NOTFOUND, E_INVALID_STATE (no pane of it proven), E_FORBIDDEN (another session's pane), E_EXISTS (owned).
 
-Parameters: `person`, `session_id`
+Access: a per-host token only · deadline 60 s.
+
+Parameters (* required): `person`*, `session_id`*
 
 ### `session_context_help`
 
 Context help at a session's composer: a question about the draft (empty asks about the draft alone), with the earlier prompts and the commands the composer accepts as context. Returns { answer, command?, model, host_alias, history_items, at }: a few lines and at most one proposal for the composer, never run. Runs one claude -p on the session's host under its account, on work.help_model (booked as context_help), for the owner or an answer/drive grant. Errors: E_INVALID_STATE (work.context_help off), E_FORBIDDEN (a watch grant), E_INVALID (nothing to ask about), E_CLAUDE_CLI, E_TIMEOUT, as session_conversation.
 
-Parameters: `commands`, `history`, `line`, `question`, `session_id`
+Access: the master, a paired device or a per-host token · deadline 300 s.
+
+Parameters (* required): `commands`, `history`, `line`, `question`, `session_id`*
 
 ### `session_conversation`
 
 Read a session conversation as structured turns (session_transcript is one flat blob): each turn's prompt, timestamps and items by kind (text, tool, subagent, compact, command, interrupt; tool inputs and results are never included), plus events (the conversation timeline) and context (context-window usage, or null). Read-only. Errors: E_INVALID, E_INVALID_STATE, E_NO_TRANSCRIPT.
 
-Parameters: `claude_session_id`, `events_limit`, `session_id`, `since_turn`, `turns`
+Access: the master, a paired device or a per-host token · readonly tokens too · deadline 300 s.
+
+Parameters (* required): `claude_session_id`, `events_limit`, `session_id`*, `since_turn`, `turns`
 
 ### `session_conversations`
 
 The Claude conversations a session has run, newest first: claude_session_id, started_at, ended_at, start_source (startup, resume, clear, compact, fork, fleet, unknown), end_reason, model, first_prompt, turns, compactions, current. Read an earlier one with session_conversation. Read-only; a per-host token only for sessions on its own host.
 
-Parameters: `limit`, `session_id`
+Access: the master, a paired device or a per-host token · readonly tokens too · deadline 60 s.
+
+Parameters (* required): `limit`, `session_id`*
 
 ### `session_history`
 
 A session's recorded event timeline, newest first: status changes, prompts, stuck, kills, and conversation events (conversation_started, conversation_ended, compact_started, compact_done, turn_done).
 
-Parameters: `fresh_for`, `limit`, `session_id`
+Access: the master, a paired device or a per-host token · readonly tokens too · deadline 60 s.
+
+Parameters (* required): `fresh_for`, `limit`, `session_id`*
 
 ### `session_narrow`
 
 Lower a person's or org's grant on your session to watch (owner only). Nothing raises one: revoke and share again. Returns the session row. Errors: E_NOTFOUND, E_FORBIDDEN.
 
-Parameters: `org`, `person`, `session_id`
+Access: the master or a paired device; not a per-host token · deadline 60 s.
+
+Parameters (* required): `org`, `person`, `session_id`*
 
 ### `session_presence`
 
 Presence: report that you have a session open (again every heartbeat_secs; leaving: true when you close it) and read who else has. The owner sees everyone; others see the owner and themselves. Returns { session_id, viewers: [{ person_id, name, device?, since, you? }], heartbeat_secs }.
 
-Parameters: `leaving`, `session_id`
+Access: the master or a paired device; not a per-host token · readonly tokens too · deadline 60 s.
+
+Parameters (* required): `leaving`, `session_id`*
 
 ### `session_prompt_tune`
 
 The prompt tuner at a session's composer: a model rewrites the draft into a clearer prompt for the session's agent, with the earlier prompts, the commands the composer accepts and an optional ask ("shorter") as context. Returns { prompt, notes, unchanged, model, host_alias, at }: a proposal for the composer, never sent. Runs one claude -p on the session's host under its account, on work.help_model (booked as context_help), for the owner or an answer/drive grant. Errors: E_INVALID_STATE (work.prompt_tune off), E_FORBIDDEN (a watch grant), E_INVALID (an empty draft), E_CLAUDE_CLI, E_TIMEOUT, as session_conversation.
 
-Parameters: `ask`, `commands`, `draft`, `history`, `session_id`
+Access: the master, a paired device or a per-host token · deadline 300 s.
+
+Parameters (* required): `ask`, `commands`, `draft`*, `history`, `session_id`*
 
 ### `session_share`
 
 Share a session you OWN with a person, or an org you are in (its members from now), at watch (read), answer (also a dialog's keys) or drive (also prompt). Owner only; never 'own' or a terminal. Returns the row. Errors: E_NOTFOUND, E_FORBIDDEN, E_VALIDATE, E_EXISTS.
 
-Parameters: `level`, `org`, `person`, `session_id`
+Access: the master or a paired device; not a per-host token · deadline 60 s.
+
+Parameters (* required): `level`*, `org`, `person`, `session_id`*
 
 ### `session_summary_since`
 
 A short Claude-written summary of what a session did since a time (unix seconds), for whoever may read it: { text | null, check: off | shadow | passed | failed | unchecked, since, turns, model, host_alias, at }. Runs one claude -p on the session's host under its account (booked as watch_summary); only with the session org's consent; text is null when nothing happened since or when the Jev check hid it. Errors: E_FORBIDDEN (no consent), E_CLAUDE_CLI, E_TIMEOUT, as session_conversation.
 
-Parameters: `session_id`, `since`
+Access: the master, a paired device or a per-host token · deadline 300 s.
+
+Parameters (* required): `session_id`*, `since`*
 
 ### `session_tool_detail`
 
 One tool call's input and result (omitted by session_conversation): { id, name, input, edit {file_path, old, new} | null, command | null, result | null, is_error, images? [{mime, data}], images_omitted? }; texts capped at 8000 chars, images (a screenshot) at 2 of 4 MiB base64. Read-only. Errors: as session_conversation, E_NOTFOUND.
 
-Parameters: `claude_session_id`, `session_id`, `tool_use_id`
+Access: the master, a paired device or a per-host token · readonly tokens too · deadline 300 s.
+
+Parameters (* required): `claude_session_id`, `session_id`*, `tool_use_id`*
 
 ### `session_transcript`
 
 Read a session's Claude Code transcript (the JSONL, not the pane): the last assistant turn as plain text, text blocks verbatim, one line per tool call, no thinking. Errors: E_INVALID_STATE (no claude_session_id yet), E_NO_TRANSCRIPT (nothing written yet). Read-only; prefer it over capture_session for the reply. unchanged costs no transcript read.
 
-Parameters: `fresh_for`, `max_chars`, `session_id`, `since_turn`
+Access: the master, a paired device or a per-host token · readonly tokens too · deadline 300 s.
+
+Parameters (* required): `fresh_for`, `max_chars`, `session_id`*, `since_turn`
 
 ### `session_unshare`
 
 Revoke a person's or org's grant on your session (owner only; kept, revoked, for audit). Returns the session row. Errors: E_NOTFOUND, E_FORBIDDEN.
 
-Parameters: `org`, `person`, `session_id`
+Access: the master or a paired device; not a per-host token · deadline 60 s.
+
+Parameters (* required): `org`, `person`, `session_id`*
 
 ### `set_account_nickname`
 
 Name a Claude account (≤ 32 characters; empty or null clears). Returns the account row.
 
-Parameters: `nickname`, `uuid`
+Access: the master or a fleet admin's own device · deadline 60 s.
+
+Parameters (* required): `nickname`, `uuid`*
 
 ### `set_client_trust`
 
 Grant or withdraw trust in a paired client by name: a trusted client's prompts and messages are delivered without the untrusted-content marker, like the master's raw=true. Trust a device you type on, never an agent's token. E_NOTFOUND for an unknown live name. Master token only.
 
-Parameters: `name`, `trusted`
+Access: the master token only · deadline 60 s.
+
+Parameters (* required): `name`*, `trusted`*
 
 ### `set_clipboard`
 
-Write a host's system clipboard, via wl-copy, xclip, xsel or pbcopy. E_CLIPBOARD_UNAVAILABLE if none is installed. May return E_CONFIRM_REQUIRED when desktop confirmation is on.
+Write a host's system clipboard, via wl-copy, xclip, xsel or pbcopy. E_CLIPBOARD_UNAVAILABLE if none is installed. May return E_CONFIRM_REQUIRED when confirmation is on (mcp.confirm_destructive).
 
-Parameters: `confirm_nonce`, `content`, `host_alias`
+Access: the master, a paired device or a per-host token · confirm-gated (mcp.confirm_destructive) · deadline 660 s.
+
+Parameters (* required): `confirm_nonce`, `content`*, `host_alias`*
 
 ### `set_friendly_name`
 
 Set the session's friendly display name, once per task by the in-session agent (3–6 words; empty clears). Returns the updated row.
 
-Parameters: `friendly_name`, `host_alias`, `session_id`, `tmux_name`
+Access: the master, a paired device or a per-host token · deadline 60 s.
+
+Parameters (* required): `friendly_name`*, `host_alias`, `session_id`, `tmux_name`
 
 ### `set_host_harnesses`
 
 Choose which harnesses the asset catalog syncs on one host. harnesses null = auto: Claude, plus Codex where a scan finds the codex CLI, ~/.codex/auth.json or ~/.codex/sessions, or where fleet already manages Codex assets. Otherwise a list that must include "claude"; ["claude"] turns Codex off, and the next sync then removes what fleet installed for Codex there. Edits fleet state only. Master token only.
 
-Parameters: `harnesses`, `host_alias`
+Access: the master token only · deadline 60 s.
+
+Parameters (* required): `harnesses`, `host_alias`*
 
 ### `set_host_layers`
 
 Replace a host's layer assignment: one optional role plus context layers. Edits fleet state only, never catalog files. Requires a configured catalog (in the app, or `fleet-hub catalog set` on a hub). Master token only.
 
-Parameters: `contexts`, `host_alias`, `role`
+Access: the master token only · deadline 60 s.
+
+Parameters (* required): `contexts`, `host_alias`*, `role`
 
 ### `set_project_pick`
 
 Replace one project's picker choices: pinned, vis hide|keep|null, group or null. The empty state clears.
 
-Parameters: `grp`, `owner`, `pinned`, `repo`, `vis`
+Access: a fleet admin's own device (not the master) · deadline 60 s.
+
+Parameters (* required): `grp`, `owner`*, `pinned`, `repo`*, `vis`
 
 ### `set_secret`
 
 Store a value for a catalog ${NAME} placeholder (global, or per host with host_alias). Master token only. The value is never returned or logged.
 
-Parameters: `host_alias`, `name`, `value`
+Access: the master token only · deadline 60 s.
+
+Parameters (* required): `host_alias`, `name`*, `value`*
 
 ### `set_session_tags`
 
 Replace a session's tags (short labels such as `review`, `wip`; up to 16 of 1–32 chars from [A-Za-z0-9_.:-]), shown and filterable in list_sessions. Returns the updated row.
 
-Parameters: `host_alias`, `session_id`, `tags`, `tmux_name`
+Access: the master, a paired device or a per-host token · deadline 60 s.
+
+Parameters (* required): `host_alias`, `session_id`, `tags`*, `tmux_name`
 
 ### `set_setting`
 
-Change one get_settings key, validated; E_INVALID otherwise. mcp.*, hub.* and controller.* are refused. Master, or a trusted device. Returns the settings, or with propose the proposal.
+Change one get_settings key, validated; E_INVALID otherwise. mcp.*, hub.* and controller.* are refused. The master or a fleet admin's own device (a write needs it trusted and full). Returns the settings, or with propose the proposal.
 
-Parameters: `key`, `propose`, `value`, `why`
+Access: the master or a fleet admin's own device · deadline 60 s.
+
+Parameters (* required): `key`*, `propose`, `value`*, `why`
 
 ### `setting_history`
 
 One setting's writes, newest first: who, before and after, the proposal applied.
 
-Parameters: `key`, `limit`
+Access: a fleet admin's own device (not the master) · readonly tokens too · deadline 60 s.
+
+Parameters (* required): `key`*, `limit`
 
 ### `setting_proposals`
 
 Settings proposals waiting for review, each with the key's value now, and can_write: whether this device may decide.
 
+Access: a fleet admin's own device (not the master) · readonly tokens too · deadline 60 s.
+
 ### `shell_terminals`
 
 A session's shell terminals: tmux sessions <name>--sh<N> (N 1-9) beside its agent, started in the agent's directory (at=home: home) and never listed as sessions. action=list (default), open (n, or the lowest free) or close (n). Closing one never stops the session. Returns the open terminals, each with the command running in it.
 
-Parameters: `action`, `at`, `n`, `session_id`
+Access: the master, a paired device or a per-host token · deadline 60 s.
+
+Parameters (* required): `action`, `at`, `n`, `session_id`*
 
 ### `spawn_review`
 
 Spawn a review session: a new Claude session in the source session's worktree, seeded with a review prompt. Returns its row.
 
-Parameters: `agent`, `confirm_nonce`, `prompt`, `source_session_id`
+Access: the master, a paired device or a per-host token · deadline 300 s.
+
+Parameters (* required): `agent`, `confirm_nonce`, `prompt`*, `source_session_id`*
 
 ### `start_rules`
 
 Start rules: a task key pattern (PD-*) that names the project, and optionally the host (with a fallback host for when it is offline), the account, model, effort and agent (claude | codex) of a start, decided before the key's history and Jev. Fleet offers one after five identical starts. list: offers, active and dismissed rules; save {rule, rule_id?}: the whole rule, active; accept {rule_id}: an offer, replacing the pattern's other rule; dismiss {rule_id}: never offered again; delete {rule_id}. E_NOTFOUND, E_INVALID, E_EXISTS.
 
-Parameters: `action`, `rule`, `rule_id`
+Access: the master or a paired device; not a per-host token · deadline 60 s.
+
+Parameters (* required): `action`*, `rule`, `rule_id`
 
 ### `suggest_placement`
 
 Where new work should run: every host and Claude login that can take it, best first, and what was left out and why. Filters hosts that answer, have claude and are under the recovery thresholds (memory, pressure, CPU), and, with project_id, have run that project; logins that are signed in, under accounts.pause_at and within their daily limit. Ranks by account headroom, then idle CPU and free memory. hosts limits it to those (a mission's grant), profile to one login ("" = each host's own). Returns {pause_at_pct, candidates:[{host_alias, profile?, account_uuid, email?, used_pct?, cpu_pct?, mem_avail_pct?, score, reasons}], excluded:[{host_alias, profile?, host, why}], note?}. Read-only; never fetches. Errors: E_INVALID.
 
-Parameters: `hosts`, `profile`, `project_id`
+Access: the master, a paired device or a per-host token · readonly tokens too · deadline 60 s.
+
+Parameters (* required): `hosts`, `profile`, `project_id`
 
 ### `touch_session_viewed`
 
 Mark a session viewed now: the turns it has finished read as seen. Returns the row.
 
-Parameters: `session_id`
+Access: the master, a paired device or a per-host token · deadline 60 s.
+
+Parameters (* required): `session_id`*
 
 ### `unlink_peer`
 
 Remove a link to another fleet's hub by its id: messages waiting for it fail back to their senders. The master, or the hub owner's trusted full device.
 
-Parameters: `id`
+Access: the master or a fleet admin's own device · deadline 60 s.
+
+Parameters (* required): `id`*
 
 ### `update_admin`
 
 Update admin, master only: pin a version (below installed = rollback), unpin, update_now, refresh the channel, rollout_* in waves, or an org's policy (set_policy / clear_policy). E_INVALID, E_CONFLICT, E_UPDATE_UNVERIFIED.
 
-Parameters: `action`, `component`, `halt_failure_ratio`, `mandatory`, `minimum`, `mode`, `org_id`, `reason`, `target`, `version`, `waves`, `window`
+Access: the master token only · deadline 300 s.
+
+Parameters (* required): `action`*, `component`, `halt_failure_ratio`, `mandatory`, `minimum`, `mode`, `org_id`, `reason`, `target`, `version`, `waves`, `window`
 
 ### `update_policy`
 
 An org's update policy from a person's device: list, set or clear its mode, floor, window and pin per component. The hub owner's device for any org, an org admin's for theirs. E_FORBIDDEN, E_INVALID.
 
-Parameters: `action`, `component`, `mandatory`, `minimum`, `mode`, `org_id`, `reason`, `version`, `window`
+Access: a person's paired device (not the master) · deadline 60 s.
+
+Parameters (* required): `action`*, `component`, `mandatory`, `minimum`, `mode`, `org_id`, `reason`, `version`, `window`
 
 ### `update_status`
 
 Fleet updates: the verified release channel, each target's version, phase and what the hub would tell it now, per-component counts, pins; with target, why. A per-host or org-bound token sees itself only.
 
-Parameters: `target`
+Access: the master, a paired device or a per-host token · readonly tokens too · deadline 60 s.
+
+Parameters (* required): `target`
 
 ### `usage_report`
 
 ESTIMATED token usage and cost per session, host and UTC day, from each session's transcript (collected every usage.interval_secs). Costs are micro-USD from a built-in price table (usage.prices_json), not a bill. total and by_host sum live rows over their lifetime; by_day is the durable daily roll-up (killed sessions included). Sessions sorted by cost, at most 200. A per-host token only sees its own host. by_day.backfill_cost_micros: history a first read booked, apart from live cost.
 
-Parameters: `host_alias`, `since_secs`
+Access: the master, a paired device or a per-host token · readonly tokens too · deadline 300 s.
+
+Parameters (* required): `host_alias`, `since_secs`
 
 ### `wait_for_reply`
 
 Block until the next message arrives for a session, or timeout_s (instead of polling inbox). Returns { status: satisfied | timeout, message }. Read-only.
 
-Parameters: `after_message_id`, `session_id`, `timeout_s`
+Access: the master, a paired device or a per-host token · readonly tokens too · deadline 660 s.
+
+Parameters (* required): `after_message_id`, `session_id`*, `timeout_s`
 
 ### `wait_for_session`
 
 Block until a session reaches a state, or timeout_s. until="idle": claude_status is idle | completed | stopped | failed (true even before a first turn). until="turn_gt": turn_seq > `turn`; pass send_prompt's turn_seq_before to wait for the reply to YOUR prompt. Polls every 500 ms. Returns { status: satisfied | timeout, claude_status, turn_seq, last_stop_at, stuck_kind }. Read-only; a per-host token only for sessions on its own host.
 
-Parameters: `session_id`, `timeout_s`, `turn`, `until`
+Access: the master, a paired device or a per-host token · readonly tokens too · deadline 660 s.
+
+Parameters (* required): `session_id`*, `timeout_s`, `turn`, `until`*
 
 ### `wait_for_task`
 
 Block until a task is done | failed | cancelled, or timeout_s (polls every 500 ms). Returns { status: satisfied | timeout, task }; task.result holds the worker's paragraph. Read-only. A per-host token may only wait on tasks it requested or whose worker is on its host (E_FORBIDDEN).
 
-Parameters: `task_id`, `timeout_s`
+Access: the master, a paired device or a per-host token · readonly tokens too · deadline 660 s.
+
+Parameters (* required): `task_id`*, `timeout_s`
 
 ### `whoami`
 
 Find your own fleet row. From inside a fleet session call it with no argument: your pane names you. Else pass your tmux session name (`tmux display-message -p '#S'`). E_NOTFOUND until fleet has reconciled it; E_AMBIGUOUS when the name exists on several hosts: pick yours from the error's {session_id, host_alias} candidates and use session_id from then on.
 
-Parameters: `tmux_name`
+Access: the master, a paired device or a per-host token · deadline 60 s.
+
+Parameters (* required): `tmux_name`
 
 ### `wizard_state`
 
 A wizard left half-way, to resume on another of your devices: list {kind?} | get {kind, key?} | save {kind, key?, step, answers, label?} | clear {kind, key?}. Rows name the device that saved last. E_INVALID.
 
-Parameters: `action`, `answers`, `key`, `kind`, `label`, `step`
+Access: the master or a paired device; not a per-host token · deadline 60 s.
+
+Parameters (* required): `action`*, `answers`, `key`, `kind`, `label`, `step`
 
 ### `work`
 
 Work links: {session_id} → its live links; {key} → ended (past) links; neither → recently ended. action context|resume_plan {key}; purge_impact; tickets (cached; view: mine|sprint|recent|archived); lookup {key|url}; trackers; scopes; orgs; org_suggestions; today {since}; card {key}; describe {key} (the tracker's whole description, cached); tracker_comments {key} (the ticket's own comments, live); tidy; reopened. Work view: tree {filters, cursor} (archived: false hides archived tasks); task {task_id}; session_tasks; review; rules; rule_preview {rule}; views; org_impact. buckets {kind?}: sprints, releases; bucket {bucket_id}. missions; mission {mission_id, before_event?}. attachment {attachment_id}: a file's bytes. result {item_id|session_id}: a task's report, evidence, gate, PR and follow-ups.
 
-Parameters: `action`, `attachment_id`, `before_event`, `bucket_id`, `cursor`, `filters`, `host_alias`, `host_aliases`, `include_local`, `item_id`, `key`, `kind`, `limit`, `link_id`, `mission_id`, `org_id`, `per_task`, `project_id`, `query`, `rule`, `session_id`, `since`, `task_id`, `tracker_id`, `url`, `view`, `with_brief`
+Access: the master, a paired device or a per-host token · readonly tokens too · deadline 60 s.
+
+Parameters (* required): `action`, `attachment_id`, `before_event`, `bucket_id`, `cursor`, `filters`, `host_alias`, `host_aliases`, `include_local`, `item_id`, `key`, `kind`, `limit`, `link_id`, `mission_id`, `org_id`, `per_task`, `project_id`, `query`, `rule`, `session_id`, `since`, `task_id`, `tracker_id`, `url`, `view`, `with_brief`
 
 ### `work_admin`
 
 Trackers, orgs, retention, usage counts, sprints and releases; see action. Never returns a secret.
 
-Parameters: `action`, `auth_kind`, `auto_tidy`, `bound_sees_unassigned`, `bucket_id`, `carry`, `carry_to`, `color`, `confirm_nonce`, `credential_ref`, `days`, `ends_at`, `expected_version`, `external_id`, `goal`, `host_alias`, `isolate_sessions`, `jev`, `jev_reply`, `kind`, `name`, `org_id`, `owner`, `path_prefix`, `prefix`, `project_id`, `provider`, `repo`, `rule_id`, `secret`, `settings`, `shipped_ref`, `site_url`, `space_id`, `starts_at`, `state`, `tracker_id`, `transport`, `username`
+Access: the master or a fleet admin's own device · confirm-gated (mcp.confirm_destructive) · deadline 900 s.
+
+Parameters (* required): `action`*, `auth_kind`, `auto_tidy`, `bound_sees_unassigned`, `bucket_id`, `carry`, `carry_to`, `color`, `confirm_nonce`, `credential_ref`, `days`, `ends_at`, `expected_version`, `external_id`, `goal`, `host_alias`, `isolate_sessions`, `jev`, `jev_reply`, `kind`, `name`, `org_id`, `owner`, `path_prefix`, `prefix`, `project_id`, `provider`, `repo`, `rule_id`, `secret`, `settings`, `shipped_ref`, `site_url`, `space_id`, `starts_at`, `state`, `tracker_id`, `transport`, `username`
 
 ### `work_link`
 
 Decide a session's work: action link (becomes its primary; key or item_id), reject (sticky 'not this'; or a suggestion's link_id), confirm (link_id), unlink (link_id). Returns the updated row. switch {link_id, key|item_id}: end that link, take the primary. trust_project {project_id, on}. resume {key, mode}: new session on past work. start {key|url|item_id}: new session on a ticket (project_ids: one per repo; parallel: beside a live one); preview_start: where it would land, nothing made. abandon_start {session_id}: undo an unused start. run {item_id, role?}: an attempt at the item in its own session and worktree, tracked as a task. handover {session_id}: ask it to write its hand-off. wrap_up {session_id}: ask it for its task result. summarize {key, link_id}: a Claude-written summary of past work. archive|unarchive (UI only; with no session_id: the ended links of link_id|key|item_id|task_id), unlink {link_id} with no session_id removes an ended link; snooze {days}|never (tidy-up); dismiss {item_id} (reopened); archive_item {item_id|task_id, on?}: a person archives a ticket or task (on: false unarchives); tidy_apply {items}: kills (safe kill when dirty). set_status {item_id, status, status_name?}: a person's status for work with no ticket, or a ticket moved at its tracker; keep_open {item_id} answers close_suggested. edit {item_id, title?, notes?, assignees?, due_at?, priority?, labels?, estimate?, estimate_unit?}: a person edits work with no ticket. attach {item_id, name, mime, data_base64, comment_id?}: a file on a task; attachment_delete {attachment_id}. create {title, parent?, notes?, assignees?, due_at?}: a task or subtask. followup {task_id, index|title}: a result's follow-up as a task. promote {item_id, tracker_id?, container?}: make it a ticket. propose {parent, title, why?}: a subtask a person accepts or rejects {item_id, no session_id}. bucket_add|bucket_remove {bucket_id, item_id}: sprint/release. mission_save {mission, mission_id?, item_id?: root}; mission_state {mission_id, status} (paused reopens a finished one); mission_repo {project_id, role?, on?}; mission_item {item_id, on?}; mission_delete; mission_import {plan}. dep {item_id, depends_on, on?}; hold {item_id, on?}; propose_tree {parent, tree}; accept_many | undo_accept {item_ids}. done_when {item_id, done_when: [ci[:check] | review | test[:cmd] | person | text]}; verify {item_id, line, ok, note?}: a person's check. mission_start {mission_id, step?}: take the next steps; retry {item_id, note?}; mission_plan: ask the planner; card_decide {card_id, ok, note?}; mission_grant {mission_id, level, hours? | until_done? (finite, needs budget_cents), budget_cents?, hosts?, max_parallel?, profile?}: raises the mission's level to it; mission_revoke; missions_pause_all. mission_release_note {mission_id}: a drafted release note of a completed mission; today_brief {refresh?, org_id?, since?}: Today's morning brief, drafted only on refresh; mission_triage {mission_id, refresh?}: a stuck mission's card, Jev's proposed outcome and next step (never applied), and with refresh its drafted words. Work view: primary:false links a secondary; expected_* guard (E_CONFLICT). place {task_id|item_id, group, note?, expected_version}: group a task; unplace clears it.
 
-Parameters: `ack_live`, `action`, `assignees`, `attachment_id`, `brief`, `bucket_id`, `bucket_op`, `budget_cents`, `card_id`, `comment_id`, `confirm_nonce`, `container`, `data_base64`, `days`, `decisions`, `depends_on`, `done_when`, `draft_brief`, `due_at`, `epic`, `estimate`, `estimate_unit`, `expected_primary`, `expected_version`, `force_cross_org`, `group`, `host_alias`, `hosts`, `hours`, `impact_token`, `index`, `item_id`, `item_ids`, `items`, `key`, `labels`, `level`, `line`, `link_id`, `max_parallel`, `mime`, `mission`, `mission_id`, `mode`, `name`, `note`, `notes`, `ok`, `on`, `org_id`, `parallel`, `parent`, `plan`, `post_to_tracker`, `primary`, `priority`, `profile`, `project_id`, `project_ids`, `refresh`, `role`, `rule`, `rule_id`, `session_id`, `since`, `source`, `status`, `status_name`, `step`, `task_id`, `title`, `tracker_id`, `tree`, `until_done`, `url`, `view`, `view_id`, `why`, `with_brief`, `worktree`
+Access: the master, a paired device or a per-host token · confirm-gated (mcp.confirm_destructive) · deadline 900 s.
+
+Parameters (* required): `ack_live`, `action`*, `assignees`, `attachment_id`, `brief`, `bucket_id`, `bucket_op`, `budget_cents`, `card_id`, `comment_id`, `confirm_nonce`, `container`, `data_base64`, `days`, `decisions`, `depends_on`, `done_when`, `draft_brief`, `due_at`, `epic`, `estimate`, `estimate_unit`, `expected_primary`, `expected_version`, `force_cross_org`, `group`, `host_alias`, `hosts`, `hours`, `impact_token`, `index`, `item_id`, `item_ids`, `items`, `key`, `labels`, `level`, `line`, `link_id`, `max_parallel`, `mime`, `mission`, `mission_id`, `mode`, `name`, `note`, `notes`, `ok`, `on`, `org_id`, `parallel`, `parent`, `plan`, `post_to_tracker`, `primary`, `priority`, `profile`, `project_id`, `project_ids`, `refresh`, `role`, `rule`, `rule_id`, `session_id`, `since`, `source`, `status`, `status_name`, `step`, `task_id`, `title`, `tracker_id`, `tree`, `until_done`, `url`, `view`, `view_id`, `why`, `with_brief`, `worktree`
 
 ## Tauri IPC commands
 
@@ -1212,6 +1564,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::sessions::session_narrow`
 - `commands::sessions::session_access`
 - `commands::sessions::my_grants`
+- `commands::sessions::my_profile`
 - `commands::sessions::session_ask_access`
 - `commands::sessions::access_requests`
 - `commands::sessions::restart_session`
@@ -1256,6 +1609,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::pages::setting_proposals`
 - `commands::pages::decide_setting_proposals`
 - `commands::autofix::autofix_findings`
+- `commands::autofix::autofix_scan`
 - `commands::autofix::autofix_apply`
 - `commands::autofix::autofix_dismiss`
 - `commands::pages::list_guides`

@@ -146,6 +146,29 @@ pub struct SendPromptArgs {
     pub expect: Option<super::ExpectDialog>,
 }
 
+/// The wall clock of one typing script, local or over ssh. A typing runs
+/// in the session's typing lane, so a tmux call that never returns must
+/// not hold the lane (and every later send into the session) forever.
+const TMUX_SCRIPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// `bash -c script` on this machine, killed after `timeout`. A timeout is
+/// `E_TIMEOUT` ([`codes::may_have_run`]): the paste may have landed, so the
+/// idle moment it claimed stays claimed.
+async fn run_local_script(
+    script: &str,
+    timeout: std::time::Duration,
+) -> Result<std::process::Output, IpcError> {
+    let mut cmd = crate::proc::command("bash");
+    cmd.args(["-c", script]).kill_on_drop(true);
+    match tokio::time::timeout(timeout, cmd.output()).await {
+        Ok(out) => out.map_err(|e| IpcError::new(codes::E_TMUX, format!("spawn bash: {e}"))),
+        Err(_) => Err(IpcError::new(
+            codes::E_TIMEOUT,
+            format!("local tmux did not answer within {}s", timeout.as_secs()),
+        )),
+    }
+}
+
 /// Run `script` as one tmux invocation on `host_alias`: locally via
 /// `bash -c` for `local` (after `ensure_local_allowed`), else over ssh via
 /// `bash -lc '<quoted script>'`. `Ok(())` on a zero exit; `E_TMUX` (the
@@ -163,16 +186,12 @@ async fn run_tmux_script(
 ) -> Result<(), IpcError> {
     let out = if host_alias == "local" {
         crate::service::hub::ensure_local_allowed(host_alias)?;
-        crate::proc::command("bash")
-            .args(["-c", script])
-            .output()
-            .await
-            .map_err(|e| IpcError::new(codes::E_TMUX, format!("spawn bash: {e}")))?
+        run_local_script(script, TMUX_SCRIPT_TIMEOUT).await?
     } else {
         ssh.run(
             host_alias,
             &["bash", "-lc", &quote(script)],
-            std::time::Duration::from_secs(10),
+            TMUX_SCRIPT_TIMEOUT,
         )
         .await?
     };
@@ -1115,6 +1134,24 @@ pub fn shape_capture(text: &str, max_lines: Option<u32>) -> String {
 #[cfg(test)]
 mod prompt_tests {
     use super::*;
+
+    /// A local typing that hangs is cut off, as a may-have-typed error, so
+    /// the typing lane it runs in is released (review r3).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_local_typing_that_hangs_times_out_as_may_have_typed() {
+        let t0 = std::time::Instant::now();
+        let e = run_local_script("sleep 30", std::time::Duration::from_millis(200))
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, codes::E_TIMEOUT);
+        assert!(codes::may_have_run(&e.code));
+        assert!(t0.elapsed() < std::time::Duration::from_secs(10));
+        let out = run_local_script("exit 0", TMUX_SCRIPT_TIMEOUT)
+            .await
+            .unwrap();
+        assert!(out.status.success());
+    }
 
     #[test]
     fn a_bare_enter_is_not_a_prompt() {

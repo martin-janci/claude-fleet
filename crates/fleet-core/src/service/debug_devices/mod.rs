@@ -136,9 +136,7 @@ pub struct QueuedHolder {
     pub queued_at: i64,
 }
 
-fn is_zero(n: &u32) -> bool {
-    *n == 0
-}
+use crate::serde_util::is_zero_u32 as is_zero;
 
 fn is_ready(state: &str) -> bool {
     matches!(state, "online" | "booted")

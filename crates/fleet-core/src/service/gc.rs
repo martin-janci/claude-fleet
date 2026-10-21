@@ -387,6 +387,17 @@ pub async fn sweep_with(
                 if !still_planned(&s, p.session_id, cfg, controller.as_ref(), &reachable, now) {
                     continue;
                 }
+                // A safe-kill types its prompt with Enter, so it refuses a
+                // session waiting on a dialog: left for a person, not
+                // recorded as killed and failed again on every sweep.
+                if via_claude
+                    && s.get_session_by_id(p.session_id)
+                        .ok()
+                        .flatten()
+                        .is_some_and(|r| crate::service::safe_kill::waits_on_a_dialog(&r))
+                {
+                    continue;
+                }
                 if let Err(e) = s.insert_session_event(p.session_id, "gc_killed", Some(&detail)) {
                     tracing::warn!(
                         session_id = p.session_id,
@@ -601,12 +612,7 @@ pub async fn maybe_sweep(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>) -> Opt
     Some(report)
 }
 
-fn now_unix() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
+use crate::store::now_unix;
 
 #[cfg(test)]
 mod tests {
@@ -1066,6 +1072,37 @@ mod tests {
             .iter()
             .any(|e| e.kind == "gc_killed"
                 && e.detail.as_deref() == Some("work:safe_kill:idle_10000s")));
+    }
+
+    /// Review r5: a dirty session waiting on a dialog is not sent a
+    /// safe-kill (it would refuse: Enter answers the dialog), so the sweep
+    /// records neither a kill nor a failure for it.
+    #[tokio::test]
+    async fn sweep_leaves_a_dirty_session_waiting_on_a_dialog_alone() {
+        for (status, stuck) in [("blocked", None), ("idle", Some("trust_prompt"))] {
+            let store = Mutex::new(Store::open_in_memory().unwrap());
+            let id = seed_idle_work(&store, 0);
+            store
+                .lock()
+                .unwrap()
+                .conn_ref()
+                .execute(
+                    "UPDATE sessions SET claude_status = ?2, stuck_kind = ?3 WHERE id = ?1",
+                    rusqlite::params![id, status, stuck],
+                )
+                .unwrap();
+            let exec = fake(true);
+            let report = sweep_with(&store, &exec, &CFG, 10_000).await;
+            assert_eq!(report.safe_kill_requested, 0, "{status}");
+            assert_eq!(report.failed, 0, "{status}");
+            assert_eq!(exec.safe_kills.load(Ordering::SeqCst), 0, "{status}");
+            let s = store.lock().unwrap();
+            let events = s.list_session_events(id, 10).unwrap();
+            assert!(
+                events.iter().all(|e| e.kind != "gc_killed"),
+                "{status}: no false kill recorded"
+            );
+        }
     }
 
     /// The mail-retention sweep runs alongside the session-idle one, on the

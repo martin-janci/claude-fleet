@@ -935,7 +935,9 @@ impl Store {
     }
 
     /// Add a repo to a mission's allow-list (or change its role), or remove
-    /// it.
+    /// it. Adding one widens what the mission may do, so it voids the grants
+    /// signed for the old plan ([`Self::bump_plan_version`]); a role change
+    /// or a removal does not.
     pub fn set_mission_repo(
         &self,
         id: i64,
@@ -955,6 +957,7 @@ impl Store {
             }
         }
         let tx = self.conn.unchecked_transaction()?;
+        let mut added = false;
         let changed = if on {
             if self.get_project(project_id)?.is_none() {
                 return Err(IpcError::new(
@@ -962,6 +965,12 @@ impl Store {
                     format!("project {project_id} not found"),
                 ));
             }
+            added = !tx.query_row(
+                "SELECT EXISTS (SELECT 1 FROM orchestration_project_repos \
+                 WHERE orchestration_project_id = ?1 AND project_id = ?2)",
+                rusqlite::params![id, project_id],
+                |r| r.get::<_, bool>(0),
+            )?;
             tx.execute(
                 "INSERT INTO orchestration_project_repos \
                    (orchestration_project_id, project_id, role, created_at) \
@@ -976,6 +985,9 @@ impl Store {
                 rusqlite::params![id, project_id],
             )?
         };
+        if added {
+            self.bump_plan_version(id)?;
+        }
         if changed > 0 {
             self.touch_mission(id)?;
             self.insert_mission_event(

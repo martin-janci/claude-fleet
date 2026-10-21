@@ -474,7 +474,7 @@ impl FleetTools {
         session_transcript in one call. Returns { turn_seq, status: \
         satisfied | timeout, transcript } (the reply as plain text; null \
         with transcript_error when unreadable). Marked untrusted unless \
-        raw=true (master token only).")]
+        raw=true (master) or the caller is a trusted client.")]
     pub(super) async fn run_prompt(
         &self,
         Extension(caller): Extension<Caller>,
@@ -579,7 +579,8 @@ impl FleetTools {
         that paragraph as `result` (also sent to the requester's inbox as \
         kind=task_result). Returns the task row; follow with wait_for_task. \
         A per-host token must name a requester on its own host. Marked \
-        untrusted unless raw=true (master only).")]
+        untrusted unless raw=true (master) or the caller is a trusted \
+        client.")]
     pub(super) async fn dispatch_task(
         &self,
         Extension(caller): Extension<Caller>,
@@ -681,15 +682,23 @@ impl FleetTools {
                 // (it could otherwise read another host's output back via
                 // wait_for_task / list_tasks / its inbox).
                 require_host(&caller, &spec.host_alias, "the new worker")?;
-                // A worker runs Claude on the host's own login: past
-                // `accounts.pause_at` it would stall at the limit with the
-                // task open, so it asks first, as `new_session` does.
+                // A worker runs Claude on the login `profile` names (the
+                // host's own without one): past `accounts.pause_at` it
+                // would stall at the limit with the task open, so it asks
+                // first, as `new_session` does, and the refusal names the
+                // profile to pass instead.
+                let profile = spec
+                    .profile
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|p| !p.is_empty())
+                    .map(str::to_string);
                 if !spec.over_limit_ok.unwrap_or(false) {
                     let s = lock(self.reader()).map_err(to_mcp_err)?;
                     crate::service::account_limits::refuse_over_limit(
                         &s,
                         &spec.host_alias,
-                        None,
+                        profile.as_deref(),
                         crate::store::now_unix(),
                     )
                     .map_err(to_mcp_err)?;
@@ -720,7 +729,7 @@ impl FleetTools {
                         resume_claude_session_id: None,
                         model: None,
                         effort: None,
-                        profile: None,
+                        profile,
                         agent: None,
                         // Who asked for the worker (migration 124): the
                         // connection, as for `new_session`.
@@ -947,8 +956,8 @@ impl FleetTools {
 
     #[tool(description = "Cancel a queued or running task (E_TASK_TERMINAL \
         if it already finished). The worker session keeps running: kill or \
-        re-prompt it separately. May return E_CONFIRM_REQUIRED when desktop \
-        confirmation is on. A per-host token may only cancel tasks it can \
+        re-prompt it separately. May return E_CONFIRM_REQUIRED when confirmation is on \
+        (mcp.confirm_destructive). A per-host token may only cancel tasks it can \
         see (E_FORBIDDEN).")]
     pub(super) async fn cancel_task(
         &self,
@@ -1544,18 +1553,26 @@ impl FleetTools {
             // Only ever gates the operator (D12): a session is about to exist.
             // (`work_link` is `confirm: true` for M7's tidy kills; a person's
             // start or resume is never gated.) A task's session is a start
-            // like `new_session`'s: inside a running mission's grant it goes
-            // without a card at Autopilot (F2). With no host fleet places it,
-            // which only a grant naming no hosts covers.
+            // like `new_session`'s: inside the grant of the running mission
+            // the task belongs to it goes without a card at Autopilot (F2);
+            // a task of no mission, or another mission's grant, never does
+            // (review r3). With no host fleet places it, which only a grant
+            // naming no hosts covers.
             let repos = self.repo_labels(args.project_ids.as_deref().unwrap_or_default())?;
+            let target = match self.work_link_mission(&args, multi.as_deref())? {
+                Some((mission, sessions)) => GateTarget::MissionStart {
+                    mission,
+                    host: args.host_alias.as_deref(),
+                    sessions,
+                },
+                None => GateTarget::Other,
+            };
             self.confirm_gate_target(
                 "work_link",
                 args.confirm_nonce.as_deref(),
                 &work_link_start_summary(&args, &repos),
                 &caller,
-                GateTarget::Start {
-                    host: args.host_alias.as_deref(),
-                },
+                target,
             )?;
         }
         if args.action == "draft_title" {
@@ -3313,6 +3330,100 @@ fn graph_item(args: &crate::service::work::WorkLinkArgs) -> Result<i64, McpError
 }
 
 impl super::FleetTools {
+    /// The mission of the work item a `work_link` start / run / resume
+    /// names, for the operator's grant check, with how many sessions the
+    /// call would start. The item is the one the action resolves: `item_id`,
+    /// else the key normalised as the action normalises it (review 456).
+    /// `None` — no grant covers it — for a ticket URL (the start takes the
+    /// URL over a key, so a key beside it says nothing about what starts),
+    /// an unknown key, an item of no mission, or a key whose items do not
+    /// all belong to the one mission (two trackers can hold the same key,
+    /// and the start may resolve the other one).
+    ///
+    /// A multi-repo start counts only the repos it would start in: one
+    /// where the key already has a live session is skipped, and that
+    /// session is already on the mission's count. A key on several items
+    /// counts by the one that skips the fewest repos, since the start may
+    /// resolve any of them.
+    pub(super) fn work_link_mission(
+        &self,
+        args: &crate::service::work::WorkLinkArgs,
+        multi: Option<&[i64]>,
+    ) -> Result<Option<(i64, i64)>, McpError> {
+        if args.url.is_some() {
+            return Ok(None);
+        }
+        let s = lock(&self.store).map_err(to_mcp_err)?;
+        let (mission, items, key) = match (args.item_id, args.key.as_deref()) {
+            (Some(id), _) => {
+                let Some(mission) = s.work_item_mission(id).map_err(to_mcp_err)? else {
+                    return Ok(None);
+                };
+                let key = s.get_work_item(id).map_err(to_mcp_err)?.and_then(|i| i.key);
+                (mission, vec![id], key)
+            }
+            (None, Some(raw)) => {
+                let Ok(key) = crate::store::normalize_work_ref(raw) else {
+                    return Ok(None);
+                };
+                let mut ids: Vec<i64> = s
+                    .work_items_by_key(&key)
+                    .map_err(to_mcp_err)?
+                    .into_iter()
+                    .chain(s.tracker_items_for_key(&key).map_err(to_mcp_err)?)
+                    .map(|i| i.id)
+                    .collect();
+                ids.sort_unstable();
+                ids.dedup();
+                let mut mission = None;
+                for id in &ids {
+                    match (mission, s.work_item_mission(*id).map_err(to_mcp_err)?) {
+                        (_, None) => return Ok(None),
+                        (None, Some(m)) => mission = Some(m),
+                        (Some(a), Some(b)) if a != b => return Ok(None),
+                        _ => {}
+                    }
+                }
+                let Some(mission) = mission else {
+                    return Ok(None);
+                };
+                (mission, ids, Some(key))
+            }
+            (None, None) => return Ok(None),
+        };
+        let sessions = match (multi, key) {
+            (Some(ids), Some(key)) if !args.parallel.unwrap_or(false) => {
+                // The org the start skips by is the item it resolves. A key
+                // on several items may resolve any one of them, or none
+                // (no org filter), so count the most repos any of them
+                // would start in: never fewer than the start opens.
+                let mut orgs: Vec<Option<i64>> = Vec::new();
+                if items.len() != 1 {
+                    orgs.push(None);
+                }
+                for id in &items {
+                    orgs.push(s.item_org(*id).map_err(to_mcp_err)?);
+                }
+                orgs.sort_unstable();
+                orgs.dedup();
+                let mut most = 0;
+                for org in orgs {
+                    let live = crate::service::trackers::tickets::live_work_on(&s, &key, org)
+                        .map_err(to_mcp_err)?;
+                    let n = ids
+                        .iter()
+                        .filter(|pid| !live.iter().any(|(_, r)| r.project_id == Some(**pid)))
+                        .count() as i64;
+                    most = most.max(n);
+                }
+                most
+            }
+            (Some(ids), _) => ids.len() as i64,
+            (None, _) => 1,
+        };
+        Ok(Some((mission, sessions)))
+    }
+
     /// What the mission loop needs to take a step from this server.
     fn mission_deps(&self) -> crate::service::work::orchestrate::Deps {
         crate::service::work::orchestrate::Deps {

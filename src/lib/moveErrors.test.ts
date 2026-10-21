@@ -13,7 +13,7 @@ describe('describeMoveError', () => {
     ['E_MOVE_UNPUSHED', 'not pushed'],
     ['E_MOVE_MIDOP', 'in the middle of'],
     ['E_MOVE_TARGET_DIRTY', 'turanga already has uncommitted'],
-    ['E_MOVE_TOO_LARGE', 'too large'],
+    ['E_MOVE_TOO_LARGE', 'larger than a move carries'],
     ['E_LOCAL_ONLY', 'hub'],
   ])('%s has its own sentence', (code, fragment) => {
     const d = failed(code);
@@ -61,6 +61,26 @@ describe('describeMoveError', () => {
       'failed', 'turanga', 'check',
     );
     expect(anon.what).toContain('organisation 1');
+  });
+
+  // Review w16-9: a move that is too large is refused the same way again, so
+  // it gets no Retry, and the backend's next step in words.
+  it('says how big a too-large move is and what to do, with no Retry', () => {
+    const MB = 1024 * 1024;
+    const t = failed('E_MOVE_TOO_LARGE', { payload: 'transcript', bytes: 230 * MB, cap_bytes: 200 * MB });
+    expect(t.what).toBe(
+      'The conversation is 230 MB; a move carries up to 200 MB. Run /compact in the session, or raise the limit in Settings → Move to host.',
+    );
+    expect(t.action).toBeNull();
+    const b = failed('E_MOVE_TOO_LARGE', { payload: 'bundle', bytes: 600 * MB, cap_bytes: 500 * MB });
+    expect(b.what).toContain('Push the branch first');
+    expect(b.action).toBeNull();
+  });
+
+  it('falls back to the plain sentence, not transport noise', () => {
+    expect(failed('E_SSH', null, 'ssh: connect to host mercury port 22: Connection timed out').what).toBe(
+      "Couldn't reach the host over SSH",
+    );
   });
 
   it('treats any other E_FORBIDDEN as a plain refusal', () => {

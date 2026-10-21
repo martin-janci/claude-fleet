@@ -149,6 +149,12 @@ const SAVED_KEY = 'workspace.work';
 export const workspaceLanding = writable<{ rail: RailId; seq: number } | null>(null);
 let seq = 0;
 
+/** Land on a rail item as a click on it would (⌘K's Inbox and Toolkit
+ *  rows, review w18-4); App's rail handler takes it. */
+export function landOn(rail: RailId): void {
+  workspaceLanding.set({ rail, seq: ++seq });
+}
+
 /**
  * Switch to `to`: store the Work view's state under the workspace being
  * left, put back `to`'s (or its preset's on a first visit), and ask the

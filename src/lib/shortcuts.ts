@@ -13,7 +13,8 @@
  *   `matchShortcut`) which action a key is, so its rows ARE its handler's
  *   keys; `shortcuts.test.ts` replays every key and modifier combination
  *   through the table against a copy of each handler's 0.5.4 key logic. The
- *   three in `SCOPE_SOURCES` (the switcher's two and the New session dialog)
+ *   four in `SCOPE_SOURCES` (the switcher's two, the New session dialog and
+ *   the message box)
  *   still read `e.key`: their handlers take a key under any mix of ⌘ and Ctrl
  *   by design, so the rows there are the inventory the freeze test checks
  *   against their source. All of them are what the `?` sheet
@@ -44,6 +45,7 @@ export type Scope =
   | 'global'
   | 'terminal'
   | 'conversation'
+  | 'composer'
   | 'switcher'
   | 'switcher-new'
   | 'new-session-dialog'
@@ -72,6 +74,7 @@ export const SCOPE_TITLES: Record<Scope, string> = {
   form: 'Dialogs and forms',
   work: 'Work',
   conversation: 'Conversation',
+  composer: 'Message box',
   terminal: 'Terminal',
   switcher: 'Quick switcher',
   'switcher-new': 'Quick switcher, New session',
@@ -196,6 +199,16 @@ export const SHORTCUTS: readonly Shortcut[] = [
   row('conversation', 'conversation.prev-turn', 'Previous turn', keys('[~')),
   row('conversation', 'conversation.next-turn', 'Next turn', keys(']~')),
 
+  // ── Message box (ConversationPanel's composer, review w18-8) ─────────
+  // Its handler reads `e.key` (a SCOPE_SOURCES scope): the rows are the
+  // inventory the freeze test checks against the source.
+  row('composer', 'composer.send', 'Send', keys('Enter')),
+  row('composer', 'composer.newline', 'New line', keys('Shift+Enter', 'Alt+Enter')),
+  row('composer', 'composer.recall-prev', 'An earlier prompt (from an empty box)', keys('ArrowUp')),
+  row('composer', 'composer.recall-next', 'A later prompt (while going back through them)', keys('ArrowDown')),
+  row('composer', 'composer.complete', 'Complete the slash command or task', keys('Tab')),
+  row('composer', 'composer.dismiss', 'Close the slash menu or task suggestion', keys('Escape')),
+
   // ── Quick switcher (QuickSwitcher, while open) ───────────────────────
   row('switcher', 'switcher.down', 'Next result', keys('ArrowDown', 'Ctrl+N')),
   row('switcher', 'switcher.up', 'Previous result', keys('ArrowUp')),
@@ -312,6 +325,7 @@ export const SCOPE_SOURCES: Partial<Record<Scope, string>> = {
   switcher: 'src/lib/QuickSwitcher.svelte',
   'switcher-new': 'src/lib/QuickSwitcher.svelte',
   'new-session-dialog': 'src/lib/NewSessionDialog.svelte',
+  composer: 'src/lib/ConversationPanel.svelte',
 };
 
 /** Scopes whose handler asks the registry (`viewKey` or `matchShortcut`),
@@ -382,7 +396,9 @@ export function matchShortcut(scope: Scope, e: KeyEventLike, isMac: boolean): st
   return null;
 }
 
-const IS_MAC =
+/** Whether this machine is a Mac, for a hint drawn outside a component
+ *  that knows (review w18-7). */
+export const IS_MAC =
   typeof navigator !== 'undefined' &&
   (/Mac|iPhone|iPad|iPod/.test(navigator.platform ?? '') || /Macintosh/.test(navigator.userAgent ?? ''));
 
@@ -412,6 +428,17 @@ export function formatBinding(b: Binding, isMac: boolean): string {
   const k = KEY_NAME[b.key.toLowerCase()] ?? (b.key.length === 1 ? b.key.toUpperCase() : b.key);
   if (isMac) return MAC_ORDER.filter((m) => b.mods.includes(m)).map((m) => MAC_GLYPH[m]).join('') + k;
   return [...OTHER_ORDER.filter((m) => b.mods.includes(m)).map((m) => OTHER_NAME[m]), k].join('+');
+}
+
+/** One row's chords as both shortcut lists show them (review w18-9): a
+ *  global row shows its advertised chord only (the rest are kept, not
+ *  advertised); a run of nine reads as a range. Empty when the platform
+ *  has none. */
+export function chordText(s: Shortcut, isMac: boolean, sep = ' or '): string {
+  const bs = bindingsFor(s, isMac);
+  if (bs.length >= 9) return `${formatBinding(bs[0], isMac)}–${formatBinding(bs[8], isMac)}`;
+  const shown = s.scope === 'global' ? bs.slice(0, 1) : bs;
+  return shown.map((b) => formatBinding(b, isMac)).join(sep);
 }
 
 /** The advertised chord of a shortcut: its first binding on the platform. */

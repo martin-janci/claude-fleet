@@ -181,6 +181,55 @@ describe('WorkTaskDetail', () => {
     expect(get(selectedTaskId)).toBe('item:81');
   });
 
+  const resultAt = (at: number, session_id: number | null = 9) => () => ({
+    task_id: 5,
+    item_id: 77,
+    session_id,
+    role: 'wrapup',
+    at,
+    marker: 'FLEET_TASK_DONE_x',
+    report: { summary: 'Cache cleaned.', outcome: 'done' },
+    gate: { state: 'passed', checks: [], open_children: [] },
+  });
+
+  it('shows Last outcome beside the result when a session ended after it (review w09-10)', async () => {
+    const lastOutcome = { at: 2000, name: 'rework', host: 'h-a', branch: null, pr_url: null, summary: 'Stopped: tests failed.' };
+    handlers.work_task = () => ({ ...localTask, last_outcome: lastOutcome });
+    handlers.work_result = resultAt(1000);
+    render(WorkTaskDetail, { taskId: 'item:77' });
+    await flush();
+    await fireEvent.click(screen.getByTestId('work-task-tab-activity'));
+    expect(screen.getByTestId('work-task-result')).toBeTruthy();
+    expect(screen.getByTestId('work-task-outcome').textContent).toContain('Stopped: tests failed.');
+  });
+
+  it('keeps an older Last outcome hidden behind the result', async () => {
+    handlers.work_task = () => ({ ...localTask, last_outcome: { at: 500, name: 'x', host: null, branch: null, pr_url: null, summary: 'old' } });
+    handlers.work_result = resultAt(1000);
+    render(WorkTaskDetail, { taskId: 'item:77' });
+    await flush();
+    await fireEvent.click(screen.getByTestId('work-task-tab-activity'));
+    expect(screen.queryByTestId('work-task-outcome')).toBeNull();
+  });
+
+  it('Ask about result opens the worker session first (review w09-9)', async () => {
+    handlers.work_result = resultAt(1000);
+    render(WorkTaskDetail, { taskId: 'item:77' });
+    await flush();
+    await fireEvent.click(screen.getByTestId('work-task-tab-activity'));
+    await fireEvent.click(screen.getByTestId('task-result-ask'));
+    expect(get(selectedSession)?.id).toBe(9);
+  });
+
+  it('offers no Ask about result once the worker session is gone', async () => {
+    handlers.work_result = resultAt(1000, 404);
+    render(WorkTaskDetail, { taskId: 'item:77' });
+    await flush();
+    await fireEvent.click(screen.getByTestId('work-task-tab-activity'));
+    expect(screen.getByTestId('work-task-result')).toBeTruthy();
+    expect(screen.queryByTestId('task-result-ask')).toBeNull();
+  });
+
   it('a task with no result shows no result panel', async () => {
     render(WorkTaskDetail, { taskId: 'item:77' });
     await flush();
@@ -253,9 +302,32 @@ describe('WorkTaskDetail', () => {
     await flush();
     expect(calls('set_work_archived')).toEqual([{ task_id: 'ref:martin-janci/claude-fleet#333', on: true }]);
     expect(screen.getByTestId('work-task-archive').textContent).toBe('Unarchive');
+    // No item, so no stamp: the chip still says it is archived (review w10-9).
+    expect(screen.getByTestId('work-task-archived-chip').getAttribute('title')).toBe('Archived');
     await fireEvent.click(screen.getByTestId('work-task-archive'));
     await flush();
     expect(calls('set_work_archived')[1]).toEqual({ task_id: 'ref:martin-janci/claude-fleet#333', on: false });
+    expect(screen.queryByTestId('work-task-archived-chip')).toBeNull();
+  });
+
+  it('a bare task with a session still running cannot be archived, and says why (review w10-13)', async () => {
+    handlers.work_task = () => ({
+      ...trackerTask,
+      task: {
+        ...trackerTask.task,
+        task_id: 'ref:martin-janci/claude-fleet#334',
+        key: 'martin-janci/claude-fleet#334',
+        item_id: null,
+        archived: false,
+        counts: { active: 1, ended: 1, suggested: 0 },
+      },
+    });
+    render(WorkTaskDetail, { taskId: 'ref:martin-janci/claude-fleet#334' });
+    await flush();
+    const btn = screen.getByTestId('work-task-archive') as HTMLButtonElement;
+    expect(btn.textContent).toBe('Archive');
+    expect(btn.disabled).toBe(true);
+    expect(btn.title).toMatch(/still running/);
   });
 
   it('a task nobody is asked about, and a ticket, show no close question', async () => {
@@ -447,6 +519,23 @@ describe('WorkTaskDetail', () => {
     expect(screen.queryByTestId('start-popover')).toBeNull();
     expect(calls('start_work')[0]).toEqual({ item_id: 12, with_brief: true, project_id: 3, host_alias: 'mefistos' });
     expect(get(selectedSession)?.id).toBe(12);
+  });
+
+  it('Esc closes the ▾ menu and gives focus back to its caret; ↓ walks its items (review w18-11)', async () => {
+    render(WorkTaskDetail, { taskId: 'item:12' });
+    await flush();
+    const caret = within(bar()).getByTestId('work-button-menu');
+    await fireEvent.click(caret);
+    await flush();
+    const list = within(bar()).getByTestId('work-button-menu-list');
+    await fireEvent.keyDown(list, { key: 'ArrowDown' });
+    expect(document.activeElement?.getAttribute('role')).toBe('menuitem');
+    const esc = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+    document.activeElement!.dispatchEvent(esc);
+    await flush();
+    expect(esc.defaultPrevented).toBe(true);
+    expect(within(bar()).queryByTestId('work-button-menu-list')).toBeNull();
+    expect(document.activeElement).toBe(caret);
   });
 
   it('Start with last settings opens the popover on those settings when something is in the way', async () => {

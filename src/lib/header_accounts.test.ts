@@ -19,6 +19,9 @@ describe('header account pills (3.17)', () => {
     expect(a.health).toBe('limit');
     expect(a.limited).toBe(true);
     expect(a.meta).toBe('weekly limit · Thu 09:00');
+    // Review w03-11: with extra usage it runs on, as the row pill says.
+    const extra = headerAccount({ ...WORK, has_extra_usage: true }, snap, NOW, 'en-GB', 'UTC');
+    expect([extra.health, extra.limited, extra.meta]).toEqual(['caution', false, 'weekly: extra usage · Thu 09:00']);
   });
 
   it('is not stopped at 99.6% used, though it rounds to 0% left', () => {

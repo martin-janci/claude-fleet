@@ -13,7 +13,7 @@
   // Remove are reachable only by Tab or pointer.
   import { isEditable } from './terminal_keys';
   import { onMount, tick, untrack } from 'svelte';
-  import { hosts } from './hosts';
+  import { hosts, hostsLoad } from './hosts';
   import { accounts, accountByUuid } from './accounts';
   import { sessions } from './sessions';
   import {
@@ -593,7 +593,7 @@
         {/key}
       {:else}
         <p class="empty" data-testid="hosts-detail-empty">
-          {hubSkewEmptyMessage ?? ($hosts.length === 0 ? 'No hosts yet — add one.' : 'Select a host.')}
+          {hubSkewEmptyMessage ?? ($hosts.length > 0 ? 'Select a host.' : $hubStatus.unavailable || $hostsLoad.state === 'failed' ? 'Hosts could not be loaded.' : $hostsLoad.state === 'loading' ? '' : 'No hosts yet — add one.')}
         </p>
       {/if}
     </div>
@@ -604,7 +604,7 @@
 {#if showAddPicker}
   {#if $hubStatus.remote}
     <!-- Paired: the hub discovers, probes and adds (HubAddHostDialog). -->
-    <HubAddHostDialog onClose={() => (showAddPicker = false)} />
+    <HubAddHostDialog onClose={() => (showAddPicker = false)} {onNewSession} />
   {:else}
     <!-- The add-host wizard (4.9). -->
     <AddHostWizard onClose={() => (showAddPicker = false)} {onNewSession} />

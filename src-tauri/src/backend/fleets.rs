@@ -83,6 +83,46 @@ pub const FLEET_SCOPED: &[&str] = &[
     "env_var_unset",
     "my_grants",
     "setting_proposals",
+    // Settings › Company per fleet: the org_admin / realm_admin pages
+    // (Organisations, Devices, People, Groups) on each hub, judged by that
+    // hub, and the lists their option selects read.
+    "list_orgs",
+    "add_org",
+    "update_org",
+    "remove_org",
+    "add_org_rule",
+    "remove_org_rule",
+    "org_rule_preview",
+    "set_org_setting",
+    "add_org_project",
+    "remove_org_project",
+    "assign_host_org",
+    "assign_tracker_org",
+    "set_org_member",
+    "remove_org_member",
+    "org_member_grants",
+    "revoke_org_member_grants",
+    "revoke_org_share",
+    "narrow_org_share",
+    "list_devices",
+    "pair_device",
+    "update_device",
+    "revoke_device",
+    "bind_device_org",
+    "grant_device_catalog",
+    "list_people",
+    "add_person",
+    "rename_person",
+    "disable_person",
+    "list_groups",
+    "list_trackers",
+    "catalog_list_catalogs",
+    // Phase 3b: who this device is on each fleet.
+    "my_profile",
+    // Phase 3: an extra fleet's session in the full conversation panel.
+    "session_conversations",
+    "session_activity",
+    "restart_session",
 ];
 
 /// Colours offered to a new fleet, in order; the first one no fleet uses is
@@ -621,7 +661,12 @@ impl Fleets {
             .map(str::trim)
             .filter(|l| !l.is_empty())
             .map(str::to_string)
-            .unwrap_or_else(|| default_label(&url));
+            .unwrap_or_else(|| {
+                let primary_label = primary_info(primary).label;
+                let mut taken: Vec<&str> = records.iter().map(|r| r.label.as_str()).collect();
+                taken.push(&primary_label);
+                default_label_among(&url, &taken)
+            });
         if label.chars().count() > LABEL_MAX {
             return Err(IpcError::new(
                 codes::E_INVALID,
@@ -718,8 +763,11 @@ impl Fleets {
 
     /// Stop showing an extra fleet and forget its pairing on this machine.
     /// Revokes nothing on its hub (design D10). The bridge stops first, then
-    /// the token goes, then the row: a failure part-way leaves a row with no
-    /// token, which is listed as unusable and can be removed again.
+    /// the token goes, then the row. A failure part-way (the keychain refuses
+    /// to forget the token, the row cannot be written) keeps the fleet
+    /// listed as unusable, saying why, so Remove can be tried again rather
+    /// than the fleet vanishing until the next launch brings it back
+    /// (review w01-11).
     pub fn remove(&self, id: &str) -> Result<(), IpcError> {
         if id == PRIMARY {
             return Err(IpcError::new(
@@ -727,9 +775,28 @@ impl Fleets {
                 "the primary fleet is this app's own pairing: Unpair it above instead",
             ));
         }
-        if let Some(handle) = self.write().remove(id) {
+        let removed = self.write().remove(id);
+        if let Some(handle) = &removed {
             handle.cancel.cancel();
         }
+        let result = self.forget(id);
+        if let (Err(e), Some(handle)) = (&result, removed) {
+            if e.code != codes::E_NOTFOUND {
+                let unusable = FleetHandle {
+                    record: handle.record,
+                    backend: None,
+                    status: None,
+                    unavailable: Some(format!("remove did not finish: {}", e.message)),
+                    cancel: self.shutdown.child_token(),
+                };
+                self.write().insert(id.to_string(), unusable);
+            }
+        }
+        result
+    }
+
+    /// [`Self::remove`]'s stored half: the token, then the row.
+    fn forget(&self, id: &str) -> Result<(), IpcError> {
         let _rows = self.records_lock.lock().unwrap_or_else(|p| p.into_inner());
         let records = read_records(&self.store)?;
         if !records.iter().any(|r| r.id == id) {
@@ -851,6 +918,34 @@ fn duplicate_of(url: &str, primary: &PrimaryView, records: &[ExtraFleet]) -> Opt
 }
 
 /// The first palette colour no extra fleet uses (the primary keeps the first).
+/// [`default_label`], unless a fleet this window already shows reads that
+/// way (`https://fleet.rlt.sk` and `https://company.rlt.sk` are both `rlt`,
+/// review w01-10): then the first host label (`company`), then the whole host.
+pub fn default_label_among(url: &str, taken: &[&str]) -> String {
+    let base = default_label(url);
+    let clash = |l: &str| taken.iter().any(|t| t.trim().eq_ignore_ascii_case(l));
+    if !clash(&base) {
+        return base;
+    }
+    let host = url::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_string))
+        .unwrap_or_else(|| url.to_string());
+    if base == host {
+        // An address or a one-label host: nothing shorter tells them apart.
+        return base;
+    }
+    let first = host.split('.').find(|p| !p.is_empty()).unwrap_or(&host);
+    if !clash(first) {
+        return first.to_string();
+    }
+    if host.chars().count() <= LABEL_MAX {
+        host
+    } else {
+        base
+    }
+}
+
 fn next_color(records: &[ExtraFleet]) -> String {
     PALETTE[1..]
         .iter()

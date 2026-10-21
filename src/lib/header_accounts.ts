@@ -66,6 +66,18 @@ export function headerAccount(
   const stop = shown.find((s) => s.level === 'limit');
   if (stop) {
     const reset = formatResetShort(stop.kind, stop.resetsAt, now, locale, timeZone).replace(/^resets? (at )?/, '');
+    // Extra usage keeps its sessions running past the limit (review
+    // w03-11): say so as the row pill does, not stopped and red.
+    if (account.has_extra_usage) {
+      return {
+        uuid: account.uuid,
+        label,
+        health: 'caution',
+        meta: `${NAME[stop.kind]}: extra usage · ${reset}`,
+        limited: false,
+        aria: `Account ${label}, ${NAME[stop.kind]} limit reached, on extra usage until it resets ${reset}`,
+      };
+    }
     return {
       uuid: account.uuid,
       label,

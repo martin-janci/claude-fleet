@@ -8,6 +8,7 @@ const dismiss = vi.fn();
 const setToastProgress = vi.fn((..._a: unknown[]) => true);
 vi.mock('./toasts', () => ({
   push: (o: { message: string }) => push(o),
+  pushError: (e: { code: string; message: string }, context?: string) => push({ kind: 'error', code: e.code, message: `${context}: ${e.message}` }),
   dismiss: (...a: unknown[]) => dismiss(...a),
   setToastProgress: (...a: unknown[]) => setToastProgress(...a),
 }));

@@ -2,12 +2,14 @@
 // `pair_device` with the answers of `wizards/pair_device.json`. Its answer
 // (the code, the URL and its QR) is what PairingResult shows with its Halo.
 // Nothing is minted before the button.
-import { invokeCmd, type Result } from '../result';
+import type { Result } from '../result';
+import { invokeOnFleet } from '../fleets';
 import type { Pairing } from '../devices';
 import type { OrgRow } from '../orgs';
 import type { ChatFormOutcome } from './ChatForm.svelte';
 import type { Values } from './forms';
 import { WIZARDS, withChoices, type Wizard } from './wizards';
+import { errorText } from '../error_copy';
 
 /** The org select's "none". An org's value is its id, so never `none`. */
 export const NO_ORG = 'none';
@@ -32,13 +34,13 @@ export function pairDeviceArgs(v: Values): Record<string, unknown> {
 }
 
 /** The pairing itself, for a screen that shows the code (Settings › Devices). */
-export function pairDevice(v: Values): Promise<Result<Pairing>> {
-  return invokeCmd<Pairing>('pair_device', { args: pairDeviceArgs(v) });
+export function pairDevice(v: Values, fleet?: string | null): Promise<Result<Pairing>> {
+  return invokeOnFleet<Pairing>('pair_device', { args: pairDeviceArgs(v) }, fleet);
 }
 
 /** As a chat form: the code and the link in the one line it leaves. */
 export async function runPairDevice(v: Values): Promise<ChatFormOutcome> {
   const r = await pairDevice(v);
-  if (!r.ok) return { ok: false, error: r.error.message };
+  if (!r.ok) return { ok: false, error: errorText(r.error) };
   return { ok: true, summary: `${r.value.name}: open ${r.value.url} (code ${r.value.code})` };
 }

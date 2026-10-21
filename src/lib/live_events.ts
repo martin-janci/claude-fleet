@@ -9,6 +9,7 @@ import type { SessionEvent } from './timeline';
 type Subs<T> = Map<number, Set<(v: T) => void>>;
 const timelineSubs: Subs<SessionEvent> = new Map();
 const conversationSubs: Subs<void> = new Map();
+const anySubs = new Set<(e: SessionEvent) => void>();
 
 function add<T>(subs: Subs<T>, id: number, fn: (v: T) => void): () => void {
   let set = subs.get(id);
@@ -31,9 +32,20 @@ export function onConversationsChanged(sessionId: number, fn: () => void): () =>
   return add(conversationSubs, sessionId, () => fn());
 }
 
+/** Every session's timeline pushes, for a module that follows an event
+ *  kind fleet-wide rather than one session (a finished move's composer
+ *  carry, `moveSession.ts`). */
+export function onAnyTimelineEvent(fn: (e: SessionEvent) => void): () => void {
+  anySubs.add(fn);
+  return () => {
+    anySubs.delete(fn);
+  };
+}
+
 export function dispatchTimelineEvents(events: SessionEvent[]): void {
   for (const e of events) {
     for (const fn of timelineSubs.get(e.session_id) ?? []) fn(e);
+    for (const fn of anySubs) fn(e);
   }
 }
 

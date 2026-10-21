@@ -226,7 +226,19 @@ Phase 3's re-key. `FLEET_SCOPED` grew by `session_conversation`,
 `list_pull_requests`, and later by Settings › Environment's `env_vars`,
 `env_vars_list`, `env_var_set`, `env_var_unset` plus the two reads that say
 what the device may change there, `my_grants` and `setting_proposals`
-(a Fleet picker on that page). The New session default is: the fleet last used for
+(a Fleet picker on that page), and then by Settings › Company's commands
+(Organisations, Devices, People, Groups): every `list_*`, action and
+preview their resources name (`list_orgs`, `add_org` … `narrow_org_share`,
+`org_rule_preview`, `org_member_grants`, `list_devices`, `pair_device`,
+`update_device`, `revoke_device`, `bind_device_org`, `grant_device_catalog`,
+`list_people`, `add_person`, `rename_person`, `disable_person`,
+`list_groups`) plus the option lists their selects read on an extra fleet
+(`list_trackers`, `catalog_list_catalogs`; `list_hosts` already was). The
+same Fleet picker (`FleetPicker.svelte`) sits on both pages; Company reads
+that hub's `setting_proposals` (served only to a fleet admin's unbound
+device) and `list_devices` (this device's trust and mode) to decide what it
+offers, as `org_admin` decides (`company_access.ts`). `org_suggestions`
+stays the primary's. The New session default is: the fleet last used for
 the repository, else the extra fleet whose label or host name is the
 repository's owner, else the primary (the org rule, read from what the
 window knows; the hubs' org rows are not compared). Repo reads stay on the
@@ -244,6 +256,46 @@ primary.
 - `fleet_id` in the `ready` frame; federation addresses rendered as
   `<fleet label> › host/name`; duplicate detection by fleet id.
 - Per-fleet error reports (`/report`) and update checks stay on the primary.
+- Settings per fleet (landed for two pages): Environment and Company
+  (Organisations, Devices, People, Groups) carry a Fleet picker, shown only
+  with more than one fleet, routing their reads and writes by `fleet` and
+  judging what the device may change by that hub's own answers. The other
+  Settings pages act on the primary.
+
+### Phase 3a — the sidebar's filters across fleets (landed)
+
+Observed live (2026-10-19, two fleets: primary "rlt", extra "Papaya POS
+(hub)"): the Machine filter listed only the primary's hosts, the
+Organisation filter only the primary's orgs; with a primary org chosen
+nothing of the extra fleet was visible and nothing said why; and the extra
+fleet's sessions were easy to miss below a long primary list (an idle
+background agent shows nowhere else, since it never needs you).
+
+| # | Decision | Why |
+|---|----------|-----|
+| D14 | **Machine and Organisation list every shown fleet**, one chip group per fleet, labelled `Machine · <fleet>` / `Organisation · <fleet>` with the fleet's colour. An extra fleet's orgs come from its own hub (`list_orgs` joined `FLEET_SCOPED`); its scopes follow the primary's rule (named orgs, then uncovered project owners) over its own rows. | A host alias and an org id mean something on one hub only (both hubs have a `mac`, both an org 3), so a chip is always qualified by its fleet. |
+| D15 | **A Machine / Organisation choice belongs to one fleet, the anchor.** The primary's stays in `hostFilter` / `scopeFilter` (a one-hub window is unchanged); an extra fleet's is `{fleet, alias}` / `{fleet, scope}` (`src/lib/fleet_filters.ts`). Choosing in one fleet clears both facets in every other; *Any* clears that facet everywhere. | Applying a primary org to another hub's rows has no meaning (its ids are another hub's), and "match by name" would guess. One anchor keeps the two facets from contradicting each other. |
+| D16 | **While a fleet anchors, the other fleets' rows are hidden and each says so in place**: "N sessions on <fleet> hidden: the org filter (Org: Papaya POS on rlt) applies to that fleet only · Show every fleet". The strip names the fleet too (`Org: Papaya POS · rlt`). | The live complaint was a silent empty list. Hiding is honest (the person asked for one machine or org); hiding *without a word* is not. |
+| D17 | **The fleet switcher wins**: an anchor in a fleet the switcher hides is ignored, and the panel offers only the shown fleets' chips. | The switcher is the stronger, always-visible choice; it must never show an empty fleet because of a filter set for another. |
+| D18 | **Shared filters apply to every fleet** — search (with the row's `owner/repo`), Last active, Needs you, Agent, Background agents. Work filters (tracker, status, assignee) stay the primary's. | They are not hub-relative; the work filters read the primary's trackers. |
+| D19 | **Every fleet is a group in the Sessions list.** Beside another fleet the primary's list sits under its own folding header (badge, link state, count); each extra fleet's group folds too and lists every live session, background agents marked `bg`. Opening a row is still `FleetSessionView`. | An extra fleet's idle background agent showed only below the whole primary tree; folding the primary puts every fleet a click away. |
+
+Not changed: Inbox (needs-you is never hidden by a scope, plan decision 6),
+the Hosts page, the Work view.
+
+### Phase 3b — profiles: one human, several fleet identities (landed)
+
+The owner is the same human on both fleets but deliberately a different
+person on each: work on the company hub (its GitHub token, its e-mail, its
+SSO account) and private on the personal one. The window now says which.
+
+| # | Decision | Why |
+|---|----------|-----|
+| D20 | **A hub answers "who am I here?" with a new read, `my_profile`**: the caller's own person (id, name, display name, e-mail, whether it owns the hub), its linked SSO accounts **by issuer** (the subject is not served), the NAMES of its own person-scope variables with `secret` / `is_ref`, and its git identity from its own plain `GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL`. No argument names a person: the answer is the connection's own (`owner_for`, as `my_grants`); a caller that proves no person gets `person_id: null` and nothing else. `Access::Client`, read-only, refused to a per-host token. | `my_grants` gives only an id; the person's name and sign-in live on the hub. Secrets never cross: names only, and the two git values are ones the person set in plain and `env_vars list` already shows them. |
+| D21 | **No contract bump.** A hub without the tool answers `E_HUB_PROTOCOL`; the desktop then pieces the profile together from `my_grants` (who) and `env_vars_list` (its own person rows' names) and says sign-in is unknown. | Additive tool with a working fallback, the rule `wire_contract.rs` states for such tools. |
+| D22 | **The desktop command `my_profile` is `Routed` and fleet-scoped** (`FLEET_SCOPED` grows by it); standalone it answers this fleet's own person (the personal owner). | Each fleet's profile is read from that fleet's own hub, with the argument mapping every fleet-scoped read uses. |
+| D23 | **A profile's label is local**: `fleets.profileLabels` in this desktop's own prefs, keyed by fleet slot id, defaulting to the fleet's label. It is never sent to any hub, and nothing about one fleet is sent to another. | A label is how this window tells two of the person's identities apart, like the fleet colour (D13). |
+| D24 | **Where it shows**: the fleet switcher's chips (the label, when given, under the fleet's; the person and e-mail in the tooltip), Settings › Hub & sync › Fleets › *Profiles* (rename, person, e-mail, sign-in, git identity, a ✓/— list of `GH_TOKEN`, `GIT_AUTHOR_*`, `JIRA_EMAIL`, `JIRA_API_TOKEN` and any other own variable by name), and New session ("Runs as Work · Martin · martin@…" for the fleet the dialog will start on, which the Phase 2 picker defaults by the repository's owner). | Each place a person decides where work runs. Setting the variables stays in Settings › Environment with that fleet picked (#948). |
 
 ### Phase 3 — one id space
 
@@ -252,6 +304,32 @@ primary.
 - Every command fleet-aware; the per-command `FLEET_SCOPED` list becomes the
   default and the verdict table gains nothing (a fleet is always a hub).
 - Moving work between fleets, if ever, as a federation feature.
+
+Step 1 (landed): one id space for the conversation panel. `fleets.ts` stamps
+`fleet` on every extra fleet's session row, and `sessionKey(row)` keys what
+the panel keeps per session: the id itself for the primary (no store written
+for it changes), a stable negative number per (fleet, id) otherwise, since
+hubs number sessions from 1. `keyTarget` maps a key back. The panel routes
+each call by `row.fleet` (`invokeCmd(…, { args, fleet })`), the outbox
+carries the fleet on its target, and for an extra fleet's row asks only
+that fleet's link (`fleetBlocked`); its hub judges access. The parts whose
+commands are not fleet-scoped yet are hidden or disabled for such a row
+rather than sent to the primary.
+
+Step 2a (landed): `TerminalView` takes an optional `session`. Handed an extra
+fleet's row it attaches under `fleetPtyId(fleet, row, view)`, refuses
+`local` / `wsl-…` through `fleetAttachRefusal`, and runs nothing that names
+the row's id to the primary (workspace check, shell terminals, voice follow,
+un-archive, upload, host lookups). Only the main window's own pane (no
+`session` prop) publishes `terminalPane`, takes bar requests and releases the
+microphone. `FleetTerminal` was removed.
+
+Step 2b (landed): `FleetSessionView` renders `SessionTabs` (which, for a row
+with `fleet`, leaves out presence, grants, the account lookup, Share, Open
+in VS Code and the inspector, and takes an `extra` snippet for the fleet
+badge, Copy attach and Close) over the same body as the main layout: the
+terminal mounted, the conversation over it. Terminals, Files and Details
+are disabled until step 3 makes their commands fleet-scoped.
 
 ## Testing
 

@@ -130,7 +130,7 @@ describe('fleet administration on a hub client', () => {
     for (const testid of ['detail-hide', 'detail-remove', 'detail-rotate']) {
       const btn = screen.getByTestId(testid) as HTMLButtonElement;
       expect(btn, testid).toBeDisabled();
-      expect(btn.title, testid).toContain('fleet.example.com');
+      expect(btn.title, testid).toContain('paired client');
       expect(btn.title.toLowerCase(), testid).toContain('client');
     }
   });
@@ -141,7 +141,7 @@ describe('fleet administration on a hub client', () => {
     await tick();
     const select = screen.getByTestId('detail-token-mode') as HTMLSelectElement;
     expect(select).toBeDisabled();
-    expect(select.title).toContain('fleet.example.com');
+    expect(select.title).toContain('paired client');
   });
 
   it('standalone is untouched: all three still work', async () => {
@@ -202,6 +202,28 @@ describe('the asset catalog on a hub client', () => {
     });
     render(AssetsPanel, { props: { visible: true } });
     expect((await screen.findByTestId('assets-grant-error')).textContent).toContain('update the hub');
+  });
+
+  // Review w17-3: a probe that failed (not a refusal) offers Retry, and a
+  // granted client then gets the full panel without restarting the app.
+  it('a failed probe can be retried, and a grant then opens the full panel', async () => {
+    hubStatus.set(remote);
+    let fail = true;
+    inv().mockImplementation(async (cmd: string) => {
+      if (cmd === 'catalog_config') {
+        if (fail) throw { code: 'E_HUB_TIMEOUT', message: 'the hub did not answer in time' };
+        return null;
+      }
+      return null;
+    });
+    render(AssetsPanel, { props: { visible: true } });
+    await screen.findByTestId('assets-grant-error');
+    fail = false;
+    await fireEvent.click(screen.getByTestId('assets-grant-error-retry'));
+    await waitFor(() => expect(screen.queryByTestId('assets-grant-error')).toBeNull());
+    expect(inv().mock.calls.filter((c) => c[0] === 'catalog_config')).toHaveLength(2);
+    // Granted with no catalog configured: the setup form, not the overview.
+    expect(await screen.findByTestId('assets-setup')).toBeTruthy();
   });
 
   // The list and the scan route for every paired client (the hub's
@@ -356,7 +378,7 @@ describe('adding a host on a hub client', () => {
     render(HostsView, { props: { onClose: vi.fn(), onFilterSidebar: vi.fn(), onNewSession: vi.fn() } });
     const btn = (await screen.findByTestId('hosts-add')) as HTMLButtonElement;
     expect(btn).toBeDisabled();
-    expect(btn.title).toContain('fleet.example.com');
+    expect(btn.title).toContain('The hub is unreachable');
   });
 
   it('connected, + Add host opens the hub form over the hub’s SSH config', async () => {
@@ -553,7 +575,7 @@ describe('safe remove and discard-kill on a hub client', () => {
     render(SessionDetails, { props: { session } });
     const btn = await screen.findByTestId('safe-kill-from-details');
     expect(btn).toBeDisabled();
-    expect((btn as HTMLButtonElement).title).toContain('fleet.example.com');
+    expect((btn as HTMLButtonElement).title).toContain('paired desktop');
     // A disabled button fires no click in a real browser; jsdom does not
     // enforce that, so this pins the handler never having been reached the
     // way the rendered `disabled` attribute promises.
@@ -621,7 +643,7 @@ describe('add and purge project on a hub client', () => {
     expect(btn).toBeDisabled();
     const why = await screen.findByTestId('add-blocked');
     expect(why.textContent).toContain('unreachable');
-    expect(why.textContent).toContain('fleet.example.com');
+    expect(why.textContent).toContain("Try again once it's back");
   });
 
   it('standalone is untouched: + Add project… still opens the dialog', async () => {
@@ -639,7 +661,7 @@ describe('add and purge project on a hub client', () => {
     render(Sidebar, { props: {} as never });
     const btn = await screen.findByTestId('purge-project');
     expect(btn).toBeDisabled();
-    expect((btn as HTMLButtonElement).title).toContain('fleet.example.com');
+    expect((btn as HTMLButtonElement).title).toContain('paired desktop');
   });
 
   it('standalone is untouched: Purge project still opens the confirm dialog', async () => {

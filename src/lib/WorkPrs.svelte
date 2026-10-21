@@ -12,7 +12,7 @@
   import Skeleton from './states/Skeleton.svelte';
   import { onDestroy, onMount } from 'svelte';
   import { get } from 'svelte/store';
-  import { sessions } from './sessions';
+  import { sessions, type SessionRow } from './sessions';
   import { selectSessionExplicitly } from './selection';
   import { timeAgo } from './session_status';
   import { openExternal } from './open_external';
@@ -24,6 +24,7 @@
     PRIMARY,
     fleetListPullRequests,
     fleetRows,
+    fleets,
     multiFleet,
     openFleetSession,
     showPrimary,
@@ -46,35 +47,61 @@
   let total = $state(0);
   let loaded = $state(false);
   let loadError = $state<IpcError | null>(null);
+  /** Review w17-7: a re-read of the list shown failed; the list stays. */
+  let refreshError = $state<IpcError | null>(null);
+  /** The filter and fleets the items shown were read for: a failed re-read
+   *  keeps them only when it asked for the same. */
+  let shownKey: string | null = null;
+  /** Fleets whose hub could not answer while others did (review w01-7):
+   *  said above the list, so it never looks complete when it is not. */
+  let fleetErrors = $state<{ label: string; message: string }[]>([]);
   let seq = 0;
 
   async function load() {
     const mine = ++seq;
     const extras = get(multiFleet) ? get(visibleExtraFleets).map((g) => g.fleet).filter((f) => !f.unavailable && !f.duplicate_of) : [];
     const own = get(showPrimary);
+    const key = JSON.stringify([filter, own, extras.map((f) => f.id)]);
     const [r, ...others] = await Promise.all([
       own ? listPullRequests({ state: filter }) : Promise.resolve(null),
       ...extras.map((f) => fleetListPullRequests(f.id, { state: filter })),
     ]);
     if (mine !== seq) return;
     loaded = true;
-    if (r && !r.ok) {
-      loadError = r.error;
+    // The primary alone failing is the page's error; beside extra fleets it
+    // is one fleet's note, and theirs stay on screen.
+    if (r && !r.ok && extras.length === 0) {
+      if (shownKey === key && !loadError) refreshError = r.error;
+      else {
+        loadError = r.error;
+        refreshError = null;
+      }
       return;
     }
-    const list: Item[] = (r?.value?.items ?? []).map((pr) => ({ ...pr, fleet: null }));
-    let count = r?.value?.total ?? list.length;
+    const failed: { label: string; message: string }[] = [];
+    if (r && !r.ok) {
+      const label = get(fleets).find((f) => f.primary)?.label ?? 'this fleet';
+      failed.push({ label, message: readErrorText(r.error) });
+    }
+    const list: Item[] = (r?.ok ? (r.value?.items ?? []) : []).map((pr) => ({ ...pr, fleet: null }));
+    let count = r?.ok ? (r.value?.total ?? list.length) : 0;
     extras.forEach((f, i) => {
       const o = others[i];
-      // One extra hub that cannot answer leaves the rest on screen.
-      if (!o.ok) return;
+      // One extra hub that cannot answer leaves the rest on screen, and says so.
+      if (!o.ok) {
+        failed.push({ label: f.label, message: readErrorText(o.error) });
+        return;
+      }
       list.push(...(o.value?.items ?? []).map((pr) => ({ ...pr, fleet: f })));
       count += o.value?.total ?? 0;
     });
     if (extras.length > 0) list.sort((a, b) => b.updated_at - a.updated_at);
     items = list;
     total = count;
+    fleetErrors = failed;
     loadError = null;
+    refreshError = null;
+    shownKey = key;
   }
 
   // The fleet filter moved: re-read for the fleets it now shows.
@@ -90,6 +117,11 @@
   function pick(f: PrFilter) {
     if (f === filter) return;
     filter = f;
+    // Review w17-12: the old filter's list never stands under the new tab;
+    // the skeleton shows (after its delay) until the hub answers.
+    loaded = false;
+    loadError = null;
+    refreshError = null;
     void load();
   }
 
@@ -97,22 +129,37 @@
   // evidence: re-read when those change, not on a timer.
   let lastSig = '';
   let timer: ReturnType<typeof setTimeout> | null = null;
+  const prSig = (rows: Iterable<SessionRow>) =>
+    [...rows].map((r) => `${r.id}:${r.pr_url ?? ''}:${r.ci_status ?? ''}:${r.pr_evidence?.state ?? ''}`).join('|');
+  function reloadSoon() {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => void load(), 500);
+  }
   const unsub = sessions.subscribe((rows) => {
-    const sig = rows
-      .map((r) => `${r.id}:${r.pr_url ?? ''}:${r.ci_status ?? ''}:${r.pr_evidence?.state ?? ''}`)
-      .join('|');
+    const sig = prSig(rows);
     if (sig === lastSig) return;
     const first = lastSig === '';
     lastSig = sig;
     if (first) return;
-    if (timer) clearTimeout(timer);
-    timer = setTimeout(() => void load(), 500);
+    reloadSoon();
+  });
+  // The same signal from each extra fleet's sessions: a company session
+  // opening a PR re-reads the page too (review w01-7).
+  let lastFleetSig: string | null = null;
+  const unsubFleetRows = fleetRows.subscribe((all) => {
+    const sig = [...all].map(([id, rows]) => `${id}=${prSig(rows.sessions.values())}`).join('#');
+    if (sig === lastFleetSig) return;
+    const first = lastFleetSig === null;
+    lastFleetSig = sig;
+    if (first) return;
+    reloadSoon();
   });
 
   onMount(() => void load());
   onDestroy(() => {
     unsub();
     unsubFleets();
+    unsubFleetRows();
     if (timer) clearTimeout(timer);
   });
 
@@ -144,6 +191,11 @@
     {/each}
   </div>
 
+  {#if !loadError && loaded}
+    {#each fleetErrors as e (e.label)}
+      <p class="error" role="status" data-testid="work-prs-fleet-error">Couldn't read PRs from {e.label}: {e.message}</p>
+    {/each}
+  {/if}
   {#if loadError}
     <div class="error" role="alert" data-testid="work-prs-error">
       <p>{readErrorText(loadError)}</p>
@@ -156,6 +208,12 @@
       {filter === 'all' ? 'No pull requests yet. A session’s PR shows here once fleet sees it.' : `No ${filter} pull requests.`}
     </p>
   {:else}
+    {#if refreshError}
+      <p class="refresh-error" role="status" data-testid="work-prs-refresh-error">
+        Couldn't refresh ({readErrorText(refreshError)}) — showing what was loaded.
+        <button class="btn btn--quiet" type="button" data-testid="work-prs-refresh-retry" onclick={() => void load()}>Retry</button>
+      </p>
+    {/if}
     <ul class="items">
       {#each items as pr (`${pr.fleet?.id ?? PRIMARY}:${pr.id}`)}
         {@const checks = prChecksLabel(pr)}
@@ -184,9 +242,16 @@
             <div class="sub muted">
               <!-- G7.8 (MCViews board): "from <mission>", opening it. -->
               from
-              <button class="link muted" type="button" title="Open the mission" data-testid="work-pr-mission" onclick={() => openMission(pr.mission_id!)}
-                >{pr.mission_name}</button
-              >
+              {#if pr.fleet}
+                <!-- Mission ids are per hub: this id would open the primary's
+                     mission of that number (review w01-1). Text until missions
+                     open per fleet. -->
+                <span data-testid="work-pr-mission-text">{pr.mission_name}</span>
+              {:else}
+                <button class="link muted" type="button" title="Open the mission" data-testid="work-pr-mission" onclick={() => openMission(pr.mission_id!)}
+                  >{pr.mission_name}</button
+                >
+              {/if}
             </div>
           {/if}
           {#if pr.session_name}
@@ -282,6 +347,11 @@
   }
   .link:hover {
     text-decoration: underline;
+  }
+  .refresh-error {
+    margin: 0;
+    font-size: var(--text-2xs);
+    color: var(--usage-warn);
   }
   .muted {
     color: var(--fg-muted);

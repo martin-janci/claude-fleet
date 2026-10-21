@@ -434,6 +434,8 @@ describe('composerStatus', () => {
     expect(composerStatus({ claude_status: 'working', stuck_kind: 'auth_menu' })).toMatch(/stuck \(auth menu\)/);
     expect(composerStatus({ claude_status: 'working', stuck_kind: null })).toMatch(/working/);
     expect(composerStatus({ claude_status: 'idle', stuck_kind: null })).toBeNull();
+    // w13-3: a dialog is up; what is typed would answer it.
+    expect(composerStatus({ claude_status: 'blocked', stuck_kind: null })).toMatch(/waiting on a question above/);
     expect(composerStatus({ claude_status: null, stuck_kind: null })).toBeNull();
   });
 });

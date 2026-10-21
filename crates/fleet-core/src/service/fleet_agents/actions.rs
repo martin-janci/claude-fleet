@@ -133,6 +133,104 @@ pub struct PrCommentPayload {
     pub body: String,
 }
 
+/// One line comment of a `pr_review`, as the answer gave it (placed on the
+/// diff when the review is sent).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReviewFinding {
+    pub path: String,
+    pub line: u32,
+    pub body: String,
+}
+
+/// `pr_review`: a review of the PR's head, with line comments.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PrReviewPayload {
+    pub action: String,
+    pub repo: String,
+    pub number: i64,
+    /// The head the run read; a review of a head that moved on is not sent.
+    pub sha: String,
+    /// APPROVE | REQUEST_CHANGES | COMMENT.
+    pub event: String,
+    pub body: String,
+    pub findings: Vec<ReviewFinding>,
+}
+
+/// Most line comments one `pr_review` posts; the rest go into its body.
+pub const MAX_REVIEW_COMMENTS: usize = 30;
+/// Longest line comment.
+const REVIEW_COMMENT_MAX: usize = 2000;
+
+/// PURE: the review's event for `said`: APPROVE, REQUEST_CHANGES or
+/// COMMENT, and never APPROVE unattended (`auto`): an approval is a person's.
+pub fn review_event(said: &str, auto: bool) -> &'static str {
+    match said.trim().to_ascii_uppercase().as_str() {
+        "APPROVE" if !auto => "APPROVE",
+        "REQUEST_CHANGES" => "REQUEST_CHANGES",
+        _ => "COMMENT",
+    }
+}
+
+/// PURE: the answer's findings array as line comments, at most
+/// [`MAX_REVIEW_COMMENTS`]; an item without a path, a line or a body is
+/// dropped.
+fn review_findings(v: Option<&Value>) -> Vec<ReviewFinding> {
+    v.and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|f| {
+            let path = f.get("path")?.as_str()?.trim().trim_start_matches("./");
+            let line = u32::try_from(f.get("line")?.as_u64()?).ok()?;
+            let body = f.get("body")?.as_str()?.trim();
+            (!path.is_empty() && line > 0 && !body.is_empty()).then(|| ReviewFinding {
+                path: path.to_string(),
+                line,
+                body: fit(body, REVIEW_COMMENT_MAX),
+            })
+        })
+        .take(MAX_REVIEW_COMMENTS)
+        .collect()
+}
+
+/// PURE: the review as GitHub takes it: each finding on a line of `diff`
+/// (snapped within a few lines, as the PR reviewer does) is a line comment,
+/// the rest are listed in the body; both end with the instance's marker.
+pub fn place_review(
+    p: &PrReviewPayload,
+    diff: &str,
+    mark: &str,
+) -> crate::service::agents::review::post::ReviewRequest {
+    use crate::service::agents::review::diff::{commentable_lines, snap_line};
+    use crate::service::agents::review::post::{ReviewComment, ReviewRequest};
+    let lines = commentable_lines(diff);
+    let mut comments = Vec::new();
+    let mut outside = Vec::new();
+    for f in &p.findings {
+        match snap_line(&lines, &f.path, f.line) {
+            Some(line) => comments.push(ReviewComment {
+                path: f.path.clone(),
+                line,
+                body: format!("{}\n\n{mark}", f.body),
+            }),
+            None => outside.push(format!("- `{}:{}`: {}", f.path, f.line, f.body)),
+        }
+    }
+    let mut body = p.body.clone();
+    if !outside.is_empty() {
+        body.push_str(&format!("\n\nOutside the diff:\n{}", outside.join("\n")));
+    }
+    ReviewRequest {
+        host: String::new(),
+        repo: p.repo.clone(),
+        number: p.number,
+        sha: p.sha.clone(),
+        record_id: 0,
+        event: p.event.clone(),
+        body: format!("{body}\n\n{mark}"),
+        comments,
+    }
+}
+
 /// `pr_labels`: labels to add and remove (`-name` in the action's list).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PrLabelsPayload {
@@ -522,7 +620,7 @@ pub fn plan(
                     };
                     Ok((serde_json::to_string(&p).unwrap_or_default(), body))
                 }
-                ActionKind::PrComment | ActionKind::PrLabels => {
+                ActionKind::PrComment | ActionKind::PrLabels | ActionKind::PrReview => {
                     let repo = d
                         .trigger
                         .repo
@@ -535,6 +633,39 @@ pub fn plan(
                         .map_err(|_| skip("the target is not a pull request number"))?;
                     if !super::github::repo_ok(&repo) {
                         return Err(skip("the trigger's repo is not owner/repo"));
+                    }
+                    if a.kind == ActionKind::PrReview {
+                        let text = body_text();
+                        if text.is_empty() {
+                            return Err(skip("the body is empty"));
+                        }
+                        let sha = ctx["subject"]["head_sha"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_string();
+                        if sha.is_empty() {
+                            return Err(skip("the subject has no head_sha"));
+                        }
+                        let findings =
+                            review_findings(a.findings.as_ref().map(|f| &ctx["answer"][f]));
+                        let event = review_event(&r(&a.verdict), a.auto).to_string();
+                        // The body leaves room for the findings that land
+                        // outside the diff, and the marker.
+                        let body = fit(&text, max / 2);
+                        let mut shown = format!("{event}: {body}");
+                        for f in &findings {
+                            shown.push_str(&format!("\n- {}:{}: {}", f.path, f.line, f.body));
+                        }
+                        let p = PrReviewPayload {
+                            action: a.id.clone(),
+                            repo,
+                            number,
+                            sha,
+                            event,
+                            body,
+                            findings,
+                        };
+                        return Ok((serde_json::to_string(&p).unwrap_or_default(), shown));
                     }
                     if a.kind == ActionKind::PrComment {
                         let text = body_text();
@@ -581,9 +712,6 @@ pub fn plan(
                         Ok((serde_json::to_string(&p).unwrap_or_default(), body))
                     }
                 }
-                ActionKind::PrReview => Err(skip(
-                    "pr_review is the PR reviewer's: not built for a fleet agent",
-                )),
                 ActionKind::WorkTask => {
                     let title = fit(&r(&a.summary), 200);
                     if title.is_empty() {
@@ -653,6 +781,9 @@ pub fn plan(
                     {
                         return Err(skip("the setting is not one an agent may propose"));
                     }
+                    if let Err(e) = crate::service::settings::validate(&key, &value) {
+                        return Err(skip(&e.message));
+                    }
                     let body = format!("{} ({key}) → {value}\n\n{why}", spec.label);
                     let p = SettingPayload {
                         action: a.id.clone(),
@@ -689,6 +820,7 @@ pub fn plan(
             })();
             match made {
                 Ok((payload, body)) => {
+                    let payload = with_fingerprint(payload, a.fingerprint.as_deref(), &ctx);
                     let auto = a.auto
                         && match a.kind {
                             ActionKind::McpCall => d
@@ -719,6 +851,23 @@ pub fn plan(
         }
     }
     (planned, skipped)
+}
+
+/// PURE: the payload with the action's rendered `fingerprint` added, so a
+/// later run's `proposals` can tell this finding was proposed before (the
+/// executors read only their own keys). Unchanged when there is none.
+fn with_fingerprint(payload: String, fingerprint: Option<&str>, ctx: &Value) -> String {
+    let Some(t) = fingerprint else {
+        return payload;
+    };
+    let fp = fit(template::render(t, ctx).trim(), 120);
+    match serde_json::from_str::<Value>(&payload) {
+        Ok(Value::Object(mut m)) if !fp.is_empty() => {
+            m.insert("fingerprint".into(), Value::String(fp));
+            Value::Object(m).to_string()
+        }
+        _ => payload,
+    }
 }
 
 /// PURE: `steps` rendered: a template that is one array path gives its
@@ -809,6 +958,59 @@ fn refuse(what: impl std::fmt::Display) -> ActionResult {
 }
 
 impl FleetExecutor {
+    /// Send a `pr_review`: only while the PR is open at the head the run
+    /// read, its findings placed on the diff of that head, an APPROVE or
+    /// REQUEST_CHANGES GitHub refuses on one's own PR sent as COMMENT.
+    async fn send_review(
+        &self,
+        rule: &AgentRuleRow,
+        inst: &Instance,
+        repo: &str,
+        p: PrReviewPayload,
+    ) -> ActionResult {
+        let host = &rule.host_alias;
+        let max = inst.loaded().definition.limits.max_body_chars;
+        if p.body.chars().count() > max || p.findings.len() > MAX_REVIEW_COMMENTS {
+            return refuse(format!(
+                "the review is over {max} characters or its comments"
+            ));
+        }
+        let open = match self.host.open_prs(host, repo).await {
+            Ok(o) => o,
+            Err(e) => return ActionResult::Failed(e),
+        };
+        match open.iter().find(|o| o.number == p.number) {
+            None => return ActionResult::Expired(format!("{repo}#{} is not open", p.number)),
+            Some(o) if o.head_sha != p.sha => {
+                return ActionResult::Expired("the head moved on since the review".into())
+            }
+            Some(_) => {}
+        }
+        let diff = match self.host.pr_diff(host, repo, p.number).await {
+            Ok(d) => d,
+            Err(e) => return ActionResult::Failed(e),
+        };
+        let mut req = place_review(&p, &diff, &marker(&rule.scope));
+        req.host = host.clone();
+        req.body = fit(&req.body, max);
+        let event = req.event.clone();
+        let sent = match self.host.post_pr_review(&req, &event).await {
+            Err(e)
+                if event != "COMMENT"
+                    && crate::service::agents::review::post::is_self_review_refusal(&e) =>
+            {
+                self.host.post_pr_review(&req, "COMMENT").await
+            }
+            other => other,
+        };
+        match sent {
+            Ok(id) => {
+                ActionResult::Done(format!("review {id}: {} line comments", req.comments.len()))
+            }
+            Err(e) => ActionResult::Failed(e),
+        }
+    }
+
     /// The rule and the job's subject behind an action.
     fn rule_and_subject(
         &self,
@@ -1116,7 +1318,7 @@ impl FleetExecutor {
                     Err(e) => ActionResult::Failed(e),
                 }
             }
-            ActionKind::PrComment | ActionKind::PrLabels => {
+            ActionKind::PrComment | ActionKind::PrLabels | ActionKind::PrReview => {
                 let repos = write_repos(inst, now);
                 let (repo, number) = match raw.get("repo").and_then(Value::as_str) {
                     Some(r) => (
@@ -1129,6 +1331,10 @@ impl FleetExecutor {
                     return refuse(format!(
                         "{repo} is neither the trigger's repo nor in limits.repos"
                     ));
+                }
+                if def_action.kind == ActionKind::PrReview {
+                    let p = payload!(PrReviewPayload);
+                    return self.send_review(rule, inst, &repo, p).await;
                 }
                 if def_action.kind == ActionKind::PrComment {
                     let c = payload!(PrCommentPayload);
@@ -1163,9 +1369,6 @@ impl FleetExecutor {
                     }
                 }
             }
-            ActionKind::PrReview => {
-                ActionResult::Failed("pr_review is not built for a fleet agent".into())
-            }
             ActionKind::WorkTask => {
                 let p = payload!(WorkTaskPayload);
                 if p.title.is_empty() || p.steps.len() > MAX_STEPS || !fits(&p.notes) {
@@ -1193,7 +1396,7 @@ impl FleetExecutor {
 
     async fn fleet(&self, op: FleetOp) -> ActionResult {
         match self.host.fleet_op(op).await {
-            Ok(_) => ActionResult::Executed,
+            Ok(line) => ActionResult::Done(line),
             Err(e) => ActionResult::Failed(e),
         }
     }

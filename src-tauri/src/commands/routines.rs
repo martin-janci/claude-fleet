@@ -18,7 +18,7 @@ use tauri::State;
 /// The `routines` tool's arguments, as the tool reads them.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RoutinesArgs {
-    /// list | get | runs | failing | budget | save | preview | delete | set_enabled | skip_next | run_now | set_run_outcome | explain | decisions | dry_run | tune_prompt
+    /// list | get | runs | failing | budget | save | preview | delete | set_enabled | skip_next | run_now | set_run_outcome | explain | decisions | dry_run | tune_prompt | memory | set_memory
     pub action: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routine_id: Option<i64>,
@@ -39,6 +39,12 @@ pub struct RoutinesArgs {
     /// tune_prompt: what the person wants from the rewrite.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ask: Option<String>,
+    /// set_memory: routine | project.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notebook: Option<String>,
+    /// set_memory: the notebook's whole new text ("" clears it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
 }
 
 /// One `routines` action; the answer is the tool's JSON.
@@ -157,6 +163,25 @@ pub(crate) mod routed {
                 args.event_id,
                 fleet_core::store::now_unix(),
             )?),
+            "memory" => json(svc::memory::get(store, &scope, id()?)?),
+            "set_memory" => {
+                let notebook = args
+                    .notebook
+                    .as_deref()
+                    .ok_or_else(|| IpcError::new(codes::E_INVALID, "set_memory needs notebook"))?;
+                let text = args
+                    .text
+                    .as_deref()
+                    .ok_or_else(|| IpcError::new(codes::E_INVALID, "set_memory needs text"))?;
+                json(svc::memory::set(
+                    store,
+                    &scope,
+                    id()?,
+                    notebook,
+                    text,
+                    fleet_core::store::now_unix(),
+                )?)
+            }
             "set_run_outcome" => {
                 let run_id = args
                     .run_id
@@ -179,7 +204,7 @@ pub(crate) mod routed {
                 format!(
                     "action must be list | get | runs | failing | budget | save | preview | delete | \
                      set_enabled | skip_next | run_now | set_run_outcome | explain | decisions | \
-                     dry_run, got {other:?}"
+                     dry_run | tune_prompt | memory | set_memory, got {other:?}"
                 ),
             )),
         }

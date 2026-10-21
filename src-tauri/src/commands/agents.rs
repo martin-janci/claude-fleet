@@ -113,14 +113,23 @@ pub(crate) mod routed {
         ssh: &SshClient,
         call: FleetCall,
     ) -> Result<serde_json::Value, IpcError> {
+        const ACTIONS: &[&str] = &[
+            "definitions",
+            "gallery",
+            "form",
+            "grant",
+            "install",
+            "revoke",
+            "run",
+        ];
         let action = &call.action;
-        if !matches!(
-            action.as_str(),
-            "definitions" | "gallery" | "form" | "grant" | "install" | "revoke" | "run"
-        ) {
+        if !ACTIONS.contains(&action.as_str()) {
             return Err(IpcError::new(
                 fleet_core::ipc_error::codes::E_INVALID,
-                format!("agents_fleet action must be definitions | gallery | form | grant | install | revoke | run, got {action:?}"),
+                format!(
+                    "agents_fleet action must be {}, got {action:?}",
+                    ACTIONS.join(" | ")
+                ),
             ));
         }
         let args = fleet_args(call);

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { errorText } from './error_copy';
   import { changedAny, onWorkChangedDebounced } from './work';
   // The Work view's filters and saved views (work graph M14). One filters
   // object (`WorkTreeFilters`) for the tree, the saved views and the phone:
@@ -268,7 +269,7 @@
       if (id != null && !views.some((v) => v.id === id)) activeWorkViewId.set(null);
     } else {
       views = [];
-      viewsError = r.error.message;
+      viewsError = errorText(r.error);
     }
   }
 

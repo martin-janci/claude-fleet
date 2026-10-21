@@ -100,6 +100,9 @@ describe('+ Add account', () => {
 
     loggedIn = true;
     await waitFor(() => expect(screen.getByTestId('add-account-signed-in').textContent).toContain('w@x.com'));
+    // Review w19-9: the sign-in is announced and focus lands on Done.
+    expect(screen.getByTestId('add-account-signed-in').getAttribute('role')).toBe('status');
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByTestId('add-account-done')));
     await fireEvent.click(screen.getByTestId('add-account-done'));
     await waitFor(() => expect(onclose).toHaveBeenCalled());
     expect(calls).toContainEqual({ action: 'end_login', host_alias: 'mercury', profile: 'work' });

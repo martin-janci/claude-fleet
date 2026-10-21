@@ -2,6 +2,9 @@
   import HubProjectsPick from './HubProjectsPick.svelte';
   import FleetsSettings from './FleetsSettings.svelte';
   import EnvironmentSettings from './EnvironmentSettings.svelte';
+  import CompanySettings from './CompanySettings.svelte';
+  import { COMPANY_PAGES } from './company_access';
+  import { PRIMARY } from './fleets';
   import Icon from './kit/Icon.svelte';
   import Loader from './Loader.svelte';
   import WorkSettings from './WorkSettings.svelte';
@@ -71,8 +74,11 @@
     resourceBlock,
     hubStrandedToken,
     ownsTheFleet,
-    plainUnavailableReason,
   } from './hub';
+  import { errorText, hubUnavailableWords } from './error_copy';
+  import { hubConnection } from './hub_connection';
+  import LoadError from './states/LoadError.svelte';
+  import type { IpcError } from './result';
   import {
     attentionIdleMinutes,
     notificationPermission,
@@ -134,6 +140,9 @@
   // client, but it owns no fleet either, and the backend refuses the same
   // panels. See `ownsTheFleet`.
   const ownsFleet = $derived(ownsTheFleet($hubStatus));
+  /** The fleet Settings › Company shows (its Fleet picker), kept while
+   *  moving between Organisations, Devices, People and Groups. */
+  let companyFleet = $state<string>(PRIMARY);
   /** The URL the link wizard opens with: the configured hub's, to pair again. */
   let hubUrlDraft = $state('');
   /** The hub link wizard (step 10.12: one fleet.form/1 spec, `link_hub`). */
@@ -170,7 +179,7 @@
       // inviting a second attempt that can only fail.
       hubLinking = false;
     } else {
-      hubError = r.error.message;
+      hubError = errorText(r.error);
       if (r.error.code === 'E_HUB_PLAINTEXT') hubPlaintextRefused = true;
     }
   }
@@ -191,7 +200,7 @@
       // Disconnect clears the token too, so whatever was stranded is gone.
       hubStranded = false;
     } else {
-      hubError = r.error.message;
+      hubError = errorText(r.error);
     }
   }
 
@@ -206,7 +215,12 @@
   // settings, read (and, when the hub's operator trusts this device,
   // written) through it. `off` until they load; a refusal keeps the reason.
   let hubPages = $state<'off' | 'loading' | 'ok'>('off');
-  let hubPagesError = $state<string | null>(null);
+  let hubPagesError = $state<IpcError | null>(null);
+  /** Review w17-2: only a refusal means "this hub does not serve its
+   *  settings"; a link blip or a timeout is a failed read, with Retry. */
+  const hubPagesRefused = $derived(
+    hubPagesError === null || ['E_FORBIDDEN', 'E_HUB_PROTOCOL', 'E_INVALID'].includes(hubPagesError.code),
+  );
   /** The generated pages have the fleet's settings to show here. */
   const pagesHere = $derived(ownsFleet || hubPages === 'ok');
   const leaf = $derived(leafById(view, $allPages) ?? leafById(DEFAULT_LEAF, $allPages));
@@ -267,13 +281,26 @@
     const failed = !ds.ok ? ds : !fs.ok ? fs : null;
     if (failed && !failed.ok) {
       hubPages = 'off';
-      hubPagesError = failed.error.message;
+      hubPagesError = failed.error;
       return;
     }
     hubPages = 'ok';
+    hubPagesError = null;
     resetProjectDrafts();
     await subscribeSettings();
   }
+
+  // Review w17-2: a read that failed while the link was down is read again
+  // when it comes back, so Settings need not be closed and reopened.
+  let lastLink = $hubConnection.state;
+  $effect(() => {
+    const now = $hubConnection.state;
+    const was = lastLink;
+    lastLink = now;
+    if (now === 'connected' && was !== 'connected' && hubPages === 'off' && hubPagesError && !hubPagesRefused) {
+      void loadHubPages();
+    }
+  });
 
   onMount(async () => {
     hubUrlDraft = $hubStatus.configured_url ?? '';
@@ -308,8 +335,8 @@
     // here would also skip resetProjectDrafts() below.
     mcpSettings?.applyStatus(r);
     const [fs, ds] = await Promise.all([loadFleetSettings(), loadDescriptors(), loadProposals()]);
-    if (!fs.ok) settingsLoadError = fs.error.message;
-    else if (!ds.ok) settingsLoadError = ds.error.message;
+    if (!fs.ok) settingsLoadError = errorText(fs.error);
+    else if (!ds.ok) settingsLoadError = errorText(ds.error);
     resetProjectDrafts();
     await subscribeSettings();
     // Last, and only standalone: on macOS this reads the keychain, which is
@@ -377,7 +404,7 @@
     let blocked = false;
     answers.forEach((r, i) => {
       const { alias, path } = asked[i];
-      const line = r.ok ? (r.value ? basePathLine(alias, r.value) : null) : { text: `${alias}: ${r.error.message}`, problem: false };
+      const line = r.ok ? (r.value ? basePathLine(alias, r.value) : null) : { text: `${alias}: ${errorText(r.error)}`, problem: false };
       if (!line) return;
       // Only a host that answered can say a path is wrong.
       const problem = line.problem && r.ok && !r.value?.error;
@@ -425,10 +452,10 @@
     if (r.ok) {
       const pr = await refreshProjects();
       if (pr.ok) projectsMsg = `Saved. Rescanned ${pr.value?.length ?? 0} local project(s).`;
-      else projectsError = pr.error.message;
+      else projectsError = errorText(pr.error);
       resetProjectDrafts();
     } else {
-      projectsError = r.error.message;
+      projectsError = errorText(r.error);
     }
     projectsBusy = false;
   }
@@ -635,7 +662,7 @@
         <p class="err" data-testid="hub-unavailable-reason">
           <Icon name="warning" size={12} /> This app is set to use
           {#if $hubStatus.configured_url}<code>{$hubStatus.configured_url}</code>{:else}a hub{/if},
-          but this launch cannot: {plainUnavailableReason($hubStatus.unavailable)}.
+          but this launch cannot. {hubUnavailableWords($hubStatus.unavailable)}.
         </p>
         <details class="hook-desc" data-testid="hub-unavailable-detail">
           <summary>Details</summary>
@@ -1070,6 +1097,25 @@
             {ownsFleet}
             onnavigate={(id) => select(id)} />
         {/key}
+      {:else if COMPANY_PAGES.includes(currentPage.id)}
+        <!-- Company decides per fleet what this device may change, as the
+             hub's org_admin does: a fleet admin's or an org admin's device,
+             trusted to change anything (`company_access.ts`), on any fleet
+             shown here; the pick holds across the Company pages. -->
+        {#key view}
+          <CompanySettings
+            page={currentPage}
+            pages={$allPages}
+            descs={$descriptors}
+            values={$settingValues}
+            sources={$pagesBundle.sources}
+            resources={$pagesBundle.resources}
+            actions={$pagesBundle.actions}
+            section={leaf?.section}
+            {ownsFleet}
+            bind:fleet={companyFleet}
+            onnavigate={(id) => select(id)} />
+        {/key}
       {:else if !ownsFleet && currentPage.layout === 'master_detail'}
         <!-- A resource's list routes to the hub: shown, read-only, with
              where to change it instead. -->
@@ -1093,9 +1139,15 @@
           <div class="section-header"><h4>{leaf?.section ?? currentPage.title}</h4></div>
           {#if hubPages === 'loading'}
             <p class="hook-desc">Reading the hub’s settings…</p>
+          {:else if !hubPagesRefused && hubPagesError}
+            <LoadError
+              title="Couldn't read the hub's settings"
+              error={hubPagesError}
+              onretry={() => void loadHubPages()}
+              testid="pages-remote-load-error" />
           {:else}
             <p class="hook-desc">{hubBlock('fleet_settings', $hubStatus)}</p>
-            {#if hubPagesError}<p class="hook-desc" data-testid="pages-remote-error">The hub answered: {hubPagesError}</p>{/if}
+            {#if hubPagesError}<p class="hook-desc" data-testid="pages-remote-error">The hub answered: {hubPagesError.message}</p>{/if}
           {/if}
         </section>
       {:else}
@@ -1123,6 +1175,7 @@
             actions={$pagesBundle.actions}
             {focusKey}
             section={leaf?.section}
+            hideKeys={leaf?.panelKeys}
             proposals={$settingProposals}
             onnavigate={(id) => select(id)}
             onopen={(id, key) => select(id, key)} />

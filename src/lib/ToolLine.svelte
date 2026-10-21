@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { errorText } from './error_copy';
   // One tool call in the Conversations tab: a compact row (verb, short
   // target, duration, failure mark) that expands to the call's input and
   // result. The detail is not in the poll payload; it is read on the first
@@ -124,7 +125,7 @@
     fetching = false;
     if (r.ok) detail = r.value;
     else {
-      loadError = r.error.message;
+      loadError = errorText(r.error);
       loadRetryable = !['E_LOCAL_ONLY', 'E_HUB_CONTRACT'].includes(r.error.code);
     }
   }
@@ -394,10 +395,6 @@
   }
   button.tool:hover {
     color: var(--fg);
-  }
-  button.tool:focus-visible {
-    outline: 1px solid var(--accent);
-    outline-offset: 1px;
   }
   .chev {
     flex: 0 0 auto;

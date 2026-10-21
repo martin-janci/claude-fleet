@@ -178,7 +178,7 @@ describe('TransferChip', () => {
     await tick();
     const chip = screen.getByTestId('transfer-chip') as HTMLButtonElement;
     expect(chip.disabled).toBe(true);
-    expect(chip.title).toContain('unreachable right now');
+    expect(chip.title).toContain('The hub is unreachable');
   });
 });
 

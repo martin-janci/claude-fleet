@@ -263,6 +263,27 @@ describe('App: the rail and the Accounts page (steps 3.2, 4.1)', () => {
     expect(terminalSlot(container)).toBe(term);
   });
 
+  it('an Esc an inner handler already took does not leave the page (review w18-1)', async () => {
+    const { container, getByTestId } = render(App);
+    for (const page of ['accounts', 'control', 'automation']) {
+      await fireEvent.click(getByTestId(`rail-${page}`));
+      expect(openOverlays(container)).toEqual([`${page}-overlay`]);
+      // Stands in for RoutineEditor's "Discard changes?" or Control's back
+      // step: a focused button inside the page whose own handler takes Esc.
+      const overlay = getByTestId(`${page}-overlay`);
+      const inner = document.createElement('button');
+      inner.addEventListener('keydown', (e) => e.preventDefault());
+      overlay.appendChild(inner);
+      inner.focus();
+      await fireEvent.keyDown(inner, { key: 'Escape' });
+      expect(get(destination)).toBe(page);
+      inner.remove();
+      // An Esc nobody took still leaves.
+      await fireEvent.keyDown(document.body, { key: 'Escape' });
+      expect(get(destination)).toBe('session');
+    }
+  });
+
   it('opening a session leaves every fleet page for it (review r07)', async () => {
     const { container, getByTestId } = render(App);
     const row = session('mefistos', 'dev-open');
