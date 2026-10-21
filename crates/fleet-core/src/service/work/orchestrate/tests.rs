@@ -211,13 +211,12 @@ fn a_grant_lifts_a_level_0_mission_so_the_loop_runs_by_itself() {
             "t",
         )
         .unwrap();
-        assert_eq!(
-            autonomy(&s, &mission_now(&fx), now_unix())
-                .unwrap()
-                .effective,
-            0
-        );
     }
+    // `mission_now` takes the store's lock itself, so read it outside the guard.
+    let m = mission_now(&fx);
+    let s = lock(&fx.deps.store).unwrap();
+    assert_eq!(autonomy(&s, &m, now_unix()).unwrap().effective, 0);
+    drop(s);
     grant(
         &WorkLinkArgs {
             level: Some(2),
