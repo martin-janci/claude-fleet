@@ -989,7 +989,11 @@ finite mission whose checks all hold. A locked `claude -p` planner
 (`planner.rs`, no tools, worker text fenced as untrusted, all or nothing,
 at most `policy.max_planner_runs_per_hour`) breaks a goal down and decides
 what a failure needs; its commands become cards in the mission's confirm
-queue. `git merge-tree` checks the finished branches against each other and
+queue. An answer is refused when it leaves a merge-wave item (titled
+"Merge wave <n>" / "Integrate wave <n>") short of an item of its wave —
+the latest wave it waits for — counting this answer's creates and edges;
+a gap a person already accepted does not refuse later answers
+(`check_merge_waves`), and the next snapshot shows why it was refused. `git merge-tree` checks the finished branches against each other and
 proposes a resolve task for a conflict (`integrate.rs`). What the loop does by
 itself is the least of the mission's level, `orchestrator.max_level`
 (default 1: a person presses every step) and a person's grant

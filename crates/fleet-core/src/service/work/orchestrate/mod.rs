@@ -1218,7 +1218,7 @@ pub async fn run_planner(
 ) -> Result<PlanOutcome, IpcError> {
     let _slot = PlannerSlot::take(deps, m)?;
     let now = now_unix();
-    let (host, prompt, model, auto_level, accept_created) = {
+    let (host, prompt, model, auto_level, accept_created, plan_nodes) = {
         let s = lock(&deps.store)?;
         let a = autonomy(&s, m, now)?;
         let runs = s.mission_planner_runs_since(m.id, now - 3600)?;
@@ -1262,6 +1262,7 @@ pub async fn run_planner(
                 .unwrap_or_else(|| planner::PLANNER_DEFAULT_MODEL.into()),
             a.effective,
             a.effective >= 3 && m.policy.task_creation == "auto",
+            planner::plan_nodes(&items, &graph),
         )
     };
     let script = planner::planner_script(&model, &prompt);
@@ -1302,7 +1303,9 @@ pub async fn run_planner(
             ))
         }
     };
-    let commands = match planner::parse_commands(&answer) {
+    let commands = match planner::parse_commands(&answer)
+        .and_then(|c| planner::check_merge_waves(&c, &plan_nodes).map(|()| c))
+    {
         Ok(c) => c,
         Err(mut why) => {
             if answer.trim().is_empty() && !out.stderr.is_empty() {
