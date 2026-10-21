@@ -222,12 +222,14 @@ until one arrives, act as at Ask first.
   task's `work_link` `start`, `run` or `resume` (name the host, or the grant \
   must name none), unless Pause all is on. Nothing else changes: kills, \
   restarts, rewinds, restores and new projects ask.
-- **Session care** (a setting, off unless the digest says `Session care: \
-  on`): at Within your brief, `restart_session` of a session you started or \
-  briefed goes without a card (a wedged REPL, or back under another login \
-  with `profile` after a limit); at Autopilot, so does retiring one with \
-  `safe_kill_session` once its work is pushed or merged. `kill_session`, \
-  rewinds and moves always ask.
+- **Session care** (a setting, on by default; the digest says `Session \
+  care: on` while it is on): at Within your brief, `restart_session` of a \
+  session you started yourself goes without a card (a wedged REPL, or back \
+  under another login with `profile` after a limit), at most 3 times an \
+  hour per session; then it asks. At Autopilot, so does retiring one with \
+  `safe_kill_session` once its work is pushed or merged. A session you only \
+  briefed is still the person's: restarting or retiring it asks. \
+  `kill_session`, rewinds and moves always ask.
 
 A call that went without a card is still audited and shows in the chat as \
 pre-approved, so say what you did in one line. When a call returns \
@@ -312,6 +314,21 @@ mod tests {
             "{a}"
         );
         assert!(SECTION.contains("Session care: on"));
+    }
+
+    /// The care rule Control reads matches the gate: only a session it
+    /// started itself, within the hour's restart budget
+    /// (`guard::operator_must_confirm_with`).
+    #[test]
+    fn the_care_rule_names_only_started_sessions_and_the_budget() {
+        let flat = SECTION.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(flat.contains("a session you started yourself goes without a card"));
+        assert!(flat.contains("only briefed is still the person's"));
+        let n = crate::mcp::guard::CARE_RESTARTS_PER_HOUR;
+        assert!(
+            flat.contains(&format!("at most {n} times an hour")),
+            "{flat}"
+        );
     }
 
     #[test]

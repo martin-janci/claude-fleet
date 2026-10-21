@@ -42,7 +42,7 @@ use axum::response::{IntoResponse, Response};
 use base64::Engine as _;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 /// How long a sign-in may take at the provider before its state expires.
 pub const LOGIN_TTL: Duration = Duration::from_secs(10 * 60);
@@ -741,12 +741,7 @@ fn random_b64(n: usize) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw)
 }
 
-fn unix_now() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
+use crate::store::now_unix as unix_now;
 
 /// Percent-encode everything but RFC 3986's unreserved characters.
 fn pct(s: &str) -> String {

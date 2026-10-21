@@ -834,18 +834,20 @@ interface Exemption {
  *  them — asking it about a company-fleet row would answer for a different
  *  session. The extra fleet's own hub is the gate: it resolves the person
  *  from this desktop's token on that hub and refuses with `E_FORBIDDEN`,
- *  which the group and the fleet's session view (Phase 2) show as an error
- *  toast. */
+ *  which the group shows as an error toast and the conversation panel
+ *  (Phase 3) on the message that did not go. */
 const EXTRA_FLEET_WHY =
   "An extra fleet's row is gated by that fleet's own hub, not by access.ts: access.ts answers for " +
   "the primary hub's ids, which collide with the extra fleet's, so asking it would answer for a " +
   'different session. The hub resolves the person from this desktop’s token there and refuses ' +
-  'with E_FORBIDDEN, shown as a toast.';
+  'with E_FORBIDDEN, shown as a toast or on the message that did not go.';
 const EXTRA_FLEET_PINS = [
   { file: './fleets.ts', needle: 'return invokeCmd<T>(cmd, { ...args, fleet });' },
   { file: './FleetSessionGroups.svelte', needle: "push({ kind: 'error', message: `${what} failed`" },
-  { file: './FleetSessionView.svelte', needle: "const who = `${name} on ${fleet.label}`;" },
-  { file: './FleetSessionView.svelte', needle: "push({ kind: 'error', message: `Sending to ${who} failed`" },
+  // Phase 3: the conversation panel asks only that fleet's link for an
+  // extra fleet's row, and the outbox shows the hub's refusal on the bubble.
+  { file: './ConversationPanel.svelte', needle: "away ? awayBlocked : (hubActionBlocked('send_prompt', $hubStatus, $hubConnection) ?? shareBlocked)" },
+  { file: './outbox.ts', needle: "blocked: (id) => (id < 0 ? get(fleetBlocked)(keyTarget(id)?.fleet) : sessionIdActionBlocked(id, 'send_prompt'))," },
 ] as const;
 
 const EXEMPT_SITES: Record<string, readonly Exemption[]> = {
@@ -856,8 +858,6 @@ const EXEMPT_SITES: Record<string, readonly Exemption[]> = {
     { writer: 'fleetKillSession', action: 'kill_session', sites: ['fleetKillSession(f.id, s)'], why: EXTRA_FLEET_WHY, pins: EXTRA_FLEET_PINS },
   ],
   './FleetSessionView.svelte': [
-    { writer: 'fleetSendPrompt', action: 'send_prompt', sites: ['fleetSendPrompt(fleet.id, session, text)'], why: EXTRA_FLEET_WHY, pins: EXTRA_FLEET_PINS },
-    { writer: 'fleetSendKey', action: 'send_prompt', sites: ['fleetSendKey(fleet.id, session, k)'], why: EXTRA_FLEET_WHY, pins: EXTRA_FLEET_PINS },
     { writer: 'fleetTouchViewed', action: 'touch_session_viewed', sites: ['fleetTouchViewed(at, { id })'], why: EXTRA_FLEET_WHY, pins: EXTRA_FLEET_PINS },
   ],
   './ReplyActions.svelte': [

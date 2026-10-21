@@ -292,7 +292,7 @@ pub fn record_recheck(
     let Some(row) = s.get_host_row(host_alias)? else {
         return Ok(());
     };
-    let mut next = row.signed_out_logins.clone();
+    let mut next = row.signed_out_logins;
     let Some(l) = next.iter_mut().find(|l| l.profile.as_deref() == profile) else {
         return Ok(());
     };

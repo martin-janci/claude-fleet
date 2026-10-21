@@ -564,7 +564,7 @@ describe('HostsView: hub client', () => {
     await tick();
     const refresh = within(detail()).getByTestId('usage-refresh') as HTMLButtonElement;
     expect(refresh).toBeDisabled();
-    expect(refresh.title).toContain('fleet.example.com');
+    expect(refresh.title).toContain('this machine’s own SSH');
   });
 
   // `list_host_tokens` is also local-only in remote mode and was still
@@ -593,7 +593,7 @@ describe('HostsView: hub client', () => {
     await tick();
     const empty = within(detail()).getByTestId('detail-token-empty');
     expect(empty.textContent).not.toBe('…');
-    expect(empty.textContent).toContain('fleet.example.com');
+    expect(empty.textContent).toContain('Per-host tokens');
   });
 
   it('standalone is untouched: the empty-token line still reads "…" before tokens load, then the real answer', async () => {

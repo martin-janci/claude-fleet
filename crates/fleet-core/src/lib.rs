@@ -42,6 +42,7 @@ pub mod rt;
 #[cfg(test)]
 mod scope_guard_tests;
 pub mod search_text;
+mod serde_util;
 pub mod service;
 pub mod shell;
 pub mod ssh;

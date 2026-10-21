@@ -64,9 +64,10 @@ from `autonomy.ts`; Custom grants what Ask first does), and since the
   all is on (review w04-5).
   Kills, rewinds, restores, add_project and every other `confirm: true`
   tool always ask. **Session care** (`control.session_care`, ON by
-  default since 2026-10-20, the owner's choice): with it on, `restart_session` of an open handoff
-  goes without a card at Within your brief and Autopilot, and
-  `safe_kill_session` of one at Autopilot (`guard::OPERATOR_CARE_TOOLS`);
+  default since 2026-10-20, the owner's choice): with it on, `restart_session` of a session
+  Control started itself (not one it only briefed;
+  `Store::is_control_started_session`) goes without a card at Within your
+  brief and Autopilot, and `safe_kill_session` of one at Autopilot (`guard::OPERATOR_CARE_TOOLS`);
   the digest says `Session care: on` under its autonomy line. The rule is
   one pure function, `guard::operator_must_confirm_with(tool, position,
   OperatorFacts)`, with truth-table tests. Control's CLAUDE.md also
@@ -465,10 +466,23 @@ tell; the script is shared, so SSH, `local` and agent hosts all get it with
 no proto change. `mem_low` (`health.mem_low_pct`, 10) and `cpu_saturated`
 (`health.cpu_busy_pct`, 90, two samples in a row) are judged when the sample
 is written (`Store::set_host_health`) and carried on the host row, the ping
-and `fleet_health.hosts[]` (with `cpu_pct`, `mem_used_pct`, `mem_pressure`)
-for a future status-bar chip; the automatic restore defers on either, the
-operator feed reports `mem_low`. The desktop shows the numbers only in the
-host's Health line.
+and `fleet_health.hosts[]` (with `cpu_pct`, `mem_used_pct`, `mem_pressure`);
+the automatic restore defers on either, the operator feed reports
+`mem_low`, and the desktop shows them in the status bar's host chip (see
+the Control paragraph above).
+
+**Autofix** is landed and ON by default (#939, #940; `service/autofix/`,
+migration 198, MCP `autofix`, loop `autofix`; mechanics in
+`docs/architecture.md`). Four detectors (`autofix.detector.*`: an unbound
+operator token, a host's out-of-date fleet files or old agent, a host's
+missing or wrong `~/.claude.json` fleet entry, a stuck session) are all on.
+With `autofix.auto_safe` (on) the fixes marked safe run unattended on the
+reconcile tick, up to `autofix.max_attempts` (3) tries per problem in 24 h,
+and then tell you; the rest (a new token, a sign-in, typing into a session)
+wait for a trusted device's Apply. Findings show in Needs you → *Problems &
+fixes*, as the `fix` chat block, as a count on the host chip, and in the
+operator feed; fleet-mobile shows them in its Problems & fixes sheet
+(`AutofixSheet`).
 
 The work graph's M0–M3 are landed (work links anchored on participants,
 group-by-work, and M2's work journal, carry rules, handover brief and resume
@@ -1057,7 +1071,15 @@ Routines are landed (`service/routines/`, migrations 131 and 139, redesign
 fleet event or when a person presses Run now. Since M15 G2.4 (migration
 156) the events include a pull request's review, failing or passing checks
 and merge, read from the `pull_requests` changes reconcile records, with a
-repo filter, "me or anyone in its org" and a rate per PR. The scheduler stops on
+repo filter, "me or anyone in its org" and a rate per PR. Since
+ce84e5d28 (migration 201) they also include more session kinds
+(`needs_you`, `auto_restored` / `auto_restore_failed`, `account_switched`
+/ `account_switch_failed`, `session_moved`, `pr_opened`) and fleet events
+(`fleet_events`, written by `service/fleet_events.rs`'s watcher and by
+`set_mission_state`): `host_offline` / `host_online` / `host_low`,
+`account_limited` / `account_available`, `login_signed_out`,
+`mission_done` / `mission_failed`; any event routine but an account or
+mission one may narrow to one host (`event_host`). The scheduler stops on
 `automation.paused`, a fire past the routine's day budget is skipped, a run
 past its run budget fails and pauses the routine, and a run whose account
 is at or past `accounts.pause_at` is skipped (8.7). M15 G3.8 (migration
@@ -1093,6 +1115,12 @@ once the run finishes; `memory_auto` also notes each finished run in it. The
 routine editor's Memory group picks them and shows the saved notebooks to
 read, edit or clear (`routines { memory | set_memory }`). Off by default
 per routine. The phone shows nothing of it yet.
+
+The prompt tuner is landed and OFF by default (`work.prompt_tune`;
+`service/prompt_tune.rs`, `PromptTune.svelte`, mechanics in
+`docs/architecture.md`): the composer's ✦ and a routine's prompt field ask
+the Writing help model to rewrite the draft into a clearer prompt, shown
+beside it as a proposal that is never sent on its own.
 
 Reply actions are landed (#338): Copy, Quote, Retry, Fork here and Rewind
 here under each reply; Fork, Rewind and Retry are one operation,
@@ -1231,10 +1259,11 @@ items assigned to the tracker's own account on GitHub and Linear, so those are
 all a poll sees there; the gallery (`fleet_agents/gallery.rs`: the
 `catalog-seed/fleet-agents/` definitions embedded, listed under Automation ›
 Agents › Gallery and added to the catalog with *Add to catalog*, `agents {
-install }`), with `issue-triage`, `pr-questions` and `daily-digest` added to
-it; `pr_review` (a review of the PR's head with line comments placed on
-the diff, sent only while that head is current, never an unattended
-APPROVE); not restating the built-in agents.
+install }`), which holds all seven seeds in `catalog-seed/fleet-agents/`:
+`issue-triage`, `pr-questions` and `daily-digest`, and `self-debug`,
+`proposer`, `simplify` and `refactor` (below); `pr_review` (a review of the
+PR's head with line comments placed on the diff, sent only while that head
+is current, never an unattended APPROVE); not restating the built-in agents.
 
 The self debug agent (thread "Self debug agent", 2026-10-17), the hub and
 desktop parts: a fleet agent definition that sets `run.diagnostics` gets
@@ -1266,7 +1295,7 @@ the same services as the matching buttons (`settings_review` as
 per item (`{{item.…}}`, `when` per item, at most 10), so self-debug
 proposes one step per finding. `fleet-diagnostics` adds `analyses` (recent
 fleet-agent answers with their findings) and `proposals` (the last 30
-days of agent actions and what a person did). Three more seeds:
+days of agent actions and what a person did). Three more gallery seeds:
 `proposer` (daily 07:00 and `/propose <focus>`; merges by fingerprint,
 skips pending, done, or rejected in the last 14 days; at most five),
 `simplify` and `refactor` (manual, read a project's checkout, propose a
@@ -1426,7 +1455,25 @@ person-scope variables, its git identity; an older hub falls back to
 the same name, a local per-fleet profile label (`src/lib/fleet_profiles.ts`),
 shown on the switcher's chips, in Settings › Fleets › Profiles and as "Runs
 as …" in New session.
-Phase 3 (one id space, the full panes per fleet) is not started.
+Phase 3 step 1 landed: one id space for the conversation panel. An extra
+fleet's session row carries its fleet (`SessionRow.fleet`), stores keyed by
+session id key it by `sessionKey` (the primary's id, or a negative stand-in
+for an extra fleet's (fleet, id)), and the session opens in the full
+ConversationPanel inside `FleetSessionView`: reads, the conversation list,
+the activity probe, the outbox, dialog answers and the model relaunch go to
+its hub (`session_conversations`, `session_activity`, `restart_session`
+joined `FLEET_SCOPED`). Still off for another fleet's session: attachments,
+fork / rewind, send later, writing help, forms, devices, task results.
+Step 2a landed: its Terminal tab is the same TerminalView (a `session` prop;
+pty id `fleet-<slot>-<id>.<view>`) with the workspace check, shell strip,
+microphone, transfer chip, un-archive and uploads off for it; FleetTerminal
+is gone. Step 2b landed: `FleetSessionView` is laid out as the primary's
+own session (the same `SessionTabs` header and Conversation / agent tabs,
+the conversation over a mounted terminal); its fleet, Copy attach and Close
+sit in the header, and Terminals, Files, Details, Share, Open in VS Code
+and the inspector are off for it. A `local` / `wsl-…` host shows the pane
+snapshot in the agent tab. Not started: every command fleet-aware (which
+turns those back on) and promoting another hub to primary (step 3).
 
 Application updates: design
 `docs/superpowers/specs/2026-09-28-update-channel-design.md` (with

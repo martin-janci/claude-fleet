@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { errorText } from './error_copy';
   // Settings → Hub & sync → Fleets (multi-hub design): every hub this window
   // shows. The primary is the pairing above (or this machine's own fleet) and
   // is listed read-only; each extra fleet is its own pairing, made here with a
@@ -18,6 +19,8 @@
     startFleets,
   } from './fleets';
   import Button from './kit/Button.svelte';
+  import LoadError from './states/LoadError.svelte';
+  import type { IpcError } from './result';
   import FleetProfiles from './FleetProfiles.svelte';
   import { multiFleet } from './fleets';
 
@@ -35,9 +38,18 @@
   let error = $state<string | null>(null);
   let removeAsk = $state<string | null>(null);
 
+  // Review w17-13: a failed list read says so with Retry; otherwise the
+  // section is an empty list and the add form, with not even the primary.
+  let loadError = $state<IpcError | null>(null);
+  let retrying = $state(false);
+  async function reloadFleets() {
+    const r = await loadFleets();
+    loadError = r.ok ? null : r.error;
+  }
+
   onMount(() => {
     void startFleets();
-    void loadFleets();
+    void reloadFleets();
   });
 
   async function add() {
@@ -58,7 +70,7 @@
       return;
     }
     if (r.error.code === 'E_HUB_PLAINTEXT') plaintextAsk = true;
-    error = r.error.message;
+    error = errorText(r.error);
   }
 
   async function remove(id: string) {
@@ -66,7 +78,7 @@
     const r = await removeFleet(id);
     busy = false;
     removeAsk = null;
-    error = r.ok ? null : r.error.message;
+    error = r.ok ? null : errorText(r.error);
   }
 </script>
 
@@ -80,6 +92,18 @@
     and each hub has its own pairing, its own token and its own trust: a
     device trusted on one hub is not trusted on another.
   </p>
+  {#if loadError}
+    <LoadError
+      title="Couldn't load the fleets"
+      error={loadError}
+      {retrying}
+      onretry={async () => {
+        retrying = true;
+        await reloadFleets();
+        retrying = false;
+      }}
+      testid="fleets-load-error" />
+  {/if}
   <ul class="fleet-list" data-testid="fleets-list">
     {#each $fleets as f (f.id)}
       {@const cw = connectionWord(f)}

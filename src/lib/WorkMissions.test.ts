@@ -1,7 +1,7 @@
 // The Work view's Missions tab (orchestration O1): the list, a new mission,
 // its detail with the lifecycle moves the state allows, a new task under its
 // root, and a refusal shown as text.
-import { render, screen, fireEvent } from '@testing-library/svelte';
+import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { tick } from 'svelte';
 
@@ -9,7 +9,8 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke } from '@tauri-apps/api/core';
 import WorkMissions from './WorkMissions.svelte';
 import MissionRoom from './MissionRoom.svelte';
-import { openMissionRoom, resetMissionRoomForTests } from './mission_room';
+import { openMissionRoom, resetMissionRoomForTests, roomMissionId } from './mission_room';
+import { bumpWorkChanged } from './work';
 import { expectAccessible } from './a11y_check';
 import { expectLastButton, expectOnePrimary } from './action_hierarchy_check';
 import { hosts } from './hosts';
@@ -146,6 +147,51 @@ describe('WorkMissions', () => {
     renderMissions();
     await flush();
     expect(screen.getByTestId('missions-empty')).toBeTruthy();
+  });
+
+  // Review w17-7: a failed list refresh keeps the missions listed.
+  it('a failed list refresh keeps the list, with a Retry line', async () => {
+    renderMissions();
+    await flush();
+    expect(screen.queryByTestId('missions-error')).toBeNull();
+    handlers.work_missions = () => Object.assign(new Error('slow'), { code: 'E_HUB_TIMEOUT' });
+    bumpWorkChanged();
+    await waitFor(() => expect(screen.getByTestId('missions-refresh-error')).toBeTruthy(), { timeout: 2000 });
+    expect(screen.queryByTestId('missions-error')).toBeNull();
+    expect(screen.getByTestId('work-missions').textContent).toContain('Payments v2');
+  });
+
+  // Review w17-4: a failed background re-read keeps the room open.
+  it('a failed refresh keeps the open mission and offers Retry', async () => {
+    renderMissions();
+    await flush();
+    openMissionRoom(4);
+    await flush();
+    expect(screen.getByTestId('mission-detail').textContent).toContain('Cards and refunds');
+    const ok = handlers.work_mission;
+    handlers.work_mission = () => Object.assign(new Error('the hub did not answer in time'), { code: 'E_HUB_TIMEOUT' });
+    bumpWorkChanged();
+    await waitFor(() => expect(screen.getByTestId('mission-refresh-error')).toBeTruthy(), { timeout: 2000 });
+    expect(screen.getByTestId('mission-detail').textContent).toContain('Cards and refunds');
+    expect(get(roomMissionId)).toBe(4);
+    handlers.work_mission = ok;
+    await fireEvent.click(screen.getByTestId('mission-refresh-retry'));
+    await flush();
+    expect(screen.queryByTestId('mission-refresh-error')).toBeNull();
+  });
+
+  // Review w30-1: a mission deleted elsewhere closes the room with a notice.
+  it('a mission gone from the hub closes the room and says so', async () => {
+    renderMissions();
+    await flush();
+    openMissionRoom(4);
+    await flush();
+    expect(screen.getByTestId('mission-detail').textContent).toContain('Cards and refunds');
+    handlers.work_mission = () => Object.assign(new Error('no such mission'), { code: 'E_NOTFOUND' });
+    bumpWorkChanged();
+    await waitFor(() => expect(get(roomMissionId)).toBeNull(), { timeout: 2000 });
+    expect(screen.queryByTestId('mission-refresh-error')).toBeNull();
+    expect(screen.getByTestId('mission-notice').textContent).toContain('not in the fleet any more');
   });
 
   it('creates a mission from a name and a goal, then opens it', async () => {

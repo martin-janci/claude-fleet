@@ -22,8 +22,6 @@
     fleetRenameSession,
     fleetPinSession,
     fleetNewSession,
-    fleetAttachCommand,
-    fleetAttachRefusal,
     fleetTrouble,
     fleetHostChoices,
     defaultFleetHost,
@@ -39,20 +37,21 @@
   import { agentFilter } from './session_scope';
   import type { Recency } from './session_status';
   import { scopes as primaryScopes } from './orgs';
-  import { readPref, writePref } from './prefs';
   import {
     anchor,
     anchorFacetWord,
     anchorText,
     clearMachineOrg,
     fleetListView,
+    fleetGroupsFolded,
     fleetScopesOf,
     scopeLabelIn,
+    toggleFleetGroupFold as toggleFold,
   } from './fleet_filters';
   import { fleets, fleetRows, PRIMARY } from './fleets';
-  import { copyText } from './clipboard';
   import { push } from './toasts';
   import Button from './kit/Button.svelte';
+  import FleetAttachButton from './FleetAttachButton.svelte';
 
   const NONE: ReadonlySet<number> = new Set();
 
@@ -60,12 +59,16 @@
     search = '',
     recency = 'all',
     needsYouOnly = false,
+    focused = false,
   }: {
     /** The Sessions list's own search, Last active and Needs you (Sidebar
      *  state, not stores), applied to every fleet alike. */
     search?: string;
     recency?: Recency;
     needsYouOnly?: boolean;
+    /** The primary list is narrowed to one session (`session_focus.ts`):
+     *  no extra fleet's rows show beside it. */
+    focused?: boolean;
   } = $props();
 
   // A coarse clock for Last active, as the primary's list keeps.
@@ -75,13 +78,9 @@
     return () => clearInterval(t);
   });
 
-  // Folded fleets, per viewer.
-  const isFolds = (v: unknown): v is string[] => Array.isArray(v) && v.every((x) => typeof x === 'string');
-  let folded = $state<string[]>(readPref('fleet-groups-folded', [], isFolds));
-  function toggleFold(id: string) {
-    folded = folded.includes(id) ? folded.filter((x) => x !== id) : [...folded, id];
-    writePref('fleet-groups-folded', folded);
-  }
+  // Folded fleets, per viewer (`fleetGroupsFolded`: a removed fleet's fold
+  // goes with it).
+  const folded = $derived($fleetGroupsFolded);
 
   /** The anchor in words, for the notice on a fleet it hides. */
   const anchorWords = $derived.by(() => {
@@ -145,11 +144,6 @@
     }
   }
 
-  async function copyAttach(s: SessionRow) {
-    if (fleetAttachRefusal(s)) return;
-    if (await copyText(fleetAttachCommand(s))) push({ kind: 'success', message: 'Attach command copied' });
-  }
-
   function startForm(f: FleetInfo, rows: FleetRows) {
     starting = starting === f.id ? null : f.id;
     newHost = defaultFleetHost(rows);
@@ -167,7 +161,7 @@
   }
 </script>
 
-{#each $visibleExtraFleets as { fleet: f, rows } (f.id)}
+{#each focused ? [] : $visibleExtraFleets as { fleet: f, rows } (f.id)}
   {@const cw = connectionWord(f)}
   {@const needs = $fleetNeedsIds.get(f.id) ?? NONE}
   {@const view = fleetListView(f.id, rows, {
@@ -277,13 +271,7 @@
             <Button size="sm" variant="quiet" testid="fleet-prompt-{f.id}-{s.id}" onclick={() => toggle(f.id, s, 'prompt')}>Prompt…</Button>
             <Button size="sm" variant="quiet" onclick={() => toggle(f.id, s, 'rename')}>Rename…</Button>
             <Button size="sm" variant="quiet" onclick={() => void run('Pinning', fleetPinSession(f.id, s, !s.pinned_at))}>{s.pinned_at ? 'Unpin' : 'Pin'}</Button>
-            <Button
-              size="sm"
-              variant="quiet"
-              disabled={!!fleetAttachRefusal(s)}
-              title={fleetAttachRefusal(s) ?? undefined}
-              onclick={() => void copyAttach(s)}>Copy attach</Button
-            >
+            <FleetAttachButton session={s} />
             <Button size="sm" variant="quiet" testid="fleet-close-{f.id}-{s.id}" onclick={() => toggle(f.id, s, 'close')}>Close…</Button>
           </div>
           {#if open?.key === key && open.kind === 'prompt'}

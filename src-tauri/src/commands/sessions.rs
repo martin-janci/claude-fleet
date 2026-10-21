@@ -209,10 +209,13 @@ pub async fn pin_session(
 #[tauri::command]
 pub async fn restart_session(
     args: RestartSessionArgs,
+    fleet: Option<String>,
     backend: State<'_, Arc<FleetBackend>>,
+    fleets: State<'_, Arc<Fleets>>,
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<SessionRow, IpcError> {
+    let backend = fleets.select(backend.inner(), fleet.as_deref())?;
     routed::restart_session(&backend, args, &store, &ssh).await
 }
 
@@ -493,9 +496,12 @@ pub struct SessionConversationsArgs {
 #[tauri::command]
 pub async fn session_conversations(
     args: SessionConversationsArgs,
+    fleet: Option<String>,
     backend: State<'_, Arc<FleetBackend>>,
+    fleets: State<'_, Arc<Fleets>>,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<Vec<fleet_core::store::ConversationRow>, IpcError> {
+    let backend = fleets.select(backend.inner(), fleet.as_deref())?;
     routed::session_conversations(&backend, args, &store).await
 }
 
@@ -575,10 +581,13 @@ pub struct SessionActivityArgs {
 #[tauri::command]
 pub async fn session_activity(
     args: SessionActivityArgs,
+    fleet: Option<String>,
     backend: State<'_, Arc<FleetBackend>>,
+    fleets: State<'_, Arc<Fleets>>,
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<sessions::ActivityProbe, IpcError> {
+    let backend = fleets.select(backend.inner(), fleet.as_deref())?;
     routed::session_activity(&backend, args, &store, &ssh).await
 }
 

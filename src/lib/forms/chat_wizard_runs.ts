@@ -17,6 +17,7 @@ import { newSessionWizard, runNewSession } from './new_session_wizard';
 import { pairDeviceWizard, runPairDevice } from './pair_device_wizard';
 import { getStartedWizard, runGetStarted } from './get_started_wizard';
 import { fleetForm, fleetWizard, grantFleet, loadAgents } from '../agents';
+import { errorText } from '../error_copy';
 
 export interface ChatWizard {
   wizard: Wizard;
@@ -56,13 +57,13 @@ export function addProjectChatWizard(hostList: readonly { alias: string }[]): Wi
 async function fleetAgentChatWizard(definition: string | null | undefined): Promise<ChatWizard> {
   if (!definition) throw new Error('the block names no fleet agent');
   const r = await fleetForm(definition);
-  if (!r.ok) throw new Error(r.error.message);
+  if (!r.ok) throw new Error(errorText(r.error));
   return {
     wizard: fleetWizard(r.value),
     run: async (values, onprogress) => {
       onprogress?.('Checking its stores on the host…');
       const g = await grantFleet(definition, values);
-      if (!g.ok) return { ok: false, error: g.error.message };
+      if (!g.ok) return { ok: false, error: errorText(g.error) };
       void loadAgents();
       return { ok: true, summary: `${definition} instance ${String(values.f_instance ?? '')} started` };
     },

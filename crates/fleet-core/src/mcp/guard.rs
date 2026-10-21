@@ -1869,12 +1869,21 @@ pub const OPERATOR_PROMPT_TOOLS: &[&str] =
 /// so its `tidy_apply` kills still ask.
 pub const OPERATOR_START_TOOLS: &[&str] = &["new_session", "dispatch_task", "work_link"];
 
-/// Session care (`control.session_care`, off by default): the operator's
-/// calls that look after a session it started or briefed. `restart_session`
+/// Session care (`control.session_care`, on by default): the operator's
+/// calls that look after a session it started itself (not one it only
+/// briefed; [`OperatorFacts::own_start`]). `restart_session`
 /// (a wedged REPL, or back under another login after a limit) goes without a
-/// card at "Within your brief" and "Autopilot"; `safe_kill_session` (commit
-/// and push, then retire) at "Autopilot" only.
+/// card at "Within your brief" and "Autopilot", at most
+/// [`CARE_RESTARTS_PER_HOUR`] times an hour per session; `safe_kill_session`
+/// (commit and push, then retire) at "Autopilot" only.
 pub const OPERATOR_CARE_TOOLS: &[&str] = &["restart_session", "safe_kill_session"];
+
+/// How many card-free care restarts one session gets in an hour: a session
+/// that wedges again right after every restart would otherwise be restarted
+/// on every digest, resuming (and paying for) its conversation each time,
+/// with no person ever seeing a card. Counted from its pre-approved
+/// `restart_session` events (`OperatorFacts::care_restarts_spent`).
+pub const CARE_RESTARTS_PER_HOUR: u32 = 3;
 
 /// The facts besides the position that [`operator_must_confirm_with`]
 /// decides on.
@@ -1893,6 +1902,9 @@ pub struct OperatorFacts {
     /// retires only these: a session Control merely sent a prompt to is
     /// still the person's.
     pub own_start: bool,
+    /// The target already had [`CARE_RESTARTS_PER_HOUR`] card-free
+    /// restarts in the last hour: its next restart asks a person.
+    pub care_restarts_spent: bool,
 }
 
 /// Whether a tool the operator calls is one a person approves at "Ask
@@ -1914,10 +1926,13 @@ pub fn operator_gated(name: &str) -> bool {
 /// At **Ask first** (and **Custom**, which grants what Ask first does) every
 /// gated tool asks, as before. **Within your brief** lets a prompt or task
 /// to an open handoff through ([`OPERATOR_PROMPT_TOOLS`]). **Autopilot** also
-/// lets a start inside a grant through ([`OPERATOR_START_TOOLS`]). Kills,
-/// restarts, rewinds, restores, new projects and every `confirm: true` tool
-/// ask at every position. This reverses review round 15, F21 for those two
-/// cases only (the 2026-10-17 review's F2, approved by the owner).
+/// lets a start inside a grant through ([`OPERATOR_START_TOOLS`]). This
+/// function passes no session care, so here kills, restarts, rewinds,
+/// restores, new projects and every `confirm: true` tool ask at every
+/// position; [`operator_must_confirm_with`] adds session care's exception
+/// for [`OPERATOR_CARE_TOOLS`] on a session Control started itself. This
+/// reverses review round 15, F21 for those cases only (the 2026-10-17
+/// review's F2, approved by the owner).
 pub fn operator_must_confirm(
     name: &str,
     position: crate::service::autonomy::Position,
@@ -1932,12 +1947,14 @@ pub fn operator_must_confirm(
             inside_grant,
             session_care: false,
             own_start: false,
+            care_restarts_spent: false,
         },
     )
 }
 
 /// [`operator_must_confirm`] with session care in the facts: with it on,
-/// [`OPERATOR_CARE_TOOLS`] on an open handoff go without a card as that
+/// [`OPERATOR_CARE_TOOLS`] on a session Control started itself
+/// ([`OperatorFacts::own_start`]) go without a card as that
 /// list says. `work_link` is `confirm: true` for its tidy kills, so a start
 /// target is the only way it goes without a card.
 pub fn operator_must_confirm_with(
@@ -1956,7 +1973,7 @@ pub fn operator_must_confirm_with(
     let own = facts.own_handoff;
     let prompt = OPERATOR_PROMPT_TOOLS.contains(&name) && own;
     let care = facts.session_care && facts.own_start;
-    let restart = care && name == "restart_session";
+    let restart = care && !facts.care_restarts_spent && name == "restart_session";
     let retire = care && name == "safe_kill_session";
     match position.grants() {
         Position::Brief => !(prompt || restart),
@@ -2005,11 +2022,12 @@ pub fn operator_confirm_reason(tool: &str) -> &'static str {
              \"Within your brief\" or \"Autopilot\", and only into a session it \
              started or briefed, whatever mcp.confirm_destructive says"
         }
-        // Session care, off by default.
+        // Session care, on by default.
         "restart_session" | "safe_kill_session" => {
             "the operator's restarts and kills ask unless session care \
-             (control.session_care) is on and the session is one it started or \
-             briefed: restarts at \"Within your brief\" or \"Autopilot\", retiring at \
+             (control.session_care) is on and the session is one it started \
+             itself, not one it only briefed: restarts at \"Within your brief\" or \
+             \"Autopilot\", at most 3 an hour per session, retiring at \
              \"Autopilot\" only, whatever mcp.confirm_destructive says"
         }
         // D12.
@@ -3100,6 +3118,7 @@ mod tests {
                         inside_grant,
                         session_care: false,
                         own_start,
+                        care_restarts_spent: false,
                     };
                     let on = OperatorFacts {
                         session_care: true,
@@ -3131,6 +3150,7 @@ mod tests {
             inside_grant: true,
             session_care: true,
             own_start: true,
+            care_restarts_spent: false,
         };
         for t in [
             "kill_session",
@@ -3140,6 +3160,41 @@ mod tests {
         ] {
             assert!(operator_must_confirm_with(t, Autopilot, all), "{t}");
         }
+    }
+
+    /// A session that wedges again after every care restart is not
+    /// restarted without a card forever: past the hour's budget the restart
+    /// asks, and the refusal says so. Retiring is not budgeted.
+    #[test]
+    fn care_restarts_ask_once_the_hours_budget_is_spent() {
+        use Position::{Autopilot, Brief};
+        let fresh = OperatorFacts {
+            own_handoff: true,
+            inside_grant: false,
+            session_care: true,
+            own_start: true,
+            care_restarts_spent: false,
+        };
+        let spent = OperatorFacts {
+            care_restarts_spent: true,
+            ..fresh
+        };
+        for pos in [Brief, Autopilot] {
+            assert!(!operator_must_confirm_with("restart_session", pos, fresh));
+            assert!(operator_must_confirm_with("restart_session", pos, spent));
+        }
+        assert!(!operator_must_confirm_with(
+            "safe_kill_session",
+            Autopilot,
+            spent
+        ));
+        let why = operator_confirm_reason("restart_session");
+        assert!(
+            why.contains(&format!("at most {CARE_RESTARTS_PER_HOUR} an hour")),
+            "{why}"
+        );
+        assert!(why.contains("started itself"), "{why}");
+        assert!(!why.contains("started or briefed"), "{why}");
     }
 
     #[test]

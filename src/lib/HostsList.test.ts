@@ -5,10 +5,12 @@ import { groupHostsByAccount, sessionCounts, type HostRowInfo } from './hosts_vi
 import { NOW, fleetAccounts, fleetHosts, fleetSessions, fleetUsage, host } from './hosts_fixture';
 import { hubStatus, STANDALONE, type HubStatus } from './hub';
 import { hubConnection } from './hub_connection';
+import { hostsLoad } from './hosts';
 
 beforeEach(() => {
   hubStatus.set({ ...STANDALONE });
   hubConnection.set({ state: 'standalone' });
+  hostsLoad.set({ state: 'idle', error: null });
 });
 
 function mount(over: Record<string, unknown> = {}) {
@@ -151,5 +153,27 @@ describe('a first run (review r13)', () => {
     expect(screen.getByTestId('hosts-empty').dataset.kind).toBe('first');
     await fireEvent.click(screen.getByTestId('hosts-empty-add'));
     expect(onaddhost).toHaveBeenCalledOnce();
+  });
+
+  // Review w17-1: a failed or unusable read is never shown as a first run.
+  it('says a failed hosts read as a failure with Retry, not "Start with one host"', () => {
+    hostsLoad.set({ state: 'failed', error: { code: 'E_DB', message: 'disk I/O error' } });
+    mount({ hosts: [], onaddhost: vi.fn() });
+    expect(screen.queryByTestId('hosts-empty')).toBeNull();
+    expect(screen.getByTestId('hosts-load-error').textContent).toContain("Couldn't load hosts");
+    expect(screen.getByTestId('hosts-load-error-retry')).toBeTruthy();
+  });
+
+  it('says an unusable hub, not a first run', () => {
+    hubStatus.set({ ...STANDALONE, unavailable: 'hub.url is not set' });
+    mount({ hosts: [], onaddhost: vi.fn() });
+    expect(screen.queryByTestId('hosts-empty')).toBeNull();
+    expect(screen.getByTestId('hosts-unavailable')).toBeTruthy();
+  });
+
+  it('shows no first-run copy while the hosts read is in flight', () => {
+    hostsLoad.set({ state: 'loading', error: null });
+    mount({ hosts: [], onaddhost: vi.fn() });
+    expect(screen.queryByTestId('hosts-empty')).toBeNull();
   });
 });

@@ -122,7 +122,7 @@ describe('sessionActionBlocked', () => {
 
   it('never says "not yours" when the truth is that the hub is unreachable', () => {
     const why = sessionActionBlocked(row(), 'kill_session', null, unavailable);
-    expect(why).toContain('no stored token');
+    expect(why).toContain("can't use the hub");
     expect(why).not.toMatch(/owner/i);
   });
 
@@ -143,7 +143,7 @@ describe('sessionActionBlocked', () => {
       /has not said who this device is/i,
     );
     expect(sessionActionBlocked(row(), 'send_prompt', null, unavailable, 4)).toContain(
-      'no stored token',
+      "can't use the hub",
     );
   });
 

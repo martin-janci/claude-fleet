@@ -55,9 +55,7 @@ pub struct DeferredPromptRow {
     pub skipped_at: Option<i64>,
 }
 
-fn is_false(b: &bool) -> bool {
-    !*b
-}
+use crate::serde_util::is_false;
 
 /// When a deferred prompt may be typed, besides "the session is idle".
 /// `Default` is the plain step 5.10 prompt: the next idle moment.
@@ -193,12 +191,7 @@ impl Store {
     ) -> Result<bool> {
         let n = self
             .conn
-            .prepare_cached(&format!(
-                "UPDATE deferred_prompts SET delivered_at = ?2 WHERE id = ?1 AND {PENDING} \
-                 AND NOT EXISTS (SELECT 1 FROM deferred_prompts d \
-                   WHERE d.session_id = deferred_prompts.session_id \
-                     AND d.delivered_at >= ?3 AND d.delivered_at > ?4)"
-            ))?
+            .prepare_cached(&claim_sql())?
             .execute(rusqlite::params![
                 id,
                 now,
@@ -267,6 +260,15 @@ impl Store {
         Ok(n == 1)
     }
 
+    /// When the session's newest claim was typed: the `delivered_at` that
+    /// [`Self::claim_deferred_prompt_in`] holds a moment against. `None`
+    /// when nothing was ever claimed.
+    pub fn latest_deferred_claim_at(&self, session_id: i64) -> Result<Option<i64>> {
+        self.conn
+            .prepare_cached("SELECT MAX(delivered_at) FROM deferred_prompts WHERE session_id = ?1")?
+            .query_row([session_id], |r| r.get(0))
+    }
+
     pub fn get_deferred_prompt(&self, id: i64) -> Result<Option<DeferredPromptRow>> {
         self.conn
             .prepare_cached(&format!(
@@ -286,26 +288,44 @@ impl Store {
     /// `deferred_prompts_session` (migration 202) instead of scanning the
     /// table's whole history.
     pub fn list_deferred_prompts(&self, session_id: Option<i64>) -> Result<Vec<DeferredPromptRow>> {
-        const LISTED: &str = "(delivered_at IS NULL OR failed_at IS NOT NULL) \
-                              AND cancelled_at IS NULL AND skipped_at IS NULL";
         match session_id {
             Some(id) => {
-                let mut st = self.conn.prepare_cached(&format!(
-                    "SELECT {COLS} FROM deferred_prompts \
-                     WHERE session_id = ?1 AND {LISTED} ORDER BY id"
-                ))?;
+                let mut st = self.conn.prepare_cached(&listing_sql(true))?;
                 let rows = st.query_map([id], row)?;
                 rows.collect()
             }
             None => {
-                let mut st = self.conn.prepare_cached(&format!(
-                    "SELECT {COLS} FROM deferred_prompts WHERE {LISTED} ORDER BY id"
-                ))?;
+                let mut st = self.conn.prepare_cached(&listing_sql(false))?;
                 let rows = st.query_map([], row)?;
                 rows.collect()
             }
         }
     }
+}
+
+/// [`Store::claim_deferred_prompt_in`]'s statement: `?1` the prompt, `?2`
+/// now, `?3` the moment, `?4` now − the hold. One text for the claim and
+/// for the test that checks its plan.
+fn claim_sql() -> String {
+    format!(
+        "UPDATE deferred_prompts SET delivered_at = ?2 WHERE id = ?1 AND {PENDING} \
+         AND NOT EXISTS (SELECT 1 FROM deferred_prompts d \
+           WHERE d.session_id = deferred_prompts.session_id \
+             AND d.delivered_at >= ?3 AND d.delivered_at > ?4)"
+    )
+}
+
+/// [`Store::list_deferred_prompts`]'s statement, for one session (`?1`) or
+/// all of them.
+fn listing_sql(per_session: bool) -> String {
+    const LISTED: &str = "(delivered_at IS NULL OR failed_at IS NOT NULL) \
+                          AND cancelled_at IS NULL AND skipped_at IS NULL";
+    let session = if per_session {
+        "session_id = ?1 AND "
+    } else {
+        ""
+    };
+    format!("SELECT {COLS} FROM deferred_prompts WHERE {session}{LISTED} ORDER BY id")
 }
 
 #[cfg(test)]
@@ -404,30 +424,21 @@ mod tests {
     #[test]
     fn the_per_session_reads_use_the_session_index() {
         let (s, _sid) = store_with_session();
-        let plan = |sql: &str| -> String {
+        // The production statements themselves, not copies of them.
+        let plan = |sql: &str, params: &[&dyn rusqlite::ToSql]| -> String {
             let mut st = s
                 .conn
                 .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
                 .unwrap();
-            let rows = st
-                .query_map(rusqlite::params![1, 2, 3], |r| r.get::<_, String>(3))
-                .unwrap();
+            let rows = st.query_map(params, |r| r.get::<_, String>(3)).unwrap();
             rows.map(|r| r.unwrap()).collect::<Vec<_>>().join("\n")
         };
-        let claim = plan(&format!(
-            "UPDATE deferred_prompts SET delivered_at = ?2 WHERE id = ?1 AND {PENDING} \
-             AND NOT EXISTS (SELECT 1 FROM deferred_prompts d \
-               WHERE d.session_id = deferred_prompts.session_id AND d.delivered_at >= ?3)"
-        ));
+        let claim = plan(&claim_sql(), rusqlite::params![1, 2, 3, 4]);
         assert!(
             claim.contains("deferred_prompts_session"),
             "the idle-moment check scans: {claim}"
         );
-        let list = plan(
-            "SELECT id FROM deferred_prompts WHERE session_id = ?1 \
-             AND (delivered_at IS NULL OR failed_at IS NOT NULL) \
-             AND cancelled_at IS NULL AND skipped_at IS NULL AND ?2 = ?2 AND ?3 = ?3 ORDER BY id",
-        );
+        let list = plan(&listing_sql(true), rusqlite::params![1]);
         assert!(
             !list.contains("SCAN deferred_prompts"),
             "the listing scans: {list}"

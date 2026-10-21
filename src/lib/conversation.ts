@@ -6,6 +6,7 @@ import { stuckKindLabel, contextLevel, type ContextLevel } from './attention';
 import type { SessionEvent } from './timeline';
 import { promptFirstLine, type TaskRow } from './tasks';
 import { parseSwitchDetail } from './account_switch';
+import type { Attachment } from './attachments';
 
 export type ConvItem =
   | { kind: 'text'; text: string }
@@ -133,10 +134,9 @@ export function sessionConversation(
 }
 
 /** The session's conversations, newest first (backend caps `limit` at 500). */
-export function listConversations(sessionId: number, limit = 50): Promise<Result<ConversationSummary[]>> {
-  return invokeCmd<ConversationSummary[]>('session_conversations', {
-    args: { session_id: sessionId, limit },
-  });
+export function listConversations(sessionId: number, limit = 50, fleet?: string): Promise<Result<ConversationSummary[]>> {
+  const args = { session_id: sessionId, limit };
+  return invokeCmd<ConversationSummary[]>('session_conversations', fleet === undefined ? { args } : { args, fleet });
 }
 
 /** The file change of an Edit / MultiEdit / Write call (`session_tool_detail`). */
@@ -871,13 +871,16 @@ export function carriedCount(conv: Conversation | null, text: string): number {
 
 /** The note under the composer's Send button, or null when the session is
  *  ready to take a prompt. A stuck session may never read what is typed; a
- *  working one queues it until the turn ends. */
+ *  working one queues it until the turn ends; a blocked one is showing a
+ *  permission or question dialog, where typed text and its Enter would
+ *  answer the dialog (review w13-3), so the composer does not send there. */
 export function composerStatus(
   s: { claude_status: string | null; stuck_kind: string | null },
   agent: SessionAgent = 'claude',
 ): string | null {
   if (s.stuck_kind) return `Session is stuck (${stuckKindLabel(s.stuck_kind as StuckKind) || s.stuck_kind}). The prompt may not be read until that is cleared.`;
   if (s.claude_status === 'working') return `${agentLabel(agent)} is working. The prompt is queued until the current turn ends.`;
+  if (s.claude_status === 'blocked') return `${agentLabel(agent)} is waiting on a question above. Answer it, or choose “Answer in your own words”, then send.`;
   return null;
 }
 
@@ -1171,8 +1174,9 @@ export interface ActivityProbe {
   pending_input: SessionRow['pending_input'];
 }
 
-export function sessionActivity(sessionId: number): Promise<Result<ActivityProbe>> {
-  return invokeCmd<ActivityProbe>('session_activity', { args: { session_id: sessionId } });
+export function sessionActivity(sessionId: number, fleet?: string): Promise<Result<ActivityProbe>> {
+  const args = { session_id: sessionId };
+  return invokeCmd<ActivityProbe>('session_activity', fleet === undefined ? { args } : { args, fleet });
 }
 
 /** Probe cadence while the indicator is live (working / sent / blocked). */
@@ -1256,6 +1260,20 @@ export const composerDrafts = new Map<number, string>();
 export function rememberDraft(sessionId: number, text: string): void {
   if (text.length === 0) composerDrafts.delete(sessionId);
   else composerDrafts.set(sessionId, text);
+}
+
+/**
+ * The attachment tray per session, beside the draft (review w13-6). The
+ * panel unmounts on the Terminal tab and is reused across sessions; the text
+ * survived both while the files were dropped, so a send went out without the
+ * screenshots it talked about. Keyed by session, so a tile still never
+ * follows the person to another session (and another host).
+ */
+export const composerTrays = new Map<number, Attachment[]>();
+
+export function rememberTray(sessionId: number, tray: readonly Attachment[]): void {
+  if (tray.length === 0) composerTrays.delete(sessionId);
+  else composerTrays.set(sessionId, [...tray]);
 }
 
 /** The last "Insert into composer" (work graph M9.2): the session and its

@@ -5,6 +5,7 @@
 </script>
 
 <script lang="ts">
+  import { errorText } from './error_copy';
   import Icon from './kit/Icon.svelte';
   // Fork's confirmation sheet. Opened from ReplyActions' fork button via
   // ConversationPanel's `openForkSheet`; this dialog IS the confirmation —
@@ -121,7 +122,7 @@
     const r = await rewindConversation(sessionId, 'fork', anchor, choice === 'new' ? slug : null);
     if (!r.ok) {
       busy = false;
-      error = r.error.code === 'E_UNSUPPORTED' && choice === 'new' ? NEW_WORKTREE_OLD_HUB : r.error.message;
+      error = r.error.code === 'E_UNSUPPORTED' && choice === 'new' ? NEW_WORKTREE_OLD_HUB : errorText(r.error);
       return;
     }
     if (targetHost === null) {
@@ -134,7 +135,7 @@
     const m = await moveSession(r.value.id, targetHost, { when: 'idle' });
     busy = false;
     if (!m.ok) {
-      error = `Forked on ${r.value.host_alias}, but the move to ${targetHost} failed: ${m.error.message}`;
+      error = `Forked on ${r.value.host_alias}, but the move to ${targetHost} failed: ${errorText(m.error)}`;
       notice = 'forked';
       return;
     }

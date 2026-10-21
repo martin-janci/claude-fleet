@@ -27,6 +27,7 @@ import {
   type OrgDetail,
 } from './orgs';
 import { appChord, scopeChordLabel } from './app_views';
+import { cyclePrimaryScope, fleetHostFilter } from './fleet_filters';
 import { rowMatches, sessionVisible, type FilterRow } from './sidebar_index';
 
 let nextId = 1;
@@ -146,6 +147,16 @@ describe('scopes', () => {
       seen.push(get(effectiveScope));
     }
     expect(seen).toEqual(['all', 'owner:acme', 'owner:beta', 'all']);
+  });
+
+  it("the app's ⌘⇧O drops an extra fleet's Machine / Org choice, which would hide the primary list", () => {
+    projects.set([project(1, 'acme'), project(2, 'beta')]);
+    sessions.set([row({ project_id: 1 }), row({ project_id: 2 })]);
+    scopeFilter.set('all');
+    fleetHostFilter.set({ fleet: 'company', alias: 'mac' });
+    cyclePrimaryScope();
+    expect(get(effectiveScope)).toBe('owner:acme');
+    expect(get(fleetHostFilter)).toBeNull();
   });
 
   it('needs-you is never hidden by scope: other scopes report their waiting sessions', () => {

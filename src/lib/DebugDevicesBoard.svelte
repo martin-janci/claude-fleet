@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { errorText } from './error_copy';
   // Settings › Organisations › Debug devices: the device board
   // (`docs/debug-devices.md`). Every phone, emulator and simulator the
   // fleet's hosts see, grouped by host as cards: whether it is ready, who
@@ -112,7 +113,7 @@
     rescanning = true;
     scanError = null;
     const r = await scanDebugDevices();
-    if (!r.ok) scanError = r.error.message;
+    if (!r.ok) scanError = errorText(r.error);
     await load();
     rescanning = false;
   }
@@ -146,7 +147,7 @@
     const r = await run();
     busy[id] = null;
     if (!r.ok) {
-      errors[id] = r.error.message;
+      errors[id] = errorText(r.error);
       return null;
     }
     const v = r.value as unknown;

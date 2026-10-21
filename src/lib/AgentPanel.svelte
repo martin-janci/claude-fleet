@@ -326,6 +326,7 @@
       daySeparators={true}
       look="chat"
       onOpenRef={openRef}
+      advanceOnAnswer={false}
     />
   {/if}
 </div>

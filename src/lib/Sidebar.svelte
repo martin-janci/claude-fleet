@@ -54,9 +54,9 @@
   import FleetSessionGroups from './FleetSessionGroups.svelte';
   import { showPrimary, fleetInboxCount, multiFleet } from './fleets';
   import PrimaryFleetHeader from './PrimaryFleetHeader.svelte';
-  import { anchor, primaryFleetOpen, primaryHiddenByAnchor } from './fleet_filters';
+  import { anchor, primaryFleetOpen, primaryHiddenByAnchor, showPrimaryList } from './fleet_filters';
   import FleetInbox from './FleetInbox.svelte';
-  import { failingCount, loadFailing, loadNextRoutine, nextRoutine, nextRoutineLine } from './routines';
+  import { failingCount, failingOthersCount, loadFailing, loadNextRoutine, nextRoutine, nextRoutineLine } from './routines';
   import { loadWaitingMissions, waitingMissionCount } from './mission_waits';
   import { matchesAllWords, sessionMatchesSearch } from './search';
   import { sessionFocus } from './session_focus';
@@ -94,6 +94,7 @@
   import {
     hostsViewOpen,
     addProjectRequest,
+    nextNeedsYouRequest,
     requestHostsView,
   } from './app_views';
   import { hintAnchor } from './hints';
@@ -103,7 +104,7 @@
   import LostFoldRow from './LostFoldRow.svelte';
   import { setProjectPick } from './project_picks';
   import { detectMac, isEditable } from './terminal_keys';
-  import { matchShortcut } from './shortcuts';
+  import { matchShortcut, shortcutLabel } from './shortcuts';
   import {
     buildSessionsByProject,
     buildOutsideFleet,
@@ -537,6 +538,21 @@
     for (const s of pinnedRows) ids.add(s.id);
     return ids;
   });
+  // The primary's rows another fleet's Machine / Org choice hides, counted
+  // as an extra fleet's are (`fleetListView().hiddenByAnchor`): the rows
+  // that pass the filters every fleet shares — Background agents, Last
+  // active, Agent, Needs you, Search — whatever their machine or org.
+  const primaryHiddenCount = $derived.by(() => {
+    const shared = triagePredicate(null);
+    const q = searchQuery;
+    return $sessions.filter(
+      (s) =>
+        s.kind !== 'external' &&
+        s.status !== 'lost' &&
+        sessionVisible(s, 'all', $showBgAgents, shared, null) &&
+        sessionMatchesSearch(s, q, projectLabelOf(s.project_id)),
+    ).length;
+  });
   $effect(() => {
     const vis = visibleIds;
     const cur = untrack(() => selectedIds);
@@ -768,6 +784,9 @@
       if (!sess) return;
       revealedId = sess.id;
       if ($effectiveHostFilter !== 'all' && $effectiveHostFilter !== sess.host_alias) hostFilter.set('all');
+      // An extra fleet's Machine / Org choice, or the primary's fold, would
+      // keep the whole list the row is in off screen.
+      if (primaryHiddenByAnchor($anchor) || ($multiFleet && !$primaryFleetOpen)) showPrimaryList();
       expandAndScrollTo(sess);
     });
   });
@@ -870,8 +889,11 @@
   // worktree id → branch, and the sessions that carry a work key (tag,
   // branch or worktree name — see work_keys.ts). Only built in work mode.
   const branchById = $derived(worktreeBranchById($projects));
+  // Not in the Inbox (review w11-2): its pool is the tree's split, and a
+  // work group would take every keyed session out of it, while the Inbox's
+  // own Group menu shows `inboxGroupBy`, not this.
   const workIndex = $derived(
-    $sidebarGroupBy === 'work'
+    $sidebarGroupBy === 'work' && $sidebarView !== 'inbox'
       ? buildSessionsByWork(
           $sessions,
           viewHost,
@@ -1085,6 +1107,7 @@
     inboxSections(inboxPool, attentionOpts, $inboxGroupBy, {
       missions: $waitingMissionCount,
       failingRoutines: $failingCount,
+      failingOthers: $failingOthersCount,
       proposed: inboxProposed.length,
       agentActions: $pendingAgentCount,
     }),
@@ -1313,16 +1336,29 @@
     }
     return undefined;
   }
-  function onWindowKeydown(e: KeyboardEvent) {
+  // ⌘K's "Next session that needs you" row (review w18-4), as the chord.
+  $effect(() => {
+    if ($nextNeedsYouRequest === 0) return;
+    untrack(() => {
+      nextNeedsYouRequest.set(0);
+      openRow(nextNeedingYou());
+    });
+  });
+  function onWindowKeydown(e: KeyboardEvent, capture: boolean) {
     if (e.defaultPrevented) return;
     const id = matchShortcut('global', e, isMac);
-    if (id !== 'next-needs-you' && id !== 'jump-n') return;
+    // Next-needs-you is taken in the capture phase (review w18-3): the
+    // terminal's own keydown would otherwise send Ctrl+Alt+N to the pty as
+    // ESC ^N first. ⌘1–9 stays in the bubble phase.
+    if (id !== (capture ? 'next-needs-you' : 'jump-n')) return;
     const target = e.target as HTMLElement | null;
     // A modal owns the keyboard, and a field keeps its keys.
     if (target?.closest?.('dialog') || isEditable(target)) return;
     e.preventDefault();
-    if (id === 'next-needs-you') openRow(nextNeedingYou());
-    else openRow(shownRows()[Number(e.key) - 1]);
+    if (id === 'next-needs-you') {
+      e.stopPropagation();
+      openRow(nextNeedingYou());
+    } else openRow(shownRows()[Number(e.key) - 1]);
   }
 
   /** Same guard for the project row, which holds + New session and Purge. */
@@ -1371,7 +1407,7 @@
         renameValue,
       );
       if (outcome.kind === 'error') {
-        renameError = outcome.error.message;
+        renameError = errorText(outcome.error);
         return;
       }
       // If the renamed session was the selected one, follow the rename.
@@ -1542,7 +1578,10 @@
   }
 </script>
 
-<svelte:window onkeydown={onWindowKeydown} />
+<svelte:window
+  onkeydowncapture={(e) => onWindowKeydown(e, true)}
+  onkeydown={(e) => onWindowKeydown(e, false)}
+/>
 
 <div class="sidebar" data-testid="sidebar-tree" bind:this={sidebarEl}>
   <!-- Review r13: what an empty Sessions list or Inbox says. A list that
@@ -1629,7 +1668,7 @@
       data-testid="new-session-head"
       title={isMac ? 'New session (⌘N)' : 'New session (Ctrl+Shift+N)'}
       aria-keyshortcuts={isMac ? 'Meta+N' : 'Control+Shift+N'}
-    >+ New…{#if isMac}<kbd class="of-kbd">⌘N</kbd>{/if}</button>
+    >+ New…{#if isMac}<kbd class="of-kbd">{shortcutLabel('new-session', isMac)}</kbd>{/if}</button>
   {/snippet}
 
   <FleetSwitcher />
@@ -1644,6 +1683,7 @@
     {onRefresh}
     {onCollapse}
     needsYouCount={needsYouTotal}
+    inboxNeedsCount={inboxNeeding}
     {selectMode}
     {toggleSelectMode}
     selectedCount={selectedIds.size}
@@ -1781,10 +1821,13 @@
     {#if $multiFleet && $showPrimary}
       <PrimaryFleetHeader
         count={visibleIds.size + sharedWithMe.length}
-        hiddenCount={$sessions.filter((s) => s.kind !== 'external' && s.status !== 'lost').length}
+        hiddenCount={primaryHiddenCount}
+        focused={!!focus}
       />
     {/if}
-    {#if $showPrimary && !primaryHiddenByAnchor($anchor) && (!$multiFleet || $primaryFleetOpen)}
+    <!-- A focus ("Showing only X") is past every filter, the anchor and the
+         fold included: its one row is in this list. -->
+    {#if $showPrimary && (focus || (!primaryHiddenByAnchor($anchor) && (!$multiFleet || $primaryFleetOpen)))}
     {#if pinnedRows.length > 0}
       <div class="orphan-section pinned-section" data-testid="pinned-sessions">
         <button
@@ -2250,7 +2293,7 @@
     {/if}
     <!-- Extra fleets (multi-hub design): each fleet the filter shows, under
          its own badge, after this window's own list. -->
-    <FleetSessionGroups search={searchQuery} {recency} {needsYouOnly} />
+    <FleetSessionGroups search={searchQuery} {recency} {needsYouOnly} focused={!!focus} />
   </div>
   {/if}
 

@@ -1,4 +1,5 @@
 <script lang="ts" module>
+  import { errorText } from '../error_copy';
   // What a person did on a settings card, by proposal id, so a re-drawn
   // transcript keeps it. Per window, never saved: "Not now" leaves the
   // proposal waiting in Settings › Proposed changes, it only folds this card.
@@ -76,7 +77,7 @@
     const r = await decideProposals([p.id], []);
     busy = false;
     if (!r.ok) {
-      failure = r.error.message;
+      failure = errorText(r.error);
       return;
     }
     const failed = r.value.failed.find((f) => f.id === block.proposal);

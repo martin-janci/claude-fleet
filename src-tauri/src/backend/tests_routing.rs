@@ -24,6 +24,7 @@ use super::verdicts::{self, Verdict, VERDICTS};
 use super::*;
 use crate::backend::connection::{self, ConnectionReporter};
 use crate::backend::remote;
+use crate::backend::RemoteConfig;
 use crate::commands;
 use fleet_core::events::NoopEventBus;
 use fleet_core::ipc_error::{codes, IpcError};

@@ -14,6 +14,7 @@ import { durationWords, wavesOf, type CondCheck, type FinishSession, type Missio
 import type { SessionRow } from './sessions';
 import { sizeText } from './hosts_table';
 import { prChecksLabel, type PullRequestRow } from './prs';
+import { errorText } from './error_copy';
 
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 
@@ -170,7 +171,7 @@ export async function archiveMissionSessions(
     if (!check || check.state === 'checking') check = await checkWork(row);
     const r = await cleanUp(row, check);
     if (!r.ok) {
-      out.skipped.push({ session_id: s.session_id, why: r.error.message });
+      out.skipped.push({ session_id: s.session_id, why: errorText(r.error) });
     } else if (r.value === 'removed') {
       out.removed.push(s.session_id);
       if (s.worktree_kb != null) out.freedKb = (out.freedKb ?? 0) + s.worktree_kb;

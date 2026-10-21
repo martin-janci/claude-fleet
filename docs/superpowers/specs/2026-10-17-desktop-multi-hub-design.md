@@ -305,6 +305,32 @@ SSO account) and private on the personal one. The window now says which.
   default and the verdict table gains nothing (a fleet is always a hub).
 - Moving work between fleets, if ever, as a federation feature.
 
+Step 1 (landed): one id space for the conversation panel. `fleets.ts` stamps
+`fleet` on every extra fleet's session row, and `sessionKey(row)` keys what
+the panel keeps per session: the id itself for the primary (no store written
+for it changes), a stable negative number per (fleet, id) otherwise, since
+hubs number sessions from 1. `keyTarget` maps a key back. The panel routes
+each call by `row.fleet` (`invokeCmd(…, { args, fleet })`), the outbox
+carries the fleet on its target, and for an extra fleet's row asks only
+that fleet's link (`fleetBlocked`); its hub judges access. The parts whose
+commands are not fleet-scoped yet are hidden or disabled for such a row
+rather than sent to the primary.
+
+Step 2a (landed): `TerminalView` takes an optional `session`. Handed an extra
+fleet's row it attaches under `fleetPtyId(fleet, row, view)`, refuses
+`local` / `wsl-…` through `fleetAttachRefusal`, and runs nothing that names
+the row's id to the primary (workspace check, shell terminals, voice follow,
+un-archive, upload, host lookups). Only the main window's own pane (no
+`session` prop) publishes `terminalPane`, takes bar requests and releases the
+microphone. `FleetTerminal` was removed.
+
+Step 2b (landed): `FleetSessionView` renders `SessionTabs` (which, for a row
+with `fleet`, leaves out presence, grants, the account lookup, Share, Open
+in VS Code and the inspector, and takes an `extra` snippet for the fleet
+badge, Copy attach and Close) over the same body as the main layout: the
+terminal mounted, the conversation over it. Terminals, Files and Details
+are disabled until step 3 makes their commands fleet-scoped.
+
 ## Testing
 
 - Rust, `src-tauri`: `backend::fleets` unit tests (record round-trip, slot

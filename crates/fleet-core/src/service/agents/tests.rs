@@ -375,3 +375,29 @@ async fn a_done_line_is_kept_and_status_shows_recent_outcomes() {
     .unwrap();
     assert!(later.recent.is_empty());
 }
+
+/// Review w11-5: the pending actions are not cut to the jobs' `limit`, so
+/// the Inbox lists (and the badge counts) all of them, the oldest too.
+#[tokio::test]
+async fn status_lists_every_pending_action_whatever_the_limit() {
+    let (st, _) = store_with_rule(None);
+    let (reg, _) = registry(vec![("gh:o/r#1", "a")], done());
+    poll_with(&st, &reg, NOW).await;
+    let first = {
+        let s = st.lock().unwrap();
+        let jid = s.list_agent_jobs(None, 1).unwrap()[0].id;
+        let first = s.insert_agent_action(jid, "kb_learn", "{}", NOW).unwrap();
+        for i in 1..26 {
+            s.insert_agent_action(jid, "kb_learn", "{}", NOW + i)
+                .unwrap();
+        }
+        first
+    };
+    let args = admin::AgentsArgs {
+        limit: Some(20),
+        ..Default::default()
+    };
+    let status = admin::status(&st, &args, NOW + 30).unwrap();
+    assert_eq!(status.pending.len(), 26);
+    assert!(status.pending.iter().any(|a| a.id == first));
+}

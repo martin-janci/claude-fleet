@@ -117,8 +117,9 @@ describe('fleet rows', () => {
     expect(rows.hosts.size).toBe(0);
     applyFleetEvent(rows, { name: 'project:updated', payload: { id: 7, owner: 'papayapos', repo: 'pos' } });
     expect(rows.projects[0].project.repo).toBe('pos');
-    expect(applyFleetEvent(rows, { name: 'task:updated', payload: { id: 1 } })).toBeNull();
-    expect(applyFleetEvent(rows, { name: 'session:updated', payload: 'garbage' })).toBeNull();
+    applyFleetEvent(rows, { name: 'task:updated', payload: { id: 1 } });
+    applyFleetEvent(rows, { name: 'session:updated', payload: 'garbage' });
+    expect([rows.sessions.size, rows.hosts.size, rows.projects.length]).toEqual([0, 0, 1]);
   });
 
   it('copies nothing for an event it does not keep', () => {
@@ -542,12 +543,22 @@ describe('review w01: multi-hub gaps', () => {
     openFleetSession('company', 12);
     rememberFleetFor('PapayaPOS', 'pos', 'company');
     rememberFleetFor('me', 'exp', 'lab');
+    // Review w30-9: the filter and a kill's tombstone are the old fleet's too.
+    fleetFilter.set('company');
+    onFleetEvent({ fleet: 'company', name: 'session:updated', payload: session(12) });
+    onFleetEvent({ fleet: 'company', name: 'session:killed', payload: { id: 12 } });
     inv.mockImplementation(async (cmd: string) => (cmd === 'fleets_list' ? [fleet(PRIMARY), fleet('lab')] : null));
     const r = await removeFleet('company');
     expect(r.ok).toBe(true);
     expect(get(fleetSelection)).toBeNull();
     expect(rememberedFleetFor('PapayaPOS', 'pos')).toBeNull();
     expect(rememberedFleetFor('me', 'exp')).toBe('lab');
+    expect(get(fleetFilter)).toBe('all');
+    // Added again under the same label: its session #12 is listed, not hidden
+    // behind the old fleet's tombstone.
+    _setFleetsForTest([fleet(PRIMARY), fleet('company'), fleet('lab')]);
+    onFleetEvent({ fleet: 'company', name: 'session:updated', payload: session(12) });
+    expect(get(fleetRows).get('company')?.sessions.has(12)).toBe(true);
   });
 
   it("w01-14: the Add form's colour is the one the backend would pick, from the same palette", () => {

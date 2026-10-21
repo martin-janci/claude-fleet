@@ -1805,16 +1805,8 @@ fn next_cursor(f: &Fx, polled: &crate::service::agents::Polled) -> AgentCursorRo
 
 #[tokio::test]
 async fn another_trackers_burst_is_paged_and_a_late_synced_comment_still_counts() {
-    let f = fx(
-        small(
-            json!({ "source": "tracker_comments", "tracker": "3",
-                "match": { "any_phrase": "/ask" } }),
-            json!([]),
-        ),
-        json!({}),
-        json!([]),
-        false,
-    );
+    let f = trigger_fx(json!({ "source": "tracker_comments", "tracker": "3",
+        "match": { "any_phrase": "/ask" } }));
     *f.world.provider.lock().unwrap() = Some("github".into());
     let now = crate::store::now_unix();
     let p = f.poller();
@@ -1908,4 +1900,211 @@ fn a_setting_already_at_its_value_is_skipped_and_others_say_from_what() {
         "{}",
         other.body
     );
+}
+
+// ── the real paged read under `LiveFleetHost::item_threads` ─────────────
+
+mod item_page {
+    use super::super::runner::{read_item_page, ItemsRead, LiveFleetHost};
+    use crate::service::agents::review::SshReviewHost;
+    use crate::service::agents::support::LiveSupportHost;
+    use crate::service::trackers::{
+        Caps, Fetched, ItemRef, Page, RefCtx, TrackerComment, TrackerError, TrackerInfo,
+        TrackerProvider, ViewDef,
+    };
+    use crate::store::{ItemMeta, Store, TrackerConfig, WorkItemRow};
+    use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    /// Comments for every item; from call `fail_from` (1-based) on, the
+    /// tracker answers `error` instead.
+    struct Comments {
+        calls: AtomicUsize,
+        fail_from: usize,
+        error: fn() -> TrackerError,
+    }
+
+    impl Comments {
+        fn failing_from(fail_from: usize, error: fn() -> TrackerError) -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+                fail_from,
+                error,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl TrackerProvider for Comments {
+        fn caps(&self) -> Caps {
+            Caps::default()
+        }
+        async fn probe(&self) -> Result<TrackerInfo, TrackerError> {
+            unreachable!()
+        }
+        async fn views(&self, _: &TrackerConfig) -> Result<Vec<ViewDef>, TrackerError> {
+            unreachable!()
+        }
+        async fn list(
+            &self,
+            _: &ViewDef,
+            _: Option<i64>,
+            _: Option<String>,
+        ) -> Result<Page, TrackerError> {
+            unreachable!()
+        }
+        async fn fetch(&self, _: &[ItemRef]) -> Result<Vec<Fetched>, TrackerError> {
+            unreachable!()
+        }
+        fn recognize(&self, _: &str, _: RefCtx<'_>) -> Vec<ItemRef> {
+            Vec::new()
+        }
+        async fn comments(
+            &self,
+            r: &ItemRef,
+            _: usize,
+        ) -> Result<Vec<TrackerComment>, TrackerError> {
+            let n = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+            if n >= self.fail_from {
+                return Err((self.error)());
+            }
+            Ok(vec![TrackerComment {
+                id: format!("c{n}"),
+                author: "someone".into(),
+                body: format!("on {r:?}"),
+                created_at: 100,
+                url: None,
+            }])
+        }
+    }
+
+    fn row(id: i64, key: Option<&str>) -> (WorkItemRow, ItemMeta) {
+        let row: WorkItemRow = serde_json::from_value(json!({
+            "id": id,
+            "source": "github",
+            "key": key,
+            "title": format!("item {id}"),
+            "status_category": "todo",
+            "created_at": 1,
+            "updated_at": 10 * id,
+            "tracker_id": 7,
+            "external_id": key.map(|_| format!("ext{id}")),
+        }))
+        .unwrap();
+        (row, ItemMeta::default())
+    }
+
+    fn keys(read: &ItemsRead) -> Vec<&str> {
+        read.items.iter().map(|i| i.thread.key.as_str()).collect()
+    }
+
+    fn rate_limited() -> TrackerError {
+        TrackerError::RateLimited {
+            retry_after_secs: Some(60),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_full_page_carries_on_from_its_last_row_and_a_short_one_is_done() {
+        let rows = || vec![row(1, Some("A-1")), row(2, Some("A-2"))];
+        let full = read_item_page(7, rows(), 2, None).await.unwrap();
+        assert_eq!(keys(&full), ["A-1", "A-2"]);
+        assert_eq!(full.more, Some((20, 2)));
+        assert!(full.items.iter().all(|i| i.thread.comments.is_empty()));
+        let short = read_item_page(7, rows(), 3, None).await.unwrap();
+        assert_eq!(short.more, None);
+    }
+
+    #[tokio::test]
+    async fn a_page_of_keyless_rows_still_moves_the_watermark() {
+        let read = read_item_page(7, vec![row(1, None), row(2, None)], 2, None)
+            .await
+            .unwrap();
+        assert!(read.items.is_empty());
+        assert_eq!(read.more, Some((20, 2)), "the next page starts after them");
+        // A keyless row before a refusal is done with too.
+        let p = Comments::failing_from(1, rate_limited);
+        let read = read_item_page(7, vec![row(1, None), row(2, Some("A-2"))], 5, Some(&p))
+            .await
+            .unwrap();
+        assert!(read.items.is_empty());
+        assert_eq!(read.more, Some((10, 1)));
+    }
+
+    #[tokio::test]
+    async fn a_refusal_stops_the_page_at_the_item_before_and_keeps_what_was_read() {
+        let p = Comments::failing_from(3, rate_limited);
+        let rows = (1..=4).map(|i| row(i, Some(&format!("A-{i}")))).collect();
+        // The page is short (max 10): without the refusal `more` would be None.
+        let read = read_item_page(7, rows, 10, Some(&p)).await.unwrap();
+        assert_eq!(keys(&read), ["A-1", "A-2"], "the items read before stay");
+        assert_eq!(read.items[0].thread.comments.len(), 1);
+        assert_eq!(
+            read.more,
+            Some((20, 2)),
+            "the next poll starts with A-3, the item refused"
+        );
+        assert_eq!(p.calls.load(Ordering::SeqCst), 3, "nothing asked after it");
+    }
+
+    #[tokio::test]
+    async fn a_refusal_on_the_first_item_is_the_polls_error() {
+        for error in [
+            rate_limited as fn() -> TrackerError,
+            || TrackerError::Unreachable("dns".into()),
+            || TrackerError::Auth("401".into()),
+            || TrackerError::Captcha,
+            || TrackerError::Unconfigured,
+        ] {
+            let p = Comments::failing_from(1, error);
+            let err = read_item_page(7, vec![row(1, Some("A-1"))], 1, Some(&p))
+                .await
+                .unwrap_err();
+            assert!(err.starts_with("tracker 7: "), "{err}");
+        }
+    }
+
+    #[tokio::test]
+    async fn one_item_whose_comments_cannot_be_read_is_still_read() {
+        let p = Comments::failing_from(1, || TrackerError::NotFound);
+        let rows = vec![row(1, Some("A-1")), row(2, Some("A-2"))];
+        let read = read_item_page(7, rows, 10, Some(&p)).await.unwrap();
+        assert_eq!(keys(&read), ["A-1", "A-2"]);
+        assert!(read.items.iter().all(|i| i.thread.comments.is_empty()));
+        assert_eq!(read.more, None);
+    }
+
+    #[tokio::test]
+    async fn with_the_tracker_sync_off_the_poll_says_so() {
+        let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+        store
+            .lock()
+            .unwrap()
+            .set_setting(crate::service::settings::WORK_SYNC_INTERVAL_SECS, "0")
+            .unwrap();
+        let ssh = Arc::new(crate::ssh::SshClient::new());
+        let host = LiveFleetHost {
+            store: Arc::clone(&store),
+            ssh: Arc::clone(&ssh),
+            base: LiveSupportHost {
+                store: Arc::clone(&store),
+                ssh: Arc::clone(&ssh),
+            },
+            gh: SshReviewHost {
+                store: Arc::clone(&store),
+                ssh,
+            },
+        };
+        let page = super::super::runner::ItemPage {
+            after: (0, 0),
+            until: i64::MAX,
+            max: 10,
+            comments: true,
+        };
+        let err = super::super::runner::FleetHost::item_threads(&host, 7, page)
+            .await
+            .unwrap_err();
+        assert!(err.contains("tracker sync is off"), "{err}");
+    }
 }

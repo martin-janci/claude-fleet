@@ -1,4 +1,4 @@
-import { render, screen, fireEvent } from '@testing-library/svelte';
+import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { get } from 'svelte/store';
 
@@ -9,6 +9,7 @@ import ControlMissionView from './ControlMissionView.svelte';
 import { controlMission } from './control_room';
 import { missionOpenRequest } from './missions';
 import { destination } from './destination';
+import { bumpWorkChanged } from './work';
 
 // Thread room: a mission thread or chip opens the mission in Control's
 // right panel, with its task graph.
@@ -59,5 +60,34 @@ describe('ControlMissionView', () => {
     expect((await screen.findByTestId('control-mission-wait')).textContent).toContain('Grant needs signing');
     await fireEvent.click(screen.getByTestId('control-mission-answer'));
     expect(get(missionOpenRequest)).toEqual({ id: 5 });
+  });
+
+  // Review w17-5: loading is not "No missions yet", a failure has Retry, and
+  // a failed refresh keeps the graph.
+  it('says nothing is empty while the list loads, and a failed read has Retry', async () => {
+    let answer: (v: unknown) => void = () => {};
+    inv.mockImplementation((cmd: string) => (cmd === 'work_missions' ? new Promise((r) => (answer = r)) : Promise.resolve(null)));
+    render(ControlMissionView);
+    await Promise.resolve();
+    expect(screen.queryByTestId('control-missions-empty')).toBeNull();
+    answer(Promise.reject({ code: 'E_HUB_TIMEOUT', message: 'slow' }));
+    expect((await screen.findByTestId('control-missions-load-error')).textContent).toContain("Couldn't load missions");
+    inv.mockImplementation(async (cmd: string) => (cmd === 'work_missions' ? [] : null));
+    await fireEvent.click(screen.getByTestId('control-missions-load-error-retry'));
+    expect(await screen.findByTestId('control-missions-empty')).toBeTruthy();
+  });
+
+  it('a failed refresh keeps the open mission graph', async () => {
+    controlMission.set(5);
+    render(ControlMissionView);
+    await screen.findByTestId('control-mission-name');
+    inv.mockImplementation(async (cmd: string) => {
+      if (cmd === 'work_mission') throw { code: 'E_HUB_TIMEOUT', message: 'slow' };
+      return null;
+    });
+    bumpWorkChanged();
+    await waitFor(() => expect(screen.getByTestId('control-missions-refresh-error')).toBeTruthy(), { timeout: 2000 });
+    expect(screen.getByTestId('control-mission-name').textContent).toBe('Hub federation v2');
+    expect(screen.getByTestId('control-missions-view').querySelector('svg')).not.toBeNull();
   });
 });

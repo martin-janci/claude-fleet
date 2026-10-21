@@ -783,6 +783,33 @@ describe('TerminalView drag-drop upload (N5)', () => {
     expect(written().join('')).toContain('/home/alpha/.cf-uploads/big.zip');
   });
 
+  it('ignores a drop that lands on an overlay covering the grid (w13-1)', async () => {
+    inv().mockImplementation(async (cmd: string) => {
+      if (cmd === 'pty_drain') return drained();
+      if (cmd === 'upload_to_session') return ['/home/alpha/.cf-uploads/shot.png'];
+      return null;
+    });
+    // The Conversation tab sits over the still-mounted terminal.
+    const overlay = document.createElement('div');
+    document.body.appendChild(overlay);
+    const had = Object.prototype.hasOwnProperty.call(document, 'elementFromPoint');
+    const prev = document.elementFromPoint;
+    document.elementFromPoint = () => overlay;
+    try {
+      render(TerminalView);
+      selectSession(onAlpha);
+      await settle();
+      drop(['/Users/me/shot.png']);
+      await settle(16);
+      expect(calls('upload_to_session')).toHaveLength(0);
+      expect(written().join('')).not.toContain('shot.png');
+    } finally {
+      if (had) document.elementFromPoint = prev;
+      else delete (document as { elementFromPoint?: unknown }).elementFromPoint;
+      overlay.remove();
+    }
+  });
+
   it("never types one host's paths into the session attached later", async () => {
     const upload = deferred<string[]>();
     inv().mockImplementation(async (cmd: string) => {

@@ -636,9 +636,10 @@
   .errt { font-size: var(--text-xs); line-height: 16px; color: var(--status-failed); }
   .grp { margin: 6px 0 -2px; font-size: var(--text-2xs); font-weight: 500; color: var(--fg-muted); }
 
-  /* Fields (FormsAnatomy): 28 px, the pane colour, an accent ring on focus. */
+  /* Fields (FormsAnatomy): 28 px, the pane colour, the house ring on focus (review w19-3:
+     the old --accent-soft halo measured ~1.2:1 and matched the selected Starts option). */
   .inp { height: 28px; box-sizing: border-box; width: 100%; min-width: 0; padding: 0 8px; border: 1px solid var(--control-border-strong, var(--border)); border-radius: var(--radius-sm); background: var(--bg-pane); color: var(--fg); font: inherit; font-size: var(--text-sm); }
-  .inp:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+  .inp:focus { border-color: var(--accent); outline: var(--ring-w) solid var(--ring); outline-offset: 1px; }
   .inp.bad { border-color: var(--status-failed); }
   .inp.mono { font-family: var(--font-mono); font-size: var(--text-xs); }
   textarea.inp { height: auto; padding: 6px 8px; line-height: 18px; resize: vertical; min-height: 96px; }
@@ -656,14 +657,14 @@
   .opt:hover { background: var(--bg-hover); }
   .opt.on { border-color: var(--accent); background: var(--accent-soft); color: var(--fg); }
   .opt input { position: absolute; opacity: 0; width: 1px; height: 1px; pointer-events: none; }
-  .opt:has(input:focus-visible) { box-shadow: 0 0 0 2px var(--accent-soft); border-color: var(--accent); }
+  .opt:has(input:focus-visible) { outline: var(--ring-w) solid var(--ring); outline-offset: 1px; }
 
   /* When: one panel, whatever was picked; the event list may grow. */
   .when { display: flex; flex-direction: column; gap: 8px; padding: 12px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-sunk, var(--bg-pane)); }
   .event { display: flex; flex-direction: column; gap: 10px; }
   .event :global(label) { color: var(--fg-2); font-size: var(--text-xs); }
   .event :global(select), .event :global(input) { height: 28px; box-sizing: border-box; width: 100%; padding: 0 8px; border: 1px solid var(--control-border-strong, var(--border)); border-radius: var(--radius-sm); background: var(--bg-pane); color: var(--fg); font: inherit; font-size: var(--text-sm); }
-  .event :global(select:focus), .event :global(input:focus) { outline: none; border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+  .event :global(select:focus), .event :global(input:focus) { border-color: var(--accent); outline: var(--ring-w) solid var(--ring); outline-offset: 1px; }
 
   .ck { display: flex; align-items: flex-start; gap: 8px; font-size: var(--text-sm); color: var(--fg); }
   .ck input { accent-color: var(--accent); margin: 2px 0 0; }
