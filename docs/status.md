@@ -1466,9 +1466,13 @@ fork / rewind, send later, writing help, forms, devices, task results.
 Step 2a landed: its Terminal tab is the same TerminalView (a `session` prop;
 pty id `fleet-<slot>-<id>.<view>`) with the workspace check, shell strip,
 microphone, transfer chip, un-archive and uploads off for it; FleetTerminal
-is gone. Not started: the session opening in the main layout rather than
-`FleetSessionView` (the remaining stores per (fleet, id)), every command
-fleet-aware and promoting another hub to primary (step 3).
+is gone. Step 2b landed: `FleetSessionView` is laid out as the primary's
+own session (the same `SessionTabs` header and Conversation / agent tabs,
+the conversation over a mounted terminal); its fleet, Copy attach and Close
+sit in the header, and Terminals, Files, Details, Share, Open in VS Code
+and the inspector are off for it. A `local` / `wsl-…` host shows the pane
+snapshot in the agent tab. Not started: every command fleet-aware (which
+turns those back on) and promoting another hub to primary (step 3).
 
 Application updates: design
 `docs/superpowers/specs/2026-09-28-update-channel-design.md` (with
