@@ -1071,6 +1071,38 @@ describe('WorkMissions', () => {
       hosts.set([]);
     });
 
+    it('a finite mission is granted until it completes, with a budget and no hours', async () => {
+      current = mission({ state: 'active', level: 2 });
+      handlers.work_mission = () => detailOf(current);
+      handlers.grant_mission = () => ({ id: 1, mission_id: 4, plan_version: 1, level: 2, granted_by: 'fleet', created_at: 1, expires_at: 253_402_300_799, until_done: true });
+      renderMissions();
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-row'));
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-grant'));
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-grant-until-done'));
+      await fireEvent.click(screen.getByTestId('mission-grant-save'));
+      await flush();
+      expect(calls('grant_mission')).toHaveLength(0);
+      await fireEvent.input(screen.getByTestId('mission-grant-budget'), { target: { value: '20' } });
+      await fireEvent.click(screen.getByTestId('mission-grant-save'));
+      await flush();
+      expect(calls('grant_mission')[0]).toEqual({ mission_id: 4, level: 2, until_done: true, budget_cents: 2000 });
+    });
+
+    it('a continuous mission is not offered a grant until it completes', async () => {
+      current = mission({ state: 'active', level: 2, mode: 'continuous' });
+      handlers.work_mission = () => detailOf(current);
+      renderMissions();
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-row'));
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-grant'));
+      await flush();
+      expect(screen.queryByTestId('mission-grant-until-done')).toBeNull();
+    });
+
     it('words every limit', () => {
       const base = { asked: 2, ceiling: 3, effective: 2, why: '', enabled: true };
       expect(autonomyWords(base).hint).toBeNull();
@@ -1081,6 +1113,12 @@ describe('WorkMissions', () => {
       const w = autonomyWords({ ...base, asked: 3, effective: 1, grant }, 1_000);
       expect(w.limits).toMatch(/^L3 asked · L3 ceiling · L1 grant until /);
       expect(w.hint).toContain('The grant signs L1');
+      const done = { ...grant, level: 2, expires_at: 253_402_300_799, until_done: true };
+      expect(autonomyWords({ ...base, grant: done }, 1_000).limits).toBe('L2 asked · L3 ceiling · L2 grant until done');
+      expect(eventSentence({ id: 1, at: 1, kind: 'grant', actor: 'p', payload: { level: 2, until_done: true, raised_from: 0 } })).toBe(
+        'Granted L2 until the mission completes (raised the ask from L0)',
+      );
+      expect(eventSentence({ id: 1, at: 1, kind: 'grant', actor: 'p', payload: { level: 2, hours: 8 } })).toBe('Granted L2 for 8 h');
       expect(policyWith({ max_parallel: 2, wake_every_secs: 600 }, { wake_every_secs: null })).toEqual({ max_parallel: 2 });
     });
   });

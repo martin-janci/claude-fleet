@@ -293,12 +293,20 @@ pub fn snapshot(i: &SnapshotInput<'_>) -> String {
     let mut hist = String::from("## Recent history (newest first)\n");
     for e in i.events.iter().take(40) {
         hist.push_str(&format!(
-            "- {} {} by {}{}\n",
+            "- {} {} by {}{}{}\n",
             e.at,
             e.kind,
             e.actor,
             e.work_item_id
                 .map(|w| format!(" on item {w}"))
+                .unwrap_or_default(),
+            // A refusal says why, so the next answer can mend it.
+            e.payload
+                .as_ref()
+                .filter(|_| e.kind == "refused")
+                .and_then(|p| p.get("why"))
+                .and_then(|w| w.as_str())
+                .map(|w| format!(": {}", untrusted(w, 400)))
                 .unwrap_or_default()
         ));
     }
@@ -325,7 +333,9 @@ mechanical steps itself (running ready items, one retry, review and test runs, c
 verified items), so decide only what needs judgment: break the goal into items with \
 dependencies when the mission has none, decide what to do about a failure (retry with a note, \
 split it with create_item, hold it, or ask), turn review follow-ups into items, and say \
-complete only when every check holds. Commands, each an object with a \"command\" field: \
+complete only when every check holds. An item that merges or integrates a wave's work is \
+titled \"Merge wave <n>: ...\" and depends on every item of that wave, or the answer is \
+refused. Commands, each an object with a \"command\" field: \
 create_item {title, notes?, done_when?: [\"ci\" | \"ci:<check>\" | \"review\" | \
 \"test:<command>\" | \"person\"], depends_on?: [item id | \"new:<n>\"]}; add_dep {item_id, \
 depends_on}; remove_dep {item_id, depends_on}; run {item_id, role?: implement | review | test \
@@ -555,6 +565,225 @@ pub fn done_when_of(commands: &[Command]) -> Vec<Vec<String>> {
             _ => None,
         })
         .collect()
+}
+
+/// One member of the mission as the merge-wave check reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanNode {
+    pub item_id: i64,
+    pub title: String,
+    /// Members it waits for (items outside the mission are left out).
+    pub depends_on: Vec<i64>,
+    /// A rejected proposal: nothing will run it, so no merge waits for it.
+    pub rejected: bool,
+}
+
+/// The mission's members and their edges, for [`check_merge_waves`].
+pub fn plan_nodes(items: &[WorkItemRow], graph: &MissionGraph) -> Vec<PlanNode> {
+    let titles: HashMap<i64, &str> = items.iter().map(|i| (i.id, i.title.as_str())).collect();
+    graph
+        .nodes
+        .iter()
+        .map(|n| PlanNode {
+            item_id: n.item_id,
+            title: titles.get(&n.item_id).copied().unwrap_or("").to_string(),
+            depends_on: n
+                .depends_on
+                .iter()
+                .copied()
+                .filter(|d| titles.contains_key(d))
+                .collect(),
+            rejected: n.state == "rejected",
+        })
+        .collect()
+}
+
+/// PURE: whether a title names an item that merges or integrates a wave
+/// ("Merge wave 1: …", "Integrate wave 2"), the title the prompt asks for.
+pub fn is_merge_wave(title: &str) -> bool {
+    let t = title.to_lowercase();
+    t.contains("wave") && (t.contains("merge") || t.contains("integrat"))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+enum PlanKey {
+    Item(i64),
+    New(usize),
+}
+
+impl std::fmt::Display for PlanKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PlanKey::Item(id) => write!(f, "item {id}"),
+            PlanKey::New(k) => write!(f, "new:{k}"),
+        }
+    }
+}
+
+struct PlanEntry {
+    title: String,
+    deps: Vec<PlanKey>,
+    rejected: bool,
+}
+
+type PlanGraph = std::collections::BTreeMap<PlanKey, PlanEntry>;
+
+/// Every (merge item, wave, member of that wave it does not reach). A merge
+/// item's wave is the latest wave among what it waits for; it must reach,
+/// directly or through others, every other item of that wave that is not a
+/// merge item itself and not a rejected proposal.
+fn merge_gaps(g: &PlanGraph) -> std::collections::BTreeSet<(PlanKey, u32, PlanKey)> {
+    use std::collections::BTreeSet;
+    fn wave(k: PlanKey, g: &PlanGraph, memo: &mut HashMap<PlanKey, u32>, guard: usize) -> u32 {
+        if let Some(w) = memo.get(&k) {
+            return *w;
+        }
+        let w = if guard == 0 {
+            1
+        } else {
+            1 + g
+                .get(&k)
+                .map(|e| {
+                    e.deps
+                        .iter()
+                        .filter(|d| g.contains_key(d))
+                        .map(|d| wave(*d, g, memo, guard - 1))
+                        .max()
+                        .unwrap_or(0)
+                })
+                .unwrap_or(0)
+        };
+        memo.insert(k, w);
+        w
+    }
+    let mut memo = HashMap::new();
+    let waves: HashMap<PlanKey, u32> = g
+        .keys()
+        .map(|k| (*k, wave(*k, g, &mut memo, g.len() + 1)))
+        .collect();
+    let mut gaps = BTreeSet::new();
+    for (k, e) in g {
+        if e.rejected || !is_merge_wave(&e.title) {
+            continue;
+        }
+        let Some(w) = e.deps.iter().filter_map(|d| waves.get(d)).max().copied() else {
+            continue;
+        };
+        // What it reaches, through every edge.
+        let mut reach: BTreeSet<PlanKey> = BTreeSet::new();
+        let mut stack: Vec<PlanKey> = e.deps.clone();
+        while let Some(d) = stack.pop() {
+            if d != *k && reach.insert(d) {
+                if let Some(de) = g.get(&d) {
+                    stack.extend(de.deps.iter().copied());
+                }
+            }
+        }
+        for (x, xe) in g {
+            if x != k
+                && waves[x] == w
+                && !xe.rejected
+                && !is_merge_wave(&xe.title)
+                && !reach.contains(x)
+            {
+                gaps.insert((*k, w, *x));
+            }
+        }
+    }
+    gaps
+}
+
+/// PURE: refuse an answer that leaves a merge-wave item short of its wave.
+/// The graph is the mission's members with this answer's `create_item`,
+/// `add_dep` and `remove_dep` applied. Only a gap the answer makes counts:
+/// one a person already accepted does not block every later answer.
+pub fn check_merge_waves(commands: &[Command], members: &[PlanNode]) -> Result<(), String> {
+    let mut g: PlanGraph = members
+        .iter()
+        .map(|n| {
+            (
+                PlanKey::Item(n.item_id),
+                PlanEntry {
+                    title: n.title.clone(),
+                    deps: n.depends_on.iter().map(|d| PlanKey::Item(*d)).collect(),
+                    rejected: n.rejected,
+                },
+            )
+        })
+        .collect();
+    let before = merge_gaps(&g);
+    let mut created = 0usize;
+    for c in commands {
+        match c {
+            Command::CreateItem {
+                title, depends_on, ..
+            } => {
+                let deps = depends_on
+                    .iter()
+                    .filter_map(|d| match d.as_i64() {
+                        Some(id) => Some(PlanKey::Item(id)),
+                        None => d
+                            .as_str()
+                            .and_then(|s| s.strip_prefix("new:"))
+                            .and_then(|k| k.parse().ok())
+                            .map(PlanKey::New),
+                    })
+                    .collect();
+                g.insert(
+                    PlanKey::New(created),
+                    PlanEntry {
+                        title: title.trim().to_string(),
+                        deps,
+                        rejected: false,
+                    },
+                );
+                created += 1;
+            }
+            Command::AddDep {
+                item_id,
+                depends_on,
+            } => {
+                if let Some(e) = g.get_mut(&PlanKey::Item(*item_id)) {
+                    if !e.deps.contains(&PlanKey::Item(*depends_on)) {
+                        e.deps.push(PlanKey::Item(*depends_on));
+                    }
+                }
+            }
+            Command::RemoveDep {
+                item_id,
+                depends_on,
+            } => {
+                if let Some(e) = g.get_mut(&PlanKey::Item(*item_id)) {
+                    e.deps.retain(|d| *d != PlanKey::Item(*depends_on));
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut short: std::collections::BTreeMap<(PlanKey, u32), Vec<String>> = Default::default();
+    for gap in merge_gaps(&g).difference(&before) {
+        short
+            .entry((gap.0, gap.1))
+            .or_default()
+            .push(gap.2.to_string());
+    }
+    if short.is_empty() {
+        return Ok(());
+    }
+    let why: Vec<String> = short
+        .into_iter()
+        .map(|((k, w), missing)| {
+            format!(
+                "{k} {:?} merges wave {w} but does not depend on {}",
+                clip(&g[&k].title, 80),
+                missing.join(", ")
+            )
+        })
+        .collect();
+    Err(format!(
+        "a merge-wave item depends on every item of its wave: {}",
+        why.join("; ")
+    ))
 }
 
 #[cfg(test)]

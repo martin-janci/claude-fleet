@@ -403,6 +403,10 @@ pub struct WorkLinkArgs {
     /// mission_grant: what its workers may spend, in cents.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget_cents: Option<i64>,
+    /// mission_grant: last until the mission completes instead of hours
+    /// (a finite mission, with budget_cents).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until_done: Option<bool>,
     /// mission_grant: the hosts its runs may use.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hosts: Option<Vec<String>>,
