@@ -15,6 +15,7 @@
   Control about it until it is unmuted (`control_journal`).
 -->
 <script lang="ts">
+  import { errorText } from './error_copy';
   import { onDestroy, onMount } from 'svelte';
   import StatusDot from './kit/StatusDot.svelte';
   import Icon from './kit/Icon.svelte';
@@ -34,7 +35,7 @@
   import { money } from './automation';
   import { leave } from './destination';
   import { sidebarView } from './work_view';
-  import { mutedThreads, refreshMutes, setThreadMuted } from './control_journal';
+  import { mutedThreads, refreshMutes, setThreadMuted, threadFollows } from './control_journal';
 
   let { oncollapse }: { oncollapse: () => void } = $props();
 
@@ -84,6 +85,7 @@
       operatorId: $operatorRow?.id ?? null,
       opts: $visibleFleet.opts,
       muted: $mutedThreads,
+      follows: $threadFollows,
     }),
   );
   const counts = $derived(threadCounts(threads));
@@ -104,7 +106,7 @@
   let muteError = $state<string | null>(null);
   async function toggleMute(t: ControlThread) {
     const r = await setThreadMuted(t.kind, t.id, !t.muted);
-    muteError = r.ok ? null : r.error.message;
+    muteError = r.ok ? null : errorText(r.error);
   }
 
   function isActive(t: ControlThread): boolean {
@@ -185,7 +187,9 @@
               <span class="dot"><StatusDot state={t.state} /></span>
               <span class="text">
                 <span class="ttl">{t.title}</span>
-                <span class="ln" class:waiting={t.group === 'needs'}>{t.muted ? `Muted · ${t.line}` : t.line}</span>
+                <span class="ln" class:waiting={t.group === 'needs'} data-testid="control-thread-line"
+                  >{t.muted ? `Muted · ${t.line}` : t.unfollowed ? `${t.line} · not followed (${t.unfollowed})` : t.line}</span
+                >
               </span>
               {#if t.at > 0}<span class="age">{shortAge(t.at, nowSec)}</span>{/if}
             </button>
@@ -194,8 +198,8 @@
               class="mute"
               data-testid="control-thread-mute"
               aria-pressed={t.muted}
-              title={t.muted ? 'Unmute: Control hears about it again' : 'Mute: Control stops hearing about it'}
-              aria-label={t.muted ? `Unmute ${t.title}` : `Mute ${t.title}`}
+              title={t.muted ? 'Muted: click so Control hears about it again' : 'Mute: Control stops hearing about it'}
+              aria-label={`Mute ${t.title}`}
               onclick={() => void toggleMute(t)}><Icon name={t.muted ? 'bell-off' : 'bell'} size={12} /></button
             >
           </div>

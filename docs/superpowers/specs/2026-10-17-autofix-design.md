@@ -231,7 +231,7 @@ A later recurrence opens a new row.
 | 2a | `host_mcp_entry.header` | the host's `~/.claude.json` `mcpServers["claude-fleet"]` lacks `X-Fleet-Pane`, or its `url` ≠ the hub's `mcp_url()` for that host | rewrite the entry via `merge_mcp_entry` with the host's stored token (`get_host_token`) | Safe |
 | 2b | `host_mcp_entry.token` | the entry's bearer hash ≠ the host token's hash; evidence names whose it is: another host, `ux-agent`, a revoked token, or unknown | same rewrite, which replaces the bearer with this host's own token | NeedsApproval (auth) |
 | 2c | `host_mcp_entry.missing` | no `claude-fleet` entry at all | same rewrite | Safe |
-| 3a | `stuck.reconnect` | `stuck_kind = reconnect` | send the reconnect keys | Safe |
+| 3a | `stuck.reconnect` | `stuck_kind = reconnect` | send the reconnect keys | NeedsApproval (the match is a substring anywhere in the pane) |
 | 3b | `stuck.trust_prompt` | `stuck_kind = trust_prompt` | accept the trust prompt | NeedsApproval (security) |
 | 3c | `stuck.auth_menu` | `stuck_kind = auth_menu` | none: `ClientAction::login` | n/a |
 | 3d | `stuck.press_enter`, `stuck.oom` | existing playbook states | delegates to the playbook executor | Safe only when that playbook's toggle is on, else NeedsApproval |

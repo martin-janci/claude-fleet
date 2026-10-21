@@ -223,12 +223,14 @@ describe('shortcut registry', () => {
     const md = readFileSync('docs/ux/2026-10-08-orbit-fleet-redesign/design-system/keyboard.md', 'utf8');
     const mac = (id: string) => shortcutLabel(id, true);
     const other = (id: string) => shortcutLabel(id, false);
-    expect(md).toContain(`| ${mac('open-in-editor')} | Open in VS Code (${other('open-in-editor')})`);
-    expect(md).toContain(`| ${mac('inspector')} | Inspector (${other('inspector')})`);
-    expect(md).toContain(`| ${mac('new-terminal')} | New terminal (${other('new-terminal')})`);
-    expect(md).toContain(`| ${mac('next-terminal')} | Next terminal (${other('next-terminal')})`);
+    // keyboard.md's Mac | Windows · Linux | Action columns (review w18-10).
+    const row = (id: string, action: string) => `| ${mac(id)} | ${other(id)} | ${action} |`;
+    expect(md).toContain(row('open-in-editor', 'Open in VS Code'));
+    expect(md).toContain(row('inspector', 'Inspector'));
+    expect(md).toContain(row('new-terminal', 'New terminal'));
+    expect(md).toContain(row('next-terminal', 'Next terminal'));
     expect(other('next-terminal')).toBe('Ctrl+Alt+`');
-    expect(md).toContain(`| ${mac('go-to-file')} | Go to file, Files tab only (${other('go-to-file')})`);
+    expect(md).toContain(row('go-to-file', 'Go to file (Files tab only)'));
     // Wired by step 5.3 (TerminalView).
     for (const id of ['new-terminal', 'next-terminal']) {
       expect(SHORTCUTS.find((s) => s.id === id)?.status).toBe('live');
@@ -420,9 +422,10 @@ describe('shortcut freeze: views matched through the registry answer every key a
     // 'work' (G2.1) too: ⌘N makes a task in the Work view.
     const since38 = ['session-list', 'question-card', 'form-card', 'form', 'work'];
     expect(Object.keys(FROZEN_054).sort()).toEqual(Object.keys(MATCHED_SCOPES).filter((k) => !since38.includes(k)).sort());
-    // 15 of the 18 scopes ask the registry; the other 3 are SCOPE_SOURCES.
+    // 15 of the 19 scopes ask the registry; the other 4 are SCOPE_SOURCES
+    // (the message box joined them in review w18-8).
     expect(Object.keys(MATCHED_SCOPES)).toHaveLength(15);
-    expect(new Set([...Object.keys(MATCHED_SCOPES), ...Object.keys(SCOPE_SOURCES), 'global']).size).toBe(19);
+    expect(new Set([...Object.keys(MATCHED_SCOPES), ...Object.keys(SCOPE_SOURCES), 'global']).size).toBe(20);
   });
 
   for (const [scope, frozen] of Object.entries(FROZEN_054)) {

@@ -24,6 +24,9 @@
 //! Step 5 is the grant form ([`form`]): an instance as a `fleet.form/1`
 //! form (New instance / Edit), its answers turned into the grant.
 //!
+//! The gallery ([`gallery`]) is the definitions claude-fleet ships
+//! (`catalog-seed/fleet-agents/`), embedded, added to a catalog in one step.
+//!
 //! A definition that sets `run.diagnostics` gets the hub's read-only view of
 //! the fleet's own logs, error reports, runs and host health
 //! ([`diagnostics`]): the self debug agent.
@@ -35,6 +38,7 @@ pub mod definition;
 pub mod diagnostics;
 pub mod fleet_ops;
 pub mod form;
+pub mod gallery;
 pub mod github;
 pub mod grant;
 pub mod probe;

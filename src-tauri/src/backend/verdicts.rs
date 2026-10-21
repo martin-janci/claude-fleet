@@ -719,6 +719,8 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         },
     ),
     ("my_grants", Verdict::Routed { tool: "my_grants" }),
+    // Multi-hub Phase 3b: this device's own profile on a hub.
+    ("my_profile", Verdict::Routed { tool: "my_profile" }),
     // Gap plan G4.2: a recipient's ask for a wider level, and the owner's
     // list and answer. Both route; the hub gates each per request.
     (
@@ -978,6 +980,7 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     // Autofix findings: the hub's, decided on the hub (`autofix` tool;
     // apply and dismiss need a trusted full device there).
     ("autofix_findings", Verdict::Routed { tool: "autofix" }),
+    ("autofix_scan", Verdict::Routed { tool: "autofix" }),
     ("autofix_apply", Verdict::Routed { tool: "autofix" }),
     ("autofix_dismiss", Verdict::Routed { tool: "autofix" }),
     ("list_guides", Verdict::Routed { tool: "guide" }),

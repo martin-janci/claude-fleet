@@ -924,12 +924,7 @@ pub async fn maybe_collect(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>) -> O
     Some(n)
 }
 
-fn now_unix() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
+use crate::store::now_unix;
 
 // ── roll-ups ──
 

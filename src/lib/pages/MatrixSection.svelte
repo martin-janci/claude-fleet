@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { errorText } from '../error_copy';
   // A matrix section (Orbit Fleet 11.9): settings that are each a choice
   // set over the same options, shown as one grid — a row per option, a
   // column per setting. A tick adds or removes that option from that
@@ -34,7 +35,7 @@
     const next = options.filter((o) => now.has(o)).join(',');
     error = null;
     const r = await setFleetSetting(d.key as SettingKey, next);
-    if (!r.ok) error = r.error.message;
+    if (!r.ok) error = errorText(r.error);
   }
 </script>
 

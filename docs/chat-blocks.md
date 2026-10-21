@@ -9,8 +9,9 @@ it are drawn as cards instead:
   The card shows the outcome, the confidence, the summary, then blockers,
   warnings, tests run and follow-ups. A follow-up's *Ask* button puts it in
   the composer. The JSON is still there under *Reported after FLEET_TASK_DONE_…*.
-- **A `fleet.ui/1` block.** A fenced ```` ```fleet-ui ```` block (or a
-  ```` ```json ```` block whose object has `"spec": "fleet.ui/1"`) holding one
+- **A `fleet.ui/1` block.** A fenced ```` ```fleet-ui ```` block (`fleet.ui`
+  is read the same way), or a ```` ```json ```` or untagged block whose object
+  has `"spec": "fleet.ui/1"`, holding one
   block: a tutorial, a guide, a callout, facts, choices, a form, a report,
   a job's progress, results, an error, a settings change, a wizard, a
   dashboard or a debug device.
@@ -141,8 +142,10 @@ and nobody answers, fleet sends that option's `prompt` once
 the fleet runs (`service::control_continue`), so with no window open and
 only once, as a `[fleet]` note quoting the option. A countdown above the
 box offers *Send now* and *Cancel*, and typing or any newer turn stops it.
-An option or a question that names a push, a delete or another step that
-is hard to undo (`decide::quick_answer::risky`) is never sent this way, nor
+Only a card in a tagged fence (```` ```fleet-ui ```` or ```` ```json ````)
+is sent this way: one in an untagged fence reads as quoted output and is
+drawn but waits for a click. An option or a question that names a push, a
+delete or another step that is hard to undo (`decide::quick_answer::risky`) is never sent this way, nor
 a card from a reply more than a day old.
 
 ### `form`

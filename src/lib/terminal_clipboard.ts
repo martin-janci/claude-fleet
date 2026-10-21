@@ -5,6 +5,7 @@ import { sanitizePaste, framePaste } from './clipboard';
 import { nativeWriteText, nativeReadText } from './clipboard_native';
 import type { Screen } from './ansi';
 import type { CellPos } from './terminal_selection';
+import { errorText } from './error_copy';
 
 export interface ClipboardHost {
   ptyOpen(): boolean;
@@ -50,7 +51,7 @@ export function createTerminalClipboard(host: ClipboardHost) {
     const text = screen.selectionText(selAnchor, selFocus);
     if (text === '') return;
     const r = await nativeWriteText(text);
-    if (!r.ok) host.setOpenError(`Copy failed: ${r.error.message}`);
+    if (!r.ok) host.setOpenError(`Copy failed: ${errorText(r.error)}`);
   }
 
   /** Paste the native clipboard into the PTY (bracketed-paste framing happens
@@ -58,7 +59,7 @@ export function createTerminalClipboard(host: ClipboardHost) {
   async function pasteFromClipboard() {
     const r = await nativeReadText();
     if (r.ok) sendPaste(r.value);
-    else host.setOpenError(`Paste failed: ${r.error.message}`);
+    else host.setOpenError(`Paste failed: ${errorText(r.error)}`);
   }
 
   return { sendPaste, copySelection, pasteFromClipboard };

@@ -4,6 +4,7 @@ import type { ProposalLike } from './ai_proposal';
 import { outbox } from './outbox';
 import { sessions } from './sessions';
 import { decideMissionCard, getMission } from './missions';
+import { errorText } from './error_copy';
 
 /**
  * Jev K2, redesign step 9.9: where a message just sent in Control goes.
@@ -137,13 +138,13 @@ export async function handOn(key: string): Promise<string | null> {
 /** A mission takes the message as the answer to its oldest open question. */
 async function handOnToMission(key: string, r: Receipt, t: RouteTarget): Promise<string | null> {
   const m = await getMission(t.id);
-  if (!m.ok) return m.error.message ?? `${t.name} could not be read.`;
+  if (!m.ok) return errorText(m.error) ?? `${t.name} could not be read.`;
   const ask = (m.value.plan?.cards ?? [])
     .filter((c) => c.state === 'open' && c.kind === 'ask')
     .sort((a, b) => a.created_at - b.created_at)[0];
   if (!ask) return `${t.name} has no open question to answer; open it to steer it.`;
   const d = await decideMissionCard(ask.id, true, r.text);
-  if (!d.ok) return d.error.message ?? `${t.name} did not take the answer.`;
+  if (!d.ok) return errorText(d.error) ?? `${t.name} did not take the answer.`;
   receipts.update((rs) => rs.map((x) => (x.key === key ? { ...x, handed: t } : x)));
   if (r.chosen === null) await choose(key, optionOf(t));
   return null;

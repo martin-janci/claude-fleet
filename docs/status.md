@@ -53,14 +53,27 @@ from `autonomy.ts`; Custom grants what Ask first does), and since the
 - **Pre-approval (F2, owner-approved; reverses review round 15 F21 for these
   cases only).** At Within your brief the operator's `send_prompt`,
   `queue_prompt`, `run_prompt` and `dispatch_task` into a live session it
-  started or briefed (`Store::is_open_control_handoff`) go without a card;
+  started or briefed (`Store::is_open_control_handoff`) and still follows
+  (`control_follow::session_followed`: not muted, merged, done or quiet;
+  review w04-4) go without a card;
   at Autopilot so does a Claude `new_session` (or `dispatch_task`
-  `new_worker`) on a host inside an active mission's live grant — its
-  hosts, expiry and budget, and parallel cap (`start_inside_mission_grant`).
-  Kills, restarts, rewinds, restores, add_project and every `confirm: true`
-  tool always ask. The rule is one pure function,
-  `guard::operator_must_confirm(tool, position, own_handoff, inside_grant)`,
-  with a truth-table test. A pre-approved call writes a
+  `new_worker`, or a task's `work_link` `start` / `run` / `resume`) on a
+  host inside an active mission's live grant — its hosts, expiry and
+  budget, and parallel cap (`start_inside_mission_grant`; a task start
+  with no host is inside only a grant naming no hosts), never while Pause
+  all is on (review w04-5).
+  Kills, rewinds, restores, add_project and every other `confirm: true`
+  tool always ask. **Session care** (`control.session_care`, ON by
+  default since 2026-10-20, the owner's choice): with it on, `restart_session` of a session
+  Control started itself (not one it only briefed;
+  `Store::is_control_started_session`) goes without a card at Within your
+  brief and Autopilot, and `safe_kill_session` of one at Autopilot (`guard::OPERATOR_CARE_TOOLS`);
+  the digest says `Session care: on` under its autonomy line. The rule is
+  one pure function, `guard::operator_must_confirm_with(tool, position,
+  OperatorFacts)`, with truth-table tests. Control's CLAUDE.md also
+  carries "Carry your tasks through" and "Look after your sessions"
+  (`service/control_rules.rs`), and each digest line names the task its
+  session works on (`task KEY`). A pre-approved call writes a
   `control_pre_approved` event on its target and its receipt carries
   `approval = pre_approved` (migration 196), drawn "pre-approved" on the
   chip.
@@ -116,6 +129,16 @@ nothing saved, nothing proposed or "the hub needs updating", so a desktop
 accepts a revision-16 to 18 hub; 18 adds session environment variables
 (`env_vars`, `new_session { env }`, a form's `env_target`), whose Settings
 page a revision-17 hub answers with an unknown tool.
+
+**The dynamic day/night theme** is landed and ON by default (#936,
+fleet-mobile #234): Settings › Appearance's Theme defaults to Sun, which is
+light while the sun is up in the device's time zone and dark after sunset;
+Contrast (System by default on the desktop) and Accent (Cyan) apply to every
+mode (`docs/architecture.md` → *Theme engine*). Sun works from the time
+zone's meridian at a fixed 48° N, so it is off by hours far from that
+latitude and seasons are inverted in the southern hemisphere; a real
+location or fixed hours ("Schedule") waits on the owner (review w20-1). The
+phone has no System contrast yet (w20-8).
 
 Ticket keys (2026-10, migration 169, `store/ticket_keys.rs`). Fleet
 administers Jira-style keys: each ticket space (a project, a GitHub
@@ -443,10 +466,23 @@ tell; the script is shared, so SSH, `local` and agent hosts all get it with
 no proto change. `mem_low` (`health.mem_low_pct`, 10) and `cpu_saturated`
 (`health.cpu_busy_pct`, 90, two samples in a row) are judged when the sample
 is written (`Store::set_host_health`) and carried on the host row, the ping
-and `fleet_health.hosts[]` (with `cpu_pct`, `mem_used_pct`, `mem_pressure`)
-for a future status-bar chip; the automatic restore defers on either, the
-operator feed reports `mem_low`. The desktop shows the numbers only in the
-host's Health line.
+and `fleet_health.hosts[]` (with `cpu_pct`, `mem_used_pct`, `mem_pressure`);
+the automatic restore defers on either, the operator feed reports
+`mem_low`, and the desktop shows them in the status bar's host chip (see
+the Control paragraph above).
+
+**Autofix** is landed and ON by default (#939, #940; `service/autofix/`,
+migration 198, MCP `autofix`, loop `autofix`; mechanics in
+`docs/architecture.md`). Four detectors (`autofix.detector.*`: an unbound
+operator token, a host's out-of-date fleet files or old agent, a host's
+missing or wrong `~/.claude.json` fleet entry, a stuck session) are all on.
+With `autofix.auto_safe` (on) the fixes marked safe run unattended on the
+reconcile tick, up to `autofix.max_attempts` (3) tries per problem in 24 h,
+and then tell you; the rest (a new token, a sign-in, typing into a session)
+wait for a trusted device's Apply. Findings show in Needs you → *Problems &
+fixes*, as the `fix` chat block, as a count on the host chip, and in the
+operator feed; fleet-mobile shows them in its Problems & fixes sheet
+(`AutofixSheet`).
 
 The work graph's M0–M3 are landed (work links anchored on participants,
 group-by-work, and M2's work journal, carry rules, handover brief and resume
@@ -1042,7 +1078,15 @@ Routines are landed (`service/routines/`, migrations 131 and 139, redesign
 fleet event or when a person presses Run now. Since M15 G2.4 (migration
 156) the events include a pull request's review, failing or passing checks
 and merge, read from the `pull_requests` changes reconcile records, with a
-repo filter, "me or anyone in its org" and a rate per PR. The scheduler stops on
+repo filter, "me or anyone in its org" and a rate per PR. Since
+ce84e5d28 (migration 201) they also include more session kinds
+(`needs_you`, `auto_restored` / `auto_restore_failed`, `account_switched`
+/ `account_switch_failed`, `session_moved`, `pr_opened`) and fleet events
+(`fleet_events`, written by `service/fleet_events.rs`'s watcher and by
+`set_mission_state`): `host_offline` / `host_online` / `host_low`,
+`account_limited` / `account_available`, `login_signed_out`,
+`mission_done` / `mission_failed`; any event routine but an account or
+mission one may narrow to one host (`event_host`). The scheduler stops on
 `automation.paused`, a fire past the routine's day budget is skipped, a run
 past its run budget fails and pauses the routine, and a run whose account
 is at or past `accounts.pause_at` is skipped (8.7). M15 G3.8 (migration
@@ -1069,6 +1113,21 @@ fires included), `routines { explain | decisions | dry_run }` and the
 routine's Debug tab; `agents { explain | job }` (the desktop's
 `agents_debug`, Automation › Agents › Debug, with each rule's last poll
 error per process) and `pr_shepherd { explain }` (no UI). All read only.
+Routine memory (migration 204, `routines/memory.rs`): a routine may keep
+notebooks in the fleet's database, outside git and the host: its own, its
+project's (shared by the project's routines in one org, or one owner's), or
+both. Each run reads them under its prompt and rewrites one with a
+`<routine-memory>` block at the end of its reply, read off the transcript
+once the run finishes; `memory_auto` also notes each finished run in it. The
+routine editor's Memory group picks them and shows the saved notebooks to
+read, edit or clear (`routines { memory | set_memory }`). Off by default
+per routine. The phone shows nothing of it yet.
+
+The prompt tuner is landed and OFF by default (`work.prompt_tune`;
+`service/prompt_tune.rs`, `PromptTune.svelte`, mechanics in
+`docs/architecture.md`): the composer's ✦ and a routine's prompt field ask
+the Writing help model to rewrite the draft into a clearer prompt, shown
+beside it as a proposal that is never sent on its own.
 
 Reply actions are landed (#338): Copy, Quote, Retry, Fork here and Rewind
 here under each reply; Fork, Rewind and Retry are one operation,
@@ -1200,9 +1259,18 @@ agent drafts one in a chat with a `wizard: fleet_agent` block, which the
 person sends; the phone lists the instances with Revoke. Step 6 in part: the
 `github_prs` and `github_comments` sources, `pr_comment` and `pr_labels`,
 and comments and new items on trackers other than Jira, whose
-`tracker_comments` and `tracker_assigned` polls read the hub's synced items
-(updated since the poll, less a sync's lag) and each one's comments through
-its provider; not `pr_review` or restating the built-in agents.
+`tracker_comments` and `tracker_assigned` polls page through the hub's synced
+items (by when the hub wrote them, from where the last poll stopped) and, for
+comments, each one's comments through its provider — the sync holds only the
+items assigned to the tracker's own account on GitHub and Linear, so those are
+all a poll sees there; the gallery (`fleet_agents/gallery.rs`: the
+`catalog-seed/fleet-agents/` definitions embedded, listed under Automation ›
+Agents › Gallery and added to the catalog with *Add to catalog*, `agents {
+install }`), which holds all seven seeds in `catalog-seed/fleet-agents/`:
+`issue-triage`, `pr-questions` and `daily-digest`, and `self-debug`,
+`proposer`, `simplify` and `refactor` (below); `pr_review` (a review of the
+PR's head with line comments placed on the diff, sent only while that head
+is current, never an unattended APPROVE); not restating the built-in agents.
 
 The self debug agent (thread "Self debug agent", 2026-10-17), the hub and
 desktop parts: a fleet agent definition that sets `run.diagnostics` gets
@@ -1234,7 +1302,7 @@ the same services as the matching buttons (`settings_review` as
 per item (`{{item.…}}`, `when` per item, at most 10), so self-debug
 proposes one step per finding. `fleet-diagnostics` adds `analyses` (recent
 fleet-agent answers with their findings) and `proposals` (the last 30
-days of agent actions and what a person did). Three more seeds:
+days of agent actions and what a person did). Three more gallery seeds:
 `proposer` (daily 07:00 and `/propose <focus>`; merges by fingerprint,
 skips pending, done, or rejected in the last 14 days; at most five),
 `simplify` and `refactor` (manual, read a project's checkout, propose a
@@ -1372,9 +1440,47 @@ primary), the Hosts page, Inbox (and the rail count), PRs and notifications
 follow the fleet filter, and the hub's `ready` frame names its `fleet_id`
 (minted at `serve` start) so one hub added twice is refused. The fleet id
 needs a hub with this change; an older one just never reads as a duplicate.
-Settings › Environment is per fleet too (a Fleet picker); the other Settings
-pages still act on the primary only.
-Phase 3 (one id space, the full panes per fleet) is not started.
+Settings › Environment and Settings › Company (Organisations, Devices,
+People, Groups) are per fleet too, each with the same Fleet picker
+(`FleetPicker.svelte`); Company's reads and writes route to the picked hub
+and what the device may change there is that hub's `org_admin` rule
+(`company_access.ts`: a fleet admin's unbound device or an org admin's,
+trusted `full` to change anything) — on a paired primary too, which before
+showed the Company pages read-only. The other Settings pages still act on
+the primary only. Phase 3a landed: the sidebar's Machine
+and Organisation filters list every shown fleet's machines and orgs under
+that fleet's label and colour (`list_orgs` joined `FLEET_SCOPED`); a choice
+belongs to one fleet (`src/lib/fleet_filters.ts`) and hides the other
+fleets' rows with a counted "hidden by the … filter · Show every fleet"
+line rather than silently; the shared filters (search, Last active, Needs
+you, Agent, Background agents) apply to the extra fleets' groups too; the
+primary's list sits under a folding fleet header beside another fleet.
+Phase 3b landed: profiles — the hub's read-only `my_profile` tool (no
+contract bump; the caller's own person, SSO issuers, the names of its
+person-scope variables, its git identity; an older hub falls back to
+`my_grants` + `env_vars_list`), the routed fleet-scoped desktop command of
+the same name, a local per-fleet profile label (`src/lib/fleet_profiles.ts`),
+shown on the switcher's chips, in Settings › Fleets › Profiles and as "Runs
+as …" in New session.
+Phase 3 step 1 landed: one id space for the conversation panel. An extra
+fleet's session row carries its fleet (`SessionRow.fleet`), stores keyed by
+session id key it by `sessionKey` (the primary's id, or a negative stand-in
+for an extra fleet's (fleet, id)), and the session opens in the full
+ConversationPanel inside `FleetSessionView`: reads, the conversation list,
+the activity probe, the outbox, dialog answers and the model relaunch go to
+its hub (`session_conversations`, `session_activity`, `restart_session`
+joined `FLEET_SCOPED`). Still off for another fleet's session: attachments,
+fork / rewind, send later, writing help, forms, devices, task results.
+Step 2a landed: its Terminal tab is the same TerminalView (a `session` prop;
+pty id `fleet-<slot>-<id>.<view>`) with the workspace check, shell strip,
+microphone, transfer chip, un-archive and uploads off for it; FleetTerminal
+is gone. Step 2b landed: `FleetSessionView` is laid out as the primary's
+own session (the same `SessionTabs` header and Conversation / agent tabs,
+the conversation over a mounted terminal); its fleet, Copy attach and Close
+sit in the header, and Terminals, Files, Details, Share, Open in VS Code
+and the inspector are off for it. A `local` / `wsl-…` host shows the pane
+snapshot in the agent tab. Not started: every command fleet-aware (which
+turns those back on) and promoting another hub to primary (step 3).
 
 Application updates: design
 `docs/superpowers/specs/2026-09-28-update-channel-design.md` (with

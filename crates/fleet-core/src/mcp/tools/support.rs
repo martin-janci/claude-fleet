@@ -791,8 +791,17 @@ pub(super) fn dispatch_new_worker_summary(
     raw: bool,
     prompt: &str,
 ) -> String {
+    // `profile=` only when one is named, so a summary without one reads as
+    // it always has.
+    let profile = spec
+        .profile
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(|p| format!(" profile={}", bound_text(Some(p))))
+        .unwrap_or_default();
     format!(
-        "new_worker host={} project_id={} name={} requester_session_id={:?} raw={} prompt={}",
+        "new_worker host={}{profile} project_id={} name={} requester_session_id={:?} raw={} prompt={}",
         bound_text(Some(&spec.host_alias)),
         spec.project_id,
         bound_text(spec.name.as_deref()),
@@ -1827,12 +1836,27 @@ pub(super) enum GateTarget<'a> {
     Other,
     /// A prompt or task into this existing session.
     Session(i64),
-    /// A new Claude session on this host.
-    Start { host: &'a str },
+    /// A new Claude session on this host; `None` when fleet picks it (a
+    /// task's start with no host), which only a grant naming no hosts
+    /// covers.
+    Start { host: Option<&'a str> },
+    /// `sessions` new Claude sessions for a task of this mission
+    /// (`work_link` start / run / resume): only that mission's own grant
+    /// covers them, with room in its cap for all of them.
+    MissionStart {
+        mission: i64,
+        host: Option<&'a str>,
+        sessions: i64,
+    },
 }
 
 /// The timeline event a pre-approved operator call leaves on its target.
 pub const EVENT_PRE_APPROVED: &str = "control_pre_approved";
+
+/// How a pre-approved `restart_session`'s [`EVENT_PRE_APPROVED`] detail
+/// begins (`note_pre_approved` writes `<tool> · <position>`): the care
+/// restart budget counts these.
+const CARE_RESTART_DETAIL: &str = "restart_session · ";
 
 impl FleetTools {
     /// True when the operator turned on desktop confirmation for
@@ -1889,31 +1913,82 @@ impl FleetTools {
         self.confirm_gate_inner(tool, nonce, summary, caller, false, target)
     }
 
-    /// The operator's facts [`guard::operator_must_confirm`] decides on:
-    /// the autonomy position, whether `target` is one of Control's open
-    /// handoffs, and whether it is a start inside a running mission's grant.
+    /// The operator's facts [`guard::operator_must_confirm_with`] decides
+    /// on: the autonomy position, whether `target` is one of Control's open
+    /// handoffs, whether it is a start inside a running mission's grant, and
+    /// whether session care is on.
     fn operator_gate_facts(
         &self,
         target: GateTarget<'_>,
-    ) -> Result<(crate::service::autonomy::Position, bool, bool), McpError> {
+    ) -> Result<(crate::service::autonomy::Position, guard::OperatorFacts), McpError> {
         let s = lock(&self.store).map_err(to_mcp_err)?;
         let position = crate::service::autonomy::position(&s);
         if position.is_ask_first() {
-            return Ok((position, false, false));
+            return Ok((position, guard::OperatorFacts::default()));
         }
-        let own = match target {
+        let open = match target {
             GateTarget::Session(id) => s
                 .is_open_control_handoff(id)
                 .map_err(|e| to_mcp_err(IpcError::from(e)))?,
             _ => false,
         };
+        // A prompt goes only into an open handoff Control still FOLLOWS
+        // (review w04-4): a thread the person muted, whose pull request
+        // merged, that is done or went quiet is no longer "within your
+        // brief". Session care is not narrowed: a wedged session is quiet.
+        let own = match target {
+            GateTarget::Session(id) if open => {
+                crate::service::control_follow::session_followed(&s, id, crate::store::now_unix())
+            }
+            _ => false,
+        };
+        let own_start = match target {
+            GateTarget::Session(id) if open => s
+                .is_control_started_session(id)
+                .map_err(|e| to_mcp_err(IpcError::from(e)))?,
+            _ => false,
+        };
+        // Pause all stops every grant-covered start too (review w04-5).
         let grant = match target {
-            GateTarget::Start { host } => s
+            GateTarget::Start { host } if !crate::service::loops::paused(&s) => s
                 .start_inside_mission_grant(host, crate::store::now_unix())
+                .map_err(to_mcp_err)?,
+            GateTarget::MissionStart {
+                mission,
+                host,
+                sessions,
+            } if !crate::service::loops::paused(&s) => s
+                .mission_start_inside_grant(mission, host, sessions, crate::store::now_unix())
                 .map_err(to_mcp_err)?,
             _ => false,
         };
-        Ok((position, own, grant))
+        let session_care =
+            crate::service::settings::get_bool(&s, crate::service::settings::CONTROL_SESSION_CARE);
+        // Care restarts are budgeted per session (guard::CARE_RESTARTS_PER_HOUR),
+        // counted from the pre-approvals `note_pre_approved` leaves.
+        let care_restarts_spent = match target {
+            GateTarget::Session(id) if session_care && own_start => {
+                s.count_session_events_with_detail_since(
+                    id,
+                    EVENT_PRE_APPROVED,
+                    CARE_RESTART_DETAIL,
+                    crate::store::now_unix() - 3600,
+                )
+                .map_err(to_mcp_err)?
+                    >= guard::CARE_RESTARTS_PER_HOUR
+            }
+            _ => false,
+        };
+        Ok((
+            position,
+            guard::OperatorFacts {
+                own_handoff: own,
+                inside_grant: grant,
+                session_care,
+                own_start,
+                care_restarts_spent,
+            },
+        ))
     }
 
     fn confirm_gate_inner(
@@ -1936,14 +2011,19 @@ impl FleetTools {
         let operator_gated = caller.is_operator() && guard::operator_gated(tool);
         let forced = person
             || (operator_gated && {
-                let (position, own, grant) = self.operator_gate_facts(target)?;
-                let must = guard::caller_must_confirm(true, tool, position, own, grant);
+                let (position, facts) = self.operator_gate_facts(target)?;
+                let must = guard::caller_must_confirm_with(true, tool, position, facts);
                 if !must {
                     self.note_pre_approved(tool, summary, position, target);
                 }
                 must
             });
-        if !forced && (!guard::needs_confirmation(tool) || !self.confirm_enabled()?) {
+        // An operator call the position pre-approved is done here, even for
+        // a `confirm: true` tool: `work_link` is one for its tidy kills, and
+        // a task's start inside a grant is not one of those.
+        if !forced
+            && (operator_gated || !guard::needs_confirmation(tool) || !self.confirm_enabled()?)
+        {
             return Ok(());
         }
         if forced && !self.guards.approver {
@@ -1973,7 +2053,7 @@ impl FleetTools {
                 ConfirmState::Denied => {
                     return Err(mcp_err(
                         "E_FORBIDDEN",
-                        format!("{tool} was denied on the desktop"),
+                        format!("{tool} was denied in the fleet app"),
                         None,
                     ))
                 }
@@ -1981,7 +2061,7 @@ impl FleetTools {
                     return Err(mcp_err(
                         codes::E_CONFIRM_REQUIRED,
                         format!(
-                            "{tool} is awaiting approval on the desktop; retry with the same confirm_nonce once approved"
+                            "{tool} is awaiting approval in the fleet app (desktop or phone); retry with the same confirm_nonce once approved"
                         ),
                         Some(serde_json::json!({ "confirm_nonce": n })),
                     ))
@@ -2020,7 +2100,7 @@ impl FleetTools {
         Err(mcp_err(
             codes::E_CONFIRM_REQUIRED,
             format!(
-                "{tool} needs approval on the claude-fleet desktop ({}); \
+                "{tool} needs approval in the fleet app, desktop or phone ({}); \
                  ask the user to approve it there, then retry with confirm_nonce={}",
                 if person && !caller.is_operator() {
                     "a person approves this call whoever makes it"
@@ -2533,29 +2613,45 @@ impl FleetTools {
                 "acked": serde_json::Value::Null,
             }));
         }
-        let mut queued = delivery_gate(row, force, submit)?;
-        // An idle session gets one prompt per idle moment, whoever types it:
-        // this send takes the moment, or the queue already did and the REPL
-        // will hold this one behind that turn.
-        if submit
-            && !queued
-            && !crate::service::sessions::deferred::claim_moment_for_direct_send(
+        // Refused up front on the row the caller resolved, and again on the
+        // row read in the typing lane: a dialog may have opened during the
+        // wait, and every number reported below comes from that later read.
+        delivery_gate(row, force, submit)?;
+        let ack_state = || -> Result<_, crate::ipc_error::IpcError> {
+            Ok(lock(&self.store)?.prompt_ack_state(row.id)?)
+        };
+        let (queued, turn_seq, before) = if submit {
+            // An idle session gets one prompt per idle moment, whoever types
+            // it: this send takes the moment, or another prompt already did
+            // and the REPL will hold this one behind that turn. A session
+            // already `working` queues it too. Either way it is typed in the
+            // session's typing lane, after any paste in flight; a send that
+            // fails and typed nothing gives the moment back.
+            let body = prompt.clone();
+            let (_, out) = crate::service::sessions::deferred::send_direct(
                 &self.store,
                 row,
-                &prompt,
-                crate::store::now_unix(),
+                &body,
+                |d| async move {
+                    if let Err(e) = delivery_gate(&d.row, force, submit) {
+                        return Ok(Err(e));
+                    }
+                    let before = ack_state()?;
+                    send(prompt).await?;
+                    Ok(Ok((d.behind_a_turn, d.row.turn_seq, before)))
+                },
             )
-            .map_err(to_mcp_err)?
-            && crate::service::sessions::deferred::idle_for_prompt(row)
-        {
-            queued = true;
-        }
-        let before = {
-            let s = lock(&self.store).map_err(to_mcp_err)?;
-            s.prompt_ack_state(row.id)
-                .map_err(|e| to_mcp_err(e.into()))?
+            .await
+            .map_err(to_mcp_err)?;
+            out?
+        } else {
+            // Staged text, no Enter: no idle moment to take, but still one
+            // typing at a time into the pane.
+            let _lane = crate::service::sessions::deferred::typing_lane(&self.store, row.id).await;
+            let before = ack_state().map_err(to_mcp_err)?;
+            send(prompt).await.map_err(to_mcp_err)?;
+            (false, row.turn_seq, before)
         };
-        send(prompt).await.map_err(to_mcp_err)?;
         let acked = match before {
             Some(st) if ack_knowable(submit, queued, st.hooks_seen) => {
                 Some(await_prompt_ack(&self.store, row.id, st.prompt_submit_seq, ACK_WAIT).await?)
@@ -2565,7 +2661,7 @@ impl FleetTools {
         Ok(serde_json::json!({
             "delivered": true,
             "session_id": row.id,
-            "turn_seq_before": turn_seq_before(row.turn_seq, queued, acked),
+            "turn_seq_before": turn_seq_before(turn_seq, queued, acked),
             "queued": queued,
             "acked": acked,
         }))

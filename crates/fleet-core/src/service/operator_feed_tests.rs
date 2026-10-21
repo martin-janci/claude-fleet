@@ -14,7 +14,25 @@ fn ev(id: i64, sid: i64, at: i64, kind: &str, detail: Option<&str>) -> FeedEvent
         tmux_name: format!("s{sid}"),
         host_alias: "h".into(),
         started_by_control: sid == 1,
+        task_key: None,
     }
+}
+
+#[test]
+fn a_line_names_the_task_its_session_works_on() {
+    let mut e = ev(1, 1, 100, "turn_done", None);
+    e.task_key = Some("FLEET-12".into());
+    let lines = session_lines(&[e.clone()], 100);
+    assert_eq!(
+        lines[0].text,
+        "session s1 on h (#1, you started it, task FLEET-12) finished its turn"
+    );
+    // A key is data: one line, cut short.
+    e.task_key = Some(format!("A\nB{}", "x".repeat(100)));
+    let text = session_lines(&[e], 100).remove(0).text;
+    assert!(!text.contains('\n'), "{text}");
+    assert!(text.contains(", task AB"), "{text}");
+    assert!(text.len() < 120, "{text}");
 }
 
 const CFG: FeedConfig = FeedConfig {
@@ -257,7 +275,7 @@ fn world() -> World {
             session_id: Some(handed),
             ..Default::default()
         },
-        1,
+        t0,
     )
     .unwrap();
     World {
@@ -450,6 +468,8 @@ fn finding_view(
         evidence: vec![],
         fix,
         action: None,
+        auto_runs: None,
+        auto_next_at: None,
     }
 }
 
@@ -471,11 +491,20 @@ fn autofix_lines_say_what_waits_on_a_person_and_what_fleet_fixed() {
     use crate::service::autofix::Safety;
     let live = vec![
         finding_view(1, "open", Some(a_fix(Safety::NeedsApproval, false)), 0),
-        finding_view(2, "open", Some(a_fix(Safety::Safe, true)), 0),
+        crate::service::autofix::api::FindingView {
+            auto_runs: Some(true),
+            auto_next_at: Some(0),
+            ..finding_view(2, "open", Some(a_fix(Safety::Safe, true)), 0)
+        },
         finding_view(3, "apply_failed", Some(a_fix(Safety::Safe, true)), 0),
         finding_view(4, "open", None, 0),
         finding_view(5, "dismissed", Some(a_fix(Safety::NeedsApproval, false)), 0),
         finding_view(6, "open", Some(a_fix(Safety::Safe, false)), 0),
+        // Automatic fixes off: fleet will not run it, so it waits on a person.
+        crate::service::autofix::api::FindingView {
+            auto_runs: Some(false),
+            ..finding_view(10, "open", Some(a_fix(Safety::Safe, true)), 0)
+        },
     ];
     let fixed = vec![
         finding_view(7, "cleared", Some(a_fix(Safety::Safe, true)), 1000),
@@ -494,14 +523,17 @@ fn autofix_lines_say_what_waits_on_a_person_and_what_fleet_fixed() {
     ];
     let c = autofix_conditions(&live, &fixed, 1000);
     let keys: Vec<_> = c.iter().map(|c| c.key.as_str()).collect();
-    assert_eq!(keys, vec!["af1", "af3", "af4", "af7:fixed"]);
+    assert_eq!(keys, vec!["af1", "af3", "af4", "af10", "af7:fixed"]);
     assert_eq!(
         c[0].text,
         "problem: The title (host mercury) — fix needs your approval (autofix finding #1)"
     );
     assert!(c[1].text.contains("automatic fix did not work"));
     assert!(c[2].text.contains("no fix"));
-    assert_eq!(c[3].text, "fixed automatically: The title");
+    assert!(c[3]
+        .text
+        .ends_with("fix waiting for you (autofix finding #10)"));
+    assert_eq!(c[4].text, "fixed automatically: The title");
 }
 
 #[tokio::test]

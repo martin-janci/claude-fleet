@@ -68,12 +68,7 @@ pub struct Deps {
     pub net: TrackerNet,
 }
 
-fn now_unix() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
+use crate::store::now_unix;
 
 /// What the loop may do on its own, and why not more.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1192,6 +1187,58 @@ impl Drop for PlannerSlot {
     }
 }
 
+/// The planner's cards the loop applies itself at `auto_level`, in order;
+/// the rest are returned as they are, for a person.
+async fn loop_apply_cards(
+    deps: &Deps,
+    m: &MissionRow,
+    cards: Vec<CardRow>,
+    auto_level: i64,
+    accept_created: bool,
+) -> Result<Vec<CardRow>, IpcError> {
+    let mut shown = Vec::with_capacity(cards.len());
+    for c in cards {
+        if loop_applies_card(&c.kind, auto_level) {
+            // Each earlier card's apply may take an SSH start, so this one
+            // sat `open` meanwhile, where a person can dismiss or apply it.
+            // Claimed as a person's decision is, and re-read: a card decided
+            // in that window is theirs, never applied a second time.
+            let Ok(_claim) = CardClaim::take(c.id) else {
+                shown.push(c);
+                continue;
+            };
+            let current = lock(&deps.store)?.get_card(c.id)?;
+            match current {
+                Some(card) if card.state == "open" => {}
+                other => {
+                    shown.push(other.unwrap_or(c));
+                    continue;
+                }
+            }
+            let res = apply_card(
+                deps,
+                m,
+                &c,
+                &Actor::Loop,
+                &ViewScope::internal(),
+                None,
+                accept_created,
+            )
+            .await;
+            let s = lock(&deps.store)?;
+            let (state, note) = match res {
+                Ok(d) => ("applied", d),
+                Err(e) => ("refused", e.message),
+            };
+            s.decide_card(c.id, state, "loop", Some(&note))?;
+            shown.push(s.get_card(c.id)?.unwrap_or(c));
+        } else {
+            shown.push(c);
+        }
+    }
+    Ok(shown)
+}
+
 /// Ask the planner about `m` now, and card its answer.
 pub async fn run_planner(
     deps: &Deps,
@@ -1358,30 +1405,7 @@ pub async fn run_planner(
     };
     let cards = card_commands(deps, m, &commands, now)?;
     // What the autonomy covers is applied now; the rest waits for a person.
-    let mut shown = Vec::with_capacity(cards.len());
-    for c in cards {
-        if loop_applies_card(&c.kind, auto_level) {
-            let res = apply_card(
-                deps,
-                m,
-                &c,
-                &Actor::Loop,
-                &ViewScope::internal(),
-                None,
-                accept_created,
-            )
-            .await;
-            let s = lock(&deps.store)?;
-            let (state, note) = match res {
-                Ok(d) => ("applied", d),
-                Err(e) => ("refused", e.message),
-            };
-            s.decide_card(c.id, state, "loop", Some(&note))?;
-            shown.push(s.get_card(c.id)?.unwrap_or(c));
-        } else {
-            shown.push(c);
-        }
-    }
+    let shown = loop_apply_cards(deps, m, cards, auto_level, accept_created).await?;
     Ok(PlanOutcome {
         mission_id: m.id,
         cards: shown,
@@ -1760,27 +1784,28 @@ fn planner_wanted(
 /// The steps that start a worker session.
 const RUN_STEPS: &[&str] = &["run", "retry", "review", "test", "integrate"];
 
-/// The account a loop run of `step` would bill, when it is at or past
-/// `accounts.pause_at` (redesign 8.7): on the grant's first host, else where
-/// the start would land (`tickets::seen_place` / `seen_host`, the start's
-/// own choice: a start rule, the key's history, the project's last host),
-/// under the grant's login. `None` when the run's host cannot be told yet:
-/// the start then decides, as before.
+/// Why a loop run of `step` waits, when the login it would bill is at or
+/// past `accounts.pause_at` (redesign 8.7) or signed out (review w02-6): on
+/// the grant's first host, else where the start would land
+/// (`tickets::seen_place` / `seen_host` / `placed_host`, the start's own
+/// choice: the key's history, the project's last host, placement's login
+/// there), under the grant's login. `None` when the run's host cannot be
+/// told yet: the start then decides, as before.
 fn run_over_limit(
     s: &Store,
     m: &MissionRow,
     step: &Step,
     grant: Option<&GrantRow>,
     now: i64,
-) -> Result<Option<crate::service::account_limits::OverLimit>, IpcError> {
+) -> Result<Option<String>, IpcError> {
     let Some(item_id) = step.item_id else {
         return Ok(None);
     };
     let Ok(start) = start_for(s, m, item_id, &Actor::Loop, grant) else {
         return Ok(None);
     };
-    let host = match start.host_alias {
-        Some(h) => Some(h),
+    let (host, placed_profile) = match start.host_alias {
+        Some(h) => (Some(h), None),
         None => {
             // A work item with no key cannot be started: nothing to hold.
             let Some(key) = s.get_work_item(item_id)?.and_then(|i| i.key) else {
@@ -1790,15 +1815,32 @@ fn run_over_limit(
             let (_, seen, _) =
                 crate::service::trackers::tickets::seen_place(s, &key, item_org, start.project_id)?;
             match start.project_id.or(seen.as_ref().map(|p| p.0)) {
-                Some(p) => crate::service::trackers::tickets::seen_host(s, seen, p)?,
-                None => None,
+                // Where the start itself lands (`plan_resolved`): the placed
+                // host and its login, not only the host last seen (review
+                // w02-1), so the hold looks at what the start would bill.
+                Some(p) => {
+                    let seen = crate::service::trackers::tickets::seen_host(s, seen, p)?;
+                    match crate::service::trackers::tickets::placed_host(s, p, seen) {
+                        Some((h, profile)) => (Some(h), profile),
+                        None => (None, None),
+                    }
+                }
+                None => (None, None),
             }
         }
     };
     let Some(host) = host else {
         return Ok(None);
     };
-    crate::service::account_limits::over_limit(s, &host, start.profile.as_deref(), now)
+    let profile = start.profile.or(placed_profile);
+    if let Some(over) =
+        crate::service::account_limits::over_limit(s, &host, profile.as_deref(), now)?
+    {
+        return Ok(Some(over.reason()));
+    }
+    // A login fleet knows is signed out answers a run with `/login` (review
+    // w02-6): the run waits for it as for a spent one.
+    crate::service::login_health::signed_out_reason(s, &host, profile.as_deref())
 }
 
 /// Drop the loop's run steps whose account is over the line (redesign 8.7):
@@ -1816,7 +1858,7 @@ fn hold_runs_over_limit(
     for st in steps.drain(..) {
         if st.auto && RUN_STEPS.contains(&st.kind.as_str()) {
             if let Some(over) = run_over_limit(s, m, &st, grant, now)? {
-                why.get_or_insert_with(|| over.reason());
+                why.get_or_insert(over);
                 continue;
             }
         }
@@ -1906,11 +1948,11 @@ pub async fn tick_mission(deps: &Deps, id: i64, now: i64) -> Result<(), IpcError
                 return Ok(());
             }
         }
-        if counts.open > 0
-            && counts
-                .last_activity_at
-                .is_some_and(|at| now - at > m.policy.no_progress_secs as i64)
-        {
+        // A person's resume restarts the window: braking on the same stale
+        // run that paused it would pause the mission again before this tick
+        // ever tried to start a step.
+        let since = counts.last_activity_at.max(s.mission_resumed_at(id)?);
+        if counts.open > 0 && since.is_some_and(|at| now - at > m.policy.no_progress_secs as i64) {
             brake(
                 &s,
                 &m,

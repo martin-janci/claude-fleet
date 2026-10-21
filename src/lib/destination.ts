@@ -49,6 +49,13 @@ export const DESTINATIONS: readonly Destination[] = [
 
 export const destination = writable<Destination>('session');
 
+/** The fleet pages: they cover the session's own view and need no selected
+ *  session (App.svelte's `fleetPageShown`), so an extra fleet's open
+ *  session is not on screen under them either. */
+export function isFleetPage(d: Destination): boolean {
+  return d === 'hosts' || d === 'assets' || d === 'accounts' || d === 'control' || d === 'automation' || d === 'dashboard';
+}
+
 // Step 3.15's warm start shows the last screen at once, so the destination is
 // kept (localStorage through `prefs`, which swallows a blocked store). What
 // the LAST run left is read once, here, before anything in this run writes:

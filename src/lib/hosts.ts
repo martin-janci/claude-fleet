@@ -1,5 +1,6 @@
 import { writable, derived } from 'svelte/store';
 import { createRowStore } from './row_store';
+import { createListLoad } from './list_load';
 import { invokeCmd, type Result } from './result';
 import { readPref, writePref } from './prefs';
 
@@ -102,6 +103,11 @@ export interface HostRow {
    *  `service::login_health`): `profile` null is the host's own. Absent when
    *  none, and from an older hub. */
   signed_out_logins?: SignedOutLogin[];
+  /** macOS (migration 203): the host's default Claude login is kept both in the
+   *  Keychain and in ~/.claude/.credentials.json, so the two copies log each
+   *  other out (`service::login_conflicts`). Absent when not macOS, unknown, or
+   *  from an older hub. */
+  login_split?: boolean | null;
 }
 
 /** One signed-out login on a host. */
@@ -143,6 +149,8 @@ export interface HostHealth {
   mem_pressure?: number | null;
   mem_low?: boolean;
   cpu_saturated?: boolean;
+  /** Migration 203; absent from an older hub's ping and off macOS. */
+  login_split?: boolean | null;
 }
 
 export interface SshHost {
@@ -200,9 +208,13 @@ export function effectiveHostOf(filter: string, list: readonly Pick<HostRow, 'al
 }
 export const effectiveHostFilter = derived([hostFilter, hosts], ([f, list]) => effectiveHostOf(f, list));
 
+/** Review w17-1: whether the hosts list has loaded, so an empty list is not
+ *  read as a first run while it loads or after its read failed. */
+export const hostsLoad = createListLoad();
+
 export async function loadHosts(): Promise<Result<HostRow[]>> {
   const token = rows.beginList();
-  const r = await invokeCmd<HostRow[]>('list_hosts');
+  const r = await hostsLoad.track(invokeCmd<HostRow[]>('list_hosts'));
   // A probe or a remove that landed while the list was in flight wins.
   if (r.ok) rows.applyList(r.value, token);
   return r;
@@ -212,12 +224,15 @@ export async function discoverHosts(): Promise<Result<SshHost[]>> {
   return invokeCmd<SshHost[]>('discover_hosts');
 }
 
+/** Add a host. `transport: 'agent'` (a hub only) registers one the hub
+ *  cannot reach, without an SSH probe: its fleet-agent dials in later. */
 export async function addHost(
   alias: string,
   sshAlias: string,
+  transport?: 'agent',
 ): Promise<Result<HostRow>> {
   const r = await invokeCmd<HostRow>('add_host', {
-    args: { alias, ssh_alias: sshAlias },
+    args: transport ? { alias, ssh_alias: sshAlias, transport } : { alias, ssh_alias: sshAlias },
   });
   if (r.ok) {
     // An explicit re-add overrides any lingering tombstone from a recent

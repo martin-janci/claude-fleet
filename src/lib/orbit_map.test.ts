@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { orbitModel, hostLabels, LAP_BUSY, LAP_QUIET, RECENT_SECS, RING_SECS } from './orbit_map';
+import { orbitModel, orbitStageLabel, hostLabels, LAP_BUSY, LAP_QUIET, RECENT_SECS, RING_SECS } from './orbit_map';
 import type { RunRow } from './runs';
 
 const NOW = 1_800_000_000;
@@ -57,6 +57,23 @@ describe('orbitModel', () => {
     expect(by.nas.failed).toBe(true);
     expect(by.mercury.failed).toBe(false);
     expect(m.feed[0]).toMatchObject({ who: 'Nightly', what: 'failed: time cap', tone: 'failed' });
+  });
+
+  it('review w19-12: names the waiting and failed hosts in the stage label, not only by colour', () => {
+    const m = orbitModel({
+      runs: [
+        run({ id: 'routine:1', outcome: 'needs_person', ended_at: NOW - 100 }),
+        run({ id: 'routine:2', outcome: 'failed', ended_at: NOW - 60, host: 'nas' }),
+      ],
+      hostAliases: ['htz', 'nas'],
+      sessions: [],
+      routines: [],
+      now: NOW,
+    });
+    expect(orbitStageLabel(m)).toBe('0 running and 0 working across 2 hosts · a run waits for you on htz · a run failed lately on nas');
+    expect(orbitStageLabel({ ...m, hosts: m.hosts.map((h) => ({ ...h, needs: false, failed: false })) })).toBe(
+      '0 running and 0 working across 2 hosts',
+    );
   });
 
   it("ticks the next fires on the outer ring, and names a quiet host's next one", () => {
@@ -126,5 +143,21 @@ describe('hostLabels', () => {
     expect(l.get('claude-fleet')).toBe('fleet');
     expect(l.get('mac')).toBe('mac');
     expect(l.get('buildbox-primary')).toBe('buildbox-primary');
+  });
+
+  it('puts segments back until two shortened labels differ', () => {
+    const l = hostLabels(['prod-eu-web1', 'prod-eu-db01', 'prod-us-web1', 'prod-us-db01']);
+    expect(l.get('prod-eu-web1')).toBe('eu-web1');
+    expect(l.get('prod-us-web1')).toBe('us-web1');
+    expect(l.get('prod-eu-db01')).toBe('eu-db01');
+    expect(l.get('prod-us-db01')).toBe('us-db01');
+    expect(new Set(l.values()).size).toBe(4);
+  });
+
+  it('never prints a shortened label equal to another host\'s short alias', () => {
+    const l = hostLabels(['web1', 'claude-fleet-web1', 'claude-fleet-ci']);
+    expect(l.get('web1')).toBe('web1');
+    expect(l.get('claude-fleet-web1')).toBe('fleet-web1');
+    expect(l.get('claude-fleet-ci')).toBe('ci');
   });
 });

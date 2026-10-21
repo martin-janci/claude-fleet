@@ -302,4 +302,23 @@
 //!   `control_journal` tool (the desktop's command of the same name). A hub
 //!   without it refuses it as a protocol error, which the desktop reads as
 //!   nothing muted.
+//!   Control's auto-continue clock moved to the fleet (review F17) without a
+//!   bump: the `control_auto_continue` tool (the desktop's command of the
+//!   same name, and the phone's). The desktop no longer runs a clock of its
+//!   own, so against a hub without the tool (`E_HUB_PROTOCOL`) nothing goes
+//!   on by itself; the desktop's bar says the hub needs updating instead.
+//!   Multi-hub profiles (Phase 3b) are new without a bump: the read-only
+//!   `my_profile` tool (the desktop's command of the same name). A hub
+//!   without it answers `E_HUB_PROTOCOL`, and the desktop pieces the
+//!   profile together from `my_grants` and `env_vars` instead.
+//!   Routine memory (migration 204) is new without a bump: a routine row
+//!   carries `memory` and `memory_auto` (additive, absent when off), its
+//!   input takes them, and `routines` gains `memory` and `set_memory`. The
+//!   desktop sends the input fields only when a routine keeps a notebook
+//!   (or `memory: ""` to turn one off), so a hub without them still saves
+//!   every other routine; one that has no `memory` action answers
+//!   `E_INVALID`, which the editor shows as no notebook. The other way
+//!   round, a desktop older than memory sends a change without `memory`,
+//!   and the hub keeps the routine's notebooks rather than turning them
+//!   off.
 pub const CONTRACT_REVISION: u32 = 18;

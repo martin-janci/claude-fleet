@@ -6,6 +6,7 @@
   transcript.
 -->
 <script lang="ts">
+  import { errorText } from './error_copy';
   import { draftedBy } from './ai_proposal';
   import DraftedLabel from './DraftedLabel.svelte';
   import type { SessionRow } from './sessions';
@@ -47,11 +48,11 @@
     if (r.ok) {
       summary = r.value;
     } else if (r.error.code === 'E_FORBIDDEN') {
-      refused = r.error.message;
+      refused = errorText(r.error);
     } else if (r.error.code === 'E_HUB_PROTOCOL' || r.error.code === 'E_INVALID') {
       refused = 'This hub cannot summarise sessions yet.';
     } else {
-      error = r.error.message;
+      error = errorText(r.error);
     }
   }
 

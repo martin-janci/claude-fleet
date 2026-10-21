@@ -274,6 +274,59 @@ async fn a_person_closes_an_implemented_item_and_the_mission_completes() {
     assert_eq!(mission_now(&fx).state, "completed");
 }
 
+/// The loop applies the planner's cards one by one, each perhaps after an
+/// SSH start; a card a person dismissed meanwhile stays dismissed and is
+/// never applied, and one being decided by a person is left to them.
+#[tokio::test]
+async fn the_loop_never_applies_a_card_a_person_decided_meanwhile() {
+    let fx = fixture();
+    let (one, two, three) = (member(&fx, "one"), member(&fx, "two"), member(&fx, "three"));
+    let hold = |n: &str, item: i64| {
+        lock(&fx.deps.store)
+            .unwrap()
+            .add_card(
+                fx.m.id,
+                &NewCard {
+                    decision_id: n,
+                    source: "planner",
+                    kind: "hold",
+                    work_item_id: Some(item),
+                    payload: None,
+                },
+            )
+            .unwrap()
+            .unwrap()
+    };
+    let cards = vec![hold("t:1", one), hold("t:2", two), hold("t:3", three)];
+    let dismiss = WorkLinkArgs {
+        action: "card_decide".into(),
+        card_id: Some(cards[1].id),
+        ok: Some(false),
+        ..Default::default()
+    };
+    decide_card(&dismiss, &fx.deps, &fx.me).await.unwrap();
+    // A person is mid-decision on the third.
+    let _theirs = CardClaim::take(cards[2].id).unwrap();
+    let m = mission_now(&fx);
+    let shown = loop_apply_cards(&fx.deps, &m, cards, AUTO_LEVEL, true)
+        .await
+        .unwrap();
+    let states: Vec<&str> = shown.iter().map(|c| c.state.as_str()).collect();
+    assert_eq!(states, ["applied", "dismissed", "open"]);
+    let held = |item: i64| {
+        lock(&fx.deps.store)
+            .unwrap()
+            .get_work_item(item)
+            .unwrap()
+            .unwrap()
+            .held_at
+            .is_some()
+    };
+    assert!(held(one));
+    assert!(!held(two), "a dismissed card is never applied");
+    assert!(!held(three), "a card a person is deciding is theirs");
+}
+
 #[tokio::test]
 async fn a_card_is_decided_once_and_never_by_an_agent() {
     let fx = fixture();
@@ -850,12 +903,8 @@ fn a_run_goes_to_the_best_host_inside_its_grant() {
     seed(&s, "mac", None, "acct-mac", 80.0, now);
     seed(&s, "htz", None, "acct-htz", 70.0, now);
     seed(&s, "htz", Some("spare"), "acct-spare", 5.0, now);
-    s.conn_for_test()
-        .execute(
-            "UPDATE hosts SET reachable = 1, claude_version = '2.1' WHERE alias IN ('mac', 'htz')",
-            [],
-        )
-        .unwrap();
+    crate::service::account_limits::ready_host(&s, "mac");
+    crate::service::account_limits::ready_host(&s, "htz");
     let start = start_for(&s, &fx.m, item, &Actor::Loop, Some(&g)).unwrap();
     assert_eq!(start.host_alias.as_deref(), Some("htz"));
     assert_eq!(
@@ -990,4 +1039,61 @@ fn a_limit_with_no_known_reset_waits_the_guess() {
         "profile work on mac is at its usage limit (resets 3pm (Europe/Bratislava))"
     );
     assert_eq!(wait.said.as_deref(), Some("resets 3pm (Europe/Bratislava)"));
+}
+
+/// Mission #6 (2026-10-20): a run stuck open for over an hour braked the
+/// mission, and every resume braked it again on the same stale run before
+/// the tick tried a step. A person's resume restarts the window.
+#[tokio::test]
+async fn a_persons_resume_restarts_the_no_progress_window() {
+    let fx = fixture();
+    let item = member(&fx, "a");
+    let now = now_unix();
+    let stale = now - 2 * fx.m.policy.no_progress_secs as i64;
+    {
+        let s = lock(&fx.deps.store).unwrap();
+        crate::service::work::run::record_headless_run(&s, "x", item, 1, "implement").unwrap();
+        let c = s.conn_for_test();
+        c.execute("UPDATE tasks SET created_at = ?1, started_at = ?1", [stale])
+            .unwrap();
+        c.execute(
+            "UPDATE orchestration_events SET at = ?1 WHERE kind = 'state'",
+            [stale],
+        )
+        .unwrap();
+    }
+    let braked = || {
+        lock(&fx.deps.store)
+            .unwrap()
+            .conn_for_test()
+            .query_row(
+                "SELECT COUNT(*) FROM orchestration_events \
+                 WHERE orchestration_project_id = ?1 AND kind = 'no_progress'",
+                [fx.m.id],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap()
+    };
+    tick_mission(&fx.deps, fx.m.id, now).await.unwrap();
+    assert_eq!(mission_now(&fx).state, "paused", "the stale run brakes it");
+    assert_eq!(braked(), 1);
+
+    missions::set_state(
+        &WorkLinkArgs {
+            status: Some("active".into()),
+            ..by_id("mission_state", fx.m.id)
+        },
+        &fx.deps.store,
+        &fx.me,
+    )
+    .unwrap();
+    tick_mission(&fx.deps, fx.m.id, now_unix()).await.unwrap();
+    assert_eq!(mission_now(&fx).state, "active", "the resume gets a window");
+    assert_eq!(braked(), 1);
+
+    // The window still closes: an hour on with nothing moving brakes again.
+    let later = now_unix() + fx.m.policy.no_progress_secs as i64 + 1;
+    tick_mission(&fx.deps, fx.m.id, later).await.unwrap();
+    assert_eq!(mission_now(&fx).state, "paused");
+    assert_eq!(braked(), 2);
 }

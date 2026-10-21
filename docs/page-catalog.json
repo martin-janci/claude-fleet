@@ -3366,6 +3366,18 @@
       ]
     },
     {
+      "default_widget": "switch",
+      "key": "control.session_care",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Control looks after its sessions",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
       "default_widget": "number",
       "key": "control.follow_quiet_hours",
       "kind": {
@@ -3768,7 +3780,7 @@
         "min": 1,
         "type": "int"
       },
-      "label": "Download: file cap",
+      "label": "Downloads: largest file",
       "widgets": [
         "number",
         "readonly"
@@ -3782,7 +3794,7 @@
         "min": 1,
         "type": "int"
       },
-      "label": "Downloads: space",
+      "label": "Downloads: total space",
       "widgets": [
         "number",
         "readonly"
@@ -4427,7 +4439,7 @@
         ],
         "type": "choice"
       },
-      "label": "Context help model",
+      "label": "Writing help model",
       "widgets": [
         "select",
         "radio",

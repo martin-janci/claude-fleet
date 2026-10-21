@@ -278,6 +278,27 @@ impl Store {
         Ok(n as u32)
     }
 
+    /// How many of `session_id`'s `kind` events whose detail begins with
+    /// `detail_prefix` were written at or after `since`: the operator's
+    /// care-restart budget (`guard::CARE_RESTARTS_PER_HOUR`). Compared by
+    /// `substr`, not `LIKE`, so a `_` in a tool name is not a wildcard.
+    pub fn count_session_events_with_detail_since(
+        &self,
+        session_id: i64,
+        kind: &str,
+        detail_prefix: &str,
+        since: i64,
+    ) -> Result<u32, crate::ipc_error::IpcError> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM session_events \
+             WHERE session_id = ?1 AND at >= ?2 AND kind = ?3 \
+             AND substr(detail, 1, length(?4)) = ?4",
+            rusqlite::params![session_id, since, kind, detail_prefix],
+            |r| r.get(0),
+        )?;
+        Ok(n as u32)
+    }
+
     /// When `session_id`'s latest `kind` event at or before `until` was
     /// written, `None` without one: the auto-restore tick's "was this
     /// session restored shortly before the loss" (`service::auto_restore`).
@@ -742,6 +763,17 @@ impl Store {
         let params = params_then(rusqlite::params![at], ids);
         Ok(self.conn.execute(&sql, params.as_slice())?)
     }
+
+    /// Undo [`Self::mark_messages_delivered`] for one message whose wake
+    /// paste, stamped ahead of the send, typed nothing: the next hook
+    /// response hands it over instead.
+    pub fn unmark_message_delivered(&self, id: i64) -> Result<(), crate::ipc_error::IpcError> {
+        self.conn.execute(
+            "UPDATE session_messages SET delivered_at = NULL WHERE id = ?1",
+            [id],
+        )?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -992,6 +1024,33 @@ mod tests {
         assert!(!Store::timeline_needs_prune(SESSION_EVENTS_CAP - 1));
         assert!(!Store::timeline_needs_prune(SESSION_EVENTS_CAP));
         assert!(Store::timeline_needs_prune(SESSION_EVENTS_CAP + 1));
+    }
+
+    #[test]
+    fn count_with_detail_since_matches_the_prefix_literally() {
+        let s = Store::open_in_memory().expect("open");
+        let k = "control_pre_approved";
+        s.insert_session_event(7, k, Some("restart_session · Autopilot"))
+            .unwrap();
+        s.insert_session_event(7, k, Some("restart_session · Within your brief"))
+            .unwrap();
+        s.insert_session_event(7, k, Some("send_prompt · Autopilot"))
+            .unwrap();
+        // `_` is not a wildcard: this would match under LIKE.
+        s.insert_session_event(7, k, Some("restartXsession · Autopilot"))
+            .unwrap();
+        s.insert_session_event(7, "restarted", Some("restart_session · x"))
+            .unwrap();
+        s.insert_session_event(8, k, Some("restart_session · Autopilot"))
+            .unwrap();
+        s.insert_session_event(7, k, None).unwrap();
+        let now = crate::store::now_unix();
+        let n = |since| {
+            s.count_session_events_with_detail_since(7, k, "restart_session · ", since)
+                .unwrap()
+        };
+        assert_eq!(n(now - 60), 2);
+        assert_eq!(n(now + 60), 0, "only events at or after `since`");
     }
 
     #[test]

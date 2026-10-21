@@ -249,8 +249,9 @@ impl FleetTools {
     #[tool(description = "Which agent hosts (transport \"agent\") have a \
         fleet-agent connected: since (unix s), version, host name, OS. \
         Offline ones show connected=false; a call for one fails fast with \
-        E_AGENT_OFFLINE. enabled=false where no agents are accepted (the \
-        desktop).")]
+        E_AGENT_OFFLINE. duplicate (since, takeovers, peers) when two \
+        fleet-agents keep taking one host's token from each other. \
+        enabled=false where no agents are accepted (the desktop).")]
     pub(super) async fn agent_status(&self) -> Result<CallToolResult, McpError> {
         audit("agent_status", "");
         let registry = self.ssh.agent_registry().map(|r| r.as_ref());
@@ -324,11 +325,30 @@ impl FleetTools {
         never fetches. Errors: E_INVALID.")]
     pub(super) async fn suggest_placement(
         &self,
-        Parameters(p): Parameters<crate::service::placement::SuggestArgs>,
+        Extension(caller): Extension<Caller>,
+        Parameters(mut p): Parameters<crate::service::placement::SuggestArgs>,
     ) -> Result<CallToolResult, McpError> {
         audit("suggest_placement", "");
         let now = crate::store::now_unix();
         let s = crate::ipc_error::lock(self.reader()).map_err(to_mcp_err)?;
+        // Only the hosts of the caller's orgs are weighed: a client bound to
+        // an org, or a per-host token, never sees another org's hosts, their
+        // load or the logins behind them. Everything for an unbound caller.
+        for h in p.hosts.iter().flatten() {
+            crate::validate::host_alias(h).map_err(to_mcp_err)?;
+        }
+        let org = caller.org_scope(&s).map_err(to_mcp_err)?;
+        let seen: Vec<String> = s
+            .list_hosts()
+            .map_err(|e| to_mcp_err(IpcError::from(e)))?
+            .into_iter()
+            .filter(|h| org.sees_org(h.org_id))
+            .map(|h| h.alias)
+            .collect();
+        p.hosts = Some(match p.hosts.take() {
+            Some(asked) => asked.into_iter().filter(|h| seen.contains(h)).collect(),
+            None => seen,
+        });
         ok_json_compact(&crate::service::placement::suggest(&s, &p, now).map_err(to_mcp_err)?)
     }
 
@@ -567,7 +587,8 @@ impl FleetTools {
         (a reverse SSH tunnel when the hub is loopback-only). Returns \
         per-host status; each host must restart Claude to load it. host: \
         one alias; content_only: skills, CLAUDE.md and hooks only, no token. \
-        The hub owner's device may run content_only for one host only.")]
+        The master, or a fleet admin's own device for content_only on one \
+        host only.")]
     pub(super) async fn provision_hosts(
         &self,
         Extension(caller): Extension<Caller>,
@@ -608,8 +629,9 @@ impl FleetTools {
         (not a token) travels in the URL FRAGMENT, so no proxy or access log \
         sees it; the device posts it to /pair once for a token of its own. \
         name: 1-64 chars, no control characters, not a live client's. mode \
-        full drives sessions fleet-wide, readonly observes, peer is another \
-        hub's link (see peer_exchange), updater is fleet-updater's (/update \
+        full drives sessions fleet-wide, readonly observes, answer observes \
+        and answers dialogs and forms but never types a prompt, peer is \
+        another hub's link (see peer_exchange), updater is fleet-updater's (/update \
         only); fleet-admin tools stay out of a \
         client's reach. Codes are in memory only: a hub restart voids them. \
         org_id binds it to one org (its work and sessions only). person names \
@@ -918,7 +940,7 @@ impl FleetTools {
 
     #[tool(description = "Operator settings (ticks, GC, playbooks, projects \
         roots, move, usage, reports, work graph), each key's effective value. \
-        Master token or a paired device bound to no org.")]
+        The master or a fleet admin's own device.")]
     pub(super) async fn get_settings(
         &self,
         Parameters(p): Parameters<GetSettingsParams>,
@@ -936,8 +958,9 @@ impl FleetTools {
     }
 
     #[tool(description = "Change one get_settings key, validated; E_INVALID \
-        otherwise. mcp.*, hub.* and controller.* are refused. Master, or a \
-        trusted device. Returns the settings, or with propose the proposal.")]
+        otherwise. mcp.*, hub.* and controller.* are refused. The master or \
+        a fleet admin's own device (a write needs it trusted and full). \
+        Returns the settings, or with propose the proposal.")]
     pub(super) async fn set_setting(
         &self,
         Extension(caller): Extension<Caller>,
@@ -1104,7 +1127,7 @@ impl FleetTools {
         audit("control_journal", action);
         // Control's own state and the owner's words to it: Control, the
         // master and the fleet admin's own device only.
-        if !(caller.is_operator() || caller.is_master() || caller.is_fleet_admin_device()) {
+        if !caller.is_control_or_owner() {
             return Err(mcp_err(
                 "E_FORBIDDEN",
                 "control_journal is Control's and its owner's",

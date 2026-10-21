@@ -198,15 +198,6 @@ impl TriggerSource {
         }
     }
 
-    pub fn is_tracker(self) -> bool {
-        matches!(
-            self,
-            TriggerSource::TrackerComments
-                | TriggerSource::TrackerAssigned
-                | TriggerSource::TrackerQuery
-        )
-    }
-
     pub fn is_github(self) -> bool {
         matches!(
             self,
@@ -462,17 +453,6 @@ impl ActionKind {
         }
     }
 
-    /// Acts on fleet itself rather than a tracker, GitHub or a store.
-    pub fn is_fleet_own(self) -> bool {
-        matches!(
-            self,
-            ActionKind::WorkTask
-                | ActionKind::FixSession
-                | ActionKind::Setting
-                | ActionKind::SessionRecover
-        )
-    }
-
     /// The action keys this kind takes (besides id, when, do, auto, stop),
     /// and which of them it needs. `body` / `body_template` are one choice.
     fn keys(self) -> (&'static [&'static str], &'static [&'static str]) {
@@ -491,6 +471,7 @@ impl ActionKind {
                     "body_template",
                     "labels",
                     "link",
+                    "fingerprint",
                 ],
                 &["project", "summary", "body"],
             ),
@@ -498,7 +479,10 @@ impl ActionKind {
                 &["tracker", "from", "to", "link_type"],
                 &["from", "to", "link_type"],
             ),
-            ActionKind::PrReview => (&[], &[]),
+            ActionKind::PrReview => (
+                &["target", "body", "body_template", "verdict", "findings"],
+                &["target", "body"],
+            ),
             ActionKind::PrComment => (&["target", "body", "body_template"], &["target", "body"]),
             ActionKind::PrLabels => (&["target", "labels"], &["target", "labels"]),
             ActionKind::McpCall => (
@@ -509,17 +493,27 @@ impl ActionKind {
                 &["store", "key", "value", "expires_secs"],
                 &["store", "key", "value"],
             ),
-            ActionKind::WorkTask => (&["summary", "body", "body_template", "steps"], &["summary"]),
+            ActionKind::WorkTask => (
+                &["summary", "body", "body_template", "steps", "fingerprint"],
+                &["summary"],
+            ),
             ActionKind::FixSession => (
-                &["project", "host", "summary", "body", "body_template"],
+                &[
+                    "project",
+                    "host",
+                    "summary",
+                    "body",
+                    "body_template",
+                    "fingerprint",
+                ],
                 &["project", "summary", "body"],
             ),
             ActionKind::Setting => (
-                &["key", "value", "body", "body_template"],
+                &["key", "value", "body", "body_template", "fingerprint"],
                 &["key", "value", "body"],
             ),
             ActionKind::SessionRecover => (
-                &["target", "host", "body", "body_template"],
+                &["target", "host", "body", "body_template", "fingerprint"],
                 &["target", "body"],
             ),
         }
@@ -598,6 +592,20 @@ pub struct Action {
     /// `fix_session`, `session_recover`: the host (a template).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<String>,
+    /// `work_task`, `fix_session`, `setting`, `session_recover`,
+    /// `tracker_issue`: what the finding is (a template), kept on the
+    /// action so a later run can tell it was proposed (and rejected)
+    /// before (the diagnostics `proposals` tool answers it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<String>,
+    /// `pr_review`: APPROVE | REQUEST_CHANGES | COMMENT (a template;
+    /// anything else is COMMENT).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verdict: Option<String>,
+    /// `pr_review`: an array field of the answer, each item a line comment
+    /// `{path, line, body}`, placed on the PR's diff when it is sent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub findings: Option<String>,
 }
 
 /// Most items one `each` action is planned for.
@@ -631,6 +639,9 @@ impl Action {
         put("expires_secs", self.expires_secs.is_some());
         put("steps", self.steps.is_some());
         put("host", self.host.is_some());
+        put("fingerprint", self.fingerprint.is_some());
+        put("verdict", self.verdict.is_some());
+        put("findings", self.findings.is_some());
         out
     }
 }
@@ -1270,6 +1281,8 @@ pub fn problems(d: &Definition, templates: &BTreeMap<String, String>) -> Vec<Str
             ("key", &a.key),
             ("steps", &a.steps),
             ("host", &a.host),
+            ("fingerprint", &a.fingerprint),
+            ("verdict", &a.verdict),
         ] {
             if let Some(v) = v {
                 check_template(v, &format!("{at} › {k}"), after_run, &mut out);
@@ -1316,6 +1329,26 @@ pub fn problems(d: &Definition, templates: &BTreeMap<String, String>) -> Vec<Str
                     out.push(format!(
                         "{at}: pr_review reviews a PR's head: the trigger is github_prs"
                     ));
+                }
+                if a.kind == ActionKind::PrReview && a.each.is_some() {
+                    out.push(format!("{at}: pr_review is one review: no each"));
+                }
+                if let Some(f) = a.findings.as_ref().filter(|_| schema_ok) {
+                    let item = r
+                        .output_schema
+                        .get("properties")
+                        .and_then(|p| p.get(f))
+                        .filter(|v| v.get("type").and_then(Value::as_str) == Some("array"))
+                        .and_then(|v| v.get("items"));
+                    let has = |k: &str| {
+                        item.and_then(|i| i.get("properties"))
+                            .is_some_and(|p| p.get(k).is_some())
+                    };
+                    if !(has("path") && has("line") && has("body")) {
+                        out.push(format!(
+                            "{at}: findings {f} is not an array of {{path, line, body}} in output_schema"
+                        ));
+                    }
                 }
             }
             ActionKind::McpCall => {

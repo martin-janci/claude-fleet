@@ -20,6 +20,18 @@ to clear to `CONTRAST_PAIRS`. The phone's `FleetTheme.kt` follows the same
 snapshot (step 0.10); fleet-mobile's copy of this file has not taken the r10
 additions yet, which name no token the phone draws.
 
+## Palette engine
+
+The colours the app shows at run time are the palette engine's
+(`src/lib/palette.ts`, `docs/architecture.md` → *Theme engine*), solved from
+these tokens' roles for the sun's height, the Contrast level and the Accent;
+`app.css`'s theme blocks are its first paint. `palette-golden.json` holds the
+engine's golden values for six inputs. It is generated
+(`REGEN_PALETTE_GOLDEN=1 pnpm exec vitest run src/lib/palette.test.ts`, which
+fails on purpose; run it again), `palette.test.ts` fails when the engine no
+longer paints it, and fleet-mobile keeps an unchanged copy that its
+`OrbitPaletteTest` holds the Kotlin port to.
+
 ## Loaders
 
 `src/lib/Loader.svelte` is the manual's loader kit: the 24 loaders of its

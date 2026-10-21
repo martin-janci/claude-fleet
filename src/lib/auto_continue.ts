@@ -13,7 +13,7 @@
 // What keeps it from acting where a person must lives there too: the
 // setting, "Ask first" on the autonomy dial, risky words, a newer turn, a
 // busy agent, and cards older than a day.
-import { invokeCmd, type Result } from './result';
+import { invokeCmd, type IpcError, type Result } from './result';
 
 export type PickState = 'waiting' | 'sent' | 'taken' | 'cancelled' | 'superseded' | 'failed';
 
@@ -40,6 +40,14 @@ export function autoContinue(action: 'status' | 'cancel' | 'take', turnSeq?: num
   return invokeCmd<AutoContinueView>('control_auto_continue', { action, turnSeq: turnSeq ?? null });
 }
 
+/** A hub from before the fleet ran the clock (2026-10-17) has no
+ *  `control_auto_continue` tool and refuses it as a protocol error
+ *  (`wire_contract.rs`, revision 18): no clock runs anywhere, so the bar
+ *  says the hub needs updating rather than drawing nothing. */
+export function hubLacksAutoContinue(e: IpcError): boolean {
+  return e.code === 'E_HUB_PROTOCOL';
+}
+
 /** The pick to draw a countdown for in `sessionId`'s chat, or null. */
 export function liveCountdown(v: AutoContinueView | null, sessionId: number): { pick: PendingPick; dueAt: number } | null {
   const p = v?.pending;
@@ -51,4 +59,15 @@ export function liveCountdown(v: AutoContinueView | null, sessionId: number): { 
 export function countdown(msLeft: number): string {
   const s = Math.max(0, Math.ceil(msLeft / 1000));
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+}
+
+/** The countdown in words for a screen reader (review w19-1): it changes
+ *  only at each whole minute and once at ten seconds, so a live region
+ *  holding it is not re-announced every second the way `countdown` is. */
+export function spokenCountdown(msLeft: number): string {
+  const s = Math.max(0, Math.ceil(msLeft / 1000));
+  if (s <= 10) return 'a few seconds';
+  if (s <= 60) return 'under a minute';
+  const m = Math.ceil(s / 60);
+  return `about ${m} minutes`;
 }

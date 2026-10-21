@@ -5,12 +5,14 @@
   one there and then; editing lives in Automation.
 -->
 <script lang="ts">
+  import { errorText } from './error_copy';
   import { onMount } from 'svelte';
   import StatusDot from './kit/StatusDot.svelte';
   import { listRoutines, lastRunByRoutine, openRoutines, routineDot, routineLine, runRoutineNow, type RoutineRow } from './routines';
   import { listRuns, type RunRow } from './runs';
   import { readErrorText } from './work_view';
   import type { IpcError } from './result';
+  import Skeleton from './states/Skeleton.svelte';
 
   let routines = $state<RoutineRow[]>([]);
   let last = $state<Map<number, RunRow>>(new Map());
@@ -47,7 +49,7 @@
     busy = r.id;
     const res = await runRoutineNow(r.id);
     busy = null;
-    note = res.ok ? `${r.name} started.` : res.error.message;
+    note = res.ok ? `${r.name} started.` : errorText(res.error);
     if (res.ok) void load();
   }
 </script>
@@ -58,7 +60,10 @@
     <p class="muted" role="alert" data-testid="control-routines-error">
       {readErrorText(loadError)} <button type="button" class="btn" onclick={() => void load()}>Retry</button>
     </p>
-  {:else if loaded && rows.length === 0}
+  {:else if !loaded}
+    <!-- Review w17-11: the first read in flight is a skeleton, not a blank. -->
+    <Skeleton rows={3} label="Loading routines" />
+  {:else if rows.length === 0}
     <div class="empty" data-testid="control-routines-empty">
       <p class="muted">No routines yet. A routine is a saved prompt that starts a session on a schedule or an event.</p>
       <button type="button" class="btn" data-testid="control-routines-template" onclick={() => openRoutines({ template: 'morning-pr-sweep' })}

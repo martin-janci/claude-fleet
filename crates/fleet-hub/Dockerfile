@@ -16,6 +16,7 @@ COPY skills ./skills
 COPY tools/ag ./tools/ag
 COPY tools/voice ./tools/voice
 COPY src/lib/names.json ./src/lib/names.json
+COPY catalog-seed/fleet-agents ./catalog-seed/fleet-agents
 # The context has no .git, so build.rs takes the build identity from these
 # (hub-image.yml passes them; a local `docker build` gets unknown / local).
 ARG FLEET_GIT_SHA=

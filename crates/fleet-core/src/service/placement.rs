@@ -328,10 +328,25 @@ pub fn facts(
     local_enabled: bool,
     now: i64,
 ) -> Result<(Vec<HostFacts>, bool), IpcError> {
-    let hosts = crate::service::hosts::active_hosts(s.list_hosts()?, local_enabled);
+    let all = s.list_hosts()?;
+    let hosts = crate::service::hosts::active_hosts(all.clone(), local_enabled);
     let snaps = s.latest_usage_snapshots()?;
     let accounts = s.list_accounts()?;
-    let live = s.live_sessions_per_account()?;
+    let mut live = s.live_sessions_per_account()?;
+    // A run started moments ago may not carry its account yet (a profile
+    // start drops the link until reconcile fills it): charge it to the
+    // account its login holds, so the next pick of the same pass sees it.
+    let unlinked = s.live_unlinked_sessions_per_login()?;
+    if !unlinked.is_empty() {
+        // Every host's logins, the hidden ones' too: their runs still count.
+        for h in &all {
+            for l in account_limits::host_logins(h, &[], now) {
+                if let Some(n) = unlinked.get(&(h.alias.clone(), l.profile.clone())) {
+                    *live.entry(l.account_uuid).or_default() += n;
+                }
+            }
+        }
+    }
     let cfg = auto_restore::AutoRestoreConfig::from_store(s);
     let with_repo: Option<Vec<String>> = match project_id {
         Some(p) => Some(s.hosts_with_project(p)?),

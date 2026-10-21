@@ -6,7 +6,8 @@
   import { sessions } from './sessions';
   import { attentionIdleMinutes } from './notify';
   import { attentionFacts } from './attention_facts';
-  import { effectiveScope, scopes, scopeOf, scopeFilter, needsYouElsewhere } from './orgs';
+  import { effectiveScope, scopes, scopeOf, needsYouElsewhere } from './orgs';
+  import { pickPrimaryScope } from './fleet_filters';
 
   let nowSec = $state(Math.floor(Date.now() / 1000));
   $effect(() => {
@@ -28,7 +29,7 @@
       <button
         class="pill hot"
         data-testid="needs-you-elsewhere-item"
-        onclick={() => scopeFilter.set(e.scope)}
+        onclick={() => pickPrimaryScope(e.scope)}
         title="Switch to {e.label}"
       >
         {e.count} need{e.count === 1 ? 's' : ''} you in {e.label} →

@@ -16,9 +16,14 @@ use crate::store::{
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 
-/// Most jobs and actions one `status` answers.
+/// Most jobs one `status` answers (`limit`'s ceiling).
 pub const STATUS_MAX_LIMIT: u32 = 200;
 const STATUS_DEFAULT_LIMIT: u32 = 20;
+/// How many pending actions `status` lists, whatever `limit` asks for the
+/// jobs (review w11-5), newest first. A backlog past this cap is not hidden
+/// from the count: `status.pending_total` is uncapped, and the Inbox badge
+/// reads it.
+pub const STATUS_PENDING_MAX: usize = STATUS_MAX_LIMIT as usize;
 /// Longest a granted rule may run before it ends on its own.
 pub const MAX_RULE_HOURS: i64 = 24 * 90;
 
@@ -27,8 +32,8 @@ pub const MAX_RULE_HOURS: i64 = 24 * 90;
 #[derive(Debug, Clone, Default, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars", rename = "AgentsParams")]
 pub struct AgentsArgs {
-    /// status | explain | job | definitions | form | grant | revoke | pause_all |
-    /// approve | reject | run.
+    /// status | explain | job | definitions | gallery | form | grant | install |
+    /// revoke | pause_all | approve | reject | run.
     pub action: String,
     /// grant: review | support | fleet; status: only this agent's jobs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -53,7 +58,8 @@ pub struct AgentsArgs {
     /// grant: the rule ends after this many hours (default never).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hours: Option<i64>,
-    /// grant (fleet): the catalog fleet_agent the rule runs.
+    /// grant (fleet): the catalog fleet_agent the rule runs; install: the
+    /// gallery definition to add to the catalog.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub definition: Option<String>,
     /// grant (fleet): one binding per store role, a JSON array of
@@ -77,7 +83,8 @@ pub struct AgentsArgs {
     /// revoke, run: a rule's id; approve, reject: an action's id; job: a job's id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<i64>,
-    /// status: jobs and actions, ≤ 200 (default 20).
+    /// status: jobs, ≤ 200 (default 20); pending actions are listed up to
+    /// 200 whatever this is, and `pending_total` counts all of them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
 }
@@ -87,7 +94,7 @@ impl AgentsArgs {
     pub fn is_read(&self) -> bool {
         matches!(
             self.action.as_str(),
-            "status" | "explain" | "job" | "definitions" | "form"
+            "status" | "explain" | "job" | "definitions" | "gallery" | "form"
         )
     }
 }
@@ -106,9 +113,25 @@ pub struct AgentRuleView {
 pub struct AgentsStatus {
     pub rules: Vec<AgentRuleView>,
     pub jobs: Vec<AgentJobRow>,
-    /// Actions waiting for a person.
+    /// Actions waiting for a person, newest first, at most
+    /// [`STATUS_PENDING_MAX`].
     pub pending: Vec<AgentActionRow>,
+    /// How many actions are waiting, uncapped: more than `pending.len()`
+    /// when the backlog passes [`STATUS_PENDING_MAX`]. Absent (0) from an
+    /// older hub; read `pending.len()` then.
+    #[serde(default)]
+    pub pending_total: u64,
+    /// Actions a person approved that ran (or failed) in the last
+    /// [`RECENT_WINDOW_SECS`], newest first, at most [`RECENT_MAX`]: an
+    /// executed one's `error` says what it made, a failed one's why.
+    #[serde(default)]
+    pub recent: Vec<AgentActionRow>,
 }
+
+/// How far back `status.recent` reaches.
+pub const RECENT_WINDOW_SECS: i64 = 24 * 3600;
+/// Most rows `status.recent` carries.
+pub const RECENT_MAX: usize = 5;
 
 /// What a rule write answers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -314,7 +337,13 @@ pub fn status(store: &Mutex<Store>, args: &AgentsArgs, now: i64) -> Result<Agent
         jobs: s
             .list_agent_jobs(args.agent.as_deref(), limit)
             .map_err(db)?,
-        pending: s.list_agent_actions(Some("pending"), limit).map_err(db)?,
+        pending: s
+            .list_agent_actions(Some("pending"), STATUS_PENDING_MAX)
+            .map_err(db)?,
+        pending_total: s.count_agent_actions("pending").map_err(db)?,
+        recent: s
+            .recent_decided_agent_actions(now - RECENT_WINDOW_SECS, RECENT_MAX)
+            .map_err(db)?,
     })
 }
 
@@ -434,7 +463,30 @@ pub fn fleet_form(
     Ok(form::grant_form(&sources.definition, &ctx, rule.as_ref()))
 }
 
+/// [`call`], plus `install`: a gallery install writes the personal catalog,
+/// so it waits for the PF7 authoring lock and runs its git on a blocking
+/// thread ([`gallery::install_locked`](crate::service::fleet_agents::gallery::install_locked)).
+/// The caller has already checked the device may write (and, for an
+/// install, may write the personal catalog).
+pub async fn call_async(
+    store: &std::sync::Arc<Mutex<Store>>,
+    args: &AgentsArgs,
+    by: &str,
+    now: i64,
+) -> Result<serde_json::Value, IpcError> {
+    if args.action != "install" {
+        return call(store, args, by, now);
+    }
+    let name = args
+        .definition
+        .as_deref()
+        .ok_or_else(|| invalid("install needs definition (a gallery name)"))?;
+    let done = crate::service::fleet_agents::gallery::install_locked(store, name).await?;
+    serde_json::to_value(done).map_err(|e| IpcError::new(codes::E_INTERNAL, e.to_string()))
+}
+
 /// Dispatch one call. The caller has already checked the device may write.
+/// `install` goes through [`call_async`].
 pub fn call(
     store: &Mutex<Store>,
     args: &AgentsArgs,
@@ -461,9 +513,18 @@ pub fn call(
             crate::service::fleet_agents::form::definitions()?,
         )),
         "form" => to_json(serde_json::to_value(fleet_form(store, args)?)),
+        "gallery" => to_json(serde_json::to_value(
+            crate::service::fleet_agents::gallery::gallery(),
+        )),
+        // A catalog write: it holds the authoring lock, so only
+        // [`call_async`] runs it.
+        "install" => Err(IpcError::new(
+            codes::E_INTERNAL,
+            "agents install runs through admin::call_async",
+        )),
         other => Err(invalid(format!(
             "unknown agents action {other:?}: status | explain | job | grant | revoke | pause_all | \
-             approve | reject | run | definitions | form"
+             approve | reject | run | definitions | gallery | form | install"
         ))),
     }
 }

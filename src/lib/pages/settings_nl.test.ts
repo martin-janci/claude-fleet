@@ -47,6 +47,17 @@ describe('settings in plain words', () => {
     expect(err('set no such thing to 3')).toContain('No setting');
   });
 
+  it('a choice set takes option labels, and a label holding "and" stays whole (review w15-6)', () => {
+    expect(parseValue(d('notify.sound'), 'needs you')).toEqual({ value: 'needs_you' });
+    expect(parseValue(d('notify.sound'), 'failed and needs you')).toEqual({ value: 'needs_you,failed' });
+    expect(parseValue(d('work.auto_tidy_reasons'), 'done and idle')).toEqual({ value: 'done_idle' });
+    expect(parseValue(d('work.auto_tidy_reasons'), "done and idle, won't do / duplicate")).toEqual({
+      value: 'done_idle,not_planned',
+    });
+    const bad = parseValue(d('notify.sound'), 'sometimes');
+    expect('error' in bad && bad.error).toContain('Needs you');
+  });
+
   it('asks which when the words fit several settings about as well', () => {
     const r = interpret('set tidy to 3', descs);
     expect(r?.kind).toBe('ambiguous');

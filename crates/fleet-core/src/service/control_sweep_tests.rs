@@ -141,7 +141,7 @@ fn the_sweep_looks_at_what_control_started_and_nothing_with_the_setting_off() {
     assert!(s.handed_off_session_ids(Some(r.id)).unwrap().is_empty());
     assert!(!s.handed_off_session_ids(None).unwrap().contains(&other));
     s.set_setting(settings::CONTROL_SWEEP, "false").unwrap();
-    assert!(conditions(&s, None, 0).is_empty());
+    assert!(conditions(&s, None, &[], 0).is_empty());
 }
 
 #[test]
@@ -195,4 +195,26 @@ fn a_pr_is_swept_after_following_stopped_but_not_when_muted() {
     }
     assert!(!pr_swept(&follows, 5), "a mute holds");
     assert!(!pr_swept(&follows, 9), "not a thread of Control's");
+}
+
+#[test]
+fn a_wait_on_the_person_does_not_count_toward_the_stall() {
+    let mut st = SweepState::default();
+    let t0 = 1_000_000;
+    let mut m = mission(1, 5);
+    assert_eq!(progress_since(&mut st, &m, t0), t0);
+    m.waiting_on = Some(
+        serde_json::from_value(
+            serde_json::json!({"reason": "question", "since": 0, "open_cards": 0}),
+        )
+        .unwrap(),
+    );
+    // Five hours waiting: the clock follows the wait.
+    let resumed = t0 + 5 * 3600;
+    assert_eq!(progress_since(&mut st, &m, resumed), resumed);
+    // Answered: the clock starts at the end of the wait, not before it.
+    m.waiting_on = None;
+    let since = progress_since(&mut st, &m, resumed + 60);
+    assert_eq!(since, resumed);
+    assert!(mission_condition(&m, since, resumed + 60, false).is_none());
 }

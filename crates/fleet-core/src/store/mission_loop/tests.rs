@@ -320,17 +320,21 @@ fn a_start_is_inside_a_grant_only_on_its_hosts_while_it_holds() {
     )
     .unwrap();
     assert!(
-        !s.start_inside_mission_grant("h", now).unwrap(),
+        !s.start_inside_mission_grant(Some("h"), now).unwrap(),
         "a mission that is not running grants nothing"
     );
     s.set_mission_state(m, None, "active", "fleet").unwrap();
-    assert!(s.start_inside_mission_grant("h", now).unwrap());
+    assert!(s.start_inside_mission_grant(Some("h"), now).unwrap());
     assert!(
-        !s.start_inside_mission_grant("other", now).unwrap(),
+        !s.start_inside_mission_grant(Some("other"), now).unwrap(),
         "not its host"
     );
     assert!(
-        !s.start_inside_mission_grant("h", now + 3601).unwrap(),
+        !s.start_inside_mission_grant(None, now).unwrap(),
+        "a start fleet places may land outside the grant's hosts"
+    );
+    assert!(
+        !s.start_inside_mission_grant(Some("h"), now + 3601).unwrap(),
         "expired"
     );
     s.conn
@@ -341,7 +345,212 @@ fn a_start_is_inside_a_grant_only_on_its_hosts_while_it_holds() {
         )
         .unwrap();
     assert!(
-        !s.start_inside_mission_grant("h", now).unwrap(),
+        !s.start_inside_mission_grant(Some("h"), now).unwrap(),
         "budget spent"
+    );
+}
+
+/// A task's start with no host (fleet places it) is inside a grant only when
+/// the grant names no hosts.
+#[test]
+fn a_hostless_start_is_inside_only_a_grant_naming_no_hosts() {
+    let s = Store::open_in_memory().unwrap();
+    let m = mission(&s);
+    let now = now_unix();
+    s.add_grant(
+        m,
+        &NewGrant {
+            level: 3,
+            granted_by: "person:1",
+            hosts: None,
+            expires_at: now + 3600,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    s.set_mission_state(m, None, "active", "fleet").unwrap();
+    assert!(s.start_inside_mission_grant(None, now).unwrap());
+    assert!(s.start_inside_mission_grant(Some("any"), now).unwrap());
+}
+
+/// Review r3: a `work_link` start on a task is inside a grant only when the
+/// task belongs to the granting mission, and every session it starts fits
+/// the mission's parallel cap.
+#[test]
+fn a_task_start_is_inside_only_its_own_missions_grant() {
+    let s = Store::open_in_memory().unwrap();
+    let granting = mission(&s);
+    let other = mission(&s);
+    let now = now_unix();
+    s.add_grant(
+        granting,
+        &NewGrant {
+            level: 3,
+            granted_by: "person:1",
+            hosts: None,
+            max_parallel: Some(2),
+            expires_at: now + 3600,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    s.set_mission_state(granting, None, "active", "fleet")
+        .unwrap();
+    s.set_mission_state(other, None, "active", "fleet").unwrap();
+    let item = |key: &str, m: Option<i64>| -> i64 {
+        s.conn
+            .execute(
+                "INSERT INTO work_items (source, key, title, origin, created_at, updated_at, \
+                 orchestration_project_id) VALUES ('local', ?1, ?1, 'person', 1, 1, ?2)",
+                rusqlite::params![key, m],
+            )
+            .unwrap();
+        s.conn.last_insert_rowid()
+    };
+    let member = item("M-1", Some(granting));
+    let foreign = item("O-1", Some(other));
+    let plain = item("P-1", None);
+    assert_eq!(s.work_item_mission(member).unwrap(), Some(granting));
+    assert_eq!(s.work_item_mission(foreign).unwrap(), Some(other));
+    assert_eq!(s.work_item_mission(plain).unwrap(), None);
+    assert!(s
+        .mission_start_inside_grant(granting, None, 1, now)
+        .unwrap());
+    assert!(s
+        .mission_start_inside_grant(granting, None, 2, now)
+        .unwrap());
+    assert!(
+        !s.mission_start_inside_grant(granting, None, 3, now)
+            .unwrap(),
+        "three siblings do not fit a cap of two"
+    );
+    assert!(
+        !s.mission_start_inside_grant(other, None, 1, now).unwrap(),
+        "another mission's grant does not cover this one's task"
+    );
+    // The new-session form still asks whether any grant covers the host.
+    assert!(s.start_inside_mission_grant(None, now).unwrap());
+}
+
+/// Review 456: the parallel cap counts what runs for the mission — its open
+/// tasks and the live sessions a `work_link` start put on a member — and
+/// not a finished run's idle worker, the wrap-up session or a ghost row,
+/// whose links stay open until something retires them.
+#[test]
+fn the_parallel_cap_counts_open_work_not_finished_workers_or_ghosts() {
+    let s = Store::open_in_memory().unwrap();
+    let m = mission(&s);
+    let now = now_unix();
+    s.add_grant(
+        m,
+        &NewGrant {
+            level: 3,
+            granted_by: "person:1",
+            hosts: None,
+            max_parallel: Some(2),
+            expires_at: now + 3600,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    s.set_mission_state(m, None, "active", "fleet").unwrap();
+    s.conn
+        .execute(
+            "INSERT INTO work_items (source, key, title, origin, created_at, updated_at, \
+             orchestration_project_id) VALUES ('local', 'M-1', 'M-1', 'person', 1, 1, ?1)",
+            [m],
+        )
+        .unwrap();
+    let member = s.conn.last_insert_rowid();
+    s.upsert_host("h").unwrap();
+    let linked = |name: &str| -> i64 {
+        let id = s
+            .upsert_session(name, "h", None, None, 1, 1, "running", None)
+            .unwrap();
+        s.link_session_work(id, crate::store::WorkTarget::Item(member), "manual")
+            .unwrap();
+        id
+    };
+    let task = |worker: i64, state: &str, role: Option<&str>| {
+        s.conn
+            .execute(
+                "INSERT INTO tasks (worker_session_id, prompt, state, created_at, nonce, \
+                 work_item_id, role) VALUES (?1, 'p', ?2, 1, ?3, ?4, ?5)",
+                rusqlite::params![worker, state, format!("n{worker}"), member, role],
+            )
+            .unwrap();
+    };
+    let finished = linked("finished");
+    task(finished, "done", None);
+    let wrapup = linked("wrapup");
+    task(wrapup, "running", Some("wrapup"));
+    let ghost = linked("ghost");
+    s.conn
+        .execute(
+            "UPDATE sessions SET status = 'ghost' WHERE id = ?1",
+            [ghost],
+        )
+        .unwrap();
+    assert!(
+        s.mission_start_inside_grant(m, None, 2, now).unwrap(),
+        "nothing runs for the mission: both slots are free"
+    );
+    let _started = linked("started");
+    assert!(s.mission_start_inside_grant(m, None, 1, now).unwrap());
+    assert!(
+        !s.mission_start_inside_grant(m, None, 2, now).unwrap(),
+        "a work_link start on a member takes a slot"
+    );
+    let worker = linked("worker");
+    task(worker, "running", None);
+    assert!(
+        !s.mission_start_inside_grant(m, None, 1, now).unwrap(),
+        "an open task and the started session fill the cap, counted once each"
+    );
+}
+
+/// Review w29-16: a repo added widens what a mission may do, so the grant
+/// signed before it no longer covers a start; a role change or a removal
+/// leaves the grant standing.
+#[test]
+fn adding_a_repo_voids_the_grant_signed_for_the_old_plan() {
+    let s = Store::open_in_memory().unwrap();
+    let m = mission(&s);
+    let api = s.upsert_project("acme", "api", "/src/api").unwrap();
+    let web = s.upsert_project("acme", "web", "/src/web").unwrap();
+    s.set_mission_repo(m, api, None, true, "fleet").unwrap();
+    s.set_mission_state(m, None, "active", "fleet").unwrap();
+    let now = now_unix();
+    let grant = NewGrant {
+        level: 2,
+        granted_by: "person:1",
+        hosts: Some(vec!["h".into()]),
+        expires_at: now + 3600,
+        ..Default::default()
+    };
+    s.add_grant(m, &grant).unwrap();
+    assert!(s.start_inside_mission_grant(Some("h"), now).unwrap());
+
+    s.set_mission_repo(m, api, Some("backend"), true, "fleet")
+        .unwrap();
+    s.set_mission_repo(m, web, None, false, "fleet").unwrap();
+    assert!(
+        s.start_inside_mission_grant(Some("h"), now).unwrap(),
+        "a role change, or removing a repo it never had, changes no plan"
+    );
+
+    let before = s.get_mission(m).unwrap().unwrap().plan_version;
+    s.set_mission_repo(m, web, None, true, "fleet").unwrap();
+    assert_eq!(s.get_mission(m).unwrap().unwrap().plan_version, before + 1);
+    assert_eq!(s.live_mission_grant(m, now).unwrap(), None);
+    assert!(
+        !s.start_inside_mission_grant(Some("h"), now).unwrap(),
+        "the grant was signed for the plan without acme/web"
+    );
+
+    s.add_grant(m, &grant).unwrap();
+    assert!(
+        s.start_inside_mission_grant(Some("h"), now).unwrap(),
+        "a grant signed for the new plan covers it again"
     );
 }

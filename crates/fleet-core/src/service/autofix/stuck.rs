@@ -4,13 +4,18 @@
 //!
 //! | kind          | fix                         | safety                                   |
 //! |---------------|-----------------------------|------------------------------------------|
-//! | reconnect     | press Enter                 | Safe, automatic                          |
+//! | reconnect     | press Enter                 | NeedsApproval                            |
 //! | trust_prompt  | press Enter (Yes, proceed)  | NeedsApproval                            |
 //! | auth_menu     | none: a login on the host   | n/a                                      |
 //! | press_enter   | press Enter                 | Safe when `playbooks.press_enter` is on (the playbook runs it), else NeedsApproval |
 //! | oom           | recreate                    | Safe when `playbooks.oom_recreate` is on (the playbook runs it), else NeedsApproval |
 //!
 //! The controller is never sent keys: its findings carry no fix.
+//!
+//! `reconnect` is matched on a substring anywhere in the pane's tail (tool
+//! output that says "Reconnecting to db…" matches too), so its Enter is never
+//! pressed by itself: in a working session, or one at a permission prompt,
+//! that Enter would submit queued input or approve the preselected choice.
 
 use super::{ClientAction, Finding, FindingBody, Fix, FixPlan, Safety, ScanCx, Severity};
 use crate::store::SessionRow;
@@ -80,13 +85,15 @@ pub fn scan(cx: &ScanCx) -> Vec<Finding> {
                 Severity::Degraded,
                 format!("{n} lost its connection and is stuck reconnecting"),
                 "The session's connection to Claude dropped and it is waiting to retry. \
-                     Pressing Enter usually wakes it up; nothing it was doing is lost."
+                     Pressing Enter usually wakes it up; nothing it was doing is lost. Look at \
+                     the pane first: if it shows a question or typed text instead, Enter \
+                     answers or sends that, so this waits for you."
                     .to_string(),
                 Some(press(
                     r,
                     kind,
-                    Safety::Safe,
-                    true,
+                    Safety::NeedsApproval,
+                    false,
                     "it nudges the reconnect.",
                 )),
                 None,
@@ -259,14 +266,18 @@ mod tests {
     }
 
     #[test]
-    fn reconnect_is_a_safe_automatic_enter() {
+    fn reconnect_waits_for_approval() {
         let c = cx("reconnect");
         let f = only(&c);
         assert_eq!(f.kind, "stuck.reconnect");
         assert_eq!(f.subject, format!("session:{}", c.sessions[0].id));
         assert_eq!(f.host_alias.as_deref(), Some("h1"));
         let fix = f.body.fix.unwrap();
-        assert_eq!((fix.safety, fix.auto), (Safety::Safe, true));
+        assert_eq!(
+            (fix.safety, fix.auto),
+            (Safety::NeedsApproval, false),
+            "a substring match is never enough to press Enter unattended"
+        );
         assert_eq!(fix.plan, press(&c.sessions[0], "reconnect"));
     }
 

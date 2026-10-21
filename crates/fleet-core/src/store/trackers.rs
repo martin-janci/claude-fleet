@@ -245,9 +245,7 @@ pub struct TrackerViewRow {
     pub sync_mark: Option<String>,
 }
 
-fn default_true() -> bool {
-    true
-}
+use crate::serde_util::default_true;
 
 /// A secret string: no `Serialize`, and `Debug`/`Display` print
 /// `[REDACTED]`. Read it with [`Secret::expose`], only where it is sent.

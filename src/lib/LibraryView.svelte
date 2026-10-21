@@ -16,6 +16,7 @@
   folder is cut with Drive: fleet does not list claude.ai artifacts.
 -->
 <script lang="ts">
+  import { errorText } from './error_copy';
   import { onMount } from 'svelte';
   import { addProjectRequest } from './app_views';
   import Icon from './kit/Icon.svelte';
@@ -106,13 +107,13 @@
     error = null;
     const r = await uploadToSession(s);
     busy = false;
-    if (r && !r.ok) error = r.error.message;
+    if (r && !r.ok) error = errorText(r.error);
   }
 
   async function forget(e: LibraryEntry) {
     if (!e.item) return;
     const r = await removeLibraryItem(e.item.id);
-    if (!r.ok) error = r.error.message;
+    if (!r.ok) error = errorText(r.error);
   }
 
   async function save(e: LibraryEntry) {

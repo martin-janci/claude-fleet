@@ -118,7 +118,9 @@ export const scrollMemory = new Map<number, ScrollSnapshot>();
 sessions.subscribe((rows) => {
   if (scrollMemory.size === 0 || !get(sessionsLoaded)) return;
   const live = new Set(rows.map((r) => r.id));
-  for (const id of [...scrollMemory.keys()]) if (!live.has(id)) scrollMemory.delete(id);
+  // A negative key is an extra fleet's session (`fleets.ts::sessionKey`),
+  // which this store does not list.
+  for (const id of [...scrollMemory.keys()]) if (id >= 0 && !live.has(id)) scrollMemory.delete(id);
 });
 
 /** Records where session `sessionId`'s view was left. A snapshot at the

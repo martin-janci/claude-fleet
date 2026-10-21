@@ -6337,6 +6337,74 @@ async fn an_unreadable_identity_leaves_today_s_behaviour_intact() {
     );
 }
 
+/// Review w10-6: the reaper never deletes a pinned ghost.
+/// `dismiss_ghost_session` refuses one (`E_PINNED`), so Phase 2 must not drop
+/// the same row (its pin, events and resumable conversation) by itself once
+/// the floor has passed. Unpinned, the same row is reaped on the next pass.
+#[tokio::test]
+async fn the_reaper_keeps_a_pinned_ghost_past_the_floor() {
+    let store = Mutex::new(Store::open_in_memory().expect("store"));
+    store.lock().unwrap().upsert_host("mefistos").unwrap();
+    let deps = identity_deps("mefistos", vec![tmux_session("p")], None, vec![]);
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    {
+        let s = store.lock().unwrap();
+        s.mark_sessions_reconciled("mefistos", &["p".to_string()], 1)
+            .unwrap();
+        s.conn_ref()
+            .execute(
+                "UPDATE sessions SET pinned_at = 100 WHERE tmux_name = 'p'",
+                [],
+            )
+            .unwrap();
+    }
+    // "p" disappears: ghosted as 'missing'.
+    let deps = identity_deps("mefistos", vec![], None, vec![]);
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    let age_past_floor = |store: &Mutex<Store>| {
+        store
+            .lock()
+            .unwrap()
+            .conn_ref()
+            .execute(
+                "UPDATE sessions SET lost_at = lost_at - ?1 WHERE tmux_name = 'p'",
+                [crate::service::sessions::reconcile::GHOST_MIN_AGE_SECS + 1],
+            )
+            .unwrap();
+    };
+    age_past_floor(&store);
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    let row = store
+        .lock()
+        .unwrap()
+        .get_session("p", "mefistos")
+        .unwrap()
+        .expect("a pinned ghost is never reaped");
+    assert_eq!(row.status, "ghost");
+    assert_eq!(row.pinned_at, Some(100));
+
+    // Unpinned, the routine reap applies again.
+    store
+        .lock()
+        .unwrap()
+        .conn_ref()
+        .execute(
+            "UPDATE sessions SET pinned_at = NULL WHERE tmux_name = 'p'",
+            [],
+        )
+        .unwrap();
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    assert!(
+        store
+            .lock()
+            .unwrap()
+            .get_session("p", "mefistos")
+            .unwrap()
+            .is_none(),
+        "an unpinned ghost past the floor is reaped as before"
+    );
+}
+
 /// `skip_prune` in isolation from the TTL exemption: with
 /// `sessions.lost_ttl_secs` set to `0` (the exemption disabled — every
 /// mass-loss row reaps on the routine one-cycle schedule same as a
@@ -8183,6 +8251,114 @@ async fn killing_a_ghost_whose_tmux_is_gone_removes_it() {
         .is_none());
 }
 
+/// A host whose `tmux kill-session` times out after it was sent: the kill
+/// may have run. `listed` is what a follow-up `list-sessions` answers
+/// (`None`: that fails too).
+struct TimedOutKillTmux {
+    listed: Option<Vec<crate::tmux::TmuxSession>>,
+}
+
+#[async_trait::async_trait]
+impl TmuxExec for TimedOutKillTmux {
+    async fn list_sessions(&self) -> Result<Vec<crate::tmux::TmuxSession>, IpcError> {
+        self.listed
+            .clone()
+            .ok_or_else(|| IpcError::new(codes::E_SSH_TIMEOUT, "list timed out"))
+    }
+    async fn new_session(&self, _n: &str, _c: &std::path::Path, _p: &str) -> Result<(), IpcError> {
+        Ok(())
+    }
+    async fn kill_session(&self, _n: &str) -> Result<(), IpcError> {
+        Err(IpcError::new(codes::E_SSH_TIMEOUT, "kill timed out"))
+    }
+    async fn rename_session(&self, _o: &str, _n: &str) -> Result<(), IpcError> {
+        Ok(())
+    }
+    async fn restart_session(&self, _n: &str, _p: &str) -> Result<(), IpcError> {
+        Ok(())
+    }
+    async fn capture_pane(&self, _n: &str) -> Result<String, IpcError> {
+        Ok(String::new())
+    }
+    async fn capture_pane_scrollback(&self, _n: &str, _l: u32) -> Result<String, IpcError> {
+        Ok(String::new())
+    }
+    async fn list_claude_agents(&self) -> Option<Vec<crate::claude_agents::ClaudeAgentRow>> {
+        Some(Vec::new())
+    }
+    async fn host_identity(&self) -> Option<crate::tmux::HostIdentity> {
+        Some(boot_a_pid(None))
+    }
+}
+
+/// Review w27-6: a kill whose transport timed out (sent, outcome unknown)
+/// asks the host before giving up. Gone: the kill landed, so it is recorded
+/// as fleet's own kill and no later pass can read the empty server as a
+/// resumable `tmux_server_gone` loss. Still listed: the error stands and the
+/// row is untouched. No answer: the error stands, but the row is marked
+/// killed anyway, since that was the person's intent.
+#[tokio::test]
+async fn a_kill_that_timed_out_is_settled_by_asking_the_host() {
+    let setup = || {
+        let store = Mutex::new(Store::open_in_memory().expect("store"));
+        let s = store.lock().unwrap();
+        s.upsert_host("mefistos").unwrap();
+        let id = s
+            .upsert_session("x", "mefistos", None, None, 1, 1, "running", None)
+            .unwrap();
+        s.set_claude_session_id(id, "cid-x").unwrap();
+        drop(s);
+        (store, id)
+    };
+    let deps = |listed: Option<Vec<crate::tmux::TmuxSession>>| {
+        ReconcileDeps::fake(
+            move |_| {
+                Box::new(TimedOutKillTmux {
+                    listed: listed.clone(),
+                })
+            },
+            std::time::Duration::from_secs(5),
+        )
+    };
+    let kill = || KillSessionArgs {
+        host_alias: "mefistos".into(),
+        name: "x".into(),
+        force: false,
+    };
+    let ssh = Arc::new(SshClient::new());
+    let row = |store: &Mutex<Store>, id| store.lock().unwrap().get_session_by_id(id).unwrap();
+
+    // Gone afterwards: the kill landed.
+    let (store, id) = setup();
+    let killed = kill_session_with(kill(), &store, &ssh, &deps(Some(vec![])))
+        .await
+        .expect("a kill the host confirms is done");
+    assert_eq!(killed, id);
+    if let Some(r) = row(&store, id) {
+        assert_eq!(r.lost_reason.as_deref(), Some("killed"), "{r:?}");
+    }
+
+    // Still listed: it did not land.
+    let (store, id) = setup();
+    let e = kill_session_with(kill(), &store, &ssh, &deps(Some(vec![tmux_session("x")])))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, codes::E_SSH_TIMEOUT);
+    assert_eq!(row(&store, id).unwrap().status, "running");
+
+    // The host does not answer: the error stands, the row reads killed.
+    let (store, id) = setup();
+    let e = kill_session_with(kill(), &store, &ssh, &deps(None))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, codes::E_SSH_TIMEOUT);
+    assert!(!kill_landed(&e));
+    assert_eq!(
+        row(&store, id).unwrap().lost_reason.as_deref(),
+        Some("killed")
+    );
+}
+
 /// Session environment at launch (spec 2026-10-11-session-env-and-secrets):
 /// a remote host `h` whose `ssh` is a fake that runs each remote script on
 /// this machine under `sh` with `HOME` at a tempdir (the catalog testkit's
@@ -8565,6 +8741,69 @@ mod env_launch {
         let body = std::fs::read_to_string(env_file_of(&h.home(), pane)).unwrap();
         assert!(body.contains("export G='gv'"), "{body}");
     }
+
+    /// Review w27-4: a restart or a recreate replaces the process that was
+    /// waiting in `ask`, so the form it waited on is settled as cancelled:
+    /// no "waiting for your answer" with nobody to read the answer, and the
+    /// relaunched agent may ask again.
+    #[tokio::test]
+    async fn a_relaunch_cancels_the_form_the_old_process_waited_on() {
+        let h = Harness::new();
+        let row = new_session(h.args("dev-form-relaunch", None), &h.store, &h.ssh, &h.reg)
+            .await
+            .expect("create");
+        let ask = |form_id: &str| {
+            let s = h.store.lock().unwrap();
+            s.insert_form(&crate::store::NewForm {
+                form_id,
+                session_id: row.id,
+                host_alias: "h",
+                spec: "{}",
+                why: None,
+            })
+            .unwrap();
+        };
+        let pending = || {
+            h.store
+                .lock()
+                .unwrap()
+                .pending_form_of_session(row.id)
+                .unwrap()
+        };
+
+        ask("form-before-restart");
+        assert!(pending().is_some());
+        // Review w27-5: a safe remove waiting for its marker is dropped too.
+        h.store
+            .lock()
+            .unwrap()
+            .set_safe_kill_requested(row.id, "nonce", 1)
+            .unwrap();
+        let restart = serde_json::from_value(serde_json::json!({
+            "host_alias": "h", "name": "dev-form-relaunch"
+        }))
+        .unwrap();
+        restart_session(restart, &h.store, &h.ssh)
+            .await
+            .expect("restart");
+        assert!(pending().is_none(), "a restart settles the pending form");
+        let safe_kill = h
+            .store
+            .lock()
+            .unwrap()
+            .get_session_by_id(row.id)
+            .unwrap()
+            .unwrap()
+            .safe_kill_state;
+        assert_eq!(safe_kill, None, "a restart drops a requested safe remove");
+
+        ask("form-before-recreate");
+        let recreate = serde_json::from_value(serde_json::json!({ "session_id": row.id })).unwrap();
+        recreate_session(recreate, &h.store, &h.ssh)
+            .await
+            .expect("recreate");
+        assert!(pending().is_none(), "a recreate settles the pending form");
+    }
 }
 
 /// A pinned session is never closed: Kill refuses it with `E_PINNED` before
@@ -8682,4 +8921,96 @@ fn a_pinned_ghost_is_not_dismissed() {
         .get_session_by_id(id)
         .unwrap()
         .is_none());
+}
+
+/// A live bg agent whose host's `claude agents` listing fails is not taken
+/// as already gone: the kill reports the failure (and records no kill), so
+/// a stop limit or a person's Kill is retried rather than closed while the
+/// agent keeps running.
+#[tokio::test]
+async fn a_bg_kill_whose_listing_failed_is_not_reported_as_done() {
+    let s = Store::open_in_memory().unwrap();
+    let host = "nohost.invalid";
+    s.upsert_host(host).unwrap();
+    s.upsert_bg_session(host, "bg:job-1", None, "job-1", Some("working"), 1, "bg", 1)
+        .unwrap();
+    let store = Mutex::new(s);
+    let ssh = Arc::new(crate::ssh::SshClient::new());
+    let err = kill_session(
+        KillSessionArgs {
+            host_alias: host.into(),
+            name: "bg:job-1".into(),
+            force: false,
+        },
+        &store,
+        &ssh,
+    )
+    .await
+    .unwrap_err();
+    assert!(err.message.contains("was not stopped"), "{err:?}");
+    let row = store
+        .lock()
+        .unwrap()
+        .get_session("bg:job-1", host)
+        .unwrap()
+        .expect("row kept");
+    assert_eq!(row.status, "running");
+}
+
+/// #964/#965: an agent connection that drops (or is taken over by a second
+/// agent on the same token) while the probe is in flight comes back as
+/// `E_AGENT_PROTOCOL` with `details.connection_lost`, not `E_AGENT_OFFLINE`.
+/// The reconcile must still give it the redial grace: the pass writes
+/// nothing and the host stays reachable. The same code WITHOUT the flag is a
+/// real failure and is written at once.
+#[test]
+fn a_connection_lost_mid_probe_gets_the_redial_grace() {
+    // Its own alias: `down_hosts()` is process-global.
+    let alias = "lost-mid-probe";
+    let mut s = Store::open_in_memory().unwrap();
+    s.upsert_host(alias).unwrap();
+    let host = |s: &Store| {
+        s.list_hosts()
+            .unwrap()
+            .into_iter()
+            .find(|h| h.alias == alias)
+            .unwrap()
+    };
+    let probe = |s: &Store, result: Result<Vec<_>, IpcError>| HostProbe {
+        host: host(s),
+        result,
+        agent_rows: Some(Vec::new()),
+        agent_mtimes: Some(std::collections::HashMap::new()),
+        intel: PaneIntelMap::new(),
+        pane_tails: Default::default(),
+        account: None,
+        profiles: None,
+        pr_info: PrInfoMap::new(),
+        identity: None,
+        versions: None,
+        health: None,
+        started_at: now_unix(),
+        worktree_kb: None,
+        codex_rollouts: Default::default(),
+    };
+    let good = probe(&s, Ok(Vec::new()));
+    reconcile_write_one_host(&mut s, &good, &[]).unwrap();
+    assert!(host(&s).reachable, "a good pass marks it reachable");
+
+    let lost = crate::agent::registry::lost_mid_request(alias);
+    assert_eq!(lost.code, codes::E_AGENT_PROTOCOL);
+    let held = probe(&s, Err(lost));
+    reconcile_write_one_host(&mut s, &held, &[]).unwrap();
+    assert!(
+        host(&s).reachable,
+        "a connection lost mid-probe is held like E_AGENT_OFFLINE, not written as unreachable"
+    );
+
+    let garbled = IpcError::new(codes::E_AGENT_PROTOCOL, "unexpected frame");
+    let failed = probe(&s, Err(garbled));
+    reconcile_write_one_host(&mut s, &failed, &[]).unwrap();
+    assert!(
+        !host(&s).reachable,
+        "a protocol error with no connection_lost flag is a real failure"
+    );
 }

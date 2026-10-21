@@ -2,8 +2,9 @@
 
 Status: steps 1 to 5 built, and step 6's GitHub sources, PR comments and
 labels, and writes to other trackers, 2026-10-14 (the phone's part in
-martin-janci/fleet-mobile); polling other trackers, 2026-10-18. The rest of
-step 6 not built.
+martin-janci/fleet-mobile); polling other trackers and the gallery,
+2026-10-18; `pr_review`, 2026-10-20. Restating the built-in agents not
+built.
 Asked for by the owner after the built-in reviewer and support agent landed
 (`2026-10-11-review-and-support-agents-design.md`, PRs
 martin-janci/claude-fleet#871, martin-janci/fleet-mobile#217,
@@ -71,7 +72,9 @@ instances side by side.
   - a built-in write (a tracker comment, an issue, a link, a PR review);
   - `mcp_call`: one named write tool on one bound store, with arguments the
     model proposed and the definition's allow-list and schema checked;
-  - `record`: a fleet-store write.
+  - `record`: a fleet-store write;
+  - fleet's own writes, for agents that read the fleet itself: `work_task`,
+    `fix_session`, `setting`, `session_recover` (see the action table).
 - The reviewer and the support agent stay as they are. Each can later be
   restated as a definition (*Migration*). The generic runtime does not need
   them to move.
@@ -322,10 +325,35 @@ person at `propose`, run at `act` when `auto` is true.
 | `tracker_comment` | `{tracker, key, body}` (ADF / wiki rendered as now) | `WriteOp::RichComment` |
 | `tracker_issue` | `{tracker, project, type, summary, body, labels, link?}` | `WriteOp::CreateIssue` (+ `LinkIssues`) |
 | `tracker_link` | `{tracker, from, to, type}` | `WriteOp::LinkIssues` |
-| `pr_review` | the reviewer's `ReviewRequest` | the reviewer's executor |
+| `pr_review` | `{repo, number, sha, event, body, findings[]}` | the reviewer's `gh` calls: the diff, then the review (`ReviewRequest`) |
 | `pr_comment`, `pr_labels` | as the reviewer's | gh |
 | `mcp_call` | `{binding, tool, arguments}` | calls the tool over stdio on the host with the binding rendered, as the scanner does |
 | `record` | `{namespace, key, value, expires_at?}` | `agent_records` upsert |
+| `work_task` | `{title, notes, steps[]}` from `summary`, `body`, `steps` | a Work task, its steps proposed as subtasks (`fleet_ops::work_task`) |
+| `fix_session` | `{project, host?, title, prompt}` from `project`, `host`, `summary`, `body` | a Work task and a Claude session started on it (`start_work`) |
+| `setting` | `{key, value, was, why}` from `key`, `value`, `body` | a settings-review proposal, applied as the person's (`settings_review`) |
+| `session_recover` | `{session, host?, why}` from `target`, `host`, `body` | a lost session restored, a live one restarted |
+
+The four fleet-own writes (`work_task`, `fix_session`, `setting`,
+`session_recover`) and `tracker_issue` also take `fingerprint` (a template):
+what the finding is, kept on the payload so the `fleet-diagnostics`
+`proposals` tool can tell a later run it was proposed, or rejected, before.
+Only `work_task` may be `auto`; `fix_session`, `setting` and
+`session_recover` **never** run without a person, and a definition that
+says `auto: true` on one is refused. A `setting` is planned only for a key
+an agent may propose (`ai` not `never`, not owned by another subsystem) and
+a value the key accepts; queued, it records the value it had (`was`), and
+one already at that value is skipped.
+
+**`each`.** An action with `each: <array field of the answer>` is planned
+once per item (at most `MAX_EACH`, 10), its templates reading the item as
+`{{item.…}}` and its `when` tested on the item. The self debug agent's
+`findings` and the proposer's `proposals` use it.
+
+**`run.diagnostics: true`** gives the run `fleet-diagnostics`, the hub's
+read-only MCP server over the fleet's own logs, error reports, runs, host
+health, sessions, the agents' analyses and their proposals. Every answer is
+masked with every secret the store knows before the run sees it.
 
 **Guardrails**, checked by the executor at send time (not only at plan
 time):
@@ -597,17 +625,63 @@ run real instances.
    `tracker_comment` sends the same text plain (`WriteOp::Comment`) and
    `tracker_issue` creates an item in the project (`WriteOp::CreateItem`);
    an issue link is Jira's, so a link, or an issue with one, is refused
-   there. Not built: `pr_review` (the reviewer's placed, verified review
-   stays the PR reviewer's), restating the built-in agents, and a gallery.
+   there. Not built: restating the built-in agents.
+
+   `pr_review`, built 2026-10-20: a review of the subject's head with line
+   comments, on a `github_prs` trigger only and never with `each`. It takes
+   `target` (the number), `body` or `body_template` (the review's text),
+   `verdict` (a template: APPROVE, REQUEST_CHANGES or COMMENT, anything else
+   COMMENT) and `findings`, an array field of the answer whose items have
+   `path`, `line` and `body` (the validator checks the schema). Planning
+   keeps the head the run read (`sha`), at most 30 findings, and the event;
+   an `auto` review never approves (APPROVE becomes COMMENT: an approval is
+   a person's). Sending checks the repo as `pr_comment` does, expires the
+   action when the PR is no longer open or its head moved on, fetches the
+   diff and places each finding on it with the PR reviewer's
+   `commentable_lines` / `snap_line` (within three lines); a finding that
+   does not land is listed in the body under *Outside the diff*. The body
+   and each line comment end with the instance's marker. An APPROVE or
+   REQUEST_CHANGES GitHub refuses on one's own PR is sent as COMMENT, as
+   the reviewer does. Not taken from the reviewer: its confidence filter,
+   the debate, and the re-review of a dismissed review (`verify`), which
+   reads the reviewer's own `review_prs` table.
+
+   The gallery, built 2026-10-18 (`service/fleet_agents/gallery.rs`): the
+   definitions in `catalog-seed/fleet-agents/`, embedded in fleet-core
+   (`SEEDS`; a test checks it lists the directory and that each loads
+   clean). The `agents` tool's `gallery` lists them, each marked whether the
+   catalog has one of that name; `install {definition}` adds one to the
+   personal catalog as a commit (`catalog::author::install_in`), private and
+   with no source, and refuses a name the catalog has, so an edited copy is
+   never overwritten. Automation › Agents shows the ones not installed under
+   *Gallery* with *Add to catalog*. Next to the self debug agent, the
+   proposer, simplify and refactor, it ships three for everyday work:
+   `issue-triage` (`tracker_comments` on `/triage`: a triage comment, or a
+   question when the issue is too vague), `pr-questions` (`github_comments`
+   on `/ask`: an answer from the code as a `pr_comment`) and `daily-digest`
+   (a workday `schedule` reading `fleet-diagnostics`, kept in a fleet
+   store).
 
    Polling a tracker that is not Jira, built 2026-10-18: no provider grows
-   `issue_threads`. The poll reads the items the hub's tracker sync saw
-   updated since the last poll, less `SYNC_LAG_SECS` (30 minutes: the sync
-   lags the tracker), at most 25 (`ITEM_POLL_MAX`,
-   `Store::tracker_items_updated_since`), and each one's newest 20 comments
-   through its provider's `comments`. The job keys are the Jira poll's
-   (`<tracker>:<key>#c<id>`, `#assigned:<who>`), so the longer window finds
-   nothing twice. The subject is kept when the job is found, the item's own
+   `issue_threads`. The poll pages through the items the hub's tracker sync
+   wrote (`updated_at`, the local write, which a sync moves only on a real
+   change; not the tracker's own update time, so a sync that runs late
+   loses nothing), oldest first, from where the last poll stopped
+   (`Cursor::items`, `(updated_at, id)`), at most 25 a poll (`ITEM_POLL_MAX`,
+   `Store::tracker_items_written_since`): a burst bigger than a page is read
+   over the next polls, and an unchanged item is not read again. For
+   `tracker_comments` it reads each one's newest 20 comments through its
+   provider's `comments`; `tracker_assigned` makes no comments call. A rate
+   limit or an outage stops the page at the item before, for the next poll.
+   A comment counts from the rule's first poll (`Cursor::start`), and no
+   further back than a kept job key lives (30 days). With the tracker sync
+   off (`work.sync_interval_secs = 0`) the poll fails and says so. The job
+   keys are the Jira poll's (`<tracker>:<key>#c<id>`, `#assigned:<who>`), so
+   an item read again finds nothing twice. The sync holds what its views
+   read: on GitHub and Linear only the items assigned to the tracker's own
+   account (`assignee:@me`, `isMe`), on Asana those or a `project:` view's.
+   So `tracker_comments` there sees comments on those items only, and a
+   `tracker_assigned` whose `match.assignee` is anyone else never matches. The subject is kept when the job is found, the item's own
    URL with it, and the run reads it back rather than asking the tracker
    again. `match.assignee` is the account id as the sync stores it (a GitHub
    login, a Linear or Asana user id). A comment there has no author id, so

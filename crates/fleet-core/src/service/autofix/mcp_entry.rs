@@ -131,9 +131,10 @@ pub async fn probe(ssh: &dyn SshExec, host: &str) -> Result<Option<EntryProbe>, 
     Ok(parse_probe(&String::from_utf8_lossy(&out.stdout)))
 }
 
-/// Per host: when it was last probed, and what was seen (`None`: it could
-/// not be judged). Kept in memory; a hub restart probes again.
-type Seen = BTreeMap<String, (i64, Option<EntryProbe>)>;
+/// Per host: when it was last tried, and the last reading that could be
+/// judged (with when it was seen). Kept in memory; a hub restart probes
+/// again.
+type Seen = BTreeMap<String, (i64, Option<(i64, EntryProbe)>)>;
 static CACHE: LazyLock<Mutex<Seen>> = LazyLock::new(|| Mutex::new(BTreeMap::new()));
 
 /// Every cached probe that saw something.
@@ -142,10 +143,10 @@ pub fn cached() -> Vec<HostProbe> {
         .lock()
         .map(|c| {
             c.iter()
-                .filter_map(|(alias, (at, p))| {
-                    p.clone().map(|probe| HostProbe {
+                .filter_map(|(alias, (_, seen))| {
+                    seen.clone().map(|(at, probe)| HostProbe {
                         alias: alias.clone(),
-                        at: *at,
+                        at,
                         probe,
                     })
                 })
@@ -163,11 +164,26 @@ pub fn due(alias: &str, now: i64) -> bool {
     })
 }
 
-/// Record a probe of `alias` at `at`; `None`: it could not be judged, and
-/// the host is left out of the scan until it can.
+/// Record a probe of `alias` tried at `at`. `None`: it could not be judged
+/// (an SSH error, a non-zero exit, no jq or python3): the last reading that
+/// could is kept, so the scan goes on reporting what it last saw instead of
+/// dropping the host, which a sync would read as "fixed" and clear.
 pub fn remember(alias: &str, at: i64, probe: Option<EntryProbe>) {
     if let Ok(mut c) = CACHE.lock() {
-        c.insert(alias.to_string(), (at, probe));
+        let seen = match probe {
+            Some(p) => Some((at, p)),
+            None => c.get(alias).and_then(|(_, seen)| seen.clone()),
+        };
+        c.insert(alias.to_string(), (at, seen));
+    }
+}
+
+/// Make `alias` due on the next pass, keeping its last reading.
+pub fn mark_due(alias: &str) {
+    if let Ok(mut c) = CACHE.lock() {
+        if let Some((tried, _)) = c.get_mut(alias) {
+            *tried = i64::MIN / 2;
+        }
     }
 }
 
@@ -488,6 +504,24 @@ mod tests {
         let mut c = cx(entry(URL, false, H1_SHA));
         c.mcp_url = None;
         assert!(scan(&c).is_empty(), "no URL to compare with");
+    }
+
+    #[test]
+    fn a_probe_that_cannot_judge_keeps_the_last_reading() {
+        // The cache is process-wide: an alias no other test uses.
+        let alias = "remember-keeps-h1";
+        let seen = |c: Vec<HostProbe>| c.into_iter().find(|p| p.alias == alias);
+        remember(alias, 100, None);
+        assert!(seen(cached()).is_none(), "never judged: left out");
+        assert!(!due(alias, 101), "a failed probe is not retried every pass");
+        remember(alias, 200, Some(EntryProbe::Missing));
+        remember(alias, 800, None);
+        let p = seen(cached()).expect("the last reading is kept");
+        assert_eq!((p.at, p.probe), (200, EntryProbe::Missing));
+        assert!(!due(alias, 801));
+        mark_due(alias);
+        assert!(due(alias, 801), "marked due on the next pass");
+        assert_eq!(seen(cached()).map(|p| p.at), Some(200));
     }
 
     #[test]

@@ -66,4 +66,26 @@ describe('AutonomyChip', () => {
     await fireEvent.keyDown(screen.getByTestId('autonomy-popover'), { key: 'Escape' });
     expect(screen.queryByTestId('autonomy-popover')).toBeNull();
   });
+
+  it('review w19-6/8: arrows move between options, and a pick or Escape gives focus back to the chip', async () => {
+    render(AutonomyChip);
+    const chip = screen.getByTestId('autonomy-chip');
+    await fireEvent.click(chip);
+    const brief = screen.getByTestId('autonomy-option-brief');
+    expect(screen.getAllByRole('radio').filter((r) => r.getAttribute('tabindex') === '0')).toEqual([brief]);
+    brief.focus();
+    await fireEvent.keyDown(brief, { key: 'ArrowDown' });
+    const auto = screen.getByTestId('autonomy-option-autopilot');
+    expect(document.activeElement).toBe(auto);
+    expect(inv.mock.calls.some((c) => c[0] === 'set_fleet_setting')).toBe(false);
+    await fireEvent.click(auto);
+    await waitFor(() => expect(screen.queryByTestId('autonomy-popover')).toBeNull());
+    expect(document.activeElement).toBe(chip);
+
+    await fireEvent.click(chip);
+    screen.getByTestId('autonomy-option-ask').focus();
+    await fireEvent.keyDown(document.activeElement!, { key: 'Escape' });
+    expect(screen.queryByTestId('autonomy-popover')).toBeNull();
+    expect(document.activeElement).toBe(chip);
+  });
 });

@@ -763,3 +763,81 @@ mod grant_form {
         assert_eq!(forms::validate(&spec), Vec::<String>::new());
     }
 }
+
+/// The gallery ships every definition in catalog-seed/fleet-agents/, each
+/// valid: what a person installs grants without an edit.
+#[test]
+fn the_gallery_is_the_seed_directory_and_every_entry_is_valid() {
+    let mut on_disk: Vec<String> =
+        std::fs::read_dir(crate::repo_files::path("catalog-seed/fleet-agents"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+    on_disk.sort();
+    let mut shipped: Vec<String> = super::gallery::SEEDS
+        .iter()
+        .map(|s| s.name.to_string())
+        .collect();
+    shipped.sort();
+    assert_eq!(shipped, on_disk, "SEEDS lists the seed directory");
+    for e in super::gallery::entries(|n| n == "proposer") {
+        assert!(
+            e.view.problems.is_empty(),
+            "{}: {:?}",
+            e.view.name,
+            e.view.problems
+        );
+        assert!(!e.view.description.is_empty() && e.view.trigger.is_some());
+        assert_eq!(e.installed, e.view.name == "proposer");
+    }
+}
+
+/// The three gallery agents for everyday work: a triage on a tracker, an
+/// answer on GitHub, a digest on a schedule.
+#[test]
+fn the_everyday_gallery_agents_read_and_write_where_they_say() {
+    use definition::TriggerSource;
+    let triage = seeded("issue-triage");
+    assert_eq!(
+        triage.definition.trigger.source,
+        TriggerSource::TrackerComments
+    );
+    assert!(triage.skill.contains("never") && triage.skill.contains("instruction"));
+    let ask = seeded("pr-questions");
+    assert_eq!(ask.definition.trigger.source, TriggerSource::GithubComments);
+    assert_eq!(ask.definition.actions[0].kind.word(), "pr_comment");
+    let digest = seeded("daily-digest");
+    assert_eq!(digest.definition.trigger.source, TriggerSource::Schedule);
+    assert!(digest.definition.run.diagnostics);
+}
+
+/// A pr_review names its findings: an array of {path, line, body} in the
+/// answer; it is one review (no each) of a github_prs subject.
+#[test]
+fn a_review_names_findings_the_answer_has() {
+    let def = |findings: Value, each: Option<&str>, source: &str| {
+        let mut review = json!({ "id": "review", "do": "pr_review",
+            "target": "{{subject.number}}", "body": "{{answer.summary}}",
+            "verdict": "{{answer.verdict}}", "findings": "notes" });
+        if let Some(e) = each {
+            review["each"] = json!(e);
+        }
+        let d = definition::parse_value(&json!({
+            "trigger": { "source": source, "repo": "acme/pos" },
+            "run": { "output_schema": { "type": "object", "required": ["summary"],
+                "properties": { "summary": { "type": "string" },
+                    "verdict": { "type": "string" }, "notes": findings } } },
+            "actions": [review]
+        }))
+        .unwrap();
+        definition::problems(&d, &std::collections::BTreeMap::new()).join("\n")
+    };
+    let good = json!({ "type": "array", "items": { "type": "object", "properties": {
+        "path": { "type": "string" }, "line": { "type": "integer" }, "body": { "type": "string" } } } });
+    assert_eq!(def(good.clone(), None, "github_prs"), "");
+    let no_line = json!({ "type": "array", "items": { "type": "object", "properties": {
+        "path": { "type": "string" }, "body": { "type": "string" } } } });
+    assert!(def(no_line, None, "github_prs").contains("not an array of {path, line, body}"));
+    assert!(def(good.clone(), Some("notes"), "github_prs").contains("no each"));
+    assert!(def(good, None, "github_comments").contains("the trigger is github_prs"));
+}

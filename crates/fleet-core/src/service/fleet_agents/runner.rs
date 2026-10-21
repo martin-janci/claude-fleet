@@ -49,12 +49,14 @@ pub const POLL_MAX_ISSUES: usize = 100;
 /// Seconds a poll window reaches back past the last poll (clock skew).
 pub const POLL_SLACK_SECS: i64 = 120;
 /// Items one poll of a tracker that is not Jira reads at most: each is one
-/// comments call.
+/// comments call. A full page leaves the rest to the next poll, which
+/// starts where this one stopped (`Cursor::items`).
 pub const ITEM_POLL_MAX: usize = 25;
 /// Comments read per item on such a tracker.
 pub const ITEM_COMMENTS: usize = 20;
-/// Seconds such a poll reaches back further than a Jira one: it reads the
-/// hub's synced copy of the tracker, which lags it by up to a sync.
+/// Seconds before its last poll a cursor kept before `Cursor::start`
+/// existed takes as the rule's start: such a poll read the hub's synced
+/// copy that far back.
 pub const SYNC_LAG_SECS: i64 = 30 * 60;
 /// New scan entries one poll turns into jobs, at most.
 pub const SCAN_MAX_JOBS: usize = 10;
@@ -123,6 +125,14 @@ pub struct Cursor {
     /// `mcp_scan`: the last scan.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scan: Option<i64>,
+    /// The first poll: a tracker that is not Jira takes no comment from
+    /// before it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start: Option<i64>,
+    /// A tracker that is not Jira: the last synced item read, as
+    /// `(updated_at, id)` (`Store::tracker_items_written_since`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub items: Option<(i64, i64)>,
 }
 
 impl Cursor {
@@ -192,15 +202,37 @@ pub struct ItemThread {
     pub url: Option<String>,
 }
 
+/// One page a poll of a tracker that is not Jira asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ItemPage {
+    /// The last item read before, `(updated_at, id)`: the page starts after it.
+    pub after: (i64, i64),
+    /// Items written before this (unix seconds, exclusive).
+    pub until: i64,
+    pub max: usize,
+    /// Read each item's comments (`tracker_comments`; `tracker_assigned`
+    /// needs none).
+    pub comments: bool,
+}
+
+/// What one [`ItemPage`] read.
+#[derive(Debug, Clone, Default)]
+pub struct ItemsRead {
+    pub items: Vec<ItemThread>,
+    /// Where the next page starts: the last item read when the page stopped
+    /// short of everything written before `until` (it was full, or the
+    /// tracker refused more); `None` when it read all of it.
+    pub more: Option<(i64, i64)>,
+}
+
 /// PURE: the subject a job found on a tracker that is not Jira keeps: the
 /// item, and the comment the job's key names.
-pub fn item_subject(tracker: i64, it: &ItemThread, dedup_key: &str) -> Value {
-    let t = &it.thread;
+pub fn item_subject(tracker: i64, t: &IssueThread, url: Option<&str>, dedup_key: &str) -> Value {
     let comment = dedup_key
         .rsplit_once("#c")
         .and_then(|(_, id)| t.comments.iter().find(|c| c.id == id));
     let mut v = issue_subject(tracker, None, t, comment);
-    v["url"] = json!(it.url);
+    v["url"] = json!(url);
     v
 }
 
@@ -531,14 +563,11 @@ pub trait FleetHost: Send + Sync {
     async fn list_tools(&self, host: &str, entry: &Value) -> Result<Vec<Value>, String>;
     /// A tracker's provider (`jira_cloud`, `github`, `linear` …).
     fn tracker_provider(&self, tracker: i64) -> Option<String>;
-    /// A tracker that is not Jira: the items its sync saw updated at or
-    /// after `since`, at most `max`, each with its newest comments.
-    async fn item_threads(
-        &self,
-        tracker: i64,
-        since: i64,
-        max: usize,
-    ) -> Result<Vec<ItemThread>, String>;
+    /// A tracker that is not Jira: a page of the items its sync wrote,
+    /// oldest first, each with its newest comments when asked. The sync
+    /// holds what its views read: on GitHub and Linear the items assigned to
+    /// the tracker's own account, so a poll sees nothing else there.
+    async fn item_threads(&self, tracker: i64, page: ItemPage) -> Result<ItemsRead, String>;
     /// GitHub, with `host`'s `gh`: a repo's open pull requests.
     async fn open_prs(&self, host: &str, repo: &str) -> Result<Vec<OpenPr>, String>;
     /// GitHub: a repo's issue and PR comments updated since `since` (RFC 3339).
@@ -558,6 +587,14 @@ pub trait FleetHost: Send + Sync {
     ) -> Result<(), String>;
     /// GitHub: add and remove labels.
     async fn set_pr_labels(&self, req: &LabelsRequest) -> Result<(), String>;
+    /// GitHub: a pull request's diff (its head's).
+    async fn pr_diff(&self, host: &str, repo: &str, number: i64) -> Result<String, String>;
+    /// GitHub: post a review as `event`; GitHub's id for it.
+    async fn post_pr_review(
+        &self,
+        req: &crate::service::agents::review::post::ReviewRequest,
+        event: &str,
+    ) -> Result<i64, String>;
     /// The support agent's host: issues, workspaces, writes and the run.
     fn base(&self) -> &dyn SupportHost;
     /// Carry out an approved fleet-own action (`fleet_ops`).
@@ -565,6 +602,87 @@ pub trait FleetHost: Send + Sync {
         let _ = op;
         Err("this host does not act on fleet".into())
     }
+}
+
+/// One page of synced items, each with its newest comments from `provider`
+/// when one is given (`None`: comments not asked for). `max` is the page
+/// size the store was asked for: a page that came back full has more after
+/// it. A tracker that refuses every call for now (rate limit, network,
+/// credential) stops the page at the item before; on the first item that is
+/// the poll's error.
+pub(crate) async fn read_item_page(
+    tracker: i64,
+    items: Vec<(crate::store::WorkItemRow, crate::store::ItemMeta)>,
+    max: usize,
+    provider: Option<&dyn crate::service::trackers::TrackerProvider>,
+) -> Result<ItemsRead, String> {
+    use crate::service::trackers::{IssueComment, ItemRef, TrackerError};
+    let full = items.len() >= max;
+    // The last row this page is done with.
+    let mut last = None;
+    let mut read = ItemsRead::default();
+    for (row, meta) in items {
+        let mark = (row.updated_at, row.id);
+        let Some(key) = row.key else {
+            last = Some(mark);
+            continue;
+        };
+        let r = match &row.external_id {
+            Some(id) => ItemRef::Id(id.clone()),
+            None => ItemRef::parse(&key),
+        };
+        let comments = match &provider {
+            None => Vec::new(),
+            Some(p) => match p.comments(&r, ITEM_COMMENTS).await {
+                Ok(c) => c,
+                // The tracker says no to every call for now: stop here,
+                // and the next poll starts from this item.
+                Err(
+                    e @ (TrackerError::RateLimited { .. }
+                    | TrackerError::Unreachable(_)
+                    | TrackerError::Auth(_)
+                    | TrackerError::Captcha
+                    | TrackerError::Unconfigured),
+                ) => {
+                    if last.is_none() {
+                        return Err(format!("tracker {tracker}: {}", e.explain()));
+                    }
+                    tracing::warn!(tracker, key, error = %e.explain(), "[agents] fleet: comments, stopping");
+                    read.more = last;
+                    return Ok(read);
+                }
+                // An item whose comments cannot be read is still assigned.
+                Err(e) => {
+                    tracing::warn!(tracker, key, error = %e.explain(), "[agents] fleet: comments");
+                    Vec::new()
+                }
+            },
+        };
+        last = Some(mark);
+        read.items.push(ItemThread {
+            thread: IssueThread {
+                key,
+                summary: row.title,
+                description: meta.description.unwrap_or_default(),
+                assignee_id: meta.assignee_id,
+                status: row.status_name.unwrap_or(row.status_category),
+                updated: row.updated_ext,
+                comments: comments
+                    .into_iter()
+                    .map(|c| IssueComment {
+                        id: c.id,
+                        author_id: None,
+                        author: c.author,
+                        body: c.body,
+                        created: Some(c.created_at),
+                    })
+                    .collect(),
+            },
+            url: row.url,
+        });
+    }
+    read.more = if full { last } else { None };
+    Ok(read)
 }
 
 /// The production host.
@@ -625,62 +743,29 @@ impl FleetHost for LiveFleetHost {
         Some(s.get_tracker(tracker).ok()??.provider)
     }
 
-    async fn item_threads(
-        &self,
-        tracker: i64,
-        since: i64,
-        max: usize,
-    ) -> Result<Vec<ItemThread>, String> {
-        use crate::service::trackers::{IssueComment, ItemRef};
+    async fn item_threads(&self, tracker: i64, page: ItemPage) -> Result<ItemsRead, String> {
+        // With the sync off nothing new is ever written: say so rather than
+        // finding nothing on every poll.
+        if crate::service::trackers::sync::interval(&self.store).is_none() {
+            return Err(format!(
+                "tracker {tracker} is not Jira and is polled from the hub's synced items, \
+                 but the tracker sync is off (work.sync_interval_secs = 0)"
+            ));
+        }
         let items = {
             let s = lock(&self.store).map_err(|e| e.message)?;
-            s.tracker_items_updated_since(tracker, since, max)
+            s.tracker_items_written_since(tracker, page.after, page.until, page.max)
                 .map_err(|e| e.message)?
         };
         if items.is_empty() {
-            return Ok(Vec::new());
+            return Ok(ItemsRead::default());
         }
-        let provider = self.base.provider(tracker)?;
-        let mut out = Vec::new();
-        for (row, meta) in items {
-            let Some(key) = row.key.clone() else {
-                continue;
-            };
-            let r = match &row.external_id {
-                Some(id) => ItemRef::Id(id.clone()),
-                None => ItemRef::parse(&key),
-            };
-            // An item whose comments cannot be read is still assigned.
-            let comments = match provider.comments(&r, ITEM_COMMENTS).await {
-                Ok(c) => c,
-                Err(e) => {
-                    tracing::warn!(tracker, key, error = %e.explain(), "[agents] fleet: comments");
-                    Vec::new()
-                }
-            };
-            out.push(ItemThread {
-                thread: IssueThread {
-                    key,
-                    summary: row.title,
-                    description: meta.description.unwrap_or_default(),
-                    assignee_id: meta.assignee_id,
-                    status: row.status_name.unwrap_or(row.status_category),
-                    updated: row.updated_ext,
-                    comments: comments
-                        .into_iter()
-                        .map(|c| IssueComment {
-                            id: c.id,
-                            author_id: None,
-                            author: c.author,
-                            body: c.body,
-                            created: Some(c.created_at),
-                        })
-                        .collect(),
-                },
-                url: row.url,
-            });
-        }
-        Ok(out)
+        let provider = if page.comments {
+            Some(self.base.provider(tracker)?)
+        } else {
+            None
+        };
+        read_item_page(tracker, items, page.max, provider.as_deref()).await
     }
 
     async fn open_prs(&self, host: &str, repo: &str) -> Result<Vec<OpenPr>, String> {
@@ -732,6 +817,18 @@ impl FleetHost for LiveFleetHost {
 
     async fn set_pr_labels(&self, req: &LabelsRequest) -> Result<(), String> {
         self.gh.set_labels(req).await
+    }
+
+    async fn pr_diff(&self, host: &str, repo: &str, number: i64) -> Result<String, String> {
+        self.gh.diff(host, repo, number).await
+    }
+
+    async fn post_pr_review(
+        &self,
+        req: &crate::service::agents::review::post::ReviewRequest,
+        event: &str,
+    ) -> Result<i64, String> {
+        self.gh.post_review(req, event).await
     }
 
     async fn fleet_op(&self, op: super::actions::FleetOp) -> Result<String, String> {
@@ -797,6 +894,29 @@ pub fn agent(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>) -> AgentImpl {
     }
 }
 
+/// A subject record's key: the job's dedup key, cut to what a record keeps.
+fn subject_key(dedup_key: &str) -> String {
+    dedup_key.chars().take(300).collect()
+}
+
+/// Whether a job with this dedup key was already found (its subject is kept).
+pub(super) fn subject_seen(
+    store: &Mutex<Store>,
+    rule_id: i64,
+    dedup_key: &str,
+    now: i64,
+) -> Result<bool, String> {
+    let s = lock(store).map_err(|e| e.message)?;
+    s.agent_record(
+        &subjects_namespace(rule_id),
+        SUBJECT_KIND,
+        &subject_key(dedup_key),
+        now,
+    )
+    .map(|row| row.is_some())
+    .map_err(|e| e.to_string())
+}
+
 pub(super) fn keep_subject(
     store: &Mutex<Store>,
     rule_id: i64,
@@ -809,7 +929,7 @@ pub(super) fn keep_subject(
         &NewAgentRecord {
             namespace: subjects_namespace(rule_id),
             kind: SUBJECT_KIND.into(),
-            key: dedup_key.chars().take(300).collect(),
+            key: subject_key(dedup_key),
             value: subject.to_string(),
             expires_at: Some(now + SUBJECT_TTL_SECS),
             written_by_job: None,
@@ -826,9 +946,13 @@ pub(super) fn kept_subject(
     now: i64,
 ) -> Option<Value> {
     let s = lock(store).ok()?;
-    let key: String = job.dedup_key.chars().take(300).collect();
     let row = s
-        .agent_record(&subjects_namespace(rule_id), SUBJECT_KIND, &key, now)
+        .agent_record(
+            &subjects_namespace(rule_id),
+            SUBJECT_KIND,
+            &subject_key(&job.dedup_key),
+            now,
+        )
         .ok()??;
     serde_json::from_str(&row.value).ok()
 }
@@ -981,17 +1105,7 @@ impl FleetPoller {
             if subject.is_null() {
                 continue;
             }
-            let seen = {
-                let s = lock(&self.store).map_err(|e| e.message)?;
-                s.agent_record(
-                    &subjects_namespace(rule_id),
-                    SUBJECT_KIND,
-                    &job.dedup_key,
-                    now,
-                )
-                .map_err(|e| e.to_string())?
-                .is_some()
-            };
+            let seen = subject_seen(&self.store, rule_id, &job.dedup_key, now)?;
             if !seen {
                 keep_subject(&self.store, rule_id, &job.dedup_key, &subject, now)?;
                 jobs.push(job);
@@ -1036,17 +1150,7 @@ impl FleetPoller {
         let planned = plan_scan_jobs(rule.id, inst, &scan_entries(&text)?, now);
         let mut jobs = Vec::new();
         for (job, subject) in planned {
-            let seen = {
-                let s = lock(&self.store).map_err(|e| e.message)?;
-                s.agent_record(
-                    &subjects_namespace(rule.id),
-                    SUBJECT_KIND,
-                    &job.dedup_key,
-                    now,
-                )
-                .map_err(|e| e.to_string())?
-                .is_some()
-            };
+            let seen = subject_seen(&self.store, rule.id, &job.dedup_key, now)?;
             if seen || jobs.len() >= SCAN_MAX_JOBS {
                 continue;
             }
@@ -1074,7 +1178,8 @@ impl AgentPoller for FleetPoller {
                 cursor: Some(
                     Cursor {
                         since: now,
-                        scan: None,
+                        start: Some(now),
+                        ..Cursor::default()
                     }
                     .text(),
                 ),
@@ -1094,28 +1199,44 @@ impl AgentPoller for FleetPoller {
                         .await?;
                     plan_tracker_jobs(rule.id, &inst, &ctx, tracker, &threads, c.since, now)?
                 } else {
-                    // GitHub, Linear, Asana: the hub's synced items, read
-                    // further back by a sync's lag; the job keys dedup.
+                    // GitHub, Linear, Asana: the hub's synced items, paged
+                    // by when the hub wrote them, from where the last poll
+                    // stopped; the job keys dedup.
                     if !query.trim().is_empty() {
                         return Err(format!(
                             "trigger › query is JQL: tracker {tracker} is not Jira"
                         ));
                     }
-                    let since = c.since - SYNC_LAG_SECS;
-                    let items = self
-                        .host
-                        .item_threads(tracker, since - POLL_SLACK_SECS, ITEM_POLL_MAX)
-                        .await?;
-                    let threads: Vec<IssueThread> =
-                        items.iter().map(|i| i.thread.clone()).collect();
+                    let start = *c.start.get_or_insert(c.since - SYNC_LAG_SECS);
+                    let page = ItemPage {
+                        after: c.items.unwrap_or((c.since - POLL_SLACK_SECS, 0)),
+                        until: now,
+                        max: ITEM_POLL_MAX,
+                        comments: d.trigger.source == TriggerSource::TrackerComments,
+                    };
+                    let read = self.host.item_threads(tracker, page).await?;
+                    // Read through `until`, or stopped at `more`.
+                    c.items = Some(read.more.unwrap_or((now - 1, i64::MAX)));
+                    let (threads, urls): (Vec<IssueThread>, Vec<Option<String>>) =
+                        read.items.into_iter().map(|i| (i.thread, i.url)).unzip();
+                    // A comment counts from the rule's start, and no further
+                    // back than a kept job key lives.
+                    let since = start.max(now - SUBJECT_TTL_SECS);
                     let planned =
                         plan_tracker_jobs(rule.id, &inst, &ctx, tracker, &threads, since, now)?
                             .into_iter()
                             .map(|job| {
                                 let key = parse_job_key(&job.subject, tracker);
-                                let it = items.iter().find(|i| Some(i.thread.key.as_str()) == key);
-                                let subject = it
-                                    .map(|i| item_subject(tracker, i, &job.dedup_key))
+                                let at = threads.iter().position(|t| Some(t.key.as_str()) == key);
+                                let subject = at
+                                    .map(|i| {
+                                        item_subject(
+                                            tracker,
+                                            &threads[i],
+                                            urls[i].as_deref(),
+                                            &job.dedup_key,
+                                        )
+                                    })
                                     .unwrap_or(Value::Null);
                                 (job, subject)
                             })
@@ -1425,10 +1546,22 @@ impl FleetRunner {
         answer: &Value,
         now: i64,
     ) -> Value {
-        let (planned, unplanned) =
+        let (mut planned, mut unplanned) =
             super::actions::plan(inst, rule.id, &rule.scope, subject, answer, now);
         let s = lock(&self.store).ok();
         let mut out: Vec<Value> = Vec::new();
+        if let Some(s) = &s {
+            planned.retain_mut(|p| match with_current_setting(s, p) {
+                Ok(()) => true,
+                Err(why) => {
+                    unplanned.push(super::actions::Unplanned {
+                        id: p.id.clone(),
+                        why,
+                    });
+                    false
+                }
+            });
+        }
         for p in &planned {
             let state = match (rule.level.as_str(), &s) {
                 ("watch", _) => "kept".to_string(),
@@ -1531,4 +1664,38 @@ impl AgentRunner for FleetRunner {
             },
         }
     }
+}
+
+/// A `setting` action as a person reads it: `was` filled with the key's
+/// current value and the body saying "from → to", so the Inbox shows
+/// whether it goes up or down (review w08-5). `Err` (the action is
+/// skipped) when the setting already has that value. Any other action is
+/// left as it is.
+pub(super) fn with_current_setting(
+    s: &Store,
+    p: &mut super::actions::Planned,
+) -> Result<(), String> {
+    if p.kind != "setting" {
+        return Ok(());
+    }
+    // Edited as JSON so keys the struct does not name (`fingerprint`) stay.
+    let Ok(mut payload) = serde_json::from_str::<Value>(&p.payload) else {
+        return Ok(());
+    };
+    let key = payload["key"].as_str().unwrap_or_default().to_string();
+    let value = payload["value"].as_str().unwrap_or_default().to_string();
+    let Some(was) = crate::service::settings::effective_value(s, &key) else {
+        return Ok(());
+    };
+    if was.trim() == value.trim() {
+        return Err(format!("{key} is already {value}"));
+    }
+    let label = crate::service::settings::spec(&key).map_or("", |sp| sp.label);
+    let why = payload["why"].as_str().unwrap_or_default();
+    let body = format!("{label} ({key}): {was} → {value}\n\n{why}");
+    payload["body"] = Value::String(body.clone());
+    payload["was"] = Value::String(was);
+    p.body = body;
+    p.payload = payload.to_string();
+    Ok(())
 }

@@ -15,24 +15,24 @@
 import type { RunRow } from './runs';
 
 /** A failure this recent still sparks. */
-export const SPARK_SECS = 600;
+const SPARK_SECS = 600;
 /** A run waiting this long or less still haloes its host. */
-export const HALO_SECS = 3600;
+const HALO_SECS = 3600;
 /** Each half of the outer ring: the next 12 hours of fires on the right,
  *  the last 12 hours of runs on the left. */
 export const RING_SECS = 12 * 3600;
 /** A run started or ended this recently still ripples its host. */
 export const RECENT_SECS = 15 * 60;
 /** A run that ended this recently is a moon on its host's ring. */
-export const MOON_SECS = 3600;
+const MOON_SECS = 3600;
 /** At most this many moons, satellites and past dots per host / ring. */
-export const MOONS_MAX = 6;
-export const SATELLITES_MAX = 6;
-export const PAST_MAX = 48;
+const MOONS_MAX = 6;
+const SATELLITES_MAX = 6;
+const PAST_MAX = 48;
 /** A host name longer than this drops the segments it shares with another. */
-export const LABEL_MAX = 10;
+const LABEL_MAX = 10;
 /** A comet's trail is full after this long. */
-export const TRAIL_FULL_SECS = 1800;
+const TRAIL_FULL_SECS = 1800;
 /** One lap, in seconds, of a busy comet and of one gone quiet. */
 export const LAP_BUSY = 6;
 export const LAP_QUIET = 16;
@@ -82,6 +82,8 @@ export interface OrbitHost {
   /** Planet size, 0.6 to 1.2. */
   scale: number;
   comets: OrbitComet[];
+  /** Something is at work here: a live run or a working session. */
+  busy: boolean;
   needs: boolean;
   failed: boolean;
   caption: string;
@@ -134,13 +136,17 @@ interface RoutineLike {
   skip_next?: boolean;
 }
 
-const hm = (sec: number) => {
+/** "09:05": a moment as the map's clock reads it, in local time. */
+export function clockLabel(sec: number): string {
   const d = new Date(sec * 1000);
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
-};
+}
+
+/** When a run ended, or started if it has not. */
+const endOf = (r: RunRow) => r.ended_at ?? r.started_at;
 
 /** "in 52m", "in 3h 10m". */
-export function inLabel(secs: number): string {
+function inLabel(secs: number): string {
   const m = Math.max(1, Math.round(secs / 60));
   if (m < 60) return `in ${m}m`;
   const h = Math.floor(m / 60);
@@ -148,7 +154,7 @@ export function inLabel(secs: number): string {
 }
 
 /** "just now", "12m ago", "3h ago". */
-export function agoLabel(secs: number): string {
+function agoLabel(secs: number): string {
   if (secs < 60) return 'just now';
   const m = Math.round(secs / 60);
   return m < 60 ? `${m}m ago` : `${Math.round(m / 60)}h ago`;
@@ -176,7 +182,7 @@ function toneOf(r: RunRow): OrbitTone {
 }
 
 function feedLine(r: RunRow): OrbitFeed {
-  const at = r.ended_at ?? r.started_at;
+  const at = endOf(r);
   const who = r.owner;
   const tone = toneOf(r);
   const line = (what: string, when = at) => ({ run_id: r.id, at: when, who, what: tidy(what, who), tone });
@@ -199,17 +205,21 @@ function feedLine(r: RunRow): OrbitFeed {
  * long one that shares its leading segments (split on `-`, `_`, `.`) with
  * another host drops them, so `claude-fleet-ci` and `claude-fleet-trn`
  * read `ci` and `trn` instead of two clipped `claude-fl…`. The full alias
- * stays in the tooltip and the accessible name.
+ * stays in the tooltip and the accessible name. Two shortened labels that
+ * would print the same (`prod-eu-web1` and `prod-us-web1` both `web1`) put
+ * back leading segments until they differ, so no two planets share a name.
  */
 export function hostLabels(aliases: string[]): Map<string, string> {
   const seg = (a: string) => a.split(/(?<=[-_.])/);
-  const out = new Map<string, string>();
+  const segs = new Map<string, string[]>();
+  const drop = new Map<string, number>();
   for (const a of aliases) {
+    const mine = seg(a);
+    segs.set(a, mine);
     if (a.length <= LABEL_MAX) {
-      out.set(a, a);
+      drop.set(a, 0);
       continue;
     }
-    const mine = seg(a);
     let shared = 0;
     for (const b of aliases) {
       if (b === a) continue;
@@ -218,8 +228,32 @@ export function hostLabels(aliases: string[]): Map<string, string> {
       while (n < mine.length - 1 && n < theirs.length && mine[n] === theirs[n]) n++;
       shared = Math.max(shared, n);
     }
-    out.set(a, shared > 0 ? mine.slice(shared).join('') : a);
+    drop.set(a, shared);
   }
+  const label = (a: string) => (segs.get(a) ?? [a]).slice(drop.get(a) ?? 0).join('');
+  // Each pass puts one segment back on every shortened label that collides;
+  // a label with nothing dropped is its full alias, unique by definition.
+  for (;;) {
+    const byLabel = new Map<string, string[]>();
+    for (const a of drop.keys()) {
+      const l = label(a);
+      byLabel.set(l, [...(byLabel.get(l) ?? []), a]);
+    }
+    let changed = false;
+    for (const group of byLabel.values()) {
+      if (group.length < 2) continue;
+      for (const a of group) {
+        const d = drop.get(a) ?? 0;
+        if (d > 0) {
+          drop.set(a, d - 1);
+          changed = true;
+        }
+      }
+    }
+    if (!changed) break;
+  }
+  const out = new Map<string, string>();
+  for (const a of drop.keys()) out.set(a, label(a));
   return out;
 }
 
@@ -246,12 +280,15 @@ export function orbitModel(args: {
   const list = [...aliases].sort((a, b) => a.localeCompare(b));
   const labels = hostLabels(list);
   const heatOf = (rs: RunRow[]) => {
-    const last = Math.max(-Infinity, ...rs.map((r) => (r.outcome === 'running' ? now : (r.ended_at ?? r.started_at))));
+    const last = Math.max(-Infinity, ...rs.map((r) => (r.outcome === 'running' ? now : endOf(r))));
     const age = now - last;
     return age >= 0 && age < RECENT_SECS ? Math.round((1 - age / RECENT_SECS) * 100) / 100 : 0;
   };
+  // Every finished run, newest first: a host's moons and the past ring read it.
+  const finished = runs.filter((r) => r.outcome !== 'running').sort((a, b) => endOf(b) - endOf(a));
   const hosts: OrbitHost[] = list.map((alias, i) => {
     const mine = runs.filter((r) => r.host === alias);
+    const mineDone = finished.filter((r) => r.host === alias);
     const comets = mine
       .filter((r) => r.outcome === 'running')
       .map((r) => {
@@ -267,24 +304,19 @@ export function orbitModel(args: {
           quiet,
         };
       });
-    const needs = mine.some((r) => r.outcome === 'needs_person' && now - (r.ended_at ?? r.started_at) <= HALO_SECS);
-    const failed = mine.some((r) => r.outcome === 'failed' && now - (r.ended_at ?? r.started_at) <= SPARK_SECS);
+    const needs = mine.some((r) => r.outcome === 'needs_person' && now - endOf(r) <= HALO_SECS);
+    const failed = mine.some((r) => r.outcome === 'failed' && now - endOf(r) <= SPARK_SECS);
     const next = routines
       .filter((r) => r.host_alias === alias && r.enabled && r.trigger === 'cron' && !r.skip_next && (r.next_run_at ?? 0) > now)
       .sort((a, b) => (a.next_run_at ?? 0) - (b.next_run_at ?? 0))[0];
     const drawn = new Set(mine.filter((r) => r.outcome === 'running').flatMap((r) => r.session_ids.slice(0, 1)));
     const working = sessions.filter((s) => s.host_alias === alias && s.claude_status === 'working' && !drawn.has(s.id)).length;
-    const lastEnded = mine
-      .filter((r) => r.outcome !== 'running')
-      .reduce((t, r) => Math.max(t, r.ended_at ?? r.started_at), -Infinity);
-    const moonRuns = mine
-      .filter((r) => r.outcome !== 'running' && now - (r.ended_at ?? r.started_at) <= MOON_SECS)
-      .sort((a, b) => (b.ended_at ?? b.started_at) - (a.ended_at ?? a.started_at))
-      .slice(0, MOONS_MAX);
+    const lastEnded = mineDone.length > 0 ? endOf(mineDone[0]) : -Infinity;
+    const moonRuns = mineDone.filter((r) => now - endOf(r) <= MOON_SECS).slice(0, MOONS_MAX);
     // Moons sit on the ring from the top, the newest first, a sixth apart.
     const moons = moonRuns.map((r, k) => {
       const a = -Math.PI / 2 + (k * Math.PI) / 3 + Math.PI / 6;
-      const at = r.ended_at ?? r.started_at;
+      const at = endOf(r);
       const tone = toneOf(r);
       return {
         run_id: r.id,
@@ -318,6 +350,7 @@ export function orbitModel(args: {
       moons,
       scale: 0.6 + 0.6 * (n / most),
       comets,
+      busy: comets.length > 0 || working > 0,
       needs,
       failed,
       caption,
@@ -328,16 +361,15 @@ export function orbitModel(args: {
 
   const fires = routines
     .filter((r) => r.enabled && r.trigger === 'cron' && !r.skip_next && r.next_run_at !== undefined && r.next_run_at > now && r.next_run_at - now <= RING_SECS)
-    .map((r) => ({ routine: r.name, at: r.next_run_at!, deg: ((r.next_run_at! - now) / RING_SECS) * 180, label: hm(r.next_run_at!) }))
+    .map((r) => ({ routine: r.name, at: r.next_run_at!, deg: ((r.next_run_at! - now) / RING_SECS) * 180, label: clockLabel(r.next_run_at!) }))
     .sort((a, b) => a.at - b.at);
 
-  const past = runs
-    .filter((r) => r.outcome !== 'running' && now - (r.ended_at ?? r.started_at) <= RING_SECS && (r.ended_at ?? r.started_at) <= now)
-    .sort((a, b) => (b.ended_at ?? b.started_at) - (a.ended_at ?? a.started_at))
+  const past = finished
+    .filter((r) => now - endOf(r) <= RING_SECS && endOf(r) <= now)
     .slice(0, PAST_MAX)
     .map((r) => {
-      const at = r.ended_at ?? r.started_at;
-      return { run_id: r.id, tone: toneOf(r), deg: -((now - at) / RING_SECS) * 180, title: `${hm(at)} · ${r.owner} · ${feedLine(r).what}` };
+      const at = endOf(r);
+      return { run_id: r.id, tone: toneOf(r), deg: -((now - at) / RING_SECS) * 180, title: `${clockLabel(at)} · ${r.owner} · ${feedLine(r).what}` };
     });
 
   const feed = runs
@@ -355,4 +387,17 @@ export function orbitModel(args: {
     hubHeat: heatOf(runs.filter((r) => !r.host || !aliases.has(r.host))),
     jev: runs.filter((r) => r.source === 'jev' && now - r.started_at <= SPARK_SECS).length,
   };
+}
+
+/** The stage's accessible name (review w19-12): the counts, and which hosts
+ *  have a run waiting for you or one that failed lately, which the map
+ *  shows only as an amber halo and a red spark. */
+export function orbitStageLabel(m: Pick<OrbitModel, 'hosts' | 'running' | 'working'>): string {
+  const base = `${m.running} running and ${m.working} working across ${m.hosts.length} hosts`;
+  const waits = m.hosts.filter((h) => h.needs).map((h) => h.alias);
+  const failed = m.hosts.filter((h) => h.failed).map((h) => h.alias);
+  const parts = [base];
+  if (waits.length) parts.push(`a run waits for you on ${waits.join(', ')}`);
+  if (failed.length) parts.push(`a run failed lately on ${failed.join(', ')}`);
+  return parts.join(' · ');
 }

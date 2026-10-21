@@ -161,9 +161,7 @@ pub const GROUP_BY_VALUES: [&str; 9] = [
     "group", "org", "person", "mission", "account", "repo", "sprint", "release", "epic",
 ];
 
-fn is_zero_u32(n: &u32) -> bool {
-    *n == 0
-}
+use crate::serde_util::is_zero_u32;
 
 /// Where a task sits and why.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

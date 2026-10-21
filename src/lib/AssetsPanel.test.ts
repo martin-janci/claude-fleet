@@ -113,6 +113,21 @@ describe('AssetsPanel', () => {
     await waitFor(() => expect(invoke.mock.calls.some((c) => c[0] === 'catalog_load')).toBe(true));
   });
 
+  // Review w17-9: the catalog loads but its listing does not — the Retry
+  // pane, not a spinner that never ends.
+  it('a failed listing after a good load offers Retry, not endless loading', async () => {
+    byCmd({
+      catalog_config: { repo_path: '/r', remote_url: null, head_commit: 'h', last_loaded_at: 1 },
+      catalog_load: { head: 'h', loaded_at: 1, asset_count: 2, problem_count: 0 },
+      catalog_list_assets: { code: 'E_DB', message: 'database is locked' },
+      assets_inventory: [],
+    });
+    render(AssetsPanel);
+    const failed = await screen.findByTestId('assets-load-failed');
+    expect(failed.textContent).toContain('database is locked');
+    expect(screen.getByTestId('assets-retry')).toBeTruthy();
+  });
+
   // The recovery UI above must not hang off a variable that unrelated toolbar
   // handlers reset. Sync (and Push, and Scan hosts) clear `error` on entry and
   // leave it clear on success — which used to turn the Retry block back into a

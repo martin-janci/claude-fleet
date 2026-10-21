@@ -295,13 +295,39 @@ pub async fn provision_one_with(
     Ok(())
 }
 
+/// How many times [`rewrite_mcp_entry`] reads and merges again when the
+/// file changed under it.
+const MCP_ENTRY_TRIES: usize = 3;
+
 /// Step 2 of [`provision_one`] alone: read the host's `~/.claude.json`,
 /// merge fleet's entry with `base.mcp_url()` and `token` ([`merge_mcp_entry`],
 /// siblings kept), back the old file up to `~/.claude.json.fleet-bak` and
 /// write it back, both `0600`. A file that does not parse aborts before any
 /// write. Autofix's `host_mcp_entry` fix runs this with the host's stored
-/// token.
+/// token, unattended, on hosts whose Claude sessions rewrite that file all
+/// the time: the final rename happens only if the file still holds what
+/// was read (compared with the backup in the same remote script), and a
+/// file that changed in between is read and merged again, so a write a
+/// live session made meanwhile is never replaced by the stale copy.
 pub async fn rewrite_mcp_entry(
+    ssh: &dyn SshExec,
+    host: &str,
+    base: &HubBase,
+    token: &str,
+) -> Result<(), IpcError> {
+    let mut last = None;
+    for _ in 0..MCP_ENTRY_TRIES {
+        match rewrite_mcp_entry_once(ssh, host, base, token).await {
+            Err(e) if e.code == codes::E_CONFLICT => last = Some(e),
+            other => return other,
+        }
+    }
+    Err(last.unwrap_or_else(|| IpcError::new(codes::E_CONFLICT, "~/.claude.json kept changing")))
+}
+
+/// One read → merge → back up → guarded write of [`rewrite_mcp_entry`].
+/// `E_CONFLICT` when the file changed after the read; nothing was replaced.
+async fn rewrite_mcp_entry_once(
     ssh: &dyn SshExec,
     host: &str,
     base: &HubBase,
@@ -309,18 +335,19 @@ pub async fn rewrite_mcp_entry(
 ) -> Result<(), IpcError> {
     let existing = read_host_file(ssh, host, CLAUDE_JSON).await?;
     let merged = merge_mcp_entry(&existing, &base.mcp_url(), token)?; // errors before any write
+    let backup = format!("{CLAUDE_JSON}.fleet-bak");
     if !existing.trim().is_empty() {
         // The backup carries the previous token too — same mode.
-        write_host_file_secret(
-            ssh,
-            host,
-            CLAUDE_DIR,
-            &format!("{CLAUDE_JSON}.fleet-bak"),
-            &existing,
-        )
-        .await?;
+        write_host_file_secret(ssh, host, CLAUDE_DIR, &backup, &existing).await?;
     }
-    write_host_file_secret(ssh, host, CLAUDE_DIR, CLAUDE_JSON, &merged).await
+    let unchanged = Unchanged {
+        expected: &existing,
+        // Blank content has no backup to compare with; blank still counts
+        // as "nothing there" for the check.
+        backup: (!existing.trim().is_empty()).then_some(backup.as_str()),
+    };
+    write_host_file_secret_guarded(ssh, host, CLAUDE_DIR, CLAUDE_JSON, &merged, Some(unchanged))
+        .await
 }
 
 /// Shell script listing the host's login profile dirs, one `@@P\t<name>`
@@ -1377,6 +1404,44 @@ pub async fn write_host_file_secret(
     path: &str,
     content: &str,
 ) -> Result<(), IpcError> {
+    write_host_file_secret_guarded(ssh, host, dir, path, content, None).await
+}
+
+/// What a guarded secret write expects `path` to still hold at the rename
+/// ([`write_host_file_secret_guarded`]).
+#[derive(Debug, Clone, Copy)]
+struct Unchanged<'a> {
+    /// The content read before the merge (local hosts compare it).
+    expected: &'a str,
+    /// A file on the host holding exactly `expected` (the backup just
+    /// written), compared remotely; `None` = `path` must be absent or blank.
+    backup: Option<&'a str>,
+}
+
+/// What [`remote_guarded_rename_script`] prints when the target changed
+/// since it was read and the rename was skipped.
+const CHANGED_MEANWHILE_MARKER: &str = "fleet-changed-meanwhile";
+
+fn changed_meanwhile(host: &str, path: &str) -> IpcError {
+    IpcError::new(
+        codes::E_CONFLICT,
+        format!("{path} on {host} changed while fleet was rewriting it; not replaced"),
+    )
+}
+
+/// [`write_host_file_secret`], and with `unchanged` set, the rename onto
+/// `path` happens only while `path` still holds what was read: checked in
+/// the same remote script as the rename, so another writer's change since
+/// the read is not overwritten. `E_CONFLICT` when it changed (the tmp file
+/// is removed, `path` untouched).
+async fn write_host_file_secret_guarded(
+    ssh: &dyn SshExec,
+    host: &str,
+    dir: &str,
+    path: &str,
+    content: &str,
+    unchanged: Option<Unchanged<'_>>,
+) -> Result<(), IpcError> {
     let tmp_path = format!("{path}.fleet-tmp");
     if host == "local" {
         crate::service::hub::ensure_local_allowed(host)?;
@@ -1384,6 +1449,26 @@ pub async fn write_host_file_secret(
         std::fs::create_dir_all(&edir)
             .map_err(|e| IpcError::new(codes::E_PROVISION, format!("mkdir {edir}: {e}")))?;
         let epath = expand_home_local(path)?;
+        if let Some(u) = unchanged {
+            let now = match std::fs::read(&epath) {
+                Ok(b) => b,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+                Err(e) => {
+                    return Err(IpcError::new(
+                        codes::E_PROVISION,
+                        format!("read {epath}: {e}"),
+                    ))
+                }
+            };
+            let same = if u.expected.trim().is_empty() {
+                std::str::from_utf8(&now).is_ok_and(|t| t.trim().is_empty())
+            } else {
+                now == u.expected.as_bytes()
+            };
+            if !same {
+                return Err(changed_meanwhile(host, path));
+            }
+        }
         let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
         return write_local_secret(std::path::Path::new(&epath), content, home.as_deref())
             .map_err(|e| IpcError::new(codes::E_PROVISION, format!("write {epath}: {e}")));
@@ -1412,8 +1497,14 @@ pub async fn write_host_file_secret(
     }
     // 3. Rename the tmp file onto the real path — atomic, no window where
     //    `path` is truncated but not yet rewritten.
-    let mv_script = quote(&remote_rename_script(&tmp_path, path));
+    let mv_script = quote(&match unchanged {
+        Some(u) => remote_guarded_rename_script(&tmp_path, path, u.backup),
+        None => remote_rename_script(&tmp_path, path),
+    });
     match run_remote_write_output(ssh, host, path, &mv_script).await {
+        Ok(stdout) if stdout.lines().any(|l| l.trim() == CHANGED_MEANWHILE_MARKER) => {
+            Err(changed_meanwhile(host, path))
+        }
         Ok(stdout) => {
             if let Some(line) = stdout
                 .lines()
@@ -1779,6 +1870,26 @@ fn remote_rename_script(tmp: &str, path: &str) -> String {
          fi; \
          mv -f \"$src\" \"$dst\" 2>/dev/null \
          || {{ cat \"$src\" > \"$dst\" && chmod 600 \"$dst\" && rm -f \"$src\"; }}; }}"
+    )
+}
+
+/// [`remote_rename_script`] run only while `path` still holds what was
+/// read: the same bytes as `unchanged_from` (the backup of that read), or,
+/// with `None`, nothing at all (absent, empty or blank). Otherwise the tmp file is
+/// removed and [`CHANGED_MEANWHILE_MARKER`] printed. A host without `cmp`
+/// skips the comparison rather than never writing.
+fn remote_guarded_rename_script(tmp: &str, path: &str, unchanged_from: Option<&str>) -> String {
+    let (t, p) = (remote_path(tmp), remote_path(path));
+    let check = match unchanged_from {
+        Some(b) => format!(
+            "{{ ! command -v cmp >/dev/null 2>&1 || cmp -s -- {p} {}; }}",
+            remote_path(b)
+        ),
+        None => format!("{{ ! grep -q '[^[:space:]]' {p} 2>/dev/null; }}"),
+    };
+    format!(
+        "if ! {check}; then rm -f {t}; echo {CHANGED_MEANWHILE_MARKER}; exit 0; fi; {}",
+        remote_rename_script(tmp, path)
     )
 }
 
@@ -2748,6 +2859,22 @@ mod tests {
         steps
     }
 
+    /// [`secret_write_steps`] for `~/.claude.json`, whose rename is guarded
+    /// by what was read ([`remote_guarded_rename_script`]).
+    fn guarded_write_steps(
+        dir: &str,
+        path: &str,
+        content: &str,
+        home_cached: bool,
+        unchanged_from: Option<&str>,
+    ) -> Vec<Step> {
+        let mut steps = secret_write_steps(dir, path, content, home_cached);
+        let tmp = format!("{path}.fleet-tmp");
+        *steps.last_mut().unwrap() =
+            Step::Script(remote_guarded_rename_script(&tmp, path, unchanged_from));
+        steps
+    }
+
     fn fresh_host_sequence() -> Vec<Step> {
         use Step::*;
         let mut steps = vec![
@@ -2782,11 +2909,12 @@ mod tests {
             //    an atomic rename lands it on the real path.
             Script(remote_read_script(CLAUDE_JSON)),
         ];
-        steps.extend(secret_write_steps(
+        steps.extend(guarded_write_steps(
             CLAUDE_DIR,
             CLAUDE_JSON,
             &merge_mcp_entry("", URL, TOKEN).unwrap(),
             false,
+            None,
         ));
         steps.extend([
             // 3. tmux clipboard
@@ -3661,9 +3789,11 @@ mod tests {
         assert_eq!(content(&settings_bak_tmp), expected_settings());
         // Each tmp file is renamed onto its real path — the file is never
         // truncated in place.
-        assert!(steps.contains(&Step::Script(remote_rename_script(
+        // The rewrite lands only while the file still matches its backup.
+        assert!(steps.contains(&Step::Script(remote_guarded_rename_script(
             &format!("{CLAUDE_JSON}.fleet-tmp"),
-            CLAUDE_JSON
+            CLAUDE_JSON,
+            Some(&format!("{CLAUDE_JSON}.fleet-bak"))
         ))));
         assert!(steps.contains(&Step::Script(remote_rename_script(
             &format!("{CLAUDE_JSON}.fleet-bak.fleet-tmp"),
@@ -3752,6 +3882,83 @@ mod tests {
             )
             .count();
         assert_eq!(skill_writes, 4);
+    }
+
+    /// A live Claude rewrote `~/.claude.json` between the read and the
+    /// rename: the guarded rename refuses, and the rewrite reads and merges
+    /// again instead of landing the stale copy.
+    #[tokio::test]
+    async fn a_claude_json_changed_meanwhile_is_read_and_merged_again() {
+        let fake = provisioned_host();
+        let guarded = remote_guarded_rename_script(
+            &format!("{CLAUDE_JSON}.fleet-tmp"),
+            CLAUDE_JSON,
+            Some(&format!("{CLAUDE_JSON}.fleet-bak")),
+        );
+        fake.on_host_once(
+            "h1",
+            Match::script(&guarded),
+            Reply::ok(&format!("{CHANGED_MEANWHILE_MARKER}\n")),
+        );
+        rewrite_mcp_entry(&fake, "h1", &base(), TOKEN)
+            .await
+            .unwrap();
+        let scripts: Vec<String> = fake.calls().iter().filter_map(Call::script).collect();
+        let count = |want: &str| scripts.iter().filter(|s| *s == want).count();
+        assert_eq!(count(&remote_read_script(CLAUDE_JSON)), 2, "read again");
+        assert_eq!(count(&guarded), 2, "renamed on the second try");
+
+        // A file that never settles gives up with E_CONFLICT.
+        let fake = provisioned_host();
+        fake.on(
+            Match::script(&guarded),
+            Reply::ok(&format!("{CHANGED_MEANWHILE_MARKER}\n")),
+        );
+        let e = rewrite_mcp_entry(&fake, "h1", &base(), TOKEN)
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, codes::E_CONFLICT, "{}", e.message);
+    }
+
+    /// The guarded rename against a real shell: it lands only while the
+    /// target still holds what was read.
+    #[cfg(unix)]
+    #[test]
+    fn the_guarded_rename_lands_only_on_an_unchanged_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = |n: &str| dir.path().join(n).to_string_lossy().into_owned();
+        let (target, tmp, bak) = (p("c.json"), p("c.json.fleet-tmp"), p("c.json.fleet-bak"));
+        let run = |unchanged: Option<&str>| {
+            let out = std::process::Command::new("bash")
+                .args([
+                    "-c",
+                    &remote_guarded_rename_script(&tmp, &target, unchanged),
+                ])
+                .output()
+                .unwrap();
+            assert!(out.status.success());
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        };
+        // Unchanged since the read: renamed.
+        std::fs::write(&target, "{\"a\":1}").unwrap();
+        std::fs::write(&bak, "{\"a\":1}").unwrap();
+        std::fs::write(&tmp, "merged").unwrap();
+        assert!(!run(Some(&bak)).contains(CHANGED_MEANWHILE_MARKER));
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "merged");
+        // Changed since the read: left alone, tmp removed.
+        std::fs::write(&target, "{\"a\":2}").unwrap();
+        std::fs::write(&tmp, "stale").unwrap();
+        assert!(run(Some(&bak)).contains(CHANGED_MEANWHILE_MARKER));
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "{\"a\":2}");
+        assert!(!std::path::Path::new(&tmp).exists());
+        // Read as absent, but created meanwhile: left alone.
+        std::fs::write(&tmp, "fresh").unwrap();
+        assert!(run(None).contains(CHANGED_MEANWHILE_MARKER));
+        // Still absent: renamed.
+        std::fs::remove_file(&target).unwrap();
+        std::fs::write(&tmp, "fresh").unwrap();
+        assert!(!run(None).contains(CHANGED_MEANWHILE_MARKER));
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "fresh");
     }
 
     #[tokio::test]

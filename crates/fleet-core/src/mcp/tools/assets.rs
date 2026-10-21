@@ -513,8 +513,8 @@ impl FleetTools {
     }
 
     #[tool(description = "The catalog's layer definitions (layers/*.yaml) \
-        and each host's role + active contexts. Read-only. Requires \
-        catalog_configure + catalog_load in the app.")]
+        and each host's role + active contexts. Read-only. Needs a loaded \
+        catalog: catalog_admin {action: load} (configure first).")]
     pub(super) async fn list_layers(&self) -> Result<CallToolResult, McpError> {
         audit("list_layers", "");
         catalog::ensure_fresh_blocking(&self.store)
@@ -528,8 +528,8 @@ impl FleetTools {
         contexts resolve: provenance, what was excluded and why, every \
         refused asset (scope or collision), every private asset an org \
         host withheld silently, and each held-back catalog with why. \
-        Nothing is written. Requires \
-        catalog_configure + catalog_load in the app.")]
+        Nothing is written. Needs a loaded catalog: catalog_admin \
+        {action: load} (configure first).")]
     pub(super) async fn resolve_preview(
         &self,
         Parameters(p): Parameters<ResolvePreviewParams>,
@@ -894,7 +894,7 @@ fn may_admin_catalog_row(
 }
 
 /// [`may_admin_catalog_row`] by name, for a caller that has not read the row.
-fn may_admin_catalog(
+pub(super) fn may_admin_catalog(
     caller: &Caller,
     store: &std::sync::Mutex<Store>,
     name: &str,

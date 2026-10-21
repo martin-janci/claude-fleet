@@ -335,6 +335,85 @@ async fn fetch_by_id_marks_missing_items_unavailable_never_gone() {
     assert_eq!(body["issueIdsOrKeys"], json!(["10101", "10999"]));
 }
 
+/// Jira Cloud answers an expired or revoked API token as an anonymous
+/// caller: `bulkfetch` is a 200 with no issues and no `issueErrors`, and
+/// only `/myself` says 401 (seen live, 2026-10). An all-empty answer is
+/// checked against `/myself` before anything is called unavailable.
+#[tokio::test]
+async fn an_all_empty_fetch_from_a_dead_token_is_auth_not_unavailable() {
+    let empty = || {
+        Ok(Response::json(
+            200,
+            &json!({"issues": [], "issueErrors": []}),
+        ))
+    };
+    let f = FakeTransport::new();
+    f.once(Method::Post, "/issue/bulkfetch", empty()).once(
+        Method::Get,
+        "/rest/api/3/myself",
+        Ok(Response::new(401, "")),
+    );
+    let e = jira(&f)
+        .fetch(&[ItemRef::Id("10101".into()), ItemRef::Id("10999".into())])
+        .await
+        .unwrap_err();
+    assert!(matches!(e, TrackerError::Auth(_)), "{e:?}");
+    assert_eq!(e.state(), Some("auth_failed"));
+
+    // A live token that truly sees none of them: unavailable, as before.
+    let f = FakeTransport::new();
+    f.once(Method::Post, "/issue/bulkfetch", empty()).once(
+        Method::Get,
+        "/rest/api/3/myself",
+        ok("myself.json"),
+    );
+    let got = jira(&f)
+        .fetch(&[ItemRef::Id("10999".into())])
+        .await
+        .unwrap();
+    assert!(matches!(got[0], Fetched::Unavailable { .. }), "{got:?}");
+
+    // Something came back: no identity call.
+    let f = FakeTransport::new();
+    f.once(Method::Post, "/issue/bulkfetch", ok("bulkfetch.json"));
+    jira(&f)
+        .fetch(&[ItemRef::Id("10101".into()), ItemRef::Id("10999".into())])
+        .await
+        .unwrap();
+    assert_eq!(f.count("/myself"), 0);
+}
+
+/// An empty view is checked the same way: a dead token would otherwise
+/// read as "nothing assigned to me" and the tracker would stay ok. A live
+/// token's empty view costs one `/myself` per provider, not one per view.
+#[tokio::test]
+async fn an_empty_view_from_a_dead_token_is_auth_and_a_live_one_is_asked_once() {
+    let empty = || Ok(Response::json(200, &json!({"issues": [], "isLast": true})));
+    let f = FakeTransport::new();
+    f.once(Method::Post, "/search/jql", empty()).once(
+        Method::Get,
+        "/rest/api/3/myself",
+        Ok(Response::new(401, "")),
+    );
+    let e = jira(&f)
+        .list(&view("mine", VIEW_MINE), None, None)
+        .await
+        .unwrap_err();
+    assert_eq!(e.state(), Some("auth_failed"), "{e:?}");
+
+    let f = FakeTransport::new();
+    f.always(Method::Post, "/search/jql", empty()).once(
+        Method::Get,
+        "/rest/api/3/myself",
+        ok("myself.json"),
+    );
+    let j = jira(&f);
+    for v in [view("mine", VIEW_MINE), view("recent", VIEW_RECENT)] {
+        assert!(j.list(&v, None, None).await.unwrap().items.is_empty());
+    }
+    assert_eq!(f.count("/myself"), 1, "once per provider");
+}
+
 #[tokio::test]
 async fn fetch_by_an_old_key_reveals_a_moved_issue_as_an_alias() {
     let f = FakeTransport::new();
@@ -483,6 +562,7 @@ async fn fetch_chunks_at_the_bulk_limit() {
             &json!({"issues": [], "issueErrors": []}),
         )),
     );
+    f.once(Method::Get, "/rest/api/3/myself", ok("myself.json"));
     let refs: Vec<ItemRef> = (0..(BULK_MAX + 5))
         .map(|i| ItemRef::Id(i.to_string()))
         .collect();

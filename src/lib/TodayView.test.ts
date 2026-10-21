@@ -111,6 +111,16 @@ describe('TodayView', () => {
     expect(onclose).toHaveBeenCalled();
   });
 
+  it('w11-10: with onopen (Control), a session opens there instead of jumping', async () => {
+    const onopen = vi.fn();
+    const onclose = vi.fn();
+    render(TodayView, { onopen, onclose });
+    await flush();
+    await fireEvent.click(screen.getByText('pay (waiting for an answer)'));
+    expect(onopen).toHaveBeenCalledWith(expect.objectContaining({ id: 41 }));
+    expect(onclose).not.toHaveBeenCalled();
+  });
+
   it('Copy standup copies the plain-text standup and nothing is sent', async () => {
     render(TodayView);
     await flush();

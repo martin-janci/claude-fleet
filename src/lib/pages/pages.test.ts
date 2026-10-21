@@ -8,12 +8,14 @@ import {
   formatCell,
   fromDisplay,
   homeOf,
+  needsConfirm,
   rangeText,
   searchSettings,
   toDisplay,
   valuesOf,
 } from './pages';
 import { allDescriptors, bundle, descriptorOf } from './testing';
+import type { Descriptor } from './pages';
 
 const descs = new Map(allDescriptors.map((d) => [d.key, d]));
 const defaults = Object.fromEntries(allDescriptors.map((d) => [d.key, d.value]));
@@ -57,6 +59,30 @@ describe('units', () => {
     expect(rangeText(descriptorOf('gc.bg_idle_secs'))).toBe('hours; 0 = never');
     expect(rangeText(descriptorOf('repair.tick_interval_secs'))).toBe('at least 60 seconds');
     expect(rangeText(descriptorOf('health.context_red_pct'))).toBe('1–100 %');
+  });
+
+  it('shows a minimum the backend accepts, in the row\'s unit (review w15-3)', () => {
+    expect(rangeText(descriptorOf('update.check_interval_secs'))).toBe('at least 0.25 hours');
+    expect(rangeText(descriptorOf('update.rollout_wave_secs'))).toBe('at least 5 minutes');
+    // A minimum that does not divide evenly rounds up, never under it.
+    const odd = { ...descriptorOf('update.check_interval_secs'), kind: { type: 'secs', min: 300, max: 10 ** 9 } } as Descriptor;
+    expect(rangeText(odd)).toBe('at least 0.09 hours');
+    expect(fromDisplay(odd, '0.09')).toEqual({ value: '324' });
+  });
+
+  it('refuses a number out of range in the row\'s own unit (review w15-4)', () => {
+    const check = descriptorOf('update.check_interval_secs');
+    expect(fromDisplay(check, '0.1')).toEqual({ error: 'enter at least 0.25 hours' });
+    expect(fromDisplay(check, '0.25')).toEqual({ value: '900' });
+    const days = descriptorOf('work.recent_days');
+    expect(fromDisplay(days, '900')).toEqual({ error: `enter ${rangeText(days).split(';')[0]}` });
+  });
+
+  it('asks to confirm a dangerous change unless it goes back to the default (review w15-5)', () => {
+    const gc = descriptorOf('gc.enabled');
+    expect(gc.danger.level).toBe('confirm');
+    expect(needsConfirm(gc, gc.default === 'true' ? 'false' : 'true')).toBe(true);
+    expect(needsConfirm(gc, gc.default)).toBe(false);
   });
 });
 
@@ -105,6 +131,17 @@ describe('search and the page tree', () => {
     // (the haystack is label/key/help/tags plus the section title)
     const viaGuide = searchSettings('turn auto-tidy on', withGuide, descs, defaults);
     expect(viaGuide.map((h) => h.page)).toContain('guide.tidy');
+  });
+
+  it('finds a setting by its page title, and says when its page hides it (review w15-1, w15-2)', () => {
+    expect(searchSettings('notifications', bundle.pages, descs, defaults).length).toBeGreaterThan(0);
+    const off = { ...defaults, 'decide.haiku.shadow': 'false' };
+    const hit = searchSettings('second opinion host', bundle.pages, descs, off).find((h) => h.key === 'decide.haiku.host')!;
+    expect(hit.hidden).toBe(`shown when ${descs.get('decide.haiku.shadow')!.label} is on`);
+    const on = { ...defaults, 'decide.haiku.shadow': 'true' };
+    expect(
+      searchSettings('second opinion host', bundle.pages, descs, on).find((h) => h.key === 'decide.haiku.host')!.hidden,
+    ).toBeUndefined();
   });
 
   it('@modified lists only what is off its default; @tag filters by tag', () => {

@@ -14,7 +14,7 @@
   side panel.
 -->
 <script lang="ts">
-  import { orbitModel, type OrbitModel } from '../orbit_map';
+  import { clockLabel, orbitModel, orbitStageLabel, type OrbitModel } from '../orbit_map';
   import { countRoll, toastIn } from '../motion_catalog';
   import type { RunRow } from '../runs';
 
@@ -38,10 +38,6 @@
 
   const model: OrbitModel = $derived(orbitModel({ runs, hostAliases, sessions, routines, now }));
   const byId = $derived(new Map(runs.map((r) => [r.id, r])));
-  const clock = (sec: number) => {
-    const d = new Date(sec * 1000);
-    return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
-  };
   function pick(id: string) {
     const r = byId.get(id);
     if (r) onpick?.(r);
@@ -52,7 +48,7 @@
   <div
     class="stage"
     role="group"
-    aria-label={`${model.running} running and ${model.working} working across ${model.hosts.length} hosts`}
+    aria-label={orbitStageLabel(model)}
   >
     <div class="ring outer"></div>
     <svg class="spokes" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
@@ -63,7 +59,7 @@
           x2={h.x}
           y2={h.y}
           class="spoke"
-          class:live={h.comets.length > 0 || h.working > 0}
+          class:live={h.busy}
           class:warm={h.heat > 0}
           style:--heat={h.heat}
         />
@@ -81,7 +77,7 @@
       </div>
     {/each}
     <span class="nowmark" aria-hidden="true"></span>
-    <span class="nowlabel xs tnum">now {clock(now)}</span>
+    <span class="nowlabel xs tnum">now {clockLabel(now)}</span>
     <span class="half past xs">past 12h</span>
     <span class="half next xs">next 12h</span>
 
@@ -97,7 +93,7 @@
     {#each model.hosts as h (h.alias)}
       <div
         class="host"
-        class:busy={h.comets.length > 0 || h.working > 0}
+        class:busy={h.busy}
         style:left={`${h.x}%`}
         style:top={`${h.y}%`}
         style:--s={h.scale}
@@ -178,7 +174,7 @@
       {#if model.feed.length === 0}<span class="xs muted">Nothing ran recently.</span>{/if}
       {#each model.feed as e (e.run_id)}
         <div class="feed" in:toastIn>
-          <span class="xs muted tnum">{clock(e.at)}</span>
+          <span class="xs muted tnum">{clockLabel(e.at)}</span>
           <span class={`fdot ${e.tone}`}></span>
           <span class="xs what" title={`${e.who} ${e.what}`}><b>{e.who}</b> <span class="fg2">{e.what}</span></span>
         </div>
@@ -234,6 +230,7 @@
   /* The name and caption hang under the planet, never inside it: a long
      alias ellipsises against the stage, not against a 40 px circle. */
   .label { position: absolute; top: 72%; left: 50%; transform: translateX(-50%); width: max-content; max-width: 34cqw; display: flex; flex-direction: column; align-items: center; gap: 1px; text-align: center; pointer-events: none; }
+  /* Moons (z-index 1) sit above the label, so a lower moon under the name stays clickable. */
   .name, .caption { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; pointer-events: auto; }
   .name { font-size: var(--text-xs); font-weight: 600; color: var(--fg); padding: 0 4px; border-radius: var(--radius-xs); background: color-mix(in srgb, var(--bg-sunk) 80%, transparent); }
   .caption { font-size: var(--text-2xs); }
@@ -250,7 +247,7 @@
   .sat { position: absolute; inset: 16%; border-radius: 50%; pointer-events: none; animation: orbit calc(var(--loop-slow) * 5) linear infinite; animation-delay: calc(var(--loop-slow) * -5 * var(--phase)); }
   .sathead { position: absolute; left: calc(50% - 3px); top: -3px; width: 6px; height: 6px; border-radius: 50%; background: var(--status-working); box-shadow: 0 0 6px 1px color-mix(in srgb, var(--status-working) 70%, transparent); }
   /* Moons: a 24 px target, drawn as an 8 px dot. */
-  .moon { position: absolute; width: 24px; height: 24px; transform: translate(-50%, -50%); padding: 0; border: 0; background: transparent; cursor: pointer; border-radius: 50%; }
+  .moon { position: absolute; z-index: 1; width: 24px; height: 24px; transform: translate(-50%, -50%); padding: 0; border: 0; background: transparent; cursor: pointer; border-radius: 50%; }
   .moon::after { content: ''; position: absolute; left: 8px; top: 8px; width: 8px; height: 8px; border-radius: 50%; background: var(--fg-muted); box-shadow: 0 0 0 2px var(--bg-sunk); }
   .moon.done::after { background: var(--status-done); }
   .moon.failed::after { background: var(--status-failed); }

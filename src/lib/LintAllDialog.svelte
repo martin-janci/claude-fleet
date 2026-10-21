@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { errorText } from './error_copy';
   import { onMount } from 'svelte';
   import Modal from './Modal.svelte';
   import { lintAll, type LintAll } from './assets';
@@ -21,7 +22,7 @@
     error = null;
     const r = await lintAll();
     busy = false;
-    if (!r.ok) { error = r.error.message; return; }
+    if (!r.ok) { error = errorText(r.error); return; }
     report = r.value;
   }
 

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { errorText } from '../error_copy';
   // An org's members (redesign 11.2, board OrgMembers): a table of who is
   // in it, their role, their devices (for whoever administers it) and since
   // when an org share reaches them. Removing one asks what happens to what
@@ -9,6 +10,7 @@
   import PairingResult from './PairingResult.svelte';
   import { trustDevice } from '../devices';
   import { buildArgs, type ActionSpec, type ResourceRecord } from './resources';
+  import { useResourceFleet } from './resource_fleet';
   import {
     memberPairing,
     memberSessionsWord,
@@ -44,6 +46,9 @@
     now?: () => number;
   } = $props();
 
+  /** The fleet the enclosing resource page acts on: a trust, a member's
+   *  shares and a pairing code go to that fleet's hub. */
+  const resourceFleet = useResourceFleet();
   const orgId = $derived(Number(record.id));
   const orgName = $derived(String(record.name ?? 'the org'));
   const showDevices = $derived(members.some((m) => m.devices !== undefined));
@@ -86,7 +91,7 @@
   async function askRemove(m: OrgMember) {
     choice = 'revoke';
     removing = { member: m, grants: null, loading: true };
-    const r = await orgMemberGrants(orgId, m.person_id);
+    const r = await orgMemberGrants(orgId, m.person_id, resourceFleet().fleet);
     if (removing?.member !== m) return;
     const g = r.ok && r.value && typeof r.value.watch === 'number' ? r.value : null;
     removing = { member: m, grants: g, loading: false };
@@ -106,7 +111,10 @@
 
   // --- add, then pair --------------------------------------------------------
 
-  const pairingHere = $derived($memberPairing && $memberPairing.org_id === orgId ? $memberPairing : null);
+  // A pairing started on another hub's org of the same id is not this one's.
+  const pairingHere = $derived(
+    $memberPairing && $memberPairing.org_id === orgId && $memberPairing.fleet === resourceFleet().fleet ? $memberPairing : null,
+  );
   let device = $state('');
   // The editor is rebuilt when the list is re-read after the add, so a
   // pairing started there arrives through the store: name its device here.
@@ -120,7 +128,7 @@
   function startPairing(person: string) {
     device = `${person}-device`;
     pairError = null;
-    memberPairing.set({ org_id: orgId, person });
+    memberPairing.set({ fleet: resourceFleet().fleet, org_id: orgId, person });
   }
 
   async function add(params: Record<string, string>) {
@@ -140,7 +148,7 @@
    *  trust: say that it is waiting, rather than a raw "not found". */
   async function trust(device: string, person: string) {
     trusting = device;
-    const r = await trustDevice(device);
+    const r = await trustDevice(device, resourceFleet().fleet);
     trusting = null;
     if (r.ok) {
       trustNote = { ...trustNote, [device]: '' };
@@ -151,7 +159,7 @@
     }
     trustNote = {
       ...trustNote,
-      [device]: r.error.code === 'E_NOTFOUND' ? `Waiting for ${person} to pair…` : r.error.message,
+      [device]: r.error.code === 'E_NOTFOUND' ? `Waiting for ${person} to pair…` : errorText(r.error),
     };
   }
 
@@ -159,10 +167,10 @@
     const p = pairingHere;
     if (!p || !device.trim()) return;
     minting = true;
-    const r = await pairMemberDevice(orgId, p.person, device.trim());
+    const r = await pairMemberDevice(orgId, p.person, device.trim(), resourceFleet().fleet);
     minting = false;
     if (r.ok) memberPairing.set({ ...p, pairing: r.value });
-    else pairError = r.error.message;
+    else pairError = errorText(r.error);
   }
 </script>
 

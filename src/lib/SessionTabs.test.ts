@@ -7,7 +7,7 @@ import { session } from './hosts_fixture';
 import { expectAccessible } from './a11y_check';
 import type { SessionRow } from './sessions';
 
-function mount(row: SessionRow | null, isMac = true) {
+function mount(row: SessionRow | null, isMac = true, inspectorAvailable = true) {
   return render(SessionTabs, {
     props: {
       session: row,
@@ -15,7 +15,7 @@ function mount(row: SessionRow | null, isMac = true) {
       current: row ? 'agent' : null,
       disabled: {},
       inspectorOpen: false,
-      inspectorAvailable: true,
+      inspectorAvailable,
       isMac,
       onselect: () => {},
       oninspector: () => {},
@@ -137,5 +137,19 @@ describe('SessionTabs: the header per the Main board (UX audit 2026-10-09, H1–
   it('shows no meter when the context is unknown', () => {
     mount({ ...session('mercury', 'dev-n'), context_pct: null });
     expect(screen.queryByTestId('session-head-context')).toBeNull();
+  });
+});
+
+describe('SessionTabs: the inspector toggle (review w13-11)', () => {
+  it('a disabled toggle says why, not just its chord', () => {
+    mount(session('mercury', 'dev-a'), true, false);
+    const btn = screen.getByTestId('inspector-toggle') as HTMLButtonElement;
+    expect(btn.disabled).toBe(true);
+    expect(btn.getAttribute('title')).toMatch(/No room for the inspector/);
+  });
+
+  it('an available toggle names its chord', () => {
+    mount(session('mercury', 'dev-a'));
+    expect(screen.getByTestId('inspector-toggle').getAttribute('title')).toMatch(/^Inspector \(/);
   });
 });

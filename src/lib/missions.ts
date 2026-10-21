@@ -409,6 +409,13 @@ export function finalMoveQuestion(name: string, to: string): string {
 }
 
 /** A mission that no longer changes. */
+/** Why a mission waits on a person, in words (`MissionWait.reason`). */
+export const WAIT_WORDS: Record<string, string> = {
+  question: 'Asks a question',
+  sign_grant: 'Grant needs signing',
+  confirm: 'A step waits for your OK',
+};
+
 export function isFinal(state: string): boolean {
   return state === 'completed' || state === 'failed' || state === 'cancelled';
 }
@@ -622,6 +629,9 @@ export function eventSentence(e: MissionEvent): string {
     case 'budget':
     case 'no_progress':
       return `Paused: ${String(p.why ?? '')}`;
+    case 'account_limit':
+      // The loop holds its runs (review w03-5): say why, not just the kind.
+      return p.why ? `Waiting for the account: ${String(p.why)}` : 'Waiting for the account';
     case 'integration':
       return `Tasks ${String(p.a ?? '')} and ${String(p.b ?? '')} conflict`;
     case 'note':

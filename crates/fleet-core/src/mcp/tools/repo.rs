@@ -359,7 +359,7 @@ impl FleetTools {
     #[tool(description = "Delete a git worktree on its host (no --force) and \
         drop fleet's row. Refuses if an alive session points at it, unless \
         force. Errors: E_WORKTREE_BUSY, E_NOTFOUND, E_GIT, \
-        E_CONFIRM_REQUIRED (desktop confirmation on).")]
+        E_CONFIRM_REQUIRED (when mcp.confirm_destructive is on).")]
     pub(super) async fn delete_worktree(
         &self,
         Extension(caller): Extension<Caller>,

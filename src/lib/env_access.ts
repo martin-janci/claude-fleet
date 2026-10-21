@@ -13,7 +13,8 @@
 // The hub stays the judge: a gate here only keeps the page from offering
 // what the hub would refuse, and keeps its read-only sentence true.
 import { PRIMARY } from './fleets';
-import { invokeCmd } from './result';
+import { errorText } from './error_copy';
+import { invokeCmd, type IpcError, type Result } from './result';
 import type { ResourceRecord, ResourceType } from './pages/resources';
 
 /** What this device may change on one fleet's Environment page. */
@@ -22,6 +23,10 @@ export interface EnvAccess {
   person: boolean;
   /** Set and remove the global, host and project ones. */
   shared: boolean;
+  /** Set when a read failed without the hub answering (unreachable, timed
+   *  out): the access is unknown, not "none", so the page says the read
+   *  failed rather than asking the operator for trust. */
+  error?: string;
 }
 
 /** Everything: this app owns its fleet (standalone, its own master). */
@@ -38,11 +43,19 @@ export function envAccessFrom(personId: number | null | undefined, canWrite: boo
   return { person: typeof personId === 'number', shared: canWrite };
 }
 
+/** Refusals that ARE the hub's answer: a hub older than the command
+ *  (`E_HUB_PROTOCOL`, `E_INVALID`) or one that will not tell this device
+ *  (`E_FORBIDDEN`). Any other failure is a read that did not get through. */
+const ANSWERED_NO = new Set(['E_HUB_PROTOCOL', 'E_INVALID', 'E_FORBIDDEN']);
+
+const unread = (r: Result<unknown>): IpcError | null => (!r.ok && !ANSWERED_NO.has(r.error.code) ? r.error : null);
+
 /**
  * Read one fleet's access: the primary when `fleet` is the primary slot (or
  * null), else that extra fleet, routed by `fleet` like every fleet-scoped
- * command. A read that fails counts as "no": a hub older than either command
- * gets the read-only page, never a form it would refuse.
+ * command. A refusal counts as "no": a hub older than either command gets
+ * the read-only page, never a form it would refuse. A read that did not get
+ * through (the hub unreachable, timed out) is "no" too, but carries `error`.
  */
 export async function loadEnvAccess(fleet: string | null): Promise<EnvAccess> {
   const args = fleet && fleet !== PRIMARY ? { fleet } : {};
@@ -50,7 +63,9 @@ export async function loadEnvAccess(fleet: string | null): Promise<EnvAccess> {
     invokeCmd<{ person_id: number | null }>('my_grants', args),
     invokeCmd<{ can_write: boolean }>('setting_proposals', args),
   ]);
-  return envAccessFrom(who.ok ? (who.value?.person_id ?? null) : null, pending.ok && pending.value?.can_write === true);
+  const access = envAccessFrom(who.ok ? (who.value?.person_id ?? null) : null, pending.ok && pending.value?.can_write === true);
+  const failed = unread(who) ?? unread(pending);
+  return failed ? { ...access, error: errorText(failed) } : access;
 }
 
 /** Whether this device may change (remove) one listed variable. */
@@ -87,6 +102,10 @@ export function envResourceFor(resource: ResourceType, access: EnvAccess): Resou
  */
 export function envReadonlyReason(access: EnvAccess, where: string, clientName: string | null): string | null {
   if (access.person && access.shared) return null;
+  if (access.error) {
+    const until = access.person ? 'Until then only your own variables (Me) can be changed here.' : 'Until then nothing here can be changed.';
+    return `Could not read what this device may change on ${where}: ${access.error}. ${until} Try again.`;
+  }
   const trust = `fleet-hub client trust ${clientName ?? '<name>'}`;
   if (access.person)
     return `Your own variables (Me) are yours to change from this device. The global, host and project ones are ${where}’s: to change them here, its operator trusts this device: ${trust}.`;
@@ -138,7 +157,7 @@ export async function setPersonVars(
       args: { scope: 'person', scope_key: null, name: w.name, value: w.value, secret: w.secret },
       ...where,
     });
-    if (!r.ok) return { set, error: r.error.message };
+    if (!r.ok) return { set, error: errorText(r.error) };
     set += 1;
   }
   return { set, error: null };

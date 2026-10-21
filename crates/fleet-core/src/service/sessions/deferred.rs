@@ -115,9 +115,39 @@ fn idle_moment(row: &SessionRow) -> Option<i64> {
 }
 
 /// A typing error after which the paste may still have landed: the SSH
-/// call outlived its wall clock, not a tmux refusal.
+/// call outlived its wall clock, or an agent host's connection dropped after
+/// the exec frame went out (`codes::may_have_run`), not a tmux refusal.
 fn maybe_typed(e: &IpcError) -> bool {
-    e.code == codes::E_SSH_TIMEOUT
+    codes::may_have_run(&e.code)
+}
+
+/// Per-session typing lanes, keyed by the store as well so two stores (one
+/// per test) never share one.
+type Lanes = Mutex<std::collections::HashMap<(usize, i64), Arc<tokio::sync::Mutex<()>>>>;
+static LANES: std::sync::LazyLock<Lanes> = std::sync::LazyLock::new(Default::default);
+
+/// One typing at a time into a session, for every path that claims its idle
+/// moment and types (the Stop delivery, the reconcile backstop, a send-now
+/// `queue_prompt`, an agent's direct send, a message wake). Taken BEFORE the
+/// claim and held across the typing: the claim decides who gets the moment,
+/// the lane makes a send that lost it, and types anyway, wait until the
+/// winner's paste and Enter are in, so the two bodies never land in one
+/// input line (the paste, 150 ms, then Enter of `build_send_script`).
+pub async fn typing_lane(
+    store: &Mutex<Store>,
+    session_id: i64,
+) -> tokio::sync::OwnedMutexGuard<()> {
+    let lane = {
+        let mut m = LANES.lock().unwrap_or_else(|e| e.into_inner());
+        if m.len() > 256 {
+            m.retain(|_, l| Arc::strong_count(l) > 1);
+        }
+        Arc::clone(
+            m.entry((store as *const Mutex<Store> as usize, session_id))
+                .or_default(),
+        )
+    };
+    lane.lock_owned().await
 }
 
 /// Whether the row's work link is archived (collapsed into Done).
@@ -171,7 +201,12 @@ pub async fn queue_prompt(
     store: &Mutex<Store>,
     ssh: &Arc<SshClient>,
 ) -> Result<QueuePromptResult, IpcError> {
-    queue_prompt_with(args, store, now_unix(), |row, body| {
+    let body = checked_body(&args)?;
+    let _lane = typing_lane(store, args.session_id).await;
+    // The clock is read once the lane is held: a claim stamped with a time
+    // from before the wait can be older than the idle moment it takes, and
+    // the next claimant of that moment would not see it (review r3).
+    queue_prompt_in_lane(args, body, store, now_unix(), |row, body| {
         let ssh = Arc::clone(ssh);
         async move {
             prompt::send_prompt_inner(
@@ -189,8 +224,17 @@ pub async fn queue_prompt(
     .await
 }
 
-/// [`queue_prompt`] with the typing step handed in, so the decision is
-/// testable without a pane.
+/// The prompt body as it will be typed, refused when empty.
+fn checked_body(args: &QueuePromptArgs) -> Result<String, IpcError> {
+    let body = normalize_prompt_body(&args.prompt)?;
+    if body.trim().is_empty() {
+        return Err(IpcError::new(codes::E_VALIDATE, "the prompt is empty"));
+    }
+    Ok(body)
+}
+
+/// [`queue_prompt`] with the typing step and the time handed in, so the
+/// decision is testable without a pane.
 pub async fn queue_prompt_with<F, Fut>(
     args: QueuePromptArgs,
     store: &Mutex<Store>,
@@ -201,10 +245,25 @@ where
     F: FnOnce(SessionRow, String) -> Fut,
     Fut: std::future::Future<Output = Result<(), IpcError>>,
 {
-    let body = normalize_prompt_body(&args.prompt)?;
-    if body.trim().is_empty() {
-        return Err(IpcError::new(codes::E_VALIDATE, "the prompt is empty"));
-    }
+    let body = checked_body(&args)?;
+    let _lane = typing_lane(store, args.session_id).await;
+    queue_prompt_in_lane(args, body, store, now, type_it).await
+}
+
+/// The decision of [`queue_prompt`], with the session's typing lane held:
+/// the lane before the row is read, so what the row says is what the
+/// decision sees, after any typing in flight is in.
+async fn queue_prompt_in_lane<F, Fut>(
+    args: QueuePromptArgs,
+    body: String,
+    store: &Mutex<Store>,
+    now: i64,
+    type_it: F,
+) -> Result<QueuePromptResult, IpcError>
+where
+    F: FnOnce(SessionRow, String) -> Fut,
+    Fut: std::future::Future<Output = Result<(), IpcError>>,
+{
     let row = session_row(store, args.session_id)?;
     if crate::store::has_no_pane(&row.kind) || row.kind == "shell" {
         return Err(IpcError::new(
@@ -247,10 +306,20 @@ where
     if send_now {
         if let Err(e) = type_it(row.clone(), body).await {
             // The caller sees the error and decides; the row is taken back,
-            // not left to be typed again behind its back.
+            // not left to be typed again behind its back. One that may have
+            // been typed fails instead and keeps the moment it claimed, so
+            // nothing else goes in on top of the turn it may have started.
             if let Ok(s) = lock(store) {
-                let _ = s.release_deferred_prompt(id, &e.message, now);
-                let _ = s.cancel_deferred_prompt(id, now);
+                if maybe_typed(&e) {
+                    let _ = s.fail_deferred_prompt(
+                        id,
+                        &format!("may have been typed, not sent again: {}", e.message),
+                        now,
+                    );
+                } else {
+                    let _ = s.release_deferred_prompt(id, &e.message, now);
+                    let _ = s.cancel_deferred_prompt(id, now);
+                }
             }
             return Err(e);
         }
@@ -271,25 +340,207 @@ where
 /// the session's current idle moment in the ledger, so a queued prompt the
 /// Stop hook or the reconcile backstop is about to deliver waits for the
 /// next one instead of going in on top. Answers whether this send got the
-/// moment: `false` when the session is not idle, or a queued prompt already
-/// took it (the REPL then queues this one behind that turn). The ledger row
-/// is history only: it is recorded as delivered and never typed by fleet.
+/// moment, as the ledger row's id: `None` when the session is not idle, or a
+/// queued prompt already took it (the REPL then queues this one behind that
+/// turn). The ledger row is history only: it is recorded as delivered and
+/// never typed by fleet. A send whose typing then fails hands the moment
+/// back with [`settle_direct_send`]; [`send_direct`] does both, in the
+/// session's [`typing_lane`].
 pub fn claim_moment_for_direct_send(
     store: &Mutex<Store>,
     row: &SessionRow,
     body: &str,
     now: i64,
-) -> Result<bool, IpcError> {
+) -> Result<Option<i64>, IpcError> {
     if !idle_for_prompt(row) {
-        return Ok(false);
+        return Ok(None);
     }
     let s = lock(store)?;
     let id = s.insert_deferred_prompt(row.id, body, now)?;
     if s.claim_deferred_prompt_in(id, now, idle_moment(row))? {
-        return Ok(true);
+        return Ok(Some(id));
     }
     s.cancel_deferred_prompt(id, now)?;
-    Ok(false)
+    Ok(None)
+}
+
+/// A direct send's typing failed: give back the moment it claimed, unless
+/// the paste may have landed ([`maybe_typed`]) and started a turn, which
+/// keeps it. Without this a failed send held the moment with nothing typed,
+/// no turn and no Stop to start another, and the session's queue stalled.
+pub fn settle_direct_send(store: &Mutex<Store>, claim: Option<i64>, e: &IpcError, now: i64) {
+    let Some(id) = claim else {
+        return;
+    };
+    if maybe_typed(e) {
+        date_claim_from_typing(store, Some(id));
+        return;
+    }
+    if let Ok(s) = lock(store) {
+        let _ = s.release_deferred_prompt(id, &e.message, now);
+        let _ = s.cancel_deferred_prompt(id, now);
+    }
+}
+
+/// A direct send's typing is over (or may have landed): date its claim from
+/// now, so [`TURN_START_GRACE_SECS`] counts from when the paste could have
+/// landed, not from before a typing that took seconds (an SSH send that ran
+/// to its wall clock). Left alone when a new idle moment began after the
+/// claim: its turn already ended, and the claim must not come to hold a
+/// moment it never took.
+///
+/// Dated to the second BEFORE now, never now: a turn that ends at once (an
+/// API or auth error, a one-word reply) can Stop in the second the typing
+/// returned, after this restamp, and a claim dated that second would hold
+/// the moment its Stop opened (`delivered_at >= idle_since`), stalling the
+/// queue for the store's `DEFERRED_MOMENT_HOLD_SECS`.
+/// Any Stop that can follow the restamp lands strictly after `now - 1`.
+pub fn date_claim_from_typing(store: &Mutex<Store>, claim: Option<i64>) {
+    let Some(id) = claim else {
+        return;
+    };
+    let Ok(s) = lock(store) else {
+        return;
+    };
+    let Ok(Some(p)) = s.get_deferred_prompt(id) else {
+        return;
+    };
+    let Some(at) = p.delivered_at else {
+        return;
+    };
+    let Ok(Some(row)) = s.get_session_by_id(p.session_id) else {
+        return;
+    };
+    let to = now_unix() - 1;
+    if to > at && idle_moment(&row).is_none_or(|m| m <= at) {
+        let _ = s.restamp_deferred_claim(id, to);
+    }
+}
+
+/// How long after a claimed prompt is typed its turn's UserPromptSubmit hook
+/// is expected to have moved the row off idle. A claim older than this that
+/// left the row idle started no turn that will come back for anything.
+pub const TURN_START_GRACE_SECS: i64 = 10;
+
+/// Did a direct send that lost the moment ([`claim_moment_for_direct_send`]
+/// answered `None`) lose it to a prompt that started no turn still to come?
+/// The row is idle and its newest claim is past [`TURN_START_GRACE_SECS`]
+/// with the row still idle (a local `/clear`, a paste the REPL swallowed, a
+/// typing that may have landed but did not, a turn that failed at once).
+/// `false` for a row that is not idle: the turn it is in hooks on its own.
+///
+/// A Stop in the claim's own second is no proof its turn ended: both are
+/// whole seconds, and the Stop that OPENED the moment shares the second of
+/// a claim typed right after it (the claim holds a moment when
+/// `delivered_at >= idle_since`). Only the grace tells the two apart; a Stop
+/// strictly after the claim starts a moment the claim does not hold, so it
+/// never gets here.
+pub fn moment_held_without_turn(
+    store: &Mutex<Store>,
+    row: &SessionRow,
+    now: i64,
+) -> Result<bool, IpcError> {
+    if !idle_for_prompt(row) {
+        return Ok(false);
+    }
+    let Some(at) = lock(store)?.latest_deferred_claim_at(row.id)? else {
+        return Ok(false);
+    };
+    Ok(at <= now - TURN_START_GRACE_SECS)
+}
+
+/// A send that lost the moment to a prompt that started no turn
+/// ([`moment_held_without_turn`]) takes the moment over: it records a claim
+/// of its own, dated now, past the dead one's hold, so the next sender in
+/// the lane judges from this send (typed, its turn starting) and counts
+/// itself behind it, rather than from the dead claim. `None` when the
+/// moment is held by a prompt that may still be starting a turn, or the row
+/// is not idle. Given back like any claim, with [`settle_direct_send`].
+pub fn take_over_turnless_moment(
+    store: &Mutex<Store>,
+    row: &SessionRow,
+    body: &str,
+    now: i64,
+) -> Result<Option<i64>, IpcError> {
+    if !moment_held_without_turn(store, row, now)? {
+        return Ok(None);
+    }
+    let s = lock(store)?;
+    let id = s.insert_deferred_prompt(row.id, body, now)?;
+    if s.claim_deferred_prompt(id, now)? {
+        return Ok(Some(id));
+    }
+    s.cancel_deferred_prompt(id, now)?;
+    Ok(None)
+}
+
+/// What a direct send found once it held the session's typing lane: the
+/// row as it read then, not as the caller resolved it before the wait.
+#[derive(Debug, Clone)]
+pub struct DirectSend {
+    /// This send took the session's idle moment, or took over one held by
+    /// a prompt that started no turn.
+    pub got: bool,
+    /// The session row read in the lane.
+    pub row: SessionRow,
+    /// A turn runs, or is about to, ahead of this prompt, so the REPL
+    /// queues this one behind it and the reply is the turn after that one:
+    /// the row says `working`, or another prompt took this idle moment and
+    /// has not been answered yet. A moment held by a prompt that started no
+    /// turn still to come ([`moment_held_without_turn`]) has nothing in
+    /// front of it: the send takes it over ([`take_over_turnless_moment`]),
+    /// so a sender after it counts itself behind this one.
+    pub behind_a_turn: bool,
+}
+
+/// A direct send (an agent's `send_prompt`, `run_prompt`, a dispatch, a
+/// safe-kill request): in the session's [`typing_lane`], claim its idle
+/// moment from the row as it reads now, then type. `type_it` is told what
+/// the send found ([`DirectSend`]); it types either way unless it refuses
+/// (a send that lost the moment goes in behind the turn the winner started,
+/// once the winner's paste is in). Answers whether the send got the moment,
+/// with what `type_it` answered. A request dropped mid-typing keeps the
+/// claim: the paste may have run. The clock is read once the lane is held,
+/// so the claim is never dated before the moment it takes.
+pub async fn send_direct<T, F, Fut>(
+    store: &Mutex<Store>,
+    row: &SessionRow,
+    body: &str,
+    type_it: F,
+) -> Result<(bool, T), IpcError>
+where
+    F: FnOnce(DirectSend) -> Fut,
+    Fut: std::future::Future<Output = Result<T, IpcError>>,
+{
+    let _lane = typing_lane(store, row.id).await;
+    let now = now_unix();
+    let fresh = session_row(store, row.id).unwrap_or_else(|_| row.clone());
+    let mut claim = claim_moment_for_direct_send(store, &fresh, body, now)?;
+    let mut behind_a_turn = false;
+    if claim.is_none() {
+        if fresh.claude_status.as_deref() == Some("working") {
+            behind_a_turn = true;
+        } else if idle_for_prompt(&fresh) {
+            claim = take_over_turnless_moment(store, &fresh, body, now)?;
+            behind_a_turn = claim.is_none();
+        }
+    }
+    let got = claim.is_some();
+    let found = DirectSend {
+        got,
+        row: fresh,
+        behind_a_turn,
+    };
+    match type_it(found).await {
+        Ok(t) => {
+            date_claim_from_typing(store, claim);
+            Ok((got, t))
+        }
+        Err(e) => {
+            settle_direct_send(store, claim, &e, now);
+            Err(e)
+        }
+    }
 }
 
 /// Type the session's oldest waiting prompt when it is idle. Answers the row
@@ -300,7 +551,9 @@ pub async fn deliver_due(
     ssh: &Arc<SshClient>,
     session_id: i64,
 ) -> Result<Option<DeferredPromptRow>, IpcError> {
-    deliver_due_with(store, session_id, now_unix(), |row, body| {
+    let _lane = typing_lane(store, session_id).await;
+    // The clock after the lane wait, as in `queue_prompt`.
+    deliver_due_in_lane(store, session_id, now_unix(), |row, body| {
         let ssh = Arc::clone(ssh);
         async move {
             prompt::send_prompt_inner(
@@ -329,7 +582,24 @@ where
     F: FnOnce(SessionRow, String) -> Fut,
     Fut: std::future::Future<Output = Result<(), IpcError>>,
 {
-    // Read, decide and claim under one lock; type with it released.
+    // The lane first, so a direct send that loses this moment waits for the
+    // paste below.
+    let _lane = typing_lane(store, session_id).await;
+    deliver_due_in_lane(store, session_id, now, type_it).await
+}
+
+/// [`deliver_due`] with the session's typing lane held: read, decide and
+/// claim under one lock; type with it released.
+async fn deliver_due_in_lane<F, Fut>(
+    store: &Mutex<Store>,
+    session_id: i64,
+    now: i64,
+    type_it: F,
+) -> Result<Option<DeferredPromptRow>, IpcError>
+where
+    F: FnOnce(SessionRow, String) -> Fut,
+    Fut: std::future::Future<Output = Result<(), IpcError>>,
+{
     let (row, next) = {
         let s = lock(store)?;
         let Some(row) = s.get_session_by_id(session_id)? else {
@@ -717,7 +987,8 @@ mod tests {
     }
 
     /// Two sends to one idle session: the first claims the idle moment and
-    /// types, the second, while the first is still typing, queues.
+    /// types, the second, sent while the first is still typing, waits for
+    /// the lane and queues.
     #[tokio::test]
     async fn two_sends_to_an_idle_session_type_one_and_queue_the_other() {
         let (store, id) = store_with("idle");
@@ -732,13 +1003,11 @@ mod tests {
         });
         let second = async {
             typing.notified().await;
-            let r = queue_prompt_with(args(id, "b"), &store, now, |_, _| async {
+            let sent = queue_prompt_with(args(id, "b"), &store, now, |_, _| async {
                 panic!("typed into the same idle moment")
-            })
-            .await
-            .unwrap();
+            });
             release.notify_one();
-            r
+            sent.await.unwrap()
         };
         let (a, b) = tokio::join!(first, second);
         assert!(a.unwrap().delivered);
@@ -849,7 +1118,9 @@ mod tests {
             .get_session_by_id(id)
             .unwrap()
             .unwrap();
-        assert!(claim_moment_for_direct_send(&store, &row, "now", now - 5).unwrap());
+        assert!(claim_moment_for_direct_send(&store, &row, "now", now - 5)
+            .unwrap()
+            .is_some());
         let out = deliver_due_with(&store, id, now, |_, _| async {
             panic!("typed into the moment the direct send took")
         })
@@ -867,7 +1138,298 @@ mod tests {
             Some("later".to_string())
         );
         // A second direct send in the same moment does not get it.
-        assert!(!claim_moment_for_direct_send(&store, &row, "again", now - 4).unwrap());
+        assert!(claim_moment_for_direct_send(&store, &row, "again", now - 4)
+            .unwrap()
+            .is_none());
+    }
+
+    /// An idle session with a prompt queued; returns the row.
+    async fn idle_with_queued(store: &Mutex<Store>, id: i64, now: i64) -> SessionRow {
+        set_status(store, id, "working");
+        queue_prompt_with(args(id, "later"), store, now - 20, |_, _| async {
+            panic!()
+        })
+        .await
+        .unwrap();
+        set_idle_since(store, id, now - 10);
+        store
+            .lock()
+            .unwrap()
+            .get_session_by_id(id)
+            .unwrap()
+            .unwrap()
+    }
+
+    /// A direct send whose typing failed and typed nothing hands the moment
+    /// back: no turn starts, no Stop comes, and the queue would stall.
+    #[tokio::test]
+    async fn a_direct_send_that_failed_gives_the_moment_back() {
+        let (store, id) = store_with("idle");
+        let now = now_unix();
+        let row = idle_with_queued(&store, id, now).await;
+        let err = send_direct(&store, &row, "now", |d| async move {
+            assert!(d.got, "the send had the moment");
+            Err::<(), _>(IpcError::new(codes::E_TMUX, "no pane"))
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, codes::E_TMUX);
+        let out = deliver_due_with(&store, id, now, |_, _| async { Ok(()) })
+            .await
+            .unwrap();
+        assert_eq!(out.map(|r| r.body).as_deref(), Some("later"));
+    }
+
+    /// One that may have been typed (a timeout, an agent connection lost
+    /// mid-request) keeps the moment: the turn it may have started is not
+    /// typed on top of.
+    #[tokio::test]
+    async fn a_direct_send_that_may_have_typed_keeps_the_moment() {
+        for code in [codes::E_SSH_TIMEOUT, codes::E_AGENT_PROTOCOL] {
+            let (store, id) = store_with("idle");
+            let now = now_unix();
+            let row = idle_with_queued(&store, id, now).await;
+            send_direct(&store, &row, "now", |_| async move {
+                Err::<(), _>(IpcError::new(code, "lost"))
+            })
+            .await
+            .unwrap_err();
+            let out = deliver_due_with(&store, id, now, |_, _| async {
+                panic!("{code}: typed on top of a send that may have landed")
+            })
+            .await
+            .unwrap();
+            assert!(out.is_none(), "{code}");
+        }
+    }
+
+    /// A direct send that lost the moment to the queue's delivery still
+    /// types (behind that turn), but only once the delivery's paste is in.
+    #[tokio::test]
+    async fn a_direct_send_that_lost_the_moment_waits_for_the_winners_paste() {
+        let (store, id) = store_with("idle");
+        let now = now_unix();
+        let row = idle_with_queued(&store, id, now).await;
+        let typing = tokio::sync::Notify::new();
+        let release = tokio::sync::Notify::new();
+        let done_flag = std::sync::atomic::AtomicBool::new(false);
+        let done = &done_flag;
+        let delivery = async {
+            let out = deliver_due_with(&store, id, now, |_, _| async {
+                typing.notify_one();
+                release.notified().await;
+                done.store(true, Ordering::SeqCst);
+                Ok(())
+            })
+            .await
+            .unwrap();
+            assert_eq!(out.map(|r| r.body).as_deref(), Some("later"));
+        };
+        let direct = async {
+            typing.notified().await;
+            let sent = send_direct(&store, &row, "now", |d| async move {
+                assert!(
+                    done.load(Ordering::SeqCst),
+                    "typed while the delivery's paste was in flight"
+                );
+                Ok(d.behind_a_turn)
+            });
+            release.notify_one();
+            sent.await.unwrap()
+        };
+        let ((), (got, behind)) = tokio::join!(delivery, direct);
+        assert!(!got, "the delivery had the moment");
+        assert!(behind, "the delivery's turn runs ahead of this send");
+    }
+
+    /// Review r3: the claim is dated by the clock after the lane wait, not
+    /// before it. A moment that began while the send waited is then held by
+    /// its claim, and the queue's delivery does not type into it too.
+    #[tokio::test]
+    async fn a_claim_after_a_lane_wait_is_dated_no_earlier_than_its_moment() {
+        let (store, id) = store_with("idle");
+        let now = now_unix();
+        let row = idle_with_queued(&store, id, now).await;
+        let lane = typing_lane(&store, id).await;
+        let waited = async {
+            send_direct(&store, &row, "direct", |d| async move { Ok(d.got) })
+                .await
+                .unwrap()
+        };
+        let moved = async {
+            // A turn ends while the send waits on the lane: a new moment.
+            tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+            set_idle_since(&store, id, now_unix());
+            drop(lane);
+        };
+        let ((got, _), ()) = tokio::join!(waited, moved);
+        assert!(got, "the waiting send took the new moment");
+        let out = deliver_due_with(&store, id, now_unix(), |_, _| async {
+            panic!("typed into the moment the direct send took")
+        })
+        .await
+        .unwrap();
+        assert!(out.is_none());
+    }
+
+    /// Review r5: a Stop in the claim's own second may be the Stop that
+    /// opened the moment, with the claim's turn still starting, so a send
+    /// into it counts itself behind that turn (the grace decides later).
+    #[tokio::test]
+    async fn a_claim_in_the_stops_own_second_still_counts_as_a_turn_ahead() {
+        let (store, id) = store_with("idle");
+        let now = now_unix();
+        set_idle_since(&store, id, now - 10);
+        store
+            .lock()
+            .unwrap()
+            .conn_ref()
+            .execute(
+                "UPDATE sessions SET last_stop_at = ?2 WHERE id = ?1",
+                rusqlite::params![id, now],
+            )
+            .unwrap();
+        let row = session_row(&store, id).unwrap();
+        assert!(claim_moment_for_direct_send(&store, &row, "fast", now)
+            .unwrap()
+            .is_some());
+        let (got, behind) =
+            send_direct(&store, &row, "next", |d| async move { Ok(d.behind_a_turn) })
+                .await
+                .unwrap();
+        assert!(!got, "the moment is still held");
+        assert!(
+            behind,
+            "the claim's turn may be starting ahead of this send"
+        );
+    }
+
+    /// A moment held by a prompt that started no turn has nothing in front
+    /// of a send into it, and that send takes the moment over: the next
+    /// sender in the lane, before the first one's hook lands, counts itself
+    /// behind the first one's turn instead of collecting its reply.
+    #[tokio::test]
+    async fn a_send_past_a_turnless_claim_takes_the_moment_over() {
+        let (store, id) = store_with("idle");
+        let now = now_unix();
+        set_idle_since(&store, id, now - 60);
+        let row = session_row(&store, id).unwrap();
+        assert!(claim_moment_for_direct_send(
+            &store,
+            &row,
+            "/clear",
+            now - TURN_START_GRACE_SECS - 5
+        )
+        .unwrap()
+        .is_some());
+        let (got, behind) = send_direct(&store, &row, "a", |d| async move { Ok(d.behind_a_turn) })
+            .await
+            .unwrap();
+        assert!(got, "the send took the dead claim's moment over");
+        assert!(!behind, "no turn is coming ahead of it");
+        let (got, behind) = send_direct(&store, &row, "b", |d| async move { Ok(d.behind_a_turn) })
+            .await
+            .unwrap();
+        assert!(!got);
+        assert!(behind, "the first send's turn runs ahead of this one");
+        // The queue's delivery does not type into it either.
+        let out = deliver_due_with(&store, id, now_unix(), |_, _| async {
+            panic!("typed on top of the send that took the moment over")
+        })
+        .await
+        .unwrap();
+        assert!(out.is_none());
+    }
+
+    /// The grace counts from the end of the typing, not from the claim
+    /// stamped before it, unless a new moment began since the claim.
+    #[test]
+    fn a_claim_is_dated_from_its_typing_unless_a_new_moment_began() {
+        let (store, id) = store_with("idle");
+        let now = now_unix();
+        set_idle_since(&store, id, now - 60);
+        let row = session_row(&store, id).unwrap();
+        let claim = claim_moment_for_direct_send(&store, &row, "slow", now - 30).unwrap();
+        date_claim_from_typing(&store, claim);
+        let at = store.lock().unwrap().latest_deferred_claim_at(id).unwrap();
+        assert!(at.is_some_and(|at| at >= now - 1), "{at:?}");
+
+        let (store, id) = store_with("idle");
+        set_idle_since(&store, id, now - 60);
+        let row = session_row(&store, id).unwrap();
+        let claim = claim_moment_for_direct_send(&store, &row, "done", now - 30).unwrap();
+        set_idle_since(&store, id, now - 20);
+        date_claim_from_typing(&store, claim);
+        let at = store.lock().unwrap().latest_deferred_claim_at(id).unwrap();
+        assert_eq!(
+            at,
+            Some(now - 30),
+            "its turn ended: no hold on the new moment"
+        );
+    }
+
+    /// A turn that ends in the very second its typing returned (an API
+    /// error right after the paste) opens a moment the re-dated claim does
+    /// not hold: the queued prompt its Stop is due to deliver goes in.
+    #[tokio::test]
+    async fn a_stop_in_the_typing_seconds_frees_the_moment_for_the_queue() {
+        let (store, id) = store_with("idle");
+        let now = now_unix();
+        set_idle_since(&store, id, now - 60);
+        let row = session_row(&store, id).unwrap();
+        let claim = claim_moment_for_direct_send(&store, &row, "fast", now - 30).unwrap();
+        date_claim_from_typing(&store, claim);
+        let stop = now_unix();
+        store
+            .lock()
+            .unwrap()
+            .conn_ref()
+            .execute(
+                "UPDATE sessions SET idle_since = ?2, last_stop_at = ?2 WHERE id = ?1",
+                rusqlite::params![id, stop],
+            )
+            .unwrap();
+        let qid = store
+            .lock()
+            .unwrap()
+            .insert_deferred_prompt(id, "next", now - 1)
+            .unwrap();
+        let out = deliver_due_with(&store, id, now_unix(), |_, _| async { Ok(()) })
+            .await
+            .unwrap();
+        assert_eq!(
+            out.map(|r| r.id),
+            Some(qid),
+            "the dead claim held the new moment"
+        );
+    }
+
+    /// A send-now `queue_prompt` that may have been typed fails (listed,
+    /// with its error) and keeps the moment, instead of being taken back.
+    #[tokio::test]
+    async fn a_send_now_that_may_have_typed_keeps_the_moment() {
+        let (store, id) = store_with("idle");
+        let now = now_unix();
+        set_idle_since(&store, id, now - 10);
+        let err = queue_prompt_with(args(id, "a"), &store, now, |_, _| async {
+            Err(IpcError::new(codes::E_SSH_TIMEOUT, "wall clock"))
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, codes::E_SSH_TIMEOUT);
+        let listed = store
+            .lock()
+            .unwrap()
+            .list_deferred_prompts(Some(id))
+            .unwrap();
+        assert_eq!(listed.len(), 1);
+        assert!(listed[0].failed_at.is_some() && listed[0].cancelled_at.is_none());
+        let r = queue_prompt_with(args(id, "b"), &store, now, |_, _| async {
+            panic!("typed on top of a send that may have landed")
+        })
+        .await
+        .unwrap();
+        assert!(!r.delivered && r.queued_id.is_some());
     }
 
     /// A move carries the source's waiting prompts to its new row.

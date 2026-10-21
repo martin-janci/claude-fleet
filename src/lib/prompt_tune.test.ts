@@ -4,7 +4,13 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke } from '@tauri-apps/api/core';
-import { tuneBlocked, tuneComposerPrompt, tuneRoutinePrompt } from './prompt_tune';
+import {
+  TUNE_DRAFT_MAX_CHARS,
+  TUNE_NEEDS_NEWER_HUB,
+  tuneBlocked,
+  tuneComposerPrompt,
+  tuneRoutinePrompt,
+} from './prompt_tune';
 import { HELP_HISTORY_MAX } from './context_help';
 import type { RoutineInput } from './routines';
 
@@ -35,8 +41,27 @@ describe('prompt_tune', () => {
     expect((payload as { args: Record<string, unknown> }).args).toEqual({ action: 'tune_prompt', routine, ask: '' });
   });
 
+  // Review w07-3 / w07-8.
+  it('a routine tunes the rewrite in place of its prompt, and an older hub reads as needing an update', async () => {
+    const routine = { name: '', trigger: 'cron', host_alias: 'h', project_id: 2, prompt: 'check ci' } as RoutineInput;
+    vi.mocked(invoke).mockResolvedValue(reply);
+    await tuneRoutinePrompt(routine, 'shorter', 'the rewrite');
+    const args = (vi.mocked(invoke).mock.calls[0][1] as { args: { routine: RoutineInput } }).args;
+    expect(args.routine).toEqual({ ...routine, prompt: 'the rewrite' });
+
+    vi.mocked(invoke).mockRejectedValueOnce({
+      code: 'E_INVALID',
+      message: 'action must be list | get | dry_run, got "tune_prompt"',
+    });
+    const r = await tuneRoutinePrompt(routine, '');
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.message).toBe(TUNE_NEEDS_NEWER_HUB);
+  });
+
   it('an empty draft is blocked', () => {
     expect(tuneBlocked(' \n')).toMatch(/draft/);
     expect(tuneBlocked('x')).toBeNull();
+    expect(tuneBlocked('a'.repeat(TUNE_DRAFT_MAX_CHARS))).toBeNull();
+    expect(tuneBlocked('a'.repeat(TUNE_DRAFT_MAX_CHARS + 1))).toMatch(/too long/);
   });
 });

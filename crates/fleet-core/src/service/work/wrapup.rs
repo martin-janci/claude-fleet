@@ -9,7 +9,11 @@
 //! * **Only an idle REPL**, and never the operator's own session: the rules
 //!   of an agent-written handover ([`super::agent_handover`]), reused.
 //! * **One open request per session**: `E_EXISTS` until the Stop hook, a
-//!   cancel or a failed delivery closes it.
+//!   cancel or a failed delivery closes it — or until the session's turn
+//!   ended without the marker (a Stop after the request, more than
+//!   [`STOP_GRACE_SECS`] ago): then a new request replaces the old one,
+//!   which is cancelled, so a reply that left out the block (or an Esc)
+//!   does not block "Finish task" until the task's age limit.
 //! * **Not an attempt.** The role is outside `run::RUN_ROLES`.
 
 use crate::ipc_error::{codes, lock, IpcError};
@@ -23,6 +27,11 @@ use std::sync::{Arc, Mutex};
 /// attempts count within `(item, role)`, so it never reads as an attempt.
 pub const WRAPUP_ROLE: &str = "wrapup";
 
+/// How long after the Stop that ended a request's turn the request still
+/// blocks a new one: the Stop hook reads the marker in the background, so
+/// a request whose result is about to land is not replaced.
+pub const STOP_GRACE_SECS: i64 = 30;
+
 /// PURE: what the session is asked, before the report instruction.
 pub fn wrapup_prompt(key: &str) -> String {
     format!(
@@ -31,17 +40,40 @@ pub fn wrapup_prompt(key: &str) -> String {
     )
 }
 
-/// Write the request under the lock. `E_EXISTS` while one is open.
+/// Write the request under the lock. `E_EXISTS` while one is open and its
+/// turn has not ended; one whose turn ended without the marker is
+/// cancelled and replaced.
 pub fn record_wrapup(s: &Store, session_id: i64, item_id: i64) -> Result<TaskRow, IpcError> {
-    let open = s
+    let open: Vec<TaskRow> = s
         .open_tasks_for_worker(session_id)?
         .into_iter()
-        .any(|t| t.role.as_deref() == Some(WRAPUP_ROLE));
-    if open {
-        return Err(IpcError::new(
-            codes::E_EXISTS,
-            "a result is already requested from this session",
-        ));
+        .filter(|t| t.role.as_deref() == Some(WRAPUP_ROLE))
+        .collect();
+    if !open.is_empty() {
+        // A Stop after the request means its turn ended; with no result
+        // by now, none is coming from that turn.
+        let last_stop = s
+            .get_session_by_id(session_id)?
+            .and_then(|r| r.last_stop_at);
+        let now = crate::store::now_unix();
+        let ended = |t: &TaskRow| {
+            last_stop.is_some_and(|at| {
+                at > t.started_at.unwrap_or(t.created_at) && now - at >= STOP_GRACE_SECS
+            })
+        };
+        if !open.iter().all(ended) {
+            return Err(IpcError::new(
+                codes::E_EXISTS,
+                "a result is already requested from this session",
+            ));
+        }
+        for t in &open {
+            tasks::cancel_task(
+                s,
+                t.id,
+                "its turn ended without a result; a new request replaced it",
+            )?;
+        }
     }
     let key = s
         .get_work_item(item_id)?
@@ -202,6 +234,41 @@ mod tests {
         tasks::fail_task(&s, first.id, "not delivered").unwrap();
         let second = record_wrapup(&s, sid, item).unwrap();
         assert_eq!(second.attempt, Some(2));
+    }
+
+    #[test]
+    fn a_wrapup_whose_turn_ended_without_a_result_is_replaced() {
+        let s = Store::open_in_memory().unwrap();
+        let (sid, item) = linked(&s);
+        let first = record_wrapup(&s, sid, item).unwrap();
+        let started = first.started_at.unwrap_or(first.created_at);
+        let stop_at = |at: i64| {
+            s.conn_for_test()
+                .execute(
+                    "UPDATE sessions SET last_stop_at = ?1 WHERE id = ?2",
+                    rusqlite::params![at, sid],
+                )
+                .unwrap();
+        };
+        // A Stop from before the request says nothing about it.
+        stop_at(started - 5);
+        let e = record_wrapup(&s, sid, item).unwrap_err();
+        assert_eq!(e.code, crate::ipc_error::codes::E_EXISTS);
+        // A Stop just now: the hook may still be reading the marker.
+        stop_at(crate::store::now_unix());
+        let e = record_wrapup(&s, sid, item).unwrap_err();
+        assert_eq!(e.code, crate::ipc_error::codes::E_EXISTS);
+        // The turn ended a while ago with no marker: replaced.
+        s.conn_for_test()
+            .execute(
+                "UPDATE tasks SET started_at = ?1, created_at = ?1 WHERE id = ?2",
+                rusqlite::params![started - 100, first.id],
+            )
+            .unwrap();
+        stop_at(started - 60);
+        let second = record_wrapup(&s, sid, item).unwrap();
+        assert_eq!(second.attempt, Some(2));
+        assert_eq!(s.get_task(first.id).unwrap().unwrap().state, "cancelled");
     }
 
     #[test]

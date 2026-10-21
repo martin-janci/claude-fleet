@@ -126,11 +126,17 @@ MCP: `restart_session { session_id, profile: "work" }` restarts the session,
 resuming its conversation under that login, and stores the new profile once
 the relaunch succeeded (a failed one leaves the row as it was).
 `profile: ""` switches back to the host's login; leaving `profile` out keeps
-the current one. Restart, recreate, repair, rewind and move all relaunch
-with the stored profile (`sessions.claude_profile`, migration 113).
+the current one. Restart, recreate, repair and rewind all relaunch with the
+stored profile (`sessions.claude_profile`, migration 113).
 
-A moved session keeps its profile name; on the target host that name is a
-separate profile, which asks for its own `/login` the first time.
+A move keeps the login by account, not by name. On the target it takes the
+same profile name when that profile is signed in to the same account there;
+else the target's signed-in login on that account (the host's own login
+first); else the same name when the target has a signed-in profile of that
+name on another account; else the target's own login. A signed-out login is
+skipped, and a move never lands on an empty profile that asks for `/login`.
+When fleet does not know the session's account, the profile name is kept
+as it was.
 
 ### Switch automatically
 
@@ -206,8 +212,29 @@ host's idle CPU and free memory; the host the work ran on before wins a
 near tie. Control is told to call it before it starts anything, a mission's
 run takes the best place inside its grant (its hosts, its login when it
 names one), a start that names no host takes the best host that has run the
-project, and the over-limit refusal names a login on another host when none
-on its own has room.
+project and the login placement ranked first there (a start rule's or
+placement rule's login, or `profile` on `work_link { start }`, wins), and
+the over-limit refusal names a login on another host when none on its own
+has room. `dispatch_task { new_worker }` takes `profile` too, so Control can
+start the worker on the login a refusal named.
+
+A resume (`work_link { resume }`, Resume in the desktop) runs under the
+login `profile` names (`""` = the host's own); without one, under the past
+session's login when its row is still known and the resume lands on the
+same host, else the host's own login, or the login on the host with
+headroom when the host's own is past `accounts.pause_at`. Neither a ticket
+start nor a resume refuses an over-limit login: they are how Control
+recovers work, so a spent login is the session's to report.
+
+Automation leaves a login alone that is past `accounts.pause_at` or that
+fleet knows is signed out: a routine's fire goes to its fallback host, else
+skips and says why (with the reset time, or the sign-in command); a
+mission's run waits. A `restart_session { profile }` onto another login is
+refused for a signed-out login, and for one past the line unless
+`over_limit_ok` says the person chose it. A switch from a person's paired
+device (Switch account on a hub-paired desktop or the phone, org-bound or
+not) is the person's choice; the operator, a per-host token and the master
+token are held.
 
 ### Signed-out logins
 
@@ -220,6 +247,34 @@ an hour. Placement leaves it out, Control's chat shows one card per login
 ("Claude login expired on htz (since Aug 9) · ssh htz then claude /login";
 for a profile, `CLAUDE_CONFIG_DIR=~/.claude-profiles/<name> claude
 /login`), and Control's feed says it once. Only a person can sign it in.
+
+### Two copies of one login
+
+Every OAuth refresh hands out a new refresh token and revokes the old one.
+Two copies of the same login on one host refresh on their own schedules, so
+the first to refresh leaves the other with a revoked token, and its next
+refresh fails with "Login expired · Please run /login". Signing in again
+only starts the next round. Fleet flags such a host in Hosts (⚿) and in
+`fleet_health` (`hosts[].login_conflicts`, `service::login_conflicts`):
+
+- **Keychain and file** (macOS). Claude Code keeps the default login in the
+  login Keychain, but a `claude` started over SSH, as fleet's tmux sessions
+  are, finds the Keychain locked and falls back to
+  `~/.claude/.credentials.json`. The desktop app or a local terminal then
+  refreshes one copy and fleet's sessions the other. The health probe asks
+  whether both exist (`security find-generic-password` without `-w`, so
+  never the secret; migration 203, `hosts.login_split`).
+- **Shared account.** The host's login and a login profile, or two
+  profiles, signed into the same account.
+
+Fix it by keeping one copy per login on a host. For Keychain and file, run
+fleet's sessions on that host under a login profile, then delete
+`~/.claude/.credentials.json`: the probe only asks whether both copies
+exist, so the mark stays until one is gone. `local` is never flagged, since
+fleet's local tmux server starts in the login session and reads the
+Keychain. For a shared account, sign the duplicate profile into another
+account. An API key under two profiles is not a conflict: it has no refresh
+token to revoke.
 
 ### Control's own login
 

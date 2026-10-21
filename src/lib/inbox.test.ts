@@ -10,12 +10,15 @@ import {
   notWaitingText,
   proposedRows,
   proposedText,
+  proposalKey,
   sayNotWaiting,
 } from './inbox';
 import { sessions } from './sessions';
+import { readPref } from './prefs';
 import { waitingMissions, waitingOf } from './mission_waits';
 import { attentionState, countNeedsYou } from './attention';
-import { session } from './hosts_fixture';
+import { host, session } from './hosts_fixture';
+import { hosts } from './hosts';
 
 // Redesign step 3.3: the Inbox lists exactly what raises the badge.
 
@@ -78,6 +81,13 @@ describe('G1.6: Jev proposals and waiting missions', () => {
     notWaitingSaid.set(new Set());
   });
 
+  it('w11-11: "Not waiting" is kept across a relaunch', () => {
+    sayNotWaiting(jev);
+    expect(readPref<string[]>('inbox.not-waiting', [], (v): v is string[] => Array.isArray(v))).toEqual([proposalKey(jev)]);
+    notWaitingSaid.set(new Set());
+    expect(readPref<string[]>('inbox.not-waiting', ['x'], (v): v is string[] => Array.isArray(v))).toEqual([]);
+  });
+
   it('counts a mission waiting on a person in the rail badge', () => {
     sessions.set([]);
     waitingMissions.set([]);
@@ -92,8 +102,27 @@ describe('G1.6: Jev proposals and waiting missions', () => {
   });
 });
 
+describe('review w11-1: the rail counts Blocked rows', () => {
+  it('counts a session blocked on a down host, as the Inbox lists it', () => {
+    waitingMissions.set([]);
+    hosts.set([host('mercury', { reachable: false, last_pinged_at: 1 })]);
+    sessions.set([session('mercury', 'stranded', { claude_status: 'working' })]);
+    expect(get(inboxCount)).toBe(1);
+    hosts.set([host('mercury')]);
+    expect(get(inboxCount)).toBe(0);
+    sessions.set([]);
+    hosts.set([]);
+  });
+});
+
 describe('G3.1: the Inbox by state, from the attention model', () => {
   const none = { missions: 0, failingRoutines: 0, proposed: 0 };
+
+  it('w11-6: lists failed routines the viewer may not change, uncounted', () => {
+    const secs = inboxSections([], opts, 'state', { ...none, failingOthers: 1 });
+    expect(secs.map((s) => [s.key, s.count, s.routines])).toEqual([['failed', 0, true]]);
+    expect(inboxSections([], opts, 'none', { ...none, failingOthers: 1 })).toHaveLength(1);
+  });
   const limited = session('mac', 'limited', { claude_status: 'idle', account_uuid: 'acc' });
   const facts = { limited_accounts: { acc: { window: 'weekly' as const, resets_at: opts.now + 3600 } } };
   const withFacts = { ...opts, facts };

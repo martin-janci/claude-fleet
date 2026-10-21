@@ -5,7 +5,7 @@
 // person's Fix. The panel's "Problems & fixes", the `fix` chat card, the
 // host chip's count and Control's own finding all read this one store.
 import { derived, get, writable } from 'svelte/store';
-import { invokeCmd, type Result } from './result';
+import { invokeCmd, type IpcError, type Result } from './result';
 
 export type Safety = 'safe' | 'needs_approval';
 
@@ -46,6 +46,12 @@ export interface Finding {
   evidence: string[];
   fix?: FixInfo | null;
   action?: ClientAction | null;
+  /** Whether the hub will try the fix by itself: false when it will not
+   *  (automatic fixes off or paused, its tries for the last day spent).
+   *  Absent from a hub older than the field. */
+  auto_runs?: boolean | null;
+  /** When it next tries (unix seconds), when `auto_runs`. */
+  auto_next_at?: number | null;
 }
 
 export interface Findings {
@@ -62,6 +68,10 @@ export const fixedRecently = writable<Finding[]>([]);
 export const canApplyFixes = writable<boolean>(false);
 /** The list was read at least once. */
 export const findingsLoaded = writable<boolean>(false);
+/** The last read failed (the hub unreachable, timed out, or without the
+ *  tool): what the store holds is not the hub's answer, so a finding missing
+ *  from it is unknown, not resolved. Null once a read succeeds. */
+export const findingsError = writable<IpcError | null>(null);
 
 /** The findings a person is asked about: everything live but the dismissed. */
 export const openFindings = derived(findings, ($f) => $f.filter((x) => x.state !== 'dismissed'));
@@ -86,13 +96,23 @@ export const findingsByHost = derived(openFindings, ($f) => {
 export const operatorFinding = derived(openFindings, ($f) => $f.find((x) => x.kind === 'operator_unbound') ?? null);
 
 export async function loadFindings(): Promise<Result<Findings>> {
-  const r = await invokeCmd<Findings>('autofix_findings', {});
+  return take(await invokeCmd<Findings>('autofix_findings', {}));
+}
+
+/** Check now: the hub re-reads every host and re-runs its checks (it
+ *  applies nothing), then answers with the list as `loadFindings` does. */
+export async function scanFindings(): Promise<Result<Findings>> {
+  return take(await invokeCmd<Findings>('autofix_scan', {}));
+}
+
+function take(r: Result<Findings>): Result<Findings> {
   // A hub older than autofix answers nothing usable: no findings, read-only.
   if (r.ok && r.value) {
     findings.set(r.value.findings ?? []);
     fixedRecently.set(r.value.fixed ?? []);
     canApplyFixes.set(r.value.can_apply === true);
   }
+  findingsError.set(r.ok ? null : r.error);
   findingsLoaded.set(true);
   return r;
 }
@@ -148,6 +168,24 @@ export function subjectWords(subject: string): string {
   if (k === 'session') return `session #${v}`;
   if (k === 'token') return `token ${v}`;
   return subject;
+}
+
+/** For a safe automatic fix: whether fleet will run it by itself, and
+ *  when, or that it stopped. Null for any other fix. */
+export function autoWords(f: Finding, nowSecs: number): string | null {
+  if (f.fix?.safety !== 'safe' || !f.fix.auto) return null;
+  if (f.state !== 'open' && f.state !== 'apply_failed') return null;
+  if (f.auto_runs == null) return 'Safe: fleet runs this fix by itself unless automatic fixes are off.';
+  if (!f.auto_runs) {
+    if (f.attempts > 0) {
+      const times = f.attempts === 1 ? 'once' : `${f.attempts} times`;
+      return `Fleet tried this fix ${times} and stopped trying by itself; fix it here.`;
+    }
+    return 'Fleet will not run this fix by itself (automatic fixes are off or paused); fix it here.';
+  }
+  const mins = Math.ceil(((f.auto_next_at ?? nowSecs) - nowSecs) / 60);
+  if (mins <= 1) return 'Fleet runs this fix by itself on its next check.';
+  return `Fleet tries this fix again by itself in ~${mins} min.`;
 }
 
 /** The state of a finding in a few words, for the card's status line. */

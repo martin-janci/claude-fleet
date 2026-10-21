@@ -381,9 +381,10 @@ pub const CONTROL_COMMANDS: [(&str, &str); 10] = [
          description: Look for problems in the fleet logs\n\
          argument-hint: [@host] [30m|6h|3d] [part:<component>] [session:<name>] <focus>\n\
          ---\n\
-         Run the self debug agent on \"$ARGUMENTS\". An `@host` word is the \
-         scope's `host`, a `30m`, `6h` or `3d` word its `minutes`, `part:<x>` its \
-         `component` and `session:<name>` its `session`; the rest is the request. \
+         Run the self debug agent on \"$ARGUMENTS\". The leading words set the \
+         scope: an `@host` word is its `host`, a `30m`, `6h` or `3d` word its \
+         `minutes`, `part:<x>` its `component` and `session:<name>` its `session`; \
+         from the first other word on, the rest is the request. \
          Find the active rule whose definition is `self-debug` with `agents` \
          action `status` agent `fleet`; when there is none, say it is added under \
          Automation, Agents, and stop. Otherwise call `agents` action `run` with \

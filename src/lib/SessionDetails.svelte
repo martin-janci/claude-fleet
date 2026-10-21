@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { errorText } from './error_copy';
   import { onDestroy, tick, untrack } from 'svelte';
   import {
     sessions,
@@ -319,10 +320,14 @@
       { value: '', name: 'Host login', email: hostUuid ? ($accountByUuid.get(hostUuid)?.email ?? null) : null, uuid: hostUuid, loggedIn: true },
       ...loginChoices.map((p) => ({ value: p.name, name: p.name, email: p.email, uuid: p.account_uuid, loggedIn: p.account_uuid != null || p.email != null })),
     ];
+    // A login fleet knows is signed out opens `/login` whatever its last
+    // reading says (review w02-4): it reads "signed out", not its headroom.
+    const signedOut = new Set((hostRow?.signed_out_logins ?? []).map((l) => l.profile ?? ''));
     return rows.map((o) => ({
       ...o,
       current: o.value === current,
-      headroom: o.uuid ? loginHeadroomText($accountUsage[o.uuid] ?? null, nowSec) : null,
+      signedOut: signedOut.has(o.value),
+      headroom: signedOut.has(o.value) ? 'signed out' : o.uuid ? loginHeadroomText($accountUsage[o.uuid] ?? null, nowSec) : null,
     }));
   });
   function loginOptionText(o: (typeof loginOptions)[number]): string {
@@ -542,7 +547,7 @@
     confirmingRestart = false;
     const { host_alias, tmux_name } = session;
     const r = await restartSession(host_alias, tmux_name, undefined, {}, { force });
-    if (!r.ok) pushRestartError(r.error, host_alias, tmux_name, () => void onRestart(true));
+    if (!r.ok) pushRestartError(r.error, host_alias, tmux_name, () => void onRestart(true), askRepair);
   }
 
   // Make the worktree directory + tmux pane healthy again (deleted dir,
@@ -652,7 +657,7 @@
     if (r.ok) {
       inspection = r.value;
     } else {
-      inspectError = r.error.message;
+      inspectError = errorText(r.error);
     }
   }
   function cancelSafeKill() {
@@ -819,7 +824,7 @@
     confirmingRecreate = false;
     const r = await recreateSession(session.id);
     if (!r.ok) {
-      pushError(r.error, 'Recreate failed');
+      pushError(r.error, 'Recreate failed', undefined, { repair: askRepair });
       return;
     }
     // kill-session severed the PTY; same tmux_name won't auto-reopen. This

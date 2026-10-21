@@ -70,6 +70,17 @@ describe('NewAssetDialog', () => {
     expect(invoke).toHaveBeenCalledWith('catalog_create_asset', { args: { kind: 'skill', name: 'my-new-skill', duplicate_from: null } });
   });
 
+  it('Ctrl+Enter in the name creates it, and the button names the chord (review w18-6)', async () => {
+    invoke.mockResolvedValueOnce({ commit: 'sha1', lint: { errors: [], warnings: [] } });
+    const onsaved = vi.fn();
+    render(NewAssetDialog, { onclose: () => {}, onsaved });
+    const name = screen.getByTestId('new-asset-name');
+    await fireEvent.input(name, { target: { value: 'my-new-skill' } });
+    expect(screen.getByTestId('new-asset-create').getAttribute('aria-keyshortcuts')).toBe('Control+Enter');
+    await fireEvent.keyDown(name, { key: 'Enter', ctrlKey: true });
+    await waitFor(() => expect(onsaved).toHaveBeenCalledWith('skill', 'my-new-skill'));
+  });
+
   it('Create passes duplicate_from when chosen', async () => {
     invoke.mockResolvedValueOnce({ commit: 'sha1', lint: { errors: [], warnings: [] } });
     const onsaved = vi.fn();

@@ -3,7 +3,7 @@
   // inline at a bounded height; a click opens it full size over the app,
   // closed by Escape, the Close button or a click outside it. The data is
   // base64 the backend handed over: it only ever becomes a `data:` URL.
-  import { tick } from 'svelte';
+  import { lightboxFocus } from './lightbox_focus';
 
   let {
     mime,
@@ -15,13 +15,6 @@
   // Only image types become a URL: a result could name any type.
   const src = $derived(/^image\/[a-z0-9.+-]+$/i.test(mime) ? `data:${mime};base64,${data}` : null);
   let open = $state(false);
-  let layer = $state<HTMLDivElement | null>(null);
-
-  async function show() {
-    open = true;
-    await tick();
-    layer?.focus();
-  }
 
   function onKey(e: KeyboardEvent) {
     if (e.key === 'Escape') {
@@ -33,12 +26,13 @@
 </script>
 
 {#if src}
-  <button type="button" class="shot" title="Open full size" data-testid={testid} onclick={() => void show()}>
+  <button type="button" class="shot" title="Open full size" data-testid={testid} onclick={() => (open = true)}>
     <img {src} {alt} />
   </button>
   {#if open}
+    <!-- Review w19-5: focus moves in, stays in, and returns to the shot. -->
     <div
-      bind:this={layer}
+      use:lightboxFocus
       class="lightbox"
       role="dialog"
       aria-modal="true"
@@ -70,10 +64,6 @@
     border-radius: var(--radius-sm);
     background: var(--bg);
     cursor: zoom-in;
-  }
-  .shot:focus-visible {
-    outline: 1px solid var(--accent);
-    outline-offset: 1px;
   }
   .shot img {
     display: block;

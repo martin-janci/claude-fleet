@@ -199,7 +199,7 @@ describe('ResumeDialog', () => {
     await settle();
     await fireEvent.click(screen.getByTestId('resume-start'));
     await settle();
-    expect(screen.getByTestId('resume-error')).toHaveTextContent('h is unreachable');
+    expect(screen.getByTestId('resume-error')).toHaveTextContent("Couldn't reach the host over SSH");
     expect(onclose).not.toHaveBeenCalled();
     expect(get(selectedSession)).toBeNull();
     // Not stuck on "Starting…": it can be tried again.
