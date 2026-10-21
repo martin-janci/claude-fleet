@@ -269,6 +269,9 @@ export interface MissionGrant {
   profile?: string | null;
   created_at: number;
   expires_at: number;
+  /** Lasts until the (finite) mission ends, bounded by its budget;
+   *  `expires_at` is then a far-future sentinel, not a time to show. */
+  until_done?: boolean;
   revoked_at?: number | null;
 }
 
@@ -613,8 +616,11 @@ export function eventSentence(e: MissionEvent): string {
       return `Asked the planner (${String(p.why ?? '')})`;
     case 'card':
       return `Card ${String(p.card_id ?? '')} ${String(p.state ?? '')}`;
-    case 'grant':
-      return `Granted L${String(p.level ?? '?')} for ${String(p.hours ?? '?')} h`;
+    case 'grant': {
+      const span = p.until_done ? 'until done' : `for ${String(p.hours ?? '?')} h`;
+      const raised = typeof p.raised_from === 'number' ? ` (mission raised from L${p.raised_from})` : '';
+      return `Granted L${String(p.level ?? '?')} ${span}${raised}`;
+    }
     case 'revoked':
       return 'Grant revoked';
     case 'budget':
@@ -820,6 +826,8 @@ export function decideMissionCard(cardId: number, ok: boolean, note?: string): P
 export interface GrantInput {
   level: number;
   hours?: number;
+  /** Until a finite mission ends instead of `hours`; needs `budget_cents`. */
+  until_done?: boolean;
   budget_cents?: number;
   hosts?: string[];
   max_parallel?: number;
@@ -947,7 +955,11 @@ export interface AutonomyWords {
 
 export function autonomyWords(a: MissionAutonomy, now = Date.now() / 1000): AutonomyWords {
   const g = a.grant && (a.grant.revoked_at == null && a.grant.expires_at > now) ? a.grant : null;
-  const until = g ? new Date(g.expires_at * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
+  const until = !g
+    ? ''
+    : g.until_done
+      ? 'done'
+      : new Date(g.expires_at * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   const parts = [`L${a.asked} asked`, `L${a.ceiling} ceiling`, g ? `L${g.level} grant until ${until}` : 'no grant'];
   let hint: string | null = null;
   if (!a.enabled) hint = 'The mission loop is off for the whole fleet. Turn it on in Settings.';

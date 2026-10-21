@@ -33,6 +33,11 @@ pub const CARDS_OPEN_CAP: i64 = 40;
 pub const CARD_PAYLOAD_MAX: usize = 4096;
 /// The longest a grant runs (seven days).
 pub const GRANT_MAX_SECS: i64 = 7 * 24 * 3600;
+/// The `expires_at` of a grant that lasts until its finite mission ends
+/// (TASK-293): 9999-12-31, past any real clock and exact in a JS number.
+/// Such a grant is bounded by its budget instead; a mission that ends
+/// never returns to `active`, so the grant lapses with it.
+pub const GRANT_UNTIL_DONE_AT: i64 = 253_402_300_799;
 
 /// One card of a mission's confirm queue.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -91,6 +96,10 @@ pub struct GrantRow {
     pub profile: Option<String>,
     pub created_at: i64,
     pub expires_at: i64,
+    /// Lasts until the mission ends, not for hours: `expires_at` is
+    /// [`GRANT_UNTIL_DONE_AT`].
+    #[serde(default)]
+    pub until_done: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revoked_at: Option<i64>,
 }
@@ -157,6 +166,7 @@ fn map_grant(r: &rusqlite::Row<'_>) -> rusqlite::Result<GrantRow> {
         max_parallel: r.get(7)?,
         created_at: r.get(8)?,
         expires_at: r.get(9)?,
+        until_done: r.get::<_, i64>(9)? >= GRANT_UNTIL_DONE_AT,
         revoked_at: r.get(10)?,
         profile: r.get(11)?,
     })

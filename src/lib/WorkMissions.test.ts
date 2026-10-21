@@ -952,6 +952,29 @@ describe('WorkMissions', () => {
       hosts.set([]);
     });
 
+    it('a finite mission can be granted until it is done, which needs a budget and raises its level', async () => {
+      current = mission({ state: 'active', level: 0 });
+      handlers.work_mission = () => detailOf(current);
+      handlers.grant_mission = () => ({ id: 1, mission_id: 4, plan_version: 1, level: 2, granted_by: 'fleet', created_at: 1, expires_at: 2, until_done: true });
+      renderMissions();
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-row'));
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-grant'));
+      await flush();
+      expect(screen.getByTestId('mission-grant-raises').textContent).toContain('from L0 to L2');
+      await fireEvent.click(screen.getByTestId('mission-grant-until-done'));
+      await flush();
+      const save = screen.getByTestId('mission-grant-save') as HTMLButtonElement;
+      expect(save.disabled).toBe(true);
+      await fireEvent.input(screen.getByTestId('mission-grant-budget'), { target: { value: '20' } });
+      await flush();
+      expect(save.disabled).toBe(false);
+      await fireEvent.click(save);
+      await flush();
+      expect(calls('grant_mission')[0]).toEqual({ mission_id: 4, level: 2, until_done: true, budget_cents: 2000 });
+    });
+
     it('words every limit', () => {
       const base = { asked: 2, ceiling: 3, effective: 2, why: '', enabled: true };
       expect(autonomyWords(base).hint).toBeNull();
@@ -962,6 +985,8 @@ describe('WorkMissions', () => {
       const w = autonomyWords({ ...base, asked: 3, effective: 1, grant }, 1_000);
       expect(w.limits).toMatch(/^L3 asked · L3 ceiling · L1 grant until /);
       expect(w.hint).toContain('The grant signs L1');
+      const done = autonomyWords({ ...base, grant: { ...grant, level: 2, until_done: true, expires_at: 253_402_300_799 } }, 1_000);
+      expect(done.limits).toBe('L2 asked · L3 ceiling · L2 grant until done');
       expect(policyWith({ max_parallel: 2, wake_every_secs: 600 }, { wake_every_secs: null })).toEqual({ max_parallel: 2 });
     });
   });

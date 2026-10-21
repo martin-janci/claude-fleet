@@ -994,7 +994,11 @@ proposes a resolve task for a conflict (`integrate.rs`). What the loop does by
 itself is the least of the mission's level, `orchestrator.max_level`
 (default 1: a person presses every step) and a person's grant
 (`work_link { mission_grant }`: level, hours, budget, hosts, and the login
-`profile` its runs bill, migration 137); brakes pause the mission on a spent budget or no
+`profile` its runs bill, migration 137). A finite mission's grant may last
+`until_done` instead of hours, and then needs a budget, which bounds it
+(TASK-293). Signing a level above the mission's own raises the mission to it:
+a mission made at the default L0 used to hold every grant at L0, so the loop
+started nothing itself. Brakes pause the mission on a spent budget or no
 progress, a run on an account at or past `accounts.pause_at` waits (one
 `account_limit` event says why) until the account is back under it, and
 `missions_pause_all` pauses

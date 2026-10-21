@@ -141,11 +141,16 @@ fn autonomy_is_the_least_of_ceiling_level_and_grant() {
         &fx.me,
     )
     .unwrap();
+    assert_eq!(
+        mission_now(&fx).level,
+        3,
+        "signing above the mission's level raises it"
+    );
     let s = lock(&fx.deps.store).unwrap();
     assert_eq!(
         autonomy(&s, &fx.m, now_unix()).unwrap().effective,
         2,
-        "the mission asks for 2"
+        "the row read before the grant still asks for 2"
     );
     s.set_setting(settings::ORCHESTRATOR_ENABLED, "false")
         .unwrap();
@@ -184,6 +189,118 @@ fn only_a_person_signs_a_grant_and_revoking_ends_it() {
     );
     let s = lock(&fx.deps.store).unwrap();
     assert!(s.live_mission_grant(fx.m.id, now_unix()).unwrap().is_none());
+}
+
+/// TASK-293: mission #4 was made at the default L0, so every grant it was
+/// signed (L2, three times) left the loop at L0 and a person started every
+/// run. A grant now raises the mission to the level it signs.
+#[test]
+fn a_grant_lifts_a_level_0_mission_so_the_loop_runs_by_itself() {
+    let fx = fixture();
+    {
+        let s = lock(&fx.deps.store).unwrap();
+        s.set_setting(settings::ORCHESTRATOR_MAX_LEVEL, "3")
+            .unwrap();
+        s.update_mission(
+            fx.m.id,
+            None,
+            &crate::store::MissionPatch {
+                level: Some(0),
+                ..Default::default()
+            },
+            "t",
+        )
+        .unwrap();
+        assert_eq!(
+            autonomy(&s, &mission_now(&fx), now_unix())
+                .unwrap()
+                .effective,
+            0
+        );
+    }
+    grant(
+        &WorkLinkArgs {
+            level: Some(2),
+            hours: Some(1),
+            ..by_id("mission_grant", fx.m.id)
+        },
+        &fx.deps.store,
+        &fx.me,
+    )
+    .unwrap();
+    let m = mission_now(&fx);
+    assert_eq!(m.level, 2);
+    let s = lock(&fx.deps.store).unwrap();
+    assert_eq!(autonomy(&s, &m, now_unix()).unwrap().effective, AUTO_LEVEL);
+    drop(s);
+    // A lower grant never lowers what the mission asks.
+    grant(
+        &WorkLinkArgs {
+            level: Some(1),
+            hours: Some(1),
+            ..by_id("mission_grant", fx.m.id)
+        },
+        &fx.deps.store,
+        &fx.me,
+    )
+    .unwrap();
+    assert_eq!(mission_now(&fx).level, 2);
+}
+
+#[test]
+fn a_finite_mission_may_be_granted_until_it_is_done_within_a_budget() {
+    let fx = fixture();
+    let args = |budget: Option<i64>, hours: Option<u32>| WorkLinkArgs {
+        level: Some(2),
+        until_done: Some(true),
+        hours,
+        budget_cents: budget,
+        ..by_id("mission_grant", fx.m.id)
+    };
+    let refused = |a: WorkLinkArgs| grant(&a, &fx.deps.store, &fx.me).unwrap_err();
+    let e = refused(args(None, None));
+    assert_eq!(e.code, codes::E_INVALID);
+    assert!(e.message.contains("budget"), "{}", e.message);
+    assert_eq!(refused(args(Some(500), Some(8))).code, codes::E_INVALID);
+    let g = grant(&args(Some(500), None), &fx.deps.store, &fx.me).unwrap();
+    assert!(g.until_done);
+    assert_eq!(g.expires_at, GRANT_UNTIL_DONE_AT);
+    assert_eq!(g.budget_micros, Some(5_000_000));
+    let s = lock(&fx.deps.store).unwrap();
+    // Live a year from now, past any hours a grant may run.
+    let later = now_unix() + 365 * 24 * 3600;
+    let live = s.live_mission_grant(fx.m.id, later).unwrap().unwrap();
+    assert!(live.until_done);
+    // An hours grant is not until done.
+    drop(s);
+    let g = grant(
+        &WorkLinkArgs {
+            level: Some(2),
+            hours: Some(1),
+            ..by_id("mission_grant", fx.m.id)
+        },
+        &fx.deps.store,
+        &fx.me,
+    )
+    .unwrap();
+    assert!(!g.until_done);
+    // Only a finite mission's grant lasts until it is done.
+    {
+        let s = lock(&fx.deps.store).unwrap();
+        s.update_mission(
+            fx.m.id,
+            None,
+            &crate::store::MissionPatch {
+                mode: Some("continuous".into()),
+                ..Default::default()
+            },
+            "t",
+        )
+        .unwrap();
+    }
+    let e = refused(args(Some(500), None));
+    assert_eq!(e.code, codes::E_INVALID);
+    assert!(e.message.contains("finite"), "{}", e.message);
 }
 
 #[test]

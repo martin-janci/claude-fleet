@@ -1486,8 +1486,9 @@ impl FleetTools {
         person | text]}; verify {item_id, line, ok, note?}: a person's check. \
         mission_start {mission_id, step?}: take the next steps; retry \
         {item_id, note?}; mission_plan: ask the planner; card_decide \
-        {card_id, ok, note?}; mission_grant {mission_id, level, hours?, \
-        budget_cents?, hosts?, max_parallel?, profile?}; mission_revoke; \
+        {card_id, ok, note?}; mission_grant {mission_id, level, hours? | \
+        until_done? (finite, needs budget_cents), budget_cents?, hosts?, \
+        max_parallel?, profile?}: raises the mission's level to it; mission_revoke; \
         missions_pause_all. mission_release_note {mission_id}: a drafted \
         release note of a completed mission; today_brief {refresh?, org_id?, \
         since?}: Today's morning brief, drafted only on refresh; \

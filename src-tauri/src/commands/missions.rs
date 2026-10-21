@@ -179,6 +179,8 @@ pub struct GrantMissionArgs {
     #[serde(default)]
     pub hours: Option<u32>,
     #[serde(default)]
+    pub until_done: Option<bool>,
+    #[serde(default)]
     pub budget_cents: Option<i64>,
     #[serde(default)]
     pub hosts: Option<Vec<String>>,
@@ -808,6 +810,7 @@ pub(crate) mod routed {
         let wire = WorkLinkArgs {
             level: Some(args.level),
             hours: args.hours,
+            until_done: args.until_done,
             budget_cents: args.budget_cents,
             hosts: args.hosts,
             max_parallel: args.max_parallel,
