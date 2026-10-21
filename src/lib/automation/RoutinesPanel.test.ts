@@ -7,6 +7,7 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import RoutinesPanel from './RoutinesPanel.svelte';
 import RoutineFailures from './RoutineFailures.svelte';
+import RoutineMemory from './RoutineMemory.svelte';
 import { hosts } from '../hosts';
 import { projects } from '../projects';
 import { get } from 'svelte/store';
@@ -844,5 +845,95 @@ describe('the routine editor (review w05)', () => {
     expect(screen.queryByTestId('routine-prompt-count')).toBeNull();
     await fireEvent.input(prompt, { target: { value: 'x'.repeat(3600) } });
     expect(screen.getByTestId('routine-prompt-count').textContent).toBe('3600 / 4000 characters');
+  });
+});
+
+describe('the routine notebooks (migration 204)', () => {
+  const withMemory = { ...sweep, memory: 'routine' } as RoutineRow;
+  const notebook = (body: string) => ({
+    routine_id: 3,
+    memory: 'routine',
+    memory_auto: false,
+    routine: { scope: 'routine', owner_id: 3, body, updated_at: 1, updated_by: 'run', updated_run_id: 2 },
+    max_chars: 4000,
+    may_change: true,
+  });
+
+  /** `route`, with `memory` answered by `answer` (a hub without notebooks throws). */
+  function routeMemory(answer: (id: number) => unknown, list: RoutineRow[] = [withMemory]) {
+    route(list);
+    const base = inv.getMockImplementation() as (cmd: string, a: unknown) => Promise<unknown>;
+    inv.mockImplementation(async (cmd: string, a: { args: { action: string; routine_id?: number } }) => {
+      if (cmd === 'routines' && a.args.action === 'memory') return answer(a.args.routine_id!);
+      return base(cmd, a);
+    });
+  }
+  const notFound = () => {
+    throw { code: 'E_NOT_FOUND', message: 'no routine 0' };
+  };
+
+  async function openSaved() {
+    render(RoutinesPanel);
+    await screen.findByTestId('routine-title');
+    await fireEvent.click(screen.getByTestId('routine-edit'));
+  }
+
+  it('a notebook edit survives a change to the form, read-only, and leaving asks first', async () => {
+    routeMemory((id) => (id === 3 ? notebook('old notes') : notFound()));
+    await openSaved();
+    const box = (await screen.findByTestId('routine-memory-routine')) as HTMLTextAreaElement;
+    await waitFor(() => expect(box.value).toBe('old notes'));
+    await fireEvent.input(box, { target: { value: 'new notes' } });
+
+    // An unsaved notebook alone makes Cancel ask.
+    await fireEvent.click(screen.getByTestId('routine-cancel'));
+    expect(screen.getByTestId('form-discard-ask')).toBeInTheDocument();
+    await fireEvent.click(screen.getByTestId('form-keep-editing'));
+
+    // A form edit keeps the box and its text, read-only until the form is saved.
+    await fireEvent.input(screen.getByTestId('routine-prompt'), { target: { value: 'Only CI.' } });
+    const kept = screen.getByTestId('routine-memory-routine') as HTMLTextAreaElement;
+    expect(kept.value).toBe('new notes');
+    expect(kept.readOnly).toBe(true);
+    expect(screen.getByTestId('routine-memory-locked')).toBeInTheDocument();
+    expect((screen.getByTestId('routine-memory-save-routine') as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('counts characters as the fleet does: an emoji is one', async () => {
+    const body = '🙂'.repeat(20) + 'x'.repeat(3970);
+    routeMemory((id) => (id === 3 ? notebook(body) : notFound()));
+    await openSaved();
+    const box = (await screen.findByTestId('routine-memory-routine')) as HTMLTextAreaElement;
+    await waitFor(() => expect(box.value).toBe(body));
+    await fireEvent.input(box, { target: { value: body + 'y' } });
+    expect(box.getAttribute('aria-invalid')).toBeNull();
+    expect(box.parentElement!.textContent).toContain('3991 / 4000 characters');
+    expect((screen.getByTestId('routine-memory-save-routine') as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('against a hub without notebooks the form offers none, so a save never names one', async () => {
+    routeMemory(() => {
+      throw { code: 'E_INVALID', message: 'action must be list | get | runs, got "memory"' };
+    }, [sweep]);
+    await openSaved();
+    expect(await screen.findByTestId('routine-memory-unserved')).toBeInTheDocument();
+    expect(screen.queryByTestId('routine-memory-mode')).toBeNull();
+  });
+
+  it('a stale notebook reply for the routine left behind is not shown under the next one', async () => {
+    let releaseA: () => void = () => {};
+    routeMemory((id) => {
+      if (id === 3) return new Promise((res) => (releaseA = () => res(notebook('A notes'))));
+      if (id === 4) return { ...notebook('B notes'), routine_id: 4 };
+      return notFound();
+    });
+    const v = render(RoutineMemory, { routineId: 3 });
+    await v.rerender({ routineId: 4 });
+    const box = (await screen.findByTestId('routine-memory-routine')) as HTMLTextAreaElement;
+    await waitFor(() => expect(box.value).toBe('B notes'));
+    releaseA();
+    await new Promise((r) => setTimeout(r, 0));
+    await tick();
+    expect((screen.getByTestId('routine-memory-routine') as HTMLTextAreaElement).value).toBe('B notes');
   });
 });
