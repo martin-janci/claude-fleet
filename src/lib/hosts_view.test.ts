@@ -279,7 +279,7 @@ describe('host health helpers', () => {
     expect(hostAttention({ ...base, host: host('old', { auth_overrides: null }) })).toBeNull();
   });
 
-  it('login_conflict names two copies of one login and outranks disk_low', () => {
+  it('login_conflict names two copies of one login and yields to disk_low', () => {
     const base = {
       hasToken: true,
       tokensLoaded: true,
@@ -300,14 +300,24 @@ describe('host health helpers', () => {
         { name: 'Primary', account_uuid: 'a', email: 'mj@x' },
         { name: 'work', account_uuid: 'b', email: 'b@x' },
       ],
-      disk_home_free_kb: 3_600_000,
-      disk_home_total_kb: 150_000_000,
       health_at: NOW,
     });
     const a = hostAttention({ ...base, host: mac });
     expect(a?.kind).toBe('login_conflict');
     expect(a?.title).toContain('macOS Keychain');
+    expect(a?.title).toContain('then delete ~/.claude/.credentials.json');
     expect(a?.title).toContain('the host login and profile Primary are both signed into mj@x');
+    // A nearly full disk breaks every session there, so it takes the slot.
+    const full = { ...mac, disk_home_free_kb: 3_600_000, disk_home_total_kb: 150_000_000 };
+    expect(hostAttention({ ...base, host: full })?.kind).toBe('disk_low');
+    // One API key under two profiles has no refresh token to revoke.
+    const keys = host('keys', {
+      claude_profiles: [
+        { name: 'one', account_uuid: 'apikey-0123456789abcdef' },
+        { name: 'two', account_uuid: 'apikey-0123456789abcdef' },
+      ],
+    });
+    expect(hostAttention({ ...base, host: keys })).toBeNull();
     // One login per account, or nothing known, earns no mark.
     const clean = host('ok', {
       login_split: false,

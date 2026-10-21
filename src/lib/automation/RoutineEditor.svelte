@@ -34,6 +34,7 @@
     offsetWords,
     previewRoutine,
     routineAccountLabel,
+    routineMemory,
     SCHEDULE_DAYS,
     triggerWords,
     zoneChoices,
@@ -45,7 +46,7 @@
   import { draftCron, draftInput, draftMissing, draftZone, withDays, type RoutineDraft } from './routine_draft';
   import { errorText } from '../error_copy';
   import type { ScheduleDays } from '../routines';
-  import { tick, untrack } from 'svelte';
+  import { onMount, tick, untrack } from 'svelte';
   import PromptTune from '../PromptTune.svelte';
   import { tuneRoutinePrompt } from '../prompt_tune';
   import { helpModel } from '../context_help';
@@ -84,8 +85,19 @@
   ];
 
   const isNew = $derived(draft.id === undefined);
-  /** The notebooks show once the routine is saved with the memory the form shows. */
-  const savedMemory = $derived(!dirty);
+  /** A notebook box holds text not saved yet (RoutineMemory): leaving asks,
+   *  as for a changed form. */
+  let notebookPending = $state(false);
+  /** Anything here that leaving would lose. */
+  const unsaved = $derived(dirty || notebookPending);
+  /** Whether the fleet keeps notebooks (migration 204): a hub that predates
+   *  them answers the `memory` action E_INVALID and refuses a routine that
+   *  names one, so the form offers none. `null` until it answers. */
+  let memoryServed: boolean | null = $state(null);
+  onMount(() => {
+    // Routine 0 is never one: a hub with notebooks answers E_NOT_FOUND.
+    void routineMemory(0).then((r) => (memoryServed = r.ok || r.error.code !== 'E_INVALID'));
+  });
   // The prompt tuner (`prompt_tune.ts`): a model rewrites the prompt on the
   // routine's host and profile, saved or not; "Use this" writes draft.prompt.
   const tuneOn = $derived(settingBool($fleetSettings, SETTING_KEYS.workPromptTune));
@@ -202,7 +214,7 @@
    *  another routine, a template, a request from elsewhere (review w05-1). */
   let leaveTo: (() => void) | null = null;
   const guard = new CloseGuard(
-    () => dirty,
+    () => unsaved,
     () => {
       const then = leaveTo;
       leaveTo = null;
@@ -217,8 +229,14 @@
   /** Leave this draft for `then`: at once when it is unchanged, else after
    *  "Discard changes?" in the footer. RoutinesPanel sends every way out
    *  that replaces the draft through here. */
+  /** Whether a notebook box holds unsaved text, for a Save that would
+   *  otherwise close the editor over it. */
+  export function hasNotebookEdit(): boolean {
+    return notebookPending;
+  }
+
   export function askLeave(then: () => void): void {
-    if (!dirty) {
+    if (!unsaved) {
       leaveTo = null;
       guard.keep();
       then();
@@ -545,34 +563,42 @@
       not a sandbox.
     </p>
 
-    <h4 class="grp">Memory</h4>
-    <div class="two">
-      <label class="f">
-        <span class="fl">Notebooks</span>
-        <select
-          class="inp"
-          data-testid="routine-memory-mode"
-          bind:value={draft.memory}
-          onchange={() => {
-            if (!draft.memory) draft.memory_auto = false;
-          }}>
-          <option value="">None: each run starts fresh</option>
-          <option value="routine">This routine's own</option>
-          <option value="project">The project's, shared by its routines</option>
-          <option value="both">Both</option>
-        </select>
-      </label>
-      <label class="ck">
-        <input type="checkbox" data-testid="routine-memory-auto" bind:checked={draft.memory_auto} disabled={!draft.memory} />
-        <span>Note each finished run in the notebook</span>
-      </label>
-    </div>
-    <p class="help">
-      The fleet keeps notebooks in its own database, outside the repo and the host, so the next run reads them on any host. A run rewrites one by
-      ending its reply with a &lt;routine-memory&gt; block; the prompt tells it how.
-    </p>
-    {#if draft.id !== undefined && draft.memory && savedMemory}
-      <RoutineMemory routineId={draft.id} />
+    {#if memoryServed !== false || draft.memory}
+      <h4 class="grp">Memory</h4>
+      <div class="two">
+        <label class="f">
+          <span class="fl">Notebooks</span>
+          <select
+            class="inp"
+            data-testid="routine-memory-mode"
+            bind:value={draft.memory}
+            onchange={() => {
+              if (!draft.memory) draft.memory_auto = false;
+            }}>
+            <option value="">None: each run starts fresh</option>
+            <option value="routine">This routine's own</option>
+            <option value="project">The project's, shared by its routines</option>
+            <option value="both">Both</option>
+          </select>
+        </label>
+        <label class="ck">
+          <input type="checkbox" data-testid="routine-memory-auto" bind:checked={draft.memory_auto} disabled={!draft.memory} />
+          <span>Note each finished run in the notebook</span>
+        </label>
+      </div>
+      <p class="help">
+        The fleet keeps notebooks in its own database, outside the repo and the host, so the next run reads them on any host. A run rewrites one by
+        ending its reply with a &lt;routine-memory&gt; block; the prompt tells it how.
+      </p>
+      {#if draft.id !== undefined && (draft.memory || dirty)}
+        <!-- One per routine: switching to another starts from its own notebooks. -->
+        {#key draft.id}
+          <RoutineMemory routineId={draft.id} locked={dirty} onpending={(p) => (notebookPending = p)} />
+        {/key}
+      {/if}
+    {:else}
+      <h4 class="grp">Memory</h4>
+      <p class="help" data-testid="routine-memory-unserved">This fleet's hub keeps no notebooks yet: update it to give a routine a memory.</p>
     {/if}
 
     <label class="f">

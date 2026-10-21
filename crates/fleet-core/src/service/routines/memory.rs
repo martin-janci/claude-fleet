@@ -65,13 +65,25 @@ pub const SCOPE_PROJECT: &str = "project";
 
 /// `memory` and `memory_auto` of `input`, checked: a mode of
 /// [`ROUTINE_MEMORY_MODES`] (`""` = none), and `memory_auto` only with one.
-pub(super) fn check_input(input: &super::RoutineInput) -> Result<(Option<String>, bool), IpcError> {
-    let mode = input
-        .memory
-        .as_deref()
-        .map(str::trim)
-        .filter(|m| !m.is_empty());
-    if let Some(m) = mode {
+/// A change of routine `before` without `memory` keeps its notebooks, and
+/// its `memory_auto` unless the input names one: a desktop older than
+/// memory (hub client mode) sends neither, and its edit must not turn the
+/// notebooks off.
+pub(super) fn check_input(
+    input: &super::RoutineInput,
+    before: Option<&RoutineRow>,
+) -> Result<(Option<String>, bool), IpcError> {
+    let kept = input.memory.is_none().then_some(before).flatten();
+    let mode = match kept {
+        Some(b) => b.memory.clone(),
+        None => input
+            .memory
+            .as_deref()
+            .map(str::trim)
+            .filter(|m| !m.is_empty())
+            .map(str::to_string),
+    };
+    if let (None, Some(m)) = (kept, mode.as_deref()) {
         if !ROUTINE_MEMORY_MODES.contains(&m) {
             return Err(IpcError::new(
                 codes::E_INVALID,
@@ -79,14 +91,16 @@ pub(super) fn check_input(input: &super::RoutineInput) -> Result<(Option<String>
             ));
         }
     }
-    let auto = input.memory_auto.unwrap_or(false);
+    let auto = input
+        .memory_auto
+        .unwrap_or_else(|| kept.is_some_and(|b| b.memory_auto));
     if auto && mode.is_none() {
         return Err(IpcError::new(
             codes::E_INVALID,
             "memory_auto needs memory: a note goes into a notebook",
         ));
     }
-    Ok((mode.map(str::to_string), auto))
+    Ok((mode, auto))
 }
 
 /// PURE: the notebooks `r`'s runs use, routine first.
@@ -194,25 +208,49 @@ fn scope_attr(tag: &str) -> Option<&str> {
     inner.find(q).map(|end| &inner[..end])
 }
 
+/// PURE: where the first real opening tag in `text` starts, and its
+/// attributes: `<routine-memory>` or `<routine-memory scope="…">`, nothing
+/// else, and not quoted as code (`` `<routine-memory>` ``).
+fn real_open(text: &str) -> Option<(usize, &str)> {
+    let mut from = 0;
+    while let Some(i) = text[from..].find(TAG_OPEN) {
+        let open = from + i;
+        let after = &text[open + TAG_OPEN.len()..];
+        from = open + TAG_OPEN.len();
+        if (!after.starts_with('>') && !after.starts_with(char::is_whitespace))
+            || text[..open].ends_with('`')
+        {
+            continue;
+        }
+        let gt = after.find('>')?;
+        return Some((open, &after[..gt]));
+    }
+    None
+}
+
 /// PURE: each `<routine-memory scope="…">…</routine-memory>` block in
 /// `text`, in order, as `(scope, body)`; a block without a scope names
-/// `default`. An unclosed block is left out.
+/// `default`. An unclosed block is left out, and so is a tag in code
+/// (`` `<routine-memory>` ``, as a reply names it in prose). A block whose
+/// text holds another real opening tag starts at that one: what came
+/// before it was a mention, not the notebook. Unless the outer tag names
+/// a scope and the inner one none: then the inner is the notebook's text
+/// naming the tag, and the block is the outer one.
 pub fn parse_blocks<'a>(text: &'a str, default: &'a str) -> Vec<(&'a str, &'a str)> {
     let mut out = Vec::new();
     let mut rest = text;
-    while let Some(open) = rest.find(TAG_OPEN) {
-        let after = &rest[open + TAG_OPEN.len()..];
-        // `<routine-memory>` or `<routine-memory scope="…">`, nothing else.
-        if !after.starts_with('>') && !after.starts_with(char::is_whitespace) {
-            rest = after;
-            continue;
-        }
-        let Some(gt) = after.find('>') else { break };
-        let tag = &after[..gt];
-        let inner = &after[gt + 1..];
+    while let Some((open, tag)) = real_open(rest) {
+        let inner = &rest[open + TAG_OPEN.len() + tag.len() + 1..];
         let Some(close) = inner.find(TAG_CLOSE) else {
             break;
         };
+        if let Some((at, inner_tag)) = real_open(&inner[..close]) {
+            if scope_attr(tag).is_none() || scope_attr(inner_tag).is_some() {
+                // Parse again from the inner opening tag.
+                rest = &inner[at..];
+                continue;
+            }
+        }
         let scope = scope_attr(tag).unwrap_or(default);
         out.push((
             scope,
@@ -265,13 +303,21 @@ pub fn summary(reply: &str) -> Option<String> {
 }
 
 /// PURE: the note line of `run`: `- [run 42 · 2026-10-20 14:05 UTC · done] …`.
-pub fn note_line(run: &RoutineRunRow, reply: Option<&str>) -> String {
+/// `read`: whether its reply was read (`false`: its transcript could not
+/// be, which the note says rather than reading as a quiet `done`).
+pub fn note_line(run: &RoutineRunRow, reply: Option<&str>, read: bool) -> String {
     let at = run.finished_at.unwrap_or(run.started_at);
     let stamp = crate::service::agents::review::rfc3339(at);
     let when = format!("{} {} UTC", &stamp[..10], &stamp[11..16]);
     let what = match (run.state.as_str(), run.reason.as_deref()) {
-        ("failed", Some(why)) => format!("failed: {}", clip(why, NOTE_SUMMARY_MAX)),
+        // One line whatever the reason holds (a tool's stderr runs to
+        // several): the oldest notes are found, to drop, by their lines.
+        ("failed", Some(why)) => {
+            let why = why.split_whitespace().collect::<Vec<_>>().join(" ");
+            format!("failed: {}", clip(&why, NOTE_SUMMARY_MAX))
+        }
         ("failed", None) => "failed".to_string(),
+        _ if !read => "done (reply not read)".to_string(),
         _ => reply
             .and_then(summary)
             .unwrap_or_else(|| "done".to_string()),
@@ -314,22 +360,60 @@ pub struct Written {
     pub by: &'static str,
 }
 
+/// Whether notebook `m` was written after run `run` read it, at its start:
+/// by a run that finished since (a retried read lands after the runs that
+/// followed it; an overlapping run finished first), or by a person since.
+/// Such a notebook is not rewritten from `run`'s reply, which was written
+/// from an older one.
+fn newer_than(s: &Store, m: &RoutineMemoryRow, run: &RoutineRunRow) -> Result<bool, IpcError> {
+    let read = run.started_at;
+    Ok(match m.updated_run_id {
+        Some(other) if other == run.id => false,
+        Some(other) => s
+            .routine_run_finished_at(other)?
+            .is_some_and(|at| at > read || (at == read && other > run.id)),
+        None => m.updated_by == "person" && m.updated_at > read,
+    })
+}
+
 /// Apply finished run `run` of `r` to its notebooks: each block of
-/// `replies` (the run's reply texts, oldest first; `None` when its
-/// transcript could not be read) rewrites its notebook, then
-/// `memory_auto`'s note. Marks the run read and writes what changed to its
-/// trace.
+/// `replies` (the run's reply texts, oldest first; `Err(why)` when its
+/// transcript could not be read) rewrites its notebook, unless a later run
+/// or a person wrote it since, then `memory_auto`'s note. Marks the run
+/// read and writes what changed, or why nothing could, to its trace.
 pub fn apply(
     s: &Store,
     r: &RoutineRow,
     run: &RoutineRunRow,
-    replies: Option<&[String]>,
+    replies: Result<&[String], &str>,
     now: i64,
 ) -> Result<Vec<Written>, IpcError> {
-    let used = scopes(r);
+    // A removed project's notebook went with it, and its id may be the
+    // next project's: a run read after the removal writes none there.
+    let mut used = scopes(r);
+    if used.contains(&SCOPE_PROJECT) && s.get_project(r.project_id)?.is_none() {
+        used.retain(|u| *u != SCOPE_PROJECT);
+    }
     let mut written = Vec::new();
     let mut last_reply: Option<&str> = None;
-    if let (Some(texts), Some(default)) = (replies, used.first()) {
+    if let Err(why) = replies {
+        trace::write_one(
+            s,
+            run.id,
+            Step::new(
+                now,
+                "outcome",
+                "memory",
+                "hub",
+                format!(
+                    "Its reply could not be read ({}); its notebooks were not rewritten",
+                    clip(why, NOTE_SUMMARY_MAX)
+                ),
+            )
+            .data(serde_json::json!({ "read": false })),
+        );
+    }
+    if let (Ok(texts), Some(default)) = (replies, used.first()) {
         let mut latest: Vec<(&'static str, &str)> = Vec::new();
         for text in texts {
             for (scope, b) in parse_blocks(text, default) {
@@ -341,6 +425,29 @@ pub fn apply(
             }
         }
         for (scope, b) in latest {
+            let (owner, circle) = key(r, scope);
+            if let Some(m) = s.get_routine_memory(scope, owner, circle)? {
+                if newer_than(s, &m, run)? {
+                    let what = if scope == SCOPE_PROJECT {
+                        "the project's notebook"
+                    } else {
+                        "its notebook"
+                    };
+                    trace::write_one(
+                        s,
+                        run.id,
+                        Step::new(
+                            now,
+                            "outcome",
+                            "memory",
+                            "hub",
+                            format!("Its reply's rewrite of {what} was older than the notebook, kept as it is"),
+                        )
+                        .data(serde_json::json!({ "scope": scope, "stale": true })),
+                    );
+                    continue;
+                }
+            }
             let n = b.chars().count();
             let text: String = b.chars().take(MEMORY_MAX_CHARS).collect();
             if s.set_routine_memory(scope, key(r, scope), &text, "run", Some(run.id), now)? {
@@ -360,9 +467,23 @@ pub fn apply(
     }
     if r.memory_auto {
         if let Some(scope) = used.first().copied() {
-            let line = note_line(run, last_reply);
-            let next = append_note(&body(s, r, scope)?, &line, MEMORY_MAX_CHARS);
-            if s.set_routine_memory(scope, key(r, scope), &next, "fleet", Some(run.id), now)? {
+            let line = note_line(run, last_reply, replies.is_ok());
+            let (owner, circle) = key(r, scope);
+            let m = s.get_routine_memory(scope, owner, circle)?;
+            let body = m.as_ref().map(|m| m.body.as_str()).unwrap_or_default();
+            let next = append_note(body, &line, MEMORY_MAX_CHARS);
+            // A note on a notebook written since this run read it leaves
+            // the last writer as it is: an older run's note must not make
+            // the next stale reply look newer than the notebook.
+            let changed = match &m {
+                Some(m) if newer_than(s, m, run)? => {
+                    s.set_routine_memory_body(scope, (owner, circle), &next)?
+                }
+                _ => {
+                    s.set_routine_memory(scope, (owner, circle), &next, "fleet", Some(run.id), now)?
+                }
+            };
+            if changed {
                 written.push(Written {
                     scope,
                     chars: next.chars().count(),
@@ -448,7 +569,7 @@ fn pending(
     now: i64,
 ) -> Result<Vec<(RoutineRow, RoutineRunRow, Option<SessionRow>)>, IpcError> {
     let mut out = Vec::new();
-    for run in s.routine_runs_memory_unread(now - READ_WITHIN_SECS, PER_PASS)? {
+    for run in s.routine_runs_memory_unread(now - READ_WITHIN_SECS, now, PER_PASS)? {
         let Some(r) = s.get_routine(run.routine_id)? else {
             continue;
         };
@@ -461,9 +582,19 @@ fn pending(
     Ok(out)
 }
 
+/// A run whose transcript could not be read is not tried again for this
+/// long (`memory_retry_at`, migration 205), so an unreachable host does not
+/// hold every pass's window nor take an SSH attempt per run and pass.
+pub const RETRY_SECS: i64 = 60;
+
 /// Read each finished run's reply once and [`apply`] it. A transcript that
-/// cannot be read is tried again on the next pass, until [`GIVE_UP_SECS`]
-/// after the run finished; then the run is applied without it.
+/// cannot be read is tried again [`RETRY_SECS`] later, until
+/// [`GIVE_UP_SECS`] after the run finished; then the run is applied without
+/// it. Once one read on a host fails for want of the host (a transport
+/// error), the pass reads nothing else there that can wait; a run that is
+/// giving up is still tried, so none is noted unread without a read. A
+/// read that fails for its own session (no transcript, no Claude id) says
+/// nothing about the host.
 pub async fn read_finished(store: &Arc<Mutex<Store>>, reader: &dyn ReplyReader, now: i64) {
     let runs = match lock(store).and_then(|s| pending(&s, now)) {
         Ok(r) => r,
@@ -472,23 +603,51 @@ pub async fn read_finished(store: &Arc<Mutex<Store>>, reader: &dyn ReplyReader, 
             return;
         }
     };
+    let mut down: std::collections::HashSet<String> = std::collections::HashSet::new();
     for (r, run, row) in runs {
-        let replies = match &row {
-            Some(row) => match reader.replies(row).await {
-                Ok(t) => Some(t),
-                Err(e) => {
-                    let finished = run.finished_at.unwrap_or(run.started_at);
-                    if now - finished < GIVE_UP_SECS {
-                        tracing::debug!(run = run.id, error = %e.message, "[routines] run's reply not read for memory yet");
+        let finished = run.finished_at.unwrap_or(run.started_at);
+        let giving_up = now - finished >= GIVE_UP_SECS;
+        let read = match (&row, run.session_id) {
+            (Some(row), _) => {
+                let got = if !giving_up && down.contains(&row.host_alias) {
+                    Err(format!("{} could not be reached", row.host_alias))
+                } else {
+                    reader.replies(row).await.map_err(|e| {
+                        if codes::is_transport_failure(&e.code) {
+                            down.insert(row.host_alias.clone());
+                        }
+                        e.message
+                    })
+                };
+                match got {
+                    Ok(t) => Ok(t),
+                    Err(why) if !giving_up => {
+                        tracing::debug!(run = run.id, error = %why, "[routines] run's reply not read for memory yet");
+                        if let Ok(s) = lock(store) {
+                            if let Err(e) = s.hold_routine_run_memory_read(run.id, now + RETRY_SECS)
+                            {
+                                tracing::warn!(run = run.id, error = %e.message, "[routines] run's memory read not held back");
+                            }
+                        }
                         continue;
                     }
-                    None
+                    Err(why) => {
+                        tracing::warn!(run = run.id, error = %why, "[routines] run's reply could not be read for memory; noted without it");
+                        Err(why)
+                    }
                 }
-            },
-            None => None,
+            }
+            // Its session row is gone: nothing left to read.
+            (None, Some(_)) => Err("its session is gone".to_string()),
+            // It never had a session (it failed to start): no reply.
+            (None, None) => Ok(Vec::new()),
         };
         if let Ok(s) = lock(store) {
-            if let Err(e) = apply(&s, &r, &run, replies.as_deref(), now) {
+            let replies = match &read {
+                Ok(t) => Ok(t.as_slice()),
+                Err(why) => Err(why.as_str()),
+            };
+            if let Err(e) = apply(&s, &r, &run, replies, now) {
                 tracing::warn!(run = run.id, error = %e.message, "[routines] run's memory not written");
             }
         }
@@ -501,7 +660,7 @@ static IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 /// run waiting it costs one short lock and spawns nothing.
 pub fn spawn_pass(store: &Arc<Mutex<Store>>, reader: Arc<dyn ReplyReader>, now: i64) {
     let any = lock(store).ok().is_some_and(|s| {
-        s.routine_runs_memory_unread(now - READ_WITHIN_SECS, 1)
+        s.routine_runs_memory_unread(now - READ_WITHIN_SECS, now, 1)
             .is_ok_and(|r| !r.is_empty())
     });
     if !any || IN_FLIGHT.swap(true, Ordering::SeqCst) {
@@ -557,6 +716,23 @@ fn of_routine(s: &Store, scope: &ViewScope, r: &RoutineRow) -> Result<RoutineMem
         max_chars: MEMORY_MAX_CHARS,
         may_change: super::may_change_routine(s, scope, r)?,
     })
+}
+
+/// PURE: `m` with each notebook's text fenced as untrusted, as a run's
+/// prompt carries it: runs write them, and runs read pull requests. What
+/// the operator reads (`routines { action: memory }`); a person's editor
+/// takes the text as it is.
+pub fn fenced(mut m: RoutineMemory) -> RoutineMemory {
+    for row in [m.routine.as_mut(), m.project.as_mut()]
+        .into_iter()
+        .flatten()
+    {
+        if !row.body.trim().is_empty() {
+            row.body =
+                crate::mcp::guard::fence_untrusted(&row.body, "routine memory", MEMORY_MAX_CHARS);
+        }
+    }
+    m
 }
 
 /// `routines { action: memory, routine_id }`, for anyone who may read the

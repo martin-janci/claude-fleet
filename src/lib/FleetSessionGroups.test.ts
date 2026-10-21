@@ -26,6 +26,7 @@ import {
   fleetHostFilter,
   fleetScopeFilter,
   pickFleetHost,
+  primaryFleetOpen,
   pickFleetScope,
 } from './fleet_filters';
 import { hostFilter, hosts, type HostRow } from './hosts';
@@ -159,6 +160,19 @@ describe('PrimaryFleetHeader', () => {
     await tick();
     expect(screen.queryByTestId('primary-fleet-hidden')).toBeNull();
     expect(screen.getByTestId('primary-fleet-count').textContent).toBe('1');
+  });
+
+  it('a session focus shows this list past the fold, so the fold button says it is shown', async () => {
+    primaryFleetOpen.set(false);
+    render(PrimaryFleetHeader, { props: { count: 1, hiddenCount: 4, focused: true } });
+    await tick();
+    const fold = screen.getByTestId('primary-fleet-fold') as HTMLButtonElement;
+    expect(fold.getAttribute('aria-expanded')).toBe('true');
+    expect(fold.getAttribute('aria-label')).toBe('Hide the sessions of rlt');
+    expect(fold.querySelector('.caret')?.classList.contains('collapsed')).toBe(false);
+    // Folding would change nothing on screen while the focus holds.
+    expect(fold.disabled).toBe(true);
+    primaryFleetOpen.set(true);
   });
 });
 

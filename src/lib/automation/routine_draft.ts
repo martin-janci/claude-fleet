@@ -47,6 +47,9 @@ export interface RoutineDraft {
   memory?: RoutineMemoryMode | '';
   /** The fleet notes each finished run in the notebook. */
   memory_auto?: boolean;
+  /** The saved routine keeps a notebook: clearing `memory` then sends
+   *  `memory: ''`, since a change without it keeps the routine's. */
+  saved_memory?: boolean;
   /** The schedule's zone (G7.4's Time zone select); '' = this device's. */
   zone: string;
   /** A routine saved without a zone at an offset no zone here stands for
@@ -113,6 +116,7 @@ export function draftOf(i: RoutineInput, id?: number): RoutineDraft {
     autonomy: i.autonomy ?? 2,
     memory: i.memory ?? '',
     memory_auto: i.memory_auto ?? false,
+    ...(i.memory ? { saved_memory: true } : {}),
     zone: z.zone,
     ...(z.offset !== undefined ? { saved_offset: z.offset } : {}),
   };
@@ -208,8 +212,9 @@ export function draftInput(d: RoutineDraft, enabled: boolean, device: string | n
     fallback_host: d.fallback_host || undefined,
     retry_once: d.retry_once,
     autonomy: d.autonomy < 2 ? d.autonomy : undefined,
-    // Only when it keeps a notebook: a hub that predates memory refuses
+    // Only when it keeps a notebook, or kept one (a change without
+    // `memory` keeps the routine's): a hub that predates memory refuses
     // the fields, and every other routine still saves there.
-    ...(d.memory ? { memory: d.memory, memory_auto: d.memory_auto ?? false } : {}),
+    ...(d.memory ? { memory: d.memory, memory_auto: d.memory_auto ?? false } : d.saved_memory ? { memory: '' as const } : {}),
   };
 }

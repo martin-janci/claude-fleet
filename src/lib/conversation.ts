@@ -1276,6 +1276,25 @@ export function rememberTray(sessionId: number, tray: readonly Attachment[]): vo
   else composerTrays.set(sessionId, [...tray]);
 }
 
+const trayTakenListeners = new Set<(sessionId: number) => void>();
+
+/** Drop a session's remembered tray because its tiles went elsewhere (a move
+ *  carried them to the new row). The map is only half of it: a panel that
+ *  is showing that session holds the same tiles live and would write them
+ *  back on its next tray change, so it hears this and empties its box. */
+export function takeTray(sessionId: number): void {
+  composerTrays.delete(sessionId);
+  for (const l of trayTakenListeners) l(sessionId);
+}
+
+/** Hear `takeTray`; returns the unsubscribe. A listener, not a store: a
+ *  store keeps its last value, and a later mount would empty a tray the
+ *  person filled again since. */
+export function onTrayTaken(listener: (sessionId: number) => void): () => void {
+  trayTakenListeners.add(listener);
+  return () => trayTakenListeners.delete(listener);
+}
+
 /** The last "Insert into composer" (work graph M9.2): the session and its
  *  whole new draft. ConversationPanel adopts it when it shows that session;
  *  App opens the conversation view for it. `seq` makes a repeat distinct. */

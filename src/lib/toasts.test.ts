@@ -96,6 +96,17 @@ describe('toasts store', () => {
     expect(retry).toHaveBeenCalledOnce();
   });
 
+  // Review w16-8: a timed-out action may have run; a failed read says so.
+  it('pushError says a timed-out action may have gone through, and a read does not', () => {
+    pushError({ code: 'E_SSH_TIMEOUT', message: 'timed out' }, 'Kill failed');
+    pushError({ code: 'E_SSH_TIMEOUT', message: 'timed out' }, 'Refresh sessions failed', undefined, { read: true });
+    const messages = get(toasts).map((t) => t.message);
+    expect(messages).toContain(
+      'Kill failed: The host took too long to answer over SSH. It may have gone through anyway. The list refreshes; check it before trying again',
+    );
+    expect(messages).toContain('Refresh sessions failed: The host took too long to answer over SSH');
+  });
+
   it('pushError also reports to the hub error channel', () => {
     pushError({ code: 'E_SSH', message: 'ssh refused' }, 'Opening terminal');
     const reported = inv().mock.calls.filter((c) => c[0] === 'report_client_error');
@@ -164,7 +175,7 @@ describe('pushError on a hub client', () => {
       const t = get(toasts)[0];
       expect(t.code).toBe('E_CONFIRM_REQUIRED');
       expect(t.message).toContain('Kill failed');
-      expect(t.message).toContain('approve it in the confirmation that just opened, or on your phone');
+      expect(t.message).toContain('approving the request won’t run it from here');
       expect(t.message).not.toContain('fleet.example.com');
     } finally {
       hubStatus.set({ ...STANDALONE });

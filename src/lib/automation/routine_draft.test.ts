@@ -114,5 +114,15 @@ describe('memory (migration 204)', () => {
     const row = { ...base, id: 3, enabled: true, utc_offset_min: 0, overlap: 'skip', skip_next: false, created_at: 0, updated_at: 0 } as RoutineRow;
     expect('memory' in routineInputOf(row)).toBe(false);
     expect(routineInputOf({ ...row, memory: 'project' })).toMatchObject({ memory: 'project', memory_auto: false });
+    // Undo of an edit that turned memory on: a change without memory keeps it.
+    expect(routineInputOf(row, true).memory).toBe('');
+  });
+  it('turning off a saved routine’s memory sends memory: "", since a change without it keeps it', () => {
+    const d = draftOf({ ...base, memory: 'routine', memory_auto: true });
+    d.memory = '';
+    d.memory_auto = false;
+    const i = draftInput(d, true, 'UTC');
+    expect(i.memory).toBe('');
+    expect('memory_auto' in i).toBe(false);
   });
 });

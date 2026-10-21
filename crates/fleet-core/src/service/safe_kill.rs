@@ -178,10 +178,8 @@ pub fn build_safe_kill_prompt(nonce: &str) -> String {
 /// safe-kill prompt ends with Enter, which would answer it, choosing
 /// whatever is highlighted (the check `delivery_gate` makes for a send).
 fn refuse_if_waiting_on_a_dialog(row: &SessionRow) -> Result<(), IpcError> {
-    let what = match (row.claude_status.as_deref(), row.stuck_kind.as_deref()) {
-        (_, Some(kind)) => kind.to_string(),
-        (Some("blocked"), None) => "a dialog".to_string(),
-        _ => return Ok(()),
+    let Some(what) = dialog_waited_on(row) else {
+        return Ok(());
     };
     Err(IpcError::new(
         codes::E_INVALID_STATE,
@@ -191,6 +189,42 @@ fn refuse_if_waiting_on_a_dialog(row: &SessionRow) -> Result<(), IpcError> {
             row.tmux_name
         ),
     ))
+}
+
+/// A safe-kill prompt's send failed. One that typed nothing rolls the
+/// request back so the user can retry (the worktree is untouched). One that
+/// may have landed (`codes::may_have_run`: a timeout, a dropped agent
+/// connection) keeps the request stamped, as a direct send keeps its claim:
+/// a marker Claude prints is still acted on, and a retry waits for
+/// [`REQUEST_TIMEOUT_SECS`] instead of typing a second prompt.
+fn settle_failed_request(store: &Mutex<Store>, session_id: i64, e: &IpcError) {
+    let Ok(s) = store.lock() else {
+        return;
+    };
+    if codes::may_have_run(&e.code) {
+        let detail = format!("may have been typed: {}", e.message);
+        let _ = s.insert_session_event(session_id, "safe_kill_send_failed", Some(&detail));
+    } else {
+        let _ = s.clear_safe_kill(session_id);
+        let _ = s.insert_session_event(session_id, "safe_kill_send_failed", Some(&e.message));
+    }
+}
+
+/// What the session waits on that Enter would answer (a stuck kind, or a
+/// dialog for a `blocked` row): [`safe_kill_session`] refuses it.
+fn dialog_waited_on(row: &SessionRow) -> Option<String> {
+    match (row.claude_status.as_deref(), row.stuck_kind.as_deref()) {
+        (_, Some(kind)) => Some(kind.to_string()),
+        (Some("blocked"), None) => Some("a dialog".to_string()),
+        _ => None,
+    }
+}
+
+/// Would [`safe_kill_session`] refuse this row as waiting on a dialog? For
+/// callers that pick a safe-kill unattended (the gc sweep), to leave the row
+/// alone instead of failing on it every pass.
+pub(crate) fn waits_on_a_dialog(row: &SessionRow) -> bool {
+    dialog_waited_on(row).is_some()
 }
 
 /// Kick off a safe-kill request: stamp the DB, send the marker-baked prompt
@@ -306,11 +340,7 @@ pub async fn safe_kill_session(
     })
     .await;
     if let Err(e) = sent {
-        // Roll back state so the user can retry; the worktree is untouched.
-        if let Ok(s) = store.lock() {
-            let _ = s.clear_safe_kill(session_id);
-            let _ = s.insert_session_event(session_id, "safe_kill_send_failed", Some(&e.message));
-        }
+        settle_failed_request(store, session_id, &e);
         return Err(e);
     }
 
@@ -1429,6 +1459,93 @@ SAFE_REMOVE_READY_n1";
             assert!(
                 row.safe_kill_state.is_none(),
                 "{status}: nothing was stamped"
+            );
+        }
+    }
+
+    /// Review r5: a dialog that opens while the safe-kill waits on the
+    /// session's typing lane is caught by the re-check on the row read in
+    /// the lane: nothing typed, the request rolled back, the moment free.
+    #[tokio::test]
+    async fn safe_kill_refuses_a_dialog_that_opened_while_it_waited_on_the_lane() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("mac").unwrap();
+        let id = s
+            .upsert_session("w", "mac", None, None, 0, 0, "running", None)
+            .unwrap();
+        let now = now_secs();
+        s.conn_ref()
+            .execute(
+                "UPDATE sessions SET claude_status = 'idle', idle_since = ?2 WHERE id = ?1",
+                rusqlite::params![id, now - 30],
+            )
+            .unwrap();
+        let store = Mutex::new(s);
+        let ssh = Arc::new(SshClient::new());
+        let lane = crate::service::sessions::deferred::typing_lane(&store, id).await;
+        let kill = safe_kill_session(
+            SafeKillSessionArgs {
+                host_alias: "mac".into(),
+                tmux_name: "w".into(),
+            },
+            &store,
+            &ssh,
+        );
+        let open_dialog = async {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            lock(&store)
+                .unwrap()
+                .conn_ref()
+                .execute(
+                    "UPDATE sessions SET claude_status = 'blocked' WHERE id = ?1",
+                    [id],
+                )
+                .unwrap();
+            drop(lane);
+        };
+        let (res, ()) = tokio::join!(kill, open_dialog);
+        let err = res.expect_err("Enter would answer the dialog");
+        assert_eq!(err.code, codes::E_INVALID_STATE, "{}", err.message);
+        let row = lock(&store)
+            .unwrap()
+            .get_session_by_id(id)
+            .unwrap()
+            .unwrap();
+        assert!(row.safe_kill_state.is_none(), "the request was rolled back");
+        assert_eq!(
+            lock(&store).unwrap().latest_deferred_claim_at(id).unwrap(),
+            None,
+            "the idle moment it claimed was handed back"
+        );
+    }
+
+    /// Review r5: a send that may have typed the safe-kill prompt keeps the
+    /// request stamped, so its marker is acted on; one that typed nothing
+    /// rolls it back for a retry.
+    #[test]
+    fn a_failed_safe_kill_send_keeps_the_request_only_when_it_may_have_typed() {
+        for (code, kept) in [
+            (codes::E_TMUX, false),
+            (codes::E_TIMEOUT, true),
+            (codes::E_SSH_TIMEOUT, true),
+        ] {
+            let s = Store::open_in_memory().unwrap();
+            s.upsert_host("mac").unwrap();
+            let id = s
+                .upsert_session("w", "mac", None, None, 0, 0, "running", None)
+                .unwrap();
+            s.set_safe_kill_requested(id, "n0nce", now_secs()).unwrap();
+            let store = Mutex::new(s);
+            settle_failed_request(&store, id, &IpcError::new(code, "x"));
+            let row = lock(&store)
+                .unwrap()
+                .get_session_by_id(id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                row.safe_kill_state.as_deref() == Some("requested"),
+                kept,
+                "{code}"
             );
         }
     }

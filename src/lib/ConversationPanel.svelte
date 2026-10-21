@@ -108,6 +108,7 @@
     composerDrafts,
     composerTrays,
     rememberTray,
+    onTrayTaken,
     composerInsert,
     rememberDraft,
     newItemCount,
@@ -129,7 +130,7 @@
   } from './conversation';
   import { highlightNames, highlightCss, paintHighlights, clearHighlights } from './conversation_highlight';
   import { invokeCmd } from './result';
-  import { addFiles, pastedName, fmtBytes, clearSent, type Attachment, type PickedFile } from './attachments';
+  import { addFiles, pastedName, fmtBytes, clearSent, expireTray, type Attachment, type PickedFile } from './attachments';
   import { getCurrentWebview } from '@tauri-apps/api/webview';
   import { pointInRect, dropPoint } from './geometry';
   import Markdown from './MarkdownView.svelte';
@@ -583,7 +584,9 @@
       // catch that; it has to be dropped here. It is not lost, though: it
       // waits under its own session (`composerTrays`, review w13-6) and
       // comes back with the draft when that session is shown again.
-      attachments = composerTrays.get(sKey) ?? [];
+      // A tray kept past the allow-list's four hours comes back marked
+      // "attach it again" rather than failing the whole send (w13-6).
+      attachments = expireTray(composerTrays.get(sKey) ?? [], Date.now());
       attachErrors = [];
       // The tuner and the help panel answer about the session they were
       // opened on: left open, "Use this" would put the old session's
@@ -2112,6 +2115,15 @@
   $effect(() => {
     if (draftFor !== null) rememberTray(draftFor, attachments);
   });
+  // A move carried the shown session's tray to its new row (`takeTray`):
+  // the tiles leave this box too, or a kept source would still send them
+  // (spending the picked paths' one-use allow-list entries) and the effect
+  // above would write them back under the source.
+  $effect(() =>
+    onTrayTaken((id) => {
+      if (id === draftFor) attachments = [];
+    }),
+  );
   // Send later (gap plan G2.7, the FormsSession board's "composer › Send
   // later"): the draft goes into the session's prompt queue with a time
   // (G1.8). Its own question: `queue_prompt`, `drive` like a send. Text

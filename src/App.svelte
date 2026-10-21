@@ -86,6 +86,7 @@
     assetsViewRequest,
     hostsViewRequest,
     inspectorToggleRequest,
+    nextNeedsYouRequest,
     onHostsCloseRequested,
     openPathRequest,
     requestNewSessionOnHost,
@@ -209,7 +210,7 @@
     // failed. Stacking up to four more sticky toasts on top of that would
     // just be the #166 "toast storm" repeated — so this is the one code that
     // does not also toast. Every other failure still does.
-    if (r.error.code !== 'E_HUB_CONTRACT') pushError(r.error, `Failed to load ${what}`);
+    if (r.error.code !== 'E_HUB_CONTRACT') pushError(r.error, `Failed to load ${what}`, undefined, { read: true });
     return `${what}: ${r.error.code}`;
   }
 
@@ -1012,6 +1013,16 @@
   // back, and the mounted Sidebar then consumes the request.
   $effect(() => {
     if ($addProjectRequest) untrack(revealList);
+  });
+  // ⌘K's "Next session that needs you" is answered by the Sidebar too: behind
+  // a collapsed rail (or Settings / a fleet page) it would sit unanswered and
+  // jump the selection whenever the list next mounted.
+  $effect(() => {
+    if ($nextNeedsYouRequest === 0) return;
+    untrack(() => {
+      settingsOpen.set(false);
+      revealList();
+    });
   });
   function revealList() {
     sidebarCollapsed = false;

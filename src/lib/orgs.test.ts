@@ -24,8 +24,10 @@ import {
   orgColorById,
   loadOrgs,
   createFromSuggestion,
+  memberPairing,
   type OrgDetail,
 } from './orgs';
+import { removeFleet } from './fleets';
 import { appChord, scopeChordLabel } from './app_views';
 import { cyclePrimaryScope, fleetHostFilter } from './fleet_filters';
 import { rowMatches, sessionVisible, type FilterRow } from './sidebar_index';
@@ -372,5 +374,22 @@ describe('createFromSuggestion', () => {
     mocked.mockClear();
     await createFromSuggestion({ name: 'Beta', owner: 'beta', tracker_id: null, sessions: 0, reason: 'x' });
     expect(cmds()).toEqual(['add_org', 'add_org_rule', 'list_orgs']);
+  });
+});
+
+describe('memberPairing', () => {
+  it("removing a fleet forgets the pairing started there: its slot id is reused by label", async () => {
+    const inv = vi.mocked(invoke);
+    inv.mockImplementation(async (cmd: string) => (cmd === 'fleets_list' ? [] : null));
+    memberPairing.set({ fleet: 'work', org_id: 3, person: 'ana' });
+    expect((await removeFleet('lab')).ok).toBe(true);
+    expect(get(memberPairing)?.fleet).toBe('work');
+    expect((await removeFleet('work')).ok).toBe(true);
+    expect(get(memberPairing)).toBeNull();
+    // The primary's own pairing is never a removed fleet's.
+    memberPairing.set({ fleet: null, org_id: 3, person: 'ana' });
+    await removeFleet('work');
+    expect(get(memberPairing)).not.toBeNull();
+    memberPairing.set(null);
   });
 });

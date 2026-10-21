@@ -756,6 +756,17 @@ impl Store {
         rows.collect()
     }
 
+    /// How many actions are in `state`, uncapped: `status` lists at most
+    /// [`crate::service::agents::admin::STATUS_PENDING_MAX`] pending ones,
+    /// and the Inbox badge counts this.
+    pub fn count_agent_actions(&self, state: &str) -> Result<u64, rusqlite::Error> {
+        self.conn.query_row(
+            "SELECT COUNT(*) FROM agent_actions WHERE state = ?1",
+            params![state],
+            |r| r.get::<_, i64>(0).map(|n| n as u64),
+        )
+    }
+
     /// The actions a person approved that were carried out (`executed`,
     /// with what they made in `error`) or failed since `since`, newest
     /// first: what the Inbox shows after Approve. A rule's own (`act`)

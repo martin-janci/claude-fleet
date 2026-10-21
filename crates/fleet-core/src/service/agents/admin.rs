@@ -16,12 +16,13 @@ use crate::store::{
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 
-/// Most jobs and actions one `status` answers.
+/// Most jobs one `status` answers (`limit`'s ceiling).
 pub const STATUS_MAX_LIMIT: u32 = 200;
 const STATUS_DEFAULT_LIMIT: u32 = 20;
 /// How many pending actions `status` lists, whatever `limit` asks for the
-/// jobs (review w11-5): the Inbox counts them, so a cap of 20 hid the
-/// oldest behind the newest and the badge stopped at 20.
+/// jobs (review w11-5), newest first. A backlog past this cap is not hidden
+/// from the count: `status.pending_total` is uncapped, and the Inbox badge
+/// reads it.
 pub const STATUS_PENDING_MAX: usize = STATUS_MAX_LIMIT as usize;
 /// Longest a granted rule may run before it ends on its own.
 pub const MAX_RULE_HOURS: i64 = 24 * 90;
@@ -82,7 +83,8 @@ pub struct AgentsArgs {
     /// revoke, run: a rule's id; approve, reject: an action's id; job: a job's id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<i64>,
-    /// status: jobs and actions, ≤ 200 (default 20).
+    /// status: jobs, ≤ 200 (default 20); pending actions are listed up to
+    /// 200 whatever this is, and `pending_total` counts all of them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
 }
@@ -111,8 +113,14 @@ pub struct AgentRuleView {
 pub struct AgentsStatus {
     pub rules: Vec<AgentRuleView>,
     pub jobs: Vec<AgentJobRow>,
-    /// Actions waiting for a person.
+    /// Actions waiting for a person, newest first, at most
+    /// [`STATUS_PENDING_MAX`].
     pub pending: Vec<AgentActionRow>,
+    /// How many actions are waiting, uncapped: more than `pending.len()`
+    /// when the backlog passes [`STATUS_PENDING_MAX`]. Absent (0) from an
+    /// older hub; read `pending.len()` then.
+    #[serde(default)]
+    pub pending_total: u64,
     /// Actions a person approved that ran (or failed) in the last
     /// [`RECENT_WINDOW_SECS`], newest first, at most [`RECENT_MAX`]: an
     /// executed one's `error` says what it made, a failed one's why.
@@ -332,6 +340,7 @@ pub fn status(store: &Mutex<Store>, args: &AgentsArgs, now: i64) -> Result<Agent
         pending: s
             .list_agent_actions(Some("pending"), STATUS_PENDING_MAX)
             .map_err(db)?,
+        pending_total: s.count_agent_actions("pending").map_err(db)?,
         recent: s
             .recent_decided_agent_actions(now - RECENT_WINDOW_SECS, RECENT_MAX)
             .map_err(db)?,

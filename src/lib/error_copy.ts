@@ -17,7 +17,6 @@ const PLAIN: Record<string, string> = {
   E_AGENT_OFFLINE: "The host's agent is offline",
   E_AGENT_PROTOCOL: "The host's agent answered in a way this version doesn't understand",
   E_HUB_UNREACHABLE: "Couldn't reach the hub",
-  E_HUB_UNAVAILABLE: "This app can't use its hub. Pair again or disconnect in Settings → Hub & sync",
   E_HUB_TIMEOUT: 'The hub took too long to answer',
   E_HUB_PROTOCOL: "The hub answered in a way this version doesn't understand",
   E_TIMEOUT: 'That took too long to answer',
@@ -28,15 +27,19 @@ const PLAIN: Record<string, string> = {
   E_PARSE: 'Something went wrong reading the answer',
   E_INTERNAL: 'Something went wrong inside Orbit Fleet',
   E_RATE_LIMITED: 'Too many requests; try again in a moment',
-  // Review w16-4: the hub's 401 used to reach the toast twice, with the URL
-  // and the status code in it. The 401 stays under Details.
-  E_UNAUTHORIZED: "The hub no longer accepts this app's pairing. Pair again in Settings → Hub & sync",
+  // (No `E_HUB_UNAVAILABLE` / `E_UNAUTHORIZED` row: one fixed sentence about
+  // this app's own pairing was wrong for an extra fleet and for a standalone
+  // update check. `rewordedFor` words them from the message.)
 };
 
 /** Review w16-8: these codes mean the request was sent and its outcome is
  *  unknown (`IpcError::may_have_run` in `ipc_error.rs`), so the sentence must
  *  not read as "it failed": a second Kill after a timed-out first one only
- *  finds nothing to kill. */
+ *  finds nothing to kill. Every call gets it unless it says it was a read
+ *  (`ErrorTextOptions.read`): a read has nothing to go through, and Retry is
+ *  its next step. The safe wording is the default because most call sites
+ *  report actions, and one that forgets to say so must not invite a second
+ *  send, move or resume. */
 const MAY_HAVE_RUN = new Set(['E_SSH_TIMEOUT', 'E_TIMEOUT', 'E_AGENT_PROTOCOL']);
 const MAY_HAVE_RUN_TAIL = 'It may have gone through anyway. The list refreshes; check it before trying again';
 
@@ -75,6 +78,16 @@ function accountLimitText(details: unknown): string | undefined {
   return `${head} ${who} on ${d.suggested_host} has room; start it from New session to choose that login`;
 }
 
+/** Whether an `E_ACCOUNT_LIMIT` is the usage-window refusal (details carry
+ *  `used_pct`), the one `over_limit_ok: true` passes, and so may offer "Start
+ *  anyway". A spent daily limit (`refuse_over_daily_limit`: `daily_limit_usd`
+ *  / `spent_usd`) cannot be started anyway; its fix is on the Accounts page. */
+export function canStartAnyway(e: Pick<IpcError, 'code' | 'details'>): boolean {
+  if (e.code !== 'E_ACCOUNT_LIMIT') return false;
+  const d = e.details as { used_pct?: unknown; daily_limit_usd?: unknown } | null | undefined;
+  return typeof d?.used_pct === 'number' && d.daily_limit_usd === undefined;
+}
+
 const CODE_PREFIX = /^E_[A-Z_]+:\s*/;
 
 /** An agent connection that dropped or was replaced while a request was in
@@ -93,15 +106,54 @@ function plainFor(e: Pick<IpcError, 'code' | 'details'>): string | undefined {
   return PLAIN[e.code];
 }
 
+export interface ErrorTextOptions {
+  /** The failed call was a read, so a timeout has nothing to go through and
+   *  the sentence stands alone. Leave it off for a write (an action): a
+   *  timed-out one may have run, and the sentence says so. */
+  read?: boolean;
+}
+
 /** The sentence to show for `e`, never an `E_*` code. */
-export function errorText(e: Pick<IpcError, 'code' | 'message' | 'details'>): string {
+export function errorText(e: Pick<IpcError, 'code' | 'message' | 'details'>, opts: ErrorTextOptions = {}): string {
+  const tail = opts.read !== true && mayHaveRun(e);
   const plain = plainFor(e);
-  if (plain) return mayHaveRun(e) ? `${plain}. ${MAY_HAVE_RUN_TAIL}` : plain;
+  if (plain) return tail ? `${plain}. ${MAY_HAVE_RUN_TAIL}` : plain;
   const msg = (e.message ?? '').replace(CODE_PREFIX, '').trim();
   const reworded = rewordedFor(e, msg);
   if (reworded) return reworded;
   const text = msg || 'Something went wrong';
-  return mayHaveRun(e) ? `${text.replace(/[.!?…]$/, '')}. ${MAY_HAVE_RUN_TAIL}` : text;
+  return tail ? `${text.replace(/[.!?…]$/, '')}. ${MAY_HAVE_RUN_TAIL}` : text;
+}
+
+/** This app's own hub cannot be used (`RemoteBackend::unavailable_error`:
+ *  `<what> was not run: <reason> — this app is set to use a hub, …`): the
+ *  reason in words. An extra fleet's refusal (`FleetRegistry::select`:
+ *  `<label> (<url>) cannot be used: …`) already names the fleet and the fix,
+ *  and an update check's (`no stable channel is published yet`) has nothing
+ *  to do with pairing, so both keep their own words. */
+function hubUnavailableText(msg: string): string | undefined {
+  const m = /^.+? was not run: ([\s\S]+?)(?: — this app is set to use a hub[\s\S]*)?$/.exec(msg);
+  if (!m) return undefined;
+  const words = hubUnavailableWords(m[1]);
+  return words.includes('Settings → Hub & sync') ? words : `${words}. Fix it in Settings → Hub & sync`;
+}
+
+/** A hub answered 401 (`HubBackend::read_result`). The hub is named by its
+ *  host, not its full URL or the status code (review w16-4), because the one
+ *  that refused may be a fleet added beside this app's own, whose fix is
+ *  different. */
+function unauthorizedText(msg: string): string {
+  const m = /\((\S+) answered 401\)/.exec(msg);
+  let host: string | undefined;
+  if (m) {
+    try {
+      host = new URL(m[1]).host;
+    } catch {
+      host = undefined;
+    }
+  }
+  const who = host ? `The hub at ${host}` : 'The hub';
+  return `${who} no longer accepts this app's pairing. In Settings → Hub & sync, pair again if it is this app's hub, or remove the fleet and add it again with a fresh code if it is one you added`;
 }
 
 /** Review w16-10: a missing-secret refusal (`catalog::sync::apply`,
@@ -134,6 +186,8 @@ function rewordedFor(e: Pick<IpcError, 'code' | 'details'>, msg: string): string
   if (e.code === 'E_ACCOUNT_LIMIT') return accountLimitText(e.details);
   if (e.code === 'E_SECRET_MISSING') return secretMissingText(msg);
   if (e.code === 'E_REPO') return gitRefusalText(msg);
+  if (e.code === 'E_HUB_UNAVAILABLE') return hubUnavailableText(msg);
+  if (e.code === 'E_UNAUTHORIZED') return unauthorizedText(msg);
   return undefined;
 }
 
@@ -146,8 +200,8 @@ export function errorDetail(e: Pick<IpcError, 'code' | 'message' | 'details'>): 
 }
 
 /** `errorText` as a sentence ending in one full stop. */
-export function errorSentence(e: Pick<IpcError, 'code' | 'message' | 'details'>): string {
-  const t = errorText(e);
+export function errorSentence(e: Pick<IpcError, 'code' | 'message' | 'details'>, opts: ErrorTextOptions = {}): string {
+  const t = errorText(e, opts);
   return /[.!?…]$/.test(t) ? t : `${t}.`;
 }
 
@@ -161,7 +215,9 @@ export function hubUnavailableWords(reason: string): string {
   if (/not a usable hub address/.test(reason)) return "The hub address in Settings → Hub & sync isn't a valid address";
   if (/plain ?http|plain ?text|in the clear/i.test(reason))
     return 'The hub address uses plain http to another machine, which would send this app\'s sign-in unencrypted. Use an https:// address';
+  // Before the token test: `Backend::unreadable_settings` adds a clause about
+  // the client token to every settings failure, even when the token is fine.
+  if (/settings store|cannot read hub\./.test(reason)) return "This app couldn't read its own settings";
   if (/client token|token store/.test(reason)) return "This app can't read its saved sign-in for the hub";
-  if (/settings store/.test(reason)) return "This app couldn't read its own settings";
   return "This app can't use the hub right now";
 }

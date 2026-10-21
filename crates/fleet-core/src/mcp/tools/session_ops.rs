@@ -438,7 +438,10 @@ impl FleetTools {
         })?;
         // Step 4.4: a Claude start on a login past `accounts.pause_at` asks
         // first, as the desktop's dialog does: refused unless the caller
-        // says the person chose it (`over_limit_ok`).
+        // says the person chose it (`over_limit_ok`). That answers the usage
+        // window's question only: a spent daily limit starts nothing, for
+        // the host's own login too, and `sessions::new_session` refuses it
+        // for every caller.
         let over_limit_ok = p.over_limit_ok.unwrap_or(false);
         let runs_claude = p.kind.as_deref().unwrap_or("work") != "shell"
             && matches!(

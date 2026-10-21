@@ -110,14 +110,18 @@
   let draftBase = $state(restored?.base ?? '');
   const dirty = $derived(!!draft && JSON.stringify(draft) !== draftBase);
   /** The open editor, which asks "Discard changes?" before a changed draft goes. */
-  let editor: { askLeave: (then: () => void) => void } | undefined = $state();
+  let editor: { askLeave: (then: () => void) => void; hasNotebookEdit: () => boolean } | undefined = $state();
+  /** A notebook box holds unsaved text: Save and Run once now keep the
+   *  editor open rather than drop it (RoutineMemory keeps it). */
+  const notebookPending = () => !!editor?.hasNotebookEdit();
   let root: HTMLDivElement | undefined = $state();
 
   /** Every way out that replaces the draft (another routine, a built-in
    *  one, New, a template, the Inbox's Fix) asks first when it is changed
    *  (review w05-1). */
   function leaveDraft(then: () => void) {
-    if (draft && dirty && editor) editor.askLeave(then);
+    // The editor decides, not `dirty`: an unsaved notebook edit counts too.
+    if (draft && editor) editor.askLeave(then);
     else then();
   }
 
@@ -257,20 +261,24 @@
       saveError = r.error;
       return null;
     }
-    draft = null;
+    // An unsaved notebook edit stays: the editor stays open on the saved
+    // routine, its form clean, so the notebook boxes unlock with the text.
+    const keepOpen = notebookPending() && d.id === r.value.id;
+    if (keepOpen) edit(r.value);
+    else draft = null;
     selected = r.value.id;
     const was = d.id !== undefined ? list.find((x) => x.id === d.id) : undefined;
     const saved = r.value;
     // Undo: an edit is saved back as it was; a new routine is deleted. Not
     // offered when Run once now saved it: a run is starting from it.
     const undo = async () => {
-      const back = was ? await saveRoutine(routineInputOf(was), was.id) : await deleteRoutine(saved.id);
+      const back = was ? await saveRoutine(routineInputOf(was, !!saved.memory), was.id) : await deleteRoutine(saved.id);
       if (!back.ok) pushError(back.error, 'Undo failed');
       await reload();
     };
     savedWithUndo(`${saved.name} saved`, undoable ? undo : undefined);
     await reload();
-    void focusSelectedRow();
+    if (!keepOpen) void focusSelectedRow();
     return r.value;
   }
 
@@ -285,7 +293,7 @@
       const saved = await saveDraft(false);
       if (!saved) return;
       id = saved.id;
-    } else {
+    } else if (!notebookPending()) {
       draft = null;
     }
     await act('Run once now', () => runRoutineNow(id!));

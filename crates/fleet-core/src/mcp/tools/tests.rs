@@ -2314,6 +2314,45 @@ async fn new_session_asks_before_starting_past_pause_at() {
     }
 }
 
+/// `over_limit_ok` answers the usage window's question, not a spent daily
+/// limit: a Resume on the host's own login (no profile) past its daily
+/// limit is refused even with it set.
+#[tokio::test]
+async fn over_limit_ok_does_not_pass_a_spent_daily_limit() {
+    let s = crate::store::Store::open_in_memory().unwrap();
+    let now = crate::store::now_unix();
+    crate::service::account_limits::seed_usage(&s, "hosta", None, "acct-api", 10.0, now);
+    crate::service::add_account::set_daily_limit(&s, "acct-api", Some(5.0)).unwrap();
+    s.conn_for_test()
+        .execute(
+            "INSERT INTO usage_daily_account (day, account_uuid, model, backfill, cost_micros) \
+             VALUES (?1, 'acct-api', 'm', 0, 6000000)",
+            rusqlite::params![now.div_euclid(86_400)],
+        )
+        .unwrap();
+    let t = test_tools(s);
+    for over in [None, Some(true)] {
+        let refused = t
+            .new_session(
+                Extension(host_caller("hosta", TokenMode::Full)),
+                Parameters(new_session_params(serde_json::json!({
+                    "host_alias": "hosta",
+                    "project_id": 4242,
+                    "name": "x",
+                    "over_limit_ok": over,
+                }))),
+            )
+            .await
+            .unwrap_err()
+            .message;
+        assert!(
+            refused.starts_with("E_ACCOUNT_LIMIT"),
+            "{over:?}: {refused}"
+        );
+        assert!(refused.contains("daily limit"), "{over:?}: {refused}");
+    }
+}
+
 /// A dispatched new worker runs on the login its `profile` names (the
 /// host's own without one): past `accounts.pause_at` it is refused with
 /// `E_ACCOUNT_LIMIT` before anything starts, unless the person chose it, and
@@ -2446,35 +2485,276 @@ async fn a_restart_onto_a_login_past_pause_at_asks_first() {
 }
 
 /// A person's own device switching login (Switch account on a hub-paired
-/// desktop or the phone) has chosen the login it picked: neither client
-/// sends `over_limit_ok` on a restart, so the hub lets it past
-/// `accounts.pause_at` as a standalone desktop does. The operator, on the
-/// same arguments, is still held.
+/// desktop or the phone) has chosen the login it picked: the desktop sends
+/// no `over_limit_ok` on a restart, so the hub lets a paired device past
+/// `accounts.pause_at` as a standalone desktop does — an org-bound one too
+/// (review 456) — on to the restart itself, which runs on the host. The
+/// operator and the master, on the same arguments, are held at the line, and
+/// an agent's per-host token never gets that far; none of them reaches ssh.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_persons_switch_onto_a_login_past_pause_at_goes_through() {
     use super::params::RestartSessionParams;
+    let dir = tempfile::tempdir().unwrap();
     let (s, _, on_b) = two_host_store();
+    let org = s.add_org("Company", None, false).unwrap().id;
+    s.set_host_org("hostb", Some(org)).unwrap();
     let now = crate::store::now_unix();
     crate::service::account_limits::seed_usage(&s, "hostb", Some("full"), "acct-full", 95.0, now);
-    let t = test_tools(s);
+    let t = tools_over_fake_ssh(s, dir.path());
     let call = |caller: Caller| {
-        let t = &t;
+        let (t, dir) = (&t, &dir);
         async move {
+            // Each leg switches from the host's own login.
+            t.store
+                .lock()
+                .unwrap()
+                .conn_ref()
+                .execute(
+                    "UPDATE sessions SET claude_profile = NULL WHERE id = ?1",
+                    [on_b],
+                )
+                .unwrap();
             let p = serde_json::from_value::<RestartSessionParams>(
                 serde_json::json!({ "session_id": on_b, "profile": "full" }),
             )
             .unwrap();
-            t.restart_session(Extension(caller), Parameters(p))
+            let before = ssh_calls(dir.path()).len();
+            let msg = t
+                .restart_session(Extension(caller), Parameters(p))
                 .await
                 .err()
                 .map(|e| e.message)
-                .unwrap_or_default()
+                .unwrap_or_default();
+            (msg, ssh_calls(dir.path()).len() > before)
         }
     };
-    let phone = call(client_caller("phone", TokenMode::Full)).await;
-    assert!(!phone.starts_with("E_ACCOUNT_LIMIT"), "{phone}");
-    let held = call(operator()).await;
-    assert!(held.starts_with("E_ACCOUNT_LIMIT"), "{held}");
+    for (who, caller) in [("operator", operator()), ("master", Caller::master())] {
+        let (held, ran) = call(caller).await;
+        assert!(held.starts_with("E_ACCOUNT_LIMIT"), "{who}: {held}");
+        assert!(!ran, "{who}: nothing ran on the host");
+    }
+    let (fenced, ran) = call(host_caller("hostb", TokenMode::Full)).await;
+    assert!(
+        fenced.starts_with("E_FORBIDDEN"),
+        "per-host token: {fenced}"
+    );
+    assert!(!ran, "per-host token: nothing ran on the host");
+    let mut org_phone = client_caller("org-phone", TokenMode::Full);
+    if let Some(c) = org_phone.client.as_mut() {
+        c.org_id = Some(org);
+    }
+    for (who, caller) in [
+        ("phone", client_caller("phone", TokenMode::Full)),
+        ("org-bound phone", org_phone),
+    ] {
+        let (past, ran) = call(caller).await;
+        assert!(!past.starts_with("E_ACCOUNT_LIMIT"), "{who}: {past}");
+        assert!(ran, "{who}: the restart ran on the host ({past})");
+    }
+}
+
+/// A person's switch back to the host's own login passes `pause_at`, never
+/// a spent daily limit: the restart's relaunch refuses it for the host's own
+/// login too, not only under a profile.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_persons_switch_onto_an_own_login_past_its_daily_limit_is_refused() {
+    use super::params::RestartSessionParams;
+    let dir = tempfile::tempdir().unwrap();
+    let (s, _, on_b) = two_host_store();
+    let now = crate::store::now_unix();
+    crate::service::account_limits::seed_usage(&s, "hostb", None, "acct-own", 10.0, now);
+    crate::service::account_limits::seed_usage(&s, "hostb", Some("full"), "acct-full", 10.0, now);
+    crate::service::add_account::set_daily_limit(&s, "acct-own", Some(5.0)).unwrap();
+    s.conn_for_test()
+        .execute(
+            "INSERT INTO usage_daily_account (day, account_uuid, model, backfill, cost_micros) \
+             VALUES (?1, 'acct-own', 'm', 0, 6000000)",
+            rusqlite::params![now.div_euclid(86_400)],
+        )
+        .unwrap();
+    s.conn_ref()
+        .execute(
+            "UPDATE sessions SET claude_profile = 'full' WHERE id = ?1",
+            [on_b],
+        )
+        .unwrap();
+    let t = tools_over_fake_ssh(s, dir.path());
+    let p = serde_json::from_value::<RestartSessionParams>(
+        serde_json::json!({ "session_id": on_b, "profile": "" }),
+    )
+    .unwrap();
+    let msg = t
+        .restart_session(
+            Extension(client_caller("phone", TokenMode::Full)),
+            Parameters(p),
+        )
+        .await
+        .err()
+        .map(|e| e.message)
+        .unwrap_or_default();
+    assert!(msg.starts_with("E_ACCOUNT_LIMIT"), "{msg}");
+    assert!(msg.contains("daily limit"), "{msg}");
+}
+
+/// Review 456: the operator's grant check reads the mission of the item the
+/// `work_link` start / resume itself resolves — the key normalised as the
+/// action normalises it, never a key beside a URL (the start takes the URL),
+/// never a key two items hold across missions — and counts only the repos a
+/// multi-repo start would start in.
+#[test]
+fn the_work_link_grant_check_reads_the_item_the_action_resolves() {
+    use crate::service::work::WorkLinkArgs;
+    let s = Store::open_in_memory().unwrap();
+    let m = s
+        .create_mission(
+            &crate::store::NewMission {
+                name: "m",
+                goal: "g",
+                ..Default::default()
+            },
+            "fleet",
+        )
+        .unwrap()
+        .id;
+    let item = |source: &str, key: &str, mission: Option<i64>| -> i64 {
+        s.conn_ref()
+            .execute(
+                "INSERT INTO work_items (source, key, title, origin, created_at, updated_at, \
+                 orchestration_project_id) VALUES (?1, ?2, ?2, 'person', 1, 1, ?3)",
+                rusqlite::params![source, key, mission],
+            )
+            .unwrap();
+        s.conn_ref().last_insert_rowid()
+    };
+    let member = item("local", "MX-1", Some(m));
+    item("local", "DX-1", Some(m));
+    item("jira", "DX-1", None);
+    s.upsert_host("h").unwrap();
+    let api = s.upsert_project("o", "api", "/api").unwrap();
+    let web = s.upsert_project("o", "web", "/web").unwrap();
+    let on_api = s
+        .upsert_session("mx1-api", "h", Some(api), None, 1, 1, "running", None)
+        .unwrap();
+    s.link_session_work(on_api, crate::store::WorkTarget::Item(member), "manual")
+        .unwrap();
+    let t = test_tools(s);
+    let args = |key: Option<&str>, url: Option<&str>| WorkLinkArgs {
+        action: "start".into(),
+        key: key.map(Into::into),
+        url: url.map(Into::into),
+        ..Default::default()
+    };
+    assert_eq!(
+        t.work_link_mission(&args(Some(" mx-1"), None), None)
+            .unwrap(),
+        Some((m, 1)),
+        "the key as the action normalises it"
+    );
+    assert_eq!(
+        t.work_link_mission(
+            &args(
+                Some("MX-1"),
+                Some("https://example.atlassian.net/browse/X-9")
+            ),
+            None
+        )
+        .unwrap(),
+        None,
+        "the start takes the URL, which is not the key's item"
+    );
+    assert_eq!(
+        t.work_link_mission(&args(Some("DX-1"), None), None)
+            .unwrap(),
+        None,
+        "two items hold the key, one of no mission"
+    );
+    assert_eq!(
+        t.work_link_mission(&args(Some("MX-1"), None), Some(&[api, web]))
+            .unwrap(),
+        Some((m, 1)),
+        "the repo the key already runs in is skipped, not started"
+    );
+    let parallel = WorkLinkArgs {
+        parallel: Some(true),
+        ..args(Some("MX-1"), None)
+    };
+    assert_eq!(
+        t.work_link_mission(&parallel, Some(&[api, web])).unwrap(),
+        Some((m, 2)),
+        "a parallel start skips nothing"
+    );
+}
+
+/// A key two items of one mission hold, in two orgs: the start may resolve
+/// either, and skips a repo only for a live session of that item's org. The
+/// grant check counts by the item that skips the fewest repos, so a live
+/// session of the other org never lets it count fewer than start.
+#[test]
+fn a_key_on_two_orgs_items_counts_the_repos_either_would_start_in() {
+    use crate::service::work::WorkLinkArgs;
+    let s = Store::open_in_memory().unwrap();
+    let m = s
+        .create_mission(
+            &crate::store::NewMission {
+                name: "m",
+                goal: "g",
+                ..Default::default()
+            },
+            "fleet",
+        )
+        .unwrap()
+        .id;
+    let org_a = s.add_org("A", None, false).unwrap().id;
+    let org_b = s.add_org("B", None, false).unwrap().id;
+    let tracker = s
+        .add_tracker("jira", "acme", "https://acme.atlassian.net")
+        .unwrap()
+        .id;
+    s.conn_ref()
+        .execute(
+            "UPDATE trackers SET org_id = ?2 WHERE id = ?1",
+            rusqlite::params![tracker, org_b],
+        )
+        .unwrap();
+    // Org A's local MX-1 and org B's tracker MX-1, both in the mission.
+    s.conn_ref()
+        .execute(
+            "INSERT INTO work_items (source, key, title, origin, created_at, updated_at, \
+             orchestration_project_id, org_id) VALUES ('local', 'MX-1', 'MX-1', 'person', \
+             1, 1, ?1, ?2)",
+            rusqlite::params![m, org_a],
+        )
+        .unwrap();
+    let of_a = s.conn_ref().last_insert_rowid();
+    s.conn_ref()
+        .execute(
+            "INSERT INTO work_items (source, key, title, origin, created_at, updated_at, \
+             orchestration_project_id, tracker_id, external_id) VALUES ('jira', 'MX-1', \
+             'MX-1', 'person', 1, 1, ?1, ?2, '10001')",
+            rusqlite::params![m, tracker],
+        )
+        .unwrap();
+    s.upsert_host("h").unwrap();
+    let api = s.upsert_project("o", "api", "/api").unwrap();
+    let web = s.upsert_project("o", "web", "/web").unwrap();
+    let on_api = s
+        .upsert_session("mx1-api", "h", Some(api), None, 1, 1, "running", None)
+        .unwrap();
+    s.link_session_work(on_api, crate::store::WorkTarget::Item(of_a), "manual")
+        .unwrap();
+    let t = test_tools(s);
+    let args = WorkLinkArgs {
+        action: "start".into(),
+        key: Some("MX-1".into()),
+        ..Default::default()
+    };
+    assert_eq!(
+        t.work_link_mission(&args, Some(&[api, web])).unwrap(),
+        Some((m, 2)),
+        "org B's item does not skip api, where only org A's session runs"
+    );
 }
 
 #[tokio::test]
@@ -5334,6 +5614,53 @@ fn delivery_gate_refuses_a_blocked_or_stuck_session_unless_forced() {
     assert!(e.message.contains("trust_prompt"), "{}", e.message);
     assert!(!delivery_gate(&blocked, true, true).unwrap());
     assert!(!delivery_gate(&stuck, true, true).unwrap());
+}
+
+/// Review r5: a dialog that opens while a send waits on the typing lane is
+/// refused by the gate's re-check on the row read in the lane, before
+/// anything is typed; the up-front check saw an idle session.
+#[tokio::test]
+async fn deliver_prompt_refuses_a_dialog_that_opened_while_it_waited_on_the_lane() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("h1").unwrap();
+    let id = s
+        .upsert_session("sess", "h1", None, None, 0, 0, "running", None)
+        .unwrap();
+    s.conn_ref()
+        .execute(
+            "UPDATE sessions SET claude_status = 'idle', idle_since = ?2 WHERE id = ?1",
+            rusqlite::params![id, crate::store::now_unix() - 30],
+        )
+        .unwrap();
+    let row = s.get_session_by_id(id).unwrap().unwrap();
+    let t = test_tools(s);
+    let lane = crate::service::sessions::deferred::typing_lane(&t.store, id).await;
+    let send = t.deliver_prompt(&row, "go on".into(), true, false);
+    let open_dialog = async {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        t.store
+            .lock()
+            .unwrap()
+            .conn_ref()
+            .execute(
+                "UPDATE sessions SET claude_status = 'blocked' WHERE id = ?1",
+                [id],
+            )
+            .unwrap();
+        drop(lane);
+    };
+    let (res, ()) = tokio::join!(send, open_dialog);
+    let e = res.expect_err("Enter would answer the dialog");
+    assert!(e.message.starts_with("E_INVALID_STATE"), "{}", e.message);
+    assert_eq!(
+        t.store
+            .lock()
+            .unwrap()
+            .latest_deferred_claim_at(id)
+            .unwrap(),
+        None,
+        "nothing typed: the idle moment was handed back"
+    );
 }
 
 #[test]

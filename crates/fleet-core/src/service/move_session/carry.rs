@@ -572,11 +572,11 @@ run() {{ s=$1; shift; e=$("$@" 2>&1 >/dev/null) || fail "$s: $(printf '%s' "$e" 
 run verify git -C "$r" bundle verify "$b"
 run fetch git -C "$r" fetch -q "$b" "+refs/fleet/transfer/$id/*:refs/fleet/transfer/$id/*"
 # `git bundle create` leaves out a ref whose tip the target already has, so
-# when the source HEAD was pushed the bundle carries no `head`. Both snapshot
-# commits are built on HEAD: `wt`'s parent is it.
-if ! git -C "$r" rev-parse --verify -q "refs/fleet/transfer/$id/head" >/dev/null; then
-  run head git -C "$r" update-ref "refs/fleet/transfer/$id/head" "refs/fleet/transfer/$id/wt^{{commit}}^"
-fi
+# when the source HEAD was pushed the bundle carries no `head`, and a `head`
+# an earlier move left behind would survive the fetch stale. Both snapshot
+# commits are built on HEAD and `wt` is always fresh: its parent IS the
+# source HEAD, so `head` is set from it every time.
+run head git -C "$r" update-ref "refs/fleet/transfer/$id/head" "refs/fleet/transfer/$id/wt^{{commit}}^"
 if ! git -C "$r" show-ref --verify --quiet "refs/heads/$br"; then
   run branch git -C "$r" branch -- "$br" "refs/fleet/transfer/$id/head"
   if git -C "$r" config --get remote.origin.url >/dev/null 2>&1 \
@@ -1612,6 +1612,35 @@ pub(crate) mod tests {
                     "-q",
                     src.to_str().unwrap(),
                     "feat:refs/remotes/origin/feat",
+                ],
+            );
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn round_trip_ignores_a_stale_head_an_earlier_move_left_behind() {
+        // An earlier move's cleanup failed and left `$ref/head` at an older
+        // commit; this bundle omits `head` (the target has the source HEAD),
+        // so the fetch must not create the branch at the stale one.
+        round_trip(dirty_source, |src, root, base| {
+            std::fs::create_dir_all(root).unwrap();
+            git(root, &["init", "-q", "-b", "main"]);
+            git(
+                root,
+                &[
+                    "fetch",
+                    "-q",
+                    src.to_str().unwrap(),
+                    "feat:refs/remotes/origin/feat",
+                ],
+            );
+            git(
+                root,
+                &[
+                    "update-ref",
+                    &format!("refs/fleet/transfer/{ID}/head"),
+                    base,
                 ],
             );
         });

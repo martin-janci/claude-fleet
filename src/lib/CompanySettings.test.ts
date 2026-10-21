@@ -244,6 +244,22 @@ describe('Settings › Company with a second fleet', () => {
     expect(screen.queryByTestId('edit-name')).toBeNull();
   });
 
+  it('says the access is being read while that hub answers, then shows the page', async () => {
+    hubStatus.set(remote);
+    _setFleetsForTest([fleet('primary', true), fleet('company', false)]);
+    let answer: (v: unknown) => void = () => {};
+    const answers = twoHubs(true);
+    route({ ...answers, list_devices: (a: Args) => (a?.fleet === 'company' ? new Promise((r) => (answer = r)) : (answers.list_devices as (x: Args) => unknown)(a)) });
+    show('settings.orgs', false);
+    await pickCompany();
+    const loading = await screen.findByTestId('company-access-loading');
+    expect(loading.getAttribute('role')).toBe('status');
+    expect(loading.textContent).toContain('on company');
+    answer([me(true)]);
+    await screen.findByTestId('resource-readonly');
+    expect(screen.queryByTestId('company-access-loading')).toBeNull();
+  });
+
   it('a device that administers nothing there says so', async () => {
     hubStatus.set(remote);
     _setFleetsForTest([fleet('primary', true), fleet('company', false)]);

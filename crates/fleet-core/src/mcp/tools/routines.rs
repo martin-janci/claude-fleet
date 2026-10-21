@@ -157,9 +157,17 @@ impl FleetTools {
                 &routines::dry_run(store, &scope, id()?, p.event_id, crate::store::now_unix())
                     .map_err(to_mcp_err)?,
             ),
-            "memory" => ok_json_compact(
-                &routines::memory::get(store, &scope, id()?).map_err(to_mcp_err)?,
-            ),
+            "memory" => {
+                let m = routines::memory::get(store, &scope, id()?).map_err(to_mcp_err)?;
+                // Runs write the notebooks: the operator, which can act,
+                // reads them fenced, as a run does.
+                let m = if caller.is_operator() {
+                    routines::memory::fenced(m)
+                } else {
+                    m
+                };
+                ok_json_compact(&m)
+            }
             "set_memory" => {
                 let notebook = p.notebook.as_deref().ok_or_else(|| {
                     mcp_err(codes::E_INVALID, "set_memory needs notebook", None)

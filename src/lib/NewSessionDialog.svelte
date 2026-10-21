@@ -959,12 +959,15 @@
   let fleetBranch = $state('');
 
   // Phase 3b: which profile the session runs as — this device's person on
-  // the chosen fleet, under the label given here.
+  // the chosen fleet, under the label given here. A read that failed earlier
+  // is asked again when the fleet is picked (its line says it failed).
   const runsOnFleet = $derived(fleetChoice ? fleetChoice.fleet.id : PRIMARY);
   const runsAs = $derived($multiFleet ? ($profileLines.get(runsOnFleet)?.line ?? null) : null);
   $effect(() => {
     const id = runsOnFleet;
-    if ($multiFleet && !untrack(() => $fleetProfiles.has(id))) void loadProfile(id);
+    if (!$multiFleet) return;
+    const st = untrack(() => $fleetProfiles.get(id));
+    if (!st || st.error) void loadProfile(id);
   });
 
   function pickFleet(id: string) {

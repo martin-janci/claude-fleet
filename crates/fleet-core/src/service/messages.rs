@@ -402,10 +402,11 @@ pub async fn send_message_scoped(
 ///
 /// A moment can also be held by a prompt that started no turn (a local
 /// `/clear`, a swallowed paste, a typing that may have landed but did not,
-/// a turn that failed in the second it was typed): no hook is coming then,
-/// so the wake pastes anyway, as it did before the moment was shared
+/// a turn that failed at once): no hook is coming then, so the wake takes
+/// the moment over and pastes, as it did before the moment was shared
 /// (`deferred::moment_held_without_turn`). A claim typed too recently to
-/// tell is not pasted on top of, and the caller is told so it can retry.
+/// tell (a Stop in its own second included) is not pasted on top of, and
+/// the caller is told so it can retry.
 ///
 /// The message is stamped delivered BEFORE the paste, under the lock:
 /// Claude Code fires UserPromptSubmit the moment Enter lands, before the
@@ -466,12 +467,15 @@ where
     let fresh = lock(store)?
         .get_session_by_id(to_row.id)?
         .unwrap_or_else(|| to_row.clone());
-    let claim = deferred::claim_moment_for_direct_send(store, &fresh, header, now)?;
+    let mut claim = deferred::claim_moment_for_direct_send(store, &fresh, header, now)?;
     if claim.is_none() {
         if !deferred::idle_for_prompt(&fresh) {
             return Ok(WakePaste::Skipped);
         }
-        if !deferred::moment_held_without_turn(store, &fresh, now)? {
+        // Past a claim that started no turn, the paste takes the moment
+        // over, so a send right after it is not pasted on top of its turn.
+        claim = deferred::take_over_turnless_moment(store, &fresh, header, now)?;
+        if claim.is_none() {
             return Ok(WakePaste::Held);
         }
     }
@@ -490,7 +494,10 @@ where
         }
     };
     match type_it().await {
-        Ok(()) => Ok(WakePaste::Pasted),
+        Ok(()) => {
+            deferred::date_claim_from_typing(store, claim);
+            Ok(WakePaste::Pasted)
+        }
         Err(e) => {
             if stamped && !codes::may_have_run(&e.code) {
                 if let Err(u) = lock(store).and_then(|s| s.unmark_message_delivered(id)) {
@@ -1922,48 +1929,81 @@ mod tests {
     }
 
     /// The findings' case: a claim that left the row idle past the grace (a
-    /// `/clear`, a swallowed paste, a may-have-typed failure that did not),
-    /// or whose turn ended in the second it was typed, started no turn that
-    /// will hand the message over, so the wake pastes anyway.
+    /// `/clear`, a swallowed paste, a may-have-typed failure that did not)
+    /// started no turn that will hand the message over, so the wake pastes
+    /// anyway, and takes the moment over: a second wake right after it, its
+    /// turn still starting, is held instead of pasted on top.
     #[tokio::test]
     async fn wake_pastes_past_a_claim_that_started_no_turn() {
-        for same_second_stop in [false, true] {
-            let (store, ssh, a, b) = fixture();
-            let now = crate::store::now_unix();
-            let (id, _) = idle_recipient_with_message(&store, &ssh, a, b, now).await;
-            let at = if same_second_stop {
-                now - 2
-            } else {
-                now - sessions::deferred::TURN_START_GRACE_SECS - 1
-            };
-            let row = store.lock().unwrap().get_session_by_id(b).unwrap().unwrap();
-            assert!(
-                sessions::deferred::claim_moment_for_direct_send(&store, &row, "/clear", at)
-                    .unwrap()
-                    .is_some()
-            );
-            if same_second_stop {
-                store
-                    .lock()
-                    .unwrap()
-                    .conn_ref()
-                    .execute(
-                        "UPDATE sessions SET claude_status = 'failed', last_stop_at = ?2 WHERE id = ?1",
-                        rusqlite::params![b, at],
-                    )
-                    .unwrap();
-            }
-            let row = store.lock().unwrap().get_session_by_id(b).unwrap().unwrap();
-            let out = wake_paste_with(&store, &row, id, "hdr", || now, || async { Ok(()) })
-                .await
-                .unwrap();
-            assert_eq!(
-                out,
-                WakePaste::Pasted,
-                "same-second stop: {same_second_stop}"
-            );
-            assert_eq!(undelivered(&store, b), 0);
-        }
+        let (store, ssh, a, b) = fixture();
+        let now = crate::store::now_unix();
+        let (id, _) = idle_recipient_with_message(&store, &ssh, a, b, now).await;
+        let at = now - sessions::deferred::TURN_START_GRACE_SECS - 1;
+        let row = store.lock().unwrap().get_session_by_id(b).unwrap().unwrap();
+        assert!(
+            sessions::deferred::claim_moment_for_direct_send(&store, &row, "/clear", at)
+                .unwrap()
+                .is_some()
+        );
+        let out = wake_paste_with(&store, &row, id, "hdr", || now, || async { Ok(()) })
+            .await
+            .unwrap();
+        assert_eq!(out, WakePaste::Pasted);
+        assert_eq!(undelivered(&store, b), 0);
+
+        let id2 = send_message(args(a, b, "second"), &store, &ssh)
+            .await
+            .unwrap()
+            .id;
+        let out = wake_paste_with(
+            &store,
+            &row,
+            id2,
+            "hdr",
+            || now,
+            || async { panic!("pasted on top of the first wake's turn") },
+        )
+        .await
+        .unwrap();
+        assert_eq!(out, WakePaste::Held);
+    }
+
+    /// Review r5: a Stop in the claim's own second is the Stop that opened
+    /// the moment as often as the end of the claim's turn, so the wake holds
+    /// back (the grace decides later) instead of pasting on top.
+    #[tokio::test]
+    async fn wake_holds_back_behind_a_claim_typed_in_the_stops_second() {
+        let (store, ssh, a, b) = fixture();
+        let now = crate::store::now_unix();
+        let (id, _) = idle_recipient_with_message(&store, &ssh, a, b, now).await;
+        let at = now - 2;
+        store
+            .lock()
+            .unwrap()
+            .conn_ref()
+            .execute(
+                "UPDATE sessions SET last_stop_at = ?2 WHERE id = ?1",
+                rusqlite::params![b, at],
+            )
+            .unwrap();
+        let row = store.lock().unwrap().get_session_by_id(b).unwrap().unwrap();
+        assert!(
+            sessions::deferred::claim_moment_for_direct_send(&store, &row, "next", at)
+                .unwrap()
+                .is_some()
+        );
+        let out = wake_paste_with(
+            &store,
+            &row,
+            id,
+            "hdr",
+            || now,
+            || async { panic!("pasted on top of a turn that may be starting") },
+        )
+        .await
+        .unwrap();
+        assert_eq!(out, WakePaste::Held);
+        assert_eq!(undelivered(&store, b), 1);
     }
 
     #[tokio::test]

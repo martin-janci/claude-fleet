@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { errorText } from './error_copy';
+  import { canStartAnyway, errorText } from './error_copy';
   // The Hosts view's detail pane (spec: "The Hosts view" → Detail sections).
   // In order: header, usage, sessions, integration, danger. ("Today" is left
   // out: the frontend has per-session lifetime totals only, no per-day figure,
@@ -331,7 +331,8 @@
 
   /** Rows whose Resume was refused for a login past `accounts.pause_at`
    *  (`E_ACCOUNT_LIMIT`, from the hub's `new_session`): they offer "Start
-   *  anyway", the choice New session gives (review w16-2). */
+   *  anyway", the choice New session gives (review w16-2). Not a spent
+   *  daily limit: `over_limit_ok` does not pass that one (`canStartAnyway`). */
   let overLimitIds = $state<Set<string>>(new Set());
 
   async function onResumeCandidate(c: LostCandidate, overLimitOk = false) {
@@ -364,7 +365,7 @@
       resumedIds = new Set(resumedIds).add(c.claude_session_id);
     } else {
       resumeErrors = { ...resumeErrors, [c.claude_session_id]: errorText(r.error) };
-      if (r.error.code === 'E_ACCOUNT_LIMIT' && !overLimitOk) overLimitIds = new Set(overLimitIds).add(c.claude_session_id);
+      if (canStartAnyway(r.error) && !overLimitOk) overLimitIds = new Set(overLimitIds).add(c.claude_session_id);
     }
   }
 

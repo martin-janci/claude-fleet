@@ -600,10 +600,12 @@ impl Store {
             // (step 8.10); nothing later may say otherwise.
             "INSERT INTO routine_runs (routine_id, trigger, trigger_ref, state, reason, \
                session_id, scheduled_for, started_at, finished_at, outcome, outcome_source, \
-               error_code, host_alias) \
+               error_code, host_alias, memory_read_at) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, \
                CASE ?4 WHEN 'failed' THEN 'failed' END, CASE ?4 WHEN 'failed' THEN 'exit' END, \
-               ?10, ?11)",
+               ?10, ?11, \
+               CASE WHEN ?9 IS NOT NULL \
+                 AND (SELECT memory FROM routines WHERE id = ?1) IS NULL THEN ?9 END)",
             rusqlite::params![
                 r.routine_id,
                 r.trigger,
@@ -747,7 +749,9 @@ impl Store {
         Ok(())
     }
 
-    /// Close a run: `done` or `failed`, with why.
+    /// Close a run: `done` or `failed`, with why. A run of a routine that
+    /// keeps no notebook is read for memory as it closes: there is nothing
+    /// to read (migration 205's index holds the pending reads only).
     pub fn finish_routine_run(
         &self,
         id: i64,
@@ -757,7 +761,9 @@ impl Store {
         now: i64,
     ) -> Result<(), IpcError> {
         self.conn.execute(
-            "UPDATE routine_runs SET state = ?1, reason = ?2, cost_micros = ?3, finished_at = ?4 \
+            "UPDATE routine_runs SET state = ?1, reason = ?2, cost_micros = ?3, finished_at = ?4, \
+               memory_read_at = CASE WHEN (SELECT memory FROM routines r \
+                 WHERE r.id = routine_runs.routine_id) IS NULL THEN ?4 END \
              WHERE id = ?5 AND state = 'running'",
             rusqlite::params![state, reason, cost_micros, now, id],
         )?;

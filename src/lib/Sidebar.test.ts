@@ -1465,6 +1465,31 @@ describe('Sidebar triage (W2 Track D)', () => {
     expect(after[0]).toHaveTextContent('dev-stuck');
   });
 
+  it('a focus shows its primary row even while the fleet switcher names only an extra fleet', async () => {
+    const { _setFleetsForTest, _resetFleetsForTest, fleetFilter } = await import('./fleets');
+    const base = { url: 'https://x', color: '#5b8def', local: false, client_name: 'mac', connection: { state: 'connected' as const }, unavailable: null };
+    _setFleetsForTest([
+      { ...base, id: 'primary', label: 'home', primary: true },
+      { ...base, id: 'company', label: 'company', primary: false },
+    ]);
+    fleetFilter.set('company');
+    try {
+      const fine = sessionFor(2, 'dev-fine');
+      mockBackend(fakeProjects, [sessionFor(1, 'dev-other'), fine]);
+      render(Sidebar);
+      await tick(); await tick();
+      expect(screen.queryAllByTestId('sess-row')).toHaveLength(0);
+      focusSession(fine.id, 'dev-fine');
+      await tick(); await tick();
+      const rows = screen.getAllByTestId('sess-row');
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toHaveTextContent('dev-fine');
+    } finally {
+      fleetFilter.set('all');
+      _resetFleetsForTest();
+    }
+  });
+
   // UX-08: at zero there is nothing to warn about, so the glyph and the
   // "(0)" go away — but the pill itself must stay, or the filter becomes
   // unreachable the moment the queue drains.

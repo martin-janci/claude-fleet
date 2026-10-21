@@ -805,13 +805,13 @@
     // Review r13: the line under the toolbar is a sentence; the toast keeps
     // the code under Details.
     if (!pr.ok) {
-      loadError = `Couldn't refresh projects: ${errorText(pr.error)}`;
+      loadError = `Couldn't refresh projects: ${errorText(pr.error, { read: true })}`;
       refreshError = pr.error;
-      pushError(pr.error, 'Refresh projects failed');
+      pushError(pr.error, 'Refresh projects failed', undefined, { read: true });
     } else if (!sr.ok) {
-      loadError = `Couldn't refresh sessions: ${errorText(sr.error)}`;
+      loadError = `Couldn't refresh sessions: ${errorText(sr.error, { read: true })}`;
       refreshError = sr.error;
-      pushError(sr.error, 'Refresh sessions failed');
+      pushError(sr.error, 'Refresh sessions failed', undefined, { read: true });
     } else {
       bootstrapError.set(null);
     }
@@ -1818,16 +1818,16 @@
          list sits under its own fleet header, which folds it, and which
          says so when another fleet's Machine / Organisation choice hides it
          (Phase 3a, fleet_filters.ts). -->
-    {#if $multiFleet && $showPrimary}
+    {#if $multiFleet && ($showPrimary || focus)}
       <PrimaryFleetHeader
         count={visibleIds.size + sharedWithMe.length}
         hiddenCount={primaryHiddenCount}
         focused={!!focus}
       />
     {/if}
-    <!-- A focus ("Showing only X") is past every filter, the anchor and the
-         fold included: its one row is in this list. -->
-    {#if $showPrimary && (focus || (!primaryHiddenByAnchor($anchor) && (!$multiFleet || $primaryFleetOpen)))}
+    <!-- A focus ("Showing only X") is past every filter, the fleet switcher,
+         the anchor and the fold included: its one row is in this list. -->
+    {#if focus || ($showPrimary && !primaryHiddenByAnchor($anchor) && (!$multiFleet || $primaryFleetOpen))}
     {#if pinnedRows.length > 0}
       <div class="orphan-section pinned-section" data-testid="pinned-sessions">
         <button

@@ -11,16 +11,31 @@
   // and label (`fleet_profiles.ts`).
   import { fleets, fleetFilter, multiFleet, connectionWord, fleetNeedsCount } from './fleets';
   import { radiogroupKeys } from './radiogroup_keys';
-  import { loadProfiles, profileLines } from './fleet_profiles';
+  import { loadProfile, loadProfiles, profileLines } from './fleet_profiles';
 
-  // Read each fleet's profile once the switcher shows, and again when the
-  // set of fleets changes.
+  // Read each fleet's profile once the switcher shows and again when the set
+  // of fleets changes; otherwise re-read only the fleet whose link just came
+  // up, so one hub's flapping link does not re-read every healthy fleet.
   let loadedFor = '';
+  let lastState = new Map<string, string>();
   $effect(() => {
-    const key = $multiFleet ? $fleets.map((f) => `${f.id}:${f.connection?.state ?? ''}`).join(',') : '';
-    if (key && key !== loadedFor) {
+    const states = new Map($multiFleet ? $fleets.map((f) => [f.id, f.connection?.state ?? ''] as const) : []);
+    const key = [...states.keys()].join(',');
+    const prev = lastState;
+    lastState = states;
+    if (!key) {
+      // Hidden: forget what was read, so showing again reads afresh.
+      loadedFor = '';
+      return;
+    }
+    if (key !== loadedFor) {
       loadedFor = key;
       void loadProfiles();
+      return;
+    }
+    for (const f of $fleets) {
+      if (states.get(f.id) === 'connected' && prev.get(f.id) !== 'connected' && !f.unavailable && !f.duplicate_of)
+        void loadProfile(f.id);
     }
   });
 </script>

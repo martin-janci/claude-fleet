@@ -1,7 +1,7 @@
 // Review round 13: what a person reads when a call fails. No `E_*` code and
 // no transport noise in the line; the original stays reachable as Details.
 import { describe, expect, it } from 'vitest';
-import { errorDetail, errorSentence, errorText, hubUnavailableWords } from './error_copy';
+import { canStartAnyway, errorDetail, errorSentence, errorText, hubUnavailableWords } from './error_copy';
 
 describe('error copy', () => {
   it('turns transport failures into a sentence and keeps the original for Details', () => {
@@ -11,8 +11,10 @@ describe('error copy', () => {
   });
 
   // Review w16-8: these were sent and their outcome is unknown
-  // (`IpcError::may_have_run`); "failed" sent the person to try again.
-  it('says a timed-out request may have gone through', () => {
+  // (`IpcError::may_have_run`); "failed" sent the person to try again. Every
+  // call says so unless it was a read (`{ read: true }`): most call sites are
+  // actions, and one that forgets to opt out must not invite a second send.
+  it('says a timed-out call may have gone through unless it was a read', () => {
     const e = { code: 'E_SSH_TIMEOUT', message: 'ssh mercury: timed out after 10 s' };
     expect(errorText(e)).toBe(
       'The host took too long to answer over SSH. It may have gone through anyway. The list refreshes; check it before trying again',
@@ -21,7 +23,12 @@ describe('error copy', () => {
     expect(errorText({ code: 'E_HUB_TIMEOUT', message: 'x', details: { outcome_unknown: true } })).toContain('may have gone through');
     expect(errorText({ code: 'E_HUB_TIMEOUT', message: 'x', details: { outcome_unknown: false } })).toBe('The hub took too long to answer');
     expect(errorText({ code: 'E_TIMEOUT', message: 'x' })).not.toContain('stopped');
+    expect(errorSentence({ code: 'E_AGENT_PROTOCOL', message: 'x' })).toContain('It may have gone through');
     expect(errorDetail(e)).toBe('E_SSH_TIMEOUT: ssh mercury: timed out after 10 s');
+    // A read (LoadError, a list refresh) gets the sentence alone.
+    expect(errorText(e, { read: true })).toBe('The host took too long to answer over SSH');
+    expect(errorSentence({ code: 'E_TIMEOUT', message: 'x' }, { read: true })).toBe('That took too long to answer.');
+    expect(errorText({ code: 'E_AGENT_PROTOCOL', message: 'x' }, { read: true })).not.toContain('gone through');
   });
 
   it("keeps a backend sentence as it is, minus a leading code", () => {
@@ -41,15 +48,41 @@ describe('error copy', () => {
     expect(errorText(garbled)).toMatch(/^The host's agent answered in a way this version doesn't understand\. It may have gone through/);
   });
 
-  // Review w16-4: the hub's 401 says it once, with no URL or status code.
-  it('words a revoked pairing once', () => {
-    const e = { code: 'E_UNAUTHORIZED', message: 'the hub revoked this client (https://hub:7777 answered 401) — pair again in Settings' };
-    expect(errorText(e)).toBe("The hub no longer accepts this app's pairing. Pair again in Settings → Hub & sync");
+  // Review w16-4: the hub's 401 says it once, with no full URL or status
+  // code. It names the hub's host, because the one that refused may be an
+  // extra fleet, whose fix is to remove it and add it again.
+  it('words a revoked pairing once, naming which hub', () => {
+    const e = { code: 'E_UNAUTHORIZED', message: 'the hub revoked this client (https://extra.example:7777 answered 401) — pair again in Settings' };
+    const t = errorText(e);
+    expect(t).toMatch(/^The hub at extra\.example:7777 no longer accepts this app's pairing\./);
+    expect(t).toContain('remove the fleet and add it again');
+    expect(t).not.toContain('401');
+    expect(t).not.toContain('https://');
     expect(errorDetail(e)).toContain('401');
+    expect(errorText({ code: 'E_UNAUTHORIZED', message: 'nope' })).toMatch(/^The hub no longer accepts/);
   });
 
-  it('gives an unusable hub a next step', () => {
-    expect(errorText({ code: 'E_HUB_UNAVAILABLE', message: 'x' })).toContain('Settings → Hub & sync');
+  it("words this app's unusable hub from its reason", () => {
+    const e = {
+      code: 'E_HUB_UNAVAILABLE',
+      message:
+        'kill_session was not run: http://10.0.0.2 sends the token in the clear. Use https:// — this app is set to use a hub, so it is managing no fleet of its own until that is fixed: pair again, or Disconnect, in Settings → Hub & sync',
+    };
+    const t = errorText(e);
+    expect(t).toContain('plain http');
+    expect(t).toContain('Settings → Hub & sync');
+    expect(t).not.toContain('Pair again');
+    expect(errorDetail(e)).toContain('kill_session');
+  });
+
+  // An extra fleet's refusal names the fleet and its fix; an update check's
+  // is not about pairing at all. Neither may read as this app's own hub.
+  it('keeps the words of an extra fleet or an update check that is unavailable', () => {
+    const fleet = { code: 'E_HUB_UNAVAILABLE', message: 'company (https://co.example) cannot be used: it is not connected; fix it in Settings → Hub & sync' };
+    expect(errorText(fleet)).toBe(fleet.message);
+    const update = { code: 'E_HUB_UNAVAILABLE', message: 'no stable channel is published yet (nothing at https://u.example/stable.json)' };
+    expect(errorText(update)).toBe(update.message);
+    expect(errorText(update)).not.toMatch(/pair/i);
   });
 
   // Review w16-7: no command name or hub URL in front of the reason.
@@ -78,6 +111,15 @@ describe('error copy', () => {
     // An account with no email shows no uuid.
     expect(errorText({ code: 'E_ACCOUNT_LIMIT', message, details: { ...near, suggested_email: '9f2c-uuid' } })).toContain('Another login on mercury');
     expect(errorDetail({ code: 'E_ACCOUNT_LIMIT', message, details: near })).toContain('over_limit_ok');
+  });
+
+  // A spent daily limit is not one `over_limit_ok` passes, so it offers no
+  // "Start anyway"; the usage-window refusal does.
+  it('offers Start anyway only for the usage-window refusal', () => {
+    expect(canStartAnyway({ code: 'E_ACCOUNT_LIMIT', details: { used_pct: 96, pause_at_pct: 90 } })).toBe(true);
+    expect(canStartAnyway({ code: 'E_ACCOUNT_LIMIT', details: { account_uuid: 'u', daily_limit_usd: 20, spent_usd: 21.5 } })).toBe(false);
+    expect(canStartAnyway({ code: 'E_ACCOUNT_LIMIT', details: null })).toBe(false);
+    expect(canStartAnyway({ code: 'E_INVALID', details: { used_pct: 96 } })).toBe(false);
   });
 
   // Review w16-10: the person has a Secrets panel, not catalog_set_secret.
@@ -122,5 +164,11 @@ describe('error copy', () => {
     // plain-http one (it used to read as such, now that every control shows it).
     expect(hubUnavailableWords(reasons[3])).toBe("This app can't read its saved sign-in for the hub");
     expect(hubUnavailableWords(reasons[1])).toContain('plain http');
+    // A settings failure is not a sign-in problem, though its reason
+    // mentions the client token (`Backend::unreadable_settings`).
+    expect(hubUnavailableWords(reasons[4])).toBe("This app couldn't read its own settings");
+    expect(hubUnavailableWords('cannot read hub.remote_url: database is locked, and the client token store cannot be read either (x), so this app may be paired with a hub')).toBe(
+      "This app couldn't read its own settings",
+    );
   });
 });

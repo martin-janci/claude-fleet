@@ -60,7 +60,7 @@ Repositories on this machine are found by scanning the base. On a remote host, t
 
 ### 4. Create a session
 
-Click **Create first session** in the checklist, or use the new-session button in the sidebar. Choose the host and a project, then start. Claude Code launches in a tmux session on that host and the terminal attaches to it.
+Click **Start your first session** in the checklist, or use the new-session button in the sidebar. Choose the host and a project, then start. Claude Code launches in a tmux session on that host and the terminal attaches to it.
 
 Nothing about this changed when fleet became multi-user: there is no registration and no login, the install creates its own personal owner on first run, every session you start is attributed to it, and the sessions fleet did not start stay visible to you exactly as before. Sharing a session with somebody else needs a hub — see [hub.md](hub.md#who-owns-a-session).
 
@@ -68,9 +68,9 @@ Nothing about this changed when fleet became multi-user: there is no registratio
 
 ## Guided setup — the "Get started" checklist
 
-**Layout: Classic or New.** The app has two layouts, switched in **Settings → Appearance → Layout**. Classic is the default and is what this section describes. The New layout has a rail, a filterable left list and an inspector. Its first run is different: a short tour starts after the welcome dialog, and a floating **Get started** checklist in the bottom-right corner replaces the sidebar card. That checklist has six rows: **Add a host**, **Sign in a Claude account**, **Start your first session**, **Connect GitHub for PRs**, **Pair your phone** and **Turn on a routine**. Click a row to open the place that does it.
+The app has one layout, Orbit: a rail on the left, a filterable list beside it and the session inspector on the right (there is no layout switch any more; the Classic layout and its sidebar card were removed). On first run a short tour starts after the welcome dialog, and a floating **Get started** checklist sits in the bottom-right corner. It counts what is done (**{n} of {m}**) and has six rows: **Add a host**, **Sign in a Claude account**, **Start your first session**, **Connect GitHub for PRs**, **Pair your phone** and **Turn on a routine**. Click a row to open the place that does it. **–** folds the checklist to its title line and **✕** hides it; when every row is done it says **Your fleet is set up.** In **Settings → Appearance → Setup guide**, **Replay setup guide** brings the checklist back and **Take the tour** runs the tour again.
 
-In the Classic layout, the sidebar shows a **Get started** card with a progress counter (**{n} of {m} done**) and one row per step. Click a row to act on that step. When all required steps are complete, the card shows **"You're all set 🎉"** and a **Dismiss** button. You can re-open the checklist at any time via Settings → Appearance → **Replay setup guide**.
+The sections below describe what the setup steps do.
 
 ### Local prerequisites
 

@@ -10,8 +10,10 @@
 //     display name, e-mail, linked sign-in issuers, the NAMES of its
 //     person-scope variables, its git identity) — read from that fleet's
 //     own hub, routed by `fleet` like every fleet-scoped read;
-//   - a hub older than `my_profile` answers `E_HUB_PROTOCOL`; then the
-//     profile is pieced together from `my_grants` (who) and `env_vars_list`
+//   - a hub older than `my_profile` refuses it (`E_HUB_PROTOCOL` for a
+//     master token, `E_FORBIDDEN … is not a client-callable tool` for a
+//     paired device, whose guard fails closed on a name it does not know);
+//     then the profile is pieced together from `my_grants` (who) and `env_vars_list`
 //     (the person's own variable names), with no name or sign-in;
 //   - a LABEL ("Work", "Private") that is this desktop's alone, kept in its
 //     own prefs keyed by fleet slot id. Nothing about one fleet — its label,
@@ -22,7 +24,7 @@
 // themselves, which `env_vars list` already shows them).
 import { derived, get, writable } from 'svelte/store';
 import { invokeCmd, type IpcError } from './result';
-import { PRIMARY, fleets, type FleetInfo } from './fleets';
+import { PRIMARY, fleets, onFleetForgotten, type FleetInfo } from './fleets';
 import { readPref, writePref } from './prefs';
 
 /** One `env_vars_list` row. A secret or a reference is write-only: a row
@@ -59,6 +61,9 @@ export interface FleetProfileState {
   /** `hub`: `my_profile`; `fallback`: an older hub, pieced together. */
   source: 'hub' | 'fallback' | null;
   error: string | null;
+  /** The fallback only: `env_vars_list` failed, so the variables (and the
+   *  git identity) are unknown, not unset. */
+  envError?: string | null;
 }
 
 /** The variables a profile row calls out by name when set. */
@@ -100,8 +105,14 @@ export const fleetProfiles = { subscribe: profilesStore.subscribe };
 
 const fleetArg = (fleet: string) => (fleet === PRIMARY ? {} : { fleet });
 
-/** A hub older than the tool answers it as a protocol error. */
-const OLDER_HUB = new Set(['E_HUB_PROTOCOL']);
+/** A hub older than the tool refuses it: a master token reaches rmcp's
+ *  unknown-tool path (`E_HUB_PROTOCOL`); a paired device is stopped first by
+ *  the guard, which fails closed on a tool it cannot classify. Only that
+ *  exact refusal counts — any other `E_FORBIDDEN` is a real refusal. */
+export function isOlderHub(e: IpcError): boolean {
+  if (e.code === 'E_HUB_PROTOCOL') return true;
+  return e.code === 'E_FORBIDDEN' && (e.message ?? '').includes('my_profile is not a client-callable tool');
+}
 
 /** The fallback for a hub without `my_profile`: who (my_grants) and the
  *  person's own variable names (env_vars_list), nothing else. */
@@ -122,30 +133,57 @@ export function profileFromParts(personId: number | null, rows: readonly EnvVarR
 
 const errText = (e: IpcError) => e.message || e.code;
 
+/** Fleet slot id → the newest read's number: a read applies its answer only
+ *  while it is still the newest for its fleet, so a slow stale answer never
+ *  overwrites a newer one, nor brings back a forgotten fleet's entry. */
+const loadSeq = new Map<string, number>();
+
 /** Read one fleet's profile from its own hub. */
 export async function loadProfile(fleet: string): Promise<FleetProfileState> {
+  const seq = (loadSeq.get(fleet) ?? 0) + 1;
+  loadSeq.set(fleet, seq);
   const r = await invokeCmd<MyProfile>('my_profile', fleetArg(fleet));
   let state: FleetProfileState;
   if (r.ok && r.value && typeof r.value === 'object') {
     state = { profile: r.value, source: 'hub', error: null };
-  } else if (!r.ok && OLDER_HUB.has(r.error.code)) {
+  } else if (!r.ok && isOlderHub(r.error)) {
     const [who, env] = await Promise.all([
       invokeCmd<{ person_id: number | null }>('my_grants', fleetArg(fleet)),
       invokeCmd<EnvVarRow[]>('env_vars_list', fleetArg(fleet)),
     ]);
     if (!who.ok) state = { profile: null, source: null, error: errText(who.error) };
-    else
+    else {
+      const rows = env.ok && Array.isArray(env.value) ? env.value : null;
+      const profile = profileFromParts(who.value?.person_id ?? null, rows ?? []);
+      // Unknown is not unset: without the rows, say nothing about variables.
+      if (!rows) delete profile.env;
       state = {
-        profile: profileFromParts(who.value?.person_id ?? null, env.ok && Array.isArray(env.value) ? env.value : []),
+        profile,
         source: 'fallback',
         error: null,
+        envError: rows ? null : env.ok ? 'no answer' : errText(env.error),
       };
+    }
   } else {
     state = { profile: null, source: null, error: r.ok ? 'no answer' : errText(r.error) };
   }
-  profilesStore.update((m) => new Map(m).set(fleet, state));
+  if (loadSeq.get(fleet) === seq) profilesStore.update((m) => new Map(m).set(fleet, state));
   return state;
 }
+
+/** Forget a removed fleet's label and profile: slot ids are reused by label,
+ *  so another hub added later under the same slot must not inherit them. */
+export function forgetProfile(fleet: string): void {
+  loadSeq.set(fleet, (loadSeq.get(fleet) ?? 0) + 1);
+  profilesStore.update((m) => {
+    if (!m.has(fleet)) return m;
+    const next = new Map(m);
+    next.delete(fleet);
+    return next;
+  });
+  if (fleet in get(labelsStore)) setProfileLabel(fleet, '');
+}
+onFleetForgotten(forgetProfile);
 
 /** Read every usable fleet's profile (Settings, the switcher). */
 export async function loadProfiles(): Promise<void> {
@@ -199,12 +237,16 @@ export function envChecklist(p: MyProfile | null | undefined): { name: string; s
   return [...key, ...rest];
 }
 
-/** Per fleet: its label and one-line profile, for the switcher's chips. */
+/** Per fleet: its label and one-line profile, for the switcher's chips and
+ *  New session's "Runs as". A failed read says so rather than showing the
+ *  bare label as if it were the whole answer. */
 export const profileLines = derived([fleets, profileLabels, fleetProfiles], ([$fleets, $labels, $profiles]) => {
   const out = new Map<string, { label: string; line: string; custom: boolean }>();
   for (const f of $fleets) {
     const label = profileLabelOf(f, $labels);
-    out.set(f.id, { label, line: profileLine(label, $profiles.get(f.id)?.profile), custom: !!$labels[f.id] });
+    const st = $profiles.get(f.id);
+    const line = st?.error ? `${label} · could not read the profile` : profileLine(label, st?.profile);
+    out.set(f.id, { label, line, custom: !!$labels[f.id] });
   }
   return out;
 });
@@ -213,4 +255,5 @@ export const profileLines = derived([fleets, profileLabels, fleetProfiles], ([$f
 export function _resetProfilesForTest(): void {
   profilesStore.set(new Map());
   labelsStore.set({});
+  loadSeq.clear();
 }

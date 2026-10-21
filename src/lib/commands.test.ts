@@ -207,3 +207,18 @@ describe('every live chord has a palette row (review w18-4)', () => {
     expect(get(workspaceLanding)?.rail).toBe('inbox');
   });
 });
+
+// Review 113: ⌘K's New terminal from Settings (or a Work task's detail),
+// which cover the pane while the destination stays 'session', brings the
+// terminal into view instead of opening it unseen.
+describe('session.new-terminal from a covered pane', () => {
+  it('closes Settings and shows the terminal', async () => {
+    const { settingsOpen } = await import('./app_views');
+    const { sessionView } = await import('./prefs');
+    destination.set('session');
+    settingsOpen.set(true);
+    await runCommand('session.new-terminal', { selected: session('mac', 'a'), sessionView: 'conversation' });
+    expect(get(settingsOpen)).toBe(false);
+    expect(get(sessionView)).toBe('terminal');
+  });
+});

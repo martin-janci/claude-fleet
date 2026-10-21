@@ -10,10 +10,13 @@ vi.mock('./sessions', async (importOriginal) => {
 });
 import { invokeCmd, type Result } from './result';
 import { mergeSession, type SessionRow } from './sessions';
-import { composerDrafts, composerTrays } from './conversation';
+import { composerDrafts, composerTrays, onTrayTaken } from './conversation';
+import { dispatchTimelineEvents } from './live_events';
+import type { Attachment } from './attachments';
 import {
   moveSession,
   carryComposer,
+  carryFromMovedEvent,
   previewMove,
   cancelMoveWait,
   type MoveReport,
@@ -320,5 +323,57 @@ describe('moveSession carries the composer to the new row (review w13-10)', () =
     carryComposer(1, 3, false);
     expect(composerDrafts.get(3)).toBe('mine');
     expect(composerDrafts.has(1)).toBe(false);
+  });
+
+  const tile: Attachment = {
+    id: 'att-1', path: '/tmp/a.png', name: 'a.png', size: 1, kind: 'image',
+    thumb: null, state: 'ready', error: null, pasted: false,
+  };
+
+  it('keepSource moves the tray rather than copying it: a picked path uploads once', () => {
+    composerDrafts.set(1, 'source');
+    composerTrays.set(1, [tile]);
+    carryComposer(1, 2, true);
+    expect(composerTrays.get(2)).toEqual([tile]);
+    expect(composerTrays.has(1)).toBe(false);
+    expect(composerDrafts.get(1)).toBe('source');
+  });
+
+  it('tells a panel showing the kept source to empty its live tray', () => {
+    const heard: number[] = [];
+    const off = onTrayTaken((id) => heard.push(id));
+    composerTrays.set(1, [tile]);
+    carryComposer(1, 2, true);
+    expect(heard).toEqual([1]);
+    // Nothing moved (the target already has a tray): the source keeps its tiles.
+    composerTrays.set(3, [tile]);
+    composerTrays.set(4, [tile]);
+    carryComposer(3, 4, true);
+    expect(heard).toEqual([1]);
+    expect(composerTrays.get(3)).toEqual([tile]);
+    off();
+  });
+
+  it('a move that waited for idle carries when its session_moved arrives', async () => {
+    composerDrafts.set(5, 'typed while busy');
+    composerTrays.set(5, [tile]);
+    invoked.mockResolvedValueOnce(ok({ kind: 'waiting', session_id: 5, to_host: 'beta', deadline_unix: 9 }));
+    await moveSession(5, 'beta');
+    expect(composerDrafts.has(6)).toBe(false);
+    const detail = JSON.stringify({ from_host: 'mefistos', to_host: 'beta', from_session_id: 5, to_session_id: 6, kept_source: false });
+    dispatchTimelineEvents([{ session_id: 5, kind: 'session_moved', detail } as never]);
+    expect(composerDrafts.get(6)).toBe('typed while busy');
+    expect(composerTrays.get(6)).toEqual([tile]);
+    expect(composerDrafts.has(5)).toBe(false);
+    expect(composerTrays.has(5)).toBe(false);
+  });
+
+  it('ignores other kinds and a detail without both ids', () => {
+    composerDrafts.set(5, 'x');
+    carryFromMovedEvent({ session_id: 5, kind: 'session_move_partial', detail: '{"from_session_id":5,"to_session_id":6}' } as never);
+    carryFromMovedEvent({ session_id: 5, kind: 'session_moved', detail: '{"from_session_id":5}' } as never);
+    carryFromMovedEvent({ session_id: 5, kind: 'session_moved', detail: 'nope' } as never);
+    expect(composerDrafts.has(6)).toBe(false);
+    expect(composerDrafts.get(5)).toBe('x');
   });
 });

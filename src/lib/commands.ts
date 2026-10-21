@@ -17,7 +17,7 @@ import { sessionView } from './prefs';
 import type { SessionView } from './session_view';
 import { theme, applyTheme, themeLabel, THEMES, type Theme } from './theme';
 import { openControl, openToday } from './control';
-import { cycleWorkOrg, sidebarView, toggleSidebarView } from './work_view';
+import { cycleWorkOrg, selectedTaskId, sidebarView, taskDetailOpen, toggleSidebarView } from './work_view';
 import { cycleScope } from './orgs';
 import { openNewSessionPicker } from './switcher_request';
 import { openRoutines } from './routines';
@@ -398,6 +398,10 @@ export async function runCommand(id: string, ctx: CommandContext): Promise<void>
       return;
     case 'session.new-terminal':
       if (!s) return;
+      // Settings and a Work task's detail cover the pane without changing
+      // the destination, so goTo alone would open the terminal unseen.
+      settingsOpen.set(false);
+      if (get(sidebarView) === 'work' && get(selectedTaskId)) taskDetailOpen.set(false);
       sessionView.set('terminal');
       goTo('session');
       requestTerminalTab('new');

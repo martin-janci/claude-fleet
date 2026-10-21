@@ -617,8 +617,10 @@ impl Store {
 
     /// Whether mission `id`'s live grant covers `sessions` new sessions on
     /// `host`: its hosts, its budget, its parallel cap. The cap counts the
-    /// mission's open tasks, or its members' live linked sessions when there
-    /// are more of those (a start or resume on a member makes no task row).
+    /// mission's open tasks plus its members' live linked sessions that run
+    /// no task of the mission (a start or resume on a member makes no task
+    /// row): the same open count the loop dispatches against, so a finished
+    /// run's idle worker or the wrap-up session takes no slot (review 456).
     fn grant_covers_start(
         &self,
         id: i64,
@@ -641,10 +643,8 @@ impl Store {
             }
         }
         if let Some(cap) = g.max_parallel {
-            let open = self
-                .mission_task_counts(id)?
-                .open
-                .max(self.mission_live_member_sessions(id)?);
+            let open =
+                self.mission_task_counts(id)?.open + self.mission_untasked_member_sessions(id)?;
             if open + sessions.max(1) > cap {
                 return Ok(false);
             }
@@ -662,16 +662,27 @@ impl Store {
             .flatten())
     }
 
-    /// How many live sessions are linked to the mission's members.
-    fn mission_live_member_sessions(&self, mission_id: i64) -> Result<i64, IpcError> {
+    /// How many live sessions are linked to the mission's members without
+    /// being the worker of any of its tasks: a `work_link` start or resume
+    /// on a member. A task's worker is on the open-task count while its
+    /// task is open and off the cap once it finished (it stays up for
+    /// review or tidy); a wrap-up session is a task's worker too. A ghost
+    /// row keeps its participant and link until it is reaped, but runs
+    /// nothing.
+    fn mission_untasked_member_sessions(&self, mission_id: i64) -> Result<i64, IpcError> {
         Ok(self
             .conn
             .prepare_cached(
                 "SELECT COUNT(DISTINCT p.session_id) FROM work_links l \
                    JOIN participants p ON p.id = l.participant_id AND p.retired_at IS NULL \
+                   JOIN sessions s ON s.id = p.session_id AND s.status != 'ghost' \
                    JOIN work_items i ON i.id = l.item_id \
                  WHERE i.orchestration_project_id = ?1 AND l.ended_at IS NULL \
-                   AND l.state = 'confirmed' AND p.session_id IS NOT NULL",
+                   AND l.state = 'confirmed' \
+                   AND NOT EXISTS (SELECT 1 FROM tasks t \
+                                   JOIN work_items ti ON ti.id = t.work_item_id \
+                                   WHERE t.worker_session_id = p.session_id \
+                                     AND ti.orchestration_project_id = ?1)",
             )?
             .query_row([mission_id], |r| r.get(0))?)
     }

@@ -196,6 +196,11 @@ describe('agents (design step 5)', () => {
     expect(get(pendingAgentCount)).toBe(0);
   });
 
+  it('counts the whole backlog when the pending list is cut', () => {
+    agents.set(status({ pending_total: 250 }));
+    expect(get(pendingAgentCount)).toBe(250);
+  });
+
   it('keeps the status fresh, and stops asking a hub that refuses this device', async () => {
     vi.useFakeTimers();
     const load = vi.fn().mockResolvedValue({ ok: true, value: status() });

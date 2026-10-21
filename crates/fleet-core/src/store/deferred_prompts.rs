@@ -269,6 +269,19 @@ impl Store {
             .query_row([session_id], |r| r.get(0))
     }
 
+    /// Date a claimed prompt's claim from `now`, once its typing is over:
+    /// the claim keeps the moment it took, its turn-start grace counts from
+    /// the paste. A no-op for a prompt that is not claimed.
+    pub fn restamp_deferred_claim(&self, id: i64, now: i64) -> Result<()> {
+        self.conn
+            .prepare_cached(
+                "UPDATE deferred_prompts SET delivered_at = ?2 \
+                 WHERE id = ?1 AND delivered_at IS NOT NULL",
+            )?
+            .execute(rusqlite::params![id, now])?;
+        Ok(())
+    }
+
     pub fn get_deferred_prompt(&self, id: i64) -> Result<Option<DeferredPromptRow>> {
         self.conn
             .prepare_cached(&format!(

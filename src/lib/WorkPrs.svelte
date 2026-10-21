@@ -49,8 +49,9 @@
   let loadError = $state<IpcError | null>(null);
   /** Review w17-7: a re-read of the list shown failed; the list stays. */
   let refreshError = $state<IpcError | null>(null);
-  /** The filter the items shown were read for. */
-  let shownFilter: PrFilter | null = null;
+  /** The filter and fleets the items shown were read for: a failed re-read
+   *  keeps them only when it asked for the same. */
+  let shownKey: string | null = null;
   /** Fleets whose hub could not answer while others did (review w01-7):
    *  said above the list, so it never looks complete when it is not. */
   let fleetErrors = $state<{ label: string; message: string }[]>([]);
@@ -60,6 +61,7 @@
     const mine = ++seq;
     const extras = get(multiFleet) ? get(visibleExtraFleets).map((g) => g.fleet).filter((f) => !f.unavailable && !f.duplicate_of) : [];
     const own = get(showPrimary);
+    const key = JSON.stringify([filter, own, extras.map((f) => f.id)]);
     const [r, ...others] = await Promise.all([
       own ? listPullRequests({ state: filter }) : Promise.resolve(null),
       ...extras.map((f) => fleetListPullRequests(f.id, { state: filter })),
@@ -69,8 +71,11 @@
     // The primary alone failing is the page's error; beside extra fleets it
     // is one fleet's note, and theirs stay on screen.
     if (r && !r.ok && extras.length === 0) {
-      if (shownFilter === filter && !loadError) refreshError = r.error;
-      else loadError = r.error;
+      if (shownKey === key && !loadError) refreshError = r.error;
+      else {
+        loadError = r.error;
+        refreshError = null;
+      }
       return;
     }
     const failed: { label: string; message: string }[] = [];
@@ -96,7 +101,7 @@
     fleetErrors = failed;
     loadError = null;
     refreshError = null;
-    shownFilter = filter;
+    shownKey = key;
   }
 
   // The fleet filter moved: re-read for the fleets it now shows.
