@@ -842,6 +842,16 @@ impl Store {
              WHERE id = ?5",
             rusqlite::params![to, started_at, finished_at, now, id],
         )?;
+        // A grant until the mission completes ends with it (TASK-293): a
+        // finished mission reopened as paused starts without one.
+        if finished_at.is_some() {
+            tx.execute(
+                "UPDATE orchestration_grants SET revoked_at = ?1 \
+                 WHERE orchestration_project_id = ?2 AND revoked_at IS NULL \
+                   AND expires_at >= ?3",
+                rusqlite::params![now, id, super::GRANT_UNTIL_DONE_AT],
+            )?;
+        }
         self.insert_mission_event(
             id,
             &NewMissionEvent {

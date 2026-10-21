@@ -37,7 +37,7 @@ use crate::service::view_scope::ViewScope;
 use crate::ssh::SshClient;
 use crate::store::{
     CardRow, Decider, GrantRow, MissionRow, MissionTaskCounts, NewCard, NewGrant, NewMissionEvent,
-    Store, TaskRow, WorkItemRow, GRANT_MAX_SECS,
+    Store, TaskRow, WorkItemRow, GRANT_MAX_SECS, GRANT_UNTIL_DONE_AT,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -1493,10 +1493,16 @@ pub async fn plan_now(
     .await
 }
 
-/// `work_link { action: mission_grant, mission_id, level, hours, budget_cents?,
-/// hosts?, max_parallel?, profile? }`: a person signs what the loop may do by itself,
-/// for this plan, until it expires. Never an agent's: the scope must be a
-/// person's own, and the mission theirs to change.
+/// `work_link { action: mission_grant, mission_id, level, hours?, budget_cents?,
+/// until_done?, hosts?, max_parallel?, profile? }`: a person signs what the
+/// loop may do by itself, for this plan, until it expires: after `hours`, or
+/// with `until_done` when the mission completes (a finite mission only, and
+/// only with a budget, which is then its one bound). Never an agent's: the
+/// scope must be a person's own, and the mission theirs to change.
+///
+/// A grant above the level the mission asks raises the ask to it (TASK-293):
+/// the loop runs at the least of the ask, the fleet's ceiling and the grant,
+/// so a mission made in the room (L0) never ran a step under an L2 grant.
 pub fn grant(
     args: &WorkLinkArgs,
     store: &Mutex<Store>,
@@ -1509,6 +1515,19 @@ pub fn grant(
         .ok_or_else(|| IpcError::new(codes::E_INVALID, "mission_grant needs level (1 to 3)"))?;
     if !(1..=3).contains(&level) {
         return Err(IpcError::new(codes::E_INVALID, "a grant's level is 1 to 3"));
+    }
+    let until_done = args.until_done.unwrap_or(false);
+    if until_done && args.hours.is_some() {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            "a grant lasts some hours or until the mission completes, not both",
+        ));
+    }
+    if until_done && args.budget_cents.is_none() {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            "a grant until the mission completes needs a budget (budget_cents)",
+        ));
     }
     let hours = args.hours.unwrap_or(8) as i64;
     if !(1..=GRANT_MAX_SECS / 3600).contains(&hours) {
@@ -1543,7 +1562,28 @@ pub fn grant(
             format!("{} is {}", m.name, m.state),
         ));
     }
+    if until_done && m.mode != "finite" {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            format!(
+                "{} is {}: it never completes, so its grant runs some hours",
+                m.name, m.mode
+            ),
+        ));
+    }
     let who = super::graph::actor(scope);
+    let raised_from = (m.level < level).then_some(m.level);
+    if raised_from.is_some() {
+        s.update_mission(
+            id,
+            None,
+            &crate::store::MissionPatch {
+                level: Some(level),
+                ..Default::default()
+            },
+            &who,
+        )?;
+    }
     s.revoke_grants(id)?;
     let g = s.add_grant(
         id,
@@ -1554,7 +1594,11 @@ pub fn grant(
             budget_micros: args.budget_cents.map(|c| c * 10_000),
             max_parallel: args.max_parallel.map(|p| p as i64),
             profile: profile.clone(),
-            expires_at: now_unix() + hours * 3600,
+            expires_at: if until_done {
+                GRANT_UNTIL_DONE_AT
+            } else {
+                now_unix() + hours * 3600
+            },
         },
     )?;
     event(
@@ -1563,7 +1607,14 @@ pub fn grant(
         "grant",
         &who,
         None,
-        serde_json::json!({ "level": level, "hours": hours, "budget_cents": args.budget_cents, "profile": profile }),
+        serde_json::json!({
+            "level": level,
+            "hours": (!until_done).then_some(hours),
+            "until_done": until_done,
+            "budget_cents": args.budget_cents,
+            "profile": profile,
+            "raised_from": raised_from,
+        }),
     );
     s.wake_mission(id)?;
     Ok(g)
