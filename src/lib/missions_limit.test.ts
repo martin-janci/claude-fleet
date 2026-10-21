@@ -1,0 +1,45 @@
+// TASK-291: the planner waiting on a usage limit, in words.
+import { describe, it, expect } from 'vitest';
+import { eventSentence, limitWaitSentence, plannerLimitWait, plannerWaiting, type LimitWait } from './missions';
+
+const now = new Date(2026, 9, 19, 10, 0).getTime() / 1000;
+const at = new Date(2026, 9, 19, 15, 0).getTime() / 1000;
+const time = new Date(at * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+const login: LimitWait = {
+  login: { host: 'mac', profile: null },
+  resets_at: at,
+  reset_known: true,
+  why: "mac's own login is at its usage limit",
+};
+
+describe('the planner at a usage limit', () => {
+  it('says whose limit it waits on and when it resets', () => {
+    expect(limitWaitSentence(login, now)).toBe(`Waiting on the usage limit of mac's own login, resets ${time}`);
+    const work = { ...login, login: { host: 'mac', profile: 'work' } };
+    expect(limitWaitSentence(work, now)).toBe(`Waiting on the usage limit of profile work on mac, resets ${time}`);
+    const all = { ...login, login: null, reset_known: false, said: 'resets 3pm (Europe/Bratislava)' };
+    expect(limitWaitSentence(all, now)).toBe(
+      `Waiting on a usage limit on every login, asks again at ${time} (Claude: resets 3pm (Europe/Bratislava))`,
+    );
+  });
+
+  it('a limit_wait event reads as a wait, not a refusal', () => {
+    const s = eventSentence({ id: 1, at: now, kind: 'limit_wait', actor: 'planner', payload: { ...login } });
+    expect(s.startsWith('Waiting on the usage limit')).toBe(true);
+  });
+
+  it('the mission waits only while the planner’s newest word is a wait', () => {
+    const ev = (id: number, kind: string, payload?: unknown) => ({ id, at: id, kind, actor: 'planner', payload });
+    expect(plannerLimitWait({ events: [ev(3, 'step'), ev(2, 'limit_wait', login), ev(1, 'planned')] })).toEqual(login);
+    expect(plannerLimitWait({ events: [ev(3, 'planned'), ev(2, 'limit_wait', login)] })).toBeNull();
+    expect(plannerLimitWait({ events: [] })).toBeNull();
+  });
+
+  it('the Plan button says it waits, with the reason in Details', () => {
+    const h = plannerWaiting(login, now);
+    expect(h.title).toBe('The planner is waiting on a usage limit');
+    expect(h.text).toContain(time);
+    expect(h.details).toBe(login.why);
+  });
+});

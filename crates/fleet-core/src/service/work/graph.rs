@@ -483,7 +483,41 @@ pub fn accept_many(
     for id in ids {
         require_mission_change(&s, scope, *id)?;
     }
+    check_accept_merge_waves(&s, ids)?;
     s.accept_proposals(ids)
+}
+
+/// The planner's merge-wave rule (TASK-294), for a person's accept: in
+/// each mission an item of `ids` belongs to, accepting them must not leave
+/// a merge-wave item short of an item of its wave. Before the accept the
+/// proposals in `ids` count as not there; after it they are live. Another
+/// proposal still waiting counts toward its wave but, as a merge item,
+/// merges nothing yet. A gap that does not involve `ids` was there already
+/// and is left alone.
+pub(super) fn check_accept_merge_waves(s: &Store, ids: &[i64]) -> Result<(), IpcError> {
+    use crate::service::work::orchestrate::planner::{check_merge_change, member_nodes};
+    let mut missions = std::collections::BTreeSet::new();
+    for id in ids {
+        if let Some(m) = s.item_mission(*id)? {
+            missions.insert(m);
+        }
+    }
+    for m in missions {
+        let root = s.get_mission(m)?.and_then(|m| m.root_item_id);
+        let items = s.mission_items(m)?;
+        let member_ids: Vec<i64> = items.iter().map(|i| i.id).collect();
+        let mut after = member_nodes(&items, &s.item_deps(&member_ids)?, root);
+        let mut before = after.clone();
+        for n in before.iter_mut().filter(|n| ids.contains(&n.item_id)) {
+            n.rejected = true;
+        }
+        for n in after.iter_mut().filter(|n| ids.contains(&n.item_id)) {
+            n.pending = false;
+        }
+        check_merge_change(&before, &after, |id| format!("item {id}"))
+            .map_err(|why| IpcError::new(codes::E_INVALID, why))?;
+    }
+    Ok(())
 }
 
 /// `work_link { action: undo_accept, item_ids }`: take a recent accept
