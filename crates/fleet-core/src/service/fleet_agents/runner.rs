@@ -587,6 +587,14 @@ pub trait FleetHost: Send + Sync {
     ) -> Result<(), String>;
     /// GitHub: add and remove labels.
     async fn set_pr_labels(&self, req: &LabelsRequest) -> Result<(), String>;
+    /// GitHub: a pull request's diff (its head's).
+    async fn pr_diff(&self, host: &str, repo: &str, number: i64) -> Result<String, String>;
+    /// GitHub: post a review as `event`; GitHub's id for it.
+    async fn post_pr_review(
+        &self,
+        req: &crate::service::agents::review::post::ReviewRequest,
+        event: &str,
+    ) -> Result<i64, String>;
     /// The support agent's host: issues, workspaces, writes and the run.
     fn base(&self) -> &dyn SupportHost;
     /// Carry out an approved fleet-own action (`fleet_ops`).
@@ -809,6 +817,18 @@ impl FleetHost for LiveFleetHost {
 
     async fn set_pr_labels(&self, req: &LabelsRequest) -> Result<(), String> {
         self.gh.set_labels(req).await
+    }
+
+    async fn pr_diff(&self, host: &str, repo: &str, number: i64) -> Result<String, String> {
+        self.gh.diff(host, repo, number).await
+    }
+
+    async fn post_pr_review(
+        &self,
+        req: &crate::service::agents::review::post::ReviewRequest,
+        event: &str,
+    ) -> Result<i64, String> {
+        self.gh.post_review(req, event).await
     }
 
     async fn fleet_op(&self, op: super::actions::FleetOp) -> Result<String, String> {

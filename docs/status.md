@@ -1261,8 +1261,9 @@ all a poll sees there; the gallery (`fleet_agents/gallery.rs`: the
 Agents › Gallery and added to the catalog with *Add to catalog*, `agents {
 install }`), which holds all seven seeds in `catalog-seed/fleet-agents/`:
 `issue-triage`, `pr-questions` and `daily-digest`, and `self-debug`,
-`proposer`, `simplify` and `refactor` (below); not `pr_review` or
-restating the built-in agents.
+`proposer`, `simplify` and `refactor` (below); `pr_review` (a review of the
+PR's head with line comments placed on the diff, sent only while that head
+is current, never an unattended APPROVE); not restating the built-in agents.
 
 The self debug agent (thread "Self debug agent", 2026-10-17), the hub and
 desktop parts: a fleet agent definition that sets `run.diagnostics` gets

@@ -3,7 +3,8 @@
 Status: steps 1 to 5 built, and step 6's GitHub sources, PR comments and
 labels, and writes to other trackers, 2026-10-14 (the phone's part in
 martin-janci/fleet-mobile); polling other trackers and the gallery,
-2026-10-18. The rest of step 6 not built.
+2026-10-18; `pr_review`, 2026-10-20. Restating the built-in agents not
+built.
 Asked for by the owner after the built-in reviewer and support agent landed
 (`2026-10-11-review-and-support-agents-design.md`, PRs
 martin-janci/claude-fleet#871, martin-janci/fleet-mobile#217,
@@ -324,7 +325,7 @@ person at `propose`, run at `act` when `auto` is true.
 | `tracker_comment` | `{tracker, key, body}` (ADF / wiki rendered as now) | `WriteOp::RichComment` |
 | `tracker_issue` | `{tracker, project, type, summary, body, labels, link?}` | `WriteOp::CreateIssue` (+ `LinkIssues`) |
 | `tracker_link` | `{tracker, from, to, type}` | `WriteOp::LinkIssues` |
-| `pr_review` | the reviewer's `ReviewRequest` | the reviewer's executor |
+| `pr_review` | `{repo, number, sha, event, body, findings[]}` | the reviewer's `gh` calls: the diff, then the review (`ReviewRequest`) |
 | `pr_comment`, `pr_labels` | as the reviewer's | gh |
 | `mcp_call` | `{binding, tool, arguments}` | calls the tool over stdio on the host with the binding rendered, as the scanner does |
 | `record` | `{namespace, key, value, expires_at?}` | `agent_records` upsert |
@@ -624,8 +625,26 @@ run real instances.
    `tracker_comment` sends the same text plain (`WriteOp::Comment`) and
    `tracker_issue` creates an item in the project (`WriteOp::CreateItem`);
    an issue link is Jira's, so a link, or an issue with one, is refused
-   there. Not built: `pr_review` (the reviewer's placed, verified review
-   stays the PR reviewer's) and restating the built-in agents.
+   there. Not built: restating the built-in agents.
+
+   `pr_review`, built 2026-10-20: a review of the subject's head with line
+   comments, on a `github_prs` trigger only and never with `each`. It takes
+   `target` (the number), `body` or `body_template` (the review's text),
+   `verdict` (a template: APPROVE, REQUEST_CHANGES or COMMENT, anything else
+   COMMENT) and `findings`, an array field of the answer whose items have
+   `path`, `line` and `body` (the validator checks the schema). Planning
+   keeps the head the run read (`sha`), at most 30 findings, and the event;
+   an `auto` review never approves (APPROVE becomes COMMENT: an approval is
+   a person's). Sending checks the repo as `pr_comment` does, expires the
+   action when the PR is no longer open or its head moved on, fetches the
+   diff and places each finding on it with the PR reviewer's
+   `commentable_lines` / `snap_line` (within three lines); a finding that
+   does not land is listed in the body under *Outside the diff*. The body
+   and each line comment end with the instance's marker. An APPROVE or
+   REQUEST_CHANGES GitHub refuses on one's own PR is sent as COMMENT, as
+   the reviewer does. Not taken from the reviewer: its confidence filter,
+   the debate, and the re-review of a dismissed review (`verify`), which
+   reads the reviewer's own `review_prs` table.
 
    The gallery, built 2026-10-18 (`service/fleet_agents/gallery.rs`): the
    definitions in `catalog-seed/fleet-agents/`, embedded in fleet-core

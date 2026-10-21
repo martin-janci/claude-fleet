@@ -113,6 +113,10 @@ struct World {
     /// tracker updated them, the id their place), and the pages asked.
     items: Mutex<Vec<ItemThread>>,
     item_pages: Mutex<Vec<ItemPage>>,
+    /// GitHub: the diff a review is placed on, and whether the PR is the
+    /// host's own (GitHub refuses to approve it).
+    diff: Mutex<String>,
+    own_pr: Mutex<bool>,
 }
 
 #[async_trait::async_trait]
@@ -223,6 +227,36 @@ impl FleetHost for World {
         ));
         Ok(())
     }
+    async fn pr_diff(&self, _: &str, repo: &str, number: i64) -> Result<String, String> {
+        self.gh_writes
+            .lock()
+            .unwrap()
+            .push(format!("diff {repo}#{number}"));
+        Ok(self.diff.lock().unwrap().clone())
+    }
+    async fn post_pr_review(
+        &self,
+        req: &crate::service::agents::review::post::ReviewRequest,
+        event: &str,
+    ) -> Result<i64, String> {
+        if *self.own_pr.lock().unwrap() && event != "COMMENT" {
+            return Err("Can not approve your own pull request".into());
+        }
+        let lines: Vec<String> = req
+            .comments
+            .iter()
+            .map(|c| format!("{}:{} {}", c.path, c.line, c.body))
+            .collect();
+        self.gh_writes.lock().unwrap().push(format!(
+            "review {}#{} {event} @{}: {} || {}",
+            req.repo,
+            req.number,
+            req.sha,
+            req.body,
+            lines.join(" | ")
+        ));
+        Ok(77)
+    }
     fn base(&self) -> &dyn SupportHost {
         &self.base
     }
@@ -314,6 +348,8 @@ fn fx(loaded: Loaded, config: Value, bindings: Value, project: bool) -> Fx {
         fleet_ops: Mutex::default(),
         items: Mutex::default(),
         item_pages: Mutex::default(),
+        diff: Mutex::default(),
+        own_pr: Mutex::default(),
     });
     Fx {
         store: Arc::new(Mutex::new(s)),
@@ -1307,6 +1343,153 @@ async fn a_pr_answer_comments_and_labels_within_the_repos() {
     p["repo"] = "acme/other".into();
     a.payload = p.to_string();
     assert_eq!(ex.execute(&a).await, ActionResult::Executed, "limits.repos");
+}
+
+/// A definition triggered by github_prs whose answer is a review.
+fn review_fx(auto: bool) -> Fx {
+    let d = definition::parse_value(&json!({
+        "inputs": [{ "name": "repo", "type": "text", "label": "Repo", "required": true }],
+        "trigger": { "source": "github_prs", "repo": "{{repo}}" },
+        "run": { "workspace": "home", "output_schema": { "type": "object",
+            "required": ["verdict", "summary", "findings"], "properties": {
+                "verdict": { "enum": ["APPROVE", "REQUEST_CHANGES", "COMMENT"] },
+                "summary": { "type": "string" },
+                "findings": { "type": "array", "items": { "type": "object",
+                    "required": ["path", "line", "body"], "properties": {
+                        "path": { "type": "string" }, "line": { "type": "integer" },
+                        "body": { "type": "string" } } } } } } },
+        "actions": [
+            { "id": "review", "do": "pr_review", "target": "{{subject.number}}",
+              "verdict": "{{answer.verdict}}", "body": "{{answer.summary}}",
+              "findings": "findings", "auto": auto }
+        ]
+    }))
+    .unwrap();
+    assert_eq!(
+        definition::problems(&d, &BTreeMap::new()),
+        Vec::<String>::new()
+    );
+    let loaded = Loaded {
+        name: "rv".into(),
+        definition: d,
+        skill: "Review the PR.".into(),
+        templates: BTreeMap::new(),
+    };
+    fx(loaded, json!({ "repo": "acme/pos" }), json!([]), false).at("act")
+}
+
+const REVIEW_DIFF: &str = "diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1,3 +1,4 @@\n fn a() {\n+    let x = 1;\n     b();\n }\n";
+
+/// Run the review fixture on PR 4 at `abc`; the review action.
+async fn reviewed(f: &Fx, answer: &str) -> crate::store::AgentActionRow {
+    *f.world.prs.lock().unwrap() = vec![pr(4, "abc", false)];
+    *f.world.diff.lock().unwrap() = REVIEW_DIFF.into();
+    let now = crate::store::now_unix();
+    let polled = f
+        .poller()
+        .poll(&f.rule, Some(&f.cursor(now - 100, None)), now)
+        .await
+        .unwrap();
+    let jobs = f.claim(&polled.jobs);
+    *f.world.base.answer.lock().unwrap() = Some(PrintOutcome::Answered {
+        text: answer.into(),
+        cost_micros: 0,
+    });
+    let out = f.runner().run(&jobs[0], Some(&f.rule)).await;
+    assert!(matches!(out, RunOutcome::Done { .. }), "{out:?}");
+    f.actions()
+        .into_iter()
+        .find(|a| a.kind == "pr_review")
+        .unwrap()
+}
+
+#[tokio::test]
+async fn a_review_places_its_findings_on_the_diff_and_lists_the_rest() {
+    let f = review_fx(false);
+    let a = reviewed(
+        &f,
+        r#"{"verdict":"APPROVE","summary":"Fine overall.","findings":[
+            {"path":"src/a.rs","line":2,"body":"x is unused"},
+            {"path":"src/a.rs","line":40,"body":"far away"},
+            {"path":"","line":1,"body":"no path"}]}"#,
+    )
+    .await;
+    assert_eq!(
+        a.state, "pending",
+        "a review waits for a person unless auto"
+    );
+    let p: Value = serde_json::from_str(&a.payload).unwrap();
+    assert_eq!(
+        (p["event"].as_str(), p["sha"].as_str()),
+        (Some("APPROVE"), Some("abc"))
+    );
+    assert_eq!(p["findings"].as_array().unwrap().len(), 2, "{p}");
+    let done = f.executor().execute(&a).await;
+    assert!(
+        matches!(&done, ActionResult::Done(l) if l.contains("1 line comments")),
+        "{done:?}"
+    );
+    let writes = f.world.gh_writes.lock().unwrap().clone();
+    let review = writes.iter().find(|w| w.starts_with("review")).unwrap();
+    assert!(
+        review.starts_with("review acme/pos#4 APPROVE @abc: Fine overall."),
+        "{review}"
+    );
+    assert!(
+        review.contains("Outside the diff:\n- `src/a.rs:40`: far away"),
+        "{review}"
+    );
+    assert!(
+        review.contains("|| src/a.rs:2 x is unused\n\n[fleet-agent:inst]"),
+        "{review}"
+    );
+    assert!(
+        !review.contains("no path"),
+        "an item without a path is dropped"
+    );
+
+    // GitHub refuses to approve one's own PR: it goes as a comment.
+    *f.world.own_pr.lock().unwrap() = true;
+    f.world.gh_writes.lock().unwrap().clear();
+    assert!(matches!(
+        f.executor().execute(&a).await,
+        ActionResult::Done(_)
+    ));
+    assert!(f
+        .world
+        .gh_writes
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|w| w.starts_with("review acme/pos#4 COMMENT")));
+
+    // A head that moved on, or a PR no longer open, is not reviewed.
+    *f.world.prs.lock().unwrap() = vec![pr(4, "def", false)];
+    assert!(
+        matches!(f.executor().execute(&a).await, ActionResult::Expired(e) if e.contains("head moved"))
+    );
+    f.world.prs.lock().unwrap().clear();
+    assert!(
+        matches!(f.executor().execute(&a).await, ActionResult::Expired(e) if e.contains("not open"))
+    );
+}
+
+#[tokio::test]
+async fn an_unattended_review_never_approves() {
+    let f = review_fx(true);
+    let a = reviewed(
+        &f,
+        r#"{"verdict":"APPROVE","summary":"Ship it.","findings":[]}"#,
+    )
+    .await;
+    assert_eq!(a.state, "approved");
+    let p: Value = serde_json::from_str(&a.payload).unwrap();
+    assert_eq!(p["event"], "COMMENT", "an approval is a person's");
+    assert_eq!(
+        super::actions::review_event("request_changes", true),
+        "REQUEST_CHANGES"
+    );
+    assert_eq!(super::actions::review_event("LGTM", false), "COMMENT");
 }
 
 #[tokio::test]

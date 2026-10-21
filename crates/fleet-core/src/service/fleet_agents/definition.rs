@@ -479,7 +479,10 @@ impl ActionKind {
                 &["tracker", "from", "to", "link_type"],
                 &["from", "to", "link_type"],
             ),
-            ActionKind::PrReview => (&[], &[]),
+            ActionKind::PrReview => (
+                &["target", "body", "body_template", "verdict", "findings"],
+                &["target", "body"],
+            ),
             ActionKind::PrComment => (&["target", "body", "body_template"], &["target", "body"]),
             ActionKind::PrLabels => (&["target", "labels"], &["target", "labels"]),
             ActionKind::McpCall => (
@@ -595,6 +598,14 @@ pub struct Action {
     /// before (the diagnostics `proposals` tool answers it).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fingerprint: Option<String>,
+    /// `pr_review`: APPROVE | REQUEST_CHANGES | COMMENT (a template;
+    /// anything else is COMMENT).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verdict: Option<String>,
+    /// `pr_review`: an array field of the answer, each item a line comment
+    /// `{path, line, body}`, placed on the PR's diff when it is sent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub findings: Option<String>,
 }
 
 /// Most items one `each` action is planned for.
@@ -629,6 +640,8 @@ impl Action {
         put("steps", self.steps.is_some());
         put("host", self.host.is_some());
         put("fingerprint", self.fingerprint.is_some());
+        put("verdict", self.verdict.is_some());
+        put("findings", self.findings.is_some());
         out
     }
 }
@@ -1269,6 +1282,7 @@ pub fn problems(d: &Definition, templates: &BTreeMap<String, String>) -> Vec<Str
             ("steps", &a.steps),
             ("host", &a.host),
             ("fingerprint", &a.fingerprint),
+            ("verdict", &a.verdict),
         ] {
             if let Some(v) = v {
                 check_template(v, &format!("{at} › {k}"), after_run, &mut out);
@@ -1315,6 +1329,26 @@ pub fn problems(d: &Definition, templates: &BTreeMap<String, String>) -> Vec<Str
                     out.push(format!(
                         "{at}: pr_review reviews a PR's head: the trigger is github_prs"
                     ));
+                }
+                if a.kind == ActionKind::PrReview && a.each.is_some() {
+                    out.push(format!("{at}: pr_review is one review: no each"));
+                }
+                if let Some(f) = a.findings.as_ref().filter(|_| schema_ok) {
+                    let item = r
+                        .output_schema
+                        .get("properties")
+                        .and_then(|p| p.get(f))
+                        .filter(|v| v.get("type").and_then(Value::as_str) == Some("array"))
+                        .and_then(|v| v.get("items"));
+                    let has = |k: &str| {
+                        item.and_then(|i| i.get("properties"))
+                            .is_some_and(|p| p.get(k).is_some())
+                    };
+                    if !(has("path") && has("line") && has("body")) {
+                        out.push(format!(
+                            "{at}: findings {f} is not an array of {{path, line, body}} in output_schema"
+                        ));
+                    }
                 }
             }
             ActionKind::McpCall => {

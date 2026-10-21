@@ -127,6 +127,12 @@ describe('agents (design step 5)', () => {
       'Call kb.add_known_error',
     );
     expect(actionTitle({ kind: 'pr_comment', payload: '{"repo":"o/r","number":4,"body":"x"}' })).toBe('Comment on o/r#4');
+    expect(
+      actionTitle({
+        kind: 'pr_review',
+        payload: '{"repo":"o/r","number":4,"event":"REQUEST_CHANGES","body":"x","findings":[{"path":"a","line":1,"body":"y"}]}',
+      }),
+    ).toBe('Review o/r#4: request changes, 1 line comment');
     expect(actionTitle({ kind: 'jira_create_bug', payload: '{"project":"PD","source_key":null,"summary":"x"}' })).toBe(
       'File a bug in PD for a logged error: x',
     );

@@ -259,6 +259,11 @@ export function actionTitle(a: Pick<AgentAction, 'kind' | 'payload'>): string {
   if (a.kind === 'record' && p) return `Remember ${p.key} in ${p.store}`;
   if (a.kind === 'mcp_call' && p) return `Call ${p.binding}.${p.tool}`;
   if (a.kind === 'pr_comment' && p) return `Comment on ${p.repo}#${p.number}`;
+  if (a.kind === 'pr_review' && p) {
+    const event = String(p.event ?? 'COMMENT').toLowerCase().replace('_', ' ');
+    const n = Array.isArray(p.findings) ? p.findings.length : 0;
+    return `Review ${p.repo}#${p.number}: ${event}, ${n} line comment${n === 1 ? '' : 's'}`;
+  }
   // Fleet's own: what an analysis proposes (self debug, proposer, simplify, refactor).
   if (a.kind === 'work_task' && p) {
     const n = Array.isArray(p.steps) ? p.steps.length : 0;
