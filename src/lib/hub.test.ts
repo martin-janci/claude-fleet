@@ -94,6 +94,11 @@ describe('hubBlock', () => {
   it('sends administration to the hub’s operator, naming the command where there is one', () => {
     expect(hubBlock('add_tracker', remote)).toContain('Ask the hub’s operator to do it (fleet-hub tracker add).');
     expect(hubBlock('remove_host', remote)).toMatch(/Ask the hub’s operator to do it\.$/);
+    // The operator gets a command with its arguments, and the decide action
+    // names apply/reject, not the listing.
+    expect(hubBlock('set_ticket_prefix', remote)).toContain('(fleet-hub tracker prefix <PREFIX> --project <id>)');
+    expect(hubBlock('decide_status_map_proposal', remote)).toContain('(fleet-hub decide proposals apply|reject)');
+    expect(hubBlock('fleet_settings', remote)).toContain('set_setting');
     // A reason that says what to use here instead sends nobody anywhere.
     expect(hubBlock('dismiss_agent_session', remote)).toMatch(/^Use Kill instead/);
     expect(hubBlock('catalog_spawn_author_session', remote)).not.toContain('operator');
@@ -139,24 +144,23 @@ describe('hubBlock, configured hub unavailable', () => {
 });
 
 describe('hubNextStep', () => {
-  // Review w16-3: since redesign 9.2 a paired desktop's confirmation queue is
-  // the hub's, so the request opens in this window's own dialog, and the phone
-  // answers it in Control. The old sentence ("this desktop's dialog answers
-  // only its own queue, which is empty") was false.
-  it('points a hub client at the confirmation that opened here, or the phone', () => {
+  // A yes only marks the hub's nonce approved: the hub replays an approved
+  // call for its operator alone, and this window never retries with the
+  // nonce. So the sentence must not say approving runs it, or that this
+  // window follows (clicking again only mints a fresh request).
+  it('does not promise that approving runs a held call from this window', () => {
     const step = hubNextStep({ code: 'E_CONFIRM_REQUIRED', message: 'confirm' }, remote)!;
-    expect(step).toContain('approve it in the confirmation that just opened, or on your phone');
-    expect(step).toContain('This window follows.');
+    expect(step).toContain('approving the request won’t run it from here');
+    expect(step).toContain('hub’s operator');
+    expect(step).not.toContain('This window follows');
     expect(step).not.toContain('fleet.example.com');
-    expect(step.toLowerCase()).not.toContain('empty');
-    // Once approved the change comes back over the event bridge, so telling
-    // anyone to "refresh" would send them to a button that does nothing new.
-    expect(step.toLowerCase()).not.toContain('refresh');
+    expect(step).not.toMatch(/mcp\.|confirm_destructive/);
   });
 
-  it('sends a read-only client to the owner, who can answer it', () => {
+  it('sends a read-only client to the owner', () => {
     const step = hubNextStep({ code: 'E_CONFIRM_REQUIRED', message: 'confirm' }, { ...remote, client_mode: 'readonly' })!;
-    expect(step).toContain('owner’s device');
+    expect(step).toContain('fleet’s owner');
+    expect(step).not.toContain('This window follows');
   });
 
   it('says nothing about confirmations in standalone mode, where the dialog works', () => {

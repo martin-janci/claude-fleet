@@ -344,7 +344,7 @@ export async function replaceOperator(): Promise<void> {
   }
   const r = await killSession(session.host_alias, session.tmux_name);
   if (!r.ok) {
-    operatorError.set(`Kill failed: ${errorText(r.error)}`);
+    operatorError.set(`Kill failed: ${errorText(r.error, { write: true })}`);
     pushError(r.error, 'Kill failed');
     return;
   }

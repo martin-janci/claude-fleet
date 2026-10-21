@@ -454,6 +454,18 @@ impl FleetTools {
                 crate::store::now_unix(),
             )
             .map_err(to_mcp_err)?;
+        } else if runs_claude {
+            // `over_limit_ok` answers the usage window's question only: a
+            // spent daily limit starts nothing, for the host's own login too
+            // (`sessions::new_session` checks it only under a profile).
+            let s = lock(self.reader()).map_err(to_mcp_err)?;
+            crate::service::account_limits::refuse_over_daily_limit(
+                &s,
+                &p.host_alias,
+                p.profile.as_deref(),
+                crate::store::now_unix(),
+            )
+            .map_err(to_mcp_err)?;
         }
         // A Claude start inside a running mission's grant goes without a
         // card at Autopilot (F2); a shell or another agent never does.

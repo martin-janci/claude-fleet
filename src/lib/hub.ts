@@ -188,10 +188,10 @@ const REASONS = {
   tracker_sync_metrics: { text: `Sync metrics live in the hub’s memory. ${NOT_ADMIN}`, operator: 'fleet-hub tracker status' },
   // Ticket keys: a project's prefix is `work_admin`, master-only.
   ticket_prefixes: { text: `Which prefix a project’s ticket keys carry is fleet administration. ${NOT_ADMIN}`, operator: 'fleet-hub tracker prefixes' },
-  set_ticket_prefix: { text: `Which prefix a project’s ticket keys carry is fleet administration. ${NOT_ADMIN}`, operator: 'fleet-hub tracker prefix' },
+  set_ticket_prefix: { text: `Which prefix a project’s ticket keys carry is fleet administration. ${NOT_ADMIN}`, operator: 'fleet-hub tracker prefix <PREFIX> --project <id>' },
   // Jev's Asana section proposals: applying one is `work_admin update`.
   status_map_proposals: { text: `Section proposals are tracker administration. ${NOT_ADMIN}`, operator: 'fleet-hub decide proposals' },
-  decide_status_map_proposal: { text: `Applying a section proposal changes the tracker’s section map, which is fleet administration. ${NOT_ADMIN}`, operator: 'fleet-hub decide proposals' },
+  decide_status_map_proposal: { text: `Applying a section proposal changes the tracker’s section map, which is fleet administration. ${NOT_ADMIN}`, operator: 'fleet-hub decide proposals apply|reject' },
   // Asset catalogs (Assets M6, R11): which catalogs exist is the master's
   // alone (`add_catalog` / `remove_catalog` are `MasterOnly`). Both commands
   // ROUTE, so this is not a command-named key: Settings → Catalogs shows a
@@ -218,7 +218,7 @@ const REASONS = {
   // P6); this is what a paired desktop says when the hub serves them none.
   fleet_settings: {
     text: 'The hub didn’t send its settings to this device: the hub is older than this app, or this device belongs to one organisation.',
-    operator: 'fleet-hub settings',
+    operator: 'fleet-hub settings, or set_setting',
   },
   refresh_account_usage: { text: 'This reads usage over this machine’s own SSH, which a paired desktop doesn’t use for the fleet.' },
   account_usage_history: { text: 'This app keeps no usage history while a hub runs the fleet.' },
@@ -539,17 +539,14 @@ export function hubActionBlocked(
  *
  * `E_CONFIRM_REQUIRED`: with `mcp.confirm_destructive` on, the hub holds
  * `kill_session`, `delete_worktree`, `move_session`, `cancel_task` and
- * `repair_session` until someone approves them. Since redesign 9.2 a paired
- * desktop's confirmation queue IS the hub's (`mcp_pending_confirms` /
- * `mcp_confirm` route, and `confirms.ts` follows `confirm:changed`), so the
- * request opens in this window's own dialog, and the phone answers it in
- * Control too (review w16-3). A read-only client cannot answer it: the
- * fleet's owner has to.
- *
- * "This window follows" is a consequence of the event bridge, not a hope:
- * once approved, the hub emits `session:killed` / `worktree:removed` /
- * `task:updated` like any other change and the bridge re-emits it here. So
- * the sentence must not say "then refresh".
+ * `repair_session` until someone approves them. The request does show in this
+ * window's confirmation queue and on the phone (`mcp_pending_confirms` routes,
+ * review w16-3), but a yes only marks the hub's nonce approved: the hub
+ * replays an approved call for its operator alone (`confirm_replay.rs`), and
+ * this window's routed commands never retry with the `confirm_nonce`. So the
+ * sentence must not promise that approving runs it, or that this window
+ * follows — clicking again only mints a fresh request. It names who can do
+ * it instead.
  *
  * (`E_UNAUTHORIZED` has its own sentence in `error_copy.ts` now; a second one
  * here said the same thing twice, with the URL in it — review w16-4.)
@@ -560,8 +557,7 @@ export function hubNextStep(
 ): string | null {
   if (!status.remote) return null;
   if (error.code !== 'E_CONFIRM_REQUIRED') return null;
-  if (status.client_mode === 'readonly') {
-    return 'Waiting for a yes from the fleet’s owner: approve it on the owner’s device. This window follows.';
-  }
-  return 'Waiting for a yes: approve it in the confirmation that just opened, or on your phone. This window follows.';
+  const held = 'The hub asks for a yes before this, and this window can’t carry a yes back to it yet, so approving the request won’t run it from here.';
+  if (status.client_mode === 'readonly') return `${held} Ask the fleet’s owner to do it.`;
+  return `${held} Ask the hub’s operator to do it, or to turn off confirming destructive actions on the hub.`;
 }

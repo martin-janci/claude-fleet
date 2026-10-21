@@ -719,6 +719,28 @@ describe('HostDetail find lost conversations', () => {
     expect(screen.getByTestId('discover-list').textContent).toContain('resumed');
   });
 
+  // A spent daily limit is not one over_limit_ok passes (the hub would skip
+  // its check for the host's own login), so the row offers no Start anyway.
+  it('offers no Start anyway for a spent daily limit', async () => {
+    mockedDiscover.mockResolvedValueOnce({ ok: true, value: [candidate()] });
+    mockedNewSession.mockResolvedValueOnce({
+      ok: false,
+      error: {
+        code: 'E_ACCOUNT_LIMIT',
+        message: 'a@b.com has spent $21.50 of its $20.00 daily limit; raise it on the Accounts page',
+        details: { account_uuid: 'u-1', daily_limit_usd: 20, spent_usd: 21.5 },
+      },
+    });
+    mount('mefistos');
+    await fireEvent.click(screen.getByTestId('discover-lost'));
+    await tick();
+    await fireEvent.click(screen.getByTestId('discover-resume'));
+    await tick();
+
+    expect(screen.getByTestId('discover-item-error').textContent).toContain('daily limit');
+    expect(screen.queryByTestId('discover-item-start-anyway')).toBeNull();
+  });
+
   it('renders the transcript age from the seconds-based now prop, not a raw ms mismatch', async () => {
     const threeHoursAgo = candidate({ claude_session_id: 'cs-age', transcript_mtime: NOW - 3 * 3600 });
     mockedDiscover.mockResolvedValueOnce({ ok: true, value: [threeHoursAgo] });

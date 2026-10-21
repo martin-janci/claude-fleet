@@ -164,7 +164,7 @@ describe('pushError on a hub client', () => {
       const t = get(toasts)[0];
       expect(t.code).toBe('E_CONFIRM_REQUIRED');
       expect(t.message).toContain('Kill failed');
-      expect(t.message).toContain('approve it in the confirmation that just opened, or on your phone');
+      expect(t.message).toContain('approving the request won’t run it from here');
       expect(t.message).not.toContain('fleet.example.com');
     } finally {
       hubStatus.set({ ...STANDALONE });
