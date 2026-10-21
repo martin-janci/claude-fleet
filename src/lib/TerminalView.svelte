@@ -1,3 +1,8 @@
+<script lang="ts" module>
+  // Each pane's own pty id suffix for another fleet's session (`fleetPtyId`).
+  let nextAwayView = 0;
+</script>
+
 <script lang="ts">
   import { onDestroy, tick, untrack } from 'svelte';
   import { get } from 'svelte/store';
@@ -5,6 +10,8 @@
   import { unarchiveSession } from './tidy';
   import { getCurrentWebview } from '@tauri-apps/api/webview';
   import { selectedSession } from './selection';
+  import { fleetAttachRefusal, fleetPtyId } from './fleets';
+  import type { SessionRow } from './sessions';
   import PaneUnreadableNotice from './PaneUnreadableNotice.svelte';
   import { hostByAlias } from './hosts';
   import { Screen, rowRunsCache, runsKey, runStyleCss, type Run, type RowShift } from './ansi';
@@ -67,8 +74,25 @@
    *  label: the same single terminal (the agent's when `shell` is absent),
    *  attached under that label as its pty id, so it is a second attach
    *  beside the main window's and never replaces it. */
-  let { shell = undefined, popout = undefined }: { shell?: number; popout?: string } = $props();
+  let {
+    shell = undefined,
+    popout = undefined,
+    session = undefined,
+  }: { shell?: number; popout?: string; session?: SessionRow } = $props();
   const isRoot = $derived(shell === undefined && popout === undefined);
+  /** The main window's own pane: the one the bar, the shortcuts and the
+   *  microphone belong to. A pane mounted for a given `session` is not. */
+  const isMain = $derived(isRoot && session === undefined);
+  /** The session this pane attaches: the selection, unless `session` names
+   *  another fleet's (multi-hub Phase 3, `FleetSessionView`). Such a row has
+   *  `fleet` set and an id in that hub's space, so nothing here that speaks
+   *  to the primary by id runs for it: no workspace check, shell strip,
+   *  microphone, transfer chip, un-archive, upload or host lookups. */
+  const tsel: SessionRow | null = $derived(session ?? $selectedSession);
+  const away = $derived(!!tsel?.fleet);
+  /** `local` (or `wsl-…`) on another hub would mean this machine here. */
+  const awayRefusal = $derived(away && tsel ? fleetAttachRefusal(tsel) : null);
+  const awayView = ++nextAwayView;
 
   // ─────────────────────────────────────────────────────────────────────
   // Terminal pane — minimal ANSI renderer.
@@ -150,14 +174,17 @@
   // THREE inputs — the row, this client's person id and its grant set — and a
   // revoke moves only the last of them. A derivation that read the row alone
   // would never fire, because a revoke changes no column on it.
-  const termAccess = $derived($accessOf($selectedSession));
+  // Another fleet's session: that hub owns the question, and this pane only
+  // ever opens this machine's own ssh to it, as the primary's own pane does. The
+  // refusal below covers the names that would mean this machine.
+  const termAccess = $derived(away ? (awayRefusal ? null : 'own') : $accessOf(tsel));
   const termOwned = $derived(termAccess === 'own');
-  const termNoAttachWhy = $derived(noAttachReason(termAccess, $hubStatus));
+  const termNoAttachWhy = $derived(awayRefusal ?? noAttachReason(termAccess, $hubStatus));
 
   // ── Shell terminals (step 5.3) ──────────────────────────────────────
   // The strip of the session's terminals, beside the agent's own pane.
   const showStrip = $derived(
-    isRoot && termOwned && !!$selectedSession && !hasNoPane($selectedSession),
+    isRoot && !away && termOwned && !!tsel && !hasNoPane(tsel),
   );
   /** The session's open terminals, by number. */
   let shells: number[] = $state([]);
@@ -177,7 +204,7 @@
    *  selection is dropped. */
   let stripFor: number | null = null;
   /** Opening or closing a terminal is `own`, as the attach itself is. */
-  const stripBlocked = $derived($sessionBlocked($selectedSession, 'shell_terminals'));
+  const stripBlocked = $derived($sessionBlocked(tsel, 'shell_terminals'));
 
   /** The list for this selection has come back: until then an empty
    *  `shells` means "not known yet", not "none". */
@@ -201,7 +228,7 @@
   }
 
   $effect(() => {
-    const id = showStrip ? ($selectedSession?.id ?? null) : null;
+    const id = showStrip ? (tsel?.id ?? null) : null;
     if (id === stripFor) return;
     stripFor = id;
     shells = [];
@@ -297,7 +324,7 @@
   let seenRequest = get(terminalRequest)?.seq ?? 0;
   $effect(() => {
     const req = $terminalRequest;
-    if (!isRoot || !req || req.seq <= seenRequest) return;
+    if (!isMain || !req || req.seq <= seenRequest) return;
     seenRequest = req.seq;
     untrack(() => {
       if (req.to === 'agent') selectTab(null);
@@ -314,15 +341,15 @@
 
   // What the bar's Terminals tab reads: the count, and whether it is current.
   $effect(() => {
-    if (!isRoot) return;
+    if (!isMain) return;
     terminalPane.set({
-      sessionId: showStrip ? ($selectedSession?.id ?? null) : null,
+      sessionId: showStrip ? (tsel?.id ?? null) : null,
       shells: [...shells],
       active: showStrip ? activeShell : null,
     });
   });
   onDestroy(() => {
-    if (isRoot) terminalPane.set({ sessionId: null, shells: [], active: null });
+    if (isMain) terminalPane.set({ sessionId: null, shells: [], active: null });
   });
 
   // ── Context help on the picked shell (`context_help.ts`) ─────────────
@@ -354,7 +381,7 @@
       : null,
   );
   function askShellHelp(question: string) {
-    const sel = $selectedSession;
+    const sel = tsel;
     const n = activeShell;
     if (!sel || n == null) {
       return Promise.resolve({ ok: false as const, error: { code: 'E_INVALID', message: 'No shell is picked' } });
@@ -385,7 +412,7 @@
   /** Pop the picked tab out into its own window (step 5.4), or bring its
    *  window forward. The tab stays here too: the window is a second view. */
   async function popOutTerminal() {
-    const sel = $selectedSession;
+    const sel = tsel;
     if (!sel) return;
     const n = activeShell;
     const r = await openTerminalWindow(sel.id, n, popoutTitle(displayName(sel, $showFriendlyNames), n));
@@ -699,6 +726,9 @@
     // without an attach; stated anyway, because the one place a drop can race
     // is a revoke that has not yet closed the PTY.)
     if (!termOwned) return;
+    // Another fleet's session: `upload_to_session` would go through this
+    // window's own hub, which knows another session by that name or none.
+    if (away) return;
     if (!ptyOpen || !currentSession || !currentHost || paths.length === 0) return;
     // An scp of a large file takes many seconds. Pin the upload to the attach
     // that started it: pasting on arrival regardless typed host A's paths into
@@ -735,11 +765,11 @@
   }
 
   $effect(() => {
-    const sess = $selectedSession;
+    const sess = tsel;
     if (!sess) {
       void closeTerm();
       // Nothing attached: the microphone has no session to serve.
-      if (isRoot && get(voiceState).state !== 'off') void releaseVoice();
+      if (isMain && get(voiceState).state !== 'off') void releaseVoice();
       return;
     }
     if (isAttachedTo(sess)) return;
@@ -751,7 +781,7 @@
   // PTY. Required because the first effect above can fire before the
   // <div bind:this> has populated `container`.
   $effect(() => {
-    if (container && $selectedSession && !isAttachedTo($selectedSession)) {
+    if (container && tsel && !isAttachedTo(tsel)) {
       void openTerm();
     }
   });
@@ -766,7 +796,7 @@
       .onDragDropEvent((event) => {
         const p = event.payload;
         if (p.type === 'enter' || p.type === 'over') {
-          dragOver = pointOverGrid(p.position);
+          dragOver = !away && pointOverGrid(p.position);
         } else if (p.type === 'leave') {
           dragOver = false;
         } else if (p.type === 'drop') {
@@ -821,7 +851,7 @@
   ): boolean {
     if (destroyed || gen !== openGeneration) return true;
     if (target.shell !== undefined && target.shell !== myShell) return true;
-    const sel = $selectedSession;
+    const sel = tsel;
     return !sel || sel.tmux_name !== target.tmux_name || sel.host_alias !== target.host_alias;
   }
 
@@ -830,7 +860,7 @@
       reopenPending = true;
       return;
     }
-    const sess = $selectedSession;
+    const sess = tsel;
     if (!sess) return;
     // Before `container`, before the workspace probe, before any state write:
     // a session this client does not own gets no PTY and no `repair_session`
@@ -865,7 +895,7 @@
       gen = ++openGeneration;
       if (standDown()) return;
       // From here on every pty call names this open's terminal.
-      PTY_ID = popout ?? terminalPtyId(shellN);
+      PTY_ID = popout ?? (sess.fleet ? fleetPtyId(sess.fleet, sess, awayView) : terminalPtyId(shellN));
       openError = null;
       disconnected = false;
       await tick();
@@ -911,7 +941,7 @@
       // ask for — attempting it anyway put an E_LOCAL_ONLY toast on every
       // attach of a project-backed session. Repair workspace is unaffected:
       // it passes `explicit: true` and routes.
-      if (shellN == null && sess.project_id != null && !hasNoPane(sess) && ownsTheFleet()) {
+      if (!away && shellN == null && sess.project_id != null && !hasNoPane(sess) && ownsTheFleet()) {
         const rep = await repairSession(sess.id);
         if (standDown()) return;
         if (rep.ok) {
@@ -970,7 +1000,7 @@
           scheduleAutoReconnect(target.tmux_name, target.host_alias);
         } else {
           openError = `Couldn't attach to the session: ${errorText(toIpcError(e))}`;
-          abandonFollow(sess.id);
+          if (!sess.fleet) abandonFollow(sess.id);
         }
         return;
       }
@@ -991,7 +1021,7 @@
       ptyOpen = true;
       ptyGeneration = typeof opened === 'number' ? opened : null;
       attachedAt = Date.now();
-      if (shellN == null) {
+      if (shellN == null && !sess.fleet) {
         // The microphone claim follows the attached session (closeTerm runs
         // on every switch, so release lives on the deselect / destroy
         // paths). A shell terminal never takes it: the voice is the agent's,
@@ -1021,7 +1051,7 @@
       opening = false;
       const pending = reopenPending;
       reopenPending = false;
-      const sel = $selectedSession;
+      const sel = tsel;
       // Re-run the coalesced request when this open cannot have served it: it
       // stood down as stale, or it was for another session. An open that ran
       // its course for `target` and merely failed at pty_open is NOT re-run —
@@ -1199,7 +1229,7 @@
       autoReconnectTimer = null;
       autoReconnecting = false;
       // Bail if the user switched away or detached while we waited.
-      const sel = $selectedSession;
+      const sel = tsel;
       if (!sel || sel.tmux_name !== sessionAtSchedule || sel.host_alias !== hostAtSchedule) return;
       void openTerm(true);
     }, delay);
@@ -1440,7 +1470,7 @@
     destroyed = true;
     openGeneration += 1;
     void closeTerm();
-    if (isRoot && get(voiceState).state !== 'off') void releaseVoice();
+    if (isMain && get(voiceState).state !== 'off') void releaseVoice();
     mouse.dispose();
   });
 
@@ -1545,7 +1575,7 @@
   // unknown host (not yet loaded) is treated as `ssh`, which means we try to
   // attach and let ssh itself say no, rather than refusing on a guess.
   const selectedSessionHostTransport = $derived(
-    $selectedSession ? ($hostByAlias.get($selectedSession.host_alias)?.transport ?? 'ssh') : 'ssh',
+    tsel && !away ? ($hostByAlias.get(tsel.host_alias)?.transport ?? 'ssh') : 'ssh',
   );
   // `transport: 'agent'` says the HUB cannot dial this host — that is why the
   // host dials out instead. It says nothing about THIS machine: `pty_open`
@@ -1554,13 +1584,13 @@
   // it). So the pane attaches every session alike and uses this only to
   // explain a failure that has already happened, never to refuse in advance.
   const selectedIsAgentHost = $derived(
-    !!$selectedSession && selectedSessionHostTransport === 'agent',
+    !!tsel && selectedSessionHostTransport === 'agent',
   );
 </script>
 
 <svelte:window onkeydowncapture={onTerminalChord} />
 
-{#if $selectedSession && !termOwned}
+{#if tsel && !termOwned}
   <!-- The last line of the gate: App does not mount this component for a row
        the client does not own, so reaching here means the answer changed under
        a mounted pane (a revoke) — or that a future caller mounted us without
@@ -1574,10 +1604,10 @@
       <p class="no-attach-why">{termNoAttachWhy}</p>
     {/if}
   </div>
-{:else if $selectedSession}
+{:else if tsel}
   <div class="term-root" class:nested={!isRoot}>
   {#if popoutTarget}
-    {@const what = myShell == null ? agentTabLabel(AGENT_LABELS[sessionAgent($selectedSession)], $agentTabName) : `Shell ${myShell}`}
+    {@const what = myShell == null ? agentTabLabel(AGENT_LABELS[sessionAgent(tsel)], $agentTabName) : `Shell ${myShell}`}
     <div class="popout-bar" data-testid="popout-bar">
       <span class="popout-name">{what} · popped out</span>
       <span class="popout-gap"></span>
@@ -1610,7 +1640,7 @@
   {/if}
   {#if showStrip}
     <TerminalStrip
-      agentLabel={agentTabLabel(AGENT_LABELS[sessionAgent($selectedSession)], $agentTabName)}
+      agentLabel={agentTabLabel(AGENT_LABELS[sessionAgent(tsel)], $agentTabName)}
       {shells}
       active={activeShell}
       {split}
@@ -1621,7 +1651,7 @@
       onsplit={() => (split = !split)}
       onclear={clearTerminal}
       onpopout={() => void popOutTerminal()}
-      host={$selectedSession.host_alias}
+      host={tsel.host_alias}
       opensOn={$terminalOpensOn}
       onopenson={(at) => terminalOpensOn.set(at)}
       {activity}
@@ -1657,9 +1687,9 @@
         <button onclick={reconnect}>Reconnect</button>
       </div>
     {/if}
-    {#if myShell == null}
+    {#if myShell == null && !away}
       <!-- J8 (5.11): the rules could not read the agent's screen. -->
-      <PaneUnreadableNotice session={$selectedSession} />
+      <PaneUnreadableNotice session={tsel} />
     {/if}
     <div class="header" data-testid="terminal-header" use:hintAnchor={{ id: 'terminal-header' }}>
       <!-- One name policy: the header names the session the same way the
@@ -1667,15 +1697,17 @@
            It used to render the tmux name unconditionally, so with the
            default settings the two disagreed about what you were looking
            at. The tmux name stays reachable in the tooltip. -->
-      <span class="name" title={myShell == null ? $selectedSession.tmux_name : shellTerminalName($selectedSession.tmux_name, myShell)}
-        >{displayName($selectedSession, $showFriendlyNames)}</span
+      <span class="name" title={myShell == null ? tsel.tmux_name : shellTerminalName(tsel.tmux_name, myShell)}
+        >{displayName(tsel, $showFriendlyNames)}</span
       >
       {#if myShell != null}
         <span class="shell-tag" data-testid="terminal-shell-tag">Shell {myShell}</span>
       {/if}
-      <TransferChip session={$selectedSession} />
-      {#if myShell == null}
-        <MicToggle session={$selectedSession} transport={selectedSessionHostTransport} />
+      {#if !away}
+        <TransferChip session={tsel} />
+      {/if}
+      {#if myShell == null && !away}
+        <MicToggle session={tsel} transport={selectedSessionHostTransport} />
       {/if}
       <span class="size" data-testid="terminal-size">
         {#if lastCols > 0}{lastCols}×{lastRows}{:else}measuring…{/if}
@@ -1800,22 +1832,22 @@
       </div>
     {/if}
     {#if openError}
-      {#if selectedIsAgentHost && $selectedSession}
+      {#if selectedIsAgentHost && tsel}
         <!-- The attach was tried and failed. `transport: 'agent'` is not a
              claim that no route exists anywhere — only that the hub has
              none — so name what is actually missing: a route from HERE. -->
         <div class="err" data-testid="terminal-agent-transport">
-          {$selectedSession.host_alias} is reached through fleet-agent, not SSH, and this machine
-          has no SSH route to it. Give it one — an ssh config entry for {$selectedSession.host_alias},
+          {tsel.host_alias} is reached through fleet-agent, not SSH, and this machine
+          has no SSH route to it. Give it one — an ssh config entry for {tsel.host_alias},
           through a host that can reach it — or move the session somewhere you can attach.
           ({openError})
         </div>
-      {:else if $selectedSession && $hostByAlias.get($selectedSession.host_alias)?.reachable === false}
+      {:else if tsel && !away && $hostByAlias.get(tsel.host_alias)?.reachable === false}
         <!-- Review r13 (step 3.14): an offline host is said in the pane with
              the states kit, not as ssh's own words. -->
-        {@const offline = $hostByAlias.get($selectedSession.host_alias)}
+        {@const offline = $hostByAlias.get(tsel.host_alias)}
         <HostOffline
-          alias={$selectedSession.host_alias}
+          alias={tsel.host_alias}
           lastSeen={offline?.last_reachable_at ?? offline?.health_at ?? null}
           reason={offline?.last_probe_error ?? null}
           code={offline?.last_probe_error_code ?? null}
