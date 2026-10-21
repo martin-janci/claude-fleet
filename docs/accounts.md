@@ -231,7 +231,10 @@ fleet knows is signed out: a routine's fire goes to its fallback host, else
 skips and says why (with the reset time, or the sign-in command); a
 mission's run waits. A `restart_session { profile }` onto another login is
 refused for a signed-out login, and for one past the line unless
-`over_limit_ok` says the person chose it.
+`over_limit_ok` says the person chose it. A switch from a person's paired
+device (Switch account on a hub-paired desktop or the phone, org-bound or
+not) is the person's choice; the operator, a per-host token and the master
+token are held.
 
 ### Signed-out logins
 
@@ -264,9 +267,14 @@ only starts the next round. Fleet flags such a host in Hosts (⚿) and in
 - **Shared account.** The host's login and a login profile, or two
   profiles, signed into the same account.
 
-Fix it by keeping one login per account on a host: run fleet's sessions on
-that host under a profile on another account, or sign the desktop app (or
-the duplicate profile) into another account.
+Fix it by keeping one copy per login on a host. For Keychain and file, run
+fleet's sessions on that host under a login profile, then delete
+`~/.claude/.credentials.json`: the probe only asks whether both copies
+exist, so the mark stays until one is gone. `local` is never flagged, since
+fleet's local tmux server starts in the login session and reads the
+Keychain. For a shared account, sign the duplicate profile into another
+account. An API key under two profiles is not a conflict: it has no refresh
+token to revoke.
 
 ### Control's own login
 

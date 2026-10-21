@@ -23,6 +23,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::service::add_account::is_api_key_account;
 use crate::store::{HostProfileRow, HostRow};
 
 /// One conflict on a host.
@@ -49,8 +50,8 @@ impl LoginConflict {
                 "{alias}: the default Claude login is kept twice, in the macOS Keychain (the \
                  desktop app, a local terminal) and in ~/.claude/.credentials.json (sessions \
                  started over SSH). Each refresh revokes the other copy, so one side keeps \
-                 hitting \"Login expired\". Run fleet's sessions there under a login profile on \
-                 another account, or sign the desktop app into another account."
+                 hitting \"Login expired\". Run fleet's sessions there under a login profile, \
+                 then delete ~/.claude/.credentials.json: the mark stays while both copies exist."
             ),
             LoginConflict::SharedAccount { logins, email } => {
                 let names: Vec<String> = logins
@@ -107,11 +108,14 @@ pub fn find(
         }
         None => groups.push((uuid.to_string(), vec![login], email.cloned())),
     };
-    if let Some(uuid) = host_account.filter(|u| !u.is_empty()) {
+    // An API key has no refresh token to revoke, so one key under two
+    // profiles is not a conflict.
+    let oauth = |u: &&str| !u.is_empty() && !is_api_key_account(u);
+    if let Some(uuid) = host_account.filter(oauth) {
         add(uuid, None, None);
     }
     for p in profiles {
-        if let Some(uuid) = p.account_uuid.as_deref().filter(|u| !u.is_empty()) {
+        if let Some(uuid) = p.account_uuid.as_deref().filter(oauth) {
             add(uuid, Some(p.name.clone()), p.email.as_ref());
         }
     }
@@ -190,6 +194,15 @@ mod tests {
     }
 
     #[test]
+    fn one_api_key_under_two_profiles_is_not_a_conflict() {
+        let profiles = [
+            profile("one", Some("apikey-0123456789abcdef"), None),
+            profile("two", Some("apikey-0123456789abcdef"), None),
+        ];
+        assert!(find(None, Some("apikey-0123456789abcdef"), &profiles).is_empty());
+    }
+
+    #[test]
     fn the_sentences_name_the_logins_and_the_account() {
         let c = LoginConflict::SharedAccount {
             logins: vec![None, Some("Primary".into())],
@@ -202,7 +215,7 @@ mod tests {
         );
         let k = LoginConflict::KeychainAndFile.describe("mac");
         assert!(
-            k.contains("Keychain") && k.contains(".credentials.json"),
+            k.contains("Keychain") && k.contains("delete ~/.claude/.credentials.json"),
             "{k}"
         );
     }

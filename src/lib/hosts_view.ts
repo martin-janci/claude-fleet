@@ -183,7 +183,9 @@ export function loginConflicts(
   // Accounts in first-seen order, the host's own login first.
   const groups = new Map<string, { logins: (string | null)[]; email: string | null }>();
   const add = (uuid: string | null | undefined, login: string | null, email: string | null) => {
-    if (!uuid) return;
+    // An API key (`add_account::is_api_key_account`) has no refresh token to
+    // revoke, so one key under two profiles is not a conflict.
+    if (!uuid || uuid.startsWith('apikey-')) return;
     const g = groups.get(uuid);
     if (g) {
       g.logins.push(login);
@@ -205,8 +207,8 @@ export function describeLoginConflict(alias: string, c: LoginConflict): string {
     return (
       `${alias}: the default Claude login is kept twice, in the macOS Keychain (the desktop app, a local terminal) ` +
       `and in ~/.claude/.credentials.json (sessions started over SSH). Each refresh revokes the other copy, so one ` +
-      `side keeps hitting "Login expired". Run fleet's sessions there under a login profile on another account, ` +
-      `or sign the desktop app into another account.`
+      `side keeps hitting "Login expired". Run fleet's sessions there under a login profile, then delete ` +
+      `~/.claude/.credentials.json: the mark stays while both copies exist.`
     );
   }
   const names = c.logins.map((l) => (l === null ? 'the host login' : `profile ${l}`));
@@ -225,8 +227,8 @@ export type AttentionKind =
   | 'provision_warning'
   | 'provision_stale'
   | 'auth_override'
-  | 'login_conflict'
   | 'disk_low'
+  | 'login_conflict'
   | 'agent_old'
   | 'claude_old';
 
@@ -315,16 +317,6 @@ export function hostAttention(args: {
       title: `${host.alias}: ${overrides.join(', ')} ${overrides.length === 1 ? 'is' : 'are'} set in its shell or tmux environment and outrank${overrides.length === 1 ? 's' : ''} the /login account, so new Claude sessions there use that credential instead. Unset it (and restart tmux) to use the login.`,
     };
   }
-  // Two copies of one Claude login on the host revoke each other's refresh
-  // token, so sessions there keep stopping at "Login expired · Please run /login".
-  const conflicts = loginConflicts(host);
-  if (conflicts.length > 0) {
-    return {
-      kind: 'login_conflict',
-      icon: 'key',
-      title: conflicts.map((c) => describeLoginConflict(host.alias, c)).join(' '),
-    };
-  }
   // hosts F4 / ux F-14: two hosts sat at 98 % disk with no signal anywhere.
   // A stale sample (the host stopped answering) earns no mark: the disk may
   // have been cleaned up since.
@@ -334,6 +326,18 @@ export function hostAttention(args: {
       kind: 'disk_low',
       icon: 'disk',
       title: `${host.alias} is at ${disk.pct}% disk in $HOME (${gb(host.disk_home_free_kb ?? 0)} free): transcripts, worktrees and moves onto it will fail with ENOSPC.`,
+    };
+  }
+  // Two copies of one Claude login on the host revoke each other's refresh
+  // token, so sessions there keep stopping at "Login expired · Please run /login".
+  // Below disk_low: a full disk breaks every session there, and this mark can
+  // outlive its cause until a stale copy is deleted.
+  const conflicts = loginConflicts(host);
+  if (conflicts.length > 0) {
+    return {
+      kind: 'login_conflict',
+      icon: 'key',
+      title: conflicts.map((c) => describeLoginConflict(host.alias, c)).join(' '),
     };
   }
   // hosts F5: an agent older than the hub silently lacks features. One ahead

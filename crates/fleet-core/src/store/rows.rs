@@ -1411,7 +1411,10 @@ pub struct HostHealth {
     #[serde(default)]
     pub cpu_saturated: bool,
     /// Migration 203. Per-field default: an older hub's ping omits it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Sent as `null` when `None`, like the fields above: `applyPing`
+    /// spreads the ping over the row it holds, so a left-out key would keep
+    /// a stale `true` after the host stops reporting a split.
+    #[serde(default)]
     pub login_split: Option<bool>,
 }
 
@@ -2157,6 +2160,20 @@ pub(super) fn fetch_project(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A ping must carry a cleared `login_split` as `null`: the desktop
+    /// spreads the ping's health over the row it holds, so a left-out key
+    /// would keep a stale `true` (and its login-conflict mark).
+    #[test]
+    fn a_ping_sends_a_cleared_login_split_as_null() {
+        let mut h: HostHealth = serde_json::from_str("{}").unwrap();
+        assert_eq!(h.login_split, None);
+        let v = serde_json::to_value(&h).unwrap();
+        assert_eq!(v.get("login_split"), Some(&serde_json::Value::Null));
+        h.login_split = Some(true);
+        let v = serde_json::to_value(&h).unwrap();
+        assert_eq!(v["login_split"], serde_json::json!(true));
+    }
 
     /// A desktop paired to a hub parses that hub's rows, and the hub may be
     /// older than the desktop. Migration 038 added `system` to `ProjectRow`;

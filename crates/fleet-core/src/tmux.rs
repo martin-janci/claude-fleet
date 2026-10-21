@@ -692,7 +692,8 @@ pub struct HostHealthSample {
     /// login Keychain (`Claude Code-credentials`) AND in
     /// `~/.claude/.credentials.json` (migration 203,
     /// `service::login_conflicts`). Only whether each exists is asked,
-    /// never what it holds. `None`: not macOS, or the host could not tell.
+    /// never what it holds. `None`: not macOS, `local` (its sessions read
+    /// the Keychain, see `local_health`), or the host could not tell.
     pub login_split: Option<bool>,
 }
 
@@ -755,6 +756,17 @@ printf 'bootat=%s\\n' \"$(awk '/^btime / {print $2}' /proc/stat 2>/dev/null || s
 printf 'authenv=%s\\n' \"$({ env; tmux show-environment -g 2>/dev/null; } | grep -E '^(CLAUDE_CODE_USE_BEDROCK|CLAUDE_CODE_USE_VERTEX|CLAUDE_CODE_USE_FOUNDRY|ANTHROPIC_AUTH_TOKEN|ANTHROPIC_API_KEY|CLAUDE_CODE_OAUTH_TOKEN|ANTHROPIC_PROFILE)=.' | cut -d= -f1 | sort -u | tr '\\n' ' ')\"; \
 printf 'agents=%s\\n' \"$(for a in claude codex agy gemini; do command -v \"$a\" >/dev/null 2>&1 && printf '%s ' \"$a\"; done)\"; \
 printf 'credsplit=%s\\n' \"$([ \"$(uname -s 2>/dev/null)\" = Darwin ] && { [ -f \"$HOME/.claude/.credentials.json\" ] && security find-generic-password -s 'Claude Code-credentials' >/dev/null 2>&1 && echo 1 || echo 0; })\"";
+
+/// A [`HOST_HEALTH_SCRIPT`] sample taken on `local`, with `login_split`
+/// dropped: the split is about `claude` started over SSH, which finds the
+/// Keychain locked and falls back to `.credentials.json`. Fleet's local
+/// tmux server is started from the login session, so its sessions read the
+/// Keychain like the desktop app does, and a `.credentials.json` left over
+/// next to it is a copy nothing of fleet's refreshes.
+fn local_health(mut sample: HostHealthSample) -> HostHealthSample {
+    sample.login_split = None;
+    sample
+}
 
 /// Second field of a `df -Pk` data line is total kB, fourth is available kB.
 fn df_kb(line: &str) -> (Option<i64>, Option<i64>) {
@@ -1061,7 +1073,9 @@ impl TmuxExec for LocalTmux {
             .await
             .ok()
             .filter(|o| o.status.success())?;
-        Some(parse_host_health(&String::from_utf8_lossy(&out.stdout)))
+        Some(local_health(parse_host_health(&String::from_utf8_lossy(
+            &out.stdout,
+        ))))
     }
     async fn read_profiles(&self) -> Option<Vec<HostProfile>> {
         local_allowed().ok()?;
@@ -3535,6 +3549,11 @@ mod tests {
         assert_eq!(parse_host_health("credsplit=0\n").login_split, Some(false));
         // Not macOS prints an empty value; an older host no line at all.
         assert_eq!(parse_host_health("credsplit=\n").login_split, None);
+        // On `local` the split does not apply (the sessions read the Keychain).
+        assert_eq!(
+            local_health(parse_host_health("credsplit=1\n")).login_split,
+            None
+        );
         assert_eq!(parse_host_health("uptime=5\n").login_split, None);
     }
 
