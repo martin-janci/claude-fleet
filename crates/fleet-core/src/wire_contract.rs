@@ -314,8 +314,11 @@
 //!   Routine memory (migration 204) is new without a bump: a routine row
 //!   carries `memory` and `memory_auto` (additive, absent when off), its
 //!   input takes them, and `routines` gains `memory` and `set_memory`. The
-//!   desktop sends the input fields only when a routine keeps a notebook,
-//!   so a hub without them still saves every other routine; one that has
-//!   no `memory` action answers `E_INVALID`, which the editor shows as no
-//!   notebook.
+//!   desktop sends the input fields only when a routine keeps a notebook
+//!   (or `memory: ""` to turn one off), so a hub without them still saves
+//!   every other routine; one that has no `memory` action answers
+//!   `E_INVALID`, which the editor shows as no notebook. The other way
+//!   round, a desktop older than memory sends a change without `memory`,
+//!   and the hub keeps the routine's notebooks rather than turning them
+//!   off.
 pub const CONTRACT_REVISION: u32 = 18;

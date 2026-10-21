@@ -1171,18 +1171,21 @@ Index by area (names only; see the reference for details):
   `~/.claude`, so the next run reads them on whatever host it starts. A
   routine's `memory` in `save` names the ones its runs use: `routine` (its
   own), `project` (its project's, shared by every routine of that project
-  in the same circle: its org, else its owner) or `both`; absent or `""`
-  is none. `memory_auto: true` (needs `memory`) adds one line per finished
+  in the same circle: its org, else its owner) or `both`; `""` is none,
+  and so is absent for a new routine, while a change without `memory`
+  keeps the routine's (an older client's edit does not turn it off). `memory_auto: true` (needs `memory`) adds one line per finished
   run, `- [run <id> · <UTC time> · <state>] <first line of its reply>`
   (or the failure's reason), to the first notebook it uses; the oldest such
   lines go first when the notebook is full. A run's prompt carries each
   notebook it uses under the autonomy line, fenced as untrusted text, and
   says how to rewrite one; `dry_run` shows it. A finished run's reply is
   read off its transcript within the hour (a transcript that cannot be read
-  is tried again for ten minutes, then the run is noted without it): a
+  is tried again a minute later, for ten minutes, then the run is noted
+  without it, `done (reply not read)`, and its trace says so): a
   `<routine-memory scope="routine|project">…</routine-memory>` block
   replaces that notebook, the last block of a scope winning, and a scope
-  the routine does not use is ignored; the run's trace says what changed.
+  the routine does not use is ignored, as is a block of a run older than
+  the notebook's last writer; the run's trace says what changed.
   A notebook is at most 4000 characters (a longer block is cut). `memory {
   routine_id }` answers `{ routine_id, memory?, memory_auto, routine?,
   project?, max_chars, may_change }`, each notebook `{ scope, owner_id,
@@ -1191,7 +1194,8 @@ Index by area (names only; see the reference for details):
   notebook: routine | project, text }` rewrites one (`""` clears it), with
   the fence of changing the routine (`E_INVALID` for a notebook it does not
   use or text past the cap). Deleting a routine deletes its own notebook;
-  its project's stays. The operator may read them, not write them.
+  its project's stays until the project is removed. The operator may
+  read them, fenced as untrusted text, not write them.
 - **Start rules** — `start_rules`, by `action` (Orbit Fleet 8.11): a task
   key pattern (`PD-*`, `*` for any run of characters, any case) that names
   the project, and optionally the host, a start of a matching task lands

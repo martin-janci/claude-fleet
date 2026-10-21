@@ -117,7 +117,8 @@
    *  one, New, a template, the Inbox's Fix) asks first when it is changed
    *  (review w05-1). */
   function leaveDraft(then: () => void) {
-    if (draft && dirty && editor) editor.askLeave(then);
+    // The editor decides, not `dirty`: an unsaved notebook edit counts too.
+    if (draft && editor) editor.askLeave(then);
     else then();
   }
 
@@ -264,7 +265,7 @@
     // Undo: an edit is saved back as it was; a new routine is deleted. Not
     // offered when Run once now saved it: a run is starting from it.
     const undo = async () => {
-      const back = was ? await saveRoutine(routineInputOf(was), was.id) : await deleteRoutine(saved.id);
+      const back = was ? await saveRoutine(routineInputOf(was, !!saved.memory), was.id) : await deleteRoutine(saved.id);
       if (!back.ok) pushError(back.error, 'Undo failed');
       await reload();
     };

@@ -214,8 +214,9 @@ export interface RoutineInput {
   fallback_host?: string;
   retry_once?: boolean;
   autonomy?: number;
-  /** Sent only when it keeps a notebook, so a hub without memory still saves it. */
-  memory?: RoutineMemoryMode;
+  /** Sent only when it keeps a notebook, so a hub without memory still
+   *  saves it; `''` turns a routine's off (a change without it keeps it). */
+  memory?: RoutineMemoryMode | '';
   memory_auto?: boolean;
 }
 
@@ -234,8 +235,10 @@ export interface RoutinePreview {
 }
 
 /** A saved routine as `save` takes it back, unchanged: what the editor
- *  opens on, and what Undo writes after an edit (G7.4). */
-export function routineInputOf(r: RoutineRow): RoutineInput {
+ *  opens on, and what Undo writes after an edit (G7.4). `clearsMemory`:
+ *  the routine now keeps a notebook `r` did not, so `memory: ''` goes too
+ *  (a change without `memory` keeps the routine's). */
+export function routineInputOf(r: RoutineRow, clearsMemory = false): RoutineInput {
   return {
     name: r.name,
     enabled: r.enabled,
@@ -259,7 +262,7 @@ export function routineInputOf(r: RoutineRow): RoutineInput {
     fallback_host: r.fallback_host,
     retry_once: r.retry_once,
     autonomy: r.autonomy,
-    ...(r.memory ? { memory: r.memory, memory_auto: r.memory_auto ?? false } : {}),
+    ...(r.memory ? { memory: r.memory, memory_auto: r.memory_auto ?? false } : clearsMemory ? { memory: '' as const } : {}),
   };
 }
 

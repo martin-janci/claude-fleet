@@ -254,8 +254,9 @@ pub struct RoutineInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub autonomy: Option<i64>,
     // Routine memory (migration 204; docs/control-api.md): the notebooks
-    // its runs read and may rewrite, routine | project | both; absent =
-    // none.
+    // its runs read and may rewrite, routine | project | both; "" = none,
+    // absent = none for a new routine and unchanged for a change (a client
+    // that predates memory keeps a routine's).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory: Option<String>,
     // The fleet notes each finished run in the notebook. Needs memory.
@@ -962,7 +963,8 @@ pub fn preview(
 }
 
 /// `routines { action: save, routine, routine_id? }`: without `routine_id`
-/// a new routine, the caller's; with it, a change of every field.
+/// a new routine, the caller's; with it, a change of every field but an
+/// absent `memory`, which keeps the routine's.
 pub fn save(
     store: &Mutex<Store>,
     scope: &ViewScope,
@@ -992,7 +994,15 @@ pub fn save(
         }
         Some(id) => {
             let before = changeable(&s, scope, id)?;
-            let (f, org) = check(&s, scope, input)?;
+            let (mut f, org) = check(&s, scope, input)?;
+            // A change without `memory` keeps the routine's: a desktop
+            // older than memory (hub client mode) sends none, and its
+            // edit must not turn the notebooks off. `""` turns them off.
+            if input.memory.is_none() {
+                f.memory = before.memory.clone();
+                f.memory_auto =
+                    f.memory.is_some() && input.memory_auto.unwrap_or(before.memory_auto);
+            }
             if org != before.org_id {
                 return Err(IpcError::new(codes::E_INVALID, STAYS_IN_ORG));
             }
