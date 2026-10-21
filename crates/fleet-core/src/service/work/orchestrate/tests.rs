@@ -534,6 +534,41 @@ fn a_continuous_mission_wakes_on_its_timer() {
     assert_eq!(next_wake(&m, &busy, 100), 100 + RUNNING_RECHECK_SECS);
 }
 
+/// TASK-292: a person's resume restarts the no-progress window, so the
+/// mission is not braked again by the runs it found when it was resumed.
+#[test]
+fn a_resume_restarts_the_no_progress_window() {
+    let m = fixture().m;
+    let secs = m.policy.no_progress_secs as i64;
+    let stale = MissionTaskCounts {
+        open: 1,
+        last_activity_at: Some(1_000),
+        ..Default::default()
+    };
+    let late = 1_000 + secs + 1;
+    assert!(no_progress(&m, &stale, None, late), "the brake still fires");
+    assert!(
+        !no_progress(&m, &stale, Some(late - 10), late),
+        "resumed just now"
+    );
+    assert!(
+        no_progress(&m, &stale, Some(late - 10), late + secs),
+        "a full window after the resume, it fires again"
+    );
+    assert!(
+        no_progress(&m, &stale, Some(500), late),
+        "a resume before the last run changes nothing"
+    );
+    let idle = MissionTaskCounts {
+        last_activity_at: Some(1_000),
+        ..Default::default()
+    };
+    assert!(
+        !no_progress(&m, &idle, None, late),
+        "nothing open, no brake"
+    );
+}
+
 /// Redesign 2.2 (migration 124): a run's session is the mission's, whoever
 /// took the step.
 #[test]

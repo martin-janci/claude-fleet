@@ -345,3 +345,29 @@ fn a_start_is_inside_a_grant_only_on_its_hosts_while_it_holds() {
         "budget spent"
     );
 }
+
+/// TASK-292: only a resume (`paused` → `active`) that is not the loop's own
+/// restarts the no-progress window; the first start does not.
+#[test]
+fn a_persons_resume_is_the_missions_resumed_at() {
+    let s = Store::open_in_memory().unwrap();
+    let m = mission(&s);
+    s.set_mission_state(m, None, "active", "fleet").unwrap();
+    assert_eq!(
+        s.mission_resumed_at(m).unwrap(),
+        None,
+        "a start is no resume"
+    );
+    s.set_mission_state(m, None, "paused", "loop").unwrap();
+    assert_eq!(
+        s.mission_resumed_at(m).unwrap(),
+        None,
+        "a brake is no resume"
+    );
+    s.set_mission_state(m, None, "active", "loop").unwrap();
+    assert_eq!(s.mission_resumed_at(m).unwrap(), None, "the loop's own");
+    s.set_mission_state(m, None, "paused", "loop").unwrap();
+    s.set_mission_state(m, None, "active", "person:1").unwrap();
+    let at = s.mission_resumed_at(m).unwrap().expect("resumed");
+    assert!((now_unix() - at).abs() <= 1);
+}

@@ -317,6 +317,21 @@ impl Store {
         )?)
     }
 
+    /// When a person last resumed the mission (`paused` → `active`, any
+    /// actor but the loop), or `None`. The no-progress brake counts its
+    /// window from here as well as from the last run, so a resume after
+    /// that brake does not pause it again on the next tick (TASK-292).
+    pub fn mission_resumed_at(&self, mission_id: i64) -> Result<Option<i64>, IpcError> {
+        Ok(self.conn.query_row(
+            "SELECT MAX(at) FROM orchestration_events \
+             WHERE orchestration_project_id = ?1 AND kind = 'state' AND actor <> 'loop' \
+               AND json_extract(payload, '$.from') = 'paused' \
+               AND json_extract(payload, '$.to') = 'active'",
+            [mission_id],
+            |r| r.get(0),
+        )?)
+    }
+
     /// What the mission has spent, in micro-USD: the usage of every session
     /// that ran an attempt at one of its members, plus its planner's
     /// `claude -p` runs (`aux_usage`, redesign 8.2).

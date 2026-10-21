@@ -1593,6 +1593,23 @@ fn brake(s: &Store, m: &MissionRow, kind: &str, why: String) -> Result<(), IpcEr
     Ok(())
 }
 
+/// The no-progress brake (§7.5): runs are open and none started or
+/// finished for `no_progress_secs`. A person's resume restarts the window
+/// (TASK-292): the runs it found are still old, and without this the next
+/// tick would pause the mission again before anything could move.
+fn no_progress(
+    m: &MissionRow,
+    counts: &MissionTaskCounts,
+    resumed_at: Option<i64>,
+    now: i64,
+) -> bool {
+    counts.open > 0
+        && counts
+            .last_activity_at
+            .max(resumed_at)
+            .is_some_and(|at| now - at > m.policy.no_progress_secs as i64)
+}
+
 /// When to look at `m` next.
 fn next_wake(m: &MissionRow, counts: &MissionTaskCounts, now: i64) -> i64 {
     if m.mode == "continuous" {
@@ -1803,11 +1820,7 @@ pub async fn tick_mission(deps: &Deps, id: i64, now: i64) -> Result<(), IpcError
                 return Ok(());
             }
         }
-        if counts.open > 0
-            && counts
-                .last_activity_at
-                .is_some_and(|at| now - at > m.policy.no_progress_secs as i64)
-        {
+        if no_progress(&m, &counts, s.mission_resumed_at(id)?, now) {
             brake(
                 &s,
                 &m,
