@@ -373,11 +373,40 @@ pub fn settle_direct_send(store: &Mutex<Store>, claim: Option<i64>, e: &IpcError
         return;
     };
     if maybe_typed(e) {
+        date_claim_from_typing(store, Some(id));
         return;
     }
     if let Ok(s) = lock(store) {
         let _ = s.release_deferred_prompt(id, &e.message, now);
         let _ = s.cancel_deferred_prompt(id, now);
+    }
+}
+
+/// A direct send's typing is over (or may have landed): date its claim from
+/// now, so [`TURN_START_GRACE_SECS`] counts from when the paste could have
+/// landed, not from before a typing that took seconds (an SSH send that ran
+/// to its wall clock). Left alone when a new idle moment began after the
+/// claim: its turn already ended, and the claim must not come to hold a
+/// moment it never took.
+pub fn date_claim_from_typing(store: &Mutex<Store>, claim: Option<i64>) {
+    let Some(id) = claim else {
+        return;
+    };
+    let Ok(s) = lock(store) else {
+        return;
+    };
+    let Ok(Some(p)) = s.get_deferred_prompt(id) else {
+        return;
+    };
+    let Some(at) = p.delivered_at else {
+        return;
+    };
+    let Ok(Some(row)) = s.get_session_by_id(p.session_id) else {
+        return;
+    };
+    let now = now_unix();
+    if now > at && idle_moment(&row).is_none_or(|m| m <= at) {
+        let _ = s.restamp_deferred_claim(id, now);
     }
 }
 
@@ -388,11 +417,17 @@ pub const TURN_START_GRACE_SECS: i64 = 10;
 
 /// Did a direct send that lost the moment ([`claim_moment_for_direct_send`]
 /// answered `None`) lose it to a prompt that started no turn still to come?
-/// The row is idle and its newest claim either ended in the Stop that made
-/// this moment (a turn that failed in the second it was typed) or is past
-/// [`TURN_START_GRACE_SECS`] with the row still idle (a local `/clear`, a
-/// paste the REPL swallowed, a typing that may have landed but did not).
+/// The row is idle and its newest claim is past [`TURN_START_GRACE_SECS`]
+/// with the row still idle (a local `/clear`, a paste the REPL swallowed, a
+/// typing that may have landed but did not, a turn that failed at once).
 /// `false` for a row that is not idle: the turn it is in hooks on its own.
+///
+/// A Stop in the claim's own second is no proof its turn ended: both are
+/// whole seconds, and the Stop that OPENED the moment shares the second of
+/// a claim typed right after it (the claim holds a moment when
+/// `delivered_at >= idle_since`). Only the grace tells the two apart; a Stop
+/// strictly after the claim starts a moment the claim does not hold, so it
+/// never gets here.
 pub fn moment_held_without_turn(
     store: &Mutex<Store>,
     row: &SessionRow,
@@ -404,14 +439,40 @@ pub fn moment_held_without_turn(
     let Some(at) = lock(store)?.latest_deferred_claim_at(row.id)? else {
         return Ok(false);
     };
-    Ok(row.last_stop_at.is_some_and(|stop| stop >= at) || at <= now - TURN_START_GRACE_SECS)
+    Ok(at <= now - TURN_START_GRACE_SECS)
+}
+
+/// A send that lost the moment to a prompt that started no turn
+/// ([`moment_held_without_turn`]) takes the moment over: it records a claim
+/// of its own, dated now, past the dead one's hold, so the next sender in
+/// the lane judges from this send (typed, its turn starting) and counts
+/// itself behind it, rather than from the dead claim. `None` when the
+/// moment is held by a prompt that may still be starting a turn, or the row
+/// is not idle. Given back like any claim, with [`settle_direct_send`].
+pub fn take_over_turnless_moment(
+    store: &Mutex<Store>,
+    row: &SessionRow,
+    body: &str,
+    now: i64,
+) -> Result<Option<i64>, IpcError> {
+    if !moment_held_without_turn(store, row, now)? {
+        return Ok(None);
+    }
+    let s = lock(store)?;
+    let id = s.insert_deferred_prompt(row.id, body, now)?;
+    if s.claim_deferred_prompt(id, now)? {
+        return Ok(Some(id));
+    }
+    s.cancel_deferred_prompt(id, now)?;
+    Ok(None)
 }
 
 /// What a direct send found once it held the session's typing lane: the
 /// row as it read then, not as the caller resolved it before the wait.
 #[derive(Debug, Clone)]
 pub struct DirectSend {
-    /// This send took the session's idle moment.
+    /// This send took the session's idle moment, or took over one held by
+    /// a prompt that started no turn.
     pub got: bool,
     /// The session row read in the lane.
     pub row: SessionRow,
@@ -420,7 +481,8 @@ pub struct DirectSend {
     /// the row says `working`, or another prompt took this idle moment and
     /// has not been answered yet. A moment held by a prompt that started no
     /// turn still to come ([`moment_held_without_turn`]) has nothing in
-    /// front of it.
+    /// front of it: the send takes it over ([`take_over_turnless_moment`]),
+    /// so a sender after it counts itself behind this one.
     pub behind_a_turn: bool,
 }
 
@@ -446,21 +508,27 @@ where
     let _lane = typing_lane(store, row.id).await;
     let now = now_unix();
     let fresh = session_row(store, row.id).unwrap_or_else(|_| row.clone());
-    let claim = claim_moment_for_direct_send(store, &fresh, body, now)?;
-    let behind_a_turn = match claim {
-        Some(_) => false,
-        None => {
-            fresh.claude_status.as_deref() == Some("working")
-                || (idle_for_prompt(&fresh) && !moment_held_without_turn(store, &fresh, now)?)
+    let mut claim = claim_moment_for_direct_send(store, &fresh, body, now)?;
+    let mut behind_a_turn = false;
+    if claim.is_none() {
+        if fresh.claude_status.as_deref() == Some("working") {
+            behind_a_turn = true;
+        } else if idle_for_prompt(&fresh) {
+            claim = take_over_turnless_moment(store, &fresh, body, now)?;
+            behind_a_turn = claim.is_none();
         }
-    };
+    }
+    let got = claim.is_some();
     let found = DirectSend {
-        got: claim.is_some(),
+        got,
         row: fresh,
         behind_a_turn,
     };
     match type_it(found).await {
-        Ok(t) => Ok((claim.is_some(), t)),
+        Ok(t) => {
+            date_claim_from_typing(store, claim);
+            Ok((got, t))
+        }
         Err(e) => {
             settle_direct_send(store, claim, &e, now);
             Err(e)
@@ -1197,17 +1265,14 @@ mod tests {
         assert!(out.is_none());
     }
 
-    /// A moment held by a prompt whose turn ended in the second it was typed
-    /// has nothing in front of a send into it: the reply is the next turn.
+    /// Review r5: a Stop in the claim's own second may be the Stop that
+    /// opened the moment, with the claim's turn still starting, so a send
+    /// into it counts itself behind that turn (the grace decides later).
     #[tokio::test]
-    async fn a_moment_held_by_an_ended_turn_puts_nothing_in_front() {
+    async fn a_claim_in_the_stops_own_second_still_counts_as_a_turn_ahead() {
         let (store, id) = store_with("idle");
         let now = now_unix();
         set_idle_since(&store, id, now - 10);
-        let row = session_row(&store, id).unwrap();
-        assert!(claim_moment_for_direct_send(&store, &row, "fast", now)
-            .unwrap()
-            .is_some());
         store
             .lock()
             .unwrap()
@@ -1217,12 +1282,83 @@ mod tests {
                 rusqlite::params![id, now],
             )
             .unwrap();
+        let row = session_row(&store, id).unwrap();
+        assert!(claim_moment_for_direct_send(&store, &row, "fast", now)
+            .unwrap()
+            .is_some());
         let (got, behind) =
             send_direct(&store, &row, "next", |d| async move { Ok(d.behind_a_turn) })
                 .await
                 .unwrap();
         assert!(!got, "the moment is still held");
-        assert!(!behind, "but no turn is coming ahead of this send");
+        assert!(
+            behind,
+            "the claim's turn may be starting ahead of this send"
+        );
+    }
+
+    /// A moment held by a prompt that started no turn has nothing in front
+    /// of a send into it, and that send takes the moment over: the next
+    /// sender in the lane, before the first one's hook lands, counts itself
+    /// behind the first one's turn instead of collecting its reply.
+    #[tokio::test]
+    async fn a_send_past_a_turnless_claim_takes_the_moment_over() {
+        let (store, id) = store_with("idle");
+        let now = now_unix();
+        set_idle_since(&store, id, now - 60);
+        let row = session_row(&store, id).unwrap();
+        assert!(claim_moment_for_direct_send(
+            &store,
+            &row,
+            "/clear",
+            now - TURN_START_GRACE_SECS - 5
+        )
+        .unwrap()
+        .is_some());
+        let (got, behind) = send_direct(&store, &row, "a", |d| async move { Ok(d.behind_a_turn) })
+            .await
+            .unwrap();
+        assert!(got, "the send took the dead claim's moment over");
+        assert!(!behind, "no turn is coming ahead of it");
+        let (got, behind) = send_direct(&store, &row, "b", |d| async move { Ok(d.behind_a_turn) })
+            .await
+            .unwrap();
+        assert!(!got);
+        assert!(behind, "the first send's turn runs ahead of this one");
+        // The queue's delivery does not type into it either.
+        let out = deliver_due_with(&store, id, now_unix(), |_, _| async {
+            panic!("typed on top of the send that took the moment over")
+        })
+        .await
+        .unwrap();
+        assert!(out.is_none());
+    }
+
+    /// The grace counts from the end of the typing, not from the claim
+    /// stamped before it, unless a new moment began since the claim.
+    #[test]
+    fn a_claim_is_dated_from_its_typing_unless_a_new_moment_began() {
+        let (store, id) = store_with("idle");
+        let now = now_unix();
+        set_idle_since(&store, id, now - 60);
+        let row = session_row(&store, id).unwrap();
+        let claim = claim_moment_for_direct_send(&store, &row, "slow", now - 30).unwrap();
+        date_claim_from_typing(&store, claim);
+        let at = store.lock().unwrap().latest_deferred_claim_at(id).unwrap();
+        assert!(at.is_some_and(|at| at >= now), "{at:?}");
+
+        let (store, id) = store_with("idle");
+        set_idle_since(&store, id, now - 60);
+        let row = session_row(&store, id).unwrap();
+        let claim = claim_moment_for_direct_send(&store, &row, "done", now - 30).unwrap();
+        set_idle_since(&store, id, now - 20);
+        date_claim_from_typing(&store, claim);
+        let at = store.lock().unwrap().latest_deferred_claim_at(id).unwrap();
+        assert_eq!(
+            at,
+            Some(now - 30),
+            "its turn ended: no hold on the new moment"
+        );
     }
 
     /// A send-now `queue_prompt` that may have been typed fails (listed,
