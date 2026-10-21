@@ -51,8 +51,13 @@
     }
   }
 
+  /** The routine read last: the same id handed in again (the editor
+   *  re-drafted from the saved row) keeps what is being typed. */
+  let shownId: number | null = null;
   $effect(() => {
     const id = routineId;
+    if (id === shownId) return;
+    shownId = id;
     untrack(() => {
       mem = null;
       edits = {};

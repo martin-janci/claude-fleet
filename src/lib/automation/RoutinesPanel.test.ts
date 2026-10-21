@@ -899,6 +899,49 @@ describe('the routine notebooks (migration 204)', () => {
     expect((screen.getByTestId('routine-memory-save-routine') as HTMLButtonElement).disabled).toBe(true);
   });
 
+  /** `routeMemory`, with `save` answering the routine saved in place. */
+  function routeSaveInPlace() {
+    routeMemory((id) => (id === 3 ? notebook('old notes') : notFound()));
+    const base = inv.getMockImplementation() as (cmd: string, a: unknown) => Promise<unknown>;
+    inv.mockImplementation(async (cmd: string, a: { args: { action: string; routine?: Partial<RoutineRow> } }) => {
+      if (cmd === 'routines' && a.args.action === 'save') return { ...withMemory, ...a.args.routine, id: 3 };
+      return base(cmd, a);
+    });
+  }
+
+  it('saving the form keeps the editor open with the unsaved notebook text, unlocked', async () => {
+    routeSaveInPlace();
+    await openSaved();
+    const box = (await screen.findByTestId('routine-memory-routine')) as HTMLTextAreaElement;
+    await waitFor(() => expect(box.value).toBe('old notes'));
+    await fireEvent.input(box, { target: { value: 'new notes' } });
+    await fireEvent.input(screen.getByTestId('routine-prompt'), { target: { value: 'Only CI.' } });
+    expect(screen.getByTestId('routine-memory-locked')).toBeInTheDocument();
+
+    await fireEvent.click(screen.getByTestId('routine-save'));
+    await waitFor(() => expect(argsOf('save')?.routine?.prompt).toBe('Only CI.'));
+    await waitFor(() => expect(screen.queryByTestId('routine-memory-locked')).toBeNull());
+    const kept = screen.getByTestId('routine-memory-routine') as HTMLTextAreaElement;
+    await waitFor(() => expect(kept.readOnly).toBe(false));
+    expect(kept.value).toBe('new notes');
+    expect((screen.getByTestId('routine-memory-save-routine') as HTMLButtonElement).disabled).toBe(false);
+    // Leaving still asks: the notebook text is not saved yet.
+    await fireEvent.click(screen.getByTestId('routine-cancel'));
+    expect(screen.getByTestId('form-discard-ask')).toBeInTheDocument();
+  });
+
+  it('Run once now with only a notebook edit runs and keeps the editor and its text', async () => {
+    routeSaveInPlace();
+    await openSaved();
+    const box = (await screen.findByTestId('routine-memory-routine')) as HTMLTextAreaElement;
+    await waitFor(() => expect(box.value).toBe('old notes'));
+    await fireEvent.input(box, { target: { value: 'new notes' } });
+
+    await fireEvent.click(screen.getByTestId('routine-run-once'));
+    await waitFor(() => expect(argsOf('run_now')).toEqual({ action: 'run_now', routine_id: 3 }));
+    expect((screen.getByTestId('routine-memory-routine') as HTMLTextAreaElement).value).toBe('new notes');
+  });
+
   it('counts characters as the fleet does: an emoji is one', async () => {
     const body = '🙂'.repeat(20) + 'x'.repeat(3970);
     routeMemory((id) => (id === 3 ? notebook(body) : notFound()));

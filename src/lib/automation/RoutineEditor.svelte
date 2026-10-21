@@ -229,6 +229,12 @@
   /** Leave this draft for `then`: at once when it is unchanged, else after
    *  "Discard changes?" in the footer. RoutinesPanel sends every way out
    *  that replaces the draft through here. */
+  /** Whether a notebook box holds unsaved text, for a Save that would
+   *  otherwise close the editor over it. */
+  export function hasNotebookEdit(): boolean {
+    return notebookPending;
+  }
+
   export function askLeave(then: () => void): void {
     if (!unsaved) {
       leaveTo = null;
