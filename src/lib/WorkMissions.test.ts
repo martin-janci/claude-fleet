@@ -1,7 +1,7 @@
 // The Work view's Missions tab (orchestration O1): the list, a new mission,
 // its detail with the lifecycle moves the state allows, a new task under its
 // root, and a refusal shown as text.
-import { render, screen, fireEvent } from '@testing-library/svelte';
+import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { tick } from 'svelte';
 
@@ -9,7 +9,8 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke } from '@tauri-apps/api/core';
 import WorkMissions from './WorkMissions.svelte';
 import MissionRoom from './MissionRoom.svelte';
-import { openMissionRoom, resetMissionRoomForTests } from './mission_room';
+import { openMissionRoom, resetMissionRoomForTests, roomMissionId } from './mission_room';
+import { bumpWorkChanged } from './work';
 import { expectAccessible } from './a11y_check';
 import { expectLastButton, expectOnePrimary } from './action_hierarchy_check';
 import { hosts } from './hosts';
@@ -18,6 +19,7 @@ import { get } from 'svelte/store';
 import { sessions as sessionStore } from './sessions';
 import { session } from './hosts_fixture';
 import { clearSelection, selectedSession, selectedTaskId, taskFocused } from './selection';
+import { outbox } from './outbox';
 import {
   filterMissions,
   missionFilterChoices,
@@ -97,6 +99,7 @@ const item = (id: number, title: string) => ({
 beforeEach(() => {
   localStorage.removeItem('cf:pref:work.missions.view');
   resetMissionRoomForTests();
+  outbox.resetForTests();
 });
 
 /** Work → Missions as the app draws it: the sidebar's list and the room. */
@@ -144,6 +147,51 @@ describe('WorkMissions', () => {
     renderMissions();
     await flush();
     expect(screen.getByTestId('missions-empty')).toBeTruthy();
+  });
+
+  // Review w17-7: a failed list refresh keeps the missions listed.
+  it('a failed list refresh keeps the list, with a Retry line', async () => {
+    renderMissions();
+    await flush();
+    expect(screen.queryByTestId('missions-error')).toBeNull();
+    handlers.work_missions = () => Object.assign(new Error('slow'), { code: 'E_HUB_TIMEOUT' });
+    bumpWorkChanged();
+    await waitFor(() => expect(screen.getByTestId('missions-refresh-error')).toBeTruthy(), { timeout: 2000 });
+    expect(screen.queryByTestId('missions-error')).toBeNull();
+    expect(screen.getByTestId('work-missions').textContent).toContain('Payments v2');
+  });
+
+  // Review w17-4: a failed background re-read keeps the room open.
+  it('a failed refresh keeps the open mission and offers Retry', async () => {
+    renderMissions();
+    await flush();
+    openMissionRoom(4);
+    await flush();
+    expect(screen.getByTestId('mission-detail').textContent).toContain('Cards and refunds');
+    const ok = handlers.work_mission;
+    handlers.work_mission = () => Object.assign(new Error('the hub did not answer in time'), { code: 'E_HUB_TIMEOUT' });
+    bumpWorkChanged();
+    await waitFor(() => expect(screen.getByTestId('mission-refresh-error')).toBeTruthy(), { timeout: 2000 });
+    expect(screen.getByTestId('mission-detail').textContent).toContain('Cards and refunds');
+    expect(get(roomMissionId)).toBe(4);
+    handlers.work_mission = ok;
+    await fireEvent.click(screen.getByTestId('mission-refresh-retry'));
+    await flush();
+    expect(screen.queryByTestId('mission-refresh-error')).toBeNull();
+  });
+
+  // Review w30-1: a mission deleted elsewhere closes the room with a notice.
+  it('a mission gone from the hub closes the room and says so', async () => {
+    renderMissions();
+    await flush();
+    openMissionRoom(4);
+    await flush();
+    expect(screen.getByTestId('mission-detail').textContent).toContain('Cards and refunds');
+    handlers.work_mission = () => Object.assign(new Error('no such mission'), { code: 'E_NOTFOUND' });
+    bumpWorkChanged();
+    await waitFor(() => expect(get(roomMissionId)).toBeNull(), { timeout: 2000 });
+    expect(screen.queryByTestId('mission-refresh-error')).toBeNull();
+    expect(screen.getByTestId('mission-notice').textContent).toContain('not in the fleet any more');
   });
 
   it('creates a mission from a name and a goal, then opens it', async () => {
@@ -753,6 +801,54 @@ describe('WorkMissions', () => {
     expect(calls('set_work_done_when')[0]).toEqual({ item_id: 11, done_when: ['review', 'ci:test'] });
   });
 
+  it('shows missing run evidence on the card and overrides it with a reason', async () => {
+    handlers.work_mission = () => ({
+      mission: current,
+      items: [item(10, 'Payments v2'), item(11, 'Schema')],
+      graph: {
+        nodes: [
+          {
+            item_id: 10,
+            state: 'verifying',
+            wave: 1,
+            evidence: { state: 'missing', task_id: 5, detail: 'the implement run committed nothing and changed no file' },
+          },
+          {
+            item_id: 11,
+            state: 'verifying',
+            wave: 1,
+            evidence: { state: 'present', task_id: 6, commits: 2, files: 3, detail: '2 commit(s), 3 file(s) changed' },
+          },
+        ],
+        waves: 1,
+      },
+      events: [],
+      may_change: true,
+    });
+    handlers.verify_work_item = () => ({ item_id: 10, changed: true });
+    renderMissions();
+    await flush();
+    await fireEvent.click(screen.getByTestId('mission-row'));
+    await flush();
+    // Only the task with nothing to show says so.
+    const rows = screen.getAllByTestId('mission-evidence');
+    expect(rows).toHaveLength(1);
+    expect(rows[0].dataset.state).toBe('missing');
+    expect(rows[0].textContent).toContain('No run evidence');
+    expect(rows[0].textContent).toContain('committed nothing');
+    await fireEvent.click(screen.getByTestId('mission-evidence-override'));
+    expect((screen.getByTestId('mission-evidence-save') as HTMLButtonElement).disabled).toBe(true);
+    await fireEvent.input(screen.getByTestId('mission-evidence-reason'), { target: { value: ' a config change on the host ' } });
+    await fireEvent.click(screen.getByTestId('mission-evidence-save'));
+    await flush();
+    expect(calls('verify_work_item')[0]).toEqual({
+      item_id: 10,
+      line: 'run evidence',
+      ok: true,
+      note: 'a config change on the host',
+    });
+  });
+
   describe('the planner in words (step 1.3)', () => {
     const loopDetail = () => ({
       mission: current,
@@ -1175,6 +1271,22 @@ describe('WorkMissions', () => {
       expect((screen.getByTestId('mission-steer-send') as HTMLButtonElement).disabled).toBe(false);
     });
 
+    it('while Control is mid-turn the box stays open and Send waits (w04-12)', async () => {
+      const { operatorSession } = await import('./operator');
+      const working = { ...operator, claude_status: 'working' as const };
+      sessionStore.set([working]);
+      operatorSession.set(working);
+      await openIt();
+      const box = screen.getByTestId('mission-steer-input') as HTMLTextAreaElement;
+      expect(box.disabled).toBe(false);
+      await fireEvent.input(box, { target: { value: 'pause it' } });
+      await fireEvent.keyDown(box, { key: 'Enter' });
+      await flush();
+      expect(calls('send_prompt')).toHaveLength(0);
+      expect((screen.getByTestId('mission-steer-send') as HTMLButtonElement).disabled).toBe(true);
+      expect(screen.getByTestId('mission-steer-busy').textContent).toContain('mid-turn');
+    });
+
     it('with no Control agent the composer is off and says why', async () => {
       await openIt();
       expect((screen.getByTestId('mission-steer-input') as HTMLTextAreaElement).disabled).toBe(true);
@@ -1323,6 +1435,17 @@ describe('missions helpers', () => {
     expect(eventSentence({ id: 3, at: 1, kind: 'task_done', actor: 'fleet' })).toBe('task done');
     expect(eventSentence({ id: 4, at: 1, kind: 'dep_added', actor: 'fleet', work_item_id: 3, payload: { depends_on: 2 } })).toBe(
       'Task 3 waits for 2',
+    );
+    // Review w03-5: a hold says why.
+    expect(eventSentence({ id: 5, at: 1, kind: 'account_limit', actor: 'loop', payload: { why: 'work is 95% used' } })).toBe(
+      'Waiting for the account: work is 95% used',
+    );
+    // One integration names every branch; an older event a pair.
+    expect(
+      eventSentence({ id: 6, at: 1, kind: 'integration', actor: 'loop', payload: { items: [300, 301, 306], a: 300, b: 301 } }),
+    ).toBe('Tasks 300, 301 and 306 need one integration');
+    expect(eventSentence({ id: 7, at: 1, kind: 'integration', actor: 'loop', payload: { a: 300, b: 324 } })).toBe(
+      'Tasks 300 and 324 conflict',
     );
   });
 });

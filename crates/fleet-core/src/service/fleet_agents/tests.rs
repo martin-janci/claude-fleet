@@ -810,3 +810,34 @@ fn the_everyday_gallery_agents_read_and_write_where_they_say() {
     assert_eq!(digest.definition.trigger.source, TriggerSource::Schedule);
     assert!(digest.definition.run.diagnostics);
 }
+
+/// A pr_review names its findings: an array of {path, line, body} in the
+/// answer; it is one review (no each) of a github_prs subject.
+#[test]
+fn a_review_names_findings_the_answer_has() {
+    let def = |findings: Value, each: Option<&str>, source: &str| {
+        let mut review = json!({ "id": "review", "do": "pr_review",
+            "target": "{{subject.number}}", "body": "{{answer.summary}}",
+            "verdict": "{{answer.verdict}}", "findings": "notes" });
+        if let Some(e) = each {
+            review["each"] = json!(e);
+        }
+        let d = definition::parse_value(&json!({
+            "trigger": { "source": source, "repo": "acme/pos" },
+            "run": { "output_schema": { "type": "object", "required": ["summary"],
+                "properties": { "summary": { "type": "string" },
+                    "verdict": { "type": "string" }, "notes": findings } } },
+            "actions": [review]
+        }))
+        .unwrap();
+        definition::problems(&d, &std::collections::BTreeMap::new()).join("\n")
+    };
+    let good = json!({ "type": "array", "items": { "type": "object", "properties": {
+        "path": { "type": "string" }, "line": { "type": "integer" }, "body": { "type": "string" } } } });
+    assert_eq!(def(good.clone(), None, "github_prs"), "");
+    let no_line = json!({ "type": "array", "items": { "type": "object", "properties": {
+        "path": { "type": "string" }, "body": { "type": "string" } } } });
+    assert!(def(no_line, None, "github_prs").contains("not an array of {path, line, body}"));
+    assert!(def(good.clone(), Some("notes"), "github_prs").contains("no each"));
+    assert!(def(good, None, "github_comments").contains("the trigger is github_prs"));
+}

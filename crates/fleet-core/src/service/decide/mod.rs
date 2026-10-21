@@ -863,6 +863,7 @@ impl DecideCtx {
     }
 
     /// The second opinion's transport (tests).
+    #[cfg(test)]
     pub fn with_haiku_exec(mut self, exec: Arc<dyn crate::ssh::SshExec>) -> Self {
         self.haiku_exec = Some(exec);
         self

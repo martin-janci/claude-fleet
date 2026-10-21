@@ -99,7 +99,7 @@ pub struct OrgAdminArgs {
     /// A paired device, by name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device: Option<String>,
-    /// full|readonly (pair_device, set_device_mode).
+    /// full|answer|readonly (pair_device, set_device_mode).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<String>,
     /// Its prompts reach agents unmarked.
@@ -492,9 +492,7 @@ impl EffectiveRoleSummary {
     }
 }
 
-fn is_zero(n: &u32) -> bool {
-    *n == 0
-}
+use crate::serde_util::is_zero_u32 as is_zero;
 
 /// Fill each member's live and private counts (redesign 11.7c) as `viewer`
 /// may learn them: every live session of `org` the member owns, and of those

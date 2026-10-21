@@ -12,6 +12,7 @@ import { acceptCommandRow, dismissGhostSession, type SessionRow } from './sessio
 import { ALL_SCOPES } from './orgs';
 import { sizeText } from './hosts_table';
 import { sessionIdBlocked } from './share';
+import { errorText } from './error_copy';
 
 /** `service::gc::tidy::TidyReason` — tolerant of values a newer hub adds. */
 export type TidyReason =
@@ -456,7 +457,7 @@ export async function applyTidyChoices(items: TidyApplyItem[]): Promise<Result<{
       action: 'expire',
       ok: r.ok,
       outcome: r.ok ? 'expired' : null,
-      error: r.ok ? null : (r.error.message ?? 'expire failed'),
+      error: r.ok ? null : (errorText(r.error) ?? 'expire failed'),
     });
   }
   void refreshTidy();

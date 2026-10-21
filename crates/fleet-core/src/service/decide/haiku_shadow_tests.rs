@@ -158,7 +158,12 @@ fn each_fence_keeps_the_question_out() {
     // No host, or one this database does not know.
     w.set(settings::DECIDE_HAIKU_HOST, "");
     assert!(w.plan(&req).is_none());
-    w.set(settings::DECIDE_HAIKU_HOST, "stranger");
+    // `set` refuses a host it does not know; one removed since reads the same.
+    w.store
+        .lock()
+        .unwrap()
+        .set_setting(settings::DECIDE_HAIKU_HOST, "stranger")
+        .unwrap();
     assert!(w.plan(&req).is_none());
     w.set(settings::DECIDE_HAIKU_HOST, w.host);
     // The switch.

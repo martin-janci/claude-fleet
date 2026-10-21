@@ -425,6 +425,9 @@ pub struct ClaudeOnHost<'a> {
     pub profile: Option<String>,
     /// One of [`settings::SUMMARY_MODELS`].
     pub model: String,
+    /// What the run is called in an error ("the help", "the tune"): the
+    /// prompt tuner shares this runner and must not read as context help.
+    pub what: &'static str,
 }
 
 #[async_trait::async_trait]
@@ -457,7 +460,7 @@ impl HelpModel for ClaudeOnHost<'_> {
             Some(_) if run.status.code() == Some(124) => {
                 return Err(IpcError::new(
                     codes::E_TIMEOUT,
-                    format!("the help took longer than {HOST_TIMEOUT_SECS}s"),
+                    format!("{} took longer than {HOST_TIMEOUT_SECS}s", self.what),
                 ))
             }
             _ if claude_print::run_signed_out(None, "", &run.stderr) => {
@@ -467,12 +470,14 @@ impl HelpModel for ClaudeOnHost<'_> {
                 return Err(IpcError::new(
                     codes::E_CLAUDE_CLI,
                     format!(
-                        "the help run failed: {}",
+                        "{} run failed: {}",
+                        self.what,
                         crate::service::work::summary::last_error_line(&run.stderr)
                     ),
                 ))
             }
         };
+        let what = format!("{} run", self.what);
         let (text, usage) = headless::read_reply(
             headless::default_agent(),
             text,
@@ -480,7 +485,7 @@ impl HelpModel for ClaudeOnHost<'_> {
             RunAt {
                 host: &self.host,
                 profile,
-                what: "the help run",
+                what: &what,
             },
             |_| {},
         )?;
@@ -514,6 +519,7 @@ pub async fn ask_for_session(
         host: row.host_alias.clone(),
         profile: profile.filter(|p| !p.is_empty()),
         model,
+        what: "the help",
     };
     let (answer, usage) = ask(&model, Surface::Composer, req, None).await?;
     book(store, &answer, usage.as_ref(), row.org_id);

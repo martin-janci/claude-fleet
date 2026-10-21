@@ -87,7 +87,7 @@ pub fn with_personal<T>(f: impl FnOnce(&Catalog) -> Result<T, IpcError>) -> Resu
         Some(c) => f(c),
         None => Err(IpcError::new(
             super::E_CATALOG_NOT_CONFIGURED,
-            "catalog not loaded; call catalog_load",
+            super::NOT_LOADED,
         )),
     }
 }
@@ -248,7 +248,7 @@ pub fn with_catalog_row<T>(
         )),
         None if row.org_id.is_none() => Err(IpcError::new(
             super::E_CATALOG_NOT_CONFIGURED,
-            "catalog not loaded; call catalog_load",
+            super::NOT_LOADED,
         )),
         None => Err(IpcError::new(
             super::E_CATALOG_NOT_CONFIGURED,

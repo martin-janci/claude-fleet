@@ -233,6 +233,45 @@ describe('shell terminals strip (step 5.3)', () => {
     expect(screen.getByTestId('terminal-tab-1').getAttribute('aria-selected')).toBe('true');
     expect(calls('pty_write')).toHaveLength(0);
   });
+
+  it('the chords act only where the terminal can show, and then show it (review w18-2)', async () => {
+    const { destination } = await import('./destination');
+    const { sessionView } = await import('./prefs');
+    render(TerminalView);
+    selectSession(row);
+    await settle();
+    // A new terminal is an `open` with no number (selecting it reopens by number).
+    const opens = () => calls('shell_terminals').filter((c) => args(c).action === 'open' && args(c).n == null).length;
+    // On a fleet page the pane stays mounted, but the chord opens nothing.
+    destination.set('automation');
+    await fireEvent.keyDown(window, { key: 't', ctrlKey: true, altKey: true });
+    await settle();
+    expect(opens()).toBe(0);
+    // Nor from inside a dialog on the Session tab.
+    destination.set('session');
+    const dlg = document.createElement('dialog');
+    const btn = document.createElement('button');
+    dlg.appendChild(btn);
+    document.body.appendChild(dlg);
+    await fireEvent.keyDown(btn, { key: 't', ctrlKey: true, altKey: true });
+    await settle();
+    expect(opens()).toBe(0);
+    dlg.remove();
+    // Nor behind the Settings page, which covers the pane without leaving
+    // the Session destination (review 113).
+    const { settingsOpen } = await import('./app_views');
+    settingsOpen.set(true);
+    await fireEvent.keyDown(window, { key: 't', ctrlKey: true, altKey: true });
+    await settle();
+    expect(opens()).toBe(0);
+    settingsOpen.set(false);
+    // From the Conversation view it opens one and shows the terminal.
+    sessionView.set('conversation');
+    await fireEvent.keyDown(window, { key: 't', ctrlKey: true, altKey: true });
+    await settle();
+    expect(opens()).toBe(1);
+    expect(get(sessionView)).toBe('terminal');
+  });
 });
 
 describe('the session bar\'s Terminals tab (step 5.3)', () => {

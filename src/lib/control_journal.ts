@@ -23,7 +23,7 @@ export interface ControlJournal {
 }
 
 export interface JournalArgs {
-  action?: 'read' | 'note' | 'ask' | 'mute' | 'unmute';
+  action?: 'read' | 'note' | 'ask' | 'mute' | 'unmute' | 'follow';
   text?: string;
   thread?: 'session' | 'mission';
   id?: number;
@@ -37,6 +37,8 @@ export function controlJournal<T = unknown>(args: JournalArgs): Promise<Result<T
 export interface FollowMark {
   state: string;
   muted: boolean;
+  /** A session's tmux name, a mission's name (the column's fallback title). */
+  name?: string;
 }
 
 /** Every thread of the last journal read by key (`s:<id>`, `m:<id>`);
@@ -47,7 +49,7 @@ export const threadFollows = writable<ReadonlyMap<string, FollowMark> | null>(nu
 export function followMarks(j: ControlJournal | null | undefined): Map<string, FollowMark> | null {
   if (!j) return null;
   const out = new Map<string, FollowMark>();
-  for (const f of j.follows ?? []) out.set(`${f.kind === 'session' ? 's' : 'm'}:${f.id}`, { state: f.state, muted: f.muted });
+  for (const f of j.follows ?? []) out.set(`${f.kind === 'session' ? 's' : 'm'}:${f.id}`, { state: f.state, muted: f.muted, name: f.name });
   return out;
 }
 

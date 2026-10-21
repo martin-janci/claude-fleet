@@ -609,7 +609,9 @@ fn eligible(row: &SessionRow, controller: Option<&(String, String)>) -> bool {
         && !crate::store::has_no_pane(&row.kind)
         && row.kind != "shell"
         && row.agent != crate::store::AGENT_SHELL
-        && row.safe_kill_state.is_none()
+        // A safe remove still waiting for its marker means the person is
+        // ending it; a `failed` one is no reason to leave it lost (w27-5).
+        && row.safe_kill_state.as_deref() != Some("requested")
         && !controller.is_some_and(|(h, n)| *h == row.host_alias && *n == row.tmux_name)
 }
 
@@ -981,23 +983,11 @@ pub async fn run_with(
     }
     for (host, cands) in by_host {
         let ids: Vec<i64> = cands.iter().map(|c| c.session_id).collect();
-        let reason_of = |id: i64| {
-            cands
-                .iter()
-                .find(|c| c.session_id == id)
-                .map(|c| c.lost_reason.clone())
-                .unwrap_or_default()
-        };
-        let row_failures_of = |id: i64| {
-            cands
-                .iter()
-                .find(|c| c.session_id == id)
-                .map_or(0, |c| c.row_failures)
-        };
-        match exec.restore(&host, ids.clone()).await {
+        match exec.restore(&host, ids).await {
             Ok(r) => {
                 for o in r.results {
-                    let reason = reason_of(o.session_id);
+                    let cand = cands.iter().find(|c| c.session_id == o.session_id);
+                    let reason = cand.map(|c| c.lost_reason.clone()).unwrap_or_default();
                     if o.ok {
                         record(store, o.session_id, EVENT_RESTORED, &reason);
                         report.restored += 1;
@@ -1007,7 +997,12 @@ pub async fn run_with(
                         // A person (or another restore) got there first:
                         // not an attempt of ours.
                     } else if o.code.as_deref().is_some_and(|code| {
-                        row_not_now(store, code, o.session_id, row_failures_of(o.session_id))
+                        row_not_now(
+                            store,
+                            code,
+                            o.session_id,
+                            cand.map_or(0, |c| c.row_failures),
+                        )
                     }) {
                         // The host dropped (or the row moved on) mid-restore:
                         // the next tick tries again, budget untouched.
@@ -1029,9 +1024,14 @@ pub async fn run_with(
             }
             Err(e) => {
                 tracing::warn!(host = %host, error = %e.message, "[auto-restore] restore failed");
-                for id in ids {
-                    let reason = reason_of(id);
-                    record(store, id, EVENT_FAILED, &format!("{reason}: {}", e.message));
+                for c in &cands {
+                    let reason = &c.lost_reason;
+                    record(
+                        store,
+                        c.session_id,
+                        EVENT_FAILED,
+                        &format!("{reason}: {}", e.message),
+                    );
                     report.failed += 1;
                 }
             }
@@ -1155,6 +1155,25 @@ mod tests {
             host_alias: format!("h{id}"),
             ..cand(id, reason, lost_at)
         }
+    }
+
+    /// Review w27-5: only a safe remove still waiting keeps a lost row out
+    /// of auto-restore; one that failed earlier does not leave it lost.
+    #[test]
+    fn a_failed_safe_remove_does_not_keep_a_lost_row_from_auto_restore() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("h").unwrap();
+        let id = s
+            .upsert_session("a", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+        s.set_claude_session_id(id, "c-a").unwrap();
+        s.mark_host_sessions_lost("h", "host_reboot", &[], 100, 0)
+            .unwrap();
+        s.set_safe_kill_requested(id, "n", 50).unwrap();
+        assert!(!eligible(&s.get_session_by_id(id).unwrap().unwrap(), None));
+        s.set_safe_kill_outcome(id, "failed", Some("push rejected"))
+            .unwrap();
+        assert!(eligible(&s.get_session_by_id(id).unwrap().unwrap(), None));
     }
 
     #[test]

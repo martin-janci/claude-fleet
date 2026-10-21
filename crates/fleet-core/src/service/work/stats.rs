@@ -166,9 +166,7 @@ pub fn burnup_of(
         .collect()
 }
 
-fn is_zero(n: &u32) -> bool {
-    *n == 0
-}
+use crate::serde_util::is_zero_u32 as is_zero;
 
 fn pct(part: u32, whole: u32) -> u32 {
     if whole == 0 {

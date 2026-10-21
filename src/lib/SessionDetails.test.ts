@@ -1093,7 +1093,7 @@ describe('SessionDetails Share… and the per-session action gate (multi-user M1
     render(SessionDetails, { props: { session: mine } });
     await tick();
     expect(dis('share-from-details')).toBe(true);
-    expect(screen.getByTestId('share-from-details').title).toMatch(/unreachable right now/i);
+    expect(screen.getByTestId('share-from-details').title).toMatch(/hub is unreachable/i);
   });
 
   it('a driver keeps Send prompt and loses the own-tier actions', async () => {

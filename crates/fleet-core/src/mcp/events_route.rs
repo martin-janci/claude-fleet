@@ -1026,13 +1026,7 @@ pub(crate) fn matches(kinds: Option<&Vec<String>>, msg: &EventMessage) -> bool {
     }
 }
 
-/// Seconds since the Unix epoch (0 on a clock set before 1970).
-fn unix_now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
+use crate::store::now_unix as unix_now;
 
 /// Where the stream is in its life. `Lagged` is terminal: a subscriber that
 /// fell behind has an incomplete picture, so it is told how many events it

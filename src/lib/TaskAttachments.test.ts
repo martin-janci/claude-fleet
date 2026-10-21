@@ -86,6 +86,24 @@ describe('TaskAttachments', () => {
     expect(screen.queryByTestId('task-attachment-lightbox')).toBeNull();
   });
 
+  it('review w19-5: the lightbox takes focus, keeps Tab inside, and gives it back to the thumbnail', async () => {
+    render(TaskAttachments, { itemId: 77, attachments: [row({ id: 2, name: 'shot.png', mime: 'image/png' })] });
+    await flush();
+    const thumb = screen.getByTestId('task-attachment-open');
+    thumb.focus();
+    await fireEvent.click(thumb);
+    await tick();
+    const close = screen.getByTestId('task-attachment-lightbox-close');
+    expect(document.activeElement).toBe(close);
+    await fireEvent.keyDown(close, { key: 'Tab' });
+    expect(document.activeElement).toBe(close);
+    await fireEvent.keyDown(close, { key: 'Escape' });
+    await tick();
+    await Promise.resolve();
+    expect(screen.queryByTestId('task-attachment-lightbox')).toBeNull();
+    expect(document.activeElement).toBe(thumb);
+  });
+
   it('refuses a file over the limit without calling the hub', async () => {
     fleetSettings.set({ ...SETTING_DEFAULTS, 'work.attachment_max_mb': '1' });
     render(TaskAttachments, { itemId: 77, attachments: [] });

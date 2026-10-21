@@ -33,12 +33,13 @@ pub use crate::ipc_error::codes::{
     E_CATALOG_NOT_CONFIGURED, E_CATALOG_PARSE, E_LINT,
 };
 
-pub fn now_secs() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
+/// The `E_CATALOG_NOT_CONFIGURED` message for "configured but not loaded".
+/// It names the MCP route too (review w25-5): `catalog_load` is the
+/// desktop's command, and a model over MCP that looked for it gave up.
+pub const NOT_LOADED: &str = "catalog not loaded; load it from the app's Assets \
+    screen, or catalog_admin {action: load} (configure first)";
+
+pub use crate::store::now_unix as now_secs;
 
 /// The `registry` module and `HOME` are process-global, so tests that write
 /// either must serialise on this lock.
@@ -501,12 +502,10 @@ pub fn list_assets_in(store: &Mutex<Store>, scope: ListingScope) -> Result<Asset
     let rows = inventory(store)?;
     let identities = identity::group_identities(&rows);
     registry::with_catalogs(|m| {
-        let personal = m.values().find(|c| c.org_id.is_none()).ok_or_else(|| {
-            IpcError::new(
-                E_CATALOG_NOT_CONFIGURED,
-                "catalog not loaded; call catalog_load",
-            )
-        })?;
+        let personal = m
+            .values()
+            .find(|c| c.org_id.is_none())
+            .ok_or_else(|| IpcError::new(E_CATALOG_NOT_CONFIGURED, NOT_LOADED))?;
         let mut assets = Vec::new();
         for cat in registry::in_order(m) {
             if cat.load_error.is_some() || (scope == ListingScope::Personal && cat.org_id.is_some())
@@ -865,12 +864,9 @@ pub fn set_host_layers(
     contexts: &[&str],
     store: &Mutex<Store>,
 ) -> Result<Vec<crate::store::HostLayerRow>, IpcError> {
-    let row = lock(store)?.personal_catalog()?.ok_or_else(|| {
-        IpcError::new(
-            E_CATALOG_NOT_CONFIGURED,
-            "catalog not loaded; call catalog_load",
-        )
-    })?;
+    let row = lock(store)?
+        .personal_catalog()?
+        .ok_or_else(|| IpcError::new(E_CATALOG_NOT_CONFIGURED, NOT_LOADED))?;
     set_host_layers_for(host_alias, &row, role, contexts, store)
 }
 

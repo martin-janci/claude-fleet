@@ -1,7 +1,7 @@
 // Work › Pull requests (redesign 6.4): the PRs sessions opened, filtered by
 // state, each opening on GitHub and naming the session that opened it.
-import { render, screen, fireEvent, within } from '@testing-library/svelte';
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { render, screen, fireEvent, within, waitFor } from '@testing-library/svelte';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { tick } from 'svelte';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
@@ -11,6 +11,7 @@ import { openExternal } from './open_external';
 import WorkPrs from './WorkPrs.svelte';
 import { expectAccessible } from './a11y_check';
 import { sessions } from './sessions';
+import { PRIMARY, _resetFleetsForTest, _setFleetRowsForTest, _setFleetsForTest, emptyRows, fleetFilter, type FleetInfo } from './fleets';
 import { session } from './hosts_fixture';
 import { prChecksLabel, prDiffstat, prRef, prStateLabel, type PullRequestRow } from './prs';
 
@@ -61,6 +62,35 @@ describe('WorkPrs', () => {
       const items = rows.filter((r) => st === 'all' || r.state === st.toUpperCase());
       return { items, total: items.length };
     });
+  });
+
+  // Review w17-12: a new tab never shows the old tab's list.
+  it('switching the filter drops the old list until the hub answers', async () => {
+    render(WorkPrs);
+    await flush();
+    expect(screen.getAllByTestId('work-pr')).toHaveLength(1);
+    let answer: (v: unknown) => void = () => {};
+    vi.mocked(invoke).mockImplementation(() => new Promise((r) => (answer = r)));
+    await fireEvent.click(screen.getByTestId('work-prs-filter-merged'));
+    await flush();
+    expect(screen.queryAllByTestId('work-pr')).toHaveLength(0);
+    answer({ items: [rows[1]], total: 1 });
+    await flush();
+    expect(screen.getAllByTestId('work-pr')).toHaveLength(1);
+    expect(screen.getByTestId('work-pr').dataset.state).toBe('MERGED');
+  });
+
+  // Review w17-7: a failed background refresh keeps the list shown.
+  it('a failed refresh keeps the list, with a Retry line', async () => {
+    render(WorkPrs);
+    await flush();
+    vi.mocked(invoke).mockImplementation(async () => {
+      throw { code: 'E_HUB_TIMEOUT', message: 'slow' };
+    });
+    sessions.set([session('mefistos', 'api', { id: 7, pr_url: 'https://github.com/o/r/pull/42' })]);
+    await waitFor(() => expect(screen.getByTestId('work-prs-refresh-error')).toBeTruthy(), { timeout: 2000 });
+    expect(screen.getAllByTestId('work-pr')).toHaveLength(1);
+    expect(screen.queryByTestId('work-prs-error')).toBeNull();
   });
 
   it('opens on the open PRs, with state, CI, review and the session that opened it', async () => {
@@ -141,5 +171,101 @@ describe('WorkPrs', () => {
     const { container } = render(WorkPrs);
     await flush();
     await expectAccessible(container);
+  });
+});
+
+describe('WorkPrs with extra fleets (review w01)', () => {
+  const primary: FleetInfo = {
+    id: PRIMARY,
+    label: 'home',
+    url: null,
+    color: '#5b8def',
+    primary: true,
+    local: true,
+    client_name: null,
+    connection: null,
+    unavailable: null,
+  };
+  const company: FleetInfo = { ...primary, id: 'company', label: 'company', url: 'https://company.example.com', primary: false, local: false, color: '#e8833a', connection: { state: 'connected' } };
+  const lab: FleetInfo = { ...company, id: 'lab', label: 'lab', url: 'https://lab.example.com' };
+
+  beforeEach(() => {
+    vi.mocked(invoke).mockReset();
+    _resetFleetsForTest();
+    sessions.set([]);
+    _setFleetsForTest([primary, company, lab]);
+  });
+  afterEach(() => _resetFleetsForTest());
+
+  it("w01-1: shows an extra fleet's mission as text, never opening the primary's mission of that id", async () => {
+    vi.mocked(invoke).mockImplementation(async (cmd: string, raw?: unknown) => {
+      if (cmd !== 'list_pull_requests') return null;
+      const fleet = (raw as { fleet?: string }).fleet;
+      if (fleet === 'company') return { items: [pr({ id: 9, mission_id: 7, mission_name: 'Company work' })], total: 1 };
+      if (fleet === 'lab') return { items: [], total: 0 };
+      return { items: [pr({ mission_id: 7, mission_name: 'Home work' })], total: 1 };
+    });
+    render(WorkPrs);
+    await flush();
+    expect(screen.getByTestId('work-pr-mission').textContent).toBe('Home work');
+    expect(screen.getByTestId('work-pr-mission-text').textContent).toBe('Company work');
+  });
+
+  it('w01-7: says which fleet failed, and keeps the others when the primary fails', async () => {
+    vi.mocked(invoke).mockImplementation(async (cmd: string, raw?: unknown) => {
+      if (cmd !== 'list_pull_requests') return null;
+      const fleet = (raw as { fleet?: string }).fleet;
+      if (fleet === 'company') return { items: [pr({ id: 9, title: 'Company PR' })], total: 1 };
+      if (fleet === 'lab') throw { code: 'E_HUB_UNREACHABLE', message: 'lab is down' };
+      throw { code: 'E_HUB', message: 'home is down' };
+    });
+    render(WorkPrs);
+    await flush();
+    expect(screen.queryByTestId('work-prs-error')).toBeNull();
+    expect(screen.getAllByTestId('work-pr')).toHaveLength(1);
+    const notes = screen.getAllByTestId('work-prs-fleet-error').map((n) => n.textContent);
+    expect(notes).toEqual([expect.stringContaining('from home: home is down'), expect.stringContaining('from lab: ')]);
+  });
+
+  it("w01-7: re-reads when an extra fleet's session opens a PR", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.mocked(invoke).mockImplementation(async (cmd: string) => (cmd === 'list_pull_requests' ? { items: [], total: 0 } : null));
+      render(WorkPrs);
+      await flush();
+      const before = calls().length;
+      _setFleetRowsForTest('company', { ...emptyRows(), sessions: new Map([[3, session('mac', 'pos', { id: 3, pr_url: 'https://github.com/o/r/pull/1' })]]) });
+      await vi.advanceTimersByTimeAsync(600);
+      expect(calls().length).toBeGreaterThan(before);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // Review 115: the kept list is the one read for the same fleets, so a
+  // failed read after hiding a fleet never keeps that fleet's PRs on screen.
+  it("a failed read after hiding a fleet does not keep that fleet's PRs", async () => {
+    _setFleetsForTest([primary, company]);
+    let primaryFails = false;
+    vi.mocked(invoke).mockImplementation(async (cmd: string, raw?: unknown) => {
+      if (cmd !== 'list_pull_requests') return null;
+      const fleet = (raw as { fleet?: string }).fleet;
+      if (fleet === 'company') return { items: [pr({ id: 9, title: 'Company PR' })], total: 1 };
+      if (primaryFails) throw { code: 'E_HUB_TIMEOUT', message: 'slow' };
+      return { items: [pr()], total: 1 };
+    });
+    try {
+      render(WorkPrs);
+      await flush();
+      expect(screen.getAllByTestId('work-pr')).toHaveLength(2);
+      primaryFails = true;
+      fleetFilter.set(PRIMARY);
+      await flush();
+      expect(screen.queryByTestId('work-prs-refresh-error')).toBeNull();
+      expect(screen.getByTestId('work-prs-error')).toBeTruthy();
+      expect(screen.queryByText('Company PR')).toBeNull();
+    } finally {
+      fleetFilter.set('all');
+    }
   });
 });

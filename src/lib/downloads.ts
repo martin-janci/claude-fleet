@@ -8,7 +8,8 @@ import { get, writable } from 'svelte/store';
 import { invokeCmd, type Result } from './result';
 import { createListRace } from './row_store';
 import { detectMac } from './terminal_keys';
-import { dismiss, push, setToastProgress } from './toasts';
+import { dismiss, push, pushError, setToastProgress } from './toasts';
+import { errorText } from './error_copy';
 
 export type DownloadState = 'fetching' | 'ready' | 'failed';
 
@@ -143,7 +144,7 @@ async function requestCopy(sessionId: number, path: string, note: string | undef
     args: { session_id: sessionId, path, ...(note ? { note } : {}) },
   });
   if (!r.ok) {
-    push({ kind: 'error', code: r.error.code, message: `${context}: ${r.error.message}` });
+    pushError(r.error, `${context}`);
     return null;
   }
   race.touch(r.value.id);
@@ -232,7 +233,7 @@ export function finished(rows: Download[]): Download[] {
 export async function saveDownload(id: number): Promise<string | null> {
   const r = await invokeCmd<string | null>('save_download', { id });
   if (!r.ok) {
-    push({ kind: 'error', code: r.error.code, message: `Save: ${r.error.message}` });
+    pushError(r.error, 'Save');
     return null;
   }
   if (r.value) {
@@ -255,7 +256,7 @@ export async function pauseDownload(id: number, paused: boolean): Promise<void> 
     // A hub before contract 17 has no pause_download: the copy goes on.
     const message = r.error.code === 'E_HUB_PROTOCOL'
       ? 'the hub needs updating first; the copy goes on meanwhile.'
-      : r.error.message;
+      : errorText(r.error);
     push({ kind: 'error', code: r.error.code, message: `${paused ? 'Pause' : 'Resume'}: ${message}` });
     return;
   }
@@ -267,7 +268,7 @@ export async function pauseDownload(id: number, paused: boolean): Promise<void> 
 export async function removeDownload(id: number): Promise<void> {
   const r = await invokeCmd<boolean>('remove_download', { id });
   if (!r.ok) {
-    push({ kind: 'error', code: r.error.code, message: `Remove: ${r.error.message}` });
+    pushError(r.error, 'Remove');
     return;
   }
   race.touch(id);

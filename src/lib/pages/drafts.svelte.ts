@@ -4,6 +4,7 @@
 // on the page's bar ("2 changes · Discard · Save"). Switches and other
 // toggles never come here: they save at once and offer Undo.
 import type { Result } from '../result';
+import { errorText } from '../error_copy';
 
 export type DraftWriter = (key: string, value: string) => Promise<Result<unknown>>;
 
@@ -56,7 +57,7 @@ export class SettingDrafts {
           const { [key]: _done, ...rest } = this.staged;
           this.staged = rest;
         } else {
-          errors[key] = r.error.message;
+          errors[key] = errorText(r.error);
         }
       }
     } finally {

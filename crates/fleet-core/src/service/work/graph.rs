@@ -65,6 +65,10 @@ pub struct GraphNode {
     /// Its latest attempt, when the caller may see that task.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attempt: Option<AttemptBrief>,
+    /// What git showed from its latest implement run, the completion
+    /// gate's evidence (`gate::RunEvidence`); absent before any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<super::gate::RunEvidence>,
 }
 
 /// A node's latest attempt, in brief: what the worker said and what git
@@ -188,6 +192,7 @@ pub fn build(
     // Each member's own state, before what it waits for is weighed.
     let mut own: HashMap<i64, &'static str> = HashMap::new();
     let mut latest: HashMap<i64, AttemptBrief> = HashMap::new();
+    let mut evidence: HashMap<i64, super::gate::RunEvidence> = HashMap::new();
     for i in items {
         let tasks = s.tasks_for_item(i.id)?;
         if let Some(t) = tasks.first() {
@@ -203,6 +208,13 @@ pub fn build(
         let latest_impl = tasks
             .iter()
             .find(|t| matches!(t.role.as_deref(), None | Some("implement")));
+        if let Some(t) = latest_impl {
+            let recorded = s.latest_verifications(i.id)?;
+            let over = recorded
+                .iter()
+                .find(|r| r.line == super::gate::EVIDENCE_LINE);
+            evidence.insert(i.id, super::gate::run_evidence(t, over, now));
+        }
         let failed =
             latest_impl.is_some_and(crate::service::work::orchestrate::steps::attempt_failed);
         let implemented = latest_impl.is_some_and(|t| t.state == "done") && !failed;
@@ -258,6 +270,7 @@ pub fn build(
             wave: 0,
             verification: super::verify::verification(s, i, now)?,
             attempt: latest.remove(&i.id),
+            evidence: evidence.remove(&i.id),
             // A hidden outside item is not named to this caller.
             depends_on: on
                 .iter()

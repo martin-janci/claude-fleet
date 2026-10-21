@@ -449,7 +449,7 @@ describe('sharing never confers a terminal', () => {
     await settle();
     expect(inv().mock.calls.some((c) => c[0] === 'pty_open')).toBe(false);
     const why = screen.getByTestId('terminal-no-attach');
-    expect(why.textContent).toContain('no stored token');
+    expect(why.textContent).toContain("can't use the hub");
     expect(why.textContent).not.toContain('Shared with you');
   });
 });

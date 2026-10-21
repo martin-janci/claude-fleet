@@ -9,7 +9,7 @@
   // and kill switches on the right. A failed run carries Fix, Retry and
   // Pause, as in the Inbox. New starts from a template (the first is
   // Morning PR sweep) or a blank one.
-  import { onDestroy, onMount } from 'svelte';
+  import { onDestroy, onMount, tick } from 'svelte';
   import { get } from 'svelte/store';
   import { hosts } from '../hosts';
   import { sessions } from '../sessions';
@@ -29,7 +29,7 @@
   import type { OfState } from '../kit/status';
   import NewRoutineMenu from './NewRoutineMenu.svelte';
   import RoutineEditor from './RoutineEditor.svelte';
-  import { draftInput, draftMissing, draftOf, type RoutineDraft } from './routine_draft';
+  import { draftInput, draftMissing, draftOf, stashDraft, takeStashedDraft, type RoutineDraft } from './routine_draft';
   import RoutineDebug from './RoutineDebug.svelte';
   import DestructiveConfirm from '../forms/DestructiveConfirm.svelte';
   import type { IpcError } from '../result';
@@ -101,8 +101,36 @@
   let loopSel = $state<string | null>(null);
   /** Each routine's newest run, for the list's dot and line. */
   let lastRuns = $state<Map<number, RunRow>>(new Map());
+  // A changed draft left open when this tab last closed comes back
+  // (review w05-2).
+  const restored = takeStashedDraft();
   /** The editor's draft: a new routine (`id` absent) or a change. */
-  let draft = $state<RoutineDraft | null>(null);
+  let draft = $state<RoutineDraft | null>(restored?.draft ?? null);
+  /** The editor's draft as it was opened, to tell an unsaved change. */
+  let draftBase = $state(restored?.base ?? '');
+  const dirty = $derived(!!draft && JSON.stringify(draft) !== draftBase);
+  /** The open editor, which asks "Discard changes?" before a changed draft goes. */
+  let editor: { askLeave: (then: () => void) => void; hasNotebookEdit: () => boolean } | undefined = $state();
+  /** A notebook box holds unsaved text: Save and Run once now keep the
+   *  editor open rather than drop it (RoutineMemory keeps it). */
+  const notebookPending = () => !!editor?.hasNotebookEdit();
+  let root: HTMLDivElement | undefined = $state();
+
+  /** Every way out that replaces the draft (another routine, a built-in
+   *  one, New, a template, the Inbox's Fix) asks first when it is changed
+   *  (review w05-1). */
+  function leaveDraft(then: () => void) {
+    // The editor decides, not `dirty`: an unsaved notebook edit counts too.
+    if (draft && editor) editor.askLeave(then);
+    else then();
+  }
+
+  /** Close the editor and put focus on the routine it leaves selected
+   *  (review w05-12). */
+  async function focusSelectedRow() {
+    await tick();
+    root?.querySelector<HTMLElement>('[data-testid="routine-row"][aria-selected="true"]')?.focus();
+  }
   /** Saving the draft failed: the editor's banner (input kept). */
   let saveError = $state<IpcError | null>(null);
 
@@ -142,11 +170,13 @@
   }
 
   function pick(id: number) {
-    selected = id;
-    loopSel = null;
-    draft = null;
-    confirmDelete = false;
-    void loadDetail();
+    leaveDraft(() => {
+      selected = id;
+      loopSel = null;
+      draft = null;
+      confirmDelete = false;
+      void loadDetail();
+    });
   }
 
   /** Run one action, then re-read the list, the routine and the Inbox. */
@@ -198,6 +228,10 @@
   }
 
   function newFrom(template: string | null) {
+    leaveDraft(() => openTemplate(template));
+  }
+
+  function openTemplate(template: string | null) {
     loopSel = null;
     const host = $hosts.find((h) => !h.hidden)?.alias ?? '';
     const proj = pickable[0]?.project;
@@ -217,7 +251,7 @@
 
   /** Save the draft; answers the saved routine, or null on a refusal. */
   async function saveDraft(undoable = true): Promise<RoutineRow | null> {
-    if (!draft || draftMissing(draft)) return null;
+    if (!draft || draftMissing(draft, $projects.length ? $projects.map((p) => p.project.id) : undefined)) return null;
     const d = draft;
     busy = true;
     saveError = null;
@@ -227,27 +261,28 @@
       saveError = r.error;
       return null;
     }
-    draft = null;
+    // An unsaved notebook edit stays: the editor stays open on the saved
+    // routine, its form clean, so the notebook boxes unlock with the text.
+    const keepOpen = notebookPending() && d.id === r.value.id;
+    if (keepOpen) edit(r.value);
+    else draft = null;
     selected = r.value.id;
     const was = d.id !== undefined ? list.find((x) => x.id === d.id) : undefined;
     const saved = r.value;
     // Undo: an edit is saved back as it was; a new routine is deleted. Not
     // offered when Run once now saved it: a run is starting from it.
     const undo = async () => {
-      const back = was ? await saveRoutine(routineInputOf(was), was.id) : await deleteRoutine(saved.id);
+      const back = was ? await saveRoutine(routineInputOf(was, !!saved.memory), was.id) : await deleteRoutine(saved.id);
       if (!back.ok) pushError(back.error, 'Undo failed');
       await reload();
     };
     savedWithUndo(`${saved.name} saved`, undoable ? undo : undefined);
     await reload();
+    if (!keepOpen) void focusSelectedRow();
     return r.value;
   }
 
   // ---- Run once now (gap plan G2.3) ------------------------------------------
-
-  /** The editor's draft as it was opened, to tell an unsaved change. */
-  let draftBase = $state('');
-  const dirty = $derived(!!draft && JSON.stringify(draft) !== draftBase);
 
   /** Run once now: the saved routine as it is; a new or changed one is
    *  saved first, since a run is a saved routine's. */
@@ -258,7 +293,7 @@
       const saved = await saveDraft(false);
       if (!saved) return;
       id = saved.id;
-    } else {
+    } else if (!notebookPending()) {
       draft = null;
     }
     await act('Run once now', () => runRoutineNow(id!));
@@ -296,16 +331,23 @@
 
   const unsub = routinesRequest.subscribe((req) => {
     if (!req) return;
-    if (req.template) newFrom(req.template === 'blank' ? null : req.template);
-    if (req.select !== undefined) {
-      selected = req.select;
-      draft = null;
-      void loadDetail();
-    }
-    if (req.tab) tab = req.tab;
+    leaveDraft(() => {
+      if (req.template) openTemplate(req.template === 'blank' ? null : req.template);
+      if (req.select !== undefined) {
+        selected = req.select;
+        draft = null;
+        void loadDetail();
+      }
+      if (req.tab) tab = req.tab;
+    });
     routinesRequest.set(null);
   });
   onDestroy(unsub);
+  onDestroy(() => {
+    const d = draft ? ($state.snapshot(draft) as RoutineDraft) : null;
+    // Compared here, not through `dirty`: a derived is not re-read on teardown.
+    stashDraft(d && JSON.stringify(d) !== draftBase ? { draft: d, base: draftBase } : null);
+  });
 
   onMount(() => void reload());
 
@@ -339,6 +381,20 @@
   ];
   let filters = $state<Filter[]>([]);
   let filtersOpen = $state(false);
+  let filterMenuEl: HTMLDivElement | undefined = $state();
+  // The Filters menu closes on Esc and on a press outside it (review
+  // w18-11), as ControlPlusMenu does: Esc is the menu's, not App's (which
+  // would leave Automation), and focus goes back to its trigger.
+  function onFilterMenuKey(e: KeyboardEvent) {
+    if (!filtersOpen || e.key !== 'Escape') return;
+    e.preventDefault();
+    e.stopPropagation();
+    filtersOpen = false;
+    filterMenuEl?.querySelector<HTMLElement>('[data-testid="routine-filters"]')?.focus();
+  }
+  function onDocPointerDown(e: PointerEvent) {
+    if (filtersOpen && filterMenuEl && !filterMenuEl.contains(e.target as Node)) filtersOpen = false;
+  }
   let grouping = $state<'owner' | 'state'>('owner');
 
   interface Item {
@@ -419,17 +475,21 @@
   }
 
   function pickLoop(name: string) {
-    loopSel = name;
-    selected = null;
-    draft = null;
-    confirmDelete = false;
-    detail = null;
+    leaveDraft(() => {
+      loopSel = name;
+      selected = null;
+      draft = null;
+      confirmDelete = false;
+      detail = null;
+    });
   }
 
   const loop = $derived(loopSel === null ? undefined : loops.find((l) => l.name === loopSel));
 
   const pauseAt = $derived(settingInt($fleetSettings, SETTING_KEYS.accountsPauseAt));
 </script>
+
+<svelte:document onpointerdown={onDocPointerDown} />
 
 {#snippet row(it: Item)}
   <li>
@@ -453,7 +513,7 @@
   </li>
 {/snippet}
 
-<div class="routines" class:fill data-testid="routines-panel">
+<div class="routines" class:fill data-testid="routines-panel" bind:this={root}>
   <div class="list">
     {#if listHead}
       {@render listHead()}
@@ -464,7 +524,8 @@
       </div>
     {/if}
     <div class="filters">
-      <div class="filter-menu">
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div class="filter-menu" bind:this={filterMenuEl} onkeydown={onFilterMenuKey}>
         <Button testid="routine-filters" onclick={() => (filtersOpen = !filtersOpen)}
           ><Icon name="filter" size={12} />Filters{#if filters.length}{' '}<Count n={filters.length} />{/if}</Button
         >
@@ -521,6 +582,7 @@
   <div class="detail">
     {#if draft}
       <RoutineEditor
+        bind:this={editor}
         bind:draft
         enabled={enabledOf(draft)}
         {dirty}
@@ -528,7 +590,10 @@
         error={saveError}
         onsave={() => void saveDraft()}
         onrunonce={() => void runOnce()}
-        oncancel={() => (draft = null)}
+        oncancel={() => {
+          draft = null;
+          void focusSelectedRow();
+        }}
         ontemplate={(t) => newFrom(t === 'blank' ? null : t)} />
     {:else if loop}
       {@const stands = paused && loop.pausable}

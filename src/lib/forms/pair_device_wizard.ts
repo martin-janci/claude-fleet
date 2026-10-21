@@ -9,6 +9,7 @@ import type { OrgRow } from '../orgs';
 import type { ChatFormOutcome } from './ChatForm.svelte';
 import type { Values } from './forms';
 import { WIZARDS, withChoices, type Wizard } from './wizards';
+import { errorText } from '../error_copy';
 
 /** The org select's "none". An org's value is its id, so never `none`. */
 export const NO_ORG = 'none';
@@ -40,6 +41,6 @@ export function pairDevice(v: Values, fleet?: string | null): Promise<Result<Pai
 /** As a chat form: the code and the link in the one line it leaves. */
 export async function runPairDevice(v: Values): Promise<ChatFormOutcome> {
   const r = await pairDevice(v);
-  if (!r.ok) return { ok: false, error: r.error.message };
+  if (!r.ok) return { ok: false, error: errorText(r.error) };
   return { ok: true, summary: `${r.value.name}: open ${r.value.url} (code ${r.value.code})` };
 }

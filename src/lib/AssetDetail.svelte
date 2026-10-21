@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { errorText } from './error_copy';
   import { tablistKeys } from './tablist_keys';
   import Loader from './Loader.svelte';
   import { untrack } from 'svelte';
@@ -69,7 +70,7 @@
     detail = null; error = null;
     getAsset(k, n).then((r) => {
       if (k !== kind || n !== name) return;
-      if (r.ok) detail = r.value; else error = r.error.message;
+      if (r.ok) detail = r.value; else error = errorText(r.error);
     });
   });
 
@@ -106,7 +107,7 @@
     const r = await deleteAsset(detail.asset.kind, detail.asset.name);
     deleting = false;
     if (!r.ok) {
-      deleteError = r.error.message;
+      deleteError = errorText(r.error);
       return;
     }
     showDeleteConfirm = false;
@@ -131,7 +132,7 @@
     const r = await lintAsset(detail.asset.kind, detail.asset.name);
     lintBusy = false;
     if (!r.ok) {
-      lintError = r.error.message;
+      lintError = errorText(r.error);
       return;
     }
     lintReport = r.value;

@@ -1024,12 +1024,18 @@ pub(crate) fn seen_host(
     }
 }
 
-/// The host a start that names none lands on (control review F5): the best
-/// placement among the hosts that have run the project, the one it last ran
-/// on (`seen`) winning a near tie; `seen` itself when placement has no
-/// candidate (no readings, every login spent: the start's own refusals say
-/// why); `None` only when no host has run it.
-fn placed_host(s: &Store, project_id: i64, seen: Option<String>) -> Option<String> {
+/// The host a start that names none lands on (control review F5), with the
+/// login placement chose there (review w02-1: the start bills that login,
+/// not the host's own): the best placement among the hosts that have run
+/// the project, the one it last ran on (`seen`) winning a near tie; `seen`
+/// itself, on its own login, when placement has no candidate (no readings,
+/// every login spent: the start's own refusals say why); `None` only when
+/// no host has run it.
+pub(crate) fn placed_host(
+    s: &Store,
+    project_id: i64,
+    seen: Option<String>,
+) -> Option<(String, Option<String>)> {
     let seen = seen?;
     let want = crate::service::placement::Want {
         prefer_host: Some(seen.clone()),
@@ -1044,8 +1050,8 @@ fn placed_host(s: &Store, project_id: i64, seen: Option<String>) -> Option<Strin
     )
     .ok()
     .and_then(|p| p.candidates.into_iter().next())
-    .map(|c| c.host_alias)
-    .or(Some(seen))
+    .map(|c| (c.host_alias, c.profile))
+    .or(Some((seen, None)))
 }
 
 /// Plan where a resolved ticket's start lands. `E_EXISTS` (with the
@@ -1135,6 +1141,10 @@ pub fn plan_resolved(
             .filter(|h| h != &p.1),
         _ => None,
     };
+    // The login placement picked along with the host, when it picked the
+    // host: the start runs there under it unless the caller or a rule names
+    // one (review w02-1).
+    let mut placed_profile: Option<String> = None;
     let host_alias = match (&args.host_alias, scope.host()) {
         (Some(h), _) => h.clone(),
         (None, Some(h)) => h.to_string(),
@@ -1149,10 +1159,13 @@ pub fn plan_resolved(
         (None, None) => match match seen_host(&s, seen, project_id)? {
             // An org-bound client keeps the host it saw: placement does not
             // judge orgs.
-            seen if scope.bound_org().is_some() => seen,
+            seen if scope.bound_org().is_some() => seen.map(|h| (h, None)),
             seen => placed_host(&s, project_id, seen),
         } {
-            Some(h) => h,
+            Some((h, profile)) => {
+                placed_profile = profile;
+                h
+            }
             None => {
                 let hosts: Vec<String> = s
                     .list_hosts()?
@@ -1285,6 +1298,7 @@ pub fn plan_resolved(
                 placement
                     .as_ref()
                     .and_then(|w| w.profile.clone())
+                    .or(placed_profile)
                     .filter(|_| !codex)
             }),
         model: rule.as_ref().and_then(|r| r.model.clone()),

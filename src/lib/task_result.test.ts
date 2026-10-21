@@ -5,8 +5,10 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import {
   createFollowupTask,
+  evidenceMet,
   headline,
   requestWorkResult,
+  normalizeResult,
   validationLines,
   workResult,
   type TaskResultView,
@@ -30,16 +32,29 @@ describe('task result', () => {
       { label: 'cargo fleet-test', state: 'reported' },
     ]);
   });
-  it('reads a check that is neither passed nor failed as pending', () => {
+  it('leaves a failed or pending check to the gate group, so it is listed once (review w09-11)', () => {
     const checks = [
       { line: 'a', kind: 'ci', state: 'fail', detail: '' },
       { line: 'b', kind: 'manual', state: 'unknown', detail: '' },
+      { line: 'c', kind: 'ci', state: 'pass', detail: '' },
     ];
-    expect(validationLines({ ...base, gate: { ...base.gate, checks } }).map((l) => l.state)).toEqual([
-      'fail',
-      'pending',
-      'reported',
+    expect(validationLines({ ...base, gate: { ...base.gate, checks } })).toEqual([
+      { label: 'c', state: 'pass' },
+      { label: 'cargo fleet-test', state: 'reported' },
     ]);
+  });
+  it('lists run evidence only when it speaks for the result; missing evidence is the gate group\'s', () => {
+    const missing = { state: 'missing', task_id: 9, detail: 'the implement run committed nothing and changed no file' };
+    expect(evidenceMet(missing)).toBe(false);
+    expect(validationLines({ ...base, gate: { ...base.gate, state: 'blocked', evidence: missing } })).not.toContainEqual(
+      expect.objectContaining({ label: expect.stringContaining('Run evidence') }),
+    );
+    const waived = { ...missing, state: 'overridden', detail: 'a config change on the host' };
+    expect(validationLines({ ...base, gate: { ...base.gate, evidence: waived } })).toContainEqual({
+      label: 'Run evidence: a config change on the host',
+      state: 'pass',
+    });
+    expect(normalizeResult({ ...base, gate: { state: 'passed', checks: [], open_children: [] } }).gate.evidence).toBeNull();
   });
   it('says completed only when the report is done and the gate passed', () => {
     expect(headline(base)).toEqual({ label: 'Task completed', tone: 'success' });

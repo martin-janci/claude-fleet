@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { errorText } from './error_copy';
   import Icon from './kit/Icon.svelte';
   import Loader from './Loader.svelte';
   import { untrack } from 'svelte';
@@ -123,7 +124,7 @@
         if (r.ok) {
           succeeded[key] = true;
         } else {
-          errors[key] = r.error.message;
+          errors[key] = errorText(r.error);
         }
       }),
     );

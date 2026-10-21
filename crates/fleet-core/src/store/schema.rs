@@ -401,6 +401,28 @@ fn routines_has_event_host(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 204: `routine_runs` already has its
+/// `memory_read_at` column (the last column it adds).
+fn routine_runs_has_memory_read_at(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('routine_runs') WHERE name = 'memory_read_at'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 205: `routine_runs` already has its
+/// `memory_retry_at` column.
+fn routine_runs_has_memory_retry_at(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('routine_runs') WHERE name = 'memory_retry_at'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 fn routine_runs_has_host(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('routine_runs') WHERE name = 'host_alias'",
@@ -997,6 +1019,16 @@ fn work_items_has_archived_at(conn: &Connection) -> rusqlite::Result<bool> {
 fn work_items_has_held_at(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('work_items') WHERE name = 'held_at'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 203.
+fn hosts_has_login_split(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('hosts') WHERE name = 'login_split'",
         [],
         |r| r.get(0),
     )?;
@@ -2281,6 +2313,25 @@ const MIGRATIONS: &[Migration] = &[
         version: 202,
         sql: include_str!("../../migrations/202_deferred_prompts_session_index.sql"),
         already_applied: None,
+    },
+    Migration {
+        version: 203,
+        sql: include_str!("../../migrations/203_host_login_split.sql"),
+        already_applied: Some(hosts_has_login_split),
+    },
+    // Routine memory: `routine_memory` and the routines' `memory` /
+    // `memory_auto`, the runs' `memory_read_at`. ADD COLUMNs, so guarded.
+    Migration {
+        version: 204,
+        sql: include_str!("../../migrations/204_routine_memory.sql"),
+        already_applied: Some(routine_runs_has_memory_read_at),
+    },
+    // Routine memory's reads: the runs' `memory_retry_at` and the index
+    // behind the per-tick probe. An ADD COLUMN, so guarded.
+    Migration {
+        version: 205,
+        sql: include_str!("../../migrations/205_routine_memory_reads.sql"),
+        already_applied: Some(routine_runs_has_memory_retry_at),
     },
 ];
 

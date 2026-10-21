@@ -4,6 +4,7 @@
 import { writable, get } from 'svelte/store';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { invokeCmd } from './result';
+import { errorText } from './error_copy';
 
 export interface VoiceState {
   sessionId: number | null;
@@ -62,7 +63,7 @@ export async function claimVoice(sessionId: number): Promise<void> {
   voiceState.update((s) =>
     r.ok
       ? { ...s, sessionId, state: 'claimed', error: null }
-      : { ...s, sessionId, state: 'error', error: r.error.message },
+      : { ...s, sessionId, state: 'error', error: errorText(r.error) },
   );
 }
 

@@ -744,6 +744,13 @@ impl Store {
                 now_unix()
             ],
         )?;
+        // Its routines' project notebooks go with it (migration 204): a
+        // project id is a reused rowid, and the next project to take it
+        // must not read another repository's notes.
+        tx.execute(
+            "DELETE FROM routine_memory WHERE scope = 'project' AND owner_id = ?1",
+            rusqlite::params![project_id],
+        )?;
         tx.execute(
             "DELETE FROM projects WHERE id = ?1",
             rusqlite::params![project_id],

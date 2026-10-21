@@ -161,6 +161,7 @@ fn node(item_id: i64, state: &str, attempt: Option<AttemptBrief>) -> GraphNode {
         waiting_for: vec![],
         verification: None,
         attempt,
+        evidence: None,
     }
 }
 

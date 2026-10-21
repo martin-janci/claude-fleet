@@ -11,6 +11,7 @@ import {
   healthSampleFresh,
   HEALTH_SAMPLE_FRESH_SECS,
   hostAttention,
+  loginConflicts,
   memUsedPct,
   NO_ACCOUNT_LABEL,
   newestClaudeVersion,
@@ -278,6 +279,68 @@ describe('host health helpers', () => {
     expect(hostAttention({ ...base, host: host('old', { auth_overrides: null }) })).toBeNull();
   });
 
+  it('login_conflict names two copies of one login and yields to disk_low', () => {
+    const base = {
+      hasToken: true,
+      tokensLoaded: true,
+      hook: { state: 'seen' as const, lastAt: NOW },
+      sessionCount: 1,
+      newestClaude: null,
+      now: NOW,
+      versionMaxAgeSecs: 86400,
+      diskLowPct: 90,
+      hubVersion: null,
+    };
+    // The Mac in the field: the Keychain and a file, and profile Primary on
+    // the host login's own account.
+    const mac = host('mac', {
+      login_split: true,
+      account_uuid: 'a',
+      claude_profiles: [
+        { name: 'Primary', account_uuid: 'a', email: 'mj@x' },
+        { name: 'work', account_uuid: 'b', email: 'b@x' },
+      ],
+      health_at: NOW,
+    });
+    const a = hostAttention({ ...base, host: mac });
+    expect(a?.kind).toBe('login_conflict');
+    expect(a?.title).toContain('macOS Keychain');
+    expect(a?.title).toContain('then delete ~/.claude/.credentials.json');
+    expect(a?.title).toContain('the host login and profile Primary are both signed into mj@x');
+    // A nearly full disk breaks every session there, so it takes the slot.
+    const full = { ...mac, disk_home_free_kb: 3_600_000, disk_home_total_kb: 150_000_000 };
+    expect(hostAttention({ ...base, host: full })?.kind).toBe('disk_low');
+    // One API key under two profiles has no refresh token to revoke.
+    const keys = host('keys', {
+      claude_profiles: [
+        { name: 'one', account_uuid: 'apikey-0123456789abcdef' },
+        { name: 'two', account_uuid: 'apikey-0123456789abcdef' },
+      ],
+    });
+    expect(hostAttention({ ...base, host: keys })).toBeNull();
+    // One login per account, or nothing known, earns no mark.
+    const clean = host('ok', {
+      login_split: false,
+      account_uuid: 'a',
+      claude_profiles: [{ name: 'work', account_uuid: 'b' }, { name: 'new' }],
+    });
+    expect(hostAttention({ ...base, host: clean })).toBeNull();
+    expect(hostAttention({ ...base, host: host('old', {}) })).toBeNull();
+  });
+
+  it('loginConflicts groups profiles on one account without the host login', () => {
+    expect(
+      loginConflicts({
+        login_split: null,
+        account_uuid: 'a',
+        claude_profiles: [
+          { name: 'one', account_uuid: 'b' },
+          { name: 'two', account_uuid: 'b', email: 'b@x' },
+        ],
+      }),
+    ).toEqual([{ kind: 'shared_account', logins: ['one', 'two'], email: 'b@x' }]);
+  });
+
   it('disk_low outranks claude_old; agent_old fires when the agent is older than the hub version', () => {
     const base = {
       hasToken: true,
@@ -295,6 +358,11 @@ describe('host health helpers', () => {
     expect(hostAttention({ ...base, host: full })?.title).toContain('98%');
     const agent = host('trn', { transport: 'agent', agent_version: '0.2.26' });
     expect(hostAttention({ ...base, host: agent })?.kind).toBe('agent_old');
+    // Agents update themselves; the hint names that and the by-hand command,
+    // never a systemctl restart of a unit the job installs as --user (w14-8).
+    const agentTitle = hostAttention({ ...base, host: agent })?.title ?? '';
+    expect(agentTitle).toContain('fleet-agent update');
+    expect(agentTitle).not.toContain('systemctl');
     expect(hostAttention({ ...base, host: host('ok', { transport: 'agent', agent_version: '0.3.1' }) })).toBeNull();
     // After a hub rollback the agent is ahead: no "upgrade the agent" mark.
     expect(hostAttention({ ...base, host: host('ahead', { transport: 'agent', agent_version: '0.4.0' }) })).toBeNull();

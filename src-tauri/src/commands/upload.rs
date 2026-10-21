@@ -57,6 +57,11 @@ impl Origin {
             Origin::Picked => PICKED_ALLOW_TTL,
         }
     }
+
+    /// Whether an entry of this origin authorised at `at` still holds at `now`.
+    fn live(self, at: Instant, now: Instant) -> bool {
+        now.saturating_duration_since(at) < self.ttl()
+    }
 }
 
 /// Rust-side record of the paths this process itself authorised: the OS
@@ -92,12 +97,17 @@ impl UploadAllowList {
         self.insert_at(paths, now, Origin::Picked);
     }
 
-    fn insert_at(&self, paths: &[PathBuf], now: Instant, origin: Origin) {
-        let mut e = self
-            .entries
+    /// The entries, recovered from a poisoned lock: a panic elsewhere must
+    /// not leave every later upload refused.
+    fn entries(&self) -> std::sync::MutexGuard<'_, HashMap<PathBuf, (Instant, Origin)>> {
+        self.entries
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        e.retain(|_, (at, o)| now.saturating_duration_since(*at) < o.ttl());
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn insert_at(&self, paths: &[PathBuf], now: Instant, origin: Origin) {
+        let mut e = self.entries();
+        e.retain(|_, (at, o)| o.live(*at, now));
         for p in paths {
             e.insert(p.clone(), (now, origin));
         }
@@ -111,12 +121,9 @@ impl UploadAllowList {
     }
 
     pub fn is_allowed_at(&self, path: &Path, now: Instant) -> bool {
-        let e = self
-            .entries
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let e = self.entries();
         e.get(path)
-            .is_some_and(|(at, origin)| now.saturating_duration_since(*at) < origin.ttl())
+            .is_some_and(|(at, origin)| origin.live(*at, now))
     }
 
     /// Move still-live *dropped* paths onto the tray TTL, because the
@@ -131,14 +138,11 @@ impl UploadAllowList {
     }
 
     pub fn adopt_into_tray_at(&self, paths: &[String], now: Instant) {
-        let mut e = self
-            .entries
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut e = self.entries();
         for p in paths {
             if let Some(entry) = e.get_mut(Path::new(p)) {
                 let (at, origin) = *entry;
-                if origin == Origin::Dropped && now.saturating_duration_since(at) < origin.ttl() {
+                if origin == Origin::Dropped && origin.live(at, now) {
                     *entry = (now, Origin::Picked);
                 }
             }
@@ -148,10 +152,7 @@ impl UploadAllowList {
     /// Remove `paths` from the list once an upload has used them: one
     /// drop or pick authorises one upload, not a window of re-reads.
     pub fn consume(&self, paths: &[String]) {
-        let mut e = self
-            .entries
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut e = self.entries();
         for p in paths {
             e.remove(Path::new(p));
         }
