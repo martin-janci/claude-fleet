@@ -1392,6 +1392,13 @@ describe('missions helpers', () => {
     expect(eventSentence({ id: 5, at: 1, kind: 'account_limit', actor: 'loop', payload: { why: 'work is 95% used' } })).toBe(
       'Waiting for the account: work is 95% used',
     );
+    // One integration names every branch; an older event a pair.
+    expect(
+      eventSentence({ id: 6, at: 1, kind: 'integration', actor: 'loop', payload: { items: [300, 301, 306], a: 300, b: 301 } }),
+    ).toBe('Tasks 300, 301 and 306 need one integration');
+    expect(eventSentence({ id: 7, at: 1, kind: 'integration', actor: 'loop', payload: { a: 300, b: 324 } })).toBe(
+      'Tasks 300 and 324 conflict',
+    );
   });
 });
 
