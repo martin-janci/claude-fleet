@@ -3341,7 +3341,9 @@ impl super::FleetTools {
     ///
     /// A multi-repo start counts only the repos it would start in: one
     /// where the key already has a live session is skipped, and that
-    /// session is already on the mission's count.
+    /// session is already on the mission's count. A key on several items
+    /// counts by the one that skips the fewest repos, since the start may
+    /// resolve any of them.
     pub(super) fn work_link_mission(
         &self,
         args: &crate::service::work::WorkLinkArgs,
@@ -3351,13 +3353,13 @@ impl super::FleetTools {
             return Ok(None);
         }
         let s = lock(&self.store).map_err(to_mcp_err)?;
-        let (mission, item, key) = match (args.item_id, args.key.as_deref()) {
+        let (mission, items, key) = match (args.item_id, args.key.as_deref()) {
             (Some(id), _) => {
                 let Some(mission) = s.work_item_mission(id).map_err(to_mcp_err)? else {
                     return Ok(None);
                 };
                 let key = s.get_work_item(id).map_err(to_mcp_err)?.and_then(|i| i.key);
-                (mission, Some(id), key)
+                (mission, vec![id], key)
             }
             (None, Some(raw)) => {
                 let Ok(key) = crate::store::normalize_work_ref(raw) else {
@@ -3384,23 +3386,36 @@ impl super::FleetTools {
                 let Some(mission) = mission else {
                     return Ok(None);
                 };
-                let item = (ids.len() == 1).then(|| ids[0]);
-                (mission, item, Some(key))
+                (mission, ids, Some(key))
             }
             (None, None) => return Ok(None),
         };
         let sessions = match (multi, key) {
             (Some(ids), Some(key)) if !args.parallel.unwrap_or(false) => {
-                let item_org = item
-                    .map(|id| s.item_org(id))
-                    .transpose()
-                    .map_err(to_mcp_err)?
-                    .flatten();
-                let live = crate::service::trackers::tickets::live_work_on(&s, &key, item_org)
-                    .map_err(to_mcp_err)?;
-                ids.iter()
-                    .filter(|pid| !live.iter().any(|(_, r)| r.project_id == Some(**pid)))
-                    .count() as i64
+                // The org the start skips by is the item it resolves. A key
+                // on several items may resolve any one of them, or none
+                // (no org filter), so count the most repos any of them
+                // would start in: never fewer than the start opens.
+                let mut orgs: Vec<Option<i64>> = Vec::new();
+                if items.len() != 1 {
+                    orgs.push(None);
+                }
+                for id in &items {
+                    orgs.push(s.item_org(*id).map_err(to_mcp_err)?);
+                }
+                orgs.sort_unstable();
+                orgs.dedup();
+                let mut most = 0;
+                for org in orgs {
+                    let live = crate::service::trackers::tickets::live_work_on(&s, &key, org)
+                        .map_err(to_mcp_err)?;
+                    let n = ids
+                        .iter()
+                        .filter(|pid| !live.iter().any(|(_, r)| r.project_id == Some(**pid)))
+                        .count() as i64;
+                    most = most.max(n);
+                }
+                most
             }
             (Some(ids), _) => ids.len() as i64,
             (None, _) => 1,

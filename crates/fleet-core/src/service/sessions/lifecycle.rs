@@ -526,8 +526,14 @@ pub async fn new_session(
         let s = lock(store)?;
         // M15 step G2.9: a login whose API-key account spent its daily limit
         // starts nothing today, from any caller (`over_limit_ok` is the
-        // usage window's question, not this).
-        if args.profile.is_some() {
+        // usage window's question, not this). The host's own login (no
+        // profile) is checked too, for every Claude start.
+        let runs_claude = args.kind.as_deref() != Some("shell")
+            && matches!(
+                args.agent.as_deref(),
+                None | Some(crate::store::AGENT_CLAUDE)
+            );
+        if runs_claude {
             crate::service::account_limits::refuse_over_daily_limit(
                 &s,
                 &args.host_alias,
@@ -2496,8 +2502,9 @@ pub async fn restart_session(
     )
     .await;
     refuse_unvalidated_agent(&agent)?;
-    if launch.profile.is_some() && agent == crate::store::AGENT_CLAUDE && kind != "shell" {
-        // As `new_session`: no relaunch under a login past its daily limit.
+    if agent == crate::store::AGENT_CLAUDE && kind != "shell" {
+        // As `new_session`: no relaunch under a login past its daily limit,
+        // the host's own login included.
         crate::service::account_limits::refuse_over_daily_limit(
             &*lock(store)?,
             &args.host_alias,

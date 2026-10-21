@@ -2554,6 +2554,50 @@ async fn a_persons_switch_onto_a_login_past_pause_at_goes_through() {
     }
 }
 
+/// A person's switch back to the host's own login passes `pause_at`, never
+/// a spent daily limit: the restart's relaunch refuses it for the host's own
+/// login too, not only under a profile.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_persons_switch_onto_an_own_login_past_its_daily_limit_is_refused() {
+    use super::params::RestartSessionParams;
+    let dir = tempfile::tempdir().unwrap();
+    let (s, _, on_b) = two_host_store();
+    let now = crate::store::now_unix();
+    crate::service::account_limits::seed_usage(&s, "hostb", None, "acct-own", 10.0, now);
+    crate::service::account_limits::seed_usage(&s, "hostb", Some("full"), "acct-full", 10.0, now);
+    crate::service::add_account::set_daily_limit(&s, "acct-own", Some(5.0)).unwrap();
+    s.conn_for_test()
+        .execute(
+            "INSERT INTO usage_daily_account (day, account_uuid, model, backfill, cost_micros) \
+             VALUES (?1, 'acct-own', 'm', 0, 6000000)",
+            rusqlite::params![now.div_euclid(86_400)],
+        )
+        .unwrap();
+    s.conn_ref()
+        .execute(
+            "UPDATE sessions SET claude_profile = 'full' WHERE id = ?1",
+            [on_b],
+        )
+        .unwrap();
+    let t = tools_over_fake_ssh(s, dir.path());
+    let p = serde_json::from_value::<RestartSessionParams>(
+        serde_json::json!({ "session_id": on_b, "profile": "" }),
+    )
+    .unwrap();
+    let msg = t
+        .restart_session(
+            Extension(client_caller("phone", TokenMode::Full)),
+            Parameters(p),
+        )
+        .await
+        .err()
+        .map(|e| e.message)
+        .unwrap_or_default();
+    assert!(msg.starts_with("E_ACCOUNT_LIMIT"), "{msg}");
+    assert!(msg.contains("daily limit"), "{msg}");
+}
+
 /// Review 456: the operator's grant check reads the mission of the item the
 /// `work_link` start / resume itself resolves — the key normalised as the
 /// action normalises it, never a key beside a URL (the start takes the URL),
@@ -2640,6 +2684,76 @@ fn the_work_link_grant_check_reads_the_item_the_action_resolves() {
         t.work_link_mission(&parallel, Some(&[api, web])).unwrap(),
         Some((m, 2)),
         "a parallel start skips nothing"
+    );
+}
+
+/// A key two items of one mission hold, in two orgs: the start may resolve
+/// either, and skips a repo only for a live session of that item's org. The
+/// grant check counts by the item that skips the fewest repos, so a live
+/// session of the other org never lets it count fewer than start.
+#[test]
+fn a_key_on_two_orgs_items_counts_the_repos_either_would_start_in() {
+    use crate::service::work::WorkLinkArgs;
+    let s = Store::open_in_memory().unwrap();
+    let m = s
+        .create_mission(
+            &crate::store::NewMission {
+                name: "m",
+                goal: "g",
+                ..Default::default()
+            },
+            "fleet",
+        )
+        .unwrap()
+        .id;
+    let org_a = s.add_org("A", None, false).unwrap().id;
+    let org_b = s.add_org("B", None, false).unwrap().id;
+    let tracker = s
+        .add_tracker("jira", "acme", "https://acme.atlassian.net")
+        .unwrap()
+        .id;
+    s.conn_ref()
+        .execute(
+            "UPDATE trackers SET org_id = ?2 WHERE id = ?1",
+            rusqlite::params![tracker, org_b],
+        )
+        .unwrap();
+    // Org A's local MX-1 and org B's tracker MX-1, both in the mission.
+    s.conn_ref()
+        .execute(
+            "INSERT INTO work_items (source, key, title, origin, created_at, updated_at, \
+             orchestration_project_id, org_id) VALUES ('local', 'MX-1', 'MX-1', 'person', \
+             1, 1, ?1, ?2)",
+            rusqlite::params![m, org_a],
+        )
+        .unwrap();
+    let of_a = s.conn_ref().last_insert_rowid();
+    s.conn_ref()
+        .execute(
+            "INSERT INTO work_items (source, key, title, origin, created_at, updated_at, \
+             orchestration_project_id, tracker_id, external_id) VALUES ('jira', 'MX-1', \
+             'MX-1', 'person', 1, 1, ?1, ?2, '10001')",
+            rusqlite::params![m, tracker],
+        )
+        .unwrap();
+    s.upsert_host("h").unwrap();
+    let api = s.upsert_project("o", "api", "/api").unwrap();
+    let web = s.upsert_project("o", "web", "/web").unwrap();
+    let on_api = s
+        .upsert_session("mx1-api", "h", Some(api), None, 1, 1, "running", None)
+        .unwrap();
+    s.link_session_work(on_api, crate::store::WorkTarget::Item(of_a), "manual")
+        .unwrap();
+    let t = test_tools(s);
+    let args = WorkLinkArgs {
+        action: "start".into(),
+        key: Some("MX-1".into()),
+        ..Default::default()
+    };
+    assert_eq!(
+        t.work_link_mission(&args, Some(&[api, web])).unwrap(),
+        Some((m, 2)),
+        "org B's item does not skip api, where only org A's session runs"
     );
 }
 

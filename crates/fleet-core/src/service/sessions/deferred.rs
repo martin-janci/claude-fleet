@@ -388,6 +388,13 @@ pub fn settle_direct_send(store: &Mutex<Store>, claim: Option<i64>, e: &IpcError
 /// to its wall clock). Left alone when a new idle moment began after the
 /// claim: its turn already ended, and the claim must not come to hold a
 /// moment it never took.
+///
+/// Dated to the second BEFORE now, never now: a turn that ends at once (an
+/// API or auth error, a one-word reply) can Stop in the second the typing
+/// returned, after this restamp, and a claim dated that second would hold
+/// the moment its Stop opened (`delivered_at >= idle_since`), stalling the
+/// queue for the store's `DEFERRED_MOMENT_HOLD_SECS`.
+/// Any Stop that can follow the restamp lands strictly after `now - 1`.
 pub fn date_claim_from_typing(store: &Mutex<Store>, claim: Option<i64>) {
     let Some(id) = claim else {
         return;
@@ -404,9 +411,9 @@ pub fn date_claim_from_typing(store: &Mutex<Store>, claim: Option<i64>) {
     let Ok(Some(row)) = s.get_session_by_id(p.session_id) else {
         return;
     };
-    let now = now_unix();
-    if now > at && idle_moment(&row).is_none_or(|m| m <= at) {
-        let _ = s.restamp_deferred_claim(id, now);
+    let to = now_unix() - 1;
+    if to > at && idle_moment(&row).is_none_or(|m| m <= at) {
+        let _ = s.restamp_deferred_claim(id, to);
     }
 }
 
@@ -1345,7 +1352,7 @@ mod tests {
         let claim = claim_moment_for_direct_send(&store, &row, "slow", now - 30).unwrap();
         date_claim_from_typing(&store, claim);
         let at = store.lock().unwrap().latest_deferred_claim_at(id).unwrap();
-        assert!(at.is_some_and(|at| at >= now), "{at:?}");
+        assert!(at.is_some_and(|at| at >= now - 1), "{at:?}");
 
         let (store, id) = store_with("idle");
         set_idle_since(&store, id, now - 60);
@@ -1358,6 +1365,42 @@ mod tests {
             at,
             Some(now - 30),
             "its turn ended: no hold on the new moment"
+        );
+    }
+
+    /// A turn that ends in the very second its typing returned (an API
+    /// error right after the paste) opens a moment the re-dated claim does
+    /// not hold: the queued prompt its Stop is due to deliver goes in.
+    #[tokio::test]
+    async fn a_stop_in_the_typing_seconds_frees_the_moment_for_the_queue() {
+        let (store, id) = store_with("idle");
+        let now = now_unix();
+        set_idle_since(&store, id, now - 60);
+        let row = session_row(&store, id).unwrap();
+        let claim = claim_moment_for_direct_send(&store, &row, "fast", now - 30).unwrap();
+        date_claim_from_typing(&store, claim);
+        let stop = now_unix();
+        store
+            .lock()
+            .unwrap()
+            .conn_ref()
+            .execute(
+                "UPDATE sessions SET idle_since = ?2, last_stop_at = ?2 WHERE id = ?1",
+                rusqlite::params![id, stop],
+            )
+            .unwrap();
+        let qid = store
+            .lock()
+            .unwrap()
+            .insert_deferred_prompt(id, "next", now - 1)
+            .unwrap();
+        let out = deliver_due_with(&store, id, now_unix(), |_, _| async { Ok(()) })
+            .await
+            .unwrap();
+        assert_eq!(
+            out.map(|r| r.id),
+            Some(qid),
+            "the dead claim held the new moment"
         );
     }
 
