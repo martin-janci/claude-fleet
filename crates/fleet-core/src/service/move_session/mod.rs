@@ -1771,6 +1771,52 @@ pub(super) struct Snapshot {
     pub(super) local_layout_paths: (String, String),
 }
 
+/// The account the login `profile` on `host` is signed in to, if known.
+fn login_account_on<'a>(host: &'a crate::store::HostRow, profile: Option<&str>) -> Option<&'a str> {
+    match profile {
+        None => host.account_uuid.as_deref(),
+        Some(p) => host
+            .claude_profiles
+            .iter()
+            .flatten()
+            .find(|x| x.name == p)
+            .and_then(|x| x.account_uuid.as_deref()),
+    }
+}
+
+/// PURE: the login on `target` a moved session runs under (review w02-5):
+/// the same name when it is signed in to the same `account` there; else
+/// the target's signed-in login on that account (its own first); else the
+/// name it had, when the target has a signed-in login of that name; else
+/// the target's own login, which is at least signed in, rather than an
+/// empty profile that asks for `/login`.
+pub(crate) fn target_login(
+    target: &crate::store::HostRow,
+    profile: Option<&str>,
+    account: &str,
+) -> Option<String> {
+    let usable = |p: Option<&str>| !crate::service::login_health::is_signed_out(target, p);
+    if login_account_on(target, profile) == Some(account) && usable(profile) {
+        return profile.map(str::to_string);
+    }
+    let own = std::iter::once(None);
+    let profiles = target
+        .claude_profiles
+        .iter()
+        .flatten()
+        .map(|x| Some(x.name.as_str()));
+    if let Some(p) = own
+        .chain(profiles)
+        .find(|p| login_account_on(target, *p) == Some(account) && usable(*p))
+    {
+        return p.map(str::to_string);
+    }
+    if login_account_on(target, profile).is_some() && usable(profile) {
+        return profile.map(str::to_string);
+    }
+    None
+}
+
 fn snapshot(s: &Store, args: &MoveSessionArgs) -> Result<Snapshot, IpcError> {
     let row = s
         .get_session_by_id(args.session_id)?
@@ -1925,8 +1971,21 @@ fn snapshot(s: &Store, args: &MoveSessionArgs) -> Result<Snapshot, IpcError> {
     )
     .saturating_mul(1024 * 1024);
     let target_taken = target_rows.into_iter().map(|r| r.tmux_name).collect();
+    let mut launch = crate::service::sessions::stored_launch(s, row.id)?;
+    // The login travels by ACCOUNT, not by name (review w02-5): a profile
+    // name the target has on another account, or not at all, would bill
+    // another account or open `/login` there.
+    if let (Some(src), Some(dst)) = (s.get_host_row(&row.host_alias)?, s.get_host_row(target)?) {
+        let account = row
+            .account_uuid
+            .clone()
+            .or_else(|| login_account_on(&src, launch.profile.as_deref()).map(str::to_string));
+        if let Some(account) = account {
+            launch.profile = target_login(&dst, launch.profile.as_deref(), &account);
+        }
+    }
     Ok(Snapshot {
-        launch: crate::service::sessions::stored_launch(s, row.id)?,
+        launch,
         claude_id,
         branch,
         project_id,
@@ -3548,6 +3607,60 @@ mod tests {
     use crate::ssh_fake::{FakeSsh, Match, Reply};
     use crate::tmux::{RemoteTmux, TmuxExec};
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// Review w02-5: a moved session's login follows its account, never a
+    /// profile name the target has on another account or not at all.
+    #[test]
+    fn a_moved_login_follows_its_account() {
+        use crate::store::{HostProfileRow, SignedOutLogin};
+        let s = Store::open_in_memory().unwrap();
+        for uuid in ["acct-a", "acct-b", "acct-c"] {
+            s.upsert_account(&crate::store::AccountRow {
+                uuid: uuid.into(),
+                ..Default::default()
+            })
+            .unwrap();
+        }
+        s.upsert_host("htz").unwrap();
+        s.set_host_account("htz", Some("acct-b")).unwrap();
+        let profile = |name: &str, uuid: &str| HostProfileRow {
+            name: name.into(),
+            account_uuid: Some(uuid.into()),
+            email: None,
+        };
+        s.set_host_profiles("htz", &[profile("work", "acct-c"), profile("ci", "acct-a")])
+            .unwrap();
+        let htz = || s.get_host_row("htz").unwrap().unwrap();
+        // Same name, other account; a login on the account exists: that one.
+        assert_eq!(
+            target_login(&htz(), Some("work"), "acct-a").as_deref(),
+            Some("ci")
+        );
+        // The host's own login is on the account.
+        assert_eq!(target_login(&htz(), Some("missing"), "acct-b"), None);
+        // Same name, same account: kept.
+        assert_eq!(
+            target_login(&htz(), Some("work"), "acct-c").as_deref(),
+            Some("work")
+        );
+        // No login on the account and no such profile: the host's own, not
+        // an empty profile at `/login`.
+        assert_eq!(target_login(&htz(), Some("missing"), "acct-z"), None);
+        // A signed-out login on the account is passed over.
+        s.set_host_signed_out_logins(
+            "htz",
+            &[SignedOutLogin {
+                profile: Some("ci".into()),
+                since: 1,
+                checked_at: 1,
+            }],
+        )
+        .unwrap();
+        assert_eq!(
+            target_login(&htz(), Some("work"), "acct-a").as_deref(),
+            Some("work")
+        );
+    }
 
     const SID: &str = "550e8400-e29b-41d4-a716-446655440000";
     const HEAD: &str = "1111111111111111111111111111111111111111";

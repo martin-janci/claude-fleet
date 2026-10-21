@@ -21,6 +21,7 @@
   action); the created-task card says who proposed it and takes a group.
 -->
 <script lang="ts">
+  import { errorText } from './error_copy';
   import { onMount, tick, untrack } from 'svelte';
   import Loader from './Loader.svelte';
   import { durationMs, effectiveMotion } from './motion';
@@ -213,7 +214,7 @@
     busy = h.id;
     const r = await mergeWorkProposal(item.id, into.item_id);
     busy = null;
-    if (!r.ok) errors[h.id] = r.error.message;
+    if (!r.ok) errors[h.id] = errorText(r.error);
     else await refreshHandoffs();
   }
 
@@ -245,7 +246,7 @@
       const r = await editWorkItem(item.id, { ...(who.length ? { assignees: who } : {}), ...(when ? { due_at: when } : {}) });
       if (!r.ok) {
         busy = null;
-        errors[h.id] = r.error.message;
+        errors[h.id] = errorText(r.error);
         return;
       }
     }
@@ -254,7 +255,7 @@
       const r = await placeWork(`item:${item.id}`, into, 0);
       if (!r.ok) {
         busy = null;
-        errors[h.id] = r.error.message;
+        errors[h.id] = errorText(r.error);
         return;
       }
     }
@@ -351,7 +352,7 @@
           disabled={!h.mission_name}
           onclick={() => openMissionChip(h)}
         >
-          <span class="what">Sent to a mission</span>
+          <span class="what">{h.tool === 'steer' ? 'You steered' : 'Sent to a mission'}</span>
           <span class="target">{h.mission_name ?? 'a deleted mission'}</span>
           {#if h.mission_state}<StatusChip state={workState(h.mission_state)} />{/if}
         </button>

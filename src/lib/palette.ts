@@ -15,7 +15,9 @@
  * destructive-fill colours are not touched: they stay app.css's.
  *
  * fleet-mobile's `OrbitPalette.kt` is a port of this file; the golden values
- * in `palette.test.ts` and its Kotlin twin keep the two in step.
+ * in `docs/design/palette-golden.json` (held here by `palette.test.ts`, and on
+ * the phone by `OrbitPaletteTest` against its unchanged copy) keep the two in
+ * step.
  */
 
 export type ContrastLevel = 'soft' | 'std' | 'high';
@@ -221,7 +223,6 @@ export function orbitPalette({ sun, contrast, hue }: PaletteInput): Record<strin
     'count-bg': count.hex,
     track: oklch(bgL + s * 0.09, nc, nh).hex,
     'org-1': accent.hex,
-    'loader-accent': accent.hex,
     'control-bg': dark ? raise.hex : pane.hex,
     'control-bg-hover': hover.hex,
     'control-bg-active': oklch(bgL + s * 0.1, nc, nh).hex,

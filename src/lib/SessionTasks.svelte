@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { errorText } from './error_copy';
   // The session's Tasks (work graph M14): every link of the session's
   // participant — active (the primary ★ first, then secondary ones),
   // suggested, past and rejected — each with its why. A session can work on
@@ -84,7 +85,7 @@
     if (mine !== seq) return;
     if (!r.ok) {
       unsupported = isOlderHub(r.error);
-      error = unsupported ? null : r.error.message;
+      error = unsupported ? null : errorText(r.error);
       data = null;
       return;
     }
@@ -168,7 +169,7 @@
         conflictNotice(r.error, `${what}: it`, (id) => {
           const l = links.find((x) => x.link_id === id);
           return l ? taskLabel(l.task) : null;
-        }) ?? `${what}: ${r.error.message}`;
+        }) ?? `${what}: ${errorText(r.error)}`;
       await load(session.id);
       return;
     }
@@ -247,7 +248,7 @@
         liveElsewhere = { ref, label, force, live };
         return;
       }
-      notice = `Work on task: ${r.error.message}`;
+      notice = `Work on task: ${errorText(r.error)}`;
       return;
     }
     liveElsewhere = null;

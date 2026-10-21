@@ -13,12 +13,14 @@ import { push } from './toasts';
 import {
   discardKillSession,
   inspectSafeKill,
+  pinnedBlock,
   safeKillSession,
   type DirtyFile,
   type SessionRow,
 } from './sessions';
 import { sessionActionBlocked, sessionIdActionBlocked } from './share';
 import { applyTidy, unarchiveSession, type TidyApplyResult } from './tidy';
+import { errorText } from './error_copy';
 
 /** What a Kill would leave behind in one session's worktree. */
 export type WorkCheck =
@@ -33,7 +35,7 @@ export async function checkWork(row: SessionRow): Promise<WorkCheck> {
   const blocked = hubBlock('inspect_safe_kill', get(hubStatus)) ?? sessionActionBlocked(row, 'inspect_safe_kill');
   if (blocked !== null) return { state: 'unknown', why: blocked };
   const r = await inspectSafeKill(row.host_alias, row.tmux_name);
-  if (!r.ok) return { state: 'unknown', why: r.error.message };
+  if (!r.ok) return { state: 'unknown', why: errorText(r.error) };
   const i = r.value;
   if (!i) return { state: 'unknown', why: 'the host sent no answer' };
   if (i.error) return { state: 'unknown', why: i.error };
@@ -60,7 +62,8 @@ export const FILES_SHOWN = 5;
 export function cleanUpBlocked(row: SessionRow): string | null {
   return (
     hubActionBlocked('safe_kill_session', get(hubStatus), get(hubConnection)) ??
-    sessionActionBlocked(row, 'safe_kill_session')
+    sessionActionBlocked(row, 'safe_kill_session') ??
+    pinnedBlock(row)
   );
 }
 

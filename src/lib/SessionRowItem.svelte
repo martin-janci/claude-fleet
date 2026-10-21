@@ -13,7 +13,7 @@
     sessions,
     type SessionRow,
   } from './sessions';
-  import { pinnedBlock } from './session_actions';
+  import { pinnedBlock, requestSessionAction } from './session_actions';
   import { get } from 'svelte/store';
   import { selectedSession } from './selection';
   import { hostByAlias } from './hosts';
@@ -192,7 +192,7 @@
     // reactive, but the keyboard and a stale render are not it.
     if ($sessionBlocked(sess, 'recreate_session') !== null) return;
     const r = await recreateSession(sess.id);
-    if (!r.ok) pushError(r.error, 'Recreate failed');
+    if (!r.ok) pushError(r.error, 'Recreate failed', undefined, { repair: () => requestSessionAction(sess, 'repair') });
   }
 
   async function doDismissGhost(sess: SessionRow, e?: Event) {
@@ -268,7 +268,8 @@
   );
   const ghostDismissBlocked = $derived(
     hubActionBlocked('dismiss_ghost_session', $hubStatus, $hubConnection) ??
-      $sessionBlocked(sess, 'dismiss_ghost_session'),
+      $sessionBlocked(sess, 'dismiss_ghost_session') ??
+      pinnedBlock(sess),
   );
   const workBlocked = $derived(
     hubActionBlocked('link_session_work', $hubStatus, $hubConnection) ??
@@ -1033,6 +1034,10 @@
               resetsAt={$attentionFacts?.limited_accounts?.[sess.account_uuid ?? '']?.resets_at ?? null}
               accountName={(u) => accountLabel($accountByUuid.get(u))}
             />
+          {:else if triage.bucket === 'no_credentials'}
+            <!-- Signed out (review w03-3): the same restart under another
+                 login applies; there is no reset to wait for. -->
+            <LimitActions {sess} resetsAt={null} signedOut accountName={(u) => accountLabel($accountByUuid.get(u))} />
           {/if}
           {#if !compact && $showRowDetails}
             <SessionRowDetails {sess} {nowSec} {secondaryName} />

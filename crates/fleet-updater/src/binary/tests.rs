@@ -534,6 +534,11 @@ async fn a_bare_hub_that_migrated_comes_back_on_its_backup() {
     let recovered = r.hub.lock().unwrap().reports.last().cloned().unwrap();
     assert_eq!(recovered.phase, UpdatePhase::Recovered);
     assert_eq!(recovered.detail["data_restored"], true);
+    assert!(
+        recovered.error.as_deref().is_some_and(|e| !e.is_empty()),
+        "the reason for the rollback reaches the hub (review w26-2): {:?}",
+        recovered.error
+    );
 }
 
 #[tokio::test]

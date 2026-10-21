@@ -345,10 +345,8 @@ async fn new_codex_bg_session(
     let project_id = args
         .project_id
         .ok_or_else(|| IpcError::new(codes::E_INVALID, CODEX_BG_NEEDS_PROJECT))?;
-    let over = {
-        let s = lock(store)?;
-        crate::service::account_limits::over_limit(&s, &args.host_alias, None, now_unix())?
-    };
+    // No Claude account check (review w02-9): Codex keeps its own login and
+    // does not bill the host's Claude account.
     let session_args = crate::service::sessions::NewSessionArgs {
         host_alias: args.host_alias.clone(),
         project_id,
@@ -376,7 +374,7 @@ async fn new_codex_bg_session(
         env: None,
     };
     let row = crate::service::sessions::new_session(session_args, store, ssh, reg).await?;
-    let mut warning = over.map(|o| format!("{}; it may stall at the limit", o.reason()));
+    let mut warning: Option<String> = None;
     let row = {
         let s = lock(store)?;
         // Parentage and the requester's work, as `stamp_bg_row` gives a
@@ -410,13 +408,7 @@ async fn new_codex_bg_session(
 const LAUNCH_LOOKUP_TRIES: usize = 3;
 const LAUNCH_LOOKUP_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
 
-/// Current wall-clock time in unix seconds (0 if the clock is before 1970).
-fn now_unix() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
+use crate::store::now_unix;
 
 /// Clock-skew slack (seconds) between fleet's clock and the host's when
 /// matching a just-launched agent's `startedAt` against the launch time.

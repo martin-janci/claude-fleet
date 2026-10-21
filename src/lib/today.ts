@@ -112,19 +112,23 @@ export function bucketOf(sessions: readonly TodaySession[]): TodayBucket {
  * of its live row (`scopeOf`), a shipped entry by its org (an owner scope or
  * *unassigned* keeps only entries with no org — a finished ticket has no
  * project owner to go by). Groups left empty are dropped and the rest
- * re-bucketed.
+ * re-bucketed. `shown`, when given, also drops a session whose live row the
+ * list's host filter or background-agent toggle hides, as the Inbox and
+ * the rail do (review w11-8).
  */
 export function scopeToday(
   t: Today,
   scope: ScopeId,
   rows: readonly SessionRow[],
   scopeOf: (s: SessionRow) => ScopeId,
+  shown?: (row: SessionRow) => boolean,
 ): TodayView {
   const all = scope === ALL_SCOPES;
   const byId = new Map(rows.map((r) => [r.id, r]));
   const keepSession = (s: TodaySession) => {
-    if (all) return true;
     const row = byId.get(s.id);
+    if (shown && row && !shown(row)) return false;
+    if (all) return true;
     return row !== undefined && scopeOf(row) === scope;
   };
   const orgScope = scope.startsWith('org:') ? Number(scope.slice(4)) : null;
@@ -154,12 +158,13 @@ const ATTENTION_WORDS: Record<string, string> = {
 };
 
 /** How a session reads in a line: its name, and why it is listed. */
-export function sessionPhrase(s: TodaySession, bucket: TodayBucket): string {
+export function sessionPhrase(s: TodaySession, bucket: TodayBucket, setAside = false): string {
   if (bucket === 'waiting' && s.attention) {
     return `${s.name} (${ATTENTION_WORDS[s.attention] ?? s.attention})`;
   }
   // G1.6: Jev's proposal says so, wherever its group stands.
-  if (s.proposed && !s.attention) return `${s.name} (probably waiting)`;
+  // One the person set aside with "Not waiting" says nothing (w11-11).
+  if (s.proposed && !s.attention && !setAside) return `${s.name} (probably waiting)`;
   if (bucket === 'stale' && s.stale) {
     return `${s.name} (${s.stale === 'done' ? 'ticket done, session still running' : 'idle'})`;
   }
@@ -260,13 +265,18 @@ export interface TodayKpis {
 }
 
 const sessionsIn = (gs: readonly TodayGroup[]) => gs.reduce((n, g) => n + g.sessions.length, 0);
+const waitingIn = (gs: readonly TodayGroup[]) =>
+  gs.reduce((n, g) => n + g.sessions.filter((s) => s.attention).length, 0);
 
 /** The four tiles: sessions (and missions) that need you, sessions in
- *  progress, what shipped today, stale sessions. */
+ *  progress, what shipped today, stale sessions. A waiting group waits on
+ *  one of its sessions; its siblings count as in progress, as the rail
+ *  counts them (review w11-3). */
 export function todayKpis(v: TodayView): TodayKpis {
+  const waiting = waitingIn(v.waiting);
   return {
-    needsYou: sessionsIn(v.waiting) + (v.missions?.length ?? 0),
-    inProgress: sessionsIn(v.inProgress),
+    needsYou: waiting + (v.missions?.length ?? 0),
+    inProgress: sessionsIn(v.inProgress) + sessionsIn(v.waiting) - waiting,
     shipped: v.shipped.length,
     stale: sessionsIn(v.stale),
   };

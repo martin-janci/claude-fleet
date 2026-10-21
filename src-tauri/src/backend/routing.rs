@@ -60,9 +60,9 @@
 //! (*Parity or refusal*), because the refusal is user-visible.
 
 use super::connection::ConnectionView;
-use super::remote::{HubBackend, HubTransport};
+use super::remote::HubBackend;
 use super::verdicts::{self, Verdict};
-use super::{Backend, RemoteConfig};
+use super::Backend;
 use fleet_core::ipc_error::{codes, IpcError};
 use std::sync::Arc;
 
@@ -113,7 +113,11 @@ impl FleetBackend {
 
     /// A hub client over a caller-supplied transport — the seam the routing
     /// tests use to answer with a recorded response instead of a network.
-    pub fn remote_over(cfg: RemoteConfig, transport: Arc<dyn HubTransport>) -> Self {
+    #[cfg(test)]
+    pub fn remote_over(
+        cfg: super::RemoteConfig,
+        transport: Arc<dyn super::remote::HubTransport>,
+    ) -> Self {
         Self {
             hub: Some(HubBackend::with_transport(cfg, transport)),
         }

@@ -258,3 +258,26 @@ describe('app.css and THEME follow the design manual (docs/design/tokens.json)',
     );
   });
 });
+
+describe('native controls and the primary halo follow the theme (review w20-3, w20-10)', () => {
+  /** The text of the block that starts at `marker`, up to its first `}`. */
+  const block = (marker: string) => {
+    const at = appCss.indexOf(marker);
+    expect(at, `block not found in app.css: ${marker}`).toBeGreaterThanOrEqual(0);
+    return appCss.slice(at, appCss.indexOf('}', at));
+  };
+
+  for (const mode of ['light', 'dark'] as const) {
+    it(`${mode}: every block that declares the theme sets color-scheme: ${mode}`, () => {
+      for (const marker of BLOCKS[mode]) expect(block(marker)).toMatch(new RegExp(`color-scheme:\\s*${mode};`));
+    });
+  }
+
+  it('checkboxes, radios and ranges take the accent', () => {
+    expect(block(BLOCKS.light[0])).toMatch(/accent-color:\s*var\(--accent\);/);
+  });
+
+  it('a component button.primary gets the dark halo too, at zero specificity', () => {
+    expect(appCss).toMatch(/:where\([^)]*\bbutton\.primary\b[^)]*\)\s*\{\s*box-shadow:\s*var\(--glow\);/);
+  });
+});

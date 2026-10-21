@@ -279,6 +279,13 @@ impl Caller {
         self.is_fleet_admin && self.is_person_device()
     }
 
+    /// Control's own surfaces (`control_journal`, `control_auto_continue`):
+    /// Control itself, the master, or the fleet admin's own device. Unlike
+    /// `is_master_or_fleet_admin_device`, the master needs no named owner.
+    pub fn is_control_or_owner(&self) -> bool {
+        self.is_operator() || self.is_master() || self.is_fleet_admin_device()
+    }
+
     /// The callers that administer the fleet (`Access::Person`): the master
     /// or a person device, and in both cases only while `is_fleet_admin`
     /// holds. A master counts only while the hub names its owner; with no
@@ -720,17 +727,6 @@ fn is_the_personal_owner(person_id: Option<i64>, personal_owner: Option<i64>) ->
 /// agent, the hub's bind check and the desktop.
 pub fn is_loopback_host(value: &str) -> bool {
     fleet_proto::net::is_loopback(&authority_host(value))
-}
-
-/// True if an `Origin` header value is a loopback `http(s)` origin. Anything
-/// else — a remote origin, the opaque `null` origin, a non-http scheme — is
-/// treated as cross-origin and rejected.
-// Kept as a public, independently-tested special case of `origin_allowed`
-// (empty allowlist) even though production code now calls `check_origin`
-// directly; not currently called outside its own test.
-#[allow(dead_code)]
-pub fn origin_is_loopback(origin: &str) -> bool {
-    origin_allowed(origin, &[])
 }
 
 /// Lower-cased, trimmed allowlist entries (`host` or `host:port`), empties
@@ -1327,14 +1323,24 @@ mod tests {
     }
 
     #[test]
-    fn origin_is_loopback_accepts_local_and_rejects_remote() {
-        assert!(origin_is_loopback("http://127.0.0.1:4180"));
-        assert!(origin_is_loopback("http://localhost:4180"));
-        assert!(origin_is_loopback("https://[::1]"));
-        assert!(!origin_is_loopback("http://evil.com"));
-        assert!(!origin_is_loopback("https://evil.com:4180"));
-        assert!(!origin_is_loopback("null"));
-        assert!(!origin_is_loopback("file://"));
+    fn an_empty_allowlist_admits_only_loopback_origins() {
+        // Anything else — a remote origin, the opaque `null` origin, a
+        // non-http scheme — is treated as cross-origin and rejected.
+        for o in [
+            "http://127.0.0.1:4180",
+            "http://localhost:4180",
+            "https://[::1]",
+        ] {
+            assert!(origin_allowed(o, &[]), "should accept {o}");
+        }
+        for o in [
+            "http://evil.com",
+            "https://evil.com:4180",
+            "null",
+            "file://",
+        ] {
+            assert!(!origin_allowed(o, &[]), "should reject {o}");
+        }
     }
 
     fn headers(pairs: &[(&str, &str)]) -> HeaderMap {

@@ -10,6 +10,7 @@
   import { timeAgo } from './session_status';
   import { commentAuthor } from './task_detail';
   import Icon from './kit/Icon.svelte';
+  import { lightboxFocus } from './lightbox_focus';
   import {
     attachToWork,
     deleteWorkAttachment,
@@ -236,7 +237,9 @@
 </section>
 
 {#if lightbox}
+  <!-- Review w19-5: focus moves to Close, stays in, and returns to the thumbnail. -->
   <div
+    use:lightboxFocus
     class="lightbox"
     role="dialog"
     aria-modal="true"

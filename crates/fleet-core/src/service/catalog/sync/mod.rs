@@ -110,12 +110,8 @@ pub struct SyncRunSummary {
 fn union_catalog(
     snapshot: &BTreeMap<i64, super::repo::Catalog>,
 ) -> Result<super::repo::Catalog, IpcError> {
-    super::registry::union_of(snapshot).ok_or_else(|| {
-        IpcError::new(
-            super::E_CATALOG_NOT_CONFIGURED,
-            "catalog not loaded; call catalog_load",
-        )
-    })
+    super::registry::union_of(snapshot)
+        .ok_or_else(|| IpcError::new(super::E_CATALOG_NOT_CONFIGURED, super::NOT_LOADED))
 }
 
 /// A `HostPlan` with nothing to do and a reason: an unreachable host, or a

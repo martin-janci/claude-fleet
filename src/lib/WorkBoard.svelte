@@ -109,6 +109,11 @@
   let more = $state(false);
   let loaded = $state(false);
   let error = $state<IpcError | null>(null);
+  /** Review w17-7: a re-read of the board shown (same filters and scope)
+   *  failed; the cards stay, with a one-line note, as WorkTree does. */
+  let refreshError = $state<IpcError | null>(null);
+  /** The filters and scope the cards shown were read for. */
+  let readKey: string | null = null;
   /** Cards a person moved (task → lane id), placed before the hub answers. */
   let overrides = $state.raw<Map<string, string>>(new Map());
   /** Cards moved on this board: kept on Done past its window. */
@@ -156,14 +161,19 @@
   async function load() {
     const mine = ++seq;
     const want = liveScope(get(boardScope), sprints);
-    const r = await workTree({ filters: boardFilters(get(workViewFilters), want), limit: 200, per_task: 3, with_missions: true });
+    const filters = boardFilters(get(workViewFilters), want);
+    const key = JSON.stringify([filters, want]);
+    const r = await workTree({ filters, limit: 200, per_task: 3, with_missions: true });
     if (mine !== seq) return;
     loaded = true;
     if (!r.ok) {
-      error = r.error;
+      if (readKey === key && !error) refreshError = r.error;
+      else error = r.error;
       return;
     }
     error = null;
+    refreshError = null;
+    readKey = key;
     // The board reads archived rows so Done keeps its cards; tasks a person
     // archived stay hidden until the Archived switch is on.
     tasks = withoutPersonArchived(Array.isArray(r.value?.tasks) ? r.value.tasks : [], get(workViewFilters).archived === true);
@@ -503,6 +513,12 @@
   {:else if !loaded}
     <div class="pad" data-testid="work-board-loading"><Skeleton rows={4} label="Loading tasks" /></div>
   {:else}
+    {#if refreshError}
+      <p class="refresh-error pad" role="status" data-testid="work-board-refresh-error">
+        Couldn't refresh ({readErrorText(refreshError)}) — showing what was loaded.
+        <button class="btn btn--quiet" type="button" data-testid="work-board-refresh-retry" onclick={() => void load()}>Retry</button>
+      </p>
+    {/if}
     {#if more}
       <p class="muted pad" data-testid="work-board-more">Showing the 200 most recent tasks. Narrow the Work view's filters to see the rest.</p>
     {/if}
@@ -785,6 +801,11 @@
   .pad {
     padding: var(--space-2) var(--space-3);
     margin: 0;
+  }
+  .refresh-error {
+    margin: 0;
+    font-size: var(--text-2xs);
+    color: var(--usage-warn);
   }
   .err {
     padding: var(--space-2) var(--space-3);

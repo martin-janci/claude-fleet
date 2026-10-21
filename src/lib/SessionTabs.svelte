@@ -38,6 +38,7 @@
   import { hostByAlias } from './hosts';
   import { accountByUuid } from './accounts';
   import Meter from './kit/Meter.svelte';
+  import type { Snippet } from 'svelte';
 
   interface Props {
     session: SessionRow | null;
@@ -55,6 +56,9 @@
     isMac: boolean;
     onselect: (tab: SessionTab) => void;
     oninspector: () => void;
+    /** Shown in the title row before the context meter: another fleet's
+     *  session puts its fleet, Copy attach and Close here. */
+    extra?: Snippet;
   }
   let {
     session,
@@ -67,7 +71,14 @@
     isMac,
     onselect,
     oninspector,
+    extra,
   }: Props = $props();
+
+  /** Another fleet's session (multi-hub Phase 3): its id, host and account
+   *  are that hub's, so nothing here looks them up in this window's own
+   *  stores (presence, grants, accounts) or offers what acts on this hub
+   *  (Share, Open in VS Code, the inspector). */
+  const away = $derived(!!session?.fleet);
 
   const state = $derived(
     session
@@ -82,7 +93,7 @@
   // The header's meta line and context meter (UX audit 2026-10-09, H2 and
   // H3): host · account · worktree · PR, and how full the context window is.
   const accountEmail = $derived.by(() => {
-    if (!session) return null;
+    if (!session || away) return null;
     const uuid = session.claude_profile
       ? session.account_uuid
       : (session.account_uuid ?? $hostByAlias.get(session.host_alias)?.account_uuid ?? null);
@@ -91,7 +102,7 @@
   // Gap plan G4.2: someone the session is shared with reads who shared it,
   // at what level and since when, and "Waiting for Martin" for its state.
   const sharedLevel = $derived.by(() => {
-    const a = session ? $accessOf(session) : null;
+    const a = session && !away ? $accessOf(session) : null;
     return isSharedAccess(a) ? a : null;
   });
   const shareInfo = $derived(session ? $myGrantInfo.get(session.id) : undefined);
@@ -129,8 +140,11 @@
     <div class="title-row">
       <span class="name" data-testid="session-head-name">{name}</span>
       <span class="state state-{state}" data-testid="session-head-state">{stateLabel}</span>
-      <VisibilityBadge {session} />
-      <SharedWithYou {session} />
+      {#if !away}
+        <VisibilityBadge {session} />
+        <SharedWithYou {session} />
+      {/if}
+      {@render extra?.()}
       <span class="grow"></span>
       {#if ctxPct !== null && ctxLevel !== null}
         <span class="ctx" data-testid="session-head-context" data-level={ctxLevel} title="Context window used">
@@ -143,6 +157,7 @@
           <Meter value={ctxPct / 100} level={ctxLevel} label="{Math.round(ctxPct)}% of the context window used" />
         </span>
       {/if}
+      {#if !away}
       <PresenceStrip sessionId={session.id} />
       <button
         type="button"
@@ -177,7 +192,9 @@
         class="btn btn--quiet head-btn inspector-toggle"
         aria-pressed={inspectorOpen}
         disabled={!inspectorAvailable}
-        title={`Inspector (${inspectorChord})`}
+        title={inspectorAvailable
+          ? `Inspector (${inspectorChord})`
+          : 'No room for the inspector in this view (wide layout, Details, board or missions)'}
         aria-label="Inspector"
         data-testid="inspector-toggle"
         onclick={oninspector}
@@ -186,6 +203,7 @@
           ><rect x="2" y="3" width="12" height="10" rx="1.5" /><path d="M10 3v10" /></svg
         >
       </button>
+      {/if}
     </div>
     <div class="meta" data-testid="session-head-meta">
       {#if sharedLevel}<span data-testid="session-head-shared-by">{sharedByMeta(sharedLevel, shareInfo, sharer)}</span

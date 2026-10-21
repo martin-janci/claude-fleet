@@ -410,7 +410,8 @@ pub struct WorkLinkArgs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_parallel: Option<u32>,
     /// mission_grant: the login its runs bill, a credential profile on the
-    /// run's host; omitted, the host's own.
+    /// run's host; omitted, the host's own. start/resume: the login the
+    /// session runs under ("" = the host's own; omitted, fleet picks).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
     /// today_brief: draft a new brief (true) or answer the last one;
@@ -998,8 +999,9 @@ pub fn start_args_as(
         decider,
         owner: None,
         origin: None,
-        // A start names no login: `profile` is mission_grant's.
-        profile: None,
+        // The login the caller named (review w02-1); "" = the host's own.
+        // Omitted, the start rule or placement picks.
+        profile: args.profile.clone(),
         reference: args.url.clone().or(args.key.clone()),
         item_id: args.item_id,
         project_id: args.project_id,
@@ -1027,6 +1029,7 @@ pub fn resume_args(args: &WorkLinkArgs) -> Result<resume::ResumeArgs, IpcError> 
         host_alias: args.host_alias.clone(),
         brief: args.brief.clone(),
         force_cross_org: args.force_cross_org.unwrap_or(false),
+        profile: args.profile.clone(),
     })
 }
 

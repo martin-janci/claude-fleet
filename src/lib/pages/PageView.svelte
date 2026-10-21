@@ -50,6 +50,7 @@
     actions = [],
     focusKey = null,
     section = null,
+    hideKeys = [],
     readonly = false,
     remote = false,
     reason = null,
@@ -74,6 +75,8 @@
     /** Show only the section with this title (a Settings tree leaf, step
      *  7.1), headed by that title, with a link to the whole page. */
     section?: string | null;
+    /** Fields not to show: a panel above the page already edits them. */
+    hideKeys?: string[];
     /** Show every field without editing (a hub client). */
     readonly?: boolean;
     /** A paired desktop (P6): the fields are the hub's, but data items,
@@ -325,7 +328,7 @@
     {#each section.items as item, i (i)}
       {#if item.type === 'field'}
         {@const d = descs.get(item.key)}
-        {#if d && evalCondition(item.when, values)}
+        {#if d && evalCondition(item.when, values) && !hideKeys.includes(item.key)}
           <FieldRow
             {d}
             value={values[item.key] ?? d.value}

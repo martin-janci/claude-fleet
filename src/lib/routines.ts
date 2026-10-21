@@ -12,8 +12,11 @@ import { RUN_CHANGED_EVENT } from './events';
 import { pollWhileShown } from './window_hidden';
 import type { AccountRow } from './accounts';
 import { sessions } from './sessions';
+import { hosts } from './hosts';
 import { selectSessionExplicitly } from './selection';
 import { goTo } from './destination';
+import { requestHostsView } from './app_views';
+import { openAccount } from './account_pill';
 import { automationTab } from './automation';
 import type { RunRow } from './runs';
 import type { OfState } from './kit/status';
@@ -64,6 +67,39 @@ export interface RoutineRow {
   retry_once?: boolean;
   /** 0 report only | 1 ask before push; absent = push and open PRs. */
   autonomy?: number;
+  /** The notebooks its runs read and rewrite (migration 204); absent = none. */
+  memory?: RoutineMemoryMode;
+  /** The fleet notes each finished run in the notebook. */
+  memory_auto?: boolean;
+}
+
+/** `routines.memory`: which notebooks a routine's runs use. */
+export type RoutineMemoryMode = 'routine' | 'project' | 'both';
+/** A notebook: the routine's own, or its project's (shared by its routines). */
+export type RoutineNotebook = 'routine' | 'project';
+
+/** One notebook (fleet-core `store::RoutineMemoryRow`). */
+export interface RoutineMemoryRow {
+  scope: RoutineNotebook;
+  owner_id: number;
+  circle?: number;
+  body: string;
+  updated_at: number;
+  /** person | run | fleet */
+  updated_by: string;
+  updated_run_id?: number;
+}
+
+/** `memory`: the notebooks a routine uses (fleet-core
+ *  `routines::memory::RoutineMemory`). A notebook nothing wrote is absent. */
+export interface RoutineMemory {
+  routine_id: number;
+  memory?: RoutineMemoryMode;
+  memory_auto: boolean;
+  routine?: RoutineMemoryRow;
+  project?: RoutineMemoryRow;
+  max_chars: number;
+  may_change: boolean;
 }
 
 /** One run of a routine. */
@@ -178,6 +214,10 @@ export interface RoutineInput {
   fallback_host?: string;
   retry_once?: boolean;
   autonomy?: number;
+  /** Sent only when it keeps a notebook, so a hub without memory still
+   *  saves it; `''` turns a routine's off (a change without it keeps it). */
+  memory?: RoutineMemoryMode | '';
+  memory_auto?: boolean;
 }
 
 /** `preview`: the editor's dry run (gap plan G2.3, fleet-core
@@ -195,8 +235,10 @@ export interface RoutinePreview {
 }
 
 /** A saved routine as `save` takes it back, unchanged: what the editor
- *  opens on, and what Undo writes after an edit (G7.4). */
-export function routineInputOf(r: RoutineRow): RoutineInput {
+ *  opens on, and what Undo writes after an edit (G7.4). `clearsMemory`:
+ *  the routine now keeps a notebook `r` did not, so `memory: ''` goes too
+ *  (a change without `memory` keeps the routine's). */
+export function routineInputOf(r: RoutineRow, clearsMemory = false): RoutineInput {
   return {
     name: r.name,
     enabled: r.enabled,
@@ -220,6 +262,7 @@ export function routineInputOf(r: RoutineRow): RoutineInput {
     fallback_host: r.fallback_host,
     retry_once: r.retry_once,
     autonomy: r.autonomy,
+    ...(r.memory ? { memory: r.memory, memory_auto: r.memory_auto ?? false } : clearsMemory ? { memory: '' as const } : {}),
   };
 }
 
@@ -233,6 +276,8 @@ type Args = {
   run_id?: number;
   outcome?: string;
   event_id?: number;
+  notebook?: RoutineNotebook;
+  text?: string;
 };
 
 function call<T>(args: Args): Promise<Result<T>> {
@@ -258,6 +303,11 @@ export const runRoutineNow = (id: number) => call<RoutineRunRow>({ action: 'run_
 export type PersonOutcome = 'did_work' | 'nothing' | 'needs_person';
 export const setRunOutcome = (id: number, runId: number, outcome: PersonOutcome) =>
   call<RoutineRunRow>({ action: 'set_run_outcome', routine_id: id, run_id: runId, outcome });
+/** The notebooks a routine's runs read and rewrite (migration 204). */
+export const routineMemory = (id: number) => call<RoutineMemory>({ action: 'memory', routine_id: id });
+/** Rewrite one notebook; `''` clears it. */
+export const setRoutineMemory = (id: number, notebook: RoutineNotebook, text: string) =>
+  call<RoutineMemory>({ action: 'set_memory', routine_id: id, notebook, text });
 
 // ---- debugging (migration 186; `service::routines::debug`) -----------------
 
@@ -416,6 +466,15 @@ export async function loadFailing(): Promise<void> {
  *  read failed; the line is then left out. */
 export const nextRoutine = writable<RoutineRow | null>(null);
 
+/** The routines ⌘K finds by name (review w18-5), read each time it opens.
+ *  A failed read leaves the last list. */
+export const switcherRoutines = writable<RoutineRow[]>([]);
+
+export async function loadSwitcherRoutines(): Promise<void> {
+  const r = await listRoutines();
+  if (r.ok && Array.isArray(r.value)) switcherRoutines.set(r.value);
+}
+
 export async function loadNextRoutine(nowSec = Math.floor(Date.now() / 1000)): Promise<void> {
   const r = await listRoutines();
   nextRoutine.set(r.ok && Array.isArray(r.value) ? soonestRoutine(r.value, nowSec) : null);
@@ -446,8 +505,14 @@ export function nextRoutineLine(r: Pick<RoutineRow, 'name' | 'next_run_at'>, now
   return `The next routine is ${r.name} ${when}.`;
 }
 
-/** How many failed runs the Inbox shows: added to its Needs you count. */
-export const failingCount = derived(failing, ($f) => $f.length);
+/** How many failed runs the Inbox counts: added to its Needs you count.
+ *  Only the ones this viewer may change (review w11-6): a teammate's
+ *  routine has no button here, so it would hold the badge until its owner
+ *  acts. Those are listed, uncounted (`failingOthersCount`). */
+export const failingCount = derived(failing, ($f) => $f.filter((f) => f.may_change).length);
+
+/** The failed routines listed for the viewer to see but not to change. */
+export const failingOthersCount = derived(failing, ($f) => $f.filter((f) => !f.may_change).length);
 
 /** Retry: run it again now; the newer run takes it out of the Inbox. */
 export async function retryRoutine(f: FailingRoutine): Promise<Result<RoutineRunRow>> {
@@ -491,14 +556,29 @@ export function openRoutines(r: Omit<RoutinesRequest, 'at'> = {}): void {
  * host, a refused start) opens the routine's definition instead. Answers
  * what it opened.
  */
+/** The account the run's login bills, from the host rows: the profile's
+ *  account, else the host's own. `null` when the hosts do not say. */
+function routineAccountUuid(f: FailingRoutine): string | null {
+  const alias = f.run.host_alias ?? f.routine.host_alias;
+  const h = get(hosts).find((x) => x.alias === alias);
+  if (!h) return null;
+  const p = f.routine.profile;
+  return (p ? h.claude_profiles?.find((x) => x.name === p)?.account_uuid : h.account_uuid) ?? null;
+}
+
 export function fixRoutine(f: FailingRoutine): 'session' | 'definition' | 'host' | 'accounts' | 'retry' {
   const action = f.fix?.action;
   if (action === 'host') {
+    // The run's host, focused (review w03-6).
+    requestHostsView(f.run.host_alias ?? f.routine.host_alias);
     goTo('hosts');
     return 'host';
   }
   if (action === 'accounts') {
-    goTo('accounts');
+    // The routine's own account, not the page's first (review w03-6).
+    const uuid = routineAccountUuid(f);
+    if (uuid) openAccount(uuid);
+    else goTo('accounts');
     return 'accounts';
   }
   if (action === 'retry') {
@@ -566,12 +646,38 @@ export function capSecsOf(text: string): number | undefined {
   return Number.isFinite(n) && n > 0 ? Math.round(n * 60) : undefined;
 }
 
-/** What started a run, for its Details: a retry names the run it retried. */
+/** What an event run's `trigger_ref` is about, in words (review w06-12):
+ *  `session:12:345` → "session #12", `pr:3:9` → "a pull request",
+ *  `fleet:host:mac:42` → "host mac", `fleet:mission:4:7` → "mission #4",
+ *  `fleet:account:u-1:8` → "account u-1", `fleet:login:mac:work:9` →
+ *  "the work login on mac". `null` for a ref it does not know. */
+export function triggerRefWords(ref: string | undefined | null): string | null {
+  if (!ref) return null;
+  const p = ref.split(':');
+  if (p[0] === 'session' && /^\d+$/.test(p[1] ?? '')) return `session #${p[1]}`;
+  if (p[0] === 'pr' && /^\d+$/.test(p[1] ?? '')) return 'a pull request';
+  if (p[0] !== 'fleet' || p.length < 4) return null;
+  // The fleet event's subject sits between `fleet:` and its event id.
+  const subject = p.slice(1, -1);
+  const [what, ...rest] = subject;
+  const name = rest.join(':');
+  if (!name) return null;
+  if (what === 'host') return `host ${name}`;
+  if (what === 'mission') return `mission #${name}`;
+  if (what === 'account') return `account ${name}`;
+  if (what === 'login' && rest.length === 2) return rest[1] === '-' ? `the default login on ${rest[0]}` : `the ${rest[1]} login on ${rest[0]}`;
+  return null;
+}
+
+/** What started a run, for its Details: a retry names the run it retried;
+ *  an event says what it was about ("an event on session #12"). */
 export function startedByWords(run: Pick<RoutineRunRow, 'trigger' | 'trigger_ref'>): string {
   const by: Record<string, string> = { cron: 'its schedule', event: 'an event', run_now: 'Run now' };
   const what = by[run.trigger] ?? run.trigger;
   const ref = run.trigger_ref;
   if (ref?.startsWith('retry:')) return `${what}, retried once after run ${ref.slice(6)} failed`;
+  const about = triggerRefWords(ref);
+  if (about) return `${what} on ${about}`;
   return ref ? `${what} (${ref})` : what;
 }
 
@@ -608,21 +714,28 @@ export function triggerWords(r: Pick<RoutineRow, 'trigger' | 'cron' | 'event'>):
   return 'Run now only';
 }
 
-// Session events (fleet-core `routines::EVENTS`): "A session is …".
+// Session events (fleet-core `routines::EVENTS`): "A session is …", unless
+// SESSION_EVENT_LABELS names it whole (review w06-9; the phone's
+// AutomationViewModel.eventLabel says the same).
+const SESSION_EVENT_LABELS: Record<string, string> = {
+  stop_failure: 'A session’s turn fails',
+  auto_restore_failed: 'An automatic restore attempt fails',
+  account_switch_failed: 'An account switch fails',
+};
 const EVENT_WORDS: Record<string, string> = {
   turn_done: 'done with a turn',
   needs_you: 'waiting for you',
   stuck: 'stuck',
   lost: 'lost',
-  stop_failure: 'failed',
+  stop_failure: 'failed at a turn',
   task_done: 'done with its task',
   task_failed: 'failed at its task',
   session_restore_failed: 'not restored after a reboot',
   workspace_repair_failed: 'left with a broken workspace',
   auto_restored: 'brought back automatically',
-  auto_restore_failed: 'past bringing back',
+  auto_restore_failed: 'not brought back by an automatic restore attempt',
   account_switched: 'moved to another account',
-  account_switch_failed: 'stuck on an account it could not leave',
+  account_switch_failed: 'not moved by an account switch',
   session_moved: 'moved to another host',
 };
 export function eventWords(e: string | undefined): string {
@@ -676,7 +789,7 @@ export function isPrEvent(e: string | undefined): boolean {
 }
 /** An event as the editor's select names it. */
 export function eventLabel(e: string | undefined): string {
-  return (e && (PR_EVENT_LABELS[e] || FLEET_EVENT_LABELS[e])) || `A session is ${eventWords(e)}`;
+  return (e && (PR_EVENT_LABELS[e] || FLEET_EVENT_LABELS[e] || SESSION_EVENT_LABELS[e])) || `A session is ${eventWords(e)}`;
 }
 /** The rate choices: absent is "every time". */
 export const RATE_CHOICES: readonly { secs?: number; label: string }[] = [
@@ -729,8 +842,25 @@ export function eventFilterInput(
 export function rateSubject(e: string | undefined): string {
   if (isPrEvent(e)) return 'PR';
   if (!isFleetEvent(e)) return 'session';
-  if (e?.startsWith('host_') || e === 'login_signed_out') return 'host';
+  // The hub counts a signed-out login per login (`login:<host>:<profile>`),
+  // not per host (review w06-10).
+  if (e === 'login_signed_out') return 'login';
+  if (e?.startsWith('host_')) return 'host';
   return e?.startsWith('account_') ? 'account' : 'mission';
+}
+/** The hosts "Only on host" offers (review w06-11): every unhidden one, but
+ *  for a fleet event only those in the routine's host's org, as the hub
+ *  refuses the rest at save. Without a routine host, every unhidden one. */
+export function eventHostChoices(
+  hosts: readonly { alias: string; hidden?: boolean; org_id?: number | null }[],
+  event: string | undefined,
+  routineHost: string | undefined,
+): string[] {
+  const shown = hosts.filter((h) => !h.hidden);
+  const own = routineHost ? hosts.find((h) => h.alias === routineHost) : undefined;
+  if (!own || !isFleetEvent(event)) return shown.map((h) => h.alias);
+  const org = own.org_id ?? null;
+  return shown.filter((h) => (h.org_id ?? null) === org).map((h) => h.alias);
 }
 /** "only in acme/web · on mac · anyone's · once per PR per hour", or '' when nothing narrows it. */
 export function eventFilterWords(
@@ -776,11 +906,49 @@ export function dollars(micros: number | undefined): string {
   return `$${((micros ?? 0) / 1_000_000).toFixed(2)}`;
 }
 
-/** Dollars typed by a person as micro-dollars; empty or bad is no limit. */
+/** Dollars typed by a person as micro-dollars; empty or bad is no limit
+ *  (`budgetProblem` says which, so a bad one never saves as none). A
+ *  comma is a decimal point too ("5,50", the Slovak way). */
 export function microsOf(text: string): number | undefined {
-  const t = text.trim().replace(/^\$/, '');
+  const t = text.trim().replace(/^\$\s*/, '').replace(',', '.');
   if (t === '' || !/^\d+(\.\d{1,2})?$/.test(t)) return undefined;
   return Math.round(Number(t) * 1_000_000);
+}
+
+/** What is wrong with a budget field, or null when it is empty (no
+ *  limit) or an amount above $0 (review w05-5, w05-6). */
+export function budgetProblem(text: string): string | null {
+  if (text.trim() === '') return null;
+  const m = microsOf(text);
+  if (m === undefined) return 'Write an amount like 5 or 5.50.';
+  return m > 0 ? null : 'A budget is above $0; leave it empty for no limit.';
+}
+
+/** The longest time cap in minutes: six hours, past which the hub fails any run. */
+export const CAP_MAX_MIN = 360;
+
+/** What is wrong with the Time cap field, or null when it is empty (no
+ *  cap) or whole minutes from 1 to 360 (the hub's 60 s to six hours). */
+export function capProblem(text: string): string | null {
+  const t = text.trim();
+  if (t === '') return null;
+  const n = Number(t);
+  return /^\d+$/.test(t) && n >= 1 && n <= CAP_MAX_MIN ? null : `Whole minutes, 1 to ${CAP_MAX_MIN}; leave it empty for no cap.`;
+}
+
+/** "once per 30 minutes": an event rate in words, for one the presets lack. */
+export function rateLabel(secs: number): string {
+  const unit = (n: number, w: string) => (n === 1 ? `once per ${w}` : `once per ${n} ${w}s`);
+  if (secs % 86400 === 0) return unit(secs / 86400, 'day');
+  if (secs % 3600 === 0) return unit(secs / 3600, 'hour');
+  if (secs % 60 === 0) return unit(secs / 60, 'minute');
+  return unit(secs, 'second');
+}
+
+/** A preview `problem` that is about the cron line itself (it does not
+ *  parse, or never fires), as the cron parser words it. */
+export function isCronProblem(problem: string | undefined): boolean {
+  return !!problem && /^(a schedule has five fields|(minute|hour|day of month|month|weekday): )|never fires$|needs cron$/.test(problem);
 }
 
 // ---- templates ------------------------------------------------------------

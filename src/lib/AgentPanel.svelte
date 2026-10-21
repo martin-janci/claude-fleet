@@ -41,7 +41,8 @@
   import { openSettingsAt, requestHostsView, requestNewSessionOnHost } from './app_views';
   import { hosts } from './hosts';
   import { fleetSettings, hubHasSetting, hubSettingKeys, settingBool, SETTING_KEYS } from './fleet_settings';
-  import { agentContext, type AgentContextInput } from './agent_context';
+  import { agentContext, missionContext, type AgentContextInput } from './agent_context';
+  import { missionList } from './mission_room';
   import ControlPlusMenu from './ControlPlusMenu.svelte';
   import { insertIntoComposer } from './conversation';
   import ConfirmCards from './ConfirmCards.svelte';
@@ -56,7 +57,8 @@
   import { linkableTasks, type TaskLink } from './control_task_link';
   import { workTree } from './work_view';
   import { sessions } from './sessions';
-  import { openInControl } from './control_room';
+  import { activeThread, openInControl } from './control_room';
+  import { handoffs } from './handoffs';
   import { selectView } from './control_views';
   import type { ChatRef } from './chat_refs';
   import FixCard from './FixCard.svelte';
@@ -120,7 +122,16 @@
   // leave both stale.
   // See `operatorRow` in operator.ts.
   const session = $derived($operatorRow);
-  const rawCtx = $derived(contextInput ? agentContext(contextInput) : null);
+  // A mission thread open in Control speaks about that mission (w04-13):
+  // its name from the missions list, else from Control's receipt for it.
+  const missionCtx = $derived.by(() => {
+    const t = $activeThread;
+    if (t?.kind !== 'mission') return null;
+    const name =
+      $missionList.missions.find((m) => m.id === t.id)?.name ?? $handoffs.find((h) => h.mission_id === t.id)?.mission_name ?? `#${t.id}`;
+    return missionContext({ id: t.id, name });
+  });
+  const rawCtx = $derived(missionCtx ?? (contextInput ? agentContext(contextInput) : null));
   const ctx = $derived(rawCtx && rawCtx.chipLabel !== droppedLabel ? rawCtx : null);
 
   const blocked = $derived(
@@ -315,6 +326,7 @@
       daySeparators={true}
       look="chat"
       onOpenRef={openRef}
+      advanceOnAnswer={false}
     />
   {/if}
 </div>

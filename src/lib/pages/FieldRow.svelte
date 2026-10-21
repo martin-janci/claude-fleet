@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { errorText } from '../error_copy';
   // One setting on a generated page. Everything shown comes from the
   // registry's descriptor — label, help, bounds, unit, danger, restart,
   // owner — so a page spec only says *where* the setting goes. Writes go
@@ -15,6 +16,7 @@
   import type { Result } from '../result';
   import {
     fromDisplay,
+    needsConfirm as confirmFirst,
     optionLabel,
     rangeText,
     toDisplay,
@@ -123,16 +125,14 @@
   let error = $state<string | null>(null);
   let pending = $state<string | null>(null);
 
-  function needsConfirm(next: string): boolean {
-    return d.danger.level === 'confirm' && next !== d.default;
-  }
+  const needsConfirm = (next: string) => confirmFirst(d, next);
 
   async function commit(next: string): Promise<boolean> {
     busy = true;
     error = null;
     const r = save ? await save(next) : await setFleetSetting(d.key as SettingKey, next);
     busy = false;
-    if (!r.ok) error = r.error.message;
+    if (!r.ok) error = errorText(r.error);
     return r.ok;
   }
 
@@ -220,7 +220,7 @@
     error = null;
     const r = await decideProposals(apply ? [proposal.id] : [], apply ? [] : [proposal.id]);
     busy = false;
-    if (!r.ok) error = r.error.message;
+    if (!r.ok) error = errorText(r.error);
     else if (r.value.failed.length) error = r.value.failed[0].error;
   }
 
@@ -231,7 +231,7 @@
     if (!historyOpen) return;
     const r = await settingHistory(d.key);
     if (r.ok) history = r.value;
-    else error = r.error.message;
+    else error = errorText(r.error);
   }
 
   const ids = $derived.by<number[]>(() => {
@@ -259,7 +259,9 @@
       <span class="label" id={`${id}-label`}>{d.label}</span>
     {/if}
     {#if d.tags.includes('experimental')}<span class="tag">experimental</span>{/if}
-    {#if d.restart === 'app'}<span class="tag" title="Read once at launch">applies after a restart</span>{/if}
+    {#if d.restart === 'app'}<span class="tag" title="Read once at launch" data-testid={`setting-restart-${d.key}`}
+        >{remote ? 'applies after the hub restarts' : 'applies after the app restarts'}</span
+      >{/if}
     {#if d.restart === 'hooks'}<span class="tag" title="Takes effect on each host's next hook install">applies when hooks are reinstalled</span>{/if}
     {#if !readonly && !save && d.owned_by === undefined}
       <button
@@ -641,6 +643,7 @@
   .readonly {
     font-family: var(--mono);
     font-size: var(--control-font);
+    overflow-wrap: anywhere;
   }
   .help {
     margin: 0.15rem 0 0;

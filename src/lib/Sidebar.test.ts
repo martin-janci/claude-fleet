@@ -1465,6 +1465,31 @@ describe('Sidebar triage (W2 Track D)', () => {
     expect(after[0]).toHaveTextContent('dev-stuck');
   });
 
+  it('a focus shows its primary row even while the fleet switcher names only an extra fleet', async () => {
+    const { _setFleetsForTest, _resetFleetsForTest, fleetFilter } = await import('./fleets');
+    const base = { url: 'https://x', color: '#5b8def', local: false, client_name: 'mac', connection: { state: 'connected' as const }, unavailable: null };
+    _setFleetsForTest([
+      { ...base, id: 'primary', label: 'home', primary: true },
+      { ...base, id: 'company', label: 'company', primary: false },
+    ]);
+    fleetFilter.set('company');
+    try {
+      const fine = sessionFor(2, 'dev-fine');
+      mockBackend(fakeProjects, [sessionFor(1, 'dev-other'), fine]);
+      render(Sidebar);
+      await tick(); await tick();
+      expect(screen.queryAllByTestId('sess-row')).toHaveLength(0);
+      focusSession(fine.id, 'dev-fine');
+      await tick(); await tick();
+      const rows = screen.getAllByTestId('sess-row');
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toHaveTextContent('dev-fine');
+    } finally {
+      fleetFilter.set('all');
+      _resetFleetsForTest();
+    }
+  });
+
   // UX-08: at zero there is nothing to warn about, so the glyph and the
   // "(0)" go away — but the pill itself must stay, or the filter becomes
   // unreachable the moment the queue drains.
@@ -2009,7 +2034,7 @@ describe('Sidebar: a hub contract skew', () => {
     expect((screen.getByTestId('add-create') as HTMLButtonElement).disabled).toBe(true);
     const why = screen.getByTestId('add-blocked');
     expect(why.textContent).toContain('unreachable');
-    expect(why.textContent).toContain('fleet.example.com');
+    expect(why.textContent).toContain("Try again once it's back");
   });
 });
 
@@ -3268,6 +3293,33 @@ describe('List keys (redesign step 3.8)', () => {
     expect(get(selectedSession)?.id).toBe(rows[2].id);
   });
 
+  it('the next-needs-you chord wins over a focused terminal (review w18-3)', async () => {
+    const rows = three();
+    mockBackend(fakeProjects, rows);
+    selectSession(null);
+    render(Sidebar);
+    await tick(); await tick();
+    // Stands in for the terminal's IME proxy, whose keydown writes the
+    // chord to the pty and prevents it.
+    const proxy = document.createElement('textarea');
+    proxy.dataset.imeProxy = '';
+    const wrote = vi.fn();
+    proxy.addEventListener('keydown', (e) => {
+      wrote();
+      e.preventDefault();
+    });
+    document.body.appendChild(proxy);
+    try {
+      const isMac = /Mac/.test(navigator.platform) || /Macintosh/.test(navigator.userAgent);
+      const chord = isMac ? { key: 'n', metaKey: true, altKey: true } : { key: 'n', ctrlKey: true, altKey: true };
+      await fireEvent.keyDown(proxy, chord);
+      expect(get(selectedSession)?.id).toBe(rows[2].id);
+      expect(wrote).not.toHaveBeenCalled();
+    } finally {
+      proxy.remove();
+    }
+  });
+
   it('⌘2 opens the second row on a Mac', async () => {
     const plat = Object.getOwnPropertyDescriptor(Navigator.prototype, 'platform');
     Object.defineProperty(navigator, 'platform', { value: 'MacIntel', configurable: true });
@@ -3322,6 +3374,23 @@ describe('Inbox (redesign step 3.3)', () => {
     expect(screen.getAllByTestId('sess-row')).toHaveLength(3);
   });
 
+  it('w11-2: Sessions grouped by work does not take keyed sessions out of the Inbox', async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const keyed = { ...sessionFor(2, 'dev-pay'), tags: ['PAY-7'], claude_status: 'blocked' as const, last_activity_at: now };
+    mockBackend(fakeProjects, [...fleet(), keyed]);
+    sidebarGroupBy.set('work');
+    sidebarView.set('inbox');
+    try {
+      render(Sidebar);
+      await tick(); await tick();
+      const shown = screen.getAllByTestId('sess-row').map((r) => r.textContent ?? '');
+      expect(shown.some((t) => t.includes('dev-pay'))).toBe(true);
+      expect(screen.getByTestId('inbox-head').textContent).toContain('3 need you');
+    } finally {
+      sidebarGroupBy.set('project');
+    }
+  });
+
   // G3.1: the Main board's Inbox, from the one attention model.
   it('groups by state: Needs you with its missions and "+1 proposed", then Failed', async () => {
     const now = Math.floor(Date.now() / 1000);
@@ -3350,6 +3419,8 @@ describe('Inbox (redesign step 3.3)', () => {
     expect(within(failed).getByTestId('inbox-section-head').textContent).toMatch(/Failed\s*1/);
     expect(within(failed).getByTestId('sess-row').textContent).toContain('dev-crashed');
     expect(screen.getByTestId('inbox-head').textContent).toContain('3 need you');
+    // w11-7: the title's badge counts what the header counts, the mission too.
+    expect(screen.getByTestId('inbox-title').textContent).toBe('Inbox3');
     // "Not waiting" sets the reading aside: the row and "+1 proposed" go.
     await fireEvent.click(within(proposed).getByTestId('inbox-proposed-by-change'));
     await tick();
@@ -3939,5 +4010,93 @@ describe('Pinned sessions', () => {
     const kill = within(section).getByLabelText('Kill') as HTMLButtonElement;
     expect(kill.disabled).toBe(true);
     expect(kill.title).toBe('Pinned: unpin it first');
+  });
+  it('shows no empty state under a Pinned section when every session is pinned', async () => {
+    const a = { ...sessionFor(1, 'dev-a'), pinned_at: 100 };
+    const b = { ...sessionFor(null, 'dev-b'), pinned_at: 200 };
+    mockBackend(fakeProjects, [a, b]);
+    render(Sidebar);
+    await tick(); await tick();
+    await screen.findByTestId('pinned-sessions');
+    expect(screen.queryByTestId('sidebar-empty')).toBeNull();
+  });
+
+  it('a search that matches only a pinned row shows no "No sessions match"', async () => {
+    const p = { ...sessionFor(null, 'dev-alpha'), pinned_at: 100 };
+    const loose = sessionFor(1, 'dev-beta');
+    mockBackend(fakeProjects, [p, loose]);
+    render(Sidebar);
+    await tick(); await tick();
+    await screen.findByTestId('pinned-sessions');
+    const search = screen.getByPlaceholderText(/search/i) as HTMLInputElement;
+    await fireEvent.input(search, { target: { value: 'alpha' } });
+    await waitFor(() => {
+      expect(screen.getAllByTestId('sess-row')).toHaveLength(1);
+    });
+    expect(within(screen.getByTestId('pinned-sessions')).getAllByTestId('sess-row')).toHaveLength(1);
+    expect(screen.queryByTestId('sidebar-empty')).toBeNull();
+  });
+
+  it('opening a pinned session from outside opens a collapsed Pinned section', async () => {
+    const p = { ...sessionFor(1, 'dev-pinned'), pinned_at: 100 };
+    mockBackend(fakeProjects, [p, sessionFor(1, 'dev-loose')]);
+    render(Sidebar);
+    await tick(); await tick();
+    const section = await screen.findByTestId('pinned-sessions');
+    await fireEvent.click(within(section).getByTestId('pinned-toggle'));
+    expect(within(section).queryAllByTestId('sess-row')).toHaveLength(0);
+    const row = get(sessions).find((x) => x.tmux_name === 'dev-pinned')!;
+    selectSession(row);
+    await tick(); await tick(); await Promise.resolve();
+    expect(within(screen.getByTestId('pinned-sessions')).getAllByTestId('sess-row')).toHaveLength(1);
+  });
+
+  it('bulk Kill of pinned rows says they are pinned, not that they are not yours', async () => {
+    const a = { ...sessionFor(1, 'dev-a'), pinned_at: 100 };
+    const b = { ...sessionFor(1, 'dev-b'), pinned_at: 200 };
+    mockBackend(fakeProjects, [a, b]);
+    render(Sidebar);
+    await tick(); await tick();
+    const rows = screen.getAllByTestId('sess-row');
+    await fireEvent.click(rows[0], { shiftKey: true });
+    await fireEvent.click(rows[1], { metaKey: true });
+    await tick();
+    await fireEvent.click(screen.getByTestId('bulk-kill'));
+    await tick();
+    const none = screen.getByTestId('bulk-kill-none').textContent ?? '';
+    expect(none).toMatch(/pinned/i);
+    expect(none).not.toMatch(/not yours|never killed/i);
+  });
+
+  it('bulk Kill on a mixed selection counts the pinned row as pinned', async () => {
+    const a = { ...sessionFor(1, 'dev-a'), pinned_at: 100 };
+    const b = sessionFor(1, 'dev-b');
+    mockBackend(fakeProjects, [a, b]);
+    render(Sidebar);
+    await tick(); await tick();
+    const rows = screen.getAllByTestId('sess-row');
+    await fireEvent.click(rows[0], { shiftKey: true });
+    await fireEvent.click(rows[1], { metaKey: true });
+    await tick();
+    await fireEvent.click(screen.getByTestId('bulk-kill'));
+    await tick();
+    const skipped = screen.getByTestId('bulk-kill-skipped').textContent ?? '';
+    expect(skipped).toMatch(/1 pinned \(unpin first\)/);
+    expect(skipped).not.toMatch(/not yours/);
+  });
+
+  it('bulk Clean up leaves a pinned row out of its targets', async () => {
+    const a = { ...sessionFor(1, 'dev-a'), pinned_at: 100 };
+    const b = sessionFor(1, 'dev-b');
+    mockBackend(fakeProjects, [a, b]);
+    render(Sidebar);
+    await tick(); await tick();
+    const rows = screen.getAllByTestId('sess-row');
+    await fireEvent.click(rows[0], { shiftKey: true });
+    await fireEvent.click(rows[1], { metaKey: true });
+    await tick();
+    await fireEvent.click(screen.getByTestId('bulk-cleanup'));
+    await tick();
+    expect(screen.getByRole('dialog').textContent).toMatch(/Clean up session\?/);
   });
 });

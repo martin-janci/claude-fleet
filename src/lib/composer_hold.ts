@@ -7,6 +7,8 @@
 // one line per turn, once the turn ends. The Stop button next to Send
 // interrupts the turn (the REPL's own Escape).
 
+import { get, writable } from 'svelte/store';
+
 /** One line typed while the composer was gated. */
 export interface HeldLine {
   id: number;
@@ -14,6 +16,33 @@ export interface HeldLine {
 }
 
 let nextId = 1;
+
+/**
+ * The held lines of a gated composer that went away (review w04-6). They
+ * are typed to Control, not to one pane of it, and Control has one gated
+ * composer: when its panel unmounts (the person leaves Control for a rail
+ * item or "All sessions") its lines are parked here, and the next gated
+ * panel takes them back — also when Control was moved to a new row (#923),
+ * so the lines go to the Control that now runs instead of vanishing.
+ */
+export const parkedHeld = writable<readonly HeldLine[]>([]);
+
+/** Park a gated composer's held lines as its panel goes. */
+export function parkHeld(lines: readonly HeldLine[]): void {
+  parkedHeld.update((p) => [...p, ...lines]);
+}
+
+/** Take the parked lines back (once). */
+export function unparkHeld(): HeldLine[] {
+  const out = [...get(parkedHeld)];
+  parkedHeld.set([]);
+  return out;
+}
+
+/** Test seam: nothing parked. */
+export function resetHeldForTests(): void {
+  parkedHeld.set([]);
+}
 
 /** Hold `text` behind what is already held. Blank text holds nothing. */
 export function hold(held: readonly HeldLine[], text: string): HeldLine[] {
@@ -50,8 +79,11 @@ export function heldPreview(text: string, max = 60): string {
 /** The key that interrupts Claude Code's running turn. */
 export const STOP_KEY = 'Escape';
 
-/** Whether the Stop button shows: on a gated composer, while the session is
- *  busy (`busyNote` is the composer's own "working" sentence). */
-export function canStop(gatedComposer: boolean, busyNote: string | null): boolean {
-  return gatedComposer && busyNote !== null;
+/** Whether the Stop button shows: on every composer while a turn is running
+ *  (review w13-4: the Session view's Conversation tab had no interrupt at
+ *  all), and never while the session is stuck (w13-5): at a trust prompt or
+ *  a login menu Escape means "No, exit" or backs out, not "stop the turn",
+ *  and the stuck row carries its own recovery chip. */
+export function canStop(claudeStatus: string | null, stuckKind: string | null): boolean {
+  return claudeStatus === 'working' && !stuckKind;
 }

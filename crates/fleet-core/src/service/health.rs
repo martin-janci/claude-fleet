@@ -281,6 +281,11 @@ pub struct HostHealthRow {
     /// latest fresh.
     #[serde(default)]
     pub cpu_saturated: bool,
+    /// Two copies of one Claude login on the host, which log each other out
+    /// (`service::login_conflicts`). Not sent when empty; an older hub
+    /// omits it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub login_conflicts: Vec<crate::service::login_conflicts::LoginConflict>,
 }
 
 /// The `health.*` thresholds [`hosts_health`] judges against.
@@ -503,6 +508,7 @@ pub fn hosts_health(
                 mem_pressure: h.mem_pressure.map(round_pct),
                 mem_low: mem_low(h, t.mem_low_pct, now),
                 cpu_saturated: cpu_saturated(h, now),
+                login_conflicts: crate::service::login_conflicts::for_host(h),
             }
         })
         .collect()
@@ -1289,12 +1295,7 @@ pub fn blank_rollups(h: &mut Health) {
     h.org_budgets.clear();
 }
 
-fn now_unix() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
+use crate::store::now_unix;
 
 pub fn health_check(store: &Mutex<Store>) -> Health {
     // A poisoned store mutex IS an unhealthy state — report db_ready=false
@@ -1469,6 +1470,7 @@ mod tests {
             mem_low: false,
             cpu_saturated: false,
             signed_out_logins: Vec::new(),
+            login_split: None,
             harnesses: None,
         }
     }

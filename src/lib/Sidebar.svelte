@@ -16,6 +16,7 @@
     hasNoPane,
     sessionAgent,
     isPinned,
+    PINNED_BLOCK,
     type SessionRow,
   } from './sessions';
   import { describePurge, purgeHostsForProject } from './purge';
@@ -51,9 +52,11 @@
   import ProposedBy from './ProposedBy.svelte';
   import FleetSwitcher from './FleetSwitcher.svelte';
   import FleetSessionGroups from './FleetSessionGroups.svelte';
-  import { showPrimary, fleetInboxCount, hostFilterLabel, fleetHostPasses } from './fleets';
+  import { showPrimary, fleetInboxCount, multiFleet } from './fleets';
+  import PrimaryFleetHeader from './PrimaryFleetHeader.svelte';
+  import { anchor, primaryFleetOpen, primaryHiddenByAnchor, showPrimaryList } from './fleet_filters';
   import FleetInbox from './FleetInbox.svelte';
-  import { failingCount, loadFailing, loadNextRoutine, nextRoutine, nextRoutineLine } from './routines';
+  import { failingCount, failingOthersCount, loadFailing, loadNextRoutine, nextRoutine, nextRoutineLine } from './routines';
   import { loadWaitingMissions, waitingMissionCount } from './mission_waits';
   import { matchesAllWords, sessionMatchesSearch } from './search';
   import { sessionFocus } from './session_focus';
@@ -91,6 +94,7 @@
   import {
     hostsViewOpen,
     addProjectRequest,
+    nextNeedsYouRequest,
     requestHostsView,
   } from './app_views';
   import { hintAnchor } from './hints';
@@ -100,7 +104,7 @@
   import LostFoldRow from './LostFoldRow.svelte';
   import { setProjectPick } from './project_picks';
   import { detectMac, isEditable } from './terminal_keys';
-  import { matchShortcut } from './shortcuts';
+  import { matchShortcut, shortcutLabel } from './shortcuts';
   import {
     buildSessionsByProject,
     buildOutsideFleet,
@@ -347,31 +351,6 @@
       work,
     );
   }
-  /** The extra fleets' rows under the same filters (multi-hub): Machine,
-   *  background agents, needs-you, last active, agent and search. Not the
-   *  org scope, the work filters, the folds or the Mine / Shared tabs: those
-   *  read this window's own ids, which an extra fleet's collide with. A
-   *  focus is one of this window's sessions, so it hides them. */
-  const fleetMatch = $derived.by(() => {
-    if (focus) return () => false;
-    const host = viewHost;
-    const bg = viewBg;
-    const q = viewSearch;
-    const nyo = needsYouOnly;
-    const r = recency;
-    const now = attentionOpts.now;
-    const ag = $agentFilter;
-    return (fleet: string, s: SessionRow, proj: string, needs: boolean): boolean =>
-      fleetHostPasses(host, fleet, s.host_alias) &&
-      sessionVisible(s, 'all', bg) &&
-      (!nyo || needs) &&
-      (r === 'all' || withinRecency(s.last_activity_at, r, now)) &&
-      (ag === 'any' || sessionAgent(s) === ag) &&
-      sessionMatchesSearch(s, q, proj);
-  });
-  const fleetFiltered = $derived(
-    !!focus || viewHost !== 'all' || needsYouOnly || recency !== 'all' || $agentFilter !== 'any' || viewSearch.trim() !== '',
-  );
   const rowBase = $derived.by((): SessionPredicate => {
     if (focus) {
       const id = focus.id;
@@ -503,7 +482,6 @@
           scopeLabel:
             $effectiveScope === UNASSIGNED ? 'Unassigned' : $scopes.find((x) => x.id === $effectiveScope)?.label,
           host: $effectiveHostFilter,
-          hostLabel: $hostFilterLabel($effectiveHostFilter),
           agent: $agentFilter === 'any' ? undefined : agentFilterLabel($agentFilter),
           recency,
           search: searchQuery,
@@ -559,6 +537,21 @@
     for (const s of orphanSessions) ids.add(s.id);
     for (const s of pinnedRows) ids.add(s.id);
     return ids;
+  });
+  // The primary's rows another fleet's Machine / Org choice hides, counted
+  // as an extra fleet's are (`fleetListView().hiddenByAnchor`): the rows
+  // that pass the filters every fleet shares — Background agents, Last
+  // active, Agent, Needs you, Search — whatever their machine or org.
+  const primaryHiddenCount = $derived.by(() => {
+    const shared = triagePredicate(null);
+    const q = searchQuery;
+    return $sessions.filter(
+      (s) =>
+        s.kind !== 'external' &&
+        s.status !== 'lost' &&
+        sessionVisible(s, 'all', $showBgAgents, shared, null) &&
+        sessionMatchesSearch(s, q, projectLabelOf(s.project_id)),
+    ).length;
   });
   $effect(() => {
     const vis = visibleIds;
@@ -622,9 +615,12 @@
    * outright would take the first away to prevent the second.
    */
   // A pinned row is never closed: Kill and Clean up pass it by.
-  const bulkKillTargets = $derived(
-    bulkTargets(selectedRows, 'kill_session', $sessionBlocked).filter((s) => !isPinned(s)),
-  );
+  const bulkKillAllowed = $derived(bulkTargets(selectedRows, 'kill_session', $sessionBlocked));
+  const bulkKillTargets = $derived(bulkKillAllowed.filter((s) => !isPinned(s)));
+  /** Rows this person may kill but that are pinned: told apart from the
+   *  rows refused by grant, because the way back differs (unpin). */
+  const bulkKillPinned = $derived(bulkKillAllowed.length - bulkKillTargets.length);
+  const bulkKillNotYours = $derived(selectedRows.length - bulkKillAllowed.length);
   const bulkPromptTargets = $derived(bulkTargets(selectedRows, 'send_prompt', $sessionBlocked));
 
   /** Clean up was accepted. A direct remove already dropped the row, so
@@ -669,10 +665,15 @@
     push({ message: parts.join(' · '), kind: r.failed > 0 ? 'error' : r.moved > 0 ? 'success' : 'info' });
   }
   /** Clean up's targets: the rows this person may Safe remove (`own`). */
-  const bulkCleanUpTargets = $derived(bulkTargets(selectedRows, 'safe_kill_session', $sessionBlocked));
+  const bulkCleanUpAllowed = $derived(bulkTargets(selectedRows, 'safe_kill_session', $sessionBlocked));
+  const bulkCleanUpTargets = $derived(bulkCleanUpAllowed.filter((s) => !isPinned(s)));
   const bulkCleanUpBlocked = $derived(
     hubActionBlocked('safe_kill_session', $hubStatus, $hubConnection) ??
-      (selectedRows.length > 0 && bulkCleanUpTargets.length === 0 ? 'None of the selected sessions is yours to clean up.' : null),
+      (selectedRows.length > 0 && bulkCleanUpTargets.length === 0
+        ? bulkCleanUpAllowed.length > 0
+          ? PINNED_BLOCK
+          : 'None of the selected sessions is yours to clean up.'
+        : null),
   );
 
   async function confirmBulkKill() {
@@ -708,6 +709,7 @@
   // here doesn't become an extra tracked dependency of whichever effect is
   // calling it.
   function expandAndScrollTo(sess: SessionRow): void {
+    if (splitPinned && sess.kind !== 'external' && isPinned(sess)) pinnedOpen = true;
     if (sess.project_id !== null && collapsed.has(sess.project_id)) {
       const next = new Set(collapsed);
       next.delete(sess.project_id);
@@ -782,6 +784,9 @@
       if (!sess) return;
       revealedId = sess.id;
       if ($effectiveHostFilter !== 'all' && $effectiveHostFilter !== sess.host_alias) hostFilter.set('all');
+      // An extra fleet's Machine / Org choice, or the primary's fold, would
+      // keep the whole list the row is in off screen.
+      if (primaryHiddenByAnchor($anchor) || ($multiFleet && !$primaryFleetOpen)) showPrimaryList();
       expandAndScrollTo(sess);
     });
   });
@@ -800,13 +805,13 @@
     // Review r13: the line under the toolbar is a sentence; the toast keeps
     // the code under Details.
     if (!pr.ok) {
-      loadError = `Couldn't refresh projects: ${errorText(pr.error)}`;
+      loadError = `Couldn't refresh projects: ${errorText(pr.error, { read: true })}`;
       refreshError = pr.error;
-      pushError(pr.error, 'Refresh projects failed');
+      pushError(pr.error, 'Refresh projects failed', undefined, { read: true });
     } else if (!sr.ok) {
-      loadError = `Couldn't refresh sessions: ${errorText(sr.error)}`;
+      loadError = `Couldn't refresh sessions: ${errorText(sr.error, { read: true })}`;
       refreshError = sr.error;
-      pushError(sr.error, 'Refresh sessions failed');
+      pushError(sr.error, 'Refresh sessions failed', undefined, { read: true });
     } else {
       bootstrapError.set(null);
     }
@@ -884,8 +889,11 @@
   // worktree id → branch, and the sessions that carry a work key (tag,
   // branch or worktree name — see work_keys.ts). Only built in work mode.
   const branchById = $derived(worktreeBranchById($projects));
+  // Not in the Inbox (review w11-2): its pool is the tree's split, and a
+  // work group would take every keyed session out of it, while the Inbox's
+  // own Group menu shows `inboxGroupBy`, not this.
   const workIndex = $derived(
-    $sidebarGroupBy === 'work'
+    $sidebarGroupBy === 'work' && $sidebarView !== 'inbox'
       ? buildSessionsByWork(
           $sessions,
           viewHost,
@@ -1099,6 +1107,7 @@
     inboxSections(inboxPool, attentionOpts, $inboxGroupBy, {
       missions: $waitingMissionCount,
       failingRoutines: $failingCount,
+      failingOthers: $failingOthersCount,
       proposed: inboxProposed.length,
       agentActions: $pendingAgentCount,
     }),
@@ -1327,16 +1336,29 @@
     }
     return undefined;
   }
-  function onWindowKeydown(e: KeyboardEvent) {
+  // ⌘K's "Next session that needs you" row (review w18-4), as the chord.
+  $effect(() => {
+    if ($nextNeedsYouRequest === 0) return;
+    untrack(() => {
+      nextNeedsYouRequest.set(0);
+      openRow(nextNeedingYou());
+    });
+  });
+  function onWindowKeydown(e: KeyboardEvent, capture: boolean) {
     if (e.defaultPrevented) return;
     const id = matchShortcut('global', e, isMac);
-    if (id !== 'next-needs-you' && id !== 'jump-n') return;
+    // Next-needs-you is taken in the capture phase (review w18-3): the
+    // terminal's own keydown would otherwise send Ctrl+Alt+N to the pty as
+    // ESC ^N first. ⌘1–9 stays in the bubble phase.
+    if (id !== (capture ? 'next-needs-you' : 'jump-n')) return;
     const target = e.target as HTMLElement | null;
     // A modal owns the keyboard, and a field keeps its keys.
     if (target?.closest?.('dialog') || isEditable(target)) return;
     e.preventDefault();
-    if (id === 'next-needs-you') openRow(nextNeedingYou());
-    else openRow(shownRows()[Number(e.key) - 1]);
+    if (id === 'next-needs-you') {
+      e.stopPropagation();
+      openRow(nextNeedingYou());
+    } else openRow(shownRows()[Number(e.key) - 1]);
   }
 
   /** Same guard for the project row, which holds + New session and Purge. */
@@ -1385,7 +1407,7 @@
         renameValue,
       );
       if (outcome.kind === 'error') {
-        renameError = outcome.error.message;
+        renameError = errorText(outcome.error);
         return;
       }
       // If the renamed session was the selected one, follow the rename.
@@ -1556,7 +1578,10 @@
   }
 </script>
 
-<svelte:window onkeydown={onWindowKeydown} />
+<svelte:window
+  onkeydowncapture={(e) => onWindowKeydown(e, true)}
+  onkeydown={(e) => onWindowKeydown(e, false)}
+/>
 
 <div class="sidebar" data-testid="sidebar-tree" bind:this={sidebarEl}>
   <!-- Review r13: what an empty Sessions list or Inbox says. A list that
@@ -1643,7 +1668,7 @@
       data-testid="new-session-head"
       title={isMac ? 'New session (⌘N)' : 'New session (Ctrl+Shift+N)'}
       aria-keyshortcuts={isMac ? 'Meta+N' : 'Control+Shift+N'}
-    >+ New…{#if isMac}<kbd class="of-kbd">⌘N</kbd>{/if}</button>
+    >+ New…{#if isMac}<kbd class="of-kbd">{shortcutLabel('new-session', isMac)}</kbd>{/if}</button>
   {/snippet}
 
   <FleetSwitcher />
@@ -1658,6 +1683,7 @@
     {onRefresh}
     {onCollapse}
     needsYouCount={needsYouTotal}
+    inboxNeedsCount={inboxNeeding}
     {selectMode}
     {toggleSelectMode}
     selectedCount={selectedIds.size}
@@ -1788,8 +1814,20 @@
       </div>
     {/snippet}
     <!-- The fleet filter hides this window's own (primary) list when it
-         names an extra fleet (multi-hub design). -->
-    {#if $showPrimary}
+         names an extra fleet (multi-hub design). Beside another fleet the
+         list sits under its own fleet header, which folds it, and which
+         says so when another fleet's Machine / Organisation choice hides it
+         (Phase 3a, fleet_filters.ts). -->
+    {#if $multiFleet && ($showPrimary || focus)}
+      <PrimaryFleetHeader
+        count={visibleIds.size + sharedWithMe.length}
+        hiddenCount={primaryHiddenCount}
+        focused={!!focus}
+      />
+    {/if}
+    <!-- A focus ("Showing only X") is past every filter, the fleet switcher,
+         the anchor and the fold included: its one row is in this list. -->
+    {#if focus || ($showPrimary && !primaryHiddenByAnchor($anchor) && (!$multiFleet || $primaryFleetOpen))}
     {#if pinnedRows.length > 0}
       <div class="orphan-section pinned-section" data-testid="pinned-sessions">
         <button
@@ -2093,9 +2131,9 @@
           </li>
         {/each}
       </ul>
-    {:else if listUnavailable && orphanSessions.length === 0 && sharedWithMe.length === 0 && workGroups.length === 0 && pastOnlyGroups.length === 0}
+    {:else if listUnavailable && orphanSessions.length === 0 && sharedWithMe.length === 0 && workGroups.length === 0 && pastOnlyGroups.length === 0 && pinnedRows.length === 0}
       {@render listState('sessions')}
-    {:else if !loadError && orphanSessions.length === 0 && sharedWithMe.length === 0 && workGroups.length === 0 && pastOnlyGroups.length === 0}
+    {:else if !loadError && orphanSessions.length === 0 && sharedWithMe.length === 0 && workGroups.length === 0 && pastOnlyGroups.length === 0 && pinnedRows.length === 0}
       {#if !hubSkewEmptyMessage && listFacets.length > 0 && $projects.length > 0}
         <!-- Filters hide every row: say which, and offer the way back,
              instead of "no sessions" over a fleet that has some, as the states
@@ -2255,7 +2293,7 @@
     {/if}
     <!-- Extra fleets (multi-hub design): each fleet the filter shows, under
          its own badge, after this window's own list. -->
-    <FleetSessionGroups match={fleetMatch} filtered={fleetFiltered} />
+    <FleetSessionGroups search={searchQuery} {recency} {needsYouOnly} focused={!!focus} />
   </div>
   {/if}
 
@@ -2307,20 +2345,29 @@
     confirmTestId="confirm-bulk-kill"
   >
     {#snippet notes()}
-      {#if bulkKillTargets.length === 0}
+      {#if bulkKillTargets.length === 0 && bulkKillNotYours === 0 && bulkKillPinned > 0}
+        <span data-testid="bulk-kill-none"
+          >{bulkKillPinned === 1 ? 'The selected session is' : 'Every selected session is'} pinned — unpin it first.</span
+        >
+      {:else if bulkKillTargets.length === 0}
         <span data-testid="bulk-kill-none"
           >None of the selected sessions is yours to kill — a session shared with you
-          can be watched or driven, never killed.</span
+          can be watched or driven, never killed.{bulkKillPinned > 0
+            ? ` ${bulkKillPinned} pinned (unpin first).`
+            : ''}</span
         >
       {:else if bulkKillTargets.length < selectedRows.length}
         <!-- Said out loud rather than silently dropped: the count in the title
              no longer matches the selection, and the reason is a rule. -->
         <span data-testid="bulk-kill-skipped"
-          >{selectedRows.length - bulkKillTargets.length} selected session{selectedRows.length -
-            bulkKillTargets.length ===
-          1
-            ? ' is'
-            : 's are'} not yours to kill and will be left alone.</span
+          >{[
+            bulkKillNotYours > 0
+              ? `${bulkKillNotYours} selected session${bulkKillNotYours === 1 ? ' is' : 's are'} not yours to kill`
+              : '',
+            bulkKillPinned > 0 ? `${bulkKillPinned} pinned (unpin first)` : '',
+          ]
+            .filter(Boolean)
+            .join('; ')} — left alone.</span
         >
       {/if}
     {/snippet}

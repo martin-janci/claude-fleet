@@ -5,7 +5,7 @@
   // mission. Their count is part of the Needs you badge.
   import { shortAge } from './session_status';
   import { openMission } from './missions';
-  import { waitWords, waitingMissions } from './mission_waits';
+  import { waitWords, scopedWaitingMissions as waitingMissions } from './mission_waits';
 
   // `trackWaitingMissions` (main.ts) keeps the list fresh; opening the
   // Inbox reads it once more (Sidebar.svelte), so it is current as it shows.

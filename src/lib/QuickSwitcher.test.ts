@@ -1365,3 +1365,48 @@ describe('QuickSwitcher searches everywhere on the hub', () => {
     await vi.waitFor(() => expect(get(sidebarView)).toBe('work'));
   });
 });
+
+describe('missions and routines by name (review w18-5)', () => {
+  afterEach(async () => {
+    const { missionList } = await import('./mission_room');
+    const { switcherRoutines } = await import('./routines');
+    const { destination } = await import('./destination');
+    missionList.set({ loaded: false, missions: [], error: null });
+    switcherRoutines.set([]);
+    destination.set('session');
+  });
+
+  it('a mission row opens its room; a routine row opens Automation on it', async () => {
+    const { missionList, roomMissionId } = await import('./mission_room');
+    const { switcherRoutines, routinesRequest } = await import('./routines');
+    const { destination } = await import('./destination');
+    missionList.set({
+      loaded: true,
+      read: true,
+      error: null,
+      missions: [{ id: 7, name: 'Ship the zebra importer', goal: 'import zebras', mode: 'finite', state: 'active' } as never],
+    });
+    switcherRoutines.set([{ id: 3, name: 'Morning PR sweep', enabled: true } as never]);
+    render(QuickSwitcher);
+    let input = await openSwitcher();
+    await fireEvent.input(input, { target: { value: 'zebra' } });
+    await tick();
+    const mission = screen.getAllByTestId('switcher-command').find((e) => e.getAttribute('data-key') === 'mission:7');
+    expect(mission).toBeTruthy();
+    await fireEvent.click(mission!);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(get(roomMissionId)).toBe(7);
+    expect(get(destination)).toBe('missions');
+
+    input = await openSwitcher();
+    await fireEvent.input(input, { target: { value: 'pr sweep' } });
+    await tick();
+    const routine = screen.getAllByTestId('switcher-command').find((e) => e.getAttribute('data-key') === 'routine:3');
+    expect(routine).toBeTruthy();
+    await fireEvent.click(routine!);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(get(routinesRequest)?.select).toBe(3);
+    expect(get(destination)).toBe('automation');
+    routinesRequest.set(null);
+  });
+});

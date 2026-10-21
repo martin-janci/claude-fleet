@@ -72,6 +72,22 @@ beforeEach(() => {
   toasts.set([]);
 });
 
+// Review w17-10: a failed list read is a sentence with Retry, not raw text.
+describe('ResourcePage list read', () => {
+  it('a failed read offers Retry, and Retry reads again', async () => {
+    const err = Object.assign(new Error('hub link is down'), { code: 'E_HUB_UNREACHABLE' });
+    const inv = route({ list_orgs: err });
+    show();
+    const box = await screen.findByTestId('resource-load-error');
+    expect(box.textContent).toContain(`Couldn't load ${orgResource.plural.toLowerCase()}`);
+    expect(screen.queryByTestId('resource-empty')).toBeNull();
+    inv.mockImplementation(async (cmd: string) => (cmd === 'list_orgs' ? [acme] : null));
+    await fireEvent.click(screen.getByTestId('resource-load-error-retry'));
+    await waitFor(() => expect(screen.queryByTestId('resource-load-error')).toBeNull());
+    expect(screen.getAllByTestId('resource-row')).toHaveLength(1);
+  });
+});
+
 describe('Organisations (master_detail over the org resource)', () => {
   it('shows the overview: counts, catalogs and the devices bound to it', async () => {
     const overview: OrgDetail = {

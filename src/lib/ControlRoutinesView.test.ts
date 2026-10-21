@@ -43,6 +43,14 @@ beforeEach(() => {
 });
 
 describe('ControlRoutinesView (G3.10)', () => {
+  // Review w17-11: the first read in flight shows a skeleton, not a blank.
+  it('shows a skeleton while the first read is in flight', async () => {
+    routines = new Promise(() => {}) as unknown as unknown[];
+    const { findByTestId, queryByTestId } = render(ControlRoutinesView);
+    expect(await findByTestId('skeleton', {}, { timeout: 1500 })).toBeTruthy();
+    expect(queryByTestId('control-routines-empty')).toBeNull();
+  });
+
   it('lists routines with the failed one first, and a row opens it in Automation', async () => {
     const { getAllByTestId, container } = render(ControlRoutinesView);
     await waitFor(() => expect(getAllByTestId('control-routine-row')).toHaveLength(2));

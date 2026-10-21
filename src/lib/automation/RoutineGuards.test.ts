@@ -17,6 +17,7 @@ import { projects } from '../projects';
 import { destination } from '../destination';
 import { automationTab } from '../automation';
 import { failing, type RoutineRow, type RoutineRunRow, type RunFix } from '../routines';
+import { stashDraft } from './routine_draft';
 
 const inv = mockedInvoke as ReturnType<typeof vi.fn>;
 
@@ -81,6 +82,8 @@ function route(r: RoutineRow = guarded, fixes: RunFix[] = [fix]) {
 }
 
 beforeEach(() => {
+  // A changed draft an earlier test left open must not come back (review w05-2).
+  stashDraft(null);
   hosts.set([{ alias: 'mac', hidden: false } as never, { alias: 'nas', hidden: false } as never]);
   projects.set([{ project: { id: 1, owner: 'martin-janci', repo: 'claude-fleet', system: false }, worktrees: [] } as never]);
   failing.set([]);

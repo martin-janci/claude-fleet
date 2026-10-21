@@ -6,7 +6,7 @@ import { isFinal, listMissions, type Mission } from './missions';
 import { listPullRequests, type PrList } from './prs';
 import type { Result } from './result';
 import { stageOf } from './work_row';
-import type { WorkTreePage } from './work_view';
+import { withoutPersonArchived, type WorkTreePage } from './work_view';
 
 export interface TabCounts {
   tasks: number | null;
@@ -15,12 +15,18 @@ export interface TabCounts {
 }
 
 /** The Tasks tab's count. The List layout reads archived tasks too, so it
- *  counts the rows not done (To do and Doing); the tree's page is already
- *  the open view, so its total is the count. `null` before a read. */
-export function taskTabCount(page: Pick<WorkTreePage, 'tasks' | 'total'> | null, listMode: boolean): number | null {
+ *  counts the rows not done (To do and Doing), leaving out the tasks a
+ *  person archived the way the List does unless `showArchived` (review
+ *  w10-10); the tree's page is already the open view, so its total is the
+ *  count. `null` before a read. */
+export function taskTabCount(
+  page: Pick<WorkTreePage, 'tasks' | 'total'> | null,
+  listMode: boolean,
+  showArchived = false,
+): number | null {
   if (!page) return null;
   if (!listMode) return typeof page.total === 'number' ? page.total : null;
-  return (page.tasks ?? []).filter((t) => stageOf(t) !== 'done').length;
+  return withoutPersonArchived(page.tasks ?? [], showArchived).filter((t) => stageOf(t) !== 'done').length;
 }
 
 /** Missions still moving: drafts, active and paused ones. */

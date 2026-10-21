@@ -67,6 +67,42 @@ describe('control threads', () => {
     expect(t.map((x) => x.title)).toEqual(['Hub federation v2']);
   });
 
+  const only = (m: Mission) =>
+    buildThreads({ rows: [], handoffs: [{ id: 9, at: now - 10, kind: 'mission', tool: 'work_link', mission_id: m.id }], missions: [m], operatorId: null, opts, since })[0];
+
+  it('a cancelled mission is done, never Needs you; a failure needs you only the day it failed (w04-2)', () => {
+    const cancelled = only(mission(5, { state: 'cancelled', finished_at: now - 60 }));
+    expect(cancelled.group).toBe('done');
+    expect(cancelled.state).toBe('idle');
+    expect(only(mission(5, { state: 'cancelled', finished_at: since - 86_400 })).group).toBe('earlier');
+    expect(only(mission(5, { state: 'failed', finished_at: now - 60 })).group).toBe('needs');
+    const oldFail = only(mission(5, { state: 'failed', finished_at: since - 86_400 }));
+    expect(oldFail.group).toBe('earlier');
+    expect(threadCounts([oldFail, cancelled]).needs).toBe(0);
+  });
+
+  it('a draft or paused mission says so, under Draft and paused (w04-9)', () => {
+    const draft = only(mission(5, { state: 'draft' }));
+    expect([draft.group, draft.line, draft.state]).toEqual(['paused', 'Draft · not planned yet', 'idle']);
+    const paused = only(mission(5, { state: 'paused', updated_at: since - 86_400 }));
+    expect([paused.group, paused.line]).toEqual(['paused', 'Paused']);
+    expect(groupThreads([draft]).map((g) => g.label)).toEqual(['Draft and paused']);
+  });
+
+  it("lists what the hub follows past the newest receipts, and why it stopped following one (w04-1)", () => {
+    const quiet = session('htz', 'quiet', { origin: 'person', claude_status: 'idle', last_activity_at: since - 10 });
+    const follows = new Map([
+      [`s:${quiet.id}`, { state: 'quiet', muted: false }],
+      ['m:7', { state: 'following', muted: true, name: 'Old mission' }],
+      [`s:${operator.id}`, { state: 'following', muted: false }],
+    ]);
+    const t = buildThreads({ rows: [operator, quiet], handoffs: [], missions: [], operatorId: operator.id, opts, since, follows });
+    expect(t.map((x) => x.key).sort()).toEqual([`s:${quiet.id}`, 'm:7'].sort());
+    expect(t.find((x) => x.key === `s:${quiet.id}`)!.unfollowed).toBe('went quiet');
+    const m = t.find((x) => x.key === 'm:7')!;
+    expect([m.title, m.muted, m.unfollowed]).toEqual(['Old mission', true, null]);
+  });
+
   it('the chips filter and count: All, Needs you, Missions', () => {
     expect(threadCounts(threads)).toEqual({ all: 5, needs: 1, missions: 1 });
     expect(filterThreads(threads, 'needs').map((t) => t.title)).toEqual(['release']);

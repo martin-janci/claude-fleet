@@ -18,12 +18,7 @@ use std::time::Duration;
 /// notify could not carry (a row inserted by another process) still lands.
 const POLL_FLOOR: Duration = Duration::from_millis(500);
 
-fn now_unix() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
+use crate::store::now_unix;
 
 /// All a peer is told when this hub fails it: a non-terminal E_INTERNAL, so
 /// its dialer backs off and resends. The detail stays in our own log.

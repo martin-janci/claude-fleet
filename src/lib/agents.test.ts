@@ -6,12 +6,14 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import {
   actionBody,
+  actionOutcome,
   actionTitle,
   agents,
   agentState,
   answerAgentAction,
   jobLine,
   pendingAgentCount,
+  recentAgentOutcomes,
   ruleLine,
   trackAgents,
   type AgentAction,
@@ -125,6 +127,12 @@ describe('agents (design step 5)', () => {
       'Call kb.add_known_error',
     );
     expect(actionTitle({ kind: 'pr_comment', payload: '{"repo":"o/r","number":4,"body":"x"}' })).toBe('Comment on o/r#4');
+    expect(
+      actionTitle({
+        kind: 'pr_review',
+        payload: '{"repo":"o/r","number":4,"event":"REQUEST_CHANGES","body":"x","findings":[{"path":"a","line":1,"body":"y"}]}',
+      }),
+    ).toBe('Review o/r#4: request changes, 1 line comment');
     expect(actionTitle({ kind: 'jira_create_bug', payload: '{"project":"PD","source_key":null,"summary":"x"}' })).toBe(
       'File a bug in PD for a logged error: x',
     );
@@ -160,6 +168,21 @@ describe('agents (design step 5)', () => {
     expect(agentState('review', status({ jobs: [job({ state: 'running' })] }))).toBe('1 rule · 1 working · 1 waiting for you');
   });
 
+  it('says what an approved action came to (review w08-3)', () => {
+    const task = { kind: 'work_task', payload: JSON.stringify({ action: 'task', title: 'Flaky reconnect' }) };
+    const title = actionTitle(task);
+    expect(actionOutcome({ ...task, state: 'executed', error: 'created task 42' })).toBe(`Done: ${title} — created task 42`);
+    expect(actionOutcome({ ...task, state: 'executed', error: null })).toBe(`Done: ${title}`);
+    expect(actionOutcome({ ...task, state: 'failed', error: 'task 17 created; the session did not start: x' })).toBe(
+      `Failed: ${title} — task 17 created; the session did not start: x`,
+    );
+    agents.set(status({ recent: [action({ state: 'executed', error: 'posted' })] }));
+    expect(get(recentAgentOutcomes)).toHaveLength(1);
+    // An older hub sends no `recent`.
+    agents.set(status());
+    expect(get(recentAgentOutcomes)).toEqual([]);
+  });
+
   it('counts the pending actions and reads again after an answer', async () => {
     agents.set(status());
     expect(get(pendingAgentCount)).toBe(1);
@@ -171,6 +194,11 @@ describe('agents (design step 5)', () => {
     expect(invoke.mock.calls.map((c) => c[0])).toEqual(['agents_decide', 'agents_status']);
     expect(invoke.mock.calls[0][1]).toEqual({ id: 7, approve: true });
     expect(get(pendingAgentCount)).toBe(0);
+  });
+
+  it('counts the whole backlog when the pending list is cut', () => {
+    agents.set(status({ pending_total: 250 }));
+    expect(get(pendingAgentCount)).toBe(250);
   });
 
   it('keeps the status fresh, and stops asking a hub that refuses this device', async () => {
