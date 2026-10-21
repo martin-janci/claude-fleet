@@ -55,27 +55,14 @@ import {
   loadFleets,
   nextFleetColor,
   removeFleet,
-  type FleetInfo,
 } from './fleets';
 import type { SessionRow } from './sessions';
 import type { HostRow } from './hosts';
+import { fleetInfo } from './fleets_fixture';
 
 const inv = mockedInvoke as ReturnType<typeof vi.fn>;
 
-function fleet(id: string, extra: Partial<FleetInfo> = {}): FleetInfo {
-  return {
-    id,
-    label: id,
-    url: id === PRIMARY ? null : `https://${id}.example.com`,
-    color: '#5b8def',
-    primary: id === PRIMARY,
-    local: id === PRIMARY,
-    client_name: null,
-    connection: id === PRIMARY ? null : { state: 'connected' },
-    unavailable: null,
-    ...extra,
-  };
-}
+const fleet = fleetInfo;
 
 function session(id: number, extra: Partial<SessionRow> = {}): SessionRow {
   return { id, tmux_name: `s${id}`, host_alias: 'mac', status: 'running', last_activity_at: id, ...extra } as SessionRow;

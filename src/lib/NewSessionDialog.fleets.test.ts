@@ -22,6 +22,7 @@ import {
   _setFleetsForTest,
   type FleetInfo,
 } from './fleets';
+import { fleetInfo } from './fleets_fixture';
 
 const inv = mockedInvoke as ReturnType<typeof vi.fn>;
 
@@ -31,18 +32,7 @@ const project = {
 };
 
 function fleet(id: string, extra: Partial<FleetInfo> = {}): FleetInfo {
-  return {
-    id,
-    label: id,
-    url: id === PRIMARY ? null : `https://fleet.${id}.dev`,
-    color: '#e8833a',
-    primary: id === PRIMARY,
-    local: id === PRIMARY,
-    client_name: null,
-    connection: id === PRIMARY ? null : { state: 'connected' },
-    unavailable: null,
-    ...extra,
-  };
+  return fleetInfo(id, { url: id === PRIMARY ? null : `https://fleet.${id}.dev`, color: '#e8833a', ...extra });
 }
 
 beforeEach(() => {

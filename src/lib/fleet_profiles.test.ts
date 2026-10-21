@@ -24,20 +24,11 @@ import {
 } from './fleet_profiles';
 import FleetProfiles from './FleetProfiles.svelte';
 import FleetSwitcher from './FleetSwitcher.svelte';
+import { fleetInfo } from './fleets_fixture';
 
 const inv = mockedInvoke as ReturnType<typeof vi.fn>;
 
-const primary: FleetInfo = {
-  id: PRIMARY,
-  label: 'rlt',
-  url: 'https://fleet.rlt.sk',
-  color: '#5b8def',
-  primary: true,
-  local: false,
-  client_name: 'mac',
-  connection: { state: 'connected' },
-  unavailable: null,
-};
+const primary = fleetInfo(PRIMARY, { label: 'rlt', url: 'https://fleet.rlt.sk', local: false, client_name: 'mac', connection: { state: 'connected' } });
 const company: FleetInfo = { ...primary, id: 'company', label: 'Papaya POS (hub)', url: 'https://fleet.papayapos.dev', color: '#e8833a', primary: false };
 
 const work: MyProfile = {

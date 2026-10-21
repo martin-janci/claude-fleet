@@ -13,22 +13,12 @@ import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import FleetSessionView from './FleetSessionView.svelte';
 import { PRIMARY, _resetFleetsForTest, _setFleetsForTest, type FleetInfo } from './fleets';
 import type { SessionRow } from './sessions';
+import { fleetInfo } from './fleets_fixture';
 
 const inv = mockedInvoke as ReturnType<typeof vi.fn>;
 const PROBE = { claude_status: 'working', stuck_kind: null, current_activity: null, waiting_for: null, spinner: null };
 
-const company: FleetInfo = {
-  id: 'company',
-  label: 'company',
-  url: 'https://fleet.papayapos.dev',
-  color: '#e8833a',
-  primary: false,
-  local: false,
-  client_name: null,
-  connection: { state: 'connected' },
-  unavailable: null,
-  fleet_id: 'bbbbbbbb-2222',
-};
+const company = fleetInfo('company', { url: 'https://fleet.papayapos.dev', color: '#e8833a', fleet_id: 'bbbbbbbb-2222' });
 
 const session = {
   id: 3,
