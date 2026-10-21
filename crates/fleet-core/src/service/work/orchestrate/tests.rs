@@ -145,7 +145,15 @@ fn autonomy_is_the_least_of_ceiling_level_and_grant() {
     assert_eq!(
         autonomy(&s, &fx.m, now_unix()).unwrap().effective,
         2,
-        "the mission asks for 2"
+        "the row read before the grant asks for 2"
+    );
+    drop(s);
+    let m = mission_now(&fx);
+    let s = lock(&fx.deps.store).unwrap();
+    assert_eq!(
+        (m.level, autonomy(&s, &m, now_unix()).unwrap().effective),
+        (3, 3),
+        "signing L3 raised the ask to it"
     );
     s.set_setting(settings::ORCHESTRATOR_ENABLED, "false")
         .unwrap();
@@ -183,6 +191,132 @@ fn only_a_person_signs_a_grant_and_revoking_ends_it() {
         1
     );
     let s = lock(&fx.deps.store).unwrap();
+    assert!(s.live_mission_grant(fx.m.id, now_unix()).unwrap().is_none());
+}
+
+/// TASK-293: a mission made in the room asks L0 and the loop runs at the
+/// least of the ask, the ceiling and the grant, so an L2 grant on it never
+/// started a run. Signing raises the ask to the grant's level.
+#[test]
+fn a_grant_raises_a_lower_ask_so_the_loop_runs_under_it() {
+    let fx = fixture();
+    let s = lock(&fx.deps.store).unwrap();
+    s.set_setting(settings::ORCHESTRATOR_MAX_LEVEL, "2")
+        .unwrap();
+    s.update_mission(
+        fx.m.id,
+        None,
+        &crate::store::MissionPatch {
+            level: Some(0),
+            ..Default::default()
+        },
+        "ana",
+    )
+    .unwrap();
+    drop(s);
+    let m = mission_now(&fx);
+    assert_eq!(
+        autonomy(&lock(&fx.deps.store).unwrap(), &m, now_unix())
+            .unwrap()
+            .effective,
+        0
+    );
+    grant(
+        &WorkLinkArgs {
+            level: Some(2),
+            ..by_id("mission_grant", fx.m.id)
+        },
+        &fx.deps.store,
+        &fx.me,
+    )
+    .unwrap();
+    let m = mission_now(&fx);
+    let s = lock(&fx.deps.store).unwrap();
+    assert_eq!(m.level, 2);
+    let a = autonomy(&s, &m, now_unix()).unwrap();
+    assert!(a.effective >= AUTO_LEVEL, "{a:?}");
+    let e = &s.mission_events(fx.m.id, None, 1).unwrap()[0];
+    assert_eq!(e.kind, "grant");
+    assert_eq!(e.payload.as_ref().unwrap()["raised_from"], 0);
+    drop(s);
+    // A lower grant never lowers what the mission asks.
+    grant(
+        &WorkLinkArgs {
+            level: Some(1),
+            ..by_id("mission_grant", fx.m.id)
+        },
+        &fx.deps.store,
+        &fx.me,
+    )
+    .unwrap();
+    assert_eq!(mission_now(&fx).level, 2);
+}
+
+/// TASK-293: a finite mission's grant may last until it completes, bounded
+/// by its budget alone.
+#[test]
+fn a_grant_until_done_needs_a_budget_and_ends_with_the_finite_mission() {
+    let fx = fixture();
+    let args = |hours: Option<u32>, cents: Option<i64>| WorkLinkArgs {
+        level: Some(2),
+        hours,
+        budget_cents: cents,
+        until_done: Some(true),
+        ..by_id("mission_grant", fx.m.id)
+    };
+    for bad in [args(None, None), args(Some(2), Some(500))] {
+        assert_eq!(
+            grant(&bad, &fx.deps.store, &fx.me).unwrap_err().code,
+            codes::E_INVALID
+        );
+    }
+    let g = grant(&args(None, Some(500)), &fx.deps.store, &fx.me).unwrap();
+    assert!(g.until_done);
+    assert_eq!(
+        (g.expires_at, g.budget_micros),
+        (GRANT_UNTIL_DONE_AT, Some(5_000_000))
+    );
+    let s = lock(&fx.deps.store).unwrap();
+    let in_a_month = now_unix() + 30 * 86_400;
+    assert!(s.live_mission_grant(fx.m.id, in_a_month).unwrap().is_some());
+    let e = &s.mission_events(fx.m.id, None, 1).unwrap()[0];
+    assert_eq!(e.payload.as_ref().unwrap()["until_done"], true);
+    // Made continuous, it never completes: the grant stops holding.
+    s.update_mission(
+        fx.m.id,
+        None,
+        &crate::store::MissionPatch {
+            mode: Some("continuous".into()),
+            ..Default::default()
+        },
+        "ana",
+    )
+    .unwrap();
+    assert!(s.live_mission_grant(fx.m.id, now_unix()).unwrap().is_none());
+    drop(s);
+    assert_eq!(
+        grant(&args(None, Some(500)), &fx.deps.store, &fx.me)
+            .unwrap_err()
+            .code,
+        codes::E_INVALID,
+        "a continuous mission's grant runs some hours"
+    );
+    let s = lock(&fx.deps.store).unwrap();
+    s.update_mission(
+        fx.m.id,
+        None,
+        &crate::store::MissionPatch {
+            mode: Some("finite".into()),
+            ..Default::default()
+        },
+        "ana",
+    )
+    .unwrap();
+    assert!(s.live_mission_grant(fx.m.id, now_unix()).unwrap().is_some());
+    // It ends with the mission: reopened, it has none.
+    s.set_mission_state(fx.m.id, None, "completed", "ana")
+        .unwrap();
+    s.set_mission_state(fx.m.id, None, "paused", "ana").unwrap();
     assert!(s.live_mission_grant(fx.m.id, now_unix()).unwrap().is_none());
 }
 

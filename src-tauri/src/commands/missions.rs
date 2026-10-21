@@ -180,6 +180,9 @@ pub struct GrantMissionArgs {
     pub hours: Option<u32>,
     #[serde(default)]
     pub budget_cents: Option<i64>,
+    /// Until the mission completes instead of `hours` (TASK-293).
+    #[serde(default)]
+    pub until_done: Option<bool>,
     #[serde(default)]
     pub hosts: Option<Vec<String>>,
     #[serde(default)]
@@ -809,6 +812,7 @@ pub(crate) mod routed {
             level: Some(args.level),
             hours: args.hours,
             budget_cents: args.budget_cents,
+            until_done: args.until_done,
             hosts: args.hosts,
             max_parallel: args.max_parallel,
             profile: args.profile,

@@ -33,6 +33,12 @@ pub const CARDS_OPEN_CAP: i64 = 40;
 pub const CARD_PAYLOAD_MAX: usize = 4096;
 /// The longest a grant runs (seven days).
 pub const GRANT_MAX_SECS: i64 = 7 * 24 * 3600;
+/// The `expires_at` of a grant that lasts until its mission completes
+/// (TASK-293): 9999-12-31, past any clock, and exact in a JS number. Only a
+/// finite mission holds one, and only with a budget; it ends when the
+/// mission does ([`Store::revoke_grants`] on a final state) or stops being
+/// finite ([`Store::live_mission_grant`]).
+pub const GRANT_UNTIL_DONE_AT: i64 = 253_402_300_799;
 
 /// One card of a mission's confirm queue.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -90,9 +96,15 @@ pub struct GrantRow {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
     pub created_at: i64,
+    /// [`GRANT_UNTIL_DONE_AT`] for a grant that lasts until the mission
+    /// completes (`until_done`).
     pub expires_at: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revoked_at: Option<i64>,
+    /// It lasts until the mission completes, not for some hours: read from
+    /// `expires_at`, never stored.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub until_done: bool,
 }
 
 /// A new grant.
@@ -159,6 +171,7 @@ fn map_grant(r: &rusqlite::Row<'_>) -> rusqlite::Result<GrantRow> {
         expires_at: r.get(9)?,
         revoked_at: r.get(10)?,
         profile: r.get(11)?,
+        until_done: r.get::<_, i64>(9)? >= GRANT_UNTIL_DONE_AT,
     })
 }
 
@@ -542,7 +555,9 @@ impl Store {
     }
 
     /// The newest grant that still holds at `now`: not revoked, not
-    /// expired, and signed for the plan the mission has now.
+    /// expired, and signed for the plan the mission has now. A grant until
+    /// the mission completes holds only while the mission is finite: one
+    /// made continuous never ends.
     pub fn live_mission_grant(
         &self,
         mission_id: i64,
@@ -557,9 +572,12 @@ impl Store {
                        AND expires_at > ?2 \
                        AND plan_version = (SELECT plan_version FROM orchestration_projects \
                                            WHERE id = g.orchestration_project_id) \
+                       AND (expires_at < ?3 \
+                            OR (SELECT mode FROM orchestration_projects \
+                                WHERE id = g.orchestration_project_id) = 'finite') \
                      ORDER BY id DESC LIMIT 1"
                 ),
-                rusqlite::params![mission_id, now],
+                rusqlite::params![mission_id, now, GRANT_UNTIL_DONE_AT],
                 map_grant,
             )
             .optional()?)
