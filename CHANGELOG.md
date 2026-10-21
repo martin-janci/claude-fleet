@@ -8,6 +8,539 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Releases are cut with `scripts/release.sh` — see [docs/RELEASING.md](docs/RELEASING.md).
 Entries before 0.2.4 were plain version bumps and were not recorded individually.
 
+## [0.6.3-dev.875.desktop.g5fdbcbf] - 2026-10-21
+
+### Added
+- **missions:** grant until a finite mission completes; a grant raises the ask
+- **multi-hub:** another fleet's session in the main session layout
+- **multi-hub:** another fleet's session in the full TerminalView
+- **fleet-agents:** pr_review, a review with line comments
+- **multi-hub:** one id space; another fleet's session in the full conversation panel
+- **routines:** routine memory — fleet-kept notebooks per routine and per project
+- **hosts:** flag two copies of one Claude login on a host
+- **conversation:** list and cancel Send later prompts; carry the composer on a move (review w13)
+- **work:** completion gate refuses done for an implement run with no evidence
+- **control:** session care on by default
+- **agent:** flag two fleet-agents on one token in the log and agent_status (review w14)
+- **updates:** fleet_health.updates raises Attention items on the desktop (review w26-3)
+- **hosts:** add a host the hub cannot reach from the paired desktop, and say what's next (review w14)
+- **control:** start tasks inside a grant, look after its own sessions
+- **multi-hub:** Phase 3b — a profile per fleet
+- **multi-hub:** Phase 3a — Machine and Organisation filters across fleets
+- **settings:** Company pages per fleet, gated by the hub's org_admin rule
+- **missions:** the planner waits out a usage limit instead of refusing
+- **fleet-agents:** a definition gallery with three everyday agents
+- **fleet-agents:** poll GitHub, Linear and Asana trackers
+- **autofix:** show hidden findings and what each fix ran in Problems & fixes
+- **automation:** tune a routine's prompt in the editor
+- **composer:** tune a draft prompt with a model before sending it
+- **automation:** more events that start a routine
+- **automation:** redesign the routine form on the Forms board
+- **settings:** person-scope Environment on any paired device, per fleet
+- **multi-hub:** Phase 2 — fleet session view, fleet picker, per-fleet Hosts/Inbox/PRs/attention
+- **autofix:** Problems & fixes in Needs you, FixCard, host chip count, Control's own finding
+- **autofix:** fix chat block and the desktop's autofix commands
+- **autofix:** host MCP entry and stuck-session detectors, shared budget and retention
+- **control:** diagnose, the sweep and auto-continue on the fleet (F14, F15, F17)
+- **control:** escalation cards keep Later and show Control's threads by default (F18)
+- **control:** queue what is typed mid-turn, Stop, and show versions
+- **operator:** refresh Control's files on every start, version-stamped
+- **control:** approvals run the call, and the autonomy dial pre-approves
+- **accounts:** placement, login health and Control's own account
+- **autofix:** the autofix MCP tool
+- **autofix:** run detectors and safe fixes on the reconcile tick
+- **control:** follow handoffs only while they matter, quieter digests, a journal, routine back-off
+- **autofix:** settings, safe-fix eligibility and the apply step
+- **autofix:** sync findings into episodes with clear, expiry and verify window
+- **desktop:** extra fleets — one window onto several hubs (multi-hub Phase 1)
+- **autofix:** host detector for stale files, silent hooks and old versions
+- **autofix:** finding types, registry and the operator_unbound detector
+- **theme:** dynamic day/night theme (Mission HUD) with contrast levels, accent and glow line
+- **agents:** proposals from analysis, the proposer, and simplify and refactor agents
+- **today:** restyle Today after the Orbit Fleet Today board
+- **autofix:** findings table and store
+- **agents:** self debug agent reading the fleet's logs, with focus and scope
+- **control:** one "+" menu in Control's composer
+- **control:** /health, /graph and /tidy commands and escalation cards in Control's chat
+- **recovery:** move Control off a host that stopped answering, without a client
+- **work:** Missions as a Thread room
+- **control:** the orbit map as a view in Control's right panel
+- **automation:** run lanes, a run timeline and the orbit map on Runs
+- **runs:** trace the tools an open routine run's session finishes
+- **control:** add an autonomy chip to Control's composer
+- **control:** fold fleet events and draw task graphs in the chat
+- **status-bar:** show host health beside Shortcuts
+- **control:** lay Control out as a Thread room
+- **runs:** record a trace of each routine and agent run
+- **updater:** Kubernetes StatefulSet backend for fleet-updater
+- **hosts:** sample CPU and memory pressure and judge host load
+- **control:** tell the operator what changed in the fleet
+- **work:** wire task result actions and desktop commands
+- **recovery:** bring killed sessions back by themselves
+- **env:** person-scoped session environment variables
+- **ui:** the result panel on the task page, in the conversation, and Finish task on the ticket card
+- **fleet-agent:** relay Claude Code hooks on loopback for hubs behind private DNS
+- **work:** archive a ticket or task; it leaves the lists until unarchived
+- **work:** one result view per item: report, evidence, gate, PR, follow-ups
+- **work:** a follow-up's brief opens with what its origin task left
+- **fleet-agents:** GitHub sources, PR comments and labels, other trackers (step 6)
+- **fleet-agents:** a chat card drafts an instance (step 5, chat path)
+- **work:** follow-up service with scope fence and index or title
+- **fleet-agents:** the grant form and the Agents tab's instances (step 5)
+- **fleet-agents:** actions and the loop guard (step 4)
+- **sessions:** pin a session; pinned sessions get their own section and are never closed
+- **work:** follow-up store with create_followup and followups_of
+- **fleet-agents:** the generic runner (step 3)
+- **audit:** work_admin's org writes and the CLI's direct org commands record admin events
+- **audit:** a pairing code carries its minter; the mint is recorded and the redeem names it
+- **clients:** list_clients and client list show the person's trust and catalog grant
+- **accounts:** switch before the limit; never restart a session waiting on a dialog
+- **fleet-hub:** routine, agents and shepherd debugging on the console
+- **fleet-agents:** store bindings and instance grants (step 2)
+- **work:** completion gate; an agent cannot set done past it
+- **work:** a wrap-up request asks a live session for its task result
+- **automation:** debug routines, agents and the PR shepherd
+- **accounts:** continue after an automatic switch, and say what will happen
+- **dashboards:** a burn-up widget from the status history
+- **debug-devices:** a person reads a held device; regenerated docs
+- **work:** a task report carries done, decisions, remaining and context
+- **accounts:** switch an out-of-credit session to another login automatically
+- **fleet-agents:** configurable agent definitions (step 1)
+- **missions:** open tasks and child sessions from a mission; Work row-click pref
+- **debug-devices:** device cards, the session's device strip and the device block in the chat
+- **dashboards:** a pin on one device shows on the others at once
+- **debug-devices:** a device board above the Debug devices page
+- **work:** an agent declares what its own task waits on
+- **ui:** the report's done, decisions and remaining, and one result panel
+- **work:** archive or remove a work link whose session is gone over the control API
+- **work:** suggest closing finished work, and an Archived section (CF-5)
+- **work:** draft the new task's title from its notes, and attach files (CF-4)
+- **work:** move a ticket at its tracker from the Board (CF-6)
+- **desktop:** read-only groups page and a person's groups and effective roles
+- **hub:** fleet-hub realm — groups, roles, mappings and audit from the hub machine
+- **realm:** realm_admin — users, groups, roles, mappings and audit over MCP
+- **auth:** device tokens expire after idle days; SSO no longer auto-provisions
+- **agent-install:** a tracker's host may be moved to an agent
+- **trackers:** allow via_host / via_cli on a fleet-agent host
+- **agent:** AgentTransport pipes stdin through the exec frame
+- **work:** promote a task to a Linear or GitHub ticket too
+- **realm:** an append-only admin audit log, and re-enabling a person
+- **debug-devices:** a queue beside the claim
+- **realm:** trust and assets-admin are the person's, granted as realm roles
+- **realm:** the fleet-admin role, not the single owner, administers the fleet
+- **realm:** org membership is a projection of the org's groups
+- **realm:** store API for roles, groups, mappings and effective roles
+- **realm:** roles, groups and mappings, seeded from orgs and devices
+- **people:** a person carries a Keycloak user profile and uuid
+- **env:** a move checks the target's environment among its opening checks
+- **env:** Settings › Environment page and docs
+- **env:** routed env_vars commands and hub contract 18
+- **env:** env_vars tool, new_session env and a form's env_target; the sweep keeps a host noted mid-pass
+- **env:** sweep env files from hosts and mask stored secrets in diagnostics
+- **work:** promote a task of fleet's own to a Jira or Asana ticket
+- **dashboards:** pinned dashboards live on the hub, per person
+- **env:** repair, review and move launch with the session's environment
+- **env:** sessions source their environment on create, restart and recreate
+- **agents:** the support agent scans logs and teaches its KB (step 8, part 2)
+- **env:** resolve, render and wrap a session's environment
+- **env:** env_vars table and store
+- **debug-devices:** Mirror action opens scrcpy over SSH or locally
+- **update:** a release pokes the hub, the hub wakes its updater; read a phone's check
+- **agents:** the reviewer labels, describes and debates tests (step 8, part 1)
+- **device-mirror:** mirror lifecycle over the relay
+- **agents:** the support agent writes to Jira (step 7)
+- **debug-devices:** start a host's adb server on demand
+- **decide:** frame free text as quoted data in every adapter that sends it
+- **device-mirror:** adb wire preflight and local tool lookup
+- **work:** an agent plans its own shared task
+- **relay:** SSH dialer over ssh -W
+- **agents:** the support agent's read side (step 6)
+- **relay:** loopback relay listener and the mirror's error codes
+- **agents:** the agents in Automation and their actions in the Inbox (step 5)
+- **work:** a ticket start briefs Claude with its comments and attachments
+- **update:** hub reads dev/nightly channels every 15 min; Check for updates re-reads now
+- **chat:** the agent proposes a dashboard, the person pins it
+- **agents:** the PR reviewer posts, by the rule's level (step 4)
+- **work:** an agent renames its own shared task
+- **work:** an agent edits and comments on its own shared task
+- **agents:** the PR reviewer, read side (step 3)
+- **control:** go on with the recommended option when nobody answers
+- **agents:** the run vehicle and a run's own workspace (step 2)
+- **work:** an agent sets the status of its own shared task
+- **ui:** a dashboard per workspace, drawn from work stats
+- **missions:** the operator saves a mission for the owner, approved by a person
+- **missions:** headless review and test runs in the implementer's checkout
+- **agents:** agent runtime for the reviewer and support agents (step 1)
+- **work:** count the board's tasks (work stats) and log status history
+- **decide:** haiku as a live second opinion beside Jev, in shadow
+- **ui:** workspace switcher for Developer, Tester, PM, Scrum master, PO
+- **work:** tracker comments in the task detail, read and posted back
+- **work:** priority, labels and estimate on tasks
+- **work:** a session agent finds and recognises its own tasks
+- **decide:** option-order perturbation, cost per right answer, J3 split question, J1 quoted-data framing
+- **work:** rename ticket prefixes from Settings, the hub CLI and work_admin
+- **work:** Jira-style ticket keys administered by fleet
+- **work:** place by item_id or group id, unplace, and honest confirm refusals
+- **hub:** add host, account nickname and host checklist from a paired desktop
+- **routines:** a deleted routine keeps its runs
+- **downloads:** G7.15 Pause on a copy in flight
+- **work:** task attachments, files and images kept in fleet
+- **hub:** serve the phone's hub data (repair progress, Meta keys, Codex bg agents, week stats, host proposal)
+- **toolkit:** asset editor Discard and Lint, confirmed snippet Remove, push after each change, layers that apply by organisation
+- **help:** context help at a shared session's composer
+- **hub:** sign in with Keycloak (OIDC) to pair a device
+- **help:** gate context help behind Writing help's work.context_help
+- **conversation:** fit the composer to Codex sessions
+- **control:** one chip row above the box
+- **wizards:** wizard_state resumes Add host and Add a project on another device
+- **agent:** update itself without systemd, and never refuse a newer hub
+- **work:** task detail redesign: header, Markdown, properties rail
+- **search:** full-text index, `search` tool and ⌘K Everywhere
+- **share:** G7.11 Read / Answer / Steer, Private, and Trust now
+- **sessions:** G7.10 close the session, files and new-session gaps
+- **missions:** mission Filters, the finished PR block, Jev unsure and Done today in Review
+- **work:** drafted name prefilled, branch mates, brief drafting in the task, board chips
+- **ui:** G7.8 mission hand-on, PR origin, Library folders, task cards, # link
+- **ui:** G7.9 Done today, Tidy Reopened and Expire, routine outcome, PR line
+- **forms:** undo on every dialog, form hints, receipts, live progress and drafted wizards
+- **orgs:** G7.14 people & devices, members, federation and debug-device gaps
+- **work:** start and placement rules name host fallback, account, model and agent
+- **states:** G7.15 wizard agents, guide provenance and undo, calm states, AI change line
+- **toolkit:** G7.13 + Add skill, layer tabs, Automation limits, Hub status header
+- **hosts:** G7.12 host tabs, integrations form, base path check, paused panel, reviewer agent
+- **work:** one person does not see another's device names
+- **work:** personal sprints, and an org decides whether its members plan
+- **help:** Haiku context help at the shell and composer prompt lines
+- **work:** local work three levels deep (epic → task → subtask)
+- **work:** task comments, and Activity lists what happened to a task
+- **search:** sprints, epics, types and sort in Work; one session rule; ⌘K planning rows
+- **search:** ⌘K finds own tasks and any cached ticket; accent-blind matching
+- **work:** epics for local items, one level deep
+- **work:** scope the board to a sprint or the backlog
+- **work:** plan tasks into sprints and releases from the Work view
+
+### Changed
+- **release:** v0.6.4
+- **graft:** local helper path rewritten by graft wiring refresh
+- remove dead code and duplicated helpers; void grants on repo add
+- **fleet-agents:** cover the real tracker item paging and the abandoned-action sweep
+- **rust:** share repeated checks and drop needless clones and reads
+- **frontend:** share the row cache, the attach button and the fleet host rule
+- regenerate docs and fix tests after the review-wave merges
+- dedupe today's merges and fix the long dedup-key lookup
+- **automation:** type the routine tune test's base mock for svelte-check
+- **automation:** open the event trigger through the redesigned radiogroup
+- **autofix:** run the MCP-entry probe script test on Unix only
+- **autofix:** drop the duplicate zbus ignores and name migration 198 in the spec
+- **diagnostics:** read the timeline up to the clock after the writes
+- **autofix:** name the renumbered migration file in the store's doc comment
+- **deny:** ignore 2026-10-17 zbus unmaintained and zip extraction advisories
+- **deny:** ignore the zbus_names/zvariant unmaintained advisories
+- **recovery:** settle from the restore's own timestamp, not the test's clock
+- **auto_restore:** count the settle window from the restore's own stamp
+- **mcp:** raise the tool definition budget to 862 a tool after merging main
+- **deny:** ignore the zip 4.x extraction advisories until the updater moves
+- **deny:** ignore the zip 4 advisories tauri-plugin-updater 2.x pins
+- **desktop:** one shared debug-device read, event-driven failing routines, pause pollers on blur
+- **mcp:** pin work_link's desktop-decided reach with followup's Read
+- **mcp:** work_link's session reach includes Read for followup
+- **automation:** pick the lanes' list_runs call, not today's
+- **control:** share the right panel's width and the Session view
+- **routing:** drive run_trace through the routed-read cases
+- **buildkite:** a 75-minute job, and test temp files on tmpfs
+- stop adding Claude-Session trailers to commits and PRs
+- **mcp:** raise BYTES_PER_TOOL to 851 after main's #900 landed beside #901
+- **pairing:** a fenced trusted code for a person wholly inside the org still redeems trusted
+- **realm:** the writer guard scans production text up to the last test module body
+- **realm:** the projection property test covers every writer; the guard reads every spelling
+- **identity:** one fleet-admin-device predicate, one role_ref, one via fence
+- **mcp:** keep the agent-facing facts in the client tool surface; budget raised to 841
+- **mcp:** the definition budget bounds the full-client surface too
+- keep the rust cache when tests fail, and save it from main only
+- **ci-local:** the update-scripts step uses the cargo target dir it built into
+- cargo fmt
+- **debug-devices:** tool results carry images; a device chat block; shared device helpers
+- **work:** scaffold task-result modules
+- **dev:** wire Reticle into the dev build
+- **wip:** JWKS verification scaffold and identity handover note
+- **work:** the isolation matrix and routing test follow the ticket move (CF-6)
+- **hub:** the realm CLI's run/print glue and every table render
+- **auth:** Task 9 edits before the third main merge (to be squashed)
+- **ci:** ignore RUSTSEC-2024-0449 (unsafe-libyaml, via serde_yaml) in cargo deny
+- **agent-e2e:** stdin reaches the real agent's child and is closed
+- **dashboards:** the merged Caller literal names is_fleet_admin
+- **audit:** Task 8 fix round 1 edits, part 2 (to be squashed)
+- **mcp:** raise the tool byte budget to 825 (ported from #875)
+- **work:** a To do ticket for the status filter test
+- **mcp:** raise the tool byte budget to 825 for #873 and #874 together
+- **audit:** Task 8 fix round 1 edits (to be amended)
+- **env:** the router sum, the resource command list and the control API guide name the new tool and commands
+- **pages:** the env_var resource routes on a paired desktop, like linked hubs
+- **env:** regenerate the control API reference, schemas, page docs, verdicts and the contract golden
+- **wip:** JWKS verification scaffold and identity handover note
+- **decide:** set JevRequest.order_salt in haiku_shadow_tests
+- **search:** gate the local-shell transcript pass test to unix
+- **fleet-core:** one headless agent seam for fleet's claude -p runs
+- strip the Claude Projects attribution lines from PR descriptions
+- **pages:** regenerate the page registry for the agent-updates default
+- **work:** build the device-name test's scopes through Caller::view_scope
+- **search:** build the marks list with Array.from (main's DOM lib)
+- **accounts:** tolerate a closed pipe when a refused profile exits before reading stdin
+- **hub-e2e:** skip the agent install leg off Linux
+
+### Fixed
+- **missions:** plan import and a person's accept keep the merge-wave rule
+- **missions:** one integration per repo instead of pairwise conflict tasks
+- **missions:** the planner's merge-wave item depends on every item of its wave
+- **missions:** a person's resume restarts the no-progress window
+- **sessions,missions:** keep re-dated claims off the next idle moment, count multi-org keys safely, enforce the daily limit in the service
+- **conversation:** empty a moved tray from the panel showing it, and focus the real composer after the last Later
+- **routines:** keep unsaved notebook text when the routine form is saved or run
+- **routines:** read each run's memory on its own, keep newer notebooks and whole blocks
+- **frontend:** keep the "may have gone through" tail on by default
+- **agents,move:** count every pending agent action and never reuse a stale carry head
+- **ui:** mission gone state, scheduled prompts per session, composer carry on deferred moves
+- **ui:** word hub, 401 and timeout errors by what they are; keep the daily limit unpassable
+- **sidebar:** keep a session focus visible past the fleet switcher and answer next-needs-you behind a collapsed rail
+- **routines:** keep unsaved notebook edits, guard stale replies, count code points
+- **deps:** bump vite to 6.4.4 for three new advisories
+- **routines:** harden routine memory reads, writes and version skew
+- **missions:** count only open work against a grant's parallel cap and check the item the start resolves
+- **sessions:** judge turnless idle-moment claims by the grace alone, and take them over
+- **deps:** bump vite to 6.4.4 for three new advisories
+- **hosts:** make the login-conflict mark clearable and stop its false positives
+- **fleets:** forget a removed fleet's profile, order profile reads, fall back on older hubs
+- **deps:** bump rustls-webpki 0.103.16 and webpki-root-certs 1.0.10
+- drop the toasts import FleetSessionView no longer reads after the merge
+- **settings:** scope a member's pairing to its fleet and mount Company pages once
+- **sidebar:** keep the multi-fleet Machine/Org anchor from hiding what the person asked for
+- **control:** budget session-care restarts and state the started-only rule
+- **mcp:** let a person's own switch-login restart past accounts.pause_at
+- **messages:** wake an idle recipient whose moment is held by a turnless prompt
+- **fleet-core:** stamp idle-moment claims after the typing lane, lane every send, scope task starts to their mission's grant
+- **review:** wave 30 gaps and test pins (review w30)
+- **keyboard:** Esc, chords, palette and form keys (review w18)
+- **errors:** plain error copy at every display site and hub reasons as sentences (review w16)
+- **a11y:** desktop accessibility fixes for recent components (review w19)
+- **agents:** list every pending action in status, not the jobs' limit (review w11-5)
+- **today:** Inbox counts, Today filters, notification clicks and agent actions (review w11)
+- **move:** carry works when the target already has the source HEAD
+- **states:** failed and in-flight reads no longer read as empty (review w17)
+- **new-session:** keys, busy state, late results, errors and ticket/background starts (review w12)
+- **conversation:** composer gaps in the session view (review w13)
+- **terminal:** ignore a file drop that lands on an overlay above the grid (review w13)
+- **trackers:** a dead Jira token is auth_failed, not every ticket unavailable
+- **theme:** loader accent, color-scheme, boot palette and token lints (review w20)
+- **automation:** event trigger labels and host picker (review w06)
+- **automation:** routine editor guards, limits, zones and focus (review w05)
+- **automation:** event runs say what started them, fleet events fire once (review w06)
+- **mcp:** validate status filters, protect the controller from safe-kill, correct tool docs (review w25)
+- **accounts:** carry the chosen login through starts, resumes, moves and automation (review w02, w03)
+- **agents:** keep a setting's fingerprint when filling was; fix w08 tests (review w08-3, w08-5, w08-6)
+- **tune:** name the tune in its errors, flag a cut rewrite, label the model setting (review w07)
+- **agent:** refuse an install beside a running system agent; say why a download failed (review w14)
+- **accounts:** desktop limits and multi-account ergonomics (review w02, w03)
+- **autofix:** Check now judges like the tick, retires rather than "fixes", says what waits (review w09)
+- **mcp:** fence the clipboard tools; refuse unknown fan-out arguments (review w25)
+- **settings:** search finds screens, flags hidden hits; nicer number errors (review w15)
+- **settings:** label refusals, check the second-opinion host, title every docs group (review w15)
+- **control:** /propose and /debug count what was queued; /debug scope from leading words (review w08-9, w08-13)
+- **agents:** show what an approved action did; honest recover and setting proposals (review w08-3..6, w08-13)
+- **agents:** redact fleet-diagnostics answers per string, before the cut (review w08-2, w08-6, w08-7, w08-8)
+- **diagnostics:** mask the asset catalog's secrets too (review w08-1)
+- **updates:** pins, rollbacks and the Updates table say what is true (review w26-2, w26-5, w26-6, w26-7, w26-8)
+- **routines:** runs whose prompt was lost, and queued prompts after a same-second turn (round 10)
+- **self-update:** keep the pending install until the hub takes its final report (review w26-11)
+- **updates:** a check brings a dismissed banner back; required is not available (review w26-9, w26-10)
+- **updater:** clear reaches the running loop, rollback keeps its reason, path unit (review w26)
+- **sessions:** settle forms, safe removes, timed-out kills and orphan terminals (review w27)
+- **control:** never send a card recorded while auto-continue was off (review w27-7)
+- **restore:** batch restore skips ended rows and Control, counts rows already back (review w27)
+- Control care, restart and automation hardening (round 9)
+- **control:** autonomy pre-approval follows, starts ask, expired cards tell Control (review w04)
+- **hub:** keep the phone's pin, view, origin and draft columns in view=phone (review w24)
+- **fleets:** distinct default labels, and a failed remove stays listed (review w01)
+- **sessions:** the reaper and Cancel start leave a pinned session alone (review w10)
+- **fleets:** close multi-hub gaps in the desktop window (review w01)
+- **control:** thread column, Needs you, held lines, steer and suggestions (review w04)
+- **work:** task result panel asks, dates and lists each check once (review w09)
+- **tune:** undo, build on the rewrite, stop waiting, cut warning in the tuner (review w07)
+- **work:** archived tasks follow the hub's rule in List, Board and the tab count (review w10)
+- **sidebar:** pinned rows stay out of Clean up, dismiss and the empty state (review w10)
+- **settings:** keep the session care help under the length limit
+- **hosts:** a gone agent fails its checklist row; the agent-behind hint says agents update themselves (review w14)
+- **hosts:** block restore and agent install on an offline host, show restore results on both tabs (review w14)
+- **hosts:** keep following an agent install through a failed poll (review w14)
+- **ui:** keep lower orbit moons clickable, unique host labels, stateful mute tooltip
+- **fleets:** keep extra-fleet terminals, tombstones and drafts apart across remounts
+- **errors:** word a lost agent connection as "may have gone through", not a version mismatch
+- **core:** keep a killed session killed across a login-switch restart; make move re-points undoable and emit task:updated
+- **fleet-core:** judge only reachable hosts on Check now, auto-continue only tagged cards
+- **agents:** run gallery install under the catalog authoring lock and assets grant
+- **fleet-agents:** page non-Jira tracker polls by local write time
+- **multi-hub:** extra fleets' hosts in Control and the host chip; sidebar filters reach them
+- **deferred:** give back a failed send's idle moment and serialise typing per session
+- **agent:** two agents on one host token stop trading the connection
+- **sessions:** stop, move and agent-drop hardening (round 7)
+- **hosts:** stop a host's reverse tunnel when it is removed or merged away
+- **multi-hub:** drop a stale conversation read in an extra fleet's session view
+- **ui:** keep the prompt tuner and template menu Esc local, and drop stale tuner/env-form state
+- **accounts:** limit-check dispatched workers, never revive a killed session on a switch
+- **multi-hub:** close an extra fleet's terminal opened after its view went away
+- **control:** harden auto-continue bar, escalations Later, fix card and env access reads
+- **fleets:** guard extra-fleet rows, session view and terminal against races and wrong targets
+- **fleets:** run fleet_retry_now off the main thread and serialise fleet row writes
+- **placement:** count live runs whose account link is not filled yet
+- **prompt-tune:** refuse over-long drafts, keep the draft's own values, cap at the target limit
+- **prompts:** an agent's direct send takes the session's idle moment
+- **fleet-core:** bound auto-restore retries, stop undelivered run workers, close leaked trees and stuck wrap-ups
+- **control:** guard auto-continue, journal, sweep and follows against races, read errors and id reuse
+- **routines:** stop false fleet events, keep retries held at a limit, check event_host's org
+- **autofix:** never auto-press Enter on reconnect, type only into the re-checked pane, keep unjudged findings
+- **mcp:** fence Control's auto-continue, diagnose and placement to their owners
+- **attachments:** a composer send no longer fails with "not attached by the user"
+- **chat:** draw fleet.ui-tagged fences as cards
+- **sync:** track live rows before the first successful re-list
+- **sync:** keep frames applied during re-lists and re-read after hub gaps
+- **prompts:** one prompt per idle moment on every path, never typed twice
+- **multisession:** spread mission runs, guard loop limits and holds, refuse purging live projects
+- **orbit:** fit host labels, show live activity, stop the views tab strip overlapping
+- harden many concurrent sessions across hosts and accounts
+- **autofix:** build the poke test's ExitStatus through the cross-platform helper
+- **schema:** close migration 195's entry the renumber left open
+- **control:** sweep red PRs past F10, honest auto-continue wording, quieter escalation scope
+- **control:** composer tokens and the sheet's gate test after F4
+- **autofix:** honour dismissals and pause per apply, guard state writes, respect detector toggles in scan
+- **autofix:** list advertises only live states
+- **autofix:** agent update targets agent:<host>, pokes only count when poked
+- **today:** give the Today view its own gutter
+- **operator:** bind the ux-agent token to the hub's personal owner
+- **agent:** a panic no longer ends the in-process self-update for good
+- **reconcile:** give an agent host 30 s to redial before it reads unreachable
+- **control:** stuck prompt cards can be dismissed and old cards stop acting
+- **reconcile,recovery:** keep fresh ghosts and stop auto-restore storming a host
+- **reconcile:** warn about an unreachable host once, not every tick
+- **health:** flag an agent behind the hub across -dev.N builds
+- **agent:** keep systemd-oomd off the tmux server and systemd env out of panes
+- **update:** take the hub's 204 to an update report as success
+- **control:** promise an automatic restart only when the hub has auto-restore
+- **ui:** the result panel reads a sparse view; it replaces Last outcome
+- **work:** review fixes for task result, gate and follow-ups
+- **operator:** a controller record naming the operator reads as none
+- **work:** archive a bare task (a key with no item) from its task page
+- **work:** work result follows the person who may read its task
+- **provision:** keep a symlinked ~/.claude.json a symlink
+- **agent:** move tmux servers and panes into their own systemd scopes
+- **work:** result_for_session names its person half for main's scope guard
+- **agent:** the report ring's own test no longer drains another test's reports
+- **work:** hide archived tickets in the left panel until Show archived (#908)
+- **deps:** bump rustls to 0.23.46 past RUSTSEC-2026-0349
+- **identity:** final-review fixes: org admins no longer see a fleet admin's devices in member lists; a fenced trusted redeem refuses a person who left the org; audit-log docs follow the scrub; minor audit and test gaps
+- **pairing:** a trusted code minted by an org admin is re-checked against the org at redeem
+- **org_admin:** device lists hide every fleet admin's devices, as require_org_device already does
+- **catalog:** a personal catalog's grantees follow the assets-admin role
+- **clients:** a revoked device lists neither trust nor the catalog grant
+- **realm:** group_by_path answers only a group whose own path is the one asked
+- **audit:** the scrub keeps plain values, redacts URL credentials and stores JSON always
+- **realm:** moving a group bounds the moved subtree's height, not only the parent's depth
+- **mcp:** a liveness stamp the writer was busy for is restored, not erased
+- **identity:** the master counts as a fleet admin only while the hub names its owner
+- **ci:** the update-scripts step finds its binaries under CARGO_TARGET_DIR
+- **control:** let the tray yield on very short panes, test the scroll on open
+- **a11y:** the image lightbox drops its outline without a :focus rule
+- **work:** keep the per-host item read off a full scan of work_links
+- **control:** keep the tray above the composer readable on short panes
+- **provision:** write the fleet MCP entry into login profiles
+- **work:** let a mission's worker read its step and its mission
+- **work:** group a task with no session under its project's repo
+- **sso:** verify the ID token's signature against the issuer's JWKS
+- **realm:** fleet admins are exempt from the org fence; re-enable restores nothing; an org admin's trust stays inside the org; the org fence follows group ancestry
+- **realm:** a managed group never takes a role mapping; the org-authority sweep over every realm_admin action
+- **ci:** main's macOS and Windows legs pass again
+- **ssh:** route run_with_stdin to a fleet-agent host instead of refusing
+- **dashboards:** keep the tool surface within its budget
+- **work:** the status filter counts a live bare key as in progress
+- **realm:** untrust refuses while a group still trusts the person; grant_catalog personal off keeps the device in hand
+- **realm:** org roles and the seeded structure are reachable only through the org wrappers
+- **realm:** the uuid backfill never lowers the auth epoch; assets-admin backfill matches client_is_assets_admin
+- **env:** each environment command routes by its own name
+- **sso:** verify the ID token's signature against the issuer's JWKS
+- **device-mirror:** trust a held claim only on a standalone desktop
+- **device-mirror:** never release a claim the mirror does not own
+- **env:** refuse before the workspace step; pin the created project so relaunches keep its scope
+- **provision:** a remote secret file ends 0600 after the atomic upload
+- **work:** a task with no status and no live session leaves the Board and List
+- **env:** wrap's helper cannot clobber a user variable; referenced values are checked
+- **device-mirror:** keep a live mirror's claim; kill scrcpy on quit
+- **device-mirror:** unix-only path test; bound adb version
+- **update:** on dev and nightly every target asks again within 15 minutes
+- **ui:** workspace switcher menu escapes the clipping rail
+- **work:** give the task page a gutter and a calmer header
+- **sessions:** offer Restart anyway when the target is the fleet controller
+- **control:** Open in Work and mission links leave Control for Work
+- **work:** starting a fleet task briefs Claude with its title and notes
+- **conversation:** keep the Less toggle with the last quick-prompt chip
+- **conversation:** fill the collapsed quick-prompt row instead of stopping at three
+- **missions:** show a running headless check to whoever sees the implementer
+- **work:** a group label that already names a group is refused, not duplicated
+- **decide:** port #849's order_salt line so the test target compiles
+- **test:** haiku shadow test sets JevRequest::order_salt
+- **decide:** give haiku_shadow_tests' JevRequest the order_salt field
+- **work:** two test: lines no longer deadlock an item
+- **repo:** gate the remote_branches test helper to unix like git_fixture
+- **work:** clippy unnecessary_sort_by in the ticket prefix overview
+- **decide:** shuffle Jev choice options and gate on the top probability
+- **hosts:** re-provision stale hosts automatically, and from a paired desktop
+- **sessions:** recover and clean up ghost sessions
+- **hub-client:** a 204 answers at once; the mirror fetches real artifacts
+- **hub:** a contract-17 desktop keeps working against a contract-16 hub
+- **routines:** type a run's prompt into its session
+- **chat:** set the conversation at the manual's reading size
+- **control:** cap the tray above the composer and fold task cards into a group
+- **agent:** welcome an older agent at its own protocol version
+- **hosts:** host detail tabs answer the arrow keys
+
+### Documentation
+- bring status, guides, README and CLAUDE.md back in line with the code (review w28)
+- **settings:** say which fixes run unattended, and that tries count per day (review w09)
+- **contract:** describe the contract bounds without stale numbers (review w24)
+- **agents:** document the fleet-own writes, each, fingerprint and run.diagnostics (review w08-14)
+- **updates:** clear, rollback reason, pins, update_now, updater refresh (review w26-12)
+- Classic layout is gone; describe F1-F4, F13 and F0.2
+- **autofix:** architecture entry and spec updates from the core plan
+- **spec:** desktop multi-hub design
+- **autofix:** implementation plan for the core PR
+- **autofix:** design spec for detect, explain and fix
+- **work:** CF-22 review of the task-result branch; guide follows the fixes
+- **work:** task result, completion gate and follow-ups
+- **status:** the identity follow-ups replace the known gaps
+- **plans:** identity sub-project 1 follow-ups (TASK-264)
+- **work:** the result headline uses the manual's status words
+- **work:** the follow-up migration is 185
+- **work:** mission step table for the task-result plan
+- **work:** task result, completion gate and follow-up: design, plan, multi-agent execution
+- **identity:** fleet administration needs a device bound to no org; the audit log's real coverage
+- the realm model, per-person trust, device-token expiry and the audit log
+- a fleet-agent host takes stdin (CF-3 plan)
+- **spec:** configurable agents with per-instance stores
+- **plan:** handover for session env and secrets (tasks 1–5 done)
+- **plan:** identity realm model implementation plan; spec follows the code survey
+- **debug-devices:** the device mirror
+- **spec:** identity realm model and user-management hardening
+- **plan:** session environment variables and secrets
+- **spec:** fold the code survey into the env design
+- **update:** the updater asks every 15 minutes at most on dev and nightly
+- **spec:** session environment variables and secrets design
+- **plan:** device mirror PR 1 — relay core, SSH and local routes
+- **spec:** device mirror (scrcpy) over SSH and the hub
+- list work_stats in the control-API reference
+- **spec:** reviewer and support agents design
+- regenerate the control-api reference on main
+- **control-api:** regenerate the tool reference (work_link description drifted on main)
+- **skills:** add migration-conflicts skill for renumbering colliding migrations
+- **control-api:** name wizard_state in the tool index
+- G6.2 bring status, the transition plan and the phone parity audit up to date
+- **redesign:** G6.1 re-run the canvas audit against main
 ## [0.6.4] - 2026-10-21
 
 ### Added
@@ -4034,6 +4567,7 @@ added by hand for that reason — see #152._
   index, and new Getting Started, Concepts, and Troubleshooting guides; refreshed
   and cross-linked the Control API guide.
 
+[0.6.3-dev.875.desktop.g5fdbcbf]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.6.3-dev.875.desktop.g5fdbcbf
 [0.6.4]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.6.4
 [0.6.2]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.6.2
 [0.6.1]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.6.1
