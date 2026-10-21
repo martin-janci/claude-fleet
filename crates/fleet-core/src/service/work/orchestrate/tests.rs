@@ -734,3 +734,50 @@ fn a_card_is_claimed_while_it_is_decided() {
     drop(first);
     assert!(CardClaim::take(987_654).is_ok(), "released with the first");
 }
+
+/// TASK-292: a person's resume restarts the no-progress window, so the
+/// brake does not fire again on the very next tick.
+#[tokio::test]
+async fn a_resume_restarts_the_no_progress_window() {
+    let fx = fixture();
+    let item = member(&fx, "a");
+    {
+        let s = lock(&fx.deps.store).unwrap();
+        s.upsert_host("h").unwrap();
+        let sid = s
+            .upsert_session("w", "h", None, None, 0, 0, "running", None)
+            .unwrap();
+        s.conn_ref()
+            .execute(
+                "INSERT INTO tasks (worker_session_id, state, created_at, started_at, nonce, \
+                                    work_item_id) VALUES (?1, 'running', 1, 1, 'n', ?2)",
+                rusqlite::params![sid, item],
+            )
+            .unwrap();
+    }
+    let now = now_unix();
+    tick_mission(&fx.deps, fx.m.id, now).await.unwrap();
+    let m = mission_now(&fx);
+    assert_eq!(
+        m.state, "paused",
+        "an hour-old run with nothing since brakes"
+    );
+    missions::set_state(
+        &WorkLinkArgs {
+            status: Some("active".into()),
+            ..by_id("mission_state", fx.m.id)
+        },
+        &fx.deps.store,
+        &fx.me,
+    )
+    .unwrap();
+    tick_mission(&fx.deps, fx.m.id, now).await.unwrap();
+    assert_eq!(mission_now(&fx).state, "active", "the resume is progress");
+    let later = now + m.policy.no_progress_secs as i64 + 60;
+    tick_mission(&fx.deps, fx.m.id, later).await.unwrap();
+    assert_eq!(
+        mission_now(&fx).state,
+        "paused",
+        "a full window after the resume brakes again"
+    );
+}
