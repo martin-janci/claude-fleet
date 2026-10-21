@@ -125,6 +125,24 @@ impl Store {
         Ok(n > 0)
     }
 
+    /// Replace the text of an existing notebook and nothing else: its
+    /// last writer (`updated_at`, `updated_by`, `updated_run_id`) stays,
+    /// as an older run's note on a newer notebook needs. Answers whether
+    /// the text changed.
+    pub fn set_routine_memory_body(
+        &self,
+        scope: &str,
+        (owner_id, circle): (i64, i64),
+        body: &str,
+    ) -> Result<bool, IpcError> {
+        let n = self.conn.execute(
+            "UPDATE routine_memory SET body = ?4 \
+             WHERE scope = ?1 AND owner_id = ?2 AND circle = ?3 AND body IS NOT ?4",
+            rusqlite::params![scope, owner_id, circle, body],
+        )?;
+        Ok(n > 0)
+    }
+
     /// The finished runs whose reply was not read for their routine's
     /// notebooks yet, finished at or after `since` and not held back past
     /// `now` (`memory_retry_at`, migration 205), oldest first, at most
@@ -161,6 +179,19 @@ impl Store {
             )
             .optional()?
             .flatten())
+    }
+
+    /// When run `id`'s reply was read for the notebooks (tests).
+    #[cfg(test)]
+    pub fn routine_run_memory_read_at(&self, id: i64) -> Option<i64> {
+        self.conn
+            .query_row(
+                "SELECT memory_read_at FROM routine_runs WHERE id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .ok()
+            .flatten()
     }
 
     /// Mark run `id`'s reply read for the notebooks.

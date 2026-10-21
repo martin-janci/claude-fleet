@@ -467,6 +467,7 @@ fn check(
     s: &Store,
     scope: &ViewScope,
     input: &RoutineInput,
+    before: Option<&RoutineRow>,
 ) -> Result<(RoutineFields, Option<i64>), IpcError> {
     let invalid = |m: String| IpcError::new(codes::E_INVALID, m);
     let name = input.name.trim();
@@ -568,7 +569,7 @@ fn check(
         }
     }
     let guards = guards(s, scope, input, org)?;
-    let (memory_mode, memory_auto) = memory::check_input(input)?;
+    let (memory_mode, memory_auto) = memory::check_input(input, before)?;
     let overlap = input.overlap.as_deref().unwrap_or("skip");
     if !ROUTINE_OVERLAPS.contains(&overlap) {
         return Err(invalid(format!(
@@ -907,7 +908,7 @@ pub fn preview(
 ) -> Result<RoutinePreview, IpcError> {
     let s = lock(store)?;
     let before = id.map(|id| changeable(&s, scope, id)).transpose()?;
-    let problem = match check(&s, scope, input) {
+    let problem = match check(&s, scope, input, before.as_ref()) {
         Ok((_, org)) if before.as_ref().is_some_and(|b| b.org_id != org) => {
             Some(STAYS_IN_ORG.to_string())
         }
@@ -988,21 +989,15 @@ pub fn save(
                     ))
                 }
             };
-            let (f, org) = check(&s, scope, input)?;
+            let (f, org) = check(&s, scope, input, None)?;
             let cursor = start_cursor(&s, f.event.as_deref())?;
             s.insert_routine(org, owner, &f, next_fire(&f, now), cursor)
         }
         Some(id) => {
             let before = changeable(&s, scope, id)?;
-            let (mut f, org) = check(&s, scope, input)?;
-            // A change without `memory` keeps the routine's: a desktop
-            // older than memory (hub client mode) sends none, and its
-            // edit must not turn the notebooks off. `""` turns them off.
-            if input.memory.is_none() {
-                f.memory = before.memory.clone();
-                f.memory_auto =
-                    f.memory.is_some() && input.memory_auto.unwrap_or(before.memory_auto);
-            }
+            // A change without `memory` keeps the routine's
+            // (`memory::check_input`).
+            let (f, org) = check(&s, scope, input, Some(&before))?;
             if org != before.org_id {
                 return Err(IpcError::new(codes::E_INVALID, STAYS_IN_ORG));
             }

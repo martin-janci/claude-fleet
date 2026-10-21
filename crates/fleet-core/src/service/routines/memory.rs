@@ -65,13 +65,25 @@ pub const SCOPE_PROJECT: &str = "project";
 
 /// `memory` and `memory_auto` of `input`, checked: a mode of
 /// [`ROUTINE_MEMORY_MODES`] (`""` = none), and `memory_auto` only with one.
-pub(super) fn check_input(input: &super::RoutineInput) -> Result<(Option<String>, bool), IpcError> {
-    let mode = input
-        .memory
-        .as_deref()
-        .map(str::trim)
-        .filter(|m| !m.is_empty());
-    if let Some(m) = mode {
+/// A change of routine `before` without `memory` keeps its notebooks, and
+/// its `memory_auto` unless the input names one: a desktop older than
+/// memory (hub client mode) sends neither, and its edit must not turn the
+/// notebooks off.
+pub(super) fn check_input(
+    input: &super::RoutineInput,
+    before: Option<&RoutineRow>,
+) -> Result<(Option<String>, bool), IpcError> {
+    let kept = input.memory.is_none().then_some(before).flatten();
+    let mode = match kept {
+        Some(b) => b.memory.clone(),
+        None => input
+            .memory
+            .as_deref()
+            .map(str::trim)
+            .filter(|m| !m.is_empty())
+            .map(str::to_string),
+    };
+    if let (None, Some(m)) = (kept, mode.as_deref()) {
         if !ROUTINE_MEMORY_MODES.contains(&m) {
             return Err(IpcError::new(
                 codes::E_INVALID,
@@ -79,14 +91,16 @@ pub(super) fn check_input(input: &super::RoutineInput) -> Result<(Option<String>
             ));
         }
     }
-    let auto = input.memory_auto.unwrap_or(false);
+    let auto = input
+        .memory_auto
+        .unwrap_or_else(|| kept.is_some_and(|b| b.memory_auto));
     if auto && mode.is_none() {
         return Err(IpcError::new(
             codes::E_INVALID,
             "memory_auto needs memory: a note goes into a notebook",
         ));
     }
-    Ok((mode.map(str::to_string), auto))
+    Ok((mode, auto))
 }
 
 /// PURE: the notebooks `r`'s runs use, routine first.
@@ -194,35 +208,48 @@ fn scope_attr(tag: &str) -> Option<&str> {
     inner.find(q).map(|end| &inner[..end])
 }
 
+/// PURE: where the first real opening tag in `text` starts, and its
+/// attributes: `<routine-memory>` or `<routine-memory scope="…">`, nothing
+/// else, and not quoted as code (`` `<routine-memory>` ``).
+fn real_open(text: &str) -> Option<(usize, &str)> {
+    let mut from = 0;
+    while let Some(i) = text[from..].find(TAG_OPEN) {
+        let open = from + i;
+        let after = &text[open + TAG_OPEN.len()..];
+        from = open + TAG_OPEN.len();
+        if (!after.starts_with('>') && !after.starts_with(char::is_whitespace))
+            || text[..open].ends_with('`')
+        {
+            continue;
+        }
+        let gt = after.find('>')?;
+        return Some((open, &after[..gt]));
+    }
+    None
+}
+
 /// PURE: each `<routine-memory scope="…">…</routine-memory>` block in
 /// `text`, in order, as `(scope, body)`; a block without a scope names
 /// `default`. An unclosed block is left out, and so is a tag in code
 /// (`` `<routine-memory>` ``, as a reply names it in prose). A block whose
-/// text holds another opening tag starts at that one: what came before it
-/// was a mention, not the notebook.
+/// text holds another real opening tag starts at that one: what came
+/// before it was a mention, not the notebook. Unless the outer tag names
+/// a scope and the inner one none: then the inner is the notebook's text
+/// naming the tag, and the block is the outer one.
 pub fn parse_blocks<'a>(text: &'a str, default: &'a str) -> Vec<(&'a str, &'a str)> {
     let mut out = Vec::new();
     let mut rest = text;
-    while let Some(open) = rest.find(TAG_OPEN) {
-        let after = &rest[open + TAG_OPEN.len()..];
-        // `<routine-memory>` or `<routine-memory scope="…">`, nothing else,
-        // and not quoted as code.
-        if (!after.starts_with('>') && !after.starts_with(char::is_whitespace))
-            || rest[..open].ends_with('`')
-        {
-            rest = after;
-            continue;
-        }
-        let Some(gt) = after.find('>') else { break };
-        let tag = &after[..gt];
-        let inner = &after[gt + 1..];
+    while let Some((open, tag)) = real_open(rest) {
+        let inner = &rest[open + TAG_OPEN.len() + tag.len() + 1..];
         let Some(close) = inner.find(TAG_CLOSE) else {
             break;
         };
-        if inner[..close].contains(TAG_OPEN) {
-            // Parse again from the inner opening tag.
-            rest = inner;
-            continue;
+        if let Some((at, inner_tag)) = real_open(&inner[..close]) {
+            if scope_attr(tag).is_none() || scope_attr(inner_tag).is_some() {
+                // Parse again from the inner opening tag.
+                rest = &inner[at..];
+                continue;
+            }
         }
         let scope = scope_attr(tag).unwrap_or(default);
         out.push((
@@ -333,18 +360,19 @@ pub struct Written {
     pub by: &'static str,
 }
 
-/// Whether notebook `m` was written after run `run` finished: by
-/// a later run (a retried read lands after the runs that followed it), or
-/// by a person since. Such a notebook is not rewritten from `run`'s reply,
-/// which was written from an older one.
+/// Whether notebook `m` was written after run `run` read it, at its start:
+/// by a run that finished since (a retried read lands after the runs that
+/// followed it; an overlapping run finished first), or by a person since.
+/// Such a notebook is not rewritten from `run`'s reply, which was written
+/// from an older one.
 fn newer_than(s: &Store, m: &RoutineMemoryRow, run: &RoutineRunRow) -> Result<bool, IpcError> {
-    let finished = run.finished_at.unwrap_or(run.started_at);
+    let read = run.started_at;
     Ok(match m.updated_run_id {
         Some(other) if other == run.id => false,
         Some(other) => s
             .routine_run_finished_at(other)?
-            .is_some_and(|at| at > finished || (at == finished && other > run.id)),
-        None => m.updated_by == "person" && m.updated_at > finished,
+            .is_some_and(|at| at > read || (at == read && other > run.id)),
+        None => m.updated_by == "person" && m.updated_at > read,
     })
 }
 
@@ -360,7 +388,12 @@ pub fn apply(
     replies: Result<&[String], &str>,
     now: i64,
 ) -> Result<Vec<Written>, IpcError> {
-    let used = scopes(r);
+    // A removed project's notebook went with it, and its id may be the
+    // next project's: a run read after the removal writes none there.
+    let mut used = scopes(r);
+    if used.contains(&SCOPE_PROJECT) && s.get_project(r.project_id)?.is_none() {
+        used.retain(|u| *u != SCOPE_PROJECT);
+    }
     let mut written = Vec::new();
     let mut last_reply: Option<&str> = None;
     if let Err(why) = replies {
@@ -435,8 +468,22 @@ pub fn apply(
     if r.memory_auto {
         if let Some(scope) = used.first().copied() {
             let line = note_line(run, last_reply, replies.is_ok());
-            let next = append_note(&body(s, r, scope)?, &line, MEMORY_MAX_CHARS);
-            if s.set_routine_memory(scope, key(r, scope), &next, "fleet", Some(run.id), now)? {
+            let (owner, circle) = key(r, scope);
+            let m = s.get_routine_memory(scope, owner, circle)?;
+            let body = m.as_ref().map(|m| m.body.as_str()).unwrap_or_default();
+            let next = append_note(body, &line, MEMORY_MAX_CHARS);
+            // A note on a notebook written since this run read it leaves
+            // the last writer as it is: an older run's note must not make
+            // the next stale reply look newer than the notebook.
+            let changed = match &m {
+                Some(m) if newer_than(s, m, run)? => {
+                    s.set_routine_memory_body(scope, (owner, circle), &next)?
+                }
+                _ => {
+                    s.set_routine_memory(scope, (owner, circle), &next, "fleet", Some(run.id), now)?
+                }
+            };
+            if changed {
                 written.push(Written {
                     scope,
                     chars: next.chars().count(),
@@ -543,7 +590,11 @@ pub const RETRY_SECS: i64 = 60;
 /// Read each finished run's reply once and [`apply`] it. A transcript that
 /// cannot be read is tried again [`RETRY_SECS`] later, until
 /// [`GIVE_UP_SECS`] after the run finished; then the run is applied without
-/// it. Once one read on a host fails, the pass reads nothing else there.
+/// it. Once one read on a host fails for want of the host (a transport
+/// error), the pass reads nothing else there that can wait; a run that is
+/// giving up is still tried, so none is noted unread without a read. A
+/// read that fails for its own session (no transcript, no Claude id) says
+/// nothing about the host.
 pub async fn read_finished(store: &Arc<Mutex<Store>>, reader: &dyn ReplyReader, now: i64) {
     let runs = match lock(store).and_then(|s| pending(&s, now)) {
         Ok(r) => r,
@@ -558,11 +609,13 @@ pub async fn read_finished(store: &Arc<Mutex<Store>>, reader: &dyn ReplyReader, 
         let giving_up = now - finished >= GIVE_UP_SECS;
         let read = match (&row, run.session_id) {
             (Some(row), _) => {
-                let got = if down.contains(&row.host_alias) {
+                let got = if !giving_up && down.contains(&row.host_alias) {
                     Err(format!("{} could not be reached", row.host_alias))
                 } else {
                     reader.replies(row).await.map_err(|e| {
-                        down.insert(row.host_alias.clone());
+                        if codes::is_transport_failure(&e.code) {
+                            down.insert(row.host_alias.clone());
+                        }
                         e.message
                     })
                 };

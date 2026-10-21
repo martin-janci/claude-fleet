@@ -11,8 +11,16 @@
 -- (`Store::routine_runs_memory_unread`): no index fit its filter, so each
 -- tick scanned the runs' whole history under the store lock (the same
 -- problem migration 146 fixed for the unjudged runs). Partial on the
--- query's own predicates, so it holds the unread finished runs only.
+-- query's own predicates, so it holds the unread finished runs only. A
+-- run of a routine that keeps no notebook has nothing to read: it is
+-- stamped read as it finishes (`Store::finish_routine_run`,
+-- `insert_routine_run`), and the ones already finished are stamped here,
+-- so the index does not grow with every such run's history.
 ALTER TABLE routine_runs ADD COLUMN memory_retry_at INTEGER;
+
+UPDATE routine_runs SET memory_read_at = finished_at
+  WHERE memory_read_at IS NULL AND state IN ('done', 'failed')
+    AND routine_id IN (SELECT id FROM routines WHERE memory IS NULL);
 
 CREATE INDEX IF NOT EXISTS routine_runs_memory_unread
   ON routine_runs (finished_at, id)

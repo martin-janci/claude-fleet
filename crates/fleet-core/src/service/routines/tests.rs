@@ -3588,14 +3588,22 @@ struct FakeReplies {
     texts: Vec<String>,
     fail: AtomicBool,
     reads: AtomicUsize,
+    /// Sessions whose own transcript cannot be read (the host is up).
+    unreadable: std::sync::Mutex<Vec<i64>>,
 }
 
 #[async_trait::async_trait]
 impl memory::ReplyReader for FakeReplies {
-    async fn replies(&self, _row: &SessionRow) -> Result<Vec<String>, IpcError> {
+    async fn replies(&self, row: &SessionRow) -> Result<Vec<String>, IpcError> {
         self.reads.fetch_add(1, Ordering::SeqCst);
         if self.fail.load(Ordering::SeqCst) {
             return Err(IpcError::new(codes::E_SSH, "host unreachable"));
+        }
+        if self.unreadable.lock().unwrap().contains(&row.id) {
+            return Err(IpcError::new(
+                codes::E_INVALID_STATE,
+                "no Claude session id",
+            ));
         }
         Ok(self.texts.clone())
     }
@@ -3606,6 +3614,7 @@ fn replies(texts: &[&str]) -> FakeReplies {
         texts: texts.iter().map(|t| t.to_string()).collect(),
         fail: AtomicBool::new(false),
         reads: AtomicUsize::new(0),
+        unreadable: std::sync::Mutex::new(Vec::new()),
     }
 }
 
@@ -3931,6 +3940,167 @@ async fn an_unreachable_host_is_read_once_a_pass_and_held_back() {
         2,
         "then read again"
     );
+}
+
+// ---- review 7: routine memory's reads and writes ---------------------------
+
+#[tokio::test]
+async fn one_runs_unreadable_transcript_does_not_hold_its_hosts_other_runs() {
+    let f = fx();
+    let r1 = memory_routine(&f, "routine", false);
+    let r2 = memory_routine(&f, "routine", false);
+    let a = finished_run(&f, &r1, OCT8).await;
+    let b = finished_run(&f, &r2, OCT8).await;
+    let reader = replies(&["<routine-memory>from B</routine-memory>"]);
+    reader
+        .unreadable
+        .lock()
+        .unwrap()
+        .push(a.session_id.unwrap());
+    let ana = person(&f.store, None, f.ana);
+    memory::read_finished(&f.store, &reader, b.finished_at.unwrap() + 60).await;
+    assert_eq!(reader.reads.load(Ordering::SeqCst), 2, "both are read");
+    let own = memory::get(&f.store, &ana, r2.id).unwrap().routine.unwrap();
+    assert_eq!(own.body, "from B");
+}
+
+#[tokio::test]
+async fn a_run_giving_up_is_read_though_its_host_failed_this_pass() {
+    let f = fx();
+    let r1 = memory_routine(&f, "routine", false);
+    let r2 = memory_routine(&f, "routine", true);
+    let a = finished_run(&f, &r1, OCT8).await;
+    let b = finished_run(&f, &r2, OCT8).await;
+    let reader = replies(&["<routine-memory>x</routine-memory>"]);
+    reader.fail.store(true, Ordering::SeqCst);
+    let now = b.finished_at.unwrap().max(a.finished_at.unwrap()) + memory::GIVE_UP_SECS;
+    memory::read_finished(&f.store, &reader, now).await;
+    assert_eq!(
+        reader.reads.load(Ordering::SeqCst),
+        2,
+        "no run is noted unread without a read of its own"
+    );
+}
+
+#[tokio::test]
+async fn an_older_runs_note_does_not_make_a_stale_reply_look_newer() {
+    let f = fx();
+    let ana = person(&f.store, None, f.ana);
+    let r = memory_routine(&f, "routine", true);
+    let a = finished_run(&f, &r, OCT8).await;
+    let e = finished_run(&f, &r, OCT8 + 100).await;
+    let b = finished_run(&f, &r, OCT8 + 300).await;
+    let r = routine(&f, r.id);
+    let now = OCT8 + 400;
+    {
+        let s = lock(&f.store).unwrap();
+        let from = |w: &str| [format!("<routine-memory>from {w}</routine-memory>")];
+        memory::apply(&s, &r, &b, Ok(&from("B")), now).unwrap();
+        // A's and E's reads were retried, and land after B's.
+        memory::apply(&s, &r, &a, Ok(&from("A")), now + 1).unwrap();
+        memory::apply(&s, &r, &e, Ok(&from("E")), now + 2).unwrap();
+    }
+    let own = memory::get(&f.store, &ana, r.id).unwrap().routine.unwrap();
+    assert!(own.body.starts_with("from B"), "{}", own.body);
+    assert_eq!(own.updated_run_id, Some(b.id));
+    assert!(
+        own.body.contains(&format!("[run {} ", a.id)),
+        "{}",
+        own.body
+    );
+    assert!(
+        own.body.contains(&format!("[run {} ", e.id)),
+        "{}",
+        own.body
+    );
+}
+
+#[tokio::test]
+async fn a_persons_edit_during_a_run_is_kept_over_its_reply() {
+    let f = fx();
+    let ana = person(&f.store, None, f.ana);
+    let r = memory_routine(&f, "routine", false);
+    let run = finished_run(&f, &r, OCT8).await;
+    assert!(run.finished_at.unwrap() > run.started_at + 1);
+    memory::set(
+        &f.store,
+        &ana,
+        r.id,
+        "routine",
+        "a person's",
+        run.started_at + 1,
+    )
+    .unwrap();
+    {
+        let s = lock(&f.store).unwrap();
+        let reply = ["<routine-memory>the run's</routine-memory>".to_string()];
+        memory::apply(&s, &r, &run, Ok(&reply), OCT8 + 100).unwrap();
+    }
+    let own = memory::get(&f.store, &ana, r.id).unwrap().routine.unwrap();
+    assert_eq!(own.body, "a person's");
+}
+
+#[test]
+fn memory_auto_alone_turns_a_kept_notebooks_notes_on() {
+    let f = fx();
+    let ana = person(&f.store, None, f.ana);
+    let r = memory_routine(&f, "both", false);
+    let mut change = input(&f);
+    change.memory = None;
+    change.memory_auto = Some(true);
+    let r2 = save(&f.store, &ana, Some(r.id), &change).unwrap();
+    assert_eq!((r2.memory.as_deref(), r2.memory_auto), (Some("both"), true));
+    // A new routine still needs memory for it.
+    assert!(save(&f.store, &ana, None, &change).is_err());
+}
+
+#[test]
+fn a_block_whose_text_names_the_tag_keeps_its_whole_text() {
+    let quoted =
+        "<routine-memory>\n- write notes with a `<routine-memory>` block\n</routine-memory>";
+    assert_eq!(
+        memory::parse_blocks(quoted, "routine"),
+        vec![("routine", "- write notes with a `<routine-memory>` block")]
+    );
+    let bare = "<routine-memory scope=\"routine\">Notes: end with a <routine-memory> block.\n\
+                - PR 12 merged</routine-memory>";
+    assert_eq!(
+        memory::parse_blocks(bare, "project"),
+        vec![(
+            "routine",
+            "Notes: end with a <routine-memory> block.\n- PR 12 merged"
+        )]
+    );
+}
+
+#[tokio::test]
+async fn a_run_read_after_its_project_is_removed_writes_no_project_notebook() {
+    let f = fx();
+    let r = memory_routine(&f, "project", true);
+    let run = finished_run(&f, &r, OCT8).await;
+    let s = lock(&f.store).unwrap();
+    s.delete_project(f.project, &Default::default()).unwrap();
+    let reply = ["<routine-memory>late</routine-memory>".to_string()];
+    let r = s.get_routine(r.id).unwrap().unwrap();
+    assert!(memory::apply(&s, &r, &run, Ok(&reply), OCT8 + 100)
+        .unwrap()
+        .is_empty());
+    assert!(s
+        .get_routine_memory("project", f.project, -f.ana)
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn a_run_of_a_routine_without_memory_is_read_as_it_finishes() {
+    let f = fx();
+    let plain = new_routine(&f, input(&f));
+    let run = finished_run(&f, &plain, OCT8).await;
+    let kept = memory_routine(&f, "routine", false);
+    let other = finished_run(&f, &kept, OCT8 + 100).await;
+    let s = lock(&f.store).unwrap();
+    assert_eq!(s.routine_run_memory_read_at(run.id), run.finished_at);
+    assert_eq!(s.routine_run_memory_read_at(other.id), None);
 }
 
 #[test]
