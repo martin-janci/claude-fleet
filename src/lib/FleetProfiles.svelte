@@ -6,7 +6,7 @@
   // gives each profile (kept here only, keyed by fleet), the person that
   // hub knows this device as, its sign-in, and which of the person's own
   // variables are set there (names only; a secret's value never comes here).
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { fleets, connectionWord } from './fleets';
   import {
     envChecklist,
@@ -31,9 +31,21 @@
     editing = id;
     draft = current;
   }
+  /** Close the label form and give focus back to that row's Rename…, so a
+   *  keyboard user is not dropped onto the page body. */
+  async function close(id: string) {
+    editing = null;
+    await tick();
+    document.querySelector<HTMLElement>(`[data-testid="fleet-profile-rename-${id}"]`)?.focus();
+  }
   function save(id: string) {
     setProfileLabel(id, draft);
-    editing = null;
+    void close(id);
+  }
+  /** The label input takes focus as the form opens. */
+  function focusOnMount(el: HTMLInputElement) {
+    el.focus();
+    el.select();
   }
 </script>
 
@@ -70,15 +82,30 @@
                 placeholder={f.label}
                 maxlength="32"
                 data-testid="fleet-profile-label-input-{f.id}"
+                use:focusOnMount
+                onkeydown={(e) => {
+                  if (e.key === 'Escape') {
+                    // Cancel the rename, not the whole Settings dialog.
+                    e.preventDefault();
+                    e.stopPropagation();
+                    void close(f.id);
+                  }
+                }}
               />
               <Button size="sm" variant="primary" type="submit" testid="fleet-profile-label-save-{f.id}">Save</Button>
-              <Button size="sm" variant="quiet" onclick={() => (editing = null)}>Cancel</Button>
+              <Button size="sm" variant="quiet" testid="fleet-profile-label-cancel-{f.id}" onclick={() => void close(f.id)}
+                >Cancel</Button
+              >
             </form>
           {:else}
             <strong data-testid="fleet-profile-label-{f.id}">{label}</strong>
             {#if label !== f.label}<span class="muted">on {f.label}</span>{/if}
-            <Button size="sm" variant="quiet" testid="fleet-profile-rename-{f.id}" onclick={() => edit(f.id, $profileLabels[f.id] ?? '')}
-              >Rename…</Button
+            <Button
+              size="sm"
+              variant="quiet"
+              testid="fleet-profile-rename-{f.id}"
+              label="Rename profile on {f.label}…"
+              onclick={() => edit(f.id, $profileLabels[f.id] ?? '')}>Rename…</Button
             >
           {/if}
           <span class="muted">{connectionWord(f).word}</span>
@@ -115,7 +142,10 @@
               <dt>Git</dt>
               <dd data-testid="fleet-profile-git-{f.id}">{[p.git.name, p.git.email ? `<${p.git.email}>` : ''].filter(Boolean).join(' ')}</dd>
             {/if}
-            {#if p?.person_id != null}
+            {#if p?.person_id != null && st.envError}
+              <dt>Variables</dt>
+              <dd class="err" data-testid="fleet-profile-env-{f.id}">Could not read the variables: {st.envError}</dd>
+            {:else if p?.person_id != null}
               <dt>Variables</dt>
               <dd class="vars" data-testid="fleet-profile-env-{f.id}">
                 {#each envChecklist(p) as v (v.name)}

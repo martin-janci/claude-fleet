@@ -7,7 +7,7 @@ import { get } from 'svelte/store';
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 
-import { PRIMARY, _resetFleetsForTest, _setFleetsForTest, type FleetInfo } from './fleets';
+import { PRIMARY, _resetFleetsForTest, _setFleetsForTest, removeFleet, type FleetInfo } from './fleets';
 import {
   envChecklist,
   fleetProfiles,
@@ -19,6 +19,7 @@ import {
   profileLines,
   profilePerson,
   setProfileLabel,
+  isOlderHub,
   _resetProfilesForTest,
   type MyProfile,
 } from './fleet_profiles';
@@ -126,6 +127,74 @@ describe('reading a profile', () => {
     for (const call of inv.mock.calls.slice(1)) expect(call[1]).toEqual({ fleet: 'company' });
   });
 
+  it("falls back on a paired device's refusal from an older hub, and on nothing else", async () => {
+    expect(isOlderHub({ code: 'E_FORBIDDEN', message: 'my_profile is not a client-callable tool (mac refused)' })).toBe(true);
+    expect(isOlderHub({ code: 'E_FORBIDDEN', message: 'my_profile is a fleet-admin tool: master token only' })).toBe(false);
+    expect(isOlderHub({ code: 'E_HUB_TIMEOUT', message: 'timed out' })).toBe(false);
+    inv.mockImplementation(async (cmd: string) => {
+      if (cmd === 'my_profile') throw { code: 'E_FORBIDDEN', message: 'my_profile is not a client-callable tool (mac refused)' };
+      if (cmd === 'my_grants') return { person_id: 4, grants: [] };
+      if (cmd === 'env_vars_list') return [];
+      return null;
+    });
+    const st = await loadProfile('company');
+    expect(st.source).toBe('fallback');
+    expect(st.error).toBeNull();
+    expect(st.profile?.person_id).toBe(4);
+  });
+
+  it('a failed env_vars_list on the fallback is unknown, not unset', async () => {
+    inv.mockImplementation(async (cmd: string) => {
+      if (cmd === 'my_profile') throw { code: 'E_HUB_PROTOCOL', message: 'unknown tool' };
+      if (cmd === 'my_grants') return { person_id: 4, grants: [] };
+      if (cmd === 'env_vars_list') throw { code: 'E_HUB_TIMEOUT', message: 'timed out' };
+      return null;
+    });
+    const st = await loadProfile('company');
+    expect(st.source).toBe('fallback');
+    expect(st.envError).toBe('timed out');
+    expect(st.profile?.env).toBeUndefined();
+    render(FleetProfiles);
+    await vi.waitFor(() => expect(screen.getByTestId('fleet-profile-env-company').textContent).toContain('Could not read the variables'));
+    expect(screen.getByTestId('fleet-profile-env-company').textContent).not.toContain('GH_TOKEN');
+  });
+
+  it('a slow stale answer never overwrites a newer one', async () => {
+    let failFirst: (e: unknown) => void = () => {};
+    inv.mockImplementationOnce(() => new Promise((_, reject) => (failFirst = reject))).mockResolvedValueOnce(work);
+    const first = loadProfile('company');
+    await loadProfile('company');
+    failFirst({ code: 'E_HUB_TIMEOUT', message: 'timed out' });
+    await first;
+    expect(get(fleetProfiles).get('company')).toEqual({ profile: work, source: 'hub', error: null });
+  });
+
+  it("a failed read says so in the profile's line", async () => {
+    inv.mockRejectedValue({ code: 'E_HUB_TIMEOUT', message: 'timed out' });
+    setProfileLabel('company', 'Work');
+    await loadProfile('company');
+    expect(get(profileLines).get('company')?.line).toBe('Work · could not read the profile');
+  });
+
+  it('removing a fleet forgets its label and profile, so a reused slot inherits neither', async () => {
+    inv.mockResolvedValue(work);
+    setProfileLabel('company', 'Work');
+    setProfileLabel(PRIMARY, 'Private');
+    await loadProfile('company');
+    let finishLate: (v: unknown) => void = () => {};
+    inv.mockImplementationOnce(() => new Promise((resolve) => (finishLate = resolve)));
+    const late = loadProfile('company');
+    inv.mockImplementation(async (cmd: string) => (cmd === 'fleets_list' ? [primary] : null));
+    expect((await removeFleet('company')).ok).toBe(true);
+    expect(get(profileLabels)).toEqual({ [PRIMARY]: 'Private' });
+    expect(JSON.parse(localStorage.getItem('cf:pref:fleets.profileLabels')!)).toEqual({ [PRIMARY]: 'Private' });
+    expect(get(fleetProfiles).has('company')).toBe(false);
+    // A read still in flight when the fleet went does not write it back.
+    finishLate(work);
+    await late;
+    expect(get(fleetProfiles).has('company')).toBe(false);
+  });
+
   it('nobody on the fallback is nobody', () => {
     expect(profileFromParts(null, [])).toEqual({ person_id: null });
   });
@@ -151,6 +220,22 @@ describe('Settings › Fleets › Profiles', () => {
     // Nothing about a label is sent anywhere.
     expect(inv.mock.calls.every(([cmd]) => cmd === 'my_profile')).toBe(true);
   });
+
+  it('Rename… moves focus to the input, Escape cancels, and focus comes back', async () => {
+    inv.mockResolvedValue(home);
+    render(FleetProfiles);
+    const rename = screen.getByTestId('fleet-profile-rename-company');
+    expect(rename.getAttribute('aria-label')).toContain('Papaya POS (hub)');
+    await fireEvent.click(rename);
+    const input = screen.getByTestId('fleet-profile-label-input-company');
+    expect(document.activeElement).toBe(input);
+    await fireEvent.input(input, { target: { value: 'Nope' } });
+    await fireEvent.keyDown(input, { key: 'Escape' });
+    await tick();
+    expect(screen.queryByTestId('fleet-profile-label-input-company')).toBeNull();
+    expect(get(profileLabels)).toEqual({});
+    expect(document.activeElement).toBe(screen.getByTestId('fleet-profile-rename-company'));
+  });
 });
 
 describe('the fleet switcher', () => {
@@ -168,5 +253,21 @@ describe('the fleet switcher', () => {
     expect(chip.getAttribute('title')).toContain('Work · Martin Janči (martin) · martin@papayapos.example');
     expect(screen.getByTestId('fleet-profile-chip-company').textContent).toBe('Work');
     expect(screen.getByTestId('fleet-profile-chip-primary').textContent).toBe('Private');
+  });
+
+  it('re-reads only the fleet whose link came back up', async () => {
+    inv.mockImplementation(async (cmd: string, args: { fleet?: string }) => {
+      if (cmd === 'my_profile') return args?.fleet === 'company' ? work : home;
+      return null;
+    });
+    render(FleetSwitcher);
+    await vi.waitFor(() => expect(inv).toHaveBeenCalledTimes(2));
+    inv.mockClear();
+    _setFleetsForTest([primary, { ...company, connection: { state: 'reconnecting', attempt: 1, retry_in_secs: 2, reason: 'reset' } }]);
+    await tick();
+    expect(inv).not.toHaveBeenCalled();
+    _setFleetsForTest([primary, company]);
+    await tick();
+    expect(inv.mock.calls).toEqual([['my_profile', { fleet: 'company' }]]);
   });
 });
