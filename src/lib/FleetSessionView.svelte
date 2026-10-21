@@ -1,39 +1,43 @@
 <script lang="ts">
-  // An extra fleet's session, opened (multi-hub): its conversation in the
-  // same ConversationPanel the primary's sessions use (Phase 3: the row
-  // carries its fleet, so every call the panel makes goes to that fleet's
-  // hub and what it keeps is keyed by `sessionKey`), its terminal in the
-  // same TerminalView (attached from this machine, under its own pty id), and
-  // a read-only pane snapshot.
+  // An extra fleet's session, opened (multi-hub Phase 3), laid out as the
+  // primary's own: the same SessionTabs header, the same ConversationPanel
+  // over the same TerminalView. The row carries its fleet, so every call
+  // they make goes to that fleet's hub and what they keep is keyed by
+  // `sessionKey`. A host that would mean this machine from here (`local`,
+  // `wsl-…`) gets a pane snapshot read through that hub instead of an attach.
   import { untrack } from 'svelte';
   import { errorText } from './error_copy';
   import {
     closeFleetSession,
     connectionWord,
+    fleetAttachRefusal,
     fleetCaptureSession,
     fleetTouchViewed,
     type FleetInfo,
   } from './fleets';
-  import { sessionStatusWord } from './attention';
-  import type { SessionRow } from './sessions';
+  import { showFriendlyNames, type SessionRow } from './sessions';
   import ConversationPanel from './ConversationPanel.svelte';
   import TerminalView from './TerminalView.svelte';
   import Button from './kit/Button.svelte';
   import FleetAttachButton from './FleetAttachButton.svelte';
-  import { tablistKeys } from './tablist_keys';
+  import SessionTabs from './SessionTabs.svelte';
+  import { detectMac } from './terminal_keys';
   import { readable, writable } from 'svelte/store';
   import { trackViewedSession } from './session_viewed';
 
   let { fleet, session }: { fleet: FleetInfo; session: SessionRow } = $props();
 
-  type Tab = 'conversation' | 'terminal' | 'snapshot';
+  type Tab = 'conversation' | 'agent';
+  const AWAY_ONLY = 'Not available for another fleet’s session yet';
+  const isMac = detectMac(typeof navigator === 'undefined' ? undefined : navigator);
   let tab = $state<Tab>('conversation');
   let snapshot = $state<string | null>(null);
   let snapshotError = $state<string | null>(null);
 
   const cw = $derived(connectionWord(fleet));
-  const name = $derived(session.friendly_name || session.tmux_name);
+  const name = $derived(($showFriendlyNames && session.friendly_name) || session.tmux_name);
   const key = $derived(`${fleet.id}:${session.id}`);
+  const attachRefusal = $derived(fleetAttachRefusal(session));
   /** The row as the panel reads it: with its fleet, whoever handed it over. */
   const row = $derived(session.fleet === fleet.id ? session : { ...session, fleet: fleet.id });
 
@@ -85,55 +89,57 @@
 
   function pick(t: Tab) {
     tab = t;
-    if (t === 'snapshot') void loadSnapshot();
+    if (t === 'agent' && attachRefusal) void loadSnapshot();
   }
 </script>
 
 <section class="fleet-session" style="--fleet: {fleet.color}" data-testid="fleet-session-view">
-  <header class="head">
-    <span class="badge" data-testid="fleet-session-badge">{fleet.label}</span>
-    <h2 class="name" title={session.tmux_name}>{name}</h2>
-    <span class="muted">{session.host_alias}</span>
-    <span class="muted" data-testid="fleet-session-status">· {sessionStatusWord(session)}</span>
-    {#if cw.tone !== 'ok'}<span class="state {cw.tone}">{cw.word}</span>{/if}
-    <span class="grow"></span>
-    <div class="tabs" role="tablist" aria-label="View" use:tablistKeys>
-      {#each [['conversation', 'Conversation'], ['terminal', 'Terminal'], ['snapshot', 'Snapshot']] as [id, label] (id)}
-        <button
-          type="button"
-          role="tab"
-          class:active={tab === id}
-          aria-selected={tab === id}
-          data-testid="fleet-session-tab-{id}"
-          onclick={() => pick(id as Tab)}>{label}</button
-        >
-      {/each}
-    </div>
-    <FleetAttachButton {session} testid="fleet-session-copy-attach" />
-    <Button size="sm" variant="quiet" testid="fleet-session-close" onclick={closeFleetSession}>Close</Button>
-  </header>
+  <SessionTabs
+    session={row}
+    {name}
+    current={tab}
+    disabled={{ terminals: AWAY_ONLY, files: AWAY_ONLY, details: AWAY_ONLY }}
+    inspectorOpen={false}
+    inspectorAvailable={false}
+    {isMac}
+    onselect={(t) => pick(t === 'conversation' ? 'conversation' : 'agent')}
+    oninspector={() => {}}
+  >
+    {#snippet extra()}
+      <span class="badge" data-testid="fleet-session-badge">{fleet.label}</span>
+      {#if cw.tone !== 'ok'}<span class="state {cw.tone}" data-testid="fleet-session-link">{cw.word}</span>{/if}
+      <FleetAttachButton {session} testid="fleet-session-copy-attach" />
+      <Button size="sm" variant="quiet" testid="fleet-session-close" onclick={closeFleetSession}>Close</Button>
+    {/snippet}
+  </SessionTabs>
 
   <div class="body">
-    {#if tab === 'conversation'}
-      <div class="conv" data-testid="fleet-session-conversation">
-        <ConversationPanel session={row} visible={tab === 'conversation'} onOpenTerminal={() => pick('terminal')} />
-      </div>
-    {:else if tab === 'terminal'}
-      {#key key}
+    {#key key}
+      {#if attachRefusal}
+        <!-- Its host means this machine from here: no attach, so the agent
+             tab reads the pane through that hub instead. -->
+        <div class="snapshot" data-testid="fleet-session-snapshot">
+          <p class="note muted" data-testid="terminal-no-attach">{attachRefusal}</p>
+          <Button size="sm" variant="quiet" onclick={() => void loadSnapshot()}>Refresh</Button>
+          {#if snapshotError}
+            <p class="note err">{snapshotError}</p>
+          {:else if snapshot === null}
+            <p class="note muted">Reading the pane…</p>
+          {:else}
+            <pre>{snapshot}</pre>
+          {/if}
+        </div>
+      {:else}
+        <!-- Mounted underneath, as the primary's terminal is, so flipping
+             back from the conversation never re-attaches. -->
         <div class="term" data-testid="fleet-session-terminal">
           <TerminalView session={row} />
         </div>
-      {/key}
-    {:else}
-      <div class="snapshot" data-testid="fleet-session-snapshot">
-        <Button size="sm" variant="quiet" onclick={() => void loadSnapshot()}>Refresh</Button>
-        {#if snapshotError}
-          <p class="note err">{snapshotError}</p>
-        {:else if snapshot === null}
-          <p class="note muted">Reading the pane…</p>
-        {:else}
-          <pre>{snapshot}</pre>
-        {/if}
+      {/if}
+    {/key}
+    {#if tab === 'conversation'}
+      <div class="conv" data-testid="fleet-session-conversation">
+        <ConversationPanel session={row} visible={tab === 'conversation'} onOpenTerminal={() => pick('agent')} />
       </div>
     {/if}
   </div>
@@ -148,15 +154,8 @@
     background: var(--bg);
     color: var(--fg);
   }
-  .head {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    padding: var(--space-2) var(--space-3);
-    border-bottom: 1px solid var(--border);
-    flex-wrap: wrap;
-  }
   .badge {
+    flex-shrink: 0;
     padding: 1px var(--space-2);
     border-radius: var(--radius-xs);
     background: color-mix(in srgb, var(--fleet) 20%, transparent);
@@ -165,22 +164,11 @@
     font-size: var(--text-xs);
     font-weight: 600;
   }
-  .name {
-    margin: 0;
-    font-size: var(--text-md);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    max-width: 40ch;
-  }
   .muted {
     color: var(--fg-muted);
-    font-size: var(--text-sm);
-  }
-  .grow {
-    flex: 1;
   }
   .state {
+    flex-shrink: 0;
     font-size: var(--text-xs);
   }
   .state.bad {
@@ -189,40 +177,28 @@
   .state.warn {
     color: var(--brand-amber);
   }
-  .tabs {
-    display: flex;
-    gap: 2px;
-  }
-  .tabs button {
-    background: none;
-    border: 1px solid transparent;
-    border-radius: var(--radius-sm);
-    padding: 2px var(--space-2);
-    color: var(--fg-muted);
-    font: inherit;
-    font-size: var(--text-sm);
-    cursor: pointer;
-  }
-  .tabs button.active {
-    color: var(--fg);
-    border-color: var(--border);
-    background: var(--bg-raise);
-  }
   .body {
     flex: 1;
     min-height: 0;
+    position: relative;
     display: flex;
     flex-direction: column;
-    gap: var(--space-2);
   }
-  /* The panel is the primary's own: it lays itself out edge to edge. */
-  .conv,
+  /* The panels are the primary's own: they lay themselves out edge to edge.
+     The conversation covers the terminal, as it does in the main layout. */
   .term {
     flex: 1;
     min-height: 0;
     position: relative;
     display: flex;
     flex-direction: column;
+  }
+  .conv {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg);
   }
   .snapshot pre {
     margin: 0;

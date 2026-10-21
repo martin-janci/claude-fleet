@@ -324,6 +324,13 @@ un-archive, upload, host lookups). Only the main window's own pane (no
 `session` prop) publishes `terminalPane`, takes bar requests and releases the
 microphone. `FleetTerminal` was removed.
 
+Step 2b (landed): `FleetSessionView` renders `SessionTabs` (which, for a row
+with `fleet`, leaves out presence, grants, the account lookup, Share, Open
+in VS Code and the inspector, and takes an `extra` snippet for the fleet
+badge, Copy attach and Close) over the same body as the main layout: the
+terminal mounted, the conversation over it. Terminals, Files and Details
+are disabled until step 3 makes their commands fleet-scoped.
+
 ## Testing
 
 - Rust, `src-tauri`: `backend::fleets` unit tests (record round-trip, slot
