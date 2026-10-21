@@ -341,8 +341,11 @@ pub async fn catalog_repo_status(
 #[tauri::command]
 pub async fn catalog_list_catalogs(
     backend: State<'_, Arc<FleetBackend>>,
+    fleet: Option<String>,
+    fleets: State<'_, Arc<crate::backend::fleets::Fleets>>,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<Vec<CatalogStatus>, IpcError> {
+    let backend = fleets.select(backend.inner(), fleet.as_deref())?;
     routed::catalog_list_catalogs(&backend, &store).await
 }
 

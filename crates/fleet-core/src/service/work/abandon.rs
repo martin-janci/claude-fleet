@@ -81,6 +81,15 @@ pub fn plan_abandon(s: &Store, session_id: i64) -> Result<AbandonPlan, IpcError>
         &row.tmux_name,
         "abandon_start",
     )?;
+    // Before anything is inspected or recorded: a pinned session is never
+    // killed, so a cancel would write `start_abandoned` and then fail at the
+    // kill, leaving the strip saying "abandoned" over a running session.
+    crate::service::sessions::refuse_if_pinned(
+        s,
+        &row.host_alias,
+        &row.tmux_name,
+        "abandon_start",
+    )?;
     let started: Option<StartSpawned> = s
         .newest_session_event_of(session_id, &[START_SPAWNED])?
         .and_then(|e| e.detail)

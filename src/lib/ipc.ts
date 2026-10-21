@@ -2,6 +2,7 @@ import { invokeCmd, type Result } from './result';
 import type { DecideHealth } from './decide_health';
 import type { TrackersHealth } from './tracker_health';
 import type { OrgBudgetAlert } from './org_budget';
+import type { UpdatesHealth } from './update_health';
 
 export interface Health {
   version: string;
@@ -23,6 +24,9 @@ export interface Health {
   loops?: LoopHealth[];
   /** `automation.paused`: the pausable loops stand still. */
   automation_paused?: boolean;
+  /** The fleet's own updates: what needs a person (review w26-3); absent
+   *  from an older hub. */
+  updates?: UpdatesHealth | null;
 }
 
 /** One background loop (`service::loops::LoopHealth`). */

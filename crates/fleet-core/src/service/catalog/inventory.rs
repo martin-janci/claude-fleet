@@ -171,10 +171,7 @@ pub async fn scan_hosts(
     // reported the same as before; `compute_states` stamps each row with
     // whichever catalog it actually came from.
     let catalog = super::registry::union_all()?.ok_or_else(|| {
-        crate::ipc_error::IpcError::new(
-            super::E_CATALOG_NOT_CONFIGURED,
-            "catalog not loaded; call catalog_load",
-        )
+        crate::ipc_error::IpcError::new(super::E_CATALOG_NOT_CONFIGURED, super::NOT_LOADED)
     })?;
     let mut results = Vec::new();
     for h in hosts {

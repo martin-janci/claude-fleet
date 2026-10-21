@@ -172,6 +172,20 @@ pub fn close_all_shell_terminals_script(session: &str) -> String {
     )
 }
 
+/// Close the terminals left behind by an ended session of this name: every
+/// `<session>--sh<N>`, but only while no tmux session `session` exists, so a
+/// live session's own terminals are never touched. Run before a new session
+/// takes the name (review w27-8): a session that ended without fleet's Kill
+/// (`/exit`, an OOM kill, `tmux kill-session` by hand) left them running
+/// unseen, and the new session's strip would show them as its own.
+pub fn close_orphan_shell_terminals_script(session: &str) -> String {
+    format!(
+        "tmux has-session -t {target} 2>/dev/null || {{ {close}; }}; true",
+        target = quote(&format!("={session}")),
+        close = close_all_shell_terminals_script(session),
+    )
+}
+
 /// Rename every terminal of `old` to the same terminal of `new`: a renamed
 /// session keeps its terminals.
 pub fn rename_shell_terminals_script(old: &str, new: &str) -> String {
@@ -674,6 +688,13 @@ pub struct HostHealthSample {
     /// session picker enables an agent only where it can run). `None`: the
     /// host could not tell; `Some(empty)`: none found.
     pub agents_on_path: Option<Vec<String>>,
+    /// macOS only: the host's default Claude login is kept twice, in the
+    /// login Keychain (`Claude Code-credentials`) AND in
+    /// `~/.claude/.credentials.json` (migration 203,
+    /// `service::login_conflicts`). Only whether each exists is asked,
+    /// never what it holds. `None`: not macOS, `local` (its sessions read
+    /// the Keychain, see `local_health`), or the host could not tell.
+    pub login_split: Option<bool>,
 }
 
 /// The variables that outrank a Claude Code `/login` subscription
@@ -704,6 +725,11 @@ pub const AUTH_OVERRIDE_VARS: [&str; 7] = [
 /// inside the pipe and `cut` keeps only the name, so no value is printed.
 /// `agents=` lists which agent CLIs `command -v` finds (Orbit Fleet 12.4;
 /// the names are [`crate::service::host_check::AGENT_BINARIES`]).
+/// `credsplit=` (macOS only, migration 203) is `1` when the default login
+/// is both a Keychain item and a `.credentials.json` file:
+/// `find-generic-password` without `-w` reads the item's attributes, which
+/// an SSH session can do even while the Keychain will not hand out its
+/// secret, and prints nothing fleet keeps. Empty elsewhere.
 ///
 /// Host load (migration 193): `memkb=` falls back on macOS to
 /// `kern.memorystatus_level` (the percent of memory the kernel counts as
@@ -728,7 +754,19 @@ printf 'cpus=%s\\n' \"$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.nc
 printf 'memtotal=%s\\n' \"$(awk '/^MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null || { m=$(sysctl -n hw.memsize 2>/dev/null); [ -n \"$m\" ] && echo $(( m / 1024 )); })\"; \
 printf 'bootat=%s\\n' \"$(awk '/^btime / {print $2}' /proc/stat 2>/dev/null || sysctl -n kern.boottime 2>/dev/null | sed -n 's/.*{ sec = \\([0-9]*\\),.*/\\1/p')\"; \
 printf 'authenv=%s\\n' \"$({ env; tmux show-environment -g 2>/dev/null; } | grep -E '^(CLAUDE_CODE_USE_BEDROCK|CLAUDE_CODE_USE_VERTEX|CLAUDE_CODE_USE_FOUNDRY|ANTHROPIC_AUTH_TOKEN|ANTHROPIC_API_KEY|CLAUDE_CODE_OAUTH_TOKEN|ANTHROPIC_PROFILE)=.' | cut -d= -f1 | sort -u | tr '\\n' ' ')\"; \
-printf 'agents=%s\\n' \"$(for a in claude codex agy gemini; do command -v \"$a\" >/dev/null 2>&1 && printf '%s ' \"$a\"; done)\"";
+printf 'agents=%s\\n' \"$(for a in claude codex agy gemini; do command -v \"$a\" >/dev/null 2>&1 && printf '%s ' \"$a\"; done)\"; \
+printf 'credsplit=%s\\n' \"$([ \"$(uname -s 2>/dev/null)\" = Darwin ] && { [ -f \"$HOME/.claude/.credentials.json\" ] && security find-generic-password -s 'Claude Code-credentials' >/dev/null 2>&1 && echo 1 || echo 0; })\"";
+
+/// A [`HOST_HEALTH_SCRIPT`] sample taken on `local`, with `login_split`
+/// dropped: the split is about `claude` started over SSH, which finds the
+/// Keychain locked and falls back to `.credentials.json`. Fleet's local
+/// tmux server is started from the login session, so its sessions read the
+/// Keychain like the desktop app does, and a `.credentials.json` left over
+/// next to it is a copy nothing of fleet's refreshes.
+fn local_health(mut sample: HostHealthSample) -> HostHealthSample {
+    sample.login_split = None;
+    sample
+}
 
 /// Second field of a `df -Pk` data line is total kB, fourth is available kB.
 fn df_kb(line: &str) -> (Option<i64>, Option<i64>) {
@@ -801,6 +839,12 @@ pub fn parse_host_health(stdout: &str) -> HostHealthSample {
                     .map(|n| n.to_string())
                     .collect(),
             );
+        } else if let Some(v) = line.strip_prefix("credsplit=") {
+            h.login_split = match v.trim() {
+                "1" => Some(true),
+                "0" => Some(false),
+                _ => None,
+            };
         } else if let Some(v) = line.strip_prefix("agents=") {
             // In the checklist's order, and only names fleet asked about.
             let found: Vec<&str> = v.split_whitespace().collect();
@@ -1029,7 +1073,9 @@ impl TmuxExec for LocalTmux {
             .await
             .ok()
             .filter(|o| o.status.success())?;
-        Some(parse_host_health(&String::from_utf8_lossy(&out.stdout)))
+        Some(local_health(parse_host_health(&String::from_utf8_lossy(
+            &out.stdout,
+        ))))
     }
     async fn read_profiles(&self) -> Option<Vec<HostProfile>> {
         local_allowed().ok()?;
@@ -3495,6 +3541,71 @@ mod tests {
         assert_eq!(parse_host_health("authenv=\n").auth_overrides, Some(vec![]));
         // An older agent's sample has no line at all: unknown, not clean.
         assert_eq!(parse_host_health("uptime=5\n").auth_overrides, None);
+    }
+
+    #[test]
+    fn parse_host_health_reads_the_login_split() {
+        assert_eq!(parse_host_health("credsplit=1\n").login_split, Some(true));
+        assert_eq!(parse_host_health("credsplit=0\n").login_split, Some(false));
+        // Not macOS prints an empty value; an older host no line at all.
+        assert_eq!(parse_host_health("credsplit=\n").login_split, None);
+        // On `local` the split does not apply (the sessions read the Keychain).
+        assert_eq!(
+            local_health(parse_host_health("credsplit=1\n")).login_split,
+            None
+        );
+        assert_eq!(parse_host_health("uptime=5\n").login_split, None);
+    }
+
+    /// The `credsplit=` line against stand-ins for `uname` and `security`:
+    /// `1` only on Darwin with both the Keychain item and the file, and the
+    /// Keychain is asked for attributes, never the secret (`-w`).
+    #[cfg(unix)]
+    #[test]
+    fn the_health_script_reports_a_login_kept_in_the_keychain_and_a_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let run = |os: &str, item: bool, file: bool| {
+            let bin = tempfile::tempdir().unwrap();
+            let home = tempfile::tempdir().unwrap();
+            let log = home.path().join("security.args");
+            let stub = |name: &str, body: String| {
+                let p = bin.path().join(name);
+                std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
+                std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+            };
+            stub("uname", format!("echo {os}"));
+            stub(
+                "security",
+                format!(
+                    "echo \"$@\" >> '{}'; exit {}",
+                    log.display(),
+                    if item { 0 } else { 44 }
+                ),
+            );
+            if file {
+                std::fs::create_dir_all(home.path().join(".claude")).unwrap();
+                std::fs::write(home.path().join(".claude/.credentials.json"), "{}").unwrap();
+            }
+            let path = format!(
+                "{}:{}",
+                bin.path().display(),
+                std::env::var("PATH").unwrap_or_default()
+            );
+            let out = std::process::Command::new("sh")
+                .args(["-c", HOST_HEALTH_SCRIPT])
+                .env("PATH", path)
+                .env("HOME", home.path())
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+            let args = std::fs::read_to_string(&log).unwrap_or_default();
+            assert!(!args.contains("-w"), "{args}");
+            parse_host_health(&stdout).login_split
+        };
+        assert_eq!(run("Darwin", true, true), Some(true));
+        assert_eq!(run("Darwin", true, false), Some(false));
+        assert_eq!(run("Darwin", false, true), Some(false));
+        assert_eq!(run("Linux", true, true), None);
     }
 
     #[cfg(unix)]

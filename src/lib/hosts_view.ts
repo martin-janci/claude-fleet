@@ -166,6 +166,60 @@ export function newestClaudeVersion(hosts: readonly HostRow[], now: number, maxA
   return best;
 }
 
+/** Two copies of one Claude login on a host, which log each other out. Mirrors
+ *  `crates/fleet-core/src/service/login_conflicts.rs`: `keychain_and_file` is the
+ *  macOS default login kept in the Keychain and in ~/.claude/.credentials.json;
+ *  `shared_account` is two logins (`null` = the host's own, else a profile name)
+ *  signed into one account. */
+export type LoginConflict =
+  | { kind: 'keychain_and_file' }
+  | { kind: 'shared_account'; logins: (string | null)[]; email: string | null };
+
+export function loginConflicts(
+  host: Pick<HostRow, 'login_split' | 'account_uuid' | 'claude_profiles'>,
+): LoginConflict[] {
+  const out: LoginConflict[] = [];
+  if (host.login_split === true) out.push({ kind: 'keychain_and_file' });
+  // Accounts in first-seen order, the host's own login first.
+  const groups = new Map<string, { logins: (string | null)[]; email: string | null }>();
+  const add = (uuid: string | null | undefined, login: string | null, email: string | null) => {
+    // An API key (`add_account::is_api_key_account`) has no refresh token to
+    // revoke, so one key under two profiles is not a conflict.
+    if (!uuid || uuid.startsWith('apikey-')) return;
+    const g = groups.get(uuid);
+    if (g) {
+      g.logins.push(login);
+      g.email ??= email;
+    } else {
+      groups.set(uuid, { logins: [login], email });
+    }
+  };
+  add(host.account_uuid, null, null);
+  for (const p of host.claude_profiles ?? []) add(p.account_uuid, p.name, p.email ?? null);
+  for (const g of groups.values()) {
+    if (g.logins.length > 1) out.push({ kind: 'shared_account', logins: g.logins, email: g.email });
+  }
+  return out;
+}
+
+export function describeLoginConflict(alias: string, c: LoginConflict): string {
+  if (c.kind === 'keychain_and_file') {
+    return (
+      `${alias}: the default Claude login is kept twice, in the macOS Keychain (the desktop app, a local terminal) ` +
+      `and in ~/.claude/.credentials.json (sessions started over SSH). Each refresh revokes the other copy, so one ` +
+      `side keeps hitting "Login expired". Run fleet's sessions there under a login profile, then delete ` +
+      `~/.claude/.credentials.json: the mark stays while both copies exist.`
+    );
+  }
+  const names = c.logins.map((l) => (l === null ? 'the host login' : `profile ${l}`));
+  const all = names.length === 2 ? 'both' : 'all';
+  return (
+    `${alias}: ${names.join(' and ')} are ${all} signed into ${c.email ?? 'one account'}. Each refresh revokes the ` +
+    `others' copy, so they keep hitting "Login expired". Keep one login per account on a host: sign the others ` +
+    `into other accounts.`
+  );
+}
+
 export type AttentionKind =
   | 'token_missing'
   | 'hooks_missing'
@@ -174,6 +228,7 @@ export type AttentionKind =
   | 'provision_stale'
   | 'auth_override'
   | 'disk_low'
+  | 'login_conflict'
   | 'agent_old'
   | 'claude_old';
 
@@ -188,7 +243,7 @@ export interface HostAttention {
 /**
  * At most ONE attention mark per host, strongest first: no control-API token
  * (so no hooks either), hooks installed but silent, a credential variable
- * outranking the host's /login, a home filesystem almost full, a fleet-agent behind the hub, then a Claude Code older than the
+ * outranking the host's /login, two copies of one login, a home filesystem almost full, a fleet-agent behind the hub, then a Claude Code older than the
  * newest in the fleet. Token-derived marks wait for `tokensLoaded` so a slow
  * token fetch never flashes a false alarm.
  */
@@ -273,6 +328,18 @@ export function hostAttention(args: {
       title: `${host.alias} is at ${disk.pct}% disk in $HOME (${gb(host.disk_home_free_kb ?? 0)} free): transcripts, worktrees and moves onto it will fail with ENOSPC.`,
     };
   }
+  // Two copies of one Claude login on the host revoke each other's refresh
+  // token, so sessions there keep stopping at "Login expired · Please run /login".
+  // Below disk_low: a full disk breaks every session there, and this mark can
+  // outlive its cause until a stale copy is deleted.
+  const conflicts = loginConflicts(host);
+  if (conflicts.length > 0) {
+    return {
+      kind: 'login_conflict',
+      icon: 'key',
+      title: conflicts.map((c) => describeLoginConflict(host.alias, c)).join(' '),
+    };
+  }
   // hosts F5: an agent older than the hub silently lacks features. One ahead
   // (after a hub rollback) or unparseable earns no mark.
   if (
@@ -284,7 +351,7 @@ export function hostAttention(args: {
     return {
       kind: 'agent_old',
       icon: 'upgrade',
-      title: `fleet-agent ${host.agent_version} on ${host.alias}, hub ${hubVersion}: upgrade the agent (fleet-agent install with the existing token, then systemctl restart fleet-agent).`,
+      title: `fleet-agent ${host.agent_version} on ${host.alias}, hub ${hubVersion}: it updates itself as Settings → Updates (fleet-agent) says; by hand on the host: fleet-agent update (--user for a user unit).`,
     };
   }
   // ux F-13: only a version read from the host recently earns the mark; a

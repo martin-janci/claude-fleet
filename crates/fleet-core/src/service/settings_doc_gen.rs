@@ -118,28 +118,45 @@ pub(crate) fn render_table(prefix: &str) -> String {
     )
 }
 
-/// A group heading for a key prefix (the part before the first dot).
-fn group_title(prefix: &str) -> &str {
-    match prefix {
+/// A group heading for a key prefix (the part before the first dot), or
+/// `None` for a prefix with no title yet (`every_prefix_has_a_title`).
+fn group_title(prefix: &str) -> Option<&'static str> {
+    Some(match prefix {
         "reconcile" => "Reconcile tick",
         "sessions" => "Sessions",
         "restore" => "Restoring lost sessions",
+        "automation" => "Automation",
+        "routines" => "Routines",
+        "orchestrator" => "Missions",
+        "control" => "Control chat",
         "playbooks" => "Playbooks",
+        "autofix" => "Problems & fixes",
+        "recovery" => "Recovery",
+        "agents" => "Agents",
         "gc" => "Garbage collection",
         "projects" => "Projects",
         "tasks" => "Tasks",
         "repair" => "Workspace repair",
+        "downloads" => "Downloads",
+        "voice" => "Voice",
         "move" => "Move to host",
         "usage" => "Usage",
+        "search" => "Search",
+        "accounts" => "Accounts",
         "reports" => "Error reports",
         "health" => "Health",
+        "provision" => "Host provisioning",
         "work" => "Work graph",
+        "catalog" => "Asset catalog",
+        "update" => "Updates",
         "decide" => "Decisions (Jev)",
         "auth" => "Identity and audit",
         "hub" => "Hub daemon (read-only)",
         "mcp" => "Control API (read-only)",
-        other => other,
-    }
+        "budget" => "Budgets",
+        "notify" => "Notifications",
+        _ => return None,
+    })
 }
 
 /// The whole of `docs/settings-reference.md`.
@@ -167,7 +184,10 @@ the same, and an org may set its own value that its sessions read instead; \
     }
     for prefix in prefixes {
         let dotted = format!("{prefix}.");
-        out.push_str(&format!("\n## {}\n\n", group_title(prefix)));
+        out.push_str(&format!(
+            "\n## {}\n\n",
+            group_title(prefix).unwrap_or(prefix)
+        ));
         out.push_str(&render_rows(
             SPECS.iter().filter(|s| s.key.starts_with(&dotted)),
         ));
@@ -199,6 +219,21 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .join(rel)
+    }
+
+    /// Review w15-8: the reference heads every group with a title, never
+    /// a raw key prefix.
+    #[test]
+    fn every_prefix_has_a_title() {
+        let untitled: Vec<&str> = SPECS
+            .iter()
+            .map(|s| s.key.split('.').next().unwrap_or(s.key))
+            .filter(|p| group_title(p).is_none())
+            .collect();
+        assert!(
+            untitled.is_empty(),
+            "give these a group_title: {untitled:?}"
+        );
     }
 
     #[test]

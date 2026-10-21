@@ -381,7 +381,7 @@ describe('ShareSheet', () => {
     // The sentence is the offline one, not "this session is not yours": the
     // row IS this person's, and the hub is the problem.
     for (const b of [confirm, narrow, revoke]) {
-      expect(b.title).toMatch(/unreachable right now/i);
+      expect(b.title).toMatch(/hub is unreachable/i);
     }
     await fireEvent.click(confirm);
     await settle();

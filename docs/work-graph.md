@@ -544,8 +544,9 @@ decides what each sighting becomes:
 A project becomes trusted when you tick **Trust branch keys in this repo**
 in the popover, or automatically after you confirmed three branch
 suggestions in it (a suggestion only a pull request made, or one an agent
-confirmed, does not count). Settings → Limits → Lifecycle shows how many projects are trusted and has a
-**Trust none** button.
+confirmed, does not count). Settings → Work & trackers → Detection →
+*Linking* shows how many projects are trusted (*Trusted branch projects*)
+and has a **Clear** button that trusts none.
 
 ### The chip and its popover
 
@@ -1184,8 +1185,8 @@ candidates whose reason is in `work.auto_tidy_reasons` by itself, with safe
 kill or archive only, never a plain kill. `idle_unlinked` can never be
 auto-tidied (decision D19). An org can override `work.auto_tidy` for its own
 sessions (`on` / `off` / `inherit`). Every action is written to the
-session's timeline and its work journal. Settings → Limits → Lifecycle
-previews what auto-tidy would act on.
+session's timeline and its work journal. Settings → Work & trackers →
+Tidy-up → *Auto-tidy* previews what auto-tidy would act on.
 
 > **[Screenshot placeholder]** The Tidy up sheet with a done ticket and an
 > idle unlinked session.
@@ -1499,7 +1500,8 @@ asks you to confirm, like any kill.
 ## Settings
 
 Every `work.*` setting, with its default. On a standalone desktop they are
-in Settings → Limits (with its *Retention* and *Lifecycle* groups); on a hub, set them with `set_setting` (master token), read
+in Settings → Work & trackers (its *Detection*, *Tidy-up* and *Retention*
+tabs); on a hub, set them with `set_setting` (master token), read
 them with `get_settings`. This table is generated from
 `service/settings.rs` (`settings_docs_are_current`); every setting is also
 in [the settings reference](settings-reference.md).
@@ -1522,7 +1524,7 @@ in [the settings reference](settings-reference.md).
 | `work.summary_model` | `haiku` | `haiku` / `sonnet` / `opus` | fleet, per org | The model Summarise runs on for a past session, on that session's own host and account. |
 | `work.context_help` | `false` | on / off | fleet | Terminal and composer: Ask asks a model about the line you are typing, with its history as context, on the session's host. A proposed command is put on the line, never run. |
 | `work.help_model` | `haiku` | `haiku` / `sonnet` / `opus` | fleet | The model that answers a question asked at a terminal or composer prompt line, and that tunes a prompt, on the session's own host and account. |
-| `work.prompt_tune` | `false` | on / off | fleet | Composer and routine prompt: Tune has a model rewrite your draft into a clearer prompt for the agent, on the session's or routine's host. You see the rewrite beside your draft and accept, edit or discard it; nothing is sent. |
+| `work.prompt_tune` | `false` | on / off | fleet | Composer and routine prompt: Tune has a model rewrite your draft into a clearer prompt for the agent, on the session's or routine's host. It runs on the Writing help model. You see the rewrite beside your draft and accept, edit or discard it; nothing is sent. |
 | `work.draft_commit_messages` | `false` | on / off | fleet | Files tab: Draft writes a commit message from the staged diff with claude -p on the session's host. A draft is text you edit and commit yourself. |
 | `work.draft_briefs` | `false` | on / off | fleet | Starting from a ticket: Draft writes the agent's brief from the ticket before the first prompt, on the planned host. |
 | `work.draft_task_titles` | `false` | on / off | fleet | New task: once you have written the notes, the title is drafted from them with claude -p on this machine, or on the first reachable host when it is not a fleet host. A draft is text you edit before you create the task. |

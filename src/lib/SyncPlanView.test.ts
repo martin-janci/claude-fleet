@@ -243,6 +243,22 @@ describe('SyncPlanView', () => {
     // The plan stays valid — Apply (now with force_partial) is one click away.
     expect(screen.getByTestId('plan-apply')).not.toBeDisabled();
   });
+
+  // Review w16-10: the person's ways past it are Secrets and "Apply anyway",
+  // not the agent's catalog_set_secret / force_partial.
+  it('words a missing secret with the panel and the box, not the MCP tool or flag', async () => {
+    invoke.mockRejectedValueOnce({
+      code: 'E_SECRET_MISSING',
+      message: 'no value for GH_TOKEN; set them (catalog_set_secret) or apply again with force_partial',
+    });
+    const p = plan([hostPlan({ actions: [action({ op: 'create' })] })], { create: 1 });
+    render(SyncPlanView, { plan: p, onclose: () => {}, onapplied: () => {} });
+    await fireEvent.click(screen.getByTestId('plan-apply'));
+    await waitFor(() => expect(screen.getByTestId('plan-error')).toBeTruthy());
+    const text = screen.getByTestId('plan-error').textContent ?? '';
+    expect(text).toContain('No value for GH_TOKEN. Add it under Secrets, then apply again. Or tick “Apply anyway”.');
+    expect(text).not.toMatch(/catalog_set_secret|force_partial/);
+  });
 });
 
 describe('SyncPlanView as a view', () => {

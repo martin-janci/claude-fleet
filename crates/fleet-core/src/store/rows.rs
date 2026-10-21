@@ -1333,6 +1333,14 @@ pub struct HostRow {
     /// an older hub omits it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub signed_out_logins: Vec<SignedOutLogin>,
+    /// macOS: the host's default login is kept both in the Keychain and in
+    /// `~/.claude/.credentials.json` (migration 203, `credsplit=` of
+    /// [`crate::tmux::HOST_HEALTH_SCRIPT`]), so the two copies revoke each
+    /// other's refresh token (`service::login_conflicts`). `None`: not
+    /// macOS, never sampled, or the host could not tell. Per-field default:
+    /// an older hub omits it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub login_split: Option<bool>,
 }
 
 /// One signed-out login on a host ([`HostRow::signed_out_logins`]).
@@ -1402,6 +1410,12 @@ pub struct HostHealth {
     pub mem_low: bool,
     #[serde(default)]
     pub cpu_saturated: bool,
+    /// Migration 203. Per-field default: an older hub's ping omits it.
+    /// Sent as `null` when `None`, like the fields above: `applyPing`
+    /// spreads the ping over the row it holds, so a left-out key would keep
+    /// a stale `true` after the host stops reporting a split.
+    #[serde(default)]
+    pub login_split: Option<bool>,
 }
 
 impl HostHealth {
@@ -1425,6 +1439,7 @@ impl HostHealth {
             mem_pressure: row.mem_pressure,
             mem_low: row.mem_low,
             cpu_saturated: row.cpu_saturated,
+            login_split: row.login_split,
         }
     }
 }
@@ -1455,7 +1470,7 @@ pub(super) const HOST_COLUMNS: &str =
      harnesses, provision_warning, auth_overrides, claude_profiles, cpu_count, mem_total_kb, \
      boot_at, latency_ms, worktree_kb, worktree_at, agents_on_path, \
      last_reachable_at, last_probe_error_code, last_probe_error, \
-     cpu_pct, mem_pressure, mem_low, cpu_saturated, signed_out_logins";
+     cpu_pct, mem_pressure, mem_low, cpu_saturated, signed_out_logins, login_split";
 
 /// Map a row selected with [`HOST_COLUMNS`].
 pub(super) fn map_host_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostRow> {
@@ -1533,6 +1548,8 @@ pub(super) fn map_host_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostRow>
             .get::<_, Option<String>>(41)?
             .and_then(|t| serde_json::from_str::<Vec<SignedOutLogin>>(&t).ok())
             .unwrap_or_default(),
+        // Migration 203.
+        login_split: row.get::<_, Option<i64>>(42)?.map(|v| v != 0),
     })
 }
 
@@ -2143,6 +2160,20 @@ pub(super) fn fetch_project(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A ping must carry a cleared `login_split` as `null`: the desktop
+    /// spreads the ping's health over the row it holds, so a left-out key
+    /// would keep a stale `true` (and its login-conflict mark).
+    #[test]
+    fn a_ping_sends_a_cleared_login_split_as_null() {
+        let mut h: HostHealth = serde_json::from_str("{}").unwrap();
+        assert_eq!(h.login_split, None);
+        let v = serde_json::to_value(&h).unwrap();
+        assert_eq!(v.get("login_split"), Some(&serde_json::Value::Null));
+        h.login_split = Some(true);
+        let v = serde_json::to_value(&h).unwrap();
+        assert_eq!(v["login_split"], serde_json::json!(true));
+    }
 
     /// A desktop paired to a hub parses that hub's rows, and the hub may be
     /// older than the desktop. Migration 038 added `system` to `ProjectRow`;

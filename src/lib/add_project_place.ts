@@ -9,6 +9,7 @@ import type { OrgDetail, OrgRuleRow } from './orgs';
 import type { ProjectRow } from './projects';
 import type { TrackerRow } from './trackers';
 import type { Result } from './result';
+import { errorText } from './error_copy';
 
 /** The org an `owner/repo` already belongs to by a rule naming it or its
  *  owner (the most specific wins, as `store::orgs` resolves it), or null. */
@@ -68,13 +69,13 @@ export async function placeProject(
   const name = p.owner === 'local' ? p.repo : `${p.owner}/${p.repo}`;
   if (want.orgId !== null && coveringOrgId(orgs, p.owner, p.repo) !== want.orgId) {
     const r = await deps.addOrgRule(ruleFor(want.orgId, p));
-    if (!r.ok) problems.push(`${name} was added but not put in the organisation: ${r.error.message}`);
+    if (!r.ok) problems.push(`${name} was added but not put in the organisation: ${errorText(r.error)}`);
   }
   if (want.tracker && p.owner !== 'local') {
     const repos = reposWith(want.tracker, p.owner, p.repo);
     if (repos) {
       const r = await deps.updateTracker(want.tracker.id, { settings: { ...want.tracker.settings, repos } });
-      if (!r.ok) problems.push(`${name} was added but ${want.tracker.name} does not cover it yet: ${r.error.message}`);
+      if (!r.ok) problems.push(`${name} was added but ${want.tracker.name} does not cover it yet: ${errorText(r.error)}`);
     }
   }
   return problems;

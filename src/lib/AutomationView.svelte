@@ -43,6 +43,7 @@
   import { errorText } from './error_copy';
   import type { IpcError } from './result';
   import LoadError from './states/LoadError.svelte';
+  import Skeleton from './states/Skeleton.svelte';
   import { timeAgo } from './session_status';
   import {
     automationTab,
@@ -367,6 +368,9 @@
           </div>
           {#if runsError && !runs}
             <LoadError title="Couldn't load the runs" error={runsError} onretry={() => retry(loadRuns)} {retrying} testid="automation-runs-error" />
+          {:else if runs === null}
+            <!-- Review w17-11: the first read in flight is a skeleton, not a blank. -->
+            <Skeleton rows={3} label="Loading runs" />
           {:else if runsView === 'orbit' && runs}
             <OrbitMap
               {runs}

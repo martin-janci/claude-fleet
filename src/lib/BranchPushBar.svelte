@@ -3,6 +3,7 @@
      has yet is pushed with its upstream set, so the first push needs no
      terminal. -->
 <script lang="ts">
+  import { errorText } from './error_copy';
   import { repoPush } from './history';
   import type { BranchDiff } from './files';
   import type { SessionRow } from './sessions';
@@ -45,7 +46,7 @@
     const r = await repoPush(session.id, branch.upstream === null);
     busy = false;
     if (r.ok) ondone();
-    else err = r.error.message;
+    else err = errorText(r.error);
   }
 </script>
 

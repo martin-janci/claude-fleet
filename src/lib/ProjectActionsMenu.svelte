@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { IS_MAC } from './shortcuts';
+  import { platformChord } from './kit/kbd';
   // The New session picker's per-project actions (project picker spec v2):
   // ⇧F10 / right-click / ⌘G on the highlighted project. A `role=menu`;
   // focus moves in, and Esc hands it back to the switcher's input.
@@ -97,9 +99,9 @@
 <div class="menu" role="menu" aria-label={title} bind:this={root} onkeydown={onKey} data-testid="project-actions">
   <div class="title" role="presentation">{title}</div>
   {#if mode === 'main'}
-    <button type="button" role="menuitem" class="mi" onclick={onpin}>{pinned ? 'Unpin' : 'Pin to top'}<kbd>⌘P</kbd></button>
-    <button type="button" role="menuitem" class="mi" onclick={() => { mode = 'groups'; void focusFirst(); }}>Move to group…<kbd>⌘G</kbd></button>
-    <button type="button" role="menuitem" class="mi" onclick={onhide}>{hidden ? 'Unhide' : 'Hide'}<kbd>⌘⌫</kbd></button>
+    <button type="button" role="menuitem" class="mi" onclick={onpin}>{pinned ? 'Unpin' : 'Pin to top'}<kbd>{platformChord('⌘P', IS_MAC)}</kbd></button>
+    <button type="button" role="menuitem" class="mi" onclick={() => { mode = 'groups'; void focusFirst(); }}>Move to group…<kbd>{platformChord('⌘G', IS_MAC)}</kbd></button>
+    <button type="button" role="menuitem" class="mi" onclick={onhide}>{hidden ? 'Unhide' : 'Hide'}<kbd>{platformChord('⌘⌫', IS_MAC)}</kbd></button>
   {:else}
     <input
       class="gi"

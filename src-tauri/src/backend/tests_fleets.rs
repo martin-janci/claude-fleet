@@ -277,6 +277,39 @@ fn a_fleets_default_label_is_its_registrable_name() {
     assert_eq!(default_label("http://10.0.0.5:8787"), "10.0.0.5");
 }
 
+#[test]
+fn a_default_label_another_fleet_already_reads_as_falls_back_to_the_first_host_label() {
+    assert_eq!(
+        default_label_among("https://company.rlt.sk", &["lab"]),
+        "rlt"
+    );
+    assert_eq!(
+        default_label_among("https://company.rlt.sk", &["RLT"]),
+        "company"
+    );
+    assert_eq!(
+        default_label_among("https://company.rlt.sk", &["rlt", "company"]),
+        "company.rlt.sk"
+    );
+    assert_eq!(
+        default_label_among("http://10.0.0.5:8787", &["10.0.0.5"]),
+        "10.0.0.5"
+    );
+}
+
+#[test]
+fn a_hub_on_the_primarys_domain_is_not_labelled_like_the_primary() {
+    let w = world(&[], Tokens::with(&[]));
+    let transport = pair("cl_new");
+    let info = block_on(w.fleets.add(
+        &transport,
+        &paired_to("https://fleet.rlt.sk"),
+        add_args("https://company.rlt.sk"),
+    ))
+    .unwrap();
+    assert_eq!(info.label, "company");
+}
+
 // --- loading -----------------------------------------------------------------
 
 #[test]
@@ -624,6 +657,16 @@ impl<F: Fn() + Send + Sync> PairTransport for PairWhile<F> {
     }
 }
 
+/// A pairing for `cl_lab` that, while in flight, writes `row` as the only
+/// extra fleet.
+fn pair_writing(w: &World, row: ExtraFleet) -> PairWhile<impl Fn() + Send + Sync> {
+    let store = Arc::clone(&w.store);
+    PairWhile {
+        inner: pair("cl_lab"),
+        during: move || write_records(&store, std::slice::from_ref(&row)).unwrap(),
+    }
+}
+
 #[test]
 fn an_add_keeps_the_rows_written_while_its_pairing_was_in_flight() {
     let w = world(
@@ -632,13 +675,7 @@ fn an_add_keeps_the_rows_written_while_its_pairing_was_in_flight() {
     );
     // While the pairing is in flight: `company` is removed and another add
     // takes the slot `lab` would have had.
-    let store = Arc::clone(&w.store);
-    let transport = PairWhile {
-        inner: pair("cl_lab"),
-        during: move || {
-            write_records(&store, &[record("lab", "https://other.example.com")]).unwrap();
-        },
-    };
+    let transport = pair_writing(&w, record("lab", "https://other.example.com"));
     let info = block_on(w.fleets.add(
         &transport,
         &standalone(),
@@ -671,13 +708,7 @@ fn an_add_keeps_the_rows_written_while_its_pairing_was_in_flight() {
 #[test]
 fn a_hub_added_while_its_pairing_was_in_flight_is_not_added_twice() {
     let w = world(&[], Tokens::with(&[]));
-    let store = Arc::clone(&w.store);
-    let transport = PairWhile {
-        inner: pair("cl_lab"),
-        during: move || {
-            write_records(&store, &[record("lab", "https://lab.example.com")]).unwrap();
-        },
-    };
+    let transport = pair_writing(&w, record("lab", "https://lab.example.com"));
     let err = block_on(w.fleets.add(
         &transport,
         &standalone(),
@@ -765,6 +796,30 @@ fn removing_a_fleet_stops_it_and_forgets_its_token_and_row() {
 }
 
 #[test]
+fn a_remove_the_keychain_refuses_keeps_the_fleet_listed_to_try_again() {
+    let tokens = Arc::new(Tokens {
+        failing: Some("keychain locked".into()),
+        ..Tokens::default()
+    });
+    let w = world(&[record("company", "https://fleet.papayapos.dev")], tokens);
+    let err = w.fleets.remove("company").unwrap_err();
+    assert_eq!(err.code, codes::E_IO);
+    let listed = w.fleets.list(&standalone());
+    let company = listed
+        .iter()
+        .find(|f| f.id == "company")
+        .expect("still listed");
+    assert!(
+        company
+            .unavailable
+            .as_deref()
+            .is_some_and(|u| u.starts_with("remove did not finish")),
+        "{company:?}"
+    );
+    assert_eq!(read_records(&w.store).unwrap().len(), 1, "the row stays");
+}
+
+#[test]
 fn the_primary_cannot_be_removed_here() {
     let w = world(&[], Tokens::with(&[]));
     assert_eq!(w.fleets.remove(PRIMARY).unwrap_err().code, codes::E_INVALID);
@@ -821,6 +876,17 @@ fn every_fleet_scoped_command_selects_and_no_other_takes_a_fleet() {
             include_str!("../commands/env_vars.rs"),
         ),
         ("commands/pages.rs", include_str!("../commands/pages.rs")),
+        // Settings › Company per fleet.
+        ("commands/orgs.rs", include_str!("../commands/orgs.rs")),
+        (
+            "commands/org_devices.rs",
+            include_str!("../commands/org_devices.rs"),
+        ),
+        (
+            "commands/trackers.rs",
+            include_str!("../commands/trackers.rs"),
+        ),
+        ("commands/assets.rs", include_str!("../commands/assets.rs")),
     ];
     for name in FLEET_SCOPED {
         let body = files
@@ -857,6 +923,31 @@ fn every_fleet_scoped_command_selects_and_no_other_takes_a_fleet() {
                     "{file}::{name} takes a fleet but is not in FLEET_SCOPED"
                 );
             }
+        }
+    }
+}
+
+/// Settings › Company acts on whichever fleet its picker names: every
+/// command its resources (Organisations, Devices, People, Groups) list, run
+/// or preview through must route by `fleet`, or a write meant for an extra
+/// fleet's hub would be refused by the frontend (`resources.ts::fleetArgs`)
+/// rather than reach it — and a new action added to one of them later must
+/// join `FLEET_SCOPED` with it.
+#[test]
+fn every_company_resource_command_is_fleet_scoped() {
+    use fleet_core::pages::resources::resource;
+    for id in ["org", "device", "person", "group"] {
+        let r = resource(id).unwrap_or_else(|| panic!("no resource {id}"));
+        let mut names = vec![r.list];
+        for a in r.actions() {
+            names.push(a.command);
+            names.extend(a.preview);
+        }
+        for name in names {
+            assert!(
+                FLEET_SCOPED.contains(&name),
+                "{id}: {name} is not fleet-scoped, so the Company page cannot send it to an extra fleet"
+            );
         }
     }
 }

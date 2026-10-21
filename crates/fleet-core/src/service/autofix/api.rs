@@ -2,7 +2,7 @@
 //! one shape for both, so the panel, the `fix` card and Control read the
 //! same thing.
 
-use super::apply::body_of;
+use super::apply::{auto_next_at_of, body_of};
 use super::{ClientAction, Fix};
 use crate::ipc_error::{codes, IpcError};
 use crate::store::{AutofixRow, Store};
@@ -41,6 +41,16 @@ pub struct FindingView {
     pub fix: Option<Fix>,
     #[serde(default)]
     pub action: Option<ClientAction>,
+    /// Whether fleet will try the fix by itself: `false` when it will not
+    /// (no safe automatic fix, automatic fixes off or paused, its tries for
+    /// the last 24 h spent). Set by [`list`] and [`get`]; `None` from a hub
+    /// older than the field. A bool, not only `auto_next_at`, because the
+    /// MCP list strips nulls.
+    #[serde(default)]
+    pub auto_runs: Option<bool>,
+    /// When it next tries, when `auto_runs`: now, or once the retry gap ends.
+    #[serde(default)]
+    pub auto_next_at: Option<i64>,
 }
 
 impl From<&AutofixRow> for FindingView {
@@ -67,8 +77,19 @@ impl From<&AutofixRow> for FindingView {
                 .unwrap_or_default(),
             action: body.as_ref().and_then(|b| b.action.clone()),
             fix: body.and_then(|b| b.fix),
+            auto_runs: None,
+            auto_next_at: None,
         }
     }
+}
+
+/// A row as [`FindingView`], with [`FindingView::auto_runs`] and
+/// [`FindingView::auto_next_at`] filled in.
+fn view(s: &Store, r: &AutofixRow, now: i64) -> Result<FindingView, IpcError> {
+    let mut v = FindingView::from(r);
+    v.auto_next_at = auto_next_at_of(s, r, now)?;
+    v.auto_runs = Some(v.auto_next_at.is_some());
+    Ok(v)
 }
 
 /// What a subject names, in words: `host:mercury` → "host mercury".
@@ -103,8 +124,8 @@ pub fn list(
         .live_autofix_findings()?
         .iter()
         .filter(|r| state.is_none_or(|st| r.state == st))
-        .map(FindingView::from)
-        .collect();
+        .map(|r| view(s, r, now))
+        .collect::<Result<_, _>>()?;
     let fixed = s
         .recently_fixed_autofix_findings(now - FIXED_WINDOW_SECS)?
         .iter()
@@ -117,11 +138,11 @@ pub fn list(
     })
 }
 
-pub fn get(s: &Store, id: i64) -> Result<FindingView, IpcError> {
-    s.autofix_finding(id)?
-        .as_ref()
-        .map(FindingView::from)
-        .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, format!("no finding {id}")))
+pub fn get(s: &Store, id: i64, now: i64) -> Result<FindingView, IpcError> {
+    let row = s
+        .autofix_finding(id)?
+        .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, format!("no finding {id}")))?;
+    view(s, &row, now)
 }
 
 /// Later: hide a live finding until `until` (default a day from now).
@@ -139,7 +160,7 @@ pub fn dismiss(s: &Store, id: i64, until: Option<i64>, now: i64) -> Result<Findi
             format!("no live finding {id}"),
         ));
     }
-    get(s, id)
+    get(s, id, now)
 }
 
 #[cfg(test)]
@@ -169,7 +190,7 @@ mod tests {
     fn a_view_carries_the_body_and_the_login_action() {
         let s = Store::open_in_memory().unwrap();
         let id = seed(&s);
-        let v = get(&s, id).unwrap();
+        let v = get(&s, id, 0).unwrap();
         assert_eq!(v.title.as_deref(), Some("t"));
         assert_eq!(v.evidence, vec!["x".to_string()]);
         assert_eq!(v.action, Some(ClientAction::Login { host: "h1".into() }));

@@ -20,6 +20,7 @@ import {
   fixedRecently,
   loadFindings,
   operatorFinding,
+  autoWords,
   stateWords,
   subjectWords,
   type Finding,
@@ -105,6 +106,28 @@ describe('the findings store', () => {
   });
 });
 
+describe('autoWords (review w09-4)', () => {
+  const safe = { summary: 's', changes: [], safety: 'safe' as const, reversible: true, auto: true };
+  it('says when fleet tries again, or that it stopped', () => {
+    expect(autoWords(finding(), 1000)).toBeNull();
+    expect(autoWords(finding({ fix: safe }), 1000)).toContain('unless automatic fixes are off');
+    expect(autoWords(finding({ fix: safe, auto_runs: true, auto_next_at: 1000 }), 1000)).toContain('next check');
+    expect(autoWords(finding({ fix: safe, state: 'apply_failed', attempts: 1, auto_runs: true, auto_next_at: 1600 }), 1000)).toBe(
+      'Fleet tries this fix again by itself in ~10 min.',
+    );
+    expect(autoWords(finding({ fix: safe, state: 'apply_failed', attempts: 3, auto_runs: false }), 1000)).toBe(
+      'Fleet tried this fix 3 times and stopped trying by itself; fix it here.',
+    );
+    expect(autoWords(finding({ fix: safe, auto_runs: false }), 1000)).toContain('automatic fixes are off');
+  });
+
+  it('shows on the card without opening Details', () => {
+    render(FixCard, { props: { finding: finding({ fix: safe, state: 'apply_failed', attempts: 3, auto_runs: false }) } });
+    expect(screen.getByTestId('fix-card-auto').textContent).toContain('3 times');
+    expect(screen.queryByText(/unless automatic fixes are off/)).toBeNull();
+  });
+});
+
 describe('FixCard', () => {
   it('asks first, listing what the fix changes, then applies once', async () => {
     live = [finding()];
@@ -120,6 +143,26 @@ describe('FixCard', () => {
     await waitFor(() => expect(calls.filter((c) => c.cmd === 'autofix_apply')).toEqual([{ cmd: 'autofix_apply', args: { id: 7 } }]));
     await waitFor(() => expect(get(findings)).toHaveLength(0));
     expect(get(fixedRecently).map((f) => f.id)).toEqual([7]);
+  });
+
+  it('review w19-10: the status line is live, and a failed fix states its error once', async () => {
+    const failed = finding({ state: 'apply_failed', last_error: 'boom', attempts: 1 });
+    live = [finding()];
+    await loadFindings();
+    inv.mockImplementation(async (cmd: string, args: unknown) => {
+      calls.push({ cmd, args });
+      if (cmd === 'autofix_findings') return { findings: live, fixed, can_apply: true };
+      if (cmd === 'autofix_apply') return failed;
+      return null;
+    });
+    const r = render(FixCard, { props: { finding: finding({ state: 'verifying' }) } });
+    expect(screen.getByTestId('fix-card-status').getAttribute('role')).toBe('status');
+    await fireEvent.click(screen.getByTestId('fix-card-fix'));
+    await fireEvent.click(await screen.findByTestId('fix-card-confirm'));
+    await waitFor(() => expect(screen.getByTestId('fix-card-failure').textContent).toBe('boom'));
+    await r.rerender({ finding: failed });
+    expect(screen.queryByTestId('fix-card-status')).toBeNull();
+    expect(screen.getAllByText(/boom/)).toHaveLength(1);
   });
 
   it('offers no Fix or Later on a device that may not apply', async () => {

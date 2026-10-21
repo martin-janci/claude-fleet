@@ -9,6 +9,7 @@ A Tauri 2 desktop app for managing long-lived Claude Code sessions in tmux acros
 - **[Chat forms](forms.md)** — a form an agent asks the person in the session's chat.
 - **[Claude accounts](accounts.md)** — which Claude login a session bills, and several logins on one host.
 - **[Work](work-graph.md)** — what each session is working on: tickets and trackers, detection, start and resume, handover, Today, tidy-up, orgs, and every `work.*` setting.
+- **[Decisions (Jev)](decisions.md)** — what fleet's decision engine may suggest or do (experimental, off by default), and every `decide.*` setting.
 - **[Troubleshooting](troubleshooting.md)** — common problems and fixes.
 - **[Windows](windows.md)** — the desktop as a client on Windows: what works, OpenSSH, hub-client mode.
 - **[Control API](control-api.md)** — enable the MCP control server; **[reference](control-api-reference.md)** (generated).

@@ -15,7 +15,9 @@ function deferred<T>() {
   return { promise, resolve };
 }
 const ok = <T>(value: T): Result<T> => ({ ok: true, value });
-const fail = (message: string): Result<never> => ({ ok: false, error: { code: 'E_SSH', message } });
+// Not a transport code: those are shown as errorText's sentence, not as the
+// message these tests follow through the outbox.
+const fail = (message: string): Result<never> => ({ ok: false, error: { code: 'E_INVALID', message } });
 const flush = () => new Promise((r) => setTimeout(r, 0));
 
 /** Deps whose sends are held until the test releases them, one by one. */

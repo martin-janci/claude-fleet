@@ -137,7 +137,7 @@ describe('the watcher’s pane view', () => {
     render(WatchView, { props: { session: makeSession(), access: null } });
     await screen.findByTestId('watch-unavailable');
     expect(screen.queryByTestId('watch-level')).toBeNull();
-    expect(screen.getByTestId('watch-reason').textContent).toContain('no stored token');
+    expect(screen.getByTestId('watch-reason').textContent).toContain("can't use the hub");
   });
 
   // The scrollback is only worth asking for if the reply may carry it: the

@@ -617,6 +617,13 @@ async fn an_image_that_migrates_and_never_gets_ready_is_rolled_back_with_the_bac
     let recovered = r.hub.lock().unwrap().reports.last().cloned().unwrap();
     assert_eq!(recovered.phase, UpdatePhase::Recovered);
     assert_eq!(recovered.detail["data_restored"], json!(true));
+    // The reason survives the recovery (review w26-2): the hub keeps the
+    // last report's error.
+    assert!(
+        recovered.error.as_deref().is_some_and(|e| !e.is_empty()),
+        "{:?}",
+        recovered.error
+    );
     assert!(r.phases().contains(&"failed"));
 }
 
@@ -635,6 +642,38 @@ async fn when_the_previous_build_does_not_come_back_either_it_stops_for_an_opera
     assert_eq!(o, Outcome::Blocked);
     r.u.clear();
     assert_eq!(r.u.state.phase, UpdatePhase::Idle);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_clear_from_another_process_reaches_the_running_loop() {
+    let mut r = rig(Behaviour::CrashOnStart, 140);
+    r.world.lock().unwrap().images[0].breaks_after_starts = Some(1);
+    r.decide(automatic("0.5.4", Some(140)));
+    let (o, _) = r.u.tick().await;
+    assert!(matches!(o, Outcome::RollbackFailed(_)), "{o:?}");
+    assert!(r
+        .u
+        .state
+        .bad
+        .is_bad(&Version::new(0, 5, 4), Some("sha256:hub-0.5.4")));
+
+    // `fleet-updater clear` in its own process: it rewrites state.json and
+    // leaves the marker; this loop still holds RollbackFailed in memory.
+    let mut on_disk = State::load(&r.u.cfg.state_dir).unwrap();
+    on_disk.phase = UpdatePhase::Idle;
+    on_disk.bad.clear();
+    on_disk.save(&r.u.cfg.state_dir).unwrap();
+    r.u.request_clear().unwrap();
+
+    let (o, _) = r.u.tick().await;
+    assert_ne!(o, Outcome::Blocked);
+    assert_ne!(r.u.state.phase, UpdatePhase::RollbackFailed);
+    // The loop's next save does not write the old bad list back.
+    let saved = State::load(&r.u.cfg.state_dir).unwrap();
+    assert!(!saved
+        .bad
+        .is_bad(&Version::new(0, 5, 4), Some("sha256:hub-0.5.4")));
+    assert!(!r.u.cfg.state_dir.join(CLEAR_FILE).exists());
 }
 
 #[tokio::test(start_paused = true)]

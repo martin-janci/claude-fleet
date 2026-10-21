@@ -756,6 +756,36 @@ impl Store {
         rows.collect()
     }
 
+    /// How many actions are in `state`, uncapped: `status` lists at most
+    /// [`crate::service::agents::admin::STATUS_PENDING_MAX`] pending ones,
+    /// and the Inbox badge counts this.
+    pub fn count_agent_actions(&self, state: &str) -> Result<u64, rusqlite::Error> {
+        self.conn.query_row(
+            "SELECT COUNT(*) FROM agent_actions WHERE state = ?1",
+            params![state],
+            |r| r.get::<_, i64>(0).map(|n| n as u64),
+        )
+    }
+
+    /// The actions a person approved that were carried out (`executed`,
+    /// with what they made in `error`) or failed since `since`, newest
+    /// first: what the Inbox shows after Approve. A rule's own (`act`)
+    /// actions are left out.
+    pub fn recent_decided_agent_actions(
+        &self,
+        since: i64,
+        limit: usize,
+    ) -> Result<Vec<AgentActionRow>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {ACTION_COLS} FROM agent_actions \
+             WHERE state IN ('executed', 'failed') AND executed_at >= ?1 \
+               AND decided_by IS NOT NULL AND decided_by NOT LIKE 'rule:%' \
+             ORDER BY executed_at DESC, id DESC LIMIT ?2"
+        ))?;
+        let rows = stmt.query_map(params![since, limit as i64], action_row)?;
+        rows.collect()
+    }
+
     /// A person's answer to a pending action: `approved` or `rejected`.
     /// Only a `pending` action changes; the answer is the row as it is
     /// afterwards, or `None` when no action has that id.
@@ -1056,5 +1086,48 @@ mod tests {
             (failed.error.as_deref(), failed.executed_at),
             (Some("422"), Some(1400))
         );
+    }
+
+    #[test]
+    fn only_a_claim_older_than_the_cutoff_is_failed_as_abandoned() {
+        let s = Store::open_in_memory().unwrap();
+        let rid = s.grant_agent_rule(&rule("review", "gh:o/r")).unwrap();
+        s.record_agent_poll(rid, 1000, None, &[job(rid, "gh:o/r#1", "k1")])
+            .unwrap();
+        let jid = s.list_agent_jobs(None, 1).unwrap()[0].id;
+        let claimed = s
+            .insert_approved_agent_action(jid, "post_review", "{}", "rule:act", 1000)
+            .unwrap();
+        let waiting = s
+            .insert_approved_agent_action(jid, "post_review", "{}", "rule:act", 1000)
+            .unwrap();
+        assert!(s.claim_agent_action(claimed, 2000).unwrap());
+        let state = |id: i64| {
+            let a = s
+                .list_agent_actions(None, 10)
+                .unwrap()
+                .into_iter()
+                .find(|a| a.id == id)
+                .unwrap();
+            (a.state, a.error)
+        };
+
+        assert_eq!(s.fail_abandoned_agent_actions(2000).unwrap(), 0);
+        assert_eq!(
+            state(claimed),
+            ("approved".into(), None),
+            "claimed at the cutoff"
+        );
+        assert_eq!(s.fail_abandoned_agent_actions(2001).unwrap(), 1);
+        let (st, err) = state(claimed);
+        assert_eq!(st, "failed");
+        assert!(err.unwrap().contains("check whether it ran"));
+        assert_eq!(
+            state(waiting),
+            ("approved".into(), None),
+            "an unclaimed action is never abandoned"
+        );
+        assert_eq!(s.fail_abandoned_agent_actions(i64::MAX).unwrap(), 0);
+        assert_eq!(state(waiting).0, "approved");
     }
 }

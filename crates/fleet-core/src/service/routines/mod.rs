@@ -58,6 +58,11 @@
 //! prompt saying how far the run may go (report, ask before push, push). A
 //! failed run carries an error code, read as a named fix ([`fix`]).
 //!
+//! **Memory** ([`memory`], migration 204): a routine may keep notebooks in
+//! the fleet's database, its own and its project's, that each run reads
+//! under its prompt and rewrites with a `<routine-memory>` block in its
+//! reply; `memory_auto` also notes each finished run there.
+//!
 //! **Debugging** ([`debug`], migration 186): every scheduler decision is a
 //! row of the routine's trace (`routine_decisions`, the newest 200), the
 //! event fires dropped and the events filtered out included, and
@@ -68,6 +73,7 @@ pub mod backoff;
 pub mod cron;
 pub mod debug;
 pub mod fix;
+pub mod memory;
 pub mod outcome;
 pub mod tick;
 pub mod trace;
@@ -247,6 +253,15 @@ pub struct RoutineInput {
     // 0 report only | 1 ask before push | 2 push (the default).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub autonomy: Option<i64>,
+    // Routine memory (migration 204; docs/control-api.md): the notebooks
+    // its runs read and may rewrite, routine | project | both; "" = none,
+    // absent = none for a new routine and unchanged for a change (a client
+    // that predates memory keeps a routine's).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory: Option<String>,
+    // The fleet notes each finished run in the notebook. Needs memory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_auto: Option<bool>,
 }
 
 /// The shortest time cap: a minute.
@@ -452,6 +467,7 @@ fn check(
     s: &Store,
     scope: &ViewScope,
     input: &RoutineInput,
+    before: Option<&RoutineRow>,
 ) -> Result<(RoutineFields, Option<i64>), IpcError> {
     let invalid = |m: String| IpcError::new(codes::E_INVALID, m);
     let name = input.name.trim();
@@ -553,6 +569,7 @@ fn check(
         }
     }
     let guards = guards(s, scope, input, org)?;
+    let (memory_mode, memory_auto) = memory::check_input(input, before)?;
     let overlap = input.overlap.as_deref().unwrap_or("skip");
     if !ROUTINE_OVERLAPS.contains(&overlap) {
         return Err(invalid(format!(
@@ -583,6 +600,8 @@ fn check(
             fallback_host: guards.fallback_host,
             retry_once: guards.retry_once,
             autonomy: guards.autonomy,
+            memory: memory_mode,
+            memory_auto,
         },
         org,
     ))
@@ -889,7 +908,7 @@ pub fn preview(
 ) -> Result<RoutinePreview, IpcError> {
     let s = lock(store)?;
     let before = id.map(|id| changeable(&s, scope, id)).transpose()?;
-    let problem = match check(&s, scope, input) {
+    let problem = match check(&s, scope, input, before.as_ref()) {
         Ok((_, org)) if before.as_ref().is_some_and(|b| b.org_id != org) => {
             Some(STAYS_IN_ORG.to_string())
         }
@@ -945,7 +964,8 @@ pub fn preview(
 }
 
 /// `routines { action: save, routine, routine_id? }`: without `routine_id`
-/// a new routine, the caller's; with it, a change of every field.
+/// a new routine, the caller's; with it, a change of every field but an
+/// absent `memory`, which keeps the routine's.
 pub fn save(
     store: &Mutex<Store>,
     scope: &ViewScope,
@@ -969,13 +989,15 @@ pub fn save(
                     ))
                 }
             };
-            let (f, org) = check(&s, scope, input)?;
+            let (f, org) = check(&s, scope, input, None)?;
             let cursor = start_cursor(&s, f.event.as_deref())?;
             s.insert_routine(org, owner, &f, next_fire(&f, now), cursor)
         }
         Some(id) => {
             let before = changeable(&s, scope, id)?;
-            let (f, org) = check(&s, scope, input)?;
+            // A change without `memory` keeps the routine's
+            // (`memory::check_input`).
+            let (f, org) = check(&s, scope, input, Some(&before))?;
             if org != before.org_id {
                 return Err(IpcError::new(codes::E_INVALID, STAYS_IN_ORG));
             }
@@ -1163,6 +1185,7 @@ pub(crate) fn record_skip(
         error_code: None,
         host_alias: None,
     })?;
+    tick::note_dropped_retry(s, r, &run, now);
     let checks = debug::fire_checks(s, r, now).unwrap_or_default();
     let mut steps = trace::opening(r, &run, &checks, Some(reason), now);
     steps.push(trace::settle_step("skipped", Some(reason), None, 0, now));

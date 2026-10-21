@@ -1032,3 +1032,60 @@ fn a_run_goes_to_the_best_host_inside_its_grant() {
     assert_eq!(start.host_alias.as_deref(), Some("mac"));
     assert_eq!(start.profile, None);
 }
+
+/// Mission #6 (2026-10-20): a run stuck open for over an hour braked the
+/// mission, and every resume braked it again on the same stale run before
+/// the tick tried a step. A person's resume restarts the window.
+#[tokio::test]
+async fn a_persons_resume_restarts_the_no_progress_window() {
+    let fx = fixture();
+    let item = member(&fx, "a");
+    let now = now_unix();
+    let stale = now - 2 * fx.m.policy.no_progress_secs as i64;
+    {
+        let s = lock(&fx.deps.store).unwrap();
+        crate::service::work::run::record_headless_run(&s, "x", item, 1, "implement").unwrap();
+        let c = s.conn_for_test();
+        c.execute("UPDATE tasks SET created_at = ?1, started_at = ?1", [stale])
+            .unwrap();
+        c.execute(
+            "UPDATE orchestration_events SET at = ?1 WHERE kind = 'state'",
+            [stale],
+        )
+        .unwrap();
+    }
+    let braked = || {
+        lock(&fx.deps.store)
+            .unwrap()
+            .conn_for_test()
+            .query_row(
+                "SELECT COUNT(*) FROM orchestration_events \
+                 WHERE orchestration_project_id = ?1 AND kind = 'no_progress'",
+                [fx.m.id],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap()
+    };
+    tick_mission(&fx.deps, fx.m.id, now).await.unwrap();
+    assert_eq!(mission_now(&fx).state, "paused", "the stale run brakes it");
+    assert_eq!(braked(), 1);
+
+    missions::set_state(
+        &WorkLinkArgs {
+            status: Some("active".into()),
+            ..by_id("mission_state", fx.m.id)
+        },
+        &fx.deps.store,
+        &fx.me,
+    )
+    .unwrap();
+    tick_mission(&fx.deps, fx.m.id, now_unix()).await.unwrap();
+    assert_eq!(mission_now(&fx).state, "active", "the resume gets a window");
+    assert_eq!(braked(), 1);
+
+    // The window still closes: an hour on with nothing moving brakes again.
+    let later = now_unix() + fx.m.policy.no_progress_secs as i64 + 1;
+    tick_mission(&fx.deps, fx.m.id, later).await.unwrap();
+    assert_eq!(mission_now(&fx).state, "paused");
+    assert_eq!(braked(), 2);
+}

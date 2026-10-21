@@ -1,5 +1,6 @@
 import { derived } from 'svelte/store';
 import { createRowStore } from './row_store';
+import { createListLoad } from './list_load';
 import { invokeCmd, invokeCmdAbortable, type Result } from './result';
 
 export interface AccountRow {
@@ -55,9 +56,12 @@ export function accountEmailTier(a: AccountRow | null): string {
 /** O(1) uuid -> account lookup, derived once per `accounts` change. */
 export const accountByUuid = derived(accounts, ($a) => new Map($a.map((a) => [a.uuid, a])));
 
+/** Review w17-1: whether the accounts list has loaded (see list_load.ts). */
+export const accountsLoad = createListLoad();
+
 export async function loadAccounts(): Promise<Result<AccountRow[]>> {
   const token = rows.beginList();
-  const r = await invokeCmd<AccountRow[]>('list_accounts');
+  const r = await accountsLoad.track(invokeCmd<AccountRow[]>('list_accounts'));
   if (r.ok) rows.applyList(r.value, token);
   return r;
 }

@@ -60,3 +60,14 @@ export function countdown(msLeft: number): string {
   const s = Math.max(0, Math.ceil(msLeft / 1000));
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
 }
+
+/** The countdown in words for a screen reader (review w19-1): it changes
+ *  only at each whole minute and once at ten seconds, so a live region
+ *  holding it is not re-announced every second the way `countdown` is. */
+export function spokenCountdown(msLeft: number): string {
+  const s = Math.max(0, Math.ceil(msLeft / 1000));
+  if (s <= 10) return 'a few seconds';
+  if (s <= 60) return 'under a minute';
+  const m = Math.ceil(s / 60);
+  return `about ${m} minutes`;
+}

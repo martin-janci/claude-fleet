@@ -95,6 +95,7 @@ fn findings_mark_what_could_not_be_checked() {
             profile: Some("work".into()),
             account_uuid: "u".into(),
             used_pct: Some(97.0),
+            signed_out: false,
         },
         email: None,
         over: true,

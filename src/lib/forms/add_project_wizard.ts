@@ -5,6 +5,7 @@
 import { addProject, type AddProjectSource } from '../projects';
 import type { ChatFormOutcome } from './ChatForm.svelte';
 import type { Values } from './forms';
+import { errorText } from '../error_copy';
 
 /** The host and the sources the answers ask for. */
 export function addProjectSources(values: Values): { host: string; sources: AddProjectSource[] } {
@@ -32,7 +33,7 @@ export async function runAddProject(values: Values): Promise<ChatFormOutcome> {
     const r = await addProject(host, s);
     if (!r.ok) {
       const before = added.length ? `Added ${added.join(', ')}. ` : '';
-      return { ok: false, error: `${before}${r.error.message}` };
+      return { ok: false, error: `${before}${errorText(r.error)}` };
     }
     added.push(`${r.value.project.owner}/${r.value.project.repo}`);
   }

@@ -9,6 +9,10 @@
 //! security boundary, so the hub lets only its owner's own trusted `full`
 //! device change them — never a host, an org-bound device or a colleague's.
 //! Standalone, they run `service::org_admin` on this desktop's store.
+//! Every command Settings › Organisations uses is fleet-scoped
+//! (`backend::fleets::FLEET_SCOPED`): `fleet` names an extra fleet, whose
+//! hub then decides the same way (`org_suggestions` is not: it reads the
+//! primary's sessions).
 
 use crate::backend::FleetBackend;
 use fleet_core::ipc_error::IpcError;
@@ -187,9 +191,12 @@ fn decode<T: serde::de::DeserializeOwned>(v: serde_json::Value) -> Result<T, Ipc
 #[tauri::command]
 pub async fn add_org(
     backend: State<'_, Arc<FleetBackend>>,
+    fleet: Option<String>,
+    fleets: State<'_, Arc<crate::backend::fleets::Fleets>>,
     args: AddOrgArgs,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<OrgRow, IpcError> {
+    let backend = fleets.select(backend.inner(), fleet.as_deref())?;
     decode(
         routed::add_org(
             &backend,
@@ -208,9 +215,12 @@ pub async fn add_org(
 #[tauri::command]
 pub async fn update_org(
     backend: State<'_, Arc<FleetBackend>>,
+    fleet: Option<String>,
+    fleets: State<'_, Arc<crate::backend::fleets::Fleets>>,
     args: UpdateOrgArgs,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<OrgRow, IpcError> {
+    let backend = fleets.select(backend.inner(), fleet.as_deref())?;
     decode(
         routed::update_org(
             &backend,
@@ -237,9 +247,12 @@ pub async fn update_org(
 #[tauri::command]
 pub async fn remove_org(
     backend: State<'_, Arc<FleetBackend>>,
+    fleet: Option<String>,
+    fleets: State<'_, Arc<crate::backend::fleets::Fleets>>,
     args: OrgIdArgs,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<(), IpcError> {
+    let backend = fleets.select(backend.inner(), fleet.as_deref())?;
     routed::remove_org(
         &backend,
         &store,
@@ -255,9 +268,12 @@ pub async fn remove_org(
 #[tauri::command]
 pub async fn add_org_rule(
     backend: State<'_, Arc<FleetBackend>>,
+    fleet: Option<String>,
+    fleets: State<'_, Arc<crate::backend::fleets::Fleets>>,
     args: AddOrgRuleArgs,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<OrgRuleRow, IpcError> {
+    let backend = fleets.select(backend.inner(), fleet.as_deref())?;
     decode(routed::add_org_rule(&backend, &store, args.admin_args("add_rule")?).await?)
 }
 
@@ -266,9 +282,12 @@ pub async fn add_org_rule(
 #[tauri::command]
 pub async fn org_rule_preview(
     backend: State<'_, Arc<FleetBackend>>,
+    fleet: Option<String>,
+    fleets: State<'_, Arc<crate::backend::fleets::Fleets>>,
     args: AddOrgRuleArgs,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<serde_json::Value, IpcError> {
+    let backend = fleets.select(backend.inner(), fleet.as_deref())?;
     routed::org_rule_preview(&backend, &store, args.admin_args("rule_preview")?).await
 }
 
@@ -276,9 +295,12 @@ pub async fn org_rule_preview(
 #[tauri::command]
 pub async fn add_org_project(
     backend: State<'_, Arc<FleetBackend>>,
+    fleet: Option<String>,
+    fleets: State<'_, Arc<crate::backend::fleets::Fleets>>,
     args: AddOrgProjectArgs,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<serde_json::Value, IpcError> {
+    let backend = fleets.select(backend.inner(), fleet.as_deref())?;
     routed::add_org_project(
         &backend,
         &store,
@@ -297,9 +319,12 @@ pub async fn add_org_project(
 #[tauri::command]
 pub async fn remove_org_project(
     backend: State<'_, Arc<FleetBackend>>,
+    fleet: Option<String>,
+    fleets: State<'_, Arc<crate::backend::fleets::Fleets>>,
     args: ProjectIdArgs,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<serde_json::Value, IpcError> {
+    let backend = fleets.select(backend.inner(), fleet.as_deref())?;
     routed::remove_org_project(
         &backend,
         &store,
@@ -315,9 +340,12 @@ pub async fn remove_org_project(
 #[tauri::command]
 pub async fn revoke_org_share(
     backend: State<'_, Arc<FleetBackend>>,
+    fleet: Option<String>,
+    fleets: State<'_, Arc<crate::backend::fleets::Fleets>>,
     args: OrgShareArgs,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<serde_json::Value, IpcError> {
+    let backend = fleets.select(backend.inner(), fleet.as_deref())?;
     routed::revoke_org_share(
         &backend,
         &store,
@@ -334,9 +362,12 @@ pub async fn revoke_org_share(
 #[tauri::command]
 pub async fn narrow_org_share(
     backend: State<'_, Arc<FleetBackend>>,
+    fleet: Option<String>,
+    fleets: State<'_, Arc<crate::backend::fleets::Fleets>>,
     args: OrgShareArgs,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<serde_json::Value, IpcError> {
+    let backend = fleets.select(backend.inner(), fleet.as_deref())?;
     routed::narrow_org_share(
         &backend,
         &store,
@@ -354,9 +385,12 @@ pub async fn narrow_org_share(
 #[tauri::command]
 pub async fn revoke_org_member_grants(
     backend: State<'_, Arc<FleetBackend>>,
+    fleet: Option<String>,
+    fleets: State<'_, Arc<crate::backend::fleets::Fleets>>,
     args: OrgPersonArgs,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<serde_json::Value, IpcError> {
+    let backend = fleets.select(backend.inner(), fleet.as_deref())?;
     routed::revoke_org_member_grants(
         &backend,
         &store,
@@ -372,9 +406,12 @@ pub async fn revoke_org_member_grants(
 #[tauri::command]
 pub async fn remove_org_rule(
     backend: State<'_, Arc<FleetBackend>>,
+    fleet: Option<String>,
+    fleets: State<'_, Arc<crate::backend::fleets::Fleets>>,
     args: RuleIdArgs,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<(), IpcError> {
+    let backend = fleets.select(backend.inner(), fleet.as_deref())?;
     routed::remove_org_rule(
         &backend,
         &store,
@@ -390,9 +427,12 @@ pub async fn remove_org_rule(
 #[tauri::command]
 pub async fn assign_host_org(
     backend: State<'_, Arc<FleetBackend>>,
+    fleet: Option<String>,
+    fleets: State<'_, Arc<crate::backend::fleets::Fleets>>,
     args: AssignHostOrgArgs,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<(), IpcError> {
+    let backend = fleets.select(backend.inner(), fleet.as_deref())?;
     let action = if args.org_id.is_some() {
         "assign_host"
     } else {
@@ -414,9 +454,12 @@ pub async fn assign_host_org(
 #[tauri::command]
 pub async fn assign_tracker_org(
     backend: State<'_, Arc<FleetBackend>>,
+    fleet: Option<String>,
+    fleets: State<'_, Arc<crate::backend::fleets::Fleets>>,
     args: AssignTrackerOrgArgs,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<TrackerRow, IpcError> {
+    let backend = fleets.select(backend.inner(), fleet.as_deref())?;
     decode(
         routed::assign_tracker_org(
             &backend,
@@ -444,9 +487,12 @@ pub struct SetOrgSettingArgs {
 #[tauri::command]
 pub async fn set_org_setting(
     backend: State<'_, Arc<FleetBackend>>,
+    fleet: Option<String>,
+    fleets: State<'_, Arc<crate::backend::fleets::Fleets>>,
     args: SetOrgSettingArgs,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<serde_json::Value, IpcError> {
+    let backend = fleets.select(backend.inner(), fleet.as_deref())?;
     routed::set_org_setting(
         &backend,
         &store,
@@ -475,9 +521,12 @@ pub struct SetOrgMemberArgs {
 #[tauri::command]
 pub async fn set_org_member(
     backend: State<'_, Arc<FleetBackend>>,
+    fleet: Option<String>,
+    fleets: State<'_, Arc<crate::backend::fleets::Fleets>>,
     args: SetOrgMemberArgs,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<serde_json::Value, IpcError> {
+    let backend = fleets.select(backend.inner(), fleet.as_deref())?;
     routed::set_org_member(
         &backend,
         &store,
@@ -509,9 +558,12 @@ pub struct RemoveOrgMemberArgs {
 #[tauri::command]
 pub async fn remove_org_member(
     backend: State<'_, Arc<FleetBackend>>,
+    fleet: Option<String>,
+    fleets: State<'_, Arc<crate::backend::fleets::Fleets>>,
     args: RemoveOrgMemberArgs,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<serde_json::Value, IpcError> {
+    let backend = fleets.select(backend.inner(), fleet.as_deref())?;
     routed::remove_org_member_choosing(&backend, &store, args).await
 }
 
@@ -526,9 +578,12 @@ pub struct OrgMemberArgs {
 #[tauri::command]
 pub async fn org_member_grants(
     backend: State<'_, Arc<FleetBackend>>,
+    fleet: Option<String>,
+    fleets: State<'_, Arc<crate::backend::fleets::Fleets>>,
     args: OrgMemberArgs,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<serde_json::Value, IpcError> {
+    let backend = fleets.select(backend.inner(), fleet.as_deref())?;
     routed::org_member_grants(
         &backend,
         &store,
@@ -543,11 +598,17 @@ pub async fn org_member_grants(
 
 // --- reads (routed) ------------------------------------------------------------
 
+/// Every org this caller may read. `fleet` picks which hub answers (multi-hub
+/// Phase 3a: the sidebar's Organisation filter lists each extra fleet's orgs
+/// under that fleet's badge); that hub still answers for its own connection.
 #[tauri::command]
 pub async fn list_orgs(
+    fleet: Option<String>,
     backend: State<'_, Arc<FleetBackend>>,
+    fleets: State<'_, Arc<crate::backend::fleets::Fleets>>,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<Vec<OrgDetail>, IpcError> {
+    let backend = fleets.select(backend.inner(), fleet.as_deref())?;
     routed::list_orgs(&backend, &store).await
 }
 

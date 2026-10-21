@@ -219,8 +219,8 @@ docker compose exec fleet-hub fleet-hub --version    # fleet-hub 0.2.41
 docker compose images fleet-hub                      # the tag and image id in use
 ```
 
-Over the network, and only with the master token, `fleet_health` reports the
-same string in its `version` field (see the `curl` under *Setup* above). To see
+Over the network, with any client token (a readonly one is enough),
+`fleet_health` reports the same string in its `version` field (see the `curl` under *Setup* above). To see
 which exact image — not just which version — is running:
 
 ```bash
@@ -2239,6 +2239,17 @@ pairs a phone with a one-time code and QR (`pair_device`, a person's device
 only — peer links and updater tokens stay `fleet-hub pair --mode`), and
 never revokes, untrusts, binds or hands over the device it is used from.
 `fleet-hub org|client|person` stay the operator's side on this machine.
+An org admin's device (one fenced to the org they administer) gets the
+same pages for that org: its own org changes, the others are shown, and
+Add organisation, + Person and a person's name stay a fleet admin's. The
+page decides what to offer from the hub's own answers — `setting_proposals`
+is served only to a fleet admin's unbound device, `list_devices` marks this
+device's row with its trust and mode — and says why the rest is read-only,
+naming the `fleet-hub client trust <name>` it takes. With a second fleet
+added (Settings › Hub & sync › Fleets) a Fleet picker routes the Company
+pages to that hub, judged by that hub (every command their resources
+list, run or preview is fleet-scoped, with `list_trackers` and
+`catalog_list_catalogs` for their selects).
 
 Organisations are optional. With none, the desktop's scope selector offers
 the GitHub owners of the live sessions (only when there are two or more) and
@@ -2327,7 +2338,7 @@ What else to know:
 The hub (or a standalone desktop) plans tidy-up on every GC sweep
 (`gc.sweep_interval_secs`) and on request (`work { action: "tidy" }`, the
 desktop's "Tidy up · n"). Suggestions only, by default. The settings, all
-under Settings → Work → Lifecycle or `set_fleet_setting`:
+under Settings → Work & trackers → Tidy-up or `set_fleet_setting`:
 
 | Setting | Default | Meaning |
 |---|---|---|
@@ -2580,7 +2591,12 @@ session card's `is_controller`, `tags`, `turn_seq`, `safe_kill_state`,
 `started_at`, `last_turn_at`, `last_stop_at`, `usage_cost_micros`,
 `usage_model`, plus the work graph's `work` (the row's primary work link)
 and the PR fact, CI check count and Switch account's `pr_url`,
-`pr_evidence` and `claude_profile`. The first cut — the list's sixteen alone — measured
+`pr_evidence` and `claude_profile`, and the Pinned section's `pinned_at`,
+Done-unread's `last_viewed_at`, Control's threads' `origin` / `origin_ref`,
+`agent`, `lost_reason`, `form_draft`, `parent_session_id` and `worktree_id`
+(review wave 24: the phone's re-list replaces its rows with this view, so a
+column it reads but the view drops resets on every reconnect;
+`views.rs` lists them all). The first cut — the list's sixteen alone — measured
 **46 990 → 16 733 B of JSON (−64 %), 7 712 → 3 023 B gzipped** on the same
 44-session fleet; the card's nine are short scalars and do not change that
 picture. The first cut left the card's columns out, and a phone that
@@ -3906,12 +3922,6 @@ Settings → **Hub & sync** → *Fleets* → *Add a hub*: run
   you. Control's Hosts view and the status bar's host chip list the extra
   fleets' hosts' CPU, memory and disk too, and the chip follows an open
   extra fleet session's host.
-- **The sidebar's filters reach the extra fleets.** The Machine filter
-  offers each shown fleet's hosts (`work · mercury`), and search,
-  needs-you, last active, agent and background agents narrow the extra
-  fleets' groups as they do this window's list. The org scope, the work
-  filters and the Mine / Shared tabs stay with this window's own rows: they
-  read its ids, which an extra fleet's collide with.
 - **One hub added twice is spotted.** Each hub names its fleet id in the
   `/events` `ready` frame (`fleet_id`, minted at `serve` start; `null` until
   then). An extra fleet whose id is the primary's, or an earlier extra
@@ -3922,6 +3932,33 @@ Settings → **Hub & sync** → *Fleets* → *Add a hub*: run
   prompt's untrusted-sender line that is a federation address
   (`<fleet-uuid>/session/<host>/<name>`) reads `company › mac/dev-x` when
   this window shows that fleet, and opens that session.
+
+- **The sidebar's filters know every fleet** (Phase 3a). *Machine* and
+  *Organisation* list each shown fleet's machines and orgs in a group of
+  their own, under the fleet's label and colour (`Machine · Papaya POS
+  (hub)`), because a host alias or an org id means something on one hub
+  only. A choice belongs to that one fleet: picking a machine or org in one
+  fleet clears the Machine and Organisation choice of every other, and while
+  it stands every other fleet's rows are hidden **with a line saying so** —
+  "1 session on Papaya POS (hub) hidden: the org filter (Org: Papaya POS on
+  rlt) applies to that fleet only · Show every fleet". The fleet switcher
+  wins over both: a choice in a fleet it hides is ignored. Search, Last
+  active, Needs you, Agent and Background agents apply to every fleet alike.
+  Beside another fleet this window's own list sits under its fleet header,
+  which folds, and every fleet's group (background agents included) lists
+  its sessions in the Sessions list, not only in the Inbox.
+
+- **Each fleet carries a profile** (Phase 3b). One human is often a
+  different person on each hub — work on the company's, private on their
+  own. Settings → **Hub & sync** → *Fleets* → *Profiles* shows, per fleet,
+  the person this device is there, its e-mail, the sign-in issuers linked
+  to it, its git identity, and which of its own variables are set (by name:
+  `GH_TOKEN ✓`, `JIRA_API_TOKEN —`; a value never leaves the hub). A label
+  ("Work", "Private") is kept on this desktop only. The fleet switcher's
+  chips carry it, and New session says which profile the session will run
+  as. The hub's side is the read-only `my_profile` tool: the caller's own
+  person only, never anyone else's. A hub without it is read through
+  `my_grants` and `env_vars` instead, without name or sign-in.
 
 Limits (Phase 3): this window's own panes — the full Conversation panel,
 Files, Repo, Rewind and Fork, forms, the session's terminals — are still
@@ -4076,8 +4113,13 @@ deliberately.
   since review round 15 (F21), everything it WRITES into a session as well:
   `send_prompt`, `run_prompt`, `queue_prompt`, and `dispatch_task` to an
   existing worker (the 2026-10-17 review's F2: the autonomy position
-  pre-approves these into a session the operator started or briefed, and a
-  start inside a mission's grant at Autopilot; see `docs/status.md`). An
+  pre-approves these into a session the operator started or briefed and
+  still follows; at Autopilot also a start inside a running mission's live
+  grant; and with session care, `control.session_care`, on by default, a
+  `restart_session` of a session the operator started itself at Within
+  your brief and Autopilot and its `safe_kill_session` at Autopilot; the
+  rest always ask: `guard::operator_must_confirm_with`, see
+  `docs/status.md`). An
   approved call runs on the hub itself and the operator is told in a
   `[fleet] approved: …` note (F1). The toggle lifts none of it; a caller that is not the
   operator client is ungated for the prompts (they are `confirm: false`). On a hub

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { errorText } from '../error_copy';
   // A `stat`, `record`, `table` or `chart` item: reads its data source when
   // shown, again when a page action changes it or a filter changes its
   // params, and formats each value by the column type the source declares
@@ -52,7 +53,7 @@
     loaded = true;
     error = null;
     if (r.ok) data = r.value;
-    else error = r.error.message;
+    else error = errorText(r.error);
   }
 
   // Once when shown, then on every new tick or filter value — by value, so

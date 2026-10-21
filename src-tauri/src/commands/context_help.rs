@@ -84,6 +84,7 @@ pub async fn context_help(
         host: args.host_alias.clone(),
         profile: args.profile.filter(|p| !p.is_empty()),
         model: args.model.unwrap_or_else(|| "haiku".into()),
+        what: "the help",
     };
     let (answer, usage) =
         context_help::ask(&model, args.surface, &args.request, scrollback.as_deref()).await?;

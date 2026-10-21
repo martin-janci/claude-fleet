@@ -9,6 +9,7 @@ import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import SettingsDialog from './SettingsDialog.svelte';
 import { hosts } from './hosts';
 import { hubStatus, STANDALONE, type HubStatus } from './hub';
+import { hubConnection } from './hub_connection';
 import { allDescriptors, bundle } from './pages/testing';
 import { settingProposals, settingsWritable } from './pages/review';
 
@@ -303,7 +304,7 @@ describe('the panels that do not apply to a hub client', () => {
   it('the control API panel is still the reason: it is the hub’s', async () => {
     route();
     render(SettingsDialog, { props: { onClose: () => {} } });
-    expect((await screen.findByTestId('mcp-remote')).textContent).toContain('fleet.example.com');
+    expect((await screen.findByTestId('mcp-remote')).textContent).toContain('The hub runs this fleet’s control API');
     expect(screen.queryByTestId('mcp-enable')).toBeNull();
   });
 
@@ -363,7 +364,7 @@ describe('the Hub section, configured but unavailable', () => {
     route();
     render(SettingsDialog, { props: { onClose: () => {} } });
     const why = await screen.findByTestId('hub-unavailable-reason');
-    expect(why.textContent).toContain('no saved pairing for that hub');
+    expect(why.textContent).toContain("isn't paired with the hub");
     expect(why.textContent).not.toContain('client token');
     expect(why.textContent).toContain('fleet.example.com');
     // The backend's raw reason stays one click away.
@@ -556,9 +557,26 @@ describe('the hub’s settings on a paired desktop (P6)', () => {
     render(SettingsDialog, { props: { onClose: () => {} } });
     await fireEvent.click(await screen.findByTestId('settings-nav-automation'));
     const note = await screen.findByTestId('pages-remote');
-    await waitFor(() => expect(note.textContent).toContain('did not serve its settings'));
+    await waitFor(() => expect(note.textContent).toContain('didn’t send its settings'));
     expect(screen.getByTestId('pages-remote-error').textContent).toContain('not a client-callable tool');
     expect(screen.queryByTestId('setting-row-playbooks.press_enter')).toBeNull();
+  });
+
+  // Review w17-2: a link blip is a failed read with Retry, not "this hub is
+  // too old", and the read runs again when the link comes back.
+  it('a timed-out read says so with Retry, and re-reads when the link returns', async () => {
+    hubConnection.set({ state: 'reconnecting', attempt: 1, retry_in_secs: 2, reason: 'timeout' });
+    const inv = route({ describe_fleet_settings: ipcError('E_HUB_UNREACHABLE', 'hub link is down') });
+    render(SettingsDialog, { props: { onClose: () => {} } });
+    await fireEvent.click(await screen.findByTestId('settings-nav-automation'));
+    const err = await screen.findByTestId('pages-remote-load-error');
+    expect(err.textContent).toContain("Couldn't read the hub's settings");
+    expect(screen.getByTestId('pages-remote').textContent).not.toContain('didn’t send its settings');
+    const reads = () => inv.mock.calls.filter(([c]) => c === 'describe_fleet_settings').length;
+    const before = reads();
+    hubConnection.set({ state: 'connected' });
+    await waitFor(() => expect(reads()).toBeGreaterThan(before));
+    hubConnection.set({ state: 'standalone' });
   });
 });
 
@@ -577,7 +595,7 @@ describe('Settings → Catalogs on a paired desktop', () => {
     await fireEvent.click(await screen.findByTestId('settings-nav-catalogs'));
     const reason = await screen.findByTestId('resource-readonly');
     expect(reason.textContent).toContain('fleet-hub catalog add');
-    expect(reason.textContent).toContain('https://fleet.example.com');
+    expect(reason.textContent).toContain('Ask the hub’s operator');
     await screen.findByRole('option', { name: /acme/ });
     expect(screen.queryByTestId('resource-add')).toBeNull();
     expect(screen.queryByTestId('item-remove-admitted')).toBeNull();
@@ -603,5 +621,30 @@ describe('Settings → Environment on a paired desktop', () => {
     await fireEvent.click(await screen.findByTestId('resource-add'));
     const scope = (await screen.findByTestId('param-env_var.set-scope')) as HTMLSelectElement;
     expect(Array.from(scope.options).map((o) => o.value)).toEqual(['person']);
+  });
+});
+
+// Company per fleet: Settings → Organisations on a paired desktop is gated by
+// the hub's own org_admin rule (`company_access.ts`), not shown read-only
+// whatever the device may do.
+describe('Settings → Company on a paired desktop', () => {
+  it('a trusted fleet admin’s device edits the hub’s orgs; an untrusted one is told the trust command', async () => {
+    hubStatus.set(remote);
+    settingsWritable.set(false);
+    const org = { id: 1, name: 'Acme', created_at: 1, rules: [], hosts: [], trackers: [] };
+    const me = { name: 'laptop', mode: 'full', trusted: true, created_at: 1, catalogs: [], this_device: true };
+    route({ list_orgs: [org], setting_proposals: { can_write: true, proposals: [] }, list_devices: [me] });
+    const { unmount } = render(SettingsDialog, { props: { onClose: () => {} } });
+    await fireEvent.click(await screen.findByTestId('settings-nav-orgs'));
+    expect(await screen.findByTestId('edit-name')).toBeInTheDocument();
+    expect(screen.queryByTestId('resource-readonly')).toBeNull();
+    unmount();
+
+    route({ list_orgs: [org], setting_proposals: { can_write: false, proposals: [] }, list_devices: [{ ...me, trusted: false }] });
+    render(SettingsDialog, { props: { onClose: () => {} } });
+    await fireEvent.click(await screen.findByTestId('settings-nav-orgs'));
+    const reason = await screen.findByTestId('resource-readonly');
+    expect(reason.textContent).toContain('fleet-hub client trust laptop');
+    expect(screen.queryByTestId('edit-name')).toBeNull();
   });
 });

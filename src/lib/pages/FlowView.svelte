@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { errorText } from '../error_copy';
   // Layout L3: a wizard whose steps the backend decides. It shows the step
   // it is given — a title, a sentence, the fields — and posts their values;
   // the answer is the next step, the same step with an error, or done. A
@@ -36,7 +37,7 @@
     const r = await flowStart(flow, prefill);
     busy = false;
     if (r.ok) show(r.value);
-    else error = r.error.message;
+    else error = errorText(r.error);
   });
 
   onDestroy(() => {
@@ -57,7 +58,7 @@
     const r = await flowSubmit(step.flow_id, sent);
     busy = false;
     if (!r.ok) {
-      error = r.error.message;
+      error = errorText(r.error);
       return;
     }
     if (r.value.state === 'done') {
@@ -74,7 +75,7 @@
     const r = await flowBack(step.flow_id);
     busy = false;
     if (r.ok) show(r.value);
-    else error = r.error.message;
+    else error = errorText(r.error);
   }
 </script>
 
