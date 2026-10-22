@@ -6,15 +6,24 @@ const NONCE: &str = "abcd1234";
 
 #[test]
 fn the_instruction_names_the_marker_inline_and_asks_for_the_block() {
-    let i = run_instruction(NONCE);
+    let i = run_instruction(7, NONCE);
     assert!(
         i.contains("FLEET_TASK_DONE_abcd1234 on its own line"),
         "{i}"
     );
     assert!(i.contains("```json"), "{i}");
+    // The tool comes first, with the ids it needs; the marker is the fallback.
+    assert!(
+        i.find("task_report").unwrap() < i.find("FLEET_TASK_DONE_").unwrap(),
+        "{i}"
+    );
+    assert!(
+        i.contains("task_id 7") && i.contains("nonce \"abcd1234\""),
+        "{i}"
+    );
     // The echo of the prompt is never a marker line.
     assert_eq!(
-        after_marker(&with_run_instruction("do it", NONCE), NONCE),
+        after_marker(&with_run_instruction("do it", 7, NONCE), NONCE),
         None
     );
 }
@@ -193,7 +202,7 @@ fn a_report_stored_before_the_new_keys_still_reads() {
 
 #[test]
 fn the_instruction_names_every_key_the_parser_reads() {
-    let text = run_instruction("abc");
+    let text = run_instruction(7, "abc");
     for key in [
         "summary",
         "outcome",

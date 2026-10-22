@@ -620,7 +620,8 @@ Index by area (names only; see the reference for details):
 - **Orchestration** — `wait_for_session`, `session_transcript`,
   `session_conversation`, `session_tool_detail`, `session_summary_since`,
   `session_context_help` (help at the composer, for an `answer` grant too), `session_prompt_tune` (the composer's prompt tuner, the same grant), `run_prompt`,
-  `dispatch_task`, `wait_for_task`, `list_tasks`, `cancel_task`,
+  `dispatch_task`, `wait_for_task`, `list_tasks`, `cancel_task`, `task_report`
+  (a worker reports its own task finished),
   `set_session_tags`, `decide_related_session` (Link or Not related on a
   session's `related_session` proposal; a linked partner stays on the row
   with `linked: true`).
@@ -1885,15 +1886,26 @@ raw? }` composes the three: deliver, wait for `turn_seq` to grow, return
 project_id, name? }, prompt, requester_session_id?, raw? }` creates a task
 row (states `queued → running → done | failed | cancelled`), spawns the worker
 when asked (recording `requester_session_id` as the worker's
-`parent_session_id`), and delivers the prompt with an appended instruction:
-*"When finished, print exactly `FLEET_TASK_DONE_<nonce>` on its own line
-followed by a one-paragraph result."* The nonce is per task and never sent to
-the UI. On the worker's next `Stop` fleet reads its last transcript turn (pane
-capture as fallback), looks for the marker on its own line — which the prompt
-echo, where it is followed by more text, never satisfies — and flips the task
-to `done` with the paragraph as `result`; the result is also delivered to the
-requester's inbox as `kind: task_result`. A `Stop` without the marker leaves
-the task `running`. Open tasks are failed when their worker session is killed or lost, when it is recreated onto a new Claude conversation, or after `tasks.max_age_secs` (default 86400, `0` = off); the check runs on the reconcile tick and on every `list_tasks` / `wait_for_task` call. The fleet instruction is appended after an `[claude-fleet: end of untrusted input]` line, outside the marked prompt, and the result is prefixed with the untrusted-content marker wherever it is returned (inbox, `wait_for_task`, `list_tasks`). `wait_for_task { task_id, timeout_s? }` long-polls for a
+`parent_session_id`), and delivers the prompt with an appended instruction: *"When finished, call the
+claude-fleet MCP tool `task_report` with task_id N, nonce "…", outcome (done |
+partial | blocked | failed) and a one-paragraph summary. Then also print
+exactly `FLEET_TASK_DONE_<nonce>` on its own line followed by a one-paragraph
+result: fleet reads that when the tool is not available."* The nonce is per
+task and never sent to the UI. `task_report { task_id, nonce, summary,
+outcome, done?, decisions?, remaining?, context?, tests_run?, warnings?,
+blockers?, followups?, confidence? }` is the explicit path: only the task's
+worker may call it (its per-host token and `X-Fleet-Pane`; `E_NOT_A_SESSION`
+from anywhere else, `E_FORBIDDEN` for another session or a wrong nonce), and
+it flips the task to `done` with the summary as `result` and the rest as the
+report. On a task already `done | failed | cancelled` it changes nothing and
+answers `status: already_finished`. The marker is the fallback: on the
+worker's next `Stop` fleet reads its last transcript turn (pane capture as
+fallback), looks for the marker on its own line — which the prompt echo,
+where it is followed by more text, never satisfies — and flips the task to
+`done` with the paragraph as `result`. Either way the result is also
+delivered to the requester's inbox as `kind: task_result`. A `Stop` without
+the marker leaves the task `running` and logs a warning naming the task, the
+worker, its host and the sizes of the transcript and pane it read. Open tasks are failed when their worker session is killed or lost, when it is recreated onto a new Claude conversation, or after `tasks.max_age_secs` (default 86400, `0` = off); the check runs on the reconcile tick and on every `list_tasks` / `wait_for_task` call. The fleet instruction is appended after an `[claude-fleet: end of untrusted input]` line, outside the marked prompt, and the result is prefixed with the untrusted-content marker wherever it is returned (inbox, `wait_for_task`, `list_tasks`). `wait_for_task { task_id, timeout_s? }` long-polls for a
 terminal state; `list_tasks { requester_session_id?, state?, limit? }` lists;
 `cancel_task { task_id }` marks a task cancelled (`E_TASK_TERMINAL` if it
 already finished; the worker keeps running) and is confirm-gated like

@@ -919,6 +919,45 @@ pub struct CancelTaskParams {
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct TaskReportParams {
+    /// From your prompt.
+    pub task_id: i64,
+    /// From your prompt.
+    pub nonce: String,
+    /// One paragraph.
+    pub summary: String,
+    /// done | partial | blocked | failed.
+    pub outcome: String,
+    /// What you did.
+    #[serde(default)]
+    pub done: Vec<String>,
+    /// Choices to keep.
+    #[serde(default)]
+    pub decisions: Vec<String>,
+    /// Work left.
+    #[serde(default)]
+    pub remaining: Vec<String>,
+    /// Facts to continue.
+    #[serde(default)]
+    pub context: Vec<String>,
+    /// Commands run.
+    #[serde(default)]
+    pub tests_run: Vec<String>,
+    /// Risks.
+    #[serde(default)]
+    pub warnings: Vec<String>,
+    /// What stopped you.
+    #[serde(default)]
+    pub blockers: Vec<String>,
+    /// Task titles.
+    #[serde(default)]
+    pub followups: Vec<String>,
+    /// low | medium | high.
+    #[serde(default)]
+    pub confidence: Option<String>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct SetSessionTagsParams {
     /// Fleet session id, or host_alias + tmux_name.
     #[serde(default)]

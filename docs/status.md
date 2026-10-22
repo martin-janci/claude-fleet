@@ -996,8 +996,11 @@ a finite or continuous one holds 30. Import plan (`work_link { mission_import
 (`#`, `Step`, `Needs`, optional `Lane` / `Status`, plus a `Lane | Steps in
 order` table) into the mission: each step a local task titled `<step>
 <title>` with its lane as its assignee, its needs as edges; importing again
-updates them in place. O3 is built: a run's prompt asks for a fenced JSON report after its
-done marker, stored as `tasks.result_json` (the worker's word), and when the
+updates them in place. O3 is built: a run's prompt asks the worker to call the `task_report` MCP
+tool with its report (and, as the fallback for a worker without fleet's MCP,
+to print the same report as a fenced JSON block after its done marker; a
+Stop that finds neither logs a warning), stored as `tasks.result_json` (the
+worker's word), and when the
 run finishes fleet reads the commits and changed files from git in the
 worker's checkout into `tasks.evidence_json` (migration 117,
 `service/work/report.rs`). An item's `done_when` lines are typed (`ci[:check]`,

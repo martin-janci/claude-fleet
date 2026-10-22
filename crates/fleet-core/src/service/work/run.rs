@@ -289,7 +289,7 @@ pub async fn run_item_with(
         Arc::clone(store),
         Arc::clone(ssh),
         &row,
-        crate::service::work::report::with_run_instruction(&prompt, &task.nonce),
+        crate::service::work::report::with_run_instruction(&prompt, task.id, &task.nonce),
         task.id,
     );
     Ok(RunOutcome {

@@ -772,6 +772,7 @@ async fn call(fx: &Fx, who: Who, tool: &str, args: Value) -> Answer {
         "wait_for_task" => fx.t.wait_for_task(ext, p!()).await,
         "list_tasks" => fx.t.list_tasks(ext, p!()).await,
         "cancel_task" => fx.t.cancel_task(ext, p!()).await,
+        "task_report" => fx.t.task_report(ext, p!()).await,
         "set_session_tags" => fx.t.set_session_tags(ext, p!()).await,
         "decide_related_session" => fx.t.decide_related_session(ext, p!()).await,
         "work" => fx.t.work(ext, p!()).await,
@@ -1906,6 +1907,36 @@ async fn run_matrix() {
             } else {
                 tier(Reach::Drive, who)
             }
+        },
+    )
+    .await;
+
+    // `task_report` last: the row's own pane completes the shared task.
+    // Past `cancel_task`'s gate it holds the caller to the task's WORKER,
+    // which only a pane proves: a person's device is told it is not a
+    // session, not refused by the gate.
+    m.at(
+        "task_report",
+        Reach::Drive,
+        |fx, _| {
+            let nonce =
+                fx.t.store
+                    .lock()
+                    .unwrap()
+                    .get_task(fx.task)
+                    .unwrap()
+                    .expect("the fixture's task")
+                    .nonce;
+            json!({
+                "task_id": fx.task,
+                "nonce": nonce,
+                "summary": "done",
+                "outcome": "done"
+            })
+        },
+        |who| match (task_cells(Reach::Drive))(who) {
+            Out::Pass if who != Who::HostPane => Out::Code(codes::E_NOT_A_SESSION),
+            other => other,
         },
     )
     .await;

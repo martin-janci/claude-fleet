@@ -1010,19 +1010,26 @@ with the session as its worker) and types one prompt into the REPL:
 
 followed by the same instruction every run gets:
 
-> When finished, print exactly FLEET_TASK_DONE_<nonce> on its own line,
-> followed by one fenced ```json block with these keys: "summary" (one
-> paragraph), "outcome" (done | partial | blocked | failed), "done" (what
-> you did), "decisions" (choices the next task must keep), "remaining"
-> (work left), "context" (facts a fresh session needs to continue),
-> "tests_run" (the commands you ran), "warnings", "blockers", "followups"
-> (each a task title) — all lists of short strings — and "confidence"
-> (low | medium | high). Fleet reads your commits and changed files from
-> git itself; do not list them.
+> When finished, call the claude-fleet MCP tool task_report with task_id N,
+> nonce "<nonce>" and your report: "summary" (one paragraph), "outcome"
+> (done | partial | blocked | failed), "done" (what you did), "decisions"
+> (choices the next task must keep), "remaining" (work left), "context"
+> (facts a fresh session needs to continue), "tests_run" (the commands you
+> ran), "warnings", "blockers", "followups" (each a task title) — all lists
+> of short strings — and "confidence" (low | medium | high). Then also
+> print exactly FLEET_TASK_DONE_<nonce> on its own line, followed by the
+> same report as one fenced ```json block: fleet reads that when the tool
+> is not available. Fleet reads your commits and changed files from git
+> itself; do not list them.
 
-The next Stop hook reads the reply exactly as it reads a run's: the marker
-closes the request, the JSON becomes the report, and fleet collects the
-evidence. It costs the session one turn. It is refused when the session has
+The reply closes the request exactly as a run's does. The `task_report`
+call, from the worker's own pane with the request's nonce, closes it at
+once, stores the report and collects the evidence from the worker's
+worktree. Without it, the next Stop hook scans the transcript and the pane
+for the marker: the marker closes the request, the JSON becomes the report,
+and fleet collects the evidence. A Stop that finds no marker logs a warning
+(task, worker, host, what it read), so a missed report is visible before
+`tasks.max_age_secs` fails the request. It costs the session one turn. It is refused when the session has
 no work item (link it first), is busy, stuck or waiting on a dialog, is the
 operator's own session, or already has a request open ("a result is already
 requested from this session"). A wrap-up is never counted as an attempt:

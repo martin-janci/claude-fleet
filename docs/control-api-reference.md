@@ -1251,6 +1251,14 @@ Access: the master, a paired device or a per-host token · readonly tokens too �
 
 Parameters (* required): `hosts`, `profile`, `project_id`
 
+### `task_report`
+
+From a task's worker: report it finished, with the task_id and nonce its prompt gave. Completes it as the FLEET_TASK_DONE marker does; a finished task answers already_finished.
+
+Access: the master, a paired device or a per-host token · deadline 60 s.
+
+Parameters (* required): `blockers`, `confidence`, `context`, `decisions`, `done`, `followups`, `nonce`*, `outcome`*, `remaining`, `summary`*, `task_id`*, `tests_run`, `warnings`
+
 ### `touch_session_viewed`
 
 Mark a session viewed now: the turns it has finished read as seen. Returns the row.
