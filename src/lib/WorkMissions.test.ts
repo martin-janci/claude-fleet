@@ -407,6 +407,29 @@ describe('WorkMissions', () => {
       expect(screen.queryByTestId('mission-more')).toBeNull();
     });
 
+    it('red CI on its PRs holds Complete until a person completes it anyway (TASK-295)', async () => {
+      handlers.set_mission_state = (a) =>
+        a.ci_override
+          ? (current = mission({ state: 'completed', version: 2 }))
+          : Object.assign(new Error('CI is failing on acme/pay#476; fix it, or a person completes the mission anyway (ci_override)'), {
+              code: 'E_CI_FAILING',
+            });
+      await openActive();
+      await fireEvent.click(screen.getByTestId('mission-more'));
+      await fireEvent.click(screen.getByTestId('mission-menu-completed'));
+      await fireEvent.click(screen.getByTestId('mission-move-confirm'));
+      await flush();
+      expect(screen.getByTestId('mission-notice').textContent).toContain('acme/pay#476');
+      expect(screen.getByTestId('mission-ci-override-row')).toBeTruthy();
+      await fireEvent.click(screen.getByTestId('mission-ci-override'));
+      await flush();
+      expect(calls('set_mission_state')).toEqual([
+        { mission_id: 4, state: 'completed', expected_version: 1 },
+        { mission_id: 4, state: 'completed', expected_version: 1, ci_override: true },
+      ]);
+      expect(screen.queryByTestId('mission-ci-override-row')).toBeNull();
+    });
+
     it('New: Esc closes the menu and a draft offers only Cancel in it', async () => {
       renderMissions();
       await flush();
@@ -801,6 +824,54 @@ describe('WorkMissions', () => {
     expect(calls('set_work_done_when')[0]).toEqual({ item_id: 11, done_when: ['review', 'ci:test'] });
   });
 
+  it('shows missing run evidence on the card and overrides it with a reason', async () => {
+    handlers.work_mission = () => ({
+      mission: current,
+      items: [item(10, 'Payments v2'), item(11, 'Schema')],
+      graph: {
+        nodes: [
+          {
+            item_id: 10,
+            state: 'verifying',
+            wave: 1,
+            evidence: { state: 'missing', task_id: 5, detail: 'the implement run committed nothing and changed no file' },
+          },
+          {
+            item_id: 11,
+            state: 'verifying',
+            wave: 1,
+            evidence: { state: 'present', task_id: 6, commits: 2, files: 3, detail: '2 commit(s), 3 file(s) changed' },
+          },
+        ],
+        waves: 1,
+      },
+      events: [],
+      may_change: true,
+    });
+    handlers.verify_work_item = () => ({ item_id: 10, changed: true });
+    renderMissions();
+    await flush();
+    await fireEvent.click(screen.getByTestId('mission-row'));
+    await flush();
+    // Only the task with nothing to show says so.
+    const rows = screen.getAllByTestId('mission-evidence');
+    expect(rows).toHaveLength(1);
+    expect(rows[0].dataset.state).toBe('missing');
+    expect(rows[0].textContent).toContain('No run evidence');
+    expect(rows[0].textContent).toContain('committed nothing');
+    await fireEvent.click(screen.getByTestId('mission-evidence-override'));
+    expect((screen.getByTestId('mission-evidence-save') as HTMLButtonElement).disabled).toBe(true);
+    await fireEvent.input(screen.getByTestId('mission-evidence-reason'), { target: { value: ' a config change on the host ' } });
+    await fireEvent.click(screen.getByTestId('mission-evidence-save'));
+    await flush();
+    expect(calls('verify_work_item')[0]).toEqual({
+      item_id: 10,
+      line: 'run evidence',
+      ok: true,
+      note: 'a config change on the host',
+    });
+  });
+
   describe('the planner in words (step 1.3)', () => {
     const loopDetail = () => ({
       mission: current,
@@ -1000,6 +1071,38 @@ describe('WorkMissions', () => {
       hosts.set([]);
     });
 
+    it('a finite mission is granted until it completes, with a budget and no hours', async () => {
+      current = mission({ state: 'active', level: 2 });
+      handlers.work_mission = () => detailOf(current);
+      handlers.grant_mission = () => ({ id: 1, mission_id: 4, plan_version: 1, level: 2, granted_by: 'fleet', created_at: 1, expires_at: 253_402_300_799, until_done: true });
+      renderMissions();
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-row'));
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-grant'));
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-grant-until-done'));
+      await fireEvent.click(screen.getByTestId('mission-grant-save'));
+      await flush();
+      expect(calls('grant_mission')).toHaveLength(0);
+      await fireEvent.input(screen.getByTestId('mission-grant-budget'), { target: { value: '20' } });
+      await fireEvent.click(screen.getByTestId('mission-grant-save'));
+      await flush();
+      expect(calls('grant_mission')[0]).toEqual({ mission_id: 4, level: 2, until_done: true, budget_cents: 2000 });
+    });
+
+    it('a continuous mission is not offered a grant until it completes', async () => {
+      current = mission({ state: 'active', level: 2, mode: 'continuous' });
+      handlers.work_mission = () => detailOf(current);
+      renderMissions();
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-row'));
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-grant'));
+      await flush();
+      expect(screen.queryByTestId('mission-grant-until-done')).toBeNull();
+    });
+
     it('words every limit', () => {
       const base = { asked: 2, ceiling: 3, effective: 2, why: '', enabled: true };
       expect(autonomyWords(base).hint).toBeNull();
@@ -1010,6 +1113,12 @@ describe('WorkMissions', () => {
       const w = autonomyWords({ ...base, asked: 3, effective: 1, grant }, 1_000);
       expect(w.limits).toMatch(/^L3 asked · L3 ceiling · L1 grant until /);
       expect(w.hint).toContain('The grant signs L1');
+      const done = { ...grant, level: 2, expires_at: 253_402_300_799, until_done: true };
+      expect(autonomyWords({ ...base, grant: done }, 1_000).limits).toBe('L2 asked · L3 ceiling · L2 grant until done');
+      expect(eventSentence({ id: 1, at: 1, kind: 'grant', actor: 'p', payload: { level: 2, until_done: true, raised_from: 0 } })).toBe(
+        'Granted L2 until the mission completes (raised the ask from L0)',
+      );
+      expect(eventSentence({ id: 1, at: 1, kind: 'grant', actor: 'p', payload: { level: 2, hours: 8 } })).toBe('Granted L2 for 8 h');
       expect(policyWith({ max_parallel: 2, wake_every_secs: 600 }, { wake_every_secs: null })).toEqual({ max_parallel: 2 });
     });
   });
@@ -1391,6 +1500,13 @@ describe('missions helpers', () => {
     // Review w03-5: a hold says why.
     expect(eventSentence({ id: 5, at: 1, kind: 'account_limit', actor: 'loop', payload: { why: 'work is 95% used' } })).toBe(
       'Waiting for the account: work is 95% used',
+    );
+    // One integration names every branch; an older event a pair.
+    expect(
+      eventSentence({ id: 6, at: 1, kind: 'integration', actor: 'loop', payload: { items: [300, 301, 306], a: 300, b: 301 } }),
+    ).toBe('Tasks 300, 301 and 306 need one integration');
+    expect(eventSentence({ id: 7, at: 1, kind: 'integration', actor: 'loop', payload: { a: 300, b: 324 } })).toBe(
+      'Tasks 300 and 324 conflict',
     );
   });
 });

@@ -586,3 +586,85 @@ fn a_worker_reads_the_mission_it_has_an_open_run_on_and_nothing_more() {
         codes::E_NOTFOUND
     );
 }
+
+/// TASK-295: red CI on a mission's open or merged pull request holds
+/// Complete; a person's `ci_override` completes it and is recorded. A
+/// closed PR does not count, and a PR the caller may not see still holds,
+/// unnamed.
+#[test]
+fn red_ci_on_a_mission_pr_holds_complete_until_a_person_overrides() {
+    let st = store();
+    let (ana, bo) = people(&st);
+    let me = person(&st, None, ana);
+    let m = new_mission(&st, &me, None);
+    let task = lock(&st)
+        .unwrap()
+        .create_local_work_item(None, "cards")
+        .unwrap()
+        .id;
+    let mut args = by_id("mission_item", m.id);
+    args.item_id = Some(task);
+    item(&args, &st, &me).unwrap();
+    {
+        let s = lock(&st).unwrap();
+        test_mission_pr(&s, task, ana, 476, "MERGED", "failing");
+        test_mission_pr(&s, task, ana, 477, "CLOSED", "failing");
+        test_mission_pr(&s, task, ana, 478, "OPEN", "passing");
+        test_mission_pr(&s, task, bo, 479, "OPEN", "failing");
+    }
+    let mut st_args = by_id("mission_state", m.id);
+    st_args.status = Some("active".into());
+    set_state(&st_args, &st, &me).unwrap();
+
+    st_args.status = Some("completed".into());
+    let e = set_state(&st_args, &st, &me).unwrap_err();
+    assert_eq!(e.code, codes::E_CI_FAILING);
+    assert!(
+        e.message
+            .contains("acme/pay#476 and a pull request you cannot see"),
+        "{}",
+        e.message
+    );
+    assert!(!e.message.contains("#477") && !e.message.contains("#479"));
+    assert_eq!(
+        lock(&st).unwrap().get_mission(m.id).unwrap().unwrap().state,
+        "active"
+    );
+
+    // Other moves are not held.
+    st_args.status = Some("paused".into());
+    set_state(&st_args, &st, &me).unwrap();
+
+    st_args.status = Some("completed".into());
+    st_args.ci_override = Some(true);
+    let r = set_state(&st_args, &st, &me).unwrap();
+    assert_eq!(r.state, "completed");
+    let events = lock(&st).unwrap().mission_events(m.id, None, 50).unwrap();
+    let o = events
+        .iter()
+        .find(|e| e.kind == "ci_override")
+        .expect("the override is recorded");
+    assert_eq!(o.actor, format!("person:{ana}"));
+    assert_eq!(
+        o.payload.as_ref().unwrap()["prs"],
+        serde_json::json!(["", "acme/pay#476"])
+    );
+}
+
+#[test]
+fn ci_refusal_names_what_it_may() {
+    assert!(ci_refusal(&[]).is_none());
+    let e = ci_refusal(&["o/r#1".into(), "o/r#2".into()]).unwrap();
+    assert!(
+        e.message.starts_with("CI is failing on o/r#1, o/r#2;"),
+        "{}",
+        e.message
+    );
+    let e = ci_refusal(&[String::new(), String::new()]).unwrap();
+    assert!(
+        e.message
+            .starts_with("CI is failing on 2 pull requests you cannot see;"),
+        "{}",
+        e.message
+    );
+}

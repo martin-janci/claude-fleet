@@ -19,6 +19,7 @@ pub mod checks;
 pub mod drafts;
 pub mod guard;
 pub mod integrate;
+pub mod limit;
 pub mod planner;
 pub mod steps;
 pub mod triage;
@@ -37,7 +38,7 @@ use crate::service::view_scope::ViewScope;
 use crate::ssh::SshClient;
 use crate::store::{
     CardRow, Decider, GrantRow, MissionRow, MissionTaskCounts, NewCard, NewGrant, NewMissionEvent,
-    Store, TaskRow, WorkItemRow, GRANT_MAX_SECS,
+    Store, TaskRow, WorkItemRow, GRANT_MAX_SECS, GRANT_UNTIL_DONE_AT,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -50,6 +51,9 @@ pub const TICK_EVERY: Duration = Duration::from_secs(20);
 pub const RUNNING_RECHECK_SECS: i64 = 300;
 /// An idle finite mission is looked at again within this.
 pub const IDLE_RECHECK_SECS: i64 = 3600;
+/// The soonest a mission whose planner waits on a usage limit is looked at
+/// again, however near the reset.
+pub const RESET_RECHECK_SECS: i64 = 60;
 /// A continuous mission's timer when its policy names none (O8).
 pub const CONTINUOUS_DEFAULT_WAKE_SECS: u64 = 1800;
 /// Cards a mission's detail shows.
@@ -514,6 +518,20 @@ async fn apply_step_inner(
                 .item_id
                 .ok_or_else(|| IpcError::new(codes::E_INVALID, "a close step names its item"))?;
             let s = lock(&deps.store)?;
+            // The completion gate's evidence: the loop never closes an item
+            // whose implement run shows no commits or files. A person's
+            // press is never refused (they see it on the card).
+            if *actor == Actor::Loop {
+                if let Some(e) =
+                    crate::service::work::gate::item_run_evidence(&s, item_id, now_unix())?
+                        .filter(|e| e.state == "missing" || e.state == "pending")
+                {
+                    return Err(IpcError::new(
+                        codes::E_INVALID_STATE,
+                        format!("no run evidence: {}", e.detail),
+                    ));
+                }
+            }
             s.set_item_status(item_id, "done")?;
             s.wake_mission(m.id)?;
             Ok(("closed".into(), None))
@@ -527,6 +545,12 @@ async fn apply_step_inner(
                 ));
             }
             let s = lock(&deps.store)?;
+            // Red CI on its pull requests holds the step; only the
+            // mission's own Complete takes a person's override.
+            if let Some(e) = super::missions::ci_refusal(&super::missions::red_prs(&s, view, m.id)?)
+            {
+                return Err(e);
+            }
             if let Some(root) = m.root_item_id {
                 s.set_item_status(root, "done")?;
             }
@@ -997,6 +1021,12 @@ pub struct PlanOutcome {
     /// Why the answer was refused, when it was.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refused: Option<String>,
+    /// The usage limit the ask ended on (TASK-291): the mission's wait when
+    /// every login the planner may use is at one, else the last login's
+    /// when its tries ran out. Not a refused answer; the loop asks again
+    /// once a login has headroom.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting: Option<limit::LimitWait>,
 }
 
 /// The host the planner runs on: the policy's, the grant's first, else the
@@ -1008,19 +1038,37 @@ pub struct PlanOutcome {
 /// or grant host that is not refuses with `E_FORBIDDEN`, and a worker on
 /// such a host is passed over.
 fn planner_host(s: &Store, m: &MissionRow, grant: Option<&GrantRow>) -> Result<String, IpcError> {
-    let named = m
-        .policy
-        .planner_host
-        .as_ref()
-        .map(|h| (h, "policy.planner_host"));
-    let granted = grant
-        .and_then(|g| g.hosts.as_ref())
-        .and_then(|h| h.first())
-        .map(|h| (h, "the grant's first host"));
-    if let Some((h, from)) = named.or(granted) {
-        require_host_sees_org(s, h, m.org_id, from)?;
-        return Ok(h.clone());
+    Ok(planner_hosts(s, m, grant)?.swap_remove(0))
+}
+
+/// Every host the planner may run on, [`planner_host`]'s first (TASK-291:
+/// the rest are where it goes when that one's logins are at their usage
+/// limit): the policy's host alone, else the grant's hosts of the
+/// mission's org, else the hosts of the mission's workers that see it, by
+/// item and task. Never empty.
+fn planner_hosts(
+    s: &Store,
+    m: &MissionRow,
+    grant: Option<&GrantRow>,
+) -> Result<Vec<String>, IpcError> {
+    if let Some(h) = &m.policy.planner_host {
+        require_host_sees_org(s, h, m.org_id, "policy.planner_host")?;
+        return Ok(vec![h.clone()]);
     }
+    if let Some(hosts) = grant
+        .and_then(|g| g.hosts.as_ref())
+        .filter(|h| !h.is_empty())
+    {
+        require_host_sees_org(s, &hosts[0], m.org_id, "the grant's first host")?;
+        let mut out = vec![hosts[0].clone()];
+        for h in &hosts[1..] {
+            if !out.contains(h) && host_sees_org(s, h, m.org_id)? {
+                out.push(h.clone());
+            }
+        }
+        return Ok(out);
+    }
+    let mut out: Vec<String> = Vec::new();
     let mut passed_over = None;
     for i in s.mission_items(m.id)? {
         for t in s.tasks_for_item(i.id)? {
@@ -1028,12 +1076,19 @@ fn planner_host(s: &Store, m: &MissionRow, grant: Option<&GrantRow>) -> Result<S
                 .worker_session_id
                 .and_then(|w| s.get_session_by_id(w).ok().flatten())
             {
-                if host_sees_org(s, &w.host_alias, m.org_id)? {
-                    return Ok(w.host_alias);
+                if out.contains(&w.host_alias) {
+                    continue;
                 }
-                passed_over.get_or_insert(w.host_alias);
+                if host_sees_org(s, &w.host_alias, m.org_id)? {
+                    out.push(w.host_alias);
+                } else {
+                    passed_over.get_or_insert(w.host_alias);
+                }
             }
         }
+    }
+    if !out.is_empty() {
+        return Ok(out);
     }
     if let Some(h) = passed_over {
         return Err(other_org_host(&h, "its workers' host"));
@@ -1213,7 +1268,7 @@ pub async fn run_planner(
 ) -> Result<PlanOutcome, IpcError> {
     let _slot = PlannerSlot::take(deps, m)?;
     let now = now_unix();
-    let (host, prompt, model, auto_level, accept_created) = {
+    let (mut login, grant, prompt, model, auto_level, accept_created, plan_nodes) = {
         let s = lock(&deps.store)?;
         let a = autonomy(&s, m, now)?;
         let runs = s.mission_planner_runs_since(m.id, now - 3600)?;
@@ -1225,7 +1280,12 @@ pub async fn run_planner(
                 ),
             ));
         }
-        let host = planner_host(&s, m, a.grant.as_ref())?;
+        // TASK-291: a login at its usage limit is passed over; with none
+        // left the mission waits for the reset, and nothing is asked.
+        let login = match limit::choose(&s, m, a.grant.as_ref(), now)? {
+            Ok(l) => l,
+            Err(wait) => return Ok(waiting_outcome(&s, m, wait)),
+        };
         let items = s.mission_items(m.id)?;
         let graph = super::graph::build(&s, &ViewScope::internal(), &items)?;
         let steps = steps_for(&s, m, &a)?;
@@ -1246,10 +1306,11 @@ pub async fn run_planner(
             "planned",
             &actor.name(),
             None,
-            serde_json::json!({ "why": why, "host": host }),
+            serde_json::json!({ "why": why, "host": login.host, "profile": login.profile }),
         );
         (
-            host,
+            login,
+            a.grant.clone(),
             format!("{}\n\n{snap}", planner::PLANNER_PROMPT),
             m.policy
                 .planner_model
@@ -1257,54 +1318,95 @@ pub async fn run_planner(
                 .unwrap_or_else(|| planner::PLANNER_DEFAULT_MODEL.into()),
             a.effective,
             a.effective >= 3 && m.policy.task_creation == "auto",
+            planner::plan_nodes(&items, &graph, m.root_item_id),
         )
     };
-    let script = planner::planner_script(&model, &prompt);
-    let out = crate::ssh::run_shell_bounded(
-        deps.ssh.as_ref(),
-        &host,
-        &script,
-        Duration::from_secs(10),
-        Duration::from_secs(planner::PLANNER_HOST_TIMEOUT_SECS + 20),
-    )
-    .await?;
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let answer = match planner::parse_planner_output(&stdout) {
-        PlannerOutput::Ran(ran) => {
-            let (answer, usage) = planner::planner_answer(ran);
-            let s = lock(&deps.store)?;
-            book_planner_run(&s, m, &host, &model, usage.as_ref(), now_unix());
-            // Claude Code's own "Login expired" is not a malformed answer:
-            // say whose login it is and how to sign it in again.
-            if claude_print::run_signed_out(usage.as_ref(), &answer, &out.stderr) {
-                return Err(claude_print::signed_out_error(&host, None));
+    let mut attempts = 0;
+    let (answer, stderr) = loop {
+        attempts += 1;
+        let (host, profile) = (login.host.as_str(), login.profile.as_deref());
+        let script = planner::planner_script_as(&model, &prompt, profile)
+            .map_err(|e| IpcError::new(codes::E_INVALID, e))?;
+        let out = crate::ssh::run_shell_bounded(
+            deps.ssh.as_ref(),
+            host,
+            &script,
+            Duration::from_secs(10),
+            Duration::from_secs(planner::PLANNER_HOST_TIMEOUT_SECS + 20),
+        )
+        .await?;
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let answer = match planner::parse_planner_output(&stdout) {
+            PlannerOutput::Ran(ran) => {
+                let (answer, usage) = planner::planner_answer(ran);
+                let s = lock(&deps.store)?;
+                book_planner_run(&s, m, host, &model, usage.as_ref(), now_unix());
+                // Claude Code's own "Login expired" is not a malformed answer:
+                // say whose login it is and how to sign it in again.
+                if claude_print::run_signed_out(usage.as_ref(), &answer, &out.stderr) {
+                    return Err(claude_print::signed_out_error(host, profile));
+                }
+                answer
             }
-            answer
-        }
-        PlannerOutput::NoClaude => {
-            return Err(IpcError::new(
-                codes::E_INVALID_STATE,
-                format!("claude is not on {host}'s PATH"),
-            ))
-        }
-        PlannerOutput::Nothing if claude_print::run_signed_out(None, "", &out.stderr) => {
-            return Err(claude_print::signed_out_error(&host, None))
-        }
-        PlannerOutput::Nothing => {
-            return Err(IpcError::new(
-                codes::E_SHELL,
-                format!("the planner on {host} gave no answer"),
-            ))
+            PlannerOutput::NoClaude => {
+                return Err(IpcError::new(
+                    codes::E_INVALID_STATE,
+                    format!("claude is not on {host}'s PATH"),
+                ))
+            }
+            PlannerOutput::Nothing if claude_print::run_signed_out(None, "", &out.stderr) => {
+                return Err(claude_print::signed_out_error(host, profile))
+            }
+            // The limit said on stderr alone is read below.
+            PlannerOutput::Nothing if claude_print::run_usage_limit("", &out.stderr).is_some() => {
+                String::new()
+            }
+            PlannerOutput::Nothing => {
+                return Err(IpcError::new(
+                    codes::E_SHELL,
+                    format!("the planner on {host} gave no answer"),
+                ))
+            }
+        };
+        // A command array never opens with Claude's limit words, so only an
+        // answer that is not one is read for them.
+        let hit = match planner::parse_commands(&answer) {
+            Ok(_) => None,
+            Err(_) => claude_print::run_usage_limit(&answer, &out.stderr),
+        };
+        let Some(hit) = hit else {
+            break (answer, out.stderr);
+        };
+        let s = lock(&deps.store)?;
+        let now = now_unix();
+        limit::record(&s, m.id, &limit::answered(&s, &login, &hit, now));
+        match limit::choose(&s, m, grant.as_ref(), now)? {
+            Ok(next) if attempts < limit::LIMIT_ATTEMPTS => login = next,
+            Ok(_) => {
+                // Another login has headroom; the loop asks there next.
+                let wait = limit::open_waits(&s, m.id, now)?
+                    .into_iter()
+                    .find(|w| w.login.as_ref() == Some(&login));
+                return Ok(PlanOutcome {
+                    mission_id: m.id,
+                    cards: vec![],
+                    refused: None,
+                    waiting: wait,
+                });
+            }
+            Err(wait) => return Ok(waiting_outcome(&s, m, wait)),
         }
     };
-    let commands = match planner::parse_commands(&answer) {
+    let commands = match planner::parse_commands(&answer)
+        .and_then(|c| planner::check_merge_waves(&c, &plan_nodes).map(|()| c))
+    {
         Ok(c) => c,
         Err(mut why) => {
-            if answer.trim().is_empty() && !out.stderr.is_empty() {
+            if answer.trim().is_empty() && !stderr.is_empty() {
                 // `claude` printed nothing: what it said went to stderr.
                 why.push_str(&format!(
                     "; claude said: {}",
-                    crate::service::work::summary::last_error_line(&out.stderr)
+                    crate::service::work::summary::last_error_line(&stderr)
                 ));
             }
             let s = lock(&deps.store)?;
@@ -1320,6 +1422,7 @@ pub async fn run_planner(
                 mission_id: m.id,
                 cards: vec![],
                 refused: Some(why),
+                waiting: None,
             });
         }
     };
@@ -1330,7 +1433,20 @@ pub async fn run_planner(
         mission_id: m.id,
         cards: shown,
         refused: None,
+        waiting: None,
     })
+}
+
+/// Record that the mission waits on `wait` and say so as the planner's
+/// outcome.
+fn waiting_outcome(s: &Store, m: &MissionRow, wait: limit::LimitWait) -> PlanOutcome {
+    limit::record(s, m.id, &wait);
+    PlanOutcome {
+        mission_id: m.id,
+        cards: vec![],
+        refused: None,
+        waiting: Some(wait),
+    }
 }
 
 /// The planner's commands as cards: every `create_item` of the answer in
@@ -1476,10 +1592,16 @@ pub async fn plan_now(
     .await
 }
 
-/// `work_link { action: mission_grant, mission_id, level, hours, budget_cents?,
-/// hosts?, max_parallel?, profile? }`: a person signs what the loop may do by itself,
-/// for this plan, until it expires. Never an agent's: the scope must be a
-/// person's own, and the mission theirs to change.
+/// `work_link { action: mission_grant, mission_id, level, hours?, budget_cents?,
+/// until_done?, hosts?, max_parallel?, profile? }`: a person signs what the
+/// loop may do by itself, for this plan, until it expires: after `hours`, or
+/// with `until_done` when the mission completes (a finite mission only, and
+/// only with a budget, which is then its one bound). Never an agent's: the
+/// scope must be a person's own, and the mission theirs to change.
+///
+/// A grant above the level the mission asks raises the ask to it (TASK-293):
+/// the loop runs at the least of the ask, the fleet's ceiling and the grant,
+/// so a mission made in the room (L0) never ran a step under an L2 grant.
 pub fn grant(
     args: &WorkLinkArgs,
     store: &Mutex<Store>,
@@ -1492,6 +1614,19 @@ pub fn grant(
         .ok_or_else(|| IpcError::new(codes::E_INVALID, "mission_grant needs level (1 to 3)"))?;
     if !(1..=3).contains(&level) {
         return Err(IpcError::new(codes::E_INVALID, "a grant's level is 1 to 3"));
+    }
+    let until_done = args.until_done.unwrap_or(false);
+    if until_done && args.hours.is_some() {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            "a grant lasts some hours or until the mission completes, not both",
+        ));
+    }
+    if until_done && args.budget_cents.is_none() {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            "a grant until the mission completes needs a budget (budget_cents)",
+        ));
     }
     let hours = args.hours.unwrap_or(8) as i64;
     if !(1..=GRANT_MAX_SECS / 3600).contains(&hours) {
@@ -1526,7 +1661,28 @@ pub fn grant(
             format!("{} is {}", m.name, m.state),
         ));
     }
+    if until_done && m.mode != "finite" {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            format!(
+                "{} is {}: it never completes, so its grant runs some hours",
+                m.name, m.mode
+            ),
+        ));
+    }
     let who = super::graph::actor(scope);
+    let raised_from = (m.level < level).then_some(m.level);
+    if raised_from.is_some() {
+        s.update_mission(
+            id,
+            None,
+            &crate::store::MissionPatch {
+                level: Some(level),
+                ..Default::default()
+            },
+            &who,
+        )?;
+    }
     s.revoke_grants(id)?;
     let g = s.add_grant(
         id,
@@ -1537,7 +1693,11 @@ pub fn grant(
             budget_micros: args.budget_cents.map(|c| c * 10_000),
             max_parallel: args.max_parallel.map(|p| p as i64),
             profile: profile.clone(),
-            expires_at: now_unix() + hours * 3600,
+            expires_at: if until_done {
+                GRANT_UNTIL_DONE_AT
+            } else {
+                now_unix() + hours * 3600
+            },
         },
     )?;
     event(
@@ -1546,7 +1706,14 @@ pub fn grant(
         "grant",
         &who,
         None,
-        serde_json::json!({ "level": level, "hours": hours, "budget_cents": args.budget_cents, "profile": profile }),
+        serde_json::json!({
+            "level": level,
+            "hours": (!until_done).then_some(hours),
+            "until_done": until_done,
+            "budget_cents": args.budget_cents,
+            "profile": profile,
+            "raised_from": raised_from,
+        }),
     );
     s.wake_mission(id)?;
     Ok(g)
@@ -1642,17 +1809,27 @@ fn next_wake(m: &MissionRow, counts: &MissionTaskCounts, now: i64) -> i64 {
 /// a mission with nothing planned under its root, or one that needs a
 /// person's answer since its last call, and only when something happened
 /// since that call.
+///
+/// A planner whose last ask ended at a usage limit (TASK-291) is asked again
+/// as soon as a login it may use has headroom (the reset passed, or another
+/// login is under the line), and never before.
 fn planner_wanted(
     s: &Store,
     m: &MissionRow,
     steps: &[Step],
     counts: &MissionTaskCounts,
+    grant: Option<&GrantRow>,
+    now: i64,
 ) -> Result<Option<&'static str>, IpcError> {
     if s.mission_cards(m.id, CARDS_SHOWN)?
         .iter()
         .any(|c| c.state == "open" && c.source == "planner")
     {
         return Ok(None);
+    }
+    if limit::waiting(s, m.id)? {
+        let free = matches!(limit::choose(s, m, grant, now), Ok(Ok(_)));
+        return Ok(free.then_some("the usage limit it waited on is over"));
     }
     let last_plan = s
         .mission_events(m.id, None, 200)?
@@ -1883,7 +2060,7 @@ pub async fn tick_mission(deps: &Deps, id: i64, now: i64) -> Result<(), IpcError
     let want = {
         let s = lock(&deps.store)?;
         if a.effective >= 1 {
-            planner_wanted(&s, &m, &steps, &counts)?
+            planner_wanted(&s, &m, &steps, &counts, a.grant.as_ref(), now)?
         } else {
             None
         }
@@ -1901,7 +2078,12 @@ pub async fn tick_mission(deps: &Deps, id: i64, now: i64) -> Result<(), IpcError
     let s = lock(&deps.store)?;
     let counts = s.mission_task_counts(id)?;
     let m = s.get_mission(id)?.unwrap_or(m);
-    s.release_mission_lease(id, Some(next_wake(&m, &counts, now)), Some(now))?;
+    // A planner waiting on a usage limit is asked again at its reset.
+    let wake = match limit::wake_at(&s, id, now)? {
+        Some(reset) => next_wake(&m, &counts, now).min(reset.max(now + RESET_RECHECK_SECS)),
+        None => next_wake(&m, &counts, now),
+    };
+    s.release_mission_lease(id, Some(wake), Some(now))?;
     Ok(())
 }
 

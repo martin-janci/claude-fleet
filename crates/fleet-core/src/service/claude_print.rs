@@ -327,6 +327,75 @@ pub fn signed_out_error(host: &str, profile: Option<&str>) -> crate::ipc_error::
     )
 }
 
+// --- a `claude` at its usage limit -------------------------------------------
+
+/// Claude Code's own words, lowercased, for a run its account's usage limit
+/// stopped: "Claude AI usage limit reached|1760536800", "5-hour limit
+/// reached ∙ resets 3pm", "Weekly limit reached · resets Oct 20, 9am",
+/// "You've hit your limit · resets 3pm (Europe/Bratislava)".
+const USAGE_LIMIT: &[&str] = &[
+    "usage limit reached",
+    "hit your limit",
+    "hit your usage limit",
+];
+
+/// A run stopped at its account's usage limit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsageLimit {
+    /// When it resets, when the answer says so as a Unix time (the
+    /// `…limit reached|<epoch>` form).
+    pub reset_at: Option<i64>,
+    /// How the answer says when it resets ("resets 3pm (Europe/Bratislava)"),
+    /// redacted and cut to 80 characters.
+    pub said: Option<String>,
+}
+
+/// PURE: whether `said` (an answer that is not what was asked for, or the
+/// run's stderr) is Claude Code saying the account's usage limit stopped
+/// it, and when it resets. Only the opening is read, as
+/// [`says_signed_out`]: claude's own message is one short line.
+pub fn usage_limit(said: &str) -> Option<UsageLimit> {
+    let head: String = said.trim().chars().take(300).collect();
+    let lower = head.to_lowercase();
+    let hit = USAGE_LIMIT.iter().any(|p| lower.contains(p))
+        || (lower.contains("limit reached") && lower.contains("reset"));
+    if !hit {
+        return None;
+    }
+    let reset_at = head.split_once('|').and_then(|(_, rest)| {
+        let digits: String = rest
+            .trim_start()
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect();
+        digits.parse::<i64>().ok().filter(|t| *t > 1_000_000_000)
+    });
+    // The phrase in Claude's own case ("Europe/Bratislava"), found without
+    // lowercasing, whose byte offsets may differ from `head`'s.
+    let said = head
+        .char_indices()
+        .find(|(i, _)| {
+            head.get(*i..*i + 5)
+                .is_some_and(|w| w.eq_ignore_ascii_case("reset"))
+        })
+        .map(|(i, _)| {
+            let phrase = head[i..].lines().next().unwrap_or_default();
+            let phrase = phrase.trim().trim_end_matches(['.', ' ']);
+            crate::logging::redact(phrase)
+                .chars()
+                .take(80)
+                .collect::<String>()
+        });
+    Some(UsageLimit { reset_at, said })
+}
+
+/// PURE: [`usage_limit`] of a finished run's answer `text`, else of the last
+/// line of its `stderr`.
+pub fn run_usage_limit(text: &str, stderr: &[u8]) -> Option<UsageLimit> {
+    usage_limit(text)
+        .or_else(|| usage_limit(&crate::service::work::summary::last_error_line(stderr)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -482,5 +551,44 @@ mod tests {
             run_capped("T=", "claude", 5, 10, true).ends_with("$t claude </dev/null | head -c 10")
         );
         assert!(run_capped("T=", "claude", 5, 10, false).ends_with("$t claude | head -c 10"));
+    }
+
+    /// TASK-291: Claude Code's limit answers, in each form it has printed,
+    /// are a usage limit with their reset; an answer or error that only
+    /// mentions a limit is not.
+    #[test]
+    fn a_usage_limit_answer_is_recognised_with_its_reset() {
+        let l = usage_limit("Claude AI usage limit reached|1760536800").unwrap();
+        assert_eq!(l.reset_at, Some(1_760_536_800));
+        assert_eq!(l.said, None);
+        let l = usage_limit("You've hit your limit · resets 3pm (Europe/Bratislava)\n").unwrap();
+        assert_eq!(l.reset_at, None);
+        assert_eq!(l.said.as_deref(), Some("resets 3pm (Europe/Bratislava)"));
+        let l = usage_limit("5-hour limit reached ∙ resets 3pm").unwrap();
+        assert_eq!(l.said.as_deref(), Some("resets 3pm"));
+        let l = usage_limit("Weekly limit reached · resets Oct 20, 9am").unwrap();
+        assert_eq!(l.said.as_deref(), Some("resets Oct 20, 9am"));
+        let l = usage_limit(
+            "Claude usage limit reached. Your limit will reset at 3pm (Europe/Bratislava).",
+        )
+        .unwrap();
+        assert_eq!(l.said.as_deref(), Some("reset at 3pm (Europe/Bratislava)"));
+        for not in [
+            "",
+            "[]",
+            "not a JSON array",
+            "API Error: 429 rate_limit_error",
+            "Invalid API key · Please run /login",
+        ] {
+            assert_eq!(usage_limit(not), None, "{not:?}");
+        }
+        // Only the opening is read.
+        let late = format!("{} usage limit reached", "x".repeat(400));
+        assert_eq!(usage_limit(&late), None);
+        assert!(
+            run_usage_limit("", b"warn: x\nClaude AI usage limit reached|1760536800\n")
+                .is_some_and(|l| l.reset_at == Some(1_760_536_800))
+        );
+        assert_eq!(run_usage_limit("", b"boom\n"), None);
     }
 }

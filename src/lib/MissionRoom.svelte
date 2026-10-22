@@ -80,6 +80,9 @@
     moveLabel,
     ownerLine,
     planMission,
+    plannerWaiting,
+    plannerLimitWait,
+    limitWaitSentence,
     plannerError,
     plannerLine,
     plannerRefusal,
@@ -147,6 +150,8 @@
   let busy = $state(false);
   /** The last planner press that failed, in words (step 1.3). */
   let plannerFailure = $state<HumanError | null>(null);
+  /** `plannerFailure` is a usage-limit wait, not a failure. */
+  let plannerIsWait = $state(false);
   let plannerDetails = $state(false);
 
   const mission = $derived(detail?.mission ?? null);
@@ -163,6 +168,7 @@
     `${proposals.ids.length} ${proposals.ids.length === 1 ? 'task' : 'tasks'}${proposals.waves > 1 ? ` · ${proposals.waves} waves` : ''}`,
   );
   const events = $derived(detail ? roomEvents(detail) : []);
+  const limitWait = $derived(detail ? plannerLimitWait(detail) : null);
   const itemById = $derived(new Map((detail?.items ?? []).map((i) => [i.id, i])));
   const needsYou = $derived(!!detail && !!mission && !isFinal(mission.state) && (!!mission.waiting_on || waitsOnPerson(detail)));
 
@@ -285,10 +291,12 @@
   async function act<T>(p: Promise<Result<T>>): Promise<T | null> {
     busy = true;
     notice = null;
+    ciRed = false;
     try {
       const r = await p;
       if (!r.ok) {
         notice = readErrorText(r.error);
+        ciRed = r.error.code === 'E_CI_FAILING';
         if (r.error.code === 'E_CONFLICT') await load();
         return null;
       }
@@ -407,9 +415,13 @@
   let confirmMove = $state<string | null>(null);
   let moreEl = $state<HTMLElement>();
 
-  async function move(to: string) {
+  /** The last Complete was refused for red CI on the mission's PRs: offer
+   *  a person's override under the notice. */
+  let ciRed = $state(false);
+
+  async function move(to: string, ciOverride = false) {
     if (!mission) return;
-    await act(setMissionState(mission.id, to, mission.version));
+    await act(setMissionState(mission.id, to, mission.version, ciOverride));
   }
 
   function pickFinal(to: string) {
@@ -490,6 +502,7 @@
   async function askPlanner() {
     if (!mission) return;
     plannerFailure = null;
+    plannerIsWait = false;
     plannerDetails = false;
     busy = true;
     notice = null;
@@ -503,6 +516,10 @@
         return;
       }
       if (r.value.refused) plannerFailure = plannerRefusal(r.value.refused);
+      else if (r.value.waiting) {
+        plannerFailure = plannerWaiting(r.value.waiting);
+        plannerIsWait = true;
+      }
       await load();
     } finally {
       busy = false;
@@ -577,16 +594,23 @@
   let grantLevel = $state(2);
   let grantHours = $state(8);
   let grantBudget = $state('');
+  /** Until the mission completes (a finite mission's), bounded by the budget. */
+  let grantUntilDone = $state(false);
   /** Hosts the grant lets the loop run on; none ticked: any host. */
   let grantHosts = $state<string[]>([]);
 
   async function grant() {
     if (!mission) return;
     const cents = Math.round(Number(grantBudget) * 100);
+    const untilDone = grantUntilDone && mission.mode === 'finite';
+    if (untilDone && !(grantBudget.trim() && cents > 0)) {
+      notice = 'A grant until the mission completes needs a budget.';
+      return;
+    }
     const out = await act(
       grantMission(mission.id, {
         level: grantLevel,
-        hours: grantHours,
+        ...(untilDone ? { until_done: true } : { hours: grantHours }),
         ...(grantBudget.trim() && cents > 0 ? { budget_cents: cents } : {}),
         ...(grantHosts.length > 0 ? { hosts: [...grantHosts] } : {}),
       }),
@@ -594,6 +618,7 @@
     if (out) {
       granting = false;
       grantHosts = [];
+      grantUntilDone = false;
     }
   }
 
@@ -874,6 +899,19 @@
             <button class="btn btn--quiet" type="button" data-testid="mission-move-keep" onclick={() => (confirmMove = null)}>Keep</button>
           </div>
         {/if}
+        {#if mayChange && ciRed}
+          <div class="row confirm-move" role="alertdialog" aria-label="CI is failing" data-testid="mission-ci-override-row">
+            <span>CI is failing on this mission's pull requests. Complete it anyway? Fleet records that you did.</span>
+            <button
+              class="btn btn--danger"
+              type="button"
+              disabled={busy || changeBlocked}
+              data-testid="mission-ci-override"
+              onclick={() => void move('completed', true)}>Complete anyway</button
+            >
+            <button class="btn btn--quiet" type="button" data-testid="mission-ci-keep" onclick={() => (ciRed = false)}>Keep</button>
+          </div>
+        {/if}
       </header>
 
       <div class="scroll">
@@ -928,8 +966,12 @@
             {/each}
           </ol>
 
+          {#if limitWait && !plannerFailure}
+            <p class="limit-wait" data-testid="mission-limit-wait">{limitWaitSentence(limitWait)}</p>
+          {/if}
+
           {#if plannerFailure}
-            <div class="card planner-error" role="alert" data-testid="mission-planner-error">
+            <div class="card planner-error" class:planner-wait={plannerIsWait} role="alert" data-testid="mission-planner-error">
               <p class="title">{plannerFailure.title}</p>
               <p>{plannerFailure.text}</p>
               <div class="row">
@@ -1354,7 +1396,9 @@
                   >
                   {#if plan.autonomy.grant}
                     <button class="btn btn--quiet" type="button" disabled={busy || changeBlocked} data-testid="mission-revoke" onclick={() => void revokeGrant()}
-                      >End the grant (L{plan.autonomy.grant.level}, until {new Date(plan.autonomy.grant.expires_at * 1000).toLocaleString()})</button
+                      >End the grant (L{plan.autonomy.grant.level}, {plan.autonomy.grant.until_done
+                        ? 'until the mission completes'
+                        : `until ${new Date(plan.autonomy.grant.expires_at * 1000).toLocaleString()}`})</button
                     >
                   {:else}
                     <button class="btn btn--quiet" type="button" disabled={busy || changeBlocked} data-testid="mission-grant" onclick={() => (granting = !granting)}
@@ -1373,9 +1417,24 @@
                       </select></label
                     >
                     <div class="row">
-                      <label class="field inline">Hours <input type="number" min="1" max="168" bind:value={grantHours} class="role" /></label>
-                      <label class="field inline">Budget $ <input placeholder="none" bind:value={grantBudget} class="role" data-testid="mission-grant-budget" /></label>
+                      {#if !(grantUntilDone && mission.mode === 'finite')}
+                        <label class="field inline">Hours <input type="number" min="1" max="168" bind:value={grantHours} class="role" /></label>
+                      {/if}
+                      <label class="field inline"
+                        >Budget $ <input
+                          placeholder={grantUntilDone && mission.mode === 'finite' ? 'required' : 'none'}
+                          bind:value={grantBudget}
+                          class="role"
+                          data-testid="mission-grant-budget"
+                        /></label
+                      >
                     </div>
+                    {#if mission.mode === 'finite'}
+                      <label class="field inline"
+                        ><input type="checkbox" bind:checked={grantUntilDone} data-testid="mission-grant-until-done" /> Until the mission completes
+                        <span class="muted small">(the budget is its only bound)</span></label
+                      >
+                    {/if}
                     {#if $hosts.length > 0}
                       <fieldset class="hosts" data-testid="mission-grant-hosts">
                         <legend>Hosts <span class="muted small">(none ticked: any)</span></legend>
@@ -2164,6 +2223,17 @@
   .planner-error .title {
     color: var(--danger);
     font-weight: 600;
+  }
+  .planner-wait {
+    border-color: var(--status-waiting);
+  }
+  .planner-wait .title {
+    color: var(--status-waiting);
+  }
+  .limit-wait {
+    margin: var(--space-1) 0 0;
+    font-size: var(--text-xs);
+    color: var(--status-waiting);
   }
   .planner-error .details {
     margin: var(--space-1) 0 0;

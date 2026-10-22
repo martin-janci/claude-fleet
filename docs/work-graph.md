@@ -1040,14 +1040,26 @@ takes.
 
 The gate is what stands between a work item and *done*, computed on every
 read from the item's acceptance lines (`work_link { done_when }`: `ci`,
-`review`, `test:<cmd>`, `person` or free text) and its
-open subtasks (a subtask counts unless it is done or a rejected proposal):
+`review`, `test:<cmd>`, `person` or free text), its
+open subtasks (a subtask counts unless it is done or a rejected proposal),
+and — for an item an implement run worked on — that run's **evidence**:
 
 | State | When |
 |---|---|
-| **passed** | every acceptance line passed (an item with none has none to fail) and no subtask is open |
-| **unverified** | no line failed and no subtask is open, but not every line has passed yet |
-| **blocked** | a line failed, or a subtask is open |
+| **passed** | every acceptance line passed (an item with none has none to fail), no subtask is open, and the evidence is there |
+| **unverified** | nothing failed and no subtask is open, but not every line has passed yet, or the implement run has not finished |
+| **blocked** | a line failed, a subtask is open, or the implement run left no evidence |
+
+**Run evidence.** What git showed when the item's latest implement run
+finished: at least one commit or one changed file. A run that reports
+*done* with neither — nothing committed, nothing changed, or a checkout git
+could not read — leaves the gate blocked, and the mission card says what is
+missing (*No run evidence: the implement run committed nothing…*). A person
+answers it with **Override…** and a reason (`work_link { verify, item_id,
+line: "run evidence", ok: true, note }`; the reason is required). The
+override holds for that run only: a newer implement run needs evidence, or
+an override, of its own. The mission loop never closes an item with missing
+evidence; it raises an ask card with the missing evidence instead.
 
 An **agent** (a per-host token, the operator, or a peer hub) setting a
 local task to `done` while the gate has not passed is refused with `E_INVALID_STATE`, and the refusal
@@ -1057,7 +1069,8 @@ subtask the agent's organisation may not see is named only as "a subtask
 is open". A **person** is never refused: the panel shows the gate and a
 **Mark done** button. Fleet never moves a task to done because a report
 says *done*. A tracker ticket's status is not gated here; a mission keeps
-its own close step.
+its own close step, which refuses the loop (never a person) when the run
+evidence is missing.
 
 ### The result panel
 

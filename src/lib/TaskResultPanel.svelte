@@ -8,6 +8,7 @@
   import {
     ASK_ABOUT_RESULT,
     createFollowupTask,
+    evidenceMet,
     headline,
     validationLines,
     type ResultPr,
@@ -64,6 +65,8 @@
   const lines = $derived(validationLines(result));
   const unmet = $derived(result.gate.checks.filter((c) => c.state !== 'pass'));
   const ev = $derived(result.evidence);
+  // The completion gate's reading of the implement run (`gate.evidence`).
+  const runEv = $derived(result.gate.evidence ?? null);
   const commits = $derived(ev?.commits ?? []);
   const files = $derived(ev?.files ?? []);
   const moreCommits = $derived(Math.max(0, (ev?.commits_total ?? 0) - commits.length));
@@ -173,6 +176,14 @@
             {c.line}{#if c.detail}<span class="muted"> — {c.detail}</span>{/if}
           </li>
         {/each}
+        {#if runEv && !evidenceMet(runEv)}
+          <li data-testid="task-result-run-evidence">
+            <span class="mark {runEv.state === 'missing' ? 'fail' : 'pending'}"
+              >{runEv.state === 'missing' ? 'no run evidence' : 'pending'}</span
+            >
+            Run evidence<span class="muted"> — {runEv.detail}</span>
+          </li>
+        {/if}
         {#each result.gate.open_children as c (c.id)}
           <li>
             <span class="mark pending">open subtask</span>

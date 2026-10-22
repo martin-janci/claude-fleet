@@ -1019,15 +1019,36 @@ finite mission whose checks all hold. A locked `claude -p` planner
 (`planner.rs`, no tools, worker text fenced as untrusted, all or nothing,
 at most `policy.max_planner_runs_per_hour`) breaks a goal down and decides
 what a failure needs; its commands become cards in the mission's confirm
-queue. `git merge-tree` checks the finished branches against each other and
-proposes a resolve task for a conflict (`integrate.rs`). What the loop does by
+queue. An answer is refused when it leaves a merge-wave item (titled
+"Merge wave <n>" / "Integrate wave <n>") short of an item of its wave —
+the latest wave it waits for — counting this answer's creates and edges;
+a gap a person already accepted does not refuse later answers
+(`check_merge_waves`), and the next snapshot shows why it was refused.
+The same rule refuses a plan import (`mission_import`, before any row is
+written, naming steps) and a person's accept (`accept_many`, a single
+accept) that would leave a merge-wave item short; a proposal still
+waiting counts toward its wave but merges nothing until accepted, and
+the mission's root is no item of a wave (`check_merge_change`).
+`git merge-tree` checks the finished branches against each other and
+proposes ONE task per repo that integrates every live branch into one
+(`integrate.rs`); a branch another member's head already contains is left
+out, so a finished integration supersedes what it merged, and no new card is
+raised while one is open (before 2026-10-21 each conflicting pair got its
+own task and the resolutions conflicted again). What the loop does by
 itself is the least of the mission's level, `orchestrator.max_level`
 (default 1: a person presses every step) and a person's grant
 (`work_link { mission_grant }`: level, hours, budget, hosts, and the login
 `profile` its runs bill, migration 137); brakes pause the mission on a spent budget or no
 progress, a run on an account at or past `accounts.pause_at` waits (one
-`account_limit` event says why) until the account is back under it, and
-`missions_pause_all` pauses
+`account_limit` event says why) until the account is back under it. The
+planner does the same (TASK-291, `orchestrate/limit.rs`): it passes over a
+login at `accounts.pause_at` for the next one with headroom (the grant's or
+the host's own, the host's other profiles, then the next planner host), an
+answer that is Claude Code's usage-limit message is a `limit_wait` event on
+that login (until the reset the answer or the account's reading names, else
+an hour), not `refused`, and with no login left `PlanOutcome.waiting` says
+the mission waits; the loop asks again once a login has headroom, waking at
+the reset. `missions_pause_all` pauses
 every mission and ends its grants. `orchestrator.enabled` is the kill switch.
 A continuous mission wakes on `policy.wake_every_secs`; a finished run, a
 member's status moving on the tracker and a worker's PR checks moving each

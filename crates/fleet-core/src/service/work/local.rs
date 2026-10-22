@@ -658,6 +658,9 @@ pub fn decide(
         _ => None,
     };
     let s = lock(store)?;
+    if accept {
+        super::graph::check_accept_merge_waves(&s, &[id])?;
+    }
     let row = match merge_into {
         Some(into) => {
             s.merge_proposal_into(id, into)?;
