@@ -5163,7 +5163,11 @@ fn the_served_definition_budget_stays_bounded() {
     /// trimmed to make room) measured the client full surface at 136,874
     /// bytes for 158 tools (866 a tool) and the master at 129,508 bytes for
     /// 154 tools (840 a tool).
-    const BYTES_PER_TOOL: usize = 867;
+    /// Raised to 880 on 2026-10-22: `task_report` (its parameter docs already
+    /// cut to a few words each) on top of the TASK-291/293/295 mission tools
+    /// measured the client full surface at 139,221 bytes for 160 tools (870 a
+    /// tool) and the master at 131,772 bytes for 156 tools (844 a tool).
+    const BYTES_PER_TOOL: usize = 880;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
