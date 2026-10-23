@@ -8,6 +8,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Releases are cut with `scripts/release.sh` — see [docs/RELEASING.md](docs/RELEASING.md).
 Entries before 0.2.4 were plain version bumps and were not recorded individually.
 
+## [0.6.5-dev.43.desktop.gf3bf998] - 2026-10-23
+
+### Added
+- **tasks:** task_report tool, an explicit way for a worker to finish its task
+- **missions:** failing CI on a mission's PRs holds Complete until a person overrides
+- **missions:** the planner waits out a usage limit instead of refusing
+
+### Changed
+- **decide:** the pane rules now read the Stop-hooks spinner screen
+- **relay:** check the dropped listener's tasks, not a reconnect to its port
+- one project lookup in fleets.ts, one failure path in New session
+- **mcp:** raise the tool-definition budget to 880 bytes a tool
+
+### Fixed
+- **deps:** tokio 1.53.3 for RUSTSEC-2026-0386
+- **deps:** tokio 1.53.3 for RUSTSEC-2026-0386
+- **deps:** bump tokio to 1.54.1 for RUSTSEC-2026-0386
+- **deps:** tokio 1.53.3 for RUSTSEC-2026-0386
+- **deps:** tokio 1.53.3 for RUSTSEC-2026-0386
+- **sessions:** keep the Thinking/Working indicator on for the whole turn
+- **fleets:** keep another fleet's session from attaching to no-pane rows or driving the hidden primary
+- **missions:** keep per-mission room state with its mission, flag hubs that drop until_done, focus the evidence override form
+- **fleet-agents:** keep pr_review's marker and findings, never block unattended
+- **missions:** re-read task_report evidence at Stop, retry failed git reads, end until-done grants when a mission leaves finite mode
+- **missions:** merge-wave rule skips finished merges and loop integrations; integration card stays under the payload cap
+- **missions:** planner limit fallback skips signed-out logins, clears waits a later login answered, grant lifts the ask only while it holds
+- **toolkit:** say what a device can do with the catalog, and list host-only skills
+- **new-session:** offer every extra fleet's machines, cloning the repo there first
+- one-line hub pin refusal; drop a duplicate test suite and repeated test setup
 ## [0.6.4] - 2026-10-21
 
 ### Added
@@ -4034,6 +4063,7 @@ added by hand for that reason — see #152._
   index, and new Getting Started, Concepts, and Troubleshooting guides; refreshed
   and cross-linked the Control API guide.
 
+[0.6.5-dev.43.desktop.gf3bf998]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.6.5-dev.43.desktop.gf3bf998
 [0.6.4]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.6.4
 [0.6.2]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.6.2
 [0.6.1]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.6.1
