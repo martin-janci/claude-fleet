@@ -56,7 +56,7 @@ fn ok_json_compact_is_compact_and_strips_nulls() {
     assert!(text.contains("\"a\":1"));
 }
 
-fn host_caller(alias: &str, mode: TokenMode) -> Caller {
+pub(super) fn host_caller(alias: &str, mode: TokenMode) -> Caller {
     Caller {
         api: None,
         host_alias: Some(alias.into()),
@@ -9088,13 +9088,7 @@ async fn within_the_brief_the_operators_prompt_to_its_own_session_is_pre_approve
     let (out, approval) =
         guard::tracking_approval(t.queue_prompt(Extension(operator()), Parameters(queue(on_b))))
             .await;
-    if let Err(e) = &out {
-        assert!(
-            !e.message.starts_with("E_CONFIRM_REQUIRED"),
-            "{}",
-            e.message
-        );
-    }
+    assert_not_asked(&out);
     assert_eq!(approval, Some(crate::store::APPROVAL_PRE_APPROVED));
     let events = t
         .store
@@ -9144,15 +9138,7 @@ async fn within_the_brief_a_thread_control_no_longer_follows_asks_again() {
         }))
         .unwrap()
     };
-    let pre_approved = |out: Result<_, McpError>| {
-        if let Err(e) = out {
-            assert!(
-                !e.message.starts_with("E_CONFIRM_REQUIRED"),
-                "{}",
-                e.message
-            );
-        }
-    };
+    let pre_approved = |out: Result<CallToolResult, McpError>| assert_not_asked(&out);
     // Followed: no card.
     pre_approved(
         t.queue_prompt(Extension(operator()), Parameters(queue(on_b)))
@@ -9202,42 +9188,9 @@ async fn within_the_brief_a_thread_control_no_longer_follows_asks_again() {
 #[tokio::test]
 async fn at_autopilot_pause_all_makes_a_grant_covered_start_ask() {
     let (s, pid, _) = two_host_store();
-    let now = crate::store::now_unix();
-    let m = s
-        .create_mission(
-            &crate::store::NewMission {
-                name: "m",
-                goal: "g",
-                ..Default::default()
-            },
-            "fleet",
-        )
-        .unwrap()
-        .id;
-    s.add_grant(
-        m,
-        &crate::store::NewGrant {
-            level: 3,
-            granted_by: "person:1",
-            hosts: None,
-            expires_at: now + 3600,
-            ..Default::default()
-        },
-    )
-    .unwrap();
-    s.set_mission_state(m, None, "active", "fleet").unwrap();
-    for (k, v) in [
-        (crate::service::settings::ORCHESTRATOR_MAX_LEVEL, "3"),
-        (crate::service::settings::CONTROL_AUTO_CONTINUE, "true"),
-        (crate::service::settings::CONTROL_AUTO_CONTINUE_MINUTES, "2"),
-    ] {
-        s.set_setting(k, v).unwrap();
-    }
-    assert_eq!(
-        crate::service::autonomy::position(&s),
-        crate::service::autonomy::Position::Autopilot
-    );
+    active_mission_with_grant(&s, None);
     let t = guarded_tools(s, true);
+    set_position(&t, crate::service::autonomy::Position::Autopilot);
     let start = || {
         serde_json::from_value::<NewSessionParams>(serde_json::json!({
             "host_alias": "hostb", "project_id": pid, "name": "x"
@@ -9304,6 +9257,47 @@ fn guarded_tools(s: Store, approver: bool) -> FleetTools {
         Arc::new(crate::service::tunnel::TunnelSupervisor::new()),
         if approver { g } else { g.without_approver() },
     )
+}
+
+/// The call went through without a confirm card (it may still fail for
+/// another reason).
+fn assert_not_asked(out: &Result<CallToolResult, McpError>) {
+    if let Err(e) = out {
+        assert!(
+            !e.message.starts_with("E_CONFIRM_REQUIRED"),
+            "{}",
+            e.message
+        );
+    }
+}
+
+/// An active mission with a level-3 grant for the next hour, on `hosts`
+/// (`None`: every host).
+fn active_mission_with_grant(s: &Store, hosts: Option<Vec<String>>) -> i64 {
+    let m = s
+        .create_mission(
+            &crate::store::NewMission {
+                name: "m",
+                goal: "g",
+                ..Default::default()
+            },
+            "fleet",
+        )
+        .unwrap()
+        .id;
+    s.add_grant(
+        m,
+        &crate::store::NewGrant {
+            level: 3,
+            granted_by: "person:1",
+            hosts,
+            expires_at: crate::store::now_unix() + 3600,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    s.set_mission_state(m, None, "active", "fleet").unwrap();
+    m
 }
 
 fn confirm_nonce_of(e: &McpError) -> String {
@@ -22287,15 +22281,7 @@ async fn session_care_lets_the_operator_restart_and_retire_its_own_sessions() {
         serde_json::from_value::<SafeKillSessionParams>(serde_json::json!({ "session_id": id }))
             .unwrap()
     };
-    let not_asked = |out: &Result<CallToolResult, McpError>| {
-        if let Err(e) = out {
-            assert!(
-                !e.message.starts_with("E_CONFIRM_REQUIRED"),
-                "{}",
-                e.message
-            );
-        }
-    };
+    let not_asked = assert_not_asked;
 
     // Review w30-10: care is on by default (the owner's 2026-10-20 choice):
     // on a store that never set it, a restart of its own session at Within
@@ -22422,13 +22408,7 @@ async fn session_care_restarts_ask_once_a_sessions_hourly_budget_is_spent() {
             t.restart_session(Extension(operator()), Parameters(restart(on_b))),
         )
         .await;
-        if let Err(e) = &out {
-            assert!(
-                !e.message.starts_with("E_CONFIRM_REQUIRED"),
-                "{}",
-                e.message
-            );
-        }
+        assert_not_asked(&out);
         assert_eq!(approval, Some(crate::store::APPROVAL_PRE_APPROVED));
     }
     let asked = t
@@ -22490,33 +22470,7 @@ async fn at_autopilot_the_operator_starts_a_task_inside_a_grant_without_a_card()
         .unwrap_err();
     confirm_nonce_of(&asked);
 
-    let m = {
-        let st = t.store.lock().unwrap();
-        let m = st
-            .create_mission(
-                &crate::store::NewMission {
-                    name: "m",
-                    goal: "g",
-                    ..Default::default()
-                },
-                "fleet",
-            )
-            .unwrap()
-            .id;
-        st.add_grant(
-            m,
-            &crate::store::NewGrant {
-                level: 3,
-                granted_by: "person:1",
-                hosts: Some(vec!["hostb".into()]),
-                expires_at: crate::store::now_unix() + 3600,
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        st.set_mission_state(m, None, "active", "fleet").unwrap();
-        m
-    };
+    let m = active_mission_with_grant(&t.store.lock().unwrap(), Some(vec!["hostb".into()]));
     let member = item("MEMBER-1", Some(m));
     let (out, approval) = guard::tracking_approval(t.work_link(
         Extension(operator()),

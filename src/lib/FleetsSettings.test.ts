@@ -9,20 +9,11 @@ vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(async () => () => {}) })
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import FleetsSettings from './FleetsSettings.svelte';
 import { PRIMARY, _resetFleetsForTest, type FleetInfo } from './fleets';
+import { fleetInfo } from './fleets_fixture';
 
 const inv = mockedInvoke as ReturnType<typeof vi.fn>;
 
-const primary: FleetInfo = {
-  id: PRIMARY,
-  label: 'home',
-  url: null,
-  color: '#5b8def',
-  primary: true,
-  local: true,
-  client_name: null,
-  connection: null,
-  unavailable: null,
-};
+const primary = fleetInfo(PRIMARY, { label: 'home' });
 const extra = (id: string, over: Partial<FleetInfo> = {}): FleetInfo => ({
   ...primary,
   id,

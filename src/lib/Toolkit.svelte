@@ -3,13 +3,17 @@
   today's Assets workspace: Skills, the catalog's skills as a host
   matrix with drift per host, and Assets, the workspace itself (layers and
   changesets) unchanged. Sync and Edit hand over to the Assets tab, where the
-  plan, the confirm and the editor already live.
+  plan, the confirm and the editor already live. It asks the catalog's
+  config once it opens, so a window that cannot manage the catalog (none set
+  up, or a paired device the hub has not granted it) says what to do instead
+  of offering buttons the Assets tab would ignore.
 -->
 <script lang="ts">
-  import { onMount } from 'svelte';
-  import { catalog, loadAssets } from './assets';
+  import { untrack } from 'svelte';
+  import { catalog, loadAssets, loadCatalogConfig } from './assets';
   import { requestAssetsView } from './app_views';
-  import { skillMatrix, toolkitTab, TOOLKIT_KIND, type ToolkitTab } from './toolkit_skills';
+  import { accessOf, skillMatrix, toolkitTab, TOOLKIT_KIND, type ToolkitAccess, type ToolkitTab } from './toolkit_skills';
+  import { hubStatus, unavailableReason } from './hub';
   import { composerPresets } from './composer_presets';
   import { downloads, downloadsOpen } from './downloads';
   import { goTo } from './destination';
@@ -48,10 +52,33 @@
   });
   const activeDownloads = $derived($downloads.filter((d) => d.state === 'fetching').length);
 
-  // The catalog is primed at launch; refresh it quietly when Toolkit opens.
-  onMount(() => {
+  // The catalog is primed at launch; refresh it quietly when Toolkit opens,
+  // and again once the hub status resolves (it can after mount).
+  let access = $state<ToolkitAccess>('unknown');
+  async function check() {
     void loadAssets();
+    if ($hubStatus.unavailable) {
+      access = 'unavailable';
+      return;
+    }
+    access = accessOf(await loadCatalogConfig());
+  }
+  $effect(() => {
+    void [$hubStatus.remote, $hubStatus.unavailable];
+    untrack(() => void check());
   });
+  const canManage = $derived(access === 'manage' || access === 'unknown');
+  const onHub = $derived($hubStatus.remote);
+  const grantCmd = $derived(`fleet-hub client grant ${$hubStatus.client_name ?? '<this device>'} assets`);
+  const blockedWhy = $derived(
+    access === 'read_only'
+      ? "This device may only look: the hub has not granted it the asset catalog."
+      : access === 'unconfigured'
+        ? 'Set up the asset catalog first.'
+        : access === 'unavailable'
+          ? (unavailableReason($hubStatus) ?? undefined)
+          : undefined,
+  );
 
   function openAssets(r?: Parameters<typeof requestAssetsView>[0]) {
     toolkitTab.set('assets');
@@ -104,28 +131,67 @@
     {@const tab = $toolkitTab}
     {@const page = PAGES[tab]}
     <div class="body skills" role="region" aria-label={page.title} data-testid="toolkit-{tab === 'skills' ? 'skills' : tab}">
-      {#if !$catalog}
-        <div class="empty" data-testid="toolkit-skills-empty">
-          <p>No catalog is loaded yet. Set one up, or pull it, in the Assets catalog.</p>
-          <Button onclick={() => openAssets()}>Open the Assets catalog</Button>
+      {#if access === 'unconfigured'}
+        <div class="notice" data-testid="toolkit-setup">
+          <h2>No asset catalog yet</h2>
+          <p>
+            Fleet keeps your skills, MCP servers and hooks in one git repository, the catalog, installs them on
+            every host and shows here which host has which version. Point it at a repository (or an empty folder)
+            to start; the {page.noun}s already on your hosts can then be imported into it.
+          </p>
+          {#if onHub}<p class="muted">The catalog lives on the hub's machine.</p>{/if}
+          <Button variant="primary" testid="toolkit-setup-open" onclick={() => openAssets()}>Set up the catalog…</Button>
         </div>
+      {:else if access === 'read_only'}
+        <div class="notice" data-testid="toolkit-read-only">
+          <p>
+            <strong>Read-only.</strong> This device sees what is installed where, but the hub has not granted it the
+            asset catalog, so it cannot add, edit or sync anything. On the hub's machine, run:
+          </p>
+          <pre class="cmd" data-testid="toolkit-grant-cmd">{grantCmd}</pre>
+          <p class="muted">Then open Toolkit again. A person who holds the hub's <code>assets-admin</code> role has it on every device.</p>
+        </div>
+      {:else if access === 'unavailable'}
+        <div class="notice" data-testid="toolkit-unavailable"><p>{blockedWhy}</p></div>
+      {/if}
+      {#if !$catalog}
+        {#if access !== 'unconfigured'}
+          <div class="empty" data-testid="toolkit-skills-empty">
+            <p>No catalog is loaded yet. Set one up, or pull it, in the Assets catalog.</p>
+            <Button onclick={() => openAssets()}>Open the Assets catalog</Button>
+          </div>
+        {/if}
       {:else}
         <div class="bar">
           <div>
             <h2>{page.title}</h2>
             <p class="sub" data-testid="toolkit-{tab}-summary">
-              {matrix.rows.length}
-              {matrix.rows.length === 1 ? page.noun : `${page.noun}s`}{#if matrix.outOfSync > 0}{' '}· {matrix.outOfSync} out of sync{/if}
+              {matrix.rows.length - matrix.unmanaged}
+              {matrix.rows.length - matrix.unmanaged === 1 ? page.noun : `${page.noun}s`}{#if matrix.outOfSync > 0}{' '}· {matrix.outOfSync} out of sync{/if}{#if matrix.unmanaged > 0}{' '}· {matrix.unmanaged} on hosts only{/if}
             </p>
           </div>
           <span class="grow"></span>
-          <Button testid="toolkit-add" onclick={() => openAssets({ newKind: TOOLKIT_KIND[tab] })}>+ Add {page.noun}</Button>
-          <Button variant="primary" testid="toolkit-sync" onclick={() => openAssets({ command: 'sync' })}
-            >Sync all hosts…</Button
+          <Button
+            testid="toolkit-add"
+            disabled={!canManage}
+            title={blockedWhy}
+            onclick={() => openAssets({ newKind: TOOLKIT_KIND[tab] })}>+ Add {page.noun}</Button
+          >
+          <Button
+            variant="primary"
+            testid="toolkit-sync"
+            disabled={!canManage}
+            title={blockedWhy ?? 'Install the catalog on every host; you review the plan first'}
+            onclick={() => openAssets({ command: 'sync' })}>Sync all hosts…</Button
           >
         </div>
         {#if matrix.rows.length === 0}
-          <p class="none">The catalog has no {page.noun}s yet.</p>
+          <p class="none" data-testid="toolkit-none">
+            No {page.noun}s in the catalog or on any host yet.{#if canManage}{' '}Add one with “+ Add {page.noun}”, or
+              import one from a host in the <button type="button" class="link" onclick={() => openAssets()}
+                >Assets catalog</button
+              >.{/if}
+          </p>
         {:else}
           <div class="scroll">
             <table class="matrix" data-testid="toolkit-{tab}-table">
@@ -154,9 +220,22 @@
                       >
                     {/each}
                     <td class="act">
-                      <Button size="sm" variant="quiet" label="Edit {row.name}" onclick={() => openAssets({ select: row.key })}
-                        >Edit</Button
-                      >
+                      {#if row.managed}
+                        <Button
+                          size="sm"
+                          variant="quiet"
+                          label="{canManage ? 'Edit' : 'View'} {row.name}"
+                          onclick={() => openAssets({ select: row.key })}>{canManage ? 'Edit' : 'View'}</Button
+                        >
+                      {:else}
+                        <Button
+                          size="sm"
+                          variant="quiet"
+                          label="{canManage ? 'Import' : 'View'} {row.name}"
+                          title={canManage ? 'Review it and import it into the catalog' : undefined}
+                          onclick={() => openAssets({ select: row.key })}>{canManage ? 'Import…' : 'View'}</Button
+                        >
+                      {/if}
                     </td>
                   </tr>
                 {/each}
@@ -341,8 +420,31 @@
   .cell.missing {
     color: var(--status-failed);
   }
-  .cell.none {
+  .cell.none,
+  .cell.unmanaged {
     color: var(--fg-muted);
+  }
+  .notice {
+    max-width: 64ch;
+    margin-bottom: var(--space-4);
+    padding: var(--space-3);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--bg-pane);
+    font-size: var(--text-sm);
+  }
+  .notice h2 { margin-bottom: var(--space-2); }
+  .notice p { margin: 0 0 var(--space-2); }
+  .notice .muted { color: var(--fg-muted); }
+  .cmd {
+    margin: 0 0 var(--space-2);
+    padding: var(--space-2);
+    border-radius: var(--radius-sm);
+    background: var(--bg);
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    user-select: text;
+    white-space: pre-wrap;
   }
   .act {
     text-align: right;

@@ -5,7 +5,10 @@
 // workspace (layers and changesets) unchanged, and Prompts & snippets, the
 // composer's quick-action chips (moved from Settings).
 import { writable } from 'svelte/store';
-import { hostOrderOf, catalogOf, type AssetKind, type AssetListing, type AssetSummary, type HostState } from './assets';
+import {
+  hostOrderOf, catalogOf, identitiesOf,
+  type AssetIdentity, type AssetKind, type AssetListing, type AssetSummary, type HostState,
+} from './assets';
 import { AGENT_LABELS } from './row_groups';
 import { keyOf } from './assets_workspace';
 import { readPref, writePref } from './prefs';
@@ -28,7 +31,7 @@ export const toolkitTab = writable<ToolkitTab>(readPref<ToolkitTab>('ui.toolkitT
 toolkitTab.subscribe((v) => writePref('ui.toolkitTab', v));
 
 /** One host's cell: the worst state across that host's harnesses. */
-export type SkillCellState = 'in_sync' | 'behind' | 'edited' | 'drifted' | 'missing' | 'none';
+export type SkillCellState = 'in_sync' | 'behind' | 'edited' | 'drifted' | 'missing' | 'unmanaged' | 'none';
 
 export interface SkillCell {
   state: SkillCellState;
@@ -47,16 +50,21 @@ export interface SkillRow {
   agents: string;
   cells: Record<string, SkillCell>;
   outOfSync: boolean;
+  /** False for a copy found on hosts that the catalog does not hold yet:
+   *  its action is Import, not Edit. */
+  managed: boolean;
 }
 
 export interface SkillMatrix {
   hosts: string[];
   rows: SkillRow[];
   outOfSync: number;
+  /** Rows found on hosts but not in the catalog. */
+  unmanaged: number;
 }
 
 // Higher wins when a host has several harnesses.
-const RANK: Record<SkillCellState, number> = { none: 0, in_sync: 1, behind: 2, missing: 3, edited: 4, drifted: 5 };
+const RANK: Record<SkillCellState, number> = { none: 0, unmanaged: 0, in_sync: 1, behind: 2, missing: 3, edited: 4, drifted: 5 };
 
 function cellStateOf(h: HostState): SkillCellState {
   if (h.state === 'in_sync') return 'in_sync';
@@ -71,6 +79,7 @@ const STATE_TITLE: Record<SkillCellState, string> = {
   edited: 'edited on host',
   drifted: 'drifted',
   missing: 'missing',
+  unmanaged: 'installed, not in the catalog',
   none: 'not installed',
 };
 
@@ -104,12 +113,24 @@ function cellOf(host: string, version: string, states: HostState[]): SkillCell {
 
 const OUT_OF_SYNC: ReadonlySet<SkillCellState> = new Set(['behind', 'edited', 'drifted', 'missing']);
 
-/** The catalog's skills (or another kind's assets) as rows of a host matrix. */
+/** What the hosts hold that fleet itself or the harness put there: never
+ *  offered for import (AssetList hides them the same way). */
+const internal = (i: AssetIdentity) => i.class === 'fleet_internal' || i.class === 'harness_internal';
+
+/** The catalog's skills (or another kind's assets) as rows of a host matrix,
+ *  then the ones found on hosts that the catalog does not hold yet: without
+ *  them a fleet whose skills were never imported reads as having none. */
 export function skillMatrix(listing: AssetListing | null, kind: AssetKind = 'skill'): SkillMatrix {
   const skills = (listing?.assets ?? [])
     .filter((a) => a.kind === kind)
     .sort((a, b) => a.name.localeCompare(b.name) || catalogOf(a).localeCompare(catalogOf(b)));
-  const hosts = hostOrderOf(skills.flatMap((a) => a.hosts.map((h) => h.host_alias)));
+  const found = (listing ? identitiesOf(listing) : [])
+    .filter((i) => i.kind === kind && !internal(i))
+    .sort((a, b) => a.name.localeCompare(b.name));
+  const hosts = hostOrderOf([
+    ...skills.flatMap((a) => a.hosts.map((h) => h.host_alias)),
+    ...found.flatMap((i) => i.hosts.map((h) => h.host_alias)),
+  ]);
   const rows = skills.map((a: AssetSummary): SkillRow => {
     const cells: Record<string, SkillCell> = {};
     for (const host of hosts) cells[host] = cellOf(host, a.version, a.hosts.filter((h) => h.host_alias === host));
@@ -122,7 +143,56 @@ export function skillMatrix(listing: AssetListing | null, kind: AssetKind = 'ski
       agents: harnesses.length ? harnesses.map(harnessLabel).join(', ') : 'any',
       cells,
       outOfSync: Object.values(cells).some((c) => OUT_OF_SYNC.has(c.state)),
+      managed: true,
     };
   });
-  return { hosts, rows, outOfSync: rows.filter((r) => r.outOfSync).length };
+  const unmanaged = found.map((i): SkillRow => {
+    const cells: Record<string, SkillCell> = {};
+    for (const host of hosts) {
+      const on = i.hosts.filter((h) => h.host_alias === host);
+      cells[host] = on.length
+        ? {
+            state: 'unmanaged',
+            word: 'found',
+            title: `${host}: ${on.map((h) => harnessLabel(h.harness)).join(', ')}, ${STATE_TITLE.unmanaged}`,
+          }
+        : { state: 'none', word: '—', title: `${host}: not installed` };
+    }
+    const harnesses = [...new Set(i.hosts.map((h) => h.harness))].sort();
+    return {
+      key: keyOf({ type: 'identity', kind: i.kind, name: i.name }),
+      name: i.name,
+      description: i.class === 'needs_person' && i.reason ? `Not in the catalog · ${i.reason}` : 'Not in the catalog',
+      version: '',
+      agents: harnesses.map(harnessLabel).join(', '),
+      cells,
+      outOfSync: false,
+      managed: false,
+    };
+  });
+  return {
+    hosts,
+    rows: [...rows, ...unmanaged],
+    outOfSync: rows.filter((r) => r.outOfSync).length,
+    unmanaged: unmanaged.length,
+  };
+}
+
+/** What this window may do with the catalog, so Toolkit says so rather than
+ *  offering buttons the Assets tab then ignores. */
+export type ToolkitAccess =
+  /** Not known yet, or the check failed for another reason: offer everything. */
+  | 'unknown'
+  | 'manage'
+  /** No catalog is set up (here, or on the hub this device may manage). */
+  | 'unconfigured'
+  /** A paired device the hub has not granted the catalog: it can only look. */
+  | 'read_only'
+  /** A configured hub this launch cannot use. */
+  | 'unavailable';
+
+/** The access a `catalog_config` answer means. */
+export function accessOf(config: { ok: true; value: unknown } | { ok: false; error: { code: string } }): ToolkitAccess {
+  if (config.ok) return config.value ? 'manage' : 'unconfigured';
+  return config.error.code === 'E_FORBIDDEN' ? 'read_only' : 'unknown';
 }

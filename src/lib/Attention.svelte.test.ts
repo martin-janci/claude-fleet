@@ -15,6 +15,7 @@ import { notifyStuckOs, notifyStuckToast } from './notify';
 import { fleetSettings } from './fleet_settings';
 import { failing, type FailingRoutine } from './routines';
 import { PRIMARY, _resetFleetsForTest, _setFleetRowsForTest, _setFleetsForTest, emptyRows, type FleetInfo } from './fleets';
+import { fleetInfo } from './fleets_fixture';
 
 let nextId = 1;
 function row(over: Partial<SessionRow> = {}): SessionRow {
@@ -211,17 +212,7 @@ describe('Attention: the notifications matrix (11.9)', () => {
   });
 
   describe('extra fleets (review w01)', () => {
-    const base: FleetInfo = {
-      id: PRIMARY,
-      label: 'home',
-      url: null,
-      color: '#5b8def',
-      primary: true,
-      local: true,
-      client_name: null,
-      connection: null,
-      unavailable: null,
-    };
+    const base = fleetInfo(PRIMARY, { label: 'home' });
     const extra = (id: string, over: Partial<FleetInfo> = {}): FleetInfo => ({
       ...base,
       id,

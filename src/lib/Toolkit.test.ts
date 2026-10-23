@@ -3,6 +3,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { get } from 'svelte/store';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn(async () => { throw { code: 'E_TEST', message: 'no backend' }; }) }));
+import { invoke } from '@tauri-apps/api/core';
 import Toolkit from './Toolkit.svelte';
 import { catalog, type AssetListing } from './assets';
 import { assetsViewRequest } from './app_views';
@@ -25,6 +26,8 @@ beforeEach(() => {
   catalog.set(listing);
 });
 afterEach(() => {
+  vi.mocked(invoke).mockReset();
+  vi.mocked(invoke).mockImplementation(async () => { throw { code: 'E_TEST', message: 'no backend' }; });
   catalog.set(null);
   assetsViewRequest.set(null);
 });
@@ -112,6 +115,51 @@ describe('Toolkit (step 3.16)', () => {
     expect(await findByTestId('toolkit-prompts')).toBeTruthy();
     expect(getByTestId('preset-add')).toBeTruthy();
     toolkitTab.set('skills');
+  });
+
+  it('says the device is read-only, and how to grant it, instead of offering buttons that do nothing', async () => {
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === 'catalog_config') throw { code: 'E_FORBIDDEN', message: 'not granted' };
+      if (cmd === 'catalog_list_assets') return listing;
+      throw { code: 'E_TEST', message: 'no backend' };
+    });
+    const { findByTestId, getByTestId, getByRole } = render(Toolkit, { visible: true });
+    expect((await findByTestId('toolkit-grant-cmd')).textContent).toMatch(/^fleet-hub client grant .+ assets$/);
+    expect((getByTestId('toolkit-add') as HTMLButtonElement).disabled).toBe(true);
+    expect((getByTestId('toolkit-sync') as HTMLButtonElement).disabled).toBe(true);
+    expect(getByRole('button', { name: 'View steward' })).toBeTruthy();
+  });
+
+  it('explains the catalog and offers to set it up when there is none', async () => {
+    catalog.set(null);
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === 'catalog_config') return null;
+      throw { code: 'E_CATALOG_NOT_CONFIGURED', message: 'no catalog' };
+    });
+    const { findByTestId, queryByTestId } = render(Toolkit, { visible: true });
+    expect((await findByTestId('toolkit-setup')).textContent).toContain('git repository');
+    expect(queryByTestId('toolkit-skills-empty')).toBeNull();
+    await fireEvent.click(await findByTestId('toolkit-setup-open'));
+    expect(get(toolkitTab)).toBe('assets');
+  });
+
+  it('lists the skills found on hosts but not in the catalog, with Import', async () => {
+    const asked: unknown[] = [];
+    const stop = assetsViewRequest.subscribe((r) => r && asked.push(r));
+    catalog.set({
+      ...listing,
+      identities: [
+        { kind: 'skill', name: 'pdf', hosts: [{ host_alias: 'trn', harness: 'claude', host_hash: 'a' }], signature: 'trn', variants: 1, class: 'normal', reason: null },
+      ],
+    });
+    const { getByTestId, getByRole } = render(Toolkit, { visible: true });
+    expect(getByTestId('toolkit-skills-summary').textContent).toMatch(/1\s+skill · 1 out of sync · 1 on hosts only/);
+    const row = getByTestId('toolkit-skill-pdf');
+    expect(row.querySelector('[data-host="trn"]')!.getAttribute('data-state')).toBe('unmanaged');
+    await fireEvent.click(getByRole('button', { name: 'Import pdf' }));
+    stop();
+    expect(get(toolkitTab)).toBe('assets');
+    expect(asked).toEqual([expect.objectContaining({ select: 'identity:skill/pdf' })]);
   });
 
   it('passes the axe and audit checks', async () => {
