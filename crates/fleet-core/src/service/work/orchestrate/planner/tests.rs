@@ -164,6 +164,8 @@ fn member(id: i64, title: &str, depends_on: &[i64]) -> PlanNode {
         depends_on: depends_on.to_vec(),
         rejected: false,
         pending: false,
+        done: false,
+        integration: false,
     }
 }
 
@@ -304,4 +306,70 @@ fn the_snapshot_says_why_the_last_answer_was_refused() {
         snap.contains("refused by planner: <untrusted>a merge-wave item"),
         "{snap}"
     );
+}
+
+#[test]
+fn a_finished_merge_does_not_refuse_a_new_item_of_its_wave() {
+    // "Merge wave 1" (3) already ran: a review follow-up with no deps lands
+    // in wave 1, and is the next merge's to take in.
+    let members = [
+        PlanNode {
+            done: true,
+            ..member(1, "api", &[])
+        },
+        PlanNode {
+            done: true,
+            ..member(2, "ui", &[])
+        },
+        PlanNode {
+            done: true,
+            ..member(3, "Merge wave 1: land the PRs", &[1, 2])
+        },
+    ];
+    let added = parse_commands(r#"[{"command":"create_item","title":"Fix X"}]"#).unwrap();
+    check_merge_waves(&added, &members).unwrap();
+    // The same merge not yet done still asks for it.
+    let open = [
+        member(1, "api", &[]),
+        member(2, "ui", &[]),
+        member(3, "Merge wave 1: land the PRs", &[1, 2]),
+    ];
+    assert!(check_merge_waves(&added, &open).is_err());
+}
+
+#[test]
+fn the_loops_integration_item_joins_no_wave() {
+    // Wave 2 holds 3 and 4; "Merge wave 2" (5) waits for both. The loop's
+    // integration of 1 and 2 (6) sits in wave 2 too, yet no merge waits
+    // for it: accepting it is no new gap.
+    let mut before = vec![
+        member(1, "api", &[]),
+        member(2, "ui", &[]),
+        member(3, "search", &[1]),
+        member(4, "export", &[2]),
+        member(5, "Merge wave 2", &[3, 4]),
+        PlanNode {
+            rejected: true,
+            integration: true,
+            ..member(6, "Integrate #1 and #2 into one branch", &[1, 2])
+        },
+    ];
+    let mut after = before.clone();
+    after[5].rejected = false;
+    check_merge_change(&before, &after, |id| format!("item {id}")).unwrap();
+    // An ordinary item in its place is a gap.
+    before[5].integration = false;
+    after[5].integration = false;
+    assert!(check_merge_change(&before, &after, |id| format!("item {id}")).is_err());
+}
+
+#[test]
+fn a_merge_wave_title_takes_whole_words() {
+    assert!(is_merge_wave("Merge wave 1: land the PRs"));
+    assert!(is_merge_wave("Integrate wave 2"));
+    assert!(is_merge_wave("Integration of waves 1-2"));
+    assert!(is_merge_wave("Merge wave 1b"));
+    assert!(!is_merge_wave("Integrate waveform renderer"));
+    assert!(!is_merge_wave("Merge microwave driver PR"));
+    assert!(!is_merge_wave("Merge the config loaders"));
 }

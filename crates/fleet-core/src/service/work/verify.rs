@@ -388,14 +388,33 @@ pub fn verification(
     item: &WorkItemRow,
     now: i64,
 ) -> Result<Option<Verification>, IpcError> {
+    verification_with(s, item, None, now)
+}
+
+/// [`verification`], reusing `recorded` (the item's
+/// `latest_verifications`) when the caller already read them, as
+/// `graph::build` does for an implemented item.
+pub fn verification_with(
+    s: &Store,
+    item: &WorkItemRow,
+    recorded: Option<&[VerificationRow]>,
+    now: i64,
+) -> Result<Option<Verification>, IpcError> {
     let lines = lines_for(s, item)?;
     if lines.is_empty() {
         return Ok(None);
     }
-    let recorded = s.latest_verifications(item.id)?;
+    let read;
+    let recorded = match recorded {
+        Some(r) => r,
+        None => {
+            read = s.latest_verifications(item.id)?;
+            &read[..]
+        }
+    };
     let checks = lines
         .iter()
-        .map(|l| check_line(s, item, l, &recorded, now))
+        .map(|l| check_line(s, item, l, recorded, now))
         .collect::<Result<Vec<_>, _>>()?;
     let state = if checks.iter().any(|c| c.state == "fail") {
         "failed"
