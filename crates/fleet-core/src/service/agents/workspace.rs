@@ -37,7 +37,7 @@ pub enum Source {
 /// PURE: whether `b` is a branch name a script may fetch: git's own rules,
 /// narrowed (no leading `-`, no `..`, no `@{`, no control or glob
 /// characters, no trailing `.lock` or `/`).
-fn branch_ok(b: &str) -> bool {
+pub fn branch_ok(b: &str) -> bool {
     !b.is_empty()
         && b.len() <= 200
         && !b.starts_with(['-', '/', '.'])

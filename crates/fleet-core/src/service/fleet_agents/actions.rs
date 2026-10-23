@@ -162,7 +162,8 @@ pub const MAX_REVIEW_COMMENTS: usize = 30;
 const REVIEW_COMMENT_MAX: usize = 2000;
 
 /// PURE: the review's event for `said`: APPROVE, REQUEST_CHANGES or
-/// COMMENT, and never APPROVE unattended (`auto`): an approval is a person's.
+/// COMMENT, and never APPROVE unattended (`auto`) unless the definition's
+/// `limits.auto_approve` lets it: otherwise an approval is a person's.
 pub fn review_event(said: &str, auto: bool) -> &'static str {
     match said.trim().to_ascii_uppercase().as_str() {
         "APPROVE" if !auto => "APPROVE",
@@ -648,7 +649,8 @@ pub fn plan(
                         }
                         let findings =
                             review_findings(a.findings.as_ref().map(|f| &ctx["answer"][f]));
-                        let event = review_event(&r(&a.verdict), a.auto).to_string();
+                        let event = review_event(&r(&a.verdict), a.auto && !d.limits.auto_approve)
+                            .to_string();
                         // The body leaves room for the findings that land
                         // outside the diff, and the marker.
                         let body = fit(&text, max / 2);

@@ -1135,8 +1135,12 @@ impl FleetPoller {
             .ok_or("the scan's server is not in the catalog")?;
         let secrets = self.host.secrets(&rule.host_alias)?;
         let entry = bindings::render_entry(spec, &b.env, &secrets)?;
-        let args =
+        let mut args =
             template::render_value(t.arguments.as_ref().unwrap_or(&json!({})), &inst.ctx(now));
+        if let (Some(w), Some(a)) = (t.window_mins, args.as_object_mut()) {
+            a.insert("from".into(), (now - w * 60).into());
+            a.insert("to".into(), now.into());
+        }
         let line = self
             .host
             .call_tool(
@@ -1151,7 +1155,7 @@ impl FleetPoller {
         let mut jobs = Vec::new();
         for (job, subject) in planned {
             let seen = subject_seen(&self.store, rule.id, &job.dedup_key, now)?;
-            if seen || jobs.len() >= SCAN_MAX_JOBS {
+            if seen || jobs.len() >= t.max_jobs.unwrap_or(SCAN_MAX_JOBS).min(SCAN_MAX_JOBS) {
                 continue;
             }
             keep_subject(&self.store, rule.id, &job.dedup_key, &subject, now)?;
@@ -1416,6 +1420,19 @@ impl FleetRunner {
                 reason: format!("loop guard: {} already ran {runs} times today", job.subject),
             };
         }
+        let cooldown = inst.loaded().definition.run.cooldown_secs;
+        if cooldown > 0 {
+            let last = lock(&self.store).ok().and_then(|s| {
+                s.last_agent_rule_subject_run(AGENT, rule.id, &job.subject, job.id)
+                    .ok()
+                    .flatten()
+            });
+            if last.is_some_and(|at| at + cooldown > now) {
+                return RunOutcome::Skipped {
+                    reason: format!("cooldown: {} ran less than {cooldown}s ago", job.subject),
+                };
+            }
+        }
         let subject = match self.subject(job, rule, now).await {
             Ok(s) => s,
             Err(o) => return o,
@@ -1610,7 +1627,24 @@ impl FleetRunner {
                     .await
                     .map_err(|e| failed(ErrorKind::Transient, e.message))?;
                 base.prune(host, &root).await;
-                match base.prepare(host, &root, job.id, WORKSPACE_BRANCH).await {
+                let branch = d
+                    .run
+                    .branch
+                    .as_deref()
+                    .map(|b| {
+                        template::render(b, &inst.ctx(crate::store::now_unix()))
+                            .trim()
+                            .to_string()
+                    })
+                    .filter(|b| !b.is_empty())
+                    .unwrap_or_else(|| WORKSPACE_BRANCH.to_string());
+                if !crate::service::agents::workspace::branch_ok(&branch) {
+                    return Err(failed(
+                        ErrorKind::Permanent,
+                        format!("run › branch {branch:?} is not a branch name"),
+                    ));
+                }
+                match base.prepare(host, &root, job.id, &branch).await {
                     Ok((Prepared::Ready, cwd)) => (cwd, Some(root)),
                     Ok((Prepared::NoRoot, _)) => {
                         return Err(failed(
