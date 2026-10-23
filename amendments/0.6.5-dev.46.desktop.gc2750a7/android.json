@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "version": "0.6.5-dev.46.desktop.gc2750a7",
+  "mobile_accepts": [
+    0,
+    18
+  ],
+  "components": {
+    "android": {
+      "version": "0.6.5-dev.46.desktop.gc2750a7",
+      "artifacts": [
+        {
+          "kind": "apk",
+          "url": "https://github.com/martin-janci/fleet-mobile/releases/download/v0.6.5-dev.46.desktop.gc2750a7/fleet-mobile-0.6.5-dev.46.desktop.gc2750a7.apk",
+          "sha256": "24118cc5becdfdf4b44c1061ff79bc1bb4cd72a33a869ac8ac6028296d522c1b",
+          "size": 18319612,
+          "version_code": 425952,
+          "signer_sha256": "87081ff376e7ad2cb3082bf8f48dac2f451bffda66693b575c31cd4c354b9a15"
+        }
+      ]
+    }
+  }
+}

@@ -1,9 +1,9 @@
 {
   "schema": 1,
   "track": "dev",
-  "sequence": 193,
-  "generated_at": "2026-10-23T19:08:46Z",
-  "expires_at": "2026-11-06T19:08:46Z",
+  "sequence": 194,
+  "generated_at": "2026-10-23T19:15:21Z",
+  "expires_at": "2026-11-06T19:15:21Z",
   "current": "0.6.5-dev.46.desktop.gc2750a7",
   "recommended": "0.6.5-dev.46.desktop.gc2750a7",
   "minimum_supported": {},
@@ -14,7 +14,14 @@
     {
       "version": "0.6.5-dev.46.desktop.gc2750a7",
       "manifest": "https://github.com/martin-janci/claude-fleet/releases/download/v0.6.5-dev.46.desktop.gc2750a7/release-manifest.json",
-      "manifest_sha256": "83a8d5aa8e5ba94bb59d01a06acdfc75ad42d7628c08c8e4b9d49cd44c522024"
+      "manifest_sha256": "83a8d5aa8e5ba94bb59d01a06acdfc75ad42d7628c08c8e4b9d49cd44c522024",
+      "amendments": [
+        {
+          "component": "android",
+          "manifest": "https://raw.githubusercontent.com/martin-janci/claude-fleet/update-channels/amendments/0.6.5-dev.46.desktop.gc2750a7/android.json",
+          "manifest_sha256": "c33d498066bf1029cd42ddd6eddebc4cc2569663315f2bf2e932e3bd81bf231d"
+        }
+      ]
     },
     {
       "version": "0.6.5-dev.43.desktop.gf3bf998",
