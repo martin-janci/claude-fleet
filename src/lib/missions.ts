@@ -185,6 +185,11 @@ export interface TaskEvidence {
   files_total?: number;
   uncommitted?: number | null;
   error?: string | null;
+  /** Read mid-turn (`task_report`); the worker's Stop reads git again. */
+  provisional?: boolean;
+  /** Where a failed read was taken, for the loop's retry. */
+  host?: string | null;
+  dir?: string | null;
 }
 
 /** A node's latest attempt (`service::work::graph::AttemptBrief`). */
@@ -649,11 +654,20 @@ export function eventSentence(e: MissionEvent): string {
       return `Asked the planner (${String(p.why ?? '')})`;
     case 'limit_wait':
       return limitWaitSentence(p as unknown as LimitWait);
+    case 'limit_cleared':
+      return `The planner answered on ${loginWords(p as unknown as NonNullable<LimitWait['login']>)}`;
     case 'card':
       return `Card ${String(p.card_id ?? '')} ${String(p.state ?? '')}`;
     case 'grant': {
       const span = p.until_done ? 'until the mission completes' : `for ${String(p.hours ?? '?')} h`;
-      const raised = typeof p.raised_from === 'number' ? ` (raised the ask from L${p.raised_from})` : '';
+      // `lifted_from`: the ask the grant lifts while it holds (review r8);
+      // `raised_from`: an older hub's grant, which raised it for good.
+      const raised =
+        typeof p.lifted_from === 'number'
+          ? ` (lifts the ask from L${p.lifted_from} while it holds)`
+          : typeof p.raised_from === 'number'
+            ? ` (raised the ask from L${p.raised_from})`
+            : '';
       return `Granted L${String(p.level ?? '?')} ${span}${raised}`;
     }
     case 'revoked':
@@ -876,7 +890,9 @@ export interface PlanOutcome {
   mission_id: number;
   cards?: MissionCard[];
   refused?: string | null;
-  /** Every login the planner may use is at its usage limit. */
+  /** The planner is waiting on a usage limit: the mission's wait when every
+   *  login it may use is at its limit (no `login`), else the last login's
+   *  when the ask's tries ran out while another login has headroom. */
   waiting?: LimitWait | null;
 }
 
@@ -905,16 +921,26 @@ export function limitWaitSentence(w: LimitWait, now = Date.now() / 1000): string
 /** The planner's open wait, when its newest word on the mission (of its runs
  *  and waits) is a `limit_wait`: the mission's state "waiting on a limit". */
 export function plannerLimitWait(detail: Pick<MissionDetail, 'events'>): LimitWait | null {
-  const last = (detail.events ?? []).find((e) => e.kind === 'planned' || e.kind === 'limit_wait');
+  // `limit_cleared`: a later login of the same ask answered (review r8).
+  const last = (detail.events ?? []).find((e) => e.kind === 'planned' || e.kind === 'limit_wait' || e.kind === 'limit_cleared');
   if (last?.kind !== 'limit_wait' || !last.payload) return null;
   const w = last.payload as unknown as LimitWait;
   return typeof w.resets_at === 'number' ? w : null;
 }
 
 /** The planner could not be asked: every login it may use is at its usage
- *  limit (`PlanOutcome.waiting`). Not a failure; it is asked again then. */
+ *  limit (`PlanOutcome.waiting`). Not a failure; it is asked again then.
+ *  A wait naming one login is the ask's tries running out while another
+ *  login has headroom (review r8): only that login is at its limit. */
 export function plannerWaiting(w: LimitWait, now = Date.now() / 1000): HumanError {
   const at = resetWords(w.resets_at, now);
+  if (w.login) {
+    return {
+      title: 'The planner hit a usage limit',
+      text: `Only ${loginWords(w.login)} is at its usage limit${w.reset_known ? ` until ${at}` : ''}. Fleet asks the planner again on a login with headroom.`,
+      details: w.why,
+    };
+  }
   return {
     title: 'The planner is waiting on a usage limit',
     text: w.reset_known
@@ -951,6 +977,16 @@ export interface GrantInput {
 
 export function grantMission(missionId: number, g: GrantInput): Promise<Result<MissionGrant>> {
   return invokeCmd<MissionGrant>('grant_mission', { args: { mission_id: missionId, ...g } });
+}
+
+/** What to tell the person when a grant asked to last until the mission
+ *  completes came back as an hours grant: a hub before grants until done
+ *  drops `until_done` and signs its default hours (review r8). `null` when
+ *  the grant is what was asked. */
+export function grantSpanNotice(askedUntilDone: boolean, g: Pick<MissionGrant, 'until_done' | 'created_at' | 'expires_at'>): string | null {
+  if (!askedUntilDone || g.until_done) return null;
+  const hours = Math.round((g.expires_at - g.created_at) / 3600);
+  return `This hub cannot grant until the mission completes: it signed a grant for ${hours} h instead. Update fleet-hub, or revoke the grant.`;
 }
 
 export function revokeMissionGrant(missionId: number): Promise<Result<number>> {

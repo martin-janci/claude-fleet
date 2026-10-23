@@ -93,7 +93,11 @@ pub fn autonomy(s: &Store, m: &MissionRow, now: i64) -> Result<Autonomy, IpcErro
     let ceiling = settings::get_secs(s, settings::ORCHESTRATOR_MAX_LEVEL).min(3) as i64;
     let grant = s.live_mission_grant(m.id, now)?;
     let granted = grant.as_ref().map(|g| g.level).unwrap_or(1);
-    let effective = m.level.min(ceiling).min(granted);
+    // A live grant lifts a lower ask to its level while it holds (TASK-293):
+    // a mission made in the room (L0) runs under its L2 grant, and drops back
+    // to its own ask when the grant ends, never past it (review r8).
+    let asked = grant.as_ref().map_or(m.level, |g| m.level.max(g.level));
+    let effective = asked.min(ceiling).min(granted);
     let why = if !enabled {
         "the mission loop is off (orchestrator.enabled)".to_string()
     } else if effective == m.level {
@@ -547,7 +551,8 @@ async fn apply_step_inner(
             let s = lock(&deps.store)?;
             // Red CI on its pull requests holds the step; only the
             // mission's own Complete takes a person's override.
-            if let Some(e) = super::missions::ci_refusal(&super::missions::red_prs(&s, view, m.id)?)
+            if let Some(e) =
+                super::missions::ci_step_refusal(&super::missions::red_prs(&s, view, m.id)?)
             {
                 return Err(e);
             }
@@ -1038,7 +1043,7 @@ pub struct PlanOutcome {
 /// or grant host that is not refuses with `E_FORBIDDEN`, and a worker on
 /// such a host is passed over.
 fn planner_host(s: &Store, m: &MissionRow, grant: Option<&GrantRow>) -> Result<String, IpcError> {
-    Ok(planner_hosts(s, m, grant)?.swap_remove(0))
+    Ok(planner_hosts_up_to(s, m, grant, 1)?.swap_remove(0))
 }
 
 /// Every host the planner may run on, [`planner_host`]'s first (TASK-291:
@@ -1050,6 +1055,18 @@ fn planner_hosts(
     s: &Store,
     m: &MissionRow,
     grant: Option<&GrantRow>,
+) -> Result<Vec<String>, IpcError> {
+    planner_hosts_up_to(s, m, grant, usize::MAX)
+}
+
+/// [`planner_hosts`], the first `max` of them: the walk of the mission's
+/// workers stops there, and looks each worker session and host up once
+/// (review r8: it ran under the store lock on every limit check).
+fn planner_hosts_up_to(
+    s: &Store,
+    m: &MissionRow,
+    grant: Option<&GrantRow>,
+    max: usize,
 ) -> Result<Vec<String>, IpcError> {
     if let Some(h) = &m.policy.planner_host {
         require_host_sees_org(s, h, m.org_id, "policy.planner_host")?;
@@ -1070,20 +1087,26 @@ fn planner_hosts(
     }
     let mut out: Vec<String> = Vec::new();
     let mut passed_over = None;
-    for i in s.mission_items(m.id)? {
+    let mut seen_sessions = std::collections::HashSet::new();
+    let mut seen_hosts = std::collections::HashSet::new();
+    'walk: for i in s.mission_items(m.id)? {
         for t in s.tasks_for_item(i.id)? {
-            if let Some(w) = t
-                .worker_session_id
-                .and_then(|w| s.get_session_by_id(w).ok().flatten())
-            {
-                if out.contains(&w.host_alias) {
-                    continue;
+            let Some(sid) = t.worker_session_id.filter(|w| seen_sessions.insert(*w)) else {
+                continue;
+            };
+            let Some(w) = s.get_session_by_id(sid).ok().flatten() else {
+                continue;
+            };
+            if !seen_hosts.insert(w.host_alias.clone()) {
+                continue;
+            }
+            if host_sees_org(s, &w.host_alias, m.org_id)? {
+                out.push(w.host_alias);
+                if out.len() >= max {
+                    break 'walk;
                 }
-                if host_sees_org(s, &w.host_alias, m.org_id)? {
-                    out.push(w.host_alias);
-                } else {
-                    passed_over.get_or_insert(w.host_alias);
-                }
+            } else {
+                passed_over.get_or_insert(w.host_alias);
             }
         }
     }
@@ -1322,6 +1345,13 @@ pub async fn run_planner(
         )
     };
     let mut attempts = 0;
+    // Review r8: a signed-out login is passed over for the next one, like a
+    // login at its limit; the first one's refusal is the answer when none
+    // is left.
+    let mut signed_out: Vec<limit::Login> = Vec::new();
+    let mut first_signed_out: Option<IpcError> = None;
+    // Whether this ask recorded a wait, which a later login's answer clears.
+    let mut waited = false;
     let (answer, stderr) = loop {
         attempts += 1;
         let (host, profile) = (login.host.as_str(), login.profile.as_deref());
@@ -1336,17 +1366,17 @@ pub async fn run_planner(
         )
         .await?;
         let stdout = String::from_utf8_lossy(&out.stdout);
-        let answer = match planner::parse_planner_output(&stdout) {
+        // `None`: Claude Code's own "Login expired", no malformed answer.
+        let (answer, usage) = match planner::parse_planner_output(&stdout) {
             PlannerOutput::Ran(ran) => {
                 let (answer, usage) = planner::planner_answer(ran);
                 let s = lock(&deps.store)?;
                 book_planner_run(&s, m, host, &model, usage.as_ref(), now_unix());
-                // Claude Code's own "Login expired" is not a malformed answer:
-                // say whose login it is and how to sign it in again.
                 if claude_print::run_signed_out(usage.as_ref(), &answer, &out.stderr) {
-                    return Err(claude_print::signed_out_error(host, profile));
+                    (None, None)
+                } else {
+                    (Some(answer), usage)
                 }
-                answer
             }
             PlannerOutput::NoClaude => {
                 return Err(IpcError::new(
@@ -1355,11 +1385,13 @@ pub async fn run_planner(
                 ))
             }
             PlannerOutput::Nothing if claude_print::run_signed_out(None, "", &out.stderr) => {
-                return Err(claude_print::signed_out_error(host, profile))
+                (None, None)
             }
             // The limit said on stderr alone is read below.
-            PlannerOutput::Nothing if claude_print::run_usage_limit("", &out.stderr).is_some() => {
-                String::new()
+            PlannerOutput::Nothing
+                if claude_print::run_usage_limit(None, "", &out.stderr).is_some() =>
+            {
+                (Some(String::new()), None)
             }
             PlannerOutput::Nothing => {
                 return Err(IpcError::new(
@@ -1368,31 +1400,53 @@ pub async fn run_planner(
                 ))
             }
         };
+        let Some(answer) = answer else {
+            // Say whose login it is and how to sign it in again, unless
+            // another login answers.
+            let refusal = claude_print::signed_out_error(host, profile);
+            let first = first_signed_out.take().unwrap_or(refusal);
+            signed_out.push(login.clone());
+            let s = lock(&deps.store)?;
+            let words = limit::Words::read(&s, m.id)?;
+            match limit::choose_in(&s, m, grant.as_ref(), now_unix(), &words, &signed_out)? {
+                Ok(next) if attempts < limit::LIMIT_ATTEMPTS => {
+                    first_signed_out = Some(first);
+                    login = next;
+                    continue;
+                }
+                _ => return Err(first),
+            }
+        };
         // A command array never opens with Claude's limit words, so only an
-        // answer that is not one is read for them.
+        // answer that is not one is read for them; and only Claude Code's
+        // own error, not the model's text (review r8).
         let hit = match planner::parse_commands(&answer) {
             Ok(_) => None,
-            Err(_) => claude_print::run_usage_limit(&answer, &out.stderr),
+            Err(_) => claude_print::run_usage_limit(usage.as_ref(), &answer, &out.stderr),
         };
         let Some(hit) = hit else {
+            if waited {
+                limit::cleared(&*lock(&deps.store)?, m.id, &login);
+            }
             break (answer, out.stderr);
         };
         let s = lock(&deps.store)?;
         let now = now_unix();
-        limit::record(&s, m.id, &limit::answered(&s, &login, &hit, now));
-        match limit::choose(&s, m, grant.as_ref(), now)? {
+        let wait = limit::answered(&s, &login, &hit, now);
+        limit::record(&s, m.id, &wait);
+        waited = true;
+        let words = limit::Words::read(&s, m.id)?;
+        match limit::choose_in(&s, m, grant.as_ref(), now, &words, &signed_out)? {
             Ok(next) if attempts < limit::LIMIT_ATTEMPTS => login = next,
+            // Another login has headroom; the loop asks there next. This
+            // login's wait is said, not the mission's (review r8).
             Ok(_) => {
-                // Another login has headroom; the loop asks there next.
-                let wait = limit::open_waits(&s, m.id, now)?
-                    .into_iter()
-                    .find(|w| w.login.as_ref() == Some(&login));
                 return Ok(PlanOutcome {
                     mission_id: m.id,
                     cards: vec![],
                     refused: None,
-                    waiting: wait,
-                });
+                    waiting: Some(wait),
+                })
             }
             Err(wait) => return Ok(waiting_outcome(&s, m, wait)),
         }
@@ -1599,9 +1653,11 @@ pub async fn plan_now(
 /// only with a budget, which is then its one bound). Never an agent's: the
 /// scope must be a person's own, and the mission theirs to change.
 ///
-/// A grant above the level the mission asks raises the ask to it (TASK-293):
-/// the loop runs at the least of the ask, the fleet's ceiling and the grant,
-/// so a mission made in the room (L0) never ran a step under an L2 grant.
+/// A grant above the level the mission asks lifts the ask to it while the
+/// grant holds (TASK-293, [`autonomy`]): the loop runs at the least of the
+/// ask, the fleet's ceiling and the grant, so a mission made in the room (L0)
+/// never ran a step under an L2 grant. The mission's own level is left as it
+/// is, so the grant's autonomy ends with the grant (review r8).
 pub fn grant(
     args: &WorkLinkArgs,
     store: &Mutex<Store>,
@@ -1671,18 +1727,7 @@ pub fn grant(
         ));
     }
     let who = super::graph::actor(scope);
-    let raised_from = (m.level < level).then_some(m.level);
-    if raised_from.is_some() {
-        s.update_mission(
-            id,
-            None,
-            &crate::store::MissionPatch {
-                level: Some(level),
-                ..Default::default()
-            },
-            &who,
-        )?;
-    }
+    let lifted_from = (m.level < level).then_some(m.level);
     s.revoke_grants(id)?;
     let g = s.add_grant(
         id,
@@ -1712,7 +1757,7 @@ pub fn grant(
             "until_done": until_done,
             "budget_cents": args.budget_cents,
             "profile": profile,
-            "raised_from": raised_from,
+            "lifted_from": lifted_from,
         }),
     );
     s.wake_mission(id)?;
@@ -1827,15 +1872,12 @@ fn planner_wanted(
     {
         return Ok(None);
     }
-    if limit::waiting(s, m.id)? {
-        let free = matches!(limit::choose(s, m, grant, now), Ok(Ok(_)));
+    let words = limit::Words::read(s, m.id)?;
+    if words.waiting() {
+        let free = matches!(limit::choose_in(s, m, grant, now, &words, &[]), Ok(Ok(_)));
         return Ok(free.then_some("the usage limit it waited on is over"));
     }
-    let last_plan = s
-        .mission_events(m.id, None, 200)?
-        .into_iter()
-        .find(|e| e.kind == "planned")
-        .map(|e| e.at);
+    let last_plan = words.last_planned_at();
     let items = s.mission_items(m.id)?;
     if items.len() <= 1 && counts.open == 0 && last_plan.is_none() {
         return Ok(Some("break the goal down into tasks"));
@@ -2075,6 +2117,9 @@ pub async fn tick_mission(deps: &Deps, id: i64, now: i64) -> Result<(), IpcError
     if a.effective >= 1 {
         integrate::check(deps, &m).await;
     }
+    // A run whose git read failed (a host that dropped for a moment) is read
+    // again; the gate holds it `pending` meanwhile.
+    crate::service::work::report::retry_unread_evidence(&deps.store, &deps.ssh, id, now).await;
     let s = lock(&deps.store)?;
     let counts = s.mission_task_counts(id)?;
     let m = s.get_mission(id)?.unwrap_or(m);
