@@ -313,6 +313,21 @@ fn start_for(
         (None, _) => None,
     };
     let (host_alias, profile) = grant_placement(s, grant, project_id);
+    // A run that builds on earlier work (a retry, a review, a test) goes
+    // where that work is when the grant allows that host and it is up
+    // (lanes design P2, `run::prior_work`), billing the grant's own login.
+    let (host_alias, profile) = match super::run::prior_work(s, item_id)? {
+        Some(p)
+            if p.host_up
+                && host_alias.as_deref() != Some(p.host_alias.as_str())
+                && grant
+                    .and_then(|g| g.hosts.as_ref())
+                    .is_some_and(|h| h.contains(&p.host_alias)) =>
+        {
+            (Some(p.host_alias), grant.and_then(|g| g.profile.clone()))
+        }
+        _ => (host_alias, profile),
+    };
     Ok(StartArgs {
         item_id: Some(item_id),
         project_id,

@@ -3329,3 +3329,45 @@ async fn a_start_records_its_steps_and_only_its_own_checkout_may_be_cancelled() 
     let e = plan_abandon(&s, other).unwrap_err();
     assert_eq!(e.details.unwrap()["reason"], "not_a_start");
 }
+
+/// A run's base branch (lanes design P2) reaches the new checkout: the
+/// plan carries it to `new_session`, and a client cannot hand one back.
+#[tokio::test]
+async fn a_base_branch_reaches_the_new_checkout() {
+    let fx = Fx::new();
+    let plan = plan_start(
+        &fx.store,
+        &StartArgs {
+            reference: Some("ABC-1".into()),
+            project_id: Some(fx.pid),
+            host_alias: Some("hosta".into()),
+            base_branch: Some("abc-1-earlier".into()),
+            ..Default::default()
+        },
+        &OrgScope::All,
+        &fx.net(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(plan.base_branch.as_deref(), Some("abc-1-earlier"));
+    let wire = serde_json::to_value(&plan).unwrap();
+    let back: StartPlan = serde_json::from_value(wire).unwrap();
+    assert_eq!(back.base_branch, None, "never read back from a client");
+    let seen = Arc::new(Mutex::new(None));
+    let seen2 = Arc::clone(&seen);
+    let store = Arc::clone(&fx.store);
+    start_with(&fx.store, &plan, None, &OrgScope::All, move |a| {
+        *seen2.lock().unwrap() = Some((a.new_worktree.clone(), a.base_branch.clone()));
+        let s = store.lock().unwrap();
+        let id = s
+            .upsert_session("started", &a.host_alias, None, None, 1, 1, "running", None)
+            .unwrap();
+        std::future::ready(Ok(s.get_session_by_id(id).unwrap().unwrap()))
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        seen.lock().unwrap().clone(),
+        Some((Some(plan.branch.clone()), Some("abc-1-earlier".into())))
+    );
+}

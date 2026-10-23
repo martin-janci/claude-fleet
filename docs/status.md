@@ -1054,7 +1054,17 @@ A continuous mission wakes on `policy.wake_every_secs`; a finished run, a
 member's status moving on the tracker and a worker's PR checks moving each
 wake its mission. The Missions tab has Start wave, the next steps, the
 cards, the grant and Pause all; the phone (fleet-mobile) has the list, the
-steps, the cards and Pause all. A mission's worker is refused a person's
+steps, the cards and Pause all. A run of an item that already has an
+implement attempt (a retry, a review, a test) starts its checkout from that
+attempt's branch, on its host while that host is up (and inside the grant), and its prompt names
+the branch (`run::prior_work`, lanes design 2026-10-23 L0): before, a run
+beside the live implementer got a fresh `-N` checkout of the default branch,
+so a review read none of the work and a retry began again. `work { mission }`
+carries `stats` (`missions/stats.rs`): runs by role and per done task,
+retries, cold starts, a task's median time and the share of the working span
+with no run open, shown as a line in the mission room's header. The lanes
+design (`docs/superpowers/specs/2026-10-23-mission-lanes-design.md`, L1–L6)
+waits on the owner. A mission's worker is refused a person's
 step (`gh pr merge` / `ready`, a push to `main` / `master`, a tracker CLI)
 by fleet's `PreToolUse(Bash)` guard (`orchestrate/guard.rs`): a shell
 prefilter that asks the hub only about those commands and lets the command

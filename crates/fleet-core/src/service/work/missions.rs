@@ -100,6 +100,10 @@ pub struct MissionDetail {
     /// detail's Sessions list opens. Empty, and absent, from an older hub.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sessions: Vec<FinishSession>,
+    /// Where its runs and its time went (lanes design L0), over the
+    /// members this caller may see. Absent from an older hub.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stats: Option<stats::MissionStats>,
 }
 
 /// A finished mission's leftovers, as far as the caller may see them.
@@ -260,6 +264,7 @@ pub fn mission(
     let may_change = may_change_mission(&s, scope, &mission)?;
     let plan = super::orchestrate::plan_for(&s, &mission)?;
     let sessions = live_sessions(&s, scope, id)?;
+    let stats = Some(mission_stats(&s, &mission, &items)?);
     let finish = if crate::store::MISSION_FINAL_STATES.contains(&mission.state.as_str()) {
         Some(finish(&s, scope, id, sessions.clone())?)
     } else {
@@ -275,7 +280,33 @@ pub fn mission(
         plan,
         finish,
         sessions,
+        stats,
     })
+}
+
+/// [`stats::stats`] over `items`' attempts, now.
+fn mission_stats(
+    s: &Store,
+    mission: &MissionRow,
+    items: &[WorkItemRow],
+) -> Result<stats::MissionStats, IpcError> {
+    let mut attempts = Vec::new();
+    for i in items {
+        attempts.extend(s.tasks_for_item(i.id)?);
+    }
+    let checkout_of = |sid: i64| {
+        s.get_session_by_id(sid)
+            .ok()
+            .flatten()
+            .and_then(|r| r.worktree_id)
+    };
+    Ok(stats::stats(
+        items,
+        mission.root_item_id,
+        &attempts,
+        &checkout_of,
+        crate::store::now_unix(),
+    ))
 }
 
 /// The running sessions on mission `id`'s member items that `scope` may
@@ -716,6 +747,8 @@ pub(crate) fn test_mission_pr(
     .unwrap();
     sid
 }
+
+pub mod stats;
 
 #[cfg(test)]
 mod tests;

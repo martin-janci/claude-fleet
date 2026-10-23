@@ -232,6 +232,34 @@ export interface MissionDetail {
    *  state (a running mission's workers included); absent when there are
    *  none, and from an older hub. */
   sessions?: FinishSession[];
+  /** Where its runs and its time went (lanes design L0); absent from an
+   *  older hub. */
+  stats?: MissionStats | null;
+}
+
+/** A mission's run metrics (`missions::stats::MissionStats`). */
+export interface MissionStats {
+  items: number;
+  items_done: number;
+  /** Attempts by role: `implement`, `review`, `test`, `integrate`, `research`. */
+  runs_by_role: Record<string, number>;
+  /** Attempts in a session of their own; the rest ran headless. */
+  session_runs: number;
+  /** Distinct worker sessions and checkouts: each a cold start. */
+  sessions: number;
+  checkouts: number;
+  failed_runs: number;
+  /** Implement attempts past each item's first. */
+  retries: number;
+  /** Attempts per done item, in hundredths. */
+  runs_per_done_item_x100?: number | null;
+  run_secs_p50?: number | null;
+  run_secs_p90?: number | null;
+  item_secs_p50?: number | null;
+  item_secs_p90?: number | null;
+  /** First run to the last run's end, and the part of it no run was open. */
+  span_secs: number;
+  idle_secs: number;
 }
 
 /** One live session on a mission's member item (`missions::FinishSession`). */

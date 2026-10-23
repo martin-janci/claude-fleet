@@ -686,6 +686,12 @@ pub struct StartArgs {
     /// The login the session bills (redesign 8.7): a credential profile on
     /// the host; `None` = the host's own. Set by a mission's grant.
     pub profile: Option<String>,
+    /// The branch a NEW checkout starts from instead of the repo's default
+    /// branch: a run beside the work it continues or checks (a retry, a
+    /// review, a test) starts from that work's branch
+    /// ([`crate::service::work::run::prior_work`]). A reused worktree
+    /// ignores it. Set by a run, never from a tool's own parameters.
+    pub base_branch: Option<String>,
 }
 
 /// Where a start lands and what it is called.
@@ -712,6 +718,10 @@ pub struct StartPlan {
     /// is not this plan's.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub parallel: bool,
+    /// The branch a new checkout starts from ([`StartArgs::base_branch`]);
+    /// `None`, the default branch. Never read back from a client.
+    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
+    pub base_branch: Option<String>,
     /// Who starts ([`StartArgs::decider`]): decides the link's source.
     /// Never on the wire: a plan read back is a person's.
     #[serde(skip)]
@@ -1285,6 +1295,7 @@ pub fn plan_resolved(
         worktree_id,
         per_project: args.per_project,
         parallel: args.parallel,
+        base_branch: args.base_branch.clone().filter(|_| worktree_id.is_none()),
         decider: args.decider,
         owner: args.owner,
         origin: args.origin.clone(),
@@ -1607,7 +1618,7 @@ where
         name: String::new(),
         call_id: None,
         new_worktree: plan.worktree_id.is_none().then(|| plan.branch.clone()),
-        base_branch: None,
+        base_branch: plan.base_branch.clone(),
         kind: None,
         start_command: None,
         friendly_name: crate::validate::friendly_name(&plan.name)

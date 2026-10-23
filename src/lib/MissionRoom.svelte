@@ -131,6 +131,7 @@
     sendSteer,
     showMissionPanel,
     startNewMission,
+    statsLine,
     steerBlocked,
     steerBusy,
     steerPrefix,
@@ -158,6 +159,8 @@
   const plan = $derived(detail?.plan ?? null);
   /** The header's autonomy in words: "Runs at L1 · L3 asked · L1 ceiling". */
   const autonomy = $derived(plan ? autonomyWords(plan.autonomy) : null);
+  /** Its runs and its idle time (lanes design L0). */
+  const statsText = $derived(statsLine(detail?.stats));
   const pressable = $derived((plan?.steps ?? []).filter((s) => s.kind !== 'ask'));
   const openCards = $derived((plan?.cards ?? []).filter((c) => c.state === 'open' && !hiddenCards.includes(c.id)));
   const runs = $derived(detail ? runsOf(detail) : []);
@@ -884,6 +887,9 @@
             {autonomy?.runs} · {autonomy?.limits} · spent {dollars(plan.cost_micros)}{#if plan.autonomy.grant?.budget_micros}
               of {dollars(plan.autonomy.grant.budget_micros)}{/if} · {plan.counts.open} running
           </p>
+        {/if}
+        {#if statsText}
+          <p class="meta" data-testid="mission-stats" title="Runs per done task, retries, cold starts (sessions started), a task's median time, and the share of the working span with no run open">{statsText}</p>
         {/if}
         {#if mayChange && confirmMove}
           <div class="row confirm-move" role="alertdialog" aria-label="Confirm" data-testid="mission-move-confirm-row">

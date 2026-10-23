@@ -1017,6 +1017,8 @@ pub fn start_args_as(
         force_cross_org: args.force_cross_org.unwrap_or(false),
         per_project: false,
         parallel: args.parallel.unwrap_or(false),
+        // A run's own (`run::prior_work`), never a tool parameter.
+        base_branch: None,
     }
 }
 

@@ -1,7 +1,7 @@
 # Misie po líniách: jedna vedúca session na líniu, subagenti vnútri
 
 **Dátum:** 2026-10-23
-**Stav:** návrh, čaká na rozhodnutie vlastníka (§9). Nič z L2 a ďalej sa nestavia, kým vlastník nepovie áno.
+**Stav:** návrh, čaká na rozhodnutie vlastníka (§9). Nič z L2 a ďalej sa nestavia, kým vlastník nepovie áno. **L0 je postavené** (2026-10-23): oprava P2 a metriky misie (§5.2, §5.5).
 **Nadväzuje na:** `2026-10-07-autonomous-orchestration-projects-design.md` (ďalej *O-návrh*), najmä §5.3 (deterministický loop), §6 (evidencia), §8 (worktrees a integrácia).
 **Vstup:** analýza „ako zlepšiť misie: jeden Claude so subagentmi alebo veľa sessions" (2026-10-23).
 
@@ -20,7 +20,7 @@
 | # | Zistenie | Kde | Dôsledok |
 |---|---|---|---|
 | P1 | Každý beh je nová session, nový worktree a nová vetva `branch_slug(key+title)` | `run.rs::run_item_with`, `tickets.rs::branch_slug` | studený štart na každý beh: kontext, prieskum, v Rust repe build workspace od nuly |
-| P2 | Ak na položke ešte žije session (hotový implementátor beží ďalej), ďalší beh dostane `parallel = true`, teda **nový `-N` checkout z default vetvy** | `run.rs:262` (`has_live_work`), `StartArgs::parallel` | **treba overiť (L0):** review a retry na session ceste pravdepodobne nevidia commity predošlého pokusu, ak ich worker nepushol a beh si vetvu sám nenašiel. Retry začína od nuly. |
+| P2 | Ak na položke ešte žije session (hotový implementátor beží ďalej), ďalší beh dostane `parallel = true`, teda **nový `-N` checkout z default vetvy** | `run.rs` (`has_live_work`), `StartArgs::parallel` | **potvrdené a opravené v L0:** nový checkout vznikal z default vetvy (`start_one`: `base_branch: None`) a brief menoval len vlastnú prázdnu vetvu, takže review nevidel prácu a retry začínal od nuly. |
 | P3 | Plánovač je `claude -p` bez nástrojov | `orchestrate/planner.rs` | rozkladá cieľ bez znalosti súborov, teda bez ohľadu na to, čo sa zrazí |
 | P4 | `touches` a pravidlo „prekrývajúce sa úlohy nebežia paralelne" z O-návrhu §8 nie sú postavené | grep `touches` v `service/work/` | konflikty sa riešia až po fakte |
 | P5 | Sekvenčná reťaz v jednom repe nezdieľa vetvu (O-návrh §8 to predpokladal) | `run.rs`, `branch_slug` | reťaz A → B → C sú tri vetvy, B a C sa navzájom integrujú |
@@ -193,7 +193,11 @@ Pokyny z §3.4 (prieskum, review pred hlásením) sa pridajú aj do promptu behu
 
 ### 5.2 (bod 3) Headless checks predvolene a P2
 
-- Overiť P2 testom: misia, implement hotový, session žije, `review` krok na session ceste → v akom checkoute a na akom commite beží. Ak je to `-N` z default vetvy, je to chyba aj v dnešnom režime. Oprava: review a retry dostanú `worktree = vetva predošlého implement pokusu` (reuse, nie `-N`), alebo sa predošlá session pred nimi ukončí, ako to už robí retry v `orchestrate/mod.rs:~800`.
+- **P2, postavené v L0.** `run::prior_work` nájde vetvu a host najnovšieho implement pokusu s vlastným checkoutom. Beh na tej istej položke (retry, review, test) potom:
+  - dostane nový checkout **z tejto vetvy** (`StartArgs::base_branch` → `StartPlan` → `NewSessionArgs::base_branch`, ktoré `worktree_add_script` už vedel),
+  - beží na **jej hoste**, ak pri poslednej sonde odpovedal a host nikto nezvolil alebo ho grant misie povoľuje (`orchestrate::start_for`, vtedy s loginom grantu); inak host vyberie placement a skript nájde vetvu ako `origin/<vetva>`, ak bola pushnutá,
+  - má v prompte vetu, ktorá vetvu menuje a hovorí, ako ju stiahnuť, keby na hoste chýbala (`prior_work_note`).
+  Vetva, ktorú prompt nevie bezpečne niesť (hlásená hostom, s inými znakmi než `[A-Za-z0-9._/-]`), sa nepoužije. Klient `base_branch` do plánu nevie poslať (`skip_deserializing`).
 - `orchestrator.headless_checks` predvolene zapnúť, až keď je P2 vyriešené a snapshot z §3.7 hotový (bez neho headless review padá na session cestu vždy, keď sa checkout pohne).
 
 ### 5.3 (bod 5) Teplý build
@@ -210,7 +214,7 @@ Pokyny z §3.4 (prieskum, review pred hlásením) sa pridajú aj do promptu behu
 
 ### 5.5 (bod 6) Metriky
 
-Nová read-only akcia `work { mission_stats, mission_id }` (a desktop panel na misii) z `tasks`, `orchestration_events` a nákladov:
+**Postavené v L0** ako pole `stats` odpovede `work { mission }` (`service/work/missions/stats.rs`, čistá funkcia nad `tasks` členov misie; žiadna nová akcia, teda žiadny nový riadok verdiktov ani tool budget) a riadok v hlavičke miestnosti misie (`mission_room.ts::statsLine`): behy a behy na hotovú úlohu, retry, studené štarty (worker sessions), medián času úlohy a podiel času bez otvoreného behu. Čakanie podľa príčiny (človek, limit, slot, tick) a integračné konflikty z eventov sú ďalší krok, keď eventy budú niesť príčinu. Pôvodný zámer:
 
 | Metrika | Z čoho |
 |---|---|
