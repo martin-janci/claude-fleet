@@ -1018,7 +1018,15 @@ fn derive_status(
     // "running…"/"in progress…": those persist in the captured scrollback long
     // after the work finished (e.g. a completed "⏺ Bash(…)" line, or the summary
     // text "41 tool uses"), which made idle sessions read as "working" forever.
-    if lower.contains("esc to interrupt") {
+    //
+    // The live spinner line counts too. Claude Code 2.1 moved the hint into
+    // the mode footer, and the footer drops it while a draft sits in the
+    // input box (`⏵⏵ bypass permissions on (shift+tab to cycle)`, nothing
+    // more) or when the pane is too narrow to fit it — both read as idle
+    // while Claude was thinking. The spinner (`✢ Deliberating… (4s ·
+    // thinking)`) stays on screen for the whole turn; a finished turn's
+    // summary (`✻ Worked for 30s · done`) never matches it.
+    if lower.contains("esc to interrupt") || spinner_line(stripped).is_some() {
         return Some(ClaudeStatus::Working);
     }
     // IDLE: the REPL is showing its input chrome — the status bar, the
@@ -1140,6 +1148,37 @@ mod tests {
             Some(88.0)
         );
         assert_eq!(analyze("≈42% used").context_pct, Some(42.0));
+    }
+
+    /// Captured from Claude Code 2.1.309 while it was thinking: a draft in
+    /// the input box, and a pane too narrow for the footer. Neither footer
+    /// says "esc to interrupt", both used to read as idle, and the spinner
+    /// is the one line that still tells.
+    #[test]
+    fn a_thinking_pane_whose_footer_lost_the_interrupt_hint_is_working() {
+        for (name, tail) in [
+            (
+                "draft in the input box",
+                include_str!("testdata/pane_intel/working_draft_in_input_box.txt"),
+            ),
+            (
+                "narrow pane",
+                include_str!("testdata/pane_intel/working_narrow_pane.txt"),
+            ),
+        ] {
+            assert!(
+                !tail.contains("esc to interrupt"),
+                "{name}: fixture premise"
+            );
+            assert_eq!(
+                analyze(tail).derived_status,
+                Some(ClaudeStatus::Working),
+                "{name}"
+            );
+        }
+        // The finished turn's summary line is not a spinner.
+        let done = "✻ Worked for 1m 23s · done 2:39 PM\n────\n❯ \n────\n  ⏵⏵ bypass permissions on (shift+tab to cycle)";
+        assert_eq!(analyze(done).derived_status, Some(ClaudeStatus::Idle));
     }
 
     #[test]
