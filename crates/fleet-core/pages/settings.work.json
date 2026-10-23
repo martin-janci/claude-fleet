@@ -223,6 +223,22 @@
                 "key": "orchestrator.headless_checks",
                 "truthy": true
               }
+            },
+            {
+              "type": "field",
+              "key": "orchestrator.run_subagents",
+              "when": {
+                "key": "orchestrator.enabled",
+                "truthy": true
+              }
+            },
+            {
+              "type": "field",
+              "key": "orchestrator.planner_reads",
+              "when": {
+                "key": "orchestrator.enabled",
+                "truthy": true
+              }
             }
           ]
         }

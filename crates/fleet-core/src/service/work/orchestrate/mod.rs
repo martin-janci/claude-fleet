@@ -1047,6 +1047,21 @@ pub struct PlanOutcome {
 /// The host the planner runs on: the policy's, the grant's first, else the
 /// host of the mission's latest worker that may see the mission's org.
 ///
+/// The project whose checkout the planner reads (`orchestrator.planner_reads`,
+/// lanes design L1): the root item's, else the mission's first repo. `None`
+/// when the setting is off or the mission names no repository.
+fn planner_reads_project(s: &Store, m: &MissionRow) -> Result<Option<i64>, IpcError> {
+    if !crate::service::settings::get_bool(s, crate::service::settings::ORCHESTRATOR_PLANNER_READS)
+    {
+        return Ok(None);
+    }
+    let root = match m.root_item_id {
+        Some(r) => s.get_work_item(r)?.and_then(|i| i.project_id),
+        None => None,
+    };
+    Ok(root.or_else(|| m.repos.first().map(|r| r.project_id)))
+}
+
 /// Every LLM run of a mission (the planner, its release note, its triage
 /// card) is sent the mission's text, so the host must be one of the
 /// mission's org (transition plan, risk "Org text leaves the org"): a policy
@@ -1283,7 +1298,7 @@ pub async fn run_planner(
 ) -> Result<PlanOutcome, IpcError> {
     let _slot = PlannerSlot::take(deps, m)?;
     let now = now_unix();
-    let (mut login, grant, prompt, model, auto_level, accept_created, plan_nodes) = {
+    let (mut login, grant, snap, reads, model, auto_level, accept_created, plan_nodes) = {
         let s = lock(&deps.store)?;
         let a = autonomy(&s, m, now)?;
         let runs = s.mission_planner_runs_since(m.id, now - 3600)?;
@@ -1326,7 +1341,8 @@ pub async fn run_planner(
         (
             login,
             a.grant.clone(),
-            format!("{}\n\n{snap}", planner::PLANNER_PROMPT),
+            snap,
+            planner_reads_project(&s, m)?,
             m.policy
                 .planner_model
                 .clone()
@@ -1340,14 +1356,57 @@ pub async fn run_planner(
     let (answer, stderr) = loop {
         attempts += 1;
         let (host, profile) = (login.host.as_str(), login.profile.as_deref());
-        let script = planner::planner_script_as(&model, &prompt, profile)
-            .map_err(|e| IpcError::new(codes::E_INVALID, e))?;
+        // Lanes design L1: the planner reads the repository's checkout on
+        // its host when `orchestrator.planner_reads` is on. A checkout it
+        // cannot have is said on the log, and it plans without reading.
+        let checkout = match reads {
+            Some(project_id) => {
+                match crate::service::sessions::project_checkout_on(
+                    &deps.store,
+                    &deps.ssh,
+                    host,
+                    project_id,
+                )
+                .await
+                {
+                    Ok(dir) => Some(dir),
+                    Err(e) => {
+                        let s = lock(&deps.store)?;
+                        event(
+                            &s,
+                            m.id,
+                            "note",
+                            "fleet",
+                            None,
+                            serde_json::json!({ "text": format!(
+                                "the planner did not read the repository on {host}: {}",
+                                e.message
+                            ) }),
+                        );
+                        None
+                    }
+                }
+            }
+            None => None,
+        };
+        let prompt = format!("{}\n\n{snap}", planner::planner_prompt(checkout.is_some()));
+        let (script, secs) = match &checkout {
+            Some(dir) => (
+                planner::planner_script_in(&model, &prompt, profile, dir),
+                planner::PLANNER_READS_TIMEOUT_SECS,
+            ),
+            None => (
+                planner::planner_script_as(&model, &prompt, profile),
+                planner::PLANNER_HOST_TIMEOUT_SECS,
+            ),
+        };
+        let script = script.map_err(|e| IpcError::new(codes::E_INVALID, e))?;
         let out = crate::ssh::run_shell_bounded(
             deps.ssh.as_ref(),
             host,
             &script,
             Duration::from_secs(10),
-            Duration::from_secs(planner::PLANNER_HOST_TIMEOUT_SECS + 20),
+            Duration::from_secs(secs + 20),
         )
         .await?;
         let stdout = String::from_utf8_lossy(&out.stdout);

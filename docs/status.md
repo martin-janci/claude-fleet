@@ -1062,8 +1062,13 @@ beside the live implementer got a fresh `-N` checkout of the default branch,
 so a review read none of the work and a retry began again. `work { mission }`
 carries `stats` (`missions/stats.rs`): runs by role and per done task,
 retries, cold starts, a task's median time and the share of the working span
-with no run open, shown as a line in the mission room's header. The lanes
-design (`docs/superpowers/specs/2026-10-23-mission-lanes-design.md`, L1–L6)
+with no run open, shown as a line in the mission room's header. Lanes L1:
+a Claude worker's run prompt asks for subagents to explore and to review its
+own diff (`run::subagent_note`, `orchestrator.run_subagents`, on); with
+`orchestrator.planner_reads` (off) the planner runs in the mission's
+checkout on its host with Read, Grep and Glob; and its prompt says items
+changing the same files or shared registry depend on each other. The lanes
+design (`docs/superpowers/specs/2026-10-23-mission-lanes-design.md`, L2–L6)
 waits on the owner. A mission's worker is refused a person's
 step (`gh pr merge` / `ready`, a push to `main` / `master`, a tracker CLI)
 by fleet's `PreToolUse(Bash)` guard (`orchestrate/guard.rs`): a shell

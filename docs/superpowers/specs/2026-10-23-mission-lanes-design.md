@@ -1,7 +1,7 @@
 # Misie po líniách: jedna vedúca session na líniu, subagenti vnútri
 
 **Dátum:** 2026-10-23
-**Stav:** návrh, čaká na rozhodnutie vlastníka (§9). Nič z L2 a ďalej sa nestavia, kým vlastník nepovie áno. **L0 je postavené** (2026-10-23): oprava P2 a metriky misie (§5.2, §5.5).
+**Stav:** návrh, čaká na rozhodnutie vlastníka (§9). Nič z L2 a ďalej sa nestavia, kým vlastník nepovie áno. **L0 je postavené** (2026-10-23): oprava P2 a metriky misie (§5.2, §5.5). **L1 je postavené** (2026-10-23): subagenti v prompte behu, plánovač, ktorý číta repo, a pravidlo o spoločných súboroch (§5.1, §5.4).
 **Nadväzuje na:** `2026-10-07-autonomous-orchestration-projects-design.md` (ďalej *O-návrh*), najmä §5.3 (deterministický loop), §6 (evidencia), §8 (worktrees a integrácia).
 **Vstup:** analýza „ako zlepšiť misie: jeden Claude so subagentmi alebo veľa sessions" (2026-10-23).
 
@@ -191,6 +191,8 @@ Inak druhá čaká. V claude-fleet pre P7 predvolene čaká.
 
 Pokyny z §3.4 (prieskum, review pred hlásením) sa pridajú aj do promptu behu v režime `item` (`run_prompt`). Je to jedna zmena textu, lacné a hneď merateľné na počte retry.
 
+**Postavené v L1:** `run::subagent_note` podľa roly (`implement` a `integrate`: prieskum a review vlastného diffu cez subagentov, ktorí len čítajú; `review` a `research`: paralelné čítanie; `test`: nič). Pridá sa len Claude workerovi (nie Codex) a len pri zapnutom `orchestrator.run_subagents` (predvolene zapnuté, aby sa dalo porovnať s vypnutým cez metriky z L0).
+
 ### 5.2 (bod 3) Headless checks predvolene a P2
 
 - **P2, postavené v L0.** `run::prior_work` nájde vetvu a host najnovšieho implement pokusu s vlastným checkoutom. Beh na tej istej položke (retry, review, test) potom:
@@ -211,6 +213,11 @@ Pokyny z §3.4 (prieskum, review pred hlásením) sa pridajú aj do promptu behu
 - `create_item` dostane `lane` a `touches[]` (globy ciest). `touches` sa uloží na položku (stĺpec alebo `notes` metadáta; rozhodnutie pri implementácii, preferovaný stĺpec `touches_json`).
 - Pravidlo: v režime `item` dve položky s prekrývajúcimi sa `touches` v tom istom repe nebežia naraz. V režime `lane` to isté platí pre línie (§4.1). Bez `touches` sa predpokladá prekrytie.
 - Plánovač má v prompte pravidlo z P7: zmena migrácie, MCP nástroja, verdiktu alebo `status.md` patrí do jednej línie na repo.
+
+**Postavené v L1:**
+- `orchestrator.planner_reads` (predvolene vypnuté). Keď je zapnuté, `run_planner` pred každým pokusom zaistí checkout projektu misie na hoste plánovača (`sessions::project_checkout_on`; projekt koreňovej úlohy, inak prvé repo misie) a plánovač beží v ňom s `Read`, `Grep`, `Glob` (`planner::planner_script_in`, `claude_print::tool_flags`) a s dlhším limitom (`PLANNER_READS_TIMEOUT_SECS`, 600 s). Prompt (`planner_prompt(true)`) mu povie prečítať CLAUDE.md alebo README, považovať prečítané za dáta a pri `create_item` uviesť v `notes` súbory, ktoré úloha zmení. Checkout, ktorý sa nedá zaistiť, zapíše `note` do logu misie a plánovač plánuje bez čítania.
+- Pravidlo o spoločných miestach je v prompte vždy, aj bez čítania, a všeobecne, nie len pre claude-fleet: úlohy, ktoré menia tie isté súbory alebo ten istý spoločný register (zoznam migrácií, generovaný súbor, tabuľka nástrojov či príkazov, stavový dokument), na seba nadväzujú.
+- `touches` ako pole a pravidlo prekrytia pri spúšťaní ostávajú pre L5.
 
 ### 5.5 (bod 6) Metriky
 

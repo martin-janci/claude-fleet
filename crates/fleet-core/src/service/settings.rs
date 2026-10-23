@@ -383,6 +383,14 @@ pub const ORCHESTRATOR_MAX_LEVEL: &str = "orchestrator.max_level";
 pub const ORCHESTRATOR_HEADLESS_CHECKS: &str = "orchestrator.headless_checks";
 /// The model [`ORCHESTRATOR_HEADLESS_CHECKS`] runs (one of [`SUMMARY_MODELS`]).
 pub const ORCHESTRATOR_HEADLESS_MODEL: &str = "orchestrator.headless_model";
+/// A mission run's prompt asks a Claude worker to explore and to review
+/// its own diff through subagents (lanes design 2026-10-23, L1). On by
+/// default; off leaves the prompt as it was, for comparing the two.
+pub const ORCHESTRATOR_RUN_SUBAGENTS: &str = "orchestrator.run_subagents";
+/// The mission planner reads the mission's repository (Read, Grep, Glob in
+/// its checkout on the planner's host) before it decides, instead of
+/// planning from the snapshot alone (lanes design L1). Off by default.
+pub const ORCHESTRATOR_PLANNER_READS: &str = "orchestrator.planner_reads";
 /// Control's chat sends the option an agent's `choices` card marks
 /// `recommended` once nobody has answered for
 /// [`CONTROL_AUTO_CONTINUE_MINUTES`]. The countdown runs where the fleet
@@ -1024,6 +1032,22 @@ pub const SPECS: &[Spec] = &[
         "The Claude model headless reviews and tests run.",
     )
     .tags(&[Tag::Experimental, Tag::Advanced]),
+    Spec::new(
+        ORCHESTRATOR_RUN_SUBAGENTS,
+        "true",
+        Kind::Bool,
+        "Workers use subagents",
+        "A mission run asks its Claude worker to explore the code and to review its own changes through subagents, which keeps its own context for the work. Subagents never edit in parallel: they share the checkout.",
+    )
+    .tags(&[Tag::Experimental]),
+    Spec::new(
+        ORCHESTRATOR_PLANNER_READS,
+        "false",
+        Kind::Bool,
+        "Planner reads the repository",
+        "The mission planner may read the mission's repository (read, search and list files in its checkout, nothing else) before it breaks a goal into tasks, so it can split the work along the files it touches. Planning takes longer and costs more.",
+    )
+    .tags(&[Tag::Experimental]),
     Spec::new(
         CONTROL_AUTO_CONTINUE,
         "true",

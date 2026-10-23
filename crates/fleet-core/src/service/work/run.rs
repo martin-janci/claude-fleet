@@ -218,6 +218,26 @@ pub fn prior_work_note(role: &str, branch: &str) -> String {
     format!("{what} If `git log` does not show them, fetch them with `git fetch origin {branch}`.")
 }
 
+/// What a run's prompt asks of a Claude worker about subagents
+/// (`orchestrator.run_subagents`, lanes design 2026-10-23 L1), by role;
+/// `None` for a role with no use for them. Subagents only read: they share
+/// the worker's checkout, so two writing at once would fight over it.
+pub fn subagent_note(role: &str) -> Option<&'static str> {
+    match role {
+        "implement" | "integrate" => Some(
+            "Use subagents (the Agent tool) to keep your own context for the work: one or more \
+             to explore the code before you edit, and one with a fresh context to review your \
+             diff before you report. Subagents only read: never have one edit, since they share \
+             your checkout.",
+        ),
+        "review" | "research" => Some(
+            "Use subagents (the Agent tool) to read the parts of the code in parallel; they only \
+             read.",
+        ),
+        _ => None,
+    }
+}
+
 /// Write the attempt: a `running` task on `worker`, naming the item, its
 /// attempt number and role. No requester (nobody's inbox gets the result),
 /// and no mirror item: the item it is an attempt at already exists.
@@ -385,6 +405,20 @@ pub async fn run_item_with(
             prompt.push_str("\n\n");
             prompt.push_str(&prior_work_note(role, &p.branch));
         }
+        let claude = plan
+            .agent
+            .as_deref()
+            .is_none_or(|a| a == crate::store::AGENT_CLAUDE);
+        if let Some(n) = subagent_note(role).filter(|_| {
+            claude
+                && crate::service::settings::get_bool(
+                    &s,
+                    crate::service::settings::ORCHESTRATOR_RUN_SUBAGENTS,
+                )
+        }) {
+            prompt.push_str("\n\n");
+            prompt.push_str(n);
+        }
         let task = record_run(&s, row.id, &prompt, item_id, attempt, role)?;
         (prompt, task)
     };
@@ -494,6 +528,17 @@ mod tests {
         assert_eq!(prior_work(&s, item).unwrap(), None);
         assert!(!branch_is_plain("-delete"));
         assert!(branch_is_plain("feat/x_1.2"));
+    }
+
+    #[test]
+    fn the_subagent_note_is_for_the_roles_that_read_or_write_code() {
+        let n = subagent_note("implement").unwrap();
+        assert!(
+            n.contains("Agent tool") && n.contains("never have one edit"),
+            "{n}"
+        );
+        assert!(subagent_note("review").unwrap().contains("only"));
+        assert_eq!(subagent_note("test"), None, "a test runs its commands");
     }
 
     #[test]

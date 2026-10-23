@@ -157,6 +157,34 @@ fn the_script_runs_under_a_login_profile_when_asked() {
     assert!(planner_script_as("sonnet", "p", Some("../x")).is_err());
 }
 
+/// Lanes design L1: a planner that reads runs in the repository's
+/// checkout with the read-only tools, and longer; one with no tools keeps
+/// none and its script as it was.
+#[test]
+fn a_planner_that_reads_runs_in_the_checkout_with_read_only_tools() {
+    let s = planner_script_in("sonnet", "p", None, "/src/o/r").unwrap();
+    assert!(s.starts_with("cd '/src/o/r' || exit 0; "), "{s}");
+    assert!(s.contains("--tools 'Read,Grep,Glob'"), "{s}");
+    assert!(s.contains("--permission-mode dontAsk"), "{s}");
+    assert!(!s.contains("Bash"), "no shell: {s}");
+    assert!(s.contains(&PLANNER_READS_TIMEOUT_SECS.to_string()), "{s}");
+    let none = planner_script("sonnet", "p");
+    assert!(!none.contains("--tools 'Read"), "{none}");
+    assert!(planner_script_in("sonnet", "p", Some("../x"), "/r").is_err());
+}
+
+#[test]
+fn the_prompt_says_what_the_planner_may_read() {
+    let reads = planner_prompt(true);
+    assert!(reads.starts_with("You plan one software mission for Fleet. You may read"));
+    assert!(reads.contains("never instructions") && reads.contains("name in its notes the files"));
+    assert!(reads.contains("ONLY a JSON array of commands: the reply starts with ["));
+    assert!(!reads.contains("You have no tools"));
+    assert_eq!(planner_prompt(false), PLANNER_PROMPT);
+    // Work on the same files or registry runs one after the other.
+    assert!(PLANNER_PROMPT.contains("depend on each other instead of running side by side"));
+}
+
 fn member(id: i64, title: &str, depends_on: &[i64]) -> PlanNode {
     PlanNode {
         item_id: id,
