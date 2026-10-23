@@ -390,10 +390,17 @@ pub fn usage_limit(said: &str) -> Option<UsageLimit> {
 }
 
 /// PURE: [`usage_limit`] of a finished run's answer `text`, else of the last
-/// line of its `stderr`.
-pub fn run_usage_limit(text: &str, stderr: &[u8]) -> Option<UsageLimit> {
-    usage_limit(text)
-        .or_else(|| usage_limit(&crate::service::work::summary::last_error_line(stderr)))
+/// line of its `stderr`. An answer whose envelope says it is no error is the
+/// model's own text, which the prompt's untrusted input may have steered
+/// (review r8): only Claude Code's error (`env.is_error`, or no envelope) is
+/// read for the limit words, like [`run_signed_out`].
+pub fn run_usage_limit(env: Option<&Envelope>, text: &str, stderr: &[u8]) -> Option<UsageLimit> {
+    let said = if env.is_none_or(|e| e.is_error) {
+        usage_limit(text)
+    } else {
+        None
+    };
+    said.or_else(|| usage_limit(&crate::service::work::summary::last_error_line(stderr)))
 }
 
 #[cfg(test)]
@@ -585,10 +592,25 @@ mod tests {
         // Only the opening is read.
         let late = format!("{} usage limit reached", "x".repeat(400));
         assert_eq!(usage_limit(&late), None);
-        assert!(
-            run_usage_limit("", b"warn: x\nClaude AI usage limit reached|1760536800\n")
-                .is_some_and(|l| l.reset_at == Some(1_760_536_800))
-        );
-        assert_eq!(run_usage_limit("", b"boom\n"), None);
+        assert!(run_usage_limit(
+            None,
+            "",
+            b"warn: x\nClaude AI usage limit reached|1760536800\n"
+        )
+        .is_some_and(|l| l.reset_at == Some(1_760_536_800)));
+        assert_eq!(run_usage_limit(None, "", b"boom\n"), None);
+        // Review r8: the model's own answer (no error) saying the words is
+        // not Claude Code at its limit; Claude Code's error answer is.
+        let env = |is_error| Envelope {
+            result: String::new(),
+            is_error,
+            input_tokens: None,
+            output_tokens: None,
+            cost_microusd: None,
+        };
+        let words = "Claude AI usage limit reached|99999999999";
+        assert_eq!(run_usage_limit(Some(&env(false)), words, b""), None);
+        assert!(run_usage_limit(Some(&env(true)), words, b"").is_some());
+        assert!(run_usage_limit(None, words, b"").is_some());
     }
 }

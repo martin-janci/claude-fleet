@@ -1024,8 +1024,10 @@ impl FleetTools {
             let (row, changed) = tasks::report_task_done(&s, &task, worker, &p.nonce, &report)
                 .map_err(to_mcp_err)?;
             // Where the run's checkout is: the worker's worktree, as the Stop
-            // path falls back to when the hook gave no `cwd`.
-            // Best-effort, as the evidence itself is.
+            // path falls back to when the hook gave no `cwd`. Best-effort, as
+            // the evidence itself is: the worker's next Stop reads it again
+            // (`handle_stop_for_worker`), from its `cwd` when it has no
+            // linked worktree.
             let checkout = match (changed, row.work_item_id) {
                 (true, Some(_)) => s.get_session_by_id(worker).ok().flatten().and_then(|w| {
                     let wt = w.worktree_id?;
@@ -1039,14 +1041,17 @@ impl FleetTools {
         if changed {
             tracing::info!("task {} done (worker {}, reported)", row.id, worker);
         }
-        // A run's evidence, as the Stop path reads it after a scanned marker:
-        // mission integration reads `evidence.head`. A host round trip, so it
-        // runs after the reply.
+        // A run's evidence, read now so the result shows it at once, but
+        // provisional: the worker's turn still runs, and a commit after the
+        // report counts once its Stop reads git again (mission integration
+        // reads `evidence.head`). A host round trip, so it runs after the
+        // reply.
         if let Some((host, dir, done)) = checkout {
             let store = Arc::clone(&self.store);
             let ssh = Arc::clone(&self.ssh);
             crate::rt::spawn(async move {
-                crate::service::work::report::collect_evidence(&store, &ssh, &host, &dir, &[done])
+                use crate::service::work::report::{collect_evidence_as, EvidenceRead};
+                collect_evidence_as(&store, &ssh, &host, &dir, &[done], EvidenceRead::MidTurn)
                     .await;
             });
         }

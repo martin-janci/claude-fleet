@@ -105,6 +105,17 @@ pub struct TaskEvidence {
     pub uncommitted: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Read while the worker's turn was still running (`task_report`), or a
+    /// placeholder for a read still to come: the worker's next Stop reads git
+    /// again and replaces it, so a commit made after the report counts.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub provisional: bool,
+    /// Where git was read, kept when the read failed (`error`) so the
+    /// mission loop can read it again (`report::retry_unread_evidence`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dir: Option<String>,
 }
 
 /// Decode a stored JSON column; text fleet did not write reads as absent.
@@ -134,6 +145,74 @@ impl Store {
             rusqlite::params![json, task_id],
         )?;
         self.emit_task_row(task_id)
+    }
+
+    /// [`Self::set_task_evidence`], but only over evidence that is still
+    /// open to a better read: none, a provisional one, or, with
+    /// `over_errors`, one whose read failed. A mid-turn read finishing after
+    /// the Stop's (or a retry after a newer read) never replaces it.
+    /// Answers whether it wrote.
+    pub fn replace_open_task_evidence(
+        &self,
+        task_id: i64,
+        ev: &TaskEvidence,
+        over_errors: bool,
+    ) -> Result<bool, IpcError> {
+        let json = serde_json::to_string(ev)
+            .map_err(|e| IpcError::new(crate::ipc_error::codes::E_INTERNAL, e.to_string()))?;
+        let n = self.conn.execute(
+            "UPDATE tasks SET evidence_json = ?1 WHERE id = ?2 \
+               AND (evidence_json IS NULL \
+                    OR json_extract(evidence_json, '$.provisional') = 1 \
+                    OR (?3 AND json_extract(evidence_json, '$.error') IS NOT NULL))",
+            rusqlite::params![json, task_id, over_errors],
+        )?;
+        if n > 0 {
+            self.emit_task_row(task_id)?;
+        }
+        Ok(n > 0)
+    }
+
+    /// The runs `worker` finished since `since` whose evidence its next Stop
+    /// still owes: none yet, or a provisional read taken mid-turn by
+    /// `task_report`. Oldest first.
+    pub fn runs_awaiting_stop_evidence(
+        &self,
+        worker: i64,
+        since: i64,
+    ) -> Result<Vec<super::TaskRow>, IpcError> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {} FROM tasks WHERE worker_session_id = ?1 AND state = 'done' \
+               AND work_item_id IS NOT NULL AND finished_at >= ?2 \
+               AND (evidence_json IS NULL \
+                    OR json_extract(evidence_json, '$.provisional') = 1) \
+             ORDER BY finished_at ASC, id ASC",
+            super::rows::TASK_COLUMNS
+        ))?;
+        let rows = stmt.query_map(rusqlite::params![worker, since], super::rows::map_task_row)?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// The finished runs at `mission_id`'s members, done since `since`,
+    /// whose git read failed: the loop reads them again.
+    pub fn mission_runs_with_unread_evidence(
+        &self,
+        mission_id: i64,
+        since: i64,
+    ) -> Result<Vec<super::TaskRow>, IpcError> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {} FROM tasks t JOIN work_items i ON i.id = t.work_item_id \
+             WHERE i.orchestration_project_id = ?1 AND t.state = 'done' \
+               AND t.finished_at >= ?2 \
+               AND json_extract(t.evidence_json, '$.error') IS NOT NULL \
+             ORDER BY t.finished_at ASC, t.id ASC",
+            super::rows::task_columns_t()
+        ))?;
+        let rows = stmt.query_map(
+            rusqlite::params![mission_id, since],
+            super::rows::map_task_row,
+        )?;
+        Ok(rows.collect::<Result<_, _>>()?)
     }
 
     /// The newest attempt at `item_id` in `role`, open or not.

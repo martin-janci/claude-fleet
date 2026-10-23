@@ -766,6 +766,17 @@ impl Store {
                 id
             ],
         )?;
+        // A grant until the mission completes ends when it stops being
+        // finite (TASK-293): switched back later, it needs a new signature
+        // rather than reviving the old level and budget.
+        if before.mode == "finite" && mode != "finite" {
+            tx.execute(
+                "UPDATE orchestration_grants SET revoked_at = ?1 \
+                 WHERE orchestration_project_id = ?2 AND revoked_at IS NULL \
+                   AND expires_at >= ?3",
+                rusqlite::params![now_unix(), id, super::GRANT_UNTIL_DONE_AT],
+            )?;
+        }
         let mut changed = Vec::new();
         if name != before.name {
             changed.push("name");
@@ -1322,6 +1333,39 @@ impl Store {
              ORDER BY at DESC, id DESC LIMIT ?3",
         )?;
         let rows = stmt.query_map(rusqlite::params![id, before_id, limit as i64], |r| {
+            let payload: Option<String> = r.get(7)?;
+            Ok(MissionEventRow {
+                id: r.get(0)?,
+                at: r.get(1)?,
+                kind: r.get(2)?,
+                actor: r.get(3)?,
+                work_item_id: r.get(4)?,
+                task_id: r.get(5)?,
+                decision_id: r.get(6)?,
+                payload: payload.and_then(|p| serde_json::from_str(&p).ok()),
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// A mission's events of `kinds` alone, newest first, at most `limit`:
+    /// what a reader of a few kinds needs however busy the rest of the log
+    /// is (the planner's waits, review r8).
+    pub fn mission_events_of_kinds(
+        &self,
+        id: i64,
+        kinds: &[&str],
+        limit: usize,
+    ) -> Result<Vec<MissionEventRow>, IpcError> {
+        let kinds = serde_json::to_string(kinds).unwrap_or_else(|_| "[]".into());
+        let mut stmt = self.conn.prepare(
+            "SELECT id, at, kind, actor, work_item_id, task_id, decision_id, payload \
+             FROM orchestration_events \
+             WHERE orchestration_project_id = ?1 \
+               AND kind IN (SELECT value FROM json_each(?2)) \
+             ORDER BY at DESC, id DESC LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![id, kinds, limit as i64], |r| {
             let payload: Option<String> = r.get(7)?;
             Ok(MissionEventRow {
                 id: r.get(0)?,

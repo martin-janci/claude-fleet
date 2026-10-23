@@ -603,6 +603,18 @@ pub struct PlanNode {
     /// as a merge item it merges nothing until a person accepts it. The
     /// planner leaves it false: its answer is weighed whole.
     pub pending: bool,
+    /// Finished: as a merge item it merged what it merged, and can no
+    /// longer wait for an item added to its wave since.
+    pub done: bool,
+    /// The loop's own integration of branches that do not merge cleanly
+    /// (`integrate::INTEGRATION_WHY`): it supersedes those branches rather
+    /// than joining their wave, so no merge item must wait for it.
+    pub integration: bool,
+}
+
+/// Whether `why` (an item's `proposal_why`) marks the loop's integration item.
+fn is_integration(why: Option<&str>) -> bool {
+    why == Some(super::integrate::INTEGRATION_WHY)
 }
 
 /// The mission's members and their edges, for [`check_merge_waves`]. The
@@ -612,6 +624,11 @@ pub fn plan_nodes(items: &[WorkItemRow], graph: &MissionGraph, root: Option<i64>
         .iter()
         .filter(|i| Some(i.id) != root)
         .map(|i| (i.id, i.title.as_str()))
+        .collect();
+    let integration: std::collections::HashSet<i64> = items
+        .iter()
+        .filter(|i| is_integration(i.proposal_why.as_deref()))
+        .map(|i| i.id)
         .collect();
     graph
         .nodes
@@ -628,15 +645,26 @@ pub fn plan_nodes(items: &[WorkItemRow], graph: &MissionGraph, root: Option<i64>
                 .collect(),
             rejected: n.state == "rejected",
             pending: false,
+            done: n.state == "done",
+            integration: integration.contains(&n.item_id),
         })
         .collect()
 }
 
 /// PURE: whether a title names an item that merges or integrates a wave
 /// ("Merge wave 1: …", "Integrate wave 2"), the title the prompt asks for.
+/// Whole words only: "Integrate waveform renderer" and "Merge microwave
+/// driver PR" merge no wave.
 pub fn is_merge_wave(title: &str) -> bool {
     let t = title.to_lowercase();
-    t.contains("wave") && (t.contains("merge") || t.contains("integrat"))
+    let words: Vec<&str> = t
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
+    words.iter().any(|w| matches!(*w, "wave" | "waves"))
+        && words.iter().any(|w| {
+            matches!(*w, "merge" | "merges" | "merged" | "merging") || w.starts_with("integrat")
+        })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -659,6 +687,8 @@ struct PlanEntry {
     deps: Vec<PlanKey>,
     rejected: bool,
     pending: bool,
+    done: bool,
+    integration: bool,
 }
 
 type PlanGraph = std::collections::BTreeMap<PlanKey, PlanEntry>;
@@ -666,7 +696,9 @@ type PlanGraph = std::collections::BTreeMap<PlanKey, PlanEntry>;
 /// Every (merge item, wave, member of that wave it does not reach). A merge
 /// item's wave is the latest wave among what it waits for; it must reach,
 /// directly or through others, every other item of that wave that is not a
-/// merge item itself and not a rejected proposal.
+/// merge item itself, not a rejected proposal and not the loop's
+/// integration item. A finished merge item asks for nothing more: what
+/// joins its wave later is the next merge's.
 fn merge_gaps(g: &PlanGraph) -> std::collections::BTreeSet<(PlanKey, u32, PlanKey)> {
     use std::collections::BTreeSet;
     fn wave(k: PlanKey, g: &PlanGraph, memo: &mut HashMap<PlanKey, u32>, guard: usize) -> u32 {
@@ -698,7 +730,7 @@ fn merge_gaps(g: &PlanGraph) -> std::collections::BTreeSet<(PlanKey, u32, PlanKe
         .collect();
     let mut gaps = BTreeSet::new();
     for (k, e) in g {
-        if e.rejected || e.pending || !is_merge_wave(&e.title) {
+        if e.rejected || e.pending || e.done || !is_merge_wave(&e.title) {
             continue;
         }
         let Some(w) = e.deps.iter().filter_map(|d| waves.get(d)).max().copied() else {
@@ -718,6 +750,7 @@ fn merge_gaps(g: &PlanGraph) -> std::collections::BTreeSet<(PlanKey, u32, PlanKe
             if x != k
                 && waves[x] == w
                 && !xe.rejected
+                && !xe.integration
                 && !is_merge_wave(&xe.title)
                 && !reach.contains(x)
             {
@@ -743,6 +776,8 @@ pub fn check_merge_waves(commands: &[Command], members: &[PlanNode]) -> Result<(
                     deps: n.depends_on.iter().map(|d| PlanKey::Item(*d)).collect(),
                     rejected: n.rejected,
                     pending: n.pending,
+                    done: n.done,
+                    integration: n.integration,
                 },
             )
         })
@@ -772,6 +807,8 @@ pub fn check_merge_waves(commands: &[Command], members: &[PlanNode]) -> Result<(
                         deps,
                         rejected: false,
                         pending: false,
+                        done: false,
+                        integration: false,
                     },
                 );
                 created += 1;
@@ -851,6 +888,8 @@ pub fn member_nodes(
             rejected: i.status_category != "done"
                 && i.proposal_state.as_deref() == Some("rejected"),
             pending: i.status_category != "done" && i.proposal_state.as_deref() == Some("proposed"),
+            done: i.status_category == "done",
+            integration: is_integration(i.proposal_why.as_deref()),
         })
         .collect()
 }
@@ -875,6 +914,8 @@ pub fn check_merge_change(
                         deps: n.depends_on.iter().map(|d| PlanKey::Item(*d)).collect(),
                         rejected: n.rejected,
                         pending: n.pending,
+                        done: n.done,
+                        integration: n.integration,
                     },
                 )
             })

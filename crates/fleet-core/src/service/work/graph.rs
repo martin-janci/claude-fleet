@@ -193,6 +193,9 @@ pub fn build(
     let mut own: HashMap<i64, &'static str> = HashMap::new();
     let mut latest: HashMap<i64, AttemptBrief> = HashMap::new();
     let mut evidence: HashMap<i64, super::gate::RunEvidence> = HashMap::new();
+    // Read once per implemented item, for the run evidence and again for
+    // the verification below.
+    let mut recorded_of: HashMap<i64, Vec<crate::store::VerificationRow>> = HashMap::new();
     for i in items {
         let tasks = s.tasks_for_item(i.id)?;
         if let Some(t) = tasks.first() {
@@ -214,6 +217,7 @@ pub fn build(
                 .iter()
                 .find(|r| r.line == super::gate::EVIDENCE_LINE);
             evidence.insert(i.id, super::gate::run_evidence(t, over, now));
+            recorded_of.insert(i.id, recorded);
         }
         let failed =
             latest_impl.is_some_and(crate::service::work::orchestrate::steps::attempt_failed);
@@ -268,7 +272,12 @@ pub fn build(
             item_id: i.id,
             state: state.to_string(),
             wave: 0,
-            verification: super::verify::verification(s, i, now)?,
+            verification: super::verify::verification_with(
+                s,
+                i,
+                recorded_of.get(&i.id).map(Vec::as_slice),
+                now,
+            )?,
             attempt: latest.remove(&i.id),
             evidence: evidence.remove(&i.id),
             // A hidden outside item is not named to this caller.

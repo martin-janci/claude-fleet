@@ -667,4 +667,14 @@ fn ci_refusal_names_what_it_may() {
         "{}",
         e.message
     );
+    assert!(e.message.ends_with("(ci_override)"), "{}", e.message);
+    // Review r8: the step takes no override, so it points to Complete.
+    let e = ci_step_refusal(&["o/r#1".into()]).unwrap();
+    assert_eq!(e.code, codes::E_CI_FAILING);
+    assert!(
+        e.message.starts_with("CI is failing on o/r#1;") && e.message.contains("its own Complete"),
+        "{}",
+        e.message
+    );
+    assert!(!e.message.contains("ci_override"), "{}", e.message);
 }

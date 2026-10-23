@@ -98,6 +98,75 @@ fn one_integration_covers_every_conflicting_pair() {
     assert_eq!(tree["depends_on"].as_array().unwrap().len(), 3);
 }
 
+/// Twelve branches, all 66 pairs conflicting on 20 long paths each: the
+/// card still fits `CARD_PAYLOAD_MAX`, so the conflict is carded.
+#[test]
+fn the_largest_integration_still_fits_one_card() {
+    let s = Store::open_in_memory().unwrap();
+    let m = s
+        .create_mission(
+            &crate::store::NewMission {
+                name: "m",
+                goal: "g",
+                ..Default::default()
+            },
+            "person:1",
+        )
+        .unwrap();
+    let all: Vec<Branch> = (0..INTEGRATE_MEMBERS_MAX as i64)
+        .map(|i| branch(1000 + i, &format!("{i:040}")))
+        .collect();
+    let live: Vec<&Branch> = all.iter().collect();
+    let files: Vec<String> = (0..CONFLICT_FILES_MAX)
+        .map(|k| format!("crates/fleet-core/src/service/work/orchestrate/file_{k}.rs"))
+        .collect();
+    let mut conflicts = Vec::new();
+    for i in 0..all.len() {
+        for j in i + 1..all.len() {
+            conflicts.push((&all[i], &all[j], files.clone()));
+        }
+    }
+    assert!(integration_card(&s, &m, &live, &conflicts));
+    let cards = s.mission_cards(m.id, 50).unwrap();
+    assert_eq!(cards.len(), 1, "{cards:?}");
+    let notes = cards[0].payload.as_ref().unwrap()["tree"][0]["notes"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(notes.contains("more pairs"), "{notes}");
+    // And the mission records that it was carded.
+    let events = s.mission_events(m.id, None, 10).unwrap();
+    assert!(events.iter().any(|e| e.kind == "integration"), "{events:?}");
+}
+
+#[test]
+fn conflict_lines_cut_paths_then_pairs_to_the_budget() {
+    let files: Vec<String> = (0..20)
+        .map(|k| format!("src/some/long/path_{k}.rs"))
+        .collect();
+    let one = conflict_lines(&[("A", "B", &files[..2])], 2048);
+    assert_eq!(
+        one,
+        "- A × B: src/some/long/path_0.rs, src/some/long/path_1.rs"
+    );
+    let pairs: Vec<(&str, &str, &[String])> = (0..40).map(|_| ("A", "B", &files[..])).collect();
+    let many = conflict_lines(&pairs, 2048);
+    assert!(many.len() <= 2048 + 40, "{}", many.len());
+    assert!(many.contains("… and "), "{many}");
+    assert!(many.ends_with("more pairs"), "{many}");
+}
+
+#[test]
+fn an_open_card_covers_only_its_own_branches_and_old_pair_cards_none() {
+    let open = vec![
+        "integrate:300:aaaa,301:bbbb".to_string(),
+        "integrate:5:6:cccc:dddd".to_string(),
+        "retry:7".to_string(),
+    ];
+    let got: Vec<i64> = covered_items(&open).into_iter().collect();
+    assert_eq!(got, vec![300, 301]);
+}
+
 #[test]
 fn the_script_quotes_every_value() {
     let s = merge_tree_script(&["/w/it's"], &["a;b".into(), "c".into()]);

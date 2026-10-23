@@ -15,7 +15,7 @@
     fleetTouchViewed,
     type FleetInfo,
   } from './fleets';
-  import { showFriendlyNames, type SessionRow } from './sessions';
+  import { hasNoPane, showFriendlyNames, type SessionRow } from './sessions';
   import ConversationPanel from './ConversationPanel.svelte';
   import TerminalView from './TerminalView.svelte';
   import Button from './kit/Button.svelte';
@@ -29,6 +29,7 @@
 
   type Tab = 'conversation' | 'agent';
   const AWAY_ONLY = 'Not available for another fleet’s session yet';
+  const NO_PANE_TITLE = 'Runs outside tmux — no terminal';
   const isMac = detectMac(typeof navigator === 'undefined' ? undefined : navigator);
   let tab = $state<Tab>('conversation');
   let snapshot = $state<string | null>(null);
@@ -38,6 +39,9 @@
   const name = $derived(($showFriendlyNames && session.friendly_name) || session.tmux_name);
   const key = $derived(`${fleet.id}:${session.id}`);
   const attachRefusal = $derived(fleetAttachRefusal(session));
+  // A background or external agent has no tmux pane (`hasNoPane`), on any
+  // hub: as in App, no attach and no pane read, and the agent tab is off.
+  const noPane = $derived(hasNoPane(session));
   /** The row as the panel reads it: with its fleet, whoever handed it over. */
   const row = $derived(session.fleet === fleet.id ? session : { ...session, fleet: fleet.id });
 
@@ -88,6 +92,7 @@
   });
 
   function pick(t: Tab) {
+    if (t === 'agent' && noPane) return;
     tab = t;
     if (t === 'agent' && attachRefusal) void loadSnapshot();
   }
@@ -98,7 +103,12 @@
     session={row}
     {name}
     current={tab}
-    disabled={{ terminals: AWAY_ONLY, files: AWAY_ONLY, details: AWAY_ONLY }}
+    disabled={{
+      ...(noPane ? { agent: NO_PANE_TITLE } : {}),
+      terminals: AWAY_ONLY,
+      files: AWAY_ONLY,
+      details: AWAY_ONLY,
+    }}
     inspectorOpen={false}
     inspectorAvailable={false}
     {isMac}
@@ -115,7 +125,9 @@
 
   <div class="body">
     {#key key}
-      {#if attachRefusal}
+      {#if noPane}
+        <!-- No pane to attach to or read: only the conversation. -->
+      {:else if attachRefusal}
         <!-- Its host means this machine from here: no attach, so the agent
              tab reads the pane through that hub instead. -->
         <div class="snapshot" data-testid="fleet-session-snapshot">
@@ -139,7 +151,11 @@
     {/key}
     {#if tab === 'conversation'}
       <div class="conv" data-testid="fleet-session-conversation">
-        <ConversationPanel session={row} visible={tab === 'conversation'} onOpenTerminal={() => pick('agent')} />
+        <ConversationPanel
+          session={row}
+          visible={tab === 'conversation'}
+          onOpenTerminal={noPane ? undefined : () => pick('agent')}
+        />
       </div>
     {/if}
   </div>
