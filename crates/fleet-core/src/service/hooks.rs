@@ -1192,10 +1192,17 @@ fn apply_stop_hook(
                 tracing::debug!(error = %e.message, "[control-continue] pick not recorded");
                 s.ensure_in_tx()?;
             }
+            // Or a run it closed with `task_report` mid-turn, whose git
+            // evidence this Stop reads again.
             let has_open_tasks = s
                 .open_tasks_for_worker(before.id)
                 .map(|v| !v.is_empty())
-                .unwrap_or(false);
+                .unwrap_or(false)
+                || s.runs_awaiting_stop_evidence(
+                    before.id,
+                    crate::store::now_unix() - crate::service::tasks::STOP_EVIDENCE_WINDOW_SECS,
+                )
+                .is_ok_and(|v| !v.is_empty());
             // Agent steps (design 2026-09-29 §2): a host whose hooks predate
             // the step matcher gets the transcript backstop. Read here, under
             // the lock, so an up-to-date host never pays for a tail read.

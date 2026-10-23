@@ -36,8 +36,9 @@ pub const GRANT_MAX_SECS: i64 = 7 * 24 * 3600;
 /// The `expires_at` of a grant that lasts until its mission completes
 /// (TASK-293): 9999-12-31, past any clock, and exact in a JS number. Only a
 /// finite mission holds one, and only with a budget; it ends when the
-/// mission does ([`Store::revoke_grants`] on a final state) or stops being
-/// finite ([`Store::live_mission_grant`]).
+/// mission does ([`Store::set_mission_state`] on a final state) or stops
+/// being finite ([`Store::update_mission`] revokes it; [`Store::live_mission_grant`]
+/// also refuses one on a mission that is not finite).
 pub const GRANT_UNTIL_DONE_AT: i64 = 253_402_300_799;
 
 /// One card of a mission's confirm queue.
@@ -557,7 +558,8 @@ impl Store {
     /// The newest grant that still holds at `now`: not revoked, not
     /// expired, and signed for the plan the mission has now. A grant until
     /// the mission completes holds only while the mission is finite: one
-    /// made continuous never ends.
+    /// made continuous never ends, so the switch revokes it
+    /// ([`Self::update_mission`]) and a switch back needs a new grant.
     pub fn live_mission_grant(
         &self,
         mission_id: i64,

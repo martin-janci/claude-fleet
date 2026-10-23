@@ -295,6 +295,32 @@ pub async fn collect_evidence(
     cwd: &str,
     tasks: &[TaskRow],
 ) {
+    collect_evidence_as(store, ssh, host, cwd, tasks, EvidenceRead::Final).await
+}
+
+/// When a git read of a run's checkout happens, which says what it may
+/// replace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvidenceRead {
+    /// After the worker's turn (its Stop): the run's evidence.
+    Final,
+    /// While the worker's turn still runs (`task_report`): stored
+    /// provisional, never over a settled read, and read again at its Stop.
+    MidTurn,
+    /// The mission loop reading a failed read again: only over a read that
+    /// is still unsettled or failed.
+    Retry,
+}
+
+/// [`collect_evidence`], for `read`.
+pub async fn collect_evidence_as(
+    store: &Arc<Mutex<Store>>,
+    ssh: &Arc<SshClient>,
+    host: &str,
+    cwd: &str,
+    tasks: &[TaskRow],
+    read: EvidenceRead,
+) {
     let runs: Vec<i64> = tasks
         .iter()
         .filter(|t| t.work_item_id.is_some())
@@ -304,19 +330,63 @@ pub async fn collect_evidence(
         return;
     }
     let script = evidence_script(cwd);
-    let ev = match crate::service::catalog::inventory::run_host_script(ssh, host, &script).await {
+    let mut ev = match crate::service::catalog::inventory::run_host_script(ssh, host, &script).await
+    {
         Ok(out) => parse_evidence(&out, now_unix()),
+        // Where it was read, so the loop can read it again (a host that
+        // dropped for a moment is not a run that did nothing).
         Err(e) => TaskEvidence {
             at: now_unix(),
             error: Some(clip(&e.message, 200)),
+            host: Some(host.to_string()),
+            dir: Some(cwd.to_string()),
             ..Default::default()
         },
     };
+    ev.provisional = read == EvidenceRead::MidTurn;
     let Ok(s) = store.lock() else { return };
     for id in runs {
-        if let Err(e) = s.set_task_evidence(id, &ev) {
+        let stored = match read {
+            EvidenceRead::Final => s.set_task_evidence(id, &ev),
+            EvidenceRead::MidTurn => s.replace_open_task_evidence(id, &ev, false).map(|_| ()),
+            EvidenceRead::Retry => s.replace_open_task_evidence(id, &ev, true).map(|_| ()),
+        };
+        if let Err(e) = stored {
             tracing::warn!(task = id, error = %e.message, "[report] storing evidence failed");
         }
+    }
+}
+
+/// The least time between two reads of one run's failed git evidence.
+const EVIDENCE_RETRY_EVERY_SECS: i64 = 60;
+
+/// Read again the git evidence of `mission_id`'s runs whose read failed
+/// (a transient SSH error right after the run), within
+/// [`super::gate::EVIDENCE_RETRY_SECS`] of their finish: the gate holds
+/// them `pending` meanwhile rather than calling the work missing.
+pub async fn retry_unread_evidence(
+    store: &Arc<Mutex<Store>>,
+    ssh: &Arc<SshClient>,
+    mission_id: i64,
+    now: i64,
+) {
+    let runs = match store.lock() {
+        Ok(s) => s
+            .mission_runs_with_unread_evidence(mission_id, now - super::gate::EVIDENCE_RETRY_SECS)
+            .unwrap_or_default(),
+        Err(_) => return,
+    };
+    for t in runs {
+        let Some(ev) = t.evidence.as_ref() else {
+            continue;
+        };
+        let (Some(host), Some(dir)) = (ev.host.clone(), ev.dir.clone()) else {
+            continue;
+        };
+        if now - ev.at < EVIDENCE_RETRY_EVERY_SECS {
+            continue;
+        }
+        collect_evidence_as(store, ssh, &host, &dir, &[t], EvidenceRead::Retry).await;
     }
 }
 
