@@ -121,6 +121,7 @@
     shouldFetchTranscript,
     CONVERSATION_POLL_MS,
     ACTIVITY_POLL_MS,
+    IDLE_PROBE_MS,
     type Conversation,
     type ConversationSummary,
     type SlashCommand,
@@ -378,6 +379,8 @@
   // an upgraded hub is re-discovered without restarting the app.
   let probeUnsupported = $state(false);
   let probeTimer: ReturnType<typeof setTimeout> | undefined;
+  // When the last probe went out (0 = none for this conversation yet).
+  let lastProbeAt = 0;
   function setProbe(next: ActivityProbe | null) {
     probe = next;
     clearTimeout(probeTimer);
@@ -543,6 +546,7 @@
     resetView();
     setProbe(null);
     probeSeq++;
+    lastProbeAt = 0;
     // Whether the hub serves `session_activity` is a fact about the hub, not
     // about the session — but re-learning it costs exactly one call per
     // session switch, and it is what lets an upgraded hub start answering
@@ -1196,6 +1200,7 @@
   async function probeNow() {
     if (probing) return;
     probing = true;
+    lastProbeAt = Date.now();
     const id = sKey;
     const mine = ++probeSeq;
     let r: Awaited<ReturnType<typeof sessionActivity>>;
@@ -1228,15 +1233,22 @@
   // moving for the length of a turn. The command routes to the hub's own
   // tool now, which reads the pane over the ssh connection that can actually
   // reach the host.
-  const probeLive = $derived(
-    visible && !hasNoPane(session) && indicator !== null && viewing === null && !probeUnsupported,
-  );
+  //
+  // With no indicator the pane is still read, every `IDLE_PROBE_MS`: the row
+  // is not the whole truth (a turn a background task or a wakeup started
+  // fires no prompt hook, and the tick is 20 s apart), and the probe is
+  // what turns the indicator on for a turn the row has not caught up with.
+  const probeOn = $derived(visible && !hasNoPane(session) && viewing === null && !probeUnsupported);
+  const probeLive = $derived(probeOn && indicator !== null);
   $effect(() => {
-    if (!probeLive) return;
-    if (document.visibilityState === 'visible') void untrack(probeNow);
+    if (!probeOn) return;
+    const every = probeLive ? ACTIVITY_POLL_MS : IDLE_PROBE_MS;
+    // A change of cadence because a probe just answered needs no second
+    // read straight away.
+    if (document.visibilityState === 'visible' && Date.now() - lastProbeAt >= ACTIVITY_POLL_MS) void untrack(probeNow);
     const t = setInterval(() => {
       if (document.visibilityState === 'visible') void untrack(probeNow);
-    }, ACTIVITY_POLL_MS);
+    }, every);
     return () => clearInterval(t);
   });
 

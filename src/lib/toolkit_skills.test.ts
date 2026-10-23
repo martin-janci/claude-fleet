@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { skillMatrix } from './toolkit_skills';
+import { accessOf, skillMatrix } from './toolkit_skills';
 import type { AssetListing } from './assets';
 
 const listing = (assets: AssetListing['assets']): AssetListing => ({ head: 'h', loaded_at: 1, assets, unmanaged: [], problems: [] });
@@ -47,6 +47,29 @@ describe('skillMatrix (step 3.16)', () => {
   });
 
   it('is empty without a catalog', () => {
-    expect(skillMatrix(null)).toEqual({ hosts: [], rows: [], outOfSync: 0 });
+    expect(skillMatrix(null)).toEqual({ hosts: [], rows: [], outOfSync: 0, unmanaged: 0 });
+  });
+
+  it('adds what hosts hold outside the catalog, never what fleet or the harness put there', () => {
+    const m = skillMatrix({
+      head: 'h', loaded_at: 1, assets: [], unmanaged: [], problems: [],
+      identities: [
+        { kind: 'skill', name: 'pdf', hosts: [{ host_alias: 'trn', harness: 'claude', host_hash: 'a' }], signature: 'trn', variants: 1, class: 'normal', reason: null },
+        { kind: 'skill', name: 'fleet', hosts: [{ host_alias: 'trn', harness: 'claude', host_hash: 'b' }], signature: 'trn', variants: 1, class: 'fleet_internal', reason: null },
+        { kind: 'hook', name: 'h', hosts: [{ host_alias: 'trn', harness: 'claude', host_hash: 'c' }], signature: 'trn', variants: 1, class: 'normal', reason: null },
+      ],
+    });
+    expect(m.hosts).toEqual(['trn']);
+    expect(m.unmanaged).toBe(1);
+    expect(m.rows.map((r) => [r.key, r.managed, r.cells.trn.state])).toEqual([['identity:skill/pdf', false, 'unmanaged']]);
+  });
+});
+
+describe('accessOf', () => {
+  it('reads the catalog config answer', () => {
+    expect(accessOf({ ok: true, value: { repo_path: '~/a' } })).toBe('manage');
+    expect(accessOf({ ok: true, value: null })).toBe('unconfigured');
+    expect(accessOf({ ok: false, error: { code: 'E_FORBIDDEN' } })).toBe('read_only');
+    expect(accessOf({ ok: false, error: { code: 'E_TIMEOUT' } })).toBe('unknown');
   });
 });

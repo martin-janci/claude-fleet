@@ -17,27 +17,16 @@ import {
   _setFleetsForTest,
   keyTarget,
   sessionKey,
-  type FleetInfo,
 } from './fleets';
 import { outbox } from './outbox';
 import { sendAnswer } from './answer_send';
 import { pendingInputFor } from './pending_input';
 import type { SessionRow } from './sessions';
+import { fleetInfo } from './fleets_fixture';
 
 const inv = mockedInvoke as ReturnType<typeof vi.fn>;
 
-const company: FleetInfo = {
-  id: 'company',
-  label: 'company',
-  url: 'https://fleet.papayapos.dev',
-  color: '#e8833a',
-  primary: false,
-  local: false,
-  client_name: null,
-  connection: { state: 'connected' },
-  unavailable: null,
-  fleet_id: 'bbbbbbbb-2222',
-};
+const company = fleetInfo('company', { url: 'https://fleet.papayapos.dev', color: '#e8833a', fleet_id: 'bbbbbbbb-2222' });
 
 const row = {
   id: 3,

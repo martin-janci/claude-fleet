@@ -2268,6 +2268,11 @@ async fn a_hub_pin_below_the_databases_schema_is_refused() {
     let e = pin_checked(&store, "hub", "", "0.3.3", false, None, &k, NOW).unwrap_err();
     assert_eq!(e.code, codes::E_INVALID);
     assert!(e.message.contains("cannot open"), "{}", e.message);
+    assert!(
+        !e.message.contains("  "),
+        "one line, no runs of spaces: {}",
+        e.message
+    );
     assert!(lock(&store)
         .unwrap()
         .update_desired_all()

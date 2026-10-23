@@ -42,20 +42,18 @@ import { hostFilter } from './hosts';
 import { scopeFilter, type OrgDetail } from './orgs';
 import type { SessionRow } from './sessions';
 import type { HostRow } from './hosts';
+import { fleetInfo } from './fleets_fixture';
 
 function fleet(id: string, extra: Partial<FleetInfo> = {}): FleetInfo {
-  return {
-    id,
+  return fleetInfo(id, {
     label: id === PRIMARY ? 'rlt' : 'Papaya POS (hub)',
     url: `https://${id}.example.com`,
     color: id === PRIMARY ? '#5b8def' : '#e8833a',
-    primary: id === PRIMARY,
     local: false,
     client_name: 'laptop',
     connection: { state: 'connected' },
-    unavailable: null,
     ...extra,
-  };
+  });
 }
 
 const NOW = 1_000_000;

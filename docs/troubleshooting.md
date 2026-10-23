@@ -326,8 +326,9 @@ apart, and none runs while the session is `working` or after a turn ended
 past the OOM text. The count reads the timeline, which keeps the newest 500
 entries per session.
 
-Tick passes whose pane capture shows Claude's spinner ("esc to interrupt")
-count as activity, so one long tool call is not demoted. A row that was
+Tick passes whose pane capture shows Claude's spinner (`✢ Deliberating… (4s ·
+thinking)`) or its "esc to interrupt" hint count as activity, and set the row
+`working` without waiting for the next `claude agents` pass, so one long tool call is not demoted. A row that was
 demoted is `idle` only as a guess: `run_prompt`, a move's source check and
 `wait_for_session { until: "idle" }` look at its pane first and treat it as
 mid-turn unless the pane shows the REPL's idle prompt. That holds until a

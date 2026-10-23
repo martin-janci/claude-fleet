@@ -44,7 +44,7 @@ vi.mock('./selection', async () => {
   const actual = await vi.importActual<typeof import('./selection')>('./selection');
   return { ...actual, selectSession: vi.fn(), selectSessionExplicitly: vi.fn() };
 });
-import { sessionConversation, sessionActivity, listConversations, toolDetail, type ConversationSummary, PROMPT_CLAMP_LINES, CONVERSATION_POLL_MS, ACTIVITY_POLL_MS, QUIET_POLL_MS, PROBE_TTL_MS, CONV_MAX_TURNS, type Conversation, type ActivityProbe } from './conversation';
+import { sessionConversation, sessionActivity, listConversations, toolDetail, type ConversationSummary, PROMPT_CLAMP_LINES, CONVERSATION_POLL_MS, ACTIVITY_POLL_MS, IDLE_PROBE_MS, QUIET_POLL_MS, PROBE_TTL_MS, CONV_MAX_TURNS, type Conversation, type ActivityProbe } from './conversation';
 import ConversationPanel from './ConversationPanel.svelte';
 import { getForm } from './forms/forms';
 import { sendPrompt, sessions, startedIds, type SessionRow } from './sessions';
@@ -1698,15 +1698,41 @@ describe('ConversationPanel live indicator', () => {
     expect(mockedAct).toHaveBeenCalledTimes(1);
   });
 
-  it('an idle row shows no indicator and does not probe', async () => {
+  it('an idle row with an idle pane shows no indicator and probes only on the slow cadence', async () => {
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
     mockedConv.mockReturnValue(ok(conv()));
+    mockedAct.mockResolvedValue({ ok: true, value: probe({ claude_status: 'idle' }) });
     render(ConversationPanel, { session: session({ claude_status: 'idle' }), visible: true });
     await settle();
     expect(screen.queryByTestId('conv-indicator')).toBeNull();
-    vi.advanceTimersByTime(ACTIVITY_POLL_MS * 3);
+    expect(mockedAct).toHaveBeenCalledTimes(1);
+    vi.advanceTimersByTime(IDLE_PROBE_MS - 1);
     await settle();
-    expect(mockedAct).not.toHaveBeenCalled();
+    expect(mockedAct).toHaveBeenCalledTimes(1);
+    vi.advanceTimersByTime(1);
+    await settle();
+    expect(mockedAct).toHaveBeenCalledTimes(2);
+    expect(screen.queryByTestId('conv-indicator')).toBeNull();
+  });
+
+  // The row lags: a turn a background task or a wakeup started fires no
+  // prompt hook, and the tick is 20 s apart. The pane shows the turn first.
+  it('an idle row whose pane shows a turn turns the indicator on and speeds the probe up', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    mockedConv.mockReturnValue(ok(conv()));
+    mockedAct.mockResolvedValue({ ok: true, value: probe({ claude_status: 'idle' }) });
+    render(ConversationPanel, { session: session({ claude_status: 'idle' }), visible: true });
+    await settle();
+    expect(screen.queryByTestId('conv-indicator')).toBeNull();
+    mockedAct.mockResolvedValue({ ok: true, value: probe({ claude_status: 'working', spinner: 'Deliberating… (4s · thinking)' }) });
+    vi.advanceTimersByTime(IDLE_PROBE_MS);
+    await settle();
+    const ind = screen.getByTestId('conv-indicator');
+    expect(ind.getAttribute('data-kind')).toBe('working');
+    const calls = mockedAct.mock.calls.length;
+    vi.advanceTimersByTime(ACTIVITY_POLL_MS);
+    await settle();
+    expect(mockedAct.mock.calls.length).toBe(calls + 1);
   });
 
   it('a blocked row shows the banner with the pane detail and Open terminal', async () => {

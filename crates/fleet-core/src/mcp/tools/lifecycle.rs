@@ -840,27 +840,11 @@ mod tests {
         s.upsert_host("build-box").unwrap();
         let org = s.add_org("Acme", None, false).unwrap().id;
         s.set_host_org("build-box", Some(org)).unwrap();
-        s.set_setting(crate::service::hub::SETTING_LOCAL_HOST, "false")
-            .unwrap();
-        FleetTools::new(
-            Arc::new(Mutex::new(s)),
-            Arc::new(SshClient::new()),
-            CancellationRegistry::new(),
-            Arc::new(crate::service::tunnel::TunnelSupervisor::new()),
-            McpGuards::new(Arc::new(|_: &guard::ConfirmRequest| {})),
-        )
+        crate::mcp::tools::tests::test_tools(s)
     }
 
     fn host_token(alias: &str) -> Caller {
-        Caller {
-            api: None,
-            host_alias: Some(alias.into()),
-            client: None,
-            mode: crate::mcp::auth::TokenMode::Full,
-            pane: None,
-            is_personal_owner: false,
-            is_fleet_admin: false,
-        }
+        crate::mcp::tools::tests::host_caller(alias, crate::mcp::auth::TokenMode::Full)
     }
 
     fn org_bound_client(org_id: i64) -> Caller {

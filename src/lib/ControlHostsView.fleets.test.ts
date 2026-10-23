@@ -15,19 +15,9 @@ import {
 } from './fleets';
 import type { HostRow } from './hosts';
 import type { SessionRow } from './sessions';
+import { fleetInfo } from './fleets_fixture';
 
-const work: FleetInfo = {
-  id: 'work',
-  label: 'work',
-  url: 'https://fleet.example.dev',
-  color: '#e8833a',
-  primary: false,
-  local: false,
-  client_name: null,
-  connection: { state: 'connected' },
-  unavailable: null,
-  fleet_id: 'bbbbbbbb-2222',
-};
+const work = fleetInfo('work', { url: 'https://fleet.example.dev', color: '#e8833a', fleet_id: 'bbbbbbbb-2222' });
 const home: FleetInfo = { ...work, id: PRIMARY, primary: true, label: 'home', fleet_id: 'aaaaaaaa-1111' };
 
 const host = (alias: string, extra: Partial<HostRow> = {}) =>

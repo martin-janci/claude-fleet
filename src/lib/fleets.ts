@@ -806,7 +806,7 @@ export async function fleetCloneProject(
   });
   if (r.ok || r.error.code !== 'E_EXISTS') return r;
   await loadFleetRows(fleet);
-  const p = get(fleetRows).get(fleet)?.projects.find((t) => !t.project.system && sameText(t.project.owner, owner) && sameText(t.project.repo, repo));
+  const p = repoProject(get(fleetRows).get(fleet)?.projects, owner, repo);
   return p ? { ok: true, value: p } : r;
 }
 
@@ -869,6 +869,11 @@ export interface FleetChoice {
 }
 
 const sameText = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
+
+/** A fleet's (non-system) project for `owner/repo`, matched case-blind. */
+const repoProject = (projects: ProjectTreeRow[] | undefined, owner: string, repo: string) =>
+  projects?.find((t) => !t.project.system && sameText(t.project.owner, owner) && sameText(t.project.repo, repo));
+
 /** Lower-case letters and digits only: `PapayaPOS` and `papayapos` agree. */
 const squash = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
 
@@ -895,7 +900,7 @@ export function fleetChoicesFor(
   const out: FleetChoice[] = [];
   for (const f of known) {
     if (f.primary || f.unavailable || f.duplicate_of || fleetIsDown(f)) continue;
-    const p = rows.get(f.id)?.projects.find((t) => !t.project.system && sameText(t.project.owner, owner) && sameText(t.project.repo, repo));
+    const p = repoProject(rows.get(f.id)?.projects, owner, repo);
     out.push({ fleet: f, projectId: p?.project.id ?? null });
   }
   return out;
