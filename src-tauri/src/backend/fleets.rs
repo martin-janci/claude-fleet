@@ -123,6 +123,9 @@ pub const FLEET_SCOPED: &[&str] = &[
     "session_conversations",
     "session_activity",
     "restart_session",
+    // New session on an extra fleet that lacks the repository: clone it
+    // there first.
+    "add_project",
 ];
 
 /// Colours offered to a new fleet, in order; the first one no fleet uses is

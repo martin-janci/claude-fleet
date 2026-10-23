@@ -78,6 +78,7 @@
     fleets,
     fleetRows,
     fleetChoicesFor,
+    fleetCloneProject,
     fleetHostChoices,
     defaultFleetHost,
     defaultFleetFor,
@@ -979,9 +980,22 @@
     if (!fleetHost) return;
     busy = true;
     error = null;
+    // A fleet without the repository gets it cloned onto the picked host
+    // first, so its machines can be used for any repository this window has.
+    let projectId = choice.projectId;
+    if (projectId === null) {
+      const added = await fleetCloneProject(choice.fleet.id, fleetHost, owner, repo);
+      if (!added.ok) {
+        busy = false;
+        if (destroyed) pushError(added.error, `Adding ${owner}/${repo} to ${choice.fleet.label} failed`);
+        else error = added.error;
+        return;
+      }
+      projectId = added.value.project.id;
+    }
     const r = await fleetNewSession(choice.fleet.id, {
       host_alias: fleetHost,
-      project_id: choice.projectId,
+      project_id: projectId,
       name: nameOverride ?? '',
       friendly_name: friendlyName.trim() || null,
       new_worktree: fleetBranch.trim() ? finalizeBranchSlug(slugifyBranch(fleetBranch.trim())) : null,
@@ -2016,6 +2030,10 @@
       </select>
       {#if fleetHosts.length === 0}
         <p class="wt-status">{fleetChoice.fleet.label} lists no hosts yet.</p>
+      {:else if fleetChoice.projectId === null}
+        <p class="wt-status" data-testid="new-session-fleet-clone">
+          {fleetChoice.fleet.label} doesn't have {owner}/{repo} yet. Create clones it onto {fleetHost || 'the host'} first.
+        </p>
       {/if}
       <label for="fleet-branch">new branch (optional)</label>
       <input
