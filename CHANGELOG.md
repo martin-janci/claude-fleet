@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Releases are cut with `scripts/release.sh` — see [docs/RELEASING.md](docs/RELEASING.md).
 Entries before 0.2.4 were plain version bumps and were not recorded individually.
 
+## [0.6.5-dev.18.desktop.g6123a27] - 2026-10-23
+
+### Added
+- **tasks:** task_report tool, an explicit way for a worker to finish its task
+- **missions:** failing CI on a mission's PRs holds Complete until a person overrides
+- **missions:** the planner waits out a usage limit instead of refusing
+
+### Changed
+- **mcp:** raise the tool-definition budget to 880 bytes a tool
+
+### Fixed
+- **new-session:** offer every extra fleet's machines, cloning the repo there first
 ## [0.6.4] - 2026-10-21
 
 ### Added
@@ -4034,6 +4046,7 @@ added by hand for that reason — see #152._
   index, and new Getting Started, Concepts, and Troubleshooting guides; refreshed
   and cross-linked the Control API guide.
 
+[0.6.5-dev.18.desktop.g6123a27]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.6.5-dev.18.desktop.g6123a27
 [0.6.4]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.6.4
 [0.6.2]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.6.2
 [0.6.1]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.6.1
