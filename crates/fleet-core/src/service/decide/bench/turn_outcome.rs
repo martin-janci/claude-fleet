@@ -331,8 +331,8 @@ mod tests {
                 ),
                 (q.cases, q.answered, q.asked_right, q.asked_answered),
             ),
-            ((72, 65, 7, 7), (72, 72, 31, 31)),
-            "J8: seven screens the rules cannot read; they catch the seven dialogs only",
+            ((72, 66, 7, 7), (72, 72, 31, 31)),
+            "J8: six screens the rules cannot read; they catch the seven dialogs only",
         );
         for m in [&rule, &q] {
             assert!(m.synthetic);
