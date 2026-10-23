@@ -1068,7 +1068,7 @@ fn write_reachable_host(
             prior_row.is_some_and(|p| p.stale_working_at.is_some() || p.stale_demoted_at.is_some());
         // Prefer the authoritative `claude agents` status; fall back to
         // the pane heuristic per `status_candidate` — full weight when
-        // this pass actually asked, `Blocked`-only otherwise (a
+        // this pass actually asked, `Blocked` / `Working` only otherwise (a
         // cadence-skipped or unanswerable pass must not let a weak
         // pane guess overwrite the stored status every time). A row the
         // tick demoted for staleness keeps its `idle` unless the pane
@@ -2641,6 +2641,15 @@ pub(super) fn known_agent_status(tmux_name: &str, status: Option<&str>) -> Optio
 /// whatever is stored (a hook-stamped `idle`/`working` survives between
 /// agent fetches).
 ///
+/// A pane showing a turn (`Working`: the live spinner or the interrupt
+/// hint) is strong evidence too, and wins the same way. Claude Code draws
+/// neither once the turn is over, while the cached `claude agents` status
+/// and a missed `UserPromptSubmit` (a turn a background task or a wakeup
+/// started has none) both lag behind it: holding the pane's `Working` back
+/// until the next agents pass left a thinking session reading idle for up
+/// to a minute. A Stop hook that lands while this pass is in flight still
+/// wins (the upsert's `last_hook_at` guard).
+///
 /// Two exceptions, both about a dialog, the one thing the pane sees better
 /// than anyone:
 ///  - a pane showing a dialog (`Blocked`) wins even over `claude agents`:
@@ -2658,7 +2667,7 @@ pub(super) fn status_candidate(
     stored_blocked: bool,
 ) -> Option<crate::service::pane_intel::ClaudeStatus> {
     use crate::service::pane_intel::ClaudeStatus;
-    if pane == Some(ClaudeStatus::Blocked) {
+    if matches!(pane, Some(ClaudeStatus::Blocked | ClaudeStatus::Working)) {
         return pane;
     }
     if agents_asked {

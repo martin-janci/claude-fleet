@@ -1,5 +1,6 @@
-// Multi-hub Phase 2: New session can start on an extra fleet that has the
-// same repository, by that fleet's own project id and hosts, and opens the
+// Multi-hub Phase 2: New session can start on an extra fleet, by that
+// fleet's own project id (cloning the repository there first when it has
+// none) and hosts, and opens the
 // new session in its own view rather than selecting it as one of this
 // window's.
 import { render, screen, fireEvent } from '@testing-library/svelte';
@@ -22,6 +23,7 @@ import {
   _setFleetsForTest,
   type FleetInfo,
 } from './fleets';
+import { fleetInfo } from './fleets_fixture';
 
 const inv = mockedInvoke as ReturnType<typeof vi.fn>;
 
@@ -31,18 +33,7 @@ const project = {
 };
 
 function fleet(id: string, extra: Partial<FleetInfo> = {}): FleetInfo {
-  return {
-    id,
-    label: id,
-    url: id === PRIMARY ? null : `https://fleet.${id}.dev`,
-    color: '#e8833a',
-    primary: id === PRIMARY,
-    local: id === PRIMARY,
-    client_name: null,
-    connection: id === PRIMARY ? null : { state: 'connected' },
-    unavailable: null,
-    ...extra,
-  };
+  return fleetInfo(id, { url: id === PRIMARY ? null : `https://fleet.${id}.dev`, color: '#e8833a', ...extra });
 }
 
 beforeEach(() => {
@@ -69,11 +60,43 @@ function seedCompany() {
 }
 
 describe('New session on an extra fleet', () => {
-  it('shows no fleet row while no extra fleet has the repository', async () => {
-    _setFleetsForTest([fleet(PRIMARY), fleet('lab')]);
+  it('shows no fleet row while there is no extra fleet', async () => {
+    _setFleetsForTest([fleet(PRIMARY)]);
     render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
     await tick();
     expect(screen.queryByTestId('new-session-fleet')).toBeNull();
+  });
+
+  it("offers a fleet's machines without the repository, and clones it there before the start", async () => {
+    _setFleetsForTest([fleet(PRIMARY), fleet('papayapos')]);
+    _setFleetRowsForTest('papayapos', {
+      ...emptyRows(),
+      hosts: new Map([
+        ['mac', { alias: 'mac', ssh_alias: 'mac', reachable: true, claude_version: null, tmux_version: null, hidden: false, last_pinged_at: 1, account_uuid: null, provisioned: false, transport: 'ssh' }],
+      ]),
+    });
+    inv.mockImplementation(async (cmd: string) => {
+      if (cmd === 'add_project')
+        return { project: { id: 51, owner: 'PapayaPOS', repo: 'pos', base_path: '', last_session_at: null, adopted: false, system: false }, worktrees: [] };
+      if (cmd === 'new_session') return { id: 8, tmux_name: 'pos-1', host_alias: 'mac', status: 'running', last_activity_at: 1 };
+      return null;
+    });
+    const onCancel = vi.fn();
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel } });
+    await tick();
+    expect(screen.getByTestId('new-session-fleet-papayapos').getAttribute('aria-checked')).toBe('true');
+    expect((screen.getByTestId('new-session-fleet-host') as HTMLSelectElement).value).toBe('mac');
+    expect(screen.getByTestId('new-session-fleet-clone').textContent).toContain('clones it onto mac');
+    await fireEvent.click(screen.getByTestId('create-btn'));
+    await vi.waitFor(() => expect(onCancel).toHaveBeenCalled());
+    const add = inv.mock.calls.find(([cmd]) => cmd === 'add_project')!;
+    expect(add[1]).toEqual({
+      fleet: 'papayapos',
+      args: { host_alias: 'mac', source: { kind: 'clone', url: 'https://github.com/PapayaPOS/pos' } },
+    });
+    const call = inv.mock.calls.find(([cmd]) => cmd === 'new_session')!;
+    expect(call[1]).toMatchObject({ fleet: 'papayapos', args: { host_alias: 'mac', project_id: 51 } });
+    expect(get(fleetSelection)).toEqual({ fleet: 'papayapos', id: 8 });
   });
 
   it("defaults to the fleet that owns the repository's owner and starts there", async () => {

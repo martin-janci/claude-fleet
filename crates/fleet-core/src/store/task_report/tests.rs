@@ -121,3 +121,60 @@ fn the_latest_result_is_the_newest_done_task_with_a_report() {
         "only a done task is a result"
     );
 }
+
+/// review8: a mid-turn read never replaces a settled one; the Stop owes
+/// evidence to a reported run with none or a provisional one; the loop
+/// reads failed reads again.
+#[test]
+fn open_evidence_is_replaced_and_found_settled_evidence_is_not() {
+    let s = Store::open_in_memory().unwrap();
+    let item = s.create_local_work_item(None, "queue").unwrap().id;
+    let t = s.insert_task(None, Some(7), "go", "n1").unwrap();
+    s.set_task_run(t.id, item, 1, "implement").unwrap();
+    s.conn_ref()
+        .execute(
+            "UPDATE tasks SET state = 'done', finished_at = 100 WHERE id = ?1",
+            [t.id],
+        )
+        .unwrap();
+    let owed = |since| {
+        s.runs_awaiting_stop_evidence(7, since)
+            .unwrap()
+            .iter()
+            .map(|t| t.id)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(owed(50), vec![t.id], "no evidence yet");
+    assert!(owed(101).is_empty(), "finished before the window");
+    let mid = TaskEvidence {
+        at: 101,
+        provisional: true,
+        ..Default::default()
+    };
+    assert!(s.replace_open_task_evidence(t.id, &mid, false).unwrap());
+    assert_eq!(owed(50), vec![t.id], "a provisional read is read again");
+    let settled = TaskEvidence {
+        at: 102,
+        commits_total: 1,
+        ..Default::default()
+    };
+    s.set_task_evidence(t.id, &settled).unwrap();
+    assert!(owed(50).is_empty());
+    assert!(!s.replace_open_task_evidence(t.id, &mid, false).unwrap());
+    assert!(!s.replace_open_task_evidence(t.id, &mid, true).unwrap());
+    assert_eq!(
+        s.get_task(t.id).unwrap().unwrap().evidence,
+        Some(settled.clone())
+    );
+    // A failed read: a retry replaces it, a mid-turn read does not.
+    let failed = TaskEvidence {
+        at: 103,
+        error: Some("ssh: reset".into()),
+        host: Some("mars".into()),
+        dir: Some("/w".into()),
+        ..Default::default()
+    };
+    s.set_task_evidence(t.id, &failed).unwrap();
+    assert!(!s.replace_open_task_evidence(t.id, &mid, false).unwrap());
+    assert!(s.replace_open_task_evidence(t.id, &settled, true).unwrap());
+}

@@ -1287,7 +1287,8 @@ install }`), which holds all seven seeds in `catalog-seed/fleet-agents/`:
 `issue-triage`, `pr-questions` and `daily-digest`, and `self-debug`,
 `proposer`, `simplify` and `refactor` (below); `pr_review` (a review of the
 PR's head with line comments placed on the diff, sent only while that head
-is current, never an unattended APPROVE unless `limits.auto_approve`).
+is current, never an unattended REQUEST_CHANGES, nor an unattended APPROVE
+unless `limits.auto_approve`).
 Restating the built-in agents is under way, the built-in ones staying until
 the definitions have run for real (spec *Migration*): built so far
 `run.cooldown_secs`, `run.branch`, `mcp_scan`'s `window_mins` / `max_jobs`

@@ -1071,10 +1071,19 @@ pub fn resolve_markers(open: &[TaskRow], sources: &[&str]) -> Vec<(i64, String)>
         .collect()
 }
 
+/// How far back a Stop looks for runs its worker closed with `task_report`
+/// (mid-turn) whose git evidence it still owes
+/// ([`Store::runs_awaiting_stop_evidence`]).
+pub const STOP_EVIDENCE_WINDOW_SECS: i64 = 6 * 3600;
+
 /// Called from the Stop hook (off the HTTP handler, on a background task)
-/// for a worker with open tasks: read the worker's last transcript turn
-/// (`cwd` from the hook payload locates it; the pane is the fallback) and
-/// resolve every open task whose marker appears. Errors are logged and
+/// for a worker with open tasks, or with runs it closed through
+/// `task_report` during the turn: read the worker's last transcript turn
+/// (`cwd` from the hook payload locates it; the pane is the fallback),
+/// resolve every open task whose marker appears, and read git for every run
+/// finished either way. A run reported mid-turn is read again here, after
+/// the turn, so a commit made after the report counts and a session with no
+/// linked worktree is read from the hook's `cwd`. Errors are logged and
 /// swallowed — the next Stop retries.
 pub async fn handle_stop_for_worker(
     store: Arc<Mutex<Store>>,
@@ -1082,22 +1091,64 @@ pub async fn handle_stop_for_worker(
     worker: SessionRow,
     cwd: Option<String>,
 ) {
-    let (open, stored_path) = match store.lock() {
+    let (open, stored_path, reported) = match store.lock() {
         Ok(s) => (
             s.open_tasks_for_worker(worker.id).unwrap_or_default(),
             s.session_transcript_path(worker.id).ok().flatten(),
+            s.runs_awaiting_stop_evidence(worker.id, now_unix() - STOP_EVIDENCE_WINDOW_SECS)
+                .unwrap_or_default(),
         ),
         Err(_) => return,
     };
-    if open.is_empty() {
+    if open.is_empty() && reported.is_empty() {
         return;
     }
-    let transcript = read_worker_transcript(&ssh, &worker, stored_path, cwd.clone()).await;
-    let mut resolved = resolve_markers(&open, &[transcript.as_deref().unwrap_or("")]);
+    let mut finished = if open.is_empty() {
+        Vec::new()
+    } else {
+        finish_by_markers(&store, &ssh, &worker, &open, stored_path, cwd.clone()).await
+    };
+    for t in reported {
+        if !finished.iter().any(|f| f.id == t.id) {
+            finished.push(t);
+        }
+    }
+    // A run's evidence, read from git in the worker's checkout once it is
+    // done (orchestration O3). After the lock: it is a host round trip.
+    let checkout = cwd.or_else(|| {
+        let s = store.lock().ok()?;
+        let wt = worker.worktree_id?;
+        s.worktree_path(wt).ok().flatten()
+    });
+    if let Some(dir) = checkout {
+        crate::service::work::report::collect_evidence(
+            &store,
+            &ssh,
+            &worker.host_alias,
+            &dir,
+            &finished,
+        )
+        .await;
+    }
+}
+
+/// The marker half of [`handle_stop_for_worker`]: resolve `open` from the
+/// worker's transcript and pane and complete each task whose marker shows.
+/// Answers the tasks it completed.
+async fn finish_by_markers(
+    store: &Arc<Mutex<Store>>,
+    ssh: &Arc<SshClient>,
+    worker: &SessionRow,
+    open: &[TaskRow],
+    stored_path: Option<String>,
+    cwd: Option<String>,
+) -> Vec<TaskRow> {
+    let transcript = read_worker_transcript(ssh, worker, stored_path, cwd).await;
+    let mut resolved = resolve_markers(open, &[transcript.as_deref().unwrap_or("")]);
     let mut pane: Option<String> = None;
     // The JSONL can flush AFTER Stop fires; scan the pane for the rest.
     if resolved.len() < open.len() && !worker.tmux_name.starts_with("bg:") {
-        match capture_worker_pane(&ssh, &worker).await {
+        match capture_worker_pane(ssh, worker).await {
             Ok(text) => {
                 let pane = &*pane.insert(text);
                 let rest: Vec<TaskRow> = open
@@ -1135,7 +1186,9 @@ pub async fn handle_stop_for_worker(
     }
     let mut finished: Vec<TaskRow> = Vec::new();
     {
-        let Ok(s) = store.lock() else { return };
+        let Ok(s) = store.lock() else {
+            return finished;
+        };
         let sources = [
             transcript.as_deref().unwrap_or(""),
             pane.as_deref().unwrap_or(""),
@@ -1155,23 +1208,7 @@ pub async fn handle_stop_for_worker(
             }
         }
     }
-    // A run's evidence, read from git in the worker's checkout once it is
-    // done (orchestration O3). After the lock: it is a host round trip.
-    let checkout = cwd.or_else(|| {
-        let s = store.lock().ok()?;
-        let wt = worker.worktree_id?;
-        s.worktree_path(wt).ok().flatten()
-    });
-    if let Some(dir) = checkout {
-        crate::service::work::report::collect_evidence(
-            &store,
-            &ssh,
-            &worker.host_alias,
-            &dir,
-            &finished,
-        )
-        .await;
-    }
+    finished
 }
 
 /// How a scanned source reads in a log line: its size, or that it was not

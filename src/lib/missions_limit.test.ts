@@ -34,12 +34,24 @@ describe('the planner at a usage limit', () => {
     expect(plannerLimitWait({ events: [ev(3, 'step'), ev(2, 'limit_wait', login), ev(1, 'planned')] })).toEqual(login);
     expect(plannerLimitWait({ events: [ev(3, 'planned'), ev(2, 'limit_wait', login)] })).toBeNull();
     expect(plannerLimitWait({ events: [] })).toBeNull();
+    // Review r8: a later login of the same ask answered.
+    expect(plannerLimitWait({ events: [ev(3, 'limit_cleared', { host: 'mac', profile: 'work' }), ev(2, 'limit_wait', login), ev(1, 'planned')] })).toBeNull();
+    expect(eventSentence(ev(3, 'limit_cleared', { host: 'mac', profile: 'work' }))).toBe('The planner answered on profile work on mac');
   });
 
   it('the Plan button says it waits, with the reason in Details', () => {
-    const h = plannerWaiting(login, now);
+    const all = { ...login, login: null, why: 'every login the planner may use is at its usage limit' };
+    const h = plannerWaiting(all, now);
     expect(h.title).toBe('The planner is waiting on a usage limit');
     expect(h.text).toContain(time);
+    expect(h.details).toBe(all.why);
+  });
+
+  it('one login at its limit while another has headroom is no wait on every account (review r8)', () => {
+    const h = plannerWaiting(login, now);
+    expect(h.title).toBe('The planner hit a usage limit');
+    expect(h.text).toBe(`Only mac's own login is at its usage limit until ${time}. Fleet asks the planner again on a login with headroom.`);
+    expect(h.text).not.toContain('accounts');
     expect(h.details).toBe(login.why);
   });
 });

@@ -78,6 +78,7 @@
     fleets,
     fleetRows,
     fleetChoicesFor,
+    fleetCloneProject,
     fleetHostChoices,
     defaultFleetHost,
     defaultFleetFor,
@@ -412,8 +413,7 @@
     const r = await newBgSession(host, bgName, bgPrompt.trim(), null, projectId);
     busy = false;
     if (!r.ok) {
-      if (destroyed) pushError(r.error, 'Background session failed');
-      else error = r.error;
+      fail(r.error, 'Background session failed');
       return;
     }
     // "Over pause_at", "no session id, limits not recorded" (review w12-10).
@@ -979,9 +979,21 @@
     if (!fleetHost) return;
     busy = true;
     error = null;
+    // A fleet without the repository gets it cloned onto the picked host
+    // first, so its machines can be used for any repository this window has.
+    let projectId = choice.projectId;
+    if (projectId === null) {
+      const added = await fleetCloneProject(choice.fleet.id, fleetHost, owner, repo);
+      if (!added.ok) {
+        busy = false;
+        fail(added.error, `Adding ${owner}/${repo} to ${choice.fleet.label} failed`);
+        return;
+      }
+      projectId = added.value.project.id;
+    }
     const r = await fleetNewSession(choice.fleet.id, {
       host_alias: fleetHost,
-      project_id: choice.projectId,
+      project_id: projectId,
       name: nameOverride ?? '',
       friendly_name: friendlyName.trim() || null,
       new_worktree: fleetBranch.trim() ? finalizeBranchSlug(slugifyBranch(fleetBranch.trim())) : null,
@@ -996,8 +1008,7 @@
     });
     busy = false;
     if (!r.ok) {
-      if (destroyed) pushError(r.error, `New session on ${choice.fleet.label} failed`);
-      else error = r.error;
+      fail(r.error, `New session on ${choice.fleet.label} failed`);
       return;
     }
     rememberFleetFor(owner, repo, choice.fleet.id);
@@ -1024,6 +1035,13 @@
   onDestroy(() => {
     destroyed = true;
   });
+
+  /** A failed start: shown in the dialog's own paragraph while it is open,
+   *  as a toast titled `title` once it has closed. */
+  function fail(err: IpcError, title: string) {
+    if (destroyed) pushError(err, title);
+    else error = err;
+  }
 
   // A hub-routed `new_session` sends no `call_id` (`HubBackend::new_session`,
   // deliberately — it has no hub-side counterpart to cancel by), so
@@ -1320,8 +1338,7 @@
     const r = await withStartPulse(host, () => startWorkMulti(args));
     busy = false;
     if (!r.ok) {
-      if (destroyed) pushError(r.error, 'Start work failed');
-      else error = r.error;
+      fail(r.error, 'Start work failed');
       return;
     }
     const labelOf = (id: number) => {
@@ -1419,8 +1436,7 @@
         error = 'This ticket belongs to another organisation than this repository. Tick "Start across organisations" to start it anyway.';
         return;
       }
-      if (destroyed) pushError(r.error, 'Start work failed');
-      else error = r.error;
+      fail(r.error, 'Start work failed');
       return;
     }
     remember(submittedHost, submittedWorktreeId);
@@ -1538,11 +1554,7 @@
         // it's gone (Escape / backdrop closed it mid-create), that paragraph
         // closed with it — a toast is the only way this failure still
         // reaches anyone, in both modes.
-        if (destroyed) {
-          pushError(r.error, 'New session failed');
-        } else {
-          error = r.error;
-        }
+        fail(r.error, 'New session failed');
       }
       return;
     }
@@ -2016,6 +2028,10 @@
       </select>
       {#if fleetHosts.length === 0}
         <p class="wt-status">{fleetChoice.fleet.label} lists no hosts yet.</p>
+      {:else if fleetChoice.projectId === null}
+        <p class="wt-status" data-testid="new-session-fleet-clone">
+          {fleetChoice.fleet.label} doesn't have {owner}/{repo} yet. Create clones it onto {fleetHost || 'the host'} first.
+        </p>
       {/if}
       <label for="fleet-branch">new branch (optional)</label>
       <input

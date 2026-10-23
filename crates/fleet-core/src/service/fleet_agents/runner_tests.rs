@@ -117,6 +117,8 @@ struct World {
     /// host's own (GitHub refuses to approve it).
     diff: Mutex<String>,
     own_pr: Mutex<bool>,
+    /// GitHub's refusal to serve the diff, when set.
+    diff_refusal: Mutex<Option<String>>,
 }
 
 #[async_trait::async_trait]
@@ -232,6 +234,9 @@ impl FleetHost for World {
             .lock()
             .unwrap()
             .push(format!("diff {repo}#{number}"));
+        if let Some(e) = self.diff_refusal.lock().unwrap().clone() {
+            return Err(e);
+        }
         Ok(self.diff.lock().unwrap().clone())
     }
     async fn post_pr_review(
@@ -350,6 +355,7 @@ fn fx(loaded: Loaded, config: Value, bindings: Value, project: bool) -> Fx {
         item_pages: Mutex::default(),
         diff: Mutex::default(),
         own_pr: Mutex::default(),
+        diff_refusal: Mutex::default(),
     });
     Fx {
         store: Arc::new(Mutex::new(s)),
@@ -1491,11 +1497,98 @@ async fn an_unattended_review_never_approves() {
     assert_eq!(a.state, "approved");
     let p: Value = serde_json::from_str(&a.payload).unwrap();
     assert_eq!(p["event"], "COMMENT", "an approval is a person's");
+    // Nor blocks: a later COMMENT from the agent could never lift it.
     assert_eq!(
-        super::actions::review_event("request_changes", true),
+        super::actions::review_event("request_changes", true, false),
+        "COMMENT"
+    );
+    assert_eq!(
+        super::actions::review_event("request_changes", false, false),
         "REQUEST_CHANGES"
     );
-    assert_eq!(super::actions::review_event("LGTM", false), "COMMENT");
+    assert_eq!(
+        super::actions::review_event("LGTM", false, false),
+        "COMMENT"
+    );
+    // auto_approve unlocks an unattended APPROVE, never a REQUEST_CHANGES.
+    assert_eq!(
+        super::actions::review_event("approve", true, true),
+        "APPROVE"
+    );
+    assert_eq!(
+        super::actions::review_event("request_changes", true, true),
+        "COMMENT"
+    );
+}
+
+/// The review's answer with `n` findings of `len` characters, each far
+/// outside the diff.
+fn long_findings(n: usize, len: usize) -> String {
+    let findings: Vec<Value> = (0..n)
+        .map(|i| json!({ "path": "src/a.rs", "line": 100 + i, "body": format!("f{i} {}", "x".repeat(len)) }))
+        .collect();
+    json!({ "verdict": "COMMENT", "summary": "Long.", "findings": findings }).to_string()
+}
+
+#[tokio::test]
+async fn a_long_review_keeps_its_marker_and_lists_the_findings_past_the_cap() {
+    let f = review_fx(false);
+    let a = reviewed(&f, &long_findings(40, 1500)).await;
+    let p: Value = serde_json::from_str(&a.payload).unwrap();
+    assert_eq!(
+        p["findings"].as_array().unwrap().len(),
+        super::actions::MAX_REVIEW_COMMENTS
+    );
+    let body = p["body"].as_str().unwrap();
+    assert!(
+        body.contains("More findings:\n- `src/a.rs:130`: f30 "),
+        "the findings past the cap go into the body: {body}"
+    );
+    assert!(matches!(
+        f.executor().execute(&a).await,
+        ActionResult::Done(_)
+    ));
+    let writes = f.world.gh_writes.lock().unwrap().clone();
+    let review = writes.iter().find(|w| w.starts_with("review")).unwrap();
+    let posted = review
+        .split_once(": ")
+        .unwrap()
+        .1
+        .rsplit_once(" || ")
+        .unwrap()
+        .0;
+    assert!(posted.ends_with("\n\n[fleet-agent:inst]"), "{posted}");
+    assert!(posted.chars().count() <= 5000, "{}", posted.chars().count());
+}
+
+#[tokio::test]
+async fn a_diff_too_large_to_serve_still_takes_the_review() {
+    let f = review_fx(false);
+    let a = reviewed(
+        &f,
+        r#"{"verdict":"COMMENT","summary":"Big one.","findings":[
+            {"path":"src/a.rs","line":2,"body":"x is unused"}]}"#,
+    )
+    .await;
+    *f.world.diff_refusal.lock().unwrap() =
+        Some("HTTP 406: Sorry, the diff exceeded the maximum number of lines".into());
+    let done = f.executor().execute(&a).await;
+    assert!(
+        matches!(&done, ActionResult::Done(l) if l.contains("0 line comments")),
+        "{done:?}"
+    );
+    let writes = f.world.gh_writes.lock().unwrap().clone();
+    let review = writes.iter().find(|w| w.starts_with("review")).unwrap();
+    assert!(
+        review.contains("Outside the diff:\n- `src/a.rs:2`: x is unused\n\n[fleet-agent:inst]"),
+        "{review}"
+    );
+    // Any other refusal still fails.
+    *f.world.diff_refusal.lock().unwrap() = Some("HTTP 502: Bad Gateway".into());
+    assert!(matches!(
+        f.executor().execute(&a).await,
+        ActionResult::Failed(_)
+    ));
 }
 
 #[tokio::test]

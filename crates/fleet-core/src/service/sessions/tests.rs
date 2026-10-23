@@ -27,14 +27,16 @@ fn known_agent_status_keeps_vocabulary_and_drops_the_rest() {
 }
 
 #[test]
-fn skipped_agents_pass_only_lets_the_pane_report_blocked() {
+fn skipped_agents_pass_only_lets_the_pane_report_blocked_or_working() {
     use crate::service::pane_intel::ClaudeStatus;
     // Agents NOT asked this pass (cadence-skipped or unanswerable): a weak
     // pane guess must not overwrite the stored status — only `Blocked` (a
-    // real dialog / stuck pane) is strong enough to surface immediately.
+    // real dialog / stuck pane) and `Working` (the live spinner) are strong
+    // enough to surface immediately.
     assert_eq!(
         status_candidate(false, None, Some(ClaudeStatus::Working), false),
-        None
+        Some(ClaudeStatus::Working),
+        "a turn on screen is not held back until the next agents pass"
     );
     assert_eq!(
         status_candidate(false, None, Some(ClaudeStatus::Idle), false),
@@ -63,6 +65,16 @@ fn skipped_agents_pass_only_lets_the_pane_report_blocked() {
         status_candidate(true, None, Some(ClaudeStatus::Idle), false),
         Some(ClaudeStatus::Idle),
         "falls back to the pane when the agent gave nothing"
+    );
+    assert_eq!(
+        status_candidate(
+            true,
+            Some(ClaudeStatus::Idle),
+            Some(ClaudeStatus::Working),
+            false
+        ),
+        Some(ClaudeStatus::Working),
+        "the cached agents status does not hide a turn the pane shows"
     );
     assert_eq!(status_candidate(true, None, None, false), None);
 }

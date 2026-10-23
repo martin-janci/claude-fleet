@@ -47,11 +47,14 @@ pub async fn refresh_projects(
 #[tauri::command]
 pub async fn add_project(
     args: AddProjectArgs,
+    fleet: Option<String>,
     backend: State<'_, Arc<FleetBackend>>,
+    fleets: State<'_, Arc<crate::backend::fleets::Fleets>>,
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
     reg: State<'_, Arc<CancellationRegistry>>,
 ) -> Result<ProjectTreeRow, IpcError> {
+    let backend = fleets.select(backend.inner(), fleet.as_deref())?;
     routed::add_project(&backend, args, &store, &ssh, &reg).await
 }
 

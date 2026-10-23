@@ -1346,7 +1346,9 @@ fn refuse_a_pin_below_the_database(
         return Err(IpcError::new(
             codes::E_INVALID,
             format!(
-                "{v} cannot open this hub's database: it is at schema {db}, and {v} opens up to                  {schema_to}. Pinning it would only fail and roll back. To go back, restore a                  backup taken before the newer release by hand (docs/hub.md → Restore drill)."
+                "{v} cannot open this hub's database: it is at schema {db}, and {v} opens up to \
+                 {schema_to}. Pinning it would only fail and roll back. To go back, restore a \
+                 backup taken before the newer release by hand (docs/hub.md → Restore drill)."
             ),
         ));
     }

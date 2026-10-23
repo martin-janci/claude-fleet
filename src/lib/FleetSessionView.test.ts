@@ -13,22 +13,12 @@ import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import FleetSessionView from './FleetSessionView.svelte';
 import { PRIMARY, _resetFleetsForTest, _setFleetsForTest, type FleetInfo } from './fleets';
 import type { SessionRow } from './sessions';
+import { fleetInfo } from './fleets_fixture';
 
 const inv = mockedInvoke as ReturnType<typeof vi.fn>;
 const PROBE = { claude_status: 'working', stuck_kind: null, current_activity: null, waiting_for: null, spinner: null };
 
-const company: FleetInfo = {
-  id: 'company',
-  label: 'company',
-  url: 'https://fleet.papayapos.dev',
-  color: '#e8833a',
-  primary: false,
-  local: false,
-  client_name: null,
-  connection: { state: 'connected' },
-  unavailable: null,
-  fleet_id: 'bbbbbbbb-2222',
-};
+const company = fleetInfo('company', { url: 'https://fleet.papayapos.dev', color: '#e8833a', fleet_id: 'bbbbbbbb-2222' });
 
 const session = {
   id: 3,
@@ -125,6 +115,32 @@ describe('FleetSessionView', () => {
     expect(open[1].args).toMatchObject({ session_name: 'pos-3', host_alias: 'mac' });
     expect(open[1].args.id).toMatch(/^fleet-company-3\.\d+$/);
     expect(screen.queryByTestId('fleet-session-conversation')).toBeNull();
+  });
+
+  it('a background or external agent there has no pane: no attach, no pane read, the agent tab off', async () => {
+    for (const kind of ['bg', 'external'] as const) {
+      inv.mockClear();
+      const { unmount } = render(FleetSessionView, { props: { fleet: company, session: { ...session, kind } as SessionRow } });
+      await tick();
+      await tick();
+      const agent = screen.getByTestId('stab-agent') as HTMLButtonElement;
+      expect(agent.disabled).toBe(true);
+      expect(agent.title).toBe('Runs outside tmux — no terminal');
+      expect(screen.queryByTestId('fleet-session-terminal')).toBeNull();
+      expect(screen.queryByTestId('fleet-session-snapshot')).toBeNull();
+      expect(inv.mock.calls.some(([cmd]) => cmd === 'pty_open' || cmd === 'capture_session')).toBe(false);
+      unmount();
+    }
+  });
+
+  it('shows no keyboard chord on its tabs: the chords act on this window’s own session', async () => {
+    render(FleetSessionView, { props: { fleet: company, session } });
+    await tick();
+    for (const t of ['agent', 'terminals']) {
+      const tab = screen.getByTestId(`stab-${t}`);
+      expect(tab.querySelector('.of-kbd')).toBeNull();
+    }
+    expect(screen.getByTestId('stab-agent').title).not.toMatch(/\(/);
   });
 
   it('a session on that hub’s own machine shows its pane read through that fleet', async () => {

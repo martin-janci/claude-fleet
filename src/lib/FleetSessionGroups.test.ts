@@ -32,18 +32,9 @@ import {
 import { hostFilter, hosts, type HostRow } from './hosts';
 import { scopeFilter, orgs, type OrgDetail } from './orgs';
 import { showBgAgents, type SessionRow } from './sessions';
+import { fleetInfo } from './fleets_fixture';
 
-const primary: FleetInfo = {
-  id: PRIMARY,
-  label: 'rlt',
-  url: 'https://fleet.rlt.sk',
-  color: '#5b8def',
-  primary: true,
-  local: false,
-  client_name: 'mac',
-  connection: { state: 'connected' },
-  unavailable: null,
-};
+const primary = fleetInfo(PRIMARY, { label: 'rlt', url: 'https://fleet.rlt.sk', local: false, client_name: 'mac', connection: { state: 'connected' } });
 const company: FleetInfo = { ...primary, id: 'company', label: 'Papaya POS (hub)', url: 'https://fleet.papayapos.dev', color: '#e8833a', primary: false };
 
 const now = Math.floor(Date.now() / 1000);

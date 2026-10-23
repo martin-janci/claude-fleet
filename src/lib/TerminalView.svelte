@@ -12,7 +12,7 @@
   import { unarchiveSession } from './tidy';
   import { getCurrentWebview } from '@tauri-apps/api/webview';
   import { selectedSession } from './selection';
-  import { fleetAttachRefusal, fleetPtyId } from './fleets';
+  import { fleetAttachRefusal, fleetPtyId, selectedFleetSession } from './fleets';
   import type { SessionRow } from './sessions';
   import PaneUnreadableNotice from './PaneUnreadableNotice.svelte';
   import { hostByAlias } from './hosts';
@@ -465,6 +465,8 @@
     // stays 'session': a terminal opened there would open unseen too.
     if (get(settingsOpen)) return;
     if (get(sidebarView) === 'work' && get(selectedTaskId) && get(taskDetailOpen)) return;
+    // Another fleet's session covers this pane too (review8).
+    if (get(selectedFleetSession)) return;
     e.preventDefault();
     e.stopPropagation();
     // Then show the terminal, as the session bar's Terminals tab does: from

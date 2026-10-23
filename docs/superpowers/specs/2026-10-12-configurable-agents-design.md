@@ -458,7 +458,8 @@ definitions are brought to parity and ship in the gallery beside them;
 deleting the Rust agents and converting their rules and tables waits until
 the definitions have run on real tickets and PRs. An unattended `pr_review`
 may APPROVE only when the definition sets `limits.auto_approve`, as the
-built-in reviewer does at `act`.
+built-in reviewer does at `act`; it never sends REQUEST_CHANGES unattended,
+which a later COMMENT from the agent could not lift.
 
 The gaps, in the order they close (each its own PR):
 

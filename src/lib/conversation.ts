@@ -1181,6 +1181,11 @@ export function sessionActivity(sessionId: number, fleet?: string): Promise<Resu
 
 /** Probe cadence while the indicator is live (working / sent / blocked). */
 export const ACTIVITY_POLL_MS = 2_000;
+/** Probe cadence while the indicator is not shown. The row can say idle
+ *  while the agent works (a turn a background task or a wakeup started has
+ *  no prompt hook, and the tick runs every 20 s), so an open panel keeps
+ *  looking at the pane, just less often. */
+export const IDLE_PROBE_MS = 5_000;
 /** Transcript re-read cadence for a quiet session (nothing is changing). */
 export const QUIET_POLL_MS = 15_000;
 

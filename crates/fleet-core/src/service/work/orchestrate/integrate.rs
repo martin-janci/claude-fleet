@@ -13,8 +13,9 @@
 //! members), so the check never converged.
 //!
 //! Without git ≥ 2.38 on the host the state is `unknown` and nothing is
-//! carded. The set is looked at again only when one of its heads moved, and
-//! not while an integration card is still open.
+//! carded. The set is looked at again only when one of its heads moved or
+//! an integration card was decided; a repo whose branches an open card
+//! covers is not checked while it is open.
 
 use super::Deps;
 use crate::shell::quote as shq;
@@ -27,6 +28,14 @@ use std::sync::Mutex;
 pub const INTEGRATE_MEMBERS_MAX: usize = 12;
 /// Conflicted paths a card names, at most.
 pub const CONFLICT_FILES_MAX: usize = 20;
+/// Bytes the card's conflict lines take, about: the card's whole payload
+/// must stay under `store::CARD_PAYLOAD_MAX` (4096) with the title, the
+/// fixed notes and the dependencies of up to [`INTEGRATE_MEMBERS_MAX`]
+/// branches. The `integration` mission event carries every pair.
+pub const CONFLICT_NOTES_MAX: usize = 2048;
+/// The integration item's `proposal_why`: the merge-wave rule reads it to
+/// tell the loop's integration from an item of a wave.
+pub const INTEGRATION_WHY: &str = "their branches do not merge cleanly (git merge-tree)";
 
 /// One finished member's branch, as its last implementation left it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -215,26 +224,29 @@ pub async fn check(deps: &Deps, m: &MissionRow) -> Vec<PairState> {
     if found.len() < 2 {
         return Vec::new();
     }
-    let key: String = found
-        .iter()
-        .map(|b| format!("{}={}", b.item_id, b.head))
-        .collect::<Vec<_>>()
-        .join(",");
-    // An open integration card already covers what the check would say.
-    let pending = match deps.store.lock() {
+    // An open integration card already covers what the check would say
+    // about the repo of its branches; another repo is still checked.
+    let open: Vec<String> = match deps.store.lock() {
         Ok(s) => s
             .mission_cards(m.id, 50)
             .map(|cards| {
                 cards
-                    .iter()
-                    .any(|c| c.state == "open" && c.decision_id.starts_with("integrate:"))
+                    .into_iter()
+                    .filter(|c| c.state == "open")
+                    .map(|c| c.decision_id)
+                    .collect()
             })
-            .unwrap_or(false),
+            .unwrap_or_default(),
         Err(_) => return Vec::new(),
     };
-    if pending {
-        return Vec::new();
-    }
+    let covered = covered_items(&open);
+    // The open cards are part of the key: deciding one checks again.
+    let key: String = found
+        .iter()
+        .map(|b| format!("{}={}", b.item_id, b.head))
+        .chain(covered.iter().map(|id| format!("open={id}")))
+        .collect::<Vec<_>>()
+        .join(",");
     if let Ok(mut c) = checked().lock() {
         if c.get(&m.id) == Some(&key) {
             return Vec::new();
@@ -250,7 +262,10 @@ pub async fn check(deps: &Deps, m: &MissionRow) -> Vec<PairState> {
             .push(b);
     }
     let mut out = Vec::new();
-    for ((host, _), group) in groups.into_iter().filter(|(_, g)| g.len() >= 2) {
+    for ((host, _), group) in groups
+        .into_iter()
+        .filter(|(_, g)| g.len() >= 2 && !g.iter().any(|b| covered.contains(&b.item_id)))
+    {
         let heads: Vec<String> = group.iter().map(|b| b.head.clone()).collect();
         let cwds: Vec<&str> = group.iter().map(|b| b.path.as_str()).collect();
         let script = merge_tree_script(&cwds, &heads);
@@ -293,11 +308,58 @@ pub async fn check(deps: &Deps, m: &MissionRow) -> Vec<PairState> {
                 .map(|(_, b)| *b)
                 .collect();
             if let Ok(s) = deps.store.lock() {
-                integration_card(&s, m, &live, &conflicts);
+                if !integration_card(&s, m, &live, &conflicts) {
+                    // Not carded: ask again next tick rather than never.
+                    if let Ok(mut c) = checked().lock() {
+                        c.remove(&m.id);
+                    }
+                }
             }
         }
     }
     out
+}
+
+/// PURE: the members open integration cards cover, read from their
+/// decision ids (`integrate:<item>:<head>,<item>:<head>,…`). A pairwise
+/// card of the older shape (`integrate:<a>:<b>:<head>:<head>`, no comma)
+/// covers nothing: one integration supersedes it.
+pub fn covered_items(decision_ids: &[String]) -> std::collections::BTreeSet<i64> {
+    decision_ids
+        .iter()
+        .filter_map(|d| d.strip_prefix("integrate:"))
+        .filter(|rest| rest.contains(','))
+        .flat_map(|rest| rest.split(','))
+        .filter_map(|part| part.split(':').next()?.parse().ok())
+        .collect()
+}
+
+/// PURE: the card's conflict lines, one per pair, kept to about `budget`
+/// bytes: a pair's paths are cut to its share with "… and N more", and
+/// the pairs past the budget are counted, not listed.
+pub fn conflict_lines(pairs: &[(&str, &str, &[String])], budget: usize) -> String {
+    let share = (budget / pairs.len().max(1)).max(80);
+    let mut out: Vec<String> = Vec::new();
+    let mut used = 0usize;
+    for (n, (a, b, files)) in pairs.iter().enumerate() {
+        let mut line = format!("- {a} × {b}");
+        for (k, f) in files.iter().enumerate() {
+            let sep = if k == 0 { ": " } else { ", " };
+            if line.len() + sep.len() + f.len() > share {
+                line.push_str(&format!("{sep}… and {} more", files.len() - k));
+                break;
+            }
+            line.push_str(sep);
+            line.push_str(f);
+        }
+        if used + line.len() + 1 > budget && !out.is_empty() {
+            out.push(format!("… and {} more pairs", pairs.len() - n));
+            break;
+        }
+        used += line.len() + 1;
+        out.push(line);
+    }
+    out.join("\n")
 }
 
 /// "A, B and C" for a title.
@@ -310,13 +372,14 @@ fn joined(labels: &[&str]) -> String {
 }
 
 /// The one proposed task a repo's conflicts raise: merge every live branch
-/// into one, once per set of heads.
+/// into one, once per set of heads. False when the card could not be
+/// written (logged), so the caller checks again.
 fn integration_card(
     s: &Store,
     m: &MissionRow,
     live: &[&Branch],
     conflicts: &[(&Branch, &Branch, Vec<String>)],
-) {
+) -> bool {
     let mut heads: Vec<String> = live
         .iter()
         .map(|b| format!("{}:{}", b.item_id, &b.head[..b.head.len().min(12)]))
@@ -324,15 +387,9 @@ fn integration_card(
     heads.sort();
     let decision = format!("integrate:{}", heads.join(","));
     let labels: Vec<&str> = live.iter().map(|b| b.label.as_str()).collect();
-    let lines: Vec<String> = conflicts
+    let pairs: Vec<(&str, &str, &[String])> = conflicts
         .iter()
-        .map(|(a, b, files)| {
-            if files.is_empty() {
-                format!("- {} × {}", a.label, b.label)
-            } else {
-                format!("- {} × {}: {}", a.label, b.label, files.join(", "))
-            }
-        })
+        .map(|(a, b, files)| (a.label.as_str(), b.label.as_str(), files.as_slice()))
         .collect();
     let entry = TreeEntry {
         title: format!("Integrate {} into one branch", joined(&labels)),
@@ -340,9 +397,9 @@ fn integration_card(
             "Merge all {} branches into one branch and resolve every conflict there; \
              that branch supersedes them.\nConflicts:\n{}",
             live.len(),
-            lines.join("\n")
+            conflict_lines(&pairs, CONFLICT_NOTES_MAX)
         )),
-        why: Some("their branches do not merge cleanly (git merge-tree)".into()),
+        why: Some(INTEGRATION_WHY.into()),
         depends_on: live.iter().map(|b| TreeRef::Item(b.item_id)).collect(),
     };
     let card = s.add_card(
@@ -359,7 +416,14 @@ fn integration_card(
             })),
         },
     );
-    if let Ok(Some(_)) = card {
+    let card = match card {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(mission = m.id, error = %e.message, "[integrate] integration card not written");
+            return false;
+        }
+    };
+    if card.is_some() {
         let pairs: Vec<serde_json::Value> = conflicts
             .iter()
             .map(|(a, b, files)| serde_json::json!({ "a": a.item_id, "b": b.item_id, "files": files }))
@@ -382,6 +446,7 @@ fn integration_card(
             },
         );
     }
+    true
 }
 
 #[cfg(test)]
