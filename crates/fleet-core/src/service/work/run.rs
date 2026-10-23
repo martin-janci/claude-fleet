@@ -468,10 +468,13 @@ mod tests {
             Some(PriorWork {
                 host_alias: "h".into(),
                 branch: "task-7-queue-schema".into(),
-                host_up: false,
-            }),
-            "a host never probed is not up"
+                host_up: true,
+            })
         );
+        // A host whose last probe went unanswered is not where a run goes.
+        s.update_host_probe("h", false, None, None, 2).unwrap();
+        assert!(!prior_work(&s, item).unwrap().unwrap().host_up);
+        s.update_host_probe("h", true, None, None, 3).unwrap();
         let second = worker_in(&s, "h", "task-7-queue-schema-2");
         record_run(&s, second, "again", item, 2, "implement").unwrap();
         assert_eq!(
