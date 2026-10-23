@@ -402,7 +402,7 @@ describe('Phase 2: which fleet New session starts on', () => {
     worktrees: [],
   });
 
-  it('offers only usable extra fleets that have the repository, by their own project id', () => {
+  it('offers every usable extra fleet, by its own project id or null when it lacks the repository', () => {
     const known = [
       fleet(PRIMARY),
       fleet('company'),
@@ -417,7 +417,10 @@ describe('Phase 2: which fleet New session starts on', () => {
       ['twice', { ...emptyRows(), projects: [project(1, 'papayapos', 'pos')] }],
     ]);
     const got = fleetChoicesFor('papayapos', 'POS', known, rows);
-    expect(got.map((c) => [c.fleet.id, c.projectId])).toEqual([['company', 9]]);
+    expect(got.map((c) => [c.fleet.id, c.projectId])).toEqual([
+      ['company', 9],
+      ['lab', null],
+    ]);
   });
 
   it('defaults to the remembered fleet, else the one that owns the owner, else the primary', () => {

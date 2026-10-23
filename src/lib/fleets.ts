@@ -96,6 +96,9 @@ export const FLEET_SCOPED = [
   'session_conversations',
   'session_activity',
   'restart_session',
+  // New session on an extra fleet that lacks the repository: clone it
+  // there first.
+  'add_project',
 ] as const;
 export type FleetScopedCommand = (typeof FLEET_SCOPED)[number];
 
@@ -788,6 +791,25 @@ export async function fleetNewSession(fleet: string, a: FleetNewSession): Promis
   return r;
 }
 
+/** Add `owner/repo` to an extra fleet by cloning it from GitHub onto
+ *  `host_alias` there, for a New session on a fleet that does not have the
+ *  repository yet. A fleet that has it after all (its list was stale) is
+ *  re-listed and its row answered. */
+export async function fleetCloneProject(
+  fleet: string,
+  host_alias: string,
+  owner: string,
+  repo: string,
+): Promise<Result<ProjectTreeRow>> {
+  const r = await fleetCmd<ProjectTreeRow>('add_project', fleet, {
+    args: { host_alias, source: { kind: 'clone', url: `https://github.com/${owner}/${repo}` } },
+  });
+  if (r.ok || r.error.code !== 'E_EXISTS') return r;
+  await loadFleetRows(fleet);
+  const p = get(fleetRows).get(fleet)?.projects.find((t) => !t.project.system && sameText(t.project.owner, owner) && sameText(t.project.repo, repo));
+  return p ? { ok: true, value: p } : r;
+}
+
 // ── an extra fleet's session, opened (Phase 2) ──────────────────────────
 
 /** The extra fleet's session on screen, by its fleet and its id there. Null
@@ -839,10 +861,11 @@ export function fleetPtyId(fleet: string, s: Pick<SessionRow, 'id'>, view?: numb
 // ── New session: which fleet (Phase 2) ──────────────────────────────────
 
 /** An extra fleet that can start a session in a repository: its project row
- *  for it, by the id that fleet's hub knows it under. */
+ *  for it, by the id that fleet's hub knows it under, or null while that hub
+ *  does not have the repository yet (the start clones it there first). */
 export interface FleetChoice {
   fleet: FleetInfo;
-  projectId: number;
+  projectId: number | null;
 }
 
 const sameText = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
@@ -857,10 +880,12 @@ export function fleetIsDown(f: Pick<FleetInfo, 'connection'>): boolean {
   return DOWN_STATES.has(f.connection?.state ?? '');
 }
 
-/** The extra fleets that have `owner/repo` among their projects and can be
- *  used now (connected or connecting, not a duplicate, not unavailable). The
- *  projects of a fleet that went offline stay cached, so its link decides
- *  (review w01-5). */
+/** The extra fleets that can be used now (connected or connecting, not a
+ *  duplicate, not unavailable), each with its project for `owner/repo` when
+ *  it has one. A fleet without the repository is offered too: a company's
+ *  machines must not vanish from New session because its hub has not added
+ *  the project yet. The projects of a fleet that went offline stay cached,
+ *  so its link decides (review w01-5). */
 export function fleetChoicesFor(
   owner: string,
   repo: string,
@@ -871,7 +896,7 @@ export function fleetChoicesFor(
   for (const f of known) {
     if (f.primary || f.unavailable || f.duplicate_of || fleetIsDown(f)) continue;
     const p = rows.get(f.id)?.projects.find((t) => !t.project.system && sameText(t.project.owner, owner) && sameText(t.project.repo, repo));
-    if (p) out.push({ fleet: f, projectId: p.project.id });
+    out.push({ fleet: f, projectId: p?.project.id ?? null });
   }
   return out;
 }
