@@ -1,0 +1,29 @@
+
+ ▐▛███▛█   Claude Code v2.1.309
+▝▜██████▀  Sonnet 5.5 · Claude API
+ ▝▝   ▝▝   ~/work/proj
+
+
+  Get to finished work sooner with Opus 5.5.
+  Switch anytime with /model.
+
+❯ /clear
+
+❯ think about it
+
+
+
+
+
+
+
+
+
+✻ Deliberating… (7s · thinking)
+  ⎿  Tip: Try setting environment variable
+     COLORTERM=truecolor for richer colors
+              Ctrl+Y to paste deleted text
+────────────────────────────────────────────
+❯
+────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to
