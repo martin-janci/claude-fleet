@@ -228,6 +228,10 @@ fn a_trigger_takes_its_sources_keys_only() {
     ] {
         assert!(scan.iter().any(|x| x.contains(want)), "{want}: {scan:#?}");
     }
+    assert_problem(
+        |v| v["run"]["cooldown_secs"] = json!(-1),
+        "cooldown_secs is 0-604800",
+    );
     let manual = problems_of(|v| v["trigger"] = json!({ "source": "manual" }));
     assert!(
         manual.iter().any(|x| x.contains("{{subject.key}}")),

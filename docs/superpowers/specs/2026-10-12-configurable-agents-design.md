@@ -3,8 +3,8 @@
 Status: steps 1 to 5 built, and step 6's GitHub sources, PR comments and
 labels, and writes to other trackers, 2026-10-14 (the phone's part in
 martin-janci/fleet-mobile); polling other trackers and the gallery,
-2026-10-18; `pr_review`, 2026-10-20. Restating the built-in agents not
-built.
+2026-10-18; `pr_review`, 2026-10-20. Restating the built-in agents under
+way (*Migration*), 2026-10-23.
 Asked for by the owner after the built-in reviewer and support agent landed
 (`2026-10-11-review-and-support-agents-design.md`, PRs
 martin-janci/claude-fleet#871, martin-janci/fleet-mobile#217,
@@ -453,8 +453,38 @@ definition and deleted from Rust, step by step:
 
   A definition with `source: github_prs` and `do: pr_review` covers the rest.
 
-That is follow-up work and gets its own decision once the generic runtime has
-run real instances.
+The owner's decision (2026-10-23): the built-in agents stay while the
+definitions are brought to parity and ship in the gallery beside them;
+deleting the Rust agents and converting their rules and tables waits until
+the definitions have run on real tickets and PRs. An unattended `pr_review`
+may APPROVE only when the definition sets `limits.auto_approve`, as the
+built-in reviewer does at `act`; it never sends REQUEST_CHANGES unattended,
+which a later COMMENT from the agent could not lift.
+
+The gaps, in the order they close (each its own PR):
+
+1. **Support basics** (built 2026-10-23): `run.cooldown_secs` (a subject
+   this instance finished less than that ago is skipped, the support
+   agent's `cooldown_secs`, per instance:
+   `Store::last_agent_rule_subject_run`); `run.branch` (the project
+   worktree's branch, a template over the inputs, checked with the
+   workspace's `branch_ok`; default `main`); `mcp_scan`'s `window_mins`
+   (the tool gets `from` / `to`, unix seconds, over the last that many
+   minutes, as the support scanner does) and `max_jobs` (1-10);
+   `limits.auto_approve`. The `l2-support` example's `remember` now keys
+   its record by the ticket, as its context lookup reads it.
+2. **Fingerprints**: a built-in `fingerprint` helper for `run.context`
+   (the support agent's `fingerprint.rs`: class, normalised message, app
+   frames), the candidate search and score, and recording an action's
+   result (a created bug's key) so incident aggregation works; then the
+   support agent as a gallery definition.
+3. **Reviewer inputs**: a worktree at the PR head, the filtered diff in the
+   prompt (exclude paths, `.claudeignore`, the size gate), `skip_wip` and
+   `debounce_secs`, `head_sha` on a `github_comments` subject.
+4. **Reviewer answer**: the confidence filter, `previous` findings and
+   `adjust_verdict`, label rules, a `pr_description` action.
+5. **Reviewer state**: re-review of a dismissed review, the test debate;
+   then the reviewer as a gallery definition.
 
 ## Steps
 

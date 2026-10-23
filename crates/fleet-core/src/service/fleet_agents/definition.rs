@@ -221,7 +221,15 @@ impl TriggerSource {
             TriggerSource::GithubPrs => (&["repo"], &["repo"]),
             TriggerSource::GithubComments => (&["repo", "match"], &["repo", "match"]),
             TriggerSource::McpScan => (
-                &["store", "tool", "arguments", "every_mins", "key_template"],
+                &[
+                    "store",
+                    "tool",
+                    "arguments",
+                    "every_mins",
+                    "key_template",
+                    "window_mins",
+                    "max_jobs",
+                ],
                 &["store", "tool", "every_mins", "key_template"],
             ),
             TriggerSource::Schedule => (&["cron"], &["cron"]),
@@ -306,7 +314,18 @@ pub struct Trigger {
     pub key_template: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cron: Option<String>,
+    /// `mcp_scan`: the tool is called with `from` / `to` (unix seconds)
+    /// covering the last `window_mins`, a little more than `every_mins`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_mins: Option<i64>,
+    /// `mcp_scan`: new entries one scan turns into jobs, at most
+    /// (default and most [`MAX_SCAN_JOBS`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_jobs: Option<usize>,
 }
+
+/// Most new entries one scan turns into jobs.
+pub const MAX_SCAN_JOBS: usize = 10;
 
 impl Trigger {
     /// The keys set, by name.
@@ -327,6 +346,8 @@ impl Trigger {
         put("every_mins", self.every_mins.is_some());
         put("key_template", self.key_template.is_some());
         put("cron", self.cron.is_some());
+        put("window_mins", self.window_mins.is_some());
+        put("max_jobs", self.max_jobs.is_some());
         out
     }
 }
@@ -396,6 +417,18 @@ pub struct Run {
     /// (`diagnostics.rs`): the self debug agent's eyes.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub diagnostics: bool,
+    /// A subject a run of this instance finished less than this many
+    /// seconds ago is skipped (at most a week; 0 is none).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub cooldown_secs: i64,
+    /// `project`: the branch the worktree is made from (a template over
+    /// the inputs; default `main`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+}
+
+fn is_zero(n: &i64) -> bool {
+    *n == 0
 }
 
 impl Default for Run {
@@ -410,6 +443,8 @@ impl Default for Run {
             context: Vec::new(),
             max_parallel: None,
             diagnostics: false,
+            cooldown_secs: 0,
+            branch: None,
         }
     }
 }
@@ -662,6 +697,10 @@ pub struct Limits {
     /// Repos (`owner/repo`, templates) PR writes may land in.
     #[serde(default)]
     pub repos: Vec<String>,
+    /// An `auto` `pr_review` may APPROVE (at `act`, with no person):
+    /// off, an unattended approval is sent as COMMENT.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub auto_approve: bool,
 }
 
 impl Default for Limits {
@@ -670,6 +709,7 @@ impl Default for Limits {
             max_body_chars: default_max_body(),
             write_projects: Vec::new(),
             repos: Vec::new(),
+            auto_approve: false,
         }
     }
 }
@@ -1088,6 +1128,14 @@ pub fn problems(d: &Definition, templates: &BTreeMap<String, String>) -> Vec<Str
         if t.every_mins.is_some_and(|m| !(5..=1440).contains(&m)) {
             out.push(format!("{at}: every_mins is 5-1440"));
         }
+        if t.window_mins.is_some_and(|m| !(1..=10_080).contains(&m)) {
+            out.push(format!("{at}: window_mins is 1-10080"));
+        }
+        if t.max_jobs
+            .is_some_and(|n| !(1..=MAX_SCAN_JOBS).contains(&n))
+        {
+            out.push(format!("{at}: max_jobs is 1-{MAX_SCAN_JOBS}"));
+        }
         if let Some(a) = &t.arguments {
             if !a.is_object() {
                 out.push(format!("{at}: arguments is an object"));
@@ -1138,6 +1186,15 @@ pub fn problems(d: &Definition, templates: &BTreeMap<String, String>) -> Vec<Str
         {
             out.push(format!("run › model: {m:?} is not a model name"));
         }
+    }
+    if !(0..=7 * 86_400).contains(&r.cooldown_secs) {
+        out.push("run › cooldown_secs is 0-604800".into());
+    }
+    if let Some(b) = &r.branch {
+        if r.workspace != Workspace::Project {
+            out.push("run › branch is for a project workspace".into());
+        }
+        check_template(b, "run › branch", inputs_only, &mut out);
     }
     if r.max_parallel.is_some_and(|n| !(1..=20).contains(&n)) {
         out.push("run › max_parallel is 1-20".into());

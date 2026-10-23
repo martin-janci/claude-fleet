@@ -165,11 +165,12 @@ const REVIEW_COMMENT_MAX: usize = 2000;
 
 /// PURE: the review's event for `said`: APPROVE, REQUEST_CHANGES or
 /// COMMENT, and neither blocking verdict unattended (`auto`): an approval is
-/// a person's, and so is a REQUEST_CHANGES, which a later COMMENT from the
-/// agent could never lift.
-pub fn review_event(said: &str, auto: bool) -> &'static str {
+/// a person's unless the definition's `limits.auto_approve` lets the agent
+/// give it, and a REQUEST_CHANGES always is, since a later COMMENT from the
+/// agent could never lift it.
+pub fn review_event(said: &str, auto: bool, auto_approve: bool) -> &'static str {
     match said.trim().to_ascii_uppercase().as_str() {
-        "APPROVE" if !auto => "APPROVE",
+        "APPROVE" if !auto || auto_approve => "APPROVE",
         "REQUEST_CHANGES" if !auto => "REQUEST_CHANGES",
         _ => "COMMENT",
     }
@@ -660,7 +661,8 @@ pub fn plan(
                             .iter()
                             .map(|f| format!("- `{}:{}`: {}", f.path, f.line, f.body))
                             .collect();
-                        let event = review_event(&r(&a.verdict), a.auto).to_string();
+                        let event =
+                            review_event(&r(&a.verdict), a.auto, d.limits.auto_approve).to_string();
                         let text = if more.is_empty() {
                             text
                         } else {
