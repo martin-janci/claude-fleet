@@ -116,6 +116,9 @@ use serde_json::Value;
 ///   `session:updated` frame carried the whole row back (review wave 24,
 ///   w24-1).
 ///
+/// * `prompt_suggestion` — the chip over the phone's composer offering the
+///   next prompt Claude Code proposes (migration 206).
+///
 /// Added 2026-09-23 when fleet-mobile's pager (its PR #19) began reading
 /// them: the first cut of this view was taken against the list screen alone.
 ///
@@ -157,6 +160,7 @@ pub(super) const PHONE_SESSION_FIELDS: &[&str] = &[
     "pr_evidence",
     "pr_url",
     "project_id",
+    "prompt_suggestion",
     "safe_kill_state",
     "started_at",
     "status",

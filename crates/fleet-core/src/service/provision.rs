@@ -18,9 +18,34 @@ const SKILL_PATH: &str = "~/.claude/skills/claude-fleet-control/SKILL.md";
 const FRIENDLY_NAME_SKILL: &str = include_str!("../../../../skills/fleet-friendly-name/SKILL.md");
 const FRIENDLY_NAME_SKILL_DIR: &str = "~/.claude/skills/fleet-friendly-name";
 const FRIENDLY_NAME_SKILL_PATH: &str = "~/.claude/skills/fleet-friendly-name/SKILL.md";
-/// Skills fleet provisions on every host. The catalog treats them as fleet
-/// internals: they are never offered for import.
-pub const FLEET_SKILL_NAMES: &[&str] = &["claude-fleet-control", "fleet-friendly-name"];
+/// Fleet's Claude Code plugin (`plugins/fleet-prompt-suggestion`): it posts
+/// Claude Code's next-prompt suggestion to `/hook`. Claude Code loads a
+/// plugin from a folder under `~/.claude/skills` by itself, so it lives
+/// beside the skills and needs no launch flag.
+const SUGGEST_PLUGIN_DIR: &str = "~/.claude/skills/fleet-prompt-suggestion";
+/// The plugin's files, relative to [`SUGGEST_PLUGIN_DIR`], with their
+/// content.
+const SUGGEST_PLUGIN_FILES: &[(&str, &str)] = &[
+    (
+        ".claude-plugin/plugin.json",
+        include_str!("../../../../plugins/fleet-prompt-suggestion/.claude-plugin/plugin.json"),
+    ),
+    (
+        "hooks/hooks.json",
+        include_str!("../../../../plugins/fleet-prompt-suggestion/hooks/hooks.json"),
+    ),
+    (
+        "hooks/register.ts",
+        include_str!("../../../../plugins/fleet-prompt-suggestion/hooks/register.ts"),
+    ),
+];
+/// Skills (and the plugin) fleet provisions on every host. The catalog
+/// treats them as fleet internals: they are never offered for import.
+pub const FLEET_SKILL_NAMES: &[&str] = &[
+    "claude-fleet-control",
+    "fleet-friendly-name",
+    "fleet-prompt-suggestion",
+];
 /// The `mcpServers` key fleet provisions (it carries the host's token).
 pub const FLEET_MCP_SERVER: &str = "claude-fleet";
 /// Written into each managed skill dir: the fingerprint that put it there.
@@ -159,10 +184,19 @@ pub fn fingerprint() -> &'static str {
             .map(|(path, body)| format!("{path}\u{0}{body}\u{0}"))
             .collect();
         crate::mcp::auth::sha256_hex(&format!(
-            "{FLEET_SKILL}\u{0}{FRIENDLY_NAME_SKILL}\u{0}{CLAUDE_MD_BODY}\u{0}{}\u{0}{ag}\u{0}{VOICE_ARECORD}",
-            crate::service::hooks_install::hook_shape()
+            "{FLEET_SKILL}\u{0}{FRIENDLY_NAME_SKILL}\u{0}{CLAUDE_MD_BODY}\u{0}{}\u{0}{ag}\u{0}{VOICE_ARECORD}{}",
+            crate::service::hooks_install::hook_shape(),
+            suggest_plugin_fingerprint_part()
         ))
     })
+}
+
+/// [`SUGGEST_PLUGIN_FILES`] as [`fingerprint`] hashes them.
+fn suggest_plugin_fingerprint_part() -> String {
+    SUGGEST_PLUGIN_FILES
+        .iter()
+        .map(|(path, body)| format!("\u{0}{path}\u{0}{body}"))
+        .collect()
 }
 
 fn marker_content() -> String {
@@ -191,7 +225,7 @@ fn git_top_of(stdout: &str) -> &str {
 /// skill dirs, else nothing. A dotfiles checkout that untracks or ignores
 /// them is fine: provisioning then overwrites nothing anyone committed.
 fn git_tree_probe_script() -> String {
-    let dirs = [SKILL_DIR, FRIENDLY_NAME_SKILL_DIR]
+    let dirs = [SKILL_DIR, FRIENDLY_NAME_SKILL_DIR, SUGGEST_PLUGIN_DIR]
         .iter()
         .map(|d| {
             quote(
@@ -482,8 +516,9 @@ async fn provision_skills(
         return Err(IpcError::new(
             codes::E_INVALID,
             format!(
-                "{host}: the git work tree {toplevel} tracks files in {SKILL_DIR} or \
-                 {FRIENDLY_NAME_SKILL_DIR}; fleet would overwrite them. Untrack both dirs there \
+                "{host}: the git work tree {toplevel} tracks files in {SKILL_DIR}, \
+                 {FRIENDLY_NAME_SKILL_DIR} or {SUGGEST_PLUGIN_DIR}; fleet would overwrite them. \
+                 Untrack those dirs there \
                  (git rm -r --cached, then add them to .gitignore), or set \
                  provision.force_git_tree=true to write anyway"
             ),
@@ -508,6 +543,19 @@ async fn provision_skills(
         )
         .await?;
     }
+    for (file, body) in SUGGEST_PLUGIN_FILES {
+        let path = format!("{SUGGEST_PLUGIN_DIR}/{file}");
+        let dir = path.rsplit_once('/').map_or(SUGGEST_PLUGIN_DIR, |(d, _)| d);
+        write_host_file(ssh, host, dir, &path, body).await?;
+    }
+    write_host_file(
+        ssh,
+        host,
+        SUGGEST_PLUGIN_DIR,
+        &format!("{SUGGEST_PLUGIN_DIR}/{MANAGED_MARKER}"),
+        &marker_content(),
+    )
+    .await?;
     Ok(())
 }
 
@@ -2897,6 +2945,19 @@ mod tests {
                 &format!("{FRIENDLY_NAME_SKILL_DIR}/{MANAGED_MARKER}"),
                 &marker_content(),
             )),
+        ];
+        // 1a. the prompt-suggestion plugin, then its marker
+        for (file, body) in SUGGEST_PLUGIN_FILES {
+            let path = format!("{SUGGEST_PLUGIN_DIR}/{file}");
+            let (dir, _) = path.rsplit_once('/').unwrap();
+            steps.push(Script(remote_write_script(dir, &path, body)));
+        }
+        steps.push(Script(remote_write_script(
+            SUGGEST_PLUGIN_DIR,
+            &format!("{SUGGEST_PLUGIN_DIR}/{MANAGED_MARKER}"),
+            &marker_content(),
+        )));
+        steps.extend([
             // 1b. managed CLAUDE.md block
             Script(remote_read_script(CLAUDE_MD_PATH)),
             Script(remote_write_script(
@@ -2908,7 +2969,7 @@ mod tests {
             //    over stdin into a 0600 tmp file, never through argv, then
             //    an atomic rename lands it on the real path.
             Script(remote_read_script(CLAUDE_JSON)),
-        ];
+        ]);
         steps.extend(guarded_write_steps(
             CLAUDE_DIR,
             CLAUDE_JSON,
@@ -3043,8 +3104,12 @@ mod tests {
             .iter()
             .map(|(p, b)| format!("{p}\u{0}{b}\u{0}"))
             .collect();
+        let plugin: String = SUGGEST_PLUGIN_FILES
+            .iter()
+            .map(|(p, b)| format!("\u{0}{p}\u{0}{b}"))
+            .collect();
         let expected = crate::mcp::auth::sha256_hex(&format!(
-            "{FLEET_SKILL}\u{0}{FRIENDLY_NAME_SKILL}\u{0}{CLAUDE_MD_BODY}\u{0}{}\u{0}{ag}\u{0}{VOICE_ARECORD}",
+            "{FLEET_SKILL}\u{0}{FRIENDLY_NAME_SKILL}\u{0}{CLAUDE_MD_BODY}\u{0}{}\u{0}{ag}\u{0}{VOICE_ARECORD}{plugin}",
             crate::service::hooks_install::hook_shape()
         ));
         assert_eq!(fp, expected);
@@ -3078,6 +3143,7 @@ mod tests {
         // is an input too: the pin has to ask about every input, never a
         // list that was complete when it was written.
         let ag_bodies: Vec<&str> = AG_FILES.iter().map(|(_, b)| *b).collect();
+        let plugin_bodies: Vec<&str> = SUGGEST_PLUGIN_FILES.iter().map(|(_, b)| *b).collect();
         for covered in [
             FLEET_SKILL,
             FRIENDLY_NAME_SKILL,
@@ -3086,6 +3152,7 @@ mod tests {
         ]
         .into_iter()
         .chain(ag_bodies)
+        .chain(plugin_bodies)
         {
             assert!(
                 !covered.contains("\"X-Fleet-Pane\": \"${TMUX_PANE:-}\""),
@@ -3493,7 +3560,7 @@ mod tests {
         let fake = fresh_host();
         provision_one(&fake, "h1", &base(), TOKEN).await.unwrap();
         let steps: Vec<Step> = fake.calls().iter().map(step_of).collect();
-        for dir in [SKILL_DIR, FRIENDLY_NAME_SKILL_DIR] {
+        for dir in [SKILL_DIR, FRIENDLY_NAME_SKILL_DIR, SUGGEST_PLUGIN_DIR] {
             let marker = format!("{dir}/{MANAGED_MARKER}");
             assert!(
                 steps.contains(&Step::Script(remote_write_script(

@@ -96,8 +96,9 @@ Rules:
   dev-dependency on a workspace crate it does not already depend on; a test
   that needs one lives in a crate of its own, as `crates/fleet-agent-e2e`
   does. `src/lib/names.json`, `tools/ag/**`, `tools/voice/arecord`,
-  `catalog-seed/fleet-agents/**` (the definition gallery) and three
-  `skills/*/SKILL.md` are embedded in fleet-core itself, so editing them
+  `catalog-seed/fleet-agents/**` (the definition gallery),
+  `plugins/fleet-prompt-suggestion/**` and three `skills/*/SKILL.md` are
+  embedded in fleet-core itself, so editing them
   does recompile it.
 - `pnpm tauri dev` / `pnpm tauri build` and `cargo build -p fleet-hub` use other
   feature sets. Run them when you need them; in a cloud session (no display,
