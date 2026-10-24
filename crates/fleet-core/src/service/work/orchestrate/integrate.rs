@@ -213,6 +213,20 @@ fn checked() -> &'static Mutex<HashMap<i64, String>> {
     C.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// The key a check leaves when its card was refused for the mission's
+/// open-card cap: the same heads are not looked at again while the cap
+/// holds (review r9: every tick re-ran git over ssh), and are once a card
+/// is decided.
+fn held(key: &str) -> String {
+    format!("{key};held")
+}
+
+/// PURE: whether the check that makes `key` is skipped, given the key the
+/// last one left and whether the mission holds its open-card cap.
+fn already_checked(last: Option<&String>, key: &str, full: bool) -> bool {
+    last.is_some_and(|l| l == key || (full && *l == held(key)))
+}
+
 /// Check `m`'s finished branches against each other; card the conflicts of
 /// each repo as one integration.
 /// Never fails the tick: what git cannot answer stays `unknown`.
@@ -239,6 +253,8 @@ pub async fn check(deps: &Deps, m: &MissionRow) -> Vec<PairState> {
             .unwrap_or_default(),
         Err(_) => return Vec::new(),
     };
+    // Open cards come first, and the cap is under the 50 read.
+    let full = open.len() as i64 >= crate::store::CARDS_OPEN_CAP;
     let covered = covered_items(&open);
     // The open cards are part of the key: deciding one checks again.
     let key: String = found
@@ -248,11 +264,14 @@ pub async fn check(deps: &Deps, m: &MissionRow) -> Vec<PairState> {
         .collect::<Vec<_>>()
         .join(",");
     if let Ok(mut c) = checked().lock() {
-        if c.get(&m.id) == Some(&key) {
+        if already_checked(c.get(&m.id), &key, full) {
             return Vec::new();
         }
-        c.insert(m.id, key);
+        c.insert(m.id, key.clone());
     }
+    // Not checked or not carded: the next tick asks again (`retry`), or
+    // once the open-card cap no longer holds (`at_cap`).
+    let (mut retry, mut at_cap) = (false, false);
     // One repo on one host is one script.
     let mut groups: BTreeMap<(String, i64), Vec<&Branch>> = BTreeMap::new();
     for b in &found {
@@ -279,9 +298,7 @@ pub async fn check(deps: &Deps, m: &MissionRow) -> Vec<PairState> {
                 tracing::debug!(mission = m.id, %host, error = %e.message, "[integrate] not checked");
                 // Not checked: forget the heads so the next tick asks again
                 // (a finished mission's heads never move).
-                if let Ok(mut c) = checked().lock() {
-                    c.remove(&m.id);
-                }
+                retry = true;
                 continue;
             }
         };
@@ -308,12 +325,21 @@ pub async fn check(deps: &Deps, m: &MissionRow) -> Vec<PairState> {
                 .map(|(_, b)| *b)
                 .collect();
             if let Ok(s) = deps.store.lock() {
-                if !integration_card(&s, m, &live, &conflicts) {
+                match integration_card(&s, m, &live, &conflicts) {
+                    Carded::Done => {}
+                    Carded::Held => at_cap = true,
                     // Not carded: ask again next tick rather than never.
-                    if let Ok(mut c) = checked().lock() {
-                        c.remove(&m.id);
-                    }
+                    Carded::Failed => retry = true,
                 }
+            }
+        }
+    }
+    if retry || at_cap {
+        if let Ok(mut c) = checked().lock() {
+            if retry {
+                c.remove(&m.id);
+            } else {
+                c.insert(m.id, held(&key));
             }
         }
     }
@@ -371,15 +397,26 @@ fn joined(labels: &[&str]) -> String {
     }
 }
 
+/// What became of an integration card.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Carded {
+    /// Written, carded before, or never will be for these heads (its
+    /// payload is too large).
+    Done,
+    /// Refused: the mission holds its open-card cap.
+    Held,
+    /// Not written for another reason (logged): check again.
+    Failed,
+}
+
 /// The one proposed task a repo's conflicts raise: merge every live branch
-/// into one, once per set of heads. False when the card could not be
-/// written (logged), so the caller checks again.
+/// into one, once per set of heads.
 fn integration_card(
     s: &Store,
     m: &MissionRow,
     live: &[&Branch],
     conflicts: &[(&Branch, &Branch, Vec<String>)],
-) -> bool {
+) -> Carded {
     let mut heads: Vec<String> = live
         .iter()
         .map(|b| format!("{}:{}", b.item_id, &b.head[..b.head.len().min(12)]))
@@ -420,7 +457,16 @@ fn integration_card(
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(mission = m.id, error = %e.message, "[integrate] integration card not written");
-            return false;
+            if e.code != crate::ipc_error::codes::E_LIMIT {
+                return Carded::Failed;
+            }
+            let at_cap = s
+                .mission_cards(m.id, crate::store::CARDS_OPEN_CAP)
+                .is_ok_and(|c| {
+                    c.iter().filter(|c| c.state == "open").count() as i64
+                        >= crate::store::CARDS_OPEN_CAP
+                });
+            return if at_cap { Carded::Held } else { Carded::Done };
         }
     };
     if card.is_some() {
@@ -446,7 +492,7 @@ fn integration_card(
             },
         );
     }
-    true
+    Carded::Done
 }
 
 #[cfg(test)]
