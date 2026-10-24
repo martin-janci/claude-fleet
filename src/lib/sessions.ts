@@ -267,6 +267,10 @@ export interface SessionRow {
    *  or null when not pinned. A pinned session sits in the Pinned section
    *  and the hub refuses to close it (`E_PINNED`) until it is unpinned. */
   pinned_at?: number | null;
+  /** The next prompt Claude Code proposes after a turn, the dim text in its
+   *  empty prompt box (migration 206); absent when nothing is proposed. The
+   *  next prompt clears it. */
+  prompt_suggestion?: string | null;
   /** What a rule, Jev or an LLM proposes about the session, one per
    *  feature (redesign 2.8). Absent when nothing proposes anything. */
   proposals?: DecisionProposal[];

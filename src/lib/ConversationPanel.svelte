@@ -27,6 +27,7 @@
   import { hintAnchor } from './hints';
   import { composerPresets, presetSendsNow, type ComposerPreset } from './composer_presets';
   import { chipsThatFit } from './composer_chips';
+  import { offeredSuggestion } from './prompt_suggestion';
   import { contextLevel } from './attention';
   import { shortAge } from './session_status';
   import { onTimelineEvent, onConversationsChanged } from './live_events';
@@ -763,6 +764,10 @@
 
   const liveProbe = $derived(probeFresh ? probe : null);
   const liveStatus = $derived(liveProbe?.claude_status ?? session.claude_status);
+  // The next prompt Claude Code proposes (the dim text in its own empty
+  // box): ghost text here too, taken with Tab, and a chip that fills the box
+  // or, with Shift, sends it.
+  const suggestion = $derived(offeredSuggestion(session, liveStatus, draft));
   const liveStuck = $derived(liveProbe?.stuck_kind ?? session.stuck_kind);
   const liveActivity = $derived(liveProbe?.current_activity ?? session.current_activity);
   const optimistic = $derived(
@@ -2026,6 +2031,12 @@
         return;
       }
     }
+    if (e.key === 'Tab' && !e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey && suggestion) {
+      e.preventDefault();
+      draft = suggestion;
+      histIndex = null;
+      return;
+    }
     if (e.key !== 'Enter' || e.shiftKey || e.altKey) return;
     e.preventDefault();
     void send();
@@ -3179,6 +3190,19 @@
             onclick={() => void sendText('')}>⏎ Press Enter</button>
         </div>
       {/if}
+      {#if suggestion}
+        <div class="stuck-row">
+          <button
+            type="button"
+            class="btn btn--chip suggest-chip"
+            data-testid="conv-chip-suggestion"
+            title={`Claude suggests this next prompt.\n\nClick fills the box; Shift+click sends now. Tab in the empty box fills it too.`}
+            disabled={viewing !== null || shareBlocked !== null}
+            onclick={(e) => usePreset({ label: suggestion, text: suggestion }, e.shiftKey)}
+            ><span class="suggest-mark" aria-hidden="true">✦</span>&nbsp;{suggestion}</button
+          >
+        </div>
+      {/if}
       <div class="chips" data-testid="conv-chips" bind:this={chipsRow}>
         <!-- Every chip at its natural width, out of the flow, so the
              collapsed row can tell how many fit (measureChips). -->
@@ -3299,7 +3323,7 @@
           rows="2"
           use:autoGrow={draft}
           onpaste={onComposerPaste}
-          {placeholder}
+          placeholder={suggestion ? `${suggestion}   ⇥ Tab` : placeholder}
           title={shareBlocked ?? undefined}
           disabled={viewing !== null || shareBlocked !== null}
         ></textarea>
@@ -3768,6 +3792,14 @@
   }
   /* Marks an auto-send chip: a click sends rather than fills. */
   .chip-send {
+    opacity: 0.6;
+  }
+  .suggest-chip {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .suggest-mark {
     opacity: 0.6;
   }
   .composer-shell {
