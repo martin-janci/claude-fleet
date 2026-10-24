@@ -62,6 +62,11 @@ export interface MissionWait {
 /** `store::MissionPolicy`. The backend reads a missing field as its
  *  default, so a save sends the whole policy back with its edits on top. */
 export interface MissionPolicy {
+  /** `item` (each run its own session) or `lane` (a lane's tasks in one
+   *  lead session); changes only while the mission is not running. */
+  execution?: 'item' | 'lane';
+  /** In `lane` execution, a lead hands over to a fresh one after this many tasks. */
+  lane_relay_after?: number;
   max_parallel?: number;
   max_retries?: number;
   require_review?: boolean;
