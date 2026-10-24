@@ -1295,7 +1295,9 @@ the definitions have run for real (spec *Migration*): built so far
 and `limits.auto_approve`; `run.fingerprint` (the support agent's error
 fingerprint counted in a fleet store, `knownBug` / `similarBug` /
 `relatedBug` added to the answer, a filed bug kept against it), and the
-gallery's `support` definition.
+gallery's `support` definition; `run.workspace: pr_head`, `run.diff` (the
+reviewer's filtered diff in the prompt, with its size gate), `github_prs`'s
+`skip_wip` / `debounce_secs`, and a PR comment's head.
 
 The self debug agent (thread "Self debug agent", 2026-10-17), the hub and
 desktop parts: a fleet agent definition that sets `run.diagnostics` gets
