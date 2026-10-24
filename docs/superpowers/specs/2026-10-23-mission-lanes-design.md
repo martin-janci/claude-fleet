@@ -1,7 +1,7 @@
 # Misie po líniách: jedna vedúca session na líniu, subagenti vnútri
 
 **Dátum:** 2026-10-23
-**Stav:** rozhodnutia D1–D9 (§9) vlastník prijal podľa odporúčaní 2026-10-24. **L0 je postavené** (2026-10-23): oprava P2 a metriky misie (§5.2, §5.5). **L1 je postavené** (2026-10-23): subagenti v prompte behu, plánovač, ktorý číta repo, a pravidlo o spoločných súboroch (§5.1, §5.4). **L2 je postavené** (2026-10-24): línie v dátach, bez zmeny behu (§2.2).
+**Stav:** rozhodnutia D1–D9 (§9) vlastník prijal podľa odporúčaní 2026-10-24. **L0 je postavené** (2026-10-23): oprava P2 a metriky misie (§5.2, §5.5). **L1 je postavené** (2026-10-23): subagenti v prompte behu, plánovač, ktorý číta repo, a pravidlo o spoločných súboroch (§5.1, §5.4). **L2 je postavené** (2026-10-24): línie v dátach, bez zmeny behu (§2.2). **L3 je postavené** (2026-10-24): vedúca session na líniu za `policy.execution = lane` (§3, „Ako je to postavené v L3“).
 **Nadväzuje na:** `2026-10-07-autonomous-orchestration-projects-design.md` (ďalej *O-návrh*), najmä §5.3 (deterministický loop), §6 (evidencia), §8 (worktrees a integrácia).
 **Vstup:** analýza „ako zlepšiť misie: jeden Claude so subagentmi alebo veľa sessions" (2026-10-23).
 
@@ -176,6 +176,16 @@ Zahodenie práce: retry v línii pokračuje z `HEAD` línie, nie z default vetvy
 - Ready a merge zostávajú človeku (TS11, guard).
 - „Merge wave" položky (`check_merge_waves`) v režime `lane` nie sú potrebné na integráciu vetiev úloh jednej línie. Ostávajú len medzi líniami jedného repa (§4.2).
 
+### 3.9 Ako je to postavené v L3
+
+- `policy.execution` (`item` | `lane`, predvolene `item`) a `policy.lane_relay_after` (1–20, predvolene 4). Režim sa mení len na misii, ktorá nebeží a nemá otvorené behy; v UI je to „Tasks run“ v úprave misie.
+- `tasks.start_head` (migrácia 208) a evidencia úlohy `start_head..HEAD` (`report::evidence_script_since`). `end_head` netreba: je to `TaskEvidence.head`. Prepísaná história (štart už nie je predok `HEAD`) je chyba evidencie, takže brána dokončenia úlohu nezavrie.
+- `orchestrate/lanes.rs`:
+  - `gate`: v režime `lane` jeden implement beh na líniu, prvý v poradí grafu, a žiadny, kým je línia `busy_lanes` (jej úloha má otvorený implement beh, alebo jej živá vedúca session nie je pri prompte či čaká na dialóg). Úloha bez línie, review, test a integrácia idú ako doteraz.
+  - `run_in_lane`: živému vedúcemu úlohu doručí (`deliver`: nový `tasks` riadok so `start_head`, napísaný cez typing lane ako direct send). Bez živého vedúceho, po `lane_relay_after` úlohách alebo pri treťom pokuse o tú istú úlohu na tom istom vedúcom (`needs_relay`) ukončí starého vedúceho misie a naštartuje nového v tom istom checkoute línie (`start_lead`: brief línie, vetva `slug(M<id> <misia> <línia>)`, `set_lane_lead` zvýši `relay`). Tá istá cesta obnoví líniu po páde vedúceho.
+  - Vedúci je vždy session misie (`SessionOrigin::mission`), takže guard, grant a brzdy platia ako pre ktorýkoľvek beh. Id vedúceho sa overuje voči misii a checkoutu línie, lebo id session sa recykluje.
+- **Ostáva na L4:** review nad snapshotom úlohy (dnes review línie ide session cestou z vetvy línie vďaka P2, alebo headless, keď sa checkout nepohol), test ako brána pred ďalšou úlohou, PR na líniu ako pravidlo Fleetu (dnes len pokyn v briefe), štafeta podľa zaplnenia kontextu (dnes len podľa počtu úloh) a stav línie `done`.
+
 ## 4. Paralelizmus a integrácia
 
 ### 4.1 Sloty
@@ -260,7 +270,7 @@ Každá fáza sa dá vydať samostatne a každá končí meraním proti L0.
 | **L0 Meranie a overenie** | `work { mission_stats }` a panel (§5.5); test pre P2 a oprava, ak sa potvrdí (§5.2) | žiadna zmena okrem opravy P2 | S | baseline z doterajších misií; P2 potvrdené alebo vyvrátené testom |
 | **L1 Rýchle výhry** | pokyny pre subagentov v `run_prompt` (§5.1); plánovač s read-only nástrojmi za nastavením `orchestrator.planner_reads` (§5.4); pravidlo P7 v prompte plánovača | opt-in nastavenie, text promptu | S–M | menej retry na úlohu, menej integračných úloh na nových misiách |
 | **L2 Línie v dátach** (postavené) | migrácia (§2.2), `lane` pri importe a v `create_item`, presun úlohy medzi líniami (`work_link { mission_item, lane }`), Graph view kreslí línie z `lane_id`; verdikty, izolačná matica, `REGEN_DOCS`, telefón len čítanie | žiadna zmena behu | M | misia sa dá naplánovať po líniách, nič sa nespúšťa inak |
-| **L3 Vedúca session** | `policy.execution = lane`: štart línie, podávanie úloh do session (§3.2), `start_head`/`end_head` a evidencia (§3.3), retry v session, štafeta (§3.5), pád a limit (§3.6) | opt-in na misii | L | jedna skutočná misia v jednom repe dokončená v režime `lane` bez ručného zásahu mimo brán |
+| **L3 Vedúca session** (postavené) | `policy.execution = lane`: štart línie, podávanie úloh do session (§3.2), `start_head`/`end_head` a evidencia (§3.3), retry v session, štafeta (§3.5), pád a limit (§3.6) | opt-in na misii | L | jedna skutočná misia v jednom repe dokončená v režime `lane` bez ručného zásahu mimo brán |
 | **L4 Overenie v línii** | review nad snapshotom (§3.7), test v checkoute línie a `lane_test_at`, PR na líniu (§3.8), `headless_checks` predvolene zapnuté (§5.2), subagent definície v katalógu (§3.4) | opt-in na misii, `headless_checks` globálne | M | `done_when` overené bez session ciest pre review |
 | **L5 `touches` a plánovanie línií** | `touches_json`, pravidlo prekrytia pre `item` aj `lane` (§4.1, §5.4), plánovač priraďuje línie; integrácia len medzi líniami (§4.2) | platí v oboch režimoch | M | v misii s dvoma líniami v jednom repe nevznikne konflikt, ktorý `touches` mohli predpovedať |
 | **L6 Porovnanie a prepnutie** | A/B: ten istý typ misie v `item` a `lane`, porovnanie metrík z L0; build cache experiment (§5.3) | rozhodnutie vlastníka | S | vlastník rozhodne o predvolenom režime podľa čísel |

@@ -1113,12 +1113,20 @@ describe('WorkMissions', () => {
       expect((screen.getByTestId('mission-edit-save') as HTMLButtonElement).disabled).toBe(true);
       await fireEvent.input(screen.getByTestId('mission-edit-wake'), { target: { value: '30' } });
       await fireEvent.input(screen.getByTestId('mission-edit-parallel'), { target: { value: '4' } });
+      // Lanes L3: a mission not running may switch to running by lane.
+      expect((screen.getByTestId('mission-edit-execution') as HTMLSelectElement).value).toBe('item');
+      await fireEvent.change(screen.getByTestId('mission-edit-execution'), { target: { value: 'lane' } });
       await flush();
       await fireEvent.click(screen.getByTestId('mission-edit-save'));
       await flush();
       const sent = calls('save_mission')[0];
       expect(sent.expected_version).toBe(1);
-      expect((sent.mission as { policy: unknown }).policy).toEqual({ ...policy, max_parallel: 4, wake_every_secs: 1800 });
+      expect((sent.mission as { policy: unknown }).policy).toEqual({
+        ...policy,
+        max_parallel: 4,
+        wake_every_secs: 1800,
+        execution: 'lane',
+      });
       // What came back is what the header shows, and a second edit starts from it.
       const meta = screen.getByTestId('mission-detail').textContent ?? '';
       expect(meta).toContain('wakes every 30 min');

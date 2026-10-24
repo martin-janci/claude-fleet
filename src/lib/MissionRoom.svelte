@@ -380,6 +380,8 @@
   /** Runs open at once, and a continuous mission's wake interval in minutes
    *  ('' = no timer) (step 1.8). */
   let editParallel = $state(POLICY_DEFAULT_PARALLEL);
+  /** How its tasks run (lanes design L3): `item` or `lane`. */
+  let editExecution = $state<'item' | 'lane'>('item');
   let editWakeMins = $state<number | null>(null);
   const minWakeMins = POLICY_MIN_WAKE_SECS / 60;
   const wakeBad = $derived(editMode === 'continuous' && editWakeMins != null && !(editWakeMins >= minWakeMins));
@@ -393,6 +395,7 @@
     editLevel = mission.level;
     editMode = mission.mode;
     editParallel = mission.policy?.max_parallel ?? POLICY_DEFAULT_PARALLEL;
+    editExecution = mission.policy?.execution ?? 'item';
     const wake = mission.policy?.wake_every_secs;
     editWakeMins = wake ? Math.round(wake / 60) : null;
     editing = true;
@@ -411,7 +414,11 @@
           done_when: doneWhenRows(editDoneWhen),
           level: editLevel,
           mode: editMode,
-          policy: policyWith(mission.policy, { max_parallel: editParallel, wake_every_secs: wakeSecs }),
+          policy: policyWith(mission.policy, {
+            max_parallel: editParallel,
+            wake_every_secs: wakeSecs,
+            execution: editExecution,
+          }),
         },
         mission.version,
       ),
@@ -1347,6 +1354,13 @@
                   <label class="field inline"
                     >Parallel runs
                     <input type="number" min="1" max={POLICY_MAX_PARALLEL} bind:value={editParallel} class="role" data-testid="mission-edit-parallel" /></label
+                  >
+                  <label class="field inline" title="By lane: a lane's tasks run one after another in one session on the lane's branch. Changes only while the mission is not running."
+                    >Tasks run
+                    <select bind:value={editExecution} disabled={mission.state === 'active'} data-testid="mission-edit-execution">
+                      <option value="item">Each in its own session</option>
+                      <option value="lane">By lane, one session each</option>
+                    </select></label
                   >
                   {#if editMode === 'continuous'}
                     <label class="field inline"

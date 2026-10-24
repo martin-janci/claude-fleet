@@ -1072,8 +1072,17 @@ design's decisions D1–D9 are accepted (2026-10-24). Lanes L2 (migration
 207, `store/mission_lanes.rs`): a mission's tasks can be put in named lanes
 by a plan's `Lane` column, the planner's `create_item { lane }` and a
 person (`work_link { mission_item, lane }`, the task row's lane picker);
-`work { mission }` lists them and the Graph view groups by them. Nothing
-runs differently yet: the lead session per lane is L3. A mission's worker is refused a person's
+`work { mission }` lists them and the Graph view groups by them. Lanes L3:
+with `policy.execution = lane` (off by default; "Tasks run" in the
+mission's edit form, changed only while it is not running) a lane's tasks
+run one at a time in one lead session on the lane's branch
+(`orchestrate/lanes.rs`): the loop offers one implement run per free lane,
+hands it to the live lead as a new task typed at its idle prompt, and starts
+a fresh lead in the same checkout after `policy.lane_relay_after` tasks (4),
+on a task's third try on one lead, or when the lead died. Each such task
+records the commit it began on (`tasks.start_head`, migration 208) and its
+evidence is its own commits only. Review on a snapshot, the test gate and a
+PR per lane are L4. A mission's worker is refused a person's
 step (`gh pr merge` / `ready`, a push to `main` / `master`, a tracker CLI)
 by fleet's `PreToolUse(Bash)` guard (`orchestrate/guard.rs`): a shell
 prefilter that asks the hub only about those commands and lets the command

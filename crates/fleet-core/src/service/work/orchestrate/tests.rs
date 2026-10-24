@@ -1536,3 +1536,41 @@ fn the_planner_reads_the_missions_repo_only_when_asked() {
         "no repo to read"
     );
 }
+
+/// Lanes design L3: in lane execution the loop offers one implement run per
+/// lane; a task in no lane still runs on its own.
+#[test]
+fn lane_execution_offers_one_run_per_lane() {
+    let fx = fixture();
+    let (a, b, c) = (member(&fx, "a"), member(&fx, "b"), member(&fx, "c"));
+    let s = lock(&fx.deps.store).unwrap();
+    s.set_mission_state(fx.m.id, None, "paused", "t").unwrap();
+    s.update_mission(
+        fx.m.id,
+        None,
+        &crate::store::MissionPatch {
+            policy: Some(crate::store::MissionPolicy {
+                execution: "lane".into(),
+                max_parallel: 8,
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        "t",
+    )
+    .unwrap();
+    s.set_mission_state(fx.m.id, None, "active", "t").unwrap();
+    s.set_item_lane(fx.m.id, a, Some("backend"), None, "t")
+        .unwrap();
+    s.set_item_lane(fx.m.id, b, Some("backend"), None, "t")
+        .unwrap();
+    let m = s.get_mission(fx.m.id).unwrap().unwrap();
+    let a_now = autonomy(&s, &m, now_unix()).unwrap();
+    let runs: Vec<i64> = steps_for(&s, &m, &a_now)
+        .unwrap()
+        .into_iter()
+        .filter(|st| st.kind == "run")
+        .filter_map(|st| st.item_id)
+        .collect();
+    assert_eq!(runs, vec![a, c], "b waits for its lane; c is in none");
+}

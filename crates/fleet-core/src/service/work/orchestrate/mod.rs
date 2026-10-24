@@ -19,6 +19,7 @@ pub mod checks;
 pub mod drafts;
 pub mod guard;
 pub mod integrate;
+pub mod lanes;
 pub mod limit;
 pub mod planner;
 pub mod steps;
@@ -207,14 +208,25 @@ fn steps_for(s: &Store, m: &MissionRow, a: &Autonomy) -> Result<Vec<Step>, IpcEr
     let items = s.mission_items(m.id)?;
     let graph = super::graph::build(s, &ViewScope::internal(), &items)?;
     let attempts = attempts_of(s, &items)?;
-    Ok(plan_steps(&StepInput {
+    let steps = plan_steps(&StepInput {
         mission: m,
         graph: &graph,
         items: &items,
         attempts: &attempts,
         counts: s.mission_task_counts(m.id)?,
         max_parallel: max_parallel(m, a),
-    }))
+    });
+    if m.policy.execution != "lane" {
+        return Ok(steps);
+    }
+    // Lanes L3: a lane takes one implement run at a time, when it is free.
+    let lanes = s.mission_lanes(m.id)?;
+    let lane_of: HashMap<i64, i64> = lanes
+        .iter()
+        .flat_map(|l| l.item_ids.iter().map(move |i| (*i, l.id)))
+        .collect();
+    let busy = lanes::busy_lanes(s, m, &lanes, &attempts)?;
+    Ok(lanes::gate(steps, &lane_of, &busy))
 }
 
 /// The plan a mission's detail carries: `None` for a draft or a finished
@@ -496,6 +508,23 @@ async fn apply_step_inner(
                 (start_for(&s, m, item_id, actor, a.grant.as_ref())?, a.grant)
             };
             let role = step.role.as_deref().unwrap_or("implement");
+            // Lanes L3: a lane's task runs in the lane's lead session.
+            if role == "implement" && m.policy.execution == "lane" {
+                let lane = lock(&deps.store)?.item_lane(item_id)?;
+                if let Some(lane) = lane {
+                    return lanes::run_in_lane(
+                        deps,
+                        m,
+                        lane,
+                        item_id,
+                        role,
+                        start,
+                        step.context.as_deref(),
+                        view,
+                    )
+                    .await;
+                }
+            }
             // F3: a review or a test, headless in the implementer's
             // checkout, when the setting is on and the checkout allows.
             if let Some(started) = checks::try_start(

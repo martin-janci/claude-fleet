@@ -110,6 +110,57 @@ impl Store {
         Ok(lanes)
     }
 
+    /// One lane, with its tasks.
+    pub fn get_mission_lane(&self, id: i64) -> Result<Option<MissionLaneRow>, IpcError> {
+        let lane = self
+            .conn
+            .query_row(
+                &format!("SELECT {LANE_COLUMNS} FROM mission_lanes WHERE id = ?1"),
+                [id],
+                map_lane,
+            )
+            .optional()?;
+        let Some(mut lane) = lane else {
+            return Ok(None);
+        };
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT id FROM work_items WHERE lane_id = ?1 ORDER BY id")?;
+        lane.item_ids = stmt
+            .query_map([id], |r| r.get::<_, i64>(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(Some(lane))
+    }
+
+    /// Record a new lead session of lane `id` (lanes design L3): its
+    /// session, its checkout and its branch; the relay count goes up by one.
+    pub fn set_lane_lead(
+        &self,
+        id: i64,
+        session_id: i64,
+        worktree_id: Option<i64>,
+        branch: &str,
+    ) -> Result<(), IpcError> {
+        self.conn.execute(
+            "UPDATE mission_lanes SET lead_session_id = ?1, \
+               worktree_id = COALESCE(?2, worktree_id), branch = ?3, relay = relay + 1, \
+               updated_at = ?4 WHERE id = ?5",
+            rusqlite::params![session_id, worktree_id, branch, now_unix(), id],
+        )?;
+        Ok(())
+    }
+
+    /// The implement runs session `lead` was handed, open or not: how far a
+    /// lead is into its share of a lane before it hands over (§3.5).
+    pub fn lead_run_count(&self, lead: i64) -> Result<i64, IpcError> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*) FROM tasks WHERE worker_session_id = ?1 \
+               AND work_item_id IS NOT NULL AND COALESCE(role, 'implement') = 'implement'",
+            [lead],
+            |r| r.get(0),
+        )?)
+    }
+
     /// The lane of `item_id`, if it is in one.
     pub fn item_lane(&self, item_id: i64) -> Result<Option<i64>, IpcError> {
         Ok(self
