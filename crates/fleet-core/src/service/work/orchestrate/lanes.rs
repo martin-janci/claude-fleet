@@ -84,11 +84,24 @@ fn live_lead(
     }))
 }
 
+/// How full a lead's context may be when it is handed a task (§3.5): past
+/// this the next task goes to a fresh lead, so compaction never lands in
+/// the middle of one.
+pub const RELAY_CONTEXT_PCT: f64 = 70.0;
+
 /// PURE: whether a live lead hands over before the next task (§3.5, D4):
-/// it has had `relay_after` tasks, or this task already ran on it twice
-/// (the first retry stays in its context, the next gets fresh eyes).
-pub fn needs_relay(lead_runs: i64, tries_here: usize, relay_after: u32) -> bool {
-    lead_runs >= i64::from(relay_after) || tries_here >= 2
+/// it has had `relay_after` tasks, its context is [`RELAY_CONTEXT_PCT`]
+/// full, or this task already ran on it twice (the first retry stays in
+/// its context, the next gets fresh eyes).
+pub fn needs_relay(
+    lead_runs: i64,
+    tries_here: usize,
+    relay_after: u32,
+    context_pct: Option<f64>,
+) -> bool {
+    lead_runs >= i64::from(relay_after)
+        || tries_here >= 2
+        || context_pct.is_some_and(|p| p >= RELAY_CONTEXT_PCT)
 }
 
 /// Whether a session waits on a dialog Enter would answer.
@@ -96,20 +109,47 @@ fn on_a_dialog(row: &SessionRow) -> bool {
     row.stuck_kind.is_some() || row.claude_status.as_deref() == Some("blocked")
 }
 
+/// PURE: the members whose `test` line is still to pass while they are
+/// verified (lanes design §3.7, L4): their lane waits, so the test measures
+/// that task in the lane's checkout before the lead moves on.
+pub fn awaiting_test(graph: &crate::service::work::graph::MissionGraph) -> HashSet<i64> {
+    graph
+        .nodes
+        .iter()
+        .filter(|n| n.state == "verifying")
+        .filter(|n| {
+            n.verification.as_ref().is_some_and(|v| {
+                v.checks
+                    .iter()
+                    .any(|c| c.kind == "test" && c.state != "pass")
+            })
+        })
+        .map(|n| n.item_id)
+        .collect()
+}
+
 /// The lanes of `m` that cannot take a task now: a task of theirs has an
-/// open implement run, or their live lead is not at an idle prompt.
+/// open implement or test run or waits for its test (`testing`), or their
+/// live lead is not at an idle prompt.
 pub fn busy_lanes(
     s: &Store,
     m: &MissionRow,
     lanes: &[MissionLaneRow],
     attempts: &HashMap<i64, Vec<TaskRow>>,
+    testing: &HashSet<i64>,
 ) -> Result<HashSet<i64>, IpcError> {
     let mut busy = HashSet::new();
     for l in lanes {
-        let open = l
-            .item_ids
-            .iter()
-            .any(|i| attempts.get(i).is_some_and(|ts| ts.iter().any(open_impl)));
+        let open = l.item_ids.iter().any(|i| {
+            testing.contains(i)
+                || attempts.get(i).is_some_and(|ts| {
+                    ts.iter().any(|t| {
+                        open_impl(t)
+                            || (t.role.as_deref() == Some("test")
+                                && matches!(t.state.as_str(), "queued" | "running"))
+                    })
+                })
+        });
         let lead_busy = live_lead(s, m, l)?.is_some_and(|r| {
             !crate::service::sessions::deferred::idle_for_prompt(&r) || on_a_dialog(&r)
         });
@@ -243,6 +283,7 @@ pub async fn run_in_lane(
                     s.lead_run_count(r.id)?,
                     tries_here,
                     m.policy.lane_relay_after,
+                    r.context_pct,
                 )
             }
             None => false,

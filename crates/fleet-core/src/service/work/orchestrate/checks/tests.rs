@@ -113,6 +113,7 @@ fn a_check_runs_in_the_implementers_checkout() {
             path: "/w/pos-2".into(),
             head: HEAD.into(),
             merge_base: Some(BASE.into()),
+            snapshot: false,
         }
     );
     assert!(p.cmds.is_empty());
@@ -157,6 +158,7 @@ fn the_review_reads_and_the_test_runs_only_its_commands() {
         path: "/w/it's here".into(),
         head: HEAD.into(),
         merge_base: Some(BASE.into()),
+        snapshot: false,
     };
     let review = check_script("review", &at, "sonnet", None, &[], "Review it's fine").unwrap();
     assert!(review.contains("--tools 'Read,Grep,Glob' "), "{review}");
@@ -253,6 +255,7 @@ fn the_script_runs_claude_in_the_checkout_with_the_prompt_on_stdin() {
         path: repo.display().to_string(),
         head: head.clone(),
         merge_base: Some(base),
+        snapshot: false,
     };
     let run = |sc: &str| {
         let full = format!(
@@ -266,7 +269,7 @@ fn the_script_runs_claude_in_the_checkout_with_the_prompt_on_stdin() {
             .unwrap();
         String::from_utf8_lossy(&out.stdout).to_string()
     };
-    let pre = run(&preflight_script(&at));
+    let pre = run(&preflight_script("review", &at));
     assert_eq!(
         claude_print::parse_tagged(&pre, TAG, VERDICTS).map(|v| v.0),
         Some("ok"),
@@ -302,12 +305,52 @@ fn the_script_runs_claude_in_the_checkout_with_the_prompt_on_stdin() {
         Some("dirty")
     );
     sh("git -c user.email=a@b -c user.name=a commit -qam more");
-    let moved = run(&preflight_script(&at));
+    let moved = run(&preflight_script("review", &at));
     assert_eq!(
         claude_print::parse_tagged(&moved, TAG, VERDICTS).map(|v| v.0),
         Some("moved")
     );
     assert!(!got.exists());
+
+    // Lanes L4 (§3.7): a lane task's review runs in a snapshot of its
+    // commit while the lane's checkout has moved on and is dirty, and leaves
+    // no checkout behind; its test still waits for the lane's own checkout.
+    sh("echo wip >> f");
+    let lane = Checkout {
+        snapshot: true,
+        ..at.clone()
+    };
+    let pre = run(&preflight_script("review", &lane));
+    assert_eq!(
+        claude_print::parse_tagged(&pre, TAG, VERDICTS).map(|v| v.0),
+        Some("ok"),
+        "{pre}"
+    );
+    let out = run(&check_script("review", &lane, "sonnet", None, &[], "lane").unwrap());
+    assert_eq!(
+        claude_print::parse_tagged(&out, TAG, VERDICTS).map(|v| v.0),
+        Some("run"),
+        "{out}"
+    );
+    let stdin = std::fs::read_to_string(&got).unwrap();
+    assert!(stdin.contains("+hi"), "the task's own diff: {stdin}");
+    let args = std::fs::read_to_string(&argv).unwrap();
+    let ran_in = args.trim_end().lines().last().unwrap().to_string();
+    assert_ne!(
+        ran_in,
+        repo.display().to_string(),
+        "not the lane's checkout"
+    );
+    assert!(
+        !std::path::Path::new(&ran_in).exists(),
+        "the snapshot is gone"
+    );
+    assert_eq!(sh("git worktree list | wc -l"), "1");
+    let test = run(&preflight_script("test", &lane));
+    assert_eq!(
+        claude_print::parse_tagged(&test, TAG, VERDICTS).map(|v| v.0),
+        Some("moved")
+    );
 }
 
 /// The run's reply closes its task as a session's report would, and the

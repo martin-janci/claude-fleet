@@ -1,7 +1,7 @@
 # Misie po líniách: jedna vedúca session na líniu, subagenti vnútri
 
 **Dátum:** 2026-10-23
-**Stav:** rozhodnutia D1–D9 (§9) vlastník prijal podľa odporúčaní 2026-10-24. **L0 je postavené** (2026-10-23): oprava P2 a metriky misie (§5.2, §5.5). **L1 je postavené** (2026-10-23): subagenti v prompte behu, plánovač, ktorý číta repo, a pravidlo o spoločných súboroch (§5.1, §5.4). **L2 je postavené** (2026-10-24): línie v dátach, bez zmeny behu (§2.2). **L3 je postavené** (2026-10-24): vedúca session na líniu za `policy.execution = lane` (§3, „Ako je to postavené v L3“).
+**Stav:** rozhodnutia D1–D9 (§9) vlastník prijal podľa odporúčaní 2026-10-24. **L0 je postavené** (2026-10-23): oprava P2 a metriky misie (§5.2, §5.5). **L1 je postavené** (2026-10-23): subagenti v prompte behu, plánovač, ktorý číta repo, a pravidlo o spoločných súboroch (§5.1, §5.4). **L2 je postavené** (2026-10-24): línie v dátach, bez zmeny behu (§2.2). **L3 je postavené** (2026-10-24): vedúca session na líniu za `policy.execution = lane` (§3, „Ako je to postavené v L3“). **L4 je postavené** (2026-10-24): review nad snapshotom, test ako brána, štafeta aj podľa kontextu, headless checks predvolene zapnuté (§3.10).
 **Nadväzuje na:** `2026-10-07-autonomous-orchestration-projects-design.md` (ďalej *O-návrh*), najmä §5.3 (deterministický loop), §6 (evidencia), §8 (worktrees a integrácia).
 **Vstup:** analýza „ako zlepšiť misie: jeden Claude so subagentmi alebo veľa sessions" (2026-10-23).
 
@@ -186,6 +186,15 @@ Zahodenie práce: retry v línii pokračuje z `HEAD` línie, nie z default vetvy
   - Vedúci je vždy session misie (`SessionOrigin::mission`), takže guard, grant a brzdy platia ako pre ktorýkoľvek beh. Id vedúceho sa overuje voči misii a checkoutu línie, lebo id session sa recykluje.
 - **Ostáva na L4:** review nad snapshotom úlohy (dnes review línie ide session cestou z vetvy línie vďaka P2, alebo headless, keď sa checkout nepohol), test ako brána pred ďalšou úlohou, PR na líniu ako pravidlo Fleetu (dnes len pokyn v briefe), štafeta podľa zaplnenia kontextu (dnes len podľa počtu úloh) a stav línie `done`.
 
+### 3.10 Ako je to postavené v L4
+
+- **Review úlohy línie nad snapshotom** (`orchestrate/checks.rs`): `implementer_checkout` pozná úlohu línie podľa `start_head`, porovnáva od neho (diff je len tej úlohy) a označí ho `snapshot`. Headless review potom v checkoute línie overí, že commit existuje, spraví `git worktree add --detach` do dočasného priečinka, beží v ňom a EXIT trap ho odstráni. Vedúci medzitým môže robiť ďalšiu úlohu a checkout línie môže byť pohnutý aj špinavý.
+- **Test ako brána** (`lanes::awaiting_test`, `busy_lanes`): línia je obsadená, kým jej úloha vo `verifying` má `test` riadok, ktorý ešte neprešiel, alebo kým beží jej test. Test tak beží v checkoute línie na commite úlohy (headless preflight vyžaduje nepohnutý a čistý checkout). `policy.lane_test_at = lane` sa nestavalo.
+- **Štafeta aj podľa kontextu**: `needs_relay` odovzdá ďalšiu úlohu novému vedúcemu aj pri `context_pct` ≥ 70 (`RELAY_CONTEXT_PCT`).
+- **Línia `done`** sa odvodzuje pri čítaní (`work { mission }`): všetky jej úlohy sú hotové a nie je `held`. Vedúci sa automaticky neukončuje; ukončí ho Clean up pri dokončení misie ako ostatné sessions.
+- **`orchestrator.headless_checks` je predvolene zapnuté** (§5.2): P2 aj snapshot sú postavené. Čo headless nevezme (pohnutý checkout pri teste, príkaz so shell syntaxou, host mimo grantu), ide ako doteraz session cestou.
+- **Nestavalo sa:** PR na líniu ako pravidlo Fleetu (ostáva pokyn v briefe vedúceho) a definície subagentov v katalógu (pokyn v prompte stačí; definície by pridali katalógovú synchronizáciu na každý host).
+
 ## 4. Paralelizmus a integrácia
 
 ### 4.1 Sloty
@@ -271,7 +280,7 @@ Každá fáza sa dá vydať samostatne a každá končí meraním proti L0.
 | **L1 Rýchle výhry** | pokyny pre subagentov v `run_prompt` (§5.1); plánovač s read-only nástrojmi za nastavením `orchestrator.planner_reads` (§5.4); pravidlo P7 v prompte plánovača | opt-in nastavenie, text promptu | S–M | menej retry na úlohu, menej integračných úloh na nových misiách |
 | **L2 Línie v dátach** (postavené) | migrácia (§2.2), `lane` pri importe a v `create_item`, presun úlohy medzi líniami (`work_link { mission_item, lane }`), Graph view kreslí línie z `lane_id`; verdikty, izolačná matica, `REGEN_DOCS`, telefón len čítanie | žiadna zmena behu | M | misia sa dá naplánovať po líniách, nič sa nespúšťa inak |
 | **L3 Vedúca session** (postavené) | `policy.execution = lane`: štart línie, podávanie úloh do session (§3.2), `start_head`/`end_head` a evidencia (§3.3), retry v session, štafeta (§3.5), pád a limit (§3.6) | opt-in na misii | L | jedna skutočná misia v jednom repe dokončená v režime `lane` bez ručného zásahu mimo brán |
-| **L4 Overenie v línii** | review nad snapshotom (§3.7), test v checkoute línie a `lane_test_at`, PR na líniu (§3.8), `headless_checks` predvolene zapnuté (§5.2), subagent definície v katalógu (§3.4) | opt-in na misii, `headless_checks` globálne | M | `done_when` overené bez session ciest pre review |
+| **L4 Overenie v línii** (postavené) | review nad snapshotom (§3.7), test v checkoute línie a `lane_test_at`, PR na líniu (§3.8), `headless_checks` predvolene zapnuté (§5.2), subagent definície v katalógu (§3.4) | opt-in na misii, `headless_checks` globálne | M | `done_when` overené bez session ciest pre review |
 | **L5 `touches` a plánovanie línií** | `touches_json`, pravidlo prekrytia pre `item` aj `lane` (§4.1, §5.4), plánovač priraďuje línie; integrácia len medzi líniami (§4.2) | platí v oboch režimoch | M | v misii s dvoma líniami v jednom repe nevznikne konflikt, ktorý `touches` mohli predpovedať |
 | **L6 Porovnanie a prepnutie** | A/B: ten istý typ misie v `item` a `lane`, porovnanie metrík z L0; build cache experiment (§5.3) | rozhodnutie vlastníka | S | vlastník rozhodne o predvolenom režime podľa čísel |
 

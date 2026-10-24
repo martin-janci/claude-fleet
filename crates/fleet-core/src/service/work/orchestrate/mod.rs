@@ -225,7 +225,7 @@ fn steps_for(s: &Store, m: &MissionRow, a: &Autonomy) -> Result<Vec<Step>, IpcEr
         .iter()
         .flat_map(|l| l.item_ids.iter().map(move |i| (*i, l.id)))
         .collect();
-    let busy = lanes::busy_lanes(s, m, &lanes, &attempts)?;
+    let busy = lanes::busy_lanes(s, m, &lanes, &attempts, &lanes::awaiting_test(&graph))?;
     Ok(lanes::gate(steps, &lane_of, &busy))
 }
 

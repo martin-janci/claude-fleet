@@ -379,7 +379,8 @@ pub const ORCHESTRATOR_ENABLED: &str = "orchestrator.enabled";
 pub const ORCHESTRATOR_MAX_LEVEL: &str = "orchestrator.max_level";
 /// F3: a mission's review and test runs as one headless `claude -p` run in
 /// the implementer's checkout (read-only tools, the test commands only)
-/// instead of an interactive session. Off by default.
+/// instead of an interactive session. On by default since lanes L4 (a
+/// lane task's review runs on a snapshot of its commit).
 pub const ORCHESTRATOR_HEADLESS_CHECKS: &str = "orchestrator.headless_checks";
 /// The model [`ORCHESTRATOR_HEADLESS_CHECKS`] runs (one of [`SUMMARY_MODELS`]).
 pub const ORCHESTRATOR_HEADLESS_MODEL: &str = "orchestrator.headless_model";
@@ -1018,7 +1019,7 @@ pub const SPECS: &[Spec] = &[
     .unit(Unit::Count),
     Spec::new(
         ORCHESTRATOR_HEADLESS_CHECKS,
-        "false",
+        "true",
         Kind::Bool,
         "Headless reviews and tests",
         "Run a mission's review and its test commands as one Claude run in the implementer's checkout, with read-only tools and only those commands, instead of opening a session for each. Falls back to a session when the checkout moved or a command is not a plain one.",

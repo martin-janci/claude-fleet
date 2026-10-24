@@ -711,3 +711,30 @@ fn a_person_puts_a_task_in_a_lane() {
     root.lane = Some("x".into());
     assert!(item(&root, &st, &me).is_err());
 }
+
+/// Lanes design L4: a lane whose every task is done reads as done.
+#[test]
+fn a_lane_whose_tasks_are_all_done_is_done() {
+    let st = store();
+    let (ana, _) = people(&st);
+    let me = person(&st, None, ana);
+    let m = new_mission(&st, &me, None);
+    let task = lock(&st)
+        .unwrap()
+        .create_local_work_item(None, "cards")
+        .unwrap()
+        .id;
+    let mut args = by_id("mission_item", m.id);
+    args.item_id = Some(task);
+    args.lane = Some("backend".into());
+    item(&args, &st, &me).unwrap();
+    assert_eq!(
+        mission(&st, &me, m.id, None).unwrap().lanes[0].state,
+        "idle"
+    );
+    lock(&st).unwrap().set_item_status(task, "done").unwrap();
+    assert_eq!(
+        mission(&st, &me, m.id, None).unwrap().lanes[0].state,
+        "done"
+    );
+}

@@ -1081,8 +1081,13 @@ hands it to the live lead as a new task typed at its idle prompt, and starts
 a fresh lead in the same checkout after `policy.lane_relay_after` tasks (4),
 on a task's third try on one lead, or when the lead died. Each such task
 records the commit it began on (`tasks.start_head`, migration 208) and its
-evidence is its own commits only. Review on a snapshot, the test gate and a
-PR per lane are L4. A mission's worker is refused a person's
+evidence is its own commits only. Lanes L4: a lane task's headless review
+runs in a detached checkout of its commit (`git worktree add --detach`,
+removed after) and reads only its own diff, so its lead may already work on
+the next task; a lane waits while a task of it waits for or runs its test,
+which then runs in the lane's checkout; a lead also hands over once its
+context is 70% full; a lane whose tasks are all done reads as done.
+`orchestrator.headless_checks` is on by default since L4. A mission's worker is refused a person's
 step (`gh pr merge` / `ready`, a push to `main` / `master`, a tracker CLI)
 by fleet's `PreToolUse(Bash)` guard (`orchestrate/guard.rs`): a shell
 prefilter that asks the hub only about those commands and lets the command
@@ -1091,7 +1096,7 @@ run when the hub does not answer. Hosts get it on re-provisioning
 In the New layout, Jev K3 (off) proposes a stuck mission's outcome and next
 step, and Control shows a "Sent to a mission" receipt for what the operator
 handed over (`control_handoffs`, migration 140, redesign 9.3).
-Built but OFF by default: `orchestrator.headless_checks` runs a member's
+On by default since lanes L4 (was off): `orchestrator.headless_checks` runs a member's
 `review` and `test` steps as one `claude -p` run in the implementer's
 finished checkout (`orchestrate/checks.rs`, F3) instead of a session of
 their own: a review gets Read/Grep/Glob and the diff, a test also exactly

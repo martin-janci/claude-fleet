@@ -52,13 +52,17 @@ fn a_busy_lane_takes_none_and_a_retry_counts_as_its_run() {
 
 #[test]
 fn a_lead_hands_over_after_its_share_or_a_second_failure_here() {
-    assert!(!needs_relay(3, 0, 4));
-    assert!(needs_relay(4, 0, 4), "its share of tasks");
+    assert!(!needs_relay(3, 0, 4, None));
+    assert!(needs_relay(4, 0, 4, None), "its share of tasks");
     assert!(
-        !needs_relay(1, 1, 4),
+        !needs_relay(1, 1, 4, Some(40.0)),
         "the first retry stays in its context"
     );
-    assert!(needs_relay(1, 2, 4), "the next gets fresh eyes");
+    assert!(needs_relay(1, 2, 4, None), "the next gets fresh eyes");
+    assert!(
+        needs_relay(1, 0, 4, Some(72.0)),
+        "a context that is filling up"
+    );
 }
 
 fn mission_row() -> MissionRow {
@@ -125,16 +129,35 @@ fn a_lane_is_busy_while_one_of_its_tasks_runs() {
         .unwrap()
     };
     let mut attempts = HashMap::from([(10, vec![task(1, 10, "implement", "done")])]);
-    assert!(busy_lanes(&s, &m, std::slice::from_ref(&lane), &attempts)
-        .unwrap()
-        .is_empty());
+    assert!(busy_lanes(
+        &s,
+        &m,
+        std::slice::from_ref(&lane),
+        &attempts,
+        &HashSet::new()
+    )
+    .unwrap()
+    .is_empty());
     attempts.insert(11, vec![task(2, 11, "review", "running")]);
-    assert!(busy_lanes(&s, &m, std::slice::from_ref(&lane), &attempts)
-        .unwrap()
-        .is_empty());
+    assert!(busy_lanes(
+        &s,
+        &m,
+        std::slice::from_ref(&lane),
+        &attempts,
+        &HashSet::new()
+    )
+    .unwrap()
+    .is_empty());
     attempts.insert(11, vec![task(3, 11, "implement", "running")]);
     assert_eq!(
-        busy_lanes(&s, &m, std::slice::from_ref(&lane), &attempts).unwrap(),
+        busy_lanes(
+            &s,
+            &m,
+            std::slice::from_ref(&lane),
+            &attempts,
+            &HashSet::new()
+        )
+        .unwrap(),
         HashSet::from([1])
     );
     // A lead id whose row is someone else's session is no lead.
@@ -146,4 +169,39 @@ fn a_lane_is_busy_while_one_of_its_tasks_runs() {
         ..lane
     };
     assert_eq!(live_lead(&s, &m, &led).unwrap(), None);
+}
+
+/// Lanes design L4 (§3.7): a lane waits while a task of it waits for its
+/// test or runs one; a review beside it does not hold it.
+#[test]
+fn a_lane_waits_for_its_tasks_test() {
+    let s = Store::open_in_memory().unwrap();
+    let m = mission_row();
+    let lane: MissionLaneRow = serde_json::from_value(serde_json::json!({
+        "id": 1, "mission_id": 1, "name": "backend", "state": "idle",
+        "created_at": 0, "updated_at": 0, "item_ids": [10]
+    }))
+    .unwrap();
+    let lanes = std::slice::from_ref(&lane);
+    let none = HashMap::new();
+    assert_eq!(
+        busy_lanes(&s, &m, lanes, &none, &HashSet::from([10])).unwrap(),
+        HashSet::from([1])
+    );
+    let graph: crate::service::work::graph::MissionGraph =
+        serde_json::from_value(serde_json::json!({
+            "nodes": [
+                {"item_id": 10, "state": "verifying", "wave": 1,
+                 "verification": {"state": "pending", "checks": [
+                    {"line": "test:cargo test", "kind": "test", "state": "pending", "detail": ""},
+                    {"line": "review", "kind": "review", "state": "pass", "detail": ""}]}},
+                {"item_id": 11, "state": "verifying", "wave": 1,
+                 "verification": {"state": "pending", "checks": [
+                    {"line": "review", "kind": "review", "state": "pending", "detail": ""}]}},
+                {"item_id": 12, "state": "ready", "wave": 1}
+            ],
+            "waves": 1
+        }))
+        .unwrap();
+    assert_eq!(awaiting_test(&graph), HashSet::from([10]));
 }

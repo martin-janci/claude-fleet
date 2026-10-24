@@ -64,7 +64,12 @@ pub struct Checkout {
     /// The commit the implementation finished on.
     pub head: String,
     /// What its branch was compared against, when evidence recorded it.
+    /// For a lane's task, the commit it began on (lanes design L4).
     pub merge_base: Option<String>,
+    /// A lane's task (lanes design §3.7, L4): its lead may already be on
+    /// the next task, so a review runs in a detached checkout of `head`
+    /// made for the run and removed after it, not in the lane's own.
+    pub snapshot: bool,
 }
 
 fn is_sha(s: &str) -> bool {
@@ -83,11 +88,13 @@ pub fn implementer_checkout(s: &Store, item_id: i64) -> Option<Checkout> {
     let head = ev.head.clone().filter(|h| is_sha(h))?;
     let w = s.get_session_by_id(t.worker_session_id?).ok()??;
     let wt = s.get_worktree_row(w.worktree_id?).ok()??;
+    let start = s.task_start_head(t.id).ok().flatten().filter(|h| is_sha(h));
     Some(Checkout {
         host: w.host_alias,
         path: wt.path,
         head,
-        merge_base: ev.merge_base.clone().filter(|b| is_sha(b)),
+        snapshot: start.is_some(),
+        merge_base: start.or_else(|| ev.merge_base.clone().filter(|b| is_sha(b))),
     })
 }
 
@@ -169,6 +176,45 @@ pub fn check_prompt(
     p
 }
 
+/// Whether `role` on `at` runs in a snapshot of `head`: a review of a
+/// lane's task. A test runs in the lane's checkout, which the lane holds
+/// still until the test is in (lanes design §3.7).
+fn in_snapshot(role: &str, at: &Checkout) -> bool {
+    at.snapshot && role == "review"
+}
+
+/// PURE: the checkout's preflight lines: in the directory, at `head`, clean,
+/// `claude` there (for a snapshot: the commit is there to check out). Each
+/// failure prints its verdict and stops the script.
+fn preflight_for(role: &str, at: &Checkout) -> String {
+    if in_snapshot(role, at) {
+        return format!(
+            "cd -- {path} 2>/dev/null || {{ echo {TAG}nodir; exit 0; }}; \
+             git cat-file -e {head}^{{commit}} 2>/dev/null || {{ echo {TAG}moved; exit 0; }}; \
+             {noclaude}",
+            path = quote(&at.path),
+            head = quote(&at.head),
+            noclaude = headless::default_agent().missing_check(TAG),
+        );
+    }
+    preflight(at)
+}
+
+/// PURE: the lines that move a snapshot run into a detached checkout of
+/// `head` beside the lane's (removed by the script's EXIT trap). Empty for
+/// a run in the checkout itself.
+fn enter_snapshot(role: &str, at: &Checkout) -> String {
+    if !in_snapshot(role, at) {
+        return String::new();
+    }
+    format!(
+        "snap=\"$(mktemp -d)\"; \
+         git worktree add --detach --quiet \"$snap\" {head} >/dev/null 2>&1 || {{ echo {TAG}nodir; exit 0; }}; \
+         cd -- \"$snap\" || exit 0; ",
+        head = quote(&at.head),
+    )
+}
+
 /// PURE: the checkout's preflight lines: in the directory, at `head`, clean,
 /// `claude` there. Each failure prints its verdict and stops the script.
 fn preflight(at: &Checkout) -> String {
@@ -184,8 +230,8 @@ fn preflight(at: &Checkout) -> String {
 }
 
 /// PURE: the preflight alone, answering `<tag>ok` when the run could start.
-pub fn preflight_script(at: &Checkout) -> String {
-    format!("{} echo {TAG}ok", preflight(at))
+pub fn preflight_script(role: &str, at: &Checkout) -> String {
+    format!("{} echo {TAG}ok", preflight_for(role, at))
 }
 
 /// PURE: the run: the preflight again, the prompt (and, for a review, the
@@ -237,10 +283,12 @@ pub fn check_script(
         REVIEW_SECS
     };
     Ok(format!(
-        "{pre} d=$(mktemp); trap 'rm -f \"$d\"' EXIT; \
-         {{ printf '%s\\n' {prompt};{extra} }} >\"$d\" 2>/dev/null || true; \
+        "{pre} repo=\"$(pwd)\"; snap=; d=$(mktemp); \
+         trap 'rm -f \"$d\"; [ -z \"$snap\" ] || git -C \"$repo\" worktree remove --force \"$snap\" >/dev/null 2>&1' EXIT; \
+         {enter}{{ printf '%s\\n' {prompt};{extra} }} >\"$d\" 2>/dev/null || true; \
          {env}{run}",
-        pre = preflight(at),
+        pre = preflight_for(role, at),
+        enter = enter_snapshot(role, at),
         prompt = quote(prompt),
         run = claude_print::run_capped(TAG, &claude, secs, OUTPUT_CAP, false),
     ))
@@ -316,7 +364,7 @@ pub async fn try_start(
     let pre = crate::ssh::run_shell_bounded(
         deps.ssh.as_ref(),
         &p.at.host,
-        &preflight_script(&p.at),
+        &preflight_script(role, &p.at),
         CONNECT,
         Duration::from_secs(60),
     )

@@ -269,7 +269,7 @@ export const SETTING_DEFAULTS: Record<SettingKey, string> = {
   'routines.pause_at_limit': 'true',
   'orchestrator.enabled': 'true',
   'orchestrator.max_level': '1',
-  'orchestrator.headless_checks': 'false',
+  'orchestrator.headless_checks': 'true',
   'orchestrator.headless_model': 'sonnet',
   'orchestrator.run_subagents': 'true',
   'orchestrator.planner_reads': 'false',

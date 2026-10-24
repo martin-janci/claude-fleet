@@ -275,6 +275,17 @@ pub fn mission(
         .into_iter()
         .map(|mut l| {
             l.item_ids.retain(|i| items.iter().any(|it| it.id == *i));
+            // A lane whose every task is done is done (lanes design L4),
+            // derived on read like the mission's phase.
+            let done = !l.item_ids.is_empty()
+                && l.item_ids.iter().all(|i| {
+                    items
+                        .iter()
+                        .any(|it| it.id == *i && it.status_category == "done")
+                });
+            if done && l.state != "held" {
+                l.state = "done".into();
+            }
             l
         })
         .collect();
