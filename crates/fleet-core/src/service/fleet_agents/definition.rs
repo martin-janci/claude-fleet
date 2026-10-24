@@ -425,6 +425,88 @@ pub struct Run {
     /// the inputs; default `main`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
+    /// The fingerprint of the error the answer names, and what fleet knows
+    /// of it (`fingerprints.rs`): added to the answer before the actions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<FingerprintSpec>,
+}
+
+/// `run.fingerprint`: the support agent's fingerprint of an error,
+/// `sha256(class | normalised message | first 5 app frames)`, kept in a
+/// fleet store with how often it was seen and the bug filed for it. Its
+/// findings join the answer as [`FINGERPRINT_FIELDS`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FingerprintSpec {
+    /// The fleet store role that keeps the fingerprints.
+    pub store: String,
+    /// The exception class (a template over the answer); empty: no
+    /// fingerprint this run.
+    pub class: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stack: Option<String>,
+    /// The affected component (a template over the answer): an open bug's
+    /// summary naming it scores 30 of the 100.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub component: Option<String>,
+    /// The frames that are the application's contain this (a template over
+    /// the inputs); empty: every `at …` line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_frame_prefix: Option<String>,
+    /// A bug filed for the fingerprint counts while it was seen this
+    /// recently (`knownBug`); 0 is always.
+    #[serde(default = "default_incident_window")]
+    pub window_mins: i64,
+    /// Search the tracker's open bugs for one like it (Jira).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bugs: Option<BugSearch>,
+}
+
+fn default_incident_window() -> i64 {
+    120
+}
+
+/// `run.fingerprint.bugs`: where open bugs are looked for.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BugSearch {
+    /// The tracker (a template over the inputs); default the trigger's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tracker: Option<String>,
+    /// The project (a template over the inputs).
+    pub project: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_type: Option<String>,
+}
+
+/// What `run.fingerprint` adds to the answer, with its JSON type:
+/// `fingerprint` (hex), `seenCount` (this run included), `knownBug` (the bug
+/// filed for it, seen inside the window), `similarBug` (an open bug scoring
+/// at least 80), `relatedBug` (at least 60).
+pub const FINGERPRINT_FIELDS: [(&str, &str); 5] = [
+    ("fingerprint", "string"),
+    ("seenCount", "integer"),
+    ("knownBug", "string"),
+    ("similarBug", "string"),
+    ("relatedBug", "string"),
+];
+
+/// PURE: the answer's schema as the actions see it: `output_schema`, and
+/// [`FINGERPRINT_FIELDS`] when the run has a fingerprint.
+pub fn actions_schema(r: &Run) -> Value {
+    let mut schema = r.output_schema.clone();
+    if r.fingerprint.is_some() {
+        if let Some(props) = schema.get_mut("properties").and_then(Value::as_object_mut) {
+            for (name, ty) in FINGERPRINT_FIELDS {
+                props
+                    .entry(name.to_string())
+                    .or_insert_with(|| serde_json::json!({ "type": ty }));
+            }
+        }
+    }
+    schema
 }
 
 fn is_zero(n: &i64) -> bool {
@@ -445,6 +527,7 @@ impl Default for Run {
             diagnostics: false,
             cooldown_secs: 0,
             branch: None,
+            fingerprint: None,
         }
     }
 }
@@ -1236,22 +1319,82 @@ pub fn problems(d: &Definition, templates: &BTreeMap<String, String>) -> Vec<Str
         }
     }
 
+    if let Some(f) = &r.fingerprint {
+        let at = "run › fingerprint";
+        match role(&f.store) {
+            None => out.push(format!("{at}: store {} is not a role", f.store)),
+            Some(s) if s.kind != StoreKind::Fleet => {
+                out.push(format!("{at}: store {} is not a fleet store", f.store))
+            }
+            _ => {}
+        }
+        let answered = Scope {
+            answer: schema_ok.then_some(&r.output_schema),
+            ..before_run
+        };
+        for (k, v) in [
+            ("class", Some(&f.class)),
+            ("message", f.message.as_ref()),
+            ("stack", f.stack.as_ref()),
+            ("component", f.component.as_ref()),
+        ] {
+            if let Some(v) = v {
+                check_template(v, &format!("{at} › {k}"), answered, &mut out);
+            }
+        }
+        if let Some(p) = &f.app_frame_prefix {
+            check_template(
+                p,
+                &format!("{at} › app_frame_prefix"),
+                inputs_only,
+                &mut out,
+            );
+        }
+        if !(0..=10_080).contains(&f.window_mins) {
+            out.push(format!("{at}: window_mins is 0-10080"));
+        }
+        if let Some(b) = &f.bugs {
+            for (k, v) in [
+                ("tracker", b.tracker.as_ref()),
+                ("project", Some(&b.project)),
+                ("issue_type", b.issue_type.as_ref()),
+            ] {
+                if let Some(v) = v {
+                    check_template(v, &format!("{at} › bugs › {k}"), inputs_only, &mut out);
+                }
+            }
+            let has_tracker = b.tracker.is_some()
+                || t.tracker.is_some()
+                || d.inputs.iter().any(|i| i.kind == InputType::Tracker);
+            if !has_tracker {
+                out.push(format!(
+                    "{at} › bugs: name the tracker (the trigger has none)"
+                ));
+            }
+        }
+        let own = answer::fields(&r.output_schema);
+        for (name, _) in FINGERPRINT_FIELDS {
+            if own.iter().any(|f| f == name) {
+                out.push(format!(
+                    "{at}: output_schema has {name}, which the fingerprint adds"
+                ));
+            }
+        }
+    }
+
     // ── actions ──
     if d.actions.len() > MAX_ACTIONS {
         out.push(format!("actions: at most {MAX_ACTIONS}"));
     }
+    let schema = actions_schema(r);
     let after_run = Scope {
         inputs: &d.inputs,
         subject: Some(subject_fields),
-        answer: if schema_ok {
-            Some(&r.output_schema)
-        } else {
-            None
-        },
+        answer: if schema_ok { Some(&schema) } else { None },
         now: true,
         item: None,
     };
-    let answer_fields = answer::fields(&r.output_schema);
+    let answer_fields = answer::fields(&schema);
     let mut ids: Vec<&str> = Vec::new();
     for a in &d.actions {
         let at = format!("actions › {}", a.id);

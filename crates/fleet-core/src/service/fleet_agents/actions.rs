@@ -978,6 +978,39 @@ fn refuse(what: impl std::fmt::Display) -> ActionResult {
 }
 
 impl FleetExecutor {
+    /// A bug a `tracker_issue` filed, kept against the fingerprint its
+    /// payload carries (`fingerprint: "{{answer.fingerprint}}"`): the next
+    /// run of the same error inside the window gets it as `knownBug`.
+    fn file_against_fingerprint(
+        &self,
+        rule: &AgentRuleRow,
+        inst: &Instance,
+        raw: &Value,
+        bug: Option<String>,
+        now: i64,
+    ) {
+        let (Some(spec), Some(bug)) = (inst.loaded().definition.run.fingerprint.as_ref(), bug)
+        else {
+            return;
+        };
+        let Some(fp) = raw
+            .get("fingerprint")
+            .and_then(Value::as_str)
+            .filter(|f| super::fingerprints::is_fingerprint(f))
+        else {
+            return;
+        };
+        let ns = super::bindings::namespaces(rule.id, &inst.bindings);
+        let Some(namespace) = ns.get(&spec.store) else {
+            return;
+        };
+        if let Ok(s) = self.store.lock() {
+            if let Err(e) = super::fingerprints::set_bug(&s, namespace, fp, &bug, now) {
+                tracing::warn!(rule_id = rule.id, error = %e, "[agents] fleet: file the bug");
+            }
+        }
+    }
+
     /// Send a `pr_review`: only while the PR is open at the head the run
     /// read, its findings placed on the diff of that head, an APPROVE or
     /// REQUEST_CHANGES GitHub refuses on one's own PR sent as COMMENT.
@@ -1167,7 +1200,16 @@ impl FleetExecutor {
                     )
                     .await
                     {
-                        Ok(_) => ActionResult::Executed,
+                        Ok(o) => {
+                            self.file_against_fingerprint(
+                                rule,
+                                inst,
+                                &raw,
+                                o.remote_id.or(o.key),
+                                now,
+                            );
+                            ActionResult::Executed
+                        }
                         Err(e) => ActionResult::Failed(e),
                     };
                 }
@@ -1187,10 +1229,12 @@ impl FleetExecutor {
                     Ok(o) => o,
                     Err(e) => return ActionResult::Failed(e),
                 };
+                let new_key = created.remote_id.or(created.key);
+                self.file_against_fingerprint(rule, inst, &raw, new_key.clone(), now);
                 let Some(l) = i.link else {
                     return ActionResult::Executed;
                 };
-                let Some(new_key) = created.remote_id.or(created.key) else {
+                let Some(new_key) = new_key else {
                     return ActionResult::Failed(
                         "the issue was created, its key is unknown: not linked".into(),
                     );

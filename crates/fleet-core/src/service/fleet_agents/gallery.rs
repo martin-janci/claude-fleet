@@ -29,6 +29,11 @@ pub struct Seed {
 /// the hub image's build test finds the embeds by their literal paths.
 pub const SEEDS: &[Seed] = &[
     Seed {
+        name: "support",
+        asset: include_str!("../../../../../catalog-seed/fleet-agents/support/asset.yaml"),
+        skill: include_str!("../../../../../catalog-seed/fleet-agents/support/skill.md"),
+    },
+    Seed {
         name: "issue-triage",
         asset: include_str!("../../../../../catalog-seed/fleet-agents/issue-triage/asset.yaml"),
         skill: include_str!("../../../../../catalog-seed/fleet-agents/issue-triage/skill.md"),
