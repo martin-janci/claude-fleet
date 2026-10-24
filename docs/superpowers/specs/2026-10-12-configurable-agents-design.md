@@ -497,9 +497,21 @@ The gaps, in the order they close (each its own PR):
    high-confidence bug. Not restated yet: the assignment trigger and the
    log scanner (each a definition of its own, one trigger per definition)
    and the KB write-back (a git commit, not an MCP call).
-3. **Reviewer inputs**: a worktree at the PR head, the filtered diff in the
-   prompt (exclude paths, `.claudeignore`, the size gate), `skip_wip` and
-   `debounce_secs`, `head_sha` on a `github_comments` subject.
+3. **Reviewer inputs** (built 2026-10-25): `run.workspace: pr_head` (a
+   worktree of the project at the job's pull request head, through the
+   reviewer's `prepare`; the head moving on skips the run); `run.diff:
+   {exclude_paths, respect_claudeignore (default on), max_lines (default
+   3000, at most 20000)}`, the diff filtered with the reviewer's
+   `exclude_patterns` / `filter_diff` and put in the prompt as data, a
+   diff left empty or too long skipping the run (`empty_diff`,
+   `diff_too_large`); `github_prs`'s `skip_wip` (the reviewer's `is_wip`)
+   and `debounce_secs` (0-3600: a head's job is due that long after it is
+   first seen). A `github_prs` job whose PR is no longer open at its head
+   is skipped when it runs, so a burst of pushes is read once, at its last
+   head. A `github_comments` comment on an open pull request carries its
+   `head_sha`, `base_ref` and `head_ref`, so `/review` in a comment reads
+   and reviews that head (a comment's job is not skipped when the head
+   moves: it asks whatever the head).
 4. **Reviewer answer**: the confidence filter, `previous` findings and
    `adjust_verdict`, label rules, a `pr_description` action.
 5. **Reviewer state**: re-review of a dismissed review, the test debate;

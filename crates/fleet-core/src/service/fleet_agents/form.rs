@@ -294,10 +294,17 @@ pub fn grant_form(loaded: &Loaded, ctx: &FormContext, rule: Option<&AgentRuleRow
         ),
         ..field(F_HOST, FieldType::Select, "Host")
     })];
-    if d.run.workspace == Workspace::Project {
+    if d.run.workspace.needs_project() {
         where_.push(with_value(FormField {
             required: true,
-            help: Some("The checkout its runs read (at main).".into()),
+            help: Some(
+                if d.run.workspace == Workspace::PrHead {
+                    "The checkout its runs read (at the pull request's head)."
+                } else {
+                    "The checkout its runs read (at main)."
+                }
+                .into(),
+            ),
             options: Some(
                 ctx.projects
                     .iter()
