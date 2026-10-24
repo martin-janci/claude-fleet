@@ -2333,3 +2333,127 @@ async fn a_definition_may_let_an_unattended_review_approve() {
         .iter()
         .any(|p| p.contains("branch is for a project workspace")));
 }
+
+/// The gallery's support definition, cooldown off, at `level`.
+fn support_fx(level: &str) -> Fx {
+    let seed = super::gallery::SEEDS
+        .iter()
+        .find(|s| s.name == "support")
+        .unwrap();
+    let mut l = seed.asset().unwrap().fleet_agent().unwrap();
+    l.definition.run.cooldown_secs = 0;
+    fx(
+        l,
+        json!({ "jira_tracker": "3", "project": "L2S", "bug_project": "BUG",
+            "phrases": "Tech help!", "app_frame_prefix": "com.acme." }),
+        json!([
+            { "role": "logs", "server": "graylog", "name": "logs-prod",
+              "env": { "GRAYLOG_API_TOKEN": "${GRAYLOG_PROD_TOKEN}" } },
+            { "role": "kb", "server": "kb" },
+            { "role": "memory", "namespace": "rule" }
+        ]),
+        true,
+    )
+    .at(level)
+}
+
+/// Run one support job on L2S-7 with `key` and finish it; its result.
+async fn support_run(f: &Fx, key: &str) -> Value {
+    *f.world.base.answer.lock().unwrap() = Some(PrintOutcome::Answered {
+        text: json!({ "summary": "Gateway key expired", "rootCause": "The key", "confidence": "high",
+            "severity": "critical", "exceptionClass": "KeyExpiredException",
+            "errorMessage": "Gateway key expired", "affectedComponent": "payments",
+            "stackTrace": "KeyExpiredException\n\tat com.acme.pay.Gateway.charge(Gateway.java:42)" })
+        .to_string(),
+        cost_micros: 0,
+    });
+    let jobs = f.claim(&[crate::store::NewAgentJob {
+        rule_id: f.rule.id,
+        agent: AGENT.into(),
+        subject: "tracker:3:L2S-7".into(),
+        trigger: "comment".into(),
+        dedup_key: key.into(),
+        not_before: 0,
+    }]);
+    let out = f.runner().run(&jobs[0], Some(&f.rule)).await;
+    let RunOutcome::Done { result, .. } = out else {
+        panic!("{out:?}")
+    };
+    f.store
+        .lock()
+        .unwrap()
+        .finish_agent_job(
+            jobs[0].id,
+            &crate::store::AgentJobEnd::Final {
+                state: "done",
+                result: result.clone(),
+                error_kind: None,
+                error: None,
+            },
+            0,
+            crate::store::now_unix(),
+        )
+        .unwrap();
+    serde_json::from_str(&result.unwrap()).unwrap()
+}
+
+/// The support agent as a definition: an open bug like the error is linked
+/// (a person approves); with none, a high-confidence bug is filed, kept
+/// against the fingerprint, and the next run of the same error links to it.
+#[tokio::test]
+async fn the_support_definition_fingerprints_links_and_files_once() {
+    let f = support_fx("act");
+    let ticket = thread(&[("1", "Tech help!", 1500)]);
+    let mut open_bug = thread(&[]);
+    open_bug.key = "BUG-2".into();
+    open_bug.summary = "[payments] KeyExpiredException: Gateway key expired".into();
+    *f.world.base.threads.lock().unwrap() = vec![ticket.clone(), open_bug];
+
+    let r = support_run(&f, "c1").await;
+    let fp = r["answer"]["fingerprint"].as_str().unwrap().to_string();
+    assert!(super::fingerprints::is_fingerprint(&fp), "{r}");
+    assert_eq!(r["answer"]["seenCount"], 1);
+    assert_eq!(r["answer"]["similarBug"], "BUG-2");
+    let jql = f.world.base.jql.lock().unwrap().clone();
+    assert!(
+        jql.iter()
+            .any(|q| q.starts_with("3 project = \"BUG\" AND issuetype = \"Bug\"")),
+        "{jql:?}"
+    );
+    assert_eq!(
+        states(&r),
+        [
+            ("comment".to_string(), "approved".to_string()),
+            ("similar".to_string(), "pending".to_string())
+        ],
+        "a similar bug is linked by a person, and no new bug is filed"
+    );
+
+    // No open bug like it: a high-confidence bug is filed, a person approving.
+    *f.world.base.threads.lock().unwrap() = vec![ticket.clone()];
+    let r = support_run(&f, "c2").await;
+    assert_eq!(r["answer"]["seenCount"], 2);
+    assert!(r["answer"].get("similarBug").is_none());
+    let bug = f
+        .actions()
+        .into_iter()
+        .find(|a| a.kind == "tracker_issue")
+        .unwrap();
+    assert!(
+        bug.payload.contains(&fp),
+        "the payload carries the fingerprint"
+    );
+    assert_eq!(f.executor().execute(&bug).await, ActionResult::Executed);
+
+    // The same error again: the bug filed for it, inside the window.
+    let r = support_run(&f, "c3").await;
+    assert_eq!(r["answer"]["knownBug"], "BUG-9");
+    assert_eq!(r["answer"]["seenCount"], 3);
+    assert_eq!(
+        states(&r),
+        [
+            ("comment".to_string(), "approved".to_string()),
+            ("known".to_string(), "approved".to_string())
+        ]
+    );
+}
