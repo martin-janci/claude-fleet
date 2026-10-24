@@ -1059,7 +1059,20 @@ fn write_reachable_host(
         let agent_status_typed = agent_status
             .as_deref()
             .and_then(|s| s.parse::<crate::service::pane_intel::ClaudeStatus>().ok());
-        let pane_status = pane.and_then(|p| p.derived_status);
+        // The Stop-hooks spinner reads Working on screen, but the turn is
+        // over and fleet's Stop hook may already have stored `idle` while a
+        // slower hook keeps the spinner up. A pass that starts after that
+        // hook is not covered by the upsert's in-flight guard, so the pane's
+        // strong `Working` would write `working` back, and on
+        // cadence-skipped passes an idle pane would not clear it again.
+        // Such a pane says nothing about the status.
+        let pane_status = pane.and_then(|p| p.derived_status).filter(|s| {
+            *s != crate::service::pane_intel::ClaudeStatus::Working
+                || !probe
+                    .pane_tails
+                    .get(&sess.name)
+                    .is_some_and(|t| crate::service::pane_intel::stop_hooks_running(t))
+        });
         // The veto is armed by the attention stamp OR by the demotion's own
         // memory (`stale_demoted_at`): an attach or
         // `reconcile.stale_working_ttl_secs` ends the reason, not the
