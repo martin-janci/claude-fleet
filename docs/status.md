@@ -1292,7 +1292,10 @@ unless `limits.auto_approve`).
 Restating the built-in agents is under way, the built-in ones staying until
 the definitions have run for real (spec *Migration*): built so far
 `run.cooldown_secs`, `run.branch`, `mcp_scan`'s `window_mins` / `max_jobs`
-and `limits.auto_approve`.
+and `limits.auto_approve`; `run.fingerprint` (the support agent's error
+fingerprint counted in a fleet store, `knownBug` / `similarBug` /
+`relatedBug` added to the answer, a filed bug kept against it), and the
+gallery's `support` definition.
 
 The self debug agent (thread "Self debug agent", 2026-10-17), the hub and
 desktop parts: a fleet agent definition that sets `run.diagnostics` gets

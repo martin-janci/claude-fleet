@@ -6325,6 +6325,7 @@ fn one_full_row() -> serde_json::Value {
     // With a pin, a view, an origin and a form draft, for the same reason:
     // each is skipped when absent (review wave 24, w24-1).
     row.pinned_at = Some(11);
+    row.prompt_suggestion = Some("run the tests".into());
     row.last_viewed_at = Some(12);
     row.origin = Some("operator".to_string());
     row.origin_ref = Some("9".to_string());
@@ -6381,6 +6382,7 @@ fn the_phone_view_is_exactly_the_columns_a_pager_reads() {
             "pr_evidence",
             "pr_url",
             "project_id",
+            "prompt_suggestion",
             "safe_kill_state",
             "started_at",
             "status",

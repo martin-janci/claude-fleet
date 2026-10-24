@@ -893,3 +893,45 @@ fn the_writes_line_tells_of_an_unattended_approve() {
         "a review a person sends"
     );
 }
+
+/// `run.fingerprint` keeps its records in a fleet store, reads the answer,
+/// and adds fields the answer's own schema must not have.
+#[test]
+fn a_fingerprint_names_a_fleet_store_and_adds_its_own_fields() {
+    let seed = super::gallery::SEEDS
+        .iter()
+        .find(|s| s.name == "support")
+        .unwrap();
+    let base: Value = serde_yaml::from_str(seed.asset).unwrap();
+    let check = |edit: &dyn Fn(&mut Value)| {
+        let mut v = base.clone();
+        for k in ["kind", "name", "description"] {
+            v.as_object_mut().unwrap().remove(k);
+        }
+        edit(&mut v);
+        let d = definition::parse_value(&v).unwrap();
+        let (templates, _) = split_skill(seed.skill).unwrap();
+        problems(&d, &templates).join("\n")
+    };
+    assert_eq!(
+        check(&|_| {}),
+        "",
+        "the gallery's support definition is valid"
+    );
+    assert!(
+        check(&|v| v["run"]["fingerprint"]["store"] = json!("logs")).contains("not a fleet store")
+    );
+    assert!(check(
+        &|v| v["run"]["output_schema"]["properties"]["knownBug"] = json!({ "type": "string" })
+    )
+    .contains("which the fingerprint adds"));
+    assert!(
+        check(&|v| v["run"]["fingerprint"]["class"] = json!("{{answer.nope}}"))
+            .contains("no such field")
+    );
+    // Without a fingerprint, an action may not name its fields.
+    assert!(check(&|v| {
+        v["run"].as_object_mut().unwrap().remove("fingerprint");
+    })
+    .contains("knownBug"));
+}

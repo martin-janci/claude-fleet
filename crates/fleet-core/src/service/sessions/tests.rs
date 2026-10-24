@@ -601,6 +601,7 @@ fn row(
         last_viewed_at: None,
         turn_outcome: None,
         pinned_at: None,
+        prompt_suggestion: None,
         proposals: Vec::new(),
         pending_form: None,
         form_draft: None,

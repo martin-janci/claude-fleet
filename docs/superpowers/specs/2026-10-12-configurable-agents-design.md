@@ -474,11 +474,30 @@ The gaps, in the order they close (each its own PR):
    minutes, as the support scanner does) and `max_jobs` (1-10);
    `limits.auto_approve`. The `l2-support` example's `remember` now keys
    its record by the ticket, as its context lookup reads it.
-2. **Fingerprints**: a built-in `fingerprint` helper for `run.context`
-   (the support agent's `fingerprint.rs`: class, normalised message, app
-   frames), the candidate search and score, and recording an action's
-   result (a created bug's key) so incident aggregation works; then the
-   support agent as a gallery definition.
+2. **Fingerprints** (built 2026-10-24, `fleet_agents/fingerprints.rs`):
+   `run.fingerprint` names a fleet store and, as templates over the
+   answer, the error's `class`, `message`, `stack` and `component`, with
+   `app_frame_prefix` over the inputs, `window_mins` (default 120) and an
+   optional `bugs: {tracker?, project, issue_type?}`. It runs after the
+   answer is checked and before the actions are planned, not from
+   `run.context`: a comment ticket's error is known only once the model
+   has read the logs. The support agent's own `fingerprint` (sha256 of the
+   class, the message without numbers or ids, the first five app frames)
+   is counted in a record of kind `fingerprint`, and five fields join the
+   answer: `fingerprint`, `seenCount`, `knownBug` (the bug filed for it,
+   while it was seen inside the window), and, with `bugs` and no known bug,
+   `similarBug` / `relatedBug` (the open bug the support agent's JQL finds
+   whose summary scores at least 80 / 60 on class, component and message).
+   The validator adds the five to the schema the actions see and refuses
+   an `output_schema` that has them. A `tracker_issue` whose payload's
+   `fingerprint` is one (`fingerprint: "{{answer.fingerprint}}"`) keeps
+   the bug it filed against it, so the next run of the same error links to
+   it: incident aggregation. The gallery's `support` definition is the
+   support agent's comment trigger restated: ask, comment, link to the
+   known bug unattended, link to a similar one with a person, else file a
+   high-confidence bug. Not restated yet: the assignment trigger and the
+   log scanner (each a definition of its own, one trigger per definition)
+   and the KB write-back (a git commit, not an MCP call).
 3. **Reviewer inputs**: a worktree at the PR head, the filtered diff in the
    prompt (exclude paths, `.claudeignore`, the size gate), `skip_wip` and
    `debounce_secs`, `head_sha` on a `github_comments` subject.

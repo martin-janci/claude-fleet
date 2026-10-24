@@ -106,6 +106,8 @@ pub(crate) fn sample_session() -> SessionRow {
         turn_outcome: Some("finished".into()),
         // Some, so the golden pins the name the Pinned section reads.
         pinned_at: Some(1_700_000_200),
+        // Some, so the golden pins the name the suggestion chip reads.
+        prompt_suggestion: Some("run the tests".into()),
         // One, so the golden pins the proposal shape every row carries.
         proposals: vec![fleet_core::store::DecisionProposal {
             feature: "turn_outcome".into(),
@@ -1492,6 +1494,7 @@ fn a_session_rows_wire_names_are_these_exact_seventy_two() {
         "pr_url",
         "project_id",
         "prompt_submit_seq",
+        "prompt_suggestion",
         "proposals",
         "reviews_session_id",
         "row_version",
@@ -1525,7 +1528,7 @@ fn a_session_rows_wire_names_are_these_exact_seventy_two() {
         "worktree_key",
     ];
     let expected: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
-    assert_eq!(expected.len(), 73, "the list above lost or gained a line");
+    assert_eq!(expected.len(), 74, "the list above lost or gained a line");
     assert_eq!(wire_keys(&sample_session()), expected);
 }
 

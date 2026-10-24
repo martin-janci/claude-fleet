@@ -58,6 +58,7 @@ pub fn apply_hook(
         Some("SessionEnd") => apply_session_end_hook(store, payload, ctx),
         Some("StopFailure") => apply_stop_failure_hook(store, ssh, payload, ctx),
         Some("Notification") => apply_notification_hook(store, ssh, payload, ctx),
+        Some(PROMPT_SUGGESTION_EVENT) => apply_prompt_suggestion_hook(store, payload, ctx),
         // `EnterWorktree` is the real tool (the installed matcher).
         // `WorktreeCreate` is a hook EVENT that replaces git worktree
         // creation, not a tool — no PostToolUse ever carries it; it is still
@@ -88,6 +89,58 @@ pub fn apply_hook(
         }
         _ => Ok(()),
     }
+}
+
+/// The event fleet's Claude Code plugin (`plugins/fleet-prompt-suggestion`)
+/// posts to `/hook` when Claude Code shows its next-prompt suggestion. No
+/// settings hook fires it: Claude Code has no hook event for suggestions.
+pub const PROMPT_SUGGESTION_EVENT: &str = "PromptSuggestion";
+
+/// The longest suggestion stored, in chars. Claude Code's are a short line;
+/// anything longer is cut, never refused.
+pub const PROMPT_SUGGESTION_MAX: usize = 300;
+
+/// A suggestion as the row stores it: one line (control characters, line
+/// breaks included, become spaces; runs of whitespace collapse), trimmed and
+/// cut to [`PROMPT_SUGGESTION_MAX`] chars. `None` when nothing is left.
+pub fn clean_prompt_suggestion(text: &str) -> Option<String> {
+    let one_line = text
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect::<String>();
+    let words = one_line.split_whitespace().collect::<Vec<_>>().join(" ");
+    let cut: String = words.chars().take(PROMPT_SUGGESTION_MAX).collect();
+    let cut = cut.trim_end();
+    (!cut.is_empty()).then(|| cut.to_string())
+}
+
+/// The plugin's `PromptSuggestion` event: Claude Code shows `suggestion` dim
+/// in the empty prompt box of the conversation the payload names. Stored on
+/// that row while it is the row's current conversation, so every client can
+/// offer it; the next prompt (`UserPromptSubmit`) or the conversation
+/// starting over or ending clears it. Never rebinds a row.
+fn apply_prompt_suggestion_hook(
+    store: &Arc<Mutex<Store>>,
+    payload: &HookPayload,
+    ctx: &HookContext,
+) -> Result<(), IpcError> {
+    let Some(text) = payload
+        .suggestion
+        .as_deref()
+        .and_then(clean_prompt_suggestion)
+    else {
+        return Ok(());
+    };
+    let s = lock(store)?;
+    s.atomically(|s| {
+        let Some((row, Binding::Current)) =
+            resolve_and_rebind(s, payload, ctx, StartSource::Unknown)?
+        else {
+            return Ok(());
+        };
+        s.set_prompt_suggestion(row.id, Some(text.as_str()))?;
+        Ok(())
+    })
 }
 
 /// Accept a hook-reported `transcript_path` only when it is an absolute,
@@ -939,6 +992,7 @@ fn apply_session_start_hook(
         // A stale id is the row's own earlier conversation, not a new start.
         if binding != Binding::Stale {
             s.clear_ended_turn_state(row.id)?;
+            s.set_prompt_suggestion(row.id, None)?;
         }
         if binding == Binding::Current {
             // A turn already began on this conversation (its
@@ -1375,6 +1429,7 @@ fn apply_session_end_hook(
             return Ok(());
         }
         remember_transcript_path(s, row.id, payload, session_id)?;
+        s.set_prompt_suggestion(row.id, None)?;
         if matches!(reason, "clear" | "resume") {
             s.mark_awaiting_rebind(row.id)?;
             best_effort_event_for(
@@ -4877,5 +4932,100 @@ mod tests {
         let mut other_tool = bash("gh pr merge 3");
         other_tool.tool_name = Some("Read".into());
         assert_eq!(pre_tool_use_denial(&store, &other_tool, &c), None);
+    }
+    fn suggestion_payload(session_id: &str, text: &str) -> HookPayload {
+        HookPayload {
+            suggestion: Some(text.into()),
+            ..make_payload(PROMPT_SUGGESTION_EVENT, session_id)
+        }
+    }
+
+    fn suggestion_of(store: &Arc<Mutex<Store>>) -> Option<String> {
+        let s = store.lock().unwrap();
+        s.get_session("sess", "local")
+            .unwrap()
+            .unwrap()
+            .prompt_suggestion
+    }
+
+    /// The plugin's `PromptSuggestion` lands on the row of the conversation
+    /// it names, one clean line; the next prompt clears it.
+    #[test]
+    fn a_prompt_suggestion_is_stored_until_the_next_prompt() {
+        let store = make_store();
+        {
+            let s = store.lock().unwrap();
+            s.upsert_host("local").unwrap();
+            let id = s
+                .upsert_session("sess", "local", None, None, 0, 0, "running", None)
+                .unwrap();
+            s.set_claude_session_id(id, "uuid-1").unwrap();
+        }
+        let master = Caller::master();
+        apply_hook(
+            &store,
+            &make_ssh(),
+            &suggestion_payload("uuid-1", "  run the\ntests  "),
+            &ctx(&master, None),
+        )
+        .unwrap();
+        assert_eq!(suggestion_of(&store).as_deref(), Some("run the tests"));
+        // Another conversation's suggestion never lands on this row.
+        apply_hook(
+            &store,
+            &make_ssh(),
+            &suggestion_payload("uuid-other", "push it"),
+            &ctx(&master, None),
+        )
+        .unwrap();
+        assert_eq!(suggestion_of(&store).as_deref(), Some("run the tests"));
+        apply_hook(
+            &store,
+            &make_ssh(),
+            &make_payload("UserPromptSubmit", "uuid-1"),
+            &ctx(&master, None),
+        )
+        .unwrap();
+        assert_eq!(suggestion_of(&store), None, "the next prompt clears it");
+    }
+
+    /// The conversation ending takes its suggestion with it.
+    #[test]
+    fn session_end_clears_the_prompt_suggestion() {
+        let store = make_store();
+        {
+            let s = store.lock().unwrap();
+            s.upsert_host("local").unwrap();
+            let id = s
+                .upsert_session("sess", "local", None, None, 0, 0, "running", None)
+                .unwrap();
+            s.set_claude_session_id(id, "uuid-1").unwrap();
+            s.set_prompt_suggestion(id, Some("commit this")).unwrap();
+        }
+        apply_hook(
+            &store,
+            &make_ssh(),
+            &HookPayload {
+                reason: Some("prompt_input_exit".into()),
+                ..make_payload("SessionEnd", "uuid-1")
+            },
+            &ctx(&Caller::master(), None),
+        )
+        .unwrap();
+        assert_eq!(suggestion_of(&store), None);
+    }
+
+    #[test]
+    fn a_prompt_suggestion_is_one_short_line_or_nothing() {
+        assert_eq!(
+            clean_prompt_suggestion("\u{1b}[2mrun\t the tests\r\n").as_deref(),
+            Some("[2mrun the tests")
+        );
+        assert_eq!(clean_prompt_suggestion(" \n\t "), None);
+        let long = "a".repeat(PROMPT_SUGGESTION_MAX + 50);
+        assert_eq!(
+            clean_prompt_suggestion(&long).map(|t| t.chars().count()),
+            Some(PROMPT_SUGGESTION_MAX)
+        );
     }
 }

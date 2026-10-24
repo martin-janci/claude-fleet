@@ -767,6 +767,24 @@ impl Store {
         Ok(n > 0)
     }
 
+    /// Set the next prompt Claude Code proposes for the session, or clear it
+    /// with `None` (migration 206). Answers whether the row changed; a
+    /// change emits `session_updated`.
+    pub fn set_prompt_suggestion(
+        &self,
+        id: i64,
+        text: Option<&str>,
+    ) -> Result<bool, rusqlite::Error> {
+        let n = self.conn.execute(
+            "UPDATE sessions SET prompt_suggestion = ?1 WHERE id = ?2 AND prompt_suggestion IS NOT ?1",
+            rusqlite::params![text, id],
+        )?;
+        if n > 0 {
+            self.emit_session(id)?;
+        }
+        Ok(n > 0)
+    }
+
     /// Whether the session `tmux_name` on `host_alias` is pinned. A row that
     /// does not exist is not pinned.
     pub fn is_session_pinned(
@@ -1935,7 +1953,7 @@ impl Store {
                 "UPDATE sessions SET claude_status = 'working', idle_since = NULL, \
                      last_hook_at = ?2, prompt_submit_seq = prompt_submit_seq + 1, \
                      pending_input = NULL, stale_working_at = NULL, stale_demoted_at = NULL, \
-                     turn_outcome = NULL{END_COMPACTING} WHERE id = ?1"
+                     turn_outcome = NULL, prompt_suggestion = NULL{END_COMPACTING} WHERE id = ?1"
             ),
             rusqlite::params![row_id, now_unix()],
         )?;
