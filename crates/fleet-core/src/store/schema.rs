@@ -412,7 +412,7 @@ fn routine_runs_has_memory_read_at(conn: &Connection) -> rusqlite::Result<bool> 
     Ok(n > 0)
 }
 
-/// `already_applied` guard of migration 207: `tasks` already has its
+/// `already_applied` guard of migration 208: `tasks` already has its
 /// `start_head` column.
 fn tasks_has_start_head(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
@@ -423,7 +423,7 @@ fn tasks_has_start_head(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
-/// `already_applied` guard of migration 206: `work_items` already has its
+/// `already_applied` guard of migration 207: `work_items` already has its
 /// `lane_id` column.
 fn work_items_has_lane_id(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
@@ -764,6 +764,16 @@ fn sessions_has_turn_outcome(conn: &Connection) -> rusqlite::Result<bool> {
 fn sessions_has_pinned_at(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'pinned_at'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 206.
+fn sessions_has_prompt_suggestion(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'prompt_suggestion'",
         [],
         |r| r.get(0),
     )?;
@@ -2355,18 +2365,25 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/205_routine_memory_reads.sql"),
         already_applied: Some(routine_runs_has_memory_retry_at),
     },
+    // Claude Code's next-prompt suggestion: `sessions.prompt_suggestion`
+    // (one ADD COLUMN, guarded, and the row-version trigger re-issued).
+    Migration {
+        version: 206,
+        sql: include_str!("../../migrations/206_session_prompt_suggestion.sql"),
+        already_applied: Some(sessions_has_prompt_suggestion),
+    },
     // Mission lanes (lanes design L2): `mission_lanes` and the members'
     // `lane_id`. An ADD COLUMN, so guarded.
     Migration {
-        version: 206,
-        sql: include_str!("../../migrations/206_mission_lanes.sql"),
+        version: 207,
+        sql: include_str!("../../migrations/207_mission_lanes.sql"),
         already_applied: Some(work_items_has_lane_id),
     },
     // Lanes L3: a task's `start_head` in its lane's checkout. An ADD
     // COLUMN, so guarded.
     Migration {
-        version: 207,
-        sql: include_str!("../../migrations/207_task_start_head.sql"),
+        version: 208,
+        sql: include_str!("../../migrations/208_task_start_head.sql"),
         already_applied: Some(tasks_has_start_head),
     },
 ];

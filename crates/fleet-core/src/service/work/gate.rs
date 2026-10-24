@@ -43,6 +43,12 @@ pub struct RunEvidence {
 /// long, and `missing` after.
 pub const EVIDENCE_GRACE_SECS: i64 = 300;
 
+/// How long after a run finished a failed git read (a host that dropped
+/// for a moment) is read again by the mission loop
+/// (`report::retry_unread_evidence`): `pending` meanwhile, and `missing`
+/// only once this window passes with git still unreadable.
+pub const EVIDENCE_RETRY_SECS: i64 = 1800;
+
 /// PURE: the evidence of `run`, an item's latest implement run, at `now`,
 /// given the item's newest recorded check of [`EVIDENCE_LINE`]. A person's
 /// override counts for the run it was recorded over: a newer implement run
@@ -63,12 +69,13 @@ pub fn run_evidence(run: &TaskRow, recorded: Option<&VerificationRow>, now: i64)
     if matches!(run.state.as_str(), "queued" | "running") {
         return out("pending", "the implement run has not finished".into());
     }
-    if ev.is_none()
-        && run.state == "done"
-        && run
-            .finished_at
-            .is_some_and(|f| now - f < EVIDENCE_GRACE_SECS)
-    {
+    let since_done =
+        |secs: i64| run.state == "done" && run.finished_at.is_some_and(|f| now - f < secs);
+    // None yet, or only a read taken while the worker's turn still ran
+    // (`task_report`) that shows nothing: its Stop reads git again.
+    let unsettled =
+        ev.is_none_or(|e| e.provisional && e.error.is_none()) && commits == 0 && files == 0;
+    if unsettled && since_done(EVIDENCE_GRACE_SECS) {
         return out("pending", "git is still being read after the run".into());
     }
     if commits > 0 || files > 0 {
@@ -87,6 +94,18 @@ pub fn run_evidence(run: &TaskRow, recorded: Option<&VerificationRow>, now: i64)
         e.by = Some(r.actor.clone());
         e.at = Some(r.at);
         return e;
+    }
+    // A failed read the mission loop reads again (`report::retry_unread_evidence`).
+    if let Some(err) = ev
+        .filter(|e| e.host.is_some() && e.dir.is_some())
+        .and_then(|e| e.error.as_deref())
+    {
+        if since_done(EVIDENCE_RETRY_SECS) {
+            return out(
+                "pending",
+                format!("git could not be read after the run, and is read again: {err}"),
+            );
+        }
     }
     let detail = match ev {
         None => "the implement run left no git evidence".to_string(),
@@ -474,6 +493,53 @@ mod tests {
         );
         // Evidence that came back empty is missing at once.
         run.evidence = Some(ev(0, 0, None));
+        assert_eq!(run_evidence(&run, None, 101).state, "missing");
+    }
+
+    /// review8: a `task_report` read taken mid-turn that shows nothing waits
+    /// for the worker's Stop to read git again; one that shows work counts.
+    #[test]
+    fn a_provisional_read_that_shows_nothing_waits_like_none() {
+        let mut run = run_row(9, "done", 10, None);
+        run.finished_at = Some(100);
+        let mut mid = ev(0, 0, Some(2));
+        mid.provisional = true;
+        run.evidence = Some(mid.clone());
+        assert_eq!(run_evidence(&run, None, 101).state, "pending");
+        assert_eq!(
+            run_evidence(&run, None, 100 + EVIDENCE_GRACE_SECS).state,
+            "missing"
+        );
+        mid.commits_total = 1;
+        run.evidence = Some(mid);
+        assert_eq!(run_evidence(&run, None, 101).state, "present");
+    }
+
+    /// review8: a git read that failed (a host that dropped) is read again
+    /// by the loop, so it is pending for the retry window, then missing.
+    #[test]
+    fn a_failed_read_is_pending_while_the_loop_reads_it_again() {
+        let mut run = run_row(9, "done", 10, None);
+        run.finished_at = Some(100);
+        let mut failed = ev(0, 0, None);
+        failed.error = Some("ssh: connection reset".into());
+        failed.host = Some("mars".into());
+        failed.dir = Some("/w/x".into());
+        run.evidence = Some(failed.clone());
+        let e = run_evidence(&run, None, 101);
+        assert_eq!(e.state, "pending");
+        assert!(e.detail.contains("connection reset"), "{}", e.detail);
+        assert_eq!(
+            run_evidence(&run, Some(&over(20, true)), 101).state,
+            "overridden",
+            "a person's override still answers it at once"
+        );
+        let e = run_evidence(&run, None, 100 + EVIDENCE_RETRY_SECS);
+        assert_eq!(e.state, "missing");
+        assert!(e.detail.contains("could not be read"), "{}", e.detail);
+        // Nowhere to read it again: missing at once, as before.
+        failed.dir = None;
+        run.evidence = Some(failed);
         assert_eq!(run_evidence(&run, None, 101).state, "missing");
     }
 

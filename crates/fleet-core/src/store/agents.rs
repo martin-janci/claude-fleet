@@ -556,6 +556,26 @@ impl Store {
         )
     }
 
+    /// When the newest finished run (`done` or `needs_person`) of another
+    /// job of rule `rule_id` on `subject` ended: a fleet agent's cooldown,
+    /// per instance.
+    pub fn last_agent_rule_subject_run(
+        &self,
+        agent: &str,
+        rule_id: i64,
+        subject: &str,
+        except_job: i64,
+    ) -> Result<Option<i64>, rusqlite::Error> {
+        // `agent, subject` first: the `agent_jobs_subject` index.
+        self.conn.query_row(
+            "SELECT MAX(updated_at) FROM agent_jobs \
+             WHERE agent = ?1 AND subject = ?2 AND rule_id = ?3 AND id <> ?4 \
+               AND state IN ('done', 'needs_person')",
+            params![agent, subject, rule_id, except_job],
+            |r| r.get(0),
+        )
+    }
+
     /// One job by id.
     pub fn agent_job(&self, id: i64) -> Result<Option<AgentJobRow>, rusqlite::Error> {
         self.conn

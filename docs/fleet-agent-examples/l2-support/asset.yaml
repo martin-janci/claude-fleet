@@ -68,8 +68,8 @@ actions:
     when: { field: exceptionClass, truthy: true }
     do: record
     store: memory
-    key: "{{answer.exceptionClass}}"
-    value: { ticket: "{{subject.key}}", seen: "{{now}}" }
+    key: "{{subject.key}}"
+    value: { exceptionClass: "{{answer.exceptionClass}}", summary: "{{answer.summary}}", seen: "{{now}}" }
     auto: true
 limits:
   max_body_chars: 5000

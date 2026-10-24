@@ -1069,7 +1069,7 @@ own diff (`run::subagent_note`, `orchestrator.run_subagents`, on); with
 checkout on its host with Read, Grep and Glob; and its prompt says items
 changing the same files or shared registry depend on each other. The lanes
 design's decisions D1–D9 are accepted (2026-10-24). Lanes L2 (migration
-206, `store/mission_lanes.rs`): a mission's tasks can be put in named lanes
+207, `store/mission_lanes.rs`): a mission's tasks can be put in named lanes
 by a plan's `Lane` column, the planner's `create_item { lane }` and a
 person (`work_link { mission_item, lane }`, the task row's lane picker);
 `work { mission }` lists them and the Graph view groups by them. Nothing
@@ -1306,7 +1306,12 @@ install }`), which holds all seven seeds in `catalog-seed/fleet-agents/`:
 `issue-triage`, `pr-questions` and `daily-digest`, and `self-debug`,
 `proposer`, `simplify` and `refactor` (below); `pr_review` (a review of the
 PR's head with line comments placed on the diff, sent only while that head
-is current, never an unattended APPROVE); not restating the built-in agents.
+is current, never an unattended REQUEST_CHANGES, nor an unattended APPROVE
+unless `limits.auto_approve`).
+Restating the built-in agents is under way, the built-in ones staying until
+the definitions have run for real (spec *Migration*): built so far
+`run.cooldown_secs`, `run.branch`, `mcp_scan`'s `window_mins` / `max_jobs`
+and `limits.auto_approve`.
 
 The self debug agent (thread "Self debug agent", 2026-10-17), the hub and
 desktop parts: a fleet agent definition that sets `run.diagnostics` gets

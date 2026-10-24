@@ -1024,8 +1024,10 @@ followed by the same instruction every run gets:
 
 The reply closes the request exactly as a run's does. The `task_report`
 call, from the worker's own pane with the request's nonce, closes it at
-once, stores the report and collects the evidence from the worker's
-worktree. Without it, the next Stop hook scans the transcript and the pane
+once, stores the report and reads provisional evidence from the worker's
+worktree; the worker's next Stop reads git again (from the hook's `cwd`,
+else the worktree), so a commit made after the report counts and a session
+with no linked worktree still gets evidence. Without it, the next Stop hook scans the transcript and the pane
 for the marker: the marker closes the request, the JSON becomes the report,
 and fleet collects the evidence. A Stop that finds no marker logs a warning
 (task, worker, host, what it read), so a missed report is visible before
@@ -1053,7 +1055,9 @@ and — for an item an implement run worked on — that run's **evidence**:
 **Run evidence.** What git showed when the item's latest implement run
 finished: at least one commit or one changed file. A run that reports
 *done* with neither — nothing committed, nothing changed, or a checkout git
-could not read — leaves the gate blocked, and the mission card says what is
+still could not read half an hour after the run (the mission loop reads a
+failed read again meanwhile, and the evidence stays pending) — leaves the
+gate blocked, and the mission card says what is
 missing (*No run evidence: the implement run committed nothing…*). A person
 answers it with **Override…** and a reason (`work_link { verify, item_id,
 line: "run evidence", ok: true, note }`; the reason is required). The

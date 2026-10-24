@@ -11,6 +11,7 @@
   went wrong. Task titles are tracker text, rendered as text.
 -->
 <script lang="ts">
+  import { tick } from 'svelte';
   import Icon from './kit/Icon.svelte';
   import StatusDot from './kit/StatusDot.svelte';
   import Loader from './Loader.svelte';
@@ -142,7 +143,22 @@
 
   async function saveOverride() {
     if (overrideFor == null || !overrideText.trim()) return;
-    if (await act(overrideRunEvidence(overrideFor, overrideText))) overrideFor = null;
+    const id = overrideFor;
+    if (await act(overrideRunEvidence(id, overrideText))) closeOverride(id);
+  }
+
+  /** The reason field takes focus as it opens: the Override… button that
+   *  opened it is gone (review r8). */
+  function focusOnMount(el: HTMLInputElement): void {
+    el.focus();
+  }
+
+  /** Close the reason form and give focus back to its Override… button,
+   *  when the task still has one. */
+  async function closeOverride(id: number): Promise<void> {
+    overrideFor = null;
+    await tick();
+    document.querySelector<HTMLButtonElement>(`[data-testid="mission-evidence-override"][data-item="${id}"]`)?.focus();
   }
 
   async function retry(itemId: number) {
@@ -253,6 +269,7 @@
                         title="Accept this run without commits or files, and say why"
                         disabled={busy}
                         data-testid="mission-evidence-override"
+                        data-item={n.item_id}
                         onclick={() => ((overrideFor = n.item_id), (overrideText = ''))}>Override…</button
                       >
                     {/if}
@@ -264,13 +281,14 @@
                         aria-label="Why the task is done without commits or files"
                         placeholder="Why it is done without commits or files"
                         bind:value={overrideText}
+                        use:focusOnMount
                         data-testid="mission-evidence-reason"
                       />
                       <span class="row">
                         <button class="btn" type="submit" disabled={busy || !overrideText.trim()} data-testid="mission-evidence-save"
                           >Override</button
                         >
-                        <button class="btn btn--quiet" type="button" onclick={() => (overrideFor = null)}>Cancel</button>
+                        <button class="btn btn--quiet" type="button" onclick={() => void closeOverride(n.item_id)}>Cancel</button>
                       </span>
                     </form>
                   {/if}

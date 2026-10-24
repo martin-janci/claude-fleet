@@ -616,6 +616,19 @@ fn pr_label(pr: &PullRequestRow) -> String {
 /// PURE: the refusal of a completion while `red` (from [`red_prs`]) holds
 /// a pull request; `None` when CI is not red.
 pub(crate) fn ci_refusal(red: &[String]) -> Option<IpcError> {
+    ci_refusal_saying(red, "a person completes the mission anyway (ci_override)")
+}
+
+/// PURE: [`ci_refusal`] for the loop's `complete` step, which takes no
+/// override (review r8): it points to the mission's own Complete, which does.
+pub(crate) fn ci_step_refusal(red: &[String]) -> Option<IpcError> {
+    ci_refusal_saying(
+        red,
+        "complete the mission anyway with its own Complete, which takes a person's CI override",
+    )
+}
+
+fn ci_refusal_saying(red: &[String], anyway: &str) -> Option<IpcError> {
     if red.is_empty() {
         return None;
     }
@@ -638,9 +651,7 @@ pub(crate) fn ci_refusal(red: &[String]) -> Option<IpcError> {
     }
     Some(IpcError::new(
         codes::E_CI_FAILING,
-        format!(
-            "CI is failing on {what}; fix it, or a person completes the mission anyway (ci_override)"
-        ),
+        format!("CI is failing on {what}; fix it, or {anyway}"),
     ))
 }
 

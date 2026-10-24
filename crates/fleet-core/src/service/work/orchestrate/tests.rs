@@ -141,19 +141,12 @@ fn autonomy_is_the_least_of_ceiling_level_and_grant() {
         &fx.me,
     )
     .unwrap();
-    let s = lock(&fx.deps.store).unwrap();
-    assert_eq!(
-        autonomy(&s, &fx.m, now_unix()).unwrap().effective,
-        2,
-        "the row read before the grant asks for 2"
-    );
-    drop(s);
     let m = mission_now(&fx);
     let s = lock(&fx.deps.store).unwrap();
     assert_eq!(
         (m.level, autonomy(&s, &m, now_unix()).unwrap().effective),
-        (3, 3),
-        "signing L3 raised the ask to it"
+        (2, 3),
+        "the L3 grant lifts the ask while it holds; the mission's own is kept"
     );
     s.set_setting(settings::ORCHESTRATOR_ENABLED, "false")
         .unwrap();
@@ -196,9 +189,10 @@ fn only_a_person_signs_a_grant_and_revoking_ends_it() {
 
 /// TASK-293: a mission made in the room asks L0 and the loop runs at the
 /// least of the ask, the ceiling and the grant, so an L2 grant on it never
-/// started a run. Signing raises the ask to the grant's level.
+/// started a run. A grant lifts the ask to its level while it holds, and
+/// the mission drops back to its own ask when it ends (review r8).
 #[test]
-fn a_grant_raises_a_lower_ask_so_the_loop_runs_under_it() {
+fn a_grant_lifts_a_lower_ask_while_it_holds() {
     let fx = fixture();
     let s = lock(&fx.deps.store).unwrap();
     s.set_setting(settings::ORCHESTRATOR_MAX_LEVEL, "2")
@@ -232,14 +226,15 @@ fn a_grant_raises_a_lower_ask_so_the_loop_runs_under_it() {
     .unwrap();
     let m = mission_now(&fx);
     let s = lock(&fx.deps.store).unwrap();
-    assert_eq!(m.level, 2);
+    assert_eq!(m.level, 0, "the mission's own ask is kept");
     let a = autonomy(&s, &m, now_unix()).unwrap();
     assert!(a.effective >= AUTO_LEVEL, "{a:?}");
+    assert_eq!(a.asked, 0);
     let e = &s.mission_events(fx.m.id, None, 1).unwrap()[0];
     assert_eq!(e.kind, "grant");
-    assert_eq!(e.payload.as_ref().unwrap()["raised_from"], 0);
+    assert_eq!(e.payload.as_ref().unwrap()["lifted_from"], 0);
     drop(s);
-    // A lower grant never lowers what the mission asks.
+    // A lower grant runs at its own level.
     grant(
         &WorkLinkArgs {
             level: Some(1),
@@ -249,7 +244,18 @@ fn a_grant_raises_a_lower_ask_so_the_loop_runs_under_it() {
         &fx.me,
     )
     .unwrap();
-    assert_eq!(mission_now(&fx).level, 2);
+    let s = lock(&fx.deps.store).unwrap();
+    assert_eq!(autonomy(&s, &m, now_unix()).unwrap().effective, 1);
+    drop(s);
+    // Review r8: once the grant ends the mission is back at its own L0, so
+    // the loop asks no planner and checks no merge on its own.
+    revoke(&by_id("mission_revoke", fx.m.id), &fx.deps.store, &fx.me).unwrap();
+    let s = lock(&fx.deps.store).unwrap();
+    let m = s.get_mission(fx.m.id).unwrap().unwrap();
+    assert_eq!(
+        (m.level, autonomy(&s, &m, now_unix()).unwrap().effective),
+        (0, 0)
+    );
 }
 
 /// TASK-293: a finite mission's grant may last until it completes, bounded
@@ -312,6 +318,12 @@ fn a_grant_until_done_needs_a_budget_and_ends_with_the_finite_mission() {
         "ana",
     )
     .unwrap();
+    // Made finite again, the old grant stays revoked: no level or budget
+    // comes back without a new signature.
+    assert!(s.live_mission_grant(fx.m.id, now_unix()).unwrap().is_none());
+    drop(s);
+    grant(&args(None, Some(500)), &fx.deps.store, &fx.me).unwrap();
+    let s = lock(&fx.deps.store).unwrap();
     assert!(s.live_mission_grant(fx.m.id, now_unix()).unwrap().is_some());
     // It ends with the mission: reopened, it has none.
     s.set_mission_state(fx.m.id, None, "completed", "ana")
@@ -1322,6 +1334,125 @@ fn a_limit_with_no_known_reset_waits_the_guess() {
         "profile work on mac is at its usage limit (resets 3pm (Europe/Bratislava))"
     );
     assert_eq!(wait.said.as_deref(), Some("resets 3pm (Europe/Bratislava)"));
+}
+
+/// Review r8: a login fleet holds signed out is no candidate, the host's
+/// own and the grant's as much as the rest, and a login this ask found
+/// signed out is passed over for the next one.
+#[test]
+fn the_planner_passes_over_signed_out_logins() {
+    let fx = fixture();
+    let m = planned_on_mac(&fx);
+    let s = lock(&fx.deps.store).unwrap();
+    let now = now_unix();
+    crate::service::account_limits::seed_usage(&s, "mac", None, "own", 10.0, now);
+    crate::service::account_limits::seed_usage(&s, "mac", Some("a"), "acct-a", 10.0, now);
+    crate::service::account_limits::seed_usage(&s, "mac", Some("b"), "acct-b", 10.0, now);
+    let at = |p: Option<&str>| limit::Login {
+        host: "mac".into(),
+        profile: p.map(str::to_string),
+    };
+    let signed_out = |p: Option<&str>| crate::store::SignedOutLogin {
+        profile: p.map(str::to_string),
+        since: now,
+        checked_at: now,
+    };
+    s.set_host_signed_out_logins("mac", &[signed_out(None), signed_out(Some("a"))])
+        .unwrap();
+    let g = s
+        .add_grant(
+            m.id,
+            &NewGrant {
+                level: 2,
+                granted_by: "ana",
+                hosts: None,
+                budget_micros: None,
+                max_parallel: None,
+                profile: Some("a".into()),
+                expires_at: now + 3600,
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        limit::candidates(&s, &m, Some(&g)).unwrap(),
+        vec![at(Some("b"))],
+        "the grant's and the host's own login are signed out"
+    );
+    s.set_host_signed_out_logins("mac", &[]).unwrap();
+    assert_eq!(
+        limit::candidates(&s, &m, Some(&g)).unwrap(),
+        vec![at(Some("a")), at(None), at(Some("b"))]
+    );
+    let words = limit::Words::read(&s, m.id).unwrap();
+    assert_eq!(
+        limit::choose_in(&s, &m, Some(&g), now, &words, &[at(Some("a"))]).unwrap(),
+        Ok(at(None)),
+        "a login this ask found signed out is passed over"
+    );
+}
+
+/// Review r8: an answer from a later login of the same ask clears its wait,
+/// so the mission is not left waiting (no early wake, no second ask).
+#[test]
+fn an_answer_after_a_wait_clears_it() {
+    let fx = fixture();
+    let m = planned_on_mac(&fx);
+    let s = lock(&fx.deps.store).unwrap();
+    let now = now_unix();
+    let own = limit::Login {
+        host: "mac".into(),
+        profile: None,
+    };
+    let hit = crate::service::claude_print::usage_limit(&format!(
+        "Claude AI usage limit reached|{}",
+        now + 600
+    ))
+    .unwrap();
+    event(&s, m.id, "planned", "loop", None, serde_json::json!({}));
+    limit::record(&s, m.id, &limit::answered(&s, &own, &hit, now));
+    assert!(limit::waiting(&s, m.id).unwrap());
+    let work = limit::Login {
+        host: "mac".into(),
+        profile: Some("work".into()),
+    };
+    limit::cleared(&s, m.id, &work);
+    assert!(!limit::waiting(&s, m.id).unwrap());
+    assert_eq!(limit::wake_at(&s, m.id, now).unwrap(), None);
+    assert_eq!(
+        limit::open_waits(&s, m.id, now).unwrap().len(),
+        1,
+        "the login's own wait still holds for the next ask"
+    );
+    // A busy log does not hide the planner's words.
+    for _ in 0..250 {
+        event(&s, m.id, "step", "loop", None, serde_json::json!({}));
+    }
+    limit::record(&s, m.id, &limit::answered(&s, &own, &hit, now));
+    for _ in 0..250 {
+        event(&s, m.id, "step", "loop", None, serde_json::json!({}));
+    }
+    assert!(limit::waiting(&s, m.id).unwrap());
+}
+
+/// Review r8: a reset further out than Claude's weekly limit (an answer the
+/// prompt's text steered) is not taken as the limit's own.
+#[test]
+fn a_far_reset_is_not_believed() {
+    let fx = fixture();
+    let s = lock(&fx.deps.store).unwrap();
+    let now = now_unix();
+    let login = limit::Login {
+        host: "mac".into(),
+        profile: Some("work".into()),
+    };
+    let hit =
+        crate::service::claude_print::usage_limit("Claude AI usage limit reached|99999999999")
+            .unwrap();
+    let wait = limit::answered(&s, &login, &hit, now);
+    assert_eq!(
+        (wait.resets_at, wait.reset_known),
+        (now + limit::LIMIT_WAIT_GUESS_SECS, false)
+    );
 }
 
 /// Mission #6 (2026-10-20): a run stuck open for over an hour braked the

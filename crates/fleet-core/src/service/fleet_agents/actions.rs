@@ -158,22 +158,27 @@ pub struct PrReviewPayload {
 
 /// Most line comments one `pr_review` posts; the rest go into its body.
 pub const MAX_REVIEW_COMMENTS: usize = 30;
+/// The heading of a review body's findings past [`MAX_REVIEW_COMMENTS`].
+const MORE_FINDINGS: &str = "More findings:";
 /// Longest line comment.
 const REVIEW_COMMENT_MAX: usize = 2000;
 
 /// PURE: the review's event for `said`: APPROVE, REQUEST_CHANGES or
-/// COMMENT, and never APPROVE unattended (`auto`): an approval is a person's.
-pub fn review_event(said: &str, auto: bool) -> &'static str {
+/// COMMENT, and neither blocking verdict unattended (`auto`): an approval is
+/// a person's unless the definition's `limits.auto_approve` lets the agent
+/// give it, and a REQUEST_CHANGES always is, since a later COMMENT from the
+/// agent could never lift it.
+pub fn review_event(said: &str, auto: bool, auto_approve: bool) -> &'static str {
     match said.trim().to_ascii_uppercase().as_str() {
-        "APPROVE" if !auto => "APPROVE",
-        "REQUEST_CHANGES" => "REQUEST_CHANGES",
+        "APPROVE" if !auto || auto_approve => "APPROVE",
+        "REQUEST_CHANGES" if !auto => "REQUEST_CHANGES",
         _ => "COMMENT",
     }
 }
 
-/// PURE: the answer's findings array as line comments, at most
-/// [`MAX_REVIEW_COMMENTS`]; an item without a path, a line or a body is
-/// dropped.
+/// PURE: the answer's findings array as line comments; an item without a
+/// path, a line or a body is dropped. The caller keeps the first
+/// [`MAX_REVIEW_COMMENTS`] as line comments and lists the rest in the body.
 fn review_findings(v: Option<&Value>) -> Vec<ReviewFinding> {
     v.and_then(Value::as_array)
         .into_iter()
@@ -188,17 +193,18 @@ fn review_findings(v: Option<&Value>) -> Vec<ReviewFinding> {
                 body: fit(body, REVIEW_COMMENT_MAX),
             })
         })
-        .take(MAX_REVIEW_COMMENTS)
         .collect()
 }
 
 /// PURE: the review as GitHub takes it: each finding on a line of `diff`
 /// (snapped within a few lines, as the PR reviewer does) is a line comment,
 /// the rest are listed in the body; both end with the instance's marker.
+/// The body, its list included, is fitted to `max` with the marker kept.
 pub fn place_review(
     p: &PrReviewPayload,
     diff: &str,
     mark: &str,
+    max: usize,
 ) -> crate::service::agents::review::post::ReviewRequest {
     use crate::service::agents::review::diff::{commentable_lines, snap_line};
     use crate::service::agents::review::post::{ReviewComment, ReviewRequest};
@@ -219,6 +225,8 @@ pub fn place_review(
     if !outside.is_empty() {
         body.push_str(&format!("\n\nOutside the diff:\n{}", outside.join("\n")));
     }
+    let mark = format!("\n\n{mark}");
+    let body = fit(&body, max.saturating_sub(mark.chars().count()));
     ReviewRequest {
         host: String::new(),
         repo: p.repo.clone(),
@@ -226,7 +234,7 @@ pub fn place_review(
         sha: p.sha.clone(),
         record_id: 0,
         event: p.event.clone(),
-        body: format!("{body}\n\n{mark}"),
+        body: format!("{body}{mark}"),
         comments,
     }
 }
@@ -646,11 +654,23 @@ pub fn plan(
                         if sha.is_empty() {
                             return Err(skip("the subject has no head_sha"));
                         }
-                        let findings =
+                        let mut findings =
                             review_findings(a.findings.as_ref().map(|f| &ctx["answer"][f]));
-                        let event = review_event(&r(&a.verdict), a.auto).to_string();
+                        let more: Vec<String> = findings
+                            .split_off(findings.len().min(MAX_REVIEW_COMMENTS))
+                            .iter()
+                            .map(|f| format!("- `{}:{}`: {}", f.path, f.line, f.body))
+                            .collect();
+                        let event =
+                            review_event(&r(&a.verdict), a.auto, d.limits.auto_approve).to_string();
+                        let text = if more.is_empty() {
+                            text
+                        } else {
+                            format!("{text}\n\n{MORE_FINDINGS}\n{}", more.join("\n"))
+                        };
                         // The body leaves room for the findings that land
-                        // outside the diff, and the marker.
+                        // outside the diff, and the marker; `place_review`
+                        // fits the whole to `max`.
                         let body = fit(&text, max / 2);
                         let mut shown = format!("{event}: {body}");
                         for f in &findings {
@@ -986,13 +1006,15 @@ impl FleetExecutor {
             }
             Some(_) => {}
         }
+        // A diff GitHub will not serve for its size still takes the
+        // review: every finding is then listed in the body.
         let diff = match self.host.pr_diff(host, repo, p.number).await {
             Ok(d) => d,
+            Err(e) if crate::service::agents::review::diff_failure(&e).is_none() => String::new(),
             Err(e) => return ActionResult::Failed(e),
         };
-        let mut req = place_review(&p, &diff, &marker(&rule.scope));
+        let mut req = place_review(&p, &diff, &marker(&rule.scope), max);
         req.host = host.clone();
-        req.body = fit(&req.body, max);
         let event = req.event.clone();
         let sent = match self.host.post_pr_review(&req, &event).await {
             Err(e)

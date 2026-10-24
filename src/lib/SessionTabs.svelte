@@ -115,8 +115,16 @@
 
   const tabs = $derived<{ id: SessionTab; label: string; chord: string | null; count?: number }[]>([
     { id: 'conversation', label: 'Conversation', chord: null },
-    { id: 'agent', label: agentLabel, chord: shortcutLabel('session-view', isMac) },
-    { id: 'terminals', label: 'Terminals', chord: shortcutLabel('new-terminal', isMac), count: terminalCount },
+    // The chords act on this window's own selected session (App's chord
+    // handler, the primary pane's terminal strip), so another fleet's
+    // session shows none: one pressed there would act on the hidden one.
+    { id: 'agent', label: agentLabel, chord: away ? null : shortcutLabel('session-view', isMac) },
+    {
+      id: 'terminals',
+      label: 'Terminals',
+      chord: away ? null : shortcutLabel('new-terminal', isMac),
+      count: terminalCount,
+    },
     { id: 'files', label: 'Files', chord: null },
     { id: 'details', label: 'Details', chord: null },
   ]);

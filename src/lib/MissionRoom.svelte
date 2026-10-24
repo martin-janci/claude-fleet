@@ -75,6 +75,7 @@
     finalMoveQuestion,
     getMission,
     grantMission,
+    grantSpanNotice,
     isFinal,
     missionTaskId,
     moveLabel,
@@ -265,6 +266,10 @@
     notice = null;
     refreshError = null;
     plannerFailure = null;
+    plannerIsWait = false;
+    // A refused Complete's override is that mission's (review r8): it never
+    // carries over to the next one.
+    ciRed = false;
     importOpen = false;
     importText = '';
     importResult = null;
@@ -272,6 +277,8 @@
     reviewing = false;
     reviewAt = 0;
     granting = false;
+    grantUntilDone = false;
+    grantHosts = [];
     earlierShown = false;
     steerText = '';
     missionSessionId.set(null);
@@ -622,6 +629,9 @@
       granting = false;
       grantHosts = [];
       grantUntilDone = false;
+      // A hub before grants until done drops the flag and signs its default
+      // hours (review r8): say so rather than let it pass as asked.
+      notice = grantSpanNotice(untilDone, out);
     }
   }
 

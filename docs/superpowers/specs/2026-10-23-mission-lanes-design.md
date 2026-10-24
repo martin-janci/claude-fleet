@@ -81,7 +81,7 @@ ALTER TABLE tasks ADD COLUMN end_head   TEXT;  -- HEAD pri hlásení; evidencia 
 - `lane_id` je `NULL` pre úlohy misie v režime `item` a pre koreň misie.
 - Assignee z importu ostáva assignee. Import v režime `lane` navyše založí alebo nájde líniu podľa mena.
 
-**Ako je to postavené v L2** (migrácia 206, `store/mission_lanes.rs`), odchýlky od SQL vyššie:
+**Ako je to postavené v L2** (migrácia 207, `store/mission_lanes.rs`), odchýlky od SQL vyššie:
 - `mission_lanes.project_id` je **nepovinné** (`ON DELETE SET NULL`): línia z plánu nemusí mať vlastné repo. Prvé repo, ktoré niekto pri línii uvedie, si ponechá.
 - `tasks.start_head` / `end_head` sa presúvajú do **L3**, kde ich prvý raz niečo číta. L2 nemení `tasks` ani `WorkItemRow`: `lane_id` sa číta samostatným dotazom (`Store::mission_lanes`, `item_lane`).
 - Línia vzniká pri prvom použití mena a zaniká, keď v nej neostane úloha a nemá vedúcu session. Úloha, ktorá opustí misiu, opustí aj líniu. Koreň misie v línii nebýva.

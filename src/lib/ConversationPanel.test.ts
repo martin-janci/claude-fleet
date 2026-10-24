@@ -1451,6 +1451,37 @@ describe('ConversationPanel quick actions', () => {
     expect(box.value).toBe('/status');
   });
 
+  // Claude Code's next-prompt suggestion (migration 206): ghost text taken
+  // with Tab, and a chip that fills the box or, with Shift, sends it.
+  it('offers Claude Code\'s suggestion on an idle session: chip, Tab and Shift+click', async () => {
+    mockedSend.mockResolvedValue({ ok: true, value: undefined });
+    await mount({ claude_status: 'idle', prompt_suggestion: 'run the tests' });
+    const box = screen.getByTestId('conv-composer-input') as HTMLTextAreaElement;
+    expect(box.placeholder).toContain('run the tests');
+    const chip = screen.getByTestId('conv-chip-suggestion');
+    expect(chip.textContent).toContain('run the tests');
+    await fireEvent.click(chip);
+    await settle();
+    expect(mockedSend).not.toHaveBeenCalled();
+    expect(box.value).toBe('run the tests');
+    // A draft in the box hides the offer.
+    expect(screen.queryByTestId('conv-chip-suggestion')).toBeNull();
+    box.value = '';
+    await fireEvent.input(box);
+    await fireEvent.keyDown(box, { key: 'Tab' });
+    expect(box.value).toBe('run the tests');
+    box.value = '';
+    await fireEvent.input(box);
+    await fireEvent.click(screen.getByTestId('conv-chip-suggestion'), { shiftKey: true });
+    await settle();
+    expect(mockedSend).toHaveBeenCalledWith('local', 'ctl', 'run the tests');
+  });
+
+  it('offers no suggestion while a turn runs', async () => {
+    await mount({ claude_status: 'working', prompt_suggestion: 'run the tests' });
+    expect(screen.queryByTestId('conv-chip-suggestion')).toBeNull();
+  });
+
   it('a session stuck on press_enter gets a chip that sends a bare Enter', async () => {
     await mount({ claude_status: 'blocked', stuck_kind: 'press_enter' });
     await fireEvent.click(screen.getByTestId('conv-chip-enter'));

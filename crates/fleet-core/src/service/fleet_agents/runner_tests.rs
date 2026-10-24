@@ -117,6 +117,8 @@ struct World {
     /// host's own (GitHub refuses to approve it).
     diff: Mutex<String>,
     own_pr: Mutex<bool>,
+    /// GitHub's refusal to serve the diff, when set.
+    diff_refusal: Mutex<Option<String>>,
 }
 
 #[async_trait::async_trait]
@@ -232,6 +234,9 @@ impl FleetHost for World {
             .lock()
             .unwrap()
             .push(format!("diff {repo}#{number}"));
+        if let Some(e) = self.diff_refusal.lock().unwrap().clone() {
+            return Err(e);
+        }
         Ok(self.diff.lock().unwrap().clone())
     }
     async fn post_pr_review(
@@ -350,6 +355,7 @@ fn fx(loaded: Loaded, config: Value, bindings: Value, project: bool) -> Fx {
         item_pages: Mutex::default(),
         diff: Mutex::default(),
         own_pr: Mutex::default(),
+        diff_refusal: Mutex::default(),
     });
     Fx {
         store: Arc::new(Mutex::new(s)),
@@ -1018,12 +1024,12 @@ async fn the_executor_sends_what_was_approved_within_limits() {
         .agent_record(
             &format!("rule:{}", f.rule.id),
             "record",
-            "KeyExpiredException",
+            "L2S-7",
             crate::store::now_unix(),
         )
         .unwrap()
         .unwrap();
-    assert!(rec.value.contains("L2S-7") && rec.written_by_job.is_some());
+    assert!(rec.value.contains("KeyExpiredException") && rec.written_by_job.is_some());
     // The mcp_call: the tool's inputSchema decides.
     let learn = by_kind("mcp_call");
     *f.world.tools.lock().unwrap() = vec![json!({ "name": "add_known_error", "inputSchema": {
@@ -1347,7 +1353,13 @@ async fn a_pr_answer_comments_and_labels_within_the_repos() {
 
 /// A definition triggered by github_prs whose answer is a review.
 fn review_fx(auto: bool) -> Fx {
+    review_fx_limits(auto, json!({}))
+}
+
+/// [`review_fx`] with the definition's `limits`.
+fn review_fx_limits(auto: bool, limits: Value) -> Fx {
     let d = definition::parse_value(&json!({
+        "limits": limits,
         "inputs": [{ "name": "repo", "type": "text", "label": "Repo", "required": true }],
         "trigger": { "source": "github_prs", "repo": "{{repo}}" },
         "run": { "workspace": "home", "output_schema": { "type": "object",
@@ -1485,11 +1497,98 @@ async fn an_unattended_review_never_approves() {
     assert_eq!(a.state, "approved");
     let p: Value = serde_json::from_str(&a.payload).unwrap();
     assert_eq!(p["event"], "COMMENT", "an approval is a person's");
+    // Nor blocks: a later COMMENT from the agent could never lift it.
     assert_eq!(
-        super::actions::review_event("request_changes", true),
+        super::actions::review_event("request_changes", true, false),
+        "COMMENT"
+    );
+    assert_eq!(
+        super::actions::review_event("request_changes", false, false),
         "REQUEST_CHANGES"
     );
-    assert_eq!(super::actions::review_event("LGTM", false), "COMMENT");
+    assert_eq!(
+        super::actions::review_event("LGTM", false, false),
+        "COMMENT"
+    );
+    // auto_approve unlocks an unattended APPROVE, never a REQUEST_CHANGES.
+    assert_eq!(
+        super::actions::review_event("approve", true, true),
+        "APPROVE"
+    );
+    assert_eq!(
+        super::actions::review_event("request_changes", true, true),
+        "COMMENT"
+    );
+}
+
+/// The review's answer with `n` findings of `len` characters, each far
+/// outside the diff.
+fn long_findings(n: usize, len: usize) -> String {
+    let findings: Vec<Value> = (0..n)
+        .map(|i| json!({ "path": "src/a.rs", "line": 100 + i, "body": format!("f{i} {}", "x".repeat(len)) }))
+        .collect();
+    json!({ "verdict": "COMMENT", "summary": "Long.", "findings": findings }).to_string()
+}
+
+#[tokio::test]
+async fn a_long_review_keeps_its_marker_and_lists_the_findings_past_the_cap() {
+    let f = review_fx(false);
+    let a = reviewed(&f, &long_findings(40, 1500)).await;
+    let p: Value = serde_json::from_str(&a.payload).unwrap();
+    assert_eq!(
+        p["findings"].as_array().unwrap().len(),
+        super::actions::MAX_REVIEW_COMMENTS
+    );
+    let body = p["body"].as_str().unwrap();
+    assert!(
+        body.contains("More findings:\n- `src/a.rs:130`: f30 "),
+        "the findings past the cap go into the body: {body}"
+    );
+    assert!(matches!(
+        f.executor().execute(&a).await,
+        ActionResult::Done(_)
+    ));
+    let writes = f.world.gh_writes.lock().unwrap().clone();
+    let review = writes.iter().find(|w| w.starts_with("review")).unwrap();
+    let posted = review
+        .split_once(": ")
+        .unwrap()
+        .1
+        .rsplit_once(" || ")
+        .unwrap()
+        .0;
+    assert!(posted.ends_with("\n\n[fleet-agent:inst]"), "{posted}");
+    assert!(posted.chars().count() <= 5000, "{}", posted.chars().count());
+}
+
+#[tokio::test]
+async fn a_diff_too_large_to_serve_still_takes_the_review() {
+    let f = review_fx(false);
+    let a = reviewed(
+        &f,
+        r#"{"verdict":"COMMENT","summary":"Big one.","findings":[
+            {"path":"src/a.rs","line":2,"body":"x is unused"}]}"#,
+    )
+    .await;
+    *f.world.diff_refusal.lock().unwrap() =
+        Some("HTTP 406: Sorry, the diff exceeded the maximum number of lines".into());
+    let done = f.executor().execute(&a).await;
+    assert!(
+        matches!(&done, ActionResult::Done(l) if l.contains("0 line comments")),
+        "{done:?}"
+    );
+    let writes = f.world.gh_writes.lock().unwrap().clone();
+    let review = writes.iter().find(|w| w.starts_with("review")).unwrap();
+    assert!(
+        review.contains("Outside the diff:\n- `src/a.rs:2`: x is unused\n\n[fleet-agent:inst]"),
+        "{review}"
+    );
+    // Any other refusal still fails.
+    *f.world.diff_refusal.lock().unwrap() = Some("HTTP 502: Bad Gateway".into());
+    assert!(matches!(
+        f.executor().execute(&a).await,
+        ActionResult::Failed(_)
+    ));
 }
 
 #[tokio::test]
@@ -2107,4 +2206,130 @@ mod item_page {
             .unwrap_err();
         assert!(err.contains("tracker sync is off"), "{err}");
     }
+}
+
+/// A scan's window: `from` / `to` over the last `window_mins`, and at most
+/// `max_jobs` new entries.
+#[tokio::test]
+async fn a_scan_reads_its_window_and_keeps_to_its_max_jobs() {
+    let f = fx(
+        small(
+            json!({ "source": "mcp_scan", "store": "logs", "tool": "search_logs",
+                "arguments": { "query": "level:ERROR" }, "every_mins": 30,
+                "window_mins": 35, "max_jobs": 1,
+                "key_template": "{{subject.entry.id}}" }),
+            json!([{ "role": "logs", "kind": "mcp", "label": "Logs", "read_tools": ["search_logs"] }]),
+        ),
+        json!({}),
+        json!([{ "role": "logs", "server": "graylog",
+            "env": { "GRAYLOG_API_TOKEN": "${GRAYLOG_PROD_TOKEN}" } }]),
+        false,
+    );
+    let text = json!({ "entries": [ { "id": "a" }, { "id": "b" } ] }).to_string();
+    *f.world.call_answer.lock().unwrap() = json!({ "jsonrpc": "2.0", "id": 2,
+        "result": { "content": [{ "type": "text", "text": text }] } })
+    .to_string();
+    let polled = f
+        .poller()
+        .poll(&f.rule, Some(&f.cursor(0, None)), 10_000)
+        .await
+        .unwrap();
+    assert_eq!(polled.jobs.len(), 1, "max_jobs");
+    let (_, _, args) = f.world.calls.lock().unwrap()[0].clone();
+    assert_eq!(
+        args,
+        json!({ "query": "level:ERROR", "from": 10_000 - 35 * 60, "to": 10_000 })
+    );
+}
+
+/// `run.branch` picks the worktree's branch, and `run.cooldown_secs` skips
+/// a subject this instance finished lately.
+#[tokio::test]
+async fn a_run_reads_its_branch_and_waits_out_its_cooldown() {
+    let mut l = l2();
+    l.definition.run.branch = Some("release/{{project}}".into());
+    l.definition.run.cooldown_secs = 3600;
+    assert_eq!(
+        definition::problems(&l.definition, &l.templates),
+        Vec::<String>::new()
+    );
+    let f = fx(
+        l,
+        json!({ "jira_tracker": "3", "project": "L2S", "phrases": "Tech help!" }),
+        json!([
+            { "role": "logs", "server": "graylog", "name": "logs-prod",
+              "env": { "GRAYLOG_API_TOKEN": "${GRAYLOG_PROD_TOKEN}" } },
+            { "role": "kb", "server": "kb" },
+            { "role": "memory", "namespace": "rule" }
+        ]),
+        true,
+    );
+    *f.world.base.threads.lock().unwrap() = vec![thread(&[("1", "Tech help!", 1500)])];
+    *f.world.base.answer.lock().unwrap() = Some(PrintOutcome::Answered {
+        text: GOOD.into(),
+        cost_micros: 1,
+    });
+    let job = |key: &str| crate::store::NewAgentJob {
+        rule_id: f.rule.id,
+        agent: AGENT.into(),
+        subject: "tracker:3:L2S-7".into(),
+        trigger: "comment".into(),
+        dedup_key: key.into(),
+        not_before: 0,
+    };
+    let first = f.claim(&[job("c1")]);
+    assert!(matches!(
+        f.runner().run(&first[0], Some(&f.rule)).await,
+        RunOutcome::Done { .. }
+    ));
+    let log = f.world.base.log.lock().unwrap().clone();
+    assert!(log.contains(&"prepare release/L2S".to_string()), "{log:?}");
+    f.store
+        .lock()
+        .unwrap()
+        .finish_agent_job(
+            first[0].id,
+            &crate::store::AgentJobEnd::Final {
+                state: "done",
+                result: None,
+                error_kind: None,
+                error: None,
+            },
+            0,
+            crate::store::now_unix(),
+        )
+        .unwrap();
+    let second = f.claim(&[job("c2")]);
+    match f.runner().run(&second[0], Some(&f.rule)).await {
+        RunOutcome::Skipped { reason } => assert!(reason.contains("cooldown"), "{reason}"),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_definition_may_let_an_unattended_review_approve() {
+    let f = review_fx_limits(true, json!({ "auto_approve": true }));
+    let a = reviewed(
+        &f,
+        r#"{"verdict":"APPROVE","summary":"Ship it.","findings":[]}"#,
+    )
+    .await;
+    let p: Value = serde_json::from_str(&a.payload).unwrap();
+    assert_eq!(
+        (a.state.as_str(), p["event"].as_str()),
+        ("approved", Some("APPROVE"))
+    );
+
+    let mut d = definition::parse_value(&json!({
+        "trigger": { "source": "github_prs", "repo": "acme/pos" },
+        "run": { "workspace": "home", "output_schema": { "type": "object",
+            "required": ["summary"], "properties": { "summary": { "type": "string" } } } },
+        "limits": { "auto_approve": true }
+    }))
+    .unwrap();
+    assert!(d.limits.auto_approve);
+    d.run.branch = Some("main".into());
+    assert!(definition::problems(&d, &BTreeMap::new())
+        .iter()
+        .any(|p| p.contains("branch is for a project workspace")));
 }

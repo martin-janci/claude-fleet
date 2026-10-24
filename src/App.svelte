@@ -911,7 +911,13 @@
   // Review r08: a board card's task opens in the inspector column beside the
   // board, whatever the inspector pref.
   const boardTask = $derived(boardShown && taskShowing);
-  const inspectorRoom = $derived(boardTask || (!!$selectedSession && !wideMode && !boardShown && !missionsShown && !detailsMain));
+  // Another fleet's session covers this window's own (review8): the
+  // inspector would show the hidden session's Details beside it.
+  const fleetSessionShown = $derived(!!$selectedFleetSession && !fleetPageShown);
+  const inspectorRoom = $derived(
+    boardTask ||
+      (!!$selectedSession && !fleetSessionShown && !wideMode && !boardShown && !missionsShown && !detailsMain),
+  );
   const inspectorShown = $derived(!$settingsOpen && (boardTask || (inspectorRoom && inspectorOpen)));
   // Step 5.3: the pane's shells, for the Terminals tab. It is current while
   // the pane shows one of them (alone or split beside the agent).
@@ -1049,6 +1055,10 @@
     e.preventDefault();
     e.stopPropagation();
     if (chord === 'hosts') toggleHosts();
+    // Under another fleet's session these would act on the hidden selected
+    // session (review8): its view, its inspector, its folder in VS Code.
+    else if (fleetSessionShown && (chord === 'session-view' || chord === 'inspector' || chord === 'open-in-editor'))
+      return;
     else if (chord === 'session-view') flipSessionView();
     else if (chord === 'settings') settingsOpen.set(true);
     // ⌘E opens Control (step 9.1).

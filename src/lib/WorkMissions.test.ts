@@ -28,6 +28,7 @@ import {
   finalMoveQuestion,
   splitMoves,
   eventSentence,
+  grantSpanNotice,
   moveLabel,
   autonomyWords,
   plannerError,
@@ -428,6 +429,40 @@ describe('WorkMissions', () => {
         { mission_id: 4, state: 'completed', expected_version: 1, ci_override: true },
       ]);
       expect(screen.queryByTestId('mission-ci-override-row')).toBeNull();
+    });
+
+    it("a refused Complete's override and a ticked until-done stay with their mission (review r8)", async () => {
+      const a = mission({ id: 4, name: 'Payments v2', state: 'active' });
+      const b = mission({ id: 5, name: 'Search', state: 'active' });
+      handlers.work_missions = () => [a, b];
+      const plan = {
+        steps: [],
+        cards: [],
+        autonomy: { asked: 2, ceiling: 3, effective: 1, why: '', enabled: true },
+        cost_micros: 0,
+        counts: { total: 1, open: 0 },
+      };
+      handlers.work_mission = (args) => ({ mission: args.mission_id === 4 ? a : b, items: [item(10, 'x')], events: [], may_change: true, plan });
+      handlers.set_mission_state = () => Object.assign(new Error('CI is failing on acme/pay#476'), { code: 'E_CI_FAILING' });
+      renderMissions();
+      await flush();
+      const row = (name: string) => screen.getAllByTestId('mission-row').find((r) => r.textContent?.includes(name))!;
+      await fireEvent.click(row('Payments v2'));
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-grant'));
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-grant-until-done'));
+      await fireEvent.click(screen.getByTestId('mission-more'));
+      await fireEvent.click(screen.getByTestId('mission-menu-completed'));
+      await fireEvent.click(screen.getByTestId('mission-move-confirm'));
+      await flush();
+      expect(screen.getByTestId('mission-ci-override-row')).toBeTruthy();
+      await fireEvent.click(row('Search'));
+      await flush();
+      expect(screen.queryByTestId('mission-ci-override-row')).toBeNull();
+      await fireEvent.click(screen.getByTestId('mission-grant'));
+      await flush();
+      expect((screen.getByTestId('mission-grant-until-done') as HTMLInputElement).checked).toBe(false);
     });
 
     it('New: Esc closes the menu and a draft offers only Cancel in it', async () => {
@@ -913,6 +948,13 @@ describe('WorkMissions', () => {
     expect(rows[0].textContent).toContain('committed nothing');
     await fireEvent.click(screen.getByTestId('mission-evidence-override'));
     expect((screen.getByTestId('mission-evidence-save') as HTMLButtonElement).disabled).toBe(true);
+    // The reason field takes the focus the unmounted button had; Cancel
+    // gives it back (review r8).
+    expect(document.activeElement).toBe(screen.getByTestId('mission-evidence-reason'));
+    await fireEvent.click(screen.getByText('Cancel', { selector: 'form.conds button' }));
+    await flush();
+    expect(document.activeElement).toBe(screen.getByTestId('mission-evidence-override'));
+    await fireEvent.click(screen.getByTestId('mission-evidence-override'));
     await fireEvent.input(screen.getByTestId('mission-evidence-reason'), { target: { value: ' a config change on the host ' } });
     await fireEvent.click(screen.getByTestId('mission-evidence-save'));
     await flush();
@@ -1143,6 +1185,25 @@ describe('WorkMissions', () => {
       expect(calls('grant_mission')[0]).toEqual({ mission_id: 4, level: 2, until_done: true, budget_cents: 2000 });
     });
 
+    it('an older hub that signs hours for an until-done grant is said so (review r8)', async () => {
+      current = mission({ state: 'active', level: 2 });
+      handlers.work_mission = () => detailOf(current);
+      handlers.grant_mission = () => ({ id: 1, mission_id: 4, plan_version: 1, level: 2, granted_by: 'fleet', created_at: 0, expires_at: 8 * 3600 });
+      renderMissions();
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-row'));
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-grant'));
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-grant-until-done'));
+      await fireEvent.input(screen.getByTestId('mission-grant-budget'), { target: { value: '20' } });
+      await fireEvent.click(screen.getByTestId('mission-grant-save'));
+      await flush();
+      expect(screen.getByTestId('mission-notice').textContent).toContain('signed a grant for 8 h instead');
+      expect(grantSpanNotice(true, { created_at: 0, expires_at: 1, until_done: true })).toBeNull();
+      expect(grantSpanNotice(false, { created_at: 0, expires_at: 3600 })).toBeNull();
+    });
+
     it('a continuous mission is not offered a grant until it completes', async () => {
       current = mission({ state: 'active', level: 2, mode: 'continuous' });
       handlers.work_mission = () => detailOf(current);
@@ -1169,6 +1230,9 @@ describe('WorkMissions', () => {
       expect(autonomyWords({ ...base, grant: done }, 1_000).limits).toBe('L2 asked · L3 ceiling · L2 grant until done');
       expect(eventSentence({ id: 1, at: 1, kind: 'grant', actor: 'p', payload: { level: 2, until_done: true, raised_from: 0 } })).toBe(
         'Granted L2 until the mission completes (raised the ask from L0)',
+      );
+      expect(eventSentence({ id: 1, at: 1, kind: 'grant', actor: 'p', payload: { level: 2, hours: 8, lifted_from: 0 } })).toBe(
+        'Granted L2 for 8 h (lifts the ask from L0 while it holds)',
       );
       expect(eventSentence({ id: 1, at: 1, kind: 'grant', actor: 'p', payload: { level: 2, hours: 8 } })).toBe('Granted L2 for 8 h');
       expect(policyWith({ max_parallel: 2, wake_every_secs: 600 }, { wake_every_secs: null })).toEqual({ max_parallel: 2 });

@@ -1,0 +1,6 @@
+{
+  "name": "fleet-prompt-suggestion",
+  "version": "1.0.0",
+  "description": "Sends Claude Code's next-prompt suggestion to claude-fleet, so the desktop app and the phone can offer it.",
+  "license": "MIT"
+}

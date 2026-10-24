@@ -389,6 +389,8 @@ fn check_merge_waves(
                     depends_on: Vec::new(),
                     rejected: false,
                     pending: false,
+                    done: false,
+                    integration: false,
                 });
                 after.last_mut().expect("just pushed")
             }
