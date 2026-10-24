@@ -515,6 +515,11 @@
   let selAnchor: CellPos | null = $state(null);
   let selFocus: CellPos | null = $state(null);
   let openError: string | null = $state(null);
+  /** The `openError` of an attach that failed reaching the host, as opposed to
+   *  failing on this machine (no process could be spawned, no PTY, a poisoned
+   *  lock). Only that one may be explained as a missing SSH route; compared by
+   *  value, so any later error replaces it. */
+  let routeError: string | null = $state(null);
   /** The hidden textarea that actually owns keyboard focus. WebKit only runs
    *  an input-method session on an editable element, so a dead key, the
    *  press-and-hold accent popup, the emoji picker and every CJK IME need a
@@ -576,6 +581,10 @@
    *  self-heal budget is restored. Longer than a failing attach survives
    *  (ssh connect + a login profile + a tmux error is well under a second). */
   const HEALTHY_ATTACH_MS = 10_000;
+  /** `pty_open` failures that happen on this machine before ssh runs at all
+   *  (`spawn ssh: Resource temporarily unavailable` is E_PTY): whatever the
+   *  host's transport, no SSH route is missing. */
+  const LOCAL_ATTACH_CODES = new Set(['E_PTY', 'E_LOCK', 'E_INVALID', 'E_PTY_BUSY', 'E_PTY_CLOSED']);
 
   /** What `pty_drain` returns (src-tauri/src/pty.rs `PtyDrainResult`).
    *  `eof` and `overflowed` are out-of-band flags — the reader thread's own
@@ -1007,7 +1016,9 @@
           // unreachable.
           scheduleAutoReconnect(target.tmux_name, target.host_alias);
         } else {
-          openError = `Couldn't attach to the session: ${errorText(toIpcError(e))}`;
+          const err = toIpcError(e);
+          openError = `Couldn't attach to the session: ${errorText(err)}`;
+          routeError = LOCAL_ATTACH_CODES.has(err.code) ? null : openError;
           if (!sess.fleet) abandonFollow(sess.id);
         }
         return;
@@ -1840,7 +1851,7 @@
       </div>
     {/if}
     {#if openError}
-      {#if selectedIsAgentHost && tsel}
+      {#if selectedIsAgentHost && tsel && openError === routeError}
         <!-- The attach was tried and failed. `transport: 'agent'` is not a
              claim that no route exists anywhere — only that the hub has
              none — so name what is actually missing: a route from HERE. -->
