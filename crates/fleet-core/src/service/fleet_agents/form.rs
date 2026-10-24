@@ -174,11 +174,17 @@ pub fn writes_line(loaded: &Loaded) -> String {
                             .iter()
                             .any(|w| Some(w.name()) == a.tool.as_deref() && w.auto_ok())
                 }));
-        parts.push(if unattended {
-            format!("{what} (unattended at act)")
-        } else {
-            what
-        });
+        parts.push(
+            if unattended && a.kind == ActionKind::PrReview && d.limits.auto_approve {
+                // `limits.auto_approve` lifts the rule that an unattended review
+                // never approves: the person installing it has to be told.
+                format!("{what} (unattended at act, may APPROVE)")
+            } else if unattended {
+                format!("{what} (unattended at act)")
+            } else {
+                what
+            },
+        );
     }
     if parts.is_empty() {
         "This agent writes nothing: its answers stay in fleet.".into()

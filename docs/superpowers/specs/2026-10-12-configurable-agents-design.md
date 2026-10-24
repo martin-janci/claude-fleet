@@ -464,7 +464,8 @@ which a later COMMENT from the agent could not lift.
 The gaps, in the order they close (each its own PR):
 
 1. **Support basics** (built 2026-10-23): `run.cooldown_secs` (a subject
-   this instance finished less than that ago is skipped, the support
+   this instance finished less than that ago waits until it has passed,
+   deferred rather than skipped so a PR head or comment is not lost; the support
    agent's `cooldown_secs`, per instance:
    `Store::last_agent_rule_subject_run`); `run.branch` (the project
    worktree's branch, a template over the inputs, checked with the

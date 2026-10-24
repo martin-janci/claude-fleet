@@ -228,6 +228,19 @@ fn a_trigger_takes_its_sources_keys_only() {
     ] {
         assert!(scan.iter().any(|x| x.contains(want)), "{want}: {scan:#?}");
     }
+    // A window shorter than the interval leaves gaps; the default
+    // interval (60) counts when every_mins is unset.
+    for (every, window) in [(json!(60), 15), (Value::Null, 45)] {
+        let p = problems_of(|v| {
+            v["trigger"] = json!({ "source": "mcp_scan", "store": "logs", "tool": "search_logs",
+                "every_mins": every, "window_mins": window })
+        });
+        assert!(
+            p.iter()
+                .any(|x| x.contains("window_mins must cover every_mins")),
+            "{every} / {window}: {p:#?}"
+        );
+    }
     assert_problem(
         |v| v["run"]["cooldown_secs"] = json!(-1),
         "cooldown_secs is 0-604800",
@@ -844,4 +857,39 @@ fn a_review_names_findings_the_answer_has() {
     assert!(def(no_line, None, "github_prs").contains("not an array of {path, line, body}"));
     assert!(def(good.clone(), Some("notes"), "github_prs").contains("no each"));
     assert!(def(good, None, "github_comments").contains("the trigger is github_prs"));
+}
+
+/// The install form's "It may write" line says when `limits.auto_approve`
+/// lets an unattended review APPROVE, and only then.
+#[test]
+fn the_writes_line_tells_of_an_unattended_approve() {
+    let line = |auto: bool, auto_approve: bool| {
+        let d = definition::parse_value(&json!({
+            "limits": { "auto_approve": auto_approve },
+            "inputs": [{ "name": "repo", "type": "text", "label": "Repo", "required": true }],
+            "trigger": { "source": "github_prs", "repo": "{{repo}}" },
+            "run": { "workspace": "home" },
+            "actions": [
+                { "id": "review", "do": "pr_review", "target": "{{subject.number}}",
+                  "verdict": "{{answer.verdict}}", "body": "{{answer.summary}}", "auto": auto }
+            ]
+        }))
+        .unwrap();
+        super::form::writes_line(&definition::Loaded {
+            name: "rv".into(),
+            definition: d,
+            skill: String::new(),
+            templates: BTreeMap::new(),
+        })
+    };
+    assert!(line(true, true).contains("pr review (unattended at act, may APPROVE)"));
+    let plain = line(true, false);
+    assert!(
+        plain.contains("pr review (unattended at act)") && !plain.contains("APPROVE"),
+        "{plain}"
+    );
+    assert!(
+        !line(false, true).contains("APPROVE"),
+        "a review a person sends"
+    );
 }
