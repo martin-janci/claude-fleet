@@ -55,13 +55,18 @@
   // The catalog is primed at launch; refresh it quietly when Toolkit opens,
   // and again once the hub status resolves (it can after mount).
   let access = $state<ToolkitAccess>('unknown');
+  // Only the latest check may set `access`: an earlier one still waiting on
+  // the catalog must not undo a newer 'unavailable'.
+  let checkSeq = 0;
   async function check() {
+    const mine = ++checkSeq;
     void loadAssets();
     if ($hubStatus.unavailable) {
       access = 'unavailable';
       return;
     }
-    access = accessOf(await loadCatalogConfig());
+    const r = await loadCatalogConfig();
+    if (mine === checkSeq) access = accessOf(r);
   }
   $effect(() => {
     void [$hubStatus.remote, $hubStatus.unavailable];

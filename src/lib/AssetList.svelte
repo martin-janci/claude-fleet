@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { groupByKind, stateCounts, identitiesOf, hostOrderOf, catalogOf, type AssetListing, type AssetIdentity, type AssetSummary } from './assets';
+  import { groupByKind, stateCounts, identitiesOf, isInternal, hostOrderOf, catalogOf, type AssetListing, type AssetIdentity, type AssetSummary } from './assets';
   import { assetDots } from './assets_inbox';
   import { keyOf, scopeBadge } from './assets_workspace';
   import { rowOfAsset, rowOfIdentity, rowOfOrphan, type QueryRow } from './assets_query';
@@ -96,9 +96,8 @@
   const noStale: ReadonlySet<string> = new Set();
 
   let showInternals = $state(false);
-  const internal = (i: AssetIdentity) => i.class === 'fleet_internal' || i.class === 'harness_internal';
-  const visible = $derived(ids.filter((i) => showInternals || !internal(i)));
-  const hiddenCount = $derived(ids.filter(internal).length);
+  const visible = $derived(ids.filter((i) => showInternals || !isInternal(i)));
+  const hiddenCount = $derived(ids.filter(isInternal).length);
 
   const isSel = (a: AssetSummary) =>
     selected?.kind === a.kind && selected?.name === a.name && (selected?.catalog ?? 'personal') === catalogOf(a);

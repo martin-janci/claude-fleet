@@ -20,7 +20,7 @@
 
 use super::answer;
 use super::bindings::{self, Binding};
-use super::definition::{Loaded, StoreKind, TriggerSource, Workspace};
+use super::definition::{Loaded, StoreKind, TriggerSource, Workspace, MAX_SCAN_JOBS};
 use super::diagnostics;
 use super::grant::Sources;
 use super::records;
@@ -58,8 +58,6 @@ pub const ITEM_COMMENTS: usize = 20;
 /// existed takes as the rule's start: such a poll read the hub's synced
 /// copy that far back.
 pub const SYNC_LAG_SECS: i64 = 30 * 60;
-/// New scan entries one poll turns into jobs, at most.
-pub const SCAN_MAX_JOBS: usize = 10;
 /// Seconds a scan's tool call may take.
 pub const SCAN_CALL_SECS: u64 = 120;
 /// How long a kept subject (a scan entry, a person's request) lives.
@@ -1155,7 +1153,7 @@ impl FleetPoller {
         let mut jobs = Vec::new();
         for (job, subject) in planned {
             let seen = subject_seen(&self.store, rule.id, &job.dedup_key, now)?;
-            if seen || jobs.len() >= t.max_jobs.unwrap_or(SCAN_MAX_JOBS).min(SCAN_MAX_JOBS) {
+            if seen || jobs.len() >= t.max_jobs.unwrap_or(MAX_SCAN_JOBS).min(MAX_SCAN_JOBS) {
                 continue;
             }
             keep_subject(&self.store, rule.id, &job.dedup_key, &subject, now)?;
