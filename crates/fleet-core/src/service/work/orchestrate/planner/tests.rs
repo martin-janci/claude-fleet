@@ -333,3 +333,22 @@ fn the_snapshot_says_why_the_last_answer_was_refused() {
         "{snap}"
     );
 }
+
+/// Lanes design L2: `create_item` may name its lane, which the create card
+/// carries beside the tree; a name that cannot be a lane refuses the answer.
+#[test]
+fn a_created_item_may_name_its_lane() {
+    let c = parse_commands(
+        r#"[{"command":"create_item","title":"Schema","lane":"backend"},
+            {"command":"create_item","title":"Screen"}]"#,
+    )
+    .unwrap();
+    assert_eq!(lanes_of(&c), vec![Some("backend".to_string()), None]);
+    assert_eq!(tree_of(&c).len(), 2);
+    let long = format!(
+        r#"[{{"command":"create_item","title":"x","lane":"{}"}}]"#,
+        "l".repeat(41)
+    );
+    assert!(parse_commands(&long).unwrap_err().contains("command 0"));
+    assert!(PLANNER_PROMPT.contains("lane?:"));
+}

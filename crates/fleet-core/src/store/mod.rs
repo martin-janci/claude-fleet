@@ -42,6 +42,7 @@ mod item_verify;
 mod layers;
 mod library;
 mod local_workspaces;
+mod mission_lanes;
 mod mission_loop;
 mod nl_census;
 mod orchestration;
@@ -182,6 +183,7 @@ pub use local_workspaces::{
     LocalWorkspaceStatus, NewLocalConflict, NewLocalWorkspace, SideSeen, LOCAL_CONFLICT_KINDS,
     LOCAL_WORKSPACE_DRIVERS, LOCAL_WORKSPACE_STATES,
 };
+pub use mission_lanes::{lane_name, MissionLaneRow, LANE_NAME_MAX_CHARS, LANE_STATES};
 pub use mission_loop::{
     CardRow, GrantRow, MissionTaskCounts, NewCard, NewGrant, CARDS_OPEN_CAP, CARD_KINDS,
     CARD_STATES, GRANT_MAX_SECS, GRANT_UNTIL_DONE_AT, MISSION_LEASE_SECS,

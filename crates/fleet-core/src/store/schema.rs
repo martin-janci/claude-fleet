@@ -412,6 +412,17 @@ fn routine_runs_has_memory_read_at(conn: &Connection) -> rusqlite::Result<bool> 
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 206: `work_items` already has its
+/// `lane_id` column.
+fn work_items_has_lane_id(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('work_items') WHERE name = 'lane_id'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 205: `routine_runs` already has its
 /// `memory_retry_at` column.
 fn routine_runs_has_memory_retry_at(conn: &Connection) -> rusqlite::Result<bool> {
@@ -2332,6 +2343,13 @@ const MIGRATIONS: &[Migration] = &[
         version: 205,
         sql: include_str!("../../migrations/205_routine_memory_reads.sql"),
         already_applied: Some(routine_runs_has_memory_retry_at),
+    },
+    // Mission lanes (lanes design L2): `mission_lanes` and the members'
+    // `lane_id`. An ADD COLUMN, so guarded.
+    Migration {
+        version: 206,
+        sql: include_str!("../../migrations/206_mission_lanes.sql"),
+        already_applied: Some(work_items_has_lane_id),
     },
 ];
 

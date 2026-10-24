@@ -1070,11 +1070,15 @@ impl Store {
                     m.name
                 )));
             }
-            tx.execute(
+            let left = tx.execute(
                 "UPDATE work_items SET orchestration_project_id = NULL \
                  WHERE id = ?1 AND orchestration_project_id = ?2",
                 rusqlite::params![item_id, id],
-            )? > 0
+            )? > 0;
+            if left {
+                self.clear_item_lane(item_id)?;
+            }
+            left
         };
         if changed {
             self.touch_mission(id)?;
@@ -1137,7 +1141,7 @@ impl Store {
         Ok(())
     }
 
-    fn touch_mission(&self, id: i64) -> Result<(), IpcError> {
+    pub(super) fn touch_mission(&self, id: i64) -> Result<(), IpcError> {
         self.conn.execute(
             "UPDATE orchestration_projects SET updated_at = ?1, version = version + 1 \
              WHERE id = ?2",
@@ -1338,7 +1342,7 @@ impl Store {
     }
 }
 
-fn refuse_final(m: &MissionRow) -> Result<(), IpcError> {
+pub(super) fn refuse_final(m: &MissionRow) -> Result<(), IpcError> {
     if MISSION_FINAL_STATES.contains(&m.state.as_str()) {
         Err(invalid(format!(
             "{} is {}; a finished mission does not change",

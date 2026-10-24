@@ -76,6 +76,9 @@ pub struct SetMissionItemArgs {
     pub mission_id: i64,
     pub item_id: i64,
     pub on: bool,
+    /// The mission lane to put the task in; "" takes it out (lanes L2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lane: Option<String>,
 }
 
 /// `delete_mission`.
@@ -567,6 +570,7 @@ pub(crate) mod routed {
         let wire = WorkLinkArgs {
             item_id: Some(args.item_id),
             on: Some(args.on),
+            lane: args.lane,
             ..write("mission_item", Some(args.mission_id))
         };
         match backend.hub() {

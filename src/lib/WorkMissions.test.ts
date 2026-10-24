@@ -582,6 +582,58 @@ describe('WorkMissions', () => {
     });
   });
 
+  // Lanes design L2: a person puts a task in a lane, names a new one, or
+  // takes it out of its lane; the graph draws the mission's lanes.
+  describe('lanes', () => {
+    async function open() {
+      handlers.work_mission = () => ({
+        mission: current,
+        items: [item(10, 'Payments v2'), item(11, 'Schema'), item(12, 'API')],
+        graph: {
+          nodes: [
+            { item_id: 10, state: 'ready', wave: 1 },
+            { item_id: 11, state: 'ready', wave: 1 },
+            { item_id: 12, state: 'ready', wave: 1 },
+          ],
+          waves: 1,
+        },
+        lanes: [{ id: 1, mission_id: 4, name: 'backend', state: 'idle', item_ids: [11] }],
+        events: [],
+        may_change: true,
+      });
+      renderMissions();
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-row'));
+      await flush();
+    }
+
+    it('moves a task between lanes and names a new one', async () => {
+      await open();
+      const picks = screen.getAllByTestId('mission-lane-pick') as HTMLSelectElement[];
+      expect(picks.map((p) => p.value)).toEqual(['backend', '']);
+      await fireEvent.change(picks[1], { target: { value: 'backend' } });
+      await flush();
+      expect(calls('set_mission_item')[0]).toEqual({ mission_id: 4, item_id: 12, on: true, lane: 'backend' });
+      await fireEvent.change(picks[0], { target: { value: '' } });
+      await flush();
+      expect(calls('set_mission_item')[1]).toEqual({ mission_id: 4, item_id: 11, on: true, lane: '' });
+      await fireEvent.change(picks[1], { target: { value: '\u0000new' } });
+      await flush();
+      await fireEvent.input(screen.getByTestId('mission-lane-name'), { target: { value: ' web ' } });
+      await fireEvent.click(screen.getByTestId('mission-lane-save'));
+      await flush();
+      expect(calls('set_mission_item')[2]).toEqual({ mission_id: 4, item_id: 12, on: true, lane: 'web' });
+    });
+
+    it('draws the mission\'s lanes in the graph', async () => {
+      await open();
+      await fireEvent.click(screen.getByTestId('mission-view-graph'));
+      await flush();
+      expect(screen.getByTestId('mission-detail').textContent).toContain('backend');
+      expect(screen.getByTestId('mission-detail').textContent).toContain('No lane');
+    });
+  });
+
   describe('tasks and child sessions open from the detail', () => {
     const liveDetail = () => ({
       mission: mission({ state: 'active' }),

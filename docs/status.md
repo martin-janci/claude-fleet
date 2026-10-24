@@ -1068,8 +1068,12 @@ own diff (`run::subagent_note`, `orchestrator.run_subagents`, on); with
 `orchestrator.planner_reads` (off) the planner runs in the mission's
 checkout on its host with Read, Grep and Glob; and its prompt says items
 changing the same files or shared registry depend on each other. The lanes
-design (`docs/superpowers/specs/2026-10-23-mission-lanes-design.md`, L2–L6)
-waits on the owner. A mission's worker is refused a person's
+design's decisions D1–D9 are accepted (2026-10-24). Lanes L2 (migration
+206, `store/mission_lanes.rs`): a mission's tasks can be put in named lanes
+by a plan's `Lane` column, the planner's `create_item { lane }` and a
+person (`work_link { mission_item, lane }`, the task row's lane picker);
+`work { mission }` lists them and the Graph view groups by them. Nothing
+runs differently yet: the lead session per lane is L3. A mission's worker is refused a person's
 step (`gh pr merge` / `ready`, a push to `main` / `master`, a tracker CLI)
 by fleet's `PreToolUse(Bash)` guard (`orchestrate/guard.rs`): a shell
 prefilter that asks the hub only about those commands and lets the command

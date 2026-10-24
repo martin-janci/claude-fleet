@@ -30,8 +30,10 @@
     nodeLabel,
     overrideRunEvidence,
     retryWorkItem,
+    laneOfItem,
     sessionsByItem,
     setMissionItem,
+    setMissionLane,
     setWorkDep,
     setWorkDoneWhen,
     setWorkHold,
@@ -121,6 +123,22 @@
   // The task whose missing run evidence a person is overriding, and why.
   let overrideFor = $state<number | null>(null);
   let overrideText = $state('');
+  /** The task whose new lane is being named (lanes design L2). */
+  let laneFor = $state<number | null>(null);
+  let laneText = $state('');
+  const NEW_LANE = '\u0000new';
+  async function saveLane(): Promise<void> {
+    if (laneFor == null || !laneText.trim()) return;
+    if (await act(setMissionLane(mission.id, laneFor, laneText))) laneFor = null;
+  }
+  function pickLane(itemId: number, v: string): void {
+    if (v === NEW_LANE) {
+      laneFor = itemId;
+      laneText = '';
+    } else {
+      void act(setMissionLane(mission.id, itemId, v || null));
+    }
+  }
 
   async function saveOverride() {
     if (overrideFor == null || !overrideText.trim()) return;
@@ -257,6 +275,22 @@
                     </form>
                   {/if}
                 {/if}
+                {#if laneFor === n.item_id}
+                  <form class="conds" onsubmit={(e) => (e.preventDefault(), void saveLane())}>
+                    <input
+                      type="text"
+                      aria-label="New lane's name"
+                      placeholder="Lane name, e.g. backend"
+                      maxlength="40"
+                      bind:value={laneText}
+                      data-testid="mission-lane-name"
+                    />
+                    <span class="row">
+                      <button class="btn" type="submit" disabled={busy || !laneText.trim()} data-testid="mission-lane-save">Put in lane</button>
+                      <button class="btn btn--quiet" type="button" onclick={() => (laneFor = null)}>Cancel</button>
+                    </span>
+                  </form>
+                {/if}
                 {#if condsFor === n.item_id}
                   <form class="conds" onsubmit={(e) => (e.preventDefault(), void saveConds())}>
                     <textarea
@@ -301,7 +335,21 @@
               {#if it.id === mission.root_item_id}
                 <span class="muted small">root</span>
               {:else if mayChange}
+                {@const lane = laneOfItem(detail, it.id)}
                 {@const choices = depChoices(n)}
+                <select
+                  class="dep-pick"
+                  aria-label="Lane"
+                  title="Lane: the tasks one session works through on one branch"
+                  disabled={busy}
+                  value={lane?.name ?? ''}
+                  data-testid="mission-lane-pick"
+                  onchange={(e) => pickLane(it.id, (e.currentTarget as HTMLSelectElement).value)}
+                >
+                  <option value="">No lane</option>
+                  {#each detail.lanes ?? [] as l (l.id)}<option value={l.name}>{l.name}</option>{/each}
+                  <option value={NEW_LANE}>New lane…</option>
+                </select>
                 {#if choices.length > 0}
                   <select
                     class="dep-pick"

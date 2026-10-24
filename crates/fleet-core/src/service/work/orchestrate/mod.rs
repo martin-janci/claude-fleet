@@ -746,11 +746,18 @@ async fn apply_card(
             let lines: Vec<Vec<String>> =
                 serde_json::from_value(p.get("done_when").cloned().unwrap_or_default())
                     .unwrap_or_default();
+            let lanes: Vec<Option<String>> =
+                serde_json::from_value(p.get("lanes").cloned().unwrap_or_default())
+                    .unwrap_or_default();
             let s = lock(&deps.store)?;
             let made = s.propose_tree(root, &tree, "planner")?;
             for (i, row) in made.iter().enumerate() {
                 if let Some(l) = lines.get(i).filter(|l| !l.is_empty()) {
                     s.set_item_done_when(row.id, l, &actor.name())?;
+                }
+                // Lanes design L2: the lane the planner named.
+                if let Some(l) = lanes.get(i).and_then(Option::as_deref) {
+                    s.set_item_lane(m.id, row.id, Some(l), row.project_id, &actor.name())?;
                 }
             }
             if accept_created {
@@ -1553,6 +1560,7 @@ fn card_commands(
                 payload: Some(serde_json::json!({
                     "tree": tree,
                     "done_when": planner::done_when_of(commands),
+                    "lanes": planner::lanes_of(commands),
                 })),
             },
         )? {

@@ -235,6 +235,29 @@ export interface MissionDetail {
   /** Where its runs and its time went (lanes design L0); absent from an
    *  older hub. */
   stats?: MissionStats | null;
+  /** Its lanes with the visible tasks each holds (lanes design L2); absent
+   *  when it has none, and from an older hub. */
+  lanes?: MissionLane[];
+}
+
+/** A mission lane (`store::MissionLaneRow`): the tasks one lead session
+ *  works through on one branch in one repository. */
+export interface MissionLane {
+  id: number;
+  mission_id: number;
+  name: string;
+  project_id?: number | null;
+  branch?: string | null;
+  lead_session_id?: number | null;
+  relay?: number;
+  /** `idle` | `held` | `done`. */
+  state: string;
+  item_ids: number[];
+}
+
+/** The lane a task is in, if any. */
+export function laneOfItem(detail: Pick<MissionDetail, 'lanes'>, itemId: number): MissionLane | undefined {
+  return (detail.lanes ?? []).find((l) => l.item_ids.includes(itemId));
 }
 
 /** A mission's run metrics (`missions::stats::MissionStats`). */
@@ -814,6 +837,16 @@ export function setMissionRepo(
 export function setMissionItem(missionId: number, itemId: number, on: boolean): Promise<Result<Mission>> {
   return changed(
     invokeCmd<Mission>('set_mission_item', { args: { mission_id: missionId, item_id: itemId, on } }),
+  );
+}
+
+/** Put a member task in the mission lane named `lane`, or take it out of
+ *  its lane with `null` (lanes design L2). */
+export function setMissionLane(missionId: number, itemId: number, lane: string | null): Promise<Result<Mission>> {
+  return changed(
+    invokeCmd<Mission>('set_mission_item', {
+      args: { mission_id: missionId, item_id: itemId, on: true, lane: lane?.trim() ?? '' },
+    }),
   );
 }
 

@@ -104,6 +104,11 @@ pub struct MissionDetail {
     /// members this caller may see. Absent from an older hub.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stats: Option<stats::MissionStats>,
+    /// Its lanes (lanes design L2), each with the members of `items` it
+    /// holds. Empty, and absent, for a mission with none and from an older
+    /// hub.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lanes: Vec<crate::store::MissionLaneRow>,
 }
 
 /// A finished mission's leftovers, as far as the caller may see them.
@@ -265,6 +270,14 @@ pub fn mission(
     let plan = super::orchestrate::plan_for(&s, &mission)?;
     let sessions = live_sessions(&s, scope, id)?;
     let stats = Some(mission_stats(&s, &mission, &items)?);
+    let lanes = s
+        .mission_lanes(id)?
+        .into_iter()
+        .map(|mut l| {
+            l.item_ids.retain(|i| items.iter().any(|it| it.id == *i));
+            l
+        })
+        .collect();
     let finish = if crate::store::MISSION_FINAL_STATES.contains(&mission.state.as_str()) {
         Some(finish(&s, scope, id, sessions.clone())?)
     } else {
@@ -281,6 +294,7 @@ pub fn mission(
         finish,
         sessions,
         stats,
+        lanes,
     })
 }
 
@@ -651,7 +665,7 @@ pub fn repo(
     )
 }
 
-/// `work_link { action: mission_item, mission_id, item_id, on? }`. The
+/// `work_link { action: mission_item, mission_id, item_id, on?, lane? }`. The
 /// person fence on the item's own sessions is the tool layer's
 /// (`require_drive_on_item_sessions`), as for a sprint.
 pub fn item(
@@ -677,7 +691,16 @@ pub fn item(
             ));
         }
     }
-    s.set_mission_item(id, item, args.on.unwrap_or(true), &actor(scope))
+    let on = args.on.unwrap_or(true);
+    let m = s.set_mission_item(id, item, on, &actor(scope))?;
+    // Lanes design L2: a person puts the task in a lane, or takes it out.
+    if let Some(l) = args.lane.as_deref().filter(|_| on) {
+        let lane = Some(l.trim()).filter(|l| !l.is_empty());
+        let project = s.get_work_item(item)?.and_then(|i| i.project_id);
+        s.set_item_lane(id, item, lane, project, &actor(scope))?;
+        return Ok(s.get_mission(id)?.unwrap_or(m));
+    }
+    Ok(m)
 }
 
 /// What `mission_delete` answers.

@@ -61,6 +61,10 @@ pub enum Command {
         /// this same answer (0-based, an earlier one).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         depends_on: Vec<serde_json::Value>,
+        /// The mission's lane it goes in (lanes design L2): the tasks one
+        /// lead session works through on one branch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lane: Option<String>,
     },
     AddDep {
         item_id: i64,
@@ -343,7 +347,9 @@ a generated file, a table of tools or commands, a status document), depend on ea
 instead of running side by side: two branches that both change one conflict when they are \
 merged. Commands, each an object with a \"command\" field: \
 create_item {title, notes?, done_when?: [\"ci\" | \"ci:<check>\" | \"review\" | \
-\"test:<command>\" | \"person\"], depends_on?: [item id | \"new:<n>\"]}; add_dep {item_id, \
+\"test:<command>\" | \"person\"], depends_on?: [item id | \"new:<n>\"], lane?: a short name \
+of the line of work it belongs to, the same for items one session should do one after the \
+other in one repository}; add_dep {item_id, \
 depends_on}; remove_dep {item_id, depends_on}; run {item_id, role?: implement | review | test \
 | research | integrate}; retry {item_id, note?}; cancel {item_id}; hold {item_id}; ask \
 {question, options?}; complete {evidence?}; note {text}. Use [] when nothing needs judgment.";
@@ -555,10 +561,15 @@ pub fn parse_commands(answer: &str) -> Result<Vec<Command>, String> {
                 title,
                 depends_on,
                 done_when,
+                lane,
                 ..
             } => {
                 if title.trim().is_empty() || title.chars().count() > 300 {
                     return Err(format!("command {n}: a title of 1 to 300 characters"));
+                }
+                if let Some(l) = lane {
+                    crate::store::lane_name(l)
+                        .map_err(|e| format!("command {n}: {}", e.message))?;
                 }
                 crate::store::normalize_done_when(done_when)
                     .map_err(|e| format!("command {n}: {}", e.message))?;
@@ -634,6 +645,17 @@ pub fn tree_of(commands: &[Command]) -> Vec<TreeEntry> {
 }
 
 /// The `done_when` lines each `create_item` asked for, in order.
+/// The lane each `create_item` named, in order (lanes design L2).
+pub fn lanes_of(commands: &[Command]) -> Vec<Option<String>> {
+    commands
+        .iter()
+        .filter_map(|c| match c {
+            Command::CreateItem { lane, .. } => Some(lane.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
 pub fn done_when_of(commands: &[Command]) -> Vec<Vec<String>> {
     commands
         .iter()
