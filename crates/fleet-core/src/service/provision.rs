@@ -3939,16 +3939,18 @@ mod tests {
                 );
             }
         }
-        // Skills are re-shipped (same bytes) with their `.fleet-managed`
-        // markers (task 6) — the only unconditional writes. The git-tree
-        // preflight reads the dir too but writes nothing.
+        // Skills and the prompt-suggestion plugin are re-shipped (same
+        // bytes) with their `.fleet-managed` markers (task 6) — the only
+        // unconditional writes: two SKILL.md files, three plugin files and
+        // three markers. The git-tree preflight reads the dirs too but
+        // writes nothing.
         let skill_writes = steps
             .iter()
             .filter(
                 |s| matches!(s, Step::Script(b) if b.contains(".claude/skills") && b.contains("printf")),
             )
             .count();
-        assert_eq!(skill_writes, 4);
+        assert_eq!(skill_writes, 8);
     }
 
     /// A live Claude rewrote `~/.claude.json` between the read and the
@@ -4078,8 +4080,13 @@ mod tests {
             calls.iter().all(|c| c.stdin.is_none()),
             "no upload may happen after a parse failure"
         );
+        // The prompt-suggestion plugin's source names settings.json (it
+        // reads the hook URL from it), so its writes are not settings work.
         assert!(
-            !calls.iter().any(|c| c.command().contains("settings.json")),
+            !calls.iter().any(|c| {
+                let cmd = c.command();
+                cmd.contains("settings.json") && !cmd.contains(".claude/skills")
+            }),
             "provisioning stops at the first failure"
         );
         // Skills + CLAUDE.md (steps before the failure) were still written.
