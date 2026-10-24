@@ -1408,8 +1408,9 @@ pub async fn run_planner(
             signed_out.push(login.clone());
             let s = lock(&deps.store)?;
             let words = limit::Words::read(&s, m.id)?;
-            match limit::choose_in(&s, m, grant.as_ref(), now_unix(), &words, &signed_out)? {
-                Ok(next) if attempts < limit::LIMIT_ATTEMPTS => {
+            // This ask's own refusal, not the chooser's, when none is left.
+            match limit::choose_in(&s, m, grant.as_ref(), now_unix(), &words, &signed_out) {
+                Ok(Ok(next)) if attempts < limit::LIMIT_ATTEMPTS => {
                     first_signed_out = Some(first);
                     login = next;
                     continue;
@@ -2117,9 +2118,6 @@ pub async fn tick_mission(deps: &Deps, id: i64, now: i64) -> Result<(), IpcError
     if a.effective >= 1 {
         integrate::check(deps, &m).await;
     }
-    // A run whose git read failed (a host that dropped for a moment) is read
-    // again; the gate holds it `pending` meanwhile.
-    crate::service::work::report::retry_unread_evidence(&deps.store, &deps.ssh, id, now).await;
     let s = lock(&deps.store)?;
     let counts = s.mission_task_counts(id)?;
     let m = s.get_mission(id)?.unwrap_or(m);
@@ -2142,11 +2140,13 @@ pub async fn tick_once(deps: &Deps, now: i64) {
             if !crate::service::loops::gate_in("missions", &s, next) {
                 return;
             }
-            if !settings::get_bool(&s, settings::ORCHESTRATOR_ENABLED) {
-                crate::service::loops::report("missions", Ok::<_, String>(()), next);
-                return;
+            // With the loop off no mission is ticked, but a failed git
+            // read is still read again below.
+            if settings::get_bool(&s, settings::ORCHESTRATOR_ENABLED) {
+                s.missions_due(now).unwrap_or_default()
+            } else {
+                Vec::new()
             }
-            s.missions_due(now).unwrap_or_default()
         }
         Err(e) => {
             crate::service::loops::report("missions", Err(e.to_string()), next);
@@ -2163,6 +2163,11 @@ pub async fn tick_once(deps: &Deps, now: i64) {
             }
         }
     }
+    // A run whose git read failed (a host that dropped for a moment) is read
+    // again, in a mission or not and with the orchestrator off too: the gate
+    // holds it `pending` meanwhile. After the missions, outside every
+    // mission's lease, and bounded per pass.
+    crate::service::work::report::retry_unread_evidence(&deps.store, &deps.ssh, now).await;
     crate::service::loops::report("missions", failed.map_or(Ok(()), Err), next);
 }
 

@@ -20,7 +20,7 @@
 
 use super::answer;
 use super::bindings::{self, Binding};
-use super::definition::{Loaded, StoreKind, TriggerSource, Workspace};
+use super::definition::{Loaded, StoreKind, TriggerSource, Workspace, DEFAULT_SCAN_EVERY_MINS};
 use super::diagnostics;
 use super::grant::Sources;
 use super::records;
@@ -1249,7 +1249,7 @@ impl AgentPoller for FleetPoller {
                 }
             }
             TriggerSource::McpScan => {
-                let every = d.trigger.every_mins.unwrap_or(60) * 60;
+                let every = d.trigger.every_mins.unwrap_or(DEFAULT_SCAN_EVERY_MINS) * 60;
                 if c.scan.is_some_and(|t| now - t < every) {
                     Vec::new()
                 } else {
@@ -1427,8 +1427,12 @@ impl FleetRunner {
                     .ok()
                     .flatten()
             });
-            if last.is_some_and(|at| at + cooldown > now) {
-                return RunOutcome::Skipped {
+            // Deferred, not skipped: the poller has already spent this
+            // trigger's dedup key (a PR's head, a comment), so a skip
+            // would lose it for good.
+            if let Some(at) = last.filter(|at| at + cooldown > now) {
+                return RunOutcome::Deferred {
+                    at: at + cooldown,
                     reason: format!("cooldown: {} ran less than {cooldown}s ago", job.subject),
                 };
             }
@@ -1637,8 +1641,15 @@ impl FleetRunner {
         answer: &Value,
         now: i64,
     ) -> Value {
-        let (mut planned, mut unplanned) =
-            super::actions::plan(inst, rule.id, &rule.scope, subject, answer, now);
+        let (mut planned, mut unplanned) = super::actions::plan(
+            inst,
+            rule.id,
+            &rule.scope,
+            subject,
+            answer,
+            now,
+            rule.level == "act",
+        );
         let s = lock(&self.store).ok();
         let mut out: Vec<Value> = Vec::new();
         if let Some(s) = &s {

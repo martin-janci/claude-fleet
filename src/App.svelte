@@ -1268,7 +1268,7 @@
              normal session reconnects its PTY. The Conversation is the only
              view these rows have. -->
         <div class="view-slot">
-          <ConversationPanel session={$selectedSession} visible={!fleetPageShown} />
+          <ConversationPanel session={$selectedSession} visible={!fleetPageShown && !fleetSessionShown} />
         </div>
       {:else}
         <!-- TerminalView stays mounted underneath so the PTY and its ANSI
@@ -1316,7 +1316,11 @@
         {/if}
         {#if conversationMode && $selectedSession}
           <div class="view-slot overlay">
-            <ConversationPanel session={$selectedSession} visible={!fleetPageShown} onOpenTerminal={() => setSessionView('terminal')} />
+            <ConversationPanel
+              session={$selectedSession}
+              visible={!fleetPageShown && !fleetSessionShown}
+              onOpenTerminal={() => setSessionView('terminal')}
+            />
           </div>
         {/if}
       {/if}

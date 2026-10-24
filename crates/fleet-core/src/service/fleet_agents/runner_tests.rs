@@ -1521,6 +1521,60 @@ async fn an_unattended_review_never_approves() {
     );
 }
 
+#[tokio::test]
+async fn an_auto_review_a_person_sends_keeps_its_verdict() {
+    // `auto` below `act` still waits for a person, who signs the verdict.
+    let f = review_fx(true).at("propose");
+    let a = reviewed(
+        &f,
+        r#"{"verdict":"REQUEST_CHANGES","summary":"Broken.","findings":[]}"#,
+    )
+    .await;
+    assert_eq!(a.state, "pending");
+    let p: Value = serde_json::from_str(&a.payload).unwrap();
+    assert_eq!(p["event"], "REQUEST_CHANGES", "{p}");
+    let f = review_fx(true).at("propose");
+    let a = reviewed(
+        &f,
+        r#"{"verdict":"APPROVE","summary":"Ship it.","findings":[]}"#,
+    )
+    .await;
+    let p: Value = serde_json::from_str(&a.payload).unwrap();
+    assert_eq!(p["event"], "APPROVE", "{p}");
+}
+
+#[tokio::test]
+async fn a_cut_findings_list_says_how_many_it_left_out() {
+    let f = review_fx(false);
+    let a = reviewed(&f, &long_findings(45, 400)).await;
+    let p: Value = serde_json::from_str(&a.payload).unwrap();
+    let body = p["body"].as_str().unwrap();
+    assert!(body.chars().count() <= 2500, "{}", body.chars().count());
+    assert!(
+        body.contains("More findings:\n- `src/a.rs:130`: f30 "),
+        "{body}"
+    );
+    assert!(body.contains(" more findings"), "{body}");
+
+    // A diff too large to serve lists every finding, and counts the cut.
+    *f.world.diff_refusal.lock().unwrap() =
+        Some("HTTP 406: Sorry, the diff exceeded the maximum number of lines".into());
+    assert!(matches!(
+        f.executor().execute(&a).await,
+        ActionResult::Done(_)
+    ));
+    let writes = f.world.gh_writes.lock().unwrap().clone();
+    let review = writes.iter().find(|w| w.starts_with("review")).unwrap();
+    assert!(
+        review.contains("Outside the diff:\n- `src/a.rs:100`: f0 "),
+        "{review}"
+    );
+    assert!(
+        review.contains(" more findings\n\n[fleet-agent:inst]"),
+        "{review}"
+    );
+}
+
 /// The review's answer with `n` findings of `len` characters, each far
 /// outside the diff.
 fn long_findings(n: usize, len: usize) -> String {
@@ -2242,7 +2296,7 @@ async fn a_scan_reads_its_window_and_keeps_to_its_max_jobs() {
     );
 }
 
-/// `run.branch` picks the worktree's branch, and `run.cooldown_secs` skips
+/// `run.branch` picks the worktree's branch, and `run.cooldown_secs` defers
 /// a subject this instance finished lately.
 #[tokio::test]
 async fn a_run_reads_its_branch_and_waits_out_its_cooldown() {
@@ -2300,8 +2354,13 @@ async fn a_run_reads_its_branch_and_waits_out_its_cooldown() {
         )
         .unwrap();
     let second = f.claim(&[job("c2")]);
+    // Deferred to the cooldown's end, not skipped: the poller will not
+    // offer this trigger again.
     match f.runner().run(&second[0], Some(&f.rule)).await {
-        RunOutcome::Skipped { reason } => assert!(reason.contains("cooldown"), "{reason}"),
+        RunOutcome::Deferred { at, reason } => {
+            assert!(reason.contains("cooldown"), "{reason}");
+            assert!(at > crate::store::now_unix() + 3500, "{at}");
+        }
         other => panic!("{other:?}"),
     }
 }

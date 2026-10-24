@@ -52,6 +52,15 @@ pub struct ProjectRow {
     /// also the right answer for such a hub: it has no system projects.
     #[serde(default)]
     pub system: bool,
+    /// The checkout's `origin` when it names a github.com repository
+    /// (migration 207, `repo_url::github_origin`); `None` when it has none,
+    /// is not on GitHub, or was not read yet. `owner`/`repo` are not that
+    /// identity (an adopted non-GitHub checkout is `local/<dir>`), so a
+    /// clone of this project elsewhere (New session on another fleet) uses
+    /// this URL and is not offered without it. `serde(default)` for a hub
+    /// built before 207, whose rows carry no such key.
+    #[serde(default)]
+    pub github_origin: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -74,7 +83,7 @@ pub type FingerprintKeys = std::collections::HashMap<i64, Vec<String>>;
 
 /// Columns every `ProjectRow` query selects, in [`map_project_row`] order.
 pub(super) const PROJECT_COLUMNS: &str =
-    "id, owner, repo, base_path, last_session_at, adopted, system";
+    "id, owner, repo, base_path, last_session_at, adopted, system, github_origin";
 
 /// Map a row selected with [`PROJECT_COLUMNS`] (at column offset 0).
 pub(super) fn map_project_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProjectRow> {
@@ -86,6 +95,7 @@ pub(super) fn map_project_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Proje
         last_session_at: row.get(4)?,
         adopted: row.get::<_, i64>(5)? != 0,
         system: row.get::<_, i64>(6)? != 0,
+        github_origin: row.get(7)?,
     })
 }
 

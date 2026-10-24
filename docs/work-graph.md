@@ -1055,8 +1055,10 @@ and — for an item an implement run worked on — that run's **evidence**:
 **Run evidence.** What git showed when the item's latest implement run
 finished: at least one commit or one changed file. A run that reports
 *done* with neither — nothing committed, nothing changed, or a checkout git
-still could not read half an hour after the run (the mission loop reads a
-failed read again meanwhile, and the evidence stays pending) — leaves the
+still could not read half an hour after the run (fleet reads a failed
+read again about once a minute meanwhile, on the missions' loop pass, for
+any run — in a mission or not, and with the orchestrator off — and the
+evidence stays pending) — leaves the
 gate blocked, and the mission card says what is
 missing (*No run evidence: the implement run committed nothing…*). A person
 answers it with **Override…** and a reason (`work_link { verify, item_id,

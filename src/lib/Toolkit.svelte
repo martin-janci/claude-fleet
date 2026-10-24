@@ -17,6 +17,7 @@
   import { composerPresets } from './composer_presets';
   import { downloads, downloadsOpen } from './downloads';
   import { goTo } from './destination';
+  import { shq } from './fleets';
   import AssetsPanel from './AssetsPanel.svelte';
   import PromptsSnippets from './PromptsSnippets.svelte';
   import Button from './kit/Button.svelte';
@@ -69,7 +70,10 @@
   });
   const canManage = $derived(access === 'manage' || access === 'unknown');
   const onHub = $derived($hubStatus.remote);
-  const grantCmd = $derived(`fleet-hub client grant ${$hubStatus.client_name ?? '<this device>'} assets`);
+  // Quoted: a paired device's name may hold spaces or an apostrophe.
+  const grantCmd = $derived(
+    `fleet-hub client grant ${$hubStatus.client_name ? shq($hubStatus.client_name) : '<this device>'} assets`,
+  );
   const blockedWhy = $derived(
     access === 'read_only'
       ? "This device may only look: the hub has not granted it the asset catalog."
@@ -155,11 +159,14 @@
         <div class="notice" data-testid="toolkit-unavailable"><p>{blockedWhy}</p></div>
       {/if}
       {#if !$catalog}
-        {#if access !== 'unconfigured'}
+        {#if canManage}
           <div class="empty" data-testid="toolkit-skills-empty">
             <p>No catalog is loaded yet. Set one up, or pull it, in the Assets catalog.</p>
             <Button onclick={() => openAssets()}>Open the Assets catalog</Button>
           </div>
+        {:else if access === 'read_only'}
+          <!-- The notice above says what to do; this device cannot set one up. -->
+          <p class="none" data-testid="toolkit-none">Nothing is listed yet.</p>
         {/if}
       {:else}
         <div class="bar">

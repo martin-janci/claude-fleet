@@ -791,22 +791,34 @@ export async function fleetNewSession(fleet: string, a: FleetNewSession): Promis
   return r;
 }
 
-/** Add `owner/repo` to an extra fleet by cloning it from GitHub onto
+/** The GitHub `owner/repo` a GitHub remote URL names (`git@github.com:o/r.git`,
+ *  `https://github.com/o/r`, `ssh://git@github.com/o/r`), or null. */
+export function githubRepoOf(url: string): { owner: string; repo: string } | null {
+  const m = /^(?:git@github\.com:|ssh:\/\/git@github\.com\/|https?:\/\/github\.com\/)([^/\s]+)\/([^/\s]+?)(?:\.git)?\/?$/.exec(
+    url.trim(),
+  );
+  return m ? { owner: m[1], repo: m[2] } : null;
+}
+
+/** Add a repository to an extra fleet by cloning `url` — the window's
+ *  project's own GitHub origin (`ProjectRow::github_origin`), never a URL
+ *  made up from its owner/repo, which need not name it on GitHub — onto
  *  `host_alias` there, for a New session on a fleet that does not have the
  *  repository yet. A fleet that has it after all (its list was stale) is
  *  re-listed and its row answered. */
 export async function fleetCloneProject(
   fleet: string,
   host_alias: string,
-  owner: string,
-  repo: string,
+  url: string,
 ): Promise<Result<ProjectTreeRow>> {
   const r = await fleetCmd<ProjectTreeRow>('add_project', fleet, {
-    args: { host_alias, source: { kind: 'clone', url: `https://github.com/${owner}/${repo}` } },
+    args: { host_alias, source: { kind: 'clone', url } },
   });
   if (r.ok || r.error.code !== 'E_EXISTS') return r;
+  const named = githubRepoOf(url);
+  if (!named) return r;
   await loadFleetRows(fleet);
-  const p = repoProject(get(fleetRows).get(fleet)?.projects, owner, repo);
+  const p = repoProject(get(fleetRows).get(fleet)?.projects, named.owner, named.repo);
   return p ? { ok: true, value: p } : r;
 }
 
@@ -862,10 +874,13 @@ export function fleetPtyId(fleet: string, s: Pick<SessionRow, 'id'>, view?: numb
 
 /** An extra fleet that can start a session in a repository: its project row
  *  for it, by the id that fleet's hub knows it under, or null while that hub
- *  does not have the repository yet (the start clones it there first). */
+ *  does not have the repository yet — then `cloneUrl` is the GitHub origin
+ *  the start clones there first. */
 export interface FleetChoice {
   fleet: FleetInfo;
   projectId: number | null;
+  /** Set exactly when `projectId` is null. */
+  cloneUrl?: string | null;
 }
 
 const sameText = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
@@ -887,21 +902,31 @@ export function fleetIsDown(f: Pick<FleetInfo, 'connection'>): boolean {
 
 /** The extra fleets that can be used now (connected or connecting, not a
  *  duplicate, not unavailable), each with its project for `owner/repo` when
- *  it has one. A fleet without the repository is offered too: a company's
- *  machines must not vanish from New session because its hub has not added
- *  the project yet. The projects of a fleet that went offline stay cached,
- *  so its link decides (review w01-5). */
+ *  it has one. A fleet without the repository is offered too when the
+ *  window's project has a GitHub origin (`githubOrigin`), cloned from that
+ *  very URL: a company's machines must not vanish from New session because
+ *  its hub has not added the project yet. Without one there is nothing
+ *  safe to clone (`owner/repo` need not name a GitHub repository), so only
+ *  fleets that have the project are offered. A `local/*` project (adopted
+ *  with no GitHub origin) is offered no other fleet at all: another fleet's
+ *  `local/<dir>` is some other machine's checkout that only shares a folder
+ *  name. The projects of a fleet that went offline stay cached, so its link
+ *  decides (review w01-5). */
 export function fleetChoicesFor(
   owner: string,
   repo: string,
   known: readonly FleetInfo[],
   rows: ReadonlyMap<string, FleetRows>,
+  githubOrigin: string | null = null,
 ): FleetChoice[] {
+  if (sameText(owner, 'local')) return [];
+  const cloneUrl = githubOrigin && githubRepoOf(githubOrigin) ? githubOrigin.trim() : null;
   const out: FleetChoice[] = [];
   for (const f of known) {
     if (f.primary || f.unavailable || f.duplicate_of || fleetIsDown(f)) continue;
     const p = repoProject(rows.get(f.id)?.projects, owner, repo);
-    out.push({ fleet: f, projectId: p?.project.id ?? null });
+    if (p) out.push({ fleet: f, projectId: p.project.id, cloneUrl: null });
+    else if (cloneUrl) out.push({ fleet: f, projectId: null, cloneUrl });
   }
   return out;
 }
@@ -931,22 +956,24 @@ export function rememberedFleetFor(owner: string, repo: string): string | null {
   return readPref<Record<string, string>>(FLEET_BY_REPO_PREF, {}, isRepoMap)[`${owner}/${repo}`.toLowerCase()] ?? null;
 }
 
-/** Remember where `owner/repo` was last started (the primary forgets it). */
+/** Remember where `owner/repo` was last started — the primary too, so a
+ *  start here outranks the owner-matched fleet next time. */
 export function rememberFleetFor(owner: string, repo: string, fleet: string): void {
   const map = { ...readPref<Record<string, string>>(FLEET_BY_REPO_PREF, {}, isRepoMap) };
-  const key = `${owner}/${repo}`.toLowerCase();
-  if (fleet === PRIMARY) delete map[key];
-  else map[key] = fleet;
+  map[`${owner}/${repo}`.toLowerCase()] = fleet;
   writePref(FLEET_BY_REPO_PREF, map);
 }
 
 /** Where New session starts `owner/repo` unless the person picks: the fleet
- *  they last started it on, else the extra fleet that owns the owner's work
- *  (design: "PapayaPOS → company"), else the primary. Only ever one of
- *  `choices` or the primary. */
+ *  they last started it on (the primary included), else the extra fleet that
+ *  owns the owner's work (design: "PapayaPOS → company") if it already has
+ *  the repository, else the primary. A fleet that would first need a clone
+ *  is never the default: that clone onto another machine happens only when
+ *  the person picks the fleet (or started this repository there before).
+ *  Only ever one of `choices` or the primary. */
 export function defaultFleetFor(owner: string, choices: readonly FleetChoice[], remembered: string | null): string {
   if (remembered && (remembered === PRIMARY || choices.some((c) => c.fleet.id === remembered))) return remembered;
-  return choices.find((c) => fleetOwnsOwner(c.fleet, owner))?.fleet.id ?? PRIMARY;
+  return choices.find((c) => c.projectId !== null && fleetOwnsOwner(c.fleet, owner))?.fleet.id ?? PRIMARY;
 }
 
 // ── attention per fleet (Phase 2) ───────────────────────────────────────
@@ -1036,7 +1063,7 @@ export function fleetSessionAt(
 }
 
 /** POSIX single-quoting for a command a person pastes into a shell. */
-function shq(s: string): string {
+export function shq(s: string): string {
   return /^[A-Za-z0-9_.@%+=:,/-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`;
 }
 

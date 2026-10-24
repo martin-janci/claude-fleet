@@ -237,6 +237,10 @@ export interface MissionDetail {
    *  state (a running mission's workers included); absent when there are
    *  none, and from an older hub. */
   sessions?: FinishSession[];
+  /** The planner's open wait, read from its own words rather than the
+   *  `events` page (review r9); `null` when it is not waiting, absent from
+   *  an older hub. */
+  limit_wait?: LimitWait | null;
 }
 
 /** One live session on a mission's member item (`missions::FinishSession`). */
@@ -920,7 +924,13 @@ export function limitWaitSentence(w: LimitWait, now = Date.now() / 1000): string
 
 /** The planner's open wait, when its newest word on the mission (of its runs
  *  and waits) is a `limit_wait`: the mission's state "waiting on a limit". */
-export function plannerLimitWait(detail: Pick<MissionDetail, 'events'>): LimitWait | null {
+export function plannerLimitWait(detail: Pick<MissionDetail, 'events' | 'limit_wait'>): LimitWait | null {
+  // The hub's own reading (review r9): a busy log can push the wait off the
+  // `events` page. An older hub leaves it out, and the page is read.
+  if (detail.limit_wait !== undefined) {
+    const w = detail.limit_wait;
+    return w && typeof w.resets_at === 'number' ? w : null;
+  }
   // `limit_cleared`: a later login of the same ask answered (review r8).
   const last = (detail.events ?? []).find((e) => e.kind === 'planned' || e.kind === 'limit_wait' || e.kind === 'limit_cleared');
   if (last?.kind !== 'limit_wait' || !last.payload) return null;

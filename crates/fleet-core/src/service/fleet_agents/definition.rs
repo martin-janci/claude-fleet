@@ -327,6 +327,9 @@ pub struct Trigger {
 /// Most new entries one scan turns into jobs.
 pub const MAX_SCAN_JOBS: usize = 10;
 
+/// `mcp_scan`: minutes between scans when `every_mins` is unset.
+pub const DEFAULT_SCAN_EVERY_MINS: i64 = 60;
+
 impl Trigger {
     /// The keys set, by name.
     fn set_keys(&self) -> Vec<&'static str> {
@@ -418,7 +421,8 @@ pub struct Run {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub diagnostics: bool,
     /// A subject a run of this instance finished less than this many
-    /// seconds ago is skipped (at most a week; 0 is none).
+    /// seconds ago waits until that many seconds have passed (at most a
+    /// week; 0 is none).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub cooldown_secs: i64,
     /// `project`: the branch the worktree is made from (a template over
@@ -1213,6 +1217,12 @@ pub fn problems(d: &Definition, templates: &BTreeMap<String, String>) -> Vec<Str
         }
         if t.window_mins.is_some_and(|m| !(1..=10_080).contains(&m)) {
             out.push(format!("{at}: window_mins is 1-10080"));
+        }
+        let every = t.every_mins.unwrap_or(DEFAULT_SCAN_EVERY_MINS);
+        if t.window_mins.is_some_and(|w| w < every) {
+            out.push(format!(
+                "{at}: window_mins must cover every_mins ({every}): scans would skip the entries between them"
+            ));
         }
         if t.max_jobs
             .is_some_and(|n| !(1..=MAX_SCAN_JOBS).contains(&n))

@@ -90,6 +90,28 @@ impl Store {
         Ok(id)
     }
 
+    /// Record project `id`'s GitHub origin ([`ProjectRow::github_origin`]):
+    /// the scan's and `service::add_project`'s read of its `origin`, already
+    /// filtered by `repo_url::github_origin`. `project:updated` fires only
+    /// when the value changed, so a rescan that reads the same origin is
+    /// silent.
+    pub fn set_project_github_origin(
+        &self,
+        id: i64,
+        origin: Option<&str>,
+    ) -> Result<(), rusqlite::Error> {
+        let n = self.conn.execute(
+            "UPDATE projects SET github_origin = ?2 WHERE id = ?1 AND github_origin IS NOT ?2",
+            rusqlite::params![id, origin],
+        )?;
+        if n > 0 {
+            if let Some(row) = self.get_project(id)? {
+                self.bus.project_updated(&row);
+            }
+        }
+        Ok(())
+    }
+
     pub fn list_projects(&self) -> Result<Vec<ProjectRow>, rusqlite::Error> {
         let mut stmt = self.conn.prepare_cached(&format!(
             "SELECT {PROJECT_COLUMNS} FROM projects ORDER BY owner, repo"
@@ -141,10 +163,10 @@ impl Store {
         let rows = stmt.query_map([], |row| {
             Ok((
                 map_project_row(row)?,
-                row.get::<_, Option<i64>>(7)?,
-                row.get::<_, Option<String>>(8)?,
+                row.get::<_, Option<i64>>(8)?,
                 row.get::<_, Option<String>>(9)?,
                 row.get::<_, Option<String>>(10)?,
+                row.get::<_, Option<String>>(11)?,
             ))
         })?;
         let mut out: Vec<crate::service::projects::ProjectTreeRow> = Vec::new();

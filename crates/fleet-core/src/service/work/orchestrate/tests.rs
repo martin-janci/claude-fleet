@@ -1391,6 +1391,125 @@ fn the_planner_passes_over_signed_out_logins() {
     );
 }
 
+/// Review r9: with every login the planner may use held signed out (and
+/// none at a limit), the ask is refused with the login to sign in again,
+/// not taken for a usage-limit wait, and no wait is recorded.
+#[tokio::test]
+async fn a_planner_whose_logins_are_all_signed_out_says_sign_in_again() {
+    let fx = fixture();
+    let m = planned_on_mac(&fx);
+    let now = now_unix();
+    {
+        let s = lock(&fx.deps.store).unwrap();
+        s.insert_host("mac", None).unwrap();
+        s.set_host_signed_out_logins(
+            "mac",
+            &[crate::store::SignedOutLogin {
+                profile: None,
+                since: now,
+                checked_at: now,
+            }],
+        )
+        .unwrap();
+        assert!(limit::candidates(&s, &m, None).unwrap().is_empty());
+        let e = limit::choose(&s, &m, None, now).unwrap_err();
+        assert_eq!(e.code, codes::E_CLAUDE_CLI, "{e:?}");
+        assert!(
+            e.message.contains("mac's own login is signed out") && e.message.contains("/login"),
+            "{}",
+            e.message
+        );
+    }
+    let e = run_planner(&fx.deps, &m, "test", &Actor::Loop)
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, codes::E_CLAUDE_CLI, "{e:?}");
+    let s = lock(&fx.deps.store).unwrap();
+    assert!(!limit::waiting(&s, m.id).unwrap(), "no usage-limit wait");
+    assert!(limit::open_waits(&s, m.id, now).unwrap().is_empty());
+}
+
+/// A fake `ssh` whose planner answers on mac's own login with `own` (one
+/// line) and on the `work` profile with an empty command array.
+#[cfg(unix)]
+fn planner_ssh(dir: &std::path::Path, own: &str) -> Arc<crate::ssh::SshClient> {
+    use crate::tmux::fake_exec::{write_exec, PROBE_GUARD};
+    let bin = write_exec(
+        dir,
+        "ssh",
+        &format!(
+            "#!/bin/sh\n{PROBE_GUARD}case \"$*\" in *'-O '*) exit 0;; esac\n\
+             echo {tag}run\n\
+             case \"$*\" in *claude-profiles*) echo '[]';; *) echo {own};; esac\n",
+            tag = planner::PLANNER_TAG,
+            own = crate::shell::quote(own),
+        ),
+    );
+    Arc::new(crate::ssh::SshClient::with_ssh_binary(bin))
+}
+
+/// Review r9 (TASK-291, r8): run_planner itself passes a signed-out login
+/// and a login at its limit over for the next one, takes that one's
+/// answer, and an answer after a wait clears it.
+#[cfg(unix)]
+#[tokio::test]
+async fn run_planner_answers_on_the_next_login() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut fx = fixture();
+    let m = planned_on_mac(&fx);
+    let now = now_unix();
+    {
+        let s = lock(&fx.deps.store).unwrap();
+        crate::service::account_limits::seed_usage(&s, "mac", None, "own", 10.0, now);
+        crate::service::account_limits::seed_usage(&s, "mac", Some("work"), "work", 10.0, now);
+    }
+    let own = limit::Login {
+        host: "mac".into(),
+        profile: None,
+    };
+    let work = limit::Login {
+        host: "mac".into(),
+        profile: Some("work".into()),
+    };
+    // The host's own login is signed out: the work profile answers.
+    fx.deps.ssh = planner_ssh(dir.path(), "Login expired · Please run /login");
+    let out = run_planner(&fx.deps, &m, "test", &Actor::Loop)
+        .await
+        .unwrap();
+    assert_eq!((out.refused.as_deref(), out.waiting.as_ref()), (None, None));
+    {
+        let s = lock(&fx.deps.store).unwrap();
+        assert!(!limit::waiting(&s, m.id).unwrap());
+    }
+    // The host's own login is at its limit: a wait on it, cleared by the
+    // work profile's answer, and the mission is not left waiting.
+    let sub = tempfile::tempdir().unwrap();
+    fx.deps.ssh = planner_ssh(
+        sub.path(),
+        &format!("Claude AI usage limit reached|{}", now + 600),
+    );
+    let out = run_planner(&fx.deps, &m, "test", &Actor::Loop)
+        .await
+        .unwrap();
+    assert_eq!((out.refused.as_deref(), out.waiting.as_ref()), (None, None));
+    let s = lock(&fx.deps.store).unwrap();
+    let words = limit::Words::read(&s, m.id).unwrap();
+    assert!(
+        !words.waiting(),
+        "the work profile's answer cleared the wait"
+    );
+    assert_eq!(words.newest_wait(), None);
+    let newest = &s
+        .mission_events_of_kinds(m.id, &[limit::LIMIT_CLEARED_EVENT, "limit_wait"], 1)
+        .unwrap()[0];
+    assert_eq!(newest.kind, limit::LIMIT_CLEARED_EVENT);
+    assert_eq!(newest.payload.as_ref().unwrap()["profile"], "work");
+    let waits = limit::open_waits(&s, m.id, now).unwrap();
+    assert_eq!(waits.len(), 1);
+    assert_eq!(waits[0].login.as_ref(), Some(&own), "{waits:?}");
+    assert_ne!(waits[0].login.as_ref(), Some(&work));
+}
+
 /// Review r8: an answer from a later login of the same ask clears its wait,
 /// so the mission is not left waiting (no early wake, no second ask).
 #[test]

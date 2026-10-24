@@ -2,7 +2,8 @@ use crate::ipc_error::lock;
 use crate::ipc_error::{codes, IpcError};
 use crate::projects::path_identity::{canonical, canonical_str};
 use crate::projects::{
-    git_common_dir, list_worktrees, scan_projects, DiscoveredProject, DiscoveredWorktree, Layout,
+    git_common_dir, git_github_origin, list_worktrees, scan_projects, DiscoveredProject,
+    DiscoveredWorktree, Layout,
 };
 use crate::service::settings;
 use crate::store::{ProjectRow, Store, WorktreeRow};
@@ -167,6 +168,8 @@ struct Scanned {
     dp: DiscoveredProject,
     worktrees: Vec<DiscoveredWorktree>,
     common_dir: Option<PathBuf>,
+    /// Its `origin`, when that is a github.com repository.
+    github_origin: Option<String>,
 }
 
 /// Keep ONE project per git repository. Two scanned directories sharing a
@@ -254,8 +257,8 @@ pub async fn refresh_projects(store: &Mutex<Store>) -> Result<Vec<ProjectTreeRow
     .await
     .map_err(|e| IpcError::new(codes::E_IO, format!("project scan task failed: {e}")))??;
 
-    // 3. Fan-out: `git worktree list` + `git rev-parse --git-common-dir` per
-    //    discovered project, off-lock and in parallel. Both are async
+    // 3. Fan-out: `git worktree list` + `git rev-parse --git-common-dir` +
+    //    `git remote get-url origin` per discovered project, off-lock and in parallel. Both are async
     //    (tokio::process), so N repos never pin N worker threads (BE-4). A
     //    failed join or `list_worktrees` skips the project, as before.
     let mut set = tokio::task::JoinSet::new();
@@ -263,16 +266,18 @@ pub async fn refresh_projects(store: &Mutex<Store>) -> Result<Vec<ProjectTreeRow
         set.spawn(async move {
             let worktrees = list_worktrees(&dp.base_path).await;
             let common_dir = git_common_dir(&dp.base_path).await;
-            (dp, worktrees, common_dir)
+            let github_origin = git_github_origin(&dp.base_path).await;
+            (dp, worktrees, common_dir, github_origin)
         });
     }
     let mut scanned = Vec::new();
     while let Some(joined) = set.join_next().await {
-        if let Ok((dp, Ok(worktrees), common_dir)) = joined {
+        if let Ok((dp, Ok(worktrees), common_dir, github_origin)) = joined {
             scanned.push(Scanned {
                 dp,
                 worktrees,
                 common_dir,
+                github_origin,
             });
         }
     }
@@ -291,6 +296,7 @@ pub async fn refresh_projects(store: &Mutex<Store>) -> Result<Vec<ProjectTreeRow
                 &sc.dp.repo,
                 &sc.dp.base_path.to_string_lossy(),
             )?;
+            s.set_project_github_origin(project_id, sc.github_origin.as_deref())?;
             fresh_ids.insert(project_id);
             let mut keep_names = Vec::with_capacity(sc.worktrees.len());
             for wt in &sc.worktrees {
@@ -744,6 +750,70 @@ mod tests {
         );
     }
 
+    /// The scan records a checkout's origin only when it is on GitHub, and
+    /// forgets it when the origin moves elsewhere: a project's owner/repo
+    /// (here the directories' names) is not its GitHub identity.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn refresh_projects_records_only_a_github_origin() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let git = |args: &[&str], dir: &std::path::Path| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(args)
+                .status()
+                .map(|st| st.success())
+                .unwrap_or(false)
+        };
+        let gh = tmp.path().join("acme").join("web");
+        let gl = tmp.path().join("acme").join("tool");
+        for d in [&gh, &gl] {
+            std::fs::create_dir_all(d).unwrap();
+            if !git(&["init", "-q"], d) {
+                return; // no git on this box
+            }
+        }
+        assert!(git(
+            &["remote", "add", "origin", "git@github.com:other/site.git"],
+            &gh
+        ));
+        assert!(git(
+            &["remote", "add", "origin", "https://gitlab.com/acme/tool"],
+            &gl
+        ));
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        {
+            let s = store.lock().unwrap();
+            let map = serde_json::json!({ "local": tmp.path().to_string_lossy() }).to_string();
+            settings::set(&s, settings::PROJECTS_BASE_PATH, &map).unwrap();
+        }
+        let origin_of = |rows: &[ProjectTreeRow], repo: &str| {
+            rows.iter()
+                .find(|r| r.project.repo == repo)
+                .unwrap()
+                .project
+                .github_origin
+                .clone()
+        };
+        let rows = refresh_projects(&store).await.unwrap();
+        // As `git remote get-url` answers it, so after any `insteadOf`.
+        assert_eq!(
+            origin_of(&rows, "web")
+                .as_deref()
+                .and_then(crate::repo_url::parse_repo_url),
+            Some(("other".to_string(), "site".to_string()))
+        );
+        assert_eq!(origin_of(&rows, "tool"), None);
+
+        assert!(git(
+            &["remote", "set-url", "origin", "/srv/git/site.git"],
+            &gh
+        ));
+        let rows = refresh_projects(&store).await.unwrap();
+        assert_eq!(origin_of(&rows, "web"), None);
+    }
+
     #[test]
     fn dedupe_keeps_the_main_checkout_per_common_dir() {
         let sc = |repo: &str, base: &str, first: &str, common: Option<&str>| Scanned {
@@ -758,6 +828,7 @@ mod tests {
                 branch: None,
             }],
             common_dir: common.map(PathBuf::from),
+            github_origin: None,
         };
         let kept = dedupe_by_common_dir(vec![
             // A linked worktree whose name sorts first still loses to main.
