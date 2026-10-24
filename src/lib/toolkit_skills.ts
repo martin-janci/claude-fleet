@@ -6,8 +6,8 @@
 // composer's quick-action chips (moved from Settings).
 import { writable } from 'svelte/store';
 import {
-  hostOrderOf, catalogOf, identitiesOf,
-  type AssetIdentity, type AssetKind, type AssetListing, type AssetSummary, type HostState,
+  hostOrderOf, catalogOf, identitiesOf, isInternal,
+  type AssetKind, type AssetListing, type AssetSummary, type HostState,
 } from './assets';
 import { AGENT_LABELS } from './row_groups';
 import { keyOf } from './assets_workspace';
@@ -115,7 +115,6 @@ const OUT_OF_SYNC: ReadonlySet<SkillCellState> = new Set(['behind', 'edited', 'd
 
 /** What the hosts hold that fleet itself or the harness put there: never
  *  offered for import (AssetList hides them the same way). */
-const internal = (i: AssetIdentity) => i.class === 'fleet_internal' || i.class === 'harness_internal';
 
 /** The catalog's skills (or another kind's assets) as rows of a host matrix,
  *  then the ones found on hosts that the catalog does not hold yet: without
@@ -125,7 +124,7 @@ export function skillMatrix(listing: AssetListing | null, kind: AssetKind = 'ski
     .filter((a) => a.kind === kind)
     .sort((a, b) => a.name.localeCompare(b.name) || catalogOf(a).localeCompare(catalogOf(b)));
   const found = (listing ? identitiesOf(listing) : [])
-    .filter((i) => i.kind === kind && !internal(i))
+    .filter((i) => i.kind === kind && !isInternal(i))
     .sort((a, b) => a.name.localeCompare(b.name));
   const hosts = hostOrderOf([
     ...skills.flatMap((a) => a.hosts.map((h) => h.host_alias)),

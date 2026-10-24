@@ -1332,19 +1332,7 @@ impl Store {
              WHERE orchestration_project_id = ?1 AND (?2 IS NULL OR id < ?2) \
              ORDER BY at DESC, id DESC LIMIT ?3",
         )?;
-        let rows = stmt.query_map(rusqlite::params![id, before_id, limit as i64], |r| {
-            let payload: Option<String> = r.get(7)?;
-            Ok(MissionEventRow {
-                id: r.get(0)?,
-                at: r.get(1)?,
-                kind: r.get(2)?,
-                actor: r.get(3)?,
-                work_item_id: r.get(4)?,
-                task_id: r.get(5)?,
-                decision_id: r.get(6)?,
-                payload: payload.and_then(|p| serde_json::from_str(&p).ok()),
-            })
-        })?;
+        let rows = stmt.query_map(rusqlite::params![id, before_id, limit as i64], event_row)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
@@ -1365,21 +1353,25 @@ impl Store {
                AND kind IN (SELECT value FROM json_each(?2)) \
              ORDER BY at DESC, id DESC LIMIT ?3",
         )?;
-        let rows = stmt.query_map(rusqlite::params![id, kinds, limit as i64], |r| {
-            let payload: Option<String> = r.get(7)?;
-            Ok(MissionEventRow {
-                id: r.get(0)?,
-                at: r.get(1)?,
-                kind: r.get(2)?,
-                actor: r.get(3)?,
-                work_item_id: r.get(4)?,
-                task_id: r.get(5)?,
-                decision_id: r.get(6)?,
-                payload: payload.and_then(|p| serde_json::from_str(&p).ok()),
-            })
-        })?;
+        let rows = stmt.query_map(rusqlite::params![id, kinds, limit as i64], event_row)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
+}
+
+/// One `orchestration_events` row, selected as `id, at, kind, actor,
+/// work_item_id, task_id, decision_id, payload`.
+fn event_row(r: &rusqlite::Row) -> rusqlite::Result<MissionEventRow> {
+    let payload: Option<String> = r.get(7)?;
+    Ok(MissionEventRow {
+        id: r.get(0)?,
+        at: r.get(1)?,
+        kind: r.get(2)?,
+        actor: r.get(3)?,
+        work_item_id: r.get(4)?,
+        task_id: r.get(5)?,
+        decision_id: r.get(6)?,
+        payload: payload.and_then(|p| serde_json::from_str(&p).ok()),
+    })
 }
 
 fn refuse_final(m: &MissionRow) -> Result<(), IpcError> {

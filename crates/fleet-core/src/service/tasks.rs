@@ -1108,11 +1108,9 @@ pub async fn handle_stop_for_worker(
     } else {
         finish_by_markers(&store, &ssh, &worker, &open, stored_path, cwd.clone()).await
     };
-    for t in reported {
-        if !finished.iter().any(|f| f.id == t.id) {
-            finished.push(t);
-        }
-    }
+    // `finished` comes from `open` (queued or running) and `reported` is done
+    // runs, both read under one lock: they never share a task.
+    finished.extend(reported);
     // A run's evidence, read from git in the worker's checkout once it is
     // done (orchestration O3). After the lock: it is a host round trip.
     let checkout = cwd.or_else(|| {

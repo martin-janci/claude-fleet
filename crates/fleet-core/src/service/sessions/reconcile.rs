@@ -2648,14 +2648,14 @@ pub(super) fn known_agent_status(tmux_name: &str, status: Option<&str>) -> Optio
 /// pane guess on every skipped pass — at the 60 s agents / 20 s reconcile
 /// cadence that is 2 of every 3 passes, producing status flicker and
 /// spurious `status_change` events. Only `Blocked` (a real dialog or
-/// stuck pane) is strong enough pane evidence to surface without waiting
-/// for the next agents pass; any other pane verdict yields `None` so the
-/// upsert's `COALESCE(excluded.claude_status, claude_status)` keeps
-/// whatever is stored (a hook-stamped `idle`/`working` survives between
-/// agent fetches).
+/// stuck pane) and `Working` (below) are strong enough pane evidence to
+/// surface without waiting for the next agents pass; an `Idle` pane yields
+/// `None` (but see the stored `blocked` exception) so the upsert's
+/// `COALESCE(excluded.claude_status, claude_status)` keeps whatever is
+/// stored (a hook-stamped `idle`/`working` survives between agent fetches).
 ///
 /// A pane showing a turn (`Working`: the live spinner or the interrupt
-/// hint) is strong evidence too, and wins the same way. Claude Code draws
+/// hint) wins the same way, even over `claude agents`. Claude Code draws
 /// neither once the turn is over, while the cached `claude agents` status
 /// and a missed `UserPromptSubmit` (a turn a background task or a wakeup
 /// started has none) both lag behind it: holding the pane's `Working` back
@@ -2669,10 +2669,10 @@ pub(super) fn known_agent_status(tmux_name: &str, status: Option<&str>) -> Optio
 ///    the CLI can report `working` while a permission dialog is up, and
 ///    letting it win flipped the row every agents pass (and re-alerted a
 ///    phone each time it came back);
-///  - a stored `blocked` (`stored_blocked`) whose pane now shows a turn or
-///    the input box is over: a dialog answered in the terminal fires no
-///    hook, so without this `blocked` (and its "needs you") lasted until the
-///    next agents pass or the Stop hook.
+///  - a stored `blocked` (`stored_blocked`) whose pane now shows the input
+///    box is over (a pane showing a turn already wins above): a dialog
+///    answered in the terminal fires no hook, so without this `blocked` (and
+///    its "needs you") lasted until the next agents pass or the Stop hook.
 pub(super) fn status_candidate(
     agents_asked: bool,
     agent_status: Option<crate::service::pane_intel::ClaudeStatus>,
@@ -2687,7 +2687,7 @@ pub(super) fn status_candidate(
         return agent_status.or(pane);
     }
     match pane {
-        Some(ClaudeStatus::Working | ClaudeStatus::Idle) if stored_blocked => pane,
+        Some(ClaudeStatus::Idle) if stored_blocked => pane,
         _ => None,
     }
 }
