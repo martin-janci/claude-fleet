@@ -75,6 +75,10 @@ pub struct HookPayload {
     /// `Stop`: the final assistant message (first 200 chars go to the
     /// `turn_done` timeline event; never logged).
     pub last_assistant_message: Option<String>,
+    /// `PromptSuggestion` (fleet's own event, posted by its Claude Code
+    /// plugin, not by a settings hook): the next prompt Claude Code proposes
+    /// after a turn. Stored on the row; never logged.
+    pub suggestion: Option<String>,
 }
 
 /// `X-Fleet-Pane`: `$TMUX_PANE` of the hook's process (`%` + digits). Empty

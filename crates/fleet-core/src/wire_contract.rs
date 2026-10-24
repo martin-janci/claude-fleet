@@ -321,4 +321,8 @@
 //!   round, a desktop older than memory sends a change without `memory`,
 //!   and the hub keeps the routine's notebooks rather than turning them
 //!   off.
+//!   Claude Code's next-prompt suggestion (migration 206) is new without a
+//!   bump: a session row's `prompt_suggestion` (additive, absent when
+//!   nothing is proposed). A hub without it never sends one, so a client
+//!   simply offers none; a client that predates it ignores the field.
 pub const CONTRACT_REVISION: u32 = 18;

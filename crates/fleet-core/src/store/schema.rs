@@ -748,6 +748,16 @@ fn sessions_has_pinned_at(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 206.
+fn sessions_has_prompt_suggestion(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'prompt_suggestion'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 191.
 fn control_handoffs_has_approval(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
@@ -2332,6 +2342,13 @@ const MIGRATIONS: &[Migration] = &[
         version: 205,
         sql: include_str!("../../migrations/205_routine_memory_reads.sql"),
         already_applied: Some(routine_runs_has_memory_retry_at),
+    },
+    // Claude Code's next-prompt suggestion: `sessions.prompt_suggestion`
+    // (one ADD COLUMN, guarded, and the row-version trigger re-issued).
+    Migration {
+        version: 206,
+        sql: include_str!("../../migrations/206_session_prompt_suggestion.sql"),
+        already_applied: Some(sessions_has_prompt_suggestion),
     },
 ];
 
