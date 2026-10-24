@@ -423,6 +423,17 @@ fn routine_runs_has_memory_retry_at(conn: &Connection) -> rusqlite::Result<bool>
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 207: `projects` already has its
+/// `github_origin` column.
+fn projects_has_github_origin(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('projects') WHERE name = 'github_origin'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 fn routine_runs_has_host(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('routine_runs') WHERE name = 'host_alias'",
@@ -2332,6 +2343,13 @@ const MIGRATIONS: &[Migration] = &[
         version: 205,
         sql: include_str!("../../migrations/205_routine_memory_reads.sql"),
         already_applied: Some(routine_runs_has_memory_retry_at),
+    },
+    // A project's GitHub origin, read by the scan and add_project. An ADD
+    // COLUMN, so guarded.
+    Migration {
+        version: 207,
+        sql: include_str!("../../migrations/207_project_github_origin.sql"),
+        already_applied: Some(projects_has_github_origin),
     },
 ];
 
@@ -7390,13 +7408,21 @@ mod tests {
     fn migration_105_flattens_slash_named_worktrees_and_their_session_keys() {
         let s = store_at_version(104);
         // Raw rows: `upsert_host` reads back every current `hosts` column,
-        // and a 104 store predates the later ones (111's `auth_overrides`).
+        // and a 104 store predates the later ones (111's `auth_overrides`);
+        // `upsert_project` likewise reads back 207's `github_origin`.
         s.conn
             .execute_batch(
                 "INSERT INTO hosts (alias, reachable) VALUES ('trn', 1), ('mefistos', 1);",
             )
             .unwrap();
-        let pid = s.upsert_project("o", "r", "/p/o/r").unwrap();
+        let pid: i64 = s
+            .conn
+            .query_row(
+                "INSERT INTO projects (owner, repo, base_path) VALUES ('o', 'r', '/p/o/r') RETURNING id",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         let nested = "/home/dev/projects/r/.worktrees/feat/imports";
         let wid = s
             .upsert_worktree_on("trn", pid, "feat/imports", nested, Some("feat/imports"))

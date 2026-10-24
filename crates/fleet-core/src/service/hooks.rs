@@ -2753,6 +2753,7 @@ mod tests {
                 last_session_at: None,
                 adopted: false,
                 system: false,
+                github_origin: None,
             },
             ProjectRow {
                 id: 2,
@@ -2762,6 +2763,7 @@ mod tests {
                 last_session_at: None,
                 adopted: false,
                 system: false,
+                github_origin: None,
             },
         ];
         assert_eq!(
@@ -2785,6 +2787,7 @@ mod tests {
             last_session_at: None,
             adopted: false,
             system: false,
+            github_origin: None,
         }];
         // "/home/u/project/..." must NOT match "/home/u/proj"
         assert_eq!(

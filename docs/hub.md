@@ -3908,11 +3908,18 @@ Settings → **Hub & sync** → *Fleets* → *Add a hub*: run
   attaches with this machine's own `ssh` (so the fleet's host alias has to
   resolve here too, as for any terminal), and *Snapshot* is a read-only
   `capture_session` of its pane.
-- **New session can start on another fleet.** When an extra fleet has the
-  same repository, the dialog shows a *Fleet* row. It defaults to the fleet
-  you last started that repository on, else the fleet whose label or host
-  name is the repository's owner (`PapayaPOS` → `fleet.papayapos.dev`), else
-  this window's own.
+- **New session can start on another fleet.** The dialog shows a *Fleet*
+  row with every connected extra fleet that has the same repository and,
+  when this window's project has a GitHub `origin`, every other connected
+  extra fleet too. Picking a fleet without the repository makes Create clone
+  that exact origin URL (the dialog shows it) onto the picked host there
+  first, through that hub's `add_project`. A project with no GitHub origin
+  (a GitLab or local-only checkout) gets no clone, and a `local/*` project
+  is offered no other fleet at all. It defaults to the fleet you last
+  started that repository on (this window's own included), else the fleet
+  whose label or host name is the repository's owner (`PapayaPOS` →
+  `fleet.papayapos.dev`) if that fleet already has the repository, else this
+  window's own: a clone onto another machine only ever follows your pick.
 - **Hosts, the Inbox, PRs and notifications follow the fleet filter.** The
   Hosts page lists each extra fleet's hosts under its badge (read-only:
   managing a hub's hosts is its operator's job), the Inbox and the rail's

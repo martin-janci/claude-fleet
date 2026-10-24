@@ -600,6 +600,7 @@
     "ProjectRow": [
       "adopted",
       "base_path",
+      "github_origin",
       "id",
       "last_session_at",
       "owner",
