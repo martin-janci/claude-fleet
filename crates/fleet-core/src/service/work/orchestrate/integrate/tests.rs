@@ -98,6 +98,53 @@ fn one_integration_covers_every_conflicting_pair() {
     assert_eq!(tree["depends_on"].as_array().unwrap().len(), 3);
 }
 
+/// Review r9: an integration the open-card cap refuses is held, not
+/// forgotten: the same heads are not checked over ssh again while the cap
+/// holds, and are once it no longer does.
+#[test]
+fn a_card_the_cap_refuses_is_held_until_a_card_is_decided() {
+    let s = Store::open_in_memory().unwrap();
+    let m = s
+        .create_mission(
+            &crate::store::NewMission {
+                name: "m",
+                goal: "g",
+                ..Default::default()
+            },
+            "person:1",
+        )
+        .unwrap();
+    for i in 0..crate::store::CARDS_OPEN_CAP {
+        s.add_card(
+            m.id,
+            &NewCard {
+                decision_id: &format!("filler:{i}"),
+                source: "planner",
+                kind: "create",
+                work_item_id: None,
+                payload: None,
+            },
+        )
+        .unwrap();
+    }
+    let (a, b) = (branch(300, "aaaa"), branch(301, "bbbb"));
+    let conflicts = vec![(&a, &b, vec!["CHANGELOG.md".to_string()])];
+    assert_eq!(
+        integration_card(&s, &m, &[&a, &b], &conflicts),
+        Carded::Held
+    );
+    let key = "300=aaaa,301=bbbb".to_string();
+    let last = held(&key);
+    assert!(already_checked(Some(&last), &key, true), "held while full");
+    assert!(
+        !already_checked(Some(&last), &key, false),
+        "checked again once a card is decided"
+    );
+    assert!(already_checked(Some(&key), &key, false));
+    assert!(!already_checked(None, &key, true));
+    assert!(!already_checked(Some(&last), "300=aaaa,301=cccc", true));
+}
+
 /// Twelve branches, all 66 pairs conflicting on 20 long paths each: the
 /// card still fits `CARD_PAYLOAD_MAX`, so the conflict is carded.
 #[test]
@@ -126,7 +173,7 @@ fn the_largest_integration_still_fits_one_card() {
             conflicts.push((&all[i], &all[j], files.clone()));
         }
     }
-    assert!(integration_card(&s, &m, &live, &conflicts));
+    assert_eq!(integration_card(&s, &m, &live, &conflicts), Carded::Done);
     let cards = s.mission_cards(m.id, 50).unwrap();
     assert_eq!(cards.len(), 1, "{cards:?}");
     let notes = cards[0].payload.as_ref().unwrap()["tree"][0]["notes"]

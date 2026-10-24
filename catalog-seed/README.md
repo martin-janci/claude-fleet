@@ -14,6 +14,7 @@ The next sync installs it on your hosts.
 
 | Asset | What it is for |
 |---|---|
+| `fleet-agents/support` | The support agent as a definition: on `Tech help!` or `/analyze` in a Jira ticket's comment, investigates with the bound logs, tenant registry and knowledge base, fingerprints the error it names (`run.fingerprint`), links the ticket to the bug already filed for that error or (with a person) to a matching open bug, and otherwise files a high-confidence bug that later runs of the same error link to. The built-in support agent stays beside it. |
 | `fleet-agents/issue-triage` | Triage on request: someone comments `/triage` (the trigger phrases are an input) on an issue of a tracker (Jira, GitHub, Linear or Asana); the agent reads the project's code and comments the issue's kind, severity, where in the code it likely lives and the next step, or asks for what is missing. |
 | `fleet-agents/pr-questions` | Answers on GitHub: someone comments `/ask …` on an issue or pull request of the instance's repo; the agent answers from the project's code (read-only) as a reply comment, with the files it read and how sure it is. |
 | `fleet-agents/daily-digest` | A workday-evening digest (17:00): reads the day's runs, sessions, failures and host health through `fleet-diagnostics` and keeps what got done, what went wrong and what needs a person tomorrow in a fleet store; the job's result is the digest. |

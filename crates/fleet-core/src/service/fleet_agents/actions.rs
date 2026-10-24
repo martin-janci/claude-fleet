@@ -196,6 +196,49 @@ fn review_findings(v: Option<&Value>) -> Vec<ReviewFinding> {
         .collect()
 }
 
+/// A finding as a line of a review body's list.
+fn listed_finding(f: &ReviewFinding) -> String {
+    format!("- `{}:{}`: {}", f.path, f.line, f.body)
+}
+
+/// The shortest a listed finding is cut to, however many share the room.
+const MIN_LISTED: usize = 200;
+
+/// PURE: `items` under `heading` within `budget` characters: each cut to an
+/// even share of the room (never below [`MIN_LISTED`]), as many as fit, then
+/// a count of the ones left out, so a cut list says what it dropped. Empty
+/// when not even the heading and that count fit.
+fn listed(heading: &str, items: &[String], budget: usize) -> String {
+    let len = |s: &str| s.chars().count();
+    let rest = |n: usize| {
+        let s = if n == 1 { "" } else { "s" };
+        format!("\n… and {n} more finding{s}")
+    };
+    if items.is_empty() || len(heading) + len(&rest(items.len())) > budget {
+        return String::new();
+    }
+    let room = budget.saturating_sub(len(heading));
+    let share = (room / items.len()).max(MIN_LISTED);
+    let mut out = heading.to_string();
+    let mut used = len(heading);
+    let mut kept = 0;
+    for item in items {
+        let line = format!("\n{}", fit(item, share));
+        let left = items.len() - kept - 1;
+        let tail = if left == 0 { 0 } else { len(&rest(left)) };
+        if used + len(&line) + tail > budget {
+            break;
+        }
+        used += len(&line);
+        out.push_str(&line);
+        kept += 1;
+    }
+    if kept < items.len() {
+        out.push_str(&rest(items.len() - kept));
+    }
+    out
+}
+
 /// PURE: the review as GitHub takes it: each finding on a line of `diff`
 /// (snapped within a few lines, as the PR reviewer does) is a line comment,
 /// the rest are listed in the body; both end with the instance's marker.
@@ -218,15 +261,25 @@ pub fn place_review(
                 line,
                 body: format!("{}\n\n{mark}", f.body),
             }),
-            None => outside.push(format!("- `{}:{}`: {}", f.path, f.line, f.body)),
+            None => outside.push(listed_finding(f)),
         }
     }
-    let mut body = p.body.clone();
-    if !outside.is_empty() {
-        body.push_str(&format!("\n\nOutside the diff:\n{}", outside.join("\n")));
-    }
     let mark = format!("\n\n{mark}");
-    let body = fit(&body, max.saturating_sub(mark.chars().count()));
+    let room = max.saturating_sub(mark.chars().count());
+    let mut body = if outside.is_empty() {
+        fit(&p.body, room)
+    } else {
+        fit(&p.body, room / 2)
+    };
+    let list = listed(
+        "Outside the diff:",
+        &outside,
+        room.saturating_sub(body.chars().count() + 2),
+    );
+    if !list.is_empty() {
+        body.push_str("\n\n");
+        body.push_str(&list);
+    }
     ReviewRequest {
         host: String::new(),
         repo: p.repo.clone(),
@@ -445,7 +498,9 @@ fn labels_of(v: Option<&Value>, ctx: &Value) -> Vec<String> {
 }
 
 /// PURE: the actions an answer asks for. `instance` is the rule's scope
-/// (its marker); `rule_id` resolves fleet namespaces.
+/// (its marker); `rule_id` resolves fleet namespaces. `act` is the rule's
+/// level being `act`: only then is an `auto` action sent with no person, so
+/// only then does a `pr_review` lose its blocking verdict ([`review_event`]).
 pub fn plan(
     inst: &Instance,
     rule_id: i64,
@@ -453,6 +508,7 @@ pub fn plan(
     subject: &Value,
     answer: &Value,
     now: i64,
+    act: bool,
 ) -> (Vec<Planned>, Vec<Unplanned>) {
     let loaded = inst.loaded();
     let d = &loaded.definition;
@@ -659,19 +715,27 @@ pub fn plan(
                         let more: Vec<String> = findings
                             .split_off(findings.len().min(MAX_REVIEW_COMMENTS))
                             .iter()
-                            .map(|f| format!("- `{}:{}`: {}", f.path, f.line, f.body))
+                            .map(listed_finding)
                             .collect();
+                        // Unattended only when it is sent with no person: a
+                        // person approving it at `propose` signs the verdict.
                         let event =
-                            review_event(&r(&a.verdict), a.auto, d.limits.auto_approve).to_string();
-                        let text = if more.is_empty() {
-                            text
-                        } else {
-                            format!("{text}\n\n{MORE_FINDINGS}\n{}", more.join("\n"))
-                        };
+                            review_event(&r(&a.verdict), act && a.auto, d.limits.auto_approve)
+                                .to_string();
                         // The body leaves room for the findings that land
                         // outside the diff, and the marker; `place_review`
                         // fits the whole to `max`.
-                        let body = fit(&text, max / 2);
+                        let budget = max / 2;
+                        let body = if more.is_empty() {
+                            fit(&text, budget)
+                        } else {
+                            let head = fit(&text, budget / 2);
+                            let room = budget.saturating_sub(head.chars().count() + 2);
+                            match listed(MORE_FINDINGS, &more, room) {
+                                l if l.is_empty() => head,
+                                l => format!("{head}\n\n{l}"),
+                            }
+                        };
                         let mut shown = format!("{event}: {body}");
                         for f in &findings {
                             shown.push_str(&format!("\n- {}:{}: {}", f.path, f.line, f.body));
@@ -978,6 +1042,39 @@ fn refuse(what: impl std::fmt::Display) -> ActionResult {
 }
 
 impl FleetExecutor {
+    /// A bug a `tracker_issue` filed, kept against the fingerprint its
+    /// payload carries (`fingerprint: "{{answer.fingerprint}}"`): the next
+    /// run of the same error inside the window gets it as `knownBug`.
+    fn file_against_fingerprint(
+        &self,
+        rule: &AgentRuleRow,
+        inst: &Instance,
+        raw: &Value,
+        bug: Option<String>,
+        now: i64,
+    ) {
+        let (Some(spec), Some(bug)) = (inst.loaded().definition.run.fingerprint.as_ref(), bug)
+        else {
+            return;
+        };
+        let Some(fp) = raw
+            .get("fingerprint")
+            .and_then(Value::as_str)
+            .filter(|f| super::fingerprints::is_fingerprint(f))
+        else {
+            return;
+        };
+        let ns = super::bindings::namespaces(rule.id, &inst.bindings);
+        let Some(namespace) = ns.get(&spec.store) else {
+            return;
+        };
+        if let Ok(s) = self.store.lock() {
+            if let Err(e) = super::fingerprints::set_bug(&s, namespace, fp, &bug, now) {
+                tracing::warn!(rule_id = rule.id, error = %e, "[agents] fleet: file the bug");
+            }
+        }
+    }
+
     /// Send a `pr_review`: only while the PR is open at the head the run
     /// read, its findings placed on the diff of that head, an APPROVE or
     /// REQUEST_CHANGES GitHub refuses on one's own PR sent as COMMENT.
@@ -1167,7 +1264,16 @@ impl FleetExecutor {
                     )
                     .await
                     {
-                        Ok(_) => ActionResult::Executed,
+                        Ok(o) => {
+                            self.file_against_fingerprint(
+                                rule,
+                                inst,
+                                &raw,
+                                o.remote_id.or(o.key),
+                                now,
+                            );
+                            ActionResult::Executed
+                        }
                         Err(e) => ActionResult::Failed(e),
                     };
                 }
@@ -1187,10 +1293,12 @@ impl FleetExecutor {
                     Ok(o) => o,
                     Err(e) => return ActionResult::Failed(e),
                 };
+                let new_key = created.remote_id.or(created.key);
+                self.file_against_fingerprint(rule, inst, &raw, new_key.clone(), now);
                 let Some(l) = i.link else {
                     return ActionResult::Executed;
                 };
-                let Some(new_key) = created.remote_id.or(created.key) else {
+                let Some(new_key) = new_key else {
                     return ActionResult::Failed(
                         "the issue was created, its key is unknown: not linked".into(),
                     );

@@ -272,14 +272,14 @@ async fn clone_source(
         if already_a_checkout(&out) && checkout_is_this_repo(&out, &owner, &repo) {
             return match existing_row {
                 Some(row) => Ok(row),
-                None => register(store, &owner, &repo, &local_base, false),
+                None => register(store, &owner, &repo, &local_base, false, Some(&clone_url)),
             };
         }
         return Err(git_error(&args.host_alias, &owner, &repo, &dest, &out));
     }
     match existing_row {
         Some(row) => Ok(row),
-        None => register(store, &owner, &repo, &local_base, false),
+        None => register(store, &owner, &repo, &local_base, false, Some(&clone_url)),
     }
 }
 
@@ -583,6 +583,8 @@ async fn new_source(
     let (reg_owner, reg_repo) = resume_as
         .as_ref()
         .map_or((owner, repo), |(o, r)| (o.as_str(), r.as_str()));
+    // The origin a published repository has; a local-only one has none.
+    let published = create_remote.then(|| clone_url_for(owner, repo));
 
     let host = args.host_alias.as_str();
     let dest = if host == crate::service::projects::LOCAL_HOST {
@@ -635,8 +637,15 @@ async fn new_source(
             Some(2) => {}
             Some(0) => {
                 // The creation already completed; nothing left to push.
-                return register(store, reg_owner, reg_repo, &local_base, false)
-                    .map_err(|e| describe_register_failure_after_gh_success(owner, repo, e));
+                return register(
+                    store,
+                    reg_owner,
+                    reg_repo,
+                    &local_base,
+                    false,
+                    published.as_deref(),
+                )
+                .map_err(|e| describe_register_failure_after_gh_success(owner, repo, e));
             }
             _ => {
                 let detail = user_facing_stderr(&String::from_utf8_lossy(&check.stderr));
@@ -675,11 +684,19 @@ async fn new_source(
             // is let through `existing_project_or_resume` and resumes it.
             // Best-effort: if THIS also fails, the original error above is
             // still the one returned.
-            let _ = register(store, reg_owner, reg_repo, &local_base, false);
+            // No origin recorded: the GitHub half did not finish.
+            let _ = register(store, reg_owner, reg_repo, &local_base, false, None);
         }
         return Err(err);
     }
-    let row = register(store, reg_owner, reg_repo, &local_base, false);
+    let row = register(
+        store,
+        reg_owner,
+        reg_repo,
+        &local_base,
+        false,
+        published.as_deref(),
+    );
     if create_remote {
         return row.map_err(|e| describe_register_failure_after_gh_success(owner, repo, e));
     }
@@ -1457,23 +1474,25 @@ async fn folder_source(
     // itself being async — `spawn_blocking`'s closure is a plain `FnOnce`.
     let p = path.to_string();
     let handle = tokio::runtime::Handle::current();
-    let (base_path, owner, repo) = tokio::task::spawn_blocking(move || adopt(&handle, &p))
+    let (base_path, owner, repo, origin) = tokio::task::spawn_blocking(move || adopt(&handle, &p))
         .await
         .map_err(|e| IpcError::new(codes::E_IO, format!("folder probe failed: {e}")))??;
     refuse_existing_project(store, &owner, &repo)?;
     refuse_existing_base_path(store, &base_path)?;
-    register(store, &owner, &repo, &base_path, true)
+    register(store, &owner, &repo, &base_path, true, origin.as_deref())
 }
 
 /// The checkout at `path`: its canonical top level (resolved through a
 /// linked worktree to its MAIN checkout, if that's what `path` names — see
 /// [`resolve_main_checkout`]), and the `(owner, repo)` its `origin` names —
 /// falling back to `("local", <sanitized basename of the top level>)` when
-/// there is no origin, or `origin` is not a GitHub URL.
+/// there is no origin, or `origin` is not a GitHub URL — and that origin
+/// when it is one ([`crate::repo_url::github_origin`]), for
+/// `ProjectRow::github_origin`.
 fn adopt(
     handle: &tokio::runtime::Handle,
     path: &str,
-) -> Result<(String, String, String), IpcError> {
+) -> Result<(String, String, String, Option<String>), IpcError> {
     let top = match git_out(handle, path, &["rev-parse", "--show-toplevel"]) {
         Ok(s) if !s.is_empty() => s,
         Ok(_) => {
@@ -1508,7 +1527,8 @@ fn adopt(
                 .unwrap_or_else(|| "repo".to_string());
             ("local".to_string(), sanitize_basename(&name))
         });
-    Ok((top, owner, repo))
+    let github = crate::repo_url::github_origin(&origin);
+    Ok((top, owner, repo, github))
 }
 
 /// When `top` is a linked worktree of a NON-bare repo, resolve and return its
@@ -2063,13 +2083,15 @@ fn register(
     repo: &str,
     base_path: &str,
     adopted: bool,
+    github_origin: Option<&str>,
 ) -> Result<ProjectTreeRow, IpcError> {
     let s = lock(store)?;
-    if adopted {
-        s.upsert_adopted_project(owner, repo, base_path)?;
+    let id = if adopted {
+        s.upsert_adopted_project(owner, repo, base_path)?
     } else {
-        s.upsert_project(owner, repo, base_path)?;
-    }
+        s.upsert_project(owner, repo, base_path)?
+    };
+    s.set_project_github_origin(id, github_origin)?;
     s.list_projects_joined()?
         .into_iter()
         .find(|r| r.project.owner == owner && r.project.repo == repo)
@@ -2149,6 +2171,11 @@ mod tests {
         assert_eq!(
             (row.project.owner.as_str(), row.project.repo.as_str()),
             ("o", "r")
+        );
+        // The origin it was cloned from, for a clone of it on another fleet.
+        assert_eq!(
+            row.project.github_origin.as_deref(),
+            Some("git@github.com:o/r.git")
         );
         assert!(
             row.worktrees.is_empty(),
@@ -2670,6 +2697,15 @@ mod tests {
             (row.project.owner.as_str(), row.project.repo.as_str()),
             ("acme", "widget")
         );
+        // Its GitHub origin is kept, for a clone of it on another fleet (as
+        // `git remote get-url` answers it, so after any `insteadOf`).
+        assert_eq!(
+            row.project
+                .github_origin
+                .as_deref()
+                .and_then(parse_repo_url),
+            Some(("acme".to_string(), "widget".to_string()))
+        );
         // Registered where it is — nothing moved.
         assert_eq!(
             row.project.base_path,
@@ -2712,6 +2748,7 @@ mod tests {
         .unwrap();
         assert_eq!(row.project.repo, "loose-repo");
         assert_eq!(row.project.owner, "local");
+        assert_eq!(row.project.github_origin, None);
     }
 
     /// An origin that is a relative path (`../mirror/widget` style, here
@@ -2754,6 +2791,7 @@ mod tests {
             (row.project.owner.as_str(), row.project.repo.as_str()),
             ("local", "local-clone")
         );
+        assert_eq!(row.project.github_origin, None);
     }
 
     #[cfg(unix)]

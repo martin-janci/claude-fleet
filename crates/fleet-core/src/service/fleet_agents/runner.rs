@@ -20,7 +20,9 @@
 
 use super::answer;
 use super::bindings::{self, Binding};
-use super::definition::{Loaded, StoreKind, TriggerSource, Workspace, MAX_SCAN_JOBS};
+use super::definition::{
+    Loaded, StoreKind, TriggerSource, Workspace, DEFAULT_SCAN_EVERY_MINS, MAX_SCAN_JOBS,
+};
 use super::diagnostics;
 use super::grant::Sources;
 use super::records;
@@ -1247,7 +1249,7 @@ impl AgentPoller for FleetPoller {
                 }
             }
             TriggerSource::McpScan => {
-                let every = d.trigger.every_mins.unwrap_or(60) * 60;
+                let every = d.trigger.every_mins.unwrap_or(DEFAULT_SCAN_EVERY_MINS) * 60;
                 if c.scan.is_some_and(|t| now - t < every) {
                     Vec::new()
                 } else {
@@ -1425,8 +1427,12 @@ impl FleetRunner {
                     .ok()
                     .flatten()
             });
-            if last.is_some_and(|at| at + cooldown > now) {
-                return RunOutcome::Skipped {
+            // Deferred, not skipped: the poller has already spent this
+            // trigger's dedup key (a PR's head, a comment), so a skip
+            // would lose it for good.
+            if let Some(at) = last.filter(|at| at + cooldown > now) {
+                return RunOutcome::Deferred {
+                    at: at + cooldown,
                     reason: format!("cooldown: {} ran less than {cooldown}s ago", job.subject),
                 };
             }
@@ -1532,6 +1538,9 @@ impl FleetRunner {
         };
         match parse_answer(&text, &d.run.output_schema) {
             Ok(answer) => {
+                let answer = self
+                    .fingerprint(job, rule, &inst, &subject, answer, now)
+                    .await;
                 let actions = self.queue_actions(job, rule, &inst, &subject, &answer, now);
                 RunOutcome::Done {
                     result: Some(
@@ -1549,6 +1558,77 @@ impl FleetRunner {
         }
     }
 
+    /// `run.fingerprint`: the error the answer names, counted in its store,
+    /// and what fleet knows of it added to the answer (`fingerprints.rs`).
+    /// A failed bug search only loses the match.
+    async fn fingerprint(
+        &self,
+        job: &AgentJobRow,
+        rule: &AgentRuleRow,
+        inst: &Instance,
+        subject: &Value,
+        answer: Value,
+        now: i64,
+    ) -> Value {
+        use super::fingerprints as fp;
+        let Some(spec) = inst.loaded().definition.run.fingerprint.as_ref() else {
+            return answer;
+        };
+        let ctx =
+            json!({ "inputs": inst.values, "subject": subject, "answer": answer, "now": now });
+        let Some(n) = fp::named(spec, &ctx) else {
+            return answer;
+        };
+        let ns = bindings::namespaces(rule.id, &inst.bindings);
+        let Some(namespace) = ns.get(&spec.store) else {
+            return answer;
+        };
+        let seen = match lock(&self.store) {
+            Ok(s) => fp::see(&s, namespace, &n, Some(job.id), now),
+            Err(e) => Err(e.message),
+        };
+        let (before, seen) = match seen {
+            Ok(x) => x,
+            Err(e) => {
+                tracing::warn!(rule_id = rule.id, error = %e, "[agents] fleet: fingerprint");
+                return answer;
+            }
+        };
+        let known = fp::known_bug(before.as_ref(), spec.window_mins, now);
+        let (mut similar, mut related) = (None, None);
+        if let (None, Some(b)) = (&known, &spec.bugs) {
+            let ictx = inst.ctx(now);
+            let tracker = match &b.tracker {
+                Some(t) => template::render(t, &ictx).trim().parse().ok(),
+                None => tracker_id(inst, &ictx).ok(),
+            };
+            let project = template::render(&b.project, &ictx);
+            let issue_type = b
+                .issue_type
+                .as_deref()
+                .map(|t| template::render(t, &ictx))
+                .filter(|t| !t.trim().is_empty())
+                .unwrap_or_else(|| "Bug".into());
+            if let (Some(tracker), Some(jql)) = (
+                tracker,
+                fp::candidates_jql(project.trim(), issue_type.trim(), &n.class),
+            ) {
+                match self
+                    .host
+                    .base()
+                    .threads(tracker, &jql, fp::CANDIDATES_MAX)
+                    .await
+                {
+                    Ok(found) => (similar, related) = fp::best_candidate(&n, &found),
+                    Err(e) => {
+                        tracing::warn!(rule_id = rule.id, error = %e, "[agents] fleet: bug search")
+                    }
+                }
+            }
+        }
+        fp::with_fields(answer, &n, &seen, known, similar, related)
+    }
+
     /// The answer's actions: kept in the result at `watch`, queued for a
     /// person at `propose`, approved at once at `act` when `auto` (see
     /// [`super::actions::plan`]). Answers what became of each.
@@ -1561,8 +1641,15 @@ impl FleetRunner {
         answer: &Value,
         now: i64,
     ) -> Value {
-        let (mut planned, mut unplanned) =
-            super::actions::plan(inst, rule.id, &rule.scope, subject, answer, now);
+        let (mut planned, mut unplanned) = super::actions::plan(
+            inst,
+            rule.id,
+            &rule.scope,
+            subject,
+            answer,
+            now,
+            rule.level == "act",
+        );
         let s = lock(&self.store).ok();
         let mut out: Vec<Value> = Vec::new();
         if let Some(s) = &s {

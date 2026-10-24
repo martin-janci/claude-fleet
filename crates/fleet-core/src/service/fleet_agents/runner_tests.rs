@@ -1521,6 +1521,60 @@ async fn an_unattended_review_never_approves() {
     );
 }
 
+#[tokio::test]
+async fn an_auto_review_a_person_sends_keeps_its_verdict() {
+    // `auto` below `act` still waits for a person, who signs the verdict.
+    let f = review_fx(true).at("propose");
+    let a = reviewed(
+        &f,
+        r#"{"verdict":"REQUEST_CHANGES","summary":"Broken.","findings":[]}"#,
+    )
+    .await;
+    assert_eq!(a.state, "pending");
+    let p: Value = serde_json::from_str(&a.payload).unwrap();
+    assert_eq!(p["event"], "REQUEST_CHANGES", "{p}");
+    let f = review_fx(true).at("propose");
+    let a = reviewed(
+        &f,
+        r#"{"verdict":"APPROVE","summary":"Ship it.","findings":[]}"#,
+    )
+    .await;
+    let p: Value = serde_json::from_str(&a.payload).unwrap();
+    assert_eq!(p["event"], "APPROVE", "{p}");
+}
+
+#[tokio::test]
+async fn a_cut_findings_list_says_how_many_it_left_out() {
+    let f = review_fx(false);
+    let a = reviewed(&f, &long_findings(45, 400)).await;
+    let p: Value = serde_json::from_str(&a.payload).unwrap();
+    let body = p["body"].as_str().unwrap();
+    assert!(body.chars().count() <= 2500, "{}", body.chars().count());
+    assert!(
+        body.contains("More findings:\n- `src/a.rs:130`: f30 "),
+        "{body}"
+    );
+    assert!(body.contains(" more findings"), "{body}");
+
+    // A diff too large to serve lists every finding, and counts the cut.
+    *f.world.diff_refusal.lock().unwrap() =
+        Some("HTTP 406: Sorry, the diff exceeded the maximum number of lines".into());
+    assert!(matches!(
+        f.executor().execute(&a).await,
+        ActionResult::Done(_)
+    ));
+    let writes = f.world.gh_writes.lock().unwrap().clone();
+    let review = writes.iter().find(|w| w.starts_with("review")).unwrap();
+    assert!(
+        review.contains("Outside the diff:\n- `src/a.rs:100`: f0 "),
+        "{review}"
+    );
+    assert!(
+        review.contains(" more findings\n\n[fleet-agent:inst]"),
+        "{review}"
+    );
+}
+
 /// The review's answer with `n` findings of `len` characters, each far
 /// outside the diff.
 fn long_findings(n: usize, len: usize) -> String {
@@ -2242,7 +2296,7 @@ async fn a_scan_reads_its_window_and_keeps_to_its_max_jobs() {
     );
 }
 
-/// `run.branch` picks the worktree's branch, and `run.cooldown_secs` skips
+/// `run.branch` picks the worktree's branch, and `run.cooldown_secs` defers
 /// a subject this instance finished lately.
 #[tokio::test]
 async fn a_run_reads_its_branch_and_waits_out_its_cooldown() {
@@ -2300,8 +2354,13 @@ async fn a_run_reads_its_branch_and_waits_out_its_cooldown() {
         )
         .unwrap();
     let second = f.claim(&[job("c2")]);
+    // Deferred to the cooldown's end, not skipped: the poller will not
+    // offer this trigger again.
     match f.runner().run(&second[0], Some(&f.rule)).await {
-        RunOutcome::Skipped { reason } => assert!(reason.contains("cooldown"), "{reason}"),
+        RunOutcome::Deferred { at, reason } => {
+            assert!(reason.contains("cooldown"), "{reason}");
+            assert!(at > crate::store::now_unix() + 3500, "{at}");
+        }
         other => panic!("{other:?}"),
     }
 }
@@ -2332,4 +2391,128 @@ async fn a_definition_may_let_an_unattended_review_approve() {
     assert!(definition::problems(&d, &BTreeMap::new())
         .iter()
         .any(|p| p.contains("branch is for a project workspace")));
+}
+
+/// The gallery's support definition, cooldown off, at `level`.
+fn support_fx(level: &str) -> Fx {
+    let seed = super::gallery::SEEDS
+        .iter()
+        .find(|s| s.name == "support")
+        .unwrap();
+    let mut l = seed.asset().unwrap().fleet_agent().unwrap();
+    l.definition.run.cooldown_secs = 0;
+    fx(
+        l,
+        json!({ "jira_tracker": "3", "project": "L2S", "bug_project": "BUG",
+            "phrases": "Tech help!", "app_frame_prefix": "com.acme." }),
+        json!([
+            { "role": "logs", "server": "graylog", "name": "logs-prod",
+              "env": { "GRAYLOG_API_TOKEN": "${GRAYLOG_PROD_TOKEN}" } },
+            { "role": "kb", "server": "kb" },
+            { "role": "memory", "namespace": "rule" }
+        ]),
+        true,
+    )
+    .at(level)
+}
+
+/// Run one support job on L2S-7 with `key` and finish it; its result.
+async fn support_run(f: &Fx, key: &str) -> Value {
+    *f.world.base.answer.lock().unwrap() = Some(PrintOutcome::Answered {
+        text: json!({ "summary": "Gateway key expired", "rootCause": "The key", "confidence": "high",
+            "severity": "critical", "exceptionClass": "KeyExpiredException",
+            "errorMessage": "Gateway key expired", "affectedComponent": "payments",
+            "stackTrace": "KeyExpiredException\n\tat com.acme.pay.Gateway.charge(Gateway.java:42)" })
+        .to_string(),
+        cost_micros: 0,
+    });
+    let jobs = f.claim(&[crate::store::NewAgentJob {
+        rule_id: f.rule.id,
+        agent: AGENT.into(),
+        subject: "tracker:3:L2S-7".into(),
+        trigger: "comment".into(),
+        dedup_key: key.into(),
+        not_before: 0,
+    }]);
+    let out = f.runner().run(&jobs[0], Some(&f.rule)).await;
+    let RunOutcome::Done { result, .. } = out else {
+        panic!("{out:?}")
+    };
+    f.store
+        .lock()
+        .unwrap()
+        .finish_agent_job(
+            jobs[0].id,
+            &crate::store::AgentJobEnd::Final {
+                state: "done",
+                result: result.clone(),
+                error_kind: None,
+                error: None,
+            },
+            0,
+            crate::store::now_unix(),
+        )
+        .unwrap();
+    serde_json::from_str(&result.unwrap()).unwrap()
+}
+
+/// The support agent as a definition: an open bug like the error is linked
+/// (a person approves); with none, a high-confidence bug is filed, kept
+/// against the fingerprint, and the next run of the same error links to it.
+#[tokio::test]
+async fn the_support_definition_fingerprints_links_and_files_once() {
+    let f = support_fx("act");
+    let ticket = thread(&[("1", "Tech help!", 1500)]);
+    let mut open_bug = thread(&[]);
+    open_bug.key = "BUG-2".into();
+    open_bug.summary = "[payments] KeyExpiredException: Gateway key expired".into();
+    *f.world.base.threads.lock().unwrap() = vec![ticket.clone(), open_bug];
+
+    let r = support_run(&f, "c1").await;
+    let fp = r["answer"]["fingerprint"].as_str().unwrap().to_string();
+    assert!(super::fingerprints::is_fingerprint(&fp), "{r}");
+    assert_eq!(r["answer"]["seenCount"], 1);
+    assert_eq!(r["answer"]["similarBug"], "BUG-2");
+    let jql = f.world.base.jql.lock().unwrap().clone();
+    assert!(
+        jql.iter()
+            .any(|q| q.starts_with("3 project = \"BUG\" AND issuetype = \"Bug\"")),
+        "{jql:?}"
+    );
+    assert_eq!(
+        states(&r),
+        [
+            ("comment".to_string(), "approved".to_string()),
+            ("similar".to_string(), "pending".to_string())
+        ],
+        "a similar bug is linked by a person, and no new bug is filed"
+    );
+
+    // No open bug like it: a high-confidence bug is filed, a person approving.
+    *f.world.base.threads.lock().unwrap() = vec![ticket.clone()];
+    let r = support_run(&f, "c2").await;
+    assert_eq!(r["answer"]["seenCount"], 2);
+    assert!(r["answer"].get("similarBug").is_none());
+    let bug = f
+        .actions()
+        .into_iter()
+        .find(|a| a.kind == "tracker_issue")
+        .unwrap();
+    assert!(
+        bug.payload.contains(&fp),
+        "the payload carries the fingerprint"
+    );
+    assert_eq!(f.executor().execute(&bug).await, ActionResult::Executed);
+
+    // The same error again: the bug filed for it, inside the window.
+    let r = support_run(&f, "c3").await;
+    assert_eq!(r["answer"]["knownBug"], "BUG-9");
+    assert_eq!(r["answer"]["seenCount"], 3);
+    assert_eq!(
+        states(&r),
+        [
+            ("comment".to_string(), "approved".to_string()),
+            ("known".to_string(), "approved".to_string())
+        ]
+    );
 }

@@ -70,6 +70,18 @@ pub(crate) fn is_component(s: &str, max_len: usize) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
+/// `origin` as stored on a project row (`ProjectRow::github_origin`): the
+/// URL trimmed, when it is a remote URL naming a github.com repository.
+/// `None` for anything else — another host, a bare `owner/repo` (as an
+/// origin that is a relative path to another local repository), a URL
+/// with credentials in it (`https://user:token@github.com/...`, which
+/// [`parse_repo_url`] does not accept), or nothing at all.
+pub fn github_origin(origin: &str) -> Option<String> {
+    let s = origin.trim();
+    let remote = s.contains("://") || s.contains('@');
+    (remote && parse_repo_url(s).is_some()).then(|| s.to_string())
+}
+
 /// The URL fleet clones with, for a pair from [`parse_repo_url`].
 pub fn clone_url_for(owner: &str, repo: &str) -> String {
     format!("git@github.com:{owner}/{repo}.git")
@@ -97,6 +109,28 @@ mod tests {
                 Some(("martin-janci".to_string(), "claude-fleet".to_string())),
                 "{input}"
             );
+        }
+    }
+
+    #[test]
+    fn github_origin_keeps_only_a_github_remote() {
+        for ok in [
+            "git@github.com:acme/web.git",
+            "https://github.com/acme/web",
+            "ssh://git@github.com/acme/web.git",
+        ] {
+            assert_eq!(github_origin(&format!(" {ok}\n")).as_deref(), Some(ok));
+        }
+        for bad in [
+            "",
+            "acme/web",
+            "../web",
+            "/srv/git/web.git",
+            "git@gitlab.com:acme/web.git",
+            "https://gitlab.com/acme/web",
+            "https://user:token@github.com/acme/web",
+        ] {
+            assert_eq!(github_origin(bad), None, "{bad}");
         }
     }
 

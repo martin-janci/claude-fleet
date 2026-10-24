@@ -302,6 +302,7 @@ pub(crate) fn sample_project_row() -> ProjectRow {
         last_session_at: Some(1_725_000_000),
         adopted: true,
         system: false,
+        github_origin: Some("git@github.com:owner/repo.git".into()),
     }
 }
 

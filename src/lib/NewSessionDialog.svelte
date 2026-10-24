@@ -931,11 +931,14 @@
   }
 
   // ── Which fleet (multi-hub Phase 2) ──────────────────────────────────
-  // The extra fleets that also have this repository. Picking one starts the
-  // session on THAT hub (`fleetNewSession`), with its hosts and its project
-  // id; the rest of this dialog (accounts, worktree scan, tickets, multi
-  // start) is about this window's own fleet and steps aside.
-  const fleetOptions = $derived(fleetChoicesFor(owner, repo, $fleets, $fleetRows));
+  // The extra fleets that have this repository, and — when it has a GitHub
+  // origin — those that would clone it from that origin first. Picking one
+  // starts the session on THAT hub (`fleetNewSession`), with its hosts and
+  // its project id; the rest of this dialog (accounts, worktree scan,
+  // tickets, multi start) is about this window's own fleet and steps aside.
+  const fleetOptions = $derived(
+    fleetChoicesFor(owner, repo, $fleets, $fleetRows, project.project.github_origin ?? null),
+  );
   let chosenFleet = $state<string>(PRIMARY);
   let fleetPicked = false;
   $effect(() => {
@@ -977,13 +980,15 @@
 
   async function submitFleet(choice: NonNullable<typeof fleetChoice>) {
     if (!fleetHost) return;
+    // A fleet without the repository gets it cloned onto the picked host
+    // first, from this project's own GitHub origin only (`fleetChoicesFor`).
+    const cloneUrl = choice.cloneUrl ?? null;
+    let projectId = choice.projectId;
+    if (projectId === null && cloneUrl === null) return;
     busy = true;
     error = null;
-    // A fleet without the repository gets it cloned onto the picked host
-    // first, so its machines can be used for any repository this window has.
-    let projectId = choice.projectId;
     if (projectId === null) {
-      const added = await fleetCloneProject(choice.fleet.id, fleetHost, owner, repo);
+      const added = await fleetCloneProject(choice.fleet.id, fleetHost, cloneUrl ?? '');
       if (!added.ok) {
         busy = false;
         fail(added.error, `Adding ${owner}/${repo} to ${choice.fleet.label} failed`);
@@ -2030,7 +2035,9 @@
         <p class="wt-status">{fleetChoice.fleet.label} lists no hosts yet.</p>
       {:else if fleetChoice.projectId === null}
         <p class="wt-status" data-testid="new-session-fleet-clone">
-          {fleetChoice.fleet.label} doesn't have {owner}/{repo} yet. Create clones it onto {fleetHost || 'the host'} first.
+          {fleetChoice.fleet.label} doesn't have {owner}/{repo} yet. Create clones
+          <code data-testid="new-session-fleet-clone-url">{fleetChoice.cloneUrl}</code>
+          onto {fleetHost || 'the host'} first.
         </p>
       {/if}
       <label for="fleet-branch">new branch (optional)</label>

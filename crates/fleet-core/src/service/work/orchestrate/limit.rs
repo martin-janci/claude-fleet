@@ -82,11 +82,23 @@ pub fn candidates(
     m: &MissionRow,
     grant: Option<&GrantRow>,
 ) -> Result<Vec<Login>, IpcError> {
+    Ok(logins(s, m, grant)?.0)
+}
+
+/// [`candidates`], and the logins left out of them as signed out, in the
+/// order they would have been tried.
+fn logins(
+    s: &Store,
+    m: &MissionRow,
+    grant: Option<&GrantRow>,
+) -> Result<(Vec<Login>, Vec<Login>), IpcError> {
     let preferred = grant.and_then(|g| g.profile.clone());
     let mut out: Vec<Login> = Vec::new();
-    let mut push = |l: Login| {
-        if !out.contains(&l) {
-            out.push(l);
+    let mut dropped: Vec<Login> = Vec::new();
+    let mut push = |l: Login, gone: bool| {
+        let list = if gone { &mut dropped } else { &mut out };
+        if !list.contains(&l) {
+            list.push(l);
         }
     };
     for host in planner_hosts(s, m, grant)? {
@@ -106,20 +118,17 @@ pub fn candidates(
         if let Some(p) = preferred
             .as_ref()
             .filter(|p| profiles.iter().any(|x| &x.name == *p))
-            .filter(|p| !signed_out(Some(p)))
         {
-            push(at(Some(p)));
+            push(at(Some(p)), signed_out(Some(p)));
         }
-        if !signed_out(None) {
-            push(at(None));
-        }
+        push(at(None), signed_out(None));
         for p in &profiles {
-            if p.account_uuid.is_some() && !signed_out(Some(&p.name)) {
-                push(at(Some(&p.name)));
+            if p.account_uuid.is_some() {
+                push(at(Some(&p.name)), signed_out(Some(&p.name)));
             }
         }
     }
-    Ok(out)
+    Ok((out, dropped))
 }
 
 /// The planner's words on a mission (its runs and waits, newest first),
@@ -150,6 +159,12 @@ impl Words {
     /// limit, and no later login of that ask answered.
     pub fn waiting(&self) -> bool {
         self.0.first().is_some_and(|e| e.kind == LIMIT_WAIT_EVENT)
+    }
+
+    /// The wait the planner's newest word is, when it is one.
+    pub fn newest_wait(&self) -> Option<LimitWait> {
+        let e = self.0.first().filter(|e| e.kind == LIMIT_WAIT_EVENT)?;
+        serde_json::from_value(e.payload.clone()?).ok()
     }
 
     /// When the planner was last asked.
@@ -197,6 +212,10 @@ pub fn choose(
 
 /// [`choose`] over `words` already read, passing over `skip` too (the
 /// logins this ask found signed out).
+///
+/// When no login is at a limit and the logins left were all left out as
+/// signed out, there is no reset to wait for: the refusal says which login
+/// to sign in again (review r9), and no wait is recorded.
 pub fn choose_in(
     s: &Store,
     m: &MissionRow,
@@ -208,7 +227,8 @@ pub fn choose_in(
     let waits = words.open_waits(now);
     let mut resets: Vec<(i64, bool)> = Vec::new();
     let mut first_why: Option<String> = None;
-    for l in candidates(s, m, grant)? {
+    let (usable, gone) = logins(s, m, grant)?;
+    for l in usable {
         if skip.contains(&l) {
             continue;
         }
@@ -227,6 +247,17 @@ pub fn choose_in(
             continue;
         }
         return Ok(Ok(l));
+    }
+    if resets.is_empty() {
+        if let Some(l) = gone.first() {
+            let why =
+                crate::service::login_health::signed_out_reason(s, &l.host, l.profile.as_deref())?
+                    .unwrap_or_else(|| format!("{} is signed out", l.words()));
+            return Err(IpcError::new(
+                crate::ipc_error::codes::E_CLAUDE_CLI,
+                format!("no login the planner may use is signed in: {why}"),
+            ));
+        }
     }
     let (resets_at, reset_known) = resets
         .into_iter()
