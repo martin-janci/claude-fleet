@@ -935,3 +935,22 @@ fn a_fingerprint_names_a_fleet_store_and_adds_its_own_fields() {
     })
     .contains("knownBug"));
 }
+
+/// A pull request's head and diff, and a push's gate, are a GitHub
+/// trigger's: a tracker definition is refused them.
+#[test]
+fn a_head_a_diff_and_a_debounce_need_a_pull_request() {
+    assert_problem(
+        |v| v["run"]["workspace"] = json!("pr_head"),
+        "workspace pr_head reads a pull request",
+    );
+    assert_problem(|v| v["run"]["diff"] = json!({}), "diff is a pull request's");
+    assert_problem(
+        |v| v["trigger"]["debounce_secs"] = json!(60),
+        "debounce_secs is not for this source",
+    );
+    assert_problem(
+        |v| v["run"]["diff"] = json!({ "max_lines": 0 }),
+        "max_lines is 1-20000",
+    );
+}

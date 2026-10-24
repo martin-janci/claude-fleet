@@ -229,6 +229,27 @@ impl FleetHost for World {
         ));
         Ok(())
     }
+    async fn claude_ignore(&self, _: &str, _: &str, base: &str) -> Option<String> {
+        (base == "main").then(|| "docs/**\n".to_string())
+    }
+    async fn prepare_pr(
+        &self,
+        _: &str,
+        root: &str,
+        job_id: i64,
+        number: i64,
+        sha: &str,
+    ) -> Result<(Prepared, String), IpcError> {
+        self.base
+            .log
+            .lock()
+            .unwrap()
+            .push(format!("prepare_pr #{number}@{sha}"));
+        if sha == "moved" {
+            return Ok((Prepared::Moved, String::new()));
+        }
+        Ok((Prepared::Ready, workspace::workspace_dir(root, job_id)))
+    }
     async fn pr_diff(&self, _: &str, repo: &str, number: i64) -> Result<String, String> {
         self.gh_writes
             .lock()
@@ -2514,5 +2535,164 @@ async fn the_support_definition_fingerprints_links_and_files_once() {
             ("comment".to_string(), "approved".to_string()),
             ("known".to_string(), "approved".to_string())
         ]
+    );
+}
+
+#[test]
+fn a_pr_job_waits_out_its_debounce_and_a_wip_one_none() {
+    let mut wip = pr(5, "def", false);
+    wip.title = "[WIP] not yet".into();
+    let gate = super::github::PrGate {
+        skip_wip: true,
+        debounce_secs: 120,
+    };
+    let jobs = super::github::plan_pr_jobs(
+        1,
+        "acme/pos",
+        &[pr(4, "abc", false), wip.clone()],
+        gate,
+        1000,
+    );
+    assert_eq!(jobs.len(), 1, "the WIP pull request has no job");
+    assert_eq!(jobs[0].0.not_before, 1120);
+    let open = super::github::plan_pr_jobs(1, "acme/pos", &[wip], Default::default(), 1000);
+    assert_eq!((open.len(), open[0].0.not_before), (1, 1000));
+}
+
+#[test]
+fn a_diff_is_filtered_and_gated() {
+    let spec = definition::DiffSpec {
+        exclude_paths: vec!["*.lock".into()],
+        respect_claudeignore: true,
+        max_lines: 10,
+    };
+    let diff = "diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1 +1,2 @@\n fn a() {}\n+fn b() {}\n\
+diff --git a/Cargo.lock b/Cargo.lock\n--- a/Cargo.lock\n+++ b/Cargo.lock\n@@ -1 +1 @@\n-x\n+y\n";
+    let kept = gate_diff(diff, &spec, None).unwrap();
+    assert!(
+        kept.contains("src/a.rs") && !kept.contains("Cargo.lock"),
+        "{kept}"
+    );
+    let only_lock = "diff --git a/Cargo.lock b/Cargo.lock\n--- a/Cargo.lock\n+++ b/Cargo.lock\n@@ -1 +1 @@\n-x\n+y\n";
+    assert!(gate_diff(only_lock, &spec, None)
+        .unwrap_err()
+        .starts_with("empty_diff"));
+    let small = definition::DiffSpec {
+        max_lines: 1,
+        ..spec
+    };
+    assert!(gate_diff(diff, &small, None)
+        .unwrap_err()
+        .starts_with("diff_too_large"));
+}
+
+/// A reviewer-like definition: `pr_head`, the diff in the prompt.
+fn head_fx() -> Fx {
+    let d = definition::parse_value(&json!({
+        "inputs": [{ "name": "repo", "type": "text", "label": "Repo", "required": true }],
+        "trigger": { "source": "github_prs", "repo": "{{repo}}" },
+        "run": { "workspace": "pr_head", "diff": { "exclude_paths": ["*.lock"] },
+            "output_schema": { "type": "object", "required": ["summary"],
+                "properties": { "summary": { "type": "string" } } } }
+    }))
+    .unwrap();
+    assert_eq!(
+        definition::problems(&d, &BTreeMap::new()),
+        Vec::<String>::new()
+    );
+    let loaded = Loaded {
+        name: "rv".into(),
+        definition: d,
+        skill: "Review it.".into(),
+        templates: BTreeMap::new(),
+    };
+    fx(loaded, json!({ "repo": "acme/pos" }), json!([]), true)
+}
+
+#[tokio::test]
+async fn a_review_reads_the_head_and_its_diff_and_skips_a_head_that_moved() {
+    let f = head_fx();
+    *f.world.prs.lock().unwrap() = vec![pr(4, "abc", false)];
+    *f.world.diff.lock().unwrap() = "diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1 +1,2 @@\n fn a() {}\n+fn b() {}\n\
+diff --git a/docs/x.md b/docs/x.md\n--- a/docs/x.md\n+++ b/docs/x.md\n@@ -1 +1 @@\n-x\n+y\n".into();
+    *f.world.base.answer.lock().unwrap() = Some(PrintOutcome::Answered {
+        text: r#"{"summary":"fine"}"#.into(),
+        cost_micros: 0,
+    });
+    let now = crate::store::now_unix();
+    let polled = f
+        .poller()
+        .poll(&f.rule, Some(&f.cursor(now - 100, None)), now)
+        .await
+        .unwrap();
+    let jobs = f.claim(&polled.jobs);
+    let out = f.runner().run(&jobs[0], Some(&f.rule)).await;
+    assert!(matches!(out, RunOutcome::Done { .. }), "{out:?}");
+    let log = f.world.base.log.lock().unwrap().clone();
+    assert!(log.contains(&"prepare_pr #4@abc".to_string()), "{log:?}");
+    let (_, prompt) = f.world.base.last.lock().unwrap().clone().unwrap();
+    assert!(
+        prompt.contains("## Diff") && prompt.contains("+fn b() {}"),
+        "{prompt}"
+    );
+    assert!(
+        !prompt.contains("docs/x.md"),
+        "the base's .claudeignore leaves docs out"
+    );
+
+    // A later push: this head's job, run again, is skipped.
+    *f.world.prs.lock().unwrap() = vec![pr(4, "def", false)];
+    match f.runner().run(&jobs[0], Some(&f.rule)).await {
+        RunOutcome::Skipped { reason } => assert!(reason.contains("head moved"), "{reason}"),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_comment_on_an_open_pr_carries_its_head() {
+    let f = gh_fx(json!({ "source": "github_comments", "repo": "{{repo}}",
+        "match": { "any_phrase": "/ask" } }));
+    *f.world.prs.lock().unwrap() = vec![pr(4, "abc", false)];
+    let c = |id: i64, number: i64| crate::service::agents::review::PrComment {
+        id,
+        number,
+        body: "/ask why".into(),
+        user_type: "User".into(),
+    };
+    *f.world.comments.lock().unwrap() = vec![c(1, 4), c(2, 9)];
+    let now = crate::store::now_unix();
+    let polled = f
+        .poller()
+        .poll(&f.rule, Some(&f.cursor(now - 100, None)), now)
+        .await
+        .unwrap();
+    assert_eq!(polled.jobs.len(), 2);
+    let kept = |job: &crate::store::NewAgentJob| {
+        let s = f.store.lock().unwrap();
+        let row = s
+            .agent_record(
+                &subjects_namespace(f.rule.id),
+                "subject",
+                &job.dedup_key,
+                now,
+            )
+            .unwrap()
+            .unwrap();
+        serde_json::from_str::<Value>(&row.value).unwrap()
+    };
+    let on_pr = polled
+        .jobs
+        .iter()
+        .find(|j| j.subject.ends_with("#4"))
+        .unwrap();
+    assert_eq!(kept(on_pr)["head_sha"], "abc");
+    let on_issue = polled
+        .jobs
+        .iter()
+        .find(|j| j.subject.ends_with("#9"))
+        .unwrap();
+    assert!(
+        kept(on_issue).get("head_sha").is_none(),
+        "an issue has no head"
     );
 }
