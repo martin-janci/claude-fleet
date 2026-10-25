@@ -344,80 +344,131 @@ pub async fn collect_evidence_as(
     tasks: &[TaskRow],
     read: EvidenceRead,
 ) {
+    read_and_store(store, ssh, host, cwd, tasks, read).await;
+}
+
+/// The longest one retried git read may take. The retry runs in the loop's
+/// pass, so a host that swallows packets costs this, not ssh's own minute.
+const EVIDENCE_RETRY_WALL_CLOCK: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// The most one pass of the loop spends on retried reads; the rest wait
+/// for the next pass.
+const EVIDENCE_RETRY_PASS: std::time::Duration = std::time::Duration::from_secs(45);
+
+/// [`collect_evidence_as`]; answers whether the host answered (a failed
+/// read is stored either way).
+async fn read_and_store(
+    store: &Arc<Mutex<Store>>,
+    ssh: &Arc<SshClient>,
+    host: &str,
+    cwd: &str,
+    tasks: &[TaskRow],
+    read: EvidenceRead,
+) -> bool {
     let runs: Vec<i64> = tasks
         .iter()
         .filter(|t| t.work_item_id.is_some())
         .map(|t| t.id)
         .collect();
     if runs.is_empty() {
-        return;
+        return true;
     }
     // A task that began part way along a shared checkout (a lane's) is
     // read from where it began; the others against the merge base, once.
     let since: Vec<(i64, Option<String>)> = {
-        let Ok(s) = store.lock() else { return };
+        let Ok(s) = store.lock() else { return false };
         runs.iter()
             .map(|&id| (id, s.task_start_head(id).ok().flatten()))
             .collect()
     };
+    let mut answered = true;
     let mut done: Vec<(Option<String>, TaskEvidence)> = Vec::new();
     for (id, from) in since {
         let ev = match done.iter().find(|(f, _)| *f == from) {
             Some((_, ev)) => ev.clone(),
             None => {
                 let script = evidence_script_since(cwd, from.as_deref());
-                let mut ev =
-                    match crate::service::catalog::inventory::run_host_script(ssh, host, &script)
+                let answer = match read {
+                    EvidenceRead::Retry => {
+                        crate::service::catalog::inventory::run_host_script_with(
+                            ssh,
+                            host,
+                            &script,
+                            EVIDENCE_RETRY_WALL_CLOCK,
+                            &tokio_util::sync::CancellationToken::new(),
+                        )
                         .await
-                    {
-                        Ok(out) => parse_evidence(&out, now_unix()),
-                        // Where it was read, so the loop can read it again (a
-                        // host that dropped for a moment is not a run that did
-                        // nothing).
-                        Err(e) => TaskEvidence {
-                            at: now_unix(),
-                            error: Some(clip(&e.message, 200)),
-                            host: Some(host.to_string()),
-                            dir: Some(cwd.to_string()),
-                            ..Default::default()
-                        },
-                    };
+                    }
+                    _ => {
+                        crate::service::catalog::inventory::run_host_script(ssh, host, &script)
+                            .await
+                    }
+                };
+                answered &= answer.is_ok();
+                let mut ev = match answer {
+                    Ok(out) => parse_evidence(&out, now_unix()),
+                    // Where it was read, so the loop can read it again (a
+                    // host that dropped for a moment is not a run that did
+                    // nothing).
+                    Err(e) => TaskEvidence {
+                        at: now_unix(),
+                        error: Some(clip(&e.message, 200)),
+                        host: Some(host.to_string()),
+                        dir: Some(cwd.to_string()),
+                        ..Default::default()
+                    },
+                };
                 ev.provisional = read == EvidenceRead::MidTurn;
                 done.push((from, ev.clone()));
                 ev
             }
         };
-        let Ok(s) = store.lock() else { return };
+        let Ok(s) = store.lock() else {
+            return answered;
+        };
         let stored = match read {
             EvidenceRead::Final => s.set_task_evidence(id, &ev),
             EvidenceRead::MidTurn => s.replace_open_task_evidence(id, &ev, false).map(|_| ()),
-            EvidenceRead::Retry => s.replace_open_task_evidence(id, &ev, true).map(|_| ()),
+            // A retry keeps what it replaces open or settled: a failed
+            // mid-turn read read again is still owed the worker's Stop, so
+            // a commit made after it counts.
+            EvidenceRead::Retry => {
+                let mut ev = ev.clone();
+                ev.provisional = s
+                    .get_task(id)
+                    .ok()
+                    .flatten()
+                    .and_then(|t| t.evidence)
+                    .is_some_and(|e| e.provisional);
+                s.replace_open_task_evidence(id, &ev, true).map(|_| ())
+            }
         };
         if let Err(e) = stored {
             tracing::warn!(task = id, error = %e.message, "[report] storing evidence failed");
         }
     }
+    answered
 }
 
 /// The least time between two reads of one run's failed git evidence.
 const EVIDENCE_RETRY_EVERY_SECS: i64 = 60;
 
-/// Read again the git evidence of `mission_id`'s runs whose read failed
-/// (a transient SSH error right after the run), within
-/// [`super::gate::EVIDENCE_RETRY_SECS`] of their finish: the gate holds
-/// them `pending` meanwhile rather than calling the work missing.
-pub async fn retry_unread_evidence(
-    store: &Arc<Mutex<Store>>,
-    ssh: &Arc<SshClient>,
-    mission_id: i64,
-    now: i64,
-) {
+/// Read again the git evidence of every run whose read failed (a transient
+/// SSH error right after the run), within [`super::gate::EVIDENCE_RETRY_SECS`]
+/// of its finish: the gate holds it `pending` meanwhile rather than calling
+/// the work missing. Any run, in a mission or not: the missions' loop calls
+/// it on every pass, outside any mission's lease. One read per checkout
+/// (`host`, `dir`) for all its runs, each bounded by
+/// [`EVIDENCE_RETRY_WALL_CLOCK`]; a host that fails once is not tried again
+/// in the same pass, and the pass stops after [`EVIDENCE_RETRY_PASS`].
+pub async fn retry_unread_evidence(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>, now: i64) {
     let runs = match store.lock() {
         Ok(s) => s
-            .mission_runs_with_unread_evidence(mission_id, now - super::gate::EVIDENCE_RETRY_SECS)
+            .runs_with_unread_evidence(now - super::gate::EVIDENCE_RETRY_SECS)
             .unwrap_or_default(),
         Err(_) => return,
     };
+    let mut checkouts: Vec<((String, String), Vec<TaskRow>)> = Vec::new();
     for t in runs {
         let Some(ev) = t.evidence.as_ref() else {
             continue;
@@ -428,7 +479,24 @@ pub async fn retry_unread_evidence(
         if now - ev.at < EVIDENCE_RETRY_EVERY_SECS {
             continue;
         }
-        collect_evidence_as(store, ssh, &host, &dir, &[t], EvidenceRead::Retry).await;
+        let key = (host, dir);
+        match checkouts.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, group)) => group.push(t),
+            None => checkouts.push((key, vec![t])),
+        }
+    }
+    let started = std::time::Instant::now();
+    let mut unreachable: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for ((host, dir), group) in checkouts {
+        if started.elapsed() >= EVIDENCE_RETRY_PASS {
+            break;
+        }
+        if unreachable.contains(&host) {
+            continue;
+        }
+        if !read_and_store(store, ssh, &host, &dir, &group, EvidenceRead::Retry).await {
+            unreachable.insert(host);
+        }
     }
 }
 

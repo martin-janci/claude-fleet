@@ -106,6 +106,9 @@ pub enum RunOutcome {
     },
     /// Nothing to do after all (a draft, a diff too large).
     Skipped { reason: String },
+    /// Not yet: the job goes back to pending until `at` (a cooldown), so
+    /// the trigger it carries is handled later rather than dropped.
+    Deferred { at: i64, reason: String },
     /// Finished, and a person has to look (an approval, a question).
     NeedsPerson {
         result: Option<String>,
@@ -236,6 +239,11 @@ pub fn plan_end(outcome: &RunOutcome, attempts: u32, max_retries: u32, now: i64)
             error_kind: None,
             error: Some(reason.clone()),
         },
+        RunOutcome::Deferred { at, reason } => AgentJobEnd::Retry {
+            at: (*at).max(now),
+            error_kind: "deferred".into(),
+            error: reason.clone(),
+        },
         RunOutcome::NeedsPerson { result, reason, .. } => AgentJobEnd::Final {
             state: "needs_person",
             result: result.clone(),
@@ -275,7 +283,7 @@ fn cost_of(outcome: &RunOutcome) -> i64 {
         RunOutcome::Done { cost_micros, .. }
         | RunOutcome::NeedsPerson { cost_micros, .. }
         | RunOutcome::Failed { cost_micros, .. } => *cost_micros,
-        RunOutcome::Skipped { .. } => 0,
+        RunOutcome::Skipped { .. } | RunOutcome::Deferred { .. } => 0,
     }
 }
 

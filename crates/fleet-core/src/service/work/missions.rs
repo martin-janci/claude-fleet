@@ -109,6 +109,13 @@ pub struct MissionDetail {
     /// hub.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lanes: Vec<crate::store::MissionLaneRow>,
+    /// The planner's open wait, when its newest word (of its runs and
+    /// waits, read apart from the rest of the log) is a usage-limit wait
+    /// (review r9: `events` is one page of every kind, so a busy log hid
+    /// it). Always sent, `null` when not waiting, so a client tells this
+    /// hub from an older one that leaves it out.
+    #[serde(default)]
+    pub limit_wait: Option<super::orchestrate::limit::LimitWait>,
 }
 
 /// A finished mission's leftovers, as far as the caller may see them.
@@ -289,6 +296,7 @@ pub fn mission(
             l
         })
         .collect();
+    let limit_wait = super::orchestrate::limit::Words::read(&s, id)?.newest_wait();
     let finish = if crate::store::MISSION_FINAL_STATES.contains(&mission.state.as_str()) {
         Some(finish(&s, scope, id, sessions.clone())?)
     } else {
@@ -306,6 +314,7 @@ pub fn mission(
         sessions,
         stats,
         lanes,
+        limit_wait,
     })
 }
 

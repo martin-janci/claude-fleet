@@ -178,3 +178,72 @@ fn open_evidence_is_replaced_and_found_settled_evidence_is_not() {
     assert!(!s.replace_open_task_evidence(t.id, &mid, false).unwrap());
     assert!(s.replace_open_task_evidence(t.id, &settled, true).unwrap());
 }
+
+/// review9: the loop reads again every done run whose read failed with the
+/// checkout recorded, within the window and in a mission or not; a run whose
+/// git answered (an error without a host) or that is not done is not read.
+#[test]
+fn failed_reads_with_a_checkout_are_found_for_any_run() {
+    let s = Store::open_in_memory().unwrap();
+    let item = s.create_local_work_item(None, "queue").unwrap().id;
+    let run = |finished: i64, state: &str| {
+        let t = s.insert_task(None, Some(7), "go", "n").unwrap();
+        s.set_task_run(t.id, item, 1, "implement").unwrap();
+        s.conn_ref()
+            .execute(
+                "UPDATE tasks SET state = ?2, finished_at = ?3 WHERE id = ?1",
+                rusqlite::params![t.id, state, finished],
+            )
+            .unwrap();
+        t.id
+    };
+    let failed = TaskEvidence {
+        at: 100,
+        error: Some("ssh: reset".into()),
+        host: Some("mars".into()),
+        dir: Some("/w".into()),
+        ..Default::default()
+    };
+    let unread = run(100, "done");
+    s.set_task_evidence(unread, &failed).unwrap();
+    let mid_turn = run(100, "done");
+    s.set_task_evidence(
+        mid_turn,
+        &TaskEvidence {
+            provisional: true,
+            ..failed.clone()
+        },
+    )
+    .unwrap();
+    let old = run(10, "done");
+    s.set_task_evidence(old, &failed).unwrap();
+    let answered = run(100, "done");
+    s.set_task_evidence(
+        answered,
+        &TaskEvidence {
+            at: 100,
+            error: Some("no checkout".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let settled = run(100, "done");
+    s.set_task_evidence(
+        settled,
+        &TaskEvidence {
+            at: 100,
+            commits_total: 1,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let cancelled = run(100, "cancelled");
+    s.set_task_evidence(cancelled, &failed).unwrap();
+    let found: Vec<i64> = s
+        .runs_with_unread_evidence(50)
+        .unwrap()
+        .iter()
+        .map(|t| t.id)
+        .collect();
+    assert_eq!(found, vec![unread, mid_turn]);
+}

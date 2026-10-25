@@ -89,13 +89,16 @@ fn only_plain_commands_are_pre_approved() {
     }
 }
 
+/// On by default since lanes L4; a person who turns it off gets every
+/// review and test as a session again.
 #[test]
 fn nothing_goes_headless_with_the_setting_off() {
     let (s, item) = world();
-    assert!(!settings::get_bool(
+    assert!(settings::get_bool(
         &s,
         settings::ORCHESTRATOR_HEADLESS_CHECKS
     ));
+    settings::set(&s, settings::ORCHESTRATOR_HEADLESS_CHECKS, "false").unwrap();
     for role in ["review", "test"] {
         assert!(plan(&s, item, role, None, None).is_none(), "{role}");
     }

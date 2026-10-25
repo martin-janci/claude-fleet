@@ -148,7 +148,7 @@ impl Store {
     }
 
     /// Record where a task began in a checkout it shares (lanes design L3,
-    /// migration 208): a commit id as git printed it, refused otherwise.
+    /// migration 209): a commit id as git printed it, refused otherwise.
     pub fn set_task_start_head(&self, task_id: i64, sha: &str) -> Result<(), IpcError> {
         if !is_commit_id(sha) {
             return Err(IpcError::new(
@@ -224,25 +224,20 @@ impl Store {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
-    /// The finished runs at `mission_id`'s members, done since `since`,
-    /// whose git read failed: the loop reads them again.
-    pub fn mission_runs_with_unread_evidence(
-        &self,
-        mission_id: i64,
-        since: i64,
-    ) -> Result<Vec<super::TaskRow>, IpcError> {
+    /// The finished runs, done since `since`, whose git read failed with
+    /// the checkout to read again recorded (`host`, `dir`): the loop reads
+    /// them again (`report::retry_unread_evidence`), in a mission or not.
+    pub fn runs_with_unread_evidence(&self, since: i64) -> Result<Vec<super::TaskRow>, IpcError> {
         let mut stmt = self.conn.prepare(&format!(
-            "SELECT {} FROM tasks t JOIN work_items i ON i.id = t.work_item_id \
-             WHERE i.orchestration_project_id = ?1 AND t.state = 'done' \
-               AND t.finished_at >= ?2 \
-               AND json_extract(t.evidence_json, '$.error') IS NOT NULL \
-             ORDER BY t.finished_at ASC, t.id ASC",
-            super::rows::task_columns_t()
+            "SELECT {} FROM tasks WHERE state = 'done' AND work_item_id IS NOT NULL \
+               AND finished_at >= ?1 \
+               AND json_extract(evidence_json, '$.error') IS NOT NULL \
+               AND json_extract(evidence_json, '$.host') IS NOT NULL \
+               AND json_extract(evidence_json, '$.dir') IS NOT NULL \
+             ORDER BY finished_at ASC, id ASC",
+            super::rows::TASK_COLUMNS
         ))?;
-        let rows = stmt.query_map(
-            rusqlite::params![mission_id, since],
-            super::rows::map_task_row,
-        )?;
+        let rows = stmt.query_map([since], super::rows::map_task_row)?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
 

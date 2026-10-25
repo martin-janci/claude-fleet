@@ -280,3 +280,88 @@ fn a_lane_task_is_read_from_where_it_began() {
     // Something that is no commit id falls back to the merge base.
     assert!(!evidence_script_since("/x", Some("; rm -rf ~")).contains("rm -rf"));
 }
+
+/// review9: the loop's retry reads each failed checkout once for all its
+/// runs, tries a host that failed only once a pass, leaves a read newer than
+/// a minute alone, and keeps a failed mid-turn read open for the Stop.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_retry_reads_each_checkout_once_and_keeps_a_mid_turn_read_open() {
+    use crate::tmux::fake_exec::{write_exec, PROBE_GUARD};
+    let bin = tempfile::tempdir().unwrap();
+    let log = bin.path().join("calls");
+    let fake = write_exec(
+        bin.path(),
+        "ssh",
+        &format!(
+            "#!/bin/sh\n{PROBE_GUARD}\
+             case \"$*\" in *'-O check'*|*'-O exit'*) exit 0;; esac\n\
+             while [ \"$#\" -gt 0 ] && [ \"$1\" != \"--\" ]; do shift; done\n\
+             echo \"$2\" >> '{log}'\n\
+             [ \"$2\" = dead ] && exit 255\n\
+             shift 2\n\
+             exec sh -c \"$*\"\n",
+            log = log.display()
+        ),
+    );
+    let ssh = Arc::new(SshClient::with_ssh_binary(fake));
+    let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+    let now = 10_000;
+    let run = |host: &str, dir: &str, at: i64, provisional: bool| {
+        let s = store.lock().unwrap();
+        let item = s.create_local_work_item(None, "queue").unwrap().id;
+        let t = s.insert_task(None, Some(7), "go", "n").unwrap();
+        s.set_task_run(t.id, item, 1, "implement").unwrap();
+        s.conn_ref()
+            .execute(
+                "UPDATE tasks SET state = 'done', finished_at = ?2 WHERE id = ?1",
+                rusqlite::params![t.id, now - 100],
+            )
+            .unwrap();
+        let ev = TaskEvidence {
+            at,
+            error: Some("ssh: reset".into()),
+            host: Some(host.into()),
+            dir: Some(dir.into()),
+            provisional,
+            ..Default::default()
+        };
+        s.set_task_evidence(t.id, &ev).unwrap();
+        (t.id, ev)
+    };
+    let (mid_turn, _) = run("mars", "/nonexistent/fleet-r9", now - 100, true);
+    let (after_stop, _) = run("mars", "/nonexistent/fleet-r9", now - 100, false);
+    let (dead_a, _) = run("dead", "/w/a", now - 100, false);
+    let (dead_b, dead_b_ev) = run("dead", "/w/b", now - 100, false);
+    let (fresh, fresh_ev) = run("mars", "/nonexistent/other", now - 10, false);
+
+    retry_unread_evidence(&store, &ssh, now).await;
+
+    let calls = std::fs::read_to_string(&log).unwrap();
+    assert_eq!(
+        calls.lines().collect::<Vec<_>>(),
+        vec!["mars", "dead"],
+        "one read per checkout, one try per failed host, none too soon"
+    );
+    let ev = |id: i64| {
+        store
+            .lock()
+            .unwrap()
+            .get_task(id)
+            .unwrap()
+            .unwrap()
+            .evidence
+            .unwrap()
+    };
+    let read = ev(mid_turn);
+    assert_eq!(read.error.as_deref(), Some("no checkout"), "{read:?}");
+    assert!(read.provisional, "a mid-turn read stays owed to the Stop");
+    let read = ev(after_stop);
+    assert_eq!(read.error.as_deref(), Some("no checkout"));
+    assert!(!read.provisional);
+    let failed = ev(dead_a);
+    assert_eq!(failed.host.as_deref(), Some("dead"), "read again later");
+    assert!(failed.at > now - 100);
+    assert_eq!(ev(dead_b), dead_b_ev, "the host already failed this pass");
+    assert_eq!(ev(fresh), fresh_ev, "read less than a minute ago");
+}

@@ -10,4 +10,4 @@
 --               as before.
 ALTER TABLE tasks ADD COLUMN start_head TEXT;
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (208);
+INSERT OR IGNORE INTO schema_version (version) VALUES (209);

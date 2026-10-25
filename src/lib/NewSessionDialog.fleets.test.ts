@@ -67,7 +67,7 @@ describe('New session on an extra fleet', () => {
     expect(screen.queryByTestId('new-session-fleet')).toBeNull();
   });
 
-  it("offers a fleet's machines without the repository, and clones it there before the start", async () => {
+  it("offers a fleet's machines without the repository, and clones its GitHub origin there before the start", async () => {
     _setFleetsForTest([fleet(PRIMARY), fleet('papayapos')]);
     _setFleetRowsForTest('papayapos', {
       ...emptyRows(),
@@ -82,21 +82,45 @@ describe('New session on an extra fleet', () => {
       return null;
     });
     const onCancel = vi.fn();
-    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel } });
+    // Its origin, not a URL made of its owner/repo.
+    const origin = 'git@github.com:papaya-pos/pos-app.git';
+    const cloned = { ...project, project: { ...project.project, github_origin: origin } };
+    render(NewSessionDialog, { props: { project: cloned, onCreate: () => {}, onCancel } });
     await tick();
-    expect(screen.getByTestId('new-session-fleet-papayapos').getAttribute('aria-checked')).toBe('true');
+    // The owner matches, but a fleet that needs a clone is never the default.
+    expect(screen.getByTestId(`new-session-fleet-${PRIMARY}`).getAttribute('aria-checked')).toBe('true');
+    await fireEvent.click(screen.getByTestId('new-session-fleet-papayapos'));
+    await tick();
     expect((screen.getByTestId('new-session-fleet-host') as HTMLSelectElement).value).toBe('mac');
-    expect(screen.getByTestId('new-session-fleet-clone').textContent).toContain('clones it onto mac');
+    expect(screen.getByTestId('new-session-fleet-clone').textContent).toContain('onto mac');
+    expect(screen.getByTestId('new-session-fleet-clone-url').textContent).toBe(origin);
     await fireEvent.click(screen.getByTestId('create-btn'));
     await vi.waitFor(() => expect(onCancel).toHaveBeenCalled());
     const add = inv.mock.calls.find(([cmd]) => cmd === 'add_project')!;
     expect(add[1]).toEqual({
       fleet: 'papayapos',
-      args: { host_alias: 'mac', source: { kind: 'clone', url: 'https://github.com/PapayaPOS/pos' } },
+      args: { host_alias: 'mac', source: { kind: 'clone', url: origin } },
     });
     const call = inv.mock.calls.find(([cmd]) => cmd === 'new_session')!;
     expect(call[1]).toMatchObject({ fleet: 'papayapos', args: { host_alias: 'mac', project_id: 51 } });
     expect(get(fleetSelection)).toEqual({ fleet: 'papayapos', id: 8 });
+  });
+
+  it('offers no fleet without the repository when the project has no GitHub origin', async () => {
+    _setFleetsForTest([fleet(PRIMARY), fleet('papayapos')]);
+    _setFleetRowsForTest('papayapos', {
+      ...emptyRows(),
+      hosts: new Map([
+        ['mac', { alias: 'mac', ssh_alias: 'mac', reachable: true, claude_version: null, tmux_version: null, hidden: false, last_pinged_at: 1, account_uuid: null, provisioned: false, transport: 'ssh' }],
+      ]),
+    });
+    for (const p of [project, { ...project, project: { ...project.project, owner: 'local', repo: 'loose' } }]) {
+      const { unmount } = render(NewSessionDialog, { props: { project: p, onCreate: () => {}, onCancel: () => {} } });
+      await tick();
+      expect(screen.queryByTestId('new-session-fleet')).toBeNull();
+      expect(screen.queryByTestId('new-session-fleet-clone')).toBeNull();
+      unmount();
+    }
   });
 
   it("defaults to the fleet that owns the repository's owner and starts there", async () => {

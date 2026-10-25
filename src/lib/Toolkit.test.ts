@@ -9,6 +9,7 @@ import { catalog, type AssetListing } from './assets';
 import { assetsViewRequest } from './app_views';
 import { toolkitTab } from './toolkit_skills';
 import { expectAccessible } from './a11y_check';
+import { hubStatus, STANDALONE } from './hub';
 
 const listing: AssetListing = {
   head: 'h', loaded_at: 1, unmanaged: [], problems: [],
@@ -30,6 +31,7 @@ afterEach(() => {
   vi.mocked(invoke).mockImplementation(async () => { throw { code: 'E_TEST', message: 'no backend' }; });
   catalog.set(null);
   assetsViewRequest.set(null);
+  hubStatus.set({ ...STANDALONE });
 });
 
 describe('Toolkit (step 3.16)', () => {
@@ -128,6 +130,68 @@ describe('Toolkit (step 3.16)', () => {
     expect((getByTestId('toolkit-add') as HTMLButtonElement).disabled).toBe(true);
     expect((getByTestId('toolkit-sync') as HTMLButtonElement).disabled).toBe(true);
     expect(getByRole('button', { name: 'View steward' })).toBeTruthy();
+  });
+
+  it('keeps the unavailable notice when an older catalog check answers after it', async () => {
+    // The first check is still waiting on the catalog when the hub goes
+    // unavailable; its late answer must not take the notice back.
+    let answer!: (v: null) => void;
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === 'catalog_config') return new Promise((r) => { answer = r; });
+      if (cmd === 'catalog_list_assets') return listing;
+      throw { code: 'E_TEST', message: 'no backend' };
+    });
+    const { findByTestId, getByTestId } = render(Toolkit, { visible: true });
+    await vi.waitFor(() => expect(answer).toBeTypeOf('function'));
+    hubStatus.set({ ...STANDALONE, unavailable: 'the hub is unreachable' });
+    expect(await findByTestId('toolkit-unavailable')).toBeTruthy();
+    answer(null);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(getByTestId('toolkit-unavailable')).toBeTruthy();
+    expect((getByTestId('toolkit-sync') as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('quotes a device name with a space or an apostrophe in the grant command', async () => {
+    const before = get(hubStatus);
+    hubStatus.set({ ...before, client_name: "Martin's MacBook" });
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === 'catalog_config') throw { code: 'E_FORBIDDEN', message: 'not granted' };
+      if (cmd === 'catalog_list_assets') return listing;
+      throw { code: 'E_TEST', message: 'no backend' };
+    });
+    try {
+      const { findByTestId } = render(Toolkit, { visible: true });
+      expect((await findByTestId('toolkit-grant-cmd')).textContent).toBe(
+        `fleet-hub client grant 'Martin'\\''s MacBook' assets`,
+      );
+    } finally {
+      hubStatus.set(before);
+    }
+  });
+
+  it('does not tell a read-only device to set up a catalog it cannot manage', async () => {
+    catalog.set(null);
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === 'catalog_config') throw { code: 'E_FORBIDDEN', message: 'not granted' };
+      throw { code: 'E_TEST', message: 'no backend' };
+    });
+    const { findByTestId, queryByTestId } = render(Toolkit, { visible: true });
+    expect(await findByTestId('toolkit-read-only')).toBeTruthy();
+    expect(queryByTestId('toolkit-skills-empty')).toBeNull();
+    expect(queryByTestId('toolkit-none')?.textContent).toBe('Nothing is listed yet.');
+  });
+
+  it('does not tell a device whose hub is unavailable to set up a catalog', async () => {
+    catalog.set(null);
+    const before = get(hubStatus);
+    hubStatus.set({ ...before, unavailable: 'the hub is unreachable' });
+    try {
+      const { findByTestId, queryByTestId } = render(Toolkit, { visible: true });
+      expect(await findByTestId('toolkit-unavailable')).toBeTruthy();
+      expect(queryByTestId('toolkit-skills-empty')).toBeNull();
+    } finally {
+      hubStatus.set(before);
+    }
   });
 
   it('explains the catalog and offers to set it up when there is none', async () => {

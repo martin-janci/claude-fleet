@@ -301,6 +301,24 @@ pub async fn git_common_dir(repo_path: &Path) -> Option<PathBuf> {
     Some(canonical(&abs))
 }
 
+/// `repo_path`'s `origin` URL when it names a github.com repository
+/// ([`crate::repo_url::github_origin`]); `None` when git could not answer,
+/// there is no origin, or it is elsewhere. Stored on the project row by the
+/// scan (`ProjectRow::github_origin`).
+pub async fn git_github_origin(repo_path: &Path) -> Option<String> {
+    let output = crate::proc::command("git")
+        .arg("-C")
+        .arg(repo_path)
+        .args(["remote", "get-url", "origin"])
+        .output()
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    crate::repo_url::github_origin(&String::from_utf8_lossy(&output.stdout))
+}
+
 /// Parse `git worktree list --porcelain`. The first entry is the main
 /// worktree (git's ordering guarantee) and is named `main`; comparing paths
 /// against the scanned directory instead misnamed the real main checkout

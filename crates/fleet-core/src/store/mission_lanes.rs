@@ -1,4 +1,4 @@
-//! A mission's lanes (lanes design 2026-10-23 §2, L2, migration 207): an
+//! A mission's lanes (lanes design 2026-10-23 §2, L2, migration 208): an
 //! ordered set of its member tasks in one repository that one lead session
 //! works through on one branch (L3). A lane is named once per mission and
 //! made the first time a plan, the planner or a person puts a task in it.

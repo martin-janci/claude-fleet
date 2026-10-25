@@ -837,12 +837,9 @@ fn merge_gaps(g: &PlanGraph) -> std::collections::BTreeSet<(PlanKey, u32, PlanKe
     gaps
 }
 
-/// PURE: refuse an answer that leaves a merge-wave item short of its wave.
-/// The graph is the mission's members with this answer's `create_item`,
-/// `add_dep` and `remove_dep` applied. Only a gap the answer makes counts:
-/// one a person already accepted does not block every later answer.
-pub fn check_merge_waves(commands: &[Command], members: &[PlanNode]) -> Result<(), String> {
-    let mut g: PlanGraph = members
+/// The members of a mission as a plan graph, keyed by their item ids.
+fn graph_of(nodes: &[PlanNode]) -> PlanGraph {
+    nodes
         .iter()
         .map(|n| {
             (
@@ -857,7 +854,15 @@ pub fn check_merge_waves(commands: &[Command], members: &[PlanNode]) -> Result<(
                 },
             )
         })
-        .collect();
+        .collect()
+}
+
+/// PURE: refuse an answer that leaves a merge-wave item short of its wave.
+/// The graph is the mission's members with this answer's `create_item`,
+/// `add_dep` and `remove_dep` applied. Only a gap the answer makes counts:
+/// one a person already accepted does not block every later answer.
+pub fn check_merge_waves(commands: &[Command], members: &[PlanNode]) -> Result<(), String> {
+    let mut g = graph_of(members);
     let before = merge_gaps(&g);
     let mut created = 0usize;
     for c in commands {
@@ -979,24 +984,6 @@ pub fn check_merge_change(
     after: &[PlanNode],
     name: impl Fn(i64) -> String,
 ) -> Result<(), String> {
-    fn graph_of(nodes: &[PlanNode]) -> PlanGraph {
-        nodes
-            .iter()
-            .map(|n| {
-                (
-                    PlanKey::Item(n.item_id),
-                    PlanEntry {
-                        title: n.title.clone(),
-                        deps: n.depends_on.iter().map(|d| PlanKey::Item(*d)).collect(),
-                        rejected: n.rejected,
-                        pending: n.pending,
-                        done: n.done,
-                        integration: n.integration,
-                    },
-                )
-            })
-            .collect()
-    }
     let g = graph_of(after);
     let item = |k: PlanKey| match k {
         PlanKey::Item(id) => id,

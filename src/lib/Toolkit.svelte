@@ -17,6 +17,7 @@
   import { composerPresets } from './composer_presets';
   import { downloads, downloadsOpen } from './downloads';
   import { goTo } from './destination';
+  import { shq } from './fleets';
   import AssetsPanel from './AssetsPanel.svelte';
   import PromptsSnippets from './PromptsSnippets.svelte';
   import Button from './kit/Button.svelte';
@@ -55,13 +56,18 @@
   // The catalog is primed at launch; refresh it quietly when Toolkit opens,
   // and again once the hub status resolves (it can after mount).
   let access = $state<ToolkitAccess>('unknown');
+  // Only the latest check may set `access`: an earlier one still waiting on
+  // the catalog must not undo a newer 'unavailable'.
+  let checkSeq = 0;
   async function check() {
+    const mine = ++checkSeq;
     void loadAssets();
     if ($hubStatus.unavailable) {
       access = 'unavailable';
       return;
     }
-    access = accessOf(await loadCatalogConfig());
+    const r = await loadCatalogConfig();
+    if (mine === checkSeq) access = accessOf(r);
   }
   $effect(() => {
     void [$hubStatus.remote, $hubStatus.unavailable];
@@ -69,7 +75,10 @@
   });
   const canManage = $derived(access === 'manage' || access === 'unknown');
   const onHub = $derived($hubStatus.remote);
-  const grantCmd = $derived(`fleet-hub client grant ${$hubStatus.client_name ?? '<this device>'} assets`);
+  // Quoted: a paired device's name may hold spaces or an apostrophe.
+  const grantCmd = $derived(
+    `fleet-hub client grant ${$hubStatus.client_name ? shq($hubStatus.client_name) : '<this device>'} assets`,
+  );
   const blockedWhy = $derived(
     access === 'read_only'
       ? "This device may only look: the hub has not granted it the asset catalog."
@@ -155,11 +164,14 @@
         <div class="notice" data-testid="toolkit-unavailable"><p>{blockedWhy}</p></div>
       {/if}
       {#if !$catalog}
-        {#if access !== 'unconfigured'}
+        {#if canManage}
           <div class="empty" data-testid="toolkit-skills-empty">
             <p>No catalog is loaded yet. Set one up, or pull it, in the Assets catalog.</p>
             <Button onclick={() => openAssets()}>Open the Assets catalog</Button>
           </div>
+        {:else if access === 'read_only'}
+          <!-- The notice above says what to do; this device cannot set one up. -->
+          <p class="none" data-testid="toolkit-none">Nothing is listed yet.</p>
         {/if}
       {:else}
         <div class="bar">
