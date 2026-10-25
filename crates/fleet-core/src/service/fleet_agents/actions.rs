@@ -212,6 +212,21 @@ fn listed_finding(f: &ReviewFinding) -> String {
     format!("- `{}:{}`: {}", f.path, f.line, f.body)
 }
 
+/// PURE: `head`, then `items` listed under `heading` in what is left of
+/// `budget` characters; `head` alone when not even the heading fits.
+fn with_list(mut head: String, heading: &str, items: &[String], budget: usize) -> String {
+    let list = listed(
+        heading,
+        items,
+        budget.saturating_sub(head.chars().count() + 2),
+    );
+    if !list.is_empty() {
+        head.push_str("\n\n");
+        head.push_str(&list);
+    }
+    head
+}
+
 /// The shortest a listed finding is cut to, however many share the room.
 const MIN_LISTED: usize = 200;
 
@@ -280,21 +295,13 @@ pub fn place_review(
     // A body `plan` already sized (up to `max / 2`, its "… and N more
     // findings" tail last) is not cut again: half the room, or its own
     // length within `max / 2`, whichever is more.
-    let mut body = if outside.is_empty() {
+    let body = if outside.is_empty() {
         fit(&p.body, room)
     } else {
         let own = p.body.chars().count().min(max / 2);
-        fit(&p.body, (room / 2).max(own).min(room))
+        let head = fit(&p.body, (room / 2).max(own).min(room));
+        with_list(head, "Outside the diff:", &outside, room)
     };
-    let list = listed(
-        "Outside the diff:",
-        &outside,
-        room.saturating_sub(body.chars().count() + 2),
-    );
-    if !list.is_empty() {
-        body.push_str("\n\n");
-        body.push_str(&list);
-    }
     ReviewRequest {
         host: String::new(),
         repo: p.repo.clone(),
@@ -876,12 +883,7 @@ pub fn plan(
                         let body = if more.is_empty() {
                             fit(&text, budget)
                         } else {
-                            let head = fit(&text, budget / 2);
-                            let room = budget.saturating_sub(head.chars().count() + 2);
-                            match listed(MORE_FINDINGS, &more, room) {
-                                l if l.is_empty() => head,
-                                l => format!("{head}\n\n{l}"),
-                            }
+                            with_list(fit(&text, budget / 2), MORE_FINDINGS, &more, budget)
                         };
                         let mut shown = format!("{event}: {body}");
                         for f in &findings {

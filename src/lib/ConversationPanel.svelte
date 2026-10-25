@@ -2040,6 +2040,9 @@
       e.preventDefault();
       suggestionTaken = `Filled with Claude's suggestion: ${suggestion}`;
       draft = suggestion;
+      // As a chip click does: a suggestion that starts with `/` is text to
+      // send, not a command being typed, so no slash menu opens over it.
+      slashDismissedFor = draft;
       histIndex = null;
       return;
     }

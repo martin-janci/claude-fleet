@@ -180,6 +180,46 @@ pub fn filter_diff(diff: &str, patterns: &[String]) -> (String, usize) {
     (out.join("\n"), excluded)
 }
 
+/// Why a diff is not reviewed: nothing is left after the exclusions, or it
+/// is longer than the limit (its filtered line count).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Gate {
+    Empty,
+    TooLarge(usize),
+}
+
+impl Gate {
+    /// The skip's code, as stored and shown: `empty_diff` / `diff_too_large`.
+    pub fn code(self) -> &'static str {
+        match self {
+            Gate::Empty => "empty_diff",
+            Gate::TooLarge(_) => "diff_too_large",
+        }
+    }
+
+    /// The skip's reason, `max_lines` the limit it was held to.
+    pub fn reason(self, max_lines: usize) -> String {
+        match self {
+            Gate::Empty => "empty_diff: nothing left after the exclusions".into(),
+            Gate::TooLarge(lines) => format!("diff_too_large: {lines} lines (max {max_lines})"),
+        }
+    }
+}
+
+/// PURE: `raw` without the excluded files' blocks, or why it is not
+/// reviewed: nothing left, or more than `max_lines` lines.
+pub fn gate(raw: &str, patterns: &[String], max_lines: usize) -> Result<String, Gate> {
+    let (filtered, _) = filter_diff(raw, patterns);
+    if !filtered.split('\n').any(|l| l.starts_with("diff --git ")) {
+        return Err(Gate::Empty);
+    }
+    let lines = count_diff_lines(&filtered);
+    if lines > max_lines {
+        return Err(Gate::TooLarge(lines));
+    }
+    Ok(filtered)
+}
+
 /// Per file, the right-side lines an inline comment may sit on.
 pub type Commentable = BTreeMap<String, BTreeSet<u32>>;
 

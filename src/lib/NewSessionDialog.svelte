@@ -982,13 +982,13 @@
     if (!fleetHost) return;
     // A fleet without the repository gets it cloned onto the picked host
     // first, from this project's own GitHub origin only (`fleetChoicesFor`).
-    const cloneUrl = choice.cloneUrl ?? null;
     let projectId = choice.projectId;
-    if (projectId === null && cloneUrl === null) return;
+    if (projectId === null && choice.cloneUrl === null) return;
     busy = true;
     error = null;
     if (projectId === null) {
-      const added = await fleetCloneProject(choice.fleet.id, fleetHost, cloneUrl ?? '');
+      // Set: `cloneUrl` is null only beside a project id (checked above).
+      const added = await fleetCloneProject(choice.fleet.id, fleetHost, choice.cloneUrl!);
       if (!added.ok) {
         busy = false;
         fail(added.error, `Adding ${owner}/${repo} to ${choice.fleet.label} failed`);

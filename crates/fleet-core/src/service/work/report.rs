@@ -295,7 +295,7 @@ pub async fn collect_evidence(
     cwd: &str,
     tasks: &[TaskRow],
 ) {
-    collect_evidence_as(store, ssh, host, cwd, tasks, EvidenceRead::Final).await
+    collect_evidence_as(store, ssh, host, cwd, tasks, EvidenceRead::Final).await;
 }
 
 /// When a git read of a run's checkout happens, which says what it may
@@ -312,18 +312,6 @@ pub enum EvidenceRead {
     Retry,
 }
 
-/// [`collect_evidence`], for `read`.
-pub async fn collect_evidence_as(
-    store: &Arc<Mutex<Store>>,
-    ssh: &Arc<SshClient>,
-    host: &str,
-    cwd: &str,
-    tasks: &[TaskRow],
-    read: EvidenceRead,
-) {
-    read_and_store(store, ssh, host, cwd, tasks, read).await;
-}
-
 /// The longest one retried git read may take. The retry runs in the loop's
 /// pass, so a host that swallows packets costs this, not ssh's own minute.
 const EVIDENCE_RETRY_WALL_CLOCK: std::time::Duration = std::time::Duration::from_secs(20);
@@ -332,9 +320,9 @@ const EVIDENCE_RETRY_WALL_CLOCK: std::time::Duration = std::time::Duration::from
 /// for the next pass.
 const EVIDENCE_RETRY_PASS: std::time::Duration = std::time::Duration::from_secs(45);
 
-/// [`collect_evidence_as`]; answers whether the host answered (a failed
-/// read is stored either way).
-async fn read_and_store(
+/// [`collect_evidence`], for `read`; answers whether the host answered (a
+/// failed read is stored either way).
+pub async fn collect_evidence_as(
     store: &Arc<Mutex<Store>>,
     ssh: &Arc<SshClient>,
     host: &str,
@@ -450,7 +438,7 @@ pub async fn retry_unread_evidence(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClien
         if unreachable.contains(&host) {
             continue;
         }
-        if !read_and_store(store, ssh, &host, &dir, &group, EvidenceRead::Retry).await {
+        if !collect_evidence_as(store, ssh, &host, &dir, &group, EvidenceRead::Retry).await {
             unreachable.insert(host);
         }
     }

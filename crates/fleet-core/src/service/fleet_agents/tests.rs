@@ -898,10 +898,7 @@ fn the_writes_line_tells_of_an_unattended_approve() {
 /// and adds fields the answer's own schema must not have.
 #[test]
 fn a_fingerprint_names_a_fleet_store_and_adds_its_own_fields() {
-    let seed = super::gallery::SEEDS
-        .iter()
-        .find(|s| s.name == "support")
-        .unwrap();
+    let seed = super::gallery::seed("support").unwrap();
     let base: Value = serde_yaml::from_str(seed.asset).unwrap();
     let check = |edit: &dyn Fn(&mut Value)| {
         let mut v = base.clone();

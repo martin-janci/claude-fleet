@@ -880,7 +880,7 @@ export interface FleetChoice {
   fleet: FleetInfo;
   projectId: number | null;
   /** Set exactly when `projectId` is null. */
-  cloneUrl?: string | null;
+  cloneUrl: string | null;
 }
 
 const sameText = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();

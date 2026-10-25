@@ -2,7 +2,7 @@
 //! support agent's fingerprint of an error (`agents::support::fingerprint`),
 //! computed from the answer, kept in a fleet store, and what fleet knows of
 //! it added to the answer before the actions are planned
-//! ([`definition::FINGERPRINT_FIELDS`]):
+//! ([`super::definition::FINGERPRINT_FIELDS`]):
 //!
 //! * `fingerprint`, `seenCount`: the record of kind [`KIND`] under the
 //!   fingerprint, counted on every run that names it;
@@ -13,7 +13,7 @@
 //!
 //! Hashing and scoring are fleet's, never the model's.
 
-use super::definition::{self, FingerprintSpec};
+use super::definition::FingerprintSpec;
 use super::template;
 use crate::service::agents::support::fingerprint::{
     fingerprint, similarity, FOLLOW_UP_AT, REUSE_AT,
@@ -21,7 +21,7 @@ use crate::service::agents::support::fingerprint::{
 use crate::service::trackers::IssueThread;
 use crate::store::{NewAgentRecord, Store};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 
 /// The record kind fingerprints are kept under.
 pub const KIND: &str = "fingerprint";
@@ -84,15 +84,11 @@ pub fn named(spec: &FingerprintSpec, ctx: &Value) -> Option<Named> {
     })
 }
 
-/// PURE: the JQL of the open bugs an exception class may already have.
-pub fn candidates_jql(project: &str, issue_type: &str, class: &str) -> Option<String> {
-    crate::service::agents::support::writes::candidates_jql(project, issue_type, class)
-}
-
 /// PURE: the best open bug for `n`: `(similarBug, relatedBug)`, the first
 /// scoring at least [`REUSE_AT`], else the first at least [`FOLLOW_UP_AT`].
 pub fn best_candidate(n: &Named, found: &[IssueThread]) -> (Option<String>, Option<String>) {
-    let mut scored: Vec<(u32, &str)> = found
+    // The highest score, the first of equals.
+    let best = found
         .iter()
         .map(|t| {
             (
@@ -100,11 +96,10 @@ pub fn best_candidate(n: &Named, found: &[IssueThread]) -> (Option<String>, Opti
                 t.key.as_str(),
             )
         })
-        .collect();
-    scored.sort_by_key(|s| std::cmp::Reverse(s.0));
-    match scored.first() {
-        Some((s, k)) if *s >= REUSE_AT => (Some(k.to_string()), None),
-        Some((s, k)) if *s >= FOLLOW_UP_AT => (None, Some(k.to_string())),
+        .min_by_key(|s| std::cmp::Reverse(s.0));
+    match best {
+        Some((s, k)) if s >= REUSE_AT => (Some(k.to_string()), None),
+        Some((s, k)) if s >= FOLLOW_UP_AT => (None, Some(k.to_string())),
         _ => (None, None),
     }
 }
@@ -131,19 +126,16 @@ pub fn see(
     });
     seen.count += 1;
     seen.last_seen = now;
-    store
-        .put_agent_record(
-            &NewAgentRecord {
-                namespace: namespace.into(),
-                kind: KIND.into(),
-                key: n.fingerprint.clone(),
-                value: serde_json::to_string(&seen).unwrap_or_default(),
-                expires_at: Some(expires_at(window_mins, now)),
-                written_by_job: job_id,
-            },
-            now,
-        )
-        .map_err(|e| e.to_string())?;
+    let expires = Some(expires_at(window_mins, now));
+    put(
+        store,
+        namespace,
+        &n.fingerprint,
+        &seen,
+        expires,
+        job_id,
+        now,
+    )?;
     Ok((before, seen))
 }
 
@@ -165,16 +157,37 @@ pub fn set_bug(
     let mut seen: Seen = serde_json::from_str(&row.value).map_err(|e| e.to_string())?;
     seen.bug = Some(bug.to_string());
     seen.bug_at = Some(now);
+    // The sighting's expiry: filing a bug does not renew it.
+    put(
+        store,
+        namespace,
+        fp,
+        &seen,
+        row.expires_at,
+        row.written_by_job,
+        now,
+    )
+}
+
+/// Write `seen` as fingerprint `fp`'s record in `namespace`.
+fn put(
+    store: &Store,
+    namespace: &str,
+    fp: &str,
+    seen: &Seen,
+    expires_at: Option<i64>,
+    written_by_job: Option<i64>,
+    now: i64,
+) -> Result<(), String> {
     store
         .put_agent_record(
             &NewAgentRecord {
                 namespace: namespace.into(),
                 kind: KIND.into(),
                 key: fp.into(),
-                value: serde_json::to_string(&seen).unwrap_or_default(),
-                // The sighting's expiry: filing a bug does not renew it.
-                expires_at: row.expires_at,
-                written_by_job: row.written_by_job,
+                value: serde_json::to_string(seen).unwrap_or_default(),
+                expires_at,
+                written_by_job,
             },
             now,
         )
@@ -200,22 +213,17 @@ pub fn with_fields(
     similar: Option<String>,
     related: Option<String>,
 ) -> Value {
+    // The names are `definition::FINGERPRINT_FIELDS`.
     if let Some(m) = answer.as_object_mut() {
-        let mut add = Map::new();
-        add.insert("fingerprint".into(), json!(n.fingerprint));
-        add.insert("seenCount".into(), json!(seen.count));
+        m.insert("fingerprint".into(), json!(n.fingerprint));
+        m.insert("seenCount".into(), json!(seen.count));
         for (k, v) in [
             ("knownBug", known),
             ("similarBug", similar),
             ("relatedBug", related),
         ] {
             if let Some(v) = v {
-                add.insert(k.into(), json!(v));
-            }
-        }
-        for (name, _) in definition::FINGERPRINT_FIELDS {
-            if let Some(v) = add.remove(name) {
-                m.insert(name.into(), v);
+                m.insert(k.into(), json!(v));
             }
         }
     }

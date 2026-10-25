@@ -1485,6 +1485,15 @@ describe('ConversationPanel quick actions', () => {
     expect(box.placeholder).not.toContain('run the tests');
   });
 
+  it('takes a suggestion that starts with / as text: no slash menu opens over it', async () => {
+    await mount({ claude_status: 'idle', prompt_suggestion: '/status' });
+    const box = screen.getByTestId('conv-composer-input') as HTMLTextAreaElement;
+    await fireEvent.keyDown(box, { key: 'ArrowRight' });
+    await settle();
+    expect(box.value).toBe('/status');
+    expect(screen.queryByTestId('conv-slash-menu')).toBeNull();
+  });
+
   it('offers no suggestion while a turn runs', async () => {
     await mount({ claude_status: 'working', prompt_suggestion: 'run the tests' });
     expect(screen.queryByTestId('conv-chip-suggestion')).toBeNull();

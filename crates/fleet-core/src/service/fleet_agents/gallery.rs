@@ -135,9 +135,14 @@ pub fn gallery() -> Vec<GalleryEntry> {
     entries(|n| names.iter().any(|m| m == n))
 }
 
+/// Gallery definition `name`.
+pub fn seed(name: &str) -> Option<&'static Seed> {
+    SEEDS.iter().find(|s| s.name == name)
+}
+
 /// Add gallery definition `name` to the personal catalog.
 pub fn install(store: &Mutex<Store>, name: &str) -> Result<WriteResult, IpcError> {
-    let seed = SEEDS.iter().find(|s| s.name == name).ok_or_else(|| {
+    let seed = seed(name).ok_or_else(|| {
         IpcError::new(
             codes::E_NOTFOUND,
             format!(

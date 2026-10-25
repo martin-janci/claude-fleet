@@ -1539,12 +1539,12 @@ fn adopt(
     };
     let top = resolve_main_checkout(handle, &top)?;
     let origin = git_out(handle, &top, &["remote", "get-url", "origin"]).unwrap_or_default();
-    // `parse_repo_url` also takes a bare `owner/repo`, the clone form a
-    // person types; as an origin that is a relative path to another local
-    // repository, not GitHub.
-    let remote = origin.contains("://") || origin.contains('@');
-    let (owner, repo) = parse_repo_url(&origin)
-        .filter(|_| remote)
+    // Only a GitHub remote names the project: a bare `owner/repo` origin is
+    // a relative path to another local repository (`github_origin`).
+    let github = crate::repo_url::github_origin(&origin);
+    let (owner, repo) = github
+        .as_deref()
+        .and_then(parse_repo_url)
         .unwrap_or_else(|| {
             let name = std::path::Path::new(&top)
                 .file_name()
@@ -1552,7 +1552,6 @@ fn adopt(
                 .unwrap_or_else(|| "repo".to_string());
             ("local".to_string(), sanitize_basename(&name))
         });
-    let github = crate::repo_url::github_origin(&origin);
     Ok((top, owner, repo, github))
 }
 

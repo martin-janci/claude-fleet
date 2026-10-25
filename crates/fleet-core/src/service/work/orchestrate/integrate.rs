@@ -241,19 +241,9 @@ pub async fn check(deps: &Deps, m: &MissionRow) -> Vec<PairState> {
     // An open integration card already covers what the check would say
     // about the repo of its branches; another repo is still checked.
     let open: Vec<String> = match deps.store.lock() {
-        Ok(s) => s
-            .mission_cards(m.id, 50)
-            .map(|cards| {
-                cards
-                    .into_iter()
-                    .filter(|c| c.state == "open")
-                    .map(|c| c.decision_id)
-                    .collect()
-            })
-            .unwrap_or_default(),
+        Ok(s) => open_cards(&s, m.id).unwrap_or_default(),
         Err(_) => return Vec::new(),
     };
-    // Open cards come first, and the cap is under the 50 read.
     let full = open.len() as i64 >= crate::store::CARDS_OPEN_CAP;
     let covered = covered_items(&open);
     // The open cards are part of the key: deciding one checks again.
@@ -460,12 +450,8 @@ fn integration_card(
             if e.code != crate::ipc_error::codes::E_LIMIT {
                 return Carded::Failed;
             }
-            let at_cap = s
-                .mission_cards(m.id, crate::store::CARDS_OPEN_CAP)
-                .is_ok_and(|c| {
-                    c.iter().filter(|c| c.state == "open").count() as i64
-                        >= crate::store::CARDS_OPEN_CAP
-                });
+            let at_cap = open_cards(s, m.id)
+                .is_ok_and(|open| open.len() as i64 >= crate::store::CARDS_OPEN_CAP);
             return if at_cap { Carded::Held } else { Carded::Done };
         }
     };
@@ -493,6 +479,17 @@ fn integration_card(
         );
     }
     Carded::Done
+}
+
+/// The decision ids of mission `id`'s open cards. The store lists open
+/// cards first and holds at most `CARDS_OPEN_CAP` of them, so one page of
+/// that many has them all.
+fn open_cards(s: &Store, id: i64) -> Result<Vec<String>, crate::ipc_error::IpcError> {
+    Ok(s.mission_cards(id, crate::store::CARDS_OPEN_CAP)?
+        .into_iter()
+        .filter(|c| c.state == "open")
+        .map(|c| c.decision_id)
+        .collect())
 }
 
 #[cfg(test)]

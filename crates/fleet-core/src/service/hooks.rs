@@ -1983,15 +1983,7 @@ mod tests {
     #[test]
     fn stop_hook_bumps_turn_seq_and_stamps_last_stop_at() {
         let store = make_store();
-        let id = {
-            let s = store.lock().unwrap();
-            s.upsert_host("local").unwrap();
-            let id = s
-                .upsert_session("sess", "local", None, None, 0, 0, "running", None)
-                .unwrap();
-            s.set_claude_session_id(id, "uuid-1").unwrap();
-            id
-        };
+        let id = hooked(&store);
         for expected in 1..=3 {
             apply_hook(
                 &store,
@@ -2787,15 +2779,7 @@ mod tests {
     #[test]
     fn hooks_store_a_valid_transcript_path_and_ignore_a_bad_one() {
         let store = make_store();
-        let id = {
-            let s = store.lock().unwrap();
-            s.upsert_host("local").unwrap();
-            let id = s
-                .upsert_session("sess", "local", None, None, 0, 0, "running", None)
-                .unwrap();
-            s.set_claude_session_id(id, "uuid-1").unwrap();
-            id
-        };
+        let id = hooked(&store);
         let mut p = make_payload("UserPromptSubmit", "uuid-1");
         p.transcript_path = Some("/etc/passwd".into());
         apply_hook(&store, &make_ssh(), &p, &ctx(&Caller::master(), None)).unwrap();
@@ -4976,14 +4960,7 @@ mod tests {
     #[test]
     fn a_prompt_suggestion_is_stored_until_the_next_prompt() {
         let store = make_store();
-        {
-            let s = store.lock().unwrap();
-            s.upsert_host("local").unwrap();
-            let id = s
-                .upsert_session("sess", "local", None, None, 0, 0, "running", None)
-                .unwrap();
-            s.set_claude_session_id(id, "uuid-1").unwrap();
-        }
+        hooked(&store);
         let master = Caller::master();
         apply_hook(
             &store,
@@ -5016,15 +4993,12 @@ mod tests {
     #[test]
     fn session_end_clears_the_prompt_suggestion() {
         let store = make_store();
-        {
-            let s = store.lock().unwrap();
-            s.upsert_host("local").unwrap();
-            let id = s
-                .upsert_session("sess", "local", None, None, 0, 0, "running", None)
-                .unwrap();
-            s.set_claude_session_id(id, "uuid-1").unwrap();
-            s.set_prompt_suggestion(id, Some("commit this")).unwrap();
-        }
+        let id = hooked(&store);
+        store
+            .lock()
+            .unwrap()
+            .set_prompt_suggestion(id, Some("commit this"))
+            .unwrap();
         apply_hook(
             &store,
             &make_ssh(),
@@ -5045,14 +5019,7 @@ mod tests {
     #[test]
     fn a_suggestion_never_outlives_its_turn() {
         let store = make_store();
-        {
-            let s = store.lock().unwrap();
-            s.upsert_host("local").unwrap();
-            let id = s
-                .upsert_session("sess", "local", None, None, 0, 0, "running", None)
-                .unwrap();
-            s.set_claude_session_id(id, "uuid-1").unwrap();
-        }
+        hooked(&store);
         let master = Caller::master();
         let hook = |p: HookPayload| apply_hook(&store, &make_ssh(), &p, &ctx(&master, None));
         hook(suggestion_payload("uuid-1", "run the tests")).unwrap();

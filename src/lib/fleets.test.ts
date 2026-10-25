@@ -458,8 +458,8 @@ describe('Phase 2: which fleet New session starts on', () => {
   });
 
   it('defaults to the remembered fleet, else the one that owns the owner, else the primary', () => {
-    const company = { fleet: fleet('company', { label: 'company', url: 'https://fleet.papayapos.dev' }), projectId: 9 };
-    const lab = { fleet: fleet('lab'), projectId: 2 };
+    const company = { fleet: fleet('company', { label: 'company', url: 'https://fleet.papayapos.dev' }), projectId: 9, cloneUrl: null };
+    const lab = { fleet: fleet('lab'), projectId: 2, cloneUrl: null };
     expect(defaultFleetFor('PapayaPOS', [lab, company], null)).toBe('company');
     expect(defaultFleetFor('PapayaPOS', [lab, company], 'lab')).toBe('lab');
     expect(defaultFleetFor('PapayaPOS', [lab, company], PRIMARY)).toBe(PRIMARY);
@@ -473,7 +473,7 @@ describe('Phase 2: which fleet New session starts on', () => {
     expect(rememberedFleetFor('papayapos', 'POS')).toBe('company');
     rememberFleetFor('PapayaPOS', 'pos', PRIMARY);
     expect(rememberedFleetFor('papayapos', 'pos')).toBe(PRIMARY);
-    const company = { fleet: fleet('company', { label: 'papayapos' }), projectId: 9 };
+    const company = { fleet: fleet('company', { label: 'papayapos' }), projectId: 9, cloneUrl: null };
     expect(defaultFleetFor('PapayaPOS', [company], rememberedFleetFor('PapayaPOS', 'pos'))).toBe(PRIMARY);
   });
 });
