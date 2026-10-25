@@ -247,8 +247,10 @@ pub struct HostHealthRow {
     pub claude_behind: bool,
     /// An agent host whose agent is older than the hub (not merely different).
     pub agent_behind: bool,
-    /// Reachable, has a live non-external session, and no hook from its
-    /// token within `hooks_silent_secs`.
+    /// Reachable, has a non-external session that is working or ended a
+    /// turn within `hooks_silent_secs`, and no hook from its token within
+    /// `hooks_silent_secs`. Idle, failed, stopped and blocked sessions call
+    /// no hooks, so they are not evidence.
     pub hooks_silent: bool,
     /// What the last provisioning warned about, when it delivered the content
     /// but degraded part way (migration 092) — the `ag` launcher did not
@@ -473,9 +475,18 @@ pub fn hosts_health(
                 .find(|(a, _)| a == &h.alias)
                 .map(|(_, v)| v.clone());
             let agent_version = live.or_else(|| h.agent_version.clone());
-            let has_live_session = sessions
-                .iter()
-                .any(|s| s.host_alias == h.alias && s.status != "ghost" && s.kind != "external");
+            // Evidence that hooks should have arrived: a session working
+            // now, or one whose turn ended within the window. An idle,
+            // failed, stopped or blocked session calls no hook, so it says
+            // nothing about whether the host's hooks still work.
+            let has_live_session = sessions.iter().any(|s| {
+                s.host_alias == h.alias
+                    && s.status != "ghost"
+                    && s.kind != "external"
+                    && (s.claude_status.as_deref() == Some("working")
+                        || s.last_turn_at
+                            .is_some_and(|at| now - at <= t.hooks_silent_secs))
+            });
             HostHealthRow {
                 alias: h.alias.clone(),
                 reachable: h.reachable,
@@ -1531,6 +1542,56 @@ mod tests {
         let fine = rows.iter().find(|r| r.alias == "fine").unwrap();
         assert_eq!(fine.disk_home_pct, Some(25));
         assert!(!fine.disk_low && !fine.claude_behind && !fine.agent_behind && !fine.hooks_silent);
+    }
+
+    /// Idle, failed, stopped and blocked sessions call no hooks, so a host
+    /// with only those is not hooks silent; a working session or a recent
+    /// turn is evidence.
+    #[test]
+    fn hooks_silent_counts_only_working_or_recent_turns() {
+        let now = 1_700_000_000;
+        let t = HostHealthThresholds {
+            disk_low_pct: 90,
+            claude_max_behind: 30,
+            hooks_silent_secs: 3600,
+            mem_low_pct: 10.0,
+        };
+        let quiet = |alias: &str| {
+            let mut h = host(alias, true);
+            h.last_hook_at = Some(now - 7200);
+            h
+        };
+        let mut old_turn = session_on("dormant", Some("idle"));
+        old_turn.last_turn_at = Some(now - 7200);
+        let mut recent_turn = session_on("turned", Some("idle"));
+        recent_turn.last_turn_at = Some(now - 600);
+        let mut ghost = session_on("ghosted", Some("working"));
+        ghost.status = "ghost".into();
+        let sessions = vec![
+            session_on("dormant", Some("idle")),
+            session_on("dormant", Some("failed")),
+            session_on("dormant", Some("stopped")),
+            session_on("dormant", Some("completed")),
+            session_on("dormant", Some("blocked")),
+            session_on("dormant", None),
+            old_turn,
+            session_on("busy", Some("working")),
+            recent_turn,
+            ghost,
+        ];
+        let hosts: Vec<HostRow> = ["dormant", "busy", "turned", "ghosted"]
+            .into_iter()
+            .map(quiet)
+            .collect();
+        let rows = hosts_health(&hosts, &sessions, &t, &[], "0.3.1", now);
+        let silent = |alias: &str| rows.iter().find(|r| r.alias == alias).unwrap().hooks_silent;
+        assert!(
+            !silent("dormant"),
+            "idle / failed / blocked sessions call no hooks"
+        );
+        assert!(silent("busy"), "a working session and no hook for 2 h");
+        assert!(silent("turned"), "a turn 10 min ago and no hook for 2 h");
+        assert!(!silent("ghosted"), "a ghost row is not evidence");
     }
 
     /// The live registry outranks the stored hello: an agent that

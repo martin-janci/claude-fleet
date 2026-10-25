@@ -1607,7 +1607,7 @@ pub const SPECS: &[Spec] = &[
         "3600",
         Kind::Secs,
         "Hooks silent after",
-        "How long a reachable host with a live session may send no hook before it reads as hooks silent.",
+        "How long a reachable host with a working session (or a turn in that time) may send no hook before it reads as hooks silent. Idle and failed sessions call no hooks, so they do not count.",
     )
     .unit(Unit::Minutes)
     .tags(&[Tag::Advanced]),
