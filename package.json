@@ -1,6 +1,6 @@
 {
   "name": "claude-fleet",
-  "version": "0.6.4",
+  "version": "0.6.5-dev.82.desktop.g36cd9c4",
   "description": "",
   "type": "module",
   "packageManager": "pnpm@10.34.5",
