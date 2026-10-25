@@ -379,10 +379,19 @@ pub const ORCHESTRATOR_ENABLED: &str = "orchestrator.enabled";
 pub const ORCHESTRATOR_MAX_LEVEL: &str = "orchestrator.max_level";
 /// F3: a mission's review and test runs as one headless `claude -p` run in
 /// the implementer's checkout (read-only tools, the test commands only)
-/// instead of an interactive session. Off by default.
+/// instead of an interactive session. On by default since lanes L4 (a
+/// lane task's review runs on a snapshot of its commit).
 pub const ORCHESTRATOR_HEADLESS_CHECKS: &str = "orchestrator.headless_checks";
 /// The model [`ORCHESTRATOR_HEADLESS_CHECKS`] runs (one of [`SUMMARY_MODELS`]).
 pub const ORCHESTRATOR_HEADLESS_MODEL: &str = "orchestrator.headless_model";
+/// A mission run's prompt asks a Claude worker to explore and to review
+/// its own diff through subagents (lanes design 2026-10-23, L1). On by
+/// default; off leaves the prompt as it was, for comparing the two.
+pub const ORCHESTRATOR_RUN_SUBAGENTS: &str = "orchestrator.run_subagents";
+/// The mission planner reads the mission's repository (Read, Grep, Glob in
+/// its checkout on the planner's host) before it decides, instead of
+/// planning from the snapshot alone (lanes design L1). Off by default.
+pub const ORCHESTRATOR_PLANNER_READS: &str = "orchestrator.planner_reads";
 /// Control's chat sends the option an agent's `choices` card marks
 /// `recommended` once nobody has answered for
 /// [`CONTROL_AUTO_CONTINUE_MINUTES`]. The countdown runs where the fleet
@@ -1010,7 +1019,7 @@ pub const SPECS: &[Spec] = &[
     .unit(Unit::Count),
     Spec::new(
         ORCHESTRATOR_HEADLESS_CHECKS,
-        "false",
+        "true",
         Kind::Bool,
         "Headless reviews and tests",
         "Run a mission's review and its test commands as one Claude run in the implementer's checkout, with read-only tools and only those commands, instead of opening a session for each. Falls back to a session when the checkout moved or a command is not a plain one.",
@@ -1024,6 +1033,22 @@ pub const SPECS: &[Spec] = &[
         "The Claude model headless reviews and tests run.",
     )
     .tags(&[Tag::Experimental, Tag::Advanced]),
+    Spec::new(
+        ORCHESTRATOR_RUN_SUBAGENTS,
+        "true",
+        Kind::Bool,
+        "Workers use subagents",
+        "A mission run asks its Claude worker to explore the code and to review its own changes through subagents, which keeps its own context for the work. Subagents never edit in parallel: they share the checkout.",
+    )
+    .tags(&[Tag::Experimental]),
+    Spec::new(
+        ORCHESTRATOR_PLANNER_READS,
+        "false",
+        Kind::Bool,
+        "Planner reads the repository",
+        "The mission planner may read the mission's repository (read, search and list files in its checkout, nothing else) before it breaks a goal into tasks, so it can split the work along the files it touches. Planning takes longer and costs more.",
+    )
+    .tags(&[Tag::Experimental]),
     Spec::new(
         CONTROL_AUTO_CONTINUE,
         "true",

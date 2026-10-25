@@ -3290,6 +3290,30 @@
     },
     {
       "default_widget": "switch",
+      "key": "orchestrator.run_subagents",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Workers use subagents",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "switch",
+      "key": "orchestrator.planner_reads",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Planner reads the repository",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "switch",
       "key": "control.auto_continue",
       "kind": {
         "type": "bool"

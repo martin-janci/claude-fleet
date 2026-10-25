@@ -62,6 +62,11 @@ export interface MissionWait {
 /** `store::MissionPolicy`. The backend reads a missing field as its
  *  default, so a save sends the whole policy back with its edits on top. */
 export interface MissionPolicy {
+  /** `item` (each run its own session) or `lane` (a lane's tasks in one
+   *  lead session); changes only while the mission is not running. */
+  execution?: 'item' | 'lane';
+  /** In `lane` execution, a lead hands over to a fresh one after this many tasks. */
+  lane_relay_after?: number;
   max_parallel?: number;
   max_retries?: number;
   require_review?: boolean;
@@ -237,10 +242,64 @@ export interface MissionDetail {
    *  state (a running mission's workers included); absent when there are
    *  none, and from an older hub. */
   sessions?: FinishSession[];
+  /** Where its runs and its time went (lanes design L0); absent from an
+   *  older hub. */
+  stats?: MissionStats | null;
+  /** Its lanes with the visible tasks each holds (lanes design L2); absent
+   *  when it has none, and from an older hub. */
+  lanes?: MissionLane[];
+  /** What each member says it changes (lanes design L5), by item id; only
+   *  members that say. Absent from an older hub. */
+  touches?: Record<number, string[]>;
   /** The planner's open wait, read from its own words rather than the
    *  `events` page (review r9); `null` when it is not waiting, absent from
    *  an older hub. */
   limit_wait?: LimitWait | null;
+}
+
+/** A mission lane (`store::MissionLaneRow`): the tasks one lead session
+ *  works through on one branch in one repository. */
+export interface MissionLane {
+  id: number;
+  mission_id: number;
+  name: string;
+  project_id?: number | null;
+  branch?: string | null;
+  lead_session_id?: number | null;
+  relay?: number;
+  /** `idle` | `held` | `done`. */
+  state: string;
+  item_ids: number[];
+}
+
+/** The lane a task is in, if any. */
+export function laneOfItem(detail: Pick<MissionDetail, 'lanes'>, itemId: number): MissionLane | undefined {
+  return (detail.lanes ?? []).find((l) => l.item_ids.includes(itemId));
+}
+
+/** A mission's run metrics (`missions::stats::MissionStats`). */
+export interface MissionStats {
+  items: number;
+  items_done: number;
+  /** Attempts by role: `implement`, `review`, `test`, `integrate`, `research`. */
+  runs_by_role: Record<string, number>;
+  /** Attempts in a session of their own; the rest ran headless. */
+  session_runs: number;
+  /** Distinct worker sessions and checkouts: each a cold start. */
+  sessions: number;
+  checkouts: number;
+  failed_runs: number;
+  /** Implement attempts past each item's first. */
+  retries: number;
+  /** Attempts per done item, in hundredths. */
+  runs_per_done_item_x100?: number | null;
+  run_secs_p50?: number | null;
+  run_secs_p90?: number | null;
+  item_secs_p50?: number | null;
+  item_secs_p90?: number | null;
+  /** First run to the last run's end, and the part of it no run was open. */
+  span_secs: number;
+  idle_secs: number;
 }
 
 /** One live session on a mission's member item (`missions::FinishSession`). */
@@ -808,6 +867,16 @@ export function setMissionRepo(
 export function setMissionItem(missionId: number, itemId: number, on: boolean): Promise<Result<Mission>> {
   return changed(
     invokeCmd<Mission>('set_mission_item', { args: { mission_id: missionId, item_id: itemId, on } }),
+  );
+}
+
+/** Put a member task in the mission lane named `lane`, or take it out of
+ *  its lane with `null` (lanes design L2). */
+export function setMissionLane(missionId: number, itemId: number, lane: string | null): Promise<Result<Mission>> {
+  return changed(
+    invokeCmd<Mission>('set_mission_item', {
+      args: { mission_id: missionId, item_id: itemId, on: true, lane: lane?.trim() ?? '' },
+    }),
   );
 }
 

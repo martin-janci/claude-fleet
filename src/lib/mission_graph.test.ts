@@ -153,3 +153,22 @@ describe('toneOf', () => {
     ]);
   });
 });
+
+describe('the mission\'s own lanes (lanes design L2)', () => {
+  const lanes = [
+    { id: 1, mission_id: 1, name: 'backend', state: 'idle', item_ids: [1, 2, 4] },
+    { id: 2, mission_id: 1, name: 'web', state: 'idle', item_ids: [3] },
+  ];
+  const d = { ...detail(items, nodes), lanes };
+
+  it('are the default grouping once a lane holds a task', () => {
+    expect(defaultLaneBy(d)).toBe('lane');
+    expect(defaultLaneBy({ ...d, lanes: [{ ...lanes[0], item_ids: [] }] })).toBe('repo');
+  });
+
+  it('draw a row per lane with the tasks in none last', () => {
+    const l = layoutMission(d, 'lane');
+    expect(l.lanes.map((x) => x.label)).toEqual(['backend', 'web', 'No lane']);
+    expect(l.lanes[0]).toMatchObject({ done: 1, total: 3 });
+  });
+});

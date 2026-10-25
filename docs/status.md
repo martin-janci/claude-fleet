@@ -1054,7 +1054,46 @@ A continuous mission wakes on `policy.wake_every_secs`; a finished run, a
 member's status moving on the tracker and a worker's PR checks moving each
 wake its mission. The Missions tab has Start wave, the next steps, the
 cards, the grant and Pause all; the phone (fleet-mobile) has the list, the
-steps, the cards and Pause all. A mission's worker is refused a person's
+steps, the cards and Pause all. A run of an item that already has an
+implement attempt (a retry, a review, a test) starts its checkout from that
+attempt's branch, on its host while that host is up (and inside the grant), and its prompt names
+the branch (`run::prior_work`, lanes design 2026-10-23 L0): before, a run
+beside the live implementer got a fresh `-N` checkout of the default branch,
+so a review read none of the work and a retry began again. `work { mission }`
+carries `stats` (`missions/stats.rs`): runs by role and per done task,
+retries, cold starts, a task's median time and the share of the working span
+with no run open, shown as a line in the mission room's header. Lanes L1:
+a Claude worker's run prompt asks for subagents to explore and to review its
+own diff (`run::subagent_note`, `orchestrator.run_subagents`, on); with
+`orchestrator.planner_reads` (off) the planner runs in the mission's
+checkout on its host with Read, Grep and Glob; and its prompt says items
+changing the same files or shared registry depend on each other. The lanes
+design's decisions D1–D9 are accepted (2026-10-24). Lanes L2 (migration
+209, `store/mission_lanes.rs`): a mission's tasks can be put in named lanes
+by a plan's `Lane` column, the planner's `create_item { lane }` and a
+person (`work_link { mission_item, lane }`, the task row's lane picker);
+`work { mission }` lists them and the Graph view groups by them. Lanes L3:
+with `policy.execution = lane` (off by default; "Tasks run" in the
+mission's edit form, changed only while it is not running) a lane's tasks
+run one at a time in one lead session on the lane's branch
+(`orchestrate/lanes.rs`): the loop offers one implement run per free lane,
+hands it to the live lead as a new task typed at its idle prompt, and starts
+a fresh lead in the same checkout after `policy.lane_relay_after` tasks (4),
+on a task's third try on one lead, or when the lead died. Each such task
+records the commit it began on (`tasks.start_head`, migration 210) and its
+evidence is its own commits only. Lanes L4: a lane task's headless review
+runs in a detached checkout of its commit (`git worktree add --detach`,
+removed after) and reads only its own diff, so its lead may already work on
+the next task; a lane waits while a task of it waits for or runs its test,
+which then runs in the lane's checkout; a lead also hands over once its
+context is 70% full; a lane whose tasks are all done reads as done.
+`orchestrator.headless_checks` is on by default since L4. Lanes L5
+(migration 211, `store/item_touches.rs`, `orchestrate/touches.rs`): the
+planner's `create_item` may name `touches` (repository paths or globs the
+task changes); a task whose touches meet an open run's in the same
+repository waits (a task that names none is not held), and a lane starts
+beside another of its repository only when both name every task's touches
+and they do not meet. The task row says what a task changes. A mission's worker is refused a person's
 step (`gh pr merge` / `ready`, a push to `main` / `master`, a tracker CLI)
 by fleet's `PreToolUse(Bash)` guard (`orchestrate/guard.rs`): a shell
 prefilter that asks the hub only about those commands and lets the command
@@ -1063,7 +1102,7 @@ run when the hub does not answer. Hosts get it on re-provisioning
 In the New layout, Jev K3 (off) proposes a stuck mission's outcome and next
 step, and Control shows a "Sent to a mission" receipt for what the operator
 handed over (`control_handoffs`, migration 140, redesign 9.3).
-Built but OFF by default: `orchestrator.headless_checks` runs a member's
+On by default since lanes L4 (was off): `orchestrator.headless_checks` runs a member's
 `review` and `test` steps as one `claude -p` run in the implementer's
 finished checkout (`orchestrate/checks.rs`, F3) instead of a session of
 their own: a review gets Read/Grep/Glob and the diff, a test also exactly

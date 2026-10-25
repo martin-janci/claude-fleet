@@ -1569,7 +1569,7 @@ impl FleetTools {
         mission_id?, item_id?: root}; mission_state {mission_id, status, ci_override?} \
         (paused reopens a finished one; failing CI on its open or merged PRs \
         refuses completed with E_CI_FAILING unless a person sets ci_override); \
-        mission_repo {project_id, role?, on?}; mission_item {item_id, on?}; \
+        mission_repo {project_id, role?, on?}; mission_item {item_id, on?, lane?}; \
         mission_delete; mission_import {plan}. dep {item_id, depends_on, on?}; hold {item_id, on?}; \
         propose_tree {parent, tree}; accept_many | undo_accept {item_ids}. \
         done_when {item_id, done_when: [ci[:check] | review | test[:cmd] | \

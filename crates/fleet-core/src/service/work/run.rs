@@ -135,6 +135,109 @@ pub fn run_prompt(key: &str, title: &str, notes: Option<&str>, role: &str, queue
     }
 }
 
+/// The work a new run of an item builds on: the branch and host of its
+/// newest implement attempt that had a checkout of its own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PriorWork {
+    pub host_alias: String,
+    pub branch: String,
+    /// The host answered its last probe (`local` always does): a run is
+    /// sent there only while it is up, else placement picks and the branch
+    /// is found on `origin` if it was pushed.
+    pub host_up: bool,
+}
+
+/// PURE over the store: [`PriorWork`] for `item_id`, `None` before its first
+/// implement run with a checkout. A run beside a live session gets a `-N`
+/// checkout of its own, which would start from the default branch: a review
+/// then read none of the work and a retry began again from nothing (lanes
+/// design 2026-10-23, P2). Starting it from this branch, on this host,
+/// gives it the work.
+pub fn prior_work(s: &Store, item_id: i64) -> Result<Option<PriorWork>, IpcError> {
+    for t in s.tasks_for_item(item_id)? {
+        if !matches!(t.role.as_deref(), None | Some("implement")) {
+            continue;
+        }
+        let Some(session) = t
+            .worker_session_id
+            .map(|id| s.get_session_by_id(id))
+            .transpose()?
+            .flatten()
+        else {
+            continue;
+        };
+        let Some(wt) = session
+            .worktree_id
+            .map(|id| s.get_worktree_row(id))
+            .transpose()?
+            .flatten()
+        else {
+            continue;
+        };
+        let branch = wt
+            .branch
+            .filter(|b| !b.trim().is_empty() && b != "HEAD")
+            .unwrap_or(wt.name);
+        if !branch_is_plain(&branch) {
+            continue;
+        }
+        let host_up = session.host_alias == crate::service::projects::LOCAL_HOST
+            || s.get_host_row(&session.host_alias)?
+                .is_some_and(|h| h.reachable);
+        return Ok(Some(PriorWork {
+            host_alias: session.host_alias,
+            branch,
+            host_up,
+        }));
+    }
+    Ok(None)
+}
+
+/// A branch name a prompt may carry as is: `[A-Za-z0-9._/-]`, not starting
+/// with `-`. A worktree row's branch can come from a host's hook report.
+fn branch_is_plain(b: &str) -> bool {
+    !b.is_empty()
+        && b.len() <= 200
+        && !b.starts_with('-')
+        && b.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '/' | '-'))
+}
+
+/// What a run's prompt says about the work it builds on ([`prior_work`]).
+pub fn prior_work_note(role: &str, branch: &str) -> String {
+    let what = match role {
+        "implement" => format!(
+            "The earlier attempts' work is on branch `{branch}` and your checkout starts \
+             from it: continue it rather than starting again."
+        ),
+        other => format!(
+            "The work to {other} is on branch `{branch}` and your checkout starts from it: \
+             its changes are the commits the default branch lacks."
+        ),
+    };
+    format!("{what} If `git log` does not show them, fetch them with `git fetch origin {branch}`.")
+}
+
+/// What a run's prompt asks of a Claude worker about subagents
+/// (`orchestrator.run_subagents`, lanes design 2026-10-23 L1), by role;
+/// `None` for a role with no use for them. Subagents only read: they share
+/// the worker's checkout, so two writing at once would fight over it.
+pub fn subagent_note(role: &str) -> Option<&'static str> {
+    match role {
+        "implement" | "integrate" => Some(
+            "Use subagents (the Agent tool) to keep your own context for the work: one or more \
+             to explore the code before you edit, and one with a fresh context to review your \
+             diff before you report. Subagents only read: never have one edit, since they share \
+             your checkout.",
+        ),
+        "review" | "research" => Some(
+            "Use subagents (the Agent tool) to read the parts of the code in parallel; they only \
+             read.",
+        ),
+        _ => None,
+    }
+}
+
 /// Write the attempt: a `running` task on `worker`, naming the item, its
 /// attempt number and role. No requester (nobody's inbox gets the result),
 /// and no mirror item: the item it is an attempt at already exists.
@@ -262,12 +365,28 @@ pub async fn run_item_with(
     // item (another role's run, a failed attempt's session that lives on,
     // a person's own) is not a reason to refuse, but a reason for this
     // attempt to get its own `-N` checkout, as a parallel start does.
-    let parallel = start.parallel || has_live_work(&*lock(store.as_ref())?, item_id)?;
+    let (parallel, prior) = {
+        let s = lock(store.as_ref())?;
+        (
+            start.parallel || has_live_work(&s, item_id)?,
+            prior_work(&s, item_id)?,
+        )
+    };
     let start = StartArgs {
         item_id: Some(item_id),
         reference: None,
         with_brief: true,
         parallel,
+        // Where the earlier work is: its host when nobody chose one and it
+        // is up, and its branch as the new checkout's start (P2,
+        // [`prior_work`]).
+        host_alias: start.host_alias.clone().or_else(|| {
+            prior
+                .as_ref()
+                .filter(|p| p.host_up)
+                .map(|p| p.host_alias.clone())
+        }),
+        base_branch: prior.as_ref().map(|p| p.branch.clone()),
         ..start.clone()
     };
     let (row, plan, queued) =
@@ -281,6 +400,24 @@ pub async fn run_item_with(
                 "\n\nWhat the mission's earlier runs left (their words, quoted):\n> {}",
                 c.replace('\n', "\n> ")
             ));
+        }
+        if let Some(p) = &prior {
+            prompt.push_str("\n\n");
+            prompt.push_str(&prior_work_note(role, &p.branch));
+        }
+        let claude = plan
+            .agent
+            .as_deref()
+            .is_none_or(|a| a == crate::store::AGENT_CLAUDE);
+        if let Some(n) = subagent_note(role).filter(|_| {
+            claude
+                && crate::service::settings::get_bool(
+                    &s,
+                    crate::service::settings::ORCHESTRATOR_RUN_SUBAGENTS,
+                )
+        }) {
+            prompt.push_str("\n\n");
+            prompt.push_str(n);
         }
         let task = record_run(&s, row.id, &prompt, item_id, attempt, role)?;
         (prompt, task)
@@ -320,6 +457,100 @@ mod tests {
             })
             .unwrap();
         (s, worker, item.id)
+    }
+
+    /// A worker session on `host` in a checkout of `branch`.
+    fn worker_in(s: &Store, host: &str, branch: &str) -> i64 {
+        s.upsert_host(host).unwrap();
+        let pid = s.upsert_project("o", "r", "/src/r").unwrap();
+        let wt = s
+            .upsert_worktree_on(
+                host,
+                pid,
+                branch,
+                &format!("/src/r/.worktrees/{branch}"),
+                Some(branch),
+            )
+            .unwrap();
+        s.upsert_session(
+            &format!("dev-{branch}"),
+            host,
+            Some(pid),
+            Some(wt),
+            1,
+            1,
+            "running",
+            None,
+        )
+        .unwrap()
+    }
+
+    /// P2 (lanes design 2026-10-23): a run beside the work it continues or
+    /// checks starts from the newest implement attempt's branch, on its
+    /// host; a review's or a test's checkout is not the work.
+    #[test]
+    fn prior_work_is_the_newest_implement_attempts_branch() {
+        let (s, _, item) = store_with_item();
+        assert_eq!(prior_work(&s, item).unwrap(), None, "nothing ran yet");
+        let first = worker_in(&s, "h", "task-7-queue-schema");
+        let t = record_run(&s, first, "do it", item, 1, "implement").unwrap();
+        crate::service::tasks::fail_task(&s, t.id, "tests fail").unwrap();
+        let review = worker_in(&s, "k", "task-7-queue-schema-3");
+        record_run(&s, review, "check it", item, 1, "review").unwrap();
+        assert_eq!(
+            prior_work(&s, item).unwrap(),
+            Some(PriorWork {
+                host_alias: "h".into(),
+                branch: "task-7-queue-schema".into(),
+                host_up: true,
+            })
+        );
+        // A host whose last probe went unanswered is not where a run goes.
+        s.update_host_probe("h", false, None, None, 2).unwrap();
+        assert!(!prior_work(&s, item).unwrap().unwrap().host_up);
+        s.update_host_probe("h", true, None, None, 3).unwrap();
+        let second = worker_in(&s, "h", "task-7-queue-schema-2");
+        record_run(&s, second, "again", item, 2, "implement").unwrap();
+        assert_eq!(
+            prior_work(&s, item).unwrap().map(|p| p.branch),
+            Some("task-7-queue-schema-2".into())
+        );
+    }
+
+    /// A branch a prompt cannot carry as is (a host reported it) is no
+    /// prior work; an attempt with no checkout of its own is passed over.
+    #[test]
+    fn prior_work_skips_odd_branches_and_checkout_less_attempts() {
+        let (s, plain, item) = store_with_item();
+        let odd = worker_in(&s, "h", "x`; rm -rf ~ #");
+        record_run(&s, odd, "do it", item, 1, "implement").unwrap();
+        record_run(&s, plain, "do it", item, 2, "implement").unwrap();
+        assert_eq!(prior_work(&s, item).unwrap(), None);
+        assert!(!branch_is_plain("-delete"));
+        assert!(branch_is_plain("feat/x_1.2"));
+    }
+
+    #[test]
+    fn the_subagent_note_is_for_the_roles_that_read_or_write_code() {
+        let n = subagent_note("implement").unwrap();
+        assert!(
+            n.contains("Agent tool") && n.contains("never have one edit"),
+            "{n}"
+        );
+        assert!(subagent_note("review").unwrap().contains("only"));
+        assert_eq!(subagent_note("test"), None, "a test runs its commands");
+    }
+
+    #[test]
+    fn the_prior_work_note_names_the_branch_by_role() {
+        let n = prior_work_note("implement", "task-7-x");
+        assert!(n.contains("`task-7-x`") && n.contains("continue it"), "{n}");
+        let n = prior_work_note("review", "task-7-x");
+        assert!(
+            n.contains("The work to review is on branch `task-7-x`"),
+            "{n}"
+        );
+        assert!(n.contains("git fetch origin task-7-x"), "{n}");
     }
 
     /// A worker whose first prompt never went in fails its run, so the

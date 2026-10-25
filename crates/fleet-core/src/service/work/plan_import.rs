@@ -7,7 +7,8 @@
 //! task works in (gap plan G2.5). A step becomes a local
 //! task under the mission's root (top-level when it has none) titled
 //! `"<step> <title>"`; its lane is its one assignee (a lane has one owner,
-//! so the graph's "Assignee" lanes are the plan's lanes). Importing again
+//! so the graph's "Assignee" lanes are the plan's lanes) and its lane in
+//! the mission (`mission_lanes`, lanes design L2). Importing again
 //! matches a member by that leading step id and brings it in line: title,
 //! lane, status, and its edges to the other steps of the plan. Nothing is
 //! ever removed but an edge between two steps of the plan that the plan no
@@ -129,6 +130,12 @@ pub fn check_plan(rows: &[PlanRow]) -> Result<Vec<PlanRow>, IpcError> {
             .collect();
         if needs.contains(&step) {
             return Err(invalid(format!("step {step} needs itself")));
+        }
+        // Its lane becomes the mission's (L2): refused here, before anything
+        // is written, rather than half way through.
+        if let Some(l) = r.lane.as_deref().filter(|l| !l.trim().is_empty()) {
+            crate::store::lane_name(l)
+                .map_err(|e| invalid(format!("step {step}'s lane: {}", e.message)))?;
         }
         out.push(PlanRow {
             step,
@@ -287,6 +294,13 @@ pub fn import(
                     s.set_item_status(row.id, st)?;
                     changed = true;
                 }
+            }
+        }
+        // The step's lane is also the mission's lane (lanes design L2):
+        // the tasks one lead session will work through on one branch.
+        if let Some(l) = r.lane.as_deref() {
+            if s.set_item_lane(id, row.id, Some(l), r.project_id, &who)? && !created {
+                changed = true;
             }
         }
         if created {

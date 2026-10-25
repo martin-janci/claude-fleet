@@ -317,3 +317,45 @@ fn an_import_that_drops_a_merge_edge_is_refused_but_an_old_gap_is_left_alone() {
     rest.pop();
     import_rows(&st, m.id, rest).unwrap();
 }
+
+/// Lanes design L2: a plan's lanes are the mission's lanes, and a step that
+/// moves lane on a second import moves with it; the emptied lane goes.
+#[test]
+fn a_plans_lanes_become_the_missions_lanes() {
+    let st = store();
+    let m = mission(&st, "plan");
+    import_rows(&st, m.id, plan()).unwrap();
+    let lanes_of = |st: &Mutex<Store>| {
+        let s = st.lock().unwrap();
+        s.mission_lanes(m.id)
+            .unwrap()
+            .into_iter()
+            .map(|l| (l.name, l.item_ids.len()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        lanes_of(&st),
+        vec![
+            ("B".to_string(), 2),
+            ("E".to_string(), 1),
+            ("C".to_string(), 1)
+        ]
+    );
+    let mut next = plan();
+    next[2] = row("4.1", "Account pills", "B", &["3.1"]);
+    let out = import_rows(&st, m.id, next).unwrap();
+    assert_eq!(out.updated, 1, "{out:?}");
+    assert_eq!(
+        lanes_of(&st),
+        vec![("B".to_string(), 3), ("C".to_string(), 1)]
+    );
+}
+
+#[test]
+fn a_lane_name_that_cannot_be_one_refuses_the_table() {
+    let st = store();
+    let m = mission(&st, "plan");
+    let e = import_rows(&st, m.id, vec![row("1", "x", &"L".repeat(41), &[])]).unwrap_err();
+    assert!(e.message.contains("step 1's lane"), "{}", e.message);
+    assert!(members(&st, m.id).is_empty(), "nothing written");
+}

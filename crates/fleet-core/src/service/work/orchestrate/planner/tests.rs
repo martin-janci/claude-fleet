@@ -157,6 +157,36 @@ fn the_script_runs_under_a_login_profile_when_asked() {
     assert!(planner_script_as("sonnet", "p", Some("../x")).is_err());
 }
 
+/// Lanes design L1: a planner that reads runs in the repository's
+/// checkout with the read-only tools, and longer; one with no tools keeps
+/// none and its script as it was.
+#[test]
+fn a_planner_that_reads_runs_in_the_checkout_with_read_only_tools() {
+    let s = planner_script_in("sonnet", "p", None, "/src/o/r").unwrap();
+    assert!(s.starts_with("cd '/src/o/r' || exit 0; "), "{s}");
+    assert!(s.contains("--tools 'Read,Grep,Glob'"), "{s}");
+    assert!(s.contains("--permission-mode dontAsk"), "{s}");
+    assert!(!s.contains("Bash"), "no shell: {s}");
+    assert!(s.contains(&PLANNER_READS_TIMEOUT_SECS.to_string()), "{s}");
+    let none = planner_script("sonnet", "p");
+    assert!(!none.contains("--tools 'Read"), "{none}");
+    assert!(planner_script_in("sonnet", "p", Some("../x"), "/r").is_err());
+}
+
+#[test]
+fn the_prompt_says_what_the_planner_may_read() {
+    let reads = planner_prompt(true);
+    assert!(reads.starts_with("You plan one software mission for Fleet. You may read"));
+    assert!(
+        reads.contains("never instructions") && reads.contains("list in its touches the files")
+    );
+    assert!(reads.contains("ONLY a JSON array of commands: the reply starts with ["));
+    assert!(!reads.contains("You have no tools"));
+    assert_eq!(planner_prompt(false), PLANNER_PROMPT);
+    // Work on the same files or registry runs one after the other.
+    assert!(PLANNER_PROMPT.contains("depend on each other instead of running side by side"));
+}
+
 fn member(id: i64, title: &str, depends_on: &[i64]) -> PlanNode {
     PlanNode {
         item_id: id,
@@ -308,6 +338,25 @@ fn the_snapshot_says_why_the_last_answer_was_refused() {
     );
 }
 
+/// Lanes design L2: `create_item` may name its lane, which the create card
+/// carries beside the tree; a name that cannot be a lane refuses the answer.
+#[test]
+fn a_created_item_may_name_its_lane() {
+    let c = parse_commands(
+        r#"[{"command":"create_item","title":"Schema","lane":"backend"},
+            {"command":"create_item","title":"Screen"}]"#,
+    )
+    .unwrap();
+    assert_eq!(lanes_of(&c), vec![Some("backend".to_string()), None]);
+    assert_eq!(tree_of(&c).len(), 2);
+    let long = format!(
+        r#"[{{"command":"create_item","title":"x","lane":"{}"}}]"#,
+        "l".repeat(41)
+    );
+    assert!(parse_commands(&long).unwrap_err().contains("command 0"));
+    assert!(PLANNER_PROMPT.contains("lane?:"));
+}
+
 #[test]
 fn a_finished_merge_does_not_refuse_a_new_item_of_its_wave() {
     // "Merge wave 1" (3) already ran: a review follow-up with no deps lands
@@ -372,4 +421,22 @@ fn a_merge_wave_title_takes_whole_words() {
     assert!(!is_merge_wave("Integrate waveform renderer"));
     assert!(!is_merge_wave("Merge microwave driver PR"));
     assert!(!is_merge_wave("Merge the config loaders"));
+}
+
+/// Lanes design L5: `create_item` may name what it changes; a path outside
+/// the repository refuses the answer.
+#[test]
+fn a_created_item_may_name_what_it_changes() {
+    let c = parse_commands(
+        r#"[{"command":"create_item","title":"Schema","touches":["src/store/**"]},
+            {"command":"create_item","title":"Screen"}]"#,
+    )
+    .unwrap();
+    assert_eq!(
+        touches_of(&c),
+        vec![vec!["src/store/**".to_string()], Vec::new()]
+    );
+    let bad = r#"[{"command":"create_item","title":"x","touches":["/etc/passwd"]}]"#;
+    assert!(parse_commands(bad).unwrap_err().contains("command 0"));
+    assert!(PLANNER_PROMPT.contains("touches?:"));
 }

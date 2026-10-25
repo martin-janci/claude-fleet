@@ -2269,6 +2269,7 @@ mod tests {
             name: "ABC-1".into(),
             per_project: false,
             parallel: false,
+            base_branch: None,
             decider: crate::store::Decider::Person,
             rule_id: None,
             model: None,

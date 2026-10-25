@@ -100,6 +100,19 @@ pub struct MissionDetail {
     /// detail's Sessions list opens. Empty, and absent, from an older hub.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sessions: Vec<FinishSession>,
+    /// Where its runs and its time went (lanes design L0), over the
+    /// members this caller may see. Absent from an older hub.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stats: Option<stats::MissionStats>,
+    /// Its lanes (lanes design L2), each with the members of `items` it
+    /// holds. Empty, and absent, for a mission with none and from an older
+    /// hub.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lanes: Vec<crate::store::MissionLaneRow>,
+    /// What each member this caller may see says it changes (lanes design
+    /// L5), by item id; only members that say. Absent from an older hub.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub touches: std::collections::HashMap<i64, Vec<String>>,
     /// The planner's open wait, when its newest word (of its runs and
     /// waits, read apart from the rest of the log) is a usage-limit wait
     /// (review r9: `events` is one page of every kind, so a busy log hid
@@ -283,7 +296,32 @@ pub fn mission(
     let may_change = may_change_mission(&s, scope, &mission)?;
     let plan = super::orchestrate::plan_for(&s, &mission)?;
     let sessions = live_sessions(&s, scope, id)?;
+    let stats = Some(mission_stats(&s, &mission, &items)?);
+    let lanes = s
+        .mission_lanes(id)?
+        .into_iter()
+        .map(|mut l| {
+            l.item_ids.retain(|i| items.iter().any(|it| it.id == *i));
+            // A lane whose every task is done is done (lanes design L4),
+            // derived on read like the mission's phase.
+            let done = !l.item_ids.is_empty()
+                && l.item_ids.iter().all(|i| {
+                    items
+                        .iter()
+                        .any(|it| it.id == *i && it.status_category == "done")
+                });
+            if done && l.state != "held" {
+                l.state = "done".into();
+            }
+            l
+        })
+        .collect();
     let limit_wait = Some(super::orchestrate::limit::Words::read(&s, id)?.newest_wait());
+    let touches = s
+        .mission_touches(id)?
+        .into_iter()
+        .filter(|(i, _)| items.iter().any(|it| it.id == *i))
+        .collect();
     let finish = if crate::store::MISSION_FINAL_STATES.contains(&mission.state.as_str()) {
         Some(finish(&s, scope, id, sessions.clone())?)
     } else {
@@ -299,8 +337,36 @@ pub fn mission(
         plan,
         finish,
         sessions,
+        stats,
+        lanes,
+        touches,
         limit_wait,
     })
+}
+
+/// [`stats::stats`] over `items`' attempts, now.
+fn mission_stats(
+    s: &Store,
+    mission: &MissionRow,
+    items: &[WorkItemRow],
+) -> Result<stats::MissionStats, IpcError> {
+    let mut attempts = Vec::new();
+    for i in items {
+        attempts.extend(s.tasks_for_item(i.id)?);
+    }
+    let checkout_of = |sid: i64| {
+        s.get_session_by_id(sid)
+            .ok()
+            .flatten()
+            .and_then(|r| r.worktree_id)
+    };
+    Ok(stats::stats(
+        items,
+        mission.root_item_id,
+        &attempts,
+        &checkout_of,
+        crate::store::now_unix(),
+    ))
 }
 
 /// The running sessions on mission `id`'s member items that `scope` may
@@ -656,7 +722,7 @@ pub fn repo(
     )
 }
 
-/// `work_link { action: mission_item, mission_id, item_id, on? }`. The
+/// `work_link { action: mission_item, mission_id, item_id, on?, lane? }`. The
 /// person fence on the item's own sessions is the tool layer's
 /// (`require_drive_on_item_sessions`), as for a sprint.
 pub fn item(
@@ -682,7 +748,16 @@ pub fn item(
             ));
         }
     }
-    s.set_mission_item(id, item, args.on.unwrap_or(true), &actor(scope))
+    let on = args.on.unwrap_or(true);
+    let m = s.set_mission_item(id, item, on, &actor(scope))?;
+    // Lanes design L2: a person puts the task in a lane, or takes it out.
+    if let Some(l) = args.lane.as_deref().filter(|_| on) {
+        let lane = Some(l.trim()).filter(|l| !l.is_empty());
+        let project = s.get_work_item(item)?.and_then(|i| i.project_id);
+        s.set_item_lane(id, item, lane, project, &actor(scope))?;
+        return Ok(s.get_mission(id)?.unwrap_or(m));
+    }
+    Ok(m)
 }
 
 /// What `mission_delete` answers.
@@ -752,6 +827,8 @@ pub(crate) fn test_mission_pr(
     .unwrap();
     sid
 }
+
+pub mod stats;
 
 #[cfg(test)]
 mod tests;

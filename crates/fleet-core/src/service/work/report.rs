@@ -204,14 +204,37 @@ const EV_ERR: &str = "__FLEET_EV_ERR__\t";
 /// else `origin/master`; the comparison is against the merge base, so a
 /// base that moved on since the branch was cut adds nothing.
 pub fn evidence_script(cwd: &str) -> String {
+    evidence_script_since(cwd, None)
+}
+
+/// [`evidence_script`] from `since`, the commit a task began on in a
+/// checkout it shares with the tasks before it (lanes design L3, §3.3):
+/// its evidence is `since..HEAD`, never what the tasks before it did. A
+/// `since` that is no longer an ancestor of `HEAD` (the history was
+/// rewritten) is an error, not a guess. `None` reads against the merge
+/// base, as for a run in a checkout of its own.
+pub fn evidence_script_since(cwd: &str, since: Option<&str>) -> String {
+    let base = match since.filter(|s| crate::store::is_commit_id(s)) {
+        Some(sha) => format!(
+            "base={sha}\n\
+             head=$(git rev-parse HEAD 2>/dev/null) || {{ printf '{err}not a git checkout\\n'; exit 0; }}\n\
+             git merge-base --is-ancestor {sha} HEAD 2>/dev/null || {{ printf '{err}the task began on %s, which the branch no longer holds\\n' {sha}; exit 0; }}\n\
+             mb={sha}\n",
+            err = EV_ERR,
+        ),
+        None => format!(
+            "base=$(git symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null)\n\
+             [ -n \"$base\" ] || {{ git rev-parse -q --verify origin/main >/dev/null 2>&1 && base=origin/main; }}\n\
+             [ -n \"$base\" ] || {{ git rev-parse -q --verify origin/master >/dev/null 2>&1 && base=origin/master; }}\n\
+             [ -n \"$base\" ] || {{ printf '{err}no base branch\\n'; exit 0; }}\n\
+             head=$(git rev-parse HEAD 2>/dev/null) || {{ printf '{err}not a git checkout\\n'; exit 0; }}\n\
+             mb=$(git merge-base HEAD \"$base\" 2>/dev/null) || {{ printf '{err}no merge base with %s\\n' \"$base\"; exit 0; }}\n",
+            err = EV_ERR,
+        ),
+    };
     format!(
         "cd {cwd} 2>/dev/null || {{ printf '{err}no checkout\\n'; exit 0; }}\n\
-         base=$(git symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null)\n\
-         [ -n \"$base\" ] || {{ git rev-parse -q --verify origin/main >/dev/null 2>&1 && base=origin/main; }}\n\
-         [ -n \"$base\" ] || {{ git rev-parse -q --verify origin/master >/dev/null 2>&1 && base=origin/master; }}\n\
-         [ -n \"$base\" ] || {{ printf '{err}no base branch\\n'; exit 0; }}\n\
-         head=$(git rev-parse HEAD 2>/dev/null) || {{ printf '{err}not a git checkout\\n'; exit 0; }}\n\
-         mb=$(git merge-base HEAD \"$base\" 2>/dev/null) || {{ printf '{err}no merge base with %s\\n' \"$base\"; exit 0; }}\n\
+         {base}\
          printf '{head}%s\\t%s\\t%s\\n' \"$head\" \"$base\" \"$mb\"\n\
          printf '{nc}%s\\n' \"$(git rev-list --count \"$mb\"..HEAD 2>/dev/null)\"\n\
          git log --no-merges --format='{commit}%H%x09%s' -n {cmax} \"$mb\"..HEAD 2>/dev/null\n\
@@ -338,38 +361,59 @@ pub async fn collect_evidence_as(
     if runs.is_empty() {
         return true;
     }
-    let script = evidence_script(cwd);
-    let answer = match read {
-        EvidenceRead::Retry => {
-            crate::service::catalog::inventory::run_host_script_with(
-                ssh,
-                host,
-                &script,
-                EVIDENCE_RETRY_WALL_CLOCK,
-                &tokio_util::sync::CancellationToken::new(),
-            )
-            .await
-        }
-        _ => crate::service::catalog::inventory::run_host_script(ssh, host, &script).await,
+    // A task that began part way along a shared checkout (a lane's) is
+    // read from where it began; the others against the merge base, once.
+    let since: Vec<(i64, Option<String>)> = {
+        let Ok(s) = store.lock() else { return false };
+        runs.iter()
+            .map(|&id| (id, s.task_start_head(id).ok().flatten()))
+            .collect()
     };
-    let answered = answer.is_ok();
-    let mut ev = match answer {
-        Ok(out) => parse_evidence(&out, now_unix()),
-        // Where it was read, so the loop can read it again (a host that
-        // dropped for a moment is not a run that did nothing).
-        Err(e) => TaskEvidence {
-            at: now_unix(),
-            error: Some(clip(&e.message, 200)),
-            host: Some(host.to_string()),
-            dir: Some(cwd.to_string()),
-            ..Default::default()
-        },
-    };
-    ev.provisional = read == EvidenceRead::MidTurn;
-    let Ok(s) = store.lock() else {
-        return answered;
-    };
-    for id in runs {
+    let mut answered = true;
+    let mut done: Vec<(Option<String>, TaskEvidence)> = Vec::new();
+    for (id, from) in since {
+        let ev = match done.iter().find(|(f, _)| *f == from) {
+            Some((_, ev)) => ev.clone(),
+            None => {
+                let script = evidence_script_since(cwd, from.as_deref());
+                let answer = match read {
+                    EvidenceRead::Retry => {
+                        crate::service::catalog::inventory::run_host_script_with(
+                            ssh,
+                            host,
+                            &script,
+                            EVIDENCE_RETRY_WALL_CLOCK,
+                            &tokio_util::sync::CancellationToken::new(),
+                        )
+                        .await
+                    }
+                    _ => {
+                        crate::service::catalog::inventory::run_host_script(ssh, host, &script)
+                            .await
+                    }
+                };
+                answered &= answer.is_ok();
+                let mut ev = match answer {
+                    Ok(out) => parse_evidence(&out, now_unix()),
+                    // Where it was read, so the loop can read it again (a
+                    // host that dropped for a moment is not a run that did
+                    // nothing).
+                    Err(e) => TaskEvidence {
+                        at: now_unix(),
+                        error: Some(clip(&e.message, 200)),
+                        host: Some(host.to_string()),
+                        dir: Some(cwd.to_string()),
+                        ..Default::default()
+                    },
+                };
+                ev.provisional = read == EvidenceRead::MidTurn;
+                done.push((from, ev.clone()));
+                ev
+            }
+        };
+        let Ok(s) = store.lock() else {
+            return answered;
+        };
         let stored = match read {
             EvidenceRead::Final => s.set_task_evidence(id, &ev),
             EvidenceRead::MidTurn => s.replace_open_task_evidence(id, &ev, false).map(|_| ()),

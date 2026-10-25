@@ -19,9 +19,11 @@ pub mod checks;
 pub mod drafts;
 pub mod guard;
 pub mod integrate;
+pub mod lanes;
 pub mod limit;
 pub mod planner;
 pub mod steps;
+pub mod touches;
 pub mod triage;
 
 use self::planner::{Command, PlannerOutput};
@@ -207,14 +209,101 @@ fn steps_for(s: &Store, m: &MissionRow, a: &Autonomy) -> Result<Vec<Step>, IpcEr
     let items = s.mission_items(m.id)?;
     let graph = super::graph::build(s, &ViewScope::internal(), &items)?;
     let attempts = attempts_of(s, &items)?;
-    Ok(plan_steps(&StepInput {
+    let steps = plan_steps(&StepInput {
         mission: m,
         graph: &graph,
         items: &items,
         attempts: &attempts,
         counts: s.mission_task_counts(m.id)?,
         max_parallel: max_parallel(m, a),
-    }))
+    });
+    // Lanes L5: what each task says it changes, in which repository (a
+    // mission with one repo names it for a task that names none).
+    let sole_repo = match m.repos.as_slice() {
+        [only] => Some(only.project_id),
+        _ => None,
+    };
+    let said = s.mission_touches(m.id)?;
+    let known: HashMap<i64, touches::ItemTouch> = items
+        .iter()
+        .map(|i| {
+            (
+                i.id,
+                touches::ItemTouch {
+                    project: i.project_id.or(sole_repo),
+                    touches: said.get(&i.id).cloned().unwrap_or_default(),
+                },
+            )
+        })
+        .collect();
+    let running: Vec<i64> = attempts
+        .iter()
+        .filter(|(_, ts)| {
+            ts.iter().any(|t| {
+                matches!(t.state.as_str(), "queued" | "running")
+                    && matches!(t.role.as_deref(), None | Some("implement"))
+            })
+        })
+        .map(|(i, _)| *i)
+        .collect();
+    if m.policy.execution != "lane" {
+        return Ok(touches::gate_items(steps, &known, &running, None));
+    }
+    // Lanes L3: a lane takes one implement run at a time, when it is free.
+    let lanes = s.mission_lanes(m.id)?;
+    let lane_of: HashMap<i64, i64> = lanes
+        .iter()
+        .flat_map(|l| l.item_ids.iter().map(move |i| (*i, l.id)))
+        .collect();
+    let busy = lanes::busy_lanes(s, m, &lanes, &attempts, &lanes::awaiting_test(&graph))?;
+    let steps = lanes::gate(steps, &lane_of, &busy);
+    // Lanes L5: a lane starts beside another of its repository only when
+    // both say all they change and it does not meet.
+    let done = |i: &i64| {
+        items
+            .iter()
+            .any(|it| it.id == *i && it.status_category == "done")
+    };
+    let units: Vec<touches::LaneTouch> = lanes
+        .iter()
+        .map(|l| {
+            let mut paths: Vec<String> = Vec::new();
+            for i in &l.item_ids {
+                for p in said.get(i).into_iter().flatten() {
+                    if !paths.contains(p) {
+                        paths.push(p.clone());
+                    }
+                }
+            }
+            touches::LaneTouch {
+                id: l.id,
+                project: l.project_id.or_else(|| {
+                    l.item_ids
+                        .iter()
+                        .find_map(|i| known.get(i).and_then(|k| k.project))
+                }),
+                touches: paths,
+                complete: l.item_ids.iter().all(|i| said.contains_key(i)),
+                under_way: (l.lead_session_id.is_some()
+                    || l.item_ids
+                        .iter()
+                        .any(|i| attempts.get(i).is_some_and(|ts| !ts.is_empty())))
+                    && !l.item_ids.iter().all(done),
+            }
+        })
+        .collect();
+    let steps = touches::gate_lane_starts(steps, &lane_of, &units);
+    let laneless: std::collections::HashSet<i64> = items
+        .iter()
+        .map(|i| i.id)
+        .filter(|i| !lane_of.contains_key(i))
+        .collect();
+    Ok(touches::gate_items(
+        steps,
+        &known,
+        &running,
+        Some(&laneless),
+    ))
 }
 
 /// The plan a mission's detail carries: `None` for a draft or a finished
@@ -317,6 +406,21 @@ fn start_for(
         (None, _) => None,
     };
     let (host_alias, profile) = grant_placement(s, grant, project_id);
+    // A run that builds on earlier work (a retry, a review, a test) goes
+    // where that work is when the grant allows that host and it is up
+    // (lanes design P2, `run::prior_work`), billing the grant's own login.
+    let (host_alias, profile) = match super::run::prior_work(s, item_id)? {
+        Some(p)
+            if p.host_up
+                && host_alias.as_deref() != Some(p.host_alias.as_str())
+                && grant
+                    .and_then(|g| g.hosts.as_ref())
+                    .is_some_and(|h| h.contains(&p.host_alias)) =>
+        {
+            (Some(p.host_alias), grant.and_then(|g| g.profile.clone()))
+        }
+        _ => (host_alias, profile),
+    };
     Ok(StartArgs {
         item_id: Some(item_id),
         project_id,
@@ -481,6 +585,23 @@ async fn apply_step_inner(
                 (start_for(&s, m, item_id, actor, a.grant.as_ref())?, a.grant)
             };
             let role = step.role.as_deref().unwrap_or("implement");
+            // Lanes L3: a lane's task runs in the lane's lead session.
+            if role == "implement" && m.policy.execution == "lane" {
+                let lane = lock(&deps.store)?.item_lane(item_id)?;
+                if let Some(lane) = lane {
+                    return lanes::run_in_lane(
+                        deps,
+                        m,
+                        lane,
+                        item_id,
+                        role,
+                        start,
+                        step.context.as_deref(),
+                        view,
+                    )
+                    .await;
+                }
+            }
             // F3: a review or a test, headless in the implementer's
             // checkout, when the setting is on and the checkout allows.
             if let Some(started) = checks::try_start(
@@ -736,11 +857,25 @@ async fn apply_card(
             let lines: Vec<Vec<String>> =
                 serde_json::from_value(p.get("done_when").cloned().unwrap_or_default())
                     .unwrap_or_default();
+            let lanes: Vec<Option<String>> =
+                serde_json::from_value(p.get("lanes").cloned().unwrap_or_default())
+                    .unwrap_or_default();
+            let touches: Vec<Vec<String>> =
+                serde_json::from_value(p.get("touches").cloned().unwrap_or_default())
+                    .unwrap_or_default();
             let s = lock(&deps.store)?;
             let made = s.propose_tree(root, &tree, "planner")?;
             for (i, row) in made.iter().enumerate() {
                 if let Some(l) = lines.get(i).filter(|l| !l.is_empty()) {
                     s.set_item_done_when(row.id, l, &actor.name())?;
+                }
+                // Lanes design L2: the lane the planner named.
+                if let Some(l) = lanes.get(i).and_then(Option::as_deref) {
+                    s.set_item_lane(m.id, row.id, Some(l), row.project_id, &actor.name())?;
+                }
+                // Lanes design L5: what it said the task changes.
+                if let Some(t) = touches.get(i).filter(|t| !t.is_empty()) {
+                    s.set_item_touches(row.id, t)?;
                 }
             }
             if accept_created {
@@ -1037,6 +1172,21 @@ pub struct PlanOutcome {
 /// The host the planner runs on: the policy's, the grant's first, else the
 /// host of the mission's latest worker that may see the mission's org.
 ///
+/// The project whose checkout the planner reads (`orchestrator.planner_reads`,
+/// lanes design L1): the root item's, else the mission's first repo. `None`
+/// when the setting is off or the mission names no repository.
+fn planner_reads_project(s: &Store, m: &MissionRow) -> Result<Option<i64>, IpcError> {
+    if !crate::service::settings::get_bool(s, crate::service::settings::ORCHESTRATOR_PLANNER_READS)
+    {
+        return Ok(None);
+    }
+    let root = match m.root_item_id {
+        Some(r) => s.get_work_item(r)?.and_then(|i| i.project_id),
+        None => None,
+    };
+    Ok(root.or_else(|| m.repos.first().map(|r| r.project_id)))
+}
+
 /// Every LLM run of a mission (the planner, its release note, its triage
 /// card) is sent the mission's text, so the host must be one of the
 /// mission's org (transition plan, risk "Org text leaves the org"): a policy
@@ -1291,7 +1441,7 @@ pub async fn run_planner(
 ) -> Result<PlanOutcome, IpcError> {
     let _slot = PlannerSlot::take(deps, m)?;
     let now = now_unix();
-    let (mut login, grant, prompt, model, auto_level, accept_created, plan_nodes) = {
+    let (mut login, grant, snap, reads, model, auto_level, accept_created, plan_nodes) = {
         let s = lock(&deps.store)?;
         let a = autonomy(&s, m, now)?;
         let runs = s.mission_planner_runs_since(m.id, now - 3600)?;
@@ -1343,7 +1493,8 @@ pub async fn run_planner(
         (
             login,
             a.grant.clone(),
-            format!("{}\n\n{snap}", planner::PLANNER_PROMPT),
+            snap,
+            planner_reads_project(&s, m)?,
             m.policy
                 .planner_model
                 .clone()
@@ -1364,14 +1515,57 @@ pub async fn run_planner(
     let (answer, stderr) = loop {
         attempts += 1;
         let (host, profile) = (login.host.as_str(), login.profile.as_deref());
-        let script = planner::planner_script_as(&model, &prompt, profile)
-            .map_err(|e| IpcError::new(codes::E_INVALID, e))?;
+        // Lanes design L1: the planner reads the repository's checkout on
+        // its host when `orchestrator.planner_reads` is on. A checkout it
+        // cannot have is said on the log, and it plans without reading.
+        let checkout = match reads {
+            Some(project_id) => {
+                match crate::service::sessions::project_checkout_on(
+                    &deps.store,
+                    &deps.ssh,
+                    host,
+                    project_id,
+                )
+                .await
+                {
+                    Ok(dir) => Some(dir),
+                    Err(e) => {
+                        let s = lock(&deps.store)?;
+                        event(
+                            &s,
+                            m.id,
+                            "note",
+                            "fleet",
+                            None,
+                            serde_json::json!({ "text": format!(
+                                "the planner did not read the repository on {host}: {}",
+                                e.message
+                            ) }),
+                        );
+                        None
+                    }
+                }
+            }
+            None => None,
+        };
+        let prompt = format!("{}\n\n{snap}", planner::planner_prompt(checkout.is_some()));
+        let (script, secs) = match &checkout {
+            Some(dir) => (
+                planner::planner_script_in(&model, &prompt, profile, dir),
+                planner::PLANNER_READS_TIMEOUT_SECS,
+            ),
+            None => (
+                planner::planner_script_as(&model, &prompt, profile),
+                planner::PLANNER_HOST_TIMEOUT_SECS,
+            ),
+        };
+        let script = script.map_err(|e| IpcError::new(codes::E_INVALID, e))?;
         let out = crate::ssh::run_shell_bounded(
             deps.ssh.as_ref(),
             host,
             &script,
             Duration::from_secs(10),
-            Duration::from_secs(planner::PLANNER_HOST_TIMEOUT_SECS + 20),
+            Duration::from_secs(secs + 20),
         )
         .await?;
         let stdout = String::from_utf8_lossy(&out.stdout);
@@ -1543,6 +1737,8 @@ fn card_commands(
                 payload: Some(serde_json::json!({
                     "tree": tree,
                     "done_when": planner::done_when_of(commands),
+                    "lanes": planner::lanes_of(commands),
+                    "touches": planner::touches_of(commands),
                 })),
             },
         )? {

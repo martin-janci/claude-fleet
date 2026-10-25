@@ -162,6 +162,37 @@ impl Store {
         self.emit_task_row(task_id)
     }
 
+    /// Record where a task began in a checkout it shares (lanes design L3,
+    /// migration 210): a commit id as git printed it, refused otherwise.
+    pub fn set_task_start_head(&self, task_id: i64, sha: &str) -> Result<(), IpcError> {
+        if !is_commit_id(sha) {
+            return Err(IpcError::new(
+                crate::ipc_error::codes::E_INVALID,
+                format!("{sha:?} is not a commit id"),
+            ));
+        }
+        self.conn.execute(
+            "UPDATE tasks SET start_head = ?1 WHERE id = ?2",
+            rusqlite::params![sha, task_id],
+        )?;
+        Ok(())
+    }
+
+    /// Where `task_id` began ([`Self::set_task_start_head`]); `None` for a
+    /// run in a checkout of its own.
+    pub fn task_start_head(&self, task_id: i64) -> Result<Option<String>, IpcError> {
+        use rusqlite::OptionalExtension;
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT start_head FROM tasks WHERE id = ?1",
+                [task_id],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten())
+    }
+
     /// [`Self::set_task_evidence`], but only over evidence that is still
     /// open to a better read: none, a provisional one, or, with
     /// `over_errors`, one whose read failed. A mid-turn read finishing after
@@ -308,3 +339,8 @@ impl Store {
 
 #[cfg(test)]
 mod tests;
+
+/// PURE: a full or abbreviated git commit id (7 to 64 hex digits).
+pub fn is_commit_id(s: &str) -> bool {
+    (7..=64).contains(&s.len()) && s.chars().all(|c| c.is_ascii_hexdigit())
+}

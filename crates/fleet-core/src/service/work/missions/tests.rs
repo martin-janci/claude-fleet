@@ -679,6 +679,66 @@ fn ci_refusal_names_what_it_may() {
     assert!(!e.message.contains("ci_override"), "{}", e.message);
 }
 
+/// Lanes design L2: a person puts a member in a lane and takes it out, and
+/// the mission's detail lists its lanes with their tasks.
+#[test]
+fn a_person_puts_a_task_in_a_lane() {
+    let st = store();
+    let (ana, _) = people(&st);
+    let me = person(&st, None, ana);
+    let m = new_mission(&st, &me, None);
+    let task = lock(&st)
+        .unwrap()
+        .create_local_work_item(None, "cards")
+        .unwrap()
+        .id;
+    let mut args = by_id("mission_item", m.id);
+    args.item_id = Some(task);
+    args.lane = Some("backend".into());
+    item(&args, &st, &me).unwrap();
+    let d = mission(&st, &me, m.id, None).unwrap();
+    assert_eq!(d.lanes.len(), 1);
+    assert_eq!(
+        (d.lanes[0].name.as_str(), d.lanes[0].item_ids.clone()),
+        ("backend", vec![task])
+    );
+    args.lane = Some(String::new());
+    item(&args, &st, &me).unwrap();
+    assert!(mission(&st, &me, m.id, None).unwrap().lanes.is_empty());
+    // The root is in no lane.
+    let mut root = by_id("mission_item", m.id);
+    root.item_id = m.root_item_id;
+    root.lane = Some("x".into());
+    assert!(item(&root, &st, &me).is_err());
+}
+
+/// Lanes design L4: a lane whose every task is done reads as done.
+#[test]
+fn a_lane_whose_tasks_are_all_done_is_done() {
+    let st = store();
+    let (ana, _) = people(&st);
+    let me = person(&st, None, ana);
+    let m = new_mission(&st, &me, None);
+    let task = lock(&st)
+        .unwrap()
+        .create_local_work_item(None, "cards")
+        .unwrap()
+        .id;
+    let mut args = by_id("mission_item", m.id);
+    args.item_id = Some(task);
+    args.lane = Some("backend".into());
+    item(&args, &st, &me).unwrap();
+    assert_eq!(
+        mission(&st, &me, m.id, None).unwrap().lanes[0].state,
+        "idle"
+    );
+    lock(&st).unwrap().set_item_status(task, "done").unwrap();
+    assert_eq!(
+        mission(&st, &me, m.id, None).unwrap().lanes[0].state,
+        "done"
+    );
+}
+
 /// Review r10: hub client mode routes `work_mission` typed, so an older
 /// hub's missing `limit_wait` must stay missing on the way to the webview
 /// (the client then reads `events`), and this hub's `null` stays `null`.

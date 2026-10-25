@@ -220,6 +220,67 @@ fn the_instruction_names_every_key_the_parser_reads() {
     }
 }
 
+/// Lanes design L3 (§3.3): a task that began part way along a shared
+/// branch is read from where it began, not from the merge base; a start the
+/// branch no longer holds (history rewritten) is an error.
+#[cfg(unix)]
+#[test]
+fn a_lane_task_is_read_from_where_it_began() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let head = |d: &std::path::Path| {
+        let out = crate::proc::std_command("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(d)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    git(d, &["init", "-q", "-b", "main"]);
+    std::fs::write(d.join("a.txt"), "one\n").unwrap();
+    git(d, &["add", "."]);
+    git(d, &["commit", "-qm", "base"]);
+    git(d, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+    git(d, &["checkout", "-qb", "lane"]);
+    std::fs::write(d.join("first.txt"), "1\n").unwrap();
+    git(d, &["add", "."]);
+    git(d, &["commit", "-qm", "First task"]);
+    let start = head(d);
+    std::fs::write(d.join("second.txt"), "2\n").unwrap();
+    git(d, &["add", "."]);
+    git(d, &["commit", "-qm", "Second task"]);
+    let run = |since: Option<&str>| {
+        let out = crate::proc::std_command("bash")
+            .args(["-c", &evidence_script_since(&d.to_string_lossy(), since)])
+            .output()
+            .unwrap();
+        parse_evidence(&String::from_utf8_lossy(&out.stdout), 1)
+    };
+    let ev = run(Some(&start));
+    assert_eq!(ev.error, None, "{ev:?}");
+    assert_eq!(ev.commits_total, 1);
+    assert_eq!(ev.commits[0].subject, "Second task");
+    assert_eq!(
+        ev.files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(),
+        ["second.txt"]
+    );
+    assert_eq!(run(None).commits_total, 2, "the merge base sees both");
+    // An amend that rewrites the task's start.
+    git(d, &["reset", "-q", "--hard", "HEAD~2"]);
+    std::fs::write(d.join("other.txt"), "x\n").unwrap();
+    git(d, &["add", "."]);
+    git(d, &["commit", "-qm", "Rewritten"]);
+    let ev = run(Some(&start));
+    assert!(
+        ev.error
+            .as_deref()
+            .is_some_and(|e| e.contains("no longer holds")),
+        "{ev:?}"
+    );
+    // Something that is no commit id falls back to the merge base.
+    assert!(!evidence_script_since("/x", Some("; rm -rf ~")).contains("rm -rf"));
+}
+
 /// review9: the loop's retry reads each failed checkout once for all its
 /// runs, tries a host that failed only once a pass, leaves a read newer than
 /// a minute alone, and keeps a failed mid-turn read open for the Stop.

@@ -123,6 +123,14 @@ pub struct MissionPolicy {
     /// A continuous mission's timer (O8): wake at least this often.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wake_every_secs: Option<u64>,
+    /// How its tasks run (lanes design 2026-10-23 §2.3): `item`, each run
+    /// in a session and checkout of its own; `lane`, a lane's tasks one
+    /// after another in one lead session on the lane's branch. Changes only
+    /// while the mission is not running.
+    pub execution: String,
+    /// In `lane` execution, a lead session hands over to a fresh one after
+    /// this many tasks (§3.5): the checkout stays, the context starts over.
+    pub lane_relay_after: u32,
 }
 
 impl Default for MissionPolicy {
@@ -138,9 +146,14 @@ impl Default for MissionPolicy {
             planner_model: None,
             planner_host: None,
             wake_every_secs: None,
+            execution: "item".into(),
+            lane_relay_after: 4,
         }
     }
 }
+
+/// How a mission's tasks run ([`MissionPolicy::execution`]).
+pub const MISSION_EXECUTIONS: [&str; 2] = ["item", "lane"];
 
 /// The policy's bounds.
 pub const POLICY_MAX_PARALLEL: u32 = 8;
@@ -149,6 +162,7 @@ pub const POLICY_MAX_TASKS: u32 = 300;
 pub const POLICY_MAX_PLANNER_RUNS: u32 = 30;
 /// A continuous mission's timer is at least this.
 pub const POLICY_MIN_WAKE_SECS: u64 = 300;
+pub const POLICY_MAX_LANE_RELAY: u32 = 20;
 
 /// PURE: a policy within its bounds, or `E_INVALID` naming the field.
 pub fn check_policy(p: &MissionPolicy) -> Result<MissionPolicy, IpcError> {
@@ -173,6 +187,15 @@ pub fn check_policy(p: &MissionPolicy) -> Result<MissionPolicy, IpcError> {
     }
     if !matches!(p.task_creation.as_str(), "propose" | "auto") {
         return Err(bad("task_creation", "propose or auto".into()));
+    }
+    if !MISSION_EXECUTIONS.contains(&p.execution.as_str()) {
+        return Err(bad("execution", "item or lane".into()));
+    }
+    if !(1..=POLICY_MAX_LANE_RELAY).contains(&p.lane_relay_after) {
+        return Err(bad(
+            "lane_relay_after",
+            format!("1 to {POLICY_MAX_LANE_RELAY}"),
+        ));
     }
     if p.wake_every_secs.is_some_and(|w| w < POLICY_MIN_WAKE_SECS) {
         return Err(bad(
@@ -746,6 +769,22 @@ impl Store {
             Some(pol) => check_policy(pol)?,
             None => before.policy.clone(),
         };
+        // Lanes design §2.3: a running mission does not switch how its tasks
+        // run under its open runs.
+        if policy.execution != before.policy.execution {
+            let open: i64 = self.conn.query_row(
+                "SELECT COUNT(*) FROM tasks t JOIN work_items i ON i.id = t.work_item_id \
+                 WHERE i.orchestration_project_id = ?1 AND t.state IN ('queued','running')",
+                [id],
+                |r| r.get(0),
+            )?;
+            if before.state == "active" || open > 0 {
+                return Err(invalid(format!(
+                    "{} changes how its tasks run only while it is not running and has no open runs",
+                    before.name
+                )));
+            }
+        }
         let policy_json = serde_json::to_string(&policy)
             .map_err(|e| IpcError::new(codes::E_SERIALIZE, e.to_string()))?;
         let tx = self.conn.unchecked_transaction()?;
@@ -1081,11 +1120,15 @@ impl Store {
                     m.name
                 )));
             }
-            tx.execute(
+            let left = tx.execute(
                 "UPDATE work_items SET orchestration_project_id = NULL \
                  WHERE id = ?1 AND orchestration_project_id = ?2",
                 rusqlite::params![item_id, id],
-            )? > 0
+            )? > 0;
+            if left {
+                self.clear_item_lane(item_id)?;
+            }
+            left
         };
         if changed {
             self.touch_mission(id)?;
@@ -1148,7 +1191,7 @@ impl Store {
         Ok(())
     }
 
-    fn touch_mission(&self, id: i64) -> Result<(), IpcError> {
+    pub(super) fn touch_mission(&self, id: i64) -> Result<(), IpcError> {
         self.conn.execute(
             "UPDATE orchestration_projects SET updated_at = ?1, version = version + 1 \
              WHERE id = ?2",
@@ -1374,7 +1417,7 @@ fn event_row(r: &rusqlite::Row) -> rusqlite::Result<MissionEventRow> {
     })
 }
 
-fn refuse_final(m: &MissionRow) -> Result<(), IpcError> {
+pub(super) fn refuse_final(m: &MissionRow) -> Result<(), IpcError> {
     if MISSION_FINAL_STATES.contains(&m.state.as_str()) {
         Err(invalid(format!(
             "{} is {}; a finished mission does not change",

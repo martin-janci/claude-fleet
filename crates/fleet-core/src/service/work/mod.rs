@@ -236,6 +236,9 @@ pub struct WorkLinkArgs {
     /// run: implement|review|test|research|integrate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
+    /// mission_item: the mission lane to put the task in; "" takes it out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lane: Option<String>,
     /// link/switch: false refuses when live elsewhere.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ack_live: Option<bool>,
@@ -1017,6 +1020,8 @@ pub fn start_args_as(
         force_cross_org: args.force_cross_org.unwrap_or(false),
         per_project: false,
         parallel: args.parallel.unwrap_or(false),
+        // A run's own (`run::prior_work`), never a tool parameter.
+        base_branch: None,
     }
 }
 

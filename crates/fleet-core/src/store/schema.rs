@@ -412,6 +412,39 @@ fn routine_runs_has_memory_read_at(conn: &Connection) -> rusqlite::Result<bool> 
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 211: `work_items` already has its
+/// `touches_json` column.
+fn work_items_has_touches(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('work_items') WHERE name = 'touches_json'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 210: `tasks` already has its
+/// `start_head` column.
+fn tasks_has_start_head(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name = 'start_head'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 209: `work_items` already has its
+/// `lane_id` column.
+fn work_items_has_lane_id(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('work_items') WHERE name = 'lane_id'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 205: `routine_runs` already has its
 /// `memory_retry_at` column.
 fn routine_runs_has_memory_retry_at(conn: &Connection) -> rusqlite::Result<bool> {
@@ -2372,6 +2405,26 @@ const MIGRATIONS: &[Migration] = &[
         version: 208,
         sql: include_str!("../../migrations/208_tasks_unread_evidence_index.sql"),
         already_applied: None,
+    },
+    // Mission lanes (lanes design L2): `mission_lanes` and the members'
+    // `lane_id`. An ADD COLUMN, so guarded.
+    Migration {
+        version: 209,
+        sql: include_str!("../../migrations/209_mission_lanes.sql"),
+        already_applied: Some(work_items_has_lane_id),
+    },
+    // Lanes L3: a task's `start_head` in its lane's checkout. An ADD
+    // COLUMN, so guarded.
+    Migration {
+        version: 210,
+        sql: include_str!("../../migrations/210_task_start_head.sql"),
+        already_applied: Some(tasks_has_start_head),
+    },
+    // Lanes L5: the paths a task will change. An ADD COLUMN, so guarded.
+    Migration {
+        version: 211,
+        sql: include_str!("../../migrations/211_item_touches.sql"),
+        already_applied: Some(work_items_has_touches),
     },
 ];
 
