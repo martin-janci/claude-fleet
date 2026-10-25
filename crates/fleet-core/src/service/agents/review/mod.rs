@@ -1122,19 +1122,17 @@ impl ReviewRunner {
             None
         };
         let patterns = diff::exclude_patterns(&cfg.exclude_paths, ignore.as_deref());
-        let (filtered, _) = diff::filter_diff(&raw, &patterns);
-        if !filtered.split('\n').any(|l| l.starts_with("diff --git ")) {
-            self.skip(repo, number, sha, "empty_diff", Some(0));
-            return skipped("empty_diff: nothing left after the exclusions");
-        }
-        let lines = diff::count_diff_lines(&filtered);
-        if lines > cfg.max_diff_lines {
-            self.skip(repo, number, sha, "diff_too_large", Some(lines as i64));
-            return skipped(format!(
-                "diff_too_large: {lines} lines (max {})",
-                cfg.max_diff_lines
-            ));
-        }
+        let filtered = match diff::gate(&raw, &patterns, cfg.max_diff_lines) {
+            Ok(f) => f,
+            Err(g) => {
+                let lines = match g {
+                    diff::Gate::Empty => 0,
+                    diff::Gate::TooLarge(n) => n as i64,
+                };
+                self.skip(repo, number, sha, g.code(), Some(lines));
+                return skipped(g.reason(cfg.max_diff_lines));
+            }
+        };
 
         // The workspace: exactly the head this job is about.
         let Some(project_id) = self.project_of(rule, repo) else {

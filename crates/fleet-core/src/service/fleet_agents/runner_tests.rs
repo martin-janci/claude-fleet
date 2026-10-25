@@ -471,6 +471,17 @@ fn fx(loaded: Loaded, config: Value, bindings: Value, project: bool) -> Fx {
     }
 }
 
+/// Finish job `id` as done, with `result`.
+fn finish_done(s: &Store, id: i64, result: Option<String>, now: i64) {
+    let end = crate::store::AgentJobEnd::Final {
+        state: "done",
+        result,
+        error_kind: None,
+        error: None,
+    };
+    s.finish_agent_job(id, &end, 0, now).unwrap();
+}
+
 impl Fx {
     fn poller(&self) -> FleetPoller {
         FleetPoller {
@@ -1246,18 +1257,7 @@ async fn the_loop_guard_ignores_its_own_comments_and_caps_a_subject() {
         .unwrap();
         let claimed = s.claim_agent_jobs(&[AGENT], now, 10, 60).unwrap();
         assert_eq!(claimed.len(), 1);
-        s.finish_agent_job(
-            claimed[0].id,
-            &crate::store::AgentJobEnd::Final {
-                state: "done",
-                result: None,
-                error_kind: None,
-                error: None,
-            },
-            0,
-            now,
-        )
-        .unwrap();
+        finish_done(&s, claimed[0].id, None, now);
     }
     let job = f.claim(&[crate::store::NewAgentJob {
         rule_id: f.rule.id,
@@ -2531,21 +2531,12 @@ async fn a_run_reads_its_branch_and_waits_out_its_cooldown() {
     ));
     let log = f.world.base.log.lock().unwrap().clone();
     assert!(log.contains(&"prepare release/L2S".to_string()), "{log:?}");
-    f.store
-        .lock()
-        .unwrap()
-        .finish_agent_job(
-            first[0].id,
-            &crate::store::AgentJobEnd::Final {
-                state: "done",
-                result: None,
-                error_kind: None,
-                error: None,
-            },
-            0,
-            crate::store::now_unix(),
-        )
-        .unwrap();
+    finish_done(
+        &f.store.lock().unwrap(),
+        first[0].id,
+        None,
+        crate::store::now_unix(),
+    );
     let second = f.claim(&[job("c2")]);
     // Deferred to the cooldown's end, not skipped: the poller will not
     // offer this trigger again.
@@ -2610,10 +2601,7 @@ async fn a_definition_may_let_an_unattended_review_approve() {
 
 /// The gallery's support definition, cooldown off, at `level`.
 fn support_fx(level: &str) -> Fx {
-    let seed = super::gallery::SEEDS
-        .iter()
-        .find(|s| s.name == "support")
-        .unwrap();
+    let seed = super::gallery::seed("support").unwrap();
     let mut l = seed.asset().unwrap().fleet_agent().unwrap();
     l.definition.run.cooldown_secs = 0;
     fx(
@@ -2653,21 +2641,12 @@ async fn support_run(f: &Fx, key: &str) -> Value {
     let RunOutcome::Done { result, .. } = out else {
         panic!("{out:?}")
     };
-    f.store
-        .lock()
-        .unwrap()
-        .finish_agent_job(
-            jobs[0].id,
-            &crate::store::AgentJobEnd::Final {
-                state: "done",
-                result: result.clone(),
-                error_kind: None,
-                error: None,
-            },
-            0,
-            crate::store::now_unix(),
-        )
-        .unwrap();
+    finish_done(
+        &f.store.lock().unwrap(),
+        jobs[0].id,
+        result.clone(),
+        crate::store::now_unix(),
+    );
     serde_json::from_str(&result.unwrap()).unwrap()
 }
 
@@ -2876,6 +2855,30 @@ diff --git a/docs/x.md b/docs/x.md\n--- a/docs/x.md\n+++ b/docs/x.md\n@@ -1 +1 @
 }
 
 #[tokio::test]
+async fn a_diff_github_will_not_serve_is_skipped_and_a_missing_pr_is_permanent() {
+    let f = head_fx();
+    *f.world.prs.lock().unwrap() = vec![pr(4, "abc", false)];
+    let now = crate::store::now_unix();
+    let polled = f
+        .poller()
+        .poll(&f.rule, Some(&f.cursor(now - 100, None)), now)
+        .await
+        .unwrap();
+    let jobs = f.claim(&polled.jobs);
+    *f.world.diff_refusal.lock().unwrap() =
+        Some("HTTP 406: Sorry, the diff exceeded the maximum number of lines".into());
+    match f.runner().run(&jobs[0], Some(&f.rule)).await {
+        RunOutcome::Skipped { reason } => assert!(reason.starts_with("diff_too_large"), "{reason}"),
+        other => panic!("too large is not worth a retry: {other:?}"),
+    }
+    *f.world.diff_refusal.lock().unwrap() = Some("HTTP 404: Not Found".into());
+    match f.runner().run(&jobs[0], Some(&f.rule)).await {
+        RunOutcome::Failed { kind, .. } => assert_eq!(kind, ErrorKind::Permanent),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn a_comment_on_an_open_pr_carries_its_head() {
     let f = gh_fx(json!({ "source": "github_comments", "repo": "{{repo}}",
         "match": { "any_phrase": "/ask" } }));
@@ -2995,18 +2998,7 @@ async fn answered_at(
     // Done, its result kept: the next head's job can be claimed.
     let s = f.store.lock().unwrap();
     let result = s.agent_job(job.id).unwrap().unwrap().result;
-    s.finish_agent_job(
-        job.id,
-        &crate::store::AgentJobEnd::Final {
-            state: "done",
-            result,
-            error_kind: None,
-            error: None,
-        },
-        0,
-        now,
-    )
-    .unwrap();
+    finish_done(&s, job.id, result, now);
     drop(s);
     f.actions()
         .into_iter()

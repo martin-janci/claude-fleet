@@ -31,7 +31,7 @@ use crate::ipc_error::{lock, IpcError};
 use crate::service::agents::review::debate::ReviewComment;
 use crate::service::agents::review::labels::LabelsRequest;
 use crate::service::agents::review::plan::OpenPr;
-use crate::service::agents::review::{PrComment, ReviewHost, SshReviewHost};
+use crate::service::agents::review::{self, PrComment, ReviewHost, SshReviewHost};
 use crate::service::agents::support::{LiveSupportHost, SupportHost};
 use crate::service::agents::vehicle::{self, PrintOutcome, PrintRun};
 use crate::service::agents::workspace::Prepared;
@@ -1631,18 +1631,7 @@ pub fn gate_diff(
 ) -> Result<String, String> {
     use crate::service::agents::review::diff;
     let patterns = diff::exclude_patterns(&spec.exclude_paths, claude_ignore);
-    let (filtered, _) = diff::filter_diff(raw, &patterns);
-    if !filtered.split('\n').any(|l| l.starts_with("diff --git ")) {
-        return Err("empty_diff: nothing left after the exclusions".into());
-    }
-    let lines = diff::count_diff_lines(&filtered);
-    if lines > spec.max_lines {
-        return Err(format!(
-            "diff_too_large: {lines} lines (max {})",
-            spec.max_lines
-        ));
-    }
-    Ok(filtered)
+    diff::gate(raw, &patterns, spec.max_lines).map_err(|g| g.reason(spec.max_lines))
 }
 
 /// PURE: where a scan's window starts: the last `window_mins`, stretched
@@ -2027,11 +2016,16 @@ impl FleetRunner {
                 reason: "not a pull request: there is no diff".into(),
             });
         }
-        let raw = self
-            .host
-            .pr_diff(host, repo, number)
-            .await
-            .map_err(|e| failed(ErrorKind::Transient, e))?;
+        let raw =
+            self.host.pr_diff(host, repo, number).await.map_err(
+                |e| match review::diff_failure(&e) {
+                    // A diff GitHub will not serve for its size never will.
+                    None => RunOutcome::Skipped {
+                        reason: "diff_too_large: GitHub will not serve the diff".into(),
+                    },
+                    Some(kind) => failed(kind, e),
+                },
+            )?;
         let base = subject
             .get("base_ref")
             .and_then(Value::as_str)
@@ -2102,7 +2096,11 @@ impl FleetRunner {
                 .unwrap_or_else(|| "Bug".into());
             if let (Some(tracker), Some(jql)) = (
                 tracker,
-                fp::candidates_jql(project.trim(), issue_type.trim(), &n.class),
+                crate::service::agents::support::writes::candidates_jql(
+                    project.trim(),
+                    issue_type.trim(),
+                    &n.class,
+                ),
             ) {
                 match self
                     .host
@@ -2199,74 +2197,63 @@ impl FleetRunner {
                     "the agent runs in a project and the rule names none",
                 ))
             }
-            (Workspace::PrHead, Some(pid)) => {
-                let (number, sha) = match (
-                    subject.get("number").and_then(Value::as_i64),
-                    subject.get("head_sha").and_then(Value::as_str),
-                ) {
-                    (Some(n), Some(s)) if !s.is_empty() => (n, s.to_string()),
-                    _ => {
-                        return Err(RunOutcome::Skipped {
-                            reason: "not a pull request: the subject has no head".into(),
-                        })
+            (ws @ (Workspace::Project | Workspace::PrHead), Some(pid)) => {
+                // A pull request's job runs at its head, read before the
+                // checkout: a subject without one is skipped untouched.
+                let pr_head = if ws == Workspace::PrHead {
+                    match (
+                        subject.get("number").and_then(Value::as_i64),
+                        subject.get("head_sha").and_then(Value::as_str),
+                    ) {
+                        (Some(n), Some(s)) if !s.is_empty() => Some((n, s.to_string())),
+                        _ => {
+                            return Err(RunOutcome::Skipped {
+                                reason: "not a pull request: the subject has no head".into(),
+                            })
+                        }
                     }
+                } else {
+                    None
                 };
                 let root = base
                     .checkout(host, pid)
                     .await
                     .map_err(|e| failed(ErrorKind::Transient, e.message))?;
                 base.prune(host, &root).await;
-                match self
-                    .host
-                    .prepare_pr(host, &root, job.id, number, &sha)
-                    .await
-                {
+                let prepared = match &pr_head {
+                    Some((number, sha)) => {
+                        self.host
+                            .prepare_pr(host, &root, job.id, *number, sha)
+                            .await
+                    }
+                    None => {
+                        let branch = d
+                            .run
+                            .branch
+                            .as_deref()
+                            .map(|b| {
+                                template::render(b, &inst.ctx(crate::store::now_unix()))
+                                    .trim()
+                                    .to_string()
+                            })
+                            .filter(|b| !b.is_empty())
+                            .unwrap_or_else(|| WORKSPACE_BRANCH.to_string());
+                        if !crate::service::agents::workspace::branch_ok(&branch) {
+                            return Err(failed(
+                                ErrorKind::Permanent,
+                                format!("run › branch {branch:?} is not a branch name"),
+                            ));
+                        }
+                        base.prepare(host, &root, job.id, &branch).await
+                    }
+                };
+                match prepared {
                     Ok((Prepared::Ready, cwd)) => (cwd, Some(root)),
-                    Ok((Prepared::Moved, _)) => {
+                    Ok((Prepared::Moved, _)) if pr_head.is_some() => {
                         return Err(RunOutcome::Skipped {
                             reason: "the head moved on since the job".into(),
                         })
                     }
-                    Ok((Prepared::NoRoot, _)) => {
-                        return Err(failed(
-                            ErrorKind::Permanent,
-                            format!("no git checkout at {root}"),
-                        ))
-                    }
-                    Ok((other, _)) => {
-                        return Err(failed(
-                            ErrorKind::Transient,
-                            format!("workspace: {other:?}"),
-                        ))
-                    }
-                    Err(e) => return Err(failed(ErrorKind::Transient, e.message)),
-                }
-            }
-            (Workspace::Project, Some(pid)) => {
-                let root = base
-                    .checkout(host, pid)
-                    .await
-                    .map_err(|e| failed(ErrorKind::Transient, e.message))?;
-                base.prune(host, &root).await;
-                let branch = d
-                    .run
-                    .branch
-                    .as_deref()
-                    .map(|b| {
-                        template::render(b, &inst.ctx(crate::store::now_unix()))
-                            .trim()
-                            .to_string()
-                    })
-                    .filter(|b| !b.is_empty())
-                    .unwrap_or_else(|| WORKSPACE_BRANCH.to_string());
-                if !crate::service::agents::workspace::branch_ok(&branch) {
-                    return Err(failed(
-                        ErrorKind::Permanent,
-                        format!("run › branch {branch:?} is not a branch name"),
-                    ));
-                }
-                match base.prepare(host, &root, job.id, &branch).await {
-                    Ok((Prepared::Ready, cwd)) => (cwd, Some(root)),
                     Ok((Prepared::NoRoot, _)) => {
                         return Err(failed(
                             ErrorKind::Permanent,

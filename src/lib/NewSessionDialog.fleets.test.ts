@@ -11,7 +11,7 @@ import { get } from 'svelte/store';
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import NewSessionDialog from './NewSessionDialog.svelte';
-import { hosts } from './hosts';
+import { hosts, type HostRow } from './hosts';
 import { hubStatus, STANDALONE } from './hub';
 import { hubConnection } from './hub_connection';
 import {
@@ -26,6 +26,9 @@ import {
 import { fleetInfo } from './fleets_fixture';
 
 const inv = mockedInvoke as ReturnType<typeof vi.fn>;
+
+/** The extra fleet's one host. */
+const MAC: HostRow = { alias: 'mac', ssh_alias: 'mac', reachable: true, claude_version: null, tmux_version: null, hidden: false, last_pinged_at: 1, account_uuid: null, provisioned: false, transport: 'ssh' };
 
 const project = {
   project: { id: 1, owner: 'PapayaPOS', repo: 'pos', base_path: '/r/pos', last_session_at: null, adopted: false, system: false },
@@ -53,7 +56,7 @@ function seedCompany() {
   _setFleetRowsForTest('papayapos', {
     ...emptyRows(),
     hosts: new Map([
-      ['mac', { alias: 'mac', ssh_alias: 'mac', reachable: true, claude_version: null, tmux_version: null, hidden: false, last_pinged_at: 1, account_uuid: null, provisioned: false, transport: 'ssh' }],
+      ['mac', MAC],
     ]),
     projects: [{ project: { id: 42, owner: 'papayapos', repo: 'pos', base_path: '', last_session_at: null, adopted: false, system: false }, worktrees: [] }],
   });
@@ -72,7 +75,7 @@ describe('New session on an extra fleet', () => {
     _setFleetRowsForTest('papayapos', {
       ...emptyRows(),
       hosts: new Map([
-        ['mac', { alias: 'mac', ssh_alias: 'mac', reachable: true, claude_version: null, tmux_version: null, hidden: false, last_pinged_at: 1, account_uuid: null, provisioned: false, transport: 'ssh' }],
+        ['mac', MAC],
       ]),
     });
     inv.mockImplementation(async (cmd: string) => {
@@ -111,7 +114,7 @@ describe('New session on an extra fleet', () => {
     _setFleetRowsForTest('papayapos', {
       ...emptyRows(),
       hosts: new Map([
-        ['mac', { alias: 'mac', ssh_alias: 'mac', reachable: true, claude_version: null, tmux_version: null, hidden: false, last_pinged_at: 1, account_uuid: null, provisioned: false, transport: 'ssh' }],
+        ['mac', MAC],
       ]),
     });
     for (const p of [project, { ...project, project: { ...project.project, owner: 'local', repo: 'loose' } }]) {
@@ -202,7 +205,7 @@ describe('New session on an extra fleet: launch choices (review w01-2)', () => {
     _setFleetRowsForTest('papayapos', {
       ...emptyRows(),
       hosts: new Map([
-        ['mac', { alias: 'mac', ssh_alias: 'mac', reachable: true, claude_version: null, tmux_version: null, hidden: false, last_pinged_at: 1, account_uuid: null, provisioned: false, transport: 'ssh', agents_on_path: ['codex'] }],
+        ['mac', { ...MAC, agents_on_path: ['codex'] }],
       ]),
       projects: [{ project: { id: 42, owner: 'papayapos', repo: 'pos', base_path: '', last_session_at: null, adopted: false, system: false }, worktrees: [] }],
     });
