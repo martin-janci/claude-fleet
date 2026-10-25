@@ -764,10 +764,6 @@
 
   const liveProbe = $derived(probeFresh ? probe : null);
   const liveStatus = $derived(liveProbe?.claude_status ?? session.claude_status);
-  // The next prompt Claude Code proposes (the dim text in its own empty
-  // box): ghost text here too, taken with Tab, and a chip that fills the box
-  // or, with Shift, sends it.
-  const suggestion = $derived(offeredSuggestion(session, liveStatus, draft));
   const liveStuck = $derived(liveProbe?.stuck_kind ?? session.stuck_kind);
   const liveActivity = $derived(liveProbe?.current_activity ?? session.current_activity);
   const optimistic = $derived(
@@ -1369,6 +1365,14 @@
   // read yet is the mangled line the gate exists to prevent.
   const outboxBusy = $derived(outgoing.some((m) => m.state === 'waiting' || m.state === 'sending' || m.state === 'sent'));
   const busyBlocked = $derived(blockWhileBusy && (busyNote !== null || outboxBusy));
+  // The next prompt Claude Code proposes (the dim text in its own empty
+  // box): ghost text here too, taken with → (Tab moves focus on a page), and
+  // a chip that fills the box or, with Shift, sends it. Hidden while our own
+  // send is in flight: the row still reads idle with the old proposal until
+  // the prompt's hook lands, and offering it then would send it twice.
+  const suggestion = $derived(offeredSuggestion(session, liveStatus, draft, optimistic || outboxBusy));
+  // Said to a screen reader when → fills the box with the suggestion.
+  let suggestionTaken = $state('');
   // F4 (review 2026-10-17): what the gate holds instead of refusing. A line
   // typed while busy waits here as a "queued · cancel" chip and goes out,
   // one per turn, when the gate opens (`composer_hold.ts`).
@@ -1724,6 +1728,7 @@
   let composerEdits = $state(0);
   function onComposerInput() {
     histIndex = null;
+    suggestionTaken = '';
     composerEdits++;
   }
   const slashOpen = $derived(slashMatches.length > 0);
@@ -2031,8 +2036,9 @@
         return;
       }
     }
-    if (e.key === 'Tab' && !e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey && suggestion) {
+    if (e.key === 'ArrowRight' && !e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey && suggestion) {
       e.preventDefault();
+      suggestionTaken = `Filled with Claude's suggestion: ${suggestion}`;
       draft = suggestion;
       histIndex = null;
       return;
@@ -3196,10 +3202,10 @@
             type="button"
             class="btn btn--chip suggest-chip"
             data-testid="conv-chip-suggestion"
-            title={`Claude suggests this next prompt.\n\nClick fills the box; Shift+click sends now. Tab in the empty box fills it too.`}
+            title={`Claude suggests: ${suggestion}\n\nClick fills the box; Shift+click sends now. → in the empty box fills it too.`}
             disabled={viewing !== null || shareBlocked !== null}
             onclick={(e) => usePreset({ label: suggestion, text: suggestion }, e.shiftKey)}
-            ><span class="suggest-mark" aria-hidden="true">✦</span>&nbsp;{suggestion}</button
+            ><span class="suggest-mark" aria-hidden="true">✦</span><span class="suggest-text">{suggestion}</span></button
           >
         </div>
       {/if}
@@ -3323,7 +3329,7 @@
           rows="2"
           use:autoGrow={draft}
           onpaste={onComposerPaste}
-          placeholder={suggestion ? `${suggestion}   ⇥ Tab` : placeholder}
+          placeholder={suggestion ? `${suggestion}   → fills` : placeholder}
           title={shareBlocked ?? undefined}
           disabled={viewing !== null || shareBlocked !== null}
         ></textarea>
@@ -3369,6 +3375,7 @@
             {/each}
           </select>
           <span class="composer-hint" id={COMPOSER_HINT_ID} data-testid="conv-composer-hint">{composerHint}</span>
+          <span class="sr-only" role="status" aria-live="polite" data-testid="conv-suggestion-taken">{suggestionTaken}</span>
           {#if tuneOn}
             <button
               type="button"
@@ -3794,13 +3801,33 @@
   .chip-send {
     opacity: 0.6;
   }
+  /* `.btn` is a flex box, where text-overflow does nothing: the ellipsis
+     lives on the text's own block, which may shrink below its width. */
   .suggest-chip {
+    min-width: 0;
+    max-width: 100%;
+    gap: 0.4em;
+  }
+  .suggest-mark {
+    flex: none;
+    opacity: 0.6;
+  }
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    border: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  .suggest-text {
+    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-  }
-  .suggest-mark {
-    opacity: 0.6;
   }
   .composer-shell {
     position: relative;

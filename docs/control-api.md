@@ -2076,7 +2076,7 @@ the session continues.
 | `Notification` | `quota_auto_resume_fired` | same | `working`, stuck cleared | `notification` — type |
 | `PostToolUse` | `EnterWorktree\|ExitWorktree` | `tool_name`, `tool_input`, `tool_response` | worktree row registered / removed | — |
 | `PreToolUse` | `Bash` (command hook, prefiltered) | `tool_name`, `tool_input.command` | none; answers `deny` for a mission's worker running a person's step (orchestration §7.2) | — |
-| `PromptSuggestion` | — (fleet's plugin, not a settings hook) | `session_id`, `suggestion` | `prompt_suggestion` set on the current conversation's row (one line, at most 300 chars); the next `UserPromptSubmit`, a genuine `SessionStart` or `SessionEnd` clears it | — |
+| `PromptSuggestion` | — (fleet's plugin, not a settings hook) | `session_id`, `suggestion` | `prompt_suggestion` set on the current conversation's row (one line, at most 300 chars, no bidi or zero-width characters); dropped while the row is `working` (a late POST the next prompt overtook); the next `UserPromptSubmit`, `Stop`/`StopFailure`, a genuine `SessionStart` or `SessionEnd` clears it | — |
 
 Every hook write stamps `last_hook_at`; a reconcile pass that started before that
 stamp never overwrites the hook's status with its pane heuristic. Fleet never

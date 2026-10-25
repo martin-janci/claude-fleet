@@ -101,11 +101,27 @@ pub const PROMPT_SUGGESTION_EVENT: &str = "PromptSuggestion";
 pub const PROMPT_SUGGESTION_MAX: usize = 300;
 
 /// A suggestion as the row stores it: one line (control characters, line
-/// breaks included, become spaces; runs of whitespace collapse), trimmed and
-/// cut to [`PROMPT_SUGGESTION_MAX`] chars. `None` when nothing is left.
+/// breaks included, become spaces; runs of whitespace collapse), with no
+/// invisible format characters (bidi embeddings, overrides, isolates and
+/// marks, zero-width spaces and joiners, BOM: a chip must read in the order
+/// it sends), trimmed and cut to [`PROMPT_SUGGESTION_MAX`] chars. `None`
+/// when nothing is left.
 pub fn clean_prompt_suggestion(text: &str) -> Option<String> {
     let one_line = text
         .chars()
+        .filter(|c| {
+            !matches!(
+                c,
+                '\u{00AD}'
+                    | '\u{061C}'
+                    | '\u{180E}'
+                    | '\u{200B}'..='\u{200F}'
+                    | '\u{202A}'..='\u{202E}'
+                    | '\u{2060}'..='\u{2064}'
+                    | '\u{2066}'..='\u{206F}'
+                    | '\u{FEFF}'
+            )
+        })
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect::<String>();
     let words = one_line.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -117,8 +133,12 @@ pub fn clean_prompt_suggestion(text: &str) -> Option<String> {
 /// The plugin's `PromptSuggestion` event: Claude Code shows `suggestion` dim
 /// in the empty prompt box of the conversation the payload names. Stored on
 /// that row while it is the row's current conversation, so every client can
-/// offer it; the next prompt (`UserPromptSubmit`) or the conversation
-/// starting over or ending clears it. Never rebinds a row.
+/// offer it; the next prompt (`UserPromptSubmit`), the next turn's `Stop`
+/// or the conversation starting over or ending clears it. Never rebinds a
+/// row. A suggestion belongs to the turn that just ended: Claude Code makes
+/// it after the Stop hooks ran (the row is idle), so one that lands while
+/// the row is `working` is a late POST overtaken by the next prompt and is
+/// dropped, never stored to be offered after that turn.
 fn apply_prompt_suggestion_hook(
     store: &Arc<Mutex<Store>>,
     payload: &HookPayload,
@@ -138,6 +158,9 @@ fn apply_prompt_suggestion_hook(
         else {
             return Ok(());
         };
+        if row.claude_status.as_deref() == Some("working") {
+            return Ok(());
+        }
         s.set_prompt_suggestion(row.id, Some(text.as_str()))?;
         Ok(())
     })
@@ -5015,6 +5038,76 @@ mod tests {
         assert_eq!(suggestion_of(&store), None);
     }
 
+    /// A suggestion belongs to the turn that just ended. One posted late,
+    /// after the next prompt's UserPromptSubmit, is dropped instead of being
+    /// offered after that turn; and a Stop clears an earlier turn's, so a
+    /// turn that began without a submit and proposed nothing leaves none.
+    #[test]
+    fn a_suggestion_never_outlives_its_turn() {
+        let store = make_store();
+        {
+            let s = store.lock().unwrap();
+            s.upsert_host("local").unwrap();
+            let id = s
+                .upsert_session("sess", "local", None, None, 0, 0, "running", None)
+                .unwrap();
+            s.set_claude_session_id(id, "uuid-1").unwrap();
+        }
+        let master = Caller::master();
+        let hook = |p: HookPayload| apply_hook(&store, &make_ssh(), &p, &ctx(&master, None));
+        hook(suggestion_payload("uuid-1", "run the tests")).unwrap();
+        hook(make_payload("UserPromptSubmit", "uuid-1")).unwrap();
+        hook(suggestion_payload("uuid-1", "run the tests")).unwrap();
+        assert_eq!(suggestion_of(&store), None, "a late POST is not stored");
+        hook(make_payload("Stop", "uuid-1")).unwrap();
+        assert_eq!(suggestion_of(&store), None, "nor offered after the turn");
+        hook(suggestion_payload("uuid-1", "commit it")).unwrap();
+        assert_eq!(suggestion_of(&store).as_deref(), Some("commit it"));
+        // A turn with no UserPromptSubmit (a background task resuming
+        // Claude) ends without a proposal: the old one goes with it.
+        hook(make_payload("Stop", "uuid-1")).unwrap();
+        assert_eq!(suggestion_of(&store), None);
+    }
+
+    /// Found by its pane, the way the plugin's host-token POST is: only the
+    /// row's current conversation sets a suggestion, and a genuine
+    /// SessionStart clears it while a stale one (the row's earlier
+    /// conversation) leaves it alone.
+    #[test]
+    fn a_pane_routed_suggestion_follows_the_current_conversation() {
+        let store = make_store();
+        let id = pane_session(&store, "s", "%3");
+        let host = host_caller("local");
+        let hook = |p: HookPayload| apply_hook(&store, &make_ssh(), &p, &ctx(&host, Some("%3")));
+        let suggestion = || status_of(&store, id).prompt_suggestion;
+        hook(suggestion_payload(OLD, "run the tests")).unwrap();
+        assert_eq!(suggestion().as_deref(), Some("run the tests"));
+        let mut clear = make_payload("SessionStart", NEW);
+        clear.source = Some("clear".into());
+        hook(clear).unwrap();
+        assert_eq!(
+            status_of(&store, id).claude_session_id.as_deref(),
+            Some(NEW)
+        );
+        assert_eq!(suggestion(), None, "a /clear drops the old proposal");
+        hook(suggestion_payload(OLD, "push it")).unwrap();
+        assert_eq!(suggestion(), None, "the left conversation's is dropped");
+        hook(suggestion_payload(NEW, "commit it")).unwrap();
+        assert_eq!(suggestion().as_deref(), Some("commit it"));
+        let mut stale = make_payload("SessionStart", OLD);
+        stale.source = Some("startup".into());
+        hook(stale).unwrap();
+        assert_eq!(
+            status_of(&store, id).claude_session_id.as_deref(),
+            Some(NEW)
+        );
+        assert_eq!(suggestion().as_deref(), Some("commit it"));
+        let mut restart = make_payload("SessionStart", NEW);
+        restart.source = Some("startup".into());
+        hook(restart).unwrap();
+        assert_eq!(suggestion(), None, "the current conversation starting over");
+    }
+
     #[test]
     fn a_prompt_suggestion_is_one_short_line_or_nothing() {
         assert_eq!(
@@ -5022,6 +5115,14 @@ mod tests {
             Some("[2mrun the tests")
         );
         assert_eq!(clean_prompt_suggestion(" \n\t "), None);
+        // Bidi controls and zero-width characters would make the chip read
+        // in a different order from the text it sends.
+        assert_eq!(
+            clean_prompt_suggestion("run \u{202e}stset\u{202c} the\u{200b} tests\u{2066}\u{feff}")
+                .as_deref(),
+            Some("run stset the tests")
+        );
+        assert_eq!(clean_prompt_suggestion("\u{202e}\u{200f}"), None);
         let long = "a".repeat(PROMPT_SUGGESTION_MAX + 50);
         assert_eq!(
             clean_prompt_suggestion(&long).map(|t| t.chars().count()),
