@@ -13,4 +13,8 @@ describe('offeredSuggestion', () => {
     expect(offeredSuggestion({}, 'idle', '')).toBeNull();
     expect(offeredSuggestion({ prompt_suggestion: '  ' }, 'idle', '')).toBeNull();
   });
+
+  it('offers nothing while a prompt of our own is in flight', () => {
+    expect(offeredSuggestion({ prompt_suggestion: 'run the tests' }, 'idle', '', true)).toBeNull();
+  });
 });

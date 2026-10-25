@@ -1303,7 +1303,7 @@
             <WatchView
               session={$selectedSession}
               access={selAccess}
-              visible={!fleetPageShown && $destination !== 'files' && !conversationMode}
+              visible={!fleetPageShown && !fleetSessionShown && $destination !== 'files' && !conversationMode}
             />
           {:else}
             <TerminalView />

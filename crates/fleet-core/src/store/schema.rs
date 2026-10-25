@@ -2368,6 +2368,11 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/207_project_github_origin.sql"),
         already_applied: Some(projects_has_github_origin),
     },
+    Migration {
+        version: 208,
+        sql: include_str!("../../migrations/208_tasks_unread_evidence_index.sql"),
+        already_applied: None,
+    },
 ];
 
 /// The settings row [`Store::finish_realm_upgrade`] writes once migration

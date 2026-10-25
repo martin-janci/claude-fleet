@@ -169,6 +169,22 @@ describe('Toolkit (step 3.16)', () => {
     }
   });
 
+  it('puts a device name that starts with a dash after -- so clap does not read it as an option', async () => {
+    const before = get(hubStatus);
+    hubStatus.set({ ...before, client_name: '-phone' });
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === 'catalog_config') throw { code: 'E_FORBIDDEN', message: 'not granted' };
+      if (cmd === 'catalog_list_assets') return listing;
+      throw { code: 'E_TEST', message: 'no backend' };
+    });
+    try {
+      const { findByTestId } = render(Toolkit, { visible: true });
+      expect((await findByTestId('toolkit-grant-cmd')).textContent).toBe('fleet-hub client grant -- -phone assets');
+    } finally {
+      hubStatus.set(before);
+    }
+  });
+
   it('does not tell a read-only device to set up a catalog it cannot manage', async () => {
     catalog.set(null);
     vi.mocked(invoke).mockImplementation(async (cmd: string) => {

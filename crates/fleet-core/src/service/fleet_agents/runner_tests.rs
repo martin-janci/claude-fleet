@@ -2338,6 +2338,83 @@ async fn a_scan_reads_its_window_and_keeps_to_its_max_jobs() {
     );
 }
 
+/// `run.fingerprint.bugs` searches its own tracker, else the trigger's,
+/// else the first tracker input: what validation accepts.
+#[test]
+fn a_bug_search_finds_its_tracker_where_validation_does() {
+    let mut l = small(json!({ "source": "manual" }), json!([]));
+    l.definition.inputs = definition::parse_value(&json!({
+        "inputs": [{ "name": "jira", "type": "tracker", "label": "Jira", "required": true }],
+        "trigger": { "source": "manual" },
+        "run": { "workspace": "home", "output_schema": { "type": "object" } }
+    }))
+    .unwrap()
+    .inputs;
+    let mut inst = Instance {
+        sources: Sources {
+            definition: l,
+            servers: BTreeMap::new(),
+        },
+        values: json!({ "jira": "4" }).as_object().unwrap().clone(),
+        bindings: Vec::new(),
+    };
+    let mut b = definition::BugSearch {
+        tracker: None,
+        project: "BUG".into(),
+        issue_type: None,
+    };
+    let ctx = inst.ctx(0);
+    assert_eq!(bug_tracker(&inst, &b, &ctx), Some(4), "the tracker input");
+    inst.sources.definition.definition.trigger.tracker = Some("3".into());
+    assert_eq!(bug_tracker(&inst, &b, &ctx), Some(3), "the trigger's");
+    b.tracker = Some("{{inputs.jira}}".into());
+    assert_eq!(bug_tracker(&inst, &b, &ctx), Some(4), "its own");
+}
+
+/// A body `plan` already fitted to `max / 2` keeps its "… and N more
+/// findings" tail when findings outside the diff join it.
+#[test]
+fn placing_a_review_keeps_the_body_plan_fitted() {
+    use super::actions::{place_review, PrReviewPayload, ReviewFinding};
+    let max = 400;
+    let tail = "\n… and 3 more findings";
+    let body = format!("{}{tail}", "x".repeat(max / 2 - tail.chars().count()));
+    assert_eq!(body.chars().count(), max / 2);
+    let p = PrReviewPayload {
+        action: "review".into(),
+        repo: "acme/pos".into(),
+        number: 1,
+        sha: "abc".into(),
+        event: "COMMENT".into(),
+        body,
+        findings: vec![ReviewFinding {
+            path: "src/a.rs".into(),
+            line: 3,
+            body: "Off by one.".into(),
+            blocking: false,
+        }],
+    };
+    let req = place_review(&p, "", "[fleet-agent:inst]", max);
+    assert!(req.body.contains("… and 3 more findings"), "{}", req.body);
+    assert!(
+        req.body.chars().count() <= max,
+        "{}",
+        req.body.chars().count()
+    );
+    assert!(req.body.ends_with("[fleet-agent:inst]"));
+}
+
+/// A scan that ran late reaches back to the previous one, so no entry
+/// falls between them; never more than a week back.
+#[test]
+fn a_late_scan_reaches_back_to_the_previous_one() {
+    let now = 1_000_000;
+    assert_eq!(scan_from(60, None, now), now - 3600);
+    assert_eq!(scan_from(60, Some(now - 1800), now), now - 3600);
+    assert_eq!(scan_from(60, Some(now - 3900), now), now - 3900);
+    assert_eq!(scan_from(60, Some(0), now), now - 10_080 * 60);
+}
+
 /// `run.branch` picks the worktree's branch, and `run.cooldown_secs` defers
 /// a subject this instance finished lately.
 #[tokio::test]
@@ -2403,6 +2480,28 @@ async fn a_run_reads_its_branch_and_waits_out_its_cooldown() {
             assert!(reason.contains("cooldown"), "{reason}");
             assert!(at > crate::store::now_unix() + 3500, "{at}");
         }
+        other => panic!("{other:?}"),
+    }
+    // A newer trigger on the subject supersedes the waiting one: only the
+    // newest outlives the cooldown.
+    f.store
+        .lock()
+        .unwrap()
+        .finish_agent_job(
+            second[0].id,
+            &crate::store::AgentJobEnd::Retry {
+                at: 0,
+                error_kind: "deferred".into(),
+                error: "cooldown".into(),
+            },
+            0,
+            crate::store::now_unix(),
+        )
+        .unwrap();
+    let third = f.claim(&[job("c3")]);
+    assert_eq!(third[0].id, second[0].id, "the older job is claimed first");
+    match f.runner().run(&third[0], Some(&f.rule)).await {
+        RunOutcome::Skipped { reason } => assert!(reason.contains("superseded"), "{reason}"),
         other => panic!("{other:?}"),
     }
 }
@@ -2557,6 +2656,39 @@ async fn the_support_definition_fingerprints_links_and_files_once() {
             ("known".to_string(), "approved".to_string())
         ]
     );
+}
+
+/// A burst of one error: each run proposes its own bug before a person
+/// approved the first; once one is filed, the others are not.
+#[tokio::test]
+async fn a_burst_of_one_error_files_one_bug() {
+    let f = support_fx("act");
+    *f.world.base.threads.lock().unwrap() = vec![thread(&[("1", "Tech help!", 1500)])];
+    for key in ["c1", "c2"] {
+        let r = support_run(&f, key).await;
+        assert!(r["answer"].get("knownBug").is_none(), "{r}");
+    }
+    let bugs: Vec<_> = f
+        .actions()
+        .into_iter()
+        .filter(|a| a.kind == "tracker_issue")
+        .collect();
+    assert_eq!(bugs.len(), 2, "each run proposed one");
+    assert_eq!(f.executor().execute(&bugs[0]).await, ActionResult::Executed);
+    match f.executor().execute(&bugs[1]).await {
+        ActionResult::Expired(e) => assert!(e.contains("duplicate: BUG-9"), "{e}"),
+        other => panic!("{other:?}"),
+    }
+    let creates = f
+        .world
+        .base
+        .writes
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(_, op)| matches!(op, WriteOp::CreateIssue { .. }))
+        .count();
+    assert_eq!(creates, 1);
 }
 
 #[test]

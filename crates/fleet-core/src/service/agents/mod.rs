@@ -224,7 +224,8 @@ impl Registry {
 /// `attempts`-th run (counting this one). A permanent failure ends the
 /// job; `max_turns` gets one more try; a limit waits its fixed time; any
 /// other failure waits `RETRY_BASE_SECS · 2^(attempts-1)`. Past
-/// `max_retries` attempts a failure is final.
+/// `max_retries` attempts a failure is final. A deferral (`error_kind`
+/// "deferred") gives its attempt back when the store records it.
 pub fn plan_end(outcome: &RunOutcome, attempts: u32, max_retries: u32, now: i64) -> AgentJobEnd {
     match outcome {
         RunOutcome::Done { result, .. } => AgentJobEnd::Final {

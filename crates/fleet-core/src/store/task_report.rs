@@ -123,6 +123,21 @@ pub(crate) fn decode<T: serde::de::DeserializeOwned>(raw: Option<String>) -> Opt
     raw.and_then(|t| serde_json::from_str(&t).ok())
 }
 
+/// [`Store::runs_with_unread_evidence`]'s statement: its first three
+/// predicates are `idx_tasks_unread_evidence`'s (migration 208), so the
+/// probe walks the failed reads in its window, not every done run.
+pub(super) fn unread_evidence_sql() -> String {
+    format!(
+        "SELECT {} FROM tasks WHERE state = 'done' AND work_item_id IS NOT NULL \
+           AND json_extract(evidence_json, '$.error') IS NOT NULL \
+           AND finished_at >= ?1 \
+           AND json_extract(evidence_json, '$.host') IS NOT NULL \
+           AND json_extract(evidence_json, '$.dir') IS NOT NULL \
+         ORDER BY finished_at ASC, id ASC",
+        super::rows::TASK_COLUMNS
+    )
+}
+
 impl Store {
     /// Store the worker's report on a task (any state: the report arrives
     /// with the flip to `done`, which already happened).
@@ -197,15 +212,7 @@ impl Store {
     /// the checkout to read again recorded (`host`, `dir`): the loop reads
     /// them again (`report::retry_unread_evidence`), in a mission or not.
     pub fn runs_with_unread_evidence(&self, since: i64) -> Result<Vec<super::TaskRow>, IpcError> {
-        let mut stmt = self.conn.prepare(&format!(
-            "SELECT {} FROM tasks WHERE state = 'done' AND work_item_id IS NOT NULL \
-               AND finished_at >= ?1 \
-               AND json_extract(evidence_json, '$.error') IS NOT NULL \
-               AND json_extract(evidence_json, '$.host') IS NOT NULL \
-               AND json_extract(evidence_json, '$.dir') IS NOT NULL \
-             ORDER BY finished_at ASC, id ASC",
-            super::rows::TASK_COLUMNS
-        ))?;
+        let mut stmt = self.conn.prepare(&unread_evidence_sql())?;
         let rows = stmt.query_map([since], super::rows::map_task_row)?;
         Ok(rows.collect::<Result<_, _>>()?)
     }

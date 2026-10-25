@@ -228,16 +228,16 @@ fn a_trigger_takes_its_sources_keys_only() {
     ] {
         assert!(scan.iter().any(|x| x.contains(want)), "{want}: {scan:#?}");
     }
-    // A window shorter than the interval leaves gaps; the default
-    // interval (60) counts when every_mins is unset.
-    for (every, window) in [(json!(60), 15), (Value::Null, 45)] {
+    // A window no longer than the interval leaves gaps (scans run a poll
+    // late); the default interval (60) counts when every_mins is unset.
+    for (every, window) in [(json!(60), 15), (json!(60), 60), (Value::Null, 45)] {
         let p = problems_of(|v| {
             v["trigger"] = json!({ "source": "mcp_scan", "store": "logs", "tool": "search_logs",
                 "every_mins": every, "window_mins": window })
         });
         assert!(
             p.iter()
-                .any(|x| x.contains("window_mins must cover every_mins")),
+                .any(|x| x.contains("window_mins must be more than every_mins")),
             "{every} / {window}: {p:#?}"
         );
     }

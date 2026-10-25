@@ -27,6 +27,16 @@ use serde_json::{json, Map, Value};
 pub const KIND: &str = "fingerprint";
 /// Open bugs one search reads.
 pub const CANDIDATES_MAX: usize = 5;
+/// A fingerprint not seen for this long (or for its `window_mins`, when
+/// longer) is forgotten: its record expires and the store's sweep removes
+/// it, so an error stream of ever-new fingerprints does not grow the store
+/// for good. A window of 0 ("always") counts until then.
+pub const KEEP_SECS_MIN: i64 = 90 * 86_400;
+
+/// PURE: when a fingerprint seen at `now` expires.
+pub fn expires_at(window_mins: i64, now: i64) -> i64 {
+    now.saturating_add(window_mins.saturating_mul(60).max(KEEP_SECS_MIN))
+}
 
 /// What the store keeps under a fingerprint.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -100,12 +110,14 @@ pub fn best_candidate(n: &Named, found: &[IssueThread]) -> (Option<String>, Opti
 }
 
 /// Count a sighting of `n` in `namespace` and answer the record as it was
-/// before it, and as it is now.
+/// before it, and as it is now. The sighting renews its expiry
+/// ([`expires_at`]).
 pub fn see(
     store: &Store,
     namespace: &str,
     n: &Named,
     job_id: Option<i64>,
+    window_mins: i64,
     now: i64,
 ) -> Result<(Option<Seen>, Seen), String> {
     let before: Option<Seen> = store
@@ -126,7 +138,7 @@ pub fn see(
                 kind: KIND.into(),
                 key: n.fingerprint.clone(),
                 value: serde_json::to_string(&seen).unwrap_or_default(),
-                expires_at: None,
+                expires_at: Some(expires_at(window_mins, now)),
                 written_by_job: job_id,
             },
             now,
@@ -160,7 +172,8 @@ pub fn set_bug(
                 kind: KIND.into(),
                 key: fp.into(),
                 value: serde_json::to_string(&seen).unwrap_or_default(),
-                expires_at: None,
+                // The sighting's expiry: filing a bug does not renew it.
+                expires_at: row.expires_at,
                 written_by_job: row.written_by_job,
             },
             now,
@@ -297,11 +310,11 @@ mod tests {
             message: String::new(),
             component: String::new(),
         };
-        let (before, seen) = see(&s, "rule:1", &n, None, 1000).unwrap();
+        let (before, seen) = see(&s, "rule:1", &n, None, 120, 1000).unwrap();
         assert!(before.is_none());
         assert_eq!((seen.count, seen.first_seen), (1, 1000));
         set_bug(&s, "rule:1", &n.fingerprint, "BUG-9", 1001).unwrap();
-        let (before, seen) = see(&s, "rule:1", &n, None, 2000).unwrap();
+        let (before, seen) = see(&s, "rule:1", &n, None, 120, 2000).unwrap();
         assert_eq!(seen.count, 2);
         assert_eq!(
             known_bug(before.as_ref(), 120, 2000).as_deref(),
@@ -316,6 +329,24 @@ mod tests {
             known_bug(before.as_ref(), 0, 99_999).as_deref(),
             Some("BUG-9")
         );
+        // A sighting renews the record's expiry; filing a bug keeps it.
+        let row = s
+            .agent_record("rule:1", KIND, &n.fingerprint, 2000)
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.expires_at, Some(2000 + KEEP_SECS_MIN));
+        set_bug(&s, "rule:1", &n.fingerprint, "BUG-10", 2001).unwrap();
+        let row = s
+            .agent_record("rule:1", KIND, &n.fingerprint, 2001)
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.expires_at, Some(2000 + KEEP_SECS_MIN));
+        assert_eq!(expires_at(200 * 1440, 0), 200 * 86_400, "a longer window");
+        // Forgotten once it expires.
+        assert!(s
+            .agent_record("rule:1", KIND, &n.fingerprint, 2000 + KEEP_SECS_MIN)
+            .unwrap()
+            .is_none());
         // Never seen: nothing to file the bug against.
         set_bug(&s, "rule:1", &"0".repeat(64), "BUG-1", 3000).unwrap();
         assert!(s

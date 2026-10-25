@@ -1452,14 +1452,16 @@ describe('ConversationPanel quick actions', () => {
   });
 
   // Claude Code's next-prompt suggestion (migration 206): ghost text taken
-  // with Tab, and a chip that fills the box or, with Shift, sends it.
-  it('offers Claude Code\'s suggestion on an idle session: chip, Tab and Shift+click', async () => {
+  // with → (Tab keeps moving focus), and a chip that fills the box or, with
+  // Shift, sends it. Once sent it is not offered again before the hook lands.
+  it('offers Claude Code\'s suggestion on an idle session: chip, → and Shift+click', async () => {
     mockedSend.mockResolvedValue({ ok: true, value: undefined });
     await mount({ claude_status: 'idle', prompt_suggestion: 'run the tests' });
     const box = screen.getByTestId('conv-composer-input') as HTMLTextAreaElement;
     expect(box.placeholder).toContain('run the tests');
     const chip = screen.getByTestId('conv-chip-suggestion');
     expect(chip.textContent).toContain('run the tests');
+    expect(chip.title).toContain('run the tests');
     await fireEvent.click(chip);
     await settle();
     expect(mockedSend).not.toHaveBeenCalled();
@@ -1469,12 +1471,18 @@ describe('ConversationPanel quick actions', () => {
     box.value = '';
     await fireEvent.input(box);
     await fireEvent.keyDown(box, { key: 'Tab' });
+    expect(box.value).toBe('');
+    await fireEvent.keyDown(box, { key: 'ArrowRight' });
     expect(box.value).toBe('run the tests');
+    expect(screen.getByTestId('conv-suggestion-taken').textContent).toContain('run the tests');
     box.value = '';
     await fireEvent.input(box);
     await fireEvent.click(screen.getByTestId('conv-chip-suggestion'), { shiftKey: true });
     await settle();
     expect(mockedSend).toHaveBeenCalledWith('local', 'ctl', 'run the tests');
+    // The row still reads idle with the proposal: no second offer to send.
+    expect(screen.queryByTestId('conv-chip-suggestion')).toBeNull();
+    expect(box.placeholder).not.toContain('run the tests');
   });
 
   it('offers no suggestion while a turn runs', async () => {

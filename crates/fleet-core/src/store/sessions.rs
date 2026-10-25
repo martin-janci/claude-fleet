@@ -1876,7 +1876,9 @@ impl Store {
     /// The Stop hook's write: the turn is over. Sets `claude_status = idle`,
     /// bumps `turn_seq`, stamps `last_stop_at` / `last_turn_at`, maintains
     /// `idle_since`, ends a `compacting` activity, and clears `pending_input`
-    /// (a dialog on the just-ended turn's pane does not survive it). Keyed
+    /// (a dialog on the just-ended turn's pane does not survive it) and
+    /// `prompt_suggestion` (an earlier turn's proposal; Claude Code makes
+    /// this turn's after the Stop hooks ran). Keyed
     /// by row id (the hook resolver already picked the row: two rows may
     /// share one `claude_session_id`); returns the updated row (`None` when
     /// the row is gone). Emits `session_updated`.
@@ -1891,7 +1893,7 @@ impl Store {
                      last_stop_at = ?2, last_turn_at = ?2, last_hook_at = ?2, \
                      idle_since = COALESCE(idle_since, ?2), pending_input = NULL, \
                      stale_working_at = NULL, stale_demoted_at = NULL, \
-                     turn_outcome = NULL{END_COMPACTING} \
+                     turn_outcome = NULL, prompt_suggestion = NULL{END_COMPACTING} \
                  WHERE id = ?1"
             ),
             rusqlite::params![row_id, now],
@@ -2037,7 +2039,7 @@ impl Store {
                      last_stop_at = ?2, last_turn_at = ?2, last_hook_at = ?2, \
                      idle_since = COALESCE(idle_since, ?2), pending_input = NULL, \
                      stale_working_at = NULL, stale_demoted_at = NULL, \
-                     turn_outcome = NULL{END_COMPACTING} \
+                     turn_outcome = NULL, prompt_suggestion = NULL{END_COMPACTING} \
                  WHERE id = ?1"
             ),
             rusqlite::params![row_id, now],

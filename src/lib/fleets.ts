@@ -910,8 +910,10 @@ export function fleetIsDown(f: Pick<FleetInfo, 'connection'>): boolean {
  *  fleets that have the project are offered. A `local/*` project (adopted
  *  with no GitHub origin) is offered no other fleet at all: another fleet's
  *  `local/<dir>` is some other machine's checkout that only shares a folder
- *  name. The projects of a fleet that went offline stay cached, so its link
- *  decides (review w01-5). */
+ *  name. A fleet that has the project under its origin's own owner/repo
+ *  (where cloning that origin registers it) counts as having it. The
+ *  projects of a fleet that went offline stay cached, so its link decides
+ *  (review w01-5). */
 export function fleetChoicesFor(
   owner: string,
   repo: string,
@@ -920,11 +922,17 @@ export function fleetChoicesFor(
   githubOrigin: string | null = null,
 ): FleetChoice[] {
   if (sameText(owner, 'local')) return [];
-  const cloneUrl = githubOrigin && githubRepoOf(githubOrigin) ? githubOrigin.trim() : null;
+  const named = githubOrigin ? githubRepoOf(githubOrigin) : null;
+  const cloneUrl = named && githubOrigin ? githubOrigin.trim() : null;
   const out: FleetChoice[] = [];
   for (const f of known) {
     if (f.primary || f.unavailable || f.duplicate_of || fleetIsDown(f)) continue;
-    const p = repoProject(rows.get(f.id)?.projects, owner, repo);
+    const projects = rows.get(f.id)?.projects;
+    // A project named after its directories (`acme/web`) whose origin is
+    // `other/site` is registered as `other/site` where a clone of it put it:
+    // look for that too, or the fleet the clone went to is offered another
+    // clone every time.
+    const p = repoProject(projects, owner, repo) ?? (named ? repoProject(projects, named.owner, named.repo) : undefined);
     if (p) out.push({ fleet: f, projectId: p.project.id, cloneUrl: null });
     else if (cloneUrl) out.push({ fleet: f, projectId: null, cloneUrl });
   }

@@ -277,10 +277,14 @@ pub fn place_review(
     }
     let mark = format!("\n\n{mark}");
     let room = max.saturating_sub(mark.chars().count());
+    // A body `plan` already sized (up to `max / 2`, its "… and N more
+    // findings" tail last) is not cut again: half the room, or its own
+    // length within `max / 2`, whichever is more.
     let mut body = if outside.is_empty() {
         fit(&p.body, room)
     } else {
-        fit(&p.body, room / 2)
+        let own = p.body.chars().count().min(max / 2);
+        fit(&p.body, (room / 2).max(own).min(room))
     };
     let list = listed(
         "Outside the diff:",
@@ -1192,6 +1196,24 @@ pub fn check_arguments(schema: &Value, args: &Value) -> Vec<String> {
     out
 }
 
+/// The fingerprint store's namespace, the fingerprint a `tracker_issue`
+/// payload carries (`fingerprint: "{{answer.fingerprint}}"`) and the
+/// incident window, when the definition keeps fingerprints.
+fn fingerprint_of(
+    rule: &AgentRuleRow,
+    inst: &Instance,
+    raw: &Value,
+) -> Option<(String, String, i64)> {
+    let spec = inst.loaded().definition.run.fingerprint.as_ref()?;
+    let fp = raw
+        .get("fingerprint")
+        .and_then(Value::as_str)
+        .filter(|f| super::fingerprints::is_fingerprint(f))?;
+    let ns = super::bindings::namespaces(rule.id, &inst.bindings);
+    let namespace = ns.get(&spec.store)?;
+    Some((namespace.clone(), fp.to_string(), spec.window_mins))
+}
+
 // ── the executor ──
 
 pub struct FleetExecutor {
@@ -1215,26 +1237,38 @@ impl FleetExecutor {
         bug: Option<String>,
         now: i64,
     ) {
-        let (Some(spec), Some(bug)) = (inst.loaded().definition.run.fingerprint.as_ref(), bug)
-        else {
-            return;
-        };
-        let Some(fp) = raw
-            .get("fingerprint")
-            .and_then(Value::as_str)
-            .filter(|f| super::fingerprints::is_fingerprint(f))
-        else {
-            return;
-        };
-        let ns = super::bindings::namespaces(rule.id, &inst.bindings);
-        let Some(namespace) = ns.get(&spec.store) else {
+        let (Some((namespace, fp, _)), Some(bug)) = (fingerprint_of(rule, inst, raw), bug) else {
             return;
         };
         if let Ok(s) = self.store.lock() {
-            if let Err(e) = super::fingerprints::set_bug(&s, namespace, fp, &bug, now) {
+            if let Err(e) = super::fingerprints::set_bug(&s, &namespace, &fp, &bug, now) {
                 tracing::warn!(rule_id = rule.id, error = %e, "[agents] fleet: file the bug");
             }
         }
+    }
+
+    /// The bug another `tracker_issue` filed for the fingerprint this
+    /// payload carries since `since` (when this one was proposed), while it
+    /// still counts: a burst of one error, each run proposing its own bug
+    /// before the first was approved, files one bug, not one per run.
+    fn filed_since(
+        &self,
+        rule: &AgentRuleRow,
+        inst: &Instance,
+        raw: &Value,
+        since: i64,
+        now: i64,
+    ) -> Option<String> {
+        let (namespace, fp, window_mins) = fingerprint_of(rule, inst, raw)?;
+        let s = self.store.lock().ok()?;
+        let row = s
+            .agent_record(&namespace, super::fingerprints::KIND, &fp, now)
+            .ok()??;
+        let seen: super::fingerprints::Seen = serde_json::from_str(&row.value).ok()?;
+        if seen.bug_at? < since {
+            return None;
+        }
+        super::fingerprints::known_bug(Some(&seen), window_mins, now)
     }
 
     /// Send a `pr_review`: only while the PR is open at the head the run
@@ -1468,6 +1502,11 @@ impl FleetExecutor {
                         return refuse(format!("{} is outside limits.write_projects", l.to));
                     }
                 }
+                if let Some(bug) = self.filed_since(rule, inst, &raw, action.created_at, now) {
+                    return ActionResult::Expired(format!(
+                        "duplicate: {bug} was filed for the same error after this was proposed"
+                    ));
+                }
                 let jira = is_jira(self.host.tracker_provider(i.tracker).as_deref());
                 if !jira {
                     if i.link.is_some() {
@@ -1489,7 +1528,10 @@ impl FleetExecutor {
                                 rule,
                                 inst,
                                 &raw,
-                                o.remote_id.or(o.key),
+                                // The key people and templates name it by
+                                // (ENG-123, #12); remote_id is the tracker's
+                                // internal id off Jira.
+                                o.key.or(o.remote_id),
                                 now,
                             );
                             ActionResult::Executed

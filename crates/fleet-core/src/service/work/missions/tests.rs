@@ -678,3 +678,30 @@ fn ci_refusal_names_what_it_may() {
     );
     assert!(!e.message.contains("ci_override"), "{}", e.message);
 }
+
+/// Review r10: hub client mode routes `work_mission` typed, so an older
+/// hub's missing `limit_wait` must stay missing on the way to the webview
+/// (the client then reads `events`), and this hub's `null` stays `null`.
+#[test]
+fn limit_wait_keeps_absent_apart_from_null_through_a_round_trip() {
+    let st = store();
+    let (ana, _) = people(&st);
+    let me = person(&st, None, ana);
+    let m = new_mission(&st, &me, None);
+    let ours = mission(&st, &me, m.id, None).unwrap();
+    assert_eq!(ours.limit_wait, Some(None), "this hub always answers");
+    let json = serde_json::to_value(&ours).unwrap();
+    assert!(
+        json["limit_wait"].is_null() && json.get("limit_wait").is_some(),
+        "{json}"
+    );
+    let back: MissionDetail = serde_json::from_value(json).unwrap();
+    assert_eq!(back.limit_wait, Some(None));
+
+    let mut older = serde_json::to_value(&ours).unwrap();
+    older.as_object_mut().unwrap().remove("limit_wait");
+    let read: MissionDetail = serde_json::from_value(older).unwrap();
+    assert_eq!(read.limit_wait, None);
+    let again = serde_json::to_value(&read).unwrap();
+    assert!(again.get("limit_wait").is_none(), "{again}");
+}
