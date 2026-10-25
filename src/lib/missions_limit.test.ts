@@ -49,6 +49,13 @@ describe('the planner at a usage limit', () => {
     expect(plannerLimitWait({ events: [ev(2, 'limit_wait', login)] })).toEqual(login);
   });
 
+  it('a refusal for signed-out logins says which to sign in again and ends the wait (review r10)', () => {
+    const ev = (id: number, kind: string, payload?: unknown) => ({ id, at: id, kind, actor: 'loop', payload });
+    const why = "no login the planner may use is signed in: mac's own login is signed out since today";
+    expect(eventSentence(ev(3, 'planner_signed_out', { why }))).toBe(`The planner could not be asked: ${why}`);
+    expect(plannerLimitWait({ events: [ev(3, 'planner_signed_out', { why }), ev(2, 'limit_wait', login)] })).toBeNull();
+  });
+
   it('the Plan button says it waits, with the reason in Details', () => {
     const all = { ...login, login: null, why: 'every login the planner may use is at its usage limit' };
     const h = plannerWaiting(all, now);

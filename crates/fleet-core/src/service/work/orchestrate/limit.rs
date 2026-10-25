@@ -22,9 +22,21 @@ pub const LIMIT_WAIT_EVENT: &str = "limit_wait";
 /// The mission event that ends the ask's waits: a later login of the same
 /// ask answered (review r8), so the planner's newest word is no wait.
 pub const LIMIT_CLEARED_EVENT: &str = "limit_cleared";
-/// The planner's words on a mission: its runs, its waits, and an answer
-/// after a wait. Only these are read, so a busy log never hides a wait.
-const WORD_KINDS: &[&str] = &["planned", LIMIT_WAIT_EVENT, LIMIT_CLEARED_EVENT];
+/// The mission event an ask the chooser refused is, when every login the
+/// planner may use is signed out (review r10): the mission says which login
+/// to sign in again, and the loop does not ask again until one is back.
+pub const SIGNED_OUT_EVENT: &str = "planner_signed_out";
+/// The planner's words on a mission: its runs, its waits, an answer after
+/// a wait and a refusal for signed-out logins. Only these are read, so a
+/// busy log never hides a wait.
+const WORD_KINDS: &[&str] = &[
+    "planned",
+    LIMIT_WAIT_EVENT,
+    LIMIT_CLEARED_EVENT,
+    SIGNED_OUT_EVENT,
+];
+/// How [`choose_in`]'s signed-out refusal starts.
+const SIGNED_OUT_REFUSAL: &str = "no login the planner may use is signed in";
 /// Waits are at most this far ahead: Claude's weekly limit and a day.
 /// A reset further out (an answer the prompt's text steered, review r8) is
 /// not taken as known.
@@ -167,6 +179,13 @@ impl Words {
         serde_json::from_value(e.payload.clone()?).ok()
     }
 
+    /// The refusal the planner's newest word is, when it is a
+    /// [`SIGNED_OUT_EVENT`]: the message the ask was refused with.
+    pub fn signed_out(&self) -> Option<String> {
+        let e = self.0.first().filter(|e| e.kind == SIGNED_OUT_EVENT)?;
+        Some(e.payload.as_ref()?.get("why")?.as_str()?.to_string())
+    }
+
     /// When the planner was last asked.
     pub fn last_planned_at(&self) -> Option<i64> {
         self.0.iter().find(|e| e.kind == "planned").map(|e| e.at)
@@ -255,7 +274,7 @@ pub fn choose_in(
                     .unwrap_or_else(|| format!("{} is signed out", l.words()));
             return Err(IpcError::new(
                 crate::ipc_error::codes::E_CLAUDE_CLI,
-                format!("no login the planner may use is signed in: {why}"),
+                format!("{SIGNED_OUT_REFUSAL}: {why}"),
             ));
         }
     }
@@ -273,6 +292,27 @@ pub fn choose_in(
             first_why.unwrap_or_else(|| "no login".into())
         ),
     }))
+}
+
+/// Whether `e` is [`choose_in`]'s refusal for signed-out logins.
+pub fn is_signed_out_refusal(e: &IpcError) -> bool {
+    e.code == crate::ipc_error::codes::E_CLAUDE_CLI && e.message.starts_with(SIGNED_OUT_REFUSAL)
+}
+
+/// Record `refusal` ([`is_signed_out_refusal`]) on the mission's log, once
+/// per change: not again while the planner's newest word is the same one.
+pub fn say_signed_out(s: &Store, mission_id: i64, words: &Words, refusal: &IpcError, actor: &str) {
+    if words.signed_out().as_deref() == Some(refusal.message.as_str()) {
+        return;
+    }
+    event(
+        s,
+        mission_id,
+        SIGNED_OUT_EVENT,
+        actor,
+        None,
+        serde_json::json!({ "why": refusal.message }),
+    );
 }
 
 /// The wait for `login`, whose run answered at its usage limit: until the

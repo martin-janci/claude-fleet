@@ -660,6 +660,10 @@ export function eventSentence(e: MissionEvent): string {
       return limitWaitSentence(p as unknown as LimitWait);
     case 'limit_cleared':
       return `The planner answered on ${loginWords(p as unknown as NonNullable<LimitWait['login']>)}`;
+    case 'planner_signed_out':
+      // Every login the planner may use is signed out (review r10): the loop
+      // asks again once one is signed in.
+      return `The planner could not be asked: ${String(p.why ?? 'every login it may use is signed out')}`;
     case 'card':
       return `Card ${String(p.card_id ?? '')} ${String(p.state ?? '')}`;
     case 'grant': {
@@ -932,7 +936,9 @@ export function plannerLimitWait(detail: Pick<MissionDetail, 'events' | 'limit_w
     return w && typeof w.resets_at === 'number' ? w : null;
   }
   // `limit_cleared`: a later login of the same ask answered (review r8).
-  const last = (detail.events ?? []).find((e) => e.kind === 'planned' || e.kind === 'limit_wait' || e.kind === 'limit_cleared');
+  // `planner_signed_out`: a later ask refused for signed-out logins (review r10).
+  const words = ['planned', 'limit_wait', 'limit_cleared', 'planner_signed_out'];
+  const last = (detail.events ?? []).find((e) => words.includes(e.kind));
   if (last?.kind !== 'limit_wait' || !last.payload) return null;
   const w = last.payload as unknown as LimitWait;
   return typeof w.resets_at === 'number' ? w : null;
