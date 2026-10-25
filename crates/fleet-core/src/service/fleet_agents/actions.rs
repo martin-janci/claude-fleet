@@ -140,6 +140,10 @@ pub struct ReviewFinding {
     pub path: String,
     pub line: u32,
     pub body: String,
+    /// The answer called it blocking: the next review's verdict waits on
+    /// it being resolved ([`adjusted_verdict`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub blocking: bool,
 }
 
 /// `pr_review`: a review of the PR's head, with line comments.
@@ -177,9 +181,10 @@ pub fn review_event(said: &str, auto: bool, auto_approve: bool) -> &'static str 
 }
 
 /// PURE: the answer's findings array as line comments; an item without a
-/// path, a line or a body is dropped. The caller keeps the first
+/// path, a line or a body is dropped, and so is one whose `confidence` is
+/// below `min_confidence` (none given is 100). The caller keeps the first
 /// [`MAX_REVIEW_COMMENTS`] as line comments and lists the rest in the body.
-fn review_findings(v: Option<&Value>) -> Vec<ReviewFinding> {
+fn review_findings(v: Option<&Value>, min_confidence: u8) -> Vec<ReviewFinding> {
     v.and_then(Value::as_array)
         .into_iter()
         .flatten()
@@ -187,10 +192,16 @@ fn review_findings(v: Option<&Value>) -> Vec<ReviewFinding> {
             let path = f.get("path")?.as_str()?.trim().trim_start_matches("./");
             let line = u32::try_from(f.get("line")?.as_u64()?).ok()?;
             let body = f.get("body")?.as_str()?.trim();
-            (!path.is_empty() && line > 0 && !body.is_empty()).then(|| ReviewFinding {
+            let confidence = f.get("confidence").and_then(Value::as_f64).unwrap_or(100.0);
+            (!path.is_empty()
+                && line > 0
+                && !body.is_empty()
+                && confidence >= f64::from(min_confidence))
+            .then(|| ReviewFinding {
                 path: path.to_string(),
                 line,
                 body: fit(body, REVIEW_COMMENT_MAX),
+                blocking: f.get("blocking").and_then(Value::as_bool).unwrap_or(false),
             })
         })
         .collect()
@@ -290,6 +301,97 @@ pub fn place_review(
         body: format!("{body}{mark}"),
         comments,
     }
+}
+
+/// `pr_description`: the pull request's description.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PrDescriptionPayload {
+    pub action: String,
+    pub repo: String,
+    pub number: i64,
+    pub sha: String,
+    pub body: String,
+    #[serde(default)]
+    pub overwrite: bool,
+    /// The instance had not reviewed the pull request before this run.
+    #[serde(default)]
+    pub first: bool,
+}
+
+/// The record kind a sent `pr_review` is remembered under, in the rule's
+/// [`super::runner::subjects_namespace`], keyed `owner/repo#number`: the
+/// next run's `subject.previous`.
+pub const REVIEW_KIND: &str = "review";
+
+/// PURE: the key a pull request's review is remembered under.
+pub fn review_key(repo: &str, number: i64) -> String {
+    format!("{repo}#{number}")
+}
+
+/// PURE: what is remembered of a sent review.
+pub fn remembered_review(p: &PrReviewPayload, event: &str) -> Value {
+    json!({
+        "sha": p.sha,
+        "event": event,
+        "findings": p.findings.iter().map(|f| json!({
+            "path": f.path, "line": f.line, "blocking": f.blocking,
+        })).collect::<Vec<_>>(),
+    })
+}
+
+/// PURE: the verdict `said`, adjusted as the PR reviewer adjusts it
+/// (`agents::review::post::adjust_verdict`) against the previous review's
+/// findings and the answer's `resolutions` of them: REQUEST_CHANGES while a
+/// blocking one is resolved `open` (or not at all), and a COMMENT with
+/// nothing blocking left an APPROVE. No previous findings: `said`.
+pub fn adjusted_verdict(
+    said: &str,
+    previous: &Value,
+    resolutions: &Value,
+    findings: &[ReviewFinding],
+) -> String {
+    let said = said.trim().to_ascii_uppercase();
+    let prev: Vec<(&str, u64, bool)> = previous["findings"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|f| {
+            Some((
+                f.get("path")?.as_str()?,
+                f.get("line")?.as_u64()?,
+                f.get("blocking").and_then(Value::as_bool).unwrap_or(false),
+            ))
+        })
+        .collect();
+    if prev.is_empty() {
+        return said;
+    }
+    let res: Vec<(&str, u64, &str)> = resolutions
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|r| {
+            Some((
+                r.get("path")?.as_str()?.trim_start_matches("./"),
+                r.get("line")?.as_u64()?,
+                r.get("resolution")?.as_str()?,
+            ))
+        })
+        .collect();
+    let settled = prev.iter().all(|(path, line, blocking)| {
+        !blocking
+            || res
+                .iter()
+                .find(|(p, l, _)| p == path && l == line)
+                .is_some_and(|(_, _, r)| !r.trim().eq_ignore_ascii_case("open"))
+    });
+    if !res.is_empty() && !settled {
+        return "REQUEST_CHANGES".into();
+    }
+    if said == "COMMENT" && settled && !findings.iter().any(|f| f.blocking) {
+        return "APPROVE".into();
+    }
+    said
 }
 
 /// `pr_labels`: labels to add and remove (`-name` in the action's list).
@@ -480,12 +582,40 @@ pub fn write_projects(inst: &Instance, now: i64) -> Vec<String> {
         .collect()
 }
 
+/// PURE: an action's labels: an array, or a comma-separated string. An
+/// array item may be `{label, paths: [globs]}`, a label only when one of
+/// the pull request's changed files (`subject.paths`) matches a glob, as
+/// the PR reviewer's label rules are.
 fn labels_of(v: Option<&Value>, ctx: &Value) -> Vec<String> {
+    use crate::service::agents::review::diff::glob_match;
     let rendered = v.map(|v| template::render_value(v, ctx));
+    let changed: Vec<&str> = ctx["subject"]["paths"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    let item = |x: &Value| match x {
+        Value::String(s) => Some(s.trim().to_string()),
+        Value::Object(o) => {
+            let label = o.get("label")?.as_str()?.trim().to_string();
+            let globs: Vec<&str> = o
+                .get("paths")?
+                .as_array()?
+                .iter()
+                .filter_map(Value::as_str)
+                .collect();
+            changed
+                .iter()
+                .any(|p| globs.iter().any(|g| glob_match(g, p)))
+                .then_some(label)
+        }
+        _ => None,
+    };
     match rendered {
         Some(Value::Array(a)) => a
             .iter()
-            .filter_map(|x| x.as_str().map(str::trim).map(str::to_string))
+            .filter_map(item)
             .filter(|s| !s.is_empty())
             .collect(),
         Some(Value::String(s)) => s
@@ -684,7 +814,10 @@ pub fn plan(
                     };
                     Ok((serde_json::to_string(&p).unwrap_or_default(), body))
                 }
-                ActionKind::PrComment | ActionKind::PrLabels | ActionKind::PrReview => {
+                ActionKind::PrComment
+                | ActionKind::PrLabels
+                | ActionKind::PrReview
+                | ActionKind::PrDescription => {
                     let repo = d
                         .trigger
                         .repo
@@ -710,8 +843,19 @@ pub fn plan(
                         if sha.is_empty() {
                             return Err(skip("the subject has no head_sha"));
                         }
-                        let mut findings =
-                            review_findings(a.findings.as_ref().map(|f| &ctx["answer"][f]));
+                        let mut findings = review_findings(
+                            a.findings.as_ref().map(|f| &ctx["answer"][f]),
+                            a.min_confidence.unwrap_or(0),
+                        );
+                        let said = match &a.resolutions {
+                            Some(f) => adjusted_verdict(
+                                &r(&a.verdict),
+                                &ctx["subject"]["previous"],
+                                &ctx["answer"][f],
+                                &findings,
+                            ),
+                            None => r(&a.verdict),
+                        };
                         let more: Vec<String> = findings
                             .split_off(findings.len().min(MAX_REVIEW_COMMENTS))
                             .iter()
@@ -720,8 +864,7 @@ pub fn plan(
                         // Unattended only when it is sent with no person: a
                         // person approving it at `propose` signs the verdict.
                         let event =
-                            review_event(&r(&a.verdict), act && a.auto, d.limits.auto_approve)
-                                .to_string();
+                            review_event(&said, act && a.auto, d.limits.auto_approve).to_string();
                         // The body leaves room for the findings that land
                         // outside the diff, and the marker; `place_review`
                         // fits the whole to `max`.
@@ -750,6 +893,25 @@ pub fn plan(
                             findings,
                         };
                         return Ok((serde_json::to_string(&p).unwrap_or_default(), shown));
+                    }
+                    if a.kind == ActionKind::PrDescription {
+                        let body = fit(&body_text(), max);
+                        if body.is_empty() {
+                            return Err(skip("the body is empty"));
+                        }
+                        let p = PrDescriptionPayload {
+                            action: a.id.clone(),
+                            repo,
+                            number,
+                            sha: ctx["subject"]["head_sha"]
+                                .as_str()
+                                .unwrap_or_default()
+                                .to_string(),
+                            body: body.clone(),
+                            overwrite: a.overwrite,
+                            first: ctx["subject"]["previous"].is_null(),
+                        };
+                        return Ok((serde_json::to_string(&p).unwrap_or_default(), body));
                     }
                     if a.kind == ActionKind::PrComment {
                         let text = body_text();
@@ -1084,6 +1246,8 @@ impl FleetExecutor {
         inst: &Instance,
         repo: &str,
         p: PrReviewPayload,
+        job_id: i64,
+        now: i64,
     ) -> ActionResult {
         let host = &rule.host_alias;
         let max = inst.loaded().definition.limits.max_body_chars;
@@ -1122,10 +1286,66 @@ impl FleetExecutor {
             }
             other => other,
         };
-        match sent {
-            Ok(id) => {
-                ActionResult::Done(format!("review {id}: {} line comments", req.comments.len()))
-            }
+        let sent = match sent {
+            Err(e) => return ActionResult::Failed(e),
+            Ok(id) => id,
+        };
+        // The next run's `subject.previous`. GitHub already has the review,
+        // so a failure to remember it is logged, not the action's.
+        let kept = self
+            .store
+            .lock()
+            .map_err(|_| "store lock".to_string())
+            .and_then(|s| {
+                s.put_agent_record(
+                    &crate::store::NewAgentRecord {
+                        namespace: super::runner::subjects_namespace(rule.id),
+                        kind: REVIEW_KIND.into(),
+                        key: review_key(repo, p.number),
+                        value: remembered_review(&p, &event).to_string(),
+                        expires_at: None,
+                        written_by_job: Some(job_id),
+                    },
+                    now,
+                )
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+            });
+        if let Err(e) = kept {
+            tracing::warn!(rule_id = rule.id, error = %e, "[agents] fleet: remember the review");
+        }
+        ActionResult::Done(format!(
+            "review {sent}: {} line comments",
+            req.comments.len()
+        ))
+    }
+
+    /// Send a `pr_description`: only onto a pull request with none, or,
+    /// with `overwrite`, on the instance's first review of it (the PR
+    /// reviewer's `overwrite_description`).
+    async fn send_description(
+        &self,
+        rule: &AgentRuleRow,
+        repo: &str,
+        p: PrDescriptionPayload,
+    ) -> ActionResult {
+        let host = &rule.host_alias;
+        let meta = match self.host.pr_meta(host, repo, p.number).await {
+            Ok(m) => m,
+            Err(e) => return ActionResult::Failed(e),
+        };
+        if !meta.body.trim().is_empty() && !(p.overwrite && p.first) {
+            return ActionResult::Expired(format!("{repo}#{} has a description", p.number));
+        }
+        let req = crate::service::agents::review::labels::DescriptionRequest {
+            host: host.clone(),
+            repo: repo.to_string(),
+            number: p.number,
+            sha: p.sha,
+            body: p.body,
+        };
+        match self.host.set_pr_description(&req).await {
+            Ok(()) => ActionResult::Executed,
             Err(e) => ActionResult::Failed(e),
         }
     }
@@ -1448,7 +1668,10 @@ impl FleetExecutor {
                     Err(e) => ActionResult::Failed(e),
                 }
             }
-            ActionKind::PrComment | ActionKind::PrLabels | ActionKind::PrReview => {
+            ActionKind::PrComment
+            | ActionKind::PrLabels
+            | ActionKind::PrReview
+            | ActionKind::PrDescription => {
                 let repos = write_repos(inst, now);
                 let (repo, number) = match raw.get("repo").and_then(Value::as_str) {
                     Some(r) => (
@@ -1464,7 +1687,16 @@ impl FleetExecutor {
                 }
                 if def_action.kind == ActionKind::PrReview {
                     let p = payload!(PrReviewPayload);
-                    return self.send_review(rule, inst, &repo, p).await;
+                    return self
+                        .send_review(rule, inst, &repo, p, action.job_id, now)
+                        .await;
+                }
+                if def_action.kind == ActionKind::PrDescription {
+                    let p = payload!(PrDescriptionPayload);
+                    if !fits(&p.body) {
+                        return refuse(format!("the description is over {max} characters"));
+                    }
+                    return self.send_description(rule, &repo, p).await;
                 }
                 if def_action.kind == ActionKind::PrComment {
                     let c = payload!(PrCommentPayload);

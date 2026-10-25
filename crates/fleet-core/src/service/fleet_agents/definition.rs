@@ -262,9 +262,11 @@ impl TriggerSource {
             TriggerSource::TrackerAssigned | TriggerSource::TrackerQuery => ISSUE,
             TriggerSource::GithubPrs => &[
                 "repo", "number", "title", "head_sha", "base_ref", "head_ref", "author", "url",
+                "previous", "paths",
             ],
             TriggerSource::GithubComments => &[
                 "repo", "number", "title", "url", "comment", "head_sha", "base_ref", "head_ref",
+                "previous", "paths",
             ],
             TriggerSource::McpScan => &["key", "entry"],
             TriggerSource::Schedule => &["at", "request", "scope"],
@@ -597,6 +599,9 @@ pub enum ActionKind {
     PrReview,
     PrComment,
     PrLabels,
+    /// The pull request's description, when it has none (or, with
+    /// `overwrite`, on the instance's first review of it).
+    PrDescription,
     McpCall,
     Record,
     /// A task in fleet's Work view, optionally with proposed subtasks.
@@ -618,6 +623,7 @@ impl ActionKind {
             ActionKind::PrReview => "pr_review",
             ActionKind::PrComment => "pr_comment",
             ActionKind::PrLabels => "pr_labels",
+            ActionKind::PrDescription => "pr_description",
             ActionKind::McpCall => "mcp_call",
             ActionKind::Record => "record",
             ActionKind::WorkTask => "work_task",
@@ -654,7 +660,19 @@ impl ActionKind {
                 &["from", "to", "link_type"],
             ),
             ActionKind::PrReview => (
-                &["target", "body", "body_template", "verdict", "findings"],
+                &[
+                    "target",
+                    "body",
+                    "body_template",
+                    "verdict",
+                    "findings",
+                    "min_confidence",
+                    "resolutions",
+                ],
+                &["target", "body"],
+            ),
+            ActionKind::PrDescription => (
+                &["target", "body", "body_template", "overwrite"],
                 &["target", "body"],
             ),
             ActionKind::PrComment => (&["target", "body", "body_template"], &["target", "body"]),
@@ -780,6 +798,21 @@ pub struct Action {
     /// `{path, line, body}`, placed on the PR's diff when it is sent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub findings: Option<String>,
+    /// `pr_review`: a finding whose `confidence` (0-100) is below this is
+    /// dropped, as the PR reviewer's `confidence_threshold` (one without a
+    /// confidence counts as 100).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_confidence: Option<u8>,
+    /// `pr_review`: an array field of the answer, each item
+    /// `{path, line, resolution}` saying what became of a previous review's
+    /// finding (`fixed`, `wontfix`, `open` …): with it the verdict is
+    /// adjusted as the PR reviewer adjusts it (`adjusted_verdict`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolutions: Option<String>,
+    /// `pr_description`: also replace a description someone wrote, on the
+    /// instance's first review of the pull request.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub overwrite: bool,
 }
 
 /// Most items one `each` action is planned for.
@@ -816,6 +849,9 @@ impl Action {
         put("fingerprint", self.fingerprint.is_some());
         put("verdict", self.verdict.is_some());
         put("findings", self.findings.is_some());
+        put("min_confidence", self.min_confidence.is_some());
+        put("resolutions", self.resolutions.is_some());
+        put("overwrite", self.overwrite);
         out
     }
 }
@@ -1608,7 +1644,10 @@ pub fn problems(d: &Definition, templates: &BTreeMap<String, String>) -> Vec<Str
                     ));
                 }
             }
-            ActionKind::PrReview | ActionKind::PrComment | ActionKind::PrLabels => {
+            ActionKind::PrReview
+            | ActionKind::PrComment
+            | ActionKind::PrLabels
+            | ActionKind::PrDescription => {
                 if !t.source.is_github() {
                     out.push(format!("{at}: {} needs a github trigger", a.kind.word()));
                 }
@@ -1616,6 +1655,23 @@ pub fn problems(d: &Definition, templates: &BTreeMap<String, String>) -> Vec<Str
                     out.push(format!(
                         "{at}: pr_review reviews a PR's head: the trigger is github_prs"
                     ));
+                }
+                if a.min_confidence.is_some_and(|c| c > 100) {
+                    out.push(format!("{at}: min_confidence is 0-100"));
+                }
+                if let Some(f) = a.resolutions.as_ref().filter(|_| schema_ok) {
+                    let is_array = r
+                        .output_schema
+                        .get("properties")
+                        .and_then(|p| p.get(f))
+                        .and_then(|v| v.get("type"))
+                        .and_then(Value::as_str)
+                        == Some("array");
+                    if !is_array {
+                        out.push(format!(
+                            "{at}: resolutions {f} is not an array in output_schema"
+                        ));
+                    }
                 }
                 if a.kind == ActionKind::PrReview && a.each.is_some() {
                     out.push(format!("{at}: pr_review is one review: no each"));
