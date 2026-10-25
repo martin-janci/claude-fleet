@@ -1,9 +1,9 @@
 {
   "schema": 1,
   "track": "dev",
-  "sequence": 213,
-  "generated_at": "2026-10-25T19:33:13Z",
-  "expires_at": "2026-11-08T19:33:13Z",
+  "sequence": 214,
+  "generated_at": "2026-10-25T19:46:22Z",
+  "expires_at": "2026-11-08T19:46:22Z",
   "current": "0.6.5-dev.98.desktop.gb15d818",
   "recommended": "0.6.5-dev.98.desktop.gb15d818",
   "minimum_supported": {},
@@ -14,7 +14,14 @@
     {
       "version": "0.6.5-dev.98.desktop.gb15d818",
       "manifest": "https://github.com/martin-janci/claude-fleet/releases/download/v0.6.5-dev.98.desktop.gb15d818/release-manifest.json",
-      "manifest_sha256": "e0852f7f1b129d830b4f29c51eee6c099f719e02009b9ece3e8da98ec9e03857"
+      "manifest_sha256": "e0852f7f1b129d830b4f29c51eee6c099f719e02009b9ece3e8da98ec9e03857",
+      "amendments": [
+        {
+          "component": "android",
+          "manifest": "https://raw.githubusercontent.com/martin-janci/claude-fleet/update-channels/amendments/0.6.5-dev.98.desktop.gb15d818/android.json",
+          "manifest_sha256": "0851e866da762b3dff7a9429aa49beffe3109e1df323a1689d4ff916cf5334fe"
+        }
+      ]
     },
     {
       "version": "0.6.5-dev.84.desktop.gbf99ad4",
