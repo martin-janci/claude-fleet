@@ -27,3 +27,6 @@ fleet-hub agents grant fleet l2-prod --definition l2-support --host mercury \
 
 An `env` value names a secret (`fleet-hub` / the Assets tab's secrets), never a value. Each MCP
 binding is started on the host and asked for its tools before the rule is written.
+
+The gallery's restated built-in agents (`support`, `pr-reviewer`, `pr-test-debate`) are rolled
+out next to the built-in ones as `docs/fleet-agents-rollout.md` describes.
