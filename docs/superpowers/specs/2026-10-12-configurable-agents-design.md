@@ -327,6 +327,7 @@ person at `propose`, run at `act` when `auto` is true.
 | `tracker_link` | `{tracker, from, to, type}` | `WriteOp::LinkIssues` |
 | `pr_review` | `{repo, number, sha, event, body, findings[]}` | the reviewer's `gh` calls: the diff, then the review (`ReviewRequest`) |
 | `pr_comment`, `pr_labels` | as the reviewer's | gh |
+| `pr_description` | `{repo, number, sha, body, overwrite, first}` | gh, only onto an empty description unless `overwrite` and `first` |
 | `mcp_call` | `{binding, tool, arguments}` | calls the tool over stdio on the host with the binding rendered, as the scanner does |
 | `record` | `{namespace, key, value, expires_at?}` | `agent_records` upsert |
 | `work_task` | `{title, notes, steps[]}` from `summary`, `body`, `steps` | a Work task, its steps proposed as subtasks (`fleet_ops::work_task`) |
@@ -513,8 +514,22 @@ The gaps, in the order they close (each its own PR):
    `head_sha`, `base_ref` and `head_ref`, so `/review` in a comment reads
    and reviews that head (a comment's job is not skipped when the head
    moves: it asks whatever the head).
-4. **Reviewer answer**: the confidence filter, `previous` findings and
-   `adjust_verdict`, label rules, a `pr_description` action.
+4. **Reviewer answer** (built 2026-10-25): `pr_review`'s `min_confidence`
+   (0-100: a finding whose `confidence` is below it is dropped, one without
+   counts as 100) and a finding's `blocking`; a sent review is remembered
+   in the rule's subjects namespace (kind `review`, key `owner/repo#N`:
+   `{sha, event, findings[{path, line, blocking}]}`), and the next run's
+   GitHub subject carries it as `previous`; `pr_review`'s `resolutions`
+   (an answer array of `{path, line, resolution}`) adjusts the verdict as
+   the reviewer's `adjust_verdict` does: REQUEST_CHANGES while a previous
+   blocking finding is unresolved or `open`, a COMMENT with nothing
+   blocking left an APPROVE, then the unattended rules of `review_event`.
+   The subject carries `paths` (the files of the diff the run reads), and a
+   `pr_labels` item may be `{label, paths: [globs]}`, a label only when a
+   changed file matches (the reviewer's label rules). A `pr_description`
+   action (`target`, `body` / `body_template`, `overwrite`) writes the
+   pull request's description when it has none, or with `overwrite` on the
+   instance's first review of it.
 5. **Reviewer state**: re-review of a dismissed review, the test debate;
    then the reviewer as a gallery definition.
 

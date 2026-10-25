@@ -117,6 +117,8 @@ struct World {
     /// host's own (GitHub refuses to approve it).
     diff: Mutex<String>,
     own_pr: Mutex<bool>,
+    /// GitHub: the pull request's description and labels.
+    meta: Mutex<crate::service::agents::review::labels::PrMeta>,
     /// GitHub's refusal to serve the diff, when set.
     diff_refusal: Mutex<Option<String>>,
 }
@@ -226,6 +228,24 @@ impl FleetHost for World {
         self.gh_writes.lock().unwrap().push(format!(
             "labels {}#{} +{:?} -{:?}",
             req.repo, req.number, req.add, req.remove
+        ));
+        Ok(())
+    }
+    async fn pr_meta(
+        &self,
+        _: &str,
+        _: &str,
+        _: i64,
+    ) -> Result<crate::service::agents::review::labels::PrMeta, String> {
+        Ok(self.meta.lock().unwrap().clone())
+    }
+    async fn set_pr_description(
+        &self,
+        req: &crate::service::agents::review::labels::DescriptionRequest,
+    ) -> Result<(), String> {
+        self.gh_writes.lock().unwrap().push(format!(
+            "describe {}#{} @{}: {}",
+            req.repo, req.number, req.sha, req.body
         ));
         Ok(())
     }
@@ -376,6 +396,7 @@ fn fx(loaded: Loaded, config: Value, bindings: Value, project: bool) -> Fx {
         item_pages: Mutex::default(),
         diff: Mutex::default(),
         own_pr: Mutex::default(),
+        meta: Mutex::default(),
         diff_refusal: Mutex::default(),
     });
     Fx {
@@ -2370,6 +2391,7 @@ fn placing_a_review_keeps_the_body_plan_fitted() {
             path: "src/a.rs".into(),
             line: 3,
             body: "Off by one.".into(),
+            blocking: false,
         }],
     };
     let req = place_review(&p, "", "[fleet-agent:inst]", max);
@@ -2826,4 +2848,234 @@ async fn a_comment_on_an_open_pr_carries_its_head() {
         kept(on_issue).get("head_sha").is_none(),
         "an issue has no head"
     );
+}
+
+/// A reviewer restated: confidence, blocking findings and their
+/// resolutions, path label rules and the description.
+fn answer_fx() -> Fx {
+    let d = definition::parse_value(&json!({
+        "inputs": [{ "name": "repo", "type": "text", "label": "Repo", "required": true }],
+        "trigger": { "source": "github_prs", "repo": "{{repo}}" },
+        "run": { "workspace": "home", "diff": { "respect_claudeignore": false },
+            "output_schema": { "type": "object",
+            "required": ["verdict", "summary", "findings"], "properties": {
+                "verdict": { "enum": ["APPROVE", "REQUEST_CHANGES", "COMMENT"] },
+                "summary": { "type": "string" },
+                "description": { "type": "string" },
+                "findings": { "type": "array", "items": { "type": "object",
+                    "required": ["path", "line", "body"], "properties": {
+                        "path": { "type": "string" }, "line": { "type": "integer" },
+                        "body": { "type": "string" }, "blocking": { "type": "boolean" },
+                        "confidence": { "type": "integer" } } } },
+                "resolutions": { "type": "array", "items": { "type": "object" } } } } },
+        "actions": [
+            { "id": "review", "do": "pr_review", "target": "{{subject.number}}",
+              "verdict": "{{answer.verdict}}", "body": "{{answer.summary}}",
+              "findings": "findings", "min_confidence": 50, "resolutions": "resolutions" },
+            { "id": "labels", "do": "pr_labels", "target": "{{subject.number}}",
+              "labels": ["reviewed", { "label": "rust", "paths": ["src/**"] },
+                         { "label": "docs", "paths": ["docs/**"] }] },
+            { "id": "describe", "do": "pr_description", "target": "{{subject.number}}",
+              "body": "{{answer.description}}", "overwrite": true }
+        ]
+    }))
+    .unwrap();
+    assert_eq!(
+        definition::problems(&d, &BTreeMap::new()),
+        Vec::<String>::new()
+    );
+    let loaded = Loaded {
+        name: "rv".into(),
+        definition: d,
+        skill: "Review the PR.".into(),
+        templates: BTreeMap::new(),
+    };
+    fx(loaded, json!({ "repo": "acme/pos" }), json!([]), false).at("propose")
+}
+
+/// Run [`answer_fx`] on PR 4 at `sha`; the run's actions by kind.
+async fn answered_at(
+    f: &Fx,
+    sha: &str,
+    answer: &str,
+) -> BTreeMap<String, crate::store::AgentActionRow> {
+    *f.world.prs.lock().unwrap() = vec![pr(4, sha, false)];
+    *f.world.diff.lock().unwrap() = REVIEW_DIFF.into();
+    let now = crate::store::now_unix();
+    let polled = f
+        .poller()
+        .poll(&f.rule, Some(&f.cursor(now - 100, None)), now)
+        .await
+        .unwrap();
+    let jobs = f.claim(&polled.jobs);
+    let job = jobs
+        .iter()
+        .find(|j| j.dedup_key.contains(sha))
+        .unwrap_or_else(|| panic!("a job for the head: {:?} {:?}", polled.jobs, jobs));
+    *f.world.base.answer.lock().unwrap() = Some(PrintOutcome::Answered {
+        text: answer.into(),
+        cost_micros: 0,
+    });
+    let out = f.runner().run(job, Some(&f.rule)).await;
+    assert!(matches!(out, RunOutcome::Done { .. }), "{out:?}");
+    // Done, its result kept: the next head's job can be claimed.
+    let s = f.store.lock().unwrap();
+    let result = s.agent_job(job.id).unwrap().unwrap().result;
+    s.finish_agent_job(
+        job.id,
+        &crate::store::AgentJobEnd::Final {
+            state: "done",
+            result,
+            error_kind: None,
+            error: None,
+        },
+        0,
+        now,
+    )
+    .unwrap();
+    drop(s);
+    f.actions()
+        .into_iter()
+        .filter(|a| a.job_id == job.id)
+        .map(|a| (a.kind.clone(), a))
+        .collect()
+}
+
+#[tokio::test]
+async fn a_review_remembers_its_findings_and_the_next_verdict_waits_on_them() {
+    let f = answer_fx();
+    *f.world.meta.lock().unwrap() = crate::service::agents::review::labels::PrMeta {
+        body: "written by a person".into(),
+        labels: Vec::new(),
+    };
+    let first = answered_at(
+        &f,
+        "abc",
+        r#"{"verdict":"COMMENT","summary":"One thing.","description":"Adds x.","findings":[
+            {"path":"src/a.rs","line":2,"body":"x is unused","blocking":true,"confidence":90},
+            {"path":"src/a.rs","line":3,"body":"a hunch","confidence":20}]}"#,
+    )
+    .await;
+    let p: Value = serde_json::from_str(&first["pr_review"].payload).unwrap();
+    assert_eq!(p["event"], "COMMENT");
+    assert_eq!(
+        p["findings"].as_array().unwrap().len(),
+        1,
+        "below min_confidence is dropped: {p}"
+    );
+    let l: Value = serde_json::from_str(&first["pr_labels"].payload).unwrap();
+    assert_eq!(
+        l["add"],
+        json!(["reviewed", "rust"]),
+        "docs/** matched nothing"
+    );
+    let ex = f.executor();
+    assert!(matches!(
+        ex.execute(&first["pr_review"]).await,
+        ActionResult::Done(_)
+    ));
+    // The first review may replace a person's description with overwrite.
+    assert_eq!(
+        ex.execute(&first["pr_description"]).await,
+        ActionResult::Executed
+    );
+    assert!(f
+        .world
+        .gh_writes
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|w| w == "describe acme/pos#4 @abc: Adds x."));
+
+    // The next head: the blocking finding is still open.
+    let open = answered_at(
+        &f,
+        "def",
+        r#"{"verdict":"COMMENT","summary":"Still.","description":"Adds x.","findings":[],
+            "resolutions":[{"path":"src/a.rs","line":2,"resolution":"open"}]}"#,
+    )
+    .await;
+    let p: Value = serde_json::from_str(&open["pr_review"].payload).unwrap();
+    assert_eq!(p["event"], "REQUEST_CHANGES", "a person sends it: {p}");
+    // Not the first review any more: a description is left alone.
+    assert!(matches!(
+        ex.execute(&open["pr_description"]).await,
+        ActionResult::Expired(e) if e.contains("has a description")
+    ));
+}
+
+#[test]
+fn the_verdict_is_adjusted_against_the_previous_review() {
+    use super::actions::{adjusted_verdict, ReviewFinding};
+    let prev = json!({ "findings": [
+        { "path": "src/a.rs", "line": 2, "blocking": true },
+        { "path": "src/b.rs", "line": 9, "blocking": false } ] });
+    let res = |r: &str| json!([{ "path": "./src/a.rs", "line": 2, "resolution": r }]);
+    let blocking = ReviewFinding {
+        path: "src/c.rs".into(),
+        line: 1,
+        body: "new".into(),
+        blocking: true,
+    };
+    assert_eq!(
+        adjusted_verdict("comment", &prev, &res("fixed"), &[]),
+        "APPROVE"
+    );
+    assert_eq!(
+        adjusted_verdict("COMMENT", &prev, &res("fixed"), &[blocking]),
+        "COMMENT",
+        "a new blocking finding"
+    );
+    assert_eq!(
+        adjusted_verdict("APPROVE", &prev, &res("open"), &[]),
+        "REQUEST_CHANGES"
+    );
+    assert_eq!(
+        adjusted_verdict("COMMENT", &prev, &json!([]), &[]),
+        "COMMENT",
+        "unresolved but not answered"
+    );
+    assert_eq!(
+        adjusted_verdict("COMMENT", &Value::Null, &res("open"), &[]),
+        "COMMENT",
+        "no previous review"
+    );
+}
+
+#[test]
+fn a_review_answer_is_checked_against_its_schema() {
+    let d = |action: Value| {
+        definition::parse_value(&json!({
+            "trigger": { "source": "github_prs", "repo": "acme/pos" },
+            "run": { "workspace": "home", "output_schema": { "type": "object",
+                "required": ["summary"], "properties": {
+                    "summary": { "type": "string" }, "note": { "type": "string" } } } },
+            "actions": [action]
+        }))
+        .unwrap()
+    };
+    let p = definition::problems(
+        &d(
+            json!({ "id": "r", "do": "pr_review", "target": "{{subject.number}}",
+            "body": "{{answer.summary}}", "min_confidence": 101, "resolutions": "note" }),
+        ),
+        &BTreeMap::new(),
+    );
+    assert!(
+        p.iter().any(|p| p.contains("min_confidence is 0-100")),
+        "{p:?}"
+    );
+    assert!(
+        p.iter()
+            .any(|p| p.contains("resolutions note is not an array")),
+        "{p:?}"
+    );
+    let p = definition::problems(
+        &d(
+            json!({ "id": "d", "do": "pr_description", "target": "{{subject.number}}",
+            "body": "{{answer.summary}}", "overwrite": true }),
+        ),
+        &BTreeMap::new(),
+    );
+    assert_eq!(p, Vec::<String>::new());
 }

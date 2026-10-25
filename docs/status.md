@@ -1297,7 +1297,10 @@ fingerprint counted in a fleet store, `knownBug` / `similarBug` /
 `relatedBug` added to the answer, a filed bug kept against it), and the
 gallery's `support` definition; `run.workspace: pr_head`, `run.diff` (the
 reviewer's filtered diff in the prompt, with its size gate), `github_prs`'s
-`skip_wip` / `debounce_secs`, and a PR comment's head.
+`skip_wip` / `debounce_secs`, and a PR comment's head; `pr_review`'s
+`min_confidence` and `resolutions` (the reviewer's verdict adjustment
+against the previous review, kept as the subject's `previous`), path label
+rules on `pr_labels` (`subject.paths`), and `pr_description`.
 
 The self debug agent (thread "Self debug agent", 2026-10-17), the hub and
 desktop parts: a fleet agent definition that sets `run.diagnostics` gets
