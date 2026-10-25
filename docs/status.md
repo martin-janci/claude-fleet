@@ -1306,7 +1306,10 @@ rules on `pr_labels` (`subject.paths`), and `pr_description`; `github_prs`'s
 head), the `github_review_replies` source and the `pr_reply` action (the
 test debate: a person's reply in a fleet agent's review thread, answered at
 most `max_rounds` times), and the gallery's `pr-reviewer` and
-`pr-test-debate`, which share a store of accepted test exemptions. All the
+`pr-test-debate`, which share a store of accepted test exemptions; a
+definition's `limits.daily_budget_usd` (a UTC day's cap on one instance's
+runs, past it a job waits for the next day) with `limits.budget_input` to
+lower it per instance. All the
 migration's steps are built; deleting the built-in agents and converting
 their rules waits on the definitions having run for real.
 

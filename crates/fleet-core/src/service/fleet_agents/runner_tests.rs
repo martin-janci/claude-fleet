@@ -3426,3 +3426,118 @@ fn a_reply_trigger_is_checked() {
         "{p:?}"
     );
 }
+
+#[tokio::test]
+async fn a_spent_day_budget_holds_the_next_run_until_tomorrow() {
+    let f = review_fx_limits(false, json!({ "daily_budget_usd": 0.5 }));
+    let now = crate::store::now_unix();
+    let run_at = |sha: &'static str, cost: i64| {
+        let f = &f;
+        async move {
+            *f.world.prs.lock().unwrap() = vec![pr(4, sha, false)];
+            *f.world.diff.lock().unwrap() = REVIEW_DIFF.into();
+            let polled = f
+                .poller()
+                .poll(&f.rule, Some(&f.cursor(now - 100, None)), now)
+                .await
+                .unwrap();
+            let jobs = f.claim(&polled.jobs);
+            let job = jobs
+                .iter()
+                .find(|j| j.dedup_key.contains(sha))
+                .unwrap()
+                .clone();
+            *f.world.base.answer.lock().unwrap() = Some(PrintOutcome::Answered {
+                text: r#"{"verdict":"COMMENT","summary":"Fine.","findings":[]}"#.into(),
+                cost_micros: cost,
+            });
+            let out = f.runner().run(&job, Some(&f.rule)).await;
+            (job, out)
+        }
+    };
+    let (job, out) = run_at("abc", 600_000).await;
+    assert!(matches!(out, RunOutcome::Done { .. }), "{out:?}");
+    f.store
+        .lock()
+        .unwrap()
+        .finish_agent_job(
+            job.id,
+            &crate::store::AgentJobEnd::Final {
+                state: "done",
+                result: None,
+                error_kind: None,
+                error: None,
+            },
+            600_000,
+            now,
+        )
+        .unwrap();
+    let (_, out) = run_at("def", 0).await;
+    let tomorrow = crate::service::routines::cron::local_day_start(now, 0) + 86_400;
+    match out {
+        RunOutcome::Deferred { at, reason } => {
+            assert_eq!(at, tomorrow);
+            assert!(reason.contains("spent $0.60 of today's $0.50"), "{reason}");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn an_instance_may_lower_its_budget_never_raise_it() {
+    let limits = |input: Option<&str>| definition::Limits {
+        daily_budget_usd: Some(10.0),
+        budget_input: input.map(str::to_string),
+        ..Default::default()
+    };
+    let values = |v: Value| v.as_object().unwrap().clone();
+    let l = limits(Some("budget"));
+    assert_eq!(l.budget_micros(&values(json!({}))), Some(10_000_000));
+    assert_eq!(
+        l.budget_micros(&values(json!({ "budget": 2.5 }))),
+        Some(2_500_000)
+    );
+    assert_eq!(
+        l.budget_micros(&values(json!({ "budget": "4" }))),
+        Some(4_000_000)
+    );
+    assert_eq!(
+        l.budget_micros(&values(json!({ "budget": 50 }))),
+        Some(10_000_000),
+        "held to the definition's"
+    );
+    assert_eq!(
+        definition::Limits::default().budget_micros(&values(json!({}))),
+        None
+    );
+    assert!(super::runner::over_budget(9, 10).is_none());
+
+    let problems = |limits: Value| {
+        let d = definition::parse_value(&json!({
+            "inputs": [{ "name": "note", "type": "text", "label": "Note" },
+                       { "name": "budget", "type": "number", "label": "Budget" }],
+            "trigger": { "source": "manual" },
+            "run": { "workspace": "home", "output_schema": { "type": "object",
+                "required": ["summary"], "properties": { "summary": { "type": "string" } } } },
+            "limits": limits
+        }))
+        .unwrap();
+        definition::problems(&d, &BTreeMap::new())
+    };
+    assert_eq!(
+        problems(json!({ "daily_budget_usd": 5, "budget_input": "budget" })),
+        Vec::<String>::new()
+    );
+    let p = problems(json!({ "daily_budget_usd": 0, "budget_input": "note" }));
+    assert!(
+        p.iter()
+            .any(|p| p.contains("daily_budget_usd is more than 0")),
+        "{p:?}"
+    );
+    assert!(
+        p.iter().any(|p| p.contains("note is not a number input")),
+        "{p:?}"
+    );
+    let p = problems(json!({ "budget_input": "budget" }));
+    assert!(p.iter().any(|p| p.contains("set it")), "{p:?}");
+}

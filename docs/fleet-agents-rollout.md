@@ -21,6 +21,7 @@ What to edit before the first instance, if anything:
 | `support` | the `bug` action's `when` (files a bug only at `confidence: high`), `run.cooldown_secs` |
 | `pr-reviewer` | `run.diff.exclude_paths`, `run.diff.max_lines`, the `review` action's `min_confidence` (50), `trigger.debounce_secs` |
 | `pr-test-debate` | `trigger.max_rounds` (2), the `phrase` input if you change pr-reviewer's `🧪 Missing test:` |
+| all three | `limits.daily_budget_usd`: $25 a day for `support` and `pr-reviewer`, $5 for `pr-test-debate` |
 
 ## 2. Grant an instance at `watch`
 
@@ -29,7 +30,10 @@ level. From a shell on the hub, `fleet-hub agents grant fleet <instance> --defin
 --host <host> [--project owner/repo] --level watch --values values.json --bindings bindings.json`.
 
 At `watch` an instance runs and keeps its answer and the actions it would take, and sends
-nothing; the built-in twin keeps doing the real work meanwhile.
+nothing; the built-in twin keeps doing the real work meanwhile. It still spends: its
+`daily_budget` input lowers the definition's cap for this instance (never raises it), and
+once a UTC day's runs have cost that much, the next job waits for the next day
+(`fleet-hub agents job <id>` says `budget: …`).
 
 ### `pr-reviewer` and `pr-test-debate`
 

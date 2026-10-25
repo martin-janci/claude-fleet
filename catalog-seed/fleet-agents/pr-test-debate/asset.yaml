@@ -4,6 +4,7 @@ description: "The PR reviewer's test debate as a definition: when a pull request
 inputs:
   - { name: repo, type: text, label: Repository (owner/repo), required: true, help: "e.g. martin-janci/claude-fleet" }
   - { name: phrase, type: text, label: Finding marker, value: "Missing test:", help: "What a missing-test finding's comment carries (pr-reviewer starts its own with it)." }
+  - { name: daily_budget, type: number, label: Daily budget (USD), min: 0, max: 5, help: "At most 5; past it, runs wait for the next UTC day." }
 stores:
   - { role: exemptions, kind: fleet, label: Accepted test exemptions, shared_by_default: true }
 trigger:
@@ -46,3 +47,5 @@ actions:
     auto: true
 limits:
   max_body_chars: 3000
+  daily_budget_usd: 5
+  budget_input: daily_budget
