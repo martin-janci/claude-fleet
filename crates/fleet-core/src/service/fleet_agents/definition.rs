@@ -1274,9 +1274,11 @@ pub fn problems(d: &Definition, templates: &BTreeMap<String, String>) -> Vec<Str
             out.push(format!("{at}: window_mins is 1-10080"));
         }
         let every = t.every_mins.unwrap_or(DEFAULT_SCAN_EVERY_MINS);
-        if t.window_mins.is_some_and(|w| w < every) {
+        // A scan runs on a poll tick once `every_mins` has passed, so two
+        // scans are always a little more than `every_mins` apart.
+        if t.window_mins.is_some_and(|w| w <= every) {
             out.push(format!(
-                "{at}: window_mins must cover every_mins ({every}): scans would skip the entries between them"
+                "{at}: window_mins must be more than every_mins ({every}): scans run a poll late, and would skip the entries between them"
             ));
         }
         if t.max_jobs

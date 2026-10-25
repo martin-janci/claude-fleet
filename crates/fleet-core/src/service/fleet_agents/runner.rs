@@ -158,6 +158,26 @@ pub fn tracker_id(inst: &Instance, ctx: &Value) -> Result<i64, String> {
         .map_err(|_| format!("trigger › tracker {t:?} is not a tracker id"))
 }
 
+/// The tracker `run.fingerprint.bugs` searches: its own, else the
+/// trigger's, else the first tracker input, as validation accepts (and as
+/// an action's tracker resolves, `actions::tracker_of`).
+pub fn bug_tracker(inst: &Instance, b: &super::definition::BugSearch, ctx: &Value) -> Option<i64> {
+    let d = &inst.loaded().definition;
+    let t = b
+        .tracker
+        .as_deref()
+        .or(d.trigger.tracker.as_deref())
+        .map(|t| template::render(t, ctx))
+        .or_else(|| {
+            d.inputs
+                .iter()
+                .find(|i| i.kind == super::definition::InputType::Tracker)
+                .and_then(|i| inst.values.get(&i.name))
+                .map(|v| v.as_str().map_or_else(|| v.to_string(), str::to_string))
+        })?;
+    t.trim().parse().ok()
+}
+
 /// The JQL a tracker poll reads: the trigger's query, updated since the
 /// window opened, newest first.
 pub fn poll_jql(query: &str, since: i64, now: i64) -> String {
@@ -1160,6 +1180,7 @@ impl FleetPoller {
         &self,
         rule: &AgentRuleRow,
         inst: &Instance,
+        prev_scan: Option<i64>,
         now: i64,
     ) -> Result<Vec<NewAgentJob>, String> {
         let d = &inst.loaded().definition;
@@ -1180,7 +1201,7 @@ impl FleetPoller {
         let mut args =
             template::render_value(t.arguments.as_ref().unwrap_or(&json!({})), &inst.ctx(now));
         if let (Some(w), Some(a)) = (t.window_mins, args.as_object_mut()) {
-            a.insert("from".into(), (now - w * 60).into());
+            a.insert("from".into(), scan_from(w, prev_scan, now).into());
             a.insert("to".into(), now.into());
         }
         let line = self
@@ -1295,8 +1316,8 @@ impl AgentPoller for FleetPoller {
                 if c.scan.is_some_and(|t| now - t < every) {
                     Vec::new()
                 } else {
-                    c.scan = Some(now);
-                    match self.scan(rule, &inst, now).await {
+                    let prev = c.scan.replace(now);
+                    match self.scan(rule, &inst, prev, now).await {
                         Ok(j) => j,
                         // A failed scan waits for its next turn.
                         Err(e) => {
@@ -1388,6 +1409,17 @@ pub fn gate_diff(
         ));
     }
     Ok(filtered)
+}
+
+/// PURE: where a scan's window starts: the last `window_mins`, stretched
+/// back to the previous scan when that ran longer ago (a poll that landed
+/// late, the hub down a while), so no entry falls between two scans. Never
+/// more than a week back.
+pub fn scan_from(window_mins: i64, prev_scan: Option<i64>, now: i64) -> i64 {
+    let from = now - window_mins * 60;
+    prev_scan
+        .map_or(from, |p| from.min(p))
+        .max(now - 10_080 * 60)
 }
 
 // ── the runner ──
@@ -1505,6 +1537,19 @@ impl FleetRunner {
         }
         let cooldown = inst.loaded().definition.run.cooldown_secs;
         if cooldown > 0 {
+            // Only the newest trigger on a subject outlives a cooldown: an
+            // older one (a superseded PR head, an earlier comment) would
+            // spend a run on a stale subject and a turn of the loop guard
+            // the newest one needs.
+            let newer = lock(&self.store).ok().is_some_and(|s| {
+                s.newer_pending_agent_rule_job(AGENT, rule.id, &job.subject, job.id)
+                    .unwrap_or(false)
+            });
+            if newer {
+                return RunOutcome::Skipped {
+                    reason: format!("superseded: a newer trigger on {} is waiting", job.subject),
+                };
+            }
             let last = lock(&self.store).ok().and_then(|s| {
                 s.last_agent_rule_subject_run(AGENT, rule.id, &job.subject, job.id)
                     .ok()
@@ -1741,7 +1786,7 @@ impl FleetRunner {
             return answer;
         };
         let seen = match lock(&self.store) {
-            Ok(s) => fp::see(&s, namespace, &n, Some(job.id), now),
+            Ok(s) => fp::see(&s, namespace, &n, Some(job.id), spec.window_mins, now),
             Err(e) => Err(e.message),
         };
         let (before, seen) = match seen {
@@ -1755,10 +1800,13 @@ impl FleetRunner {
         let (mut similar, mut related) = (None, None);
         if let (None, Some(b)) = (&known, &spec.bugs) {
             let ictx = inst.ctx(now);
-            let tracker = match &b.tracker {
-                Some(t) => template::render(t, &ictx).trim().parse().ok(),
-                None => tracker_id(inst, &ictx).ok(),
-            };
+            let tracker = bug_tracker(inst, b, &ictx);
+            if tracker.is_none() {
+                tracing::warn!(
+                    rule_id = rule.id,
+                    "[agents] fleet: bug search: no tracker id (bugs.tracker, the trigger's, a tracker input)"
+                );
+            }
             let project = template::render(&b.project, &ictx);
             let issue_type = b
                 .issue_type
