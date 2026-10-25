@@ -52,6 +52,23 @@ pub fn is_agent_comment(body: &str) -> bool {
     body.contains(MARKER_PREFIX)
 }
 
+/// PURE: a comment's text without the fleet agents' markers in it.
+pub fn without_markers(body: &str) -> String {
+    let mut out = String::new();
+    let mut rest = body;
+    while let Some(at) = rest.find(MARKER_PREFIX) {
+        out.push_str(&rest[..at]);
+        match rest[at..].find(']') {
+            Some(end) => rest = &rest[at + end + 1..],
+            None => {
+                rest = "";
+            }
+        }
+    }
+    out.push_str(rest);
+    out.trim().to_string()
+}
+
 // ── payloads ──
 
 /// `tracker_comment`.
@@ -333,10 +350,13 @@ pub fn review_key(repo: &str, number: i64) -> String {
 }
 
 /// PURE: what is remembered of a sent review.
-pub fn remembered_review(p: &PrReviewPayload, event: &str) -> Value {
+pub fn remembered_review(p: &PrReviewPayload, event: &str, id: i64, now: i64) -> Value {
     json!({
         "sha": p.sha,
         "event": event,
+        // GitHub's id, while the review stands (`runner`'s reverify).
+        "id": id,
+        "verified_at": now,
         "findings": p.findings.iter().map(|f| json!({
             "path": f.path, "line": f.line, "blocking": f.blocking,
         })).collect::<Vec<_>>(),
@@ -396,6 +416,19 @@ pub fn adjusted_verdict(
         return "APPROVE".into();
     }
     said
+}
+
+/// `pr_reply`: a reply in the review thread the job is about.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PrReplyPayload {
+    pub action: String,
+    pub repo: String,
+    pub number: i64,
+    /// The thread's first comment.
+    pub root_id: i64,
+    pub body: String,
+    #[serde(default)]
+    pub resolve: bool,
 }
 
 /// `pr_labels`: labels to add and remove (`-name` in the action's list).
@@ -815,6 +848,39 @@ pub fn plan(
                         tool,
                         arguments,
                         body: body.clone(),
+                    };
+                    Ok((serde_json::to_string(&p).unwrap_or_default(), body))
+                }
+                ActionKind::PrReply => {
+                    let repo = ctx["subject"]["repo"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_string();
+                    let number = ctx["subject"]["number"].as_i64().unwrap_or(0);
+                    let root_id: i64 = r(&a.target)
+                        .parse()
+                        .map_err(|_| skip("the target is not a review comment id"))?;
+                    if !super::github::repo_ok(&repo) || number <= 0 {
+                        return Err(skip("the subject is not a pull request"));
+                    }
+                    let text = body_text();
+                    if text.is_empty() {
+                        return Err(skip("the body is empty"));
+                    }
+                    // The marker counts the instance's rounds in the thread
+                    // and keeps its own reply from starting another.
+                    let mark = format!("\n\n{}", marker(instance));
+                    let body = format!(
+                        "{}{mark}",
+                        fit(&text, max.saturating_sub(mark.chars().count()))
+                    );
+                    let p = PrReplyPayload {
+                        action: a.id.clone(),
+                        repo,
+                        number,
+                        root_id,
+                        body: body.clone(),
+                        resolve: a.resolve,
                     };
                     Ok((serde_json::to_string(&p).unwrap_or_default(), body))
                 }
@@ -1336,7 +1402,7 @@ impl FleetExecutor {
                         namespace: super::runner::subjects_namespace(rule.id),
                         kind: REVIEW_KIND.into(),
                         key: review_key(repo, p.number),
-                        value: remembered_review(&p, &event).to_string(),
+                        value: remembered_review(&p, &event, sent, now).to_string(),
                         expires_at: None,
                         written_by_job: Some(job_id),
                     },
@@ -1352,6 +1418,51 @@ impl FleetExecutor {
             "review {sent}: {} line comments",
             req.comments.len()
         ))
+    }
+
+    /// Send a `pr_reply`: only into a thread that is still there, on a pull
+    /// request still open; resolving it (`resolve`) after the reply.
+    async fn send_reply(&self, rule: &AgentRuleRow, repo: &str, p: PrReplyPayload) -> ActionResult {
+        let host = &rule.host_alias;
+        match self.host.open_prs(host, repo).await {
+            Ok(open) if open.iter().any(|o| o.number == p.number) => {}
+            Ok(_) => return ActionResult::Expired(format!("{repo}#{} is not open", p.number)),
+            Err(e) => return ActionResult::Failed(e),
+        }
+        let thread = match self.host.pr_review_comments(host, repo, p.number).await {
+            Ok(t) => t,
+            Err(e) => return ActionResult::Failed(e),
+        };
+        let Some(root) = thread.iter().find(|c| c.id == p.root_id) else {
+            return ActionResult::Expired("the thread is gone".into());
+        };
+        let req = crate::service::agents::review::debate::DebateReply {
+            host: host.clone(),
+            repo: repo.to_string(),
+            number: p.number,
+            root_id: p.root_id,
+            body: p.body,
+            decision: String::new(),
+            path: root.path.clone(),
+            line: root.line,
+            reason: String::new(),
+        };
+        if let Err(e) = self.host.reply_in_thread(&req).await {
+            return ActionResult::Failed(e);
+        }
+        if !p.resolve {
+            return ActionResult::Executed;
+        }
+        // The reply is posted: a thread left open is the outcome, not a
+        // failure to retry (a retry would reply twice).
+        match self
+            .host
+            .resolve_thread(host, repo, p.number, p.root_id)
+            .await
+        {
+            Ok(()) => ActionResult::Done("replied and resolved".into()),
+            Err(e) => ActionResult::Done(format!("replied; the thread stays open: {e}")),
+        }
     }
 
     /// Send a `pr_description`: only onto a pull request with none, or,
@@ -1713,7 +1824,8 @@ impl FleetExecutor {
             ActionKind::PrComment
             | ActionKind::PrLabels
             | ActionKind::PrReview
-            | ActionKind::PrDescription => {
+            | ActionKind::PrDescription
+            | ActionKind::PrReply => {
                 let repos = write_repos(inst, now);
                 let (repo, number) = match raw.get("repo").and_then(Value::as_str) {
                     Some(r) => (
@@ -1732,6 +1844,13 @@ impl FleetExecutor {
                     return self
                         .send_review(rule, inst, &repo, p, action.job_id, now)
                         .await;
+                }
+                if def_action.kind == ActionKind::PrReply {
+                    let p = payload!(PrReplyPayload);
+                    if !fits(&p.body) {
+                        return refuse(format!("the reply is over {max} characters"));
+                    }
+                    return self.send_reply(rule, &repo, p).await;
                 }
                 if def_action.kind == ActionKind::PrDescription {
                     let p = payload!(PrDescriptionPayload);

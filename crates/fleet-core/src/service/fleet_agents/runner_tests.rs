@@ -119,6 +119,10 @@ struct World {
     own_pr: Mutex<bool>,
     /// GitHub: the pull request's description and labels.
     meta: Mutex<crate::service::agents::review::labels::PrMeta>,
+    /// GitHub: a posted review's state by id (`COMMENTED` when unset; a
+    /// `None` is a deleted one), and the repo's inline review comments.
+    review_states: Mutex<BTreeMap<i64, Option<String>>>,
+    review_comments: Mutex<Vec<crate::service::agents::review::debate::ReviewComment>>,
     /// GitHub's refusal to serve the diff, when set.
     diff_refusal: Mutex<Option<String>>,
 }
@@ -247,6 +251,65 @@ impl FleetHost for World {
             "describe {}#{} @{}: {}",
             req.repo, req.number, req.sha, req.body
         ));
+        Ok(())
+    }
+    async fn review_state(
+        &self,
+        _: &str,
+        _: &str,
+        _: i64,
+        review_id: i64,
+    ) -> Result<Option<String>, String> {
+        self.gh_writes
+            .lock()
+            .unwrap()
+            .push(format!("state r{review_id}"));
+        Ok(self
+            .review_states
+            .lock()
+            .unwrap()
+            .get(&review_id)
+            .cloned()
+            .unwrap_or(Some("COMMENTED".into())))
+    }
+    async fn review_comments_since(
+        &self,
+        _: &str,
+        _: &str,
+        _: &str,
+    ) -> Result<Vec<crate::service::agents::review::debate::ReviewComment>, String> {
+        Ok(self.review_comments.lock().unwrap().clone())
+    }
+    async fn pr_review_comments(
+        &self,
+        _: &str,
+        _: &str,
+        number: i64,
+    ) -> Result<Vec<crate::service::agents::review::debate::ReviewComment>, String> {
+        Ok(self
+            .review_comments
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| c.number == number)
+            .cloned()
+            .collect())
+    }
+    async fn reply_in_thread(
+        &self,
+        req: &crate::service::agents::review::debate::DebateReply,
+    ) -> Result<(), String> {
+        self.gh_writes.lock().unwrap().push(format!(
+            "reply {}#{} t{}: {}",
+            req.repo, req.number, req.root_id, req.body
+        ));
+        Ok(())
+    }
+    async fn resolve_thread(&self, _: &str, _: &str, _: i64, root_id: i64) -> Result<(), String> {
+        self.gh_writes
+            .lock()
+            .unwrap()
+            .push(format!("resolve t{root_id}"));
         Ok(())
     }
     async fn claude_ignore(&self, _: &str, _: &str, base: &str) -> Option<String> {
@@ -397,6 +460,8 @@ fn fx(loaded: Loaded, config: Value, bindings: Value, project: bool) -> Fx {
         diff: Mutex::default(),
         own_pr: Mutex::default(),
         meta: Mutex::default(),
+        review_states: Mutex::default(),
+        review_comments: Mutex::default(),
         diff_refusal: Mutex::default(),
     });
     Fx {
@@ -1400,10 +1465,19 @@ fn review_fx(auto: bool) -> Fx {
 
 /// [`review_fx`] with the definition's `limits`.
 fn review_fx_limits(auto: bool, limits: Value) -> Fx {
+    review_fx_trigger(
+        auto,
+        limits,
+        json!({ "source": "github_prs", "repo": "{{repo}}" }),
+    )
+}
+
+/// [`review_fx`] with the definition's `limits` and `trigger`.
+fn review_fx_trigger(auto: bool, limits: Value, trigger: Value) -> Fx {
     let d = definition::parse_value(&json!({
         "limits": limits,
         "inputs": [{ "name": "repo", "type": "text", "label": "Repo", "required": true }],
-        "trigger": { "source": "github_prs", "repo": "{{repo}}" },
+        "trigger": trigger,
         "run": { "workspace": "home", "output_schema": { "type": "object",
             "required": ["verdict", "summary", "findings"], "properties": {
                 "verdict": { "enum": ["APPROVE", "REQUEST_CHANGES", "COMMENT"] },
@@ -3078,4 +3152,285 @@ fn a_review_answer_is_checked_against_its_schema() {
         &BTreeMap::new(),
     );
     assert_eq!(p, Vec::<String>::new());
+}
+
+#[tokio::test]
+async fn a_dismissed_review_is_made_again_at_the_same_head() {
+    let f = review_fx_trigger(
+        false,
+        json!({}),
+        json!({ "source": "github_prs", "repo": "{{repo}}", "reverify_mins": 1 }),
+    );
+    let a = reviewed(
+        &f,
+        r#"{"verdict":"COMMENT","summary":"Fine.","findings":[]}"#,
+    )
+    .await;
+    assert!(matches!(
+        f.executor().execute(&a).await,
+        ActionResult::Done(_)
+    ));
+    let now = crate::store::now_unix();
+    let f = &f;
+    let poll = |at: i64| async move {
+        f.poller()
+            .poll(&f.rule, Some(&f.cursor(at - 100, None)), at)
+            .await
+            .unwrap()
+            .jobs
+    };
+    // Too soon: the review is not looked up.
+    f.world.gh_writes.lock().unwrap().clear();
+    assert!(poll(now + 30).await.is_empty());
+    assert!(!f
+        .world
+        .gh_writes
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|w| w.starts_with("state")));
+    // Standing: looked up, nothing to do.
+    assert!(poll(now + 120).await.is_empty());
+    assert!(f
+        .world
+        .gh_writes
+        .lock()
+        .unwrap()
+        .contains(&"state r77".to_string()));
+    // Dismissed: made again at the same head, once.
+    f.world
+        .review_states
+        .lock()
+        .unwrap()
+        .insert(77, Some("DISMISSED".into()));
+    let jobs = poll(now + 240).await;
+    assert_eq!(jobs.len(), 1, "{jobs:?}");
+    assert_eq!(
+        (jobs[0].trigger.as_str(), jobs[0].dedup_key.as_str()),
+        ("reverify", "r1:gh:acme/pos#4@abc:r77")
+    );
+    assert!(poll(now + 400).await.is_empty(), "its id is forgotten");
+}
+
+fn rc(
+    id: i64,
+    reply_to: Option<i64>,
+    body: &str,
+    user_type: &str,
+) -> crate::service::agents::review::debate::ReviewComment {
+    crate::service::agents::review::debate::ReviewComment {
+        id,
+        number: 4,
+        in_reply_to: reply_to,
+        path: "src/a.rs".into(),
+        line: Some(2),
+        body: body.into(),
+        user: if user_type == "Bot" { "fleet" } else { "ann" }.into(),
+        user_type: user_type.into(),
+        diff_hunk: "@@ -1 +1 @@\n+fn c() {}".into(),
+    }
+}
+
+/// The gallery's pr-test-debate definition at act, on acme/pos.
+fn debate_fx() -> Fx {
+    let seed = super::gallery::SEEDS
+        .iter()
+        .find(|s| s.name == "pr-test-debate")
+        .unwrap();
+    let l = seed.asset().unwrap().fleet_agent().unwrap();
+    let f = fx(
+        l,
+        json!({ "repo": "acme/pos", "phrase": "Missing test:" }),
+        json!([{ "role": "exemptions", "namespace": "shared:pr-test-exemptions" }]),
+        true,
+    )
+    .at("act");
+    *f.world.prs.lock().unwrap() = vec![pr(4, "abc", false)];
+    f
+}
+
+#[tokio::test]
+async fn a_reply_to_a_missing_test_finding_is_judged_and_a_concession_kept() {
+    let f = debate_fx();
+    let root = "issue: 🧪 Missing test: cover c()\n\n[fleet-agent:rv]";
+    *f.world.review_comments.lock().unwrap() = vec![
+        rc(7, None, root, "Bot"),
+        rc(9, Some(7), "It is covered by tests/a.rs", "User"),
+        // Not a finding the trigger matches, nor a fleet agent's.
+        rc(20, None, "nitpick: a name\n\n[fleet-agent:rv]", "Bot"),
+        rc(21, Some(20), "renamed", "User"),
+        rc(30, None, "Missing test: from a person", "User"),
+        rc(31, Some(30), "agreed", "User"),
+    ];
+    let now = crate::store::now_unix();
+    let polled = f
+        .poller()
+        .poll(&f.rule, Some(&f.cursor(now - 100, None)), now)
+        .await
+        .unwrap();
+    assert_eq!(polled.jobs.len(), 1, "{:?}", polled.jobs);
+    let jobs = f.claim(&polled.jobs);
+    *f.world.base.answer.lock().unwrap() = Some(PrintOutcome::Answered {
+        text: r#"{"decision":"concede","reply":"Fair: tests/a.rs covers c().","reason":"covered by tests/a.rs"}"#.into(),
+        cost_micros: 0,
+    });
+    let out = f.runner().run(&jobs[0], Some(&f.rule)).await;
+    assert!(matches!(out, RunOutcome::Done { .. }), "{out:?}");
+    let (_, prompt) = f.world.base.last.lock().unwrap().clone().unwrap();
+    assert!(
+        prompt.contains("cover c()") && prompt.contains("It is covered by tests/a.rs"),
+        "{prompt}"
+    );
+    assert!(!prompt.contains("[fleet-agent:rv]"), "markers are left out");
+    let actions = f.actions();
+    let kinds: Vec<&str> = actions.iter().map(|a| a.kind.as_str()).collect();
+    assert_eq!(
+        {
+            let mut k = kinds.clone();
+            k.sort();
+            k
+        },
+        vec!["pr_reply", "record"],
+        "the hold reply is not planned"
+    );
+    let ex = f.executor();
+    for a in &actions {
+        assert_eq!(a.state, "approved", "auto at act");
+        let done = ex.execute(a).await;
+        assert!(
+            matches!(done, ActionResult::Executed | ActionResult::Done(_)),
+            "{}: {done:?}",
+            a.kind
+        );
+    }
+    let writes = f.world.gh_writes.lock().unwrap().clone();
+    let reply = writes.iter().find(|w| w.starts_with("reply")).unwrap();
+    assert!(
+        reply.starts_with("reply acme/pos#4 t7: Fair: tests/a.rs covers c().")
+            && reply.contains("_Accepted")
+            && reply.ends_with("[fleet-agent:inst]"),
+        "{reply}"
+    );
+    assert!(writes.contains(&"resolve t7".to_string()), "{writes:?}");
+    let kept = f
+        .store
+        .lock()
+        .unwrap()
+        .agent_record(
+            "shared:pr-test-exemptions",
+            "record",
+            "acme/pos#4:src/a.rs:2",
+            now,
+        )
+        .unwrap();
+    assert!(
+        kept.is_some_and(|r| r.value.contains("covered by tests/a.rs")),
+        "the exemption pr-reviewer reads"
+    );
+
+    // Its own answer starts nothing; a person's next word does, until the
+    // instance has answered max_rounds (2) times.
+    let mine = format!("Holding.\n\n{}", super::actions::marker("inst"));
+    f.world.review_comments.lock().unwrap().extend([
+        rc(10, Some(7), &mine, "Bot"),
+        rc(11, Some(7), "But really", "User"),
+    ]);
+    let again = f
+        .poller()
+        .poll(&f.rule, Some(&f.cursor(now - 100, None)), now + 10)
+        .await
+        .unwrap();
+    assert_eq!(again.jobs.len(), 1, "{:?}", again.jobs);
+    assert!(again.jobs[0].dedup_key.ends_with(":c11"));
+    f.world.review_comments.lock().unwrap().extend([
+        rc(12, Some(7), &mine, "Bot"),
+        rc(13, Some(7), "Still no", "User"),
+    ]);
+    let done = f
+        .poller()
+        .poll(&f.rule, Some(&f.cursor(now - 100, None)), now + 20)
+        .await
+        .unwrap();
+    assert!(
+        done.jobs.is_empty(),
+        "two rounds: the thread is the people's"
+    );
+}
+
+#[test]
+fn the_reviewer_pair_ships_in_the_gallery() {
+    use definition::TriggerSource;
+    let load = |name: &str| {
+        super::gallery::SEEDS
+            .iter()
+            .find(|s| s.name == name)
+            .unwrap()
+            .asset()
+            .unwrap()
+            .fleet_agent()
+            .unwrap()
+    };
+    let rv = load("pr-reviewer");
+    let t = &rv.definition.trigger;
+    assert_eq!(t.source, TriggerSource::GithubPrs);
+    assert!(t.skip_wip && t.reverify_mins == Some(60));
+    assert_eq!(rv.definition.run.workspace, definition::Workspace::PrHead);
+    let review = &rv.definition.actions[0];
+    assert_eq!(
+        (review.kind.word(), review.min_confidence, review.auto),
+        ("pr_review", Some(50), false)
+    );
+    assert!(rv.skill.contains("🧪 Missing test:"), "the debate's phrase");
+    let db = load("pr-test-debate");
+    assert_eq!(
+        db.definition.trigger.source,
+        TriggerSource::GithubReviewReplies
+    );
+    assert_eq!(
+        db.definition.stores[0].role, rv.definition.stores[0].role,
+        "they share the exemptions"
+    );
+    assert!(db.definition.stores[0].shared_by_default && rv.definition.stores[0].shared_by_default);
+    assert!(super::actions::without_markers("a [fleet-agent:x] b\n\n[fleet-agent:y]") == "a  b");
+}
+
+#[test]
+fn a_reply_trigger_is_checked() {
+    let d = |trigger: Value, action: Value| {
+        let d = definition::parse_value(&json!({
+            "trigger": trigger,
+            "run": { "workspace": "home", "output_schema": { "type": "object",
+                "required": ["reply"], "properties": { "reply": { "type": "string" } } } },
+            "actions": [action]
+        }))
+        .unwrap();
+        definition::problems(&d, &BTreeMap::new())
+    };
+    let reply = json!({ "id": "r", "do": "pr_reply", "target": "{{subject.thread.root_id}}",
+        "body": "{{answer.reply}}" });
+    assert_eq!(
+        d(
+            json!({ "source": "github_review_replies", "repo": "acme/pos", "max_rounds": 3 }),
+            reply.clone()
+        ),
+        Vec::<String>::new()
+    );
+    let p = d(
+        json!({ "source": "github_review_replies", "repo": "acme/pos", "max_rounds": 9 }),
+        reply.clone(),
+    );
+    assert!(p.iter().any(|p| p.contains("max_rounds is 1-5")), "{p:?}");
+    let p = d(
+        json!({ "source": "github_prs", "repo": "acme/pos", "reverify_mins": 0 }),
+        reply,
+    );
+    assert!(
+        p.iter().any(|p| p.contains("reverify_mins is 1-1440")),
+        "{p:?}"
+    );
+    assert!(
+        p.iter()
+            .any(|p| p.contains("the trigger is github_review_replies")),
+        "{p:?}"
+    );
 }

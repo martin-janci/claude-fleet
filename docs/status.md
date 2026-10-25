@@ -1283,8 +1283,9 @@ items assigned to the tracker's own account on GitHub and Linear, so those are
 all a poll sees there; the gallery (`fleet_agents/gallery.rs`: the
 `catalog-seed/fleet-agents/` definitions embedded, listed under Automation ›
 Agents › Gallery and added to the catalog with *Add to catalog*, `agents {
-install }`), which holds all seven seeds in `catalog-seed/fleet-agents/`:
-`issue-triage`, `pr-questions` and `daily-digest`, and `self-debug`,
+install }`), which holds the seeds in `catalog-seed/fleet-agents/`:
+`support`, `pr-reviewer` and `pr-test-debate` (the built-in agents restated,
+below), `issue-triage`, `pr-questions` and `daily-digest`, and `self-debug`,
 `proposer`, `simplify` and `refactor` (below); `pr_review` (a review of the
 PR's head with line comments placed on the diff, sent only while that head
 is current, never an unattended REQUEST_CHANGES, nor an unattended APPROVE
@@ -1300,7 +1301,14 @@ reviewer's filtered diff in the prompt, with its size gate), `github_prs`'s
 `skip_wip` / `debounce_secs`, and a PR comment's head; `pr_review`'s
 `min_confidence` and `resolutions` (the reviewer's verdict adjustment
 against the previous review, kept as the subject's `previous`), path label
-rules on `pr_labels` (`subject.paths`), and `pr_description`.
+rules on `pr_labels` (`subject.paths`), and `pr_description`; `github_prs`'s
+`reverify_mins` (a dismissed or deleted review made again at the same
+head), the `github_review_replies` source and the `pr_reply` action (the
+test debate: a person's reply in a fleet agent's review thread, answered at
+most `max_rounds` times), and the gallery's `pr-reviewer` and
+`pr-test-debate`, which share a store of accepted test exemptions. All the
+migration's steps are built; deleting the built-in agents and converting
+their rules waits on the definitions having run for real.
 
 The self debug agent (thread "Self debug agent", 2026-10-17), the hub and
 desktop parts: a fleet agent definition that sets `run.diagnostics` gets
