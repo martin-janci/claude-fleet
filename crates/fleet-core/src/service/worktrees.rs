@@ -87,6 +87,21 @@ pub struct HostWorktrees {
 /// project root is not a git checkout on the host yet.
 const NOT_CLONED_MARKER: &str = "__NOT_CLONED__";
 
+/// Prefixes the scan script's `origin` line, printed before its `root ` line
+/// when the checkout has an `origin`: the remote read that backfills
+/// `ProjectRow::github_origin` for a row the local scan never sees.
+const ORIGIN_MARKER: &str = "__FLEET_ORIGIN__ ";
+
+/// The checkout's `origin`, from the scan script's [`ORIGIN_MARKER`] line
+/// ahead of its `root ` line, when it names a github.com repository.
+fn scan_github_origin(stdout: &str) -> Option<String> {
+    stdout
+        .lines()
+        .take_while(|l| !l.starts_with("root /"))
+        .find_map(|l| l.strip_prefix(ORIGIN_MARKER))
+        .and_then(crate::repo_url::github_origin)
+}
+
 /// Wall clock for the remote `git worktree list` (a cold ControlMaster plus
 /// a login shell; git itself is instant).
 const SCAN_WALL_CLOCK: Duration = Duration::from_secs(15);
@@ -243,9 +258,15 @@ pub async fn list_host_worktrees_with(
     // macOS default) would otherwise report `$top` and `root`'s realpath as
     // unequal strings for `REPO` vs on-disk `repo`, wrongly treating a valid
     // checkout as not-cloned.
+    //
+    // The checkout's `origin` comes along (before the `root ` line, so the
+    // porcelain after it is untouched): a row that predates migration 207,
+    // or whose checkouts all live on remote hosts, gets its GitHub origin
+    // from here, since the local scan never reads it.
     let q_root = quote(&root);
     let script = format!(
-        "top=$(git -C {q_root} rev-parse --show-toplevel 2>/dev/null); if [ -n \"$top\" ] && [ \"$top\" -ef {q_root} ]; then echo \"root $top\"; git -C {q_root} worktree list --porcelain; else echo {marker}; fi",
+        "top=$(git -C {q_root} rev-parse --show-toplevel 2>/dev/null); if [ -n \"$top\" ] && [ \"$top\" -ef {q_root} ]; then o=$(git -C {q_root} remote get-url origin 2>/dev/null) && echo \"{origin}$o\"; echo \"root $top\"; git -C {q_root} worktree list --porcelain; else echo {marker}; fi",
+        origin = ORIGIN_MARKER,
         marker = NOT_CLONED_MARKER,
     );
     let quoted = quote(&script);
@@ -311,6 +332,11 @@ pub async fn list_host_worktrees_with(
             names.push(name.clone());
         }
         s.delete_host_worktrees_not_in(host, pid, &names)?;
+        // Only ever fills a missing origin: what the local scan recorded,
+        // or an earlier read, stays.
+        if let Some(origin) = scan_github_origin(&stdout) {
+            s.fill_project_github_origin(pid, &origin)?;
+        }
         rows
     };
     Ok(HostWorktrees {
@@ -692,6 +718,76 @@ mod tests {
         assert_eq!(cached.len(), 3);
         assert!(cached.iter().all(|w| w.name != "old"));
         assert_eq!(s.list_worktrees_for_project(pid).unwrap().len(), 1);
+    }
+
+    /// The scan reads the host checkout's `origin` and records it on a row
+    /// that has none (one from before migration 207, or whose checkouts the
+    /// local scan never sees), but never replaces one already recorded, and
+    /// a non-GitHub origin records nothing.
+    #[tokio::test]
+    async fn list_host_worktrees_backfills_a_missing_github_origin_only() {
+        let root = "/home/u/projects/github.com/o/r";
+        let scan = |origin: &str| {
+            let store = Mutex::new(Store::open_in_memory().unwrap());
+            let pid = store
+                .lock()
+                .unwrap()
+                .upsert_project("o", "r", "/p/o/r")
+                .unwrap();
+            let fake = FakeSsh::new();
+            fake.with_home("/home/u").on(
+                Match::script_contains("worktree list --porcelain"),
+                Reply::ok(&format!(
+                    "{ORIGIN_MARKER}{origin}\nroot {root}\nworktree {root}\nHEAD 1111\nbranch refs/heads/main\n\n"
+                )),
+            );
+            (store, pid, fake)
+        };
+        async fn run(store: &Mutex<Store>, pid: i64, fake: &FakeSsh) -> HostWorktrees {
+            let args = ListHostWorktreesArgs {
+                host_alias: "vps".into(),
+                project_id: pid,
+            };
+            list_host_worktrees_with(args, store, fake).await.unwrap()
+        }
+        let origin_of = |store: &Mutex<Store>, pid: i64| {
+            store
+                .lock()
+                .unwrap()
+                .get_project(pid)
+                .unwrap()
+                .unwrap()
+                .github_origin
+        };
+
+        let (store, pid, fake) = scan("git@github.com:o/r.git");
+        let out = run(&store, pid, &fake).await;
+        assert_eq!(out.worktrees.len(), 1, "the origin line is not a worktree");
+        let script = fake.calls_for("vps").last().unwrap().script().unwrap();
+        assert!(
+            script.contains(&format!("git -C '{root}' remote get-url origin")),
+            "{script}"
+        );
+        assert_eq!(
+            origin_of(&store, pid).as_deref(),
+            Some("git@github.com:o/r.git")
+        );
+
+        let (store, pid, fake) = scan("git@github.com:o/r.git");
+        store
+            .lock()
+            .unwrap()
+            .set_project_github_origin(pid, Some("git@github.com:x/y.git"))
+            .unwrap();
+        run(&store, pid, &fake).await;
+        assert_eq!(
+            origin_of(&store, pid).as_deref(),
+            Some("git@github.com:x/y.git")
+        );
+
+        let (store, pid, fake) = scan("https://gitlab.com/o/r");
+        run(&store, pid, &fake).await;
+        assert_eq!(origin_of(&store, pid), None);
     }
 
     /// A login shell can print a banner (a provider MOTD) before the

@@ -168,8 +168,9 @@ struct Scanned {
     dp: DiscoveredProject,
     worktrees: Vec<DiscoveredWorktree>,
     common_dir: Option<PathBuf>,
-    /// Its `origin`, when that is a github.com repository.
-    github_origin: Option<String>,
+    /// Its `origin`, when that is a github.com repository; `None` when git
+    /// could not answer, so the recorded origin stays as it is.
+    github_origin: Option<Option<String>>,
 }
 
 /// Keep ONE project per git repository. Two scanned directories sharing a
@@ -296,7 +297,12 @@ pub async fn refresh_projects(store: &Mutex<Store>) -> Result<Vec<ProjectTreeRow
                 &sc.dp.repo,
                 &sc.dp.base_path.to_string_lossy(),
             )?;
-            s.set_project_github_origin(project_id, sc.github_origin.as_deref())?;
+            // A failed read leaves the recorded origin alone: one transient
+            // git failure must not erase it (and with it the clone onto
+            // another fleet).
+            if let Some(origin) = &sc.github_origin {
+                s.set_project_github_origin(project_id, origin.as_deref())?;
+            }
             fresh_ids.insert(project_id);
             let mut keep_names = Vec::with_capacity(sc.worktrees.len());
             for wt in &sc.worktrees {
@@ -810,6 +816,22 @@ mod tests {
             &["remote", "set-url", "origin", "/srv/git/site.git"],
             &gh
         ));
+        let rows = refresh_projects(&store).await.unwrap();
+        assert_eq!(origin_of(&rows, "web"), None);
+
+        // No origin at all (git's "No such remote") clears it too.
+        assert!(git(
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                "git@github.com:other/site.git"
+            ],
+            &gh
+        ));
+        let rows = refresh_projects(&store).await.unwrap();
+        assert!(origin_of(&rows, "web").is_some());
+        assert!(git(&["remote", "remove", "origin"], &gh));
         let rows = refresh_projects(&store).await.unwrap();
         assert_eq!(origin_of(&rows, "web"), None);
     }

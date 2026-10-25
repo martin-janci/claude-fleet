@@ -428,6 +428,20 @@ describe('Phase 2: which fleet New session starts on', () => {
     expect(fleetChoicesFor('local', 'loose', known, rows, null)).toEqual([]);
   });
 
+  it('finds a fleet that has the project under its origin\'s owner/repo, where a clone of it registered it', () => {
+    const known = [fleet(PRIMARY), fleet('company'), fleet('lab')];
+    const rows = new Map([
+      ['company', { ...emptyRows(), projects: [project(7, 'Other', 'Site')] }],
+      ['lab', { ...emptyRows(), projects: [] }],
+    ]);
+    // Scanned as acme/web (its directories), origin other/site.
+    const origin = 'git@github.com:other/site.git';
+    expect(fleetChoicesFor('acme', 'web', known, rows, origin).map((c) => [c.fleet.id, c.projectId, c.cloneUrl])).toEqual([
+      ['company', 7, null],
+      ['lab', null, origin],
+    ]);
+  });
+
   it('reads owner/repo out of a GitHub remote URL only', () => {
     expect(githubRepoOf('git@github.com:acme/web.git')).toEqual({ owner: 'acme', repo: 'web' });
     expect(githubRepoOf('https://github.com/acme/web/')).toEqual({ owner: 'acme', repo: 'web' });

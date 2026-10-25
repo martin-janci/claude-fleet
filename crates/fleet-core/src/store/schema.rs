@@ -412,7 +412,7 @@ fn routine_runs_has_memory_read_at(conn: &Connection) -> rusqlite::Result<bool> 
     Ok(n > 0)
 }
 
-/// `already_applied` guard of migration 209: `tasks` already has its
+/// `already_applied` guard of migration 210: `tasks` already has its
 /// `start_head` column.
 fn tasks_has_start_head(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
@@ -423,7 +423,7 @@ fn tasks_has_start_head(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
-/// `already_applied` guard of migration 208: `work_items` already has its
+/// `already_applied` guard of migration 209: `work_items` already has its
 /// `lane_id` column.
 fn work_items_has_lane_id(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
@@ -2390,18 +2390,23 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/207_project_github_origin.sql"),
         already_applied: Some(projects_has_github_origin),
     },
+    Migration {
+        version: 208,
+        sql: include_str!("../../migrations/208_tasks_unread_evidence_index.sql"),
+        already_applied: None,
+    },
     // Mission lanes (lanes design L2): `mission_lanes` and the members'
     // `lane_id`. An ADD COLUMN, so guarded.
     Migration {
-        version: 208,
-        sql: include_str!("../../migrations/208_mission_lanes.sql"),
+        version: 209,
+        sql: include_str!("../../migrations/209_mission_lanes.sql"),
         already_applied: Some(work_items_has_lane_id),
     },
     // Lanes L3: a task's `start_head` in its lane's checkout. An ADD
     // COLUMN, so guarded.
     Migration {
-        version: 209,
-        sql: include_str!("../../migrations/209_task_start_head.sql"),
+        version: 210,
+        sql: include_str!("../../migrations/210_task_start_head.sql"),
         already_applied: Some(tasks_has_start_head),
     },
 ];

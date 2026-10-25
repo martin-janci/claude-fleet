@@ -1371,9 +1371,18 @@ pub async fn run_planner(
         }
         // TASK-291: a login at its usage limit is passed over; with none
         // left the mission waits for the reset, and nothing is asked.
-        let login = match limit::choose(&s, m, a.grant.as_ref(), now)? {
-            Ok(l) => l,
-            Err(wait) => return Ok(waiting_outcome(&s, m, wait)),
+        // Review r10: every login signed out is said on the log, so the
+        // mission shows which to sign in again and the loop backs off.
+        let words = limit::Words::read(&s, m.id)?;
+        let login = match limit::choose_in(&s, m, a.grant.as_ref(), now, &words, &[]) {
+            Ok(Ok(l)) => l,
+            Ok(Err(wait)) => return Ok(waiting_outcome(&s, m, wait)),
+            Err(e) => {
+                if limit::is_signed_out_refusal(&e) {
+                    limit::say_signed_out(&s, m.id, &words, &e, &actor.name());
+                }
+                return Err(e);
+            }
         };
         let items = s.mission_items(m.id)?;
         let graph = super::graph::build(&s, &ViewScope::internal(), &items)?;
@@ -1989,6 +1998,11 @@ fn planner_wanted(
         let free = matches!(limit::choose_in(s, m, grant, now, &words, &[]), Ok(Ok(_)));
         return Ok(free.then_some("the usage limit it waited on is over"));
     }
+    // Refused for signed-out logins (review r10): not asked again until a
+    // login it may use is signed in, or something else answers.
+    if words.signed_out().is_some() && limit::choose_in(s, m, grant, now, &words, &[]).is_err() {
+        return Ok(None);
+    }
     let last_plan = words.last_planned_at();
     let items = s.mission_items(m.id)?;
     if items.len() <= 1 && counts.open == 0 && last_plan.is_none() {
@@ -2249,20 +2263,27 @@ pub async fn tick_once(deps: &Deps, now: i64) {
             // Pause all (redesign 8.1) before the loop's own switch, so
             // health says why nothing moves.
             if !crate::service::loops::gate_in("missions", &s, next) {
-                return;
-            }
+                None
             // With the loop off no mission is ticked, but a failed git
             // read is still read again below.
-            if settings::get_bool(&s, settings::ORCHESTRATOR_ENABLED) {
-                s.missions_due(now).unwrap_or_default()
+            } else if settings::get_bool(&s, settings::ORCHESTRATOR_ENABLED) {
+                Some(s.missions_due(now).unwrap_or_default())
             } else {
-                Vec::new()
+                Some(Vec::new())
             }
         }
         Err(e) => {
             crate::service::loops::report("missions", Err(e.to_string()), next);
             return;
         }
+    };
+    let Some(due) = due else {
+        // The evidence retry only reads git and writes evidence, so it runs
+        // under Pause all too (review r10): a pause longer than
+        // EVIDENCE_RETRY_SECS would leave a transient failed read `missing`
+        // for good.
+        crate::service::work::report::retry_unread_evidence(&deps.store, &deps.ssh, now).await;
+        return;
     };
     let mut failed: Option<String> = None;
     for id in due {

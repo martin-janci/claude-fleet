@@ -81,7 +81,7 @@ ALTER TABLE tasks ADD COLUMN end_head   TEXT;  -- HEAD pri hlásení; evidencia 
 - `lane_id` je `NULL` pre úlohy misie v režime `item` a pre koreň misie.
 - Assignee z importu ostáva assignee. Import v režime `lane` navyše založí alebo nájde líniu podľa mena.
 
-**Ako je to postavené v L2** (migrácia 208, `store/mission_lanes.rs`), odchýlky od SQL vyššie:
+**Ako je to postavené v L2** (migrácia 209, `store/mission_lanes.rs`), odchýlky od SQL vyššie:
 - `mission_lanes.project_id` je **nepovinné** (`ON DELETE SET NULL`): línia z plánu nemusí mať vlastné repo. Prvé repo, ktoré niekto pri línii uvedie, si ponechá.
 - `tasks.start_head` / `end_head` sa presúvajú do **L3**, kde ich prvý raz niečo číta. L2 nemení `tasks` ani `WorkItemRow`: `lane_id` sa číta samostatným dotazom (`Store::mission_lanes`, `item_lane`).
 - Línia vzniká pri prvom použití mena a zaniká, keď v nej neostane úloha a nemá vedúcu session. Úloha, ktorá opustí misiu, opustí aj líniu. Koreň misie v línii nebýva.
@@ -179,7 +179,7 @@ Zahodenie práce: retry v línii pokračuje z `HEAD` línie, nie z default vetvy
 ### 3.9 Ako je to postavené v L3
 
 - `policy.execution` (`item` | `lane`, predvolene `item`) a `policy.lane_relay_after` (1–20, predvolene 4). Režim sa mení len na misii, ktorá nebeží a nemá otvorené behy; v UI je to „Tasks run“ v úprave misie.
-- `tasks.start_head` (migrácia 209) a evidencia úlohy `start_head..HEAD` (`report::evidence_script_since`). `end_head` netreba: je to `TaskEvidence.head`. Prepísaná história (štart už nie je predok `HEAD`) je chyba evidencie, takže brána dokončenia úlohu nezavrie.
+- `tasks.start_head` (migrácia 210) a evidencia úlohy `start_head..HEAD` (`report::evidence_script_since`). `end_head` netreba: je to `TaskEvidence.head`. Prepísaná história (štart už nie je predok `HEAD`) je chyba evidencie, takže brána dokončenia úlohu nezavrie.
 - `orchestrate/lanes.rs`:
   - `gate`: v režime `lane` jeden implement beh na líniu, prvý v poradí grafu, a žiadny, kým je línia `busy_lanes` (jej úloha má otvorený implement beh, alebo jej živá vedúca session nie je pri prompte či čaká na dialóg). Úloha bez línie, review, test a integrácia idú ako doteraz.
   - `run_in_lane`: živému vedúcemu úlohu doručí (`deliver`: nový `tasks` riadok so `start_head`, napísaný cez typing lane ako direct send). Bez živého vedúceho, po `lane_relay_after` úlohách alebo pri treťom pokuse o tú istú úlohu na tom istom vedúcom (`needs_relay`) ukončí starého vedúceho misie a naštartuje nového v tom istom checkoute línie (`start_lead`: brief línie, vetva `slug(M<id> <misia> <línia>)`, `set_lane_lead` zvýši `relay`). Tá istá cesta obnoví líniu po páde vedúceho.

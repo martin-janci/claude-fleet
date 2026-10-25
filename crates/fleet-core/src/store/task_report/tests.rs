@@ -247,3 +247,24 @@ fn failed_reads_with_a_checkout_are_found_for_any_run() {
         .collect();
     assert_eq!(found, vec![unread, mid_turn]);
 }
+
+/// Review r10: the evidence retry's per-pass probe walks its partial index
+/// (migration 208), not every done run the store ever recorded.
+#[test]
+fn the_unread_evidence_probe_uses_its_index() {
+    let s = Store::open_in_memory().unwrap();
+    let mut st = s
+        .conn
+        .prepare(&format!("EXPLAIN QUERY PLAN {}", unread_evidence_sql()))
+        .unwrap();
+    let plan = st
+        .query_map([1], |r| r.get::<_, String>(3))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        plan.contains("idx_tasks_unread_evidence"),
+        "the probe scans: {plan}"
+    );
+}

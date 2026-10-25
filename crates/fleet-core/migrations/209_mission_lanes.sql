@@ -39,4 +39,4 @@ ALTER TABLE work_items ADD COLUMN lane_id INTEGER
 CREATE INDEX IF NOT EXISTS idx_work_items_lane ON work_items(lane_id)
   WHERE lane_id IS NOT NULL;
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (208);
+INSERT OR IGNORE INTO schema_version (version) VALUES (209);

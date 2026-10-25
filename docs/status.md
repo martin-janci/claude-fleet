@@ -1069,7 +1069,7 @@ own diff (`run::subagent_note`, `orchestrator.run_subagents`, on); with
 checkout on its host with Read, Grep and Glob; and its prompt says items
 changing the same files or shared registry depend on each other. The lanes
 design's decisions D1–D9 are accepted (2026-10-24). Lanes L2 (migration
-208, `store/mission_lanes.rs`): a mission's tasks can be put in named lanes
+209, `store/mission_lanes.rs`): a mission's tasks can be put in named lanes
 by a plan's `Lane` column, the planner's `create_item { lane }` and a
 person (`work_link { mission_item, lane }`, the task row's lane picker);
 `work { mission }` lists them and the Graph view groups by them. Lanes L3:
@@ -1080,7 +1080,7 @@ run one at a time in one lead session on the lane's branch
 hands it to the live lead as a new task typed at its idle prompt, and starts
 a fresh lead in the same checkout after `policy.lane_relay_after` tasks (4),
 on a task's third try on one lead, or when the lead died. Each such task
-records the commit it began on (`tasks.start_head`, migration 209) and its
+records the commit it began on (`tasks.start_head`, migration 210) and its
 evidence is its own commits only. Lanes L4: a lane task's headless review
 runs in a detached checkout of its commit (`git worktree add --detach`,
 removed after) and reads only its own diff, so its lead may already work on
@@ -1328,7 +1328,12 @@ the definitions have run for real (spec *Migration*): built so far
 and `limits.auto_approve`; `run.fingerprint` (the support agent's error
 fingerprint counted in a fleet store, `knownBug` / `similarBug` /
 `relatedBug` added to the answer, a filed bug kept against it), and the
-gallery's `support` definition.
+gallery's `support` definition; `run.workspace: pr_head`, `run.diff` (the
+reviewer's filtered diff in the prompt, with its size gate), `github_prs`'s
+`skip_wip` / `debounce_secs`, and a PR comment's head; `pr_review`'s
+`min_confidence` and `resolutions` (the reviewer's verdict adjustment
+against the previous review, kept as the subject's `previous`), path label
+rules on `pr_labels` (`subject.paths`), and `pr_description`.
 
 The self debug agent (thread "Self debug agent", 2026-10-17), the hub and
 desktop parts: a fleet agent definition that sets `run.diagnostics` gets

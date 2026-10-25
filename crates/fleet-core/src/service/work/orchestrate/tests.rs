@@ -1424,9 +1424,34 @@ async fn a_planner_whose_logins_are_all_signed_out_says_sign_in_again() {
         .await
         .unwrap_err();
     assert_eq!(e.code, codes::E_CLAUDE_CLI, "{e:?}");
+    {
+        let s = lock(&fx.deps.store).unwrap();
+        assert!(!limit::waiting(&s, m.id).unwrap(), "no usage-limit wait");
+        assert!(limit::open_waits(&s, m.id, now).unwrap().is_empty());
+    }
+    // Review r10: the loop's refusal is said on the log once, and the loop
+    // does not ask again while every login is signed out.
+    run_planner(&fx.deps, &m, "test", &Actor::Loop)
+        .await
+        .unwrap_err();
     let s = lock(&fx.deps.store).unwrap();
-    assert!(!limit::waiting(&s, m.id).unwrap(), "no usage-limit wait");
-    assert!(limit::open_waits(&s, m.id, now).unwrap().is_empty());
+    let said = s
+        .mission_events_of_kinds(m.id, &[limit::SIGNED_OUT_EVENT], 10)
+        .unwrap();
+    assert_eq!(said.len(), 1, "once per change: {said:?}");
+    let why = said[0].payload.as_ref().unwrap()["why"].as_str().unwrap();
+    assert!(why.contains("/login"), "{why}");
+    let counts = s.mission_task_counts(m.id).unwrap();
+    assert_eq!(
+        planner_wanted(&s, &m, &[], &counts, None, now).unwrap(),
+        None,
+        "backs off while signed out"
+    );
+    // Signed in again: the planner is wanted once more.
+    s.set_host_signed_out_logins("mac", &[]).unwrap();
+    assert!(planner_wanted(&s, &m, &[], &counts, None, now)
+        .unwrap()
+        .is_some());
 }
 
 /// A fake `ssh` whose planner answers on mac's own login with `own` (one

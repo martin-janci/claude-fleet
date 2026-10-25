@@ -113,9 +113,25 @@ pub struct MissionDetail {
     /// waits, read apart from the rest of the log) is a usage-limit wait
     /// (review r9: `events` is one page of every kind, so a busy log hid
     /// it). Always sent, `null` when not waiting, so a client tells this
-    /// hub from an older one that leaves it out.
-    #[serde(default)]
-    pub limit_wait: Option<super::orchestrate::limit::LimitWait>,
+    /// hub from an older one that leaves it out. The outer `None` is that
+    /// older hub's answer read back (hub client mode routes this struct
+    /// typed): the key stays out again, so the client still reads `events`.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present"
+    )]
+    pub limit_wait: Option<Option<super::orchestrate::limit::LimitWait>>,
+}
+
+/// A key that is there, `null` included, is `Some`: only an absent key
+/// (`#[serde(default)]`) reads as `None`.
+fn present<'de, D, T>(d: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(d).map(Some)
 }
 
 /// A finished mission's leftovers, as far as the caller may see them.
@@ -296,7 +312,7 @@ pub fn mission(
             l
         })
         .collect();
-    let limit_wait = super::orchestrate::limit::Words::read(&s, id)?.newest_wait();
+    let limit_wait = Some(super::orchestrate::limit::Words::read(&s, id)?.newest_wait());
     let finish = if crate::store::MISSION_FINAL_STATES.contains(&mission.state.as_str()) {
         Some(finish(&s, scope, id, sessions.clone())?)
     } else {

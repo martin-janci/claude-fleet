@@ -44,16 +44,27 @@ fn pr_url(repo: &str, number: i64) -> String {
     format!("https://github.com/{repo}/pull/{number}")
 }
 
-/// PURE: a job per open, non-draft pull request at its head, with the
-/// subject to keep.
+/// The trigger's gate on a pull request: `skip_wip`, `debounce_secs`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PrGate {
+    pub skip_wip: bool,
+    pub debounce_secs: i64,
+}
+
+/// PURE: a job per open, non-draft pull request at its head (not a WIP one
+/// with `skip_wip`), due `debounce_secs` after the head was first seen,
+/// with the subject to keep. A job of a head that moved on is skipped when
+/// it runs (`runner`).
 pub fn plan_pr_jobs(
     rule_id: i64,
     repo: &str,
     prs: &[OpenPr],
+    gate: PrGate,
     now: i64,
 ) -> Vec<(NewAgentJob, Value)> {
     prs.iter()
         .filter(|p| !p.is_draft && !p.head_sha.is_empty())
+        .filter(|p| !(gate.skip_wip && crate::service::agents::review::plan::is_wip(&p.title)))
         .map(|p| {
             let subject = format!("gh:{repo}#{}", p.number);
             (
@@ -63,7 +74,7 @@ pub fn plan_pr_jobs(
                     subject: subject.clone(),
                     trigger: "pushed".into(),
                     dedup_key: format!("r{rule_id}:{subject}@{}", p.head_sha),
-                    not_before: now,
+                    not_before: now + gate.debounce_secs.max(0),
                 },
                 json!({
                     "repo": repo,
@@ -137,6 +148,27 @@ pub fn plan_comment_jobs(
             )
         })
         .collect())
+}
+
+/// PURE: a comment job's subject with the pull request's head, base and
+/// branch when the comment is on an open pull request (an issue's has none).
+pub fn with_pr_heads(
+    planned: Vec<(NewAgentJob, Value)>,
+    prs: &[OpenPr],
+) -> Vec<(NewAgentJob, Value)> {
+    planned
+        .into_iter()
+        .map(|(job, mut subject)| {
+            let n = subject.get("number").and_then(Value::as_i64);
+            if let Some(p) = prs.iter().find(|p| Some(p.number) == n) {
+                subject["head_sha"] = json!(p.head_sha);
+                subject["base_ref"] = json!(p.base_ref);
+                subject["head_ref"] = json!(p.head_ref);
+                subject["title"] = json!(p.title);
+            }
+            (job, subject)
+        })
+        .collect()
 }
 
 /// The RFC 3339 time a comment poll reads from: the last poll, less the slack.

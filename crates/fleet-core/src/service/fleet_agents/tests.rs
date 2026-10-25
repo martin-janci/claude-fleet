@@ -228,16 +228,16 @@ fn a_trigger_takes_its_sources_keys_only() {
     ] {
         assert!(scan.iter().any(|x| x.contains(want)), "{want}: {scan:#?}");
     }
-    // A window shorter than the interval leaves gaps; the default
-    // interval (60) counts when every_mins is unset.
-    for (every, window) in [(json!(60), 15), (Value::Null, 45)] {
+    // A window no longer than the interval leaves gaps (scans run a poll
+    // late); the default interval (60) counts when every_mins is unset.
+    for (every, window) in [(json!(60), 15), (json!(60), 60), (Value::Null, 45)] {
         let p = problems_of(|v| {
             v["trigger"] = json!({ "source": "mcp_scan", "store": "logs", "tool": "search_logs",
                 "every_mins": every, "window_mins": window })
         });
         assert!(
             p.iter()
-                .any(|x| x.contains("window_mins must cover every_mins")),
+                .any(|x| x.contains("window_mins must be more than every_mins")),
             "{every} / {window}: {p:#?}"
         );
     }
@@ -934,4 +934,23 @@ fn a_fingerprint_names_a_fleet_store_and_adds_its_own_fields() {
         v["run"].as_object_mut().unwrap().remove("fingerprint");
     })
     .contains("knownBug"));
+}
+
+/// A pull request's head and diff, and a push's gate, are a GitHub
+/// trigger's: a tracker definition is refused them.
+#[test]
+fn a_head_a_diff_and_a_debounce_need_a_pull_request() {
+    assert_problem(
+        |v| v["run"]["workspace"] = json!("pr_head"),
+        "workspace pr_head reads a pull request",
+    );
+    assert_problem(|v| v["run"]["diff"] = json!({}), "diff is a pull request's");
+    assert_problem(
+        |v| v["trigger"]["debounce_secs"] = json!(60),
+        "debounce_secs is not for this source",
+    );
+    assert_problem(
+        |v| v["run"]["diff"] = json!({ "max_lines": 0 }),
+        "max_lines is 1-20000",
+    );
 }

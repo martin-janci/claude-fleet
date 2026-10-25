@@ -218,7 +218,7 @@ impl TriggerSource {
                 (&["tracker", "query", "match"], &["tracker", "match"])
             }
             TriggerSource::TrackerQuery => (&["tracker", "query"], &["tracker", "query"]),
-            TriggerSource::GithubPrs => (&["repo"], &["repo"]),
+            TriggerSource::GithubPrs => (&["repo", "skip_wip", "debounce_secs"], &["repo"]),
             TriggerSource::GithubComments => (&["repo", "match"], &["repo", "match"]),
             TriggerSource::McpScan => (
                 &[
@@ -262,8 +262,12 @@ impl TriggerSource {
             TriggerSource::TrackerAssigned | TriggerSource::TrackerQuery => ISSUE,
             TriggerSource::GithubPrs => &[
                 "repo", "number", "title", "head_sha", "base_ref", "head_ref", "author", "url",
+                "previous", "paths",
             ],
-            TriggerSource::GithubComments => &["repo", "number", "title", "url", "comment"],
+            TriggerSource::GithubComments => &[
+                "repo", "number", "title", "url", "comment", "head_sha", "base_ref", "head_ref",
+                "previous", "paths",
+            ],
             TriggerSource::McpScan => &["key", "entry"],
             TriggerSource::Schedule => &["at", "request", "scope"],
             TriggerSource::Manual => &["request", "scope"],
@@ -322,6 +326,13 @@ pub struct Trigger {
     /// (default and most [`MAX_SCAN_JOBS`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_jobs: Option<usize>,
+    /// `github_prs`: no job for a pull request whose title starts with WIP.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub skip_wip: bool,
+    /// `github_prs`: a new head's job waits this long, so a burst of pushes
+    /// is reviewed once, at its last head (0-3600).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub debounce_secs: Option<i64>,
 }
 
 /// Most new entries one scan turns into jobs.
@@ -351,6 +362,8 @@ impl Trigger {
         put("cron", self.cron.is_some());
         put("window_mins", self.window_mins.is_some());
         put("max_jobs", self.max_jobs.is_some());
+        put("skip_wip", self.skip_wip);
+        put("debounce_secs", self.debounce_secs.is_some());
         out
     }
 }
@@ -363,7 +376,44 @@ pub enum Workspace {
     Project,
     /// The host's home directory.
     Home,
+    /// A detached worktree of the project at the pull request's head the
+    /// job is about (`github_prs`, or a `github_comments` comment on an
+    /// open PR): the head moving on skips the run.
+    PrHead,
 }
+
+impl Workspace {
+    /// Whether runs read the instance's project (it needs one).
+    pub fn needs_project(self) -> bool {
+        matches!(self, Workspace::Project | Workspace::PrHead)
+    }
+}
+
+/// `run.diff`: the pull request's diff in the prompt, filtered as the PR
+/// reviewer filters it (`agents::review::diff`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DiffSpec {
+    /// Paths left out (globs, as the reviewer's `exclude_paths`).
+    #[serde(default)]
+    pub exclude_paths: Vec<String>,
+    /// Also leave out what the repo's `.claudeignore` (on the base) names.
+    #[serde(default = "yes")]
+    pub respect_claudeignore: bool,
+    /// A diff longer than this (after the exclusions) skips the run.
+    #[serde(default = "default_diff_lines")]
+    pub max_lines: usize,
+}
+
+fn yes() -> bool {
+    true
+}
+fn default_diff_lines() -> usize {
+    3000
+}
+
+/// Longest diff a definition may take into its prompt.
+pub const MAX_DIFF_LINES: usize = 20_000;
 
 /// A lookup made before the run, its result put into the prompt.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -429,6 +479,9 @@ pub struct Run {
     /// the inputs; default `main`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
+    /// The pull request's diff in the prompt (a GitHub trigger).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff: Option<DiffSpec>,
     /// The fingerprint of the error the answer names, and what fleet knows
     /// of it (`fingerprints.rs`): added to the answer before the actions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -531,6 +584,7 @@ impl Default for Run {
             diagnostics: false,
             cooldown_secs: 0,
             branch: None,
+            diff: None,
             fingerprint: None,
         }
     }
@@ -545,6 +599,9 @@ pub enum ActionKind {
     PrReview,
     PrComment,
     PrLabels,
+    /// The pull request's description, when it has none (or, with
+    /// `overwrite`, on the instance's first review of it).
+    PrDescription,
     McpCall,
     Record,
     /// A task in fleet's Work view, optionally with proposed subtasks.
@@ -566,6 +623,7 @@ impl ActionKind {
             ActionKind::PrReview => "pr_review",
             ActionKind::PrComment => "pr_comment",
             ActionKind::PrLabels => "pr_labels",
+            ActionKind::PrDescription => "pr_description",
             ActionKind::McpCall => "mcp_call",
             ActionKind::Record => "record",
             ActionKind::WorkTask => "work_task",
@@ -602,7 +660,19 @@ impl ActionKind {
                 &["from", "to", "link_type"],
             ),
             ActionKind::PrReview => (
-                &["target", "body", "body_template", "verdict", "findings"],
+                &[
+                    "target",
+                    "body",
+                    "body_template",
+                    "verdict",
+                    "findings",
+                    "min_confidence",
+                    "resolutions",
+                ],
+                &["target", "body"],
+            ),
+            ActionKind::PrDescription => (
+                &["target", "body", "body_template", "overwrite"],
                 &["target", "body"],
             ),
             ActionKind::PrComment => (&["target", "body", "body_template"], &["target", "body"]),
@@ -728,6 +798,21 @@ pub struct Action {
     /// `{path, line, body}`, placed on the PR's diff when it is sent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub findings: Option<String>,
+    /// `pr_review`: a finding whose `confidence` (0-100) is below this is
+    /// dropped, as the PR reviewer's `confidence_threshold` (one without a
+    /// confidence counts as 100).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_confidence: Option<u8>,
+    /// `pr_review`: an array field of the answer, each item
+    /// `{path, line, resolution}` saying what became of a previous review's
+    /// finding (`fixed`, `wontfix`, `open` …): with it the verdict is
+    /// adjusted as the PR reviewer adjusts it (`adjusted_verdict`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolutions: Option<String>,
+    /// `pr_description`: also replace a description someone wrote, on the
+    /// instance's first review of the pull request.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub overwrite: bool,
 }
 
 /// Most items one `each` action is planned for.
@@ -764,6 +849,9 @@ impl Action {
         put("fingerprint", self.fingerprint.is_some());
         put("verdict", self.verdict.is_some());
         put("findings", self.findings.is_some());
+        put("min_confidence", self.min_confidence.is_some());
+        put("resolutions", self.resolutions.is_some());
+        put("overwrite", self.overwrite);
         out
     }
 }
@@ -1197,6 +1285,9 @@ pub fn problems(d: &Definition, templates: &BTreeMap<String, String>) -> Vec<Str
             }
         }
     }
+    if t.debounce_secs.is_some_and(|s| !(0..=3600).contains(&s)) {
+        out.push(format!("{at}: debounce_secs is 0-3600"));
+    }
     if t.source == TriggerSource::McpScan {
         match t.store.as_deref().map(|s| (s, role(s))) {
             Some((s, None)) => out.push(format!("{at}: store {s} is not a role")),
@@ -1219,9 +1310,11 @@ pub fn problems(d: &Definition, templates: &BTreeMap<String, String>) -> Vec<Str
             out.push(format!("{at}: window_mins is 1-10080"));
         }
         let every = t.every_mins.unwrap_or(DEFAULT_SCAN_EVERY_MINS);
-        if t.window_mins.is_some_and(|w| w < every) {
+        // A scan runs on a poll tick once `every_mins` has passed, so two
+        // scans are always a little more than `every_mins` apart.
+        if t.window_mins.is_some_and(|w| w <= every) {
             out.push(format!(
-                "{at}: window_mins must cover every_mins ({every}): scans would skip the entries between them"
+                "{at}: window_mins must be more than every_mins ({every}): scans run a poll late, and would skip the entries between them"
             ));
         }
         if t.max_jobs
@@ -1282,6 +1375,28 @@ pub fn problems(d: &Definition, templates: &BTreeMap<String, String>) -> Vec<Str
     }
     if !(0..=7 * 86_400).contains(&r.cooldown_secs) {
         out.push("run › cooldown_secs is 0-604800".into());
+    }
+    if r.workspace == Workspace::PrHead && !t.source.is_github() {
+        out.push("run › workspace pr_head reads a pull request: the trigger is github_prs or github_comments".into());
+    }
+    if let Some(df) = &r.diff {
+        if !t.source.is_github() {
+            out.push(
+                "run › diff is a pull request's: the trigger is github_prs or github_comments"
+                    .into(),
+            );
+        }
+        if !(1..=MAX_DIFF_LINES).contains(&df.max_lines) {
+            out.push(format!("run › diff › max_lines is 1-{MAX_DIFF_LINES}"));
+        }
+        if df.exclude_paths.len() > 50
+            || df
+                .exclude_paths
+                .iter()
+                .any(|p| p.is_empty() || p.len() > 200)
+        {
+            out.push("run › diff › exclude_paths: at most 50 globs of 1-200 characters".into());
+        }
     }
     if let Some(b) = &r.branch {
         if r.workspace != Workspace::Project {
@@ -1531,7 +1646,10 @@ pub fn problems(d: &Definition, templates: &BTreeMap<String, String>) -> Vec<Str
                     ));
                 }
             }
-            ActionKind::PrReview | ActionKind::PrComment | ActionKind::PrLabels => {
+            ActionKind::PrReview
+            | ActionKind::PrComment
+            | ActionKind::PrLabels
+            | ActionKind::PrDescription => {
                 if !t.source.is_github() {
                     out.push(format!("{at}: {} needs a github trigger", a.kind.word()));
                 }
@@ -1539,6 +1657,23 @@ pub fn problems(d: &Definition, templates: &BTreeMap<String, String>) -> Vec<Str
                     out.push(format!(
                         "{at}: pr_review reviews a PR's head: the trigger is github_prs"
                     ));
+                }
+                if a.min_confidence.is_some_and(|c| c > 100) {
+                    out.push(format!("{at}: min_confidence is 0-100"));
+                }
+                if let Some(f) = a.resolutions.as_ref().filter(|_| schema_ok) {
+                    let is_array = r
+                        .output_schema
+                        .get("properties")
+                        .and_then(|p| p.get(f))
+                        .and_then(|v| v.get("type"))
+                        .and_then(Value::as_str)
+                        == Some("array");
+                    if !is_array {
+                        out.push(format!(
+                            "{at}: resolutions {f} is not an array in output_schema"
+                        ));
+                    }
                 }
                 if a.kind == ActionKind::PrReview && a.each.is_some() {
                     out.push(format!("{at}: pr_review is one review: no each"));

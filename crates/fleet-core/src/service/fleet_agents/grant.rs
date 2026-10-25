@@ -253,9 +253,7 @@ pub fn prepare(
         }
     }
     let loaded = &sources.definition;
-    if loaded.definition.run.workspace == super::definition::Workspace::Project
-        && args.project_id.is_none()
-    {
+    if loaded.definition.run.workspace.needs_project() && args.project_id.is_none() {
         return Err(invalid(
             "this agent runs in a project's checkout: give project_id",
         ));

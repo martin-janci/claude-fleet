@@ -75,10 +75,14 @@
   });
   const canManage = $derived(access === 'manage' || access === 'unknown');
   const onHub = $derived($hubStatus.remote);
-  // Quoted: a paired device's name may hold spaces or an apostrophe.
-  const grantCmd = $derived(
-    `fleet-hub client grant ${$hubStatus.client_name ? shq($hubStatus.client_name) : '<this device>'} assets`,
-  );
+  // Quoted: a paired device's name may hold spaces or an apostrophe. A name
+  // starting with '-' goes after `--`, or clap reads it as an option (quoting
+  // does not help: the shell strips the quotes before clap sees it).
+  const grantCmd = $derived.by(() => {
+    const name = $hubStatus.client_name;
+    if (!name) return 'fleet-hub client grant <this device> assets';
+    return `fleet-hub client grant ${name.startsWith('-') ? '-- ' : ''}${shq(name)} assets`;
+  });
   const blockedWhy = $derived(
     access === 'read_only'
       ? "This device may only look: the hub has not granted it the asset catalog."

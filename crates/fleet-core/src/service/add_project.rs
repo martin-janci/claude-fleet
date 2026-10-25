@@ -271,16 +271,41 @@ async fn clone_source(
         // adopting on that alone can register a row for the wrong repository.
         if already_a_checkout(&out) && checkout_is_this_repo(&out, &owner, &repo) {
             return match existing_row {
-                Some(row) => Ok(row),
+                Some(row) => backfill_origin(store, row, &clone_url),
                 None => register(store, &owner, &repo, &local_base, false, Some(&clone_url)),
             };
         }
         return Err(git_error(&args.host_alias, &owner, &repo, &dest, &out));
     }
     match existing_row {
-        Some(row) => Ok(row),
+        Some(row) => backfill_origin(store, row, &clone_url),
         None => register(store, &owner, &repo, &local_base, false, Some(&clone_url)),
     }
+}
+
+/// `row` once the origin its new checkout on another host was just cloned
+/// from (or, already there, proved to be by [`checkout_is_this_repo`]) is
+/// recorded on it, if it had none yet: a row from before migration 207, or
+/// one whose checkouts the local scan never reads, otherwise keeps NULL and
+/// is offered no clone onto another fleet. A recorded origin is never
+/// replaced ([`Store::fill_project_github_origin`]).
+fn backfill_origin(
+    store: &Mutex<Store>,
+    row: ProjectTreeRow,
+    clone_url: &str,
+) -> Result<ProjectTreeRow, IpcError> {
+    if row.project.github_origin.is_some() {
+        return Ok(row);
+    }
+    let Some(origin) = crate::repo_url::github_origin(clone_url) else {
+        return Ok(row);
+    };
+    let s = lock(store)?;
+    s.fill_project_github_origin(row.project.id, &origin)?;
+    Ok(s.list_projects_joined()?
+        .into_iter()
+        .find(|r| r.project.id == row.project.id)
+        .unwrap_or(row))
 }
 
 /// The fleet's row for `owner/repo` (case-insensitively), for a clone onto
@@ -5514,6 +5539,10 @@ mod tests {
             .unwrap();
         assert_eq!(again.project.id, first.project.id);
         assert_eq!(again.project.base_path, first.project.base_path);
+        assert_eq!(
+            again.project.github_origin.as_deref(),
+            Some("git@github.com:acme/api.git")
+        );
         let script = fake.calls_for("trn").last().unwrap().script().unwrap();
         assert!(
             script.contains(
@@ -5554,6 +5583,12 @@ mod tests {
         .unwrap();
         // The row is the fleet's, untouched: an adopted path is not moved.
         assert_eq!(row.project.base_path, "/somewhere/acme/api");
+        // A row from before migration 207 gets the origin the host's
+        // checkout was proved to have.
+        assert_eq!(
+            row.project.github_origin.as_deref(),
+            Some("git@github.com:acme/api.git")
+        );
         // Cloned under the row's casing, where a session on vps looks.
         let script = fake.calls_for("vps").last().unwrap().script().unwrap();
         assert!(
