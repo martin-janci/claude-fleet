@@ -190,6 +190,7 @@ configures it; it never supplies code.
 | `tracker_query` | a query's results that are new since the cursor | issue | `<tracker>:<KEY>` |
 | `github_prs` | open PRs, new heads (the reviewer's `plan.rs` gating) | `{repo, number, title, head_sha, …}` | `gh:o/r#N@sha` |
 | `github_comments` | issue/PR comments matching `match` | comment + PR | `gh:o/r#N@c<id>` |
+| `github_review_replies` | a person's reply in a fleet agent's review thread | thread + PR | `gh:o/r#N@t<root>:c<id>` |
 | `mcp_scan` | a read tool of a bound MCP store, every `every_mins` (the support scanner, generalised) | one entry of the answer, keyed by `key_template` | `scan:<hash of key>` |
 | `schedule` | a cron expression (routines' parser) | `{at}` | `cron:<rule>:<slot>` |
 | `manual` | nothing: a person or a chat agent starts it with inputs | the inputs | `manual:<uuid>` |
@@ -328,6 +329,7 @@ person at `propose`, run at `act` when `auto` is true.
 | `pr_review` | `{repo, number, sha, event, body, findings[]}` | the reviewer's `gh` calls: the diff, then the review (`ReviewRequest`) |
 | `pr_comment`, `pr_labels` | as the reviewer's | gh |
 | `pr_description` | `{repo, number, sha, body, overwrite, first}` | gh, only onto an empty description unless `overwrite` and `first` |
+| `pr_reply` | `{repo, number, root_id, body, resolve}` | gh: a reply in the thread, then resolving it with `resolve` |
 | `mcp_call` | `{binding, tool, arguments}` | calls the tool over stdio on the host with the binding rendered, as the scanner does |
 | `record` | `{namespace, key, value, expires_at?}` | `agent_records` upsert |
 | `work_task` | `{title, notes, steps[]}` from `summary`, `body`, `steps` | a Work task, its steps proposed as subtasks (`fleet_ops::work_task`) |
@@ -530,8 +532,24 @@ The gaps, in the order they close (each its own PR):
    action (`target`, `body` / `body_template`, `overwrite`) writes the
    pull request's description when it has none, or with `overwrite` on the
    instance's first review of it.
-5. **Reviewer state**: re-review of a dismissed review, the test debate;
-   then the reviewer as a gallery definition.
+5. **Reviewer state** (built 2026-10-25): `github_prs`' `reverify_mins`
+   (1-1440): each open PR's remembered review (its GitHub id kept with it)
+   is looked up when due, at most 5 a poll, and one GitHub deleted or
+   dismissed is a `reverify` job at the same head, keyed apart from the
+   head's own. The `github_review_replies` source (`repo`, `match`,
+   `max_rounds` 1-5, default 2): a job per person's reply in a review thread
+   whose first comment is a fleet agent's (and carries `match` when set),
+   the last word being a person's and this instance having answered fewer
+   than `max_rounds` times; the subject carries the PR, `comment` and
+   `thread` (`root_id`, `path`, `line`, `diff_hunk`, `finding`, `rounds`,
+   `replies[{user, body, mine}]`, the markers stripped). The `pr_reply`
+   action (`target` the thread's root, `body`, `resolve`) answers in the
+   thread with the instance's marker, resolving it after. The gallery's
+   `pr-reviewer` (the reviewer's skill, `pr_head`, the filtered diff,
+   confidence 50, resolutions, the description) and `pr-test-debate`
+   (concede or hold; a concession resolves the thread and is recorded in
+   the `exemptions` store both bind shared, which the reviewer reads as
+   context).
 
 ## Steps
 

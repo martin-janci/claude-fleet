@@ -1,0 +1,48 @@
+kind: fleet_agent
+name: pr-test-debate
+description: "The PR reviewer's test debate as a definition: when a pull request's author replies to a missing-test finding arguing that no test is needed, judges the argument with read-only access to the head and answers in the thread. A concession resolves the thread and is kept as a test exemption the pr-reviewer reads, so the location is not flagged again."
+inputs:
+  - { name: repo, type: text, label: Repository (owner/repo), required: true, help: "e.g. martin-janci/claude-fleet" }
+  - { name: phrase, type: text, label: Finding marker, value: "Missing test:", help: "What a missing-test finding's comment carries (pr-reviewer starts its own with it)." }
+stores:
+  - { role: exemptions, kind: fleet, label: Accepted test exemptions, shared_by_default: true }
+trigger:
+  source: github_review_replies
+  repo: "{{repo}}"
+  match: { any_phrase: "{{phrase}}" }
+  max_rounds: 2
+run:
+  workspace: pr_head
+  max_turns: 8
+  timeout_secs: 600
+  output_schema:
+    type: object
+    required: [decision, reply, reason]
+    properties:
+      decision: { enum: [concede, hold] }
+      reply: { type: string, maxLength: 1500 }
+      reason: { type: string, maxLength: 300 }
+      confidence: { type: integer }
+actions:
+  - id: concede
+    when: { field: decision, eq: concede }
+    do: pr_reply
+    target: "{{subject.thread.root_id}}"
+    body_template: conceded
+    resolve: true
+    auto: true
+  - id: hold
+    when: { field: decision, eq: hold }
+    do: pr_reply
+    target: "{{subject.thread.root_id}}"
+    body_template: held
+    auto: true
+  - id: exempt
+    when: { field: decision, eq: concede }
+    do: record
+    store: exemptions
+    key: "{{subject.repo}}#{{subject.number}}:{{subject.thread.path}}:{{subject.thread.line}}"
+    value: { reason: "{{answer.reason}}", thread: "{{subject.thread.root_id}}", at: "{{now}}" }
+    auto: true
+limits:
+  max_body_chars: 3000

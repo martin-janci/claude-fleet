@@ -28,6 +28,7 @@ use super::grant::Sources;
 use super::records;
 use super::template;
 use crate::ipc_error::{lock, IpcError};
+use crate::service::agents::review::debate::ReviewComment;
 use crate::service::agents::review::labels::LabelsRequest;
 use crate::service::agents::review::plan::OpenPr;
 use crate::service::agents::review::{PrComment, ReviewHost, SshReviewHost};
@@ -634,6 +635,41 @@ pub trait FleetHost: Send + Sync {
         &self,
         req: &crate::service::agents::review::labels::DescriptionRequest,
     ) -> Result<(), String>;
+    /// GitHub: a posted review's state; `None` when GitHub no longer has it.
+    async fn review_state(
+        &self,
+        host: &str,
+        repo: &str,
+        number: i64,
+        review_id: i64,
+    ) -> Result<Option<String>, String>;
+    /// GitHub: the repo's inline review comments updated since `since`.
+    async fn review_comments_since(
+        &self,
+        host: &str,
+        repo: &str,
+        since: &str,
+    ) -> Result<Vec<ReviewComment>, String>;
+    /// GitHub: a pull request's inline review comments.
+    async fn pr_review_comments(
+        &self,
+        host: &str,
+        repo: &str,
+        number: i64,
+    ) -> Result<Vec<ReviewComment>, String>;
+    /// GitHub: reply in a review thread.
+    async fn reply_in_thread(
+        &self,
+        req: &crate::service::agents::review::debate::DebateReply,
+    ) -> Result<(), String>;
+    /// GitHub: resolve the review thread whose first comment is `root_id`.
+    async fn resolve_thread(
+        &self,
+        host: &str,
+        repo: &str,
+        number: i64,
+        root_id: i64,
+    ) -> Result<(), String>;
     /// GitHub: a pull request's diff (its head's).
     async fn pr_diff(&self, host: &str, repo: &str, number: i64) -> Result<String, String>;
     /// GitHub: the repo's `.claudeignore` at `base`, when it has one.
@@ -892,6 +928,51 @@ impl FleetHost for LiveFleetHost {
         req: &crate::service::agents::review::labels::DescriptionRequest,
     ) -> Result<(), String> {
         self.gh.set_description(req).await
+    }
+
+    async fn review_state(
+        &self,
+        host: &str,
+        repo: &str,
+        number: i64,
+        review_id: i64,
+    ) -> Result<Option<String>, String> {
+        self.gh.review_state(host, repo, number, review_id).await
+    }
+
+    async fn review_comments_since(
+        &self,
+        host: &str,
+        repo: &str,
+        since: &str,
+    ) -> Result<Vec<ReviewComment>, String> {
+        self.gh.review_comments_since(host, repo, since).await
+    }
+
+    async fn pr_review_comments(
+        &self,
+        host: &str,
+        repo: &str,
+        number: i64,
+    ) -> Result<Vec<ReviewComment>, String> {
+        self.gh.pr_review_comments(host, repo, number).await
+    }
+
+    async fn reply_in_thread(
+        &self,
+        req: &crate::service::agents::review::debate::DebateReply,
+    ) -> Result<(), String> {
+        self.gh.reply_in_thread(req).await
+    }
+
+    async fn resolve_thread(
+        &self,
+        host: &str,
+        repo: &str,
+        number: i64,
+        root_id: i64,
+    ) -> Result<(), String> {
+        self.gh.resolve_thread(host, repo, number, root_id).await
     }
 
     async fn pr_diff(&self, host: &str, repo: &str, number: i64) -> Result<String, String> {
@@ -1256,6 +1337,123 @@ impl FleetPoller {
     }
 }
 
+impl FleetPoller {
+    /// `reverify_mins`: the instance's last review of each open pull
+    /// request, looked up when due ([`super::github::reverify_due`]); one
+    /// GitHub deleted or dismissed is a job at the same head, and forgets
+    /// its id so it is made once.
+    async fn reverify(
+        &self,
+        rule: &AgentRuleRow,
+        repo: &str,
+        prs: &[crate::service::agents::review::plan::OpenPr],
+        gate: super::github::PrGate,
+        mins: i64,
+        now: i64,
+    ) -> Vec<(NewAgentJob, Value)> {
+        use super::actions::{review_key, REVIEW_KIND};
+        let ns = subjects_namespace(rule.id);
+        let due: Vec<(&crate::service::agents::review::plan::OpenPr, i64, Value)> = {
+            let Ok(s) = self.store.lock() else {
+                return Vec::new();
+            };
+            prs.iter()
+                .filter(|p| !p.is_draft)
+                .filter(|p| {
+                    !(gate.skip_wip && crate::service::agents::review::plan::is_wip(&p.title))
+                })
+                .filter_map(|p| {
+                    let row = s
+                        .agent_record(&ns, REVIEW_KIND, &review_key(repo, p.number), now)
+                        .ok()??;
+                    let v: Value = serde_json::from_str(&row.value).ok()?;
+                    let id = super::github::reverify_due(&v, &p.head_sha, mins, now)?;
+                    Some((p, id, v))
+                })
+                .take(super::github::MAX_REVERIFIES)
+                .collect()
+        };
+        let mut out = Vec::new();
+        for (p, id, mut v) in due {
+            let gone = match self
+                .host
+                .review_state(&rule.host_alias, repo, p.number, id)
+                .await
+            {
+                Ok(state) => state.is_none_or(|s| s == "DISMISSED"),
+                Err(e) => {
+                    tracing::warn!(rule_id = rule.id, repo, number = p.number, error = %e, "[agents] fleet: reverify failed");
+                    continue;
+                }
+            };
+            v["verified_at"] = now.into();
+            if gone {
+                if let Some(m) = v.as_object_mut() {
+                    m.remove("id");
+                }
+                out.push(super::github::reverify_job(rule.id, repo, p, id, now));
+            }
+            if let Ok(s) = self.store.lock() {
+                let kept = s.put_agent_record(
+                    &NewAgentRecord {
+                        namespace: ns.clone(),
+                        kind: REVIEW_KIND.into(),
+                        key: review_key(repo, p.number),
+                        value: v.to_string(),
+                        expires_at: None,
+                        written_by_job: None,
+                    },
+                    now,
+                );
+                if let Err(e) = kept {
+                    tracing::warn!(rule_id = rule.id, error = %e, "[agents] fleet: reverify not recorded");
+                }
+            }
+        }
+        out
+    }
+
+    /// `github_review_replies`: the review comments since the last poll; the
+    /// threads of each open pull request a person replied in, read whole.
+    async fn replies(
+        &self,
+        rule: &AgentRuleRow,
+        inst: &Instance,
+        ctx: &Value,
+        repo: &str,
+        since: i64,
+        now: i64,
+    ) -> Result<Vec<(NewAgentJob, Value)>, String> {
+        let host = rule.host_alias.as_str();
+        let replies = self
+            .host
+            .review_comments_since(host, repo, &super::github::comments_since(since))
+            .await?;
+        if replies.is_empty() {
+            return Ok(Vec::new());
+        }
+        let prs = self.host.open_prs(host, repo).await?;
+        let mark = super::actions::marker(&rule.scope);
+        let max_rounds = inst
+            .loaded()
+            .definition
+            .trigger
+            .max_rounds
+            .unwrap_or(super::definition::DEFAULT_MAX_ROUNDS);
+        let mut out = Vec::new();
+        for n in super::github::reply_prs(&replies, &prs) {
+            let Some(p) = prs.iter().find(|p| p.number == n) else {
+                continue;
+            };
+            let thread = self.host.pr_review_comments(host, repo, n).await?;
+            out.extend(super::github::plan_reply_jobs(
+                rule.id, inst, ctx, repo, &mark, p, &replies, &thread, max_rounds, now,
+            )?);
+        }
+        Ok(out)
+    }
+}
+
 #[async_trait::async_trait]
 impl AgentPoller for FleetPoller {
     async fn poll(
@@ -1372,7 +1570,9 @@ impl AgentPoller for FleetPoller {
                     None => Vec::new(),
                 }
             }
-            TriggerSource::GithubPrs | TriggerSource::GithubComments => {
+            TriggerSource::GithubPrs
+            | TriggerSource::GithubComments
+            | TriggerSource::GithubReviewReplies => {
                 let repo = super::github::repo_of(&inst, &ctx)?;
                 let planned = if d.trigger.source == TriggerSource::GithubPrs {
                     let prs = self.host.open_prs(&rule.host_alias, &repo).await?;
@@ -1380,7 +1580,13 @@ impl AgentPoller for FleetPoller {
                         skip_wip: d.trigger.skip_wip,
                         debounce_secs: d.trigger.debounce_secs.unwrap_or(0),
                     };
-                    super::github::plan_pr_jobs(rule.id, &repo, &prs, gate, now)
+                    let mut planned = super::github::plan_pr_jobs(rule.id, &repo, &prs, gate, now);
+                    if let Some(mins) = d.trigger.reverify_mins {
+                        planned.extend(self.reverify(rule, &repo, &prs, gate, mins, now).await);
+                    }
+                    planned
+                } else if d.trigger.source == TriggerSource::GithubReviewReplies {
+                    self.replies(rule, &inst, &ctx, &repo, c.since, now).await?
                 } else {
                     let since = super::github::comments_since(c.since);
                     let comments = self

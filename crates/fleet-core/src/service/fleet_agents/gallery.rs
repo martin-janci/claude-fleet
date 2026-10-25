@@ -34,6 +34,16 @@ pub const SEEDS: &[Seed] = &[
         skill: include_str!("../../../../../catalog-seed/fleet-agents/support/skill.md"),
     },
     Seed {
+        name: "pr-reviewer",
+        asset: include_str!("../../../../../catalog-seed/fleet-agents/pr-reviewer/asset.yaml"),
+        skill: include_str!("../../../../../catalog-seed/fleet-agents/pr-reviewer/skill.md"),
+    },
+    Seed {
+        name: "pr-test-debate",
+        asset: include_str!("../../../../../catalog-seed/fleet-agents/pr-test-debate/asset.yaml"),
+        skill: include_str!("../../../../../catalog-seed/fleet-agents/pr-test-debate/skill.md"),
+    },
+    Seed {
         name: "issue-triage",
         asset: include_str!("../../../../../catalog-seed/fleet-agents/issue-triage/asset.yaml"),
         skill: include_str!("../../../../../catalog-seed/fleet-agents/issue-triage/skill.md"),

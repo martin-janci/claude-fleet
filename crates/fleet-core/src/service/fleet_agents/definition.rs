@@ -179,6 +179,9 @@ pub enum TriggerSource {
     TrackerQuery,
     GithubPrs,
     GithubComments,
+    /// A person's reply in a review thread a fleet agent started (its line
+    /// comment, usually a reviewer instance's): the PR reviewer's test debate.
+    GithubReviewReplies,
     McpScan,
     Schedule,
     Manual,
@@ -192,6 +195,7 @@ impl TriggerSource {
             TriggerSource::TrackerQuery => "tracker_query",
             TriggerSource::GithubPrs => "github_prs",
             TriggerSource::GithubComments => "github_comments",
+            TriggerSource::GithubReviewReplies => "github_review_replies",
             TriggerSource::McpScan => "mcp_scan",
             TriggerSource::Schedule => "schedule",
             TriggerSource::Manual => "manual",
@@ -201,7 +205,9 @@ impl TriggerSource {
     pub fn is_github(self) -> bool {
         matches!(
             self,
-            TriggerSource::GithubPrs | TriggerSource::GithubComments
+            TriggerSource::GithubPrs
+                | TriggerSource::GithubComments
+                | TriggerSource::GithubReviewReplies
         )
     }
 
@@ -218,8 +224,12 @@ impl TriggerSource {
                 (&["tracker", "query", "match"], &["tracker", "match"])
             }
             TriggerSource::TrackerQuery => (&["tracker", "query"], &["tracker", "query"]),
-            TriggerSource::GithubPrs => (&["repo", "skip_wip", "debounce_secs"], &["repo"]),
+            TriggerSource::GithubPrs => (
+                &["repo", "skip_wip", "debounce_secs", "reverify_mins"],
+                &["repo"],
+            ),
             TriggerSource::GithubComments => (&["repo", "match"], &["repo", "match"]),
+            TriggerSource::GithubReviewReplies => (&["repo", "match", "max_rounds"], &["repo"]),
             TriggerSource::McpScan => (
                 &[
                     "store",
@@ -267,6 +277,10 @@ impl TriggerSource {
             TriggerSource::GithubComments => &[
                 "repo", "number", "title", "url", "comment", "head_sha", "base_ref", "head_ref",
                 "previous", "paths",
+            ],
+            TriggerSource::GithubReviewReplies => &[
+                "repo", "number", "title", "url", "comment", "thread", "head_sha", "base_ref",
+                "head_ref", "previous", "paths",
             ],
             TriggerSource::McpScan => &["key", "entry"],
             TriggerSource::Schedule => &["at", "request", "scope"],
@@ -333,7 +347,20 @@ pub struct Trigger {
     /// is reviewed once, at its last head (0-3600).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub debounce_secs: Option<i64>,
+    /// `github_prs`: every this many minutes the instance's last review of
+    /// an open pull request is looked up, and one GitHub deleted or
+    /// dismissed is made again at the same head (1-1440; unset is never).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reverify_mins: Option<i64>,
+    /// `github_review_replies`: the instance answers a thread at most this
+    /// many times (1-5, default [`DEFAULT_MAX_ROUNDS`]); then it is the
+    /// people's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_rounds: Option<usize>,
 }
+
+/// `github_review_replies`: replies per thread when `max_rounds` is unset.
+pub const DEFAULT_MAX_ROUNDS: usize = 2;
 
 /// Most new entries one scan turns into jobs.
 pub const MAX_SCAN_JOBS: usize = 10;
@@ -364,6 +391,8 @@ impl Trigger {
         put("max_jobs", self.max_jobs.is_some());
         put("skip_wip", self.skip_wip);
         put("debounce_secs", self.debounce_secs.is_some());
+        put("reverify_mins", self.reverify_mins.is_some());
+        put("max_rounds", self.max_rounds.is_some());
         out
     }
 }
@@ -602,6 +631,9 @@ pub enum ActionKind {
     /// The pull request's description, when it has none (or, with
     /// `overwrite`, on the instance's first review of it).
     PrDescription,
+    /// A reply in the review thread the job is about
+    /// (`github_review_replies`), resolving it with `resolve`.
+    PrReply,
     McpCall,
     Record,
     /// A task in fleet's Work view, optionally with proposed subtasks.
@@ -624,6 +656,7 @@ impl ActionKind {
             ActionKind::PrComment => "pr_comment",
             ActionKind::PrLabels => "pr_labels",
             ActionKind::PrDescription => "pr_description",
+            ActionKind::PrReply => "pr_reply",
             ActionKind::McpCall => "mcp_call",
             ActionKind::Record => "record",
             ActionKind::WorkTask => "work_task",
@@ -673,6 +706,10 @@ impl ActionKind {
             ),
             ActionKind::PrDescription => (
                 &["target", "body", "body_template", "overwrite"],
+                &["target", "body"],
+            ),
+            ActionKind::PrReply => (
+                &["target", "body", "body_template", "resolve"],
                 &["target", "body"],
             ),
             ActionKind::PrComment => (&["target", "body", "body_template"], &["target", "body"]),
@@ -813,6 +850,9 @@ pub struct Action {
     /// instance's first review of the pull request.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub overwrite: bool,
+    /// `pr_reply`: resolve the thread once the reply is posted.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub resolve: bool,
 }
 
 /// Most items one `each` action is planned for.
@@ -852,6 +892,7 @@ impl Action {
         put("min_confidence", self.min_confidence.is_some());
         put("resolutions", self.resolutions.is_some());
         put("overwrite", self.overwrite);
+        put("resolve", self.resolve);
         out
     }
 }
@@ -1288,6 +1329,12 @@ pub fn problems(d: &Definition, templates: &BTreeMap<String, String>) -> Vec<Str
     if t.debounce_secs.is_some_and(|s| !(0..=3600).contains(&s)) {
         out.push(format!("{at}: debounce_secs is 0-3600"));
     }
+    if t.reverify_mins.is_some_and(|m| !(1..=1440).contains(&m)) {
+        out.push(format!("{at}: reverify_mins is 1-1440"));
+    }
+    if t.max_rounds.is_some_and(|m| !(1..=5).contains(&m)) {
+        out.push(format!("{at}: max_rounds is 1-5"));
+    }
     if t.source == TriggerSource::McpScan {
         match t.store.as_deref().map(|s| (s, role(s))) {
             Some((s, None)) => out.push(format!("{at}: store {s} is not a role")),
@@ -1649,9 +1696,15 @@ pub fn problems(d: &Definition, templates: &BTreeMap<String, String>) -> Vec<Str
             ActionKind::PrReview
             | ActionKind::PrComment
             | ActionKind::PrLabels
-            | ActionKind::PrDescription => {
+            | ActionKind::PrDescription
+            | ActionKind::PrReply => {
                 if !t.source.is_github() {
                     out.push(format!("{at}: {} needs a github trigger", a.kind.word()));
+                }
+                if a.kind == ActionKind::PrReply && t.source != TriggerSource::GithubReviewReplies {
+                    out.push(format!(
+                        "{at}: pr_reply answers a review thread: the trigger is github_review_replies"
+                    ));
                 }
                 if a.kind == ActionKind::PrReview && t.source != TriggerSource::GithubPrs {
                     out.push(format!(
