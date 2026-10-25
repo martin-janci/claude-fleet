@@ -633,6 +633,7 @@ describe('WorkMissions', () => {
           waves: 1,
         },
         lanes: [{ id: 1, mission_id: 4, name: 'backend', state: 'idle', item_ids: [11] }],
+        touches: { 11: ['src/store/**', 'docs/status.md'] },
         events: [],
         may_change: true,
       });
@@ -658,6 +659,11 @@ describe('WorkMissions', () => {
       await fireEvent.click(screen.getByTestId('mission-lane-save'));
       await flush();
       expect(calls('set_mission_item')[2]).toEqual({ mission_id: 4, item_id: 12, on: true, lane: 'web' });
+    });
+
+    it('says what a task changes (lanes design L5)', async () => {
+      await open();
+      expect(screen.getByTestId('mission-touches').textContent).toBe('changes src/store/**, docs/status.md');
     });
 
     it('draws the mission\'s lanes in the graph', async () => {

@@ -1087,7 +1087,13 @@ removed after) and reads only its own diff, so its lead may already work on
 the next task; a lane waits while a task of it waits for or runs its test,
 which then runs in the lane's checkout; a lead also hands over once its
 context is 70% full; a lane whose tasks are all done reads as done.
-`orchestrator.headless_checks` is on by default since L4. A mission's worker is refused a person's
+`orchestrator.headless_checks` is on by default since L4. Lanes L5
+(migration 211, `store/item_touches.rs`, `orchestrate/touches.rs`): the
+planner's `create_item` may name `touches` (repository paths or globs the
+task changes); a task whose touches meet an open run's in the same
+repository waits (a task that names none is not held), and a lane starts
+beside another of its repository only when both name every task's touches
+and they do not meet. The task row says what a task changes. A mission's worker is refused a person's
 step (`gh pr merge` / `ready`, a push to `main` / `master`, a tracker CLI)
 by fleet's `PreToolUse(Bash)` guard (`orchestrate/guard.rs`): a shell
 prefilter that asks the hub only about those commands and lets the command

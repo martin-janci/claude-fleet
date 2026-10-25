@@ -109,6 +109,10 @@ pub struct MissionDetail {
     /// hub.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lanes: Vec<crate::store::MissionLaneRow>,
+    /// What each member this caller may see says it changes (lanes design
+    /// L5), by item id; only members that say. Absent from an older hub.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub touches: std::collections::HashMap<i64, Vec<String>>,
     /// The planner's open wait, when its newest word (of its runs and
     /// waits, read apart from the rest of the log) is a usage-limit wait
     /// (review r9: `events` is one page of every kind, so a busy log hid
@@ -313,6 +317,11 @@ pub fn mission(
         })
         .collect();
     let limit_wait = Some(super::orchestrate::limit::Words::read(&s, id)?.newest_wait());
+    let touches = s
+        .mission_touches(id)?
+        .into_iter()
+        .filter(|(i, _)| items.iter().any(|it| it.id == *i))
+        .collect();
     let finish = if crate::store::MISSION_FINAL_STATES.contains(&mission.state.as_str()) {
         Some(finish(&s, scope, id, sessions.clone())?)
     } else {
@@ -330,6 +339,7 @@ pub fn mission(
         sessions,
         stats,
         lanes,
+        touches,
         limit_wait,
     })
 }

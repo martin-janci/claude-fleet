@@ -1718,3 +1718,40 @@ fn lane_execution_offers_one_run_per_lane() {
         .collect();
     assert_eq!(runs, vec![a, c], "b waits for its lane; c is in none");
 }
+
+/// Lanes design L5: two tasks whose touches meet do not start together;
+/// a task that names none is not held.
+#[test]
+fn tasks_that_change_the_same_files_do_not_start_together() {
+    let fx = fixture();
+    let (a, b, c) = (member(&fx, "a"), member(&fx, "b"), member(&fx, "c"));
+    let s = lock(&fx.deps.store).unwrap();
+    s.set_item_touches(a, &["src/store/**".to_string()])
+        .unwrap();
+    s.set_item_touches(b, &["src/store/mod.rs".to_string()])
+        .unwrap();
+    s.set_mission_state(fx.m.id, None, "paused", "t").unwrap();
+    s.update_mission(
+        fx.m.id,
+        None,
+        &crate::store::MissionPatch {
+            policy: Some(crate::store::MissionPolicy {
+                max_parallel: 8,
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        "t",
+    )
+    .unwrap();
+    s.set_mission_state(fx.m.id, None, "active", "t").unwrap();
+    let m = s.get_mission(fx.m.id).unwrap().unwrap();
+    let a_now = autonomy(&s, &m, now_unix()).unwrap();
+    let runs: Vec<i64> = steps_for(&s, &m, &a_now)
+        .unwrap()
+        .into_iter()
+        .filter(|st| st.kind == "run")
+        .filter_map(|st| st.item_id)
+        .collect();
+    assert_eq!(runs, vec![a, c], "b waits for a; c says nothing");
+}

@@ -1,7 +1,7 @@
 # Misie po líniách: jedna vedúca session na líniu, subagenti vnútri
 
 **Dátum:** 2026-10-23
-**Stav:** rozhodnutia D1–D9 (§9) vlastník prijal podľa odporúčaní 2026-10-24. **L0 je postavené** (2026-10-23): oprava P2 a metriky misie (§5.2, §5.5). **L1 je postavené** (2026-10-23): subagenti v prompte behu, plánovač, ktorý číta repo, a pravidlo o spoločných súboroch (§5.1, §5.4). **L2 je postavené** (2026-10-24): línie v dátach, bez zmeny behu (§2.2). **L3 je postavené** (2026-10-24): vedúca session na líniu za `policy.execution = lane` (§3, „Ako je to postavené v L3“). **L4 je postavené** (2026-10-24): review nad snapshotom, test ako brána, štafeta aj podľa kontextu, headless checks predvolene zapnuté (§3.10).
+**Stav:** rozhodnutia D1–D9 (§9) vlastník prijal podľa odporúčaní 2026-10-24. **L0 je postavené** (2026-10-23): oprava P2 a metriky misie (§5.2, §5.5). **L1 je postavené** (2026-10-23): subagenti v prompte behu, plánovač, ktorý číta repo, a pravidlo o spoločných súboroch (§5.1, §5.4). **L2 je postavené** (2026-10-24): línie v dátach, bez zmeny behu (§2.2). **L3 je postavené** (2026-10-24): vedúca session na líniu za `policy.execution = lane` (§3, „Ako je to postavené v L3“). **L4 je postavené** (2026-10-24): review nad snapshotom, test ako brána, štafeta aj podľa kontextu, headless checks predvolene zapnuté (§3.10). **L5 je postavené** (2026-10-25): `touches` a pravidlo prekrytia (§5.4, „Ako je to postavené v L5“).
 **Nadväzuje na:** `2026-10-07-autonomous-orchestration-projects-design.md` (ďalej *O-návrh*), najmä §5.3 (deterministický loop), §6 (evidencia), §8 (worktrees a integrácia).
 **Vstup:** analýza „ako zlepšiť misie: jeden Claude so subagentmi alebo veľa sessions" (2026-10-23).
 
@@ -246,6 +246,16 @@ Pokyny z §3.4 (prieskum, review pred hlásením) sa pridajú aj do promptu behu
 - Pravidlo o spoločných miestach je v prompte vždy, aj bez čítania, a všeobecne, nie len pre claude-fleet: úlohy, ktoré menia tie isté súbory alebo ten istý spoločný register (zoznam migrácií, generovaný súbor, tabuľka nástrojov či príkazov, stavový dokument), na seba nadväzujú.
 - `touches` ako pole a pravidlo prekrytia pri spúšťaní ostávajú pre L5.
 
+**Ako je to postavené v L5:**
+- Migrácia 211: `work_items.touches_json`, čítané mimo `WorkItemRow` (`store/item_touches.rs`). Cesty sú relatívne k repu: absolútna cesta, `..`, riadiaci znak, viac ako 20 ciest alebo cesta dlhšia než 200 znakov sú odmietnuté.
+- Prekrytie (`touches_overlap`) je konzervatívne: berie sa istá časť cesty pred prvým wildcardom a dve cesty sa stretnú, keď jedna obsahuje druhú po segmentoch (`src/store/**` stretne `src/store/mod.rs`, `src/store` nestretne `src/storefront`).
+- Plánovač: `create_item { touches? }`, nesené v karte `create` ako `lane` a `done_when`; prompt čítajúceho plánovača chce `touches` namiesto ciest v `notes`.
+- `orchestrate/touches.rs`:
+  - režim `item` (`gate_items`): implement beh, ktorého `touches` stretnú otvorený beh (alebo beh vybraný skôr v tom istom priechode) v tom istom repe, čaká. **Odchýlka od návrhu:** úloha bez `touches` sa nedrží, lebo by to dnešným misiám vypol paralelizmus.
+  - režim `lane` (`gate_lane_starts`): rozbehnutá línia pokračuje; nová línia čaká, kým v tom istom repe beží iná, pokiaľ obe neuvádzajú `touches` všetkých úloh a nestretnú sa (§4.1). Úlohy bez línie idú cez `gate_items`. `policy.lanes_same_repo_parallel` sa nestavalo.
+  - Neznámy repo (`None`) sa berie ako rovnaký s každým; misia s jedným repom ho dosadí úlohe bez projektu.
+- `work { mission }` vracia `touches` po úlohách a riadok úlohy ukazuje „changes …“.
+
 ### 5.5 (bod 6) Metriky
 
 **Postavené v L0** ako pole `stats` odpovede `work { mission }` (`service/work/missions/stats.rs`, čistá funkcia nad `tasks` členov misie; žiadna nová akcia, teda žiadny nový riadok verdiktov ani tool budget) a riadok v hlavičke miestnosti misie (`mission_room.ts::statsLine`): behy a behy na hotovú úlohu, retry, studené štarty (worker sessions), medián času úlohy a podiel času bez otvoreného behu. Čakanie podľa príčiny (človek, limit, slot, tick) a integračné konflikty z eventov sú ďalší krok, keď eventy budú niesť príčinu. Pôvodný zámer:
@@ -281,7 +291,7 @@ Každá fáza sa dá vydať samostatne a každá končí meraním proti L0.
 | **L2 Línie v dátach** (postavené) | migrácia (§2.2), `lane` pri importe a v `create_item`, presun úlohy medzi líniami (`work_link { mission_item, lane }`), Graph view kreslí línie z `lane_id`; verdikty, izolačná matica, `REGEN_DOCS`, telefón len čítanie | žiadna zmena behu | M | misia sa dá naplánovať po líniách, nič sa nespúšťa inak |
 | **L3 Vedúca session** (postavené) | `policy.execution = lane`: štart línie, podávanie úloh do session (§3.2), `start_head`/`end_head` a evidencia (§3.3), retry v session, štafeta (§3.5), pád a limit (§3.6) | opt-in na misii | L | jedna skutočná misia v jednom repe dokončená v režime `lane` bez ručného zásahu mimo brán |
 | **L4 Overenie v línii** (postavené) | review nad snapshotom (§3.7), test v checkoute línie a `lane_test_at`, PR na líniu (§3.8), `headless_checks` predvolene zapnuté (§5.2), subagent definície v katalógu (§3.4) | opt-in na misii, `headless_checks` globálne | M | `done_when` overené bez session ciest pre review |
-| **L5 `touches` a plánovanie línií** | `touches_json`, pravidlo prekrytia pre `item` aj `lane` (§4.1, §5.4), plánovač priraďuje línie; integrácia len medzi líniami (§4.2) | platí v oboch režimoch | M | v misii s dvoma líniami v jednom repe nevznikne konflikt, ktorý `touches` mohli predpovedať |
+| **L5 `touches` a plánovanie línií** (postavené) | `touches_json`, pravidlo prekrytia pre `item` aj `lane` (§4.1, §5.4), plánovač priraďuje línie; integrácia len medzi líniami (§4.2) | platí v oboch režimoch | M | v misii s dvoma líniami v jednom repe nevznikne konflikt, ktorý `touches` mohli predpovedať |
 | **L6 Porovnanie a prepnutie** | A/B: ten istý typ misie v `item` a `lane`, porovnanie metrík z L0; build cache experiment (§5.3) | rozhodnutie vlastníka | S | vlastník rozhodne o predvolenom režime podľa čísel |
 
 Závislosti: L0 → všetko (baseline). L2 → L3 → L4. L1 a L5 sú nezávislé od L3, L5 ťaží z L2. Build cache experiment môže bežať popri L3.

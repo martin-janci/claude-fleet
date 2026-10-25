@@ -23,6 +23,7 @@ pub mod lanes;
 pub mod limit;
 pub mod planner;
 pub mod steps;
+pub mod touches;
 pub mod triage;
 
 use self::planner::{Command, PlannerOutput};
@@ -216,8 +217,37 @@ fn steps_for(s: &Store, m: &MissionRow, a: &Autonomy) -> Result<Vec<Step>, IpcEr
         counts: s.mission_task_counts(m.id)?,
         max_parallel: max_parallel(m, a),
     });
+    // Lanes L5: what each task says it changes, in which repository (a
+    // mission with one repo names it for a task that names none).
+    let sole_repo = match m.repos.as_slice() {
+        [only] => Some(only.project_id),
+        _ => None,
+    };
+    let said = s.mission_touches(m.id)?;
+    let known: HashMap<i64, touches::ItemTouch> = items
+        .iter()
+        .map(|i| {
+            (
+                i.id,
+                touches::ItemTouch {
+                    project: i.project_id.or(sole_repo),
+                    touches: said.get(&i.id).cloned().unwrap_or_default(),
+                },
+            )
+        })
+        .collect();
+    let running: Vec<i64> = attempts
+        .iter()
+        .filter(|(_, ts)| {
+            ts.iter().any(|t| {
+                matches!(t.state.as_str(), "queued" | "running")
+                    && matches!(t.role.as_deref(), None | Some("implement"))
+            })
+        })
+        .map(|(i, _)| *i)
+        .collect();
     if m.policy.execution != "lane" {
-        return Ok(steps);
+        return Ok(touches::gate_items(steps, &known, &running, None));
     }
     // Lanes L3: a lane takes one implement run at a time, when it is free.
     let lanes = s.mission_lanes(m.id)?;
@@ -226,7 +256,54 @@ fn steps_for(s: &Store, m: &MissionRow, a: &Autonomy) -> Result<Vec<Step>, IpcEr
         .flat_map(|l| l.item_ids.iter().map(move |i| (*i, l.id)))
         .collect();
     let busy = lanes::busy_lanes(s, m, &lanes, &attempts, &lanes::awaiting_test(&graph))?;
-    Ok(lanes::gate(steps, &lane_of, &busy))
+    let steps = lanes::gate(steps, &lane_of, &busy);
+    // Lanes L5: a lane starts beside another of its repository only when
+    // both say all they change and it does not meet.
+    let done = |i: &i64| {
+        items
+            .iter()
+            .any(|it| it.id == *i && it.status_category == "done")
+    };
+    let units: Vec<touches::LaneTouch> = lanes
+        .iter()
+        .map(|l| {
+            let mut paths: Vec<String> = Vec::new();
+            for i in &l.item_ids {
+                for p in said.get(i).into_iter().flatten() {
+                    if !paths.contains(p) {
+                        paths.push(p.clone());
+                    }
+                }
+            }
+            touches::LaneTouch {
+                id: l.id,
+                project: l.project_id.or_else(|| {
+                    l.item_ids
+                        .iter()
+                        .find_map(|i| known.get(i).and_then(|k| k.project))
+                }),
+                touches: paths,
+                complete: l.item_ids.iter().all(|i| said.contains_key(i)),
+                under_way: (l.lead_session_id.is_some()
+                    || l.item_ids
+                        .iter()
+                        .any(|i| attempts.get(i).is_some_and(|ts| !ts.is_empty())))
+                    && !l.item_ids.iter().all(done),
+            }
+        })
+        .collect();
+    let steps = touches::gate_lane_starts(steps, &lane_of, &units);
+    let laneless: std::collections::HashSet<i64> = items
+        .iter()
+        .map(|i| i.id)
+        .filter(|i| !lane_of.contains_key(i))
+        .collect();
+    Ok(touches::gate_items(
+        steps,
+        &known,
+        &running,
+        Some(&laneless),
+    ))
 }
 
 /// The plan a mission's detail carries: `None` for a draft or a finished
@@ -783,6 +860,9 @@ async fn apply_card(
             let lanes: Vec<Option<String>> =
                 serde_json::from_value(p.get("lanes").cloned().unwrap_or_default())
                     .unwrap_or_default();
+            let touches: Vec<Vec<String>> =
+                serde_json::from_value(p.get("touches").cloned().unwrap_or_default())
+                    .unwrap_or_default();
             let s = lock(&deps.store)?;
             let made = s.propose_tree(root, &tree, "planner")?;
             for (i, row) in made.iter().enumerate() {
@@ -792,6 +872,10 @@ async fn apply_card(
                 // Lanes design L2: the lane the planner named.
                 if let Some(l) = lanes.get(i).and_then(Option::as_deref) {
                     s.set_item_lane(m.id, row.id, Some(l), row.project_id, &actor.name())?;
+                }
+                // Lanes design L5: what it said the task changes.
+                if let Some(t) = touches.get(i).filter(|t| !t.is_empty()) {
+                    s.set_item_touches(row.id, t)?;
                 }
             }
             if accept_created {
@@ -1654,6 +1738,7 @@ fn card_commands(
                     "tree": tree,
                     "done_when": planner::done_when_of(commands),
                     "lanes": planner::lanes_of(commands),
+                    "touches": planner::touches_of(commands),
                 })),
             },
         )? {

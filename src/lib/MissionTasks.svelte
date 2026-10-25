@@ -230,6 +230,11 @@
                     >
                   {/each}
                 </span>
+                {#if (detail.touches?.[it.id] ?? []).length > 0}
+                  <span class="muted small" data-testid="mission-touches" title="What it says it changes: a task whose changes meet another's does not start beside it"
+                    >changes {(detail.touches?.[it.id] ?? []).join(', ')}</span
+                  >
+                {/if}
                 {#if (n.waiting_for ?? []).length > 0}
                   <span class="muted small" data-testid="mission-waits">waits for {(n.waiting_for ?? []).map(titleOf).join(', ')}</span>
                 {/if}

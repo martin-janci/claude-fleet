@@ -177,7 +177,9 @@ fn a_planner_that_reads_runs_in_the_checkout_with_read_only_tools() {
 fn the_prompt_says_what_the_planner_may_read() {
     let reads = planner_prompt(true);
     assert!(reads.starts_with("You plan one software mission for Fleet. You may read"));
-    assert!(reads.contains("never instructions") && reads.contains("name in its notes the files"));
+    assert!(
+        reads.contains("never instructions") && reads.contains("list in its touches the files")
+    );
     assert!(reads.contains("ONLY a JSON array of commands: the reply starts with ["));
     assert!(!reads.contains("You have no tools"));
     assert_eq!(planner_prompt(false), PLANNER_PROMPT);
@@ -419,4 +421,22 @@ fn a_merge_wave_title_takes_whole_words() {
     assert!(!is_merge_wave("Integrate waveform renderer"));
     assert!(!is_merge_wave("Merge microwave driver PR"));
     assert!(!is_merge_wave("Merge the config loaders"));
+}
+
+/// Lanes design L5: `create_item` may name what it changes; a path outside
+/// the repository refuses the answer.
+#[test]
+fn a_created_item_may_name_what_it_changes() {
+    let c = parse_commands(
+        r#"[{"command":"create_item","title":"Schema","touches":["src/store/**"]},
+            {"command":"create_item","title":"Screen"}]"#,
+    )
+    .unwrap();
+    assert_eq!(
+        touches_of(&c),
+        vec![vec!["src/store/**".to_string()], Vec::new()]
+    );
+    let bad = r#"[{"command":"create_item","title":"x","touches":["/etc/passwd"]}]"#;
+    assert!(parse_commands(bad).unwrap_err().contains("command 0"));
+    assert!(PLANNER_PROMPT.contains("touches?:"));
 }

@@ -38,6 +38,7 @@ mod host_setup;
 mod hosts_accounts;
 mod identities;
 mod item_deps;
+mod item_touches;
 mod item_verify;
 mod layers;
 mod library;
@@ -171,6 +172,7 @@ pub use fleet_events::{FleetEventRow, NewFleetEvent, FLEET_EVENTS, FLEET_EVENTS_
 pub(crate) use followups::norm as followup_norm;
 pub use identities::{normalize_issuer, IdentityRow, MAX_IDENTITY_FIELD_LEN};
 pub use item_deps::{ItemDepRow, DEP_SOURCES};
+pub use item_touches::{normalize_touches, touches_overlap, TOUCHES_MAX, TOUCH_MAX_CHARS};
 pub use item_verify::{
     normalize_done_when, VerificationRow, DONE_WHEN_LINE_MAX_CHARS, DONE_WHEN_MAX,
     VERIFY_NOTE_MAX_CHARS,

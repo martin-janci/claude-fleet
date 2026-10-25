@@ -248,6 +248,9 @@ export interface MissionDetail {
   /** Its lanes with the visible tasks each holds (lanes design L2); absent
    *  when it has none, and from an older hub. */
   lanes?: MissionLane[];
+  /** What each member says it changes (lanes design L5), by item id; only
+   *  members that say. Absent from an older hub. */
+  touches?: Record<number, string[]>;
   /** The planner's open wait, read from its own words rather than the
    *  `events` page (review r9); `null` when it is not waiting, absent from
    *  an older hub. */
