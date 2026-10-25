@@ -602,6 +602,18 @@ pub trait FleetHost: Send + Sync {
     ) -> Result<(), String>;
     /// GitHub: add and remove labels.
     async fn set_pr_labels(&self, req: &LabelsRequest) -> Result<(), String>;
+    /// GitHub: a pull request's description and labels.
+    async fn pr_meta(
+        &self,
+        host: &str,
+        repo: &str,
+        number: i64,
+    ) -> Result<crate::service::agents::review::labels::PrMeta, String>;
+    /// GitHub: replace a pull request's description.
+    async fn set_pr_description(
+        &self,
+        req: &crate::service::agents::review::labels::DescriptionRequest,
+    ) -> Result<(), String>;
     /// GitHub: a pull request's diff (its head's).
     async fn pr_diff(&self, host: &str, repo: &str, number: i64) -> Result<String, String>;
     /// GitHub: the repo's `.claudeignore` at `base`, when it has one.
@@ -844,6 +856,22 @@ impl FleetHost for LiveFleetHost {
 
     async fn set_pr_labels(&self, req: &LabelsRequest) -> Result<(), String> {
         self.gh.set_labels(req).await
+    }
+
+    async fn pr_meta(
+        &self,
+        host: &str,
+        repo: &str,
+        number: i64,
+    ) -> Result<crate::service::agents::review::labels::PrMeta, String> {
+        self.gh.pr_meta(host, repo, number).await
+    }
+
+    async fn set_pr_description(
+        &self,
+        req: &crate::service::agents::review::labels::DescriptionRequest,
+    ) -> Result<(), String> {
+        self.gh.set_description(req).await
     }
 
     async fn pr_diff(&self, host: &str, repo: &str, number: i64) -> Result<String, String> {
@@ -1520,7 +1548,7 @@ impl FleetRunner {
                 };
             }
         }
-        let subject = match self.subject(job, rule, now).await {
+        let mut subject = match self.subject(job, rule, now).await {
             Ok(s) => s,
             Err(o) => return o,
         };
@@ -1528,6 +1556,7 @@ impl FleetRunner {
             Ok(d) => d,
             Err(o) => return o,
         };
+        self.with_review_context(rule, &inst, &mut subject, diff.as_deref(), now);
         let ctx = json!({ "inputs": inst.values, "subject": subject, "now": now });
         let context = self.context(&inst, rule.id, &ctx, now);
         let d = &inst.loaded().definition;
@@ -1642,6 +1671,57 @@ impl FleetRunner {
                 message: e,
                 cost_micros: cost,
             },
+        }
+    }
+
+    /// A pull request's subject gains what the PR reviewer knows of it:
+    /// `previous`, the instance's last review sent on it
+    /// (`actions::remembered_review`), and `paths`, the files of the diff the
+    /// run reads.
+    fn with_review_context(
+        &self,
+        rule: &AgentRuleRow,
+        inst: &Instance,
+        subject: &mut Value,
+        diff: Option<&str>,
+        now: i64,
+    ) {
+        if !inst.loaded().definition.trigger.source.is_github() {
+            return;
+        }
+        let (Some(repo), Some(number)) = (
+            subject.get("repo").and_then(Value::as_str),
+            subject.get("number").and_then(Value::as_i64),
+        ) else {
+            return;
+        };
+        let key = super::actions::review_key(repo, number);
+        let previous = self
+            .store
+            .lock()
+            .ok()
+            .and_then(|s| {
+                s.agent_record(
+                    &subjects_namespace(rule.id),
+                    super::actions::REVIEW_KIND,
+                    &key,
+                    now,
+                )
+                .ok()
+                .flatten()
+            })
+            .and_then(|r| serde_json::from_str::<Value>(&r.value).ok());
+        let Some(m) = subject.as_object_mut() else {
+            return;
+        };
+        if let Some(p) = previous {
+            m.insert("previous".into(), p);
+        }
+        if let Some(d) = diff {
+            m.insert(
+                "paths".into(),
+                json!(crate::service::agents::review::diff::diff_paths(d)),
+            );
         }
     }
 
