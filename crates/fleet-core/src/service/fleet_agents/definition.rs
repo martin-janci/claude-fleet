@@ -917,7 +917,20 @@ pub struct Limits {
     /// off, an unattended approval is sent as COMMENT.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub auto_approve: bool,
+    /// What an instance's runs may cost in a UTC day, at most (USD, up to
+    /// [`MAX_DAILY_BUDGET_USD`]): past it, a job waits for the next day.
+    /// Unset is no cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub daily_budget_usd: Option<f64>,
+    /// A `number` input whose value lowers the budget for one instance; a
+    /// value above `daily_budget_usd` is held to it, so an instance can
+    /// spend less than its definition allows, never more.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_input: Option<String>,
 }
+
+/// The highest `limits.daily_budget_usd` a definition may set.
+pub const MAX_DAILY_BUDGET_USD: f64 = 1000.0;
 
 impl Default for Limits {
     fn default() -> Self {
@@ -926,7 +939,25 @@ impl Default for Limits {
             write_projects: Vec::new(),
             repos: Vec::new(),
             auto_approve: false,
+            daily_budget_usd: None,
+            budget_input: None,
         }
+    }
+}
+
+impl Limits {
+    /// PURE: an instance's daily budget in micro-USD: the definition's,
+    /// lowered by the `budget_input` value when it is a lower number.
+    pub fn budget_micros(&self, values: &serde_json::Map<String, Value>) -> Option<i64> {
+        let ceiling = self.daily_budget_usd?;
+        let own = self
+            .budget_input
+            .as_ref()
+            .and_then(|i| values.get(i))
+            .and_then(|v| v.as_f64().or_else(|| v.as_str()?.trim().parse().ok()))
+            .filter(|v| v.is_finite() && *v >= 0.0);
+        let usd = own.map_or(ceiling, |o| o.min(ceiling));
+        Some((usd * 1_000_000.0).round() as i64)
     }
 }
 
@@ -1804,6 +1835,24 @@ pub fn problems(d: &Definition, templates: &BTreeMap<String, String>) -> Vec<Str
     // ── limits ──
     if !(500..=30_000).contains(&d.limits.max_body_chars) {
         out.push("limits: max_body_chars is 500-30000".into());
+    }
+    if d.limits
+        .daily_budget_usd
+        .is_some_and(|b| !(b > 0.0 && b <= MAX_DAILY_BUDGET_USD))
+    {
+        out.push(format!(
+            "limits: daily_budget_usd is more than 0, at most {MAX_DAILY_BUDGET_USD}"
+        ));
+    }
+    if let Some(name) = &d.limits.budget_input {
+        if d.limits.daily_budget_usd.is_none() {
+            out.push("limits: budget_input lowers daily_budget_usd: set it".into());
+        }
+        match d.inputs.iter().find(|i| &i.name == name) {
+            Some(i) if i.kind == InputType::Number => {}
+            Some(_) => out.push(format!("limits: budget_input {name} is not a number input")),
+            None => out.push(format!("limits: budget_input {name} is not an input")),
+        }
     }
     for (i, p) in d.limits.write_projects.iter().enumerate() {
         check_template(

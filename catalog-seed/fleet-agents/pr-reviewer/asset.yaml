@@ -3,6 +3,7 @@ name: pr-reviewer
 description: "The PR reviewer as a definition: reviews each new head of an open pull request in a worktree of that head, from its filtered diff. Line comments land on the diff, a re-review settles the previous review's findings, a dismissed review is made again, and the description is written when the PR has none. Pairs with pr-test-debate, which shares its test exemptions."
 inputs:
   - { name: repo, type: text, label: Repository (owner/repo), required: true, help: "e.g. martin-janci/claude-fleet" }
+  - { name: daily_budget, type: number, label: Daily budget (USD), min: 0, max: 25, help: "At most 25; past it, runs wait for the next UTC day." }
 stores:
   - { role: exemptions, kind: fleet, label: Accepted test exemptions, shared_by_default: true }
 trigger:
@@ -67,3 +68,5 @@ actions:
     body: "{{answer.description}}"
 limits:
   max_body_chars: 8000
+  daily_budget_usd: 25
+  budget_input: daily_budget

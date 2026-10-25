@@ -1652,6 +1652,18 @@ pub struct FleetRunner {
     pub host: Arc<dyn FleetHost>,
 }
 
+/// PURE: why a run waits when the instance has spent its day's budget.
+pub fn over_budget(spent_micros: i64, budget_micros: i64) -> Option<String> {
+    let usd = |m: i64| format!("${:.2}", m as f64 / 1_000_000.0);
+    (spent_micros >= budget_micros).then(|| {
+        format!(
+            "budget: the instance spent {} of today's {} (limits.daily_budget_usd)",
+            usd(spent_micros),
+            usd(budget_micros)
+        )
+    })
+}
+
 fn failed(kind: ErrorKind, message: impl Into<String>) -> RunOutcome {
     RunOutcome::Failed {
         kind,
@@ -1785,6 +1797,21 @@ impl FleetRunner {
                 return RunOutcome::Deferred {
                     at: at + cooldown,
                     reason: format!("cooldown: {} ran less than {cooldown}s ago", job.subject),
+                };
+            }
+        }
+        // The instance's day budget (`limits.daily_budget_usd`): spent, the
+        // job waits for the next UTC day rather than being dropped.
+        if let Some(budget) = inst.loaded().definition.limits.budget_micros(&inst.values) {
+            let day = crate::service::routines::cron::local_day_start(now, 0);
+            let spent = lock(&self.store)
+                .ok()
+                .and_then(|s| s.agent_rule_cost_since(rule.id, day).ok())
+                .unwrap_or(0);
+            if let Some(reason) = over_budget(spent, budget) {
+                return RunOutcome::Deferred {
+                    at: day + 86_400,
+                    reason,
                 };
             }
         }

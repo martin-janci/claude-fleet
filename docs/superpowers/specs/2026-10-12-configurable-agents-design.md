@@ -720,7 +720,8 @@ The gaps, in the order they close (each its own PR):
    `tracker_comment` sends the same text plain (`WriteOp::Comment`) and
    `tracker_issue` creates an item in the project (`WriteOp::CreateItem`);
    an issue link is Jira's, so a link, or an issue with one, is refused
-   there. Not built: restating the built-in agents.
+   there. The built-in agents are restated as gallery definitions
+   (*Migration* above).
 
    `pr_review`, built 2026-10-20: a review of the subject's head with line
    comments, on a `github_prs` trigger only and never with `each`. It takes
@@ -729,17 +730,19 @@ The gaps, in the order they close (each its own PR):
    COMMENT) and `findings`, an array field of the answer whose items have
    `path`, `line` and `body` (the validator checks the schema). Planning
    keeps the head the run read (`sha`), at most 30 findings, and the event;
-   an `auto` review never approves (APPROVE becomes COMMENT: an approval is
-   a person's). Sending checks the repo as `pr_comment` does, expires the
+   an `auto` review never approves unless the definition sets
+   `limits.auto_approve`, and never requests changes (*Migration*). Sending checks the repo as `pr_comment` does, expires the
    action when the PR is no longer open or its head moved on, fetches the
    diff and places each finding on it with the PR reviewer's
    `commentable_lines` / `snap_line` (within three lines); a finding that
    does not land is listed in the body under *Outside the diff*. The body
    and each line comment end with the instance's marker. An APPROVE or
    REQUEST_CHANGES GitHub refuses on one's own PR is sent as COMMENT, as
-   the reviewer does. Not taken from the reviewer: its confidence filter,
-   the debate, and the re-review of a dismissed review (`verify`), which
-   reads the reviewer's own `review_prs` table.
+   the reviewer does. The reviewer's confidence filter, its verdict
+   adjustment against the previous review, the debate and the re-review of
+   a dismissed review came later (*Migration* steps 4 and 5): fleet keeps
+   the instance's last review in its own records, never the reviewer's
+   `review_prs` table.
 
    The gallery, built 2026-10-18 (`service/fleet_agents/gallery.rs`): the
    definitions in `catalog-seed/fleet-agents/`, embedded in fleet-core
@@ -808,6 +811,13 @@ The gaps, in the order they close (each its own PR):
    - v1: a shared namespace is per hub.
    - Should it be per org, so one org's instances cannot read another's
      records?
-4. **Cost.** Each instance has its own spend. Should a definition carry a
-   default budget (`run.max_cost_usd`) that an instance may lower but not
-   raise?
+4. **Cost** (decided 2026-10-25). A definition's `limits.daily_budget_usd`
+   (more than 0, at most 1000) caps what one instance's runs cost in a UTC
+   day: the jobs a rule finished since the day began are summed
+   (`Store::agent_rule_cost_since`), and once that reaches the budget a job
+   is deferred to the next day, not dropped. `limits.budget_input` names a
+   `number` input whose value lowers the budget for one instance; a value
+   above the definition's is held to it, so an instance may spend less than
+   its definition allows, never more. Unset is no cap. The gallery's
+   `support` and `pr-reviewer` cap at $25 a day, `pr-test-debate` at $5,
+   each with a `daily_budget` input to lower it.
