@@ -2420,6 +2420,36 @@ fn a_tasks_cost_sums_its_sessions_and_the_group_header_sums_its_tasks() {
     assert!(p.tasks.iter().all(|t| t.cost_micros == 0));
 }
 
+/// Mission improvements M1: a lane's lead worked on two tasks; each
+/// counts its share of the lead's spend, not the whole of it.
+#[test]
+fn a_lane_leads_spend_is_split_by_the_tasks_it_was_handed() {
+    let w = world();
+    {
+        let s = lock(&w.st).unwrap();
+        let spend = |micros: i64| {
+            s.conn_ref()
+                .execute(
+                    "UPDATE sessions SET usage_cost_micros = ?1 WHERE id = ?2",
+                    rusqlite::params![micros, w.s1],
+                )
+                .unwrap();
+        };
+        for (item, before) in [(w.t1, 100_000), (w.t2, 400_000)] {
+            spend(before);
+            let t = s.insert_task(None, Some(w.s1), "p", "n").unwrap();
+            s.set_task_run(t.id, item, 1, "implement").unwrap();
+            s.set_task_cost_start(t.id).unwrap();
+        }
+        spend(1_000_000);
+    }
+    link(&w, w.s1, w.t1, true);
+    link(&w, w.s1, w.t2, true);
+    let p = page(&w, &OrgScope::All, WorkTreeFilters::default());
+    assert_eq!(task_of(&p, "TK-1").cost_micros, 400_000);
+    assert_eq!(task_of(&p, "TK-2").cost_micros, 600_000);
+}
+
 /// Step 2.8: what a rule, Jev or an LLM proposes about a task rides on it
 /// in the shape a session row carries; a task nothing decided carries none.
 #[test]

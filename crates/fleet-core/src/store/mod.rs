@@ -81,6 +81,7 @@ mod sessions;
 mod setting_review;
 mod start_rules;
 mod support_fingerprints;
+mod task_cost;
 mod task_report;
 mod tasks;
 #[cfg(test)]

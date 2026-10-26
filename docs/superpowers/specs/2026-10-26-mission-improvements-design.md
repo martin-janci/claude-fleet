@@ -32,10 +32,16 @@ Línie sú postavené a merané (Missions → Compare). Z návrhu línií ostali
 
 - Zapisuje sa pri každom vzniku `tasks` riadku s `worker_session_id` (štart behu: 0; `deliver` do živého vedúceho: jeho cena v tej chvíli).
 - Starší riadok bez hodnoty: ak je session jedinou úlohou, celá cena session; inak rovnaký podiel (označený ako odhad).
-- **Kde sa to prejaví:** `WorkTask::cost_micros` pre úlohy misie (súčet ich úloh namiesto celých sessions), `run_cost_estimate` (súčet rozdielov / počet behov), stĺpec „Cost / task“ v Compare zostáva cena misie / hotové úlohy (už správne), riadok úlohy v miestnosti misie dostane vlastnú cenu.
+- **Kde sa to prejaví:** `WorkTask::cost_micros` pre úlohy misie (súčet ich úloh namiesto celých sessions), stĺpec „Cost / task“ v Compare zostáva cena misie / hotové úlohy (už správne), riadok úlohy v miestnosti misie dostane vlastnú cenu.
 - Úloha mimo misie (človekova session na dvoch úlohách) sa nemení: pravidlo „počíta sa v oboch“ ostáva tam, kde Fleet nevie, ktorá práca patrila ktorej úlohe.
 
-**Veľkosť** S–M. **Test:** dve úlohy v jednom vedúcom, cena session 10 → 30 → 45; úlohy 20 a 25 (nie 45 a 45).
+**Veľkosť** S–M. **Test:** dve úlohy v jednom vedúcom, cena session 10 → 30 → 45; úlohy 30 a 15 (nie 45 a 45; brief vedúceho patrí prvej úlohe).
+
+**Ako je to postavené v M1:**
+- Migrácia 213: `tasks.cost_start_micros` a partial index `idx_tasks_cost_start` (len riadky s hodnotou). Úlohy línie spred migrácie (`start_head IS NOT NULL`) dostanú `-1` a ich session sa delí rovným dielom.
+- Hodnotu zapisuje len `lanes::begin_task` (prvá úloha nového vedúceho aj doručenie do živého), nie `insert_task`: viac úloh rôznych položiek nesie iba vedúci línie, takže beh vo vlastnej session ostáva `NULL` a počíta celú session ako doteraz. Work view tak číta len úlohy línií cez partial index, bez full scanu (`scale_tests`).
+- `store/task_cost.rs`: `split_session_spend` (čistá funkcia; časti dávajú súčet ceny session, pokles ceny je nula) a `shared_session_spend`. `Graph::shared_spend` vo Work view nahradí celú cenu vedúceho podielom položky.
+- **Odchýlka od návrhu:** `run_cost_estimate` sa nemení. Už počíta každú session raz (`IN`) a delí počtom hotových behov, takže zdieľaná session v ňom nie je dvakrát. Presun session (`repoint_open_tasks`) `cost_start` neprepisuje; je to zriedkavá cesta a úloha v nej dostane nanajvýš nulu namiesto podielu.
 
 ## 3. M3: prečo úloha čaká
 
@@ -121,7 +127,7 @@ Línia už build ohrieva sama (jeden worktree na líniu, štafeta ho nemení). N
 
 | Fáza | Obsah | Správanie | Veľkosť |
 |---|---|---|---|
-| **M1** | `tasks.cost_start_micros`, cena úlohy z rozdielov, `run_cost_estimate` | oprava čísel | S–M |
+| **M1** (postavené) | `tasks.cost_start_micros`, cena úlohy z rozdielov | oprava čísel | S–M |
 | **M3** | `mission_waits`, príčiny v ticku, `stats.waits`, riadok štatistík, Compare | len meranie | M |
 | **M2** | závislá úloha z vetiev závislostí (`item`), merge závislých línií (`lane`), integračná karta pri konflikte, prompt, e2e | mení, odkiaľ beh začína | M |
 | **M7** | `SubagentStart`/`Stop` hooky, timeline, počet na úlohe a v Compare | len zobrazenie | S |

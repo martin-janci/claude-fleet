@@ -388,7 +388,9 @@ pub struct WorkTask {
     pub blocked_by: Vec<String>,
     /// What its sessions have spent, in micro-USD: the usage of every
     /// distinct session this caller sees on an active or ended link. A
-    /// session that worked on two tasks counts in both.
+    /// session that worked on two tasks counts in both, except a lane's
+    /// lead, whose spend is split by the tasks it was handed (mission
+    /// improvements M1).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub cost_micros: i64,
     /// Where the task stands, one word of [`STAGE_VALUES`]: `done`, then
@@ -1178,6 +1180,10 @@ pub(crate) struct Graph {
     /// Every `work_item_deps` edge out of an item in [`Self::items`]: item
     /// id → the items it waits for (redesign step 6.3).
     pub(crate) deps: HashMap<i64, Vec<i64>>,
+    /// A lane lead's spend split by the items of its tasks (mission
+    /// improvements M1, `Store::shared_session_spend`): session id → item
+    /// id → micro-USD. A session absent from it counts whole on each task.
+    pub(crate) shared_spend: HashMap<i64, HashMap<i64, i64>>,
     /// The scope the graph was loaded for, so a task's `blocked_by` names
     /// only items this caller may see.
     pub(crate) scope: OrgScope,
@@ -1432,6 +1438,7 @@ impl Graph {
             item_proposals,
             visible_proposers,
             deps,
+            shared_spend: s.shared_session_spend()?,
             scope: scope.clone(),
             missions_by_item: HashMap::new(),
             mission_waves: HashMap::new(),
@@ -2468,7 +2475,15 @@ fn summarize<'g>(g: &Graph, b: &Built<'g>, with_rejected: bool) -> TaskSummary<'
     for (l, st) in links {
         let row = g.session_of(l);
         if let (Some(r), "active" | "ended") = (row, st) {
-            spent.insert(r.id, r.usage.usage_cost_micros);
+            // A lane's lead worked on several tasks: this one's share.
+            let micros = match g.shared_spend.get(&r.id) {
+                Some(by_item) => item
+                    .and_then(|i| by_item.get(&i.item.id))
+                    .copied()
+                    .unwrap_or(0),
+                None => r.usage.usage_cost_micros,
+            };
+            spent.insert(r.id, micros);
         }
         let link_needs_you = needs_you_of(g, row);
         listed.push((l, st, link_needs_you));

@@ -405,6 +405,8 @@ async fn begin_task(
     );
     let prompt = format!("{preamble}{task_text}");
     let task = run::record_run(&s, row.id, &prompt, item_id, attempt, role)?;
+    // The lead's spend so far: this task costs from here (M1).
+    s.set_task_cost_start(task.id)?;
     if let Some(h) = &head {
         s.set_task_start_head(task.id, h)?;
     }

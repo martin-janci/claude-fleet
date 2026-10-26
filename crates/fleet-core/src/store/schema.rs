@@ -412,6 +412,17 @@ fn routine_runs_has_memory_read_at(conn: &Connection) -> rusqlite::Result<bool> 
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 213: `tasks` already has its
+/// `cost_start_micros` column.
+fn tasks_has_cost_start(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name = 'cost_start_micros'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 212: `routines` already has its
 /// `track_seen` column.
 fn routines_has_track_seen(conn: &Connection) -> rusqlite::Result<bool> {
@@ -2443,6 +2454,13 @@ const MIGRATIONS: &[Migration] = &[
         version: 212,
         sql: include_str!("../../migrations/212_routine_seen.sql"),
         already_applied: Some(routines_has_track_seen),
+    },
+    // Mission improvements M1: what a lane task's lead session had spent
+    // when it got the task. An ADD COLUMN, so guarded.
+    Migration {
+        version: 213,
+        sql: include_str!("../../migrations/213_task_cost_start.sql"),
+        already_applied: Some(tasks_has_cost_start),
     },
 ];
 
