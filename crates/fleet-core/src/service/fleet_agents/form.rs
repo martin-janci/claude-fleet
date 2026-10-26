@@ -10,8 +10,9 @@
 //! 2. *Where*: the host and, for a definition that runs in a project, the
 //!    project;
 //! 3. *Stores*: each role a select of the catalog's MCP servers (with an
-//!    optional `NAME=${SECRET}` override per line) or of the fleet
-//!    namespaces (`rule`, or a shared one; another is typed);
+//!    optional `NAME=${SECRET}` override per line, and a switch that names
+//!    every secret the server reads after this instance: [`own_secret`])
+//!    or of the fleet namespaces (`rule`, or a shared one; another is typed);
 //! 4. *How much*: the level and the hours, under a line naming what the
 //!    agent may write.
 //!
@@ -45,6 +46,41 @@ fn f_store(role: &str) -> String {
 fn f_env(role: &str) -> String {
     format!("f_env_{role}")
 }
+fn f_own(role: &str) -> String {
+    format!("f_own_{role}")
+}
+
+/// PURE: the secret an instance's own binding of `role` reads for the
+/// server's `${name}`: `AGENT_<INSTANCE>_<ROLE>_<NAME>`, upper case, any
+/// other character `_`. A person may name secrets themselves instead (one
+/// shared by several instances); this is the name the form suggests.
+pub fn own_secret(instance: &str, role: &str, name: &str) -> String {
+    format!("AGENT_{instance}_{role}_{name}")
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// PURE: `env` with an override to [`own_secret`] for each of `names` it
+/// does not already override.
+fn with_own_secrets(
+    mut env: BTreeMap<String, String>,
+    instance: &str,
+    role: &str,
+    names: &[String],
+) -> BTreeMap<String, String> {
+    for n in names {
+        env.entry(n.clone())
+            .or_insert_with(|| format!("${{{}}}", own_secret(instance, role, n)));
+    }
+    env
+}
 
 /// What fleet has to offer the form.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -58,6 +94,9 @@ pub struct FormContext {
     pub servers: Vec<String>,
     /// `shared:<name>` namespaces some rule binds.
     pub shared: Vec<String>,
+    /// The secrets each catalog MCP server reads (its `${NAME}`s), by name.
+    #[serde(default)]
+    pub server_secrets: BTreeMap<String, Vec<String>>,
 }
 
 impl FormContext {
@@ -66,16 +105,22 @@ impl FormContext {
         store: &std::sync::Mutex<crate::store::Store>,
     ) -> Result<FormContext, crate::ipc_error::IpcError> {
         use crate::service::catalog::{model::Kind, CatalogTarget};
-        let servers: Vec<String> = CatalogTarget::Personal
+        let server_secrets: BTreeMap<String, Vec<String>> = CatalogTarget::Personal
             .with(|cat| {
                 Ok(cat
                     .assets
                     .iter()
                     .filter(|a| a.kind() == Kind::McpServer)
-                    .map(|a| a.header.name.clone())
+                    .map(|a| {
+                        (
+                            a.header.name.clone(),
+                            super::bindings::server_placeholders(&a.spec),
+                        )
+                    })
                     .collect())
             })
             .unwrap_or_default();
+        let servers: Vec<String> = server_secrets.keys().cloned().collect();
         let s = crate::ipc_error::lock(store)?;
         let db = |e: rusqlite::Error| {
             crate::ipc_error::IpcError::new(crate::ipc_error::codes::E_INTERNAL, e.to_string())
@@ -111,6 +156,7 @@ impl FormContext {
                 .collect(),
             servers,
             shared,
+            server_secrets,
         })
     }
 }
@@ -215,7 +261,23 @@ fn current(rule: Option<&AgentRuleRow>, ctx: &FormContext) -> Map<String, Value>
     for b in super::bindings::parse(&r.bindings).unwrap_or_default() {
         if let Some(s) = &b.server {
             out.insert(f_store(&b.role), s.clone().into());
-            let env: Vec<String> = b.env.iter().map(|(k, v)| format!("{k}={v}")).collect();
+            // Every secret the server reads named after this instance: the
+            // switch, and those lines left out.
+            let names = ctx.server_secrets.get(s).cloned().unwrap_or_default();
+            let own = |k: &str, v: &str| v == format!("${{{}}}", own_secret(&r.scope, &b.role, k));
+            let all_own = !names.is_empty()
+                && names
+                    .iter()
+                    .all(|n| b.env.get(n).is_some_and(|v| own(n, v)));
+            if all_own {
+                out.insert(f_own(&b.role), true.into());
+            }
+            let env: Vec<String> = b
+                .env
+                .iter()
+                .filter(|(k, v)| !(all_own && own(k, v)))
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect();
             if !env.is_empty() {
                 out.insert(f_env(&b.role), env.join("\n").into());
             }
@@ -366,6 +428,37 @@ pub fn grant_form(loaded: &Loaded, ctx: &FormContext, rule: Option<&AgentRuleRow
                     max_len: Some(2000),
                     ..field(&f_env(&r.role), FieldType::Textarea, &format!("{} secrets", r.label))
                 }));
+                let reads: Vec<String> = ctx
+                    .server_secrets
+                    .iter()
+                    .filter(|(_, names)| !names.is_empty())
+                    .map(|(s, names)| format!("{s}: {}", names.join(", ")))
+                    .collect();
+                stores.push(with_value(FormField {
+                    help: Some(format!(
+                        "On: each secret the server reads is this instance's own, \
+                         AGENT_<INSTANCE>_{}_<NAME> (add them under Assets › Secrets; a line above \
+                         still wins). Off: the hub's secrets under the server's own names{}.",
+                        r.role
+                            .chars()
+                            .map(|c| if c.is_ascii_alphanumeric() {
+                                c.to_ascii_uppercase()
+                            } else {
+                                '_'
+                            })
+                            .collect::<String>(),
+                        if reads.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" ({})", reads.join("; "))
+                        }
+                    )),
+                    ..field(
+                        &f_own(&r.role),
+                        FieldType::Bool,
+                        &format!("{}: this instance's own secrets", r.label),
+                    )
+                }));
             }
             StoreKind::Fleet => {
                 let mut opts = vec![pair("rule", "This instance's own")];
@@ -495,14 +588,21 @@ pub fn answers_to_args(
             continue;
         };
         binds.push(match r.kind {
-            StoreKind::Mcp => Binding {
-                role: r.role.clone(),
-                server: Some(chosen.to_string()),
-                name: None,
-                env: parse_env(s(&f_env(&r.role)).unwrap_or_default())
-                    .map_err(|e| format!("{}: {e}", f_env(&r.role)))?,
-                namespace: None,
-            },
+            StoreKind::Mcp => {
+                let mut env = parse_env(s(&f_env(&r.role)).unwrap_or_default())
+                    .map_err(|e| format!("{}: {e}", f_env(&r.role)))?;
+                if checked.get(&f_own(&r.role)).and_then(Value::as_bool) == Some(true) {
+                    let names = ctx.server_secrets.get(chosen).cloned().unwrap_or_default();
+                    env = with_own_secrets(env, s(F_INSTANCE).unwrap_or_default(), &r.role, &names);
+                }
+                Binding {
+                    role: r.role.clone(),
+                    server: Some(chosen.to_string()),
+                    name: None,
+                    env,
+                    namespace: None,
+                }
+            }
             StoreKind::Fleet => Binding {
                 role: r.role.clone(),
                 server: None,

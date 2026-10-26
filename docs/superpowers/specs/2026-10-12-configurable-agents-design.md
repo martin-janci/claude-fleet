@@ -804,9 +804,16 @@ The gaps, in the order they close (each its own PR):
    - A store reachable only from another host (a Graylog inside one customer's
      network) would need the run, or just that store, on that host.
    - Should a binding name its own host, the call relayed through the hub?
-2. **Secret naming.** Should per-binding secrets be generated names
-   (`AGENT_<RULE>_<ROLE>_<VAR>`), so the form needs no naming, or names the
-   person picks so they can be reused across instances?
+2. **Secret naming** (decided 2026-10-26): both. A binding's `env` names
+   the secrets a person picks, so one can serve several instances; with no
+   override the server reads the hub's secrets under its own `${NAME}`s.
+   The grant form's *this instance's own secrets* switch per MCP role fills
+   every override it leaves out with a generated name,
+   `AGENT_<INSTANCE>_<ROLE>_<NAME>` (`form::own_secret`, upper case, any
+   other character `_`), and its help lists the secrets each catalog server
+   reads (`FormContext::server_secrets`). The grant still starts each
+   binding and names any secret missing from the hub's store; *Edit* shows
+   the switch on and only the person's own lines.
 3. **Shared fleet namespaces across orgs.**
    - v1: a shared namespace is per hub.
    - Should it be per org, so one org's instances cannot read another's
