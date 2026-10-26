@@ -47,6 +47,7 @@
     roomGroups,
     roomMissionId,
     rowProgress,
+    openMissionCompare,
     startNewMission,
     workMissionsOpen,
   } from './mission_room';
@@ -171,6 +172,13 @@
       >
     {/if}
     <span class="grow"></span>
+    <button
+      class="btn btn--quiet"
+      type="button"
+      title="Compare the missions that ran: runs, cold starts, time and cost per done task, by how their tasks run"
+      data-testid="mission-compare-open"
+      onclick={openMissionCompare}>Compare</button
+    >
     <button
       class="btn btn--quiet new"
       type="button"

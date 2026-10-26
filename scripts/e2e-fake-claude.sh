@@ -17,8 +17,11 @@
 #     request's `WORK_HANDOVER_BEGIN_<nonce>` is answered with a hand-off
 #     between that request's two marker lines (M9.3); a safe-kill request
 #     (`SAFE_REMOVE_READY_<nonce>`) is refused with that request's FAILED
-#     marker and a reason, since the e2e keeps the dirty tree dirty; anything
-#     else gets a one-line acknowledgement.
+#     marker and a reason, since the e2e keeps the dirty tree dirty; a
+#     mission task's prompt (one asking for `FLEET_TASK_DONE_<nonce>`) is
+#     done: one new file committed in the pane's checkout, then the marker
+#     on its own line and a JSON report (lanes design L6); anything else
+#     gets a one-line acknowledgement.
 #   * Every hook's HTTP status and response body is appended to
 #     $FAKE_CLAUDE_LOG_DIR/<id>/hooks.log, every prompt to prompts.log, so
 #     the script can assert what fleet handed Claude (the queued brief rides
@@ -68,6 +71,7 @@ while IFS= read -r line; do
   hook UserPromptSubmit ",\"prompt\":$(printf '%s' "$prompt" | jstr)"
   nonce=$(printf '%s' "$prompt" | grep -oE 'WORK_HANDOVER_BEGIN_[0-9a-f]+' | head -1 | sed 's/^WORK_HANDOVER_BEGIN_//')
   sk=$(printf '%s' "$prompt" | grep -oE 'SAFE_REMOVE_READY_[0-9a-f]+' | head -1 | sed 's/^SAFE_REMOVE_READY_//')
+  task=$(printf '%s' "$prompt" | grep -oE 'FLEET_TASK_DONE_[0-9a-f]+' | head -1 | sed 's/^FLEET_TASK_DONE_//')
   if [ -n "$sk" ]; then
     reply="I cannot persist this work: the e2e keeps it uncommitted.
 SAFE_REMOVE_FAILED_$sk: e2e keeps uncommitted.txt uncommitted"
@@ -77,6 +81,18 @@ WORK_HANDOVER_BEGIN_$nonce
 E2E-HANDOVER-NOTE: the redirect fix is on the branch; left: the tests.
 WORK_HANDOVER_END_$nonce
 Anything else?"
+  elif [ -n "$task" ]; then
+    n=$(( $(cat "$log/tasks" 2>/dev/null || echo 0) + 1 ))
+    echo "$n" >"$log/tasks"
+    printf 'task %s of %s\n' "$n" "$sid" >"fake-task-$n.txt"
+    git add "fake-task-$n.txt" >/dev/null 2>&1
+    git -c user.name=fake-claude -c user.email=fake-claude@example.invalid -c commit.gpgsign=false \
+      commit -qm "fake task $n" >/dev/null 2>&1
+    reply="Did task $n.
+FLEET_TASK_DONE_$task
+\`\`\`json
+{\"summary\":\"fake task $n\",\"outcome\":\"done\"}
+\`\`\`"
   else
     reply="fake claude read your prompt ($(printf '%s' "$prompt" | wc -c | tr -d ' ') bytes)"
   fi
