@@ -302,8 +302,8 @@ fn the_script_checks_in_place_or_in_a_snapshot_of_the_commit() {
     let w = world();
     let at = target_for(&w.s, w.item).unwrap();
     let sc = check_script(&at, "sonnet", &["cargo test".into()], "check it").unwrap();
-    assert!(sc.contains("cd -- /w/pos-2"), "{sc}");
-    assert!(sc.contains(&format!("git cat-file -e {HEAD}")), "{sc}");
+    assert!(sc.contains("cd -- '/w/pos-2'"), "{sc}");
+    assert!(sc.contains(&format!("git cat-file -e '{HEAD}'")), "{sc}");
     assert!(sc.contains("git worktree add --detach"), "{sc}");
     assert!(sc.contains("worktree remove --force"), "{sc}");
     assert!(sc.contains(&format!("{BASE}..HEAD")), "{sc}");
@@ -341,7 +341,10 @@ fn setting_an_item_done_is_a_fleet_event_once() {
             .unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].subject, format!("item:{}", w.item));
-    assert_eq!(rows[0].detail.as_deref(), Some("Queue schema was set done"));
+    assert_eq!(
+        rows[0].detail.as_deref(),
+        Some("POS-1 Queue schema was set done")
+    );
 }
 
 #[test]

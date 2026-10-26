@@ -417,6 +417,10 @@ pub async fn start(
 /// scoped caller (a per-host token, an org-bound client) is refused before
 /// any row is read.
 fn person_decides(view: &ViewScope) -> Result<(), IpcError> {
+    // This is the org boundary, not a privacy fence: a check starts a billed
+    // headless run and the switch changes a project, both a PERSON's ask by
+    // design, so every scoped caller is refused outright before any row is
+    // reached. The item is fenced after it (`status::item_visible`).
     if !view.org.is_all() {
         return Err(IpcError::new(
             codes::E_FORBIDDEN,
