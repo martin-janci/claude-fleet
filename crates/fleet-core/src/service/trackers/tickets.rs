@@ -686,6 +686,12 @@ pub struct StartArgs {
     /// The login the session bills (redesign 8.7): a credential profile on
     /// the host; `None` = the host's own. Set by a mission's grant.
     pub profile: Option<String>,
+    /// The branch a NEW checkout starts from instead of the repo's default
+    /// branch: a run beside the work it continues or checks (a retry, a
+    /// review, a test) starts from that work's branch
+    /// ([`crate::service::work::run::prior_work`]). A reused worktree
+    /// ignores it. Set by a run, never from a tool's own parameters.
+    pub base_branch: Option<String>,
 }
 
 /// Where a start lands and what it is called.
@@ -712,6 +718,10 @@ pub struct StartPlan {
     /// is not this plan's.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub parallel: bool,
+    /// The branch a new checkout starts from ([`StartArgs::base_branch`]);
+    /// `None`, the default branch. Never read back from a client.
+    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
+    pub base_branch: Option<String>,
     /// Who starts ([`StartArgs::decider`]): decides the link's source.
     /// Never on the wire: a plan read back is a person's.
     #[serde(skip)]
@@ -1274,6 +1284,31 @@ pub fn plan_resolved(
         }
         None => start_name(&key, &title),
     };
+    let codex = rule.as_ref().and_then(|r| r.agent.as_deref()) == Some(crate::store::AGENT_CODEX);
+    let named_profile = args
+        .profile
+        .clone()
+        .or_else(|| rule.as_ref().and_then(|r| r.profile.clone()))
+        .or_else(|| {
+            placement
+                .as_ref()
+                .and_then(|w| w.profile.clone())
+                .filter(|_| !codex)
+        });
+    let profile = match named_profile {
+        Some(p) => Some(p),
+        // Nobody named a login: the one placement picked, else the host's
+        // own, gives way to a login on the host with headroom when its
+        // account is past `accounts.pause_at` (a named host skips
+        // placement, so this is its only look at the limits).
+        None if !codex => crate::service::account_limits::login_with_headroom(
+            &s,
+            &host_alias,
+            placed_profile.as_deref(),
+            crate::store::now_unix(),
+        )?,
+        None => None,
+    };
     Ok(StartPlan {
         name,
         key,
@@ -1285,22 +1320,11 @@ pub fn plan_resolved(
         worktree_id,
         per_project: args.per_project,
         parallel: args.parallel,
+        base_branch: args.base_branch.clone().filter(|_| worktree_id.is_none()),
         decider: args.decider,
         owner: args.owner,
         origin: args.origin.clone(),
-        profile: args
-            .profile
-            .clone()
-            .or_else(|| rule.as_ref().and_then(|r| r.profile.clone()))
-            .or_else(|| {
-                let codex = rule.as_ref().and_then(|r| r.agent.as_deref())
-                    == Some(crate::store::AGENT_CODEX);
-                placement
-                    .as_ref()
-                    .and_then(|w| w.profile.clone())
-                    .or(placed_profile)
-                    .filter(|_| !codex)
-            }),
+        profile,
         model: rule.as_ref().and_then(|r| r.model.clone()),
         effort: rule.as_ref().and_then(|r| r.effort.clone()),
         agent: rule.as_ref().and_then(|r| r.agent.clone()),
@@ -1607,7 +1631,7 @@ where
         name: String::new(),
         call_id: None,
         new_worktree: plan.worktree_id.is_none().then(|| plan.branch.clone()),
-        base_branch: None,
+        base_branch: plan.base_branch.clone(),
         kind: None,
         start_command: None,
         friendly_name: crate::validate::friendly_name(&plan.name)

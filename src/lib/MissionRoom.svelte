@@ -132,6 +132,7 @@
     sendSteer,
     showMissionPanel,
     startNewMission,
+    statsLine,
     steerBlocked,
     steerBusy,
     steerPrefix,
@@ -159,6 +160,8 @@
   const plan = $derived(detail?.plan ?? null);
   /** The header's autonomy in words: "Runs at L1 · L3 asked · L1 ceiling". */
   const autonomy = $derived(plan ? autonomyWords(plan.autonomy) : null);
+  /** Its runs and its idle time (lanes design L0). */
+  const statsText = $derived(statsLine(detail?.stats));
   const pressable = $derived((plan?.steps ?? []).filter((s) => s.kind !== 'ask'));
   const openCards = $derived((plan?.cards ?? []).filter((c) => c.state === 'open' && !hiddenCards.includes(c.id)));
   const runs = $derived(detail ? runsOf(detail) : []);
@@ -377,6 +380,8 @@
   /** Runs open at once, and a continuous mission's wake interval in minutes
    *  ('' = no timer) (step 1.8). */
   let editParallel = $state(POLICY_DEFAULT_PARALLEL);
+  /** How its tasks run (lanes design L3): `item` or `lane`. */
+  let editExecution = $state<'item' | 'lane'>('item');
   let editWakeMins = $state<number | null>(null);
   const minWakeMins = POLICY_MIN_WAKE_SECS / 60;
   const wakeBad = $derived(editMode === 'continuous' && editWakeMins != null && !(editWakeMins >= minWakeMins));
@@ -390,6 +395,7 @@
     editLevel = mission.level;
     editMode = mission.mode;
     editParallel = mission.policy?.max_parallel ?? POLICY_DEFAULT_PARALLEL;
+    editExecution = mission.policy?.execution ?? 'item';
     const wake = mission.policy?.wake_every_secs;
     editWakeMins = wake ? Math.round(wake / 60) : null;
     editing = true;
@@ -408,7 +414,11 @@
           done_when: doneWhenRows(editDoneWhen),
           level: editLevel,
           mode: editMode,
-          policy: policyWith(mission.policy, { max_parallel: editParallel, wake_every_secs: wakeSecs }),
+          policy: policyWith(mission.policy, {
+            max_parallel: editParallel,
+            wake_every_secs: wakeSecs,
+            execution: editExecution,
+          }),
         },
         mission.version,
       ),
@@ -895,6 +905,9 @@
               of {dollars(plan.autonomy.grant.budget_micros)}{/if} · {plan.counts.open} running
           </p>
         {/if}
+        {#if statsText}
+          <p class="meta" data-testid="mission-stats" title="Runs per done task, retries, cold starts (sessions started), a task's median time, and the share of the working span with no run open">{statsText}</p>
+        {/if}
         {#if mayChange && confirmMove}
           <div class="row confirm-move" role="alertdialog" aria-label="Confirm" data-testid="mission-move-confirm-row">
             <span>{finalMoveQuestion(mission.name, confirmMove)}</span>
@@ -1341,6 +1354,13 @@
                   <label class="field inline"
                     >Parallel runs
                     <input type="number" min="1" max={POLICY_MAX_PARALLEL} bind:value={editParallel} class="role" data-testid="mission-edit-parallel" /></label
+                  >
+                  <label class="field inline" title="By lane: a lane's tasks run one after another in one session on the lane's branch. Changes only while the mission is not running."
+                    >Tasks run
+                    <select bind:value={editExecution} disabled={mission.state === 'active'} data-testid="mission-edit-execution">
+                      <option value="item">Each in its own session</option>
+                      <option value="lane">By lane, one session each</option>
+                    </select></label
                   >
                   {#if editMode === 'continuous'}
                     <label class="field inline"

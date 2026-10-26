@@ -37,7 +37,9 @@ import {
   type Mission,
   type MissionDetail,
   type MissionEvent,
+  type MissionStats,
 } from './missions';
+import { formatDuration } from './account_usage';
 
 // ── Where the room is ──
 
@@ -297,6 +299,27 @@ export function sendSteer(m: Pick<Mission, 'id' | 'name'>, text: string, operato
   // itself went already.
   void controlJournal({ action: 'follow', thread: 'mission', id: m.id, text });
   return receipt;
+}
+
+/**
+ * The room's metrics line (lanes design L0): how many runs its done tasks
+ * took, the retries, the cold starts, and how much of its working span no
+ * run was open. `null` before its first run.
+ */
+export function statsLine(st: MissionStats | null | undefined): string | null {
+  if (!st || st.span_secs <= 0) return null;
+  const runs = Object.values(st.runs_by_role).reduce((a, b) => a + b, 0);
+  const parts = [`${runs} run${runs === 1 ? '' : 's'}`];
+  // The backend sends the ratio only once a task is done.
+  if (st.runs_per_done_item_x100 != null) {
+    parts[0] += ` (${(st.runs_per_done_item_x100 / 100).toFixed(1)} per done task)`;
+  }
+  if (st.retries > 0) parts.push(`${st.retries} retr${st.retries === 1 ? 'y' : 'ies'}`);
+  parts.push(`${st.sessions} cold start${st.sessions === 1 ? '' : 's'}`);
+  if (st.item_secs_p50 != null) parts.push(`a task takes ${formatDuration(st.item_secs_p50)}`);
+  const idle = Math.round((st.idle_secs * 100) / st.span_secs);
+  parts.push(`idle ${idle}% of ${formatDuration(st.span_secs)}`);
+  return parts.join(' · ');
 }
 
 /** Test seam: the room as a fresh run has it. */

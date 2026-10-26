@@ -27,6 +27,7 @@
   import { hintAnchor } from './hints';
   import { composerPresets, presetSendsNow, type ComposerPreset } from './composer_presets';
   import { chipsThatFit } from './composer_chips';
+  import { offeredSuggestion } from './prompt_suggestion';
   import { contextLevel } from './attention';
   import { shortAge } from './session_status';
   import { onTimelineEvent, onConversationsChanged } from './live_events';
@@ -1364,6 +1365,14 @@
   // read yet is the mangled line the gate exists to prevent.
   const outboxBusy = $derived(outgoing.some((m) => m.state === 'waiting' || m.state === 'sending' || m.state === 'sent'));
   const busyBlocked = $derived(blockWhileBusy && (busyNote !== null || outboxBusy));
+  // The next prompt Claude Code proposes (the dim text in its own empty
+  // box): ghost text here too, taken with → (Tab moves focus on a page), and
+  // a chip that fills the box or, with Shift, sends it. Hidden while our own
+  // send is in flight: the row still reads idle with the old proposal until
+  // the prompt's hook lands, and offering it then would send it twice.
+  const suggestion = $derived(offeredSuggestion(session, liveStatus, draft, optimistic || outboxBusy));
+  // Said to a screen reader when → fills the box with the suggestion.
+  let suggestionTaken = $state('');
   // F4 (review 2026-10-17): what the gate holds instead of refusing. A line
   // typed while busy waits here as a "queued · cancel" chip and goes out,
   // one per turn, when the gate opens (`composer_hold.ts`).
@@ -1719,6 +1728,7 @@
   let composerEdits = $state(0);
   function onComposerInput() {
     histIndex = null;
+    suggestionTaken = '';
     composerEdits++;
   }
   const slashOpen = $derived(slashMatches.length > 0);
@@ -2025,6 +2035,16 @@
         e.preventDefault();
         return;
       }
+    }
+    if (e.key === 'ArrowRight' && !e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey && suggestion) {
+      e.preventDefault();
+      suggestionTaken = `Filled with Claude's suggestion: ${suggestion}`;
+      draft = suggestion;
+      // As a chip click does: a suggestion that starts with `/` is text to
+      // send, not a command being typed, so no slash menu opens over it.
+      slashDismissedFor = draft;
+      histIndex = null;
+      return;
     }
     if (e.key !== 'Enter' || e.shiftKey || e.altKey) return;
     e.preventDefault();
@@ -3179,6 +3199,19 @@
             onclick={() => void sendText('')}>⏎ Press Enter</button>
         </div>
       {/if}
+      {#if suggestion}
+        <div class="stuck-row">
+          <button
+            type="button"
+            class="btn btn--chip suggest-chip"
+            data-testid="conv-chip-suggestion"
+            title={`Claude suggests: ${suggestion}\n\nClick fills the box; Shift+click sends now. → in the empty box fills it too.`}
+            disabled={viewing !== null || shareBlocked !== null}
+            onclick={(e) => usePreset({ label: suggestion, text: suggestion }, e.shiftKey)}
+            ><span class="suggest-mark" aria-hidden="true">✦</span><span class="suggest-text">{suggestion}</span></button
+          >
+        </div>
+      {/if}
       <div class="chips" data-testid="conv-chips" bind:this={chipsRow}>
         <!-- Every chip at its natural width, out of the flow, so the
              collapsed row can tell how many fit (measureChips). -->
@@ -3299,7 +3332,7 @@
           rows="2"
           use:autoGrow={draft}
           onpaste={onComposerPaste}
-          {placeholder}
+          placeholder={suggestion ? `${suggestion}   → fills` : placeholder}
           title={shareBlocked ?? undefined}
           disabled={viewing !== null || shareBlocked !== null}
         ></textarea>
@@ -3345,6 +3378,7 @@
             {/each}
           </select>
           <span class="composer-hint" id={COMPOSER_HINT_ID} data-testid="conv-composer-hint">{composerHint}</span>
+          <span class="sr-only" role="status" aria-live="polite" data-testid="conv-suggestion-taken">{suggestionTaken}</span>
           {#if tuneOn}
             <button
               type="button"
@@ -3769,6 +3803,34 @@
   /* Marks an auto-send chip: a click sends rather than fills. */
   .chip-send {
     opacity: 0.6;
+  }
+  /* `.btn` is a flex box, where text-overflow does nothing: the ellipsis
+     lives on the text's own block, which may shrink below its width. */
+  .suggest-chip {
+    min-width: 0;
+    max-width: 100%;
+    gap: 0.4em;
+  }
+  .suggest-mark {
+    flex: none;
+    opacity: 0.6;
+  }
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    border: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  .suggest-text {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .composer-shell {
     position: relative;

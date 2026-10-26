@@ -1451,6 +1451,54 @@ describe('ConversationPanel quick actions', () => {
     expect(box.value).toBe('/status');
   });
 
+  // Claude Code's next-prompt suggestion (migration 206): ghost text taken
+  // with → (Tab keeps moving focus), and a chip that fills the box or, with
+  // Shift, sends it. Once sent it is not offered again before the hook lands.
+  it('offers Claude Code\'s suggestion on an idle session: chip, → and Shift+click', async () => {
+    mockedSend.mockResolvedValue({ ok: true, value: undefined });
+    await mount({ claude_status: 'idle', prompt_suggestion: 'run the tests' });
+    const box = screen.getByTestId('conv-composer-input') as HTMLTextAreaElement;
+    expect(box.placeholder).toContain('run the tests');
+    const chip = screen.getByTestId('conv-chip-suggestion');
+    expect(chip.textContent).toContain('run the tests');
+    expect(chip.title).toContain('run the tests');
+    await fireEvent.click(chip);
+    await settle();
+    expect(mockedSend).not.toHaveBeenCalled();
+    expect(box.value).toBe('run the tests');
+    // A draft in the box hides the offer.
+    expect(screen.queryByTestId('conv-chip-suggestion')).toBeNull();
+    box.value = '';
+    await fireEvent.input(box);
+    await fireEvent.keyDown(box, { key: 'Tab' });
+    expect(box.value).toBe('');
+    await fireEvent.keyDown(box, { key: 'ArrowRight' });
+    expect(box.value).toBe('run the tests');
+    expect(screen.getByTestId('conv-suggestion-taken').textContent).toContain('run the tests');
+    box.value = '';
+    await fireEvent.input(box);
+    await fireEvent.click(screen.getByTestId('conv-chip-suggestion'), { shiftKey: true });
+    await settle();
+    expect(mockedSend).toHaveBeenCalledWith('local', 'ctl', 'run the tests');
+    // The row still reads idle with the proposal: no second offer to send.
+    expect(screen.queryByTestId('conv-chip-suggestion')).toBeNull();
+    expect(box.placeholder).not.toContain('run the tests');
+  });
+
+  it('takes a suggestion that starts with / as text: no slash menu opens over it', async () => {
+    await mount({ claude_status: 'idle', prompt_suggestion: '/status' });
+    const box = screen.getByTestId('conv-composer-input') as HTMLTextAreaElement;
+    await fireEvent.keyDown(box, { key: 'ArrowRight' });
+    await settle();
+    expect(box.value).toBe('/status');
+    expect(screen.queryByTestId('conv-slash-menu')).toBeNull();
+  });
+
+  it('offers no suggestion while a turn runs', async () => {
+    await mount({ claude_status: 'working', prompt_suggestion: 'run the tests' });
+    expect(screen.queryByTestId('conv-chip-suggestion')).toBeNull();
+  });
+
   it('a session stuck on press_enter gets a chip that sends a bare Enter', async () => {
     await mount({ claude_status: 'blocked', stuck_kind: 'press_enter' });
     await fireEvent.click(screen.getByTestId('conv-chip-enter'));

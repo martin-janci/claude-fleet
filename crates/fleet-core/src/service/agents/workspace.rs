@@ -50,10 +50,6 @@ pub fn branch_ok(b: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/'))
 }
 
-fn sha_ok(s: &str) -> bool {
-    (7..=64).contains(&s.len()) && s.chars().all(|c| c.is_ascii_hexdigit())
-}
-
 /// PURE: the directory a job's worktree lives in.
 pub fn workspace_dir(root: &str, job_id: i64) -> String {
     format!("{}.fleet-agents/job-{job_id}", root.trim_end_matches('/'))
@@ -89,7 +85,7 @@ pub fn prepare_script(
     };
     let expect = match expect_sha {
         None => String::new(),
-        Some(sha) if sha_ok(sha) => format!(
+        Some(sha) if crate::store::is_commit_id(sha) => format!(
             "case \"$(git rev-parse \"$ref\")\" in {}*) ;; \
              *) git update-ref -d \"$ref\"; echo {TAG}moved; exit 0;; esac; ",
             sha.to_ascii_lowercase()

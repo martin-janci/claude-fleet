@@ -470,6 +470,30 @@ pub fn freer_login(
     .map(|(_, l)| l))
 }
 
+/// The login a start that nobody chose a login for runs under on
+/// `host_alias`: `profile` (`None` = the host's own), unless its account is
+/// at or past `accounts.pause_at` ([`over_limit`]) and another login on the
+/// host has headroom ([`freer_login`]), which it takes instead. Nothing here
+/// refuses: with no freer login the start keeps `profile`, and the start's
+/// own checks report a spent login.
+pub fn login_with_headroom(
+    s: &Store,
+    host_alias: &str,
+    profile: Option<&str>,
+    now: i64,
+) -> Result<Option<String>, IpcError> {
+    let profile = profile.map(str::trim).filter(|p| !p.is_empty());
+    let Some(over) = over_limit(s, host_alias, profile, now)? else {
+        return Ok(profile.map(str::to_string));
+    };
+    Ok(
+        match freer_login(s, host_alias, &over.login.account_uuid, now)? {
+            Some(l) => l.profile,
+            None => profile.map(str::to_string),
+        },
+    )
+}
+
 /// Step 4.4 on a start that did not come through the desktop's own dialog
 /// (an MCP or hub `new_session`): refuse a login at or past
 /// `accounts.pause_at` with `E_ACCOUNT_LIMIT`, naming its account and the

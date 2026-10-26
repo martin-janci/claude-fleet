@@ -1081,6 +1081,15 @@ pub fn spinner_line(pane_tail: &str) -> Option<String> {
     None
 }
 
+/// The pane shows the spinner Claude Code draws while it runs the turn's
+/// Stop hooks (`✢ Channelling… (running Stop hooks… 3/4 · 15s · …)`). The
+/// turn's work is over: fleet's own Stop hook may already have stamped
+/// `idle` while a slower hook keeps this spinner up, so reconcile does not
+/// let this screen write `working` back over it.
+pub fn stop_hooks_running(pane_tail: &str) -> bool {
+    spinner_line(pane_tail).is_some_and(|l| l.to_lowercase().contains("running stop hooks"))
+}
+
 /// `12s` / `3m 5s`-style elapsed marker: digits directly followed by `s`
 /// and then a non-letter (or the end).
 fn has_elapsed(s: &str) -> bool {
@@ -1195,6 +1204,23 @@ mod tests {
             spinner_line(tail).as_deref(),
             Some("Channelling… (running Stop hooks… 3/4 · 15s · ↓ 306 tokens)")
         );
+    }
+
+    #[test]
+    fn stop_hooks_running_reads_only_the_stop_hooks_spinner() {
+        let hooks = "● pong\n✢ Channelling… (running Stop hooks… 3/4 · 15s · ↓ 306 tokens)\n  ❯ /clear\n────\n  ⏸ manual mode on · esc to interrupt";
+        assert!(stop_hooks_running(hooks));
+        // The screen still reads Working; only reconcile discounts it.
+        assert_eq!(analyze(hooks).derived_status, Some(ClaudeStatus::Working));
+        assert!(!stop_hooks_running("✶ Cooking… (3s · esc to interrupt)\n"));
+        // A subagent's Stop hooks run inside a turn that is still going.
+        assert!(!stop_hooks_running(
+            "✶ Cooking… (running SubagentStop hooks… 1/2 · 4s)\n"
+        ));
+        // Prose mentioning Stop hooks is not the spinner.
+        assert!(!stop_hooks_running(
+            "● I am running Stop hooks… now\n❯ \n  ? for shortcuts"
+        ));
     }
 
     #[test]

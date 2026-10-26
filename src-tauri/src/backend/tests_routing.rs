@@ -5341,6 +5341,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                         mission_id: 4,
                         item_id: 3,
                         on: false,
+                        lane: None,
                     },
                     s,
                 ))

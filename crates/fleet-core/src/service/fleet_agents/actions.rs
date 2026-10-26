@@ -47,9 +47,36 @@ pub fn marker(instance: &str) -> String {
     format!("{MARKER_PREFIX}{instance}]")
 }
 
+/// PURE: `text` fitted to `max` characters with instance `instance`'s
+/// marker line after it.
+fn marked(text: &str, instance: &str, max: usize) -> String {
+    let mark = format!("\n\n{}", marker(instance));
+    format!(
+        "{}{mark}",
+        fit(text, max.saturating_sub(mark.chars().count()))
+    )
+}
+
 /// Whether a comment is a fleet agent's own.
 pub fn is_agent_comment(body: &str) -> bool {
     body.contains(MARKER_PREFIX)
+}
+
+/// PURE: a comment's text without the fleet agents' markers in it. A marker
+/// prefix with no closing `]` is not a marker (a person quoting one): it and
+/// what follows stay.
+pub fn without_markers(body: &str) -> String {
+    let mut out = String::new();
+    let mut rest = body;
+    while let Some(at) = rest.find(MARKER_PREFIX) {
+        let Some(end) = rest[at..].find(']') else {
+            break;
+        };
+        out.push_str(&rest[..at]);
+        rest = &rest[at + end + 1..];
+    }
+    out.push_str(rest);
+    out.trim().to_string()
 }
 
 // ── payloads ──
@@ -140,6 +167,10 @@ pub struct ReviewFinding {
     pub path: String,
     pub line: u32,
     pub body: String,
+    /// The answer called it blocking: the next review's verdict waits on
+    /// it being resolved ([`adjusted_verdict`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub blocking: bool,
 }
 
 /// `pr_review`: a review of the PR's head, with line comments.
@@ -177,9 +208,10 @@ pub fn review_event(said: &str, auto: bool, auto_approve: bool) -> &'static str 
 }
 
 /// PURE: the answer's findings array as line comments; an item without a
-/// path, a line or a body is dropped. The caller keeps the first
+/// path, a line or a body is dropped, and so is one whose `confidence` is
+/// below `min_confidence` (none given is 100). The caller keeps the first
 /// [`MAX_REVIEW_COMMENTS`] as line comments and lists the rest in the body.
-fn review_findings(v: Option<&Value>) -> Vec<ReviewFinding> {
+fn review_findings(v: Option<&Value>, min_confidence: u8) -> Vec<ReviewFinding> {
     v.and_then(Value::as_array)
         .into_iter()
         .flatten()
@@ -187,13 +219,77 @@ fn review_findings(v: Option<&Value>) -> Vec<ReviewFinding> {
             let path = f.get("path")?.as_str()?.trim().trim_start_matches("./");
             let line = u32::try_from(f.get("line")?.as_u64()?).ok()?;
             let body = f.get("body")?.as_str()?.trim();
-            (!path.is_empty() && line > 0 && !body.is_empty()).then(|| ReviewFinding {
+            let confidence = f.get("confidence").and_then(Value::as_f64).unwrap_or(100.0);
+            (!path.is_empty()
+                && line > 0
+                && !body.is_empty()
+                && confidence >= f64::from(min_confidence))
+            .then(|| ReviewFinding {
                 path: path.to_string(),
                 line,
                 body: fit(body, REVIEW_COMMENT_MAX),
+                blocking: f.get("blocking").and_then(Value::as_bool).unwrap_or(false),
             })
         })
         .collect()
+}
+
+/// A finding as a line of a review body's list.
+fn listed_finding(f: &ReviewFinding) -> String {
+    format!("- `{}:{}`: {}", f.path, f.line, f.body)
+}
+
+/// PURE: `head`, then `items` listed under `heading` in what is left of
+/// `budget` characters; `head` alone when not even the heading fits.
+fn with_list(mut head: String, heading: &str, items: &[String], budget: usize) -> String {
+    let list = listed(
+        heading,
+        items,
+        budget.saturating_sub(head.chars().count() + 2),
+    );
+    if !list.is_empty() {
+        head.push_str("\n\n");
+        head.push_str(&list);
+    }
+    head
+}
+
+/// The shortest a listed finding is cut to, however many share the room.
+const MIN_LISTED: usize = 200;
+
+/// PURE: `items` under `heading` within `budget` characters: each cut to an
+/// even share of the room (never below [`MIN_LISTED`]), as many as fit, then
+/// a count of the ones left out, so a cut list says what it dropped. Empty
+/// when not even the heading and that count fit.
+fn listed(heading: &str, items: &[String], budget: usize) -> String {
+    let len = |s: &str| s.chars().count();
+    let rest = |n: usize| {
+        let s = if n == 1 { "" } else { "s" };
+        format!("\n… and {n} more finding{s}")
+    };
+    if items.is_empty() || len(heading) + len(&rest(items.len())) > budget {
+        return String::new();
+    }
+    let room = budget.saturating_sub(len(heading));
+    let share = (room / items.len()).max(MIN_LISTED);
+    let mut out = heading.to_string();
+    let mut used = len(heading);
+    let mut kept = 0;
+    for item in items {
+        let line = format!("\n{}", fit(item, share));
+        let left = items.len() - kept - 1;
+        let tail = if left == 0 { 0 } else { len(&rest(left)) };
+        if used + len(&line) + tail > budget {
+            break;
+        }
+        used += len(&line);
+        out.push_str(&line);
+        kept += 1;
+    }
+    if kept < items.len() {
+        out.push_str(&rest(items.len() - kept));
+    }
+    out
 }
 
 /// PURE: the review as GitHub takes it: each finding on a line of `diff`
@@ -218,15 +314,21 @@ pub fn place_review(
                 line,
                 body: format!("{}\n\n{mark}", f.body),
             }),
-            None => outside.push(format!("- `{}:{}`: {}", f.path, f.line, f.body)),
+            None => outside.push(listed_finding(f)),
         }
     }
-    let mut body = p.body.clone();
-    if !outside.is_empty() {
-        body.push_str(&format!("\n\nOutside the diff:\n{}", outside.join("\n")));
-    }
     let mark = format!("\n\n{mark}");
-    let body = fit(&body, max.saturating_sub(mark.chars().count()));
+    let room = max.saturating_sub(mark.chars().count());
+    // A body `plan` already sized (up to `max / 2`, its "… and N more
+    // findings" tail last) is not cut again: half the room, or its own
+    // length within `max / 2`, whichever is more.
+    let body = if outside.is_empty() {
+        fit(&p.body, room)
+    } else {
+        let own = p.body.chars().count().min(max / 2);
+        let head = fit(&p.body, (room / 2).max(own).min(room));
+        with_list(head, "Outside the diff:", &outside, room)
+    };
     ReviewRequest {
         host: String::new(),
         repo: p.repo.clone(),
@@ -237,6 +339,113 @@ pub fn place_review(
         body: format!("{body}{mark}"),
         comments,
     }
+}
+
+/// `pr_description`: the pull request's description.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PrDescriptionPayload {
+    pub action: String,
+    pub repo: String,
+    pub number: i64,
+    pub sha: String,
+    pub body: String,
+    #[serde(default)]
+    pub overwrite: bool,
+    /// The instance had not reviewed the pull request before this run.
+    #[serde(default)]
+    pub first: bool,
+}
+
+/// The record kind a sent `pr_review` is remembered under, in the rule's
+/// [`super::runner::subjects_namespace`], keyed `owner/repo#number`: the
+/// next run's `subject.previous`.
+pub const REVIEW_KIND: &str = "review";
+
+/// PURE: the key a pull request's review is remembered under.
+pub fn review_key(repo: &str, number: i64) -> String {
+    format!("{repo}#{number}")
+}
+
+/// PURE: what is remembered of a sent review.
+pub fn remembered_review(p: &PrReviewPayload, event: &str, id: i64, now: i64) -> Value {
+    json!({
+        "sha": p.sha,
+        "event": event,
+        // GitHub's id, while the review stands (`runner`'s reverify).
+        "id": id,
+        "verified_at": now,
+        "findings": p.findings.iter().map(|f| json!({
+            "path": f.path, "line": f.line, "blocking": f.blocking,
+        })).collect::<Vec<_>>(),
+    })
+}
+
+/// PURE: the verdict `said`, adjusted as the PR reviewer adjusts it
+/// (`agents::review::post::adjust_verdict`) against the previous review's
+/// findings and the answer's `resolutions` of them: REQUEST_CHANGES while a
+/// blocking one is resolved `open` (or not at all), and a COMMENT with
+/// nothing blocking left an APPROVE. No previous findings: `said`.
+pub fn adjusted_verdict(
+    said: &str,
+    previous: &Value,
+    resolutions: &Value,
+    findings: &[ReviewFinding],
+) -> String {
+    let said = said.trim().to_ascii_uppercase();
+    let prev: Vec<(&str, u64, bool)> = previous["findings"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|f| {
+            Some((
+                f.get("path")?.as_str()?,
+                f.get("line")?.as_u64()?,
+                f.get("blocking").and_then(Value::as_bool).unwrap_or(false),
+            ))
+        })
+        .collect();
+    if prev.is_empty() {
+        return said;
+    }
+    let res: Vec<(&str, u64, &str)> = resolutions
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|r| {
+            Some((
+                r.get("path")?.as_str()?.trim_start_matches("./"),
+                r.get("line")?.as_u64()?,
+                r.get("resolution")?.as_str()?,
+            ))
+        })
+        .collect();
+    let settled = prev.iter().all(|(path, line, blocking)| {
+        !blocking
+            || res
+                .iter()
+                .find(|(p, l, _)| p == path && l == line)
+                .is_some_and(|(_, _, r)| !r.trim().eq_ignore_ascii_case("open"))
+    });
+    if !res.is_empty() && !settled {
+        return "REQUEST_CHANGES".into();
+    }
+    if said == "COMMENT" && settled && !findings.iter().any(|f| f.blocking) {
+        return "APPROVE".into();
+    }
+    said
+}
+
+/// `pr_reply`: a reply in the review thread the job is about.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PrReplyPayload {
+    pub action: String,
+    pub repo: String,
+    pub number: i64,
+    /// The thread's first comment.
+    pub root_id: i64,
+    pub body: String,
+    #[serde(default)]
+    pub resolve: bool,
 }
 
 /// `pr_labels`: labels to add and remove (`-name` in the action's list).
@@ -427,12 +636,40 @@ pub fn write_projects(inst: &Instance, now: i64) -> Vec<String> {
         .collect()
 }
 
+/// PURE: an action's labels: an array, or a comma-separated string. An
+/// array item may be `{label, paths: [globs]}`, a label only when one of
+/// the pull request's changed files (`subject.paths`) matches a glob, as
+/// the PR reviewer's label rules are.
 fn labels_of(v: Option<&Value>, ctx: &Value) -> Vec<String> {
+    use crate::service::agents::review::diff::glob_match;
     let rendered = v.map(|v| template::render_value(v, ctx));
+    let changed: Vec<&str> = ctx["subject"]["paths"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    let item = |x: &Value| match x {
+        Value::String(s) => Some(s.trim().to_string()),
+        Value::Object(o) => {
+            let label = o.get("label")?.as_str()?.trim().to_string();
+            let globs: Vec<&str> = o
+                .get("paths")?
+                .as_array()?
+                .iter()
+                .filter_map(Value::as_str)
+                .collect();
+            changed
+                .iter()
+                .any(|p| globs.iter().any(|g| glob_match(g, p)))
+                .then_some(label)
+        }
+        _ => None,
+    };
     match rendered {
         Some(Value::Array(a)) => a
             .iter()
-            .filter_map(|x| x.as_str().map(str::trim).map(str::to_string))
+            .filter_map(item)
             .filter(|s| !s.is_empty())
             .collect(),
         Some(Value::String(s)) => s
@@ -445,7 +682,9 @@ fn labels_of(v: Option<&Value>, ctx: &Value) -> Vec<String> {
 }
 
 /// PURE: the actions an answer asks for. `instance` is the rule's scope
-/// (its marker); `rule_id` resolves fleet namespaces.
+/// (its marker); `rule_id` resolves fleet namespaces. `act` is the rule's
+/// level being `act`: only then is an `auto` action sent with no person, so
+/// only then does a `pr_review` lose its blocking verdict ([`review_event`]).
 pub fn plan(
     inst: &Instance,
     rule_id: i64,
@@ -453,6 +692,7 @@ pub fn plan(
     subject: &Value,
     answer: &Value,
     now: i64,
+    act: bool,
 ) -> (Vec<Planned>, Vec<Unplanned>) {
     let loaded = inst.loaded();
     let d = &loaded.definition;
@@ -517,11 +757,7 @@ pub fn plan(
                     if key.is_empty() || text.is_empty() {
                         return Err(skip("the target or the body is empty"));
                     }
-                    let mark = format!("\n\n{}", marker(instance));
-                    let body = format!(
-                        "{}{mark}",
-                        fit(&text, max.saturating_sub(mark.chars().count()))
-                    );
+                    let body = marked(&text, instance, max);
                     let p = CommentPayload {
                         action: a.id.clone(),
                         tracker,
@@ -628,7 +864,39 @@ pub fn plan(
                     };
                     Ok((serde_json::to_string(&p).unwrap_or_default(), body))
                 }
-                ActionKind::PrComment | ActionKind::PrLabels | ActionKind::PrReview => {
+                ActionKind::PrReply => {
+                    let repo = ctx["subject"]["repo"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_string();
+                    let number = ctx["subject"]["number"].as_i64().unwrap_or(0);
+                    let root_id: i64 = r(&a.target)
+                        .parse()
+                        .map_err(|_| skip("the target is not a review comment id"))?;
+                    if !super::github::repo_ok(&repo) || number <= 0 {
+                        return Err(skip("the subject is not a pull request"));
+                    }
+                    let text = body_text();
+                    if text.is_empty() {
+                        return Err(skip("the body is empty"));
+                    }
+                    // The marker counts the instance's rounds in the thread
+                    // and keeps its own reply from starting another.
+                    let body = marked(&text, instance, max);
+                    let p = PrReplyPayload {
+                        action: a.id.clone(),
+                        repo,
+                        number,
+                        root_id,
+                        body: body.clone(),
+                        resolve: a.resolve,
+                    };
+                    Ok((serde_json::to_string(&p).unwrap_or_default(), body))
+                }
+                ActionKind::PrComment
+                | ActionKind::PrLabels
+                | ActionKind::PrReview
+                | ActionKind::PrDescription => {
                     let repo = d
                         .trigger
                         .repo
@@ -654,24 +922,37 @@ pub fn plan(
                         if sha.is_empty() {
                             return Err(skip("the subject has no head_sha"));
                         }
-                        let mut findings =
-                            review_findings(a.findings.as_ref().map(|f| &ctx["answer"][f]));
+                        let mut findings = review_findings(
+                            a.findings.as_ref().map(|f| &ctx["answer"][f]),
+                            a.min_confidence.unwrap_or(0),
+                        );
+                        let said = match &a.resolutions {
+                            Some(f) => adjusted_verdict(
+                                &r(&a.verdict),
+                                &ctx["subject"]["previous"],
+                                &ctx["answer"][f],
+                                &findings,
+                            ),
+                            None => r(&a.verdict),
+                        };
                         let more: Vec<String> = findings
                             .split_off(findings.len().min(MAX_REVIEW_COMMENTS))
                             .iter()
-                            .map(|f| format!("- `{}:{}`: {}", f.path, f.line, f.body))
+                            .map(listed_finding)
                             .collect();
+                        // Unattended only when it is sent with no person: a
+                        // person approving it at `propose` signs the verdict.
                         let event =
-                            review_event(&r(&a.verdict), a.auto, d.limits.auto_approve).to_string();
-                        let text = if more.is_empty() {
-                            text
-                        } else {
-                            format!("{text}\n\n{MORE_FINDINGS}\n{}", more.join("\n"))
-                        };
+                            review_event(&said, act && a.auto, d.limits.auto_approve).to_string();
                         // The body leaves room for the findings that land
                         // outside the diff, and the marker; `place_review`
                         // fits the whole to `max`.
-                        let body = fit(&text, max / 2);
+                        let budget = max / 2;
+                        let body = if more.is_empty() {
+                            fit(&text, budget)
+                        } else {
+                            with_list(fit(&text, budget / 2), MORE_FINDINGS, &more, budget)
+                        };
                         let mut shown = format!("{event}: {body}");
                         for f in &findings {
                             shown.push_str(&format!("\n- {}:{}: {}", f.path, f.line, f.body));
@@ -687,16 +968,31 @@ pub fn plan(
                         };
                         return Ok((serde_json::to_string(&p).unwrap_or_default(), shown));
                     }
+                    if a.kind == ActionKind::PrDescription {
+                        let body = fit(&body_text(), max);
+                        if body.is_empty() {
+                            return Err(skip("the body is empty"));
+                        }
+                        let p = PrDescriptionPayload {
+                            action: a.id.clone(),
+                            repo,
+                            number,
+                            sha: ctx["subject"]["head_sha"]
+                                .as_str()
+                                .unwrap_or_default()
+                                .to_string(),
+                            body: body.clone(),
+                            overwrite: a.overwrite,
+                            first: ctx["subject"]["previous"].is_null(),
+                        };
+                        return Ok((serde_json::to_string(&p).unwrap_or_default(), body));
+                    }
                     if a.kind == ActionKind::PrComment {
                         let text = body_text();
                         if text.is_empty() {
                             return Err(skip("the body is empty"));
                         }
-                        let mark = format!("\n\n{}", marker(instance));
-                        let body = format!(
-                            "{}{mark}",
-                            fit(&text, max.saturating_sub(mark.chars().count()))
-                        );
+                        let body = marked(&text, instance, max);
                         let p = PrCommentPayload {
                             action: a.id.clone(),
                             repo,
@@ -966,6 +1262,24 @@ pub fn check_arguments(schema: &Value, args: &Value) -> Vec<String> {
     out
 }
 
+/// The fingerprint store's namespace, the fingerprint a `tracker_issue`
+/// payload carries (`fingerprint: "{{answer.fingerprint}}"`) and the
+/// incident window, when the definition keeps fingerprints.
+fn fingerprint_of(
+    rule: &AgentRuleRow,
+    inst: &Instance,
+    raw: &Value,
+) -> Option<(String, String, i64)> {
+    let spec = inst.loaded().definition.run.fingerprint.as_ref()?;
+    let fp = raw
+        .get("fingerprint")
+        .and_then(Value::as_str)
+        .filter(|f| super::fingerprints::is_fingerprint(f))?;
+    let ns = super::bindings::namespaces(rule.id, &inst.bindings);
+    let namespace = ns.get(&spec.store)?;
+    Some((namespace.clone(), fp.to_string(), spec.window_mins))
+}
+
 // ── the executor ──
 
 pub struct FleetExecutor {
@@ -978,6 +1292,51 @@ fn refuse(what: impl std::fmt::Display) -> ActionResult {
 }
 
 impl FleetExecutor {
+    /// A bug a `tracker_issue` filed, kept against the fingerprint its
+    /// payload carries (`fingerprint: "{{answer.fingerprint}}"`): the next
+    /// run of the same error inside the window gets it as `knownBug`.
+    fn file_against_fingerprint(
+        &self,
+        rule: &AgentRuleRow,
+        inst: &Instance,
+        raw: &Value,
+        bug: Option<String>,
+        now: i64,
+    ) {
+        let (Some((namespace, fp, _)), Some(bug)) = (fingerprint_of(rule, inst, raw), bug) else {
+            return;
+        };
+        if let Ok(s) = self.store.lock() {
+            if let Err(e) = super::fingerprints::set_bug(&s, &namespace, &fp, &bug, now) {
+                tracing::warn!(rule_id = rule.id, error = %e, "[agents] fleet: file the bug");
+            }
+        }
+    }
+
+    /// The bug another `tracker_issue` filed for the fingerprint this
+    /// payload carries since `since` (when this one was proposed), while it
+    /// still counts: a burst of one error, each run proposing its own bug
+    /// before the first was approved, files one bug, not one per run.
+    fn filed_since(
+        &self,
+        rule: &AgentRuleRow,
+        inst: &Instance,
+        raw: &Value,
+        since: i64,
+        now: i64,
+    ) -> Option<String> {
+        let (namespace, fp, window_mins) = fingerprint_of(rule, inst, raw)?;
+        let s = self.store.lock().ok()?;
+        let row = s
+            .agent_record(&namespace, super::fingerprints::KIND, &fp, now)
+            .ok()??;
+        let seen: super::fingerprints::Seen = serde_json::from_str(&row.value).ok()?;
+        if seen.bug_at? < since {
+            return None;
+        }
+        super::fingerprints::known_bug(Some(&seen), window_mins, now)
+    }
+
     /// Send a `pr_review`: only while the PR is open at the head the run
     /// read, its findings placed on the diff of that head, an APPROVE or
     /// REQUEST_CHANGES GitHub refuses on one's own PR sent as COMMENT.
@@ -987,6 +1346,8 @@ impl FleetExecutor {
         inst: &Instance,
         repo: &str,
         p: PrReviewPayload,
+        job_id: i64,
+        now: i64,
     ) -> ActionResult {
         let host = &rule.host_alias;
         let max = inst.loaded().definition.limits.max_body_chars;
@@ -1025,10 +1386,111 @@ impl FleetExecutor {
             }
             other => other,
         };
-        match sent {
-            Ok(id) => {
-                ActionResult::Done(format!("review {id}: {} line comments", req.comments.len()))
-            }
+        let sent = match sent {
+            Err(e) => return ActionResult::Failed(e),
+            Ok(id) => id,
+        };
+        // The next run's `subject.previous`. GitHub already has the review,
+        // so a failure to remember it is logged, not the action's.
+        let kept = self
+            .store
+            .lock()
+            .map_err(|_| "store lock".to_string())
+            .and_then(|s| {
+                s.put_agent_record(
+                    &crate::store::NewAgentRecord {
+                        namespace: super::runner::subjects_namespace(rule.id),
+                        kind: REVIEW_KIND.into(),
+                        key: review_key(repo, p.number),
+                        value: remembered_review(&p, &event, sent, now).to_string(),
+                        expires_at: None,
+                        written_by_job: Some(job_id),
+                    },
+                    now,
+                )
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+            });
+        if let Err(e) = kept {
+            tracing::warn!(rule_id = rule.id, error = %e, "[agents] fleet: remember the review");
+        }
+        ActionResult::Done(format!(
+            "review {sent}: {} line comments",
+            req.comments.len()
+        ))
+    }
+
+    /// Send a `pr_reply`: only into a thread that is still there, on a pull
+    /// request still open; resolving it (`resolve`) after the reply.
+    async fn send_reply(&self, rule: &AgentRuleRow, repo: &str, p: PrReplyPayload) -> ActionResult {
+        let host = &rule.host_alias;
+        match self.host.open_prs(host, repo).await {
+            Ok(open) if open.iter().any(|o| o.number == p.number) => {}
+            Ok(_) => return ActionResult::Expired(format!("{repo}#{} is not open", p.number)),
+            Err(e) => return ActionResult::Failed(e),
+        }
+        let thread = match self.host.pr_review_comments(host, repo, p.number).await {
+            Ok(t) => t,
+            Err(e) => return ActionResult::Failed(e),
+        };
+        let Some(root) = thread.iter().find(|c| c.id == p.root_id) else {
+            return ActionResult::Expired("the thread is gone".into());
+        };
+        let req = crate::service::agents::review::debate::DebateReply {
+            host: host.clone(),
+            repo: repo.to_string(),
+            number: p.number,
+            root_id: p.root_id,
+            body: p.body,
+            decision: String::new(),
+            path: root.path.clone(),
+            line: root.line,
+            reason: String::new(),
+        };
+        if let Err(e) = self.host.reply_in_thread(&req).await {
+            return ActionResult::Failed(e);
+        }
+        if !p.resolve {
+            return ActionResult::Executed;
+        }
+        // The reply is posted: a thread left open is the outcome, not a
+        // failure to retry (a retry would reply twice).
+        match self
+            .host
+            .resolve_thread(host, repo, p.number, p.root_id)
+            .await
+        {
+            Ok(()) => ActionResult::Done("replied and resolved".into()),
+            Err(e) => ActionResult::Done(format!("replied; the thread stays open: {e}")),
+        }
+    }
+
+    /// Send a `pr_description`: only onto a pull request with none, or,
+    /// with `overwrite`, on the instance's first review of it (the PR
+    /// reviewer's `overwrite_description`).
+    async fn send_description(
+        &self,
+        rule: &AgentRuleRow,
+        repo: &str,
+        p: PrDescriptionPayload,
+    ) -> ActionResult {
+        let host = &rule.host_alias;
+        let meta = match self.host.pr_meta(host, repo, p.number).await {
+            Ok(m) => m,
+            Err(e) => return ActionResult::Failed(e),
+        };
+        if !meta.body.trim().is_empty() && !(p.overwrite && p.first) {
+            return ActionResult::Expired(format!("{repo}#{} has a description", p.number));
+        }
+        let req = crate::service::agents::review::labels::DescriptionRequest {
+            host: host.clone(),
+            repo: repo.to_string(),
+            number: p.number,
+            sha: p.sha,
+            body: p.body,
+        };
+        match self.host.set_pr_description(&req).await {
+            Ok(()) => ActionResult::Executed,
             Err(e) => ActionResult::Failed(e),
         }
     }
@@ -1151,6 +1613,11 @@ impl FleetExecutor {
                         return refuse(format!("{} is outside limits.write_projects", l.to));
                     }
                 }
+                if let Some(bug) = self.filed_since(rule, inst, &raw, action.created_at, now) {
+                    return ActionResult::Expired(format!(
+                        "duplicate: {bug} was filed for the same error after this was proposed"
+                    ));
+                }
                 let jira = is_jira(self.host.tracker_provider(i.tracker).as_deref());
                 if !jira {
                     if i.link.is_some() {
@@ -1167,7 +1634,19 @@ impl FleetExecutor {
                     )
                     .await
                     {
-                        Ok(_) => ActionResult::Executed,
+                        Ok(o) => {
+                            self.file_against_fingerprint(
+                                rule,
+                                inst,
+                                &raw,
+                                // The key people and templates name it by
+                                // (ENG-123, #12); remote_id is the tracker's
+                                // internal id off Jira.
+                                o.key.or(o.remote_id),
+                                now,
+                            );
+                            ActionResult::Executed
+                        }
                         Err(e) => ActionResult::Failed(e),
                     };
                 }
@@ -1187,10 +1666,12 @@ impl FleetExecutor {
                     Ok(o) => o,
                     Err(e) => return ActionResult::Failed(e),
                 };
+                let new_key = created.remote_id.or(created.key);
+                self.file_against_fingerprint(rule, inst, &raw, new_key.clone(), now);
                 let Some(l) = i.link else {
                     return ActionResult::Executed;
                 };
-                let Some(new_key) = created.remote_id.or(created.key) else {
+                let Some(new_key) = new_key else {
                     return ActionResult::Failed(
                         "the issue was created, its key is unknown: not linked".into(),
                     );
@@ -1340,7 +1821,11 @@ impl FleetExecutor {
                     Err(e) => ActionResult::Failed(e),
                 }
             }
-            ActionKind::PrComment | ActionKind::PrLabels | ActionKind::PrReview => {
+            ActionKind::PrComment
+            | ActionKind::PrLabels
+            | ActionKind::PrReview
+            | ActionKind::PrDescription
+            | ActionKind::PrReply => {
                 let repos = write_repos(inst, now);
                 let (repo, number) = match raw.get("repo").and_then(Value::as_str) {
                     Some(r) => (
@@ -1356,7 +1841,23 @@ impl FleetExecutor {
                 }
                 if def_action.kind == ActionKind::PrReview {
                     let p = payload!(PrReviewPayload);
-                    return self.send_review(rule, inst, &repo, p).await;
+                    return self
+                        .send_review(rule, inst, &repo, p, action.job_id, now)
+                        .await;
+                }
+                if def_action.kind == ActionKind::PrReply {
+                    let p = payload!(PrReplyPayload);
+                    if !fits(&p.body) {
+                        return refuse(format!("the reply is over {max} characters"));
+                    }
+                    return self.send_reply(rule, &repo, p).await;
+                }
+                if def_action.kind == ActionKind::PrDescription {
+                    let p = payload!(PrDescriptionPayload);
+                    if !fits(&p.body) {
+                        return refuse(format!("the description is over {max} characters"));
+                    }
+                    return self.send_description(rule, &repo, p).await;
                 }
                 if def_action.kind == ActionKind::PrComment {
                     let c = payload!(PrCommentPayload);

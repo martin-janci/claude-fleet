@@ -30,6 +30,7 @@ import {
   fleetAddress,
   fleetCaptureSession,
   fleetChoicesFor,
+  githubRepoOf,
   fleetInbox,
   fleetInboxCount,
   fleetListPullRequests,
@@ -389,7 +390,7 @@ describe('Phase 2: which fleet New session starts on', () => {
     worktrees: [],
   });
 
-  it('offers every usable extra fleet, by its own project id or null when it lacks the repository', () => {
+  it('offers every usable extra fleet, by its own project id or null (with the origin to clone) when it lacks the repository', () => {
     const known = [
       fleet(PRIMARY),
       fleet('company'),
@@ -403,16 +404,62 @@ describe('Phase 2: which fleet New session starts on', () => {
       ['down', { ...emptyRows(), projects: [project(1, 'papayapos', 'pos')] }],
       ['twice', { ...emptyRows(), projects: [project(1, 'papayapos', 'pos')] }],
     ]);
-    const got = fleetChoicesFor('papayapos', 'POS', known, rows);
-    expect(got.map((c) => [c.fleet.id, c.projectId])).toEqual([
-      ['company', 9],
-      ['lab', null],
+    const origin = 'git@github.com:PapayaPOS/pos.git';
+    const got = fleetChoicesFor('papayapos', 'POS', known, rows, origin);
+    expect(got.map((c) => [c.fleet.id, c.projectId, c.cloneUrl])).toEqual([
+      ['company', 9, null],
+      ['lab', null, origin],
     ]);
   });
 
+  it('offers no clone without a GitHub origin, and no other fleet at all for a local/* project', () => {
+    const known = [fleet(PRIMARY), fleet('company'), fleet('lab')];
+    const rows = new Map([
+      ['company', { ...emptyRows(), projects: [project(9, 'acme', 'tool'), project(4, 'local', 'loose')] }],
+      ['lab', { ...emptyRows(), projects: [] }],
+    ]);
+    // A scanned GitLab checkout: its owner/repo name no GitHub repository.
+    for (const origin of [null, 'https://gitlab.com/acme/tool', 'acme/tool']) {
+      expect(fleetChoicesFor('acme', 'tool', known, rows, origin).map((c) => [c.fleet.id, c.projectId])).toEqual([
+        ['company', 9],
+      ]);
+    }
+    // Another fleet's local/loose is another machine's folder of that name.
+    expect(fleetChoicesFor('local', 'loose', known, rows, null)).toEqual([]);
+  });
+
+  it('finds a fleet that has the project under its origin\'s owner/repo, where a clone of it registered it', () => {
+    const known = [fleet(PRIMARY), fleet('company'), fleet('lab')];
+    const rows = new Map([
+      ['company', { ...emptyRows(), projects: [project(7, 'Other', 'Site')] }],
+      ['lab', { ...emptyRows(), projects: [] }],
+    ]);
+    // Scanned as acme/web (its directories), origin other/site.
+    const origin = 'git@github.com:other/site.git';
+    expect(fleetChoicesFor('acme', 'web', known, rows, origin).map((c) => [c.fleet.id, c.projectId, c.cloneUrl])).toEqual([
+      ['company', 7, null],
+      ['lab', null, origin],
+    ]);
+  });
+
+  it('reads owner/repo out of a GitHub remote URL only', () => {
+    expect(githubRepoOf('git@github.com:acme/web.git')).toEqual({ owner: 'acme', repo: 'web' });
+    expect(githubRepoOf('https://github.com/acme/web/')).toEqual({ owner: 'acme', repo: 'web' });
+    expect(githubRepoOf('ssh://git@github.com/acme/web')).toEqual({ owner: 'acme', repo: 'web' });
+    expect(githubRepoOf('https://gitlab.com/acme/web')).toBeNull();
+    expect(githubRepoOf('acme/web')).toBeNull();
+  });
+
+  it('never defaults to an owner-matched fleet that would first need a clone', () => {
+    const company = { fleet: fleet('company', { label: 'company', url: 'https://fleet.papayapos.dev' }), projectId: null, cloneUrl: 'git@github.com:PapayaPOS/pos.git' };
+    expect(defaultFleetFor('PapayaPOS', [company], null)).toBe(PRIMARY);
+    // Started there before (so it was cloned there): that choice stands.
+    expect(defaultFleetFor('PapayaPOS', [company], 'company')).toBe('company');
+  });
+
   it('defaults to the remembered fleet, else the one that owns the owner, else the primary', () => {
-    const company = { fleet: fleet('company', { label: 'company', url: 'https://fleet.papayapos.dev' }), projectId: 9 };
-    const lab = { fleet: fleet('lab'), projectId: 2 };
+    const company = { fleet: fleet('company', { label: 'company', url: 'https://fleet.papayapos.dev' }), projectId: 9, cloneUrl: null };
+    const lab = { fleet: fleet('lab'), projectId: 2, cloneUrl: null };
     expect(defaultFleetFor('PapayaPOS', [lab, company], null)).toBe('company');
     expect(defaultFleetFor('PapayaPOS', [lab, company], 'lab')).toBe('lab');
     expect(defaultFleetFor('PapayaPOS', [lab, company], PRIMARY)).toBe(PRIMARY);
@@ -421,11 +468,13 @@ describe('Phase 2: which fleet New session starts on', () => {
     expect(fleetOwnsOwner({ label: 'Papaya POS', url: null }, 'papayapos')).toBe(true);
   });
 
-  it('remembers per repository, and forgets for the primary', () => {
+  it('remembers per repository, the primary too, so a start here outranks the owner match', () => {
     rememberFleetFor('PapayaPOS', 'pos', 'company');
     expect(rememberedFleetFor('papayapos', 'POS')).toBe('company');
     rememberFleetFor('PapayaPOS', 'pos', PRIMARY);
-    expect(rememberedFleetFor('papayapos', 'pos')).toBeNull();
+    expect(rememberedFleetFor('papayapos', 'pos')).toBe(PRIMARY);
+    const company = { fleet: fleet('company', { label: 'papayapos' }), projectId: 9, cloneUrl: null };
+    expect(defaultFleetFor('PapayaPOS', [company], rememberedFleetFor('PapayaPOS', 'pos'))).toBe(PRIMARY);
   });
 });
 

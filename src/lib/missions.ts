@@ -62,6 +62,11 @@ export interface MissionWait {
 /** `store::MissionPolicy`. The backend reads a missing field as its
  *  default, so a save sends the whole policy back with its edits on top. */
 export interface MissionPolicy {
+  /** `item` (each run its own session) or `lane` (a lane's tasks in one
+   *  lead session); changes only while the mission is not running. */
+  execution?: 'item' | 'lane';
+  /** In `lane` execution, a lead hands over to a fresh one after this many tasks. */
+  lane_relay_after?: number;
   max_parallel?: number;
   max_retries?: number;
   require_review?: boolean;
@@ -237,6 +242,64 @@ export interface MissionDetail {
    *  state (a running mission's workers included); absent when there are
    *  none, and from an older hub. */
   sessions?: FinishSession[];
+  /** Where its runs and its time went (lanes design L0); absent from an
+   *  older hub. */
+  stats?: MissionStats | null;
+  /** Its lanes with the visible tasks each holds (lanes design L2); absent
+   *  when it has none, and from an older hub. */
+  lanes?: MissionLane[];
+  /** What each member says it changes (lanes design L5), by item id; only
+   *  members that say. Absent from an older hub. */
+  touches?: Record<number, string[]>;
+  /** The planner's open wait, read from its own words rather than the
+   *  `events` page (review r9); `null` when it is not waiting, absent from
+   *  an older hub. */
+  limit_wait?: LimitWait | null;
+}
+
+/** A mission lane (`store::MissionLaneRow`): the tasks one lead session
+ *  works through on one branch in one repository. */
+export interface MissionLane {
+  id: number;
+  mission_id: number;
+  name: string;
+  project_id?: number | null;
+  branch?: string | null;
+  lead_session_id?: number | null;
+  relay?: number;
+  /** `idle` | `held` | `done`. */
+  state: string;
+  item_ids: number[];
+}
+
+/** The lane a task is in, if any. */
+export function laneOfItem(detail: Pick<MissionDetail, 'lanes'>, itemId: number): MissionLane | undefined {
+  return (detail.lanes ?? []).find((l) => l.item_ids.includes(itemId));
+}
+
+/** A mission's run metrics (`missions::stats::MissionStats`). */
+export interface MissionStats {
+  items: number;
+  items_done: number;
+  /** Attempts by role: `implement`, `review`, `test`, `integrate`, `research`. */
+  runs_by_role: Record<string, number>;
+  /** Attempts in a session of their own; the rest ran headless. */
+  session_runs: number;
+  /** Distinct worker sessions and checkouts: each a cold start. */
+  sessions: number;
+  checkouts: number;
+  failed_runs: number;
+  /** Implement attempts past each item's first. */
+  retries: number;
+  /** Attempts per done item, in hundredths. */
+  runs_per_done_item_x100?: number | null;
+  run_secs_p50?: number | null;
+  run_secs_p90?: number | null;
+  item_secs_p50?: number | null;
+  item_secs_p90?: number | null;
+  /** First run to the last run's end, and the part of it no run was open. */
+  span_secs: number;
+  idle_secs: number;
 }
 
 /** One live session on a mission's member item (`missions::FinishSession`). */
@@ -656,6 +719,10 @@ export function eventSentence(e: MissionEvent): string {
       return limitWaitSentence(p as unknown as LimitWait);
     case 'limit_cleared':
       return `The planner answered on ${loginWords(p as unknown as NonNullable<LimitWait['login']>)}`;
+    case 'planner_signed_out':
+      // Every login the planner may use is signed out (review r10): the loop
+      // asks again once one is signed in.
+      return `The planner could not be asked: ${String(p.why ?? 'every login it may use is signed out')}`;
     case 'card':
       return `Card ${String(p.card_id ?? '')} ${String(p.state ?? '')}`;
     case 'grant': {
@@ -803,6 +870,16 @@ export function setMissionItem(missionId: number, itemId: number, on: boolean): 
   );
 }
 
+/** Put a member task in the mission lane named `lane`, or take it out of
+ *  its lane with `null` (lanes design L2). */
+export function setMissionLane(missionId: number, itemId: number, lane: string | null): Promise<Result<Mission>> {
+  return changed(
+    invokeCmd<Mission>('set_mission_item', {
+      args: { mission_id: missionId, item_id: itemId, on: true, lane: lane?.trim() ?? '' },
+    }),
+  );
+}
+
 export function deleteMission(missionId: number): Promise<Result<{ removed: number }>> {
   return changed(invokeCmd<{ removed: number }>('delete_mission', { args: { mission_id: missionId } }));
 }
@@ -920,9 +997,17 @@ export function limitWaitSentence(w: LimitWait, now = Date.now() / 1000): string
 
 /** The planner's open wait, when its newest word on the mission (of its runs
  *  and waits) is a `limit_wait`: the mission's state "waiting on a limit". */
-export function plannerLimitWait(detail: Pick<MissionDetail, 'events'>): LimitWait | null {
+export function plannerLimitWait(detail: Pick<MissionDetail, 'events' | 'limit_wait'>): LimitWait | null {
+  // The hub's own reading (review r9): a busy log can push the wait off the
+  // `events` page. An older hub leaves it out, and the page is read.
+  if (detail.limit_wait !== undefined) {
+    const w = detail.limit_wait;
+    return w && typeof w.resets_at === 'number' ? w : null;
+  }
   // `limit_cleared`: a later login of the same ask answered (review r8).
-  const last = (detail.events ?? []).find((e) => e.kind === 'planned' || e.kind === 'limit_wait' || e.kind === 'limit_cleared');
+  // `planner_signed_out`: a later ask refused for signed-out logins (review r10).
+  const words = ['planned', 'limit_wait', 'limit_cleared', 'planner_signed_out'];
+  const last = (detail.events ?? []).find((e) => words.includes(e.kind));
   if (last?.kind !== 'limit_wait' || !last.payload) return null;
   const w = last.payload as unknown as LimitWait;
   return typeof w.resets_at === 'number' ? w : null;

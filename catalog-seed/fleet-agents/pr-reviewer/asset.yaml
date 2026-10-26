@@ -1,0 +1,72 @@
+kind: fleet_agent
+name: pr-reviewer
+description: "The PR reviewer as a definition: reviews each new head of an open pull request in a worktree of that head, from its filtered diff. Line comments land on the diff, a re-review settles the previous review's findings, a dismissed review is made again, and the description is written when the PR has none. Pairs with pr-test-debate, which shares its test exemptions."
+inputs:
+  - { name: repo, type: text, label: Repository (owner/repo), required: true, help: "e.g. martin-janci/claude-fleet" }
+  - { name: daily_budget, type: number, label: Daily budget (USD), min: 0, max: 25, help: "At most 25; past it, runs wait for the next UTC day." }
+stores:
+  - { role: exemptions, kind: fleet, label: Accepted test exemptions, shared_by_default: true }
+trigger:
+  source: github_prs
+  repo: "{{repo}}"
+  skip_wip: true
+  debounce_secs: 120
+  reverify_mins: 60
+run:
+  workspace: pr_head
+  max_turns: 30
+  timeout_secs: 900
+  # The base branch's .claudeignore is read as well.
+  diff: { max_lines: 3000, exclude_paths: ["**/*.lock", "**/*.min.js", "**/dist/**"] }
+  context:
+    - { store: exemptions, recent: 50 }
+  output_schema:
+    type: object
+    required: [verdict, summary, findings]
+    properties:
+      verdict: { enum: [APPROVE, REQUEST_CHANGES, COMMENT] }
+      summary: { type: string, maxLength: 500 }
+      tldr: { type: string, maxLength: 300 }
+      riskLevel: { enum: [low, medium, high, critical] }
+      testImportance: { enum: [none, low, medium, high, critical] }
+      description: { type: string, maxLength: 3000 }
+      findings:
+        type: array
+        items:
+          type: object
+          required: [path, line, body]
+          properties:
+            severity: { enum: [issue, suggestion, nitpick, question, praise] }
+            blocking: { type: boolean }
+            path: { type: string, maxLength: 300 }
+            line: { type: integer }
+            body: { type: string, maxLength: 2000 }
+            confidence: { type: integer }
+      resolutions:
+        type: array
+        items:
+          type: object
+          required: [path, line, resolution]
+          properties:
+            path: { type: string, maxLength: 300 }
+            line: { type: integer }
+            resolution: { enum: [resolved, wont_fix, open] }
+            body: { type: string, maxLength: 500 }
+actions:
+  - id: review
+    do: pr_review
+    target: "{{subject.number}}"
+    verdict: "{{answer.verdict}}"
+    body_template: review
+    findings: findings
+    min_confidence: 50
+    resolutions: resolutions
+  - id: describe
+    when: { field: description, truthy: true }
+    do: pr_description
+    target: "{{subject.number}}"
+    body: "{{answer.description}}"
+limits:
+  max_body_chars: 8000
+  daily_budget_usd: 25
+  budget_input: daily_budget

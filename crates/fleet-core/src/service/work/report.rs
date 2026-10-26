@@ -204,14 +204,37 @@ const EV_ERR: &str = "__FLEET_EV_ERR__\t";
 /// else `origin/master`; the comparison is against the merge base, so a
 /// base that moved on since the branch was cut adds nothing.
 pub fn evidence_script(cwd: &str) -> String {
+    evidence_script_since(cwd, None)
+}
+
+/// [`evidence_script`] from `since`, the commit a task began on in a
+/// checkout it shares with the tasks before it (lanes design L3, §3.3):
+/// its evidence is `since..HEAD`, never what the tasks before it did. A
+/// `since` that is no longer an ancestor of `HEAD` (the history was
+/// rewritten) is an error, not a guess. `None` reads against the merge
+/// base, as for a run in a checkout of its own.
+pub fn evidence_script_since(cwd: &str, since: Option<&str>) -> String {
+    let base = match since.filter(|s| crate::store::is_commit_id(s)) {
+        Some(sha) => format!(
+            "base={sha}\n\
+             head=$(git rev-parse HEAD 2>/dev/null) || {{ printf '{err}not a git checkout\\n'; exit 0; }}\n\
+             git merge-base --is-ancestor {sha} HEAD 2>/dev/null || {{ printf '{err}the task began on %s, which the branch no longer holds\\n' {sha}; exit 0; }}\n\
+             mb={sha}\n",
+            err = EV_ERR,
+        ),
+        None => format!(
+            "base=$(git symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null)\n\
+             [ -n \"$base\" ] || {{ git rev-parse -q --verify origin/main >/dev/null 2>&1 && base=origin/main; }}\n\
+             [ -n \"$base\" ] || {{ git rev-parse -q --verify origin/master >/dev/null 2>&1 && base=origin/master; }}\n\
+             [ -n \"$base\" ] || {{ printf '{err}no base branch\\n'; exit 0; }}\n\
+             head=$(git rev-parse HEAD 2>/dev/null) || {{ printf '{err}not a git checkout\\n'; exit 0; }}\n\
+             mb=$(git merge-base HEAD \"$base\" 2>/dev/null) || {{ printf '{err}no merge base with %s\\n' \"$base\"; exit 0; }}\n",
+            err = EV_ERR,
+        ),
+    };
     format!(
         "cd {cwd} 2>/dev/null || {{ printf '{err}no checkout\\n'; exit 0; }}\n\
-         base=$(git symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null)\n\
-         [ -n \"$base\" ] || {{ git rev-parse -q --verify origin/main >/dev/null 2>&1 && base=origin/main; }}\n\
-         [ -n \"$base\" ] || {{ git rev-parse -q --verify origin/master >/dev/null 2>&1 && base=origin/master; }}\n\
-         [ -n \"$base\" ] || {{ printf '{err}no base branch\\n'; exit 0; }}\n\
-         head=$(git rev-parse HEAD 2>/dev/null) || {{ printf '{err}not a git checkout\\n'; exit 0; }}\n\
-         mb=$(git merge-base HEAD \"$base\" 2>/dev/null) || {{ printf '{err}no merge base with %s\\n' \"$base\"; exit 0; }}\n\
+         {base}\
          printf '{head}%s\\t%s\\t%s\\n' \"$head\" \"$base\" \"$mb\"\n\
          printf '{nc}%s\\n' \"$(git rev-list --count \"$mb\"..HEAD 2>/dev/null)\"\n\
          git log --no-merges --format='{commit}%H%x09%s' -n {cmax} \"$mb\"..HEAD 2>/dev/null\n\
@@ -295,7 +318,7 @@ pub async fn collect_evidence(
     cwd: &str,
     tasks: &[TaskRow],
 ) {
-    collect_evidence_as(store, ssh, host, cwd, tasks, EvidenceRead::Final).await
+    collect_evidence_as(store, ssh, host, cwd, tasks, EvidenceRead::Final).await;
 }
 
 /// When a git read of a run's checkout happens, which says what it may
@@ -312,7 +335,16 @@ pub enum EvidenceRead {
     Retry,
 }
 
-/// [`collect_evidence`], for `read`.
+/// The longest one retried git read may take. The retry runs in the loop's
+/// pass, so a host that swallows packets costs this, not ssh's own minute.
+const EVIDENCE_RETRY_WALL_CLOCK: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// The most one pass of the loop spends on retried reads; the rest wait
+/// for the next pass.
+const EVIDENCE_RETRY_PASS: std::time::Duration = std::time::Duration::from_secs(45);
+
+/// [`collect_evidence`], for `read`; answers whether the host answered (a
+/// failed read is stored either way).
 pub async fn collect_evidence_as(
     store: &Arc<Mutex<Store>>,
     ssh: &Arc<SshClient>,
@@ -320,18 +352,82 @@ pub async fn collect_evidence_as(
     cwd: &str,
     tasks: &[TaskRow],
     read: EvidenceRead,
-) {
+) -> bool {
     let runs: Vec<i64> = tasks
         .iter()
         .filter(|t| t.work_item_id.is_some())
         .map(|t| t.id)
         .collect();
     if runs.is_empty() {
-        return;
+        return true;
     }
-    let script = evidence_script(cwd);
-    let mut ev = match crate::service::catalog::inventory::run_host_script(ssh, host, &script).await
-    {
+    // A task that began part way along a shared checkout (a lane's) is
+    // read from where it began; the others against the merge base, once.
+    let since: Vec<(i64, Option<String>)> = {
+        let Ok(s) = store.lock() else { return false };
+        runs.iter()
+            .map(|&id| (id, s.task_start_head(id).ok().flatten()))
+            .collect()
+    };
+    let mut answered = true;
+    let mut done: Vec<(Option<String>, TaskEvidence)> = Vec::new();
+    for (id, from) in since {
+        let ev = match done.iter().find(|(f, _)| *f == from) {
+            Some((_, ev)) => ev.clone(),
+            None => {
+                let (ok, ev) = read_evidence(ssh, host, cwd, from.as_deref(), read).await;
+                answered &= ok;
+                done.push((from, ev.clone()));
+                ev
+            }
+        };
+        let Ok(s) = store.lock() else {
+            return answered;
+        };
+        let stored = match read {
+            EvidenceRead::Final => s.set_task_evidence(id, &ev),
+            EvidenceRead::MidTurn => s.replace_open_task_evidence(id, &ev, false).map(|_| ()),
+            // A retry keeps what it replaces open or settled: a failed
+            // mid-turn read read again is still owed the worker's Stop, so
+            // a commit made after it counts.
+            EvidenceRead::Retry => {
+                let mut ev = ev;
+                ev.provisional = s
+                    .get_task(id)
+                    .ok()
+                    .flatten()
+                    .and_then(|t| t.evidence)
+                    .is_some_and(|e| e.provisional);
+                s.replace_open_task_evidence(id, &ev, true).map(|_| ())
+            }
+        };
+        if let Err(e) = stored {
+            tracing::warn!(task = id, error = %e.message, "[report] storing evidence failed");
+        }
+    }
+    answered
+}
+
+/// Read the git evidence at `cwd` on `host` since commit `from` (`None`:
+/// against the merge base), and whether the host answered.
+async fn read_evidence(
+    ssh: &Arc<SshClient>,
+    host: &str,
+    cwd: &str,
+    from: Option<&str>,
+    read: EvidenceRead,
+) -> (bool, TaskEvidence) {
+    use crate::service::catalog::inventory::{run_host_script, run_host_script_with};
+    let script = evidence_script_since(cwd, from);
+    let answer = match read {
+        EvidenceRead::Retry => {
+            let cancel = tokio_util::sync::CancellationToken::new();
+            run_host_script_with(ssh, host, &script, EVIDENCE_RETRY_WALL_CLOCK, &cancel).await
+        }
+        _ => run_host_script(ssh, host, &script).await,
+    };
+    let answered = answer.is_ok();
+    let mut ev = match answer {
         Ok(out) => parse_evidence(&out, now_unix()),
         // Where it was read, so the loop can read it again (a host that
         // dropped for a moment is not a run that did nothing).
@@ -344,38 +440,28 @@ pub async fn collect_evidence_as(
         },
     };
     ev.provisional = read == EvidenceRead::MidTurn;
-    let Ok(s) = store.lock() else { return };
-    for id in runs {
-        let stored = match read {
-            EvidenceRead::Final => s.set_task_evidence(id, &ev),
-            EvidenceRead::MidTurn => s.replace_open_task_evidence(id, &ev, false).map(|_| ()),
-            EvidenceRead::Retry => s.replace_open_task_evidence(id, &ev, true).map(|_| ()),
-        };
-        if let Err(e) = stored {
-            tracing::warn!(task = id, error = %e.message, "[report] storing evidence failed");
-        }
-    }
+    (answered, ev)
 }
 
 /// The least time between two reads of one run's failed git evidence.
 const EVIDENCE_RETRY_EVERY_SECS: i64 = 60;
 
-/// Read again the git evidence of `mission_id`'s runs whose read failed
-/// (a transient SSH error right after the run), within
-/// [`super::gate::EVIDENCE_RETRY_SECS`] of their finish: the gate holds
-/// them `pending` meanwhile rather than calling the work missing.
-pub async fn retry_unread_evidence(
-    store: &Arc<Mutex<Store>>,
-    ssh: &Arc<SshClient>,
-    mission_id: i64,
-    now: i64,
-) {
+/// Read again the git evidence of every run whose read failed (a transient
+/// SSH error right after the run), within [`super::gate::EVIDENCE_RETRY_SECS`]
+/// of its finish: the gate holds it `pending` meanwhile rather than calling
+/// the work missing. Any run, in a mission or not: the missions' loop calls
+/// it on every pass, outside any mission's lease. One read per checkout
+/// (`host`, `dir`) for all its runs, each bounded by
+/// [`EVIDENCE_RETRY_WALL_CLOCK`]; a host that fails once is not tried again
+/// in the same pass, and the pass stops after [`EVIDENCE_RETRY_PASS`].
+pub async fn retry_unread_evidence(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>, now: i64) {
     let runs = match store.lock() {
         Ok(s) => s
-            .mission_runs_with_unread_evidence(mission_id, now - super::gate::EVIDENCE_RETRY_SECS)
+            .runs_with_unread_evidence(now - super::gate::EVIDENCE_RETRY_SECS)
             .unwrap_or_default(),
         Err(_) => return,
     };
+    let mut checkouts: Vec<((String, String), Vec<TaskRow>)> = Vec::new();
     for t in runs {
         let Some(ev) = t.evidence.as_ref() else {
             continue;
@@ -386,7 +472,24 @@ pub async fn retry_unread_evidence(
         if now - ev.at < EVIDENCE_RETRY_EVERY_SECS {
             continue;
         }
-        collect_evidence_as(store, ssh, &host, &dir, &[t], EvidenceRead::Retry).await;
+        let key = (host, dir);
+        match checkouts.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, group)) => group.push(t),
+            None => checkouts.push((key, vec![t])),
+        }
+    }
+    let started = std::time::Instant::now();
+    let mut unreachable: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for ((host, dir), group) in checkouts {
+        if started.elapsed() >= EVIDENCE_RETRY_PASS {
+            break;
+        }
+        if unreachable.contains(&host) {
+            continue;
+        }
+        if !collect_evidence_as(store, ssh, &host, &dir, &group, EvidenceRead::Retry).await {
+            unreachable.insert(host);
+        }
     }
 }
 

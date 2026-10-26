@@ -1054,7 +1054,46 @@ A continuous mission wakes on `policy.wake_every_secs`; a finished run, a
 member's status moving on the tracker and a worker's PR checks moving each
 wake its mission. The Missions tab has Start wave, the next steps, the
 cards, the grant and Pause all; the phone (fleet-mobile) has the list, the
-steps, the cards and Pause all. A mission's worker is refused a person's
+steps, the cards and Pause all. A run of an item that already has an
+implement attempt (a retry, a review, a test) starts its checkout from that
+attempt's branch, on its host while that host is up (and inside the grant), and its prompt names
+the branch (`run::prior_work`, lanes design 2026-10-23 L0): before, a run
+beside the live implementer got a fresh `-N` checkout of the default branch,
+so a review read none of the work and a retry began again. `work { mission }`
+carries `stats` (`missions/stats.rs`): runs by role and per done task,
+retries, cold starts, a task's median time and the share of the working span
+with no run open, shown as a line in the mission room's header. Lanes L1:
+a Claude worker's run prompt asks for subagents to explore and to review its
+own diff (`run::subagent_note`, `orchestrator.run_subagents`, on); with
+`orchestrator.planner_reads` (off) the planner runs in the mission's
+checkout on its host with Read, Grep and Glob; and its prompt says items
+changing the same files or shared registry depend on each other. The lanes
+design's decisions D1–D9 are accepted (2026-10-24). Lanes L2 (migration
+209, `store/mission_lanes.rs`): a mission's tasks can be put in named lanes
+by a plan's `Lane` column, the planner's `create_item { lane }` and a
+person (`work_link { mission_item, lane }`, the task row's lane picker);
+`work { mission }` lists them and the Graph view groups by them. Lanes L3:
+with `policy.execution = lane` (off by default; "Tasks run" in the
+mission's edit form, changed only while it is not running) a lane's tasks
+run one at a time in one lead session on the lane's branch
+(`orchestrate/lanes.rs`): the loop offers one implement run per free lane,
+hands it to the live lead as a new task typed at its idle prompt, and starts
+a fresh lead in the same checkout after `policy.lane_relay_after` tasks (4),
+on a task's third try on one lead, or when the lead died. Each such task
+records the commit it began on (`tasks.start_head`, migration 210) and its
+evidence is its own commits only. Lanes L4: a lane task's headless review
+runs in a detached checkout of its commit (`git worktree add --detach`,
+removed after) and reads only its own diff, so its lead may already work on
+the next task; a lane waits while a task of it waits for or runs its test,
+which then runs in the lane's checkout; a lead also hands over once its
+context is 70% full; a lane whose tasks are all done reads as done.
+`orchestrator.headless_checks` is on by default since L4. Lanes L5
+(migration 211, `store/item_touches.rs`, `orchestrate/touches.rs`): the
+planner's `create_item` may name `touches` (repository paths or globs the
+task changes); a task whose touches meet an open run's in the same
+repository waits (a task that names none is not held), and a lane starts
+beside another of its repository only when both name every task's touches
+and they do not meet. The task row says what a task changes. A mission's worker is refused a person's
 step (`gh pr merge` / `ready`, a push to `main` / `master`, a tracker CLI)
 by fleet's `PreToolUse(Bash)` guard (`orchestrate/guard.rs`): a shell
 prefilter that asks the hub only about those commands and lets the command
@@ -1063,7 +1102,7 @@ run when the hub does not answer. Hosts get it on re-provisioning
 In the New layout, Jev K3 (off) proposes a stuck mission's outcome and next
 step, and Control shows a "Sent to a mission" receipt for what the operator
 handed over (`control_handoffs`, migration 140, redesign 9.3).
-Built but OFF by default: `orchestrator.headless_checks` runs a member's
+On by default since lanes L4 (was off): `orchestrator.headless_checks` runs a member's
 `review` and `test` steps as one `claude -p` run in the implementer's
 finished checkout (`orchestrate/checks.rs`, F3) instead of a session of
 their own: a review gets Read/Grep/Glob and the diff, a test also exactly
@@ -1283,8 +1322,9 @@ items assigned to the tracker's own account on GitHub and Linear, so those are
 all a poll sees there; the gallery (`fleet_agents/gallery.rs`: the
 `catalog-seed/fleet-agents/` definitions embedded, listed under Automation ›
 Agents › Gallery and added to the catalog with *Add to catalog*, `agents {
-install }`), which holds all seven seeds in `catalog-seed/fleet-agents/`:
-`issue-triage`, `pr-questions` and `daily-digest`, and `self-debug`,
+install }`), which holds the seeds in `catalog-seed/fleet-agents/`:
+`support`, `pr-reviewer` and `pr-test-debate` (the built-in agents restated,
+below), `issue-triage`, `pr-questions` and `daily-digest`, and `self-debug`,
 `proposer`, `simplify` and `refactor` (below); `pr_review` (a review of the
 PR's head with line comments placed on the diff, sent only while that head
 is current, never an unattended REQUEST_CHANGES, nor an unattended APPROVE
@@ -1292,7 +1332,25 @@ unless `limits.auto_approve`).
 Restating the built-in agents is under way, the built-in ones staying until
 the definitions have run for real (spec *Migration*): built so far
 `run.cooldown_secs`, `run.branch`, `mcp_scan`'s `window_mins` / `max_jobs`
-and `limits.auto_approve`.
+and `limits.auto_approve`; `run.fingerprint` (the support agent's error
+fingerprint counted in a fleet store, `knownBug` / `similarBug` /
+`relatedBug` added to the answer, a filed bug kept against it), and the
+gallery's `support` definition; `run.workspace: pr_head`, `run.diff` (the
+reviewer's filtered diff in the prompt, with its size gate), `github_prs`'s
+`skip_wip` / `debounce_secs`, and a PR comment's head; `pr_review`'s
+`min_confidence` and `resolutions` (the reviewer's verdict adjustment
+against the previous review, kept as the subject's `previous`), path label
+rules on `pr_labels` (`subject.paths`), and `pr_description`; `github_prs`'s
+`reverify_mins` (a dismissed or deleted review made again at the same
+head), the `github_review_replies` source and the `pr_reply` action (the
+test debate: a person's reply in a fleet agent's review thread, answered at
+most `max_rounds` times), and the gallery's `pr-reviewer` and
+`pr-test-debate`, which share a store of accepted test exemptions; a
+definition's `limits.daily_budget_usd` (a UTC day's cap on one instance's
+runs, past it a job waits for the next day) with `limits.budget_input` to
+lower it per instance. All the
+migration's steps are built; deleting the built-in agents and converting
+their rules waits on the definitions having run for real.
 
 The self debug agent (thread "Self debug agent", 2026-10-17), the hub and
 desktop parts: a fleet agent definition that sets `run.diagnostics` gets

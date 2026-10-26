@@ -190,6 +190,7 @@ configures it; it never supplies code.
 | `tracker_query` | a query's results that are new since the cursor | issue | `<tracker>:<KEY>` |
 | `github_prs` | open PRs, new heads (the reviewer's `plan.rs` gating) | `{repo, number, title, head_sha, …}` | `gh:o/r#N@sha` |
 | `github_comments` | issue/PR comments matching `match` | comment + PR | `gh:o/r#N@c<id>` |
+| `github_review_replies` | a person's reply in a fleet agent's review thread | thread + PR | `gh:o/r#N@t<root>:c<id>` |
 | `mcp_scan` | a read tool of a bound MCP store, every `every_mins` (the support scanner, generalised) | one entry of the answer, keyed by `key_template` | `scan:<hash of key>` |
 | `schedule` | a cron expression (routines' parser) | `{at}` | `cron:<rule>:<slot>` |
 | `manual` | nothing: a person or a chat agent starts it with inputs | the inputs | `manual:<uuid>` |
@@ -327,6 +328,8 @@ person at `propose`, run at `act` when `auto` is true.
 | `tracker_link` | `{tracker, from, to, type}` | `WriteOp::LinkIssues` |
 | `pr_review` | `{repo, number, sha, event, body, findings[]}` | the reviewer's `gh` calls: the diff, then the review (`ReviewRequest`) |
 | `pr_comment`, `pr_labels` | as the reviewer's | gh |
+| `pr_description` | `{repo, number, sha, body, overwrite, first}` | gh, only onto an empty description unless `overwrite` and `first` |
+| `pr_reply` | `{repo, number, root_id, body, resolve}` | gh: a reply in the thread, then resolving it with `resolve` |
 | `mcp_call` | `{binding, tool, arguments}` | calls the tool over stdio on the host with the binding rendered, as the scanner does |
 | `record` | `{namespace, key, value, expires_at?}` | `agent_records` upsert |
 | `work_task` | `{title, notes, steps[]}` from `summary`, `body`, `steps` | a Work task, its steps proposed as subtasks (`fleet_ops::work_task`) |
@@ -464,7 +467,8 @@ which a later COMMENT from the agent could not lift.
 The gaps, in the order they close (each its own PR):
 
 1. **Support basics** (built 2026-10-23): `run.cooldown_secs` (a subject
-   this instance finished less than that ago is skipped, the support
+   this instance finished less than that ago waits until it has passed,
+   deferred rather than skipped so a PR head or comment is not lost; the support
    agent's `cooldown_secs`, per instance:
    `Store::last_agent_rule_subject_run`); `run.branch` (the project
    worktree's branch, a template over the inputs, checked with the
@@ -473,18 +477,79 @@ The gaps, in the order they close (each its own PR):
    minutes, as the support scanner does) and `max_jobs` (1-10);
    `limits.auto_approve`. The `l2-support` example's `remember` now keys
    its record by the ticket, as its context lookup reads it.
-2. **Fingerprints**: a built-in `fingerprint` helper for `run.context`
-   (the support agent's `fingerprint.rs`: class, normalised message, app
-   frames), the candidate search and score, and recording an action's
-   result (a created bug's key) so incident aggregation works; then the
-   support agent as a gallery definition.
-3. **Reviewer inputs**: a worktree at the PR head, the filtered diff in the
-   prompt (exclude paths, `.claudeignore`, the size gate), `skip_wip` and
-   `debounce_secs`, `head_sha` on a `github_comments` subject.
-4. **Reviewer answer**: the confidence filter, `previous` findings and
-   `adjust_verdict`, label rules, a `pr_description` action.
-5. **Reviewer state**: re-review of a dismissed review, the test debate;
-   then the reviewer as a gallery definition.
+2. **Fingerprints** (built 2026-10-24, `fleet_agents/fingerprints.rs`):
+   `run.fingerprint` names a fleet store and, as templates over the
+   answer, the error's `class`, `message`, `stack` and `component`, with
+   `app_frame_prefix` over the inputs, `window_mins` (default 120) and an
+   optional `bugs: {tracker?, project, issue_type?}`. It runs after the
+   answer is checked and before the actions are planned, not from
+   `run.context`: a comment ticket's error is known only once the model
+   has read the logs. The support agent's own `fingerprint` (sha256 of the
+   class, the message without numbers or ids, the first five app frames)
+   is counted in a record of kind `fingerprint`, and five fields join the
+   answer: `fingerprint`, `seenCount`, `knownBug` (the bug filed for it,
+   while it was seen inside the window), and, with `bugs` and no known bug,
+   `similarBug` / `relatedBug` (the open bug the support agent's JQL finds
+   whose summary scores at least 80 / 60 on class, component and message).
+   The validator adds the five to the schema the actions see and refuses
+   an `output_schema` that has them. A `tracker_issue` whose payload's
+   `fingerprint` is one (`fingerprint: "{{answer.fingerprint}}"`) keeps
+   the bug it filed against it, so the next run of the same error links to
+   it: incident aggregation. The gallery's `support` definition is the
+   support agent's comment trigger restated: ask, comment, link to the
+   known bug unattended, link to a similar one with a person, else file a
+   high-confidence bug. Not restated yet: the assignment trigger and the
+   log scanner (each a definition of its own, one trigger per definition)
+   and the KB write-back (a git commit, not an MCP call).
+3. **Reviewer inputs** (built 2026-10-25): `run.workspace: pr_head` (a
+   worktree of the project at the job's pull request head, through the
+   reviewer's `prepare`; the head moving on skips the run); `run.diff:
+   {exclude_paths, respect_claudeignore (default on), max_lines (default
+   3000, at most 20000)}`, the diff filtered with the reviewer's
+   `exclude_patterns` / `filter_diff` and put in the prompt as data, a
+   diff left empty or too long skipping the run (`empty_diff`,
+   `diff_too_large`); `github_prs`'s `skip_wip` (the reviewer's `is_wip`)
+   and `debounce_secs` (0-3600: a head's job is due that long after it is
+   first seen). A `github_prs` job whose PR is no longer open at its head
+   is skipped when it runs, so a burst of pushes is read once, at its last
+   head. A `github_comments` comment on an open pull request carries its
+   `head_sha`, `base_ref` and `head_ref`, so `/review` in a comment reads
+   and reviews that head (a comment's job is not skipped when the head
+   moves: it asks whatever the head).
+4. **Reviewer answer** (built 2026-10-25): `pr_review`'s `min_confidence`
+   (0-100: a finding whose `confidence` is below it is dropped, one without
+   counts as 100) and a finding's `blocking`; a sent review is remembered
+   in the rule's subjects namespace (kind `review`, key `owner/repo#N`:
+   `{sha, event, findings[{path, line, blocking}]}`), and the next run's
+   GitHub subject carries it as `previous`; `pr_review`'s `resolutions`
+   (an answer array of `{path, line, resolution}`) adjusts the verdict as
+   the reviewer's `adjust_verdict` does: REQUEST_CHANGES while a previous
+   blocking finding is unresolved or `open`, a COMMENT with nothing
+   blocking left an APPROVE, then the unattended rules of `review_event`.
+   The subject carries `paths` (the files of the diff the run reads), and a
+   `pr_labels` item may be `{label, paths: [globs]}`, a label only when a
+   changed file matches (the reviewer's label rules). A `pr_description`
+   action (`target`, `body` / `body_template`, `overwrite`) writes the
+   pull request's description when it has none, or with `overwrite` on the
+   instance's first review of it.
+5. **Reviewer state** (built 2026-10-25): `github_prs`' `reverify_mins`
+   (1-1440): each open PR's remembered review (its GitHub id kept with it)
+   is looked up when due, at most 5 a poll, and one GitHub deleted or
+   dismissed is a `reverify` job at the same head, keyed apart from the
+   head's own. The `github_review_replies` source (`repo`, `match`,
+   `max_rounds` 1-5, default 2): a job per person's reply in a review thread
+   whose first comment is a fleet agent's (and carries `match` when set),
+   the last word being a person's and this instance having answered fewer
+   than `max_rounds` times; the subject carries the PR, `comment` and
+   `thread` (`root_id`, `path`, `line`, `diff_hunk`, `finding`, `rounds`,
+   `replies[{user, body, mine}]`, the markers stripped). The `pr_reply`
+   action (`target` the thread's root, `body`, `resolve`) answers in the
+   thread with the instance's marker, resolving it after. The gallery's
+   `pr-reviewer` (the reviewer's skill, `pr_head`, the filtered diff,
+   confidence 50, resolutions, the description) and `pr-test-debate`
+   (concede or hold; a concession resolves the thread and is recorded in
+   the `exemptions` store both bind shared, which the reviewer reads as
+   context).
 
 ## Steps
 
@@ -655,7 +720,8 @@ The gaps, in the order they close (each its own PR):
    `tracker_comment` sends the same text plain (`WriteOp::Comment`) and
    `tracker_issue` creates an item in the project (`WriteOp::CreateItem`);
    an issue link is Jira's, so a link, or an issue with one, is refused
-   there. Not built: restating the built-in agents.
+   there. The built-in agents are restated as gallery definitions
+   (*Migration* above).
 
    `pr_review`, built 2026-10-20: a review of the subject's head with line
    comments, on a `github_prs` trigger only and never with `each`. It takes
@@ -664,17 +730,19 @@ The gaps, in the order they close (each its own PR):
    COMMENT) and `findings`, an array field of the answer whose items have
    `path`, `line` and `body` (the validator checks the schema). Planning
    keeps the head the run read (`sha`), at most 30 findings, and the event;
-   an `auto` review never approves (APPROVE becomes COMMENT: an approval is
-   a person's). Sending checks the repo as `pr_comment` does, expires the
+   an `auto` review never approves unless the definition sets
+   `limits.auto_approve`, and never requests changes (*Migration*). Sending checks the repo as `pr_comment` does, expires the
    action when the PR is no longer open or its head moved on, fetches the
    diff and places each finding on it with the PR reviewer's
    `commentable_lines` / `snap_line` (within three lines); a finding that
    does not land is listed in the body under *Outside the diff*. The body
    and each line comment end with the instance's marker. An APPROVE or
    REQUEST_CHANGES GitHub refuses on one's own PR is sent as COMMENT, as
-   the reviewer does. Not taken from the reviewer: its confidence filter,
-   the debate, and the re-review of a dismissed review (`verify`), which
-   reads the reviewer's own `review_prs` table.
+   the reviewer does. The reviewer's confidence filter, its verdict
+   adjustment against the previous review, the debate and the re-review of
+   a dismissed review came later (*Migration* steps 4 and 5): fleet keeps
+   the instance's last review in its own records, never the reviewer's
+   `review_prs` table.
 
    The gallery, built 2026-10-18 (`service/fleet_agents/gallery.rs`): the
    definitions in `catalog-seed/fleet-agents/`, embedded in fleet-core
@@ -743,6 +811,13 @@ The gaps, in the order they close (each its own PR):
    - v1: a shared namespace is per hub.
    - Should it be per org, so one org's instances cannot read another's
      records?
-4. **Cost.** Each instance has its own spend. Should a definition carry a
-   default budget (`run.max_cost_usd`) that an instance may lower but not
-   raise?
+4. **Cost** (decided 2026-10-25). A definition's `limits.daily_budget_usd`
+   (more than 0, at most 1000) caps what one instance's runs cost in a UTC
+   day: the jobs a rule finished since the day began are summed
+   (`Store::agent_rule_cost_since`), and once that reaches the budget a job
+   is deferred to the next day, not dropped. `limits.budget_input` names a
+   `number` input whose value lowers the budget for one instance; a value
+   above the definition's is held to it, so an instance may spend less than
+   its definition allows, never more. Unset is no cap. The gallery's
+   `support` and `pr-reviewer` cap at $25 a day, `pr-test-debate` at $5,
+   each with a `daily_budget` input to lower it.

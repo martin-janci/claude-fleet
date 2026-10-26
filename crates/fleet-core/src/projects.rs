@@ -301,6 +301,38 @@ pub async fn git_common_dir(repo_path: &Path) -> Option<PathBuf> {
     Some(canonical(&abs))
 }
 
+/// `repo_path`'s `origin` URL when it names a github.com repository
+/// ([`crate::repo_url::github_origin`]). `Some(None)` when git answered that
+/// there is no origin, or that it is elsewhere; `None` when git could not
+/// answer at all (it failed to spawn, or failed some other way), so the scan
+/// keeps the origin it recorded before rather than erasing it on one failed
+/// read. Stored on the project row by the scan (`ProjectRow::github_origin`).
+pub async fn git_github_origin(repo_path: &Path) -> Option<Option<String>> {
+    let output = crate::proc::command("git")
+        .arg("-C")
+        .arg(repo_path)
+        .args(["remote", "get-url", "origin"])
+        .output()
+        .await
+        .ok()?;
+    github_origin_answer(
+        output.status.code(),
+        &String::from_utf8_lossy(&output.stdout),
+    )
+}
+
+/// `git remote get-url origin`'s answer, read as [`git_github_origin`]
+/// returns it: exit 0 is the URL (kept only when it is on GitHub), exit 2 is
+/// git's "No such remote" (no origin), and anything else (128 for a broken
+/// or unreadable repository, a signal) is no answer.
+fn github_origin_answer(code: Option<i32>, stdout: &str) -> Option<Option<String>> {
+    match code {
+        Some(0) => Some(crate::repo_url::github_origin(stdout)),
+        Some(2) => Some(None),
+        _ => None,
+    }
+}
+
 /// Parse `git worktree list --porcelain`. The first entry is the main
 /// worktree (git's ordering guarantee) and is named `main`; comparing paths
 /// against the scanned directory instead misnamed the real main checkout
@@ -341,6 +373,23 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    /// Only an answer from git decides the origin: a failed read is `None`,
+    /// which the scan skips, never `Some(None)`, which it records.
+    #[test]
+    fn github_origin_answer_tells_no_origin_from_a_failed_read() {
+        assert_eq!(
+            github_origin_answer(Some(0), "git@github.com:o/r.git\n"),
+            Some(Some("git@github.com:o/r.git".to_string()))
+        );
+        assert_eq!(
+            github_origin_answer(Some(0), "https://gitlab.com/o/r\n"),
+            Some(None)
+        );
+        assert_eq!(github_origin_answer(Some(2), ""), Some(None));
+        assert_eq!(github_origin_answer(Some(128), ""), None);
+        assert_eq!(github_origin_answer(None, ""), None);
+    }
 
     #[test]
     fn worktree_dir_name_flattens_a_branch_into_one_component() {

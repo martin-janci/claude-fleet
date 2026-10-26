@@ -39,7 +39,7 @@
 
   let { detail, laneBy, repoName = () => null, onlanechange, onopenitem, onopensession }: Props = $props();
 
-  const LANE_LABEL: Record<LaneBy, string> = { repo: 'Repo', assignee: 'Assignee', none: 'None' };
+  const LANE_LABEL: Record<LaneBy, string> = { lane: 'Lane', repo: 'Repo', assignee: 'Assignee', none: 'None' };
 
   const layout = $derived(layoutMission(detail, laneBy, repoName));
   const graphNodes = $derived(layout.nodes.map((n) => n.node));

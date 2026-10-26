@@ -29,6 +29,21 @@ pub struct Seed {
 /// the hub image's build test finds the embeds by their literal paths.
 pub const SEEDS: &[Seed] = &[
     Seed {
+        name: "support",
+        asset: include_str!("../../../../../catalog-seed/fleet-agents/support/asset.yaml"),
+        skill: include_str!("../../../../../catalog-seed/fleet-agents/support/skill.md"),
+    },
+    Seed {
+        name: "pr-reviewer",
+        asset: include_str!("../../../../../catalog-seed/fleet-agents/pr-reviewer/asset.yaml"),
+        skill: include_str!("../../../../../catalog-seed/fleet-agents/pr-reviewer/skill.md"),
+    },
+    Seed {
+        name: "pr-test-debate",
+        asset: include_str!("../../../../../catalog-seed/fleet-agents/pr-test-debate/asset.yaml"),
+        skill: include_str!("../../../../../catalog-seed/fleet-agents/pr-test-debate/skill.md"),
+    },
+    Seed {
         name: "issue-triage",
         asset: include_str!("../../../../../catalog-seed/fleet-agents/issue-triage/asset.yaml"),
         skill: include_str!("../../../../../catalog-seed/fleet-agents/issue-triage/skill.md"),
@@ -130,9 +145,14 @@ pub fn gallery() -> Vec<GalleryEntry> {
     entries(|n| names.iter().any(|m| m == n))
 }
 
+/// Gallery definition `name`.
+pub fn seed(name: &str) -> Option<&'static Seed> {
+    SEEDS.iter().find(|s| s.name == name)
+}
+
 /// Add gallery definition `name` to the personal catalog.
 pub fn install(store: &Mutex<Store>, name: &str) -> Result<WriteResult, IpcError> {
-    let seed = SEEDS.iter().find(|s| s.name == name).ok_or_else(|| {
+    let seed = seed(name).ok_or_else(|| {
         IpcError::new(
             codes::E_NOTFOUND,
             format!(

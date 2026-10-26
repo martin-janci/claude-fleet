@@ -6325,6 +6325,7 @@ fn one_full_row() -> serde_json::Value {
     // With a pin, a view, an origin and a form draft, for the same reason:
     // each is skipped when absent (review wave 24, w24-1).
     row.pinned_at = Some(11);
+    row.prompt_suggestion = Some("run the tests".into());
     row.last_viewed_at = Some(12);
     row.origin = Some("operator".to_string());
     row.origin_ref = Some("9".to_string());
@@ -6381,6 +6382,7 @@ fn the_phone_view_is_exactly_the_columns_a_pager_reads() {
             "pr_evidence",
             "pr_url",
             "project_id",
+            "prompt_suggestion",
             "safe_kill_state",
             "started_at",
             "status",
@@ -18896,6 +18898,15 @@ async fn fleet_healths_hooks_flag_is_not_an_oracle_for_another_persons_session()
         .upsert_session("a-dev-2", "h2", None, None, 1, 1, "running", None)
         .unwrap();
     assert!(g.store.claim_if_unclaimed(a2, Some(ada)).unwrap());
+    // `hooks_silent` counts only a working session (or a recent turn) as
+    // evidence: an idle one calls no hooks.
+    g.store
+        .conn_ref()
+        .execute(
+            "UPDATE sessions SET claude_status = 'working' WHERE id = ?1",
+            rusqlite::params![a2],
+        )
+        .unwrap();
     let t = test_tools(g.store);
     let flag = |caller: Caller| {
         let t = t.clone();
@@ -18921,7 +18932,7 @@ async fn fleet_healths_hooks_flag_is_not_an_oracle_for_another_persons_session()
     assert_eq!(
         flag(Caller::master()).await,
         serde_json::json!(true),
-        "the operator sees the real flag: a reachable host with a live \
+        "the operator sees the real flag: a reachable host with a working \
          session and no hook traffic is silent (§4.5)"
     );
     assert_eq!(

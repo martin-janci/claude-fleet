@@ -21,6 +21,13 @@ export interface ProjectRow {
    * The backend's stale-row sweep skips these rows for the same reason it
    * skips `adopted` ones. */
   system: boolean;
+  /** Its checkout's `origin` when that names a github.com repository
+   * (`repo_url::github_origin`); null or absent when it has none, is not on
+   * GitHub, or the hub is older than migration 207. `owner`/`repo` are not
+   * that identity: an adopted non-GitHub checkout is `local/<dir>`, and a
+   * scanned one is named after its directories. New session clones it onto
+   * another fleet from this URL, and offers no clone without it. */
+  github_origin?: string | null;
 }
 
 export interface WorktreeRow {

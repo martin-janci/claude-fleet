@@ -44,8 +44,9 @@ pub struct RunEvidence {
 pub const EVIDENCE_GRACE_SECS: i64 = 300;
 
 /// How long after a run finished a failed git read (a host that dropped
-/// for a moment) is read again by the mission loop
-/// (`report::retry_unread_evidence`): `pending` meanwhile, and `missing`
+/// for a moment) is read again (`report::retry_unread_evidence`, on every
+/// pass of the missions' loop, for any run: in a mission or not, paused or
+/// not, with the orchestrator off too): `pending` meanwhile, and `missing`
 /// only once this window passes with git still unreadable.
 pub const EVIDENCE_RETRY_SECS: i64 = 1800;
 
@@ -95,7 +96,7 @@ pub fn run_evidence(run: &TaskRow, recorded: Option<&VerificationRow>, now: i64)
         e.at = Some(r.at);
         return e;
     }
-    // A failed read the mission loop reads again (`report::retry_unread_evidence`).
+    // A failed read the loop reads again (`report::retry_unread_evidence`).
     if let Some(err) = ev
         .filter(|e| e.host.is_some() && e.dir.is_some())
         .and_then(|e| e.error.as_deref())

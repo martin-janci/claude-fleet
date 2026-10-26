@@ -516,6 +516,7 @@ mod tests {
                 last_session_at: None,
                 adopted: false,
                 system: false,
+                github_origin: None,
             },
             ProjectRow {
                 id: 2,
@@ -525,6 +526,7 @@ mod tests {
                 last_session_at: None,
                 adopted: false,
                 system: false,
+                github_origin: None,
             },
         ];
         let mut other = wt(3, "/x/s-wt");

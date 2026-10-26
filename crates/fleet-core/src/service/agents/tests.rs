@@ -290,6 +290,25 @@ fn plan_end_follows_the_error_kind() {
     }
 }
 
+/// A deferred run (a cooldown) goes back to pending at its time, however
+/// many attempts it has used: the trigger it carries is not dropped.
+#[test]
+fn a_deferred_run_waits_until_its_time_rather_than_ending() {
+    let deferred = |at| RunOutcome::Deferred {
+        at,
+        reason: "cooldown".into(),
+    };
+    match plan_end(&deferred(500), 9, 3, 100) {
+        AgentJobEnd::Retry { at, error, .. } => assert_eq!((at, error.as_str()), (500, "cooldown")),
+        other => panic!("{other:?}"),
+    }
+    // Never in the past.
+    assert!(matches!(
+        plan_end(&deferred(50), 1, 3, 100),
+        AgentJobEnd::Retry { at: 100, .. }
+    ));
+}
+
 #[tokio::test]
 async fn approved_actions_are_carried_out_and_pending_ones_wait() {
     let (st, _) = store_with_rule(None);

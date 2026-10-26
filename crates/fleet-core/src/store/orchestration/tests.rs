@@ -354,3 +354,51 @@ fn the_log_folds_its_oldest_rows_into_one_digest() {
     assert_eq!(v["kinds"]["created"], 1);
     assert_eq!(v["kinds"]["task_done"], 2);
 }
+
+/// Lanes design §2.3: how a mission's tasks run is `item` or `lane`, a
+/// relay after 1 to 20 tasks, and it changes only while the mission is not
+/// running.
+#[test]
+fn execution_is_item_or_lane_and_changes_only_while_not_running() {
+    let p = MissionPolicy::default();
+    assert_eq!((p.execution.as_str(), p.lane_relay_after), ("item", 4));
+    let bad = MissionPolicy {
+        execution: "swarm".into(),
+        ..Default::default()
+    };
+    assert!(check_policy(&bad)
+        .unwrap_err()
+        .message
+        .contains("policy.execution"));
+    let bad = MissionPolicy {
+        lane_relay_after: 0,
+        ..Default::default()
+    };
+    assert!(check_policy(&bad).is_err());
+    let s = store();
+    let m = mission(&s, "m", None);
+    let lanes = MissionPatch {
+        policy: Some(MissionPolicy {
+            execution: "lane".into(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let m = s.update_mission(m.id, None, &lanes, "fleet").unwrap();
+    assert_eq!(m.policy.execution, "lane", "a draft changes it");
+    s.set_mission_state(m.id, None, "active", "fleet").unwrap();
+    let back = MissionPatch {
+        policy: Some(MissionPolicy::default()),
+        ..Default::default()
+    };
+    let e = s.update_mission(m.id, None, &back, "fleet").unwrap_err();
+    assert!(e.message.contains("not running"), "{}", e.message);
+    s.set_mission_state(m.id, None, "paused", "fleet").unwrap();
+    assert_eq!(
+        s.update_mission(m.id, None, &back, "fleet")
+            .unwrap()
+            .policy
+            .execution,
+        "item"
+    );
+}

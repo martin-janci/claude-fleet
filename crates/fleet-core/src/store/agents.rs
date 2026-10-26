@@ -496,9 +496,14 @@ impl Store {
                 error_kind,
                 error,
             } => {
+                // A deferral (a cooldown) did no work, so it gives back the
+                // attempt its claim counted: the retry cap and the backoff
+                // count real runs only.
                 self.conn.execute(
                     "UPDATE agent_jobs SET state = 'pending', next_attempt_at = ?2, \
                        error_kind = ?3, error = ?4, lease_until = NULL, \
+                       attempts = CASE WHEN ?3 = 'deferred' THEN MAX(attempts - 1, 0) \
+                                  ELSE attempts END, \
                        cost_micros = cost_micros + ?5, updated_at = ?6 WHERE id = ?1",
                     params![id, at, error_kind, error, cost_micros, now],
                 )?;
@@ -524,6 +529,17 @@ impl Store {
     /// How many runs of `agent` on `subject` ended (done or needing a
     /// person) since `since`, `except_job` left out: the fleet agents' loop
     /// guard.
+    /// What rule `rule_id`'s jobs cost that were last written at `since`
+    /// or later, in micro-USD (a job's cost lands when it is finished).
+    pub fn agent_rule_cost_since(&self, rule_id: i64, since: i64) -> Result<i64, rusqlite::Error> {
+        self.conn.query_row(
+            "SELECT COALESCE(SUM(cost_micros), 0) FROM agent_jobs \
+             WHERE rule_id = ?1 AND updated_at >= ?2",
+            params![rule_id, since],
+            |r| r.get(0),
+        )
+    }
+
     pub fn count_agent_subject_runs(
         &self,
         agent: &str,
@@ -572,6 +588,26 @@ impl Store {
              WHERE agent = ?1 AND subject = ?2 AND rule_id = ?3 AND id <> ?4 \
                AND state IN ('done', 'needs_person')",
             params![agent, subject, rule_id, except_job],
+            |r| r.get(0),
+        )
+    }
+
+    /// Whether a later job of rule `rule_id` on `subject` than `job_id` is
+    /// still pending: the newer trigger that supersedes a job waiting out a
+    /// fleet agent's cooldown.
+    pub fn newer_pending_agent_rule_job(
+        &self,
+        agent: &str,
+        rule_id: i64,
+        subject: &str,
+        job_id: i64,
+    ) -> Result<bool, rusqlite::Error> {
+        // `agent, subject` first: the `agent_jobs_subject` index.
+        self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM agent_jobs \
+             WHERE agent = ?1 AND subject = ?2 AND rule_id = ?3 AND id > ?4 \
+               AND state = 'pending')",
+            params![agent, subject, rule_id, job_id],
             |r| r.get(0),
         )
     }
@@ -993,6 +1029,44 @@ mod tests {
             s.claim_agent_jobs(&["review"], 2060, 1, 60).unwrap().len(),
             1
         );
+    }
+
+    #[test]
+    fn a_deferral_does_not_use_up_an_attempt() {
+        let s = Store::open_in_memory().unwrap();
+        let rid = s.grant_agent_rule(&rule("review", "gh:o/r")).unwrap();
+        s.record_agent_poll(rid, 1000, None, &[job(rid, "gh:o/r#1", "k1")])
+            .unwrap();
+        for at in [1100, 1200] {
+            let j = &s.claim_agent_jobs(&["review"], at - 100, 1, 60).unwrap()[0];
+            assert_eq!(j.attempts, 1, "each deferral gave its attempt back");
+            s.finish_agent_job(
+                j.id,
+                &AgentJobEnd::Retry {
+                    at,
+                    error_kind: "deferred".into(),
+                    error: "cooldown".into(),
+                },
+                0,
+                at - 100,
+            )
+            .unwrap();
+        }
+        let j = &s.claim_agent_jobs(&["review"], 1200, 1, 60).unwrap()[0];
+        assert_eq!(j.attempts, 1, "the first real run is attempt 1");
+        s.finish_agent_job(
+            j.id,
+            &AgentJobEnd::Retry {
+                at: 1300,
+                error_kind: "transient".into(),
+                error: "timeout".into(),
+            },
+            0,
+            1210,
+        )
+        .unwrap();
+        let j = &s.claim_agent_jobs(&["review"], 1300, 1, 60).unwrap()[0];
+        assert_eq!(j.attempts, 2, "a real failure still counts");
     }
 
     #[test]

@@ -7,19 +7,20 @@
 // Pure: it reads the `work_mission` answer and returns geometry, so
 // MissionGraph.svelte only draws. Nothing here is stored; the hub derives
 // each node's state and wave (`service::work::graph`), and a lane is a
-// grouping this view picks (the task's repo or assignee), not a field.
+// grouping this view picks: the mission's own lanes (lanes design L2), or
+// the task's repo or assignee.
 
 import type { MissionDetail, GraphNode } from './missions';
 import { wavesOf } from './missions';
 import type { WorkItemRow } from './trackers';
 
 /** What a lane is. */
-export type LaneBy = 'repo' | 'assignee' | 'none';
+export type LaneBy = 'lane' | 'repo' | 'assignee' | 'none';
 
-export const LANE_BY: readonly LaneBy[] = ['repo', 'assignee', 'none'];
+export const LANE_BY: readonly LaneBy[] = ['lane', 'repo', 'assignee', 'none'];
 
 export function isLaneBy(v: unknown): v is LaneBy {
-  return v === 'repo' || v === 'assignee' || v === 'none';
+  return LANE_BY.includes(v as LaneBy);
 }
 
 /** The design system's five states (StatusChip): a node's state mapped
@@ -120,10 +121,18 @@ export interface MissionLayout {
 
 const UNASSIGNED = 'Unassigned';
 const NO_REPO = 'No repo';
+const NO_LANE = 'No lane';
+const CATCH_ALL = [UNASSIGNED, NO_REPO, NO_LANE];
 
 /** The lane a task sits in. */
-function laneOf(it: WorkItemRow | undefined, by: LaneBy, repoName: (id: number) => string | null): string {
+function laneOf(
+  it: WorkItemRow | undefined,
+  by: LaneBy,
+  repoName: (id: number) => string | null,
+  missionLane: (id: number) => string | undefined,
+): string {
   if (by === 'none') return 'All tasks';
+  if (by === 'lane') return (it && missionLane(it.id)) ?? NO_LANE;
   if (by === 'assignee') return it?.assignees?.[0] ?? UNASSIGNED;
   const pid = it?.project_id;
   return pid != null ? (repoName(pid) ?? `Repo ${pid}`) : NO_REPO;
@@ -132,6 +141,7 @@ function laneOf(it: WorkItemRow | undefined, by: LaneBy, repoName: (id: number) 
 /** The lanes that tell most apart: repos when the tasks span several,
  *  else assignees when they name several, else one lane. */
 export function defaultLaneBy(detail: MissionDetail): LaneBy {
+  if ((detail.lanes ?? []).some((l) => l.item_ids.length > 0)) return 'lane';
   const items = (detail.items ?? []).filter((i) => i.proposal_state !== 'rejected');
   const repos = new Set(items.map((i) => i.project_id ?? null));
   if (repos.size > 1) return 'repo';
@@ -227,13 +237,15 @@ export function layoutMission(
   // first task is on top; the catch-all lanes sink to the bottom.
   const laneIds: string[] = [];
   const cell = new Map<string, GraphNode[]>();
+  const laneName = new Map<number, string>();
+  for (const l of detail.lanes ?? []) for (const id of l.item_ids) laneName.set(id, l.name);
   for (const n of nodes) {
-    const lane = laneOf(items.get(n.item_id), by, repoName);
+    const lane = laneOf(items.get(n.item_id), by, repoName, (id) => laneName.get(id));
     if (!laneIds.includes(lane)) laneIds.push(lane);
     const k = `${lane}|${n.wave}`;
     cell.set(k, [...(cell.get(k) ?? []), n]);
   }
-  laneIds.sort((a, b) => Number(a === UNASSIGNED || a === NO_REPO) - Number(b === UNASSIGNED || b === NO_REPO));
+  laneIds.sort((a, b) => Number(CATCH_ALL.includes(a)) - Number(CATCH_ALL.includes(b)));
 
   const waveNums = [...new Set(nodes.map((n) => n.wave))].sort((a, b) => a - b);
   const col = new Map(waveNums.map((w, i) => [w, i]));

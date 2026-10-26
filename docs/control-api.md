@@ -1956,7 +1956,7 @@ timeline instead of a reply. See `docs/hub.md` → *Link two hubs*.
 
 `provision_hosts` (also reachable via Settings → Control API → **Provision hosts**) makes a Claude on every managed host able to drive the fleet. For each non-hidden, reachable host it performs these steps:
 
-1. **Skills** — writes both `~/.claude/skills/claude-fleet-control/SKILL.md` and `~/.claude/skills/fleet-friendly-name/SKILL.md` on that host. Claude picks up skills from this directory live, without a restart. The fleet-friendly-name skill is the path agents use to set the session's sidebar label via the `set_friendly_name` MCP tool.
+1. **Skills** — writes both `~/.claude/skills/claude-fleet-control/SKILL.md` and `~/.claude/skills/fleet-friendly-name/SKILL.md` on that host. Claude picks up skills from this directory live, without a restart. The fleet-friendly-name skill is the path agents use to set the session's sidebar label via the `set_friendly_name` MCP tool. Beside them it writes fleet's Claude Code plugin, `~/.claude/skills/fleet-prompt-suggestion/` (from `plugins/fleet-prompt-suggestion`): Claude Code loads a plugin from that folder by itself, and this one posts the next-prompt suggestion Claude Code shows after a turn to `/hook` as a `PromptSuggestion` event (see *Hook contract*). It finds the URL and bearer in fleet's own http hooks in `~/.claude/settings.json`, so it does nothing until step 5 has run. A Claude Code without plugin hook modules ignores the folder.
 2. **`~/.claude/CLAUDE.md` managed block** — appends (or refreshes in place) a short sentinel-delimited block saying what claude-fleet is and pointing at the two skills. Content outside the sentinels is the user's own and is preserved verbatim; the block is idempotent and only re-written when its body drifts.
 3. **`~/.claude.json` entry** — reads the host's `~/.claude.json`, merges an `mcpServers.claude-fleet` entry (preserving all sibling keys), backs the original up to `~/.claude.json.fleet-bak`, then writes the updated file. `<host-token>` is that host's own token (see *Per-host tokens*); it is reused on re-runs unless `rotate: true` is passed. Both files are written under `umask 077` and `chmod 600`. The entry added is:
    ```json
@@ -2023,7 +2023,7 @@ reported. `fleet_health.hosts[]` judges them per host:
 | `disk_low` | `disk_home_pct >= health.disk_low_pct` (default 90). |
 | `claude_behind` | More than `health.claude_max_behind` (default 30) patch releases behind the fleet's newest version among stamps younger than 24 h. |
 | `agent_behind` | An agent host whose agent is not the hub's version (the live registry outranks the stored hello). |
-| `hooks_silent` | Reachable, with a live non-external session, and no hook from its token within `health.hooks_silent_secs` (default 1 h). |
+| `hooks_silent` | Reachable, with a non-external session that is `working` or ended a turn within `health.hooks_silent_secs` (default 1 h), and no hook from its token in that time. Idle, failed, stopped and blocked sessions call no hooks, so they do not count. |
 | `cpu_pct` | CPU busy percent over the last interval, rounded: the `/proc/stat` delta between two samples on Linux, summed `ps` %CPU over the online CPUs on macOS. Absent when unknown. |
 | `mem_used_pct` | Used percent of physical memory (`MemAvailable` on Linux, `kern.memorystatus_level` on macOS). |
 | `mem_pressure` | 0–100: PSI `some avg10` of `/proc/pressure/memory` on Linux; the macOS pressure level (normal 0, warn 50, critical 100). Absent when the kernel cannot tell. |
@@ -2076,6 +2076,7 @@ the session continues.
 | `Notification` | `quota_auto_resume_fired` | same | `working`, stuck cleared | `notification` — type |
 | `PostToolUse` | `EnterWorktree\|ExitWorktree` | `tool_name`, `tool_input`, `tool_response` | worktree row registered / removed | — |
 | `PreToolUse` | `Bash` (command hook, prefiltered) | `tool_name`, `tool_input.command` | none; answers `deny` for a mission's worker running a person's step (orchestration §7.2) | — |
+| `PromptSuggestion` | — (fleet's plugin, not a settings hook) | `session_id`, `suggestion` | `prompt_suggestion` set on the current conversation's row (one line, at most 300 chars, no bidi or zero-width characters); dropped while the row is `working` (a late POST the next prompt overtook); the next `UserPromptSubmit`, `Stop`/`StopFailure`, a genuine `SessionStart` or `SessionEnd` clears it | — |
 
 Every hook write stamps `last_hook_at`; a reconcile pass that started before that
 stamp never overwrites the hook's status with its pane heuristic. Fleet never

@@ -232,6 +232,79 @@ fn a_long_tool_call_is_not_demoted_and_lifted_again_every_tick() {
     );
 }
 
+/// Review 9: fleet's Stop hook lands first and stores `idle` while a slower
+/// Stop hook keeps `✢ … (running Stop hooks… 3/4 · 15s …)` on screen. A
+/// pass that starts after the hook (outside the upsert's in-flight guard)
+/// used to read that spinner as a strong `Working` and write `working` back;
+/// the cadence-skipped passes after it saw an idle pane, which is too weak
+/// to clear it, so the row read working for up to a minute.
+#[test]
+fn the_stop_hooks_spinner_does_not_undo_the_stop_hooks_idle() {
+    use crate::service::pane_intel::{analyze, ClaudeStatus};
+    let mut s = Store::open_in_memory().unwrap();
+    s.upsert_host("vps").unwrap();
+    let projects = s.list_projects().unwrap();
+    let hooks_tail = "● pong\n✢ Channelling… (running Stop hooks… 3/4 · 15s · ↓ 306 tokens)\n  ❯ /clear\n────\n  ⏸ manual mode on · esc to interrupt";
+    let idle_tail = "● pong\n────\n❯ \n────\n  ⏸ manual mode on · ? for shortcuts";
+    assert_eq!(
+        analyze(hooks_tail).derived_status,
+        Some(ClaudeStatus::Working)
+    );
+    assert_eq!(analyze(idle_tail).derived_status, Some(ClaudeStatus::Idle));
+    let pass = |s: &mut Store, tail: &str, agent_status: Option<&str>, agents: bool| {
+        let agent = crate::claude_agents::ClaudeAgentRow {
+            status: agent_status.map(str::to_string),
+            ..agent_for_session("dev-a", "cid-a")
+        };
+        let mut probe = vps_probe(
+            s,
+            vec![tmux_session("dev-a")],
+            None,
+            vec![agent],
+            PrInfoMap::new(),
+        );
+        if !agents {
+            probe.agent_rows = None;
+        }
+        probe.intel.insert("dev-a".into(), analyze(tail));
+        probe.pane_tails.insert("dev-a".into(), tail.to_string());
+        reconcile_write_one_host(s, &probe, &projects).unwrap();
+        s.get_session("dev-a", "vps")
+            .unwrap()
+            .unwrap()
+            .claude_status
+    };
+    // Mid-turn: a real spinner still wins.
+    let working = "✶ Cooking… (3s · esc to interrupt)\n";
+    assert_eq!(
+        pass(&mut s, working, None, false).as_deref(),
+        Some("working")
+    );
+    // Fleet's Stop hook lands before the next pass starts.
+    let landed = now_unix() - 5;
+    s.conn_for_test()
+        .execute(
+            "UPDATE sessions SET claude_status = 'idle', last_hook_at = ?1, last_stop_at = ?1",
+            rusqlite::params![landed],
+        )
+        .unwrap();
+    // Other Stop hooks still run: neither a cadence-skipped pass nor an
+    // agents pass without a status writes `working` back.
+    assert_eq!(
+        pass(&mut s, hooks_tail, None, false).as_deref(),
+        Some("idle")
+    );
+    assert_eq!(
+        pass(&mut s, hooks_tail, None, true).as_deref(),
+        Some("idle")
+    );
+    // The hooks finish: still idle on a skipped pass.
+    assert_eq!(
+        pass(&mut s, idle_tail, None, false).as_deref(),
+        Some("idle")
+    );
+}
+
 /// A pass of `vps` that sees `dev-a` the way a stale-demoted row looks: the
 /// cached `claude agents` status says `working` (live subagents), the pane
 /// shows `pane_status`.
@@ -528,6 +601,7 @@ fn row(
         last_viewed_at: None,
         turn_outcome: None,
         pinned_at: None,
+        prompt_suggestion: None,
         proposals: Vec::new(),
         pending_form: None,
         form_draft: None,

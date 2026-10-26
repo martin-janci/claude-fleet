@@ -290,7 +290,7 @@
       "danger": {
         "level": "none"
       },
-      "default": "false",
+      "default": "true",
       "help": "Run a mission's review and its test commands as one Claude run in the implementer's checkout, with read-only tools and only those commands, instead of opening a session for each. Falls back to a session when the checkout moved or a command is not a plain one.",
       "key": "orchestrator.headless_checks",
       "kind": {
@@ -304,7 +304,7 @@
         "experimental"
       ],
       "unit": "none",
-      "value": "false"
+      "value": "true"
     },
     {
       "ai": "suggest",
@@ -332,6 +332,48 @@
       ],
       "unit": "none",
       "value": "sonnet"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "true",
+      "help": "A mission run asks its Claude worker to explore the code and to review its own changes through subagents, which keeps its own context for the work. Subagents never edit in parallel: they share the checkout.",
+      "key": "orchestrator.run_subagents",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Workers use subagents",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "experimental"
+      ],
+      "unit": "none",
+      "value": "true"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "false",
+      "help": "The mission planner may read the mission's repository (read, search and list files in its checkout, nothing else) before it breaks a goal into tasks, so it can split the work along the files it touches. Planning takes longer and costs more.",
+      "key": "orchestrator.planner_reads",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Planner reads the repository",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "experimental"
+      ],
+      "unit": "none",
+      "value": "false"
     },
     {
       "ai": "suggest",
@@ -1710,7 +1752,7 @@
         "level": "none"
       },
       "default": "3600",
-      "help": "How long a reachable host with a live session may send no hook before it reads as hooks silent.",
+      "help": "How long a reachable host with a working session (or a turn in that time) may send no hook before it reads as hooks silent. Idle and failed sessions call no hooks, so they do not count.",
       "key": "health.hooks_silent_secs",
       "kind": {
         "max": 315360000,
@@ -5315,6 +5357,22 @@
                   "type": "field",
                   "when": {
                     "key": "orchestrator.headless_checks",
+                    "truthy": true
+                  }
+                },
+                {
+                  "key": "orchestrator.run_subagents",
+                  "type": "field",
+                  "when": {
+                    "key": "orchestrator.enabled",
+                    "truthy": true
+                  }
+                },
+                {
+                  "key": "orchestrator.planner_reads",
+                  "type": "field",
+                  "when": {
+                    "key": "orchestrator.enabled",
                     "truthy": true
                   }
                 }

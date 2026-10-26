@@ -266,6 +266,7 @@
       "pr_url",
       "project_id",
       "prompt_submit_seq",
+      "prompt_suggestion",
       "proposals",
       "reviews_session_id",
       "row_version",
@@ -600,6 +601,7 @@
     "ProjectRow": [
       "adopted",
       "base_path",
+      "github_origin",
       "id",
       "last_session_at",
       "owner",
@@ -782,6 +784,7 @@
       "pr_url",
       "project_id",
       "prompt_submit_seq",
+      "prompt_suggestion",
       "proposals",
       "reviews_session_id",
       "row_version",

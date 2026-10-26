@@ -22,9 +22,21 @@ pub const LIMIT_WAIT_EVENT: &str = "limit_wait";
 /// The mission event that ends the ask's waits: a later login of the same
 /// ask answered (review r8), so the planner's newest word is no wait.
 pub const LIMIT_CLEARED_EVENT: &str = "limit_cleared";
-/// The planner's words on a mission: its runs, its waits, and an answer
-/// after a wait. Only these are read, so a busy log never hides a wait.
-const WORD_KINDS: &[&str] = &["planned", LIMIT_WAIT_EVENT, LIMIT_CLEARED_EVENT];
+/// The mission event an ask the chooser refused is, when every login the
+/// planner may use is signed out (review r10): the mission says which login
+/// to sign in again, and the loop does not ask again until one is back.
+pub const SIGNED_OUT_EVENT: &str = "planner_signed_out";
+/// The planner's words on a mission: its runs, its waits, an answer after
+/// a wait and a refusal for signed-out logins. Only these are read, so a
+/// busy log never hides a wait.
+const WORD_KINDS: &[&str] = &[
+    "planned",
+    LIMIT_WAIT_EVENT,
+    LIMIT_CLEARED_EVENT,
+    SIGNED_OUT_EVENT,
+];
+/// How [`choose_in`]'s signed-out refusal starts.
+const SIGNED_OUT_REFUSAL: &str = "no login the planner may use is signed in";
 /// Waits are at most this far ahead: Claude's weekly limit and a day.
 /// A reset further out (an answer the prompt's text steered, review r8) is
 /// not taken as known.
@@ -82,11 +94,23 @@ pub fn candidates(
     m: &MissionRow,
     grant: Option<&GrantRow>,
 ) -> Result<Vec<Login>, IpcError> {
+    Ok(logins(s, m, grant)?.0)
+}
+
+/// [`candidates`], and the logins left out of them as signed out, in the
+/// order they would have been tried.
+fn logins(
+    s: &Store,
+    m: &MissionRow,
+    grant: Option<&GrantRow>,
+) -> Result<(Vec<Login>, Vec<Login>), IpcError> {
     let preferred = grant.and_then(|g| g.profile.clone());
     let mut out: Vec<Login> = Vec::new();
-    let mut push = |l: Login| {
-        if !out.contains(&l) {
-            out.push(l);
+    let mut dropped: Vec<Login> = Vec::new();
+    let mut push = |l: Login, gone: bool| {
+        let list = if gone { &mut dropped } else { &mut out };
+        if !list.contains(&l) {
+            list.push(l);
         }
     };
     for host in planner_hosts(s, m, grant)? {
@@ -106,20 +130,17 @@ pub fn candidates(
         if let Some(p) = preferred
             .as_ref()
             .filter(|p| profiles.iter().any(|x| &x.name == *p))
-            .filter(|p| !signed_out(Some(p)))
         {
-            push(at(Some(p)));
+            push(at(Some(p)), signed_out(Some(p)));
         }
-        if !signed_out(None) {
-            push(at(None));
-        }
+        push(at(None), signed_out(None));
         for p in &profiles {
-            if p.account_uuid.is_some() && !signed_out(Some(&p.name)) {
-                push(at(Some(&p.name)));
+            if p.account_uuid.is_some() {
+                push(at(Some(&p.name)), signed_out(Some(&p.name)));
             }
         }
     }
-    Ok(out)
+    Ok((out, dropped))
 }
 
 /// The planner's words on a mission (its runs and waits, newest first),
@@ -150,6 +171,19 @@ impl Words {
     /// limit, and no later login of that ask answered.
     pub fn waiting(&self) -> bool {
         self.0.first().is_some_and(|e| e.kind == LIMIT_WAIT_EVENT)
+    }
+
+    /// The wait the planner's newest word is, when it is one.
+    pub fn newest_wait(&self) -> Option<LimitWait> {
+        let e = self.0.first().filter(|e| e.kind == LIMIT_WAIT_EVENT)?;
+        serde_json::from_value(e.payload.clone()?).ok()
+    }
+
+    /// The refusal the planner's newest word is, when it is a
+    /// [`SIGNED_OUT_EVENT`]: the message the ask was refused with.
+    pub fn signed_out(&self) -> Option<String> {
+        let e = self.0.first().filter(|e| e.kind == SIGNED_OUT_EVENT)?;
+        Some(e.payload.as_ref()?.get("why")?.as_str()?.to_string())
     }
 
     /// When the planner was last asked.
@@ -197,6 +231,10 @@ pub fn choose(
 
 /// [`choose`] over `words` already read, passing over `skip` too (the
 /// logins this ask found signed out).
+///
+/// When no login is at a limit and the logins left were all left out as
+/// signed out, there is no reset to wait for: the refusal says which login
+/// to sign in again (review r9), and no wait is recorded.
 pub fn choose_in(
     s: &Store,
     m: &MissionRow,
@@ -208,7 +246,8 @@ pub fn choose_in(
     let waits = words.open_waits(now);
     let mut resets: Vec<(i64, bool)> = Vec::new();
     let mut first_why: Option<String> = None;
-    for l in candidates(s, m, grant)? {
+    let (usable, gone) = logins(s, m, grant)?;
+    for l in usable {
         if skip.contains(&l) {
             continue;
         }
@@ -228,6 +267,17 @@ pub fn choose_in(
         }
         return Ok(Ok(l));
     }
+    if resets.is_empty() {
+        if let Some(l) = gone.first() {
+            let why =
+                crate::service::login_health::signed_out_reason(s, &l.host, l.profile.as_deref())?
+                    .unwrap_or_else(|| format!("{} is signed out", l.words()));
+            return Err(IpcError::new(
+                crate::ipc_error::codes::E_CLAUDE_CLI,
+                format!("{SIGNED_OUT_REFUSAL}: {why}"),
+            ));
+        }
+    }
     let (resets_at, reset_known) = resets
         .into_iter()
         .min_by_key(|r| r.0)
@@ -242,6 +292,27 @@ pub fn choose_in(
             first_why.unwrap_or_else(|| "no login".into())
         ),
     }))
+}
+
+/// Whether `e` is [`choose_in`]'s refusal for signed-out logins.
+pub fn is_signed_out_refusal(e: &IpcError) -> bool {
+    e.code == crate::ipc_error::codes::E_CLAUDE_CLI && e.message.starts_with(SIGNED_OUT_REFUSAL)
+}
+
+/// Record `refusal` ([`is_signed_out_refusal`]) on the mission's log, once
+/// per change: not again while the planner's newest word is the same one.
+pub fn say_signed_out(s: &Store, mission_id: i64, words: &Words, refusal: &IpcError, actor: &str) {
+    if words.signed_out().as_deref() == Some(refusal.message.as_str()) {
+        return;
+    }
+    event(
+        s,
+        mission_id,
+        SIGNED_OUT_EVENT,
+        actor,
+        None,
+        serde_json::json!({ "why": refusal.message }),
+    );
 }
 
 /// The wait for `login`, whose run answered at its usage limit: until the

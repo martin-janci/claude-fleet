@@ -123,6 +123,21 @@ pub(crate) fn decode<T: serde::de::DeserializeOwned>(raw: Option<String>) -> Opt
     raw.and_then(|t| serde_json::from_str(&t).ok())
 }
 
+/// [`Store::runs_with_unread_evidence`]'s statement: its first three
+/// predicates are `idx_tasks_unread_evidence`'s (migration 208), so the
+/// probe walks the failed reads in its window, not every done run.
+pub(super) fn unread_evidence_sql() -> String {
+    format!(
+        "SELECT {} FROM tasks WHERE state = 'done' AND work_item_id IS NOT NULL \
+           AND json_extract(evidence_json, '$.error') IS NOT NULL \
+           AND finished_at >= ?1 \
+           AND json_extract(evidence_json, '$.host') IS NOT NULL \
+           AND json_extract(evidence_json, '$.dir') IS NOT NULL \
+         ORDER BY finished_at ASC, id ASC",
+        super::rows::TASK_COLUMNS
+    )
+}
+
 impl Store {
     /// Store the worker's report on a task (any state: the report arrives
     /// with the flip to `done`, which already happened).
@@ -145,6 +160,37 @@ impl Store {
             rusqlite::params![json, task_id],
         )?;
         self.emit_task_row(task_id)
+    }
+
+    /// Record where a task began in a checkout it shares (lanes design L3,
+    /// migration 210): a commit id as git printed it, refused otherwise.
+    pub fn set_task_start_head(&self, task_id: i64, sha: &str) -> Result<(), IpcError> {
+        if !is_commit_id(sha) {
+            return Err(IpcError::new(
+                crate::ipc_error::codes::E_INVALID,
+                format!("{sha:?} is not a commit id"),
+            ));
+        }
+        self.conn.execute(
+            "UPDATE tasks SET start_head = ?1 WHERE id = ?2",
+            rusqlite::params![sha, task_id],
+        )?;
+        Ok(())
+    }
+
+    /// Where `task_id` began ([`Self::set_task_start_head`]); `None` for a
+    /// run in a checkout of its own.
+    pub fn task_start_head(&self, task_id: i64) -> Result<Option<String>, IpcError> {
+        use rusqlite::OptionalExtension;
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT start_head FROM tasks WHERE id = ?1",
+                [task_id],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten())
     }
 
     /// [`Self::set_task_evidence`], but only over evidence that is still
@@ -193,25 +239,12 @@ impl Store {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
-    /// The finished runs at `mission_id`'s members, done since `since`,
-    /// whose git read failed: the loop reads them again.
-    pub fn mission_runs_with_unread_evidence(
-        &self,
-        mission_id: i64,
-        since: i64,
-    ) -> Result<Vec<super::TaskRow>, IpcError> {
-        let mut stmt = self.conn.prepare(&format!(
-            "SELECT {} FROM tasks t JOIN work_items i ON i.id = t.work_item_id \
-             WHERE i.orchestration_project_id = ?1 AND t.state = 'done' \
-               AND t.finished_at >= ?2 \
-               AND json_extract(t.evidence_json, '$.error') IS NOT NULL \
-             ORDER BY t.finished_at ASC, t.id ASC",
-            super::rows::task_columns_t()
-        ))?;
-        let rows = stmt.query_map(
-            rusqlite::params![mission_id, since],
-            super::rows::map_task_row,
-        )?;
+    /// The finished runs, done since `since`, whose git read failed with
+    /// the checkout to read again recorded (`host`, `dir`): the loop reads
+    /// them again (`report::retry_unread_evidence`), in a mission or not.
+    pub fn runs_with_unread_evidence(&self, since: i64) -> Result<Vec<super::TaskRow>, IpcError> {
+        let mut stmt = self.conn.prepare(&unread_evidence_sql())?;
+        let rows = stmt.query_map([since], super::rows::map_task_row)?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
@@ -306,3 +339,8 @@ impl Store {
 
 #[cfg(test)]
 mod tests;
+
+/// PURE: a full or abbreviated git commit id (7 to 64 hex digits).
+pub fn is_commit_id(s: &str) -> bool {
+    (7..=64).contains(&s.len()) && s.chars().all(|c| c.is_ascii_hexdigit())
+}

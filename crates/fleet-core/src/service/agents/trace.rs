@@ -67,6 +67,7 @@ pub fn ended(
     let (kind, summary, cost) = match outcome {
         RunOutcome::Done { cost_micros, .. } => ("settle", "Finished".to_string(), *cost_micros),
         RunOutcome::Skipped { reason } => ("settle", format!("Nothing to do: {reason}"), 0),
+        RunOutcome::Deferred { reason, .. } => ("waiting", format!("Not yet: {reason}"), 0),
         RunOutcome::NeedsPerson {
             reason,
             cost_micros,
