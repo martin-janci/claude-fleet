@@ -118,8 +118,11 @@ pub fn newest_backup(dirs: &[PathBuf]) -> Option<i64> {
         .max()
 }
 
-fn cached_disk_space(dir: &Path) -> Option<(u64, u64)> {
-    static CACHE: Mutex<Option<(Instant, Option<(u64, u64)>)>> = Mutex::new(None);
+/// Free and total bytes, as `disk_space` returns them.
+type Space = Option<(u64, u64)>;
+
+fn cached_disk_space(dir: &Path) -> Space {
+    static CACHE: Mutex<Option<(Instant, Space)>> = Mutex::new(None);
     let mut cache = CACHE.lock().unwrap_or_else(|p| p.into_inner());
     if let Some((at, v)) = *cache {
         if at.elapsed() < DISK_CACHE {
