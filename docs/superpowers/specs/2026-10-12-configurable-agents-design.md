@@ -472,7 +472,7 @@ The gaps, in the order they close (each its own PR):
    agent's `cooldown_secs`, per instance:
    `Store::last_agent_rule_subject_run`); `run.branch` (the project
    worktree's branch, a template over the inputs, checked with the
-   workspace's `branch_ok`; default `main`); `mcp_scan`'s `window_mins`
+   workspace's `branch_ok`; default origin's default branch, its `HEAD`); `mcp_scan`'s `window_mins`
    (the tool gets `from` / `to`, unix seconds, over the last that many
    minutes, as the support scanner does) and `max_jobs` (1-10);
    `limits.auto_approve`. The `l2-support` example's `remember` now keys

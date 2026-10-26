@@ -26,6 +26,8 @@ struct Base {
     log: Mutex<Vec<String>>,
     /// Writes sent, in order.
     writes: Mutex<Vec<(i64, WriteOp)>>,
+    /// What `prepare` answers; `Ready` when unset.
+    prepared: Mutex<Option<Prepared>>,
 }
 
 #[async_trait::async_trait]
@@ -48,10 +50,12 @@ impl SupportHost for Base {
         _: &str,
         root: &str,
         job_id: i64,
-        branch: &str,
+        branch: Option<&str>,
     ) -> Result<(Prepared, String), IpcError> {
+        let branch = branch.unwrap_or("<default>");
         self.log.lock().unwrap().push(format!("prepare {branch}"));
-        Ok((Prepared::Ready, workspace::workspace_dir(root, job_id)))
+        let prepared = self.prepared.lock().unwrap().unwrap_or(Prepared::Ready);
+        Ok((prepared, workspace::workspace_dir(root, job_id)))
     }
     async fn run(&self, _: &str, run: &PrintRun, prompt: &str) -> Result<PrintOutcome, IpcError> {
         // What the run's token opens while it runs.
@@ -2486,6 +2490,57 @@ fn a_late_scan_reaches_back_to_the_previous_one() {
     assert_eq!(scan_from(60, Some(now - 1800), now), now - 3600);
     assert_eq!(scan_from(60, Some(now - 3900), now), now - 3900);
     assert_eq!(scan_from(60, Some(0), now), now - 10_080 * 60);
+}
+
+/// Without `run.branch` the worktree is origin's default branch, whatever
+/// it is called (papayapos-backend's is `develop`, and it has no `main`);
+/// a branch origin does not have fails the job for good, not three times.
+#[tokio::test]
+async fn a_run_without_a_branch_takes_origins_default_and_a_missing_one_is_permanent() {
+    let f = fx(
+        l2(),
+        json!({ "jira_tracker": "3", "project": "L2S", "phrases": "Tech help!" }),
+        json!([
+            { "role": "logs", "server": "graylog", "name": "logs-prod",
+              "env": { "GRAYLOG_API_TOKEN": "${GRAYLOG_PROD_TOKEN}" } },
+            { "role": "kb", "server": "kb" },
+            { "role": "memory", "namespace": "rule" }
+        ]),
+        true,
+    );
+    *f.world.base.threads.lock().unwrap() = vec![thread(&[("1", "Tech help!", 1500)])];
+    *f.world.base.answer.lock().unwrap() = Some(PrintOutcome::Answered {
+        text: GOOD.into(),
+        cost_micros: 1,
+    });
+    let job = |key: &str| crate::store::NewAgentJob {
+        rule_id: f.rule.id,
+        agent: AGENT.into(),
+        subject: "tracker:3:L2S-7".into(),
+        trigger: "comment".into(),
+        dedup_key: key.into(),
+        not_before: 0,
+    };
+    let first = f.claim(&[job("c1")]);
+    assert!(matches!(
+        f.runner().run(&first[0], Some(&f.rule)).await,
+        RunOutcome::Done { .. }
+    ));
+    let log = f.world.base.log.lock().unwrap().clone();
+    assert!(log.contains(&"prepare <default>".to_string()), "{log:?}");
+    finish_done(
+        &f.store.lock().unwrap(),
+        first[0].id,
+        None,
+        crate::store::now_unix(),
+    );
+
+    *f.world.base.prepared.lock().unwrap() = Some(Prepared::NoRef);
+    let second = f.claim(&[job("c2")]);
+    match f.runner().run(&second[0], Some(&f.rule)).await {
+        RunOutcome::Failed { kind, .. } => assert_eq!(kind, ErrorKind::Permanent),
+        other => panic!("{other:?}"),
+    }
 }
 
 /// `run.branch` picks the worktree's branch, and `run.cooldown_secs` defers

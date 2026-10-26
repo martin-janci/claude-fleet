@@ -332,12 +332,14 @@ pub trait SupportHost: Send + Sync {
     /// A file on the host, at most 1 MB; `None` when it is not there.
     async fn read_file(&self, host: &str, path: &str) -> Result<Option<String>, String>;
     async fn checkout(&self, host: &str, project_id: i64) -> Result<String, IpcError>;
+    /// Job `job_id`'s worktree of `branch`, or of origin's default branch
+    /// when `None`.
     async fn prepare(
         &self,
         host: &str,
         root: &str,
         job_id: i64,
-        branch: &str,
+        branch: Option<&str>,
     ) -> Result<(Prepared, String), IpcError>;
     async fn run(&self, host: &str, run: &PrintRun, prompt: &str)
         -> Result<PrintOutcome, IpcError>;
@@ -467,17 +469,10 @@ impl SupportHost for LiveSupportHost {
         host: &str,
         root: &str,
         job_id: i64,
-        branch: &str,
+        branch: Option<&str>,
     ) -> Result<(Prepared, String), IpcError> {
-        workspace::prepare(
-            &self.ssh,
-            host,
-            root,
-            job_id,
-            &Source::Branch(branch.into()),
-            None,
-        )
-        .await
+        let source = branch.map_or(Source::DefaultBranch, |b| Source::Branch(b.into()));
+        workspace::prepare(&self.ssh, host, root, job_id, &source, None).await
     }
 
     async fn run(
@@ -772,10 +767,20 @@ impl SupportRunner {
                     Err(e) => return failed(ErrorKind::Transient, e.message),
                 };
                 self.host.prune(host, &root).await;
-                match self.host.prepare(host, &root, job.id, &cfg.branch).await {
+                match self
+                    .host
+                    .prepare(host, &root, job.id, Some(&cfg.branch))
+                    .await
+                {
                     Ok((Prepared::Ready, cwd)) => (cwd, Some(root)),
                     Ok((Prepared::NoRoot, _)) => {
                         return failed(ErrorKind::Permanent, format!("no git checkout at {root}"))
+                    }
+                    Ok((Prepared::NoRef, _)) => {
+                        return failed(
+                            ErrorKind::Permanent,
+                            format!("workspace: origin has no branch {}", cfg.branch),
+                        )
                     }
                     Ok((other, _)) => {
                         return failed(ErrorKind::Transient, format!("workspace: {other:?}"))

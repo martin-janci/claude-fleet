@@ -505,7 +505,7 @@ pub struct Run {
     #[serde(default, skip_serializing_if = "is_zero")]
     pub cooldown_secs: i64,
     /// `project`: the branch the worktree is made from (a template over
-    /// the inputs; default `main`).
+    /// the inputs; default origin's default branch).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
     /// The pull request's diff in the prompt (a GitHub trigger).

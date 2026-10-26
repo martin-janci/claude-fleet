@@ -32,6 +32,8 @@ pub enum Source {
     PullHead(u64),
     /// A branch on `origin`.
     Branch(String),
+    /// `origin`'s default branch (its `HEAD`), whatever it is called.
+    DefaultBranch,
 }
 
 /// PURE: whether `b` is a branch name a script may fetch: git's own rules,
@@ -68,9 +70,10 @@ fn check_root(root: &str) -> Result<&str, String> {
 }
 
 /// PURE: fetch the job's commit and add its worktree. Prints exactly one
-/// tag line: `noroot` (no git checkout at `root`), `fetchfail`, `moved`
-/// (the fetched head is not `expect_sha`), `failed` (the worktree could not
-/// be added) or `ready`.
+/// tag line: `noroot` (no git checkout at `root`), `noref` (origin has no
+/// such ref), `fetchfail` (any other failed fetch), `moved` (the fetched
+/// head is not `expect_sha`), `failed` (the worktree could not be added) or
+/// `ready`.
 pub fn prepare_script(
     root: &str,
     job_id: i64,
@@ -78,11 +81,14 @@ pub fn prepare_script(
     expect_sha: Option<&str>,
 ) -> Result<String, String> {
     let r = check_root(root)?;
-    let refspec = match source {
-        Source::PullHead(n) if *n > 0 => format!("+pull/{n}/head:{}", job_ref(job_id)),
-        Source::Branch(b) if branch_ok(b) => format!("+refs/heads/{b}:{}", job_ref(job_id)),
+    // The ref on origin, fetched into the job's own ref.
+    let remote = match source {
+        Source::PullHead(n) if *n > 0 => format!("pull/{n}/head"),
+        Source::Branch(b) if branch_ok(b) => format!("refs/heads/{b}"),
+        Source::DefaultBranch => "HEAD".to_string(),
         other => return Err(format!("refusing source {other:?}")),
     };
+    let refspec = format!("+{remote}:{}", job_ref(job_id));
     let expect = match expect_sha {
         None => String::new(),
         Some(sha) if crate::store::is_commit_id(sha) => format!(
@@ -97,7 +103,9 @@ pub fn prepare_script(
     Ok(format!(
         "w={w}; ref={jref}; \
          cd -- {r} 2>/dev/null && git rev-parse --git-dir >/dev/null 2>&1 || {{ echo {t}noroot; exit 0; }}; \
-         git fetch --no-tags --quiet origin {refspec} >/dev/null 2>&1 || {{ echo {t}fetchfail; exit 0; }}; \
+         git fetch --no-tags --quiet origin {refspec} >/dev/null 2>&1 || {{ \
+           git ls-remote --exit-code --quiet origin {remote} >/dev/null 2>&1; \
+           if [ $? -eq 2 ]; then echo {t}noref; else echo {t}fetchfail; fi; exit 0; }}; \
          {expect}\
          if [ -e \"$w\" ]; then git worktree remove --force \"$w\" >/dev/null 2>&1 || rm -rf -- \"$w\"; fi; \
          mkdir -p -- {parent} && git worktree add --detach --quiet \"$w\" \"$ref\" >/dev/null 2>&1 \
@@ -107,6 +115,7 @@ pub fn prepare_script(
         jref = quote(&job_ref(job_id)),
         r = quote(r),
         refspec = quote(&refspec),
+        remote = quote(&remote),
         parent = quote(&format!("{r}.fleet-agents")),
     ))
 }
@@ -156,6 +165,8 @@ pub fn prune_script(root: &str, older_than_mins: u32) -> Result<String, String> 
 pub enum Prepared {
     Ready,
     NoRoot,
+    /// Origin has no such ref: no retry brings it.
+    NoRef,
     FetchFailed,
     /// The head moved past the commit the job was about.
     Moved,
@@ -169,10 +180,11 @@ pub fn parse_prepared(stdout: &str) -> Prepared {
     match crate::service::claude_print::parse_tagged(
         stdout,
         TAG,
-        &["ready", "noroot", "fetchfail", "moved", "failed"],
+        &["ready", "noroot", "noref", "fetchfail", "moved", "failed"],
     ) {
         Some(("ready", _)) => Prepared::Ready,
         Some(("noroot", _)) => Prepared::NoRoot,
+        Some(("noref", _)) => Prepared::NoRef,
         Some(("fetchfail", _)) => Prepared::FetchFailed,
         Some(("moved", _)) => Prepared::Moved,
         Some(_) => Prepared::Failed,
@@ -262,6 +274,20 @@ mod tests {
             "{sc}"
         );
         assert!(!sc.contains("moved"), "no expected commit, no check");
+        let sc = prepare_script("/p/o/r", 7, &Source::DefaultBranch, None).unwrap();
+        assert!(sc.contains("'+HEAD:refs/fleet-agents/job-7'"), "{sc}");
+    }
+
+    /// A fetch that fails asks origin whether the ref is there at all: a
+    /// missing branch is `noref`, which no retry fixes.
+    #[test]
+    fn a_failed_fetch_tells_a_missing_ref_from_a_failure() {
+        let sc = prepare_script("/p/o/r", 7, &Source::Branch("main".into()), None).unwrap();
+        assert!(
+            sc.contains("git ls-remote --exit-code --quiet origin 'refs/heads/main'"),
+            "{sc}"
+        );
+        assert_eq!(parse_prepared("FLEET_AGENT_WS=noref\n"), Prepared::NoRef);
     }
 
     #[test]
@@ -342,9 +368,9 @@ mod tests {
         let setup = format!(
             "set -e; export GIT_CONFIG_GLOBAL=/dev/null GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t \
              GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t; \
-             git init -q -b main {o}; cd {o}; echo a > f; git add f; git commit -qm a; \
+             git init -q -b develop {o}; cd {o}; echo a > f; git add f; git commit -qm a; \
              git checkout -qb pr; echo b > f; git commit -qam b; \
-             git update-ref refs/pull/3/head HEAD; git checkout -q main; \
+             git update-ref refs/pull/3/head HEAD; git checkout -q develop; \
              git clone -q {o} {c}; git -C {o} rev-parse refs/pull/3/head",
             o = q(&format!("{base}/origin")),
             c = q(&format!("{base}/clone")),
@@ -373,8 +399,19 @@ mod tests {
             "a moved head leaves no ref: {refs}"
         );
 
-        let got = run(prepare_script(&root, 11, &Source::Branch("main".into()), None).unwrap());
+        // origin's default branch is `develop`: a run that names no branch
+        // takes it, and one that names `main` is told the branch is not there.
+        let got = run(prepare_script(&root, 11, &Source::DefaultBranch, None).unwrap());
         assert_eq!(parse_prepared(&got), Prepared::Ready, "{got}");
+        assert_eq!(
+            std::fs::read_to_string(format!("{}/f", workspace_dir(&root, 11))).unwrap(),
+            "a\n"
+        );
+        let got = run(prepare_script(&root, 12, &Source::Branch("main".into()), None).unwrap());
+        assert_eq!(parse_prepared(&got), Prepared::NoRef, "{got}");
+        let got = run(prepare_script(&root, 13, &Source::Branch("develop".into()), None).unwrap());
+        assert_eq!(parse_prepared(&got), Prepared::Ready, "{got}");
+        run(cleanup_script(&root, 13).unwrap());
 
         run(cleanup_script(&root, 9).unwrap());
         assert!(!std::path::Path::new(&w).exists());

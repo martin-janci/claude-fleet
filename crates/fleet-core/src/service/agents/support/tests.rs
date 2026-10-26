@@ -209,8 +209,9 @@ impl SupportHost for FakeHost {
         _: &str,
         root: &str,
         job_id: i64,
-        branch: &str,
+        branch: Option<&str>,
     ) -> Result<(Prepared, String), IpcError> {
+        let branch = branch.unwrap_or("<default>");
         self.log(format!("prepare {branch}"));
         Ok((Prepared::Ready, workspace::workspace_dir(root, job_id)))
     }
