@@ -2023,7 +2023,7 @@ reported. `fleet_health.hosts[]` judges them per host:
 | `disk_low` | `disk_home_pct >= health.disk_low_pct` (default 90). |
 | `claude_behind` | More than `health.claude_max_behind` (default 30) patch releases behind the fleet's newest version among stamps younger than 24 h. |
 | `agent_behind` | An agent host whose agent is not the hub's version (the live registry outranks the stored hello). |
-| `hooks_silent` | Reachable, with a live non-external session, and no hook from its token within `health.hooks_silent_secs` (default 1 h). |
+| `hooks_silent` | Reachable, with a non-external session that is `working` or ended a turn within `health.hooks_silent_secs` (default 1 h), and no hook from its token in that time. Idle, failed, stopped and blocked sessions call no hooks, so they do not count. |
 | `cpu_pct` | CPU busy percent over the last interval, rounded: the `/proc/stat` delta between two samples on Linux, summed `ps` %CPU over the online CPUs on macOS. Absent when unknown. |
 | `mem_used_pct` | Used percent of physical memory (`MemAvailable` on Linux, `kern.memorystatus_level` on macOS). |
 | `mem_pressure` | 0–100: PSI `some avg10` of `/proc/pressure/memory` on Linux; the macOS pressure level (normal 0, warn 50, critical 100). Absent when the kernel cannot tell. |

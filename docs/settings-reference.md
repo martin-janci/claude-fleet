@@ -201,7 +201,7 @@ Scope says where a value lives: *fleet* is one value for the whole fleet, kept o
 | `health.mem_low_pct` | `10` | 1–50% | fleet | Available share of a host's memory at or under which the host reads as memory low. Sessions killed there are brought back only once it recovers. |
 | `health.cpu_busy_pct` | `90` | 50–100% | fleet | Busy share of a host's CPUs at which the host reads as saturated, when two samples in a row reach it. Sessions killed there wait to be brought back until it calms down. |
 | `health.claude_max_behind` | `30` | 0–1000 | fleet | Patch releases a host's Claude may trail the fleet's newest before the host reads as behind. |
-| `health.hooks_silent_secs` | `3600` | seconds, shown in minutes | fleet | How long a reachable host with a live session may send no hook before it reads as hooks silent. |
+| `health.hooks_silent_secs` | `3600` | seconds, shown in minutes | fleet | How long a reachable host with a working session (or a turn in that time) may send no hook before it reads as hooks silent. Idle and failed sessions call no hooks, so they do not count. |
 
 ## Host provisioning
 

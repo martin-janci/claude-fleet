@@ -1752,7 +1752,7 @@
         "level": "none"
       },
       "default": "3600",
-      "help": "How long a reachable host with a live session may send no hook before it reads as hooks silent.",
+      "help": "How long a reachable host with a working session (or a turn in that time) may send no hook before it reads as hooks silent. Idle and failed sessions call no hooks, so they do not count.",
       "key": "health.hooks_silent_secs",
       "kind": {
         "max": 315360000,
