@@ -198,12 +198,21 @@ mod tests {
         span: (i64, Option<i64>),
         state: &str,
     ) -> TaskRow {
-        serde_json::from_value(serde_json::json!({
+        let mut t: TaskRow = serde_json::from_value(serde_json::json!({
             "id": id, "work_item_id": item, "role": role,
             "worker_session_id": worker, "state": state,
             "created_at": span.0, "started_at": span.0, "finished_at": span.1
         }))
-        .unwrap()
+        .unwrap();
+        // A run that finished well reported so; with no report it is a
+        // failed attempt (`attempt_failed`).
+        if state == "done" {
+            t.report = Some(crate::store::TaskReport {
+                outcome: "done".into(),
+                ..Default::default()
+            });
+        }
+        t
     }
 
     /// Two items: one implemented twice, reviewed in a session and tested
