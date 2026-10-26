@@ -1284,6 +1284,31 @@ pub fn plan_resolved(
         }
         None => start_name(&key, &title),
     };
+    let codex = rule.as_ref().and_then(|r| r.agent.as_deref()) == Some(crate::store::AGENT_CODEX);
+    let named_profile = args
+        .profile
+        .clone()
+        .or_else(|| rule.as_ref().and_then(|r| r.profile.clone()))
+        .or_else(|| {
+            placement
+                .as_ref()
+                .and_then(|w| w.profile.clone())
+                .filter(|_| !codex)
+        });
+    let profile = match named_profile {
+        Some(p) => Some(p),
+        // Nobody named a login: the one placement picked, else the host's
+        // own, gives way to a login on the host with headroom when its
+        // account is past `accounts.pause_at` (a named host skips
+        // placement, so this is its only look at the limits).
+        None if !codex => crate::service::account_limits::login_with_headroom(
+            &s,
+            &host_alias,
+            placed_profile.as_deref(),
+            crate::store::now_unix(),
+        )?,
+        None => None,
+    };
     Ok(StartPlan {
         name,
         key,
@@ -1299,19 +1324,7 @@ pub fn plan_resolved(
         decider: args.decider,
         owner: args.owner,
         origin: args.origin.clone(),
-        profile: args
-            .profile
-            .clone()
-            .or_else(|| rule.as_ref().and_then(|r| r.profile.clone()))
-            .or_else(|| {
-                let codex = rule.as_ref().and_then(|r| r.agent.as_deref())
-                    == Some(crate::store::AGENT_CODEX);
-                placement
-                    .as_ref()
-                    .and_then(|w| w.profile.clone())
-                    .or(placed_profile)
-                    .filter(|_| !codex)
-            }),
+        profile,
         model: rule.as_ref().and_then(|r| r.model.clone()),
         effort: rule.as_ref().and_then(|r| r.effort.clone()),
         agent: rule.as_ref().and_then(|r| r.agent.clone()),

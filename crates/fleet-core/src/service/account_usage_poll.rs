@@ -134,6 +134,25 @@ fn reannounce_lapsed(
     }
 }
 
+/// One account's place in [`AccountUsagePoller::in_flight`], given up when
+/// the fetch task ends however it ends: a fetch that panicked used to leave
+/// its account marked in flight, and [`poll_due_accounts`] then skipped it
+/// until the app restarted, its meters going stale with no failure shown.
+struct InFlight {
+    poller: Arc<AccountUsagePoller>,
+    account: String,
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        self.poller
+            .in_flight
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&self.account);
+    }
+}
+
 impl Default for AccountUsagePoller {
     fn default() -> Self {
         Self::new()
@@ -355,6 +374,10 @@ pub(crate) fn poll_due_accounts(
         let bus = Arc::clone(&bus);
         let store = store.clone();
         handles.push(tokio::spawn(async move {
+            let _in_flight = InFlight {
+                poller: Arc::clone(&poller),
+                account: account.clone(),
+            };
             let _permit = poller
                 .limit
                 .clone()
@@ -370,11 +393,6 @@ pub(crate) fn poll_due_accounts(
                 store.as_deref(),
             )
             .await;
-            poller
-                .in_flight
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .remove(&account);
         }));
     }
     handles
@@ -709,6 +727,28 @@ mod tests {
             MAX_CONCURRENT_FETCHES,
             "with 4 due accounts and a 2-slot limit, concurrency should reach the cap"
         );
+    }
+
+    /// Usage hardening: a fetch task that panics gives its account back, so
+    /// the next pass polls it again instead of skipping it for good.
+    #[tokio::test]
+    async fn a_fetch_that_panics_does_not_stay_in_flight() {
+        let poller = Arc::new(AccountUsagePoller::new());
+        poller
+            .in_flight
+            .lock()
+            .unwrap()
+            .insert("acct-1".to_string());
+        let p = Arc::clone(&poller);
+        let task = tokio::spawn(async move {
+            let _in_flight = InFlight {
+                poller: p,
+                account: "acct-1".to_string(),
+            };
+            panic!("a fetch that panics");
+        });
+        assert!(task.await.is_err());
+        assert!(poller.in_flight.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

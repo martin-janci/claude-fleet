@@ -139,8 +139,8 @@ pub struct ResumeArgs {
     /// The login the resumed session runs under (review w02-2): a credential
     /// profile on the landing host, `""` for the host's own login. Omitted:
     /// the past session's login when its row is still known and it lands on
-    /// the same host, else the host's own, or the login on the host with
-    /// headroom when the host's own is past `accounts.pause_at`
+    /// the same host, else the host's own; either gives way to the login on
+    /// the host with headroom when it is past `accounts.pause_at`
     /// ([`resume_profile`]).
     #[serde(default)]
     pub profile: Option<String>,
@@ -951,13 +951,14 @@ pub fn resume_session_args(
 
 /// The login a resume onto `host` runs under (review w02-2): `asked` when
 /// the caller named one (`""` = the host's own); else the past session's,
-/// when its row is still known and was on `host`; else the host's own,
-/// unless that is past `accounts.pause_at` and another login on the host
-/// has headroom ([`account_limits::freer_login`]). Nothing here refuses: a
-/// resume is how Control recovers work, so a spent login is the start's own
-/// to report.
+/// when its row is still known and was on `host`; else the host's own. A
+/// login fleet picked (the past session's or the host's own) that is past
+/// `accounts.pause_at` gives way to another login on the host with headroom
+/// ([`account_limits::login_with_headroom`]): the conversation resumes under
+/// it, as an account switch does. Nothing here refuses: a resume is how
+/// Control recovers work, so a spent login is the start's own to report.
 ///
-/// [`account_limits::freer_login`]: crate::service::account_limits::freer_login
+/// [`account_limits::login_with_headroom`]: crate::service::account_limits::login_with_headroom
 pub(crate) fn resume_profile(
     s: &Store,
     plan: &ResumePlan,
@@ -977,16 +978,7 @@ pub(crate) fn resume_profile(
         Some(id) => past_session_login(s, id, host)?,
         None => None,
     };
-    if let Some(profile) = past {
-        return Ok(profile);
-    }
-    let Some(over) = crate::service::account_limits::over_limit(s, host, None, now)? else {
-        return Ok(None);
-    };
-    Ok(
-        crate::service::account_limits::freer_login(s, host, &over.login.account_uuid, now)?
-            .and_then(|l| l.profile),
-    )
+    crate::service::account_limits::login_with_headroom(s, host, past.flatten().as_deref(), now)
 }
 
 /// The login of the session link `link_id` ran in, when that row is still
@@ -1463,6 +1455,38 @@ mod tests {
 
     fn modes(p: &ResumePlan) -> Vec<(&str, bool)> {
         p.modes.iter().map(|m| (m.mode.as_str(), m.ok)).collect()
+    }
+
+    /// Usage hardening: a resume keeps the past session's login only while
+    /// its account is under `accounts.pause_at`; past it, the login on the
+    /// host with headroom takes the conversation. A login the caller names
+    /// is kept, spent or not.
+    #[test]
+    fn a_resume_leaves_a_spent_past_login_for_one_with_headroom() {
+        use crate::service::account_limits::seed_usage;
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("h").unwrap();
+        let id = s
+            .upsert_session("dev-o-r--abc-1", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+        s.set_session_profile(id, Some("full")).unwrap();
+        let link = s
+            .link_session_work(id, WorkTarget::Key("ABC-1"), "manual")
+            .unwrap();
+        let plan: ResumePlan = serde_json::from_value(serde_json::json!({
+            "key": "ABC-1",
+            "link_id": link.id,
+            "modes": [],
+        }))
+        .unwrap();
+        let now = crate::store::now_unix();
+        seed_usage(&s, "h", Some("full"), "acct-full", 50.0, now);
+        seed_usage(&s, "h", Some("work"), "acct-work", 10.0, now);
+        let profile = |asked: Option<&str>| resume_profile(&s, &plan, "h", asked, now).unwrap();
+        assert_eq!(profile(None).as_deref(), Some("full"), "under the line");
+        seed_usage(&s, "h", Some("full"), "acct-full", 95.0, now);
+        assert_eq!(profile(None).as_deref(), Some("work"), "past the line");
+        assert_eq!(profile(Some("full")).as_deref(), Some("full"), "named");
     }
 
     #[test]
