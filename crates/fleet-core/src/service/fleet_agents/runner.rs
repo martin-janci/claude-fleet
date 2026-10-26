@@ -67,8 +67,6 @@ pub const SCAN_CALL_SECS: u64 = 120;
 pub const SUBJECT_TTL_SECS: i64 = 30 * 24 * 3600;
 /// Records one `recent` context lookup reads at most.
 pub const CONTEXT_RECENT_MAX: u32 = 50;
-/// The branch a `project` workspace reads.
-pub const WORKSPACE_BRANCH: &str = "main";
 /// Output kept of a run.
 const OUTPUT_CAP: usize = 1 << 20;
 /// Longest JSON block of the subject or the context in a prompt.
@@ -2248,6 +2246,7 @@ impl FleetRunner {
                             .await
                     }
                     None => {
+                        // No branch named: origin's default, whatever it is called.
                         let branch = d
                             .run
                             .branch
@@ -2257,15 +2256,16 @@ impl FleetRunner {
                                     .trim()
                                     .to_string()
                             })
-                            .filter(|b| !b.is_empty())
-                            .unwrap_or_else(|| WORKSPACE_BRANCH.to_string());
-                        if !crate::service::agents::workspace::branch_ok(&branch) {
-                            return Err(failed(
-                                ErrorKind::Permanent,
-                                format!("run › branch {branch:?} is not a branch name"),
-                            ));
+                            .filter(|b| !b.is_empty());
+                        if let Some(b) = branch.as_deref() {
+                            if !crate::service::agents::workspace::branch_ok(b) {
+                                return Err(failed(
+                                    ErrorKind::Permanent,
+                                    format!("run › branch {b:?} is not a branch name"),
+                                ));
+                            }
                         }
-                        base.prepare(host, &root, job.id, &branch).await
+                        base.prepare(host, &root, job.id, branch.as_deref()).await
                     }
                 };
                 match prepared {
@@ -2279,6 +2279,12 @@ impl FleetRunner {
                         return Err(failed(
                             ErrorKind::Permanent,
                             format!("no git checkout at {root}"),
+                        ))
+                    }
+                    Ok((Prepared::NoRef, _)) => {
+                        return Err(failed(
+                            ErrorKind::Permanent,
+                            "workspace: origin has no such branch (set run › branch)",
                         ))
                     }
                     Ok((other, _)) => {
