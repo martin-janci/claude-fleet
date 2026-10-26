@@ -1286,6 +1286,37 @@ describe('SessionDetails action hierarchy (redesign 1.5)', () => {
     expect(screen.getByTestId('inspector-open-details')).toBeTruthy();
   });
 
+  it('the inspector links the ticket and lists the other PRs the session opened', async () => {
+    const inv = vi.mocked(mockedInvoke);
+    const original = inv.getMockImplementation();
+    const pr = (n: number, session_id: number, first_seen_at: number, state = 'OPEN') => ({
+      id: n, url: `https://github.com/o/r/pull/${n}`, number: n, state, session_id, first_seen_at, updated_at: first_seen_at,
+    });
+    inv.mockImplementation(async (cmd: string) =>
+      cmd === 'list_pull_requests'
+        ? { items: [pr(3, sampleSession.id, 300), pr(2, sampleSession.id, 200, 'MERGED'), pr(9, 999, 400)], total: 3 }
+        : null,
+    );
+    try {
+      const session = {
+        ...sampleSession,
+        pr_url: 'https://github.com/o/r/pull/3',
+        work: { link_id: 1, item_id: 1, key: 'FLT-12', title: 'Scroll', source: 'manual', url: 'https://tracker.example/FLT-12' },
+      };
+      render(SessionDetails, { props: { session, variant: 'inspector' } });
+      const link = screen.getByTestId('inspector-task-link') as HTMLAnchorElement;
+      expect(link.href).toBe('https://tracker.example/FLT-12');
+      expect(link.textContent).toBe('FLT-12');
+      const others = await screen.findByTestId('details-other-prs');
+      expect(others.textContent).toContain('#2');
+      expect(others.textContent).toContain('merged');
+      expect(others.textContent).not.toContain('#3');
+      expect(others.textContent).not.toContain('#9');
+    } finally {
+      inv.mockImplementation(original!);
+    }
+  });
+
   it('Kill still asks before it kills', async () => {
     render(SessionDetails, { props: { session: sampleSession } });
     await tick();
