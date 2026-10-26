@@ -720,13 +720,8 @@ pub fn dry_run(
         },
         prompt: tick::run_prompt(
             &r,
-            super::seen::joined(
-                super::memory::prompt_block(&super::memory::RunMemory::of(&s, &r)?).as_deref(),
-                super::seen::shown(&s, &r)?
-                    .map(|i| super::seen::prompt_block(&i))
-                    .as_deref(),
-            )
-            .as_deref(),
+            super::memory::prompt_block(&super::memory::RunMemory::of(&s, &r)?).as_deref(),
+            super::seen::prompt_block_for(&s, &r)?.as_deref(),
             fire.as_ref().and_then(|f| f.context.as_deref()),
         ),
         event,

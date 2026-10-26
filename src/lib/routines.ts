@@ -338,8 +338,7 @@ export interface RoutineSeen {
 }
 
 /** What a routine's runs already handled, the last seen first. */
-export const routineSeen = (id: number, limit?: number) =>
-  call<RoutineSeen>({ action: 'seen', routine_id: id, ...(limit !== undefined ? { limit } : {}) });
+export const routineSeen = (id: number) => call<RoutineSeen>({ action: 'seen', routine_id: id });
 /** Forget one item (the next run looks at it again), or all without one. */
 export const forgetRoutineSeen = (id: number, item?: string) =>
   call<RoutineSeen>({ action: 'forget_seen', routine_id: id, ...(item !== undefined ? { text: item } : {}) });

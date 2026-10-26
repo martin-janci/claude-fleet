@@ -23,10 +23,8 @@ use crate::store::{
     now_unix, AssetInventoryRow, CatalogRow, ChangesetItemRow, ChangesetRow, HostLayerRow,
     NewChangesetItem, Store, TriageVerdictRow,
 };
-use futures_util::FutureExt;
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
-use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::task::JoinHandle;
@@ -560,9 +558,7 @@ where
     F: Future<Output = ()> + Send + 'static,
 {
     let handle = crate::rt::try_spawn(async move {
-        if AssertUnwindSafe(fut).catch_unwind().await.is_err() {
-            tracing::error!("{what} panicked");
-        }
+        let _ = crate::service::loops::caught(what, fut).await;
     });
     if handle.is_none() {
         tracing::warn!("{what}: no runtime to run it on; skipped this pass");

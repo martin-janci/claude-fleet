@@ -787,7 +787,8 @@ impl Store {
     /// Close a run: `done` or `failed`, with why. A run of a routine that
     /// keeps no notebook and tracks no seen items (migration 212) is read
     /// for memory as it closes: there is nothing to read (migration 205's
-    /// index holds the pending reads only).
+    /// index holds the pending reads only). Nor is there for a failed run of
+    /// one that only tracks seen items: only a done run's are recorded.
     pub fn finish_routine_run(
         &self,
         id: i64,
@@ -798,7 +799,8 @@ impl Store {
     ) -> Result<(), IpcError> {
         self.conn.execute(
             "UPDATE routine_runs SET state = ?1, reason = ?2, cost_micros = ?3, finished_at = ?4, \
-               memory_read_at = CASE WHEN (SELECT r.memory IS NULL AND r.track_seen = 0 \
+               memory_read_at = CASE WHEN (SELECT r.memory IS NULL \
+                   AND (r.track_seen = 0 OR ?1 <> 'done') \
                  FROM routines r WHERE r.id = routine_runs.routine_id) THEN ?4 END \
              WHERE id = ?5 AND state = 'running'",
             rusqlite::params![state, reason, cost_micros, now, id],

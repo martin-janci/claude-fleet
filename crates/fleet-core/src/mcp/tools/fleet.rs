@@ -73,7 +73,10 @@ impl FleetTools {
                     // operator, deliberately not fenced.
                     health::HealthView::Fleet
                 };
-                health::health_for(&s, &view, tunnels)
+                let mut h = health::health_for(&s, &view, tunnels);
+                drop(s);
+                h.storage = health::storage_for(&view, crate::store::now_unix());
+                h
             }
             Err(_) => {
                 let mut h = health::unready_health();

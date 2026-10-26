@@ -486,12 +486,8 @@ pub fn login_with_headroom(
     let Some(over) = over_limit(s, host_alias, profile, now)? else {
         return Ok(profile.map(str::to_string));
     };
-    Ok(
-        match freer_login(s, host_alias, &over.login.account_uuid, now)? {
-            Some(l) => l.profile,
-            None => profile.map(str::to_string),
-        },
-    )
+    Ok(freer_login(s, host_alias, &over.login.account_uuid, now)?
+        .map_or_else(|| profile.map(str::to_string), |l| l.profile))
 }
 
 /// Step 4.4 on a start that did not come through the desktop's own dialog

@@ -313,6 +313,11 @@ pub struct GcReport {
     /// reason.
     #[serde(default)]
     pub swept_admin_events: usize,
+    /// Closed routine runs past `ROUTINE_RUN_KEEP_DAYS` swept this sweep
+    /// ([`sweep_routine_runs`]). Ungated like the retention sweeps above;
+    /// `#[serde(default)]` for the same wire reason.
+    #[serde(default)]
+    pub swept_routine_runs: usize,
 }
 
 /// Run one sweep against `exec`. Reads rows/hosts/controller under one brief
@@ -480,10 +485,7 @@ pub async fn sweep_with(
     // Routine runs (hardening survey 2026-10-26): closed runs past
     // `ROUTINE_RUN_KEEP_DAYS`, each routine keeping its newest
     // `ROUTINE_RUNS_KEPT`; bounded per tick, one batch per lock.
-    match sweep_routine_runs(store, now) {
-        0 => {}
-        n => tracing::info!(n, "[gc] swept old routine runs"),
-    }
+    report.swept_routine_runs = sweep_routine_runs(store, now);
     // The admin audit log: `auth.audit_retention_days` (0 = forever). One
     // statement under one brief lock, like the decision record's.
     report.swept_admin_events = sweep_admin_events(store, now);
@@ -631,6 +633,7 @@ pub async fn maybe_sweep(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>) -> Opt
             tidied = report.tidied,
             swept_decision_runs = report.swept_decision_runs,
             swept_admin_events = report.swept_admin_events,
+            swept_routine_runs = report.swept_routine_runs,
             "[gc] sweep"
         );
     }
@@ -1004,6 +1007,7 @@ mod tests {
                 swept_decision_runs: 0,
                 swept_downloads: 0,
                 swept_admin_events: 0,
+                swept_routine_runs: 0,
             }
         );
         assert_eq!(exec.inspects.load(Ordering::SeqCst), 1);
@@ -1089,6 +1093,7 @@ mod tests {
                 swept_decision_runs: 0,
                 swept_downloads: 0,
                 swept_admin_events: 0,
+                swept_routine_runs: 0,
             }
         );
         assert_eq!(exec.kills.load(Ordering::SeqCst), 0);
@@ -1181,6 +1186,7 @@ mod tests {
                 swept_decision_runs: 0,
                 swept_downloads: 0,
                 swept_admin_events: 0,
+                swept_routine_runs: 0,
             }
         );
         let s = store.lock().unwrap();
@@ -1243,6 +1249,7 @@ mod tests {
                 swept_decision_runs: 0,
                 swept_downloads: 0,
                 swept_admin_events: 0,
+                swept_routine_runs: 0,
             },
             "the retention sweep must run regardless of gc.enabled"
         );

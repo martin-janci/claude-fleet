@@ -23,8 +23,6 @@ export interface RoutineSessionGroup {
   sessions: SessionRow[];
   /** How many of them raise the Needs you badge. */
   needsYou: number;
-  /** The newest run's start (or creation), for the order of the groups. */
-  latestAt: number;
 }
 
 const startedAt = (s: SessionRow) => s.started_at ?? s.created_at ?? 0;
@@ -40,7 +38,7 @@ export function routineSessionGroups(rows: readonly SessionRow[], opts: Attentio
     const key = `routine:${id ?? '?'}`;
     let g = byKey.get(key);
     if (!g) {
-      g = { key, routineId: id, name: '', sessions: [], needsYou: 0, latestAt: 0 };
+      g = { key, routineId: id, name: '', sessions: [], needsYou: 0 };
       byKey.set(key, g);
     }
     g.sessions.push(s);
@@ -49,12 +47,11 @@ export function routineSessionGroups(rows: readonly SessionRow[], opts: Attentio
   const groups = [...byKey.values()];
   for (const g of groups) {
     g.sessions.sort((a, b) => startedAt(b) - startedAt(a) || b.id - a.id);
-    const newest = g.sessions[0];
-    g.latestAt = startedAt(newest);
     const named = g.sessions.find((s) => s.friendly_name?.trim())?.friendly_name?.trim();
     g.name = named ?? (g.routineId !== null ? `Routine ${g.routineId}` : 'Routine');
   }
-  return groups.sort((a, b) => b.latestAt - a.latestAt || a.key.localeCompare(b.key));
+  const newest = (g: RoutineSessionGroup) => startedAt(g.sessions[0]);
+  return groups.sort((a, b) => newest(b) - newest(a) || a.key.localeCompare(b.key));
 }
 
 /** "3 runs", "1 run". */

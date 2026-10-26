@@ -4107,10 +4107,18 @@ async fn a_run_of_a_routine_without_memory_is_read_as_it_finishes() {
     // Seen items are read off the same reply (migration 212).
     let tracking = new_routine(&f, input(&f));
     let third = finished_run(&f, &tracking, OCT8 + 200).await;
+    // Only a done run's seen items are recorded: a failed one has none to read.
+    let ana = person(&f.store, None, f.ana);
+    let failed = run_now(&f.deps, &ana, tracking.id, OCT8 + 300)
+        .await
+        .unwrap();
     let s = lock(&f.store).unwrap();
+    s.finish_routine_run(failed.id, "failed", Some("exit 1"), 0, OCT8 + 330)
+        .unwrap();
     assert_eq!(s.routine_run_memory_read_at(run.id), run.finished_at);
     assert_eq!(s.routine_run_memory_read_at(other.id), None);
     assert_eq!(s.routine_run_memory_read_at(third.id), None);
+    assert_eq!(s.routine_run_memory_read_at(failed.id), Some(OCT8 + 330));
 }
 
 #[tokio::test]

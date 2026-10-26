@@ -7,9 +7,9 @@
 // Pure apart from `loadCompare`, which reads each mission's detail (the
 // metrics ride `work { mission }`'s `stats`; the list does not carry them).
 
-import { getMission, type Mission, type MissionDetail } from './missions';
+import { getMission, type Mission, type MissionDetail, type MissionPolicy } from './missions';
 
-export type Execution = 'item' | 'lane';
+export type Execution = NonNullable<MissionPolicy['execution']>;
 
 /** One mission's metrics, normalised per done task where that is fair. */
 export interface CompareRow {
@@ -19,7 +19,6 @@ export interface CompareRow {
   state: string;
   done: number;
   total: number;
-  runs: number;
   /** Attempts per done task; null before the first is done. */
   runsPerDone: number | null;
   retries: number;
@@ -53,7 +52,6 @@ export function compareRow(d: MissionDetail): CompareRow | null {
   const st = d.stats;
   if (!st || st.span_secs <= 0) return null;
   const done = st.items_done;
-  const runs = Object.values(st.runs_by_role).reduce((a, b) => a + b, 0);
   const per = (n: number | null | undefined) => (done > 0 && n != null ? n / done : null);
   return {
     id: d.mission.id,
@@ -62,13 +60,12 @@ export function compareRow(d: MissionDetail): CompareRow | null {
     state: d.mission.state,
     done,
     total: st.items,
-    runs,
     runsPerDone: st.runs_per_done_item_x100 != null ? st.runs_per_done_item_x100 / 100 : null,
     retries: st.retries,
     coldStartsPerDone: per(st.sessions),
     taskSecs: st.item_secs_p50 ?? null,
     idlePct: Math.round((st.idle_secs * 100) / st.span_secs),
-    costPerDoneMicros: per(d.mission.cost_micros ?? null),
+    costPerDoneMicros: per(d.mission.cost_micros),
   };
 }
 
@@ -110,8 +107,8 @@ export function missionsToCompare(missions: Mission[], limit = 12): Mission[] {
 
 /** Read the metrics of the missions to compare. A detail that fails to
  *  read is counted in `failed`, not shown. */
-export async function loadCompare(missions: Mission[], limit = 12): Promise<{ rows: CompareRow[]; failed: number }> {
-  const picked = missionsToCompare(missions, limit);
+export async function loadCompare(missions: Mission[]): Promise<{ rows: CompareRow[]; failed: number }> {
+  const picked = missionsToCompare(missions);
   const read = await Promise.all(picked.map((m) => getMission(m.id)));
   let failed = 0;
   const rows: CompareRow[] = [];

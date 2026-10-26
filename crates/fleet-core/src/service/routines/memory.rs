@@ -400,7 +400,9 @@ pub fn apply(
     }
     let mut written = Vec::new();
     let mut last_reply: Option<&str> = None;
-    if let Err(why) = replies {
+    // A routine with no notebook (one that only tracks seen items) has none
+    // to say were not rewritten.
+    if let (Err(why), false) = (replies, used.is_empty()) {
         trace::write_one(
             s,
             run.id,
