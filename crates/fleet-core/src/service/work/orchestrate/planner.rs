@@ -392,10 +392,17 @@ pub fn planner_script(model: &str, prompt: &str) -> String {
 /// PURE: [`planner_script`] under the login profile `profile` (`None`: the
 /// host's own login), as `checks::check_script` runs one. `Err` for a
 /// profile name that is not one.
+///
+/// With a `checkout` (`orchestrator.planner_reads`) the planner reads the
+/// repository checked out there on the host: it runs there with Read, Grep
+/// and Glob, every other tool denied and no read outside the checkout
+/// ([`claude_print::tool_flags`]). A checkout that is not there ends the
+/// script with no answer.
 pub fn planner_script_as(
     model: &str,
     prompt: &str,
     profile: Option<&str>,
+    checkout: Option<&str>,
 ) -> Result<String, String> {
     let env = match profile {
         Some(_) => format!(
@@ -405,29 +412,16 @@ pub fn planner_script_as(
         ),
         None => String::new(),
     };
-    Ok(script_with_env(model, prompt, env, None))
+    Ok(script_with_env(model, prompt, env, checkout))
 }
 
-/// PURE: [`planner_script_as`] for a planner that reads the repository
-/// checked out at `checkout` on the host (`orchestrator.planner_reads`):
-/// it runs there with Read, Grep and Glob, every other tool denied and no
-/// read outside the checkout ([`claude_print::tool_flags`]). A checkout
-/// that is not there ends the script with no answer.
-pub fn planner_script_in(
-    model: &str,
-    prompt: &str,
-    profile: Option<&str>,
-    checkout: &str,
-) -> Result<String, String> {
-    let env = match profile {
-        Some(_) => format!(
-            "{}{}",
-            crate::service::headless::default_agent().login_env(profile)?,
-            crate::tmux::PROFILE_API_KEY
-        ),
-        None => String::new(),
-    };
-    Ok(script_with_env(model, prompt, env, Some(checkout)))
+/// How long the planner may run: longer when it reads the repository.
+pub fn planner_timeout_secs(reads: bool) -> u64 {
+    if reads {
+        PLANNER_READS_TIMEOUT_SECS
+    } else {
+        PLANNER_HOST_TIMEOUT_SECS
+    }
 }
 
 fn script_with_env(model: &str, prompt: &str, env: String, checkout: Option<&str>) -> String {
@@ -442,13 +436,10 @@ fn script_with_env(model: &str, prompt: &str, env: String, checkout: Option<&str
             None => crate::service::headless::ToolPolicy::None,
         },
     });
-    let (cd, secs) = match checkout {
-        Some(dir) => (
-            format!("cd {} || exit 0; ", crate::shell::quote(dir)),
-            PLANNER_READS_TIMEOUT_SECS,
-        ),
-        None => (String::new(), PLANNER_HOST_TIMEOUT_SECS),
-    };
+    let cd = checkout.map_or_else(String::new, |dir| {
+        format!("cd {} || exit 0; ", crate::shell::quote(dir))
+    });
+    let secs = planner_timeout_secs(checkout.is_some());
     format!(
         "{cd}{} {env}{}",
         agent.missing_check(PLANNER_TAG),
@@ -652,37 +643,34 @@ pub fn tree_of(commands: &[Command]) -> Vec<TreeEntry> {
         .collect()
 }
 
+/// Each `create_item`'s `(done_when, lane, touches)`, in order.
+fn created(
+    commands: &[Command],
+) -> impl Iterator<Item = (&Vec<String>, &Option<String>, &Vec<String>)> {
+    commands.iter().filter_map(|c| match c {
+        Command::CreateItem {
+            done_when,
+            lane,
+            touches,
+            ..
+        } => Some((done_when, lane, touches)),
+        _ => None,
+    })
+}
+
 /// The `done_when` lines each `create_item` asked for, in order.
-/// The touches each `create_item` named, in order (lanes design L5).
-pub fn touches_of(commands: &[Command]) -> Vec<Vec<String>> {
-    commands
-        .iter()
-        .filter_map(|c| match c {
-            Command::CreateItem { touches, .. } => Some(touches.clone()),
-            _ => None,
-        })
-        .collect()
+pub fn done_when_of(commands: &[Command]) -> Vec<Vec<String>> {
+    created(commands).map(|(d, _, _)| d.clone()).collect()
 }
 
 /// The lane each `create_item` named, in order (lanes design L2).
 pub fn lanes_of(commands: &[Command]) -> Vec<Option<String>> {
-    commands
-        .iter()
-        .filter_map(|c| match c {
-            Command::CreateItem { lane, .. } => Some(lane.clone()),
-            _ => None,
-        })
-        .collect()
+    created(commands).map(|(_, l, _)| l.clone()).collect()
 }
 
-pub fn done_when_of(commands: &[Command]) -> Vec<Vec<String>> {
-    commands
-        .iter()
-        .filter_map(|c| match c {
-            Command::CreateItem { done_when, .. } => Some(done_when.clone()),
-            _ => None,
-        })
-        .collect()
+/// The touches each `create_item` named, in order (lanes design L5).
+pub fn touches_of(commands: &[Command]) -> Vec<Vec<String>> {
+    created(commands).map(|(_, _, t)| t.clone()).collect()
 }
 
 /// One member of the mission as the merge-wave check reads it.

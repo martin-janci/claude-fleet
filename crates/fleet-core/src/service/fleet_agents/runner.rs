@@ -1353,28 +1353,31 @@ impl FleetPoller {
     ) -> Vec<(NewAgentJob, Value)> {
         use super::actions::{review_key, REVIEW_KIND};
         let ns = subjects_namespace(rule.id);
-        let due: Vec<(&crate::service::agents::review::plan::OpenPr, i64, Value)> = {
+        // Each due review with its record, whose expiry and writing job the
+        // rewrite below keeps.
+        let due: Vec<(
+            &crate::service::agents::review::plan::OpenPr,
+            i64,
+            Value,
+            crate::store::AgentRecordRow,
+        )> = {
             let Ok(s) = self.store.lock() else {
                 return Vec::new();
             };
-            prs.iter()
-                .filter(|p| !p.is_draft)
-                .filter(|p| {
-                    !(gate.skip_wip && crate::service::agents::review::plan::is_wip(&p.title))
-                })
+            super::github::gated(prs, gate)
                 .filter_map(|p| {
                     let row = s
                         .agent_record(&ns, REVIEW_KIND, &review_key(repo, p.number), now)
                         .ok()??;
                     let v: Value = serde_json::from_str(&row.value).ok()?;
                     let id = super::github::reverify_due(&v, &p.head_sha, mins, now)?;
-                    Some((p, id, v))
+                    Some((p, id, v, row))
                 })
                 .take(super::github::MAX_REVERIFIES)
                 .collect()
         };
         let mut out = Vec::new();
-        for (p, id, mut v) in due {
+        for (p, id, mut v, row) in due {
             let gone = match self
                 .host
                 .review_state(&rule.host_alias, repo, p.number, id)
@@ -1400,8 +1403,8 @@ impl FleetPoller {
                         kind: REVIEW_KIND.into(),
                         key: review_key(repo, p.number),
                         value: v.to_string(),
-                        expires_at: None,
-                        written_by_job: None,
+                        expires_at: row.expires_at,
+                        written_by_job: row.written_by_job,
                     },
                     now,
                 );
@@ -1434,20 +1437,11 @@ impl FleetPoller {
         }
         let prs = self.host.open_prs(host, repo).await?;
         let mark = super::actions::marker(&rule.scope);
-        let max_rounds = inst
-            .loaded()
-            .definition
-            .trigger
-            .max_rounds
-            .unwrap_or(super::definition::DEFAULT_MAX_ROUNDS);
         let mut out = Vec::new();
-        for n in super::github::reply_prs(&replies, &prs) {
-            let Some(p) = prs.iter().find(|p| p.number == n) else {
-                continue;
-            };
-            let thread = self.host.pr_review_comments(host, repo, n).await?;
+        for p in super::github::reply_prs(&replies, &prs) {
+            let thread = self.host.pr_review_comments(host, repo, p.number).await?;
             out.extend(super::github::plan_reply_jobs(
-                rule.id, inst, ctx, repo, &mark, p, &replies, &thread, max_rounds, now,
+                rule.id, inst, ctx, repo, &mark, p, &replies, &thread, now,
             )?);
         }
         Ok(out)

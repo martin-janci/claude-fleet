@@ -17,9 +17,6 @@ use serde::{Deserialize, Serialize};
 /// The longest lane name.
 pub const LANE_NAME_MAX_CHARS: usize = 40;
 
-/// The stored lane states; `working` and `waiting` are derived on read.
-pub const LANE_STATES: [&str; 3] = ["idle", "held", "done"];
-
 /// One lane, with its tasks.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MissionLaneRow {
@@ -39,7 +36,8 @@ pub struct MissionLaneRow {
     /// How many lead sessions it has had (L3's relay).
     #[serde(default)]
     pub relay: i64,
-    /// One of [`LANE_STATES`].
+    /// Stored as `idle`, `held` or `done`; `working` and `waiting` are
+    /// derived on read.
     pub state: String,
     pub created_at: i64,
     pub updated_at: i64,
@@ -237,11 +235,7 @@ impl Store {
             rusqlite::params![after, item_id],
         )?;
         if let Some(old) = before {
-            tx.execute(
-                "DELETE FROM mission_lanes WHERE id = ?1 AND lead_session_id IS NULL \
-                   AND NOT EXISTS (SELECT 1 FROM work_items WHERE lane_id = ?1)",
-                [old],
-            )?;
+            drop_lane_if_empty(&tx, old)?;
         }
         self.touch_mission(id)?;
         self.append_mission_event(
@@ -268,13 +262,18 @@ impl Store {
             "UPDATE work_items SET lane_id = NULL WHERE id = ?1",
             [item_id],
         )?;
-        self.conn.execute(
-            "DELETE FROM mission_lanes WHERE id = ?1 AND lead_session_id IS NULL \
-               AND NOT EXISTS (SELECT 1 FROM work_items WHERE lane_id = ?1)",
-            [old],
-        )?;
+        drop_lane_if_empty(&self.conn, old)?;
         Ok(())
     }
+}
+
+/// Delete lane `lane` when nothing is left in it and no lead holds it.
+fn drop_lane_if_empty(conn: &rusqlite::Connection, lane: i64) -> rusqlite::Result<usize> {
+    conn.execute(
+        "DELETE FROM mission_lanes WHERE id = ?1 AND lead_session_id IS NULL \
+           AND NOT EXISTS (SELECT 1 FROM work_items WHERE lane_id = ?1)",
+        [lane],
+    )
 }
 
 #[cfg(test)]

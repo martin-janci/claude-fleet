@@ -85,24 +85,43 @@ pub fn plan_pr_jobs(
     gate: PrGate,
     now: i64,
 ) -> Vec<(NewAgentJob, Value)> {
-    prs.iter()
-        .filter(|p| !p.is_draft && !p.head_sha.is_empty())
-        .filter(|p| !(gate.skip_wip && crate::service::agents::review::plan::is_wip(&p.title)))
-        .map(|p| {
-            let subject = format!("gh:{repo}#{}", p.number);
-            (
-                NewAgentJob {
-                    rule_id,
-                    agent: AGENT.into(),
-                    subject: subject.clone(),
-                    trigger: "pushed".into(),
-                    dedup_key: format!("r{rule_id}:{subject}@{}", p.head_sha),
-                    not_before: now + gate.debounce_secs.max(0),
-                },
-                pr_subject(repo, p),
-            )
-        })
+    let due = now + gate.debounce_secs.max(0);
+    gated(prs, gate)
+        .filter(|p| !p.head_sha.is_empty())
+        .map(|p| pr_job(rule_id, repo, p, "pushed", "", due))
         .collect()
+}
+
+/// PURE: the open pull requests the trigger's gate lets through: none a
+/// draft, none a WIP one with `skip_wip`.
+pub fn gated(prs: &[OpenPr], gate: PrGate) -> impl Iterator<Item = &OpenPr> {
+    prs.iter().filter(move |p| {
+        !p.is_draft && !(gate.skip_wip && crate::service::agents::review::plan::is_wip(&p.title))
+    })
+}
+
+/// PURE: pull request `p`'s job for `trigger`, keyed by its head (then
+/// `key_suffix`), due at `not_before`, with the subject to keep.
+fn pr_job(
+    rule_id: i64,
+    repo: &str,
+    p: &OpenPr,
+    trigger: &str,
+    key_suffix: &str,
+    not_before: i64,
+) -> (NewAgentJob, Value) {
+    let subject = format!("gh:{repo}#{}", p.number);
+    (
+        NewAgentJob {
+            rule_id,
+            agent: AGENT.into(),
+            subject: subject.clone(),
+            trigger: trigger.into(),
+            dedup_key: format!("r{rule_id}:{subject}@{}{key_suffix}", p.head_sha),
+            not_before,
+        },
+        pr_subject(repo, p),
+    )
 }
 
 /// Pull requests whose review threads one poll reads, at most.
@@ -131,18 +150,7 @@ pub fn reverify_job(
     review_id: i64,
     now: i64,
 ) -> (NewAgentJob, Value) {
-    let subject = format!("gh:{repo}#{}", p.number);
-    (
-        NewAgentJob {
-            rule_id,
-            agent: AGENT.into(),
-            subject: subject.clone(),
-            trigger: "reverify".into(),
-            dedup_key: format!("r{rule_id}:{subject}@{}:r{review_id}", p.head_sha),
-            not_before: now,
-        },
-        pr_subject(repo, p),
-    )
+    pr_job(rule_id, repo, p, "reverify", &format!(":r{review_id}"), now)
 }
 
 /// PURE: the instance's marker and the trigger's `match` over a body.
@@ -238,11 +246,14 @@ pub fn comments_since(since: i64) -> String {
 
 /// PURE: the pull requests whose threads a reply poll reads: those with a
 /// person's reply among `replies`, open, at most [`MAX_THREAD_PRS`].
-pub fn reply_prs(replies: &[ReviewComment], prs: &[OpenPr]) -> Vec<i64> {
-    let mut out: Vec<i64> = Vec::new();
+pub fn reply_prs<'a>(replies: &[ReviewComment], prs: &'a [OpenPr]) -> Vec<&'a OpenPr> {
+    let mut out: Vec<&OpenPr> = Vec::new();
     for c in replies.iter().filter(|c| is_persons_reply(c)) {
-        if !out.contains(&c.number) && prs.iter().any(|p| p.number == c.number) {
-            out.push(c.number);
+        if out.iter().any(|p| p.number == c.number) {
+            continue;
+        }
+        if let Some(p) = prs.iter().find(|p| p.number == c.number) {
+            out.push(p);
         }
     }
     out.truncate(MAX_THREAD_PRS);
@@ -257,7 +268,7 @@ fn is_persons_reply(c: &ReviewComment) -> bool {
 /// (pull request `p`'s review comments) whose first comment is a fleet
 /// agent's and carries the trigger's `match` when it has one, the last
 /// word in the thread being a person's and this instance (its marker
-/// `mark`) having answered it fewer than `max_rounds` times; with the
+/// `mark`) having answered it fewer than the trigger's `max_rounds` times; with the
 /// subject to keep.
 #[allow(clippy::too_many_arguments)]
 pub fn plan_reply_jobs(
@@ -269,13 +280,17 @@ pub fn plan_reply_jobs(
     p: &OpenPr,
     replies: &[ReviewComment],
     thread: &[ReviewComment],
-    max_rounds: usize,
     now: i64,
 ) -> Result<Vec<(NewAgentJob, Value)>, String> {
     let (phrases, regex) = matcher(inst, ctx)?;
-    let matching = inst.loaded().definition.trigger.match_.is_some();
+    let trigger = &inst.loaded().definition.trigger;
+    let matching = trigger.match_.is_some();
+    let max_rounds = trigger
+        .max_rounds
+        .unwrap_or(super::definition::DEFAULT_MAX_ROUNDS);
     let mut out = Vec::new();
-    let mut done = Vec::new();
+    // One job per thread a poll, for its newest word.
+    let mut seen = std::collections::BTreeSet::new();
     for c in replies
         .iter()
         .filter(|c| c.number == p.number && is_persons_reply(c))
@@ -283,7 +298,7 @@ pub fn plan_reply_jobs(
         let Some(root) = thread.iter().find(|r| Some(r.id) == c.in_reply_to) else {
             continue;
         };
-        if done.contains(&root.id)
+        if !seen.insert(root.id)
             || !super::actions::is_agent_comment(&root.body)
             || (matching && !comment_matches(&root.body, &phrases, regex.as_ref()))
         {
@@ -295,13 +310,13 @@ pub fn plan_reply_jobs(
             .collect();
         answers.sort_by_key(|r| r.id);
         let rounds = answers.iter().filter(|r| r.body.contains(mark)).count();
-        // One job per thread a poll, for its newest word: answered, or past
-        // its rounds, the thread is left to the people.
-        done.push(root.id);
-        if rounds >= max_rounds || answers.last().is_none_or(|r| !is_persons_reply(r)) {
+        // Answered, or past its rounds, the thread is left to the people.
+        let Some(&last) = answers.last().filter(|r| is_persons_reply(r)) else {
+            continue;
+        };
+        if rounds >= max_rounds {
             continue;
         }
-        let last = answers.last().map_or(c, |r| *r);
         let strip = |b: &str| super::actions::without_markers(b);
         let mut subject = pr_subject(repo, p);
         subject["comment"] = json!({ "id": last.id, "body": last.body, "user": last.user });

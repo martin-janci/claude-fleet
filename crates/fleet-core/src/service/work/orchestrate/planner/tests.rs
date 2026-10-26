@@ -145,16 +145,16 @@ fn the_script_runs_claude_locked_and_its_output_is_tagged() {
 /// a check does; the host's own login leaves the script as it was.
 #[test]
 fn the_script_runs_under_a_login_profile_when_asked() {
-    let own = planner_script_as("sonnet", "p", None).unwrap();
+    let own = planner_script_as("sonnet", "p", None, None).unwrap();
     assert_eq!(own, planner_script("sonnet", "p"));
     assert!(!own.contains("CLAUDE_CONFIG_DIR"));
-    let work = planner_script_as("sonnet", "p", Some("work")).unwrap();
+    let work = planner_script_as("sonnet", "p", Some("work"), None).unwrap();
     assert!(
         work.contains("export CLAUDE_CONFIG_DIR=\"$HOME/.claude-profiles/\"'work'; "),
         "{work}"
     );
     assert!(work.contains(crate::tmux::PROFILE_API_KEY));
-    assert!(planner_script_as("sonnet", "p", Some("../x")).is_err());
+    assert!(planner_script_as("sonnet", "p", Some("../x"), None).is_err());
 }
 
 /// Lanes design L1: a planner that reads runs in the repository's
@@ -162,7 +162,7 @@ fn the_script_runs_under_a_login_profile_when_asked() {
 /// none and its script as it was.
 #[test]
 fn a_planner_that_reads_runs_in_the_checkout_with_read_only_tools() {
-    let s = planner_script_in("sonnet", "p", None, "/src/o/r").unwrap();
+    let s = planner_script_as("sonnet", "p", None, Some("/src/o/r")).unwrap();
     assert!(s.starts_with("cd '/src/o/r' || exit 0; "), "{s}");
     assert!(s.contains("--tools 'Read,Grep,Glob'"), "{s}");
     assert!(s.contains("--permission-mode dontAsk"), "{s}");
@@ -170,7 +170,7 @@ fn a_planner_that_reads_runs_in_the_checkout_with_read_only_tools() {
     assert!(s.contains(&PLANNER_READS_TIMEOUT_SECS.to_string()), "{s}");
     let none = planner_script("sonnet", "p");
     assert!(!none.contains("--tools 'Read"), "{none}");
-    assert!(planner_script_in("sonnet", "p", Some("../x"), "/r").is_err());
+    assert!(planner_script_as("sonnet", "p", Some("../x"), Some("/r")).is_err());
 }
 
 #[test]

@@ -679,10 +679,9 @@ fn ci_refusal_names_what_it_may() {
     assert!(!e.message.contains("ci_override"), "{}", e.message);
 }
 
-/// Lanes design L2: a person puts a member in a lane and takes it out, and
-/// the mission's detail lists its lanes with their tasks.
-#[test]
-fn a_person_puts_a_task_in_a_lane() {
+/// A person's mission with one task they put in lane `backend`, and the
+/// `mission_item` arguments that did it.
+fn mission_with_laned_task() -> (Mutex<Store>, ViewScope, MissionRow, i64, WorkLinkArgs) {
     let st = store();
     let (ana, _) = people(&st);
     let me = person(&st, None, ana);
@@ -696,6 +695,14 @@ fn a_person_puts_a_task_in_a_lane() {
     args.item_id = Some(task);
     args.lane = Some("backend".into());
     item(&args, &st, &me).unwrap();
+    (st, me, m, task, args)
+}
+
+/// Lanes design L2: a person puts a member in a lane and takes it out, and
+/// the mission's detail lists its lanes with their tasks.
+#[test]
+fn a_person_puts_a_task_in_a_lane() {
+    let (st, me, m, task, mut args) = mission_with_laned_task();
     let d = mission(&st, &me, m.id, None).unwrap();
     assert_eq!(d.lanes.len(), 1);
     assert_eq!(
@@ -715,19 +722,7 @@ fn a_person_puts_a_task_in_a_lane() {
 /// Lanes design L4: a lane whose every task is done reads as done.
 #[test]
 fn a_lane_whose_tasks_are_all_done_is_done() {
-    let st = store();
-    let (ana, _) = people(&st);
-    let me = person(&st, None, ana);
-    let m = new_mission(&st, &me, None);
-    let task = lock(&st)
-        .unwrap()
-        .create_local_work_item(None, "cards")
-        .unwrap()
-        .id;
-    let mut args = by_id("mission_item", m.id);
-    args.item_id = Some(task);
-    args.lane = Some("backend".into());
-    item(&args, &st, &me).unwrap();
+    let (st, me, m, task, _) = mission_with_laned_task();
     assert_eq!(
         mission(&st, &me, m.id, None).unwrap().lanes[0].state,
         "idle"

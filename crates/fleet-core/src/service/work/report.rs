@@ -375,38 +375,8 @@ pub async fn collect_evidence_as(
         let ev = match done.iter().find(|(f, _)| *f == from) {
             Some((_, ev)) => ev.clone(),
             None => {
-                let script = evidence_script_since(cwd, from.as_deref());
-                let answer = match read {
-                    EvidenceRead::Retry => {
-                        crate::service::catalog::inventory::run_host_script_with(
-                            ssh,
-                            host,
-                            &script,
-                            EVIDENCE_RETRY_WALL_CLOCK,
-                            &tokio_util::sync::CancellationToken::new(),
-                        )
-                        .await
-                    }
-                    _ => {
-                        crate::service::catalog::inventory::run_host_script(ssh, host, &script)
-                            .await
-                    }
-                };
-                answered &= answer.is_ok();
-                let mut ev = match answer {
-                    Ok(out) => parse_evidence(&out, now_unix()),
-                    // Where it was read, so the loop can read it again (a
-                    // host that dropped for a moment is not a run that did
-                    // nothing).
-                    Err(e) => TaskEvidence {
-                        at: now_unix(),
-                        error: Some(clip(&e.message, 200)),
-                        host: Some(host.to_string()),
-                        dir: Some(cwd.to_string()),
-                        ..Default::default()
-                    },
-                };
-                ev.provisional = read == EvidenceRead::MidTurn;
+                let (ok, ev) = read_evidence(ssh, host, cwd, from.as_deref(), read).await;
+                answered &= ok;
                 done.push((from, ev.clone()));
                 ev
             }
@@ -421,7 +391,7 @@ pub async fn collect_evidence_as(
             // mid-turn read read again is still owed the worker's Stop, so
             // a commit made after it counts.
             EvidenceRead::Retry => {
-                let mut ev = ev.clone();
+                let mut ev = ev;
                 ev.provisional = s
                     .get_task(id)
                     .ok()
@@ -436,6 +406,41 @@ pub async fn collect_evidence_as(
         }
     }
     answered
+}
+
+/// Read the git evidence at `cwd` on `host` since commit `from` (`None`:
+/// against the merge base), and whether the host answered.
+async fn read_evidence(
+    ssh: &Arc<SshClient>,
+    host: &str,
+    cwd: &str,
+    from: Option<&str>,
+    read: EvidenceRead,
+) -> (bool, TaskEvidence) {
+    use crate::service::catalog::inventory::{run_host_script, run_host_script_with};
+    let script = evidence_script_since(cwd, from);
+    let answer = match read {
+        EvidenceRead::Retry => {
+            let cancel = tokio_util::sync::CancellationToken::new();
+            run_host_script_with(ssh, host, &script, EVIDENCE_RETRY_WALL_CLOCK, &cancel).await
+        }
+        _ => run_host_script(ssh, host, &script).await,
+    };
+    let answered = answer.is_ok();
+    let mut ev = match answer {
+        Ok(out) => parse_evidence(&out, now_unix()),
+        // Where it was read, so the loop can read it again (a host that
+        // dropped for a moment is not a run that did nothing).
+        Err(e) => TaskEvidence {
+            at: now_unix(),
+            error: Some(clip(&e.message, 200)),
+            host: Some(host.to_string()),
+            dir: Some(cwd.to_string()),
+            ..Default::default()
+        },
+    };
+    ev.provisional = read == EvidenceRead::MidTurn;
+    (answered, ev)
 }
 
 /// The least time between two reads of one run's failed git evidence.

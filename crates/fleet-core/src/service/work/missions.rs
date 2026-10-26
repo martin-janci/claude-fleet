@@ -297,19 +297,20 @@ pub fn mission(
     let plan = super::orchestrate::plan_for(&s, &mission)?;
     let sessions = live_sessions(&s, scope, id)?;
     let stats = Some(mission_stats(&s, &mission, &items)?);
+    // Each visible item's status category: lanes and touches show those alone.
+    let status: std::collections::HashMap<i64, &str> = items
+        .iter()
+        .map(|it| (it.id, it.status_category.as_str()))
+        .collect();
     let lanes = s
         .mission_lanes(id)?
         .into_iter()
         .map(|mut l| {
-            l.item_ids.retain(|i| items.iter().any(|it| it.id == *i));
+            l.item_ids.retain(|i| status.contains_key(i));
             // A lane whose every task is done is done (lanes design L4),
             // derived on read like the mission's phase.
-            let done = !l.item_ids.is_empty()
-                && l.item_ids.iter().all(|i| {
-                    items
-                        .iter()
-                        .any(|it| it.id == *i && it.status_category == "done")
-                });
+            let done =
+                !l.item_ids.is_empty() && l.item_ids.iter().all(|i| status.get(i) == Some(&"done"));
             if done && l.state != "held" {
                 l.state = "done".into();
             }
@@ -320,7 +321,7 @@ pub fn mission(
     let touches = s
         .mission_touches(id)?
         .into_iter()
-        .filter(|(i, _)| items.iter().any(|it| it.id == *i))
+        .filter(|(i, _)| status.contains_key(i))
         .collect();
     let finish = if crate::store::MISSION_FINAL_STATES.contains(&mission.state.as_str()) {
         Some(finish(&s, scope, id, sessions.clone())?)
