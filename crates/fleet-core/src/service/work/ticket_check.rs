@@ -19,7 +19,7 @@
 //!   lines and the completion gate read it unchanged. A person may accept
 //!   a failed check anyway: `work_link { verify, line: "ai check" }`
 //!   ([`CHECK_LINE`]).
-//! * **When.** Per project (migration 212, [`crate::store::ProjectCheck`]):
+//! * **When.** Per project (migration 213, [`crate::store::ProjectCheck`]):
 //!   `off` (the default) starts nothing, `ask` offers Test now, `auto`
 //!   starts the check from the mission loop's tick ([`sweep`]). Test now
 //!   (`work_link { check }`) works in every mode: it is a person's ask.

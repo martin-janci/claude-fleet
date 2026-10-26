@@ -57,7 +57,7 @@ fn memory_unread_sql() -> String {
          WHERE rr.memory_read_at IS NULL AND rr.state IN ('done', 'failed') \
            AND rr.finished_at >= ?1 \
            AND (rr.memory_retry_at IS NULL OR rr.memory_retry_at <= ?3) \
-           AND r.memory IS NOT NULL \
+           AND (r.memory IS NOT NULL OR r.track_seen = 1) \
          ORDER BY rr.finished_at, rr.id LIMIT ?2",
         super::routines::RUN_COLS_RR
     )
@@ -146,7 +146,8 @@ impl Store {
     /// The finished runs whose reply was not read for their routine's
     /// notebooks yet, finished at or after `since` and not held back past
     /// `now` (`memory_retry_at`, migration 205), oldest first, at most
-    /// `limit`. Only runs of a routine that keeps a notebook.
+    /// `limit`. Only runs of a routine that keeps a notebook or tracks seen
+    /// items (migration 212).
     pub fn routine_runs_memory_unread(
         &self,
         since: i64,

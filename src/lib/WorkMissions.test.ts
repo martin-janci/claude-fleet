@@ -675,6 +675,53 @@ describe('WorkMissions', () => {
     });
   });
 
+  // Lanes design L6: Compare puts the missions that ran side by side with
+  // the median per execution mode, and a row opens its mission.
+  describe('compare', () => {
+    it('reads each mission that ran and shows the median per mode', async () => {
+      const ran = (id: number, name: string, execution: 'item' | 'lane', runs: number) => ({
+        mission: mission({ id, name, state: 'completed', policy: { execution }, cost_micros: 4_000_000 }),
+        stats: {
+          items: 2,
+          items_done: 2,
+          runs_by_role: { implement: runs },
+          session_runs: runs,
+          sessions: runs,
+          checkouts: runs,
+          failed_runs: 0,
+          retries: 0,
+          runs_per_done_item_x100: runs * 50,
+          item_secs_p50: 600,
+          span_secs: 1000,
+          idle_secs: 100,
+        },
+        may_change: true,
+      });
+      handlers.work_missions = () => [
+        mission({ id: 4, name: 'Item one', state: 'completed', updated_at: 3 }),
+        mission({ id: 5, name: 'Lane one', state: 'completed', updated_at: 2 }),
+        mission({ id: 6, name: 'Draft', state: 'draft', updated_at: 1 }),
+      ];
+      handlers.work_mission = (a) =>
+        a.mission_id === 4 ? ran(4, 'Item one', 'item', 6) : ran(5, 'Lane one', 'lane', 2);
+      renderMissions();
+      await flush();
+      const before = calls('work_mission').length;
+      await fireEvent.click(screen.getByTestId('mission-compare-open'));
+      await flush();
+      await flush();
+      const read = calls('work_mission').slice(before).map((c) => c.mission_id);
+      expect([...new Set(read)].sort()).toEqual([4, 5]);
+      const modes = screen.getAllByTestId('mission-compare-mode').map((r) => [r.dataset.mode, r.textContent]);
+      expect(modes.map((m) => m[0])).toEqual(['item', 'lane']);
+      expect(modes[0][1]).toContain('3.0');
+      expect(modes[1][1]).toContain('1.0');
+      expect(screen.getAllByTestId('mission-compare-row')).toHaveLength(2);
+      await fireEvent.click(screen.getByTestId('mission-compare-close'));
+      expect(screen.queryByTestId('mission-compare')).toBeNull();
+    });
+  });
+
   describe('tasks and child sessions open from the detail', () => {
     const liveDetail = () => ({
       mission: mission({ state: 'active' }),

@@ -1093,7 +1093,7 @@ planner's `create_item` may name `touches` (repository paths or globs the
 task changes); a task whose touches meet an open run's in the same
 repository waits (a task that names none is not held), and a lane starts
 beside another of its repository only when both name every task's touches
-and they do not meet. The task row says what a task changes. A mission's worker is refused a person's
+and they do not meet. The task row says what a task changes. Lanes L6: Missions → Compare sets the missions that ran side by side with the median per mode (`src/lib/mission_compare.ts`), the measuring runbook is §7.1 of the lanes design, and `scripts/hub-e2e.sh` §11 runs a two-task lane over real tmux. The default stays `item` until the owner has measured. A mission's worker is refused a person's
 step (`gh pr merge` / `ready`, a push to `main` / `master`, a tracker CLI)
 by fleet's `PreToolUse(Bash)` guard (`orchestrate/guard.rs`): a shell
 prefilter that asks the hub only about those commands and lets the command
@@ -1141,7 +1141,7 @@ ce84e5d28 (migration 201) they also include more session kinds
 (`fleet_events`, written by `service/fleet_events.rs`'s watcher and by
 `set_mission_state`): `host_offline` / `host_online` / `host_low`,
 `account_limited` / `account_available`, `login_signed_out`,
-`mission_done` / `mission_failed`, and since migration 212 the ticket
+`mission_done` / `mission_failed`, and since migration 213 the ticket
 events `ticket_done` / `check_passed` / `check_failed` of the AI check on
 done (work-graph.md; built, OFF per project until a person turns it on);
 any event routine but an account, mission or ticket one may narrow to one
@@ -1181,6 +1181,14 @@ once the run finishes; `memory_auto` also notes each finished run in it. The
 routine editor's Memory group picks them and shows the saved notebooks to
 read, edit or clear (`routines { memory | set_memory }`). Off by default
 per routine. The phone shows nothing of it yet.
+Routine seen items (migration 212, `routines/seen.rs`): a routine remembers
+what its runs already handled (`pr owner/repo#12 | head=… checks=…`); each
+run is shown the list, skips what did not change and reports what it looked
+at in a `<routine-seen>` block, and a run with nothing new or changed comes
+to `nothing`, out of the Inbox. On for every routine (the editor's Memory
+group turns it off and lists or forgets the items). The Sessions list (desktop
+and phone) folds routine sessions into one Routines section, one group per
+routine, and a routine session's finished turn no longer notifies.
 
 The prompt tuner is landed and OFF by default (`work.prompt_tune`;
 `service/prompt_tune.rs`, `PromptTune.svelte`, mechanics in

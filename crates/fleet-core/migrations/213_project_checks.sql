@@ -17,4 +17,4 @@
 ALTER TABLE projects ADD COLUMN check_mode TEXT;
 ALTER TABLE projects ADD COLUMN check_command TEXT;
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (212);
+INSERT OR IGNORE INTO schema_version (version) VALUES (213);

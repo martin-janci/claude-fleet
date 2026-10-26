@@ -32,7 +32,7 @@
   import WatchSummary from './WatchSummary.svelte';
   import ReviewDialog from './ReviewDialog.svelte';
   import { reviewerOf } from './review_scope';
-  import { prEvidenceLine, reviewDecisionWords } from './prs';
+  import { listPullRequests, otherSessionPrs, prEvidenceLine, prStateLabel, reviewDecisionWords, type PullRequestRow } from './prs';
   import Modal from './Modal.svelte';
   import ConfirmDialog from './ConfirmDialog.svelte';
   import DialogSheet from './DialogSheet.svelte';
@@ -446,8 +446,10 @@
   const detailsOwned = $derived($accessOf(session) === 'own');
 
   // Past a month the relative form stops being useful; show the date.
+  // Reads `nowSec`, so "5 min ago" moves on with the clock instead of
+  // keeping the age it had when the panel opened.
   function formatRelative(unix: number): string {
-    const ageSec = Math.floor(Date.now() / 1000) - unix;
+    const ageSec = nowSec - unix;
     if (ageSec >= 30 * 86400) return new Date(unix * 1000).toISOString().slice(0, 10);
     return timeAgo(unix);
   }
@@ -632,6 +634,28 @@
   // G7.9: "15/15 checks · no reviews" beside the PR in the inspector.
   const prLine = $derived(session.pr_url ? prEvidenceLine(session.pr_evidence) : '');
   const prReview = $derived(session.pr_url ? reviewDecisionWords(session.pr_evidence?.review_decision) : null);
+
+  // A session can open more than one PR; its row carries only the one its
+  // branch is on now. The rest come from the PR list (Work › Pull requests),
+  // read again whenever the row's PR, CI or turn moves, so the inspector
+  // keeps up without a poll of its own. Only for a session with a PR: one
+  // that never had any has nothing to list.
+  let otherPrs = $state<PullRequestRow[]>([]);
+  const otherPrsKey = $derived(
+    session.pr_url ? `${session.id}|${session.pr_url}|${session.ci_status ?? ''}|${session.last_turn_at ?? ''}` : '',
+  );
+  $effect(() => {
+    const key = otherPrsKey;
+    if (!key) {
+      otherPrs = [];
+      return;
+    }
+    const { id, pr_url, project_id } = untrack(() => session);
+    void listPullRequests({ projectId: project_id ?? undefined, limit: 500 }).then((r) => {
+      if (key !== otherPrsKey) return;
+      otherPrs = r.ok ? otherSessionPrs(r.value?.items ?? [], id, pr_url) : [];
+    });
+  });
   const reviewsShown = $derived(session.kind !== 'external' || reviewsOfThis.length > 0 || prReview !== null);
 
   let confirmingKill = $state(false);
@@ -951,6 +975,18 @@
     {#if prLine}
       <span class="pr-line" data-testid="details-pr-line">{prLine}</span>
     {/if}
+    {#if otherPrs.length}
+      <span class="pr-others" data-testid="details-other-prs">
+        Also opened:
+        {#each otherPrs as pr (pr.id)}
+          <span class="pr-other"
+            ><a class="pr-link" href={pr.url} target="_blank" rel="noreferrer" title={pr.title ?? pr.url}
+              >{pr.number != null ? `#${pr.number}` : pr.url}</a
+            ><span class="pr-state">{prStateLabel(pr).toLowerCase()}</span></span
+          >
+        {/each}
+      </span>
+    {/if}
   {/if}
 {/snippet}
 
@@ -1034,7 +1070,18 @@
       {/if}
       {#if session.work}
         <dt>Task</dt>
-        <dd>{#if session.work.key}<span class="mono">{session.work.key}</span> {/if}{session.work.title}</dd>
+        <dd data-testid="inspector-task">
+          {#if session.work.key}
+            {#if session.work.url}
+              <a class="mono task-link" href={session.work.url} target="_blank" rel="noreferrer" data-testid="inspector-task-link"
+                >{session.work.key}</a
+              >
+            {:else}
+              <span class="mono">{session.work.key}</span>
+            {/if}
+          {/if}
+          {session.work.title}
+        </dd>
       {/if}
       <dt>Started by</dt>
       <dd>{startedBy}, {formatRelative(sessionStart(session))}</dd>
@@ -1828,6 +1875,10 @@
   }
   .pr-link { color: var(--accent); font-size: var(--text-xs); overflow-wrap: anywhere; }
   .pr-line { color: var(--fg-muted); font-size: var(--text-xs); margin-left: 6px; }
+  .pr-others { display: block; margin-top: 2px; color: var(--fg-muted); font-size: var(--text-xs); }
+  .pr-other { margin-left: 6px; white-space: nowrap; }
+  .pr-state { margin-left: 3px; }
+  .task-link { color: var(--accent); }
   .host {
     color: var(--fg-muted);
     border: 1px solid var(--border);

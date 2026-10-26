@@ -71,6 +71,9 @@ export interface RoutineRow {
   memory?: RoutineMemoryMode;
   /** The fleet notes each finished run in the notebook. */
   memory_auto?: boolean;
+  /** Its runs skip what earlier runs handled unless it changed (migration
+   *  212); absent from a hub older than it. */
+  track_seen?: boolean;
 }
 
 /** `routines.memory`: which notebooks a routine's runs use. */
@@ -218,6 +221,9 @@ export interface RoutineInput {
    *  saves it; `''` turns a routine's off (a change without it keeps it). */
   memory?: RoutineMemoryMode | '';
   memory_auto?: boolean;
+  /** Sent only to a hub whose rows carry it (an older one refuses the
+   *  field); a change without it keeps the routine's. */
+  track_seen?: boolean;
 }
 
 /** `preview`: the editor's dry run (gap plan G2.3, fleet-core
@@ -263,6 +269,7 @@ export function routineInputOf(r: RoutineRow, clearsMemory = false): RoutineInpu
     retry_once: r.retry_once,
     autonomy: r.autonomy,
     ...(r.memory ? { memory: r.memory, memory_auto: r.memory_auto ?? false } : clearsMemory ? { memory: '' as const } : {}),
+    ...(r.track_seen !== undefined ? { track_seen: r.track_seen } : {}),
   };
 }
 
@@ -308,6 +315,34 @@ export const routineMemory = (id: number) => call<RoutineMemory>({ action: 'memo
 /** Rewrite one notebook; `''` clears it. */
 export const setRoutineMemory = (id: number, notebook: RoutineNotebook, text: string) =>
   call<RoutineMemory>({ action: 'set_memory', routine_id: id, notebook, text });
+
+/** One item a routine's runs handled (fleet-core `store::RoutineSeenRow`). */
+export interface RoutineSeenRow {
+  /** Its stable name: `pr owner/repo#12`. */
+  item: string;
+  /** What the run that reported it last saw. */
+  state: string;
+  first_seen_at: number;
+  seen_at: number;
+  changed_at: number;
+  run_id?: number;
+}
+
+/** `seen` (migration 212, fleet-core `routines::seen::RoutineSeen`). */
+export interface RoutineSeen {
+  routine_id: number;
+  track_seen: boolean;
+  items: RoutineSeenRow[];
+  total: number;
+  may_change: boolean;
+}
+
+/** What a routine's runs already handled, the last seen first. */
+export const routineSeen = (id: number, limit?: number) =>
+  call<RoutineSeen>({ action: 'seen', routine_id: id, ...(limit !== undefined ? { limit } : {}) });
+/** Forget one item (the next run looks at it again), or all without one. */
+export const forgetRoutineSeen = (id: number, item?: string) =>
+  call<RoutineSeen>({ action: 'forget_seen', routine_id: id, ...(item !== undefined ? { text: item } : {}) });
 
 // ---- debugging (migration 186; `service::routines::debug`) -----------------
 

@@ -68,6 +68,7 @@ mod reports;
 mod review_prs;
 mod routine_decisions;
 mod routine_memory;
+mod routine_seen;
 mod routines;
 mod rows;
 mod run_trace;
@@ -246,6 +247,7 @@ pub use routine_decisions::{
 pub use routine_memory::{
     RoutineMemoryRow, ROUTINE_MEMORY_MODES, ROUTINE_MEMORY_SCOPES, ROUTINE_MEMORY_WRITERS,
 };
+pub use routine_seen::{RoutineSeenRow, SeenChange};
 pub use routines::{
     NewRoutineRun, RoutineFields, RoutineRow, RoutineRunRow, ROUTINE_LEASE_SECS, ROUTINE_OVERLAPS,
     ROUTINE_RUN_OUTCOMES, ROUTINE_RUN_OUTCOME_SOURCES, ROUTINE_RUN_STATES, ROUTINE_TRIGGERS,

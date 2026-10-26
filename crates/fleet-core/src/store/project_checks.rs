@@ -1,4 +1,4 @@
-//! A project's AI check switch (migration 212): `projects.check_mode` and
+//! A project's AI check switch (migration 213): `projects.check_mode` and
 //! `projects.check_command`, read apart from [`super::ProjectRow`]. What the
 //! check does with them is `service::work::ticket_check`.
 

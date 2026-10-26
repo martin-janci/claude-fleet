@@ -1141,7 +1141,7 @@ anyone calls it done: it runs the project's test command, reads the change
 against the ticket (its notes or description and its `done_when` lines,
 quoted as data) and reports **done** or **failed** with blockers a developer
 can act on. It is off until a person turns it on, per project
-(`projects.check_mode` / `check_command`, migration 212):
+(`projects.check_mode` / `check_command`, migration 213):
 
 - **Off** (the default; NULL reads as off): no card offers it, nothing runs.
 - **On request** (`ask`): the task page shows **Test now** under the result.

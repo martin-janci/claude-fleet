@@ -22,6 +22,7 @@
   import NewRoutineMenu from './NewRoutineMenu.svelte';
   import RoutineEventTrigger from './RoutineEventTrigger.svelte';
   import RoutineMemory from './RoutineMemory.svelte';
+  import RoutineSeen from './RoutineSeen.svelte';
   import {
     AUTONOMY_CHOICES,
     budgetProblem,
@@ -35,6 +36,7 @@
     previewRoutine,
     routineAccountLabel,
     routineMemory,
+    routineSeen,
     SCHEDULE_DAYS,
     triggerWords,
     zoneChoices,
@@ -97,7 +99,12 @@
   onMount(() => {
     // Routine 0 is never one: a hub with notebooks answers E_NOT_FOUND.
     void routineMemory(0).then((r) => (memoryServed = r.ok || r.error.code !== 'E_INVALID'));
+    void routineSeen(0).then((r) => (seenServed = r.ok || r.error.code !== 'E_INVALID'));
   });
+  /** Whether the fleet keeps seen items (migration 212), asked the same way;
+   *  a saved routine's row says so itself (`track_seen`). */
+  let seenServed: boolean | null = $state(null);
+  const seenOffered = $derived(draft.track_seen !== undefined || (isNew && seenServed === true));
   // The prompt tuner (`prompt_tune.ts`): a model rewrites the prompt on the
   // routine's host and profile, saved or not; "Use this" writes draft.prompt.
   const tuneOn = $derived(settingBool($fleetSettings, SETTING_KEYS.workPromptTune));
@@ -599,6 +606,21 @@
     {:else}
       <h4 class="grp">Memory</h4>
       <p class="help" data-testid="routine-memory-unserved">This fleet's hub keeps no notebooks yet: update it to give a routine a memory.</p>
+    {/if}
+    {#if seenOffered}
+      <label class="ck">
+        <input
+          type="checkbox"
+          data-testid="routine-track-seen"
+          checked={draft.track_seen ?? true}
+          onchange={(e) => (draft.track_seen = (e.currentTarget as HTMLInputElement).checked)} />
+        <span>Remember what its runs already handled (pull requests, issues) and skip what did not change</span>
+      </label>
+      {#if draft.id !== undefined && (draft.track_seen ?? true)}
+        {#key draft.id}
+          <RoutineSeen routineId={draft.id} />
+        {/key}
+      {/if}
     {/if}
 
     <label class="f">

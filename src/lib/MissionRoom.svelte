@@ -30,6 +30,7 @@
   import QuestionCard from './kit/QuestionCard.svelte';
   import StatusDot from './kit/StatusDot.svelte';
   import MissionFinish from './MissionFinish.svelte';
+  import MissionCompare from './MissionCompare.svelte';
   import MissionTriage from './MissionTriage.svelte';
   import MissionTasks from './MissionTasks.svelte';
   import TaskGraphCard from './TaskGraphCard.svelte';
@@ -126,6 +127,7 @@
     missionSessionId,
     openMissionSession,
     proposalSummary,
+    roomComparing,
     roomCreating,
     roomEvents,
     roomMissionId,
@@ -365,7 +367,7 @@
   }
   const grid = $derived(`minmax(0, 1fr) 4px ${$missionRightPx}px`);
   /** A mission is on show (not the starter, not the New mission form). */
-  const showing = $derived(!!mission && !!detail && !$roomCreating);
+  const showing = $derived(!!mission && !!detail && !$roomCreating && !$roomComparing);
   const tabCount = (id: MissionPanelTab): number =>
     id === 'session' ? liveSessions.length : id === 'runs' ? runs.length : id === 'repos' ? (mission?.repos ?? []).length : 0;
 
@@ -803,7 +805,9 @@
   style:grid-template-columns={showing && $missionPanelOpen ? grid : 'minmax(0, 1fr) 0px 0px'}
 >
   <div class="centre">
-    {#if $roomCreating}
+    {#if $roomComparing}
+      <MissionCompare />
+    {:else if $roomCreating}
       <div class="scroll">
         <div class="col">
           {#if notice}<p class="notice" role="status" data-testid="mission-notice">{notice}</p>{/if}

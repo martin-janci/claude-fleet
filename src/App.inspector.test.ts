@@ -111,6 +111,8 @@ describe('App: session tabs and the inspector (step 3.5)', () => {
     await fireEvent.click(screen.getByTestId('stab-details'));
     expect(get(destination)).toBe('details');
     expect(screen.getByTestId('details-view')).toBeTruthy();
+    // The tab scrolls inside its slot; the slot itself is absolutely placed.
+    expect(screen.getByTestId('details-view').firstElementChild?.getAttribute('data-testid')).toBe('details-scroll');
     expect(screen.queryByTestId('inspector')).toBeNull();
     expect((screen.getByTestId('inspector-toggle') as HTMLButtonElement).disabled).toBe(true);
     await fireEvent.click(screen.getByTestId('stab-agent'));
