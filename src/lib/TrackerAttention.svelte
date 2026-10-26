@@ -19,6 +19,7 @@
   import { decideAttentionItem, decideHealth } from './decide_health';
   import { orgBudgetItems, orgBudgets } from './org_budget';
   import { updateAttentionItems, updatesHealth } from './update_health';
+  import { storageAttentionItems, storageHealth } from './storage_health';
   import { windowHidden } from './window_hidden';
 
   /** Tracker health moves on the sync's scale (minutes). */
@@ -34,6 +35,9 @@
   // The fleet's own updates (review w26-3): a rollback, a failure, a stale
   // channel. One item each, to Settings → Updates.
   const updates = $derived(updateAttentionItems($updatesHealth));
+  // The hub's own disk and backups (hardening survey 2026-10-26): a nearly
+  // full disk, a stale backup. One item each, to Settings → Hub & sync.
+  const storage = $derived(storageAttentionItems($storageHealth));
 
   onMount(() => {
     const t = setInterval(() => {
@@ -44,11 +48,16 @@
   });
 </script>
 
-{#if items.length > 0 || jev || budgets.length > 0 || updates.length > 0}
+{#if items.length > 0 || jev || budgets.length > 0 || updates.length > 0 || storage.length > 0}
   <div class="trackers" data-testid="tracker-attention">
     {#each budgets as b (b.key)}
       <button class="pill hot" data-testid="org-budget-item" title={b.detail} onclick={() => openSettingsAt(b.page)}>
         <Icon name="warning" size={12} /> {b.label} →
+      </button>
+    {/each}
+    {#each storage as st (st.key)}
+      <button class="pill hot" data-testid="storage-attention-item" title={st.detail} onclick={() => openSettingsAt(st.section)}>
+        <Icon name="warning" size={12} /> {st.label} →
       </button>
     {/each}
     {#each updates as u (u.key)}

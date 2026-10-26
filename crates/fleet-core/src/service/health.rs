@@ -136,6 +136,12 @@ pub struct Health {
     /// runs. Not sent when empty.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub playbooks_week: BTreeMap<String, u32>,
+    /// The hub's own disk and backups (`service::hub_storage`, hardening
+    /// survey 2026-10-26): free space under its data dir and its newest
+    /// backup, each flagged past its warning line. `None` (not sent) on a
+    /// desktop, for a scoped caller and from an older hub.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage: Option<crate::service::hub_storage::StorageHealth>,
 }
 
 /// [`Health::devices`].
@@ -1277,6 +1283,12 @@ fn health_at(
         automation_paused: crate::service::loops::paused(s),
         devices: None,
         playbooks_week,
+        // The hub's own business, like `decide`: no scoped caller reads it.
+        storage: if matches!(view, HealthView::Fleet | HealthView::Person(_)) {
+            crate::service::hub_storage::health(now)
+        } else {
+            None
+        },
     };
     h.set_tunnels(tunnels);
     if matches!(view, HealthView::Blank) {
@@ -1360,6 +1372,7 @@ pub fn unready_health() -> Health {
         automation_paused: false,
         devices: None,
         playbooks_week: BTreeMap::new(),
+        storage: None,
     }
 }
 
@@ -2366,6 +2379,7 @@ mod tests {
             automation_paused: false,
             devices: None,
             playbooks_week: BTreeMap::new(),
+            storage: None,
         })
         .expect("Health serialises");
         let back: Health = serde_json::from_str(&whole).expect("a whole Health parses");

@@ -858,6 +858,8 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
             Ok(dir) => tracing::info!(dir = %dir.display(), "downloads ready"),
             Err(e) => tracing::warn!(error = %e, "downloads unavailable"),
         }
+        // The hub's own disk and backups in `fleet_health.storage`.
+        fleet_core::service::hub_storage::init(&r.data_dir);
         // The release-file mirror (`update.mirror`, update design S9).
         if let Err(e) = fleet_core::service::update::mirror::init(&r.data_dir) {
             tracing::warn!(error = %e, "update mirror unavailable");
@@ -1167,6 +1169,13 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
     // Application updates (update design S4): re-read the signed release
     // channel every `update.check_interval_secs`, and record this hub's own
     // build as `hub:self`. Stopped with the ticks.
+    // A daily consistent copy of `state.db` under `<data>/backups`, the
+    // newest 14 kept, unless a newer backup already exists (hardening
+    // survey 2026-10-26). Stopped with the ticks.
+    let backup_handle = fleet_core::service::hub_storage::spawn_backup_tick(
+        r.data_dir.clone(),
+        ticks_cancel.clone(),
+    );
     let update_handle = fleet_core::service::update::spawn_refresh_tick(
         Arc::clone(&store),
         fleet_core::service::update::HubSelf {
@@ -1239,6 +1248,7 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
     tick_handles.push(peer_handle);
     tick_handles.push(ready_handle);
     tick_handles.push(update_handle);
+    tick_handles.push(backup_handle);
     tick_handles.push(mission_handle);
     tick_handles.push(routine_handle);
     if let Some(h) = tracker_handle {

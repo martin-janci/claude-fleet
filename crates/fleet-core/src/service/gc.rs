@@ -477,6 +477,13 @@ pub async fn sweep_with(
     // The decision record (Jev evaluation, D37): `decide.retention_days`
     // (0 = forever), bounded per tick, one batch per lock.
     report.swept_decision_runs = crate::service::decide::sweep_runs(store, now);
+    // Routine runs (hardening survey 2026-10-26): closed runs past
+    // `ROUTINE_RUN_KEEP_DAYS`, each routine keeping its newest
+    // `ROUTINE_RUNS_KEPT`; bounded per tick, one batch per lock.
+    match sweep_routine_runs(store, now) {
+        0 => {}
+        n => tracing::info!(n, "[gc] swept old routine runs"),
+    }
     // The admin audit log: `auth.audit_retention_days` (0 = forever). One
     // statement under one brief lock, like the decision record's.
     report.swept_admin_events = sweep_admin_events(store, now);
@@ -489,6 +496,24 @@ pub async fn sweep_with(
         Err(e) => tracing::warn!(error = %e, "[gc] wizard draft purge failed"),
     }
     report
+}
+
+/// How long a closed routine run is kept.
+pub const ROUTINE_RUN_KEEP_DAYS: i64 = 180;
+/// The newest runs of each routine kept whatever their age.
+pub const ROUTINE_RUNS_KEPT: i64 = 50;
+
+/// Closed routine runs past [`ROUTINE_RUN_KEEP_DAYS`] beyond each routine's
+/// newest [`ROUTINE_RUNS_KEPT`]; the number deleted.
+fn sweep_routine_runs(store: &Mutex<Store>, now: i64) -> usize {
+    let cutoff = now - ROUTINE_RUN_KEEP_DAYS * 86_400;
+    crate::service::work::retention::sweep_batches(
+        store,
+        crate::service::decide::RETENTION_BATCH,
+        crate::service::decide::RETENTION_TICK_CAP,
+        "routine_runs",
+        |s, want| s.sweep_routine_runs(cutoff, ROUTINE_RUNS_KEPT, want),
+    )
 }
 
 /// Admin events older than `auth.audit_retention_days` (`0` keeps them

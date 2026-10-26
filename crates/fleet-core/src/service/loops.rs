@@ -119,6 +119,11 @@ pub const LOOPS: &[LoopSpec] = &[
         "Keeps linked hubs connected; what comes over a link is a person's request.",
     ),
     keeps("updates", "Update check", "Only checks for updates; it installs nothing."),
+    keeps(
+        "backup",
+        "Hub backup",
+        "Only copies the hub's own database once a day; it changes nothing.",
+    ),
 ];
 
 /// [`LoopHealth::result`] values.

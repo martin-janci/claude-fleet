@@ -658,6 +658,29 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// Delete at most `limit` closed runs that started before `cutoff`,
+    /// keeping each routine's newest `keep` runs whatever their age; the
+    /// number deleted. An open run is never swept. Runs had no retention: a
+    /// routine fired every five minutes (its overlap skips included) wrote
+    /// about 105k rows a year.
+    pub fn sweep_routine_runs(
+        &self,
+        cutoff: i64,
+        keep: i64,
+        limit: usize,
+    ) -> Result<usize, IpcError> {
+        Ok(self.conn.execute(
+            "DELETE FROM routine_runs WHERE id IN \
+               (SELECT id FROM \
+                  (SELECT id, state, started_at, ROW_NUMBER() OVER \
+                     (PARTITION BY routine_id ORDER BY started_at DESC, id DESC) AS nth \
+                   FROM routine_runs) \
+                WHERE state <> 'running' AND started_at < ?1 AND nth > ?2 \
+                ORDER BY id LIMIT ?3)",
+            rusqlite::params![cutoff, keep, limit as i64],
+        )?)
+    }
+
     /// Whether the routine has a run open.
     pub fn routine_run_open(&self, routine_id: i64) -> Result<bool, IpcError> {
         Ok(self
@@ -856,6 +879,56 @@ mod orphan_tests {
             )
             .unwrap();
         s.conn.last_insert_rowid()
+    }
+
+    /// Old closed runs go, but each routine keeps its newest `keep`, and an
+    /// open run stays however old it is.
+    #[test]
+    fn the_run_sweep_keeps_the_newest_per_routine_and_every_open_run() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("h1").unwrap();
+        let p = project(&s, "one");
+        let (busy, quiet) = (routine_on(&s, "h1", p), routine_on(&s, "h1", p));
+        let run = |routine_id: i64, state: &str, at: i64| {
+            s.insert_routine_run(&NewRoutineRun {
+                routine_id,
+                trigger: "cron",
+                state,
+                at,
+                ..Default::default()
+            })
+            .unwrap()
+            .id
+        };
+        let open = run(busy, "running", 10);
+        for at in 20..30 {
+            run(busy, "done", at);
+        }
+        let quiet_old = run(quiet, "skipped", 15);
+        let recent = run(busy, "failed", 1_000);
+
+        // Older than 500, keep the newest 3 of each routine.
+        assert_eq!(s.sweep_routine_runs(500, 3, 100).unwrap(), 8);
+        let left: Vec<i64> = s
+            .routine_runs(busy, 50)
+            .unwrap()
+            .iter()
+            .map(|r| r.id)
+            .collect();
+        // The newest three (1000, 29, 28) and the open run.
+        assert_eq!(left.len(), 4, "{left:?}");
+        assert!(left.contains(&recent) && left.contains(&open));
+        assert!(
+            s.running_routine_runs()
+                .unwrap()
+                .iter()
+                .any(|r| r.id == open),
+            "an open run is never swept"
+        );
+        // A routine with one old run keeps it: it is among its newest 3.
+        assert_eq!(s.routine_runs(quiet, 50).unwrap()[0].id, quiet_old);
+        // `limit` bounds a call.
+        assert_eq!(s.sweep_routine_runs(500, 0, 1).unwrap(), 1);
     }
 
     fn project(s: &Store, repo: &str) -> i64 {
