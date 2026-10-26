@@ -1,6 +1,6 @@
 //! Fleet events (migration 201): what happened to the fleet rather than to
 //! one session — a host gone or back, an account at its limit, a mission
-//! finished — for event routines. Who writes them and when is
+//! finished, a ticket done or checked — for event routines. Who writes them and when is
 //! `service::fleet_events`; this is the rows.
 
 use super::{now_unix, Store};
@@ -25,8 +25,15 @@ pub const MISSION_DONE: &str = "mission_done";
 /// A mission failed.
 pub const MISSION_FAILED: &str = "mission_failed";
 
+/// A person set a work item done (`service::work::ticket_check`).
+pub const TICKET_DONE: &str = "ticket_done";
+/// An AI check of a ticket's finished work passed.
+pub const CHECK_PASSED: &str = "check_passed";
+/// An AI check found a ticket's finished work not ready.
+pub const CHECK_FAILED: &str = "check_failed";
+
 /// Every fleet event kind, the order the editors offer them.
-pub const FLEET_EVENTS: [&str; 8] = [
+pub const FLEET_EVENTS: [&str; 11] = [
     HOST_OFFLINE,
     HOST_ONLINE,
     HOST_LOW,
@@ -35,6 +42,9 @@ pub const FLEET_EVENTS: [&str; 8] = [
     LOGIN_SIGNED_OUT,
     MISSION_DONE,
     MISSION_FAILED,
+    TICKET_DONE,
+    CHECK_PASSED,
+    CHECK_FAILED,
 ];
 
 /// Rows the table keeps; an insert drops the oldest past it.

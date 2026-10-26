@@ -3546,6 +3546,40 @@ async fn run_matrix(isolate: bool) {
         },
     )
     .await;
+    // AI check on done: a person's ask, refused to every scoped caller
+    // before any row, as `verify` is. The item has no finished work.
+    m.row(
+        "work_link",
+        "check",
+        move |fx, _| json!({ "action": "check", "item_id": fx.item_b }),
+        |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            match who {
+                Who::Master | Who::ClientFull => {
+                    is_code(who, a, "E_INVALID_STATE", "no finished work")
+                }
+                _ => is_code(who, a, "E_FORBIDDEN", "a person decides"),
+            }
+        },
+    )
+    .await;
+    m.row(
+        "work_link",
+        "check_setup",
+        |_, _| json!({ "action": "check_setup", "project_id": 987_654, "mode": "ask" }),
+        |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            match who {
+                Who::Master | Who::ClientFull => is_code(who, a, "E_NOTFOUND", "no such project"),
+                _ => is_code(who, a, "E_FORBIDDEN", "a person decides"),
+            }
+        },
+    )
+    .await;
     // ── The mission loop (orchestration O4–O6) ─────────────────────────
     // Taking a step, asking the planner and ending a grant are a person's
     // plan, fenced by the mission; signing a grant and deciding a card are a

@@ -56,6 +56,7 @@ mod peer_links;
 mod people;
 mod pinned_dashboards;
 mod pr_shepherd;
+mod project_checks;
 mod project_picks;
 mod projects;
 mod pull_requests;
@@ -225,6 +226,7 @@ pub use pr_shepherd::{
     ShepherdEpisodeRow, ShepherdMergeRow, ShepherdRuleRow, SHEPHERD_LEVELS,
     SHEPHERD_RECIPES_MAX_CHARS,
 };
+pub use project_checks::{ProjectCheck, CHECK_ASK, CHECK_AUTO, CHECK_MODES, CHECK_OFF};
 pub use project_picks::{ProjectPickRow, PROJECT_GROUP_MAX_CHARS, PROJECT_VIS};
 pub use pull_requests::{
     pr_events, repo_and_number, PrSeenBy, PullRequestRow, PR_EVENT_CI_FAILED, PR_EVENT_CI_PASSED,

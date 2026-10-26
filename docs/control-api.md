@@ -1090,11 +1090,13 @@ Index by area (names only; see the reference for details):
   201, `service::fleet_events`) are about a host, an account or a mission
   rather than a session: `host_offline`, `host_online`, `host_low` (disk
   or memory), `account_limited`, `account_available`, `login_signed_out`,
-  `mission_done`, `mission_failed`; each is written once when the
+  `mission_done`, `mission_failed`, and the ticket events `ticket_done`,
+  `check_passed`, `check_failed` (work-graph.md, *AI check on done*);
+  each is written once when the
   condition starts (and for a host down or an account at its limit, once
   when it ends), a flapping one again only after ten minutes, and fires a
   routine of the org it belongs to (a mission's, only its owner's). Any
-  event routine may set `event_host` (not on an account or mission event):
+  event routine may set `event_host` (not on an account, mission or ticket event):
   only a host event of that host, a session on it, a PR seen there; and
   `event_rate_secs` (up to a week): at most one run per PR, per session,
   or per host, account or mission, in that window; a fire inside it is

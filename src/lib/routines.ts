@@ -753,9 +753,20 @@ const FLEET_EVENT_LABELS: Record<string, string> = {
   login_signed_out: 'A Claude login is signed out',
   mission_done: 'A mission completes',
   mission_failed: 'A mission fails',
+  ticket_done: 'A ticket is marked done',
+  check_passed: 'An AI check passes',
+  check_failed: 'An AI check fails',
 };
 /** The fleet events about no host: they take no host filter. */
-const HOSTLESS_EVENTS = new Set(['account_limited', 'account_available', 'mission_done', 'mission_failed']);
+const HOSTLESS_EVENTS = new Set([
+  'account_limited',
+  'account_available',
+  'mission_done',
+  'mission_failed',
+  'ticket_done',
+  'check_passed',
+  'check_failed',
+]);
 export function isFleetEvent(e: string | undefined): boolean {
   return !!e && e in FLEET_EVENT_LABELS;
 }
@@ -780,7 +791,7 @@ const PR_EVENT_LABELS: Record<string, string> = {
 export const EVENT_GROUPS: readonly { label: string; events: readonly string[] }[] = [
   { label: 'Sessions', events: Object.keys(EVENT_WORDS) },
   { label: 'Pull requests', events: Object.keys(PR_EVENT_LABELS) },
-  { label: 'Hosts, accounts and missions', events: Object.keys(FLEET_EVENT_LABELS) },
+  { label: 'Hosts, accounts, missions and tickets', events: Object.keys(FLEET_EVENT_LABELS) },
 ];
 /** Every event the editor offers, in order. */
 export const EVENT_CHOICES: readonly string[] = EVENT_GROUPS.flatMap((g) => g.events);

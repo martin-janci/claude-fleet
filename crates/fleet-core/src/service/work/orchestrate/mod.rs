@@ -2372,6 +2372,10 @@ pub async fn tick_once(deps: &Deps, now: i64) {
     // holds it `pending` meanwhile. After the missions, outside every
     // mission's lease, and bounded per pass.
     crate::service::work::report::retry_unread_evidence(&deps.store, &deps.ssh, now).await;
+    // AI check on done: a ticket finished in a project whose check is on
+    // `auto` is checked. Outside missions, with the orchestrator off too;
+    // after the evidence retry, which a check needs. Stopped by Pause all.
+    crate::service::work::ticket_check::sweep(&deps.store, &deps.ssh, now).await;
     crate::service::loops::report("missions", failed.map_or(Ok(()), Err), next);
 }
 

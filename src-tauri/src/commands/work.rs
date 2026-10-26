@@ -41,6 +41,7 @@ use fleet_core::service::work::card::TicketCard;
 use fleet_core::service::work::result::TaskResultView;
 use fleet_core::service::work::resume::ResumePlan;
 use fleet_core::service::work::summary::SummaryOutcome;
+use fleet_core::service::work::ticket_check::CheckSetup;
 use fleet_core::service::work::tidy::{TidyApplyItem, TidyApplyReport, TidyReport};
 use fleet_core::service::work::today::Today;
 use fleet_core::service::work::{self, Dismissed, PurgeImpact, WorkArgs, WorkLinkArgs};
@@ -503,6 +504,42 @@ pub async fn create_followup_task(
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<WorkItemRow, IpcError> {
     routed::create_followup_task(&backend, args, &store).await
+}
+
+/// AI check on done: Test now / Rerun on a work item's finished work.
+/// Answers the check's `test` task.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RunTicketCheckArgs {
+    pub item_id: i64,
+}
+
+#[tauri::command]
+pub async fn run_ticket_check(
+    args: RunTicketCheckArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<TaskRow, IpcError> {
+    routed::run_ticket_check(&backend, args, &store, &ssh).await
+}
+
+/// A project's AI check switch: `off` | `ask` | `auto`, and the test command
+/// the check runs (`None` or "" for none).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SetTicketCheckArgs {
+    pub project_id: i64,
+    pub mode: String,
+    #[serde(default)]
+    pub command: Option<String>,
+}
+
+#[tauri::command]
+pub async fn set_ticket_check(
+    args: SetTicketCheckArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<CheckSetup, IpcError> {
+    routed::set_ticket_check(&backend, args, &store).await
 }
 
 /// A Claude-written summary of past work (work graph M13.4c, on demand):
@@ -1239,6 +1276,53 @@ pub(crate) mod routed {
                 args.task_id,
                 args.index,
                 args.title.as_deref(),
+            ),
+        }
+    }
+
+    pub async fn run_ticket_check(
+        backend: &FleetBackend,
+        args: RunTicketCheckArgs,
+        store: &Arc<Mutex<Store>>,
+        ssh: &Arc<SshClient>,
+    ) -> Result<TaskRow, IpcError> {
+        let wire = WorkLinkArgs {
+            action: "check".into(),
+            item_id: Some(args.item_id),
+            ..Default::default()
+        };
+        match backend.hub() {
+            Some(hub) => hub.route("run_ticket_check", &wire).await,
+            None => {
+                work::ticket_check::start(
+                    store,
+                    ssh,
+                    args.item_id,
+                    &fleet_core::service::view_scope::ViewScope::internal(),
+                )
+                .await
+            }
+        }
+    }
+
+    pub async fn set_ticket_check(
+        backend: &FleetBackend,
+        args: SetTicketCheckArgs,
+        store: &Mutex<Store>,
+    ) -> Result<CheckSetup, IpcError> {
+        let wire = WorkLinkArgs {
+            action: "check_setup".into(),
+            project_id: Some(args.project_id),
+            mode: Some(args.mode.clone()),
+            command: args.command.clone(),
+            ..Default::default()
+        };
+        match backend.hub() {
+            Some(hub) => hub.route("set_ticket_check", &wire).await,
+            None => work::ticket_check::setup(
+                &wire,
+                store,
+                &fleet_core::service::view_scope::ViewScope::internal(),
             ),
         }
     }

@@ -481,6 +481,8 @@ pub fn run() {
             commands::work::request_work_result,
             commands::work::work_result,
             commands::work::create_followup_task,
+            commands::work::run_ticket_check,
+            commands::work::set_ticket_check,
             commands::work::summarize_past_work,
             commands::work::name_session_work,
             commands::work::rename_work_item,

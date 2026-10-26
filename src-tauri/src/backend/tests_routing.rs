@@ -4007,6 +4007,42 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
             }),
         ),
         (
+            "run_ticket_check",
+            "work_link",
+            json!({ "session_id": null, "action": "check", "key": null, "item_id": 9,
+                    "link_id": null, "source": null }),
+            TASK_PAYLOAD,
+            Box::new(|b, s, ssh| {
+                block_on(commands::work::routed::run_ticket_check(
+                    b,
+                    commands::work::RunTicketCheckArgs { item_id: 9 },
+                    s,
+                    ssh,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "set_ticket_check",
+            "work_link",
+            json!({ "session_id": null, "action": "check_setup", "key": null, "item_id": null,
+                    "link_id": null, "source": null, "project_id": 7, "mode": "auto",
+                    "command": "cargo test" }),
+            r#"{"project_id":7,"project":"o/r","mode":"auto","command":"cargo test"}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::set_ticket_check(
+                    b,
+                    commands::work::SetTicketCheckArgs {
+                        project_id: 7,
+                        mode: "auto".into(),
+                        command: Some("cargo test".into()),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "summarize_past_work",
             "work_link",
             json!({ "session_id": null, "action": "summarize", "key": "ABC-1", "item_id": null,

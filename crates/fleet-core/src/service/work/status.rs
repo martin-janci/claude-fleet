@@ -41,8 +41,11 @@ pub fn set_status(
     if status == "done" && scope.host().is_some() {
         refuse_past_gate(&s, scope, &item)?;
     }
-    s.set_item_status(item_id, status)?
-        .ok_or_else(|| orgs::not_found("work item", item_id))
+    let after = s
+        .set_item_status(item_id, status)?
+        .ok_or_else(|| orgs::not_found("work item", item_id))?;
+    super::ticket_check::note_done(&s, &item, &after);
+    Ok(after)
 }
 
 /// [`set_status`]'s gate for an agent its scope does not name: the operator
@@ -266,9 +269,12 @@ pub async fn move_status(
             "[write-back] moved, not read back"
         );
     }
-    lock(store)?
+    let s = lock(store)?;
+    let after = s
         .get_work_item(item_id)?
-        .ok_or_else(|| orgs::not_found("work item", item_id))
+        .ok_or_else(|| orgs::not_found("work item", item_id))?;
+    super::ticket_check::note_done(&s, &item, &after);
+    Ok(after)
 }
 
 /// The status a reader should see (design 2026-09-28 §2): the live
