@@ -104,3 +104,16 @@ export function prDiffstat(pr: Pick<PullRequestRow, 'additions' | 'deletions'>):
   if (pr.additions == null && pr.deletions == null) return '';
   return `+${pr.additions ?? 0} \u2212${pr.deletions ?? 0}`;
 }
+
+/** The other PRs a session opened (the inspector): every row whose opener
+ *  is this session, newest first, without the one its branch is on now,
+ *  which the inspector already shows in full. */
+export function otherSessionPrs(
+  items: readonly PullRequestRow[],
+  sessionId: number,
+  currentUrl: string | null | undefined,
+): PullRequestRow[] {
+  return items
+    .filter((p) => p.session_id === sessionId && p.url !== currentUrl)
+    .sort((a, b) => b.first_seen_at - a.first_seen_at);
+}
