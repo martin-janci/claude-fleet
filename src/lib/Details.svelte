@@ -23,6 +23,7 @@
   const mac = detectMac(typeof navigator === 'undefined' ? undefined : navigator);
 </script>
 
+{#snippet body()}
 {#if showTask && $selectedTaskId}
   <WorkTaskDetail
     taskId={$selectedTaskId}
@@ -48,8 +49,24 @@
     </div>
   </section>
 {/if}
+{/snippet}
+
+<!-- The Details tab fills an absolutely placed slot over the terminal, so it
+     scrolls itself; without this a long page (Related, Reviews, the action
+     column below the main one on a narrow window) was cut off at the foot.
+     The inspector column already scrolls (App.svelte's `.inspector`). -->
+{#if variant === 'tab'}
+  <div class="tab-scroll" data-testid="details-scroll">{@render body()}</div>
+{:else}
+  {@render body()}
+{/if}
 
 <style>
+  .tab-scroll {
+    height: 100%;
+    overflow: auto;
+    overscroll-behavior: contain;
+  }
   .empty {
     height: 100%;
     display: flex;
