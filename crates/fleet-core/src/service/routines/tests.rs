@@ -2564,7 +2564,11 @@ async fn dry_run_says_what_a_fire_would_start_and_writes_nothing() {
     );
     let d = dry_run(&f.store, &ana, c.id, None, OCT8).unwrap();
     assert!(d.event.is_none());
-    assert_eq!(d.prompt, c.prompt);
+    // Its prompt, then what its runs handled (none yet).
+    assert!(d
+        .prompt
+        .starts_with(&format!("{}\n\nAlready handled:", c.prompt)));
+    assert!(d.prompt.contains("None yet."), "{}", d.prompt);
 }
 
 /// A run's trace, as `(phase, kind, summary)`.
