@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "version": "0.6.5-dev.121.desktop.g96a8a96",
+  "mobile_accepts": [
+    0,
+    18
+  ],
+  "components": {
+    "android": {
+      "version": "0.6.5-dev.121.desktop.g96a8a96",
+      "artifacts": [
+        {
+          "kind": "apk",
+          "url": "https://github.com/martin-janci/fleet-mobile/releases/download/v0.6.5-dev.121.desktop.g96a8a96/fleet-mobile-0.6.5-dev.121.desktop.g96a8a96.apk",
+          "sha256": "2e60e2d2ade015e718f3b390ccceb1d79d841101e5a2620b0565bef2266c5258",
+          "size": 18336008,
+          "version_code": 429969,
+          "signer_sha256": "87081ff376e7ad2cb3082bf8f48dac2f451bffda66693b575c31cd4c354b9a15"
+        }
+      ]
+    }
+  }
+}
