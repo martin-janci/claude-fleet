@@ -167,7 +167,16 @@ impl LocalSync {
                     _ = token.cancelled() => break,
                     _ = tokio::time::sleep(PASS_INTERVAL) => {}
                 }
-                me.tick();
+                // Caught like a tick pass (`run_cancellable_tick`): uncaught,
+                // one panic ended local sync for good.
+                if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| me.tick())).is_err() {
+                    tracing::error!("local sync: a pass panicked; continuing with the next one");
+                    crate::service::loops::report(
+                        "local_sync",
+                        Err::<(), _>("the pass panicked"),
+                        Some(PASS_INTERVAL),
+                    );
+                }
             }
         });
     }

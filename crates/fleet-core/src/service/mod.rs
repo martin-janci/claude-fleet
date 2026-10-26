@@ -64,6 +64,7 @@ pub mod host_check;
 pub mod host_setup;
 pub mod hosts;
 pub mod hub;
+pub mod hub_storage;
 pub mod library;
 pub mod local_sync;
 pub mod login_conflicts;

@@ -463,6 +463,10 @@ fn sample_health() -> Health {
         // desktop reads them, so they stay out of the contract.
         devices: None,
         playbooks_week: Default::default(),
+        // Hardening survey 2026-10-26: the hub's own disk and backups. The
+        // desktop reads it only for its Attention items, as optional
+        // fields, so it stays out of the contract (`None` is not sent).
+        storage: None,
     }
 }
 
