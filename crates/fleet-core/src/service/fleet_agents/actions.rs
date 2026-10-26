@@ -47,23 +47,33 @@ pub fn marker(instance: &str) -> String {
     format!("{MARKER_PREFIX}{instance}]")
 }
 
+/// PURE: `text` fitted to `max` characters with instance `instance`'s
+/// marker line after it.
+fn marked(text: &str, instance: &str, max: usize) -> String {
+    let mark = format!("\n\n{}", marker(instance));
+    format!(
+        "{}{mark}",
+        fit(text, max.saturating_sub(mark.chars().count()))
+    )
+}
+
 /// Whether a comment is a fleet agent's own.
 pub fn is_agent_comment(body: &str) -> bool {
     body.contains(MARKER_PREFIX)
 }
 
-/// PURE: a comment's text without the fleet agents' markers in it.
+/// PURE: a comment's text without the fleet agents' markers in it. A marker
+/// prefix with no closing `]` is not a marker (a person quoting one): it and
+/// what follows stay.
 pub fn without_markers(body: &str) -> String {
     let mut out = String::new();
     let mut rest = body;
     while let Some(at) = rest.find(MARKER_PREFIX) {
+        let Some(end) = rest[at..].find(']') else {
+            break;
+        };
         out.push_str(&rest[..at]);
-        match rest[at..].find(']') {
-            Some(end) => rest = &rest[at + end + 1..],
-            None => {
-                rest = "";
-            }
-        }
+        rest = &rest[at + end + 1..];
     }
     out.push_str(rest);
     out.trim().to_string()
@@ -747,11 +757,7 @@ pub fn plan(
                     if key.is_empty() || text.is_empty() {
                         return Err(skip("the target or the body is empty"));
                     }
-                    let mark = format!("\n\n{}", marker(instance));
-                    let body = format!(
-                        "{}{mark}",
-                        fit(&text, max.saturating_sub(mark.chars().count()))
-                    );
+                    let body = marked(&text, instance, max);
                     let p = CommentPayload {
                         action: a.id.clone(),
                         tracker,
@@ -876,11 +882,7 @@ pub fn plan(
                     }
                     // The marker counts the instance's rounds in the thread
                     // and keeps its own reply from starting another.
-                    let mark = format!("\n\n{}", marker(instance));
-                    let body = format!(
-                        "{}{mark}",
-                        fit(&text, max.saturating_sub(mark.chars().count()))
-                    );
+                    let body = marked(&text, instance, max);
                     let p = PrReplyPayload {
                         action: a.id.clone(),
                         repo,
@@ -990,11 +992,7 @@ pub fn plan(
                         if text.is_empty() {
                             return Err(skip("the body is empty"));
                         }
-                        let mark = format!("\n\n{}", marker(instance));
-                        let body = format!(
-                            "{}{mark}",
-                            fit(&text, max.saturating_sub(mark.chars().count()))
-                        );
+                        let body = marked(&text, instance, max);
                         let p = PrCommentPayload {
                             action: a.id.clone(),
                             repo,

@@ -52,12 +52,6 @@ pub struct MissionStats {
     pub idle_secs: i64,
 }
 
-/// Whether an attempt ended without the work (the loop's own reading,
-/// `orchestrate::steps::attempt_failed`).
-fn failed(t: &TaskRow) -> bool {
-    crate::service::work::orchestrate::steps::attempt_failed(t)
-}
-
 fn role(t: &TaskRow) -> &str {
     t.role.as_deref().unwrap_or("implement")
 }
@@ -117,7 +111,8 @@ pub fn stats(
     let mut by_item: BTreeMap<i64, (i64, i64)> = BTreeMap::new();
     let mut spans: Vec<(i64, i64)> = Vec::new();
     for t in attempts {
-        *out.runs_by_role.entry(role(t).to_string()).or_default() += 1;
+        let role = role(t);
+        *out.runs_by_role.entry(role.to_string()).or_default() += 1;
         if let Some(w) = t.worker_session_id {
             out.session_runs += 1;
             sessions.insert(w);
@@ -125,11 +120,12 @@ pub fn stats(
                 checkouts.insert(c);
             }
         }
-        if failed(t) {
+        // The loop's own reading of an attempt that ended without the work.
+        if crate::service::work::orchestrate::steps::attempt_failed(t) {
             out.failed_runs += 1;
         }
         let item = t.work_item_id.unwrap_or(0);
-        if role(t) == "implement" {
+        if role == "implement" {
             *impls.entry(item).or_default() += 1;
         }
         if done.contains(&item) {

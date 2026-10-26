@@ -66,6 +66,11 @@ pub struct Step {
 }
 
 impl Step {
+    /// Whether this step is an implement run (a `run` or a `retry`).
+    pub fn is_impl(&self) -> bool {
+        matches!(self.kind.as_str(), "run" | "retry") && implements(self.role.as_deref())
+    }
+
     fn new(kind: &str, item: Option<i64>, role: Option<&str>, reason: String) -> Step {
         Step {
             kind: kind.into(),
@@ -127,8 +132,18 @@ pub fn attempt_failed(t: &TaskRow) -> bool {
     }
 }
 
+/// Whether a run's role is implement (a run without one is too).
+fn implements(role: Option<&str>) -> bool {
+    matches!(role, None | Some("implement"))
+}
+
 fn is_impl(t: &TaskRow) -> bool {
-    matches!(t.role.as_deref(), None | Some("implement"))
+    implements(t.role.as_deref())
+}
+
+/// Whether `t` is an open (queued or running) implement run.
+pub fn open_impl(t: &TaskRow) -> bool {
+    matches!(t.state.as_str(), "queued" | "running") && is_impl(t)
 }
 
 /// PURE: the mission's next steps, in graph order.

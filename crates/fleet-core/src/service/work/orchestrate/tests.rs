@@ -1681,6 +1681,29 @@ fn the_planner_reads_the_missions_repo_only_when_asked() {
     );
 }
 
+/// Give mission `id` `policy`: a policy changes while the mission is paused.
+fn set_policy(s: &Store, id: i64, policy: crate::store::MissionPolicy) {
+    s.set_mission_state(id, None, "paused", "t").unwrap();
+    let patch = crate::store::MissionPatch {
+        policy: Some(policy),
+        ..Default::default()
+    };
+    s.update_mission(id, None, &patch, "t").unwrap();
+    s.set_mission_state(id, None, "active", "t").unwrap();
+}
+
+/// The items the loop would start a run on now, in order.
+fn run_items(s: &Store, id: i64) -> Vec<i64> {
+    let m = s.get_mission(id).unwrap().unwrap();
+    let a = autonomy(s, &m, now_unix()).unwrap();
+    steps_for(s, &m, &a)
+        .unwrap()
+        .into_iter()
+        .filter(|st| st.kind == "run")
+        .filter_map(|st| st.item_id)
+        .collect()
+}
+
 /// Lanes design L3: in lane execution the loop offers one implement run per
 /// lane; a task in no lane still runs on its own.
 #[test]
@@ -1688,34 +1711,20 @@ fn lane_execution_offers_one_run_per_lane() {
     let fx = fixture();
     let (a, b, c) = (member(&fx, "a"), member(&fx, "b"), member(&fx, "c"));
     let s = lock(&fx.deps.store).unwrap();
-    s.set_mission_state(fx.m.id, None, "paused", "t").unwrap();
-    s.update_mission(
+    set_policy(
+        &s,
         fx.m.id,
-        None,
-        &crate::store::MissionPatch {
-            policy: Some(crate::store::MissionPolicy {
-                execution: "lane".into(),
-                max_parallel: 8,
-                ..Default::default()
-            }),
+        crate::store::MissionPolicy {
+            execution: "lane".into(),
+            max_parallel: 8,
             ..Default::default()
         },
-        "t",
-    )
-    .unwrap();
-    s.set_mission_state(fx.m.id, None, "active", "t").unwrap();
+    );
     s.set_item_lane(fx.m.id, a, Some("backend"), None, "t")
         .unwrap();
     s.set_item_lane(fx.m.id, b, Some("backend"), None, "t")
         .unwrap();
-    let m = s.get_mission(fx.m.id).unwrap().unwrap();
-    let a_now = autonomy(&s, &m, now_unix()).unwrap();
-    let runs: Vec<i64> = steps_for(&s, &m, &a_now)
-        .unwrap()
-        .into_iter()
-        .filter(|st| st.kind == "run")
-        .filter_map(|st| st.item_id)
-        .collect();
+    let runs = run_items(&s, fx.m.id);
     assert_eq!(runs, vec![a, c], "b waits for its lane; c is in none");
 }
 
@@ -1730,28 +1739,14 @@ fn tasks_that_change_the_same_files_do_not_start_together() {
         .unwrap();
     s.set_item_touches(b, &["src/store/mod.rs".to_string()])
         .unwrap();
-    s.set_mission_state(fx.m.id, None, "paused", "t").unwrap();
-    s.update_mission(
+    set_policy(
+        &s,
         fx.m.id,
-        None,
-        &crate::store::MissionPatch {
-            policy: Some(crate::store::MissionPolicy {
-                max_parallel: 8,
-                ..Default::default()
-            }),
+        crate::store::MissionPolicy {
+            max_parallel: 8,
             ..Default::default()
         },
-        "t",
-    )
-    .unwrap();
-    s.set_mission_state(fx.m.id, None, "active", "t").unwrap();
-    let m = s.get_mission(fx.m.id).unwrap().unwrap();
-    let a_now = autonomy(&s, &m, now_unix()).unwrap();
-    let runs: Vec<i64> = steps_for(&s, &m, &a_now)
-        .unwrap()
-        .into_iter()
-        .filter(|st| st.kind == "run")
-        .filter_map(|st| st.item_id)
-        .collect();
+    );
+    let runs = run_items(&s, fx.m.id);
     assert_eq!(runs, vec![a, c], "b waits for a; c says nothing");
 }

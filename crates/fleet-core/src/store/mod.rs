@@ -172,7 +172,7 @@ pub use fleet_events::{FleetEventRow, NewFleetEvent, FLEET_EVENTS, FLEET_EVENTS_
 pub(crate) use followups::norm as followup_norm;
 pub use identities::{normalize_issuer, IdentityRow, MAX_IDENTITY_FIELD_LEN};
 pub use item_deps::{ItemDepRow, DEP_SOURCES};
-pub use item_touches::{normalize_touches, touches_overlap, TOUCHES_MAX, TOUCH_MAX_CHARS};
+pub use item_touches::{normalize_touches, touches_overlap};
 pub use item_verify::{
     normalize_done_when, VerificationRow, DONE_WHEN_LINE_MAX_CHARS, DONE_WHEN_MAX,
     VERIFY_NOTE_MAX_CHARS,
@@ -185,7 +185,7 @@ pub use local_workspaces::{
     LocalWorkspaceStatus, NewLocalConflict, NewLocalWorkspace, SideSeen, LOCAL_CONFLICT_KINDS,
     LOCAL_WORKSPACE_DRIVERS, LOCAL_WORKSPACE_STATES,
 };
-pub use mission_lanes::{lane_name, MissionLaneRow, LANE_NAME_MAX_CHARS, LANE_STATES};
+pub use mission_lanes::{lane_name, MissionLaneRow};
 pub use mission_loop::{
     CardRow, GrantRow, MissionTaskCounts, NewCard, NewGrant, CARDS_OPEN_CAP, CARD_KINDS,
     CARD_STATES, GRANT_MAX_SECS, GRANT_UNTIL_DONE_AT, MISSION_LEASE_SECS,

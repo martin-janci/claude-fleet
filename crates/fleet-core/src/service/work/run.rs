@@ -178,7 +178,9 @@ pub fn prior_work(s: &Store, item_id: i64) -> Result<Option<PriorWork>, IpcError
             .branch
             .filter(|b| !b.trim().is_empty() && b != "HEAD")
             .unwrap_or(wt.name);
-        if !branch_is_plain(&branch) {
+        // A worktree row's branch can come from a host's hook report: only
+        // a name git would take as a branch goes into the prompt.
+        if !crate::service::agents::workspace::branch_ok(&branch) {
             continue;
         }
         let host_up = session.host_alias == crate::service::projects::LOCAL_HOST
@@ -191,16 +193,6 @@ pub fn prior_work(s: &Store, item_id: i64) -> Result<Option<PriorWork>, IpcError
         }));
     }
     Ok(None)
-}
-
-/// A branch name a prompt may carry as is: `[A-Za-z0-9._/-]`, not starting
-/// with `-`. A worktree row's branch can come from a host's hook report.
-fn branch_is_plain(b: &str) -> bool {
-    !b.is_empty()
-        && b.len() <= 200
-        && !b.starts_with('-')
-        && b.chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '/' | '-'))
 }
 
 /// What a run's prompt says about the work it builds on ([`prior_work`]).
@@ -526,8 +518,8 @@ mod tests {
         record_run(&s, odd, "do it", item, 1, "implement").unwrap();
         record_run(&s, plain, "do it", item, 2, "implement").unwrap();
         assert_eq!(prior_work(&s, item).unwrap(), None);
-        assert!(!branch_is_plain("-delete"));
-        assert!(branch_is_plain("feat/x_1.2"));
+        assert!(!crate::service::agents::workspace::branch_ok("-delete"));
+        assert!(crate::service::agents::workspace::branch_ok("feat/x_1.2"));
     }
 
     #[test]

@@ -238,12 +238,7 @@ fn steps_for(s: &Store, m: &MissionRow, a: &Autonomy) -> Result<Vec<Step>, IpcEr
         .collect();
     let running: Vec<i64> = attempts
         .iter()
-        .filter(|(_, ts)| {
-            ts.iter().any(|t| {
-                matches!(t.state.as_str(), "queued" | "running")
-                    && matches!(t.role.as_deref(), None | Some("implement"))
-            })
-        })
+        .filter(|(_, ts)| ts.iter().any(steps::open_impl))
         .map(|(i, _)| *i)
         .collect();
     if m.policy.execution != "lane" {
@@ -1169,9 +1164,6 @@ pub struct PlanOutcome {
     pub waiting: Option<limit::LimitWait>,
 }
 
-/// The host the planner runs on: the policy's, the grant's first, else the
-/// host of the mission's latest worker that may see the mission's org.
-///
 /// The project whose checkout the planner reads (`orchestrator.planner_reads`,
 /// lanes design L1): the root item's, else the mission's first repo. `None`
 /// when the setting is off or the mission names no repository.
@@ -1187,6 +1179,9 @@ fn planner_reads_project(s: &Store, m: &MissionRow) -> Result<Option<i64>, IpcEr
     Ok(root.or_else(|| m.repos.first().map(|r| r.project_id)))
 }
 
+/// The host the planner runs on: the policy's, the grant's first, else the
+/// host of the mission's latest worker that may see the mission's org.
+///
 /// Every LLM run of a mission (the planner, its release note, its triage
 /// card) is sent the mission's text, so the host must be one of the
 /// mission's org (transition plan, risk "Org text leaves the org"): a policy
@@ -1549,17 +1544,9 @@ pub async fn run_planner(
             None => None,
         };
         let prompt = format!("{}\n\n{snap}", planner::planner_prompt(checkout.is_some()));
-        let (script, secs) = match &checkout {
-            Some(dir) => (
-                planner::planner_script_in(&model, &prompt, profile, dir),
-                planner::PLANNER_READS_TIMEOUT_SECS,
-            ),
-            None => (
-                planner::planner_script_as(&model, &prompt, profile),
-                planner::PLANNER_HOST_TIMEOUT_SECS,
-            ),
-        };
-        let script = script.map_err(|e| IpcError::new(codes::E_INVALID, e))?;
+        let script = planner::planner_script_as(&model, &prompt, profile, checkout.as_deref())
+            .map_err(|e| IpcError::new(codes::E_INVALID, e))?;
+        let secs = planner::planner_timeout_secs(checkout.is_some());
         let out = crate::ssh::run_shell_bounded(
             deps.ssh.as_ref(),
             host,

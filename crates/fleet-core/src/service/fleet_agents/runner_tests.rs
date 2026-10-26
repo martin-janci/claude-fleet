@@ -483,6 +483,13 @@ fn finish_done(s: &Store, id: i64, result: Option<String>, now: i64) {
 }
 
 impl Fx {
+    /// A poll at `at`, its cursor 100 s before.
+    async fn poll_at(&self, at: i64) -> crate::service::agents::Polled {
+        self.poller()
+            .poll(&self.rule, Some(&self.cursor(at - 100, None)), at)
+            .await
+            .unwrap()
+    }
     fn poller(&self) -> FleetPoller {
         FleetPoller {
             store: Arc::clone(&self.store),
@@ -1402,11 +1409,7 @@ async fn a_pr_answer_comments_and_labels_within_the_repos() {
     *f.world.prs.lock().unwrap() = vec![pr(4, "abc", false)];
     // The kept subject lives from now (the run reads it at now).
     let now = crate::store::now_unix();
-    let polled = f
-        .poller()
-        .poll(&f.rule, Some(&f.cursor(now - 100, None)), now)
-        .await
-        .unwrap();
+    let polled = f.poll_at(now).await;
     let jobs = f.claim(&polled.jobs);
     *f.world.base.answer.lock().unwrap() = Some(PrintOutcome::Answered {
         text: r#"{"summary":"Looks fine","risky":true}"#.into(),
@@ -1513,11 +1516,7 @@ async fn reviewed(f: &Fx, answer: &str) -> crate::store::AgentActionRow {
     *f.world.prs.lock().unwrap() = vec![pr(4, "abc", false)];
     *f.world.diff.lock().unwrap() = REVIEW_DIFF.into();
     let now = crate::store::now_unix();
-    let polled = f
-        .poller()
-        .poll(&f.rule, Some(&f.cursor(now - 100, None)), now)
-        .await
-        .unwrap();
+    let polled = f.poll_at(now).await;
     let jobs = f.claim(&polled.jobs);
     *f.world.base.answer.lock().unwrap() = Some(PrintOutcome::Answered {
         text: answer.into(),
@@ -2826,11 +2825,7 @@ diff --git a/docs/x.md b/docs/x.md\n--- a/docs/x.md\n+++ b/docs/x.md\n@@ -1 +1 @
         cost_micros: 0,
     });
     let now = crate::store::now_unix();
-    let polled = f
-        .poller()
-        .poll(&f.rule, Some(&f.cursor(now - 100, None)), now)
-        .await
-        .unwrap();
+    let polled = f.poll_at(now).await;
     let jobs = f.claim(&polled.jobs);
     let out = f.runner().run(&jobs[0], Some(&f.rule)).await;
     assert!(matches!(out, RunOutcome::Done { .. }), "{out:?}");
@@ -2859,11 +2854,7 @@ async fn a_diff_github_will_not_serve_is_skipped_and_a_missing_pr_is_permanent()
     let f = head_fx();
     *f.world.prs.lock().unwrap() = vec![pr(4, "abc", false)];
     let now = crate::store::now_unix();
-    let polled = f
-        .poller()
-        .poll(&f.rule, Some(&f.cursor(now - 100, None)), now)
-        .await
-        .unwrap();
+    let polled = f.poll_at(now).await;
     let jobs = f.claim(&polled.jobs);
     *f.world.diff_refusal.lock().unwrap() =
         Some("HTTP 406: Sorry, the diff exceeded the maximum number of lines".into());
@@ -2891,11 +2882,7 @@ async fn a_comment_on_an_open_pr_carries_its_head() {
     };
     *f.world.comments.lock().unwrap() = vec![c(1, 4), c(2, 9)];
     let now = crate::store::now_unix();
-    let polled = f
-        .poller()
-        .poll(&f.rule, Some(&f.cursor(now - 100, None)), now)
-        .await
-        .unwrap();
+    let polled = f.poll_at(now).await;
     assert_eq!(polled.jobs.len(), 2);
     let kept = |job: &crate::store::NewAgentJob| {
         let s = f.store.lock().unwrap();
@@ -2979,11 +2966,7 @@ async fn answered_at(
     *f.world.prs.lock().unwrap() = vec![pr(4, sha, false)];
     *f.world.diff.lock().unwrap() = REVIEW_DIFF.into();
     let now = crate::store::now_unix();
-    let polled = f
-        .poller()
-        .poll(&f.rule, Some(&f.cursor(now - 100, None)), now)
-        .await
-        .unwrap();
+    let polled = f.poll_at(now).await;
     let jobs = f.claim(&polled.jobs);
     let job = jobs
         .iter()
@@ -3164,13 +3147,7 @@ async fn a_dismissed_review_is_made_again_at_the_same_head() {
     ));
     let now = crate::store::now_unix();
     let f = &f;
-    let poll = |at: i64| async move {
-        f.poller()
-            .poll(&f.rule, Some(&f.cursor(at - 100, None)), at)
-            .await
-            .unwrap()
-            .jobs
-    };
+    let poll = |at: i64| async move { f.poll_at(at).await.jobs };
     // Too soon: the review is not looked up.
     f.world.gh_writes.lock().unwrap().clear();
     assert!(poll(now + 30).await.is_empty());
@@ -3189,6 +3166,21 @@ async fn a_dismissed_review_is_made_again_at_the_same_head() {
         .lock()
         .unwrap()
         .contains(&"state r77".to_string()));
+    // The look-up rewrites the record, and keeps which job wrote it.
+    let record = f
+        .store
+        .lock()
+        .unwrap()
+        .agent_record(
+            &subjects_namespace(f.rule.id),
+            super::actions::REVIEW_KIND,
+            &super::actions::review_key("acme/pos", 4),
+            now + 120,
+        )
+        .unwrap()
+        .unwrap();
+    assert!(record.value.contains("verified_at"), "{}", record.value);
+    assert_eq!(record.written_by_job, Some(a.job_id));
     // Dismissed: made again at the same head, once.
     f.world
         .review_states
@@ -3225,10 +3217,7 @@ fn rc(
 
 /// The gallery's pr-test-debate definition at act, on acme/pos.
 fn debate_fx() -> Fx {
-    let seed = super::gallery::SEEDS
-        .iter()
-        .find(|s| s.name == "pr-test-debate")
-        .unwrap();
+    let seed = super::gallery::seed("pr-test-debate").unwrap();
     let l = seed.asset().unwrap().fleet_agent().unwrap();
     let f = fx(
         l,
@@ -3255,11 +3244,7 @@ async fn a_reply_to_a_missing_test_finding_is_judged_and_a_concession_kept() {
         rc(31, Some(30), "agreed", "User"),
     ];
     let now = crate::store::now_unix();
-    let polled = f
-        .poller()
-        .poll(&f.rule, Some(&f.cursor(now - 100, None)), now)
-        .await
-        .unwrap();
+    let polled = f.poll_at(now).await;
     assert_eq!(polled.jobs.len(), 1, "{:?}", polled.jobs);
     let jobs = f.claim(&polled.jobs);
     *f.world.base.answer.lock().unwrap() = Some(PrintOutcome::Answered {
@@ -3275,13 +3260,10 @@ async fn a_reply_to_a_missing_test_finding_is_judged_and_a_concession_kept() {
     );
     assert!(!prompt.contains("[fleet-agent:rv]"), "markers are left out");
     let actions = f.actions();
-    let kinds: Vec<&str> = actions.iter().map(|a| a.kind.as_str()).collect();
+    let mut kinds: Vec<&str> = actions.iter().map(|a| a.kind.as_str()).collect();
+    kinds.sort();
     assert_eq!(
-        {
-            let mut k = kinds.clone();
-            k.sort();
-            k
-        },
+        kinds,
         vec!["pr_reply", "record"],
         "the hold reply is not planned"
     );
@@ -3353,9 +3335,7 @@ async fn a_reply_to_a_missing_test_finding_is_judged_and_a_concession_kept() {
 fn the_reviewer_pair_ships_in_the_gallery() {
     use definition::TriggerSource;
     let load = |name: &str| {
-        super::gallery::SEEDS
-            .iter()
-            .find(|s| s.name == name)
+        super::gallery::seed(name)
             .unwrap()
             .asset()
             .unwrap()
@@ -3383,7 +3363,20 @@ fn the_reviewer_pair_ships_in_the_gallery() {
         "they share the exemptions"
     );
     assert!(db.definition.stores[0].shared_by_default && rv.definition.stores[0].shared_by_default);
-    assert!(super::actions::without_markers("a [fleet-agent:x] b\n\n[fleet-agent:y]") == "a  b");
+}
+
+#[test]
+fn a_reply_is_read_without_the_agents_markers() {
+    use super::actions::without_markers;
+    assert_eq!(
+        without_markers("a [fleet-agent:x] b\n\n[fleet-agent:y]"),
+        "a  b"
+    );
+    assert_eq!(
+        without_markers("why quote [fleet-agent: like this? the rest stays"),
+        "why quote [fleet-agent: like this? the rest stays",
+        "an unclosed marker is a person's text"
+    );
 }
 
 #[test]
@@ -3436,11 +3429,7 @@ async fn a_spent_day_budget_holds_the_next_run_until_tomorrow() {
         async move {
             *f.world.prs.lock().unwrap() = vec![pr(4, sha, false)];
             *f.world.diff.lock().unwrap() = REVIEW_DIFF.into();
-            let polled = f
-                .poller()
-                .poll(&f.rule, Some(&f.cursor(now - 100, None)), now)
-                .await
-                .unwrap();
+            let polled = f.poll_at(now).await;
             let jobs = f.claim(&polled.jobs);
             let job = jobs
                 .iter()

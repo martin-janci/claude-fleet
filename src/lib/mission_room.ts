@@ -301,7 +301,6 @@ export function sendSteer(m: Pick<Mission, 'id' | 'name'>, text: string, operato
   return receipt;
 }
 
-/** Test seam: the room as a fresh run has it. */
 /**
  * The room's metrics line (lanes design L0): how many runs its done tasks
  * took, the retries, the cold starts, and how much of its working span no
@@ -311,7 +310,8 @@ export function statsLine(st: MissionStats | null | undefined): string | null {
   if (!st || st.span_secs <= 0) return null;
   const runs = Object.values(st.runs_by_role).reduce((a, b) => a + b, 0);
   const parts = [`${runs} run${runs === 1 ? '' : 's'}`];
-  if (st.items_done > 0 && st.runs_per_done_item_x100 != null) {
+  // The backend sends the ratio only once a task is done.
+  if (st.runs_per_done_item_x100 != null) {
     parts[0] += ` (${(st.runs_per_done_item_x100 / 100).toFixed(1)} per done task)`;
   }
   if (st.retries > 0) parts.push(`${st.retries} retr${st.retries === 1 ? 'y' : 'ies'}`);
@@ -322,6 +322,7 @@ export function statsLine(st: MissionStats | null | undefined): string | null {
   return parts.join(' · ');
 }
 
+/** Test seam: the room as a fresh run has it. */
 export function resetMissionRoomForTests(): void {
   listSeq++;
   missionList.set({ loaded: false, missions: [], error: null });

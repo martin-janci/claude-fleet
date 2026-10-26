@@ -6,7 +6,6 @@
 
 use super::Store;
 use crate::ipc_error::{codes, IpcError};
-use rusqlite::OptionalExtension;
 use std::collections::HashMap;
 
 /// The most paths one task names.
@@ -44,11 +43,15 @@ pub fn normalize_touches(raw: &[String]) -> Result<Vec<String>, IpcError> {
     Ok(out)
 }
 
-/// The part of a path or glob that is certain: up to its first wildcard,
+/// The part of a path or glob that is certain: the directories before its
+/// first wildcard (a wildcard inside a name makes that whole name
+/// uncertain: `src/store*` is certain only of `src`), or the whole path
 /// without a trailing `/`. `""` stands for the whole repository.
 fn certain_prefix(t: &str) -> &str {
-    let cut = t.find(['*', '?', '[', '{']).unwrap_or(t.len());
-    t[..cut].trim_end_matches('/')
+    match t.find(['*', '?', '[', '{']) {
+        Some(cut) => t[..cut].rsplit_once('/').map_or("", |(dir, _)| dir),
+        None => t.trim_end_matches('/'),
+    }
 }
 
 /// PURE: whether two tasks' touches may meet. Conservative: two paths
@@ -88,7 +91,9 @@ impl Store {
     }
 
     /// What `item_id` will change; empty when nobody said.
+    #[cfg(test)]
     pub fn item_touches(&self, item_id: i64) -> Result<Vec<String>, IpcError> {
+        use rusqlite::OptionalExtension;
         let json: Option<String> = self
             .conn
             .query_row(
@@ -138,6 +143,10 @@ mod tests {
             &v(&["src/store/mod.rs"])
         ));
         assert!(touches_overlap(&v(&["src/*.rs"]), &v(&["src/main.rs"])));
+        assert!(
+            touches_overlap(&v(&["src/store*"]), &v(&["src/store_x.rs"])),
+            "a wildcard inside a name leaves that name uncertain"
+        );
         assert!(touches_overlap(
             &v(&["docs/status.md"]),
             &v(&["docs/status.md"])
