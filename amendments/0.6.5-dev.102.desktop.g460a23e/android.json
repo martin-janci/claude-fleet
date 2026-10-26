@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "version": "0.6.5-dev.102.desktop.g460a23e",
+  "mobile_accepts": [
+    0,
+    18
+  ],
+  "components": {
+    "android": {
+      "version": "0.6.5-dev.102.desktop.g460a23e",
+      "artifacts": [
+        {
+          "kind": "apk",
+          "url": "https://github.com/martin-janci/fleet-mobile/releases/download/v0.6.5-dev.102.desktop.g460a23e/fleet-mobile-0.6.5-dev.102.desktop.g460a23e.apk",
+          "sha256": "90f7da5ae34c04508ae4c30e9e8fa462d98278ca023d735a2f8edc148fd8eb32",
+          "size": 18336008,
+          "version_code": 429816,
+          "signer_sha256": "87081ff376e7ad2cb3082bf8f48dac2f451bffda66693b575c31cd4c354b9a15"
+        }
+      ]
+    }
+  }
+}
