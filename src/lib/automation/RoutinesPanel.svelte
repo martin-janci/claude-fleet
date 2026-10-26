@@ -16,7 +16,7 @@
   import { selectSessionExplicitly } from '../selection';
   import { goTo } from '../destination';
   import { fleetSettings, SETTING_KEYS, settingInt } from '../fleet_settings';
-  import { loopEvery, loopLine, startOfToday } from '../automation';
+  import { loopEvery, loopLine, loopStalled, startOfToday } from '../automation';
   import { listRuns, type RunRow } from '../runs';
   import type { LoopHealth } from '../ipc';
   import Button from '../kit/Button.svelte';
@@ -410,7 +410,8 @@
     state: OfState;
   }
 
-  const loopState = (l: LoopHealth): OfState => (l.result === 'error' ? 'failed' : paused && l.pausable ? 'idle' : 'done');
+  const loopState = (l: LoopHealth): OfState =>
+    l.result === 'error' ? 'failed' : paused && l.pausable ? 'idle' : loopStalled(l, nowSec) ? 'failed' : 'done';
 
   const routineItems = $derived(
     list.map((r): Item => {

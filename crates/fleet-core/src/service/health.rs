@@ -1051,18 +1051,29 @@ fn health_at(
     tunnels: std::collections::HashMap<String, crate::service::tunnel::TunnelHealth>,
     now: i64,
 ) -> Health {
-    // TODO(T3): once IpcError exists, surface the failure reason here
-    // instead of silently falling back to schema_version=0 / db_ready=false.
-    let schema_version = s.schema_version().unwrap_or(0);
+    let schema_version = s.schema_version().unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "[health] cannot read the schema version");
+        0
+    });
     // Cached reconcile state only — no network / reconcile here. On a read
-    // error, fall back to empty slices so health still reports core fields.
+    // error, fall back to empty slices so health still reports core fields,
+    // and say the store is not ready: an empty fleet read from a store that
+    // cannot answer read as healthy, with no hosts and nothing wrong.
+    let mut reads_ok = true;
     let (sessions, hosts) = if matches!(view, HealthView::Blank) {
         (Vec::new(), Vec::new())
     } else {
-        (
-            s.list_all_sessions().unwrap_or_default(),
-            s.list_hosts().unwrap_or_default(),
-        )
+        let sessions = s.list_all_sessions().unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "[health] cannot read the sessions");
+            reads_ok = false;
+            Vec::new()
+        });
+        let hosts = s.list_hosts().unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "[health] cannot read the hosts");
+            reads_ok = false;
+            Vec::new()
+        });
+        (sessions, hosts)
     };
     let red = context_red_pct(s);
     // The live agents are overlaid by `fleet_health`, which holds the
@@ -1209,7 +1220,7 @@ fn health_at(
         version: crate::app_version::get().to_string(),
         tunnels: Default::default(),
         tunnels_flapping: 0,
-        db_ready: schema_version >= 1,
+        db_ready: reads_ok && schema_version >= 1,
         schema_version,
         hosts_reachable: summary.hosts_reachable,
         hosts_total: summary.hosts_total,
@@ -2218,6 +2229,21 @@ mod tests {
         assert_eq!(h.sessions_total, 0);
         assert_eq!(h.hosts_total, 0);
         assert!(h.by_status.is_empty());
+    }
+
+    /// A store that cannot list its hosts is not ready: the empty fleet the
+    /// read falls back to used to come back `db_ready: true`, an all-clear
+    /// with no hosts and nothing wrong.
+    #[test]
+    fn a_failed_read_says_the_store_is_not_ready() {
+        let store = Store::open_in_memory().expect("in-memory store");
+        store
+            .conn_for_test()
+            .execute_batch("ALTER TABLE hosts RENAME TO hosts_unreadable")
+            .expect("rename hosts");
+        let h = health_from_store(&store);
+        assert!(!h.db_ready, "a failed host read must not read as ready");
+        assert_eq!(h.schema_version, crate::store::LATEST_SCHEMA_VERSION);
     }
 
     /// The hub client deserialises `fleet_health`'s answer into this type. A
