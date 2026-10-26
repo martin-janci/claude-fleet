@@ -15,12 +15,13 @@ impl FleetTools {
         save {routine, routine_id?}: the whole routine; preview: save's dry \
         run; delete; set_enabled {enabled}; skip_next {skip?}; run_now; \
         set_run_outcome {run_id, outcome}: a person's did_work | nothing | \
-        needs_person (that lands it in the Inbox). Debugging, nothing \
+        needs_person. Debugging, nothing \
         written: explain {routine_id, limit?}: why it does or does not fire, \
-        check by check, recent events judged and the decision trace; \
+        recent events judged and the decision trace; \
         decisions {routine_id, limit?}: the trace alone; dry_run \
         {routine_id, event_id?}: what a fire now would start and the exact \
-        prompt. memory; set_memory {notebook, text}. \
+        prompt. memory; set_memory {notebook, text}; seen {limit?}: what \
+        its runs handled; forget_seen {text?}: one item, else all. \
         tune_prompt {routine, ask?}: the prompt tuner on a draft's \
         prompt, on its host and profile: { prompt, notes, \
         unchanged, model, host_alias, at }, a proposal never saved \
@@ -46,7 +47,7 @@ impl FleetTools {
         if caller.is_operator()
             && matches!(
                 p.action.as_str(),
-                "save" | "run_now" | "set_run_outcome" | "set_memory"
+                "save" | "run_now" | "set_run_outcome" | "set_memory" | "forget_seen"
             )
         {
             return Err(mcp_err(
@@ -188,6 +189,13 @@ impl FleetTools {
                     .map_err(to_mcp_err)?,
                 )
             }
+            "seen" => ok_json_compact(
+                &routines::seen::get(store, &scope, id()?, p.limit).map_err(to_mcp_err)?,
+            ),
+            "forget_seen" => ok_json_compact(
+                &routines::seen::forget(store, &scope, id()?, p.text.as_deref())
+                    .map_err(to_mcp_err)?,
+            ),
             "set_run_outcome" => {
                 let run_id = p
                     .run_id
@@ -213,7 +221,8 @@ impl FleetTools {
                 format!(
                     "action must be list | get | runs | failing | budget | save | preview | delete | \
                      set_enabled | skip_next | run_now | set_run_outcome | explain | decisions | \
-                     dry_run | tune_prompt | memory | set_memory, got {other:?}"
+                     dry_run | tune_prompt | memory | set_memory | seen | forget_seen, \
+                     got {other:?}"
                 ),
                 None,
             )),

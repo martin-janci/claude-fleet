@@ -103,6 +103,11 @@ pub struct RoutineRow {
     /// The fleet notes each finished run in the notebook.
     #[serde(default)]
     pub memory_auto: bool,
+    /// Its runs are shown what earlier runs handled, and report what they
+    /// handled (migration 212, `service::routines::seen`). On unless a
+    /// person turned it off; a hub older than it sends none, read as on.
+    #[serde(default = "crate::serde_util::default_true")]
+    pub track_seen: bool,
 }
 
 /// What a person writes: every field of a routine but its identity and the
@@ -133,6 +138,7 @@ pub struct RoutineFields {
     pub event_host: Option<String>,
     pub memory: Option<String>,
     pub memory_auto: bool,
+    pub track_seen: bool,
 }
 
 /// One run of a routine.
@@ -205,7 +211,7 @@ const COLS: &str = "id, org_id, owner_person_id, name, enabled, trigger, cron, u
                     budget_run_micros, budget_day_micros, overlap, next_run_at, skip_next, \
                     paused_reason, created_at, updated_at, event_repo, event_author, \
                     event_rate_secs, time_zone, run_max_secs, fallback_host, retry_once, \
-                    autonomy, event_host, memory, memory_auto";
+                    autonomy, event_host, memory, memory_auto, track_seen";
 
 fn routine(r: &rusqlite::Row<'_>) -> rusqlite::Result<RoutineRow> {
     Ok(RoutineRow {
@@ -242,6 +248,7 @@ fn routine(r: &rusqlite::Row<'_>) -> rusqlite::Result<RoutineRow> {
         event_host: r.get(30)?,
         memory: r.get(31)?,
         memory_auto: r.get::<_, i64>(32)? != 0,
+        track_seen: r.get::<_, i64>(33)? != 0,
     })
 }
 
@@ -293,9 +300,9 @@ impl Store {
                utc_offset_min, event, event_cursor, host_alias, project_id, profile, prompt, \
                budget_run_micros, budget_day_micros, overlap, next_run_at, created_at, updated_at, \
                event_repo, event_author, event_rate_secs, time_zone, run_max_secs, fallback_host, \
-               retry_once, autonomy, event_host, memory, memory_auto) \
+               retry_once, autonomy, event_host, memory, memory_auto, track_seen) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?18, \
-               ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29)",
+               ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30)",
             rusqlite::params![
                 org_id,
                 owner_person_id,
@@ -325,7 +332,8 @@ impl Store {
                 f.autonomy,
                 f.event_host,
                 f.memory,
-                f.memory_auto as i64
+                f.memory_auto as i64,
+                f.track_seen as i64
             ],
         )?;
         let id = self.conn.last_insert_rowid();
@@ -349,7 +357,7 @@ impl Store {
                paused_reason = NULL, updated_at = ?16, event_repo = ?18, event_author = ?19, \
                event_rate_secs = ?20, time_zone = ?21, run_max_secs = ?22, fallback_host = ?23, \
                retry_once = ?24, autonomy = ?25, event_host = ?26, memory = ?27, \
-               memory_auto = ?28 \
+               memory_auto = ?28, track_seen = ?29 \
              WHERE id = ?17",
             rusqlite::params![
                 f.name,
@@ -379,7 +387,8 @@ impl Store {
                 f.autonomy,
                 f.event_host,
                 f.memory,
-                f.memory_auto as i64
+                f.memory_auto as i64,
+                f.track_seen as i64
             ],
         )?;
         self.get_routine(id)
@@ -420,6 +429,8 @@ impl Store {
             "DELETE FROM routine_memory WHERE scope = 'routine' AND owner_id = ?1",
             [id],
         )?;
+        // So do the items its runs handled (migration 212).
+        tx.execute("DELETE FROM routine_seen WHERE routine_id = ?1", [id])?;
         let gone = tx.execute("DELETE FROM routines WHERE id = ?1", [id])? == 1;
         tx.commit()?;
         Ok(gone)
@@ -605,7 +616,8 @@ impl Store {
                CASE ?4 WHEN 'failed' THEN 'failed' END, CASE ?4 WHEN 'failed' THEN 'exit' END, \
                ?10, ?11, \
                CASE WHEN ?9 IS NOT NULL \
-                 AND (SELECT memory FROM routines WHERE id = ?1) IS NULL THEN ?9 END)",
+                 AND (SELECT memory IS NULL AND (track_seen = 0 OR ?6 IS NULL) \
+                      FROM routines WHERE id = ?1) THEN ?9 END)",
             rusqlite::params![
                 r.routine_id,
                 r.trigger,
@@ -750,8 +762,9 @@ impl Store {
     }
 
     /// Close a run: `done` or `failed`, with why. A run of a routine that
-    /// keeps no notebook is read for memory as it closes: there is nothing
-    /// to read (migration 205's index holds the pending reads only).
+    /// keeps no notebook and tracks no seen items (migration 212) is read
+    /// for memory as it closes: there is nothing to read (migration 205's
+    /// index holds the pending reads only).
     pub fn finish_routine_run(
         &self,
         id: i64,
@@ -762,8 +775,8 @@ impl Store {
     ) -> Result<(), IpcError> {
         self.conn.execute(
             "UPDATE routine_runs SET state = ?1, reason = ?2, cost_micros = ?3, finished_at = ?4, \
-               memory_read_at = CASE WHEN (SELECT memory FROM routines r \
-                 WHERE r.id = routine_runs.routine_id) IS NULL THEN ?4 END \
+               memory_read_at = CASE WHEN (SELECT r.memory IS NULL AND r.track_seen = 0 \
+                 FROM routines r WHERE r.id = routine_runs.routine_id) THEN ?4 END \
              WHERE id = ?5 AND state = 'running'",
             rusqlite::params![state, reason, cost_micros, now, id],
         )?;

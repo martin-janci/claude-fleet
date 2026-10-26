@@ -325,4 +325,10 @@
 //!   bump: a session row's `prompt_suggestion` (additive, absent when
 //!   nothing is proposed). A hub without it never sends one, so a client
 //!   simply offers none; a client that predates it ignores the field.
+//!   Routine seen items (migration 212) are new without a bump: a routine
+//!   row carries `track_seen` (read as on when absent), its input takes it,
+//!   and `routines` gains `seen` and `forget_seen`. The desktop sends the
+//!   input field only for a routine whose row carried it, so a hub without
+//!   it still saves the routine; one that has no `seen` action answers
+//!   `E_INVALID`, which the editor shows as no list.
 pub const CONTRACT_REVISION: u32 = 18;
