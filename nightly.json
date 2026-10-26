@@ -1,16 +1,21 @@
 {
   "schema": 1,
   "track": "nightly",
-  "sequence": 102,
-  "generated_at": "2026-10-26T06:53:36Z",
-  "expires_at": "2026-11-09T06:53:36Z",
-  "current": "0.6.5-dev.98.desktop.gb15d818",
-  "recommended": "0.6.5-dev.98.desktop.gb15d818",
+  "sequence": 103,
+  "generated_at": "2026-10-26T11:01:17Z",
+  "expires_at": "2026-11-09T11:01:17Z",
+  "current": "0.6.5-dev.102.desktop.g460a23e",
+  "recommended": "0.6.5-dev.102.desktop.g460a23e",
   "minimum_supported": {},
   "mandatory": [],
   "rollback": null,
   "withdrawn": [],
   "releases": [
+    {
+      "version": "0.6.5-dev.102.desktop.g460a23e",
+      "manifest": "https://github.com/martin-janci/claude-fleet/releases/download/v0.6.5-dev.102.desktop.g460a23e/release-manifest.json",
+      "manifest_sha256": "0ca4cf4b05ea3da79d539b32914eb983c7c162dcd85d9d1fba8033eb661d61dc"
+    },
     {
       "version": "0.6.5-dev.98.desktop.gb15d818",
       "manifest": "https://github.com/martin-janci/claude-fleet/releases/download/v0.6.5-dev.98.desktop.gb15d818/release-manifest.json",
@@ -164,18 +169,6 @@
       "version": "0.6.3-dev.835.desktop.g688ef03",
       "manifest": "https://github.com/martin-janci/claude-fleet/releases/download/v0.6.3-dev.835.desktop.g688ef03/release-manifest.json",
       "manifest_sha256": "9c34a4b294e62291986246b5adafa29c8b86898eaea269cffdfd39f51110f903"
-    },
-    {
-      "version": "0.6.3-dev.833.desktop.ga94ee57",
-      "manifest": "https://github.com/martin-janci/claude-fleet/releases/download/v0.6.3-dev.833.desktop.ga94ee57/release-manifest.json",
-      "manifest_sha256": "a848cc1414dcdee00b1032481525737cc45afb7094443097450f4a43a536710b",
-      "amendments": [
-        {
-          "component": "android",
-          "manifest": "https://raw.githubusercontent.com/martin-janci/claude-fleet/update-channels/amendments/0.6.3-dev.833.desktop.ga94ee57/android.json",
-          "manifest_sha256": "fd2c741654d45d3d7f426214a7775f03c67d1a50167b482120f0d8c70e32be8b"
-        }
-      ]
     }
   ],
   "next_keys": []
