@@ -8,6 +8,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Releases are cut with `scripts/release.sh` — see [docs/RELEASING.md](docs/RELEASING.md).
 Entries before 0.2.4 were plain version bumps and were not recorded individually.
 
+## [0.6.5-dev.102.desktop.g460a23e] - 2026-10-26
+
+### Added
+- **agents:** a daily budget per fleet agent instance
+- **missions:** tasks name what they change, and colliding work waits (lanes L5)
+- **agents:** restate the reviewer's state and ship it in the gallery
+- **agents:** restate the reviewer's answer in fleet agent definitions
+- **missions:** a lane task's review on a snapshot, the test gate, relay on a full context (lanes L4)
+- **fleet-agents:** the reviewer's inputs: PR head, diff, WIP and debounce
+- **missions:** a lane's tasks run in one lead session (lanes L3b)
+- **fleet-agents:** run.fingerprint and the support agent as a definition
+- **missions:** lane execution policy and a task's evidence from where it began (lanes L3a)
+- **missions:** lanes in the data — plan, planner and person put tasks in named lanes (lanes L2)
+- **sessions:** show Claude Code's next-prompt suggestion on every client
+- **missions:** workers use subagents, the planner may read the repo, shared files go in sequence (lanes L1)
+- **fleet-agents:** cooldown, branch, scan window and auto-approve
+- **tasks:** task_report tool, an explicit way for a worker to finish its task
+- **missions:** failing CI on a mission's PRs holds Complete until a person overrides
+- **missions:** the planner waits out a usage limit instead of refusing
+
+### Changed
+- **provision:** count the plugin's writes and tell its source from settings work
+- **contract:** pin prompt_suggestion in the hub contract golden
+- **decide:** the pane rules now read the Stop-hooks spinner screen
+- **relay:** check the dropped listener's tasks, not a reconnect to its port
+- **missions:** a host is up until a probe goes unanswered
+- one project lookup in fleets.ts, one failure path in New session
+- **mcp:** raise the tool-definition budget to 880 bytes a tool
+
+### Fixed
+- **usage:** starts and resumes skip a spent login; a panicked usage fetch is polled again
+- **fleet-agents:** skip a PR diff GitHub will not serve; simplify recent merges
+- **ui:** stop WatchView polling under a fleet-session overlay; guard dash-leading names in grant command
+- **fleet-agents:** keep retries, newest triggers and scan windows whole
+- **missions:** keep limit_wait absent from older hubs, say signed-out planner refusals, index the evidence retry
+- **sessions:** tie the prompt suggestion to its turn and harden its chip
+- **projects:** backfill github_origin from remote and clone reads, keep it on a failed git read
+- **ui:** quote the Toolkit grant command, drop contradictory empty state, stop hidden panel probing
+- **fleet-agents:** defer cooldown runs, check the scan window, disclose auto-approve
+- **fleet-agents:** keep a person-sent review's verdict and count cut findings
+- **missions:** say sign in again when every planner login is signed out, hold integration checks at the card cap
+- **work:** retry failed git evidence reads fleet-wide, bounded and outside the mission lease
+- **reconcile:** keep the Stop hook's idle while other Stop hooks still run
+- **fleets:** clone a project onto another fleet only from its real GitHub origin
+- **toolkit:** a stale catalog check no longer undoes 'unavailable'; simplify recent merges
+- **deps:** override zod and undici past two new high advisories
+- **hub-image:** copy the prompt-suggestion plugin into the build context
+- **deps:** tokio 1.53.3 for RUSTSEC-2026-0386
+- **deps:** tokio 1.53.3 for RUSTSEC-2026-0386
+- **deps:** bump tokio to 1.54.1 for RUSTSEC-2026-0386
+- **deps:** tokio 1.53.3 for RUSTSEC-2026-0386
+- **deps:** tokio 1.53.3 for RUSTSEC-2026-0386
+- **sessions:** keep the Thinking/Working indicator on for the whole turn
+- **fleets:** keep another fleet's session from attaching to no-pane rows or driving the hidden primary
+- **missions:** keep per-mission room state with its mission, flag hubs that drop until_done, focus the evidence override form
+- **fleet-agents:** keep pr_review's marker and findings, never block unattended
+- **missions:** re-read task_report evidence at Stop, retry failed git reads, end until-done grants when a mission leaves finite mode
+- **missions:** merge-wave rule skips finished merges and loop integrations; integration card stays under the payload cap
+- **missions:** planner limit fallback skips signed-out logins, clears waits a later login answered, grant lifts the ask only while it holds
+- **missions:** a retry, review or test run starts from the implementer's branch; mission stats (lanes L0)
+- **toolkit:** say what a device can do with the catalog, and list host-only skills
+- **new-session:** offer every extra fleet's machines, cloning the repo there first
+- one-line hub pin refusal; drop a duplicate test suite and repeated test setup
+
+### Documentation
+- **agents:** a rollout guide for the restated agents
+- **missions:** design for lanes — one lead session per lane, subagents inside, roadmap L0–L6
 ## [0.6.4] - 2026-10-21
 
 ### Added
@@ -4034,6 +4101,7 @@ added by hand for that reason — see #152._
   index, and new Getting Started, Concepts, and Troubleshooting guides; refreshed
   and cross-linked the Control API guide.
 
+[0.6.5-dev.102.desktop.g460a23e]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.6.5-dev.102.desktop.g460a23e
 [0.6.4]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.6.4
 [0.6.2]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.6.2
 [0.6.1]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.6.1
