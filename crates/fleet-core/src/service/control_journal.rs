@@ -318,10 +318,39 @@ pub fn mute(
     Ok(changed)
 }
 
+/// `control_journal { action: follow, thread: mission, id, text? }`: the
+/// person steered mission `id` through Control (the Mission room's Steer,
+/// review w04-11), so Control follows it from now on — a `mission` receipt
+/// (tool `steer`, the steer's text as its preview), which is what
+/// `handed_off_mission_ids` and the operator feed read. Answers the
+/// receipt's id; tells the owner's devices (`handoff:changed`).
+pub fn follow_mission(
+    store: &Mutex<Store>,
+    id: i64,
+    text: Option<&str>,
+    now: i64,
+) -> Result<i64, IpcError> {
+    let s = lock(store)?;
+    if s.get_mission(id)?.is_none() {
+        return Err(IpcError::new(codes::E_NOTFOUND, "no such mission"));
+    }
+    let h = crate::store::NewHandoff {
+        kind: "mission",
+        tool: "steer".into(),
+        mission_id: Some(id),
+        preview: text.and_then(crate::store::handoff_preview),
+        ..Default::default()
+    };
+    let rid = s.insert_control_handoff(&h, now)?;
+    s.bus_handoff_changed();
+    Ok(rid)
+}
+
 /// `control_journal`'s arguments, for the MCP tool and the desktop alike.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JournalArgs {
-    /// read (default) | note | ask | mute | unmute
+    /// read (default) | note | ask | mute | unmute | follow (the desktop's
+    /// Steer: `thread: mission`, `id`, `text`)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -356,9 +385,19 @@ pub fn call(
             let changed = mute(store, thread, id, action == "mute", now)?;
             Ok(serde_json::json!({ "changed": changed }))
         }
+        "follow" => {
+            let (Some("mission"), Some(id)) = (a.thread.as_deref(), a.id) else {
+                return Err(IpcError::new(
+                    codes::E_INVALID,
+                    "follow names thread: mission and its id",
+                ));
+            };
+            let id = follow_mission(store, id, a.text.as_deref(), now)?;
+            Ok(serde_json::json!({ "id": id }))
+        }
         other => Err(IpcError::new(
             codes::E_INVALID,
-            format!("unknown action {other}: read, note, ask, mute or unmute"),
+            format!("unknown action {other}: read, note, ask, mute, unmute or follow"),
         )),
     }
 }
@@ -465,15 +504,21 @@ pub async fn run_with(store: &Mutex<Store>, exec: &dyn JournalExec, now: i64) ->
             return JournalReport::default();
         }
         let op = op.expect("checked");
-        let newest = s.newest_session_event_id().unwrap_or(0);
+        // A read error leaves the cursor where it is: falling back to 0
+        // would rewind it onto every past new conversation, and an empty
+        // list would skip a real one.
+        let Ok(newest) = s.newest_session_event_id() else {
+            return JournalReport::default();
+        };
         let Some(cursor) = state.cursor else {
             state.cursor = Some(newest);
             state.save(&s);
             return JournalReport::default();
         };
-        let started = s
-            .session_events_of_kinds_after(op.id, &NEW_CONVERSATION_KINDS, cursor)
-            .unwrap_or_default();
+        let Ok(started) = s.session_events_of_kinds_after(op.id, &NEW_CONVERSATION_KINDS, cursor)
+        else {
+            return JournalReport::default();
+        };
         if started.is_empty() {
             if newest != cursor {
                 state.cursor = Some(newest);

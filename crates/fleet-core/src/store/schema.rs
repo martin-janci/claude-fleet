@@ -401,6 +401,72 @@ fn routines_has_event_host(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 204: `routine_runs` already has its
+/// `memory_read_at` column (the last column it adds).
+fn routine_runs_has_memory_read_at(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('routine_runs') WHERE name = 'memory_read_at'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 211: `work_items` already has its
+/// `touches_json` column.
+fn work_items_has_touches(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('work_items') WHERE name = 'touches_json'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 210: `tasks` already has its
+/// `start_head` column.
+fn tasks_has_start_head(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name = 'start_head'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 209: `work_items` already has its
+/// `lane_id` column.
+fn work_items_has_lane_id(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('work_items') WHERE name = 'lane_id'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 205: `routine_runs` already has its
+/// `memory_retry_at` column.
+fn routine_runs_has_memory_retry_at(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('routine_runs') WHERE name = 'memory_retry_at'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 207: `projects` already has its
+/// `github_origin` column.
+fn projects_has_github_origin(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('projects') WHERE name = 'github_origin'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 fn routine_runs_has_host(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('routine_runs') WHERE name = 'host_alias'",
@@ -726,6 +792,16 @@ fn sessions_has_pinned_at(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 206.
+fn sessions_has_prompt_suggestion(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'prompt_suggestion'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 191.
 fn control_handoffs_has_approval(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
@@ -997,6 +1073,16 @@ fn work_items_has_archived_at(conn: &Connection) -> rusqlite::Result<bool> {
 fn work_items_has_held_at(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('work_items') WHERE name = 'held_at'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 203.
+fn hosts_has_login_split(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('hosts') WHERE name = 'login_split'",
         [],
         |r| r.get(0),
     )?;
@@ -2276,6 +2362,69 @@ const MIGRATIONS: &[Migration] = &[
         version: 201,
         sql: include_str!("../../migrations/201_fleet_events.sql"),
         already_applied: Some(routines_has_event_host),
+    },
+    Migration {
+        version: 202,
+        sql: include_str!("../../migrations/202_deferred_prompts_session_index.sql"),
+        already_applied: None,
+    },
+    Migration {
+        version: 203,
+        sql: include_str!("../../migrations/203_host_login_split.sql"),
+        already_applied: Some(hosts_has_login_split),
+    },
+    // Routine memory: `routine_memory` and the routines' `memory` /
+    // `memory_auto`, the runs' `memory_read_at`. ADD COLUMNs, so guarded.
+    Migration {
+        version: 204,
+        sql: include_str!("../../migrations/204_routine_memory.sql"),
+        already_applied: Some(routine_runs_has_memory_read_at),
+    },
+    // Routine memory's reads: the runs' `memory_retry_at` and the index
+    // behind the per-tick probe. An ADD COLUMN, so guarded.
+    Migration {
+        version: 205,
+        sql: include_str!("../../migrations/205_routine_memory_reads.sql"),
+        already_applied: Some(routine_runs_has_memory_retry_at),
+    },
+    // Claude Code's next-prompt suggestion: `sessions.prompt_suggestion`
+    // (one ADD COLUMN, guarded, and the row-version trigger re-issued).
+    Migration {
+        version: 206,
+        sql: include_str!("../../migrations/206_session_prompt_suggestion.sql"),
+        already_applied: Some(sessions_has_prompt_suggestion),
+    },
+    // A project's GitHub origin, read by the scan and add_project. An ADD
+    // COLUMN, so guarded.
+    Migration {
+        version: 207,
+        sql: include_str!("../../migrations/207_project_github_origin.sql"),
+        already_applied: Some(projects_has_github_origin),
+    },
+    Migration {
+        version: 208,
+        sql: include_str!("../../migrations/208_tasks_unread_evidence_index.sql"),
+        already_applied: None,
+    },
+    // Mission lanes (lanes design L2): `mission_lanes` and the members'
+    // `lane_id`. An ADD COLUMN, so guarded.
+    Migration {
+        version: 209,
+        sql: include_str!("../../migrations/209_mission_lanes.sql"),
+        already_applied: Some(work_items_has_lane_id),
+    },
+    // Lanes L3: a task's `start_head` in its lane's checkout. An ADD
+    // COLUMN, so guarded.
+    Migration {
+        version: 210,
+        sql: include_str!("../../migrations/210_task_start_head.sql"),
+        already_applied: Some(tasks_has_start_head),
+    },
+    // Lanes L5: the paths a task will change. An ADD COLUMN, so guarded.
+    Migration {
+        version: 211,
+        sql: include_str!("../../migrations/211_item_touches.sql"),
+        already_applied: Some(work_items_has_touches),
     },
 ];
 
@@ -7334,13 +7483,21 @@ mod tests {
     fn migration_105_flattens_slash_named_worktrees_and_their_session_keys() {
         let s = store_at_version(104);
         // Raw rows: `upsert_host` reads back every current `hosts` column,
-        // and a 104 store predates the later ones (111's `auth_overrides`).
+        // and a 104 store predates the later ones (111's `auth_overrides`);
+        // `upsert_project` likewise reads back 207's `github_origin`.
         s.conn
             .execute_batch(
                 "INSERT INTO hosts (alias, reachable) VALUES ('trn', 1), ('mefistos', 1);",
             )
             .unwrap();
-        let pid = s.upsert_project("o", "r", "/p/o/r").unwrap();
+        let pid: i64 = s
+            .conn
+            .query_row(
+                "INSERT INTO projects (owner, repo, base_path) VALUES ('o', 'r', '/p/o/r') RETURNING id",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         let nested = "/home/dev/projects/r/.worktrees/feat/imports";
         let wid = s
             .upsert_worktree_on("trn", pid, "feat/imports", nested, Some("feat/imports"))

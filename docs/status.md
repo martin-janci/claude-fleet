@@ -53,14 +53,27 @@ from `autonomy.ts`; Custom grants what Ask first does), and since the
 - **Pre-approval (F2, owner-approved; reverses review round 15 F21 for these
   cases only).** At Within your brief the operator's `send_prompt`,
   `queue_prompt`, `run_prompt` and `dispatch_task` into a live session it
-  started or briefed (`Store::is_open_control_handoff`) go without a card;
+  started or briefed (`Store::is_open_control_handoff`) and still follows
+  (`control_follow::session_followed`: not muted, merged, done or quiet;
+  review w04-4) go without a card;
   at Autopilot so does a Claude `new_session` (or `dispatch_task`
-  `new_worker`) on a host inside an active mission's live grant — its
-  hosts, expiry and budget, and parallel cap (`start_inside_mission_grant`).
-  Kills, restarts, rewinds, restores, add_project and every `confirm: true`
-  tool always ask. The rule is one pure function,
-  `guard::operator_must_confirm(tool, position, own_handoff, inside_grant)`,
-  with a truth-table test. A pre-approved call writes a
+  `new_worker`, or a task's `work_link` `start` / `run` / `resume`) on a
+  host inside an active mission's live grant — its hosts, expiry and
+  budget, and parallel cap (`start_inside_mission_grant`; a task start
+  with no host is inside only a grant naming no hosts), never while Pause
+  all is on (review w04-5).
+  Kills, rewinds, restores, add_project and every other `confirm: true`
+  tool always ask. **Session care** (`control.session_care`, ON by
+  default since 2026-10-20, the owner's choice): with it on, `restart_session` of a session
+  Control started itself (not one it only briefed;
+  `Store::is_control_started_session`) goes without a card at Within your
+  brief and Autopilot, and `safe_kill_session` of one at Autopilot (`guard::OPERATOR_CARE_TOOLS`);
+  the digest says `Session care: on` under its autonomy line. The rule is
+  one pure function, `guard::operator_must_confirm_with(tool, position,
+  OperatorFacts)`, with truth-table tests. Control's CLAUDE.md also
+  carries "Carry your tasks through" and "Look after your sessions"
+  (`service/control_rules.rs`), and each digest line names the task its
+  session works on (`task KEY`). A pre-approved call writes a
   `control_pre_approved` event on its target and its receipt carries
   `approval = pre_approved` (migration 196), drawn "pre-approved" on the
   chip.
@@ -116,6 +129,16 @@ nothing saved, nothing proposed or "the hub needs updating", so a desktop
 accepts a revision-16 to 18 hub; 18 adds session environment variables
 (`env_vars`, `new_session { env }`, a form's `env_target`), whose Settings
 page a revision-17 hub answers with an unknown tool.
+
+**The dynamic day/night theme** is landed and ON by default (#936,
+fleet-mobile #234): Settings › Appearance's Theme defaults to Sun, which is
+light while the sun is up in the device's time zone and dark after sunset;
+Contrast (System by default on the desktop) and Accent (Cyan) apply to every
+mode (`docs/architecture.md` → *Theme engine*). Sun works from the time
+zone's meridian at a fixed 48° N, so it is off by hours far from that
+latitude and seasons are inverted in the southern hemisphere; a real
+location or fixed hours ("Schedule") waits on the owner (review w20-1). The
+phone has no System contrast yet (w20-8).
 
 Ticket keys (2026-10, migration 169, `store/ticket_keys.rs`). Fleet
 administers Jira-style keys: each ticket space (a project, a GitHub
@@ -443,10 +466,23 @@ tell; the script is shared, so SSH, `local` and agent hosts all get it with
 no proto change. `mem_low` (`health.mem_low_pct`, 10) and `cpu_saturated`
 (`health.cpu_busy_pct`, 90, two samples in a row) are judged when the sample
 is written (`Store::set_host_health`) and carried on the host row, the ping
-and `fleet_health.hosts[]` (with `cpu_pct`, `mem_used_pct`, `mem_pressure`)
-for a future status-bar chip; the automatic restore defers on either, the
-operator feed reports `mem_low`. The desktop shows the numbers only in the
-host's Health line.
+and `fleet_health.hosts[]` (with `cpu_pct`, `mem_used_pct`, `mem_pressure`);
+the automatic restore defers on either, the operator feed reports
+`mem_low`, and the desktop shows them in the status bar's host chip (see
+the Control paragraph above).
+
+**Autofix** is landed and ON by default (#939, #940; `service/autofix/`,
+migration 198, MCP `autofix`, loop `autofix`; mechanics in
+`docs/architecture.md`). Four detectors (`autofix.detector.*`: an unbound
+operator token, a host's out-of-date fleet files or old agent, a host's
+missing or wrong `~/.claude.json` fleet entry, a stuck session) are all on.
+With `autofix.auto_safe` (on) the fixes marked safe run unattended on the
+reconcile tick, up to `autofix.max_attempts` (3) tries per problem in 24 h,
+and then tell you; the rest (a new token, a sign-in, typing into a session)
+wait for a trusted device's Apply. Findings show in Needs you → *Problems &
+fixes*, as the `fix` chat block, as a count on the host chip, and in the
+operator feed; fleet-mobile shows them in its Problems & fixes sheet
+(`AutofixSheet`).
 
 The work graph's M0–M3 are landed (work links anchored on participants,
 group-by-work, and M2's work journal, carry rules, handover brief and resume
@@ -960,8 +996,11 @@ a finite or continuous one holds 30. Import plan (`work_link { mission_import
 (`#`, `Step`, `Needs`, optional `Lane` / `Status`, plus a `Lane | Steps in
 order` table) into the mission: each step a local task titled `<step>
 <title>` with its lane as its assignee, its needs as edges; importing again
-updates them in place. O3 is built: a run's prompt asks for a fenced JSON report after its
-done marker, stored as `tasks.result_json` (the worker's word), and when the
+updates them in place. O3 is built: a run's prompt asks the worker to call the `task_report` MCP
+tool with its report (and, as the fallback for a worker without fleet's MCP,
+to print the same report as a fenced JSON block after its done marker; a
+Stop that finds neither logs a warning), stored as `tasks.result_json` (the
+worker's word), and when the
 run finishes fleet reads the commits and changed files from git in the
 worker's checkout into `tasks.evidence_json` (migration 117,
 `service/work/report.rs`). An item's `done_when` lines are typed (`ci[:check]`,
@@ -980,21 +1019,81 @@ finite mission whose checks all hold. A locked `claude -p` planner
 (`planner.rs`, no tools, worker text fenced as untrusted, all or nothing,
 at most `policy.max_planner_runs_per_hour`) breaks a goal down and decides
 what a failure needs; its commands become cards in the mission's confirm
-queue. `git merge-tree` checks the finished branches against each other and
-proposes a resolve task for a conflict (`integrate.rs`). What the loop does by
+queue. An answer is refused when it leaves a merge-wave item (titled
+"Merge wave <n>" / "Integrate wave <n>") short of an item of its wave —
+the latest wave it waits for — counting this answer's creates and edges;
+a gap a person already accepted does not refuse later answers
+(`check_merge_waves`), and the next snapshot shows why it was refused.
+The same rule refuses a plan import (`mission_import`, before any row is
+written, naming steps) and a person's accept (`accept_many`, a single
+accept) that would leave a merge-wave item short; a proposal still
+waiting counts toward its wave but merges nothing until accepted, and
+the mission's root is no item of a wave (`check_merge_change`).
+`git merge-tree` checks the finished branches against each other and
+proposes ONE task per repo that integrates every live branch into one
+(`integrate.rs`); a branch another member's head already contains is left
+out, so a finished integration supersedes what it merged, and no new card is
+raised while one is open (before 2026-10-21 each conflicting pair got its
+own task and the resolutions conflicted again). What the loop does by
 itself is the least of the mission's level, `orchestrator.max_level`
 (default 1: a person presses every step) and a person's grant
 (`work_link { mission_grant }`: level, hours, budget, hosts, and the login
 `profile` its runs bill, migration 137); brakes pause the mission on a spent budget or no
 progress, a run on an account at or past `accounts.pause_at` waits (one
-`account_limit` event says why) until the account is back under it, and
-`missions_pause_all` pauses
+`account_limit` event says why) until the account is back under it. The
+planner does the same (TASK-291, `orchestrate/limit.rs`): it passes over a
+login at `accounts.pause_at` for the next one with headroom (the grant's or
+the host's own, the host's other profiles, then the next planner host), an
+answer that is Claude Code's usage-limit message is a `limit_wait` event on
+that login (until the reset the answer or the account's reading names, else
+an hour), not `refused`, and with no login left `PlanOutcome.waiting` says
+the mission waits; the loop asks again once a login has headroom, waking at
+the reset. `missions_pause_all` pauses
 every mission and ends its grants. `orchestrator.enabled` is the kill switch.
 A continuous mission wakes on `policy.wake_every_secs`; a finished run, a
 member's status moving on the tracker and a worker's PR checks moving each
 wake its mission. The Missions tab has Start wave, the next steps, the
 cards, the grant and Pause all; the phone (fleet-mobile) has the list, the
-steps, the cards and Pause all. A mission's worker is refused a person's
+steps, the cards and Pause all. A run of an item that already has an
+implement attempt (a retry, a review, a test) starts its checkout from that
+attempt's branch, on its host while that host is up (and inside the grant), and its prompt names
+the branch (`run::prior_work`, lanes design 2026-10-23 L0): before, a run
+beside the live implementer got a fresh `-N` checkout of the default branch,
+so a review read none of the work and a retry began again. `work { mission }`
+carries `stats` (`missions/stats.rs`): runs by role and per done task,
+retries, cold starts, a task's median time and the share of the working span
+with no run open, shown as a line in the mission room's header. Lanes L1:
+a Claude worker's run prompt asks for subagents to explore and to review its
+own diff (`run::subagent_note`, `orchestrator.run_subagents`, on); with
+`orchestrator.planner_reads` (off) the planner runs in the mission's
+checkout on its host with Read, Grep and Glob; and its prompt says items
+changing the same files or shared registry depend on each other. The lanes
+design's decisions D1–D9 are accepted (2026-10-24). Lanes L2 (migration
+209, `store/mission_lanes.rs`): a mission's tasks can be put in named lanes
+by a plan's `Lane` column, the planner's `create_item { lane }` and a
+person (`work_link { mission_item, lane }`, the task row's lane picker);
+`work { mission }` lists them and the Graph view groups by them. Lanes L3:
+with `policy.execution = lane` (off by default; "Tasks run" in the
+mission's edit form, changed only while it is not running) a lane's tasks
+run one at a time in one lead session on the lane's branch
+(`orchestrate/lanes.rs`): the loop offers one implement run per free lane,
+hands it to the live lead as a new task typed at its idle prompt, and starts
+a fresh lead in the same checkout after `policy.lane_relay_after` tasks (4),
+on a task's third try on one lead, or when the lead died. Each such task
+records the commit it began on (`tasks.start_head`, migration 210) and its
+evidence is its own commits only. Lanes L4: a lane task's headless review
+runs in a detached checkout of its commit (`git worktree add --detach`,
+removed after) and reads only its own diff, so its lead may already work on
+the next task; a lane waits while a task of it waits for or runs its test,
+which then runs in the lane's checkout; a lead also hands over once its
+context is 70% full; a lane whose tasks are all done reads as done.
+`orchestrator.headless_checks` is on by default since L4. Lanes L5
+(migration 211, `store/item_touches.rs`, `orchestrate/touches.rs`): the
+planner's `create_item` may name `touches` (repository paths or globs the
+task changes); a task whose touches meet an open run's in the same
+repository waits (a task that names none is not held), and a lane starts
+beside another of its repository only when both name every task's touches
+and they do not meet. The task row says what a task changes. A mission's worker is refused a person's
 step (`gh pr merge` / `ready`, a push to `main` / `master`, a tracker CLI)
 by fleet's `PreToolUse(Bash)` guard (`orchestrate/guard.rs`): a shell
 prefilter that asks the hub only about those commands and lets the command
@@ -1003,7 +1102,7 @@ run when the hub does not answer. Hosts get it on re-provisioning
 In the New layout, Jev K3 (off) proposes a stuck mission's outcome and next
 step, and Control shows a "Sent to a mission" receipt for what the operator
 handed over (`control_handoffs`, migration 140, redesign 9.3).
-Built but OFF by default: `orchestrator.headless_checks` runs a member's
+On by default since lanes L4 (was off): `orchestrator.headless_checks` runs a member's
 `review` and `test` steps as one `claude -p` run in the implementer's
 finished checkout (`orchestrate/checks.rs`, F3) instead of a session of
 their own: a review gets Read/Grep/Glob and the diff, a test also exactly
@@ -1035,7 +1134,15 @@ Routines are landed (`service/routines/`, migrations 131 and 139, redesign
 fleet event or when a person presses Run now. Since M15 G2.4 (migration
 156) the events include a pull request's review, failing or passing checks
 and merge, read from the `pull_requests` changes reconcile records, with a
-repo filter, "me or anyone in its org" and a rate per PR. The scheduler stops on
+repo filter, "me or anyone in its org" and a rate per PR. Since
+ce84e5d28 (migration 201) they also include more session kinds
+(`needs_you`, `auto_restored` / `auto_restore_failed`, `account_switched`
+/ `account_switch_failed`, `session_moved`, `pr_opened`) and fleet events
+(`fleet_events`, written by `service/fleet_events.rs`'s watcher and by
+`set_mission_state`): `host_offline` / `host_online` / `host_low`,
+`account_limited` / `account_available`, `login_signed_out`,
+`mission_done` / `mission_failed`; any event routine but an account or
+mission one may narrow to one host (`event_host`). The scheduler stops on
 `automation.paused`, a fire past the routine's day budget is skipped, a run
 past its run budget fails and pauses the routine, and a run whose account
 is at or past `accounts.pause_at` is skipped (8.7). M15 G3.8 (migration
@@ -1062,6 +1169,21 @@ fires included), `routines { explain | decisions | dry_run }` and the
 routine's Debug tab; `agents { explain | job }` (the desktop's
 `agents_debug`, Automation › Agents › Debug, with each rule's last poll
 error per process) and `pr_shepherd { explain }` (no UI). All read only.
+Routine memory (migration 204, `routines/memory.rs`): a routine may keep
+notebooks in the fleet's database, outside git and the host: its own, its
+project's (shared by the project's routines in one org, or one owner's), or
+both. Each run reads them under its prompt and rewrites one with a
+`<routine-memory>` block at the end of its reply, read off the transcript
+once the run finishes; `memory_auto` also notes each finished run in it. The
+routine editor's Memory group picks them and shows the saved notebooks to
+read, edit or clear (`routines { memory | set_memory }`). Off by default
+per routine. The phone shows nothing of it yet.
+
+The prompt tuner is landed and OFF by default (`work.prompt_tune`;
+`service/prompt_tune.rs`, `PromptTune.svelte`, mechanics in
+`docs/architecture.md`): the composer's ✦ and a routine's prompt field ask
+the Writing help model to rewrite the draft into a clearer prompt, shown
+beside it as a proposal that is never sent on its own.
 
 Reply actions are landed (#338): Copy, Quote, Retry, Fork here and Rewind
 here under each reply; Fork, Rewind and Retry are one operation,
@@ -1192,8 +1314,43 @@ Automation › Agents lists the catalog's fleet agents with their instances;
 agent drafts one in a chat with a `wizard: fleet_agent` block, which the
 person sends; the phone lists the instances with Revoke. Step 6 in part: the
 `github_prs` and `github_comments` sources, `pr_comment` and `pr_labels`,
-and comments and new items on trackers other than Jira; not `pr_review`,
-polling other trackers, or restating the built-in agents.
+and comments and new items on trackers other than Jira, whose
+`tracker_comments` and `tracker_assigned` polls page through the hub's synced
+items (by when the hub wrote them, from where the last poll stopped) and, for
+comments, each one's comments through its provider — the sync holds only the
+items assigned to the tracker's own account on GitHub and Linear, so those are
+all a poll sees there; the gallery (`fleet_agents/gallery.rs`: the
+`catalog-seed/fleet-agents/` definitions embedded, listed under Automation ›
+Agents › Gallery and added to the catalog with *Add to catalog*, `agents {
+install }`), which holds the seeds in `catalog-seed/fleet-agents/`:
+`support`, `pr-reviewer` and `pr-test-debate` (the built-in agents restated,
+below), `issue-triage`, `pr-questions` and `daily-digest`, and `self-debug`,
+`proposer`, `simplify` and `refactor` (below); `pr_review` (a review of the
+PR's head with line comments placed on the diff, sent only while that head
+is current, never an unattended REQUEST_CHANGES, nor an unattended APPROVE
+unless `limits.auto_approve`).
+Restating the built-in agents is under way, the built-in ones staying until
+the definitions have run for real (spec *Migration*): built so far
+`run.cooldown_secs`, `run.branch`, `mcp_scan`'s `window_mins` / `max_jobs`
+and `limits.auto_approve`; `run.fingerprint` (the support agent's error
+fingerprint counted in a fleet store, `knownBug` / `similarBug` /
+`relatedBug` added to the answer, a filed bug kept against it), and the
+gallery's `support` definition; `run.workspace: pr_head`, `run.diff` (the
+reviewer's filtered diff in the prompt, with its size gate), `github_prs`'s
+`skip_wip` / `debounce_secs`, and a PR comment's head; `pr_review`'s
+`min_confidence` and `resolutions` (the reviewer's verdict adjustment
+against the previous review, kept as the subject's `previous`), path label
+rules on `pr_labels` (`subject.paths`), and `pr_description`; `github_prs`'s
+`reverify_mins` (a dismissed or deleted review made again at the same
+head), the `github_review_replies` source and the `pr_reply` action (the
+test debate: a person's reply in a fleet agent's review thread, answered at
+most `max_rounds` times), and the gallery's `pr-reviewer` and
+`pr-test-debate`, which share a store of accepted test exemptions; a
+definition's `limits.daily_budget_usd` (a UTC day's cap on one instance's
+runs, past it a job waits for the next day) with `limits.budget_input` to
+lower it per instance. All the
+migration's steps are built; deleting the built-in agents and converting
+their rules waits on the definitions having run for real.
 
 The self debug agent (thread "Self debug agent", 2026-10-17), the hub and
 desktop parts: a fleet agent definition that sets `run.diagnostics` gets
@@ -1225,7 +1382,7 @@ the same services as the matching buttons (`settings_review` as
 per item (`{{item.…}}`, `when` per item, at most 10), so self-debug
 proposes one step per finding. `fleet-diagnostics` adds `analyses` (recent
 fleet-agent answers with their findings) and `proposals` (the last 30
-days of agent actions and what a person did). Three more seeds:
+days of agent actions and what a person did). Three more gallery seeds:
 `proposer` (daily 07:00 and `/propose <focus>`; merges by fingerprint,
 skips pending, done, or rejected in the last 14 days; at most five),
 `simplify` and `refactor` (manual, read a project's checkout, propose a
@@ -1363,9 +1520,47 @@ primary), the Hosts page, Inbox (and the rail count), PRs and notifications
 follow the fleet filter, and the hub's `ready` frame names its `fleet_id`
 (minted at `serve` start) so one hub added twice is refused. The fleet id
 needs a hub with this change; an older one just never reads as a duplicate.
-Settings › Environment is per fleet too (a Fleet picker); the other Settings
-pages still act on the primary only.
-Phase 3 (one id space, the full panes per fleet) is not started.
+Settings › Environment and Settings › Company (Organisations, Devices,
+People, Groups) are per fleet too, each with the same Fleet picker
+(`FleetPicker.svelte`); Company's reads and writes route to the picked hub
+and what the device may change there is that hub's `org_admin` rule
+(`company_access.ts`: a fleet admin's unbound device or an org admin's,
+trusted `full` to change anything) — on a paired primary too, which before
+showed the Company pages read-only. The other Settings pages still act on
+the primary only. Phase 3a landed: the sidebar's Machine
+and Organisation filters list every shown fleet's machines and orgs under
+that fleet's label and colour (`list_orgs` joined `FLEET_SCOPED`); a choice
+belongs to one fleet (`src/lib/fleet_filters.ts`) and hides the other
+fleets' rows with a counted "hidden by the … filter · Show every fleet"
+line rather than silently; the shared filters (search, Last active, Needs
+you, Agent, Background agents) apply to the extra fleets' groups too; the
+primary's list sits under a folding fleet header beside another fleet.
+Phase 3b landed: profiles — the hub's read-only `my_profile` tool (no
+contract bump; the caller's own person, SSO issuers, the names of its
+person-scope variables, its git identity; an older hub falls back to
+`my_grants` + `env_vars_list`), the routed fleet-scoped desktop command of
+the same name, a local per-fleet profile label (`src/lib/fleet_profiles.ts`),
+shown on the switcher's chips, in Settings › Fleets › Profiles and as "Runs
+as …" in New session.
+Phase 3 step 1 landed: one id space for the conversation panel. An extra
+fleet's session row carries its fleet (`SessionRow.fleet`), stores keyed by
+session id key it by `sessionKey` (the primary's id, or a negative stand-in
+for an extra fleet's (fleet, id)), and the session opens in the full
+ConversationPanel inside `FleetSessionView`: reads, the conversation list,
+the activity probe, the outbox, dialog answers and the model relaunch go to
+its hub (`session_conversations`, `session_activity`, `restart_session`
+joined `FLEET_SCOPED`). Still off for another fleet's session: attachments,
+fork / rewind, send later, writing help, forms, devices, task results.
+Step 2a landed: its Terminal tab is the same TerminalView (a `session` prop;
+pty id `fleet-<slot>-<id>.<view>`) with the workspace check, shell strip,
+microphone, transfer chip, un-archive and uploads off for it; FleetTerminal
+is gone. Step 2b landed: `FleetSessionView` is laid out as the primary's
+own session (the same `SessionTabs` header and Conversation / agent tabs,
+the conversation over a mounted terminal); its fleet, Copy attach and Close
+sit in the header, and Terminals, Files, Details, Share, Open in VS Code
+and the inspector are off for it. A `local` / `wsl-…` host shows the pane
+snapshot in the agent tab. Not started: every command fleet-aware (which
+turns those back on) and promoting another hub to primary (step 3).
 
 Application updates: design
 `docs/superpowers/specs/2026-09-28-update-channel-design.md` (with

@@ -165,7 +165,8 @@ impl Store {
         Ok(())
     }
 
-    /// How many docs of each kind the index holds (diagnostics).
+    /// How many docs of each kind the index holds (tests).
+    #[cfg(test)]
     pub fn search_doc_counts(&self) -> Result<Vec<(String, i64)>, IpcError> {
         let mut stmt = self
             .conn

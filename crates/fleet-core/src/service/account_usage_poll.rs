@@ -223,7 +223,7 @@ async fn recheck_logins(
         }
         Err(_) => None,
     };
-    let Some(only) = due else { return };
+    let Some((only, profile)) = due else { return };
     let scratch = Mutex::new(UsageCache::new());
     let snap = account_usage::fetch_account_usage_with(
         account_uuid,
@@ -235,7 +235,8 @@ async fn recheck_logins(
     .await;
     let obs = login_health::observations_from_usage(&snap);
     if let Ok(s) = store.lock() {
-        if let Err(e) = login_health::record(&s, &obs, now) {
+        if let Err(e) = login_health::record_recheck(&s, &only.alias, profile.as_deref(), &obs, now)
+        {
             tracing::debug!(error = %e.message, "[login-health] recheck not recorded");
         }
     }
@@ -558,6 +559,7 @@ mod tests {
             mem_low: false,
             cpu_saturated: false,
             signed_out_logins: Vec::new(),
+            login_split: None,
             harnesses: None,
         }
     }

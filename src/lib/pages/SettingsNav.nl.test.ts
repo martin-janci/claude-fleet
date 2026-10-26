@@ -57,11 +57,39 @@ describe('Settings search as a command', () => {
     await waitFor(() => expect(sets()).toEqual([{ key: 'work.auto_tidy', value: 'true' }]));
   });
 
+  it('a change back to the safe default does not ask (review w15-5)', async () => {
+    fleetSettings.set({ ...SETTING_DEFAULTS });
+    const onselect = vi.fn();
+    render(SettingsNav, {
+      props: { pages: bundle.pages, descs, values: { ...values, 'gc.enabled': 'true' }, selected: 'general', canWrite: true, onselect },
+    });
+    await fireEvent.input(screen.getByTestId('settings-search'), { target: { value: 'disable garbage collect idle sessions' } });
+    await fireEvent.click(screen.getByTestId('settings-nl-apply'));
+    expect(screen.queryByTestId('confirm-dialog')).toBeNull();
+    await waitFor(() => expect(sets()).toEqual([{ key: 'gc.enabled', value: 'false' }]));
+  });
+
+  it('lists a screen a search names, before the settings (review w15-1)', async () => {
+    const onselect = show(false);
+    const search = screen.getByTestId('settings-search');
+    await fireEvent.input(search, { target: { value: 'theme' } });
+    expect(screen.getByTestId('settings-leaf-hit-appearance')).toBeInTheDocument();
+    expect(screen.queryByText('No setting matches.')).toBeNull();
+    await fireEvent.keyDown(search, { key: 'Enter' });
+    expect(onselect).toHaveBeenCalledWith('appearance');
+  });
+
+  it('says what shows a setting its page hides (review w15-2)', async () => {
+    show(false);
+    await fireEvent.input(screen.getByTestId('settings-search'), { target: { value: 'second opinion host' } });
+    expect(screen.getByTestId('settings-hit-hidden-decide.haiku.host').textContent).toContain('shown when');
+  });
+
   it('says what it cannot do, and asks which when the words fit several', async () => {
     show();
     const search = screen.getByTestId('settings-search');
     await fireEvent.input(search, { target: { value: 'set recent work to 900' } });
-    expect(screen.getByTestId('settings-nl-error').textContent).toContain('out of range');
+    expect(screen.getByTestId('settings-nl-error').textContent).toContain('1–365 days');
     await fireEvent.input(search, { target: { value: 'set tidy to 3' } });
     expect(screen.getByTestId('settings-nl-option-work.tidy_done_days')).toBeInTheDocument();
     expect(sets()).toEqual([]);

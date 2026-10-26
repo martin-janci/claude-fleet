@@ -474,7 +474,7 @@ impl FleetTools {
         session_transcript in one call. Returns { turn_seq, status: \
         satisfied | timeout, transcript } (the reply as plain text; null \
         with transcript_error when unreadable). Marked untrusted unless \
-        raw=true (master token only).")]
+        raw=true (master) or the caller is a trusted client.")]
     pub(super) async fn run_prompt(
         &self,
         Extension(caller): Extension<Caller>,
@@ -535,8 +535,13 @@ impl FleetTools {
         };
         self.recheck_now(&recheck)?;
         let prompt = apply_marker(p.prompt, &marker_origin(&caller), &caller, p.raw)?;
-        let before = row.turn_seq;
-        self.deliver_prompt(&row, prompt, true, false).await?;
+        // The turn this prompt's reply ends, not `row.turn_seq` itself: a
+        // queued prompt that took the idle moment first runs its turn ahead
+        // of this one, and that turn's Stop is not this prompt's answer.
+        let delivered = self.deliver_prompt(&row, prompt, true, false).await?;
+        let before = delivered["turn_seq_before"]
+            .as_i64()
+            .unwrap_or(row.turn_seq);
         let out = tasks::wait_for_session(
             &self.store,
             row.id,
@@ -574,7 +579,8 @@ impl FleetTools {
         that paragraph as `result` (also sent to the requester's inbox as \
         kind=task_result). Returns the task row; follow with wait_for_task. \
         A per-host token must name a requester on its own host. Marked \
-        untrusted unless raw=true (master only).")]
+        untrusted unless raw=true (master) or the caller is a trusted \
+        client.")]
     pub(super) async fn dispatch_task(
         &self,
         Extension(caller): Extension<Caller>,
@@ -676,6 +682,27 @@ impl FleetTools {
                 // (it could otherwise read another host's output back via
                 // wait_for_task / list_tasks / its inbox).
                 require_host(&caller, &spec.host_alias, "the new worker")?;
+                // A worker runs Claude on the login `profile` names (the
+                // host's own without one): past `accounts.pause_at` it
+                // would stall at the limit with the task open, so it asks
+                // first, as `new_session` does, and the refusal names the
+                // profile to pass instead.
+                let profile = spec
+                    .profile
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|p| !p.is_empty())
+                    .map(str::to_string);
+                if !spec.over_limit_ok.unwrap_or(false) {
+                    let s = lock(self.reader()).map_err(to_mcp_err)?;
+                    crate::service::account_limits::refuse_over_limit(
+                        &s,
+                        &spec.host_alias,
+                        profile.as_deref(),
+                        crate::store::now_unix(),
+                    )
+                    .map_err(to_mcp_err)?;
+                }
                 // A new worker is a start: the operator's needs a person (D12).
                 self.confirm_gate_target(
                     "dispatch_task",
@@ -683,7 +710,7 @@ impl FleetTools {
                     &dispatch_new_worker_summary(&spec, p.requester_session_id, p.raw, &p.prompt),
                     &caller,
                     GateTarget::Start {
-                        host: &spec.host_alias,
+                        host: Some(&spec.host_alias),
                     },
                 )?;
                 let name = spec.name.unwrap_or_default();
@@ -702,7 +729,7 @@ impl FleetTools {
                         resume_claude_session_id: None,
                         model: None,
                         effort: None,
-                        profile: None,
+                        profile,
                         agent: None,
                         // Who asked for the worker (migration 124): the
                         // connection, as for `new_session`.
@@ -771,7 +798,7 @@ impl FleetTools {
                 return Err(to_mcp_err(e));
             }
         }
-        let body = task_delivery_body(&p.prompt, &task.nonce, &caller, p.raw)?;
+        let body = task_delivery_body(&p.prompt, task.id, &task.nonce, &caller, p.raw)?;
         match self.deliver_prompt(&worker, body, true, false).await {
             Ok(_) => {}
             Err(e) => {
@@ -929,8 +956,8 @@ impl FleetTools {
 
     #[tool(description = "Cancel a queued or running task (E_TASK_TERMINAL \
         if it already finished). The worker session keeps running: kill or \
-        re-prompt it separately. May return E_CONFIRM_REQUIRED when desktop \
-        confirmation is on. A per-host token may only cancel tasks it can \
+        re-prompt it separately. May return E_CONFIRM_REQUIRED when confirmation is on \
+        (mcp.confirm_destructive). A per-host token may only cancel tasks it can \
         see (E_FORBIDDEN).")]
     pub(super) async fn cancel_task(
         &self,
@@ -952,6 +979,86 @@ impl FleetTools {
         let row = tasks::cancel_task(&s, task.id, &format!("cancelled by {}", caller.label()))
             .map_err(to_mcp_err)?;
         ok_json(&row)
+    }
+
+    #[tool(description = "From a task's worker: report it finished, with \
+        the task_id and nonce its prompt gave. Completes it as the \
+        FLEET_TASK_DONE marker does; a finished task answers \
+        already_finished.")]
+    pub(super) async fn task_report(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(p): Parameters<TaskReportParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "task_report",
+            &format!("task_id={} outcome={}", p.task_id, p.outcome),
+        );
+        // `drive`: completing a task writes its row, the requester's inbox
+        // and the mission it belongs to. The worker's own pane passes it.
+        let task = self.visible_task(&caller, p.task_id, Reach::Drive)?;
+        let worker = self.own_session(&caller)?.ok_or_else(|| {
+            mcp_err(
+                codes::E_NOT_A_SESSION,
+                "task_report answers only from inside the task's worker session (its \
+                 per-host token and X-Fleet-Pane)",
+                None,
+            )
+        })?;
+        let report = crate::service::work::report::report_from_value(&serde_json::json!({
+            "summary": p.summary,
+            "outcome": p.outcome,
+            "done": p.done,
+            "decisions": p.decisions,
+            "remaining": p.remaining,
+            "context": p.context,
+            "tests_run": p.tests_run,
+            "warnings": p.warnings,
+            "blockers": p.blockers,
+            "followups": p.followups,
+            "confidence": p.confidence,
+        }))
+        .unwrap_or_default();
+        let (row, changed, checkout) = {
+            let s = lock(&self.store).map_err(to_mcp_err)?;
+            let (row, changed) = tasks::report_task_done(&s, &task, worker, &p.nonce, &report)
+                .map_err(to_mcp_err)?;
+            // Where the run's checkout is: the worker's worktree, as the Stop
+            // path falls back to when the hook gave no `cwd`. Best-effort, as
+            // the evidence itself is: the worker's next Stop reads it again
+            // (`handle_stop_for_worker`), from its `cwd` when it has no
+            // linked worktree.
+            let checkout = match (changed, row.work_item_id) {
+                (true, Some(_)) => s.get_session_by_id(worker).ok().flatten().and_then(|w| {
+                    let wt = w.worktree_id?;
+                    let dir = s.worktree_path(wt).ok().flatten()?;
+                    Some((w.host_alias, dir, row.clone()))
+                }),
+                _ => None,
+            };
+            (tasks::mark_task_result(&s, row), changed, checkout)
+        };
+        if changed {
+            tracing::info!("task {} done (worker {}, reported)", row.id, worker);
+        }
+        // A run's evidence, read now so the result shows it at once, but
+        // provisional: the worker's turn still runs, and a commit after the
+        // report counts once its Stop reads git again (mission integration
+        // reads `evidence.head`). A host round trip, so it runs after the
+        // reply.
+        if let Some((host, dir, done)) = checkout {
+            let store = Arc::clone(&self.store);
+            let ssh = Arc::clone(&self.ssh);
+            crate::rt::spawn(async move {
+                use crate::service::work::report::{collect_evidence_as, EvidenceRead};
+                collect_evidence_as(&store, &ssh, &host, &dir, &[done], EvidenceRead::MidTurn)
+                    .await;
+            });
+        }
+        ok_json(&serde_json::json!({
+            "status": if changed { "done" } else { "already_finished" },
+            "task": row,
+        }))
     }
 
     #[tool(description = "Replace a session's tags (short labels such as \
@@ -1459,17 +1566,20 @@ impl FleetTools {
         container?}: make it a ticket. propose {parent, title, why?}: a subtask a person accepts \
         or rejects {item_id, no session_id}. bucket_add|bucket_remove \
         {bucket_id, item_id}: sprint/release. mission_save {mission, \
-        mission_id?, item_id?: root}; mission_state {mission_id, status} (paused \
-        reopens a finished one); \
-        mission_repo {project_id, role?, on?}; mission_item {item_id, on?}; \
+        mission_id?, item_id?: root}; mission_state {mission_id, status, ci_override?} \
+        (paused reopens a finished one; failing CI on its open or merged PRs \
+        refuses completed with E_CI_FAILING unless a person sets ci_override); \
+        mission_repo {project_id, role?, on?}; mission_item {item_id, on?, lane?}; \
         mission_delete; mission_import {plan}. dep {item_id, depends_on, on?}; hold {item_id, on?}; \
         propose_tree {parent, tree}; accept_many | undo_accept {item_ids}. \
         done_when {item_id, done_when: [ci[:check] | review | test[:cmd] | \
-        person | text]}; verify {item_id, line, ok, note?}: a person's check. \
+        person | text]}; verify {item_id, line, ok, note?}: a person's check \
+        (line \"run evidence\" with a note: accept an implement run with no \
+        commits or files). \
         mission_start {mission_id, step?}: take the next steps; retry \
         {item_id, note?}; mission_plan: ask the planner; card_decide \
         {card_id, ok, note?}; mission_grant {mission_id, level, hours?, \
-        budget_cents?, hosts?, max_parallel?, profile?}; mission_revoke; \
+        budget_cents?, until_done?, hosts?, max_parallel?, profile?}; mission_revoke; \
         missions_pause_all. mission_release_note {mission_id}: a drafted \
         release note of a completed mission; today_brief {refresh?, org_id?, \
         since?}: Today's morning brief, drafted only on refresh; \
@@ -1524,13 +1634,27 @@ impl FleetTools {
         if caller.is_operator() && matches!(args.action.as_str(), "resume" | "start" | "run") {
             // Only ever gates the operator (D12): a session is about to exist.
             // (`work_link` is `confirm: true` for M7's tidy kills; a person's
-            // start or resume is never gated.)
+            // start or resume is never gated.) A task's session is a start
+            // like `new_session`'s: inside the grant of the running mission
+            // the task belongs to it goes without a card at Autopilot (F2);
+            // a task of no mission, or another mission's grant, never does
+            // (review r3). With no host fleet places it, which only a grant
+            // naming no hosts covers.
             let repos = self.repo_labels(args.project_ids.as_deref().unwrap_or_default())?;
-            self.confirm_gate(
+            let target = match self.work_link_mission(&args, multi.as_deref())? {
+                Some((mission, sessions)) => GateTarget::MissionStart {
+                    mission,
+                    host: args.host_alias.as_deref(),
+                    sessions,
+                },
+                None => GateTarget::Other,
+            };
+            self.confirm_gate_target(
                 "work_link",
                 args.confirm_nonce.as_deref(),
                 &work_link_start_summary(&args, &repos),
                 &caller,
+                target,
             )?;
         }
         if args.action == "draft_title" {
@@ -3288,6 +3412,100 @@ fn graph_item(args: &crate::service::work::WorkLinkArgs) -> Result<i64, McpError
 }
 
 impl super::FleetTools {
+    /// The mission of the work item a `work_link` start / run / resume
+    /// names, for the operator's grant check, with how many sessions the
+    /// call would start. The item is the one the action resolves: `item_id`,
+    /// else the key normalised as the action normalises it (review 456).
+    /// `None` — no grant covers it — for a ticket URL (the start takes the
+    /// URL over a key, so a key beside it says nothing about what starts),
+    /// an unknown key, an item of no mission, or a key whose items do not
+    /// all belong to the one mission (two trackers can hold the same key,
+    /// and the start may resolve the other one).
+    ///
+    /// A multi-repo start counts only the repos it would start in: one
+    /// where the key already has a live session is skipped, and that
+    /// session is already on the mission's count. A key on several items
+    /// counts by the one that skips the fewest repos, since the start may
+    /// resolve any of them.
+    pub(super) fn work_link_mission(
+        &self,
+        args: &crate::service::work::WorkLinkArgs,
+        multi: Option<&[i64]>,
+    ) -> Result<Option<(i64, i64)>, McpError> {
+        if args.url.is_some() {
+            return Ok(None);
+        }
+        let s = lock(&self.store).map_err(to_mcp_err)?;
+        let (mission, items, key) = match (args.item_id, args.key.as_deref()) {
+            (Some(id), _) => {
+                let Some(mission) = s.work_item_mission(id).map_err(to_mcp_err)? else {
+                    return Ok(None);
+                };
+                let key = s.get_work_item(id).map_err(to_mcp_err)?.and_then(|i| i.key);
+                (mission, vec![id], key)
+            }
+            (None, Some(raw)) => {
+                let Ok(key) = crate::store::normalize_work_ref(raw) else {
+                    return Ok(None);
+                };
+                let mut ids: Vec<i64> = s
+                    .work_items_by_key(&key)
+                    .map_err(to_mcp_err)?
+                    .into_iter()
+                    .chain(s.tracker_items_for_key(&key).map_err(to_mcp_err)?)
+                    .map(|i| i.id)
+                    .collect();
+                ids.sort_unstable();
+                ids.dedup();
+                let mut mission = None;
+                for id in &ids {
+                    match (mission, s.work_item_mission(*id).map_err(to_mcp_err)?) {
+                        (_, None) => return Ok(None),
+                        (None, Some(m)) => mission = Some(m),
+                        (Some(a), Some(b)) if a != b => return Ok(None),
+                        _ => {}
+                    }
+                }
+                let Some(mission) = mission else {
+                    return Ok(None);
+                };
+                (mission, ids, Some(key))
+            }
+            (None, None) => return Ok(None),
+        };
+        let sessions = match (multi, key) {
+            (Some(ids), Some(key)) if !args.parallel.unwrap_or(false) => {
+                // The org the start skips by is the item it resolves. A key
+                // on several items may resolve any one of them, or none
+                // (no org filter), so count the most repos any of them
+                // would start in: never fewer than the start opens.
+                let mut orgs: Vec<Option<i64>> = Vec::new();
+                if items.len() != 1 {
+                    orgs.push(None);
+                }
+                for id in &items {
+                    orgs.push(s.item_org(*id).map_err(to_mcp_err)?);
+                }
+                orgs.sort_unstable();
+                orgs.dedup();
+                let mut most = 0;
+                for org in orgs {
+                    let live = crate::service::trackers::tickets::live_work_on(&s, &key, org)
+                        .map_err(to_mcp_err)?;
+                    let n = ids
+                        .iter()
+                        .filter(|pid| !live.iter().any(|(_, r)| r.project_id == Some(**pid)))
+                        .count() as i64;
+                    most = most.max(n);
+                }
+                most
+            }
+            (Some(ids), _) => ids.len() as i64,
+            (None, _) => 1,
+        };
+        Ok(Some((mission, sessions)))
+    }
+
     /// What the mission loop needs to take a step from this server.
     fn mission_deps(&self) -> crate::service::work::orchestrate::Deps {
         crate::service::work::orchestrate::Deps {

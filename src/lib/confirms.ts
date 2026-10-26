@@ -3,6 +3,7 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { mcpConfirm, mcpPendingConfirms, MCP_CONFIRM_EVENT, type ConfirmRequest } from './mcp';
 import { push, pushError } from './toasts';
 import { CONFIRM_CHANGED_EVENT } from './events';
+import { errorText } from './error_copy';
 
 /**
  * The queue of control-API calls waiting for a person (redesign step 9.2).
@@ -85,7 +86,7 @@ export async function answerConfirm(nonce: string, approved: boolean): Promise<b
   });
   if (!r.ok) {
     pushError(r.error, `${approved ? 'Approving' : 'Denying'} ${req.tool} failed`);
-    failedConfirms.update((m) => new Map([...m, [nonce, r.error.message]]));
+    failedConfirms.update((m) => new Map([...m, [nonce, errorText(r.error)]]));
     // It may have expired or been answered elsewhere: a re-read drops it.
     void resync();
     return false;

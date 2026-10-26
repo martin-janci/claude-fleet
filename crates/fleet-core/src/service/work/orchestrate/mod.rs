@@ -19,8 +19,11 @@ pub mod checks;
 pub mod drafts;
 pub mod guard;
 pub mod integrate;
+pub mod lanes;
+pub mod limit;
 pub mod planner;
 pub mod steps;
+pub mod touches;
 pub mod triage;
 
 use self::planner::{Command, PlannerOutput};
@@ -37,7 +40,7 @@ use crate::service::view_scope::ViewScope;
 use crate::ssh::SshClient;
 use crate::store::{
     CardRow, Decider, GrantRow, MissionRow, MissionTaskCounts, NewCard, NewGrant, NewMissionEvent,
-    Store, TaskRow, WorkItemRow, GRANT_MAX_SECS,
+    Store, TaskRow, WorkItemRow, GRANT_MAX_SECS, GRANT_UNTIL_DONE_AT,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -50,6 +53,9 @@ pub const TICK_EVERY: Duration = Duration::from_secs(20);
 pub const RUNNING_RECHECK_SECS: i64 = 300;
 /// An idle finite mission is looked at again within this.
 pub const IDLE_RECHECK_SECS: i64 = 3600;
+/// The soonest a mission whose planner waits on a usage limit is looked at
+/// again, however near the reset.
+pub const RESET_RECHECK_SECS: i64 = 60;
 /// A continuous mission's timer when its policy names none (O8).
 pub const CONTINUOUS_DEFAULT_WAKE_SECS: u64 = 1800;
 /// Cards a mission's detail shows.
@@ -64,12 +70,7 @@ pub struct Deps {
     pub net: TrackerNet,
 }
 
-fn now_unix() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
+use crate::store::now_unix;
 
 /// What the loop may do on its own, and why not more.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -94,7 +95,11 @@ pub fn autonomy(s: &Store, m: &MissionRow, now: i64) -> Result<Autonomy, IpcErro
     let ceiling = settings::get_secs(s, settings::ORCHESTRATOR_MAX_LEVEL).min(3) as i64;
     let grant = s.live_mission_grant(m.id, now)?;
     let granted = grant.as_ref().map(|g| g.level).unwrap_or(1);
-    let effective = m.level.min(ceiling).min(granted);
+    // A live grant lifts a lower ask to its level while it holds (TASK-293):
+    // a mission made in the room (L0) runs under its L2 grant, and drops back
+    // to its own ask when the grant ends, never past it (review r8).
+    let asked = grant.as_ref().map_or(m.level, |g| m.level.max(g.level));
+    let effective = asked.min(ceiling).min(granted);
     let why = if !enabled {
         "the mission loop is off (orchestrator.enabled)".to_string()
     } else if effective == m.level {
@@ -204,14 +209,101 @@ fn steps_for(s: &Store, m: &MissionRow, a: &Autonomy) -> Result<Vec<Step>, IpcEr
     let items = s.mission_items(m.id)?;
     let graph = super::graph::build(s, &ViewScope::internal(), &items)?;
     let attempts = attempts_of(s, &items)?;
-    Ok(plan_steps(&StepInput {
+    let steps = plan_steps(&StepInput {
         mission: m,
         graph: &graph,
         items: &items,
         attempts: &attempts,
         counts: s.mission_task_counts(m.id)?,
         max_parallel: max_parallel(m, a),
-    }))
+    });
+    // Lanes L5: what each task says it changes, in which repository (a
+    // mission with one repo names it for a task that names none).
+    let sole_repo = match m.repos.as_slice() {
+        [only] => Some(only.project_id),
+        _ => None,
+    };
+    let said = s.mission_touches(m.id)?;
+    let known: HashMap<i64, touches::ItemTouch> = items
+        .iter()
+        .map(|i| {
+            (
+                i.id,
+                touches::ItemTouch {
+                    project: i.project_id.or(sole_repo),
+                    touches: said.get(&i.id).cloned().unwrap_or_default(),
+                },
+            )
+        })
+        .collect();
+    let running: Vec<i64> = attempts
+        .iter()
+        .filter(|(_, ts)| {
+            ts.iter().any(|t| {
+                matches!(t.state.as_str(), "queued" | "running")
+                    && matches!(t.role.as_deref(), None | Some("implement"))
+            })
+        })
+        .map(|(i, _)| *i)
+        .collect();
+    if m.policy.execution != "lane" {
+        return Ok(touches::gate_items(steps, &known, &running, None));
+    }
+    // Lanes L3: a lane takes one implement run at a time, when it is free.
+    let lanes = s.mission_lanes(m.id)?;
+    let lane_of: HashMap<i64, i64> = lanes
+        .iter()
+        .flat_map(|l| l.item_ids.iter().map(move |i| (*i, l.id)))
+        .collect();
+    let busy = lanes::busy_lanes(s, m, &lanes, &attempts, &lanes::awaiting_test(&graph))?;
+    let steps = lanes::gate(steps, &lane_of, &busy);
+    // Lanes L5: a lane starts beside another of its repository only when
+    // both say all they change and it does not meet.
+    let done = |i: &i64| {
+        items
+            .iter()
+            .any(|it| it.id == *i && it.status_category == "done")
+    };
+    let units: Vec<touches::LaneTouch> = lanes
+        .iter()
+        .map(|l| {
+            let mut paths: Vec<String> = Vec::new();
+            for i in &l.item_ids {
+                for p in said.get(i).into_iter().flatten() {
+                    if !paths.contains(p) {
+                        paths.push(p.clone());
+                    }
+                }
+            }
+            touches::LaneTouch {
+                id: l.id,
+                project: l.project_id.or_else(|| {
+                    l.item_ids
+                        .iter()
+                        .find_map(|i| known.get(i).and_then(|k| k.project))
+                }),
+                touches: paths,
+                complete: l.item_ids.iter().all(|i| said.contains_key(i)),
+                under_way: (l.lead_session_id.is_some()
+                    || l.item_ids
+                        .iter()
+                        .any(|i| attempts.get(i).is_some_and(|ts| !ts.is_empty())))
+                    && !l.item_ids.iter().all(done),
+            }
+        })
+        .collect();
+    let steps = touches::gate_lane_starts(steps, &lane_of, &units);
+    let laneless: std::collections::HashSet<i64> = items
+        .iter()
+        .map(|i| i.id)
+        .filter(|i| !lane_of.contains_key(i))
+        .collect();
+    Ok(touches::gate_items(
+        steps,
+        &known,
+        &running,
+        Some(&laneless),
+    ))
 }
 
 /// The plan a mission's detail carries: `None` for a draft or a finished
@@ -314,6 +406,21 @@ fn start_for(
         (None, _) => None,
     };
     let (host_alias, profile) = grant_placement(s, grant, project_id);
+    // A run that builds on earlier work (a retry, a review, a test) goes
+    // where that work is when the grant allows that host and it is up
+    // (lanes design P2, `run::prior_work`), billing the grant's own login.
+    let (host_alias, profile) = match super::run::prior_work(s, item_id)? {
+        Some(p)
+            if p.host_up
+                && host_alias.as_deref() != Some(p.host_alias.as_str())
+                && grant
+                    .and_then(|g| g.hosts.as_ref())
+                    .is_some_and(|h| h.contains(&p.host_alias)) =>
+        {
+            (Some(p.host_alias), grant.and_then(|g| g.profile.clone()))
+        }
+        _ => (host_alias, profile),
+    };
     Ok(StartArgs {
         item_id: Some(item_id),
         project_id,
@@ -478,6 +585,23 @@ async fn apply_step_inner(
                 (start_for(&s, m, item_id, actor, a.grant.as_ref())?, a.grant)
             };
             let role = step.role.as_deref().unwrap_or("implement");
+            // Lanes L3: a lane's task runs in the lane's lead session.
+            if role == "implement" && m.policy.execution == "lane" {
+                let lane = lock(&deps.store)?.item_lane(item_id)?;
+                if let Some(lane) = lane {
+                    return lanes::run_in_lane(
+                        deps,
+                        m,
+                        lane,
+                        item_id,
+                        role,
+                        start,
+                        step.context.as_deref(),
+                        view,
+                    )
+                    .await;
+                }
+            }
             // F3: a review or a test, headless in the implementer's
             // checkout, when the setting is on and the checkout allows.
             if let Some(started) = checks::try_start(
@@ -519,6 +643,20 @@ async fn apply_step_inner(
                 .item_id
                 .ok_or_else(|| IpcError::new(codes::E_INVALID, "a close step names its item"))?;
             let s = lock(&deps.store)?;
+            // The completion gate's evidence: the loop never closes an item
+            // whose implement run shows no commits or files. A person's
+            // press is never refused (they see it on the card).
+            if *actor == Actor::Loop {
+                if let Some(e) =
+                    crate::service::work::gate::item_run_evidence(&s, item_id, now_unix())?
+                        .filter(|e| e.state == "missing" || e.state == "pending")
+                {
+                    return Err(IpcError::new(
+                        codes::E_INVALID_STATE,
+                        format!("no run evidence: {}", e.detail),
+                    ));
+                }
+            }
             s.set_item_status(item_id, "done")?;
             s.wake_mission(m.id)?;
             Ok(("closed".into(), None))
@@ -532,6 +670,13 @@ async fn apply_step_inner(
                 ));
             }
             let s = lock(&deps.store)?;
+            // Red CI on its pull requests holds the step; only the
+            // mission's own Complete takes a person's override.
+            if let Some(e) =
+                super::missions::ci_step_refusal(&super::missions::red_prs(&s, view, m.id)?)
+            {
+                return Err(e);
+            }
             if let Some(root) = m.root_item_id {
                 s.set_item_status(root, "done")?;
             }
@@ -712,11 +857,25 @@ async fn apply_card(
             let lines: Vec<Vec<String>> =
                 serde_json::from_value(p.get("done_when").cloned().unwrap_or_default())
                     .unwrap_or_default();
+            let lanes: Vec<Option<String>> =
+                serde_json::from_value(p.get("lanes").cloned().unwrap_or_default())
+                    .unwrap_or_default();
+            let touches: Vec<Vec<String>> =
+                serde_json::from_value(p.get("touches").cloned().unwrap_or_default())
+                    .unwrap_or_default();
             let s = lock(&deps.store)?;
             let made = s.propose_tree(root, &tree, "planner")?;
             for (i, row) in made.iter().enumerate() {
                 if let Some(l) = lines.get(i).filter(|l| !l.is_empty()) {
                     s.set_item_done_when(row.id, l, &actor.name())?;
+                }
+                // Lanes design L2: the lane the planner named.
+                if let Some(l) = lanes.get(i).and_then(Option::as_deref) {
+                    s.set_item_lane(m.id, row.id, Some(l), row.project_id, &actor.name())?;
+                }
+                // Lanes design L5: what it said the task changes.
+                if let Some(t) = touches.get(i).filter(|t| !t.is_empty()) {
+                    s.set_item_touches(row.id, t)?;
                 }
             }
             if accept_created {
@@ -1002,43 +1161,107 @@ pub struct PlanOutcome {
     /// Why the answer was refused, when it was.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refused: Option<String>,
+    /// The usage limit the ask ended on (TASK-291): the mission's wait when
+    /// every login the planner may use is at one, else the last login's
+    /// when its tries ran out. Not a refused answer; the loop asks again
+    /// once a login has headroom.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting: Option<limit::LimitWait>,
 }
 
 /// The host the planner runs on: the policy's, the grant's first, else the
 /// host of the mission's latest worker that may see the mission's org.
 ///
+/// The project whose checkout the planner reads (`orchestrator.planner_reads`,
+/// lanes design L1): the root item's, else the mission's first repo. `None`
+/// when the setting is off or the mission names no repository.
+fn planner_reads_project(s: &Store, m: &MissionRow) -> Result<Option<i64>, IpcError> {
+    if !crate::service::settings::get_bool(s, crate::service::settings::ORCHESTRATOR_PLANNER_READS)
+    {
+        return Ok(None);
+    }
+    let root = match m.root_item_id {
+        Some(r) => s.get_work_item(r)?.and_then(|i| i.project_id),
+        None => None,
+    };
+    Ok(root.or_else(|| m.repos.first().map(|r| r.project_id)))
+}
+
 /// Every LLM run of a mission (the planner, its release note, its triage
 /// card) is sent the mission's text, so the host must be one of the
 /// mission's org (transition plan, risk "Org text leaves the org"): a policy
 /// or grant host that is not refuses with `E_FORBIDDEN`, and a worker on
 /// such a host is passed over.
 fn planner_host(s: &Store, m: &MissionRow, grant: Option<&GrantRow>) -> Result<String, IpcError> {
-    let named = m
-        .policy
-        .planner_host
-        .as_ref()
-        .map(|h| (h, "policy.planner_host"));
-    let granted = grant
-        .and_then(|g| g.hosts.as_ref())
-        .and_then(|h| h.first())
-        .map(|h| (h, "the grant's first host"));
-    if let Some((h, from)) = named.or(granted) {
-        require_host_sees_org(s, h, m.org_id, from)?;
-        return Ok(h.clone());
+    Ok(planner_hosts_up_to(s, m, grant, 1)?.swap_remove(0))
+}
+
+/// Every host the planner may run on, [`planner_host`]'s first (TASK-291:
+/// the rest are where it goes when that one's logins are at their usage
+/// limit): the policy's host alone, else the grant's hosts of the
+/// mission's org, else the hosts of the mission's workers that see it, by
+/// item and task. Never empty.
+fn planner_hosts(
+    s: &Store,
+    m: &MissionRow,
+    grant: Option<&GrantRow>,
+) -> Result<Vec<String>, IpcError> {
+    planner_hosts_up_to(s, m, grant, usize::MAX)
+}
+
+/// [`planner_hosts`], the first `max` of them: the walk of the mission's
+/// workers stops there, and looks each worker session and host up once
+/// (review r8: it ran under the store lock on every limit check).
+fn planner_hosts_up_to(
+    s: &Store,
+    m: &MissionRow,
+    grant: Option<&GrantRow>,
+    max: usize,
+) -> Result<Vec<String>, IpcError> {
+    if let Some(h) = &m.policy.planner_host {
+        require_host_sees_org(s, h, m.org_id, "policy.planner_host")?;
+        return Ok(vec![h.clone()]);
     }
+    if let Some(hosts) = grant
+        .and_then(|g| g.hosts.as_ref())
+        .filter(|h| !h.is_empty())
+    {
+        require_host_sees_org(s, &hosts[0], m.org_id, "the grant's first host")?;
+        let mut out = vec![hosts[0].clone()];
+        for h in &hosts[1..] {
+            if !out.contains(h) && host_sees_org(s, h, m.org_id)? {
+                out.push(h.clone());
+            }
+        }
+        return Ok(out);
+    }
+    let mut out: Vec<String> = Vec::new();
     let mut passed_over = None;
-    for i in s.mission_items(m.id)? {
+    let mut seen_sessions = std::collections::HashSet::new();
+    let mut seen_hosts = std::collections::HashSet::new();
+    'walk: for i in s.mission_items(m.id)? {
         for t in s.tasks_for_item(i.id)? {
-            if let Some(w) = t
-                .worker_session_id
-                .and_then(|w| s.get_session_by_id(w).ok().flatten())
-            {
-                if host_sees_org(s, &w.host_alias, m.org_id)? {
-                    return Ok(w.host_alias);
+            let Some(sid) = t.worker_session_id.filter(|w| seen_sessions.insert(*w)) else {
+                continue;
+            };
+            let Some(w) = s.get_session_by_id(sid).ok().flatten() else {
+                continue;
+            };
+            if !seen_hosts.insert(w.host_alias.clone()) {
+                continue;
+            }
+            if host_sees_org(s, &w.host_alias, m.org_id)? {
+                out.push(w.host_alias);
+                if out.len() >= max {
+                    break 'walk;
                 }
+            } else {
                 passed_over.get_or_insert(w.host_alias);
             }
         }
+    }
+    if !out.is_empty() {
+        return Ok(out);
     }
     if let Some(h) = passed_over {
         return Err(other_org_host(&h, "its workers' host"));
@@ -1157,130 +1380,34 @@ impl Drop for PlannerSlot {
     }
 }
 
-/// Ask the planner about `m` now, and card its answer.
-pub async fn run_planner(
+/// The planner's cards the loop applies itself at `auto_level`, in order;
+/// the rest are returned as they are, for a person.
+async fn loop_apply_cards(
     deps: &Deps,
     m: &MissionRow,
-    why: &str,
-    actor: &Actor,
-) -> Result<PlanOutcome, IpcError> {
-    let _slot = PlannerSlot::take(deps, m)?;
-    let now = now_unix();
-    let (host, prompt, model, auto_level, accept_created) = {
-        let s = lock(&deps.store)?;
-        let a = autonomy(&s, m, now)?;
-        let runs = s.mission_planner_runs_since(m.id, now - 3600)?;
-        if runs >= m.policy.max_planner_runs_per_hour as i64 {
-            return Err(IpcError::new(
-                codes::E_LIMIT,
-                format!(
-                    "the planner ran {runs} times in the last hour (policy.max_planner_runs_per_hour)"
-                ),
-            ));
-        }
-        let host = planner_host(&s, m, a.grant.as_ref())?;
-        let items = s.mission_items(m.id)?;
-        let graph = super::graph::build(&s, &ViewScope::internal(), &items)?;
-        let steps = steps_for(&s, m, &a)?;
-        let cards = s.mission_cards(m.id, CARDS_SHOWN)?;
-        let events = s.mission_events(m.id, None, 40)?;
-        let snap = planner::snapshot(&planner::SnapshotInput {
-            mission: m,
-            items: &items,
-            graph: &graph,
-            steps: &steps,
-            cards: &cards,
-            events: &events,
-            why,
-        });
-        event(
-            &s,
-            m.id,
-            "planned",
-            &actor.name(),
-            None,
-            serde_json::json!({ "why": why, "host": host }),
-        );
-        (
-            host,
-            format!("{}\n\n{snap}", planner::PLANNER_PROMPT),
-            m.policy
-                .planner_model
-                .clone()
-                .unwrap_or_else(|| planner::PLANNER_DEFAULT_MODEL.into()),
-            a.effective,
-            a.effective >= 3 && m.policy.task_creation == "auto",
-        )
-    };
-    let script = planner::planner_script(&model, &prompt);
-    let out = crate::ssh::run_shell_bounded(
-        deps.ssh.as_ref(),
-        &host,
-        &script,
-        Duration::from_secs(10),
-        Duration::from_secs(planner::PLANNER_HOST_TIMEOUT_SECS + 20),
-    )
-    .await?;
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let answer = match planner::parse_planner_output(&stdout) {
-        PlannerOutput::Ran(ran) => {
-            let (answer, usage) = planner::planner_answer(ran);
-            let s = lock(&deps.store)?;
-            book_planner_run(&s, m, &host, &model, usage.as_ref(), now_unix());
-            // Claude Code's own "Login expired" is not a malformed answer:
-            // say whose login it is and how to sign it in again.
-            if claude_print::run_signed_out(usage.as_ref(), &answer, &out.stderr) {
-                return Err(claude_print::signed_out_error(&host, None));
-            }
-            answer
-        }
-        PlannerOutput::NoClaude => {
-            return Err(IpcError::new(
-                codes::E_INVALID_STATE,
-                format!("claude is not on {host}'s PATH"),
-            ))
-        }
-        PlannerOutput::Nothing if claude_print::run_signed_out(None, "", &out.stderr) => {
-            return Err(claude_print::signed_out_error(&host, None))
-        }
-        PlannerOutput::Nothing => {
-            return Err(IpcError::new(
-                codes::E_SHELL,
-                format!("the planner on {host} gave no answer"),
-            ))
-        }
-    };
-    let commands = match planner::parse_commands(&answer) {
-        Ok(c) => c,
-        Err(mut why) => {
-            if answer.trim().is_empty() && !out.stderr.is_empty() {
-                // `claude` printed nothing: what it said went to stderr.
-                why.push_str(&format!(
-                    "; claude said: {}",
-                    crate::service::work::summary::last_error_line(&out.stderr)
-                ));
-            }
-            let s = lock(&deps.store)?;
-            event(
-                &s,
-                m.id,
-                "refused",
-                "planner",
-                None,
-                serde_json::json!({ "why": why }),
-            );
-            return Ok(PlanOutcome {
-                mission_id: m.id,
-                cards: vec![],
-                refused: Some(why),
-            });
-        }
-    };
-    let cards = card_commands(deps, m, &commands, now)?;
-    // What the autonomy covers is applied now; the rest waits for a person.
+    cards: Vec<CardRow>,
+    auto_level: i64,
+    accept_created: bool,
+) -> Result<Vec<CardRow>, IpcError> {
     let mut shown = Vec::with_capacity(cards.len());
     for c in cards {
         if loop_applies_card(&c.kind, auto_level) {
+            // Each earlier card's apply may take an SSH start, so this one
+            // sat `open` meanwhile, where a person can dismiss or apply it.
+            // Claimed as a person's decision is, and re-read: a card decided
+            // in that window is theirs, never applied a second time.
+            let Ok(_claim) = CardClaim::take(c.id) else {
+                shown.push(c);
+                continue;
+            };
+            let current = lock(&deps.store)?.get_card(c.id)?;
+            match current {
+                Some(card) if card.state == "open" => {}
+                other => {
+                    shown.push(other.unwrap_or(c));
+                    continue;
+                }
+            }
             let res = apply_card(
                 deps,
                 m,
@@ -1302,11 +1429,282 @@ pub async fn run_planner(
             shown.push(c);
         }
     }
+    Ok(shown)
+}
+
+/// Ask the planner about `m` now, and card its answer.
+pub async fn run_planner(
+    deps: &Deps,
+    m: &MissionRow,
+    why: &str,
+    actor: &Actor,
+) -> Result<PlanOutcome, IpcError> {
+    let _slot = PlannerSlot::take(deps, m)?;
+    let now = now_unix();
+    let (mut login, grant, snap, reads, model, auto_level, accept_created, plan_nodes) = {
+        let s = lock(&deps.store)?;
+        let a = autonomy(&s, m, now)?;
+        let runs = s.mission_planner_runs_since(m.id, now - 3600)?;
+        if runs >= m.policy.max_planner_runs_per_hour as i64 {
+            return Err(IpcError::new(
+                codes::E_LIMIT,
+                format!(
+                    "the planner ran {runs} times in the last hour (policy.max_planner_runs_per_hour)"
+                ),
+            ));
+        }
+        // TASK-291: a login at its usage limit is passed over; with none
+        // left the mission waits for the reset, and nothing is asked.
+        // Review r10: every login signed out is said on the log, so the
+        // mission shows which to sign in again and the loop backs off.
+        let words = limit::Words::read(&s, m.id)?;
+        let login = match limit::choose_in(&s, m, a.grant.as_ref(), now, &words, &[]) {
+            Ok(Ok(l)) => l,
+            Ok(Err(wait)) => return Ok(waiting_outcome(&s, m, wait)),
+            Err(e) => {
+                if limit::is_signed_out_refusal(&e) {
+                    limit::say_signed_out(&s, m.id, &words, &e, &actor.name());
+                }
+                return Err(e);
+            }
+        };
+        let items = s.mission_items(m.id)?;
+        let graph = super::graph::build(&s, &ViewScope::internal(), &items)?;
+        let steps = steps_for(&s, m, &a)?;
+        let cards = s.mission_cards(m.id, CARDS_SHOWN)?;
+        let events = s.mission_events(m.id, None, 40)?;
+        let snap = planner::snapshot(&planner::SnapshotInput {
+            mission: m,
+            items: &items,
+            graph: &graph,
+            steps: &steps,
+            cards: &cards,
+            events: &events,
+            why,
+        });
+        event(
+            &s,
+            m.id,
+            "planned",
+            &actor.name(),
+            None,
+            serde_json::json!({ "why": why, "host": login.host, "profile": login.profile }),
+        );
+        (
+            login,
+            a.grant.clone(),
+            snap,
+            planner_reads_project(&s, m)?,
+            m.policy
+                .planner_model
+                .clone()
+                .unwrap_or_else(|| planner::PLANNER_DEFAULT_MODEL.into()),
+            a.effective,
+            a.effective >= 3 && m.policy.task_creation == "auto",
+            planner::plan_nodes(&items, &graph, m.root_item_id),
+        )
+    };
+    let mut attempts = 0;
+    // Review r8: a signed-out login is passed over for the next one, like a
+    // login at its limit; the first one's refusal is the answer when none
+    // is left.
+    let mut signed_out: Vec<limit::Login> = Vec::new();
+    let mut first_signed_out: Option<IpcError> = None;
+    // Whether this ask recorded a wait, which a later login's answer clears.
+    let mut waited = false;
+    let (answer, stderr) = loop {
+        attempts += 1;
+        let (host, profile) = (login.host.as_str(), login.profile.as_deref());
+        // Lanes design L1: the planner reads the repository's checkout on
+        // its host when `orchestrator.planner_reads` is on. A checkout it
+        // cannot have is said on the log, and it plans without reading.
+        let checkout = match reads {
+            Some(project_id) => {
+                match crate::service::sessions::project_checkout_on(
+                    &deps.store,
+                    &deps.ssh,
+                    host,
+                    project_id,
+                )
+                .await
+                {
+                    Ok(dir) => Some(dir),
+                    Err(e) => {
+                        let s = lock(&deps.store)?;
+                        event(
+                            &s,
+                            m.id,
+                            "note",
+                            "fleet",
+                            None,
+                            serde_json::json!({ "text": format!(
+                                "the planner did not read the repository on {host}: {}",
+                                e.message
+                            ) }),
+                        );
+                        None
+                    }
+                }
+            }
+            None => None,
+        };
+        let prompt = format!("{}\n\n{snap}", planner::planner_prompt(checkout.is_some()));
+        let (script, secs) = match &checkout {
+            Some(dir) => (
+                planner::planner_script_in(&model, &prompt, profile, dir),
+                planner::PLANNER_READS_TIMEOUT_SECS,
+            ),
+            None => (
+                planner::planner_script_as(&model, &prompt, profile),
+                planner::PLANNER_HOST_TIMEOUT_SECS,
+            ),
+        };
+        let script = script.map_err(|e| IpcError::new(codes::E_INVALID, e))?;
+        let out = crate::ssh::run_shell_bounded(
+            deps.ssh.as_ref(),
+            host,
+            &script,
+            Duration::from_secs(10),
+            Duration::from_secs(secs + 20),
+        )
+        .await?;
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        // `None`: Claude Code's own "Login expired", no malformed answer.
+        let (answer, usage) = match planner::parse_planner_output(&stdout) {
+            PlannerOutput::Ran(ran) => {
+                let (answer, usage) = planner::planner_answer(ran);
+                let s = lock(&deps.store)?;
+                book_planner_run(&s, m, host, &model, usage.as_ref(), now_unix());
+                if claude_print::run_signed_out(usage.as_ref(), &answer, &out.stderr) {
+                    (None, None)
+                } else {
+                    (Some(answer), usage)
+                }
+            }
+            PlannerOutput::NoClaude => {
+                return Err(IpcError::new(
+                    codes::E_INVALID_STATE,
+                    format!("claude is not on {host}'s PATH"),
+                ))
+            }
+            PlannerOutput::Nothing if claude_print::run_signed_out(None, "", &out.stderr) => {
+                (None, None)
+            }
+            // The limit said on stderr alone is read below.
+            PlannerOutput::Nothing
+                if claude_print::run_usage_limit(None, "", &out.stderr).is_some() =>
+            {
+                (Some(String::new()), None)
+            }
+            PlannerOutput::Nothing => {
+                return Err(IpcError::new(
+                    codes::E_SHELL,
+                    format!("the planner on {host} gave no answer"),
+                ))
+            }
+        };
+        let Some(answer) = answer else {
+            // Say whose login it is and how to sign it in again, unless
+            // another login answers.
+            let refusal = claude_print::signed_out_error(host, profile);
+            let first = first_signed_out.take().unwrap_or(refusal);
+            signed_out.push(login.clone());
+            let s = lock(&deps.store)?;
+            let words = limit::Words::read(&s, m.id)?;
+            // This ask's own refusal, not the chooser's, when none is left.
+            match limit::choose_in(&s, m, grant.as_ref(), now_unix(), &words, &signed_out) {
+                Ok(Ok(next)) if attempts < limit::LIMIT_ATTEMPTS => {
+                    first_signed_out = Some(first);
+                    login = next;
+                    continue;
+                }
+                _ => return Err(first),
+            }
+        };
+        // A command array never opens with Claude's limit words, so only an
+        // answer that is not one is read for them; and only Claude Code's
+        // own error, not the model's text (review r8).
+        let hit = match planner::parse_commands(&answer) {
+            Ok(_) => None,
+            Err(_) => claude_print::run_usage_limit(usage.as_ref(), &answer, &out.stderr),
+        };
+        let Some(hit) = hit else {
+            if waited {
+                limit::cleared(&*lock(&deps.store)?, m.id, &login);
+            }
+            break (answer, out.stderr);
+        };
+        let s = lock(&deps.store)?;
+        let now = now_unix();
+        let wait = limit::answered(&s, &login, &hit, now);
+        limit::record(&s, m.id, &wait);
+        waited = true;
+        let words = limit::Words::read(&s, m.id)?;
+        match limit::choose_in(&s, m, grant.as_ref(), now, &words, &signed_out)? {
+            Ok(next) if attempts < limit::LIMIT_ATTEMPTS => login = next,
+            // Another login has headroom; the loop asks there next. This
+            // login's wait is said, not the mission's (review r8).
+            Ok(_) => {
+                return Ok(PlanOutcome {
+                    mission_id: m.id,
+                    cards: vec![],
+                    refused: None,
+                    waiting: Some(wait),
+                })
+            }
+            Err(wait) => return Ok(waiting_outcome(&s, m, wait)),
+        }
+    };
+    let commands = match planner::parse_commands(&answer)
+        .and_then(|c| planner::check_merge_waves(&c, &plan_nodes).map(|()| c))
+    {
+        Ok(c) => c,
+        Err(mut why) => {
+            if answer.trim().is_empty() && !stderr.is_empty() {
+                // `claude` printed nothing: what it said went to stderr.
+                why.push_str(&format!(
+                    "; claude said: {}",
+                    crate::service::work::summary::last_error_line(&stderr)
+                ));
+            }
+            let s = lock(&deps.store)?;
+            event(
+                &s,
+                m.id,
+                "refused",
+                "planner",
+                None,
+                serde_json::json!({ "why": why }),
+            );
+            return Ok(PlanOutcome {
+                mission_id: m.id,
+                cards: vec![],
+                refused: Some(why),
+                waiting: None,
+            });
+        }
+    };
+    let cards = card_commands(deps, m, &commands, now)?;
+    // What the autonomy covers is applied now; the rest waits for a person.
+    let shown = loop_apply_cards(deps, m, cards, auto_level, accept_created).await?;
     Ok(PlanOutcome {
         mission_id: m.id,
         cards: shown,
         refused: None,
+        waiting: None,
     })
+}
+
+/// Record that the mission waits on `wait` and say so as the planner's
+/// outcome.
+fn waiting_outcome(s: &Store, m: &MissionRow, wait: limit::LimitWait) -> PlanOutcome {
+    limit::record(s, m.id, &wait);
+    PlanOutcome {
+        mission_id: m.id,
+        cards: vec![],
+        refused: None,
+        waiting: Some(wait),
+    }
 }
 
 /// The planner's commands as cards: every `create_item` of the answer in
@@ -1339,6 +1737,8 @@ fn card_commands(
                 payload: Some(serde_json::json!({
                     "tree": tree,
                     "done_when": planner::done_when_of(commands),
+                    "lanes": planner::lanes_of(commands),
+                    "touches": planner::touches_of(commands),
                 })),
             },
         )? {
@@ -1452,10 +1852,18 @@ pub async fn plan_now(
     .await
 }
 
-/// `work_link { action: mission_grant, mission_id, level, hours, budget_cents?,
-/// hosts?, max_parallel?, profile? }`: a person signs what the loop may do by itself,
-/// for this plan, until it expires. Never an agent's: the scope must be a
-/// person's own, and the mission theirs to change.
+/// `work_link { action: mission_grant, mission_id, level, hours?, budget_cents?,
+/// until_done?, hosts?, max_parallel?, profile? }`: a person signs what the
+/// loop may do by itself, for this plan, until it expires: after `hours`, or
+/// with `until_done` when the mission completes (a finite mission only, and
+/// only with a budget, which is then its one bound). Never an agent's: the
+/// scope must be a person's own, and the mission theirs to change.
+///
+/// A grant above the level the mission asks lifts the ask to it while the
+/// grant holds (TASK-293, [`autonomy`]): the loop runs at the least of the
+/// ask, the fleet's ceiling and the grant, so a mission made in the room (L0)
+/// never ran a step under an L2 grant. The mission's own level is left as it
+/// is, so the grant's autonomy ends with the grant (review r8).
 pub fn grant(
     args: &WorkLinkArgs,
     store: &Mutex<Store>,
@@ -1468,6 +1876,19 @@ pub fn grant(
         .ok_or_else(|| IpcError::new(codes::E_INVALID, "mission_grant needs level (1 to 3)"))?;
     if !(1..=3).contains(&level) {
         return Err(IpcError::new(codes::E_INVALID, "a grant's level is 1 to 3"));
+    }
+    let until_done = args.until_done.unwrap_or(false);
+    if until_done && args.hours.is_some() {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            "a grant lasts some hours or until the mission completes, not both",
+        ));
+    }
+    if until_done && args.budget_cents.is_none() {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            "a grant until the mission completes needs a budget (budget_cents)",
+        ));
     }
     let hours = args.hours.unwrap_or(8) as i64;
     if !(1..=GRANT_MAX_SECS / 3600).contains(&hours) {
@@ -1502,7 +1923,17 @@ pub fn grant(
             format!("{} is {}", m.name, m.state),
         ));
     }
+    if until_done && m.mode != "finite" {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            format!(
+                "{} is {}: it never completes, so its grant runs some hours",
+                m.name, m.mode
+            ),
+        ));
+    }
     let who = super::graph::actor(scope);
+    let lifted_from = (m.level < level).then_some(m.level);
     s.revoke_grants(id)?;
     let g = s.add_grant(
         id,
@@ -1513,7 +1944,11 @@ pub fn grant(
             budget_micros: args.budget_cents.map(|c| c * 10_000),
             max_parallel: args.max_parallel.map(|p| p as i64),
             profile: profile.clone(),
-            expires_at: now_unix() + hours * 3600,
+            expires_at: if until_done {
+                GRANT_UNTIL_DONE_AT
+            } else {
+                now_unix() + hours * 3600
+            },
         },
     )?;
     event(
@@ -1522,7 +1957,14 @@ pub fn grant(
         "grant",
         &who,
         None,
-        serde_json::json!({ "level": level, "hours": hours, "budget_cents": args.budget_cents, "profile": profile }),
+        serde_json::json!({
+            "level": level,
+            "hours": (!until_done).then_some(hours),
+            "until_done": until_done,
+            "budget_cents": args.budget_cents,
+            "profile": profile,
+            "lifted_from": lifted_from,
+        }),
     );
     s.wake_mission(id)?;
     Ok(g)
@@ -1618,11 +2060,17 @@ fn next_wake(m: &MissionRow, counts: &MissionTaskCounts, now: i64) -> i64 {
 /// a mission with nothing planned under its root, or one that needs a
 /// person's answer since its last call, and only when something happened
 /// since that call.
+///
+/// A planner whose last ask ended at a usage limit (TASK-291) is asked again
+/// as soon as a login it may use has headroom (the reset passed, or another
+/// login is under the line), and never before.
 fn planner_wanted(
     s: &Store,
     m: &MissionRow,
     steps: &[Step],
     counts: &MissionTaskCounts,
+    grant: Option<&GrantRow>,
+    now: i64,
 ) -> Result<Option<&'static str>, IpcError> {
     if s.mission_cards(m.id, CARDS_SHOWN)?
         .iter()
@@ -1630,11 +2078,17 @@ fn planner_wanted(
     {
         return Ok(None);
     }
-    let last_plan = s
-        .mission_events(m.id, None, 200)?
-        .into_iter()
-        .find(|e| e.kind == "planned")
-        .map(|e| e.at);
+    let words = limit::Words::read(s, m.id)?;
+    if words.waiting() {
+        let free = matches!(limit::choose_in(s, m, grant, now, &words, &[]), Ok(Ok(_)));
+        return Ok(free.then_some("the usage limit it waited on is over"));
+    }
+    // Refused for signed-out logins (review r10): not asked again until a
+    // login it may use is signed in, or something else answers.
+    if words.signed_out().is_some() && limit::choose_in(s, m, grant, now, &words, &[]).is_err() {
+        return Ok(None);
+    }
+    let last_plan = words.last_planned_at();
     let items = s.mission_items(m.id)?;
     if items.len() <= 1 && counts.open == 0 && last_plan.is_none() {
         return Ok(Some("break the goal down into tasks"));
@@ -1657,27 +2111,28 @@ fn planner_wanted(
 /// The steps that start a worker session.
 const RUN_STEPS: &[&str] = &["run", "retry", "review", "test", "integrate"];
 
-/// The account a loop run of `step` would bill, when it is at or past
-/// `accounts.pause_at` (redesign 8.7): on the grant's first host, else where
-/// the start would land (`tickets::seen_place` / `seen_host`, the start's
-/// own choice: a start rule, the key's history, the project's last host),
-/// under the grant's login. `None` when the run's host cannot be told yet:
-/// the start then decides, as before.
+/// Why a loop run of `step` waits, when the login it would bill is at or
+/// past `accounts.pause_at` (redesign 8.7) or signed out (review w02-6): on
+/// the grant's first host, else where the start would land
+/// (`tickets::seen_place` / `seen_host` / `placed_host`, the start's own
+/// choice: the key's history, the project's last host, placement's login
+/// there), under the grant's login. `None` when the run's host cannot be
+/// told yet: the start then decides, as before.
 fn run_over_limit(
     s: &Store,
     m: &MissionRow,
     step: &Step,
     grant: Option<&GrantRow>,
     now: i64,
-) -> Result<Option<crate::service::account_limits::OverLimit>, IpcError> {
+) -> Result<Option<String>, IpcError> {
     let Some(item_id) = step.item_id else {
         return Ok(None);
     };
     let Ok(start) = start_for(s, m, item_id, &Actor::Loop, grant) else {
         return Ok(None);
     };
-    let host = match start.host_alias {
-        Some(h) => Some(h),
+    let (host, placed_profile) = match start.host_alias {
+        Some(h) => (Some(h), None),
         None => {
             // A work item with no key cannot be started: nothing to hold.
             let Some(key) = s.get_work_item(item_id)?.and_then(|i| i.key) else {
@@ -1687,15 +2142,32 @@ fn run_over_limit(
             let (_, seen, _) =
                 crate::service::trackers::tickets::seen_place(s, &key, item_org, start.project_id)?;
             match start.project_id.or(seen.as_ref().map(|p| p.0)) {
-                Some(p) => crate::service::trackers::tickets::seen_host(s, seen, p)?,
-                None => None,
+                // Where the start itself lands (`plan_resolved`): the placed
+                // host and its login, not only the host last seen (review
+                // w02-1), so the hold looks at what the start would bill.
+                Some(p) => {
+                    let seen = crate::service::trackers::tickets::seen_host(s, seen, p)?;
+                    match crate::service::trackers::tickets::placed_host(s, p, seen) {
+                        Some((h, profile)) => (Some(h), profile),
+                        None => (None, None),
+                    }
+                }
+                None => (None, None),
             }
         }
     };
     let Some(host) = host else {
         return Ok(None);
     };
-    crate::service::account_limits::over_limit(s, &host, start.profile.as_deref(), now)
+    let profile = start.profile.or(placed_profile);
+    if let Some(over) =
+        crate::service::account_limits::over_limit(s, &host, profile.as_deref(), now)?
+    {
+        return Ok(Some(over.reason()));
+    }
+    // A login fleet knows is signed out answers a run with `/login` (review
+    // w02-6): the run waits for it as for a spent one.
+    crate::service::login_health::signed_out_reason(s, &host, profile.as_deref())
 }
 
 /// Drop the loop's run steps whose account is over the line (redesign 8.7):
@@ -1713,7 +2185,7 @@ fn hold_runs_over_limit(
     for st in steps.drain(..) {
         if st.auto && RUN_STEPS.contains(&st.kind.as_str()) {
             if let Some(over) = run_over_limit(s, m, &st, grant, now)? {
-                why.get_or_insert_with(|| over.reason());
+                why.get_or_insert(over);
                 continue;
             }
         }
@@ -1803,11 +2275,11 @@ pub async fn tick_mission(deps: &Deps, id: i64, now: i64) -> Result<(), IpcError
                 return Ok(());
             }
         }
-        if counts.open > 0
-            && counts
-                .last_activity_at
-                .is_some_and(|at| now - at > m.policy.no_progress_secs as i64)
-        {
+        // A person's resume restarts the window: braking on the same stale
+        // run that paused it would pause the mission again before this tick
+        // ever tried to start a step.
+        let since = counts.last_activity_at.max(s.mission_resumed_at(id)?);
+        if counts.open > 0 && since.is_some_and(|at| now - at > m.policy.no_progress_secs as i64) {
             brake(
                 &s,
                 &m,
@@ -1841,7 +2313,7 @@ pub async fn tick_mission(deps: &Deps, id: i64, now: i64) -> Result<(), IpcError
     let want = {
         let s = lock(&deps.store)?;
         if a.effective >= 1 {
-            planner_wanted(&s, &m, &steps, &counts)?
+            planner_wanted(&s, &m, &steps, &counts, a.grant.as_ref(), now)?
         } else {
             None
         }
@@ -1859,7 +2331,12 @@ pub async fn tick_mission(deps: &Deps, id: i64, now: i64) -> Result<(), IpcError
     let s = lock(&deps.store)?;
     let counts = s.mission_task_counts(id)?;
     let m = s.get_mission(id)?.unwrap_or(m);
-    s.release_mission_lease(id, Some(next_wake(&m, &counts, now)), Some(now))?;
+    // A planner waiting on a usage limit is asked again at its reset.
+    let wake = match limit::wake_at(&s, id, now)? {
+        Some(reset) => next_wake(&m, &counts, now).min(reset.max(now + RESET_RECHECK_SECS)),
+        None => next_wake(&m, &counts, now),
+    };
+    s.release_mission_lease(id, Some(wake), Some(now))?;
     Ok(())
 }
 
@@ -1871,18 +2348,27 @@ pub async fn tick_once(deps: &Deps, now: i64) {
             // Pause all (redesign 8.1) before the loop's own switch, so
             // health says why nothing moves.
             if !crate::service::loops::gate_in("missions", &s, next) {
-                return;
+                None
+            // With the loop off no mission is ticked, but a failed git
+            // read is still read again below.
+            } else if settings::get_bool(&s, settings::ORCHESTRATOR_ENABLED) {
+                Some(s.missions_due(now).unwrap_or_default())
+            } else {
+                Some(Vec::new())
             }
-            if !settings::get_bool(&s, settings::ORCHESTRATOR_ENABLED) {
-                crate::service::loops::report("missions", Ok::<_, String>(()), next);
-                return;
-            }
-            s.missions_due(now).unwrap_or_default()
         }
         Err(e) => {
             crate::service::loops::report("missions", Err(e.to_string()), next);
             return;
         }
+    };
+    let Some(due) = due else {
+        // The evidence retry only reads git and writes evidence, so it runs
+        // under Pause all too (review r10): a pause longer than
+        // EVIDENCE_RETRY_SECS would leave a transient failed read `missing`
+        // for good.
+        crate::service::work::report::retry_unread_evidence(&deps.store, &deps.ssh, now).await;
+        return;
     };
     let mut failed: Option<String> = None;
     for id in due {
@@ -1894,6 +2380,11 @@ pub async fn tick_once(deps: &Deps, now: i64) {
             }
         }
     }
+    // A run whose git read failed (a host that dropped for a moment) is read
+    // again, in a mission or not and with the orchestrator off too: the gate
+    // holds it `pending` meanwhile. After the missions, outside every
+    // mission's lease, and bounded per pass.
+    crate::service::work::report::retry_unread_evidence(&deps.store, &deps.ssh, now).await;
     crate::service::loops::report("missions", failed.map_or(Ok(()), Err), next);
 }
 

@@ -117,15 +117,25 @@ describe('PageView — fields', () => {
       'enter a number',
     );
     expect(inv).not.toHaveBeenCalledWith('set_fleet_setting', expect.anything());
+    // Out of range: said in the row's own unit, before anything is sent
+    // (review w15-4).
     move.value = '999999';
     await fireEvent.change(move);
+    expect((await screen.findByTestId('setting-error-move.max_transcript_mb')).textContent).toContain(
+      'enter 1–4096 MiB',
+    );
+    expect(inv).not.toHaveBeenCalledWith('set_fleet_setting', expect.anything());
+    const base = registryRouter().impl;
+    inv.mockImplementation((cmd: string, args?: unknown) =>
+      cmd === 'set_fleet_setting' ? Promise.reject({ code: 'E_INVALID', message: 'the hub refused it' }) : base(cmd, args),
+    );
+    move.value = '2000';
+    await fireEvent.change(move);
     await fireEvent.click(screen.getByTestId('page-save'));
-    expect(
-      await screen.findByText(/move.max_transcript_mb must be an integer between 1 and 4096/),
-    ).toBeTruthy();
+    expect(await screen.findByText(/the hub refused it/)).toBeTruthy();
     // Refused: the typed value stays staged, so nothing typed is lost.
     expect(screen.getByTestId('page-save-count').textContent).toBe('1 change');
-    expect(move.value).toBe('999999');
+    expect(move.value).toBe('2000');
   });
 
   it('asks before a dangerous change, and cancel sends nothing', async () => {
@@ -548,5 +558,40 @@ describe('PageView — accessibility', () => {
     await waitFor(() => expect(table.textContent).toContain('claude-opus-5'));
     await screen.findByTestId('data-chart-usage.by_day');
     await expectAccessible(data.container);
+  });
+});
+
+describe('PageView — review w15', () => {
+  it('leaves out the fields a panel above already edits (w15-7)', () => {
+    render(PageView, {
+      props: {
+        page: pageOf('settings.control_api'),
+        pages: bundle.pages,
+        descs,
+        values: defaults,
+        sources: bundle.sources,
+        hideKeys: ['mcp.enabled', 'mcp.port', 'mcp.confirm_destructive'],
+        onnavigate: vi.fn(),
+      },
+    });
+    expect(screen.queryByTestId('setting-row-mcp.port')).toBeNull();
+    expect(screen.getByTestId('setting-row-mcp.broadcast_interval_secs')).toBeTruthy();
+  });
+
+  it('a restart tag says what restarts: the hub on a paired desktop (w15-9)', () => {
+    const home = bundle.pages.find((p) =>
+      [...(p.sections ?? []), ...(p.tabs ?? []).flatMap((t) => t.sections)].some((s) =>
+        s.items.some((i) => i.type === 'field' && i.key === 'reconcile.interval_secs'),
+      ),
+    ) as Page;
+    const mount = (remote: boolean) =>
+      render(PageView, {
+        props: { page: home, pages: bundle.pages, descs, values: defaults, sources: bundle.sources, remote, onnavigate: vi.fn() },
+      });
+    const local = mount(false);
+    expect(screen.getByTestId('setting-restart-reconcile.interval_secs').textContent).toBe('applies after the app restarts');
+    local.unmount();
+    mount(true);
+    expect(screen.getByTestId('setting-restart-reconcile.interval_secs').textContent).toBe('applies after the hub restarts');
   });
 });

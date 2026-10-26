@@ -1,6 +1,6 @@
 // Assets M5: the Inbox (spec, Workspace shell → Inbox; Rulings R16) and the
 // sentence header — pure functions over the listing and the cards.
-import { hostOrderOf, identitiesOf, oddHosts, type AssetIdentity, type AssetInventoryRow, type AssetListing, type AssetSummary, type HostState } from './assets';
+import { hostOrderOf, identitiesOf, isInternal, oddHosts, type AssetIdentity, type AssetInventoryRow, type AssetListing, type AssetSummary, type HostState } from './assets';
 import type { DotState } from './assets_visual';
 import { ago, heldBack, isOpenCard, keyOf, PERSONAL, type ChangesetSummary } from './assets_workspace';
 import { isUndoBanner } from './assets_cards';
@@ -115,7 +115,7 @@ export function buildInbox(input: InboxInput): Inbox {
 
   let hidden = 0;
   for (const id of identitiesOf(listing)) {
-    if (id.class === 'fleet_internal' || id.class === 'harness_internal') {
+    if (isInternal(id)) {
       hidden += 1;
       continue;
     }

@@ -1142,6 +1142,41 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// The items of `tracker_id` this hub wrote after `after` and before
+    /// `until`, still answering, oldest first, at most `limit`, with their
+    /// meta: what a fleet agent's poll pages through on a tracker that is not
+    /// Jira (`service::fleet_agents::runner`).
+    ///
+    /// Keyed on the local write (`updated_at`, which a sync moves only on a
+    /// real change), not the tracker's own `updated_ext`: an item a late sync
+    /// brings in is still read, and an unchanged item is not read again.
+    /// `after` is `(updated_at, id)` of the last row the caller read; a full
+    /// page leaves the rest for the next call from its last row. `until` is
+    /// exclusive, so a row written in the caller's own second waits for a
+    /// call that sees that second whole.
+    pub fn tracker_items_written_since(
+        &self,
+        tracker_id: i64,
+        after: (i64, i64),
+        until: i64,
+        limit: usize,
+    ) -> Result<Vec<(WorkItemRow, ItemMeta)>, IpcError> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {ITEM_COLUMNS}, meta FROM work_items \
+             WHERE tracker_id = ?1 AND unavailable_at IS NULL \
+               AND (updated_at > ?2 OR (updated_at = ?2 AND id > ?3)) AND updated_at < ?4 \
+             ORDER BY updated_at, id LIMIT ?5"
+        ))?;
+        let rows = stmt.query_map(
+            rusqlite::params![tracker_id, after.0, after.1, until, limit as i64],
+            |r| {
+                let meta: Option<String> = r.get(ITEM_COLUMN_COUNT)?;
+                Ok((map_item(r)?, ItemMeta::parse(meta.as_deref())))
+            },
+        )?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     /// Items the sessions on `host` work on: a live link whose session runs
     /// there, an ended link that ran there, or an open run
     /// (`work_link { run }`, a `tasks` row naming the item) whose worker is
@@ -1371,6 +1406,58 @@ mod tests {
         .unwrap();
         bus.take();
         (s, t.id, bus)
+    }
+
+    #[test]
+    fn items_written_since_page_oldest_first_by_local_write_and_answer() {
+        let (s, t, _) = with_tracker(&["ABC"]);
+        // The tracker's own `updated_ext` runs the other way round from the
+        // local write: a late sync brings in an item the tracker changed
+        // long ago, and it is still read in its turn.
+        for (ext, written, tracker_at) in
+            [("1", 50, 900), ("2", 200, 10), ("3", 200, 5), ("4", 400, 1)]
+        {
+            let w = TrackerItemWrite {
+                updated_ext: Some(tracker_at),
+                description: Some(format!("about {ext}")),
+                ..write(ext, &format!("ABC-{ext}"), ("To Do", "todo"))
+            };
+            let id = s.upsert_tracker_item(t, &w).unwrap().id;
+            s.conn
+                .execute(
+                    "UPDATE work_items SET updated_at = ?1 WHERE id = ?2",
+                    rusqlite::params![written, id],
+                )
+                .unwrap();
+        }
+        let page = |after, until, limit| -> Vec<(String, (i64, i64))> {
+            s.tracker_items_written_since(t, after, until, limit)
+                .unwrap()
+                .into_iter()
+                .map(|(r, _)| (r.key.unwrap(), (r.updated_at, r.id)))
+                .collect()
+        };
+        let keys = |rows: &[(String, (i64, i64))]| -> Vec<String> {
+            rows.iter().map(|(k, _)| k.clone()).collect()
+        };
+        assert_eq!(
+            keys(&page((0, 0), 1000, 10)),
+            ["ABC-1", "ABC-2", "ABC-3", "ABC-4"]
+        );
+        // A full page; the next one starts from its last row, ties by id.
+        let first = page((0, 0), 1000, 2);
+        assert_eq!(keys(&first), ["ABC-1", "ABC-2"]);
+        let next = page(first[1].1, 1000, 2);
+        assert_eq!(keys(&next), ["ABC-3", "ABC-4"]);
+        assert!(page(next[1].1, 1000, 2).is_empty());
+        // `until` is exclusive.
+        assert_eq!(keys(&page((50, i64::MAX), 400, 10)), ["ABC-2", "ABC-3"]);
+        let (_, meta) = &s.tracker_items_written_since(t, (399, 0), 1000, 1).unwrap()[0];
+        assert_eq!(meta.description.as_deref(), Some("about 4"));
+        assert!(s
+            .tracker_items_written_since(t + 1, (0, 0), 1000, 10)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

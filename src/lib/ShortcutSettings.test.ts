@@ -18,6 +18,15 @@ describe('Settings → Shortcuts', () => {
     expect(screen.getByTestId('shortcut-go-to-file').textContent).not.toContain('coming');
   });
 
+  it('shows what the ? sheet shows: the advertised chord and a 1–9 range (review w18-9)', () => {
+    render(ShortcutSettings);
+    const hosts = screen.getByTestId('shortcut-hosts').textContent ?? '';
+    expect(hosts).toContain('Ctrl+Shift+H');
+    expect(hosts).not.toContain('Super+I');
+    expect(screen.getByTestId('shortcut-jump-n').textContent).toContain('⌘1–⌘9');
+    expect(screen.getByTestId('shortcuts-section').textContent).not.toContain('0.5.3');
+  });
+
   it('filters by action or chord', async () => {
     render(ShortcutSettings);
     await fireEvent.input(screen.getByTestId('shortcuts-filter'), { target: { value: 'today' } });

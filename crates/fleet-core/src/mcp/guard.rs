@@ -1286,6 +1286,15 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: true,
         deadline: Deadline::Quick,
     },
+    // A worker's own report that its task is finished (the explicit path
+    // beside the marker scan). Only the task's worker passes the tool's gate.
+    ToolPolicy {
+        name: "task_report",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
     ToolPolicy {
         name: "decide_related_session",
         access: Access::Client,
@@ -1742,6 +1751,15 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
+    // Multi-hub Phase 3b: the caller's own profile (person, sign-in, the
+    // names of its own variables). Person-only like `my_grants`.
+    ToolPolicy {
+        name: "my_profile",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
     // Gap plan G4.2: a recipient's ask for a wider level, and the owner's
     // list and answer. Person-only like the rest of this block. Neither is
     // readonly (`access_requests` grants and declines) nor confirm-gated:
@@ -1855,8 +1873,48 @@ pub const OPERATOR_PROMPT_TOOLS: &[&str] =
 
 /// The operator's calls that start a Claude session: pre-approved at
 /// "Autopilot" inside a running mission's grant (F2). `dispatch_task` is here
-/// for its `new_worker` form.
-pub const OPERATOR_START_TOOLS: &[&str] = &["new_session", "dispatch_task"];
+/// for its `new_worker` form, `work_link` for `start`, `run` and `resume`
+/// (a task's session): its call site passes a start target only for those,
+/// so its `tidy_apply` kills still ask.
+pub const OPERATOR_START_TOOLS: &[&str] = &["new_session", "dispatch_task", "work_link"];
+
+/// Session care (`control.session_care`, on by default): the operator's
+/// calls that look after a session it started itself (not one it only
+/// briefed; [`OperatorFacts::own_start`]). `restart_session`
+/// (a wedged REPL, or back under another login after a limit) goes without a
+/// card at "Within your brief" and "Autopilot", at most
+/// [`CARE_RESTARTS_PER_HOUR`] times an hour per session; `safe_kill_session`
+/// (commit and push, then retire) at "Autopilot" only.
+pub const OPERATOR_CARE_TOOLS: &[&str] = &["restart_session", "safe_kill_session"];
+
+/// How many card-free care restarts one session gets in an hour: a session
+/// that wedges again right after every restart would otherwise be restarted
+/// on every digest, resuming (and paying for) its conversation each time,
+/// with no person ever seeing a card. Counted from its pre-approved
+/// `restart_session` events (`OperatorFacts::care_restarts_spent`).
+pub const CARE_RESTARTS_PER_HOUR: u32 = 3;
+
+/// The facts besides the position that [`operator_must_confirm_with`]
+/// decides on.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct OperatorFacts {
+    /// The call's target is a live session Control started or briefed
+    /// (`Store::is_open_control_handoff`).
+    pub own_handoff: bool,
+    /// The call starts a session inside a running mission's grant
+    /// (`Store::start_inside_mission_grant`).
+    pub inside_grant: bool,
+    /// The person turned session care on (`control.session_care`).
+    pub session_care: bool,
+    /// The call's target is a live session Control itself started
+    /// (`Store::is_control_started_session`). Session care restarts and
+    /// retires only these: a session Control merely sent a prompt to is
+    /// still the person's.
+    pub own_start: bool,
+    /// The target already had [`CARE_RESTARTS_PER_HOUR`] card-free
+    /// restarts in the last hour: its next restart asks a person.
+    pub care_restarts_spent: bool,
+}
 
 /// Whether a tool the operator calls is one a person approves at "Ask
 /// first": every `confirm: true` tool and every [`OPERATOR_CONFIRMS`] one.
@@ -1868,35 +1926,67 @@ pub fn operator_gated(name: &str) -> bool {
 /// even with `mcp.confirm_destructive` off, at autonomy `position`.
 ///
 /// - `own_handoff`: the call's target is a live session Control started or
-///   briefed (`Store::is_open_control_handoff`);
+///   briefed (`Store::is_open_control_handoff`) and still follows
+///   (`service::control_follow::session_followed`, review w04-4);
 /// - `inside_grant`: the call starts a session inside a running mission's
-///   grant (`Store::start_inside_mission_grant`).
+///   grant (`Store::start_inside_mission_grant`), never while Pause all is
+///   on (review w04-5).
 ///
 /// At **Ask first** (and **Custom**, which grants what Ask first does) every
 /// gated tool asks, as before. **Within your brief** lets a prompt or task
 /// to an open handoff through ([`OPERATOR_PROMPT_TOOLS`]). **Autopilot** also
-/// lets a start inside a grant through ([`OPERATOR_START_TOOLS`]). Kills,
-/// restarts, rewinds, restores, new projects and every `confirm: true` tool
-/// ask at every position. This reverses review round 15, F21 for those two
-/// cases only (the 2026-10-17 review's F2, approved by the owner).
+/// lets a start inside a grant through ([`OPERATOR_START_TOOLS`]). This
+/// function passes no session care, so here kills, restarts, rewinds,
+/// restores, new projects and every `confirm: true` tool ask at every
+/// position; [`operator_must_confirm_with`] adds session care's exception
+/// for [`OPERATOR_CARE_TOOLS`] on a session Control started itself. This
+/// reverses review round 15, F21 for those cases only (the 2026-10-17
+/// review's F2, approved by the owner).
 pub fn operator_must_confirm(
     name: &str,
     position: crate::service::autonomy::Position,
     own_handoff: bool,
     inside_grant: bool,
 ) -> bool {
+    operator_must_confirm_with(
+        name,
+        position,
+        OperatorFacts {
+            own_handoff,
+            inside_grant,
+            session_care: false,
+            own_start: false,
+            care_restarts_spent: false,
+        },
+    )
+}
+
+/// [`operator_must_confirm`] with session care in the facts: with it on,
+/// [`OPERATOR_CARE_TOOLS`] on a session Control started itself
+/// ([`OperatorFacts::own_start`]) go without a card as that
+/// list says. `work_link` is `confirm: true` for its tidy kills, so a start
+/// target is the only way it goes without a card.
+pub fn operator_must_confirm_with(
+    name: &str,
+    position: crate::service::autonomy::Position,
+    facts: OperatorFacts,
+) -> bool {
     use crate::service::autonomy::Position;
     if !operator_gated(name) {
         return false;
     }
-    if needs_confirmation(name) {
+    let start = OPERATOR_START_TOOLS.contains(&name) && facts.inside_grant;
+    if needs_confirmation(name) && !start {
         return true;
     }
-    let prompt = OPERATOR_PROMPT_TOOLS.contains(&name) && own_handoff;
-    let start = OPERATOR_START_TOOLS.contains(&name) && inside_grant;
+    let own = facts.own_handoff;
+    let prompt = OPERATOR_PROMPT_TOOLS.contains(&name) && own;
+    let care = facts.session_care && facts.own_start;
+    let restart = care && !facts.care_restarts_spent && name == "restart_session";
+    let retire = care && name == "safe_kill_session";
     match position.grants() {
-        Position::Brief => !prompt,
-        Position::Autopilot => !(prompt || start),
+        Position::Brief => !(prompt || restart),
+        Position::Autopilot => !(prompt || start || restart || retire),
         _ => true,
     }
 }
@@ -1912,6 +2002,16 @@ pub fn caller_must_confirm(
     inside_grant: bool,
 ) -> bool {
     is_operator && operator_must_confirm(name, position, own_handoff, inside_grant)
+}
+
+/// [`caller_must_confirm`] with every fact, session care included.
+pub fn caller_must_confirm_with(
+    is_operator: bool,
+    name: &str,
+    position: crate::service::autonomy::Position,
+    facts: OperatorFacts,
+) -> bool {
+    is_operator && operator_must_confirm_with(name, position, facts)
 }
 
 /// WHY the operator's call needs a person, in the words of the rule that
@@ -1930,6 +2030,14 @@ pub fn operator_confirm_reason(tool: &str) -> &'static str {
             "what the operator writes reaches a session without a person only at \
              \"Within your brief\" or \"Autopilot\", and only into a session it \
              started or briefed, whatever mcp.confirm_destructive says"
+        }
+        // Session care, on by default.
+        "restart_session" | "safe_kill_session" => {
+            "the operator's restarts and kills ask unless session care \
+             (control.session_care) is on and the session is one it started \
+             itself, not one it only briefed: restarts at \"Within your brief\" or \
+             \"Autopilot\", at most 3 an hour per session, retiring at \
+             \"Autopilot\" only, whatever mcp.confirm_destructive says"
         }
         // D12.
         _ => {
@@ -2003,6 +2111,7 @@ pub const NOT_FOR_HOST_TOKENS: &[&str] = &[
     "session_narrow",
     "session_access",
     "my_grants",
+    "my_profile",
     "session_ask_access",
     "access_requests",
     "session_presence",
@@ -2013,6 +2122,11 @@ pub const NOT_FOR_HOST_TOKENS: &[&str] = &[
     "runs",
     // Control's journal and its owner's words to Control (review F12).
     "control_journal",
+    // Control's pending auto-continue pick and its prompt, and the
+    // owner's paired clients and Control's login: the owner's, and a
+    // host's Claude proves no person.
+    "control_auto_continue",
+    "diagnose",
 ];
 
 // --- legacy name lists -------------------------------------------------------
@@ -2253,12 +2367,22 @@ pub enum ConfirmState {
     RunByFleet,
 }
 
+/// How a card of the operator's ended, as its [`ConfirmReplay`] is told.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfirmAnswer {
+    Approved,
+    Denied,
+    /// Nobody answered within [`CONFIRM_TTL`] (review w04-3): the card is
+    /// gone and nothing ran, so Control must hear it rather than wait on.
+    Expired,
+}
+
 /// What fleet does with an answered confirmation of the operator's (F1):
 /// called once with the answer, it runs the approved call and tells
-/// Control the result, or tells it the call was denied. Attached by
-/// `FleetTools::call_tool` to the nonce it just minted.
+/// Control the result, or tells it the call was denied or expired.
+/// Attached by `FleetTools::call_tool` to the nonce it just minted.
 pub type ConfirmReplay =
-    Box<dyn FnOnce(bool) -> futures_util::future::BoxFuture<'static, ()> + Send + 'static>;
+    Box<dyn FnOnce(ConfirmAnswer) -> futures_util::future::BoxFuture<'static, ()> + Send + 'static>;
 
 tokio::task_local! {
     /// The nonce whose approved call fleet is running now ([`as_replay`]).
@@ -2450,12 +2574,14 @@ impl PendingConfirms {
             }
         };
         if let Some(run) = replay {
-            match tokio::runtime::Handle::try_current() {
-                Ok(h) => {
-                    h.spawn(run(approved));
-                }
-                Err(_) => tracing::warn!("confirm answered outside a runtime; not replayed"),
-            }
+            spawn_replay(
+                run,
+                if approved {
+                    ConfirmAnswer::Approved
+                } else {
+                    ConfirmAnswer::Denied
+                },
+            );
         }
         true
     }
@@ -2555,8 +2681,34 @@ impl PendingConfirms {
     }
 }
 
+/// Drop the requests past [`CONFIRM_TTL`]. An unanswered one that carries
+/// a replay is told [`ConfirmAnswer::Expired`] (review w04-3), so Control —
+/// told "do not retry, fleet runs it and tells you" — hears that nobody
+/// answered instead of waiting for a note that never comes.
 fn prune(entries: &mut HashMap<String, Pending>, now: Instant) {
-    entries.retain(|_, p| now.saturating_duration_since(p.created) < CONFIRM_TTL);
+    let mut expired = Vec::new();
+    entries.retain(|_, p| {
+        let keep = now.saturating_duration_since(p.created) < CONFIRM_TTL;
+        if !keep && p.waiting() {
+            if let Some(run) = p.replay.take() {
+                expired.push(run);
+            }
+        }
+        keep
+    });
+    for run in expired {
+        spawn_replay(run, ConfirmAnswer::Expired);
+    }
+}
+
+/// Run `replay` with `answer` on a task of its own.
+fn spawn_replay(replay: ConfirmReplay, answer: ConfirmAnswer) {
+    match tokio::runtime::Handle::try_current() {
+        Ok(h) => {
+            h.spawn(replay(answer));
+        }
+        Err(_) => tracing::warn!(?answer, "confirm ended outside a runtime; not replayed"),
+    }
 }
 
 // --- long-poll concurrency ----------------------------------------------------
@@ -2922,7 +3074,6 @@ mod tests {
             "restart_session",
             "rewind_conversation",
             "safe_kill_session",
-            "work_link",
             "kill_session",
             "broadcast_prompt",
             "move_session",
@@ -2946,16 +3097,113 @@ mod tests {
                             "{t} ({pos:?}, own={own}, grant={grant})"
                         );
                     }
-                    assert_eq!(
-                        operator_must_confirm("new_session", pos, own, grant),
-                        !(grant && pos == Autopilot),
-                        "new_session ({pos:?}, own={own}, grant={grant})"
-                    );
+                    // `work_link` gets a start target only for its
+                    // start, run and resume; its tidy kills ask.
+                    for t in ["new_session", "work_link"] {
+                        assert_eq!(
+                            operator_must_confirm(t, pos, own, grant),
+                            !(grant && pos == Autopilot),
+                            "{t} ({pos:?}, own={own}, grant={grant})"
+                        );
+                    }
                     // An ungated tool stays ungated.
                     assert!(!operator_must_confirm("list_sessions", pos, own, grant));
                 }
             }
         }
+    }
+
+    /// Session care: with it off nothing changes; with it on, a restart of
+    /// an open handoff goes without a card at Within your brief and
+    /// Autopilot, retiring one at Autopilot only, and nothing else moves.
+    #[test]
+    fn session_care_truth_table() {
+        use Position::{Ask, Autopilot, Brief, Custom};
+        for pos in [Ask, Brief, Autopilot, Custom] {
+            for (own_handoff, own_start) in [(false, false), (true, false), (true, true)] {
+                for inside_grant in [false, true] {
+                    let off = OperatorFacts {
+                        own_handoff,
+                        inside_grant,
+                        session_care: false,
+                        own_start,
+                        care_restarts_spent: false,
+                    };
+                    let on = OperatorFacts {
+                        session_care: true,
+                        ..off
+                    };
+                    for t in OPERATOR_CONFIRMS.iter().chain(CONFIRM_TOOLS) {
+                        assert_eq!(
+                            operator_must_confirm_with(t, pos, off),
+                            operator_must_confirm(t, pos, own_handoff, inside_grant),
+                            "{t}: care off is the old rule"
+                        );
+                        let free = match *t {
+                            "restart_session" => own_start && matches!(pos, Brief | Autopilot),
+                            "safe_kill_session" => own_start && pos == Autopilot,
+                            _ => !operator_must_confirm_with(t, pos, off),
+                        };
+                        assert_eq!(
+                            operator_must_confirm_with(t, pos, on),
+                            !free,
+                            "{t} ({pos:?}, own={own_handoff}, grant={inside_grant})"
+                        );
+                    }
+                }
+            }
+        }
+        // Kills, rewinds and moves never ride on it.
+        let all = OperatorFacts {
+            own_handoff: true,
+            inside_grant: true,
+            session_care: true,
+            own_start: true,
+            care_restarts_spent: false,
+        };
+        for t in [
+            "kill_session",
+            "rewind_conversation",
+            "move_session",
+            "recreate_session",
+        ] {
+            assert!(operator_must_confirm_with(t, Autopilot, all), "{t}");
+        }
+    }
+
+    /// A session that wedges again after every care restart is not
+    /// restarted without a card forever: past the hour's budget the restart
+    /// asks, and the refusal says so. Retiring is not budgeted.
+    #[test]
+    fn care_restarts_ask_once_the_hours_budget_is_spent() {
+        use Position::{Autopilot, Brief};
+        let fresh = OperatorFacts {
+            own_handoff: true,
+            inside_grant: false,
+            session_care: true,
+            own_start: true,
+            care_restarts_spent: false,
+        };
+        let spent = OperatorFacts {
+            care_restarts_spent: true,
+            ..fresh
+        };
+        for pos in [Brief, Autopilot] {
+            assert!(!operator_must_confirm_with("restart_session", pos, fresh));
+            assert!(operator_must_confirm_with("restart_session", pos, spent));
+        }
+        assert!(!operator_must_confirm_with(
+            "safe_kill_session",
+            Autopilot,
+            spent
+        ));
+        let why = operator_confirm_reason("restart_session");
+        assert!(
+            why.contains(&format!("at most {CARE_RESTARTS_PER_HOUR} an hour")),
+            "{why}"
+        );
+        assert!(why.contains("started itself"), "{why}");
+        assert!(!why.contains("started or briefed"), "{why}");
     }
 
     #[test]
@@ -3128,13 +3376,50 @@ mod tests {
     }
 
     /// A replay that records the answers it was handed.
-    fn recording(log: &Arc<Mutex<Vec<bool>>>) -> ConfirmReplay {
+    fn recording(log: &Arc<Mutex<Vec<ConfirmAnswer>>>) -> ConfirmReplay {
         let log = log.clone();
-        Box::new(move |approved| {
+        Box::new(move |answer| {
             Box::pin(async move {
-                log.lock().unwrap().push(approved);
+                log.lock().unwrap().push(answer);
             })
         })
+    }
+
+    /// Review w04-3: a card nobody answered in time tells its replay it
+    /// expired, once; an answered one is not told again when it goes.
+    #[tokio::test]
+    async fn an_unanswered_card_that_expires_tells_its_replay() {
+        let pc = PendingConfirms::new();
+        let lapsed = pc.request_from("new_session", "host=h", "client:ux-agent", true);
+        let answered = pc.request_from("send_prompt", "s=1", "client:ux-agent", true);
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let other = Arc::new(Mutex::new(Vec::new()));
+        assert!(pc.attach_replay(&lapsed.nonce, recording(&log)));
+        assert!(pc.attach_replay(&answered.nonce, recording(&other)));
+        assert!(pc.answer(&answered.nonce, false));
+        let Some(long_ago) = Instant::now().checked_sub(CONFIRM_TTL + Duration::from_secs(1))
+        else {
+            return;
+        };
+        {
+            let mut e = pc.entries.lock().unwrap();
+            e.get_mut(&lapsed.nonce).unwrap().created = long_ago;
+            e.get_mut(&answered.nonce).unwrap().created = long_ago;
+        }
+        assert_eq!(pc.prune_expired(), 1);
+        assert_eq!(pc.prune_expired(), 0);
+        for _ in 0..50 {
+            if !log.lock().unwrap().is_empty() && !other.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert_eq!(*log.lock().unwrap(), vec![ConfirmAnswer::Expired]);
+        assert_eq!(
+            *other.lock().unwrap(),
+            vec![ConfirmAnswer::Denied],
+            "an answered card is told once, by its answer"
+        );
     }
 
     /// Review 2026-10-17, F1: an approval hands the call to fleet exactly
@@ -3158,7 +3443,7 @@ mod tests {
             }
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
-        assert_eq!(*log.lock().unwrap(), vec![true]);
+        assert_eq!(*log.lock().unwrap(), vec![ConfirmAnswer::Approved]);
         assert!(
             pc.pending().is_empty(),
             "an answered request leaves the cards"
@@ -3194,7 +3479,7 @@ mod tests {
             }
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
-        assert_eq!(*log.lock().unwrap(), vec![false]);
+        assert_eq!(*log.lock().unwrap(), vec![ConfirmAnswer::Denied]);
         assert_eq!(
             pc.consume(&req.nonce, "send_prompt", "s=1"),
             ConfirmState::Denied

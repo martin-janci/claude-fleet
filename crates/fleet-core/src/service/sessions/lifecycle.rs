@@ -74,9 +74,10 @@ pub struct NewSessionArgs {
     pub origin: Option<crate::store::SessionOrigin>,
     /// The person was asked about `accounts.pause_at` (redesign step 4.4)
     /// and chose to start on that login anyway. The MCP / hub `new_session`
-    /// refuses a login at or past the line without it
-    /// (`E_CONFIRM_REQUIRED`, naming the login with headroom); the
-    /// desktop's own dialog asks first and sets it.
+    /// tool reads it and refuses a login at or past the line without it
+    /// (`account_limits::refuse_over_limit`: `E_ACCOUNT_LIMIT`, naming the
+    /// login with headroom); the desktop's own dialog asks first and sets
+    /// it. The service itself does not read it.
     #[serde(default)]
     pub over_limit_ok: bool,
     /// Whose session this is to be (multi-user M1, T5): the `people` row the
@@ -525,8 +526,14 @@ pub async fn new_session(
         let s = lock(store)?;
         // M15 step G2.9: a login whose API-key account spent its daily limit
         // starts nothing today, from any caller (`over_limit_ok` is the
-        // usage window's question, not this).
-        if args.profile.is_some() {
+        // usage window's question, not this). The host's own login (no
+        // profile) is checked too, for every Claude start.
+        let runs_claude = args.kind.as_deref() != Some("shell")
+            && matches!(
+                args.agent.as_deref(),
+                None | Some(crate::store::AGENT_CLAUDE)
+            );
+        if runs_claude {
             crate::service::account_limits::refuse_over_daily_limit(
                 &s,
                 &args.host_alias,
@@ -1340,6 +1347,9 @@ pub(super) async fn new_session_inner(
 
     progress.advance(StartStep::Tmux);
     let tmux = exec_for(&args.host_alias, ssh);
+    // An ended session of this name may have left terminals running unseen
+    // (review w27-8): close them, or this session's strip shows them.
+    super::terminals::close_orphans_before_create(&*tmux, &args.name).await;
     tmux.new_session(&args.name, &path, &pane_cmd).await?;
 
     // AFTER the create, like every other create site (the one rule, and
@@ -1870,10 +1880,21 @@ pub(super) async fn kill_session_with(
             .unwrap_or_else(|| args.name.trim_start_matches("bg:").to_string());
         let status = claude_status.as_deref();
         let agents = if bg_kill_needs_listing(&kind, status) {
+            // A listing that failed is not an empty one: read as "already
+            // gone", the agent would keep running behind a kill reported
+            // as done (and a stop limit closed for good).
             exec_for(&args.host_alias, ssh)
                 .list_claude_agents()
                 .await
-                .unwrap_or_default()
+                .ok_or_else(|| {
+                    IpcError::new(
+                        codes::E_SSH,
+                        format!(
+                            "could not list the background agents on {}; {} was not stopped",
+                            args.host_alias, args.name
+                        ),
+                    )
+                })?
         } else {
             Vec::new()
         };
@@ -1903,6 +1924,9 @@ pub(super) async fn kill_session_with(
         return Ok(id);
     }
     let tmux = (deps.exec)(&args.host_alias);
+    // `Some(e)`: the kill was sent but its outcome is unknown, and the host
+    // could not say whether the session is gone either (review w27-6).
+    let mut unconfirmed: Option<IpcError> = None;
     let tmux_gone = match tmux.kill_session(&args.name).await {
         Ok(()) => false,
         // A ghost: its tmux session (or the whole server) is already gone,
@@ -1912,11 +1936,33 @@ pub(super) async fn kill_session_with(
             tracing::info!(session_id = id, error = %e.message, "[kill] tmux already gone");
             true
         }
+        // Sent, outcome unknown (a timeout after the kill ran). Returning at
+        // once skipped the bookkeeping: had it been the host's last session,
+        // the next pass read `tmux_server_gone`, a resumable loss, and
+        // auto-restore brought the killed session back (review w27-6). Ask
+        // the host: gone means the kill landed; listed means it did not; no
+        // answer means the person's intent stands and the row is marked
+        // killed, but the error still goes back.
+        Err(e) if codes::may_have_run(&e.code) => match tmux.list_sessions().await {
+            Ok(live) if live.iter().any(|t| t.name == args.name) => return Err(e),
+            Ok(_) => {
+                tracing::info!(session_id = id, error = %e.message, "[kill] outcome unknown; the session is gone");
+                true
+            }
+            Err(list_err) => {
+                tracing::warn!(session_id = id, error = %e.message, list_error = %list_err.message, "[kill] outcome unknown; marking the row killed");
+                unconfirmed = Some(e);
+                false
+            }
+        },
         Err(e) => return Err(e),
     };
     // Its shell terminals (step 5.3) go with it. Best-effort: a terminal
-    // left behind is no session row, only a stray tmux session.
-    super::terminals::close_all_after_kill(&*tmux, &args.name).await;
+    // left behind is no session row, only a stray tmux session. Not on a
+    // host that just stopped answering.
+    if unconfirmed.is_none() {
+        super::terminals::close_all_after_kill(&*tmux, &args.name).await;
+    }
     // Task G: record the kill before reconcile reaps the row. Best-effort.
     // Then ghost the row as fleet's OWN kill (`lost_reason='killed'`)
     // before the reconcile below probes the host: tmux exits with its last
@@ -1944,6 +1990,9 @@ pub(super) async fn kill_session_with(
                 tracing::warn!(session_id = id, error = %e, "[kill] marking the killed row failed");
             }
         }
+    }
+    if let Some(e) = unconfirmed {
+        return Err(e);
     }
     super::reconcile::reconcile_one_host_with(store, deps, &args.host_alias)
         .await
@@ -2347,12 +2396,33 @@ pub async fn restart_session(
     // restarted shell session comes back as a shell, not a Claude pane. Read
     // the controller under the same lock and refuse to restart ourselves
     // unless forced ([`restart_guard`], which exempts the operator).
+    let was_killed;
     let (kind, agent, claude_id, session_id, project_id, launch, gone_cwd) = {
         let s = lock(store)?;
         restart_guard(&s, &args.host_alias, &args.name, args.force)?;
         let row = s.get_session(&args.name, &args.host_alias)?;
+        was_killed = row
+            .as_ref()
+            .is_some_and(|r| r.lost_reason.as_deref() == Some("killed"));
         let gone_cwd = gone_pane_cwd(&s, row.as_ref(), &args.host_alias, &args.name)?;
         match row {
+            // Killed while an account switch was on its way: the switch
+            // planned before the kill must not bring it back on the other
+            // login. A plain restart (a person's button, Control's `lost`
+            // recovery) still revives a killed row.
+            Some(r)
+                if switch.is_some()
+                    && r.status == "ghost"
+                    && r.lost_reason.as_deref() == Some("killed") =>
+            {
+                return Err(IpcError::new(
+                    codes::E_INVALID_STATE,
+                    format!(
+                        "session {} was killed; not restarting it on another login",
+                        r.tmux_name
+                    ),
+                ));
+            }
             Some(r) => {
                 if switch.is_some()
                     && (r.kind == "shell"
@@ -2432,8 +2502,9 @@ pub async fn restart_session(
     )
     .await;
     refuse_unvalidated_agent(&agent)?;
-    if launch.profile.is_some() && agent == crate::store::AGENT_CLAUDE && kind != "shell" {
-        // As `new_session`: no relaunch under a login past its daily limit.
+    if agent == crate::store::AGENT_CLAUDE && kind != "shell" {
+        // As `new_session`: no relaunch under a login past its daily limit,
+        // the host's own login included.
         crate::service::account_limits::refuse_over_daily_limit(
             &*lock(store)?,
             &args.host_alias,
@@ -2503,9 +2574,46 @@ pub async fn restart_session(
                 .await?
             }
         }
+        // The killed-row guard above ran once, before the seconds of SSH
+        // this relaunch took: a person's kill landing in between must not
+        // be revived on the other login either. Their word is the newer
+        // one, as in `recreate_session`: the pane just started goes again,
+        // the kill stays remembered, and the new login is never recorded.
+        if let (Some(id), Some(_)) = (session_id, switch.as_ref()) {
+            let killed = killed_since_switch_began(&*lock(store)?, id)?;
+            if killed {
+                let _ = tmux.kill_session(&args.name).await;
+                if let Ok(s) = store.lock() {
+                    s.note_kill(&args.host_alias, &args.name, now_unix());
+                }
+                return Err(IpcError::new(
+                    codes::E_INVALID_STATE,
+                    format!(
+                        "session {} on {} was killed while it was being restarted on another login; left it killed",
+                        args.name, args.host_alias
+                    ),
+                ));
+            }
+        }
         Ok(())
     })
     .await?;
+    // The relaunch took seconds of SSH. A person who killed the session
+    // meanwhile (an automatic restart racing their Kill) has the newer
+    // word: the pane just started goes again and the kill stays remembered.
+    if let Some(id) = session_id {
+        leave_killed_if_killed_meanwhile(
+            store,
+            &*tmux,
+            &args.host_alias,
+            &args.name,
+            id,
+            was_killed,
+            "restarted",
+        )
+        .await?;
+        settle_relaunched_waits(&*lock(store)?, id);
+    }
     if launch_switched {
         if let Some(id) = session_id {
             // The pane already runs with the new values; a failed write only
@@ -2540,6 +2648,52 @@ pub async fn restart_session(
     })
 }
 
+/// [`restart_session`]'s re-check after a login-switch relaunch: whether
+/// the row was killed (ghosted as `killed`) or removed since the guard at
+/// the top let the switch through. That guard refuses a row already killed,
+/// so a killed row here was killed meanwhile.
+pub(super) fn killed_since_switch_began(s: &Store, session_id: i64) -> Result<bool, IpcError> {
+    Ok(match s.get_session_by_id(session_id)? {
+        None => true,
+        Some(r) => r.status == "ghost" && r.lost_reason.as_deref() == Some("killed"),
+    })
+}
+
+/// After a relaunch of row `id` (a restart, a recreate): when the row was
+/// killed or reaped while the relaunch ran, and was not killed when the
+/// relaunch read it, kill the pane it just started, remember the kill, and
+/// refuse with `E_INVALID_STATE`. A person's Kill during the seconds of SSH
+/// a relaunch takes is the newer word, and must not come back as a live
+/// Claude (possibly on another login) the UI says is killed.
+pub(super) async fn leave_killed_if_killed_meanwhile(
+    store: &Mutex<Store>,
+    tmux: &dyn TmuxExec,
+    host_alias: &str,
+    name: &str,
+    id: i64,
+    was_killed: bool,
+    verb: &str,
+) -> Result<(), IpcError> {
+    let killed_meanwhile = {
+        let s = lock(store)?;
+        match s.get_session_by_id(id)? {
+            None => true,
+            Some(now) => now.lost_reason.as_deref() == Some("killed") && !was_killed,
+        }
+    };
+    if !killed_meanwhile {
+        return Ok(());
+    }
+    let _ = tmux.kill_session(name).await;
+    if let Ok(s) = store.lock() {
+        s.note_kill(host_alias, name, now_unix());
+    }
+    Err(IpcError::new(
+        codes::E_INVALID_STATE,
+        format!("{name} on {host_alias} was killed while it was being {verb}; left it killed"),
+    ))
+}
+
 /// Run `relaunch` (a restart's repair + respawn), then record the login the
 /// relaunched pane runs under on `login`'s row: `Some(profile)` switches the
 /// stored profile, and a host-login row drops its account link either way
@@ -2570,6 +2724,31 @@ pub(crate) fn record_relaunched_login(
         s.set_session_profile(session_id, profile.as_deref())?;
     }
     s.clear_host_login_account(session_id)
+}
+
+/// Settle what a relaunched pane's old process was waiting on. Restart,
+/// recreate, repair, Switch account and rewind all replace that process, so
+/// once the relaunch has succeeded (best-effort, as [`record_kill`]'s cancel
+/// is):
+///
+/// - its pending form is cancelled (review w27-4): left `pending`, it read
+///   "waiting for your answer" for a day, swallowed the answer, and refused
+///   the resumed agent's next `ask` with `E_CONFLICT`;
+/// - a safe remove still waiting for its marker is dropped (review w27-5):
+///   the new process never saw the request and will never print it.
+pub(crate) fn settle_relaunched_waits(s: &Store, session_id: i64) {
+    if let Err(e) = s.cancel_forms_of_session(session_id) {
+        tracing::warn!(session_id, error = %e, "[forms] cancel on relaunch failed");
+    }
+    match s.clear_requested_safe_kill(session_id) {
+        Ok(true) => {
+            let _ = s.insert_session_event(session_id, "safe_kill_dropped", Some("relaunched"));
+        }
+        Ok(false) => {}
+        Err(e) => {
+            tracing::warn!(session_id, error = %e, "[safe_kill] clear on relaunch failed")
+        }
+    }
 }
 
 /// `restart_session`'s controller guard: refuse to restart the registered
@@ -2862,35 +3041,23 @@ pub async fn recreate_session(
     // dismissed it while the workspace was being rebuilt (seconds of SSH,
     // a re-clone at worst). Their word is the newer one: the pane just
     // started goes again, and the kill stays remembered.
-    let killed_meanwhile = {
-        let s = lock(store)?;
-        match s.get_session_by_id(sess.id)? {
-            None => true,
-            Some(now) => {
-                now.lost_reason.as_deref() == Some("killed")
-                    && sess.lost_reason.as_deref() != Some("killed")
-            }
-        }
-    };
-    if killed_meanwhile {
-        let _ = tmux.kill_session(&sess.tmux_name).await;
-        if let Ok(s) = store.lock() {
-            s.note_kill(&sess.host_alias, &sess.tmux_name, now_unix());
-        }
-        return Err(IpcError::new(
-            codes::E_INVALID_STATE,
-            format!(
-                "{} on {} was killed while it was being recreated; left it killed",
-                sess.tmux_name, sess.host_alias
-            ),
-        ));
-    }
+    leave_killed_if_killed_meanwhile(
+        store,
+        &*tmux,
+        &sess.host_alias,
+        &sess.tmux_name,
+        sess.id,
+        sess.lost_reason.as_deref() == Some("killed"),
+        "recreated",
+    )
+    .await?;
     let row = {
         let s = lock(store)?;
         // The rebuilt `claude` reads the host's login afresh.
         if sess.agent == crate::store::AGENT_CLAUDE && sess.kind != "shell" {
             record_relaunched_login(&s, sess.id, None)?;
         }
+        settle_relaunched_waits(&s, sess.id);
         let row = s
             .restore_session(sess.id)?
             .ok_or_else(|| IpcError::new(codes::E_INTERNAL, "session vanished after restore"))?;

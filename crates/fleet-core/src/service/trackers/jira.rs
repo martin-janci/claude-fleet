@@ -39,6 +39,7 @@ use crate::net::https::{HttpTransport, Request};
 use crate::store::{TrackerConfig, TrackerCredential};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 /// `bulkfetch`'s limit.
@@ -56,6 +57,9 @@ pub struct JiraCloud {
     config: TrackerConfig,
     cred: Option<TrackerCredential>,
     transport: Arc<dyn HttpTransport>,
+    /// `/myself` answered during this provider's life (one sync pass): see
+    /// [`JiraCloud::confirm_identity`].
+    identity_ok: AtomicBool,
 }
 
 /// What one `bulkfetch` answered.
@@ -89,6 +93,7 @@ impl JiraCloud {
             config,
             cred,
             transport,
+            identity_ok: AtomicBool::new(false),
         }
     }
 
@@ -123,6 +128,23 @@ impl JiraCloud {
         }
         f.extend(self.config.points_field.clone());
         f
+    }
+
+    /// Jira Cloud answers an expired or revoked API token as an anonymous
+    /// caller: a search or `bulkfetch` is a 200 with no issues (and no
+    /// `issueErrors`), and only `/myself` says 401. So an answer with
+    /// nothing in it is checked here before it is believed — at most once
+    /// per provider, which a sync builds per pass — and a dead token fails
+    /// the pass as `auth_failed` instead of emptying views and calling
+    /// every linked ticket unavailable.
+    async fn confirm_identity(&self) -> Result<(), TrackerError> {
+        if self.identity_ok.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+        self.call(Request::get(self.url("/rest/api/3/myself")), Call::Identity)
+            .await?;
+        self.identity_ok.store(true, Ordering::Relaxed);
+        Ok(())
     }
 
     async fn call(&self, req: Request, call: Call) -> Result<Value, TrackerError> {
@@ -663,9 +685,13 @@ impl TrackerProvider for JiraCloud {
             }
             None => format!("({}) ORDER BY updated DESC", view.query),
         };
+        let first = cursor.is_none();
         let (issues, next) = self
             .search_page(&jql, self.fields(), cursor, Call::View)
             .await?;
+        if first && issues.is_empty() {
+            self.confirm_identity().await?;
+        }
         Ok(Page {
             items: issues.iter().filter_map(|i| self.snapshot(i)).collect(),
             next,
@@ -750,6 +776,10 @@ impl TrackerProvider for JiraCloud {
                     answers.insert(i, Fetched::Found(Box::new(with_alias(s, &k))));
                 }
             }
+        }
+        // Nothing found at all may be a dead token, not missing tickets.
+        if !askable.is_empty() && answers.is_empty() {
+            self.confirm_identity().await?;
         }
         Ok(asked
             .into_iter()

@@ -544,8 +544,9 @@ decides what each sighting becomes:
 A project becomes trusted when you tick **Trust branch keys in this repo**
 in the popover, or automatically after you confirmed three branch
 suggestions in it (a suggestion only a pull request made, or one an agent
-confirmed, does not count). Settings → Limits → Lifecycle shows how many projects are trusted and has a
-**Trust none** button.
+confirmed, does not count). Settings → Work & trackers → Detection →
+*Linking* shows how many projects are trusted (*Trusted branch projects*)
+and has a **Clear** button that trusts none.
 
 ### The chip and its popover
 
@@ -1009,19 +1010,28 @@ with the session as its worker) and types one prompt into the REPL:
 
 followed by the same instruction every run gets:
 
-> When finished, print exactly FLEET_TASK_DONE_<nonce> on its own line,
-> followed by one fenced ```json block with these keys: "summary" (one
-> paragraph), "outcome" (done | partial | blocked | failed), "done" (what
-> you did), "decisions" (choices the next task must keep), "remaining"
-> (work left), "context" (facts a fresh session needs to continue),
-> "tests_run" (the commands you ran), "warnings", "blockers", "followups"
-> (each a task title) — all lists of short strings — and "confidence"
-> (low | medium | high). Fleet reads your commits and changed files from
-> git itself; do not list them.
+> When finished, call the claude-fleet MCP tool task_report with task_id N,
+> nonce "<nonce>" and your report: "summary" (one paragraph), "outcome"
+> (done | partial | blocked | failed), "done" (what you did), "decisions"
+> (choices the next task must keep), "remaining" (work left), "context"
+> (facts a fresh session needs to continue), "tests_run" (the commands you
+> ran), "warnings", "blockers", "followups" (each a task title) — all lists
+> of short strings — and "confidence" (low | medium | high). Then also
+> print exactly FLEET_TASK_DONE_<nonce> on its own line, followed by the
+> same report as one fenced ```json block: fleet reads that when the tool
+> is not available. Fleet reads your commits and changed files from git
+> itself; do not list them.
 
-The next Stop hook reads the reply exactly as it reads a run's: the marker
-closes the request, the JSON becomes the report, and fleet collects the
-evidence. It costs the session one turn. It is refused when the session has
+The reply closes the request exactly as a run's does. The `task_report`
+call, from the worker's own pane with the request's nonce, closes it at
+once, stores the report and reads provisional evidence from the worker's
+worktree; the worker's next Stop reads git again (from the hook's `cwd`,
+else the worktree), so a commit made after the report counts and a session
+with no linked worktree still gets evidence. Without it, the next Stop hook scans the transcript and the pane
+for the marker: the marker closes the request, the JSON becomes the report,
+and fleet collects the evidence. A Stop that finds no marker logs a warning
+(task, worker, host, what it read), so a missed report is visible before
+`tasks.max_age_secs` fails the request. It costs the session one turn. It is refused when the session has
 no work item (link it first), is busy, stuck or waiting on a dialog, is the
 operator's own session, or already has a request open ("a result is already
 requested from this session"). A wrap-up is never counted as an attempt:
@@ -1032,14 +1042,30 @@ takes.
 
 The gate is what stands between a work item and *done*, computed on every
 read from the item's acceptance lines (`work_link { done_when }`: `ci`,
-`review`, `test:<cmd>`, `person` or free text) and its
-open subtasks (a subtask counts unless it is done or a rejected proposal):
+`review`, `test:<cmd>`, `person` or free text), its
+open subtasks (a subtask counts unless it is done or a rejected proposal),
+and — for an item an implement run worked on — that run's **evidence**:
 
 | State | When |
 |---|---|
-| **passed** | every acceptance line passed (an item with none has none to fail) and no subtask is open |
-| **unverified** | no line failed and no subtask is open, but not every line has passed yet |
-| **blocked** | a line failed, or a subtask is open |
+| **passed** | every acceptance line passed (an item with none has none to fail), no subtask is open, and the evidence is there |
+| **unverified** | nothing failed and no subtask is open, but not every line has passed yet, or the implement run has not finished |
+| **blocked** | a line failed, a subtask is open, or the implement run left no evidence |
+
+**Run evidence.** What git showed when the item's latest implement run
+finished: at least one commit or one changed file. A run that reports
+*done* with neither — nothing committed, nothing changed, or a checkout git
+still could not read half an hour after the run (fleet reads a failed
+read again about once a minute meanwhile, on the missions' loop pass, for
+any run — in a mission or not, and with the orchestrator off — and the
+evidence stays pending) — leaves the
+gate blocked, and the mission card says what is
+missing (*No run evidence: the implement run committed nothing…*). A person
+answers it with **Override…** and a reason (`work_link { verify, item_id,
+line: "run evidence", ok: true, note }`; the reason is required). The
+override holds for that run only: a newer implement run needs evidence, or
+an override, of its own. The mission loop never closes an item with missing
+evidence; it raises an ask card with the missing evidence instead.
 
 An **agent** (a per-host token, the operator, or a peer hub) setting a
 local task to `done` while the gate has not passed is refused with `E_INVALID_STATE`, and the refusal
@@ -1049,7 +1075,8 @@ subtask the agent's organisation may not see is named only as "a subtask
 is open". A **person** is never refused: the panel shows the gate and a
 **Mark done** button. Fleet never moves a task to done because a report
 says *done*. A tracker ticket's status is not gated here; a mission keeps
-its own close step.
+its own close step, which refuses the loop (never a person) when the run
+evidence is missing.
 
 ### The result panel
 
@@ -1171,8 +1198,8 @@ candidates whose reason is in `work.auto_tidy_reasons` by itself, with safe
 kill or archive only, never a plain kill. `idle_unlinked` can never be
 auto-tidied (decision D19). An org can override `work.auto_tidy` for its own
 sessions (`on` / `off` / `inherit`). Every action is written to the
-session's timeline and its work journal. Settings → Limits → Lifecycle
-previews what auto-tidy would act on.
+session's timeline and its work journal. Settings → Work & trackers →
+Tidy-up → *Auto-tidy* previews what auto-tidy would act on.
 
 > **[Screenshot placeholder]** The Tidy up sheet with a done ticket and an
 > idle unlinked session.
@@ -1486,7 +1513,8 @@ asks you to confirm, like any kill.
 ## Settings
 
 Every `work.*` setting, with its default. On a standalone desktop they are
-in Settings → Limits (with its *Retention* and *Lifecycle* groups); on a hub, set them with `set_setting` (master token), read
+in Settings → Work & trackers (its *Detection*, *Tidy-up* and *Retention*
+tabs); on a hub, set them with `set_setting` (master token), read
 them with `get_settings`. This table is generated from
 `service/settings.rs` (`settings_docs_are_current`); every setting is also
 in [the settings reference](settings-reference.md).
@@ -1509,7 +1537,7 @@ in [the settings reference](settings-reference.md).
 | `work.summary_model` | `haiku` | `haiku` / `sonnet` / `opus` | fleet, per org | The model Summarise runs on for a past session, on that session's own host and account. |
 | `work.context_help` | `false` | on / off | fleet | Terminal and composer: Ask asks a model about the line you are typing, with its history as context, on the session's host. A proposed command is put on the line, never run. |
 | `work.help_model` | `haiku` | `haiku` / `sonnet` / `opus` | fleet | The model that answers a question asked at a terminal or composer prompt line, and that tunes a prompt, on the session's own host and account. |
-| `work.prompt_tune` | `false` | on / off | fleet | Composer and routine prompt: Tune has a model rewrite your draft into a clearer prompt for the agent, on the session's or routine's host. You see the rewrite beside your draft and accept, edit or discard it; nothing is sent. |
+| `work.prompt_tune` | `false` | on / off | fleet | Composer and routine prompt: Tune has a model rewrite your draft into a clearer prompt for the agent, on the session's or routine's host. It runs on the Writing help model. You see the rewrite beside your draft and accept, edit or discard it; nothing is sent. |
 | `work.draft_commit_messages` | `false` | on / off | fleet | Files tab: Draft writes a commit message from the staged diff with claude -p on the session's host. A draft is text you edit and commit yourself. |
 | `work.draft_briefs` | `false` | on / off | fleet | Starting from a ticket: Draft writes the agent's brief from the ticket before the first prompt, on the planned host. |
 | `work.draft_task_titles` | `false` | on / off | fleet | New task: once you have written the notes, the title is drafted from them with claude -p on this machine, or on the first reachable host when it is not a fleet host. A draft is text you edit before you create the task. |

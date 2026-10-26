@@ -281,6 +281,12 @@ export function stateCounts(hosts: HostState[]): Record<'in_sync' | 'drifted' | 
   return c;
 }
 
+/** A fleet internal (`fleet_internal`, `harness_internal`): counted, not
+ *  listed, unless the person asks to see them. */
+export function isInternal(i: Pick<AssetIdentity, 'class'>): boolean {
+  return i.class === 'fleet_internal' || i.class === 'harness_internal';
+}
+
 /** `listing.identities` when the hub sent it (Task 3, migration 087+),
  *  otherwise group the `unmanaged` rows client-side — same shape, just
  *  `normal`/`variants: 0` for every identity since drift classification

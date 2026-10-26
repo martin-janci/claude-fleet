@@ -43,12 +43,7 @@ fn is_loud(consecutive_failures: u32) -> bool {
     consecutive_failures <= 3 || consecutive_failures.is_multiple_of(20)
 }
 
-fn now_unix() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
+use crate::store::now_unix;
 
 /// How one `ssh` tunnel ended. `code` is `None` when it was killed by a signal
 /// or never spawned; `stderr` is what ssh said on the way out, which is the
@@ -613,8 +608,8 @@ impl TunnelSupervisor {
         tasks.insert(host.to_string(), handle);
     }
 
-    /// Stop a single host's tunnel.
-    #[allow(dead_code)]
+    /// Stop a single host's tunnel (the host was removed or merged
+    /// away). A no-op for a host with none.
     pub fn stop(&self, host: &str) {
         if let Some(h) = self
             .tasks

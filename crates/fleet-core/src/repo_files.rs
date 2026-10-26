@@ -9,10 +9,15 @@
 //! crate may still be `include_str!`ed: editing it recompiles the crate
 //! anyway.
 
+/// The path of `rel`, a path from the repository root.
+pub(crate) fn path(rel: &str) -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(rel)
+}
+
 /// The file at `rel`, a path from the repository root.
 pub(crate) fn read(rel: &str) -> String {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .join(rel);
+    let path = path(rel);
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }

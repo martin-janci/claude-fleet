@@ -33,6 +33,13 @@ pub const CARDS_OPEN_CAP: i64 = 40;
 pub const CARD_PAYLOAD_MAX: usize = 4096;
 /// The longest a grant runs (seven days).
 pub const GRANT_MAX_SECS: i64 = 7 * 24 * 3600;
+/// The `expires_at` of a grant that lasts until its mission completes
+/// (TASK-293): 9999-12-31, past any clock, and exact in a JS number. Only a
+/// finite mission holds one, and only with a budget; it ends when the
+/// mission does ([`Store::set_mission_state`] on a final state) or stops
+/// being finite ([`Store::update_mission`] revokes it; [`Store::live_mission_grant`]
+/// also refuses one on a mission that is not finite).
+pub const GRANT_UNTIL_DONE_AT: i64 = 253_402_300_799;
 
 /// One card of a mission's confirm queue.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -90,9 +97,15 @@ pub struct GrantRow {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
     pub created_at: i64,
+    /// [`GRANT_UNTIL_DONE_AT`] for a grant that lasts until the mission
+    /// completes (`until_done`).
     pub expires_at: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revoked_at: Option<i64>,
+    /// It lasts until the mission completes, not for some hours: read from
+    /// `expires_at`, never stored.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub until_done: bool,
 }
 
 /// A new grant.
@@ -159,6 +172,7 @@ fn map_grant(r: &rusqlite::Row<'_>) -> rusqlite::Result<GrantRow> {
         expires_at: r.get(9)?,
         revoked_at: r.get(10)?,
         profile: r.get(11)?,
+        until_done: r.get::<_, i64>(9)? >= GRANT_UNTIL_DONE_AT,
     })
 }
 
@@ -314,6 +328,19 @@ impl Store {
                     last_activity_at: r.get(2)?,
                 })
             },
+        )?)
+    }
+
+    /// When anyone but the loop last made the mission `active` (its start or
+    /// a person's resume). The no-progress brake counts from here as well as
+    /// from its runs, so a resume gets a full window before it pauses again.
+    pub fn mission_resumed_at(&self, mission_id: i64) -> Result<Option<i64>, IpcError> {
+        Ok(self.conn.query_row(
+            "SELECT MAX(at) FROM orchestration_events \
+             WHERE orchestration_project_id = ?1 AND kind = 'state' AND actor <> 'loop' \
+               AND json_extract(payload, '$.to') = 'active'",
+            [mission_id],
+            |r| r.get(0),
         )?)
     }
 
@@ -529,7 +556,10 @@ impl Store {
     }
 
     /// The newest grant that still holds at `now`: not revoked, not
-    /// expired, and signed for the plan the mission has now.
+    /// expired, and signed for the plan the mission has now. A grant until
+    /// the mission completes holds only while the mission is finite: one
+    /// made continuous never ends, so the switch revokes it
+    /// ([`Self::update_mission`]) and a switch back needs a new grant.
     pub fn live_mission_grant(
         &self,
         mission_id: i64,
@@ -544,9 +574,12 @@ impl Store {
                        AND expires_at > ?2 \
                        AND plan_version = (SELECT plan_version FROM orchestration_projects \
                                            WHERE id = g.orchestration_project_id) \
+                       AND (expires_at < ?3 \
+                            OR (SELECT mode FROM orchestration_projects \
+                                WHERE id = g.orchestration_project_id) = 'finite') \
                      ORDER BY id DESC LIMIT 1"
                 ),
-                rusqlite::params![mission_id, now],
+                rusqlite::params![mission_id, now, GRANT_UNTIL_DONE_AT],
                 map_grant,
             )
             .optional()?)
@@ -558,36 +591,120 @@ impl Store {
     /// revoked, not expired — its hours — and signed for the plan it has
     /// now) whose hosts include `host` (or name none), whose budget is not
     /// spent and whose parallel cap has room. The operator guard lets such
-    /// a start through without a card at Autopilot only.
-    pub fn start_inside_mission_grant(&self, host: &str, now: i64) -> Result<bool, IpcError> {
+    /// a start through without a card at Autopilot only. `host` is `None`
+    /// when fleet picks it (a task's start with no host): only a grant that
+    /// names no hosts covers that.
+    pub fn start_inside_mission_grant(
+        &self,
+        host: Option<&str>,
+        now: i64,
+    ) -> Result<bool, IpcError> {
         let ids: Vec<i64> = self
             .conn
             .prepare_cached("SELECT id FROM orchestration_projects WHERE state = 'active'")?
             .query_map([], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
         for id in ids {
-            let Some(g) = self.live_mission_grant(id, now)? else {
-                continue;
-            };
-            if g.hosts
-                .as_ref()
-                .is_some_and(|hs| !hs.iter().any(|h| h == host))
-            {
-                continue;
+            if self.grant_covers_start(id, host, 1, now)? {
+                return Ok(true);
             }
-            if let Some(budget) = g.budget_micros {
-                if self.mission_cost_micros(id)? >= budget {
-                    continue;
-                }
-            }
-            if let Some(cap) = g.max_parallel {
-                if self.mission_task_counts(id)?.open >= cap {
-                    continue;
-                }
-            }
-            return Ok(true);
         }
         Ok(false)
+    }
+
+    /// [`Self::start_inside_mission_grant`] for `sessions` new sessions on
+    /// a task of mission `mission_id` (`work_link` start / run / resume):
+    /// only that mission's own grant covers them, the mission must be
+    /// active, and its parallel cap must have room for every one of them
+    /// (all the siblings of a multi-repo start). Another mission's grant
+    /// never covers a task that is not its own (review r3).
+    pub fn mission_start_inside_grant(
+        &self,
+        mission_id: i64,
+        host: Option<&str>,
+        sessions: i64,
+        now: i64,
+    ) -> Result<bool, IpcError> {
+        let active: bool = self
+            .conn
+            .prepare_cached(
+                "SELECT EXISTS (SELECT 1 FROM orchestration_projects \
+                 WHERE id = ?1 AND state = 'active')",
+            )?
+            .query_row([mission_id], |r| r.get(0))?;
+        Ok(active && self.grant_covers_start(mission_id, host, sessions, now)?)
+    }
+
+    /// Whether mission `id`'s live grant covers `sessions` new sessions on
+    /// `host`: its hosts, its budget, its parallel cap. The cap counts the
+    /// mission's open tasks plus its members' live linked sessions that run
+    /// no task of the mission (a start or resume on a member makes no task
+    /// row): the same open count the loop dispatches against, so a finished
+    /// run's idle worker or the wrap-up session takes no slot (review 456).
+    fn grant_covers_start(
+        &self,
+        id: i64,
+        host: Option<&str>,
+        sessions: i64,
+        now: i64,
+    ) -> Result<bool, IpcError> {
+        let Some(g) = self.live_mission_grant(id, now)? else {
+            return Ok(false);
+        };
+        if g.hosts
+            .as_ref()
+            .is_some_and(|hs| !host.is_some_and(|host| hs.iter().any(|h| h == host)))
+        {
+            return Ok(false);
+        }
+        if let Some(budget) = g.budget_micros {
+            if self.mission_cost_micros(id)? >= budget {
+                return Ok(false);
+            }
+        }
+        if let Some(cap) = g.max_parallel {
+            let open =
+                self.mission_task_counts(id)?.open + self.mission_untasked_member_sessions(id)?;
+            if open + sessions.max(1) > cap {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    /// The mission work item `item_id` belongs to, if any.
+    pub fn work_item_mission(&self, item_id: i64) -> Result<Option<i64>, IpcError> {
+        Ok(self
+            .conn
+            .prepare_cached("SELECT orchestration_project_id FROM work_items WHERE id = ?1")?
+            .query_row([item_id], |r| r.get(0))
+            .optional()?
+            .flatten())
+    }
+
+    /// How many live sessions are linked to the mission's members without
+    /// being the worker of any of its tasks: a `work_link` start or resume
+    /// on a member. A task's worker is on the open-task count while its
+    /// task is open and off the cap once it finished (it stays up for
+    /// review or tidy); a wrap-up session is a task's worker too. A ghost
+    /// row keeps its participant and link until it is reaped, but runs
+    /// nothing.
+    fn mission_untasked_member_sessions(&self, mission_id: i64) -> Result<i64, IpcError> {
+        Ok(self
+            .conn
+            .prepare_cached(
+                "SELECT COUNT(DISTINCT p.session_id) FROM work_links l \
+                   JOIN participants p ON p.id = l.participant_id AND p.retired_at IS NULL \
+                   JOIN sessions s ON s.id = p.session_id AND s.status != 'ghost' \
+                   JOIN work_items i ON i.id = l.item_id \
+                 WHERE i.orchestration_project_id = ?1 AND l.ended_at IS NULL \
+                   AND l.state = 'confirmed' \
+                   AND NOT EXISTS (SELECT 1 FROM tasks t \
+                                   JOIN work_items ti ON ti.id = t.work_item_id \
+                                   WHERE t.worker_session_id = p.session_id \
+                                     AND ti.orchestration_project_id = ?1)",
+            )?
+            .query_row([mission_id], |r| r.get(0))?)
     }
 
     /// Revoke every live grant of the mission. Answers how many.
@@ -599,8 +716,11 @@ impl Store {
         )?)
     }
 
-    /// Bump the mission's plan version: a change to what it may do (a repo
-    /// added, the policy raised) voids the grants signed for the old plan.
+    /// Bump the mission's plan version: a change to what it may do voids the
+    /// grants signed for the old plan. A repo added
+    /// ([`Self::set_mission_repo`]) calls it. Raising the policy is meant to
+    /// as well, but which policy or level changes count as raised is not
+    /// decided yet, so `update_mission` does not call it.
     pub fn bump_plan_version(&self, mission_id: i64) -> Result<(), IpcError> {
         self.conn.execute(
             "UPDATE orchestration_projects SET plan_version = plan_version + 1 WHERE id = ?1",

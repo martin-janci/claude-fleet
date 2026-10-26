@@ -55,6 +55,9 @@ pub struct SetMissionStateArgs {
     pub state: String,
     #[serde(default)]
     pub expected_version: Option<i64>,
+    /// Complete despite failing CI on the mission's pull requests.
+    #[serde(default)]
+    pub ci_override: Option<bool>,
 }
 
 /// `set_mission_repo`.
@@ -73,6 +76,9 @@ pub struct SetMissionItemArgs {
     pub mission_id: i64,
     pub item_id: i64,
     pub on: bool,
+    /// The mission lane to put the task in; "" takes it out (lanes L2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lane: Option<String>,
 }
 
 /// `delete_mission`.
@@ -180,6 +186,9 @@ pub struct GrantMissionArgs {
     pub hours: Option<u32>,
     #[serde(default)]
     pub budget_cents: Option<i64>,
+    /// Until the mission completes instead of `hours` (TASK-293).
+    #[serde(default)]
+    pub until_done: Option<bool>,
     #[serde(default)]
     pub hosts: Option<Vec<String>>,
     #[serde(default)]
@@ -527,6 +536,7 @@ pub(crate) mod routed {
         let wire = WorkLinkArgs {
             status: Some(args.state),
             expected_version: args.expected_version,
+            ci_override: args.ci_override,
             ..write("mission_state", Some(args.mission_id))
         };
         match backend.hub() {
@@ -560,6 +570,7 @@ pub(crate) mod routed {
         let wire = WorkLinkArgs {
             item_id: Some(args.item_id),
             on: Some(args.on),
+            lane: args.lane,
             ..write("mission_item", Some(args.mission_id))
         };
         match backend.hub() {
@@ -809,6 +820,7 @@ pub(crate) mod routed {
             level: Some(args.level),
             hours: args.hours,
             budget_cents: args.budget_cents,
+            until_done: args.until_done,
             hosts: args.hosts,
             max_parallel: args.max_parallel,
             profile: args.profile,

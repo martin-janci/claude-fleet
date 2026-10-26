@@ -62,6 +62,11 @@ export interface MissionWait {
 /** `store::MissionPolicy`. The backend reads a missing field as its
  *  default, so a save sends the whole policy back with its edits on top. */
 export interface MissionPolicy {
+  /** `item` (each run its own session) or `lane` (a lane's tasks in one
+   *  lead session); changes only while the mission is not running. */
+  execution?: 'item' | 'lane';
+  /** In `lane` execution, a lead hands over to a fresh one after this many tasks. */
+  lane_relay_after?: number;
   max_parallel?: number;
   max_retries?: number;
   require_review?: boolean;
@@ -128,6 +133,32 @@ export interface GraphNode {
   verification?: Verification | null;
   /** Its latest attempt, when this reader may see the task. */
   attempt?: AttemptBrief | null;
+  /** What git showed from its latest implement run; absent before any. */
+  evidence?: RunEvidence | null;
+}
+
+/** The line a person's run-evidence override is recorded under
+ *  (`service::work::gate::EVIDENCE_LINE`). */
+export const EVIDENCE_LINE = 'run evidence';
+
+/** The completion gate's run evidence (`service::work::gate::RunEvidence`):
+ *  an implement item closes only on commits or files from its latest
+ *  implement run, or on a person's override with a reason. */
+export interface RunEvidence {
+  /** present | missing | pending | overridden — tolerant of more. */
+  state: string;
+  task_id: number;
+  commits?: number;
+  files?: number;
+  /** What is missing, or the person's reason. */
+  detail: string;
+  by?: string | null;
+  at?: number | null;
+}
+
+/** Whether `e` stands between its item and done. */
+export function evidenceMissing(e: RunEvidence | null | undefined): boolean {
+  return e?.state === 'missing';
 }
 
 /** One done_when line's answer (`service::work::verify::CondCheck`). */
@@ -159,6 +190,11 @@ export interface TaskEvidence {
   files_total?: number;
   uncommitted?: number | null;
   error?: string | null;
+  /** Read mid-turn (`task_report`); the worker's Stop reads git again. */
+  provisional?: boolean;
+  /** Where a failed read was taken, for the loop's retry. */
+  host?: string | null;
+  dir?: string | null;
 }
 
 /** A node's latest attempt (`service::work::graph::AttemptBrief`). */
@@ -206,6 +242,64 @@ export interface MissionDetail {
    *  state (a running mission's workers included); absent when there are
    *  none, and from an older hub. */
   sessions?: FinishSession[];
+  /** Where its runs and its time went (lanes design L0); absent from an
+   *  older hub. */
+  stats?: MissionStats | null;
+  /** Its lanes with the visible tasks each holds (lanes design L2); absent
+   *  when it has none, and from an older hub. */
+  lanes?: MissionLane[];
+  /** What each member says it changes (lanes design L5), by item id; only
+   *  members that say. Absent from an older hub. */
+  touches?: Record<number, string[]>;
+  /** The planner's open wait, read from its own words rather than the
+   *  `events` page (review r9); `null` when it is not waiting, absent from
+   *  an older hub. */
+  limit_wait?: LimitWait | null;
+}
+
+/** A mission lane (`store::MissionLaneRow`): the tasks one lead session
+ *  works through on one branch in one repository. */
+export interface MissionLane {
+  id: number;
+  mission_id: number;
+  name: string;
+  project_id?: number | null;
+  branch?: string | null;
+  lead_session_id?: number | null;
+  relay?: number;
+  /** `idle` | `held` | `done`. */
+  state: string;
+  item_ids: number[];
+}
+
+/** The lane a task is in, if any. */
+export function laneOfItem(detail: Pick<MissionDetail, 'lanes'>, itemId: number): MissionLane | undefined {
+  return (detail.lanes ?? []).find((l) => l.item_ids.includes(itemId));
+}
+
+/** A mission's run metrics (`missions::stats::MissionStats`). */
+export interface MissionStats {
+  items: number;
+  items_done: number;
+  /** Attempts by role: `implement`, `review`, `test`, `integrate`, `research`. */
+  runs_by_role: Record<string, number>;
+  /** Attempts in a session of their own; the rest ran headless. */
+  session_runs: number;
+  /** Distinct worker sessions and checkouts: each a cold start. */
+  sessions: number;
+  checkouts: number;
+  failed_runs: number;
+  /** Implement attempts past each item's first. */
+  retries: number;
+  /** Attempts per done item, in hundredths. */
+  runs_per_done_item_x100?: number | null;
+  run_secs_p50?: number | null;
+  run_secs_p90?: number | null;
+  item_secs_p50?: number | null;
+  item_secs_p90?: number | null;
+  /** First run to the last run's end, and the part of it no run was open. */
+  span_secs: number;
+  idle_secs: number;
 }
 
 /** One live session on a mission's member item (`missions::FinishSession`). */
@@ -270,6 +364,9 @@ export interface MissionGrant {
   created_at: number;
   expires_at: number;
   revoked_at?: number | null;
+  /** It lasts until the mission completes (a finite mission's, with a
+   *  budget), not for some hours; `expires_at` is then far off. */
+  until_done?: boolean;
 }
 
 export interface MissionAutonomy {
@@ -409,6 +506,13 @@ export function finalMoveQuestion(name: string, to: string): string {
 }
 
 /** A mission that no longer changes. */
+/** Why a mission waits on a person, in words (`MissionWait.reason`). */
+export const WAIT_WORDS: Record<string, string> = {
+  question: 'Asks a question',
+  sign_grant: 'Grant needs signing',
+  confirm: 'A step waits for your OK',
+};
+
 export function isFinal(state: string): boolean {
   return state === 'completed' || state === 'failed' || state === 'cancelled';
 }
@@ -611,17 +715,44 @@ export function eventSentence(e: MissionEvent): string {
       return `Refused: ${String(p.why ?? p.detail ?? '')}`;
     case 'planned':
       return `Asked the planner (${String(p.why ?? '')})`;
+    case 'limit_wait':
+      return limitWaitSentence(p as unknown as LimitWait);
+    case 'limit_cleared':
+      return `The planner answered on ${loginWords(p as unknown as NonNullable<LimitWait['login']>)}`;
+    case 'planner_signed_out':
+      // Every login the planner may use is signed out (review r10): the loop
+      // asks again once one is signed in.
+      return `The planner could not be asked: ${String(p.why ?? 'every login it may use is signed out')}`;
     case 'card':
       return `Card ${String(p.card_id ?? '')} ${String(p.state ?? '')}`;
-    case 'grant':
-      return `Granted L${String(p.level ?? '?')} for ${String(p.hours ?? '?')} h`;
+    case 'grant': {
+      const span = p.until_done ? 'until the mission completes' : `for ${String(p.hours ?? '?')} h`;
+      // `lifted_from`: the ask the grant lifts while it holds (review r8);
+      // `raised_from`: an older hub's grant, which raised it for good.
+      const raised =
+        typeof p.lifted_from === 'number'
+          ? ` (lifts the ask from L${p.lifted_from} while it holds)`
+          : typeof p.raised_from === 'number'
+            ? ` (raised the ask from L${p.raised_from})`
+            : '';
+      return `Granted L${String(p.level ?? '?')} ${span}${raised}`;
+    }
     case 'revoked':
       return 'Grant revoked';
     case 'budget':
     case 'no_progress':
       return `Paused: ${String(p.why ?? '')}`;
-    case 'integration':
+    case 'account_limit':
+      // The loop holds its runs (review w03-5): say why, not just the kind.
+      return p.why ? `Waiting for the account: ${String(p.why)}` : 'Waiting for the account';
+    case 'integration': {
+      // One integration names every branch it merges; older events a pair.
+      const items = Array.isArray(p.items) ? (p.items as unknown[]).map(String) : [];
+      if (items.length > 1) {
+        return `Tasks ${items.slice(0, -1).join(', ')} and ${items[items.length - 1]} need one integration`;
+      }
       return `Tasks ${String(p.a ?? '')} and ${String(p.b ?? '')} conflict`;
+    }
     case 'note':
       return String(p.text ?? 'Note');
     case 'digest':
@@ -703,16 +834,20 @@ export function updateMission(
   });
 }
 
+/** `ciOverride`: a person completes the mission despite failing CI on its
+ *  pull requests (the refusal is `E_CI_FAILING`). */
 export function setMissionState(
   missionId: number,
   state: string,
   expectedVersion?: number,
+  ciOverride?: boolean,
 ): Promise<Result<Mission>> {
   return invokeCmd<Mission>('set_mission_state', {
     args: {
       mission_id: missionId,
       state,
       ...(expectedVersion != null ? { expected_version: expectedVersion } : {}),
+      ...(ciOverride ? { ci_override: true } : {}),
     },
   });
 }
@@ -732,6 +867,16 @@ export function setMissionRepo(
 export function setMissionItem(missionId: number, itemId: number, on: boolean): Promise<Result<Mission>> {
   return changed(
     invokeCmd<Mission>('set_mission_item', { args: { mission_id: missionId, item_id: itemId, on } }),
+  );
+}
+
+/** Put a member task in the mission lane named `lane`, or take it out of
+ *  its lane with `null` (lanes design L2). */
+export function setMissionLane(missionId: number, itemId: number, lane: string | null): Promise<Result<Mission>> {
+  return changed(
+    invokeCmd<Mission>('set_mission_item', {
+      args: { mission_id: missionId, item_id: itemId, on: true, lane: lane?.trim() ?? '' },
+    }),
   );
 }
 
@@ -772,6 +917,12 @@ export function setWorkDoneWhen(itemId: number, lines: string[]): Promise<Result
   return invokeCmd<VerifyOutcome>('set_work_done_when', { args: { item_id: itemId, done_when: lines } });
 }
 
+/** A person accepts an implement run that left no commits or files, and
+ *  says why (the reason is required). */
+export function overrideRunEvidence(itemId: number, reason: string): Promise<Result<VerifyOutcome>> {
+  return verifyWorkItem(itemId, EVIDENCE_LINE, true, reason);
+}
+
 export function verifyWorkItem(itemId: number, line: string, ok: boolean, note?: string): Promise<Result<VerifyOutcome>> {
   const n = note?.trim();
   return invokeCmd<VerifyOutcome>('verify_work_item', {
@@ -799,10 +950,89 @@ export function retryWorkItem(itemId: number, note?: string): Promise<Result<Ste
   return changed(invokeCmd<StepResult>('retry_work_item', { args: { item_id: itemId, ...(n ? { note: n } : {}) } }));
 }
 
+/** The planner waiting on a usage limit (`orchestrate::limit::LimitWait`):
+ *  one login's, or the mission's when `login` is absent. */
+export interface LimitWait {
+  login?: { host: string; profile?: string | null } | null;
+  /** When the planner may be asked again, Unix seconds. */
+  resets_at: number;
+  /** `false`: nothing said when it resets, `resets_at` is fleet's guess. */
+  reset_known: boolean;
+  /** Claude Code's own words for the reset ("resets 3pm (Europe/Bratislava)"). */
+  said?: string | null;
+  why: string;
+}
+
 export interface PlanOutcome {
   mission_id: number;
   cards?: MissionCard[];
   refused?: string | null;
+  /** The planner is waiting on a usage limit: the mission's wait when every
+   *  login it may use is at its limit (no `login`), else the last login's
+   *  when the ask's tries ran out while another login has headroom. */
+  waiting?: LimitWait | null;
+}
+
+function loginWords(l: NonNullable<LimitWait['login']>): string {
+  return l.profile ? `profile ${l.profile} on ${l.host}` : `${l.host}'s own login`;
+}
+
+/** "15:00", or "Oct 20, 15:00" when the reset is not today. */
+function resetWords(at: number, now: number): string {
+  const d = new Date(at * 1000);
+  const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  return d.toDateString() === new Date(now * 1000).toDateString()
+    ? time
+    : `${d.toLocaleDateString([], { month: 'short', day: 'numeric' })}, ${time}`;
+}
+
+/** A `limit_wait` event in words: "Waiting on the usage limit of mac's own
+ *  login, resets 15:00". */
+export function limitWaitSentence(w: LimitWait, now = Date.now() / 1000): string {
+  const whose = w.login ? `the usage limit of ${loginWords(w.login)}` : 'a usage limit on every login';
+  const when = w.reset_known ? `resets ${resetWords(w.resets_at, now)}` : `asks again at ${resetWords(w.resets_at, now)}`;
+  const said = !w.reset_known && w.said ? ` (Claude: ${w.said})` : '';
+  return `Waiting on ${whose}, ${when}${said}`;
+}
+
+/** The planner's open wait, when its newest word on the mission (of its runs
+ *  and waits) is a `limit_wait`: the mission's state "waiting on a limit". */
+export function plannerLimitWait(detail: Pick<MissionDetail, 'events' | 'limit_wait'>): LimitWait | null {
+  // The hub's own reading (review r9): a busy log can push the wait off the
+  // `events` page. An older hub leaves it out, and the page is read.
+  if (detail.limit_wait !== undefined) {
+    const w = detail.limit_wait;
+    return w && typeof w.resets_at === 'number' ? w : null;
+  }
+  // `limit_cleared`: a later login of the same ask answered (review r8).
+  // `planner_signed_out`: a later ask refused for signed-out logins (review r10).
+  const words = ['planned', 'limit_wait', 'limit_cleared', 'planner_signed_out'];
+  const last = (detail.events ?? []).find((e) => words.includes(e.kind));
+  if (last?.kind !== 'limit_wait' || !last.payload) return null;
+  const w = last.payload as unknown as LimitWait;
+  return typeof w.resets_at === 'number' ? w : null;
+}
+
+/** The planner could not be asked: every login it may use is at its usage
+ *  limit (`PlanOutcome.waiting`). Not a failure; it is asked again then.
+ *  A wait naming one login is the ask's tries running out while another
+ *  login has headroom (review r8): only that login is at its limit. */
+export function plannerWaiting(w: LimitWait, now = Date.now() / 1000): HumanError {
+  const at = resetWords(w.resets_at, now);
+  if (w.login) {
+    return {
+      title: 'The planner hit a usage limit',
+      text: `Only ${loginWords(w.login)} is at its usage limit${w.reset_known ? ` until ${at}` : ''}. Fleet asks the planner again on a login with headroom.`,
+      details: w.why,
+    };
+  }
+  return {
+    title: 'The planner is waiting on a usage limit',
+    text: w.reset_known
+      ? `Its Claude accounts are at their usage limit until ${at}. Fleet asks the planner again then, or sooner on a login with headroom.`
+      : `Its Claude accounts are at their usage limit${w.said ? ` (${w.said})` : ''}. Fleet asks the planner again at ${at}, or sooner on a login with headroom.`,
+    details: w.why,
+  };
 }
 
 export function planMission(missionId: number): Promise<Result<PlanOutcome>> {
@@ -821,6 +1051,9 @@ export interface GrantInput {
   level: number;
   hours?: number;
   budget_cents?: number;
+  /** Until the mission completes instead of `hours`: a finite mission
+   *  only, and only with `budget_cents`. */
+  until_done?: boolean;
   hosts?: string[];
   max_parallel?: number;
   /** A credential profile on the run's host; omitted = the host's own. */
@@ -829,6 +1062,16 @@ export interface GrantInput {
 
 export function grantMission(missionId: number, g: GrantInput): Promise<Result<MissionGrant>> {
   return invokeCmd<MissionGrant>('grant_mission', { args: { mission_id: missionId, ...g } });
+}
+
+/** What to tell the person when a grant asked to last until the mission
+ *  completes came back as an hours grant: a hub before grants until done
+ *  drops `until_done` and signs its default hours (review r8). `null` when
+ *  the grant is what was asked. */
+export function grantSpanNotice(askedUntilDone: boolean, g: Pick<MissionGrant, 'until_done' | 'created_at' | 'expires_at'>): string | null {
+  if (!askedUntilDone || g.until_done) return null;
+  const hours = Math.round((g.expires_at - g.created_at) / 3600);
+  return `This hub cannot grant until the mission completes: it signed a grant for ${hours} h instead. Update fleet-hub, or revoke the grant.`;
 }
 
 export function revokeMissionGrant(missionId: number): Promise<Result<number>> {
@@ -947,7 +1190,11 @@ export interface AutonomyWords {
 
 export function autonomyWords(a: MissionAutonomy, now = Date.now() / 1000): AutonomyWords {
   const g = a.grant && (a.grant.revoked_at == null && a.grant.expires_at > now) ? a.grant : null;
-  const until = g ? new Date(g.expires_at * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
+  const until = g
+    ? g.until_done
+      ? 'done'
+      : new Date(g.expires_at * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    : '';
   const parts = [`L${a.asked} asked`, `L${a.ceiling} ceiling`, g ? `L${g.level} grant until ${until}` : 'no grant'];
   let hint: string | null = null;
   if (!a.enabled) hint = 'The mission loop is off for the whole fleet. Turn it on in Settings.';

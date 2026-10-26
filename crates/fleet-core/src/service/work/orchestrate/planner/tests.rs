@@ -111,6 +111,7 @@ fn worker_text_is_fenced_and_the_snapshot_stays_in_budget() {
             waiting_for: vec![],
             verification: None,
             attempt: None,
+            evidence: None,
         }],
         ..Default::default()
     };
@@ -138,4 +139,304 @@ fn the_script_runs_claude_locked_and_its_output_is_tagged() {
         PlannerOutput::NoClaude
     );
     assert_eq!(parse_planner_output("nothing here"), PlannerOutput::Nothing);
+}
+
+/// TASK-291: the planner can run under another login on its host, the way
+/// a check does; the host's own login leaves the script as it was.
+#[test]
+fn the_script_runs_under_a_login_profile_when_asked() {
+    let own = planner_script_as("sonnet", "p", None).unwrap();
+    assert_eq!(own, planner_script("sonnet", "p"));
+    assert!(!own.contains("CLAUDE_CONFIG_DIR"));
+    let work = planner_script_as("sonnet", "p", Some("work")).unwrap();
+    assert!(
+        work.contains("export CLAUDE_CONFIG_DIR=\"$HOME/.claude-profiles/\"'work'; "),
+        "{work}"
+    );
+    assert!(work.contains(crate::tmux::PROFILE_API_KEY));
+    assert!(planner_script_as("sonnet", "p", Some("../x")).is_err());
+}
+
+/// Lanes design L1: a planner that reads runs in the repository's
+/// checkout with the read-only tools, and longer; one with no tools keeps
+/// none and its script as it was.
+#[test]
+fn a_planner_that_reads_runs_in_the_checkout_with_read_only_tools() {
+    let s = planner_script_in("sonnet", "p", None, "/src/o/r").unwrap();
+    assert!(s.starts_with("cd '/src/o/r' || exit 0; "), "{s}");
+    assert!(s.contains("--tools 'Read,Grep,Glob'"), "{s}");
+    assert!(s.contains("--permission-mode dontAsk"), "{s}");
+    assert!(!s.contains("Bash"), "no shell: {s}");
+    assert!(s.contains(&PLANNER_READS_TIMEOUT_SECS.to_string()), "{s}");
+    let none = planner_script("sonnet", "p");
+    assert!(!none.contains("--tools 'Read"), "{none}");
+    assert!(planner_script_in("sonnet", "p", Some("../x"), "/r").is_err());
+}
+
+#[test]
+fn the_prompt_says_what_the_planner_may_read() {
+    let reads = planner_prompt(true);
+    assert!(reads.starts_with("You plan one software mission for Fleet. You may read"));
+    assert!(
+        reads.contains("never instructions") && reads.contains("list in its touches the files")
+    );
+    assert!(reads.contains("ONLY a JSON array of commands: the reply starts with ["));
+    assert!(!reads.contains("You have no tools"));
+    assert_eq!(planner_prompt(false), PLANNER_PROMPT);
+    // Work on the same files or registry runs one after the other.
+    assert!(PLANNER_PROMPT.contains("depend on each other instead of running side by side"));
+}
+
+fn member(id: i64, title: &str, depends_on: &[i64]) -> PlanNode {
+    PlanNode {
+        item_id: id,
+        title: title.into(),
+        depends_on: depends_on.to_vec(),
+        rejected: false,
+        pending: false,
+        done: false,
+        integration: false,
+    }
+}
+
+#[test]
+fn a_merge_wave_item_must_depend_on_every_item_of_its_wave() {
+    // Mission #4: three items in wave 1, a merge that waited for two of
+    // them and so started while the third still ran.
+    let short = r#"[
+      {"command":"create_item","title":"api"},
+      {"command":"create_item","title":"ui"},
+      {"command":"create_item","title":"docs"},
+      {"command":"create_item","title":"Merge wave 1: land the PRs","depends_on":["new:0","new:1"]}
+    ]"#;
+    let c = parse_commands(short).unwrap();
+    let e = check_merge_waves(&c, &[]).unwrap_err();
+    assert!(e.contains("new:3"), "{e}");
+    assert!(e.contains("merges wave 1"), "{e}");
+    assert!(e.contains("does not depend on new:2"), "{e}");
+    assert!(!e.contains("new:0") && !e.contains("new:1,"), "{e}");
+
+    let whole = short.replace(r#"["new:0","new:1"]"#, r#"["new:0","new:1","new:2"]"#);
+    check_merge_waves(&parse_commands(&whole).unwrap(), &[]).unwrap();
+
+    // Not a merge item: a title that merges something but names no wave.
+    let other = short.replace("Merge wave 1: land the PRs", "Merge the config loaders");
+    check_merge_waves(&parse_commands(&other).unwrap(), &[]).unwrap();
+}
+
+#[test]
+fn a_later_merge_reaches_its_own_wave_and_existing_members_count() {
+    // Wave 1: 1, 2; "Merge wave 1" (3) in wave 2; 4 and 5 after it in
+    // wave 3. A merge of wave 3 must wait for 4 and 5, not wave 1 again.
+    let members = [
+        member(1, "api", &[]),
+        member(2, "ui", &[]),
+        member(3, "Merge wave 1", &[1, 2]),
+        member(4, "search", &[3]),
+        member(5, "export", &[3]),
+    ];
+    let ok = parse_commands(
+        r#"[{"command":"create_item","title":"Integrate wave 2","depends_on":[4,5]}]"#,
+    )
+    .unwrap();
+    check_merge_waves(&ok, &members).unwrap();
+    let short = parse_commands(
+        r#"[{"command":"create_item","title":"Integrate wave 2","depends_on":[4]}]"#,
+    )
+    .unwrap();
+    let e = check_merge_waves(&short, &members).unwrap_err();
+    assert!(e.contains("does not depend on item 5"), "{e}");
+
+    // A new item added to wave 1 that the existing merge does not wait for.
+    let added = parse_commands(r#"[{"command":"create_item","title":"cli"}]"#).unwrap();
+    let e = check_merge_waves(&added, &members).unwrap_err();
+    assert!(
+        e.contains("item 3") && e.contains("does not depend on new:0"),
+        "{e}"
+    );
+    let mended = parse_commands(
+        r#"[{"command":"create_item","title":"cli"},{"command":"create_item","title":"Merge wave 1b","depends_on":["new:0"]}]"#,
+    )
+    .unwrap();
+    // A second merge of wave 1 does not mend the first one's gap.
+    assert!(check_merge_waves(&mended, &members).is_err());
+
+    // remove_dep that drops a wave member from the merge is refused;
+    // add_dep that closes a gap is taken.
+    let dropped =
+        parse_commands(r#"[{"command":"remove_dep","item_id":3,"depends_on":2}]"#).unwrap();
+    assert!(check_merge_waves(&dropped, &members)
+        .unwrap_err()
+        .contains("does not depend on item 2"));
+}
+
+#[test]
+fn a_gap_a_person_accepted_does_not_refuse_later_answers() {
+    // "Merge wave 1" waits for 1 but not 2: a person accepted that.
+    let members = [
+        member(1, "api", &[]),
+        member(2, "ui", &[]),
+        member(3, "Merge wave 1", &[1]),
+    ];
+    let note = parse_commands(r#"[{"command":"note","text":"carry on"}]"#).unwrap();
+    check_merge_waves(&note, &members).unwrap();
+    let closed = parse_commands(r#"[{"command":"add_dep","item_id":3,"depends_on":2}]"#).unwrap();
+    check_merge_waves(&closed, &members).unwrap();
+    // A new gap is still refused next to the old one.
+    let added = parse_commands(r#"[{"command":"create_item","title":"cli"}]"#).unwrap();
+    let e = check_merge_waves(&added, &members).unwrap_err();
+    assert!(e.contains("new:0") && !e.contains("item 2"), "{e}");
+}
+
+#[test]
+fn a_rejected_proposal_is_no_item_the_merge_waits_for() {
+    let members = [
+        member(1, "api", &[]),
+        PlanNode {
+            rejected: true,
+            ..member(2, "ui", &[])
+        },
+    ];
+    let c =
+        parse_commands(r#"[{"command":"create_item","title":"Merge wave 1","depends_on":[1]}]"#)
+            .unwrap();
+    check_merge_waves(&c, &members).unwrap();
+}
+
+#[test]
+fn the_snapshot_says_why_the_last_answer_was_refused() {
+    let m: MissionRow = serde_json::from_value(serde_json::json!({
+        "id": 1, "name": "m", "goal": "ship it", "mode": "finite", "state": "active",
+        "level": 1, "plan_version": 1, "created_at": 0, "updated_at": 0, "version": 1,
+    }))
+    .unwrap();
+    let events = [MissionEventRow {
+        id: 1,
+        at: 10,
+        kind: "refused".into(),
+        actor: "planner".into(),
+        work_item_id: None,
+        task_id: None,
+        decision_id: None,
+        payload: Some(
+            serde_json::json!({ "why": "a merge-wave item depends on every item of its wave: new:3" }),
+        ),
+    }];
+    let graph = MissionGraph::default();
+    let snap = snapshot(&SnapshotInput {
+        mission: &m,
+        items: &[],
+        graph: &graph,
+        steps: &[],
+        cards: &[],
+        events: &events,
+        why: "test",
+    });
+    assert!(
+        snap.contains("refused by planner: <untrusted>a merge-wave item"),
+        "{snap}"
+    );
+}
+
+/// Lanes design L2: `create_item` may name its lane, which the create card
+/// carries beside the tree; a name that cannot be a lane refuses the answer.
+#[test]
+fn a_created_item_may_name_its_lane() {
+    let c = parse_commands(
+        r#"[{"command":"create_item","title":"Schema","lane":"backend"},
+            {"command":"create_item","title":"Screen"}]"#,
+    )
+    .unwrap();
+    assert_eq!(lanes_of(&c), vec![Some("backend".to_string()), None]);
+    assert_eq!(tree_of(&c).len(), 2);
+    let long = format!(
+        r#"[{{"command":"create_item","title":"x","lane":"{}"}}]"#,
+        "l".repeat(41)
+    );
+    assert!(parse_commands(&long).unwrap_err().contains("command 0"));
+    assert!(PLANNER_PROMPT.contains("lane?:"));
+}
+
+#[test]
+fn a_finished_merge_does_not_refuse_a_new_item_of_its_wave() {
+    // "Merge wave 1" (3) already ran: a review follow-up with no deps lands
+    // in wave 1, and is the next merge's to take in.
+    let members = [
+        PlanNode {
+            done: true,
+            ..member(1, "api", &[])
+        },
+        PlanNode {
+            done: true,
+            ..member(2, "ui", &[])
+        },
+        PlanNode {
+            done: true,
+            ..member(3, "Merge wave 1: land the PRs", &[1, 2])
+        },
+    ];
+    let added = parse_commands(r#"[{"command":"create_item","title":"Fix X"}]"#).unwrap();
+    check_merge_waves(&added, &members).unwrap();
+    // The same merge not yet done still asks for it.
+    let open = [
+        member(1, "api", &[]),
+        member(2, "ui", &[]),
+        member(3, "Merge wave 1: land the PRs", &[1, 2]),
+    ];
+    assert!(check_merge_waves(&added, &open).is_err());
+}
+
+#[test]
+fn the_loops_integration_item_joins_no_wave() {
+    // Wave 2 holds 3 and 4; "Merge wave 2" (5) waits for both. The loop's
+    // integration of 1 and 2 (6) sits in wave 2 too, yet no merge waits
+    // for it: accepting it is no new gap.
+    let mut before = vec![
+        member(1, "api", &[]),
+        member(2, "ui", &[]),
+        member(3, "search", &[1]),
+        member(4, "export", &[2]),
+        member(5, "Merge wave 2", &[3, 4]),
+        PlanNode {
+            rejected: true,
+            integration: true,
+            ..member(6, "Integrate #1 and #2 into one branch", &[1, 2])
+        },
+    ];
+    let mut after = before.clone();
+    after[5].rejected = false;
+    check_merge_change(&before, &after, |id| format!("item {id}")).unwrap();
+    // An ordinary item in its place is a gap.
+    before[5].integration = false;
+    after[5].integration = false;
+    assert!(check_merge_change(&before, &after, |id| format!("item {id}")).is_err());
+}
+
+#[test]
+fn a_merge_wave_title_takes_whole_words() {
+    assert!(is_merge_wave("Merge wave 1: land the PRs"));
+    assert!(is_merge_wave("Integrate wave 2"));
+    assert!(is_merge_wave("Integration of waves 1-2"));
+    assert!(is_merge_wave("Merge wave 1b"));
+    assert!(!is_merge_wave("Integrate waveform renderer"));
+    assert!(!is_merge_wave("Merge microwave driver PR"));
+    assert!(!is_merge_wave("Merge the config loaders"));
+}
+
+/// Lanes design L5: `create_item` may name what it changes; a path outside
+/// the repository refuses the answer.
+#[test]
+fn a_created_item_may_name_what_it_changes() {
+    let c = parse_commands(
+        r#"[{"command":"create_item","title":"Schema","touches":["src/store/**"]},
+            {"command":"create_item","title":"Screen"}]"#,
+    )
+    .unwrap();
+    assert_eq!(
+        touches_of(&c),
+        vec![vec!["src/store/**".to_string()], Vec::new()]
+    );
+    let bad = r#"[{"command":"create_item","title":"x","touches":["/etc/passwd"]}]"#;
+    assert!(parse_commands(bad).unwrap_err().contains("command 0"));
+    assert!(PLANNER_PROMPT.contains("touches?:"));
 }

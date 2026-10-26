@@ -86,7 +86,8 @@ pub enum AgentsCmd {
     Define { path: std::path::PathBuf },
     /// The rules, the newest jobs and the actions waiting for a person.
     Status {
-        /// How many jobs and actions to print. [default: 20]
+        /// How many jobs to print (pending actions print up to 200
+        /// whatever this is). [default: 20]
         #[arg(long, default_value_t = 20)]
         limit: u32,
     },
@@ -419,6 +420,10 @@ fn run_on(store: &Mutex<Store>, cmd: AgentsCmd, now: i64) -> Result<ExitCode, St
                     "action {}\tjob {}\t{}\tpending",
                     a.id, a.job_id, a.kind
                 ));
+            }
+            let more = st.pending_total.saturating_sub(st.pending.len() as u64);
+            if more > 0 {
+                out::line(&format!("... and {more} older pending actions"));
             }
             for j in &st.jobs {
                 out::line(&format!(

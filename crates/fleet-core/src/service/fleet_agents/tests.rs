@@ -191,11 +191,11 @@ fn a_trigger_takes_its_sources_keys_only() {
             v["trigger"]
                 .as_object_mut()
                 .unwrap()
-                .remove("query")
+                .remove("tracker")
                 .map(|_| ())
                 .unwrap()
         },
-        "needs query",
+        "needs tracker",
     );
     assert_problem(
         |v| v["trigger"]["query"] = json!("project = {{nope}}"),
@@ -228,6 +228,23 @@ fn a_trigger_takes_its_sources_keys_only() {
     ] {
         assert!(scan.iter().any(|x| x.contains(want)), "{want}: {scan:#?}");
     }
+    // A window no longer than the interval leaves gaps (scans run a poll
+    // late); the default interval (60) counts when every_mins is unset.
+    for (every, window) in [(json!(60), 15), (json!(60), 60), (Value::Null, 45)] {
+        let p = problems_of(|v| {
+            v["trigger"] = json!({ "source": "mcp_scan", "store": "logs", "tool": "search_logs",
+                "every_mins": every, "window_mins": window })
+        });
+        assert!(
+            p.iter()
+                .any(|x| x.contains("window_mins must be more than every_mins")),
+            "{every} / {window}: {p:#?}"
+        );
+    }
+    assert_problem(
+        |v| v["run"]["cooldown_secs"] = json!(-1),
+        "cooldown_secs is 0-604800",
+    );
     let manual = problems_of(|v| v["trigger"] = json!({ "source": "manual" }));
     assert!(
         manual.iter().any(|x| x.contains("{{subject.key}}")),
@@ -762,4 +779,175 @@ mod grant_form {
         assert_eq!(spec.submit.as_deref(), Some("Save"));
         assert_eq!(forms::validate(&spec), Vec::<String>::new());
     }
+}
+
+/// The gallery ships every definition in catalog-seed/fleet-agents/, each
+/// valid: what a person installs grants without an edit.
+#[test]
+fn the_gallery_is_the_seed_directory_and_every_entry_is_valid() {
+    let mut on_disk: Vec<String> =
+        std::fs::read_dir(crate::repo_files::path("catalog-seed/fleet-agents"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+    on_disk.sort();
+    let mut shipped: Vec<String> = super::gallery::SEEDS
+        .iter()
+        .map(|s| s.name.to_string())
+        .collect();
+    shipped.sort();
+    assert_eq!(shipped, on_disk, "SEEDS lists the seed directory");
+    for e in super::gallery::entries(|n| n == "proposer") {
+        assert!(
+            e.view.problems.is_empty(),
+            "{}: {:?}",
+            e.view.name,
+            e.view.problems
+        );
+        assert!(!e.view.description.is_empty() && e.view.trigger.is_some());
+        assert_eq!(e.installed, e.view.name == "proposer");
+    }
+}
+
+/// The three gallery agents for everyday work: a triage on a tracker, an
+/// answer on GitHub, a digest on a schedule.
+#[test]
+fn the_everyday_gallery_agents_read_and_write_where_they_say() {
+    use definition::TriggerSource;
+    let triage = seeded("issue-triage");
+    assert_eq!(
+        triage.definition.trigger.source,
+        TriggerSource::TrackerComments
+    );
+    assert!(triage.skill.contains("never") && triage.skill.contains("instruction"));
+    let ask = seeded("pr-questions");
+    assert_eq!(ask.definition.trigger.source, TriggerSource::GithubComments);
+    assert_eq!(ask.definition.actions[0].kind.word(), "pr_comment");
+    let digest = seeded("daily-digest");
+    assert_eq!(digest.definition.trigger.source, TriggerSource::Schedule);
+    assert!(digest.definition.run.diagnostics);
+}
+
+/// A pr_review names its findings: an array of {path, line, body} in the
+/// answer; it is one review (no each) of a github_prs subject.
+#[test]
+fn a_review_names_findings_the_answer_has() {
+    let def = |findings: Value, each: Option<&str>, source: &str| {
+        let mut review = json!({ "id": "review", "do": "pr_review",
+            "target": "{{subject.number}}", "body": "{{answer.summary}}",
+            "verdict": "{{answer.verdict}}", "findings": "notes" });
+        if let Some(e) = each {
+            review["each"] = json!(e);
+        }
+        let d = definition::parse_value(&json!({
+            "trigger": { "source": source, "repo": "acme/pos" },
+            "run": { "output_schema": { "type": "object", "required": ["summary"],
+                "properties": { "summary": { "type": "string" },
+                    "verdict": { "type": "string" }, "notes": findings } } },
+            "actions": [review]
+        }))
+        .unwrap();
+        definition::problems(&d, &std::collections::BTreeMap::new()).join("\n")
+    };
+    let good = json!({ "type": "array", "items": { "type": "object", "properties": {
+        "path": { "type": "string" }, "line": { "type": "integer" }, "body": { "type": "string" } } } });
+    assert_eq!(def(good.clone(), None, "github_prs"), "");
+    let no_line = json!({ "type": "array", "items": { "type": "object", "properties": {
+        "path": { "type": "string" }, "body": { "type": "string" } } } });
+    assert!(def(no_line, None, "github_prs").contains("not an array of {path, line, body}"));
+    assert!(def(good.clone(), Some("notes"), "github_prs").contains("no each"));
+    assert!(def(good, None, "github_comments").contains("the trigger is github_prs"));
+}
+
+/// The install form's "It may write" line says when `limits.auto_approve`
+/// lets an unattended review APPROVE, and only then.
+#[test]
+fn the_writes_line_tells_of_an_unattended_approve() {
+    let line = |auto: bool, auto_approve: bool| {
+        let d = definition::parse_value(&json!({
+            "limits": { "auto_approve": auto_approve },
+            "inputs": [{ "name": "repo", "type": "text", "label": "Repo", "required": true }],
+            "trigger": { "source": "github_prs", "repo": "{{repo}}" },
+            "run": { "workspace": "home" },
+            "actions": [
+                { "id": "review", "do": "pr_review", "target": "{{subject.number}}",
+                  "verdict": "{{answer.verdict}}", "body": "{{answer.summary}}", "auto": auto }
+            ]
+        }))
+        .unwrap();
+        super::form::writes_line(&definition::Loaded {
+            name: "rv".into(),
+            definition: d,
+            skill: String::new(),
+            templates: BTreeMap::new(),
+        })
+    };
+    assert!(line(true, true).contains("pr review (unattended at act, may APPROVE)"));
+    let plain = line(true, false);
+    assert!(
+        plain.contains("pr review (unattended at act)") && !plain.contains("APPROVE"),
+        "{plain}"
+    );
+    assert!(
+        !line(false, true).contains("APPROVE"),
+        "a review a person sends"
+    );
+}
+
+/// `run.fingerprint` keeps its records in a fleet store, reads the answer,
+/// and adds fields the answer's own schema must not have.
+#[test]
+fn a_fingerprint_names_a_fleet_store_and_adds_its_own_fields() {
+    let seed = super::gallery::seed("support").unwrap();
+    let base: Value = serde_yaml::from_str(seed.asset).unwrap();
+    let check = |edit: &dyn Fn(&mut Value)| {
+        let mut v = base.clone();
+        for k in ["kind", "name", "description"] {
+            v.as_object_mut().unwrap().remove(k);
+        }
+        edit(&mut v);
+        let d = definition::parse_value(&v).unwrap();
+        let (templates, _) = split_skill(seed.skill).unwrap();
+        problems(&d, &templates).join("\n")
+    };
+    assert_eq!(
+        check(&|_| {}),
+        "",
+        "the gallery's support definition is valid"
+    );
+    assert!(
+        check(&|v| v["run"]["fingerprint"]["store"] = json!("logs")).contains("not a fleet store")
+    );
+    assert!(check(
+        &|v| v["run"]["output_schema"]["properties"]["knownBug"] = json!({ "type": "string" })
+    )
+    .contains("which the fingerprint adds"));
+    assert!(
+        check(&|v| v["run"]["fingerprint"]["class"] = json!("{{answer.nope}}"))
+            .contains("no such field")
+    );
+    // Without a fingerprint, an action may not name its fields.
+    assert!(check(&|v| {
+        v["run"].as_object_mut().unwrap().remove("fingerprint");
+    })
+    .contains("knownBug"));
+}
+
+/// A pull request's head and diff, and a push's gate, are a GitHub
+/// trigger's: a tracker definition is refused them.
+#[test]
+fn a_head_a_diff_and_a_debounce_need_a_pull_request() {
+    assert_problem(
+        |v| v["run"]["workspace"] = json!("pr_head"),
+        "workspace pr_head reads a pull request",
+    );
+    assert_problem(|v| v["run"]["diff"] = json!({}), "diff is a pull request's");
+    assert_problem(
+        |v| v["trigger"]["debounce_secs"] = json!(60),
+        "debounce_secs is not for this source",
+    );
+    assert_problem(
+        |v| v["run"]["diff"] = json!({ "max_lines": 0 }),
+        "max_lines is 1-20000",
+    );
 }

@@ -86,6 +86,7 @@ fn login(profile: Option<&str>, uuid: &str, used: f64) -> HostLogin {
         profile: profile.map(str::to_string),
         account_uuid: uuid.to_string(),
         used_pct: Some(used),
+        signed_out: false,
     }
 }
 

@@ -100,6 +100,42 @@ pub struct MissionDetail {
     /// detail's Sessions list opens. Empty, and absent, from an older hub.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sessions: Vec<FinishSession>,
+    /// Where its runs and its time went (lanes design L0), over the
+    /// members this caller may see. Absent from an older hub.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stats: Option<stats::MissionStats>,
+    /// Its lanes (lanes design L2), each with the members of `items` it
+    /// holds. Empty, and absent, for a mission with none and from an older
+    /// hub.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lanes: Vec<crate::store::MissionLaneRow>,
+    /// What each member this caller may see says it changes (lanes design
+    /// L5), by item id; only members that say. Absent from an older hub.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub touches: std::collections::HashMap<i64, Vec<String>>,
+    /// The planner's open wait, when its newest word (of its runs and
+    /// waits, read apart from the rest of the log) is a usage-limit wait
+    /// (review r9: `events` is one page of every kind, so a busy log hid
+    /// it). Always sent, `null` when not waiting, so a client tells this
+    /// hub from an older one that leaves it out. The outer `None` is that
+    /// older hub's answer read back (hub client mode routes this struct
+    /// typed): the key stays out again, so the client still reads `events`.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present"
+    )]
+    pub limit_wait: Option<Option<super::orchestrate::limit::LimitWait>>,
+}
+
+/// A key that is there, `null` included, is `Some`: only an absent key
+/// (`#[serde(default)]`) reads as `None`.
+fn present<'de, D, T>(d: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(d).map(Some)
 }
 
 /// A finished mission's leftovers, as far as the caller may see them.
@@ -260,6 +296,32 @@ pub fn mission(
     let may_change = may_change_mission(&s, scope, &mission)?;
     let plan = super::orchestrate::plan_for(&s, &mission)?;
     let sessions = live_sessions(&s, scope, id)?;
+    let stats = Some(mission_stats(&s, &mission, &items)?);
+    let lanes = s
+        .mission_lanes(id)?
+        .into_iter()
+        .map(|mut l| {
+            l.item_ids.retain(|i| items.iter().any(|it| it.id == *i));
+            // A lane whose every task is done is done (lanes design L4),
+            // derived on read like the mission's phase.
+            let done = !l.item_ids.is_empty()
+                && l.item_ids.iter().all(|i| {
+                    items
+                        .iter()
+                        .any(|it| it.id == *i && it.status_category == "done")
+                });
+            if done && l.state != "held" {
+                l.state = "done".into();
+            }
+            l
+        })
+        .collect();
+    let limit_wait = Some(super::orchestrate::limit::Words::read(&s, id)?.newest_wait());
+    let touches = s
+        .mission_touches(id)?
+        .into_iter()
+        .filter(|(i, _)| items.iter().any(|it| it.id == *i))
+        .collect();
     let finish = if crate::store::MISSION_FINAL_STATES.contains(&mission.state.as_str()) {
         Some(finish(&s, scope, id, sessions.clone())?)
     } else {
@@ -275,7 +337,36 @@ pub fn mission(
         plan,
         finish,
         sessions,
+        stats,
+        lanes,
+        touches,
+        limit_wait,
     })
+}
+
+/// [`stats::stats`] over `items`' attempts, now.
+fn mission_stats(
+    s: &Store,
+    mission: &MissionRow,
+    items: &[WorkItemRow],
+) -> Result<stats::MissionStats, IpcError> {
+    let mut attempts = Vec::new();
+    for i in items {
+        attempts.extend(s.tasks_for_item(i.id)?);
+    }
+    let checkout_of = |sid: i64| {
+        s.get_session_by_id(sid)
+            .ok()
+            .flatten()
+            .and_then(|r| r.worktree_id)
+    };
+    Ok(stats::stats(
+        items,
+        mission.root_item_id,
+        &attempts,
+        &checkout_of,
+        crate::store::now_unix(),
+    ))
 }
 
 /// The running sessions on mission `id`'s member items that `scope` may
@@ -505,13 +596,109 @@ pub fn set_state(
         )
     })?;
     let s = lock(store)?;
-    changeable(&s, scope, id)?;
-    s.set_mission_state(
+    let m = changeable(&s, scope, id)?;
+    let red = if to == "completed" && m.state != "completed" {
+        red_prs(&s, scope, id)?
+    } else {
+        Vec::new()
+    };
+    let overridden = args.ci_override == Some(true);
+    if !overridden {
+        if let Some(e) = ci_refusal(&red) {
+            return Err(e);
+        }
+    }
+    let row = s.set_mission_state(
         id,
         args.expected_version.filter(|v| *v != 0),
         to,
         &actor(scope),
+    )?;
+    if !red.is_empty() {
+        s.record_mission_event(
+            id,
+            &crate::store::NewMissionEvent {
+                kind: "ci_override",
+                actor: &actor(scope),
+                work_item_id: None,
+                task_id: None,
+                decision_id: None,
+                payload: Some(serde_json::json!({ "prs": red })),
+            },
+        )?;
+    }
+    Ok(row)
+}
+
+/// The pull requests of mission `id` whose CI was last seen failing, as
+/// `scope` may name them: an open or merged one (a closed, unmerged one was
+/// given up). A PR the caller may not see still counts, unnamed (`""`).
+pub(crate) fn red_prs(s: &Store, scope: &ViewScope, id: i64) -> Result<Vec<String>, IpcError> {
+    let mut out = Vec::new();
+    for url in s.mission_pr_urls(id)? {
+        let Some(pr) = s.pull_request_by_url(&url)? else {
+            continue;
+        };
+        if pr.state == "CLOSED" || pr.ci_status.as_deref() != Some("failing") {
+            continue;
+        }
+        out.push(if crate::service::prs::visible(s, scope, &pr)? {
+            pr_label(&pr)
+        } else {
+            String::new()
+        });
+    }
+    out.sort();
+    Ok(out)
+}
+
+fn pr_label(pr: &PullRequestRow) -> String {
+    match (&pr.repo, pr.number) {
+        (Some(r), Some(n)) => format!("{r}#{n}"),
+        _ => pr.url.clone(),
+    }
+}
+
+/// PURE: the refusal of a completion while `red` (from [`red_prs`]) holds
+/// a pull request; `None` when CI is not red.
+pub(crate) fn ci_refusal(red: &[String]) -> Option<IpcError> {
+    ci_refusal_saying(red, "a person completes the mission anyway (ci_override)")
+}
+
+/// PURE: [`ci_refusal`] for the loop's `complete` step, which takes no
+/// override (review r8): it points to the mission's own Complete, which does.
+pub(crate) fn ci_step_refusal(red: &[String]) -> Option<IpcError> {
+    ci_refusal_saying(
+        red,
+        "complete the mission anyway with its own Complete, which takes a person's CI override",
     )
+}
+
+fn ci_refusal_saying(red: &[String], anyway: &str) -> Option<IpcError> {
+    if red.is_empty() {
+        return None;
+    }
+    let named: Vec<&str> = red
+        .iter()
+        .map(String::as_str)
+        .filter(|l| !l.is_empty())
+        .collect();
+    let hidden = red.len() - named.len();
+    let mut what = named.join(", ");
+    if hidden > 0 {
+        if !what.is_empty() {
+            what.push_str(" and ");
+        }
+        what.push_str(&if hidden == 1 {
+            "a pull request you cannot see".to_string()
+        } else {
+            format!("{hidden} pull requests you cannot see")
+        });
+    }
+    Some(IpcError::new(
+        codes::E_CI_FAILING,
+        format!("CI is failing on {what}; fix it, or {anyway}"),
+    ))
 }
 
 /// `work_link { action: mission_repo, mission_id, project_id, role?, on? }`.
@@ -535,7 +722,7 @@ pub fn repo(
     )
 }
 
-/// `work_link { action: mission_item, mission_id, item_id, on? }`. The
+/// `work_link { action: mission_item, mission_id, item_id, on?, lane? }`. The
 /// person fence on the item's own sessions is the tool layer's
 /// (`require_drive_on_item_sessions`), as for a sprint.
 pub fn item(
@@ -561,7 +748,16 @@ pub fn item(
             ));
         }
     }
-    s.set_mission_item(id, item, args.on.unwrap_or(true), &actor(scope))
+    let on = args.on.unwrap_or(true);
+    let m = s.set_mission_item(id, item, on, &actor(scope))?;
+    // Lanes design L2: a person puts the task in a lane, or takes it out.
+    if let Some(l) = args.lane.as_deref().filter(|_| on) {
+        let lane = Some(l.trim()).filter(|l| !l.is_empty());
+        let project = s.get_work_item(item)?.and_then(|i| i.project_id);
+        s.set_item_lane(id, item, lane, project, &actor(scope))?;
+        return Ok(s.get_mission(id)?.unwrap_or(m));
+    }
+    Ok(m)
 }
 
 /// What `mission_delete` answers.
@@ -585,6 +781,54 @@ pub fn delete(
     }
     Ok(MissionDeleted { removed: id })
 }
+
+/// Test fixture: a live session of `owner`'s on `item`, whose pull request
+/// `number` is in `state` with CI `ci`. Answers the session.
+#[cfg(test)]
+pub(crate) fn test_mission_pr(
+    s: &Store,
+    item: i64,
+    owner: i64,
+    number: i64,
+    state: &str,
+    ci: &str,
+) -> i64 {
+    let name = format!("pr-{number}");
+    let url = format!("https://github.com/acme/pay/pull/{number}");
+    s.upsert_host("pr-host").unwrap();
+    let pid = s.upsert_project("acme", "pay", "/src/pay").unwrap();
+    let sid = s
+        .upsert_session(&name, "pr-host", Some(pid), None, 1, 1, "running", None)
+        .unwrap();
+    s.conn_ref()
+        .execute(
+            "UPDATE sessions SET owner_person_id = ?1, pr_url = ?2 WHERE id = ?3",
+            rusqlite::params![owner, url, sid],
+        )
+        .unwrap();
+    s.link_session_work(sid, crate::store::WorkTarget::Item(item), "manual")
+        .unwrap();
+    Store::upsert_pull_request_in_tx(
+        s.conn_ref(),
+        &url,
+        Some(ci),
+        Some(&crate::service::outcome::PrEvidence {
+            state: Some(state.into()),
+            ..Default::default()
+        }),
+        crate::store::PrSeenBy {
+            session_id: sid,
+            session_name: &name,
+            host_alias: "pr-host",
+            project_id: None,
+        },
+        100,
+    )
+    .unwrap();
+    sid
+}
+
+pub mod stats;
 
 #[cfg(test)]
 mod tests;

@@ -3,7 +3,8 @@
   import StatusBar from './lib/kit/StatusBar.svelte';
   import MoodLine from './lib/MoodLine.svelte';
   import { applyWorkEvents, loadTrackers, sessionsMentioning } from './lib/trackers';
-  import { loadOrgs, cycleScope } from './lib/orgs';
+  import { loadOrgs } from './lib/orgs';
+  import { cyclePrimaryScope } from './lib/fleet_filters';
   import type { WorkEvent } from './lib/trackers';
   import { onMount, onDestroy, tick, untrack } from 'svelte';
   import Pane from './lib/Pane.svelte';
@@ -84,6 +85,8 @@
     appChord,
     assetsViewRequest,
     hostsViewRequest,
+    inspectorToggleRequest,
+    nextNeedsYouRequest,
     onHostsCloseRequested,
     openPathRequest,
     requestNewSessionOnHost,
@@ -207,7 +210,7 @@
     // failed. Stacking up to four more sticky toasts on top of that would
     // just be the #166 "toast storm" repeated — so this is the one code that
     // does not also toast. Every other failure still does.
-    if (r.error.code !== 'E_HUB_CONTRACT') pushError(r.error, `Failed to load ${what}`);
+    if (r.error.code !== 'E_HUB_CONTRACT') pushError(r.error, `Failed to load ${what}`, undefined, { read: true });
     return `${what}: ${r.error.code}`;
   }
 
@@ -313,7 +316,7 @@
     } else {
       healthError = `${hr0.error.code}: ${hr0.error.message}`;
       healthText = errorText(hr0.error);
-      push({ kind: 'error', code: hr0.error.code, message: `Health check failed: ${hr0.error.message}` });
+      pushError(hr0.error, 'Health check failed');
     }
     // Subscribed BEFORE the first list: a `session:updated` that lands while
     // the list is in flight would otherwise be emitted to no listener and
@@ -908,7 +911,13 @@
   // Review r08: a board card's task opens in the inspector column beside the
   // board, whatever the inspector pref.
   const boardTask = $derived(boardShown && taskShowing);
-  const inspectorRoom = $derived(boardTask || (!!$selectedSession && !wideMode && !boardShown && !missionsShown && !detailsMain));
+  // Another fleet's session covers this window's own (review8): the
+  // inspector would show the hidden session's Details beside it.
+  const fleetSessionShown = $derived(!!$selectedFleetSession && !fleetPageShown);
+  const inspectorRoom = $derived(
+    boardTask ||
+      (!!$selectedSession && !fleetSessionShown && !wideMode && !boardShown && !missionsShown && !detailsMain),
+  );
   const inspectorShown = $derived(!$settingsOpen && (boardTask || (inspectorRoom && inspectorOpen)));
   // Step 5.3: the pane's shells, for the Terminals tab. It is current while
   // the pane shows one of them (alone or split beside the agent).
@@ -954,8 +963,18 @@
     }
   }
   function toggleInspector() {
+    // Review w30-7: where the inspector cannot show, the chord leaves the pref alone.
+    if (!inspectorRoom) return;
     inspectorOpen = !inspectorOpen;
   }
+  // ⌘K's Inspector row (review w18-4): the same toggle as ⌥⌘B.
+  $effect(() => {
+    if ($inspectorToggleRequest === 0) return;
+    untrack(() => {
+      inspectorToggleRequest.set(0);
+      toggleInspector();
+    });
+  });
 
   // Footer usage segment: whether to look at usage, not the numbers. A coarse
   // clock is enough for "3m" ages and staleness.
@@ -1001,6 +1020,16 @@
   $effect(() => {
     if ($addProjectRequest) untrack(revealList);
   });
+  // ⌘K's "Next session that needs you" is answered by the Sidebar too: behind
+  // a collapsed rail (or Settings / a fleet page) it would sit unanswered and
+  // jump the selection whenever the list next mounted.
+  $effect(() => {
+    if ($nextNeedsYouRequest === 0) return;
+    untrack(() => {
+      settingsOpen.set(false);
+      revealList();
+    });
+  });
   function revealList() {
     sidebarCollapsed = false;
     if (fleetPageShown) showSession();
@@ -1026,12 +1055,16 @@
     e.preventDefault();
     e.stopPropagation();
     if (chord === 'hosts') toggleHosts();
+    // Under another fleet's session these would act on the hidden selected
+    // session (review8): its view, its inspector, its folder in VS Code.
+    else if (fleetSessionShown && (chord === 'session-view' || chord === 'inspector' || chord === 'open-in-editor'))
+      return;
     else if (chord === 'session-view') flipSessionView();
     else if (chord === 'settings') settingsOpen.set(true);
     // ⌘E opens Control (step 9.1).
     else if (chord === 'agent') toggleControl('chat');
     // The Work view has its own org filter: the chord cycles that one there.
-    else if (chord === 'scope') (get(sidebarView) === 'work' ? cycleWorkOrg : cycleScope)();
+    else if (chord === 'scope') (get(sidebarView) === 'work' ? cycleWorkOrg : cyclePrimaryScope)();
     else if (chord === 'today') toggleToday();
     else if (chord === 'inspector') toggleInspector();
     else if (chord === 'open-in-editor') void openInEditorIfAllowed($selectedSession, selAccess);
@@ -1044,10 +1077,14 @@
   function onKeydown(e: KeyboardEvent) {
     if (e.key !== 'Escape') return;
     const target = e.target as HTMLElement | null;
+    // An Esc a view's own handler took (review w18-1) is not the page's. The
+    // terminal's hidden input proxy also takes Esc (it writes it to the pty),
+    // but under a fleet page the terminal is covered: that Esc still leaves.
+    const taken = e.defaultPrevented && target?.dataset?.imeProxy === undefined;
     // Settings, the same rule as the fleet pages: Esc goes back to what was
     // open under it, not while typing in a field or inside a dialog.
     if ($settingsOpen) {
-      if (e.defaultPrevented || isEditable(target) || target?.closest?.('dialog')) return;
+      if (taken || isEditable(target) || target?.closest?.('dialog')) return;
       settingsOpen.set(false);
       return;
     }
@@ -1056,36 +1093,36 @@
     // typing in a field such as the file filter, where Esc belongs to that
     // input and exiting the whole panel would be surprising.
     if ($destination === 'files') {
-      if (isEditable(target)) return;
+      if (taken || isEditable(target)) return;
       leave('files');
       return;
     }
     // Assets is an overlay with no Esc handling of its own; the same rule as
     // Files applies (not while typing in the catalog's filter field).
     if ($destination === 'assets') {
-      if (isEditable(target) || target?.closest?.('dialog')) return;
+      if (taken || isEditable(target) || target?.closest?.('dialog')) return;
       leave('assets');
       return;
     }
     // Accounts, the same rule as Assets.
     if ($destination === 'accounts') {
-      if (isEditable(target) || target?.closest?.('dialog')) return;
+      if (taken || isEditable(target) || target?.closest?.('dialog')) return;
       leave('accounts');
       return;
     }
     // Control, the same rule (its composer keeps Esc while you type).
     if ($destination === 'control') {
-      if (isEditable(target) || target?.closest?.('dialog')) return;
+      if (taken || isEditable(target) || target?.closest?.('dialog')) return;
       leave('control');
       return;
     }
     if ($destination === 'automation') {
-      if (isEditable(target) || target?.closest?.('dialog')) return;
+      if (taken || isEditable(target) || target?.closest?.('dialog')) return;
       leave('automation');
       return;
     }
     if ($destination === 'dashboard') {
-      if (isEditable(target) || target?.closest?.('dialog')) return;
+      if (taken || isEditable(target) || target?.closest?.('dialog')) return;
       leave('dashboard');
       return;
     }
@@ -1231,7 +1268,7 @@
              normal session reconnects its PTY. The Conversation is the only
              view these rows have. -->
         <div class="view-slot">
-          <ConversationPanel session={$selectedSession} visible={!fleetPageShown} />
+          <ConversationPanel session={$selectedSession} visible={!fleetPageShown && !fleetSessionShown} />
         </div>
       {:else}
         <!-- TerminalView stays mounted underneath so the PTY and its ANSI
@@ -1266,7 +1303,7 @@
             <WatchView
               session={$selectedSession}
               access={selAccess}
-              visible={!fleetPageShown && $destination !== 'files' && !conversationMode}
+              visible={!fleetPageShown && !fleetSessionShown && $destination !== 'files' && !conversationMode}
             />
           {:else}
             <TerminalView />
@@ -1279,7 +1316,11 @@
         {/if}
         {#if conversationMode && $selectedSession}
           <div class="view-slot overlay">
-            <ConversationPanel session={$selectedSession} visible={!fleetPageShown} onOpenTerminal={() => setSessionView('terminal')} />
+            <ConversationPanel
+              session={$selectedSession}
+              visible={!fleetPageShown && !fleetSessionShown}
+              onOpenTerminal={() => setSessionView('terminal')}
+            />
           </div>
         {/if}
       {/if}

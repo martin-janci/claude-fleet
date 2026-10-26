@@ -1,0 +1,98 @@
+kind: fleet_agent
+name: support
+description: "The support agent as a definition: investigates a Jira ticket when asked in a comment (Tech help! or /analyze), with logs, a tenant registry and a knowledge base. Fingerprints the error it names, links the ticket to the bug already filed for it or to a matching open bug, and files a new bug only at high confidence."
+inputs:
+  - { name: jira_tracker, type: tracker, label: Jira, required: true }
+  - { name: project, type: text, label: Jira project key, required: true }
+  - { name: phrases, type: text, label: Trigger phrases, value: "Tech help!, /analyze" }
+  - { name: bug_project, type: text, label: Bug project, required: true }
+  - { name: app_frame_prefix, type: text, label: App frame prefix, help: "The package your stack frames start with (e.g. com.acme.); empty counts every frame." }
+  - { name: daily_budget, type: number, label: Daily budget (USD), min: 0, max: 25, help: "At most 25; past it, runs wait for the next UTC day." }
+stores:
+  - { role: logs, kind: mcp, label: Logs, required: true, read_tools: [search_logs] }
+  - { role: tenants, kind: mcp, label: Tenant registry, read_tools: [resolve_tenant, lookup_client] }
+  - { role: kb, kind: mcp, label: Knowledge base, read_tools: [search_known_errors, search_docs] }
+  - { role: memory, kind: fleet, label: Tickets and fingerprints }
+trigger:
+  source: tracker_comments
+  tracker: "{{jira_tracker}}"
+  query: 'project = "{{project}}"'
+  match: { any_phrase: "{{phrases}}" }
+run:
+  workspace: project
+  max_turns: 40
+  timeout_secs: 900
+  cooldown_secs: 600
+  context:
+    - { store: memory, key: "{{subject.key}}" }
+  fingerprint:
+    store: memory
+    class: "{{answer.exceptionClass}}"
+    message: "{{answer.errorMessage}}"
+    stack: "{{answer.stackTrace}}"
+    component: "{{answer.affectedComponent}}"
+    app_frame_prefix: "{{app_frame_prefix}}"
+    window_mins: 120
+    bugs: { project: "{{bug_project}}", issue_type: Bug }
+  output_schema:
+    type: object
+    required: [summary, rootCause, confidence, severity]
+    properties:
+      summary: { type: string, maxLength: 300 }
+      rootCause: { type: string }
+      confidence: { enum: [high, medium, low] }
+      severity: { enum: [critical, major, minor] }
+      suggestedFix: { type: string }
+      exceptionClass: { type: string }
+      errorMessage: { type: string, maxLength: 1000 }
+      stackTrace: { type: string, maxLength: 8000 }
+      affectedComponent: { type: string, maxLength: 80 }
+      needsMoreInfo: { type: string }
+actions:
+  - id: ask
+    when: { field: needsMoreInfo, truthy: true }
+    do: tracker_comment
+    target: "{{subject.key}}"
+    body: "❓ {{answer.needsMoreInfo}}"
+    auto: true
+    stop: true
+  - id: comment
+    do: tracker_comment
+    target: "{{subject.key}}"
+    body_template: investigation
+    auto: true
+  - id: known
+    when: { field: knownBug, truthy: true }
+    do: tracker_link
+    from: "{{answer.knownBug}}"
+    to: "{{subject.key}}"
+    link_type: Causes
+    auto: true
+    stop: true
+  - id: similar
+    when: { field: similarBug, truthy: true }
+    do: tracker_link
+    from: "{{answer.similarBug}}"
+    to: "{{subject.key}}"
+    link_type: Causes
+    stop: true
+  - id: bug
+    when: { all: [ { field: confidence, eq: high }, { field: fingerprint, truthy: true } ] }
+    do: tracker_issue
+    project: "{{bug_project}}"
+    issue_type: Bug
+    summary: "[{{answer.affectedComponent}}] {{answer.exceptionClass}}: {{answer.summary}}"
+    body_template: bug
+    link: { to: "{{subject.key}}", link_type: Causes }
+    fingerprint: "{{answer.fingerprint}}"
+  - id: remember
+    do: record
+    store: memory
+    key: "{{subject.key}}"
+    value: { exceptionClass: "{{answer.exceptionClass}}", summary: "{{answer.summary}}", seen: "{{now}}" }
+    auto: true
+limits:
+  max_body_chars: 5000
+  daily_budget_usd: 25
+  budget_input: daily_budget
+  write_projects: ["{{project}}", "{{bug_project}}"]

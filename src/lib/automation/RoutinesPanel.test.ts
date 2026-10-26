@@ -1,4 +1,5 @@
 import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
+import { tick } from 'svelte';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
@@ -6,6 +7,7 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import RoutinesPanel from './RoutinesPanel.svelte';
 import RoutineFailures from './RoutineFailures.svelte';
+import RoutineMemory from './RoutineMemory.svelte';
 import { hosts } from '../hosts';
 import { projects } from '../projects';
 import { get } from 'svelte/store';
@@ -13,7 +15,8 @@ import { destination } from '../destination';
 import { automationTab } from '../automation';
 import { clearToasts, toasts } from '../toasts';
 import { fleetSettings, SETTING_DEFAULTS } from '../fleet_settings';
-import { deviceOffsetMin, failing, nextRunLabel, zoneChoices, zoneOffsetMin, type RoutineRow, type RoutineRunRow } from '../routines';
+import { deviceOffsetMin, failing, openRoutines, nextRunLabel, zoneChoices, zoneOffsetMin, type RoutineRow, type RoutineRunRow } from '../routines';
+import { stashDraft, zoneOfSaved } from './routine_draft';
 
 const inv = mockedInvoke as ReturnType<typeof vi.fn>;
 
@@ -89,6 +92,8 @@ function route(list: RoutineRow[] = [sweep], runs: RoutineRunRow[] = [ok, bad], 
 }
 
 beforeEach(() => {
+  // A changed draft an earlier test left open must not come back (review w05-2).
+  stashDraft(null);
   hosts.set([{ alias: 'mac', hidden: false } as never]);
   projects.set([{ project: { id: 1, owner: 'martin-janci', repo: 'claude-fleet', system: false }, worktrees: [] } as never]);
   failing.set([]);
@@ -239,6 +244,24 @@ describe('the Automation board (list, detail, inspector)', () => {
     await fireEvent.click(screen.getByTestId('routine-group'));
     expect(screen.getByTestId('routine-group').textContent).toContain('state');
     expect(document.querySelector('[data-testid^="routine-section-"]')?.textContent).toContain('Failed');
+  });
+
+  it('the Filters menu closes on Esc, keeping the Esc from the page, and on a press outside (review w18-11)', async () => {
+    render(RoutinesPanel, { props: { loops, nowSec: now } });
+    await screen.findByTestId('routine-title');
+    await fireEvent.click(screen.getByTestId('routine-filters'));
+    const item = screen.getByTestId('routine-filter-failed');
+    item.focus();
+    const esc = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+    item.dispatchEvent(esc);
+    await tick();
+    expect(esc.defaultPrevented).toBe(true);
+    expect(screen.queryByTestId('routine-filters-menu')).toBeNull();
+    expect(document.activeElement).toBe(screen.getByTestId('routine-filters'));
+    await fireEvent.click(screen.getByTestId('routine-filters'));
+    expect(screen.getByTestId('routine-filters-menu')).toBeTruthy();
+    await fireEvent.pointerDown(document.body);
+    expect(screen.queryByTestId('routine-filters-menu')).toBeNull();
   });
 
   it('the inspector says the limits, with the day spent against its budget, and Duplicate saves a copy', async () => {
@@ -432,6 +455,8 @@ describe('the routine editor (G2.3: schedule picker, next run, account, dry run,
       await fireEvent.click(screen.getByTestId('routine-tune-accept'));
       expect((screen.getByTestId('routine-prompt') as HTMLTextAreaElement).value).toBe('Tidy up the repo. Done when CI is green.');
       expect(argsOf('save')).toBeUndefined();
+      // Focus goes back to the prompt it tuned, not to the page.
+      await waitFor(() => expect(document.activeElement).toBe(screen.getByTestId('routine-prompt')));
     } finally {
       fleetSettings.set({ ...SETTING_DEFAULTS });
     }
@@ -452,7 +477,8 @@ describe('the routine editor (G2.3: schedule picker, next run, account, dry run,
     await screen.findByTestId('routine-title');
     await fireEvent.click(screen.getByTestId('routine-edit'));
     const acct = screen.getByTestId('routine-account') as HTMLSelectElement;
-    await waitFor(() => expect(Array.from(acct.options).map((o) => o.textContent)).toEqual(["me@x.com · the host's own login", 'work@x.com · profile work']));
+    await waitFor(() => expect(Array.from(acct.options).map((o) => o.textContent)).toEqual(['me@x.com · own login', 'work@x.com · profile work']));
+    expect(acct.options[0].title).toBe("me@x.com · the host's own login");
     await fireEvent.change(acct, { target: { value: 'work' } });
     expect((screen.getByTestId('routine-profile') as HTMLInputElement).value).toBe('work');
     await waitFor(() => expect(argsOf('preview')?.routine.profile).toBe('work'));
@@ -503,8 +529,9 @@ describe('the routine editor (G7.4: time zone select, Undo on save)', () => {
     await screen.findByTestId('routine-title');
     await fireEvent.click(screen.getByTestId('routine-edit'));
     const select = screen.getByTestId('routine-zone-select') as HTMLSelectElement;
-    // A routine saved before zones were stored opens on this device's.
-    expect(select.value).toBe('');
+    // A routine saved before zones were stored opens in the zone of its
+    // offset, so saving does not move it (review w05-3).
+    expect(select.value).toBe(zoneOfSaved({ utc_offset_min: 120 }).zone);
     await fireEvent.change(select, { target: { value: 'Asia/Tokyo' } });
     expect(screen.getByTestId('routine-zone').textContent).toContain('Asia/Tokyo · saved as UTC+09:00');
     await fireEvent.click(screen.getByTestId('routine-save'));
@@ -621,5 +648,335 @@ describe('the routine form (FormsAutomation board)', () => {
     await fireEvent.click(screen.getByTestId('routine-use-template'));
     await fireEvent.click(screen.getByTestId('routine-template-morning-pr-sweep'));
     expect((screen.getByTestId('routine-name') as HTMLInputElement).value).toBe('Morning PR sweep');
+  });
+
+  it('Esc on the Use a template… menu closes the menu, not the editor', async () => {
+    await openBlank();
+    await fireEvent.click(screen.getByTestId('routine-use-template'));
+    expect(screen.getByTestId('routine-new-menu')).toBeInTheDocument();
+    await fireEvent.keyDown(screen.getByTestId('routine-template-blank'), { key: 'Escape' });
+    expect(screen.queryByTestId('routine-new-menu')).toBeNull();
+    expect(screen.getByTestId('routine-editor')).toBeInTheDocument();
+    expect(screen.queryByTestId('form-discard-ask')).toBeNull();
+  });
+
+  it('Esc in the tuner closes only the tuner, and a template picked while it is open closes it', async () => {
+    fleetSettings.set({ ...SETTING_DEFAULTS, 'work.prompt_tune': 'true' });
+    try {
+      await openBlank();
+      await fireEvent.input(screen.getByTestId('routine-prompt'), { target: { value: 'Tidy up.' } });
+      await fireEvent.click(screen.getByTestId('routine-tune-open'));
+      await fireEvent.keyDown(screen.getByTestId('routine-tune-close'), { key: 'Escape' });
+      expect(screen.queryByTestId('routine-tune')).toBeNull();
+      expect(screen.getByTestId('routine-editor')).toBeInTheDocument();
+      expect(screen.queryByTestId('form-discard-ask')).toBeNull();
+
+      await fireEvent.click(screen.getByTestId('routine-tune-open'));
+      expect(screen.getByTestId('routine-tune')).toBeInTheDocument();
+      await fireEvent.click(screen.getByTestId('routine-use-template'));
+      await fireEvent.click(screen.getByTestId('routine-template-morning-pr-sweep'));
+      // The typed prompt would go: it asks first (review w05-1).
+      await fireEvent.click(screen.getByTestId('form-discard'));
+      expect((screen.getByTestId('routine-name') as HTMLInputElement).value).toBe('Morning PR sweep');
+      expect(screen.queryByTestId('routine-tune')).toBeNull();
+    } finally {
+      fleetSettings.set({ ...SETTING_DEFAULTS });
+    }
+  });
+});
+
+describe('the routine editor (review w05)', () => {
+  async function openBlankOver(list: RoutineRow[] = [sweep]) {
+    route(list);
+    const v = render(RoutinesPanel);
+    if (list.length) await screen.findByTestId('routine-title');
+    else await screen.findByTestId('routines-empty');
+    await fireEvent.click(screen.getByTestId('routine-new'));
+    await fireEvent.click(screen.getByTestId('routine-template-blank'));
+    return v;
+  }
+
+  it('w05-1: picking another routine, New or a request from elsewhere asks before a changed draft goes', async () => {
+    await openBlankOver();
+    await fireEvent.input(screen.getByTestId('routine-name'), { target: { value: 'Nightly' } });
+    await fireEvent.click(screen.getByTestId('routine-row'));
+    expect(screen.getByTestId('form-discard-ask')).toBeInTheDocument();
+    await fireEvent.click(screen.getByTestId('form-keep-editing'));
+    expect((screen.getByTestId('routine-name') as HTMLInputElement).value).toBe('Nightly');
+
+    // A template over it asks too.
+    await fireEvent.click(screen.getByTestId('routine-new'));
+    await fireEvent.click(screen.getByTestId('routine-template-morning-pr-sweep'));
+    expect(screen.getByTestId('form-discard-ask')).toBeInTheDocument();
+    expect((screen.getByTestId('routine-name') as HTMLInputElement).value).toBe('Nightly');
+    await fireEvent.click(screen.getByTestId('form-keep-editing'));
+
+    // The Inbox's Fix (a request to select a routine) asks as well.
+    openRoutines({ select: 3 });
+    await tick();
+    expect(screen.getByTestId('form-discard-ask')).toBeInTheDocument();
+    await fireEvent.click(screen.getByTestId('form-discard'));
+    expect(screen.queryByTestId('routine-editor')).toBeNull();
+    expect(screen.getByTestId('routine-title').textContent).toBe('Morning PR sweep');
+  });
+
+  it('w05-1: an untouched draft goes without asking', async () => {
+    await openBlankOver();
+    await fireEvent.click(screen.getByTestId('routine-row'));
+    expect(screen.queryByTestId('routine-editor')).toBeNull();
+  });
+
+  it('w05-2: a changed draft survives the tab closing under it; an untouched one does not', async () => {
+    const v = await openBlankOver();
+    await fireEvent.input(screen.getByTestId('routine-name'), { target: { value: 'Nightly' } });
+    v.unmount();
+    render(RoutinesPanel);
+    expect(((await screen.findByTestId('routine-name')) as HTMLInputElement).value).toBe('Nightly');
+    // Still a changed draft: Cancel asks.
+    await fireEvent.click(screen.getByTestId('routine-cancel'));
+    expect(screen.getByTestId('form-discard-ask')).toBeInTheDocument();
+  });
+
+  it('w05-3: a routine saved without a zone at UTC is saved back at UTC', async () => {
+    route([{ ...sweep, utc_offset_min: 0 }]);
+    render(RoutinesPanel);
+    await screen.findByTestId('routine-title');
+    await fireEvent.click(screen.getByTestId('routine-edit'));
+    await fireEvent.input(screen.getByTestId('routine-name'), { target: { value: 'Evening sweep' } });
+    await fireEvent.click(screen.getByTestId('routine-save'));
+    await waitFor(() => expect(argsOf('save')).toBeDefined());
+    expect(argsOf('save').routine.utc_offset_min).toBe(0);
+  });
+
+  it('w05-4: a refused save scrolls to the banner and focuses it, and the footer says it did not save', async () => {
+    await openBlankOver([]);
+    inv.mockImplementation(async (cmd: string, a: { args: { action: string } }) => {
+      if (cmd !== 'routines') return null;
+      if (a.args.action === 'save') throw { code: 'E_INVALID', message: 'the fallback host nas is in another organisation than mac' };
+      if (a.args.action === 'preview') return previewAnswer;
+      return [];
+    });
+    await fireEvent.input(screen.getByTestId('routine-name'), { target: { value: 'Nightly' } });
+    await fireEvent.input(screen.getByTestId('routine-prompt'), { target: { value: 'Tidy up.' } });
+    await fireEvent.click(screen.getByTestId('routine-save'));
+    const banner = await screen.findByTestId('routine-save-error');
+    await waitFor(() => expect(document.activeElement?.contains(banner)).toBe(true));
+    expect(screen.getByTestId('routine-save-why').textContent).toContain('Not saved');
+  });
+
+  it('w05-5/6: a budget or cap it cannot read is said on blur and blocks Save', async () => {
+    await openBlankOver([]);
+    await fireEvent.input(screen.getByTestId('routine-name'), { target: { value: 'Nightly' } });
+    await fireEvent.input(screen.getByTestId('routine-prompt'), { target: { value: 'Tidy up.' } });
+    await fireEvent.input(screen.getByTestId('routine-budget-run'), { target: { value: '1.255' } });
+    await fireEvent.blur(screen.getByTestId('routine-budget-run'));
+    expect(screen.getByTestId('routine-budget-run-error').textContent).toContain('amount like 5');
+    expect((screen.getByTestId('routine-save') as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByTestId('routine-save-why').textContent).toBe('Fix the budget per run.');
+    await fireEvent.input(screen.getByTestId('routine-budget-run'), { target: { value: '5,50' } });
+    await fireEvent.input(screen.getByTestId('routine-cap'), { target: { value: '400' } });
+    await fireEvent.blur(screen.getByTestId('routine-cap'));
+    expect(screen.getByTestId('routine-cap-error').textContent).toContain('1 to 360');
+    await fireEvent.input(screen.getByTestId('routine-cap'), { target: { value: '30' } });
+    await fireEvent.click(screen.getByTestId('routine-save'));
+    await waitFor(() => expect(argsOf('save')?.routine).toMatchObject({ budget_run_micros: 5_500_000, run_max_secs: 1800 }));
+  });
+
+  it('w05-8: a cron line that does not read says why under it, not "never runs"', async () => {
+    previewAnswer = { next_runs: [], utc_offset_min: 0, problem: 'hour: "25" is not a number from 0 to 23', logins: [] };
+    await openBlankOver([]);
+    await fireEvent.change(screen.getByTestId('routine-days'), { target: { value: 'custom' } });
+    await fireEvent.input(screen.getByTestId('routine-cron'), { target: { value: '0 25 * * *' } });
+    expect((await screen.findByTestId('routine-cron-error')).textContent).toContain('hour');
+    expect(screen.getByTestId('routine-cron').getAttribute('aria-invalid')).toBe('true');
+    expect(screen.getByTestId('routine-next-run').textContent).not.toContain('never runs');
+  });
+
+  it('w05-9: a dry run that fails says so with Retry, not "checking…" forever', async () => {
+    route([]);
+    const base = inv.getMockImplementation() as (cmd: string, a: unknown) => Promise<unknown>;
+    let down = true;
+    inv.mockImplementation(async (cmd: string, a: { args: { action: string } }) => {
+      if (cmd === 'routines' && a.args.action === 'preview' && down) throw { code: 'E_UNREACHABLE', message: 'the hub is not reachable' };
+      return base(cmd, a);
+    });
+    render(RoutinesPanel);
+    await screen.findByTestId('routines-empty');
+    await fireEvent.click(screen.getByTestId('routines-empty-new'));
+    await waitFor(() => expect(screen.getByTestId('routine-dry-run').textContent).toContain('Dry run unavailable'));
+    down = false;
+    await fireEvent.click(screen.getByTestId('routine-dry-run-retry'));
+    await waitFor(() => expect(screen.getByTestId('routine-dry-run').textContent).not.toContain('unavailable'));
+  });
+
+  it('w05-11: a hidden host, a deleted project and another organisation are shown as such', async () => {
+    hosts.set([
+      { alias: 'mac', hidden: true, org_id: 1 } as never,
+      { alias: 'pi', hidden: false, org_id: 1 } as never,
+      { alias: 'nas', hidden: false, org_id: 2 } as never,
+    ]);
+    route([{ ...sweep, project_id: 9 }]);
+    render(RoutinesPanel);
+    await screen.findByTestId('routine-title');
+    await fireEvent.click(screen.getByTestId('routine-edit'));
+    const host = screen.getByTestId('routine-host') as HTMLSelectElement;
+    expect(host.value).toBe('mac');
+    expect(host.selectedOptions[0].textContent).toBe('mac (hidden)');
+    const project = screen.getByTestId('routine-project') as HTMLSelectElement;
+    expect(project.selectedOptions[0].textContent).toBe('project 9 (deleted)');
+    expect(screen.getByTestId('routine-save-why').textContent).toBe('Pick a project: its project is gone.');
+    const fallback = screen.getByTestId('routine-fallback') as HTMLSelectElement;
+    expect(Array.from(fallback.options).map((o) => o.value)).toEqual(['', 'pi']);
+  });
+
+  it('w05-12: the form takes focus on open, and Cancel gives it back to the routine', async () => {
+    await openBlankOver();
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByTestId('routine-name')));
+    await fireEvent.click(screen.getByTestId('routine-cancel'));
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByTestId('routine-row')));
+  });
+
+  it('w05-13: Autonomy reads short, and the prompt counts toward the hub limit', async () => {
+    await openBlankOver([]);
+    const auto = screen.getByTestId('routine-autonomy') as HTMLSelectElement;
+    expect(auto.selectedOptions[0].textContent).toBe('L2 · pushes and opens PRs');
+    const prompt = screen.getByTestId('routine-prompt') as HTMLTextAreaElement;
+    expect(prompt.maxLength).toBe(4000);
+    expect(screen.queryByTestId('routine-prompt-count')).toBeNull();
+    await fireEvent.input(prompt, { target: { value: 'x'.repeat(3600) } });
+    expect(screen.getByTestId('routine-prompt-count').textContent).toBe('3600 / 4000 characters');
+  });
+});
+
+describe('the routine notebooks (migration 204)', () => {
+  const withMemory = { ...sweep, memory: 'routine' } as RoutineRow;
+  const notebook = (body: string) => ({
+    routine_id: 3,
+    memory: 'routine',
+    memory_auto: false,
+    routine: { scope: 'routine', owner_id: 3, body, updated_at: 1, updated_by: 'run', updated_run_id: 2 },
+    max_chars: 4000,
+    may_change: true,
+  });
+
+  /** `route`, with `memory` answered by `answer` (a hub without notebooks throws). */
+  function routeMemory(answer: (id: number) => unknown, list: RoutineRow[] = [withMemory]) {
+    route(list);
+    const base = inv.getMockImplementation() as (cmd: string, a: unknown) => Promise<unknown>;
+    inv.mockImplementation(async (cmd: string, a: { args: { action: string; routine_id?: number } }) => {
+      if (cmd === 'routines' && a.args.action === 'memory') return answer(a.args.routine_id!);
+      return base(cmd, a);
+    });
+  }
+  const notFound = () => {
+    throw { code: 'E_NOT_FOUND', message: 'no routine 0' };
+  };
+
+  async function openSaved() {
+    render(RoutinesPanel);
+    await screen.findByTestId('routine-title');
+    await fireEvent.click(screen.getByTestId('routine-edit'));
+  }
+
+  it('a notebook edit survives a change to the form, read-only, and leaving asks first', async () => {
+    routeMemory((id) => (id === 3 ? notebook('old notes') : notFound()));
+    await openSaved();
+    const box = (await screen.findByTestId('routine-memory-routine')) as HTMLTextAreaElement;
+    await waitFor(() => expect(box.value).toBe('old notes'));
+    await fireEvent.input(box, { target: { value: 'new notes' } });
+
+    // An unsaved notebook alone makes Cancel ask.
+    await fireEvent.click(screen.getByTestId('routine-cancel'));
+    expect(screen.getByTestId('form-discard-ask')).toBeInTheDocument();
+    await fireEvent.click(screen.getByTestId('form-keep-editing'));
+
+    // A form edit keeps the box and its text, read-only until the form is saved.
+    await fireEvent.input(screen.getByTestId('routine-prompt'), { target: { value: 'Only CI.' } });
+    const kept = screen.getByTestId('routine-memory-routine') as HTMLTextAreaElement;
+    expect(kept.value).toBe('new notes');
+    expect(kept.readOnly).toBe(true);
+    expect(screen.getByTestId('routine-memory-locked')).toBeInTheDocument();
+    expect((screen.getByTestId('routine-memory-save-routine') as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  /** `routeMemory`, with `save` answering the routine saved in place. */
+  function routeSaveInPlace() {
+    routeMemory((id) => (id === 3 ? notebook('old notes') : notFound()));
+    const base = inv.getMockImplementation() as (cmd: string, a: unknown) => Promise<unknown>;
+    inv.mockImplementation(async (cmd: string, a: { args: { action: string; routine?: Partial<RoutineRow> } }) => {
+      if (cmd === 'routines' && a.args.action === 'save') return { ...withMemory, ...a.args.routine, id: 3 };
+      return base(cmd, a);
+    });
+  }
+
+  it('saving the form keeps the editor open with the unsaved notebook text, unlocked', async () => {
+    routeSaveInPlace();
+    await openSaved();
+    const box = (await screen.findByTestId('routine-memory-routine')) as HTMLTextAreaElement;
+    await waitFor(() => expect(box.value).toBe('old notes'));
+    await fireEvent.input(box, { target: { value: 'new notes' } });
+    await fireEvent.input(screen.getByTestId('routine-prompt'), { target: { value: 'Only CI.' } });
+    expect(screen.getByTestId('routine-memory-locked')).toBeInTheDocument();
+
+    await fireEvent.click(screen.getByTestId('routine-save'));
+    await waitFor(() => expect(argsOf('save')?.routine?.prompt).toBe('Only CI.'));
+    await waitFor(() => expect(screen.queryByTestId('routine-memory-locked')).toBeNull());
+    const kept = screen.getByTestId('routine-memory-routine') as HTMLTextAreaElement;
+    await waitFor(() => expect(kept.readOnly).toBe(false));
+    expect(kept.value).toBe('new notes');
+    expect((screen.getByTestId('routine-memory-save-routine') as HTMLButtonElement).disabled).toBe(false);
+    // Leaving still asks: the notebook text is not saved yet.
+    await fireEvent.click(screen.getByTestId('routine-cancel'));
+    expect(screen.getByTestId('form-discard-ask')).toBeInTheDocument();
+  });
+
+  it('Run once now with only a notebook edit runs and keeps the editor and its text', async () => {
+    routeSaveInPlace();
+    await openSaved();
+    const box = (await screen.findByTestId('routine-memory-routine')) as HTMLTextAreaElement;
+    await waitFor(() => expect(box.value).toBe('old notes'));
+    await fireEvent.input(box, { target: { value: 'new notes' } });
+
+    await fireEvent.click(screen.getByTestId('routine-run-once'));
+    await waitFor(() => expect(argsOf('run_now')).toEqual({ action: 'run_now', routine_id: 3 }));
+    expect((screen.getByTestId('routine-memory-routine') as HTMLTextAreaElement).value).toBe('new notes');
+  });
+
+  it('counts characters as the fleet does: an emoji is one', async () => {
+    const body = '🙂'.repeat(20) + 'x'.repeat(3970);
+    routeMemory((id) => (id === 3 ? notebook(body) : notFound()));
+    await openSaved();
+    const box = (await screen.findByTestId('routine-memory-routine')) as HTMLTextAreaElement;
+    await waitFor(() => expect(box.value).toBe(body));
+    await fireEvent.input(box, { target: { value: body + 'y' } });
+    expect(box.getAttribute('aria-invalid')).toBeNull();
+    expect(box.parentElement!.textContent).toContain('3991 / 4000 characters');
+    expect((screen.getByTestId('routine-memory-save-routine') as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('against a hub without notebooks the form offers none, so a save never names one', async () => {
+    routeMemory(() => {
+      throw { code: 'E_INVALID', message: 'action must be list | get | runs, got "memory"' };
+    }, [sweep]);
+    await openSaved();
+    expect(await screen.findByTestId('routine-memory-unserved')).toBeInTheDocument();
+    expect(screen.queryByTestId('routine-memory-mode')).toBeNull();
+  });
+
+  it('a stale notebook reply for the routine left behind is not shown under the next one', async () => {
+    let releaseA: () => void = () => {};
+    routeMemory((id) => {
+      if (id === 3) return new Promise((res) => (releaseA = () => res(notebook('A notes'))));
+      if (id === 4) return { ...notebook('B notes'), routine_id: 4 };
+      return notFound();
+    });
+    const v = render(RoutineMemory, { routineId: 3 });
+    await v.rerender({ routineId: 4 });
+    const box = (await screen.findByTestId('routine-memory-routine')) as HTMLTextAreaElement;
+    await waitFor(() => expect(box.value).toBe('B notes'));
+    releaseA();
+    await new Promise((r) => setTimeout(r, 0));
+    await tick();
+    expect((screen.getByTestId('routine-memory-routine') as HTMLTextAreaElement).value).toBe('B notes');
   });
 });

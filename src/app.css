@@ -3,13 +3,21 @@
    docs/design/tokens.json, with the manual's names. src/lib/tokens.ts holds
    the colours as data, and tokens.test.ts fails when app.css, tokens.ts and
    the snapshot disagree, or when a documented pair loses its contrast.
-   Change a value in the snapshot first (the manual is the source of truth),
-   then here in all four theme blocks, then in tokens.ts.
 
-   Known contrast exception kept from the manual: --control-border is about
-   1.5:1 on --bg-pane (a control also has its fill and label). */
+   The colours the app shows at run time come from the palette engine
+   (src/lib/palette.ts, painted by theme.ts): it solves them for the sun's
+   height, the Contrast level and the Accent hue, and writes them onto <html>.
+   The four theme blocks below are only the first paint before the engine
+   runs (public/theme-boot.js replays the last painted palette even earlier)
+   and the fallback if it never does. To change a colour the app shows,
+   change the engine; to change a manual value, change the snapshot first,
+   then here in all four theme blocks, then in tokens.ts. */
 
 :root {
+  /* Native controls (checkboxes, selects, scrollbars) follow the theme and
+     the accent; each theme block below sets its own color-scheme. */
+  color-scheme: light;
+  accent-color: var(--accent);
   /* Grounds. */
   --bg: #f7f7f8;
   --bg-pane: #ffffff;
@@ -198,6 +206,7 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
+    color-scheme: dark;
     /* Grounds. */
     --bg: #0f0f0f;
     --bg-pane: #161616;
@@ -281,6 +290,7 @@
 }
 
 :root[data-theme='light'] {
+  color-scheme: light;
   /* Grounds. */
   --bg: #f7f7f8;
   --bg-pane: #ffffff;
@@ -363,6 +373,7 @@
 }
 
 :root[data-theme='dark'] {
+  color-scheme: dark;
   /* Grounds. */
   --bg: #0f0f0f;
   --bg-pane: #161616;
@@ -444,9 +455,6 @@
   --control-fg-quiet: #a8a8a8;
 }
 
-/* Motion (src/lib/motion.ts sets data-motion from the Motion pref and the
-   OS). Reduced keeps only short fades; Off stops UI motion. Every
-   transition reads these tokens, so this is the one switch. */
 /* The palette engine (src/lib/palette.ts, theme.ts) paints the colour tokens
    onto <html> at run time; the blocks above are the first paint. A flip
    between light and dark crossfades instead of snapping, under the same
@@ -463,10 +471,13 @@
 /* In the dark the primary action wears the HUD halo (--glow, painted by the
    engine; unset, it is no shadow). Zero specificity: a component's own
    shadow wins. */
-:where(.btn--primary, .of-btn.primary) {
+:where(.btn--primary, .of-btn.primary, button.primary) {
   box-shadow: var(--glow);
 }
 
+/* Motion (src/lib/motion.ts sets data-motion from the Motion pref and the
+   OS). Reduced keeps only short fades; Off stops UI motion. Every
+   transition reads these tokens, so this is the one switch. */
 :root[data-motion='reduced'] {
   --dur-base: var(--dur-fast);
   --dur-slow: var(--dur-fast);
@@ -510,4 +521,12 @@ html, body, #app {
   color: var(--fg);
   font-family: var(--font-sans);
   font-size: 14px;
+}
+
+/* A dialog's primary verb names its submit key ("Launch ⌘↵", review w18-6):
+   `formKeys` dialogs set `data-shortcut` from `submitHint`, as DialogSheet does. */
+button[data-shortcut]::after {
+  content: ' ' attr(data-shortcut);
+  opacity: 0.7;
+  font-size: 0.9em;
 }

@@ -10,7 +10,9 @@
   // ends an instance; Run now opens a small panel under the instance: what
   // to look into (the request) and where (the scope: a window, a host, a
   // session, a part of the fleet), and Run queues the manual agent's job.
-  import { onMount } from 'svelte';
+  // The gallery lists the definitions claude-fleet ships that the catalog
+  // does not have yet; Add to catalog copies one in, listed above from then.
+  import { onMount, tick } from 'svelte';
   import WizardDialog from '../forms/WizardDialog.svelte';
   import StatusDot from '../kit/StatusDot.svelte';
   import type { Values } from '../forms/forms';
@@ -18,8 +20,10 @@
   import {
     fleetDefinitions,
     fleetForm,
+    fleetGallery,
     fleetWizard,
     grantFleet,
+    installFleet,
     loadAgents,
     revokeAgentRule,
     ruleLine,
@@ -28,12 +32,14 @@
     SCOPE_WINDOWS,
     type AgentRule,
     type FleetDefinition,
+    type GalleryEntry,
     type RunScope,
   } from '../agents';
 
   let { rules }: { rules: AgentRule[] } = $props();
 
   let defs = $state<FleetDefinition[] | null>(null);
+  let gallery = $state<GalleryEntry[]>([]);
   let loadError = $state<string | null>(null);
   let open = $state<{ wizard: Wizard; definition: string } | null>(null);
   let busy = $state(false);
@@ -42,15 +48,36 @@
   /** The instance whose Run panel is open, and what it holds. */
   let running = $state<{ id: number; request: string; scope: RunScope } | null>(null);
   let queuing = $state(false);
+  /** The gallery entry being added (one at a time: a second click would be refused as taken). */
+  let installing = $state<string | null>(null);
+  let noteEl = $state<HTMLElement | null>(null);
 
   async function load() {
-    const r = await fleetDefinitions();
+    const [r, g] = await Promise.all([fleetDefinitions(), fleetGallery()]);
     if (r.ok) {
       defs = r.value ?? [];
       loadError = null;
     } else {
       loadError = r.error?.message ?? 'Could not read the catalog';
     }
+    gallery = g.ok && Array.isArray(g.value) ? g.value.filter((e) => !e.installed) : [];
+  }
+
+  async function install(name: string) {
+    if (installing) return;
+    installing = name;
+    note = null;
+    try {
+      const r = await installFleet(name);
+      note = r.ok ? `${name} added to the catalog: start an instance of it above.` : (r.error?.message ?? 'Could not add it');
+      await load();
+    } finally {
+      installing = null;
+    }
+    // The installed row (and the button that had focus) leaves the gallery:
+    // focus moves to the result instead of dropping to the page.
+    await tick();
+    noteEl?.focus();
   }
 
   onMount(() => void load());
@@ -191,7 +218,30 @@
     {/each}
   </ul>
 {/if}
-{#if note}<p class="none" data-testid="fleet-agents-note">{note}</p>{/if}
+{#if gallery.length}
+  <h3 class="sub">Gallery</h3>
+  <ul class="table agents" data-testid="fleet-gallery">
+    {#each gallery as g (g.name)}
+      <li data-testid="fleet-gallery-entry">
+        <span class="main">
+          <strong>{g.name}</strong>
+          <span class="summary">{g.description}</span>
+          <span class="summary">{g.trigger} · {g.writes}</span>
+        </span>
+        <button
+          class="act"
+          type="button"
+          disabled={installing !== null}
+          aria-busy={installing === g.name}
+          aria-label={`Add ${g.name} to catalog`}
+          data-testid="fleet-gallery-install"
+          onclick={() => void install(g.name)}>Add to catalog</button
+        >
+      </li>
+    {/each}
+  </ul>
+{/if}
+{#if note}<p class="none" role="status" tabindex="-1" bind:this={noteEl} data-testid="fleet-agents-note">{note}</p>{/if}
 
 {#if open}
   <WizardDialog

@@ -767,6 +767,24 @@ impl Store {
         Ok(n > 0)
     }
 
+    /// Set the next prompt Claude Code proposes for the session, or clear it
+    /// with `None` (migration 206). Answers whether the row changed; a
+    /// change emits `session_updated`.
+    pub fn set_prompt_suggestion(
+        &self,
+        id: i64,
+        text: Option<&str>,
+    ) -> Result<bool, rusqlite::Error> {
+        let n = self.conn.execute(
+            "UPDATE sessions SET prompt_suggestion = ?1 WHERE id = ?2 AND prompt_suggestion IS NOT ?1",
+            rusqlite::params![text, id],
+        )?;
+        if n > 0 {
+            self.emit_session(id)?;
+        }
+        Ok(n > 0)
+    }
+
     /// Whether the session `tmux_name` on `host_alias` is pinned. A row that
     /// does not exist is not pinned.
     pub fn is_session_pinned(
@@ -1437,6 +1455,51 @@ impl Store {
         self.emit_session(id)
     }
 
+    /// Settle every safe-kill request stamped before `cutoff` whose session
+    /// is not mid-turn (`claude_status` other than `working`) as `failed`
+    /// with `detail`, so the person can retry it (review w27-5). Returns the
+    /// ids settled. Emits session_updated for each.
+    pub fn expire_safe_kill_requests(
+        &self,
+        cutoff: i64,
+        detail: &str,
+    ) -> Result<Vec<i64>, rusqlite::Error> {
+        let ids: Vec<i64> = self
+            .conn
+            .prepare(
+                "UPDATE sessions SET safe_kill_state = 'failed', safe_kill_detail = ?2 \
+                 WHERE safe_kill_state = 'requested' \
+                   AND COALESCE(safe_kill_requested_at, 0) < ?1 \
+                   AND COALESCE(claude_status, '') <> 'working' \
+                 RETURNING id",
+            )?
+            .query_map(rusqlite::params![cutoff, detail], |r| r.get(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for &id in &ids {
+            self.emit_session(id)?;
+        }
+        Ok(ids)
+    }
+
+    /// Drop a safe-kill request that is still waiting for its marker (a
+    /// relaunched pane will never print it); a `failed` one is left for the
+    /// person to resolve. Emits session_updated when it changed a row.
+    pub fn clear_requested_safe_kill(&self, id: i64) -> Result<bool, rusqlite::Error> {
+        let n = self.conn.execute(
+            "UPDATE sessions
+                SET safe_kill_state=NULL,
+                    safe_kill_nonce=NULL,
+                    safe_kill_detail=NULL,
+                    safe_kill_requested_at=NULL
+              WHERE id=?1 AND safe_kill_state='requested'",
+            rusqlite::params![id],
+        )?;
+        if n > 0 {
+            self.emit_session(id)?;
+        }
+        Ok(n > 0)
+    }
+
     /// Transition a session back to running (clears `lost_at`). Called by the
     /// `recreate_session` flow after `new_session` rebuilds the tmux session on
     /// the host — for both ghost and live (RAM/wedged) recreates.
@@ -1813,7 +1876,9 @@ impl Store {
     /// The Stop hook's write: the turn is over. Sets `claude_status = idle`,
     /// bumps `turn_seq`, stamps `last_stop_at` / `last_turn_at`, maintains
     /// `idle_since`, ends a `compacting` activity, and clears `pending_input`
-    /// (a dialog on the just-ended turn's pane does not survive it). Keyed
+    /// (a dialog on the just-ended turn's pane does not survive it) and
+    /// `prompt_suggestion` (an earlier turn's proposal; Claude Code makes
+    /// this turn's after the Stop hooks ran). Keyed
     /// by row id (the hook resolver already picked the row: two rows may
     /// share one `claude_session_id`); returns the updated row (`None` when
     /// the row is gone). Emits `session_updated`.
@@ -1828,7 +1893,7 @@ impl Store {
                      last_stop_at = ?2, last_turn_at = ?2, last_hook_at = ?2, \
                      idle_since = COALESCE(idle_since, ?2), pending_input = NULL, \
                      stale_working_at = NULL, stale_demoted_at = NULL, \
-                     turn_outcome = NULL{END_COMPACTING} \
+                     turn_outcome = NULL, prompt_suggestion = NULL{END_COMPACTING} \
                  WHERE id = ?1"
             ),
             rusqlite::params![row_id, now],
@@ -1890,7 +1955,7 @@ impl Store {
                 "UPDATE sessions SET claude_status = 'working', idle_since = NULL, \
                      last_hook_at = ?2, prompt_submit_seq = prompt_submit_seq + 1, \
                      pending_input = NULL, stale_working_at = NULL, stale_demoted_at = NULL, \
-                     turn_outcome = NULL{END_COMPACTING} WHERE id = ?1"
+                     turn_outcome = NULL, prompt_suggestion = NULL{END_COMPACTING} WHERE id = ?1"
             ),
             rusqlite::params![row_id, now_unix()],
         )?;
@@ -1974,7 +2039,7 @@ impl Store {
                      last_stop_at = ?2, last_turn_at = ?2, last_hook_at = ?2, \
                      idle_since = COALESCE(idle_since, ?2), pending_input = NULL, \
                      stale_working_at = NULL, stale_demoted_at = NULL, \
-                     turn_outcome = NULL{END_COMPACTING} \
+                     turn_outcome = NULL, prompt_suggestion = NULL{END_COMPACTING} \
                  WHERE id = ?1"
             ),
             rusqlite::params![row_id, now],
@@ -2558,6 +2623,29 @@ impl Store {
              GROUP BY account_uuid",
         )?;
         let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, u32>(1)?)))?;
+        rows.collect()
+    }
+
+    /// Live Claude sessions with no account link yet, per `(host, profile)`
+    /// login. A run just started under a profile has its link dropped by
+    /// [`Self::set_session_profile`] until a later reconcile fills it, so
+    /// [`Self::live_sessions_per_account`] does not see it; placement charges
+    /// these to the account the login holds.
+    pub fn live_unlinked_sessions_per_login(
+        &self,
+    ) -> Result<std::collections::HashMap<(String, Option<String>), u32>> {
+        let mut st = self.conn.prepare_cached(
+            "SELECT host_alias, claude_profile, COUNT(*) FROM sessions \
+             WHERE status = 'running' AND lost_at IS NULL \
+               AND account_uuid IS NULL AND kind != 'shell' \
+             GROUP BY host_alias, claude_profile",
+        )?;
+        let rows = st.query_map([], |r| {
+            Ok((
+                (r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?),
+                r.get::<_, u32>(2)?,
+            ))
+        })?;
         rows.collect()
     }
 }

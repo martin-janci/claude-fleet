@@ -153,6 +153,24 @@ describe('Settings › Environment: who may change what', () => {
     expect(screen.queryByTestId('env-git')).toBeNull();
   });
 
+  it('an access read that did not get through says so and offers Try again', async () => {
+    hubStatus.set(remote);
+    let reachable = false;
+    const inv = route({
+      env_vars_list: [],
+      my_grants: () => (reachable ? { person_id: 7, grants: [] } : Object.assign(new Error('down'), { code: 'E_HUB_TIMEOUT', message: 'down' })),
+      setting_proposals: () => (reachable ? { can_write: true, proposals: [] } : Object.assign(new Error('down'), { code: 'E_HUB_TIMEOUT', message: 'down' })),
+    });
+    show(false);
+    const reason = await screen.findByTestId('resource-readonly');
+    expect(reason.textContent).toContain('Could not read');
+    expect(reason.textContent).not.toContain('client trust');
+    reachable = true;
+    await fireEvent.click(await screen.findByTestId('env-access-retry'));
+    await waitFor(() => expect(screen.queryByTestId('resource-readonly')).toBeNull());
+    expect(calls(inv, 'my_grants').length).toBe(2);
+  });
+
   it('a trusted person’s device: every scope again', async () => {
     hubStatus.set(remote);
     route({
@@ -237,5 +255,23 @@ describe('Git & tokens', () => {
     expect(sent.every((s) => s.fleet === 'company' && s.args.scope === 'person')).toBe(true);
     expect(sent.find((s) => s.args.name === 'GH_TOKEN')!.args.secret).toBe(true);
     expect(sent.find((s) => s.args.name === 'GIT_AUTHOR_NAME')!.args.secret).toBe(false);
+  });
+
+  it('empties what was typed when the fleet picker moves, so a token is never Set on the other hub', async () => {
+    hubStatus.set(remote);
+    _setFleetsForTest([fleet('primary', true), fleet('company', false)]);
+    const inv = route({
+      env_vars_list: [],
+      my_grants: { person_id: 3, grants: [] },
+      setting_proposals: { can_write: false, proposals: [] },
+    });
+    show(false);
+    await fireEvent.change(await screen.findByTestId('env-fleet'), { target: { value: 'company' } });
+    await fireEvent.click(await screen.findByTestId('env-git-open'));
+    await fireEvent.input(screen.getByTestId('env-git-gh'), { target: { value: 'ghp_company' } });
+    await fireEvent.change(screen.getByTestId('env-fleet'), { target: { value: 'primary' } });
+    await fireEvent.click(await screen.findByTestId('env-git-open'));
+    expect((screen.getByTestId('env-git-gh') as HTMLInputElement).value).toBe('');
+    expect(calls(inv, 'env_var_set')).toHaveLength(0);
   });
 });

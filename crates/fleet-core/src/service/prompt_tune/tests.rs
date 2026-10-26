@@ -110,24 +110,130 @@ fn the_draft_survives_a_long_history() {
 
 #[test]
 fn the_reply_is_read_as_json_or_as_plain_text() {
-    let (p, n) =
-        parse_reply(r#"Sure: {"prompt": "Do X.\nThen Y.", "notes": "Split it."}"#).unwrap();
+    let (p, n, _) = parse_reply(
+        r#"Sure: {"prompt": "Do X.\nThen Y.", "notes": "Split it."}"#,
+        "",
+        DRAFT_MAX_CHARS,
+    )
+    .unwrap();
     assert_eq!((p.as_str(), n.as_str()), ("Do X.\nThen Y.", "Split it."));
-    let (p, n) = parse_reply("Just do X.").unwrap();
+    let (p, n, _) = parse_reply("Just do X.", "", DRAFT_MAX_CHARS).unwrap();
     assert_eq!((p.as_str(), n.as_str()), ("Just do X.", ""));
-    let (p, _) = parse_reply(r#"{"prompt": "```\nDo X.\n```"}"#).unwrap();
+    let (p, _, _) = parse_reply(r#"{"prompt": "```\nDo X.\n```"}"#, "", DRAFT_MAX_CHARS).unwrap();
     assert_eq!(p, "Do X.", "a fence is stripped");
-    assert_eq!(parse_reply(r#"{"prompt": "", "notes": "n"}"#), None);
     assert_eq!(
-        parse_reply("{\"prompt\": \"a\\u0007b\"}"),
+        parse_reply(r#"{"prompt": "", "notes": "n"}"#, "", DRAFT_MAX_CHARS),
+        None
+    );
+    assert_eq!(
+        parse_reply("{\"prompt\": \"a\\u0007b\"}", "", DRAFT_MAX_CHARS),
         None,
         "a bell is refused"
     );
     let long = format!(r#"{{"prompt": "{}"}}"#, "y".repeat(PROMPT_MAX_CHARS + 50));
     assert_eq!(
-        parse_reply(&long).unwrap().0.chars().count(),
+        parse_reply(&long, "", PROMPT_MAX_CHARS + 100)
+            .unwrap()
+            .0
+            .chars()
+            .count(),
         PROMPT_MAX_CHARS
     );
+}
+
+/// A multibyte draft keeps where it goes and its own start: only history
+/// is cut, and a draft that cannot fit whole is refused, never cut.
+#[tokio::test]
+async fn a_multibyte_draft_keeps_the_header_and_a_too_long_one_is_refused() {
+    let mut r = req(&format!("START {}", "語".repeat(11_000)));
+    r.ask = "短く".repeat(400);
+    r.history = (0..50)
+        .map(|i| format!("{i} {}", "x".repeat(1_900)))
+        .collect();
+    assert!(!draft_too_long(&target(), &r));
+    let text = context_text(&target(), &r);
+    assert!(text.len() <= context_help::CONTEXT_MAX_BYTES);
+    assert!(text.starts_with("## Where it goes\n"), "the header is kept");
+    assert!(
+        text.contains("## Draft\nSTART "),
+        "the draft's start is kept"
+    );
+
+    let m = Says::new(r#"{"prompt": "x"}"#);
+    for draft in [
+        "🙂".repeat(DRAFT_MAX_CHARS),
+        "a".repeat(DRAFT_MAX_CHARS + 1),
+    ] {
+        let e = tune(&m, &target(), &req(&draft)).await.unwrap_err();
+        assert_eq!(e.code, codes::E_INVALID, "{e:?}");
+        assert!(e.message.contains("too long"), "{e:?}");
+    }
+    assert!(m.seen.lock().unwrap().is_empty(), "nothing ran");
+    assert!(
+        tune(&m, &target(), &req(&"a".repeat(DRAFT_MAX_CHARS)))
+            .await
+            .is_ok(),
+        "a draft at the limit runs"
+    );
+}
+
+/// The draft's own checksum is not masked in the rewrite, so an unchanged
+/// draft reads as unchanged; a token the model added still is.
+#[tokio::test]
+async fn the_drafts_own_hashes_survive_redaction_and_new_ones_do_not() {
+    let sha = "ab".repeat(32);
+    let draft = format!("verify the release checksum is {sha}");
+    let m = Says::new(&format!(r#"{{"prompt": "{draft}", "notes": "Clear."}}"#));
+    let (a, _) = tune(&m, &target(), &req(&draft)).await.unwrap();
+    assert!(a.unchanged, "{a:?}");
+    assert_eq!(a.prompt, draft);
+
+    let other = "cd".repeat(32);
+    let reply =
+        format!(r#"{{"prompt": "Verify that the release checksum equals {sha} (not {other})."}}"#);
+    let (p, _, _) = parse_reply(&reply, &draft, DRAFT_MAX_CHARS).unwrap();
+    assert!(p.contains(&sha), "the draft's own value is kept: {p}");
+    assert!(
+        !p.contains(&other),
+        "a value the model added is masked: {p}"
+    );
+    assert!(p.contains("[REDACTED]"), "{p}");
+}
+
+/// A rewrite longer than the target takes (a routine's 4000) is cut to it
+/// and the notes say so, so accepting it never yields an unsaveable prompt.
+#[test]
+fn the_rewrite_is_capped_at_the_targets_limit() {
+    let reply = format!(
+        r#"{{"prompt": "{}", "notes": "Longer."}}"#,
+        "y".repeat(5_000)
+    );
+    let (p, n, cut) = parse_reply(&reply, "short", 4_000).unwrap();
+    assert_eq!(p.chars().count(), 4_000);
+    assert!(n.starts_with("Longer.\n"), "{n}");
+    assert!(n.contains("4000-character limit"), "{n}");
+    assert!(cut, "the answer says it was cut");
+    let (p, n, cut) = parse_reply(r#"{"prompt": "ok"}"#, "short", 4_000).unwrap();
+    assert_eq!((p.as_str(), n.as_str(), cut), ("ok", "", false));
+}
+
+/// The answer carries the cut, so a client can warn before "Use this"
+/// rather than leave it to a line in the notes (review w07-7).
+#[tokio::test]
+async fn a_cut_rewrite_says_so_in_the_answer() {
+    let long = format!(r#"{{"prompt": "{}"}}"#, "y".repeat(DRAFT_MAX_CHARS + 10));
+    let (a, _) = tune(&Says::new(&long), &target(), &req("fix it"))
+        .await
+        .unwrap();
+    assert!(a.cut, "{a:?}");
+    let (a, _) = tune(
+        &Says::new(r#"{"prompt": "Fix it."}"#),
+        &target(),
+        &req("fix it"),
+    )
+    .await
+    .unwrap();
+    assert!(!a.cut, "{a:?}");
 }
 
 #[tokio::test]

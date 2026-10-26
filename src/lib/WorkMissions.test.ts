@@ -1,7 +1,7 @@
 // The Work view's Missions tab (orchestration O1): the list, a new mission,
 // its detail with the lifecycle moves the state allows, a new task under its
 // root, and a refusal shown as text.
-import { render, screen, fireEvent } from '@testing-library/svelte';
+import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { tick } from 'svelte';
 
@@ -9,7 +9,8 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke } from '@tauri-apps/api/core';
 import WorkMissions from './WorkMissions.svelte';
 import MissionRoom from './MissionRoom.svelte';
-import { openMissionRoom, resetMissionRoomForTests } from './mission_room';
+import { openMissionRoom, resetMissionRoomForTests, roomMissionId } from './mission_room';
+import { bumpWorkChanged } from './work';
 import { expectAccessible } from './a11y_check';
 import { expectLastButton, expectOnePrimary } from './action_hierarchy_check';
 import { hosts } from './hosts';
@@ -18,6 +19,7 @@ import { get } from 'svelte/store';
 import { sessions as sessionStore } from './sessions';
 import { session } from './hosts_fixture';
 import { clearSelection, selectedSession, selectedTaskId, taskFocused } from './selection';
+import { outbox } from './outbox';
 import {
   filterMissions,
   missionFilterChoices,
@@ -26,6 +28,7 @@ import {
   finalMoveQuestion,
   splitMoves,
   eventSentence,
+  grantSpanNotice,
   moveLabel,
   autonomyWords,
   plannerError,
@@ -97,6 +100,7 @@ const item = (id: number, title: string) => ({
 beforeEach(() => {
   localStorage.removeItem('cf:pref:work.missions.view');
   resetMissionRoomForTests();
+  outbox.resetForTests();
 });
 
 /** Work → Missions as the app draws it: the sidebar's list and the room. */
@@ -144,6 +148,51 @@ describe('WorkMissions', () => {
     renderMissions();
     await flush();
     expect(screen.getByTestId('missions-empty')).toBeTruthy();
+  });
+
+  // Review w17-7: a failed list refresh keeps the missions listed.
+  it('a failed list refresh keeps the list, with a Retry line', async () => {
+    renderMissions();
+    await flush();
+    expect(screen.queryByTestId('missions-error')).toBeNull();
+    handlers.work_missions = () => Object.assign(new Error('slow'), { code: 'E_HUB_TIMEOUT' });
+    bumpWorkChanged();
+    await waitFor(() => expect(screen.getByTestId('missions-refresh-error')).toBeTruthy(), { timeout: 2000 });
+    expect(screen.queryByTestId('missions-error')).toBeNull();
+    expect(screen.getByTestId('work-missions').textContent).toContain('Payments v2');
+  });
+
+  // Review w17-4: a failed background re-read keeps the room open.
+  it('a failed refresh keeps the open mission and offers Retry', async () => {
+    renderMissions();
+    await flush();
+    openMissionRoom(4);
+    await flush();
+    expect(screen.getByTestId('mission-detail').textContent).toContain('Cards and refunds');
+    const ok = handlers.work_mission;
+    handlers.work_mission = () => Object.assign(new Error('the hub did not answer in time'), { code: 'E_HUB_TIMEOUT' });
+    bumpWorkChanged();
+    await waitFor(() => expect(screen.getByTestId('mission-refresh-error')).toBeTruthy(), { timeout: 2000 });
+    expect(screen.getByTestId('mission-detail').textContent).toContain('Cards and refunds');
+    expect(get(roomMissionId)).toBe(4);
+    handlers.work_mission = ok;
+    await fireEvent.click(screen.getByTestId('mission-refresh-retry'));
+    await flush();
+    expect(screen.queryByTestId('mission-refresh-error')).toBeNull();
+  });
+
+  // Review w30-1: a mission deleted elsewhere closes the room with a notice.
+  it('a mission gone from the hub closes the room and says so', async () => {
+    renderMissions();
+    await flush();
+    openMissionRoom(4);
+    await flush();
+    expect(screen.getByTestId('mission-detail').textContent).toContain('Cards and refunds');
+    handlers.work_mission = () => Object.assign(new Error('no such mission'), { code: 'E_NOTFOUND' });
+    bumpWorkChanged();
+    await waitFor(() => expect(get(roomMissionId)).toBeNull(), { timeout: 2000 });
+    expect(screen.queryByTestId('mission-refresh-error')).toBeNull();
+    expect(screen.getByTestId('mission-notice').textContent).toContain('not in the fleet any more');
   });
 
   it('creates a mission from a name and a goal, then opens it', async () => {
@@ -359,6 +408,63 @@ describe('WorkMissions', () => {
       expect(screen.queryByTestId('mission-more')).toBeNull();
     });
 
+    it('red CI on its PRs holds Complete until a person completes it anyway (TASK-295)', async () => {
+      handlers.set_mission_state = (a) =>
+        a.ci_override
+          ? (current = mission({ state: 'completed', version: 2 }))
+          : Object.assign(new Error('CI is failing on acme/pay#476; fix it, or a person completes the mission anyway (ci_override)'), {
+              code: 'E_CI_FAILING',
+            });
+      await openActive();
+      await fireEvent.click(screen.getByTestId('mission-more'));
+      await fireEvent.click(screen.getByTestId('mission-menu-completed'));
+      await fireEvent.click(screen.getByTestId('mission-move-confirm'));
+      await flush();
+      expect(screen.getByTestId('mission-notice').textContent).toContain('acme/pay#476');
+      expect(screen.getByTestId('mission-ci-override-row')).toBeTruthy();
+      await fireEvent.click(screen.getByTestId('mission-ci-override'));
+      await flush();
+      expect(calls('set_mission_state')).toEqual([
+        { mission_id: 4, state: 'completed', expected_version: 1 },
+        { mission_id: 4, state: 'completed', expected_version: 1, ci_override: true },
+      ]);
+      expect(screen.queryByTestId('mission-ci-override-row')).toBeNull();
+    });
+
+    it("a refused Complete's override and a ticked until-done stay with their mission (review r8)", async () => {
+      const a = mission({ id: 4, name: 'Payments v2', state: 'active' });
+      const b = mission({ id: 5, name: 'Search', state: 'active' });
+      handlers.work_missions = () => [a, b];
+      const plan = {
+        steps: [],
+        cards: [],
+        autonomy: { asked: 2, ceiling: 3, effective: 1, why: '', enabled: true },
+        cost_micros: 0,
+        counts: { total: 1, open: 0 },
+      };
+      handlers.work_mission = (args) => ({ mission: args.mission_id === 4 ? a : b, items: [item(10, 'x')], events: [], may_change: true, plan });
+      handlers.set_mission_state = () => Object.assign(new Error('CI is failing on acme/pay#476'), { code: 'E_CI_FAILING' });
+      renderMissions();
+      await flush();
+      const row = (name: string) => screen.getAllByTestId('mission-row').find((r) => r.textContent?.includes(name))!;
+      await fireEvent.click(row('Payments v2'));
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-grant'));
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-grant-until-done'));
+      await fireEvent.click(screen.getByTestId('mission-more'));
+      await fireEvent.click(screen.getByTestId('mission-menu-completed'));
+      await fireEvent.click(screen.getByTestId('mission-move-confirm'));
+      await flush();
+      expect(screen.getByTestId('mission-ci-override-row')).toBeTruthy();
+      await fireEvent.click(row('Search'));
+      await flush();
+      expect(screen.queryByTestId('mission-ci-override-row')).toBeNull();
+      await fireEvent.click(screen.getByTestId('mission-grant'));
+      await flush();
+      expect((screen.getByTestId('mission-grant-until-done') as HTMLInputElement).checked).toBe(false);
+    });
+
     it('New: Esc closes the menu and a draft offers only Cancel in it', async () => {
       renderMissions();
       await flush();
@@ -508,6 +614,64 @@ describe('WorkMissions', () => {
       await fireEvent.click(screen.getByTestId('mission-view-list'));
       await flush();
       expect(screen.getAllByTestId('mission-wave')).toHaveLength(3);
+    });
+  });
+
+  // Lanes design L2: a person puts a task in a lane, names a new one, or
+  // takes it out of its lane; the graph draws the mission's lanes.
+  describe('lanes', () => {
+    async function open() {
+      handlers.work_mission = () => ({
+        mission: current,
+        items: [item(10, 'Payments v2'), item(11, 'Schema'), item(12, 'API')],
+        graph: {
+          nodes: [
+            { item_id: 10, state: 'ready', wave: 1 },
+            { item_id: 11, state: 'ready', wave: 1 },
+            { item_id: 12, state: 'ready', wave: 1 },
+          ],
+          waves: 1,
+        },
+        lanes: [{ id: 1, mission_id: 4, name: 'backend', state: 'idle', item_ids: [11] }],
+        touches: { 11: ['src/store/**', 'docs/status.md'] },
+        events: [],
+        may_change: true,
+      });
+      renderMissions();
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-row'));
+      await flush();
+    }
+
+    it('moves a task between lanes and names a new one', async () => {
+      await open();
+      const picks = screen.getAllByTestId('mission-lane-pick') as HTMLSelectElement[];
+      expect(picks.map((p) => p.value)).toEqual(['backend', '']);
+      await fireEvent.change(picks[1], { target: { value: 'backend' } });
+      await flush();
+      expect(calls('set_mission_item')[0]).toEqual({ mission_id: 4, item_id: 12, on: true, lane: 'backend' });
+      await fireEvent.change(picks[0], { target: { value: '' } });
+      await flush();
+      expect(calls('set_mission_item')[1]).toEqual({ mission_id: 4, item_id: 11, on: true, lane: '' });
+      await fireEvent.change(picks[1], { target: { value: '\u0000new' } });
+      await flush();
+      await fireEvent.input(screen.getByTestId('mission-lane-name'), { target: { value: ' web ' } });
+      await fireEvent.click(screen.getByTestId('mission-lane-save'));
+      await flush();
+      expect(calls('set_mission_item')[2]).toEqual({ mission_id: 4, item_id: 12, on: true, lane: 'web' });
+    });
+
+    it('says what a task changes (lanes design L5)', async () => {
+      await open();
+      expect(screen.getByTestId('mission-touches').textContent).toBe('changes src/store/**, docs/status.md');
+    });
+
+    it('draws the mission\'s lanes in the graph', async () => {
+      await open();
+      await fireEvent.click(screen.getByTestId('mission-view-graph'));
+      await flush();
+      expect(screen.getByTestId('mission-detail').textContent).toContain('backend');
+      expect(screen.getByTestId('mission-detail').textContent).toContain('No lane');
     });
   });
 
@@ -753,6 +917,61 @@ describe('WorkMissions', () => {
     expect(calls('set_work_done_when')[0]).toEqual({ item_id: 11, done_when: ['review', 'ci:test'] });
   });
 
+  it('shows missing run evidence on the card and overrides it with a reason', async () => {
+    handlers.work_mission = () => ({
+      mission: current,
+      items: [item(10, 'Payments v2'), item(11, 'Schema')],
+      graph: {
+        nodes: [
+          {
+            item_id: 10,
+            state: 'verifying',
+            wave: 1,
+            evidence: { state: 'missing', task_id: 5, detail: 'the implement run committed nothing and changed no file' },
+          },
+          {
+            item_id: 11,
+            state: 'verifying',
+            wave: 1,
+            evidence: { state: 'present', task_id: 6, commits: 2, files: 3, detail: '2 commit(s), 3 file(s) changed' },
+          },
+        ],
+        waves: 1,
+      },
+      events: [],
+      may_change: true,
+    });
+    handlers.verify_work_item = () => ({ item_id: 10, changed: true });
+    renderMissions();
+    await flush();
+    await fireEvent.click(screen.getByTestId('mission-row'));
+    await flush();
+    // Only the task with nothing to show says so.
+    const rows = screen.getAllByTestId('mission-evidence');
+    expect(rows).toHaveLength(1);
+    expect(rows[0].dataset.state).toBe('missing');
+    expect(rows[0].textContent).toContain('No run evidence');
+    expect(rows[0].textContent).toContain('committed nothing');
+    await fireEvent.click(screen.getByTestId('mission-evidence-override'));
+    expect((screen.getByTestId('mission-evidence-save') as HTMLButtonElement).disabled).toBe(true);
+    // The reason field takes the focus the unmounted button had; Cancel
+    // gives it back (review r8).
+    expect(document.activeElement).toBe(screen.getByTestId('mission-evidence-reason'));
+    await fireEvent.click(screen.getByText('Cancel', { selector: 'form.conds button' }));
+    await flush();
+    expect(document.activeElement).toBe(screen.getByTestId('mission-evidence-override'));
+    await fireEvent.click(screen.getByTestId('mission-evidence-override'));
+    await fireEvent.input(screen.getByTestId('mission-evidence-reason'), { target: { value: ' a config change on the host ' } });
+    await fireEvent.click(screen.getByTestId('mission-evidence-save'));
+    await flush();
+    expect(calls('verify_work_item')[0]).toEqual({
+      item_id: 10,
+      line: 'run evidence',
+      ok: true,
+      note: 'a config change on the host',
+    });
+  });
+
   describe('the planner in words (step 1.3)', () => {
     const loopDetail = () => ({
       mission: current,
@@ -900,12 +1119,20 @@ describe('WorkMissions', () => {
       expect((screen.getByTestId('mission-edit-save') as HTMLButtonElement).disabled).toBe(true);
       await fireEvent.input(screen.getByTestId('mission-edit-wake'), { target: { value: '30' } });
       await fireEvent.input(screen.getByTestId('mission-edit-parallel'), { target: { value: '4' } });
+      // Lanes L3: a mission not running may switch to running by lane.
+      expect((screen.getByTestId('mission-edit-execution') as HTMLSelectElement).value).toBe('item');
+      await fireEvent.change(screen.getByTestId('mission-edit-execution'), { target: { value: 'lane' } });
       await flush();
       await fireEvent.click(screen.getByTestId('mission-edit-save'));
       await flush();
       const sent = calls('save_mission')[0];
       expect(sent.expected_version).toBe(1);
-      expect((sent.mission as { policy: unknown }).policy).toEqual({ ...policy, max_parallel: 4, wake_every_secs: 1800 });
+      expect((sent.mission as { policy: unknown }).policy).toEqual({
+        ...policy,
+        max_parallel: 4,
+        wake_every_secs: 1800,
+        execution: 'lane',
+      });
       // What came back is what the header shows, and a second edit starts from it.
       const meta = screen.getByTestId('mission-detail').textContent ?? '';
       expect(meta).toContain('wakes every 30 min');
@@ -952,6 +1179,57 @@ describe('WorkMissions', () => {
       hosts.set([]);
     });
 
+    it('a finite mission is granted until it completes, with a budget and no hours', async () => {
+      current = mission({ state: 'active', level: 2 });
+      handlers.work_mission = () => detailOf(current);
+      handlers.grant_mission = () => ({ id: 1, mission_id: 4, plan_version: 1, level: 2, granted_by: 'fleet', created_at: 1, expires_at: 253_402_300_799, until_done: true });
+      renderMissions();
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-row'));
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-grant'));
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-grant-until-done'));
+      await fireEvent.click(screen.getByTestId('mission-grant-save'));
+      await flush();
+      expect(calls('grant_mission')).toHaveLength(0);
+      await fireEvent.input(screen.getByTestId('mission-grant-budget'), { target: { value: '20' } });
+      await fireEvent.click(screen.getByTestId('mission-grant-save'));
+      await flush();
+      expect(calls('grant_mission')[0]).toEqual({ mission_id: 4, level: 2, until_done: true, budget_cents: 2000 });
+    });
+
+    it('an older hub that signs hours for an until-done grant is said so (review r8)', async () => {
+      current = mission({ state: 'active', level: 2 });
+      handlers.work_mission = () => detailOf(current);
+      handlers.grant_mission = () => ({ id: 1, mission_id: 4, plan_version: 1, level: 2, granted_by: 'fleet', created_at: 0, expires_at: 8 * 3600 });
+      renderMissions();
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-row'));
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-grant'));
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-grant-until-done'));
+      await fireEvent.input(screen.getByTestId('mission-grant-budget'), { target: { value: '20' } });
+      await fireEvent.click(screen.getByTestId('mission-grant-save'));
+      await flush();
+      expect(screen.getByTestId('mission-notice').textContent).toContain('signed a grant for 8 h instead');
+      expect(grantSpanNotice(true, { created_at: 0, expires_at: 1, until_done: true })).toBeNull();
+      expect(grantSpanNotice(false, { created_at: 0, expires_at: 3600 })).toBeNull();
+    });
+
+    it('a continuous mission is not offered a grant until it completes', async () => {
+      current = mission({ state: 'active', level: 2, mode: 'continuous' });
+      handlers.work_mission = () => detailOf(current);
+      renderMissions();
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-row'));
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-grant'));
+      await flush();
+      expect(screen.queryByTestId('mission-grant-until-done')).toBeNull();
+    });
+
     it('words every limit', () => {
       const base = { asked: 2, ceiling: 3, effective: 2, why: '', enabled: true };
       expect(autonomyWords(base).hint).toBeNull();
@@ -962,6 +1240,15 @@ describe('WorkMissions', () => {
       const w = autonomyWords({ ...base, asked: 3, effective: 1, grant }, 1_000);
       expect(w.limits).toMatch(/^L3 asked · L3 ceiling · L1 grant until /);
       expect(w.hint).toContain('The grant signs L1');
+      const done = { ...grant, level: 2, expires_at: 253_402_300_799, until_done: true };
+      expect(autonomyWords({ ...base, grant: done }, 1_000).limits).toBe('L2 asked · L3 ceiling · L2 grant until done');
+      expect(eventSentence({ id: 1, at: 1, kind: 'grant', actor: 'p', payload: { level: 2, until_done: true, raised_from: 0 } })).toBe(
+        'Granted L2 until the mission completes (raised the ask from L0)',
+      );
+      expect(eventSentence({ id: 1, at: 1, kind: 'grant', actor: 'p', payload: { level: 2, hours: 8, lifted_from: 0 } })).toBe(
+        'Granted L2 for 8 h (lifts the ask from L0 while it holds)',
+      );
+      expect(eventSentence({ id: 1, at: 1, kind: 'grant', actor: 'p', payload: { level: 2, hours: 8 } })).toBe('Granted L2 for 8 h');
       expect(policyWith({ max_parallel: 2, wake_every_secs: 600 }, { wake_every_secs: null })).toEqual({ max_parallel: 2 });
     });
   });
@@ -1175,6 +1462,22 @@ describe('WorkMissions', () => {
       expect((screen.getByTestId('mission-steer-send') as HTMLButtonElement).disabled).toBe(false);
     });
 
+    it('while Control is mid-turn the box stays open and Send waits (w04-12)', async () => {
+      const { operatorSession } = await import('./operator');
+      const working = { ...operator, claude_status: 'working' as const };
+      sessionStore.set([working]);
+      operatorSession.set(working);
+      await openIt();
+      const box = screen.getByTestId('mission-steer-input') as HTMLTextAreaElement;
+      expect(box.disabled).toBe(false);
+      await fireEvent.input(box, { target: { value: 'pause it' } });
+      await fireEvent.keyDown(box, { key: 'Enter' });
+      await flush();
+      expect(calls('send_prompt')).toHaveLength(0);
+      expect((screen.getByTestId('mission-steer-send') as HTMLButtonElement).disabled).toBe(true);
+      expect(screen.getByTestId('mission-steer-busy').textContent).toContain('mid-turn');
+    });
+
     it('with no Control agent the composer is off and says why', async () => {
       await openIt();
       expect((screen.getByTestId('mission-steer-input') as HTMLTextAreaElement).disabled).toBe(true);
@@ -1323,6 +1626,17 @@ describe('missions helpers', () => {
     expect(eventSentence({ id: 3, at: 1, kind: 'task_done', actor: 'fleet' })).toBe('task done');
     expect(eventSentence({ id: 4, at: 1, kind: 'dep_added', actor: 'fleet', work_item_id: 3, payload: { depends_on: 2 } })).toBe(
       'Task 3 waits for 2',
+    );
+    // Review w03-5: a hold says why.
+    expect(eventSentence({ id: 5, at: 1, kind: 'account_limit', actor: 'loop', payload: { why: 'work is 95% used' } })).toBe(
+      'Waiting for the account: work is 95% used',
+    );
+    // One integration names every branch; an older event a pair.
+    expect(
+      eventSentence({ id: 6, at: 1, kind: 'integration', actor: 'loop', payload: { items: [300, 301, 306], a: 300, b: 301 } }),
+    ).toBe('Tasks 300, 301 and 306 need one integration');
+    expect(eventSentence({ id: 7, at: 1, kind: 'integration', actor: 'loop', payload: { a: 300, b: 324 } })).toBe(
+      'Tasks 300 and 324 conflict',
     );
   });
 });

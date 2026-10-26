@@ -3290,6 +3290,30 @@
     },
     {
       "default_widget": "switch",
+      "key": "orchestrator.run_subagents",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Workers use subagents",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "switch",
+      "key": "orchestrator.planner_reads",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Planner reads the repository",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "switch",
       "key": "control.auto_continue",
       "kind": {
         "type": "bool"
@@ -3360,6 +3384,18 @@
         "type": "bool"
       },
       "label": "Control sweeps what it handed out",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "switch",
+      "key": "control.session_care",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Control looks after its sessions",
       "widgets": [
         "switch",
         "readonly"
@@ -3768,7 +3804,7 @@
         "min": 1,
         "type": "int"
       },
-      "label": "Download: file cap",
+      "label": "Downloads: largest file",
       "widgets": [
         "number",
         "readonly"
@@ -3782,7 +3818,7 @@
         "min": 1,
         "type": "int"
       },
-      "label": "Downloads: space",
+      "label": "Downloads: total space",
       "widgets": [
         "number",
         "readonly"
@@ -4427,7 +4463,7 @@
         ],
         "type": "choice"
       },
-      "label": "Context help model",
+      "label": "Writing help model",
       "widgets": [
         "select",
         "radio",

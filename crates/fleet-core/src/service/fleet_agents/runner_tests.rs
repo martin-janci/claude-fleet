@@ -109,6 +109,22 @@ struct World {
     gh_writes: Mutex<Vec<String>>,
     /// Fleet-own actions carried out, in order.
     fleet_ops: Mutex<Vec<super::actions::FleetOp>>,
+    /// A tracker that is not Jira: its synced items (written when the
+    /// tracker updated them, the id their place), and the pages asked.
+    items: Mutex<Vec<ItemThread>>,
+    item_pages: Mutex<Vec<ItemPage>>,
+    /// GitHub: the diff a review is placed on, and whether the PR is the
+    /// host's own (GitHub refuses to approve it).
+    diff: Mutex<String>,
+    own_pr: Mutex<bool>,
+    /// GitHub: the pull request's description and labels.
+    meta: Mutex<crate::service::agents::review::labels::PrMeta>,
+    /// GitHub: a posted review's state by id (`COMMENTED` when unset; a
+    /// `None` is a deleted one), and the repo's inline review comments.
+    review_states: Mutex<BTreeMap<i64, Option<String>>>,
+    review_comments: Mutex<Vec<crate::service::agents::review::debate::ReviewComment>>,
+    /// GitHub's refusal to serve the diff, when set.
+    diff_refusal: Mutex<Option<String>>,
 }
 
 #[async_trait::async_trait]
@@ -153,6 +169,35 @@ impl FleetHost for World {
                 .unwrap_or_else(|| "jira_cloud".into()),
         )
     }
+    async fn item_threads(&self, _: i64, page: ItemPage) -> Result<ItemsRead, String> {
+        self.item_pages.lock().unwrap().push(page);
+        let mut rows: Vec<((i64, i64), ItemThread)> = self
+            .items
+            .lock()
+            .unwrap()
+            .iter()
+            .enumerate()
+            .map(|(id, i)| ((i.thread.updated.unwrap_or(0), id as i64), i.clone()))
+            .filter(|(mark, _)| *mark > page.after && mark.0 < page.until)
+            .collect();
+        rows.sort_by_key(|(mark, _)| *mark);
+        rows.truncate(page.max);
+        let more = (rows.len() == page.max)
+            .then(|| rows.last().map(|(m, _)| *m))
+            .flatten();
+        Ok(ItemsRead {
+            items: rows
+                .into_iter()
+                .map(|(_, mut i)| {
+                    if !page.comments {
+                        i.thread.comments.clear();
+                    }
+                    i
+                })
+                .collect(),
+            more,
+        })
+    }
     async fn open_prs(
         &self,
         _: &str,
@@ -189,6 +234,137 @@ impl FleetHost for World {
             req.repo, req.number, req.add, req.remove
         ));
         Ok(())
+    }
+    async fn pr_meta(
+        &self,
+        _: &str,
+        _: &str,
+        _: i64,
+    ) -> Result<crate::service::agents::review::labels::PrMeta, String> {
+        Ok(self.meta.lock().unwrap().clone())
+    }
+    async fn set_pr_description(
+        &self,
+        req: &crate::service::agents::review::labels::DescriptionRequest,
+    ) -> Result<(), String> {
+        self.gh_writes.lock().unwrap().push(format!(
+            "describe {}#{} @{}: {}",
+            req.repo, req.number, req.sha, req.body
+        ));
+        Ok(())
+    }
+    async fn review_state(
+        &self,
+        _: &str,
+        _: &str,
+        _: i64,
+        review_id: i64,
+    ) -> Result<Option<String>, String> {
+        self.gh_writes
+            .lock()
+            .unwrap()
+            .push(format!("state r{review_id}"));
+        Ok(self
+            .review_states
+            .lock()
+            .unwrap()
+            .get(&review_id)
+            .cloned()
+            .unwrap_or(Some("COMMENTED".into())))
+    }
+    async fn review_comments_since(
+        &self,
+        _: &str,
+        _: &str,
+        _: &str,
+    ) -> Result<Vec<crate::service::agents::review::debate::ReviewComment>, String> {
+        Ok(self.review_comments.lock().unwrap().clone())
+    }
+    async fn pr_review_comments(
+        &self,
+        _: &str,
+        _: &str,
+        number: i64,
+    ) -> Result<Vec<crate::service::agents::review::debate::ReviewComment>, String> {
+        Ok(self
+            .review_comments
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| c.number == number)
+            .cloned()
+            .collect())
+    }
+    async fn reply_in_thread(
+        &self,
+        req: &crate::service::agents::review::debate::DebateReply,
+    ) -> Result<(), String> {
+        self.gh_writes.lock().unwrap().push(format!(
+            "reply {}#{} t{}: {}",
+            req.repo, req.number, req.root_id, req.body
+        ));
+        Ok(())
+    }
+    async fn resolve_thread(&self, _: &str, _: &str, _: i64, root_id: i64) -> Result<(), String> {
+        self.gh_writes
+            .lock()
+            .unwrap()
+            .push(format!("resolve t{root_id}"));
+        Ok(())
+    }
+    async fn claude_ignore(&self, _: &str, _: &str, base: &str) -> Option<String> {
+        (base == "main").then(|| "docs/**\n".to_string())
+    }
+    async fn prepare_pr(
+        &self,
+        _: &str,
+        root: &str,
+        job_id: i64,
+        number: i64,
+        sha: &str,
+    ) -> Result<(Prepared, String), IpcError> {
+        self.base
+            .log
+            .lock()
+            .unwrap()
+            .push(format!("prepare_pr #{number}@{sha}"));
+        if sha == "moved" {
+            return Ok((Prepared::Moved, String::new()));
+        }
+        Ok((Prepared::Ready, workspace::workspace_dir(root, job_id)))
+    }
+    async fn pr_diff(&self, _: &str, repo: &str, number: i64) -> Result<String, String> {
+        self.gh_writes
+            .lock()
+            .unwrap()
+            .push(format!("diff {repo}#{number}"));
+        if let Some(e) = self.diff_refusal.lock().unwrap().clone() {
+            return Err(e);
+        }
+        Ok(self.diff.lock().unwrap().clone())
+    }
+    async fn post_pr_review(
+        &self,
+        req: &crate::service::agents::review::post::ReviewRequest,
+        event: &str,
+    ) -> Result<i64, String> {
+        if *self.own_pr.lock().unwrap() && event != "COMMENT" {
+            return Err("Can not approve your own pull request".into());
+        }
+        let lines: Vec<String> = req
+            .comments
+            .iter()
+            .map(|c| format!("{}:{} {}", c.path, c.line, c.body))
+            .collect();
+        self.gh_writes.lock().unwrap().push(format!(
+            "review {}#{} {event} @{}: {} || {}",
+            req.repo,
+            req.number,
+            req.sha,
+            req.body,
+            lines.join(" | ")
+        ));
+        Ok(77)
     }
     fn base(&self) -> &dyn SupportHost {
         &self.base
@@ -279,12 +455,31 @@ fn fx(loaded: Loaded, config: Value, bindings: Value, project: bool) -> Fx {
         comments: Mutex::default(),
         gh_writes: Mutex::default(),
         fleet_ops: Mutex::default(),
+        items: Mutex::default(),
+        item_pages: Mutex::default(),
+        diff: Mutex::default(),
+        own_pr: Mutex::default(),
+        meta: Mutex::default(),
+        review_states: Mutex::default(),
+        review_comments: Mutex::default(),
+        diff_refusal: Mutex::default(),
     });
     Fx {
         store: Arc::new(Mutex::new(s)),
         world,
         rule,
     }
+}
+
+/// Finish job `id` as done, with `result`.
+fn finish_done(s: &Store, id: i64, result: Option<String>, now: i64) {
+    let end = crate::store::AgentJobEnd::Final {
+        state: "done",
+        result,
+        error_kind: None,
+        error: None,
+    };
+    s.finish_agent_job(id, &end, 0, now).unwrap();
 }
 
 impl Fx {
@@ -304,7 +499,14 @@ impl Fx {
         AgentCursorRow {
             rule_id: self.rule.id,
             polled_at: since,
-            cursor: Some(Cursor { since, scan }.text()),
+            cursor: Some(
+                Cursor {
+                    since,
+                    scan,
+                    ..Cursor::default()
+                }
+                .text(),
+            ),
         }
     }
     /// Record `jobs` and claim them back as rows.
@@ -313,6 +515,11 @@ impl Fx {
         s.record_agent_poll(self.rule.id, 0, None, jobs).unwrap();
         s.claim_agent_jobs(&[AGENT], i64::MAX / 4, 10, 60).unwrap()
     }
+}
+
+/// A small definition on `trigger`, with no stores, inputs or bindings.
+fn trigger_fx(trigger: Value) -> Fx {
+    fx(small(trigger, json!([])), json!({}), json!([]), false)
 }
 
 fn l2_fx() -> Fx {
@@ -361,7 +568,8 @@ async fn the_first_poll_sets_the_clock_and_a_comment_with_a_phrase_is_a_job() {
         Some(
             Cursor {
                 since: 1000,
-                scan: None
+                start: Some(1000),
+                ..Cursor::default()
             }
             .text()
         )
@@ -483,6 +691,17 @@ fn a_schedule_fires_once_for_its_newest_missed_slot() {
         Some(4 * 3600)
     );
     assert!(schedule_fire("not cron", 0, 1).is_err());
+}
+
+#[test]
+fn a_kept_subject_is_seen_however_long_its_dedup_key() {
+    let store = Mutex::new(Store::open_in_memory().unwrap());
+    let long = "k".repeat(400);
+    assert!(!subject_seen(&store, 1, &long, 10).unwrap());
+    keep_subject(&store, 1, &long, &json!({ "n": 1 }), 10).unwrap();
+    // The record keeps the key cut to 300 characters; the lookup must cut it too.
+    assert!(subject_seen(&store, 1, &long, 10).unwrap());
+    assert!(!subject_seen(&store, 2, &long, 10).unwrap());
 }
 
 const GOOD: &str = r#"Here it is: {"summary":"Gateway key expired","rootCause":"The key","confidence":"high","severity":"critical","extra":"dropped"}"#;
@@ -612,12 +831,7 @@ async fn an_answer_off_the_schema_fails_the_job() {
 
 #[tokio::test]
 async fn a_person_runs_a_manual_agent_with_a_request() {
-    let f = fx(
-        small(json!({ "source": "manual" }), json!([])),
-        json!({}),
-        json!([]),
-        false,
-    );
+    let f = trigger_fx(json!({ "source": "manual" }));
     let src = super::definition::TriggerSource::Manual;
     // The subject is kept for its TTL from now; the run reads it at now.
     let now = crate::store::now_unix();
@@ -735,15 +949,7 @@ fn run_now_on_a_scheduled_agent_keeps_its_focus() {
     let src = super::definition::TriggerSource::Schedule;
     let now = crate::store::now_unix();
     for request in [Some("the hub"), None] {
-        let f = fx(
-            small(
-                json!({ "source": "schedule", "cron": "0 7 * * *" }),
-                json!([]),
-            ),
-            json!({}),
-            json!([]),
-            false,
-        );
+        let f = trigger_fx(json!({ "source": "schedule", "cron": "0 7 * * *" }));
         queue_manual(&f.store, &f.rule, src, request, None, now).unwrap();
         let jobs = f
             .store
@@ -936,12 +1142,12 @@ async fn the_executor_sends_what_was_approved_within_limits() {
         .agent_record(
             &format!("rule:{}", f.rule.id),
             "record",
-            "KeyExpiredException",
+            "L2S-7",
             crate::store::now_unix(),
         )
         .unwrap()
         .unwrap();
-    assert!(rec.value.contains("L2S-7") && rec.written_by_job.is_some());
+    assert!(rec.value.contains("KeyExpiredException") && rec.written_by_job.is_some());
     // The mcp_call: the tool's inputSchema decides.
     let learn = by_kind("mcp_call");
     *f.world.tools.lock().unwrap() = vec![json!({ "name": "add_known_error", "inputSchema": {
@@ -1051,18 +1257,7 @@ async fn the_loop_guard_ignores_its_own_comments_and_caps_a_subject() {
         .unwrap();
         let claimed = s.claim_agent_jobs(&[AGENT], now, 10, 60).unwrap();
         assert_eq!(claimed.len(), 1);
-        s.finish_agent_job(
-            claimed[0].id,
-            &crate::store::AgentJobEnd::Final {
-                state: "done",
-                result: None,
-                error_kind: None,
-                error: None,
-            },
-            0,
-            now,
-        )
-        .unwrap();
+        finish_done(&s, claimed[0].id, None, now);
     }
     let job = f.claim(&[crate::store::NewAgentJob {
         rule_id: f.rule.id,
@@ -1263,6 +1458,309 @@ async fn a_pr_answer_comments_and_labels_within_the_repos() {
     assert_eq!(ex.execute(&a).await, ActionResult::Executed, "limits.repos");
 }
 
+/// A definition triggered by github_prs whose answer is a review.
+fn review_fx(auto: bool) -> Fx {
+    review_fx_limits(auto, json!({}))
+}
+
+/// [`review_fx`] with the definition's `limits`.
+fn review_fx_limits(auto: bool, limits: Value) -> Fx {
+    review_fx_trigger(
+        auto,
+        limits,
+        json!({ "source": "github_prs", "repo": "{{repo}}" }),
+    )
+}
+
+/// [`review_fx`] with the definition's `limits` and `trigger`.
+fn review_fx_trigger(auto: bool, limits: Value, trigger: Value) -> Fx {
+    let d = definition::parse_value(&json!({
+        "limits": limits,
+        "inputs": [{ "name": "repo", "type": "text", "label": "Repo", "required": true }],
+        "trigger": trigger,
+        "run": { "workspace": "home", "output_schema": { "type": "object",
+            "required": ["verdict", "summary", "findings"], "properties": {
+                "verdict": { "enum": ["APPROVE", "REQUEST_CHANGES", "COMMENT"] },
+                "summary": { "type": "string" },
+                "findings": { "type": "array", "items": { "type": "object",
+                    "required": ["path", "line", "body"], "properties": {
+                        "path": { "type": "string" }, "line": { "type": "integer" },
+                        "body": { "type": "string" } } } } } } },
+        "actions": [
+            { "id": "review", "do": "pr_review", "target": "{{subject.number}}",
+              "verdict": "{{answer.verdict}}", "body": "{{answer.summary}}",
+              "findings": "findings", "auto": auto }
+        ]
+    }))
+    .unwrap();
+    assert_eq!(
+        definition::problems(&d, &BTreeMap::new()),
+        Vec::<String>::new()
+    );
+    let loaded = Loaded {
+        name: "rv".into(),
+        definition: d,
+        skill: "Review the PR.".into(),
+        templates: BTreeMap::new(),
+    };
+    fx(loaded, json!({ "repo": "acme/pos" }), json!([]), false).at("act")
+}
+
+const REVIEW_DIFF: &str = "diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1,3 +1,4 @@\n fn a() {\n+    let x = 1;\n     b();\n }\n";
+
+/// Run the review fixture on PR 4 at `abc`; the review action.
+async fn reviewed(f: &Fx, answer: &str) -> crate::store::AgentActionRow {
+    *f.world.prs.lock().unwrap() = vec![pr(4, "abc", false)];
+    *f.world.diff.lock().unwrap() = REVIEW_DIFF.into();
+    let now = crate::store::now_unix();
+    let polled = f
+        .poller()
+        .poll(&f.rule, Some(&f.cursor(now - 100, None)), now)
+        .await
+        .unwrap();
+    let jobs = f.claim(&polled.jobs);
+    *f.world.base.answer.lock().unwrap() = Some(PrintOutcome::Answered {
+        text: answer.into(),
+        cost_micros: 0,
+    });
+    let out = f.runner().run(&jobs[0], Some(&f.rule)).await;
+    assert!(matches!(out, RunOutcome::Done { .. }), "{out:?}");
+    f.actions()
+        .into_iter()
+        .find(|a| a.kind == "pr_review")
+        .unwrap()
+}
+
+#[tokio::test]
+async fn a_review_places_its_findings_on_the_diff_and_lists_the_rest() {
+    let f = review_fx(false);
+    let a = reviewed(
+        &f,
+        r#"{"verdict":"APPROVE","summary":"Fine overall.","findings":[
+            {"path":"src/a.rs","line":2,"body":"x is unused"},
+            {"path":"src/a.rs","line":40,"body":"far away"},
+            {"path":"","line":1,"body":"no path"}]}"#,
+    )
+    .await;
+    assert_eq!(
+        a.state, "pending",
+        "a review waits for a person unless auto"
+    );
+    let p: Value = serde_json::from_str(&a.payload).unwrap();
+    assert_eq!(
+        (p["event"].as_str(), p["sha"].as_str()),
+        (Some("APPROVE"), Some("abc"))
+    );
+    assert_eq!(p["findings"].as_array().unwrap().len(), 2, "{p}");
+    let done = f.executor().execute(&a).await;
+    assert!(
+        matches!(&done, ActionResult::Done(l) if l.contains("1 line comments")),
+        "{done:?}"
+    );
+    let writes = f.world.gh_writes.lock().unwrap().clone();
+    let review = writes.iter().find(|w| w.starts_with("review")).unwrap();
+    assert!(
+        review.starts_with("review acme/pos#4 APPROVE @abc: Fine overall."),
+        "{review}"
+    );
+    assert!(
+        review.contains("Outside the diff:\n- `src/a.rs:40`: far away"),
+        "{review}"
+    );
+    assert!(
+        review.contains("|| src/a.rs:2 x is unused\n\n[fleet-agent:inst]"),
+        "{review}"
+    );
+    assert!(
+        !review.contains("no path"),
+        "an item without a path is dropped"
+    );
+
+    // GitHub refuses to approve one's own PR: it goes as a comment.
+    *f.world.own_pr.lock().unwrap() = true;
+    f.world.gh_writes.lock().unwrap().clear();
+    assert!(matches!(
+        f.executor().execute(&a).await,
+        ActionResult::Done(_)
+    ));
+    assert!(f
+        .world
+        .gh_writes
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|w| w.starts_with("review acme/pos#4 COMMENT")));
+
+    // A head that moved on, or a PR no longer open, is not reviewed.
+    *f.world.prs.lock().unwrap() = vec![pr(4, "def", false)];
+    assert!(
+        matches!(f.executor().execute(&a).await, ActionResult::Expired(e) if e.contains("head moved"))
+    );
+    f.world.prs.lock().unwrap().clear();
+    assert!(
+        matches!(f.executor().execute(&a).await, ActionResult::Expired(e) if e.contains("not open"))
+    );
+}
+
+#[tokio::test]
+async fn an_unattended_review_never_approves() {
+    let f = review_fx(true);
+    let a = reviewed(
+        &f,
+        r#"{"verdict":"APPROVE","summary":"Ship it.","findings":[]}"#,
+    )
+    .await;
+    assert_eq!(a.state, "approved");
+    let p: Value = serde_json::from_str(&a.payload).unwrap();
+    assert_eq!(p["event"], "COMMENT", "an approval is a person's");
+    // Nor blocks: a later COMMENT from the agent could never lift it.
+    assert_eq!(
+        super::actions::review_event("request_changes", true, false),
+        "COMMENT"
+    );
+    assert_eq!(
+        super::actions::review_event("request_changes", false, false),
+        "REQUEST_CHANGES"
+    );
+    assert_eq!(
+        super::actions::review_event("LGTM", false, false),
+        "COMMENT"
+    );
+    // auto_approve unlocks an unattended APPROVE, never a REQUEST_CHANGES.
+    assert_eq!(
+        super::actions::review_event("approve", true, true),
+        "APPROVE"
+    );
+    assert_eq!(
+        super::actions::review_event("request_changes", true, true),
+        "COMMENT"
+    );
+}
+
+#[tokio::test]
+async fn an_auto_review_a_person_sends_keeps_its_verdict() {
+    // `auto` below `act` still waits for a person, who signs the verdict.
+    let f = review_fx(true).at("propose");
+    let a = reviewed(
+        &f,
+        r#"{"verdict":"REQUEST_CHANGES","summary":"Broken.","findings":[]}"#,
+    )
+    .await;
+    assert_eq!(a.state, "pending");
+    let p: Value = serde_json::from_str(&a.payload).unwrap();
+    assert_eq!(p["event"], "REQUEST_CHANGES", "{p}");
+    let f = review_fx(true).at("propose");
+    let a = reviewed(
+        &f,
+        r#"{"verdict":"APPROVE","summary":"Ship it.","findings":[]}"#,
+    )
+    .await;
+    let p: Value = serde_json::from_str(&a.payload).unwrap();
+    assert_eq!(p["event"], "APPROVE", "{p}");
+}
+
+#[tokio::test]
+async fn a_cut_findings_list_says_how_many_it_left_out() {
+    let f = review_fx(false);
+    let a = reviewed(&f, &long_findings(45, 400)).await;
+    let p: Value = serde_json::from_str(&a.payload).unwrap();
+    let body = p["body"].as_str().unwrap();
+    assert!(body.chars().count() <= 2500, "{}", body.chars().count());
+    assert!(
+        body.contains("More findings:\n- `src/a.rs:130`: f30 "),
+        "{body}"
+    );
+    assert!(body.contains(" more findings"), "{body}");
+
+    // A diff too large to serve lists every finding, and counts the cut.
+    *f.world.diff_refusal.lock().unwrap() =
+        Some("HTTP 406: Sorry, the diff exceeded the maximum number of lines".into());
+    assert!(matches!(
+        f.executor().execute(&a).await,
+        ActionResult::Done(_)
+    ));
+    let writes = f.world.gh_writes.lock().unwrap().clone();
+    let review = writes.iter().find(|w| w.starts_with("review")).unwrap();
+    assert!(
+        review.contains("Outside the diff:\n- `src/a.rs:100`: f0 "),
+        "{review}"
+    );
+    assert!(
+        review.contains(" more findings\n\n[fleet-agent:inst]"),
+        "{review}"
+    );
+}
+
+/// The review's answer with `n` findings of `len` characters, each far
+/// outside the diff.
+fn long_findings(n: usize, len: usize) -> String {
+    let findings: Vec<Value> = (0..n)
+        .map(|i| json!({ "path": "src/a.rs", "line": 100 + i, "body": format!("f{i} {}", "x".repeat(len)) }))
+        .collect();
+    json!({ "verdict": "COMMENT", "summary": "Long.", "findings": findings }).to_string()
+}
+
+#[tokio::test]
+async fn a_long_review_keeps_its_marker_and_lists_the_findings_past_the_cap() {
+    let f = review_fx(false);
+    let a = reviewed(&f, &long_findings(40, 1500)).await;
+    let p: Value = serde_json::from_str(&a.payload).unwrap();
+    assert_eq!(
+        p["findings"].as_array().unwrap().len(),
+        super::actions::MAX_REVIEW_COMMENTS
+    );
+    let body = p["body"].as_str().unwrap();
+    assert!(
+        body.contains("More findings:\n- `src/a.rs:130`: f30 "),
+        "the findings past the cap go into the body: {body}"
+    );
+    assert!(matches!(
+        f.executor().execute(&a).await,
+        ActionResult::Done(_)
+    ));
+    let writes = f.world.gh_writes.lock().unwrap().clone();
+    let review = writes.iter().find(|w| w.starts_with("review")).unwrap();
+    let posted = review
+        .split_once(": ")
+        .unwrap()
+        .1
+        .rsplit_once(" || ")
+        .unwrap()
+        .0;
+    assert!(posted.ends_with("\n\n[fleet-agent:inst]"), "{posted}");
+    assert!(posted.chars().count() <= 5000, "{}", posted.chars().count());
+}
+
+#[tokio::test]
+async fn a_diff_too_large_to_serve_still_takes_the_review() {
+    let f = review_fx(false);
+    let a = reviewed(
+        &f,
+        r#"{"verdict":"COMMENT","summary":"Big one.","findings":[
+            {"path":"src/a.rs","line":2,"body":"x is unused"}]}"#,
+    )
+    .await;
+    *f.world.diff_refusal.lock().unwrap() =
+        Some("HTTP 406: Sorry, the diff exceeded the maximum number of lines".into());
+    let done = f.executor().execute(&a).await;
+    assert!(
+        matches!(&done, ActionResult::Done(l) if l.contains("0 line comments")),
+        "{done:?}"
+    );
+    let writes = f.world.gh_writes.lock().unwrap().clone();
+    let review = writes.iter().find(|w| w.starts_with("review")).unwrap();
+    assert!(
+        review.contains("Outside the diff:\n- `src/a.rs:2`: x is unused\n\n[fleet-agent:inst]"),
+        "{review}"
+    );
+    // Any other refusal still fails.
+    *f.world.diff_refusal.lock().unwrap() = Some("HTTP 502: Bad Gateway".into());
+    assert!(matches!(
+        f.executor().execute(&a).await,
+        ActionResult::Failed(_)
+    ));
+}
+
 #[tokio::test]
 async fn another_tracker_gets_a_plain_comment_and_no_link() {
     let (f, _) = l2_run("propose", found()).await;
@@ -1310,7 +1808,8 @@ fn proposing() -> Loaded {
               "steps": "{{item.steps}}" },
             { "id": "tune", "do": "setting", "each": "findings",
               "when": { "field": "kind", "eq": "setting" },
-              "key": "{{item.key}}", "value": "{{item.value}}", "body": "{{item.title}}" },
+              "key": "{{item.key}}", "value": "{{item.value}}", "body": "{{item.title}}",
+              "fingerprint": "tune:{{item.key}}" },
             { "id": "recover", "do": "session_recover", "each": "findings",
               "when": { "field": "kind", "eq": "recover" },
               "target": "{{item.session}}", "body": "{{item.title}}" },
@@ -1351,7 +1850,12 @@ async fn each_finding_becomes_its_own_fleet_proposal() {
         .unwrap();
     let key = crate::service::settings::SPECS
         .iter()
-        .find(|sp| sp.ai != crate::service::settings::AiPolicy::Never && sp.owned_by.is_none())
+        .find(|sp| {
+            sp.ai != crate::service::settings::AiPolicy::Never
+                && sp.owned_by.is_none()
+                && sp.default != "1"
+                && crate::service::settings::validate(sp.key, "1").is_ok()
+        })
         .unwrap()
         .key;
     let answer = json!({ "summary": "two problems", "findings": [
@@ -1384,15 +1888,33 @@ async fn each_finding_becomes_its_own_fleet_proposal() {
         .map(|(a, b)| (a.to_string(), b.to_string())),
         "a work_task may run alone at act; the others wait; a key no agent may set is skipped"
     );
+    // The setting carries its finding's fingerprint (w08-6).
+    let tune_row = f
+        .actions()
+        .into_iter()
+        .find(|a| a.kind == "setting")
+        .unwrap();
+    let payload: Value = serde_json::from_str(&tune_row.payload).unwrap();
+    assert_eq!(payload["fingerprint"], format!("tune:{key}"));
+    // The setting says what it changes from (w08-5).
+    let was = crate::service::settings::effective_value(&f.store.lock().unwrap(), key).unwrap();
+    let tune = r["actions"][2]["body"].as_str().unwrap();
+    assert!(tune.contains(&format!("({key}): {was} → 1")), "{tune}");
     let first = r["actions"][0]["body"].as_str().unwrap();
     assert!(
         first.starts_with("Flaky reconnect") && first.contains("- Fix the backoff"),
         "{first}"
     );
-    // Approved: the executor hands each to fleet.
+    // Approved: the executor hands each to fleet, which answers with what
+    // it made (w08-3).
     let ex = f.executor();
     for a in f.actions() {
-        assert_eq!(ex.execute(&a).await, ActionResult::Executed, "{}", a.kind);
+        assert_eq!(
+            ex.execute(&a).await,
+            ActionResult::Done("done".into()),
+            "{}",
+            a.kind
+        );
     }
     let ops = f.world.fleet_ops.lock().unwrap().clone();
     assert_eq!(ops.len(), 4);
@@ -1428,4 +1950,1594 @@ fn a_fleet_proposal_that_acts_alone_is_refused() {
         p.iter().any(|x| x.contains("there is no item here")),
         "{p:?}"
     );
+}
+
+/// A GitHub item, updated at `updated`, with `comments`.
+fn gh_item(updated: i64, comments: &[(&str, &str, i64)]) -> ItemThread {
+    let mut t = thread(comments);
+    t.key = "o/r#12".into();
+    t.updated = Some(updated);
+    t.assignee_id = Some("octocat".into());
+    ItemThread {
+        thread: t,
+        url: Some("https://github.com/o/r/issues/12".into()),
+    }
+}
+
+#[tokio::test]
+async fn another_trackers_synced_items_are_polled_and_their_subject_kept() {
+    let f = trigger_fx(json!({ "source": "tracker_comments", "tracker": "3",
+        "match": { "any_phrase": "/ask" } }));
+    *f.world.provider.lock().unwrap() = Some("github".into());
+    let now = crate::store::now_unix();
+    let since = now - 300;
+    *f.world.items.lock().unwrap() = vec![
+        gh_item(
+            now - 10,
+            &[
+                ("c1", "/ask why is CI red", now - 20),
+                ("c2", "unrelated", now - 15),
+                ("c3", "/ask again [fleet-agent:x]", now - 12),
+            ],
+        ),
+        // A comment from before the rule's start is not asked again.
+        {
+            let mut old = gh_item(now - 60, &[("c0", "/ask old", now - 4000)]);
+            old.thread.key = "o/r#13".into();
+            old
+        },
+    ];
+    let p = f.poller();
+    let polled = p
+        .poll(&f.rule, Some(&f.cursor(since, None)), now)
+        .await
+        .unwrap();
+    let keys: Vec<&str> = polled.jobs.iter().map(|j| j.dedup_key.as_str()).collect();
+    assert_eq!(keys, [format!("r{}:tracker:3:o/r#12#cc1", f.rule.id)]);
+    assert_eq!(
+        f.world.item_pages.lock().unwrap()[0],
+        ItemPage {
+            after: (since - POLL_SLACK_SECS, 0),
+            until: now,
+            max: ITEM_POLL_MAX,
+            comments: true,
+        },
+        "a cursor from before the page mark reads from its last poll"
+    );
+    assert!(f.world.base.jql.lock().unwrap().is_empty(), "no JQL");
+    // The same comment, seen again within the lag, is not a second job.
+    let again = p
+        .poll(&f.rule, Some(&f.cursor(now, None)), now + 60)
+        .await
+        .unwrap();
+    assert!(again.jobs.is_empty(), "{:?}", again.jobs);
+
+    // The run reads the kept subject: the item and the comment that asked.
+    *f.world.base.answer.lock().unwrap() = Some(PrintOutcome::Answered {
+        text: r#"{"summary":"flaky test"}"#.into(),
+        cost_micros: 1,
+    });
+    let jobs = f.claim(&polled.jobs);
+    let out = f.runner().run(&jobs[0], Some(&f.rule)).await;
+    let RunOutcome::Done { result, .. } = out else {
+        panic!("{out:?}")
+    };
+    let r: Value = serde_json::from_str(&result.unwrap()).unwrap();
+    assert_eq!(r["subject"]["key"], "o/r#12");
+    assert_eq!(r["subject"]["url"], "https://github.com/o/r/issues/12");
+    assert_eq!(r["subject"]["comment"]["body"], "/ask why is CI red");
+    assert!(
+        f.world.base.jql.lock().unwrap().is_empty(),
+        "not read from Jira"
+    );
+}
+
+#[tokio::test]
+async fn another_tracker_takes_an_assignment_and_refuses_a_jql_query() {
+    let assigned = trigger_fx(json!({ "source": "tracker_assigned", "tracker": "3",
+        "match": { "assignee": "octocat" } }));
+    *assigned.world.provider.lock().unwrap() = Some("linear".into());
+    let now = crate::store::now_unix();
+    *assigned.world.items.lock().unwrap() = vec![gh_item(now - 5, &[])];
+    let polled = assigned
+        .poller()
+        .poll(&assigned.rule, Some(&assigned.cursor(now - 60, None)), now)
+        .await
+        .unwrap();
+    assert_eq!(
+        polled.jobs[0].dedup_key,
+        format!("r{}:tracker:3:o/r#12#assigned:octocat", assigned.rule.id)
+    );
+    assert!(
+        !assigned.world.item_pages.lock().unwrap()[0].comments,
+        "an assignment needs no comments call"
+    );
+
+    let f = l2_fx();
+    *f.world.provider.lock().unwrap() = Some("asana".into());
+    let err = f
+        .poller()
+        .poll(&f.rule, Some(&f.cursor(now - 60, None)), now)
+        .await
+        .unwrap_err();
+    assert!(err.contains("query is JQL"), "{err}");
+}
+
+/// The cursor a poll answered, as the next poll reads it.
+fn next_cursor(f: &Fx, polled: &crate::service::agents::Polled) -> AgentCursorRow {
+    AgentCursorRow {
+        rule_id: f.rule.id,
+        polled_at: 0,
+        cursor: polled.cursor.clone(),
+    }
+}
+
+#[tokio::test]
+async fn another_trackers_burst_is_paged_and_a_late_synced_comment_still_counts() {
+    let f = trigger_fx(json!({ "source": "tracker_comments", "tracker": "3",
+        "match": { "any_phrase": "/ask" } }));
+    *f.world.provider.lock().unwrap() = Some("github".into());
+    let now = crate::store::now_unix();
+    let p = f.poller();
+    let first = p.poll(&f.rule, None, now - 7200).await.unwrap();
+    // A burst of 30 items written in one window, more than one page.
+    *f.world.items.lock().unwrap() = (0..30)
+        .map(|n| {
+            let mut i = gh_item(now - 100 + n, &[(&format!("c{n}"), "/ask", now - 200)]);
+            i.thread.key = format!("o/r#{n}");
+            i
+        })
+        .collect();
+    let a = p
+        .poll(&f.rule, Some(&next_cursor(&f, &first)), now)
+        .await
+        .unwrap();
+    assert_eq!(a.jobs.len(), ITEM_POLL_MAX);
+    let b = p
+        .poll(&f.rule, Some(&next_cursor(&f, &a)), now + 1)
+        .await
+        .unwrap();
+    let keys: Vec<&str> = b.jobs.iter().map(|j| j.dedup_key.as_str()).collect();
+    assert_eq!(
+        keys,
+        (25..30)
+            .map(|n| format!("r{}:tracker:3:o/r#{n}#cc{n}", f.rule.id))
+            .collect::<Vec<_>>(),
+        "the rest of the burst, oldest first"
+    );
+    // Nothing is read twice once the page caught up.
+    let c = p
+        .poll(&f.rule, Some(&next_cursor(&f, &b)), now + 2)
+        .await
+        .unwrap();
+    assert!(c.jobs.is_empty());
+    assert_eq!(
+        f.world.item_pages.lock().unwrap()[2].after,
+        (now, i64::MAX),
+        "the last page read everything before its poll"
+    );
+
+    // A sync that ran an hour late: the comment is older than any lag
+    // window, but the hub wrote the item only now, after the last poll.
+    f.world
+        .items
+        .lock()
+        .unwrap()
+        .push(gh_item(now + 5, &[("late", "/ask late", now - 3600)]));
+    let d = p
+        .poll(&f.rule, Some(&next_cursor(&f, &c)), now + 10)
+        .await
+        .unwrap();
+    let keys: Vec<&str> = d.jobs.iter().map(|j| j.dedup_key.as_str()).collect();
+    assert_eq!(keys, [format!("r{}:tracker:3:o/r#12#clate", f.rule.id)]);
+}
+
+#[test]
+fn a_setting_already_at_its_value_is_skipped_and_others_say_from_what() {
+    let store = Store::open_in_memory().unwrap();
+    let sp = crate::service::settings::SPECS
+        .iter()
+        .find(|sp| {
+            sp.ai != crate::service::settings::AiPolicy::Never
+                && sp.owned_by.is_none()
+                && !sp.default.is_empty()
+        })
+        .unwrap();
+    let planned = |value: &str| super::actions::Planned {
+        id: "tune".into(),
+        kind: "setting",
+        payload: serde_json::to_string(&super::actions::SettingPayload {
+            action: "tune".into(),
+            key: sp.key.into(),
+            value: value.into(),
+            was: String::new(),
+            why: "because".into(),
+            body: String::new(),
+        })
+        .unwrap(),
+        body: String::new(),
+        auto: false,
+    };
+    let mut same = planned(sp.default);
+    assert!(super::runner::with_current_setting(&store, &mut same).is_err());
+    let mut other = planned("zz-other");
+    super::runner::with_current_setting(&store, &mut other).unwrap();
+    let p: super::actions::SettingPayload = serde_json::from_str(&other.payload).unwrap();
+    assert_eq!(p.was, sp.default);
+    assert!(
+        other.body.contains(&format!("{} → zz-other", sp.default)),
+        "{}",
+        other.body
+    );
+}
+
+// ── the real paged read under `LiveFleetHost::item_threads` ─────────────
+
+mod item_page {
+    use super::super::runner::{read_item_page, ItemsRead, LiveFleetHost};
+    use crate::service::agents::review::SshReviewHost;
+    use crate::service::agents::support::LiveSupportHost;
+    use crate::service::trackers::{
+        Caps, Fetched, ItemRef, Page, RefCtx, TrackerComment, TrackerError, TrackerInfo,
+        TrackerProvider, ViewDef,
+    };
+    use crate::store::{ItemMeta, Store, TrackerConfig, WorkItemRow};
+    use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    /// Comments for every item; from call `fail_from` (1-based) on, the
+    /// tracker answers `error` instead.
+    struct Comments {
+        calls: AtomicUsize,
+        fail_from: usize,
+        error: fn() -> TrackerError,
+    }
+
+    impl Comments {
+        fn failing_from(fail_from: usize, error: fn() -> TrackerError) -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+                fail_from,
+                error,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl TrackerProvider for Comments {
+        fn caps(&self) -> Caps {
+            Caps::default()
+        }
+        async fn probe(&self) -> Result<TrackerInfo, TrackerError> {
+            unreachable!()
+        }
+        async fn views(&self, _: &TrackerConfig) -> Result<Vec<ViewDef>, TrackerError> {
+            unreachable!()
+        }
+        async fn list(
+            &self,
+            _: &ViewDef,
+            _: Option<i64>,
+            _: Option<String>,
+        ) -> Result<Page, TrackerError> {
+            unreachable!()
+        }
+        async fn fetch(&self, _: &[ItemRef]) -> Result<Vec<Fetched>, TrackerError> {
+            unreachable!()
+        }
+        fn recognize(&self, _: &str, _: RefCtx<'_>) -> Vec<ItemRef> {
+            Vec::new()
+        }
+        async fn comments(
+            &self,
+            r: &ItemRef,
+            _: usize,
+        ) -> Result<Vec<TrackerComment>, TrackerError> {
+            let n = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+            if n >= self.fail_from {
+                return Err((self.error)());
+            }
+            Ok(vec![TrackerComment {
+                id: format!("c{n}"),
+                author: "someone".into(),
+                body: format!("on {r:?}"),
+                created_at: 100,
+                url: None,
+            }])
+        }
+    }
+
+    fn row(id: i64, key: Option<&str>) -> (WorkItemRow, ItemMeta) {
+        let row: WorkItemRow = serde_json::from_value(json!({
+            "id": id,
+            "source": "github",
+            "key": key,
+            "title": format!("item {id}"),
+            "status_category": "todo",
+            "created_at": 1,
+            "updated_at": 10 * id,
+            "tracker_id": 7,
+            "external_id": key.map(|_| format!("ext{id}")),
+        }))
+        .unwrap();
+        (row, ItemMeta::default())
+    }
+
+    fn keys(read: &ItemsRead) -> Vec<&str> {
+        read.items.iter().map(|i| i.thread.key.as_str()).collect()
+    }
+
+    fn rate_limited() -> TrackerError {
+        TrackerError::RateLimited {
+            retry_after_secs: Some(60),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_full_page_carries_on_from_its_last_row_and_a_short_one_is_done() {
+        let rows = || vec![row(1, Some("A-1")), row(2, Some("A-2"))];
+        let full = read_item_page(7, rows(), 2, None).await.unwrap();
+        assert_eq!(keys(&full), ["A-1", "A-2"]);
+        assert_eq!(full.more, Some((20, 2)));
+        assert!(full.items.iter().all(|i| i.thread.comments.is_empty()));
+        let short = read_item_page(7, rows(), 3, None).await.unwrap();
+        assert_eq!(short.more, None);
+    }
+
+    #[tokio::test]
+    async fn a_page_of_keyless_rows_still_moves_the_watermark() {
+        let read = read_item_page(7, vec![row(1, None), row(2, None)], 2, None)
+            .await
+            .unwrap();
+        assert!(read.items.is_empty());
+        assert_eq!(read.more, Some((20, 2)), "the next page starts after them");
+        // A keyless row before a refusal is done with too.
+        let p = Comments::failing_from(1, rate_limited);
+        let read = read_item_page(7, vec![row(1, None), row(2, Some("A-2"))], 5, Some(&p))
+            .await
+            .unwrap();
+        assert!(read.items.is_empty());
+        assert_eq!(read.more, Some((10, 1)));
+    }
+
+    #[tokio::test]
+    async fn a_refusal_stops_the_page_at_the_item_before_and_keeps_what_was_read() {
+        let p = Comments::failing_from(3, rate_limited);
+        let rows = (1..=4).map(|i| row(i, Some(&format!("A-{i}")))).collect();
+        // The page is short (max 10): without the refusal `more` would be None.
+        let read = read_item_page(7, rows, 10, Some(&p)).await.unwrap();
+        assert_eq!(keys(&read), ["A-1", "A-2"], "the items read before stay");
+        assert_eq!(read.items[0].thread.comments.len(), 1);
+        assert_eq!(
+            read.more,
+            Some((20, 2)),
+            "the next poll starts with A-3, the item refused"
+        );
+        assert_eq!(p.calls.load(Ordering::SeqCst), 3, "nothing asked after it");
+    }
+
+    #[tokio::test]
+    async fn a_refusal_on_the_first_item_is_the_polls_error() {
+        for error in [
+            rate_limited as fn() -> TrackerError,
+            || TrackerError::Unreachable("dns".into()),
+            || TrackerError::Auth("401".into()),
+            || TrackerError::Captcha,
+            || TrackerError::Unconfigured,
+        ] {
+            let p = Comments::failing_from(1, error);
+            let err = read_item_page(7, vec![row(1, Some("A-1"))], 1, Some(&p))
+                .await
+                .unwrap_err();
+            assert!(err.starts_with("tracker 7: "), "{err}");
+        }
+    }
+
+    #[tokio::test]
+    async fn one_item_whose_comments_cannot_be_read_is_still_read() {
+        let p = Comments::failing_from(1, || TrackerError::NotFound);
+        let rows = vec![row(1, Some("A-1")), row(2, Some("A-2"))];
+        let read = read_item_page(7, rows, 10, Some(&p)).await.unwrap();
+        assert_eq!(keys(&read), ["A-1", "A-2"]);
+        assert!(read.items.iter().all(|i| i.thread.comments.is_empty()));
+        assert_eq!(read.more, None);
+    }
+
+    #[tokio::test]
+    async fn with_the_tracker_sync_off_the_poll_says_so() {
+        let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+        store
+            .lock()
+            .unwrap()
+            .set_setting(crate::service::settings::WORK_SYNC_INTERVAL_SECS, "0")
+            .unwrap();
+        let ssh = Arc::new(crate::ssh::SshClient::new());
+        let host = LiveFleetHost {
+            store: Arc::clone(&store),
+            ssh: Arc::clone(&ssh),
+            base: LiveSupportHost {
+                store: Arc::clone(&store),
+                ssh: Arc::clone(&ssh),
+            },
+            gh: SshReviewHost {
+                store: Arc::clone(&store),
+                ssh,
+            },
+        };
+        let page = super::super::runner::ItemPage {
+            after: (0, 0),
+            until: i64::MAX,
+            max: 10,
+            comments: true,
+        };
+        let err = super::super::runner::FleetHost::item_threads(&host, 7, page)
+            .await
+            .unwrap_err();
+        assert!(err.contains("tracker sync is off"), "{err}");
+    }
+}
+
+/// A scan's window: `from` / `to` over the last `window_mins`, and at most
+/// `max_jobs` new entries.
+#[tokio::test]
+async fn a_scan_reads_its_window_and_keeps_to_its_max_jobs() {
+    let f = fx(
+        small(
+            json!({ "source": "mcp_scan", "store": "logs", "tool": "search_logs",
+                "arguments": { "query": "level:ERROR" }, "every_mins": 30,
+                "window_mins": 35, "max_jobs": 1,
+                "key_template": "{{subject.entry.id}}" }),
+            json!([{ "role": "logs", "kind": "mcp", "label": "Logs", "read_tools": ["search_logs"] }]),
+        ),
+        json!({}),
+        json!([{ "role": "logs", "server": "graylog",
+            "env": { "GRAYLOG_API_TOKEN": "${GRAYLOG_PROD_TOKEN}" } }]),
+        false,
+    );
+    let text = json!({ "entries": [ { "id": "a" }, { "id": "b" } ] }).to_string();
+    *f.world.call_answer.lock().unwrap() = json!({ "jsonrpc": "2.0", "id": 2,
+        "result": { "content": [{ "type": "text", "text": text }] } })
+    .to_string();
+    let polled = f
+        .poller()
+        .poll(&f.rule, Some(&f.cursor(0, None)), 10_000)
+        .await
+        .unwrap();
+    assert_eq!(polled.jobs.len(), 1, "max_jobs");
+    let (_, _, args) = f.world.calls.lock().unwrap()[0].clone();
+    assert_eq!(
+        args,
+        json!({ "query": "level:ERROR", "from": 10_000 - 35 * 60, "to": 10_000 })
+    );
+}
+
+/// `run.fingerprint.bugs` searches its own tracker, else the trigger's,
+/// else the first tracker input: what validation accepts.
+#[test]
+fn a_bug_search_finds_its_tracker_where_validation_does() {
+    let mut l = small(json!({ "source": "manual" }), json!([]));
+    l.definition.inputs = definition::parse_value(&json!({
+        "inputs": [{ "name": "jira", "type": "tracker", "label": "Jira", "required": true }],
+        "trigger": { "source": "manual" },
+        "run": { "workspace": "home", "output_schema": { "type": "object" } }
+    }))
+    .unwrap()
+    .inputs;
+    let mut inst = Instance {
+        sources: Sources {
+            definition: l,
+            servers: BTreeMap::new(),
+        },
+        values: json!({ "jira": "4" }).as_object().unwrap().clone(),
+        bindings: Vec::new(),
+    };
+    let mut b = definition::BugSearch {
+        tracker: None,
+        project: "BUG".into(),
+        issue_type: None,
+    };
+    let ctx = inst.ctx(0);
+    assert_eq!(bug_tracker(&inst, &b, &ctx), Some(4), "the tracker input");
+    inst.sources.definition.definition.trigger.tracker = Some("3".into());
+    assert_eq!(bug_tracker(&inst, &b, &ctx), Some(3), "the trigger's");
+    b.tracker = Some("{{inputs.jira}}".into());
+    assert_eq!(bug_tracker(&inst, &b, &ctx), Some(4), "its own");
+}
+
+/// A body `plan` already fitted to `max / 2` keeps its "… and N more
+/// findings" tail when findings outside the diff join it.
+#[test]
+fn placing_a_review_keeps_the_body_plan_fitted() {
+    use super::actions::{place_review, PrReviewPayload, ReviewFinding};
+    let max = 400;
+    let tail = "\n… and 3 more findings";
+    let body = format!("{}{tail}", "x".repeat(max / 2 - tail.chars().count()));
+    assert_eq!(body.chars().count(), max / 2);
+    let p = PrReviewPayload {
+        action: "review".into(),
+        repo: "acme/pos".into(),
+        number: 1,
+        sha: "abc".into(),
+        event: "COMMENT".into(),
+        body,
+        findings: vec![ReviewFinding {
+            path: "src/a.rs".into(),
+            line: 3,
+            body: "Off by one.".into(),
+            blocking: false,
+        }],
+    };
+    let req = place_review(&p, "", "[fleet-agent:inst]", max);
+    assert!(req.body.contains("… and 3 more findings"), "{}", req.body);
+    assert!(
+        req.body.chars().count() <= max,
+        "{}",
+        req.body.chars().count()
+    );
+    assert!(req.body.ends_with("[fleet-agent:inst]"));
+}
+
+/// A scan that ran late reaches back to the previous one, so no entry
+/// falls between them; never more than a week back.
+#[test]
+fn a_late_scan_reaches_back_to_the_previous_one() {
+    let now = 1_000_000;
+    assert_eq!(scan_from(60, None, now), now - 3600);
+    assert_eq!(scan_from(60, Some(now - 1800), now), now - 3600);
+    assert_eq!(scan_from(60, Some(now - 3900), now), now - 3900);
+    assert_eq!(scan_from(60, Some(0), now), now - 10_080 * 60);
+}
+
+/// `run.branch` picks the worktree's branch, and `run.cooldown_secs` defers
+/// a subject this instance finished lately.
+#[tokio::test]
+async fn a_run_reads_its_branch_and_waits_out_its_cooldown() {
+    let mut l = l2();
+    l.definition.run.branch = Some("release/{{project}}".into());
+    l.definition.run.cooldown_secs = 3600;
+    assert_eq!(
+        definition::problems(&l.definition, &l.templates),
+        Vec::<String>::new()
+    );
+    let f = fx(
+        l,
+        json!({ "jira_tracker": "3", "project": "L2S", "phrases": "Tech help!" }),
+        json!([
+            { "role": "logs", "server": "graylog", "name": "logs-prod",
+              "env": { "GRAYLOG_API_TOKEN": "${GRAYLOG_PROD_TOKEN}" } },
+            { "role": "kb", "server": "kb" },
+            { "role": "memory", "namespace": "rule" }
+        ]),
+        true,
+    );
+    *f.world.base.threads.lock().unwrap() = vec![thread(&[("1", "Tech help!", 1500)])];
+    *f.world.base.answer.lock().unwrap() = Some(PrintOutcome::Answered {
+        text: GOOD.into(),
+        cost_micros: 1,
+    });
+    let job = |key: &str| crate::store::NewAgentJob {
+        rule_id: f.rule.id,
+        agent: AGENT.into(),
+        subject: "tracker:3:L2S-7".into(),
+        trigger: "comment".into(),
+        dedup_key: key.into(),
+        not_before: 0,
+    };
+    let first = f.claim(&[job("c1")]);
+    assert!(matches!(
+        f.runner().run(&first[0], Some(&f.rule)).await,
+        RunOutcome::Done { .. }
+    ));
+    let log = f.world.base.log.lock().unwrap().clone();
+    assert!(log.contains(&"prepare release/L2S".to_string()), "{log:?}");
+    finish_done(
+        &f.store.lock().unwrap(),
+        first[0].id,
+        None,
+        crate::store::now_unix(),
+    );
+    let second = f.claim(&[job("c2")]);
+    // Deferred to the cooldown's end, not skipped: the poller will not
+    // offer this trigger again.
+    match f.runner().run(&second[0], Some(&f.rule)).await {
+        RunOutcome::Deferred { at, reason } => {
+            assert!(reason.contains("cooldown"), "{reason}");
+            assert!(at > crate::store::now_unix() + 3500, "{at}");
+        }
+        other => panic!("{other:?}"),
+    }
+    // A newer trigger on the subject supersedes the waiting one: only the
+    // newest outlives the cooldown.
+    f.store
+        .lock()
+        .unwrap()
+        .finish_agent_job(
+            second[0].id,
+            &crate::store::AgentJobEnd::Retry {
+                at: 0,
+                error_kind: "deferred".into(),
+                error: "cooldown".into(),
+            },
+            0,
+            crate::store::now_unix(),
+        )
+        .unwrap();
+    let third = f.claim(&[job("c3")]);
+    assert_eq!(third[0].id, second[0].id, "the older job is claimed first");
+    match f.runner().run(&third[0], Some(&f.rule)).await {
+        RunOutcome::Skipped { reason } => assert!(reason.contains("superseded"), "{reason}"),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_definition_may_let_an_unattended_review_approve() {
+    let f = review_fx_limits(true, json!({ "auto_approve": true }));
+    let a = reviewed(
+        &f,
+        r#"{"verdict":"APPROVE","summary":"Ship it.","findings":[]}"#,
+    )
+    .await;
+    let p: Value = serde_json::from_str(&a.payload).unwrap();
+    assert_eq!(
+        (a.state.as_str(), p["event"].as_str()),
+        ("approved", Some("APPROVE"))
+    );
+
+    let mut d = definition::parse_value(&json!({
+        "trigger": { "source": "github_prs", "repo": "acme/pos" },
+        "run": { "workspace": "home", "output_schema": { "type": "object",
+            "required": ["summary"], "properties": { "summary": { "type": "string" } } } },
+        "limits": { "auto_approve": true }
+    }))
+    .unwrap();
+    assert!(d.limits.auto_approve);
+    d.run.branch = Some("main".into());
+    assert!(definition::problems(&d, &BTreeMap::new())
+        .iter()
+        .any(|p| p.contains("branch is for a project workspace")));
+}
+
+/// The gallery's support definition, cooldown off, at `level`.
+fn support_fx(level: &str) -> Fx {
+    let seed = super::gallery::seed("support").unwrap();
+    let mut l = seed.asset().unwrap().fleet_agent().unwrap();
+    l.definition.run.cooldown_secs = 0;
+    fx(
+        l,
+        json!({ "jira_tracker": "3", "project": "L2S", "bug_project": "BUG",
+            "phrases": "Tech help!", "app_frame_prefix": "com.acme." }),
+        json!([
+            { "role": "logs", "server": "graylog", "name": "logs-prod",
+              "env": { "GRAYLOG_API_TOKEN": "${GRAYLOG_PROD_TOKEN}" } },
+            { "role": "kb", "server": "kb" },
+            { "role": "memory", "namespace": "rule" }
+        ]),
+        true,
+    )
+    .at(level)
+}
+
+/// Run one support job on L2S-7 with `key` and finish it; its result.
+async fn support_run(f: &Fx, key: &str) -> Value {
+    *f.world.base.answer.lock().unwrap() = Some(PrintOutcome::Answered {
+        text: json!({ "summary": "Gateway key expired", "rootCause": "The key", "confidence": "high",
+            "severity": "critical", "exceptionClass": "KeyExpiredException",
+            "errorMessage": "Gateway key expired", "affectedComponent": "payments",
+            "stackTrace": "KeyExpiredException\n\tat com.acme.pay.Gateway.charge(Gateway.java:42)" })
+        .to_string(),
+        cost_micros: 0,
+    });
+    let jobs = f.claim(&[crate::store::NewAgentJob {
+        rule_id: f.rule.id,
+        agent: AGENT.into(),
+        subject: "tracker:3:L2S-7".into(),
+        trigger: "comment".into(),
+        dedup_key: key.into(),
+        not_before: 0,
+    }]);
+    let out = f.runner().run(&jobs[0], Some(&f.rule)).await;
+    let RunOutcome::Done { result, .. } = out else {
+        panic!("{out:?}")
+    };
+    finish_done(
+        &f.store.lock().unwrap(),
+        jobs[0].id,
+        result.clone(),
+        crate::store::now_unix(),
+    );
+    serde_json::from_str(&result.unwrap()).unwrap()
+}
+
+/// The support agent as a definition: an open bug like the error is linked
+/// (a person approves); with none, a high-confidence bug is filed, kept
+/// against the fingerprint, and the next run of the same error links to it.
+#[tokio::test]
+async fn the_support_definition_fingerprints_links_and_files_once() {
+    let f = support_fx("act");
+    let ticket = thread(&[("1", "Tech help!", 1500)]);
+    let mut open_bug = thread(&[]);
+    open_bug.key = "BUG-2".into();
+    open_bug.summary = "[payments] KeyExpiredException: Gateway key expired".into();
+    *f.world.base.threads.lock().unwrap() = vec![ticket.clone(), open_bug];
+
+    let r = support_run(&f, "c1").await;
+    let fp = r["answer"]["fingerprint"].as_str().unwrap().to_string();
+    assert!(super::fingerprints::is_fingerprint(&fp), "{r}");
+    assert_eq!(r["answer"]["seenCount"], 1);
+    assert_eq!(r["answer"]["similarBug"], "BUG-2");
+    let jql = f.world.base.jql.lock().unwrap().clone();
+    assert!(
+        jql.iter()
+            .any(|q| q.starts_with("3 project = \"BUG\" AND issuetype = \"Bug\"")),
+        "{jql:?}"
+    );
+    assert_eq!(
+        states(&r),
+        [
+            ("comment".to_string(), "approved".to_string()),
+            ("similar".to_string(), "pending".to_string())
+        ],
+        "a similar bug is linked by a person, and no new bug is filed"
+    );
+
+    // No open bug like it: a high-confidence bug is filed, a person approving.
+    *f.world.base.threads.lock().unwrap() = vec![ticket.clone()];
+    let r = support_run(&f, "c2").await;
+    assert_eq!(r["answer"]["seenCount"], 2);
+    assert!(r["answer"].get("similarBug").is_none());
+    let bug = f
+        .actions()
+        .into_iter()
+        .find(|a| a.kind == "tracker_issue")
+        .unwrap();
+    assert!(
+        bug.payload.contains(&fp),
+        "the payload carries the fingerprint"
+    );
+    assert_eq!(f.executor().execute(&bug).await, ActionResult::Executed);
+
+    // The same error again: the bug filed for it, inside the window.
+    let r = support_run(&f, "c3").await;
+    assert_eq!(r["answer"]["knownBug"], "BUG-9");
+    assert_eq!(r["answer"]["seenCount"], 3);
+    assert_eq!(
+        states(&r),
+        [
+            ("comment".to_string(), "approved".to_string()),
+            ("known".to_string(), "approved".to_string())
+        ]
+    );
+}
+
+/// A burst of one error: each run proposes its own bug before a person
+/// approved the first; once one is filed, the others are not.
+#[tokio::test]
+async fn a_burst_of_one_error_files_one_bug() {
+    let f = support_fx("act");
+    *f.world.base.threads.lock().unwrap() = vec![thread(&[("1", "Tech help!", 1500)])];
+    for key in ["c1", "c2"] {
+        let r = support_run(&f, key).await;
+        assert!(r["answer"].get("knownBug").is_none(), "{r}");
+    }
+    let bugs: Vec<_> = f
+        .actions()
+        .into_iter()
+        .filter(|a| a.kind == "tracker_issue")
+        .collect();
+    assert_eq!(bugs.len(), 2, "each run proposed one");
+    assert_eq!(f.executor().execute(&bugs[0]).await, ActionResult::Executed);
+    match f.executor().execute(&bugs[1]).await {
+        ActionResult::Expired(e) => assert!(e.contains("duplicate: BUG-9"), "{e}"),
+        other => panic!("{other:?}"),
+    }
+    let creates = f
+        .world
+        .base
+        .writes
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(_, op)| matches!(op, WriteOp::CreateIssue { .. }))
+        .count();
+    assert_eq!(creates, 1);
+}
+
+#[test]
+fn a_pr_job_waits_out_its_debounce_and_a_wip_one_none() {
+    let mut wip = pr(5, "def", false);
+    wip.title = "[WIP] not yet".into();
+    let gate = super::github::PrGate {
+        skip_wip: true,
+        debounce_secs: 120,
+    };
+    let jobs = super::github::plan_pr_jobs(
+        1,
+        "acme/pos",
+        &[pr(4, "abc", false), wip.clone()],
+        gate,
+        1000,
+    );
+    assert_eq!(jobs.len(), 1, "the WIP pull request has no job");
+    assert_eq!(jobs[0].0.not_before, 1120);
+    let open = super::github::plan_pr_jobs(1, "acme/pos", &[wip], Default::default(), 1000);
+    assert_eq!((open.len(), open[0].0.not_before), (1, 1000));
+}
+
+#[test]
+fn a_diff_is_filtered_and_gated() {
+    let spec = definition::DiffSpec {
+        exclude_paths: vec!["*.lock".into()],
+        respect_claudeignore: true,
+        max_lines: 10,
+    };
+    let diff = "diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1 +1,2 @@\n fn a() {}\n+fn b() {}\n\
+diff --git a/Cargo.lock b/Cargo.lock\n--- a/Cargo.lock\n+++ b/Cargo.lock\n@@ -1 +1 @@\n-x\n+y\n";
+    let kept = gate_diff(diff, &spec, None).unwrap();
+    assert!(
+        kept.contains("src/a.rs") && !kept.contains("Cargo.lock"),
+        "{kept}"
+    );
+    let only_lock = "diff --git a/Cargo.lock b/Cargo.lock\n--- a/Cargo.lock\n+++ b/Cargo.lock\n@@ -1 +1 @@\n-x\n+y\n";
+    assert!(gate_diff(only_lock, &spec, None)
+        .unwrap_err()
+        .starts_with("empty_diff"));
+    let small = definition::DiffSpec {
+        max_lines: 1,
+        ..spec
+    };
+    assert!(gate_diff(diff, &small, None)
+        .unwrap_err()
+        .starts_with("diff_too_large"));
+}
+
+/// A reviewer-like definition: `pr_head`, the diff in the prompt.
+fn head_fx() -> Fx {
+    let d = definition::parse_value(&json!({
+        "inputs": [{ "name": "repo", "type": "text", "label": "Repo", "required": true }],
+        "trigger": { "source": "github_prs", "repo": "{{repo}}" },
+        "run": { "workspace": "pr_head", "diff": { "exclude_paths": ["*.lock"] },
+            "output_schema": { "type": "object", "required": ["summary"],
+                "properties": { "summary": { "type": "string" } } } }
+    }))
+    .unwrap();
+    assert_eq!(
+        definition::problems(&d, &BTreeMap::new()),
+        Vec::<String>::new()
+    );
+    let loaded = Loaded {
+        name: "rv".into(),
+        definition: d,
+        skill: "Review it.".into(),
+        templates: BTreeMap::new(),
+    };
+    fx(loaded, json!({ "repo": "acme/pos" }), json!([]), true)
+}
+
+#[tokio::test]
+async fn a_review_reads_the_head_and_its_diff_and_skips_a_head_that_moved() {
+    let f = head_fx();
+    *f.world.prs.lock().unwrap() = vec![pr(4, "abc", false)];
+    *f.world.diff.lock().unwrap() = "diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1 +1,2 @@\n fn a() {}\n+fn b() {}\n\
+diff --git a/docs/x.md b/docs/x.md\n--- a/docs/x.md\n+++ b/docs/x.md\n@@ -1 +1 @@\n-x\n+y\n".into();
+    *f.world.base.answer.lock().unwrap() = Some(PrintOutcome::Answered {
+        text: r#"{"summary":"fine"}"#.into(),
+        cost_micros: 0,
+    });
+    let now = crate::store::now_unix();
+    let polled = f
+        .poller()
+        .poll(&f.rule, Some(&f.cursor(now - 100, None)), now)
+        .await
+        .unwrap();
+    let jobs = f.claim(&polled.jobs);
+    let out = f.runner().run(&jobs[0], Some(&f.rule)).await;
+    assert!(matches!(out, RunOutcome::Done { .. }), "{out:?}");
+    let log = f.world.base.log.lock().unwrap().clone();
+    assert!(log.contains(&"prepare_pr #4@abc".to_string()), "{log:?}");
+    let (_, prompt) = f.world.base.last.lock().unwrap().clone().unwrap();
+    assert!(
+        prompt.contains("## Diff") && prompt.contains("+fn b() {}"),
+        "{prompt}"
+    );
+    assert!(
+        !prompt.contains("docs/x.md"),
+        "the base's .claudeignore leaves docs out"
+    );
+
+    // A later push: this head's job, run again, is skipped.
+    *f.world.prs.lock().unwrap() = vec![pr(4, "def", false)];
+    match f.runner().run(&jobs[0], Some(&f.rule)).await {
+        RunOutcome::Skipped { reason } => assert!(reason.contains("head moved"), "{reason}"),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_diff_github_will_not_serve_is_skipped_and_a_missing_pr_is_permanent() {
+    let f = head_fx();
+    *f.world.prs.lock().unwrap() = vec![pr(4, "abc", false)];
+    let now = crate::store::now_unix();
+    let polled = f
+        .poller()
+        .poll(&f.rule, Some(&f.cursor(now - 100, None)), now)
+        .await
+        .unwrap();
+    let jobs = f.claim(&polled.jobs);
+    *f.world.diff_refusal.lock().unwrap() =
+        Some("HTTP 406: Sorry, the diff exceeded the maximum number of lines".into());
+    match f.runner().run(&jobs[0], Some(&f.rule)).await {
+        RunOutcome::Skipped { reason } => assert!(reason.starts_with("diff_too_large"), "{reason}"),
+        other => panic!("too large is not worth a retry: {other:?}"),
+    }
+    *f.world.diff_refusal.lock().unwrap() = Some("HTTP 404: Not Found".into());
+    match f.runner().run(&jobs[0], Some(&f.rule)).await {
+        RunOutcome::Failed { kind, .. } => assert_eq!(kind, ErrorKind::Permanent),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_comment_on_an_open_pr_carries_its_head() {
+    let f = gh_fx(json!({ "source": "github_comments", "repo": "{{repo}}",
+        "match": { "any_phrase": "/ask" } }));
+    *f.world.prs.lock().unwrap() = vec![pr(4, "abc", false)];
+    let c = |id: i64, number: i64| crate::service::agents::review::PrComment {
+        id,
+        number,
+        body: "/ask why".into(),
+        user_type: "User".into(),
+    };
+    *f.world.comments.lock().unwrap() = vec![c(1, 4), c(2, 9)];
+    let now = crate::store::now_unix();
+    let polled = f
+        .poller()
+        .poll(&f.rule, Some(&f.cursor(now - 100, None)), now)
+        .await
+        .unwrap();
+    assert_eq!(polled.jobs.len(), 2);
+    let kept = |job: &crate::store::NewAgentJob| {
+        let s = f.store.lock().unwrap();
+        let row = s
+            .agent_record(
+                &subjects_namespace(f.rule.id),
+                "subject",
+                &job.dedup_key,
+                now,
+            )
+            .unwrap()
+            .unwrap();
+        serde_json::from_str::<Value>(&row.value).unwrap()
+    };
+    let on_pr = polled
+        .jobs
+        .iter()
+        .find(|j| j.subject.ends_with("#4"))
+        .unwrap();
+    assert_eq!(kept(on_pr)["head_sha"], "abc");
+    let on_issue = polled
+        .jobs
+        .iter()
+        .find(|j| j.subject.ends_with("#9"))
+        .unwrap();
+    assert!(
+        kept(on_issue).get("head_sha").is_none(),
+        "an issue has no head"
+    );
+}
+
+/// A reviewer restated: confidence, blocking findings and their
+/// resolutions, path label rules and the description.
+fn answer_fx() -> Fx {
+    let d = definition::parse_value(&json!({
+        "inputs": [{ "name": "repo", "type": "text", "label": "Repo", "required": true }],
+        "trigger": { "source": "github_prs", "repo": "{{repo}}" },
+        "run": { "workspace": "home", "diff": { "respect_claudeignore": false },
+            "output_schema": { "type": "object",
+            "required": ["verdict", "summary", "findings"], "properties": {
+                "verdict": { "enum": ["APPROVE", "REQUEST_CHANGES", "COMMENT"] },
+                "summary": { "type": "string" },
+                "description": { "type": "string" },
+                "findings": { "type": "array", "items": { "type": "object",
+                    "required": ["path", "line", "body"], "properties": {
+                        "path": { "type": "string" }, "line": { "type": "integer" },
+                        "body": { "type": "string" }, "blocking": { "type": "boolean" },
+                        "confidence": { "type": "integer" } } } },
+                "resolutions": { "type": "array", "items": { "type": "object" } } } } },
+        "actions": [
+            { "id": "review", "do": "pr_review", "target": "{{subject.number}}",
+              "verdict": "{{answer.verdict}}", "body": "{{answer.summary}}",
+              "findings": "findings", "min_confidence": 50, "resolutions": "resolutions" },
+            { "id": "labels", "do": "pr_labels", "target": "{{subject.number}}",
+              "labels": ["reviewed", { "label": "rust", "paths": ["src/**"] },
+                         { "label": "docs", "paths": ["docs/**"] }] },
+            { "id": "describe", "do": "pr_description", "target": "{{subject.number}}",
+              "body": "{{answer.description}}", "overwrite": true }
+        ]
+    }))
+    .unwrap();
+    assert_eq!(
+        definition::problems(&d, &BTreeMap::new()),
+        Vec::<String>::new()
+    );
+    let loaded = Loaded {
+        name: "rv".into(),
+        definition: d,
+        skill: "Review the PR.".into(),
+        templates: BTreeMap::new(),
+    };
+    fx(loaded, json!({ "repo": "acme/pos" }), json!([]), false).at("propose")
+}
+
+/// Run [`answer_fx`] on PR 4 at `sha`; the run's actions by kind.
+async fn answered_at(
+    f: &Fx,
+    sha: &str,
+    answer: &str,
+) -> BTreeMap<String, crate::store::AgentActionRow> {
+    *f.world.prs.lock().unwrap() = vec![pr(4, sha, false)];
+    *f.world.diff.lock().unwrap() = REVIEW_DIFF.into();
+    let now = crate::store::now_unix();
+    let polled = f
+        .poller()
+        .poll(&f.rule, Some(&f.cursor(now - 100, None)), now)
+        .await
+        .unwrap();
+    let jobs = f.claim(&polled.jobs);
+    let job = jobs
+        .iter()
+        .find(|j| j.dedup_key.contains(sha))
+        .unwrap_or_else(|| panic!("a job for the head: {:?} {:?}", polled.jobs, jobs));
+    *f.world.base.answer.lock().unwrap() = Some(PrintOutcome::Answered {
+        text: answer.into(),
+        cost_micros: 0,
+    });
+    let out = f.runner().run(job, Some(&f.rule)).await;
+    assert!(matches!(out, RunOutcome::Done { .. }), "{out:?}");
+    // Done, its result kept: the next head's job can be claimed.
+    let s = f.store.lock().unwrap();
+    let result = s.agent_job(job.id).unwrap().unwrap().result;
+    finish_done(&s, job.id, result, now);
+    drop(s);
+    f.actions()
+        .into_iter()
+        .filter(|a| a.job_id == job.id)
+        .map(|a| (a.kind.clone(), a))
+        .collect()
+}
+
+#[tokio::test]
+async fn a_review_remembers_its_findings_and_the_next_verdict_waits_on_them() {
+    let f = answer_fx();
+    *f.world.meta.lock().unwrap() = crate::service::agents::review::labels::PrMeta {
+        body: "written by a person".into(),
+        labels: Vec::new(),
+    };
+    let first = answered_at(
+        &f,
+        "abc",
+        r#"{"verdict":"COMMENT","summary":"One thing.","description":"Adds x.","findings":[
+            {"path":"src/a.rs","line":2,"body":"x is unused","blocking":true,"confidence":90},
+            {"path":"src/a.rs","line":3,"body":"a hunch","confidence":20}]}"#,
+    )
+    .await;
+    let p: Value = serde_json::from_str(&first["pr_review"].payload).unwrap();
+    assert_eq!(p["event"], "COMMENT");
+    assert_eq!(
+        p["findings"].as_array().unwrap().len(),
+        1,
+        "below min_confidence is dropped: {p}"
+    );
+    let l: Value = serde_json::from_str(&first["pr_labels"].payload).unwrap();
+    assert_eq!(
+        l["add"],
+        json!(["reviewed", "rust"]),
+        "docs/** matched nothing"
+    );
+    let ex = f.executor();
+    assert!(matches!(
+        ex.execute(&first["pr_review"]).await,
+        ActionResult::Done(_)
+    ));
+    // The first review may replace a person's description with overwrite.
+    assert_eq!(
+        ex.execute(&first["pr_description"]).await,
+        ActionResult::Executed
+    );
+    assert!(f
+        .world
+        .gh_writes
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|w| w == "describe acme/pos#4 @abc: Adds x."));
+
+    // The next head: the blocking finding is still open.
+    let open = answered_at(
+        &f,
+        "def",
+        r#"{"verdict":"COMMENT","summary":"Still.","description":"Adds x.","findings":[],
+            "resolutions":[{"path":"src/a.rs","line":2,"resolution":"open"}]}"#,
+    )
+    .await;
+    let p: Value = serde_json::from_str(&open["pr_review"].payload).unwrap();
+    assert_eq!(p["event"], "REQUEST_CHANGES", "a person sends it: {p}");
+    // Not the first review any more: a description is left alone.
+    assert!(matches!(
+        ex.execute(&open["pr_description"]).await,
+        ActionResult::Expired(e) if e.contains("has a description")
+    ));
+}
+
+#[test]
+fn the_verdict_is_adjusted_against_the_previous_review() {
+    use super::actions::{adjusted_verdict, ReviewFinding};
+    let prev = json!({ "findings": [
+        { "path": "src/a.rs", "line": 2, "blocking": true },
+        { "path": "src/b.rs", "line": 9, "blocking": false } ] });
+    let res = |r: &str| json!([{ "path": "./src/a.rs", "line": 2, "resolution": r }]);
+    let blocking = ReviewFinding {
+        path: "src/c.rs".into(),
+        line: 1,
+        body: "new".into(),
+        blocking: true,
+    };
+    assert_eq!(
+        adjusted_verdict("comment", &prev, &res("fixed"), &[]),
+        "APPROVE"
+    );
+    assert_eq!(
+        adjusted_verdict("COMMENT", &prev, &res("fixed"), &[blocking]),
+        "COMMENT",
+        "a new blocking finding"
+    );
+    assert_eq!(
+        adjusted_verdict("APPROVE", &prev, &res("open"), &[]),
+        "REQUEST_CHANGES"
+    );
+    assert_eq!(
+        adjusted_verdict("COMMENT", &prev, &json!([]), &[]),
+        "COMMENT",
+        "unresolved but not answered"
+    );
+    assert_eq!(
+        adjusted_verdict("COMMENT", &Value::Null, &res("open"), &[]),
+        "COMMENT",
+        "no previous review"
+    );
+}
+
+#[test]
+fn a_review_answer_is_checked_against_its_schema() {
+    let d = |action: Value| {
+        definition::parse_value(&json!({
+            "trigger": { "source": "github_prs", "repo": "acme/pos" },
+            "run": { "workspace": "home", "output_schema": { "type": "object",
+                "required": ["summary"], "properties": {
+                    "summary": { "type": "string" }, "note": { "type": "string" } } } },
+            "actions": [action]
+        }))
+        .unwrap()
+    };
+    let p = definition::problems(
+        &d(
+            json!({ "id": "r", "do": "pr_review", "target": "{{subject.number}}",
+            "body": "{{answer.summary}}", "min_confidence": 101, "resolutions": "note" }),
+        ),
+        &BTreeMap::new(),
+    );
+    assert!(
+        p.iter().any(|p| p.contains("min_confidence is 0-100")),
+        "{p:?}"
+    );
+    assert!(
+        p.iter()
+            .any(|p| p.contains("resolutions note is not an array")),
+        "{p:?}"
+    );
+    let p = definition::problems(
+        &d(
+            json!({ "id": "d", "do": "pr_description", "target": "{{subject.number}}",
+            "body": "{{answer.summary}}", "overwrite": true }),
+        ),
+        &BTreeMap::new(),
+    );
+    assert_eq!(p, Vec::<String>::new());
+}
+
+#[tokio::test]
+async fn a_dismissed_review_is_made_again_at_the_same_head() {
+    let f = review_fx_trigger(
+        false,
+        json!({}),
+        json!({ "source": "github_prs", "repo": "{{repo}}", "reverify_mins": 1 }),
+    );
+    let a = reviewed(
+        &f,
+        r#"{"verdict":"COMMENT","summary":"Fine.","findings":[]}"#,
+    )
+    .await;
+    assert!(matches!(
+        f.executor().execute(&a).await,
+        ActionResult::Done(_)
+    ));
+    let now = crate::store::now_unix();
+    let f = &f;
+    let poll = |at: i64| async move {
+        f.poller()
+            .poll(&f.rule, Some(&f.cursor(at - 100, None)), at)
+            .await
+            .unwrap()
+            .jobs
+    };
+    // Too soon: the review is not looked up.
+    f.world.gh_writes.lock().unwrap().clear();
+    assert!(poll(now + 30).await.is_empty());
+    assert!(!f
+        .world
+        .gh_writes
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|w| w.starts_with("state")));
+    // Standing: looked up, nothing to do.
+    assert!(poll(now + 120).await.is_empty());
+    assert!(f
+        .world
+        .gh_writes
+        .lock()
+        .unwrap()
+        .contains(&"state r77".to_string()));
+    // Dismissed: made again at the same head, once.
+    f.world
+        .review_states
+        .lock()
+        .unwrap()
+        .insert(77, Some("DISMISSED".into()));
+    let jobs = poll(now + 240).await;
+    assert_eq!(jobs.len(), 1, "{jobs:?}");
+    assert_eq!(
+        (jobs[0].trigger.as_str(), jobs[0].dedup_key.as_str()),
+        ("reverify", "r1:gh:acme/pos#4@abc:r77")
+    );
+    assert!(poll(now + 400).await.is_empty(), "its id is forgotten");
+}
+
+fn rc(
+    id: i64,
+    reply_to: Option<i64>,
+    body: &str,
+    user_type: &str,
+) -> crate::service::agents::review::debate::ReviewComment {
+    crate::service::agents::review::debate::ReviewComment {
+        id,
+        number: 4,
+        in_reply_to: reply_to,
+        path: "src/a.rs".into(),
+        line: Some(2),
+        body: body.into(),
+        user: if user_type == "Bot" { "fleet" } else { "ann" }.into(),
+        user_type: user_type.into(),
+        diff_hunk: "@@ -1 +1 @@\n+fn c() {}".into(),
+    }
+}
+
+/// The gallery's pr-test-debate definition at act, on acme/pos.
+fn debate_fx() -> Fx {
+    let seed = super::gallery::SEEDS
+        .iter()
+        .find(|s| s.name == "pr-test-debate")
+        .unwrap();
+    let l = seed.asset().unwrap().fleet_agent().unwrap();
+    let f = fx(
+        l,
+        json!({ "repo": "acme/pos", "phrase": "Missing test:" }),
+        json!([{ "role": "exemptions", "namespace": "shared:pr-test-exemptions" }]),
+        true,
+    )
+    .at("act");
+    *f.world.prs.lock().unwrap() = vec![pr(4, "abc", false)];
+    f
+}
+
+#[tokio::test]
+async fn a_reply_to_a_missing_test_finding_is_judged_and_a_concession_kept() {
+    let f = debate_fx();
+    let root = "issue: 🧪 Missing test: cover c()\n\n[fleet-agent:rv]";
+    *f.world.review_comments.lock().unwrap() = vec![
+        rc(7, None, root, "Bot"),
+        rc(9, Some(7), "It is covered by tests/a.rs", "User"),
+        // Not a finding the trigger matches, nor a fleet agent's.
+        rc(20, None, "nitpick: a name\n\n[fleet-agent:rv]", "Bot"),
+        rc(21, Some(20), "renamed", "User"),
+        rc(30, None, "Missing test: from a person", "User"),
+        rc(31, Some(30), "agreed", "User"),
+    ];
+    let now = crate::store::now_unix();
+    let polled = f
+        .poller()
+        .poll(&f.rule, Some(&f.cursor(now - 100, None)), now)
+        .await
+        .unwrap();
+    assert_eq!(polled.jobs.len(), 1, "{:?}", polled.jobs);
+    let jobs = f.claim(&polled.jobs);
+    *f.world.base.answer.lock().unwrap() = Some(PrintOutcome::Answered {
+        text: r#"{"decision":"concede","reply":"Fair: tests/a.rs covers c().","reason":"covered by tests/a.rs"}"#.into(),
+        cost_micros: 0,
+    });
+    let out = f.runner().run(&jobs[0], Some(&f.rule)).await;
+    assert!(matches!(out, RunOutcome::Done { .. }), "{out:?}");
+    let (_, prompt) = f.world.base.last.lock().unwrap().clone().unwrap();
+    assert!(
+        prompt.contains("cover c()") && prompt.contains("It is covered by tests/a.rs"),
+        "{prompt}"
+    );
+    assert!(!prompt.contains("[fleet-agent:rv]"), "markers are left out");
+    let actions = f.actions();
+    let kinds: Vec<&str> = actions.iter().map(|a| a.kind.as_str()).collect();
+    assert_eq!(
+        {
+            let mut k = kinds.clone();
+            k.sort();
+            k
+        },
+        vec!["pr_reply", "record"],
+        "the hold reply is not planned"
+    );
+    let ex = f.executor();
+    for a in &actions {
+        assert_eq!(a.state, "approved", "auto at act");
+        let done = ex.execute(a).await;
+        assert!(
+            matches!(done, ActionResult::Executed | ActionResult::Done(_)),
+            "{}: {done:?}",
+            a.kind
+        );
+    }
+    let writes = f.world.gh_writes.lock().unwrap().clone();
+    let reply = writes.iter().find(|w| w.starts_with("reply")).unwrap();
+    assert!(
+        reply.starts_with("reply acme/pos#4 t7: Fair: tests/a.rs covers c().")
+            && reply.contains("_Accepted")
+            && reply.ends_with("[fleet-agent:inst]"),
+        "{reply}"
+    );
+    assert!(writes.contains(&"resolve t7".to_string()), "{writes:?}");
+    let kept = f
+        .store
+        .lock()
+        .unwrap()
+        .agent_record(
+            "shared:pr-test-exemptions",
+            "record",
+            "acme/pos#4:src/a.rs:2",
+            now,
+        )
+        .unwrap();
+    assert!(
+        kept.is_some_and(|r| r.value.contains("covered by tests/a.rs")),
+        "the exemption pr-reviewer reads"
+    );
+
+    // Its own answer starts nothing; a person's next word does, until the
+    // instance has answered max_rounds (2) times.
+    let mine = format!("Holding.\n\n{}", super::actions::marker("inst"));
+    f.world.review_comments.lock().unwrap().extend([
+        rc(10, Some(7), &mine, "Bot"),
+        rc(11, Some(7), "But really", "User"),
+    ]);
+    let again = f
+        .poller()
+        .poll(&f.rule, Some(&f.cursor(now - 100, None)), now + 10)
+        .await
+        .unwrap();
+    assert_eq!(again.jobs.len(), 1, "{:?}", again.jobs);
+    assert!(again.jobs[0].dedup_key.ends_with(":c11"));
+    f.world.review_comments.lock().unwrap().extend([
+        rc(12, Some(7), &mine, "Bot"),
+        rc(13, Some(7), "Still no", "User"),
+    ]);
+    let done = f
+        .poller()
+        .poll(&f.rule, Some(&f.cursor(now - 100, None)), now + 20)
+        .await
+        .unwrap();
+    assert!(
+        done.jobs.is_empty(),
+        "two rounds: the thread is the people's"
+    );
+}
+
+#[test]
+fn the_reviewer_pair_ships_in_the_gallery() {
+    use definition::TriggerSource;
+    let load = |name: &str| {
+        super::gallery::SEEDS
+            .iter()
+            .find(|s| s.name == name)
+            .unwrap()
+            .asset()
+            .unwrap()
+            .fleet_agent()
+            .unwrap()
+    };
+    let rv = load("pr-reviewer");
+    let t = &rv.definition.trigger;
+    assert_eq!(t.source, TriggerSource::GithubPrs);
+    assert!(t.skip_wip && t.reverify_mins == Some(60));
+    assert_eq!(rv.definition.run.workspace, definition::Workspace::PrHead);
+    let review = &rv.definition.actions[0];
+    assert_eq!(
+        (review.kind.word(), review.min_confidence, review.auto),
+        ("pr_review", Some(50), false)
+    );
+    assert!(rv.skill.contains("🧪 Missing test:"), "the debate's phrase");
+    let db = load("pr-test-debate");
+    assert_eq!(
+        db.definition.trigger.source,
+        TriggerSource::GithubReviewReplies
+    );
+    assert_eq!(
+        db.definition.stores[0].role, rv.definition.stores[0].role,
+        "they share the exemptions"
+    );
+    assert!(db.definition.stores[0].shared_by_default && rv.definition.stores[0].shared_by_default);
+    assert!(super::actions::without_markers("a [fleet-agent:x] b\n\n[fleet-agent:y]") == "a  b");
+}
+
+#[test]
+fn a_reply_trigger_is_checked() {
+    let d = |trigger: Value, action: Value| {
+        let d = definition::parse_value(&json!({
+            "trigger": trigger,
+            "run": { "workspace": "home", "output_schema": { "type": "object",
+                "required": ["reply"], "properties": { "reply": { "type": "string" } } } },
+            "actions": [action]
+        }))
+        .unwrap();
+        definition::problems(&d, &BTreeMap::new())
+    };
+    let reply = json!({ "id": "r", "do": "pr_reply", "target": "{{subject.thread.root_id}}",
+        "body": "{{answer.reply}}" });
+    assert_eq!(
+        d(
+            json!({ "source": "github_review_replies", "repo": "acme/pos", "max_rounds": 3 }),
+            reply.clone()
+        ),
+        Vec::<String>::new()
+    );
+    let p = d(
+        json!({ "source": "github_review_replies", "repo": "acme/pos", "max_rounds": 9 }),
+        reply.clone(),
+    );
+    assert!(p.iter().any(|p| p.contains("max_rounds is 1-5")), "{p:?}");
+    let p = d(
+        json!({ "source": "github_prs", "repo": "acme/pos", "reverify_mins": 0 }),
+        reply,
+    );
+    assert!(
+        p.iter().any(|p| p.contains("reverify_mins is 1-1440")),
+        "{p:?}"
+    );
+    assert!(
+        p.iter()
+            .any(|p| p.contains("the trigger is github_review_replies")),
+        "{p:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_spent_day_budget_holds_the_next_run_until_tomorrow() {
+    let f = review_fx_limits(false, json!({ "daily_budget_usd": 0.5 }));
+    let now = crate::store::now_unix();
+    let run_at = |sha: &'static str, cost: i64| {
+        let f = &f;
+        async move {
+            *f.world.prs.lock().unwrap() = vec![pr(4, sha, false)];
+            *f.world.diff.lock().unwrap() = REVIEW_DIFF.into();
+            let polled = f
+                .poller()
+                .poll(&f.rule, Some(&f.cursor(now - 100, None)), now)
+                .await
+                .unwrap();
+            let jobs = f.claim(&polled.jobs);
+            let job = jobs
+                .iter()
+                .find(|j| j.dedup_key.contains(sha))
+                .unwrap()
+                .clone();
+            *f.world.base.answer.lock().unwrap() = Some(PrintOutcome::Answered {
+                text: r#"{"verdict":"COMMENT","summary":"Fine.","findings":[]}"#.into(),
+                cost_micros: cost,
+            });
+            let out = f.runner().run(&job, Some(&f.rule)).await;
+            (job, out)
+        }
+    };
+    let (job, out) = run_at("abc", 600_000).await;
+    assert!(matches!(out, RunOutcome::Done { .. }), "{out:?}");
+    f.store
+        .lock()
+        .unwrap()
+        .finish_agent_job(
+            job.id,
+            &crate::store::AgentJobEnd::Final {
+                state: "done",
+                result: None,
+                error_kind: None,
+                error: None,
+            },
+            600_000,
+            now,
+        )
+        .unwrap();
+    let (_, out) = run_at("def", 0).await;
+    let tomorrow = crate::service::routines::cron::local_day_start(now, 0) + 86_400;
+    match out {
+        RunOutcome::Deferred { at, reason } => {
+            assert_eq!(at, tomorrow);
+            assert!(reason.contains("spent $0.60 of today's $0.50"), "{reason}");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn an_instance_may_lower_its_budget_never_raise_it() {
+    let limits = |input: Option<&str>| definition::Limits {
+        daily_budget_usd: Some(10.0),
+        budget_input: input.map(str::to_string),
+        ..Default::default()
+    };
+    let values = |v: Value| v.as_object().unwrap().clone();
+    let l = limits(Some("budget"));
+    assert_eq!(l.budget_micros(&values(json!({}))), Some(10_000_000));
+    assert_eq!(
+        l.budget_micros(&values(json!({ "budget": 2.5 }))),
+        Some(2_500_000)
+    );
+    assert_eq!(
+        l.budget_micros(&values(json!({ "budget": "4" }))),
+        Some(4_000_000)
+    );
+    assert_eq!(
+        l.budget_micros(&values(json!({ "budget": 50 }))),
+        Some(10_000_000),
+        "held to the definition's"
+    );
+    assert_eq!(
+        definition::Limits::default().budget_micros(&values(json!({}))),
+        None
+    );
+    assert!(super::runner::over_budget(9, 10).is_none());
+
+    let problems = |limits: Value| {
+        let d = definition::parse_value(&json!({
+            "inputs": [{ "name": "note", "type": "text", "label": "Note" },
+                       { "name": "budget", "type": "number", "label": "Budget" }],
+            "trigger": { "source": "manual" },
+            "run": { "workspace": "home", "output_schema": { "type": "object",
+                "required": ["summary"], "properties": { "summary": { "type": "string" } } } },
+            "limits": limits
+        }))
+        .unwrap();
+        definition::problems(&d, &BTreeMap::new())
+    };
+    assert_eq!(
+        problems(json!({ "daily_budget_usd": 5, "budget_input": "budget" })),
+        Vec::<String>::new()
+    );
+    let p = problems(json!({ "daily_budget_usd": 0, "budget_input": "note" }));
+    assert!(
+        p.iter()
+            .any(|p| p.contains("daily_budget_usd is more than 0")),
+        "{p:?}"
+    );
+    assert!(
+        p.iter().any(|p| p.contains("note is not a number input")),
+        "{p:?}"
+    );
+    let p = problems(json!({ "budget_input": "budget" }));
+    assert!(p.iter().any(|p| p.contains("set it")), "{p:?}");
 }

@@ -11,6 +11,7 @@
   went wrong. Task titles are tracker text, rendered as text.
 -->
 <script lang="ts">
+  import { tick } from 'svelte';
   import Icon from './kit/Icon.svelte';
   import StatusDot from './kit/StatusDot.svelte';
   import Loader from './Loader.svelte';
@@ -26,10 +27,14 @@
     checkGlyph,
     checkable,
     doneWhenRows,
+    evidenceMissing,
     nodeLabel,
+    overrideRunEvidence,
     retryWorkItem,
+    laneOfItem,
     sessionsByItem,
     setMissionItem,
+    setMissionLane,
     setWorkDep,
     setWorkDoneWhen,
     setWorkHold,
@@ -116,6 +121,46 @@
     if (await act(setWorkDoneWhen(condsFor, doneWhenRows(condText)))) condsFor = null;
   }
 
+  // The task whose missing run evidence a person is overriding, and why.
+  let overrideFor = $state<number | null>(null);
+  let overrideText = $state('');
+  /** The task whose new lane is being named (lanes design L2). */
+  let laneFor = $state<number | null>(null);
+  let laneText = $state('');
+  const NEW_LANE = '\u0000new';
+  async function saveLane(): Promise<void> {
+    if (laneFor == null || !laneText.trim()) return;
+    if (await act(setMissionLane(mission.id, laneFor, laneText))) laneFor = null;
+  }
+  function pickLane(itemId: number, v: string): void {
+    if (v === NEW_LANE) {
+      laneFor = itemId;
+      laneText = '';
+    } else {
+      void act(setMissionLane(mission.id, itemId, v || null));
+    }
+  }
+
+  async function saveOverride() {
+    if (overrideFor == null || !overrideText.trim()) return;
+    const id = overrideFor;
+    if (await act(overrideRunEvidence(id, overrideText))) closeOverride(id);
+  }
+
+  /** The reason field takes focus as it opens: the Override… button that
+   *  opened it is gone (review r8). */
+  function focusOnMount(el: HTMLInputElement): void {
+    el.focus();
+  }
+
+  /** Close the reason form and give focus back to its Override… button,
+   *  when the task still has one. */
+  async function closeOverride(id: number): Promise<void> {
+    overrideFor = null;
+    await tick();
+    document.querySelector<HTMLButtonElement>(`[data-testid="mission-evidence-override"][data-item="${id}"]`)?.focus();
+  }
+
   async function retry(itemId: number) {
     const out = await act(retryWorkItem(itemId));
     if (out && !out.ok) onnotice(out.detail);
@@ -185,6 +230,11 @@
                     >
                   {/each}
                 </span>
+                {#if (detail.touches?.[it.id] ?? []).length > 0}
+                  <span class="muted small" data-testid="mission-touches" title="What it says it changes: a task whose changes meet another's does not start beside it"
+                    >changes {(detail.touches?.[it.id] ?? []).join(', ')}</span
+                  >
+                {/if}
                 {#if (n.waiting_for ?? []).length > 0}
                   <span class="muted small" data-testid="mission-waits">waits for {(n.waiting_for ?? []).map(titleOf).join(', ')}</span>
                 {/if}
@@ -211,6 +261,58 @@
                       </li>
                     {/each}
                   </ul>
+                {/if}
+                {#if n.evidence && (evidenceMissing(n.evidence) || n.evidence.state === 'overridden')}
+                  <span class="evidence ev-{n.evidence.state}" data-testid="mission-evidence" data-state={n.evidence.state}>
+                    <span class="glyph" aria-hidden="true">{checkGlyph(evidenceMissing(n.evidence) ? 'fail' : 'pass')}</span>
+                    <span>{evidenceMissing(n.evidence) ? 'No run evidence' : 'Done without evidence'}:</span>
+                    <span class="muted">{n.evidence.detail}</span>
+                    {#if detail.may_change && evidenceMissing(n.evidence) && overrideFor !== n.item_id}
+                      <button
+                        class="btn btn--chip"
+                        type="button"
+                        title="Accept this run without commits or files, and say why"
+                        disabled={busy}
+                        data-testid="mission-evidence-override"
+                        data-item={n.item_id}
+                        onclick={() => ((overrideFor = n.item_id), (overrideText = ''))}>Override…</button
+                      >
+                    {/if}
+                  </span>
+                  {#if overrideFor === n.item_id}
+                    <form class="conds" onsubmit={(e) => (e.preventDefault(), void saveOverride())}>
+                      <input
+                        type="text"
+                        aria-label="Why the task is done without commits or files"
+                        placeholder="Why it is done without commits or files"
+                        bind:value={overrideText}
+                        use:focusOnMount
+                        data-testid="mission-evidence-reason"
+                      />
+                      <span class="row">
+                        <button class="btn" type="submit" disabled={busy || !overrideText.trim()} data-testid="mission-evidence-save"
+                          >Override</button
+                        >
+                        <button class="btn btn--quiet" type="button" onclick={() => void closeOverride(n.item_id)}>Cancel</button>
+                      </span>
+                    </form>
+                  {/if}
+                {/if}
+                {#if laneFor === n.item_id}
+                  <form class="conds" onsubmit={(e) => (e.preventDefault(), void saveLane())}>
+                    <input
+                      type="text"
+                      aria-label="New lane's name"
+                      placeholder="Lane name, e.g. backend"
+                      maxlength="40"
+                      bind:value={laneText}
+                      data-testid="mission-lane-name"
+                    />
+                    <span class="row">
+                      <button class="btn" type="submit" disabled={busy || !laneText.trim()} data-testid="mission-lane-save">Put in lane</button>
+                      <button class="btn btn--quiet" type="button" onclick={() => (laneFor = null)}>Cancel</button>
+                    </span>
+                  </form>
                 {/if}
                 {#if condsFor === n.item_id}
                   <form class="conds" onsubmit={(e) => (e.preventDefault(), void saveConds())}>
@@ -256,7 +358,21 @@
               {#if it.id === mission.root_item_id}
                 <span class="muted small">root</span>
               {:else if mayChange}
+                {@const lane = laneOfItem(detail, it.id)}
                 {@const choices = depChoices(n)}
+                <select
+                  class="dep-pick"
+                  aria-label="Lane"
+                  title="Lane: the tasks one session works through on one branch"
+                  disabled={busy}
+                  value={lane?.name ?? ''}
+                  data-testid="mission-lane-pick"
+                  onchange={(e) => pickLane(it.id, (e.currentTarget as HTMLSelectElement).value)}
+                >
+                  <option value="">No lane</option>
+                  {#each detail.lanes ?? [] as l (l.id)}<option value={l.name}>{l.name}</option>{/each}
+                  <option value={NEW_LANE}>New lane…</option>
+                </select>
                 {#if choices.length > 0}
                   <select
                     class="dep-pick"
@@ -460,6 +576,19 @@
   }
   .checks .c-fail .glyph {
     color: var(--danger);
+  }
+  .evidence {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.3rem;
+    align-items: baseline;
+    font-size: var(--text-2xs);
+  }
+  .evidence.ev-missing .glyph {
+    color: var(--danger);
+  }
+  .evidence.ev-overridden .glyph {
+    color: var(--status-done);
   }
   .conds {
     display: flex;

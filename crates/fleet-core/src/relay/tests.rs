@@ -119,16 +119,23 @@ async fn dropping_the_listener_ends_its_connections() {
     c.write_all(b"x").await.unwrap();
     let mut b = [0u8; 1];
     c.read_exact(&mut b).await.unwrap();
+    // The accept task owns the listener. Watch the tasks themselves rather
+    // than reconnecting to the port: once freed, a test running alongside
+    // can bind that port, and a connect would then succeed.
+    let tasks = relay.tasks.lock().unwrap().clone();
     drop(relay);
     let n = tokio::time::timeout(Duration::from_secs(5), c.read(&mut b))
         .await
         .unwrap()
         .unwrap_or(0);
     assert_eq!(n, 0, "the spliced connection must close");
-    assert!(
-        TcpStream::connect(("127.0.0.1", port)).await.is_err(),
-        "the listener must be gone"
-    );
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !tasks.iter().all(|t| t.is_finished()) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the listener must be gone");
 }
 
 #[cfg(unix)]

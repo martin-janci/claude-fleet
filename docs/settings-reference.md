@@ -28,30 +28,32 @@ Scope says where a value lives: *fleet* is one value for the whole fleet, kept o
 | `restore.batch_size` | `4` | 1–16 | fleet | Sessions resumed in parallel by Restore lost sessions. |
 | `restore.stagger_ms` | `3000` | 0–60000 ms | fleet | Pause between starting each resumed session in a batch restore. |
 
-## automation
+## Automation
 
 | Setting | Default | Range | Scope | What it does |
 |---|---|---|---|---|
 | `automation.paused` | `false` | on / off | fleet | Stop every background job that acts on its own: missions, garbage collection, playbooks, repairs, tracker, catalog and folder syncs, and host refreshes. Reconcile, usage and update checks keep running, and health shows each job as paused. |
 | `automation.daily_budget` | `0` | 0–1000000 USD, `0` = none | fleet | What every routine's runs together may spend in one UTC day. Once they have spent it no routine starts a run, Run now included, until the next day. A run already going finishes. |
 
-## routines
+## Routines
 
 | Setting | Default | Range | Scope | What it does |
 |---|---|---|---|---|
 | `routines.backoff_on_no_change` | `false` | on / off | fleet | A scheduled routine whose last runs found nothing to do waits twice as long before each next run, up to 6 hours. A run that does work brings the schedule back. |
 | `routines.pause_at_limit` | `true` | on / off | fleet | A scheduled routine whose account is at its usage limit waits until the limit resets instead of skipping at every scheduled time. |
 
-## orchestrator
+## Missions
 
 | Setting | Default | Range | Scope | What it does |
 |---|---|---|---|---|
 | `orchestrator.enabled` | `true` | on / off | fleet | Let active missions take their next steps: keep their cards and brakes current and, under a person's grant, run what is ready. Off stops every mission's loop at once. |
 | `orchestrator.max_level` | `1` | 0–3 | fleet | The most any mission's loop may do on its own, whatever the mission asks and its grant signs. 0: the loop only keeps the cards; 1: it also asks the planner, and a person presses every step; 2: runs, retries, reviews and closes within a grant; 3: also creates the planner's tasks. |
-| `orchestrator.headless_checks` | `false` | on / off | fleet | Run a mission's review and its test commands as one Claude run in the implementer's checkout, with read-only tools and only those commands, instead of opening a session for each. Falls back to a session when the checkout moved or a command is not a plain one. Experimental. |
+| `orchestrator.headless_checks` | `true` | on / off | fleet | Run a mission's review and its test commands as one Claude run in the implementer's checkout, with read-only tools and only those commands, instead of opening a session for each. Falls back to a session when the checkout moved or a command is not a plain one. Experimental. |
 | `orchestrator.headless_model` | `sonnet` | `haiku` / `sonnet` / `opus` | fleet | The Claude model headless reviews and tests run. Experimental. |
+| `orchestrator.run_subagents` | `true` | on / off | fleet | A mission run asks its Claude worker to explore the code and to review its own changes through subagents, which keeps its own context for the work. Subagents never edit in parallel: they share the checkout. Experimental. |
+| `orchestrator.planner_reads` | `false` | on / off | fleet | The mission planner may read the mission's repository (read, search and list files in its checkout, nothing else) before it breaks a goal into tasks, so it can split the work along the files it touches. Planning takes longer and costs more. Experimental. |
 
-## control
+## Control chat
 
 | Setting | Default | Range | Scope | What it does |
 |---|---|---|---|---|
@@ -61,6 +63,7 @@ Scope says where a value lives: *fleet* is one value for the whole fleet, kept o
 | `control.feed_min_interval_secs` | `900` | seconds, `0` = no wait | fleet | The shortest time between two notes to Control's agent. A note goes only when something needs Control (a question, a failure, failing checks, a lost session, a host down); finished turns wait and go out with the next one. |
 | `control.switch_at_limit` | `true` | on / off | fleet | When Control's account hits its limit or its login is signed out, resume Control's conversation under another signed-in login with headroom: on its host first, then on another host. |
 | `control.sweep` | `true` | on / off | fleet | The note to Control's agent also names a pull request it handed out that has merge conflicts or failing checks, and a mission it handed off that made no progress for a while, once per change. Within your brief it fixes or reassigns them, asking as usual; at Ask first it only tells you. |
+| `control.session_care` | `true` | on / off | fleet | Within your brief, Control restarts a stuck session it started itself without asking, also under another login after a limit. At Autopilot it also retires one whose work is done, after committing and pushing it. Off, or at Ask first: both wait for you. |
 | `control.follow_quiet_hours` | `24` | 1–720 hours | fleet | Control stops following a session it started or briefed once it is done, killed or its pull request merged, or after this long without a turn. Briefing it again follows it again. |
 | `control.journal` | `true` | on / off | fleet | When Control starts a new conversation (a restart, a move to another host, a compaction or a new chat), fleet first tells it what it was following, what it asked you and what you last said. |
 
@@ -72,18 +75,18 @@ Scope says where a value lives: *fleet* is one value for the whole fleet, kept o
 | `playbooks.oom_recreate` | `false` | on / off | fleet | Recreate a session that ran out of memory, within the budget below. |
 | `playbooks.oom_max_attempts` | `2` | 0–20, `0` = never | fleet | Recreates one session may get per 24 hours. A session that is working, or finished a turn after the flag, is never recreated. |
 
-## autofix
+## Problems & fixes
 
 | Setting | Default | Range | Scope | What it does |
 |---|---|---|---|---|
-| `autofix.auto_safe` | `true` | on / off | fleet | Fix problems whose fix only touches fleet's own files and can be undone, then tell you. Fixes that touch tokens, sign-in or running sessions always wait for you. |
-| `autofix.max_attempts` | `3` | 0–10, `0` = never | fleet | How many times one problem is fixed automatically before it waits for you. |
+| `autofix.auto_safe` | `true` | on / off | fleet | Apply fixes marked safe without asking, then tell you: refreshing fleet's files on a host, and re-adding or repairing fleet's entry in a host's ~/.claude.json (written with that host's own fleet token). Replacing a token, signing in and typing into sessions always wait for you. |
+| `autofix.max_attempts` | `3` | 0–10, `0` = never | fleet | How many times fleet tries to fix one problem by itself in 24 hours (a problem that keeps coming back counts as one) before it waits for you. |
 | `autofix.detector.operator_unbound` | `true` | on / off | fleet | Notice when Control's token belongs to nobody, which leaves it unable to see any session. |
 | `autofix.detector.host` | `true` | on / off | fleet | Notice hosts with out-of-date fleet files, silent hooks, or an old agent or Claude Code. |
 | `autofix.detector.host_mcp_entry` | `true` | on / off | fleet | Every 10 minutes, read the fleet entry in each host's ~/.claude.json (its token is hashed on the host and never sent) and notice one that is missing, points elsewhere or carries the wrong token. |
 | `autofix.detector.stuck` | `true` | on / off | fleet | Notice sessions stuck on a reconnect, a trust or sign-in prompt, a Press Enter wait or out of memory, and offer the fix. |
 
-## recovery
+## Recovery
 
 | Setting | Default | Range | Scope | What it does |
 |---|---|---|---|---|
@@ -92,7 +95,7 @@ Scope says where a value lives: *fleet* is one value for the whole fleet, kept o
 | `recovery.max_attempts` | `2` | 0–20, `0` = never | fleet | Automatic restores one session may get per 24 hours, failed ones included. Past it the session waits for a person. |
 | `recovery.max_mem_pressure` | `20` | 1–100% | fleet | Memory pressure on a host at or over which killed sessions wait to be brought back. The host's out-of-memory killer acts at 50 by default; restoring near it only feeds the next kill. |
 
-## agents
+## Agents
 
 | Setting | Default | Range | Scope | What it does |
 |---|---|---|---|---|
@@ -115,7 +118,7 @@ Scope says where a value lives: *fleet* is one value for the whole fleet, kept o
 
 | Setting | Default | Range | Scope | What it does |
 |---|---|---|---|---|
-| `projects.base_path` | `{}` | JSON map: host alias → path | fleet | Per-host folder that holds your repositories. A host with no entry uses $CLAUDE_FLEET_PROJECTS_BASE (local only), then the layout default. |
+| `projects.base_path` | `{}` | JSON map: host alias → path | fleet | Per-host folder that holds your repositories. A host with no entry uses this machine's default projects folder, then the layout default. |
 | `projects.layout` | `github` | `github` / `flat` | fleet | Where a repository sits under the projects root: github puts it at root/owner/repo, flat at root/repo. |
 
 ## Tasks
@@ -131,7 +134,7 @@ Scope says where a value lives: *fleet* is one value for the whole fleet, kept o
 | `repair.auto_on_tick` | `false` | on / off | fleet | Re-add deleted worktree directories without anyone opening them. A stale entry is dropped only when its parent folder is the one seen while it was healthy, so an unmounted volume is never touched. |
 | `repair.tick_interval_secs` | `600` | ≥ 60 seconds | fleet | Seconds between automatic workspace checks, each repairing at most five worktrees. |
 
-## downloads
+## Downloads
 
 | Setting | Default | Range | Scope | What it does |
 |---|---|---|---|---|
@@ -139,7 +142,7 @@ Scope says where a value lives: *fleet* is one value for the whole fleet, kept o
 | `downloads.max_total_mb` | `2048` | 1–1048576 MiB | fleet | How much the kept downloads may take together. A new file pushes out the oldest ones. |
 | `downloads.keep_secs` | `604800` | seconds, shown in days, `0` = until removed | fleet | How long a sent file is kept for your devices before it is removed. |
 
-## voice
+## Voice
 
 | Setting | Default | Range | Scope | What it does |
 |---|---|---|---|---|
@@ -166,14 +169,14 @@ Scope says where a value lives: *fleet* is one value for the whole fleet, kept o
 | `usage.interval_secs` | `300` | seconds, `0` = off | fleet | Seconds between usage passes, one batched read per host. |
 | `usage.prices_json` | `{}` | JSON map: model → USD per million tokens | fleet | Per-model prices for the estimated cost, in USD per million tokens (input, output, cache_write, cache_read). {} uses the built-in prices only. |
 
-## search
+## Search
 
 | Setting | Default | Range | Scope | What it does |
 |---|---|---|---|---|
 | `search.index_transcripts` | `false` | on / off | fleet | Copy what is said in each session into the hub's search index, so a search finds it in any conversation. Turning it off deletes the copied text. Experimental. Asks to confirm. |
 | `search.transcript_days` | `30` | 1–365 days | fleet | Days of conversation text the search index keeps. |
 
-## accounts
+## Accounts
 
 | Setting | Default | Range | Scope | What it does |
 |---|---|---|---|---|
@@ -196,11 +199,11 @@ Scope says where a value lives: *fleet* is one value for the whole fleet, kept o
 | `health.version_max_age_secs` | `86400` | seconds, shown in hours | fleet | How old a host's recorded Claude version may be before the "older than the fleet" badge stops trusting it and shows nothing. |
 | `health.disk_low_pct` | `90` | 50–100% | fleet | Used share of a host's home filesystem at which the host reads as disk low. |
 | `health.mem_low_pct` | `10` | 1–50% | fleet | Available share of a host's memory at or under which the host reads as memory low. Sessions killed there are brought back only once it recovers. |
-| `health.cpu_busy_pct` | `90` | 50–100% | fleet | Busy share of a host's CPUs at which the host reads as saturated, when two samples in a row reach it. |
+| `health.cpu_busy_pct` | `90` | 50–100% | fleet | Busy share of a host's CPUs at which the host reads as saturated, when two samples in a row reach it. Sessions killed there wait to be brought back until it calms down. |
 | `health.claude_max_behind` | `30` | 0–1000 | fleet | Patch releases a host's Claude may trail the fleet's newest before the host reads as behind. |
 | `health.hooks_silent_secs` | `3600` | seconds, shown in minutes | fleet | How long a reachable host with a live session may send no hook before it reads as hooks silent. |
 
-## provision
+## Host provisioning
 
 | Setting | Default | Range | Scope | What it does |
 |---|---|---|---|---|
@@ -225,7 +228,7 @@ Scope says where a value lives: *fleet* is one value for the whole fleet, kept o
 | `work.summary_model` | `haiku` | `haiku` / `sonnet` / `opus` | fleet, per org | The model Summarise runs on for a past session, on that session's own host and account. |
 | `work.context_help` | `false` | on / off | fleet | Terminal and composer: Ask asks a model about the line you are typing, with its history as context, on the session's host. A proposed command is put on the line, never run. |
 | `work.help_model` | `haiku` | `haiku` / `sonnet` / `opus` | fleet | The model that answers a question asked at a terminal or composer prompt line, and that tunes a prompt, on the session's own host and account. |
-| `work.prompt_tune` | `false` | on / off | fleet | Composer and routine prompt: Tune has a model rewrite your draft into a clearer prompt for the agent, on the session's or routine's host. You see the rewrite beside your draft and accept, edit or discard it; nothing is sent. |
+| `work.prompt_tune` | `false` | on / off | fleet | Composer and routine prompt: Tune has a model rewrite your draft into a clearer prompt for the agent, on the session's or routine's host. It runs on the Writing help model. You see the rewrite beside your draft and accept, edit or discard it; nothing is sent. |
 | `work.draft_commit_messages` | `false` | on / off | fleet | Files tab: Draft writes a commit message from the staged diff with claude -p on the session's host. A draft is text you edit and commit yourself. |
 | `work.draft_briefs` | `false` | on / off | fleet | Starting from a ticket: Draft writes the agent's brief from the ticket before the first prompt, on the planned host. |
 | `work.draft_task_titles` | `false` | on / off | fleet | New task: once you have written the notes, the title is drafted from them with claude -p on this machine, or on the first reachable host when it is not a fleet host. A draft is text you edit before you create the task. |
@@ -238,7 +241,7 @@ Scope says where a value lives: *fleet* is one value for the whole fleet, kept o
 | `work.auto_tidy` | `false` | on / off | fleet | Let the GC sweep act on the allowed tidy reasons by itself, by safe kill or archive only. Off, Tidy up only suggests. An organisation can override it. Asks to confirm. |
 | `work.auto_tidy_reasons` | `done_idle,pr_merged_idle` | any of `done_idle`, `pr_merged_idle`, `not_planned` | fleet | The tidy reasons auto-tidy may act on. |
 
-## catalog
+## Asset catalog
 
 | Setting | Default | Range | Scope | What it does |
 |---|---|---|---|---|
@@ -247,7 +250,7 @@ Scope says where a value lives: *fleet* is one value for the whole fleet, kept o
 | `catalog.auto` | `true` | on / off | fleet | After each asset scan, hide fleet's own and Claude's internal assets, propose changeset cards, and, for layers already rolled out once, install what a host is missing and adopt identical copies. Never changes, overwrites or removes a copy a host already has. |
 | `catalog.auto_push` | `false` | on / off | fleet | Push the catalog repo right after a changeset card commits to it or is undone. Off: push it yourself. |
 
-## update
+## Updates
 
 | Setting | Default | Range | Scope | What it does |
 |---|---|---|---|---|
@@ -296,11 +299,11 @@ Scope says where a value lives: *fleet* is one value for the whole fleet, kept o
 | `decide.jev.daily_token_budget` | `2000000` | 0–1000000000 tokens, `0` = none | fleet | Input tokens the decision model may be sent per UTC day. At $0.042 per million, the default is under $0.09 a day. |
 | `decide.jev.model` | `jev-1.13.0` | `jev-1.13.0` / `jev-latest` | fleet | The model version a request names. jev-1.13.0 is pinned; jev-latest follows TypeSafe. |
 | `decide.haiku.shadow` | `false` | on / off | fleet | Also ask Claude every question a Jev use case in shadow or assist asks, on the host below, and record its answer beside Jev's to compare them. Nothing acts on it. Experimental. Asks to confirm. |
-| `decide.haiku.host` | `` | text, up to 64 characters | fleet | The host whose Claude account answers. Only questions about its own organisation are sent to it. Experimental. |
+| `decide.haiku.host` | `` | text, up to 64 characters | fleet | The host whose Claude account answers: the alias of a host in the fleet. Only questions about its own organisation are sent to it. Experimental. |
 | `decide.haiku.model` | `haiku` | `haiku` / `sonnet` / `opus` | fleet | The Claude model the second opinion asks. Experimental. |
 | `decide.haiku.daily_calls` | `200` | 0–10000, `0` = none | fleet | Questions the second opinion may ask per UTC day. One at a time; a question that comes while one is running is not asked. Experimental. |
 | `decide.retention_days` | `90` | 0–3650 days, `0` = forever | fleet | Days a decision record (ids and numbers, never text) is kept. |
-| `decide.jev.floors` | `` | text, up to 8192 characters | fleet | Per-feature confidence floors fitted from runs a person confirmed, corrected or rejected (fleet-hub decide floor fit). A fitted floor only raises a feature's built-in one, and only for the question version and model it was fitted against. |
+| `decide.jev.floors` | `` | text, up to 8192 characters | fleet | Confidence floors fitted from runs a person confirmed, corrected or rejected, written by fleet-hub decide floor fit --apply: not for editing by hand. A fitted floor only raises a feature's built-in one, for the question version and model it was fitted against. |
 
 ## Identity and audit
 
@@ -330,14 +333,14 @@ Scope says where a value lives: *fleet* is one value for the whole fleet, kept o
 | `mcp.confirm_destructive` | `false` | on / off | per process | Every destructive control API call waits for a confirmation on the desktop. Read-only here: change it with Settings → Control API. |
 | `mcp.broadcast_interval_secs` | `30` | seconds | per process | Shortest time between two broadcast prompts from the same caller. Read-only here: change it with the settings table only. |
 
-## budget
+## Budgets
 
 | Setting | Default | Range | Scope | What it does |
 |---|---|---|---|---|
 | `budget.org_daily_usd` | `0` | 0–1000000 USD, `0` = none | fleet, per org | Estimated spend an org's sessions may reach in one UTC day before fleet warns. Each org can set its own. Fleet only warns; it never stops a session. |
 | `budget.org_monthly_usd` | `0` | 0–10000000 USD, `0` = none | fleet, per org | Estimated spend an org's sessions may reach in one calendar month (UTC) before fleet warns. Each org can set its own. Fleet only warns; it never stops a session. |
 
-## notify
+## Notifications
 
 | Setting | Default | Range | Scope | What it does |
 |---|---|---|---|---|

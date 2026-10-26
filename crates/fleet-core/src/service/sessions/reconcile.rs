@@ -883,7 +883,7 @@ pub(super) fn reconcile_write_one_host(
             // Mark host unreachable; surface last-known sessions so the UI
             // can render them dimmed/red. We KEEP them (no delete).
             let now = now_unix();
-            let agent_offline = e.code == codes::E_AGENT_OFFLINE;
+            let agent_offline = crate::agent::registry::connection_gone(e);
             match down_hosts().note_down(&host.alias, &e.message, agent_offline, now) {
                 DownLog::Hold => {
                     tracing::debug!(host = %host.alias, "[reconcile] no agent connected yet; waiting for it to redial");
@@ -1059,7 +1059,20 @@ fn write_reachable_host(
         let agent_status_typed = agent_status
             .as_deref()
             .and_then(|s| s.parse::<crate::service::pane_intel::ClaudeStatus>().ok());
-        let pane_status = pane.and_then(|p| p.derived_status);
+        // The Stop-hooks spinner reads Working on screen, but the turn is
+        // over and fleet's Stop hook may already have stored `idle` while a
+        // slower hook keeps the spinner up. A pass that starts after that
+        // hook is not covered by the upsert's in-flight guard, so the pane's
+        // strong `Working` would write `working` back, and on
+        // cadence-skipped passes an idle pane would not clear it again.
+        // Such a pane says nothing about the status.
+        let pane_status = pane.and_then(|p| p.derived_status).filter(|s| {
+            *s != crate::service::pane_intel::ClaudeStatus::Working
+                || !probe
+                    .pane_tails
+                    .get(&sess.name)
+                    .is_some_and(|t| crate::service::pane_intel::stop_hooks_running(t))
+        });
         // The veto is armed by the attention stamp OR by the demotion's own
         // memory (`stale_demoted_at`): an attach or
         // `reconcile.stale_working_ttl_secs` ends the reason, not the
@@ -1068,7 +1081,7 @@ fn write_reachable_host(
             prior_row.is_some_and(|p| p.stale_working_at.is_some() || p.stale_demoted_at.is_some());
         // Prefer the authoritative `claude agents` status; fall back to
         // the pane heuristic per `status_candidate` — full weight when
-        // this pass actually asked, `Blocked`-only otherwise (a
+        // this pass actually asked, `Blocked` / `Working` only otherwise (a
         // cadence-skipped or unanswerable pass must not let a weak
         // pane guess overwrite the stored status every time). A row the
         // tick demoted for staleness keeps its `idle` unless the pane
@@ -2635,11 +2648,20 @@ pub(super) fn known_agent_status(tmux_name: &str, status: Option<&str>) -> Optio
 /// pane guess on every skipped pass — at the 60 s agents / 20 s reconcile
 /// cadence that is 2 of every 3 passes, producing status flicker and
 /// spurious `status_change` events. Only `Blocked` (a real dialog or
-/// stuck pane) is strong enough pane evidence to surface without waiting
-/// for the next agents pass; any other pane verdict yields `None` so the
-/// upsert's `COALESCE(excluded.claude_status, claude_status)` keeps
-/// whatever is stored (a hook-stamped `idle`/`working` survives between
-/// agent fetches).
+/// stuck pane) and `Working` (below) are strong enough pane evidence to
+/// surface without waiting for the next agents pass; an `Idle` pane yields
+/// `None` (but see the stored `blocked` exception) so the upsert's
+/// `COALESCE(excluded.claude_status, claude_status)` keeps whatever is
+/// stored (a hook-stamped `idle`/`working` survives between agent fetches).
+///
+/// A pane showing a turn (`Working`: the live spinner or the interrupt
+/// hint) wins the same way, even over `claude agents`. Claude Code draws
+/// neither once the turn is over, while the cached `claude agents` status
+/// and a missed `UserPromptSubmit` (a turn a background task or a wakeup
+/// started has none) both lag behind it: holding the pane's `Working` back
+/// until the next agents pass left a thinking session reading idle for up
+/// to a minute. A Stop hook that lands while this pass is in flight still
+/// wins (the upsert's `last_hook_at` guard).
 ///
 /// Two exceptions, both about a dialog, the one thing the pane sees better
 /// than anyone:
@@ -2647,10 +2669,10 @@ pub(super) fn known_agent_status(tmux_name: &str, status: Option<&str>) -> Optio
 ///    the CLI can report `working` while a permission dialog is up, and
 ///    letting it win flipped the row every agents pass (and re-alerted a
 ///    phone each time it came back);
-///  - a stored `blocked` (`stored_blocked`) whose pane now shows a turn or
-///    the input box is over: a dialog answered in the terminal fires no
-///    hook, so without this `blocked` (and its "needs you") lasted until the
-///    next agents pass or the Stop hook.
+///  - a stored `blocked` (`stored_blocked`) whose pane now shows the input
+///    box is over (a pane showing a turn already wins above): a dialog
+///    answered in the terminal fires no hook, so without this `blocked` (and
+///    its "needs you") lasted until the next agents pass or the Stop hook.
 pub(super) fn status_candidate(
     agents_asked: bool,
     agent_status: Option<crate::service::pane_intel::ClaudeStatus>,
@@ -2658,14 +2680,14 @@ pub(super) fn status_candidate(
     stored_blocked: bool,
 ) -> Option<crate::service::pane_intel::ClaudeStatus> {
     use crate::service::pane_intel::ClaudeStatus;
-    if pane == Some(ClaudeStatus::Blocked) {
+    if matches!(pane, Some(ClaudeStatus::Blocked | ClaudeStatus::Working)) {
         return pane;
     }
     if agents_asked {
         return agent_status.or(pane);
     }
     match pane {
-        Some(ClaudeStatus::Working | ClaudeStatus::Idle) if stored_blocked => pane,
+        Some(ClaudeStatus::Idle) if stored_blocked => pane,
         _ => None,
     }
 }

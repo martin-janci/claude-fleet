@@ -86,10 +86,15 @@ impl tick::Spawn for FakeSpawn {
             .push((host_alias.to_string(), tmux_name.to_string()));
         Ok(())
     }
-    async fn deliver(&self, row: &SessionRow, prompt: &str, _handover: i64) -> Result<(), String> {
+    async fn deliver(&self, row: &SessionRow, prompt: &str, handover: i64) -> Result<(), String> {
         if let Some(why) = self.untypable.lock().unwrap().clone() {
             return Err(why);
         }
+        // As `seed_routine` does once the prompt is in.
+        lock(&self.store)
+            .unwrap()
+            .mark_handovers_delivered(&[handover], None)
+            .unwrap();
         self.typed
             .lock()
             .unwrap()
@@ -191,6 +196,18 @@ fn due_at(f: &Fx, id: i64, at: i64) {
 
 fn routine(f: &Fx, id: i64) -> RoutineRow {
     lock(&f.store).unwrap().get_routine(id).unwrap().unwrap()
+}
+
+/// A routine that retries a failed run once.
+fn retrying_routine(f: &Fx) -> RoutineRow {
+    let mut i = input(f);
+    i.retry_once = Some(true);
+    new_routine(f, i)
+}
+
+/// `run` is the retry of run `failed`.
+fn assert_retry_of(run: &RoutineRunRow, failed: i64) {
+    assert_eq!(run.trigger_ref, Some(format!("retry:{failed}")), "{run:?}");
 }
 
 fn runs_of(f: &Fx, id: i64) -> Vec<RoutineRunRow> {
@@ -323,6 +340,56 @@ async fn a_run_whose_prompt_was_not_typed_fails() {
         (named.label.as_str(), named.action.as_str()),
         ("Open its session", "session")
     );
+    // Its queued prompt is retired: a person typing into the session later
+    // must not hand Claude the routine's work a second time.
+    let left = lock(&f.store)
+        .unwrap()
+        .undelivered_handovers(run.session_id.unwrap())
+        .unwrap();
+    assert!(left.is_empty(), "{left:?}");
+}
+
+/// The hub restarted while a run's prompt was being typed: nothing will
+/// ever type it, so past `PROMPT_DELIVERY_SECS` the run fails as
+/// undelivered (and its queued prompt is retired) instead of holding the
+/// routine for six hours as "still going".
+#[tokio::test]
+async fn a_run_whose_typing_was_lost_fails_as_undelivered() {
+    let f = fx();
+    let r = new_routine(&f, input(&f));
+    // Fired without the background typing ever running (a restart).
+    let run = tick::fire(&f.deps, &r, "run_now", None, None, OCT8)
+        .await
+        .unwrap();
+    let sid = run.session_id.unwrap();
+    // Undo the fake's typing: the restart lost it.
+    lock(&f.store)
+        .unwrap()
+        .conn_ref()
+        .execute(
+            "UPDATE work_journal SET delivered_at = NULL WHERE kind = 'handover'",
+            [],
+        )
+        .unwrap();
+    tick::settle(&lock(&f.store).unwrap(), OCT8 + 60).unwrap();
+    assert_eq!(
+        runs_of(&f, r.id)[0].state,
+        "running",
+        "still inside the budget"
+    );
+    tick::settle(
+        &lock(&f.store).unwrap(),
+        OCT8 + tick::PROMPT_DELIVERY_SECS + 1,
+    )
+    .unwrap();
+    let run = runs_of(&f, r.id).pop().unwrap();
+    assert_eq!(run.state, "failed");
+    assert_eq!(run.error_code.as_deref(), Some(fix::E_PROMPT_NOT_DELIVERED));
+    assert!(lock(&f.store)
+        .unwrap()
+        .undelivered_handovers(sid)
+        .unwrap()
+        .is_empty());
 }
 
 /// A run that closed before its typing gave up keeps how it closed.
@@ -335,7 +402,7 @@ async fn a_late_typing_failure_leaves_a_closed_run_alone() {
         .unwrap();
     event(&f, run.session_id.unwrap(), "turn_done");
     tick::settle(&lock(&f.store).unwrap(), OCT8 + 60).unwrap();
-    tick::undelivered(&f.store, run.id, "too late", OCT8 + 120);
+    tick::undelivered(&f.store, run.id, "too late", OCT8 + 120, None);
     let run = runs_of(&f, r.id).pop().unwrap();
     assert_eq!(run.state, "done");
     assert_eq!(run.error_code, None);
@@ -511,6 +578,7 @@ async fn a_run_settles_on_its_sessions_turn() {
     let removed = run_now(&f.deps, &ana, r.id, OCT8).await.unwrap();
     let quiet = run_now(&f.deps, &ana, r.id, OCT8).await.unwrap();
     let going = run_now(&f.deps, &ana, r.id, OCT8).await.unwrap();
+    typing_done().await;
     spend(&f, done.session_id.unwrap(), 420_000);
     event(&f, done.session_id.unwrap(), "turn_done");
     event(&f, errored.session_id.unwrap(), "stop_failure");
@@ -674,6 +742,52 @@ async fn a_fire_on_an_account_over_the_line_is_skipped() {
     assert_eq!(runs_of(&f, r.id)[1].state, "running");
 }
 
+/// Review w02-6: a login fleet knows is signed out is treated like one past
+/// the line. The fallback takes the run; without one, the fire skips and
+/// says how to sign in again, instead of starting a session at `/login`.
+#[tokio::test]
+async fn a_fire_on_a_signed_out_login_goes_to_the_fallback_or_skips() {
+    let f = fx();
+    let r = new_routine(&f, input(&f));
+    reachable(&f, "mac", true);
+    reachable(&f, "nas", true);
+    lock(&f.store)
+        .unwrap()
+        .set_host_signed_out_logins(
+            "mac",
+            &[crate::store::SignedOutLogin {
+                profile: Some("work".into()),
+                since: OCT8 - 24 * H,
+                checked_at: OCT8,
+            }],
+        )
+        .unwrap();
+    due_at(&f, r.id, OCT8 + 9 * H);
+    tick_once(&f.deps, OCT8 + 9 * H).await;
+    let runs = runs_of(&f, r.id);
+    assert_eq!(runs[0].state, "skipped");
+    let why = runs[0].reason.as_deref().unwrap();
+    assert!(
+        why.contains("profile work on mac is signed out") && why.contains("/login"),
+        "{why}"
+    );
+    assert!(f.fake.started.lock().unwrap().is_empty());
+    let mut i = input(&f);
+    i.fallback_host = Some("nas".into());
+    let fb = new_routine(&f, i);
+    let ana = person(&f.store, None, f.ana);
+    let moved = run_now(&f.deps, &ana, fb.id, OCT8 + 10 * H).await.unwrap();
+    assert_eq!(moved.host_alias.as_deref(), Some("nas"));
+    assert!(
+        moved
+            .reason
+            .as_deref()
+            .unwrap()
+            .starts_with("on nas: profile work on mac is signed out"),
+        "{moved:?}"
+    );
+}
+
 /// Redesign 8.7: a routine names the account it runs as.
 #[test]
 fn a_routine_names_the_account_it_bills() {
@@ -747,10 +861,7 @@ async fn an_event_routine_fires_on_its_owners_sessions_only() {
         id
     };
     event(&f, old, "stuck");
-    let mut i = input(&f);
-    i.trigger = "event".into();
-    i.cron = None;
-    i.event = Some("stuck".into());
+    let mut i = event_input(&f, "stuck");
     i.overlap = Some("parallel".into());
     let r = new_routine(&f, i);
     assert_eq!(r.next_run_at, None);
@@ -795,10 +906,7 @@ async fn an_event_routine_fires_on_its_owners_sessions_only() {
 #[tokio::test]
 async fn an_event_routine_with_nothing_to_fire_moves_its_cursor_on() {
     let f = fx();
-    let mut i = input(&f);
-    i.trigger = "event".into();
-    i.cron = None;
-    i.event = Some("stuck".into());
+    let i = event_input(&f, "stuck");
     let r = new_routine(&f, i);
     let mine = {
         let s = lock(&f.store).unwrap();
@@ -824,10 +932,7 @@ async fn an_event_routine_with_nothing_to_fire_moves_its_cursor_on() {
 #[tokio::test]
 async fn an_event_routine_turned_off_during_a_pass_does_not_fire() {
     let f = fx();
-    let mut i = input(&f);
-    i.trigger = "event".into();
-    i.cron = None;
-    i.event = Some("stuck".into());
+    let i = event_input(&f, "stuck");
     let r = new_routine(&f, i);
     let mine = {
         let s = lock(&f.store).unwrap();
@@ -1322,20 +1427,34 @@ fn see_pr(f: &Fx, sid: i64, url: &str, state: &str, review: Option<&str>, ci: Op
     .unwrap();
 }
 
-fn pr_routine(f: &Fx, event: &str, change: impl FnOnce(&mut RoutineInput)) -> RoutineRow {
+/// `input` turned into an event routine on `event`.
+fn event_input(f: &Fx, event: &str) -> RoutineInput {
     let mut i = input(f);
     i.trigger = "event".into();
     i.cron = None;
     i.event = Some(event.into());
+    i
+}
+
+fn pr_routine(f: &Fx, event: &str, change: impl FnOnce(&mut RoutineInput)) -> RoutineRow {
+    let mut i = event_input(f, event);
     i.overlap = Some("parallel".into());
     change(&mut i);
     new_routine(f, i)
 }
 
+/// The prompt a run queued for its session, typed or not.
 fn queued_prompt(f: &Fx, sid: i64) -> String {
     let s = lock(&f.store).unwrap();
-    let rows = s.undelivered_handovers(sid).unwrap();
-    rows[0].body.clone().unwrap_or_default()
+    s.conn_ref()
+        .query_row(
+            "SELECT body FROM work_journal WHERE kind = 'handover' AND participant_id IN \
+               (SELECT id FROM participants WHERE session_id = ?1) ORDER BY id LIMIT 1",
+            [sid],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .unwrap()
+        .unwrap_or_default()
 }
 
 #[test]
@@ -1810,10 +1929,7 @@ async fn pause_all_still_stops_retries_and_fires() {
         .unwrap();
     tick_once(&f.deps, OCT8 + 40).await;
     let runs = runs_of(&f, r.id);
-    assert_eq!(
-        runs[1].trigger_ref.as_deref(),
-        Some(&*format!("retry:{}", failed.id))
-    );
+    assert_retry_of(&runs[1], failed.id);
     lock(&f.store)
         .unwrap()
         .set_setting(crate::service::settings::AUTOMATION_PAUSED, "true")
@@ -1828,9 +1944,7 @@ async fn pause_all_still_stops_retries_and_fires() {
 #[tokio::test]
 async fn a_failed_run_is_retried_once_and_never_again() {
     let f = fx();
-    let mut i = input(&f);
-    i.retry_once = Some(true);
-    let r = new_routine(&f, i);
+    let r = retrying_routine(&f);
     let ana = person(&f.store, None, f.ana);
     f.fake.fail.store(true, Ordering::SeqCst);
     let first = run_now(&f.deps, &ana, r.id, OCT8).await.unwrap();
@@ -1841,10 +1955,7 @@ async fn a_failed_run_is_retried_once_and_never_again() {
     let runs = runs_of(&f, r.id);
     assert_eq!(runs.len(), 2, "one retry, which failed too: {runs:?}");
     assert_eq!(runs[1].trigger, "run_now");
-    assert_eq!(
-        runs[1].trigger_ref.as_deref(),
-        Some(&*format!("retry:{}", first.id))
-    );
+    assert_retry_of(&runs[1], first.id);
     assert_eq!(runs[1].state, "failed");
     // Without retry_once a failure stays as it is.
     let plain = new_routine(&f, input(&f));
@@ -1852,12 +1963,31 @@ async fn a_failed_run_is_retried_once_and_never_again() {
     tick_once(&f.deps, OCT8 + 120).await;
     assert_eq!(runs_of(&f, plain.id).len(), 1);
     // A failure older than the retry window is not started again.
-    let mut late = input(&f);
-    late.retry_once = Some(true);
-    let late = new_routine(&f, late);
+    let late = retrying_routine(&f);
     run_now(&f.deps, &ana, late.id, OCT8).await.unwrap();
     tick_once(&f.deps, OCT8 + tick::RETRY_WITHIN_SECS + 60).await;
     assert_eq!(runs_of(&f, late.id).len(), 1);
+}
+
+/// A run that ended at a rate limit waits for the limit to lift (F16); a
+/// limit that lasts past the plain one-hour window must not age the retry
+/// out, so it is still retried once the window allows.
+#[tokio::test]
+async fn a_rate_limited_run_is_still_retried_after_the_hour() {
+    let f = fx();
+    let r = retrying_routine(&f);
+    let ana = person(&f.store, None, f.ana);
+    f.fake.fail.store(true, Ordering::SeqCst);
+    let first = run_now(&f.deps, &ana, r.id, OCT8).await.unwrap();
+    lock(&f.store)
+        .unwrap()
+        .set_routine_run_error_code(first.id, super::fix::E_TURN_RATE_LIMIT)
+        .unwrap();
+    f.fake.fail.store(false, Ordering::SeqCst);
+    tick_once(&f.deps, OCT8 + 3 * 3600).await;
+    let runs = runs_of(&f, r.id);
+    assert_eq!(runs.len(), 2, "{runs:?}");
+    assert_retry_of(&runs[1], first.id);
 }
 
 #[tokio::test]
@@ -2749,6 +2879,86 @@ async fn a_fire_at_a_limit_holds_the_next_until_the_reset() {
 }
 
 #[tokio::test]
+async fn a_retry_held_at_a_limit_outlasts_the_retry_window() {
+    let f = fx();
+    let r = retrying_routine(&f);
+    let ana = person(&f.store, None, f.ana);
+    let run = run_now(&f.deps, &ana, r.id, OCT8).await.unwrap();
+    let seed = |pct: f64, at: i64| {
+        crate::service::account_limits::seed_usage(
+            &lock(&f.store).unwrap(),
+            "mac",
+            Some("work"),
+            "work",
+            pct,
+            at,
+        )
+    };
+    seed(93.0, OCT8);
+    lock(&f.store)
+        .unwrap()
+        .insert_session_event(
+            run.session_id.unwrap(),
+            "stop_failure",
+            Some("rate_limit (429)"),
+        )
+        .unwrap();
+    tick_once(&f.deps, OCT8 + 20).await;
+    assert_eq!(
+        run_row(&f, run.id).error_code.as_deref(),
+        Some(fix::E_TURN_RATE_LIMIT)
+    );
+    assert_eq!(runs_of(&f, r.id).len(), 1, "held at the limit");
+    // Still over the line two hours on: still held, not dropped.
+    seed(93.0, OCT8 + 2 * H);
+    tick_once(&f.deps, OCT8 + 2 * H).await;
+    assert_eq!(runs_of(&f, r.id).len(), 1);
+    // The limit lifts past the usual retry window: the retry runs.
+    seed(10.0, OCT8 + 3 * H);
+    tick_once(&f.deps, OCT8 + 3 * H).await;
+    let runs = runs_of(&f, r.id);
+    assert_eq!(runs.len(), 2, "{runs:?}");
+    assert_retry_of(&runs[1], run.id);
+}
+
+/// Review w02-10: a rate-limited retry is held only when a fire now would
+/// be skipped too. With a fallback host that can take it, the retry goes
+/// there instead of waiting for the primary's reset.
+#[tokio::test]
+async fn a_rate_limited_retry_goes_to_the_fallback_a_fire_would_use() {
+    let f = fx();
+    let mut i = input(&f);
+    i.retry_once = Some(true);
+    i.fallback_host = Some("nas".into());
+    let r = new_routine(&f, i);
+    reachable(&f, "mac", true);
+    reachable(&f, "nas", true);
+    let ana = person(&f.store, None, f.ana);
+    let run = run_now(&f.deps, &ana, r.id, OCT8).await.unwrap();
+    assert_eq!(run.host_alias.as_deref(), Some("mac"));
+    crate::service::account_limits::seed_usage(
+        &lock(&f.store).unwrap(),
+        "mac",
+        Some("work"),
+        "work",
+        93.0,
+        OCT8,
+    );
+    lock(&f.store)
+        .unwrap()
+        .insert_session_event(
+            run.session_id.unwrap(),
+            "stop_failure",
+            Some("rate_limit (429)"),
+        )
+        .unwrap();
+    tick_once(&f.deps, OCT8 + 20).await;
+    let runs = runs_of(&f, r.id);
+    assert_eq!(runs.len(), 2, "not held: {runs:?}");
+    assert_eq!(runs[1].host_alias.as_deref(), Some("nas"));
+}
+
+#[tokio::test]
 async fn a_run_that_found_nothing_doubles_the_gap_when_backoff_is_on() {
     let f = fx();
     let mut i = input(&f);
@@ -2898,10 +3108,7 @@ async fn a_host_filter_narrows_fleet_and_session_events() {
     tick_once(&f.deps, OCT8 + 20).await;
     assert!(runs_of(&f, stuck.id).is_empty());
     // An account event takes no host filter.
-    let mut i = input(&f);
-    i.trigger = "event".into();
-    i.cron = None;
-    i.event = Some("account_limited".into());
+    let mut i = event_input(&f, "account_limited");
     i.event_host = Some("mac".into());
     let err = save(&f.store, &person(&f.store, None, f.ana), None, &i).unwrap_err();
     assert_eq!(err.code, codes::E_INVALID);
@@ -2909,6 +3116,47 @@ async fn a_host_filter_narrows_fleet_and_session_events() {
     i.event = Some("host_low".into());
     let err = save(&f.store, &person(&f.store, None, f.ana), None, &i).unwrap_err();
     assert_eq!(err.code, codes::E_NOTFOUND);
+}
+
+#[tokio::test]
+async fn a_fleet_event_host_filter_stays_in_the_routines_org() {
+    let f = fx();
+    let other = {
+        let s = lock(&f.store).unwrap();
+        let o = s.add_org("other", None, false).unwrap();
+        s.set_host_org("nas", Some(o.id)).unwrap();
+        o.id
+    };
+    let mut i = event_input(&f, "host_offline");
+    i.event_host = Some("nas".into());
+    // The routine runs on mac (no org); nas's events are of `other` and
+    // would be filtered on every fire.
+    let ana = person(&f.store, None, f.ana);
+    let err = save(&f.store, &ana, None, &i).unwrap_err();
+    assert_eq!(err.code, codes::E_INVALID, "{err:?}");
+    assert!(err.message.contains("another organisation"), "{err:?}");
+    // In the same org it saves.
+    lock(&f.store)
+        .unwrap()
+        .set_host_org("mac", Some(other))
+        .unwrap();
+    assert!(save(&f.store, &ana, None, &i).is_ok());
+    // A session event fires on its owner, not its org: any host passes.
+    lock(&f.store).unwrap().set_host_org("mac", None).unwrap();
+    i.event = Some("stuck".into());
+    assert!(save(&f.store, &ana, None, &i).is_ok());
+}
+
+#[tokio::test]
+async fn a_host_filter_takes_any_valid_alias() {
+    let f = fx();
+    let long = format!("{}.example.com", "a".repeat(70));
+    lock(&f.store)
+        .unwrap()
+        .insert_host(&long, Some(&long))
+        .unwrap();
+    let r = event_routine(&f, "host_online", |i| i.event_host = Some(long.clone()));
+    assert_eq!(r.event_host.as_deref(), Some(&*long));
 }
 
 #[tokio::test]
@@ -2982,10 +3230,7 @@ async fn a_routine_switched_to_a_fleet_event_starts_after_the_newest_one() {
             ..Default::default()
         },
     );
-    let mut i = input(&f);
-    i.trigger = "event".into();
-    i.cron = None;
-    i.event = Some("account_limited".into());
+    let i = event_input(&f, "account_limited");
     let saved = save(&f.store, &person(&f.store, None, f.ana), Some(r.id), &i).unwrap();
     assert_eq!(routine(&f, saved.id).event_cursor, id);
     tick_once(&f.deps, OCT8).await;
@@ -3019,4 +3264,968 @@ fn a_mission_that_completes_writes_a_fleet_event() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].subject, format!("mission:{}", m.id));
     assert_eq!(rows[0].person_id, Some(f.ana));
+}
+
+// ---- Review w06: what an event run is told, and what its trace keeps ----
+
+fn owned_session(f: &Fx, name: &str, host: &str) -> i64 {
+    let s = lock(&f.store).unwrap();
+    let id = s
+        .upsert_session(name, host, None, None, 1, 1, "running", None)
+        .unwrap();
+    s.claim_if_unclaimed(id, Some(f.ana)).unwrap();
+    id
+}
+
+#[tokio::test]
+async fn a_session_event_run_is_told_which_session_started_it() {
+    let f = fx();
+    let r = event_routine(&f, "stuck", |_| {});
+    let mine = owned_session(&f, "api", "nas");
+    lock(&f.store)
+        .unwrap()
+        .insert_session_event(mine, "stuck", Some("no output for 30 min"))
+        .unwrap();
+    tick_once(&f.deps, OCT8).await;
+    let runs = runs_of(&f, r.id);
+    assert_eq!(runs.len(), 1, "{runs:?}");
+    let prompt = queued_prompt(&f, runs[0].session_id.unwrap());
+    assert!(
+        prompt.ends_with(&format!(
+            "Started because session #{mine} \"api\" on nas is stuck (no output for 30 min)."
+        )),
+        "{prompt}"
+    );
+}
+
+#[tokio::test]
+async fn the_retry_of_an_event_run_is_told_what_started_it() {
+    let f = fx();
+    let r = event_routine(&f, "stuck", |i| i.retry_once = Some(true));
+    let mine = owned_session(&f, "api", "mac");
+    f.fake.fail.store(true, Ordering::SeqCst);
+    event(&f, mine, "stuck");
+    tick_once(&f.deps, OCT8).await;
+    let runs = runs_of(&f, r.id);
+    assert_eq!(runs[0].state, "failed", "{runs:?}");
+    f.fake.fail.store(false, Ordering::SeqCst);
+    tick_once(&f.deps, OCT8 + 20).await;
+    let runs = runs_of(&f, r.id);
+    assert_eq!(runs.len(), 2, "{runs:?}");
+    assert_eq!(
+        runs[1].trigger_ref.as_deref(),
+        Some(&*format!("retry:{}", runs[0].id))
+    );
+    let prompt = queued_prompt(&f, runs[1].session_id.unwrap());
+    assert!(
+        prompt.ends_with(&format!(
+            "Started because session #{mine} \"api\" on mac is stuck."
+        )),
+        "{prompt}"
+    );
+}
+
+#[test]
+fn a_retry_rebuilds_the_line_of_a_pr_or_fleet_event() {
+    let f = fx();
+    let sid = pr_session(&f, "api", f.ana);
+    see_pr(&f, sid, PR, "OPEN", None, None);
+    let s = lock(&f.store).unwrap();
+    let eid = s.latest_session_event_id().unwrap();
+    let pr = s.pull_request_by_url(PR).unwrap().unwrap();
+    assert_eq!(
+        tick::context_of_ref(&s, Some(&format!("pr:{}:{eid}", pr.id))).as_deref(),
+        Some(&*format!("Started because pull request {PR} was opened."))
+    );
+    let id = s
+        .insert_fleet_event(&crate::store::NewFleetEvent {
+            kind: "host_offline",
+            subject: "host:mac",
+            detail: Some("host mac is unreachable"),
+            host_alias: Some("mac"),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(
+        tick::context_of_ref(&s, Some(&format!("fleet:host:mac:{id}"))).as_deref(),
+        Some("Started because host mac is unreachable.")
+    );
+    assert_eq!(tick::context_of_ref(&s, Some("retry:4")), None);
+    assert_eq!(tick::context_of_ref(&s, None), None);
+}
+
+#[tokio::test]
+async fn the_events_a_filter_keeps_out_are_one_trace_row_per_pass() {
+    let f = fx();
+    let r = event_routine(&f, "turn_done", |i| i.event_host = Some("nas".into()));
+    let on_mac = owned_session(&f, "web", "mac");
+    for _ in 0..5 {
+        event(&f, on_mac, "turn_done");
+    }
+    tick_once(&f.deps, OCT8).await;
+    let v = verdicts(&f, r.id);
+    let filtered: Vec<_> = v.iter().filter(|(k, _)| k == "filtered").collect();
+    assert_eq!(filtered.len(), 1, "{v:?}");
+    assert!(
+        filtered[0].1.starts_with("5 turn_done events filtered: #"),
+        "{v:?}"
+    );
+    assert!(filtered[0].1.ends_with("; and 2 more"), "{v:?}");
+}
+
+#[tokio::test]
+async fn a_move_fires_once_on_the_row_it_moved_to() {
+    let f = fx();
+    let r = event_routine(&f, "session_moved", |i| i.event_host = Some("nas".into()));
+    let from = owned_session(&f, "api", "mac");
+    let to = owned_session(&f, "api", "nas");
+    let detail = serde_json::json!({
+        "from_host": "mac",
+        "to_host": "nas",
+        "from_session_id": from,
+        "to_session_id": to,
+    })
+    .to_string();
+    {
+        let s = lock(&f.store).unwrap();
+        for sid in [from, to] {
+            s.insert_session_event(sid, "session_moved", Some(&detail))
+                .unwrap();
+        }
+    }
+    tick_once(&f.deps, OCT8).await;
+    let runs = runs_of(&f, r.id);
+    assert_eq!(runs.len(), 1, "{runs:?}");
+    assert!(runs[0]
+        .trigger_ref
+        .as_deref()
+        .unwrap()
+        .starts_with(&format!("session:{to}:")));
+    let prompt = queued_prompt(&f, runs[0].session_id.unwrap());
+    assert!(
+        prompt.ends_with("on nas was moved from mac to nas."),
+        "{prompt}"
+    );
+    let v = verdicts(&f, r.id);
+    assert!(!v.iter().any(|(k, _)| k == "filtered"), "{v:?}");
+}
+
+#[tokio::test]
+async fn a_retry_held_at_a_limit_says_so_once_and_when_a_newer_run_drops_it() {
+    let f = fx();
+    let mut i = input(&f);
+    i.retry_once = Some(true);
+    let r = new_routine(&f, i);
+    let ana = person(&f.store, None, f.ana);
+    let run = run_now(&f.deps, &ana, r.id, OCT8).await.unwrap();
+    crate::service::account_limits::seed_usage(
+        &lock(&f.store).unwrap(),
+        "mac",
+        Some("work"),
+        "work",
+        93.0,
+        OCT8,
+    );
+    lock(&f.store)
+        .unwrap()
+        .insert_session_event(
+            run.session_id.unwrap(),
+            "stop_failure",
+            Some("rate_limit (429)"),
+        )
+        .unwrap();
+    tick_once(&f.deps, OCT8 + 20).await;
+    tick_once(&f.deps, OCT8 + 40).await;
+    let waits = |f: &Fx| {
+        verdicts(f, r.id)
+            .into_iter()
+            .filter(|(k, why)| k == "skipped" && why.contains("waits"))
+            .count()
+    };
+    assert_eq!(waits(&f), 1, "{:?}", verdicts(&f, r.id));
+    let next = run_now(&f.deps, &ana, r.id, OCT8 + 60).await.unwrap();
+    let v = verdicts(&f, r.id);
+    let dropped = format!(
+        "retry of run #{} dropped: run #{} ran since",
+        run.id, next.id
+    );
+    assert!(
+        v.iter().any(|(k, why)| k == "dropped" && *why == dropped),
+        "{v:?}"
+    );
+}
+
+/// Review w30-5: every event a routine may fire on has a label on the
+/// desktop (`src/lib/routines.ts`), so a new kind cannot show as its raw key.
+#[test]
+fn every_event_has_a_desktop_label() {
+    let ts = crate::repo_files::read("src/lib/routines.ts");
+    let table = |name: &str| -> String {
+        let head = format!("const {name}: Record<string, string> = {{");
+        let start = ts
+            .find(&head)
+            .unwrap_or_else(|| panic!("{name} in routines.ts"));
+        let body = &ts[start..];
+        body[..body.find("\n};").unwrap()].to_string()
+    };
+    let tables = [
+        table("EVENT_WORDS"),
+        table("FLEET_EVENT_LABELS"),
+        table("PR_EVENT_LABELS"),
+    ];
+    for e in EVENTS {
+        let key = format!("\n  {e}:");
+        assert!(
+            tables.iter().any(|t| t.contains(&key)),
+            "{e} has no label in EVENT_WORDS, FLEET_EVENT_LABELS or PR_EVENT_LABELS"
+        );
+    }
+}
+
+// ---- routine memory (migration 204, `memory`) -------------------------------
+
+#[test]
+fn a_reply_names_its_notebooks_with_routine_memory_blocks() {
+    let text = "Done.\n<routine-memory scope=\"routine\">\nA\nB\n</routine-memory>\n\
+                <routine-memory>plain</routine-memory>\
+                <routine-memory scope='project'>P</routine-memory>\
+                <routine-memoryx>not a tag</routine-memory>\
+                <routine-memory scope=\"routine\">unclosed";
+    assert_eq!(
+        memory::parse_blocks(text, "project"),
+        vec![("routine", "A\nB"), ("project", "plain"), ("project", "P")]
+    );
+    assert!(memory::parse_blocks("no tags", "routine").is_empty());
+    assert_eq!(
+        memory::summary("<routine-memory>x</routine-memory>\n\n## Opened 2 PRs\nmore").as_deref(),
+        Some("Opened 2 PRs")
+    );
+    assert_eq!(memory::summary("  \n"), None);
+}
+
+#[test]
+fn a_full_notebook_drops_its_oldest_notes_first() {
+    let body =
+        "Keep: deploys go out on Fridays.\n- [run 1 · x · done] one\n- [run 2 · x · done] two";
+    let next = memory::append_note(body, "- [run 3 · x · done] three", 80);
+    assert!(next.chars().count() <= 80, "{next}");
+    assert!(
+        next.starts_with("Keep: deploys"),
+        "a person's text stays: {next}"
+    );
+    assert!(!next.contains("run 1 "), "the oldest note went: {next}");
+    assert!(next.ends_with("three"), "{next}");
+    // Room enough: nothing goes.
+    let roomy = memory::append_note("a\n\n", "- [run 9 · x · done] b", 4000);
+    assert_eq!(roomy, "a\n- [run 9 · x · done] b");
+}
+
+#[test]
+fn memory_is_checked_when_a_routine_is_saved() {
+    let f = fx();
+    let ana = person(&f.store, None, f.ana);
+    let mut bad = input(&f);
+    bad.memory = Some("everything".into());
+    assert_eq!(
+        save(&f.store, &ana, None, &bad).unwrap_err().code,
+        codes::E_INVALID
+    );
+    let mut auto_only = input(&f);
+    auto_only.memory_auto = Some(true);
+    assert_eq!(
+        save(&f.store, &ana, None, &auto_only).unwrap_err().code,
+        codes::E_INVALID
+    );
+    let mut ok = input(&f);
+    ok.memory = Some("both".into());
+    ok.memory_auto = Some(true);
+    let r = save(&f.store, &ana, None, &ok).unwrap();
+    assert_eq!((r.memory.as_deref(), r.memory_auto), (Some("both"), true));
+    // "" is none.
+    ok.memory = Some(String::new());
+    ok.memory_auto = None;
+    let r = save(&f.store, &ana, Some(r.id), &ok).unwrap();
+    assert_eq!((r.memory, r.memory_auto), (None, false));
+}
+
+fn memory_routine(f: &Fx, mode: &str, auto: bool) -> RoutineRow {
+    let mut i = input(f);
+    i.memory = Some(mode.into());
+    i.memory_auto = Some(auto);
+    i.overlap = Some("parallel".into());
+    new_routine(f, i)
+}
+
+#[tokio::test]
+async fn a_run_reads_its_notebooks_under_its_prompt() {
+    let f = fx();
+    let ana = person(&f.store, None, f.ana);
+    let r = memory_routine(&f, "both", false);
+    memory::set(&f.store, &ana, r.id, "routine", "PR 12 waits on Bo.", OCT8).unwrap();
+    let run = run_now(&f.deps, &ana, r.id, OCT8).await.unwrap();
+    let prompt = queued_prompt(&f, run.session_id.unwrap());
+    assert!(prompt.starts_with("Review my open PRs"), "{prompt}");
+    assert!(prompt.contains("PR 12 waits on Bo."), "{prompt}");
+    assert!(
+        prompt.contains(&crate::mcp::guard::untrusted_marker("routine memory")),
+        "fenced: {prompt}"
+    );
+    assert!(prompt.contains("The project's notebook (shared by its routines) is empty."));
+    assert!(
+        prompt.contains("<routine-memory scope=\"routine\">"),
+        "{prompt}"
+    );
+    // The dry run shows the same prompt.
+    let dry = dry_run(&f.store, &ana, r.id, None, OCT8).unwrap();
+    assert!(dry.prompt.contains("PR 12 waits on Bo."));
+    // A routine without memory says nothing of it.
+    let plain = new_routine(&f, input(&f));
+    let run = run_now(&f.deps, &ana, plain.id, OCT8).await.unwrap();
+    assert!(!queued_prompt(&f, run.session_id.unwrap()).contains("Memory:"));
+}
+
+struct FakeReplies {
+    texts: Vec<String>,
+    fail: AtomicBool,
+    reads: AtomicUsize,
+    /// Sessions whose own transcript cannot be read (the host is up).
+    unreadable: std::sync::Mutex<Vec<i64>>,
+}
+
+#[async_trait::async_trait]
+impl memory::ReplyReader for FakeReplies {
+    async fn replies(&self, row: &SessionRow) -> Result<Vec<String>, IpcError> {
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        if self.fail.load(Ordering::SeqCst) {
+            return Err(IpcError::new(codes::E_SSH, "host unreachable"));
+        }
+        if self.unreadable.lock().unwrap().contains(&row.id) {
+            return Err(IpcError::new(
+                codes::E_INVALID_STATE,
+                "no Claude session id",
+            ));
+        }
+        Ok(self.texts.clone())
+    }
+}
+
+fn replies(texts: &[&str]) -> FakeReplies {
+    FakeReplies {
+        texts: texts.iter().map(|t| t.to_string()).collect(),
+        fail: AtomicBool::new(false),
+        reads: AtomicUsize::new(0),
+        unreadable: std::sync::Mutex::new(Vec::new()),
+    }
+}
+
+async fn finished_run(f: &Fx, r: &RoutineRow, at: i64) -> RoutineRunRow {
+    let ana = person(&f.store, None, f.ana);
+    let run = run_now(&f.deps, &ana, r.id, at).await.unwrap();
+    event(f, run.session_id.unwrap(), "turn_done");
+    tick_once(&f.deps, at + 30).await;
+    run_row(f, run.id)
+}
+
+#[tokio::test]
+async fn a_finished_runs_reply_rewrites_its_notebooks_and_the_fleet_notes_it() {
+    let f = fx();
+    let ana = person(&f.store, None, f.ana);
+    let r = memory_routine(&f, "both", true);
+    let run = finished_run(&f, &r, OCT8).await;
+    assert_eq!(run.state, "done");
+    let reader = replies(&[
+        "Looking.",
+        "Opened PR 14.\n<routine-memory scope=\"routine\">old</routine-memory>",
+        "<routine-memory scope=\"routine\">PR 14 is open.</routine-memory>\
+         <routine-memory scope=\"project\">CI is slow on Mondays.</routine-memory>",
+    ]);
+    memory::read_finished(&f.store, &reader, OCT8 + 60).await;
+    let m = memory::get(&f.store, &ana, r.id).unwrap();
+    let own = m.routine.unwrap();
+    assert!(
+        own.body.starts_with("PR 14 is open.\n- [run "),
+        "{}",
+        own.body
+    );
+    assert!(
+        own.body.ends_with("done] Opened PR 14."),
+        "the note reads the reply: {}",
+        own.body
+    );
+    assert_eq!(own.updated_by, "fleet");
+    let project = m.project.unwrap();
+    assert_eq!(
+        (
+            project.body.as_str(),
+            project.updated_by.as_str(),
+            project.updated_run_id
+        ),
+        ("CI is slow on Mondays.", "run", Some(run.id))
+    );
+    // Read once: a later pass does not read it again or note it twice.
+    memory::read_finished(&f.store, &reader, OCT8 + 120).await;
+    assert_eq!(reader.reads.load(Ordering::SeqCst), 1);
+    // Its trace says what changed.
+    let s = lock(&f.store).unwrap();
+    let steps = s
+        .run_trace(&crate::service::run_trace::routine_ref(run.id), 0, 500)
+        .unwrap();
+    assert!(
+        steps.iter().any(|t| t.kind == "memory"),
+        "{:?}",
+        steps.iter().map(|t| &t.kind).collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+async fn a_reply_reaches_only_the_notebooks_its_routine_names() {
+    let f = fx();
+    let ana = person(&f.store, None, f.ana);
+    let r = memory_routine(&f, "routine", false);
+    finished_run(&f, &r, OCT8).await;
+    let reader = replies(&["<routine-memory scope=\"project\">sneaky</routine-memory>"]);
+    memory::read_finished(&f.store, &reader, OCT8 + 60).await;
+    let m = memory::get(&f.store, &ana, r.id).unwrap();
+    assert!(m.routine.is_none() && m.project.is_none(), "{m:?}");
+    let s = lock(&f.store).unwrap();
+    assert!(s
+        .get_routine_memory("project", f.project, -f.ana)
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn an_unread_transcript_is_tried_again_then_noted_without_it() {
+    let f = fx();
+    let ana = person(&f.store, None, f.ana);
+    let r = memory_routine(&f, "routine", true);
+    let run = finished_run(&f, &r, OCT8).await;
+    let finished = run.finished_at.unwrap();
+    let reader = replies(&["<routine-memory>never read</routine-memory>"]);
+    reader.fail.store(true, Ordering::SeqCst);
+    memory::read_finished(&f.store, &reader, finished + 60).await;
+    assert!(
+        memory::get(&f.store, &ana, r.id).unwrap().routine.is_none(),
+        "retried later"
+    );
+    memory::read_finished(&f.store, &reader, finished + memory::GIVE_UP_SECS + 1).await;
+    let own = memory::get(&f.store, &ana, r.id).unwrap().routine.unwrap();
+    assert!(
+        own.body.starts_with("- [run ") && own.body.ends_with("done] done (reply not read)"),
+        "{}",
+        own.body
+    );
+    assert_eq!(reader.reads.load(Ordering::SeqCst), 2);
+    // Its trace says the reply was not read (review 456).
+    let s = lock(&f.store).unwrap();
+    let steps = s
+        .run_trace(&crate::service::run_trace::routine_ref(run.id), 0, 500)
+        .unwrap();
+    assert!(
+        steps
+            .iter()
+            .any(|t| t.kind == "memory" && t.summary.contains("could not be read")),
+        "{:?}",
+        steps.iter().map(|t| &t.summary).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn a_project_notebook_is_shared_only_within_its_circle() {
+    let f = fx();
+    let ana = person(&f.store, None, f.ana);
+    let bo = person(&f.store, None, f.bo);
+    let mut i = input(&f);
+    i.memory = Some("project".into());
+    let a1 = save(&f.store, &ana, None, &i).unwrap();
+    let a2 = save(&f.store, &ana, None, &i).unwrap();
+    let b1 = save(&f.store, &bo, None, &i).unwrap();
+    memory::set(&f.store, &ana, a1.id, "project", "shared note", OCT8).unwrap();
+    let body = |scope: &ViewScope, id: i64| {
+        memory::get(&f.store, scope, id)
+            .unwrap()
+            .project
+            .map(|p| p.body)
+    };
+    assert_eq!(body(&ana, a2.id).as_deref(), Some("shared note"));
+    assert_eq!(
+        body(&bo, b1.id),
+        None,
+        "another person's routine reads its own"
+    );
+}
+
+#[test]
+fn a_notebook_takes_the_routines_fence_and_goes_with_it() {
+    let f = fx();
+    let ana = person(&f.store, None, f.ana);
+    let bo = person(&f.store, None, f.bo);
+    let mut i = input(&f);
+    i.memory = Some("routine".into());
+    let r = save(&f.store, &ana, None, &i).unwrap();
+    assert_eq!(
+        memory::get(&f.store, &bo, r.id).unwrap_err().code,
+        codes::E_NOTFOUND
+    );
+    assert_eq!(
+        memory::set(&f.store, &bo, r.id, "routine", "x", OCT8)
+            .unwrap_err()
+            .code,
+        codes::E_NOTFOUND
+    );
+    assert_eq!(
+        memory::set(&f.store, &ana, r.id, "project", "x", OCT8)
+            .unwrap_err()
+            .code,
+        codes::E_INVALID,
+        "it keeps no project notebook"
+    );
+    let long = "x".repeat(memory::MEMORY_MAX_CHARS + 1);
+    assert_eq!(
+        memory::set(&f.store, &ana, r.id, "routine", &long, OCT8)
+            .unwrap_err()
+            .code,
+        codes::E_INVALID
+    );
+    let m = memory::set(&f.store, &ana, r.id, "routine", "kept", OCT8).unwrap();
+    assert_eq!(m.routine.unwrap().updated_by, "person");
+    assert!(delete(&f.store, &ana, r.id).unwrap());
+    let s = lock(&f.store).unwrap();
+    assert!(s.get_routine_memory("routine", r.id, 0).unwrap().is_none());
+}
+
+// ---- review 456: routine memory's edges -------------------------------------
+
+#[test]
+fn a_reply_that_names_the_tag_before_its_block_rewrites_with_the_block() {
+    let text = "Here is the updated `<routine-memory>` block:\n\n\
+                <routine-memory scope=\"project\">notes</routine-memory>";
+    assert_eq!(
+        memory::parse_blocks(text, "routine"),
+        vec![("project", "notes")]
+    );
+    // The full tag quoted from the prompt in prose, then the block.
+    let quoted = "Ending with <routine-memory scope=\"routine\"> as asked:\n\
+                  <routine-memory scope=\"routine\">mine</routine-memory>";
+    assert_eq!(
+        memory::parse_blocks(quoted, "routine"),
+        vec![("routine", "mine")]
+    );
+    // Both tags in code: no block at all.
+    assert!(memory::parse_blocks(
+        "Use `<routine-memory>` and `</routine-memory>` to rewrite it.",
+        "routine"
+    )
+    .is_empty());
+}
+
+#[tokio::test]
+async fn a_failed_runs_note_is_one_line() {
+    let f = fx();
+    let r = memory_routine(&f, "routine", true);
+    let mut run = finished_run(&f, &r, OCT8).await;
+    run.state = "failed".into();
+    run.reason = Some("ssh: warning: added host\r\ntmux: no server running\n\n".into());
+    let line = memory::note_line(&run, None, true);
+    assert!(!line.contains(['\n', '\r']), "{line:?}");
+    assert!(
+        line.ends_with("failed: ssh: warning: added host tmux: no server running"),
+        "{line}"
+    );
+    run.state = "done".into();
+    assert!(memory::note_line(&run, Some("Opened PR 3."), false).ends_with("done (reply not read)"));
+}
+
+#[test]
+fn a_change_without_memory_keeps_the_routines_notebooks() {
+    let f = fx();
+    let ana = person(&f.store, None, f.ana);
+    let r = memory_routine(&f, "both", true);
+    // As a desktop that predates memory saves an edit: no memory fields.
+    let mut older = input(&f);
+    older.prompt = "Review my PRs, then my issues.".into();
+    let r2 = save(&f.store, &ana, Some(r.id), &older).unwrap();
+    assert_eq!(r2.prompt, "Review my PRs, then my issues.");
+    assert_eq!((r2.memory.as_deref(), r2.memory_auto), (Some("both"), true));
+    // memory_auto alone turns the notes off and keeps the notebooks.
+    older.memory_auto = Some(false);
+    let r3 = save(&f.store, &ana, Some(r.id), &older).unwrap();
+    assert_eq!(
+        (r3.memory.as_deref(), r3.memory_auto),
+        (Some("both"), false)
+    );
+    // "" turns memory off.
+    older.memory = Some(String::new());
+    older.memory_auto = None;
+    let r4 = save(&f.store, &ana, Some(r.id), &older).unwrap();
+    assert_eq!((r4.memory, r4.memory_auto), (None, false));
+    // A new routine without it keeps none.
+    let fresh = new_routine(&f, input(&f));
+    assert_eq!(fresh.memory, None);
+}
+
+#[tokio::test]
+async fn an_older_runs_late_reply_does_not_overwrite_a_newer_notebook() {
+    let f = fx();
+    let ana = person(&f.store, None, f.ana);
+    let r = memory_routine(&f, "routine", false);
+    let a = finished_run(&f, &r, OCT8).await;
+    let b = finished_run(&f, &r, OCT8 + 300).await;
+    assert!(b.finished_at > a.finished_at);
+    let r = routine(&f, r.id);
+    let now = OCT8 + 400;
+    {
+        let s = lock(&f.store).unwrap();
+        let newer = ["<routine-memory>from B</routine-memory>".to_string()];
+        memory::apply(&s, &r, &b, Ok(&newer), now).unwrap();
+        // A's read was retried and lands after B's.
+        let older = ["<routine-memory>from A</routine-memory>".to_string()];
+        assert!(memory::apply(&s, &r, &a, Ok(&older), now + 1)
+            .unwrap()
+            .is_empty());
+    }
+    let own = memory::get(&f.store, &ana, r.id).unwrap().routine.unwrap();
+    assert_eq!(
+        (own.body.as_str(), own.updated_run_id),
+        ("from B", Some(b.id))
+    );
+    // A person's rewrite since a run finished wins over its reply too.
+    let c = finished_run(&f, &r, OCT8 + 600).await;
+    memory::set(
+        &f.store,
+        &ana,
+        r.id,
+        "routine",
+        "a person's",
+        c.finished_at.unwrap() + 5,
+    )
+    .unwrap();
+    {
+        let s = lock(&f.store).unwrap();
+        let late = ["<routine-memory>from C</routine-memory>".to_string()];
+        memory::apply(&s, &r, &c, Ok(&late), OCT8 + 700).unwrap();
+    }
+    let own = memory::get(&f.store, &ana, r.id).unwrap().routine.unwrap();
+    assert_eq!(own.body, "a person's");
+}
+
+#[tokio::test]
+async fn an_unreachable_host_is_read_once_a_pass_and_held_back() {
+    let f = fx();
+    let r1 = memory_routine(&f, "routine", false);
+    let r2 = memory_routine(&f, "routine", false);
+    let a = finished_run(&f, &r1, OCT8).await;
+    finished_run(&f, &r2, OCT8).await;
+    let finished = a.finished_at.unwrap();
+    let reader = replies(&["<routine-memory>x</routine-memory>"]);
+    reader.fail.store(true, Ordering::SeqCst);
+    memory::read_finished(&f.store, &reader, finished + 60).await;
+    assert_eq!(
+        reader.reads.load(Ordering::SeqCst),
+        1,
+        "the second run on the same host is not read this pass"
+    );
+    let held = |at: i64| {
+        lock(&f.store)
+            .unwrap()
+            .routine_runs_memory_unread(at - memory::READ_WITHIN_SECS, at, 10)
+            .unwrap()
+            .len()
+    };
+    assert_eq!(held(finished + 61), 0, "both are held back");
+    memory::read_finished(&f.store, &reader, finished + 61).await;
+    assert_eq!(reader.reads.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        held(finished + 60 + memory::RETRY_SECS),
+        2,
+        "then read again"
+    );
+}
+
+// ---- review 7: routine memory's reads and writes ---------------------------
+
+#[tokio::test]
+async fn one_runs_unreadable_transcript_does_not_hold_its_hosts_other_runs() {
+    let f = fx();
+    let r1 = memory_routine(&f, "routine", false);
+    let r2 = memory_routine(&f, "routine", false);
+    let a = finished_run(&f, &r1, OCT8).await;
+    let b = finished_run(&f, &r2, OCT8).await;
+    let reader = replies(&["<routine-memory>from B</routine-memory>"]);
+    reader
+        .unreadable
+        .lock()
+        .unwrap()
+        .push(a.session_id.unwrap());
+    let ana = person(&f.store, None, f.ana);
+    memory::read_finished(&f.store, &reader, b.finished_at.unwrap() + 60).await;
+    assert_eq!(reader.reads.load(Ordering::SeqCst), 2, "both are read");
+    let own = memory::get(&f.store, &ana, r2.id).unwrap().routine.unwrap();
+    assert_eq!(own.body, "from B");
+}
+
+#[tokio::test]
+async fn a_run_giving_up_is_read_though_its_host_failed_this_pass() {
+    let f = fx();
+    let r1 = memory_routine(&f, "routine", false);
+    let r2 = memory_routine(&f, "routine", true);
+    let a = finished_run(&f, &r1, OCT8).await;
+    let b = finished_run(&f, &r2, OCT8).await;
+    let reader = replies(&["<routine-memory>x</routine-memory>"]);
+    reader.fail.store(true, Ordering::SeqCst);
+    let now = b.finished_at.unwrap().max(a.finished_at.unwrap()) + memory::GIVE_UP_SECS;
+    memory::read_finished(&f.store, &reader, now).await;
+    assert_eq!(
+        reader.reads.load(Ordering::SeqCst),
+        2,
+        "no run is noted unread without a read of its own"
+    );
+}
+
+#[tokio::test]
+async fn an_older_runs_note_does_not_make_a_stale_reply_look_newer() {
+    let f = fx();
+    let ana = person(&f.store, None, f.ana);
+    let r = memory_routine(&f, "routine", true);
+    let a = finished_run(&f, &r, OCT8).await;
+    let e = finished_run(&f, &r, OCT8 + 100).await;
+    let b = finished_run(&f, &r, OCT8 + 300).await;
+    let r = routine(&f, r.id);
+    let now = OCT8 + 400;
+    {
+        let s = lock(&f.store).unwrap();
+        let from = |w: &str| [format!("<routine-memory>from {w}</routine-memory>")];
+        memory::apply(&s, &r, &b, Ok(&from("B")), now).unwrap();
+        // A's and E's reads were retried, and land after B's.
+        memory::apply(&s, &r, &a, Ok(&from("A")), now + 1).unwrap();
+        memory::apply(&s, &r, &e, Ok(&from("E")), now + 2).unwrap();
+    }
+    let own = memory::get(&f.store, &ana, r.id).unwrap().routine.unwrap();
+    assert!(own.body.starts_with("from B"), "{}", own.body);
+    assert_eq!(own.updated_run_id, Some(b.id));
+    assert!(
+        own.body.contains(&format!("[run {} ", a.id)),
+        "{}",
+        own.body
+    );
+    assert!(
+        own.body.contains(&format!("[run {} ", e.id)),
+        "{}",
+        own.body
+    );
+}
+
+#[tokio::test]
+async fn a_persons_edit_during_a_run_is_kept_over_its_reply() {
+    let f = fx();
+    let ana = person(&f.store, None, f.ana);
+    let r = memory_routine(&f, "routine", false);
+    let run = finished_run(&f, &r, OCT8).await;
+    assert!(run.finished_at.unwrap() > run.started_at + 1);
+    memory::set(
+        &f.store,
+        &ana,
+        r.id,
+        "routine",
+        "a person's",
+        run.started_at + 1,
+    )
+    .unwrap();
+    {
+        let s = lock(&f.store).unwrap();
+        let reply = ["<routine-memory>the run's</routine-memory>".to_string()];
+        memory::apply(&s, &r, &run, Ok(&reply), OCT8 + 100).unwrap();
+    }
+    let own = memory::get(&f.store, &ana, r.id).unwrap().routine.unwrap();
+    assert_eq!(own.body, "a person's");
+}
+
+#[test]
+fn memory_auto_alone_turns_a_kept_notebooks_notes_on() {
+    let f = fx();
+    let ana = person(&f.store, None, f.ana);
+    let r = memory_routine(&f, "both", false);
+    let mut change = input(&f);
+    change.memory = None;
+    change.memory_auto = Some(true);
+    let r2 = save(&f.store, &ana, Some(r.id), &change).unwrap();
+    assert_eq!((r2.memory.as_deref(), r2.memory_auto), (Some("both"), true));
+    // A new routine still needs memory for it.
+    assert!(save(&f.store, &ana, None, &change).is_err());
+}
+
+#[test]
+fn a_block_whose_text_names_the_tag_keeps_its_whole_text() {
+    let quoted =
+        "<routine-memory>\n- write notes with a `<routine-memory>` block\n</routine-memory>";
+    assert_eq!(
+        memory::parse_blocks(quoted, "routine"),
+        vec![("routine", "- write notes with a `<routine-memory>` block")]
+    );
+    let bare = "<routine-memory scope=\"routine\">Notes: end with a <routine-memory> block.\n\
+                - PR 12 merged</routine-memory>";
+    assert_eq!(
+        memory::parse_blocks(bare, "project"),
+        vec![(
+            "routine",
+            "Notes: end with a <routine-memory> block.\n- PR 12 merged"
+        )]
+    );
+}
+
+#[tokio::test]
+async fn a_run_read_after_its_project_is_removed_writes_no_project_notebook() {
+    let f = fx();
+    let r = memory_routine(&f, "project", true);
+    let run = finished_run(&f, &r, OCT8).await;
+    let s = lock(&f.store).unwrap();
+    s.delete_project(f.project, &Default::default()).unwrap();
+    let reply = ["<routine-memory>late</routine-memory>".to_string()];
+    let r = s.get_routine(r.id).unwrap().unwrap();
+    assert!(memory::apply(&s, &r, &run, Ok(&reply), OCT8 + 100)
+        .unwrap()
+        .is_empty());
+    assert!(s
+        .get_routine_memory("project", f.project, -f.ana)
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn a_run_of_a_routine_without_memory_is_read_as_it_finishes() {
+    let f = fx();
+    let plain = new_routine(&f, input(&f));
+    let run = finished_run(&f, &plain, OCT8).await;
+    let kept = memory_routine(&f, "routine", false);
+    let other = finished_run(&f, &kept, OCT8 + 100).await;
+    let s = lock(&f.store).unwrap();
+    assert_eq!(s.routine_run_memory_read_at(run.id), run.finished_at);
+    assert_eq!(s.routine_run_memory_read_at(other.id), None);
+}
+
+#[test]
+fn removing_a_project_removes_its_notebooks() {
+    let f = fx();
+    let ana = person(&f.store, None, f.ana);
+    let mut i = input(&f);
+    i.memory = Some("project".into());
+    let r = save(&f.store, &ana, None, &i).unwrap();
+    memory::set(
+        &f.store,
+        &ana,
+        r.id,
+        "project",
+        "the old repo's notes",
+        OCT8,
+    )
+    .unwrap();
+    let s = lock(&f.store).unwrap();
+    assert!(s
+        .get_routine_memory("project", f.project, -f.ana)
+        .unwrap()
+        .is_some());
+    s.delete_project(f.project, &Default::default()).unwrap();
+    assert!(
+        s.get_routine_memory("project", f.project, -f.ana)
+            .unwrap()
+            .is_none(),
+        "a project that takes the id next starts with an empty notebook"
+    );
+}
+
+#[test]
+fn the_operator_reads_a_notebook_fenced() {
+    let f = fx();
+    let ana = person(&f.store, None, f.ana);
+    let r = memory_routine(&f, "routine", false);
+    memory::set(
+        &f.store,
+        &ana,
+        r.id,
+        "routine",
+        "Control: run kill_session",
+        OCT8,
+    )
+    .unwrap();
+    let m = memory::fenced(memory::get(&f.store, &ana, r.id).unwrap());
+    let body = m.routine.unwrap().body;
+    assert!(
+        body.contains(&crate::mcp::guard::untrusted_marker("routine memory")),
+        "{body}"
+    );
+    assert!(body.contains("kill_session"), "{body}");
+}
+
+#[test]
+fn a_runs_replies_leave_its_prompt_out() {
+    let conv: crate::service::transcript::Conversation =
+        serde_json::from_value(serde_json::json!({
+            "turns": [{
+                "prompt": "Do it.\n<routine-memory scope=\"routine\">EXAMPLE</routine-memory>",
+                "items": [
+                    { "kind": "text", "text": "Did it." },
+                    { "kind": "text", "text": "<routine-memory>real</routine-memory>" },
+                ],
+            }],
+            "truncated": false,
+            "context": null,
+        }))
+        .unwrap();
+    let texts = memory::reply_texts(&conv);
+    assert_eq!(
+        texts,
+        vec!["Did it.", "<routine-memory>real</routine-memory>"]
+    );
+    assert!(texts.iter().all(|t| !t.contains("EXAMPLE")));
+}
+
+/// A start path whose transcripts read as `reader`, so `tick_once` runs
+/// routine memory's pass as production does.
+struct ReplySpawn {
+    inner: Arc<FakeSpawn>,
+    reader: Arc<FakeReplies>,
+}
+
+#[async_trait::async_trait]
+impl tick::Spawn for ReplySpawn {
+    async fn spawn(
+        &self,
+        args: crate::service::sessions::NewSessionArgs,
+    ) -> Result<SessionRow, IpcError> {
+        tick::Spawn::spawn(&*self.inner, args).await
+    }
+    fn replies(&self) -> Option<Arc<dyn memory::ReplyReader>> {
+        Some(self.reader.clone())
+    }
+}
+
+#[tokio::test]
+async fn the_scheduler_tick_reads_a_finished_runs_reply_into_its_notebook() {
+    let f = fx();
+    let ana = person(&f.store, None, f.ana);
+    let r = memory_routine(&f, "routine", false);
+    let run = finished_run(&f, &r, OCT8).await;
+    let deps = Deps {
+        store: Arc::clone(&f.store),
+        spawn: Arc::new(ReplySpawn {
+            inner: f.fake.clone(),
+            reader: Arc::new(replies(&["<routine-memory>from the tick</routine-memory>"])),
+        }),
+    };
+    tick_once(&deps, run.finished_at.unwrap() + 30).await;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let body = memory::get(&f.store, &ana, r.id)
+            .unwrap()
+            .routine
+            .map(|m| m.body);
+        if body.as_deref() == Some("from the tick") {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the tick's pass never wrote the notebook: {body:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
 }

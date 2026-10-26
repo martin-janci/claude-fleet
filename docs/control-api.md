@@ -334,7 +334,9 @@ side are in `hub.md` → *A host that cannot be reached*; this is the contract.
   answers `503`.
 
 Tools see an agent host through the same calls as an SSH host. `agent_status`
-reports which agent hosts are connected. `add_host { transport: "agent" }`
+reports which agent hosts are connected, and flags `duplicate` on one whose
+token two fleet-agents keep taking from each other (two takeovers within
+five minutes; the hub log names both). `add_host { transport: "agent" }`
 registers one without an SSH probe. `install_agent` does the whole *Set it
 up* of `docs/hub.md` for a host the hub already reaches over SSH.
 
@@ -433,7 +435,10 @@ Index by area (names only; see the reference for details):
   `session_access` (who holds a live grant on your session), `my_grants`
   (who *you* are on this fleet and every live grant to you, which is what a
   client derives access from together with each row's `owner_person_id` and
-  `visibility`), `session_ask_access` (someone a session is shared with
+  `visibility`), `my_profile` (who *you* are on this fleet in words, for a
+  desktop showing several fleets: your person's name and e-mail, the
+  sign-in issuers linked to it, the names — never the values — of your own
+  person-scope variables, and your commit identity), `session_ask_access` (someone a session is shared with
   asks its owner for `answer` or `drive`; it confers nothing, one open ask
   each, and a decline holds a repeat back an hour), `access_requests` (the
   owner's open asks: `list`, then `grant`, which revokes the asker's share
@@ -615,7 +620,8 @@ Index by area (names only; see the reference for details):
 - **Orchestration** — `wait_for_session`, `session_transcript`,
   `session_conversation`, `session_tool_detail`, `session_summary_since`,
   `session_context_help` (help at the composer, for an `answer` grant too), `session_prompt_tune` (the composer's prompt tuner, the same grant), `run_prompt`,
-  `dispatch_task`, `wait_for_task`, `list_tasks`, `cancel_task`,
+  `dispatch_task`, `wait_for_task`, `list_tasks`, `cancel_task`, `task_report`
+  (a worker reports its own task finished),
   `set_session_tags`, `decide_related_session` (Link or Not related on a
   session's `related_session` proposal; a linked partner stays on the row
   with `linked: true`).
@@ -1161,6 +1167,36 @@ Index by area (names only; see the reference for details):
   only a scheduled fire must also pass. An event or decision on a session
   the caller may not read is left out, and `dry_run` on such an event
   answers `E_NOTFOUND`.
+  Memory (migration 204, `service/routines/memory.rs`): notebooks the
+  fleet keeps in its own database, outside any git repo and any host's
+  `~/.claude`, so the next run reads them on whatever host it starts. A
+  routine's `memory` in `save` names the ones its runs use: `routine` (its
+  own), `project` (its project's, shared by every routine of that project
+  in the same circle: its org, else its owner) or `both`; `""` is none,
+  and so is absent for a new routine, while a change without `memory`
+  keeps the routine's (an older client's edit does not turn it off). `memory_auto: true` (needs `memory`) adds one line per finished
+  run, `- [run <id> · <UTC time> · <state>] <first line of its reply>`
+  (or the failure's reason), to the first notebook it uses; the oldest such
+  lines go first when the notebook is full. A run's prompt carries each
+  notebook it uses under the autonomy line, fenced as untrusted text, and
+  says how to rewrite one; `dry_run` shows it. A finished run's reply is
+  read off its transcript within the hour (a transcript that cannot be read
+  is tried again a minute later, for ten minutes, then the run is noted
+  without it, `done (reply not read)`, and its trace says so): a
+  `<routine-memory scope="routine|project">…</routine-memory>` block
+  replaces that notebook, the last block of a scope winning, and a scope
+  the routine does not use is ignored, as is a block of a run older than
+  the notebook's last writer; the run's trace says what changed.
+  A notebook is at most 4000 characters (a longer block is cut). `memory {
+  routine_id }` answers `{ routine_id, memory?, memory_auto, routine?,
+  project?, max_chars, may_change }`, each notebook `{ scope, owner_id,
+  circle, body, updated_at, updated_by: person | run | fleet,
+  updated_run_id? }` once anything wrote it; `set_memory { routine_id,
+  notebook: routine | project, text }` rewrites one (`""` clears it), with
+  the fence of changing the routine (`E_INVALID` for a notebook it does not
+  use or text past the cap). Deleting a routine deletes its own notebook;
+  its project's stays until the project is removed. The operator may
+  read them, fenced as untrusted text, not write them.
 - **Start rules** — `start_rules`, by `action` (Orbit Fleet 8.11): a task
   key pattern (`PD-*`, `*` for any run of characters, any case) that names
   the project, and optionally the host, a start of a matching task lands
@@ -1495,6 +1531,14 @@ derive from them.
   pull requests its work opened, as `prs { list }` rows behind the same
   fence. A finished mission reopens with `work_link { mission_state,
   status: paused }`; it does not go straight back to active.
+- **Completing with red CI** (TASK-295): `mission_state { status:
+  completed }` and the `complete` step are refused with `E_CI_FAILING` while
+  any open or merged pull request of the mission (`finish.prs`' set) last
+  showed failing CI; a closed, unmerged one does not count, and one the
+  caller may not see is counted unnamed. A person completes it anyway with
+  `ci_override: true` on `mission_state` (the step takes no override); the
+  mission records a `ci_override` event naming the PRs. Pending CI does not
+  hold it.
 - **`sessions`** (on `work { mission }`, any state; optional, absent when
   there are none and from an older hub): the mission's child sessions, the
   running sessions on its member items that the caller may see, with the
@@ -1511,7 +1555,10 @@ not a JSON-RPC error. The text block is the documented `E_CODE: message` line;
 `structuredContent` carries `{ code, message, details }` (for example the
 candidate rows of `E_AMBIGUOUS` or the `confirm_nonce` of
 `E_CONFIRM_REQUIRED`). JSON-RPC errors are reserved for protocol failures:
-an unknown tool name or arguments that do not match the schema.
+an unknown tool name, or arguments that do not parse (a wrong type, a missing
+required field). Most tools ignore an argument they do not take; the fan-outs
+and `kill_session` (`broadcast_prompt`, `provision_hosts`, `kill_session`)
+refuse one instead, because a misspelled filter there would widen the call.
 
 Three codes are specific to agent hosts:
 - `E_AGENT_OFFLINE`: no `fleet-agent` is connected for the host. It is
@@ -1839,15 +1886,26 @@ raw? }` composes the three: deliver, wait for `turn_seq` to grow, return
 project_id, name? }, prompt, requester_session_id?, raw? }` creates a task
 row (states `queued → running → done | failed | cancelled`), spawns the worker
 when asked (recording `requester_session_id` as the worker's
-`parent_session_id`), and delivers the prompt with an appended instruction:
-*"When finished, print exactly `FLEET_TASK_DONE_<nonce>` on its own line
-followed by a one-paragraph result."* The nonce is per task and never sent to
-the UI. On the worker's next `Stop` fleet reads its last transcript turn (pane
-capture as fallback), looks for the marker on its own line — which the prompt
-echo, where it is followed by more text, never satisfies — and flips the task
-to `done` with the paragraph as `result`; the result is also delivered to the
-requester's inbox as `kind: task_result`. A `Stop` without the marker leaves
-the task `running`. Open tasks are failed when their worker session is killed or lost, when it is recreated onto a new Claude conversation, or after `tasks.max_age_secs` (default 86400, `0` = off); the check runs on the reconcile tick and on every `list_tasks` / `wait_for_task` call. The fleet instruction is appended after an `[claude-fleet: end of untrusted input]` line, outside the marked prompt, and the result is prefixed with the untrusted-content marker wherever it is returned (inbox, `wait_for_task`, `list_tasks`). `wait_for_task { task_id, timeout_s? }` long-polls for a
+`parent_session_id`), and delivers the prompt with an appended instruction: *"When finished, call the
+claude-fleet MCP tool `task_report` with task_id N, nonce "…", outcome (done |
+partial | blocked | failed) and a one-paragraph summary. Then also print
+exactly `FLEET_TASK_DONE_<nonce>` on its own line followed by a one-paragraph
+result: fleet reads that when the tool is not available."* The nonce is per
+task and never sent to the UI. `task_report { task_id, nonce, summary,
+outcome, done?, decisions?, remaining?, context?, tests_run?, warnings?,
+blockers?, followups?, confidence? }` is the explicit path: only the task's
+worker may call it (its per-host token and `X-Fleet-Pane`; `E_NOT_A_SESSION`
+from anywhere else, `E_FORBIDDEN` for another session or a wrong nonce), and
+it flips the task to `done` with the summary as `result` and the rest as the
+report. On a task already `done | failed | cancelled` it changes nothing and
+answers `status: already_finished`. The marker is the fallback: on the
+worker's next `Stop` fleet reads its last transcript turn (pane capture as
+fallback), looks for the marker on its own line — which the prompt echo,
+where it is followed by more text, never satisfies — and flips the task to
+`done` with the paragraph as `result`. Either way the result is also
+delivered to the requester's inbox as `kind: task_result`. A `Stop` without
+the marker leaves the task `running` and logs a warning naming the task, the
+worker, its host and the sizes of the transcript and pane it read. Open tasks are failed when their worker session is killed or lost, when it is recreated onto a new Claude conversation, or after `tasks.max_age_secs` (default 86400, `0` = off); the check runs on the reconcile tick and on every `list_tasks` / `wait_for_task` call. The fleet instruction is appended after an `[claude-fleet: end of untrusted input]` line, outside the marked prompt, and the result is prefixed with the untrusted-content marker wherever it is returned (inbox, `wait_for_task`, `list_tasks`). `wait_for_task { task_id, timeout_s? }` long-polls for a
 terminal state; `list_tasks { requester_session_id?, state?, limit? }` lists;
 `cancel_task { task_id }` marks a task cancelled (`E_TASK_TERMINAL` if it
 already finished; the worker keeps running) and is confirm-gated like
@@ -1898,7 +1956,7 @@ timeline instead of a reply. See `docs/hub.md` → *Link two hubs*.
 
 `provision_hosts` (also reachable via Settings → Control API → **Provision hosts**) makes a Claude on every managed host able to drive the fleet. For each non-hidden, reachable host it performs these steps:
 
-1. **Skills** — writes both `~/.claude/skills/claude-fleet-control/SKILL.md` and `~/.claude/skills/fleet-friendly-name/SKILL.md` on that host. Claude picks up skills from this directory live, without a restart. The fleet-friendly-name skill is the path agents use to set the session's sidebar label via the `set_friendly_name` MCP tool.
+1. **Skills** — writes both `~/.claude/skills/claude-fleet-control/SKILL.md` and `~/.claude/skills/fleet-friendly-name/SKILL.md` on that host. Claude picks up skills from this directory live, without a restart. The fleet-friendly-name skill is the path agents use to set the session's sidebar label via the `set_friendly_name` MCP tool. Beside them it writes fleet's Claude Code plugin, `~/.claude/skills/fleet-prompt-suggestion/` (from `plugins/fleet-prompt-suggestion`): Claude Code loads a plugin from that folder by itself, and this one posts the next-prompt suggestion Claude Code shows after a turn to `/hook` as a `PromptSuggestion` event (see *Hook contract*). It finds the URL and bearer in fleet's own http hooks in `~/.claude/settings.json`, so it does nothing until step 5 has run. A Claude Code without plugin hook modules ignores the folder.
 2. **`~/.claude/CLAUDE.md` managed block** — appends (or refreshes in place) a short sentinel-delimited block saying what claude-fleet is and pointing at the two skills. Content outside the sentinels is the user's own and is preserved verbatim; the block is idempotent and only re-written when its body drifts.
 3. **`~/.claude.json` entry** — reads the host's `~/.claude.json`, merges an `mcpServers.claude-fleet` entry (preserving all sibling keys), backs the original up to `~/.claude.json.fleet-bak`, then writes the updated file. `<host-token>` is that host's own token (see *Per-host tokens*); it is reused on re-runs unless `rotate: true` is passed. Both files are written under `umask 077` and `chmod 600`. The entry added is:
    ```json
@@ -2018,6 +2076,7 @@ the session continues.
 | `Notification` | `quota_auto_resume_fired` | same | `working`, stuck cleared | `notification` — type |
 | `PostToolUse` | `EnterWorktree\|ExitWorktree` | `tool_name`, `tool_input`, `tool_response` | worktree row registered / removed | — |
 | `PreToolUse` | `Bash` (command hook, prefiltered) | `tool_name`, `tool_input.command` | none; answers `deny` for a mission's worker running a person's step (orchestration §7.2) | — |
+| `PromptSuggestion` | — (fleet's plugin, not a settings hook) | `session_id`, `suggestion` | `prompt_suggestion` set on the current conversation's row (one line, at most 300 chars, no bidi or zero-width characters); dropped while the row is `working` (a late POST the next prompt overtook); the next `UserPromptSubmit`, `Stop`/`StopFailure`, a genuine `SessionStart` or `SessionEnd` clears it | — |
 
 Every hook write stamps `last_hook_at`; a reconcile pass that started before that
 stamp never overwrites the hook's status with its pane heuristic. Fleet never
@@ -2126,9 +2185,17 @@ automatically on app start.
   (`send_prompt`, `run_prompt`, `queue_prompt`, and `dispatch_task` to a
   worker that already exists: review round 15, F21 — nothing an LLM composes
   reaches a session without a person; since the 2026-10-17 review's F2 the
-  autonomy position lets those four through into a live session the operator
-  started or briefed at "Within your brief", and a Claude start inside a
-  running mission's grant at "Autopilot" — `guard::operator_must_confirm`),
+  autonomy position lets those four through at "Within your brief" and
+  "Autopilot" into a live session the operator started or briefed and still
+  follows — not muted, merged, done or quiet. "Autopilot" also lets a
+  start (`new_session`, `dispatch_task` `new_worker`, a task's `work_link`
+  `start` / `run` / `resume`) through on a host inside a running mission's
+  live grant, never while Pause all is on. With session care
+  (`control.session_care`, on by default) `restart_session` of a session
+  the operator started itself (not one it only briefed) goes without a card
+  at "Within your brief" and "Autopilot", and `safe_kill_session` of one at
+  "Autopilot". Every other call above asks at every position —
+  `guard::operator_must_confirm_with`; `docs/status.md` has the rule),
   and every tool above return
   `E_CONFIRM_REQUIRED` until a person approves them: on the desktop in its
   dialog or Control's cards, and on a hub from a fleet admin's paired device,

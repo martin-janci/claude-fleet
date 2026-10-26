@@ -18,9 +18,10 @@ import { get, writable } from 'svelte/store';
 import { destinationFlag, goTo } from './destination';
 import { readPref, writePref } from './prefs';
 import { rightPanelWidth } from './control_room';
-import { WAIT_WORDS } from './control_threads';
 import { workState } from './handoffs';
 import { outbox } from './outbox';
+import { controlJournal } from './control_journal';
+import { steerPrefix } from './agent_context';
 import { sessionActionBlocked } from './share';
 import { readErrorText } from './work_view';
 import type { OfState } from './kit/status';
@@ -31,11 +32,14 @@ import {
   missionReason,
   openProposals,
   waitsOnPerson,
+  WAIT_WORDS,
   withoutConfigKeys,
   type Mission,
   type MissionDetail,
   type MissionEvent,
+  type MissionStats,
 } from './missions';
+import { formatDuration } from './account_usage';
 
 // ── Where the room is ──
 
@@ -67,6 +71,9 @@ export interface MissionListState {
   loaded: boolean;
   missions: Mission[];
   error: string | null;
+  /** Review w17-7: a read has answered at least once, so `missions` is a
+   *  real list and a later failure is a failed refresh (the list stays). */
+  read?: boolean;
 }
 
 export const missionList = writable<MissionListState>({ loaded: false, missions: [], error: null });
@@ -79,7 +86,7 @@ export async function loadMissionList(): Promise<void> {
   const r = await listMissions();
   if (mine !== listSeq) return;
   if (r.ok) {
-    missionList.set({ loaded: true, missions: Array.isArray(r.value) ? r.value : [], error: null });
+    missionList.set({ loaded: true, missions: Array.isArray(r.value) ? r.value : [], error: null, read: true });
   } else {
     missionList.update((s) => ({ ...s, loaded: true, error: withoutConfigKeys(readErrorText(r.error)) }));
   }
@@ -238,15 +245,26 @@ export function proposalSummary(detail: MissionDetail): { ids: number[]; waves: 
 // ── Steer: the composer hands the text to Control ──
 
 /** What rides in front of a steer, so Control knows which mission. */
-export function steerPrefix(m: Pick<Mission, 'id' | 'name'>): string {
-  return `About mission #${m.id} "${m.name}":`;
-}
+export { steerPrefix } from './agent_context';
 
 /** Why the composer may not send now, or null. */
 export function steerBlocked(operator: SessionRow | null): string | null {
   if (!operator) return "Control's agent isn't running, so there is no one to steer through. Open Control to start it.";
   if (operator.lost_at != null) return "Control's agent was lost. Open Control to bring it back.";
   return sessionActionBlocked(operator, 'send_prompt');
+}
+
+/** Why Send waits now, or null (review w04-12): a steer goes into
+ *  Control's REPL as Control's own composer would, so it waits as that
+ *  composer's gate does — while Control is mid-turn, while its last message
+ *  is not taken yet, and behind lines already queued in Control's composer,
+ *  which go first. The box stays open; only Send waits. */
+export function steerBusy(operator: SessionRow | null, outboxBusy: boolean, queuedInControl: number): string | null {
+  if (queuedInControl > 0) {
+    return `Control has ${queuedInControl === 1 ? 'a line' : `${queuedInControl} lines`} queued from its chat; they go first. Open Control to send them.`;
+  }
+  if (operator?.claude_status === 'working' || outboxBusy) return 'Control is mid-turn. Send opens when it finishes, so this is not typed into its turn.';
+  return null;
 }
 
 /** One steer sent: the room's receipt line. */
@@ -276,10 +294,34 @@ export function sendSteer(m: Pick<Mission, 'id' | 'name'>, text: string, operato
   );
   const receipt: SteerReceipt = { key, missionId: m.id, operatorId: operator.id, text, at: Date.now() };
   steerReceipts.update((rs) => [...rs, receipt].slice(-MAX_STEER_RECEIPTS));
+  // Control follows the mission from now on (review w04-11): a `steer`
+  // receipt, so the feed tells it what happens next. Best effort: the steer
+  // itself went already.
+  void controlJournal({ action: 'follow', thread: 'mission', id: m.id, text });
   return receipt;
 }
 
 /** Test seam: the room as a fresh run has it. */
+/**
+ * The room's metrics line (lanes design L0): how many runs its done tasks
+ * took, the retries, the cold starts, and how much of its working span no
+ * run was open. `null` before its first run.
+ */
+export function statsLine(st: MissionStats | null | undefined): string | null {
+  if (!st || st.span_secs <= 0) return null;
+  const runs = Object.values(st.runs_by_role).reduce((a, b) => a + b, 0);
+  const parts = [`${runs} run${runs === 1 ? '' : 's'}`];
+  if (st.items_done > 0 && st.runs_per_done_item_x100 != null) {
+    parts[0] += ` (${(st.runs_per_done_item_x100 / 100).toFixed(1)} per done task)`;
+  }
+  if (st.retries > 0) parts.push(`${st.retries} retr${st.retries === 1 ? 'y' : 'ies'}`);
+  parts.push(`${st.sessions} cold start${st.sessions === 1 ? '' : 's'}`);
+  if (st.item_secs_p50 != null) parts.push(`a task takes ${formatDuration(st.item_secs_p50)}`);
+  const idle = Math.round((st.idle_secs * 100) / st.span_secs);
+  parts.push(`idle ${idle}% of ${formatDuration(st.span_secs)}`);
+  return parts.join(' · ');
+}
+
 export function resetMissionRoomForTests(): void {
   listSeq++;
   missionList.set({ loaded: false, missions: [], error: null });

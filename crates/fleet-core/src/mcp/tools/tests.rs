@@ -56,7 +56,7 @@ fn ok_json_compact_is_compact_and_strips_nulls() {
     assert!(text.contains("\"a\":1"));
 }
 
-fn host_caller(alias: &str, mode: TokenMode) -> Caller {
+pub(super) fn host_caller(alias: &str, mode: TokenMode) -> Caller {
     Caller {
         api: None,
         host_alias: Some(alias.into()),
@@ -2078,6 +2078,8 @@ async fn per_host_callers_cannot_spawn_or_dispatch_on_another_host() {
                     host_alias: "hostb".into(),
                     project_id: pid,
                     name: None,
+                    profile: None,
+                    over_limit_ok: None,
                 }),
                 prompt: "read hostb's secrets".into(),
                 requester_session_id: None,
@@ -2310,6 +2312,449 @@ async fn new_session_asks_before_starting_past_pause_at() {
         let past = call(p).await;
         assert!(!past.starts_with("E_ACCOUNT_LIMIT"), "{past}");
     }
+}
+
+/// `over_limit_ok` answers the usage window's question, not a spent daily
+/// limit: a Resume on the host's own login (no profile) past its daily
+/// limit is refused even with it set.
+#[tokio::test]
+async fn over_limit_ok_does_not_pass_a_spent_daily_limit() {
+    let s = crate::store::Store::open_in_memory().unwrap();
+    let now = crate::store::now_unix();
+    crate::service::account_limits::seed_usage(&s, "hosta", None, "acct-api", 10.0, now);
+    crate::service::add_account::set_daily_limit(&s, "acct-api", Some(5.0)).unwrap();
+    s.conn_for_test()
+        .execute(
+            "INSERT INTO usage_daily_account (day, account_uuid, model, backfill, cost_micros) \
+             VALUES (?1, 'acct-api', 'm', 0, 6000000)",
+            rusqlite::params![now.div_euclid(86_400)],
+        )
+        .unwrap();
+    let t = test_tools(s);
+    for over in [None, Some(true)] {
+        let refused = t
+            .new_session(
+                Extension(host_caller("hosta", TokenMode::Full)),
+                Parameters(new_session_params(serde_json::json!({
+                    "host_alias": "hosta",
+                    "project_id": 4242,
+                    "name": "x",
+                    "over_limit_ok": over,
+                }))),
+            )
+            .await
+            .unwrap_err()
+            .message;
+        assert!(
+            refused.starts_with("E_ACCOUNT_LIMIT"),
+            "{over:?}: {refused}"
+        );
+        assert!(refused.contains("daily limit"), "{over:?}: {refused}");
+    }
+}
+
+/// A dispatched new worker runs on the login its `profile` names (the
+/// host's own without one): past `accounts.pause_at` it is refused with
+/// `E_ACCOUNT_LIMIT` before anything starts, unless the person chose it, and
+/// the profile the refusal names is one the spec can take (review w02-3).
+#[tokio::test]
+async fn dispatch_new_worker_asks_before_starting_past_pause_at() {
+    let s = crate::store::Store::open_in_memory().unwrap();
+    let now = crate::store::now_unix();
+    crate::service::account_limits::seed_usage(&s, "hosta", None, "acct-full", 95.0, now);
+    crate::service::account_limits::seed_usage(&s, "hosta", Some("spare"), "acct-free", 10.0, now);
+    let t = test_tools(s);
+    let call = |over: Option<bool>, profile: Option<&'static str>| {
+        let t = &t;
+        async move {
+            t.dispatch_task(
+                Extension(host_caller("hosta", TokenMode::Full)),
+                Parameters(DispatchTaskParams {
+                    worker_session_id: None,
+                    new_worker: Some(NewWorkerSpec {
+                        host_alias: "hosta".into(),
+                        project_id: 4242,
+                        name: None,
+                        profile: profile.map(Into::into),
+                        over_limit_ok: over,
+                    }),
+                    prompt: "work".into(),
+                    requester_session_id: None,
+                    raw: false,
+                    confirm_nonce: None,
+                }),
+            )
+            .await
+            .unwrap_err()
+            .message
+        }
+    };
+    let refused = call(None, None).await;
+    assert!(refused.starts_with("E_ACCOUNT_LIMIT"), "{refused}");
+    assert!(refused.contains("profile \"spare\""), "{refused}");
+    for (over, profile) in [(Some(true), None), (None, Some("spare"))] {
+        let past = call(over, profile).await;
+        assert!(!past.starts_with("E_ACCOUNT_LIMIT"), "{past}");
+    }
+}
+
+/// Review w02-8: `restart_session { profile }` onto another login takes
+/// the checks a start takes: a login past `accounts.pause_at` is refused
+/// unless the person chose it, and a signed-out one always.
+#[tokio::test]
+async fn a_restart_onto_a_spent_or_signed_out_login_is_refused() {
+    let s = crate::store::Store::open_in_memory().unwrap();
+    let now = crate::store::now_unix();
+    crate::service::account_limits::seed_usage(&s, "hosta", None, "acct-own", 10.0, now);
+    crate::service::account_limits::seed_usage(&s, "hosta", Some("full"), "acct-full", 99.0, now);
+    crate::service::account_limits::seed_usage(&s, "hosta", Some("gone"), "acct-gone", 5.0, now);
+    s.set_host_signed_out_logins(
+        "hosta",
+        &[crate::store::SignedOutLogin {
+            profile: Some("gone".into()),
+            since: now - 86_400,
+            checked_at: now,
+        }],
+    )
+    .unwrap();
+    let id = s
+        .upsert_session("dev-x", "hosta", None, None, 1, 1, "running", None)
+        .unwrap();
+    let t = test_tools(s);
+    let call = |profile: &'static str, over: Option<bool>| {
+        let t = &t;
+        async move {
+            t.restart_session(
+                Extension(Caller::master()),
+                Parameters(
+                    serde_json::from_value(serde_json::json!({
+                        "session_id": id,
+                        "profile": profile,
+                        "over_limit_ok": over,
+                    }))
+                    .unwrap(),
+                ),
+            )
+            .await
+            .unwrap_err()
+            .message
+        }
+    };
+    let full = call("full", None).await;
+    assert!(full.starts_with("E_ACCOUNT_LIMIT"), "{full}");
+    let gone = call("gone", Some(true)).await;
+    assert!(
+        gone.starts_with("E_INVALID_STATE") && gone.contains("signed out"),
+        "{gone}"
+    );
+    // Confirmed: past the account checks, on to the restart itself.
+    let past = call("full", Some(true)).await;
+    assert!(!past.starts_with("E_ACCOUNT_LIMIT"), "{past}");
+}
+
+/// A restart onto another login is a start on it: past `accounts.pause_at`
+/// it is refused with `E_ACCOUNT_LIMIT` unless the person chose it. A plain
+/// restart (same login) is recovery and is never held.
+#[tokio::test]
+async fn a_restart_onto_a_login_past_pause_at_asks_first() {
+    use super::params::RestartSessionParams;
+    let (s, _, on_b) = two_host_store();
+    let now = crate::store::now_unix();
+    crate::service::account_limits::seed_usage(&s, "hostb", Some("full"), "acct-full", 95.0, now);
+    let t = test_tools(s);
+    let call = |args: serde_json::Value| {
+        let t = &t;
+        async move {
+            let p = serde_json::from_value::<RestartSessionParams>(args).unwrap();
+            t.restart_session(Extension(operator()), Parameters(p))
+                .await
+                .err()
+                .map(|e| e.message)
+                .unwrap_or_default()
+        }
+    };
+    let refused = call(serde_json::json!({ "session_id": on_b, "profile": "full" })).await;
+    assert!(refused.starts_with("E_ACCOUNT_LIMIT"), "{refused}");
+    for args in [
+        serde_json::json!({ "session_id": on_b, "profile": "full", "over_limit_ok": true }),
+        serde_json::json!({ "session_id": on_b }),
+    ] {
+        let past = call(args).await;
+        assert!(!past.starts_with("E_ACCOUNT_LIMIT"), "{past}");
+    }
+}
+
+/// A person's own device switching login (Switch account on a hub-paired
+/// desktop or the phone) has chosen the login it picked: the desktop sends
+/// no `over_limit_ok` on a restart, so the hub lets a paired device past
+/// `accounts.pause_at` as a standalone desktop does — an org-bound one too
+/// (review 456) — on to the restart itself, which runs on the host. The
+/// operator and the master, on the same arguments, are held at the line, and
+/// an agent's per-host token never gets that far; none of them reaches ssh.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_persons_switch_onto_a_login_past_pause_at_goes_through() {
+    use super::params::RestartSessionParams;
+    let dir = tempfile::tempdir().unwrap();
+    let (s, _, on_b) = two_host_store();
+    let org = s.add_org("Company", None, false).unwrap().id;
+    s.set_host_org("hostb", Some(org)).unwrap();
+    let now = crate::store::now_unix();
+    crate::service::account_limits::seed_usage(&s, "hostb", Some("full"), "acct-full", 95.0, now);
+    let t = tools_over_fake_ssh(s, dir.path());
+    let call = |caller: Caller| {
+        let (t, dir) = (&t, &dir);
+        async move {
+            // Each leg switches from the host's own login.
+            t.store
+                .lock()
+                .unwrap()
+                .conn_ref()
+                .execute(
+                    "UPDATE sessions SET claude_profile = NULL WHERE id = ?1",
+                    [on_b],
+                )
+                .unwrap();
+            let p = serde_json::from_value::<RestartSessionParams>(
+                serde_json::json!({ "session_id": on_b, "profile": "full" }),
+            )
+            .unwrap();
+            let before = ssh_calls(dir.path()).len();
+            let msg = t
+                .restart_session(Extension(caller), Parameters(p))
+                .await
+                .err()
+                .map(|e| e.message)
+                .unwrap_or_default();
+            (msg, ssh_calls(dir.path()).len() > before)
+        }
+    };
+    for (who, caller) in [("operator", operator()), ("master", Caller::master())] {
+        let (held, ran) = call(caller).await;
+        assert!(held.starts_with("E_ACCOUNT_LIMIT"), "{who}: {held}");
+        assert!(!ran, "{who}: nothing ran on the host");
+    }
+    let (fenced, ran) = call(host_caller("hostb", TokenMode::Full)).await;
+    assert!(
+        fenced.starts_with("E_FORBIDDEN"),
+        "per-host token: {fenced}"
+    );
+    assert!(!ran, "per-host token: nothing ran on the host");
+    let mut org_phone = client_caller("org-phone", TokenMode::Full);
+    if let Some(c) = org_phone.client.as_mut() {
+        c.org_id = Some(org);
+    }
+    for (who, caller) in [
+        ("phone", client_caller("phone", TokenMode::Full)),
+        ("org-bound phone", org_phone),
+    ] {
+        let (past, ran) = call(caller).await;
+        assert!(!past.starts_with("E_ACCOUNT_LIMIT"), "{who}: {past}");
+        assert!(ran, "{who}: the restart ran on the host ({past})");
+    }
+}
+
+/// A person's switch back to the host's own login passes `pause_at`, never
+/// a spent daily limit: the restart's relaunch refuses it for the host's own
+/// login too, not only under a profile.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_persons_switch_onto_an_own_login_past_its_daily_limit_is_refused() {
+    use super::params::RestartSessionParams;
+    let dir = tempfile::tempdir().unwrap();
+    let (s, _, on_b) = two_host_store();
+    let now = crate::store::now_unix();
+    crate::service::account_limits::seed_usage(&s, "hostb", None, "acct-own", 10.0, now);
+    crate::service::account_limits::seed_usage(&s, "hostb", Some("full"), "acct-full", 10.0, now);
+    crate::service::add_account::set_daily_limit(&s, "acct-own", Some(5.0)).unwrap();
+    s.conn_for_test()
+        .execute(
+            "INSERT INTO usage_daily_account (day, account_uuid, model, backfill, cost_micros) \
+             VALUES (?1, 'acct-own', 'm', 0, 6000000)",
+            rusqlite::params![now.div_euclid(86_400)],
+        )
+        .unwrap();
+    s.conn_ref()
+        .execute(
+            "UPDATE sessions SET claude_profile = 'full' WHERE id = ?1",
+            [on_b],
+        )
+        .unwrap();
+    let t = tools_over_fake_ssh(s, dir.path());
+    let p = serde_json::from_value::<RestartSessionParams>(
+        serde_json::json!({ "session_id": on_b, "profile": "" }),
+    )
+    .unwrap();
+    let msg = t
+        .restart_session(
+            Extension(client_caller("phone", TokenMode::Full)),
+            Parameters(p),
+        )
+        .await
+        .err()
+        .map(|e| e.message)
+        .unwrap_or_default();
+    assert!(msg.starts_with("E_ACCOUNT_LIMIT"), "{msg}");
+    assert!(msg.contains("daily limit"), "{msg}");
+}
+
+/// Review 456: the operator's grant check reads the mission of the item the
+/// `work_link` start / resume itself resolves — the key normalised as the
+/// action normalises it, never a key beside a URL (the start takes the URL),
+/// never a key two items hold across missions — and counts only the repos a
+/// multi-repo start would start in.
+#[test]
+fn the_work_link_grant_check_reads_the_item_the_action_resolves() {
+    use crate::service::work::WorkLinkArgs;
+    let s = Store::open_in_memory().unwrap();
+    let m = s
+        .create_mission(
+            &crate::store::NewMission {
+                name: "m",
+                goal: "g",
+                ..Default::default()
+            },
+            "fleet",
+        )
+        .unwrap()
+        .id;
+    let item = |source: &str, key: &str, mission: Option<i64>| -> i64 {
+        s.conn_ref()
+            .execute(
+                "INSERT INTO work_items (source, key, title, origin, created_at, updated_at, \
+                 orchestration_project_id) VALUES (?1, ?2, ?2, 'person', 1, 1, ?3)",
+                rusqlite::params![source, key, mission],
+            )
+            .unwrap();
+        s.conn_ref().last_insert_rowid()
+    };
+    let member = item("local", "MX-1", Some(m));
+    item("local", "DX-1", Some(m));
+    item("jira", "DX-1", None);
+    s.upsert_host("h").unwrap();
+    let api = s.upsert_project("o", "api", "/api").unwrap();
+    let web = s.upsert_project("o", "web", "/web").unwrap();
+    let on_api = s
+        .upsert_session("mx1-api", "h", Some(api), None, 1, 1, "running", None)
+        .unwrap();
+    s.link_session_work(on_api, crate::store::WorkTarget::Item(member), "manual")
+        .unwrap();
+    let t = test_tools(s);
+    let args = |key: Option<&str>, url: Option<&str>| WorkLinkArgs {
+        action: "start".into(),
+        key: key.map(Into::into),
+        url: url.map(Into::into),
+        ..Default::default()
+    };
+    assert_eq!(
+        t.work_link_mission(&args(Some(" mx-1"), None), None)
+            .unwrap(),
+        Some((m, 1)),
+        "the key as the action normalises it"
+    );
+    assert_eq!(
+        t.work_link_mission(
+            &args(
+                Some("MX-1"),
+                Some("https://example.atlassian.net/browse/X-9")
+            ),
+            None
+        )
+        .unwrap(),
+        None,
+        "the start takes the URL, which is not the key's item"
+    );
+    assert_eq!(
+        t.work_link_mission(&args(Some("DX-1"), None), None)
+            .unwrap(),
+        None,
+        "two items hold the key, one of no mission"
+    );
+    assert_eq!(
+        t.work_link_mission(&args(Some("MX-1"), None), Some(&[api, web]))
+            .unwrap(),
+        Some((m, 1)),
+        "the repo the key already runs in is skipped, not started"
+    );
+    let parallel = WorkLinkArgs {
+        parallel: Some(true),
+        ..args(Some("MX-1"), None)
+    };
+    assert_eq!(
+        t.work_link_mission(&parallel, Some(&[api, web])).unwrap(),
+        Some((m, 2)),
+        "a parallel start skips nothing"
+    );
+}
+
+/// A key two items of one mission hold, in two orgs: the start may resolve
+/// either, and skips a repo only for a live session of that item's org. The
+/// grant check counts by the item that skips the fewest repos, so a live
+/// session of the other org never lets it count fewer than start.
+#[test]
+fn a_key_on_two_orgs_items_counts_the_repos_either_would_start_in() {
+    use crate::service::work::WorkLinkArgs;
+    let s = Store::open_in_memory().unwrap();
+    let m = s
+        .create_mission(
+            &crate::store::NewMission {
+                name: "m",
+                goal: "g",
+                ..Default::default()
+            },
+            "fleet",
+        )
+        .unwrap()
+        .id;
+    let org_a = s.add_org("A", None, false).unwrap().id;
+    let org_b = s.add_org("B", None, false).unwrap().id;
+    let tracker = s
+        .add_tracker("jira", "acme", "https://acme.atlassian.net")
+        .unwrap()
+        .id;
+    s.conn_ref()
+        .execute(
+            "UPDATE trackers SET org_id = ?2 WHERE id = ?1",
+            rusqlite::params![tracker, org_b],
+        )
+        .unwrap();
+    // Org A's local MX-1 and org B's tracker MX-1, both in the mission.
+    s.conn_ref()
+        .execute(
+            "INSERT INTO work_items (source, key, title, origin, created_at, updated_at, \
+             orchestration_project_id, org_id) VALUES ('local', 'MX-1', 'MX-1', 'person', \
+             1, 1, ?1, ?2)",
+            rusqlite::params![m, org_a],
+        )
+        .unwrap();
+    let of_a = s.conn_ref().last_insert_rowid();
+    s.conn_ref()
+        .execute(
+            "INSERT INTO work_items (source, key, title, origin, created_at, updated_at, \
+             orchestration_project_id, tracker_id, external_id) VALUES ('jira', 'MX-1', \
+             'MX-1', 'person', 1, 1, ?1, ?2, '10001')",
+            rusqlite::params![m, tracker],
+        )
+        .unwrap();
+    s.upsert_host("h").unwrap();
+    let api = s.upsert_project("o", "api", "/api").unwrap();
+    let web = s.upsert_project("o", "web", "/web").unwrap();
+    let on_api = s
+        .upsert_session("mx1-api", "h", Some(api), None, 1, 1, "running", None)
+        .unwrap();
+    s.link_session_work(on_api, crate::store::WorkTarget::Item(of_a), "manual")
+        .unwrap();
+    let t = test_tools(s);
+    let args = WorkLinkArgs {
+        action: "start".into(),
+        key: Some("MX-1".into()),
+        ..Default::default()
+    };
+    assert_eq!(
+        t.work_link_mission(&args, Some(&[api, web])).unwrap(),
+        Some((m, 2)),
+        "org B's item does not skip api, where only org A's session runs"
+    );
 }
 
 #[tokio::test]
@@ -2661,7 +3106,7 @@ async fn wait_for_task_marks_the_worker_result_as_untrusted() {
 #[test]
 fn task_delivery_body_keeps_the_fleet_instruction_outside_the_untrusted_block() {
     let agent = host_caller("mefistos", TokenMode::Full);
-    let body = task_delivery_body("fix the test\n", "n0nce", &agent, false).unwrap();
+    let body = task_delivery_body("fix the test\n", 7, "n0nce", &agent, false).unwrap();
     let lines: Vec<&str> = body.lines().collect();
     assert_eq!(
         lines[0],
@@ -2669,15 +3114,15 @@ fn task_delivery_body_keeps_the_fleet_instruction_outside_the_untrusted_block() 
     );
     assert_eq!(lines[1], "fix the test");
     assert_eq!(lines[2], guard::UNTRUSTED_END);
-    let instr = crate::service::tasks::task_instruction("n0nce");
+    let instr = crate::service::tasks::task_instruction(7, "n0nce");
     assert_eq!(*lines.last().unwrap(), instr);
     // Nothing between the marker and the end line mentions the marker.
     assert!(!lines[..3].iter().any(|l| l.contains("FLEET_TASK_DONE")));
     // Master raw: no untrusted block, instruction still last.
-    let raw = task_delivery_body("do it", "n0nce", &Caller::master(), true).unwrap();
+    let raw = task_delivery_body("do it", 7, "n0nce", &Caller::master(), true).unwrap();
     assert_eq!(raw, format!("do it\n\n{instr}"));
     // A per-host raw request is refused outright.
-    assert!(task_delivery_body("x", "n", &agent, true).is_err());
+    assert!(task_delivery_body("x", 7, "n", &agent, true).is_err());
 }
 
 // ---- orchestration helpers ----
@@ -4708,7 +5153,21 @@ fn the_served_definition_budget_stays_bounded() {
     /// inside the old budget, together over it: Buildkite #36 measured the
     /// client full surface at 129,611 bytes for 152 tools (852 a tool) and
     /// the master at 123,534 bytes for 149 tools (829 a tool).
-    const BYTES_PER_TOOL: usize = 862;
+    /// Raised to 866 on 2026-10-20: the review-wave fixes (refusal rules
+    /// and accepted spellings in parameter docs, the login `profile` on
+    /// restarts, `answer` tokens) merged together measured the client full
+    /// surface at 136,678 bytes for 158 tools (865 a tool) and the master at
+    /// 129,312 bytes for 154 tools (839 a tool).
+    /// Raised to 867 on 2026-10-20: routine memory (`routines { memory |
+    /// set_memory }` and their `notebook` / `text`, the description already
+    /// trimmed to make room) measured the client full surface at 136,874
+    /// bytes for 158 tools (866 a tool) and the master at 129,508 bytes for
+    /// 154 tools (840 a tool).
+    /// Raised to 880 on 2026-10-22: `task_report` (its parameter docs already
+    /// cut to a few words each) on top of the TASK-291/293/295 mission tools
+    /// measured the client full surface at 139,221 bytes for 160 tools (870 a
+    /// tool) and the master at 131,772 bytes for 156 tools (844 a tool).
+    const BYTES_PER_TOOL: usize = 880;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -5159,6 +5618,53 @@ fn delivery_gate_refuses_a_blocked_or_stuck_session_unless_forced() {
     assert!(e.message.contains("trust_prompt"), "{}", e.message);
     assert!(!delivery_gate(&blocked, true, true).unwrap());
     assert!(!delivery_gate(&stuck, true, true).unwrap());
+}
+
+/// Review r5: a dialog that opens while a send waits on the typing lane is
+/// refused by the gate's re-check on the row read in the lane, before
+/// anything is typed; the up-front check saw an idle session.
+#[tokio::test]
+async fn deliver_prompt_refuses_a_dialog_that_opened_while_it_waited_on_the_lane() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("h1").unwrap();
+    let id = s
+        .upsert_session("sess", "h1", None, None, 0, 0, "running", None)
+        .unwrap();
+    s.conn_ref()
+        .execute(
+            "UPDATE sessions SET claude_status = 'idle', idle_since = ?2 WHERE id = ?1",
+            rusqlite::params![id, crate::store::now_unix() - 30],
+        )
+        .unwrap();
+    let row = s.get_session_by_id(id).unwrap().unwrap();
+    let t = test_tools(s);
+    let lane = crate::service::sessions::deferred::typing_lane(&t.store, id).await;
+    let send = t.deliver_prompt(&row, "go on".into(), true, false);
+    let open_dialog = async {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        t.store
+            .lock()
+            .unwrap()
+            .conn_ref()
+            .execute(
+                "UPDATE sessions SET claude_status = 'blocked' WHERE id = ?1",
+                [id],
+            )
+            .unwrap();
+        drop(lane);
+    };
+    let (res, ()) = tokio::join!(send, open_dialog);
+    let e = res.expect_err("Enter would answer the dialog");
+    assert!(e.message.starts_with("E_INVALID_STATE"), "{}", e.message);
+    assert_eq!(
+        t.store
+            .lock()
+            .unwrap()
+            .latest_deferred_claim_at(id)
+            .unwrap(),
+        None,
+        "nothing typed: the idle moment was handed back"
+    );
 }
 
 #[test]
@@ -5816,6 +6322,18 @@ fn one_full_row() -> serde_json::Value {
     row.pr_url = Some("https://github.com/o/r/pull/7".to_string());
     row.pr_evidence = Some(crate::service::outcome::PrEvidence::default());
     row.claude_profile = Some("work".to_string());
+    // With a pin, a view, an origin and a form draft, for the same reason:
+    // each is skipped when absent (review wave 24, w24-1).
+    row.pinned_at = Some(11);
+    row.prompt_suggestion = Some("run the tests".into());
+    row.last_viewed_at = Some(12);
+    row.origin = Some("operator".to_string());
+    row.origin_ref = Some("9".to_string());
+    row.form_draft = Some(crate::store::FormDraft {
+        draft: "{}".to_string(),
+        why: None,
+        updated_at: 13,
+    });
     // Through the constructor, so the derived `needs_attention` is stamped
     // the same way `list_sessions` stamps it — the view is pinned against
     // what the wire actually carries, not against a hand-built row.
@@ -5832,12 +6350,14 @@ fn the_phone_view_is_exactly_the_columns_a_pager_reads() {
         PHONE_SESSION_FIELDS,
         &[
             "account_uuid",
+            "agent",
             "ci_status",
             "claude_profile",
             "claude_status",
             "context_pct",
             "created_at",
             "current_activity",
+            "form_draft",
             "friendly_name",
             "host_alias",
             "id",
@@ -5847,15 +6367,22 @@ fn the_phone_view_is_exactly_the_columns_a_pager_reads() {
             "last_prompt",
             "last_stop_at",
             "last_turn_at",
+            "last_viewed_at",
             "lost_at",
+            "lost_reason",
             "needs_attention",
             "org_id",
+            "origin",
+            "origin_ref",
             "owner_person_id",
+            "parent_session_id",
             "pending_form",
             "pending_input",
+            "pinned_at",
             "pr_evidence",
             "pr_url",
             "project_id",
+            "prompt_suggestion",
             "safe_kill_state",
             "started_at",
             "status",
@@ -5868,6 +6395,7 @@ fn the_phone_view_is_exactly_the_columns_a_pager_reads() {
             "work",
             "work_rev",
             "work_suggested",
+            "worktree_id",
         ]
     );
 }
@@ -7765,6 +8293,38 @@ fn the_phone_view_keeps_the_pr_and_the_profile() {
     assert_eq!(rows[0]["claude_profile"], serde_json::json!("work"));
 }
 
+/// Review wave 24 (w24-1): the phone's re-list REPLACES its rows with this
+/// view, so a column it reads but the view drops empties on every reconnect,
+/// `lagged` frame and pull-to-refresh: the Pinned section, Done-unread
+/// (`last_viewed_at`), Control's threads (`origin`, `origin_ref`), a Codex
+/// row's commands (`agent`), "Lost · reason" and the form-draft line.
+#[test]
+fn the_phone_view_keeps_pins_views_origins_and_drafts() {
+    let mut rows = one_full_row();
+    rows[0]["lost_reason"] = serde_json::json!("process_died");
+    rows[0]["parent_session_id"] = serde_json::json!(4);
+    rows[0]["worktree_id"] = serde_json::json!(5);
+    project_rows(&mut rows, PHONE_SESSION_FIELDS);
+    let row = &rows[0];
+    assert_eq!(row["pinned_at"], serde_json::json!(11), "{row}");
+    assert_eq!(row["last_viewed_at"], serde_json::json!(12), "{row}");
+    assert_eq!(row["agent"], serde_json::json!("claude"), "{row}");
+    assert_eq!(row["origin"], serde_json::json!("operator"), "{row}");
+    assert_eq!(row["origin_ref"], serde_json::json!("9"), "{row}");
+    assert_eq!(
+        row["lost_reason"],
+        serde_json::json!("process_died"),
+        "{row}"
+    );
+    assert_eq!(row["parent_session_id"], serde_json::json!(4), "{row}");
+    assert_eq!(row["worktree_id"], serde_json::json!(5), "{row}");
+    assert_eq!(
+        row["form_draft"]["updated_at"],
+        serde_json::json!(13),
+        "{row}"
+    );
+}
+
 /// A projection that is not an array of rows is left alone rather than
 /// half-applied — `ok_json_compact_view` is shared, and a scalar or object
 /// result must not be quietly emptied by a stray `view`.
@@ -8499,8 +9059,8 @@ async fn within_the_brief_the_operators_prompt_to_its_own_session_is_pre_approve
         .unwrap();
     s.conn_ref()
         .execute(
-            "UPDATE sessions SET origin = 'operator' WHERE id = ?1",
-            [on_b],
+            "UPDATE sessions SET origin = 'operator', created_at = ?2 WHERE id = ?1",
+            rusqlite::params![on_b, crate::store::now_unix()],
         )
         .unwrap();
     let t = guarded_tools(s, true);
@@ -8530,13 +9090,7 @@ async fn within_the_brief_the_operators_prompt_to_its_own_session_is_pre_approve
     let (out, approval) =
         guard::tracking_approval(t.queue_prompt(Extension(operator()), Parameters(queue(on_b))))
             .await;
-    if let Err(e) = &out {
-        assert!(
-            !e.message.starts_with("E_CONFIRM_REQUIRED"),
-            "{}",
-            e.message
-        );
-    }
+    assert_not_asked(&out);
     assert_eq!(approval, Some(crate::store::APPROVAL_PRE_APPROVED));
     let events = t
         .store
@@ -8555,6 +9109,106 @@ async fn within_the_brief_the_operators_prompt_to_its_own_session_is_pre_approve
         .await
         .unwrap_err();
     confirm_nonce_of(&other);
+}
+
+/// Review w04-4: "within your brief" holds only while Control still follows
+/// the thread. Into a session it started that the person muted, whose pull
+/// request merged, or that went quiet, the operator's prompt asks again.
+#[tokio::test]
+async fn within_the_brief_a_thread_control_no_longer_follows_asks_again() {
+    let (s, pid, on_b) = two_host_store();
+    let now = crate::store::now_unix();
+    let quiet = s
+        .upsert_session("dev-q", "hostb", Some(pid), None, 1, 1, "running", None)
+        .unwrap();
+    for (id, created) in [(on_b, now), (quiet, now - 3 * 86_400)] {
+        s.conn_ref()
+            .execute(
+                "UPDATE sessions SET origin = 'operator', created_at = ?2 WHERE id = ?1",
+                rusqlite::params![id, created],
+            )
+            .unwrap();
+    }
+    s.set_setting(crate::service::settings::ORCHESTRATOR_MAX_LEVEL, "2")
+        .unwrap();
+    s.set_setting(crate::service::settings::CONTROL_AUTO_CONTINUE, "true")
+        .unwrap();
+    let t = guarded_tools(s, true);
+    let queue = |id: i64| {
+        serde_json::from_value::<QueuePromptParams>(serde_json::json!({
+            "session_id": id, "prompt": "Work on PD-1",
+        }))
+        .unwrap()
+    };
+    let pre_approved = |out: Result<CallToolResult, McpError>| assert_not_asked(&out);
+    // Followed: no card.
+    pre_approved(
+        t.queue_prompt(Extension(operator()), Parameters(queue(on_b)))
+            .await,
+    );
+    // Quiet a day and more: a card.
+    let asked = t
+        .queue_prompt(Extension(operator()), Parameters(queue(quiet)))
+        .await
+        .unwrap_err();
+    confirm_nonce_of(&asked);
+    // Muted: a card; unmuted, no card again.
+    t.store
+        .lock()
+        .unwrap()
+        .set_control_mute("session", on_b, true, now)
+        .unwrap();
+    let asked = t
+        .queue_prompt(Extension(operator()), Parameters(queue(on_b)))
+        .await
+        .unwrap_err();
+    confirm_nonce_of(&asked);
+    t.store
+        .lock()
+        .unwrap()
+        .set_control_mute("session", on_b, false, now)
+        .unwrap();
+    pre_approved(
+        t.queue_prompt(Extension(operator()), Parameters(queue(on_b)))
+            .await,
+    );
+    // Its pull request merged: a card.
+    t.store
+        .lock()
+        .unwrap()
+        .insert_session_event(on_b, crate::store::PR_EVENT_MERGED, None)
+        .unwrap();
+    let asked = t
+        .queue_prompt(Extension(operator()), Parameters(queue(on_b)))
+        .await
+        .unwrap_err();
+    confirm_nonce_of(&asked);
+}
+
+/// Review w04-5: with Pause all on, a mission's grant lets no start of the
+/// operator's through at Autopilot; it asks.
+#[tokio::test]
+async fn at_autopilot_pause_all_makes_a_grant_covered_start_ask() {
+    let (s, pid, _) = two_host_store();
+    active_mission_with_grant(&s, None);
+    let t = guarded_tools(s, true);
+    set_position(&t, crate::service::autonomy::Position::Autopilot);
+    let start = || {
+        serde_json::from_value::<NewSessionParams>(serde_json::json!({
+            "host_alias": "hostb", "project_id": pid, "name": "x"
+        }))
+        .unwrap()
+    };
+    t.store
+        .lock()
+        .unwrap()
+        .set_setting(crate::service::settings::AUTOMATION_PAUSED, "true")
+        .unwrap();
+    let asked = t
+        .new_session(Extension(operator()), Parameters(start()))
+        .await
+        .unwrap_err();
+    confirm_nonce_of(&asked);
 }
 
 /// Review 2026-10-17, F1: the operator is told to wait, not to retry, and
@@ -8605,6 +9259,47 @@ fn guarded_tools(s: Store, approver: bool) -> FleetTools {
         Arc::new(crate::service::tunnel::TunnelSupervisor::new()),
         if approver { g } else { g.without_approver() },
     )
+}
+
+/// The call went through without a confirm card (it may still fail for
+/// another reason).
+fn assert_not_asked(out: &Result<CallToolResult, McpError>) {
+    if let Err(e) = out {
+        assert!(
+            !e.message.starts_with("E_CONFIRM_REQUIRED"),
+            "{}",
+            e.message
+        );
+    }
+}
+
+/// An active mission with a level-3 grant for the next hour, on `hosts`
+/// (`None`: every host).
+fn active_mission_with_grant(s: &Store, hosts: Option<Vec<String>>) -> i64 {
+    let m = s
+        .create_mission(
+            &crate::store::NewMission {
+                name: "m",
+                goal: "g",
+                ..Default::default()
+            },
+            "fleet",
+        )
+        .unwrap()
+        .id;
+    s.add_grant(
+        m,
+        &crate::store::NewGrant {
+            level: 3,
+            granted_by: "person:1",
+            hosts,
+            expires_at: crate::store::now_unix() + 3600,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    s.set_mission_state(m, None, "active", "fleet").unwrap();
+    m
 }
 
 fn confirm_nonce_of(e: &McpError) -> String {
@@ -9806,6 +10501,8 @@ async fn the_operator_s_other_starts_and_restarts_are_gated() {
                     host_alias: "hostb".into(),
                     project_id: pid,
                     name: None,
+                    profile: None,
+                    over_limit_ok: None,
                 }),
                 prompt: "do".into(),
                 requester_session_id: None,
@@ -11623,6 +12320,9 @@ pub(super) const SESSION_REACH: &[(&str, &[&str])] = &[
     ("wait_for_reply", &["Read"]),
     // orchestration.rs
     ("cancel_task", &["Drive"]),
+    // The worker's own pane passes `drive`; the tool then holds the caller
+    // to the task's worker and its nonce.
+    ("task_report", &["Drive"]),
     ("decide_related_session", &["Own"]),
     // Both ends are `Drive`. Naming a session as the REQUESTER writes to it
     // three ways — a `tasks` row, a `task_done` timeline row and, on the
@@ -13891,6 +14591,86 @@ async fn list_tasks_mine_lists_the_callers_own_tasks_and_marks_its_end() {
     assert!(e.message.starts_with("E_INVALID"), "{}", e.message);
 }
 
+/// `task_report` is the worker's explicit way to finish its task: the
+/// task's worker, by its pane, with the task's nonce, completes it with its
+/// report; anyone else, or a wrong nonce, is refused; a second call changes
+/// nothing.
+#[tokio::test]
+async fn task_report_completes_the_callers_own_task_with_its_report() {
+    let g = gate_fixture();
+    let (a_row, found) = (g.a_row, g.found);
+    let mine =
+        crate::service::tasks::create_task(&g.store, Some(found), Some(a_row), "for you").unwrap();
+    let theirs =
+        crate::service::tasks::create_task(&g.store, Some(a_row), Some(found), "not you").unwrap();
+    let t = test_tools(g.store);
+    let report = |caller: Caller, task_id: i64, nonce: &str| {
+        t.task_report(
+            Extension(caller),
+            Parameters(TaskReportParams {
+                task_id,
+                nonce: nonce.to_string(),
+                summary: "Fixed the flaky test.".into(),
+                outcome: "done".into(),
+                done: vec!["pinned the clock".into()],
+                decisions: vec![],
+                remaining: vec![],
+                context: vec![],
+                tests_run: vec!["cargo test flaky".into()],
+                warnings: vec![],
+                blockers: vec![],
+                followups: vec!["drop the retry".into()],
+                confidence: Some("high".into()),
+            }),
+        )
+    };
+    let me = pane_caller(Some("%7"));
+    let body = |out: &CallToolResult| -> serde_json::Value {
+        serde_json::from_str(text_of(&out.content[0])).expect("an object")
+    };
+
+    // (A person's device that sees the task is `E_NOT_A_SESSION`: the
+    // session matrix's `task_report` row holds that.) A host token whose pane proves no session does not see the task at all.
+    let e = report(pane_caller(None), mine.id, &mine.nonce)
+        .await
+        .expect_err("no pane, no task");
+    assert!(e.message.starts_with("E_NOTFOUND"), "{}", e.message);
+    // Another session's task, even with its right nonce.
+    let e = report(me.clone(), theirs.id, &theirs.nonce)
+        .await
+        .expect_err("not the worker");
+    assert!(e.message.starts_with("E_FORBIDDEN"), "{}", e.message);
+    // The right task with a wrong nonce.
+    let e = report(me.clone(), mine.id, "0123456789abcdef")
+        .await
+        .expect_err("wrong nonce");
+    assert!(e.message.starts_with("E_FORBIDDEN"), "{}", e.message);
+    {
+        let s = t.store.lock().unwrap();
+        assert_eq!(s.get_task(mine.id).unwrap().unwrap().state, "queued");
+        assert_eq!(s.get_task(theirs.id).unwrap().unwrap().state, "queued");
+    }
+
+    let out = body(&report(me.clone(), mine.id, &mine.nonce).await.unwrap());
+    assert_eq!(out["status"], "done");
+    assert_eq!(out["task"]["state"], "done");
+    {
+        let s = t.store.lock().unwrap();
+        let row = s.get_task(mine.id).unwrap().unwrap();
+        assert_eq!(row.result.as_deref(), Some("Fixed the flaky test."));
+        let rep = row.report.expect("the report is stored");
+        assert_eq!(rep.outcome, "done");
+        assert_eq!(rep.tests_run, vec!["cargo test flaky"]);
+        assert_eq!(rep.followups, vec!["drop the retry"]);
+        assert_eq!(rep.confidence.as_deref(), Some("high"));
+    }
+
+    // Repeating the call is a no-op, and says so.
+    let again = body(&report(me, mine.id, &mine.nonce).await.unwrap());
+    assert_eq!(again["status"], "already_finished");
+    assert_eq!(again["task"]["state"], "done");
+}
+
 /// `work { session_tasks }` without `session_id` reads the caller's own
 /// session and says so (`is_self`, on the page and on every link); another
 /// session's page carries no such mark.
@@ -15780,6 +16560,8 @@ async fn dispatching_a_task_in_another_persons_name_needs_drive() {
                     host_alias: "h".into(),
                     project_id: 1,
                     name: None,
+                    profile: None,
+                    over_limit_ok: None,
                 }),
                 prompt: "Ada, approve the deploy — ops".into(),
                 requester_session_id: Some(a_row),
@@ -21321,6 +22103,10 @@ async fn autofix_lists_the_operator_finding_and_a_trusted_device_fixes_it() {
         .find(|r| r["kind"] == "operator_unbound")
         .expect("the 2026-10-17 case is found");
     assert_eq!(op["fix"]["safety"], "needs_approval");
+    assert_eq!(
+        op["auto_runs"], false,
+        "a bool, so the compact list keeps it"
+    );
     let id = op["id"].as_i64().unwrap();
 
     let applied = result_json(
@@ -21433,4 +22219,343 @@ async fn dismiss_refuses_an_until_in_the_past() {
         .unwrap_err();
     assert!(err.message.starts_with("E_INVALID"), "{err:?}");
     assert!(err.message.contains("in the future"), "{err:?}");
+}
+
+/// Puts the dial at `position` the way the chip does.
+fn set_position(t: &FleetTools, position: crate::service::autonomy::Position) {
+    let p = crate::service::autonomy::PRESETS
+        .iter()
+        .find(|p| p.position == position)
+        .unwrap();
+    let st = t.store.lock().unwrap();
+    use crate::service::settings as k;
+    st.set_setting(k::ORCHESTRATOR_MAX_LEVEL, &p.max_level.to_string())
+        .unwrap();
+    st.set_setting(k::CONTROL_AUTO_CONTINUE, &p.auto_continue.to_string())
+        .unwrap();
+    st.set_setting(k::CONTROL_AUTO_CONTINUE_MINUTES, &p.minutes.to_string())
+        .unwrap();
+    st.set_setting(k::CONTROL_REACT_TO_EVENTS, &p.react_to_events.to_string())
+        .unwrap();
+    assert_eq!(crate::service::autonomy::position(&st), position);
+}
+
+/// Session care (`control.session_care`, on by default): off, the
+/// operator's restart of its own session asks at every position; on, it
+/// goes without a card at Within your brief (audited on the session),
+/// retiring one only at Autopilot, and a session that is not its handoff
+/// still asks.
+#[tokio::test]
+async fn session_care_lets_the_operator_restart_and_retire_its_own_sessions() {
+    use super::params::{RestartSessionParams, SafeKillSessionParams};
+    use crate::service::autonomy::Position;
+    let (s, _, on_b) = two_host_store();
+    let stranger = s
+        .upsert_session("dev-c", "hostb", None, None, 1, 1, "running", None)
+        .unwrap();
+    // A person's session Control only sent a prompt to: an open handoff for
+    // prompts, never one care restarts or retires.
+    let briefed = s
+        .upsert_session("dev-d", "hostb", None, None, 1, 1, "running", None)
+        .unwrap();
+    s.insert_control_handoff(
+        &crate::store::NewHandoff {
+            tool: "send_prompt".into(),
+            kind: "session",
+            session_id: Some(briefed),
+            ..Default::default()
+        },
+        1,
+    )
+    .unwrap();
+    s.conn_ref()
+        .execute(
+            "UPDATE sessions SET origin = 'operator' WHERE id = ?1",
+            [on_b],
+        )
+        .unwrap();
+    let t = guarded_tools(s, true);
+    let restart = |id: i64| {
+        serde_json::from_value::<RestartSessionParams>(serde_json::json!({ "session_id": id }))
+            .unwrap()
+    };
+    let retire = |id: i64| {
+        serde_json::from_value::<SafeKillSessionParams>(serde_json::json!({ "session_id": id }))
+            .unwrap()
+    };
+    let not_asked = assert_not_asked;
+
+    // Review w30-10: care is on by default (the owner's 2026-10-20 choice):
+    // on a store that never set it, a restart of its own session at Within
+    // your brief goes without a card.
+    assert!(crate::service::settings::get_bool(
+        &t.store.lock().unwrap(),
+        crate::service::settings::CONTROL_SESSION_CARE
+    ));
+    set_position(&t, Position::Brief);
+    let (out, approval) = guard::tracking_approval(
+        t.restart_session(Extension(operator()), Parameters(restart(on_b))),
+    )
+    .await;
+    not_asked(&out);
+    assert_eq!(approval, Some(crate::store::APPROVAL_PRE_APPROVED));
+
+    // Care off: a restart asks even at Autopilot.
+    t.store
+        .lock()
+        .unwrap()
+        .set_setting(crate::service::settings::CONTROL_SESSION_CARE, "false")
+        .unwrap();
+    set_position(&t, Position::Autopilot);
+    let asked = t
+        .restart_session(Extension(operator()), Parameters(restart(on_b)))
+        .await
+        .unwrap_err();
+    confirm_nonce_of(&asked);
+
+    t.store
+        .lock()
+        .unwrap()
+        .set_setting(crate::service::settings::CONTROL_SESSION_CARE, "true")
+        .unwrap();
+
+    // Within your brief: a restart of its own session goes; retiring asks.
+    set_position(&t, Position::Brief);
+    let (out, approval) = guard::tracking_approval(
+        t.restart_session(Extension(operator()), Parameters(restart(on_b))),
+    )
+    .await;
+    not_asked(&out);
+    assert_eq!(approval, Some(crate::store::APPROVAL_PRE_APPROVED));
+    assert!(
+        t.store
+            .lock()
+            .unwrap()
+            .list_session_events(on_b, 20)
+            .unwrap()
+            .iter()
+            .any(|e| e.kind == super::support::EVENT_PRE_APPROVED),
+        "a pre-approved restart is audited on its session"
+    );
+    let asked = t
+        .safe_kill_session(Extension(operator()), Parameters(retire(on_b)))
+        .await
+        .unwrap_err();
+    confirm_nonce_of(&asked);
+    // Not its handoff: asks.
+    let asked = t
+        .restart_session(Extension(operator()), Parameters(restart(stranger)))
+        .await
+        .unwrap_err();
+    confirm_nonce_of(&asked);
+    // Only briefed: asks, at Within your brief and at Autopilot alike.
+    let asked = t
+        .restart_session(Extension(operator()), Parameters(restart(briefed)))
+        .await
+        .unwrap_err();
+    confirm_nonce_of(&asked);
+
+    // Autopilot: retiring its own session goes too.
+    set_position(&t, Position::Autopilot);
+    let (out, approval) = guard::tracking_approval(
+        t.safe_kill_session(Extension(operator()), Parameters(retire(on_b))),
+    )
+    .await;
+    not_asked(&out);
+    assert_eq!(approval, Some(crate::store::APPROVAL_PRE_APPROVED));
+
+    let asked = t
+        .safe_kill_session(Extension(operator()), Parameters(retire(briefed)))
+        .await
+        .unwrap_err();
+    confirm_nonce_of(&asked);
+
+    // Ask first: everything asks again, care or not.
+    set_position(&t, Position::Ask);
+    let asked = t
+        .restart_session(Extension(operator()), Parameters(restart(on_b)))
+        .await
+        .unwrap_err();
+    confirm_nonce_of(&asked);
+}
+
+/// Session care's restarts are budgeted per session: a session that wedges
+/// again after every restart is restarted without a card at most
+/// `guard::CARE_RESTARTS_PER_HOUR` times an hour, then the restart asks and
+/// says why. Another session's budget is its own.
+#[tokio::test]
+async fn session_care_restarts_ask_once_a_sessions_hourly_budget_is_spent() {
+    use super::params::RestartSessionParams;
+    use crate::service::autonomy::Position;
+    let (s, _, on_b) = two_host_store();
+    let on_a = s
+        .upsert_session("dev-e", "hostb", None, None, 1, 1, "running", None)
+        .unwrap();
+    s.conn_ref()
+        .execute(
+            "UPDATE sessions SET origin = 'operator' WHERE id IN (?1, ?2)",
+            [on_a, on_b],
+        )
+        .unwrap();
+    s.set_setting(crate::service::settings::CONTROL_SESSION_CARE, "true")
+        .unwrap();
+    let t = guarded_tools(s, true);
+    set_position(&t, Position::Brief);
+    let restart = |id: i64| {
+        serde_json::from_value::<RestartSessionParams>(serde_json::json!({ "session_id": id }))
+            .unwrap()
+    };
+    for _ in 0..guard::CARE_RESTARTS_PER_HOUR {
+        let (out, approval) = guard::tracking_approval(
+            t.restart_session(Extension(operator()), Parameters(restart(on_b))),
+        )
+        .await;
+        assert_not_asked(&out);
+        assert_eq!(approval, Some(crate::store::APPROVAL_PRE_APPROVED));
+    }
+    let asked = t
+        .restart_session(Extension(operator()), Parameters(restart(on_b)))
+        .await
+        .unwrap_err();
+    confirm_nonce_of(&asked);
+    assert!(
+        asked.message.contains("an hour per session"),
+        "{}",
+        asked.message
+    );
+    let (_, approval) = guard::tracking_approval(
+        t.restart_session(Extension(operator()), Parameters(restart(on_a))),
+    )
+    .await;
+    assert_eq!(approval, Some(crate::store::APPROVAL_PRE_APPROVED));
+}
+
+/// A task's start is a start like `new_session`'s (F2): at Autopilot,
+/// inside a running mission's grant, the operator's `work_link start` goes
+/// without a card even with `mcp.confirm_destructive` on (that toggle is
+/// for `work_link`'s tidy kills); outside a grant, or at Within your brief,
+/// it asks.
+#[tokio::test]
+async fn at_autopilot_the_operator_starts_a_task_inside_a_grant_without_a_card() {
+    use crate::service::autonomy::Position;
+    use crate::service::work::WorkLinkArgs;
+    let (s, _, _) = two_host_store();
+    s.set_setting(guard::SETTING_CONFIRM_DESTRUCTIVE, "true")
+        .unwrap();
+    let t = guarded_tools(s, true);
+    // Items with no project: the start itself fails locally, after the gate.
+    let start = |item: i64, host: Option<&str>| WorkLinkArgs {
+        action: "start".into(),
+        item_id: Some(item),
+        host_alias: host.map(String::from),
+        ..Default::default()
+    };
+    let item = |key: &str, mission: Option<i64>| -> i64 {
+        let st = t.store.lock().unwrap();
+        st.conn_ref()
+            .execute(
+                "INSERT INTO work_items (source, key, title, origin, created_at, updated_at, \
+                 orchestration_project_id) VALUES ('local', ?1, ?1, 'person', 1, 1, ?2)",
+                rusqlite::params![key, mission],
+            )
+            .unwrap();
+        st.conn_ref().last_insert_rowid()
+    };
+    let plain = item("PLAIN-1", None);
+    set_position(&t, Position::Autopilot);
+    let asked = t
+        .work_link(
+            Extension(operator()),
+            Parameters(start(plain, Some("hostb"))),
+        )
+        .await
+        .unwrap_err();
+    confirm_nonce_of(&asked);
+
+    let m = active_mission_with_grant(&t.store.lock().unwrap(), Some(vec!["hostb".into()]));
+    let member = item("MEMBER-1", Some(m));
+    let (out, approval) = guard::tracking_approval(t.work_link(
+        Extension(operator()),
+        Parameters(start(member, Some("hostb"))),
+    ))
+    .await;
+    let e = out.unwrap_err();
+    assert!(
+        !e.message.starts_with("E_CONFIRM_REQUIRED"),
+        "{}",
+        e.message
+    );
+    assert_eq!(approval, Some(crate::store::APPROVAL_PRE_APPROVED));
+    // A host the grant does not name, or none (fleet would place it): asks.
+    for host in [Some("hosta"), None] {
+        let asked = t
+            .work_link(Extension(operator()), Parameters(start(member, host)))
+            .await
+            .unwrap_err();
+        confirm_nonce_of(&asked);
+    }
+    // Review r3: a task of no mission, or an unknown one, is not inside
+    // the grant, whichever host it names.
+    for other in [plain, 9_999] {
+        let asked = t
+            .work_link(
+                Extension(operator()),
+                Parameters(start(other, Some("hostb"))),
+            )
+            .await
+            .unwrap_err();
+        confirm_nonce_of(&asked);
+    }
+    // Within your brief: a start always asks.
+    set_position(&t, Position::Brief);
+    let asked = t
+        .work_link(
+            Extension(operator()),
+            Parameters(start(member, Some("hostb"))),
+        )
+        .await
+        .unwrap_err();
+    confirm_nonce_of(&asked);
+}
+
+/// Review w09-1: Check now judges as the tick does. A host that cannot be
+/// reached is not looked at, so its finding stays rather than being
+/// reported fixed.
+#[tokio::test]
+async fn scan_leaves_an_unreachable_hosts_finding_alone() {
+    use crate::service::autofix::{sync, FindingBody, Severity};
+    let s = Store::open_in_memory().unwrap();
+    s.insert_host("h1", Some("h1")).unwrap(); // reachable: false
+    let id = sync::sync(
+        &s,
+        &[crate::service::autofix::Finding {
+            kind: "host.hooks_silent".into(),
+            subject: "host:h1".into(),
+            host_alias: Some("h1".into()),
+            severity: Severity::Degraded,
+            body: FindingBody {
+                title: "h1 stopped reporting session events".into(),
+                explanation: "e".into(),
+                evidence: vec![],
+                fix: None,
+                action: None,
+            },
+        }],
+        sync::Scope::All,
+        10,
+    )
+    .unwrap()
+    .opened[0];
+    assert!(s.mark_autofix_attempt(id, 15).unwrap());
+    let t = test_tools(s);
+    let mut dev = client_caller("phone", TokenMode::Full);
+    dev.client.as_mut().unwrap().trusted = true;
+    let scan = result_json(
+        &t.autofix(Extension(dev), Parameters(autofix_params("scan", None)))
+            .await
+            .unwrap(),
+    );
+    let live = scan["findings"].as_array().unwrap();
+    assert!(live.iter().any(|r| r["id"].as_i64() == Some(id)), "{scan}");
+    assert!(scan["fixed"].as_array().unwrap().is_empty(), "{scan}");
 }

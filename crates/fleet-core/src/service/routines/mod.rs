@@ -58,6 +58,11 @@
 //! prompt saying how far the run may go (report, ask before push, push). A
 //! failed run carries an error code, read as a named fix ([`fix`]).
 //!
+//! **Memory** ([`memory`], migration 204): a routine may keep notebooks in
+//! the fleet's database, its own and its project's, that each run reads
+//! under its prompt and rewrites with a `<routine-memory>` block in its
+//! reply; `memory_auto` also notes each finished run there.
+//!
 //! **Debugging** ([`debug`], migration 186): every scheduler decision is a
 //! row of the routine's trace (`routine_decisions`, the newest 200), the
 //! event fires dropped and the events filtered out included, and
@@ -68,6 +73,7 @@ pub mod backoff;
 pub mod cron;
 pub mod debug;
 pub mod fix;
+pub mod memory;
 pub mod outcome;
 pub mod tick;
 pub mod trace;
@@ -167,9 +173,6 @@ pub fn start_cursor(s: &Store, event: Option<&str>) -> Result<i64, IpcError> {
     }
 }
 
-/// A host filter, in characters.
-pub const EVENT_HOST_MAX_CHARS: usize = 64;
-
 /// `event_author` values: `me` (the same as absent) | `anyone`.
 pub const EVENT_AUTHORS: [&str; 2] = ["me", "anyone"];
 /// The longest event rate: a week.
@@ -250,6 +253,15 @@ pub struct RoutineInput {
     // 0 report only | 1 ask before push | 2 push (the default).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub autonomy: Option<i64>,
+    // Routine memory (migration 204; docs/control-api.md): the notebooks
+    // its runs read and may rewrite, routine | project | both; "" = none,
+    // absent = none for a new routine and unchanged for a change (a client
+    // that predates memory keeps a routine's).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory: Option<String>,
+    // The fleet notes each finished run in the notebook. Needs memory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_auto: Option<bool>,
 }
 
 /// The shortest time cap: a minute.
@@ -455,6 +467,7 @@ fn check(
     s: &Store,
     scope: &ViewScope,
     input: &RoutineInput,
+    before: Option<&RoutineRow>,
 ) -> Result<(RoutineFields, Option<i64>), IpcError> {
     let invalid = |m: String| IpcError::new(codes::E_INVALID, m);
     let name = input.name.trim();
@@ -525,10 +538,6 @@ fn check(
         Some(e) => event_filters(input, e)?,
         None => (None, None, None),
     };
-    let event_host = match event.as_deref() {
-        Some(e) => event_host_filter(s, scope, input, e)?,
-        None => None,
-    };
     crate::validate::host_alias(&input.host_alias)?;
     if s.get_host_row(&input.host_alias)?.is_none() {
         return Err(host_not_found(&input.host_alias));
@@ -537,6 +546,10 @@ fn check(
     if !scope.org.sees_org(org) {
         return Err(host_not_found(&input.host_alias));
     }
+    let event_host = match event.as_deref() {
+        Some(e) => event_host_filter(s, scope, input, e, org)?,
+        None => None,
+    };
     if s.get_project(input.project_id)?.is_none() {
         return Err(orgs::not_found("project", input.project_id));
     }
@@ -556,6 +569,7 @@ fn check(
         }
     }
     let guards = guards(s, scope, input, org)?;
+    let (memory_mode, memory_auto) = memory::check_input(input, before)?;
     let overlap = input.overlap.as_deref().unwrap_or("skip");
     if !ROUTINE_OVERLAPS.contains(&overlap) {
         return Err(invalid(format!(
@@ -586,6 +600,8 @@ fn check(
             fallback_host: guards.fallback_host,
             retry_once: guards.retry_once,
             autonomy: guards.autonomy,
+            memory: memory_mode,
+            memory_auto,
         },
         org,
     ))
@@ -771,12 +787,15 @@ fn event_filters(
 }
 
 /// The host filter `input` writes: a host this caller sees, on an event
-/// that is about a host.
+/// that is about a host. A fleet event fires a routine only from its own
+/// org (`tick::fleet_event_fire`), so on a hub with people the filter of
+/// one names a host of the routine's `org`: another's would never fire.
 fn event_host_filter(
     s: &Store,
     scope: &ViewScope,
     input: &RoutineInput,
     event: &str,
+    org: Option<i64>,
 ) -> Result<Option<String>, IpcError> {
     let Some(h) = input
         .event_host
@@ -792,15 +811,21 @@ fn event_host_filter(
             format!("{event} is about no host; it takes no host filter"),
         ));
     }
-    if h.chars().count() > EVENT_HOST_MAX_CHARS {
+    crate::validate::host_alias(h)?;
+    let host_org = s.host_org(h)?;
+    if s.get_host_row(h)?.is_none() || !scope.org.sees_org(host_org) {
+        return Err(host_not_found(h));
+    }
+    // The owner `save` gives the routine: none only on a hub with no people.
+    let peopleless = scope.person.is_none() && s.personal_owner_id()?.is_none();
+    if is_fleet_event(event) && host_org != org && !peopleless {
         return Err(IpcError::new(
             codes::E_INVALID,
-            format!("event_host is a host alias of at most {EVENT_HOST_MAX_CHARS} characters"),
+            format!(
+                "event_host {h} is in another organisation than the routine's host; \
+                 its {event} events never fire this routine"
+            ),
         ));
-    }
-    crate::validate::host_alias(h)?;
-    if s.get_host_row(h)?.is_none() || !scope.org.sees_org(s.host_org(h)?) {
-        return Err(host_not_found(h));
     }
     Ok(Some(h.to_string()))
 }
@@ -883,7 +908,7 @@ pub fn preview(
 ) -> Result<RoutinePreview, IpcError> {
     let s = lock(store)?;
     let before = id.map(|id| changeable(&s, scope, id)).transpose()?;
-    let problem = match check(&s, scope, input) {
+    let problem = match check(&s, scope, input, before.as_ref()) {
         Ok((_, org)) if before.as_ref().is_some_and(|b| b.org_id != org) => {
             Some(STAYS_IN_ORG.to_string())
         }
@@ -939,7 +964,8 @@ pub fn preview(
 }
 
 /// `routines { action: save, routine, routine_id? }`: without `routine_id`
-/// a new routine, the caller's; with it, a change of every field.
+/// a new routine, the caller's; with it, a change of every field but an
+/// absent `memory`, which keeps the routine's.
 pub fn save(
     store: &Mutex<Store>,
     scope: &ViewScope,
@@ -963,13 +989,15 @@ pub fn save(
                     ))
                 }
             };
-            let (f, org) = check(&s, scope, input)?;
+            let (f, org) = check(&s, scope, input, None)?;
             let cursor = start_cursor(&s, f.event.as_deref())?;
             s.insert_routine(org, owner, &f, next_fire(&f, now), cursor)
         }
         Some(id) => {
             let before = changeable(&s, scope, id)?;
-            let (f, org) = check(&s, scope, input)?;
+            // A change without `memory` keeps the routine's
+            // (`memory::check_input`).
+            let (f, org) = check(&s, scope, input, Some(&before))?;
             if org != before.org_id {
                 return Err(IpcError::new(codes::E_INVALID, STAYS_IN_ORG));
             }
@@ -1157,6 +1185,7 @@ pub(crate) fn record_skip(
         error_code: None,
         host_alias: None,
     })?;
+    tick::note_dropped_retry(s, r, &run, now);
     let checks = debug::fire_checks(s, r, now).unwrap_or_default();
     let mut steps = trace::opening(r, &run, &checks, Some(reason), now);
     steps.push(trace::settle_step("skipped", Some(reason), None, 0, now));

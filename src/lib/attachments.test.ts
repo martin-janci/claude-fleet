@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { addFiles, pastedName, fmtBytes, markNeedsReattach, clearSent, NEEDS_REATTACH, MAX_FILES, MAX_BYTES, MAX_TOTAL, samePath } from './attachments';
+import { addFiles, pastedName, fmtBytes, markNeedsReattach, clearSent, expireTray, TRAY_AUTH_TTL_MS, NEEDS_REATTACH, MAX_FILES, MAX_BYTES, MAX_TOTAL, samePath } from './attachments';
 
 const file = (o: Partial<{ path: string; name: string; size: number; kind: 'image' | 'text' | 'binary' }> = {}) => ({
   path: '/tmp/a.png', name: 'a.png', size: 1024, kind: 'image' as const, ...o,
@@ -240,5 +240,37 @@ describe('samePath', () => {
     expect(samePath('/home/me/A.png', '/home/me/a.png')).toBe(false);
     expect(samePath('/home/me/a.png', '/home/me/a.png')).toBe(true);
     expect(samePath('C:\\x\\a.png', 'C:\\x\\b.png')).toBe(false);
+  });
+});
+
+// Review w13-6 follow-up: a remembered tray outlives the allow-list's 4 h.
+describe('expireTray', () => {
+  const tile = (o: Record<string, unknown> = {}) => ({
+    id: 'att-1', path: '/tmp/a.png', name: 'a.png', size: 1, kind: 'image' as const,
+    thumb: null, state: 'ready' as const, error: null, pasted: false, ...o,
+  });
+
+  it('stamps a fresh tile with when it was attached', () => {
+    const before = Date.now();
+    const { next } = addFiles([], [file()]);
+    expect(next[0].attachedAt).toBeGreaterThanOrEqual(before);
+  });
+
+  it('marks a tile older than the allow-list window as needing a re-attach', () => {
+    const now = 10 * TRAY_AUTH_TTL_MS;
+    const old = tile({ id: 'old', attachedAt: now - TRAY_AUTH_TTL_MS - 1 });
+    const fresh = tile({ id: 'fresh', attachedAt: now - 1000 });
+    const unknown = tile({ id: 'unknown' });
+    const out = expireTray([old, fresh, unknown], now);
+    expect(out.map((a) => [a.id, a.state, a.error])).toEqual([
+      ['old', 'error', NEEDS_REATTACH],
+      ['fresh', 'ready', null],
+      ['unknown', 'ready', null],
+    ]);
+  });
+
+  it('returns the same list when nothing has lapsed', () => {
+    const list = [tile({ attachedAt: 5 })];
+    expect(expireTray(list, 10)).toBe(list);
   });
 });

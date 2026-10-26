@@ -107,9 +107,13 @@ not, and why hub-client mode is the recommended setup:
   base set in Settings → Projects, laid out as `<base>/<owner>/<repo>` (default
   `~/projects/github.com`) or flat `<base>/<repo>`; sessions are grouped under
   their project.
-- **Account model** — each host's logged-in Claude account (email / org / tier)
-  is auto-detected by probing the remote `~/.claude.json`. No credentials are
-  ever read or stored.
+- **Accounts** — each host's Claude login (email / org / tier) is read from
+  its `~/.claude.json`, and a host can hold more logins as profiles. Accounts
+  → **+ Add account** signs a new profile in with a subscription or an API
+  key (the key is written to the host), a running session can be switched to
+  another login, and automatic switching after a limit is a setting. The
+  usage poll reads a profile's credentials on the host; fleet never stores
+  them ([accounts guide](docs/accounts.md)).
 - **Terminal pane** — a custom ANSI screen-buffer renderer shows the attached
   session live.
 - **Prompt transfer** — send a prompt to one or many sessions at once.
@@ -135,8 +139,16 @@ not, and why hub-client mode is the recommended setup:
   app's microphone ([guide](docs/voice.md)).
 - **Updates** — signed release channels the hub reads and serves
   ([guide](docs/updates.md)).
-- **Two layouts** — Classic (the default) and New, switched in Settings →
-  Appearance → Layout ([getting started](docs/getting-started.md#guided-setup--the-get-started-checklist)).
+- **Control** — an operator agent you talk to in Control. It starts, briefs
+  and follows sessions for you; the autonomy chip (Ask first, Within your
+  brief, Autopilot) decides what it may do without a confirmation card
+  ([control API](docs/control-api.md), [status](docs/status.md)).
+- **More than one hub** — a desktop can show further hubs beside its own
+  fleet, each its own pairing, without restarting
+  ([hub guide](docs/hub.md#more-than-one-hub-in-one-window)).
+- **Orbit layout** — a rail with Control, Inbox, Sessions, Work, Automation,
+  Accounts, Toolkit and Settings, the session inspector, and Get started with
+  a first-run tour ([getting started](docs/getting-started.md#guided-setup--the-get-started-checklist)).
 
 ## Documentation
 
@@ -206,6 +218,7 @@ crates/fleet-hub/              # headless hub daemon and its CLI
 crates/fleet-agent/            # agent for hosts the hub cannot dial (needs fleet-proto only)
 crates/fleet-proto/            # hub/agent frame types
 crates/fleet-update/           # update manifests, signatures and channels
+crates/fleet-updater/          # the Docker hub's update sidecar
 crates/fleet-agent-e2e/        # tests only: the hub against the real agent
 src-tauri/src/commands/        # thin Tauri IPC handlers wrapping crates/fleet-core/src/service/
 crates/fleet-core/migrations/  # SQLite migrations (registered in the MIGRATIONS table in crates/fleet-core/src/store/schema.rs)

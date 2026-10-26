@@ -586,3 +586,182 @@ fn a_worker_reads_the_mission_it_has_an_open_run_on_and_nothing_more() {
         codes::E_NOTFOUND
     );
 }
+
+/// TASK-295: red CI on a mission's open or merged pull request holds
+/// Complete; a person's `ci_override` completes it and is recorded. A
+/// closed PR does not count, and a PR the caller may not see still holds,
+/// unnamed.
+#[test]
+fn red_ci_on_a_mission_pr_holds_complete_until_a_person_overrides() {
+    let st = store();
+    let (ana, bo) = people(&st);
+    let me = person(&st, None, ana);
+    let m = new_mission(&st, &me, None);
+    let task = lock(&st)
+        .unwrap()
+        .create_local_work_item(None, "cards")
+        .unwrap()
+        .id;
+    let mut args = by_id("mission_item", m.id);
+    args.item_id = Some(task);
+    item(&args, &st, &me).unwrap();
+    {
+        let s = lock(&st).unwrap();
+        test_mission_pr(&s, task, ana, 476, "MERGED", "failing");
+        test_mission_pr(&s, task, ana, 477, "CLOSED", "failing");
+        test_mission_pr(&s, task, ana, 478, "OPEN", "passing");
+        test_mission_pr(&s, task, bo, 479, "OPEN", "failing");
+    }
+    let mut st_args = by_id("mission_state", m.id);
+    st_args.status = Some("active".into());
+    set_state(&st_args, &st, &me).unwrap();
+
+    st_args.status = Some("completed".into());
+    let e = set_state(&st_args, &st, &me).unwrap_err();
+    assert_eq!(e.code, codes::E_CI_FAILING);
+    assert!(
+        e.message
+            .contains("acme/pay#476 and a pull request you cannot see"),
+        "{}",
+        e.message
+    );
+    assert!(!e.message.contains("#477") && !e.message.contains("#479"));
+    assert_eq!(
+        lock(&st).unwrap().get_mission(m.id).unwrap().unwrap().state,
+        "active"
+    );
+
+    // Other moves are not held.
+    st_args.status = Some("paused".into());
+    set_state(&st_args, &st, &me).unwrap();
+
+    st_args.status = Some("completed".into());
+    st_args.ci_override = Some(true);
+    let r = set_state(&st_args, &st, &me).unwrap();
+    assert_eq!(r.state, "completed");
+    let events = lock(&st).unwrap().mission_events(m.id, None, 50).unwrap();
+    let o = events
+        .iter()
+        .find(|e| e.kind == "ci_override")
+        .expect("the override is recorded");
+    assert_eq!(o.actor, format!("person:{ana}"));
+    assert_eq!(
+        o.payload.as_ref().unwrap()["prs"],
+        serde_json::json!(["", "acme/pay#476"])
+    );
+}
+
+#[test]
+fn ci_refusal_names_what_it_may() {
+    assert!(ci_refusal(&[]).is_none());
+    let e = ci_refusal(&["o/r#1".into(), "o/r#2".into()]).unwrap();
+    assert!(
+        e.message.starts_with("CI is failing on o/r#1, o/r#2;"),
+        "{}",
+        e.message
+    );
+    let e = ci_refusal(&[String::new(), String::new()]).unwrap();
+    assert!(
+        e.message
+            .starts_with("CI is failing on 2 pull requests you cannot see;"),
+        "{}",
+        e.message
+    );
+    assert!(e.message.ends_with("(ci_override)"), "{}", e.message);
+    // Review r8: the step takes no override, so it points to Complete.
+    let e = ci_step_refusal(&["o/r#1".into()]).unwrap();
+    assert_eq!(e.code, codes::E_CI_FAILING);
+    assert!(
+        e.message.starts_with("CI is failing on o/r#1;") && e.message.contains("its own Complete"),
+        "{}",
+        e.message
+    );
+    assert!(!e.message.contains("ci_override"), "{}", e.message);
+}
+
+/// Lanes design L2: a person puts a member in a lane and takes it out, and
+/// the mission's detail lists its lanes with their tasks.
+#[test]
+fn a_person_puts_a_task_in_a_lane() {
+    let st = store();
+    let (ana, _) = people(&st);
+    let me = person(&st, None, ana);
+    let m = new_mission(&st, &me, None);
+    let task = lock(&st)
+        .unwrap()
+        .create_local_work_item(None, "cards")
+        .unwrap()
+        .id;
+    let mut args = by_id("mission_item", m.id);
+    args.item_id = Some(task);
+    args.lane = Some("backend".into());
+    item(&args, &st, &me).unwrap();
+    let d = mission(&st, &me, m.id, None).unwrap();
+    assert_eq!(d.lanes.len(), 1);
+    assert_eq!(
+        (d.lanes[0].name.as_str(), d.lanes[0].item_ids.clone()),
+        ("backend", vec![task])
+    );
+    args.lane = Some(String::new());
+    item(&args, &st, &me).unwrap();
+    assert!(mission(&st, &me, m.id, None).unwrap().lanes.is_empty());
+    // The root is in no lane.
+    let mut root = by_id("mission_item", m.id);
+    root.item_id = m.root_item_id;
+    root.lane = Some("x".into());
+    assert!(item(&root, &st, &me).is_err());
+}
+
+/// Lanes design L4: a lane whose every task is done reads as done.
+#[test]
+fn a_lane_whose_tasks_are_all_done_is_done() {
+    let st = store();
+    let (ana, _) = people(&st);
+    let me = person(&st, None, ana);
+    let m = new_mission(&st, &me, None);
+    let task = lock(&st)
+        .unwrap()
+        .create_local_work_item(None, "cards")
+        .unwrap()
+        .id;
+    let mut args = by_id("mission_item", m.id);
+    args.item_id = Some(task);
+    args.lane = Some("backend".into());
+    item(&args, &st, &me).unwrap();
+    assert_eq!(
+        mission(&st, &me, m.id, None).unwrap().lanes[0].state,
+        "idle"
+    );
+    lock(&st).unwrap().set_item_status(task, "done").unwrap();
+    assert_eq!(
+        mission(&st, &me, m.id, None).unwrap().lanes[0].state,
+        "done"
+    );
+}
+
+/// Review r10: hub client mode routes `work_mission` typed, so an older
+/// hub's missing `limit_wait` must stay missing on the way to the webview
+/// (the client then reads `events`), and this hub's `null` stays `null`.
+#[test]
+fn limit_wait_keeps_absent_apart_from_null_through_a_round_trip() {
+    let st = store();
+    let (ana, _) = people(&st);
+    let me = person(&st, None, ana);
+    let m = new_mission(&st, &me, None);
+    let ours = mission(&st, &me, m.id, None).unwrap();
+    assert_eq!(ours.limit_wait, Some(None), "this hub always answers");
+    let json = serde_json::to_value(&ours).unwrap();
+    assert!(
+        json["limit_wait"].is_null() && json.get("limit_wait").is_some(),
+        "{json}"
+    );
+    let back: MissionDetail = serde_json::from_value(json).unwrap();
+    assert_eq!(back.limit_wait, Some(None));
+
+    let mut older = serde_json::to_value(&ours).unwrap();
+    older.as_object_mut().unwrap().remove("limit_wait");
+    let read: MissionDetail = serde_json::from_value(older).unwrap();
+    assert_eq!(read.limit_wait, None);
+    let again = serde_json::to_value(&read).unwrap();
+    assert!(again.get("limit_wait").is_none(), "{again}");
+}

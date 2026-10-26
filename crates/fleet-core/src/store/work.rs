@@ -358,9 +358,7 @@ fn default_role() -> String {
     "work".into()
 }
 
-fn default_true() -> bool {
-    true
-}
+use crate::serde_util::default_true;
 
 /// A live session's primary work, for the session row and the sidebar.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -445,9 +443,7 @@ pub struct WorkSummary {
     pub archived_at: Option<i64>,
 }
 
-fn is_zero(n: &u32) -> bool {
-    *n == 0
-}
+use crate::serde_util::is_zero_u32 as is_zero;
 
 /// What to link a session to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

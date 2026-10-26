@@ -252,8 +252,10 @@ fn add_and_mute_check_their_words() {
         add(&w.store, "ask", "  ", 1).unwrap_err().code,
         codes::E_INVALID
     );
-    assert!(mute(&w.store, "session", w.child, true, 1).unwrap());
-    assert!(!mute(&w.store, "session", w.child, true, 1).unwrap());
+    // Muted now: a mute older than the session is an earlier session's.
+    let now = crate::store::now_unix();
+    assert!(mute(&w.store, "session", w.child, true, now).unwrap());
+    assert!(!mute(&w.store, "session", w.child, true, now).unwrap());
     assert_eq!(
         mute(&w.store, "task", 1, true, 1).unwrap_err().code,
         codes::E_INVALID
@@ -263,4 +265,79 @@ fn add_and_mute_check_their_words() {
     assert!(f.follow.muted);
     assert_eq!(f.follow.state, FollowState::Muted);
     assert_eq!(v.notes[0].text, "keep #4 in mind");
+}
+
+#[tokio::test]
+async fn a_read_error_leaves_the_cursor_and_the_next_pass_still_sends() {
+    let w = world();
+    let fake = Fake::default();
+    let now = crate::store::now_unix();
+    run_with(&w.store, &fake, now).await;
+    event(&w, w.op, "compact_done", Some("auto"));
+    let before = JournalState::load(&w.store.lock().unwrap());
+    assert!(before.cursor.is_some());
+    // The events cannot be read: nothing sent, the cursor neither rewound
+    // to 0 nor moved past the new conversation.
+    let rename = |from: &str, to: &str| {
+        w.store
+            .lock()
+            .unwrap()
+            .conn_ref()
+            .execute_batch(&format!("ALTER TABLE {from} RENAME TO {to}"))
+            .unwrap();
+    };
+    rename("session_events", "session_events_away");
+    assert!(!run_with(&w.store, &fake, now).await.sent);
+    assert_eq!(JournalState::load(&w.store.lock().unwrap()), before);
+    rename("session_events_away", "session_events");
+    assert!(run_with(&w.store, &fake, now).await.sent);
+    assert_eq!(fake.sent.lock().unwrap().len(), 1);
+}
+
+/// Review w04-11: a steer from the Mission room makes the mission one of
+/// Control's threads, so the feed tells Control what happens on it next.
+#[test]
+fn a_steer_follows_its_mission() {
+    let w = world();
+    let m = w
+        .store
+        .lock()
+        .unwrap()
+        .create_mission(
+            &crate::store::NewMission {
+                name: "m",
+                goal: "g",
+                ..Default::default()
+            },
+            "fleet",
+        )
+        .unwrap()
+        .id;
+    assert!(!w
+        .store
+        .lock()
+        .unwrap()
+        .handed_off_mission_ids()
+        .unwrap()
+        .contains(&m));
+    let args = |thread: &str, id: i64| JournalArgs {
+        action: Some("follow".into()),
+        thread: Some(thread.into()),
+        id: Some(id),
+        text: Some("pause it when wave 2 finishes".into()),
+    };
+    assert!(call(&w.store, &args("mission", m), 5).is_ok());
+    let s = w.store.lock().unwrap();
+    assert!(s.handed_off_mission_ids().unwrap().contains(&m));
+    let h = &s.list_control_handoffs(1).unwrap()[0];
+    assert_eq!((h.tool.as_str(), h.mission_id), ("steer", Some(m)));
+    drop(s);
+    assert_eq!(
+        call(&w.store, &args("session", 1), 5).unwrap_err().code,
+        codes::E_INVALID
+    );
+    assert_eq!(
+        call(&w.store, &args("mission", 9_999), 5).unwrap_err().code,
+        codes::E_NOTFOUND
+    );
 }

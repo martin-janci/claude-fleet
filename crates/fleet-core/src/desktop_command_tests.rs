@@ -32,6 +32,10 @@ const OFF_MAIN_THREAD: &[(&str, &str)] = &[
     // which `no_desktop_command_locks_the_store_on_the_main_thread` covers
     // for every command).
     ("src-tauri/src/commands/mcp.rs", "install_fleet_hook"),
+    // An extra fleet's Retry rebuilds its client from the token in the OS
+    // keychain; Remove forgets that token.
+    ("src-tauri/src/commands/fleets.rs", "fleet_retry_now"),
+    ("src-tauri/src/commands/fleets.rs", "fleet_remove"),
 ];
 
 /// The attribute line directly above `pub fn <name>(` / `pub async fn <name>(`.

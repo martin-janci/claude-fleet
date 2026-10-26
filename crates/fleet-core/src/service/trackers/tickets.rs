@@ -686,6 +686,12 @@ pub struct StartArgs {
     /// The login the session bills (redesign 8.7): a credential profile on
     /// the host; `None` = the host's own. Set by a mission's grant.
     pub profile: Option<String>,
+    /// The branch a NEW checkout starts from instead of the repo's default
+    /// branch: a run beside the work it continues or checks (a retry, a
+    /// review, a test) starts from that work's branch
+    /// ([`crate::service::work::run::prior_work`]). A reused worktree
+    /// ignores it. Set by a run, never from a tool's own parameters.
+    pub base_branch: Option<String>,
 }
 
 /// Where a start lands and what it is called.
@@ -712,6 +718,10 @@ pub struct StartPlan {
     /// is not this plan's.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub parallel: bool,
+    /// The branch a new checkout starts from ([`StartArgs::base_branch`]);
+    /// `None`, the default branch. Never read back from a client.
+    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
+    pub base_branch: Option<String>,
     /// Who starts ([`StartArgs::decider`]): decides the link's source.
     /// Never on the wire: a plan read back is a person's.
     #[serde(skip)]
@@ -1024,12 +1034,18 @@ pub(crate) fn seen_host(
     }
 }
 
-/// The host a start that names none lands on (control review F5): the best
-/// placement among the hosts that have run the project, the one it last ran
-/// on (`seen`) winning a near tie; `seen` itself when placement has no
-/// candidate (no readings, every login spent: the start's own refusals say
-/// why); `None` only when no host has run it.
-fn placed_host(s: &Store, project_id: i64, seen: Option<String>) -> Option<String> {
+/// The host a start that names none lands on (control review F5), with the
+/// login placement chose there (review w02-1: the start bills that login,
+/// not the host's own): the best placement among the hosts that have run
+/// the project, the one it last ran on (`seen`) winning a near tie; `seen`
+/// itself, on its own login, when placement has no candidate (no readings,
+/// every login spent: the start's own refusals say why); `None` only when
+/// no host has run it.
+pub(crate) fn placed_host(
+    s: &Store,
+    project_id: i64,
+    seen: Option<String>,
+) -> Option<(String, Option<String>)> {
     let seen = seen?;
     let want = crate::service::placement::Want {
         prefer_host: Some(seen.clone()),
@@ -1044,8 +1060,8 @@ fn placed_host(s: &Store, project_id: i64, seen: Option<String>) -> Option<Strin
     )
     .ok()
     .and_then(|p| p.candidates.into_iter().next())
-    .map(|c| c.host_alias)
-    .or(Some(seen))
+    .map(|c| (c.host_alias, c.profile))
+    .or(Some((seen, None)))
 }
 
 /// Plan where a resolved ticket's start lands. `E_EXISTS` (with the
@@ -1135,6 +1151,10 @@ pub fn plan_resolved(
             .filter(|h| h != &p.1),
         _ => None,
     };
+    // The login placement picked along with the host, when it picked the
+    // host: the start runs there under it unless the caller or a rule names
+    // one (review w02-1).
+    let mut placed_profile: Option<String> = None;
     let host_alias = match (&args.host_alias, scope.host()) {
         (Some(h), _) => h.clone(),
         (None, Some(h)) => h.to_string(),
@@ -1149,10 +1169,13 @@ pub fn plan_resolved(
         (None, None) => match match seen_host(&s, seen, project_id)? {
             // An org-bound client keeps the host it saw: placement does not
             // judge orgs.
-            seen if scope.bound_org().is_some() => seen,
+            seen if scope.bound_org().is_some() => seen.map(|h| (h, None)),
             seen => placed_host(&s, project_id, seen),
         } {
-            Some(h) => h,
+            Some((h, profile)) => {
+                placed_profile = profile;
+                h
+            }
             None => {
                 let hosts: Vec<String> = s
                     .list_hosts()?
@@ -1272,6 +1295,7 @@ pub fn plan_resolved(
         worktree_id,
         per_project: args.per_project,
         parallel: args.parallel,
+        base_branch: args.base_branch.clone().filter(|_| worktree_id.is_none()),
         decider: args.decider,
         owner: args.owner,
         origin: args.origin.clone(),
@@ -1285,6 +1309,7 @@ pub fn plan_resolved(
                 placement
                     .as_ref()
                     .and_then(|w| w.profile.clone())
+                    .or(placed_profile)
                     .filter(|_| !codex)
             }),
         model: rule.as_ref().and_then(|r| r.model.clone()),
@@ -1593,7 +1618,7 @@ where
         name: String::new(),
         call_id: None,
         new_worktree: plan.worktree_id.is_none().then(|| plan.branch.clone()),
-        base_branch: None,
+        base_branch: plan.base_branch.clone(),
         kind: None,
         start_command: None,
         friendly_name: crate::validate::friendly_name(&plan.name)

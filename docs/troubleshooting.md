@@ -20,6 +20,7 @@ it.
 | Tunnel shows **"flapping"** | `ssh` keeps exiting before the connection is established — most often an orphaned tunnel from an earlier app instance still holding the remote port | The supervisor terminates the orphan itself on the next attempt. If it persists, read the badge's reason (the last `ssh` stderr) and see [Tunnel shows "flapping"](#tunnel-shows-flapping). |
 | **MCP bind error** — server enabled but not listening | Port 4180 (or configured port) already in use | Change the port in **Settings → Control API**. The `bind_error` field in `McpStatus` shows the exact OS error. |
 | **No projects found** | The projects base is empty, does not exist, or uses a different layout | Set this machine's projects base and layout in **Settings → Projects**, then click **Save & rescan**. With no base set, `CLAUDE_FLEET_PROJECTS_BASE` and then `~/projects/github.com` are used. (`E_FLEET_PROJECTS_BASE`) |
+| A host or session is in a known broken state (out-of-date fleet files, a missing or wrong fleet entry in the host's `~/.claude.json`, a session stuck on a prompt), or the host chip shows a count | Autofix found it; a safe fix may already have run, or the fix waits for you | Check **Needs you → Problems & fixes**: each finding says what is wrong, what its fix runs and whether it was tried. Apply or dismiss it there. |
 | Session **won't attach** / appears as a ghost | The underlying tmux session has been destroyed | Use **Recreate** to replace the session, or **Dismiss** to remove the ghost entry. |
 | **Every** session on one host turned into a ghost | The host rebooted or its tmux server restarted | See [tmux server restarted](#a-hosts-tmux-server-restarted-all-sessions-become-ghosts). Recreate before the next pass removes the rows. |
 | Hosts **offline** right after the laptop wakes | SSH ControlMasters went stale during sleep | Wait one or two reconcile passes, or click **Re-probe**. See [after sleep / wake](#after-laptop-sleep--wake). |
@@ -325,8 +326,9 @@ apart, and none runs while the session is `working` or after a turn ended
 past the OOM text. The count reads the timeline, which keeps the newest 500
 entries per session.
 
-Tick passes whose pane capture shows Claude's spinner ("esc to interrupt")
-count as activity, so one long tool call is not demoted. A row that was
+Tick passes whose pane capture shows Claude's spinner (`✢ Deliberating… (4s ·
+thinking)`) or its "esc to interrupt" hint count as activity, and set the row
+`working` without waiting for the next `claude agents` pass, so one long tool call is not demoted. A row that was
 demoted is `idle` only as a guess: `run_prompt`, a move's source check and
 `wait_for_session { until: "idle" }` look at its pane first and treat it as
 mid-turn unless the pane shows the REPL's idle prompt. That holds until a

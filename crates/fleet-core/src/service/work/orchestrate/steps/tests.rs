@@ -53,6 +53,7 @@ fn node(id: i64, state: &str) -> GraphNode {
         waiting_for: vec![],
         verification: None,
         attempt: None,
+        evidence: None,
     }
 }
 

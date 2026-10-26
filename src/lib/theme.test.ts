@@ -1,6 +1,7 @@
+import { readFileSync } from 'node:fs';
 import { describe, it, expect, beforeEach } from 'vitest';
 import { get } from 'svelte/store';
-import { theme, applyTheme, cycleTheme, sunFor, resolveContrast, paint } from './theme';
+import { theme, applyTheme, cycleTheme, sunFor, resolveContrast, paint, BOOT_KEY } from './theme';
 
 describe('theme store', () => {
   beforeEach(() => {
@@ -69,5 +70,38 @@ describe('theme store', () => {
     expect(resolveContrast('system', true)).toBe('high');
     expect(resolveContrast('system', false)).toBe('std');
     expect(resolveContrast('soft', true)).toBe('soft');
+  });
+});
+
+// Review w20-5: a launch opens on the last painted palette, not app.css's.
+describe('the boot snapshot', () => {
+  const boot = () => new Function(readFileSync('public/theme-boot.js', 'utf8'))();
+  const root = document.documentElement;
+
+  beforeEach(() => {
+    localStorage.clear();
+    root.removeAttribute('data-theme');
+    root.removeAttribute('style');
+  });
+
+  it('paint() stores what it painted, and theme-boot.js replays it on a bare page', () => {
+    applyTheme('dark');
+    const snap = JSON.parse(localStorage.getItem(BOOT_KEY)!);
+    expect(snap.theme).toBe('dark');
+    const bg = root.style.getPropertyValue('--bg');
+    expect(snap.vars.bg).toBe(bg);
+    root.removeAttribute('data-theme');
+    root.removeAttribute('style');
+    boot();
+    expect(root.getAttribute('data-theme')).toBe('dark');
+    expect(root.style.getPropertyValue('--bg')).toBe(bg);
+  });
+
+  it('theme-boot.js does nothing without a snapshot, or with a broken one', () => {
+    boot();
+    expect(root.hasAttribute('data-theme')).toBe(false);
+    localStorage.setItem(BOOT_KEY, '{nope');
+    boot();
+    expect(root.hasAttribute('data-theme')).toBe(false);
   });
 });

@@ -52,6 +52,15 @@ pub struct ProjectRow {
     /// also the right answer for such a hub: it has no system projects.
     #[serde(default)]
     pub system: bool,
+    /// The checkout's `origin` when it names a github.com repository
+    /// (migration 207, `repo_url::github_origin`); `None` when it has none,
+    /// is not on GitHub, or was not read yet. `owner`/`repo` are not that
+    /// identity (an adopted non-GitHub checkout is `local/<dir>`), so a
+    /// clone of this project elsewhere (New session on another fleet) uses
+    /// this URL and is not offered without it. `serde(default)` for a hub
+    /// built before 207, whose rows carry no such key.
+    #[serde(default)]
+    pub github_origin: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -74,7 +83,7 @@ pub type FingerprintKeys = std::collections::HashMap<i64, Vec<String>>;
 
 /// Columns every `ProjectRow` query selects, in [`map_project_row`] order.
 pub(super) const PROJECT_COLUMNS: &str =
-    "id, owner, repo, base_path, last_session_at, adopted, system";
+    "id, owner, repo, base_path, last_session_at, adopted, system, github_origin";
 
 /// Map a row selected with [`PROJECT_COLUMNS`] (at column offset 0).
 pub(super) fn map_project_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProjectRow> {
@@ -86,6 +95,7 @@ pub(super) fn map_project_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Proje
         last_session_at: row.get(4)?,
         adopted: row.get::<_, i64>(5)? != 0,
         system: row.get::<_, i64>(6)? != 0,
+        github_origin: row.get(7)?,
     })
 }
 
@@ -404,6 +414,13 @@ pub struct SessionRow {
     /// an older hub, which has no pins.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pinned_at: Option<i64>,
+    /// The next prompt Claude Code proposes after a turn, the dim text in
+    /// its empty prompt box (migration 206). Fleet's Claude Code plugin
+    /// posts it as a `PromptSuggestion` hook event; the next prompt, or the
+    /// conversation ending, clears it. A client offers it to send as is.
+    /// Absent when nothing is proposed, and from an older hub.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_suggestion: Option<String>,
     /// What a rule, Jev or an LLM proposes about this session, one per
     /// feature (step 2.8): read from `decision_runs`, never stored on the
     /// row. A person confirms or changes each; none ever acts. Empty, and
@@ -762,7 +779,7 @@ pub(super) const SESSION_COLUMNS: &str = concat!(
     " AS proposals, \
      (SELECT json_object('draft', d.draft, 'why', d.why, 'updated_at', d.updated_at) \
         FROM form_drafts d WHERE d.session_id = sessions.id) AS form_draft, \
-     pinned_at"
+     pinned_at, prompt_suggestion"
 );
 
 /// Decode `sessions.pr_evidence`. Malformed text (never written by us)
@@ -885,6 +902,7 @@ pub(super) fn map_session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Sessi
             .get::<_, Option<String>>(74)?
             .and_then(|j| serde_json::from_str(&j).ok()),
         pinned_at: row.get(75)?,
+        prompt_suggestion: row.get(76)?,
     })
     .map(|mut r| {
         // A link's org is its tracker item's, else the session's (M5).
@@ -1333,6 +1351,14 @@ pub struct HostRow {
     /// an older hub omits it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub signed_out_logins: Vec<SignedOutLogin>,
+    /// macOS: the host's default login is kept both in the Keychain and in
+    /// `~/.claude/.credentials.json` (migration 203, `credsplit=` of
+    /// [`crate::tmux::HOST_HEALTH_SCRIPT`]), so the two copies revoke each
+    /// other's refresh token (`service::login_conflicts`). `None`: not
+    /// macOS, never sampled, or the host could not tell. Per-field default:
+    /// an older hub omits it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub login_split: Option<bool>,
 }
 
 /// One signed-out login on a host ([`HostRow::signed_out_logins`]).
@@ -1402,6 +1428,12 @@ pub struct HostHealth {
     pub mem_low: bool,
     #[serde(default)]
     pub cpu_saturated: bool,
+    /// Migration 203. Per-field default: an older hub's ping omits it.
+    /// Sent as `null` when `None`, like the fields above: `applyPing`
+    /// spreads the ping over the row it holds, so a left-out key would keep
+    /// a stale `true` after the host stops reporting a split.
+    #[serde(default)]
+    pub login_split: Option<bool>,
 }
 
 impl HostHealth {
@@ -1425,6 +1457,7 @@ impl HostHealth {
             mem_pressure: row.mem_pressure,
             mem_low: row.mem_low,
             cpu_saturated: row.cpu_saturated,
+            login_split: row.login_split,
         }
     }
 }
@@ -1455,7 +1488,7 @@ pub(super) const HOST_COLUMNS: &str =
      harnesses, provision_warning, auth_overrides, claude_profiles, cpu_count, mem_total_kb, \
      boot_at, latency_ms, worktree_kb, worktree_at, agents_on_path, \
      last_reachable_at, last_probe_error_code, last_probe_error, \
-     cpu_pct, mem_pressure, mem_low, cpu_saturated, signed_out_logins";
+     cpu_pct, mem_pressure, mem_low, cpu_saturated, signed_out_logins, login_split";
 
 /// Map a row selected with [`HOST_COLUMNS`].
 pub(super) fn map_host_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostRow> {
@@ -1533,6 +1566,8 @@ pub(super) fn map_host_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostRow>
             .get::<_, Option<String>>(41)?
             .and_then(|t| serde_json::from_str::<Vec<SignedOutLogin>>(&t).ok())
             .unwrap_or_default(),
+        // Migration 203.
+        login_split: row.get::<_, Option<i64>>(42)?.map(|v| v != 0),
     })
 }
 
@@ -2143,6 +2178,20 @@ pub(super) fn fetch_project(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A ping must carry a cleared `login_split` as `null`: the desktop
+    /// spreads the ping's health over the row it holds, so a left-out key
+    /// would keep a stale `true` (and its login-conflict mark).
+    #[test]
+    fn a_ping_sends_a_cleared_login_split_as_null() {
+        let mut h: HostHealth = serde_json::from_str("{}").unwrap();
+        assert_eq!(h.login_split, None);
+        let v = serde_json::to_value(&h).unwrap();
+        assert_eq!(v.get("login_split"), Some(&serde_json::Value::Null));
+        h.login_split = Some(true);
+        let v = serde_json::to_value(&h).unwrap();
+        assert_eq!(v["login_split"], serde_json::json!(true));
+    }
 
     /// A desktop paired to a hub parses that hub's rows, and the hub may be
     /// older than the desktop. Migration 038 added `system` to `ProjectRow`;

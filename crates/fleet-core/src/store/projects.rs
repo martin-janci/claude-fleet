@@ -90,6 +90,48 @@ impl Store {
         Ok(id)
     }
 
+    /// Record project `id`'s GitHub origin ([`ProjectRow::github_origin`]):
+    /// the scan's and `service::add_project`'s read of its `origin`, already
+    /// filtered by `repo_url::github_origin`. `project:updated` fires only
+    /// when the value changed, so a rescan that reads the same origin is
+    /// silent.
+    pub fn set_project_github_origin(
+        &self,
+        id: i64,
+        origin: Option<&str>,
+    ) -> Result<(), rusqlite::Error> {
+        let n = self.conn.execute(
+            "UPDATE projects SET github_origin = ?2 WHERE id = ?1 AND github_origin IS NOT ?2",
+            rusqlite::params![id, origin],
+        )?;
+        if n > 0 {
+            if let Some(row) = self.get_project(id)? {
+                self.bus.project_updated(&row);
+            }
+        }
+        Ok(())
+    }
+
+    /// Fill project `id`'s GitHub origin only while it has none recorded:
+    /// the backfill for a row that predates migration 207 or that the local
+    /// scan never sees (a checkout on a remote host only), from a read of a
+    /// checkout of it elsewhere (`service::worktrees`'s remote scan, a clone
+    /// onto another host). The local scan stays the one writer that changes
+    /// or clears a recorded origin. `project:updated` fires only when it
+    /// wrote.
+    pub fn fill_project_github_origin(&self, id: i64, origin: &str) -> Result<(), rusqlite::Error> {
+        let n = self.conn.execute(
+            "UPDATE projects SET github_origin = ?2 WHERE id = ?1 AND github_origin IS NULL",
+            rusqlite::params![id, origin],
+        )?;
+        if n > 0 {
+            if let Some(row) = self.get_project(id)? {
+                self.bus.project_updated(&row);
+            }
+        }
+        Ok(())
+    }
+
     pub fn list_projects(&self) -> Result<Vec<ProjectRow>, rusqlite::Error> {
         let mut stmt = self.conn.prepare_cached(&format!(
             "SELECT {PROJECT_COLUMNS} FROM projects ORDER BY owner, repo"
@@ -141,10 +183,10 @@ impl Store {
         let rows = stmt.query_map([], |row| {
             Ok((
                 map_project_row(row)?,
-                row.get::<_, Option<i64>>(7)?,
-                row.get::<_, Option<String>>(8)?,
+                row.get::<_, Option<i64>>(8)?,
                 row.get::<_, Option<String>>(9)?,
                 row.get::<_, Option<String>>(10)?,
+                row.get::<_, Option<String>>(11)?,
             ))
         })?;
         let mut out: Vec<crate::service::projects::ProjectTreeRow> = Vec::new();
@@ -743,6 +785,13 @@ impl Store {
                 super::routines::PAUSED_PROJECT_REMOVED,
                 now_unix()
             ],
+        )?;
+        // Its routines' project notebooks go with it (migration 204): a
+        // project id is a reused rowid, and the next project to take it
+        // must not read another repository's notes.
+        tx.execute(
+            "DELETE FROM routine_memory WHERE scope = 'project' AND owner_id = ?1",
+            rusqlite::params![project_id],
         )?;
         tx.execute(
             "DELETE FROM projects WHERE id = ?1",

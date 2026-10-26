@@ -193,19 +193,13 @@ fn the_preferred_host_wins_a_near_tie_and_loses_a_clear_one() {
 
 #[test]
 fn the_store_wrapper_reads_logins_usage_health_and_the_project() {
-    use crate::service::account_limits::seed_usage;
+    use crate::service::account_limits::{ready_host, seed_usage};
     let s = Store::open_in_memory().unwrap();
     let now = 1_000_000;
     seed_usage(&s, "mac", None, "acct-mac", 30.0, now);
     seed_usage(&s, "htz", None, "acct-htz", 5.0, now);
-    for h in ["mac", "htz"] {
-        s.conn_for_test()
-            .execute(
-                "UPDATE hosts SET reachable = 1, claude_version = '2.1' WHERE alias = ?1",
-                [h],
-            )
-            .unwrap();
-    }
+    ready_host(&s, "mac");
+    ready_host(&s, "htz");
     // htz has the most headroom, but its login is signed out.
     login_health::record(
         &s,
@@ -275,5 +269,61 @@ fn live_sessions_spread_picks_across_logins() {
     assert_eq!(
         rank(&idle, &Want::default(), 90.0).candidates[0].account_uuid,
         "acct-b"
+    );
+}
+
+/// The store side of the penalty: running sessions charge their account,
+/// and a run whose link a profile start just dropped
+/// (`set_session_profile`) charges the account its login holds, so the
+/// next pick of the same pass does not land on that login again.
+#[test]
+fn the_store_wrapper_charges_live_sessions_linked_or_not_yet() {
+    use crate::service::account_limits::{ready_host, seed_usage};
+    let now = 1_000_000;
+    let fresh = || {
+        let s = Store::open_in_memory().unwrap();
+        seed_usage(&s, "mac", None, "acct-a", 70.0, now);
+        seed_usage(&s, "mac", Some("b"), "acct-b", 60.0, now);
+        ready_host(&s, "mac");
+        s
+    };
+    let top = |s: &Store| {
+        suggest_with(s, None, &Want::default(), false, now)
+            .unwrap()
+            .candidates[0]
+            .account_uuid
+            .clone()
+    };
+
+    let s = fresh();
+    assert_eq!(top(&s), "acct-b", "the emptier account wins when idle");
+
+    // Linked runs on acct-b.
+    for n in ["r1", "r2", "r3"] {
+        s.upsert_session(n, "mac", None, None, 1, 1, "running", Some("acct-b"))
+            .unwrap();
+    }
+    // A stopped one does not count.
+    s.upsert_session("old", "mac", None, None, 1, 1, "stopped", Some("acct-a"))
+        .unwrap();
+    assert_eq!(top(&s), "acct-a", "linked runs cost their account");
+
+    // Runs just started under profile `b`: reconcile linked them to the
+    // host's account, the profile start dropped the link.
+    let s = fresh();
+    for n in ["p1", "p2", "p3"] {
+        let id = s
+            .upsert_session(n, "mac", None, None, 1, 1, "running", Some("acct-a"))
+            .unwrap();
+        s.set_session_profile(id, Some("b")).unwrap();
+    }
+    assert_eq!(
+        s.live_unlinked_sessions_per_login().unwrap()[&("mac".to_string(), Some("b".to_string()))],
+        3
+    );
+    assert_eq!(
+        top(&s),
+        "acct-a",
+        "unlinked runs cost their login's account"
     );
 }

@@ -27,7 +27,7 @@ use crate::store::fleet_events::{
 };
 use crate::store::{HostRow, NewFleetEvent, Store};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 
 /// The setting holding [`WatchState`] as JSON. Internal bookkeeping, not a
@@ -54,6 +54,14 @@ pub struct WatchState {
     pub seeded: bool,
     #[serde(default)]
     pub told: BTreeMap<String, Told>,
+    /// The hosts a pass has seen reachable, while they stay watched: only
+    /// one of them going down is `host_offline`. A host added unreachable
+    /// (an agent host before its agent connects) or un-hidden while down
+    /// never went down; it is learned without an event (review w06-3).
+    /// `None` in a state written before it: every host counts as seen up
+    /// for one pass.
+    #[serde(default)]
+    pub seen_up: Option<BTreeSet<String>>,
 }
 
 impl WatchState {
@@ -80,6 +88,10 @@ pub struct Watched {
     pub cond: Condition,
     pub host: Option<String>,
     pub org: Option<i64>,
+    /// Whether this condition, never told before, is a change to tell:
+    /// false for a host down that no pass saw up ([`WatchState::seen_up`]),
+    /// which is learned silently, not raised.
+    pub fresh: bool,
 }
 
 /// PURE: the event a condition's key writes when it is raised (`true`) or
@@ -99,11 +111,26 @@ pub fn event_of(key: &str, raised: bool) -> Option<(&'static str, String)> {
     }
 }
 
+/// PURE: whether the subject of a condition's `key` is still watched: its
+/// host is among the active `hosts`, its account on one of them. A key
+/// whose subject left (a host hidden, removed, or `local` turned off) did
+/// not clear; it is forgotten without an event.
+pub fn key_watched(key: &str, hosts: &[String], accounts: &[String]) -> bool {
+    let parts: Vec<&str> = key.split(':').collect();
+    match parts.as_slice() {
+        ["h" | "l", host, ..] => hosts.iter().any(|h| h == host),
+        ["a", uuid, ..] => accounts.iter().any(|a| a == uuid),
+        _ => true,
+    }
+}
+
 /// PURE: the change one pass tells, and the state after it. `now_raised`
-/// is every condition true now; a key not in it is cleared.
+/// is every condition true now; a key not in it is cleared, unless
+/// `watching` says its subject is no longer watched: then it is forgotten.
 pub fn diff<'a>(
     state: &mut WatchState,
     now_raised: &'a [Watched],
+    watching: &dyn Fn(&str) -> bool,
     now: i64,
 ) -> Vec<(&'static str, String, Option<&'a Watched>, String)> {
     let mut out = Vec::new();
@@ -126,11 +153,21 @@ pub fn diff<'a>(
     keys.dedup();
     for key in keys {
         let current = now_raised.iter().find(|w| w.cond.key == key);
+        if current.is_none() && !watching(&key) {
+            state.told.remove(&key);
+            continue;
+        }
+        // A host's disk or memory reading is not cleared while the host is
+        // down: it only stopped reporting, and clearing it would raise
+        // `host_low` again when the host returns (review w06-4).
+        if current.is_none() && host_down_now(&key, now_raised) {
+            continue;
+        }
         let want = current.is_some();
         let last = state.told.get(&key).copied();
         let differs = match last {
             Some(t) => t.raised != want,
-            None => want,
+            None => want && current.is_some_and(|w| w.fresh),
         };
         if !differs || last.is_some_and(|t| now - t.at < FLAP_SECS) {
             continue;
@@ -147,13 +184,34 @@ pub fn diff<'a>(
                 Some(w) => w.cond.text.clone(),
                 None => cleared_words(kind, &subject),
             };
-            out.push((kind, subject, current, words));
+            // One event per kind and subject in a pass: a host low on disk
+            // and on memory is one `host_low`, its words joined.
+            match out.iter_mut().find(|e| e.0 == kind && e.1 == subject) {
+                Some(first) => {
+                    first.3.push_str("; ");
+                    first.3.push_str(&words);
+                }
+                None => out.push((kind, subject, current, words)),
+            }
         }
     }
     state
         .told
         .retain(|_, t| t.raised || now - t.at < FORGET_SECS);
     out
+}
+
+/// PURE: whether `key` is a disk or memory reading of a host that is down
+/// in this pass.
+fn host_down_now(key: &str, now_raised: &[Watched]) -> bool {
+    let parts: Vec<&str> = key.split(':').collect();
+    match parts.as_slice() {
+        ["h", host, "disk" | "mem"] => {
+            let down = format!("h:{host}:down");
+            now_raised.iter().any(|w| w.cond.key == down)
+        }
+        _ => false,
+    }
 }
 
 /// PURE: the words of a condition that ended.
@@ -166,9 +224,11 @@ fn cleared_words(kind: &str, subject: &str) -> String {
     }
 }
 
-/// The org of an account: the one org of every active host that logs in
-/// with it, `None` when they are in several or none.
-fn account_org(s: &Store, hosts: &[HostRow], uuid: &str) -> Option<i64> {
+/// The orgs of an account: each org of an active host that logs in with
+/// it (`None` for a host in no org). An account shared by hosts of two
+/// orgs is each org's: its event is written once per org, so each org's
+/// routines may fire on it (review w06-8).
+fn account_orgs(s: &Store, hosts: &[HostRow], uuid: &str) -> Vec<Option<i64>> {
     let mut orgs: Vec<Option<i64>> = hosts
         .iter()
         .filter(|h| {
@@ -182,17 +242,21 @@ fn account_org(s: &Store, hosts: &[HostRow], uuid: &str) -> Option<i64> {
         .collect();
     orgs.sort();
     orgs.dedup();
-    match orgs.as_slice() {
-        [one] => *one,
-        _ => None,
-    }
+    orgs
 }
 
-/// Every watched condition now.
-fn watched(s: &Store, now: i64) -> Vec<Watched> {
+/// What one pass reads: every watched condition now, over these active hosts.
+struct Pass {
+    raised: Vec<Watched>,
+    hosts: Vec<HostRow>,
+}
+
+/// Every watched condition now, or the store's error: a pass that could not
+/// read a source must not read its conditions as cleared.
+fn watched(s: &Store, now: i64) -> Result<Pass, rusqlite::Error> {
     use crate::service::health;
     let local = crate::service::hub::local_host_enabled();
-    let hosts = crate::service::hosts::active_hosts(s.list_hosts().unwrap_or_default(), local);
+    let hosts = crate::service::hosts::active_hosts(s.list_hosts()?, local);
     let t = health::host_thresholds(s);
     let mut out = Vec::new();
     for h in &hosts {
@@ -208,48 +272,99 @@ fn watched(s: &Store, now: i64) -> Vec<Watched> {
                 cond,
                 host: Some(h.alias.clone()),
                 org,
+                fresh: true,
             });
         }
     }
-    for cond in crate::service::account_feed::conditions(s, &hosts, now) {
+    for cond in crate::service::account_feed::try_conditions(s, &hosts, now)? {
         let parts: Vec<&str> = cond.key.split(':').collect();
         let (host, org) = match parts.as_slice() {
-            ["a", uuid, "limit"] => (None, account_org(s, &hosts, uuid)),
+            // Its orgs are worked out when its rows are written.
+            ["a", ..] => (None, None),
             ["l", host, ..] => (Some(host.to_string()), s.host_org(host).ok().flatten()),
             _ => (None, None),
         };
-        out.push(Watched { cond, host, org });
+        out.push(Watched {
+            cond,
+            host,
+            org,
+            fresh: true,
+        });
     }
-    out
+    Ok(Pass { raised: out, hosts })
+}
+
+/// Mark each host down that no pass saw up as not fresh, then remember the
+/// hosts up now, and those seen up before that are still watched.
+fn mark_fresh(state: &mut WatchState, raised: &mut [Watched], hosts: &[HostRow]) {
+    if let Some(seen) = &state.seen_up {
+        for w in raised.iter_mut() {
+            if let ["h", host, "down"] = w.cond.key.split(':').collect::<Vec<_>>().as_slice() {
+                w.fresh = seen.contains(*host);
+            }
+        }
+    }
+    let before = state.seen_up.take().unwrap_or_default();
+    state.seen_up = Some(
+        hosts
+            .iter()
+            .filter(|h| h.reachable || before.contains(&h.alias))
+            .map(|h| h.alias.clone())
+            .collect(),
+    );
 }
 
 /// One pass: read the conditions, write a row for each change. Returns how
 /// many rows it wrote.
 pub fn run_once(s: &Store, now: i64) -> usize {
     let mut state = WatchState::load(s);
-    let now_raised = watched(s, now);
-    let changes = diff(&mut state, &now_raised, now);
+    let pass = match watched(s, now) {
+        Ok(p) => p,
+        Err(e) => {
+            // Skip the pass: diffing a partial read would tell every
+            // condition it missed as cleared.
+            tracing::warn!(error = %e, "[fleet-events] conditions not read; pass skipped");
+            return 0;
+        }
+    };
+    let aliases: Vec<String> = pass.hosts.iter().map(|h| h.alias.clone()).collect();
+    let accounts = crate::service::account_usage_poll::distinct_account_uuids(&pass.hosts);
+    let watching = |key: &str| key_watched(key, &aliases, &accounts);
+    let mut raised = pass.raised;
+    mark_fresh(&mut state, &mut raised, &pass.hosts);
+    let changes = diff(&mut state, &raised, &watching, now);
     let mut wrote = 0;
     for (kind, subject, w, words) in &changes {
-        // A cleared condition has no row now: its host is in its subject.
+        // A cleared condition has no row now: its host (or account) is in
+        // its subject, and its org is worked out as when it was raised.
         let host = w
             .and_then(|w| w.host.clone())
             .or_else(|| subject.strip_prefix("host:").map(str::to_string));
-        let org = match w {
-            Some(w) => w.org,
-            None => host.as_deref().and_then(|h| s.host_org(h).ok().flatten()),
+        let orgs = match (w, subject.strip_prefix("account:")) {
+            (_, Some(uuid)) => {
+                let orgs = account_orgs(s, &pass.hosts, uuid);
+                if orgs.is_empty() {
+                    vec![None]
+                } else {
+                    orgs
+                }
+            }
+            (Some(w), None) => vec![w.org],
+            (None, None) => vec![host.as_deref().and_then(|h| s.host_org(h).ok().flatten())],
         };
-        let e = NewFleetEvent {
-            kind,
-            subject,
-            detail: Some(words),
-            host_alias: host.as_deref(),
-            org_id: org,
-            person_id: None,
-        };
-        match s.insert_fleet_event_at(&e, now) {
-            Ok(_) => wrote += 1,
-            Err(e) => tracing::warn!(error = %e.message, "[fleet-events] not written"),
+        for org in orgs {
+            let e = NewFleetEvent {
+                kind,
+                subject,
+                detail: Some(words),
+                host_alias: host.as_deref(),
+                org_id: org,
+                person_id: None,
+            };
+            match s.insert_fleet_event_at(&e, now) {
+                Ok(_) => wrote += 1,
+                Err(e) => tracing::warn!(error = %e.message, "[fleet-events] not written"),
+            }
         }
     }
     state.save(s);
@@ -272,6 +387,8 @@ pub fn maybe_run(store: &Mutex<Store>) {
 mod tests {
     use super::*;
 
+    const ALL: fn(&str) -> bool = |_| true;
+
     fn w(key: &str) -> Watched {
         Watched {
             cond: Condition {
@@ -280,18 +397,19 @@ mod tests {
             },
             host: None,
             org: None,
+            fresh: true,
         }
     }
 
     #[test]
     fn the_first_pass_learns_and_tells_nothing() {
         let mut st = WatchState::default();
-        assert!(diff(&mut st, &[w("h:mac:down")], 100).is_empty());
+        assert!(diff(&mut st, &[w("h:mac:down")], &ALL, 100).is_empty());
         assert!(st.seeded);
         // Still down: nothing.
-        assert!(diff(&mut st, &[w("h:mac:down")], 100 + FLAP_SECS).is_empty());
+        assert!(diff(&mut st, &[w("h:mac:down")], &ALL, 100 + FLAP_SECS).is_empty());
         // Back up: host_online.
-        let got = diff(&mut st, &[], 100 + FLAP_SECS);
+        let got = diff(&mut st, &[], &ALL, 100 + FLAP_SECS);
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].0, HOST_ONLINE);
         assert_eq!(got[0].1, "host:mac");
@@ -305,23 +423,23 @@ mod tests {
             ..Default::default()
         };
         let down = [w("h:nas:down")];
-        let got = diff(&mut st, &down, 1000);
+        let got = diff(&mut st, &down, &ALL, 1000);
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].0, HOST_OFFLINE);
         assert_eq!(got[0].3, "text of h:nas:down");
-        assert!(diff(&mut st, &[w("h:nas:down")], 1020).is_empty());
+        assert!(diff(&mut st, &[w("h:nas:down")], &ALL, 1020).is_empty());
         // Back within the window: held.
-        assert!(diff(&mut st, &[], 1040).is_empty());
+        assert!(diff(&mut st, &[], &ALL, 1040).is_empty());
         // Down again before the window ends: nothing to tell at all.
-        assert!(diff(&mut st, &[w("h:nas:down")], 1060).is_empty());
+        assert!(diff(&mut st, &[w("h:nas:down")], &ALL, 1060).is_empty());
         // Up, and still up after the window: told once.
-        assert!(diff(&mut st, &[], 1100).is_empty());
-        let got = diff(&mut st, &[], 1000 + FLAP_SECS);
+        assert!(diff(&mut st, &[], &ALL, 1100).is_empty());
+        let got = diff(&mut st, &[], &ALL, 1000 + FLAP_SECS);
         assert_eq!(
             got.iter().map(|g| g.0).collect::<Vec<_>>(),
             vec![HOST_ONLINE]
         );
-        assert!(diff(&mut st, &[], 1000 + 2 * FLAP_SECS).is_empty());
+        assert!(diff(&mut st, &[], &ALL, 1000 + 2 * FLAP_SECS).is_empty());
     }
 
     #[test]
@@ -370,5 +488,238 @@ mod tests {
         assert_eq!(run_once(&s, 1030 + FLAP_SECS), 1);
         let rows = s.fleet_events_of_kind_after(0, HOST_ONLINE, 10).unwrap();
         assert_eq!(rows[0].host_alias.as_deref(), Some("mac"));
+    }
+
+    #[test]
+    fn a_hidden_down_host_is_forgotten_without_a_host_online_row() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("mac").unwrap();
+        s.conn_ref()
+            .execute("UPDATE hosts SET reachable = 1 WHERE alias = 'mac'", [])
+            .unwrap();
+        assert_eq!(run_once(&s, 1000), 0);
+        s.conn_ref()
+            .execute("UPDATE hosts SET reachable = 0 WHERE alias = 'mac'", [])
+            .unwrap();
+        assert_eq!(run_once(&s, 1010), 1);
+        // The person hides the dead box: it did not come back.
+        s.set_host_hidden("mac", true).unwrap();
+        assert_eq!(run_once(&s, 1020 + FLAP_SECS), 0);
+        assert!(s
+            .fleet_events_of_kind_after(0, HOST_ONLINE, 10)
+            .unwrap()
+            .is_empty());
+        assert!(!WatchState::load(&s).told.contains_key("h:mac:down"));
+    }
+
+    #[test]
+    fn a_pass_that_cannot_read_the_store_writes_nothing() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("mac").unwrap();
+        s.conn_ref()
+            .execute("UPDATE hosts SET reachable = 0 WHERE alias = 'mac'", [])
+            .unwrap();
+        assert_eq!(run_once(&s, 1000), 0);
+        let before = WatchState::load(&s);
+        assert!(before.told.contains_key("h:mac:down"));
+        s.conn_ref()
+            .execute("UPDATE hosts SET reachable = 1 WHERE alias = 'mac'", [])
+            .unwrap();
+        s.conn_ref()
+            .execute_batch("DROP TABLE account_usage_snapshots")
+            .unwrap();
+        assert_eq!(run_once(&s, 1000 + 2 * FLAP_SECS), 0);
+        assert_eq!(WatchState::load(&s), before, "the pass is skipped");
+    }
+
+    #[test]
+    fn an_account_available_row_carries_the_accounts_org() {
+        use crate::service::account_usage::{AccountUsage, Window};
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("mac").unwrap();
+        s.conn_ref()
+            .execute("UPDATE hosts SET reachable = 1 WHERE alias = 'mac'", [])
+            .unwrap();
+        s.upsert_account(&crate::store::AccountRow {
+            uuid: "acct-1".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        s.set_host_account("mac", Some("acct-1")).unwrap();
+        let org = s.add_org("acme", None, false).unwrap();
+        s.set_host_org("mac", Some(org.id)).unwrap();
+        assert_eq!(run_once(&s, 1000), 0);
+        let full = |u: f64| {
+            Some(Window {
+                utilization: u,
+                resets_at: Some(1000 + 3600),
+            })
+        };
+        s.insert_usage_snapshot(&crate::store::UsageSnapshotRow {
+            account_uuid: "acct-1".into(),
+            fetched_at: 1005,
+            usage: AccountUsage {
+                five_hour: full(100.0),
+                seven_day: full(20.0),
+                seven_day_opus: None,
+                seven_day_sonnet: None,
+            },
+            subscription: None,
+            source_host: None,
+        })
+        .unwrap();
+        assert_eq!(run_once(&s, 1010), 1);
+        let limited = s
+            .fleet_events_of_kind_after(0, ACCOUNT_LIMITED, 10)
+            .unwrap();
+        assert_eq!(limited[0].org_id, Some(org.id));
+        // The window resets: under its limit again, in the same org.
+        assert_eq!(run_once(&s, 1000 + 3600 + FLAP_SECS), 1);
+        let available = s
+            .fleet_events_of_kind_after(0, ACCOUNT_AVAILABLE, 10)
+            .unwrap();
+        assert_eq!(available.len(), 1);
+        assert_eq!(available[0].subject, "account:acct-1");
+        assert_eq!(available[0].org_id, Some(org.id));
+    }
+
+    #[test]
+    fn a_key_is_watched_while_its_host_or_account_is() {
+        let hosts = vec!["mac".to_string()];
+        let accounts = vec!["u-1".to_string()];
+        assert!(key_watched("h:mac:down", &hosts, &accounts));
+        assert!(!key_watched("h:nas:down", &hosts, &accounts));
+        assert!(key_watched("a:u-1:limit", &hosts, &accounts));
+        assert!(!key_watched("a:u-2:limit", &hosts, &accounts));
+        assert!(!key_watched("l:nas:-:out", &hosts, &accounts));
+        let mut st = WatchState {
+            seeded: true,
+            ..Default::default()
+        };
+        assert_eq!(diff(&mut st, &[w("h:nas:down")], &ALL, 1000).len(), 1);
+        let gone = |k: &str| key_watched(k, &hosts, &accounts);
+        assert!(diff(&mut st, &[], &gone, 1000 + FLAP_SECS).is_empty());
+        assert!(st.told.is_empty());
+    }
+
+    fn reach(s: &Store, host: &str, up: bool) {
+        s.conn_ref()
+            .execute(
+                "UPDATE hosts SET reachable = ?1 WHERE alias = ?2",
+                rusqlite::params![up, host],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn a_host_added_unreachable_never_went_down() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("mac").unwrap();
+        reach(&s, "mac", true);
+        assert_eq!(run_once(&s, 1000), 0);
+        // An agent host is written unreachable until its agent connects.
+        s.upsert_host("nas").unwrap();
+        reach(&s, "nas", false);
+        assert_eq!(run_once(&s, 1010), 0, "never seen up: no host_offline");
+        reach(&s, "nas", true);
+        assert_eq!(run_once(&s, 1030), 0);
+        assert_eq!(run_once(&s, 1030 + 2 * FLAP_SECS), 0, "nor host_online");
+        // Now it was up: going down is told.
+        reach(&s, "nas", false);
+        assert_eq!(run_once(&s, 1040 + 2 * FLAP_SECS), 1);
+        let rows = s.fleet_events_of_kind_after(0, HOST_OFFLINE, 10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].subject, "host:nas");
+    }
+
+    #[test]
+    fn a_down_host_un_hidden_is_learned_not_told() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("mac").unwrap();
+        reach(&s, "mac", true);
+        assert_eq!(run_once(&s, 1000), 0);
+        s.set_host_hidden("mac", true).unwrap();
+        assert_eq!(run_once(&s, 1010), 0);
+        reach(&s, "mac", false);
+        s.set_host_hidden("mac", false).unwrap();
+        assert_eq!(run_once(&s, 1020), 0);
+        assert!(s
+            .fleet_events_of_kind_after(0, HOST_OFFLINE, 10)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn a_host_low_on_disk_and_memory_is_one_host_low_and_an_outage_does_not_repeat_it() {
+        let mut st = WatchState {
+            seeded: true,
+            ..Default::default()
+        };
+        let low = [w("h:mac:disk"), w("h:mac:mem")];
+        let down = [w("h:mac:down")];
+        let got = diff(&mut st, &low, &ALL, 1000);
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(got[0].0, HOST_LOW);
+        assert_eq!(got[0].3, "text of h:mac:disk; text of h:mac:mem");
+        // Down for longer than the flap window: the readings are not cleared.
+        let got = diff(&mut st, &down, &ALL, 1000 + FLAP_SECS);
+        assert_eq!(
+            got.iter().map(|g| g.0).collect::<Vec<_>>(),
+            vec![HOST_OFFLINE]
+        );
+        // Back, still low: host_online alone.
+        let got = diff(&mut st, &low, &ALL, 1000 + 3 * FLAP_SECS);
+        assert_eq!(
+            got.iter().map(|g| g.0).collect::<Vec<_>>(),
+            vec![HOST_ONLINE]
+        );
+    }
+
+    #[test]
+    fn an_account_shared_by_two_orgs_is_written_for_each() {
+        use crate::service::account_usage::{AccountUsage, Window};
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_account(&crate::store::AccountRow {
+            uuid: "acct-1".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        let mut orgs = Vec::new();
+        for (host, org) in [("mac", "acme"), ("nas", "globex")] {
+            s.upsert_host(host).unwrap();
+            reach(&s, host, true);
+            s.set_host_account(host, Some("acct-1")).unwrap();
+            let o = s.add_org(org, None, false).unwrap();
+            s.set_host_org(host, Some(o.id)).unwrap();
+            orgs.push(Some(o.id));
+        }
+        assert_eq!(run_once(&s, 1000), 0);
+        let full = Some(Window {
+            utilization: 100.0,
+            resets_at: Some(1000 + 3600),
+        });
+        s.insert_usage_snapshot(&crate::store::UsageSnapshotRow {
+            account_uuid: "acct-1".into(),
+            fetched_at: 1005,
+            usage: AccountUsage {
+                five_hour: full,
+                seven_day: None,
+                seven_day_opus: None,
+                seven_day_sonnet: None,
+            },
+            subscription: None,
+            source_host: None,
+        })
+        .unwrap();
+        assert_eq!(run_once(&s, 1010), 2);
+        let mut got: Vec<Option<i64>> = s
+            .fleet_events_of_kind_after(0, ACCOUNT_LIMITED, 10)
+            .unwrap()
+            .iter()
+            .map(|e| e.org_id)
+            .collect();
+        got.sort();
+        orgs.sort();
+        assert_eq!(got, orgs);
     }
 }

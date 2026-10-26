@@ -106,6 +106,8 @@ pub(crate) fn sample_session() -> SessionRow {
         turn_outcome: Some("finished".into()),
         // Some, so the golden pins the name the Pinned section reads.
         pinned_at: Some(1_700_000_200),
+        // Some, so the golden pins the name the suggestion chip reads.
+        prompt_suggestion: Some("run the tests".into()),
         // One, so the golden pins the proposal shape every row carries.
         proposals: vec![fleet_core::store::DecisionProposal {
             feature: "turn_outcome".into(),
@@ -238,6 +240,8 @@ pub(crate) fn sample_host() -> HostRow {
         mem_low: true,
         cpu_saturated: true,
         signed_out_logins: Vec::new(),
+        // Some so the name is in the golden.
+        login_split: Some(true),
     }
 }
 
@@ -298,6 +302,7 @@ pub(crate) fn sample_project_row() -> ProjectRow {
         last_session_at: Some(1_725_000_000),
         adopted: true,
         system: false,
+        github_origin: Some("git@github.com:owner/repo.git".into()),
     }
 }
 
@@ -432,6 +437,9 @@ fn sample_health() -> Health {
             mem_pressure: Some(41),
             mem_low: true,
             cpu_saturated: true,
+            login_conflicts: vec![
+                fleet_core::service::login_conflicts::LoginConflict::KeychainAndFile,
+            ],
         }],
         hub: Some(sample_hub_health()),
         tunnels_mode: Some("none".into()),
@@ -1075,6 +1083,7 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
         profile: Some("work".into()),
         account_uuid: "u".into(),
         used_pct: Some(40.0),
+        signed_out: false,
     };
     put("HostLogin", wire_keys(&login));
     put(
@@ -1485,6 +1494,7 @@ fn a_session_rows_wire_names_are_these_exact_seventy_two() {
         "pr_url",
         "project_id",
         "prompt_submit_seq",
+        "prompt_suggestion",
         "proposals",
         "reviews_session_id",
         "row_version",
@@ -1518,7 +1528,7 @@ fn a_session_rows_wire_names_are_these_exact_seventy_two() {
         "worktree_key",
     ];
     let expected: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
-    assert_eq!(expected.len(), 73, "the list above lost or gained a line");
+    assert_eq!(expected.len(), 74, "the list above lost or gained a line");
     assert_eq!(wire_keys(&sample_session()), expected);
 }
 

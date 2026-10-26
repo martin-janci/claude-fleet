@@ -33,6 +33,10 @@ pub mod codes {
     pub const E_GH: &str = "E_GH";
     /// The target exists but is in the wrong state for the operation.
     pub const E_INVALID_STATE: &str = "E_INVALID_STATE";
+    /// A mission's pull request (open or merged) has failing CI, so the
+    /// mission does not complete; a person may complete it anyway with
+    /// `ci_override`.
+    pub const E_CI_FAILING: &str = "E_CI_FAILING";
     /// The task is already in a terminal state (`done` / `failed` /
     /// `cancelled`), so the requested transition is refused.
     pub const E_TASK_TERMINAL: &str = "E_TASK_TERMINAL";

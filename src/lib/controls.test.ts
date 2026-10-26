@@ -40,10 +40,6 @@ describe('controls.css redesign variants', () => {
       '.tab-strip',
       '.tab-strip__tab',
       ".tab-strip__tab[aria-selected='true']",
-      '.count-badge',
-      '.count-badge--hot',
-      '.state-chip',
-      ...['waiting', 'failed', 'done', 'working', 'idle', 'accent'].map((s) => `.state-chip--${s}`),
     ]) {
       expect(variants, cls).toContain(`${cls} {`);
     }

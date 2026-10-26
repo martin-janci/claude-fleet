@@ -11,11 +11,14 @@ COPY src-tauri/Cargo.toml ./src-tauri/Cargo.toml
 # succeeds without building the desktop crate.
 RUN mkdir -p src-tauri/src && echo '' > src-tauri/src/lib.rs
 COPY skills ./skills
-# provision.rs embeds the ag launcher and the voice recorder stand-in
+# provision.rs embeds the ag launcher, the voice recorder stand-in and the
+# prompt-suggestion plugin
 # (include_str!); provision.rs's test checks every such embed has a COPY.
 COPY tools/ag ./tools/ag
 COPY tools/voice ./tools/voice
+COPY plugins/fleet-prompt-suggestion ./plugins/fleet-prompt-suggestion
 COPY src/lib/names.json ./src/lib/names.json
+COPY catalog-seed/fleet-agents ./catalog-seed/fleet-agents
 # The context has no .git, so build.rs takes the build identity from these
 # (hub-image.yml passes them; a local `docker build` gets unknown / local).
 ARG FLEET_GIT_SHA=

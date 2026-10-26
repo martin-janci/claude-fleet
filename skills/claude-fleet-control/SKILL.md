@@ -72,7 +72,7 @@ steer      send_prompt run_prompt queue_prompt queued_prompts wait_for_session
            session_context_help session_prompt_tune rewind_conversation broadcast_prompt
            touch_session_viewed ask
 coordinate send_message inbox wait_for_reply dispatch_task wait_for_task
-           list_tasks cancel_task set_session_tags session_history
+           list_tasks cancel_task task_report set_session_tags session_history
            register_self work work_link decide_related_session runs routines
            start_rules prs pin_session
 recover    restart_session recreate_session repair_session move_session
@@ -83,7 +83,8 @@ review     repo_changes repo_diff repo_file repo_tree repo_log repo_blame
            repo_branches repo_branch_diff repo_range_diff repo_commit
            repo_commit_diff
 share      session_share session_narrow session_unshare session_access
-           session_presence my_grants session_ask_access access_requests
+           session_presence my_grants my_profile session_ask_access
+           access_requests
 files      send_file list_downloads pause_download remove_download library
            get_clipboard set_clipboard
 devices    debug_devices
@@ -360,9 +361,9 @@ back, dispatch a task instead of hand-rolling send / poll / capture:
 
 1. `dispatch_task { worker_session_id, prompt, requester_session_id: <your
    id> }` — or `new_worker: { host_alias, project_id, name? }` to spawn a
-   fresh session as the worker. Fleet appends *"When finished, print exactly
-   FLEET_TASK_DONE_<nonce> on its own line followed by a one-paragraph
-   result."* to the prompt; do not add your own marker. Returns the task row
+   fresh session as the worker. Fleet appends an instruction to call
+   `task_report` and also print `FLEET_TASK_DONE_<nonce>` to the prompt; do
+   not add your own marker. Returns the task row
    (`state: running`).
 2. `wait_for_task { task_id, timeout_s? }` → `{ status, task }`; on `done`,
    `task.result` is the worker's paragraph. On `timeout` the worker is still
@@ -374,9 +375,11 @@ back, dispatch a task instead of hand-rolling send / poll / capture:
 `list_tasks { requester_session_id?, worker_session_id?, mine?, state? }` shows what is outstanding
 (`queued | running | done | failed | cancelled`). A worker's row carries
 `parent_session_id` = the requester. If **you** are the worker: when a prompt
-ends with the `FLEET_TASK_DONE_…` instruction, finish the work, then print
-that exact line on its own line followed by one paragraph summarising the
-outcome — nothing else after it.
+ends with the `task_report` / `FLEET_TASK_DONE_…` instruction, finish the
+work, call `task_report { task_id, nonce, summary, outcome, … }` with the id
+and nonce the instruction gives, then also print the marker line on its own
+line followed by one paragraph summarising the outcome — the fallback fleet
+scans for when the tool call did not land.
 
 Label sessions for triage with `set_session_tags { session_id, tags }` (up to
 16 short tags) and find them again with `list_sessions { tag }`.

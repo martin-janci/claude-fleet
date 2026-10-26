@@ -21,7 +21,10 @@
 //!
 //! What keeps it from acting where a person must:
 //! * `control.auto_continue` off, or the autonomy dial at "Ask first"
-//!   (or Custom, which acts as it: `autonomy::Position::is_ask_first`): never;
+//!   (or Custom, which acts as it: `autonomy::Position::is_ask_first`): never,
+//!   and no pick is kept for later: [`on_stop`] records none, and a pass
+//!   settles a waiting one as superseded, so turning it on never answers a
+//!   card from hours ago at once (review w27-7);
 //! * an option or question naming a push, a delete or another step hard to
 //!   undo (`decide::quick_answer::risky`): never recorded;
 //! * a newer turn (the person said something else), a busy or blocked
@@ -136,9 +139,18 @@ fn closes(line: &str, marker: &str) -> bool {
 }
 
 /// PURE: every `fleet.ui/1` block in `text`, as `rich_blocks.ts::splitRich`
-/// finds them: a closed ```` ```fleet-ui ```` fence, or a ```` ```json ````
-/// one whose object says `"spec": "fleet.ui/1"`, that passes the check.
+/// finds them: a closed ```` ```fleet-ui ```` fence (or one tagged with the
+/// spec's own name, `fleet.ui`), or a ```` ```json ```` or untagged one whose
+/// object says `"spec": "fleet.ui/1"`, that passes the check.
 pub fn ui_blocks(text: &str) -> Vec<Value> {
+    blocks_in(text, true)
+}
+
+/// PURE: [`ui_blocks`], and with `untagged` false only the fences Control
+/// tags as a card (```` ```fleet-ui ````, its aliases, or ```` ```json ````):
+/// an untagged fence is how Control quotes pane output, logs or an issue
+/// verbatim, so a card inside one is drawn but never sent by itself.
+fn blocks_in(text: &str, untagged: bool) -> Vec<Value> {
     let lines: Vec<&str> = text.lines().collect();
     let mut out = Vec::new();
     let mut i = 0;
@@ -152,9 +164,14 @@ pub fn ui_blocks(text: &str) -> Vec<Value> {
         };
         let raw = lines[i + 1..close].join("\n");
         let raw = raw.trim();
-        let tagged = lang == "fleet-ui";
-        let json_card =
-            lang == "json" && raw.starts_with('{') && raw.contains(chat_blocks::UI_SPEC);
+        let tagged = matches!(
+            lang.as_str(),
+            "fleet-ui" | "fleet.ui" | "fleet_ui" | "fleetui"
+        );
+        let json_card = (matches!(lang.as_str(), "json" | "jsonc")
+            || (untagged && lang.is_empty()))
+            && raw.starts_with('{')
+            && raw.contains(chat_blocks::UI_SPEC);
         if (tagged || json_card) && chat_blocks::check_text(raw).is_ok() {
             if let Ok(v) = serde_json::from_str::<Value>(raw) {
                 if tagged || v.get("spec").and_then(Value::as_str) == Some(chat_blocks::UI_SPEC) {
@@ -169,9 +186,10 @@ pub fn ui_blocks(text: &str) -> Vec<Value> {
 
 /// PURE: the recommended option of the LAST `choices` card in `text`, or
 /// `None`, also when the option or the card's question or title names a
-/// risky step.
+/// risky step. A card in an untagged fence does not count: that is quoted
+/// text (a pane, a log, an issue body), not Control's own choice.
 pub fn recommended_pick(text: &str) -> Option<Pick> {
-    let last = ui_blocks(text)
+    let last = blocks_in(text, false)
         .into_iter()
         .rfind(|v| v.get("kind").and_then(Value::as_str) == Some("choices"))?;
     let s = |k: &str| last.get(k).and_then(Value::as_str).unwrap_or("");
@@ -256,15 +274,20 @@ pub fn on_stop(s: &Store, session_id: i64, reply: Option<&str>, now: i64) -> Res
     if !is_operator(s, &row) {
         return Ok(());
     }
-    let next = reply.and_then(recommended_pick).map(|p| Pending {
-        session_id,
-        turn_seq: row.turn_seq,
-        label: p.label,
-        prompt: p.prompt,
-        ended_at: now,
-        state: PickState::Waiting,
-        settled_at: None,
-    });
+    // Off (or Ask first): no pick to send later. Recorded now, it would wait
+    // out the hours until auto-continue is turned on and go at once.
+    let next = reply
+        .filter(|_| enabled(s))
+        .and_then(recommended_pick)
+        .map(|p| Pending {
+            session_id,
+            turn_seq: row.turn_seq,
+            label: p.label,
+            prompt: p.prompt,
+            ended_at: now,
+            state: PickState::Waiting,
+            settled_at: None,
+        });
     if next.is_none() && load(s).is_none() {
         return Ok(());
     }
@@ -279,7 +302,7 @@ pub enum Step {
     Nothing,
     /// Not yet, in words.
     Wait(&'static str),
-    /// Settle it without sending (a newer turn, too old).
+    /// Settle it without sending (a newer turn, too old, auto-continue off).
     Drop,
     Send,
 }
@@ -308,8 +331,10 @@ pub fn decide(
     let Some(p) = p.filter(|p| p.state == PickState::Waiting) else {
         return Step::Nothing;
     };
+    // Off: a pick still waiting from before is settled, never kept for the
+    // moment it is turned on again (review w27-7).
     if !enabled {
-        return Step::Wait("off");
+        return Step::Drop;
     }
     let Some(op) = op else {
         return Step::Wait("no_operator");
@@ -420,7 +445,7 @@ impl ContinueExec for RealContinueExec {
 
 /// One pass. `true` when a prompt was queued.
 pub async fn run_with(store: &Mutex<Store>, exec: &dyn ContinueExec, now: i64) -> bool {
-    let (sid, body) = {
+    let (sid, seq, body) = {
         let Ok(s) = store.lock() else {
             return false;
         };
@@ -442,14 +467,19 @@ pub async fn run_with(store: &Mutex<Store>, exec: &dyn ContinueExec, now: i64) -
         let Ok(Some(p)) = settle(&s, p.map(|p| p.turn_seq), PickState::Sent, now) else {
             return false;
         };
-        (p.session_id, prompt_for(&p, minutes))
+        (p.session_id, p.turn_seq, prompt_for(&p, minutes))
     };
     match exec.queue(sid, body).await {
         Ok(()) => true,
         Err(e) => {
             tracing::debug!(error = %e.message, "[control-continue] not queued");
             if let Ok(s) = store.lock() {
-                if let Some(mut p) = load(&s) {
+                // Only the pick that was sent: a newer one saved while the
+                // send was in flight (Control finished another turn) is not
+                // this failure's.
+                if let Some(mut p) = load(&s).filter(|p| {
+                    p.state == PickState::Sent && p.turn_seq == seq && p.session_id == sid
+                }) {
                     p.state = PickState::Failed;
                     let _ = save(&s, Some(&p));
                 }

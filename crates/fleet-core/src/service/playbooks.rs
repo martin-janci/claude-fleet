@@ -403,12 +403,7 @@ pub async fn run(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>) -> usize {
     run_with(store, &exec, &cfg, now_unix()).await
 }
 
-fn now_unix() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
+use crate::store::now_unix;
 
 #[cfg(test)]
 mod tests {
@@ -476,6 +471,7 @@ mod tests {
             last_viewed_at: None,
             turn_outcome: None,
             pinned_at: None,
+            prompt_suggestion: None,
             proposals: Vec::new(),
             pending_form: None,
             form_draft: None,

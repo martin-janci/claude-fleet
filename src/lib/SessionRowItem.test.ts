@@ -56,6 +56,22 @@ beforeEach(() => {
   resetAccessForTests();
 });
 
+describe('SessionRowItem pinned ghost', () => {
+  it("disables a pinned ghost's dismiss with the reason (the hub refuses it E_PINNED)", async () => {
+    render(SessionRowItem, { props: baseProps({ ...sampleSession, pinned_at: 100 }) });
+    await tick();
+    const btn = screen.getByTestId('ghost-dismiss') as HTMLButtonElement;
+    expect(btn.disabled).toBe(true);
+    expect(btn.title).toBe('Pinned: unpin it first');
+  });
+
+  it('leaves an unpinned ghost dismissable', async () => {
+    render(SessionRowItem, { props: baseProps({ ...sampleSession, pinned_at: null }) });
+    await tick();
+    expect((screen.getByTestId('ghost-dismiss') as HTMLButtonElement).disabled).toBe(false);
+  });
+});
+
 describe('SessionRowItem ghost row lost_reason', () => {
   it('shows "host rebooted" for a lost_reason of host_reboot', async () => {
     render(SessionRowItem, {

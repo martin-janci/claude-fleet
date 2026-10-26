@@ -3,11 +3,13 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { get } from 'svelte/store';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn(async () => { throw { code: 'E_TEST', message: 'no backend' }; }) }));
+import { invoke } from '@tauri-apps/api/core';
 import Toolkit from './Toolkit.svelte';
 import { catalog, type AssetListing } from './assets';
 import { assetsViewRequest } from './app_views';
 import { toolkitTab } from './toolkit_skills';
 import { expectAccessible } from './a11y_check';
+import { hubStatus, STANDALONE } from './hub';
 
 const listing: AssetListing = {
   head: 'h', loaded_at: 1, unmanaged: [], problems: [],
@@ -25,8 +27,11 @@ beforeEach(() => {
   catalog.set(listing);
 });
 afterEach(() => {
+  vi.mocked(invoke).mockReset();
+  vi.mocked(invoke).mockImplementation(async () => { throw { code: 'E_TEST', message: 'no backend' }; });
   catalog.set(null);
   assetsViewRequest.set(null);
+  hubStatus.set({ ...STANDALONE });
 });
 
 describe('Toolkit (step 3.16)', () => {
@@ -112,6 +117,129 @@ describe('Toolkit (step 3.16)', () => {
     expect(await findByTestId('toolkit-prompts')).toBeTruthy();
     expect(getByTestId('preset-add')).toBeTruthy();
     toolkitTab.set('skills');
+  });
+
+  it('says the device is read-only, and how to grant it, instead of offering buttons that do nothing', async () => {
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === 'catalog_config') throw { code: 'E_FORBIDDEN', message: 'not granted' };
+      if (cmd === 'catalog_list_assets') return listing;
+      throw { code: 'E_TEST', message: 'no backend' };
+    });
+    const { findByTestId, getByTestId, getByRole } = render(Toolkit, { visible: true });
+    expect((await findByTestId('toolkit-grant-cmd')).textContent).toMatch(/^fleet-hub client grant .+ assets$/);
+    expect((getByTestId('toolkit-add') as HTMLButtonElement).disabled).toBe(true);
+    expect((getByTestId('toolkit-sync') as HTMLButtonElement).disabled).toBe(true);
+    expect(getByRole('button', { name: 'View steward' })).toBeTruthy();
+  });
+
+  it('keeps the unavailable notice when an older catalog check answers after it', async () => {
+    // The first check is still waiting on the catalog when the hub goes
+    // unavailable; its late answer must not take the notice back.
+    let answer!: (v: null) => void;
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === 'catalog_config') return new Promise((r) => { answer = r; });
+      if (cmd === 'catalog_list_assets') return listing;
+      throw { code: 'E_TEST', message: 'no backend' };
+    });
+    const { findByTestId, getByTestId } = render(Toolkit, { visible: true });
+    await vi.waitFor(() => expect(answer).toBeTypeOf('function'));
+    hubStatus.set({ ...STANDALONE, unavailable: 'the hub is unreachable' });
+    expect(await findByTestId('toolkit-unavailable')).toBeTruthy();
+    answer(null);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(getByTestId('toolkit-unavailable')).toBeTruthy();
+    expect((getByTestId('toolkit-sync') as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('quotes a device name with a space or an apostrophe in the grant command', async () => {
+    const before = get(hubStatus);
+    hubStatus.set({ ...before, client_name: "Martin's MacBook" });
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === 'catalog_config') throw { code: 'E_FORBIDDEN', message: 'not granted' };
+      if (cmd === 'catalog_list_assets') return listing;
+      throw { code: 'E_TEST', message: 'no backend' };
+    });
+    try {
+      const { findByTestId } = render(Toolkit, { visible: true });
+      expect((await findByTestId('toolkit-grant-cmd')).textContent).toBe(
+        `fleet-hub client grant 'Martin'\\''s MacBook' assets`,
+      );
+    } finally {
+      hubStatus.set(before);
+    }
+  });
+
+  it('puts a device name that starts with a dash after -- so clap does not read it as an option', async () => {
+    const before = get(hubStatus);
+    hubStatus.set({ ...before, client_name: '-phone' });
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === 'catalog_config') throw { code: 'E_FORBIDDEN', message: 'not granted' };
+      if (cmd === 'catalog_list_assets') return listing;
+      throw { code: 'E_TEST', message: 'no backend' };
+    });
+    try {
+      const { findByTestId } = render(Toolkit, { visible: true });
+      expect((await findByTestId('toolkit-grant-cmd')).textContent).toBe('fleet-hub client grant -- -phone assets');
+    } finally {
+      hubStatus.set(before);
+    }
+  });
+
+  it('does not tell a read-only device to set up a catalog it cannot manage', async () => {
+    catalog.set(null);
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === 'catalog_config') throw { code: 'E_FORBIDDEN', message: 'not granted' };
+      throw { code: 'E_TEST', message: 'no backend' };
+    });
+    const { findByTestId, queryByTestId } = render(Toolkit, { visible: true });
+    expect(await findByTestId('toolkit-read-only')).toBeTruthy();
+    expect(queryByTestId('toolkit-skills-empty')).toBeNull();
+    expect(queryByTestId('toolkit-none')?.textContent).toBe('Nothing is listed yet.');
+  });
+
+  it('does not tell a device whose hub is unavailable to set up a catalog', async () => {
+    catalog.set(null);
+    const before = get(hubStatus);
+    hubStatus.set({ ...before, unavailable: 'the hub is unreachable' });
+    try {
+      const { findByTestId, queryByTestId } = render(Toolkit, { visible: true });
+      expect(await findByTestId('toolkit-unavailable')).toBeTruthy();
+      expect(queryByTestId('toolkit-skills-empty')).toBeNull();
+    } finally {
+      hubStatus.set(before);
+    }
+  });
+
+  it('explains the catalog and offers to set it up when there is none', async () => {
+    catalog.set(null);
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === 'catalog_config') return null;
+      throw { code: 'E_CATALOG_NOT_CONFIGURED', message: 'no catalog' };
+    });
+    const { findByTestId, queryByTestId } = render(Toolkit, { visible: true });
+    expect((await findByTestId('toolkit-setup')).textContent).toContain('git repository');
+    expect(queryByTestId('toolkit-skills-empty')).toBeNull();
+    await fireEvent.click(await findByTestId('toolkit-setup-open'));
+    expect(get(toolkitTab)).toBe('assets');
+  });
+
+  it('lists the skills found on hosts but not in the catalog, with Import', async () => {
+    const asked: unknown[] = [];
+    const stop = assetsViewRequest.subscribe((r) => r && asked.push(r));
+    catalog.set({
+      ...listing,
+      identities: [
+        { kind: 'skill', name: 'pdf', hosts: [{ host_alias: 'trn', harness: 'claude', host_hash: 'a' }], signature: 'trn', variants: 1, class: 'normal', reason: null },
+      ],
+    });
+    const { getByTestId, getByRole } = render(Toolkit, { visible: true });
+    expect(getByTestId('toolkit-skills-summary').textContent).toMatch(/1\s+skill · 1 out of sync · 1 on hosts only/);
+    const row = getByTestId('toolkit-skill-pdf');
+    expect(row.querySelector('[data-host="trn"]')!.getAttribute('data-state')).toBe('unmanaged');
+    await fireEvent.click(getByRole('button', { name: 'Import pdf' }));
+    stop();
+    expect(get(toolkitTab)).toBe('assets');
+    expect(asked).toEqual([expect.objectContaining({ select: 'identity:skill/pdf' })]);
   });
 
   it('passes the axe and audit checks', async () => {

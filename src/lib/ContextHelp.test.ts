@@ -1,10 +1,12 @@
 // The context help panel: asks on Enter, shows the Drafted answer, puts the
 // proposal on the line only on the person's press (and only when it may),
 // and recalls earlier questions with ↑.
-import { render, screen, fireEvent } from '@testing-library/svelte';
+import { render, screen, fireEvent, cleanup } from '@testing-library/svelte';
 import { describe, it, expect, vi } from 'vitest';
 import { tick } from 'svelte';
 import ContextHelp, { askedQuestions } from './ContextHelp.svelte';
+import { get } from 'svelte/store';
+import { toasts, clearToasts, runToastAction } from './toasts';
 import type { HelpAnswer } from './context_help';
 import type { Result } from './result';
 
@@ -21,7 +23,9 @@ async function flush() {
   for (let i = 0; i < 5; i++) await tick();
 }
 
-function setup(over: Partial<{ line: string; insertBlocked: string | null; reply: Result<HelpAnswer> }> = {}) {
+function setup(
+  over: Partial<{ line: string; insertBlocked: string | null; reply: Result<HelpAnswer>; replaces: boolean }> = {},
+) {
   const ask = vi.fn(async () => over.reply ?? ({ ok: true, value: answer } as Result<HelpAnswer>));
   const oninsert = vi.fn();
   const onclose = vi.fn();
@@ -33,6 +37,7 @@ function setup(over: Partial<{ line: string; insertBlocked: string | null; reply
     oninsert,
     onclose,
     insertBlocked: over.insertBlocked ?? null,
+    replaces: over.replaces ?? false,
   });
   return { ask, oninsert, onclose, input: screen.getByTestId('context-help-question') as HTMLInputElement };
 }
@@ -92,5 +97,24 @@ describe('ContextHelp', () => {
     expect(input.value).toBe('');
     await fireEvent.keyDown(input, { key: 'Escape' });
     expect(onclose).toHaveBeenCalled();
+  });
+  // Review w07-2: at the composer, Put in the box replaces the draft.
+  it('offers Undo when the insert replaces a draft, and not at a shell', async () => {
+    clearToasts();
+    const shell = setup();
+    await fireEvent.keyDown(shell.input, { key: 'Enter' });
+    await flush();
+    await fireEvent.click(screen.getByTestId('context-help-insert'));
+    expect(get(toasts)).toEqual([]);
+    cleanup();
+
+    const box = setup({ line: 'my long draft', replaces: true });
+    await fireEvent.keyDown(box.input, { key: 'Enter' });
+    await flush();
+    await fireEvent.click(screen.getByTestId('context-help-insert'));
+    const t = get(toasts).at(-1);
+    expect(t?.action?.label).toBe('Undo');
+    runToastAction(t!.id);
+    expect(box.oninsert).toHaveBeenLastCalledWith('my long draft');
   });
 });

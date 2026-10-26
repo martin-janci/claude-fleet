@@ -101,7 +101,7 @@ describe('TaskResultPanel', () => {
   it('marks a test the worker ran as reported, not passed', () => {
     const { getByTestId } = render(TaskResultPanel, { result: blockedByChild, title: 'T' });
     const rows = Array.from(getByTestId('task-result-validation').querySelectorAll('li')).map((li) => li.textContent);
-    expect(rows).toEqual(['failedCI is green', 'passedDocs updated', 'reportedcargo fleet-test']);
+    expect(rows).toEqual(['passedDocs updated', 'reportedcargo fleet-test']);
   });
 
   it('counts the changes from the totals and names what is not committed', () => {
@@ -173,6 +173,23 @@ describe('TaskResultPanel', () => {
     expect(gate).not.toContain('Docs updated');
   });
 
+  it('names missing run evidence in the gate, once', () => {
+    const result: TaskResultView = {
+      ...base,
+      gate: {
+        state: 'blocked',
+        checks: [],
+        open_children: [],
+        evidence: { state: 'missing', task_id: 1, detail: 'the implement run committed nothing and changed no file' },
+      },
+    };
+    const { getByTestId, getAllByText } = render(TaskResultPanel, { result, title: 'T' });
+    const row = getByTestId('task-result-run-evidence').textContent ?? '';
+    expect(row).toContain('no run evidence');
+    expect(row).toContain('committed nothing');
+    expect(getAllByText(/committed nothing/)).toHaveLength(1);
+  });
+
   it('lets a person mark the task done past a gate that is not passed', async () => {
     setWorkStatus.mockResolvedValue({ ok: true, value: { id: 2 } });
     const onChanged = vi.fn();
@@ -201,5 +218,30 @@ describe('TaskResultPanel', () => {
   it('offers a question about the result only with a session to ask', () => {
     const { getByTestId } = render(TaskResultPanel, { result: base, title: 'T', sessionId: 3 });
     expect(getByTestId('task-result-ask').textContent).toContain('Ask about result');
+  });
+
+  it('hands Ask about result to the parent when it opens the session first (review w09-9)', async () => {
+    const onAsk = vi.fn();
+    const { getByTestId } = render(TaskResultPanel, { result: base, title: 'T', sessionId: 3, onAsk });
+    await fireEvent.click(getByTestId('task-result-ask'));
+    expect(onAsk).toHaveBeenCalledTimes(1);
+  });
+
+  it('says which role produced the result and when (review w09-10)', () => {
+    const at = Math.floor(Date.now() / 1000) - 3 * 86_400;
+    const { getByTestId } = render(TaskResultPanel, { result: { ...base, at }, title: 'T' });
+    expect(getByTestId('task-result-when').textContent).toBe('Wrap-up · finished 3d ago');
+  });
+
+  it('lists an unmet check once, in the gate group (review w09-11)', () => {
+    const { getByTestId } = render(TaskResultPanel, { result: blockedByChild, title: 'T' });
+    expect(getByTestId('task-result-validation').textContent).not.toContain('CI is green');
+    expect(getByTestId('task-result-validation').textContent).toContain('Docs updated');
+    expect(getByTestId('task-result-gate').textContent).toContain('CI is green');
+  });
+
+  it('caps a typed follow-up at the title limit the store accepts (review w09-12)', () => {
+    const { getByTestId } = render(TaskResultPanel, { result: base, title: 'T' });
+    expect((getByTestId('task-result-followup-title') as HTMLInputElement).maxLength).toBe(120);
   });
 });

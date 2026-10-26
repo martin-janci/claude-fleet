@@ -139,6 +139,19 @@ fn an_item_with_no_report_has_no_result() {
 fn the_newest_reported_task_is_the_result_whatever_its_role() {
     let w = fixture();
     let first = w.finished("implement", Some(report("first", &[])));
+    // Git's reading of the implement run, so the gate has its evidence.
+    w.store
+        .lock()
+        .unwrap()
+        .set_task_evidence(
+            first,
+            &crate::store::TaskEvidence {
+                at: 1,
+                commits_total: 1,
+                ..Default::default()
+            },
+        )
+        .unwrap();
     let v = result_for_item(&w.store, &OrgScope::All, w.item)
         .unwrap()
         .unwrap();

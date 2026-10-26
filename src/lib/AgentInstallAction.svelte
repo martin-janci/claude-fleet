@@ -16,8 +16,9 @@
     INSTALL_POLL_MS,
     agentInstalls,
     installAgent,
+    installPollDelay,
     installStepText,
-    runningInstall,
+    shownInstall,
     type AgentInstall,
   } from './agent_install';
 
@@ -42,6 +43,9 @@
   let starting = $state(false);
   let timer: ReturnType<typeof setTimeout> | null = null;
   let gone = false;
+  /** Polls failed in a row: the next one waits longer (a hub-link blip
+   *  must not freeze the step on screen). */
+  let failures = 0;
 
   function stop() {
     if (timer) clearTimeout(timer);
@@ -51,7 +55,14 @@
   async function follow() {
     stop();
     const r = await agentInstalls(alias);
-    if (gone || !r.ok) return;
+    if (gone) return;
+    if (!r.ok) {
+      // Keep the step shown and try again later.
+      failures += 1;
+      timer = setTimeout(() => void follow(), installPollDelay(failures));
+      return;
+    }
+    failures = 0;
     const latest = (r.value ?? []).find((j) => job === null || j.id === job.id) ?? null;
     if (!latest) return;
     const was = job?.state;
@@ -65,14 +76,14 @@
   }
 
   onMount(() => {
-    // Pick up a job already running for this host.
+    // Pick up a job already running for this host, or the line of one
+    // that failed lately (started elsewhere, say from the phone).
     void agentInstalls(alias).then((r) => {
       if (gone || !r.ok) return;
-      const running = runningInstall(r.value);
-      if (running) {
-        job = running;
-        timer = setTimeout(() => void follow(), INSTALL_POLL_MS);
-      }
+      const shown = shownInstall(r.value);
+      if (!shown) return;
+      job = shown;
+      if (shown.state === 'running') timer = setTimeout(() => void follow(), INSTALL_POLL_MS);
     });
   });
   onDestroy(() => {

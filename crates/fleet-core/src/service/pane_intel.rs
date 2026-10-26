@@ -1018,7 +1018,15 @@ fn derive_status(
     // "running…"/"in progress…": those persist in the captured scrollback long
     // after the work finished (e.g. a completed "⏺ Bash(…)" line, or the summary
     // text "41 tool uses"), which made idle sessions read as "working" forever.
-    if lower.contains("esc to interrupt") {
+    //
+    // The live spinner line counts too. Claude Code 2.1 moved the hint into
+    // the mode footer, and the footer drops it while a draft sits in the
+    // input box (`⏵⏵ bypass permissions on (shift+tab to cycle)`, nothing
+    // more) or when the pane is too narrow to fit it — both read as idle
+    // while Claude was thinking. The spinner (`✢ Deliberating… (4s ·
+    // thinking)`) stays on screen for the whole turn; a finished turn's
+    // summary (`✻ Worked for 30s · done`) never matches it.
+    if lower.contains("esc to interrupt") || spinner_line(stripped).is_some() {
         return Some(ClaudeStatus::Working);
     }
     // IDLE: the REPL is showing its input chrome — the status bar, the
@@ -1071,6 +1079,15 @@ pub fn spinner_line(pane_tail: &str) -> Option<String> {
         return Some(rest.chars().take(ACTIVITY_MAX).collect());
     }
     None
+}
+
+/// The pane shows the spinner Claude Code draws while it runs the turn's
+/// Stop hooks (`✢ Channelling… (running Stop hooks… 3/4 · 15s · …)`). The
+/// turn's work is over: fleet's own Stop hook may already have stamped
+/// `idle` while a slower hook keeps this spinner up, so reconcile does not
+/// let this screen write `working` back over it.
+pub fn stop_hooks_running(pane_tail: &str) -> bool {
+    spinner_line(pane_tail).is_some_and(|l| l.to_lowercase().contains("running stop hooks"))
 }
 
 /// `12s` / `3m 5s`-style elapsed marker: digits directly followed by `s`
@@ -1142,6 +1159,37 @@ mod tests {
         assert_eq!(analyze("≈42% used").context_pct, Some(42.0));
     }
 
+    /// Captured from Claude Code 2.1.309 while it was thinking: a draft in
+    /// the input box, and a pane too narrow for the footer. Neither footer
+    /// says "esc to interrupt", both used to read as idle, and the spinner
+    /// is the one line that still tells.
+    #[test]
+    fn a_thinking_pane_whose_footer_lost_the_interrupt_hint_is_working() {
+        for (name, tail) in [
+            (
+                "draft in the input box",
+                include_str!("testdata/pane_intel/working_draft_in_input_box.txt"),
+            ),
+            (
+                "narrow pane",
+                include_str!("testdata/pane_intel/working_narrow_pane.txt"),
+            ),
+        ] {
+            assert!(
+                !tail.contains("esc to interrupt"),
+                "{name}: fixture premise"
+            );
+            assert_eq!(
+                analyze(tail).derived_status,
+                Some(ClaudeStatus::Working),
+                "{name}"
+            );
+        }
+        // The finished turn's summary line is not a spinner.
+        let done = "✻ Worked for 1m 23s · done 2:39 PM\n────\n❯ \n────\n  ⏵⏵ bypass permissions on (shift+tab to cycle)";
+        assert_eq!(analyze(done).derived_status, Some(ClaudeStatus::Idle));
+    }
+
     #[test]
     fn spinner_line_picks_the_verb_line_and_drops_the_glyph() {
         let tail = "⏺ Bash(cargo test)\n  ⎿ Running…\n✶ Cooking… (3s · esc to interrupt)\n";
@@ -1156,6 +1204,23 @@ mod tests {
             spinner_line(tail).as_deref(),
             Some("Channelling… (running Stop hooks… 3/4 · 15s · ↓ 306 tokens)")
         );
+    }
+
+    #[test]
+    fn stop_hooks_running_reads_only_the_stop_hooks_spinner() {
+        let hooks = "● pong\n✢ Channelling… (running Stop hooks… 3/4 · 15s · ↓ 306 tokens)\n  ❯ /clear\n────\n  ⏸ manual mode on · esc to interrupt";
+        assert!(stop_hooks_running(hooks));
+        // The screen still reads Working; only reconcile discounts it.
+        assert_eq!(analyze(hooks).derived_status, Some(ClaudeStatus::Working));
+        assert!(!stop_hooks_running("✶ Cooking… (3s · esc to interrupt)\n"));
+        // A subagent's Stop hooks run inside a turn that is still going.
+        assert!(!stop_hooks_running(
+            "✶ Cooking… (running SubagentStop hooks… 1/2 · 4s)\n"
+        ));
+        // Prose mentioning Stop hooks is not the spinner.
+        assert!(!stop_hooks_running(
+            "● I am running Stop hooks… now\n❯ \n  ? for shortcuts"
+        ));
     }
 
     #[test]

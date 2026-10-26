@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { canStartAnyway, errorText } from './error_copy';
   // The Hosts view's detail pane (spec: "The Hosts view" → Detail sections).
   // In order: header, usage, sessions, integration, danger. ("Today" is left
   // out: the frontend has per-session lifetime totals only, no per-day figure,
@@ -152,6 +153,12 @@
   // Paired with a hub this asks the hub to refresh this one host's content;
   // blocked only while the hub is unusable or the link is down.
   const provisionBlocked = $derived(hubActionBlocked('provision_hosts', $hubStatus, $hubConnection));
+  /** The install job runs over SSH from the hub: a down link or an
+   *  unreachable host would only fail at its first step (review w14-6). */
+  const installBlocked = $derived(
+    hubActionBlocked('install_agent', $hubStatus, $hubConnection) ??
+      (!host.reachable ? `${host.alias} is offline: the hub installs over SSH` : null),
+  );
   const reprovisionAdvised = $derived(needsReprovision(checklist, host));
   // Orbit Fleet 4.13: the Hex field beside what is running, Layout: New only.
   const liveText = $derived(checklistLoaderText(host.alias, checking, provisioning));
@@ -223,6 +230,8 @@
    *  answer `null` and leave the button live over nothing this client owns. */
   const restoreBlocked = $derived(
     hubActionBlocked('restore_host_sessions', $hubStatus, $hubConnection) ??
+      // The hub refuses an unreachable host (E_HOST_OFFLINE); say so first.
+      (!host.reachable && !isLocal ? `${host.alias} is offline: restore once it answers` : null) ??
       (restorableMine.length === 0
         ? ($sessionBlocked(restorable[0], 'restore_host_sessions') ??
           'None of the lost sessions on this host are yours to restore.')
@@ -314,13 +323,19 @@
     const r = await discoverLostSessions(host.alias);
     discoverBusy = false;
     if (!r.ok) {
-      discoverError = r.error.message;
+      discoverError = errorText(r.error);
       return;
     }
     discoverList = r.value;
   }
 
-  async function onResumeCandidate(c: LostCandidate) {
+  /** Rows whose Resume was refused for a login past `accounts.pause_at`
+   *  (`E_ACCOUNT_LIMIT`, from the hub's `new_session`): they offer "Start
+   *  anyway", the choice New session gives (review w16-2). Not a spent
+   *  daily limit: `over_limit_ok` does not pass that one (`canStartAnyway`). */
+  let overLimitIds = $state<Set<string>>(new Set());
+
+  async function onResumeCandidate(c: LostCandidate, overLimitOk = false) {
     if (!c.resumable || c.project_id === null || c.derived_tmux_name === null) return;
     // Re-asked at the write: the discovered list stays on screen, and nothing
     // in it moves when a grant is narrowed.
@@ -331,6 +346,11 @@
     }
     const { [c.claude_session_id]: _dropped, ...rest } = resumeErrors;
     resumeErrors = rest;
+    if (overLimitIds.has(c.claude_session_id)) {
+      const next = new Set(overLimitIds);
+      next.delete(c.claude_session_id);
+      overLimitIds = next;
+    }
     resumingId = c.claude_session_id;
     const r = await newSessionAbortable({
       host_alias: host.alias,
@@ -338,12 +358,14 @@
       worktree_id: c.worktree_id,
       name: c.derived_tmux_name,
       resume_claude_session_id: c.claude_session_id,
+      ...(overLimitOk ? { over_limit_ok: true } : {}),
     });
     resumingId = null;
     if (r.ok) {
       resumedIds = new Set(resumedIds).add(c.claude_session_id);
     } else {
-      resumeErrors = { ...resumeErrors, [c.claude_session_id]: r.error.message };
+      resumeErrors = { ...resumeErrors, [c.claude_session_id]: errorText(r.error) };
+      if (canStartAnyway(r.error) && !overLimitOk) overLimitIds = new Set(overLimitIds).add(c.claude_session_id);
     }
   }
 
@@ -491,7 +513,7 @@
     const refused = adoptBlocked(s);
     if (refused !== null) return refused;
     const r = await adoptSession(s.id, projectId);
-    if (!r.ok) return r.error.message;
+    if (!r.ok) return errorText(r.error);
     adoptingId = null;
     push({ kind: 'success', message: `${s.tmux_name} adopted` });
     return null;
@@ -506,7 +528,7 @@
       claude_session_id: c.claude_session_id,
       project_id: projectId,
     });
-    if (!placed.ok) return placed.error.message;
+    if (!placed.ok) return errorText(placed.error);
     const r = await newSessionAbortable({
       host_alias: host.alias,
       project_id: projectId,
@@ -514,13 +536,13 @@
       name: placed.value.tmux_name,
       resume_claude_session_id: c.claude_session_id,
     });
-    if (!r.ok) return r.error.message;
+    if (!r.ok) return errorText(r.error);
     restoringId = null;
     resumedIds = new Set(resumedIds).add(c.claude_session_id);
     // J10: the ticket the branch names, when the person kept it ticked.
     if (ticket !== null) {
       const linked = await linkSessionWork(r.value.id, { key: ticket });
-      if (!linked.ok) push({ kind: 'error', message: `Restored, but not linked to ${ticket}: ${linked.error.message}` });
+      if (!linked.ok) push({ kind: 'error', message: `Restored, but not linked to ${ticket}: ${errorText(linked.error)}` });
     }
     return null;
   }
@@ -586,7 +608,7 @@
     const r = await restoreHostSessions(host.alias, { dryRun: true });
     busy = false;
     if (!r.ok) {
-      restoreError = r.error.message;
+      restoreError = errorText(r.error);
       return;
     }
     restorePlan = r.value.plan;
@@ -628,7 +650,7 @@
           .map((x) => ({ name: x.tmux_name, error: x.error ?? 'unknown error' })),
       };
     } else {
-      restoreError = r.error.message;
+      restoreError = errorText(r.error);
     }
   }
 </script>
@@ -753,7 +775,13 @@
           <span class="check-detail">{row.detail}</span>
           {#if row.install}
             <span class="check-action">
-              <AgentInstallAction alias={host.alias} version={hubVersion} testid="detail-agent-install" ondone={onreprobe} />
+              <AgentInstallAction
+                alias={host.alias}
+                version={hubVersion}
+                blocked={installBlocked}
+                testid="detail-agent-install"
+                ondone={onreprobe}
+              />
             </span>
           {:else if row.key === 'skills' && row.state === 'warn'}
             <span class="check-action">
@@ -891,15 +919,8 @@
         {/if}
       </div>
     </div>
-    <div class="tab-part" hidden={tab !== 'sessions'}>
-    {#if tidyHint && onreviewtidy}
-      <p class="muted" data-testid="detail-tidy-hint">
-        {tidyHint.text}
-        <button type="button" class="small" data-testid="detail-tidy-review" onclick={() => onreviewtidy(tidyHint.sessionIds)}
-          >Review in Tidy</button
-        >
-      </p>
-    {/if}
+    <!-- The restore button sits in the head on both tabs, so its result
+         does too: never inside a part the other tab hides (review w14-5). -->
     {#if restoreError}
       <p class="error" data-testid="restore-error">{restoreError}</p>
     {/if}
@@ -907,6 +928,15 @@
       <p data-testid="restore-summary">
         Restored {restoreSummary.ok} of {restoreSummary.total}
         {#each restoreSummary.failures as f (f.name)}<br />{f.name}: {f.error}{/each}
+      </p>
+    {/if}
+    <div class="tab-part" hidden={tab !== 'sessions'}>
+    {#if tidyHint && onreviewtidy}
+      <p class="muted" data-testid="detail-tidy-hint">
+        {tidyHint.text}
+        <button type="button" class="small" data-testid="detail-tidy-review" onclick={() => onreviewtidy(tidyHint.sessionIds)}
+          >Review in Tidy</button
+        >
       </p>
     {/if}
     </div>
@@ -963,6 +993,15 @@
                   >
                   {#if resumeErrors[c.claude_session_id]}
                     <p class="error" data-testid="discover-item-error">{resumeErrors[c.claude_session_id]}</p>
+                    {#if overLimitIds.has(c.claude_session_id)}
+                      <button
+                        type="button"
+                        class="small"
+                        data-testid="discover-item-start-anyway"
+                        disabled={resumingId !== null}
+                        onclick={() => onResumeCandidate(c, true)}>Start anyway</button
+                      >
+                    {/if}
                   {/if}
                 {:else if needsRestoreInto(c)}
                   {#if restoringId === c.claude_session_id}

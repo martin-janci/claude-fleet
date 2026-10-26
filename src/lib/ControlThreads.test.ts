@@ -16,7 +16,7 @@ import { destination } from './destination';
 import { sidebarView } from './work_view';
 import { session } from './hosts_fixture';
 import { expectAccessible } from './a11y_check';
-import { mutedThreads } from './control_journal';
+import { mutedThreads, threadFollows } from './control_journal';
 
 // Thread room (2026-10-14, board Main): Control's own left column.
 
@@ -34,6 +34,7 @@ let budget: unknown = null;
 beforeEach(() => {
   resetHandoffsForTests();
   mutedThreads.set(new Set());
+  threadFollows.set(null);
   controlViews.set(defaultLayout());
   activeThread.set(null);
   controlMission.set(null);
@@ -138,12 +139,48 @@ describe('ControlThreads', () => {
     const row = () => screen.getAllByTestId('control-thread').find((r) => (r.textContent ?? '').includes('fix-flake'))!;
     const bell = () => row().parentElement!.querySelector('[data-testid="control-thread-mute"]') as HTMLElement;
     expect(bell().getAttribute('aria-pressed')).toBe('false');
+    expect(bell().title).toBe('Mute: Control stops hearing about it');
     await fireEvent.click(bell());
     await waitFor(() => expect(row().dataset.muted).toBe('true'));
     expect(row().textContent).toContain('Muted ·');
+    // A toggle keeps its name; only the pressed state says it is muted.
+    expect(bell().getAttribute('aria-pressed')).toBe('true');
+    expect(bell().getAttribute('aria-label')).toBe('Mute fix-flake');
+    // The hover hint says what the click will do now: unmute.
+    expect(bell().title).toBe('Muted: click so Control hears about it again');
     expect(inv).toHaveBeenCalledWith('control_journal', { args: { action: 'mute', thread: 'session', id: flake.id } });
     await fireEvent.click(bell());
     await waitFor(() => expect(row().dataset.muted).toBeUndefined());
+  });
+
+  it("lists a thread the hub follows past the newest receipts, and says when Control stopped following one (w04-1, w04-10)", async () => {
+    const old = session('htz', 'old-brief', { origin: 'person', claude_status: 'idle', last_activity_at: now - 90_000 });
+    sessions.set([operator, flake, release, mine, old]);
+    missions = [{ id: 8, name: 'Docs sweep', goal: '', mode: 'finite', state: 'paused', level: 2, plan_version: 1, created_at: 1, updated_at: now - 60, version: 1 }];
+    inv.mockImplementation(async (cmd: string, args?: { args?: { action?: string } }) => {
+      if (cmd === 'control_handoffs') return receipts;
+      if (cmd === 'work_missions') return missions;
+      if (cmd === 'control_journal' && args?.args?.action === 'read')
+        return {
+          follows: [
+            { kind: 'session', id: old.id, state: 'quiet', name: 'old-brief', muted: false },
+            { kind: 'mission', id: 8, state: 'following', name: 'Docs sweep', muted: false },
+          ],
+        };
+      return null;
+    });
+    render(ControlThreads, { oncollapse: () => {} });
+    await waitFor(() => expect(screen.getAllByTestId('control-thread')).toHaveLength(5));
+    const line = (name: string) =>
+      screen
+        .getAllByTestId('control-thread')
+        .find((r) => (r.textContent ?? '').includes(name))!
+        .querySelector('[data-testid="control-thread-line"]')!.textContent;
+    expect(line('old-brief')).toContain('not followed (went quiet)');
+    expect(line('fix-flake')).not.toContain('not followed');
+    // A paused mission says so, under Draft and paused (w04-9).
+    expect(line('Docs sweep')).toBe('Paused');
+    expect(screen.getByTestId('control-thread-group-paused').textContent).toContain('Docs sweep');
   });
 
   it('passes the axe and audit checks', async () => {

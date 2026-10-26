@@ -95,9 +95,11 @@ Rules:
   for fleet-core's, against ~0.4 s). Likewise fleet-core takes no
   dev-dependency on a workspace crate it does not already depend on; a test
   that needs one lives in a crate of its own, as `crates/fleet-agent-e2e`
-  does. `src/lib/names.json`, `tools/ag/**`, `tools/voice/arecord` and
-  three `skills/*/SKILL.md` are embedded in fleet-core itself, so editing
-  them does recompile it.
+  does. `src/lib/names.json`, `tools/ag/**`, `tools/voice/arecord`,
+  `catalog-seed/fleet-agents/**` (the definition gallery),
+  `plugins/fleet-prompt-suggestion/**` and three `skills/*/SKILL.md` are
+  embedded in fleet-core itself, so editing them
+  does recompile it.
 - `pnpm tauri dev` / `pnpm tauri build` and `cargo build -p fleet-hub` use other
   feature sets. Run them when you need them; in a cloud session (no display,
   ~30 GB disk) do not run the Tauri ones at all.
@@ -132,7 +134,7 @@ code error. (`localStorage` is polyfilled in `vitest.setup.ts`; there are no
 known pre-existing frontend test failures.)
 
 **`src-tauri`'s test target parks on a loaded box, and `TMPDIR` fixes it.**
-`claude_fleet_lib`'s ~700 tests each build a temp SQLite store through
+`claude_fleet_lib`'s ~500 tests each build a temp SQLite store through
 `tempfile::tempdir()`, so on the root ext4 filesystem they serialise behind one
 journal: threads sit in `jbd2_log_wait_commit` with `/proc/pressure/io` at
 35–83% and `cargo test --workspace` never finishes. Point `TMPDIR` at tmpfs and
@@ -176,11 +178,12 @@ is on, which a fresh store defaults to. `test_tools()` in
 the full suite (another test had taken the gate first).
 
 Not a flake:
-`cargo test -p fleet-core --lib -- --test-threads=1` takes 23–25 minutes
-(4.5k tests; measured on mercury, 2026-10-02), so a `timeout 600` wrapper
-kills it mid-run and the last `test … ...` line names whichever test was in
-flight — a slow run, not a hang. Run it in parallel (the default), or give a
-sequential run a 30-minute budget.
+`cargo test -p fleet-core --lib -- --test-threads=1` took 23–25 minutes
+for 4.5k tests (measured on mercury, 2026-10-02); the crate now has about
+7.7k (2026-10-20), so expect roughly 40. A `timeout 600` wrapper kills it
+mid-run and the last `test … ...` line names whichever test was in flight —
+a slow run, not a hang. Run it in parallel (the default), or give a
+sequential run a budget of 45 minutes or more.
 
 ## Releasing
 
@@ -219,9 +222,15 @@ editing a page spec or the widget catalog,
 from the Rust models, same rule: after editing `crates/fleet-core/src/pages/forms.rs`
 or `chat_blocks.rs`, `REGEN_FORM_DOCS=1 cargo fleet-test -- form_docs_are_current`.
 
+`docs/design/palette-golden.json` is generated from the theme engine
+(`src/lib/palette.ts`): after a deliberate change to it,
+`REGEN_PALETTE_GOLDEN=1 pnpm exec vitest run src/lib/palette.test.ts`, then
+copy the file unchanged to fleet-mobile's `docs/design/palette-golden.json`,
+where `OrbitPaletteTest` holds the phone's port to it.
+
 ## Architecture
 
-Read [`docs/architecture.md`](docs/architecture.md) before changing a subsystem you have not touched in this session — frontend stores and row events, the service/store/SSH layers, settings metadata and declarative pages, client access, hub client mode (adding a desktop command), the assets catalog, downloads, voice: it names the files, the invariants and the `REGEN_*` commands.
+Read [`docs/architecture.md`](docs/architecture.md) before changing a subsystem you have not touched in this session — frontend stores and row events, the service/store/SSH layers, settings metadata and declarative pages, client access, hub client mode (adding a desktop command), extra fleets (a command another hub serves needs a `FLEET_SCOPED` entry in both `backend/fleets.rs` and `src/lib/fleets.ts`), the theme engine, autofix, the assets catalog, downloads, voice: it names the files, the invariants and the `REGEN_*` commands.
 
 ## Conventions
 

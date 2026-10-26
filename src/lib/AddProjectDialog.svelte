@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { errorText } from './error_copy';
   import { onMount, untrack } from 'svelte';
   import { open } from '@tauri-apps/plugin-dialog';
   import {
@@ -413,7 +414,7 @@
           problems.push(
             r.error.code === 'E_EXISTS'
               ? `${name} was not cloned on ${also}: this hub can't add a second host yet. It is cloned there when a session starts.`
-              : `${name} was not cloned on ${also}: ${r.error.message}`,
+              : `${name} was not cloned on ${also}: ${errorText(r.error)}`,
           );
         }
       }
@@ -475,18 +476,18 @@
       } else {
         error = confirmed
           ? 'The GitHub confirmation expired or was already used — press Add project to confirm again.'
-          : r.error.message;
+          : errorText(r.error);
       }
       return;
     }
     if (r.error.code === 'E_CANCELLED') {
       // A cancelled GitHub creation may have happened anyway: the backend's
       // message says so, and it must not be swallowed.
-      error = remote ? r.error.message : !hostIsRemote(h) ? 'Cancelled.' : `Stopped waiting — ${h} may still finish.`;
+      error = remote ? errorText(r.error) : !hostIsRemote(h) ? 'Cancelled.' : `Stopped waiting — ${h} may still finish.`;
       return;
     }
     // Keep every field (an E_GH retry resumes the same owner/repo).
-    error = r.error.message;
+    error = errorText(r.error);
   }
 
   function confirmCreate() {

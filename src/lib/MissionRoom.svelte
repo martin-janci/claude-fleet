@@ -60,6 +60,7 @@
   import { outbox, receipt as outboxReceipt } from './outbox';
   import type { NextStep } from './mission_triage';
   import type { IpcError, Result } from './result';
+  import { parkedHeld } from './composer_hold';
   import {
     acceptWorkProposals,
     autonomyWords,
@@ -74,11 +75,15 @@
     finalMoveQuestion,
     getMission,
     grantMission,
+    grantSpanNotice,
     isFinal,
     missionTaskId,
     moveLabel,
     ownerLine,
     planMission,
+    plannerWaiting,
+    plannerLimitWait,
+    limitWaitSentence,
     plannerError,
     plannerLine,
     plannerRefusal,
@@ -127,7 +132,9 @@
     sendSteer,
     showMissionPanel,
     startNewMission,
+    statsLine,
     steerBlocked,
+    steerBusy,
     steerPrefix,
     steerReceipts,
     type MissionPanelTab,
@@ -139,15 +146,22 @@
   const missions = $derived($missionList.missions);
   let detail = $state.raw<MissionDetail | null>(null);
   let notice = $state<string | null>(null);
+  /** Review w17-4: the last re-read of the open mission failed; what was
+   *  loaded stays on screen. */
+  let refreshError = $state<IpcError | null>(null);
   let busy = $state(false);
   /** The last planner press that failed, in words (step 1.3). */
   let plannerFailure = $state<HumanError | null>(null);
+  /** `plannerFailure` is a usage-limit wait, not a failure. */
+  let plannerIsWait = $state(false);
   let plannerDetails = $state(false);
 
   const mission = $derived(detail?.mission ?? null);
   const plan = $derived(detail?.plan ?? null);
   /** The header's autonomy in words: "Runs at L1 · L3 asked · L1 ceiling". */
   const autonomy = $derived(plan ? autonomyWords(plan.autonomy) : null);
+  /** Its runs and its idle time (lanes design L0). */
+  const statsText = $derived(statsLine(detail?.stats));
   const pressable = $derived((plan?.steps ?? []).filter((s) => s.kind !== 'ask'));
   const openCards = $derived((plan?.cards ?? []).filter((c) => c.state === 'open' && !hiddenCards.includes(c.id)));
   const runs = $derived(detail ? runsOf(detail) : []);
@@ -158,6 +172,7 @@
     `${proposals.ids.length} ${proposals.ids.length === 1 ? 'task' : 'tasks'}${proposals.waves > 1 ? ` · ${proposals.waves} waves` : ''}`,
   );
   const events = $derived(detail ? roomEvents(detail) : []);
+  const limitWait = $derived(detail ? plannerLimitWait(detail) : null);
   const itemById = $derived(new Map((detail?.items ?? []).map((i) => [i.id, i])));
   const needsYou = $derived(!!detail && !!mission && !isFinal(mission.state) && (!!mission.waiting_on || waitsOnPerson(detail)));
 
@@ -207,9 +222,17 @@
     if (r.ok && r.value?.mission) {
       const first = detail?.mission.id !== id;
       detail = r.value;
+      refreshError = null;
       if (first) missionPanelTab.set(defaultPanelTab(r.value));
+    } else if (!r.ok && r.error.code !== 'E_NOTFOUND' && detail?.mission.id === id) {
+      // Review w17-4: a failed background re-read is not "the mission is
+      // gone": the room, an open goal edit and a half-typed answer stay.
+      // E_NOTFOUND is (the hub answers a deleted or no-longer-visible
+      // mission with it, never with `ok` and no mission): review w30-1.
+      refreshError = r.error;
     } else {
-      notice = r.ok ? 'That mission is not in the fleet any more.' : readErrorText(r.error);
+      notice =
+        r.ok || r.error.code === 'E_NOTFOUND' ? 'That mission is not in the fleet any more.' : readErrorText(r.error);
       detail = null;
       roomMissionId.set(null);
       openedId = null;
@@ -241,7 +264,12 @@
     moreOpen = false;
     confirmMove = null;
     notice = null;
+    refreshError = null;
     plannerFailure = null;
+    plannerIsWait = false;
+    // A refused Complete's override is that mission's (review r8): it never
+    // carries over to the next one.
+    ciRed = false;
     importOpen = false;
     importText = '';
     importResult = null;
@@ -249,6 +277,8 @@
     reviewing = false;
     reviewAt = 0;
     granting = false;
+    grantUntilDone = false;
+    grantHosts = [];
     earlierShown = false;
     steerText = '';
     missionSessionId.set(null);
@@ -271,10 +301,12 @@
   async function act<T>(p: Promise<Result<T>>): Promise<T | null> {
     busy = true;
     notice = null;
+    ciRed = false;
     try {
       const r = await p;
       if (!r.ok) {
         notice = readErrorText(r.error);
+        ciRed = r.error.code === 'E_CI_FAILING';
         if (r.error.code === 'E_CONFLICT') await load();
         return null;
       }
@@ -348,6 +380,8 @@
   /** Runs open at once, and a continuous mission's wake interval in minutes
    *  ('' = no timer) (step 1.8). */
   let editParallel = $state(POLICY_DEFAULT_PARALLEL);
+  /** How its tasks run (lanes design L3): `item` or `lane`. */
+  let editExecution = $state<'item' | 'lane'>('item');
   let editWakeMins = $state<number | null>(null);
   const minWakeMins = POLICY_MIN_WAKE_SECS / 60;
   const wakeBad = $derived(editMode === 'continuous' && editWakeMins != null && !(editWakeMins >= minWakeMins));
@@ -361,6 +395,7 @@
     editLevel = mission.level;
     editMode = mission.mode;
     editParallel = mission.policy?.max_parallel ?? POLICY_DEFAULT_PARALLEL;
+    editExecution = mission.policy?.execution ?? 'item';
     const wake = mission.policy?.wake_every_secs;
     editWakeMins = wake ? Math.round(wake / 60) : null;
     editing = true;
@@ -379,7 +414,11 @@
           done_when: doneWhenRows(editDoneWhen),
           level: editLevel,
           mode: editMode,
-          policy: policyWith(mission.policy, { max_parallel: editParallel, wake_every_secs: wakeSecs }),
+          policy: policyWith(mission.policy, {
+            max_parallel: editParallel,
+            wake_every_secs: wakeSecs,
+            execution: editExecution,
+          }),
         },
         mission.version,
       ),
@@ -393,9 +432,13 @@
   let confirmMove = $state<string | null>(null);
   let moreEl = $state<HTMLElement>();
 
-  async function move(to: string) {
+  /** The last Complete was refused for red CI on the mission's PRs: offer
+   *  a person's override under the notice. */
+  let ciRed = $state(false);
+
+  async function move(to: string, ciOverride = false) {
     if (!mission) return;
-    await act(setMissionState(mission.id, to, mission.version));
+    await act(setMissionState(mission.id, to, mission.version, ciOverride));
   }
 
   function pickFinal(to: string) {
@@ -476,6 +519,7 @@
   async function askPlanner() {
     if (!mission) return;
     plannerFailure = null;
+    plannerIsWait = false;
     plannerDetails = false;
     busy = true;
     notice = null;
@@ -489,6 +533,10 @@
         return;
       }
       if (r.value.refused) plannerFailure = plannerRefusal(r.value.refused);
+      else if (r.value.waiting) {
+        plannerFailure = plannerWaiting(r.value.waiting);
+        plannerIsWait = true;
+      }
       await load();
     } finally {
       busy = false;
@@ -563,16 +611,23 @@
   let grantLevel = $state(2);
   let grantHours = $state(8);
   let grantBudget = $state('');
+  /** Until the mission completes (a finite mission's), bounded by the budget. */
+  let grantUntilDone = $state(false);
   /** Hosts the grant lets the loop run on; none ticked: any host. */
   let grantHosts = $state<string[]>([]);
 
   async function grant() {
     if (!mission) return;
     const cents = Math.round(Number(grantBudget) * 100);
+    const untilDone = grantUntilDone && mission.mode === 'finite';
+    if (untilDone && !(grantBudget.trim() && cents > 0)) {
+      notice = 'A grant until the mission completes needs a budget.';
+      return;
+    }
     const out = await act(
       grantMission(mission.id, {
         level: grantLevel,
-        hours: grantHours,
+        ...(untilDone ? { until_done: true } : { hours: grantHours }),
         ...(grantBudget.trim() && cents > 0 ? { budget_cents: cents } : {}),
         ...(grantHosts.length > 0 ? { hosts: [...grantHosts] } : {}),
       }),
@@ -580,6 +635,10 @@
     if (out) {
       granting = false;
       grantHosts = [];
+      grantUntilDone = false;
+      // A hub before grants until done drops the flag and signs its default
+      // hours (review r8): say so rather than let it pass as asked.
+      notice = grantSpanNotice(untilDone, out);
     }
   }
 
@@ -694,12 +753,17 @@
 
   let steerText = $state('');
   const blocked = $derived(steerBlocked($operatorRow));
+  const outboxStore = outbox.store;
+  const operatorOutboxBusy = $derived(
+    ($outboxStore.msgs[$operatorRow?.id ?? -1] ?? []).some((m) => m.state === 'waiting' || m.state === 'sending' || m.state === 'sent'),
+  );
+  const steerWait = $derived(blocked ? null : steerBusy($operatorRow, operatorOutboxBusy, $parkedHeld.length));
   const myReceipts = $derived(mission ? $steerReceipts.filter((r) => r.missionId === mission.id) : []);
 
   function steer() {
     const text = steerText.trim();
     const row = get(operatorRow);
-    if (!mission || !text || !row || steerBlocked(row)) return;
+    if (!mission || !text || !row || steerBlocked(row) || steerWait) return;
     sendSteer(mission, text, row);
     steerText = '';
   }
@@ -715,7 +779,6 @@
     const m = ($outboxStore.msgs[operatorId] ?? []).find((x) => x.id === key);
     return m ? outboxReceipt(m, false, Date.now()).label : 'Sent';
   }
-  const outboxStore = outbox.store;
 
   let stopWatching: (() => void) | null = null;
   onMount(() => {
@@ -842,6 +905,9 @@
               of {dollars(plan.autonomy.grant.budget_micros)}{/if} · {plan.counts.open} running
           </p>
         {/if}
+        {#if statsText}
+          <p class="meta" data-testid="mission-stats" title="Runs per done task, retries, cold starts (sessions started), a task's median time, and the share of the working span with no run open">{statsText}</p>
+        {/if}
         {#if mayChange && confirmMove}
           <div class="row confirm-move" role="alertdialog" aria-label="Confirm" data-testid="mission-move-confirm-row">
             <span>{finalMoveQuestion(mission.name, confirmMove)}</span>
@@ -856,11 +922,30 @@
             <button class="btn btn--quiet" type="button" data-testid="mission-move-keep" onclick={() => (confirmMove = null)}>Keep</button>
           </div>
         {/if}
+        {#if mayChange && ciRed}
+          <div class="row confirm-move" role="alertdialog" aria-label="CI is failing" data-testid="mission-ci-override-row">
+            <span>CI is failing on this mission's pull requests. Complete it anyway? Fleet records that you did.</span>
+            <button
+              class="btn btn--danger"
+              type="button"
+              disabled={busy || changeBlocked}
+              data-testid="mission-ci-override"
+              onclick={() => void move('completed', true)}>Complete anyway</button
+            >
+            <button class="btn btn--quiet" type="button" data-testid="mission-ci-keep" onclick={() => (ciRed = false)}>Keep</button>
+          </div>
+        {/if}
       </header>
 
       <div class="scroll">
         <div class="col" data-testid="mission-detail-centre">
           {#if notice}<p class="notice" role="status" data-testid="mission-notice">{notice}</p>{/if}
+          {#if refreshError}
+            <p class="refresh-error" role="status" data-testid="mission-refresh-error">
+              Couldn't refresh ({readErrorText(refreshError)}) — showing what was loaded.
+              <button class="btn btn--quiet" type="button" data-testid="mission-refresh-retry" onclick={() => openedId != null && void loadDetail(openedId)}>Retry</button>
+            </p>
+          {/if}
 
           {#if graph}
             <TaskGraphCard {graph} kind="mission" onopen={() => ((tasksView = 'graph'), showMissionPanel('plan'))} />
@@ -904,8 +989,12 @@
             {/each}
           </ol>
 
+          {#if limitWait && !plannerFailure}
+            <p class="limit-wait" data-testid="mission-limit-wait">{limitWaitSentence(limitWait)}</p>
+          {/if}
+
           {#if plannerFailure}
-            <div class="card planner-error" role="alert" data-testid="mission-planner-error">
+            <div class="card planner-error" class:planner-wait={plannerIsWait} role="alert" data-testid="mission-planner-error">
               <p class="title">{plannerFailure.title}</p>
               <p>{plannerFailure.text}</p>
               <div class="row">
@@ -1130,7 +1219,7 @@
             onkeydown={steerKey}
             data-testid="mission-steer-input"
           ></textarea>
-          <button class="btn send" type="submit" disabled={!!blocked || !steerText.trim()} aria-label="Send to Control" data-testid="mission-steer-send"
+          <button class="btn send" type="submit" disabled={!!blocked || !!steerWait || !steerText.trim()} aria-label="Send to Control" data-testid="mission-steer-send"
             >↵</button
           >
         </div>
@@ -1138,6 +1227,11 @@
           <p class="muted small" data-testid="mission-steer-blocked">
             {blocked}
             <button class="link" type="button" onclick={() => openControl('chat')}>Open Control</button>
+          </p>
+        {:else if steerWait}
+          <p class="muted small" data-testid="mission-steer-busy">
+            {steerWait}
+            {#if $parkedHeld.length > 0}<button class="link" type="button" onclick={() => openControl('chat')}>Open Control</button>{/if}
           </p>
         {:else}
           <p class="muted small hint">Goes to Control, about this mission.</p>
@@ -1261,6 +1355,13 @@
                     >Parallel runs
                     <input type="number" min="1" max={POLICY_MAX_PARALLEL} bind:value={editParallel} class="role" data-testid="mission-edit-parallel" /></label
                   >
+                  <label class="field inline" title="By lane: a lane's tasks run one after another in one session on the lane's branch. Changes only while the mission is not running."
+                    >Tasks run
+                    <select bind:value={editExecution} disabled={mission.state === 'active'} data-testid="mission-edit-execution">
+                      <option value="item">Each in its own session</option>
+                      <option value="lane">By lane, one session each</option>
+                    </select></label
+                  >
                   {#if editMode === 'continuous'}
                     <label class="field inline"
                       >Wake every (min)
@@ -1325,7 +1426,9 @@
                   >
                   {#if plan.autonomy.grant}
                     <button class="btn btn--quiet" type="button" disabled={busy || changeBlocked} data-testid="mission-revoke" onclick={() => void revokeGrant()}
-                      >End the grant (L{plan.autonomy.grant.level}, until {new Date(plan.autonomy.grant.expires_at * 1000).toLocaleString()})</button
+                      >End the grant (L{plan.autonomy.grant.level}, {plan.autonomy.grant.until_done
+                        ? 'until the mission completes'
+                        : `until ${new Date(plan.autonomy.grant.expires_at * 1000).toLocaleString()}`})</button
                     >
                   {:else}
                     <button class="btn btn--quiet" type="button" disabled={busy || changeBlocked} data-testid="mission-grant" onclick={() => (granting = !granting)}
@@ -1344,9 +1447,24 @@
                       </select></label
                     >
                     <div class="row">
-                      <label class="field inline">Hours <input type="number" min="1" max="168" bind:value={grantHours} class="role" /></label>
-                      <label class="field inline">Budget $ <input placeholder="none" bind:value={grantBudget} class="role" data-testid="mission-grant-budget" /></label>
+                      {#if !(grantUntilDone && mission.mode === 'finite')}
+                        <label class="field inline">Hours <input type="number" min="1" max="168" bind:value={grantHours} class="role" /></label>
+                      {/if}
+                      <label class="field inline"
+                        >Budget $ <input
+                          placeholder={grantUntilDone && mission.mode === 'finite' ? 'required' : 'none'}
+                          bind:value={grantBudget}
+                          class="role"
+                          data-testid="mission-grant-budget"
+                        /></label
+                      >
                     </div>
+                    {#if mission.mode === 'finite'}
+                      <label class="field inline"
+                        ><input type="checkbox" bind:checked={grantUntilDone} data-testid="mission-grant-until-done" /> Until the mission completes
+                        <span class="muted small">(the budget is its only bound)</span></label
+                      >
+                    {/if}
                     {#if $hosts.length > 0}
                       <fieldset class="hosts" data-testid="mission-grant-hosts">
                         <legend>Hosts <span class="muted small">(none ticked: any)</span></legend>
@@ -2124,12 +2242,28 @@
     margin: 0;
     color: var(--danger);
   }
+  .refresh-error {
+    margin: 0;
+    font-size: var(--text-2xs);
+    color: var(--usage-warn);
+  }
   .planner-error {
     border-color: var(--danger);
   }
   .planner-error .title {
     color: var(--danger);
     font-weight: 600;
+  }
+  .planner-wait {
+    border-color: var(--status-waiting);
+  }
+  .planner-wait .title {
+    color: var(--status-waiting);
+  }
+  .limit-wait {
+    margin: var(--space-1) 0 0;
+    font-size: var(--text-xs);
+    color: var(--status-waiting);
   }
   .planner-error .details {
     margin: var(--space-1) 0 0;

@@ -80,6 +80,10 @@ struct Connection {
     /// replaced, disconnected or evicted — so its owner can tear the socket
     /// down even while its writer is stuck mid-send.
     gone: tokio_util::sync::CancellationToken,
+    /// Cancelled, before `gone`, when a newer connection for the same alias
+    /// replaced this one: its owner then closes the socket with
+    /// [`fleet_proto::SUPERSEDED_CLOSE_CODE`] rather than bare.
+    superseded: tokio_util::sync::CancellationToken,
 }
 
 impl Connection {
@@ -93,6 +97,32 @@ impl Connection {
     }
 }
 
+/// How far back takeovers are counted for [`AgentRegistry::duplicate`].
+pub const DUPLICATE_WINDOW_SECS: i64 = 300;
+
+/// Takeovers within [`DUPLICATE_WINDOW_SECS`] that mean two agents share one
+/// host's token (review w14-1). A restarted agent replaces its old
+/// connection once; two agents on one token keep taking it from each other
+/// (#965 only slows that down), whether or not their host names differ: a
+/// cloned VM keeps its hostname, and a leftover service beside a reinstall
+/// runs on the same machine.
+pub const DUPLICATE_TAKEOVERS: usize = 2;
+
+/// Two agents are taking one host's connection from each other.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct DuplicateAgent {
+    /// Unix seconds of the first takeover still in the window.
+    pub since: i64,
+    /// Takeovers in the window.
+    pub takeovers: usize,
+    /// The agents that said hello in those takeovers, as
+    /// `"<host_name> (fleet-agent <version>)"`, each once.
+    pub peers: Vec<String>,
+}
+
+/// One takeover: when, and the two connections' labels (replaced, new).
+type Takeover = (i64, String, String);
+
 /// Is `credential` still current for `alias`? See [`AgentRegistry::verify_with`].
 type Verifier = Box<dyn Fn(&str, &str) -> bool + Send + Sync>;
 
@@ -101,6 +131,9 @@ pub struct AgentRegistry {
     conns: DashMap<String, Arc<Connection>>,
     next_id: AtomicU64,
     verifier: std::sync::OnceLock<Verifier>,
+    /// Alias → its recent takeovers, oldest first, pruned to
+    /// [`DUPLICATE_WINDOW_SECS`].
+    takeovers: DashMap<String, Vec<Takeover>>,
 }
 
 impl AgentRegistry {
@@ -109,6 +142,7 @@ impl AgentRegistry {
             conns: DashMap::new(),
             next_id: AtomicU64::new(1),
             verifier: std::sync::OnceLock::new(),
+            takeovers: DashMap::new(),
         })
     }
 
@@ -167,11 +201,62 @@ impl AgentRegistry {
             pending: DashMap::new(),
             credential,
             gone: tokio_util::sync::CancellationToken::new(),
+            superseded: tokio_util::sync::CancellationToken::new(),
         });
+        let host_name = conn.hello.host_name.clone();
+        let label = peer_label(&conn.hello);
         if let Some(previous) = self.conns.insert(alias.to_string(), conn) {
+            let replaced = peer_label(&previous.hello);
+            let duplicate = self.note_takeover(alias, now_unix(), replaced.clone(), label.clone());
+            if previous.hello.host_name != host_name || duplicate.is_some() {
+                let peers = duplicate
+                    .map(|d| d.peers.join(", "))
+                    .unwrap_or_else(|| format!("{replaced}, {label}"));
+                tracing::warn!(
+                    host = %alias,
+                    "[agent] {} replaced the agent on {}: two agents are using this host's token \
+                     ({}). Stop one, or rotate the token",
+                    fleet_proto::sanitize_for_log(&host_name, 64),
+                    fleet_proto::sanitize_for_log(&previous.hello.host_name, 64),
+                    fleet_proto::sanitize_for_log(&peers, 256),
+                );
+            }
+            previous.superseded.cancel();
             previous.abort_pending();
         }
         id
+    }
+
+    /// Record a takeover of `alias` at `at` and answer the duplicate it now
+    /// amounts to, if any.
+    fn note_takeover(
+        &self,
+        alias: &str,
+        at: i64,
+        replaced: String,
+        new: String,
+    ) -> Option<DuplicateAgent> {
+        let mut entry = self.takeovers.entry(alias.to_string()).or_default();
+        entry.push((at, replaced, new));
+        entry.retain(|(t, _, _)| at - *t <= DUPLICATE_WINDOW_SECS);
+        duplicate_of(&entry)
+    }
+
+    /// Two agents are taking `alias`'s connection from each other: at least
+    /// [`DUPLICATE_TAKEOVERS`] takeovers in the last
+    /// [`DUPLICATE_WINDOW_SECS`]. `agent_status` reports it per host.
+    pub fn duplicate(&self, alias: &str) -> Option<DuplicateAgent> {
+        self.duplicate_at(alias, now_unix())
+    }
+
+    fn duplicate_at(&self, alias: &str, now: i64) -> Option<DuplicateAgent> {
+        let entry = self.takeovers.get(alias)?;
+        let recent: Vec<Takeover> = entry
+            .iter()
+            .filter(|(t, _, _)| now - *t <= DUPLICATE_WINDOW_SECS)
+            .cloned()
+            .collect();
+        duplicate_of(&recent)
     }
 
     /// Deregister `conn`, if it is still the live connection for `alias`. A
@@ -215,6 +300,16 @@ impl AgentRegistry {
                 gone.cancel();
                 gone
             }
+        }
+    }
+
+    /// Fires when connection `conn` for `alias` was replaced by a newer one
+    /// (and not merely disconnected). Read it while `conn` is live: asked
+    /// later, it never fires.
+    pub fn superseded(&self, alias: &str, conn: ConnId) -> tokio_util::sync::CancellationToken {
+        match self.live(alias) {
+            Some(live) if live.id == conn => live.superseded.clone(),
+            _ => tokio_util::sync::CancellationToken::new(),
         }
     }
 
@@ -311,14 +406,19 @@ impl AgentRegistry {
             return Err(offline(alias));
         }
         // …and it could have been replaced between the lookup and the insert,
-        // in which case nobody will ever answer this slot.
+        // in which case nobody will ever answer this slot. From here on the
+        // frame is queued on that connection and may have reached the agent,
+        // which runs it whether or not the answer gets back: not "offline"
+        // (nothing ran, retry elsewhere) but lost mid-request, a code
+        // `codes::may_have_run` counts, so a billed usage call or a
+        // `gh repo create` is not fired a second time.
         if self.live(alias).map(|c| c.id) != Some(conn.id) {
-            return Err(offline(alias));
+            return Err(lost_mid_request(alias));
         }
         match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(answer)) => Ok(answer),
             // The sender was dropped: the connection was replaced or closed.
-            Ok(Err(_)) => Err(offline(alias)),
+            Ok(Err(_)) => Err(lost_mid_request(alias)),
             // `E_SSH_TIMEOUT`, not `E_TIMEOUT`, even though no ssh is
             // involved: it is the code EVERY `SshExec` returns for a blown
             // wall clock (`ssh::wall_clock_error`, shared by `SshClient`,
@@ -418,6 +518,32 @@ impl Drop for PendingGuard {
     }
 }
 
+/// The connection ended after the request was sent: its outcome is unknown.
+/// `details.connection_lost` lets a reader that only cares whether the agent
+/// is there (the reconcile's redial grace) treat it like `E_AGENT_OFFLINE`.
+pub(crate) fn lost_mid_request(alias: &str) -> IpcError {
+    IpcError {
+        details: Some(serde_json::json!({ "connection_lost": true })),
+        ..IpcError::new(
+            codes::E_AGENT_PROTOCOL,
+            format!(
+                "the connection to {alias}'s agent ended mid-request; the command may have run"
+            ),
+        )
+    }
+}
+
+/// Whether `e` says the host's agent connection is gone: not connected, or
+/// lost while a request was in flight.
+pub fn connection_gone(e: &IpcError) -> bool {
+    e.code == codes::E_AGENT_OFFLINE
+        || e.details
+            .as_ref()
+            .and_then(|d| d.get("connection_lost"))
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+}
+
 fn offline(alias: &str) -> IpcError {
     IpcError::new(
         codes::E_AGENT_OFFLINE,
@@ -465,12 +591,31 @@ fn agent_frame_id(frame: &AgentFrame) -> Option<&str> {
     }
 }
 
-fn now_unix() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
+/// How a connection reads in a duplicate warning.
+fn peer_label(hello: &AgentHello) -> String {
+    format!("{} (fleet-agent {})", hello.host_name, hello.agent_version)
 }
+
+fn duplicate_of(takeovers: &[Takeover]) -> Option<DuplicateAgent> {
+    if takeovers.len() < DUPLICATE_TAKEOVERS {
+        return None;
+    }
+    let mut peers: Vec<String> = Vec::new();
+    for (_, a, b) in takeovers {
+        for p in [a, b] {
+            if !peers.contains(p) {
+                peers.push(p.clone());
+            }
+        }
+    }
+    Some(DuplicateAgent {
+        since: takeovers[0].0,
+        takeovers: takeovers.len(),
+        peers,
+    })
+}
+
+use crate::store::now_unix;
 
 #[cfg(test)]
 mod tests {
@@ -596,6 +741,46 @@ mod tests {
 
     // ── reconnection ────────────────────────────────────────────────────────
 
+    /// Review w14-1: one takeover is a restart; two within the window are
+    /// two agents on one token, flagged even when both say the same host
+    /// name (a cloned VM), naming each agent once. Older takeovers age out.
+    #[tokio::test]
+    async fn repeated_takeovers_flag_two_agents_on_one_token() {
+        let reg = AgentRegistry::new();
+        let _a = FakeAgent::connect(&reg, "laptop", answer_exit(0));
+        assert_eq!(reg.duplicate("laptop"), None);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let other = AgentHello {
+            agent_version: "1.0.0".into(),
+            ..hello()
+        };
+        reg.connect("laptop", other, tx);
+        assert_eq!(reg.duplicate("laptop"), None, "one takeover is a restart");
+        let _c = FakeAgent::connect(&reg, "laptop", answer_exit(0));
+        let dup = reg
+            .duplicate("laptop")
+            .expect("two takeovers in the window");
+        assert_eq!(dup.takeovers, 2);
+        assert_eq!(
+            dup.peers,
+            vec![
+                "fake-host (fleet-agent 9.9.9)".to_string(),
+                "fake-host (fleet-agent 1.0.0)".to_string()
+            ]
+        );
+        assert_eq!(reg.duplicate("desk"), None);
+        // Past the window, the same takeovers no longer count.
+        assert_eq!(
+            reg.duplicate_at("laptop", dup.since + DUPLICATE_WINDOW_SECS + 1),
+            None
+        );
+        let label = || "x (fleet-agent 1)".to_string();
+        assert!(reg.note_takeover("desk", 1_000, label(), label()).is_none());
+        assert!(reg
+            .note_takeover("desk", 1_000 + DUPLICATE_WINDOW_SECS + 1, label(), label())
+            .is_none());
+    }
+
     /// A restarted agent must take over without waiting for a timeout.
     #[tokio::test]
     async fn a_second_connection_replaces_the_first() {
@@ -615,6 +800,20 @@ mod tests {
         );
         assert!(first.sent().is_empty(), "the replaced agent got nothing");
         assert_eq!(reg.snapshot().len(), 1, "one row per alias, not two");
+    }
+
+    /// Only a takeover marks the old connection superseded; a plain
+    /// disconnect, and the replacement itself, are not.
+    #[tokio::test]
+    async fn only_a_replaced_connection_is_marked_superseded() {
+        let reg = AgentRegistry::new();
+        let first = FakeAgent::connect(&reg, "laptop", answer_exit(1));
+        let replaced = reg.superseded("laptop", first.conn_id);
+        let second = FakeAgent::connect(&reg, "laptop", answer_exit(2));
+        assert!(replaced.is_cancelled(), "the first was replaced");
+        let current = reg.superseded("laptop", second.conn_id);
+        reg.disconnect("laptop", second.conn_id);
+        assert!(!current.is_cancelled(), "a disconnect is not a takeover");
     }
 
     /// The replaced connection's reader task may still be draining. Its
@@ -681,7 +880,8 @@ mod tests {
     }
 
     /// The spec's "a call racing a disconnect": the caller must be told the
-    /// agent is gone, not left waiting out the whole wall clock.
+    /// agent is gone, not left waiting out the whole wall clock. The frame
+    /// was already sent, so the code is one `may_have_run` counts.
     #[tokio::test]
     async fn an_in_flight_request_fails_offline_when_the_connection_drops() {
         let reg = AgentRegistry::new();
@@ -695,7 +895,10 @@ mod tests {
         let started = Instant::now();
         agent.disconnect();
         let err = call.await.unwrap().unwrap_err();
-        assert_eq!(err.code, codes::E_AGENT_OFFLINE);
+        assert_eq!(err.code, codes::E_AGENT_PROTOCOL);
+        assert!(codes::may_have_run(&err.code));
+        // …yet it still reads as "the agent is gone" for the redial grace.
+        assert!(connection_gone(&err));
         assert!(
             started.elapsed() < Duration::from_millis(500),
             "waited {:?} after the disconnect",

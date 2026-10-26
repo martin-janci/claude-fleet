@@ -31,7 +31,9 @@ import {
   rowProgress,
   sendSteer,
   startNewMission,
+  statsLine,
   steerBlocked,
+  steerBusy,
   steerPrefix,
   steerReceipts,
 } from './mission_room';
@@ -223,11 +225,65 @@ describe('Steer: the composer routes to Control', () => {
         keys: null,
       },
     });
+    // Control follows the mission from now on (w04-11).
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith('control_journal', {
+      args: { action: 'follow', thread: 'mission', id: 4, text: 'Retry step 2 on htz' },
+    });
   });
 
   it('says why it cannot send with no operator, or a lost one', () => {
     expect(steerBlocked(null)).toContain("Control's agent isn't running");
     expect(steerBlocked(session('local', 'op', { id: 1, lost_at: 5 }))).toContain('was lost');
     expect(steerBlocked(session('local', 'op', { id: 1 }))).toBeNull();
+  });
+
+  it("waits while Control is mid-turn, and behind lines queued in Control's chat (w04-12)", () => {
+    const idle = session('local', 'op', { id: 1, claude_status: 'idle' });
+    expect(steerBusy(idle, false, 0)).toBeNull();
+    expect(steerBusy({ ...idle, claude_status: 'working' }, false, 0)).toContain('mid-turn');
+    expect(steerBusy(idle, true, 0)).toContain('mid-turn');
+    expect(steerBusy(idle, false, 2)).toContain('2 lines queued');
+  });
+});
+
+describe('the metrics line (lanes design L0)', () => {
+  const base = {
+    items: 3,
+    items_done: 2,
+    runs_by_role: { implement: 4, review: 2, test: 1 },
+    session_runs: 6,
+    sessions: 6,
+    checkouts: 5,
+    failed_runs: 1,
+    retries: 2,
+    runs_per_done_item_x100: 350,
+    item_secs_p50: 2700,
+    span_secs: 3 * 3600,
+    idle_secs: 3600,
+  };
+
+  it('counts runs per done task, retries, cold starts, a task\'s time and the idle share', () => {
+    expect(statsLine(base)).toBe(
+      '7 runs (3.5 per done task) · 2 retries · 6 cold starts · a task takes 45 min · idle 33% of 3h 0m',
+    );
+  });
+
+  it('says nothing before the first run, or from an older hub', () => {
+    expect(statsLine(undefined)).toBeNull();
+    expect(statsLine({ ...base, span_secs: 0, idle_secs: 0 })).toBeNull();
+  });
+
+  it('leaves out what has not happened yet', () => {
+    expect(
+      statsLine({
+        ...base,
+        items_done: 0,
+        runs_per_done_item_x100: null,
+        retries: 0,
+        item_secs_p50: null,
+        runs_by_role: { implement: 1 },
+        sessions: 1,
+      }),
+    ).toBe('1 run · 1 cold start · idle 33% of 3h 0m');
   });
 });

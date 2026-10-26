@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { controlSessionIds, escalations, escalationKey, loginCardText, pruneLater, LATER_KEPT, LATER_MAX_AGE_SECS } from './control_escalations';
+import { controlMissionIds, controlSessionIds, escalations, missionEscalations, escalationKey, loginCardText, pruneLater, LATER_KEPT, LATER_MAX_AGE_SECS } from './control_escalations';
 import type { ControlHandoff } from './handoffs';
 import type { HostRow } from './hosts';
 import type { SessionRow } from './sessions';
@@ -122,6 +122,14 @@ describe("Control's threads and the hub's follow state (F10)", () => {
     expect(escalations(rows, opts, null, new Set(), [], null)).toHaveLength(5);
   });
 
+  it('takes a followed thread whose receipt fell out of the newest 20 (w04-1)', () => {
+    const follows = new Map([
+      ['s:7', { state: 'following', muted: false }],
+      ['m:12', { state: 'following', muted: false }],
+    ]);
+    expect([...controlSessionIds(rows, [], follows)].sort()).toEqual([2, 7, 8]);
+  });
+
   it('keeps every thread when the hub has not said (an older hub, no read yet)', () => {
     expect([...controlSessionIds(rows, receipts, null)].sort()).toEqual([2, 5, 6, 7, 8]);
     expect([...controlSessionIds(rows, receipts, new Map())].sort()).toEqual([2, 5, 6, 7, 8]);
@@ -149,5 +157,51 @@ describe('Later', () => {
     const again = await import('./control_escalations');
     const { get } = await import('svelte/store');
     expect(get(again.laterEscalations).has('7:waiting:3')).toBe(true);
+  });
+});
+
+describe('a host-down card put off with Later', () => {
+  const hostRow = (alias: string, reachable: boolean) => ({ alias, reachable, hidden: false }) as unknown as HostRow;
+
+  it('is forgotten once the host is up again, so its next outage raises a card', async () => {
+    const { vi } = await import('vitest');
+    vi.resetModules();
+    const m = await import('./control_escalations');
+    const { get } = await import('svelte/store');
+    m.putOff('host:mac');
+    m.putOff('7:waiting:3');
+    m.forgetRecoveredHosts([hostRow('mac', false)]);
+    expect(get(m.laterEscalations).has('host:mac')).toBe(true);
+    m.forgetRecoveredHosts([hostRow('mac', true)]);
+    expect(get(m.laterEscalations).has('host:mac')).toBe(false);
+    expect(get(m.laterEscalations).has('7:waiting:3')).toBe(true);
+  });
+
+  it('dropRecoveredHosts keeps every other card', async () => {
+    const { dropRecoveredHosts } = await import('./control_escalations');
+    const entries: [string, number][] = [['host:mac', 1], ['host:htz', 2], ['login:mac::5', 3]];
+    expect(dropRecoveredHosts(entries, [hostRow('mac', true), hostRow('htz', false)])).toEqual([['host:htz', 2], ['login:mac::5', 3]]);
+  });
+});
+
+describe('mission cards (w04-7)', () => {
+  const m = (id: number, over: Record<string, unknown> = {}) =>
+    ({ id, name: `M${id}`, goal: '', mode: 'finite', state: 'active', level: 2, plan_version: 1, created_at: 1, updated_at: 1, version: 1, ...over }) as never;
+
+  it('an unfinished mission waiting on the person is a card; Later and the scope leave it out', () => {
+    const ms = [m(4, { waiting_on: { reason: 'sign_grant' } }), m(5), m(6, { state: 'cancelled', waiting_on: { reason: 'question' } })];
+    const cards = missionEscalations(ms, new Set());
+    expect(cards.map((c) => [c.missionId, c.line])).toEqual([[4, 'M4 needs its grant signed']]);
+    expect(missionEscalations(ms, new Set([cards[0].key]))).toEqual([]);
+    expect(missionEscalations(ms, new Set(), new Set([5]))).toEqual([]);
+  });
+
+  it("Control's missions are those a receipt or the hub names, while followed", () => {
+    const receipts = [{ kind: 'mission', mission_id: 4 }] as unknown as ControlHandoff[];
+    const follows = new Map([
+      ['m:7', { state: 'following', muted: false }],
+      ['m:8', { state: 'muted', muted: true }],
+    ]);
+    expect([...controlMissionIds(receipts, follows)].sort()).toEqual([4, 7]);
   });
 });

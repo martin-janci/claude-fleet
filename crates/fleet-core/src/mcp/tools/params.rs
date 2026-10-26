@@ -167,7 +167,11 @@ pub struct ShellTerminalsParams {
     pub at: crate::service::sessions::ShellTerminalStart,
 }
 
+// Destructive: an argument it does not know is refused rather than dropped
+// (review w25-2). Callers checked: the desktop routes `KillSessionArgs`
+// (`host_alias`, `name`, `force`), the phone sends `session_id`.
 #[derive(serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct KillSessionParams {
     /// Fleet session id, or host_alias + name.
     #[serde(default)]
@@ -176,7 +180,7 @@ pub struct KillSessionParams {
     #[serde(default)]
     pub host_alias: Option<String>,
     /// tmux name (with `host_alias`).
-    #[serde(default)]
+    #[serde(default, alias = "tmux_name")]
     pub name: Option<String>,
     /// Kill even the fleet controller.
     #[serde(default)]
@@ -192,13 +196,18 @@ pub struct ForgetProjectParams {
     pub project_id: i64,
 }
 
+// A fan-out over every host when `host` is missing, so an argument it does
+// not know is refused rather than dropped (review w25-2): `{host_alias: "x",
+// rotate: true}` used to rotate EVERY host's token. Callers checked: the
+// desktop's `reprovision_host` sends `{host, content_only}`.
 #[derive(serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ProvisionHostsParams {
     /// Mint fresh per-host tokens (invalidates each host's current one).
     #[serde(default)]
     pub rotate: bool,
     /// One host alias; every active host when omitted.
-    #[serde(default)]
+    #[serde(default, alias = "host_alias")]
     pub host: Option<String>,
     /// Skills, CLAUDE.md block and hooks only: no token, no ~/.claude.json
     /// rewrite, no tunnel.
@@ -243,7 +252,7 @@ pub struct RenameSessionParams {
     #[serde(default)]
     pub host_alias: Option<String>,
     /// Current tmux session name (with `host_alias`).
-    #[serde(default)]
+    #[serde(default, alias = "tmux_name")]
     pub old_name: Option<String>,
     /// New tmux session name.
     pub new_name: String,
@@ -273,7 +282,7 @@ pub struct RestartSessionParams {
     #[serde(default)]
     pub host_alias: Option<String>,
     /// tmux name (with `host_alias`).
-    #[serde(default)]
+    #[serde(default, alias = "tmux_name")]
     pub name: Option<String>,
     /// Restart even the fleet controller.
     #[serde(default)]
@@ -281,6 +290,9 @@ pub struct RestartSessionParams {
     /// Switch login profile ("" = host login).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
+    /// The person chose to switch onto a login past `accounts.pause_at`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub over_limit_ok: Option<bool>,
     /// Relaunch under this model ("" = host default); how a Codex session changes model.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
@@ -354,9 +366,7 @@ pub struct NewBgSessionParams {
     pub confirm_nonce: Option<String>,
 }
 
-fn default_true() -> bool {
-    true
-}
+use crate::serde_util::default_true;
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct QueuePromptParams {
@@ -436,9 +446,14 @@ pub struct SendPromptParams {
     pub confirm_nonce: Option<String>,
 }
 
+// A fan-out: a filter it does not know would widen the call to the whole
+// fleet, so an unknown argument is refused rather than dropped, and the
+// spelling every other tool uses for a host is accepted (review w25-2).
 #[derive(serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct BroadcastPromptParams {
     /// Only this host.
+    #[serde(default, alias = "host_alias")]
     pub host: Option<String>,
     /// Only this project.
     pub project_id: Option<i64>,
@@ -832,6 +847,13 @@ pub struct NewWorkerSpec {
     /// tmux name; omit to let new_session pick one.
     #[serde(default)]
     pub name: Option<String>,
+    /// Login to run under: a credential profile on the host; omit or "" for
+    /// the host's own login. A limit refusal names the one to pass here.
+    #[serde(default)]
+    pub profile: Option<String>,
+    /// The person chose to start on a login past `accounts.pause_at`.
+    #[serde(default)]
+    pub over_limit_ok: Option<bool>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -894,6 +916,45 @@ pub struct CancelTaskParams {
     /// Nonce from an approved `E_CONFIRM_REQUIRED`.
     #[serde(default)]
     pub confirm_nonce: Option<String>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct TaskReportParams {
+    /// From your prompt.
+    pub task_id: i64,
+    /// From your prompt.
+    pub nonce: String,
+    /// One paragraph.
+    pub summary: String,
+    /// done | partial | blocked | failed.
+    pub outcome: String,
+    /// What you did.
+    #[serde(default)]
+    pub done: Vec<String>,
+    /// Choices to keep.
+    #[serde(default)]
+    pub decisions: Vec<String>,
+    /// Work left.
+    #[serde(default)]
+    pub remaining: Vec<String>,
+    /// Facts to continue.
+    #[serde(default)]
+    pub context: Vec<String>,
+    /// Commands run.
+    #[serde(default)]
+    pub tests_run: Vec<String>,
+    /// Risks.
+    #[serde(default)]
+    pub warnings: Vec<String>,
+    /// What stopped you.
+    #[serde(default)]
+    pub blockers: Vec<String>,
+    /// Task titles.
+    #[serde(default)]
+    pub followups: Vec<String>,
+    /// low | medium | high.
+    #[serde(default)]
+    pub confidence: Option<String>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -1007,7 +1068,7 @@ pub struct RepairSessionParams {
     #[serde(default)]
     pub host_alias: Option<String>,
     /// tmux name (with `host_alias`).
-    #[serde(default)]
+    #[serde(default, alias = "tmux_name")]
     pub name: Option<String>,
     /// Nonce from an approved `E_CONFIRM_REQUIRED`.
     #[serde(default)]
@@ -1081,7 +1142,8 @@ pub struct PairClientParams {
     /// Shown in `list_clients` and in the untrusted-input marker on what it
     /// sends. Rules: see the tool.
     pub name: String,
-    /// `full` (default), `readonly`, `peer` or `updater`; see the tool.
+    /// `full` (default), `readonly`, `answer`, `peer` or `updater`; see the
+    /// tool.
     #[serde(default)]
     pub mode: Option<String>,
     /// Code lifetime: default 600, max 3600; it also dies on first use.
@@ -1477,6 +1539,12 @@ pub struct RoutinesParams {
     /// set_run_outcome: did_work | nothing | needs_person.
     #[serde(default)]
     pub outcome: Option<String>,
+    /// routine | project.
+    #[serde(default)]
+    pub notebook: Option<String>,
+    /// Its new text.
+    #[serde(default)]
+    pub text: Option<String>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -1705,4 +1773,73 @@ pub struct RunsParams {
     /// Rows to skip.
     #[serde(default)]
     pub offset: Option<i64>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// Review w25-2: `host_alias`, the spelling every other tool uses, is
+    /// the host filter of the two fan-outs; anything else they do not know
+    /// is refused, never dropped (a dropped filter meant the whole fleet).
+    #[test]
+    fn fan_outs_take_host_alias_and_refuse_an_unknown_argument() {
+        let b: BroadcastPromptParams =
+            serde_json::from_value(json!({"host_alias": "mac", "prompt": "stop"})).unwrap();
+        assert_eq!(b.host.as_deref(), Some("mac"));
+        let b: BroadcastPromptParams =
+            serde_json::from_value(json!({"host": "mac", "prompt": "stop"})).unwrap();
+        assert_eq!(b.host.as_deref(), Some("mac"));
+        assert!(serde_json::from_value::<BroadcastPromptParams>(
+            json!({"hosts": "mac", "prompt": "stop"})
+        )
+        .is_err());
+
+        let p: ProvisionHostsParams =
+            serde_json::from_value(json!({"host_alias": "x", "rotate": true})).unwrap();
+        assert_eq!(p.host.as_deref(), Some("x"));
+        assert!(serde_json::from_value::<ProvisionHostsParams>(
+            json!({"alias": "x", "rotate": true})
+        )
+        .is_err());
+        // The desktop's routed shape still parses.
+        let p: ProvisionHostsParams =
+            serde_json::from_value(json!({"host": "x", "content_only": true})).unwrap();
+        assert!(p.content_only && !p.rotate);
+    }
+
+    /// Review w25-2/w25-3: `kill_session` refuses an argument it does not
+    /// know, and takes `tmux_name` (what `send_prompt` and the shared
+    /// "pass session_id, or both host_alias and tmux_name" error say) as
+    /// well as `name`; so do `restart_session`, `repair_session` and
+    /// `rename_session`'s `old_name`.
+    #[test]
+    fn host_and_name_addressing_takes_tmux_name_too() {
+        let k: KillSessionParams =
+            serde_json::from_value(json!({"host_alias": "mac", "tmux_name": "api"})).unwrap();
+        assert_eq!(k.name.as_deref(), Some("api"));
+        // The desktop's routed `KillSessionArgs` and the phone's shape.
+        serde_json::from_value::<KillSessionParams>(
+            json!({"host_alias": "mac", "name": "api", "force": false}),
+        )
+        .unwrap();
+        serde_json::from_value::<KillSessionParams>(json!({"session_id": 3})).unwrap();
+        assert!(serde_json::from_value::<KillSessionParams>(
+            json!({"host_alias": "mac", "session": "api"})
+        )
+        .is_err());
+
+        let r: RestartSessionParams =
+            serde_json::from_value(json!({"host_alias": "mac", "tmux_name": "api"})).unwrap();
+        assert_eq!(r.name.as_deref(), Some("api"));
+        let r: RepairSessionParams =
+            serde_json::from_value(json!({"host_alias": "mac", "tmux_name": "api"})).unwrap();
+        assert_eq!(r.name.as_deref(), Some("api"));
+        let r: RenameSessionParams = serde_json::from_value(
+            json!({"host_alias": "mac", "tmux_name": "api", "new_name": "web"}),
+        )
+        .unwrap();
+        assert_eq!(r.old_name.as_deref(), Some("api"));
+    }
 }

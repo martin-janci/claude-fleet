@@ -65,6 +65,10 @@ pub struct GraphNode {
     /// Its latest attempt, when the caller may see that task.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attempt: Option<AttemptBrief>,
+    /// What git showed from its latest implement run, the completion
+    /// gate's evidence (`gate::RunEvidence`); absent before any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<super::gate::RunEvidence>,
 }
 
 /// A node's latest attempt, in brief: what the worker said and what git
@@ -188,6 +192,10 @@ pub fn build(
     // Each member's own state, before what it waits for is weighed.
     let mut own: HashMap<i64, &'static str> = HashMap::new();
     let mut latest: HashMap<i64, AttemptBrief> = HashMap::new();
+    let mut evidence: HashMap<i64, super::gate::RunEvidence> = HashMap::new();
+    // Read once per implemented item, for the run evidence and again for
+    // the verification below.
+    let mut recorded_of: HashMap<i64, Vec<crate::store::VerificationRow>> = HashMap::new();
     for i in items {
         let tasks = s.tasks_for_item(i.id)?;
         if let Some(t) = tasks.first() {
@@ -203,6 +211,14 @@ pub fn build(
         let latest_impl = tasks
             .iter()
             .find(|t| matches!(t.role.as_deref(), None | Some("implement")));
+        if let Some(t) = latest_impl {
+            let recorded = s.latest_verifications(i.id)?;
+            let over = recorded
+                .iter()
+                .find(|r| r.line == super::gate::EVIDENCE_LINE);
+            evidence.insert(i.id, super::gate::run_evidence(t, over, now));
+            recorded_of.insert(i.id, recorded);
+        }
         let failed =
             latest_impl.is_some_and(crate::service::work::orchestrate::steps::attempt_failed);
         let implemented = latest_impl.is_some_and(|t| t.state == "done") && !failed;
@@ -256,8 +272,14 @@ pub fn build(
             item_id: i.id,
             state: state.to_string(),
             wave: 0,
-            verification: super::verify::verification(s, i, now)?,
+            verification: super::verify::verification_with(
+                s,
+                i,
+                recorded_of.get(&i.id).map(Vec::as_slice),
+                now,
+            )?,
             attempt: latest.remove(&i.id),
+            evidence: evidence.remove(&i.id),
             // A hidden outside item is not named to this caller.
             depends_on: on
                 .iter()
@@ -470,7 +492,41 @@ pub fn accept_many(
     for id in ids {
         require_mission_change(&s, scope, *id)?;
     }
+    check_accept_merge_waves(&s, ids)?;
     s.accept_proposals(ids)
+}
+
+/// The planner's merge-wave rule (TASK-294), for a person's accept: in
+/// each mission an item of `ids` belongs to, accepting them must not leave
+/// a merge-wave item short of an item of its wave. Before the accept the
+/// proposals in `ids` count as not there; after it they are live. Another
+/// proposal still waiting counts toward its wave but, as a merge item,
+/// merges nothing yet. A gap that does not involve `ids` was there already
+/// and is left alone.
+pub(super) fn check_accept_merge_waves(s: &Store, ids: &[i64]) -> Result<(), IpcError> {
+    use crate::service::work::orchestrate::planner::{check_merge_change, member_nodes};
+    let mut missions = std::collections::BTreeSet::new();
+    for id in ids {
+        if let Some(m) = s.item_mission(*id)? {
+            missions.insert(m);
+        }
+    }
+    for m in missions {
+        let root = s.get_mission(m)?.and_then(|m| m.root_item_id);
+        let items = s.mission_items(m)?;
+        let member_ids: Vec<i64> = items.iter().map(|i| i.id).collect();
+        let mut after = member_nodes(&items, &s.item_deps(&member_ids)?, root);
+        let mut before = after.clone();
+        for n in before.iter_mut().filter(|n| ids.contains(&n.item_id)) {
+            n.rejected = true;
+        }
+        for n in after.iter_mut().filter(|n| ids.contains(&n.item_id)) {
+            n.pending = false;
+        }
+        check_merge_change(&before, &after, |id| format!("item {id}"))
+            .map_err(|why| IpcError::new(codes::E_INVALID, why))?;
+    }
+    Ok(())
 }
 
 /// `work_link { action: undo_accept, item_ids }`: take a recent accept

@@ -9,10 +9,16 @@
 //! third session. On every Stop hook of a worker with open tasks fleet reads
 //! the worker's transcript (falling back to a pane capture), scans for the
 //! marker and flips the task to `done` with the paragraph as `result`. A
-//! Stop without the marker leaves the task `running`, except for a run at a
-//! work item (`work_link { run }`, a mission's step): its first such Stop is
-//! answered with the instruction again, and the next one fails it
-//! ([`unmarked_stops`]).
+//! Stop without the marker leaves the task `running`, and logs a warning
+//! naming what was read — except for a run at a work item (`work_link {
+//! run }`, a mission's step): its first such Stop is answered with the
+//! instruction again, and the next one fails it ([`unmarked_stops`]).
+//!
+//! The explicit path comes first: the instruction asks the worker to call
+//! the `task_report` MCP tool ([`report_task_done`]) with the task id, the
+//! nonce and its structured report, and to print the marker as well. The
+//! tool and the scan end in the same [`complete_task_reported`], so whichever
+//! lands first flips the task and the other is a no-op.
 //!
 //! The wait primitives are bounded long-polls over the store: they lock,
 //! read one row, unlock, sleep — never holding the mutex across the sleep.
@@ -52,18 +58,31 @@ pub fn done_marker(nonce: &str) -> String {
     format!("{DONE_PREFIX}{nonce}")
 }
 
-/// The instruction line appended to every dispatched prompt.
-pub fn task_instruction(nonce: &str) -> String {
+/// Name of the MCP tool a worker reports a finished task with.
+pub const REPORT_TOOL: &str = "task_report";
+
+/// The instruction line appended to every dispatched prompt: the
+/// [`REPORT_TOOL`] call first, the marker as the fallback for a worker
+/// without fleet's MCP. The marker stands inline in the sentence, so the
+/// prompt's echo in the pane never reads as the worker's emission.
+pub fn task_instruction(task_id: i64, nonce: &str) -> String {
     format!(
-        "When finished, print exactly {} on its own line followed by a one-paragraph result.",
+        "When finished, call the claude-fleet MCP tool {REPORT_TOOL} with task_id {task_id}, \
+         nonce \"{nonce}\", outcome (done | partial | blocked | failed) and a one-paragraph \
+         summary. Then also print exactly {} on its own line followed by a one-paragraph \
+         result: fleet reads that when the tool is not available.",
         done_marker(nonce)
     )
 }
 
 /// The prompt as delivered to the worker: the requester's text plus the
 /// instruction, separated by a blank line.
-pub fn with_instruction(prompt: &str, nonce: &str) -> String {
-    format!("{}\n\n{}", prompt.trim_end(), task_instruction(nonce))
+pub fn with_instruction(prompt: &str, task_id: i64, nonce: &str) -> String {
+    format!(
+        "{}\n\n{}",
+        prompt.trim_end(),
+        task_instruction(task_id, nonce)
+    )
 }
 
 /// Strip TUI chrome a captured pane puts in front of assistant text
@@ -528,6 +547,46 @@ pub fn complete_task_reported(
     Ok(true)
 }
 
+/// A worker's own report that `task` is finished (the `task_report` tool).
+/// `worker` is the session the caller's per-host token and pane prove; it
+/// must be the task's worker, and `nonce` the task's nonce (`E_FORBIDDEN`
+/// otherwise). A task already `done` / `failed` / `cancelled` is left as it
+/// is: `Ok((row, false))`, so a repeated call is harmless. Otherwise the
+/// task completes exactly as a scanned marker does, through
+/// [`complete_task_reported`], with the report's summary as `result`.
+pub fn report_task_done(
+    s: &Store,
+    task: &TaskRow,
+    worker: i64,
+    nonce: &str,
+    report: &crate::store::TaskReport,
+) -> Result<(TaskRow, bool), IpcError> {
+    if task.worker_session_id != Some(worker) {
+        return Err(IpcError::new(
+            codes::E_FORBIDDEN,
+            format!(
+                "task {} is not your session's task: only its worker reports it",
+                task.id
+            ),
+        ));
+    }
+    if task.nonce != nonce.trim() {
+        return Err(IpcError::new(
+            codes::E_FORBIDDEN,
+            format!(
+                "the nonce does not match task {}: pass the one its prompt gave",
+                task.id
+            ),
+        ));
+    }
+    if is_terminal(&task.state) {
+        return Ok((task.clone(), false));
+    }
+    let changed = complete_task_reported(s, task, &report.summary, Some(report))?;
+    let row = s.get_task(task.id)?.unwrap_or_else(|| task.clone());
+    Ok((row, changed))
+}
+
 /// Shared work context (design 2026-09-29): a dispatched job becomes an
 /// `agent` subtask of the requester's primary work — or of that work's
 /// parent when the requester is on a native subtask (depth one) — with the
@@ -841,12 +900,7 @@ pub fn clamp_task_limit(limit: i64) -> i64 {
     limit.clamp(1, MAX_TASK_PAGE)
 }
 
-fn now_unix() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
+use crate::store::now_unix;
 
 // ── task result as untrusted input (S6) ───────────────────────────────────
 
@@ -1019,10 +1073,19 @@ pub fn resolve_markers(open: &[TaskRow], sources: &[&str]) -> Vec<(i64, String)>
         .collect()
 }
 
+/// How far back a Stop looks for runs its worker closed with `task_report`
+/// (mid-turn) whose git evidence it still owes
+/// ([`Store::runs_awaiting_stop_evidence`]).
+pub const STOP_EVIDENCE_WINDOW_SECS: i64 = 6 * 3600;
+
 /// Called from the Stop hook (off the HTTP handler, on a background task)
-/// for a worker with open tasks: read the worker's last transcript turn
-/// (`cwd` from the hook payload locates it; the pane is the fallback) and
-/// resolve every open task whose marker appears. Errors are logged and
+/// for a worker with open tasks, or with runs it closed through
+/// `task_report` during the turn: read the worker's last transcript turn
+/// (`cwd` from the hook payload locates it; the pane is the fallback),
+/// resolve every open task whose marker appears, and read git for every run
+/// finished either way. A run reported mid-turn is read again here, after
+/// the turn, so a commit made after the report counts and a session with no
+/// linked worktree is read from the hook's `cwd`. Errors are logged and
 /// swallowed — the next Stop retries.
 pub async fn handle_stop_for_worker(
     store: Arc<Mutex<Store>>,
@@ -1030,22 +1093,62 @@ pub async fn handle_stop_for_worker(
     worker: SessionRow,
     cwd: Option<String>,
 ) {
-    let (open, stored_path) = match store.lock() {
+    let (open, stored_path, reported) = match store.lock() {
         Ok(s) => (
             s.open_tasks_for_worker(worker.id).unwrap_or_default(),
             s.session_transcript_path(worker.id).ok().flatten(),
+            s.runs_awaiting_stop_evidence(worker.id, now_unix() - STOP_EVIDENCE_WINDOW_SECS)
+                .unwrap_or_default(),
         ),
         Err(_) => return,
     };
-    if open.is_empty() {
+    if open.is_empty() && reported.is_empty() {
         return;
     }
-    let transcript = read_worker_transcript(&ssh, &worker, stored_path, cwd.clone()).await;
-    let mut resolved = resolve_markers(&open, &[transcript.as_deref().unwrap_or("")]);
+    let mut finished = if open.is_empty() {
+        Vec::new()
+    } else {
+        finish_by_markers(&store, &ssh, &worker, &open, stored_path, cwd.clone()).await
+    };
+    // `finished` comes from `open` (queued or running) and `reported` is done
+    // runs, both read under one lock: they never share a task.
+    finished.extend(reported);
+    // A run's evidence, read from git in the worker's checkout once it is
+    // done (orchestration O3). After the lock: it is a host round trip.
+    let checkout = cwd.or_else(|| {
+        let s = store.lock().ok()?;
+        let wt = worker.worktree_id?;
+        s.worktree_path(wt).ok().flatten()
+    });
+    if let Some(dir) = checkout {
+        crate::service::work::report::collect_evidence(
+            &store,
+            &ssh,
+            &worker.host_alias,
+            &dir,
+            &finished,
+        )
+        .await;
+    }
+}
+
+/// The marker half of [`handle_stop_for_worker`]: resolve `open` from the
+/// worker's transcript and pane and complete each task whose marker shows.
+/// Answers the tasks it completed.
+async fn finish_by_markers(
+    store: &Arc<Mutex<Store>>,
+    ssh: &Arc<SshClient>,
+    worker: &SessionRow,
+    open: &[TaskRow],
+    stored_path: Option<String>,
+    cwd: Option<String>,
+) -> Vec<TaskRow> {
+    let transcript = read_worker_transcript(ssh, worker, stored_path, cwd).await;
+    let mut resolved = resolve_markers(open, &[transcript.as_deref().unwrap_or("")]);
     let mut pane: Option<String> = None;
     // The JSONL can flush AFTER Stop fires; scan the pane for the rest.
     if resolved.len() < open.len() && !worker.tmux_name.starts_with("bg:") {
-        match capture_worker_pane(&ssh, &worker).await {
+        match capture_worker_pane(ssh, worker).await {
             Ok(text) => {
                 let pane = &*pane.insert(text);
                 let rest: Vec<TaskRow> = open
@@ -1064,10 +1167,29 @@ pub async fn handle_stop_for_worker(
             ),
         }
     }
+    // A silent miss left a task `running` until the max-age sweep failed it
+    // (mission #6, 2026-10-21): say which tasks stayed open and what was read.
+    for t in open
+        .iter()
+        .filter(|t| !resolved.iter().any(|(id, _)| *id == t.id))
+    {
+        tracing::warn!(
+            task = t.id,
+            worker = worker.id,
+            host = %worker.host_alias,
+            tmux = %worker.tmux_name,
+            transcript = %source_size(transcript.as_deref()),
+            pane = %source_size(pane.as_deref()),
+            "[tasks] Stop of a task worker found no done marker; the task stays {}",
+            t.state
+        );
+    }
     let mut finished: Vec<TaskRow> = Vec::new();
     let mut remind: Vec<TaskRow> = Vec::new();
     {
-        let Ok(s) = store.lock() else { return };
+        let Ok(s) = store.lock() else {
+            return finished;
+        };
         // Judged only when every source was read: a pane that could not be
         // captured may hold the marker the transcript has not flushed yet.
         if pane.is_some() {
@@ -1097,14 +1219,14 @@ pub async fn handle_stop_for_worker(
         }
     }
     for task in &remind {
-        let text = crate::service::work::report::marker_reminder(&task.nonce);
+        let text = crate::service::work::report::marker_reminder(task.id, &task.nonce);
         if let Err(e) = crate::service::sessions::send_system_prompt(
             &worker.host_alias,
             &worker.tmux_name,
             &text,
             true,
-            &store,
-            &ssh,
+            store,
+            ssh,
         )
         .await
         {
@@ -1116,22 +1238,15 @@ pub async fn handle_stop_for_worker(
             );
         }
     }
-    // A run's evidence, read from git in the worker's checkout once it is
-    // done (orchestration O3). After the lock: it is a host round trip.
-    let checkout = cwd.or_else(|| {
-        let s = store.lock().ok()?;
-        let wt = worker.worktree_id?;
-        s.worktree_path(wt).ok().flatten()
-    });
-    if let Some(dir) = checkout {
-        crate::service::work::report::collect_evidence(
-            &store,
-            &ssh,
-            &worker.host_alias,
-            &dir,
-            &finished,
-        )
-        .await;
+    finished
+}
+
+/// How a scanned source reads in a log line: its size, or that it was not
+/// read at all.
+fn source_size(text: Option<&str>) -> String {
+    match text {
+        Some(t) => format!("{} bytes", t.len()),
+        None => "not read".to_string(),
     }
 }
 
@@ -1416,11 +1531,101 @@ mod tests {
         assert_eq!(n.len(), 32, "16 random bytes");
         assert_ne!(n, make_nonce());
         assert!(n.chars().all(|c| c.is_ascii_hexdigit()));
-        let p = with_instruction("do the thing\n", "abcd1234");
+        let p = with_instruction("do the thing\n", 42, "abcd1234");
         assert_eq!(
             p,
-            "do the thing\n\nWhen finished, print exactly FLEET_TASK_DONE_abcd1234 on its own line followed by a one-paragraph result."
+            "do the thing\n\nWhen finished, call the claude-fleet MCP tool task_report with \
+             task_id 42, nonce \"abcd1234\", outcome (done | partial | blocked | failed) and a \
+             one-paragraph summary. Then also print exactly FLEET_TASK_DONE_abcd1234 on its own \
+             line followed by a one-paragraph result: fleet reads that when the tool is not \
+             available."
         );
+        // The tool first, the marker as the fallback; one line, so the
+        // prompt's echo is never a marker line.
+        let i = task_instruction(42, "abcd1234");
+        assert!(i.find(REPORT_TOOL).unwrap() < i.find(DONE_PREFIX).unwrap());
+        assert_eq!(i.lines().count(), 1);
+        assert_eq!(scan_for_done(&p, "abcd1234"), None);
+    }
+
+    // ---- task_report ----
+
+    fn report(summary: &str) -> crate::store::TaskReport {
+        crate::store::TaskReport {
+            summary: summary.into(),
+            outcome: "done".into(),
+            tests_run: vec!["cargo test".into()],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_workers_report_completes_its_task_as_a_scanned_marker_does() {
+        let s = Store::open_in_memory().unwrap();
+        let req = seed(&s, "local", "ctl");
+        let w = seed(&s, "local", "w");
+        let t = create_task(&s, Some(req), Some(w), "do it").unwrap();
+        let t = start_task(&s, &t).unwrap();
+        let (row, changed) = report_task_done(&s, &t, w, &t.nonce, &report("all done")).unwrap();
+        assert!(changed);
+        assert_eq!(row.state, "done");
+        assert_eq!(row.result.as_deref(), Some("all done"));
+        assert_eq!(row.report.expect("stored").tests_run, vec!["cargo test"]);
+        // The same side effects as the marker: the requester's inbox and the
+        // `task_done` timeline row on both ends.
+        let inbox = s.list_inbox(req, true, 10).unwrap();
+        assert_eq!(inbox.len(), 1);
+        assert_eq!(inbox[0].kind, "task_result");
+        for sid in [req, w] {
+            let kinds: Vec<String> = s
+                .list_session_events(sid, 50)
+                .unwrap()
+                .into_iter()
+                .map(|e| e.kind)
+                .collect();
+            assert!(kinds.iter().any(|k| k == "task_done"), "{sid}: {kinds:?}");
+        }
+    }
+
+    #[test]
+    fn a_report_from_another_session_or_with_a_wrong_nonce_is_refused() {
+        let s = Store::open_in_memory().unwrap();
+        let req = seed(&s, "local", "ctl");
+        let w = seed(&s, "local", "w");
+        let t = start_task(&s, &create_task(&s, Some(req), Some(w), "do it").unwrap()).unwrap();
+        let e = report_task_done(&s, &t, req, &t.nonce, &report("x")).unwrap_err();
+        assert_eq!(e.code, codes::E_FORBIDDEN);
+        let e = report_task_done(&s, &t, w, "ffffffff", &report("x")).unwrap_err();
+        assert_eq!(e.code, codes::E_FORBIDDEN);
+        assert_eq!(s.get_task(t.id).unwrap().unwrap().state, "running");
+    }
+
+    #[test]
+    fn a_repeated_report_changes_nothing() {
+        let s = Store::open_in_memory().unwrap();
+        let req = seed(&s, "local", "ctl");
+        let w = seed(&s, "local", "w");
+        let t = start_task(&s, &create_task(&s, Some(req), Some(w), "do it").unwrap()).unwrap();
+        assert!(
+            report_task_done(&s, &t, w, &t.nonce, &report("first"))
+                .unwrap()
+                .1
+        );
+        let t = s.get_task(t.id).unwrap().unwrap();
+        let (row, changed) = report_task_done(&s, &t, w, &t.nonce, &report("second")).unwrap();
+        assert!(!changed);
+        assert_eq!(row.result.as_deref(), Some("first"));
+        assert_eq!(
+            s.list_inbox(req, true, 10).unwrap().len(),
+            1,
+            "one result, once"
+        );
+        // A cancelled task stays cancelled.
+        let c = create_task(&s, Some(req), Some(w), "other").unwrap();
+        let c = cancel_task(&s, c.id, "not needed").unwrap();
+        let (row, changed) = report_task_done(&s, &c, w, &c.nonce, &report("late")).unwrap();
+        assert!(!changed);
+        assert_eq!(row.state, "cancelled");
     }
 
     #[test]

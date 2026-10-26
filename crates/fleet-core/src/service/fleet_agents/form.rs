@@ -174,11 +174,17 @@ pub fn writes_line(loaded: &Loaded) -> String {
                             .iter()
                             .any(|w| Some(w.name()) == a.tool.as_deref() && w.auto_ok())
                 }));
-        parts.push(if unattended {
-            format!("{what} (unattended at act)")
-        } else {
-            what
-        });
+        parts.push(
+            if unattended && a.kind == ActionKind::PrReview && d.limits.auto_approve {
+                // `limits.auto_approve` lifts the rule that an unattended review
+                // never approves: the person installing it has to be told.
+                format!("{what} (unattended at act, may APPROVE)")
+            } else if unattended {
+                format!("{what} (unattended at act)")
+            } else {
+                what
+            },
+        );
     }
     if parts.is_empty() {
         "This agent writes nothing: its answers stay in fleet.".into()
@@ -294,10 +300,17 @@ pub fn grant_form(loaded: &Loaded, ctx: &FormContext, rule: Option<&AgentRuleRow
         ),
         ..field(F_HOST, FieldType::Select, "Host")
     })];
-    if d.run.workspace == Workspace::Project {
+    if d.run.workspace.needs_project() {
         where_.push(with_value(FormField {
             required: true,
-            help: Some("The checkout its runs read (at main).".into()),
+            help: Some(
+                if d.run.workspace == Workspace::PrHead {
+                    "The checkout its runs read (at the pull request's head)."
+                } else {
+                    "The checkout its runs read (at main)."
+                }
+                .into(),
+            ),
             options: Some(
                 ctx.projects
                     .iter()

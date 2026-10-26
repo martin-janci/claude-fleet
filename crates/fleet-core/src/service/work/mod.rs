@@ -226,12 +226,19 @@ pub struct WorkLinkArgs {
     /// Link across orgs anyway.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub force_cross_org: Option<bool>,
+    /// mission_state completed: complete despite failing CI on the
+    /// mission's pull requests (a person's override, recorded).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ci_override: Option<bool>,
     /// Start: beside a live one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parallel: Option<bool>,
     /// run: implement|review|test|research|integrate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
+    /// mission_item: the mission lane to put the task in; "" takes it out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lane: Option<String>,
     /// link/switch: false refuses when live elsewhere.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ack_live: Option<bool>,
@@ -399,6 +406,10 @@ pub struct WorkLinkArgs {
     /// mission_grant: what its workers may spend, in cents.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget_cents: Option<i64>,
+    /// mission_grant: last until the mission completes instead of hours
+    /// (a finite mission, with budget_cents).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until_done: Option<bool>,
     /// mission_grant: the hosts its runs may use.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hosts: Option<Vec<String>>,
@@ -406,7 +417,8 @@ pub struct WorkLinkArgs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_parallel: Option<u32>,
     /// mission_grant: the login its runs bill, a credential profile on the
-    /// run's host; omitted, the host's own.
+    /// run's host; omitted, the host's own. start/resume: the login the
+    /// session runs under ("" = the host's own; omitted, fleet picks).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
     /// today_brief: draft a new brief (true) or answer the last one;
@@ -994,8 +1006,9 @@ pub fn start_args_as(
         decider,
         owner: None,
         origin: None,
-        // A start names no login: `profile` is mission_grant's.
-        profile: None,
+        // The login the caller named (review w02-1); "" = the host's own.
+        // Omitted, the start rule or placement picks.
+        profile: args.profile.clone(),
         reference: args.url.clone().or(args.key.clone()),
         item_id: args.item_id,
         project_id: args.project_id,
@@ -1007,6 +1020,8 @@ pub fn start_args_as(
         force_cross_org: args.force_cross_org.unwrap_or(false),
         per_project: false,
         parallel: args.parallel.unwrap_or(false),
+        // A run's own (`run::prior_work`), never a tool parameter.
+        base_branch: None,
     }
 }
 
@@ -1023,6 +1038,7 @@ pub fn resume_args(args: &WorkLinkArgs) -> Result<resume::ResumeArgs, IpcError> 
         host_alias: args.host_alias.clone(),
         brief: args.brief.clone(),
         force_cross_org: args.force_cross_org.unwrap_or(false),
+        profile: args.profile.clone(),
     })
 }
 

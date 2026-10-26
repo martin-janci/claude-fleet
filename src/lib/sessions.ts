@@ -82,6 +82,9 @@ export function sessionAgent(row: Pick<SessionRow, 'agent' | 'kind'>): SessionAg
 
 export interface SessionRow {
   id: number;
+  /** The extra fleet this row came from (multi-hub Phase 3), stamped by
+   *  `fleets.ts` and absent on the primary's own rows. Never from a hub. */
+  fleet?: string;
   tmux_name: string;
   host_alias: string;
   project_id: number | null;
@@ -264,6 +267,10 @@ export interface SessionRow {
    *  or null when not pinned. A pinned session sits in the Pinned section
    *  and the hub refuses to close it (`E_PINNED`) until it is unpinned. */
   pinned_at?: number | null;
+  /** The next prompt Claude Code proposes after a turn, the dim text in its
+   *  empty prompt box (migration 206); absent when nothing is proposed. The
+   *  next prompt clears it. */
+  prompt_suggestion?: string | null;
   /** What a rule, Jev or an LLM proposes about the session, one per
    *  feature (redesign 2.8). Absent when nothing proposes anything. */
   proposals?: DecisionProposal[];
@@ -379,7 +386,7 @@ export function formatCostMicros(micros: number | null | undefined): string {
 // newest row's id goes to the next insert, whose `row_version` starts again
 // at 0. Compared across that reuse, the dead row's higher version would win
 // and the new session would stay hidden behind it.
-function sessionIsStale(incoming: SessionRow, current: SessionRow): boolean {
+export function sessionIsStale(incoming: SessionRow, current: SessionRow): boolean {
   return (
     sessionIdentity(incoming) === sessionIdentity(current) &&
     incoming.row_version !== undefined &&
@@ -388,7 +395,7 @@ function sessionIsStale(incoming: SessionRow, current: SessionRow): boolean {
   );
 }
 
-function sessionIdentity(s: SessionRow): string {
+export function sessionIdentity(s: SessionRow): string {
   return `${s.host_alias}\u0000${s.tmux_name}\u0000${s.created_at}`;
 }
 
@@ -641,6 +648,15 @@ export async function pinSession(sessionId: number, pinned: boolean): Promise<Re
 /** Whether the session is pinned. */
 export function isPinned(row: Pick<SessionRow, 'pinned_at'>): boolean {
   return row.pinned_at != null;
+}
+
+/** Why a pinned session cannot be closed. */
+export const PINNED_BLOCK = 'Pinned: unpin it first';
+
+/** Why closing `s` (kill, safe remove, clean up, dismiss) is refused for its
+ *  pin, or null. The hub answers the same calls with `E_PINNED`. */
+export function pinnedBlock(s: Pick<SessionRow, 'pinned_at'>): string | null {
+  return isPinned(s) ? PINNED_BLOCK : null;
 }
 
 /** Restart the session in place. With `profile`, resume its conversation
@@ -988,7 +1004,10 @@ export function applyStartProgress(f: StartProgressFrame): void {
  *  follows them until it is. */
 export const startedIds = writable<ReadonlySet<number>>(new Set());
 
-function markStarting(row: Pick<SessionRow, 'id' | 'kind' | 'claude_status'> | null): void {
+/** Follow `row` until its agent is up (the start Pulse). Every create path
+ *  calls it: `newSessionAbortable` here, `startWork` / `startWorkMulti` for a
+ *  ticket start (review w12-4). */
+export function markStarting(row: Pick<SessionRow, 'id' | 'kind' | 'claude_status'> | null): void {
   if (!row || row.kind === 'shell' || row.claude_status !== null) return;
   startedIds.update((s) => new Set([...s, row.id]));
 }
@@ -1106,10 +1125,12 @@ export async function sendPrompt(
   hostAlias: string,
   tmuxName: string,
   prompt: string,
-  opts: { keys?: string } = {},
+  opts: { keys?: string; fleet?: string } = {},
 ): Promise<Result<void>> {
   return invokeCmd<void>('send_prompt', {
     args: { host_alias: hostAlias, tmux_name: tmuxName, prompt, keys: opts.keys ?? null },
+    // `fleet` (multi-hub): an extra fleet's session is written on its own hub.
+    ...(opts.fleet === undefined ? {} : { fleet: opts.fleet }),
   });
 }
 
@@ -1127,9 +1148,11 @@ export async function answerDialog(
   tmuxName: string,
   key: string,
   expect?: ExpectDialog,
+  fleet?: string,
 ): Promise<Result<void>> {
   return invokeCmd<void>('send_prompt', {
     args: { host_alias: hostAlias, tmux_name: tmuxName, prompt: '', keys: key, ...(expect ? { expect } : {}) },
+    ...(fleet === undefined ? {} : { fleet }),
   });
 }
 
@@ -1374,6 +1397,9 @@ export async function newBgSession(
   /** The session asking for this one; the new row becomes its child. Null
    *  from the desktop dialog — nobody asked for it from inside a session. */
   requesterSessionId: number | null = null,
+  /** Start in this project's checkout on the host (review w12-9); null runs
+   *  in the host's home folder, as the sidebar's ⚡ dialog does. */
+  projectId: number | null = null,
 ): Promise<Result<NewBgSessionResult>> {
   const r = await invokeCmd<NewBgSessionResult>('new_bg_session', {
     args: {
@@ -1381,6 +1407,7 @@ export async function newBgSession(
       name,
       prompt,
       requester_session_id: requesterSessionId,
+      ...(projectId != null ? { project_id: projectId } : {}),
     },
   });
   if (r.ok && r.value?.session) acceptCommandRow(r.value.session);

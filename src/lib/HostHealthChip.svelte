@@ -6,19 +6,24 @@
   94%"). A click opens every host's numbers above it; a host's name there
   opens it in the Hosts view. Sits beside Shortcuts. Open autofix findings
   on the focus host show as a count ("2 problems", src/lib/autofix.ts).
+  With an extra fleet's session open (multi-hub) the chip follows that
+  session's host on its own hub, and the popover lists every fleet the
+  sidebar's fleet filter shows.
 -->
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
   import HostHealthList from './HostHealthList.svelte';
   import { hosts } from './hosts';
   import { selectedSession } from './selection';
-  import { destination } from './destination';
+  import { destination, isFleetPage } from './destination';
   import { controlViews } from './control_views';
   import { operatorHost } from './operator';
   import { fleetSettings, settingInt, SETTING_KEYS } from './fleet_settings';
   import { requestHostsView } from './app_views';
   import { chipHost, fleetLoads, loadParts, otherTrouble, type LoadLimits } from './host_health';
   import { findingsByHost, watchFindings } from './autofix';
+  import { fleetRows, multiFleet, selectedFleetSession, showPrimary } from './fleets';
+  import FleetHostHealth from './FleetHostHealth.svelte';
 
   let nowSec = $state(Math.floor(Date.now() / 1000));
   let clock: ReturnType<typeof setInterval> | undefined;
@@ -43,15 +48,34 @@
     chipHost({ inControl, sessionShown, selectedHost: $selectedSession?.host_alias ?? null, operatorHost: $operatorHost }),
   );
   const loads = $derived(fleetLoads($hosts, focus, nowSec, limits));
-  const mine = $derived(loads.find((l) => l.alias === focus) ?? null);
-  const other = $derived(otherTrouble(loads, focus));
-  const problems = $derived($findingsByHost.get(focus) ?? 0);
+  // An extra fleet's open session: its host, read from that fleet's rows —
+  // only while it is on screen. A fleet page (Control, Hosts, …) covers it
+  // though it stays selected, and there the chip keeps Control's host and
+  // its open findings, as it does for a primary session.
+  const away = $derived(isFleetPage($destination) ? null : $selectedFleetSession);
+  const awayLoads = $derived(
+    away ? fleetLoads([...($fleetRows.get(away.fleet.id)?.hosts.values() ?? [])], away.row.host_alias, nowSec, limits) : [],
+  );
+  const awayFocus = $derived(away ? { fleet: away.fleet.id, alias: away.row.host_alias } : null);
+  const mine = $derived(
+    away ? (awayLoads.find((l) => l.alias === away.row.host_alias) ?? null) : (loads.find((l) => l.alias === focus) ?? null),
+  );
+  const other = $derived(otherTrouble(away ? awayLoads : loads, away ? away.row.host_alias : focus));
+  const problems = $derived(away ? 0 : ($findingsByHost.get(focus) ?? 0));
+  const shownHost = $derived(away ? `${away.fleet.label} · ${away.row.host_alias}` : focus);
   const why = $derived(
-    inControl && !(sessionShown && $selectedSession) ? "Control's host" : $selectedSession ? 'follows the selected session' : "Control's host",
+    away
+      ? 'follows the selected session'
+      : inControl && !(sessionShown && $selectedSession)
+        ? "Control's host"
+        : $selectedSession
+          ? 'follows the selected session'
+          : "Control's host",
   );
 
   let open = $state(false);
   let root: HTMLElement | undefined = $state();
+  let chipEl: HTMLButtonElement | undefined = $state();
 
   function onDocDown(e: PointerEvent) {
     if (open && root && !root.contains(e.target as Node)) open = false;
@@ -61,6 +85,9 @@
       e.preventDefault();
       e.stopPropagation();
       open = false;
+      // Escape from inside the popover would leave focus on a node about to
+      // go: give it back to the chip (review w19-6).
+      chipEl?.focus();
     }
   }
   function openHost(alias: string) {
@@ -71,20 +98,21 @@
 
 <svelte:document onpointerdown={onDocDown} />
 
-{#if loads.length > 0}
+{#if loads.length > 0 || awayLoads.length > 0}
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <span class="wrap" bind:this={root} onkeydown={onKey}>
     <button
       type="button"
+      bind:this={chipEl}
       class="chip"
       class:alert={!!mine?.trouble}
       data-testid="host-health-chip"
       aria-expanded={open}
-      aria-label="Host health for {focus}{problems ? `; ${problems} open problem${problems === 1 ? '' : 's'}` : ''}{other ? `; ${other.alias} ${other.trouble}` : ''}"
-      title="CPU, memory and disk of {focus} ({why}). Click for every host."
+      aria-label="Host health for {shownHost}{problems ? `; ${problems} open problem${problems === 1 ? '' : 's'}` : ''}{other ? `; ${other.alias} ${other.trouble}` : ''}"
+      title="CPU, memory and disk of {shownHost} ({why}). Click for every host."
       onclick={() => (open = !open)}
     >
-      <span class="host">{focus}</span>
+      <span class="host">{shownHost}</span>
       {#if mine}
         {#each loadParts(mine) as p, i (i)}<span class="part">{p}</span>{/each}
       {:else}
@@ -95,7 +123,12 @@
     </button>
     {#if open}
       <div class="pop" role="dialog" aria-label="Host health" data-testid="host-health-popover">
-        <HostHealthList {loads} {focus} now={nowSec} focusNote={why} onopen={openHost} />
+        {#if $showPrimary}
+          <HostHealthList {loads} focus={away ? null : focus} now={nowSec} focusNote={why} onopen={openHost} />
+        {/if}
+        {#if $multiFleet}
+          <FleetHostHealth now={nowSec} {limits} focus={awayFocus} focusNote={why} />
+        {/if}
       </div>
     {/if}
   </span>

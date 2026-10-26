@@ -33,12 +33,32 @@ See [`control-api.md`](control-api.md) for the narrative guide.\n\n",
             out.push_str(d.trim());
             out.push_str("\n\n");
         }
+        out.push_str(&policy_line(&t.name));
         if let Some(props) = t.input_schema.get("properties").and_then(|v| v.as_object()) {
             if !props.is_empty() {
+                let required: Vec<&str> = t
+                    .input_schema
+                    .get("required")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+                    .unwrap_or_default();
                 let mut names: Vec<&String> = props.keys().collect();
                 names.sort();
-                let rendered: Vec<String> = names.iter().map(|n| format!("`{n}`")).collect();
-                out.push_str(&format!("Parameters: {}\n\n", rendered.join(", ")));
+                let rendered: Vec<String> = names
+                    .iter()
+                    .map(|n| {
+                        let star = if required.contains(&n.as_str()) {
+                            "*"
+                        } else {
+                            ""
+                        };
+                        format!("`{n}`{star}")
+                    })
+                    .collect();
+                out.push_str(&format!(
+                    "Parameters (* required): {}\n\n",
+                    rendered.join(", ")
+                ));
             }
         }
     }
@@ -51,6 +71,39 @@ See [`control-api.md`](control-api.md) for the narrative guide.\n\n",
     }
     out.push('\n');
     out
+}
+
+/// Who may call `tool`, and its readonly, confirm and deadline facts, from
+/// [`guard::policy`] (review w25-11): the reference used to leave access to
+/// each description's prose, which drifted from the table.
+fn policy_line(tool: &str) -> String {
+    use crate::mcp::guard::{self, Access};
+    let Some(p) = guard::policy(tool) else {
+        return "Access: master token only (no policy row).\n\n".to_string();
+    };
+    let no_host = guard::NOT_FOR_HOST_TOKENS.contains(&tool);
+    let who = match p.access {
+        Access::Master => "the master token only",
+        Access::Client if no_host => "the master or a paired device; not a per-host token",
+        Access::Client => "the master, a paired device or a per-host token",
+        Access::Person => "the master or a fleet admin's own device",
+        Access::PersonDevice => "a fleet admin's own device (not the master)",
+        Access::HostToken => "a per-host token only",
+        Access::Device => "a person's paired device (not the master)",
+        Access::PersonOrAdmin => "the master, a fleet admin's own device or any person's device",
+    };
+    let mut facts = vec![format!("Access: {who}")];
+    if p.readonly {
+        facts.push("readonly tokens too".into());
+    }
+    if p.confirm {
+        facts.push("confirm-gated (mcp.confirm_destructive)".into());
+    }
+    facts.push(format!(
+        "deadline {} s",
+        crate::mcp::tool_deadline(tool).as_secs()
+    ));
+    format!("{}.\n\n", facts.join(" · "))
 }
 
 /// Extract command identifiers from the `generate_handler![ … ]` block in lib.rs.
@@ -131,7 +184,7 @@ mod tests {
             .expect("new_session section present");
         let params = section
             .lines()
-            .find(|l| l.starts_with("Parameters:"))
+            .find(|l| l.starts_with("Parameters"))
             .expect("new_session parameters line");
         assert!(
             params.contains("new_worktree"),

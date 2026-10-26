@@ -213,10 +213,10 @@ pub const MAX_HUB_CONTRACT: u32 = 18;
 
 /// Where a hub's wire-contract revision stands against what this build
 /// accepts. A pure function of the three numbers on purpose: the real bounds
-/// are `10..=10` today, and unlike the original `0..=1` range this one CAN
-/// exercise "too old" through a live `u32` (a hub reporting `0`…`3` is below
-/// `4`) — see `tests_contract.rs`, independent of whichever bounds
-/// a future release ships.
+/// are [`MIN_HUB_CONTRACT`]`..=`[`MAX_HUB_CONTRACT`], and with a minimum above
+/// zero they CAN exercise "too old" through a live `u32` — see
+/// `tests_contract.rs`, independent of whichever bounds a future release
+/// ships.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContractFit {
     /// Inside `[min, max]`: trust this hub's rows.

@@ -726,12 +726,67 @@ pub fn report(
             speaks: prev.as_ref().and_then(|p| p.speaks.clone()),
             phase: phase.into(),
             attempt: r.attempt.clone(),
-            last_error: r.error.clone(),
+            // `rolling_back` / `recovered` of the same attempt keep the
+            // `failed` report's reason when they carry none (review w26-2):
+            // it is what `fleet_health.updates` says about the rollback.
+            last_error: r.error.clone().or_else(|| {
+                let same = prev.as_ref().filter(|p| {
+                    !this_attempt.is_empty() && p.attempt.as_deref() == r.attempt.as_deref()
+                });
+                matches!(phase, "rolling_back" | "recovered")
+                    .then(|| same.and_then(|p| p.last_error.clone()))
+                    .flatten()
+            }),
             reported_at: now,
             last_checked_at: None,
         })?;
+        if phase == "success" && lift_spent_update_now_pins(s, r.component.as_str())? {
+            decisions_may_have_changed();
+        }
         Ok(recorded)
     })
+}
+
+/// The `reason` `update_now` gives its pin: what marks it as spent once its
+/// version is in (review w26-5). An operator's own pin is never lifted.
+pub const UPDATE_NOW_REASON: &str = "update now";
+
+/// Drop `update_now`'s pins for `component` that have done their job: a
+/// target's own once it reports `success` on that version (or newer), the
+/// component-wide one once every target of the component has. Without this
+/// the pin outlives its purpose and holds the target there — "Pinned to X",
+/// up to date — while the channel moves on. `true` when one was lifted.
+fn lift_spent_update_now_pins(s: &Store, component: &str) -> Result<bool, IpcError> {
+    let observed: Vec<_> = s
+        .update_observed_all()?
+        .into_iter()
+        .filter(|o| o.component == component)
+        .collect();
+    let at_or_past =
+        |o: &UpdateObservedRow, pin: &Version| Version::parse(&o.version).is_ok_and(|v| &v >= pin);
+    let mut lifted = false;
+    for pin in s.update_desired_all()? {
+        if pin.component != component
+            || pin.set_by != "operator"
+            || pin.reason.as_deref() != Some(UPDATE_NOW_REASON)
+        {
+            continue;
+        }
+        let Ok(v) = Version::parse(&pin.version) else {
+            continue;
+        };
+        let spent = if pin.target.is_empty() {
+            !observed.is_empty() && observed.iter().all(|o| at_or_past(o, &v))
+        } else {
+            observed
+                .iter()
+                .any(|o| o.target == pin.target && o.phase == "success" && at_or_past(o, &v))
+        };
+        if spent && s.clear_update_desired(&pin.component, &pin.target)? {
+            lifted = true;
+        }
+    }
+    Ok(lifted)
 }
 
 /// Where `phase` falls in one attempt's run, for ordering its reports;
@@ -777,6 +832,9 @@ pub struct TargetStatus {
     pub target_version: Option<String>,
     pub mandatory: bool,
     pub reason: String,
+    /// The reason's code (`pinned`, `rollout_paused`, …), so a reader need
+    /// not parse `reason`'s words.
+    pub reason_code: fleet_update::wire::ReasonCode,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -859,6 +917,7 @@ fn target_rows(
             status: d.status,
             target_version: d.target.as_ref().map(|t| t.version.to_string()),
             mandatory: d.target.as_ref().is_some_and(|t| t.mandatory),
+            reason_code: d.reason.code,
             reason: d.reason.text,
         });
     }
@@ -1237,6 +1296,65 @@ pub fn pin(
     Ok(row)
 }
 
+/// [`pin`], refusing a hub pin whose release cannot open this hub's database
+/// (review w26-6): a release migrates the store up to its manifest's
+/// `store.schema_to`, and its downgrade guard refuses anything newer. Such a
+/// pin would only crash-loop the older build, fail its gate, bring the newer
+/// one back and bad-list the pinned version. A release whose manifest is not
+/// verified here, or says nothing about the store, is left to the updater.
+#[allow(clippy::too_many_arguments)]
+pub fn pin_checked(
+    store: &Mutex<Store>,
+    component: &str,
+    target: &str,
+    version: &str,
+    mandatory: bool,
+    reason: Option<String>,
+    keys: &TrustedKeys,
+    now: i64,
+) -> Result<UpdateDesiredRow, IpcError> {
+    if parse_component(component)? == Component::Hub {
+        if let Ok(v) = Version::parse(version) {
+            refuse_a_pin_below_the_database(&*lock(store)?, &v, keys, now)?;
+        }
+    }
+    pin(store, component, target, version, mandatory, reason, now)
+}
+
+fn refuse_a_pin_below_the_database(
+    s: &Store,
+    v: &Version,
+    keys: &TrustedKeys,
+    now: i64,
+) -> Result<(), IpcError> {
+    let Some(cached) = load_cached(s, track(s), keys, now) else {
+        return Ok(());
+    };
+    let Some(schema_to) = cached
+        .manifests
+        .verified
+        .get(v)
+        .and_then(|m| m.compatibility.store)
+        .map(|c| c.schema_to)
+    else {
+        return Ok(());
+    };
+    let db = s
+        .schema_version()
+        .map_err(|e| IpcError::new(codes::E_INTERNAL, format!("schema version: {e}")))?;
+    if db > schema_to {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            format!(
+                "{v} cannot open this hub's database: it is at schema {db}, and {v} opens up to \
+                 {schema_to}. Pinning it would only fail and roll back. To go back, restore a \
+                 backup taken before the newer release by hand (docs/hub.md → Restore drill)."
+            ),
+        ));
+    }
+    Ok(())
+}
+
 pub fn unpin(store: &Mutex<Store>, component: &str, target: &str) -> Result<bool, IpcError> {
     let c = parse_component(component)?;
     validate_target(c, target)?;
@@ -1364,8 +1482,13 @@ pub struct UpdateNow {
     pub pin: UpdateDesiredRow,
     /// Agent hosts to poke (`AGENT_POKE_SCRIPT`); empty for other components.
     pub agents: Vec<String>,
-    /// The hub's own updater was woken (`<data_dir>/update-now`).
+    /// The hub's own updater was woken (`<data_dir>/update-now`). `false`
+    /// when no updater has ever checked in for `hub:self`: the file is
+    /// still written, but nothing may be watching it.
     pub hub_woken: bool,
+    /// What the caller should know next, in words: no updater seen for the
+    /// hub, and that the pin lifts itself once the version is in.
+    pub note: String,
 }
 
 /// `update_admin { action: update_now, component, target?, version? }`: install
@@ -1408,13 +1531,14 @@ pub fn update_now(
         }
         v
     };
-    let pin = pin(
+    let pin = pin_checked(
         store,
         c.as_str(),
         target,
         &v.to_string(),
         true,
-        Some("update now".into()),
+        Some(UPDATE_NOW_REASON.into()),
+        keys,
         now,
     )?;
     let agents = if c == Component::Agent {
@@ -1425,11 +1549,30 @@ pub fn update_now(
     } else {
         Vec::new()
     };
-    let hub_woken = c == Component::Hub && wake_hub_updater();
+    // An updater that checks in is what consumes the trigger; with none
+    // ever seen, "woken" would promise an install nothing will do (w26-8).
+    let hub_has_updater = c == Component::Hub
+        && lock(store)?
+            .update_observed("hub:self")?
+            .is_some_and(|o| o.last_checked_at.is_some());
+    let written = c == Component::Hub && wake_hub_updater();
+    let hub_woken = written && hub_has_updater;
+    let mut note = format!(
+        "{} pinned to {v} (required); the pin lifts itself once {v} is installed and healthy. \
+         `update_admin unpin` follows the channel again sooner.",
+        c.as_str()
+    );
+    if c == Component::Hub && !hub_has_updater {
+        note.push_str(
+            " No updater has checked in for this hub yet, so nothing installs it until one runs \
+             (docs/updates.md → fleet-updater).",
+        );
+    }
     Ok(UpdateNow {
         pin,
         agents,
         hub_woken,
+        note,
     })
 }
 

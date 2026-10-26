@@ -141,11 +141,12 @@ fn autonomy_is_the_least_of_ceiling_level_and_grant() {
         &fx.me,
     )
     .unwrap();
+    let m = mission_now(&fx);
     let s = lock(&fx.deps.store).unwrap();
     assert_eq!(
-        autonomy(&s, &fx.m, now_unix()).unwrap().effective,
-        2,
-        "the mission asks for 2"
+        (m.level, autonomy(&s, &m, now_unix()).unwrap().effective),
+        (2, 3),
+        "the L3 grant lifts the ask while it holds; the mission's own is kept"
     );
     s.set_setting(settings::ORCHESTRATOR_ENABLED, "false")
         .unwrap();
@@ -183,6 +184,151 @@ fn only_a_person_signs_a_grant_and_revoking_ends_it() {
         1
     );
     let s = lock(&fx.deps.store).unwrap();
+    assert!(s.live_mission_grant(fx.m.id, now_unix()).unwrap().is_none());
+}
+
+/// TASK-293: a mission made in the room asks L0 and the loop runs at the
+/// least of the ask, the ceiling and the grant, so an L2 grant on it never
+/// started a run. A grant lifts the ask to its level while it holds, and
+/// the mission drops back to its own ask when it ends (review r8).
+#[test]
+fn a_grant_lifts_a_lower_ask_while_it_holds() {
+    let fx = fixture();
+    let s = lock(&fx.deps.store).unwrap();
+    s.set_setting(settings::ORCHESTRATOR_MAX_LEVEL, "2")
+        .unwrap();
+    s.update_mission(
+        fx.m.id,
+        None,
+        &crate::store::MissionPatch {
+            level: Some(0),
+            ..Default::default()
+        },
+        "ana",
+    )
+    .unwrap();
+    drop(s);
+    let m = mission_now(&fx);
+    assert_eq!(
+        autonomy(&lock(&fx.deps.store).unwrap(), &m, now_unix())
+            .unwrap()
+            .effective,
+        0
+    );
+    grant(
+        &WorkLinkArgs {
+            level: Some(2),
+            ..by_id("mission_grant", fx.m.id)
+        },
+        &fx.deps.store,
+        &fx.me,
+    )
+    .unwrap();
+    let m = mission_now(&fx);
+    let s = lock(&fx.deps.store).unwrap();
+    assert_eq!(m.level, 0, "the mission's own ask is kept");
+    let a = autonomy(&s, &m, now_unix()).unwrap();
+    assert!(a.effective >= AUTO_LEVEL, "{a:?}");
+    assert_eq!(a.asked, 0);
+    let e = &s.mission_events(fx.m.id, None, 1).unwrap()[0];
+    assert_eq!(e.kind, "grant");
+    assert_eq!(e.payload.as_ref().unwrap()["lifted_from"], 0);
+    drop(s);
+    // A lower grant runs at its own level.
+    grant(
+        &WorkLinkArgs {
+            level: Some(1),
+            ..by_id("mission_grant", fx.m.id)
+        },
+        &fx.deps.store,
+        &fx.me,
+    )
+    .unwrap();
+    let s = lock(&fx.deps.store).unwrap();
+    assert_eq!(autonomy(&s, &m, now_unix()).unwrap().effective, 1);
+    drop(s);
+    // Review r8: once the grant ends the mission is back at its own L0, so
+    // the loop asks no planner and checks no merge on its own.
+    revoke(&by_id("mission_revoke", fx.m.id), &fx.deps.store, &fx.me).unwrap();
+    let s = lock(&fx.deps.store).unwrap();
+    let m = s.get_mission(fx.m.id).unwrap().unwrap();
+    assert_eq!(
+        (m.level, autonomy(&s, &m, now_unix()).unwrap().effective),
+        (0, 0)
+    );
+}
+
+/// TASK-293: a finite mission's grant may last until it completes, bounded
+/// by its budget alone.
+#[test]
+fn a_grant_until_done_needs_a_budget_and_ends_with_the_finite_mission() {
+    let fx = fixture();
+    let args = |hours: Option<u32>, cents: Option<i64>| WorkLinkArgs {
+        level: Some(2),
+        hours,
+        budget_cents: cents,
+        until_done: Some(true),
+        ..by_id("mission_grant", fx.m.id)
+    };
+    for bad in [args(None, None), args(Some(2), Some(500))] {
+        assert_eq!(
+            grant(&bad, &fx.deps.store, &fx.me).unwrap_err().code,
+            codes::E_INVALID
+        );
+    }
+    let g = grant(&args(None, Some(500)), &fx.deps.store, &fx.me).unwrap();
+    assert!(g.until_done);
+    assert_eq!(
+        (g.expires_at, g.budget_micros),
+        (GRANT_UNTIL_DONE_AT, Some(5_000_000))
+    );
+    let s = lock(&fx.deps.store).unwrap();
+    let in_a_month = now_unix() + 30 * 86_400;
+    assert!(s.live_mission_grant(fx.m.id, in_a_month).unwrap().is_some());
+    let e = &s.mission_events(fx.m.id, None, 1).unwrap()[0];
+    assert_eq!(e.payload.as_ref().unwrap()["until_done"], true);
+    // Made continuous, it never completes: the grant stops holding.
+    s.update_mission(
+        fx.m.id,
+        None,
+        &crate::store::MissionPatch {
+            mode: Some("continuous".into()),
+            ..Default::default()
+        },
+        "ana",
+    )
+    .unwrap();
+    assert!(s.live_mission_grant(fx.m.id, now_unix()).unwrap().is_none());
+    drop(s);
+    assert_eq!(
+        grant(&args(None, Some(500)), &fx.deps.store, &fx.me)
+            .unwrap_err()
+            .code,
+        codes::E_INVALID,
+        "a continuous mission's grant runs some hours"
+    );
+    let s = lock(&fx.deps.store).unwrap();
+    s.update_mission(
+        fx.m.id,
+        None,
+        &crate::store::MissionPatch {
+            mode: Some("finite".into()),
+            ..Default::default()
+        },
+        "ana",
+    )
+    .unwrap();
+    // Made finite again, the old grant stays revoked: no level or budget
+    // comes back without a new signature.
+    assert!(s.live_mission_grant(fx.m.id, now_unix()).unwrap().is_none());
+    drop(s);
+    grant(&args(None, Some(500)), &fx.deps.store, &fx.me).unwrap();
+    let s = lock(&fx.deps.store).unwrap();
+    assert!(s.live_mission_grant(fx.m.id, now_unix()).unwrap().is_some());
+    // It ends with the mission: reopened, it has none.
+    s.set_mission_state(fx.m.id, None, "completed", "ana")
+        .unwrap();
+    s.set_mission_state(fx.m.id, None, "paused", "ana").unwrap();
     assert!(s.live_mission_grant(fx.m.id, now_unix()).unwrap().is_none());
 }
 
@@ -226,6 +372,7 @@ async fn a_person_closes_an_implemented_item_and_the_mission_completes() {
             ..Default::default()
         };
         crate::service::tasks::complete_task_reported(&s, &t, "", Some(&report)).unwrap();
+        s.set_task_evidence(t.id, &evidence(2, 3)).unwrap();
     }
     let plan = {
         let m = mission_now(&fx);
@@ -272,6 +419,170 @@ async fn a_person_closes_an_implemented_item_and_the_mission_completes() {
         .unwrap();
     assert!(out.results.iter().all(|r| r.ok), "{:?}", out.results);
     assert_eq!(mission_now(&fx).state, "completed");
+}
+
+fn evidence(commits: u32, files: u32) -> crate::store::TaskEvidence {
+    crate::store::TaskEvidence {
+        at: 1,
+        commits_total: commits,
+        files_total: files,
+        ..Default::default()
+    }
+}
+
+/// The completion gate's run evidence (mission #4): an implement run that
+/// reports done but committed nothing and changed no file is not closed by
+/// the loop. It asks a person, naming what is missing, until a person
+/// overrides it with a reason.
+#[tokio::test]
+async fn the_loop_does_not_close_an_implement_item_with_no_run_evidence() {
+    let fx = granted();
+    let item = member(&fx, "one");
+    {
+        let s = lock(&fx.deps.store).unwrap();
+        let t = s.insert_task(None, None, "go", "n-1").unwrap();
+        s.set_task_run(t.id, item, 1, "implement").unwrap();
+        let t = s.get_task(t.id).unwrap().unwrap();
+        let report = TaskReport {
+            summary: "did it".into(),
+            outcome: "done".into(),
+            ..Default::default()
+        };
+        crate::service::tasks::complete_task_reported(&s, &t, "", Some(&report)).unwrap();
+        s.set_task_evidence(t.id, &evidence(0, 0)).unwrap();
+    }
+    let steps = {
+        let m = mission_now(&fx);
+        let s = lock(&fx.deps.store).unwrap();
+        plan_for(&s, &m).unwrap().unwrap().steps
+    };
+    assert!(!steps.iter().any(|st| st.kind == "close"), "{steps:?}");
+    let ask = steps
+        .iter()
+        .find(|st| st.kind == "ask" && st.item_id == Some(item))
+        .unwrap_or_else(|| panic!("{steps:?}"));
+    assert!(ask.reason.contains("no run evidence"), "{}", ask.reason);
+    assert!(
+        ask.context
+            .as_deref()
+            .is_some_and(|c| c.contains("committed nothing")),
+        "{ask:?}"
+    );
+    // A stale plan's close is refused for the loop.
+    let close = Step {
+        kind: "close".into(),
+        item_id: Some(item),
+        role: None,
+        reason: "stale".into(),
+        context: None,
+        auto: true,
+    };
+    let r = apply_step(
+        &fx.deps,
+        &fx.m,
+        &close,
+        &Actor::Loop,
+        &ViewScope::internal(),
+    )
+    .await;
+    assert!(!r.ok);
+    assert!(r.detail.contains("no run evidence"), "{}", r.detail);
+    assert_ne!(
+        lock(&fx.deps.store)
+            .unwrap()
+            .get_work_item(item)
+            .unwrap()
+            .unwrap()
+            .status_category,
+        "done"
+    );
+    // A person's override, with a reason, lets the close through.
+    crate::service::work::verify::verify(
+        &WorkLinkArgs {
+            action: "verify".into(),
+            item_id: Some(item),
+            line: Some(crate::service::work::gate::EVIDENCE_LINE.into()),
+            ok: Some(true),
+            note: Some("the fix was a host config change".into()),
+            ..Default::default()
+        },
+        &fx.deps.store,
+        &fx.me,
+    )
+    .unwrap();
+    let steps = {
+        let m = mission_now(&fx);
+        let s = lock(&fx.deps.store).unwrap();
+        plan_for(&s, &m).unwrap().unwrap().steps
+    };
+    assert!(
+        steps
+            .iter()
+            .any(|st| st.kind == "close" && st.item_id == Some(item)),
+        "{steps:?}"
+    );
+    let r = apply_step(
+        &fx.deps,
+        &fx.m,
+        &close,
+        &Actor::Loop,
+        &ViewScope::internal(),
+    )
+    .await;
+    assert!(r.ok, "{}", r.detail);
+}
+
+/// The loop applies the planner's cards one by one, each perhaps after an
+/// SSH start; a card a person dismissed meanwhile stays dismissed and is
+/// never applied, and one being decided by a person is left to them.
+#[tokio::test]
+async fn the_loop_never_applies_a_card_a_person_decided_meanwhile() {
+    let fx = fixture();
+    let (one, two, three) = (member(&fx, "one"), member(&fx, "two"), member(&fx, "three"));
+    let hold = |n: &str, item: i64| {
+        lock(&fx.deps.store)
+            .unwrap()
+            .add_card(
+                fx.m.id,
+                &NewCard {
+                    decision_id: n,
+                    source: "planner",
+                    kind: "hold",
+                    work_item_id: Some(item),
+                    payload: None,
+                },
+            )
+            .unwrap()
+            .unwrap()
+    };
+    let cards = vec![hold("t:1", one), hold("t:2", two), hold("t:3", three)];
+    let dismiss = WorkLinkArgs {
+        action: "card_decide".into(),
+        card_id: Some(cards[1].id),
+        ok: Some(false),
+        ..Default::default()
+    };
+    decide_card(&dismiss, &fx.deps, &fx.me).await.unwrap();
+    // A person is mid-decision on the third.
+    let _theirs = CardClaim::take(cards[2].id).unwrap();
+    let m = mission_now(&fx);
+    let shown = loop_apply_cards(&fx.deps, &m, cards, AUTO_LEVEL, true)
+        .await
+        .unwrap();
+    let states: Vec<&str> = shown.iter().map(|c| c.state.as_str()).collect();
+    assert_eq!(states, ["applied", "dismissed", "open"]);
+    let held = |item: i64| {
+        lock(&fx.deps.store)
+            .unwrap()
+            .get_work_item(item)
+            .unwrap()
+            .unwrap()
+            .held_at
+            .is_some()
+    };
+    assert!(held(one));
+    assert!(!held(two), "a dismissed card is never applied");
+    assert!(!held(three), "a card a person is deciding is theirs");
 }
 
 #[tokio::test]
@@ -720,6 +1031,43 @@ async fn the_loop_never_completes_a_mission() {
     assert_eq!(mission_now(&fx).state, "completed");
 }
 
+/// TASK-295: red CI on a mission's pull request holds a person's complete
+/// step too; only the mission's own Complete takes the override.
+#[tokio::test]
+async fn red_ci_holds_the_complete_step() {
+    let fx = fixture();
+    let item = member(&fx, "one");
+    let ana = fx.me.person.unwrap();
+    {
+        let s = lock(&fx.deps.store).unwrap();
+        missions::test_mission_pr(&s, item, ana, 476, "MERGED", "failing");
+    }
+    let step = Step {
+        kind: "complete".into(),
+        item_id: Some(fx.root),
+        role: None,
+        reason: "every task is done".into(),
+        context: None,
+        auto: false,
+    };
+    let m = mission_now(&fx);
+    let r = apply_step(
+        &fx.deps,
+        &m,
+        &step,
+        &Actor::Person(format!("person:{ana}")),
+        &fx.me,
+    )
+    .await;
+    assert!(!r.ok);
+    assert!(
+        r.detail.contains("CI is failing on acme/pay#476"),
+        "{}",
+        r.detail
+    );
+    assert_eq!(mission_now(&fx).state, "active");
+}
+
 /// Contract 14: the missions list carries each mission's spend and its
 /// grant's budget, and the plan an average run's cost for the run cards.
 #[test]
@@ -850,12 +1198,8 @@ fn a_run_goes_to_the_best_host_inside_its_grant() {
     seed(&s, "mac", None, "acct-mac", 80.0, now);
     seed(&s, "htz", None, "acct-htz", 70.0, now);
     seed(&s, "htz", Some("spare"), "acct-spare", 5.0, now);
-    s.conn_for_test()
-        .execute(
-            "UPDATE hosts SET reachable = 1, claude_version = '2.1' WHERE alias IN ('mac', 'htz')",
-            [],
-        )
-        .unwrap();
+    crate::service::account_limits::ready_host(&s, "mac");
+    crate::service::account_limits::ready_host(&s, "htz");
     let start = start_for(&s, &fx.m, item, &Actor::Loop, Some(&g)).unwrap();
     assert_eq!(start.host_alias.as_deref(), Some("htz"));
     assert_eq!(
@@ -870,4 +1214,544 @@ fn a_run_goes_to_the_best_host_inside_its_grant() {
     let start = start_for(&s, &fx.m, item, &Actor::Loop, Some(&g)).unwrap();
     assert_eq!(start.host_alias.as_deref(), Some("mac"));
     assert_eq!(start.profile, None);
+}
+
+/// The fixture's mission with its planner on `mac`.
+fn planned_on_mac(fx: &Fx) -> MissionRow {
+    let mut m = fx.m.clone();
+    m.policy.planner_host = Some("mac".into());
+    m
+}
+
+/// TASK-291: the planner passes over a login at `accounts.pause_at` for the
+/// host's next login with headroom, and with none left the mission waits
+/// until the earliest reset rather than asking into the limit.
+#[test]
+fn the_planner_takes_a_login_with_headroom_or_waits_for_the_reset() {
+    let fx = fixture();
+    let m = planned_on_mac(&fx);
+    let s = lock(&fx.deps.store).unwrap();
+    let now = now_unix();
+    crate::service::account_limits::seed_usage(&s, "mac", None, "own", 95.0, now);
+    crate::service::account_limits::seed_usage(&s, "mac", Some("work"), "work", 10.0, now);
+    let own = limit::Login {
+        host: "mac".into(),
+        profile: None,
+    };
+    let work = limit::Login {
+        host: "mac".into(),
+        profile: Some("work".into()),
+    };
+    assert_eq!(
+        limit::candidates(&s, &m, None).unwrap(),
+        vec![own.clone(), work.clone()],
+        "the host's own login first, then its profiles"
+    );
+    assert_eq!(limit::choose(&s, &m, None, now).unwrap(), Ok(work.clone()));
+    crate::service::account_limits::seed_usage(&s, "mac", Some("work"), "work", 97.0, now);
+    let wait = limit::choose(&s, &m, None, now).unwrap().unwrap_err();
+    assert_eq!(wait.login, None, "the mission's wait, not one login's");
+    assert_eq!(wait.resets_at, now + 3_600, "the readings' reset");
+    assert!(wait.reset_known);
+    assert!(
+        wait.why.contains("every login") && wait.why.contains("mac's own login"),
+        "{}",
+        wait.why
+    );
+}
+
+/// TASK-291: a run that answered with Claude's limit words is a wait on that
+/// login until the reset the answer names, the loop does not ask the
+/// planner again before it, and asks again once it passed.
+#[test]
+fn a_limit_answer_is_a_wait_and_the_loop_asks_again_after_the_reset() {
+    let fx = fixture();
+    let m = planned_on_mac(&fx);
+    let s = lock(&fx.deps.store).unwrap();
+    s.insert_host("mac", None).unwrap();
+    let now = now_unix();
+    let own = limit::Login {
+        host: "mac".into(),
+        profile: None,
+    };
+    let hit = crate::service::claude_print::usage_limit(&format!(
+        "Claude AI usage limit reached|{}",
+        now + 600
+    ))
+    .unwrap();
+    // Before: the mission has never been planned, so it wants the planner.
+    let counts = s.mission_task_counts(m.id).unwrap();
+    assert!(planner_wanted(&s, &m, &[], &counts, None, now)
+        .unwrap()
+        .is_some());
+    event(&s, m.id, "planned", "loop", None, serde_json::json!({}));
+    let wait = limit::answered(&s, &own, &hit, now);
+    assert_eq!((wait.resets_at, wait.reset_known), (now + 600, true));
+    limit::record(&s, m.id, &wait);
+    assert!(limit::waiting(&s, m.id).unwrap());
+    assert_eq!(limit::wake_at(&s, m.id, now).unwrap(), Some(now + 600));
+    let e = &s.mission_events(m.id, None, 1).unwrap()[0];
+    assert_eq!(e.kind, "limit_wait", "not refused");
+    assert_eq!(e.payload.as_ref().unwrap()["login"]["host"], "mac");
+    // Waiting: the only login is in its wait, so nothing is asked.
+    assert_eq!(
+        planner_wanted(&s, &m, &[], &counts, None, now).unwrap(),
+        None
+    );
+    let all = limit::choose(&s, &m, None, now).unwrap().unwrap_err();
+    assert_eq!(all.resets_at, now + 600);
+    // Past the reset: asked again.
+    assert_eq!(
+        planner_wanted(&s, &m, &[], &counts, None, now + 601).unwrap(),
+        Some("the usage limit it waited on is over")
+    );
+    // A run after it ends the wait.
+    event(&s, m.id, "planned", "loop", None, serde_json::json!({}));
+    assert!(!limit::waiting(&s, m.id).unwrap());
+    assert_eq!(limit::wake_at(&s, m.id, now).unwrap(), None);
+}
+
+/// TASK-291: a limit nobody says the reset of (Claude's words carry no time,
+/// the account has no reading) is waited out for the guess, said as such.
+#[test]
+fn a_limit_with_no_known_reset_waits_the_guess() {
+    let fx = fixture();
+    let s = lock(&fx.deps.store).unwrap();
+    let now = now_unix();
+    let login = limit::Login {
+        host: "mac".into(),
+        profile: Some("work".into()),
+    };
+    let hit = crate::service::claude_print::usage_limit(
+        "You've hit your limit · resets 3pm (Europe/Bratislava)",
+    )
+    .unwrap();
+    let wait = limit::answered(&s, &login, &hit, now);
+    assert_eq!(wait.resets_at, now + limit::LIMIT_WAIT_GUESS_SECS);
+    assert!(!wait.reset_known);
+    assert_eq!(
+        wait.why,
+        "profile work on mac is at its usage limit (resets 3pm (Europe/Bratislava))"
+    );
+    assert_eq!(wait.said.as_deref(), Some("resets 3pm (Europe/Bratislava)"));
+}
+
+/// Review r8: a login fleet holds signed out is no candidate, the host's
+/// own and the grant's as much as the rest, and a login this ask found
+/// signed out is passed over for the next one.
+#[test]
+fn the_planner_passes_over_signed_out_logins() {
+    let fx = fixture();
+    let m = planned_on_mac(&fx);
+    let s = lock(&fx.deps.store).unwrap();
+    let now = now_unix();
+    crate::service::account_limits::seed_usage(&s, "mac", None, "own", 10.0, now);
+    crate::service::account_limits::seed_usage(&s, "mac", Some("a"), "acct-a", 10.0, now);
+    crate::service::account_limits::seed_usage(&s, "mac", Some("b"), "acct-b", 10.0, now);
+    let at = |p: Option<&str>| limit::Login {
+        host: "mac".into(),
+        profile: p.map(str::to_string),
+    };
+    let signed_out = |p: Option<&str>| crate::store::SignedOutLogin {
+        profile: p.map(str::to_string),
+        since: now,
+        checked_at: now,
+    };
+    s.set_host_signed_out_logins("mac", &[signed_out(None), signed_out(Some("a"))])
+        .unwrap();
+    let g = s
+        .add_grant(
+            m.id,
+            &NewGrant {
+                level: 2,
+                granted_by: "ana",
+                hosts: None,
+                budget_micros: None,
+                max_parallel: None,
+                profile: Some("a".into()),
+                expires_at: now + 3600,
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        limit::candidates(&s, &m, Some(&g)).unwrap(),
+        vec![at(Some("b"))],
+        "the grant's and the host's own login are signed out"
+    );
+    s.set_host_signed_out_logins("mac", &[]).unwrap();
+    assert_eq!(
+        limit::candidates(&s, &m, Some(&g)).unwrap(),
+        vec![at(Some("a")), at(None), at(Some("b"))]
+    );
+    let words = limit::Words::read(&s, m.id).unwrap();
+    assert_eq!(
+        limit::choose_in(&s, &m, Some(&g), now, &words, &[at(Some("a"))]).unwrap(),
+        Ok(at(None)),
+        "a login this ask found signed out is passed over"
+    );
+}
+
+/// Review r9: with every login the planner may use held signed out (and
+/// none at a limit), the ask is refused with the login to sign in again,
+/// not taken for a usage-limit wait, and no wait is recorded.
+#[tokio::test]
+async fn a_planner_whose_logins_are_all_signed_out_says_sign_in_again() {
+    let fx = fixture();
+    let m = planned_on_mac(&fx);
+    let now = now_unix();
+    {
+        let s = lock(&fx.deps.store).unwrap();
+        s.insert_host("mac", None).unwrap();
+        s.set_host_signed_out_logins(
+            "mac",
+            &[crate::store::SignedOutLogin {
+                profile: None,
+                since: now,
+                checked_at: now,
+            }],
+        )
+        .unwrap();
+        assert!(limit::candidates(&s, &m, None).unwrap().is_empty());
+        let e = limit::choose(&s, &m, None, now).unwrap_err();
+        assert_eq!(e.code, codes::E_CLAUDE_CLI, "{e:?}");
+        assert!(
+            e.message.contains("mac's own login is signed out") && e.message.contains("/login"),
+            "{}",
+            e.message
+        );
+    }
+    let e = run_planner(&fx.deps, &m, "test", &Actor::Loop)
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, codes::E_CLAUDE_CLI, "{e:?}");
+    {
+        let s = lock(&fx.deps.store).unwrap();
+        assert!(!limit::waiting(&s, m.id).unwrap(), "no usage-limit wait");
+        assert!(limit::open_waits(&s, m.id, now).unwrap().is_empty());
+    }
+    // Review r10: the loop's refusal is said on the log once, and the loop
+    // does not ask again while every login is signed out.
+    run_planner(&fx.deps, &m, "test", &Actor::Loop)
+        .await
+        .unwrap_err();
+    let s = lock(&fx.deps.store).unwrap();
+    let said = s
+        .mission_events_of_kinds(m.id, &[limit::SIGNED_OUT_EVENT], 10)
+        .unwrap();
+    assert_eq!(said.len(), 1, "once per change: {said:?}");
+    let why = said[0].payload.as_ref().unwrap()["why"].as_str().unwrap();
+    assert!(why.contains("/login"), "{why}");
+    let counts = s.mission_task_counts(m.id).unwrap();
+    assert_eq!(
+        planner_wanted(&s, &m, &[], &counts, None, now).unwrap(),
+        None,
+        "backs off while signed out"
+    );
+    // Signed in again: the planner is wanted once more.
+    s.set_host_signed_out_logins("mac", &[]).unwrap();
+    assert!(planner_wanted(&s, &m, &[], &counts, None, now)
+        .unwrap()
+        .is_some());
+}
+
+/// A fake `ssh` whose planner answers on mac's own login with `own` (one
+/// line) and on the `work` profile with an empty command array.
+#[cfg(unix)]
+fn planner_ssh(dir: &std::path::Path, own: &str) -> Arc<crate::ssh::SshClient> {
+    use crate::tmux::fake_exec::{write_exec, PROBE_GUARD};
+    let bin = write_exec(
+        dir,
+        "ssh",
+        &format!(
+            "#!/bin/sh\n{PROBE_GUARD}case \"$*\" in *'-O '*) exit 0;; esac\n\
+             echo {tag}run\n\
+             case \"$*\" in *claude-profiles*) echo '[]';; *) echo {own};; esac\n",
+            tag = planner::PLANNER_TAG,
+            own = crate::shell::quote(own),
+        ),
+    );
+    Arc::new(crate::ssh::SshClient::with_ssh_binary(bin))
+}
+
+/// Review r9 (TASK-291, r8): run_planner itself passes a signed-out login
+/// and a login at its limit over for the next one, takes that one's
+/// answer, and an answer after a wait clears it.
+#[cfg(unix)]
+#[tokio::test]
+async fn run_planner_answers_on_the_next_login() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut fx = fixture();
+    let m = planned_on_mac(&fx);
+    let now = now_unix();
+    {
+        let s = lock(&fx.deps.store).unwrap();
+        crate::service::account_limits::seed_usage(&s, "mac", None, "own", 10.0, now);
+        crate::service::account_limits::seed_usage(&s, "mac", Some("work"), "work", 10.0, now);
+    }
+    let own = limit::Login {
+        host: "mac".into(),
+        profile: None,
+    };
+    let work = limit::Login {
+        host: "mac".into(),
+        profile: Some("work".into()),
+    };
+    // The host's own login is signed out: the work profile answers.
+    fx.deps.ssh = planner_ssh(dir.path(), "Login expired · Please run /login");
+    let out = run_planner(&fx.deps, &m, "test", &Actor::Loop)
+        .await
+        .unwrap();
+    assert_eq!((out.refused.as_deref(), out.waiting.as_ref()), (None, None));
+    {
+        let s = lock(&fx.deps.store).unwrap();
+        assert!(!limit::waiting(&s, m.id).unwrap());
+    }
+    // The host's own login is at its limit: a wait on it, cleared by the
+    // work profile's answer, and the mission is not left waiting.
+    let sub = tempfile::tempdir().unwrap();
+    fx.deps.ssh = planner_ssh(
+        sub.path(),
+        &format!("Claude AI usage limit reached|{}", now + 600),
+    );
+    let out = run_planner(&fx.deps, &m, "test", &Actor::Loop)
+        .await
+        .unwrap();
+    assert_eq!((out.refused.as_deref(), out.waiting.as_ref()), (None, None));
+    let s = lock(&fx.deps.store).unwrap();
+    let words = limit::Words::read(&s, m.id).unwrap();
+    assert!(
+        !words.waiting(),
+        "the work profile's answer cleared the wait"
+    );
+    assert_eq!(words.newest_wait(), None);
+    let newest = &s
+        .mission_events_of_kinds(m.id, &[limit::LIMIT_CLEARED_EVENT, "limit_wait"], 1)
+        .unwrap()[0];
+    assert_eq!(newest.kind, limit::LIMIT_CLEARED_EVENT);
+    assert_eq!(newest.payload.as_ref().unwrap()["profile"], "work");
+    let waits = limit::open_waits(&s, m.id, now).unwrap();
+    assert_eq!(waits.len(), 1);
+    assert_eq!(waits[0].login.as_ref(), Some(&own), "{waits:?}");
+    assert_ne!(waits[0].login.as_ref(), Some(&work));
+}
+
+/// Review r8: an answer from a later login of the same ask clears its wait,
+/// so the mission is not left waiting (no early wake, no second ask).
+#[test]
+fn an_answer_after_a_wait_clears_it() {
+    let fx = fixture();
+    let m = planned_on_mac(&fx);
+    let s = lock(&fx.deps.store).unwrap();
+    let now = now_unix();
+    let own = limit::Login {
+        host: "mac".into(),
+        profile: None,
+    };
+    let hit = crate::service::claude_print::usage_limit(&format!(
+        "Claude AI usage limit reached|{}",
+        now + 600
+    ))
+    .unwrap();
+    event(&s, m.id, "planned", "loop", None, serde_json::json!({}));
+    limit::record(&s, m.id, &limit::answered(&s, &own, &hit, now));
+    assert!(limit::waiting(&s, m.id).unwrap());
+    let work = limit::Login {
+        host: "mac".into(),
+        profile: Some("work".into()),
+    };
+    limit::cleared(&s, m.id, &work);
+    assert!(!limit::waiting(&s, m.id).unwrap());
+    assert_eq!(limit::wake_at(&s, m.id, now).unwrap(), None);
+    assert_eq!(
+        limit::open_waits(&s, m.id, now).unwrap().len(),
+        1,
+        "the login's own wait still holds for the next ask"
+    );
+    // A busy log does not hide the planner's words.
+    for _ in 0..250 {
+        event(&s, m.id, "step", "loop", None, serde_json::json!({}));
+    }
+    limit::record(&s, m.id, &limit::answered(&s, &own, &hit, now));
+    for _ in 0..250 {
+        event(&s, m.id, "step", "loop", None, serde_json::json!({}));
+    }
+    assert!(limit::waiting(&s, m.id).unwrap());
+}
+
+/// Review r8: a reset further out than Claude's weekly limit (an answer the
+/// prompt's text steered) is not taken as the limit's own.
+#[test]
+fn a_far_reset_is_not_believed() {
+    let fx = fixture();
+    let s = lock(&fx.deps.store).unwrap();
+    let now = now_unix();
+    let login = limit::Login {
+        host: "mac".into(),
+        profile: Some("work".into()),
+    };
+    let hit =
+        crate::service::claude_print::usage_limit("Claude AI usage limit reached|99999999999")
+            .unwrap();
+    let wait = limit::answered(&s, &login, &hit, now);
+    assert_eq!(
+        (wait.resets_at, wait.reset_known),
+        (now + limit::LIMIT_WAIT_GUESS_SECS, false)
+    );
+}
+
+/// Mission #6 (2026-10-20): a run stuck open for over an hour braked the
+/// mission, and every resume braked it again on the same stale run before
+/// the tick tried a step. A person's resume restarts the window.
+#[tokio::test]
+async fn a_persons_resume_restarts_the_no_progress_window() {
+    let fx = fixture();
+    let item = member(&fx, "a");
+    let now = now_unix();
+    let stale = now - 2 * fx.m.policy.no_progress_secs as i64;
+    {
+        let s = lock(&fx.deps.store).unwrap();
+        crate::service::work::run::record_headless_run(&s, "x", item, 1, "implement").unwrap();
+        let c = s.conn_for_test();
+        c.execute("UPDATE tasks SET created_at = ?1, started_at = ?1", [stale])
+            .unwrap();
+        c.execute(
+            "UPDATE orchestration_events SET at = ?1 WHERE kind = 'state'",
+            [stale],
+        )
+        .unwrap();
+    }
+    let braked = || {
+        lock(&fx.deps.store)
+            .unwrap()
+            .conn_for_test()
+            .query_row(
+                "SELECT COUNT(*) FROM orchestration_events \
+                 WHERE orchestration_project_id = ?1 AND kind = 'no_progress'",
+                [fx.m.id],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap()
+    };
+    tick_mission(&fx.deps, fx.m.id, now).await.unwrap();
+    assert_eq!(mission_now(&fx).state, "paused", "the stale run brakes it");
+    assert_eq!(braked(), 1);
+
+    missions::set_state(
+        &WorkLinkArgs {
+            status: Some("active".into()),
+            ..by_id("mission_state", fx.m.id)
+        },
+        &fx.deps.store,
+        &fx.me,
+    )
+    .unwrap();
+    tick_mission(&fx.deps, fx.m.id, now_unix()).await.unwrap();
+    assert_eq!(mission_now(&fx).state, "active", "the resume gets a window");
+    assert_eq!(braked(), 1);
+
+    // The window still closes: an hour on with nothing moving brakes again.
+    let later = now_unix() + fx.m.policy.no_progress_secs as i64 + 1;
+    tick_mission(&fx.deps, fx.m.id, later).await.unwrap();
+    assert_eq!(mission_now(&fx).state, "paused");
+    assert_eq!(braked(), 2);
+}
+
+/// Lanes design L1: the planner reads a repository only when
+/// `orchestrator.planner_reads` is on, and then the mission's own.
+#[test]
+fn the_planner_reads_the_missions_repo_only_when_asked() {
+    let fx = fixture();
+    let s = lock(&fx.deps.store).unwrap();
+    let pid = s.upsert_project("o", "r", "/repo").unwrap();
+    s.set_mission_repo(fx.m.id, pid, None, true, "t").unwrap();
+    let m = s.get_mission(fx.m.id).unwrap().unwrap();
+    assert_eq!(
+        planner_reads_project(&s, &m).unwrap(),
+        None,
+        "off by default"
+    );
+    s.set_setting(settings::ORCHESTRATOR_PLANNER_READS, "true")
+        .unwrap();
+    assert_eq!(planner_reads_project(&s, &m).unwrap(), Some(pid));
+    let bare = MissionRow { repos: vec![], ..m };
+    assert_eq!(
+        planner_reads_project(&s, &bare).unwrap(),
+        None,
+        "no repo to read"
+    );
+}
+
+/// Lanes design L3: in lane execution the loop offers one implement run per
+/// lane; a task in no lane still runs on its own.
+#[test]
+fn lane_execution_offers_one_run_per_lane() {
+    let fx = fixture();
+    let (a, b, c) = (member(&fx, "a"), member(&fx, "b"), member(&fx, "c"));
+    let s = lock(&fx.deps.store).unwrap();
+    s.set_mission_state(fx.m.id, None, "paused", "t").unwrap();
+    s.update_mission(
+        fx.m.id,
+        None,
+        &crate::store::MissionPatch {
+            policy: Some(crate::store::MissionPolicy {
+                execution: "lane".into(),
+                max_parallel: 8,
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        "t",
+    )
+    .unwrap();
+    s.set_mission_state(fx.m.id, None, "active", "t").unwrap();
+    s.set_item_lane(fx.m.id, a, Some("backend"), None, "t")
+        .unwrap();
+    s.set_item_lane(fx.m.id, b, Some("backend"), None, "t")
+        .unwrap();
+    let m = s.get_mission(fx.m.id).unwrap().unwrap();
+    let a_now = autonomy(&s, &m, now_unix()).unwrap();
+    let runs: Vec<i64> = steps_for(&s, &m, &a_now)
+        .unwrap()
+        .into_iter()
+        .filter(|st| st.kind == "run")
+        .filter_map(|st| st.item_id)
+        .collect();
+    assert_eq!(runs, vec![a, c], "b waits for its lane; c is in none");
+}
+
+/// Lanes design L5: two tasks whose touches meet do not start together;
+/// a task that names none is not held.
+#[test]
+fn tasks_that_change_the_same_files_do_not_start_together() {
+    let fx = fixture();
+    let (a, b, c) = (member(&fx, "a"), member(&fx, "b"), member(&fx, "c"));
+    let s = lock(&fx.deps.store).unwrap();
+    s.set_item_touches(a, &["src/store/**".to_string()])
+        .unwrap();
+    s.set_item_touches(b, &["src/store/mod.rs".to_string()])
+        .unwrap();
+    s.set_mission_state(fx.m.id, None, "paused", "t").unwrap();
+    s.update_mission(
+        fx.m.id,
+        None,
+        &crate::store::MissionPatch {
+            policy: Some(crate::store::MissionPolicy {
+                max_parallel: 8,
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        "t",
+    )
+    .unwrap();
+    s.set_mission_state(fx.m.id, None, "active", "t").unwrap();
+    let m = s.get_mission(fx.m.id).unwrap().unwrap();
+    let a_now = autonomy(&s, &m, now_unix()).unwrap();
+    let runs: Vec<i64> = steps_for(&s, &m, &a_now)
+        .unwrap()
+        .into_iter()
+        .filter(|st| st.kind == "run")
+        .filter_map(|st| st.item_id)
+        .collect();
+    assert_eq!(runs, vec![a, c], "b waits for a; c says nothing");
 }

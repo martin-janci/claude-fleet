@@ -1,8 +1,9 @@
 //! A run's result (orchestration O3, design 2026-10-07 §6): the report the
 //! worker is asked for, and the evidence fleet reads from git itself.
 //!
-//! - **The report.** A run's prompt asks the worker to follow its done
-//!   marker with one fenced JSON block (`summary`, `outcome`, `done`,
+//! - **The report.** A run's prompt asks the worker to call the
+//!   `task_report` tool with its report, and to follow its done marker with
+//!   the same report as one fenced JSON block (`summary`, `outcome`, `done`,
 //!   `decisions`, `remaining`, `context`, `tests_run`, `warnings`,
 //!   `blockers`, `followups`, `confidence`). [`parse_report`] is
 //!   tolerant: a missing or broken block leaves the paragraph in
@@ -29,27 +30,35 @@ pub const SUMMARY_MAX_CHARS: usize = 4_000;
 /// Most lines after the marker searched for the JSON block.
 const REPORT_SCAN_LINES: usize = 400;
 
-/// The instruction appended to a run's prompt: the marker, then the block.
-/// The marker stands inline in the sentence, so the prompt's echo in the
-/// pane never reads as the worker's emission.
-pub fn run_instruction(nonce: &str) -> String {
+/// The instruction appended to a run's prompt: the `task_report` tool call
+/// first, then the marker and the block as the fallback for a worker without
+/// fleet's MCP. The marker stands inline in the sentence, so the prompt's
+/// echo in the pane never reads as the worker's emission.
+pub fn run_instruction(task_id: i64, nonce: &str) -> String {
     format!(
-        "When finished, print exactly {} on its own line, followed by one fenced \
-         ```json block with these keys: \"summary\" (one paragraph), \"outcome\" \
+        "When finished, call the claude-fleet MCP tool {} with task_id {task_id}, \
+         nonce \"{nonce}\" and your report: \"summary\" (one paragraph), \"outcome\" \
          (done | partial | blocked | failed), \"done\" (what you did), \
          \"decisions\" (choices the next task must keep), \"remaining\" (work \
          left), \"context\" (facts a fresh session needs to continue), \
          \"tests_run\" (the commands you ran), \"warnings\", \"blockers\", \
          \"followups\" (each a task title) — all lists of short strings — and \
-         \"confidence\" (low | medium | high). Fleet reads your commits and \
+         \"confidence\" (low | medium | high). Then also print exactly {} on its \
+         own line, followed by the same report as one fenced ```json block: fleet \
+         reads that when the tool is not available. Fleet reads your commits and \
          changed files from git itself; do not list them.",
+        crate::service::tasks::REPORT_TOOL,
         crate::service::tasks::done_marker(nonce)
     )
 }
 
 /// A run's prompt as delivered: the text, a blank line, the instruction.
-pub fn with_run_instruction(prompt: &str, nonce: &str) -> String {
-    format!("{}\n\n{}", prompt.trim_end(), run_instruction(nonce))
+pub fn with_run_instruction(prompt: &str, task_id: i64, nonce: &str) -> String {
+    format!(
+        "{}\n\n{}",
+        prompt.trim_end(),
+        run_instruction(task_id, nonce)
+    )
 }
 
 fn clip(s: &str, max: usize) -> String {
@@ -197,12 +206,12 @@ pub const UNMARKED_STOP_EVENT: &str = "task_unmarked_stop";
 
 /// PURE: what a worker that stopped without its done marker is told. It
 /// repeats the instruction, so the reply carries the marker and the block.
-pub fn marker_reminder(nonce: &str) -> String {
+pub fn marker_reminder(task_id: i64, nonce: &str) -> String {
     format!(
         "You stopped without reporting this task. If the work is finished, \
          report it now. If it is not, finish it first; if you cannot, report \
          outcome blocked with what stops you. {}",
-        run_instruction(nonce)
+        run_instruction(task_id, nonce)
     )
 }
 
@@ -220,14 +229,37 @@ const EV_ERR: &str = "__FLEET_EV_ERR__\t";
 /// else `origin/master`; the comparison is against the merge base, so a
 /// base that moved on since the branch was cut adds nothing.
 pub fn evidence_script(cwd: &str) -> String {
+    evidence_script_since(cwd, None)
+}
+
+/// [`evidence_script`] from `since`, the commit a task began on in a
+/// checkout it shares with the tasks before it (lanes design L3, §3.3):
+/// its evidence is `since..HEAD`, never what the tasks before it did. A
+/// `since` that is no longer an ancestor of `HEAD` (the history was
+/// rewritten) is an error, not a guess. `None` reads against the merge
+/// base, as for a run in a checkout of its own.
+pub fn evidence_script_since(cwd: &str, since: Option<&str>) -> String {
+    let base = match since.filter(|s| crate::store::is_commit_id(s)) {
+        Some(sha) => format!(
+            "base={sha}\n\
+             head=$(git rev-parse HEAD 2>/dev/null) || {{ printf '{err}not a git checkout\\n'; exit 0; }}\n\
+             git merge-base --is-ancestor {sha} HEAD 2>/dev/null || {{ printf '{err}the task began on %s, which the branch no longer holds\\n' {sha}; exit 0; }}\n\
+             mb={sha}\n",
+            err = EV_ERR,
+        ),
+        None => format!(
+            "base=$(git symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null)\n\
+             [ -n \"$base\" ] || {{ git rev-parse -q --verify origin/main >/dev/null 2>&1 && base=origin/main; }}\n\
+             [ -n \"$base\" ] || {{ git rev-parse -q --verify origin/master >/dev/null 2>&1 && base=origin/master; }}\n\
+             [ -n \"$base\" ] || {{ printf '{err}no base branch\\n'; exit 0; }}\n\
+             head=$(git rev-parse HEAD 2>/dev/null) || {{ printf '{err}not a git checkout\\n'; exit 0; }}\n\
+             mb=$(git merge-base HEAD \"$base\" 2>/dev/null) || {{ printf '{err}no merge base with %s\\n' \"$base\"; exit 0; }}\n",
+            err = EV_ERR,
+        ),
+    };
     format!(
         "cd {cwd} 2>/dev/null || {{ printf '{err}no checkout\\n'; exit 0; }}\n\
-         base=$(git symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null)\n\
-         [ -n \"$base\" ] || {{ git rev-parse -q --verify origin/main >/dev/null 2>&1 && base=origin/main; }}\n\
-         [ -n \"$base\" ] || {{ git rev-parse -q --verify origin/master >/dev/null 2>&1 && base=origin/master; }}\n\
-         [ -n \"$base\" ] || {{ printf '{err}no base branch\\n'; exit 0; }}\n\
-         head=$(git rev-parse HEAD 2>/dev/null) || {{ printf '{err}not a git checkout\\n'; exit 0; }}\n\
-         mb=$(git merge-base HEAD \"$base\" 2>/dev/null) || {{ printf '{err}no merge base with %s\\n' \"$base\"; exit 0; }}\n\
+         {base}\
          printf '{head}%s\\t%s\\t%s\\n' \"$head\" \"$base\" \"$mb\"\n\
          printf '{nc}%s\\n' \"$(git rev-list --count \"$mb\"..HEAD 2>/dev/null)\"\n\
          git log --no-merges --format='{commit}%H%x09%s' -n {cmax} \"$mb\"..HEAD 2>/dev/null\n\
@@ -311,37 +343,177 @@ pub async fn collect_evidence(
     cwd: &str,
     tasks: &[TaskRow],
 ) {
+    collect_evidence_as(store, ssh, host, cwd, tasks, EvidenceRead::Final).await;
+}
+
+/// When a git read of a run's checkout happens, which says what it may
+/// replace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvidenceRead {
+    /// After the worker's turn (its Stop): the run's evidence.
+    Final,
+    /// While the worker's turn still runs (`task_report`): stored
+    /// provisional, never over a settled read, and read again at its Stop.
+    MidTurn,
+    /// The mission loop reading a failed read again: only over a read that
+    /// is still unsettled or failed.
+    Retry,
+}
+
+/// The longest one retried git read may take. The retry runs in the loop's
+/// pass, so a host that swallows packets costs this, not ssh's own minute.
+const EVIDENCE_RETRY_WALL_CLOCK: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// The most one pass of the loop spends on retried reads; the rest wait
+/// for the next pass.
+const EVIDENCE_RETRY_PASS: std::time::Duration = std::time::Duration::from_secs(45);
+
+/// [`collect_evidence`], for `read`; answers whether the host answered (a
+/// failed read is stored either way).
+pub async fn collect_evidence_as(
+    store: &Arc<Mutex<Store>>,
+    ssh: &Arc<SshClient>,
+    host: &str,
+    cwd: &str,
+    tasks: &[TaskRow],
+    read: EvidenceRead,
+) -> bool {
     let runs: Vec<i64> = tasks
         .iter()
         .filter(|t| t.work_item_id.is_some())
         .map(|t| t.id)
         .collect();
     if runs.is_empty() {
-        return;
+        return true;
     }
-    let script = evidence_script(cwd);
-    let ev = match crate::service::catalog::inventory::run_host_script(ssh, host, &script).await {
-        Ok(out) => parse_evidence(&out, now_unix()),
-        Err(e) => TaskEvidence {
-            at: now_unix(),
-            error: Some(clip(&e.message, 200)),
-            ..Default::default()
-        },
+    // A task that began part way along a shared checkout (a lane's) is
+    // read from where it began; the others against the merge base, once.
+    let since: Vec<(i64, Option<String>)> = {
+        let Ok(s) = store.lock() else { return false };
+        runs.iter()
+            .map(|&id| (id, s.task_start_head(id).ok().flatten()))
+            .collect()
     };
-    let Ok(s) = store.lock() else { return };
-    for id in runs {
-        if let Err(e) = s.set_task_evidence(id, &ev) {
+    let mut answered = true;
+    let mut done: Vec<(Option<String>, TaskEvidence)> = Vec::new();
+    for (id, from) in since {
+        let ev = match done.iter().find(|(f, _)| *f == from) {
+            Some((_, ev)) => ev.clone(),
+            None => {
+                let script = evidence_script_since(cwd, from.as_deref());
+                let answer = match read {
+                    EvidenceRead::Retry => {
+                        crate::service::catalog::inventory::run_host_script_with(
+                            ssh,
+                            host,
+                            &script,
+                            EVIDENCE_RETRY_WALL_CLOCK,
+                            &tokio_util::sync::CancellationToken::new(),
+                        )
+                        .await
+                    }
+                    _ => {
+                        crate::service::catalog::inventory::run_host_script(ssh, host, &script)
+                            .await
+                    }
+                };
+                answered &= answer.is_ok();
+                let mut ev = match answer {
+                    Ok(out) => parse_evidence(&out, now_unix()),
+                    // Where it was read, so the loop can read it again (a
+                    // host that dropped for a moment is not a run that did
+                    // nothing).
+                    Err(e) => TaskEvidence {
+                        at: now_unix(),
+                        error: Some(clip(&e.message, 200)),
+                        host: Some(host.to_string()),
+                        dir: Some(cwd.to_string()),
+                        ..Default::default()
+                    },
+                };
+                ev.provisional = read == EvidenceRead::MidTurn;
+                done.push((from, ev.clone()));
+                ev
+            }
+        };
+        let Ok(s) = store.lock() else {
+            return answered;
+        };
+        let stored = match read {
+            EvidenceRead::Final => s.set_task_evidence(id, &ev),
+            EvidenceRead::MidTurn => s.replace_open_task_evidence(id, &ev, false).map(|_| ()),
+            // A retry keeps what it replaces open or settled: a failed
+            // mid-turn read read again is still owed the worker's Stop, so
+            // a commit made after it counts.
+            EvidenceRead::Retry => {
+                let mut ev = ev.clone();
+                ev.provisional = s
+                    .get_task(id)
+                    .ok()
+                    .flatten()
+                    .and_then(|t| t.evidence)
+                    .is_some_and(|e| e.provisional);
+                s.replace_open_task_evidence(id, &ev, true).map(|_| ())
+            }
+        };
+        if let Err(e) = stored {
             tracing::warn!(task = id, error = %e.message, "[report] storing evidence failed");
+        }
+    }
+    answered
+}
+
+/// The least time between two reads of one run's failed git evidence.
+const EVIDENCE_RETRY_EVERY_SECS: i64 = 60;
+
+/// Read again the git evidence of every run whose read failed (a transient
+/// SSH error right after the run), within [`super::gate::EVIDENCE_RETRY_SECS`]
+/// of its finish: the gate holds it `pending` meanwhile rather than calling
+/// the work missing. Any run, in a mission or not: the missions' loop calls
+/// it on every pass, outside any mission's lease. One read per checkout
+/// (`host`, `dir`) for all its runs, each bounded by
+/// [`EVIDENCE_RETRY_WALL_CLOCK`]; a host that fails once is not tried again
+/// in the same pass, and the pass stops after [`EVIDENCE_RETRY_PASS`].
+pub async fn retry_unread_evidence(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>, now: i64) {
+    let runs = match store.lock() {
+        Ok(s) => s
+            .runs_with_unread_evidence(now - super::gate::EVIDENCE_RETRY_SECS)
+            .unwrap_or_default(),
+        Err(_) => return,
+    };
+    let mut checkouts: Vec<((String, String), Vec<TaskRow>)> = Vec::new();
+    for t in runs {
+        let Some(ev) = t.evidence.as_ref() else {
+            continue;
+        };
+        let (Some(host), Some(dir)) = (ev.host.clone(), ev.dir.clone()) else {
+            continue;
+        };
+        if now - ev.at < EVIDENCE_RETRY_EVERY_SECS {
+            continue;
+        }
+        let key = (host, dir);
+        match checkouts.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, group)) => group.push(t),
+            None => checkouts.push((key, vec![t])),
+        }
+    }
+    let started = std::time::Instant::now();
+    let mut unreachable: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for ((host, dir), group) in checkouts {
+        if started.elapsed() >= EVIDENCE_RETRY_PASS {
+            break;
+        }
+        if unreachable.contains(&host) {
+            continue;
+        }
+        if !collect_evidence_as(store, ssh, &host, &dir, &group, EvidenceRead::Retry).await {
+            unreachable.insert(host);
         }
     }
 }
 
-fn now_unix() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
+use crate::store::now_unix;
 
 #[cfg(test)]
 mod tests;

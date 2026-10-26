@@ -118,6 +118,35 @@ pub fn is_signed_out(host: &HostRow, profile: Option<&str>) -> bool {
         .any(|l| l.profile.as_deref() == profile)
 }
 
+/// Why the login `profile` on `host` cannot take automation's run (a
+/// routine, a mission step), when fleet knows it
+/// is signed out (`hosts.signed_out_logins`): "the login … is signed out
+/// since Aug 9 · ssh … claude /login".
+pub fn signed_out_reason(
+    s: &crate::store::Store,
+    host: &str,
+    profile: Option<&str>,
+) -> Result<Option<String>, crate::ipc_error::IpcError> {
+    let Some(row) = s.get_host_row(host)? else {
+        return Ok(None);
+    };
+    Ok(row
+        .signed_out_logins
+        .iter()
+        .find(|l| l.profile.as_deref() == profile)
+        .map(|l| {
+            let who = match profile {
+                Some(p) => format!("profile {p} on {host}"),
+                None => format!("{host}'s own login"),
+            };
+            format!(
+                "{who} is signed out since {} · {}",
+                day_label(l.since),
+                login_command(host, profile)
+            )
+        }))
+}
+
 /// PURE: what a person types to sign the login in again.
 pub fn login_command(host_alias: &str, profile: Option<&str>) -> String {
     match profile {
@@ -193,27 +222,46 @@ pub fn record(s: &Store, obs: &[Observation], now: i64) -> Result<Vec<Observatio
     Ok(went_out)
 }
 
+#[cfg(not(test))]
 static NOTED: Mutex<Vec<Observation>> = Mutex::new(Vec::new());
+
+/// Run `f` over the queue [`note_signed_out`] fills. Process-wide in the
+/// app; per thread under test (libtest runs each test on a thread of its
+/// own), so a test that builds a signed-out error never leaks a note into
+/// another test's poll.
+fn with_noted<R>(f: impl FnOnce(&mut Vec<Observation>) -> R) -> R {
+    #[cfg(not(test))]
+    {
+        f(&mut NOTED.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+    #[cfg(test)]
+    {
+        thread_local! {
+            static NOTED: Mutex<Vec<Observation>> = const { Mutex::new(Vec::new()) };
+        }
+        NOTED.with(|q| f(&mut q.lock().unwrap_or_else(|e| e.into_inner())))
+    }
+}
 
 /// A headless run on `host_alias` under `profile` was refused for want of a
 /// login: remember it for the next pass ([`drain_noted`]). No store at hand
 /// where that is found, so it waits here; bounded, the oldest dropped.
 pub fn note_signed_out(host_alias: &str, profile: Option<&str>) {
-    let mut q = NOTED.lock().unwrap_or_else(|e| e.into_inner());
-    if q.len() >= NOTED_MAX {
-        q.remove(0);
-    }
-    q.push(Observation {
-        host_alias: host_alias.to_string(),
-        profile: profile.map(str::to_string),
-        signed_out: true,
+    with_noted(|q| {
+        if q.len() >= NOTED_MAX {
+            q.remove(0);
+        }
+        q.push(Observation {
+            host_alias: host_alias.to_string(),
+            profile: profile.map(str::to_string),
+            signed_out: true,
+        });
     });
 }
 
 /// Record what [`note_signed_out`] queued.
 pub fn drain_noted(s: &Store, now: i64) {
-    let obs: Vec<Observation> =
-        std::mem::take(&mut *NOTED.lock().unwrap_or_else(|e| e.into_inner()));
+    let obs: Vec<Observation> = with_noted(std::mem::take);
     if obs.is_empty() {
         return;
     }
@@ -222,12 +270,47 @@ pub fn drain_noted(s: &Store, now: i64) {
     }
 }
 
+/// Record a recheck of the login `profile` on `host_alias`: what it saw,
+/// and — when it saw nothing of that login (an SSH timeout, a parse
+/// failure, a missing binary) — that it was looked at all, so the login
+/// waits [`RECHECK_EVERY_SECS`] like any other instead of being picked
+/// again every poll ahead of the account's other signed-out logins.
+pub fn record_recheck(
+    s: &Store,
+    host_alias: &str,
+    profile: Option<&str>,
+    obs: &[Observation],
+    now: i64,
+) -> Result<(), IpcError> {
+    record(s, obs, now)?;
+    let seen = obs
+        .iter()
+        .any(|o| o.host_alias == host_alias && o.profile.as_deref() == profile);
+    if seen {
+        return Ok(());
+    }
+    let Some(row) = s.get_host_row(host_alias)? else {
+        return Ok(());
+    };
+    let mut next = row.signed_out_logins;
+    let Some(l) = next.iter_mut().find(|l| l.profile.as_deref() == profile) else {
+        return Ok(());
+    };
+    l.checked_at = now;
+    s.set_host_signed_out_logins(host_alias, &next)?;
+    Ok(())
+}
+
 /// PURE: the signed-out login on `hosts` to ask again now, if any: one on
 /// account `account_uuid`, on a reachable host, not looked at for
 /// [`RECHECK_EVERY_SECS`]; the longest unchecked first. Returned as a host
 /// row narrowed to that one login, so a usage fetch over it asks that
-/// login alone.
-pub fn recheck_due(hosts: &[HostRow], account_uuid: &str, now: i64) -> Option<HostRow> {
+/// login alone, with the login's profile (`None` = the host's own).
+pub fn recheck_due(
+    hosts: &[HostRow],
+    account_uuid: &str,
+    now: i64,
+) -> Option<(HostRow, Option<String>)> {
     hosts
         .iter()
         .filter(|h| h.reachable && !h.hidden)
@@ -235,7 +318,7 @@ pub fn recheck_due(hosts: &[HostRow], account_uuid: &str, now: i64) -> Option<Ho
         .filter(|(_, l)| now - l.checked_at >= RECHECK_EVERY_SECS)
         .filter(|(h, l)| login_account(h, l.profile.as_deref()) == Some(account_uuid))
         .min_by_key(|(_, l)| l.checked_at)
-        .map(|(h, l)| narrowed(h, l.profile.as_deref()))
+        .map(|(h, l)| (narrowed(h, l.profile.as_deref()), l.profile.clone()))
 }
 
 /// The account the login `profile` on `h` is on.
@@ -375,13 +458,75 @@ mod tests {
             checked_at: 0,
         }];
         assert!(recheck_due(std::slice::from_ref(&h), "A", 10_000).is_none());
-        let n = recheck_due(std::slice::from_ref(&h), "B", 10_000).expect("due");
+        let (n, profile) = recheck_due(std::slice::from_ref(&h), "B", 10_000).expect("due");
+        assert_eq!(profile.as_deref(), Some("work"));
         assert_eq!(n.account_uuid, None);
         assert_eq!(n.claude_profiles.as_ref().map(Vec::len), Some(1));
         assert!(
             recheck_due(std::slice::from_ref(&h), "B", 100).is_none(),
             "checked recently"
         );
+    }
+
+    /// A recheck that saw nothing of its login still counts as a look, so
+    /// the next poll asks the account's other signed-out login.
+    #[test]
+    fn an_inconclusive_recheck_moves_on_to_the_next_login() {
+        let s = Store::open_in_memory().unwrap();
+        s.insert_host("htz", Some("htz")).unwrap();
+        record(
+            &s,
+            &[obs("htz", None, true), obs("htz", Some("work"), true)],
+            0,
+        )
+        .unwrap();
+        record(&s, &[obs("htz", Some("work"), true)], 10).unwrap();
+        let mut h = s.get_host_row("htz").unwrap().unwrap();
+        h.reachable = true;
+        h.hidden = false;
+        h.account_uuid = Some("A".into());
+        h.claude_profiles = Some(vec![crate::store::HostProfileRow {
+            name: "work".into(),
+            account_uuid: Some("A".into()),
+            email: None,
+        }]);
+        let now = 10_000;
+        let (_, first) = recheck_due(std::slice::from_ref(&h), "A", now).expect("due");
+        assert_eq!(first, None, "the longest unchecked first");
+        // The fetch failed for another reason: no observation at all.
+        record_recheck(&s, "htz", first.as_deref(), &[], now).unwrap();
+        h.signed_out_logins = s.get_host_row("htz").unwrap().unwrap().signed_out_logins;
+        let own = h
+            .signed_out_logins
+            .iter()
+            .find(|l| l.profile.is_none())
+            .unwrap();
+        assert_eq!((own.since, own.checked_at), (0, now), "still signed out");
+        let (_, next) = recheck_due(std::slice::from_ref(&h), "A", now).expect("due");
+        assert_eq!(next.as_deref(), Some("work"));
+    }
+
+    /// The F6 path end to end: a headless run refused for want of a login
+    /// is on its host row after the next pass drains the notes.
+    #[test]
+    fn a_refused_headless_run_is_recorded_on_its_host_row() {
+        let s = Store::open_in_memory().unwrap();
+        s.insert_host("lh-refused", Some("lh-refused")).unwrap();
+        let e = crate::service::claude_print::signed_out_error("lh-refused", Some("work"));
+        assert!(!e.message.is_empty());
+        drain_noted(&s, 42);
+        let row = s.get_host_row("lh-refused").unwrap().unwrap();
+        assert!(is_signed_out(&row, Some("work")));
+        assert_eq!(row.signed_out_logins[0].since, 42);
+        // Drained: a second pass records nothing new.
+        s.set_host_signed_out_logins("lh-refused", &[]).unwrap();
+        drain_noted(&s, 50);
+        assert!(s
+            .get_host_row("lh-refused")
+            .unwrap()
+            .unwrap()
+            .signed_out_logins
+            .is_empty());
     }
 
     #[test]

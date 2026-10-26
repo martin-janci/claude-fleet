@@ -388,14 +388,33 @@ pub fn verification(
     item: &WorkItemRow,
     now: i64,
 ) -> Result<Option<Verification>, IpcError> {
+    verification_with(s, item, None, now)
+}
+
+/// [`verification`], reusing `recorded` (the item's
+/// `latest_verifications`) when the caller already read them, as
+/// `graph::build` does for an implemented item.
+pub fn verification_with(
+    s: &Store,
+    item: &WorkItemRow,
+    recorded: Option<&[VerificationRow]>,
+    now: i64,
+) -> Result<Option<Verification>, IpcError> {
     let lines = lines_for(s, item)?;
     if lines.is_empty() {
         return Ok(None);
     }
-    let recorded = s.latest_verifications(item.id)?;
+    let read;
+    let recorded = match recorded {
+        Some(r) => r,
+        None => {
+            read = s.latest_verifications(item.id)?;
+            &read[..]
+        }
+    };
     let checks = lines
         .iter()
-        .map(|l| check_line(s, item, l, &recorded, now))
+        .map(|l| check_line(s, item, l, recorded, now))
         .collect::<Result<Vec<_>, _>>()?;
     let state = if checks.iter().any(|c| c.state == "fail") {
         "failed"
@@ -410,12 +429,7 @@ pub fn verification(
     }))
 }
 
-fn now_unix() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
+use crate::store::now_unix;
 
 /// What `done_when` and `verify` answer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -456,6 +470,10 @@ pub fn set_done_when(
 /// `work_link { action: verify, item_id, line, ok, note? }`: a person
 /// records a check of one of the item's lines. A person's act, as accepting
 /// a proposal is: an agent never verifies, its own work or anybody's.
+///
+/// `line: "run evidence"` (`gate::EVIDENCE_LINE`) is the completion gate's
+/// override for an implement run that left no git evidence: `ok: true`
+/// needs a `note`, the reason, and holds until a newer implement run.
 pub fn verify(
     args: &WorkLinkArgs,
     store: &Mutex<Store>,
@@ -477,7 +495,23 @@ pub fn verify(
     let s = lock(store)?;
     let item = visible_item(&s, scope, item_id)?;
     require_mission_change(&s, scope, item_id)?;
-    if !lines_for(&s, &item)?.iter().any(|l| l == line) {
+    let own_line = lines_for(&s, &item)?.iter().any(|l| l == line);
+    if !own_line && line == super::gate::EVIDENCE_LINE {
+        // The completion gate's evidence override: a person accepts an
+        // implement run that left no commits or files, and says why.
+        if s.latest_item_task(item_id, "implement")?.is_none() {
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                format!("work item {item_id} has no implement run to vouch for"),
+            ));
+        }
+        if ok && args.note.as_deref().is_none_or(|n| n.trim().is_empty()) {
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                "overriding the run evidence needs a note: the reason",
+            ));
+        }
+    } else if !own_line {
         return Err(IpcError::new(
             codes::E_INVALID,
             format!("work item {item_id} has no done_when line {line:?}"),

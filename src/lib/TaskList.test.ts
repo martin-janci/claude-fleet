@@ -1,6 +1,6 @@
 // The Work tab's List layout (design 2026-09-29): one `work_tree` read with
 // the current filters (archived on), To do / Doing / Done, + New task, Start.
-import { render, screen, fireEvent } from '@testing-library/svelte';
+import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { tick } from 'svelte';
 import { get } from 'svelte/store';
@@ -11,6 +11,7 @@ import TaskList from './TaskList.svelte';
 import { task } from './work_view_fixture';
 import { workViewFilters, type WorkTreePage } from './work_view';
 import { sessions } from './sessions';
+import { bumpWorkChanged } from './work';
 import { session } from './hosts_fixture';
 
 const NOW = Math.floor(Date.now() / 1000);
@@ -103,6 +104,32 @@ describe('TaskList', () => {
     const args = (calls('work_tree')[0][1] as { args: { filters: Record<string, unknown> } }).args.filters;
     expect(args.tracker).toBe(1);
     expect(args.archived).toBe(true);
+  });
+
+  // Review w17-8: filtered-empty has a way out; an empty fleet is a first run.
+  it('a filter that hides every task names it and offers Clear filters', async () => {
+    (invoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => (cmd === 'work_tree' ? { ...page, tasks: [], total: 0 } : null));
+    render(TaskList);
+    await flush();
+    expect(screen.getByTestId('task-list-empty').textContent).toContain('No tasks match');
+    await fireEvent.click(screen.getByTestId('task-list-clear'));
+    expect(get(workViewFilters)).toEqual({});
+    await flush();
+    expect(screen.getByTestId('task-list-empty').textContent).toContain('No tasks yet');
+    expect(screen.queryByTestId('task-list-clear')).toBeNull();
+  });
+
+  // Review w17-7: a failed background refresh keeps the tasks shown.
+  it('a failed refresh keeps the list, with a Retry line', async () => {
+    render(TaskList);
+    await flush();
+    (invoke as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      throw { code: 'E_HUB_TIMEOUT', message: 'slow' };
+    });
+    bumpWorkChanged();
+    await waitFor(() => expect(screen.getByTestId('task-list-refresh-error')).toBeTruthy(), { timeout: 2000 });
+    expect(screen.getByTestId('task-section-todo').textContent).toContain('Write notes');
+    expect(screen.queryByTestId('task-list-error')).toBeNull();
   });
 
   it('re-reads when the filters change', async () => {

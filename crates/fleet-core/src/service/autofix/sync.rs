@@ -2,7 +2,7 @@
 
 use super::{detector_of, Finding};
 use crate::ipc_error::IpcError;
-use crate::store::{NewAutofixFinding, Store};
+use crate::store::{AutofixRow, NewAutofixFinding, Store};
 
 /// How long a fix has to make its finding disappear before it counts as failed.
 pub const AUTOFIX_VERIFY_SECS: i64 = 600;
@@ -36,6 +36,37 @@ pub fn sync(
     scope: Scope<'_>,
     now: i64,
 ) -> Result<SyncOutcome, IpcError> {
+    sync_with(s, found, scope, &Judge::default(), now)
+}
+
+/// What a sync may conclude about a live row the scan did not report.
+#[derive(Default)]
+pub struct Judge<'a> {
+    /// Hosts no detector could judge this pass (an unreachable host): their
+    /// rows are left as they are, since a finding that was not looked for is
+    /// not a finding that went away.
+    pub unjudged_hosts: std::collections::BTreeSet<&'a str>,
+    /// A row that dropped out for a reason other than a fix (its detector is
+    /// off, its host or session is gone). It is `retired`, not `cleared`, so
+    /// it never shows as fixed. `None`: every dropped row is `cleared`.
+    #[allow(clippy::type_complexity)]
+    pub retire: Option<&'a dyn Fn(&AutofixRow) -> bool>,
+}
+
+/// [`sync`], with a [`Judge`] saying which dropped rows were not judged
+/// this pass and which went away without being fixed.
+///
+/// A row is cleared only when the scan could have reported it and did not,
+/// and never while its dismissal runs: a finding that drops out of one scan
+/// for an unrelated reason would otherwise come back as a new, undismissed
+/// episode (and a Safe fix the person put off would run by itself).
+pub fn sync_with(
+    s: &Store,
+    found: &[Finding],
+    scope: Scope<'_>,
+    judge: &Judge<'_>,
+    now: i64,
+) -> Result<SyncOutcome, IpcError> {
     let mut out = SyncOutcome::default();
     let mut seen = std::collections::BTreeSet::new();
     for f in found {
@@ -65,6 +96,21 @@ pub fn sync(
             continue;
         }
         if !seen.contains(&row.id) {
+            // Retired first: a switched-off detector or a removed host says
+            // nothing more about the row, whether or not it can be reached.
+            if judge.retire.is_some_and(|r| r(&row)) {
+                s.set_autofix_state(row.id, "retired", None, now)?;
+                continue;
+            }
+            let unjudged = row
+                .host_alias
+                .as_deref()
+                .is_some_and(|h| judge.unjudged_hosts.contains(h));
+            let dismissed =
+                row.state == "dismissed" && row.dismissed_until.is_some_and(|u| u > now);
+            if unjudged || dismissed {
+                continue;
+            }
             s.set_autofix_state(row.id, "cleared", None, now)?;
             out.cleared.push(row.id);
             continue;
@@ -167,11 +213,62 @@ mod tests {
     }
 
     #[test]
+    fn a_dismissal_outlives_a_scan_that_missed_the_finding() {
+        let s = Store::open_in_memory().unwrap();
+        let id = sync(&s, &[f("k")], Scope::All, 10).unwrap().opened[0];
+        s.dismiss_autofix_finding(id, 50).unwrap();
+        let o = sync(&s, &[], Scope::All, 20).unwrap();
+        assert!(o.cleared.is_empty());
+        let o = sync(&s, &[f("k")], Scope::All, 30).unwrap();
+        assert!(o.opened.is_empty(), "the same episode, still dismissed");
+        assert_eq!(s.autofix_finding(id).unwrap().unwrap().state, "dismissed");
+        // Once the dismissal ends, a finding that is gone is cleared.
+        let o = sync(&s, &[], Scope::All, 60).unwrap();
+        assert_eq!(o.cleared, vec![id]);
+    }
+
+    #[test]
+    fn an_unjudged_hosts_rows_are_left_alone() {
+        let s = Store::open_in_memory().unwrap();
+        let mut on_h1 = f("host.hooks_silent");
+        on_h1.subject = "host:h1".into();
+        on_h1.host_alias = Some("h1".into());
+        let id = sync(&s, &[on_h1], Scope::All, 10).unwrap().opened[0];
+        s.mark_autofix_attempt(id, 15).unwrap();
+        let judge = Judge {
+            unjudged_hosts: std::collections::BTreeSet::from(["h1"]),
+            ..Default::default()
+        };
+        let o = sync_with(&s, &[], Scope::All, &judge, 20).unwrap();
+        assert!(o.cleared.is_empty(), "not looked at is not fixed");
+        assert_eq!(s.autofix_finding(id).unwrap().unwrap().state, "verifying");
+        let o = sync(&s, &[], Scope::All, 30).unwrap();
+        assert_eq!(o.cleared, vec![id], "judged and gone: cleared");
+    }
+
+    #[test]
     fn a_verifying_row_that_vanished_is_cleared() {
         let s = Store::open_in_memory().unwrap();
         let id = sync(&s, &[f("k")], Scope::All, 10).unwrap().opened[0];
         s.mark_autofix_attempt(id, 100).unwrap();
         let o = sync(&s, &[], Scope::All, 101).unwrap();
         assert_eq!(o.cleared, vec![id]);
+    }
+
+    #[test]
+    fn a_retired_row_is_not_cleared_and_never_counts_as_fixed() {
+        let s = Store::open_in_memory().unwrap();
+        let id = sync(&s, &[f("k")], Scope::All, 10).unwrap().opened[0];
+        s.mark_autofix_attempt(id, 15).unwrap();
+        let retire = |r: &AutofixRow| r.kind == "k";
+        let judge = Judge {
+            retire: Some(&retire),
+            ..Default::default()
+        };
+        let o = sync_with(&s, &[], Scope::All, &judge, 20).unwrap();
+        assert!(o.cleared.is_empty());
+        assert_eq!(s.autofix_finding(id).unwrap().unwrap().state, "retired");
+        assert!(s.live_autofix_findings().unwrap().is_empty());
+        assert!(s.recently_fixed_autofix_findings(0).unwrap().is_empty());
     }
 }

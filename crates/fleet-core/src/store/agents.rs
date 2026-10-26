@@ -496,9 +496,14 @@ impl Store {
                 error_kind,
                 error,
             } => {
+                // A deferral (a cooldown) did no work, so it gives back the
+                // attempt its claim counted: the retry cap and the backoff
+                // count real runs only.
                 self.conn.execute(
                     "UPDATE agent_jobs SET state = 'pending', next_attempt_at = ?2, \
                        error_kind = ?3, error = ?4, lease_until = NULL, \
+                       attempts = CASE WHEN ?3 = 'deferred' THEN MAX(attempts - 1, 0) \
+                                  ELSE attempts END, \
                        cost_micros = cost_micros + ?5, updated_at = ?6 WHERE id = ?1",
                     params![id, at, error_kind, error, cost_micros, now],
                 )?;
@@ -524,6 +529,17 @@ impl Store {
     /// How many runs of `agent` on `subject` ended (done or needing a
     /// person) since `since`, `except_job` left out: the fleet agents' loop
     /// guard.
+    /// What rule `rule_id`'s jobs cost that were last written at `since`
+    /// or later, in micro-USD (a job's cost lands when it is finished).
+    pub fn agent_rule_cost_since(&self, rule_id: i64, since: i64) -> Result<i64, rusqlite::Error> {
+        self.conn.query_row(
+            "SELECT COALESCE(SUM(cost_micros), 0) FROM agent_jobs \
+             WHERE rule_id = ?1 AND updated_at >= ?2",
+            params![rule_id, since],
+            |r| r.get(0),
+        )
+    }
+
     pub fn count_agent_subject_runs(
         &self,
         agent: &str,
@@ -552,6 +568,46 @@ impl Store {
             "SELECT MAX(updated_at) FROM agent_jobs \
              WHERE agent = ?1 AND subject = ?2 AND id <> ?3 AND state IN ('done', 'needs_person')",
             params![agent, subject, except_job],
+            |r| r.get(0),
+        )
+    }
+
+    /// When the newest finished run (`done` or `needs_person`) of another
+    /// job of rule `rule_id` on `subject` ended: a fleet agent's cooldown,
+    /// per instance.
+    pub fn last_agent_rule_subject_run(
+        &self,
+        agent: &str,
+        rule_id: i64,
+        subject: &str,
+        except_job: i64,
+    ) -> Result<Option<i64>, rusqlite::Error> {
+        // `agent, subject` first: the `agent_jobs_subject` index.
+        self.conn.query_row(
+            "SELECT MAX(updated_at) FROM agent_jobs \
+             WHERE agent = ?1 AND subject = ?2 AND rule_id = ?3 AND id <> ?4 \
+               AND state IN ('done', 'needs_person')",
+            params![agent, subject, rule_id, except_job],
+            |r| r.get(0),
+        )
+    }
+
+    /// Whether a later job of rule `rule_id` on `subject` than `job_id` is
+    /// still pending: the newer trigger that supersedes a job waiting out a
+    /// fleet agent's cooldown.
+    pub fn newer_pending_agent_rule_job(
+        &self,
+        agent: &str,
+        rule_id: i64,
+        subject: &str,
+        job_id: i64,
+    ) -> Result<bool, rusqlite::Error> {
+        // `agent, subject` first: the `agent_jobs_subject` index.
+        self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM agent_jobs \
+             WHERE agent = ?1 AND subject = ?2 AND rule_id = ?3 AND id > ?4 \
+               AND state = 'pending')",
+            params![agent, subject, rule_id, job_id],
             |r| r.get(0),
         )
     }
@@ -673,7 +729,8 @@ impl Store {
             .join(", ");
         let mut stmt = self.conn.prepare(&format!(
             "SELECT j.agent, {cols} FROM agent_actions a JOIN agent_jobs j ON j.id = a.job_id \
-             WHERE a.state = 'approved' ORDER BY a.decided_at, a.id LIMIT ?1"
+             WHERE a.state = 'approved' AND a.executed_at IS NULL \
+             ORDER BY a.decided_at, a.id LIMIT ?1"
         ))?;
         let rows = stmt.query_map(params![limit as i64], |r| {
             let agent: String = r.get(0)?;
@@ -694,6 +751,31 @@ impl Store {
             ))
         })?;
         rows.collect()
+    }
+
+    /// Claim an approved action for its executor: stamps `executed_at`
+    /// while it is still `approved` and unclaimed. `false` when another pass
+    /// (or another process on this store) has it already. A claimed action
+    /// is never handed out again, so an executor's side effect (a review
+    /// posted, a ticket moved) happens at most once, even across a crash.
+    pub fn claim_agent_action(&self, id: i64, now: i64) -> Result<bool, rusqlite::Error> {
+        Ok(self.conn.execute(
+            "UPDATE agent_actions SET executed_at = ?2 \
+             WHERE id = ?1 AND state = 'approved' AND executed_at IS NULL",
+            params![id, now],
+        )? == 1)
+    }
+
+    /// Fail the actions claimed before `before` that never got an answer:
+    /// the process carrying them out stopped mid-way, so whether they ran is
+    /// unknown. Said so, rather than run again. Returns how many.
+    pub fn fail_abandoned_agent_actions(&self, before: i64) -> Result<usize, rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE agent_actions SET state = 'failed', \
+               error = 'stopped while it was being carried out; check whether it ran' \
+             WHERE state = 'approved' AND executed_at IS NOT NULL AND executed_at < ?1",
+            params![before],
+        )
     }
 
     /// Record what the executor did with an approved action: `executed`,
@@ -727,6 +809,36 @@ impl Store {
              ORDER BY created_at DESC, id DESC LIMIT ?2"
         ))?;
         let rows = stmt.query_map(params![state, limit as i64], action_row)?;
+        rows.collect()
+    }
+
+    /// How many actions are in `state`, uncapped: `status` lists at most
+    /// [`crate::service::agents::admin::STATUS_PENDING_MAX`] pending ones,
+    /// and the Inbox badge counts this.
+    pub fn count_agent_actions(&self, state: &str) -> Result<u64, rusqlite::Error> {
+        self.conn.query_row(
+            "SELECT COUNT(*) FROM agent_actions WHERE state = ?1",
+            params![state],
+            |r| r.get::<_, i64>(0).map(|n| n as u64),
+        )
+    }
+
+    /// The actions a person approved that were carried out (`executed`,
+    /// with what they made in `error`) or failed since `since`, newest
+    /// first: what the Inbox shows after Approve. A rule's own (`act`)
+    /// actions are left out.
+    pub fn recent_decided_agent_actions(
+        &self,
+        since: i64,
+        limit: usize,
+    ) -> Result<Vec<AgentActionRow>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {ACTION_COLS} FROM agent_actions \
+             WHERE state IN ('executed', 'failed') AND executed_at >= ?1 \
+               AND decided_by IS NOT NULL AND decided_by NOT LIKE 'rule:%' \
+             ORDER BY executed_at DESC, id DESC LIMIT ?2"
+        ))?;
+        let rows = stmt.query_map(params![since, limit as i64], action_row)?;
         rows.collect()
     }
 
@@ -920,6 +1032,44 @@ mod tests {
     }
 
     #[test]
+    fn a_deferral_does_not_use_up_an_attempt() {
+        let s = Store::open_in_memory().unwrap();
+        let rid = s.grant_agent_rule(&rule("review", "gh:o/r")).unwrap();
+        s.record_agent_poll(rid, 1000, None, &[job(rid, "gh:o/r#1", "k1")])
+            .unwrap();
+        for at in [1100, 1200] {
+            let j = &s.claim_agent_jobs(&["review"], at - 100, 1, 60).unwrap()[0];
+            assert_eq!(j.attempts, 1, "each deferral gave its attempt back");
+            s.finish_agent_job(
+                j.id,
+                &AgentJobEnd::Retry {
+                    at,
+                    error_kind: "deferred".into(),
+                    error: "cooldown".into(),
+                },
+                0,
+                at - 100,
+            )
+            .unwrap();
+        }
+        let j = &s.claim_agent_jobs(&["review"], 1200, 1, 60).unwrap()[0];
+        assert_eq!(j.attempts, 1, "the first real run is attempt 1");
+        s.finish_agent_job(
+            j.id,
+            &AgentJobEnd::Retry {
+                at: 1300,
+                error_kind: "transient".into(),
+                error: "timeout".into(),
+            },
+            0,
+            1210,
+        )
+        .unwrap();
+        let j = &s.claim_agent_jobs(&["review"], 1300, 1, 60).unwrap()[0];
+        assert_eq!(j.attempts, 2, "a real failure still counts");
+    }
+
+    #[test]
     fn a_finished_job_keeps_its_answer_and_a_retry_waits() {
         let s = Store::open_in_memory().unwrap();
         let rid = s.grant_agent_rule(&rule("review", "gh:o/r")).unwrap();
@@ -1013,6 +1163,13 @@ mod tests {
                 .collect::<Vec<_>>(),
             [("review", aid), ("review", auto)]
         );
+        assert!(s.claim_agent_action(aid, 1350).unwrap());
+        assert!(!s.claim_agent_action(aid, 1351).unwrap(), "claimed once");
+        assert_eq!(
+            s.approved_agent_actions(10).unwrap().len(),
+            1,
+            "a claimed action is not handed out again"
+        );
         s.finish_agent_action(aid, "executed", None, 1400).unwrap();
         s.finish_agent_action(auto, "failed", Some("422"), 1400)
             .unwrap();
@@ -1023,5 +1180,48 @@ mod tests {
             (failed.error.as_deref(), failed.executed_at),
             (Some("422"), Some(1400))
         );
+    }
+
+    #[test]
+    fn only_a_claim_older_than_the_cutoff_is_failed_as_abandoned() {
+        let s = Store::open_in_memory().unwrap();
+        let rid = s.grant_agent_rule(&rule("review", "gh:o/r")).unwrap();
+        s.record_agent_poll(rid, 1000, None, &[job(rid, "gh:o/r#1", "k1")])
+            .unwrap();
+        let jid = s.list_agent_jobs(None, 1).unwrap()[0].id;
+        let claimed = s
+            .insert_approved_agent_action(jid, "post_review", "{}", "rule:act", 1000)
+            .unwrap();
+        let waiting = s
+            .insert_approved_agent_action(jid, "post_review", "{}", "rule:act", 1000)
+            .unwrap();
+        assert!(s.claim_agent_action(claimed, 2000).unwrap());
+        let state = |id: i64| {
+            let a = s
+                .list_agent_actions(None, 10)
+                .unwrap()
+                .into_iter()
+                .find(|a| a.id == id)
+                .unwrap();
+            (a.state, a.error)
+        };
+
+        assert_eq!(s.fail_abandoned_agent_actions(2000).unwrap(), 0);
+        assert_eq!(
+            state(claimed),
+            ("approved".into(), None),
+            "claimed at the cutoff"
+        );
+        assert_eq!(s.fail_abandoned_agent_actions(2001).unwrap(), 1);
+        let (st, err) = state(claimed);
+        assert_eq!(st, "failed");
+        assert!(err.unwrap().contains("check whether it ran"));
+        assert_eq!(
+            state(waiting),
+            ("approved".into(), None),
+            "an unclaimed action is never abandoned"
+        );
+        assert_eq!(s.fail_abandoned_agent_actions(i64::MAX).unwrap(), 0);
+        assert_eq!(state(waiting).0, "approved");
     }
 }

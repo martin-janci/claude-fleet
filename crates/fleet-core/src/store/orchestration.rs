@@ -123,6 +123,14 @@ pub struct MissionPolicy {
     /// A continuous mission's timer (O8): wake at least this often.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wake_every_secs: Option<u64>,
+    /// How its tasks run (lanes design 2026-10-23 §2.3): `item`, each run
+    /// in a session and checkout of its own; `lane`, a lane's tasks one
+    /// after another in one lead session on the lane's branch. Changes only
+    /// while the mission is not running.
+    pub execution: String,
+    /// In `lane` execution, a lead session hands over to a fresh one after
+    /// this many tasks (§3.5): the checkout stays, the context starts over.
+    pub lane_relay_after: u32,
 }
 
 impl Default for MissionPolicy {
@@ -138,9 +146,14 @@ impl Default for MissionPolicy {
             planner_model: None,
             planner_host: None,
             wake_every_secs: None,
+            execution: "item".into(),
+            lane_relay_after: 4,
         }
     }
 }
+
+/// How a mission's tasks run ([`MissionPolicy::execution`]).
+pub const MISSION_EXECUTIONS: [&str; 2] = ["item", "lane"];
 
 /// The policy's bounds.
 pub const POLICY_MAX_PARALLEL: u32 = 8;
@@ -149,6 +162,7 @@ pub const POLICY_MAX_TASKS: u32 = 300;
 pub const POLICY_MAX_PLANNER_RUNS: u32 = 30;
 /// A continuous mission's timer is at least this.
 pub const POLICY_MIN_WAKE_SECS: u64 = 300;
+pub const POLICY_MAX_LANE_RELAY: u32 = 20;
 
 /// PURE: a policy within its bounds, or `E_INVALID` naming the field.
 pub fn check_policy(p: &MissionPolicy) -> Result<MissionPolicy, IpcError> {
@@ -173,6 +187,15 @@ pub fn check_policy(p: &MissionPolicy) -> Result<MissionPolicy, IpcError> {
     }
     if !matches!(p.task_creation.as_str(), "propose" | "auto") {
         return Err(bad("task_creation", "propose or auto".into()));
+    }
+    if !MISSION_EXECUTIONS.contains(&p.execution.as_str()) {
+        return Err(bad("execution", "item or lane".into()));
+    }
+    if !(1..=POLICY_MAX_LANE_RELAY).contains(&p.lane_relay_after) {
+        return Err(bad(
+            "lane_relay_after",
+            format!("1 to {POLICY_MAX_LANE_RELAY}"),
+        ));
     }
     if p.wake_every_secs.is_some_and(|w| w < POLICY_MIN_WAKE_SECS) {
         return Err(bad(
@@ -746,6 +769,22 @@ impl Store {
             Some(pol) => check_policy(pol)?,
             None => before.policy.clone(),
         };
+        // Lanes design §2.3: a running mission does not switch how its tasks
+        // run under its open runs.
+        if policy.execution != before.policy.execution {
+            let open: i64 = self.conn.query_row(
+                "SELECT COUNT(*) FROM tasks t JOIN work_items i ON i.id = t.work_item_id \
+                 WHERE i.orchestration_project_id = ?1 AND t.state IN ('queued','running')",
+                [id],
+                |r| r.get(0),
+            )?;
+            if before.state == "active" || open > 0 {
+                return Err(invalid(format!(
+                    "{} changes how its tasks run only while it is not running and has no open runs",
+                    before.name
+                )));
+            }
+        }
         let policy_json = serde_json::to_string(&policy)
             .map_err(|e| IpcError::new(codes::E_SERIALIZE, e.to_string()))?;
         let tx = self.conn.unchecked_transaction()?;
@@ -766,6 +805,17 @@ impl Store {
                 id
             ],
         )?;
+        // A grant until the mission completes ends when it stops being
+        // finite (TASK-293): switched back later, it needs a new signature
+        // rather than reviving the old level and budget.
+        if before.mode == "finite" && mode != "finite" {
+            tx.execute(
+                "UPDATE orchestration_grants SET revoked_at = ?1 \
+                 WHERE orchestration_project_id = ?2 AND revoked_at IS NULL \
+                   AND expires_at >= ?3",
+                rusqlite::params![now_unix(), id, super::GRANT_UNTIL_DONE_AT],
+            )?;
+        }
         let mut changed = Vec::new();
         if name != before.name {
             changed.push("name");
@@ -842,6 +892,16 @@ impl Store {
              WHERE id = ?5",
             rusqlite::params![to, started_at, finished_at, now, id],
         )?;
+        // A grant until the mission completes ends with it (TASK-293): a
+        // finished mission reopened as paused starts without one.
+        if finished_at.is_some() {
+            tx.execute(
+                "UPDATE orchestration_grants SET revoked_at = ?1 \
+                 WHERE orchestration_project_id = ?2 AND revoked_at IS NULL \
+                   AND expires_at >= ?3",
+                rusqlite::params![now, id, super::GRANT_UNTIL_DONE_AT],
+            )?;
+        }
         self.insert_mission_event(
             id,
             &NewMissionEvent {
@@ -935,7 +995,9 @@ impl Store {
     }
 
     /// Add a repo to a mission's allow-list (or change its role), or remove
-    /// it.
+    /// it. Adding one widens what the mission may do, so it voids the grants
+    /// signed for the old plan ([`Self::bump_plan_version`]); a role change
+    /// or a removal does not.
     pub fn set_mission_repo(
         &self,
         id: i64,
@@ -955,6 +1017,7 @@ impl Store {
             }
         }
         let tx = self.conn.unchecked_transaction()?;
+        let mut added = false;
         let changed = if on {
             if self.get_project(project_id)?.is_none() {
                 return Err(IpcError::new(
@@ -962,6 +1025,12 @@ impl Store {
                     format!("project {project_id} not found"),
                 ));
             }
+            added = !tx.query_row(
+                "SELECT EXISTS (SELECT 1 FROM orchestration_project_repos \
+                 WHERE orchestration_project_id = ?1 AND project_id = ?2)",
+                rusqlite::params![id, project_id],
+                |r| r.get::<_, bool>(0),
+            )?;
             tx.execute(
                 "INSERT INTO orchestration_project_repos \
                    (orchestration_project_id, project_id, role, created_at) \
@@ -976,6 +1045,9 @@ impl Store {
                 rusqlite::params![id, project_id],
             )?
         };
+        if added {
+            self.bump_plan_version(id)?;
+        }
         if changed > 0 {
             self.touch_mission(id)?;
             self.insert_mission_event(
@@ -1048,11 +1120,15 @@ impl Store {
                     m.name
                 )));
             }
-            tx.execute(
+            let left = tx.execute(
                 "UPDATE work_items SET orchestration_project_id = NULL \
                  WHERE id = ?1 AND orchestration_project_id = ?2",
                 rusqlite::params![item_id, id],
-            )? > 0
+            )? > 0;
+            if left {
+                self.clear_item_lane(item_id)?;
+            }
+            left
         };
         if changed {
             self.touch_mission(id)?;
@@ -1115,7 +1191,7 @@ impl Store {
         Ok(())
     }
 
-    fn touch_mission(&self, id: i64) -> Result<(), IpcError> {
+    pub(super) fn touch_mission(&self, id: i64) -> Result<(), IpcError> {
         self.conn.execute(
             "UPDATE orchestration_projects SET updated_at = ?1, version = version + 1 \
              WHERE id = ?2",
@@ -1299,24 +1375,49 @@ impl Store {
              WHERE orchestration_project_id = ?1 AND (?2 IS NULL OR id < ?2) \
              ORDER BY at DESC, id DESC LIMIT ?3",
         )?;
-        let rows = stmt.query_map(rusqlite::params![id, before_id, limit as i64], |r| {
-            let payload: Option<String> = r.get(7)?;
-            Ok(MissionEventRow {
-                id: r.get(0)?,
-                at: r.get(1)?,
-                kind: r.get(2)?,
-                actor: r.get(3)?,
-                work_item_id: r.get(4)?,
-                task_id: r.get(5)?,
-                decision_id: r.get(6)?,
-                payload: payload.and_then(|p| serde_json::from_str(&p).ok()),
-            })
-        })?;
+        let rows = stmt.query_map(rusqlite::params![id, before_id, limit as i64], event_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// A mission's events of `kinds` alone, newest first, at most `limit`:
+    /// what a reader of a few kinds needs however busy the rest of the log
+    /// is (the planner's waits, review r8).
+    pub fn mission_events_of_kinds(
+        &self,
+        id: i64,
+        kinds: &[&str],
+        limit: usize,
+    ) -> Result<Vec<MissionEventRow>, IpcError> {
+        let kinds = serde_json::to_string(kinds).unwrap_or_else(|_| "[]".into());
+        let mut stmt = self.conn.prepare(
+            "SELECT id, at, kind, actor, work_item_id, task_id, decision_id, payload \
+             FROM orchestration_events \
+             WHERE orchestration_project_id = ?1 \
+               AND kind IN (SELECT value FROM json_each(?2)) \
+             ORDER BY at DESC, id DESC LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![id, kinds, limit as i64], event_row)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 }
 
-fn refuse_final(m: &MissionRow) -> Result<(), IpcError> {
+/// One `orchestration_events` row, selected as `id, at, kind, actor,
+/// work_item_id, task_id, decision_id, payload`.
+fn event_row(r: &rusqlite::Row) -> rusqlite::Result<MissionEventRow> {
+    let payload: Option<String> = r.get(7)?;
+    Ok(MissionEventRow {
+        id: r.get(0)?,
+        at: r.get(1)?,
+        kind: r.get(2)?,
+        actor: r.get(3)?,
+        work_item_id: r.get(4)?,
+        task_id: r.get(5)?,
+        decision_id: r.get(6)?,
+        payload: payload.and_then(|p| serde_json::from_str(&p).ok()),
+    })
+}
+
+pub(super) fn refuse_final(m: &MissionRow) -> Result<(), IpcError> {
     if MISSION_FINAL_STATES.contains(&m.state.as_str()) {
         Err(invalid(format!(
             "{} is {}; a finished mission does not change",

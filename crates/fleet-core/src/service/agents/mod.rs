@@ -106,6 +106,9 @@ pub enum RunOutcome {
     },
     /// Nothing to do after all (a draft, a diff too large).
     Skipped { reason: String },
+    /// Not yet: the job goes back to pending until `at` (a cooldown), so
+    /// the trigger it carries is handled later rather than dropped.
+    Deferred { at: i64, reason: String },
     /// Finished, and a person has to look (an approval, a question).
     NeedsPerson {
         result: Option<String>,
@@ -144,6 +147,9 @@ pub trait AgentRunner: Send + Sync {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ActionResult {
     Executed,
+    /// It ran, and this line says what it made (`created task 42`,
+    /// `started fix-x on mercury`); kept on the row so the person sees it.
+    Done(String),
     /// It ran and failed; the reason is kept.
     Failed(String),
     /// It no longer applies (the head moved, the ticket closed); not run.
@@ -218,7 +224,8 @@ impl Registry {
 /// `attempts`-th run (counting this one). A permanent failure ends the
 /// job; `max_turns` gets one more try; a limit waits its fixed time; any
 /// other failure waits `RETRY_BASE_SECS · 2^(attempts-1)`. Past
-/// `max_retries` attempts a failure is final.
+/// `max_retries` attempts a failure is final. A deferral (`error_kind`
+/// "deferred") gives its attempt back when the store records it.
 pub fn plan_end(outcome: &RunOutcome, attempts: u32, max_retries: u32, now: i64) -> AgentJobEnd {
     match outcome {
         RunOutcome::Done { result, .. } => AgentJobEnd::Final {
@@ -232,6 +239,11 @@ pub fn plan_end(outcome: &RunOutcome, attempts: u32, max_retries: u32, now: i64)
             result: None,
             error_kind: None,
             error: Some(reason.clone()),
+        },
+        RunOutcome::Deferred { at, reason } => AgentJobEnd::Retry {
+            at: (*at).max(now),
+            error_kind: "deferred".into(),
+            error: reason.clone(),
         },
         RunOutcome::NeedsPerson { result, reason, .. } => AgentJobEnd::Final {
             state: "needs_person",
@@ -272,7 +284,7 @@ fn cost_of(outcome: &RunOutcome) -> i64 {
         RunOutcome::Done { cost_micros, .. }
         | RunOutcome::NeedsPerson { cost_micros, .. }
         | RunOutcome::Failed { cost_micros, .. } => *cost_micros,
-        RunOutcome::Skipped { .. } => 0,
+        RunOutcome::Skipped { .. } | RunOutcome::Deferred { .. } => 0,
     }
 }
 
@@ -433,6 +445,10 @@ pub async fn run_with(store: &Mutex<Store>, reg: &Registry, now: i64) -> usize {
 /// Most approved actions one pass carries out.
 pub const ACTIONS_PER_PASS: usize = 10;
 
+/// How long a claimed action may go without an answer before it is taken
+/// as abandoned (its process stopped mid-way) and failed, never re-run.
+pub const ACTION_ABANDONED_SECS: i64 = 3600;
+
 /// Carry out the approved actions (a person's approval, or an `act`
 /// rule's own): each by its agent's executor, recorded executed, failed or
 /// expired. An action whose agent has no executor waits. Returns how many
@@ -445,6 +461,10 @@ pub async fn execute_approved(store: &Mutex<Store>, reg: &Registry) -> usize {
         if crate::service::loops::paused(&s) {
             return 0;
         }
+        let before = crate::store::now_unix() - ACTION_ABANDONED_SECS;
+        if let Err(e) = s.fail_abandoned_agent_actions(before) {
+            tracing::warn!(error = %e, "[agents] failing abandoned actions failed");
+        }
         s.approved_agent_actions(ACTIONS_PER_PASS)
             .unwrap_or_default()
     };
@@ -453,9 +473,21 @@ pub async fn execute_approved(store: &Mutex<Store>, reg: &Registry) -> usize {
         let Some(exec) = reg.executor(&agent) else {
             continue;
         };
+        // Claimed before the side effect: a second pass, another process on
+        // this store, or a restart after a crash never carries it out again.
+        let claimed = match store.lock() {
+            Ok(s) => s
+                .claim_agent_action(action.id, crate::store::now_unix())
+                .unwrap_or(false),
+            Err(_) => return done,
+        };
+        if !claimed {
+            continue;
+        }
         let result = exec.execute(&action).await;
         let (state, error) = match &result {
             ActionResult::Executed => ("executed", None),
+            ActionResult::Done(line) => ("executed", Some(line.as_str())),
             ActionResult::Failed(e) => ("failed", Some(e.as_str())),
             ActionResult::Expired(e) => ("expired", Some(e.as_str())),
         };

@@ -379,10 +379,19 @@ pub const ORCHESTRATOR_ENABLED: &str = "orchestrator.enabled";
 pub const ORCHESTRATOR_MAX_LEVEL: &str = "orchestrator.max_level";
 /// F3: a mission's review and test runs as one headless `claude -p` run in
 /// the implementer's checkout (read-only tools, the test commands only)
-/// instead of an interactive session. Off by default.
+/// instead of an interactive session. On by default since lanes L4 (a
+/// lane task's review runs on a snapshot of its commit).
 pub const ORCHESTRATOR_HEADLESS_CHECKS: &str = "orchestrator.headless_checks";
 /// The model [`ORCHESTRATOR_HEADLESS_CHECKS`] runs (one of [`SUMMARY_MODELS`]).
 pub const ORCHESTRATOR_HEADLESS_MODEL: &str = "orchestrator.headless_model";
+/// A mission run's prompt asks a Claude worker to explore and to review
+/// its own diff through subagents (lanes design 2026-10-23, L1). On by
+/// default; off leaves the prompt as it was, for comparing the two.
+pub const ORCHESTRATOR_RUN_SUBAGENTS: &str = "orchestrator.run_subagents";
+/// The mission planner reads the mission's repository (Read, Grep, Glob in
+/// its checkout on the planner's host) before it decides, instead of
+/// planning from the snapshot alone (lanes design L1). Off by default.
+pub const ORCHESTRATOR_PLANNER_READS: &str = "orchestrator.planner_reads";
 /// Control's chat sends the option an agent's `choices` card marks
 /// `recommended` once nobody has answered for
 /// [`CONTROL_AUTO_CONTINUE_MINUTES`]. The countdown runs where the fleet
@@ -407,6 +416,13 @@ pub const CONTROL_SWITCH_AT_LIMIT: &str = "control.switch_at_limit";
 /// conflicts or went red and a handed-off mission that stalled
 /// (`service::control_sweep`), so Control fixes or reports it.
 pub const CONTROL_SWEEP: &str = "control.sweep";
+/// Session care: at "Within your brief" Control restarts a session it
+/// started itself (a wedged REPL, or under another login after a limit)
+/// without a card, and at "Autopilot" also retires one with
+/// `safe_kill_session` (`mcp::guard::OPERATOR_CARE_TOOLS`). Off: both ask.
+/// On by default (the owner's choice, 2026-10-20): it acts only at the two
+/// positions a person turns on.
+pub const CONTROL_SESSION_CARE: &str = "control.session_care";
 /// Control review F10: hours without a turn after which Control stops
 /// following a session it started or briefed (`service::control_follow`).
 pub const CONTROL_FOLLOW_QUIET_HOURS: &str = "control.follow_quiet_hours";
@@ -1003,7 +1019,7 @@ pub const SPECS: &[Spec] = &[
     .unit(Unit::Count),
     Spec::new(
         ORCHESTRATOR_HEADLESS_CHECKS,
-        "false",
+        "true",
         Kind::Bool,
         "Headless reviews and tests",
         "Run a mission's review and its test commands as one Claude run in the implementer's checkout, with read-only tools and only those commands, instead of opening a session for each. Falls back to a session when the checkout moved or a command is not a plain one.",
@@ -1017,6 +1033,22 @@ pub const SPECS: &[Spec] = &[
         "The Claude model headless reviews and tests run.",
     )
     .tags(&[Tag::Experimental, Tag::Advanced]),
+    Spec::new(
+        ORCHESTRATOR_RUN_SUBAGENTS,
+        "true",
+        Kind::Bool,
+        "Workers use subagents",
+        "A mission run asks its Claude worker to explore the code and to review its own changes through subagents, which keeps its own context for the work. Subagents never edit in parallel: they share the checkout.",
+    )
+    .tags(&[Tag::Experimental]),
+    Spec::new(
+        ORCHESTRATOR_PLANNER_READS,
+        "false",
+        Kind::Bool,
+        "Planner reads the repository",
+        "The mission planner may read the mission's repository (read, search and list files in its checkout, nothing else) before it breaks a goal into tasks, so it can split the work along the files it touches. Planning takes longer and costs more.",
+    )
+    .tags(&[Tag::Experimental]),
     Spec::new(
         CONTROL_AUTO_CONTINUE,
         "true",
@@ -1064,6 +1096,13 @@ pub const SPECS: &[Spec] = &[
         "The note to Control's agent also names a pull request it handed out that has merge conflicts or failing checks, and a mission it handed off that made no progress for a while, once per change. Within your brief it fixes or reassigns them, asking as usual; at Ask first it only tells you.",
     ),
     Spec::new(
+        CONTROL_SESSION_CARE,
+        "true",
+        Kind::Bool,
+        "Control looks after its sessions",
+        "Within your brief, Control restarts a stuck session it started itself without asking, also under another login after a limit. At Autopilot it also retires one whose work is done, after committing and pushing it. Off, or at Ask first: both wait for you.",
+    ),
+    Spec::new(
         CONTROL_FOLLOW_QUIET_HOURS,
         "24",
         Kind::Int { min: 1, max: 720 },
@@ -1107,14 +1146,14 @@ pub const SPECS: &[Spec] = &[
         "true",
         Kind::Bool,
         "Apply safe fixes automatically",
-        "Fix problems whose fix only touches fleet's own files and can be undone, then tell you. Fixes that touch tokens, sign-in or running sessions always wait for you.",
+        "Apply fixes marked safe without asking, then tell you: refreshing fleet's files on a host, and re-adding or repairing fleet's entry in a host's ~/.claude.json (written with that host's own fleet token). Replacing a token, signing in and typing into sessions always wait for you.",
     ),
     Spec::new(
         AUTOFIX_MAX_ATTEMPTS,
         "3",
         Kind::Int { min: 0, max: 10 },
         "Automatic fix attempts",
-        "How many times one problem is fixed automatically before it waits for you.",
+        "How many times fleet tries to fix one problem by itself in 24 hours (a problem that keeps coming back counts as one) before it waits for you.",
     )
     .unit(Unit::Count)
     .zero("never"),
@@ -1266,7 +1305,7 @@ pub const SPECS: &[Spec] = &[
         "{}",
         Kind::PathMap,
         "Projects roots",
-        "Per-host folder that holds your repositories. A host with no entry uses $CLAUDE_FLEET_PROJECTS_BASE (local only), then the layout default.",
+        "Per-host folder that holds your repositories. A host with no entry uses this machine's default projects folder, then the layout default.",
     ),
     Spec::new(
         PROJECTS_LAYOUT,
@@ -1305,7 +1344,7 @@ pub const SPECS: &[Spec] = &[
         DOWNLOADS_MAX_FILE_MB,
         "100",
         Kind::Int { min: 1, max: 4096 },
-        "Download: file cap",
+        "Downloads: largest file",
         "Largest file a session can send to your devices; a bigger one is refused.",
     )
     .unit(Unit::Mib),
@@ -1316,7 +1355,7 @@ pub const SPECS: &[Spec] = &[
             min: 1,
             max: 1_048_576,
         },
-        "Downloads: space",
+        "Downloads: total space",
         "How much the kept downloads may take together. A new file pushes out the oldest ones.",
     )
     .unit(Unit::Mib),
@@ -1550,7 +1589,7 @@ pub const SPECS: &[Spec] = &[
         "90",
         Kind::Int { min: 50, max: 100 },
         "CPU busy at",
-        "Busy share of a host's CPUs at which the host reads as saturated, when two samples in a row reach it.",
+        "Busy share of a host's CPUs at which the host reads as saturated, when two samples in a row reach it. Sessions killed there wait to be brought back until it calms down.",
     )
     .unit(Unit::Percent)
     .tags(&[Tag::Advanced]),
@@ -1738,7 +1777,7 @@ pub const SPECS: &[Spec] = &[
         WORK_HELP_MODEL,
         "haiku",
         Kind::Choice(SUMMARY_MODELS),
-        "Context help model",
+        "Writing help model",
         "The model that answers a question asked at a terminal or composer prompt line, and that tunes a prompt, on the session's own host and account.",
     )
     .tags(&[Tag::Ai]),
@@ -1747,7 +1786,7 @@ pub const SPECS: &[Spec] = &[
         "false",
         Kind::Bool,
         "Prompt tuner",
-        "Composer and routine prompt: Tune has a model rewrite your draft into a clearer prompt for the agent, on the session's or routine's host. You see the rewrite beside your draft and accept, edit or discard it; nothing is sent.",
+        "Composer and routine prompt: Tune has a model rewrite your draft into a clearer prompt for the agent, on the session's or routine's host. It runs on the Writing help model. You see the rewrite beside your draft and accept, edit or discard it; nothing is sent.",
     )
     .tags(&[Tag::Ai]),
     Spec::new(
@@ -1899,7 +1938,7 @@ pub const SPECS: &[Spec] = &[
         "Rollout wave soak",
         "How long each wave of a staged rollout runs before the next opens, if its failure ratio stays under the rollout's halt ratio.",
     )
-    .unit(Unit::Hours),
+    .unit(Unit::Minutes),
     Spec::new(
         UPDATE_MIRROR,
         "false",
@@ -2199,7 +2238,7 @@ pub const SPECS: &[Spec] = &[
         "",
         Kind::Text { max: 64 },
         "Second opinion: host",
-        "The host whose Claude account answers. Only questions about its own organisation are sent to it.",
+        "The host whose Claude account answers: the alias of a host in the fleet. Only questions about its own organisation are sent to it.",
     )
     .tags(&[Tag::Experimental]),
     Spec::new(
@@ -2264,7 +2303,7 @@ pub const SPECS: &[Spec] = &[
         "",
         Kind::Text { max: 8192 },
         "Jev: fitted floors",
-        "Per-feature confidence floors fitted from runs a person confirmed, corrected or rejected (fleet-hub decide floor fit). A fitted floor only raises a feature's built-in one, and only for the question version and model it was fitted against.",
+        "Confidence floors fitted from runs a person confirmed, corrected or rejected, written by fleet-hub decide floor fit --apply: not for editing by hand. A fitted floor only raises a feature's built-in one, for the question version and model it was fitted against.",
     )
     .tags(&[Tag::Advanced]),
     // ── read-only: owned and written elsewhere (D-P7) ──
@@ -2532,16 +2571,18 @@ pub fn validate(key: &str, value: &str) -> Result<(), IpcError> {
     let spec = spec(key)
         .ok_or_else(|| IpcError::new(codes::E_INVALID, format!("unknown setting {key}")))?;
     let v = value.trim();
+    // A person reads this beside the field, an agent beside the key: name both.
+    let who = format!("{} ({key})", spec.label);
     match spec.kind {
         Kind::Bool if v == "true" || v == "false" => Ok(()),
         Kind::Bool => Err(IpcError::new(
             codes::E_INVALID,
-            format!("{key} must be \"true\" or \"false\""),
+            format!("{who} must be \"true\" or \"false\""),
         )),
         Kind::Secs if v.parse::<u64>().is_ok_and(|n| n <= MAX_SECS) => Ok(()),
         Kind::Secs => Err(IpcError::new(
             codes::E_INVALID,
-            format!("{key} must be an integer number of seconds between 0 and {MAX_SECS}"),
+            format!("{who} must be an integer number of seconds between 0 and {MAX_SECS}"),
         )),
         Kind::SecsMin(min)
             if v.parse::<u64>()
@@ -2551,20 +2592,20 @@ pub fn validate(key: &str, value: &str) -> Result<(), IpcError> {
         }
         Kind::SecsMin(min) => Err(IpcError::new(
             codes::E_INVALID,
-            format!("{key} must be an integer number of seconds between {min} and {MAX_SECS}"),
+            format!("{who} must be an integer number of seconds between {min} and {MAX_SECS}"),
         )),
         Kind::Int { min, max } if v.parse::<u64>().is_ok_and(|n| (min..=max).contains(&n)) => {
             Ok(())
         }
         Kind::Int { min, max } => Err(IpcError::new(
             codes::E_INVALID,
-            format!("{key} must be an integer between {min} and {max}"),
+            format!("{who} must be an integer between {min} and {max}"),
         )),
         Kind::ChoiceSet(options) => parse_choice_set(key, options, v).map(|_| ()),
         Kind::Choice(options) if options.contains(&v) => Ok(()),
         Kind::Choice(options) => Err(IpcError::new(
             codes::E_INVALID,
-            format!("{key} must be one of: {}", options.join(", ")),
+            format!("{who} must be one of: {}", options.join(", ")),
         )),
         Kind::PathMap => parse_path_map(key, v).map(|_| ()),
         Kind::IdSet => parse_id_set(v)
@@ -2576,16 +2617,21 @@ pub fn validate(key: &str, value: &str) -> Result<(), IpcError> {
                 crate::service::decide::floor::parse(v)
                     .map_err(|e| IpcError::new(codes::E_INVALID, format!("{key}: {e}")))?;
             }
+            if key == DECIDE_HAIKU_HOST && !v.is_empty() {
+                crate::validate::host_alias_syntax(v).map_err(|e| {
+                    IpcError::new(codes::E_INVALID, format!("{who}: {}", e.message))
+                })?;
+            }
             Ok(())
         }
         Kind::Text { max } => Err(IpcError::new(
             codes::E_INVALID,
-            format!("{key} must be one line of at most {max} characters"),
+            format!("{who} must be one line of at most {max} characters"),
         )),
         Kind::TimeRange => parse_time_range(v).map(|_| ()).ok_or_else(|| {
             IpcError::new(
                 codes::E_INVALID,
-                format!("{key} must be a time range like 22:00-07:30, or empty for none"),
+                format!("{who} must be a time range like 22:00-07:30, or empty for none"),
             )
         }),
     }
@@ -3014,6 +3060,13 @@ pub fn set_by(
     proposal: Option<i64>,
 ) -> Result<(), IpcError> {
     let stored = normalize(key, value)?;
+    if key == DECIDE_HAIKU_HOST && !stored.is_empty() && s.get_host_row(&stored)?.is_none() {
+        // A host nobody has: the second opinion would quietly never be asked.
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            format!("no host called {stored}: the second opinion asks a host in the fleet"),
+        ));
+    }
     let before = if spec(key).is_some() {
         Some(s.get_setting(key)?)
     } else {
@@ -3320,6 +3373,37 @@ mod tests {
             "E_INVALID"
         );
         assert!(validate(PLAYBOOK_PRESS_ENTER, "true").is_ok());
+    }
+
+    /// Review w15-4: the refusal a row shows names the setting as the row
+    /// does, with the key beside it for an agent.
+    #[test]
+    fn a_refusal_names_the_setting_by_its_label() {
+        let e = validate(UPDATE_CHECK_INTERVAL_SECS, "1").unwrap_err();
+        assert!(
+            e.message
+                .starts_with("Update check interval (update.check_interval_secs) must be"),
+            "{}",
+            e.message
+        );
+    }
+
+    /// Review w15-11: a second-opinion host is an alias the fleet has; a
+    /// typo is refused instead of quietly never asking.
+    #[test]
+    fn the_second_opinion_host_must_be_a_known_host() {
+        assert_eq!(
+            validate(DECIDE_HAIKU_HOST, "no spaces").unwrap_err().code,
+            "E_INVALID"
+        );
+        assert!(validate(DECIDE_HAIKU_HOST, "").is_ok());
+        let s = Store::open_in_memory().unwrap();
+        let e = set(&s, DECIDE_HAIKU_HOST, "mercuy").unwrap_err();
+        assert_eq!(e.code, "E_INVALID");
+        assert!(e.message.contains("no host called mercuy"), "{}", e.message);
+        s.upsert_host("mercury").unwrap();
+        set(&s, DECIDE_HAIKU_HOST, "mercury").unwrap();
+        set(&s, DECIDE_HAIKU_HOST, "").unwrap();
     }
 
     #[test]

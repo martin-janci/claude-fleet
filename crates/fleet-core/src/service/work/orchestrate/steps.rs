@@ -287,6 +287,27 @@ pub fn plan_steps(input: &StepInput<'_>) -> Vec<Step> {
     steps
 }
 
+/// `n`'s close, or, when its implement run left no git evidence (completion
+/// gate, `gate::RunEvidence`), an ask that names what is missing: the loop
+/// never closes work nothing shows was done, and a person answers it by
+/// overriding the evidence with a reason or sending the work back. Nothing
+/// while the run has not finished.
+fn close_step(n: &GraphNode, title: &str, reason: String) -> Option<Step> {
+    match n.evidence.as_ref() {
+        Some(e) if e.state == "missing" => Some(
+            Step::new(
+                "ask",
+                Some(n.item_id),
+                None,
+                format!("{title} has no run evidence"),
+            )
+            .with_context(e.detail.clone()),
+        ),
+        Some(e) if e.state == "pending" => None,
+        _ => Some(Step::new("close", Some(n.item_id), None, reason)),
+    }
+}
+
 /// The steps of an item whose implementation finished: review and test
 /// runs its lines ask for, a retry when a reviewer or tester found it not
 /// done, and closing it once it is verified.
@@ -313,10 +334,9 @@ fn verify_steps(
             require_review && matches!(r.state.as_str(), "done" | "failed" | "cancelled")
         }) {
             if !attempt_failed(r) {
-                out.push(Step::new(
-                    "close",
-                    Some(n.item_id),
-                    None,
+                out.extend(close_step(
+                    n,
+                    title,
                     format!("{title} is implemented and reviewed"),
                 ));
             } else if r.state == "done" && r.report.is_none() {
@@ -364,22 +384,16 @@ fn verify_steps(
                 ));
             }
         } else if !require_review {
-            out.push(Step::new(
-                "close",
-                Some(n.item_id),
-                None,
+            out.extend(close_step(
+                n,
+                title,
                 format!("{title} is implemented and has no done_when"),
             ));
         }
         return out;
     };
     if v.state == "verified" {
-        out.push(Step::new(
-            "close",
-            Some(n.item_id),
-            None,
-            format!("{title} is verified"),
-        ));
+        out.extend(close_step(n, title, format!("{title} is verified")));
         return out;
     }
     if v.state == "failed" {

@@ -262,3 +262,100 @@ fn a_repository_that_is_not_there_refuses_the_whole_table() {
     assert!(err.message.contains("step 1.2"), "{}", err.message);
     assert!(members(&st, m.id).is_empty(), "nothing was written");
 }
+
+/// Two lanes of two steps each and a merge of the second wave.
+fn waves(merge_needs: &[&str]) -> Vec<PlanRow> {
+    vec![
+        row("1.1", "Schema", "A", &[]),
+        row("1.2", "Tokens", "B", &[]),
+        row("2.1", "API", "A", &["1.1"]),
+        row("2.2", "UI", "B", &["1.2"]),
+        row("2.9", "Merge wave 2: integrate", "A", merge_needs),
+    ]
+}
+
+#[test]
+fn a_merge_wave_step_short_of_its_wave_refuses_the_table() {
+    let st = store();
+    let m = mission(&st, "plan");
+    let e = import_rows(&st, m.id, waves(&["2.1"])).unwrap_err();
+    assert_eq!(e.code, codes::E_INVALID);
+    assert!(
+        e.message
+            .contains("step 2.9 \"2.9 Merge wave 2: integrate\" merges wave 2 but does not depend on step 2.2"),
+        "{}",
+        e.message
+    );
+    assert!(members(&st, m.id).is_empty(), "nothing written");
+    import_rows(&st, m.id, waves(&["2.1", "2.2"])).unwrap();
+}
+
+#[test]
+fn an_import_that_drops_a_merge_edge_is_refused_but_an_old_gap_is_left_alone() {
+    let st = store();
+    let m = mission(&st, "plan");
+    import_rows(&st, m.id, waves(&["2.1", "2.2"])).unwrap();
+    let got = members(&st, m.id);
+    let (merge, ui) = (got["2.9"].id, got["2.2"].id);
+
+    // Dropping 2.2 from the merge's needs would leave it short.
+    let e = import_rows(&st, m.id, waves(&["2.1"])).unwrap_err();
+    assert!(
+        e.message.contains("does not depend on step 2.2"),
+        "{}",
+        e.message
+    );
+    assert!(deps_of(&st, merge).contains(&ui), "the edge is kept");
+
+    // A gap made outside the import does not refuse a later one that
+    // leaves the merge step alone.
+    lock(&st)
+        .unwrap()
+        .remove_item_dep(merge, ui, "person:1")
+        .unwrap();
+    let mut rest = waves(&[]);
+    rest.pop();
+    import_rows(&st, m.id, rest).unwrap();
+}
+
+/// Lanes design L2: a plan's lanes are the mission's lanes, and a step that
+/// moves lane on a second import moves with it; the emptied lane goes.
+#[test]
+fn a_plans_lanes_become_the_missions_lanes() {
+    let st = store();
+    let m = mission(&st, "plan");
+    import_rows(&st, m.id, plan()).unwrap();
+    let lanes_of = |st: &Mutex<Store>| {
+        let s = st.lock().unwrap();
+        s.mission_lanes(m.id)
+            .unwrap()
+            .into_iter()
+            .map(|l| (l.name, l.item_ids.len()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        lanes_of(&st),
+        vec![
+            ("B".to_string(), 2),
+            ("E".to_string(), 1),
+            ("C".to_string(), 1)
+        ]
+    );
+    let mut next = plan();
+    next[2] = row("4.1", "Account pills", "B", &["3.1"]);
+    let out = import_rows(&st, m.id, next).unwrap();
+    assert_eq!(out.updated, 1, "{out:?}");
+    assert_eq!(
+        lanes_of(&st),
+        vec![("B".to_string(), 3), ("C".to_string(), 1)]
+    );
+}
+
+#[test]
+fn a_lane_name_that_cannot_be_one_refuses_the_table() {
+    let st = store();
+    let m = mission(&st, "plan");
+    let e = import_rows(&st, m.id, vec![row("1", "x", &"L".repeat(41), &[])]).unwrap_err();
+    assert!(e.message.contains("step 1's lane"), "{}", e.message);
+    assert!(members(&st, m.id).is_empty(), "nothing written");
+}

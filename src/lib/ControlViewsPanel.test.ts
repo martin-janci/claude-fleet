@@ -41,6 +41,30 @@ describe('ControlViewsPanel (step 9.4)', () => {
     expect(rows[0].textContent).toContain('asking');
   });
 
+  it("counts Control's approvals and the missions waiting on you, and lists them (w04-7)", async () => {
+    const { confirmQueue } = await import('./confirms');
+    const { missionList } = await import('./mission_room');
+    confirmQueue.set([{ nonce: 'n1', tool: 'new_session', summary: 'host=h', caller: 'client:op', operator: true, asked_at: 1 }]);
+    missionList.set({
+      loaded: true,
+      error: null,
+      missions: [
+        { id: 4, name: 'Receipts', goal: '', mode: 'finite', state: 'active', level: 2, plan_version: 1, created_at: 1, updated_at: 1, version: 1, waiting_on: { reason: 'sign_grant' } } as never,
+        { id: 5, name: 'Old', goal: '', mode: 'finite', state: 'cancelled', level: 2, plan_version: 1, created_at: 1, updated_at: 1, version: 1, waiting_on: { reason: 'question' } } as never,
+      ],
+    });
+    try {
+      const { getByTestId } = render(ControlViewsPanel);
+      await tick();
+      expect(getByTestId('control-view-tab-needs-you').textContent).toContain('3');
+      expect(getByTestId('control-needs-you-approval').textContent).toContain('new_session');
+      expect(getByTestId('control-needs-you-mission').textContent).toContain('Receipts · Grant needs signing');
+    } finally {
+      confirmQueue.set([]);
+      missionList.set({ loaded: false, missions: [], error: null });
+    }
+  });
+
   it('a Needs you row puts that session in focus, in the panel', async () => {
     const { getByTestId } = render(ControlViewsPanel);
     await fireEvent.click(getByTestId('control-needs-you-row'));
@@ -241,5 +265,14 @@ describe('Problems & fixes (autofix)', () => {
     const row = getByTestId('control-problems-fixed-row');
     expect(row.textContent).toContain('Update the agent on mercury · 2 tries');
     expect(row.textContent).toContain('host mercury');
+  });
+
+  it('Check now asks the hub to look again at once (review w09-6)', async () => {
+    const { invoke } = await import('@tauri-apps/api/core');
+    findings.set([base]);
+    const { getByTestId } = render(ControlViewsPanel);
+    vi.mocked(invoke).mockClear();
+    await fireEvent.click(getByTestId('control-problems-check'));
+    expect(vi.mocked(invoke).mock.calls.map((c) => c[0])).toContain('autofix_scan');
   });
 });

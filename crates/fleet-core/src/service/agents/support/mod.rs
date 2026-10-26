@@ -366,7 +366,10 @@ const READ_WALL_CLOCK: Duration = Duration::from_secs(60);
 
 impl LiveSupportHost {
     /// The tracker's client, with its own credential.
-    fn provider(&self, tracker_id: i64) -> Result<Box<dyn trackers::TrackerProvider>, String> {
+    pub(crate) fn provider(
+        &self,
+        tracker_id: i64,
+    ) -> Result<Box<dyn trackers::TrackerProvider>, String> {
         let (row, cred) = {
             let s = lock(&self.store).map_err(|e| e.message)?;
             let row = s
