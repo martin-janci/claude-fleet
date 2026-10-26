@@ -298,6 +298,30 @@ Závislosti: L0 → všetko (baseline). L2 → L3 → L4. L1 a L5 sú nezávisl�
 
 **Odhad prínosu (hypotéza na overenie v L6, nie meranie):** v misii s 5 previazanými úlohami v jednom repe ubudnú 4 z 5 studených štartov implementácie, review a test bez vlastnej session, a integrácia medzi úlohami zmizne. Stratí sa paralelizmus vnútri repa, ktorý v claude-fleet pre P7 aj dnes končí integračnými úlohami.
 
+### 7.1 L6: postup porovnania
+
+Nástroj: **Misie → Compare** (`MissionCompare.svelte`, `mission_compare.ts`). Ukazuje misie, ktoré bežali, a medián na režim (`item` / `lane`): behy na hotovú úlohu, studené štarty (spustené sessions) na úlohu, medián času úlohy, podiel nečinnosti a cenu na úlohu.
+
+**Príprava (rovnaké pre obe ramená, aby sa menil len režim):**
+- Hub s líniami (PR martin-janci/claude-fleet#1025). Nastavenia: `orchestrator.headless_checks` zapnuté (predvolené), `orchestrator.run_subagents` zapnuté (predvolené), `orchestrator.planner_reads` rovnako v oboch ramenách (odporúčam zapnuté).
+- Ten istý host a login, rovnaká úroveň a grant (L2), rovnaké `max_parallel` (2) a `require_review`.
+
+**Misie:** 2–3 páry porovnateľných misií v jednom repe (napr. claude-fleet), každá so 4–8 úlohami a podobnou veľkosťou úloh. Najľahšie je importovať plán so stĺpcom `Lane` a každý pár rozdeliť: jedna kópia s „Tasks run: Each in its own session“, druhá s „By lane“. Ramená sa striedajú, aby žiadne nemalo vždy čerstvejší `main`.
+
+**Čo sledovať počas behu (zlyhania, ktoré unit testy nepokryjú):**
+- krok `refused` s textom „lane … lead is not at its prompt yet“, ktorý sa opakuje dlhšie než pár minút: vedúci nedostáva úlohy;
+- úloha, ktorá ostane `running`, hoci vedúci skončil (chýba Stop hook alebo marker);
+- štafeta, ktorá sa točí (nový vedúci pri každej úlohe);
+- po review ostane worktree (`git worktree list` v checkoute línie);
+- evidencia „the task began on …, which the branch no longer holds“ (vedúci prepísal históriu).
+
+**Rozhodnutie** (medián „By lane“ voči „Each in its own session“):
+- **Prepnúť predvolený režim na `lane` pre misie s jedným repom**, ak naraz platí: cena na úlohu ≤ 0,8×, čas úlohy ≤ 1,0×, behy na úlohu nie sú vyššie a v ramene `lane` sa neobjavilo žiadne zo zlyhaní vyššie.
+- **Ponechať `item` ako predvolený a `lane` odporúčať po misiách**, ak je `lane` lacnejší, ale pomalší alebo sa objavilo zlyhanie, ktoré má známu opravu.
+- **Ponechať `item`**, ak `lane` nie je lacnejší.
+
+Výsledky (tabuľku z Compare a čo sa pokazilo) mi stačí poslať; zmena predvoleného režimu (`MissionPolicy::default().execution`) a prípadné opravy pôjdu samostatným PR.
+
 ## 8. Riziká
 
 | Riziko | Zmiernenie |

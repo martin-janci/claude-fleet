@@ -51,16 +51,33 @@ export const roomMissionId = writable<number | null>(null);
 
 /** The New mission form shows in the room's centre. */
 export const roomCreating = writable<boolean>(false);
+/** The room shows Compare (lanes design L6): the missions that ran, side
+ *  by side, and the median per execution mode. */
+export const roomComparing = writable<boolean>(false);
+
+/** Open Compare in the room. */
+export function openMissionCompare(): void {
+  roomCreating.set(false);
+  roomComparing.set(true);
+  goTo('missions');
+}
+
+/** Leave Compare for the mission the room had. */
+export function closeMissionCompare(): void {
+  roomComparing.set(false);
+}
 
 /** Open the room on `id` (null: the starter, or the list's first look). */
 export function openMissionRoom(id: number | null): void {
   roomCreating.set(false);
+  roomComparing.set(false);
   roomMissionId.set(id);
   goTo('missions');
 }
 
 /** "+ New" and the starter's New mission: the form, in the room. */
 export function startNewMission(): void {
+  roomComparing.set(false);
   roomCreating.set(true);
   goTo('missions');
 }
@@ -327,6 +344,7 @@ export function resetMissionRoomForTests(): void {
   missionList.set({ loaded: false, missions: [], error: null });
   roomMissionId.set(null);
   roomCreating.set(false);
+  roomComparing.set(false);
   missionPanelTab.set('plan');
   missionSessionId.set(null);
   missionPanelOpen.set(true);
