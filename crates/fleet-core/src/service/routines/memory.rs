@@ -23,6 +23,10 @@
 //!
 //! A notebook is at most [`MEMORY_MAX_CHARS`]; a longer rewrite is cut,
 //! and the run's trace says so.
+//!
+//! The same read serves a routine's seen items ([`super::seen`], migration
+//! 212): a routine that tracks them has its runs' replies read whether or
+//! not it keeps a notebook.
 
 use super::{changeable, trace, visible};
 use crate::ipc_error::{codes, lock, IpcError};
@@ -491,6 +495,12 @@ pub fn apply(
                     by: "fleet",
                 });
             }
+        }
+    }
+    // The same reply names the items it handled (migration 212).
+    if let Ok(texts) = replies {
+        if let Err(e) = super::seen::apply(s, r, run, texts, now) {
+            tracing::warn!(run = run.id, error = %e.message, "[routines] run's seen items not recorded");
         }
     }
     s.mark_routine_run_memory_read(run.id, now)?;

@@ -1178,6 +1178,14 @@ once the run finishes; `memory_auto` also notes each finished run in it. The
 routine editor's Memory group picks them and shows the saved notebooks to
 read, edit or clear (`routines { memory | set_memory }`). Off by default
 per routine. The phone shows nothing of it yet.
+Routine seen items (migration 212, `routines/seen.rs`): a routine remembers
+what its runs already handled (`pr owner/repo#12 | head=… checks=…`); each
+run is shown the list, skips what did not change and reports what it looked
+at in a `<routine-seen>` block, and a run with nothing new or changed comes
+to `nothing`, out of the Inbox. On for every routine (the editor's Memory
+group turns it off and lists or forgets the items). The Sessions list (desktop
+and phone) folds routine sessions into one Routines section, one group per
+routine, and a routine session's finished turn no longer notifies.
 
 The prompt tuner is landed and OFF by default (`work.prompt_tune`;
 `service/prompt_tune.rs`, `PromptTune.svelte`, mechanics in

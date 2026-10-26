@@ -52,6 +52,8 @@
   import ProposedBy from './ProposedBy.svelte';
   import FleetSwitcher from './FleetSwitcher.svelte';
   import FleetSessionGroups from './FleetSessionGroups.svelte';
+  import { isRoutineSession, routineSessionGroups, runsWord } from './routine_sessions';
+  import { openRoutines } from './routines';
   import { showPrimary, fleetInboxCount, multiFleet } from './fleets';
   import PrimaryFleetHeader from './PrimaryFleetHeader.svelte';
   import { anchor, primaryFleetOpen, primaryHiddenByAnchor, showPrimaryList } from './fleet_filters';
@@ -394,9 +396,14 @@
   // Pinned sessions leave the tree and the groups for the Pinned section at
   // the top, under the same filters, search and tab; in focus they stay put,
   // as shared ones do. An `external` row is never offered a pin.
+  // Routine sessions (one per run) leave them too, for the Routines
+  // section (`routine_sessions.ts`), by the same rule; a pinned one stays
+  // in Pinned.
   const splitPinned = $derived(!focus);
   const rowPredicate = $derived(
-    splitPinned ? bothPredicates((s) => s.kind === 'external' || !isPinned(s), listPredicate) : listPredicate,
+    splitPinned
+      ? bothPredicates((s) => s.kind === 'external' || (!isPinned(s) && !isRoutineSession(s)), listPredicate)
+      : listPredicate,
   );
   const pinnedRows = $derived.by((): SessionRow[] => {
     if (!splitPinned) return [];
@@ -413,6 +420,27 @@
       .sort((a, b) => (a.pinned_at ?? 0) - (b.pinned_at ?? 0) || a.id - b.id);
   });
   let pinnedOpen = $state(true);
+  const routineRows = $derived.by((): SessionRow[] => {
+    if (!splitPinned) return [];
+    const q = viewSearch;
+    const base = listPredicate;
+    return $sessions.filter(
+      (s) =>
+        isRoutineSession(s) &&
+        !isPinned(s) &&
+        sessionVisible(s, viewHost, viewBg, base, viewScope) &&
+        sessionMatchesSearch(s, q, projectLabelOf(s.project_id)),
+    );
+  });
+  const routineGroupList = $derived(routineSessionGroups(routineRows, attentionOpts));
+  let routinesOpen = $state(true);
+  /** The routine groups opened, by key: each starts folded to its line. */
+  let openRoutineGroups: Set<string> = $state(new Set());
+  function toggleRoutineGroup(key: string) {
+    const next = new Set(openRoutineGroups);
+    if (!next.delete(key)) next.add(key);
+    openRoutineGroups = next;
+  }
 
   // What narrows the list, for the empty state (the chrome shows the same
   // facets as chips).
@@ -536,6 +564,7 @@
     for (const g of workGroups) for (const s of g.sessions) ids.add(s.id);
     for (const s of orphanSessions) ids.add(s.id);
     for (const s of pinnedRows) ids.add(s.id);
+    for (const s of routineRows) ids.add(s.id);
     return ids;
   });
   // The primary's rows another fleet's Machine / Org choice hides, counted
@@ -710,6 +739,11 @@
   // calling it.
   function expandAndScrollTo(sess: SessionRow): void {
     if (splitPinned && sess.kind !== 'external' && isPinned(sess)) pinnedOpen = true;
+    else if (splitPinned && isRoutineSession(sess)) {
+      routinesOpen = true;
+      const key = routineGroupList.find((g) => g.sessions.some((r) => r.id === sess.id))?.key;
+      if (key !== undefined && !openRoutineGroups.has(key)) openRoutineGroups = new Set([...openRoutineGroups, key]);
+    }
     if (sess.project_id !== null && collapsed.has(sess.project_id)) {
       const next = new Set(collapsed);
       next.delete(sess.project_id);
@@ -1091,7 +1125,7 @@
   // shows them; the extra fleets' follow under their badges (FleetInbox).
   const inboxPool = $derived(
     $sidebarView === 'inbox' && $showPrimary
-      ? [...pinnedRows, ...filtered.flatMap((r) => sessionsForProject(r.project.id)), ...orphanSessions, ...sharedWithMe]
+      ? [...pinnedRows, ...routineRows, ...filtered.flatMap((r) => sessionsForProject(r.project.id)), ...orphanSessions, ...sharedWithMe]
       : [],
   );
   const inboxList = $derived(inboxRows(inboxPool, attentionOpts));
@@ -1134,7 +1168,7 @@
   // element there; snapshot every row's place before the groups re-render so
   // the new one slides from where the old one was (motion_catalog.slideIn).
   $effect.pre(() => {
-    void [flatGroups, workGroups, inboxList, orphanSessions, pinnedRows];
+    void [flatGroups, workGroups, inboxList, orphanSessions, pinnedRows, routineGroupList, openRoutineGroups];
     untrack(() => snapshotRows(sidebarEl));
   });
   // A folded mass loss is its own Restore line below, not "12 paused" here.
@@ -1848,6 +1882,57 @@
         {/if}
       </div>
     {/if}
+    {#if routineGroupList.length > 0}
+      <div class="orphan-section routines-section" data-testid="routine-sessions">
+        <button
+          class="section-header section-toggle"
+          data-testid="routines-toggle"
+          aria-expanded={routinesOpen}
+          onclick={() => (routinesOpen = !routinesOpen)}
+        >
+          <span class="caret" class:collapsed={!routinesOpen}>▾</span>
+          Routines ({routineRows.length})
+        </button>
+        {#if routinesOpen}
+          <div class="tree" role="tree" aria-label="Routines">
+            {#each routineGroupList as g (g.key)}
+              {@const open = openRoutineGroups.has(g.key)}
+              <div class="routine-group" data-testid="routine-group" data-routine-id={g.routineId ?? undefined}>
+                <div class="routine-head">
+                  <button
+                    class="routine-toggle"
+                    data-testid="routine-group-toggle"
+                    aria-expanded={open}
+                    onclick={() => toggleRoutineGroup(g.key)}
+                  >
+                    <span class="caret" class:collapsed={!open}>▾</span>
+                    <span class="routine-name">{g.name}</span>
+                    <span class="routine-count">{runsWord(g.sessions.length)}</span>
+                    {#if g.needsYou > 0}<span class="routine-needs" data-testid="routine-group-needs">{g.needsYou} need{g.needsYou === 1 ? 's' : ''} you</span>{/if}
+                  </button>
+                  {#if g.routineId !== null}
+                    <button
+                      class="routine-open"
+                      data-testid="routine-group-open"
+                      title="Open the routine"
+                      aria-label={`Open the routine ${g.name}`}
+                      onclick={() => openRoutines({ select: g.routineId ?? undefined, tab: 'runs' })}>↗</button
+                    >
+                  {/if}
+                </div>
+                {#if open}
+                  <div role="group">
+                    {#each g.sessions as sess (sess.id)}
+                      {@render sessionRow(sess)}
+                    {/each}
+                  </div>
+                {/if}
+              </div>
+            {/each}
+          </div>
+        {/if}
+      </div>
+    {/if}
     {#if workGroups.length > 0 || pastOnlyGroups.length > 0}
       <ul class="tree work-tree" data-testid="work-groups" role="tree" aria-label="Work">
         {#each workGroups as g (g.key)}
@@ -2131,9 +2216,9 @@
           </li>
         {/each}
       </ul>
-    {:else if listUnavailable && orphanSessions.length === 0 && sharedWithMe.length === 0 && workGroups.length === 0 && pastOnlyGroups.length === 0 && pinnedRows.length === 0}
+    {:else if listUnavailable && orphanSessions.length === 0 && sharedWithMe.length === 0 && workGroups.length === 0 && pastOnlyGroups.length === 0 && pinnedRows.length === 0 && routineRows.length === 0}
       {@render listState('sessions')}
-    {:else if !loadError && orphanSessions.length === 0 && sharedWithMe.length === 0 && workGroups.length === 0 && pastOnlyGroups.length === 0 && pinnedRows.length === 0}
+    {:else if !loadError && orphanSessions.length === 0 && sharedWithMe.length === 0 && workGroups.length === 0 && pastOnlyGroups.length === 0 && pinnedRows.length === 0 && routineRows.length === 0}
       {#if !hubSkewEmptyMessage && listFacets.length > 0 && $projects.length > 0}
         <!-- Filters hide every row: say which, and offer the way back,
              instead of "no sessions" over a fleet that has some, as the states
@@ -2751,6 +2836,31 @@
     display: inline-block;
   }
   .section-toggle .caret.collapsed { transform: rotate(-90deg); }
+  /* A routine's runs, folded to one line (routine_sessions.ts). */
+  .routine-head { display: flex; align-items: center; gap: 2px; padding-right: 0.3rem; }
+  .routine-toggle {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    flex: 1;
+    min-width: 0;
+    padding: 2px 0.4rem;
+    background: transparent;
+    border: none;
+    border-radius: var(--radius-sm);
+    color: var(--fg-2);
+    font: inherit;
+    font-size: var(--text-xs);
+    text-align: left;
+    cursor: pointer;
+  }
+  .routine-toggle:hover, .routine-open:hover { background: var(--bg-hover); }
+  .routine-toggle .caret { color: var(--fg-muted); font-size: var(--text-2xs); width: 0.7rem; text-align: center; transition: transform var(--dur-fast) ease; display: inline-block; }
+  .routine-toggle .caret.collapsed { transform: rotate(-90deg); }
+  .routine-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  .routine-count { color: var(--fg-muted); font-size: var(--text-2xs); flex: 0 0 auto; }
+  .routine-needs { color: var(--status-waiting); font-size: var(--text-2xs); flex: 0 0 auto; }
+  .routine-open { flex: 0 0 auto; background: transparent; border: none; border-radius: var(--radius-sm); color: var(--fg-muted); cursor: pointer; font: inherit; font-size: var(--text-2xs); padding: 2px 4px; }
 
   .sidebar-footer {
     flex: 0 0 auto;

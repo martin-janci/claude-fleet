@@ -1197,6 +1197,20 @@ Index by area (names only; see the reference for details):
   use or text past the cap). Deleting a routine deletes its own notebook;
   its project's stays until the project is removed. The operator may
   read them, fenced as untrusted text, not write them.
+  Seen items (migration 212, `routines/seen.rs`): `track_seen` (on unless
+  turned off; absent keeps a routine's) has each run's prompt list the
+  items earlier runs handled, `item | state`, fenced as untrusted text, and
+  ask the run to skip one whose state is the same now and to end its reply
+  with a `<routine-seen>` block, one `item | state` line per item it looked
+  at. The same read as the notebooks records each (new, changed or the
+  same; the item lower-cased), drops an item no run reported for 30 days
+  and keeps the last 500; a done run whose block names nothing new or
+  changed comes to `nothing` (rule), so it stays out of the Inbox, unless
+  something already said otherwise. `seen { routine_id, limit? }` answers
+  `{ routine_id, track_seen, items: [{ item, state, first_seen_at, seen_at,
+  changed_at, run_id? }], total, may_change }`, the last seen first;
+  `forget_seen { routine_id, text? }` forgets that item, or all, with the
+  fence of changing the routine.
 - **Start rules** — `start_rules`, by `action` (Orbit Fleet 8.11): a task
   key pattern (`PD-*`, `*` for any run of characters, any case) that names
   the project, and optionally the host, a start of a matching task lands
