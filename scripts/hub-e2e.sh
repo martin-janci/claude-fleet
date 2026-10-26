@@ -1622,7 +1622,9 @@ else
     LT="$LT ${i:-0}"
   done
   read -r LT1 LT2 <<<"$LT"
-  md=$(wcall "$TOKW" work "{\"action\":\"mission\",\"mission_id\":${MID:-0}}")
+  # The mission as the hub has it now.
+  mission_now() { wcall "$TOKW" work "{\"action\":\"mission\",\"mission_id\":${MID:-0}}"; }
+  md=$(mission_now)
   check "a mission by lane holds its two tasks in one lane" '[ -n "$MID" ] && [ "$(jt "$md" .mission.policy.execution)" = lane ] && [ "$(jt "$md" "[.lanes[] | select(.name == \"api\") | .item_ids | length][0]")" = 2 ]' "${ms:0:300} | ${rp:0:200} | ${md:0:600}"
   wcall "$TOKW" work_link "{\"action\":\"mission_state\",\"mission_id\":${MID:-0},\"status\":\"active\"}" >/dev/null
   # A grant names where its runs go (a project no host has run yet has no
@@ -1630,18 +1632,18 @@ else
   gr=$(wcall "$TOKW" work_link "{\"action\":\"mission_grant\",\"mission_id\":${MID:-0},\"level\":1,\"hours\":1,\"hosts\":[\"local\"]}")
   check "a level-1 grant places the mission's runs on local" '! echo "$gr" | grep -q "\"isError\":true"' "${gr:0:400}"
   # attempt_of ITEM FIELD -> that field of the item's latest attempt.
-  attempt_of() { jt "$(wcall "$TOKW" work "{\"action\":\"mission\",\"mission_id\":${MID:-0}}")" ".graph.nodes[] | select(.item_id == $1) | .attempt.$2 // empty"; }
+  attempt_of() { jt "$(mission_now)" ".graph.nodes[] | select(.item_id == $1) | .attempt.$2 // empty"; }
   st1=$(wcall "$TOKW" work_link "{\"action\":\"mission_start\",\"mission_id\":${MID:-0}}")
   check "Start wave runs the lane's first task only" '[ "$(jt "$st1" "[.results[] | select(.ok and .step.kind == \"run\")] | length")" = 1 ] && [ "$(jt "$st1" "[.results[] | select(.ok) | .step.item_id][0]")" = "${LT1:-x}" ]' "${st1:0:800}"
   until_ok 600 '[ "$(attempt_of "${LT1:-0}" state)" = done ]'
-  check "the lead did the first task: done, by its report" '[ "$(attempt_of "${LT1:-0}" state)" = done ] && [ "$(attempt_of "${LT1:-0}" outcome)" = done ]' "$(jt "$(wcall "$TOKW" work "{\"action\":\"mission\",\"mission_id\":${MID:-0}}")" '.graph.nodes')"
-  LEAD=$(jt "$(wcall "$TOKW" work "{\"action\":\"mission\",\"mission_id\":${MID:-0}}")" '.lanes[0].lead_session_id // empty')
+  check "the lead did the first task: done, by its report" '[ "$(attempt_of "${LT1:-0}" state)" = done ] && [ "$(attempt_of "${LT1:-0}" outcome)" = done ]' "$(jt "$(mission_now)" '.graph.nodes')"
+  LEAD=$(jt "$(mission_now)" '.lanes[0].lead_session_id // empty')
   # The lead is back at its prompt once the Stop is in.
   until_ok 100 '[ "$(wrow "${LEAD:-0}" | jq -r .claude_status 2>/dev/null)" = idle ]'
   st2=$(wcall "$TOKW" work_link "{\"action\":\"mission_start\",\"mission_id\":${MID:-0}}")
   check "the second Start wave hands the next task to the lane's live lead" 'echo "$st2" | grep -q "handed to lane api" && [ -n "$LEAD" ]' "${st2:0:800}"
   until_ok 600 '[ "$(attempt_of "${LT2:-0}" state)" = done ]'
-  md2=$(wcall "$TOKW" work "{\"action\":\"mission\",\"mission_id\":${MID:-0}}")
+  md2=$(mission_now)
   check "one lead did both tasks: the lane names it once and relayed once" '[ "$(attempt_of "${LT2:-0}" state)" = done ] && [ "$(jt "$md2" .lanes[0].lead_session_id)" = "$LEAD" ] && [ "$(jt "$md2" .lanes[0].relay)" = 1 ]' "$(jt "$md2" '{lanes, nodes: .graph.nodes}')"
   LDIR=$(grep -l "^2$" "$WLOG"/*/tasks 2>/dev/null | head -1 | xargs -r dirname)
   check "the fake Claude of that one session got both tasks, the second as the next in its lane" '[ -n "$LDIR" ] && [ "$(grep -c "Next task in your lane" "$LDIR/prompts.log")" = 2 ] && grep -q "Your lane.s brief is in your fleet brief" "$LDIR/prompts.log"' "$(ls "$WLOG"/*/tasks 2>&1; tail -20 "$LDIR/prompts.log" 2>&1)"

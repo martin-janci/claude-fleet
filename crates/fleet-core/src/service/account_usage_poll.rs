@@ -367,6 +367,12 @@ pub(crate) fn poll_due_accounts(
                 continue; // already being fetched (or queued for a permit)
             }
         }
+        // Made before the spawn: a task dropped before its first poll (the
+        // runtime shutting down) still gives the account back.
+        let in_flight = InFlight {
+            poller: Arc::clone(poller),
+            account: account.clone(),
+        };
         let poller = Arc::clone(poller);
         let hosts = Arc::clone(&hosts);
         let ssh = Arc::clone(&ssh);
@@ -374,10 +380,7 @@ pub(crate) fn poll_due_accounts(
         let bus = Arc::clone(&bus);
         let store = store.clone();
         handles.push(tokio::spawn(async move {
-            let _in_flight = InFlight {
-                poller: Arc::clone(&poller),
-                account: account.clone(),
-            };
+            let _in_flight = in_flight;
             let _permit = poller
                 .limit
                 .clone()

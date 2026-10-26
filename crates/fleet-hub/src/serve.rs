@@ -1166,9 +1166,6 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
         Arc::clone(&ssh),
         ticks_cancel.clone(),
     );
-    // Application updates (update design S4): re-read the signed release
-    // channel every `update.check_interval_secs`, and record this hub's own
-    // build as `hub:self`. Stopped with the ticks.
     // A daily consistent copy of `state.db` under `<data>/backups`, the
     // newest 14 kept, unless a newer backup already exists (hardening
     // survey 2026-10-26). Stopped with the ticks.
@@ -1176,6 +1173,9 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
         r.data_dir.clone(),
         ticks_cancel.clone(),
     );
+    // Application updates (update design S4): re-read the signed release
+    // channel every `update.check_interval_secs`, and record this hub's own
+    // build as `hub:self`. Stopped with the ticks.
     let update_handle = fleet_core::service::update::spawn_refresh_tick(
         Arc::clone(&store),
         fleet_core::service::update::HubSelf {

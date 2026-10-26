@@ -262,14 +262,11 @@ pub async fn fire_with(
                     tracing::warn!(routine = r.id, error = %e.message, "[routines] notebooks not read for its run");
                     None
                 });
-            let seen = super::seen::shown(&s, r)
-                .map(|items| items.map(|i| super::seen::prompt_block(&i)))
-                .unwrap_or_else(|e| {
-                    tracing::warn!(routine = r.id, error = %e.message, "[routines] seen items not read for its run");
-                    None
-                });
-            let notes = super::seen::joined(memory.as_deref(), seen.as_deref());
-            let prompt = run_prompt(r, notes.as_deref(), context);
+            let seen = super::seen::prompt_block_for(&s, r).unwrap_or_else(|e| {
+                tracing::warn!(routine = r.id, error = %e.message, "[routines] seen items not read for its run");
+                None
+            });
+            let prompt = run_prompt(r, memory.as_deref(), seen.as_deref(), context);
             match s.enqueue_handover(row.id, &prompt, Some(&meta)) {
                 Ok(handover) => {
                     steps.push(
@@ -418,12 +415,18 @@ pub(super) fn undelivered(
 }
 
 /// The prompt a run of `r` queues: its own, the autonomy line (G3.8), its
-/// notebooks (migration 204, [`super::memory::prompt_block`]) and seen
-/// items (migration 212, [`super::seen::prompt_block`]) as `memory`, and
-/// the line on what fired it.
-pub(super) fn run_prompt(r: &RoutineRow, memory: Option<&str>, context: Option<&str>) -> String {
+/// notebooks (`memory`, migration 204, [`super::memory::prompt_block`]),
+/// the items it was shown (`seen`, migration 212,
+/// [`super::seen::prompt_block`]) and the line on what fired it, each
+/// block after a blank line.
+pub(super) fn run_prompt(
+    r: &RoutineRow,
+    memory: Option<&str>,
+    seen: Option<&str>,
+    context: Option<&str>,
+) -> String {
     let mut prompt = r.prompt.clone();
-    for line in [super::autonomy_line(r.autonomy), memory, context]
+    for line in [super::autonomy_line(r.autonomy), memory, seen, context]
         .into_iter()
         .flatten()
     {

@@ -451,7 +451,7 @@
   function formatRelative(unix: number): string {
     const ageSec = nowSec - unix;
     if (ageSec >= 30 * 86400) return new Date(unix * 1000).toISOString().slice(0, 10);
-    return timeAgo(unix);
+    return timeAgo(unix, nowSec * 1000);
   }
 
   let copied = $state(false);
