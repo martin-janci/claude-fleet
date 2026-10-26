@@ -62,6 +62,20 @@ fn task(id: i64, role: &str, state: &str, error: Option<&str>) -> TaskRow {
     }))
     .unwrap();
     t.error = error.map(str::to_string);
+    // A run that finished well reported so; `bare` makes one that did not.
+    if state == "done" {
+        t.report = Some(TaskReport {
+            outcome: "done".into(),
+            ..Default::default()
+        });
+    }
+    t
+}
+
+/// A run that printed its marker and no report.
+fn bare(id: i64, role: &str) -> TaskRow {
+    let mut t = task(id, role, "done", None);
+    t.report = None;
     t
 }
 
@@ -304,6 +318,16 @@ fn the_task_budget_stops_new_runs_with_one_ask() {
 }
 
 #[test]
+fn a_marker_without_a_report_is_a_failed_attempt() {
+    let t = bare(1, "implement");
+    assert!(attempt_failed(&t));
+    assert_eq!(
+        failure_text(&t),
+        crate::service::work::report::REPORT_MISSING
+    );
+}
+
+#[test]
 fn a_reported_failure_counts_as_one() {
     let mut t = task(1, "implement", "done", None);
     t.report = Some(TaskReport {
@@ -366,5 +390,31 @@ fn a_finished_review_settles_an_item_without_lines() {
     assert_eq!(
         kinds(&plan(&m, nodes(), &items, redone, 0)),
         vec!["review:11"]
+    );
+}
+
+#[test]
+fn a_review_without_its_report_is_asked_about_not_retried() {
+    let m = mission(MissionPolicy {
+        require_review: true,
+        ..Default::default()
+    });
+    let items = [item(10, "todo"), item(11, "todo")];
+    let attempts = HashMap::from([(
+        11,
+        vec![bare(2, "review"), task(1, "implement", "done", None)],
+    )]);
+    let s = plan(
+        &m,
+        vec![node(10, "waiting"), node(11, "verifying")],
+        &items,
+        attempts,
+        0,
+    );
+    assert_eq!(kinds(&s), vec!["ask:11"]);
+    assert!(
+        s[0].reason.contains("without its report"),
+        "{}",
+        s[0].reason
     );
 }

@@ -36,7 +36,12 @@ fn world() -> (Store, i64) {
         .unwrap()
         .id;
     let t = record_run(&s, worker, "do it", item, 1, "implement").unwrap();
-    crate::service::tasks::complete_task(&s, &t, "done").unwrap();
+    // A finished implementation reports, or it reads as a failed attempt.
+    let report = crate::store::TaskReport {
+        outcome: "done".into(),
+        ..Default::default()
+    };
+    crate::service::tasks::complete_task_reported(&s, &t, "done", Some(&report)).unwrap();
     s.set_task_evidence(
         t.id,
         &TaskEvidence {
