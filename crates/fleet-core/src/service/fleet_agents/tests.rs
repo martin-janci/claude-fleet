@@ -631,6 +631,18 @@ mod grant_form {
             trackers: vec![(3, "Acme Jira".into())],
             servers: vec!["graylog".into(), "kb".into(), "tenants".into()],
             shared: vec!["shared:l2-fingerprints".into()],
+            server_secrets: [
+                (
+                    "graylog".to_string(),
+                    vec![
+                        "GRAYLOG_BASE_URL".to_string(),
+                        "GRAYLOG_API_TOKEN".to_string(),
+                    ],
+                ),
+                ("kb".to_string(), Vec::new()),
+                ("tenants".to_string(), vec!["TENANTS_TOKEN".to_string()]),
+            ]
+            .into(),
         }
     }
 
@@ -661,10 +673,13 @@ mod grant_form {
                 vec![
                     "f_store_logs",
                     "f_env_logs",
+                    "f_own_logs",
                     "f_store_tenants",
                     "f_env_tenants",
+                    "f_own_tenants",
                     "f_store_kb",
                     "f_env_kb",
+                    "f_own_kb",
                     "f_store_memory"
                 ],
                 vec!["f_level", "f_hours"],
@@ -741,6 +756,68 @@ mod grant_form {
         bad_env.insert("f_env_logs".into(), "no equals sign".into());
         assert!(answers_to_args(&loaded(), &ctx(), &bad_env).is_err());
         assert!(form::parse_env("A=${B}\n\n C = ${D} ").unwrap().len() == 2);
+    }
+
+    #[test]
+    fn the_own_secrets_switch_names_each_secret_after_the_instance() {
+        assert_eq!(
+            form::own_secret("l2-prod", "logs", "GRAYLOG_API_TOKEN"),
+            "AGENT_L2_PROD_LOGS_GRAYLOG_API_TOKEN"
+        );
+        let spec = grant_form(&loaded(), &ctx(), None);
+        let own = spec.steps[2]
+            .fields
+            .iter()
+            .find(|f| f.name == "f_own_logs")
+            .unwrap();
+        let help = own.help.as_deref().unwrap();
+        assert!(
+            help.contains("AGENT_<INSTANCE>_LOGS_<NAME>")
+                && help.contains("graylog: GRAYLOG_BASE_URL, GRAYLOG_API_TOKEN"),
+            "{help}"
+        );
+        let mut a = answers();
+        a.insert("f_own_logs".into(), true.into());
+        let args = answers_to_args(&loaded(), &ctx(), &a).unwrap();
+        let b = args.bindings.unwrap();
+        assert_eq!(
+            b[0]["env"],
+            json!({
+                "GRAYLOG_API_TOKEN": "${GRAYLOG_PROD_TOKEN}",
+                "GRAYLOG_BASE_URL": "${AGENT_L2_PROD_LOGS_GRAYLOG_BASE_URL}"
+            }),
+            "a line of its own wins"
+        );
+
+        // Edit: the switch is on again, and only the person's own lines show.
+        let rule = AgentRuleRow {
+            id: 9,
+            agent: "fleet".into(),
+            scope: "l2-prod".into(),
+            level: "watch".into(),
+            host_alias: "mercury".into(),
+            project_id: Some(5),
+            config: "{}".into(),
+            granted_by: "x".into(),
+            granted_at: 0,
+            expires_at: None,
+            definition: Some("l2-support".into()),
+            bindings: json!([{ "role": "logs", "server": "graylog", "env": {
+                "GRAYLOG_API_TOKEN": "${AGENT_L2_PROD_LOGS_GRAYLOG_API_TOKEN}",
+                "GRAYLOG_BASE_URL": "${AGENT_L2_PROD_LOGS_GRAYLOG_BASE_URL}" } }])
+            .to_string(),
+        };
+        let spec = grant_form(&loaded(), &ctx(), Some(&rule));
+        let value = |name: &str| {
+            spec.steps
+                .iter()
+                .flat_map(|s| s.fields.iter())
+                .find(|f| f.name == name)
+                .and_then(|f| f.value.clone())
+        };
+        assert_eq!(value("f_own_logs"), Some(json!(true)));
+        assert_eq!(value("f_env_logs"), None);
+        assert_eq!(forms::validate(&spec), Vec::<String>::new());
     }
 
     #[test]
