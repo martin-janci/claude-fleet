@@ -31,6 +31,7 @@ use fleet_update::{
     GitUpdateChannel, Manifests, MemorySequenceStore, Mode, Platform, SequenceStore, Source, Track,
     TrustedKeys, UpdateChannel, UpdateError, UpdatePhase, VerifiedChannel, Version, Window,
 };
+use futures_util::FutureExt as _;
 use serde::Serialize;
 
 use crate::ipc_error::{codes, lock, IpcError};
@@ -1993,19 +1994,29 @@ pub fn spawn_refresh_tick(
                         _ = DECIDE_WAKE.notified() => {}
                         _ = tokio::time::sleep(DECIDE_BEAT) => {}
                     }
-                    match rollout::advance(&store, crate::store::now_unix()) {
-                        Ok(moved) => {
-                            for m in moved {
-                                tracing::info!(component = %m.component, version = %m.version, what = m.what, wave = m.wave + 1, "update rollout moved");
+                    // Caught like a tick pass (`run_cancellable_tick`): a panic
+                    // here ended the pusher for good, and rollouts stopped
+                    // moving while the hub stayed up.
+                    let beat = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        match rollout::advance(&store, crate::store::now_unix()) {
+                            Ok(moved) => {
+                                for m in moved {
+                                    tracing::info!(component = %m.component, version = %m.version, what = m.what, wave = m.wave + 1, "update rollout moved");
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(error = %e.message, "could not advance the update rollouts")
                             }
                         }
-                        Err(e) => {
-                            tracing::warn!(error = %e.message, "could not advance the update rollouts")
+                        let pushed = push_decisions(&store, &keys, crate::store::now_unix());
+                        if !pushed.is_empty() {
+                            tracing::info!(targets = ?pushed, "update decisions changed");
                         }
-                    }
-                    let pushed = push_decisions(&store, &keys, crate::store::now_unix());
-                    if !pushed.is_empty() {
-                        tracing::info!(targets = ?pushed, "update decisions changed");
+                    }));
+                    if beat.is_err() {
+                        tracing::error!(
+                            "the update decision pass panicked; continuing with the next beat"
+                        );
                     }
                 }
             });
@@ -2017,7 +2028,21 @@ pub fn spawn_refresh_tick(
         loop {
             let base = channel_base_url();
             let fetch = HttpsFetch::new(Some(&base));
-            let refreshed = refresh(&store, &fetch, &base, &keys, crate::store::now_unix()).await;
+            let refreshed = std::panic::AssertUnwindSafe(refresh(
+                &store,
+                &fetch,
+                &base,
+                &keys,
+                crate::store::now_unix(),
+            ))
+            .catch_unwind()
+            .await
+            .unwrap_or_else(|_| {
+                Err(IpcError::new(
+                    codes::E_INTERNAL,
+                    "the update channel refresh panicked",
+                ))
+            });
             let outcome = refreshed
                 .as_ref()
                 .map(|_| ())
