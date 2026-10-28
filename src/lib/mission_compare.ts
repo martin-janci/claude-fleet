@@ -8,6 +8,7 @@
 // metrics ride `work { mission }`'s `stats`; the list does not carry them).
 
 import { getMission, type Mission, type MissionDetail } from './missions';
+import { waitShares } from './mission_room';
 
 export type Execution = 'item' | 'lane';
 
@@ -31,6 +32,15 @@ export interface CompareRow {
   idlePct: number;
   /** What it spent per done task, micro-USD; null without a cost. */
   costPerDoneMicros: number | null;
+  /** Each wait cause's share of the span, whole percent (M3). */
+  waits: Record<string, number>;
+}
+
+/** What one mode's ready work waited on most: the cause with the largest
+ *  median share. */
+export interface TopWait {
+  cause: string;
+  pct: number;
 }
 
 /** The median of the rows that have a value, per mode. */
@@ -43,6 +53,7 @@ export interface ModeSummary {
   taskSecs: number | null;
   idlePct: number | null;
   costPerDoneMicros: number | null;
+  topWait: TopWait | null;
 }
 
 /** The states of a mission that has run (a draft has no metrics). */
@@ -69,7 +80,26 @@ export function compareRow(d: MissionDetail): CompareRow | null {
     taskSecs: st.item_secs_p50 ?? null,
     idlePct: Math.round((st.idle_secs * 100) / st.span_secs),
     costPerDoneMicros: per(d.mission.cost_micros ?? null),
+    waits: Object.fromEntries(waitShares(st).map((w) => [w.cause, w.pct])),
   };
+}
+
+/** PURE: a row's largest wait. */
+export function rowTopWait(r: CompareRow): TopWait | null {
+  const [cause, pct] = Object.entries(r.waits).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0] ?? [];
+  return cause ? { cause, pct } : null;
+}
+
+/** PURE: the cause with the largest median share over `rows` (a row that
+ *  never waited on it counts 0). */
+function topWaitOf(rows: CompareRow[]): TopWait | null {
+  const causes = [...new Set(rows.flatMap((r) => Object.keys(r.waits)))].sort();
+  let best: TopWait | null = null;
+  for (const cause of causes) {
+    const pct = median(rows.map((r) => r.waits[cause] ?? 0)) ?? 0;
+    if (pct >= 1 && (!best || pct > best.pct)) best = { cause, pct: Math.round(pct) };
+  }
+  return best;
 }
 
 function median(xs: (number | null)[]): number | null {
@@ -94,6 +124,7 @@ export function summarize(rows: CompareRow[]): ModeSummary[] {
         taskSecs: median(r.map((x) => x.taskSecs)),
         idlePct: median(r.map((x) => x.idlePct)),
         costPerDoneMicros: median(r.map((x) => x.costPerDoneMicros)),
+        topWait: topWaitOf(r),
       };
     })
     .filter((s) => s.missions > 0);

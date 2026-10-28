@@ -45,6 +45,7 @@ mod library;
 mod local_workspaces;
 mod mission_lanes;
 mod mission_loop;
+mod mission_waits;
 mod nl_census;
 mod orchestration;
 mod org_activity;

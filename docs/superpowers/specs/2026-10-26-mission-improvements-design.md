@@ -65,6 +65,13 @@ Jedna úloha sa pripíše prvej príčine v tomto poradí (príčina bližšie k
 
 **Veľkosť** M.
 
+**Ako je to postavené v M3:**
+- Migrácia 214: `mission_waits (orchestration_project_id, cause, secs, open)` a `orchestration_projects.waits_at`. `Store::account_mission_waits(id, now, causes)` pripočíta čas od poslednej pozície príčinám, ktoré boli vtedy otvorené (najviac `WAIT_STEP_MAX_SECS`, 2 h), a otvorí tie, ktoré vidí teraz. Príčina sa teda počíta od chvíle, keď ju loop videl, nie spätne. `mission_waits(id, now)` k otvoreným pridá čas do `now`.
+- Tick (`orchestrate::steps_and_waits`, `orchestrate/waits.rs`): `slot` z porovnania plánu bez stropu behov s plánom pod stropom (minuté pokusy misie sú `person`, lebo ich rieši ask), `lane` z `lanes::gate`, `touches` z `gate_items` a `gate_lane_starts`, `person` z askov a `held` úloh, `limit` z `hold_runs_over_limit` a z plánovača čakajúceho na reset, `grant` keď sú pripravené behy a autonómia pod `AUTO_LEVEL`.
+- Pauza: aktívne misie sa tickujú, pozastavené nie. Preto `set_mission_state` účtuje pri každej zmene stavu: pauza od loopu (brzda) otvorí `brake`, iná pauza `person`, každý iný stav príčiny zavrie.
+- `stats.waits` v `work { mission }`, riadok štatistík („waited on a person 50%, for a slot 17%“, najviac tri príčiny s aspoň 1 % rozpätia) a stĺpec „Waited most“ v Compare (pri misii jej najväčšia príčina, v súhrne príčina s najväčším mediánom podielu).
+- **Odchýlka od návrhu:** jedna úloha sa nepripisuje len prvej príčine. Misia pripočíta čas každej príčine, ktorá v ticku niečo držala, takže poradie v `WAIT_CAUSES` je len poradie zobrazenia.
+
 ## 4. M2: závislá úloha začína z práce svojej závislosti
 
 **Pravidlo** (oba režimy). Keď sa spúšťa implement úloha X v repe R a X závisí (priamo) od hotových úloh D₁…Dₙ v tom istom repe, ktorých vetva ešte nie je v default vetve:
@@ -128,7 +135,7 @@ Línia už build ohrieva sama (jeden worktree na líniu, štafeta ho nemení). N
 | Fáza | Obsah | Správanie | Veľkosť |
 |---|---|---|---|
 | **M1** (postavené) | `tasks.cost_start_micros`, cena úlohy z rozdielov | oprava čísel | S–M |
-| **M3** | `mission_waits`, príčiny v ticku, `stats.waits`, riadok štatistík, Compare | len meranie | M |
+| **M3** (postavené) | `mission_waits`, príčiny v ticku, `stats.waits`, riadok štatistík, Compare | len meranie | M |
 | **M2** | závislá úloha z vetiev závislostí (`item`), merge závislých línií (`lane`), integračná karta pri konflikte, prompt, e2e | mení, odkiaľ beh začína | M |
 | **M7** | `SubagentStart`/`Stop` hooky, timeline, počet na úlohe a v Compare | len zobrazenie | S |
 | **M5** | `policy.lane_test_at = lane` | opt-in na misii | M |

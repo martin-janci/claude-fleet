@@ -50,6 +50,12 @@ pub struct MissionStats {
     /// The part of the span no run was open: time the mission waited on a
     /// person, a slot, a usage limit or the loop's tick.
     pub idle_secs: i64,
+    /// How long some ready work waited, by cause (mission improvements M3,
+    /// `Store::mission_waits`): `person`, `grant`, `limit`, `brake`,
+    /// `slot`, `lane`, `touches`. Causes overlap, so they may sum past
+    /// `span_secs`. Filled by the caller; [`stats`] leaves it empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub waits: BTreeMap<String, i64>,
 }
 
 fn role(t: &TaskRow) -> &str {

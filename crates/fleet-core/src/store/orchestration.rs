@@ -911,6 +911,15 @@ impl Store {
                 ..Default::default()
             },
         )?;
+        // M3: a paused mission waits on whoever resumes it, the brake's
+        // pause on the brake; any other state ends what was waiting (the
+        // loop's next tick opens the causes of an active one).
+        let waits: &[&str] = match to {
+            "paused" if actor == "loop" => &["brake"],
+            "paused" => &["person"],
+            _ => &[],
+        };
+        self.account_mission_waits(id, now, waits)?;
         // Event routines may fire on a mission that finished
         // (`service::routines::FLEET_EVENTS`).
         let kind = match to {

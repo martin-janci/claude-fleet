@@ -9,8 +9,8 @@
   import { get } from 'svelte/store';
   import { formatDuration } from './account_usage';
   import { dollars } from './missions';
-  import { closeMissionCompare, missionList, openMissionRoom } from './mission_room';
-  import { loadCompare, summarize, type CompareRow } from './mission_compare';
+  import { closeMissionCompare, missionList, openMissionRoom, WAIT_LABEL } from './mission_room';
+  import { loadCompare, rowTopWait, summarize, type CompareRow, type TopWait } from './mission_compare';
 
   let rows = $state<CompareRow[]>([]);
   let failed = $state(0);
@@ -34,6 +34,7 @@
   const secs = (n: number | null) => (n == null ? '–' : formatDuration(n));
   const pct = (n: number | null) => (n == null ? '–' : `${Math.round(n)}%`);
   const usd = (n: number | null) => (n == null ? '–' : dollars(Math.round(n)));
+  const wait = (w: TopWait | null) => (w ? `${WAIT_LABEL[w.cause] ?? w.cause} ${w.pct}%` : '–');
 </script>
 
 <div class="scroll">
@@ -46,7 +47,8 @@
     </div>
     <p class="muted small">
       The missions that have run, newest first. Per done task: fewer runs, fewer cold starts (sessions started) and a lower cost are
-      better; idle is the share of the working span with no run open (waiting on a person, a limit or a slot).
+      better; idle is the share of the working span with no run open, and waited most is what held ready work back the longest
+      (a person, a grant, a usage limit, a slot, a lane, overlapping files).
     </p>
     {#if loading}
       <p class="muted" data-testid="mission-compare-loading">Reading the missions…</p>
@@ -56,7 +58,7 @@
       <table class="grid" data-testid="mission-compare-summary">
         <caption class="muted small">Median per mode</caption>
         <thead>
-          <tr><th>Tasks run</th><th>Missions</th><th>Done tasks</th><th>Runs / task</th><th>Cold starts / task</th><th>A task takes</th><th>Idle</th><th>Cost / task</th></tr>
+          <tr><th>Tasks run</th><th>Missions</th><th>Done tasks</th><th>Runs / task</th><th>Cold starts / task</th><th>A task takes</th><th>Idle</th><th>Waited most</th><th>Cost / task</th></tr>
         </thead>
         <tbody>
           {#each summary as s (s.execution)}
@@ -68,6 +70,7 @@
               <td>{num(s.coldStartsPerDone)}</td>
               <td>{secs(s.taskSecs)}</td>
               <td>{pct(s.idlePct)}</td>
+              <td data-testid="mission-compare-wait">{wait(s.topWait)}</td>
               <td>{usd(s.costPerDoneMicros)}</td>
             </tr>
           {/each}
@@ -76,7 +79,7 @@
       <table class="grid" data-testid="mission-compare-rows">
         <caption class="muted small">Each mission</caption>
         <thead>
-          <tr><th>Mission</th><th>Tasks run</th><th>Done</th><th>Runs / task</th><th>Retries</th><th>Cold starts / task</th><th>A task takes</th><th>Idle</th><th>Cost / task</th></tr>
+          <tr><th>Mission</th><th>Tasks run</th><th>Done</th><th>Runs / task</th><th>Retries</th><th>Cold starts / task</th><th>A task takes</th><th>Idle</th><th>Waited most</th><th>Cost / task</th></tr>
         </thead>
         <tbody>
           {#each rows as r (r.id)}
@@ -92,6 +95,7 @@
               <td>{num(r.coldStartsPerDone)}</td>
               <td>{secs(r.taskSecs)}</td>
               <td>{pct(r.idlePct)}</td>
+              <td>{wait(rowTopWait(r))}</td>
               <td>{usd(r.costPerDoneMicros)}</td>
             </tr>
           {/each}

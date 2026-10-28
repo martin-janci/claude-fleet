@@ -2,7 +2,7 @@
 // execution mode.
 import { describe, it, expect } from 'vitest';
 import type { Mission, MissionDetail, MissionStats } from './missions';
-import { compareRow, missionsToCompare, summarize } from './mission_compare';
+import { compareRow, missionsToCompare, rowTopWait, summarize } from './mission_compare';
 
 function mission(over: Partial<Mission> = {}): Mission {
   return {
@@ -86,6 +86,19 @@ describe('the summary per mode', () => {
     expect(s[0]).toMatchObject({ missions: 2, doneTasks: 8, runsPerDone: 2.5, taskSecs: 2000 });
     expect(s[1]).toMatchObject({ missions: 1, runsPerDone: 1.2, coldStartsPerDone: 0.5 });
     expect(summarize(rows.slice(0, 2)).map((x) => x.execution)).toEqual(['item']);
+  });
+});
+
+describe('what ready work waited on', () => {
+  it('a row keeps each cause\'s share and the summary the largest median', () => {
+    const a = compareRow(detail({ id: 1 }, { waits: { slot: 4000, person: 1000 } }))!;
+    const b = compareRow(detail({ id: 2 }, { waits: { slot: 2000 } }))!;
+    const c = compareRow(detail({ id: 3 }, { waits: { person: 6000 } }))!;
+    expect(a.waits).toEqual({ slot: 40, person: 10 });
+    expect(rowTopWait(a)).toEqual({ cause: 'slot', pct: 40 });
+    expect(rowTopWait(compareRow(detail({}, {}))!)).toBeNull();
+    // Medians over the three: slot 20 (40, 20, 0), person 10 (10, 0, 60).
+    expect(summarize([a, b, c])[0].topWait).toEqual({ cause: 'slot', pct: 20 });
   });
 });
 

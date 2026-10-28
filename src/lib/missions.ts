@@ -300,6 +300,10 @@ export interface MissionStats {
   /** First run to the last run's end, and the part of it no run was open. */
   span_secs: number;
   idle_secs: number;
+  /** How long some ready work waited, seconds by cause (M3): `person`,
+   *  `grant`, `limit`, `brake`, `slot`, `lane`, `touches`. They overlap.
+   *  Absent from an older hub. */
+  waits?: Record<string, number>;
 }
 
 /** One live session on a mission's member item (`missions::FinishSession`). */

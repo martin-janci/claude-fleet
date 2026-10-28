@@ -1750,3 +1750,89 @@ fn tasks_that_change_the_same_files_do_not_start_together() {
     let runs = run_items(&s, fx.m.id);
     assert_eq!(runs, vec![a, c], "b waits for a; c says nothing");
 }
+
+/// The causes the loop would book for `id` now (M3).
+fn wait_causes(s: &Store, id: i64) -> Vec<&'static str> {
+    let m = s.get_mission(id).unwrap().unwrap();
+    let a = autonomy(s, &m, now_unix()).unwrap();
+    steps_and_waits(s, &m, &a).unwrap().1.into_iter().collect()
+}
+
+/// Mission improvements M3: each gate that holds back a ready task names
+/// its cause: the slots, a lane, overlapping files.
+#[test]
+fn a_ready_task_held_back_names_why() {
+    let fx = fixture();
+    let (a, b, c) = (member(&fx, "a"), member(&fx, "b"), member(&fx, "c"));
+    let s = lock(&fx.deps.store).unwrap();
+    set_policy(
+        &s,
+        fx.m.id,
+        crate::store::MissionPolicy {
+            max_parallel: 8,
+            ..Default::default()
+        },
+    );
+    assert!(wait_causes(&s, fx.m.id).is_empty(), "every ready task runs");
+    set_policy(
+        &s,
+        fx.m.id,
+        crate::store::MissionPolicy {
+            max_parallel: 1,
+            ..Default::default()
+        },
+    );
+    assert_eq!(wait_causes(&s, fx.m.id), vec!["slot"]);
+    s.set_item_touches(a, &["src/store/**".to_string()])
+        .unwrap();
+    s.set_item_touches(b, &["src/store/mod.rs".to_string()])
+        .unwrap();
+    set_policy(
+        &s,
+        fx.m.id,
+        crate::store::MissionPolicy {
+            max_parallel: 8,
+            ..Default::default()
+        },
+    );
+    assert_eq!(wait_causes(&s, fx.m.id), vec!["touches"]);
+    s.set_item_touches(b, &[]).unwrap();
+    set_policy(
+        &s,
+        fx.m.id,
+        crate::store::MissionPolicy {
+            execution: "lane".into(),
+            max_parallel: 8,
+            ..Default::default()
+        },
+    );
+    s.set_item_lane(fx.m.id, b, Some("backend"), None, "t")
+        .unwrap();
+    s.set_item_lane(fx.m.id, c, Some("backend"), None, "t")
+        .unwrap();
+    assert_eq!(wait_causes(&s, fx.m.id), vec!["lane"]);
+}
+
+/// M3: a tick with ready runs and no grant to take them books a grant
+/// wait; a person's pause books the person until the resume.
+#[tokio::test]
+async fn a_tick_books_its_waits_and_a_pause_waits_on_a_person() {
+    let fx = fixture();
+    member(&fx, "a");
+    let now = now_unix();
+    tick_mission(&fx.deps, fx.m.id, now).await.unwrap();
+    tick_mission(&fx.deps, fx.m.id, now + 60).await.unwrap();
+    let s = lock(&fx.deps.store).unwrap();
+    let w = s.mission_waits(fx.m.id, now + 60).unwrap();
+    assert_eq!(w.get("grant"), Some(&60), "{w:?}");
+    s.set_mission_state(fx.m.id, None, "paused", "ana").unwrap();
+    let paused_at = now_unix();
+    s.set_mission_state(fx.m.id, None, "active", "ana").unwrap();
+    s.account_mission_waits(fx.m.id, paused_at + 30, &[])
+        .unwrap();
+    let w = s.mission_waits(fx.m.id, paused_at + 30).unwrap();
+    assert!(!w.contains_key("brake"), "{w:?}");
+    // The pause and the resume came within a second of each other: the
+    // person's wait is that, not the 30 s after the resume.
+    assert!(w.get("person").copied().unwrap_or(0) <= 1, "{w:?}");
+}

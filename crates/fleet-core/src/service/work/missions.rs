@@ -361,13 +361,10 @@ fn mission_stats(
             .flatten()
             .and_then(|r| r.worktree_id)
     };
-    Ok(stats::stats(
-        items,
-        mission.root_item_id,
-        &attempts,
-        &checkout_of,
-        crate::store::now_unix(),
-    ))
+    let now = crate::store::now_unix();
+    let mut st = stats::stats(items, mission.root_item_id, &attempts, &checkout_of, now);
+    st.waits = s.mission_waits(mission.id, now)?;
+    Ok(st)
 }
 
 /// The running sessions on mission `id`'s member items that `scope` may
