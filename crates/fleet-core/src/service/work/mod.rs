@@ -11,6 +11,7 @@ pub mod brief_draft;
 pub mod buckets;
 pub mod card;
 pub mod confidence;
+pub mod dep_work;
 pub mod describe;
 pub mod detect;
 pub mod ended;

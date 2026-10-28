@@ -382,20 +382,47 @@ async fn begin_task(
     context: Option<&str>,
     preamble: &str,
 ) -> Result<(String, TaskRow), IpcError> {
-    let dir = {
+    let (dir, dep_branches) = {
         let s = lock(&deps.store)?;
-        row.worktree_id
+        let dir = row
+            .worktree_id
             .map(|w| s.worktree_path(w))
             .transpose()?
-            .flatten()
+            .flatten();
+        // M2: what this task depends on in another lane is merged into the
+        // lane's checkout first; this lane's own tasks are in it already.
+        let dep_branches = if role == "implement" {
+            let lane = s.item_lane(item_id)?;
+            crate::service::work::dep_work::unmerged_deps(&s, item_id, lane)?
+        } else {
+            Vec::new()
+        };
+        (dir, dep_branches)
     };
-    let head = match &dir {
-        Some(d) => read_head(deps, &row.host_alias, d).await,
-        None => None,
+    let (merged, head) = match &dir {
+        Some(d) if !dep_branches.is_empty() => {
+            let (merged, head) = crate::service::work::dep_work::merge_into(
+                &deps.ssh,
+                &row.host_alias,
+                d,
+                &dep_branches,
+            )
+            .await;
+            let head = match head {
+                Some(h) => Some(h),
+                None => read_head(deps, &row.host_alias, d).await,
+            };
+            (merged, head)
+        }
+        Some(d) => (Vec::new(), read_head(deps, &row.host_alias, d).await),
+        None => (
+            vec![crate::service::work::dep_work::Merged::Missing; dep_branches.len()],
+            None,
+        ),
     };
     let s = lock(&deps.store)?;
     let (key, title, notes) = key_title(&s, item_id)?;
-    let task_text = task_prompt(
+    let mut task_text = task_prompt(
         &key,
         &title,
         notes.as_deref(),
@@ -403,6 +430,10 @@ async fn begin_task(
         context,
         subagents_on(&s),
     );
+    if let Some(n) = crate::service::work::dep_work::note(&dep_branches, &merged) {
+        task_text.push_str("\n\n");
+        task_text.push_str(&n);
+    }
     let prompt = format!("{preamble}{task_text}");
     let task = run::record_run(&s, row.id, &prompt, item_id, attempt, role)?;
     // The lead's spend so far: this task costs from here (M1).

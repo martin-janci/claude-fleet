@@ -1647,6 +1647,41 @@ else
   check "the fake Claude of that one session got both tasks, the second as the next in its lane" '[ -n "$LDIR" ] && [ "$(grep -c "Next task in your lane" "$LDIR/prompts.log")" = 2 ] && grep -q "Your lane.s brief is in your fleet brief" "$LDIR/prompts.log"' "$(ls "$WLOG"/*/tasks 2>&1; tail -20 "$LDIR/prompts.log" 2>&1)"
   check "the second task's evidence is its own commit only (read from where it began)" '[ "$(attempt_of "${LT2:-0}" evidence.commits_total)" = 1 ] && [ "$(attempt_of "${LT1:-0}" evidence.commits_total)" = 1 ]' "$(jt "$md2" '[.graph.nodes[] | {item_id, ev: .attempt.evidence}]')"
 
+  # --- 12. a task starts from its dependency's work (M2, 2026-10-26) --------
+  # Two tasks of a mission that runs each in its own session, the second
+  # waiting for the first. The first's run commits a file on its branch;
+  # the second, once the first is done, starts from that branch (its PR is
+  # not merged), so its prompt says what its checkout holds and its
+  # evidence is its own commit only (read from after the dependency).
+  echo "-- 12. a dependent task starts from its dependency's work"
+  ms=$(wcall "$TOKW" work_link '{"action":"mission_save","mission":{"name":"E2E deps","goal":"the second task builds on the first"}}')
+  DMID=$(jt "$ms" .id)
+  wcall "$TOKW" work_link "{\"action\":\"mission_repo\",\"mission_id\":${DMID:-0},\"project_id\":${PAPI:-0}}" >/dev/null
+  DT=""
+  for t in "Dep task one" "Dep task two"; do
+    c=$(wcall "$TOKW" work_link "{\"action\":\"create\",\"title\":\"$t\"}")
+    i=$(jt "$c" .id)
+    wcall "$TOKW" work_link "{\"action\":\"mission_item\",\"mission_id\":${DMID:-0},\"item_id\":${i:-0}}" >/dev/null
+    DT="$DT ${i:-0}"
+  done
+  read -r DT1 DT2 <<<"$DT"
+  dp=$(wcall "$TOKW" work_link "{\"action\":\"dep\",\"item_id\":${DT2:-0},\"depends_on\":${DT1:-0}}")
+  wcall "$TOKW" work_link "{\"action\":\"mission_state\",\"mission_id\":${DMID:-0},\"status\":\"active\"}" >/dev/null
+  wcall "$TOKW" work_link "{\"action\":\"mission_grant\",\"mission_id\":${DMID:-0},\"level\":1,\"hours\":1,\"hosts\":[\"local\"]}" >/dev/null
+  dattempt() { jt "$(wcall "$TOKW" work "{\"action\":\"mission\",\"mission_id\":${DMID:-0}}")" ".graph.nodes[] | select(.item_id == $1) | .attempt.$2 // empty"; }
+  sd1=$(wcall "$TOKW" work_link "{\"action\":\"mission_start\",\"mission_id\":${DMID:-0}}")
+  check "Start wave runs the first task; the second waits for it" '[ "$(jt "$sd1" "[.results[] | select(.ok and .step.kind == \"run\") | .step.item_id] | map(tostring) | join(\",\")")" = "${DT1:-x}" ]' "${dp:0:200} | ${sd1:0:800}"
+  until_ok 600 '[ "$(dattempt "${DT1:-0}" state)" = done ]'
+  # Each Start wave takes the steps the plan has now: the first task's
+  # close, then the second task's run once nothing it waits for is open.
+  until_ok 300 'wcall "$TOKW" work_link "{\"action\":\"mission_start\",\"mission_id\":${DMID:-0}}" >/dev/null; [ -n "$(dattempt "${DT2:-0}" state)" ]'
+  until_ok 600 '[ "$(dattempt "${DT2:-0}" state)" = done ]'
+  DDIR=$(grep -l "already holds the work of the tasks this one depends on" "$WLOG"/*/prompts.log 2>/dev/null | head -1 | xargs -r dirname)
+  check "the second task's prompt says its checkout holds the first task's work" '[ -n "$DDIR" ] && grep -q "TASK-${DT2:-x}" "$DDIR/prompts.log" && grep -q "TASK-${DT1:-x} (branch" "$DDIR/prompts.log"' "$(tail -30 "$WLOG"/*/prompts.log 2>&1 | tail -60)"
+  DWT=$(find "$WBASE" -maxdepth 4 -type d -name "task-${DT2:-x}-*" 2>/dev/null | head -1)
+  check "the second task's branch holds the first task's commit and its own" '[ -n "$DWT" ] && [ "$(git -C "$DWT" log --format=%s | grep -c "^fake task")" = 2 ]' "$DWT: $(git -C "$DWT" log --oneline 2>&1 | head -5)"
+  check "the second task's evidence is its own commit only, after the dependency's" '[ "$(dattempt "${DT2:-0}" state)" = done ] && [ "$(dattempt "${DT2:-0}" evidence.commits_total)" = 1 ]' "$(jt "$(wcall "$TOKW" work "{\"action\":\"mission\",\"mission_id\":${DMID:-0}}")" '[.graph.nodes[] | {item_id, state, ev: .attempt.evidence}]')"
+
   # --- operator confirm (M9.7): waits for the owner on a hub (9.2) ----------
   echo "-- operator"
   opc=$(wcall "$TOKW" pair_client '{"name":"ux-agent","mode":"full"}')

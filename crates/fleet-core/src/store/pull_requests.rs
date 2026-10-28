@@ -303,6 +303,18 @@ impl Store {
             .optional()
     }
 
+    /// Whether a merged pull request came from `branch` (mission
+    /// improvements M2): its work is on the base branch, however it was
+    /// merged (a squash leaves no common commit for git to see).
+    pub fn branch_pull_request_merged(&self, branch: &str) -> Result<bool> {
+        self.conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM pull_requests \
+              WHERE state = 'MERGED' AND head_ref = ?1)",
+            params![branch],
+            |r| r.get(0),
+        )
+    }
+
     /// Every pull request, the most recently changed first. `states` narrows
     /// to those states (OPEN, CLOSED, MERGED); empty is all of them. The
     /// filter is SQL, so one state walks `idx_pull_requests_state_updated`

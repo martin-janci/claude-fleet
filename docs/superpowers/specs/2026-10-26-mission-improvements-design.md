@@ -89,6 +89,16 @@ Jedna úloha sa pripíše prvej príčine v tomto poradí (príčina bližšie k
 
 **Veľkosť** M. **Test:** e2e scenár v `hub-e2e.sh`: A → B v režime `item`, B vidí súbor z A; a dve línie, kde úloha línie B závisí od úlohy línie A.
 
+**Ako je to postavené v M2** (`service/work/dep_work.rs`):
+- `unmerged_deps`: priame závislosti úlohy, ktoré sú hotové, v tom istom repe (úloha bez projektu sa berie ako v ľubovoľnom), majú vetvu z implement behu (`run::prior_work`) a ich PR nie je mergnutý (`Store::branch_pull_request_merged`, platí aj pre squash merge, kde git spoločný commit nevidí). Najviac 8.
+- `merge_script` v checkoute úlohy: `git fetch`, potom pre každú vetvu (lokálnu, inak `origin/`) `had` (checkout ju obsahuje), `landed` (default vetva ju obsahuje), `took` (`git merge --no-edit`, s identitou repa, inak fleet), `conflict` (`git merge --abort`) alebo `missing`, a nakoniec `HEAD`.
+- Režim `item` (`run::run_item_with`): len prvá implementácia (bez vlastného skoršieho pokusu, ten už závislosti obsahuje). Checkout začne z vetvy prvej závislosti (`base_branch`, na jej hoste, ak je hore a nikto host nezvolil), ostatné sa mergnú po štarte a pred promptom.
+- Režim `lane` (`lanes::begin_task`): pred každou úlohou sa do checkoutu línie mergnú závislosti z iných línií; závislosti z tej istej línie sa preskočia.
+- `start_head` sa zapíše až po merge, takže evidencia aj review sú len vlastné commity úlohy (v režime `item` je to nové: úloha so závislosťami dostane `start_head` a review nad snapshotom ako úloha línie).
+- Prompt (`dep_work::note`) povie, čo checkout obsahuje a že PR stojí na PR závislostí; vetvu, ktorá sa nemergla čisto alebo chýba, má worker zlúčiť sám ako prvý krok.
+- **Odchýlka od E4:** konflikt pri merge závislostí nevytvára integračnú kartu a úloha nečaká. Merge prebieha až v checkoute novej session a integračná úloha by bola ďalšia session (studený štart navyše), hoci worker úlohy má kontext na vyriešenie konfliktu. Konflikt medzi hotovými vetvami misie aj tak nájde integračná kontrola (`integrate.rs`) pred uzavretím misie.
+- e2e: `hub-e2e.sh` §12 (dve úlohy v režime `item`, druhá závisí od prvej). Lane variant pokrývajú unit testy, e2e nie.
+
 ## 5. M7: subagenti na timeline
 
 - `hooks_install` pridá `SubagentStart` a `SubagentStop` (HTTP hook ako ostatné). Hosty ich dostanú pri re-provisioningu (`provision_stale`), rovnako ako guard v L-fázach.
@@ -136,7 +146,7 @@ Línia už build ohrieva sama (jeden worktree na líniu, štafeta ho nemení). N
 |---|---|---|---|
 | **M1** (postavené) | `tasks.cost_start_micros`, cena úlohy z rozdielov | oprava čísel | S–M |
 | **M3** (postavené) | `mission_waits`, príčiny v ticku, `stats.waits`, riadok štatistík, Compare | len meranie | M |
-| **M2** | závislá úloha z vetiev závislostí (`item`), merge závislých línií (`lane`), integračná karta pri konflikte, prompt, e2e | mení, odkiaľ beh začína | M |
+| **M2** (postavené) | závislá úloha z vetiev závislostí (`item`), merge závislých línií (`lane`), konflikt vyrieši worker (odchýlka od E4), prompt, e2e | mení, odkiaľ beh začína | M |
 | **M7** | `SubagentStart`/`Stop` hooky, timeline, počet na úlohe a v Compare | len zobrazenie | S |
 | **M5** | `policy.lane_test_at = lane` | opt-in na misii | M |
 | **M4** | `policy.lane_pr = draft`, `mission_lanes.pr_url` | opt-in na misii | M |
