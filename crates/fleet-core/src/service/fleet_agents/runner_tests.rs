@@ -2470,6 +2470,7 @@ fn placing_a_review_keeps_the_body_plan_fitted() {
             body: "Off by one.".into(),
             blocking: false,
         }],
+        listed: Vec::new(),
     };
     let req = place_review(&p, "", "[fleet-agent:inst]", max);
     assert!(req.body.contains("… and 3 more findings"), "{}", req.body);
@@ -2730,10 +2731,11 @@ async fn the_support_definition_fingerprints_links_and_files_once() {
     assert_eq!(
         states(&r),
         [
+            ("remember".to_string(), "approved".to_string()),
             ("comment".to_string(), "approved".to_string()),
             ("similar".to_string(), "pending".to_string())
         ],
-        "a similar bug is linked by a person, and no new bug is filed"
+        "remembered; a similar bug is linked by a person, and no new bug is filed"
     );
 
     // No open bug like it: a high-confidence bug is filed, a person approving.
@@ -2759,6 +2761,7 @@ async fn the_support_definition_fingerprints_links_and_files_once() {
     assert_eq!(
         states(&r),
         [
+            ("remember".to_string(), "approved".to_string()),
             ("comment".to_string(), "approved".to_string()),
             ("known".to_string(), "approved".to_string())
         ]
@@ -3101,11 +3104,9 @@ async fn a_review_remembers_its_findings_and_the_next_verdict_waits_on_them() {
     .await;
     let p: Value = serde_json::from_str(&open["pr_review"].payload).unwrap();
     assert_eq!(p["event"], "REQUEST_CHANGES", "a person sends it: {p}");
-    // Not the first review any more: a description is left alone.
-    assert!(matches!(
-        ex.execute(&open["pr_description"]).await,
-        ActionResult::Expired(e) if e.contains("has a description")
-    ));
+    // Not the first review any more: a description is left alone, and
+    // nothing is proposed that sending would expire.
+    assert!(!open.contains_key("pr_description"), "{:?}", open.keys());
 }
 
 #[test]
@@ -3143,6 +3144,43 @@ fn the_verdict_is_adjusted_against_the_previous_review() {
         adjusted_verdict("COMMENT", &Value::Null, &res("open"), &[]),
         "COMMENT",
         "no previous review"
+    );
+    assert_eq!(
+        adjusted_verdict("APPROVE", &prev, &json!(null), &[]),
+        "COMMENT",
+        "a blocker not looked at is not approved over"
+    );
+    let settled = json!({ "findings": [{ "path": "src/b.rs", "line": 9, "blocking": false }] });
+    assert_eq!(
+        adjusted_verdict("APPROVE", &settled, &json!(null), &[]),
+        "APPROVE"
+    );
+}
+
+#[test]
+fn a_review_remembers_the_findings_past_its_line_comments_too() {
+    use super::actions::{remembered_review, PrReviewPayload, ReviewFinding};
+    let f = |line: u32, blocking: bool| ReviewFinding {
+        path: "src/a.rs".into(),
+        line,
+        body: "x".into(),
+        blocking,
+    };
+    let p = PrReviewPayload {
+        action: "review".into(),
+        repo: "acme/pos".into(),
+        number: 4,
+        sha: "abc".into(),
+        event: "COMMENT".into(),
+        body: "b".into(),
+        findings: vec![f(1, false)],
+        listed: vec![f(33, true)],
+    };
+    let r = remembered_review(&p, "COMMENT", 7, 100);
+    assert_eq!(r["findings"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        r["findings"][1],
+        json!({ "path": "src/a.rs", "line": 33, "blocking": true })
     );
 }
 
@@ -3306,8 +3344,12 @@ async fn a_reply_to_a_missing_test_finding_is_judged_and_a_concession_kept() {
         text: r#"{"decision":"concede","reply":"Fair: tests/a.rs covers c().","reason":"covered by tests/a.rs"}"#.into(),
         cost_micros: 0,
     });
+    // A push since the poll: the reply is judged at the new head, not skipped.
+    *f.world.prs.lock().unwrap() = vec![pr(4, "def", false)];
     let out = f.runner().run(&jobs[0], Some(&f.rule)).await;
     assert!(matches!(out, RunOutcome::Done { .. }), "{out:?}");
+    let log = f.world.base.log.lock().unwrap().clone();
+    assert!(log.contains(&"prepare_pr #4@def".to_string()), "{log:?}");
     let (_, prompt) = f.world.base.last.lock().unwrap().clone().unwrap();
     assert!(
         prompt.contains("cover c()") && prompt.contains("It is covered by tests/a.rs"),
@@ -3384,6 +3426,16 @@ async fn a_reply_to_a_missing_test_finding_is_judged_and_a_concession_kept() {
         done.jobs.is_empty(),
         "two rounds: the thread is the people's"
     );
+    // A reply planned before those rounds is not sent past them.
+    let reply = f
+        .actions()
+        .into_iter()
+        .find(|a| a.kind == "pr_reply")
+        .unwrap();
+    assert!(matches!(
+        f.executor().execute(&reply).await,
+        ActionResult::Expired(e) if e.contains("answered 2 times")
+    ));
 }
 
 #[test]
@@ -3538,6 +3590,11 @@ fn an_instance_may_lower_its_budget_never_raise_it() {
     let l = limits(Some("budget"));
     assert_eq!(l.budget_micros(&values(json!({}))), Some(10_000_000));
     assert_eq!(
+        l.budget_micros(&values(json!({ "budget": 0 }))),
+        Some(10_000_000),
+        "0 would hold every run for good: it is no value"
+    );
+    assert_eq!(
         l.budget_micros(&values(json!({ "budget": 2.5 }))),
         Some(2_500_000)
     );
@@ -3584,4 +3641,34 @@ fn an_instance_may_lower_its_budget_never_raise_it() {
     );
     let p = problems(json!({ "budget_input": "budget" }));
     assert!(p.iter().any(|p| p.contains("set it")), "{p:?}");
+}
+
+#[test]
+fn a_context_lookup_may_find_a_pull_requests_own_records() {
+    let problems = |lookup: Value| {
+        let d = definition::parse_value(&json!({
+            "stores": [{ "role": "ex", "kind": "fleet", "label": "Ex" }],
+            "trigger": { "source": "github_prs", "repo": "acme/pos" },
+            "run": { "workspace": "home", "context": [lookup], "output_schema": { "type": "object",
+                "required": ["summary"], "properties": { "summary": { "type": "string" } } } }
+        }))
+        .unwrap();
+        definition::problems(&d, &BTreeMap::new())
+    };
+    assert_eq!(
+        problems(json!({ "store": "ex", "find": "{{subject.repo}}#{{subject.number}}:" })),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        problems(json!({ "store": "ex", "find": "x", "recent": 50 })),
+        Vec::<String>::new()
+    );
+    assert!(
+        problems(json!({ "store": "ex", "find": "x", "recent": 99 }))
+            .iter()
+            .any(|p| p.contains("recent is 1-50"))
+    );
+    assert!(problems(json!({ "store": "ex", "key": "k", "find": "x" }))
+        .iter()
+        .any(|p| p.contains("give key, find or recent")));
 }

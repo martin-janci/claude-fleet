@@ -280,7 +280,7 @@ fn a_run_is_read_only_and_describes_its_answer() {
     );
     assert_problem(
         |v| v["run"]["context"][0]["recent"] = json!(5),
-        "give key or recent",
+        "give key, find or recent",
     );
     assert_problem(
         |v| v["run"]["context"][0]["key"] = json!("{{answer.summary}}"),

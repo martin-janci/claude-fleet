@@ -124,6 +124,10 @@ pub struct Cursor {
     /// `mcp_scan`: the last scan.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scan: Option<i64>,
+    /// `mcp_scan`: the last scan that read its window: the next one reads
+    /// back to it, so a failed scan leaves no gap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scan_ok: Option<i64>,
     /// The first poll: a tracker that is not Jira takes no comment from
     /// before it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1534,9 +1538,13 @@ impl AgentPoller for FleetPoller {
                 if c.scan.is_some_and(|t| now - t < every) {
                     Vec::new()
                 } else {
-                    let prev = c.scan.replace(now);
+                    let prev = c.scan_ok.or(c.scan);
+                    c.scan = Some(now);
                     match self.scan(rule, &inst, prev, now).await {
-                        Ok(j) => j,
+                        Ok(j) => {
+                            c.scan_ok = Some(now);
+                            j
+                        }
                         // A failed scan waits for its next turn.
                         Err(e) => {
                             tracing::warn!(rule_id = rule.id, error = %e, "[agents] fleet: scan failed");
@@ -1713,6 +1721,19 @@ impl FleetRunner {
                 continue;
             };
             let rows = match (&l.key, l.recent) {
+                (None, n) if l.find.is_some() => {
+                    let text = template::render(l.find.as_deref().unwrap_or_default(), ctx);
+                    if text.trim().is_empty() {
+                        continue;
+                    }
+                    s.find_agent_records(
+                        std::slice::from_ref(namespace),
+                        Some(text.trim()),
+                        n.unwrap_or(20).min(CONTEXT_RECENT_MAX) as usize,
+                        now,
+                    )
+                    .unwrap_or_default()
+                }
                 (Some(k), _) => {
                     let key = template::render(k, ctx);
                     if key.trim().is_empty() {
@@ -1811,11 +1832,19 @@ impl FleetRunner {
             Ok(s) => s,
             Err(o) => return o,
         };
+        // A comment asks whatever the head is when it runs: a push since the
+        // poll moves the job to that head rather than skipping it.
+        if let Err(o) = self.current_head(rule, &inst, &mut subject).await {
+            return o;
+        }
         let diff = match self.pull_request(rule, &inst, &subject).await {
             Ok(d) => d,
             Err(o) => return o,
         };
         self.with_review_context(rule, &inst, &mut subject, diff.as_deref(), now);
+        if let Err(o) = self.description_state(rule, &inst, &mut subject).await {
+            return o;
+        }
         let ctx = json!({ "inputs": inst.values, "subject": subject, "now": now });
         let context = self.context(&inst, rule.id, &ctx, now);
         let d = &inst.loaded().definition;
@@ -1931,6 +1960,76 @@ impl FleetRunner {
                 cost_micros: cost,
             },
         }
+    }
+
+    /// `github_comments` / `github_review_replies`: the open pull request's
+    /// head, base and branch now, over what the poll saw.
+    async fn current_head(
+        &self,
+        rule: &AgentRuleRow,
+        inst: &Instance,
+        subject: &mut Value,
+    ) -> Result<(), RunOutcome> {
+        let source = inst.loaded().definition.trigger.source;
+        if !source.is_github() || source == TriggerSource::GithubPrs {
+            return Ok(());
+        }
+        let (Some(repo), Some(number)) = (
+            subject
+                .get("repo")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            subject.get("number").and_then(Value::as_i64),
+        ) else {
+            return Ok(());
+        };
+        let open = self
+            .host
+            .open_prs(&rule.host_alias, &repo)
+            .await
+            .map_err(|e| failed(ErrorKind::Transient, e))?;
+        if let Some(p) = open.iter().find(|p| p.number == number) {
+            subject["head_sha"] = json!(p.head_sha);
+            subject["base_ref"] = json!(p.base_ref);
+            subject["head_ref"] = json!(p.head_ref);
+        }
+        Ok(())
+    }
+
+    /// A definition with a `pr_description` action: whether the pull
+    /// request has a description (`subject.has_description`), so one is
+    /// only written, and only proposed, where it would be sent.
+    async fn description_state(
+        &self,
+        rule: &AgentRuleRow,
+        inst: &Instance,
+        subject: &mut Value,
+    ) -> Result<(), RunOutcome> {
+        let d = &inst.loaded().definition;
+        if !d.trigger.source.is_github()
+            || !d
+                .actions
+                .iter()
+                .any(|a| a.kind == super::definition::ActionKind::PrDescription)
+        {
+            return Ok(());
+        }
+        let (Some(repo), Some(number)) = (
+            subject
+                .get("repo")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            subject.get("number").and_then(Value::as_i64),
+        ) else {
+            return Ok(());
+        };
+        let meta = self
+            .host
+            .pr_meta(&rule.host_alias, &repo, number)
+            .await
+            .map_err(|e| failed(ErrorKind::Transient, e))?;
+        subject["has_description"] = json!(!meta.body.trim().is_empty());
+        Ok(())
     }
 
     /// A pull request's subject gains what the PR reviewer knows of it:
