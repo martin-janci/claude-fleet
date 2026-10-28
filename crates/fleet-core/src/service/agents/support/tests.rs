@@ -393,6 +393,21 @@ async fn an_investigation_runs_in_the_home_with_the_default_skill() {
     );
 }
 
+/// A rule that names no branch reads origin's default, whatever it is
+/// called (papayapos-backend's is `develop`, with no `main`).
+#[tokio::test]
+async fn a_rule_without_a_branch_reads_origins_default() {
+    let f = fx("{}", true);
+    let job = f.job().await;
+    let out = f.runner().run(&job, Some(&f.rule)).await;
+    assert!(matches!(out, RunOutcome::Done { .. }), "{out:?}");
+    assert!(
+        f.host.logged().contains(&"prepare <default>".to_string()),
+        "{:?}",
+        f.host.logged()
+    );
+}
+
 #[tokio::test]
 async fn an_investigation_takes_its_servers_and_skill_from_the_host() {
     let f = fx(

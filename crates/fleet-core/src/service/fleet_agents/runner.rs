@@ -2239,6 +2239,17 @@ impl FleetRunner {
                     .await
                     .map_err(|e| failed(ErrorKind::Transient, e.message))?;
                 base.prune(host, &root).await;
+                // No branch named: origin's default, whatever it is called.
+                let branch = d
+                    .run
+                    .branch
+                    .as_deref()
+                    .map(|b| {
+                        template::render(b, &inst.ctx(crate::store::now_unix()))
+                            .trim()
+                            .to_string()
+                    })
+                    .filter(|b| !b.is_empty());
                 let prepared = match &pr_head {
                     Some((number, sha)) => {
                         self.host
@@ -2246,24 +2257,14 @@ impl FleetRunner {
                             .await
                     }
                     None => {
-                        // No branch named: origin's default, whatever it is called.
-                        let branch = d
-                            .run
-                            .branch
+                        if let Some(b) = branch
                             .as_deref()
-                            .map(|b| {
-                                template::render(b, &inst.ctx(crate::store::now_unix()))
-                                    .trim()
-                                    .to_string()
-                            })
-                            .filter(|b| !b.is_empty());
-                        if let Some(b) = branch.as_deref() {
-                            if !crate::service::agents::workspace::branch_ok(b) {
-                                return Err(failed(
-                                    ErrorKind::Permanent,
-                                    format!("run › branch {b:?} is not a branch name"),
-                                ));
-                            }
+                            .filter(|b| !crate::service::agents::workspace::branch_ok(b))
+                        {
+                            return Err(failed(
+                                ErrorKind::Permanent,
+                                format!("run › branch {b:?} is not a branch name"),
+                            ));
                         }
                         base.prepare(host, &root, job.id, branch.as_deref()).await
                     }
@@ -2281,10 +2282,13 @@ impl FleetRunner {
                             format!("no git checkout at {root}"),
                         ))
                     }
-                    Ok((Prepared::NoRef, _)) => {
+                    Ok((Prepared::NoRef, _)) if pr_head.is_none() => {
                         return Err(failed(
                             ErrorKind::Permanent,
-                            "workspace: origin has no such branch (set run › branch)",
+                            format!(
+                                "{} (set run › branch)",
+                                crate::service::agents::workspace::missing_ref(branch.as_deref())
+                            ),
                         ))
                     }
                     Ok((other, _)) => {
