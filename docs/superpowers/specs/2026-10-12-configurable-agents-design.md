@@ -292,8 +292,11 @@ There is one new table, `agent_records`, with:
 The run reads it two ways:
 - **Before the run**, the definition's `run.context` can name lookups whose
   results go into the prompt, e.g.
-  `{ store: memory, key: "{{subject.key}}" }` or
-  `{ store: memory, recent: 20 }`.
+  `{ store: memory, key: "{{subject.key}}" }`,
+  `{ store: memory, recent: 20 }`, or the newest records whose key or value
+  holds a text, `{ store: exemptions, find: "{{subject.repo}}#{{subject.number}}:",
+  recent: 50 }` (`recent` defaults to 20 there): a subject's own records in a
+  store many instances share.
 - **During the run**, a built-in MCP server `fleet-records`, read-only, is
   scoped to the rule's fleet bindings. It offers `get` and `search` over its
   namespaces only, and the hub serves it through its existing control API with
@@ -549,7 +552,23 @@ The gaps, in the order they close (each its own PR):
    confidence 50, resolutions, the description) and `pr-test-debate`
    (concede or hold; a concession resolves the thread and is recorded in
    the `exemptions` store both bind shared, which the reviewer reads as
-   context).
+   context, found by the pull request's key).
+
+   After review (2026-10-28):
+   - a review remembers every finding, those past the 30 line comments too;
+   - an answer that resolves nothing while a previous finding was blocking
+     does not approve;
+   - a `github_comments` or `github_review_replies` job runs at the pull
+     request's head when it runs, not when it was found;
+   - `pr_reply` counts the instance's rounds and checks the last word again
+     when it is sent;
+   - a reply poll reads every pull request a person replied on;
+   - a definition with a `pr_description` action finds
+     `subject.has_description`, and no description is planned onto a pull
+     request that has one, unless `overwrite` on the first review;
+   - an `mcp_scan` reads back to its last scan that succeeded
+     (`Cursor::scan_ok`);
+   - a `budget_input` of 0 or less is no value.
 
 ## Steps
 

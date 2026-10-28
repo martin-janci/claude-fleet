@@ -112,8 +112,8 @@ Every missing-test finding body MUST tell the developer exactly which tests to w
 ### Accepted exemptions
 
 The Context section lists accepted test exemptions (the author justified skipping a test and
-the justification was accepted), each keyed `owner/repo#number:path:line`; only this pull
-request's apply. Do NOT re-flag those locations unless the code there materially changed since the exemption; treat them as `wont_fix` in resolutions.
+the justification was accepted) for this pull request, each keyed
+`owner/repo#number:path:line`. Do NOT re-flag those locations unless the code there materially changed since the exemption; treat them as `wont_fix` in resolutions.
 
 ## Codebase Access
 
@@ -163,7 +163,8 @@ Answer with only the JSON object your output schema describes:
   `body` (the problem, its impact and the fix; prefix it with its severity label, e.g.
   `issue:`), `severity`, `blocking` and `confidence` (0-100: 90+ for obvious issues, 70-89 for
   likely ones, lower for uncertain observations; fleet leaves out those under 50);
-- `description`: a short Markdown description of what the pull request changes and why, for a
-  pull request whose author wrote none (fleet only writes it then).
+- `description`: only when the subject's `has_description` is false, a short Markdown
+  description of what the pull request changes and why; leave it out otherwise (fleet only
+  writes one onto a pull request that has none).
 
 An empty `findings` array is valid for APPROVE. Don't invent problems.
