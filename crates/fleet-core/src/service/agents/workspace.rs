@@ -175,6 +175,15 @@ pub enum Prepared {
     Nothing,
 }
 
+/// PURE: what a job fails with when origin lacks the ref it asked for
+/// ([`Prepared::NoRef`]): `branch`, or its default branch when `None`.
+pub fn missing_ref(branch: Option<&str>) -> String {
+    match branch {
+        Some(b) => format!("workspace: origin has no branch {b}"),
+        None => "workspace: origin has no default branch".to_string(),
+    }
+}
+
 /// PURE: read [`prepare_script`]'s stdout.
 pub fn parse_prepared(stdout: &str) -> Prepared {
     match crate::service::claude_print::parse_tagged(
@@ -288,6 +297,11 @@ mod tests {
             "{sc}"
         );
         assert_eq!(parse_prepared("FLEET_AGENT_WS=noref\n"), Prepared::NoRef);
+        assert_eq!(
+            missing_ref(Some("main")),
+            "workspace: origin has no branch main"
+        );
+        assert_eq!(missing_ref(None), "workspace: origin has no default branch");
     }
 
     #[test]

@@ -86,6 +86,19 @@ fn github_known_hosts_lines() -> String {
     )
 }
 
+/// [`github_known_hosts_lines`] for a git remote `url` that reaches GitHub
+/// over SSH; nothing for any other (https never reads `known_hosts`).
+fn known_hosts_for(url: &str) -> String {
+    if ["git@github.com:", "ssh://git@github.com/"]
+        .iter()
+        .any(|p| url.starts_with(p))
+    {
+        github_known_hosts_lines()
+    } else {
+        String::new()
+    }
+}
+
 /// Where the project comes from. The hub tool `add_project` serves this
 /// schema, so every variant and field is documented here.
 #[derive(serde::Serialize, Deserialize, rmcp::schemars::JsonSchema)]
@@ -406,11 +419,7 @@ pub(crate) fn clone_script(dest: &str, clone_url: &str) -> String {
          mkdir -p \"$(dirname -- {d})\"\n\
          {known_hosts}\
          git clone {url} {d}\n",
-        known_hosts = if clone_url.starts_with("git@github.com:") {
-            github_known_hosts_lines()
-        } else {
-            String::new()
-        },
+        known_hosts = known_hosts_for(clone_url),
         url = quote(clone_url),
         marker = quote(ALREADY_CLONED_MARKER),
         begin = quote(ORIGIN_URL_BEGIN_MARKER),
@@ -1137,6 +1146,7 @@ fn new_project_script(dest: &str, owner: &str, repo: &str, create_remote: bool) 
              echo {stage_push} >&2\n\
              {known_hosts}\
              git push -u origin main\n",
+            // `gh` picks the remote's protocol, so the keys go in either way.
             known_hosts = github_known_hosts_lines(),
             stage_create = quote(STAGE_GH_CREATE),
             stage_push = quote(STAGE_GH_PUSH),
@@ -1163,7 +1173,7 @@ fn push_only_script(dest: &str, origin_url: &str) -> String {
          echo {stage_push} >&2\n\
          {known_hosts}\
          git push -u origin main\n",
-        known_hosts = github_known_hosts_lines(),
+        known_hosts = known_hosts_for(origin_url),
         d = quote(dest),
         url = quote(origin_url),
         changed = quote(ORIGIN_CHANGED_MARKER),
@@ -2433,6 +2443,7 @@ mod tests {
             .expect("pins github.com");
         assert!(pin < gh.find("git clone").unwrap(), "{gh}");
         assert!(!clone_script("/p/o/r", "file:///x").contains("known_hosts"));
+        assert!(!push_only_script("/p/o/r", "https://github.com/o/r.git").contains("known_hosts"));
         for s in [
             new_project_script("/p/o/r", "o", "r", true),
             push_only_script("/p/o/r", "git@github.com:o/r.git"),

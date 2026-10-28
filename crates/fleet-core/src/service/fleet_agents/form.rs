@@ -55,8 +55,12 @@ fn f_own(role: &str) -> String {
 /// other character `_`. A person may name secrets themselves instead (one
 /// shared by several instances); this is the name the form suggests.
 pub fn own_secret(instance: &str, role: &str, name: &str) -> String {
-    format!("AGENT_{instance}_{role}_{name}")
-        .chars()
+    secret_word(&format!("AGENT_{instance}_{role}_{name}"))
+}
+
+/// PURE: `s` upper case, any other character than a letter or digit `_`.
+fn secret_word(s: &str) -> String {
+    s.chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() {
                 c.to_ascii_uppercase()
@@ -263,7 +267,7 @@ fn current(rule: Option<&AgentRuleRow>, ctx: &FormContext) -> Map<String, Value>
             out.insert(f_store(&b.role), s.clone().into());
             // Every secret the server reads named after this instance: the
             // switch, and those lines left out.
-            let names = ctx.server_secrets.get(s).cloned().unwrap_or_default();
+            let names = ctx.server_secrets.get(s).map_or(&[][..], Vec::as_slice);
             let own = |k: &str, v: &str| v == format!("${{{}}}", own_secret(&r.scope, &b.role, k));
             let all_own = !names.is_empty()
                 && names
@@ -385,6 +389,13 @@ pub fn grant_form(loaded: &Loaded, ctx: &FormContext, rule: Option<&AgentRuleRow
 
     // 3. Stores
     let mut stores = Vec::new();
+    // What each catalog server reads, for the own-secrets switch's help.
+    let reads: Vec<String> = ctx
+        .server_secrets
+        .iter()
+        .filter(|(_, names)| !names.is_empty())
+        .map(|(s, names)| format!("{s}: {}", names.join(", ")))
+        .collect();
     for r in &d.stores {
         match r.kind {
             StoreKind::Mcp => {
@@ -428,25 +439,12 @@ pub fn grant_form(loaded: &Loaded, ctx: &FormContext, rule: Option<&AgentRuleRow
                     max_len: Some(2000),
                     ..field(&f_env(&r.role), FieldType::Textarea, &format!("{} secrets", r.label))
                 }));
-                let reads: Vec<String> = ctx
-                    .server_secrets
-                    .iter()
-                    .filter(|(_, names)| !names.is_empty())
-                    .map(|(s, names)| format!("{s}: {}", names.join(", ")))
-                    .collect();
                 stores.push(with_value(FormField {
                     help: Some(format!(
                         "On: each secret the server reads is this instance's own, \
                          AGENT_<INSTANCE>_{}_<NAME> (add them under Assets › Secrets; a line above \
                          still wins). Off: the hub's secrets under the server's own names{}.",
-                        r.role
-                            .chars()
-                            .map(|c| if c.is_ascii_alphanumeric() {
-                                c.to_ascii_uppercase()
-                            } else {
-                                '_'
-                            })
-                            .collect::<String>(),
+                        secret_word(&r.role),
                         if reads.is_empty() {
                             String::new()
                         } else {
@@ -592,8 +590,11 @@ pub fn answers_to_args(
                 let mut env = parse_env(s(&f_env(&r.role)).unwrap_or_default())
                     .map_err(|e| format!("{}: {e}", f_env(&r.role)))?;
                 if checked.get(&f_own(&r.role)).and_then(Value::as_bool) == Some(true) {
-                    let names = ctx.server_secrets.get(chosen).cloned().unwrap_or_default();
-                    env = with_own_secrets(env, s(F_INSTANCE).unwrap_or_default(), &r.role, &names);
+                    let names = ctx
+                        .server_secrets
+                        .get(chosen)
+                        .map_or(&[][..], Vec::as_slice);
+                    env = with_own_secrets(env, s(F_INSTANCE).unwrap_or_default(), &r.role, names);
                 }
                 Binding {
                     role: r.role.clone(),
