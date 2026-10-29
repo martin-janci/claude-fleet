@@ -108,6 +108,13 @@ Jedna úloha sa pripíše prvej príčine v tomto poradí (príčina bližšie k
 
 **Veľkosť** S.
 
+**Ako je to postavené v M7:**
+- `hooks_install::FLEET_HOOK_EVENTS` má `SubagentStart` a `SubagentStop` (HTTP, bez matchera). Mení to odtlačok provisioningu, takže každý host je `provision_stale` a hooky dostane pri re-provisioningu.
+- `hooks::apply_subagent_hook`: na aktuálnej konverzácii zapíše tichú udalosť timeline (`insert_session_event_quietly`, bez živého rámca klientom) `subagent_started` / `subagent_stopped` s `agent_type` ako detailom, ak je to meno (písmená, číslice, `-_:.`, najviac 64 znakov).
+- `Store::task_subagents(task, now)`: `subagent_started` udalosti session workera od štartu úlohy po jej koniec, podľa typu (bez typu `other`). Číta ich len detail misie: `graph.nodes[].attempt.subagents` a `stats.subagents` (súčet cez pokusy misie), nie tick.
+- Riadok úlohy ich ukazuje v riadku pokusu („3 subagents (Explore 2, general-purpose 1)“), Compare má stĺpec „Subagents / task“.
+- Vedúci línie robí viac úloh v jednej session; okno úlohy (od jej štartu po koniec) rozdelí subagentov medzi úlohy.
+
 ## 6. M5: testy na konci línie
 
 `policy.lane_test_at: item | lane` (predvolene `item`, D7 sa nemení).
@@ -147,7 +154,7 @@ Línia už build ohrieva sama (jeden worktree na líniu, štafeta ho nemení). N
 | **M1** (postavené) | `tasks.cost_start_micros`, cena úlohy z rozdielov | oprava čísel | S–M |
 | **M3** (postavené) | `mission_waits`, príčiny v ticku, `stats.waits`, riadok štatistík, Compare | len meranie | M |
 | **M2** (postavené) | závislá úloha z vetiev závislostí (`item`), merge závislých línií (`lane`), konflikt vyrieši worker (odchýlka od E4), prompt, e2e | mení, odkiaľ beh začína | M |
-| **M7** | `SubagentStart`/`Stop` hooky, timeline, počet na úlohe a v Compare | len zobrazenie | S |
+| **M7** (postavené) | `SubagentStart`/`Stop` hooky, timeline, počet na úlohe a v Compare | len zobrazenie | S |
 | **M5** | `policy.lane_test_at = lane` | opt-in na misii | M |
 | **M4** | `policy.lane_pr = draft`, `mission_lanes.pr_url` | opt-in na misii | M |
 | **M6** | `orchestrator.build_cache` (sccache) | opt-in nastavenie | S–M |

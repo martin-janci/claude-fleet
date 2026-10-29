@@ -79,6 +79,10 @@ pub struct HookPayload {
     /// plugin, not by a settings hook): the next prompt Claude Code proposes
     /// after a turn. Stored on the row; never logged.
     pub suggestion: Option<String>,
+    /// `SubagentStart` / `SubagentStop`: the subagent's type (`Explore`,
+    /// `general-purpose`, a catalog agent's name). Stored as the timeline
+    /// event's detail when it reads as a name.
+    pub agent_type: Option<String>,
 }
 
 /// `X-Fleet-Pane`: `$TMUX_PANE` of the hook's process (`%` + digits). Empty

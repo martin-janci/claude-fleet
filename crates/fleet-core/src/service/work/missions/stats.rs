@@ -56,6 +56,14 @@ pub struct MissionStats {
     /// `span_secs`. Filled by the caller; [`stats`] leaves it empty.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub waits: BTreeMap<String, i64>,
+    /// Subagents the mission's workers started during its attempts
+    /// (mission improvements M7). Filled by the caller, as `waits` is.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub subagents: u32,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 fn role(t: &TaskRow) -> &str {

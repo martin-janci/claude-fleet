@@ -90,6 +90,11 @@ pub struct AttemptBrief {
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub evidence: Option<crate::store::TaskEvidence>,
+    /// The subagents its worker used during it, by type (mission
+    /// improvements M7, `Store::task_subagents`). Filled by a mission's
+    /// detail read only; empty elsewhere.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub subagents: BTreeMap<String, u32>,
 }
 
 /// Longest summary a brief carries.
@@ -112,6 +117,7 @@ fn brief(t: &crate::store::TaskRow) -> AttemptBrief {
         summary,
         error: t.error.clone(),
         evidence: t.evidence.clone(),
+        subagents: BTreeMap::new(),
     }
 }
 

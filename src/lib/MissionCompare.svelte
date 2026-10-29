@@ -47,7 +47,7 @@
     </div>
     <p class="muted small">
       The missions that have run, newest first. Per done task: fewer runs, fewer cold starts (sessions started) and a lower cost are
-      better; idle is the share of the working span with no run open, and waited most is what held ready work back the longest
+      better, and subagents are the helpers a worker started for reading and review; idle is the share of the working span with no run open, and waited most is what held ready work back the longest
       (a person, a grant, a usage limit, a slot, a lane, overlapping files).
     </p>
     {#if loading}
@@ -58,7 +58,7 @@
       <table class="grid" data-testid="mission-compare-summary">
         <caption class="muted small">Median per mode</caption>
         <thead>
-          <tr><th>Tasks run</th><th>Missions</th><th>Done tasks</th><th>Runs / task</th><th>Cold starts / task</th><th>A task takes</th><th>Idle</th><th>Waited most</th><th>Cost / task</th></tr>
+          <tr><th>Tasks run</th><th>Missions</th><th>Done tasks</th><th>Runs / task</th><th>Cold starts / task</th><th>Subagents / task</th><th>A task takes</th><th>Idle</th><th>Waited most</th><th>Cost / task</th></tr>
         </thead>
         <tbody>
           {#each summary as s (s.execution)}
@@ -68,6 +68,7 @@
               <td>{s.doneTasks}</td>
               <td>{num(s.runsPerDone)}</td>
               <td>{num(s.coldStartsPerDone)}</td>
+              <td>{num(s.subagentsPerDone)}</td>
               <td>{secs(s.taskSecs)}</td>
               <td>{pct(s.idlePct)}</td>
               <td data-testid="mission-compare-wait">{wait(s.topWait)}</td>
@@ -79,7 +80,7 @@
       <table class="grid" data-testid="mission-compare-rows">
         <caption class="muted small">Each mission</caption>
         <thead>
-          <tr><th>Mission</th><th>Tasks run</th><th>Done</th><th>Runs / task</th><th>Retries</th><th>Cold starts / task</th><th>A task takes</th><th>Idle</th><th>Waited most</th><th>Cost / task</th></tr>
+          <tr><th>Mission</th><th>Tasks run</th><th>Done</th><th>Runs / task</th><th>Retries</th><th>Cold starts / task</th><th>Subagents / task</th><th>A task takes</th><th>Idle</th><th>Waited most</th><th>Cost / task</th></tr>
         </thead>
         <tbody>
           {#each rows as r (r.id)}
@@ -93,6 +94,7 @@
               <td>{num(r.runsPerDone)}</td>
               <td>{r.retries}</td>
               <td>{num(r.coldStartsPerDone)}</td>
+              <td>{num(r.subagentsPerDone)}</td>
               <td>{secs(r.taskSecs)}</td>
               <td>{pct(r.idlePct)}</td>
               <td>{wait(rowTopWait(r))}</td>

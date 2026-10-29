@@ -97,6 +97,7 @@ describe('what ready work waited on', () => {
     expect(a.waits).toEqual({ slot: 40, person: 10 });
     expect(rowTopWait(a)).toEqual({ cause: 'slot', pct: 40 });
     expect(rowTopWait(compareRow(detail({}, {}))!)).toBeNull();
+    expect(compareRow(detail({}, { subagents: 6 }))!.subagentsPerDone).toBe(1.5);
     // Medians over the three: slot 20 (40, 20, 0), person 10 (10, 0, 60).
     expect(summarize([a, b, c])[0].topWait).toEqual({ cause: 'slot', pct: 20 });
   });

@@ -34,6 +34,8 @@ export interface CompareRow {
   costPerDoneMicros: number | null;
   /** Each wait cause's share of the span, whole percent (M3). */
   waits: Record<string, number>;
+  /** Subagents started per done task (M7); null before one is done. */
+  subagentsPerDone: number | null;
 }
 
 /** What one mode's ready work waited on most: the cause with the largest
@@ -54,6 +56,7 @@ export interface ModeSummary {
   idlePct: number | null;
   costPerDoneMicros: number | null;
   topWait: TopWait | null;
+  subagentsPerDone: number | null;
 }
 
 /** The states of a mission that has run (a draft has no metrics). */
@@ -81,6 +84,7 @@ export function compareRow(d: MissionDetail): CompareRow | null {
     idlePct: Math.round((st.idle_secs * 100) / st.span_secs),
     costPerDoneMicros: per(d.mission.cost_micros ?? null),
     waits: Object.fromEntries(waitShares(st).map((w) => [w.cause, w.pct])),
+    subagentsPerDone: per(st.subagents ?? 0),
   };
 }
 
@@ -125,6 +129,7 @@ export function summarize(rows: CompareRow[]): ModeSummary[] {
         idlePct: median(r.map((x) => x.idlePct)),
         costPerDoneMicros: median(r.map((x) => x.costPerDoneMicros)),
         topWait: topWaitOf(r),
+        subagentsPerDone: median(r.map((x) => x.subagentsPerDone)),
       };
     })
     .filter((s) => s.missions > 0);

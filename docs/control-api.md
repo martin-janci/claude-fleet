@@ -2089,6 +2089,8 @@ the session continues.
 | `Notification` | `quota_auto_resume_disabled` | same | `blocked` | `notification` — type |
 | `Notification` | `quota_auto_resume_fired` | same | `working`, stuck cleared | `notification` — type |
 | `PostToolUse` | `EnterWorktree\|ExitWorktree` | `tool_name`, `tool_input`, `tool_response` | worktree row registered / removed | — |
+| `SubagentStart` | all | `session_id`, `agent_type` | none | `subagent_started` — type (quiet: no live event) |
+| `SubagentStop` | all | `session_id`, `agent_type` | none | `subagent_stopped` — type (quiet) |
 | `PreToolUse` | `Bash` (command hook, prefiltered) | `tool_name`, `tool_input.command` | none; answers `deny` for a mission's worker running a person's step (orchestration §7.2) | — |
 | `PromptSuggestion` | — (fleet's plugin, not a settings hook) | `session_id`, `suggestion` | `prompt_suggestion` set on the current conversation's row (one line, at most 300 chars, no bidi or zero-width characters); dropped while the row is `working` (a late POST the next prompt overtook); the next `UserPromptSubmit`, `Stop`/`StopFailure`, a genuine `SessionStart` or `SessionEnd` clears it | — |
 

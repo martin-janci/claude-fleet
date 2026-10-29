@@ -175,6 +175,7 @@ fn attempt(task_id: i64, error: &str) -> AttemptBrief {
         summary: Some("a summary".into()),
         error: Some(error.into()),
         evidence: None,
+        subagents: Default::default(),
     }
 }
 
