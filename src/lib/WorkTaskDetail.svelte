@@ -45,6 +45,7 @@
   import { tablistKeys } from './tablist_keys';
   import MarkdownView from './MarkdownView.svelte';
   import TaskResultPanel from './TaskResultPanel.svelte';
+  import TicketCheckCard from './TicketCheckCard.svelte';
   import { ASK_ABOUT_RESULT, workResult, type TaskResultView } from './task_result';
   import Icon from './kit/Icon.svelte';
   import { copyText } from './clipboard';
@@ -1037,7 +1038,7 @@
 
     {#if tab === 'activity'}
       <div class="pane-body">
-        {#if !result && !detail?.last_outcome && !detail?.placement && (detail?.steps ?? []).length === 0 && events.length === 0}
+        {#if !result && !detail?.check && !detail?.last_outcome && !detail?.placement && (detail?.steps ?? []).length === 0 && events.length === 0}
           <p class="muted" data-testid="work-task-no-activity">Nothing has happened on this task yet.</p>
         {/if}
         {#if events.length > 0}
@@ -1064,6 +1065,12 @@
               onOpenTask={(id) => selectedTaskId.set(`item:${id}`)}
               onChanged={() => void load(taskId)}
             />
+          </section>
+        {/if}
+
+        {#if detail?.check && task.item_id != null}
+          <section aria-label="AI check" data-testid="work-task-check">
+            <TicketCheckCard check={detail.check} itemId={task.item_id} onChanged={() => void load(taskId)} />
           </section>
         {/if}
 

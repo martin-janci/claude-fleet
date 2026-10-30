@@ -474,6 +474,8 @@ pub fn set_done_when(
 /// `line: "run evidence"` (`gate::EVIDENCE_LINE`) is the completion gate's
 /// override for an implement run that left no git evidence: `ok: true`
 /// needs a `note`, the reason, and holds until a newer implement run.
+/// `line: "ai check"` (`ticket_check::CHECK_LINE`) accepts an AI check
+/// that did not pass.
 pub fn verify(
     args: &WorkLinkArgs,
     store: &Mutex<Store>,
@@ -509,6 +511,17 @@ pub fn verify(
             return Err(IpcError::new(
                 codes::E_INVALID,
                 "overriding the run evidence needs a note: the reason",
+            ));
+        }
+    } else if !own_line && line == super::ticket_check::CHECK_LINE {
+        // Accept anyway: a person overrules an AI check that did not pass
+        // (`ticket_check`); it holds until a newer check.
+        if s.latest_item_task(item_id, super::ticket_check::ROLE)?
+            .is_none()
+        {
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                format!("work item {item_id} has no AI check to accept"),
             ));
         }
     } else if !own_line {

@@ -13536,6 +13536,19 @@ const WORK_ACTION_NO_GATE: &[(&str, &str, &str)] = &[
     ),
     (
         "work_link",
+        "check",
+        "an AI check of a work ITEM's finished work, a headless run with no \
+         worker session; refused outright to a per-host token, a bound client \
+         and the operator, as `verify` is",
+    ),
+    (
+        "work_link",
+        "check_setup",
+        "a project's AI check switch (a project, not a session); refused as \
+         `check` is",
+    ),
+    (
+        "work_link",
         "mission_delete",
         "a draft or finished mission; its items stay",
     ),

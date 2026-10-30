@@ -1141,8 +1141,11 @@ ce84e5d28 (migration 201) they also include more session kinds
 (`fleet_events`, written by `service/fleet_events.rs`'s watcher and by
 `set_mission_state`): `host_offline` / `host_online` / `host_low`,
 `account_limited` / `account_available`, `login_signed_out`,
-`mission_done` / `mission_failed`; any event routine but an account or
-mission one may narrow to one host (`event_host`). The scheduler stops on
+`mission_done` / `mission_failed`, and since migration 213 the ticket
+events `ticket_done` / `check_passed` / `check_failed` of the AI check on
+done (work-graph.md; built, OFF per project until a person turns it on);
+any event routine but an account, mission or ticket one may narrow to one
+host (`event_host`). The scheduler stops on
 `automation.paused`, a fire past the routine's day budget is skipped, a run
 past its run budget fails and pauses the routine, and a run whose account
 is at or past `accounts.pause_at` is skipped (8.7). M15 G3.8 (migration

@@ -927,6 +927,12 @@ pub struct TaskDetail {
     /// ticket, or where no tracker's admin turned creating on.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub promote_targets: Vec<super::promote::PromoteTarget>,
+    /// The AI check of the task's finished work (`ticket_check`): its
+    /// verdict, or Test now when there is work and no check of it. Absent
+    /// with neither, and for an agent (the tester's words are a person's
+    /// to read).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check: Option<super::ticket_check::TicketCheckView>,
 }
 
 /// The task one of a session's links points at, briefly.
@@ -3900,6 +3906,13 @@ pub fn task(
         }
         _ => (None, Vec::new()),
     };
+    let check = match item {
+        Some(i) if !matches!(scope, OrgScope::Host { .. }) => {
+            let s = lock(store)?;
+            super::ticket_check::view(&s, &i.item)?
+        }
+        _ => None,
+    };
     let excerpt = meta.description.clone().filter(|d| !d.trim().is_empty());
     // The full length and whether the answer shows less of it, for every
     // caller: a person's screen has no fence notice to read it from. The
@@ -4071,6 +4084,7 @@ pub fn task(
         attachments,
         promotion,
         promote_targets,
+        check,
     })
 }
 

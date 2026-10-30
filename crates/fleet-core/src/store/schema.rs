@@ -434,6 +434,17 @@ fn work_items_has_touches(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 213: `projects` already has its
+/// `check_mode` column (the migration adds it and `check_command` together).
+fn projects_has_check_mode(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('projects') WHERE name = 'check_mode'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 210: `tasks` already has its
 /// `start_head` column.
 fn tasks_has_start_head(conn: &Connection) -> rusqlite::Result<bool> {
@@ -2443,6 +2454,13 @@ const MIGRATIONS: &[Migration] = &[
         version: 212,
         sql: include_str!("../../migrations/212_routine_seen.sql"),
         already_applied: Some(routines_has_track_seen),
+    },
+    // AI check on done: a project's check switch and test command. Two ADD
+    // COLUMNs, so guarded.
+    Migration {
+        version: 213,
+        sql: include_str!("../../migrations/213_project_checks.sql"),
+        already_applied: Some(projects_has_check_mode),
     },
 ];
 
