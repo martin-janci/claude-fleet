@@ -739,6 +739,17 @@ export function eventSentence(e: MissionEvent): string {
     }
     case 'revoked':
       return 'Grant revoked';
+    case 'access_check': {
+      // What the grant's runs can reach (access review F6): the hosts and
+      // logins checked, the MCP servers shared into a login, what waits on
+      // a person (one ask card says what).
+      const targets = Array.isArray(p.targets) ? (p.targets as Record<string, unknown>[]) : [];
+      const shared = targets.flatMap((t) => (Array.isArray(t.shared) ? (t.shared as unknown[]).map(String) : []));
+      const problems = typeof p.problems === 'number' ? p.problems : 0;
+      const checked = `Checked access on ${targets.length} host${targets.length === 1 ? '' : 's'}`;
+      const share = shared.length ? `; shared ${[...new Set(shared)].join(', ')} with the run's login` : '';
+      return `${checked}${share}${problems ? `; ${problems} ${problems === 1 ? 'thing needs' : 'things need'} you` : '; all reachable'}`;
+    }
     case 'budget':
     case 'no_progress':
       return `Paused: ${String(p.why ?? '')}`;

@@ -44,9 +44,26 @@ Keychain entry is per config dir too.
 
 Because the profile's `.claude.json` is its own, so are its user-scope MCP
 servers. Provisioning a host (not the `content_only` refresh) merges fleet's
-`claude-fleet` entry into every profile's `.claude.json`; a profile added
-since then has no fleet MCP server until the host is provisioned again, and
-a session picks the entry up only when it starts.
+`claude-fleet` entry into every profile's `.claude.json`, and with it every
+user-scope MCP server of the host's own `~/.claude.json` (Jira, a company's
+servers…; the host's entry wins over a profile's of the same name, a server
+only the profile has is kept). A mission's grant does the same for the
+logins its runs will use, once per grant (the access check, below). A
+profile added since then has neither until one of the two runs, and a
+session picks the servers up only when it starts.
+
+An OAuth server's sign-in is not shared: Claude Code keeps it with the
+login (`.credentials.json`, or the Keychain on macOS), so such a server asks
+to be signed in once under each login
+(`CLAUDE_CONFIG_DIR=~/.claude-profiles/<name> claude`, then `/mcp`).
+
+**The access check.** When a mission's grant lets the loop act, the loop
+looks once where the grant's runs will go (its hosts, else placement's pick
+for each repo) and under which login, on provisioned hosts: it shares the
+host's MCP servers into that login, names a server signed in on the host's
+login but not on this one, asks each repo's `origin` for its `HEAD`, and
+compares the hosts' organisation with the tasks'. The mission's log gets one
+`access_check` event; anything a person must do is one ask card.
 
 Sharing `projects/` is what lets a conversation move between logins: the
 transcript is in the same place under every profile, so `--resume` finds it.

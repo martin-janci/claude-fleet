@@ -433,17 +433,27 @@ async fn profile_names(ssh: &dyn SshExec, host: &str) -> Result<Vec<String>, Ipc
 /// read → merge → back up → write as the host's own file, except that a
 /// profile whose entry is already current is left alone: a running Claude
 /// rewrites that file all the time.
+///
+/// The host's own user-scope MCP servers go in too ([`share_mcp_servers`]):
+/// a mission run under a second login otherwise starts without the Jira or
+/// company servers the host's login has.
 async fn provision_profiles(
     ssh: &dyn SshExec,
     host: &str,
     base: &HubBase,
     token: &str,
 ) -> Result<(), IpcError> {
-    for name in profile_names(ssh, host).await? {
+    let names = profile_names(ssh, host).await?;
+    if names.is_empty() {
+        return Ok(());
+    }
+    let host_json = read_host_file(ssh, host, CLAUDE_JSON).await?;
+    for name in names {
         let dir = format!("{PROFILES_DIR}/{name}");
         let path = format!("{dir}/.claude.json");
         let existing = read_host_file(ssh, host, &path).await?;
         let merged = merge_mcp_entry(&existing, &base.mcp_url(), token)
+            .and_then(|m| share_mcp_servers(&m, &host_json).map(|(out, _)| out))
             .map_err(|e| IpcError::new(&e.code, format!("profile {name}: {}", e.message)))?;
         if serde_json::from_str::<serde_json::Value>(&existing).ok()
             == serde_json::from_str::<serde_json::Value>(&merged).ok()
@@ -457,6 +467,107 @@ async fn provision_profiles(
         write_host_file_secret(ssh, host, &dir, &path, &merged).await?;
     }
     Ok(())
+}
+
+/// The fleet's own entry, which [`merge_mcp_entry`] writes per file with
+/// that file's token: never copied from one file into another.
+const FLEET_MCP_NAME: &str = "claude-fleet";
+
+/// PURE: `profile_json` with every user-scope MCP server of `host_json`
+/// (the host's `~/.claude.json`) put in, and the names it added or changed.
+/// The host's entry wins over a profile's entry of the same name, as every
+/// other shared file does (docs/accounts.md: a profile shares everything
+/// but the login); a server only the profile has is kept. Fleet's own entry
+/// is never copied. Nothing to change returns `profile_json` as it is, so a
+/// caller can tell a no-op by comparing.
+///
+/// What is not shared: an OAuth server's sign-in, which Claude Code keeps
+/// with the login (`.credentials.json` or the Keychain), so such a server
+/// still asks to be signed in once under each login.
+pub fn share_mcp_servers(
+    profile_json: &str,
+    host_json: &str,
+) -> Result<(String, Vec<String>), IpcError> {
+    let host = parse_claude_json(host_json)?;
+    let Some(shared) = host.get("mcpServers").and_then(|v| v.as_object()) else {
+        return Ok((profile_json.to_string(), Vec::new()));
+    };
+    let mut root = parse_claude_json(profile_json)?;
+    let servers = root
+        .as_object_mut()
+        .unwrap()
+        .entry("mcpServers")
+        .or_insert_with(|| serde_json::json!({}));
+    let Some(servers) = servers.as_object_mut() else {
+        return Err(IpcError::new(
+            codes::E_PROVISION,
+            "mcpServers is not a JSON object",
+        ));
+    };
+    let mut changed = Vec::new();
+    for (name, entry) in shared {
+        if name == FLEET_MCP_NAME || servers.get(name) == Some(entry) {
+            continue;
+        }
+        servers.insert(name.clone(), entry.clone());
+        changed.push(name.clone());
+    }
+    if changed.is_empty() {
+        return Ok((profile_json.to_string(), changed));
+    }
+    let out = serde_json::to_string_pretty(&root)
+        .map_err(|e| IpcError::new(codes::E_PROVISION, format!("serialize: {e}")))?;
+    Ok((out, changed))
+}
+
+/// The user-scope MCP server names in a `.claude.json`, fleet's own left out.
+pub fn mcp_server_names(claude_json: &str) -> Vec<String> {
+    parse_claude_json(claude_json)
+        .ok()
+        .and_then(|v| v.get("mcpServers").and_then(|m| m.as_object()).cloned())
+        .map(|m| m.keys().filter(|k| *k != FLEET_MCP_NAME).cloned().collect())
+        .unwrap_or_default()
+}
+
+/// [`share_mcp_servers`] on a host, for one login `profile`: read both
+/// files, merge, back the profile's file up and write it only if it still
+/// holds what was read (a live session under that login rewrites it all
+/// the time), reading again when it changed meanwhile. The names it added
+/// or changed; empty when the profile already had them all. A session picks
+/// a server up when it starts.
+pub async fn share_mcp_servers_into(
+    ssh: &dyn SshExec,
+    host: &str,
+    profile: &str,
+) -> Result<Vec<String>, IpcError> {
+    crate::validate::claude_profile(profile)?;
+    let dir = format!("{PROFILES_DIR}/{profile}");
+    let path = format!("{dir}/.claude.json");
+    let backup = format!("{path}.fleet-bak");
+    let mut last = None;
+    for _ in 0..MCP_ENTRY_TRIES {
+        let host_json = read_host_file(ssh, host, CLAUDE_JSON).await?;
+        let existing = read_host_file(ssh, host, &path).await?;
+        let (merged, changed) = share_mcp_servers(&existing, &host_json)
+            .map_err(|e| IpcError::new(&e.code, format!("profile {profile}: {}", e.message)))?;
+        if changed.is_empty() {
+            return Ok(changed);
+        }
+        if !existing.trim().is_empty() {
+            write_host_file_secret(ssh, host, &dir, &backup, &existing).await?;
+        }
+        let unchanged = Unchanged {
+            expected: &existing,
+            backup: (!existing.trim().is_empty()).then_some(backup.as_str()),
+        };
+        match write_host_file_secret_guarded(ssh, host, &dir, &path, &merged, Some(unchanged)).await
+        {
+            Ok(()) => return Ok(changed),
+            Err(e) if e.code == codes::E_CONFLICT => last = Some(e),
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last.unwrap_or_else(|| IpcError::new(codes::E_CONFLICT, format!("{path} kept changing"))))
 }
 
 /// Voice relay F1: install fleet's `arecord` stand-in at
@@ -1796,7 +1907,7 @@ async fn run_remote_write_output(
 /// would single-quote `~` and defeat tilde expansion, creating a literal `~`
 /// directory. `$HOME` is double-quoted (literal through the outer `quote`, then
 /// expanded by the remote `bash`); the rest of the path is `quote`-quoted inert.
-fn remote_path(path: &str) -> String {
+pub(crate) fn remote_path(path: &str) -> String {
     if path == "~" {
         // A bare `~` (the parent dir of `~/.tmux.conf`) must expand too —
         // `quote` would turn it into a literal `'~'` and `mkdir -p` would
@@ -3782,6 +3893,95 @@ mod tests {
         assert!(again.calls().iter().all(|c| !c
             .command()
             .contains(".claude-profiles/work/.claude.json.fleet")));
+    }
+
+    /// A login profile gets the host's own MCP servers (the host's entry
+    /// wins), keeps its own, and never gets fleet's entry copied with the
+    /// host's token; nothing to share leaves the file byte for byte.
+    #[test]
+    fn share_mcp_servers_copies_the_hosts_servers_into_a_profile() {
+        let host = r#"{"mcpServers":{
+            "claude-fleet":{"type":"http","url":"H","headers":{"Authorization":"Bearer host"}},
+            "atlassian":{"type":"http","url":"https://mcp.atlassian.com/v1/sse"},
+            "papaya":{"command":"papaya-mcp","args":["--stdio"]}}}"#;
+        let profile = r#"{"oauthAccount":{"emailAddress":"w@x.com"},"mcpServers":{
+            "claude-fleet":{"type":"http","url":"P"},
+            "papaya":{"command":"old"},
+            "own":{"command":"mine"}}}"#;
+        let (out, changed) = share_mcp_servers(profile, host).unwrap();
+        assert_eq!(changed, vec!["atlassian".to_string(), "papaya".to_string()]);
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["mcpServers"]["claude-fleet"]["url"], "P");
+        assert_eq!(v["mcpServers"]["papaya"]["command"], "papaya-mcp");
+        assert_eq!(v["mcpServers"]["own"]["command"], "mine");
+        assert_eq!(v["oauthAccount"]["emailAddress"], "w@x.com");
+        assert!(!out.contains("Bearer host"));
+
+        let (again, none) = share_mcp_servers(&out, host).unwrap();
+        assert!(none.is_empty());
+        assert_eq!(again, out);
+        let (blank, none) = share_mcp_servers(profile, "").unwrap();
+        assert!(none.is_empty());
+        assert_eq!(blank, profile);
+        assert!(share_mcp_servers(profile, r#"{"mcpServers":"#).is_err());
+
+        let mut names = mcp_server_names(host);
+        names.sort();
+        assert_eq!(names, vec!["atlassian".to_string(), "papaya".to_string()]);
+        assert!(mcp_server_names("not json").is_empty());
+    }
+
+    /// A profile the host's servers are missing from gets them, backed up
+    /// first; one that has them all is not written at all.
+    #[tokio::test]
+    async fn share_mcp_servers_into_writes_the_profile_only_when_something_is_missing() {
+        let path = format!("{PROFILES_DIR}/work/.claude.json");
+        let host = r#"{"mcpServers":{"atlassian":{"type":"http","url":"A"}}}"#;
+        let own = r#"{"oauthAccount":{"emailAddress":"w@x.com"}}"#;
+        let fake = fresh_host();
+        fake.on(
+            Match::script(&remote_read_script(CLAUDE_JSON)),
+            Reply::ok(host),
+        )
+        .on(Match::script(&remote_read_script(&path)), Reply::ok(own));
+        let changed = share_mcp_servers_into(&fake, "h1", "work").await.unwrap();
+        assert_eq!(changed, vec!["atlassian".to_string()]);
+        let calls = fake.calls();
+        let dir = format!("{HOME}/.claude-profiles/work");
+        let uploaded = |abs: &str| {
+            let cmd = format!("cat > {}", quote(abs));
+            calls
+                .iter()
+                .find(|c| c.command() == cmd)
+                .and_then(Call::stdin_str)
+        };
+        let written = uploaded(&format!("{dir}/.claude.json.fleet-tmp")).expect("profile write");
+        assert_eq!(written, share_mcp_servers(own, host).unwrap().0);
+        assert_eq!(
+            uploaded(&format!("{dir}/.claude.json.fleet-bak.fleet-tmp")).as_deref(),
+            Some(own)
+        );
+
+        let done = fresh_host();
+        done.on(
+            Match::script(&remote_read_script(CLAUDE_JSON)),
+            Reply::ok(host),
+        )
+        .on(
+            Match::script(&remote_read_script(&path)),
+            Reply::ok(&written),
+        );
+        assert!(share_mcp_servers_into(&done, "h1", "work")
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(done
+            .calls()
+            .iter()
+            .all(|c| !c.command().contains(".claude.json.fleet")));
+        assert!(share_mcp_servers_into(&done, "h1", "../evil")
+            .await
+            .is_err());
     }
 
     /// A host already provisioned by `provision_one`: its files read back
