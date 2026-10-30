@@ -195,7 +195,7 @@
     font-weight: 700;
   }
   .fresh {
-    animation: count-fresh 1.6s ease-out;
+    animation: count-fresh calc(var(--dur-slow) * 5) ease-out;
   }
   @keyframes count-fresh {
     0%,
