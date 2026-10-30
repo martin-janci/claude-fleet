@@ -59,6 +59,46 @@ const ALREADY_CLONED_MARKER: &str = "__add_project_clone_dest_exists__";
 /// there), so the success path and errexit aborts need nothing.
 const SCRIPT_PROLOGUE: &str = "set -e\ncf_exit() { set +e; exit \"$1\"; }\n";
 
+/// GitHub's published SSH host keys (`api.github.com/meta` → `ssh_keys`,
+/// also docs.github.com "GitHub's SSH key fingerprints").
+const GITHUB_HOST_KEYS: [&str; 3] = [
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl",
+    "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEmKSENjQEezOmxkZMy7opKgwFB9nkt5YRrYMjNuG5N87uRgg6CLrbo5wAdT/y6v0mKV0U2w0WZ2YB/++Tpockg=",
+    "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCj7ndNxQowgcQnjshcLrqPEiiphnt+VTTvDP6mHBL9j1aNUkY4Ue1gvwnGLVlOhGeYrnZaMgRK6+PKCUXaDbC7qtbW8gIkhL7aGCsOr/C56SJMy/BCZfxd1nWzAOxSDPgVsmerOBYfNqltV9/hWCqBywINIR+5dIg6JTJ72pcEpEjcYgXkE2YEFXV1JHnsKgbLWNlhScqb2UmyRkQyytRLtL+38TGxkxCflmO+5Z8CSSNY7GidjMIZ7Q4zMjA2n1nGrlTDkzwDCsw+wqFPGQA179cnfGWOWRVruj16z6XyvxvjJwbz0wQZ75XK5tKSb7FNyeIEs4TT4jk+S4dhPeAUC5y+bDYirYgM4GC7uEnztnZyaVWQ7B381AK4Qdrwt51ZqExKbQpTUNn+EjqoTwvqNj4kqx5QUCI0ThS/YkOxJCXmPUWZbhjpCg56i+2aB6CmK2JGhn57K5mj0MNdBXA4/WnwH6XoPWJzK5Nyu2zB3nAZp+S5hpQs+p1vN1/wsjk=",
+];
+
+/// Script lines that pin [`GITHUB_HOST_KEYS`] into `~/.ssh/known_hosts` when
+/// it has no `github.com` entry yet. Our git runs non-interactively, so on a
+/// host that never talked to GitHub over SSH a `git@github.com:` clone or
+/// push died with "Host key verification failed." (seen on papayapos-dev).
+/// An existing entry is left alone — a CHANGED key must still fail — and a
+/// failure here never aborts the script: git then reports what ssh says.
+fn github_known_hosts_lines() -> String {
+    let keys: Vec<String> = GITHUB_HOST_KEYS
+        .iter()
+        .map(|k| quote(&format!("github.com {k}")))
+        .collect();
+    format!(
+        "if command -v ssh-keygen >/dev/null 2>&1 && ! ssh-keygen -F github.com -f ~/.ssh/known_hosts >/dev/null 2>&1; then\n\
+         {{ mkdir -p ~/.ssh && chmod 700 ~/.ssh && printf '%s\\n' {keys} >> ~/.ssh/known_hosts; }} || true\n\
+         fi\n",
+        keys = keys.join(" "),
+    )
+}
+
+/// [`github_known_hosts_lines`] for a git remote `url` that reaches GitHub
+/// over SSH; nothing for any other (https never reads `known_hosts`).
+fn known_hosts_for(url: &str) -> String {
+    if ["git@github.com:", "ssh://git@github.com/"]
+        .iter()
+        .any(|p| url.starts_with(p))
+    {
+        github_known_hosts_lines()
+    } else {
+        String::new()
+    }
+}
+
 /// Where the project comes from. The hub tool `add_project` serves this
 /// schema, so every variant and field is documented here.
 #[derive(serde::Serialize, Deserialize, rmcp::schemars::JsonSchema)]
@@ -377,7 +417,9 @@ pub(crate) fn clone_script(dest: &str, clone_url: &str) -> String {
          cf_exit 3\n\
          fi\n\
          mkdir -p \"$(dirname -- {d})\"\n\
+         {known_hosts}\
          git clone {url} {d}\n",
+        known_hosts = known_hosts_for(clone_url),
         url = quote(clone_url),
         marker = quote(ALREADY_CLONED_MARKER),
         begin = quote(ORIGIN_URL_BEGIN_MARKER),
@@ -1102,7 +1144,10 @@ fn new_project_script(dest: &str, owner: &str, repo: &str, create_remote: bool) 
             "echo {stage_create} >&2\n\
              gh repo create {slug} --private --source . --remote origin\n\
              echo {stage_push} >&2\n\
+             {known_hosts}\
              git push -u origin main\n",
+            // `gh` picks the remote's protocol, so the keys go in either way.
+            known_hosts = github_known_hosts_lines(),
             stage_create = quote(STAGE_GH_CREATE),
             stage_push = quote(STAGE_GH_PUSH),
             slug = quote(&slug),
@@ -1126,7 +1171,9 @@ fn push_only_script(dest: &str, origin_url: &str) -> String {
          cf_exit 3\n\
          fi\n\
          echo {stage_push} >&2\n\
+         {known_hosts}\
          git push -u origin main\n",
+        known_hosts = known_hosts_for(origin_url),
         d = quote(dest),
         url = quote(origin_url),
         changed = quote(ORIGIN_CHANGED_MARKER),
@@ -2386,6 +2433,65 @@ mod tests {
             String::from_utf8_lossy(&out.stderr)
         );
         assert!(already_a_checkout(&out));
+    }
+
+    #[test]
+    fn a_github_clone_pins_githubs_host_keys_and_another_url_does_not() {
+        let gh = clone_script("/p/o/r", "git@github.com:o/r.git");
+        let pin = gh
+            .find("ssh-keygen -F github.com")
+            .expect("pins github.com");
+        assert!(pin < gh.find("git clone").unwrap(), "{gh}");
+        assert!(!clone_script("/p/o/r", "file:///x").contains("known_hosts"));
+        assert!(!push_only_script("/p/o/r", "https://github.com/o/r.git").contains("known_hosts"));
+        for s in [
+            new_project_script("/p/o/r", "o", "r", true),
+            push_only_script("/p/o/r", "git@github.com:o/r.git"),
+        ] {
+            assert!(
+                s.find("ssh-keygen -F github.com").unwrap() < s.find("git push").unwrap(),
+                "{s}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_known_hosts_lines_seed_an_empty_home_and_leave_an_entry_alone() {
+        if crate::proc::std_command("ssh-keygen")
+            .arg("-?")
+            .output()
+            .is_err()
+        {
+            return; // no OpenSSH on this box
+        }
+        let run = |home: &std::path::Path| {
+            let out = crate::proc::std_command("bash")
+                .arg("-c")
+                .arg(format!("{SCRIPT_PROLOGUE}{}", github_known_hosts_lines()))
+                .env("HOME", home)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{out:?}");
+            std::fs::read_to_string(home.join(".ssh/known_hosts")).unwrap()
+        };
+
+        let empty = tempfile::tempdir().unwrap();
+        let seeded = run(empty.path());
+        assert_eq!(seeded.lines().count(), GITHUB_HOST_KEYS.len(), "{seeded}");
+        for k in GITHUB_HOST_KEYS {
+            assert!(seeded.contains(&format!("github.com {k}\n")), "{seeded}");
+        }
+        assert_eq!(run(empty.path()), seeded, "a second run appends nothing");
+
+        let pinned = tempfile::tempdir().unwrap();
+        std::fs::create_dir(pinned.path().join(".ssh")).unwrap();
+        let other = "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBogusBogusBogusBogusBogusBogusBogusBogus1\n";
+        std::fs::write(pinned.path().join(".ssh/known_hosts"), other).unwrap();
+        assert_eq!(
+            run(pinned.path()),
+            other,
+            "an existing entry is never overridden"
+        );
     }
 
     #[test]

@@ -103,6 +103,11 @@ pub struct RoutineRow {
     /// The fleet notes each finished run in the notebook.
     #[serde(default)]
     pub memory_auto: bool,
+    /// Its runs are shown what earlier runs handled, and report what they
+    /// handled (migration 212, `service::routines::seen`). On unless a
+    /// person turned it off; a hub older than it sends none, read as on.
+    #[serde(default = "crate::serde_util::default_true")]
+    pub track_seen: bool,
 }
 
 /// What a person writes: every field of a routine but its identity and the
@@ -133,6 +138,7 @@ pub struct RoutineFields {
     pub event_host: Option<String>,
     pub memory: Option<String>,
     pub memory_auto: bool,
+    pub track_seen: bool,
 }
 
 /// One run of a routine.
@@ -205,7 +211,7 @@ const COLS: &str = "id, org_id, owner_person_id, name, enabled, trigger, cron, u
                     budget_run_micros, budget_day_micros, overlap, next_run_at, skip_next, \
                     paused_reason, created_at, updated_at, event_repo, event_author, \
                     event_rate_secs, time_zone, run_max_secs, fallback_host, retry_once, \
-                    autonomy, event_host, memory, memory_auto";
+                    autonomy, event_host, memory, memory_auto, track_seen";
 
 fn routine(r: &rusqlite::Row<'_>) -> rusqlite::Result<RoutineRow> {
     Ok(RoutineRow {
@@ -242,6 +248,7 @@ fn routine(r: &rusqlite::Row<'_>) -> rusqlite::Result<RoutineRow> {
         event_host: r.get(30)?,
         memory: r.get(31)?,
         memory_auto: r.get::<_, i64>(32)? != 0,
+        track_seen: r.get::<_, i64>(33)? != 0,
     })
 }
 
@@ -293,9 +300,9 @@ impl Store {
                utc_offset_min, event, event_cursor, host_alias, project_id, profile, prompt, \
                budget_run_micros, budget_day_micros, overlap, next_run_at, created_at, updated_at, \
                event_repo, event_author, event_rate_secs, time_zone, run_max_secs, fallback_host, \
-               retry_once, autonomy, event_host, memory, memory_auto) \
+               retry_once, autonomy, event_host, memory, memory_auto, track_seen) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?18, \
-               ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29)",
+               ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30)",
             rusqlite::params![
                 org_id,
                 owner_person_id,
@@ -325,7 +332,8 @@ impl Store {
                 f.autonomy,
                 f.event_host,
                 f.memory,
-                f.memory_auto as i64
+                f.memory_auto as i64,
+                f.track_seen as i64
             ],
         )?;
         let id = self.conn.last_insert_rowid();
@@ -349,7 +357,7 @@ impl Store {
                paused_reason = NULL, updated_at = ?16, event_repo = ?18, event_author = ?19, \
                event_rate_secs = ?20, time_zone = ?21, run_max_secs = ?22, fallback_host = ?23, \
                retry_once = ?24, autonomy = ?25, event_host = ?26, memory = ?27, \
-               memory_auto = ?28 \
+               memory_auto = ?28, track_seen = ?29 \
              WHERE id = ?17",
             rusqlite::params![
                 f.name,
@@ -379,7 +387,8 @@ impl Store {
                 f.autonomy,
                 f.event_host,
                 f.memory,
-                f.memory_auto as i64
+                f.memory_auto as i64,
+                f.track_seen as i64
             ],
         )?;
         self.get_routine(id)
@@ -405,8 +414,7 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    /// Remove a routine and its runs. `false`: no such routine.
-    /// Delete a routine. Its runs stay (migration 166): each keeps the
+    /// Delete a routine; `false`: no such routine. Its runs stay (migration 166): each keeps the
     /// routine's name, written here, and loses its `routine_id`.
     pub fn delete_routine(&self, id: i64) -> Result<bool, IpcError> {
         let tx = self.conn.unchecked_transaction()?;
@@ -420,6 +428,8 @@ impl Store {
             "DELETE FROM routine_memory WHERE scope = 'routine' AND owner_id = ?1",
             [id],
         )?;
+        // So do the items its runs handled (migration 212).
+        tx.execute("DELETE FROM routine_seen WHERE routine_id = ?1", [id])?;
         let gone = tx.execute("DELETE FROM routines WHERE id = ?1", [id])? == 1;
         tx.commit()?;
         Ok(gone)
@@ -597,7 +607,9 @@ impl Store {
         let finished = (r.state != "running").then_some(now);
         self.conn.execute(
             // A run that failed before it started is `failed` from its exit
-            // (step 8.10); nothing later may say otherwise.
+            // (step 8.10); nothing later may say otherwise. One inserted
+            // closed is never `done`, so, as in `finish_routine_run`, only
+            // a routine with notebooks has a reply worth reading.
             "INSERT INTO routine_runs (routine_id, trigger, trigger_ref, state, reason, \
                session_id, scheduled_for, started_at, finished_at, outcome, outcome_source, \
                error_code, host_alias, memory_read_at) \
@@ -605,7 +617,7 @@ impl Store {
                CASE ?4 WHEN 'failed' THEN 'failed' END, CASE ?4 WHEN 'failed' THEN 'exit' END, \
                ?10, ?11, \
                CASE WHEN ?9 IS NOT NULL \
-                 AND (SELECT memory FROM routines WHERE id = ?1) IS NULL THEN ?9 END)",
+                 AND (SELECT memory IS NULL FROM routines WHERE id = ?1) THEN ?9 END)",
             rusqlite::params![
                 r.routine_id,
                 r.trigger,
@@ -658,6 +670,29 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// Delete at most `limit` closed runs that started before `cutoff`,
+    /// keeping each routine's newest `keep` runs whatever their age; the
+    /// number deleted. An open run is never swept. Runs had no retention: a
+    /// routine fired every five minutes (its overlap skips included) wrote
+    /// about 105k rows a year.
+    pub fn sweep_routine_runs(
+        &self,
+        cutoff: i64,
+        keep: i64,
+        limit: usize,
+    ) -> Result<usize, IpcError> {
+        Ok(self.conn.execute(
+            "DELETE FROM routine_runs WHERE id IN \
+               (SELECT id FROM \
+                  (SELECT id, state, started_at, ROW_NUMBER() OVER \
+                     (PARTITION BY routine_id ORDER BY started_at DESC, id DESC) AS nth \
+                   FROM routine_runs) \
+                WHERE state <> 'running' AND started_at < ?1 AND nth > ?2 \
+                ORDER BY id LIMIT ?3)",
+            rusqlite::params![cutoff, keep, limit as i64],
+        )?)
+    }
+
     /// Whether the routine has a run open.
     pub fn routine_run_open(&self, routine_id: i64) -> Result<bool, IpcError> {
         Ok(self
@@ -692,25 +727,19 @@ impl Store {
     }
 
     /// The failed runs to start again (`retry_once`, M15 G3.8): each is
-    /// its routine's newest run, failed at or after `since`, not itself a
-    /// retry (`trigger_ref` `retry:<id>`), of a routine that is on and
+    /// its routine's newest run, started at or after `since` (or
+    /// `rate_limited_since` for a run that ended at a rate limit, whose
+    /// retry waits for the limit to lift, which can take days), not itself
+    /// a retry (`trigger_ref` `retry:<id>`), of a routine that is on and
     /// asks for it. A retry that is skipped or fails is newer than the run
     /// it retried, so a run is retried at most once. Oldest first.
-    /// Failed runs of `retry_once` routines still to retry: started since
-    /// `since`, or since `rate_limited_since` for a run that ended at a rate
-    /// limit (its retry waits for the limit to lift, which can take days).
     pub fn routine_runs_to_retry(
         &self,
         since: i64,
         rate_limited_since: i64,
     ) -> Result<Vec<RoutineRunRow>, IpcError> {
-        let cols = RUN_COLS
-            .split(", ")
-            .map(|c| format!("rr.{}", c.trim()))
-            .collect::<Vec<_>>()
-            .join(", ");
         let mut stmt = self.conn.prepare(&format!(
-            "SELECT {cols} FROM routine_runs rr JOIN routines r ON r.id = rr.routine_id \
+            "SELECT {RUN_COLS_RR} FROM routine_runs rr JOIN routines r ON r.id = rr.routine_id \
              WHERE rr.state = 'failed' \
                AND (rr.started_at >= ?1 \
                     OR (rr.error_code = ?3 AND rr.started_at >= ?2)) \
@@ -750,8 +779,10 @@ impl Store {
     }
 
     /// Close a run: `done` or `failed`, with why. A run of a routine that
-    /// keeps no notebook is read for memory as it closes: there is nothing
-    /// to read (migration 205's index holds the pending reads only).
+    /// keeps no notebook and tracks no seen items (migration 212) is read
+    /// for memory as it closes: there is nothing to read (migration 205's
+    /// index holds the pending reads only). Nor is there for a failed run of
+    /// one that only tracks seen items: only a done run's are recorded.
     pub fn finish_routine_run(
         &self,
         id: i64,
@@ -762,8 +793,9 @@ impl Store {
     ) -> Result<(), IpcError> {
         self.conn.execute(
             "UPDATE routine_runs SET state = ?1, reason = ?2, cost_micros = ?3, finished_at = ?4, \
-               memory_read_at = CASE WHEN (SELECT memory FROM routines r \
-                 WHERE r.id = routine_runs.routine_id) IS NULL THEN ?4 END \
+               memory_read_at = CASE WHEN (SELECT r.memory IS NULL \
+                   AND (r.track_seen = 0 OR ?1 <> 'done') \
+                 FROM routines r WHERE r.id = routine_runs.routine_id) THEN ?4 END \
              WHERE id = ?5 AND state = 'running'",
             rusqlite::params![state, reason, cost_micros, now, id],
         )?;
@@ -856,6 +888,56 @@ mod orphan_tests {
             )
             .unwrap();
         s.conn.last_insert_rowid()
+    }
+
+    /// Old closed runs go, but each routine keeps its newest `keep`, and an
+    /// open run stays however old it is.
+    #[test]
+    fn the_run_sweep_keeps_the_newest_per_routine_and_every_open_run() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("h1").unwrap();
+        let p = project(&s, "one");
+        let (busy, quiet) = (routine_on(&s, "h1", p), routine_on(&s, "h1", p));
+        let run = |routine_id: i64, state: &str, at: i64| {
+            s.insert_routine_run(&NewRoutineRun {
+                routine_id,
+                trigger: "cron",
+                state,
+                at,
+                ..Default::default()
+            })
+            .unwrap()
+            .id
+        };
+        let open = run(busy, "running", 10);
+        for at in 20..30 {
+            run(busy, "done", at);
+        }
+        let quiet_old = run(quiet, "skipped", 15);
+        let recent = run(busy, "failed", 1_000);
+
+        // Older than 500, keep the newest 3 of each routine.
+        assert_eq!(s.sweep_routine_runs(500, 3, 100).unwrap(), 8);
+        let left: Vec<i64> = s
+            .routine_runs(busy, 50)
+            .unwrap()
+            .iter()
+            .map(|r| r.id)
+            .collect();
+        // The newest three (1000, 29, 28) and the open run.
+        assert_eq!(left.len(), 4, "{left:?}");
+        assert!(left.contains(&recent) && left.contains(&open));
+        assert!(
+            s.running_routine_runs()
+                .unwrap()
+                .iter()
+                .any(|r| r.id == open),
+            "an open run is never swept"
+        );
+        // A routine with one old run keeps it: it is among its newest 3.
+        assert_eq!(s.routine_runs(quiet, 50).unwrap()[0].id, quiet_old);
+        // `limit` bounds a call.
+        assert_eq!(s.sweep_routine_runs(500, 0, 1).unwrap(), 1);
     }
 
     fn project(s: &Store, repo: &str) -> i64 {

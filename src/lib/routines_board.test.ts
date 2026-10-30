@@ -52,6 +52,8 @@ describe('the Automation list (board Automation)', () => {
     expect(routineLine({ ...r, enabled: false }, undefined, now)).toBe('Weekdays 07:30 · paused by you');
     expect(routineLine({ ...r, enabled: false, paused_reason: 'budget' }, undefined, now)).toBe('Weekdays 07:30 · paused by fleet');
     expect(routineLine({ ...r, skip_next: true }, undefined, now)).toBe('Weekdays · not run yet · next one skipped');
+    // Floored, not rounded: 59m40s is 59m.
+    expect(routineLine({ ...r, next_run_at: now + 3580 }, undefined, now)).toBe('Weekdays · not run yet · next in 59m');
   });
 
   it('colours the dot from the newest run, then the switch', () => {

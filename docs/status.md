@@ -1093,7 +1093,7 @@ planner's `create_item` may name `touches` (repository paths or globs the
 task changes); a task whose touches meet an open run's in the same
 repository waits (a task that names none is not held), and a lane starts
 beside another of its repository only when both name every task's touches
-and they do not meet. The task row says what a task changes. A mission's worker is refused a person's
+and they do not meet. The task row says what a task changes. Lanes L6: Missions → Compare sets the missions that ran side by side with the median per mode (`src/lib/mission_compare.ts`), the measuring runbook is §7.1 of the lanes design, and `scripts/hub-e2e.sh` §11 runs a two-task lane over real tmux. The default stays `item` until the owner has measured. A mission's worker is refused a person's
 step (`gh pr merge` / `ready`, a push to `main` / `master`, a tracker CLI)
 by fleet's `PreToolUse(Bash)` guard (`orchestrate/guard.rs`): a shell
 prefilter that asks the hub only about those commands and lets the command
@@ -1178,6 +1178,14 @@ once the run finishes; `memory_auto` also notes each finished run in it. The
 routine editor's Memory group picks them and shows the saved notebooks to
 read, edit or clear (`routines { memory | set_memory }`). Off by default
 per routine. The phone shows nothing of it yet.
+Routine seen items (migration 212, `routines/seen.rs`): a routine remembers
+what its runs already handled (`pr owner/repo#12 | head=… checks=…`); each
+run is shown the list, skips what did not change and reports what it looked
+at in a `<routine-seen>` block, and a run with nothing new or changed comes
+to `nothing`, out of the Inbox. On for every routine (the editor's Memory
+group turns it off and lists or forgets the items). The Sessions list (desktop
+and phone) folds routine sessions into one Routines section, one group per
+routine, and a routine session's finished turn no longer notifies.
 
 The prompt tuner is landed and OFF by default (`work.prompt_tune`;
 `service/prompt_tune.rs`, `PromptTune.svelte`, mechanics in
@@ -1348,7 +1356,9 @@ most `max_rounds` times), and the gallery's `pr-reviewer` and
 `pr-test-debate`, which share a store of accepted test exemptions; a
 definition's `limits.daily_budget_usd` (a UTC day's cap on one instance's
 runs, past it a job waits for the next day) with `limits.budget_input` to
-lower it per instance. All the
+lower it per instance; the grant form's *this instance's own secrets*
+switch (generated `AGENT_<INSTANCE>_<ROLE>_<NAME>` secret names per MCP
+binding). All the
 migration's steps are built; deleting the built-in agents and converting
 their rules waits on the definitions having run for real.
 

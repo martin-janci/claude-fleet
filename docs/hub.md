@@ -422,7 +422,19 @@ StatefulSet updates itself the same way (`deploy/kubernetes/fleet-updater.yaml`,
 usage roll-ups. The hub keeps it in WAL mode, so a `cp` of the file from a
 running hub is a stale database (pages still in `state.db-wal` are missing)
 and a `cp` of the `state.db*` triple can be torn. Use SQLite's online backup
-API instead — one self-contained file, no stop:
+API instead — one self-contained file, no stop.
+
+**Built in.** `fleet-hub serve` takes one itself: once a day, unless a newer
+backup already sits in `<data>/backups` or `<data>/../backups`, it writes
+`<data>/backups/daily-YYYYmmdd-HHMMSS.db` (the same integrity-checked copy as
+`fleet-hub backup`) and keeps the newest 14 `daily-*` files; other prefixes
+are never pruned (`service::hub_storage`). `fleet_health.storage` reports the
+newest backup's time and the free space under the data dir; the desktop and
+the phone warn when the newest backup is over two days old or under 2 GB (or
+5%) is free. Keep copying `backups/` off the box (Hyper Backup): a backup on
+the same disk does not survive the disk.
+
+Or by hand, or from a scheduler:
 
 ```bash
 sudo FLEET_HUB_DATA=/volume1/docker/fleet-hub/data deploy/hub/backup.sh

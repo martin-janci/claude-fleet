@@ -185,6 +185,51 @@ describe('confirms as transcript cards', () => {
   });
 });
 
+// A call in words (guard::ConfirmAbout): the card says what Approve does,
+// the bound summary behind "Exact call".
+describe('a request the hub describes', () => {
+  const START = {
+    ...KILL,
+    nonce: 'n-start',
+    tool: 'work_link',
+    summary: 'start key="PD-2709"#6371 url=- item_id=None host="mefistos"#190c',
+    about: {
+      title: 'Start a session for PD-2709',
+      facts: [
+        { label: 'Ticket', value: 'PD-2709 Fix the login', url: 'https://t/PD-2709' },
+        { label: 'Host', value: 'mefistos' },
+      ],
+      body: { label: 'Brief', text: 'Fix the login redirect.' },
+    },
+  };
+
+  it('leads with the words and keeps the exact call folded', async () => {
+    render(McpConfirmDialog);
+    const { container } = render(ConfirmCards);
+    await tick();
+    await emit('mcp:confirm-required', START);
+    await tick();
+    expect(screen.getByText('Start a session for PD-2709?')).toBeTruthy();
+    expect(screen.getByText('mefistos')).toBeTruthy();
+    expect(screen.getByRole('button', { name: /PD-2709 Fix the login/ })).toBeTruthy();
+    expect(screen.getByTestId('confirm-about-body').textContent).toContain('Fix the login redirect.');
+    const exact = screen.getByTestId('confirm-about-exact') as HTMLDetailsElement;
+    expect(exact.open).toBe(false);
+    expect(exact.textContent).toContain('key="PD-2709"');
+    await expectAccessible(container);
+  });
+
+  it('a request with no words still shows the exact call', async () => {
+    render(McpConfirmDialog);
+    render(ConfirmCards);
+    await tick();
+    await emit('mcp:confirm-required', KILL);
+    await tick();
+    expect(screen.queryByTestId('confirm-about')).toBeNull();
+    expect(screen.getByTestId('confirm-card').textContent).toContain('host=local name=dev-x');
+  });
+});
+
 describe('ConfirmCards: accessibility', () => {
   it("the operator's pending kill, as a card, is accessible", async () => {
     render(McpConfirmDialog);

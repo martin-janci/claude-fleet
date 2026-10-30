@@ -136,6 +136,12 @@ pub struct Health {
     /// runs. Not sent when empty.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub playbooks_week: BTreeMap<String, u32>,
+    /// The hub's own disk and backups (`service::hub_storage`, hardening
+    /// survey 2026-10-26): free space under its data dir and its newest
+    /// backup, each flagged past its warning line. `None` (not sent) on a
+    /// desktop, for a scoped caller and from an older hub.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage: Option<crate::service::hub_storage::StorageHealth>,
 }
 
 /// [`Health::devices`].
@@ -479,7 +485,7 @@ pub fn hosts_health(
             // now, or one whose turn ended within the window. An idle,
             // failed, stopped or blocked session calls no hook, so it says
             // nothing about whether the host's hooks still work.
-            let has_live_session = sessions.iter().any(|s| {
+            let hooks_expected = sessions.iter().any(|s| {
                 s.host_alias == h.alias
                     && s.status != "ghost"
                     && s.kind != "external"
@@ -504,7 +510,7 @@ pub fn hosts_health(
                 },
                 agent_behind: agent_behind(&h.transport, agent_version.as_deref(), hub_version),
                 hooks_silent: h.reachable
-                    && has_live_session
+                    && hooks_expected
                     && h.last_hook_at
                         .is_none_or(|at| now - at > t.hooks_silent_secs),
                 provision_warning: h.provision_warning.clone(),
@@ -1021,6 +1027,15 @@ pub enum HealthView {
     Blank,
 }
 
+impl HealthView {
+    /// Whether this view reads the hub's OWN health (its decision envelope,
+    /// its storage): the master and a person's device do, a per-host token
+    /// and an org-bound client do not.
+    pub fn reads_the_hubs_own(&self) -> bool {
+        matches!(self, HealthView::Fleet | HealthView::Person(_))
+    }
+}
+
 /// `usage_by_day` for a person's own device (multi-user M1, T8d).
 ///
 /// `usage_daily` is keyed by `(day, host_alias, backfill)`: there is no
@@ -1150,8 +1165,9 @@ fn health_at(
                 .into_iter()
                 .filter(|r| view.sees_session_row(r).is_visible())
                 .collect();
-            // `hooks_silent` is computed from `has_live_session` — "does
-            // ANYBODY have a live session on this host" — so the rows are
+            // `hooks_silent` is computed from `hooks_expected` — "does
+            // ANYBODY have a session on this host that should be sending
+            // hooks" — so the rows are
             // rebuilt over the sessions this caller may see, exactly as the
             // `Person` arm does. Rebuilt over EVERY host (`all_hosts`) and
             // narrowed afterwards, which is the order the pass at the top
@@ -1197,8 +1213,9 @@ fn health_at(
                 .filter(|r| person.sees_session_row(r).is_visible())
                 .collect();
             // `hosts[]` is a fleet operation and is not narrowed — but
-            // `hooks_silent` is computed from `has_live_session`, i.e. "does
-            // ANYBODY have a live session on this host", which is one bit
+            // `hooks_silent` is computed from `hooks_expected`, i.e. "does
+            // ANYBODY have a session on this host that should be sending
+            // hooks", which is one bit
             // wider than rule 6's per-host count of `unclaimed` rows. Rebuild
             // the rows over the sessions this person may see (multi-user M1,
             // T9b); every other field of a `HostHealthRow` comes from the
@@ -1256,12 +1273,11 @@ fn health_at(
         peer_links_total: s.peer_links_total().unwrap_or_default(),
         updates: None,
         hosts: host_rows,
-        // The decision envelope is the hub's own business: a scoped view
-        // gets none of it (`fleet_health` also drops it for those callers).
         // The decision envelope is the HUB's own health, not anybody's
         // session: the master and a person's device read it, a per-host token
-        // and an org-bound client do not.
-        decide: if matches!(view, HealthView::Fleet | HealthView::Person(_)) {
+        // and an org-bound client do not (`fleet_health` also drops it for
+        // those callers).
+        decide: if view.reads_the_hubs_own() {
             crate::service::decide::health(s, now)
         } else {
             None
@@ -1277,6 +1293,10 @@ fn health_at(
         automation_paused: crate::service::loops::paused(s),
         devices: None,
         playbooks_week,
+        // The hub's own business, like `decide`; it reads the disk, so the
+        // caller fills it in once the store's lock is released
+        // ([`storage_for`]).
+        storage: None,
     };
     h.set_tunnels(tunnels);
     if matches!(view, HealthView::Blank) {
@@ -1322,9 +1342,27 @@ use crate::store::now_unix;
 pub fn health_check(store: &Mutex<Store>) -> Health {
     // A poisoned store mutex IS an unhealthy state — report db_ready=false
     // rather than panicking the command (which the old `.expect` did).
-    match store.lock() {
-        Ok(s) => health_from_store(&s),
-        Err(_) => unready_health(),
+    let Ok(s) = store.lock() else {
+        return unready_health();
+    };
+    let mut h = health_from_store(&s);
+    drop(s);
+    h.storage = storage_for(&HealthView::Fleet, now_unix());
+    h
+}
+
+/// The hub's storage health for `view`, read after the store's lock is
+/// released: it reads the disk, and a stalled mount (the hub's data on a
+/// NAS) must not hold every user of the store behind it. `None` for a view
+/// that does not read the hub's own health.
+pub fn storage_for(
+    view: &HealthView,
+    now: i64,
+) -> Option<crate::service::hub_storage::StorageHealth> {
+    if view.reads_the_hubs_own() {
+        crate::service::hub_storage::health(now)
+    } else {
+        None
     }
 }
 
@@ -1360,12 +1398,21 @@ pub fn unready_health() -> Health {
         automation_paused: false,
         devices: None,
         playbooks_week: BTreeMap::new(),
+        storage: None,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The defaults `host_thresholds` falls back to.
+    const THRESHOLDS: HostHealthThresholds = HostHealthThresholds {
+        disk_low_pct: 90,
+        claude_max_behind: 30,
+        hooks_silent_secs: 3600,
+        mem_low_pct: 10.0,
+    };
     use crate::service::tunnel::TunnelHealth;
     use std::collections::HashMap;
     use std::sync::Mutex;
@@ -1530,12 +1577,7 @@ mod tests {
         let rows = hosts_health(
             &[full, fine],
             &sessions,
-            &HostHealthThresholds {
-                disk_low_pct: 90,
-                claude_max_behind: 30,
-                hooks_silent_secs: 3600,
-                mem_low_pct: 10.0,
-            },
+            &THRESHOLDS,
             &[("full".to_string(), "0.2.26".to_string())],
             "0.3.1",
             now,
@@ -1561,12 +1603,7 @@ mod tests {
     #[test]
     fn hooks_silent_counts_only_working_or_recent_turns() {
         let now = 1_700_000_000;
-        let t = HostHealthThresholds {
-            disk_low_pct: 90,
-            claude_max_behind: 30,
-            hooks_silent_secs: 3600,
-            mem_low_pct: 10.0,
-        };
+        let t = THRESHOLDS;
         let quiet = |alias: &str| {
             let mut h = host(alias, true);
             h.last_hook_at = Some(now - 7200);
@@ -1659,12 +1696,7 @@ mod tests {
     #[test]
     fn hosts_health_ignores_a_stale_disk_sample() {
         let now = 1_700_000_000;
-        let t = HostHealthThresholds {
-            disk_low_pct: 90,
-            claude_max_behind: 30,
-            hooks_silent_secs: 3600,
-            mem_low_pct: 10.0,
-        };
+        let t = THRESHOLDS;
         let mut stale = host("stale", true);
         stale.disk_home_free_kb = Some(3_000_000);
         stale.disk_home_total_kb = Some(150_000_000);
@@ -2366,6 +2398,7 @@ mod tests {
             automation_paused: false,
             devices: None,
             playbooks_week: BTreeMap::new(),
+            storage: None,
         })
         .expect("Health serialises");
         let back: Health = serde_json::from_str(&whole).expect("a whole Health parses");

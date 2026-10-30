@@ -185,6 +185,10 @@ export function newlyNotifiable(
     if (prev.get(s.id) === now) continue;
     const state = notifyStateOf(now);
     if (!state) continue;
+    // A routine's run finishing is the routine's news, read in its Runs:
+    // one a day per routine would otherwise ring like a person's session.
+    // Its failures and questions still announce.
+    if (state === 'done' && s.origin === 'routine') continue;
     out.push({ row: s, state });
   }
   return out;

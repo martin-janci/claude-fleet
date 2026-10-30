@@ -167,7 +167,17 @@ impl LocalSync {
                     _ = token.cancelled() => break,
                     _ = tokio::time::sleep(PASS_INTERVAL) => {}
                 }
-                me.tick();
+                // Caught like a tick pass (`run_cancellable_tick`): uncaught,
+                // one panic ended local sync for good.
+                if let Err(why) =
+                    crate::service::loops::caught_sync("the local sync pass", || me.tick())
+                {
+                    crate::service::loops::report(
+                        "local_sync",
+                        Err::<(), _>(why),
+                        Some(PASS_INTERVAL),
+                    );
+                }
             }
         });
     }

@@ -8,7 +8,7 @@
   // requests, and the fleet's hosts, accounts and missions (migration 201).
   // The hub checks every field again (`service::routines::event_filters`);
   // this only offers what it accepts.
-  import { EVENT_GROUPS, RATE_CHOICES, eventHostChoices, eventLabel, rateLabel, isFleetEvent, isPrEvent, rateSubject, takesHostFilter, type EventFilter } from '../routines';
+  import { EVENT_GROUPS, RATE_CHOICES, eventHostChoices, eventLabel, rateWords, isFleetEvent, isPrEvent, takesHostFilter, type EventFilter } from '../routines';
   import { hosts } from '../hosts';
 
   interface Props {
@@ -23,7 +23,6 @@
   let { event = $bindable(), filter = $bindable(), repos = [], routineHost }: Props = $props();
 
   const pr = $derived(isPrEvent(event));
-  const per = $derived(rateSubject(event));
   const hostAliases = $derived(eventHostChoices($hosts, event, routineHost));
 </script>
 
@@ -78,12 +77,12 @@
   <select data-testid="routine-event-rate" bind:value={filter.rate}>
     {#each RATE_CHOICES as c (c.label)}
       <option value={c.secs ? String(c.secs) : ''}
-        >{c.secs ? c.label.replace('once per', `once per ${per} per`) : c.label}</option
+        >{c.secs ? rateWords(c.secs, event) : c.label}</option
       >
     {/each}
     <!-- A rate saved through MCP that is no preset is shown, not a blank (review w05-10). -->
     {#if filter.rate && Number(filter.rate) > 0 && !RATE_CHOICES.some((c) => String(c.secs ?? '') === filter.rate)}<option value={filter.rate}
-        >{rateLabel(Number(filter.rate)).replace('once per', `once per ${per} per`)}</option
+        >{rateWords(Number(filter.rate), event)}</option
       >{/if}
   </select>
   {#if pr}<span class="hint">The run's prompt names the pull request that started it.</span>{/if}

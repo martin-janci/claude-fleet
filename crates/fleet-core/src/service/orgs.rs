@@ -715,7 +715,8 @@ pub fn require_key(s: &Store, scope: &OrgScope, key: &str) -> Result<(), IpcErro
     }
     // An open run on the host is work its sessions do too: a mission's
     // worker reads its step by the task that names the item, whatever
-    // became of the link (`Store::work_item_on_host`'s run arm).
+    // became of the link (`Store::work_item_on_host`'s run arm), and the
+    // rest of that mission's items with it (its mission arm).
     for item in s.work_items_by_key(&key)? {
         if scope.sees_org(s.item_org(item.id)?) && s.open_run_on_host(h, item.id)? {
             return Ok(());

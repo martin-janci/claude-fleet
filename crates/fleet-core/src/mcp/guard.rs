@@ -2344,6 +2344,46 @@ pub struct ConfirmRequest {
     /// When it was asked, unix seconds ("asked 2m ago" on the card).
     #[serde(default)]
     pub asked_at: i64,
+    /// What approving it does, in words (`mcp::tools::confirm_about`): the
+    /// card shows this, and keeps `summary` — what the approval is bound
+    /// to — behind a details toggle. Absent from an older hub, for a tool
+    /// with no description, and for a caller that is not the owner's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub about: Option<ConfirmAbout>,
+}
+
+/// A waiting call in words, for the person approving it: "Start a session
+/// for PD-2709 on mefistos", the ticket, host and project by name, the
+/// brief or prompt itself, and only the options that are not the default.
+/// Display only: the approval stays bound to [`ConfirmRequest::summary`].
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ConfirmAbout {
+    /// One line, verb first: what happens on Approve.
+    pub title: String,
+    /// Label/value rows, in reading order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub facts: Vec<ConfirmFact>,
+    /// The text the call types or hands on (a brief, a prompt), when it
+    /// carries one: shown as is, folded on a long one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<ConfirmBody>,
+}
+
+/// One row of [`ConfirmAbout::facts`]: `Ticket` · `PD-2709 Fix the login`.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ConfirmFact {
+    pub label: String,
+    pub value: String,
+    /// Where the value opens (a ticket's tracker page).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+
+/// [`ConfirmAbout::body`]: `Brief` and its text.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ConfirmBody {
+    pub label: String,
+    pub text: String,
 }
 
 /// Callback that surfaces a [`ConfirmRequest`] to the desktop. Wired in
@@ -2391,6 +2431,20 @@ tokio::task_local! {
     /// gated: [`crate::store::APPROVAL_PERSON`] or
     /// [`crate::store::APPROVAL_PRE_APPROVED`] ([`tracking_approval`]).
     static CALL_APPROVAL: std::cell::Cell<Option<&'static str>>;
+    /// The arguments of the tool call running in this task, as the caller
+    /// sent them: what a card's [`ConfirmAbout`] is written from.
+    static CALL_ARGS: serde_json::Value;
+}
+
+/// Run `f` as the tool call that sent `args` ([`call_args`]).
+pub async fn with_call_args<F: std::future::Future>(args: serde_json::Value, f: F) -> F::Output {
+    CALL_ARGS.scope(args, f).await
+}
+
+/// The arguments of the tool call running in this task; `None` outside
+/// [`with_call_args`].
+pub fn call_args() -> Option<serde_json::Value> {
+    CALL_ARGS.try_with(Clone::clone).ok()
 }
 
 /// Run `f` as fleet's replay of the call approved under `nonce` (F1): the
@@ -2429,6 +2483,8 @@ struct Pending {
     /// the same summary — otherwise an approval for `kill_session name=x`
     /// could be replayed as `kill_session name=controller force=true`.
     summary: String,
+    /// The same call in words, for the card (display only).
+    about: Option<ConfirmAbout>,
     created: Instant,
     approved: Option<bool>,
     /// F1: what fleet does once this is answered (the operator's calls).
@@ -2470,6 +2526,18 @@ impl PendingConfirms {
         caller: &str,
         operator: bool,
     ) -> ConfirmRequest {
+        self.request_about(tool, summary, caller, operator, None)
+    }
+
+    /// [`Self::request_from`], with the call in words for the card.
+    pub fn request_about(
+        &self,
+        tool: &str,
+        summary: &str,
+        caller: &str,
+        operator: bool,
+        about: Option<ConfirmAbout>,
+    ) -> ConfirmRequest {
         let nonce = super::generate_token();
         let asked_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -2488,6 +2556,7 @@ impl PendingConfirms {
                 operator,
                 asked_at,
                 summary: summary.to_string(),
+                about: about.clone(),
                 created: Instant::now(),
                 approved: None,
                 replay: None,
@@ -2501,6 +2570,7 @@ impl PendingConfirms {
             caller: caller.to_string(),
             operator,
             asked_at,
+            about,
         }
     }
 
@@ -2662,6 +2732,7 @@ impl PendingConfirms {
                 caller: p.caller.clone(),
                 operator: p.operator,
                 asked_at: p.asked_at,
+                about: p.about.clone(),
             })
             .collect()
     }
@@ -3773,6 +3844,7 @@ mod tests {
                 operator: false,
                 asked_at: 0,
                 summary: String::new(),
+                about: None,
                 created: now,
                 approved: None,
                 replay: None,

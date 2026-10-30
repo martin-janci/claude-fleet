@@ -34,7 +34,7 @@ struct FakeSpawn {
     fail: AtomicBool,
     /// Only a start on this host fails (G3.8's fallback).
     fail_on: Mutex<Option<String>>,
-    /// The turns a time cap stopped: `(host, tmux name)`.
+    /// The turns a budget or a time cap stopped: `(host, tmux name)`.
     stopped: Mutex<Vec<(String, String)>>,
     /// The prompts typed into a run's session: `(session id, prompt)`.
     typed: Mutex<Vec<(i64, String)>>,
@@ -371,7 +371,7 @@ async fn a_run_whose_typing_was_lost_fails_as_undelivered() {
             [],
         )
         .unwrap();
-    tick::settle(&lock(&f.store).unwrap(), OCT8 + 60).unwrap();
+    tick::settle(&lock(&f.store).unwrap(), OCT8 + 60, &mut Vec::new()).unwrap();
     assert_eq!(
         runs_of(&f, r.id)[0].state,
         "running",
@@ -380,6 +380,7 @@ async fn a_run_whose_typing_was_lost_fails_as_undelivered() {
     tick::settle(
         &lock(&f.store).unwrap(),
         OCT8 + tick::PROMPT_DELIVERY_SECS + 1,
+        &mut Vec::new(),
     )
     .unwrap();
     let run = runs_of(&f, r.id).pop().unwrap();
@@ -401,7 +402,7 @@ async fn a_late_typing_failure_leaves_a_closed_run_alone() {
         .await
         .unwrap();
     event(&f, run.session_id.unwrap(), "turn_done");
-    tick::settle(&lock(&f.store).unwrap(), OCT8 + 60).unwrap();
+    tick::settle(&lock(&f.store).unwrap(), OCT8 + 60, &mut Vec::new()).unwrap();
     tick::undelivered(&f.store, run.id, "too late", OCT8 + 120, None);
     let run = runs_of(&f, r.id).pop().unwrap();
     assert_eq!(run.state, "done");
@@ -668,6 +669,8 @@ async fn a_run_over_its_budget_fails_and_pauses_the_routine() {
     assert!(!r.enabled);
     assert_eq!(r.next_run_at, None);
     assert!(r.paused_reason.unwrap().contains("over its budget"));
+    // Its turn is stopped: the session would go on spending.
+    assert_eq!(f.fake.stopped.lock().unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -2564,7 +2567,11 @@ async fn dry_run_says_what_a_fire_would_start_and_writes_nothing() {
     );
     let d = dry_run(&f.store, &ana, c.id, None, OCT8).unwrap();
     assert!(d.event.is_none());
-    assert_eq!(d.prompt, c.prompt);
+    // Its prompt, then what its runs handled (none yet).
+    assert!(d
+        .prompt
+        .starts_with(&format!("{}\n\nAlready handled:", c.prompt)));
+    assert!(d.prompt.contains("None yet."), "{}", d.prompt);
 }
 
 /// A run's trace, as `(phase, kind, summary)`.
@@ -2875,6 +2882,39 @@ async fn a_fire_at_a_limit_holds_the_next_until_the_reset() {
     .unwrap();
     due_at(&f, r.id, t + 20);
     tick_once(&f.deps, t + 20).await;
+    assert_eq!(routine(&f, r.id).next_run_at, Some(OCT8 + 10 * H));
+}
+
+/// Only a skip at the limit holds the next fire: one skipped because the
+/// last run is still going keeps the schedule, at a limit or not.
+#[tokio::test]
+async fn a_skip_for_another_reason_does_not_hold_at_a_limit() {
+    let f = fx();
+    let mut i = input(&f);
+    i.cron = Some("0 * * * *".into());
+    i.overlap = Some("skip".into());
+    let r = new_routine(&f, i);
+    let ana = person(&f.store, None, f.ana);
+    let t = OCT8 + 9 * H + 1800;
+    run_now(&f.deps, &ana, r.id, t - 60).await.unwrap();
+    crate::service::account_limits::seed_usage(
+        &lock(&f.store).unwrap(),
+        "mac",
+        Some("work"),
+        "work",
+        93.0,
+        t,
+    );
+    due_at(&f, r.id, t);
+    tick_once(&f.deps, t).await;
+    let skipped = runs_of(&f, r.id)
+        .into_iter()
+        .find(|run| run.state == "skipped")
+        .unwrap();
+    assert_eq!(
+        skipped.reason.as_deref(),
+        Some("its last run is still going")
+    );
     assert_eq!(routine(&f, r.id).next_run_at, Some(OCT8 + 10 * H));
 }
 
@@ -4094,13 +4134,139 @@ async fn a_run_read_after_its_project_is_removed_writes_no_project_notebook() {
 #[tokio::test]
 async fn a_run_of_a_routine_without_memory_is_read_as_it_finishes() {
     let f = fx();
-    let plain = new_routine(&f, input(&f));
+    let mut i = input(&f);
+    i.track_seen = Some(false);
+    let plain = new_routine(&f, i);
     let run = finished_run(&f, &plain, OCT8).await;
     let kept = memory_routine(&f, "routine", false);
     let other = finished_run(&f, &kept, OCT8 + 100).await;
+    // Seen items are read off the same reply (migration 212).
+    let tracking = new_routine(&f, input(&f));
+    let third = finished_run(&f, &tracking, OCT8 + 200).await;
+    // Only a done run's seen items are recorded: a failed one has none to read.
+    let ana = person(&f.store, None, f.ana);
+    let failed = run_now(&f.deps, &ana, tracking.id, OCT8 + 300)
+        .await
+        .unwrap();
     let s = lock(&f.store).unwrap();
+    s.finish_routine_run(failed.id, "failed", Some("exit 1"), 0, OCT8 + 330)
+        .unwrap();
     assert_eq!(s.routine_run_memory_read_at(run.id), run.finished_at);
     assert_eq!(s.routine_run_memory_read_at(other.id), None);
+    assert_eq!(s.routine_run_memory_read_at(third.id), None);
+    assert_eq!(s.routine_run_memory_read_at(failed.id), Some(OCT8 + 330));
+    // Nor is there for one recorded failed as it started, its session
+    // named (its prompt was never queued).
+    let unqueued = s
+        .insert_routine_run(&crate::store::NewRoutineRun {
+            routine_id: tracking.id,
+            trigger: "cron",
+            trigger_ref: None,
+            state: "failed",
+            reason: Some("its prompt was not queued"),
+            session_id: third.session_id,
+            scheduled_for: None,
+            at: OCT8 + 400,
+            error_code: Some(fix::E_PROMPT_NOT_QUEUED),
+            host_alias: Some("mac"),
+        })
+        .unwrap();
+    assert_eq!(s.routine_run_memory_read_at(unqueued.id), Some(OCT8 + 400));
+}
+
+#[tokio::test]
+async fn a_routine_tracks_seen_items_unless_turned_off_and_a_change_keeps_it() {
+    let f = fx();
+    let ana = person(&f.store, None, f.ana);
+    let r = new_routine(&f, input(&f));
+    assert!(r.track_seen, "on for a new routine");
+    let mut off = input(&f);
+    off.track_seen = Some(false);
+    let r = save(&f.store, &ana, Some(r.id), &off).unwrap();
+    assert!(!r.track_seen);
+    // A change that does not name it keeps it.
+    let r = save(&f.store, &ana, Some(r.id), &input(&f)).unwrap();
+    assert!(!r.track_seen);
+    let run = run_now(&f.deps, &ana, r.id, OCT8).await.unwrap();
+    assert!(!queued_prompt(&f, run.session_id.unwrap()).contains("Already handled"));
+}
+
+#[tokio::test]
+async fn a_run_skips_what_earlier_runs_handled_and_one_that_found_nothing_new_is_quiet() {
+    let f = fx();
+    let ana = person(&f.store, None, f.ana);
+    let mut i = input(&f);
+    i.overlap = Some("parallel".into());
+    let r = new_routine(&f, i);
+    // The first run is told there is nothing yet and how to report.
+    let first = run_now(&f.deps, &ana, r.id, OCT8).await.unwrap();
+    let prompt = queued_prompt(&f, first.session_id.unwrap());
+    assert!(prompt.starts_with("Review my open PRs"), "{prompt}");
+    assert!(
+        prompt.contains("Already handled") && prompt.contains("None yet."),
+        "{prompt}"
+    );
+    event(&f, first.session_id.unwrap(), "turn_done");
+    tick_once(&f.deps, OCT8 + 30).await;
+    let reader = replies(&[
+        "Reviewed two PRs.\n<routine-seen>\npr o/r#1 | head=aaa checks=pass\n\
+         - PR O/R#2 | head=bbb\n</routine-seen>",
+    ]);
+    memory::read_finished(&f.store, &reader, OCT8 + 60).await;
+    let seen = seen::get(&f.store, &ana, r.id, None).unwrap();
+    assert_eq!(seen.total, 2, "{seen:?}");
+    assert!(seen.may_change);
+    assert_ne!(
+        run_row(&f, first.id).outcome.as_deref(),
+        Some("nothing"),
+        "two new items are news"
+    );
+    // The next run is shown them, fenced.
+    let second = run_now(&f.deps, &ana, r.id, OCT8 + 3600).await.unwrap();
+    let prompt = queued_prompt(&f, second.session_id.unwrap());
+    assert!(prompt.contains("pr o/r#2 | head=bbb"), "{prompt}");
+    assert!(
+        prompt.contains(&crate::mcp::guard::untrusted_marker("routine seen items")),
+        "{prompt}"
+    );
+    let dry = dry_run(&f.store, &ana, r.id, None, OCT8 + 3600).unwrap();
+    assert!(dry.prompt.contains("pr o/r#1 | head=aaa checks=pass"));
+    // It found both as they were: nothing to do, so it stays out of the Inbox.
+    event(&f, second.session_id.unwrap(), "turn_done");
+    tick_once(&f.deps, OCT8 + 3630).await;
+    let reader = replies(&[
+        "Nothing new.\n<routine-seen>\npr o/r#1 | head=aaa checks=pass\npr o/r#2 | head=bbb\n</routine-seen>",
+    ]);
+    memory::read_finished(&f.store, &reader, OCT8 + 3660).await;
+    let second = run_row(&f, second.id);
+    assert_eq!(
+        (second.outcome.as_deref(), second.outcome_source.as_deref()),
+        (Some("nothing"), Some("rule"))
+    );
+    let s = lock(&f.store).unwrap();
+    let steps = s
+        .run_trace(&crate::service::run_trace::routine_ref(second.id), 0, 500)
+        .unwrap();
+    assert!(
+        steps
+            .iter()
+            .any(|t| t.kind == "seen" && t.summary == "Seen items: 2 unchanged"),
+        "{:?}",
+        steps.iter().map(|t| &t.summary).collect::<Vec<_>>()
+    );
+    drop(s);
+    // A person forgets one: the next run looks at it again.
+    let left = seen::forget(&f.store, &ana, r.id, Some("PR o/r#1")).unwrap();
+    assert_eq!(left.total, 1);
+    assert_eq!(left.items[0].item, "pr o/r#2");
+    // A blank item names none: it is refused, not read as "all".
+    assert_eq!(
+        seen::forget(&f.store, &ana, r.id, Some("  "))
+            .unwrap_err()
+            .code,
+        crate::ipc_error::codes::E_INVALID
+    );
+    assert_eq!(seen::get(&f.store, &ana, r.id, None).unwrap().total, 1);
 }
 
 #[test]
@@ -4171,7 +4337,7 @@ fn a_runs_replies_leave_its_prompt_out() {
             "context": null,
         }))
         .unwrap();
-    let texts = memory::reply_texts(&conv);
+    let texts = memory::reply_texts(conv);
     assert_eq!(
         texts,
         vec!["Did it.", "<routine-memory>real</routine-memory>"]
