@@ -1,6 +1,6 @@
 [package]
 name = "fleet-hub"
-version = "0.6.4"
+version = "0.6.5-dev.149.desktop.gd5a479b"
 description = "Headless claude-fleet hub: runs the fleet without the desktop app"
 authors = ["martin-janci"]
 edition = "2021"
