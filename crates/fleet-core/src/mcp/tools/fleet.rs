@@ -1080,7 +1080,15 @@ impl FleetTools {
     ) -> Result<CallToolResult, McpError> {
         audit("mcp_confirms", "");
         refuse_operator_answer(&caller)?;
-        ok_json_compact(&self.guards.confirms.pending())
+        let mut pending = self.guards.confirms.pending();
+        // The words name tickets and carry briefs and prompts: the owner's
+        // own devices read them, anyone else the bound summary as before.
+        if !caller.is_control_or_owner() {
+            for c in &mut pending {
+                c.about = None;
+            }
+        }
+        ok_json_compact(&pending)
     }
 
     #[tool(description = "Approve or deny one waiting call by nonce; \
