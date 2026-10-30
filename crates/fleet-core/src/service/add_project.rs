@@ -2455,6 +2455,8 @@ mod tests {
         }
     }
 
+    // Runs the script through `bash`; on Windows that is WSL's launcher.
+    #[cfg(unix)]
     #[test]
     fn the_known_hosts_lines_seed_an_empty_home_and_leave_an_entry_alone() {
         if crate::proc::std_command("ssh-keygen")
