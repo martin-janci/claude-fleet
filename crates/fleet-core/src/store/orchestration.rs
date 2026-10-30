@@ -131,6 +131,12 @@ pub struct MissionPolicy {
     /// In `lane` execution, a lead session hands over to a fresh one after
     /// this many tasks (§3.5): the checkout stays, the context starts over.
     pub lane_relay_after: u32,
+    /// In `lane` execution, when a lane's `test:` lines run (mission
+    /// improvements M5): `item`, after each task, which holds the lane
+    /// meanwhile; `lane`, once its implementation is all in, in the lane's
+    /// checkout, a passing run answering every task of the lane. Changes
+    /// only while the mission is not running.
+    pub lane_test_at: String,
 }
 
 impl Default for MissionPolicy {
@@ -148,6 +154,7 @@ impl Default for MissionPolicy {
             wake_every_secs: None,
             execution: "item".into(),
             lane_relay_after: 4,
+            lane_test_at: "item".into(),
         }
     }
 }
@@ -190,6 +197,9 @@ pub fn check_policy(p: &MissionPolicy) -> Result<MissionPolicy, IpcError> {
     }
     if !MISSION_EXECUTIONS.contains(&p.execution.as_str()) {
         return Err(bad("execution", "item or lane".into()));
+    }
+    if !MISSION_EXECUTIONS.contains(&p.lane_test_at.as_str()) {
+        return Err(bad("lane_test_at", "item or lane".into()));
     }
     if !(1..=POLICY_MAX_LANE_RELAY).contains(&p.lane_relay_after) {
         return Err(bad(
@@ -771,7 +781,9 @@ impl Store {
         };
         // Lanes design §2.3: a running mission does not switch how its tasks
         // run under its open runs.
-        if policy.execution != before.policy.execution {
+        if policy.execution != before.policy.execution
+            || policy.lane_test_at != before.policy.lane_test_at
+        {
             let open: i64 = self.conn.query_row(
                 "SELECT COUNT(*) FROM tasks t JOIN work_items i ON i.id = t.work_item_id \
                  WHERE i.orchestration_project_id = ?1 AND t.state IN ('queued','running')",

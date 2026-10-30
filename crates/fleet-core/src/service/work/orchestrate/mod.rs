@@ -275,9 +275,27 @@ fn steps_and_waits(
         .iter()
         .flat_map(|l| l.item_ids.iter().map(move |i| (*i, l.id)))
         .collect();
-    let busy = lanes::busy_lanes(s, m, &lanes, &attempts, &lanes::awaiting_test(&graph))?;
+    // M5: with a lane's tests at its end, a task waiting for its test does
+    // not hold the lane; the lane's one test run waits for its last task.
+    let tests_at_end = m.policy.lane_test_at == "lane";
+    let awaiting = if tests_at_end {
+        std::collections::HashSet::new()
+    } else {
+        lanes::awaiting_test(&graph)
+    };
+    let busy = lanes::busy_lanes(s, m, &lanes, &attempts, &awaiting)?;
     let before = waits::impl_items(&steps);
     let steps = lanes::gate(steps, &lane_of, &busy);
+    let steps = if tests_at_end {
+        let state_of: HashMap<i64, &str> = graph
+            .nodes
+            .iter()
+            .map(|n| (n.item_id, n.state.as_str()))
+            .collect();
+        lanes::gate_lane_tests(steps, &lane_of, &busy, &state_of)
+    } else {
+        steps
+    };
     if waits::held(&before, &steps) {
         causes.insert("lane");
     }

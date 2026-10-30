@@ -205,3 +205,23 @@ fn a_lane_waits_for_its_tasks_test() {
         .unwrap();
     assert_eq!(awaiting_test(&graph), HashSet::from([10]));
 }
+
+/// Mission improvements M5: with a lane's tests at its end, the lane runs
+/// one test, its last test step, once all its tasks are implemented and it
+/// is not busy; a task in no lane tests as before.
+#[test]
+fn a_lanes_one_test_waits_for_its_last_task() {
+    let steps = vec![
+        step("test", 10, "test"),
+        step("test", 11, "test"),
+        step("test", 30, "test"),
+    ];
+    let all_in = HashMap::from([(10, "verifying"), (11, "verifying"), (20, "done")]);
+    let got = gate_lane_tests(steps.clone(), &lane_of(), &HashSet::new(), &all_in);
+    assert_eq!(keys(&got), ["test:11", "test:30"]);
+    let still_running = HashMap::from([(10, "verifying"), (11, "running")]);
+    let got = gate_lane_tests(steps.clone(), &lane_of(), &HashSet::new(), &still_running);
+    assert_eq!(keys(&got), ["test:30"], "lane 1 still implements");
+    let got = gate_lane_tests(steps, &lane_of(), &HashSet::from([1]), &all_in);
+    assert_eq!(keys(&got), ["test:30"], "a busy lane tests nothing");
+}

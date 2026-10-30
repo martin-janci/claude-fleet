@@ -375,6 +375,16 @@ fn execution_is_item_or_lane_and_changes_only_while_not_running() {
         ..Default::default()
     };
     assert!(check_policy(&bad).is_err());
+    // M5: a lane's tests run after each task or once at its end.
+    assert_eq!(p.lane_test_at, "item");
+    let bad = MissionPolicy {
+        lane_test_at: "never".into(),
+        ..Default::default()
+    };
+    assert!(check_policy(&bad)
+        .unwrap_err()
+        .message
+        .contains("policy.lane_test_at"));
     let s = store();
     let m = mission(&s, "m", None);
     let lanes = MissionPatch {
@@ -392,6 +402,16 @@ fn execution_is_item_or_lane_and_changes_only_while_not_running() {
         ..Default::default()
     };
     let e = s.update_mission(m.id, None, &back, "fleet").unwrap_err();
+    assert!(e.message.contains("not running"), "{}", e.message);
+    let at_end = MissionPatch {
+        policy: Some(MissionPolicy {
+            execution: "lane".into(),
+            lane_test_at: "lane".into(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let e = s.update_mission(m.id, None, &at_end, "fleet").unwrap_err();
     assert!(e.message.contains("not running"), "{}", e.message);
     s.set_mission_state(m.id, None, "paused", "fleet").unwrap();
     assert_eq!(

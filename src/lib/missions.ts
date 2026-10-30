@@ -67,6 +67,9 @@ export interface MissionPolicy {
   execution?: 'item' | 'lane';
   /** In `lane` execution, a lead hands over to a fresh one after this many tasks. */
   lane_relay_after?: number;
+  /** In `lane` execution, `item`: a task's tests run after it; `lane`: one
+   *  run at the lane's end answers all its tasks (M5). */
+  lane_test_at?: 'item' | 'lane';
   max_parallel?: number;
   max_retries?: number;
   require_review?: boolean;

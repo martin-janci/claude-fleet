@@ -52,6 +52,54 @@ pub fn gate(steps: Vec<Step>, lane_of: &HashMap<i64, i64>, busy: &HashSet<i64>) 
         .collect()
 }
 
+/// PURE: a lane's test steps when its tests run at its end (mission
+/// improvements M5, `policy.lane_test_at = lane`): one per lane, the last
+/// of its test steps in graph order, and only once every task of the lane
+/// is implemented (done or verifying) and the lane is not busy. The run
+/// tests the lane's checkout at its head, so a pass answers the lane's
+/// other tasks too (`verify::check_line`); a failure is its own task's,
+/// whose retry goes to the lane's lead.
+pub fn gate_lane_tests(
+    steps: Vec<Step>,
+    lane_of: &HashMap<i64, i64>,
+    busy: &HashSet<i64>,
+    state_of: &HashMap<i64, &str>,
+) -> Vec<Step> {
+    let unfinished: HashSet<i64> = lane_of
+        .iter()
+        .filter(|(item, _)| {
+            !matches!(
+                state_of.get(item).copied(),
+                Some("done" | "verifying" | "proposed" | "rejected")
+            )
+        })
+        .map(|(_, lane)| *lane)
+        .collect();
+    let mut last: HashMap<i64, usize> = HashMap::new();
+    for (i, st) in steps.iter().enumerate() {
+        if st.kind == "test" {
+            if let Some(&lane) = st.item_id.and_then(|it| lane_of.get(&it)) {
+                last.insert(lane, i);
+            }
+        }
+    }
+    steps
+        .into_iter()
+        .enumerate()
+        .filter(|(i, st)| {
+            let Some(&lane) = st
+                .item_id
+                .and_then(|it| lane_of.get(&it))
+                .filter(|_| st.kind == "test")
+            else {
+                return true;
+            };
+            last.get(&lane) == Some(i) && !busy.contains(&lane) && !unfinished.contains(&lane)
+        })
+        .map(|(_, st)| st)
+        .collect()
+}
+
 /// The lane's lead when it is still the lane's: a running session of this
 /// mission in the lane's checkout. A session id is reused once its row is
 /// gone, so the id alone does not say.

@@ -126,6 +126,11 @@ Jedna úloha sa pripíše prvej príčine v tomto poradí (príčina bližšie k
 
 **Veľkosť** M.
 
+**Ako je to postavené v M5:**
+- `policy.lane_test_at` (`item` | `lane`, predvolene `item`), mení sa len na misii, ktorá nebeží a nemá otvorené behy (rovnako ako `execution`). V úprave misie „Tests run“, keď sa úlohy robia po líniách.
+- `lane`: `steps_and_waits` neposiela `busy_lanes` úlohy čakajúce na test, takže línia ide ďalej; `lanes::gate_lane_tests` nechá z testových krokov línie len posledný v poradí grafu, a len keď sú všetky úlohy línie `done` alebo `verifying` a línia nie je obsadená. Test beží headless v checkoute línie na jej `HEAD` ako doteraz.
+- **Odchýlka od návrhu (bez kópií a zlučovania príkazov):** úspešný beh sa nekopíruje do ostatných úloh. `verify::check_line` pri riadku `test:` úlohy v takej línii počíta aj úspešné testové behy ostatných úloh línie, ktoré hlásili spustenie toho príkazu (a staršie než posledná implementácia úlohy sa nerátajú). Úloha s iným príkazom dostane svoj vlastný beh, jeden po druhom. Neúspech ostáva úlohe, ktorej test bežal, takže retry (s výstupom testu) ide len jej, cez vedúceho línie; druhé rovnaké zlyhanie je `ask` ako doteraz. Počty behov v štatistikách sa tak nenafukujú.
+
 ## 7. M4: PR na líniu
 
 `policy.lane_pr: off | draft` (predvolene `off`, lebo push a PR sú navonok).
@@ -155,7 +160,7 @@ Línia už build ohrieva sama (jeden worktree na líniu, štafeta ho nemení). N
 | **M3** (postavené) | `mission_waits`, príčiny v ticku, `stats.waits`, riadok štatistík, Compare | len meranie | M |
 | **M2** (postavené) | závislá úloha z vetiev závislostí (`item`), merge závislých línií (`lane`), konflikt vyrieši worker (odchýlka od E4), prompt, e2e | mení, odkiaľ beh začína | M |
 | **M7** (postavené) | `SubagentStart`/`Stop` hooky, timeline, počet na úlohe a v Compare | len zobrazenie | S |
-| **M5** | `policy.lane_test_at = lane` | opt-in na misii | M |
+| **M5** (postavené) | `policy.lane_test_at = lane` | opt-in na misii | M |
 | **M4** | `policy.lane_pr = draft`, `mission_lanes.pr_url` | opt-in na misii | M |
 | **M6** | `orchestrator.build_cache` (sccache) | opt-in nastavenie | S–M |
 

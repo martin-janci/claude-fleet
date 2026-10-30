@@ -384,6 +384,7 @@
   let editParallel = $state(POLICY_DEFAULT_PARALLEL);
   /** How its tasks run (lanes design L3): `item` or `lane`. */
   let editExecution = $state<'item' | 'lane'>('item');
+  let editLaneTestAt = $state<'item' | 'lane'>('item');
   let editWakeMins = $state<number | null>(null);
   const minWakeMins = POLICY_MIN_WAKE_SECS / 60;
   const wakeBad = $derived(editMode === 'continuous' && editWakeMins != null && !(editWakeMins >= minWakeMins));
@@ -398,6 +399,7 @@
     editMode = mission.mode;
     editParallel = mission.policy?.max_parallel ?? POLICY_DEFAULT_PARALLEL;
     editExecution = mission.policy?.execution ?? 'item';
+    editLaneTestAt = mission.policy?.lane_test_at ?? 'item';
     const wake = mission.policy?.wake_every_secs;
     editWakeMins = wake ? Math.round(wake / 60) : null;
     editing = true;
@@ -420,6 +422,7 @@
             max_parallel: editParallel,
             wake_every_secs: wakeSecs,
             execution: editExecution,
+            lane_test_at: editLaneTestAt,
           }),
         },
         mission.version,
@@ -1366,6 +1369,17 @@
                       <option value="lane">By lane, one session each</option>
                     </select></label
                   >
+                  {#if editExecution === 'lane'}
+                    <label
+                      class="field inline"
+                      title="At the lane's end: a task waiting for its test does not hold the lane, and one test run in the lane's checkout answers all its tasks. Changes only while the mission is not running."
+                      >Tests run
+                      <select bind:value={editLaneTestAt} disabled={mission.state === 'active'} data-testid="mission-edit-lane-test-at">
+                        <option value="item">After each task</option>
+                        <option value="lane">At the lane's end</option>
+                      </select></label
+                    >
+                  {/if}
                   {#if editMode === 'continuous'}
                     <label class="field inline"
                       >Wake every (min)

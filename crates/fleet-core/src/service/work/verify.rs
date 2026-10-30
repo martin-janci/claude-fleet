@@ -204,7 +204,9 @@ pub fn check_line(
             from_run(c, &t)
         }
         Cond::Test(command) => {
-            let all = s.item_tasks(item.id, "test")?;
+            let mut all = s.item_tasks(item.id, "test")?;
+            all.extend(lane_test_passes(s, item.id, command.as_deref())?);
+            all.sort_by_key(|t| std::cmp::Reverse(t.id));
             if all.is_empty() {
                 return Ok(check(line, kind, "pending", "no test run yet"));
             }
@@ -229,6 +231,47 @@ pub fn check_line(
             test_check(line, command.as_deref(), &runs)
         }
     })
+}
+
+/// The passing test runs of `item_id`'s lane-mates when its mission runs a
+/// lane's tests at the lane's end (mission improvements M5): one run in the
+/// lane's checkout tested every task of the lane. Only a pass is shared; a
+/// failure stays its own task's, so only that task is retried, and a run
+/// that did not report running `command` is not this line's (it would count
+/// toward the line's unreported runs). The usual staleness rule still
+/// applies: a run older than this task's latest implementation did not
+/// test it.
+fn lane_test_passes(
+    s: &Store,
+    item_id: i64,
+    command: Option<&str>,
+) -> Result<Vec<TaskRow>, IpcError> {
+    let Some(mission) = s
+        .item_mission(item_id)?
+        .and_then(|m| s.get_mission(m).ok().flatten())
+    else {
+        return Ok(Vec::new());
+    };
+    if mission.policy.execution != "lane" || mission.policy.lane_test_at != "lane" {
+        return Ok(Vec::new());
+    }
+    let Some(lane) = s
+        .item_lane(item_id)?
+        .and_then(|l| s.get_mission_lane(l).ok().flatten())
+    else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::new();
+    for other in lane.item_ids.iter().filter(|i| **i != item_id) {
+        out.extend(s.item_tasks(*other, "test")?.into_iter().filter(|t| {
+            t.state == "done"
+                && t.report.as_ref().is_some_and(|r| {
+                    r.outcome == "done"
+                        && command.is_none_or(|c| r.tests_run.iter().any(|x| x.contains(c)))
+                })
+        }));
+    }
+    Ok(out)
 }
 
 /// How many finished test runs may leave a `test:<command>` line unreported

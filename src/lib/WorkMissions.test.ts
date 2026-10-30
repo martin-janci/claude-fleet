@@ -1170,6 +1170,10 @@ describe('WorkMissions', () => {
       expect((screen.getByTestId('mission-edit-execution') as HTMLSelectElement).value).toBe('item');
       await fireEvent.change(screen.getByTestId('mission-edit-execution'), { target: { value: 'lane' } });
       await flush();
+      // M5: by lane, its tests may run once at the lane's end.
+      expect((screen.getByTestId('mission-edit-lane-test-at') as HTMLSelectElement).value).toBe('item');
+      await fireEvent.change(screen.getByTestId('mission-edit-lane-test-at'), { target: { value: 'lane' } });
+      await flush();
       await fireEvent.click(screen.getByTestId('mission-edit-save'));
       await flush();
       const sent = calls('save_mission')[0];
@@ -1179,6 +1183,7 @@ describe('WorkMissions', () => {
         max_parallel: 4,
         wake_every_secs: 1800,
         execution: 'lane',
+        lane_test_at: 'lane',
       });
       // What came back is what the header shows, and a second edit starts from it.
       const meta = screen.getByTestId('mission-detail').textContent ?? '';
