@@ -71,7 +71,8 @@ pub struct SupportConfig {
     pub mcp_servers: Vec<String>,
     /// A catalog skill (install name) as the instructions, instead of the default.
     pub skill: Option<String>,
-    /// The branch of the rule's project the run reads.
+    /// The branch of the rule's project the run reads; empty is origin's
+    /// default branch, whatever it is called.
     pub branch: String,
     /// Seconds after an investigation of a ticket before it is investigated again.
     pub cooldown_secs: i64,
@@ -113,7 +114,7 @@ impl Default for SupportConfig {
             marker: "Investigation Complete".into(),
             mcp_servers: Vec::new(),
             skill: None,
-            branch: "main".into(),
+            branch: String::new(),
             cooldown_secs: 300,
             max_turns: 40,
             timeout_secs: 900,
@@ -332,12 +333,14 @@ pub trait SupportHost: Send + Sync {
     /// A file on the host, at most 1 MB; `None` when it is not there.
     async fn read_file(&self, host: &str, path: &str) -> Result<Option<String>, String>;
     async fn checkout(&self, host: &str, project_id: i64) -> Result<String, IpcError>;
+    /// Job `job_id`'s worktree of `branch`, or of origin's default branch
+    /// when `None`.
     async fn prepare(
         &self,
         host: &str,
         root: &str,
         job_id: i64,
-        branch: &str,
+        branch: Option<&str>,
     ) -> Result<(Prepared, String), IpcError>;
     async fn run(&self, host: &str, run: &PrintRun, prompt: &str)
         -> Result<PrintOutcome, IpcError>;
@@ -467,17 +470,10 @@ impl SupportHost for LiveSupportHost {
         host: &str,
         root: &str,
         job_id: i64,
-        branch: &str,
+        branch: Option<&str>,
     ) -> Result<(Prepared, String), IpcError> {
-        workspace::prepare(
-            &self.ssh,
-            host,
-            root,
-            job_id,
-            &Source::Branch(branch.into()),
-            None,
-        )
-        .await
+        let source = branch.map_or(Source::DefaultBranch, |b| Source::Branch(b.into()));
+        workspace::prepare(&self.ssh, host, root, job_id, &source, None).await
     }
 
     async fn run(
@@ -772,10 +768,14 @@ impl SupportRunner {
                     Err(e) => return failed(ErrorKind::Transient, e.message),
                 };
                 self.host.prune(host, &root).await;
-                match self.host.prepare(host, &root, job.id, &cfg.branch).await {
+                let branch = Some(cfg.branch.trim()).filter(|b| !b.is_empty());
+                match self.host.prepare(host, &root, job.id, branch).await {
                     Ok((Prepared::Ready, cwd)) => (cwd, Some(root)),
                     Ok((Prepared::NoRoot, _)) => {
                         return failed(ErrorKind::Permanent, format!("no git checkout at {root}"))
+                    }
+                    Ok((Prepared::NoRef, _)) => {
+                        return failed(ErrorKind::Permanent, workspace::missing_ref(branch))
                     }
                     Ok((other, _)) => {
                         return failed(ErrorKind::Transient, format!("workspace: {other:?}"))

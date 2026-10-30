@@ -36,12 +36,35 @@
   <!-- Escape / backdrop = Deny: dismissing must never count as approval. -->
   <Modal label="Confirm control-API call" onclose={() => answer(false)} width="440px" testid="mcp-confirm">
     <div class="body">
-      <h3>Approve <code>{current.tool}</code>?</h3>
+      {#if current.about}
+        <h3>{current.about.title}?</h3>
+      {:else}
+        <h3>Approve <code>{current.tool}</code>?</h3>
+      {/if}
       <p class="who">
         An agent{current.caller ? ` (${current.caller})` : ''} asked the control API to run
         <code>{current.tool}</code>.
       </p>
-      {#if current.summary}
+      {#if current.about}
+        {#if current.about.facts?.length}
+          <dl class="facts" data-testid="mcp-confirm-facts">
+            {#each current.about.facts as f, i (i)}
+              <dt>{f.label}</dt>
+              <dd>{f.value}</dd>
+            {/each}
+          </dl>
+        {/if}
+        {#if current.about.body}
+          <p class="who"><strong>{current.about.body.label}:</strong></p>
+          <pre class="summary text">{current.about.body.text}</pre>
+        {/if}
+        {#if current.summary}
+          <details>
+            <summary class="who">Exact call</summary>
+            <pre class="summary">{current.summary}</pre>
+          </details>
+        {/if}
+      {:else if current.summary}
         <pre class="summary">{current.summary}</pre>
       {/if}
       {#if queue.length > 1}
@@ -74,6 +97,10 @@
     white-space: pre-wrap;
     word-break: break-all;
   }
+  .text { max-height: 12rem; overflow: auto; word-break: normal; overflow-wrap: anywhere; font-family: inherit; }
+  .facts { margin: 0; display: grid; grid-template-columns: max-content 1fr; gap: 2px 0.6rem; font-size: var(--text-xs); }
+  .facts dt { color: var(--fg-muted); }
+  .facts dd { margin: 0; overflow-wrap: anywhere; }
   .actions { display: flex; justify-content: flex-end; gap: 0.5rem; }
   .actions button {
     border: 1px solid var(--border);

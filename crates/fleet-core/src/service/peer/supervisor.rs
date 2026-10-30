@@ -12,9 +12,7 @@ use crate::http_client::HubTransport;
 use crate::ipc_error::{lock, IpcError};
 use crate::ssh::SshClient;
 use crate::store::{PeerLinkRow, Store, LINK_INCOMPATIBLE, LINK_REFUSED};
-use futures_util::FutureExt as _;
 use std::collections::HashMap;
-use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -54,13 +52,9 @@ pub fn spawn_peer_supervisor(
             let mut outcome = listed.as_ref().map(|_| ()).map_err(|e| e.message.clone());
             // Caught like a tick pass (`run_cancellable_tick`): uncaught, one
             // panic ended the supervisor, and no link was restarted again.
-            if AssertUnwindSafe(reconcile(&ctx, &mut running, listed))
-                .catch_unwind()
-                .await
-                .is_err()
-            {
-                tracing::error!("[peer] a rescan panicked; continuing with the next one");
-                outcome = Err("the rescan panicked".to_string());
+            let rescan = reconcile(&ctx, &mut running, listed);
+            if let Err(why) = crate::service::loops::caught("the peer rescan", rescan).await {
+                outcome = Err(why);
             }
             crate::service::loops::report("peers", outcome, Some(RESCAN));
             tokio::select! {

@@ -242,7 +242,8 @@ pub use review_prs::{
     REVIEW_SKIP_REASONS,
 };
 pub use routine_decisions::{
-    NewRoutineDecision, RoutineDecisionRow, ROUTINE_DECISIONS_KEPT, ROUTINE_DECISION_VERDICTS,
+    NewRoutineDecision, RecentEvent, RoutineDecisionRow, ROUTINE_DECISIONS_KEPT,
+    ROUTINE_DECISION_VERDICTS,
 };
 pub use routine_memory::{
     RoutineMemoryRow, ROUTINE_MEMORY_MODES, ROUTINE_MEMORY_SCOPES, ROUTINE_MEMORY_WRITERS,

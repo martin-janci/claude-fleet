@@ -7,7 +7,7 @@ inputs:
   - { name: phrases, type: text, label: Trigger phrases, value: "Tech help!, /analyze" }
   - { name: bug_project, type: text, label: Bug project, required: true }
   - { name: app_frame_prefix, type: text, label: App frame prefix, help: "The package your stack frames start with (e.g. com.acme.); empty counts every frame." }
-  - { name: daily_budget, type: number, label: Daily budget (USD), min: 0, max: 25, help: "At most 25; past it, runs wait for the next UTC day." }
+  - { name: daily_budget, type: number, label: Daily budget (USD), min: 1, max: 25, help: "At most 25; past it, runs wait for the next UTC day." }
 stores:
   - { role: logs, kind: mcp, label: Logs, required: true, read_tools: [search_logs] }
   - { role: tenants, kind: mcp, label: Tenant registry, read_tools: [resolve_tenant, lookup_client] }
@@ -49,6 +49,13 @@ run:
       affectedComponent: { type: string, maxLength: 80 }
       needsMoreInfo: { type: string }
 actions:
+  # First: the stop actions below end the plan, and every run is remembered.
+  - id: remember
+    do: record
+    store: memory
+    key: "{{subject.key}}"
+    value: { exceptionClass: "{{answer.exceptionClass}}", summary: "{{answer.summary}}", seen: "{{now}}" }
+    auto: true
   - id: ask
     when: { field: needsMoreInfo, truthy: true }
     do: tracker_comment
@@ -85,12 +92,6 @@ actions:
     body_template: bug
     link: { to: "{{subject.key}}", link_type: Causes }
     fingerprint: "{{answer.fingerprint}}"
-  - id: remember
-    do: record
-    store: memory
-    key: "{{subject.key}}"
-    value: { exceptionClass: "{{answer.exceptionClass}}", summary: "{{answer.summary}}", seen: "{{now}}" }
-    auto: true
 limits:
   max_body_chars: 5000
   daily_budget_usd: 25

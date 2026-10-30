@@ -1012,6 +1012,65 @@ fn spend_by_person_goes_only_to_an_administrator_who_sees_every_session() {
     }
 }
 
+/// A mission's worker reads the other tasks of its mission (the one it
+/// waits for, the epic above it) while its run is open on the host, and
+/// nothing outside the mission.
+#[test]
+fn an_open_mission_run_makes_the_missions_other_items_readable_there() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("h-a").unwrap();
+    let worker = s
+        .upsert_session("dev-o-r--w", "h-a", None, None, 1, 1, "running", None)
+        .unwrap();
+    let native = |title| {
+        s.create_native_item(&crate::store::NativeItem {
+            title,
+            parent_id: None,
+            project_id: None,
+            notes: None,
+        })
+        .unwrap()
+    };
+    let (mine, mate, outside) = (native("API"), native("Schema"), native("Unrelated"));
+    let m = s
+        .create_mission(
+            &crate::store::NewMission {
+                org_id: None,
+                owner_person_id: None,
+                root_item_id: None,
+                name: "Payments",
+                goal: "Pay with a card.",
+                non_goals: None,
+                done_when: &[],
+                mode: None,
+                level: None,
+            },
+            "test",
+        )
+        .unwrap();
+    s.set_mission_item(m.id, mine.id, true, "test").unwrap();
+    s.set_mission_item(m.id, mate.id, true, "test").unwrap();
+    let here = host(None, &[]);
+    let visible = |item: &crate::store::WorkItemRow| {
+        let key = item.key.clone().expect("a native task has a key");
+        (
+            require_key(&s, &here, &key).is_ok(),
+            crate::service::trackers::tickets::item_visible(&here, &s, item).unwrap(),
+            s.work_item_ids_on_host("h-a").unwrap().contains(&item.id),
+        )
+    };
+    assert_eq!(visible(&mate), (false, false, false));
+
+    let task = crate::service::work::run::record_run(&s, worker, "do it", mine.id, 1, "implement")
+        .unwrap();
+    assert_eq!(visible(&mine), (true, true, true));
+    assert_eq!(visible(&mate), (true, true, true));
+    assert_eq!(visible(&outside), (false, false, false));
+
+    crate::service::tasks::fail_task(&s, task.id, "boom").unwrap();
+    assert_eq!(visible(&mate), (false, false, false));
+}
+
 /// A run is work the host's sessions do: its worker reads the item it was
 /// started on by the task that names it, with no link at all, and only
 /// while the run is open.

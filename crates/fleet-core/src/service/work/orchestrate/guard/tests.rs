@@ -18,6 +18,12 @@ fn a_persons_steps_are_refused() {
         "jira issue move ABC-1 Done",
         "echo ok; acli jira workitem transition --key ABC-1",
         "true && linear issue update",
+        "jira issue comment add PAY-1 done",
+        "jira issue edit PAY-1 -s Done",
+        "jira issue create -t Bug",
+        "jira",
+        "acli jira workitem edit --key PAY-1 --summary x",
+        "jira issue view PAY-1; jira issue assign PAY-1 me",
     ] {
         assert!(deny_reason(cmd, Some("feat/x")).is_some(), "{cmd}");
     }
@@ -36,6 +42,12 @@ fn a_workers_own_steps_pass() {
         "cargo test -- push",
         "grep -r jira src",
         "git log main..HEAD",
+        "jira issue view PAY-123 --comments 5",
+        "jira issue list -s Done --plain",
+        "jira me",
+        "acli jira workitem view PAY-1",
+        "acli jira workitem search --jql project=PAY",
+        "linear issue list",
     ] {
         assert!(deny_reason(cmd, Some("feat/x")).is_none(), "{cmd}");
     }

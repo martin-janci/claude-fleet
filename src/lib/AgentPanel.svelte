@@ -46,12 +46,10 @@
   import ControlPlusMenu from './ControlPlusMenu.svelte';
   import { insertIntoComposer } from './conversation';
   import ConfirmCards from './ConfirmCards.svelte';
-  import ControlEscalations from './ControlEscalations.svelte';
-  import HandoffCards from './HandoffCards.svelte';
+  import ControlActivity from './ControlActivity.svelte';
   import { controlThinking } from './control_loaders';
   import ControlRouteReceipts from './ControlRouteReceipts.svelte';
   import ControlCommandReceipts from './ControlCommandReceipts.svelte';
-  import ControlSuggestions from './ControlSuggestions.svelte';
   import AutonomyChip from './AutonomyChip.svelte';
   import { takeControlCommand } from './control_slash';
   import { linkableTasks, type TaskLink } from './control_task_link';
@@ -239,18 +237,15 @@
        Mounted only while this row renders, so a request is never parked on
        a card nobody can see (confirms.ts). -->
   <ConfirmCards />
-  <!-- Thread room: what in the fleet needs the person, as amber cards. -->
-  <ControlEscalations />
-  <!-- Steps 9.3 and 9.6: what the agent handed on, as chips and cards
-       that follow their target's state. -->
-  <HandoffCards />
   <!-- Step 9.9 (Jev K2): where each message just sent here goes. Keyed, so
        another Control session primes afresh instead of routing its history. -->
   {#if session}{#key session.id}<ControlRouteReceipts sessionId={session.id} />{/key}{/if}
   <!-- G3.9: what /task, /done, /assign and /start did (control_slash.ts). -->
   <ControlCommandReceipts />
-  <!-- G3.9: suggestions read from the fleet's rows; a press runs them. -->
-  {#if session}<ControlSuggestions sessionId={session.id} />{/if}
+  <!-- Compact Control (2026-10-30): what needs the person (Thread room's
+       amber cards), what the agent handed on (steps 9.3, 9.6) and what the
+       fleet suggests (G3.9), as one row of counts right above the box; each opens its cards. -->
+  <ControlActivity sessionId={session?.id ?? null} />
 {/snippet}
 
 {#snippet tools()}

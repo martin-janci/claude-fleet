@@ -9,7 +9,6 @@ import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import {
   autonomyWords,
   capSecsOf,
-  capWords,
   fixLabel,
   hostWords,
   onFailureWords,
@@ -319,10 +318,7 @@ describe('the schedule picker and its next run (G2.3)', () => {
 });
 
 describe('automation guards in words (G3.8)', () => {
-  it('a time cap, a host with its fallback, autonomy and what started a retry', () => {
-    expect(capWords(20 * 60)).toBe('20 min');
-    expect(capWords(2 * 3600)).toBe('2 h');
-    expect(capWords(90 * 60)).toBe('1 h 30 min');
+  it('a time cap typed, a host with its fallback, autonomy and what started a retry', () => {
     expect(capSecsOf('')).toBeUndefined();
     expect(capSecsOf('20')).toBe(1200);
     expect(capSecsOf('nope')).toBeUndefined();

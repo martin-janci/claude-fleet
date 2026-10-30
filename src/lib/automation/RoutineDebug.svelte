@@ -41,7 +41,11 @@
   }
 
   async function dryRun(eventId?: number) {
-    const r = await dryRunRoutine(routineId, eventId);
+    // A reply after the routine changed (`load` bumps `seq`) is dropped.
+    const mine = seq;
+    const id = routineId;
+    const r = await dryRunRoutine(id, eventId);
+    if (mine !== seq || id !== routineId) return;
     if (r.ok) {
       dry = r.value;
       error = null;

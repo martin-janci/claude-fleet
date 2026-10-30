@@ -284,10 +284,24 @@ fn without_blocks(text: &str) -> String {
 }
 
 /// PURE: `s` cut to `max` characters, `…` marking the cut.
-fn clip(s: &str, max: usize) -> String {
+pub(super) fn clip(s: &str, max: usize) -> String {
     match s.char_indices().nth(max) {
         Some((i, _)) => format!("{}…", &s[..i]),
         None => s.to_string(),
+    }
+}
+
+/// PURE: `s` on one line, its runs of whitespace made one space.
+pub(super) fn one_line(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// PURE: the notebook of `scope`, in words.
+fn notebook_words(scope: &str) -> &'static str {
+    if scope == SCOPE_PROJECT {
+        "the project's notebook"
+    } else {
+        "its notebook"
     }
 }
 
@@ -307,24 +321,20 @@ pub fn summary(reply: &str) -> Option<String> {
 }
 
 /// PURE: the note line of `run`: `- [run 42 · 2026-10-20 14:05 UTC · done] …`.
-/// `read`: whether its reply was read (`false`: its transcript could not
-/// be, which the note says rather than reading as a quiet `done`).
-pub fn note_line(run: &RoutineRunRow, reply: Option<&str>, read: bool) -> String {
+/// `said`: its reply's [`summary`]. `read`: whether its reply was read
+/// (`false`: its transcript could not be, which the note says rather than
+/// reading as a quiet `done`).
+pub fn note_line(run: &RoutineRunRow, said: Option<&str>, read: bool) -> String {
     let at = run.finished_at.unwrap_or(run.started_at);
     let stamp = crate::service::agents::review::rfc3339(at);
     let when = format!("{} {} UTC", &stamp[..10], &stamp[11..16]);
     let what = match (run.state.as_str(), run.reason.as_deref()) {
         // One line whatever the reason holds (a tool's stderr runs to
         // several): the oldest notes are found, to drop, by their lines.
-        ("failed", Some(why)) => {
-            let why = why.split_whitespace().collect::<Vec<_>>().join(" ");
-            format!("failed: {}", clip(&why, NOTE_SUMMARY_MAX))
-        }
+        ("failed", Some(why)) => format!("failed: {}", clip(&one_line(why), NOTE_SUMMARY_MAX)),
         ("failed", None) => "failed".to_string(),
         _ if !read => "done (reply not read)".to_string(),
-        _ => reply
-            .and_then(summary)
-            .unwrap_or_else(|| "done".to_string()),
+        _ => said.unwrap_or("done").to_string(),
     };
     format!("{NOTE_PREFIX}{} · {when} · {}] {what}", run.id, run.state)
 }
@@ -399,8 +409,10 @@ pub fn apply(
         used.retain(|u| *u != SCOPE_PROJECT);
     }
     let mut written = Vec::new();
-    let mut last_reply: Option<&str> = None;
-    if let Err(why) = replies {
+    let mut last_summary: Option<String> = None;
+    // A routine with no notebook (one that only tracks seen items) has none
+    // to say were not rewritten.
+    if let (Err(why), false) = (replies, used.is_empty()) {
         trace::write_one(
             s,
             run.id,
@@ -432,11 +444,7 @@ pub fn apply(
             let (owner, circle) = key(r, scope);
             if let Some(m) = s.get_routine_memory(scope, owner, circle)? {
                 if newer_than(s, &m, run)? {
-                    let what = if scope == SCOPE_PROJECT {
-                        "the project's notebook"
-                    } else {
-                        "its notebook"
-                    };
+                    let what = notebook_words(scope);
                     trace::write_one(
                         s,
                         run.id,
@@ -463,15 +471,11 @@ pub fn apply(
                 });
             }
         }
-        last_reply = texts
-            .iter()
-            .rev()
-            .find(|t| summary(t).is_some())
-            .map(String::as_str);
+        last_summary = texts.iter().rev().find_map(|t| summary(t));
     }
     if r.memory_auto {
         if let Some(scope) = used.first().copied() {
-            let line = note_line(run, last_reply, replies.is_ok());
+            let line = note_line(run, last_summary.as_deref(), replies.is_ok());
             let (owner, circle) = key(r, scope);
             let m = s.get_routine_memory(scope, owner, circle)?;
             let body = m.as_ref().map(|m| m.body.as_str()).unwrap_or_default();
@@ -505,11 +509,7 @@ pub fn apply(
     }
     s.mark_routine_run_memory_read(run.id, now)?;
     for w in &written {
-        let what = if w.scope == SCOPE_PROJECT {
-            "the project's notebook"
-        } else {
-            "its notebook"
-        };
+        let what = notebook_words(w.scope);
         let summary = match (w.by, w.cut) {
             ("fleet", _) => format!("Noted the run in {what}"),
             (_, true) => format!("Its reply rewrote {what}, cut to {MEMORY_MAX_CHARS} characters"),
@@ -531,12 +531,12 @@ pub fn apply(
 
 /// PURE: the reply texts of `conv`, oldest first: what Claude wrote, never
 /// a turn's prompt (which carries the instructions' own example tags).
-pub fn reply_texts(conv: &crate::service::transcript::Conversation) -> Vec<String> {
+pub fn reply_texts(conv: crate::service::transcript::Conversation) -> Vec<String> {
     conv.turns
-        .iter()
-        .flat_map(|t| &t.items)
+        .into_iter()
+        .flat_map(|t| t.items)
         .filter_map(|i| match i {
-            ConvItem::Text { text } => Some(text.clone()),
+            ConvItem::Text { text } => Some(text),
             _ => None,
         })
         .collect()
@@ -568,7 +568,7 @@ impl ReplyReader for TranscriptReplies {
             0,
         )
         .await?;
-        Ok(reply_texts(&conv))
+        Ok(reply_texts(conv))
     }
 }
 

@@ -64,6 +64,11 @@
     ...escalations($visibleFleet.rows, $visibleFleet.opts, opId, $laterEscalations, $hosts, mine),
   ]);
   const all = $derived($escalationScope === 'fleet' ? fleetAll : ours);
+  // Control's activity row (ControlActivity) shows this as its Needs you count.
+  let { count = $bindable(0) }: { count?: number } = $props();
+  $effect(() => {
+    count = all.length;
+  });
   const shown = $derived(all.slice(0, ESCALATIONS_SHOWN));
   const more = $derived(all.length - shown.length);
   // The switch shows only when it would change what is drawn.

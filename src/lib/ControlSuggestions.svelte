@@ -19,12 +19,17 @@
   import { refreshTidy, requestTidy, tidyReport } from './tidy';
   import { onMount } from 'svelte';
 
-  let { sessionId }: { sessionId: number } = $props();
+  // `count`: Control's activity row (ControlActivity) shows it.
+  let { sessionId, count = $bindable(0) }: { sessionId: number; count?: number } = $props();
 
   onMount(() => void refreshTidy());
 
   const scope = $derived($escalationScope === 'fleet' ? null : controlSessionIds($sessions, $handoffs, $threadFollows));
   const cards = $derived(fleetSuggestions($sessions, $dismissedSuggestions, { scope, tidy: $tidyReport.candidates }));
+
+  $effect(() => {
+    count = cards.length;
+  });
 
   function dismiss(s: Suggestion) {
     dismissSuggestion(s.id);

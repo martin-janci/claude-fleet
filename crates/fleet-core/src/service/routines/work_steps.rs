@@ -74,10 +74,7 @@ fn unix(iso: Option<&str>) -> Option<i64> {
 }
 
 fn clip(s: &str) -> String {
-    match s.char_indices().nth(TOOL_SUMMARY_MAX) {
-        Some((i, _)) => format!("{}…", &s[..i]),
-        None => s.to_string(),
-    }
+    super::memory::clip(s, TOOL_SUMMARY_MAX)
 }
 
 /// PURE: the finished tool calls in `conv`, oldest first. A call still

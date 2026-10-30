@@ -1359,7 +1359,9 @@ most `max_rounds` times), and the gallery's `pr-reviewer` and
 `pr-test-debate`, which share a store of accepted test exemptions; a
 definition's `limits.daily_budget_usd` (a UTC day's cap on one instance's
 runs, past it a job waits for the next day) with `limits.budget_input` to
-lower it per instance. All the
+lower it per instance; the grant form's *this instance's own secrets*
+switch (generated `AGENT_<INSTANCE>_<ROLE>_<NAME>` secret names per MCP
+binding). All the
 migration's steps are built; deleting the built-in agents and converting
 their rules waits on the definitions having run for real.
 

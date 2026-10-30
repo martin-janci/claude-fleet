@@ -14,9 +14,31 @@
 /// Branches a worker never pushes to.
 pub const DEFAULT_BRANCHES: [&str; 2] = ["main", "master"];
 
-/// Tracker command-line tools a worker never runs (writes to Jira / Asana
-/// / Linear are a person's, C3).
+/// Tracker command-line tools a worker writes with only through a person
+/// (writes to Jira / Asana / Linear are a person's, C3). Reading is the
+/// worker's own: a ticket, its comments, a search ([`READ_VERBS`]).
 pub const TRACKER_CLIS: [&str; 4] = ["jira", "acli", "asana", "linear"];
+
+/// Subcommands that only read a tracker (`jira issue view ABC-1`, `acli jira
+/// workitem search --jql …`, `linear issue list`). A tracker command passes
+/// when one of its first [`VERB_WORDS`] positional words is one of these;
+/// anything else, a subcommand this list does not know included, stays a
+/// person's step.
+pub const READ_VERBS: [&str; 9] = [
+    "list",
+    "ls",
+    "view",
+    "show",
+    "get",
+    "search",
+    "me",
+    "serverinfo",
+    "version",
+];
+
+/// How many positional words name a tracker command's subcommand
+/// (`acli jira workitem view`: three).
+const VERB_WORDS: usize = 3;
 
 /// Words that may stand before the real command in a segment.
 const PREFIXES: [&str; 6] = ["sudo", "command", "env", "exec", "nohup", "time"];
@@ -51,11 +73,18 @@ fn segment_reason(words: &[String], branch: Option<&str>) -> Option<&'static str
     match tool {
         "gh" => gh_reason(rest),
         "git" => git_reason(rest, branch),
-        t if TRACKER_CLIS.contains(&t) => {
-            Some("a tracker write is a person's step (orchestration §7.3)")
-        }
+        t if TRACKER_CLIS.contains(&t) => tracker_reason(rest),
         _ => None,
     }
+}
+
+fn tracker_reason(args: &[String]) -> Option<&'static str> {
+    let reads = args
+        .iter()
+        .filter(|a| !a.starts_with('-'))
+        .take(VERB_WORDS)
+        .any(|a| READ_VERBS.contains(&a.to_ascii_lowercase().as_str()));
+    (!reads).then_some("a tracker write is a person's step (orchestration §7.3)")
 }
 
 fn gh_reason(args: &[String]) -> Option<&'static str> {
