@@ -15,6 +15,7 @@
 //! Every step taken, refused or braked is a mission event, so the timeline
 //! says what the machine did and why it did not.
 
+pub mod access;
 pub mod checks;
 pub mod drafts;
 pub mod guard;
@@ -391,7 +392,8 @@ fn start_for(
             return Err(IpcError::new(
                 codes::E_FORBIDDEN,
                 format!(
-                    "{} is in a repo outside {}'s allow-list",
+                    "{} is in a repo outside {}'s allow-list: add its repo to the \
+                     mission's repos, or take the task out of the mission",
                     item.key.as_deref().unwrap_or(&item.title),
                     m.name
                 ),
@@ -485,11 +487,32 @@ pub async fn apply_step(
     view: &ViewScope,
 ) -> StepResult {
     let res = apply_step_inner(deps, m, step, actor, view).await;
+    // A start the loop cannot make by itself (outside the repo allow-list,
+    // another organisation's host, a host the grant does not reach) waits on
+    // a person: ask, rather than only log a refusal on every tick.
+    let ask = match (&res, actor) {
+        (Err(e), Actor::Loop) if e.code == codes::E_FORBIDDEN => Some(e.message.clone()),
+        _ => None,
+    };
     let (ok, detail, task_id) = match res {
         Ok((d, t)) => (true, d, t),
         Err(e) => (false, e.message, None),
     };
     if let Ok(s) = deps.store.lock() {
+        if let Some(why) = ask {
+            let _ = ask_card(
+                &s,
+                m.id,
+                &Step {
+                    kind: "ask".into(),
+                    item_id: step.item_id,
+                    role: None,
+                    reason: format!("The loop cannot start {}: {why}", step.kind),
+                    context: None,
+                    auto: false,
+                },
+            );
+        }
         event(
             &s,
             m.id,
@@ -1953,6 +1976,25 @@ pub fn grant(
             "lifted_from": lifted_from,
         }),
     );
+    // The grant's hosts against the tasks' organisations (access review
+    // F4): a run on a host of another organisation is refused at its
+    // start, so say it now. Hosts placement picks are checked by the loop.
+    if let Some(hosts) = g.hosts.as_ref().filter(|h| !h.is_empty()) {
+        for why in access::org_conflicts(&s, &m, hosts)? {
+            ask_card(
+                &s,
+                id,
+                &Step {
+                    kind: "ask".into(),
+                    item_id: None,
+                    role: None,
+                    reason: why,
+                    context: None,
+                    auto: false,
+                },
+            )?;
+        }
+    }
     s.wake_mission(id)?;
     Ok(g)
 }
@@ -2288,6 +2330,11 @@ pub async fn tick_mission(deps: &Deps, id: i64, now: i64) -> Result<(), IpcError
         }
         (m, a, steps, counts)
     };
+    // Under a grant, what its runs can reach is checked once, before they
+    // need it (access review F6).
+    if let Some(g) = a.grant.as_ref().filter(|_| a.effective >= AUTO_LEVEL) {
+        access::check_once(deps, &m, g, now).await;
+    }
     // Under a grant, the mechanical steps are the loop's own.
     if a.effective >= AUTO_LEVEL {
         for st in steps.iter().filter(|st| st.auto) {
