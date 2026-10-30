@@ -1,16 +1,21 @@
 {
   "schema": 1,
   "track": "nightly",
-  "sequence": 105,
-  "generated_at": "2026-10-26T13:15:25Z",
-  "expires_at": "2026-11-09T13:15:25Z",
-  "current": "0.6.5-dev.113.desktop.g9fd9fb2",
-  "recommended": "0.6.5-dev.113.desktop.g9fd9fb2",
+  "sequence": 106,
+  "generated_at": "2026-10-30T15:51:38Z",
+  "expires_at": "2026-11-13T15:51:38Z",
+  "current": "0.6.5-dev.146.desktop.gce5125f",
+  "recommended": "0.6.5-dev.146.desktop.gce5125f",
   "minimum_supported": {},
   "mandatory": [],
   "rollback": null,
   "withdrawn": [],
   "releases": [
+    {
+      "version": "0.6.5-dev.146.desktop.gce5125f",
+      "manifest": "https://github.com/martin-janci/claude-fleet/releases/download/v0.6.5-dev.146.desktop.gce5125f/release-manifest.json",
+      "manifest_sha256": "31b457adcd69a35e4d845ea990f1b4473efdf70c4bd4c6b4d752bbea83595ab4"
+    },
     {
       "version": "0.6.5-dev.113.desktop.g9fd9fb2",
       "manifest": "https://github.com/martin-janci/claude-fleet/releases/download/v0.6.5-dev.113.desktop.g9fd9fb2/release-manifest.json",
@@ -162,18 +167,6 @@
           "component": "android",
           "manifest": "https://raw.githubusercontent.com/martin-janci/claude-fleet/update-channels/amendments/0.6.3-dev.868.desktop.gdf62373/android.json",
           "manifest_sha256": "bb9677c429b36e9208e566799aede8d68e6cdf8ba40eeebfda0d37de5da5793d"
-        }
-      ]
-    },
-    {
-      "version": "0.6.3-dev.855.desktop.g1ad23b0",
-      "manifest": "https://github.com/martin-janci/claude-fleet/releases/download/v0.6.3-dev.855.desktop.g1ad23b0/release-manifest.json",
-      "manifest_sha256": "7c93e17accf38f387da035397202d4edf904cb0bea9cdb5e0c81bacfaf697045",
-      "amendments": [
-        {
-          "component": "android",
-          "manifest": "https://raw.githubusercontent.com/martin-janci/claude-fleet/update-channels/amendments/0.6.3-dev.855.desktop.g1ad23b0/android.json",
-          "manifest_sha256": "d7c28f4387b0bf3d7660639ab0d1885e4250e25021390e3c44df839d96ee1617"
         }
       ]
     }
