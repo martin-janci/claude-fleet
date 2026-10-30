@@ -599,7 +599,7 @@ describe('stores', () => {
     const shown = new Set([1]);
     const touches = (row: typeof plain) => sessionEventsTouchWork([{ type: 'updated', row }], cur, shown);
     // The reasons the old hand-written check missed.
-    expect(touches({ ...plain, context_pct: 97 })).toBe(true);
+    expect(touches({ ...plain, claude_status: 'working', context_pct: 97 })).toBe(true);
     expect(touches({ ...plain, stale_working_at: 1790000000 })).toBe(true);
     expect(touches({ ...plain, ci_status: 'failing' })).toBe(true);
     expect(touches({ ...plain, lost_at: 1790000000 })).toBe(true);
