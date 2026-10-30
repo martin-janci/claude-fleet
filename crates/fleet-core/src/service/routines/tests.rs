@@ -34,7 +34,7 @@ struct FakeSpawn {
     fail: AtomicBool,
     /// Only a start on this host fails (G3.8's fallback).
     fail_on: Mutex<Option<String>>,
-    /// The turns a time cap stopped: `(host, tmux name)`.
+    /// The turns a budget or a time cap stopped: `(host, tmux name)`.
     stopped: Mutex<Vec<(String, String)>>,
     /// The prompts typed into a run's session: `(session id, prompt)`.
     typed: Mutex<Vec<(i64, String)>>,
@@ -371,7 +371,7 @@ async fn a_run_whose_typing_was_lost_fails_as_undelivered() {
             [],
         )
         .unwrap();
-    tick::settle(&lock(&f.store).unwrap(), OCT8 + 60).unwrap();
+    tick::settle(&lock(&f.store).unwrap(), OCT8 + 60, &mut Vec::new()).unwrap();
     assert_eq!(
         runs_of(&f, r.id)[0].state,
         "running",
@@ -380,6 +380,7 @@ async fn a_run_whose_typing_was_lost_fails_as_undelivered() {
     tick::settle(
         &lock(&f.store).unwrap(),
         OCT8 + tick::PROMPT_DELIVERY_SECS + 1,
+        &mut Vec::new(),
     )
     .unwrap();
     let run = runs_of(&f, r.id).pop().unwrap();
@@ -401,7 +402,7 @@ async fn a_late_typing_failure_leaves_a_closed_run_alone() {
         .await
         .unwrap();
     event(&f, run.session_id.unwrap(), "turn_done");
-    tick::settle(&lock(&f.store).unwrap(), OCT8 + 60).unwrap();
+    tick::settle(&lock(&f.store).unwrap(), OCT8 + 60, &mut Vec::new()).unwrap();
     tick::undelivered(&f.store, run.id, "too late", OCT8 + 120, None);
     let run = runs_of(&f, r.id).pop().unwrap();
     assert_eq!(run.state, "done");
@@ -668,6 +669,8 @@ async fn a_run_over_its_budget_fails_and_pauses_the_routine() {
     assert!(!r.enabled);
     assert_eq!(r.next_run_at, None);
     assert!(r.paused_reason.unwrap().contains("over its budget"));
+    // Its turn is stopped: the session would go on spending.
+    assert_eq!(f.fake.stopped.lock().unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -2882,6 +2885,39 @@ async fn a_fire_at_a_limit_holds_the_next_until_the_reset() {
     assert_eq!(routine(&f, r.id).next_run_at, Some(OCT8 + 10 * H));
 }
 
+/// Only a skip at the limit holds the next fire: one skipped because the
+/// last run is still going keeps the schedule, at a limit or not.
+#[tokio::test]
+async fn a_skip_for_another_reason_does_not_hold_at_a_limit() {
+    let f = fx();
+    let mut i = input(&f);
+    i.cron = Some("0 * * * *".into());
+    i.overlap = Some("skip".into());
+    let r = new_routine(&f, i);
+    let ana = person(&f.store, None, f.ana);
+    let t = OCT8 + 9 * H + 1800;
+    run_now(&f.deps, &ana, r.id, t - 60).await.unwrap();
+    crate::service::account_limits::seed_usage(
+        &lock(&f.store).unwrap(),
+        "mac",
+        Some("work"),
+        "work",
+        93.0,
+        t,
+    );
+    due_at(&f, r.id, t);
+    tick_once(&f.deps, t).await;
+    let skipped = runs_of(&f, r.id)
+        .into_iter()
+        .find(|run| run.state == "skipped")
+        .unwrap();
+    assert_eq!(
+        skipped.reason.as_deref(),
+        Some("its last run is still going")
+    );
+    assert_eq!(routine(&f, r.id).next_run_at, Some(OCT8 + 10 * H));
+}
+
 #[tokio::test]
 async fn a_retry_held_at_a_limit_outlasts_the_retry_window() {
     let f = fx();
@@ -4119,6 +4155,23 @@ async fn a_run_of_a_routine_without_memory_is_read_as_it_finishes() {
     assert_eq!(s.routine_run_memory_read_at(other.id), None);
     assert_eq!(s.routine_run_memory_read_at(third.id), None);
     assert_eq!(s.routine_run_memory_read_at(failed.id), Some(OCT8 + 330));
+    // Nor is there for one recorded failed as it started, its session
+    // named (its prompt was never queued).
+    let unqueued = s
+        .insert_routine_run(&crate::store::NewRoutineRun {
+            routine_id: tracking.id,
+            trigger: "cron",
+            trigger_ref: None,
+            state: "failed",
+            reason: Some("its prompt was not queued"),
+            session_id: third.session_id,
+            scheduled_for: None,
+            at: OCT8 + 400,
+            error_code: Some(fix::E_PROMPT_NOT_QUEUED),
+            host_alias: Some("mac"),
+        })
+        .unwrap();
+    assert_eq!(s.routine_run_memory_read_at(unqueued.id), Some(OCT8 + 400));
 }
 
 #[tokio::test]
@@ -4206,6 +4259,14 @@ async fn a_run_skips_what_earlier_runs_handled_and_one_that_found_nothing_new_is
     let left = seen::forget(&f.store, &ana, r.id, Some("PR o/r#1")).unwrap();
     assert_eq!(left.total, 1);
     assert_eq!(left.items[0].item, "pr o/r#2");
+    // A blank item names none: it is refused, not read as "all".
+    assert_eq!(
+        seen::forget(&f.store, &ana, r.id, Some("  "))
+            .unwrap_err()
+            .code,
+        crate::ipc_error::codes::E_INVALID
+    );
+    assert_eq!(seen::get(&f.store, &ana, r.id, None).unwrap().total, 1);
 }
 
 #[test]
@@ -4276,7 +4337,7 @@ fn a_runs_replies_leave_its_prompt_out() {
             "context": null,
         }))
         .unwrap();
-    let texts = memory::reply_texts(&conv);
+    let texts = memory::reply_texts(conv);
     assert_eq!(
         texts,
         vec!["Did it.", "<routine-memory>real</routine-memory>"]

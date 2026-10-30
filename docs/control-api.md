@@ -1120,8 +1120,8 @@ Index by area (names only; see the reference for details):
   whose prompt could not be typed fails with `E_PROMPT_NOT_DELIVERED`,
   fix: open its session). A run is `done` when its session's first turn finishes,
   `failed` on an error, a lost or removed session, six quiet hours, or a
-  session past the run budget (which also turns the routine off with
-  `paused_reason`), and `skipped` when the last run is still going under
+  session past the run budget (which also stops its turn and turns the
+  routine off with `paused_reason`), and `skipped` when the last run is still going under
   `overlap: skip`, today's budget is spent, the account its login bills
   is at or past `accounts.pause_at` (Orbit Fleet 8.7, read from the stored
   usage readings), or a person skipped it.

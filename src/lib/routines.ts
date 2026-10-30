@@ -17,7 +17,7 @@ import { selectSessionExplicitly } from './selection';
 import { goTo } from './destination';
 import { requestHostsView } from './app_views';
 import { openAccount } from './account_pill';
-import { automationTab } from './automation';
+import { automationTab, money } from './automation';
 import type { RunRow } from './runs';
 import type { OfState } from './kit/status';
 import type { LoopHealth } from './ipc';
@@ -248,7 +248,7 @@ export function routineInputOf(r: RoutineRow, clearsMemory = false): RoutineInpu
   return {
     name: r.name,
     enabled: r.enabled,
-    trigger: (r.trigger as RoutineTrigger) ?? 'cron',
+    trigger: r.trigger as RoutineTrigger,
     cron: r.cron,
     utc_offset_min: r.utc_offset_min,
     event: r.event,
@@ -418,8 +418,6 @@ export interface RoutineDryRun {
 
 export const explainRoutine = (id: number, limit?: number) =>
   call<RoutineExplain>({ action: 'explain', routine_id: id, ...(limit !== undefined ? { limit } : {}) });
-export const routineDecisions = (id: number, limit?: number) =>
-  call<RoutineDecision[]>({ action: 'decisions', routine_id: id, ...(limit !== undefined ? { limit } : {}) });
 export const dryRunRoutine = (id: number, eventId?: number) =>
   call<RoutineDryRun>({ action: 'dry_run', routine_id: id, ...(eventId !== undefined ? { event_id: eventId } : {}) });
 
@@ -637,13 +635,20 @@ export function fixLabel(fix: RunFix | undefined): string {
 
 // ---- guards (M15 G3.8) ------------------------------------------------------
 
-/** A time cap in words: "20 min", "2 h", "1 h 30 min". */
-export function capWords(secs: number): string {
-  const m = Math.round(secs / 60);
-  const h = Math.floor(m / 60);
-  const r = m % 60;
-  if (h === 0) return `${r} min`;
-  return r === 0 ? `${h} h` : `${h} h ${r} min`;
+/** What a run does while the last one is still going. */
+export function overlapWords(r: Pick<RoutineRow, 'overlap'>): string {
+  return r.overlap === 'parallel' ? 'Runs alongside the last run' : 'Skip if the last run is still going';
+}
+
+/** "acme/web": a project as the routine screens name it. */
+export function repoName(p: { owner: string; repo: string }): string {
+  return `${p.owner}/${p.repo}`;
+}
+
+/** A routine's project by id; "project 7" once it is gone. */
+export function projectName(list: readonly { project: { id: number; owner: string; repo: string } }[], id: number): string {
+  const p = list.find((x) => x.project.id === id)?.project;
+  return p ? repoName(p) : `project ${id}`;
 }
 
 /** "mac, else nas" when there is a fallback host. */
@@ -816,8 +821,6 @@ export const EVENT_GROUPS: readonly { label: string; events: readonly string[] }
   { label: 'Pull requests', events: Object.keys(PR_EVENT_LABELS) },
   { label: 'Hosts, accounts and missions', events: Object.keys(FLEET_EVENT_LABELS) },
 ];
-/** Every event the editor offers, in order. */
-export const EVENT_CHOICES: readonly string[] = EVENT_GROUPS.flatMap((g) => g.events);
 export function isPrEvent(e: string | undefined): boolean {
   return !!e && e in PR_EVENT_LABELS;
 }
@@ -905,9 +908,7 @@ export function eventFilterWords(
   if (pr && r.event_repo) parts.push(`only in ${r.event_repo}`);
   if (r.event_host) parts.push(`on ${r.event_host}`);
   if (pr) parts.push(r.event_author === 'anyone' ? 'anyone’s' : 'mine');
-  const rate = RATE_CHOICES.find((c) => c.secs === r.event_rate_secs);
-  if (r.event_rate_secs)
-    parts.push(rate ? rate.label.replace('once per', `once per ${rateSubject(r.event)} per`) : `once per ${r.event_rate_secs}s`);
+  if (r.event_rate_secs) parts.push(rateWords(r.event_rate_secs, r.event));
   return parts.join(' · ');
 }
 
@@ -933,11 +934,6 @@ export function runWords(run: Pick<RoutineRunRow, 'state' | 'outcome' | 'reason'
 export function runSourceHint(run: Pick<RoutineRunRow, 'outcome' | 'outcome_source'>): string | undefined {
   if (run.outcome_source !== 'jev' || !run.outcome) return undefined;
   return "Jev read this from the run's last screen. Open the run's session to check it.";
-}
-
-/** `$0.38` from micro-dollars. */
-export function dollars(micros: number | undefined): string {
-  return `$${((micros ?? 0) / 1_000_000).toFixed(2)}`;
 }
 
 /** Dollars typed by a person as micro-dollars; empty or bad is no limit
@@ -977,6 +973,12 @@ export function rateLabel(secs: number): string {
   if (secs % 3600 === 0) return unit(secs / 3600, 'hour');
   if (secs % 60 === 0) return unit(secs / 60, 'minute');
   return unit(secs, 'second');
+}
+
+/** "once per session per 30 minutes": a rate as the editor and the
+ *  definition both say it, counted per what the event is about. */
+export function rateWords(secs: number, event: string | undefined): string {
+  return rateLabel(secs).replace('once per', `once per ${rateSubject(event)} per`);
 }
 
 /** A preview `problem` that is about the cron line itself (it does not
@@ -1111,10 +1113,10 @@ const LAST_WORDS: Record<string, string> = {
 };
 
 function inWords(secs: number): string {
-  if (secs < 60) return `${Math.max(0, Math.round(secs))}s`;
-  if (secs < 3600) return `${Math.round(secs / 60)}m`;
-  if (secs < 86400) return `${Math.round(secs / 3600)}h`;
-  return `${Math.round(secs / 86400)}d`;
+  if (secs < 60) return `${Math.max(0, Math.floor(secs))}s`;
+  if (secs < 3600) return `${Math.floor(secs / 60)}m`;
+  if (secs < 86400) return `${Math.floor(secs / 3600)}h`;
+  return `${Math.floor(secs / 86400)}d`;
 }
 
 /** A routine's state as the list's dot says it: running now, its newest run
@@ -1135,8 +1137,7 @@ export function routineLine(
 ): string {
   const when = r.trigger === 'cron' ? cronParts(r.cron) : null;
   if (!r.enabled) {
-    const head = when ? cronWords(r.cron) : triggerWords(r);
-    return `${head} · ${r.paused_reason ? 'paused by fleet' : 'paused by you'}`;
+    return `${triggerWords(r)} · ${r.paused_reason ? 'paused by fleet' : 'paused by you'}`;
   }
   const parts = [when ? when.days : triggerWords(r)];
   if (last?.outcome === 'running') return `${parts[0]} · running now on ${r.host_alias}`;
@@ -1161,7 +1162,7 @@ export function averageRun(runs: readonly RoutineRunRow[]): string | null {
   if (done.length === 0) return null;
   const cost = done.reduce((s, r) => s + r.cost_micros, 0) / done.length;
   const secs = done.reduce((s, r) => s + (r.finished_at! - r.started_at), 0) / done.length;
-  return `${dollars(Math.round(cost))} · ${secs < 60 ? `${Math.round(secs)}s` : `${Math.round(secs / 60)} min`}`;
+  return `${money(Math.round(cost))} · ${secs < 60 ? `${Math.round(secs)}s` : `${Math.round(secs / 60)} min`}`;
 }
 
 /** When it runs next, in words: "in 18h", "Next one skipped", "Paused". */
@@ -1339,6 +1340,6 @@ export function dryRunLine(
   account: string | null,
 ): string {
   const as = account ?? (d.profile ? `profile ${d.profile}` : "the host's own login");
-  const cap = d.budget_run_micros !== undefined ? `at most ${dollars(d.budget_run_micros)} a run` : 'no limit a run';
+  const cap = d.budget_run_micros !== undefined ? `at most ${money(d.budget_run_micros)} a run` : 'no limit a run';
   return `Dry run: on ${d.host_alias}, in ${project}, as ${as}, ${cap}.`;
 }
