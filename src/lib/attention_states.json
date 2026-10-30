@@ -61,6 +61,11 @@
     { "name": "Jev's question on a lost row leaves it lost", "row": { "claude_status": "idle", "turn_outcome": "asked", "lost_at": 80 }, "bucket": "lifecycle", "state": "paused", "counted": false },
     { "name": "Jev read a silent turn's end as stuck", "row": { "claude_status": "idle", "turn_outcome": "stuck" }, "bucket": "stuck", "state": "action_required", "counted": true },
     { "name": "Jev's finished leaves an idle row idle", "row": { "claude_status": "idle", "turn_outcome": "finished" }, "bucket": "idle", "state": "idle", "counted": false },
-    { "name": "a working row outranks a stale Jev answer", "row": { "claude_status": "working", "turn_outcome": "asked" }, "bucket": "working", "state": "working", "counted": false }
+    { "name": "a working row outranks a stale Jev answer", "row": { "claude_status": "working", "turn_outcome": "asked" }, "bucket": "working", "state": "working", "counted": false },
+    { "name": "failing checks on a merged PR ask nothing of anyone", "row": { "claude_status": "idle", "ci_status": "failing", "pr_evidence": { "draft": false, "state": "MERGED", "checks": { "passing": 0, "pending": 0, "failing": [], "failing_total": 0 } } }, "bucket": "idle", "state": "idle", "counted": false },
+    { "name": "failing checks on a closed PR ask nothing of anyone", "row": { "claude_status": "idle", "ci_status": "failing", "pr_evidence": { "draft": false, "state": "CLOSED", "checks": { "passing": 0, "pending": 0, "failing": [], "failing_total": 0 } } }, "bucket": "idle", "state": "idle", "counted": false },
+    { "name": "failing checks on an open PR still count", "row": { "claude_status": "idle", "ci_status": "failing", "pr_evidence": { "draft": false, "state": "OPEN", "checks": { "passing": 0, "pending": 0, "failing": [], "failing_total": 0 } } }, "bucket": "ci_failing", "state": "failed", "counted": true },
+    { "name": "an idle session with a full context waits for nothing", "row": { "claude_status": "idle", "context_pct": 95.0 }, "bucket": "idle", "state": "idle", "counted": false },
+    { "name": "a finished session with a full context waits for nothing", "row": { "claude_status": "completed", "context_pct": 95.0 }, "bucket": "idle", "state": "idle", "counted": false }
   ]
 }

@@ -1509,9 +1509,9 @@ derive from them.
   session is not working), `no_credentials` (its account's login has
   expired or its token was rejected, and the session is not working), `stop_failed` (the
   last turn ended in an API error; re-prompt),
-  `failed` (a pane-less agent reported failure), `context_full` (context at or
+  `failed` (a pane-less agent reported failure), `context_full` (not idle, context at or
   past `health.context_red_pct`), `stale_working` (the demotion above),
-  `ci_failing` (idle with failing PR checks), `probably_waiting` (contract
+  `ci_failing` (idle with failing checks on a PR that is still open), `probably_waiting` (contract
   15: Jev read the end of a silent turn as a question; a proposal, never
   counted as Needs you) and `lifecycle` (a failed or
   pending safe kill, a ghost, a lost row). `since` is when the session
@@ -1519,7 +1519,7 @@ derive from them.
   reason puts it in: `action_required`, `failed`, `blocked` (`host_down`,
   `account_limit`, `no_credentials`), `proposed` (`probably_waiting`) or
   `paused` (`lifecycle`). A `needs_attention=true` listing includes
-  `probably_waiting` rows; the Needs you count is the first three states.
+  `probably_waiting` rows and leaves out `paused` ones; the Needs you count is the first three states.
 - **`waiting_on`** (on a mission row, contract 15): why an active mission
   waits on a person: `question` (an open `ask` card), `sign_grant` (it asks
   for autonomy and no live grant covers its plan) or `confirm` (open cards

@@ -2618,11 +2618,11 @@ most urgent first (`service/attention.rs`): `waiting`, `stuck`, `host_down`
 account's 5-hour or weekly window is used up and the session is not
 working), `no_credentials` (its account's login has expired or its
 token was rejected, and the session is not working), `stop_failed`,
-`failed`, `context_full` (at or past `health.context_red_pct`),
+`failed`, `context_full` (not idle, at or past `health.context_red_pct`),
 `stale_working` (a `working` row demoted after `reconcile.stale_working_secs`
 with no activity; it lifts on the next hook, when its terminal is opened,
 when the row works again, or after `reconcile.stale_working_ttl_secs`),
-`ci_failing`, `probably_waiting` (contract 15: Jev read a silent turn's end
+`ci_failing` (the PR still open), `probably_waiting` (contract 15: Jev read a silent turn's end
 as a question; a proposal, not a fact) and `lifecycle`. The three after `stuck` are decided from what
 the hub's event bus follows of hosts and account usage, not from the row, so
 every site that stamps `needs_attention` (`list_sessions`, `/events`, Today,
