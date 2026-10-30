@@ -137,6 +137,11 @@ pub struct MissionPolicy {
     /// checkout, a passing run answering every task of the lane. Changes
     /// only while the mission is not running.
     pub lane_test_at: String,
+    /// In `lane` execution, `draft`: fleet pushes a lane's branch up to its
+    /// newest verified task and opens its draft pull request (mission
+    /// improvements M4); `off`: the lead's brief asks it to. Ready and merge
+    /// stay a person's either way.
+    pub lane_pr: String,
 }
 
 impl Default for MissionPolicy {
@@ -155,6 +160,7 @@ impl Default for MissionPolicy {
             execution: "item".into(),
             lane_relay_after: 4,
             lane_test_at: "item".into(),
+            lane_pr: "off".into(),
         }
     }
 }
@@ -197,6 +203,9 @@ pub fn check_policy(p: &MissionPolicy) -> Result<MissionPolicy, IpcError> {
     }
     if !MISSION_EXECUTIONS.contains(&p.execution.as_str()) {
         return Err(bad("execution", "item or lane".into()));
+    }
+    if !matches!(p.lane_pr.as_str(), "off" | "draft") {
+        return Err(bad("lane_pr", "off or draft".into()));
     }
     if !MISSION_EXECUTIONS.contains(&p.lane_test_at.as_str()) {
         return Err(bad("lane_test_at", "item or lane".into()));

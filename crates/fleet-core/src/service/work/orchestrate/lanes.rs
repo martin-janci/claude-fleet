@@ -216,10 +216,16 @@ pub fn lane_brief(m: &MissionRow, lane: &str, tasks: &[String]) -> String {
     out.push_str(
         "\nFor each task: work on that task only, and commit your work on this branch at its \
          end (never amend, rebase or squash the commits of an earlier task); then report it as \
-         its prompt asks. Do not start the next task until fleet hands it to you. After your \
-         first task, open a draft pull request for this branch if you may push it; never mark \
-         it ready or merge it.",
+         its prompt asks. Do not start the next task until fleet hands it to you. ",
     );
+    // M4: under `lane_pr = draft` fleet pushes the branch and opens the PR.
+    out.push_str(if m.policy.lane_pr == "draft" {
+        "Fleet pushes this branch as your tasks are done and opens its draft pull request: \
+         do not push it or open one yourself, and never mark it ready or merge it."
+    } else {
+        "After your first task, open a draft pull request for this branch if you may push it; \
+         never mark it ready or merge it."
+    });
     out.chars()
         .take(crate::service::work::handover::BRIEF_MAX_CHARS)
         .collect()

@@ -15,6 +15,7 @@
   import Icon from './kit/Icon.svelte';
   import StatusDot from './kit/StatusDot.svelte';
   import Loader from './Loader.svelte';
+  import { openExternal } from './open_external';
   import MissionGraph from './MissionGraph.svelte';
   import { tablistKeys } from './tablist_keys';
   import { defaultLaneBy, toneOf, type LaneBy } from './mission_graph';
@@ -230,6 +231,16 @@
                     >
                   {/each}
                 </span>
+                {#if laneOfItem(detail, it.id)?.pr_url}
+                  {@const pr = laneOfItem(detail, it.id)?.pr_url ?? ''}
+                  <button
+                    class="linkish small"
+                    type="button"
+                    title="Open the lane's draft pull request: {pr}"
+                    data-testid="mission-lane-pr"
+                    onclick={() => void openExternal(pr)}>lane PR</button
+                  >
+                {/if}
                 {#if detail.touches?.[it.id]?.length}
                   <span class="muted small" data-testid="mission-touches" title="What it says it changes: a task whose changes meet another's does not start beside it"
                     >changes {detail.touches[it.id].join(', ')}</span

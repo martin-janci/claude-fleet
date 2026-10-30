@@ -225,3 +225,19 @@ fn a_lanes_one_test_waits_for_its_last_task() {
     let got = gate_lane_tests(steps, &lane_of(), &HashSet::from([1]), &all_in);
     assert_eq!(keys(&got), ["test:30"], "a busy lane tests nothing");
 }
+
+/// Mission improvements M4: under `lane_pr = draft` the brief tells the
+/// lead that fleet pushes and opens the PR; otherwise it asks the lead to.
+#[test]
+fn the_brief_says_who_opens_the_lanes_pull_request() {
+    let mut m = mission_row();
+    let own = lane_brief(&m, "api", &[]);
+    assert!(
+        own.contains("open a draft pull request for this branch"),
+        "{own}"
+    );
+    m.policy.lane_pr = "draft".into();
+    let fleet = lane_brief(&m, "api", &[]);
+    assert!(fleet.contains("Fleet pushes this branch"), "{fleet}");
+    assert!(fleet.contains("never mark it ready or merge it"));
+}

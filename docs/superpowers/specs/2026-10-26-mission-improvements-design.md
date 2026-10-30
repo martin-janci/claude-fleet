@@ -142,6 +142,14 @@ Jedna úloha sa pripíše prvej príčine v tomto poradí (príčina bližšie k
 
 **Veľkosť** M.
 
+**Ako je to postavené v M4** (`orchestrate/lane_pr.rs`, migrácia 215):
+- `policy.lane_pr` (`off` | `draft`, predvolene `off`), v úprave misie „Lane PR“ pri práci po líniách; meniť sa dá kedykoľvek.
+- Tick (`lane_pr::sync`, pri autonómii ≥ 1, po integračnej kontrole): pre každú líniu s vetvou (nie `main`/`master`) vezme commit najnovšej hotovej úlohy línie (evidencia jej implement behu), a ak ešte nie je `mission_lanes.pr_head`, v checkoute línie na jej hoste spustí `git push origin <sha>:refs/heads/<vetva>` (len overenú prácu, nie rozrobenú prácu vedúceho), potom `gh pr view` a buď `gh pr edit --body`, alebo `gh pr create --draft`. URL sa zapíše do `mission_lanes.pr_url`, prvé otvorenie je `note` v logu misie.
+- Bez `gh` alebo bez prihlásenia: push prebehne, `note` povie, že PR chýba. Odmietnutý push (napríklad vetva na `origin` je ďalej) je `note`; každý commit sa skúsi raz (pamäť v procese).
+- Telo PR: cieľ misie, úlohy línie so zaškrtnutými hotovými a veta, že ready a merge sú človeka. Brief vedúceho pri `draft` hovorí, že vetvu pushuje a PR otvára Fleet; pri `off` ostáva pôvodný pokyn.
+- Riadok úlohy v línii s PR má odkaz „lane PR“.
+- **Odchýlka od návrhu:** PR, ktorý vedúci otvoril sám, sa nezisťuje cez `prs.rs`, ale cez `gh pr view` pri prvom pushi (len pri `draft`). Stav CI pri línii sa neukazuje.
+
 ## 8. M6: teplý build (experiment)
 
 Línia už build ohrieva sama (jeden worktree na líniu, štafeta ho nemení). Najviac studených buildov má režim `item` (checkout na beh).
@@ -161,7 +169,7 @@ Línia už build ohrieva sama (jeden worktree na líniu, štafeta ho nemení). N
 | **M2** (postavené) | závislá úloha z vetiev závislostí (`item`), merge závislých línií (`lane`), konflikt vyrieši worker (odchýlka od E4), prompt, e2e | mení, odkiaľ beh začína | M |
 | **M7** (postavené) | `SubagentStart`/`Stop` hooky, timeline, počet na úlohe a v Compare | len zobrazenie | S |
 | **M5** (postavené) | `policy.lane_test_at = lane` | opt-in na misii | M |
-| **M4** | `policy.lane_pr = draft`, `mission_lanes.pr_url` | opt-in na misii | M |
+| **M4** (postavené) | `policy.lane_pr = draft`, `mission_lanes.pr_url` | opt-in na misii | M |
 | **M6** | `orchestrator.build_cache` (sccache) | opt-in nastavenie | S–M |
 
 M1 a M3 pred meraním L6, aby Compare ukazoval správnu cenu a dôvod čakania. M2 hneď potom, lebo najviac mení progres (menej práce naviac a integračných úloh). Ostatné nezávisle.

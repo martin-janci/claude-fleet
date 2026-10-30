@@ -19,6 +19,7 @@ pub mod checks;
 pub mod drafts;
 pub mod guard;
 pub mod integrate;
+pub mod lane_pr;
 pub mod lanes;
 pub mod limit;
 pub mod planner;
@@ -2377,6 +2378,8 @@ pub async fn tick_mission(deps: &Deps, id: i64, now: i64) -> Result<(), IpcError
     // each other before it integrates (O7).
     if a.effective >= 1 {
         integrate::check(deps, &m).await;
+        // M4: a lane's branch up to its newest done task, and its draft PR.
+        lane_pr::sync(deps, &m).await;
     }
     let s = lock(&deps.store)?;
     let counts = s.mission_task_counts(id)?;

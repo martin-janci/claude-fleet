@@ -412,6 +412,17 @@ fn routine_runs_has_memory_read_at(conn: &Connection) -> rusqlite::Result<bool> 
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 215: `mission_lanes` already has
+/// its `pr_url` column.
+fn lanes_have_pr_url(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('mission_lanes') WHERE name = 'pr_url'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 214: `orchestration_projects`
 /// already has its `waits_at` column.
 fn missions_have_waits_at(conn: &Connection) -> rusqlite::Result<bool> {
@@ -2479,6 +2490,13 @@ const MIGRATIONS: &[Migration] = &[
         version: 214,
         sql: include_str!("../../migrations/214_mission_waits.sql"),
         already_applied: Some(missions_have_waits_at),
+    },
+    // Mission improvements M4: a lane's draft pull request. ADD COLUMNs,
+    // so guarded.
+    Migration {
+        version: 215,
+        sql: include_str!("../../migrations/215_lane_pr.sql"),
+        already_applied: Some(lanes_have_pr_url),
     },
 ];
 

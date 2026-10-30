@@ -385,6 +385,7 @@
   /** How its tasks run (lanes design L3): `item` or `lane`. */
   let editExecution = $state<'item' | 'lane'>('item');
   let editLaneTestAt = $state<'item' | 'lane'>('item');
+  let editLanePr = $state<'off' | 'draft'>('off');
   let editWakeMins = $state<number | null>(null);
   const minWakeMins = POLICY_MIN_WAKE_SECS / 60;
   const wakeBad = $derived(editMode === 'continuous' && editWakeMins != null && !(editWakeMins >= minWakeMins));
@@ -400,6 +401,7 @@
     editParallel = mission.policy?.max_parallel ?? POLICY_DEFAULT_PARALLEL;
     editExecution = mission.policy?.execution ?? 'item';
     editLaneTestAt = mission.policy?.lane_test_at ?? 'item';
+    editLanePr = mission.policy?.lane_pr ?? 'off';
     const wake = mission.policy?.wake_every_secs;
     editWakeMins = wake ? Math.round(wake / 60) : null;
     editing = true;
@@ -423,6 +425,7 @@
             wake_every_secs: wakeSecs,
             execution: editExecution,
             lane_test_at: editLaneTestAt,
+            lane_pr: editLanePr,
           }),
         },
         mission.version,
@@ -1377,6 +1380,15 @@
                       <select bind:value={editLaneTestAt} disabled={mission.state === 'active'} data-testid="mission-edit-lane-test-at">
                         <option value="item">After each task</option>
                         <option value="lane">At the lane's end</option>
+                      </select></label
+                    >
+                    <label
+                      class="field inline"
+                      title="Fleet opens: once a task of a lane is done, fleet pushes the lane's branch up to it and opens its draft pull request; ready and merge stay yours."
+                      >Lane PR
+                      <select bind:value={editLanePr} data-testid="mission-edit-lane-pr">
+                        <option value="off">The lead opens it</option>
+                        <option value="draft">Fleet opens a draft</option>
                       </select></label
                     >
                   {/if}

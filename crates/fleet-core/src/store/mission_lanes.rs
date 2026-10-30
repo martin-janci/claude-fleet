@@ -44,6 +44,13 @@ pub struct MissionLaneRow {
     /// Its member tasks, by id.
     #[serde(default)]
     pub item_ids: Vec<i64>,
+    /// Its branch's pull request, once fleet opened or found it (mission
+    /// improvements M4, `policy.lane_pr`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_url: Option<String>,
+    /// The commit fleet last pushed to its branch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_head: Option<String>,
 }
 
 /// PURE: a lane name as stored: trimmed, one line of at most
@@ -63,7 +70,7 @@ pub fn lane_name(raw: &str) -> Result<String, IpcError> {
 }
 
 const LANE_COLUMNS: &str = "id, orchestration_project_id, name, project_id, branch, \
-     worktree_id, lead_session_id, relay, state, created_at, updated_at";
+     worktree_id, lead_session_id, relay, state, created_at, updated_at, pr_url, pr_head";
 
 fn map_lane(r: &rusqlite::Row<'_>) -> rusqlite::Result<MissionLaneRow> {
     Ok(MissionLaneRow {
@@ -79,6 +86,8 @@ fn map_lane(r: &rusqlite::Row<'_>) -> rusqlite::Result<MissionLaneRow> {
         created_at: r.get(9)?,
         updated_at: r.get(10)?,
         item_ids: Vec::new(),
+        pr_url: r.get(11)?,
+        pr_head: r.get(12)?,
     })
 }
 
@@ -128,6 +137,18 @@ impl Store {
             .query_map([id], |r| r.get::<_, i64>(0))?
             .collect::<rusqlite::Result<_>>()?;
         Ok(Some(lane))
+    }
+
+    /// Record what fleet pushed to lane `id`'s branch, and its pull request
+    /// once known (mission improvements M4). A `None` url keeps the one
+    /// recorded.
+    pub fn set_lane_pr(&self, id: i64, url: Option<&str>, head: &str) -> Result<(), IpcError> {
+        self.conn.execute(
+            "UPDATE mission_lanes SET pr_url = COALESCE(?2, pr_url), pr_head = ?3, \
+               updated_at = ?4 WHERE id = ?1",
+            rusqlite::params![id, url, head, now_unix()],
+        )?;
+        Ok(())
     }
 
     /// Record a new lead session of lane `id` (lanes design L3): its

@@ -632,7 +632,7 @@ describe('WorkMissions', () => {
           ],
           waves: 1,
         },
-        lanes: [{ id: 1, mission_id: 4, name: 'backend', state: 'idle', item_ids: [11] }],
+        lanes: [{ id: 1, mission_id: 4, name: 'backend', state: 'idle', item_ids: [11], pr_url: 'https://github.com/o/r/pull/9' }],
         touches: { 11: ['src/store/**', 'docs/status.md'] },
         events: [],
         may_change: true,
@@ -659,6 +659,13 @@ describe('WorkMissions', () => {
       await fireEvent.click(screen.getByTestId('mission-lane-save'));
       await flush();
       expect(calls('set_mission_item')[2]).toEqual({ mission_id: 4, item_id: 12, on: true, lane: 'web' });
+    });
+
+    it('links a lane task to its lane\'s draft PR (M4)', async () => {
+      await open();
+      const links = screen.getAllByTestId('mission-lane-pr');
+      expect(links).toHaveLength(1);
+      expect(links[0].getAttribute('title')).toContain('https://github.com/o/r/pull/9');
     });
 
     it('says what a task changes (lanes design L5)', async () => {
@@ -1173,6 +1180,9 @@ describe('WorkMissions', () => {
       // M5: by lane, its tests may run once at the lane's end.
       expect((screen.getByTestId('mission-edit-lane-test-at') as HTMLSelectElement).value).toBe('item');
       await fireEvent.change(screen.getByTestId('mission-edit-lane-test-at'), { target: { value: 'lane' } });
+      // M4: fleet may open each lane's draft PR.
+      expect((screen.getByTestId('mission-edit-lane-pr') as HTMLSelectElement).value).toBe('off');
+      await fireEvent.change(screen.getByTestId('mission-edit-lane-pr'), { target: { value: 'draft' } });
       await flush();
       await fireEvent.click(screen.getByTestId('mission-edit-save'));
       await flush();
@@ -1184,6 +1194,7 @@ describe('WorkMissions', () => {
         wake_every_secs: 1800,
         execution: 'lane',
         lane_test_at: 'lane',
+        lane_pr: 'draft',
       });
       // What came back is what the header shows, and a second edit starts from it.
       const meta = screen.getByTestId('mission-detail').textContent ?? '';

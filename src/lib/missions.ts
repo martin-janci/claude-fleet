@@ -70,6 +70,9 @@ export interface MissionPolicy {
   /** In `lane` execution, `item`: a task's tests run after it; `lane`: one
    *  run at the lane's end answers all its tasks (M5). */
   lane_test_at?: 'item' | 'lane';
+  /** In `lane` execution, `draft`: fleet pushes a lane's verified work and
+   *  opens its draft PR; `off`: the lead's brief asks it to (M4). */
+  lane_pr?: 'off' | 'draft';
   max_parallel?: number;
   max_retries?: number;
   require_review?: boolean;
@@ -275,6 +278,8 @@ export interface MissionLane {
   /** `idle` | `held` | `done`. */
   state: string;
   item_ids: number[];
+  /** Its branch's pull request, once fleet opened or found it (M4). */
+  pr_url?: string | null;
 }
 
 /** The lane a task is in, if any. */
