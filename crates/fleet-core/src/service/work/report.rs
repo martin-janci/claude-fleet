@@ -181,13 +181,38 @@ pub fn after_marker<'a>(text: &'a str, nonce: &str) -> Option<&'a str> {
     found.map(|at| &text[at.min(text.len())..])
 }
 
-/// PURE: the report after `nonce`'s marker in the first source that has
-/// the marker (the transcript, then the pane).
+/// PURE: the report after `nonce`'s marker in the first source whose
+/// marker is followed by one (the transcript, then the pane). A source
+/// with the marker but no block yet is passed over: the transcript can
+/// flush the marker line before the block that follows it.
 pub fn report_in(sources: &[&str], nonce: &str) -> Option<TaskReport> {
     sources
         .iter()
-        .find_map(|src| after_marker(src, nonce))
-        .and_then(parse_report)
+        .filter_map(|src| after_marker(src, nonce))
+        .find_map(parse_report)
+}
+
+/// What a run that ended without its report block reads as: its error,
+/// and the context its retry is given.
+pub const REPORT_MISSING: &str =
+    "the run printed its done marker but no JSON report, so Fleet cannot tell what it did";
+
+/// How many times a run may stop without its done marker before it fails:
+/// the first stop is answered with [`marker_reminder`].
+pub const UNMARKED_STOPS_MAX: usize = 1;
+
+/// The session event a stop without the marker leaves, detail `task=<id>`.
+pub const UNMARKED_STOP_EVENT: &str = "task_unmarked_stop";
+
+/// PURE: what a worker that stopped without its done marker is told. It
+/// repeats the instruction, so the reply carries the marker and the block.
+pub fn marker_reminder(task_id: i64, nonce: &str) -> String {
+    format!(
+        "You stopped without reporting this task. If the work is finished, \
+         report it now. If it is not, finish it first; if you cannot, report \
+         outcome blocked with what stops you. {}",
+        run_instruction(task_id, nonce)
+    )
 }
 
 /// Output line prefixes of [`evidence_script`].

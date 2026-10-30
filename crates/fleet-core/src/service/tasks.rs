@@ -10,7 +10,9 @@
 //! the worker's transcript (falling back to a pane capture), scans for the
 //! marker and flips the task to `done` with the paragraph as `result`. A
 //! Stop without the marker leaves the task `running`, and logs a warning
-//! naming what was read.
+//! naming what was read — except for a run at a work item (`work_link {
+//! run }`, a mission's step): its first such Stop is answered with the
+//! instruction again, and the next one fails it ([`unmarked_stops`]).
 //!
 //! The explicit path comes first: the instruction asks the worker to call
 //! the `task_report` MCP tool ([`report_task_done`]) with the task id, the
@@ -1183,10 +1185,20 @@ async fn finish_by_markers(
         );
     }
     let mut finished: Vec<TaskRow> = Vec::new();
+    let mut remind: Vec<TaskRow> = Vec::new();
     {
         let Ok(s) = store.lock() else {
             return finished;
         };
+        // Judged only when every source was read: a pane that could not be
+        // captured may hold the marker the transcript has not flushed yet.
+        if pane.is_some() {
+            let unmarked: Vec<&TaskRow> = open
+                .iter()
+                .filter(|t| !resolved.iter().any(|(id, _)| *id == t.id))
+                .collect();
+            remind = unmarked_stops(&s, worker.id, &unmarked);
+        }
         let sources = [
             transcript.as_deref().unwrap_or(""),
             pane.as_deref().unwrap_or(""),
@@ -1206,6 +1218,26 @@ async fn finish_by_markers(
             }
         }
     }
+    for task in &remind {
+        let text = crate::service::work::report::marker_reminder(task.id, &task.nonce);
+        if let Err(e) = crate::service::sessions::send_system_prompt(
+            &worker.host_alias,
+            &worker.tmux_name,
+            &text,
+            true,
+            store,
+            ssh,
+        )
+        .await
+        {
+            tracing::warn!(
+                "reminding worker {} of task {} failed: {}",
+                worker.id,
+                task.id,
+                e.message
+            );
+        }
+    }
     finished
 }
 
@@ -1216,6 +1248,48 @@ fn source_size(text: Option<&str>) -> String {
         Some(t) => format!("{} bytes", t.len()),
         None => "not read".to_string(),
     }
+}
+
+/// A worker stopped while these runs of its were open and none printed its
+/// marker. A run at a work item is a step someone waits on, so it is not
+/// left `running` until the TTL: the first such Stop records a
+/// [`report::UNMARKED_STOP_EVENT`](crate::service::work::report::UNMARKED_STOP_EVENT)
+/// and is returned, to be reminded; past
+/// [`report::UNMARKED_STOPS_MAX`](crate::service::work::report::UNMARKED_STOPS_MAX)
+/// the run fails, and the loop retries it with that reason. A plain
+/// dispatch and a wrap-up keep the old rule.
+pub fn unmarked_stops(s: &Store, worker_id: i64, unmarked: &[&TaskRow]) -> Vec<TaskRow> {
+    use crate::service::work::report::{UNMARKED_STOPS_MAX, UNMARKED_STOP_EVENT};
+    let mut remind = Vec::new();
+    for t in unmarked {
+        let is_run = t.work_item_id.is_some()
+            && t.role
+                .as_deref()
+                .is_some_and(|r| crate::service::work::run::RUN_ROLES.contains(&r));
+        if !is_run || t.state != "running" {
+            continue;
+        }
+        let detail = format!("task={}", t.id);
+        let seen = s
+            .count_session_events(worker_id, UNMARKED_STOP_EVENT, &detail)
+            .unwrap_or(0);
+        if seen < UNMARKED_STOPS_MAX as i64 {
+            if let Err(e) = s.insert_session_event(worker_id, UNMARKED_STOP_EVENT, Some(&detail)) {
+                tracing::warn!(task = t.id, error = %e.message, "[tasks] unmarked stop not recorded");
+                continue;
+            }
+            remind.push((*t).clone());
+        } else {
+            let why = format!(
+                "the worker stopped {} times without printing {DONE_PREFIX}<nonce>",
+                seen + 1
+            );
+            if let Err(e) = fail_task(s, t.id, &why) {
+                tracing::warn!(task = t.id, error = %e.message, "[tasks] unmarked run not failed");
+            }
+        }
+    }
+    remind
 }
 
 /// PURE: does a pane tail show the Claude REPL's input chrome (i.e. it will

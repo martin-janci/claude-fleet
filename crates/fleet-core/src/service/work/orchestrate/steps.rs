@@ -118,16 +118,20 @@ fn failure_text(t: &TaskRow) -> String {
         if !r.summary.is_empty() && parts.is_empty() {
             parts.push(r.summary.clone());
         }
+    } else if t.state == "done" {
+        parts.push(crate::service::work::report::REPORT_MISSING.to_string());
     }
     parts.join(" — ")
 }
 
 /// Whether an attempt ended without the work: failed, cancelled, or done
-/// with a reported outcome other than `done`.
+/// with a reported outcome other than `done`, or with no report at all.
+/// A marker with no block is no evidence the work was done, so it is not
+/// taken for success (TASK-289): the item is retried, or asked about.
 pub fn attempt_failed(t: &TaskRow) -> bool {
     match t.state.as_str() {
         "failed" | "cancelled" => true,
-        "done" => t.report.as_ref().is_some_and(|r| r.outcome != "done"),
+        "done" => t.report.as_ref().is_none_or(|r| r.outcome != "done"),
         _ => false,
     }
 }
@@ -344,13 +348,25 @@ fn verify_steps(
         if let Some(r) = review.filter(|r| {
             require_review && matches!(r.state.as_str(), "done" | "failed" | "cancelled")
         }) {
-            if !attempt_failed(r) && r.report.is_some() {
+            if !attempt_failed(r) {
                 out.extend(close_step(
                     n,
                     title,
                     format!("{title} is implemented and reviewed"),
                 ));
-            } else if attempt_failed(r) && (impls.len() as u32) <= max_retries {
+            } else if r.state == "done" && r.report.is_none() {
+                // The reviewer's run gave no verdict: nothing says the
+                // implementation is wrong, so it is not retried.
+                out.push(
+                    Step::new(
+                        "ask",
+                        Some(n.item_id),
+                        None,
+                        format!("the review of {title} ended without its report"),
+                    )
+                    .with_context(failure_text(r)),
+                );
+            } else if (impls.len() as u32) <= max_retries {
                 if take() {
                     out.push(
                         Step::new(
