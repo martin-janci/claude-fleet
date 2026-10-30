@@ -23,7 +23,7 @@
 
 use super::outcome::{self, OutcomeSource, RunOutcome};
 use super::{changeable, trace, visible};
-use crate::ipc_error::{lock, IpcError};
+use crate::ipc_error::{codes, lock, IpcError};
 use crate::service::run_trace::Step;
 use crate::service::view_scope::ViewScope;
 use crate::store::{RoutineRow, RoutineRunRow, RoutineSeenRow, SeenChange, Store};
@@ -116,12 +116,7 @@ pub fn last_block(text: &str) -> Option<&str> {
 /// PURE: `s` with its runs of whitespace made one space, cut to `max`
 /// characters.
 fn tidy(s: &str, max: usize) -> String {
-    s.split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .chars()
-        .take(max)
-        .collect()
+    super::memory::one_line(s).chars().take(max).collect()
 }
 
 /// PURE: the items of a block, as `(item, state)`: one per line, `item |
@@ -324,7 +319,11 @@ pub fn forget(
     let s = lock(store)?;
     let r = changeable(&s, scope, id)?;
     let item = item.map(item_key);
-    s.forget_routine_seen(r.id, item.as_deref().filter(|i| !i.is_empty()))?;
+    // A blank item names none; it must not read as "all".
+    if item.as_deref() == Some("") {
+        return Err(IpcError::new(codes::E_INVALID, "text names no item"));
+    }
+    s.forget_routine_seen(r.id, item.as_deref())?;
     of_routine(&s, scope, &r, None)
 }
 

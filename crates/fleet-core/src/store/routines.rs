@@ -414,8 +414,7 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    /// Remove a routine and its runs. `false`: no such routine.
-    /// Delete a routine. Its runs stay (migration 166): each keeps the
+    /// Delete a routine; `false`: no such routine. Its runs stay (migration 166): each keeps the
     /// routine's name, written here, and loses its `routine_id`.
     pub fn delete_routine(&self, id: i64) -> Result<bool, IpcError> {
         let tx = self.conn.unchecked_transaction()?;
@@ -608,7 +607,9 @@ impl Store {
         let finished = (r.state != "running").then_some(now);
         self.conn.execute(
             // A run that failed before it started is `failed` from its exit
-            // (step 8.10); nothing later may say otherwise.
+            // (step 8.10); nothing later may say otherwise. One inserted
+            // closed is never `done`, so, as in `finish_routine_run`, only
+            // a routine with notebooks has a reply worth reading.
             "INSERT INTO routine_runs (routine_id, trigger, trigger_ref, state, reason, \
                session_id, scheduled_for, started_at, finished_at, outcome, outcome_source, \
                error_code, host_alias, memory_read_at) \
@@ -616,8 +617,7 @@ impl Store {
                CASE ?4 WHEN 'failed' THEN 'failed' END, CASE ?4 WHEN 'failed' THEN 'exit' END, \
                ?10, ?11, \
                CASE WHEN ?9 IS NOT NULL \
-                 AND (SELECT memory IS NULL AND (track_seen = 0 OR ?6 IS NULL) \
-                      FROM routines WHERE id = ?1) THEN ?9 END)",
+                 AND (SELECT memory IS NULL FROM routines WHERE id = ?1) THEN ?9 END)",
             rusqlite::params![
                 r.routine_id,
                 r.trigger,
@@ -727,25 +727,19 @@ impl Store {
     }
 
     /// The failed runs to start again (`retry_once`, M15 G3.8): each is
-    /// its routine's newest run, failed at or after `since`, not itself a
-    /// retry (`trigger_ref` `retry:<id>`), of a routine that is on and
+    /// its routine's newest run, started at or after `since` (or
+    /// `rate_limited_since` for a run that ended at a rate limit, whose
+    /// retry waits for the limit to lift, which can take days), not itself
+    /// a retry (`trigger_ref` `retry:<id>`), of a routine that is on and
     /// asks for it. A retry that is skipped or fails is newer than the run
     /// it retried, so a run is retried at most once. Oldest first.
-    /// Failed runs of `retry_once` routines still to retry: started since
-    /// `since`, or since `rate_limited_since` for a run that ended at a rate
-    /// limit (its retry waits for the limit to lift, which can take days).
     pub fn routine_runs_to_retry(
         &self,
         since: i64,
         rate_limited_since: i64,
     ) -> Result<Vec<RoutineRunRow>, IpcError> {
-        let cols = RUN_COLS
-            .split(", ")
-            .map(|c| format!("rr.{}", c.trim()))
-            .collect::<Vec<_>>()
-            .join(", ");
         let mut stmt = self.conn.prepare(&format!(
-            "SELECT {cols} FROM routine_runs rr JOIN routines r ON r.id = rr.routine_id \
+            "SELECT {RUN_COLS_RR} FROM routine_runs rr JOIN routines r ON r.id = rr.routine_id \
              WHERE rr.state = 'failed' \
                AND (rr.started_at >= ?1 \
                     OR (rr.error_code = ?3 AND rr.started_at >= ?2)) \

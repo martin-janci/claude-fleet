@@ -435,11 +435,6 @@ pub struct FailingRoutine {
     pub fix: Option<fix::RunFix>,
 }
 
-/// Whether a run failed: its state, or what it came to (8.10).
-fn run_failed(r: &RoutineRunRow) -> bool {
-    fix::failed(r)
-}
-
 /// `routines { action: failing }`: each routine this caller may read whose
 /// newest run failed, newest failure first. A newer run (Retry) takes it
 /// out, and so does a person switching it off after the failure (Pause);
@@ -455,7 +450,7 @@ pub fn failing(store: &Mutex<Store>, scope: &ViewScope) -> Result<Vec<FailingRou
         let Some(run) = s.routine_runs(r.id, 1)?.into_iter().next() else {
             continue;
         };
-        if !run_failed(&run) {
+        if !fix::failed(&run) {
             continue;
         }
         let failed_at = run.finished_at.unwrap_or(run.started_at);
@@ -717,16 +712,11 @@ pub struct FleetBudget {
     pub since: i64,
 }
 
-/// The UTC day's start at `now`.
-pub fn utc_day_start(now: i64) -> i64 {
-    now - now.rem_euclid(86_400)
-}
-
 /// The fleet's routine spend today and its budget. Every routine counts,
 /// whoever's: the budget is the fleet's. Any caller that reads routines may
 /// read it.
 pub fn fleet_budget(s: &Store, now: i64) -> Result<FleetBudget, IpcError> {
-    let since = utc_day_start(now);
+    let since = cron::local_day_start(now, 0);
     let usd =
         crate::service::settings::get_secs(s, crate::service::settings::AUTOMATION_DAILY_BUDGET);
     Ok(FleetBudget {
@@ -859,24 +849,25 @@ pub fn repo_matches(filter: &str, repo: Option<&str>) -> bool {
         .is_some_and(|name| name.eq_ignore_ascii_case(filter))
 }
 
+/// A cron routine's schedule, parsed; `None` for any other trigger.
+pub(crate) fn schedule(trigger: &str, cron: Option<&str>) -> Option<cron::Cron> {
+    (trigger == "cron")
+        .then(|| cron::Cron::parse(cron?).ok())
+        .flatten()
+}
+
 /// The next cron fire of `f` after `now`; `None` for any other trigger, or
 /// while it is off.
 fn next_fire(f: &RoutineFields, now: i64) -> Option<i64> {
-    if !f.enabled || f.trigger != "cron" {
+    if !f.enabled {
         return None;
     }
-    let c = cron::Cron::parse(f.cron.as_deref()?).ok()?;
-    c.next_after(now, f.utc_offset_min)
+    schedule(&f.trigger, f.cron.as_deref())?.next_after(now, f.utc_offset_min)
 }
 
 /// The next fire of a stored routine after `now` (see [`next_fire`]).
 pub(crate) fn next_fire_of(r: &RoutineRow, now: i64) -> Option<i64> {
-    if r.trigger != "cron" {
-        return None;
-    }
-    cron::Cron::parse(r.cron.as_deref()?)
-        .ok()?
-        .next_after(now, r.utc_offset_min)
+    schedule(&r.trigger, r.cron.as_deref())?.next_after(now, r.utc_offset_min)
 }
 
 /// Why a change that moves a routine to another organisation's host is
