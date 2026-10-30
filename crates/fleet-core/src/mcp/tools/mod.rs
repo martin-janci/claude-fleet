@@ -43,6 +43,7 @@ mod agents;
 mod api_tokens;
 mod assets;
 mod autofix;
+mod confirm_about;
 mod confirm_replay;
 mod dashboards;
 mod devices;
@@ -461,15 +462,21 @@ impl ServerHandler for FleetTools {
         // keeps what it takes to run it again once a person approves it.
         let replay_of = (caller.is_operator() && guard::operator_gated(&tool))
             .then(|| (request.clone(), context.clone()));
+        // A call that may stop at a card keeps its arguments beside it, so
+        // the card can say what approving it does (`confirm_about`). Only
+        // those: the clone is not paid on every call.
+        let call_args = match &request.arguments {
+            Some(a) if guard::operator_gated(&tool) => serde_json::Value::Object(a.clone()),
+            _ => serde_json::Value::Null,
+        };
         let tcc = ToolCallContext::new(self, request, context);
         // Tool-execution failures travel as `is_error` results; only rmcp's
         // own protocol errors (unknown tool, bad arguments) stay JSON-RPC.
         // `approval` is how a gated call was let through (F1/F2), for its
         // receipt.
-        let (answer, approval) = guard::tracking_approval(bounded(
-            &tool,
-            tool_deadline(&tool),
-            self.tool_router.call(tcc),
+        let (answer, approval) = guard::tracking_approval(guard::with_call_args(
+            call_args,
+            bounded(&tool, tool_deadline(&tool), self.tool_router.call(tcc)),
         ))
         .await;
         // One counter write per call, on the same dimension the rate limiter

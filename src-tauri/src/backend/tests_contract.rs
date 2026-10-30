@@ -876,6 +876,24 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
             heartbeat_secs: 30,
         }),
     );
+    // Every option set, so the golden pins the names the cards read.
+    let fact = fleet_core::mcp::guard::ConfirmFact {
+        label: "Ticket".into(),
+        value: "PD-1 Fix it".into(),
+        url: Some("https://t/PD-1".into()),
+    };
+    put("ConfirmRequest.about.facts", wire_keys(&fact));
+    let body = fleet_core::mcp::guard::ConfirmBody {
+        label: "Brief".into(),
+        text: "b".into(),
+    };
+    put("ConfirmRequest.about.body", wire_keys(&body));
+    let about = fleet_core::mcp::guard::ConfirmAbout {
+        title: "Start a session for PD-1".into(),
+        facts: vec![fact],
+        body: Some(body),
+    };
+    put("ConfirmRequest.about", wire_keys(&about));
     put(
         "ConfirmRequest",
         wire_keys(&fleet_core::mcp::guard::ConfirmRequest {
@@ -885,6 +903,7 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
             caller: "master".into(),
             operator: true,
             asked_at: 1,
+            about: Some(about),
         }),
     );
     put(

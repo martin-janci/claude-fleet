@@ -123,6 +123,17 @@ export interface ConfirmRequest {
   operator: boolean;
   /** Unix seconds; 0 from an older backend. */
   asked_at: number;
+  /** What approving it does, in words (`guard::ConfirmAbout`); absent from
+   *  an older backend and for a tool it cannot describe. */
+  about?: ConfirmAbout;
+}
+
+/** A waiting call in words: the card's title, its facts, the brief or
+ *  prompt itself. Display only; the approval binds to `summary`. */
+export interface ConfirmAbout {
+  title: string;
+  facts?: { label: string; value: string; url?: string }[];
+  body?: { label: string; text: string };
 }
 
 export const MCP_CONFIRM_EVENT = 'mcp:confirm-required';
