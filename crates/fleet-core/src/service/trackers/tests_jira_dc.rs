@@ -1012,3 +1012,81 @@ async fn an_all_empty_answer_from_a_dead_token_is_auth_not_unavailable() {
     let got = dc(&f).fetch(&[ItemRef::Id("40001".into())]).await.unwrap();
     assert!(matches!(got[0], Fetched::Unavailable { .. }), "{got:?}");
 }
+
+/// TASK-408 on Data Center: the same 400, the field list under `values`,
+/// and the bearer token nowhere in the error.
+#[tokio::test]
+async fn a_data_center_create_refused_for_a_required_field_names_it() {
+    let f = FakeTransport::new();
+    f.once(
+        Method::Get,
+        "/rest/api/2/issue/createmeta/PD/issuetypes",
+        Ok(Response::json(
+            200,
+            &serde_json::json!({ "values": [
+                { "id": "10002", "name": "Task", "subtask": false },
+            ] }),
+        )),
+    );
+    f.once(
+        Method::Post,
+        "/rest/api/2/issue",
+        Ok(Response::json(
+            400,
+            &serde_json::json!({
+                "errorMessages": [],
+                "errors": { "customfield_10010": "Team is required." },
+            }),
+        )),
+    );
+    f.once(
+        Method::Get,
+        "/rest/api/2/issue/createmeta/PD/issuetypes/10002",
+        Ok(Response::json(
+            200,
+            &serde_json::json!({ "values": [
+                { "fieldId": "summary", "name": "Summary", "required": true, "hasDefaultValue": false },
+                { "fieldId": "customfield_10010", "name": "Team", "required": true, "hasDefaultValue": false },
+            ] }),
+        )),
+    );
+    let op = WriteOp::CreateItem {
+        container: Some("PD".into()),
+        parent: None,
+        title: "Promote me".into(),
+        description: String::new(),
+    };
+    let e = dc(&f).write(&op).await.unwrap_err();
+    let TrackerError::Invalid(m) = &e else {
+        panic!("{e:?}")
+    };
+    assert!(m.starts_with("POST issue in PD: HTTP 400"), "{m}");
+    assert!(m.contains("Team (customfield_10010)"), "{m}");
+    assert!(!m.contains("Summary"), "{m}");
+    assert!(!e.explain().contains(pat()));
+
+    // The field list unreadable: Jira's own words, still naming the call.
+    f.once(
+        Method::Get,
+        "/rest/api/2/issue/createmeta/PD/issuetypes",
+        Ok(Response::json(
+            200,
+            &serde_json::json!({ "values": [ { "id": "10002", "name": "Task" } ] }),
+        )),
+    );
+    f.once(
+        Method::Post,
+        "/rest/api/2/issue",
+        Ok(Response::json(
+            400,
+            &serde_json::json!({ "errors": { "customfield_10010": "Team is required." } }),
+        )),
+    );
+    let e = dc(&f).write(&op).await.unwrap_err();
+    assert_eq!(
+        e,
+        TrackerError::Invalid(
+            "POST issue in PD: HTTP 400: customfield_10010: Team is required.".into()
+        )
+    );
+}

@@ -370,6 +370,15 @@ pub async fn drain(
             }
             Err(e) => {
                 let msg = crate::service::trackers::sync::metric_error(&e.explain());
+                // `msg` is redacted and bounded; the write's text and the
+                // credential never reach the log.
+                tracing::warn!(
+                    write = w.id,
+                    tracker = t.id,
+                    op = %w.op,
+                    error = %msg,
+                    "[write-back] send failed"
+                );
                 // A refusal no retry can fix gives up now; anything that
                 // may heal (a credential, the network) backs off.
                 let next = match e {
