@@ -45,6 +45,7 @@ mod library;
 mod local_workspaces;
 mod mission_lanes;
 mod mission_loop;
+mod mission_waits;
 mod nl_census;
 mod orchestration;
 mod org_activity;
@@ -82,6 +83,7 @@ mod sessions;
 mod setting_review;
 mod start_rules;
 mod support_fingerprints;
+mod task_cost;
 mod task_report;
 mod tasks;
 #[cfg(test)]

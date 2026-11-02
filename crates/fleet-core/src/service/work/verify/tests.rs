@@ -349,3 +349,86 @@ fn a_failed_test_run_fails_the_command_it_ran() {
     assert_eq!(check_of(&v, "test:cargo test").state, "fail");
     assert_eq!(check_of(&v, "test:pnpm test").state, "pass");
 }
+
+/// Mission improvements M5: with a lane's tests at its end, one passing run
+/// of a lane-mate that ran the command answers this task's line; a failing
+/// one does not, nor does one with the tests after each task.
+#[test]
+fn a_lanes_passing_test_run_answers_its_other_tasks_when_tests_run_at_its_end() {
+    let (st, me, a) = fixture();
+    let (m, b) = {
+        let s = lock(&st).unwrap();
+        let b = s.create_local_work_item(None, "worker").unwrap().id;
+        let m = s
+            .create_mission(
+                &crate::store::NewMission {
+                    name: "m",
+                    goal: "g",
+                    ..Default::default()
+                },
+                "t",
+            )
+            .unwrap()
+            .id;
+        let policy = crate::store::MissionPolicy {
+            execution: "lane".into(),
+            lane_test_at: "lane".into(),
+            ..Default::default()
+        };
+        s.update_mission(
+            m,
+            None,
+            &crate::store::MissionPatch {
+                policy: Some(policy),
+                ..Default::default()
+            },
+            "t",
+        )
+        .unwrap();
+        for i in [a, b] {
+            s.set_mission_item(m, i, true, "t").unwrap();
+            s.set_item_lane(m, i, Some("api"), None, "t").unwrap();
+        }
+        (m, b)
+    };
+    for i in [a, b] {
+        set(&st, &me, i, &["test:cargo test"]);
+        run(&st, i, "implement", "done", &[]);
+    }
+    assert_eq!(
+        check_of(&now_check(&st, a, 0), "test:cargo test").state,
+        "pending"
+    );
+    run(&st, b, "test", "failed", &["cargo test"]);
+    assert_eq!(
+        check_of(&now_check(&st, a, 0), "test:cargo test").state,
+        "pending",
+        "a failure stays its own task's"
+    );
+    run(&st, b, "test", "done", &["cargo test --workspace"]);
+    assert_eq!(
+        check_of(&now_check(&st, a, 0), "test:cargo test").state,
+        "pass"
+    );
+    // Tests after each task: every task needs its own run.
+    {
+        let s = lock(&st).unwrap();
+        s.update_mission(
+            m,
+            None,
+            &crate::store::MissionPatch {
+                policy: Some(crate::store::MissionPolicy {
+                    execution: "lane".into(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            "t",
+        )
+        .unwrap();
+    }
+    assert_eq!(
+        check_of(&now_check(&st, a, 0), "test:cargo test").state,
+        "pending"
+    );
+}

@@ -32,6 +32,7 @@ import {
   sendSteer,
   startNewMission,
   statsLine,
+  waitShares,
   steerBlocked,
   steerBusy,
   steerPrefix,
@@ -266,6 +267,13 @@ describe('the metrics line (lanes design L0)', () => {
     expect(statsLine(base)).toBe(
       '7 runs (3.5 per done task) · 2 retries · 6 cold starts · a task takes 45 min · idle 33% of 3h 0m',
     );
+  });
+
+  it('names what the ready work waited on most, by share of the span', () => {
+    expect(statsLine({ ...base, waits: { slot: 1800, person: 5400, touches: 10, lane: 360 } })).toBe(
+      '7 runs (3.5 per done task) · 2 retries · 6 cold starts · a task takes 45 min · idle 33% of 3h 0m · waited on a person 50%, for a slot 17%, on its lane 3%',
+    );
+    expect(waitShares({ ...base, waits: {} })).toEqual([]);
   });
 
   it('says nothing before the first run, or from an older hub', () => {

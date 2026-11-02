@@ -3302,6 +3302,18 @@
     },
     {
       "default_widget": "switch",
+      "key": "orchestrator.build_cache",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Workers share a build cache",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "switch",
       "key": "orchestrator.planner_reads",
       "kind": {
         "type": "bool"

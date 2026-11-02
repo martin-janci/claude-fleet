@@ -2294,6 +2294,7 @@ mod tests {
             per_project: false,
             parallel: false,
             base_branch: None,
+            env: Default::default(),
             decider: crate::store::Decider::Person,
             rule_id: None,
             model: None,

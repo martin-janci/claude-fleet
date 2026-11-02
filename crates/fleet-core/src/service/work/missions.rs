@@ -290,7 +290,12 @@ pub fn mission(
             items.push(i);
         }
     }
-    let graph = super::graph::build(&s, scope, &items)?;
+    let mut graph = super::graph::build(&s, scope, &items)?;
+    // M7: the subagents each latest attempt used, for its task row.
+    let now = crate::store::now_unix();
+    for a in graph.nodes.iter_mut().filter_map(|n| n.attempt.as_mut()) {
+        a.subagents = s.task_subagents(a.task_id, now)?;
+    }
     let phase = (mission.state == "active").then(|| graph.phase().to_string());
     let events = s.mission_events(id, before_event, MISSION_EVENTS_PAGE)?;
     let may_change = may_change_mission(&s, scope, &mission)?;
@@ -361,13 +366,13 @@ fn mission_stats(
             .flatten()
             .and_then(|r| r.worktree_id)
     };
-    Ok(stats::stats(
-        items,
-        mission.root_item_id,
-        &attempts,
-        &checkout_of,
-        crate::store::now_unix(),
-    ))
+    let now = crate::store::now_unix();
+    let mut st = stats::stats(items, mission.root_item_id, &attempts, &checkout_of, now);
+    st.waits = s.mission_waits(mission.id, now)?;
+    for t in &attempts {
+        st.subagents += s.task_subagents(t.id, now)?.values().sum::<u32>();
+    }
+    Ok(st)
 }
 
 /// The running sessions on mission `id`'s member items that `scope` may

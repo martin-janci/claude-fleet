@@ -55,6 +55,8 @@ pub fn apply_hook(
         Some("SessionStart") => apply_session_start_hook(store, payload, ctx),
         Some("PreCompact") => apply_pre_compact_hook(store, payload, ctx),
         Some("PostCompact") => apply_post_compact_hook(store, ssh, payload, ctx),
+        Some("SubagentStart") => apply_subagent_hook(store, payload, ctx, "subagent_started"),
+        Some("SubagentStop") => apply_subagent_hook(store, payload, ctx, "subagent_stopped"),
         Some("SessionEnd") => apply_session_end_hook(store, payload, ctx),
         Some("StopFailure") => apply_stop_failure_hook(store, ssh, payload, ctx),
         Some("Notification") => apply_notification_hook(store, ssh, payload, ctx),
@@ -1087,6 +1089,48 @@ fn apply_pre_compact_hook(
     })
 }
 
+/// A subagent's type as a timeline detail: a name of letters, digits, `-`,
+/// `_`, `:` or `.`, at most 64 characters; anything else is left out.
+fn subagent_type(payload: &HookPayload) -> Option<&str> {
+    payload.agent_type.as_deref().map(str::trim).filter(|t| {
+        !t.is_empty()
+            && t.len() <= 64
+            && t.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ':' | '.'))
+    })
+}
+
+/// `SubagentStart` / `SubagentStop` (mission improvements M7): the current
+/// conversation used a subagent. Recorded as a quiet timeline event with
+/// the subagent's type (`subagent_started` / `subagent_stopped`), which a
+/// mission's task counts in its run's window; nothing else depends on it.
+/// A non-current id is a no-op.
+fn apply_subagent_hook(
+    store: &Arc<Mutex<Store>>,
+    payload: &HookPayload,
+    ctx: &HookContext,
+    kind: &str,
+) -> Result<(), IpcError> {
+    let s = lock(store)?;
+    s.atomically(|s| {
+        let Some((row, Binding::Current)) =
+            resolve_and_rebind(s, payload, ctx, StartSource::Unknown)?
+        else {
+            return Ok(());
+        };
+        if let Err(e) = s.insert_session_event_quietly(
+            row.id,
+            payload.session_id.as_deref(),
+            kind,
+            subagent_type(payload),
+        ) {
+            tracing::warn!(session_id = row.id, kind, error = %e, "[hook] session_event insert failed");
+            s.ensure_in_tx()?;
+        }
+        Ok(())
+    })
+}
+
 /// PostToolUse on Claude Code's task tools (design 2026-09-29 §2): the
 /// agent's own steps, journaled on the conversation. Best-effort — a
 /// malformed body records nothing and the hook still succeeds.
@@ -1973,7 +2017,7 @@ mod tests {
     #[test]
     fn unknown_event_is_noop() {
         let store = make_store();
-        let payload = make_payload("SubagentStop", "s1");
+        let payload = make_payload("TeammateIdle", "s1");
         assert!(apply_hook(&store, &make_ssh(), &payload, &ctx(&Caller::master(), None)).is_ok());
         // A known event about an unknown session is a no-op too.
         let payload = make_payload("SessionStart", "s1");
@@ -3833,6 +3877,30 @@ mod tests {
         assert_eq!(convs.len(), 1);
         assert!(convs[0].current && convs[0].ended_at.is_none());
         assert!(s.sessions_awaiting_rebind("local").unwrap().is_empty());
+    }
+
+    /// Mission improvements M7: a subagent's start and stop are timeline
+    /// events with its type; a type that is no name is left out.
+    #[test]
+    fn subagent_hooks_journal_the_subagent_and_its_type() {
+        let store = make_store();
+        let id = pane_session(&store, "s", "%3");
+        let host = host_caller("local");
+        let mut start = make_payload("SubagentStart", OLD);
+        start.agent_type = Some("Explore".into());
+        apply_hook(&store, &make_ssh(), &start, &ctx(&host, Some("%3"))).unwrap();
+        let mut stop = make_payload("SubagentStop", OLD);
+        stop.agent_type = Some("rm -rf /".into());
+        apply_hook(&store, &make_ssh(), &stop, &ctx(&host, Some("%3"))).unwrap();
+        let ev = events(&store, id);
+        assert!(
+            ev.contains(&("subagent_started".to_string(), Some("Explore".to_string()))),
+            "{ev:?}"
+        );
+        assert!(
+            ev.contains(&("subagent_stopped".to_string(), None)),
+            "{ev:?}"
+        );
     }
 
     #[test]
