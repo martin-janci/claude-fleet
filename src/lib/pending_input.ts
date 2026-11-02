@@ -81,13 +81,42 @@ export function pendingInputFor(a: {
 }
 
 /**
- * The key that finishes a multi-select question. A digit only toggles a box
- * and Enter toggles the highlighted one, so neither ever answers it; `Tab`
- * keeps the ticks and moves on, to the next question or to the "Review your
- * answers" step, whose `1. Submit answers` the card then shows as an ordinary
- * single-select dialog.
+ * The key that moves a multi-select question on with its ticks kept, to the
+ * next question or to the "Review your answers" step, whose
+ * `1. Submit answers` the card then shows as an ordinary single-select
+ * dialog. A digit only toggles a box, so it never does. Which key does
+ * depends on where the cursor is (checked live against Claude Code 2.1.316):
+ *
+ *  - on an option: `Tab`;
+ *  - on the `Next` / `Submit` row, where no option carries the cursor:
+ *    `Enter` (`Tab` does nothing there);
+ *  - in the free-text row: `Tab` only moves the cursor down onto the `Next`
+ *    row, so it takes `Tab` and then `Enter` (`then`).
  */
 export const MULTI_CONTINUE_KEY = 'Tab';
+
+export interface ContinueStep {
+  key: 'Tab' | 'Enter';
+  /** The option that must carry the cursor when the key goes out; `null`
+   *  for the `Next` / `Submit` row. */
+  cursor: number | null;
+  /** A second press once the first has landed, with the cursor on the row. */
+  then: ContinueStep | null;
+}
+
+export function multiContinueStep(options: readonly PendingOption[]): ContinueStep {
+  const at = options.find((o) => o.selected) ?? null;
+  const enter: ContinueStep = { key: 'Enter', cursor: null, then: null };
+  if (at === null) return enter;
+  return { key: MULTI_CONTINUE_KEY, cursor: at.n, then: isFreeTextOption(at) ? enter : null };
+}
+
+/** AskUserQuestion's "Chat about this" row, drawn under every question (a
+ *  multi-select's too, with no checkbox). Its digit does not toggle
+ *  anything: it turns the questions down and leaves the person in the chat. */
+export function isChatOption(o: { label: string }): boolean {
+  return /^chat about this$/i.test(o.label.trim());
+}
 
 /** The free-text row Claude Code adds under every question. On a
  *  multi-select, ticking it without text answers nothing, and with the

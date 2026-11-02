@@ -46,7 +46,17 @@ async function reread(session: SessionRow): Promise<{ view: AnswerView | null } 
  * write gate is asked here, after the read: the read is a round trip to the
  * host, and a revoke can land inside it.
  */
-export async function sendAnswer(session: SessionRow, view: AnswerView, key: string): Promise<AnswerOutcome> {
+export async function sendAnswer(
+  session: SessionRow,
+  view: AnswerView,
+  key: string,
+  opts: {
+    /** The option that must carry the cursor (`null`: none does, i.e. a
+     *  multi-select's `Next` / `Submit` row). Left out, the cursor is not
+     *  checked here — a digit names its own option. */
+    cursor?: number | null;
+  } = {},
+): Promise<AnswerOutcome> {
   const fresh = await reread(session);
   // Not knowing what is on the pane is not the same as knowing it is
   // unchanged: without proof, a keystroke is a guess.
@@ -54,6 +64,9 @@ export async function sendAnswer(session: SessionRow, view: AnswerView, key: str
   if (fresh.view === null) return { ok: false, stale: 'That dialog is gone — nothing was sent.' };
   if (answerFingerprint(fresh.view) !== answerFingerprint(view)) {
     return { ok: false, stale: 'The dialog changed — nothing was sent.' };
+  }
+  if (opts.cursor !== undefined && (fresh.view.options.find((o) => o.selected)?.n ?? null) !== opts.cursor) {
+    return { ok: false, stale: 'The cursor moved in the terminal — nothing was sent.' };
   }
   // An extra fleet's session: its own link is the one to ask, and its hub
   // judges the write (multi-hub Phase 3).

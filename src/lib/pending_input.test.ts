@@ -4,7 +4,9 @@ import {
   ANSWER_MAX_DIGIT,
   answerFingerprint,
   answerKeyFor,
+  isChatOption,
   isFreeTextOption,
+  multiContinueStep,
   pendingInputFor,
   type PendingInput,
 } from './pending_input';
@@ -231,5 +233,35 @@ describe('multi-select', () => {
     expect(isFreeTextOption({ label: 'Type something' })).toBe(true);
     expect(isFreeTextOption({ label: 'Type something.' })).toBe(true);
     expect(isFreeTextOption({ label: 'Type checking' })).toBe(false);
+  });
+});
+
+describe('multiContinueStep (Claude Code 2.1.316, live)', () => {
+  const opts = (cursor: number | null) =>
+    ['Auth', 'Logging', 'Type something', 'Chat about this'].map((label, i) => ({
+      n: i + 1,
+      label,
+      selected: cursor === i + 1,
+    }));
+
+  it('Tab from an option', () => {
+    expect(multiContinueStep(opts(1))).toEqual({ key: 'Tab', cursor: 1, then: null });
+  });
+
+  it('Enter from the Next / Submit row, where Tab does nothing', () => {
+    expect(multiContinueStep(opts(null))).toEqual({ key: 'Enter', cursor: null, then: null });
+  });
+
+  it('Tab then Enter from the free-text row', () => {
+    expect(multiContinueStep(opts(3))).toEqual({
+      key: 'Tab',
+      cursor: 3,
+      then: { key: 'Enter', cursor: null, then: null },
+    });
+  });
+
+  it('knows the Chat about this row', () => {
+    expect(isChatOption({ label: 'Chat about this' })).toBe(true);
+    expect(isChatOption({ label: 'Chat about this later' })).toBe(false);
   });
 });

@@ -160,13 +160,15 @@ pub fn dialog_still_matches(
         ));
     }
     if key == crate::tmux::NamedKey::Enter {
-        if let Some(want) = expect.selected {
-            if p.options.iter().find(|o| o.selected).map(|o| o.n) != Some(want) {
-                return Err(IpcError::new(
-                    codes::E_CONFLICT,
-                    "A different answer is highlighted now — nothing was sent.",
-                ));
-            }
+        // On a multi-select question Enter TOGGLES the highlighted option and,
+        // on the `Next` / `Submit` row (no option highlighted, `None`), moves
+        // on: the cursor has to be where the client saw it there too.
+        let highlighted = p.options.iter().find(|o| o.selected).map(|o| o.n);
+        if (expect.selected.is_some() || p.multi) && highlighted != expect.selected {
+            return Err(IpcError::new(
+                codes::E_CONFLICT,
+                "A different answer is highlighted now — nothing was sent.",
+            ));
         }
     }
     Ok(())
@@ -347,6 +349,36 @@ mod tests {
         assert!(
             dialog_still_matches(&expect, Some(&moved), one).is_ok(),
             "a digit names its option; the highlight does not matter"
+        );
+    }
+
+    /// A multi-select's Continue presses Enter only with the cursor on the
+    /// `Next` / `Submit` row (no option highlighted): on an option, Enter
+    /// would tick it instead of moving on.
+    #[test]
+    fn enter_on_a_multi_select_needs_the_cursor_where_the_client_saw_it() {
+        use crate::tmux::NamedKey;
+        let mut on_submit = dialog();
+        on_submit.kind = "input".into();
+        on_submit.detail = None;
+        on_submit.multi = true;
+        for o in &mut on_submit.options {
+            o.selected = false;
+        }
+        let expect = expect_of(&on_submit);
+        assert_eq!(expect.selected, None);
+        assert!(dialog_still_matches(&expect, Some(&on_submit), NamedKey::Enter).is_ok());
+        let mut on_option = on_submit.clone();
+        on_option.options[0].selected = true;
+        assert_eq!(
+            dialog_still_matches(&expect, Some(&on_option), NamedKey::Enter)
+                .unwrap_err()
+                .code,
+            codes::E_CONFLICT
+        );
+        assert!(
+            dialog_still_matches(&expect, Some(&on_option), NamedKey::Tab).is_ok(),
+            "only Enter cares where the cursor is"
         );
     }
 
