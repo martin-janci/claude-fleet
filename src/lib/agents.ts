@@ -38,6 +38,11 @@ export interface AgentRule {
   bindings: string;
   /** Not expired. */
   active: boolean;
+  /** A fleet instance with a day budget: the budget, and what its jobs cost
+   *  since the UTC day began (micro-USD). Absent otherwise, and from an
+   *  older hub. */
+  budget_micros?: number;
+  spent_today_micros?: number;
 }
 
 export interface AgentJob {
@@ -262,6 +267,7 @@ export function actionTitle(a: Pick<AgentAction, 'kind' | 'payload'>): string {
   if (a.kind === 'record' && p) return `Remember ${p.key} in ${p.store}`;
   if (a.kind === 'mcp_call' && p) return `Call ${p.binding}.${p.tool}`;
   if (a.kind === 'pr_comment' && p) return `Comment on ${p.repo}#${p.number}`;
+  if (a.kind === 'pr_reply' && p) return `Reply in a review thread on ${p.repo}#${p.number}${p.resolve ? ' and resolve it' : ''}`;
   if (a.kind === 'pr_review' && p) {
     const event = String(p.event ?? 'COMMENT').toLowerCase().replace('_', ' ');
     const n = Array.isArray(p.findings) ? p.findings.length : 0;
@@ -284,9 +290,15 @@ export function actionBody(a: Pick<AgentAction, 'payload'>): string | null {
   return typeof b === 'string' ? b : null;
 }
 
-/** "gh:o/r at propose on mercury", with "(expired)" when it is. */
-export function ruleLine(r: Pick<AgentRule, 'scope' | 'level' | 'host_alias' | 'active'>): string {
-  return `${r.scope} at ${r.level} on ${r.host_alias}${r.active ? '' : ' (expired)'}`;
+/** "gh:o/r at propose on mercury", with "(expired)" when it is, and a
+ *  fleet instance's day budget: "· $3.20 of $25.00 today". */
+export function ruleLine(
+  r: Pick<AgentRule, 'scope' | 'level' | 'host_alias' | 'active' | 'budget_micros' | 'spent_today_micros'>,
+): string {
+  const usd = (m: number) => `$${(m / 1_000_000).toFixed(2)}`;
+  const budget =
+    r.budget_micros != null ? ` · ${usd(r.spent_today_micros ?? 0)} of ${usd(r.budget_micros)} today` : '';
+  return `${r.scope} at ${r.level} on ${r.host_alias}${r.active ? '' : ' (expired)'}${budget}`;
 }
 
 /** A job in one line: its subject, what it came to and, for a review, the
