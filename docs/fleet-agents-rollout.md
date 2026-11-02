@@ -81,7 +81,20 @@ answer the same ticket comment.
 
 ## 3. Compare
 
-For a week or two of real traffic, per job: `fleet-hub agents status` (the rules, newest jobs,
+`fleet-hub agents compare` (or Automation › Agents › Debug › *Compare*, or `agents { action:
+compare }`) puts the two side by side: each pull request head or ticket comment both have done,
+newest first, with what each said ("REQUEST_CHANGES, 3 findings", "major, high confidence,
+BUG-9"), what it cost, and whether they agree (a review on the verdict, an investigation on
+severity and confidence), and how much work only one of them did:
+
+```
+3 agree, 1 differ; 2 built-in only, 0 fleet only
+≠ review gh:acme/pos#41@9f2c1e0
+    built-in job 812 done: REQUEST_CHANGES, 2 findings ($0.41)
+    fleet    job 815 done: COMMENT, 1 finding ($0.38)
+```
+
+Open a pair's two jobs where they differ. For a week or two of real traffic, per job: `fleet-hub agents status` (the rules, newest jobs,
 waiting actions), `fleet-hub agents job <id>` (one job whole: its answer and the actions it
 planned), `fleet-hub agents explain` (why a rule does or does not poll). The same is under
 Automation › Agents.

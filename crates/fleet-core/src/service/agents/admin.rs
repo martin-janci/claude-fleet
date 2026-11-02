@@ -32,8 +32,8 @@ pub const MAX_RULE_HOURS: i64 = 24 * 90;
 #[derive(Debug, Clone, Default, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars", rename = "AgentsParams")]
 pub struct AgentsArgs {
-    /// status | explain | job | definitions | gallery | form | grant | install |
-    /// revoke | pause_all | approve | reject | run.
+    /// status | explain | job | compare | definitions | gallery | form | grant |
+    /// install | revoke | pause_all | approve | reject | run.
     pub action: String,
     /// grant: review | support | fleet; status: only this agent's jobs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -94,7 +94,7 @@ impl AgentsArgs {
     pub fn is_read(&self) -> bool {
         matches!(
             self.action.as_str(),
-            "status" | "explain" | "job" | "definitions" | "gallery" | "form"
+            "status" | "explain" | "job" | "compare" | "definitions" | "gallery" | "form"
         )
     }
 }
@@ -392,6 +392,15 @@ pub fn status(store: &Mutex<Store>, args: &AgentsArgs, now: i64) -> Result<Agent
     })
 }
 
+/// The built-in agents next to their restated definitions, over the newest
+/// jobs (`super::compare`).
+pub fn compare(store: &Mutex<Store>) -> Result<super::compare::Comparison, IpcError> {
+    let jobs = lock(store)?
+        .list_agent_jobs(None, super::compare::COMPARE_JOBS)
+        .map_err(db)?;
+    Ok(super::compare::compare(&jobs))
+}
+
 /// Write a rule. `granted_by` names the device, for the record.
 pub fn grant(
     store: &Mutex<Store>,
@@ -544,6 +553,7 @@ pub fn call(
     match args.action.as_str() {
         "status" => to_json(serde_json::to_value(status(store, args, now)?)),
         "explain" => to_json(serde_json::to_value(super::debug::explain(store, now)?)),
+        "compare" => to_json(serde_json::to_value(compare(store)?)),
         "job" => {
             let id = args.id.ok_or_else(|| invalid("job needs id"))?;
             to_json(serde_json::to_value(super::debug::job(store, id, now)?))
@@ -568,8 +578,8 @@ pub fn call(
             "agents install runs through admin::call_async",
         )),
         other => Err(invalid(format!(
-            "unknown agents action {other:?}: status | explain | job | grant | revoke | pause_all | \
-             approve | reject | run | definitions | gallery | form | install"
+            "unknown agents action {other:?}: status | explain | job | compare | grant | revoke | \
+             pause_all | approve | reject | run | definitions | gallery | form | install"
         ))),
     }
 }

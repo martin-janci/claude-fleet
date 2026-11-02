@@ -13,7 +13,10 @@ impl FleetTools {
         the catalog): status {agent?, limit?} (rules, newest jobs, actions \
         waiting for a person), explain (per rule: polls or why not, next poll, \
         last poll error, jobs by state, the next and the last failed job), job \
-        {id} (one job whole, its proposed actions included), grant {agent: \
+        {id} (one job whole, its proposed actions included), compare (the \
+        built-in reviewer and support agent next to the fleet instances \
+        restating them: the same pull request head or ticket comment, side \
+        by side, and whether verdict or severity and confidence agree), grant {agent: \
         review | support | fleet, scope: gh:<owner>/<repo> | jira:<tracker \
         id>:<PROJECT> | <instance name>, host, level: watch | propose | act, \
         project_id?, config?, hours?, definition? (fleet), bindings? (fleet: \

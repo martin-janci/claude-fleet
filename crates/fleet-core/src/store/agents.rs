@@ -526,9 +526,6 @@ impl Store {
         rows.collect()
     }
 
-    /// How many runs of `agent` on `subject` ended (done or needing a
-    /// person) since `since`, `except_job` left out: the fleet agents' loop
-    /// guard.
     /// What rule `rule_id`'s jobs cost that were last written at `since`
     /// or later, in micro-USD (a job's cost lands when it is finished).
     pub fn agent_rule_cost_since(&self, rule_id: i64, since: i64) -> Result<i64, rusqlite::Error> {
@@ -540,6 +537,9 @@ impl Store {
         )
     }
 
+    /// How many runs of `agent` on `subject` ended (done or needing a
+    /// person) since `since`, `except_job` left out: the fleet agents' loop
+    /// guard.
     pub fn count_agent_subject_runs(
         &self,
         agent: &str,

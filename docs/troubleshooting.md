@@ -635,7 +635,7 @@ a rule.
   loops with their last run and error (`fleet_health.loops`).
 - **On the hub's console** — `fleet-hub routine list | explain <id> |
   decisions <id> | dry-run <id> [--event N]`, `fleet-hub agents explain |
-  job <id>` and `fleet-hub shepherd explain` read `state.db` directly. They
+  job <id> | compare` and `fleet-hub shepherd explain` read `state.db` directly. They
   run in their own process, so the scheduler's loop health and an agent
   rule's last poll error (both kept by the running hub) are not in them:
   ask the hub over the control API for those.

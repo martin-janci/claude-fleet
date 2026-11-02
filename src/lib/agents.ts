@@ -143,6 +143,48 @@ export interface AgentJobDetail {
   summary: string;
 }
 
+/** One agent's side of the same work (`service::agents::compare`). */
+export interface CompareSide {
+  job_id: number;
+  rule_id?: number;
+  state: string;
+  cost_micros: number;
+  /** What it said: "APPROVE, 2 findings", "major, high confidence, BUG-9". */
+  said: string;
+  verdict?: string;
+}
+
+/** The built-in agent and its restated definition on the same work. */
+export interface ComparePair {
+  /** `review` | `support`. */
+  kind: string;
+  /** `gh:o/r#4@<sha>` or `L2S-7#c100`. */
+  key: string;
+  builtin: CompareSide;
+  fleet: CompareSide;
+  /** Absent while either side has no answer. */
+  agree?: boolean;
+}
+
+export interface AgentsComparison {
+  pairs: ComparePair[];
+  agree: number;
+  differ: number;
+  builtin_only: number;
+  fleet_only: number;
+}
+
+/** The built-in reviewer and support agent next to the fleet instances
+ *  restating them (docs/fleet-agents-rollout.md). */
+export function compareAgents(): Promise<Result<AgentsComparison>> {
+  return invokeCmd<AgentsComparison>('agents_debug', { action: 'compare', id: null });
+}
+
+/** "3 agree, 1 differs; 2 built-in only, 0 fleet only". */
+export function comparisonLine(c: AgentsComparison): string {
+  return `${c.agree} agree, ${c.differ} differ${c.differ === 1 ? 's' : ''}; ${c.builtin_only} built-in only, ${c.fleet_only} fleet only`;
+}
+
 export function explainAgents(): Promise<Result<AgentsExplain>> {
   return invokeCmd<AgentsExplain>('agents_debug', { action: 'explain', id: null });
 }
