@@ -388,6 +388,11 @@ pub const ORCHESTRATOR_HEADLESS_MODEL: &str = "orchestrator.headless_model";
 /// its own diff through subagents (lanes design 2026-10-23, L1). On by
 /// default; off leaves the prompt as it was, for comparing the two.
 pub const ORCHESTRATOR_RUN_SUBAGENTS: &str = "orchestrator.run_subagents";
+/// A mission run's session compiles Rust through `sccache` when its host
+/// has it (mission improvements M6, `service::work::build_cache`): a fresh
+/// checkout's build reuses what earlier runs compiled. Off by default, an
+/// experiment to measure with Missions → Compare.
+pub const ORCHESTRATOR_BUILD_CACHE: &str = "orchestrator.build_cache";
 /// The mission planner reads the mission's repository (Read, Grep, Glob in
 /// its checkout on the planner's host) before it decides, instead of
 /// planning from the snapshot alone (lanes design L1). Off by default.
@@ -1039,6 +1044,14 @@ pub const SPECS: &[Spec] = &[
         Kind::Bool,
         "Workers use subagents",
         "A mission run asks its Claude worker to explore the code and to review its own changes through subagents, which keeps its own context for the work. Subagents never edit in parallel: they share the checkout.",
+    )
+    .tags(&[Tag::Experimental]),
+    Spec::new(
+        ORCHESTRATOR_BUILD_CACHE,
+        "false",
+        Kind::Bool,
+        "Workers share a build cache",
+        "A mission run's session compiles Rust through sccache when its host has it, so a fresh checkout's build reuses what earlier runs compiled. A host without sccache runs as before.",
     )
     .tags(&[Tag::Experimental]),
     Spec::new(

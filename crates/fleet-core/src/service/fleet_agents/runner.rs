@@ -1068,6 +1068,14 @@ pub fn agent(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>) -> AgentImpl {
 }
 
 /// A subject record's key: the job's dedup key, cut to what a record keeps.
+/// PURE: the pull request a GitHub subject names, `(repo, number)`.
+fn pr_ref(subject: &Value) -> Option<(String, i64)> {
+    Some((
+        subject.get("repo")?.as_str()?.to_string(),
+        subject.get("number")?.as_i64()?,
+    ))
+}
+
 fn subject_key(dedup_key: &str) -> String {
     dedup_key.chars().take(300).collect()
 }
@@ -1721,6 +1729,19 @@ impl FleetRunner {
                 continue;
             };
             let rows = match (&l.key, l.recent) {
+                (None, n) if l.prefix.is_some() => {
+                    let text = template::render(l.prefix.as_deref().unwrap_or_default(), ctx);
+                    if text.trim().is_empty() {
+                        continue;
+                    }
+                    s.agent_records_with_prefix(
+                        std::slice::from_ref(namespace),
+                        text.trim(),
+                        n.unwrap_or(20).min(CONTEXT_RECENT_MAX) as usize,
+                        now,
+                    )
+                    .unwrap_or_default()
+                }
                 (None, n) if l.find.is_some() => {
                     let text = template::render(l.find.as_deref().unwrap_or_default(), ctx);
                     if text.trim().is_empty() {
@@ -1974,13 +1995,7 @@ impl FleetRunner {
         if !source.is_github() || source == TriggerSource::GithubPrs {
             return Ok(());
         }
-        let (Some(repo), Some(number)) = (
-            subject
-                .get("repo")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-            subject.get("number").and_then(Value::as_i64),
-        ) else {
+        let Some((repo, number)) = pr_ref(subject) else {
             return Ok(());
         };
         let open = self
@@ -2014,13 +2029,7 @@ impl FleetRunner {
         {
             return Ok(());
         }
-        let (Some(repo), Some(number)) = (
-            subject
-                .get("repo")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-            subject.get("number").and_then(Value::as_i64),
-        ) else {
+        let Some((repo, number)) = pr_ref(subject) else {
             return Ok(());
         };
         let meta = self

@@ -52,6 +52,54 @@ pub fn gate(steps: Vec<Step>, lane_of: &HashMap<i64, i64>, busy: &HashSet<i64>) 
         .collect()
 }
 
+/// PURE: a lane's test steps when its tests run at its end (mission
+/// improvements M5, `policy.lane_test_at = lane`): one per lane, the last
+/// of its test steps in graph order, and only once every task of the lane
+/// is implemented (done or verifying) and the lane is not busy. The run
+/// tests the lane's checkout at its head, so a pass answers the lane's
+/// other tasks too (`verify::check_line`); a failure is its own task's,
+/// whose retry goes to the lane's lead.
+pub fn gate_lane_tests(
+    steps: Vec<Step>,
+    lane_of: &HashMap<i64, i64>,
+    busy: &HashSet<i64>,
+    state_of: &HashMap<i64, &str>,
+) -> Vec<Step> {
+    let unfinished: HashSet<i64> = lane_of
+        .iter()
+        .filter(|(item, _)| {
+            !matches!(
+                state_of.get(item).copied(),
+                Some("done" | "verifying" | "proposed" | "rejected")
+            )
+        })
+        .map(|(_, lane)| *lane)
+        .collect();
+    let mut last: HashMap<i64, usize> = HashMap::new();
+    for (i, st) in steps.iter().enumerate() {
+        if st.kind == "test" {
+            if let Some(&lane) = st.item_id.and_then(|it| lane_of.get(&it)) {
+                last.insert(lane, i);
+            }
+        }
+    }
+    steps
+        .into_iter()
+        .enumerate()
+        .filter(|(i, st)| {
+            let Some(&lane) = st
+                .item_id
+                .and_then(|it| lane_of.get(&it))
+                .filter(|_| st.kind == "test")
+            else {
+                return true;
+            };
+            last.get(&lane) == Some(i) && !busy.contains(&lane) && !unfinished.contains(&lane)
+        })
+        .map(|(_, st)| st)
+        .collect()
+}
+
 /// The lane's lead when it is still the lane's: a running session of this
 /// mission in the lane's checkout. A session id is reused once its row is
 /// gone, so the id alone does not say.
@@ -168,10 +216,16 @@ pub fn lane_brief(m: &MissionRow, lane: &str, tasks: &[String]) -> String {
     out.push_str(
         "\nFor each task: work on that task only, and commit your work on this branch at its \
          end (never amend, rebase or squash the commits of an earlier task); then report it as \
-         its prompt asks. Do not start the next task until fleet hands it to you. After your \
-         first task, open a draft pull request for this branch if you may push it; never mark \
-         it ready or merge it.",
+         its prompt asks. Do not start the next task until fleet hands it to you. ",
     );
+    // M4: under `lane_pr = draft` fleet pushes the branch and opens the PR.
+    out.push_str(if m.policy.lane_pr == "draft" {
+        "Fleet pushes this branch as your tasks are done and opens its draft pull request: \
+         do not push it or open one yourself, and never mark it ready or merge it."
+    } else {
+        "After your first task, open a draft pull request for this branch if you may push it; \
+         never mark it ready or merge it."
+    });
     out.chars()
         .take(crate::service::work::handover::BRIEF_MAX_CHARS)
         .collect()
@@ -382,20 +436,47 @@ async fn begin_task(
     context: Option<&str>,
     preamble: &str,
 ) -> Result<(String, TaskRow), IpcError> {
-    let dir = {
+    let (dir, dep_branches) = {
         let s = lock(&deps.store)?;
-        row.worktree_id
+        let dir = row
+            .worktree_id
             .map(|w| s.worktree_path(w))
             .transpose()?
-            .flatten()
+            .flatten();
+        // M2: what this task depends on in another lane is merged into the
+        // lane's checkout first; this lane's own tasks are in it already.
+        let dep_branches = if role == "implement" {
+            let lane = s.item_lane(item_id)?;
+            crate::service::work::dep_work::unmerged_deps(&s, item_id, lane)?
+        } else {
+            Vec::new()
+        };
+        (dir, dep_branches)
     };
-    let head = match &dir {
-        Some(d) => read_head(deps, &row.host_alias, d).await,
-        None => None,
+    let (merged, head) = match &dir {
+        Some(d) if !dep_branches.is_empty() => {
+            let (merged, head) = crate::service::work::dep_work::merge_into(
+                &deps.ssh,
+                &row.host_alias,
+                d,
+                &dep_branches,
+            )
+            .await;
+            let head = match head {
+                Some(h) => Some(h),
+                None => read_head(deps, &row.host_alias, d).await,
+            };
+            (merged, head)
+        }
+        Some(d) => (Vec::new(), read_head(deps, &row.host_alias, d).await),
+        None => (
+            vec![crate::service::work::dep_work::Merged::Missing; dep_branches.len()],
+            None,
+        ),
     };
     let s = lock(&deps.store)?;
     let (key, title, notes) = key_title(&s, item_id)?;
-    let task_text = task_prompt(
+    let mut task_text = task_prompt(
         &key,
         &title,
         notes.as_deref(),
@@ -403,8 +484,14 @@ async fn begin_task(
         context,
         subagents_on(&s),
     );
+    if let Some(n) = crate::service::work::dep_work::note(&dep_branches, &merged) {
+        task_text.push_str("\n\n");
+        task_text.push_str(&n);
+    }
     let prompt = format!("{preamble}{task_text}");
     let task = run::record_run(&s, row.id, &prompt, item_id, attempt, role)?;
+    // The lead's spend so far: this task costs from here (M1).
+    s.set_task_cost_start(task.id)?;
     if let Some(h) = &head {
         s.set_task_start_head(task.id, h)?;
     }
@@ -449,6 +536,11 @@ async fn start_lead(
         with_brief: true,
         brief: Some(brief),
         base_branch: None,
+        // M6: a warm build on a host with sccache.
+        build_cache: crate::service::settings::get_bool(
+            &*lock(&deps.store)?,
+            crate::service::settings::ORCHESTRATOR_BUILD_CACHE,
+        ),
         ..start
     };
     let (row, plan, _queued) =

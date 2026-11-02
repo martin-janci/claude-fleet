@@ -205,3 +205,39 @@ fn a_lane_waits_for_its_tasks_test() {
         .unwrap();
     assert_eq!(awaiting_test(&graph), HashSet::from([10]));
 }
+
+/// Mission improvements M5: with a lane's tests at its end, the lane runs
+/// one test, its last test step, once all its tasks are implemented and it
+/// is not busy; a task in no lane tests as before.
+#[test]
+fn a_lanes_one_test_waits_for_its_last_task() {
+    let steps = vec![
+        step("test", 10, "test"),
+        step("test", 11, "test"),
+        step("test", 30, "test"),
+    ];
+    let all_in = HashMap::from([(10, "verifying"), (11, "verifying"), (20, "done")]);
+    let got = gate_lane_tests(steps.clone(), &lane_of(), &HashSet::new(), &all_in);
+    assert_eq!(keys(&got), ["test:11", "test:30"]);
+    let still_running = HashMap::from([(10, "verifying"), (11, "running")]);
+    let got = gate_lane_tests(steps.clone(), &lane_of(), &HashSet::new(), &still_running);
+    assert_eq!(keys(&got), ["test:30"], "lane 1 still implements");
+    let got = gate_lane_tests(steps, &lane_of(), &HashSet::from([1]), &all_in);
+    assert_eq!(keys(&got), ["test:30"], "a busy lane tests nothing");
+}
+
+/// Mission improvements M4: under `lane_pr = draft` the brief tells the
+/// lead that fleet pushes and opens the PR; otherwise it asks the lead to.
+#[test]
+fn the_brief_says_who_opens_the_lanes_pull_request() {
+    let mut m = mission_row();
+    let own = lane_brief(&m, "api", &[]);
+    assert!(
+        own.contains("open a draft pull request for this branch"),
+        "{own}"
+    );
+    m.policy.lane_pr = "draft".into();
+    let fleet = lane_brief(&m, "api", &[]);
+    assert!(fleet.contains("Fleet pushes this branch"), "{fleet}");
+    assert!(fleet.contains("never mark it ready or merge it"));
+}

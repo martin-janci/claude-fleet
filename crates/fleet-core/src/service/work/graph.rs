@@ -90,6 +90,11 @@ pub struct AttemptBrief {
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub evidence: Option<crate::store::TaskEvidence>,
+    /// The subagents its worker used during it, by type (mission
+    /// improvements M7, `Store::task_subagents`). Filled by a mission's
+    /// detail read only; empty elsewhere.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub subagents: BTreeMap<String, u32>,
 }
 
 /// Longest summary a brief carries.
@@ -112,6 +117,7 @@ fn brief(t: &crate::store::TaskRow) -> AttemptBrief {
         summary,
         error: t.error.clone(),
         evidence: t.evidence.clone(),
+        subagents: BTreeMap::new(),
     }
 }
 
@@ -466,15 +472,23 @@ fn item_ids(args: &WorkLinkArgs) -> Result<&[i64], IpcError> {
 /// The refusal a scoped caller gets for a person's decision, before any row
 /// is reached.
 pub(super) fn person_decides(scope: &ViewScope) -> Result<(), IpcError> {
-    // This is the org boundary, not a privacy fence: deciding proposals is a
-    // PERSON's act by design (an agent never accepts its own), the rule of
-    // `local::decide`, so every scoped caller is refused outright and no row
-    // is reached to fence. Each item's mission is fenced after it.
+    // Deciding proposals is a PERSON's act by design (an agent never accepts
+    // its own), the rule of `local::decide`. Each item's mission is fenced
+    // after it.
+    person_only(
+        scope,
+        "a person decides proposals, from the desktop or the master token",
+    )
+}
+
+/// `why` (`E_FORBIDDEN`) for every scoped caller (a per-host token, an
+/// org-bound client), before any row is read.
+pub(super) fn person_only(scope: &ViewScope, why: &str) -> Result<(), IpcError> {
+    // This is the org boundary, not a privacy fence: a person's act by
+    // design, so every scoped caller is refused outright and no row is
+    // reached to fence.
     if !scope.org.is_all() {
-        return Err(IpcError::new(
-            codes::E_FORBIDDEN,
-            "a person decides proposals, from the desktop or the master token",
-        ));
+        return Err(IpcError::new(codes::E_FORBIDDEN, why));
     }
     Ok(())
 }

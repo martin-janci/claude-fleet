@@ -19,7 +19,7 @@ run:
   # The base branch's .claudeignore is read as well.
   diff: { max_lines: 3000, exclude_paths: ["**/*.lock", "**/*.min.js", "**/dist/**"] }
   context:
-    - { store: exemptions, find: "{{subject.repo}}#{{subject.number}}:", recent: 50 }
+    - { store: exemptions, prefix: "{{subject.repo}}#{{subject.number}}:", recent: 50 }
   output_schema:
     type: object
     required: [verdict, summary, findings]

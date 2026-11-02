@@ -48,9 +48,7 @@ use crate::service::tasks;
 use crate::service::view_scope::ViewScope;
 use crate::shell::quote;
 use crate::ssh::SshClient;
-use crate::store::{
-    is_commit_id, NewFleetEvent, Store, TaskRow, WorkItemRow, CHECK_AUTO, CHECK_MODES, CHECK_OFF,
-};
+use crate::store::{is_commit_id, NewFleetEvent, Store, TaskRow, WorkItemRow, CHECK_OFF};
 
 /// The role a check's task carries: a test run, as a mission's.
 pub const ROLE: &str = "test";
@@ -69,11 +67,6 @@ const VERDICTS: &[&str] = &["nodir", "moved", "noclaude", "run"];
 const OUTPUT_CAP: usize = 65_536;
 const DIFF_CAP: usize = 200_000;
 const CONNECT: Duration = Duration::from_secs(15);
-
-/// Fleet event: an AI check passed.
-pub const EVENT_PASSED: &str = crate::store::fleet_events::CHECK_PASSED;
-/// Fleet event: an AI check found the work not ready.
-pub const EVENT_FAILED: &str = crate::store::fleet_events::CHECK_FAILED;
 
 /// The finished work a check runs on.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -124,7 +117,7 @@ pub struct CheckSetup {
     pub project_id: i64,
     /// `owner/repo`.
     pub project: String,
-    /// One of [`CHECK_MODES`].
+    /// One of [`crate::store::CHECK_MODES`].
     pub mode: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
@@ -180,8 +173,12 @@ fn setup_of(s: &Store, project_id: i64) -> Option<CheckSetup> {
 }
 
 /// The card's answer for `item`: `None` when it has neither finished work
-/// to check nor a check.
-pub fn view(s: &Store, item: &WorkItemRow) -> Result<Option<TicketCheckView>, IpcError> {
+/// to check nor a check. `person`: whether the caller may start one.
+pub fn view(
+    s: &Store,
+    item: &WorkItemRow,
+    person: bool,
+) -> Result<Option<TicketCheckView>, IpcError> {
     let target = target_for(s, item.id);
     let last = s.latest_item_task(item.id, ROLE)?;
     // A check older than the work it would judge is not this work's.
@@ -231,8 +228,12 @@ pub fn view(s: &Store, item: &WorkItemRow) -> Result<Option<TicketCheckView>, Ip
         }
     }
     let running = v.state == "running";
-    v.can_run = target.is_some() && !running;
-    v.why_not = if running {
+    // Only a person starts one (`person_decides`): a scoped caller is not
+    // offered a button the hub refuses.
+    v.can_run = person && target.is_some() && !running;
+    v.why_not = if !person {
+        Some("a person decides AI checks".into())
+    } else if running {
         Some("a check is running".into())
     } else if target.is_none() {
         Some("no finished work fleet can check: Finish task first".into())
@@ -399,16 +400,7 @@ pub async fn start(
     view: &ViewScope,
 ) -> Result<TaskRow, IpcError> {
     person_decides(view)?;
-    {
-        let s = lock(store)?;
-        let visible = match s.get_work_item(item_id)? {
-            Some(i) => super::status::item_visible(&s, &view.org, &i)?,
-            None => false,
-        };
-        if !visible {
-            return Err(orgs::not_found("work item", item_id));
-        }
-    }
+    super::graph::visible_item(&*lock(store)?, view, item_id)?;
     start_checked(store, ssh, item_id).await
 }
 
@@ -417,17 +409,12 @@ pub async fn start(
 /// scoped caller (a per-host token, an org-bound client) is refused before
 /// any row is read.
 fn person_decides(view: &ViewScope) -> Result<(), IpcError> {
-    // This is the org boundary, not a privacy fence: a check starts a billed
-    // headless run and the switch changes a project, both a PERSON's ask by
-    // design, so every scoped caller is refused outright before any row is
-    // reached. The item is fenced after it (`status::item_visible`).
-    if !view.org.is_all() {
-        return Err(IpcError::new(
-            codes::E_FORBIDDEN,
-            "a person decides AI checks, from the desktop, the phone or the master token",
-        ));
-    }
-    Ok(())
+    // A check starts a billed headless run and the switch changes a
+    // project, both a PERSON's ask by design. The item is fenced after it.
+    super::graph::person_only(
+        view,
+        "a person decides AI checks, from the desktop, the phone or the master token",
+    )
 }
 
 /// [`start`] past its fences: the loop's automatic start comes here.
@@ -607,9 +594,12 @@ fn finish(
     match verdict {
         Ok(Some(passed)) => {
             let (kind, words) = if passed {
-                (EVENT_PASSED, "passed")
+                (crate::store::fleet_events::CHECK_PASSED, "passed")
             } else {
-                (EVENT_FAILED, "found it not ready")
+                (
+                    crate::store::fleet_events::CHECK_FAILED,
+                    "found it not ready",
+                )
             };
             let detail = format!("the AI check of {which} {words}");
             note_event(&s, kind, item_id, &detail);
@@ -661,16 +651,8 @@ pub fn setup(
     let pid = args
         .project_id
         .ok_or_else(|| IpcError::new(codes::E_INVALID, "check_setup needs project_id"))?;
+    // The store checks the mode against `CHECK_MODES`.
     let mode = args.mode.as_deref().map(str::trim).unwrap_or(CHECK_OFF);
-    if !CHECK_MODES.contains(&mode) {
-        return Err(IpcError::new(
-            codes::E_INVALID,
-            format!(
-                "check_setup mode {mode:?}; one of {}",
-                CHECK_MODES.join(", ")
-            ),
-        ));
-    }
     let command = normalize_command(args.command.as_deref())?;
     let s = lock(store)?;
     if !s.set_project_check(pid, mode, command.as_deref())? {
@@ -683,9 +665,10 @@ pub fn setup(
 static TRIED: LazyLock<Mutex<HashMap<i64, i64>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// PURE over the store: the items whose finished work an automatic check
-/// is owed now: their project is on `auto`, they are in no active mission,
-/// and the work is the item's newest. At most [`PER_PASS`].
-pub fn due(s: &Store, now: i64, tried: &HashMap<i64, i64>) -> Result<Vec<i64>, IpcError> {
+/// is owed now, each with that work's task: their project is on `auto`
+/// (`ticket_check_candidates` reads only those), they are in no active
+/// mission, and the work is the item's newest. At most [`PER_PASS`].
+pub fn due(s: &Store, now: i64, tried: &HashMap<i64, i64>) -> Result<Vec<(i64, i64)>, IpcError> {
     if !s.any_auto_check()? {
         return Ok(Vec::new());
     }
@@ -705,31 +688,23 @@ pub fn due(s: &Store, now: i64, tried: &HashMap<i64, i64>) -> Result<Vec<i64>, I
                 continue;
             }
         }
-        let Some(at) = target_for(s, item_id).filter(|g| g.source_task == tid) else {
-            continue;
-        };
-        let auto = at
-            .project_id
-            .and_then(|p| s.project_check(p).ok().flatten())
-            .is_some_and(|c| c.mode == CHECK_AUTO);
-        if auto && !out.contains(&item_id) {
-            out.push(item_id);
+        if target_for(s, item_id).is_some_and(|g| g.source_task == tid)
+            && !out.iter().any(|(i, _)| *i == item_id)
+        {
+            out.push((item_id, tid));
         }
     }
     Ok(out)
 }
 
 /// One automatic pass, from the mission loop's tick: start the checks
-/// [`due`] names. Cheap with no project on `auto`: one indexed read.
+/// [`due`] names. Cheap with no project on `auto`: one read of the projects.
 pub async fn sweep(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>, now: i64) {
     let items = {
         let Ok(tried) = TRIED.lock() else { return };
         let Ok(s) = lock(store) else { return };
         match due(&s, now, &tried) {
-            Ok(v) => v
-                .into_iter()
-                .filter_map(|i| target_for(&s, i).map(|g| (i, g.source_task)))
-                .collect::<Vec<_>>(),
+            Ok(v) => v,
             Err(e) => {
                 tracing::debug!(error = %e.message, "[ticket-check] sweep read failed");
                 return;

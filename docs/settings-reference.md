@@ -51,6 +51,7 @@ Scope says where a value lives: *fleet* is one value for the whole fleet, kept o
 | `orchestrator.headless_checks` | `true` | on / off | fleet | Run a mission's review and its test commands as one Claude run in the implementer's checkout, with read-only tools and only those commands, instead of opening a session for each. Falls back to a session when the checkout moved or a command is not a plain one. Experimental. |
 | `orchestrator.headless_model` | `sonnet` | `haiku` / `sonnet` / `opus` | fleet | The Claude model headless reviews and tests run. Experimental. |
 | `orchestrator.run_subagents` | `true` | on / off | fleet | A mission run asks its Claude worker to explore the code and to review its own changes through subagents, which keeps its own context for the work. Subagents never edit in parallel: they share the checkout. Experimental. |
+| `orchestrator.build_cache` | `false` | on / off | fleet | A mission run's session compiles Rust through sccache when its host has it, so a fresh checkout's build reuses what earlier runs compiled. A host without sccache runs as before. Experimental. |
 | `orchestrator.planner_reads` | `false` | on / off | fleet | The mission planner may read the mission's repository (read, search and list files in its checkout, nothing else) before it breaks a goal into tasks, so it can split the work along the files it touches. Planning takes longer and costs more. Experimental. |
 
 ## Control chat

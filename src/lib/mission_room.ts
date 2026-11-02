@@ -336,7 +336,33 @@ export function statsLine(st: MissionStats | null | undefined): string | null {
   if (st.item_secs_p50 != null) parts.push(`a task takes ${formatDuration(st.item_secs_p50)}`);
   const idle = Math.round((st.idle_secs * 100) / st.span_secs);
   parts.push(`idle ${idle}% of ${formatDuration(st.span_secs)}`);
+  const waited = waitShares(st)
+    .slice(0, 3)
+    .map((w) => `${WAIT_LABEL[w.cause] ?? w.cause} ${w.pct}%`);
+  if (waited.length > 0) parts.push(`waited ${waited.join(', ')}`);
   return parts.join(' · ');
+}
+
+/** What a mission's ready work waited on (M3), as the stats line says it. */
+export const WAIT_LABEL: Record<string, string> = {
+  person: 'on a person',
+  grant: 'for a grant',
+  limit: 'on a usage limit',
+  brake: 'on a brake',
+  slot: 'for a slot',
+  lane: 'on its lane',
+  touches: 'on overlapping files',
+};
+
+/** PURE: each wait cause's share of the working span, in whole percent,
+ *  largest first; a cause under 1% is left out. They overlap, so the
+ *  shares may add up past 100. */
+export function waitShares(st: MissionStats): { cause: string; pct: number }[] {
+  if (st.span_secs <= 0) return [];
+  return Object.entries(st.waits ?? {})
+    .map(([cause, secs]) => ({ cause, pct: Math.min(100, Math.round((secs * 100) / st.span_secs)) }))
+    .filter((w) => w.pct >= 1)
+    .sort((a, b) => b.pct - a.pct || a.cause.localeCompare(b.cause));
 }
 
 /** Test seam: the room as a fresh run has it. */

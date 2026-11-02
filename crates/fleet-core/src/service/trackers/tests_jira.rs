@@ -1428,6 +1428,11 @@ async fn a_create_refused_for_a_required_field_names_the_call_and_the_field() {
     assert!(m.starts_with("POST issue in PD: HTTP 400"), "{m}");
     assert!(m.contains("Team (customfield_10010)"), "{m}");
     assert!(!m.contains("Summary") && !m.contains("Reporter"), "{m}");
+    // Jira's own words come along: the guess never hides another cause.
+    assert!(
+        m.contains("(Jira: customfield_10010: Team is required.)"),
+        "{m}"
+    );
     // What last_error keeps carries it, and nothing of the credential.
     let stored = crate::service::trackers::sync::metric_error(&e.explain());
     assert!(stored.contains("Team (customfield_10010)"), "{stored}");

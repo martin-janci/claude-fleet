@@ -67,6 +67,12 @@ export interface MissionPolicy {
   execution?: 'item' | 'lane';
   /** In `lane` execution, a lead hands over to a fresh one after this many tasks. */
   lane_relay_after?: number;
+  /** In `lane` execution, `item`: a task's tests run after it; `lane`: one
+   *  run at the lane's end answers all its tasks (M5). */
+  lane_test_at?: 'item' | 'lane';
+  /** In `lane` execution, `draft`: fleet pushes a lane's verified work and
+   *  opens its draft PR; `off`: the lead's brief asks it to (M4). */
+  lane_pr?: 'off' | 'draft';
   max_parallel?: number;
   max_retries?: number;
   require_review?: boolean;
@@ -208,6 +214,8 @@ export interface AttemptBrief {
   summary?: string | null;
   error?: string | null;
   evidence?: TaskEvidence | null;
+  /** The subagents its worker used during it, by type (M7). */
+  subagents?: Record<string, number>;
 }
 
 export interface OutsideItem {
@@ -270,6 +278,8 @@ export interface MissionLane {
   /** `idle` | `held` | `done`. */
   state: string;
   item_ids: number[];
+  /** Its branch's pull request, once fleet opened or found it (M4). */
+  pr_url?: string | null;
 }
 
 /** The lane a task is in, if any. */
@@ -300,6 +310,12 @@ export interface MissionStats {
   /** First run to the last run's end, and the part of it no run was open. */
   span_secs: number;
   idle_secs: number;
+  /** How long some ready work waited, seconds by cause (M3): `person`,
+   *  `grant`, `limit`, `brake`, `slot`, `lane`, `touches`. They overlap.
+   *  Absent from an older hub. */
+  waits?: Record<string, number>;
+  /** Subagents the workers started during the mission's attempts (M7). */
+  subagents?: number;
 }
 
 /** One live session on a mission's member item (`missions::FinishSession`). */
@@ -672,7 +688,22 @@ export function attemptLine(a: AttemptBrief): string {
       if (ev.uncommitted) parts.push(`${ev.uncommitted} uncommitted`);
     }
   }
+  const sub = subagentsText(a.subagents);
+  if (sub) parts.push(sub);
   return parts.join(' · ');
+}
+
+/** PURE: "3 subagents (Explore 2, general-purpose 1)", the most used first;
+ *  null with none (M7). */
+export function subagentsText(by: Record<string, number> | null | undefined): string | null {
+  const rows = Object.entries(by ?? {}).filter(([, n]) => n > 0);
+  const total = rows.reduce((a, [, n]) => a + n, 0);
+  if (total === 0) return null;
+  const kinds = rows
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([t, n]) => `${t} ${n}`)
+    .join(', ');
+  return `${total} subagent${total === 1 ? '' : 's'} (${kinds})`;
 }
 
 /** One log row as a sentence. */

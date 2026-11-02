@@ -412,6 +412,39 @@ fn routine_runs_has_memory_read_at(conn: &Connection) -> rusqlite::Result<bool> 
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 216: `mission_lanes` already has
+/// its `pr_url` column.
+fn lanes_have_pr_url(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('mission_lanes') WHERE name = 'pr_url'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 215: `orchestration_projects`
+/// already has its `waits_at` column.
+fn missions_have_waits_at(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('orchestration_projects') WHERE name = 'waits_at'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 214: `tasks` already has its
+/// `cost_start_micros` column.
+fn tasks_has_cost_start(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name = 'cost_start_micros'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 212: `routines` already has its
 /// `track_seen` column.
 fn routines_has_track_seen(conn: &Connection) -> rusqlite::Result<bool> {
@@ -2461,6 +2494,27 @@ const MIGRATIONS: &[Migration] = &[
         version: 213,
         sql: include_str!("../../migrations/213_project_checks.sql"),
         already_applied: Some(projects_has_check_mode),
+    },
+    // Mission improvements M1: what a lane task's lead session had spent
+    // when it got the task. An ADD COLUMN, so guarded.
+    Migration {
+        version: 214,
+        sql: include_str!("../../migrations/214_task_cost_start.sql"),
+        already_applied: Some(tasks_has_cost_start),
+    },
+    // Mission improvements M3: why a mission's ready work waits. A new
+    // table and an ADD COLUMN, so guarded.
+    Migration {
+        version: 215,
+        sql: include_str!("../../migrations/215_mission_waits.sql"),
+        already_applied: Some(missions_have_waits_at),
+    },
+    // Mission improvements M4: a lane's draft pull request. ADD COLUMNs,
+    // so guarded.
+    Migration {
+        version: 216,
+        sql: include_str!("../../migrations/216_lane_pr.sql"),
+        already_applied: Some(lanes_have_pr_url),
     },
 ];
 

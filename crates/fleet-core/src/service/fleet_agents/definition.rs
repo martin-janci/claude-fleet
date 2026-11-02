@@ -485,10 +485,15 @@ pub struct ContextLookup {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recent: Option<u32>,
     /// Or the newest records (`recent` of them, default 20) whose key or
-    /// value contains this text (a template): a pull request's own records
-    /// in a store many share.
+    /// value contains this text (a template).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub find: Option<String>,
+    /// Or the newest records (`recent` of them, default 20) whose key
+    /// starts with this text (a template): a pull request's own records in
+    /// a store many share, never another repository's whose name only ends
+    /// the same.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix: Option<String>,
 }
 
 fn default_max_turns() -> u32 {
@@ -1548,17 +1553,28 @@ pub fn problems(d: &Definition, templates: &BTreeMap<String, String>) -> Vec<Str
             }
             _ => {}
         }
-        match (&c.key, &c.find, c.recent) {
+        let text = match (&c.find, &c.prefix) {
+            (Some(f), None) => Some(("find", f)),
+            (None, Some(p)) => Some(("prefix", p)),
+            (None, None) => None,
+            (Some(_), Some(_)) => {
+                out.push(format!("{at}: give find or prefix, not both"));
+                continue;
+            }
+        };
+        match (&c.key, text, c.recent) {
             (Some(k), None, None) => {
                 check_template(k, &format!("{at} › key"), before_run, &mut out)
             }
             (None, _, Some(n)) if !(1..=50).contains(&n) => {
                 out.push(format!("{at}: recent is 1-50"))
             }
-            (None, Some(f), _) => check_template(f, &format!("{at} › find"), before_run, &mut out),
+            (None, Some((name, t)), _) => {
+                check_template(t, &format!("{at} › {name}"), before_run, &mut out)
+            }
             (None, None, Some(_)) => {}
             _ => out.push(format!(
-                "{at}: give key, find or recent (find may take recent)"
+                "{at}: give key, find, prefix or recent (find and prefix may take recent)"
             )),
         }
     }

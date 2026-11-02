@@ -3670,5 +3670,16 @@ fn a_context_lookup_may_find_a_pull_requests_own_records() {
     );
     assert!(problems(json!({ "store": "ex", "key": "k", "find": "x" }))
         .iter()
-        .any(|p| p.contains("give key, find or recent")));
+        .any(|p| p.contains("give key, find, prefix or recent")));
+    assert_eq!(
+        problems(
+            json!({ "store": "ex", "prefix": "{{subject.repo}}#{{subject.number}}:", "recent": 50 })
+        ),
+        Vec::<String>::new()
+    );
+    assert!(
+        problems(json!({ "store": "ex", "find": "x", "prefix": "y" }))
+            .iter()
+            .any(|p| p.contains("not both"))
+    );
 }
