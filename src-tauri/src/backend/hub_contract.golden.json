@@ -90,12 +90,27 @@
       "subject"
     ],
     "ConfirmRequest": [
+      "about",
       "asked_at",
       "caller",
       "nonce",
       "operator",
       "summary",
       "tool"
+    ],
+    "ConfirmRequest.about": [
+      "body",
+      "facts",
+      "title"
+    ],
+    "ConfirmRequest.about.body": [
+      "label",
+      "text"
+    ],
+    "ConfirmRequest.about.facts": [
+      "label",
+      "url",
+      "value"
     ],
     "ControlHandoffRow": [
       "approval",

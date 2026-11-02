@@ -1,5 +1,5 @@
 //! Why a mission's ready work waits (mission improvements M3, design
-//! 2026-10-26 §3, migration 214). The loop knows on every tick what held a
+//! 2026-10-26 §3, migration 215). The loop knows on every tick what held a
 //! ready task back; this keeps, per mission and cause, how long some ready
 //! work waited on it. A look adds the time since the previous one to the
 //! causes that were open then, and opens the ones it sees now, so a cause

@@ -243,13 +243,10 @@ async fn pass(
     // touches `owed` or `seen`. A panic in it is logged and stops
     // only this pass's reconcile (or that one SB6 run), never the
     // tick loop.
-    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        super::changesets::reconcile::after_scan_pass(store, ssh)
-    }))
-    .is_err()
-    {
-        tracing::error!("catalog scan tick: the changeset reconcile pass panicked");
-    }
+    let _ = crate::service::loops::caught_sync(
+        "catalog scan tick: the changeset reconcile pass",
+        || super::changesets::reconcile::after_scan_pass(store, ssh),
+    );
     *seen = Some(now_key);
     let outcome = if owed.is_empty() {
         Ok(())

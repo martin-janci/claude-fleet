@@ -51,7 +51,6 @@ describe('a mission\'s row', () => {
       name: 'Pay',
       execution: 'lane',
       done: 4,
-      runs: 10,
       runsPerDone: 2.5,
       coldStartsPerDone: 2,
       taskSecs: 1800,

@@ -209,6 +209,118 @@ pub(crate) fn created_issue(v: &Value, site: &str) -> Result<super::WriteOutcome
     }
 }
 
+/// The longest detail a Jira 4xx carries into an error, in characters: with
+/// the call's name and `explain`'s words it stays inside `last_error`'s
+/// [`METRIC_ERROR_MAX_CHARS`](super::sync::METRIC_ERROR_MAX_CHARS).
+pub const REJECTION_MAX_CHARS: usize = 200;
+/// A 4xx body past this is not read for a reason: Jira's are small.
+const REJECTION_BODY_MAX_BYTES: usize = 64 * 1024;
+
+/// PURE: what a Jira 4xx body says was wrong — `errorMessages`, then
+/// `errors` (field id → message) sorted by field — as one redacted line of
+/// at most [`REJECTION_MAX_CHARS`]. `None` when the body says nothing fleet
+/// can read (not JSON, too large, both lists empty).
+pub(crate) fn rejection_detail(body: &[u8]) -> Option<String> {
+    if body.len() > REJECTION_BODY_MAX_BYTES {
+        return None;
+    }
+    let v: Value = serde_json::from_slice(body).ok()?;
+    let mut parts: Vec<String> = v["errorMessages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(one_line)
+        .collect();
+    if let Some(errors) = v["errors"].as_object() {
+        let mut fields: Vec<(&String, &str)> = errors
+            .iter()
+            .filter_map(|(k, m)| m.as_str().map(|m| (k, m)))
+            .collect();
+        fields.sort_by(|a, b| a.0.cmp(b.0));
+        parts.extend(
+            fields
+                .into_iter()
+                .map(|(k, m)| format!("{}: {}", one_line(k), one_line(m))),
+        );
+    }
+    parts.retain(|p| !p.is_empty());
+    if parts.is_empty() {
+        return None;
+    }
+    // Redacted before the cap, so a token the cap would cut is still whole
+    // when the patterns look for it.
+    let line = crate::logging::redact(&parts.join("; ")).into_owned();
+    Some(capped(&line, REJECTION_MAX_CHARS))
+}
+
+/// One line: control characters and runs of whitespace become one space.
+fn one_line(s: &str) -> String {
+    s.split(|c: char| c.is_whitespace() || c.is_control())
+        .filter(|w| !w.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// At most `max` characters, the last one `…` when anything was cut.
+fn capped(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
+    out.push('…');
+    out
+}
+
+/// PURE: the fields an issue type requires that have no default and that
+/// `body` (what fleet sent to `POST …/issue`) does not fill, as `Name (id)`,
+/// from `GET …/issue/createmeta/{project}/issuetypes/{type}` (the list is
+/// `fields` on Cloud and `values` on Data Center). Fleet names them; it
+/// never guesses a value for one.
+pub fn required_fields_unfilled(meta: &Value, body: &Value) -> Vec<String> {
+    let sent = body["fields"].as_object();
+    meta["fields"]
+        .as_array()
+        .or_else(|| meta["values"].as_array())
+        .into_iter()
+        .flatten()
+        .filter(|f| f["required"].as_bool() == Some(true))
+        .filter(|f| f["hasDefaultValue"].as_bool() != Some(true))
+        .filter_map(|f| {
+            let id = f["fieldId"].as_str().or_else(|| f["key"].as_str())?;
+            if sent.is_some_and(|s| s.contains_key(id)) {
+                return None;
+            }
+            let id = one_line(id);
+            Some(match f["name"].as_str().map(one_line) {
+                Some(name) if !name.is_empty() && name != id => format!("{name} ({id})"),
+                _ => id,
+            })
+        })
+        .collect()
+}
+
+/// The error for a create Jira answered 400 to (`resp`), in `project`. With
+/// `unfilled` (from [`required_fields_unfilled`]) it names the required
+/// fields fleet does not fill; without, Jira's own detail. Either way it
+/// says which call failed.
+pub(crate) fn create_refused(resp: &Response, project: &str, unfilled: &[String]) -> TrackerError {
+    let call = format!("POST issue in {project}");
+    if unfilled.is_empty() {
+        return match check(resp, Call::Other) {
+            Err(e) => e.during(&call),
+            Ok(()) => TrackerError::Invalid(format!("{call}: HTTP {}", resp.status)),
+        };
+    }
+    let names = crate::logging::redact(&unfilled.join(", ")).into_owned();
+    TrackerError::Invalid(format!(
+        "{call}: HTTP {}: required fields fleet does not fill: {}; give them a default \
+         in Jira or create the ticket there",
+        resp.status,
+        capped(&names, REJECTION_MAX_CHARS / 2)
+    ))
+}
+
 /// The sprint field's `schema.custom`.
 pub const SPRINT_FIELD_SCHEMA: &str = "com.pyxis.greenhopper.jira:gh-sprint";
 /// The Epic Link field's `schema.custom` (Data Center; Cloud uses `parent`).
@@ -246,6 +358,12 @@ pub(crate) fn check(resp: &Response, call: Call) -> Result<(), TrackerError> {
                 .map(|l| format!(" to {}", crate::logging::redact(l)))
                 .unwrap_or_default()
         )),
+        // A 4xx says why (a required field, a bad value): keep its words,
+        // or the rejection cannot be diagnosed.
+        s @ 400..=499 => TrackerError::Invalid(match rejection_detail(&resp.body) {
+            Some(d) => format!("HTTP {s}: {d}"),
+            None => format!("HTTP {s}"),
+        }),
         s => TrackerError::Invalid(format!("HTTP {s}")),
     })
 }
@@ -777,6 +895,95 @@ mod tests {
                 retry_after_secs: Some(MAX_RETRY_AFTER_SECS)
             })
         );
+    }
+
+    /// TASK-408: a 4xx keeps Jira's reason — `errorMessages` first, then
+    /// `errors` by field — so a refused create can be diagnosed.
+    #[test]
+    fn a_4xx_keeps_jiras_reason_and_a_5xx_does_not_read_the_body() {
+        let body = json!({
+            "errorMessages": ["Some fields\nare wrong."],
+            "errors": {
+                "summary": "You must specify a summary of the issue.",
+                "customfield_10010": "Team is required.",
+            }
+        });
+        let r = Response::json(400, &body);
+        assert_eq!(
+            check(&r, Call::Other),
+            Err(TrackerError::Invalid(
+                "HTTP 400: Some fields are wrong.; customfield_10010: Team is required.; \
+                 summary: You must specify a summary of the issue."
+                    .into()
+            ))
+        );
+        // Not JSON, or nothing in either list: the status alone.
+        let r = Response::new(400, "<html>Bad Request</html>");
+        assert_eq!(
+            check(&r, Call::Other),
+            Err(TrackerError::Invalid("HTTP 400".into()))
+        );
+        let r = Response::json(422, &json!({ "errorMessages": [], "errors": {} }));
+        assert_eq!(
+            check(&r, Call::Other),
+            Err(TrackerError::Invalid("HTTP 422".into()))
+        );
+        let r = Response::json(500, &body);
+        assert_eq!(
+            check(&r, Call::Other),
+            Err(TrackerError::Invalid("HTTP 500".into()))
+        );
+    }
+
+    /// The detail is one line, bounded, and redacted before the bound.
+    #[test]
+    fn a_rejection_detail_is_bounded_and_redacted() {
+        let token = format!("ATATT3xFfGF0{}", "a".repeat(40));
+        let body = json!({
+            "errorMessages": [format!("token {token} refused")],
+            "errors": { "customfield_1": "x".repeat(2000) },
+        });
+        let d = rejection_detail(serde_json::to_vec(&body).unwrap().as_slice()).unwrap();
+        assert!(!d.contains("ATATT"), "{d}");
+        assert!(d.contains(crate::logging::REDACTED), "{d}");
+        assert_eq!(d.chars().count(), REJECTION_MAX_CHARS);
+        assert!(d.ends_with('…'));
+        assert!(!d.chars().any(char::is_control));
+        // A body past the read limit is not parsed at all.
+        let huge = json!({ "errorMessages": ["x".repeat(REJECTION_BODY_MAX_BYTES)] });
+        assert_eq!(
+            rejection_detail(serde_json::to_vec(&huge).unwrap().as_slice()),
+            None
+        );
+    }
+
+    /// Only a required field with no default that the body leaves out is
+    /// named; Cloud lists them as `fields`, Data Center as `values`.
+    #[test]
+    fn the_required_fields_fleet_leaves_out_are_named_never_filled() {
+        let sent = create_issue_body("PD", "10002", "A task", Value::Null, None);
+        let list = json!([
+            { "fieldId": "project", "name": "Project", "required": true, "hasDefaultValue": false },
+            { "fieldId": "summary", "name": "Summary", "required": true, "hasDefaultValue": false },
+            { "fieldId": "reporter", "name": "Reporter", "required": true, "hasDefaultValue": true },
+            { "fieldId": "labels", "name": "Labels", "required": false, "hasDefaultValue": false },
+            { "fieldId": "customfield_10010", "name": "Team", "required": true, "hasDefaultValue": false },
+            { "fieldId": "description", "name": "Description", "required": true, "hasDefaultValue": false },
+        ]);
+        let want = vec![
+            "Team (customfield_10010)".to_string(),
+            // Not sent: an empty description is left out of the body.
+            "Description (description)".to_string(),
+        ];
+        assert_eq!(
+            required_fields_unfilled(&json!({ "fields": list }), &sent),
+            want
+        );
+        assert_eq!(
+            required_fields_unfilled(&json!({ "values": list }), &sent),
+            want
+        );
+        assert!(required_fields_unfilled(&json!({}), &sent).is_empty());
     }
 
     #[test]

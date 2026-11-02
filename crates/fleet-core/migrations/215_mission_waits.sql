@@ -21,4 +21,4 @@ CREATE TABLE IF NOT EXISTS mission_waits (
 --             time since to the causes open then.
 ALTER TABLE orchestration_projects ADD COLUMN waits_at INTEGER;
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (214);
+INSERT OR IGNORE INTO schema_version (version) VALUES (215);

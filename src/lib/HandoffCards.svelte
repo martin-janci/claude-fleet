@@ -72,7 +72,17 @@
   import { sessionBlocked } from './share';
   import type { SessionRow } from './sessions';
 
-  let { mac = false }: { mac?: boolean } = $props();
+  // `count` and `waiting` feed Control's activity row (ControlActivity): the
+  // receipts shown, and the proposed plans that wait for a tick.
+  let {
+    mac = false,
+    count = $bindable(0),
+    waiting = $bindable(0),
+  }: { mac?: boolean; count?: number; waiting?: number } = $props();
+  $effect(() => {
+    count = $recentHandoffs.length;
+    waiting = $recentHandoffs.filter((h) => h.kind === 'tree' && openProposals(h).length > 0).length;
+  });
 
   onMount(() => followHandoffs());
 

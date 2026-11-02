@@ -2080,7 +2080,12 @@ impl FleetTools {
                 ConfirmState::Unknown => {} // expired / replayed — issue a fresh one
             }
         }
-        let req = confirms.request_from(tool, summary, &caller.label(), caller.is_operator());
+        let about = guard::call_args().and_then(|args| {
+            let s = lock(self.reader()).ok()?;
+            super::confirm_about::describe(&s, tool, &args)
+        });
+        let req =
+            confirms.request_about(tool, summary, &caller.label(), caller.is_operator(), about);
         (self.guards.notify)(&req);
         if caller.is_operator() {
             // F1: `call_tool` hands this nonce a replay, so the approval

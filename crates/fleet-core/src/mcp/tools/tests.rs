@@ -10320,6 +10320,64 @@ async fn an_approved_start_cannot_be_replayed_with_other_arguments() {
     assert_ne!(confirm_nonce_of(&e), nonce);
 }
 
+/// The card says what approving does (`confirm_about`), from the arguments
+/// `call_tool` keeps beside the call: the host and the project by name.
+/// The approval still binds to the summary alone.
+#[tokio::test]
+async fn an_operator_start_card_carries_the_call_in_words() {
+    let (s, pid, _) = two_host_store();
+    let t = guarded_tools(s, true);
+    let args = serde_json::json!({ "host_alias": "hostb", "project_id": pid, "name": "bad name" });
+    let asked = guard::with_call_args(
+        args.clone(),
+        t.new_session(Extension(operator()), Parameters(new_session_params(args))),
+    )
+    .await
+    .unwrap_err();
+    let nonce = confirm_nonce_of(&asked);
+    let card = t
+        .guards
+        .confirms
+        .pending()
+        .into_iter()
+        .find(|c| c.nonce == nonce)
+        .expect("the card");
+    let about = card.about.expect("the call in words");
+    assert_eq!(about.title, "Start a Claude session on hostb");
+    assert!(
+        about
+            .facts
+            .iter()
+            .any(|f| f.label == "Host" && f.value == "hostb"),
+        "{about:?}"
+    );
+    assert!(
+        about
+            .facts
+            .iter()
+            .any(|f| f.label == "Project" && !f.value.starts_with('#')),
+        "{about:?}"
+    );
+    // A call made outside `call_tool` keeps no arguments: no words, the
+    // summary as before.
+    let bare = t
+        .new_session(
+            Extension(operator()),
+            Parameters(new_session_params(
+                serde_json::json!({ "host_alias": "hostb", "project_id": pid, "name": "other" }),
+            )),
+        )
+        .await
+        .unwrap_err();
+    let bare = confirm_nonce_of(&bare);
+    assert!(t
+        .guards
+        .confirms
+        .pending()
+        .iter()
+        .any(|c| c.nonce == bare && c.about.is_none()));
+}
+
 #[test]
 fn start_summaries_bind_every_argument_readably() {
     let p = new_session_params(serde_json::json!({
@@ -13475,6 +13533,19 @@ const WORK_ACTION_NO_GATE: &[(&str, &str, &str)] = &[
         "verify",
         "a person's check of a work ITEM's condition; refused outright to a \
          per-host token and a bound client, as `accept` is",
+    ),
+    (
+        "work_link",
+        "check",
+        "an AI check of a work ITEM's finished work, a headless run with no \
+         worker session; refused outright to a per-host token, a bound client \
+         and the operator, as `verify` is",
+    ),
+    (
+        "work_link",
+        "check_setup",
+        "a project's AI check switch (a project, not a session); refused as \
+         `check` is",
     ),
     (
         "work_link",

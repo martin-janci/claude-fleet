@@ -40,10 +40,8 @@ use super::{
 };
 use crate::ipc_error::{lock, IpcError};
 use crate::store::{ItemUpsertOutcome, Store, TrackerItemWrite, TrackerRow};
-use futures_util::FutureExt as _;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
@@ -1071,10 +1069,13 @@ pub fn spawn_tracker_sync(
                 // A write was just queued (a comment to post): drain the
                 // outbox now, not at the next pass.
                 _ = super::write_back::nudged() => {
-                    match AssertUnwindSafe(sync.drain_writes(&store)).catch_unwind().await {
-                        Ok(n) if n > 0 => tracing::debug!(sent = n, "[write-back] drained on nudge"),
-                        Ok(_) => {}
-                        Err(_) => tracing::error!("[write-back] draining the outbox panicked; the next pass drains it"),
+                    // A panic is logged; the next pass drains the rest.
+                    let drained = crate::service::loops::caught(
+                        "[write-back] draining the outbox",
+                        sync.drain_writes(&store),
+                    );
+                    if let Ok(n @ 1..) = drained.await {
+                        tracing::debug!(sent = n, "[write-back] drained on nudge");
                     }
                     continue;
                 }
@@ -1086,17 +1087,12 @@ pub fn spawn_tracker_sync(
             // is caught and reported, and the loop goes on: uncaught, it ended
             // the task and tracker sync stopped for good while the hub stayed
             // up, the reconcile tick's old failure (`run_cancellable_tick`).
-            let pass = AssertUnwindSafe(async {
+            let outcome = crate::service::loops::caught("the sync pass", async {
                 if let Some(passes) = sync.run_pass(&store).await {
                     let _ = status_map.after_pass(&passes);
                 }
             })
-            .catch_unwind()
             .await;
-            let outcome = pass.map_err(|_| "the sync pass panicked".to_string());
-            if outcome.is_err() {
-                tracing::error!("[trackers] the sync pass panicked; continuing with the next tick");
-            }
             crate::service::loops::report("trackers", outcome, Some(period));
         }
     }))

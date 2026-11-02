@@ -1,5 +1,5 @@
 //! What a lane's tasks cost when they share one lead session (mission
-//! improvements M1, design 2026-10-26 §2, migration 213). A session's spend
+//! improvements M1, design 2026-10-26 §2, migration 214). A session's spend
 //! is one number; a lead works on several tasks of several items, so each
 //! task records the session's spend when it was handed over
 //! (`tasks.cost_start_micros`) and its cost is the difference to the next
@@ -10,7 +10,7 @@ use super::Store;
 use crate::ipc_error::IpcError;
 use std::collections::HashMap;
 
-/// `cost_start_micros` of a lane task from before migration 213.
+/// `cost_start_micros` of a lane task from before migration 214.
 pub const COST_START_UNKNOWN: i64 = -1;
 
 /// One task of a shared session, in the order it was handed over.

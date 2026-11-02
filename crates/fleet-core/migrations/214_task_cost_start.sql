@@ -19,4 +19,4 @@ UPDATE tasks SET cost_start_micros = -1 WHERE start_head IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_tasks_cost_start
   ON tasks(worker_session_id, id) WHERE cost_start_micros IS NOT NULL;
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (213);
+INSERT OR IGNORE INTO schema_version (version) VALUES (214);

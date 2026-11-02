@@ -69,10 +69,7 @@ pub struct StorageHealth {
 /// (the desktop).
 pub fn health(now: i64) -> Option<StorageHealth> {
     let dir = DATA_DIR.get()?;
-    let (free_bytes, total_bytes) = match cached_disk_space(dir) {
-        Some((free, total)) => (Some(free), Some(total)),
-        None => (None, None),
-    };
+    let (free_bytes, total_bytes) = cached_disk_space(dir).unzip();
     let last_backup_at = newest_backup(&backup_dirs(dir));
     Some(StorageHealth {
         free_bytes,
@@ -222,18 +219,14 @@ pub fn spawn_backup_tick(
                 let taken = tokio::task::spawn_blocking(move || backup_if_due(&dir, now))
                     .await
                     .unwrap_or_else(|e| Err(format!("the backup task failed: {e}")));
-                let outcome = match taken {
+                match &taken {
                     Ok(Some(info)) => {
                         tracing::info!(path = %info.path.display(), bytes = info.bytes, "[backup] daily backup taken");
-                        Ok(())
                     }
-                    Ok(None) => Ok(()),
-                    Err(e) => {
-                        tracing::warn!(error = %e, "[backup] daily backup failed");
-                        Err(e)
-                    }
-                };
-                crate::service::loops::report("backup", outcome, Some(CHECK_EVERY));
+                    Ok(None) => {}
+                    Err(e) => tracing::warn!(error = %e, "[backup] daily backup failed"),
+                }
+                crate::service::loops::report("backup", taken.map(drop), Some(CHECK_EVERY));
             }
         },
     ))

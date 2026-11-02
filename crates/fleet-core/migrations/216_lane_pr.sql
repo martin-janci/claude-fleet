@@ -9,4 +9,4 @@
 ALTER TABLE mission_lanes ADD COLUMN pr_url TEXT;
 ALTER TABLE mission_lanes ADD COLUMN pr_head TEXT;
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (215);
+INSERT OR IGNORE INTO schema_version (version) VALUES (216);

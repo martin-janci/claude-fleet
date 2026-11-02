@@ -36,9 +36,6 @@ pub const E_PROMPT_NOT_QUEUED: &str = "E_PROMPT_NOT_QUEUED";
 /// REPL did not come up, a dialog was not answered, the send failed).
 pub const E_PROMPT_NOT_DELIVERED: &str = "E_PROMPT_NOT_DELIVERED";
 
-/// What a [`RunFix`] does, as the desktop and the phone act on it.
-pub const FIX_ACTIONS: [&str; 5] = ["edit", "host", "accounts", "session", "retry"];
-
 /// The one thing to do about a failed run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunFix {
@@ -47,7 +44,7 @@ pub struct RunFix {
     pub code: String,
     /// The fix in words: "Log in again on mac".
     pub label: String,
-    /// One of [`FIX_ACTIONS`]: `edit` opens the routine's editor, `host`
+    /// What the desktop and the phone do: `edit` opens the routine's editor, `host`
     /// the host named in `host`, `accounts` the accounts, `session` the
     /// run's session, `retry` runs it again.
     pub action: String,

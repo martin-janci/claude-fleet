@@ -34,6 +34,8 @@
     nextRunLabel,
     offsetWords,
     previewRoutine,
+    projectName,
+    repoName,
     routineAccountLabel,
     routineMemory,
     routineSeen,
@@ -148,10 +150,6 @@
   /** The prompt's limit (the hub's BRIEF_MAX_CHARS), and when to count. */
   const PROMPT_MAX = 4000;
   const PROMPT_COUNT_FROM = 3500;
-  const projectName = (id: number) => {
-    const p = $projects.find((x) => x.project.id === id)?.project;
-    return p ? `${p.owner}/${p.repo}` : `project ${id}`;
-  };
 
   const zone = deviceZone();
   const zoneOf = (d: RoutineDraft) => draftZone(d, zone);
@@ -196,7 +194,7 @@
     if (!preview) return previewError ? `Dry run unavailable: ${errorText(previewError)}.` : 'Dry run: checking what a run would do…';
     if (preview.problem) return `Dry run: it would not save: ${preview.problem}.`;
     const inp = draftInput(draft, enabled, zone);
-    return dryRunLine(inp, projectName(inp.project_id), preview.account ? accountName(preview.account) : null);
+    return dryRunLine(inp, projectName($projects, inp.project_id), preview.account ? accountName(preview.account) : null);
   });
 
   // ---- checks on blur and on submit, never on each key -----------------------
@@ -399,7 +397,7 @@
         {/if}
       {:else if draft.trigger === 'event'}
         <div class="event">
-          <RoutineEventTrigger bind:event={draft.event} bind:filter={draft.filter} routineHost={draft.host_alias} repos={pickable.map((p) => `${p.project.owner}/${p.project.repo}`)} />
+          <RoutineEventTrigger bind:event={draft.event} bind:filter={draft.filter} routineHost={draft.host_alias} repos={pickable.map((p) => repoName(p.project))} />
         </div>
       {:else}
         <p class="help" data-testid="routine-manual-note">It never starts on its own: Run now starts it, here or from the phone.</p>
@@ -419,9 +417,9 @@
       <label class="f">
         <span class="fl">Project</span>
         <select class="inp" class:bad={projectGone} data-testid="routine-project" bind:value={draft.project_id}>
-          {#each pickable as p (p.project.id)}<option value={String(p.project.id)}>{p.project.owner}/{p.project.repo}</option>{/each}
+          {#each pickable as p (p.project.id)}<option value={String(p.project.id)}>{repoName(p.project)}</option>{/each}
           {#if projectGone}<option value={draft.project_id}
-              >{projectName(Number(draft.project_id))} ({$projects.some((p) => String(p.project.id) === draft.project_id) ? 'not offered' : 'deleted'})</option
+              >{projectName($projects, Number(draft.project_id))} ({$projects.some((p) => String(p.project.id) === draft.project_id) ? 'not offered' : 'deleted'})</option
             >{/if}
         </select>
       </label>

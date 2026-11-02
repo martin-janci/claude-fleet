@@ -70,7 +70,10 @@ fingerprints:
 ]
 ```
 
-An `env` value names a secret, never a value. Each MCP binding is started on the host and asked
+An `env` value names a secret, never a value. With no override the server reads the hub's
+secrets under its own names (`GRAYLOG_API_TOKEN`), shared by every instance; the grant form's
+*this instance's own secrets* switch names each one `AGENT_<INSTANCE>_<ROLE>_<NAME>` instead
+(`AGENT_L2_PROD_LOGS_GRAYLOG_API_TOKEN`), so add those under Assets › Secrets first. Each MCP binding is started on the host and asked
 for its tools before the rule is written, so a wrong server or secret fails the grant, not a run.
 
 Give the instance its own trigger phrase while it watches (e.g. `/analyze-next`), or both agents

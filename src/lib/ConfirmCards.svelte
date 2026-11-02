@@ -13,6 +13,7 @@
   import { onMount } from 'svelte';
   import QuestionCard from './kit/QuestionCard.svelte';
   import { answerConfirm, answering, cardConfirms, dismissConfirm, failedConfirms, hostConfirmCards } from './confirms';
+  import { openExternal } from './open_external';
   import { shortAge } from './session_status';
   import type { ConfirmRequest } from './mcp';
 
@@ -40,8 +41,11 @@
   };
 
   function question(r: ConfirmRequest): string {
-    return `${WORDS[r.tool] ?? `Run ${r.tool}`}?`;
+    return `${r.about?.title ?? WORDS[r.tool] ?? `Run ${r.tool}`}?`;
   }
+
+  /** A body this long folds: its first lines show, the rest on a click. */
+  const BODY_FOLD = 280;
 
   function detail(r: ConfirmRequest): string {
     return r.summary ? `${r.tool} ${r.summary}` : r.tool;
@@ -65,6 +69,36 @@
   }
 </script>
 
+{#snippet about(r: ConfirmRequest)}
+  {@const a = r.about!}
+  <div class="about" data-testid="confirm-about">
+    {#if a.facts?.length}
+      <dl class="facts">
+        {#each a.facts as f, i (i)}
+          <dt>{f.label}</dt>
+          <dd>
+            {#if f.url}<button type="button" class="link" onclick={() => void openExternal(f.url ?? '')}>{f.value} ↗</button>{:else}{f.value}{/if}
+          </dd>
+        {/each}
+      </dl>
+    {/if}
+    {#if a.body}
+      {#if a.body.text.length > BODY_FOLD}
+        <details class="body" data-testid="confirm-about-body">
+          <summary>{a.body.label}: {a.body.text.slice(0, BODY_FOLD)}…</summary>
+          <p>{a.body.text}</p>
+        </details>
+      {:else}
+        <p class="body" data-testid="confirm-about-body"><span class="label">{a.body.label}:</span> {a.body.text}</p>
+      {/if}
+    {/if}
+    <details class="exact" data-testid="confirm-about-exact">
+      <summary>Exact call</summary>
+      <span class="mono">{detail(r)}</span>
+    </details>
+  </div>
+{/snippet}
+
 {#if plan}
   <div class="confirm-cards" data-testid="confirm-cards">
     <QuestionCard
@@ -82,7 +116,10 @@
     >
       <ol class="steps" data-testid="confirm-plan-steps">
         {#each plan as r (r.nonce)}
-          <li data-testid="confirm-plan-step"><span>{question(r).replace(/\?$/, '')}</span> <span class="mono">{detail(r)}</span></li>
+          <li data-testid="confirm-plan-step">
+            <span>{question(r).replace(/\?$/, '')}</span>
+            {#if r.about}{@render about(r)}{:else}<span class="mono">{detail(r)}</span>{/if}
+          </li>
         {/each}
       </ol>
       <p class="why">They start, move or kill sessions, so each waits for you. Nothing runs until you confirm.</p>
@@ -97,7 +134,7 @@
       <QuestionCard
         question={question(r)}
         age={r.asked_at > 0 ? `asked ${shortAge(r.asked_at, nowSec)} ago` : undefined}
-        detail={detail(r)}
+        detail={r.about ? undefined : detail(r)}
         label="The agent needs your OK"
         testid="confirm-card"
         enter
@@ -108,6 +145,7 @@
           ...(failed !== undefined ? [{ label: 'Dismiss', onselect: () => dismissConfirm(r.nonce), disabled: busy, testid: 'confirm-card-dismiss' }] : []),
         ]}
       >
+        {#if r.about}{@render about(r)}{/if}
         <p class="why">The agent's starts and kills always wait for you. Nothing runs until you approve.</p>
         {#if failed !== undefined}<p class="failed" role="status" data-testid="confirm-card-failed">Your answer did not reach the hub: {failed}. Try again, or dismiss this card.</p>{/if}
       </QuestionCard>
@@ -131,6 +169,50 @@
     font-size: var(--text-xs);
   }
   .steps .mono {
+    color: var(--fg-muted);
+    overflow-wrap: anywhere;
+  }
+  .about {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    font-size: var(--text-xs);
+  }
+  .facts {
+    margin: 0;
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: 2px var(--space-2);
+  }
+  .facts dt {
+    color: var(--fg-muted);
+  }
+  .facts dd {
+    margin: 0;
+    overflow-wrap: anywhere;
+  }
+  .link {
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--accent);
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+  .body {
+    margin: 0;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  .body .label,
+  .exact summary {
+    color: var(--fg-muted);
+  }
+  .body p {
+    margin: var(--space-1) 0 0;
+  }
+  .exact .mono {
     color: var(--fg-muted);
     overflow-wrap: anywhere;
   }

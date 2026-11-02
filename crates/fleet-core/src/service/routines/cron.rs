@@ -39,9 +39,9 @@ fn field(text: &str, name: &str, lo: u32, hi: u32) -> Result<(u64, bool), String
                     .ok()
                     .filter(|s| *s > 0)
                     .ok_or_else(|| format!("{name}: step {s:?} is not a positive number"))?;
-                (r, s)
+                (r, Some(s))
             }
-            None => (part, 1),
+            None => (part, None),
         };
         // A field that starts with `*` (`*/2` included) leaves the other day
         // field in charge, as in Vixie cron.
@@ -63,18 +63,17 @@ fn field(text: &str, name: &str, lo: u32, hi: u32) -> Result<(u64, bool), String
                     }
                     (a, b)
                 }
-                // `5/15` reads as 5, 20, 35, 50, as in Vixie cron.
-                None if step > 1 => (num(range)?, hi),
+                // `5/15` reads as 5, 20, 35, 50, and `5/1` as 5 to the
+                // end, as in Vixie cron.
+                None if step.is_some() => (num(range)?, hi),
                 None => {
                     let n = num(range)?;
                     (n, n)
                 }
             }
         };
-        let mut v = a;
-        while v <= b {
+        for v in (a..=b).step_by(step.unwrap_or(1) as usize) {
             bits |= 1 << v;
-            v += step;
         }
     }
     Ok((bits, restricted))
@@ -228,7 +227,12 @@ mod tests {
         assert_eq!(c.next_after(at(0, 8, 6), 0), Some(at(0, 8, 25)));
         assert_eq!(c.next_after(at(0, 10, 45), 0), Some(at(1, 8, 5)));
         let c = Cron::parse("0 12,18 * * *").unwrap();
-        assert_eq!(c.next_after(at(0, 12, 0), 0), Some(at(0, 18, 0)));
+        assert_eq!(c.next_after(at(0, 12, 0), 0), Some(at(0, 18, 0))); // `5/1` is 5 to the end, like `5/2`, not 5 alone.
+        let c = Cron::parse("5/1 * * * *").unwrap();
+        assert_eq!(c.next_after(at(0, 10, 6), 0), Some(at(0, 10, 7)));
+        // A step past the field never overflows.
+        let c = Cron::parse("0 1-23/4294967295 * * *").unwrap();
+        assert_eq!(c.next_after(at(0, 2, 0), 0), Some(at(1, 1, 0)));
     }
 
     #[test]

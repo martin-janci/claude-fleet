@@ -23,7 +23,7 @@
 
 use super::outcome::{self, OutcomeSource, RunOutcome};
 use super::{changeable, trace, visible};
-use crate::ipc_error::{lock, IpcError};
+use crate::ipc_error::{codes, lock, IpcError};
 use crate::service::run_trace::Step;
 use crate::service::view_scope::ViewScope;
 use crate::store::{RoutineRow, RoutineRunRow, RoutineSeenRow, SeenChange, Store};
@@ -89,13 +89,10 @@ pub fn prompt_block(items: &[RoutineSeenRow]) -> String {
     out
 }
 
-/// PURE: `a` and `b` as one block of a prompt, either one alone, or none.
-pub fn joined(a: Option<&str>, b: Option<&str>) -> Option<String> {
-    match (a, b) {
-        (Some(a), Some(b)) => Some(format!("{a}\n\n{b}")),
-        (Some(x), None) | (None, Some(x)) => Some(x.to_string()),
-        (None, None) => None,
-    }
+/// The block of a run of `r`'s prompt that lists what it was shown
+/// ([`prompt_block`] of [`shown`]); `None` when `r` tracks none.
+pub fn prompt_block_for(s: &Store, r: &RoutineRow) -> Result<Option<String>, IpcError> {
+    Ok(shown(s, r)?.map(|items| prompt_block(&items)))
 }
 
 /// PURE: the text of the last `<routine-seen>` block of `text` that is
@@ -119,12 +116,7 @@ pub fn last_block(text: &str) -> Option<&str> {
 /// PURE: `s` with its runs of whitespace made one space, cut to `max`
 /// characters.
 fn tidy(s: &str, max: usize) -> String {
-    s.split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .chars()
-        .take(max)
-        .collect()
+    super::memory::one_line(s).chars().take(max).collect()
 }
 
 /// PURE: the items of a block, as `(item, state)`: one per line, `item |
@@ -147,7 +139,7 @@ pub fn parse_items(block: &str) -> Vec<(String, String)> {
             Some((i, st)) => (i, st),
             None => (line, ""),
         };
-        let item = tidy(item, ITEM_MAX_CHARS).to_lowercase();
+        let item = item_key(item);
         if item.is_empty() {
             continue;
         }
@@ -161,8 +153,14 @@ pub fn parse_items(block: &str) -> Vec<(String, String)> {
     out
 }
 
+/// PURE: the key an item is kept under: tidied, cut to
+/// [`ITEM_MAX_CHARS`], lowercased, so a run and a person name it alike.
+fn item_key(item: &str) -> String {
+    tidy(item, ITEM_MAX_CHARS).to_lowercase()
+}
+
 /// What a run's report changed.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Tally {
     pub new: usize,
     pub changed: usize,
@@ -197,16 +195,17 @@ pub fn summary(t: &Tally) -> String {
 /// Apply finished run `run` of `r`'s reply (`texts`, oldest first) to its
 /// seen items: each item of its last block is recorded, the old ones
 /// dropped, and a done run that found nothing new or changed comes to
-/// `nothing`. `None`: `r` tracks none, or the reply has no block.
+/// `nothing`. A no-op when `r` tracks none; a reply without a block is
+/// only traced.
 pub fn apply(
     s: &Store,
     r: &RoutineRow,
     run: &RoutineRunRow,
     texts: &[String],
     now: i64,
-) -> Result<Option<Tally>, IpcError> {
+) -> Result<(), IpcError> {
     if !r.track_seen || run.state != "done" {
-        return Ok(None);
+        return Ok(());
     }
     let Some(block) = texts.iter().rev().find_map(|t| last_block(t)) else {
         trace::write_one(
@@ -221,7 +220,7 @@ pub fn apply(
             )
             .data(serde_json::json!({ "block": false })),
         );
-        return Ok(None);
+        return Ok(());
     };
     let mut tally = Tally::default();
     for (item, state) in parse_items(block) {
@@ -245,7 +244,7 @@ pub fn apply(
     if tally.quiet() {
         quiet(s, run.id, now)?;
     }
-    Ok(Some(tally))
+    Ok(())
 }
 
 /// Run `run_id` found nothing new: it came to `nothing`, unless something
@@ -319,8 +318,12 @@ pub fn forget(
 ) -> Result<RoutineSeen, IpcError> {
     let s = lock(store)?;
     let r = changeable(&s, scope, id)?;
-    let item = item.map(|i| tidy(i, ITEM_MAX_CHARS).to_lowercase());
-    s.forget_routine_seen(r.id, item.as_deref().filter(|i| !i.is_empty()))?;
+    let item = item.map(item_key);
+    // A blank item names none; it must not read as "all".
+    if item.as_deref() == Some("") {
+        return Err(IpcError::new(codes::E_INVALID, "text names no item"));
+    }
+    s.forget_routine_seen(r.id, item.as_deref())?;
     of_routine(&s, scope, &r, None)
 }
 
@@ -394,8 +397,5 @@ mod tests {
             summary(&Tally::default()),
             "Its reply listed nothing to look at"
         );
-        assert_eq!(joined(Some("a"), None).as_deref(), Some("a"));
-        assert_eq!(joined(Some("a"), Some("b")).as_deref(), Some("a\n\nb"));
-        assert_eq!(joined(None, None), None);
     }
 }

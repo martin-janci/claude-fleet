@@ -134,8 +134,7 @@ impl FleetTools {
                 // it is the difference between a phone fetching 44 rows to
                 // find 3 and fetching 3.
                 if let Some(want) = p.needs_attention {
-                    if crate::service::attention::needs_attention_in(row, context_red_pct, &facts)
-                        .is_some()
+                    if crate::service::attention::needs_person_in(row, context_red_pct, &facts)
                         != want
                     {
                         return false;

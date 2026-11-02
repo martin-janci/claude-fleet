@@ -31,7 +31,6 @@ use fleet_update::{
     GitUpdateChannel, Manifests, MemorySequenceStore, Mode, Platform, SequenceStore, Source, Track,
     TrustedKeys, UpdateChannel, UpdateError, UpdatePhase, VerifiedChannel, Version, Window,
 };
-use futures_util::FutureExt as _;
 use serde::Serialize;
 
 use crate::ipc_error::{codes, lock, IpcError};
@@ -1997,7 +1996,7 @@ pub fn spawn_refresh_tick(
                     // Caught like a tick pass (`run_cancellable_tick`): a panic
                     // here ended the pusher for good, and rollouts stopped
                     // moving while the hub stayed up.
-                    let beat = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let _ = crate::service::loops::caught_sync("the update decision pass", || {
                         match rollout::advance(&store, crate::store::now_unix()) {
                             Ok(moved) => {
                                 for m in moved {
@@ -2012,12 +2011,7 @@ pub fn spawn_refresh_tick(
                         if !pushed.is_empty() {
                             tracing::info!(targets = ?pushed, "update decisions changed");
                         }
-                    }));
-                    if beat.is_err() {
-                        tracing::error!(
-                            "the update decision pass panicked; continuing with the next beat"
-                        );
-                    }
+                    });
                 }
             });
         }
@@ -2028,21 +2022,12 @@ pub fn spawn_refresh_tick(
         loop {
             let base = channel_base_url();
             let fetch = HttpsFetch::new(Some(&base));
-            let refreshed = std::panic::AssertUnwindSafe(refresh(
-                &store,
-                &fetch,
-                &base,
-                &keys,
-                crate::store::now_unix(),
-            ))
-            .catch_unwind()
+            let refreshed = crate::service::loops::caught(
+                "the update channel refresh",
+                refresh(&store, &fetch, &base, &keys, crate::store::now_unix()),
+            )
             .await
-            .unwrap_or_else(|_| {
-                Err(IpcError::new(
-                    codes::E_INTERNAL,
-                    "the update channel refresh panicked",
-                ))
-            });
+            .unwrap_or_else(|why| Err(IpcError::new(codes::E_INTERNAL, why)));
             let outcome = refreshed
                 .as_ref()
                 .map(|_| ())

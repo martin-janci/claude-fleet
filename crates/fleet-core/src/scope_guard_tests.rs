@@ -557,6 +557,18 @@ const SCOPE_GUARDS: &[Guard] = &[
               membership (`graph::require_mission_change`)",
     },
     Guard {
+        file: "crates/fleet-core/src/service/work/ticket_check.rs",
+        func: "person_decides",
+        nth: 0,
+        code: "if !view.org.is_all() {",
+        verdict: Verdict::OrgBoundary,
+        why: "Test now, Rerun and a project's AI check switch are a PERSON's \
+              asks by design (each starts a billed headless run), so every \
+              scoped caller is refused before any row is reached. This is the \
+              org boundary, not a privacy fence; the item is then fenced by \
+              `status::item_visible`",
+    },
+    Guard {
         file: "crates/fleet-core/src/service/work/local.rs",
         func: "propose",
         nth: 0,

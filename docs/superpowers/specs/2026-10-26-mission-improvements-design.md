@@ -38,7 +38,7 @@ Línie sú postavené a merané (Missions → Compare). Z návrhu línií ostali
 **Veľkosť** S–M. **Test:** dve úlohy v jednom vedúcom, cena session 10 → 30 → 45; úlohy 30 a 15 (nie 45 a 45; brief vedúceho patrí prvej úlohe).
 
 **Ako je to postavené v M1:**
-- Migrácia 213: `tasks.cost_start_micros` a partial index `idx_tasks_cost_start` (len riadky s hodnotou). Úlohy línie spred migrácie (`start_head IS NOT NULL`) dostanú `-1` a ich session sa delí rovným dielom.
+- Migrácia 214: `tasks.cost_start_micros` a partial index `idx_tasks_cost_start` (len riadky s hodnotou). Úlohy línie spred migrácie (`start_head IS NOT NULL`) dostanú `-1` a ich session sa delí rovným dielom.
 - Hodnotu zapisuje len `lanes::begin_task` (prvá úloha nového vedúceho aj doručenie do živého), nie `insert_task`: viac úloh rôznych položiek nesie iba vedúci línie, takže beh vo vlastnej session ostáva `NULL` a počíta celú session ako doteraz. Work view tak číta len úlohy línií cez partial index, bez full scanu (`scale_tests`).
 - `store/task_cost.rs`: `split_session_spend` (čistá funkcia; časti dávajú súčet ceny session, pokles ceny je nula) a `shared_session_spend`. `Graph::shared_spend` vo Work view nahradí celú cenu vedúceho podielom položky.
 - **Odchýlka od návrhu:** `run_cost_estimate` sa nemení. Už počíta každú session raz (`IN`) a delí počtom hotových behov, takže zdieľaná session v ňom nie je dvakrát. Presun session (`repoint_open_tasks`) `cost_start` neprepisuje; je to zriedkavá cesta a úloha v nej dostane nanajvýš nulu namiesto podielu.
@@ -66,7 +66,7 @@ Jedna úloha sa pripíše prvej príčine v tomto poradí (príčina bližšie k
 **Veľkosť** M.
 
 **Ako je to postavené v M3:**
-- Migrácia 214: `mission_waits (orchestration_project_id, cause, secs, open)` a `orchestration_projects.waits_at`. `Store::account_mission_waits(id, now, causes)` pripočíta čas od poslednej pozície príčinám, ktoré boli vtedy otvorené (najviac `WAIT_STEP_MAX_SECS`, 2 h), a otvorí tie, ktoré vidí teraz. Príčina sa teda počíta od chvíle, keď ju loop videl, nie spätne. `mission_waits(id, now)` k otvoreným pridá čas do `now`.
+- Migrácia 215: `mission_waits (orchestration_project_id, cause, secs, open)` a `orchestration_projects.waits_at`. `Store::account_mission_waits(id, now, causes)` pripočíta čas od poslednej pozície príčinám, ktoré boli vtedy otvorené (najviac `WAIT_STEP_MAX_SECS`, 2 h), a otvorí tie, ktoré vidí teraz. Príčina sa teda počíta od chvíle, keď ju loop videl, nie spätne. `mission_waits(id, now)` k otvoreným pridá čas do `now`.
 - Tick (`orchestrate::steps_and_waits`, `orchestrate/waits.rs`): `slot` z porovnania plánu bez stropu behov s plánom pod stropom (minuté pokusy misie sú `person`, lebo ich rieši ask), `lane` z `lanes::gate`, `touches` z `gate_items` a `gate_lane_starts`, `person` z askov a `held` úloh, `limit` z `hold_runs_over_limit` a z plánovača čakajúceho na reset, `grant` keď sú pripravené behy a autonómia pod `AUTO_LEVEL`.
 - Pauza: aktívne misie sa tickujú, pozastavené nie. Preto `set_mission_state` účtuje pri každej zmene stavu: pauza od loopu (brzda) otvorí `brake`, iná pauza `person`, každý iný stav príčiny zavrie.
 - `stats.waits` v `work { mission }`, riadok štatistík („waited on a person 50%, for a slot 17%“, najviac tri príčiny s aspoň 1 % rozpätia) a stĺpec „Waited most“ v Compare (pri misii jej najväčšia príčina, v súhrne príčina s najväčším mediánom podielu).
@@ -142,7 +142,7 @@ Jedna úloha sa pripíše prvej príčine v tomto poradí (príčina bližšie k
 
 **Veľkosť** M.
 
-**Ako je to postavené v M4** (`orchestrate/lane_pr.rs`, migrácia 215):
+**Ako je to postavené v M4** (`orchestrate/lane_pr.rs`, migrácia 216):
 - `policy.lane_pr` (`off` | `draft`, predvolene `off`), v úprave misie „Lane PR“ pri práci po líniách; meniť sa dá kedykoľvek.
 - Tick (`lane_pr::sync`, pri autonómii ≥ 1, po integračnej kontrole): pre každú líniu s vetvou (nie `main`/`master`) vezme commit najnovšej hotovej úlohy línie (evidencia jej implement behu), a ak ešte nie je `mission_lanes.pr_head`, v checkoute línie na jej hoste spustí `git push origin <sha>:refs/heads/<vetva>` (len overenú prácu, nie rozrobenú prácu vedúceho), potom `gh pr view` a buď `gh pr edit --body`, alebo `gh pr create --draft`. URL sa zapíše do `mission_lanes.pr_url`, prvé otvorenie je `note` v logu misie.
 - Bez `gh` alebo bez prihlásenia: push prebehne, `note` povie, že PR chýba. Odmietnutý push (napríklad vetva na `origin` je ďalej) je `note`; každý commit sa skúsi raz (pamäť v procese).

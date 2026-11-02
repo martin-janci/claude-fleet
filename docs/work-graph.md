@@ -1134,6 +1134,62 @@ person rule), is left out of the brief.
 `wrap_up` types into a pane, so it takes the same drive reach and
 organisation fence as **Ask for a handover**.
 
+### AI check on done
+
+When a ticket's work is finished, a headless tester can check it before
+anyone calls it done: it runs the project's test command, reads the change
+against the ticket (its notes or description and its `done_when` lines,
+quoted as data) and reports **done** or **failed** with blockers a developer
+can act on. It is off until a person turns it on, per project
+(`projects.check_mode` / `check_command`, migration 213):
+
+- **Off** (the default; NULL reads as off): no card offers it, nothing runs.
+- **On request** (`ask`): the task page shows **Test now** under the result.
+- **When done** (`auto`): the missions loop starts it by itself for the
+  newest finished `implement` or `wrapup` task of an item (with git
+  evidence, created in the last 24 hours, no newer run or check after it),
+  at most two per pass. It skips items in an active mission (the mission
+  has its own checks), stops with **Pause all**, and after a start that
+  failed before its task waits 30 minutes for the same work.
+
+The check is a `test`-role task, so everything that reads tests reads it
+unchanged: a `test:` line is satisfied by its `tests_run`, the completion
+gate counts it, its result is the task's. It runs `claude -p` with no edit
+tools, under the same capped run as a mission's headless check
+(`orchestrate::checks`), in the worker's checkout when HEAD is still the
+finished commit and the tree is clean, otherwise in a detached worktree of
+that commit. The test command is one plain command (no quotes, pipes,
+redirects or `;`, at most 200 characters); without one the tester runs the
+ticket's plain `test:` lines, and without those it judges the code alone.
+Its usage is booked as a headless check's.
+
+The card on the task page says what the check found: *not tested yet*,
+*testing*, *tests passed*, *not ready* (with **Must change**), *could not
+run*, or *accepted anyway*. **Rerun** starts a fresh one; **Accept anyway**
+is `verify` with the line `ai check` and the person's note, the same
+override the gate already takes. The card names the project's switch and
+changes it in place. The phone shows the same card.
+
+Three fleet events let a routine follow along, each about no host:
+`ticket_done` (a person set a ticket done from fleet; a tracker's own sync
+does not write it), `check_passed` and `check_failed` (a check gave a
+verdict; one that could not run writes nothing). They fire a routine of
+the item's organisation.
+
+Test now, Rerun and the switch are a person's: a per-host token, the
+operator and an organisation-scoped caller are refused, and the item must
+be one the caller can see.
+
+| You do | Desktop command | MCP action |
+|---|---|---|
+| Test now / Rerun | `run_ticket_check` | `work_link { action: check, item_id }` |
+| Turn a project's check on or off | `set_ticket_check` | `work_link { action: check_setup, project_id, mode: off \| ask \| auto, command? }` |
+| Accept anyway | `verify_work_item` | `work_link { action: verify, item_id, line: "ai check", ok: true, note? }` |
+
+The card is `check` on `work { action: task }` (the desktop's
+`work_task_detail`), absent when the item has neither finished work nor a
+check.
+
 ## Today and standup
 
 **Today** is the Details panel's empty state, and ⌘⇧T (Ctrl+Shift+T)

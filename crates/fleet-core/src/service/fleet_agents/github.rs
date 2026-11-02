@@ -124,8 +124,6 @@ fn pr_job(
     )
 }
 
-/// Pull requests whose review threads one poll reads, at most.
-pub const MAX_THREAD_PRS: usize = 10;
 /// Reviews one poll looks up, at most (the PR reviewer's `MAX_VERIFIES`).
 pub const MAX_REVERIFIES: usize = 5;
 
@@ -245,7 +243,8 @@ pub fn comments_since(since: i64) -> String {
 }
 
 /// PURE: the pull requests whose threads a reply poll reads: those with a
-/// person's reply among `replies`, open, at most [`MAX_THREAD_PRS`].
+/// person's reply among `replies`, open. All of them: the next poll reads
+/// from this one, so a pull request left out would lose its replies.
 pub fn reply_prs<'a>(replies: &[ReviewComment], prs: &'a [OpenPr]) -> Vec<&'a OpenPr> {
     let mut out: Vec<&OpenPr> = Vec::new();
     for c in replies.iter().filter(|c| is_persons_reply(c)) {
@@ -256,7 +255,6 @@ pub fn reply_prs<'a>(replies: &[ReviewComment], prs: &'a [OpenPr]) -> Vec<&'a Op
             out.push(p);
         }
     }
-    out.truncate(MAX_THREAD_PRS);
     out
 }
 

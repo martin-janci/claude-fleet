@@ -338,9 +338,15 @@ export function classify(s: SessionRow, opts: AttentionOptions): TriageBucket {
   const blocked = live ? blockedBy(s, opts) : null;
   if (blocked) return blocked;
   if (s.claude_status === 'failed') return s.kind === 'bg' ? 'failed' : 'stop_failed';
-  if (live && contextLevel(s.context_pct) === 'crit') return 'context_full';
+  // An idle session has nothing running out of room: its context matters
+  // when it is next given work, not before.
+  if (live && !isIdleStatus(s.claude_status) && contextLevel(s.context_pct) === 'crit') return 'context_full';
   if (live && (s.stale_working_at ?? null) !== null) return 'stale_working';
-  if (s.ci_status === 'failing' && isIdleStatus(s.claude_status)) return 'ci_failing';
+  // A merged or closed PR's checks can fail for good: nobody has anything
+  // left to fix.
+  const prState = s.pr_evidence?.state;
+  const prFinished = prState === 'MERGED' || prState === 'CLOSED';
+  if (s.ci_status === 'failing' && isIdleStatus(s.claude_status) && !prFinished) return 'ci_failing';
   // G1.6: Jev's reading of a silent turn's end as a question is a proposal,
   // after every reason a person must act on, and never on a dead row.
   if (live && jevSays(s, 'asked')) return 'probably_waiting';

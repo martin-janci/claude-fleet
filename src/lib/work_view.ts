@@ -16,6 +16,7 @@
  * whatever the hub answered.
  */
 
+import type { TicketCheckView } from './ticket_check';
 import { errorText } from './error_copy';
 import type { ProposalLike, ProposalSource } from './ai_proposal';
 import { derived, get, writable, type Readable } from 'svelte/store';
@@ -463,6 +464,9 @@ export interface TaskDetail {
   /** Where this reader may promote a task of fleet's own. Empty: a
    *  tracker's ticket, an agent, or no tracker takes new tickets. */
   promote_targets?: PromoteTarget[];
+  /** The AI check of the item's finished work (`ticket_check`); absent when
+   *  there is neither finished work nor a check, and from an older hub. */
+  check?: TicketCheckView | null;
 }
 
 /** `service::work::promote::PromotionView`. */

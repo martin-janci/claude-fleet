@@ -3,11 +3,13 @@
   // `routines::seen`): each item with the state the last run saw, so the
   // next run skips the ones that did not change. Forget drops one (the next
   // run looks at it again); Forget all drops every one.
-  import { untrack } from 'svelte';
+  import { onMount } from 'svelte';
   import Button from '../kit/Button.svelte';
   import { errorText } from '../error_copy';
   import { forgetRoutineSeen, routineSeen, type RoutineSeen } from '../routines';
 
+  // One per routine: the editor keys it on the routine's id, so a switch
+  // to another routine mounts a fresh one.
   let { routineId }: { routineId: number } = $props();
 
   /** Rows shown before "Show all". */
@@ -17,15 +19,14 @@
   let error: string | null = $state(null);
   let busy = $state(false);
   let all = $state(false);
-  /** The newest load or write: an older reply, or one for another routine,
-   *  is dropped. */
+  /** The newest load or write: an older reply is dropped. */
   let seq = 0;
 
-  async function load(id: number) {
+  async function load() {
     const mine = ++seq;
     error = null;
-    const r = await routineSeen(id);
-    if (mine !== seq || id !== routineId) return;
+    const r = await routineSeen(routineId);
+    if (mine !== seq) return;
     if (r.ok) seen = r.value;
     else {
       seen = null;
@@ -34,23 +35,15 @@
     }
   }
 
-  $effect(() => {
-    const id = routineId;
-    untrack(() => {
-      seen = null;
-      all = false;
-      void load(id);
-    });
-  });
+  onMount(() => void load());
 
   async function forget(item?: string) {
     const mine = ++seq;
-    const routine = routineId;
     busy = true;
     error = null;
-    const r = await forgetRoutineSeen(routine, item);
+    const r = await forgetRoutineSeen(routineId, item);
     busy = false;
-    if (mine !== seq || routine !== routineId) return;
+    if (mine !== seq) return;
     if (r.ok) seen = r.value;
     else error = errorText(r.error);
   }

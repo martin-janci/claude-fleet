@@ -10,7 +10,7 @@ import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import RoutinesPanel from './RoutinesPanel.svelte';
 import { hosts } from '../hosts';
 import { projects } from '../projects';
-import { EVENT_CHOICES, eventFilterInput, eventFilterOf, eventFilterWords, eventHostChoices, eventLabel, failing, startedByWords, triggerWords, type RoutineRow } from '../routines';
+import { EVENT_GROUPS, eventFilterInput, eventFilterOf, eventFilterWords, eventHostChoices, eventLabel, failing, rateWords, startedByWords, triggerWords, type RoutineRow } from '../routines';
 import { stashDraft } from './routine_draft';
 
 const inv = mockedInvoke as ReturnType<typeof vi.fn>;
@@ -122,13 +122,20 @@ describe('event filter helpers', () => {
     expect(eventFilterWords({ event: 'stuck', event_rate_secs: 86400 })).toBe('once per session per day');
     expect(eventFilterWords({ event: 'stuck' })).toBe('');
   });
+
+  it('words a rate the presets lack the way the editor does', () => {
+    expect(rateWords(1800, 'stuck')).toBe('once per session per 30 minutes');
+    expect(rateWords(3600, 'pr_merged')).toBe('once per PR per hour');
+    expect(eventFilterWords({ event: 'stuck', event_rate_secs: 1800 })).toBe('once per session per 30 minutes');
+  });
 });
 
 describe('fleet events and the host filter', () => {
   it('offers every event the hub fires on, each with its own words', () => {
+    const choices = EVENT_GROUPS.flatMap((g) => g.events);
     for (const e of ['needs_you', 'auto_restored', 'account_switched', 'session_moved', 'pr_opened', 'host_offline', 'account_limited', 'mission_done'])
-      expect(EVENT_CHOICES).toContain(e);
-    expect(new Set(EVENT_CHOICES.map(eventLabel)).size).toBe(EVENT_CHOICES.length);
+      expect(choices).toContain(e);
+    expect(new Set(choices.map(eventLabel)).size).toBe(choices.length);
     expect(triggerWords({ trigger: 'event', event: 'host_offline' })).toBe('When a host goes offline');
     expect(triggerWords({ trigger: 'event', event: 'account_limited' })).toBe('When an account hits its limit');
     expect(triggerWords({ trigger: 'event', event: 'needs_you' })).toBe('When a session is waiting for you');

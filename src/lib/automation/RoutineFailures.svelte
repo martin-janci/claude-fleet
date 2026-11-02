@@ -41,6 +41,12 @@
     else push({ kind: 'success', message: `${f.routine.name} is running again` });
   }
 
+  // A retry fix goes through `retry`, so a refusal shows (fixRoutine's own is silent).
+  function fix(f: FailingRoutine) {
+    if (f.fix?.action === 'retry') void retry(f);
+    else fixRoutine(f);
+  }
+
   async function pause(f: FailingRoutine) {
     setBusy(f.routine.id, true);
     const r = await pauseRoutine(f);
@@ -63,7 +69,7 @@
           {#if f.routine.paused_reason}<span class="line">{f.routine.paused_reason}</span>{/if}
           {#if f.may_change}
             <span class="actions">
-              <button type="button" class="btn btn--chip" data-testid="routine-failure-fix" title={f.fix ? `${f.fix.code}${f.fix.host ? ` on ${f.fix.host}` : ''}` : undefined} onclick={() => fixRoutine(f)}>{fixLabel(f.fix)}</button>
+              <button type="button" class="btn btn--chip" data-testid="routine-failure-fix" title={f.fix ? `${f.fix.code}${f.fix.host ? ` on ${f.fix.host}` : ''}` : undefined} onclick={() => fix(f)}>{fixLabel(f.fix)}</button>
               <button type="button" class="btn btn--chip" data-testid="routine-failure-retry" disabled={busy.has(f.routine.id)} onclick={() => retry(f)}
                 >Retry</button
               >

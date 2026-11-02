@@ -1184,7 +1184,9 @@ impl Store {
     ///
     /// The run arm is what lets a mission's worker read the step it was
     /// started on: its task names the item whatever became of its link (a
-    /// recreated session, a link a person ended).
+    /// recreated session, a link a person ended). The mission arm lets it
+    /// read the rest of its mission too: the tasks beside it, the one it
+    /// waits for.
     pub fn work_item_ids_on_host(&self, host: &str) -> Result<Vec<i64>, IpcError> {
         // Two statements, not a UNION: as one arm of a compound the link
         // read loses its walk of `idx_work_links_item` and scans the table
@@ -1201,6 +1203,14 @@ impl Store {
              JOIN sessions s ON s.id = t.worker_session_id \
              WHERE t.work_item_id IS NOT NULL AND t.state IN ('queued', 'running') \
                AND s.host_alias = ?1",
+            // The mission arm ([`Store::mission_run_on_host`]): every item of
+            // a mission one of whose runs is open here.
+            "SELECT mate.id FROM tasks t \
+             JOIN sessions s ON s.id = t.worker_session_id \
+             JOIN work_items wi ON wi.id = t.work_item_id \
+             JOIN work_items mate ON mate.orchestration_project_id = wi.orchestration_project_id \
+             WHERE wi.orchestration_project_id IS NOT NULL \
+               AND t.state IN ('queued', 'running') AND s.host_alias = ?1",
         ] {
             let mut stmt = self.conn.prepare(sql)?;
             let rows = stmt.query_map(rusqlite::params![host], |r| r.get::<_, i64>(0))?;
@@ -1227,17 +1237,35 @@ impl Store {
                AND s.host_alias = ?1)",
             rusqlite::params![host, item_id],
             |r| r.get(0),
-        )?)
+        )? || self.mission_run_on_host(host, item_id)?)
     }
 
     /// Whether a session on `host` has an open run (queued or running) on
-    /// item `item_id`: the run arm of [`Store::work_item_on_host`], alone.
+    /// item `item_id`, or on another item of `item_id`'s mission: the run
+    /// arm of [`Store::work_item_on_host`], alone.
     pub fn open_run_on_host(&self, host: &str, item_id: i64) -> Result<bool, IpcError> {
         Ok(self.conn.query_row(
             "SELECT EXISTS (SELECT 1 FROM tasks t \
              JOIN sessions s ON s.id = t.worker_session_id \
              WHERE t.work_item_id = ?2 AND t.state IN ('queued', 'running') \
                AND s.host_alias = ?1)",
+            rusqlite::params![host, item_id],
+            |r| r.get(0),
+        )? || self.mission_run_on_host(host, item_id)?)
+    }
+
+    /// Whether a session on `host` has an open run on any item of the
+    /// mission `item_id` is in. A mission's worker reads its sibling tasks,
+    /// the epic above it and what it waits for, not only its own ticket;
+    /// the callers still check the org, so this never reaches past it.
+    pub fn mission_run_on_host(&self, host: &str, item_id: i64) -> Result<bool, IpcError> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM work_items wi \
+             JOIN work_items mate ON mate.orchestration_project_id = wi.orchestration_project_id \
+             JOIN tasks t ON t.work_item_id = mate.id \
+             JOIN sessions s ON s.id = t.worker_session_id \
+             WHERE wi.id = ?2 AND wi.orchestration_project_id IS NOT NULL \
+               AND t.state IN ('queued', 'running') AND s.host_alias = ?1)",
             rusqlite::params![host, item_id],
             |r| r.get(0),
         )?)

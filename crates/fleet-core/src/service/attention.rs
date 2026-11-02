@@ -404,11 +404,13 @@ pub fn needs_attention_in(
         Reason::StopFailed
     } else if failed {
         Reason::Failed
-    } else if live && row.context_pct.is_some_and(|p| p >= context_red_pct) {
+    } else if live && !idle && row.context_pct.is_some_and(|p| p >= context_red_pct) {
+        // An idle session has nothing running out of room: its context
+        // matters when it is next given work, not before.
         Reason::ContextFull
     } else if live && row.stale_working_at.is_some() {
         Reason::StaleWorking
-    } else if idle && row.ci_status.as_deref() == Some("failing") {
+    } else if idle && row.ci_status.as_deref() == Some("failing") && !pr_is_finished(row) {
         Reason::CiFailing
     } else if live && jev("asked") {
         // After every reason a person must act on: a proposal never hides
@@ -424,6 +426,23 @@ pub fn needs_attention_in(
         since: since_for(row, reason),
         state: reason.state(),
     })
+}
+
+/// The session's PR is merged or closed: the checks on it can fail for good
+/// and nobody has anything left to fix. A reading from before the probe kept
+/// the state says nothing, so it counts as open.
+fn pr_is_finished(row: &SessionRow) -> bool {
+    row.pr_evidence
+        .as_ref()
+        .and_then(|e| e.state.as_deref())
+        .is_some_and(|s| s == "MERGED" || s == "CLOSED")
+}
+
+/// What the `needs_attention` filter of `list_sessions` means: everything
+/// the Inbox lists, Jev's proposals included. A `Paused` row carries an
+/// [`Attention`] to draw, and is not waiting on anyone.
+pub fn needs_person_in(row: &SessionRow, context_red_pct: f64, facts: &Facts) -> bool {
+    needs_attention_in(row, context_red_pct, facts).is_some_and(|a| a.state != State::Paused)
 }
 
 /// Why a mission waits on a person (gap plan G1.6): the class of the one
@@ -847,6 +866,30 @@ mod tests {
         r.kind = "shell".into();
         r.context_pct = Some(99.0);
         assert_eq!(needs_attention(&r), None, "a shell has no Claude in it");
+    }
+
+    /// The `needs_attention` filter returned 23 paused rows beside the real
+    /// ones, which the Inbox's own count leaves out.
+    #[test]
+    fn the_filter_leaves_out_paused_rows() {
+        let in_filter =
+            |r: &SessionRow| needs_person_in(r, DEFAULT_CONTEXT_RED_PCT, &Facts::default());
+        let mut r = row();
+        r.claude_status = Some("blocked".into());
+        assert!(in_filter(&r));
+        let mut r = row();
+        r.status = "ghost".into();
+        r.claude_status = Some("idle".into());
+        assert_eq!(needs_attention(&r).unwrap().state, State::Paused);
+        assert!(!in_filter(&r));
+        let mut r = row();
+        r.claude_status = Some("idle".into());
+        r.turn_outcome = Some("asked".into());
+        assert_eq!(needs_attention(&r).unwrap().state, State::Proposed);
+        assert!(
+            in_filter(&r),
+            "the documented listing keeps Jev's proposals"
+        );
     }
 
     /// Every reason a person can act on outranks a broken lifecycle.

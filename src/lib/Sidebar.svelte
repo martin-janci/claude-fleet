@@ -405,32 +405,23 @@
       ? bothPredicates((s) => s.kind === 'external' || (!isPinned(s) && !isRoutineSession(s)), listPredicate)
       : listPredicate,
   );
+  /** Whether `s` is in the current view: its host, filters and search. */
+  function inView(s: SessionRow): boolean {
+    return (
+      sessionVisible(s, viewHost, viewBg, listPredicate, viewScope) &&
+      sessionMatchesSearch(s, viewSearch, projectLabelOf(s.project_id))
+    );
+  }
   const pinnedRows = $derived.by((): SessionRow[] => {
     if (!splitPinned) return [];
-    const q = viewSearch;
-    const base = listPredicate;
     return $sessions
-      .filter(
-        (s) =>
-          s.kind !== 'external' &&
-          isPinned(s) &&
-          sessionVisible(s, viewHost, viewBg, base, viewScope) &&
-          sessionMatchesSearch(s, q, projectLabelOf(s.project_id)),
-      )
+      .filter((s) => s.kind !== 'external' && isPinned(s) && inView(s))
       .sort((a, b) => (a.pinned_at ?? 0) - (b.pinned_at ?? 0) || a.id - b.id);
   });
   let pinnedOpen = $state(true);
   const routineRows = $derived.by((): SessionRow[] => {
     if (!splitPinned) return [];
-    const q = viewSearch;
-    const base = listPredicate;
-    return $sessions.filter(
-      (s) =>
-        isRoutineSession(s) &&
-        !isPinned(s) &&
-        sessionVisible(s, viewHost, viewBg, base, viewScope) &&
-        sessionMatchesSearch(s, q, projectLabelOf(s.project_id)),
-    );
+    return $sessions.filter((s) => isRoutineSession(s) && !isPinned(s) && inView(s));
   });
   const routineGroupList = $derived(routineSessionGroups(routineRows, attentionOpts));
   let routinesOpen = $state(true);
@@ -2827,7 +2818,8 @@
     cursor: pointer;
     font-family: inherit;
   }
-  .section-toggle .caret {
+  .section-toggle .caret,
+  .routine-toggle .caret {
     color: var(--fg-muted);
     font-size: var(--text-2xs);
     width: 0.7rem;
@@ -2835,7 +2827,8 @@
     transition: transform var(--dur-fast) ease;
     display: inline-block;
   }
-  .section-toggle .caret.collapsed { transform: rotate(-90deg); }
+  .section-toggle .caret.collapsed,
+  .routine-toggle .caret.collapsed { transform: rotate(-90deg); }
   /* A routine's runs, folded to one line (routine_sessions.ts). */
   .routine-head { display: flex; align-items: center; gap: 2px; padding-right: 0.3rem; }
   .routine-toggle {
@@ -2855,8 +2848,6 @@
     cursor: pointer;
   }
   .routine-toggle:hover, .routine-open:hover { background: var(--bg-hover); }
-  .routine-toggle .caret { color: var(--fg-muted); font-size: var(--text-2xs); width: 0.7rem; text-align: center; transition: transform var(--dur-fast) ease; display: inline-block; }
-  .routine-toggle .caret.collapsed { transform: rotate(-90deg); }
   .routine-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
   .routine-count { color: var(--fg-muted); font-size: var(--text-2xs); flex: 0 0 auto; }
   .routine-needs { color: var(--status-waiting); font-size: var(--text-2xs); flex: 0 0 auto; }

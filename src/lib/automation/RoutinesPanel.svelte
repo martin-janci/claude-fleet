@@ -16,7 +16,9 @@
   import { selectSessionExplicitly } from '../selection';
   import { goTo } from '../destination';
   import { fleetSettings, SETTING_KEYS, settingInt } from '../fleet_settings';
-  import { loopEvery, loopLine, loopStalled, startOfToday } from '../automation';
+  import { loopEvery, loopLine, loopStalled, money, startOfToday } from '../automation';
+  import { durationWords } from '../missions';
+  import { runsWord } from '../routine_sessions';
   import { listRuns, type RunRow } from '../runs';
   import type { LoopHealth } from '../ipc';
   import Button from '../kit/Button.svelte';
@@ -41,17 +43,18 @@
   import {
     averageRun,
     autonomyWords,
-    capWords,
     fixLabel,
     hostWords,
     onFailureWords,
+    overlapWords,
+    projectName,
+    repoName,
     OUTCOME_ROUTING,
     startedByWords,
     cronParts,
     deviceZone,
     routineInputOf,
     deleteRoutine,
-    dollars,
     eventFilterWords,
     fixRoutine,
     getRoutine,
@@ -135,10 +138,6 @@
   let saveError = $state<IpcError | null>(null);
 
   const pickable = $derived($projects.filter((p) => !p.project.system));
-  const projectName = (id: number) => {
-    const p = $projects.find((x) => x.project.id === id)?.project;
-    return p ? `${p.owner}/${p.repo}` : `project ${id}`;
-  };
 
   async function reload() {
     const r = await listRoutines();
@@ -153,20 +152,38 @@
     await Promise.all([loadDetail(), loadLastRuns()]);
   }
 
-  /** The routines' newest runs; a failed read leaves the lines without them. */
+  /** The routines' newest runs; a failed read leaves the lines without them.
+   *  Pages back until every routine has one (a weekly one's falls past the
+   *  first 200), a page comes back short, or ten pages are read. */
   async function loadLastRuns() {
-    const r = await listRuns({ kind: 'routine', limit: 200 });
-    if (r.ok && Array.isArray(r.value?.runs)) lastRuns = lastRunByRoutine(r.value.runs);
+    const runs: RunRow[] = [];
+    for (let page = 0; page < 10; page++) {
+      const r = await listRuns({ kind: 'routine', limit: 200, offset: page * 200 });
+      if (!r.ok || !Array.isArray(r.value?.runs)) {
+        if (page === 0) return;
+        break;
+      }
+      runs.push(...r.value.runs);
+      if (r.value.runs.length < 200) break;
+      const have = new Set(runs.map((x) => x.routine_id));
+      if (list.every((x) => have.has(x.id))) break;
+    }
+    lastRuns = lastRunByRoutine(runs);
   }
 
+  const LOAD_ERROR = "Couldn't load the routine: ";
   async function loadDetail() {
     if (selected === null) {
       detail = null;
       return;
     }
-    const r = await getRoutine(selected);
+    const id = selected;
+    const r = await getRoutine(id);
+    // A late reply for a routine no longer selected is dropped.
+    if (id !== selected) return;
     detail = r.ok ? r.value : null;
-    if (!r.ok) error = `Couldn't load the routine: ${errorText(r.error)}.`;
+    if (!r.ok) error = `${LOAD_ERROR}${errorText(r.error)}.`;
+    else if (error?.startsWith(LOAD_ERROR)) error = null;
   }
 
   function pick(id: number) {
@@ -236,7 +253,7 @@
     const host = $hosts.find((h) => !h.hidden)?.alias ?? '';
     const proj = pickable[0]?.project;
     if (template === 'morning-pr-sweep') {
-      open(draftOf(morningPrSweep(host, proj?.id ?? 0, proj ? `${proj.owner}/${proj.repo}` : undefined)));
+      open(draftOf(morningPrSweep(host, proj?.id ?? 0, proj ? repoName(proj) : undefined)));
     } else {
       open(draftOf({ name: '', trigger: 'cron', cron: '0 9 * * 1-5', host_alias: host, project_id: proj?.id ?? 0, prompt: '' }));
     }
@@ -608,7 +625,7 @@
         </header>
         <section class="stats">
           <div class="stat"><span class="meta">Runs</span><span>{loopEvery(loop) ?? 'On its own beat'}</span></div>
-          <div class="stat"><span class="meta">Since start</span><span class="tnum">{loop.runs} runs{#if loop.failures > 0}{' · '}<span class="bad">{loop.failures} failed</span>{/if}</span></div>
+          <div class="stat"><span class="meta">Since start</span><span class="tnum">{runsWord(loop.runs)}{#if loop.failures > 0}{' · '}<span class="bad">{loop.failures} failed</span>{/if}</span></div>
           <div class="stat"><span class="meta">Now</span><span>{loopLine(loop, nowSec, paused)}</span></div>
         </section>
         {#if loop.last_error}
@@ -660,10 +677,12 @@
         {#if tab === 'runs'}
           <section class="stats" data-testid="routine-stats">
             <div class="stat"><span class="meta">Schedule</span><span>{triggerWords(r)}</span></div>
-            <div class="stat">
-              <span class="meta">Last {detail.runs.length} runs</span>
-              <span class="tnum">{okCount(detail.runs)} OK{#if failedCount(detail.runs) > 0}{' · '}<span class="bad">{failedCount(detail.runs)} failed</span>{/if}</span>
-            </div>
+            {#if detail.runs.length > 0}
+              <div class="stat">
+                <span class="meta">Last {runsWord(detail.runs.length)}</span>
+                <span class="tnum">{okCount(detail.runs)} OK{#if failedCount(detail.runs) > 0}{' · '}<span class="bad">{failedCount(detail.runs)} failed</span>{/if}</span>
+              </div>
+            {/if}
             <div class="stat"><span class="meta">Average cost</span><span class="tnum">{avg ?? 'No runs yet'}</span></div>
             <div class="stat"><span class="meta">Next run</span><span class="tnum">{nextRunWords(r, nowSec)}</span></div>
             <div class="stat"><span class="meta">Autonomy</span><span data-testid="routine-autonomy-stat">{autonomyWords(r.autonomy)}</span></div>
@@ -685,7 +704,7 @@
                     {:else}{runWords(run)}{/if}{#if s && !failed(run)}<span class="meta">{' · '}{s.friendly_name ?? s.tmux_name}</span>{/if}
                   </span>
                   <span class="meta tnum">{took(run)}</span>
-                  <span class="meta tnum">{dollars(run.cost_micros)}</span>
+                  <span class="meta tnum">{money(run.cost_micros)}</span>
                   {#if s}
                     <Button variant="quiet" size="sm" testid="routine-run-session" onclick={() => openSession(run)}>Session</Button>
                   {:else}<span></span>{/if}
@@ -770,7 +789,7 @@
           <dl class="of-kv" data-testid="routine-definition">
             <dt>When</dt><dd>{[triggerWords(r), eventFilterWords(r)].filter(Boolean).join(' · ')}{r.trigger === 'cron' && r.time_zone ? ` · ${r.time_zone}` : ''}</dd>
             <dt>Host</dt><dd>{hostWords(r)}</dd>
-            <dt>Project</dt><dd>{projectName(r.project_id)}</dd>
+            <dt>Project</dt><dd>{projectName($projects, r.project_id)}</dd>
             <dt>Account</dt><dd>{r.profile ?? "the host's own"}</dd>
           </dl>
           <p class="prompt mono">{r.prompt}</p>
@@ -778,10 +797,10 @@
           <RoutineDebug routineId={r.id} {clock} />
         {:else}
           <dl class="of-kv" data-testid="routine-limits">
-            <dt>Per run</dt><dd>{r.budget_run_micros !== undefined ? dollars(r.budget_run_micros) : 'No limit'}</dd>
-            <dt>Per day</dt><dd>{r.budget_day_micros !== undefined ? dollars(r.budget_day_micros) : 'No limit'}</dd>
-            <dt>Time cap</dt><dd>{r.run_max_secs ? `${capWords(r.run_max_secs)} · then its turn is stopped and it fails` : 'No cap'}</dd>
-            <dt>Overlap</dt><dd>{r.overlap === 'parallel' ? 'Runs alongside the last run' : 'Skip if the last run is still going'}</dd>
+            <dt>Per run</dt><dd>{r.budget_run_micros !== undefined ? money(r.budget_run_micros) : 'No limit'}</dd>
+            <dt>Per day</dt><dd>{r.budget_day_micros !== undefined ? money(r.budget_day_micros) : 'No limit'}</dd>
+            <dt>Time cap</dt><dd>{r.run_max_secs ? `${durationWords(r.run_max_secs)} · then its turn is stopped and it fails` : 'No cap'}</dd>
+            <dt>Overlap</dt><dd>{overlapWords(r)}</dd>
             <dt>On failure</dt><dd>{onFailureWords(r)}</dd>
             <dt>Autonomy</dt><dd>{autonomyWords(r.autonomy)}</dd>
             <dt>Over budget</dt><dd>The run fails, the routine pauses, and it lands in the Inbox</dd>
@@ -791,14 +810,14 @@
 
       {#snippet perDay()}
         {#if r.budget_day_micros}
-          <span class="tnum">{dollars(today)} of {dollars(r.budget_day_micros)}</span>
+          <span class="tnum">{money(today)} of {money(r.budget_day_micros)}</span>
           <Meter
             value={today / r.budget_day_micros}
             level={today >= r.budget_day_micros ? 'crit' : today >= r.budget_day_micros * 0.8 ? 'warn' : 'ok'}
-            label={`${dollars(today)} of ${dollars(r.budget_day_micros)} today`}
+            label={`${money(today)} of ${money(r.budget_day_micros)} today`}
           />
         {:else}
-          <span class="tnum">No limit · {dollars(today)} today</span>
+          <span class="tnum">No limit · {money(today)} today</span>
         {/if}
       {/snippet}
       <aside class="inspector" aria-label="Limits and kill switches" data-testid="routine-inspector">
@@ -807,7 +826,7 @@
           items={[
             {
               label: 'Per run',
-              value: [r.budget_run_micros !== undefined ? `${dollars(r.budget_run_micros)}` : 'No limit', r.run_max_secs ? capWords(r.run_max_secs) : null]
+              value: [r.budget_run_micros !== undefined ? `${money(r.budget_run_micros)}` : 'No limit', r.run_max_secs ? durationWords(r.run_max_secs) : null]
                 .filter(Boolean)
                 .join(' · '),
               tnum: true,
@@ -818,7 +837,7 @@
               value: `${detail.account ? routineAccountLabel(detail.account, $accountByUuid.get(detail.account.account_uuid)) : (r.profile ?? "the host's own")} · skips a run past ${pauseAt}% used`,
             },
             { label: 'Host', value: hostWords(r) },
-            { label: 'Overlap', value: r.overlap === 'parallel' ? 'Runs alongside the last run' : 'Skip if the last run is still going' },
+            { label: 'Overlap', value: overlapWords(r) },
             { label: 'On failure', value: onFailureWords(r) },
             { label: 'Autonomy', value: autonomyWords(r.autonomy) },
             { label: 'Outcomes', value: OUTCOME_ROUTING },

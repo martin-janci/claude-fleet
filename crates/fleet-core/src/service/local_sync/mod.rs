@@ -169,11 +169,12 @@ impl LocalSync {
                 }
                 // Caught like a tick pass (`run_cancellable_tick`): uncaught,
                 // one panic ended local sync for good.
-                if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| me.tick())).is_err() {
-                    tracing::error!("local sync: a pass panicked; continuing with the next one");
+                if let Err(why) =
+                    crate::service::loops::caught_sync("the local sync pass", || me.tick())
+                {
                     crate::service::loops::report(
                         "local_sync",
-                        Err::<(), _>("the pass panicked"),
+                        Err::<(), _>(why),
                         Some(PASS_INTERVAL),
                     );
                 }

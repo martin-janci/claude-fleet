@@ -291,6 +291,31 @@ pub fn report(name: &str, outcome: impl Into<Outcome>, next_in: Option<Duration>
     registry().record(name, now_unix(), outcome.into(), next_in);
 }
 
+/// Run `fut`, a panic in it caught rather than ending the loop that runs it
+/// (the reconcile tick's old failure): logged as "`what` panicked", and
+/// answered as that error, the [`report`] a panicked pass gets.
+pub(crate) async fn caught<T>(
+    what: &str,
+    fut: impl std::future::Future<Output = T>,
+) -> Result<T, String> {
+    use futures_util::FutureExt as _;
+    std::panic::AssertUnwindSafe(fut)
+        .catch_unwind()
+        .await
+        .map_err(|_| panicked(what))
+}
+
+/// [`caught`] for a synchronous pass.
+pub(crate) fn caught_sync<T>(what: &str, f: impl FnOnce() -> T) -> Result<T, String> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).map_err(|_| panicked(what))
+}
+
+fn panicked(what: &str) -> String {
+    let why = format!("{what} panicked");
+    tracing::error!("{why}");
+    why
+}
+
 use crate::store::now_unix;
 
 #[cfg(test)]
