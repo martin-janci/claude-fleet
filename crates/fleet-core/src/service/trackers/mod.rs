@@ -524,6 +524,16 @@ pub enum TrackerError {
 }
 
 impl TrackerError {
+    /// The same error naming the call it came from (`createmeta for PD`),
+    /// where a sentence carries a detail; the other kinds are unchanged.
+    pub fn during(self, call: &str) -> Self {
+        match self {
+            TrackerError::Invalid(m) => TrackerError::Invalid(format!("{call}: {m}")),
+            TrackerError::Forbidden(m) => TrackerError::Forbidden(format!("{call}: {m}")),
+            e => e,
+        }
+    }
+
     /// The `trackers.state` this error leaves the tracker in; `None` when
     /// the tracker's state is unaffected (one view, one item, a bad page).
     pub fn state(&self) -> Option<&'static str> {

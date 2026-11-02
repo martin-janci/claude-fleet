@@ -35,7 +35,7 @@ use super::{
     IssueThread, ItemRef, Page, RefCtx, StatusSnapshot, TrackerComment, TrackerError, TrackerInfo,
     TrackerProvider, ViewDef, WorkItemSnapshot, WriteOp, WriteOutcome, NOT_FOUND_OR_NO_PERMISSION,
 };
-use crate::net::https::{HttpTransport, Request};
+use crate::net::https::{HttpTransport, Request, Response};
 use crate::store::{TrackerConfig, TrackerCredential};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
@@ -147,10 +147,15 @@ impl JiraCloud {
         Ok(())
     }
 
-    async fn call(&self, req: Request, call: Call) -> Result<Value, TrackerError> {
+    /// One authorised request, its answer unchecked.
+    async fn send(&self, req: Request) -> Result<Response, TrackerError> {
         let cred = self.cred.as_ref().ok_or(TrackerError::Unconfigured)?;
         let req = req.header("Authorization", cred.authorization().expose());
-        let resp = self.transport.send(req).await.map_err(map_transport)?;
+        self.transport.send(req).await.map_err(map_transport)
+    }
+
+    async fn call(&self, req: Request, call: Call) -> Result<Value, TrackerError> {
+        let resp = self.send(req).await?;
         check(&resp, call)?;
         resp.parse_json::<Value>().map_err(TrackerError::Invalid)
     }
@@ -463,7 +468,8 @@ impl TrackerProvider for JiraCloud {
                         ))),
                         Call::Other,
                     )
-                    .await?;
+                    .await
+                    .map_err(|e| e.during(&format!("createmeta for {project}")))?;
                 let issue_type = super::jira_common::pick_issue_type(&meta, parent_key.is_some())
                     .ok_or_else(|| {
                     TrackerError::Invalid(format!(
@@ -480,21 +486,37 @@ impl TrackerProvider for JiraCloud {
                 } else {
                     super::jira_common::text_to_adf(description)
                 };
-                let v = self
-                    .call(
-                        Request::post_json(
-                            self.url("/rest/api/3/issue"),
-                            &super::jira_common::create_issue_body(
-                                &project,
-                                &issue_type,
-                                title,
-                                description,
-                                parent_key.as_deref(),
-                            ),
-                        ),
-                        Call::Other,
-                    )
+                let body = super::jira_common::create_issue_body(
+                    &project,
+                    &issue_type,
+                    title,
+                    description,
+                    parent_key.as_deref(),
+                );
+                let resp = self
+                    .send(Request::post_json(self.url("/rest/api/3/issue"), &body))
                     .await?;
+                if resp.status == 400 {
+                    // Most often a field the project requires and fleet
+                    // does not fill: one read of the type's fields names
+                    // them. Unreadable, Jira's own words stand.
+                    let unfilled = self
+                        .call(
+                            Request::get(self.url(&format!(
+                                "/rest/api/3/issue/createmeta/{project}/issuetypes/{issue_type}?maxResults=200"
+                            ))),
+                            Call::Other,
+                        )
+                        .await
+                        .map(|m| super::jira_common::required_fields_unfilled(&m, &body))
+                        .unwrap_or_default();
+                    return Err(super::jira_common::create_refused(
+                        &resp, &project, &unfilled,
+                    ));
+                }
+                check(&resp, Call::Other)
+                    .map_err(|e| e.during(&format!("POST issue in {project}")))?;
+                let v = resp.parse_json::<Value>().map_err(TrackerError::Invalid)?;
                 super::jira_common::created_issue(&v, &self.site)
             }
             WriteOp::RichComment { key, adf, .. } => {
@@ -520,7 +542,8 @@ impl TrackerProvider for JiraCloud {
                         Request::post_json(self.url("/rest/api/3/issue"), &body),
                         Call::Other,
                     )
-                    .await?;
+                    .await
+                    .map_err(|e| e.during("POST issue"))?;
                 let key = v["key"]
                     .as_str()
                     .filter(|k| super::jira_common::is_key(k))
