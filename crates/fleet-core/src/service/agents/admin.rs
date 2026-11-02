@@ -106,6 +106,45 @@ pub struct AgentRuleView {
     pub rule: AgentRuleRow,
     /// Not expired.
     pub active: bool,
+    /// A fleet agent's instance with a day budget
+    /// (`limits.daily_budget_usd`, lowered by its `budget_input`): the
+    /// budget, and what its jobs cost since the UTC day began (micro-USD).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_micros: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spent_today_micros: Option<i64>,
+}
+
+/// Each fleet instance's day budget, by rule id: its catalog definition's
+/// limits over its input values. Read from the catalog, outside the store
+/// lock; a definition the catalog lacks has none.
+fn instance_budgets(rules: &[AgentRuleRow]) -> std::collections::BTreeMap<i64, i64> {
+    use crate::service::catalog::{model::Kind, CatalogTarget};
+    let fleet: Vec<&AgentRuleRow> = rules
+        .iter()
+        .filter(|r| r.agent == "fleet" && r.definition.is_some())
+        .collect();
+    if fleet.is_empty() {
+        return Default::default();
+    }
+    CatalogTarget::Personal
+        .with(|cat| {
+            Ok(fleet
+                .iter()
+                .filter_map(|r| {
+                    let loaded = cat
+                        .find(Kind::FleetAgent, r.definition.as_deref()?)?
+                        .fleet_agent()
+                        .ok()?;
+                    let values = match serde_json::from_str::<serde_json::Value>(&r.config) {
+                        Ok(serde_json::Value::Object(m)) => m,
+                        _ => Default::default(),
+                    };
+                    Some((r.id, loaded.definition.limits.budget_micros(&values)?))
+                })
+                .collect())
+        })
+        .unwrap_or_default()
 }
 
 /// What `status` answers.
@@ -322,14 +361,20 @@ pub fn status(store: &Mutex<Store>, args: &AgentsArgs, now: i64) -> Result<Agent
         .limit
         .unwrap_or(STATUS_DEFAULT_LIMIT)
         .min(STATUS_MAX_LIMIT) as usize;
+    let rows = lock(store)?.list_agent_rules().map_err(db)?;
+    let budgets = instance_budgets(&rows);
+    let day = crate::service::routines::cron::local_day_start(now, 0);
     let s = lock(store)?;
-    let rules = s
-        .list_agent_rules()
-        .map_err(db)?
+    let rules = rows
         .into_iter()
-        .map(|rule| AgentRuleView {
-            active: rule.active_at(now),
-            rule,
+        .map(|rule| {
+            let budget = budgets.get(&rule.id).copied();
+            AgentRuleView {
+                active: rule.active_at(now),
+                budget_micros: budget,
+                spent_today_micros: budget.and_then(|_| s.agent_rule_cost_since(rule.id, day).ok()),
+                rule,
+            }
         })
         .collect();
     Ok(AgentsStatus {

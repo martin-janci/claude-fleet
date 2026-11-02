@@ -140,6 +140,9 @@ describe('agents (design step 5)', () => {
       'Label o/r#4: +core −lgtm',
     );
     expect(actionTitle({ kind: 'pr_description', payload: '{"repo":"o/r","number":4,"body":"x"}' })).toBe('Describe o/r#4');
+    expect(actionTitle({ kind: 'pr_reply', payload: '{"repo":"o/r","number":4,"root_id":7,"resolve":true}' })).toBe(
+      'Reply in a review thread on o/r#4 and resolve it',
+    );
     expect(actionTitle({ kind: 'debate_reply', payload: '{"repo":"o/r","number":4,"decision":"hold"}' })).toBe(
       'Answer the test debate on o/r#4: hold',
     );
@@ -158,6 +161,9 @@ describe('agents (design step 5)', () => {
   it('names rules, jobs and each agent’s state', () => {
     expect(ruleLine(rule())).toBe('gh:o/r at propose on mercury');
     expect(ruleLine(rule({ active: false }))).toBe('gh:o/r at propose on mercury (expired)');
+    expect(ruleLine(rule({ budget_micros: 25_000_000, spent_today_micros: 3_200_000 }))).toBe(
+      'gh:o/r at propose on mercury · $3.20 of $25.00 today',
+    );
     expect(jobLine(job())).toBe('gh:o/r#4 · done · request changes');
     expect(jobLine(job({ state: 'skipped', error: 'draft', result: null }))).toBe('gh:o/r#4 · skipped: draft');
     expect(jobLine(job({ subject: 'jira:L2S-1', result: '{"severity":"critical","confidence":"high"}' }))).toBe(
