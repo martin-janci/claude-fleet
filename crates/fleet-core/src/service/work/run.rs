@@ -357,8 +357,13 @@ pub async fn run_item_with(
     // item (another role's run, a failed attempt's session that lives on,
     // a person's own) is not a reason to refuse, but a reason for this
     // attempt to get its own `-N` checkout, as a parallel start does.
-    let (parallel, prior, deps) = {
+    let (parallel, prior, deps, warm) = {
         let s = lock(store.as_ref())?;
+        // M6: a warm build on a host with sccache.
+        let warm = crate::service::settings::get_bool(
+            &s,
+            crate::service::settings::ORCHESTRATOR_BUILD_CACHE,
+        );
         let prior = prior_work(&s, item_id)?;
         // M2: a first implementation starts from the work of the tasks it
         // depends on; a later one from its own earlier attempt, which
@@ -368,7 +373,12 @@ pub async fn run_item_with(
         } else {
             Vec::new()
         };
-        (start.parallel || has_live_work(&s, item_id)?, prior, deps)
+        (
+            start.parallel || has_live_work(&s, item_id)?,
+            prior,
+            deps,
+            warm,
+        )
     };
     let start = StartArgs {
         item_id: Some(item_id),
@@ -393,6 +403,7 @@ pub async fn run_item_with(
             .as_ref()
             .map(|p| p.branch.clone())
             .or_else(|| deps.first().map(|d| d.branch.clone())),
+        build_cache: warm,
         ..start.clone()
     };
     let (row, plan, queued) =

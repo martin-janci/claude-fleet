@@ -536,6 +536,11 @@ async fn start_lead(
         with_brief: true,
         brief: Some(brief),
         base_branch: None,
+        // M6: a warm build on a host with sccache.
+        build_cache: crate::service::settings::get_bool(
+            &*lock(&deps.store)?,
+            crate::service::settings::ORCHESTRATOR_BUILD_CACHE,
+        ),
         ..start
     };
     let (row, plan, _queued) =

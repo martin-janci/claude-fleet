@@ -160,6 +160,13 @@ Línia už build ohrieva sama (jeden worktree na líniu, štafeta ho nemení). N
 
 **Veľkosť** S–M.
 
+**Ako je to postavené v M6** (`service/work/build_cache.rs`):
+- Nastavenie `orchestrator.build_cache` (predvolene vypnuté, experimentálne, stránka nastavení Work pri zapnutom orchestrátore).
+- Beh misie (`run::run_item_with`) aj nový vedúci línie (`lanes::start_lead`) nastavia `StartArgs::build_cache`. Štartová cesta (`tickets::start_work_unprompted`) po výbere hosta spýta host (`command -v sccache`, odpoveď sa drží hodinu) a ak ho má, pridá do `StartPlan::env` `RUSTC_WRAPPER=sccache`; ide to do `NewSessionArgs::env`, teda do env súboru session (návrh 2026-10-11), nie do promptu. Host bez sccache alebo bez odpovede beží ako doteraz.
+- `StartArgs::build_cache` aj `StartPlan::env` sa nedajú nastaviť z parametrov nástroja (`start_args_as` dáva `false`, `env` je `#[serde(skip)]`).
+- Headless review a test (`checks.rs`) env nedostávajú; build cache sa týka sessions.
+- Meranie: Compare (čas úlohy) pre misie v režime `item` so zapnutým a vypnutým nastavením, postupom z §7.1 návrhu línií.
+
 ## 9. Roadmap
 
 | Fáza | Obsah | Správanie | Veľkosť |
@@ -170,7 +177,7 @@ Línia už build ohrieva sama (jeden worktree na líniu, štafeta ho nemení). N
 | **M7** (postavené) | `SubagentStart`/`Stop` hooky, timeline, počet na úlohe a v Compare | len zobrazenie | S |
 | **M5** (postavené) | `policy.lane_test_at = lane` | opt-in na misii | M |
 | **M4** (postavené) | `policy.lane_pr = draft`, `mission_lanes.pr_url` | opt-in na misii | M |
-| **M6** | `orchestrator.build_cache` (sccache) | opt-in nastavenie | S–M |
+| **M6** (postavené) | `orchestrator.build_cache` (sccache) | opt-in nastavenie | S–M |
 
 M1 a M3 pred meraním L6, aby Compare ukazoval správnu cenu a dôvod čakania. M2 hneď potom, lebo najviac mení progres (menej práce naviac a integračných úloh). Ostatné nezávisle.
 

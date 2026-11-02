@@ -9,6 +9,7 @@ pub mod archive;
 pub mod attachments;
 pub mod brief_draft;
 pub mod buckets;
+pub mod build_cache;
 pub mod card;
 pub mod confidence;
 pub mod dep_work;
@@ -1032,6 +1033,8 @@ pub fn start_args_as(
         parallel: args.parallel.unwrap_or(false),
         // A run's own (`run::prior_work`), never a tool parameter.
         base_branch: None,
+        // A run's own (M6), never a tool parameter.
+        build_cache: false,
     }
 }
 
