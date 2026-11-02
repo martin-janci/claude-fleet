@@ -293,10 +293,11 @@ The run reads it two ways:
 - **Before the run**, the definition's `run.context` can name lookups whose
   results go into the prompt, e.g.
   `{ store: memory, key: "{{subject.key}}" }`,
-  `{ store: memory, recent: 20 }`, or the newest records whose key or value
-  holds a text, `{ store: exemptions, find: "{{subject.repo}}#{{subject.number}}:",
-  recent: 50 }` (`recent` defaults to 20 there): a subject's own records in a
-  store many instances share.
+  `{ store: memory, recent: 20 }`, the newest records whose key or value
+  holds a text (`find`), or whose key starts with one, `{ store: exemptions,
+  prefix: "{{subject.repo}}#{{subject.number}}:", recent: 50 }` (`recent`
+  defaults to 20 there): a subject's own records in a store many instances
+  share, never another repository's whose name only ends the same.
 - **During the run**, a built-in MCP server `fleet-records`, read-only, is
   scoped to the rule's fleet bindings. It offers `get` and `search` over its
   namespaces only, and the hub serves it through its existing control API with

@@ -1230,14 +1230,10 @@ impl Store {
              LEFT JOIN sessions s ON s.id = p.session_id \
              WHERE l.item_id = ?2 AND l.state = 'confirmed' AND \
                ((l.ended_at IS NULL AND s.host_alias = ?1) OR \
-                (l.ended_at IS NOT NULL AND l.snap_host = ?1))) \
-             OR EXISTS (SELECT 1 FROM tasks t \
-             JOIN sessions s ON s.id = t.worker_session_id \
-             WHERE t.work_item_id = ?2 AND t.state IN ('queued', 'running') \
-               AND s.host_alias = ?1)",
+                (l.ended_at IS NOT NULL AND l.snap_host = ?1)))",
             rusqlite::params![host, item_id],
             |r| r.get(0),
-        )? || self.mission_run_on_host(host, item_id)?)
+        )? || self.open_run_on_host(host, item_id)?)
     }
 
     /// Whether a session on `host` has an open run (queued or running) on

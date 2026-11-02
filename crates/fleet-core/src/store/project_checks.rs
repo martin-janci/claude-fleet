@@ -85,12 +85,19 @@ impl Store {
 
     /// The finished work a check may be owed for: per work item, its newest
     /// `implement` or `wrapup` task, when that one is done, was created
-    /// after `since`, carries evidence, and no `test` task of the item came
-    /// after it. Newest first, at most `limit` task ids.
+    /// after `since`, carries evidence, ran in a project whose checks are
+    /// `auto`, and no `test` task of the item came after it. Newest first,
+    /// at most `limit` task ids. The project is filtered here, so a busy
+    /// project with checks off never crowds an `auto` one out of `limit`;
+    /// `+t.state` keeps SQLite off `idx_tasks_state`, which would walk
+    /// every done task ever recorded (as migration 208 found).
     pub fn ticket_check_candidates(&self, since: i64, limit: i64) -> Result<Vec<i64>, IpcError> {
         let mut stmt = self.conn.prepare(
             "SELECT t.id FROM tasks t \
-              WHERE t.created_at >= ?1 AND t.state = 'done' \
+               JOIN sessions s ON s.id = t.worker_session_id \
+               JOIN worktrees w ON w.id = s.worktree_id \
+               JOIN projects p ON p.id = w.project_id AND p.check_mode = 'auto' \
+              WHERE t.created_at >= ?1 AND +t.state = 'done' \
                 AND t.work_item_id IS NOT NULL AND t.evidence_json IS NOT NULL \
                 AND COALESCE(t.role, 'implement') IN ('implement', 'wrapup') \
                 AND NOT EXISTS (SELECT 1 FROM tasks n \

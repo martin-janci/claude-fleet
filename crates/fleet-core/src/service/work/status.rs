@@ -44,7 +44,10 @@ pub fn set_status(
     let after = s
         .set_item_status(item_id, status)?
         .ok_or_else(|| orgs::not_found("work item", item_id))?;
-    super::ticket_check::note_done(&s, &item, &after);
+    // `ticket_done` is a person's act: an agent's done is not.
+    if scope.host().is_none() {
+        super::ticket_check::note_done(&s, &item, &after);
+    }
     Ok(after)
 }
 
@@ -273,7 +276,9 @@ pub async fn move_status(
     let after = s
         .get_work_item(item_id)?
         .ok_or_else(|| orgs::not_found("work item", item_id))?;
-    super::ticket_check::note_done(&s, &item, &after);
+    if scope.host().is_none() {
+        super::ticket_check::note_done(&s, &item, &after);
+    }
     Ok(after)
 }
 

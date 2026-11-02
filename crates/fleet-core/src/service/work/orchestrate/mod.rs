@@ -1979,9 +1979,11 @@ pub fn grant(
     // The grant's hosts against the tasks' organisations (access review
     // F4): a run on a host of another organisation is refused at its
     // start, so say it now. Hosts placement picks are checked by the loop.
+    // A card is best-effort: the grant is saved, and a mission at its open
+    // card cap must still wake.
     if let Some(hosts) = g.hosts.as_ref().filter(|h| !h.is_empty()) {
         for why in access::org_conflicts(&s, &m, hosts)? {
-            ask_card(
+            let _ = ask_card(
                 &s,
                 id,
                 &Step {
@@ -1992,7 +1994,7 @@ pub fn grant(
                     context: None,
                     auto: false,
                 },
-            )?;
+            );
         }
     }
     s.wake_mission(id)?;

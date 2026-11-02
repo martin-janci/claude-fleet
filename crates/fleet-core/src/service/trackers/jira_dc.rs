@@ -526,27 +526,14 @@ impl TrackerProvider for JiraDc {
                 let resp = self
                     .send(Request::post_json(self.url("/rest/api/2/issue"), &body))
                     .await?;
-                if resp.status == 400 {
-                    // As on Cloud (`JiraCloud::write`): one read of the
-                    // type's fields names the required ones fleet leaves out.
-                    let unfilled = self
-                        .call(
-                            Request::get(self.url(&format!(
-                                "/rest/api/2/issue/createmeta/{project}/issuetypes/{issue_type}?maxResults=200"
-                            ))),
-                            CallKind::Other,
-                        )
-                        .await
-                        .map(|m| super::jira_common::required_fields_unfilled(&m, &body))
-                        .unwrap_or_default();
-                    return Err(super::jira_common::create_refused(
-                        &resp, &project, &unfilled,
-                    ));
-                }
-                check(&resp, CallKind::Other)
-                    .map_err(|e| e.during(&format!("POST issue in {project}")))?;
-                let v = resp.parse_json::<Value>().map_err(TrackerError::Invalid)?;
-                super::jira_common::created_issue(&v, &self.site)
+                let meta = self.call(
+                    Request::get(self.url(&format!(
+                        "/rest/api/2/issue/createmeta/{project}/issuetypes/{issue_type}?maxResults=200"
+                    ))),
+                    CallKind::Other,
+                );
+                super::jira_common::created_or_refused(&resp, &project, &body, &self.site, meta)
+                    .await
             }
             WriteOp::RichComment { key, wiki, .. } => {
                 if !super::jira_common::is_key(key) {

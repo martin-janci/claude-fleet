@@ -130,6 +130,13 @@ pub struct PrEvidence {
     pub deletions: Option<u32>,
 }
 
+impl PrEvidence {
+    /// The PR is merged or closed: nothing about it waits on anyone.
+    pub fn is_finished(&self) -> bool {
+        matches!(self.state.as_deref(), Some("MERGED" | "CLOSED"))
+    }
+}
+
 /// Most characters of a PR title kept for the Pull requests view.
 pub const PR_TITLE_MAX: usize = 200;
 

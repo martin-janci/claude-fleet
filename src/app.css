@@ -530,3 +530,14 @@ button[data-shortcut]::after {
   opacity: 0.7;
   font-size: 0.9em;
 }
+
+/* Visually hidden, still read by screen readers. A component with its own
+   `.sr-only` rule overrides this (scoped, so more specific). */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}

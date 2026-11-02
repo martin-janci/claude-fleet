@@ -18,6 +18,7 @@
   // dialog shows everything else.
   import { onMount } from 'svelte';
   import Modal from './Modal.svelte';
+  import ConfirmAbout from './ConfirmAbout.svelte';
   import { answerConfirm, answering, dialogConfirms, startConfirmQueue } from './confirms';
 
   const queue = $derived($dialogConfirms);
@@ -46,24 +47,7 @@
         <code>{current.tool}</code>.
       </p>
       {#if current.about}
-        {#if current.about.facts?.length}
-          <dl class="facts" data-testid="mcp-confirm-facts">
-            {#each current.about.facts as f, i (i)}
-              <dt>{f.label}</dt>
-              <dd>{f.value}</dd>
-            {/each}
-          </dl>
-        {/if}
-        {#if current.about.body}
-          <p class="who"><strong>{current.about.body.label}:</strong></p>
-          <pre class="summary text">{current.about.body.text}</pre>
-        {/if}
-        {#if current.summary}
-          <details>
-            <summary class="who">Exact call</summary>
-            <pre class="summary">{current.summary}</pre>
-          </details>
-        {/if}
+        <ConfirmAbout about={current.about} tool={current.tool} summary={current.summary} />
       {:else if current.summary}
         <pre class="summary">{current.summary}</pre>
       {/if}
@@ -97,10 +81,6 @@
     white-space: pre-wrap;
     word-break: break-all;
   }
-  .text { max-height: 12rem; overflow: auto; word-break: normal; overflow-wrap: anywhere; font-family: inherit; }
-  .facts { margin: 0; display: grid; grid-template-columns: max-content 1fr; gap: 2px 0.6rem; font-size: var(--text-xs); }
-  .facts dt { color: var(--fg-muted); }
-  .facts dd { margin: 0; overflow-wrap: anywhere; }
   .actions { display: flex; justify-content: flex-end; gap: 0.5rem; }
   .actions button {
     border: 1px solid var(--border);

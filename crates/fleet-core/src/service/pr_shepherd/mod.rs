@@ -73,7 +73,7 @@ impl Condition {
 /// The one condition the shepherd would act on for this PR reading, or
 /// `None` when nothing is wrong (or the PR is merged or closed).
 pub fn condition_of(ev: &PrEvidence) -> Option<Condition> {
-    if matches!(ev.state.as_deref(), Some("MERGED") | Some("CLOSED")) {
+    if ev.is_finished() {
         return None;
     }
     match ev.merge_state.as_deref() {

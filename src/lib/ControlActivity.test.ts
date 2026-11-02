@@ -86,4 +86,16 @@ describe('ControlActivity', () => {
     expect(btn.getAttribute('aria-expanded')).toBe('true');
     expect(screen.getByTestId('control-activity-handoffs').hidden).toBe(false);
   });
+
+  it('marks a count only when it goes up, not when it mounts', async () => {
+    render(ControlActivity);
+    await tick();
+    await tick();
+    expect(screen.getByTestId('control-activity-needs-btn').classList.contains('fresh')).toBe(false);
+    handoffs.set([{ ...plan(1), kind: 'task', tool: 'create_task', items: undefined }]);
+    await tick();
+    await tick();
+    expect(screen.getByTestId('control-activity-handoffs-btn').classList.contains('fresh')).toBe(true);
+    expect(screen.getByTestId('control-activity-needs-btn').classList.contains('fresh')).toBe(false);
+  });
 });

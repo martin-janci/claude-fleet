@@ -148,6 +148,31 @@ impl Store {
         limit: usize,
         now: i64,
     ) -> Result<Vec<AgentRecordRow>, rusqlite::Error> {
+        self.query_agent_records(namespaces, text.map(|t| (t, false)), limit, now)
+    }
+
+    /// [`Self::find_agent_records`] for the records whose key starts with
+    /// `prefix`: a subject's own records in a store many share, never
+    /// another's whose key or value only contains the text.
+    pub fn agent_records_with_prefix(
+        &self,
+        namespaces: &[String],
+        prefix: &str,
+        limit: usize,
+        now: i64,
+    ) -> Result<Vec<AgentRecordRow>, rusqlite::Error> {
+        self.query_agent_records(namespaces, Some((prefix, true)), limit, now)
+    }
+
+    /// `text` with whether it is a key prefix (else contained in the key
+    /// or the value).
+    fn query_agent_records(
+        &self,
+        namespaces: &[String],
+        text: Option<(&str, bool)>,
+        limit: usize,
+        now: i64,
+    ) -> Result<Vec<AgentRecordRow>, rusqlite::Error> {
         if namespaces.is_empty() {
             return Ok(Vec::new());
         }
@@ -159,12 +184,21 @@ impl Store {
             in_list(2, namespaces.len())
         );
         values.extend(namespaces.iter().map(|n| n.clone().into()));
-        if let Some(t) = text.filter(|t| !t.is_empty()) {
-            values.push(like_pattern(t).into());
-            let i = values.len();
-            sql.push_str(&format!(
-                " AND (key LIKE ?{i} ESCAPE '\\' OR value LIKE ?{i} ESCAPE '\\')"
-            ));
+        match text.filter(|(t, _)| !t.is_empty()) {
+            Some((t, true)) => {
+                // `like_pattern` without its leading `%`: the key starts with it.
+                values.push(like_pattern(t)[1..].to_string().into());
+                let i = values.len();
+                sql.push_str(&format!(" AND key LIKE ?{i} ESCAPE '\\'"));
+            }
+            Some((t, false)) => {
+                values.push(like_pattern(t).into());
+                let i = values.len();
+                sql.push_str(&format!(
+                    " AND (key LIKE ?{i} ESCAPE '\\' OR value LIKE ?{i} ESCAPE '\\')"
+                ));
+            }
+            None => {}
         }
         sql.push_str(" ORDER BY updated_at DESC, key LIMIT ?2");
         let mut stmt = self.conn.prepare(&sql)?;
@@ -253,6 +287,20 @@ mod tests {
             ["b"]
         );
         assert!(s.find_agent_records(&[], None, 10, 40).unwrap().is_empty());
+        // A key prefix: `acme/app#12:` never matches `bigacme/app#12:`.
+        s.put_agent_record(&rec("shared:fp", "acme/app#12:t1", r#""x""#), 21)
+            .unwrap();
+        s.put_agent_record(&rec("shared:fp", "bigacme/app#12:t2", r#""x""#), 22)
+            .unwrap();
+        s.put_agent_record(&rec("shared:fp", "z", r#""see acme/app#12:""#), 23)
+            .unwrap();
+        assert_eq!(
+            keys(
+                s.agent_records_with_prefix(&mine, "acme/app#12:", 10, 40)
+                    .unwrap()
+            ),
+            ["acme/app#12:t1"]
+        );
         assert!(s
             .agent_record("rule:1", "record", "d", 14)
             .unwrap()

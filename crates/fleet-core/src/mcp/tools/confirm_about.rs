@@ -17,7 +17,9 @@ use crate::store::Store;
 pub(super) const BODY_MAX_CHARS: usize = 4000;
 
 /// `tool`'s call with `args` in words, read against `store`. `None` for an
-/// object it cannot read (a call that failed to parse is refused anyway).
+/// object it cannot read (a call that failed to parse is refused anyway),
+/// and for a tool this does not describe: the card then shows the app's own
+/// words for it and the exact call, never a guess that drops what matters.
 pub(super) fn describe(store: &Store, tool: &str, args: &Value) -> Option<ConfirmAbout> {
     let a = args.as_object()?;
     let mut d = Describer {
@@ -34,15 +36,20 @@ pub(super) fn describe(store: &Store, tool: &str, args: &Value) -> Option<Confir
         | "kill_session"
         | "restart_session"
         | "recreate_session"
-        | "rewind_conversation"
-        | "fork_session" => d.session_op(tool),
-        _ => d.generic(tool),
+        | "rewind_conversation" => d.session_op(tool),
+        _ => return None,
     };
     Some(ConfirmAbout {
         title,
         facts: d.facts,
         body,
     })
+}
+
+/// `u` when it is an http(s) link, the only kind a card offers to open.
+fn web_url(u: &str) -> Option<String> {
+    let lower = u.to_ascii_lowercase();
+    (lower.starts_with("https://") || lower.starts_with("http://")).then(|| u.to_string())
 }
 
 struct Describer<'a> {
@@ -151,7 +158,9 @@ impl<'a> Describer<'a> {
             (None, Some(i)) => i.title.clone(),
             (None, None) => self.str("url").unwrap_or("a ticket").to_string(),
         };
-        let url_arg = self.str("url").map(str::to_string);
+        // The caller's `url` is the caller's word: it labels no stored
+        // ticket, and only an http(s) link is offered to open.
+        let url_arg = self.str("url").and_then(web_url);
         match &item {
             Some(i) => {
                 let value = match &key {
@@ -162,7 +171,7 @@ impl<'a> Describer<'a> {
                 self.facts.push(ConfirmFact {
                     label: "Ticket".into(),
                     value,
-                    url: i.url.clone().or(url_arg),
+                    url: i.url.as_deref().and_then(web_url),
                 });
             }
             None => {
@@ -340,7 +349,10 @@ impl<'a> Describer<'a> {
             .session_facts("session_id", "Session")
             .unwrap_or_else(|| "a session".into());
         if self.flag("force") == Some(true) {
-            self.fact("Force", "yes, even with unsaved work");
+            self.fact("Force", "yes, even the fleet controller");
+        }
+        if let Some(a) = self.str("anchor_uuid") {
+            self.fact("From turn", a.to_string());
         }
         for (k, label) in [
             ("model", "Model"),
@@ -357,35 +369,14 @@ impl<'a> Describer<'a> {
             "kill_session" => format!("Kill {name}"),
             "restart_session" => format!("Restart {name}"),
             "recreate_session" => format!("Recreate {name}"),
-            "rewind_conversation" => format!("Rewind the conversation of {name}"),
-            "fork_session" => format!("Fork {name}"),
+            // A fork leaves the session alone and starts a new one.
+            "rewind_conversation" if self.str("mode") == Some("fork") => {
+                format!("Fork {name} into a new session")
+            }
+            "rewind_conversation" => format!("Rewind {name}"),
             _ => format!("Run {tool} on {name}"),
         };
         (title, None)
-    }
-
-    /// Any other gated tool: its name in words, the session and host it
-    /// names, and the text it carries.
-    fn generic(&mut self, tool: &str) -> (String, Option<ConfirmBody>) {
-        let target = self.session_facts("session_id", "Session");
-        if target.is_none() {
-            if let Some(h) = self.str("host_alias") {
-                self.fact("Host", h.to_string());
-            }
-        }
-        if let Some(p) = self.int("project_id") {
-            let label = self.project_label(p);
-            self.fact("Project", label);
-        }
-        let words = tool.replace('_', " ");
-        let title = match target {
-            Some(n) => format!("Run {words} on {n}"),
-            None => format!("Run {words}"),
-        };
-        let body = self
-            .body("Prompt", "prompt")
-            .or_else(|| self.body("Text", "text"));
-        (title, body)
     }
 }
 
@@ -476,5 +467,63 @@ mod tests {
     #[test]
     fn not_an_object_is_none() {
         assert!(describe(&store(), "work_link", &json!(null)).is_none());
+    }
+
+    /// A tool this does not describe has no card text: the app's own words
+    /// and the exact call show, not a guess missing its target.
+    #[test]
+    fn an_undescribed_tool_is_none() {
+        let args = json!({ "session_id": 1, "target_host_alias": "nas" });
+        assert!(describe(&store(), "move_session", &args).is_none());
+    }
+
+    /// `force` spares nothing but the fleet controller; a fork leaves the
+    /// session alone.
+    #[test]
+    fn session_ops_say_what_they_do() {
+        let kill = describe(
+            &store(),
+            "kill_session",
+            &json!({ "session_id": 9, "force": true }),
+        )
+        .expect("about");
+        assert_eq!(fact(&kill, "Force"), Some("yes, even the fleet controller"));
+        let fork = describe(
+            &store(),
+            "rewind_conversation",
+            &json!({ "session_id": 9, "mode": "fork" }),
+        )
+        .expect("about");
+        assert_eq!(fork.title, "Fork #9 into a new session");
+        let rewind = describe(
+            &store(),
+            "rewind_conversation",
+            &json!({ "session_id": 9, "mode": "rewind", "anchor_uuid": "u1" }),
+        )
+        .expect("about");
+        assert_eq!(rewind.title, "Rewind #9");
+        assert_eq!(fact(&rewind, "From turn"), Some("u1"));
+    }
+
+    /// Only an http(s) link is offered to open.
+    #[test]
+    fn a_ticket_link_is_offered_only_over_http() {
+        let s = store();
+        let odd = describe(
+            &s,
+            "work_link",
+            &json!({ "action": "start", "url": "intent://x#Intent;end", "host_alias": "h" }),
+        )
+        .expect("about");
+        let ticket = odd.facts.iter().find(|f| f.label == "Ticket").unwrap();
+        assert_eq!(ticket.url, None);
+        let web = describe(
+            &s,
+            "work_link",
+            &json!({ "action": "start", "url": "https://t.example/PD-1", "host_alias": "h" }),
+        )
+        .expect("about");
+        let ticket = web.facts.iter().find(|f| f.label == "Ticket").unwrap();
+        assert_eq!(ticket.url.as_deref(), Some("https://t.example/PD-1"));
     }
 }
