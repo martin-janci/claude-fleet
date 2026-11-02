@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::service::work::run::{record_headless_run, record_run};
-use crate::store::{TaskEvidence, TaskReport, CHECK_ASK};
+use crate::store::{TaskEvidence, TaskReport, CHECK_ASK, CHECK_AUTO};
 
 const HEAD: &str = "0123456789abcdef0123456789abcdef01234567";
 const BASE: &str = "89abcdef0123456789abcdef0123456789abcdef";
@@ -53,6 +53,11 @@ fn world() -> World {
     w
 }
 
+/// [`due`]'s items without their tasks.
+fn items(due: Vec<(i64, i64)>) -> Vec<i64> {
+    due.into_iter().map(|(i, _)| i).collect()
+}
+
 /// Another finished task of `role` on the item, on `HEAD`. Answers its id.
 fn finish_work(w: &World, role: &str) -> i64 {
     let attempt = w.s.next_task_attempt(w.item, role).unwrap();
@@ -93,7 +98,7 @@ fn check(w: &World, outcome: Option<&str>) -> TaskRow {
 
 fn card(w: &World) -> Option<TicketCheckView> {
     let item = w.s.get_work_item(w.item).unwrap().unwrap();
-    view(&w.s, &item).unwrap()
+    view(&w.s, &item, true).unwrap()
 }
 
 #[test]
@@ -120,6 +125,14 @@ fn the_card_follows_the_check_from_ready_to_its_verdict() {
     let v = card(&w).unwrap();
     assert_eq!(v.state, "ready");
     assert!(v.can_run);
+    // A scoped caller is not offered a check the hub would refuse.
+    let item = w.s.get_work_item(w.item).unwrap().unwrap();
+    let scoped = view(&w.s, &item, false).unwrap().unwrap();
+    assert!(!scoped.can_run);
+    assert_eq!(
+        scoped.why_not.as_deref(),
+        Some("a person decides AI checks")
+    );
     assert_eq!(
         v.setup,
         Some(CheckSetup {
@@ -144,6 +157,15 @@ fn the_card_follows_the_check_from_ready_to_its_verdict() {
     assert!(v.can_run, "a check that could not run may run again");
 
     check(&w, Some("failed"));
+    // The check is a `test` run, so a `test:` line reads it.
+    let test_line = || {
+        let item = w.s.get_work_item(w.item).unwrap().unwrap();
+        let recorded = w.s.latest_verifications(w.item).unwrap();
+        crate::service::work::verify::check_line(&w.s, &item, "test:cargo test", &recorded, NOW)
+            .unwrap()
+            .state
+    };
+    assert_eq!(test_line(), "fail");
     let v = card(&w).unwrap();
     assert_eq!(v.state, "failed");
     assert_eq!(v.blockers, vec!["the queue drops writes".to_string()]);
@@ -155,6 +177,8 @@ fn the_card_follows_the_check_from_ready_to_its_verdict() {
     let v = card(&w).unwrap();
     assert_eq!(v.state, "accepted");
     assert_eq!(v.note.as_deref(), Some("flaky test"));
+    // ... and the gate takes it: the item's `test:` lines pass.
+    assert_eq!(test_line(), "pass");
 
     check(&w, Some("done"));
     assert_eq!(card(&w).unwrap().state, "passed");
@@ -176,7 +200,7 @@ fn an_item_with_no_finished_work_has_no_card() {
             notes: None,
         })
         .unwrap();
-    assert!(view(&w.s, &other).unwrap().is_none());
+    assert!(view(&w.s, &other, true).unwrap().is_none());
 }
 
 #[test]
@@ -192,19 +216,22 @@ fn only_a_project_on_auto_is_owed_a_check() {
     w.s.set_project_check(w.project, CHECK_AUTO, None).unwrap();
     // The fixture's tasks are written at the real clock.
     let now = crate::store::now_unix();
-    assert_eq!(due(&w.s, now, &none).unwrap(), vec![w.item]);
+    assert_eq!(items(due(&w.s, now, &none).unwrap()), vec![w.item]);
     // Too old: past the window.
     assert!(due(&w.s, now + WINDOW_SECS + 60, &none).unwrap().is_empty());
     // A start that failed waits out its retry.
     let source = target_for(&w.s, w.item).unwrap().source_task;
     let tried = HashMap::from([(source, now)]);
     assert!(due(&w.s, now, &tried).unwrap().is_empty());
-    assert_eq!(due(&w.s, now + RETRY_SECS, &tried).unwrap(), vec![w.item]);
+    assert_eq!(
+        items(due(&w.s, now + RETRY_SECS, &tried).unwrap()),
+        vec![w.item]
+    );
     // Once checked, nothing more is owed until new work.
     check(&w, Some("failed"));
     assert!(due(&w.s, now, &none).unwrap().is_empty());
     finish_work(&w, "wrapup");
-    assert_eq!(due(&w.s, now, &none).unwrap(), vec![w.item]);
+    assert_eq!(items(due(&w.s, now, &none).unwrap()), vec![w.item]);
 }
 
 #[test]
@@ -248,7 +275,7 @@ fn an_active_missions_items_are_its_loops_to_check() {
             [m.id],
         )
         .unwrap();
-    assert_eq!(due(&w.s, now, &none).unwrap(), vec![w.item]);
+    assert_eq!(items(due(&w.s, now, &none).unwrap()), vec![w.item]);
 }
 
 #[test]
@@ -372,14 +399,16 @@ fn a_verdict_is_a_fleet_event_and_a_failure_to_run_is_not() {
         Err(IpcError::new(codes::E_CLAUDE_CLI, "claude said nothing")),
     );
     let s = lock(&store).unwrap();
-    let passed = s.recent_fleet_events_of_kind(EVENT_PASSED, 10).unwrap();
+    let passed = s
+        .recent_fleet_events_of_kind(crate::store::fleet_events::CHECK_PASSED, 10)
+        .unwrap();
     assert_eq!(passed.len(), 1, "{passed:?}");
     assert_eq!(
         passed[0].detail.as_deref(),
         Some("the AI check of POS-7 passed")
     );
     assert!(s
-        .recent_fleet_events_of_kind(EVENT_FAILED, 10)
+        .recent_fleet_events_of_kind(crate::store::fleet_events::CHECK_FAILED, 10)
         .unwrap()
         .is_empty());
     assert_eq!(s.get_task(t.id).unwrap().unwrap().state, "failed");

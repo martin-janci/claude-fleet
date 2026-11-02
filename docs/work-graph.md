@@ -1143,7 +1143,8 @@ quoted as data) and reports **done** or **failed** with blockers a developer
 can act on. It is off until a person turns it on, per project
 (`projects.check_mode` / `check_command`, migration 213):
 
-- **Off** (the default; NULL reads as off): no card offers it, nothing runs.
+- **Off** (the default; NULL reads as off): nothing runs on its own; the
+  card still offers **Test now**, a person's ask.
 - **On request** (`ask`): the task page shows **Test now** under the result.
 - **When done** (`auto`): the missions loop starts it by itself for the
   newest finished `implement` or `wrapup` task of an item (with git

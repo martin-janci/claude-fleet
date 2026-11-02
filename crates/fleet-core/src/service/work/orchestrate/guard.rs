@@ -21,9 +21,9 @@ pub const TRACKER_CLIS: [&str; 4] = ["jira", "acli", "asana", "linear"];
 
 /// Subcommands that only read a tracker (`jira issue view ABC-1`, `acli jira
 /// workitem search --jql …`, `linear issue list`). A tracker command passes
-/// when one of its first [`VERB_WORDS`] positional words is one of these;
-/// anything else, a subcommand this list does not know included, stays a
-/// person's step.
+/// when its verb, the first of its leading words that is not one of
+/// [`NOUNS`], is one of these; anything else, a subcommand this list does
+/// not know included, stays a person's step.
 pub const READ_VERBS: [&str; 9] = [
     "list",
     "ls",
@@ -36,8 +36,31 @@ pub const READ_VERBS: [&str; 9] = [
     "version",
 ];
 
-/// How many positional words name a tracker command's subcommand
-/// (`acli jira workitem view`: three).
+/// What a tracker command acts on, named before its verb (`jira issue
+/// view`, `acli jira workitem search`).
+const NOUNS: [&str; 18] = [
+    "jira",
+    "issue",
+    "issues",
+    "workitem",
+    "workitems",
+    "project",
+    "projects",
+    "sprint",
+    "sprints",
+    "board",
+    "boards",
+    "epic",
+    "epics",
+    "task",
+    "tasks",
+    "ticket",
+    "tickets",
+    "team",
+];
+
+/// How many leading words name a tracker command's subcommand (`acli jira
+/// workitem view`: three).
 const VERB_WORDS: usize = 3;
 
 /// Words that may stand before the real command in a segment.
@@ -79,11 +102,16 @@ fn segment_reason(words: &[String], branch: Option<&str>) -> Option<&'static str
 }
 
 fn tracker_reason(args: &[String]) -> Option<&'static str> {
-    let reads = args
+    // Only the words before the first flag name the subcommand, and its verb
+    // is the first that is no noun: a flag's value or a summary
+    // (`jira issue create -s "Show login error"`) never reads as one.
+    let verb = args
         .iter()
-        .filter(|a| !a.starts_with('-'))
+        .take_while(|a| !a.starts_with('-'))
         .take(VERB_WORDS)
-        .any(|a| READ_VERBS.contains(&a.to_ascii_lowercase().as_str()));
+        .map(|a| a.to_ascii_lowercase())
+        .find(|a| !NOUNS.contains(&a.as_str()));
+    let reads = verb.is_some_and(|v| READ_VERBS.contains(&v.as_str()));
     (!reads).then_some("a tracker write is a person's step (orchestration §7.3)")
 }
 

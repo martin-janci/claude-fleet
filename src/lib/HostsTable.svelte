@@ -211,12 +211,4 @@
   }
   .open:hover { border-color: var(--accent); }
   .empty { margin: 1rem; color: var(--fg-muted); font-size: var(--text-xs); }
-  .sr-only {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    overflow: hidden;
-    clip: rect(0 0 0 0);
-    white-space: nowrap;
-  }
 </style>

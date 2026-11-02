@@ -226,6 +226,26 @@ pub fn check_line(
                     newest,
                 ));
             }
+            // A person accepted the newest check anyway (`ticket_check`'s
+            // Accept anyway): it holds until a newer test run.
+            let accepted = recorded.iter().find(|r| {
+                r.line == super::ticket_check::CHECK_LINE
+                    && r.ok
+                    && newest.finished_at.is_some_and(|f| r.at >= f)
+            });
+            if let Some(r) = accepted {
+                let mut c = check(
+                    line,
+                    kind,
+                    "pass",
+                    r.note
+                        .clone()
+                        .unwrap_or_else(|| "a person accepted the test run anyway".into()),
+                );
+                c.by = Some(r.actor.clone());
+                c.at = Some(r.at);
+                return Ok(c);
+            }
             test_check(line, command.as_deref(), &runs)
         }
     })

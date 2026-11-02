@@ -533,13 +533,14 @@ pub fn mcp_server_names(claude_json: &str) -> Vec<String> {
 /// files, merge, back the profile's file up and write it only if it still
 /// holds what was read (a live session under that login rewrites it all
 /// the time), reading again when it changed meanwhile. The names it added
-/// or changed; empty when the profile already had them all. A session picks
-/// a server up when it starts.
+/// or changed (empty when the profile already had them all), and the
+/// host's own servers ([`mcp_server_names`]), so a caller need not read the
+/// host's file again. A session picks a server up when it starts.
 pub async fn share_mcp_servers_into(
     ssh: &dyn SshExec,
     host: &str,
     profile: &str,
-) -> Result<Vec<String>, IpcError> {
+) -> Result<(Vec<String>, Vec<String>), IpcError> {
     crate::validate::claude_profile(profile)?;
     let dir = format!("{PROFILES_DIR}/{profile}");
     let path = format!("{dir}/.claude.json");
@@ -550,8 +551,9 @@ pub async fn share_mcp_servers_into(
         let existing = read_host_file(ssh, host, &path).await?;
         let (merged, changed) = share_mcp_servers(&existing, &host_json)
             .map_err(|e| IpcError::new(&e.code, format!("profile {profile}: {}", e.message)))?;
+        let servers = mcp_server_names(&host_json);
         if changed.is_empty() {
-            return Ok(changed);
+            return Ok((changed, servers));
         }
         if !existing.trim().is_empty() {
             write_host_file_secret(ssh, host, &dir, &backup, &existing).await?;
@@ -562,7 +564,7 @@ pub async fn share_mcp_servers_into(
         };
         match write_host_file_secret_guarded(ssh, host, &dir, &path, &merged, Some(unchanged)).await
         {
-            Ok(()) => return Ok(changed),
+            Ok(()) => return Ok((changed, servers)),
             Err(e) if e.code == codes::E_CONFLICT => last = Some(e),
             Err(e) => return Err(e),
         }
@@ -3944,7 +3946,7 @@ mod tests {
             Reply::ok(host),
         )
         .on(Match::script(&remote_read_script(&path)), Reply::ok(own));
-        let changed = share_mcp_servers_into(&fake, "h1", "work").await.unwrap();
+        let (changed, _) = share_mcp_servers_into(&fake, "h1", "work").await.unwrap();
         assert_eq!(changed, vec!["atlassian".to_string()]);
         let calls = fake.calls();
         let dir = format!("{HOME}/.claude-profiles/work");
@@ -3974,6 +3976,7 @@ mod tests {
         assert!(share_mcp_servers_into(&done, "h1", "work")
             .await
             .unwrap()
+            .0
             .is_empty());
         assert!(done
             .calls()

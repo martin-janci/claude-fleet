@@ -24,6 +24,12 @@ fn a_persons_steps_are_refused() {
         "jira",
         "acli jira workitem edit --key PAY-1 --summary x",
         "jira issue view PAY-1; jira issue assign PAY-1 me",
+        // A flag's value or a summary is never the verb.
+        "jira issue create -s \"Show login error\"",
+        "jira issue create \"List view broken\"",
+        "linear issue create --title \"List view broken\"",
+        "asana task create --name \"Get logs\"",
+        "acli jira workitem create --summary \"view is blank\"",
     ] {
         assert!(deny_reason(cmd, Some("feat/x")).is_some(), "{cmd}");
     }

@@ -277,13 +277,16 @@ async fn probe(
         ..Default::default()
     };
     if let Some(p) = profile {
-        match provision::share_mcp_servers_into(ssh, host, p).await {
-            Ok(names) => r.shared = names,
-            Err(e) => r.errors.push(text::share_failed(&e.message)),
-        }
-        let servers = match provision::read_host_file(ssh, host, provision::CLAUDE_JSON).await {
-            Ok(j) => provision::mcp_server_names(&j),
-            Err(_) => Vec::new(),
+        // The share reads the host's servers too: no second read over SSH.
+        let servers = match provision::share_mcp_servers_into(ssh, host, p).await {
+            Ok((names, servers)) => {
+                r.shared = names;
+                servers
+            }
+            Err(e) => {
+                r.errors.push(text::share_failed(&e.message));
+                Vec::new()
+            }
         };
         if !servers.is_empty() {
             if let Ok(out) = crate::ssh::run_shell_bounded(
@@ -350,7 +353,14 @@ pub async fn check_once(deps: &Deps, m: &MissionRow, grant: &GrantRow, now: i64)
                 Some((r.name.clone(), p.base_path))
             })
             .collect();
-        let hosts: Vec<String> = targets.iter().map(|(h, _)| h.clone()).collect();
+        // A host the grant names had its conflicts raised by `grant` itself;
+        // only the hosts placement picked are news here.
+        let named = grant.hosts.as_deref().unwrap_or_default();
+        let hosts: Vec<String> = targets
+            .iter()
+            .map(|(h, _)| h.clone())
+            .filter(|h| !named.contains(h))
+            .collect();
         let orgs = org_conflicts(&s, m, &hosts).unwrap_or_default();
         (targets, repos, orgs)
     };

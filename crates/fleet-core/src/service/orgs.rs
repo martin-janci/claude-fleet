@@ -826,11 +826,12 @@ fn counted_rows(
         .collect())
 }
 
-/// Whether a row waits on a person (`service::attention::needs_attention`).
+/// Whether a row waits on a person (`service::attention::needs_person_in`:
+/// a paused row does not).
 fn needs_person(s: &Store) -> impl Fn(&SessionRow) -> bool {
     let red = crate::service::health::context_red_pct(s);
     let facts = s.attention_facts();
-    move |r: &SessionRow| crate::service::attention::needs_attention_in(r, red, &facts).is_some()
+    move |r: &SessionRow| crate::service::attention::needs_person_in(r, red, &facts)
 }
 
 /// `org id → (sessions, sessions that need a person)` over `rows`.

@@ -2215,7 +2215,7 @@ pub(crate) fn task_kind(item: Option<&ViewItem>) -> &'static str {
 
 /// Does this live session need a person (`list_sessions`' judgement)?
 fn needs_you_of(g: &Graph, row: Option<&SessionRow>) -> bool {
-    row.is_some_and(|r| attention::needs_attention_in(r, g.context_red_pct, &g.facts).is_some())
+    row.is_some_and(|r| attention::needs_person_in(r, g.context_red_pct, &g.facts))
 }
 
 /// One session a task counts: the live session, else the participant it
@@ -3909,7 +3909,10 @@ pub fn task(
     let check = match item {
         Some(i) if !matches!(scope, OrgScope::Host { .. }) => {
             let s = lock(store)?;
-            super::ticket_check::view(&s, &i.item)?
+            // Test now is offered only to a caller who may start one. This
+            // is the org boundary, not a privacy fence: every reader sees
+            // the card.
+            super::ticket_check::view(&s, &i.item, scope.is_all())?
         }
         _ => None,
     };

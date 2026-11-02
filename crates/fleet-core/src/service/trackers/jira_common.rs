@@ -300,22 +300,54 @@ pub fn required_fields_unfilled(meta: &Value, body: &Value) -> Vec<String> {
         .collect()
 }
 
+/// The issue Jira's answer `resp` to `POST issue` (sent with `body`, in
+/// `project`) created, or why it did not. A 400 is most often a field the
+/// project requires and fleet does not fill: one read of the type's fields
+/// (`meta`) names them; unreadable, Jira's own words stand. Cloud and Data
+/// Center alike.
+pub(crate) async fn created_or_refused<F>(
+    resp: &Response,
+    project: &str,
+    body: &Value,
+    site: &str,
+    meta: F,
+) -> Result<super::WriteOutcome, TrackerError>
+where
+    F: std::future::Future<Output = Result<Value, TrackerError>>,
+{
+    if resp.status == 400 {
+        let unfilled = meta
+            .await
+            .map(|m| required_fields_unfilled(&m, body))
+            .unwrap_or_default();
+        return Err(create_refused(resp, project, &unfilled));
+    }
+    check(resp, Call::Other).map_err(|e| e.during(&format!("POST issue in {project}")))?;
+    let v = resp.parse_json::<Value>().map_err(TrackerError::Invalid)?;
+    created_issue(&v, site)
+}
+
 /// The error for a create Jira answered 400 to (`resp`), in `project`. With
 /// `unfilled` (from [`required_fields_unfilled`]) it names the required
-/// fields fleet does not fill; without, Jira's own detail. Either way it
-/// says which call failed.
-pub(crate) fn create_refused(resp: &Response, project: &str, unfilled: &[String]) -> TrackerError {
+/// fields fleet does not fill, and Jira's own detail after them; without,
+/// Jira's own detail alone. Either way it says which call failed.
+fn create_refused(resp: &Response, project: &str, unfilled: &[String]) -> TrackerError {
     let call = format!("POST issue in {project}");
     if unfilled.is_empty() {
-        return match check(resp, Call::Other) {
-            Err(e) => e.during(&call),
-            Ok(()) => TrackerError::Invalid(format!("{call}: HTTP {}", resp.status)),
-        };
+        return check(resp, Call::Other).err().map_or_else(
+            || TrackerError::Invalid(format!("{call}: HTTP {}", resp.status)),
+            |e| e.during(&call),
+        );
     }
+    // The fields are fleet's guess (a field Jira fills itself can be among
+    // them): Jira's own words come along, so another cause is not hidden.
     let names = crate::logging::redact(&unfilled.join(", ")).into_owned();
+    let jira = rejection_detail(&resp.body)
+        .map(|d| format!(" (Jira: {d})"))
+        .unwrap_or_default();
     TrackerError::Invalid(format!(
         "{call}: HTTP {}: required fields fleet does not fill: {}; give them a default \
-         in Jira or create the ticket there",
+         in Jira or create the ticket there{jira}",
         resp.status,
         capped(&names, REJECTION_MAX_CHARS / 2)
     ))
@@ -343,7 +375,11 @@ pub(crate) fn check(resp: &Response, call: Call) -> Result<(), TrackerError> {
         401 => TrackerError::Auth("401 Unauthorized".into()),
         403 if call == Call::Identity => TrackerError::Auth("403 on /myself".into()),
         403 if call == Call::View => TrackerError::Forbidden("403 on this view's query".into()),
-        403 => TrackerError::Forbidden("403".into()),
+        // A refusal for permission says which, as a 4xx below does.
+        403 => TrackerError::Forbidden(match rejection_detail(&resp.body) {
+            Some(d) => format!("403: {d}"),
+            None => "403".into(),
+        }),
         404 => TrackerError::NotFound,
         429 => TrackerError::RateLimited {
             retry_after_secs: retry_after,

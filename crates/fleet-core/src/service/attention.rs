@@ -434,8 +434,7 @@ pub fn needs_attention_in(
 fn pr_is_finished(row: &SessionRow) -> bool {
     row.pr_evidence
         .as_ref()
-        .and_then(|e| e.state.as_deref())
-        .is_some_and(|s| s == "MERGED" || s == "CLOSED")
+        .is_some_and(crate::service::outcome::PrEvidence::is_finished)
 }
 
 /// What the `needs_attention` filter of `list_sessions` means: everything

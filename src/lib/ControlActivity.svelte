@@ -16,6 +16,7 @@
   import HandoffCards from './HandoffCards.svelte';
   import ControlSuggestions from './ControlSuggestions.svelte';
   import { untrack } from 'svelte';
+  import { durationMs } from './motion';
 
   let { sessionId = null }: { sessionId?: number | null } = $props();
 
@@ -48,15 +49,20 @@
     });
   });
 
-  let last: Record<Section, number> = { needs: 0, handoffs: 0, suggested: 0 };
+  // Seeded from the first reading, so mounting with counts already there
+  // marks nothing; only a later increase does.
+  let last: Record<Section, number> | null = null;
   $effect(() => {
     const c = counts;
     untrack(() => {
-      const up = (Object.keys(c) as Section[]).filter((s) => c[s] > last[s] && open !== s);
+      const prev = last;
       last = { ...c };
+      if (prev === null) return;
+      const up = (Object.keys(c) as Section[]).filter((s) => c[s] > prev[s] && open !== s);
       if (up.length === 0) return;
       fresh = [...new Set([...fresh, ...up])];
-      setTimeout(() => (fresh = fresh.filter((s) => !up.includes(s))), 1600);
+      // As long as the CSS animation (5 x --dur-slow).
+      setTimeout(() => (fresh = fresh.filter((s) => !up.includes(s))), durationMs('slow') * 5);
     });
   });
 
@@ -206,17 +212,8 @@
       box-shadow: 0 0 0 0 transparent;
     }
   }
-  .sr-only {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    overflow: hidden;
-    clip: rect(0 0 0 0);
-    white-space: nowrap;
-  }
-  @media (prefers-reduced-motion: reduce) {
-    .fresh {
-      animation: none;
-    }
+  :global(:root[data-motion='reduced']) .fresh,
+  :global(:root[data-motion='off']) .fresh {
+    animation: none;
   }
 </style>
