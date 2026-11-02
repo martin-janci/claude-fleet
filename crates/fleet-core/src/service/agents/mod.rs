@@ -32,6 +32,7 @@
 //! executor is; production registers the PR reviewer ([`review`]).
 
 pub mod admin;
+pub mod compare;
 pub mod debug;
 pub mod review;
 pub mod support;

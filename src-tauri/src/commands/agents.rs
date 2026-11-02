@@ -175,10 +175,10 @@ pub(crate) mod routed {
         id: Option<i64>,
     ) -> Result<serde_json::Value, IpcError> {
         // Only the reads: this command never grants, revokes or answers.
-        if !matches!(action.as_str(), "explain" | "job") {
+        if !matches!(action.as_str(), "explain" | "job" | "compare") {
             return Err(IpcError::new(
                 fleet_core::ipc_error::codes::E_INVALID,
-                format!("agents_debug action must be explain | job, got {action:?}"),
+                format!("agents_debug action must be explain | job | compare, got {action:?}"),
             ));
         }
         let args = debug_args(action, id);
