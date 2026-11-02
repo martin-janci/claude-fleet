@@ -124,8 +124,25 @@ describe('agents (design step 5)', () => {
     );
     expect(actionTitle({ kind: 'record', payload: '{"store":"memory","key":"NPE"}' })).toBe('Remember NPE in memory');
     expect(actionTitle({ kind: 'mcp_call', payload: '{"binding":"kb","tool":"add_known_error"}' })).toBe(
-      'Call kb.add_known_error',
+      'kb: add known error',
     );
+    // The thing a call acts on and what it sets, so two calls of one tool read apart.
+    expect(
+      actionTitle({
+        kind: 'mcp_call',
+        payload: JSON.stringify({
+          binding: 'jira',
+          tool: 'jira_update_issue',
+          arguments: { description: '## Kontext', format: 'markdown', issueKey: 'PD-3061', returnIssue: false },
+        }),
+      }),
+    ).toBe('jira: update issue PD-3061 — description, format');
+    expect(
+      actionTitle({
+        kind: 'mcp_call',
+        payload: JSON.stringify({ binding: 'kb', tool: 'put', arguments: { a: 1, b: 2, c: 3, d: 4, e: 5 } }),
+      }),
+    ).toBe('kb: put — a, b, c +2 more');
     expect(actionTitle({ kind: 'pr_comment', payload: '{"repo":"o/r","number":4,"body":"x"}' })).toBe('Comment on o/r#4');
     expect(
       actionTitle({

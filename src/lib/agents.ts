@@ -260,7 +260,7 @@ export function actionTitle(a: Pick<AgentAction, 'kind' | 'payload'>): string {
   }
   if (a.kind === 'tracker_link' && p) return `Link ${p.from} to ${p.to} (${String(p.link_type ?? '').toLowerCase()})`;
   if (a.kind === 'record' && p) return `Remember ${p.key} in ${p.store}`;
-  if (a.kind === 'mcp_call' && p) return `Call ${p.binding}.${p.tool}`;
+  if (a.kind === 'mcp_call' && p) return mcpCallTitle(p);
   if (a.kind === 'pr_comment' && p) return `Comment on ${p.repo}#${p.number}`;
   if (a.kind === 'pr_review' && p) {
     const event = String(p.event ?? 'COMMENT').toLowerCase().replace('_', ' ');
@@ -276,6 +276,35 @@ export function actionTitle(a: Pick<AgentAction, 'kind' | 'payload'>): string {
   if (a.kind === 'setting' && p) return `Change ${p.key}${p.was ? ` from ${p.was}` : ''} to ${p.value}`;
   if (a.kind === 'session_recover' && p) return `Recover ${p.session}${p.host ? ` on ${p.host}` : ''}`;
   return a.kind.replace(/_/g, ' ');
+}
+
+/** The argument names that say WHAT a call acts on, first match wins. */
+const MCP_TARGET_ARGS = ['issueKey', 'issue_key', 'issueIdOrKey', 'key', 'id', 'path', 'name'];
+const MCP_FIELDS_SHOWN = 3;
+
+/** "jira: update issue PD-3061 — description, format": an `mcp_call` by
+ *  its server, the tool in words, the thing it acts on and the arguments it
+ *  sets (flags left out), so two calls of one tool read apart. */
+function mcpCallTitle(p: Record<string, unknown>): string {
+  const binding = String(p.binding ?? '');
+  const tool = String(p.tool ?? '');
+  const bare = tool.startsWith(`${binding}_`) ? tool.slice(binding.length + 1) : tool;
+  const args =
+    p.arguments && typeof p.arguments === 'object' && !Array.isArray(p.arguments)
+      ? (p.arguments as Record<string, unknown>)
+      : {};
+  const targetKey = MCP_TARGET_ARGS.find((k) => {
+    const v = args[k];
+    return (typeof v === 'string' && v.trim() !== '') || typeof v === 'number';
+  });
+  const fields = Object.keys(args).filter((k) => k !== targetKey && typeof args[k] !== 'boolean');
+  let title = `${binding}: ${bare.replace(/_/g, ' ')}`;
+  if (targetKey) title += ` ${String(args[targetKey])}`;
+  if (fields.length > 0) {
+    const more = fields.length - MCP_FIELDS_SHOWN;
+    title += ` — ${fields.slice(0, MCP_FIELDS_SHOWN).join(', ')}${more > 0 ? ` +${more} more` : ''}`;
+  }
+  return title;
 }
 
 /** The body an action will post, when it carries one. */
