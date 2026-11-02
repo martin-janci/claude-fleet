@@ -15,9 +15,12 @@
   //
   // A multi-select question is answered in two steps, because a digit only
   // TOGGLES a box there: each choice button toggles (and the card stays up),
-  // then Continue presses `Tab`, which keeps the ticks and moves Claude Code
-  // on — to the next question or to "Review your answers", whose
-  // `1. Submit answers` arrives as an ordinary dialog on this same card.
+  // then Continue keeps the ticks and moves Claude Code on — to the next
+  // question or to "Review your answers", whose `1. Submit answers` arrives
+  // as an ordinary dialog on this same card. The key Continue presses
+  // depends on the cursor (`multiContinueStep`): `Tab` on an option, `Enter`
+  // on the `Next` / `Submit` row, where `Tab` does nothing. Its "Chat about
+  // this" row is no box: it answers, by leaving the questions.
   //
   // Answering re-reads the pane first (`sendAnswer`) and refuses unless the
   // dialog it is about to answer is still the dialog on screen. The row is written by the
@@ -40,8 +43,9 @@
   import type { Answer } from './kit/status';
   import {
     answerFingerprint,
+    isChatOption,
     isFreeTextOption,
-    MULTI_CONTINUE_KEY,
+    multiContinueStep,
     type AnswerOption,
     type AnswerView,
   } from './pending_input';
@@ -164,25 +168,35 @@
    *  text, and text is typed in the terminal. */
   const terminalOnly = (o: AnswerOption) => view.multi && isFreeTextOption(o);
 
+  /** A multi-select's box, as opposed to its "Chat about this" row. */
+  const isBox = (o: AnswerOption) => view.multi && !isChatOption(o);
+
   const optionTitle = (o: AnswerOption) =>
     o.key === null
       ? `Option ${o.n} has no single keystroke — answer it in the terminal`
       : terminalOnly(o)
         ? 'Type your own answer in the terminal'
-        : view.multi
+        : isBox(o)
           ? (toggleBlocked ?? `Press ${o.key} — ${isChecked(o) ? 'untick' : 'tick'} it`)
-          : `Press ${o.key}${isSticky(o) ? ' — this also stops Claude asking again' : ''}`;
+          : view.multi
+            ? (toggleBlocked ?? `Press ${o.key} — leave these questions and chat with Claude instead`)
+            : `Press ${o.key}${isSticky(o) ? ' — this also stops Claude asking again' : ''}`;
 
   /** Re-read the pane, then press `key` only if it still shows this card's
    *  dialog (`answer_send.ts`). `label` is what the card reports as sent; a
    *  `null` label (a multi-select toggle) leaves the choices up and runs
    *  `onSent` instead. */
-  async function press(key: string, label: string | null, onSent?: () => void): Promise<boolean> {
+  async function press(
+    key: string,
+    label: string | null,
+    onSent?: () => void,
+    cursor?: number | null,
+  ): Promise<boolean> {
     if (busy || writeBlocked !== null) return false;
     busy = true;
     errorMsg = null;
     staleMsg = null;
-    const out = await sendAnswer(session, view, key);
+    const out = await sendAnswer(session, view, key, cursor === undefined ? {} : { cursor });
     if (out.ok) {
       if (label !== null) sent = label;
       else onSent?.();
@@ -197,13 +211,14 @@
 
   function choose(o: AnswerOption) {
     if (o.key === null) return;
-    if (!view.multi) {
+    if (view.multi && toggleBlocked !== null) return;
+    if (!isBox(o)) {
       void press(o.key, o.label).then((ok) => {
         if (ok) onAnswered?.(o.label);
       });
       return;
     }
-    if (toggleBlocked !== null || terminalOnly(o)) return;
+    if (terminalOnly(o)) return;
     void press(o.key, null, () => {
       const next = new Set(toggled);
       if (!next.delete(o.n)) next.add(o.n);
@@ -213,8 +228,29 @@
 
   /** What Continue reports: the ticked choices, so "Sent" says what went. */
   function continueLabel(): string {
-    const ticked = view.options.filter(isChecked).map((o) => o.label);
+    const ticked = view.options.filter((o) => isBox(o) && isChecked(o)).map((o) => o.label);
     return ticked.length ? ticked.join(', ') : 'Nothing ticked';
+  }
+
+  /** How long the pane gets to redraw the cursor between Continue's two
+   *  presses (free-text row → `Next`), and how often it is looked at again. */
+  const CONTINUE_SETTLE_MS = 300;
+  const CONTINUE_TRIES = 4;
+
+  /** Keep the ticks and move on, with the key the cursor's place needs. */
+  async function continueMulti() {
+    const step = multiContinueStep(view.options);
+    if (step.then === null) {
+      await press(step.key, continueLabel(), undefined, step.cursor);
+      return;
+    }
+    // In the free-text row: `Tab` brings the cursor down onto `Next`, then
+    // `Enter` moves on once the pane shows it there.
+    if (!(await press(step.key, null, undefined, step.cursor))) return;
+    for (let i = 0; i < CONTINUE_TRIES; i++) {
+      await new Promise((r) => setTimeout(r, CONTINUE_SETTLE_MS));
+      if (await press(step.then.key, continueLabel(), undefined, step.then.cursor)) return;
+    }
   }
 
   // 1–9 answer (redesign step 3.8): only the full card in the Conversation,
@@ -247,7 +283,7 @@
           primary: order.primary === o || undefined,
           disabled: optionDisabled(o),
           title: writeBlocked ?? optionTitle(o),
-          checked: view.multi ? isChecked(o) : undefined,
+          checked: isBox(o) ? isChecked(o) : undefined,
           testid: 'answer-option',
           onselect: () => choose(o),
         })),
@@ -310,8 +346,8 @@
           class="btn btn--chip continue"
           data-testid="answer-continue"
           disabled={busy || writeBlocked !== null}
-          title={writeBlocked ?? 'Keep these ticks and go on (Tab) — Claude asks you to confirm next'}
-          onclick={(e) => mine(e, () => void press(MULTI_CONTINUE_KEY, continueLabel()))}>Continue →</button>
+          title={writeBlocked ?? 'Keep these ticks and go on — Claude asks you to confirm next'}
+          onclick={(e) => mine(e, () => void continueMulti())}>Continue →</button>
         {#if !compact}<span class="hint">Tick every answer that applies, then continue.</span>{/if}
       </div>
     {/if}

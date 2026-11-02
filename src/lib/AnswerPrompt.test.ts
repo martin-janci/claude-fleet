@@ -345,6 +345,59 @@ describe('AnswerPrompt, multi-select', () => {
     expect(screen.getByTestId('answer-sent').textContent).toContain('Logging');
   });
 
+  // Claude Code 2.1.316, live: with the cursor on the `Next` / `Submit` row
+  // Tab does nothing, and Enter moves on. That was "I can tick, but I cannot
+  // submit".
+  it('continues with Enter when the cursor is on the Next / Submit row', async () => {
+    const onSubmit: PendingInput = { ...MULTI, options: MULTI.options.map((o) => ({ ...o, selected: false })) };
+    mockedAct.mockResolvedValue({ ok: true, value: probe(onSubmit) });
+    render(AnswerPrompt, { session: session({ pending_input: onSubmit }), view: view(onSubmit) });
+    await fireEvent.click(screen.getByTestId('answer-continue'));
+    await settle();
+    expect(mockedSend).toHaveBeenCalledTimes(1);
+    expect(mockedSend).toHaveBeenCalledWith('local', 'dev-foo', 'Enter', expect.objectContaining({ selected: null }));
+    expect(screen.getByTestId('answer-sent').textContent).toContain('Logging');
+  });
+
+  it('presses no Enter once the cursor has moved onto an option', async () => {
+    // Enter on an option ticks it instead of moving on.
+    const onSubmit: PendingInput = { ...MULTI, options: MULTI.options.map((o) => ({ ...o, selected: false })) };
+    render(AnswerPrompt, { session: session({ pending_input: onSubmit }), view: view(onSubmit) });
+    await fireEvent.click(screen.getByTestId('answer-continue'));
+    await settle();
+    expect(mockedSend).not.toHaveBeenCalled();
+    expect(screen.getByTestId('answer-stale').textContent).toMatch(/cursor moved/i);
+  });
+
+  it('from the free-text row, Tabs down onto Next and then presses Enter', async () => {
+    vi.useFakeTimers();
+    try {
+      const typing: PendingInput = { ...MULTI, options: MULTI.options.map((o) => ({ ...o, selected: o.n === 4 })) };
+      const onNext: PendingInput = { ...MULTI, options: MULTI.options.map((o) => ({ ...o, selected: false })) };
+      mockedAct.mockResolvedValueOnce({ ok: true, value: probe(typing) }).mockResolvedValue({ ok: true, value: probe(onNext) });
+      render(AnswerPrompt, { session: session({ pending_input: typing }), view: view(typing) });
+      await fireEvent.click(screen.getByTestId('answer-continue'));
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(mockedSend.mock.calls.map((c) => c[2])).toEqual(['Tab', 'Enter']);
+      expect(screen.getByTestId('answer-sent').textContent).toContain('Logging');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('draws "Chat about this" as an answer, not a box', async () => {
+    const withChat: PendingInput = { ...MULTI, options: [...MULTI.options, { n: 5, label: 'Chat about this', selected: false }] };
+    mockedAct.mockResolvedValue({ ok: true, value: probe(withChat) });
+    render(AnswerPrompt, { session: session({ pending_input: withChat }), view: view(withChat) });
+    const chat = screen.getAllByTestId('answer-option')[4];
+    expect(chat.textContent).not.toMatch(/ticked/);
+    expect(chat.title).toMatch(/chat with Claude/);
+    await fireEvent.click(chat);
+    await settle();
+    expect(mockedSend).toHaveBeenCalledWith('local', 'dev-foo', '5', expect.anything());
+    expect(screen.getByTestId('answer-sent').textContent).toContain('Chat about this');
+  });
+
   it('leaves the free-text row to the terminal', async () => {
     render(AnswerPrompt, { session: session({ pending_input: MULTI }), view: view(MULTI) });
     const free = screen.getAllByTestId('answer-option')[3] as HTMLButtonElement;

@@ -1,0 +1,15 @@
+❯ ASK please
+────────────────────────────────────────────────────────────────────────────────────────────────────
+←  ☐ Features  ☐ Deploy  ✔ Submit  →
+
+Which deploy target?
+
+❯ 1. Fly
+     fly.io
+  2. Docker
+     compose
+  3. Type something.
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  4. Chat about this
+
+Enter to select · Tab/Arrow keys to navigate · Esc to cancel
