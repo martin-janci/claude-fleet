@@ -3370,6 +3370,39 @@ fn finished_local_work_is_suggested_for_closing() {
     assert!(wire.get("close_suggested").is_none(), "{wire}");
 }
 
+/// `sort: priority` puts urgent first and no priority last; inside one
+/// priority the latest activity leads.
+#[test]
+fn sort_by_priority_puts_urgent_first_and_none_last() {
+    let w = world();
+    finished_local(&w, w.s1, "LOC-51");
+    let p = page(&w, &OrgScope::All, hiding());
+    let t = task_of(&p, "LOC-51");
+    let org_names = HashMap::new();
+    let with = |priority: Option<&str>, at: i64| WorkTask {
+        priority: priority.map(Into::into),
+        last_activity_at: Some(at),
+        ..t.clone()
+    };
+    let key = |task: &WorkTask| sort_key(task, &org_names, Some("priority"));
+    let urgent = with(Some("urgent"), 10);
+    let high_new = with(Some("high"), 30);
+    let high_old = with(Some("high"), 20);
+    let low = with(Some("low"), 40);
+    let none = with(None, 50);
+    let odd = with(Some("whenever"), 60);
+    assert!(key(&urgent) < key(&high_new));
+    assert!(key(&high_new) < key(&high_old));
+    assert!(key(&high_old) < key(&low));
+    assert!(key(&low) < key(&none));
+    assert!(key(&low) < key(&odd), "an unknown priority sorts as none");
+    assert!(check_filters(&WorkTreeFilters {
+        sort: Some("priority".into()),
+        ..Default::default()
+    })
+    .is_ok());
+}
+
 /// Nothing is suggested while a session is on the work, for work with no
 /// session at all, or for a tracker's ticket.
 #[test]

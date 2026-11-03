@@ -47,6 +47,10 @@ describe('parseWorkQuery', () => {
     expect(p.query).toBe('x');
   });
 
+  it('sorts by priority', () => {
+    expect(parseWorkQuery('sort:priority ', vocab).patch).toEqual({ sort: 'priority' });
+  });
+
   it('leaves an unknown value in the box, and a word with a colon alone', () => {
     const p = parseWorkQuery('type:feature fix: login ', vocab);
     expect(p.patch).toEqual({});
