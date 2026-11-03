@@ -1405,6 +1405,34 @@ describe('WorkMissions', () => {
       expect(screen.getByTestId('mission-grant-save').textContent).toBe('Sign L2 for 8 h, up to $20.00');
     });
 
+    it('a mission waiting for its grant offers it as a card in the centre; Not now puts it away', async () => {
+      current = mission({ state: 'active', level: 2, waiting_on: { reason: 'sign_grant', since: 1, open_cards: 0 } });
+      handlers.work_mission = () => ({
+        ...detailOf(current),
+        plan: {
+          steps: [],
+          cards: [],
+          autonomy: { asked: 2, ceiling: 3, effective: 1, why: 'no grant signed (orchestrator.max_level)', enabled: true },
+          cost_micros: 0,
+          counts: { total: 1, open: 0 },
+        },
+      });
+      renderMissions();
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-row'));
+      await flush();
+      const card = screen.getByTestId('mission-grant-card');
+      expect(card.textContent).toContain('Sign the autonomy grant: L2 · runs, retries and reviews by itself.');
+      expect(card.textContent).toContain('waiting');
+      expect(card.textContent).not.toContain('orchestrator.');
+      await fireEvent.click(screen.getByTestId('mission-grant-card-review'));
+      await flush();
+      expect(screen.getByTestId('mission-grant-form')).toBeTruthy();
+      await fireEvent.click(screen.getByTestId('mission-grant-card-not-now'));
+      await flush();
+      expect(screen.queryByTestId('mission-grant-card')).toBeNull();
+    });
+
     it('what Start wave says lands under the Next block, where it was pressed', async () => {
       current = mission({ state: 'active', level: 2 });
       handlers.work_mission = () => ({

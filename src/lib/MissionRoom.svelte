@@ -191,9 +191,14 @@
   const itemById = $derived(new Map((detail?.items ?? []).map((i) => [i.id, i])));
   const needsYou = $derived(!!detail && !!mission && !isFinal(mission.state) && (!!mission.waiting_on || waitsOnPerson(detail)));
 
-  const saveBlocked = $derived(!!hubActionBlocked('save_mission', $hubStatus, $hubConnection));
-  const changeBlocked = $derived(!!hubActionBlocked('set_mission_state', $hubStatus, $hubConnection));
-  const importBlocked = $derived(!!hubActionBlocked('import_mission_plan', $hubStatus, $hubConnection));
+  // Why the hub refuses each kind of write (an older or offline hub), said
+  // on the greyed button's title rather than leaving it grey for no reason.
+  const saveWhy = $derived(hubActionBlocked('save_mission', $hubStatus, $hubConnection));
+  const changeWhy = $derived(hubActionBlocked('set_mission_state', $hubStatus, $hubConnection));
+  const importWhy = $derived(hubActionBlocked('import_mission_plan', $hubStatus, $hubConnection));
+  const saveBlocked = $derived(!!saveWhy);
+  const changeBlocked = $derived(!!changeWhy);
+  const importBlocked = $derived(!!importWhy);
   const mayChange = $derived(!!detail?.may_change && !!mission && !isFinal(mission.state));
   const split = $derived(mission ? splitMoves(mission.state) : { inline: [], menu: [] });
 
@@ -303,6 +308,7 @@
     // A refused Complete's override is that mission's (review r8): it never
     // carries over to the next one.
     ciRed = false;
+    grantCardHidden = false;
     importOpen = false;
     importText = '';
     importResult = null;
@@ -664,6 +670,20 @@
   let cardNote = $state<{ id: number; text: string } | null>(null);
   /** Cards this person cannot act on and hid, by id (per window). */
   let hiddenCards = $state<number[]>([]);
+  /** The grant card was put away ("Not now") for the open mission. */
+  let grantCardHidden = $state(false);
+  /** The hub's "waiting on a person" is a grant to sign, or a grant would
+   *  let this active mission run by itself: the centre offers it as a
+   *  card, as the phone does, rather than leave "Needs you" with nothing
+   *  to press (the form sat in the Plan tab's Autonomy block only). */
+  const grantCard = $derived(
+    !!mayChange && !!plan && !!mission && mission.state === 'active' && !grantCardHidden && grantWouldHelp(plan.autonomy),
+  );
+  const askedLevelLabel = $derived(MISSION_LEVELS.find((l) => l.level === plan?.autonomy.asked)?.label ?? `L${plan?.autonomy.asked}`);
+  function openGrantForm() {
+    showMissionPanel('plan');
+    granting = true;
+  }
 
   // The grant: what the loop may do by itself, for how long, on what.
   let granting = $state(false);
@@ -903,7 +923,7 @@
               >
             {/if}
             <div class="row">
-              <button class="btn btn--primary" type="submit" disabled={busy || saveBlocked} data-testid="mission-create">Create</button>
+              <button class="btn btn--primary" type="submit" disabled={busy || saveBlocked} data-testid="mission-create" title={saveWhy ?? undefined}>Create</button>
               <button class="btn btn--quiet" type="button" onclick={() => roomCreating.set(false)}>Cancel</button>
             </div>
           </form>
@@ -921,11 +941,10 @@
           <span class="grow"></span>
           {#if mayChange}
             {#each split.inline as to (to)}
-              <button class="btn btn--chip" type="button" disabled={busy || changeBlocked} data-testid="mission-move-{to}" onclick={() => void move(to)}
-                >{moveLabel(mission.state, to)}</button
+              <button class="btn btn--chip" type="button" disabled={busy || changeBlocked} data-testid="mission-move-{to}" onclick={() => void move(to)} title={changeWhy ?? undefined}>{moveLabel(mission.state, to)}</button
               >
             {/each}
-            <button class="btn btn--quiet" type="button" disabled={busy || saveBlocked} data-testid="mission-edit" onclick={startEdit}>Edit</button>
+            <button class="btn btn--quiet" type="button" disabled={busy || saveBlocked} data-testid="mission-edit" onclick={startEdit} title={saveWhy ?? undefined}>Edit</button>
             {#if split.menu.length > 0}
               <!-- svelte-ignore a11y_no_static_element_interactions -->
               <span class="more" bind:this={moreEl} onkeydown={moreKey}>
@@ -937,7 +956,7 @@
                   aria-expanded={moreOpen}
                   disabled={busy || changeBlocked}
                   data-testid="mission-more"
-                  onclick={() => (moreOpen = !moreOpen)}>⋯</button
+                  onclick={() => (moreOpen = !moreOpen)} title={changeWhy ?? undefined}>⋯</button
                 >
                 {#if moreOpen}
                   <span class="more-menu" role="menu" aria-label="Mission actions" data-testid="mission-more-menu">
@@ -991,7 +1010,7 @@
               type="button"
               disabled={busy || changeBlocked}
               data-testid="mission-move-confirm"
-              onclick={() => void confirmFinal()}>{moveLabel(mission.state, confirmMove)}</button
+              onclick={() => void confirmFinal()} title={changeWhy ?? undefined}>{moveLabel(mission.state, confirmMove)}</button
             >
             <button class="btn btn--quiet" type="button" data-testid="mission-move-keep" onclick={() => (confirmMove = null)}>Keep</button>
           </div>
@@ -1004,7 +1023,7 @@
               type="button"
               disabled={busy || changeBlocked}
               data-testid="mission-ci-override"
-              onclick={() => void move('completed', true)}>Complete anyway</button
+              onclick={() => void move('completed', true)} title={changeWhy ?? undefined}>Complete anyway</button
             >
             <button class="btn btn--quiet" type="button" data-testid="mission-ci-keep" onclick={() => (ciRed = false)}>Keep</button>
           </div>
@@ -1073,8 +1092,7 @@
               <p>{plannerFailure.text}</p>
               <div class="row">
                 {#if mayChange}
-                  <button class="btn btn--quiet" type="button" disabled={busy || changeBlocked} data-testid="mission-planner-retry" onclick={() => void askPlanner()}
-                    >Retry</button
+                  <button class="btn btn--quiet" type="button" disabled={busy || changeBlocked} data-testid="mission-planner-retry" onclick={() => void askPlanner()} title={changeWhy ?? undefined}>Retry</button
                   >
                 {/if}
                 <button
@@ -1133,7 +1151,7 @@
                     type="button"
                     disabled={busy || changeBlocked}
                     data-testid="mission-proposals-replan"
-                    onclick={() => void askPlanner()}>Ask the planner again</button
+                    onclick={() => void askPlanner()} title={changeWhy ?? undefined}>Ask the planner again</button
                   >
                 </div>
               {/if}
@@ -1146,6 +1164,22 @@
             </div>
           {/if}
 
+          {#if grantCard && mission && plan}
+            <div class="card needs" data-testid="mission-grant-card">
+              <p class="card-head">
+                <StatusChip state="waiting" />
+                <span class="muted small"
+                  >Fleet{#if mission.waiting_on?.reason === 'sign_grant'} · waiting {shortAge(mission.waiting_on.since)}{:else} · runs only when you press{/if}</span
+                >
+              </p>
+              <p class="card-text">Sign the autonomy grant: {askedLevelLabel}.{#if plan.autonomy.why} {withoutConfigKeys(plan.autonomy.why)}{/if}</p>
+              <div class="row">
+                <button class="btn btn--chip" type="button" disabled={busy || changeBlocked} data-testid="mission-grant-card-review" onclick={openGrantForm} title={changeWhy ?? undefined}>Review and sign…</button
+                >
+                <button class="btn btn--quiet" type="button" data-testid="mission-grant-card-not-now" onclick={() => (grantCardHidden = true)}>Not now</button>
+              </div>
+            </div>
+          {/if}
           {#if openCards.length > 0}
             <ul class="cards" aria-label="Waiting for you" data-testid="mission-cards">
               {#each openCards as c, i (c.id)}
@@ -1172,8 +1206,7 @@
                       {#if ownWords[c.id] || options.length === 0}
                         <span class="row">
                           <input placeholder="Your answer" aria-label="Your answer" bind:value={answers[c.id]} data-testid="mission-card-answer" />
-                          <button class="btn btn--chip" type="button" disabled={busy || changeBlocked} data-testid="mission-card-apply" onclick={() => void decide(c, true)}
-                            >Answer</button
+                          <button class="btn btn--chip" type="button" disabled={busy || changeBlocked} data-testid="mission-card-apply" onclick={() => void decide(c, true)} title={changeWhy ?? undefined}>Answer</button
                           >
                         </span>
                       {/if}
@@ -1188,11 +1221,9 @@
                     <p class="card-text">{cardLine(c)}</p>
                     {#if detail.may_change}
                       <div class="row">
-                        <button class="btn btn--chip" type="button" disabled={busy || changeBlocked} data-testid="mission-card-apply" onclick={() => void decide(c, true)}
-                          >Apply</button
+                        <button class="btn btn--chip" type="button" disabled={busy || changeBlocked} data-testid="mission-card-apply" onclick={() => void decide(c, true)} title={changeWhy ?? undefined}>Apply</button
                         >
-                        <button class="btn btn--quiet" type="button" disabled={busy || changeBlocked} data-testid="mission-card-dismiss" onclick={() => void decide(c, false)}
-                          >Dismiss</button
+                        <button class="btn btn--quiet" type="button" disabled={busy || changeBlocked} data-testid="mission-card-dismiss" onclick={() => void decide(c, false)} title={changeWhy ?? undefined}>Dismiss</button
                         >
                       </div>
                     {:else}
@@ -1231,8 +1262,7 @@
               </p>
               <div class="row">
                 {#if mission.mode !== 'plan'}
-                  <button class="btn btn--chip" type="button" disabled={busy || changeBlocked} data-testid="mission-empty-plan" onclick={() => void askPlanner()}
-                    >Ask the planner</button
+                  <button class="btn btn--chip" type="button" disabled={busy || changeBlocked} data-testid="mission-empty-plan" onclick={() => void askPlanner()} title={changeWhy ?? undefined}>Ask the planner</button
                   >
                 {/if}
                 <button
@@ -1240,7 +1270,7 @@
                   type="button"
                   disabled={busy || importBlocked}
                   data-testid="mission-empty-import"
-                  onclick={() => (showMissionPanel('plan'), (importOpen = true))}>Import a plan…</button
+                  onclick={() => (showMissionPanel('plan'), (importOpen = true))} title={importWhy ?? undefined}>Import a plan…</button
                 >
                 <button class="btn btn--quiet" type="button" data-testid="mission-empty-tasks" onclick={() => showMissionPanel('plan')}>Add tasks by hand</button>
               </div>
@@ -1256,7 +1286,7 @@
                       <span class="arrow" aria-hidden="true">→</span>
                       <span>{stepLine(st)}</span>
                       {#if mayChange && mission.state === 'active' && st.kind !== 'ask'}
-                        <button class="btn btn--chip" type="button" disabled={busy || changeBlocked} onclick={() => void startWave(stepKey(st))}>Go</button>
+                        <button class="btn btn--chip" type="button" disabled={busy || changeBlocked} onclick={() => void startWave(stepKey(st))} title={changeWhy ?? undefined}>Go</button>
                       {/if}
                     </li>
                   {/each}
@@ -1273,7 +1303,7 @@
                     type="button"
                     disabled={busy || changeBlocked}
                     data-testid="mission-start-wave"
-                    onclick={() => void startWave()}>Start wave ({pressable.length})</button
+                    onclick={() => void startWave()} title={changeWhy ?? undefined}>Start wave ({pressable.length})</button
                   >
                   {#if openCards.length > 0}<span class="muted small">once the cards are answered</span>{/if}
                   {#if plan && grantWouldHelp(plan.autonomy)}
@@ -1283,7 +1313,7 @@
                       class="link"
                       type="button"
                       data-testid="mission-run-itself"
-                      onclick={() => (showMissionPanel('plan'), (granting = true))}>or let it run by itself…</button
+                      onclick={openGrantForm}>or let it run by itself…</button
                     >
                   {/if}
                 </p>
@@ -1299,6 +1329,7 @@
               completed={missions.filter((m) => isFinal(m.state)).length}
               mayChange={!!detail.may_change}
               reopenBlocked={changeBlocked}
+              reopenWhy={changeWhy}
               nameOf={personName}
               onreopen={() => move('paused')}
               onarchived={load}
@@ -1372,8 +1403,7 @@
           {/if}
         </p>
         <div class="starters">
-          <button class="btn btn--primary" type="button" disabled={saveBlocked} data-testid="mission-room-new" onclick={startNewMission}
-            >New mission</button
+          <button class="btn btn--primary" type="button" disabled={saveBlocked} data-testid="mission-room-new" onclick={startNewMission} title={saveWhy ?? undefined}>New mission</button
           >
           <button
             class="btn"
@@ -1517,7 +1547,7 @@
                     type="button"
                     disabled={busy || saveBlocked || wakeBad || parallelBad}
                     data-testid="mission-edit-save"
-                    onclick={() => void saveEdit()}>Save</button
+                    onclick={() => void saveEdit()} title={saveWhy ?? undefined}>Save</button
                   >
                   <button class="btn btn--quiet" type="button" onclick={() => (editing = false)}>Cancel</button>
                 </div>
@@ -1554,18 +1584,15 @@
               </dl>
               {#if mayChange && plan}
                 <div class="row">
-                  <button class="btn btn--quiet" type="button" disabled={busy || changeBlocked} data-testid="mission-plan" onclick={() => void askPlanner()}
-                    >Ask the planner</button
+                  <button class="btn btn--quiet" type="button" disabled={busy || changeBlocked} data-testid="mission-plan" onclick={() => void askPlanner()} title={changeWhy ?? undefined}>Ask the planner</button
                   >
                   {#if plan.autonomy.grant}
-                    <button class="btn btn--quiet" type="button" disabled={busy || changeBlocked} data-testid="mission-revoke" onclick={() => void revokeGrant()}
-                      >End the grant (L{plan.autonomy.grant.level}, {plan.autonomy.grant.until_done
+                    <button class="btn btn--quiet" type="button" disabled={busy || changeBlocked} data-testid="mission-revoke" onclick={() => void revokeGrant()} title={changeWhy ?? undefined}>End the grant (L{plan.autonomy.grant.level}, {plan.autonomy.grant.until_done
                         ? 'until the mission completes'
                         : `until ${untilWords(plan.autonomy.grant.expires_at)}`})</button
                     >
                   {:else}
-                    <button class="btn btn--quiet" type="button" disabled={busy || changeBlocked} data-testid="mission-grant" onclick={() => (granting = !granting)}
-                      >Grant a budget so it runs by itself…</button
+                    <button class="btn btn--quiet" type="button" disabled={busy || changeBlocked} data-testid="mission-grant" onclick={() => (granting = !granting)} title={changeWhy ?? undefined}>Grant a budget so it runs by itself…</button
                     >
                   {/if}
                 </div>
@@ -1644,8 +1671,7 @@
               <div class="import" data-testid="mission-import">
                 <PlanImportForm bind:text={importText} bind:ready={importRows} />
                 <span class="row">
-                  <button class="btn" type="button" disabled={busy || importBlocked || !importRows} data-testid="mission-import-run" onclick={() => void runImport()}
-                    >Import {importRows?.length ?? 0} steps</button
+                  <button class="btn" type="button" disabled={busy || importBlocked || !importRows} data-testid="mission-import-run" onclick={() => void runImport()} title={importWhy ?? undefined}>Import {importRows?.length ?? 0} steps</button
                   >
                   <button class="btn btn--quiet" type="button" onclick={() => ((importOpen = false), (importText = ''))}>Cancel</button>
                 </span>
@@ -1673,13 +1699,11 @@
               {:else}
                 <div class="row foot-actions">
                   {#if mayChange && !importOpen}
-                    <button class="btn btn--quiet" type="button" disabled={busy || importBlocked} data-testid="mission-import-open" onclick={() => (importOpen = true)}
-                      >Import a plan…</button
+                    <button class="btn btn--quiet" type="button" disabled={busy || importBlocked} data-testid="mission-import-open" onclick={() => (importOpen = true)} title={importWhy ?? undefined}>Import a plan…</button
                     >
                   {/if}
                   {#if mayChange && split.menu.includes('completed')}
-                    <button class="btn btn--quiet" type="button" disabled={busy || changeBlocked} data-testid="mission-finish-open" onclick={() => pickFinal('completed')}
-                      >Finish…</button
+                    <button class="btn btn--quiet" type="button" disabled={busy || changeBlocked} data-testid="mission-finish-open" onclick={() => pickFinal('completed')} title={changeWhy ?? undefined}>Finish…</button
                     >
                   {/if}
                   {#if mission.state === 'draft' || isFinal(mission.state)}
