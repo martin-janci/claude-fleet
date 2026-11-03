@@ -213,7 +213,7 @@ pub async fn fire_with(
 ) -> Result<RoutineRunRow, IpcError> {
     let (owner, _starting, plan, checks) = {
         let s = lock(&deps.store)?;
-        let (host, note) = match plan(&s, r, now)? {
+        let (host, note, login) = match plan(&s, r, now)? {
             Plan::Skip(why) => {
                 return record_skip(&s, r, trigger, trigger_ref, scheduled_for, &why, now)
             }
