@@ -207,7 +207,7 @@ pub fn check_policy(p: &MissionPolicy) -> Result<MissionPolicy, IpcError> {
     if !matches!(p.lane_pr.as_str(), "off" | "draft") {
         return Err(bad("lane_pr", "off or draft".into()));
     }
-    if !MISSION_EXECUTIONS.contains(&p.lane_test_at.as_str()) {
+    if !matches!(p.lane_test_at.as_str(), "item" | "lane") {
         return Err(bad("lane_test_at", "item or lane".into()));
     }
     if !(1..=POLICY_MAX_LANE_RELAY).contains(&p.lane_relay_after) {

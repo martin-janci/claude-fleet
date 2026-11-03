@@ -399,10 +399,13 @@ pub async fn run_item_with(
                         .map(|d| d.host_alias.clone())
                 })
         }),
-        base_branch: prior
-            .as_ref()
-            .map(|p| p.branch.clone())
-            .or_else(|| deps.first().map(|d| d.branch.clone())),
+        // A dependency pinned to its commit (a lane's) merges below, never
+        // as the base: its branch has moved on past it.
+        base_branch: prior.as_ref().map(|p| p.branch.clone()).or_else(|| {
+            deps.iter()
+                .find(|d| d.commit.is_none())
+                .map(|d| d.branch.clone())
+        }),
         build_cache: warm,
         ..start.clone()
     };
@@ -410,16 +413,14 @@ pub async fn run_item_with(
         tickets::start_work_unprompted(store, ssh, reg, &start, view, net).await?;
     // M2: the other dependencies merge into the new checkout before the
     // prompt says what it holds; the run's own work begins after them.
-    let (merged, dep_head) = match row
-        .worktree_id
-        .filter(|_| !deps.is_empty())
-        .map(|w| lock(store.as_ref()).map(|s| s.worktree_path(w)))
-        .transpose()?
-        .transpose()?
-        .flatten()
-    {
-        Some(dir) => super::dep_work::merge_into(ssh, &row.host_alias, &dir, &deps).await,
-        None => (vec![super::dep_work::Merged::Missing; deps.len()], None),
+    let prepared = if deps.is_empty() {
+        super::dep_work::Prepared::default()
+    } else {
+        let dir = match row.worktree_id {
+            Some(w) => lock(store.as_ref())?.worktree_path(w)?,
+            None => None,
+        };
+        super::dep_work::prepare(ssh, &row.host_alias, dir.as_deref(), &deps).await
     };
     let (prompt, task) = {
         let s = lock(store.as_ref())?;
@@ -435,9 +436,9 @@ pub async fn run_item_with(
             prompt.push_str("\n\n");
             prompt.push_str(&prior_work_note(role, &p.branch));
         }
-        if let Some(n) = super::dep_work::note(&deps, &merged) {
+        if let Some(n) = &prepared.note {
             prompt.push_str("\n\n");
-            prompt.push_str(&n);
+            prompt.push_str(n);
         }
         let claude = plan
             .agent
@@ -455,7 +456,7 @@ pub async fn run_item_with(
         }
         let task = record_run(&s, row.id, &prompt, item_id, attempt, role)?;
         // Its evidence and review read from after the merged dependencies.
-        if let Some(h) = &dep_head {
+        if let Some(h) = &prepared.head {
             s.set_task_start_head(task.id, h)?;
         }
         (prompt, task)

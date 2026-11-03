@@ -116,27 +116,51 @@ impl Store {
         self.write_session_event(session_id, claude_session_id, kind, detail, Announce::No)
     }
 
-    /// The subagents `task_id`'s worker started while the task ran (mission
-    /// improvements M7, the `subagent_started` events of its session from
-    /// the task's start to its end, `now` while it runs), by type; a start
-    /// with no type counts as `other`.
+    /// The subagents each of `task_ids`' workers started while the task ran
+    /// (mission improvements M7, the `subagent_started` events of its session
+    /// from the task's start up to its end, `now` while it runs), by task,
+    /// then by type; a start with no type counts as `other`. The end is
+    /// exclusive, so a lead that hands the next task over in the second the
+    /// last one finished counts a subagent for one of them, not both. One
+    /// query for all of them.
     pub fn task_subagents(
         &self,
-        task_id: i64,
+        task_ids: &[i64],
         now: i64,
-    ) -> Result<std::collections::BTreeMap<String, u32>, crate::ipc_error::IpcError> {
-        let mut stmt = self.conn.prepare_cached(
-            "SELECT COALESCE(e.detail, 'other'), COUNT(*) FROM tasks t \
+    ) -> Result<
+        std::collections::HashMap<i64, std::collections::BTreeMap<String, u32>>,
+        crate::ipc_error::IpcError,
+    > {
+        let mut out: std::collections::HashMap<i64, std::collections::BTreeMap<String, u32>> =
+            std::collections::HashMap::new();
+        if task_ids.is_empty() {
+            return Ok(out);
+        }
+        let ids = task_ids
+            .iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT t.id, COALESCE(e.detail, 'other'), COUNT(*) FROM tasks t \
                JOIN session_events e ON e.session_id = t.worker_session_id \
                 AND e.kind = 'subagent_started' \
                 AND e.at >= COALESCE(t.started_at, t.created_at) \
-                AND e.at <= COALESCE(t.finished_at, ?2) \
-              WHERE t.id = ?1 GROUP BY 1",
-        )?;
-        let rows = stmt.query_map(rusqlite::params![task_id, now], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, u32>(1)?))
+                AND e.at < COALESCE(t.finished_at, ?1 + 1) \
+              WHERE t.id IN ({ids}) GROUP BY 1, 2"
+        ))?;
+        let rows = stmt.query_map(rusqlite::params![now], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, u32>(2)?,
+            ))
         })?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        for row in rows {
+            let (task, kind, n) = row?;
+            out.entry(task).or_default().insert(kind, n);
+        }
+        Ok(out)
     }
 
     /// Whether the session's timeline needs pruning after an insert — i.e.
@@ -819,9 +843,9 @@ mod tests {
             .unwrap();
         s.insert_session_event_quietly(other, None, "subagent_started", Some("Explore"))
             .unwrap();
-        let n = s.task_subagents(t.id, now_unix() + 1).unwrap();
+        let n = s.task_subagents(&[t.id], now_unix() + 1).unwrap();
         assert_eq!(
-            n,
+            n[&t.id],
             std::collections::BTreeMap::from([
                 ("Explore".to_string(), 2),
                 ("other".to_string(), 1)

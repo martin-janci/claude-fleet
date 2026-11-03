@@ -10,6 +10,7 @@
   import { errorText } from '../error_copy';
   import type { IpcError } from '../result';
   import { debugDot } from '../routines';
+  import { money } from '../automation';
   import {
     actionTitle,
     agentJob,
@@ -51,7 +52,6 @@
     }
   }
 
-  const usd = (m: number) => `$${(m / 1_000_000).toFixed(2)}`;
 
   async function openJob(id: number) {
     const r = await agentJob(id);
@@ -125,7 +125,7 @@
               <strong>{p.kind} · {p.key}</strong>
               {#each [['built-in', p.builtin], ['fleet', p.fleet]] as const as [who, side] (who)}
                 <button type="button" class="link" onclick={() => void openJob(side.job_id)}
-                  >{who}: {side.said} · {side.state} · {usd(side.cost_micros)}</button
+                  >{who}: {side.said} · {side.state} · {money(side.cost_micros)}</button
                 >
               {/each}
             </span>

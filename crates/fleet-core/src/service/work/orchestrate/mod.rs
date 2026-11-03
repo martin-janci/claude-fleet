@@ -30,7 +30,7 @@ pub mod triage;
 pub mod waits;
 
 use self::planner::{Command, PlannerOutput};
-use self::steps::{plan_steps, Step, StepInput, AUTO_LEVEL};
+use self::steps::{plan_steps_holding, Step, StepInput, AUTO_LEVEL};
 use super::missions::{changeable, mission_id};
 use super::WorkLinkArgs;
 use crate::cancel::CancellationRegistry;
@@ -46,7 +46,7 @@ use crate::store::{
     Store, TaskRow, WorkItemRow, GRANT_MAX_SECS, GRANT_UNTIL_DONE_AT,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -209,7 +209,7 @@ fn max_parallel(m: &MissionRow, a: &Autonomy) -> u32 {
 /// The mission's steps over every member (the loop's own view: no caller's
 /// scope narrows what it plans for).
 fn steps_for(s: &Store, m: &MissionRow, a: &Autonomy) -> Result<Vec<Step>, IpcError> {
-    Ok(steps_and_waits(s, m, a)?.0)
+    Ok(plan_mission(s, m, a, false)?.0)
 }
 
 /// [`steps_for`], and why ready work it leaves out waits (M3,
@@ -219,25 +219,77 @@ fn steps_and_waits(
     m: &MissionRow,
     a: &Autonomy,
 ) -> Result<(Vec<Step>, BTreeSet<&'static str>), IpcError> {
+    plan_mission(s, m, a, true)
+}
+
+/// The mission's steps, and with `with_waits` their wait causes (only the
+/// tick books them).
+fn plan_mission(
+    s: &Store,
+    m: &MissionRow,
+    a: &Autonomy,
+    with_waits: bool,
+) -> Result<(Vec<Step>, BTreeSet<&'static str>), IpcError> {
     let items = s.mission_items(m.id)?;
     let graph = super::graph::build(s, &ViewScope::internal(), &items)?;
     let attempts = attempts_of(s, &items)?;
     let counts = s.mission_task_counts(m.id)?;
+    // Lanes L3: a lane takes one implement run at a time, when it is free.
+    // Read before planning, so a lane test that waits takes no slot (M5).
+    let in_lanes = m.policy.execution == "lane";
+    let lanes = if in_lanes {
+        s.mission_lanes(m.id)?
+    } else {
+        Vec::new()
+    };
+    let lane_of: HashMap<i64, i64> = lanes
+        .iter()
+        .flat_map(|l| l.item_ids.iter().map(move |i| (*i, l.id)))
+        .collect();
+    // M5: with a lane's tests at its end, a task waiting for its test does
+    // not hold the lane; the lane's one test run waits for its last task.
+    let tests_at_end = in_lanes && m.policy.lane_test_at == "lane";
+    let busy = if in_lanes {
+        let awaiting = if tests_at_end {
+            HashSet::new()
+        } else {
+            lanes::awaiting_test(&graph)
+        };
+        lanes::busy_lanes(s, m, &lanes, &attempts, &awaiting)?
+    } else {
+        HashSet::new()
+    };
+    let held_tests = if tests_at_end {
+        lanes::held_lane_tests(&graph, &lane_of, &busy)
+    } else {
+        HashSet::new()
+    };
     let plan = |max_parallel: u32| {
-        plan_steps(&StepInput {
-            mission: m,
-            graph: &graph,
-            items: &items,
-            attempts: &attempts,
-            counts,
-            max_parallel,
-        })
+        plan_steps_holding(
+            &StepInput {
+                mission: m,
+                graph: &graph,
+                items: &items,
+                attempts: &attempts,
+                counts,
+                max_parallel,
+            },
+            &held_tests,
+        )
     };
     let steps = plan(max_parallel(m, a));
     let mut causes: BTreeSet<&'static str> = BTreeSet::new();
-    causes.extend(waits::slot_cause(&plan(u32::MAX), &steps));
-    if steps.iter().any(|st| st.kind == "ask") || graph.nodes.iter().any(|n| n.state == "held") {
-        causes.insert("person");
+    // What a gate held back, for the causes: nothing to compare without them.
+    let before = |steps: &[Step]| with_waits.then(|| waits::impl_items(steps));
+    let held = |before: Option<BTreeSet<i64>>, after: &[Step]| {
+        before.is_some_and(|b| waits::held(&b, after))
+    };
+    if with_waits {
+        causes.extend(waits::slot_cause(&plan(u32::MAX), &steps));
+        if steps.iter().any(|st| st.kind == "ask") || graph.nodes.iter().any(|n| n.state == "held")
+        {
+            causes.insert("person");
+        }
     }
     // Lanes L5: what each task says it changes, in which repository (a
     // mission with one repo names it for a task that names none).
@@ -263,45 +315,20 @@ fn steps_and_waits(
         .filter(|(_, ts)| ts.iter().any(steps::open_impl))
         .map(|(i, _)| *i)
         .collect();
-    if m.policy.execution != "lane" {
-        let before = waits::impl_items(&steps);
+    if !in_lanes {
+        let b = before(&steps);
         let steps = touches::gate_items(steps, &known, &running, None);
-        if waits::held(&before, &steps) {
+        if held(b, &steps) {
             causes.insert("touches");
         }
         return Ok((steps, causes));
     }
-    // Lanes L3: a lane takes one implement run at a time, when it is free.
-    let lanes = s.mission_lanes(m.id)?;
-    let lane_of: HashMap<i64, i64> = lanes
-        .iter()
-        .flat_map(|l| l.item_ids.iter().map(move |i| (*i, l.id)))
-        .collect();
-    // M5: with a lane's tests at its end, a task waiting for its test does
-    // not hold the lane; the lane's one test run waits for its last task.
-    let tests_at_end = m.policy.lane_test_at == "lane";
-    let awaiting = if tests_at_end {
-        std::collections::HashSet::new()
-    } else {
-        lanes::awaiting_test(&graph)
-    };
-    let busy = lanes::busy_lanes(s, m, &lanes, &attempts, &awaiting)?;
-    let before = waits::impl_items(&steps);
+    let b = before(&steps);
     let steps = lanes::gate(steps, &lane_of, &busy);
-    let steps = if tests_at_end {
-        let state_of: HashMap<i64, &str> = graph
-            .nodes
-            .iter()
-            .map(|n| (n.item_id, n.state.as_str()))
-            .collect();
-        lanes::gate_lane_tests(steps, &lane_of, &busy, &state_of)
-    } else {
-        steps
-    };
-    if waits::held(&before, &steps) {
+    if held(b, &steps) {
         causes.insert("lane");
     }
-    let before = waits::impl_items(&steps);
+    let b = before(&steps);
     // Lanes L5: a lane starts beside another of its repository only when
     // both say all they change and it does not meet.
     let done = |i: &i64| {
@@ -344,7 +371,7 @@ fn steps_and_waits(
         .filter(|i| !lane_of.contains_key(i))
         .collect();
     let steps = touches::gate_items(steps, &known, &running, Some(&laneless));
-    if waits::held(&before, &steps) {
+    if held(b, &steps) {
         causes.insert("touches");
     }
     Ok((steps, causes))

@@ -180,9 +180,10 @@ export function compareAgents(): Promise<Result<AgentsComparison>> {
   return invokeCmd<AgentsComparison>('agents_debug', { action: 'compare', id: null });
 }
 
-/** "3 agree, 1 differs; 2 built-in only, 0 fleet only". */
+/** "3 agree, 1 differs; 2 built-in only, 0 fleet only" ("1 agrees", "2 differ"). */
 export function comparisonLine(c: AgentsComparison): string {
-  return `${c.agree} agree, ${c.differ} differ${c.differ === 1 ? 's' : ''}; ${c.builtin_only} built-in only, ${c.fleet_only} fleet only`;
+  const s = (n: number) => (n === 1 ? 's' : '');
+  return `${c.agree} agree${s(c.agree)}, ${c.differ} differ${s(c.differ)}; ${c.builtin_only} built-in only, ${c.fleet_only} fleet only`;
 }
 
 export function explainAgents(): Promise<Result<AgentsExplain>> {
@@ -337,6 +338,7 @@ export function actionBody(a: Pick<AgentAction, 'payload'>): string | null {
 export function ruleLine(
   r: Pick<AgentRule, 'scope' | 'level' | 'host_alias' | 'active' | 'budget_micros' | 'spent_today_micros'>,
 ): string {
+  // automation.ts's `money`, kept here: automation imports this module.
   const usd = (m: number) => `$${(m / 1_000_000).toFixed(2)}`;
   const budget =
     r.budget_micros != null ? ` · ${usd(r.spent_today_micros ?? 0)} of ${usd(r.budget_micros)} today` : '';

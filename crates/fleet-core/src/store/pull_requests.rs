@@ -305,12 +305,15 @@ impl Store {
 
     /// Whether a merged pull request came from `branch` (mission
     /// improvements M2): its work is on the base branch, however it was
-    /// merged (a squash leaves no common commit for git to see).
-    pub fn branch_pull_request_merged(&self, branch: &str) -> Result<bool> {
+    /// merged (a squash leaves no common commit for git to see). Only in
+    /// `project` when one is named: another repository's branch of the same
+    /// name says nothing about this one's.
+    pub fn branch_pull_request_merged(&self, branch: &str, project: Option<i64>) -> Result<bool> {
         self.conn.query_row(
             "SELECT EXISTS (SELECT 1 FROM pull_requests \
-              WHERE state = 'MERGED' AND head_ref = ?1)",
-            params![branch],
+              WHERE state = 'MERGED' AND head_ref = ?1 \
+                AND (?2 IS NULL OR project_id IS NULL OR project_id = ?2))",
+            params![branch, project],
             |r| r.get(0),
         )
     }
@@ -370,6 +373,26 @@ mod tests {
             (None, None)
         );
         assert_eq!(repo_and_number("not a url"), (None, None));
+    }
+
+    /// A merged branch counts in its own project only: another repository's
+    /// branch of the same name says nothing about this one's.
+    #[test]
+    fn a_merged_branch_counts_in_its_own_project() {
+        let s = Store::open_in_memory().unwrap();
+        Store::upsert_pull_request_in_tx(
+            &s.conn,
+            URL,
+            None,
+            Some(&ev("MERGED")),
+            by(1, "api"),
+            100,
+        )
+        .unwrap();
+        assert!(s.branch_pull_request_merged("fix/login", Some(3)).unwrap());
+        assert!(s.branch_pull_request_merged("fix/login", None).unwrap());
+        assert!(!s.branch_pull_request_merged("fix/login", Some(4)).unwrap());
+        assert!(!s.branch_pull_request_merged("other", Some(3)).unwrap());
     }
 
     #[test]
