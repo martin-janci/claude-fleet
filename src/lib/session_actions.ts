@@ -81,7 +81,7 @@ export const ROW_ACTIONS: readonly SessionActionDef[] = [
   { id: 'copy_transcript', label: 'Copy transcript', detailsTestId: 'copy-transcript-from-details', synonyms: ['copy', 'transcript', 'conversation', 'export'] },
   { id: 'archive', label: 'Archive', detailsTestId: 'archive-from-details', synonyms: ['archive', 'done', 'hide'] },
   { id: 'remove_from_list', label: 'Remove from list', detailsTestId: 'remove-from-list-details', synonyms: ['remove', 'dismiss'] },
-  { id: 'safe_remove', label: 'Safe remove…', detailsTestId: 'safe-kill-from-details', synonyms: ['clean up', 'remove'] },
+  { id: 'safe_remove', label: 'Clean up…', detailsTestId: 'safe-kill-from-details', synonyms: ['safe remove', 'remove'] },
   { id: 'kill', label: 'Kill session…', detailsTestId: 'kill-from-details', danger: true, synonyms: ['kill', 'stop', 'end'] },
 ];
 
