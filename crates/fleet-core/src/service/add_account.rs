@@ -205,7 +205,29 @@ pub async fn run(
             start_login(args, store, tmux).await?;
             serde_json::json!({ "session": login_session_name(&args.profile) })
         }
-        "login_status" => to_value(login_status(args, store, tmux).await?),
+        "login_status" => {
+            let status = login_status(args, store, tmux).await?;
+            if status.logged_in {
+                // Review 2026-11-03 F3: a new login's first session must not
+                // miss the host's MCP servers (fleet's own among them). Best
+                // effort, and a no-op once the profile has them all.
+                if let Err(e) = crate::service::provision::share_mcp_servers_into(
+                    ssh,
+                    &args.host_alias,
+                    &args.profile,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        "[add-account] sharing MCP servers into {} on {} failed: {}",
+                        args.profile,
+                        args.host_alias,
+                        e.message
+                    );
+                }
+            }
+            to_value(status)
+        }
         "login_key" => {
             login_key(args, tmux).await?;
             serde_json::json!({ "sent": true })
@@ -310,7 +332,8 @@ fn start_login_script(profile: &str) -> String {
     );
     format!(
         "tmux has-session -t {exact} 2>/dev/null && exit 0; \
-         umask 077; d=\"$HOME/.claude-profiles/\"{p}; mkdir -p \"$d\" || exit 1; \
+         umask 077; d=\"$HOME/.claude-profiles/\"{p}; \
+         [ -d \"$d\" ] || {{ mkdir -p \"$d\" || exit 1; : > \"$d/{NEW_LOGIN_MARK}\"; }}; \
          [ -e \"$d/.claude.json\" ] || printf '%s\\n' '{{\"hasCompletedOnboarding\":true}}' > \"$d/.claude.json\"; \
          tmux new-session -d -s {name} -x 120 -y 40 -c \"$HOME\" -e COLORTERM=truecolor \
          -e TERM=xterm-256color -e \"PATH=$PATH\" {pane}",
@@ -372,14 +395,31 @@ async fn login_key(args: &AddAccountArgs, tmux: &dyn TmuxExec) -> Result<(), Ipc
     Ok(())
 }
 
-async fn end_login(profile: &str, tmux: &dyn TmuxExec) -> Result<(), IpcError> {
+/// Marks a profile directory [`start_login_script`] made itself, so
+/// [`end_login_script`] may take it away again when its login never
+/// completed. A directory that was there before is never marked.
+const NEW_LOGIN_MARK: &str = ".fleet-new-login";
+
+/// PURE: close the login pane; then, for a directory this flow made, keep
+/// it once it holds a login (a `.credentials.json`, or an `oauthAccount`
+/// in its `.claude.json` where the token is in the Keychain) and only drop
+/// the mark, else remove it, so a cancelled + Add account leaves no "not
+/// logged in" profile behind in every login picker (review 2026-11-03 D11).
+fn end_login_script(profile: &str) -> String {
     let exact = quote(&crate::tmux::exact_session(&login_session_name(profile)));
-    run_tmux(
-        tmux,
-        &format!("tmux kill-session -t {exact} 2>/dev/null; true"),
-        "close the login pane",
+    format!(
+        "tmux kill-session -t {exact} 2>/dev/null; \
+         d=\"$HOME/.claude-profiles/\"{p}; \
+         if [ -e \"$d/{NEW_LOGIN_MARK}\" ]; then \
+           if [ -e \"$d/.credentials.json\" ] || grep -q oauthAccount \"$d/.claude.json\" 2>/dev/null; \
+           then rm -f \"$d/{NEW_LOGIN_MARK}\"; else rm -rf -- \"$d\"; fi; \
+         fi; true",
+        p = quote(profile),
     )
-    .await?;
+}
+
+async fn end_login(profile: &str, tmux: &dyn TmuxExec) -> Result<(), IpcError> {
+    run_tmux(tmux, &end_login_script(profile), "close the login pane").await?;
     Ok(())
 }
 
