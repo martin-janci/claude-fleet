@@ -28,7 +28,9 @@ import {
   finalMoveQuestion,
   splitMoves,
   eventSentence,
+  grantSignLabel,
   grantSpanNotice,
+  grantWouldHelp,
   moveLabel,
   autonomyWords,
   plannerError,
@@ -36,6 +38,7 @@ import {
   policyWith,
   progressLabel,
   stateLabel,
+  untilWords,
   withoutConfigKeys,
   brakeReason,
   brakesLine,
@@ -1319,6 +1322,166 @@ describe('WorkMissions', () => {
       );
       expect(eventSentence({ id: 1, at: 1, kind: 'grant', actor: 'p', payload: { level: 2, hours: 8 } })).toBe('Granted L2 for 8 h');
       expect(policyWith({ max_parallel: 2, wake_every_secs: 600 }, { wake_every_secs: null })).toEqual({ max_parallel: 2 });
+    });
+
+    // ── UX antipatterns pass (2026-11-03, the Fable view) ──
+
+    it('a refusal from the Plan tab is said in the panel, beside the press, not at the top of the centre', async () => {
+      current = mission({ state: 'active', level: 2 });
+      handlers.work_mission = () => detailOf(current);
+      handlers.grant_mission = () => Object.assign(new Error('Only the owner may grant'), { code: 'E_FORBIDDEN' });
+      renderMissions();
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-row'));
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-grant'));
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-grant-save'));
+      await flush();
+      const notice = screen.getByTestId('mission-notice');
+      expect(notice.textContent).toContain('Only the owner may grant');
+      expect(screen.getByTestId('mission-panel').contains(notice)).toBe(true);
+      expect(screen.getByTestId('mission-detail-centre').contains(notice)).toBe(false);
+      // The panel folded away: the same notice moves to the centre rather than vanish.
+      await fireEvent.click(screen.getByTestId('mission-panel-close'));
+      await flush();
+      expect(screen.getByTestId('mission-detail-centre').contains(screen.getByTestId('mission-notice'))).toBe(true);
+    });
+
+    it('a mission with no tasks says what comes next in the centre, and Ask the planner runs from there', async () => {
+      current = mission({ state: 'draft', level: 1 });
+      handlers.work_mission = () => detailOf(current);
+      handlers.plan_mission = () => ({ mission_id: 4, cards: [] });
+      renderMissions();
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-row'));
+      await flush();
+      const card = screen.getByTestId('mission-empty-next');
+      expect(card.textContent).toContain('No tasks yet');
+      expect(card.textContent).toContain('and a repo');
+      await fireEvent.click(screen.getByTestId('mission-empty-plan'));
+      await flush();
+      expect(calls('plan_mission')).toHaveLength(1);
+      // Import a plan… opens the Plan tab with the import form.
+      await fireEvent.click(screen.getByTestId('mission-empty-import'));
+      await flush();
+      expect(screen.getByTestId('mission-import')).toBeTruthy();
+    });
+
+    it('the empty-next card goes once the mission has a member task', async () => {
+      current = mission({ state: 'draft', level: 1 });
+      handlers.work_mission = () => ({ ...detailOf(current), items: [item(10, 'Payments v2'), item(11, 'Cards')] });
+      renderMissions();
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-row'));
+      await flush();
+      expect(screen.queryByTestId('mission-empty-next')).toBeNull();
+    });
+
+    it('beside Start wave, a mission that would run by itself with a grant offers the grant form', async () => {
+      current = mission({ state: 'active', level: 2 });
+      handlers.work_mission = () => ({
+        ...detailOf(current),
+        items: [item(10, 'Payments v2'), item(11, 'Cards')],
+        plan: {
+          steps: [{ kind: 'run', item_id: 11, role: 'implement', reason: 'Cards is ready', auto: true }],
+          cards: [],
+          autonomy: { asked: 2, ceiling: 3, effective: 1, why: 'no grant', enabled: true },
+          cost_micros: 0,
+          counts: { total: 2, open: 0 },
+        },
+      });
+      renderMissions();
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-row'));
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-run-itself'));
+      await flush();
+      expect(screen.getByTestId('mission-grant-form')).toBeTruthy();
+      // The button says every term, as the phone's sheet does.
+      expect(screen.getByTestId('mission-grant-save').textContent).toBe('Sign L2 for 8 h, no cap');
+      await fireEvent.input(screen.getByTestId('mission-grant-budget'), { target: { value: '20' } });
+      await flush();
+      expect(screen.getByTestId('mission-grant-save').textContent).toBe('Sign L2 for 8 h, up to $20.00');
+    });
+
+    it('a mission waiting for its grant offers it as a card in the centre; Not now puts it away', async () => {
+      current = mission({ state: 'active', level: 2, waiting_on: { reason: 'sign_grant', since: 1, open_cards: 0 } });
+      handlers.work_mission = () => ({
+        ...detailOf(current),
+        plan: {
+          steps: [],
+          cards: [],
+          autonomy: { asked: 2, ceiling: 3, effective: 1, why: 'no grant signed (orchestrator.max_level)', enabled: true },
+          cost_micros: 0,
+          counts: { total: 1, open: 0 },
+        },
+      });
+      renderMissions();
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-row'));
+      await flush();
+      const card = screen.getByTestId('mission-grant-card');
+      expect(card.textContent).toContain('Sign the autonomy grant: L2 · runs, retries and reviews by itself.');
+      expect(card.textContent).toContain('waiting');
+      expect(card.textContent).not.toContain('orchestrator.');
+      await fireEvent.click(screen.getByTestId('mission-grant-card-review'));
+      await flush();
+      expect(screen.getByTestId('mission-grant-form')).toBeTruthy();
+      await fireEvent.click(screen.getByTestId('mission-grant-card-not-now'));
+      await flush();
+      expect(screen.queryByTestId('mission-grant-card')).toBeNull();
+    });
+
+    it('what Start wave says lands under the Next block, where it was pressed', async () => {
+      current = mission({ state: 'active', level: 2 });
+      handlers.work_mission = () => ({
+        ...detailOf(current),
+        items: [item(10, 'Payments v2'), item(11, 'Cards')],
+        plan: {
+          steps: [{ kind: 'run', item_id: 11, role: 'implement', reason: 'Cards is ready', auto: true }],
+          cards: [],
+          autonomy: { asked: 2, ceiling: 3, effective: 2, why: '', enabled: true },
+          cost_micros: 0,
+          counts: { total: 2, open: 0 },
+        },
+      });
+      handlers.start_mission_wave = () => ({ results: [{ ok: false, detail: 'No repo is allowed on this mission' }] });
+      renderMissions();
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-row'));
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-start-wave'));
+      await flush();
+      const notice = screen.getByTestId('mission-notice');
+      expect(notice.textContent).toContain('No repo is allowed');
+      expect(screen.getByTestId('mission-next').contains(notice)).toBe(true);
+    });
+
+    it('grantWouldHelp, grantSignLabel and untilWords', () => {
+      const base = { asked: 2, ceiling: 3, effective: 1, why: '', enabled: true };
+      expect(grantWouldHelp(base, 1_000)).toBe(true);
+      expect(grantWouldHelp({ ...base, enabled: false }, 1_000)).toBe(false);
+      expect(grantWouldHelp({ ...base, asked: 1, effective: 1 }, 1_000)).toBe(false);
+      expect(grantWouldHelp({ ...base, ceiling: 1 }, 1_000)).toBe(false);
+      const grant = { id: 1, mission_id: 4, plan_version: 1, level: 2, granted_by: 'p', created_at: 0, expires_at: 2_000 };
+      expect(grantWouldHelp({ ...base, effective: 2, grant }, 1_000)).toBe(false);
+      expect(grantWouldHelp({ ...base, grant: { ...grant, revoked_at: 500 } }, 1_000)).toBe(true);
+      expect(grantWouldHelp({ ...base, grant }, 3_000)).toBe(true);
+      expect(grantSignLabel(2, { hours: 8 }, undefined)).toBe('Sign L2 for 8 h, no cap');
+      expect(grantSignLabel(3, { hours: 24 }, 20_000_000)).toBe('Sign L3 for 24 h, up to $20.00');
+      expect(grantSignLabel(2, { untilDone: true }, 20_000_000)).toBe('Sign L2 until it completes, up to $20.00');
+      expect(grantSignLabel(2, { untilDone: true }, undefined)).toBe('Sign the grant');
+      expect(grantSignLabel(2, { hours: 0 }, undefined)).toBe('Sign the grant');
+      // A time today is the time alone; within the week it names the day; later, the date.
+      const now = Date.UTC(2026, 10, 3, 12, 0) / 1000;
+      const day = new Date(now * 1000);
+      expect(untilWords(now + 3 * 3600, now)).toMatch(/^\d{2}:\d{2}/);
+      const inTwoDays = untilWords(now + 2 * 86_400, now);
+      expect(inTwoDays).toMatch(/^[A-Z][a-z]{2} /);
+      expect(inTwoDays).not.toContain(String(day.getFullYear()));
+      expect(untilWords(now + 20 * 86_400, now)).toMatch(/\d/);
+      expect(untilWords(now + 20 * 86_400, now)).not.toMatch(/^[A-Z][a-z]{2} \d{2}:/);
     });
   });
 

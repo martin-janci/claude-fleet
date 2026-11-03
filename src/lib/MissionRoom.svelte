@@ -22,9 +22,10 @@
   goals, task titles) is rendered as text, never as markup.
 -->
 <script lang="ts">
-  import { onDestroy, onMount, untrack } from 'svelte';
+  import { onDestroy, onMount, tick, untrack } from 'svelte';
   import { get } from 'svelte/store';
   import Resizer from './Resizer.svelte';
+  import Skeleton from './states/Skeleton.svelte';
   import StatusChip from './kit/StatusChip.svelte';
   import OrbitMark from './kit/OrbitMark.svelte';
   import QuestionCard from './kit/QuestionCard.svelte';
@@ -78,7 +79,9 @@
     finalMoveQuestion,
     getMission,
     grantMission,
+    grantSignLabel,
     grantSpanNotice,
+    grantWouldHelp,
     isFinal,
     missionTaskId,
     moveLabel,
@@ -104,6 +107,7 @@
     stepKey,
     stepLine,
     undoWorkAccept,
+    untilWords,
     updateMission,
     waitsOnPerson,
     wakeLabel,
@@ -151,6 +155,12 @@
   const missions = $derived($missionList.missions);
   let detail = $state.raw<MissionDetail | null>(null);
   let notice = $state<string | null>(null);
+  /** Where the notice is drawn: beside the press that raised it. `panel`
+   *  for the right panel's own (the Plan tab's Save, Sign, Import, Delete,
+   *  a task edit), `next` for Start wave and Go (the Next block sits at the
+   *  end of the centre column, and its top is out of sight by then),
+   *  `centre` at the top for the rest. */
+  let noticeAt = $state<'centre' | 'panel' | 'next'>('centre');
   /** Review w17-4: the last re-read of the open mission failed; what was
    *  loaded stays on screen. */
   let refreshError = $state<IpcError | null>(null);
@@ -181,9 +191,14 @@
   const itemById = $derived(new Map((detail?.items ?? []).map((i) => [i.id, i])));
   const needsYou = $derived(!!detail && !!mission && !isFinal(mission.state) && (!!mission.waiting_on || waitsOnPerson(detail)));
 
-  const saveBlocked = $derived(!!hubActionBlocked('save_mission', $hubStatus, $hubConnection));
-  const changeBlocked = $derived(!!hubActionBlocked('set_mission_state', $hubStatus, $hubConnection));
-  const importBlocked = $derived(!!hubActionBlocked('import_mission_plan', $hubStatus, $hubConnection));
+  // Why the hub refuses each kind of write (an older or offline hub), said
+  // on the greyed button's title rather than leaving it grey for no reason.
+  const saveWhy = $derived(hubActionBlocked('save_mission', $hubStatus, $hubConnection));
+  const changeWhy = $derived(hubActionBlocked('set_mission_state', $hubStatus, $hubConnection));
+  const importWhy = $derived(hubActionBlocked('import_mission_plan', $hubStatus, $hubConnection));
+  const saveBlocked = $derived(!!saveWhy);
+  const changeBlocked = $derived(!!changeWhy);
+  const importBlocked = $derived(!!importWhy);
   const mayChange = $derived(!!detail?.may_change && !!mission && !isFinal(mission.state));
   const split = $derived(mission ? splitMoves(mission.state) : { inline: [], menu: [] });
 
@@ -214,6 +229,14 @@
 
   // ── Loading ──
 
+  /** The centre column's scroller, while a mission is on show. */
+  let scroller = $state<HTMLDivElement>();
+  /** The person has not scrolled up from the end of the log. */
+  let pinnedToEnd = true;
+  function onScrolled() {
+    if (scroller) pinnedToEnd = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 32;
+  }
+
   /** The mission `open` last set up the room for. */
   let openedId: number | null = null;
   // Bumped per request and by every open: a late answer for a mission no
@@ -226,9 +249,17 @@
     if (mine !== detailSeq || get(roomMissionId) !== id) return;
     if (r.ok && r.value?.mission) {
       const first = detail?.mission.id !== id;
+      // The log reads as a chat: what needs a person (the cards, Next) is
+      // at its end. Opening lands there, and a room left at the end stays
+      // there as events arrive; one scrolled up is left alone.
+      const toEnd = first || pinnedToEnd;
       detail = r.value;
       refreshError = null;
       if (first) missionPanelTab.set(defaultPanelTab(r.value));
+      if (toEnd) {
+        await tick();
+        if (scroller) scroller.scrollTop = scroller.scrollHeight;
+      }
     } else if (!r.ok && r.error.code !== 'E_NOTFOUND' && detail?.mission.id === id) {
       // Review w17-4: a failed background re-read is not "the mission is
       // gone": the room, an open goal edit and a half-typed answer stay.
@@ -269,12 +300,15 @@
     moreOpen = false;
     confirmMove = null;
     notice = null;
+    noticeAt = 'centre';
+    pinnedToEnd = true;
     refreshError = null;
     plannerFailure = null;
     plannerIsWait = false;
     // A refused Complete's override is that mission's (review r8): it never
     // carries over to the next one.
     ciRed = false;
+    grantCardHidden = false;
     importOpen = false;
     importText = '';
     importResult = null;
@@ -302,10 +336,12 @@
     });
   });
 
-  /** Run one write; on success re-read the list and the open mission. */
-  async function act<T>(p: Promise<Result<T>>): Promise<T | null> {
+  /** Run one write; on success re-read the list and the open mission.
+   *  `where` says which column pressed, so a refusal lands beside the press. */
+  async function act<T>(p: Promise<Result<T>>, where: 'centre' | 'panel' | 'next' = 'centre'): Promise<T | null> {
     busy = true;
     notice = null;
+    noticeAt = where;
     ciRed = false;
     try {
       const r = await p;
@@ -321,6 +357,20 @@
       busy = false;
     }
   }
+
+  /** `act` for the panel's own presses (the tasks block). */
+  function panelAct<T>(p: Promise<Result<T>>): Promise<T | null> {
+    return act(p, 'panel');
+  }
+
+  /** The mission's member tasks: every item but its root. */
+  const members = $derived((detail?.items ?? []).filter((i) => i.id !== mission?.root_item_id));
+  /** The Next block (the steps and Start wave) is on show. */
+  const nextShown = $derived(
+    (plan?.steps ?? []).length > 0 || (mayChange && !!mission && mission.state === 'active' && pressable.length > 0),
+  );
+  /** Nothing to run yet and nothing proposed: the centre says what comes next. */
+  const nothingYet = $derived(members.length === 0 && proposals.ids.length === 0 && (plan?.steps ?? []).length === 0);
 
   // ── Opening tasks and sessions ──
 
@@ -433,6 +483,7 @@
         },
         mission.version,
       ),
+      'panel',
     );
     if (m) editing = false;
   }
@@ -500,7 +551,7 @@
 
   async function startWave(step?: string) {
     if (!mission) return;
-    const out = await act(startMissionWave(mission.id, step));
+    const out = await act(startMissionWave(mission.id, step), 'next');
     if (out) reportSteps(out.results);
   }
 
@@ -619,6 +670,20 @@
   let cardNote = $state<{ id: number; text: string } | null>(null);
   /** Cards this person cannot act on and hid, by id (per window). */
   let hiddenCards = $state<number[]>([]);
+  /** The grant card was put away ("Not now") for the open mission. */
+  let grantCardHidden = $state(false);
+  /** The hub's "waiting on a person" is a grant to sign, or a grant would
+   *  let this active mission run by itself: the centre offers it as a
+   *  card, as the phone does, rather than leave "Needs you" with nothing
+   *  to press (the form sat in the Plan tab's Autonomy block only). */
+  const grantCard = $derived(
+    !!mayChange && !!plan && !!mission && mission.state === 'active' && !grantCardHidden && grantWouldHelp(plan.autonomy),
+  );
+  const askedLevelLabel = $derived(MISSION_LEVELS.find((l) => l.level === plan?.autonomy.asked)?.label ?? `L${plan?.autonomy.asked}`);
+  function openGrantForm() {
+    showMissionPanel('plan');
+    granting = true;
+  }
 
   // The grant: what the loop may do by itself, for how long, on what.
   let granting = $state(false);
@@ -645,6 +710,7 @@
     const untilDone = grantUntilDone && mission.mode === 'finite';
     if (untilDone && !(cents > 0)) {
       notice = 'A grant until the mission completes needs a budget.';
+      noticeAt = 'panel';
       return;
     }
     const out = await act(
@@ -654,6 +720,7 @@
         ...(cents > 0 ? { budget_cents: cents } : {}),
         ...(grantHosts.length > 0 ? { hosts: [...grantHosts] } : {}),
       }),
+      'panel',
     );
     if (out) {
       granting = false;
@@ -666,7 +733,7 @@
   }
 
   async function revokeGrant() {
-    if (mission) await act(revokeMissionGrant(mission.id));
+    if (mission) await act(revokeMissionGrant(mission.id), 'panel');
   }
 
   // ── Import a plan: a markdown step table read into the mission's tasks ──
@@ -683,7 +750,7 @@
 
   async function runImport() {
     if (!mission || !importRows || importRows.length === 0) return;
-    const out = await act(importMissionPlan(mission.id, importRows));
+    const out = await act(importMissionPlan(mission.id, importRows), 'panel');
     if (out) {
       importResult = importLine(out);
       importUnknown = out.unknown_needs ?? [];
@@ -703,7 +770,7 @@
 
   async function addRepo() {
     if (!mission || repoPick === '') return;
-    if (await act(setMissionRepo(mission.id, repoPick, true, repoRole))) {
+    if (await act(setMissionRepo(mission.id, repoPick, true, repoRole), 'panel')) {
       repoPick = '';
       repoRole = '';
     }
@@ -714,7 +781,7 @@
   let confirmDelete = $state(false);
   async function remove() {
     if (!mission) return;
-    if (await act(deleteMission(mission.id))) {
+    if (await act(deleteMission(mission.id), 'panel')) {
       roomMissionId.set(null);
       void open(null);
     }
@@ -856,7 +923,7 @@
               >
             {/if}
             <div class="row">
-              <button class="btn btn--primary" type="submit" disabled={busy || saveBlocked} data-testid="mission-create">Create</button>
+              <button class="btn btn--primary" type="submit" disabled={busy || saveBlocked} data-testid="mission-create" title={saveWhy ?? undefined}>Create</button>
               <button class="btn btn--quiet" type="button" onclick={() => roomCreating.set(false)}>Cancel</button>
             </div>
           </form>
@@ -874,11 +941,10 @@
           <span class="grow"></span>
           {#if mayChange}
             {#each split.inline as to (to)}
-              <button class="btn btn--chip" type="button" disabled={busy || changeBlocked} data-testid="mission-move-{to}" onclick={() => void move(to)}
-                >{moveLabel(mission.state, to)}</button
+              <button class="btn btn--chip" type="button" disabled={busy || changeBlocked} data-testid="mission-move-{to}" onclick={() => void move(to)} title={changeWhy ?? undefined}>{moveLabel(mission.state, to)}</button
               >
             {/each}
-            <button class="btn btn--quiet" type="button" disabled={busy || saveBlocked} data-testid="mission-edit" onclick={startEdit}>Edit</button>
+            <button class="btn btn--quiet" type="button" disabled={busy || saveBlocked} data-testid="mission-edit" onclick={startEdit} title={saveWhy ?? undefined}>Edit</button>
             {#if split.menu.length > 0}
               <!-- svelte-ignore a11y_no_static_element_interactions -->
               <span class="more" bind:this={moreEl} onkeydown={moreKey}>
@@ -890,7 +956,7 @@
                   aria-expanded={moreOpen}
                   disabled={busy || changeBlocked}
                   data-testid="mission-more"
-                  onclick={() => (moreOpen = !moreOpen)}>⋯</button
+                  onclick={() => (moreOpen = !moreOpen)} title={changeWhy ?? undefined}>⋯</button
                 >
                 {#if moreOpen}
                   <span class="more-menu" role="menu" aria-label="Mission actions" data-testid="mission-more-menu">
@@ -944,7 +1010,7 @@
               type="button"
               disabled={busy || changeBlocked}
               data-testid="mission-move-confirm"
-              onclick={() => void confirmFinal()}>{moveLabel(mission.state, confirmMove)}</button
+              onclick={() => void confirmFinal()} title={changeWhy ?? undefined}>{moveLabel(mission.state, confirmMove)}</button
             >
             <button class="btn btn--quiet" type="button" data-testid="mission-move-keep" onclick={() => (confirmMove = null)}>Keep</button>
           </div>
@@ -957,16 +1023,16 @@
               type="button"
               disabled={busy || changeBlocked}
               data-testid="mission-ci-override"
-              onclick={() => void move('completed', true)}>Complete anyway</button
+              onclick={() => void move('completed', true)} title={changeWhy ?? undefined}>Complete anyway</button
             >
             <button class="btn btn--quiet" type="button" data-testid="mission-ci-keep" onclick={() => (ciRed = false)}>Keep</button>
           </div>
         {/if}
       </header>
 
-      <div class="scroll">
+      <div class="scroll" bind:this={scroller} onscroll={onScrolled}>
         <div class="col" data-testid="mission-detail-centre">
-          {#if notice}<p class="notice" role="status" data-testid="mission-notice">{notice}</p>{/if}
+          {#if notice && !(noticeAt === 'panel' && $missionPanelOpen) && !(noticeAt === 'next' && nextShown)}<p class="notice" role="status" data-testid="mission-notice">{notice}</p>{/if}
           {#if refreshError}
             <p class="refresh-error" role="status" data-testid="mission-refresh-error">
               Couldn't refresh ({readErrorText(refreshError)}) — showing what was loaded.
@@ -1026,8 +1092,7 @@
               <p>{plannerFailure.text}</p>
               <div class="row">
                 {#if mayChange}
-                  <button class="btn btn--quiet" type="button" disabled={busy || changeBlocked} data-testid="mission-planner-retry" onclick={() => void askPlanner()}
-                    >Retry</button
+                  <button class="btn btn--quiet" type="button" disabled={busy || changeBlocked} data-testid="mission-planner-retry" onclick={() => void askPlanner()} title={changeWhy ?? undefined}>Retry</button
                   >
                 {/if}
                 <button
@@ -1086,7 +1151,7 @@
                     type="button"
                     disabled={busy || changeBlocked}
                     data-testid="mission-proposals-replan"
-                    onclick={() => void askPlanner()}>Ask the planner again</button
+                    onclick={() => void askPlanner()} title={changeWhy ?? undefined}>Ask the planner again</button
                   >
                 </div>
               {/if}
@@ -1099,6 +1164,22 @@
             </div>
           {/if}
 
+          {#if grantCard && mission && plan}
+            <div class="card needs" data-testid="mission-grant-card">
+              <p class="card-head">
+                <StatusChip state="waiting" />
+                <span class="muted small"
+                  >Fleet{#if mission.waiting_on?.reason === 'sign_grant'} · waiting {shortAge(mission.waiting_on.since)}{:else} · runs only when you press{/if}</span
+                >
+              </p>
+              <p class="card-text">Sign the autonomy grant: {askedLevelLabel}.{#if plan.autonomy.why} {withoutConfigKeys(plan.autonomy.why)}{/if}</p>
+              <div class="row">
+                <button class="btn btn--chip" type="button" disabled={busy || changeBlocked} data-testid="mission-grant-card-review" onclick={openGrantForm} title={changeWhy ?? undefined}>Review and sign…</button
+                >
+                <button class="btn btn--quiet" type="button" data-testid="mission-grant-card-not-now" onclick={() => (grantCardHidden = true)}>Not now</button>
+              </div>
+            </div>
+          {/if}
           {#if openCards.length > 0}
             <ul class="cards" aria-label="Waiting for you" data-testid="mission-cards">
               {#each openCards as c, i (c.id)}
@@ -1125,8 +1206,7 @@
                       {#if ownWords[c.id] || options.length === 0}
                         <span class="row">
                           <input placeholder="Your answer" aria-label="Your answer" bind:value={answers[c.id]} data-testid="mission-card-answer" />
-                          <button class="btn btn--chip" type="button" disabled={busy || changeBlocked} data-testid="mission-card-apply" onclick={() => void decide(c, true)}
-                            >Answer</button
+                          <button class="btn btn--chip" type="button" disabled={busy || changeBlocked} data-testid="mission-card-apply" onclick={() => void decide(c, true)} title={changeWhy ?? undefined}>Answer</button
                           >
                         </span>
                       {/if}
@@ -1141,11 +1221,9 @@
                     <p class="card-text">{cardLine(c)}</p>
                     {#if detail.may_change}
                       <div class="row">
-                        <button class="btn btn--chip" type="button" disabled={busy || changeBlocked} data-testid="mission-card-apply" onclick={() => void decide(c, true)}
-                          >Apply</button
+                        <button class="btn btn--chip" type="button" disabled={busy || changeBlocked} data-testid="mission-card-apply" onclick={() => void decide(c, true)} title={changeWhy ?? undefined}>Apply</button
                         >
-                        <button class="btn btn--quiet" type="button" disabled={busy || changeBlocked} data-testid="mission-card-dismiss" onclick={() => void decide(c, false)}
-                          >Dismiss</button
+                        <button class="btn btn--quiet" type="button" disabled={busy || changeBlocked} data-testid="mission-card-dismiss" onclick={() => void decide(c, false)} title={changeWhy ?? undefined}>Dismiss</button
                         >
                       </div>
                     {:else}
@@ -1170,7 +1248,36 @@
             <MissionTriage missionId={mission.id} reload={detail.events?.[0]?.id ?? 0} onstep={triageStep} />
           {/if}
 
-          {#if (plan?.steps ?? []).length > 0 || (mayChange && mission.state === 'active' && pressable.length > 0)}
+          {#if mayChange && nothingYet}
+            <!-- A mission with no tasks had nothing to press in the centre:
+                 the ways to get tasks sat in the panel's Plan tab only. -->
+            <div class="card" data-testid="mission-empty-next">
+              <p class="card-head">
+                <span class="tag">Next</span>
+                <span>No tasks yet</span>
+              </p>
+              <p class="muted small">
+                Tasks come from the planner, a plan you import, or your own hand in the Plan tab. The mission runs once it has tasks{#if (mission.repos ?? []).length === 0}
+                  {' '}and a repo (the Repos tab){/if}.
+              </p>
+              <div class="row">
+                {#if mission.mode !== 'plan'}
+                  <button class="btn btn--chip" type="button" disabled={busy || changeBlocked} data-testid="mission-empty-plan" onclick={() => void askPlanner()} title={changeWhy ?? undefined}>Ask the planner</button
+                  >
+                {/if}
+                <button
+                  class="btn btn--quiet"
+                  type="button"
+                  disabled={busy || importBlocked}
+                  data-testid="mission-empty-import"
+                  onclick={() => (showMissionPanel('plan'), (importOpen = true))} title={importWhy ?? undefined}>Import a plan…</button
+                >
+                <button class="btn btn--quiet" type="button" data-testid="mission-empty-tasks" onclick={() => showMissionPanel('plan')}>Add tasks by hand</button>
+              </div>
+            </div>
+          {/if}
+
+          {#if nextShown}
             <div class="next" data-testid="mission-next">
               {#if (plan?.steps ?? []).length > 0}
                 <ul class="steps" aria-label="Next steps" data-testid="mission-steps">
@@ -1179,7 +1286,7 @@
                       <span class="arrow" aria-hidden="true">→</span>
                       <span>{stepLine(st)}</span>
                       {#if mayChange && mission.state === 'active' && st.kind !== 'ask'}
-                        <button class="btn btn--chip" type="button" disabled={busy || changeBlocked} onclick={() => void startWave(stepKey(st))}>Go</button>
+                        <button class="btn btn--chip" type="button" disabled={busy || changeBlocked} onclick={() => void startWave(stepKey(st))} title={changeWhy ?? undefined}>Go</button>
                       {/if}
                     </li>
                   {/each}
@@ -1196,11 +1303,22 @@
                     type="button"
                     disabled={busy || changeBlocked}
                     data-testid="mission-start-wave"
-                    onclick={() => void startWave()}>Start wave ({pressable.length})</button
+                    onclick={() => void startWave()} title={changeWhy ?? undefined}>Start wave ({pressable.length})</button
                   >
                   {#if openCards.length > 0}<span class="muted small">once the cards are answered</span>{/if}
+                  {#if plan && grantWouldHelp(plan.autonomy)}
+                    <!-- Without a grant a person presses every wave; the way
+                         to change that sat in the panel's Autonomy block only. -->
+                    <button
+                      class="link"
+                      type="button"
+                      data-testid="mission-run-itself"
+                      onclick={openGrantForm}>or let it run by itself…</button
+                    >
+                  {/if}
                 </p>
               {/if}
+              {#if notice && noticeAt === 'next'}<p class="notice" role="status" data-testid="mission-notice">{notice}</p>{/if}
             </div>
           {/if}
 
@@ -1211,6 +1329,7 @@
               completed={missions.filter((m) => isFinal(m.state)).length}
               mayChange={!!detail.may_change}
               reopenBlocked={changeBlocked}
+              reopenWhy={changeWhy}
               nameOf={personName}
               onreopen={() => move('paused')}
               onarchived={load}
@@ -1268,7 +1387,7 @@
       <div class="scroll">
         <div class="col">
           {#if notice}<p class="notice" role="status" data-testid="mission-notice">{notice}</p>{/if}
-          <p class="muted" data-testid="mission-room-loading">Reading the mission…</p>
+          <div data-testid="mission-room-loading"><Skeleton rows={4} label="Reading the mission" /></div>
         </div>
       </div>
     {:else}
@@ -1284,8 +1403,7 @@
           {/if}
         </p>
         <div class="starters">
-          <button class="btn btn--primary" type="button" disabled={saveBlocked} data-testid="mission-room-new" onclick={startNewMission}
-            >New mission</button
+          <button class="btn btn--primary" type="button" disabled={saveBlocked} data-testid="mission-room-new" onclick={startNewMission} title={saveWhy ?? undefined}>New mission</button
           >
           <button
             class="btn"
@@ -1325,6 +1443,7 @@
         >
       </div>
       <div class="body" role="tabpanel" aria-label={MISSION_PANEL_TABS.find((t) => t.id === $missionPanelTab)?.label}>
+        {#if notice && noticeAt === 'panel'}<p class="notice panel-notice" role="status" data-testid="mission-notice">{notice}</p>{/if}
         {#if $missionPanelTab === 'session'}
           {#if focusRow}
             <SessionFocus
@@ -1355,7 +1474,7 @@
           <div class="pane">
             {#if editing}
               <div class="edit" data-testid="mission-edit-form">
-                <label class="field">Goal<textarea rows="3" bind:value={editGoal} data-testid="mission-edit-goal"></textarea></label>
+                <label class="field">Goal<textarea rows="3" bind:value={editGoal} use:focusNow data-testid="mission-edit-goal"></textarea></label>
                 <label class="field">Not in scope<textarea rows="2" bind:value={editNonGoals}></textarea></label>
                 <label class="field"
                   >Done when (one condition per line)<textarea rows="3" bind:value={editDoneWhen} data-testid="mission-edit-done-when"></textarea></label
@@ -1428,7 +1547,7 @@
                     type="button"
                     disabled={busy || saveBlocked || wakeBad || parallelBad}
                     data-testid="mission-edit-save"
-                    onclick={() => void saveEdit()}>Save</button
+                    onclick={() => void saveEdit()} title={saveWhy ?? undefined}>Save</button
                   >
                   <button class="btn btn--quiet" type="button" onclick={() => (editing = false)}>Cancel</button>
                 </div>
@@ -1465,18 +1584,15 @@
               </dl>
               {#if mayChange && plan}
                 <div class="row">
-                  <button class="btn btn--quiet" type="button" disabled={busy || changeBlocked} data-testid="mission-plan" onclick={() => void askPlanner()}
-                    >Ask the planner</button
+                  <button class="btn btn--quiet" type="button" disabled={busy || changeBlocked} data-testid="mission-plan" onclick={() => void askPlanner()} title={changeWhy ?? undefined}>Ask the planner</button
                   >
                   {#if plan.autonomy.grant}
-                    <button class="btn btn--quiet" type="button" disabled={busy || changeBlocked} data-testid="mission-revoke" onclick={() => void revokeGrant()}
-                      >End the grant (L{plan.autonomy.grant.level}, {plan.autonomy.grant.until_done
+                    <button class="btn btn--quiet" type="button" disabled={busy || changeBlocked} data-testid="mission-revoke" onclick={() => void revokeGrant()} title={changeWhy ?? undefined}>End the grant (L{plan.autonomy.grant.level}, {plan.autonomy.grant.until_done
                         ? 'until the mission completes'
-                        : `until ${new Date(plan.autonomy.grant.expires_at * 1000).toLocaleString()}`})</button
+                        : `until ${untilWords(plan.autonomy.grant.expires_at)}`})</button
                     >
                   {:else}
-                    <button class="btn btn--quiet" type="button" disabled={busy || changeBlocked} data-testid="mission-grant" onclick={() => (granting = !granting)}
-                      >Grant a budget so it runs by itself…</button
+                    <button class="btn btn--quiet" type="button" disabled={busy || changeBlocked} data-testid="mission-grant" onclick={() => (granting = !granting)} title={changeWhy ?? undefined}>Grant a budget so it runs by itself…</button
                     >
                   {/if}
                 </div>
@@ -1484,7 +1600,7 @@
                   <form class="grant" data-testid="mission-grant-form" use:formKeys onsubmit={(e) => (e.preventDefault(), void grant())}>
                     <label class="field inline"
                       >Level
-                      <select bind:value={grantLevel}>
+                      <select bind:value={grantLevel} use:focusNow>
                         {#each MISSION_LEVELS.filter((l) => l.level >= 1) as l (l.level)}<option value={l.level}>{l.label}</option>{/each}
                       </select></label
                     >
@@ -1522,7 +1638,13 @@
                       </fieldset>
                     {/if}
                     <div class="row">
-                      <button class="btn" type="submit" disabled={busy || !!grantBudgetBad} data-testid="mission-grant-save">Sign the grant</button>
+                      <button class="btn" type="submit" disabled={busy || !!grantBudgetBad} data-testid="mission-grant-save"
+                        >{grantSignLabel(
+                          grantLevel,
+                          grantUntilDone && mission.mode === 'finite' ? { untilDone: true } : { hours: grantHours },
+                          grantBudgetBad ? undefined : microsOf(grantBudget),
+                        )}</button
+                      >
                       <button class="btn btn--quiet" type="button" data-testid="mission-grant-cancel" onclick={() => (granting = false)}>Cancel</button>
                     </div>
                   </form>
@@ -1537,11 +1659,11 @@
                 {mayChange}
                 {busy}
                 {changeBlocked}
-                {act}
+                act={panelAct}
                 bind:tasksView
                 onopenitem={openItem}
                 onopensession={openSession}
-                onnotice={(t) => (notice = t)}
+                onnotice={(t) => ((notice = t), (noticeAt = 'panel'))}
               />
             </section>
 
@@ -1549,8 +1671,7 @@
               <div class="import" data-testid="mission-import">
                 <PlanImportForm bind:text={importText} bind:ready={importRows} />
                 <span class="row">
-                  <button class="btn" type="button" disabled={busy || importBlocked || !importRows} data-testid="mission-import-run" onclick={() => void runImport()}
-                    >Import {importRows?.length ?? 0} steps</button
+                  <button class="btn" type="button" disabled={busy || importBlocked || !importRows} data-testid="mission-import-run" onclick={() => void runImport()} title={importWhy ?? undefined}>Import {importRows?.length ?? 0} steps</button
                   >
                   <button class="btn btn--quiet" type="button" onclick={() => ((importOpen = false), (importText = ''))}>Cancel</button>
                 </span>
@@ -1578,13 +1699,11 @@
               {:else}
                 <div class="row foot-actions">
                   {#if mayChange && !importOpen}
-                    <button class="btn btn--quiet" type="button" disabled={busy || importBlocked} data-testid="mission-import-open" onclick={() => (importOpen = true)}
-                      >Import a plan…</button
+                    <button class="btn btn--quiet" type="button" disabled={busy || importBlocked} data-testid="mission-import-open" onclick={() => (importOpen = true)} title={importWhy ?? undefined}>Import a plan…</button
                     >
                   {/if}
                   {#if mayChange && split.menu.includes('completed')}
-                    <button class="btn btn--quiet" type="button" disabled={busy || changeBlocked} data-testid="mission-finish-open" onclick={() => pickFinal('completed')}
-                      >Finish…</button
+                    <button class="btn btn--quiet" type="button" disabled={busy || changeBlocked} data-testid="mission-finish-open" onclick={() => pickFinal('completed')} title={changeWhy ?? undefined}>Finish…</button
                     >
                   {/if}
                   {#if mission.state === 'draft' || isFinal(mission.state)}
@@ -1661,7 +1780,7 @@
                         aria-label="Remove repo"
                         title="Remove repo"
                         disabled={busy}
-                        onclick={() => void act(setMissionRepo(mission.id, r.project_id, false))}>×</button
+                        onclick={() => void act(setMissionRepo(mission.id, r.project_id, false), 'panel')}>×</button
                       >
                     {/if}
                   </li>
@@ -2290,6 +2409,9 @@
   .notice {
     margin: 0;
     color: var(--danger);
+  }
+  .panel-notice {
+    padding: 8px 12px 0;
   }
   .refresh-error {
     margin: 0;

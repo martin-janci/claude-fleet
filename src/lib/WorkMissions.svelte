@@ -111,8 +111,10 @@
    *  stays immediate: typing it is the deliberate act. */
   let confirmPauseAll = $state(false);
 
-  const saveBlocked = $derived(!!hubActionBlocked('save_mission', $hubStatus, $hubConnection));
-  const changeBlocked = $derived(!!hubActionBlocked('set_mission_state', $hubStatus, $hubConnection));
+  const saveWhy = $derived(hubActionBlocked('save_mission', $hubStatus, $hubConnection));
+  const changeWhy = $derived(hubActionBlocked('set_mission_state', $hubStatus, $hubConnection));
+  const saveBlocked = $derived(!!saveWhy);
+  const changeBlocked = $derived(!!changeWhy);
 
   function open(id: number) {
     openMissionRoom(id);
@@ -333,7 +335,7 @@
           disabled={busy || changeBlocked}
           aria-expanded={confirmPauseAll}
           data-testid="missions-pause-all"
-          onclick={() => (confirmPauseAll = !confirmPauseAll)}>Pause all…</button
+          onclick={() => (confirmPauseAll = !confirmPauseAll)} title={changeWhy ?? undefined}>Pause all…</button
         >
       {/if}
       {#if confirmPauseAll && anyActive}
@@ -348,7 +350,7 @@
               type="button"
               disabled={busy || changeBlocked}
               data-testid="missions-pause-all-confirm"
-              onclick={() => ((confirmPauseAll = false), void pauseAll())}>Pause all</button
+              onclick={() => ((confirmPauseAll = false), void pauseAll())} title={changeWhy ?? undefined}>Pause all</button
             >
             <button class="btn btn--quiet" type="button" data-testid="missions-pause-all-keep" onclick={() => (confirmPauseAll = false)}>Keep</button>
           </span>
