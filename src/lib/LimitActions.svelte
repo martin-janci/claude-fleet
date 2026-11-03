@@ -96,6 +96,16 @@
       target = r.value.target;
       return;
     }
+    // Review 2026-11-03 D15: a signed-out session needs any signed-in
+    // login, so "no room" and a reset time would give the wrong reason.
+    if (signedOut) {
+      push({
+        kind: 'info',
+        message: `No other signed-in login on ${sess.host_alias}`,
+        sub: 'Sign the login in again on the host, or add another account there',
+      });
+      return;
+    }
     const next = r.value.headroom
       ? nextReset(r.value.headroom, get(accountUsage), Math.floor(Date.now() / 1000))
       : null;

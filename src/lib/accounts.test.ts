@@ -119,14 +119,20 @@ describe('accountLabel', () => {
     expect(accountLabel({ ...sample, nickname: '   ' })).toBe('a@b.com');
   });
 
+  it('falls back to the display name when there is no email (an API-key login)', () => {
+    expect(
+      accountLabel({ ...sample, nickname: null, email: null, display_name: 'API key · work', uuid: 'apikey-3abc' }),
+    ).toBe('API key · work');
+  });
+
   it('falls back to the first 8 characters of the uuid when there is no email', () => {
     expect(
-      accountLabel({ ...sample, nickname: null, email: null, uuid: 'abcdefghijkl' }),
+      accountLabel({ ...sample, nickname: null, email: null, display_name: null, uuid: 'abcdefghijkl' }),
     ).toBe('abcdefgh');
   });
 
   it('falls back to "unknown account" when there is nothing at all', () => {
-    expect(accountLabel({ ...sample, nickname: null, email: null, uuid: '' })).toBe(
+    expect(accountLabel({ ...sample, nickname: null, email: null, display_name: null, uuid: '' })).toBe(
       'unknown account',
     );
   });

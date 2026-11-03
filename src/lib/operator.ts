@@ -59,11 +59,15 @@ export interface OperatorAccount {
 
 /** PURE: the one line the panel shows about Control's account, or null when
  *  there is nothing to say. */
-export function operatorAccountLine(a: OperatorAccount | null | undefined): string | null {
+export function operatorAccountLine(
+  a: OperatorAccount | null | undefined,
+  accountName?: (uuid: string) => string | null,
+): string | null {
   if (!a) return null;
-  const who = a.email ?? a.account_uuid ?? 'its account';
+  const named = a.account_uuid && accountName ? accountName(a.account_uuid) : null;
+  const who = named ?? a.email ?? (a.account_uuid ? a.account_uuid.slice(0, 8) : 'its account');
   const login = a.profile ? `profile ${a.profile}` : `${a.host_alias}'s own login`;
-  const used = a.used_pct == null ? '' : ` · ${Math.round(a.used_pct)}% used`;
+  const used = a.used_pct == null ? '' : ` · ${Math.max(0, 100 - Math.round(a.used_pct))}% left`;
   if (a.state === 'ok' || a.state === 'unknown') return `Control runs as ${who} (${login})${used}`;
   return `${a.label ?? a.state} · ${who} (${login})${used}`;
 }

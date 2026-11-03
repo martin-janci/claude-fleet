@@ -43,14 +43,15 @@
     onopen?.();
   }}
   onmousedown={(e) => e.stopPropagation()}
->{pill.text}</button>
+><span class="label">{pill.label}</span>{#if pill.text !== pill.label}<span class="figure">{pill.text.slice(pill.label.length)}</span>{/if}</button>
 
 <style>
+  /* Only the label truncates: the % left or LIMIT word always shows
+     (review 2026-11-03 D7). */
   .pill {
     flex: none;
-    max-width: 16ch;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    display: inline-flex;
+    max-width: 22ch;
     white-space: nowrap;
     font: inherit;
     font-size: var(--text-2xs);
@@ -61,6 +62,15 @@
     background: transparent;
     color: var(--fg-muted);
     cursor: pointer;
+  }
+  .label {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .figure {
+    flex: none;
+    white-space: pre;
   }
   .pill:hover {
     background: var(--bg-hover);

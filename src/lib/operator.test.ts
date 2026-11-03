@@ -394,7 +394,7 @@ describe('operatorAccountLine (control review F7)', () => {
       state: 'limit' as const,
       label: 'Paused · limit',
     };
-    expect(operatorAccountLine(a)).toBe("Paused · limit · me@x (mac's own login) · 100% used");
+    expect(operatorAccountLine(a)).toBe("Paused · limit · me@x (mac's own login) · 0% left");
     expect(operatorAccountLine({ ...a, state: 'signed_out', label: 'signed out', profile: 'work', used_pct: null })).toBe(
       'signed out · me@x (profile work)',
     );

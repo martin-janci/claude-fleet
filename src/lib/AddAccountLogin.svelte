@@ -12,6 +12,9 @@
   import { copyText } from './clipboard';
   import { openExternal } from './open_external';
   import { push } from './toasts';
+  import { refreshAccountUsage } from './account_usage_store';
+  import { requestNewSessionOnHost } from './app_views';
+  import { hostByAlias } from './hosts';
   import {
     asksForCode,
     deviceCode,
@@ -52,6 +55,32 @@
   $effect(() => {
     if (signedIn) void tick().then(() => doneBtn?.focus());
   });
+  // Review 2026-11-03 F8: read the new login's usage straight away, so New
+  // session can rank it by its room instead of "no reading" for an hour.
+  let refreshedFor: string | null = null;
+  $effect(() => {
+    const uuid = status?.logged_in ? (status.account_uuid ?? null) : null;
+    if (uuid && refreshedFor !== uuid) {
+      refreshedFor = uuid;
+      void refreshAccountUsage(uuid);
+    }
+  });
+
+  // Review 2026-11-03 F7: the same account signed in twice on one host shares
+  // one limit, so a second login adds no room; say so before Done.
+  const sameAs = $derived.by(() => {
+    const uuid = status?.logged_in ? (status.account_uuid ?? null) : null;
+    const h = $hostByAlias.get(login.host);
+    if (!uuid || !h) return null;
+    if (h.account_uuid === uuid) return 'the host login';
+    const p = (h.claude_profiles ?? []).find((x) => x.name !== login.profile && x.account_uuid === uuid);
+    return p ? `the ${p.name} login` : null;
+  });
+
+  async function startOnIt() {
+    await finish();
+    requestNewSessionOnHost(login.host);
+  }
 
   async function poll() {
     const r = await loginStatus(login.host, login.profile);
@@ -124,6 +153,12 @@
       <p class="done" role="status" data-testid="add-account-signed-in">
         Signed in{status.email ? ` as ${status.email}` : ''}. New sessions on {login.host} can bill it.
       </p>
+      {#if sameAs}
+        <p class="err" role="alert" data-testid="add-account-same-as">
+          This is the same account as {sameAs} on {login.host}, so the two share one usage limit. To add room, start over and
+          sign in with another account.
+        </p>
+      {/if}
     {:else}
       <p class="lead">
         Claude's own sign-in runs on {login.host}. Open the link, sign in, and paste the code the page shows.
@@ -203,6 +238,11 @@
       <span class="grow"></span>
       {#if !status?.logged_in}
         <button type="button" class="btn" data-testid="add-account-cancel" onclick={() => void finish()}>Cancel</button>
+      {/if}
+      {#if status?.logged_in}
+        <button type="button" class="btn" data-testid="add-account-start-session" onclick={() => void startOnIt()}
+          >Start a session on {login.host}</button
+        >
       {/if}
       <button bind:this={doneBtn} type="button" class="btn primary" data-testid="add-account-done" disabled={!status?.logged_in} onclick={() => void finish()}
         >Done</button

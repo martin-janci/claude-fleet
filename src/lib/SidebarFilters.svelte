@@ -299,8 +299,8 @@
   function accountLabel(host: { account_uuid: string | null }): string {
     if (!host.account_uuid) return '';
     const acc = $accountByUuid.get(host.account_uuid);
-    if (!acc) return ` · ${host.account_uuid}`;
-    const email = acc.email ?? acc.uuid;
+    if (!acc) return ` · ${host.account_uuid.slice(0, 8)}`;
+    const email = accountName(acc);
     return acc.seat_tier ? ` · ${email} (${acc.seat_tier})` : ` · ${email}`;
   }
   function hostTitle(h: (typeof visibleHosts)[number]): string {

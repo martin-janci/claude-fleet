@@ -40,6 +40,8 @@
   } from './operator';
   import { openSettingsAt, requestHostsView, requestNewSessionOnHost } from './app_views';
   import { hosts } from './hosts';
+  import { accountByUuid, accountLabel } from './accounts';
+  import { openAccount } from './account_pill';
   import { fleetSettings, hubHasSetting, hubSettingKeys, settingBool, SETTING_KEYS } from './fleet_settings';
   import { agentContext, missionContext, type AgentContextInput } from './agent_context';
   import { missionList } from './mission_room';
@@ -204,13 +206,24 @@
   const firstHost = $derived($hosts.find((h) => !h.hidden)?.alias ?? $operatorHost);
   // Control review F7: Control's own login, said only when it is in trouble.
   const accountLine = $derived(
-    $operatorAccount && $operatorAccount.state !== 'ok' && $operatorAccount.state !== 'unknown' ? operatorAccountLine($operatorAccount) : null,
+    $operatorAccount && $operatorAccount.state !== 'ok' && $operatorAccount.state !== 'unknown' ? operatorAccountLine($operatorAccount, (u) => {
+          const a = $accountByUuid.get(u);
+          return a ? accountLabel(a) : null;
+        })
+      : null,
   );
 </script>
 
 {#snippet chip()}
   {#if accountLine}
-    <p class="account-line" data-testid="control-account" data-state={$operatorAccount?.state}>{accountLine}</p>
+    <p class="account-line" data-testid="control-account" data-state={$operatorAccount?.state}>
+      {accountLine}
+      {#if $operatorAccount?.account_uuid}
+        {@const uuid = $operatorAccount.account_uuid}
+        <!-- Review 2026-11-03 D17: the warning leads to the account. -->
+        · <button type="button" class="account-open" data-testid="control-account-open" onclick={() => openAccount(uuid)}>Open account</button>
+      {/if}
+    </p>
   {/if}
   {#if firstRun && session}
     <!-- Thread room (board A2Empty): the empty chat's starters, centred
@@ -346,6 +359,15 @@
     margin: 0;
     font-size: var(--text-xs);
     color: var(--usage-warn);
+  }
+  .account-open {
+    background: none;
+    border: none;
+    padding: 0;
+    font: inherit;
+    color: var(--accent);
+    text-decoration: underline;
+    cursor: pointer;
   }
   .blocked-state {
     margin: auto;
