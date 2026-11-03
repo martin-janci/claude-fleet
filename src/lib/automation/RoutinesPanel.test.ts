@@ -942,6 +942,20 @@ describe('the routine notebooks (migration 204)', () => {
     expect((screen.getByTestId('routine-memory-routine') as HTMLTextAreaElement).value).toBe('new notes');
   });
 
+  it('Clear only empties the box: nothing is written until Save, and Undo edits brings the notes back', async () => {
+    routeMemory((id) => (id === 3 ? notebook('old notes') : notFound()));
+    await openSaved();
+    const box = (await screen.findByTestId('routine-memory-routine')) as HTMLTextAreaElement;
+    await waitFor(() => expect(box.value).toBe('old notes'));
+    await fireEvent.click(screen.getByTestId('routine-memory-clear-routine'));
+    expect((screen.getByTestId('routine-memory-routine') as HTMLTextAreaElement).value).toBe('');
+    expect(argsOf('set_memory')).toBeUndefined();
+    expect((screen.getByTestId('routine-memory-save-routine') as HTMLButtonElement).disabled).toBe(false);
+    await fireEvent.click(screen.getByTestId('routine-memory-revert-routine'));
+    expect((screen.getByTestId('routine-memory-routine') as HTMLTextAreaElement).value).toBe('old notes');
+    expect(screen.queryByTestId('routine-memory-revert-routine')).toBeNull();
+  });
+
   it('counts characters as the fleet does: an emoji is one', async () => {
     const body = '🙂'.repeat(20) + 'x'.repeat(3970);
     routeMemory((id) => (id === 3 ? notebook(body) : notFound()));
