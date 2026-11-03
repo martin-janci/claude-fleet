@@ -272,10 +272,18 @@ const waitingIn = (gs: readonly TodayGroup[]) =>
  *  progress, what shipped today, stale sessions. A waiting group waits on
  *  one of its sessions; its siblings count as in progress, as the rail
  *  counts them (review w11-3). */
-export function todayKpis(v: TodayView): TodayKpis {
+/** What else waits on the person beside sessions and missions, as the
+ *  Inbox counts it (review w11-8): agent actions to approve, routines whose
+ *  newest run failed. */
+export interface TodayExtras {
+  approvals: number;
+  failedRoutines: number;
+}
+
+export function todayKpis(v: TodayView, extras: TodayExtras = { approvals: 0, failedRoutines: 0 }): TodayKpis {
   const waiting = waitingIn(v.waiting);
   return {
-    needsYou: waiting + (v.missions?.length ?? 0),
+    needsYou: waiting + (v.missions?.length ?? 0) + extras.approvals + extras.failedRoutines,
     inProgress: sessionsIn(v.inProgress) + sessionsIn(v.waiting) - waiting,
     shipped: v.shipped.length,
     stale: sessionsIn(v.stale),
