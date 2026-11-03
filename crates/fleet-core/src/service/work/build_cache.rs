@@ -86,6 +86,7 @@ mod tests {
         assert!(env_with(false).is_empty());
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_probe_names_sccache_and_prints_the_marker_only_when_found() {
         let s = probe_script();
