@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "version": "0.6.5-dev.185.desktop.gcc6319b",
+  "mobile_accepts": [
+    0,
+    18
+  ],
+  "components": {
+    "android": {
+      "version": "0.6.5-dev.185.desktop.gcc6319b",
+      "artifacts": [
+        {
+          "kind": "apk",
+          "url": "https://github.com/martin-janci/fleet-mobile/releases/download/v0.6.5-dev.185.desktop.gcc6319b/fleet-mobile-0.6.5-dev.185.desktop.gcc6319b.apk",
+          "sha256": "bbff502769413644de936f1264a983747aa46fd638a3168854392c16cac97fa0",
+          "size": 18401544,
+          "version_code": 441824,
+          "signer_sha256": "87081ff376e7ad2cb3082bf8f48dac2f451bffda66693b575c31cd4c354b9a15"
+        }
+      ]
+    }
+  }
+}
