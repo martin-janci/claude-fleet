@@ -3324,6 +3324,46 @@ fn sort_by_key_reads_the_number_and_by_updated_newest_first() {
     assert_eq!(ticketed, ["TK-1", "TK-3", "TK-2"]);
 }
 
+/// `priority` keeps one priority, or (`none`) the tasks with none; an
+/// unknown one is refused.
+#[test]
+fn filter_by_priority_keeps_one_priority_or_none() {
+    let w = planned_world();
+    w.st.lock()
+        .unwrap()
+        .conn_ref()
+        .execute(
+            "UPDATE work_items SET priority = CASE key WHEN 'TK-1' THEN 'high' WHEN 'TK-3' THEN 'urgent' END \
+             WHERE key IN ('TK-1', 'TK-3')",
+            [],
+        )
+        .unwrap();
+    let only = |p: &str| {
+        let got = keys(&page(
+            &w,
+            &OrgScope::All,
+            WorkTreeFilters {
+                priority: Some(p.into()),
+                sort: Some("key".into()),
+                group_by: Some("org".into()),
+                ..Default::default()
+            },
+        ));
+        got.into_iter()
+            .filter(|k| k.starts_with("TK-"))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(only("high"), ["TK-1"]);
+    assert_eq!(only("urgent"), ["TK-3"]);
+    assert_eq!(only("none"), ["TK-2", "TK-10", "TK-11", "TK-12"]);
+    let err = check_filters(&WorkTreeFilters {
+        priority: Some("asap".into()),
+        ..Default::default()
+    })
+    .unwrap_err();
+    assert!(err.message.contains("filters.priority"), "{}", err.message);
+}
+
 #[test]
 fn an_unknown_sort_is_refused() {
     let err = check_filters(&WorkTreeFilters {

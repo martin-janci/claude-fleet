@@ -86,6 +86,8 @@ export interface WorkTreeFilters {
   epic?: string;
   /** The tracker's type name (Story, Bug …). */
   item_type?: string;
+  /** One priority, or `none` for tasks with none. An older hub ignores it. */
+  priority?: WorkPriorityFilter;
   /** The order inside each section; absent is `activity`. */
   sort?: WorkSort;
 }
@@ -101,6 +103,17 @@ export const WORK_SORT_LABELS: Record<WorkSort, string> = {
   title: 'Title',
   due: 'Due date',
   priority: 'Priority',
+};
+
+/** `filters.priority`: one priority, or `none` for tasks with none. */
+export const WORK_PRIORITY_FILTERS = ['urgent', 'high', 'medium', 'low', 'none'] as const;
+export type WorkPriorityFilter = (typeof WORK_PRIORITY_FILTERS)[number];
+export const WORK_PRIORITY_FILTER_LABELS: Record<WorkPriorityFilter, string> = {
+  urgent: 'Urgent',
+  high: 'High',
+  medium: 'Medium',
+  low: 'Low',
+  none: 'No priority',
 };
 
 /** `WorkTask.stage`, in board order (the Work board's status chips). */
@@ -1233,6 +1246,9 @@ export function normalizeFilters(v: unknown): WorkTreeFilters {
     const x = v[k];
     if (typeof x === 'string' && x.trim() !== '') out[k] = x.trim();
   }
+  if (typeof v.priority === 'string' && (WORK_PRIORITY_FILTERS as readonly string[]).includes(v.priority)) {
+    out.priority = v.priority as WorkPriorityFilter;
+  }
   if (typeof v.sort === 'string' && (WORK_SORTS as readonly string[]).includes(v.sort) && v.sort !== 'activity') {
     out.sort = v.sort as WorkSort;
   }
@@ -1253,6 +1269,7 @@ const FILTER_ORDER: (keyof WorkTreeFilters)[] = [
   'iteration',
   'epic',
   'item_type',
+  'priority',
   'query',
   'group',
   'archived',
