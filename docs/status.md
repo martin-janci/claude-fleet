@@ -824,8 +824,8 @@ shows as *Result* on the task page, above *Last outcome* (D6). Not built
 (the spec's §4, ordered in its §7): results from every dispatch and child
 results to the parent, asking about a result, Create PR / Merge PR buttons,
 one automation policy, lifecycle hooks and skills per task, Jev context
-selection, project memory, sub-agent results, action detection, and the
-phone.
+selection, project memory, sub-agent results, action detection. The phone
+shows the result read only on its task screen (fleet-mobile #271).
 
 The Jev evaluation (TypeSafe's decision model as an optional reader for
 closed-set decisions) has started with a local language census: `fleet-hub
