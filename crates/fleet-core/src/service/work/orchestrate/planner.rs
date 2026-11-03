@@ -132,6 +132,8 @@ pub struct SnapshotInput<'a> {
     pub cards: &'a [CardRow],
     /// Newest first.
     pub events: &'a [MissionEventRow],
+    /// What the mission's runs ran into, newest first (N1).
+    pub lessons: &'a [super::lessons::Lesson],
     pub why: &'a str,
 }
 
@@ -296,6 +298,19 @@ pub fn snapshot(i: &SnapshotInput<'_>) -> String {
                 o.id,
                 o.status_category,
                 untrusted(&o.title, 200)
+            ));
+        }
+        sections.push(s);
+    }
+    // N1: what the runs ran into, so a new task does not plan into it.
+    if !i.lessons.is_empty() {
+        let mut s = String::from("## What earlier runs ran into (their words)\n");
+        for l in i.lessons {
+            s.push_str(&format!(
+                "- item {} {}: {}\n",
+                l.item_id,
+                l.kind,
+                untrusted(&l.text, 300)
             ));
         }
         sections.push(s);

@@ -439,6 +439,13 @@ pub async fn run_item_with(
             prompt.push_str("\n\n");
             prompt.push_str(&n);
         }
+        // N1: what the mission's other tasks ran into.
+        if role == "implement" {
+            if let Some(n) = super::orchestrate::mission_lessons_note(&s, item_id)? {
+                prompt.push_str("\n\n");
+                prompt.push_str(&n);
+            }
+        }
         let claude = plan
             .agent
             .as_deref()

@@ -256,6 +256,9 @@ export interface MissionDetail {
   /** Its lanes with the visible tasks each holds (lanes design L2); absent
    *  when it has none, and from an older hub. */
   lanes?: MissionLane[];
+  /** What its runs ran into, newest first (N1); absent with none and from
+   *  an older hub. Workers' words. */
+  lessons?: MissionLesson[];
   /** What each member says it changes (lanes design L5), by item id; only
    *  members that say. Absent from an older hub. */
   touches?: Record<number, string[]>;
@@ -282,6 +285,16 @@ export interface MissionLane {
   pr_url?: string | null;
   /** Its live lead waits on a dialog for a person (N2). */
   lead_waits?: boolean;
+}
+
+/** One thing an earlier run of a mission ran into (`orchestrate::lessons::Lesson`). */
+export interface MissionLesson {
+  item_id: number;
+  label: string;
+  /** `failed` | `review` | `test`. */
+  kind: string;
+  text: string;
+  at: number;
 }
 
 /** The lane a task is in, if any. */

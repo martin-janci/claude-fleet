@@ -443,6 +443,19 @@
       </ul>
     </div>
   {/each}
+  {#if (detail.lessons ?? []).length > 0}
+    <details class="lessons" data-testid="mission-lessons">
+      <summary class="muted small">What its runs ran into ({(detail.lessons ?? []).length}) — the next runs are told</summary>
+      <ul>
+        {#each detail.lessons ?? [] as l (l.item_id + ':' + l.at + ':' + l.text)}
+          <li class="small" data-testid="mission-lesson">
+            <strong>{l.label}</strong>
+            {l.kind === 'review' ? 'review asked' : l.kind === 'test' ? 'test said' : 'failed'}: {l.text}
+          </li>
+        {/each}
+      </ul>
+    </details>
+  {/if}
   {#if (detail.graph?.outside ?? []).length > 0}
     <p class="muted small" data-testid="mission-outside">
       Waits on work outside the mission: {(detail.graph?.outside ?? []).map((o) => (o.key ? `${o.key} · ${o.title}` : o.title)).join(', ')}
@@ -457,6 +470,10 @@
 </div>
 
 <style>
+  .lessons ul {
+    margin: var(--space-1) 0 0;
+    padding-left: var(--space-4);
+  }
   .tasks {
     display: flex;
     flex-direction: column;

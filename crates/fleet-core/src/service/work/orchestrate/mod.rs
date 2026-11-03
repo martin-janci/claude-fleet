@@ -22,6 +22,7 @@ pub mod guard;
 pub mod integrate;
 pub mod lane_pr;
 pub mod lanes;
+pub mod lessons;
 pub mod limit;
 pub mod planner;
 pub mod steps;
@@ -357,6 +358,20 @@ fn steps_and_waits(
         causes.insert("touches");
     }
     Ok((steps, causes))
+}
+
+/// N1: what the mission's other tasks ran into, for an implementation's
+/// prompt.
+pub(crate) fn mission_lessons_note(s: &Store, item_id: i64) -> Result<Option<String>, IpcError> {
+    let Some(mission) = s.item_mission(item_id)? else {
+        return Ok(None);
+    };
+    Ok(lessons::note(&lessons::lessons(
+        s,
+        mission,
+        Some(item_id),
+        lessons::PROMPT_LESSONS,
+    )?))
 }
 
 /// The plan a mission's detail carries: `None` for a draft or a finished
@@ -1548,6 +1563,7 @@ pub async fn run_planner(
         let steps = steps_for(&s, m, &a)?;
         let cards = s.mission_cards(m.id, CARDS_SHOWN)?;
         let events = s.mission_events(m.id, None, 40)?;
+        let lessons = lessons::lessons(&s, m.id, None, lessons::PROMPT_LESSONS * 2)?;
         let snap = planner::snapshot(&planner::SnapshotInput {
             mission: m,
             items: &items,
@@ -1555,6 +1571,7 @@ pub async fn run_planner(
             steps: &steps,
             cards: &cards,
             events: &events,
+            lessons: &lessons,
             why,
         });
         event(

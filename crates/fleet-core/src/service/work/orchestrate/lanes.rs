@@ -495,6 +495,13 @@ async fn begin_task(
         task_text.push_str("\n\n");
         task_text.push_str(&n);
     }
+    // N1: what the mission's other tasks ran into.
+    if role == "implement" {
+        if let Some(n) = super::mission_lessons_note(&s, item_id)? {
+            task_text.push_str("\n\n");
+            task_text.push_str(&n);
+        }
+    }
     let prompt = format!("{preamble}{task_text}");
     let task = run::record_run(&s, row.id, &prompt, item_id, attempt, role)?;
     // The lead's spend so far: this task costs from here (M1).

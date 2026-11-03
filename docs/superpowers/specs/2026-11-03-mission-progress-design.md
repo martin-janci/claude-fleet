@@ -56,6 +56,12 @@ M3 ukazuje, prečo misia čaká. Najväčšie čakania sú na človeka (karty, g
 
 **Veľkosť** M.
 
+**Ako je to postavené v N1** (`orchestrate/lessons.rs`):
+- **Odchýlka od návrhu: bez tabuľky.** Poučenia sa pri každom použití odvodia z `tasks` členov misie (implement pokus, ktorý zlyhal alebo hlásil menej než `done`; review a test s iným výsledkom než `done`), text je `failure_text` (chyba, blokery, inak súhrn) v jednom riadku, najviac 300 znakov, rovnaké texty raz, najnovšie prvé. Odpadá zápis v ticku a migrácia; zmazanie jedného poučenia človekom sa nestavalo.
+- Prompt implementácie (`run::run_item_with` aj `lanes::begin_task`) dostane 5 najnovších poučení iných úloh misie (`mission_lessons_note`) ako citovaný text; vlastné zlyhania úlohy nesie už jej retry.
+- Snapshot plánovača má sekciu „What earlier runs ran into“ (10 najnovších, každé v `<untrusted>`).
+- `work { mission }` vracia `lessons` (najviac 20, len úlohy, ktoré volajúci vidí); zoznam úloh misie ich ukáže v rozbaľovacom „What its runs ran into“.
+
 ## 4. N4: grant jedným ťuknutím
 
 - `work_link { mission_grant, preset: "finish" }`: úroveň 2, `until_done`, hosty z placementu misie (hosty jej doterajších behov, inak host plánovača), rozpočet = zostávajúce úlohy × cena úlohy z N5 × 1,5 (najmenej $5), login z posledného grantu.
@@ -94,7 +100,7 @@ M3 ukazuje, prečo misia čaká. Najväčšie čakania sú na človeka (karty, g
 | Fáza | Obsah | Správanie | Veľkosť |
 |---|---|---|---|
 | **N2** (postavené) | dôvod obsadenej línie, `person` pri dialógu | len meranie a zobrazenie | S |
-| **N1** | `mission_lessons`, prompt a plánovač, zoznam v miestnosti | mení prompty | M |
+| **N1** (postavené) | poučenia zo `tasks`, prompt a plánovač, zoznam v miestnosti | mení prompty | M |
 | **N5** | `stats.forecast` | len zobrazenie | S |
 | **N4** | `preset: finish`, tlačidlo | nový spôsob grantu | S–M |
 | **N6** | `merge-tree` pred štartom, karta s `dependents` | mení, kedy závislá úloha štartuje | M |

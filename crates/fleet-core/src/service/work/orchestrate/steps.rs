@@ -106,7 +106,7 @@ pub struct StepInput<'a> {
     pub max_parallel: u32,
 }
 
-fn failure_text(t: &TaskRow) -> String {
+pub(crate) fn failure_text(t: &TaskRow) -> String {
     let mut parts: Vec<String> = Vec::new();
     if let Some(e) = t.error.as_deref().filter(|e| !e.trim().is_empty()) {
         parts.push(e.trim().to_string());

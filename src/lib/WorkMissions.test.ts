@@ -634,6 +634,7 @@ describe('WorkMissions', () => {
         },
         lanes: [{ id: 1, mission_id: 4, name: 'backend', state: 'idle', item_ids: [11], pr_url: 'https://github.com/o/r/pull/9', lead_waits: true }],
         touches: { 11: ['src/store/**', 'docs/status.md'] },
+        lessons: [{ item_id: 11, label: 'TASK-11', kind: 'review', text: 'no test for the empty case', at: 5 }],
         events: [],
         may_change: true,
       });
@@ -659,6 +660,11 @@ describe('WorkMissions', () => {
       await fireEvent.click(screen.getByTestId('mission-lane-save'));
       await flush();
       expect(calls('set_mission_item')[2]).toEqual({ mission_id: 4, item_id: 12, on: true, lane: 'web' });
+    });
+
+    it('lists what the mission\'s runs ran into (N1)', async () => {
+      await open();
+      expect(screen.getByTestId('mission-lesson').textContent).toContain('TASK-11 review asked: no test for the empty case');
     });
 
     it('says when a lane\'s lead waits on a dialog for you (N2)', async () => {

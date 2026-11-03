@@ -109,6 +109,10 @@ pub struct MissionDetail {
     /// hub.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lanes: Vec<crate::store::MissionLaneRow>,
+    /// What its runs ran into, newest first, on the members this caller
+    /// may see (mission progress N1). Absent from an older hub.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lessons: Vec<super::orchestrate::lessons::Lesson>,
     /// What each member this caller may see says it changes (lanes design
     /// L5), by item id; only members that say. Absent from an older hub.
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
@@ -326,6 +330,15 @@ pub fn mission(
         })
         .collect();
     let limit_wait = Some(super::orchestrate::limit::Words::read(&s, id)?.newest_wait());
+    let lessons = super::orchestrate::lessons::lessons(
+        &s,
+        id,
+        None,
+        super::orchestrate::lessons::LISTED_LESSONS,
+    )?
+    .into_iter()
+    .filter(|l| status.contains_key(&l.item_id))
+    .collect();
     let touches = s
         .mission_touches(id)?
         .into_iter()
@@ -348,6 +361,7 @@ pub fn mission(
         sessions,
         stats,
         lanes,
+        lessons,
         touches,
         limit_wait,
     })
