@@ -430,9 +430,14 @@ async fn profile_names(ssh: &dyn SshExec, host: &str) -> Result<Vec<String>, Ipc
 /// `CLAUDE_CONFIG_DIR=~/.claude-profiles/<name>` and reads that file instead
 /// of `~/.claude.json`; it is a dotfile, so `tmux::PROFILE_LINKS` does not
 /// share it, and without this the session has no fleet MCP server. Same
-/// read → merge → back up → write as the host's own file, except that a
-/// profile whose entry is already current is left alone: a running Claude
-/// rewrites that file all the time.
+/// read → merge → back up → guarded write as the host's own file
+/// ([`rewrite_mcp_entry`]), and a profile whose entry is already current is
+/// left alone: a running Claude under that login rewrites the file all the
+/// time, so the write lands only while the file still holds what was read,
+/// and a file that changed meanwhile is read and merged again (hardening
+/// 2026-11-03: this was the one writer of a profile's file without the
+/// guard, so a provision could put back a copy older than the session's
+/// own last write).
 ///
 /// The host's own user-scope MCP servers go in too ([`share_mcp_servers`]):
 /// a mission run under a second login otherwise starts without the Jira or
@@ -449,24 +454,55 @@ async fn provision_profiles(
     }
     let host_json = read_host_file(ssh, host, CLAUDE_JSON).await?;
     for name in names {
-        let dir = format!("{PROFILES_DIR}/{name}");
-        let path = format!("{dir}/.claude.json");
-        let existing = read_host_file(ssh, host, &path).await?;
-        let merged = merge_mcp_entry(&existing, &base.mcp_url(), token)
-            .and_then(|m| share_mcp_servers(&m, &host_json).map(|(out, _)| out))
-            .map_err(|e| IpcError::new(&e.code, format!("profile {name}: {}", e.message)))?;
-        if serde_json::from_str::<serde_json::Value>(&existing).ok()
-            == serde_json::from_str::<serde_json::Value>(&merged).ok()
-        {
-            continue;
+        let mut last = None;
+        for _ in 0..MCP_ENTRY_TRIES {
+            match provision_profile_once(ssh, host, base, token, &name, &host_json).await {
+                Err(e) if e.code == codes::E_CONFLICT => last = Some(e),
+                Err(e) => return Err(e),
+                Ok(()) => {
+                    last = None;
+                    break;
+                }
+            }
         }
-        if !existing.trim().is_empty() {
-            write_host_file_secret(ssh, host, &dir, &format!("{path}.fleet-bak"), &existing)
-                .await?;
+        if let Some(e) = last {
+            return Err(e);
         }
-        write_host_file_secret(ssh, host, &dir, &path, &merged).await?;
     }
     Ok(())
+}
+
+/// One read → merge → back up → guarded write of [`provision_profiles`]
+/// for the profile `name`. `E_CONFLICT` when the file changed after the
+/// read; nothing was replaced.
+async fn provision_profile_once(
+    ssh: &dyn SshExec,
+    host: &str,
+    base: &HubBase,
+    token: &str,
+    name: &str,
+    host_json: &str,
+) -> Result<(), IpcError> {
+    let dir = format!("{PROFILES_DIR}/{name}");
+    let path = format!("{dir}/.claude.json");
+    let backup = format!("{path}.fleet-bak");
+    let existing = read_host_file(ssh, host, &path).await?;
+    let merged = merge_mcp_entry(&existing, &base.mcp_url(), token)
+        .and_then(|m| share_mcp_servers(&m, host_json).map(|(out, _)| out))
+        .map_err(|e| IpcError::new(&e.code, format!("profile {name}: {}", e.message)))?;
+    if serde_json::from_str::<serde_json::Value>(&existing).ok()
+        == serde_json::from_str::<serde_json::Value>(&merged).ok()
+    {
+        return Ok(());
+    }
+    if !existing.trim().is_empty() {
+        write_host_file_secret(ssh, host, &dir, &backup, &existing).await?;
+    }
+    let unchanged = Unchanged {
+        expected: &existing,
+        backup: (!existing.trim().is_empty()).then_some(backup.as_str()),
+    };
+    write_host_file_secret_guarded(ssh, host, &dir, &path, &merged, Some(unchanged)).await
 }
 
 /// The fleet's own entry, which [`merge_mcp_entry`] writes per file with

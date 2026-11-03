@@ -192,7 +192,11 @@ host has room, offering only Wait.
 Which login: another account on the same host (a second login on the same
 account shares its limit), not signed out, with a usage reading under
 `accounts.pause_at` taken in the last hour, not at a limit and not past its
-daily spend limit, the least used first. An account takes one session per
+daily spend limit, the least used first. For an account no session in the
+fleet runs on, a reading up to a day old counts: nothing under such a login
+refreshes its access token, so after a few idle hours the usage check reads
+"access token expired" and its number stops moving, as its use does. The
+first session sent there refreshes the token. An account takes one session per
 wave: one per run, and the next only after a usage reading newer than that
 move, so a dozen sessions on a spent account spread out instead of all
 landing on the same spare login and spending it too. With none, nothing moves and the row waits for a person. With
@@ -247,8 +251,10 @@ rule named: they are how Control recovers work, so a spent login is the
 session's to report.
 
 Automation leaves a login alone that is past `accounts.pause_at` or that
-fleet knows is signed out: a routine's fire goes to its fallback host, else
-skips and says why (with the reset time, or the sign-in command); a
+fleet knows is signed out: a routine that names no login, whose host's own
+login is past the line, runs under the login on that host with the most
+headroom (as a ticket start does; the run's note names it); otherwise a
+routine's fire goes to its fallback host, else skips and says why (with the reset time, or the sign-in command); a
 mission's run waits. A `restart_session { profile }` onto another login is
 refused for a signed-out login, and for one past the line unless
 `over_limit_ok` says the person chose it. A switch from a person's paired

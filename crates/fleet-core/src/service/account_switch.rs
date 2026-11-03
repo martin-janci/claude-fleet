@@ -79,6 +79,15 @@ pub const RETRY_AFTER_SECS: i64 = 30 * 60;
 /// has been failing (signed out, rate-limited, host gone) and the number
 /// it still shows may be hours behind.
 pub const STALE_TARGET_SECS: i64 = 60 * 60;
+/// A login whose account no session in the fleet runs on may be a target on
+/// a reading up to this old. Its poll does not fail for a reason that says
+/// anything about the account: nothing under it refreshes the OAuth access
+/// token (only a running `claude` does), so after a few idle hours every
+/// source answers "access token expired" and the reading stops moving, as
+/// the account's use does. Without this the spare login a switch is for was
+/// no target the morning after (hardening 2026-11-03). The first session
+/// sent there refreshes the token, and the next reading counts it.
+pub const IDLE_TARGET_SECS: i64 = 24 * 3600;
 /// What a person who asked to carry on gets typed after a switch.
 pub const CONTINUE_PROMPT: &str = "Continue where you left off.";
 /// How long after the switch the prompt may go in at the earliest.
@@ -236,18 +245,35 @@ pub fn plan(
             .and_then(|r| account_limits::used_pct_of(&r.usage, Some(r.fetched_at), now))
     };
     let is_limited = |uuid: &str| used(uuid).is_some_and(|u| u >= 100.0);
-    // A target's reading must be recent, and newer than the last session
-    // sent there. (An old "at the limit" reading is still a reason to
-    // leave, so `due` reads every snapshot.)
+    let sessions = s.list_all_sessions()?;
+    // Accounts some live session in the fleet runs on: their use moves, so
+    // an old reading of theirs may be hours behind.
+    let in_use: BTreeSet<&str> = sessions
+        .iter()
+        .filter(|r| r.status != "ghost" && r.lost_at.is_none())
+        .filter_map(|r| r.account_uuid.as_deref())
+        .collect();
+    // A target's reading must be recent ([`STALE_TARGET_SECS`], or
+    // [`IDLE_TARGET_SECS`] for an account nothing runs on), and newer than
+    // the last session sent there. (An old "at the limit" reading is still
+    // a reason to leave, so `due` reads every snapshot.)
     let fresh_target = |uuid: &str| {
+        let max_age = if in_use.contains(uuid) {
+            STALE_TARGET_SECS
+        } else {
+            IDLE_TARGET_SECS
+        };
         snaps
             .iter()
             .find(|r| r.account_uuid == uuid)
             .is_some_and(|r| {
-                now - r.fetched_at <= STALE_TARGET_SECS
+                now - r.fetched_at <= max_age
                     && recent.targets.get(uuid).is_none_or(|at| r.fetched_at > *at)
             })
     };
+    // A fresh target's use now: its reading's, or nothing used once every
+    // window it read has reset since (an idle account's often has).
+    let target_used = |uuid: &str| used(uuid).or(Some(0.0));
     let pause_at = account_limits::pause_at_pct(s);
     // Early (`accounts.auto_switch_early`): an idle session moves once its
     // account passes `accounts.pause_at`, before its next turn stalls.
@@ -270,15 +296,15 @@ pub fn plan(
     let controller = s.get_controller()?;
     let mut taken: BTreeSet<String> = BTreeSet::new();
     let mut out = Vec::new();
-    for row in s.list_all_sessions()? {
+    for row in &sessions {
         let parked = row.claude_status.as_deref() == Some("blocked")
             && quota_parked(
                 s.newest_session_event_of(row.id, &["notification"])?
                     .and_then(|e| e.detail)
                     .as_deref(),
             );
-        if !switchable(&row, due, parked)
-            || !owner_allows(&row, personal_owner, &opted_out)
+        if !switchable(row, due, parked)
+            || !owner_allows(row, personal_owner, &opted_out)
             || controller
                 .as_ref()
                 .is_some_and(|(h, t)| *h == row.host_alias && *t == row.tmux_name)
@@ -303,7 +329,7 @@ pub fn plan(
             .filter(|l| !crate::service::login_health::is_signed_out(host, l.profile.as_deref()))
             .filter(|l| fresh_target(&l.account_uuid) && !taken.contains(&l.account_uuid))
             .map(|mut l| {
-                l.used_pct = used(&l.account_uuid);
+                l.used_pct = target_used(&l.account_uuid);
                 l
             })
             .collect();
@@ -315,7 +341,7 @@ pub fn plan(
             continue;
         };
         taken.insert(target.account_uuid.clone());
-        let continue_after = match answering_person(&row, personal_owner) {
+        let continue_after = match answering_person(row, personal_owner) {
             Some(p) => s.person_auto_switch_continue(p)? && last_turn_cut_off(s, row.id)?,
             None => false,
         };

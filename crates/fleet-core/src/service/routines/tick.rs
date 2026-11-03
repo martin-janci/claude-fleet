@@ -153,7 +153,12 @@ impl Deps {
 }
 
 /// The session a run of `r` starts on `host`.
-fn session_args(r: &RoutineRow, host: &str, owner: Option<i64>) -> NewSessionArgs {
+fn session_args(
+    r: &RoutineRow,
+    host: &str,
+    login: Option<&str>,
+    owner: Option<i64>,
+) -> NewSessionArgs {
     NewSessionArgs {
         host_alias: host.to_string(),
         project_id: r.project_id,
@@ -170,7 +175,7 @@ fn session_args(r: &RoutineRow, host: &str, owner: Option<i64>) -> NewSessionArg
         resume_claude_session_id: None,
         model: None,
         effort: None,
-        profile: r.profile.clone(),
+        profile: login.map(str::to_string).or_else(|| r.profile.clone()),
         agent: None,
         origin: Some(SessionOrigin::routine(r.id)),
         over_limit_ok: false,
@@ -212,7 +217,7 @@ pub async fn fire_with(
             Plan::Skip(why) => {
                 return record_skip(&s, r, trigger, trigger_ref, scheduled_for, &why, now)
             }
-            Plan::Start { host, note } => (host, note),
+            Plan::Start { host, note, login } => (host, note, login),
         };
         let checks = super::debug::fire_checks(&s, r, now).unwrap_or_default();
         // Its run row is written only once the session exists, so a second
@@ -230,12 +235,15 @@ pub async fn fire_with(
             Some(p) => Some(p),
             None => s.personal_owner_id()?,
         };
-        (owner, starting, (host, note), checks)
+        (owner, starting, (host, note, login), checks)
     };
-    let (mut host, mut note) = plan;
+    let (mut host, mut note, login) = plan;
     let mut steps = vec![trace::placement_step(r, &host, note.as_deref(), now)];
     let started = std::time::Instant::now();
-    let mut spawned = deps.spawn.spawn(session_args(r, &host, owner)).await;
+    let mut spawned = deps
+        .spawn
+        .spawn(session_args(r, &host, login.as_deref(), owner))
+        .await;
     steps.push(spawn_step(&host, &spawned, started, now));
     // The start failed on the routine's own host: its fallback takes the
     // run, once (G3.8).
@@ -248,7 +256,7 @@ pub async fn fire_with(
             host = fb.to_string();
             steps.push(trace::placement_step(r, &host, note.as_deref(), now));
             let started = std::time::Instant::now();
-            spawned = deps.spawn.spawn(session_args(r, &host, owner)).await;
+            spawned = deps.spawn.spawn(session_args(r, &host, None, owner)).await;
             steps.push(spawn_step(&host, &spawned, started, now));
         }
     }
@@ -455,8 +463,15 @@ fn claim_start(store: &Arc<Mutex<Store>>, r: &RoutineRow) -> Option<Option<crate
 pub(super) enum Plan {
     /// It does not, in words.
     Skip(String),
-    /// On `host`: its own, or its fallback with `note` saying why.
-    Start { host: String, note: Option<String> },
+    /// On `host`: its own, or its fallback with `note` saying why. `login`
+    /// is the profile the run takes instead of the routine's own: its
+    /// host's own login was past the line and another login there was not
+    /// (hardening 2026-11-03); `None` = the routine's own.
+    Start {
+        host: String,
+        note: Option<String>,
+        login: Option<String>,
+    },
 }
 
 /// Where a run of `r` starts now, if it does. It does not when its last
@@ -465,7 +480,11 @@ pub(super) enum Plan {
 /// the line and no fallback host can take it. Its own
 /// host, unless that host is unreachable or its login is past
 /// `accounts.pause_at` and its fallback host is neither (G3.8); the
-/// fallback bills the same profile there. A host the last probe could not
+/// fallback bills the same profile there. A routine that names no login
+/// (its host's own) whose host's login is past the line first takes the
+/// login on the same host with the most headroom, as a ticket start does
+/// (`account_limits::login_with_headroom`); a routine that names its login
+/// keeps it. A host the last probe could not
 /// reach, with no fallback that can, is tried anyway: the probe may be
 /// stale, and a failed start says why.
 pub(super) fn plan(s: &Store, r: &RoutineRow, now: i64) -> Result<Plan, IpcError> {
@@ -509,7 +528,19 @@ pub(super) fn plan(s: &Store, r: &RoutineRow, now: i64) -> Result<Plan, IpcError
         return Ok(Plan::Start {
             host: r.host_alias.clone(),
             note: None,
+            login: None,
         });
+    }
+    // The host's own login past the line, on a routine that named none:
+    // another login on the same host with room takes the run.
+    if let (Some(o), None, false) = (&over, profile, down) {
+        if let Some(l) = freer_login_for_run(s, &r.host_alias, &o.login.account_uuid, now)? {
+            return Ok(Plan::Start {
+                host: r.host_alias.clone(),
+                note: Some(format!("under profile {l}: {}", o.state())),
+                login: Some(l),
+            });
+        }
     }
     if let Some(fb) = r.fallback_host.as_deref() {
         let fb_over = crate::service::account_limits::over_limit(s, fb, profile, now)?;
@@ -525,6 +556,7 @@ pub(super) fn plan(s: &Store, r: &RoutineRow, now: i64) -> Result<Plan, IpcError
             return Ok(Plan::Start {
                 host: fb.to_string(),
                 note: Some(format!("on {fb}: {why}")),
+                login: None,
             });
         }
     }
@@ -534,8 +566,27 @@ pub(super) fn plan(s: &Store, r: &RoutineRow, now: i64) -> Result<Plan, IpcError
         (None, None) => Plan::Start {
             host: r.host_alias.clone(),
             note: None,
+            login: None,
         },
     })
+}
+
+/// The profile on `host` a run moves to off its host's own login (on
+/// `not_account`, past the line): [`crate::service::account_limits::freer_login`], a
+/// profile, and not past its account's daily spend limit (an unreadable
+/// spend is not known to be under it).
+fn freer_login_for_run(
+    s: &Store,
+    host: &str,
+    not_account: &str,
+    now: i64,
+) -> Result<Option<String>, IpcError> {
+    let Some(l) = crate::service::account_limits::freer_login(s, host, not_account, now)? else {
+        return Ok(None);
+    };
+    let daily_hit = crate::service::account_limits::daily_limit_hit(s, &l.account_uuid, now)
+        .map_or(true, |h| h.is_some());
+    Ok(l.profile.filter(|_| !daily_hit))
 }
 
 /// Close a run and record what its own facts say it came to (step 8.10).
