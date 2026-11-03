@@ -15,6 +15,7 @@
   import { onMount, tick } from 'svelte';
   import WizardDialog from '../forms/WizardDialog.svelte';
   import StatusDot from '../kit/StatusDot.svelte';
+  import { errorText } from '../error_copy';
   import type { Values } from '../forms/forms';
   import type { Wizard } from '../forms/wizards';
   import {
@@ -58,7 +59,7 @@
       defs = r.value ?? [];
       loadError = null;
     } else {
-      loadError = r.error?.message ?? 'Could not read the catalog';
+      loadError = r.error ? errorText(r.error) : 'Could not read the catalog';
     }
     gallery = g.ok && Array.isArray(g.value) ? g.value.filter((e) => !e.installed) : [];
   }
@@ -69,7 +70,7 @@
     note = null;
     try {
       const r = await installFleet(name);
-      note = r.ok ? `${name} added to the catalog: start an instance of it above.` : (r.error?.message ?? 'Could not add it');
+      note = r.ok ? `${name} added to the catalog: start an instance of it above.` : (r.error ? errorText(r.error) : 'Could not add it');
       await load();
     } finally {
       installing = null;
@@ -89,7 +90,7 @@
     note = null;
     const r = await fleetForm(definition, id);
     if (r.ok) open = { wizard: fleetWizard(r.value), definition };
-    else note = r.error?.message ?? 'Could not build the form';
+    else note = r.error ? errorText(r.error) : 'Could not build the form';
   }
 
   async function run(values: Values) {
@@ -99,7 +100,7 @@
     const r = await grantFleet(open.definition, values);
     busy = false;
     if (!r.ok) {
-      error = r.error?.message ?? 'The grant failed';
+      error = r.error ? errorText(r.error) : 'The grant failed';
       return;
     }
     open = null;
@@ -114,7 +115,7 @@
   async function revoke(id: number) {
     revoking = null;
     const r = await revokeAgentRule(id);
-    note = r.ok ? `Instance ${id} revoked.` : (r.error?.message ?? 'Revoke failed');
+    note = r.ok ? `Instance ${id} revoked.` : (r.error ? errorText(r.error) : 'Revoke failed');
     void loadAgents();
   }
 
@@ -127,7 +128,7 @@
     queuing = true;
     const r = await runFleetAgent(running.id, running.request, running.scope);
     queuing = false;
-    note = r.ok ? 'Queued: it runs on the next pass.' : (r.error?.message ?? 'Run failed');
+    note = r.ok ? 'Queued: it runs on the next pass.' : (r.error ? errorText(r.error) : 'Run failed');
     if (r.ok) running = null;
     void loadAgents();
   }

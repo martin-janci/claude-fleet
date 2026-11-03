@@ -297,8 +297,8 @@
         >
       {/if}
       {#if kind === 'suggested'}
-        <button class="btn btn--quiet" type="button" data-testid="session-task-confirm" disabled={busy || linkBlocked !== null} onclick={() => void confirm(l)}>Confirm</button>
-        <button class="btn btn--quiet" type="button" data-testid="session-task-reject" disabled={busy || linkBlocked !== null} onclick={() => void reject(l)}>Not this</button>
+        <button class="btn btn--quiet" type="button" data-testid="session-task-confirm" disabled={busy || linkBlocked !== null} title={linkBlocked ?? undefined} onclick={() => void confirm(l)}>Confirm</button>
+        <button class="btn btn--quiet" type="button" data-testid="session-task-reject" disabled={busy || linkBlocked !== null} title={linkBlocked ?? undefined} onclick={() => void reject(l)}>Not this</button>
       {/if}
       <button class="btn btn--quiet" type="button" data-testid="session-task-show" onclick={() => showTaskInWorkView(l.task.task_id, [{ session_id: session.id, state: l.state }])}>Show in Work view</button>
     </div>

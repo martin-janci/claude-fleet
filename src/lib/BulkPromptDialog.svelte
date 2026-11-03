@@ -90,6 +90,7 @@
   canConfirm={done || canSend}
   onconfirm={() => void send()}
   onclose={onClose}
+  dirty={!done && prompt.trim() !== ''}
   width="520px"
   testid="bulk-prompt-dialog"
   confirmTestid="bulk-prompt-send"

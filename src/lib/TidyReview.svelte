@@ -636,6 +636,7 @@
               class="btn btn--quiet is-bounded"
               data-testid="reopened-dismiss"
               disabled={hubActionBlocked('dismiss_reopened', $hubStatus, $hubConnection) !== null}
+              title={hubActionBlocked('dismiss_reopened', $hubStatus, $hubConnection) ?? undefined}
               onkeydown={(e) => e.stopPropagation()}
               onclick={() =>
                 void dismissReopened(w.item_id).then((r) => {
