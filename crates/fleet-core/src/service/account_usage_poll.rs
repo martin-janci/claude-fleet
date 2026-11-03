@@ -1384,9 +1384,14 @@ mod tests {
         assert_eq!(
             frames(),
             vec![
-                // ... and off the record again.
+                // ... and off the record again. idle-1 stays blocked until
+                // its account's new reading lands, a frame later.
                 ("host:probed", None, None),
-                ("session:updated", Some(ids[0]), None),
+                (
+                    "session:updated",
+                    Some(ids[0]),
+                    Some("no_credentials".into())
+                ),
                 ("session:updated", Some(ids[2]), None),
                 ("account_usage:updated", None, None),
                 ("session:updated", Some(ids[0]), None),
