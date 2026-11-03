@@ -1474,7 +1474,7 @@
           <div class="pane">
             {#if editing}
               <div class="edit" data-testid="mission-edit-form">
-                <label class="field">Goal<textarea rows="3" bind:value={editGoal} data-testid="mission-edit-goal"></textarea></label>
+                <label class="field">Goal<textarea rows="3" bind:value={editGoal} use:focusNow data-testid="mission-edit-goal"></textarea></label>
                 <label class="field">Not in scope<textarea rows="2" bind:value={editNonGoals}></textarea></label>
                 <label class="field"
                   >Done when (one condition per line)<textarea rows="3" bind:value={editDoneWhen} data-testid="mission-edit-done-when"></textarea></label
@@ -1600,7 +1600,7 @@
                   <form class="grant" data-testid="mission-grant-form" use:formKeys onsubmit={(e) => (e.preventDefault(), void grant())}>
                     <label class="field inline"
                       >Level
-                      <select bind:value={grantLevel}>
+                      <select bind:value={grantLevel} use:focusNow>
                         {#each MISSION_LEVELS.filter((l) => l.level >= 1) as l (l.level)}<option value={l.level}>{l.label}</option>{/each}
                       </select></label
                     >
