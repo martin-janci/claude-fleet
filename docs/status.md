@@ -758,8 +758,8 @@ a per-host token (`E_FORBIDDEN`), the setting off (`E_INVALID_STATE`) or a
 tracker with no such move (`TrackerError::Unsupported` → `E_UNSUPPORTED`).
 `WorkTask.status_movable` unlocks the Board card (`boardMovesAtTracker`);
 `net::https` gained `PUT` for Asana's task update. The phone's task screen
-moves such a ticket with its status chips (fleet-mobile #271). Not yet: the
-List view.
+moves such a ticket with its status chips (fleet-mobile #271), and the task
+page's status pick moves it too. Not yet: the List view.
 
 Task attachments (migration 168, `work_item_attachments` and the
 content-addressed `work_attachment_blobs`, deduplicated by SHA-256 and kept

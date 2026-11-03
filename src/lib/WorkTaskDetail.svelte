@@ -97,6 +97,7 @@
     type WorkTaskLink,
   } from './work_view';
   import type { IpcError } from './result';
+  import { boardMovesAtTracker } from './task_list';
 
   let {
     taskId,
@@ -455,6 +456,8 @@
   }
 
   // Inline status (a native task's own): set here, without the edit dialog.
+  // A ticket whose tracker takes moves from fleet (`status_movable`) is
+  // moved at its tracker the same way; the hub reads it back.
   let statusError = $state<string | null>(null);
   let statusBusy = $state(false);
   async function pickStatus(next: WorkItemStatus) {
@@ -660,14 +663,19 @@
     </div>
     {#if task}
       <div class="chips">
-        {#if task.kind === 'local' && task.item_id != null}
+        {#if (task.kind === 'local' && task.item_id != null) || boardMovesAtTracker(task)}
+          {@const atTracker = boardMovesAtTracker(task) ? task.tracker_name || task.provider || 'its tracker' : null}
+          {#if atTracker && task.status_name}<span
+              class="chip chip--status chip--{task.status_category ?? 'todo'}"
+              data-testid="work-task-status">{task.status_name}</span
+            >{/if}
           <select
             class="status-pick status-pick--{task.status_category ?? 'todo'}"
             aria-label="Status"
             data-testid="work-task-status-pick"
             value={task.status_category ?? 'todo'}
             disabled={statusBlocked !== null || statusBusy}
-            title={statusBlocked ?? 'Set the status'}
+            title={statusBlocked ?? (atTracker ? `Move it on ${atTracker}` : 'Set the status')}
             onchange={(e) => void pickStatus((e.currentTarget as HTMLSelectElement).value as WorkItemStatus)}
           >
             <option value="todo">To do</option>
