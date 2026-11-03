@@ -3293,6 +3293,20 @@ describe('List keys (redesign step 3.8)', () => {
     expect(get(selectedSession)?.id).toBe(rows[2].id);
   });
 
+  it('the next-needs-you chord says so when nothing needs you', async () => {
+    const rows = three().map((r) => ({ ...r, claude_status: 'working' as const }));
+    mockBackend(fakeProjects, rows);
+    selectSession(null);
+    clearToasts();
+    render(Sidebar);
+    await tick(); await tick();
+    const isMac = /Mac/.test(navigator.platform) || /Macintosh/.test(navigator.userAgent);
+    const chord = isMac ? { key: 'n', metaKey: true, altKey: true } : { key: 'n', ctrlKey: true, altKey: true };
+    await fireEvent.keyDown(document.body, chord);
+    expect(get(selectedSession)).toBeNull();
+    expect(get(toasts).some((t) => t.message === 'Nothing needs you right now')).toBe(true);
+  });
+
   it('the next-needs-you chord wins over a focused terminal (review w18-3)', async () => {
     const rows = three();
     mockBackend(fakeProjects, rows);

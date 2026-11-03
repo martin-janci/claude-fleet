@@ -1,7 +1,7 @@
 <script lang="ts">
   import { errorText } from './error_copy';
   import type { Result } from './result';
-  import { copyText } from './clipboard';
+  import { copyAndSay } from './clipboard';
   import {
     mcpConfigure,
     mcpClientConfig,
@@ -156,7 +156,7 @@
     <div class="mcp-field">
       <span class="lbl">URL</span>
       <code class="mono">{mcp.url}</code>
-      <button onclick={() => copyText(mcp!.url)}>Copy</button>
+      <button onclick={() => copyAndSay(mcp!.url, 'URL')}>Copy</button>
     </div>
 
     <div class="mcp-field">
@@ -165,7 +165,7 @@
       <button onclick={() => (tokenShown = !tokenShown)}>
         {tokenShown ? 'Hide' : 'Show'}
       </button>
-      <button onclick={() => copyText(mcp!.token)}>Copy</button>
+      <button onclick={() => copyAndSay(mcp!.token, 'Token')}>Copy</button>
       <button
         class="danger"
         disabled={mcpBusy}
@@ -179,7 +179,7 @@
     <details class="mcp-config">
       <summary>MCP client config</summary>
       <pre>{configBlock}</pre>
-      <button onclick={() => copyText(configBlock)}>Copy config</button>
+      <button onclick={() => copyAndSay(configBlock, 'Config')}>Copy config</button>
     </details>
 
     <div class="mcp-row">

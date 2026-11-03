@@ -465,6 +465,7 @@ export async function runCommand(id: string, ctx: CommandContext): Promise<void>
     case 'app.pause-all': {
       const r = await pauseAllMissions();
       if (!r.ok) pushError(r.error, 'Pause all failed');
+      else if (r.value.length === 0) push({ kind: 'info', message: 'No mission is running: nothing to pause' });
       else push({ kind: 'success', message: `Paused ${r.value.length} mission${r.value.length === 1 ? '' : 's'}` });
       return;
     }

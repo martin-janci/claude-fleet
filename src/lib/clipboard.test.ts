@@ -3,7 +3,9 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 const nativeWriteText = vi.fn();
 vi.mock('./clipboard_native', () => ({ nativeWriteText: (t: string) => nativeWriteText(t) }));
 
-import { trimSelectionText, sanitizePaste, framePaste, copyText } from './clipboard';
+import { trimSelectionText, sanitizePaste, framePaste, copyText, copyAndSay } from './clipboard';
+import { toasts, clearToasts } from './toasts';
+import { get } from 'svelte/store';
 
 describe('trimSelectionText', () => {
   it('trims trailing whitespace per line', () => {
@@ -70,6 +72,15 @@ describe('copyText', () => {
   it('resolves false without throwing when the Clipboard API is missing', async () => {
     setClipboard(undefined);
     await expect(copyText('x')).resolves.toBe(false);
+  });
+  it('copyAndSay says the copy happened, or that it did not', async () => {
+    clearToasts();
+    writeText.mockResolvedValue(undefined);
+    await expect(copyAndSay('u', 'URL')).resolves.toBe(true);
+    expect(get(toasts).map((t) => t.message)).toContain('URL copied');
+    writeText.mockRejectedValue(new Error('denied'));
+    await expect(copyAndSay('u', 'URL')).resolves.toBe(false);
+    expect(get(toasts).map((t) => t.message)).toContain('URL not copied: the clipboard refused');
   });
 });
 
