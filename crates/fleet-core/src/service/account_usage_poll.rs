@@ -1295,8 +1295,9 @@ mod tests {
 
     /// Review r05 F9: an account moving into or out of a lost login (or a
     /// limit) re-announces its live sessions, so the hub's stamped
-    /// `needs_attention` follows; a dead row, another account's session and
-    /// an answer that moves nothing send no session frame.
+    /// `needs_attention` follows; a dead row and an answer that moves
+    /// nothing send no session frame. The login's own stamp re-announces
+    /// every live session on its host first.
     #[tokio::test]
     async fn an_account_entering_or_leaving_a_block_re_announces_its_live_sessions() {
         let bus = Arc::new(crate::events::BroadcastEventBus::new(64));
@@ -1353,8 +1354,21 @@ mod tests {
         assert_eq!(
             frames(),
             vec![
-                // h1's login is now on record as signed out (login_health).
+                // h1's login is now on record as signed out (login_health),
+                // which blocks every live session on that login, whatever
+                // account it last reported (review 2026-11-03 F2): the
+                // ghost sends nothing.
                 ("host:probed", None, None),
+                (
+                    "session:updated",
+                    Some(ids[0]),
+                    Some("no_credentials".into())
+                ),
+                (
+                    "session:updated",
+                    Some(ids[2]),
+                    Some("no_credentials".into())
+                ),
                 ("account_usage:updated", None, None),
                 (
                     "session:updated",
@@ -1372,6 +1386,8 @@ mod tests {
             vec![
                 // ... and off the record again.
                 ("host:probed", None, None),
+                ("session:updated", Some(ids[0]), None),
+                ("session:updated", Some(ids[2]), None),
                 ("account_usage:updated", None, None),
                 ("session:updated", Some(ids[0]), None),
             ],
