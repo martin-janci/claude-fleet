@@ -709,7 +709,7 @@ pub fn dry_run(
     };
     let (starts, reason, host, note) = match tick::plan(&s, &r, now)? {
         Plan::Skip(why) => (false, Some(why), r.host_alias.clone(), None),
-        Plan::Start { host, note } => (true, None, host, note),
+        Plan::Start { host, note, .. } => (true, None, host, note),
     };
     let owner = match r.owner_person_id {
         Some(p) => Some(p),

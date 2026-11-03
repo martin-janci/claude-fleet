@@ -745,6 +745,42 @@ async fn a_fire_on_an_account_over_the_line_is_skipped() {
     assert_eq!(runs_of(&f, r.id)[1].state, "running");
 }
 
+/// Hardening 2026-11-03: a routine that names no login runs under its
+/// host's own; past the line, another login on the same host with room
+/// takes the run (as a ticket start does) instead of skipping it. One that
+/// names its login keeps it (the test above).
+#[tokio::test]
+async fn a_routine_on_the_hosts_own_spent_login_runs_under_a_freer_one() {
+    let f = fx();
+    let mut i = input(&f);
+    i.profile = None;
+    let r = new_routine(&f, i);
+    reachable(&f, "mac", true);
+    {
+        let s = lock(&f.store).unwrap();
+        crate::service::account_limits::seed_usage(&s, "mac", None, "own", 96.0, OCT8 + 9 * H);
+        crate::service::account_limits::seed_usage(
+            &s,
+            "mac",
+            Some("spare"),
+            "spare",
+            15.0,
+            OCT8 + 9 * H,
+        );
+    }
+    due_at(&f, r.id, OCT8 + 9 * H);
+    tick_once(&f.deps, OCT8 + 9 * H).await;
+    let runs = runs_of(&f, r.id);
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].state, "running");
+    let started = f.fake.started.lock().unwrap().clone();
+    assert_eq!(started.len(), 1);
+    assert_eq!(started[0].host, "mac");
+    assert_eq!(started[0].profile.as_deref(), Some("spare"));
+    let why = runs[0].reason.as_deref().unwrap_or_default();
+    assert!(why.contains("under profile spare"), "{why}");
+}
+
 /// Review w02-6: a login fleet knows is signed out is treated like one past
 /// the line. The fallback takes the run; without one, the fire skips and
 /// says how to sign in again, instead of starting a session at `/login`.
