@@ -726,7 +726,7 @@ Index by area (names only; see the reference for details):
   the top into `container`, a Jira project key, an Asana project gid, a
   Linear team key or a GitHub `owner/repo` — and
   the task becomes that ticket once the outbox sends it; `work { task }`
-  answers `promotion` and `promote_targets`). `work { action: "tracker_comments", key }` reads a
+  answers `promotion` and `promote_targets`, and with no target `promote_hint`: what would bring one). `work { action: "tracker_comments", key }` reads a
   ticket's own comments live (newest 50, oldest first, no cache; the ones
   fleet posted from a live comment left out; bodies fenced for a per-host
   token; `can_post` says whether the caller may post there), and for Asana

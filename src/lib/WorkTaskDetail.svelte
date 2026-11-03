@@ -125,6 +125,7 @@
   // (the hub's answer), and one on its way or refused.
   let promoting = $state(false);
   const promoteTargets = $derived(detail?.promote_targets ?? []);
+  const promoteHint = $derived(detail?.promote_hint ?? null);
   const promotion = $derived(detail?.promotion ?? null);
   const promoteBlocked = $derived(hubActionBlocked('promote_work_item', $hubStatus, $hubConnection));
   let assigning = $state(false);
@@ -634,6 +635,11 @@
             disabled={promoteBlocked !== null}
             title={promoteBlocked ?? promoteTitle(promoteTargets)}
             onclick={() => (promoting = true)}>Promote to ticket…</button
+          >
+        {:else if task?.item_id != null && promoteHint && promotion?.state !== 'pending'}
+          <!-- Nowhere to promote it yet: the button says what brings it. -->
+          <button class="btn" type="button" data-testid="work-task-promote" disabled title={promoteHint}
+            >Promote to ticket…</button
           >
         {/if}
         {#if task && canArchive(task)}
