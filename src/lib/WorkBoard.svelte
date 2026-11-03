@@ -36,7 +36,7 @@
   // button (Start new, Continue ▾).
   import { onDestroy, onMount, tick } from 'svelte';
   import { get } from 'svelte/store';
-  import { createWorkTask, onWorkChangedDebounced, ownerDueChip, setWorkStatus } from './work';
+  import { createWorkTask, estimateLabel, onWorkChangedDebounced, ownerDueChip, priorityLabel, setWorkStatus } from './work';
   import { sessionAgent, sessions } from './sessions';
   import { AGENT_LABELS } from './row_groups';
   import { prChip } from './work_row';
@@ -636,6 +636,8 @@
   {@const liveRow = live ? rowsById.get(live.session_id) : undefined}
   {@const mission = boardMissionChip(t)}
   {@const finishes = finishesWhen(t.done_when)}
+  {@const prio = priorityLabel(t.priority)}
+  {@const size = estimateLabel(t.estimate, t.estimate_unit)}
   <li role="listitem">
     <button
       class="card"
@@ -661,7 +663,14 @@
       </span>
       <span class="title" class:derived={t.title_derived}>{displayTitle(t)}</span>
       <span class="meta">
+        {#if prio}<span
+            class="prio"
+            class:hot={t.priority === 'urgent' || t.priority === 'high'}
+            title="Priority: {prio}"
+            data-testid="work-board-priority">{prio}</span
+          >{/if}
         {#if t.status_name}<span>{t.status_name}</span>{/if}
+        {#if size}<span title="Estimate" data-testid="work-board-estimate">{size}</span>{/if}
         {#if t.project_label}<span>{t.project_label}</span>{/if}
         {#if t.epic}<span class="epic" data-testid="work-board-epic">Epic</span>{/if}
         {#if (t.children_total ?? 0) > 0}<span data-testid="work-board-rollup">{t.children_done ?? 0}/{t.children_total} done</span>
@@ -972,6 +981,10 @@
   }
   .prop {
     color: var(--accent);
+  }
+  .prio.hot {
+    color: var(--status-failed);
+    font-weight: 600;
   }
   .owner {
     align-self: flex-start;

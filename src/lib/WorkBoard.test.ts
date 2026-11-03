@@ -162,6 +162,22 @@ describe('WorkBoard', () => {
     expect(owner('Login fails').classList.contains('overdue')).toBe(true);
   });
 
+  it('a card shows its priority (high and urgent stand out) and its estimate', async () => {
+    const p = page();
+    p.tasks[0] = { ...p.tasks[0], priority: 'urgent', estimate: 3, estimate_unit: 'points' };
+    p.tasks[1] = { ...p.tasks[1], priority: 'low', estimate: null };
+    (invoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => (cmd === 'work_tree' ? p : null));
+    render(WorkBoard);
+    await flush();
+    const q = (title: string, id: string) => card(title).querySelector(`[data-testid="${id}"]`) as HTMLElement | null;
+    expect(q('Write notes', 'work-board-priority')?.textContent).toBe('Urgent');
+    expect(q('Write notes', 'work-board-priority')?.classList.contains('hot')).toBe(true);
+    expect(q('Write notes', 'work-board-estimate')?.textContent).toBe('3 pts');
+    expect(q('Login fails', 'work-board-priority')?.textContent).toBe('Low');
+    expect(q('Login fails', 'work-board-priority')?.classList.contains('hot')).toBe(false);
+    expect(q('Login fails', 'work-board-estimate')).toBeNull();
+  });
+
   it('dragging a native card to Doing sets its status and moves it at once', async () => {
     const elementFromPoint = vi.fn();
     Object.defineProperty(document, 'elementFromPoint', { value: elementFromPoint, configurable: true });
