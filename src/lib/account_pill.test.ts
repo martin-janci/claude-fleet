@@ -33,7 +33,7 @@ describe('accountPill', () => {
     expect(p.window).toBe('weekly');
     expect(p.left).toBe(58);
     expect(p.level).toBe('ok');
-    expect(p.text).toBe(`${ADMIN.email} 58%`);
+    expect(p.text).toBe(`${ADMIN.email} 58% left`);
     expect(p.title).toContain('58% of the weekly window left');
   });
 
@@ -51,7 +51,7 @@ describe('accountPill', () => {
   it('is at the limit only on the raw figure, not a rounded 0% left', () => {
     const p = accountPill(ADMIN.uuid, ADMIN, snapshot(ADMIN.uuid, { usage: usage(10, 99.6) }), NOW);
     expect(p.level).toBe('warn');
-    expect(p.text).toBe(`${ADMIN.email} 0%`);
+    expect(p.text).toBe(`${ADMIN.email} 0% left`);
   });
 
   it('lets the weekly limit bind once the 5-hour window has reset', () => {

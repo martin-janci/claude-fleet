@@ -84,7 +84,7 @@ describe('LimitActions', () => {
     render(LimitActions, { props: { sess, resetsAt: RESET_WEEK, accountName: name } });
     await fireEvent.click(screen.getByTestId('limit-switch'));
     await vi.waitFor(() => expect(screen.getByTestId('limit-switch-ask')).toBeTruthy());
-    expect(screen.getByTestId('limit-switch-ask').textContent).toContain('spare (spare@x) · 30% used');
+    expect(screen.getByTestId('limit-switch-ask').textContent).toContain('spare (spare@x) · 70% left');
     expect(restarts()).toHaveLength(0);
     await fireEvent.click(screen.getByTestId('limit-switch-confirm'));
     await vi.waitFor(() => expect(restarts()).toHaveLength(1));
@@ -264,7 +264,7 @@ describe('LimitActions on a signed-out row', () => {
     expect(screen.queryByTestId('limit-auto')).toBeNull();
     expect(screen.queryByTestId('limit-wait')).toBeNull();
     await fireEvent.click(screen.getByTestId('limit-switch'));
-    await vi.waitFor(() => expect(screen.getByTestId('limit-switch-ask').textContent).toContain('40% used'));
+    await vi.waitFor(() => expect(screen.getByTestId('limit-switch-ask').textContent).toContain('60% left'));
   });
 });
 

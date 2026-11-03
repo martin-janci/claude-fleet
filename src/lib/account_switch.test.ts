@@ -59,7 +59,7 @@ describe('account_switch', () => {
     const d = parseSwitchDetail(detail())!;
     expect(switchLines(EVENT_SWITCHED, 'api', d, name)).toEqual({
       message: 'api resumed under spare (ada@spare)',
-      sub: 'ada@out ran out · 12% used',
+      sub: 'ada@out ran out · 88% left',
     });
     const f = parseSwitchDetail(detail({ error: 'E_SSH', profile: null }))!;
     expect(switchLines(EVENT_SWITCH_FAILED, 'api', f, name)).toEqual({
@@ -82,7 +82,7 @@ describe('account_switch', () => {
 
   it('says when the session was told to carry on', () => {
     const d = parseSwitchDetail(detail({ continue: true }))!;
-    expect(switchLines(EVENT_SWITCHED, 'api', d, name).sub).toBe('ada@out ran out · 12% used · told to continue');
+    expect(switchLines(EVENT_SWITCHED, 'api', d, name).sub).toBe('ada@out ran out · 88% left · told to continue');
   });
 
   it('folds several switches in one push into one toast, failures apart', () => {

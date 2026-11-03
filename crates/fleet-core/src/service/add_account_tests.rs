@@ -647,3 +647,45 @@ fn the_login_pane_runs_claude_login_under_the_profile() {
     let cj = std::fs::read_to_string(dir.join(".claude.json")).unwrap();
     assert!(cj.contains("hasCompletedOnboarding"));
 }
+
+/// Review 2026-11-03 D11: closing the login pane takes away a profile
+/// directory this flow made when its login never completed, keeps one that
+/// holds a login (dropping only the mark), and never touches a directory
+/// that was there before.
+#[cfg(unix)]
+#[test]
+fn a_cancelled_login_leaves_no_profile_it_made_behind() {
+    let home = tempfile::tempdir().unwrap();
+    let run = |profile: &str| {
+        let out = std::process::Command::new("bash")
+            .args(["-c", &end_login_script(profile)])
+            .env("HOME", home.path())
+            .env("TMUX_TMPDIR", home.path())
+            .env_remove("TMUX")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    let dir = |name: &str| home.path().join(".claude-profiles").join(name);
+    let make = |name: &str, json: &str, marked: bool| {
+        std::fs::create_dir_all(dir(name)).unwrap();
+        std::fs::write(dir(name).join(".claude.json"), json).unwrap();
+        if marked {
+            std::fs::write(dir(name).join(NEW_LOGIN_MARK), "").unwrap();
+        }
+    };
+    make("ghost", "{\"hasCompletedOnboarding\":true}\n", true);
+    make("done", "{\"oauthAccount\":{\"accountUuid\":\"u\"}}\n", true);
+    make("mine", "{\"hasCompletedOnboarding\":true}\n", false);
+    for p in ["ghost", "done", "mine"] {
+        run(p);
+    }
+    assert!(!dir("ghost").exists());
+    assert!(dir("done").join(".claude.json").exists());
+    assert!(!dir("done").join(NEW_LOGIN_MARK).exists());
+    assert!(dir("mine").join(".claude.json").exists());
+}

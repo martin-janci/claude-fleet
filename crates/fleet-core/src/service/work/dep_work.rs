@@ -292,6 +292,7 @@ mod tests {
 
     /// The script against real git: a dependency branch merges, one the
     /// checkout holds is `had`, a conflicting one is backed out of.
+    #[cfg(unix)]
     #[test]
     fn real_git_merges_a_dependency_and_backs_out_of_a_conflict() {
         let d = tempfile::tempdir().unwrap();

@@ -36,7 +36,7 @@
   import { contextColor, contextLevel } from './attention';
   import { formatTokens } from './sessions';
   import { hostByAlias } from './hosts';
-  import { accountByUuid } from './accounts';
+  import { accountByUuid, accountLabel } from './accounts';
   import Meter from './kit/Meter.svelte';
   import type { Snippet } from 'svelte';
 
@@ -97,7 +97,9 @@
     const uuid = session.claude_profile
       ? session.account_uuid
       : (session.account_uuid ?? $hostByAlias.get(session.host_alias)?.account_uuid ?? null);
-    return uuid ? ($accountByUuid.get(uuid)?.email ?? null) : null;
+    // Review 2026-11-03 D12: the nickname when set, as every account surface.
+    const a = uuid ? $accountByUuid.get(uuid) : undefined;
+    return a ? accountLabel(a) : null;
   });
   // Gap plan G4.2: someone the session is shared with reads who shared it,
   // at what level and since when, and "Waiting for Martin" for its state.

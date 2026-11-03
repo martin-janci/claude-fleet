@@ -116,7 +116,7 @@ export function switchLines(
       sub: `Switching to ${to} failed${d.error ? ` (${d.error})` : ''}; it stays paused`,
     };
   }
-  const used = d.used_pct == null ? '' : ` · ${Math.round(d.used_pct)}% used`;
+  const used = d.used_pct == null ? '' : ` · ${Math.max(0, 100 - Math.round(d.used_pct))}% left`;
   const carry = d.continued ? ' · told to continue' : '';
   return { message: `${name} resumed under ${to}`, sub: `${from} ran out${used}${carry}` };
 }

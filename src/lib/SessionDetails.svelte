@@ -25,7 +25,7 @@
   import { projectById } from './projects';
   import { selectSession, selectSessionExplicitly, clearSelection } from './selection';
   import { hostByAlias } from './hosts';
-  import { accountByUuid, accountEmailTier, sessionAccountUuid, type AccountRow } from './accounts';
+  import { accountByUuid, accountEmailTier, accountLabel, sessionAccountUuid, type AccountRow } from './accounts';
   import { timeAgo } from './session_status';
   import { applySessionRename, renameKeyHandler } from './session_rename';
   import PromptComposer from './PromptComposer.svelte';
@@ -95,7 +95,8 @@
   import { archiveBlocked } from './kill_check';
   import Meter from './kit/Meter.svelte';
   import { accountUsage } from './account_usage_store';
-  import { leftPct, loginHeadroomText } from './account_usage';
+  import { leftPct, loginHeadroomText, severity } from './account_usage';
+  import { compactWindow } from './hosts_view';
   import { goTo } from './destination';
   import { shortcutLabel } from './shortcuts';
   import { detectMac } from './terminal_keys';
@@ -1048,12 +1049,17 @@
         <dd data-testid="details-tags">{@render tagChips()}</dd>
       {/if}
       <dt>Account</dt>
-      <dd data-testid="session-account">{accountRow?.email ?? accountEmailTier(accountRow)}</dd>
+      <dd data-testid="session-account">{accountRow ? accountLabel(accountRow) : '—'}</dd>
       {#if fiveHour || week}
+        {@const c5 = compactWindow('5h', usageSnap, nowSec)}
+        {@const cw = compactWindow('weekly', usageSnap, nowSec)}
         <dt>Usage</dt>
         <dd data-testid="inspector-usage">
-          {#if fiveHour}5h {leftPct(fiveHour)}% left{/if}{#if fiveHour && week} · {/if}{#if week}week {leftPct(week)}%{/if}
-          {#if fiveHour}<Meter value={leftPct(fiveHour) / 100} level={leftPct(fiveHour) < 10 ? 'crit' : leftPct(fiveHour) < 25 ? 'warn' : 'ok'} label="{leftPct(fiveHour)}% of the 5-hour window left" />{/if}
+          {#if fiveHour}5h {c5.left}{/if}{#if fiveHour && week} · {/if}{#if week}week {cw.left}{/if}
+          {#if fiveHour && c5.freshness !== 'expired'}
+            {@const lvl = severity('5h', leftPct(fiveHour), fiveHour.resets_at ?? null, nowSec)}
+            <Meter value={leftPct(fiveHour) / 100} level={lvl === 'limit' || lvl === 'low' ? 'crit' : lvl === 'caution' ? 'warn' : 'ok'} label="{leftPct(fiveHour)}% of the 5-hour window left" />
+          {/if}
         </dd>
       {/if}
       {#if worktree?.branch}
@@ -1474,7 +1480,7 @@
 
 {#if switchOpen}
   <DialogSheet
-    title="Switch login for this session"
+    title="Switch account for this session"
     lead="The agent restarts with the other account and keeps the conversation. Anything it is doing right now is lost."
     verb="Switch and restart"
     busyVerb="Switching…"
@@ -1547,17 +1553,17 @@
 
 {#if confirmingSwitch}
   <ConfirmDialog
-    title="Switch login?"
-    confirmLabel="Switch"
+    title="Switch account?"
+    confirmLabel="Switch account"
     danger
     onconfirm={onSwitchLogin}
     oncancel={() => (confirmingSwitch = false)}
     confirmTestId="confirm-login-switch"
   >
-    This restarts claude in <code>{session.tmux_name}</code> and resumes the same
-    conversation under <code>{loginTarget || 'the host login'}</code>. Anything it is
-    working on right now is lost. A profile that is not logged in yet asks for
-    <code>/login</code> in the session.
+    {@const target = loginOptions.find((o) => o.value === loginTarget)}
+    This restarts the agent in {session.friendly_name ?? session.tmux_name} and resumes the same
+    conversation under {target ? loginOptionText({ ...target, current: false }) : 'the host login'}. Anything it is
+    working on right now is lost. A login that is not signed in yet asks you to sign in, in the session.
   </ConfirmDialog>
 {/if}
 

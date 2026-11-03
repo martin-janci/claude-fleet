@@ -1520,6 +1520,14 @@
         limitAsk = h.value;
         return;
       }
+      // Review 2026-11-03 D9: a signed-out login would open on /login, so
+      // ask as for a spent one and offer the freest signed-in login.
+      const chosenNow = h.ok ? (h.value?.chosen ?? null) : null;
+      if (h.ok && h.value && chosenNow?.signed_out) {
+        const others = (h.value.logins ?? []).filter((l) => (l.profile ?? '') !== (chosenNow.profile ?? ''));
+        limitAsk = { ...h.value, suggestion: h.value.suggestion ?? freestLogin(others) };
+        return;
+      }
     }
     limitAsk = null;
     busy = true;
@@ -1966,7 +1974,7 @@
               data-testid="launch-profile"
               bind:value={chosenProfile}
               oninput={onTypeProfile}
-              placeholder="Host login"
+              placeholder="Empty: the host's own login"
               list="launch-profile-options"
               maxlength="32"
               aria-invalid={profileInvalid}
@@ -1977,6 +1985,18 @@
                 <option value={p.name}>{p.email ?? (p.account_uuid ? p.name : 'not logged in')}</option>
               {/each}
             </datalist>
+            {#if hostLogins && hostLogins.length > 0}
+              <!-- Review 2026-11-03 D10: "Other profile…" is not a one-way trip. -->
+              <button
+                type="button"
+                class="profile-back"
+                data-testid="launch-profile-back"
+                onclick={() => {
+                  otherProfile = false;
+                  chosenProfile = freestLogin(hostLogins ?? [])?.profile ?? '';
+                }}>Back to accounts</button
+              >
+            {/if}
           </div>
         {/if}
       </div>
@@ -2173,10 +2193,15 @@
     <span class="hint">↵ or {createHint.label} create · {rerollKey} re-roll</span>
     {#if limitAsk && limitAsk.chosen}
       <div class="limit-ask" role="alert" data-testid="limit-ask">
-        <span
-          >{accountName(limitAsk.chosen.account_uuid)} is at {Math.round(limitAsk.chosen.used_pct ?? 0)}% of its
-          limit (this asks from {limitAsk.pause_at_pct}%).</span
-        >
+        {#if limitAsk.chosen.signed_out}
+          <span
+            >{loginLabel(limitAsk.chosen, accountName)} is signed out on {chosenHost}: the session would open on its
+            /login.</span
+          >
+        {:else}
+          {@const leftNow = Math.max(0, 100 - Math.round(limitAsk.chosen.used_pct ?? 0))}
+          <span>{accountName(limitAsk.chosen.account_uuid)} has {leftNow}% left (this asks under {100 - limitAsk.pause_at_pct}% left).</span>
+        {/if}
         {#if limitAsk.suggestion}
           {@const s = limitAsk.suggestion}
           <button class="primary" data-testid="limit-use-suggestion" onclick={() => useLogin(s)}
@@ -2306,6 +2331,16 @@
     text-decoration: underline;
   }
   .name-row input { flex: 1 1 auto; }
+  .profile-back {
+    align-self: flex-start;
+    background: none;
+    border: none;
+    padding: 0;
+    color: var(--accent);
+    cursor: pointer;
+    font-size: var(--text-2xs);
+    text-decoration: underline;
+  }
   .dice {
     font-size: var(--text-md);
     line-height: 1;

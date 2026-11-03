@@ -39,10 +39,11 @@ export function loginLabel(l: HostLogin, accountName: (uuid: string) => string):
   return l.profile ? `${l.profile} (${who})` : who;
 }
 
-/** "95% used", "no reading", or "signed out". */
+/** "5% left", "no reading", or "signed out": every usage figure in the app
+ *  reads as % left (review 2026-11-03 D8). */
 export function usedText(l: HostLogin): string {
   if (l.signed_out) return 'signed out';
-  return l.used_pct == null ? 'no reading' : `${Math.round(l.used_pct)}% used`;
+  return l.used_pct == null ? 'no reading' : `${Math.max(0, 100 - Math.round(l.used_pct))}% left`;
 }
 
 /** When a paused row's limit resets, for its Wait button, the Wait toast

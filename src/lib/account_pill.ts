@@ -70,7 +70,7 @@ export function accountPill(
   // decides it: 99.6% used rounds to 0% left but does not stop the account.
   const level = w.utilization >= 100 ? 'limit' : pillLevel(Math.min(usedPct(w), 99));
   const reset = formatResetShort(kind, w.resets_at, now, locale, timeZone);
-  const text = level === 'limit' ? `${label} ${limitWording(account?.has_extra_usage ?? false)}` : `${label} ${left}%`;
+  const text = level === 'limit' ? `${label} ${limitWording(account?.has_extra_usage ?? false)}` : `${label} ${left}% left`;
   return {
     uuid,
     label,

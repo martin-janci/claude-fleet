@@ -49,8 +49,9 @@ user-scope MCP server of the host's own `~/.claude.json` (Jira, a company's
 servers…; the host's entry wins over a profile's of the same name, a server
 only the profile has is kept). A mission's grant does the same for the
 logins its runs will use, once per grant (the access check, below). A
-profile added since then has neither until one of the two runs, and a
-session picks the servers up only when it starts.
+login added through + Add account gets them once the host reports it
+signed in (`login_status`); a profile made by hand has neither until one of
+those runs, and a session picks the servers up only when it starts.
 
 An OAuth server's sign-in is not shared: Claude Code keeps it with the
 login (`.credentials.json`, or the Keychain on macOS), so such a server asks

@@ -38,6 +38,10 @@ export function accountLabel(a: AccountRow | null | undefined): string {
   if (nickname) return nickname;
   const email = a.email?.trim();
   if (email) return email;
+  // An API-key login has no email: its display name ("API key · work") is
+  // the readable name, never its synthetic uuid (review 2026-11-03 D2).
+  const display = a.display_name?.trim();
+  if (display) return display;
   if (a.uuid) return a.uuid.slice(0, 8);
   return 'unknown account';
 }
@@ -45,11 +49,12 @@ export function accountLabel(a: AccountRow | null | undefined): string {
 const rows = createRowStore<AccountRow, string>({ key: (a) => a.uuid });
 export const accounts = rows.store;
 
-/** "email (seat_tier)" — the one-line account label used in session
- *  details and the prompt composer; '—' when there is no account. */
+/** "label (seat_tier)" — the one-line account label used in session
+ *  details and the prompt composer: the nickname when set, else the email,
+ *  as `accountLabel`; '—' when there is no account. */
 export function accountEmailTier(a: AccountRow | null): string {
   if (!a) return '—';
-  const email = a.email ?? a.uuid;
+  const email = a.nickname?.trim() || a.email || a.display_name?.trim() || a.uuid.slice(0, 8);
   return a.seat_tier ? `${email} (${a.seat_tier})` : email;
 }
 

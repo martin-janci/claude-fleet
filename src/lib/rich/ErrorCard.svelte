@@ -41,15 +41,14 @@
 <section class="card" data-testid="rich-error" role="alert" aria-label={block.title}>
   <header>
     <strong>{block.title}</strong>
-    <code class="code" data-testid="rich-error-code">{block.code}</code>
   </header>
   {#if block.body}<Markdown source={block.body} />{/if}
-  {#if block.detail}
-    <details class="detail">
-      <summary>Details</summary>
-      <pre data-testid="rich-error-detail">{block.detail}</pre>
-    </details>
-  {/if}
+  <!-- Review 2026-11-03 D16: the error code is for a bug report, not the headline. -->
+  <details class="detail">
+    <summary>Details</summary>
+    <code class="code" data-testid="rich-error-code">{block.code}</code>
+    {#if block.detail}<pre data-testid="rich-error-detail">{block.detail}</pre>{/if}
+  </details>
   {#if block.next.length}
     <div class="options">
       {#each block.next as o, k (k)}

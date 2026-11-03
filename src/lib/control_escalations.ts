@@ -80,6 +80,19 @@ export function loginCardText(host: string, l: SignedOutLogin): string {
   return `Claude login expired on ${whose} (since ${dayLabel(l.since)}) · ${cmd}`;
 }
 
+/** The sign-in command a person can paste into a terminal on this machine:
+ *  `ssh -t htz 'CLAUDE_CONFIG_DIR=~/.claude-profiles/work claude /login'`,
+ *  or the bare `claude /login` line for the `local` host. The card text's
+ *  "ssh htz then …" reads well but does not run (review 2026-11-03 D1). */
+function shq(s: string): string {
+  return /^[A-Za-z0-9_.@%+=:,/-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
+export function loginShellCommand(host: string, profile: string | null): string {
+  const inner = profile ? `CLAUDE_CONFIG_DIR=~/.claude-profiles/${profile} claude /login` : 'claude /login';
+  return host === 'local' ? inner : `ssh -t ${shq(host)} ${shq(inner)}`;
+}
+
 /** One card per signed-out login on a visible host, minus those put off. */
 export function loginEscalations(hosts: readonly HostRow[], later: ReadonlySet<string>): Escalation[] {
   const out: Escalation[] = [];

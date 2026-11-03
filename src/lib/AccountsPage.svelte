@@ -20,6 +20,7 @@
     formatResetShort,
     freshness,
     leftPct,
+    refreshCountdown,
     severityLeft,
     severity,
     severityBadge,
@@ -55,10 +56,12 @@
   import { moveToHeadroom, resetText, switchCheck, waitOut } from './account_limits';
   import LimitActions from './LimitActions.svelte';
   import AccountNickname from './AccountNickname.svelte';
-  import { dayLabel, loginCardText } from './control_escalations';
+  import { dayLabel, loginCardText, loginShellCommand } from './control_escalations';
   import { copyText } from './clipboard';
   import { push } from './toasts';
-  import { displayName } from './attention';
+  import { attentionState, displayName } from './attention';
+  import { STATE_LABELS } from './row_groups';
+  import { attentionIdleMinutes } from './notify';
   import { showFriendlyNames } from './sessions';
   import { selectSessionExplicitly } from './selection';
   import { pushError } from './toasts';
@@ -220,6 +223,12 @@
     push({ message: parts.join(' · '), kind: r.failed > 0 ? 'error' : r.moved > 0 ? 'success' : 'info' });
   }
   const nicknameBlocked = $derived(hubActionBlocked('set_account_nickname', $hubStatus, $hubConnection));
+  // Review 2026-11-03 D3: on a paired desktop usage is read by the hub, so
+  // Refresh would only raise an error, and this app keeps no history.
+  const refreshBlocked = $derived(hubActionBlocked('refresh_account_usage', $hubStatus, $hubConnection));
+  const countdownOf = (a: { usage?: { next_try_at: number } | null }): string | null =>
+    a.usage ? refreshCountdown(a.usage.next_try_at, now) : null;
+  const historyBlocked = $derived(hubActionBlocked('account_usage_history', $hubStatus, $hubConnection));
   let nickEditing = $state<string | null>(null);
   let picked = $state<string | null>(null);
   // A pill elsewhere (step 4.3) asked for one account: show it, then clear
@@ -346,6 +355,12 @@
   const SPARK_H = 36;
 
   function onListKeydown(e: KeyboardEvent) {
+    // Review 2026-11-03 D14: `e` renames, as the nickname's title says.
+    if (e.key === 'e' && !e.metaKey && !e.ctrlKey && !e.altKey && selected && nicknameBlocked === null) {
+      e.preventDefault();
+      nickEditing = selected.uuid;
+      return;
+    }
     if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
     e.preventDefault();
     const i = list.findIndex((a) => a.uuid === selected?.uuid);
@@ -364,7 +379,7 @@
       {list.length} {list.length === 1 ? 'account' : 'accounts'}{#if refreshed} · {refreshed}{/if}
     </span>
     {#if list.length > 0}
-      <button type="button" class="btn-quiet" data-testid="accounts-refresh-all" disabled={refreshing} onclick={() => void refreshAll()}
+      <button type="button" class="btn-quiet" data-testid="accounts-refresh-all" disabled={refreshing || refreshBlocked !== null} title={refreshBlocked ?? ''} onclick={() => void refreshAll()}
         >{refreshing ? 'Refreshing…' : 'Refresh'}</button
       >
     {/if}
@@ -411,7 +426,7 @@
         <span class="sub">
           {autoSwitch.enabled
             ? 'A paused session resumes under the login on its host with the most headroom.'
-            : 'Paused sessions wait for you to press Switch account.'}
+            : 'Paused sessions wait until you switch them to another account.'}
         </span>
       {/if}
     </div>
@@ -467,6 +482,12 @@
                   fallbackRoutinesOn(a.uuid, routines, $hosts),
                 )}
               </span>
+              {#each a.logins.filter((l) => l.signedOutSince != null) as l (l.host + '/' + (l.profile ?? ''))}
+                <!-- Review 2026-11-03 F10: a signed-out login shows on the card, not only in the detail. -->
+                <span class="meta signed-out" data-testid="account-card-signed-out"
+                  >signed out on {l.host}{#if l.profile} ({l.profile}){/if}</span
+                >
+              {/each}
             </button>
             {#if paused.length > 0}
               {@const target = switchTo[a.uuid]}
@@ -543,11 +564,14 @@
                 {#if a.account.organization_name} · {a.account.organization_name}{/if}
               </div>
             </div>
+            <!-- Review 2026-11-03 D4: inside the rate floor a refresh returns the
+                 same reading, so say when the next one can run. -->
             <button
               class="btn"
-              disabled={refreshing}
+              disabled={refreshing || refreshBlocked !== null || countdownOf(a) !== null}
+              title={refreshBlocked ?? (countdownOf(a) !== null ? `Usage was just read; the next read can run in ${countdownOf(a)}` : '')}
               onclick={() => refresh(a.uuid)}
-              data-testid="account-refresh">Refresh</button
+              data-testid="account-refresh">{countdownOf(a) !== null && refreshBlocked === null ? `Refresh in ${countdownOf(a)}` : 'Refresh'}</button
             >
           </div>
           {#if a.usage?.fetched_at}
@@ -607,7 +631,7 @@
                     last {kind === '5h' ? 'day' : 'week'}{#if peak !== null} · peaked at {peak}% used{/if}
                   </span>
                 {:else}
-                  <span class="sub" data-testid="account-history-empty-{kind}">No history yet</span>
+                  <span class="sub" data-testid="account-history-empty-{kind}">{historyBlocked !== null ? 'History is kept on the hub' : 'No history yet'}</span>
                 {/if}
               </div>
             </div>
@@ -636,7 +660,10 @@
                       class="link"
                       data-testid="account-login-copy"
                       title={card}
-                      onclick={() => void copyText(card.slice(card.indexOf(' · ') + 3)).then((ok) => ok && push({ kind: 'info', message: 'Sign-in command copied' }))}
+                      onclick={() =>
+                        void copyText(loginShellCommand(l.host, l.profile)).then((ok) =>
+                          push(ok ? { kind: 'info', message: 'Sign-in command copied' } : { kind: 'error', message: `Could not copy. Run: ${loginShellCommand(l.host, l.profile)}` }),
+                        )}
                       >Copy sign-in command</button
                     >
                   {/if}
@@ -660,7 +687,9 @@
                   <button class="link" onclick={() => selectSessionExplicitly(s)}>
                     {displayName(s, $showFriendlyNames)}
                   </button>
-                  <span class="sub">{s.host_alias} · {onlyPaused ? 'Paused · limit' : (s.claude_status ?? s.status)}</span>
+                  <span class="sub">{s.host_alias} · {onlyPaused
+                      ? 'Paused · limit'
+                      : STATE_LABELS[attentionState(s, { idleSecs: $attentionIdleMinutes * 60, now, facts: $attentionFacts })]}</span>
                   {#if onlyPaused}
                     <LimitActions sess={s} resetsAt={limitOf(a.uuid)} accountName={(u) => ($accountByUuid.get(u) ? labelOf($accountByUuid.get(u)) : u.slice(0, 8))} />
                   {/if}

@@ -342,6 +342,7 @@ mod tests {
 
     /// The script against real git: it pushes the verified commit, not
     /// the lead's later work, to the lane's branch on `origin`.
+    #[cfg(unix)]
     #[test]
     fn real_git_pushes_the_verified_commit_only() {
         let d = tempfile::tempdir().unwrap();

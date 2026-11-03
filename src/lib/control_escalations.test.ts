@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { controlMissionIds, controlSessionIds, escalations, missionEscalations, escalationKey, loginCardText, pruneLater, LATER_KEPT, LATER_MAX_AGE_SECS } from './control_escalations';
+import { controlMissionIds, controlSessionIds, escalations, missionEscalations, escalationKey, loginCardText, loginShellCommand, pruneLater, LATER_KEPT, LATER_MAX_AGE_SECS } from './control_escalations';
 import type { ControlHandoff } from './handoffs';
 import type { HostRow } from './hosts';
 import type { SessionRow } from './sessions';
@@ -72,6 +72,12 @@ describe('escalations', () => {
     expect(out.every((e) => e.session === null)).toBe(true);
     expect(escalations([], opts, null, new Set([out[0].key]), [host])).toHaveLength(1);
     expect(loginCardText('htz', { profile: null, since })).toContain('(since Aug 9)');
+  });
+
+  it('copies a sign-in command that runs as pasted (review 2026-11-03 D1)', () => {
+    expect(loginShellCommand('htz', 'work')).toBe("ssh -t htz 'CLAUDE_CONFIG_DIR=~/.claude-profiles/work claude /login'");
+    expect(loginShellCommand('htz', null)).toBe("ssh -t htz 'claude /login'");
+    expect(loginShellCommand('local', 'work')).toBe('CLAUDE_CONFIG_DIR=~/.claude-profiles/work claude /login');
   });
 
   it("by default only Control's threads raise a card; null scope is the whole fleet", () => {

@@ -2138,7 +2138,7 @@ describe('NewSessionDialog limit handling', () => {
     await tick();
     await fireEvent.click(screen.getByText('Create'));
     await vi.waitFor(() => expect(screen.getByTestId('limit-ask')).toBeTruthy());
-    expect(screen.getByTestId('limit-ask').textContent).toContain('95% of its');
+    expect(screen.getByTestId('limit-ask').textContent).toContain('5% left');
     expect(created()).toHaveLength(0);
     expect(screen.getByTestId('limit-use-suggestion').textContent).toContain('spare');
     await fireEvent.click(screen.getByTestId('limit-use-suggestion'));
@@ -2157,6 +2157,26 @@ describe('NewSessionDialog limit handling', () => {
     expect((created()[0][1] as any).args.profile).toBeNull();
     // The person's choice travels, so a hub does not refuse it (step 4.4).
     expect((created()[0][1] as any).args.over_limit_ok).toBe(true);
+  });
+
+  it('asks before starting on a signed-out login and offers a signed-in one', async () => {
+    const spare = { profile: 'spare', account_uuid: 'acc-spare', used_pct: 30 };
+    answer({
+      ...over,
+      over: false,
+      chosen: { profile: null, account_uuid: 'acc-own', used_pct: 10, signed_out: true },
+      suggestion: null,
+      logins: [{ profile: null, account_uuid: 'acc-own', used_pct: 10, signed_out: true }, spare],
+    });
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    await fireEvent.click(screen.getByText('Create'));
+    await vi.waitFor(() => expect(screen.getByTestId('limit-ask')).toBeTruthy());
+    expect(screen.getByTestId('limit-ask').textContent).toContain('signed out');
+    expect(created()).toHaveLength(0);
+    await fireEvent.click(screen.getByTestId('limit-use-suggestion'));
+    await vi.waitFor(() => expect(created()).toHaveLength(1));
+    expect((created()[0][1] as any).args.profile).toBe('spare');
   });
 
   it('under the line, or with no answer, starts straight away', async () => {
@@ -2263,7 +2283,7 @@ describe('NewSessionDialog in the New layout', () => {
     await vi.waitFor(() => expect(screen.getByTestId('launch-account')).toBeTruthy());
     const sel = screen.getByTestId('launch-account') as HTMLSelectElement;
     await vi.waitFor(() => expect(sel.value).toBe('spare'));
-    expect(sel.textContent).toContain('20% used');
+    expect(sel.textContent).toContain('80% left');
     expect(sel.textContent).toContain('no reading');
     await fireEvent.click(screen.getByText('Create'));
     await vi.waitFor(() => expect(calls('new_session')).toHaveLength(1));

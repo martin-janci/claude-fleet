@@ -100,7 +100,7 @@ describe('AccountPill', () => {
     render(AccountPill, { uuid: WORK.uuid, clock });
     const pill = screen.getByTestId('account-pill');
     expect(pill.getAttribute('data-level')).toBe('warn');
-    expect(pill.textContent).toBe(`${WORK.email} 15%`);
+    expect(pill.textContent).toBe(`${WORK.email} 15% left`);
   });
 });
 

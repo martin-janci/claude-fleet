@@ -834,7 +834,7 @@
             { label: 'Per day', content: perDay },
             {
               label: 'Account',
-              value: `${detail.account ? routineAccountLabel(detail.account, $accountByUuid.get(detail.account.account_uuid)) : (r.profile ?? "the host's own")} · skips a run past ${pauseAt}% used`,
+              value: `${detail.account ? routineAccountLabel(detail.account, $accountByUuid.get(detail.account.account_uuid)) : (r.profile ?? "the host's own")} · skips a run under ${100 - pauseAt}% left`,
             },
             { label: 'Host', value: hostWords(r) },
             { label: 'Overlap', value: overlapWords(r) },
