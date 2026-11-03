@@ -942,7 +942,7 @@ link) even when the task is shared with sessions it cannot drive
 (`own_session_works_on`); any other sprint or release membership stays a
 person's, a task in a mission stays its owner's (`require_mission_change`),
 and `bucket_admin`, `hold` and `done_when` still refuse a per-host token. Not yet: the new task's brief
-waiting for the next prompt (J3), own tasks in ⌘K.
+waiting for the next prompt (J3). (Own tasks are in ⌘K, under *My tasks*.)
 C0: the operator is born with the `fleet-brainstorm` skill
 (`skills/fleet-brainstorm/SKILL.md`, written to its directory's
 `.claude/skills/` by `operator::operator_files`, so no catalog sync is
