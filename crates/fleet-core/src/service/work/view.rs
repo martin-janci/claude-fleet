@@ -929,6 +929,11 @@ pub struct TaskDetail {
     /// ticket, or where no tracker's admin turned creating on.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub promote_targets: Vec<super::promote::PromoteTarget>,
+    /// Why a person sees no Promote on this task of fleet's own and what
+    /// brings it (creating is off on its tracker, no tracker is connected,
+    /// its parent is fleet's own). Only while `promote_targets` is empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub promote_hint: Option<String>,
     /// The AI check of the task's finished work (`ticket_check`): its
     /// verdict, or Test now when there is work and no check of it. Absent
     /// with neither, and for an agent (the tester's words are a person's
@@ -3911,15 +3916,22 @@ pub fn task(
             && crate::service::trackers::write_back::writes_comments(t)
     });
     let comments_tracker = comments_tracker.map(|t| t.name.clone());
-    let (promotion, promote_targets) = match item {
+    let (promotion, promote_targets, promote_hint) = match item {
         Some(i) if i.item.source == "local" => {
             let s = lock(store)?;
+            let targets = super::promote::targets(&s, scope, &i.item, &g.trackers)?;
+            let hint = if targets.is_empty() {
+                super::promote::promote_hint(&s, scope, &i.item, &g.trackers)?
+            } else {
+                None
+            };
             (
                 super::promote::promotion_view(&s, i.item.id, &g.trackers)?,
-                super::promote::targets(&s, scope, &i.item, &g.trackers)?,
+                targets,
+                hint,
             )
         }
-        _ => (None, Vec::new()),
+        _ => (None, Vec::new(), None),
     };
     let check = match item {
         Some(i) if !matches!(scope, OrgScope::Host { .. }) => {
@@ -4102,6 +4114,7 @@ pub fn task(
         attachments,
         promotion,
         promote_targets,
+        promote_hint,
         check,
     })
 }

@@ -173,6 +173,77 @@ pub fn targets(
     Ok(out)
 }
 
+/// Why a person sees no Promote on `item`, and what would bring it, when
+/// the task itself may be promoted but no tracker takes it yet: creating
+/// is off on the tracker it would go to (an admin turns it on), no tracker
+/// that creates tickets is connected, or it sits under a task of fleet's
+/// own. `None` for an agent, a task that is never promoted, or where
+/// [`targets`] offers somewhere (the caller asks only when it offers none).
+pub fn promote_hint(
+    s: &Store,
+    scope: &OrgScope,
+    item: &WorkItemRow,
+    trackers_by_id: &std::collections::HashMap<i64, TrackerRow>,
+) -> Result<Option<String>, IpcError> {
+    if !super::tracker_comments::may_post(scope) || not_promotable(item).is_some() {
+        return Ok(None);
+    }
+    let item_org = s.item_org(item.id)?;
+    // The trackers this task could go to once creating is on there.
+    let could = |t: &TrackerRow| {
+        trackers::creates_items(&t.provider)
+            && scope.sees_org(t.org_id)
+            && !crosses(item_org, t.org_id)
+    };
+    let turn_on = |names: Vec<String>| {
+        format!(
+            "To promote it, a tracker admin turns on Create tickets for {} in Settings → Trackers.",
+            names.join(" or ")
+        )
+    };
+    if let Some(pid) = item.parent_id {
+        let Some(parent) = s.get_work_item(pid)? else {
+            return Ok(None);
+        };
+        let parent_label = parent
+            .key
+            .clone()
+            .unwrap_or_else(|| parent.title.trim().to_string());
+        if parent.source == "local" {
+            return Ok(Some(if is_epic(&parent) {
+                format!(
+                    "It is under the epic {parent_label}, which stays fleet's own: move it to \
+                     the top to promote it."
+                )
+            } else {
+                format!(
+                    "It is under {parent_label}, which is fleet's own: promote {parent_label} \
+                     first, or move this task to the top."
+                )
+            }));
+        }
+        return Ok(parent
+            .tracker_id
+            .and_then(|t| trackers_by_id.get(&t))
+            .filter(|t| could(t) && !trackers::write_back::writes_creates(t))
+            .map(|t| turn_on(vec![t.name.clone()])));
+    }
+    let mut off: Vec<String> = trackers_by_id
+        .values()
+        .filter(|t| could(t) && !trackers::write_back::writes_creates(t))
+        .map(|t| t.name.clone())
+        .collect();
+    off.sort();
+    off.dedup();
+    Ok(Some(if off.is_empty() {
+        "To promote it, connect a Jira, Linear, Asana or GitHub tracker in Settings → Trackers \
+         and turn on Create tickets there."
+            .to_string()
+    } else {
+        turn_on(off)
+    }))
+}
+
 /// The promotion of `item_id` the task page shows: a pending or failed
 /// one, by its tracker's name. A sent one shows as the ticket itself.
 pub fn promotion_view(

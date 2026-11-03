@@ -1260,6 +1260,16 @@ describe('WorkTaskDetail', () => {
       await flush();
       expect(screen.queryByTestId('work-task-promote')).toBeNull();
     });
+
+    it('a task no tracker takes yet shows Promote off, saying what turns it on', async () => {
+      const hint = 'To promote it, a tracker admin turns on Create tickets for Jira (acme) in Settings → Trackers.';
+      handlers.work_task = () => ({ ...localTask, promote_hint: hint });
+      render(WorkTaskDetail, { taskId: 'item:77' });
+      await flush();
+      const button = screen.getByTestId('work-task-promote') as HTMLButtonElement;
+      expect(button.disabled).toBe(true);
+      expect(button.getAttribute('title')).toBe(hint);
+    });
   });
 
   describe('G3.4: tabs, Delivery, inline status, the start rule', () => {

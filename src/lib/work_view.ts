@@ -464,6 +464,10 @@ export interface TaskDetail {
   /** Where this reader may promote a task of fleet's own. Empty: a
    *  tracker's ticket, an agent, or no tracker takes new tickets. */
   promote_targets?: PromoteTarget[];
+  /** Why there is nowhere to promote this task of fleet's own yet and what
+   *  brings it (Create tickets off on its tracker, no tracker connected, a
+   *  parent of fleet's own). Only while `promote_targets` is empty. */
+  promote_hint?: string | null;
   /** The AI check of the item's finished work (`ticket_check`); absent when
    *  there is neither finished work nor a check, and from an older hub. */
   check?: TicketCheckView | null;

@@ -206,6 +206,55 @@ fn a_subtask_of_a_ticket_targets_its_tracker_and_a_top_task_every_creating_one()
         .is_empty());
 }
 
+fn trackers_of(s: &Store) -> std::collections::HashMap<i64, TrackerRow> {
+    s.list_trackers()
+        .unwrap()
+        .into_iter()
+        .map(|t| (t.id, t))
+        .collect()
+}
+
+#[test]
+fn with_nowhere_to_go_the_hint_says_what_brings_promote() {
+    // Creating off: the hint names the tracker to turn it on for, for a
+    // task at the top and a subtask of its ticket alike.
+    let f = jira_fx(false);
+    let s = f.store.lock().unwrap();
+    let trackers = trackers_of(&s);
+    for id in [f.top, f.subtask] {
+        let item = s.get_work_item(id).unwrap().unwrap();
+        let hint = promote_hint(&s, &OrgScope::All, &item, &trackers)
+            .unwrap()
+            .expect("a hint");
+        assert!(hint.contains("Create tickets for Acme Jira"), "{hint}");
+        // An agent is told nothing: it never promotes.
+        assert_eq!(promote_hint(&s, &host(), &item, &trackers).unwrap(), None);
+    }
+    // A tracker's ticket is never promoted: no hint.
+    let ticket = s.get_work_item(f.ticket).unwrap().unwrap();
+    assert_eq!(
+        promote_hint(&s, &OrgScope::All, &ticket, &trackers).unwrap(),
+        None
+    );
+    // Under a task of fleet's own: promote that one first.
+    let child = local(&s, "Child", Some(f.top));
+    let child = s.get_work_item(child).unwrap().unwrap();
+    let hint = promote_hint(&s, &OrgScope::All, &child, &trackers)
+        .unwrap()
+        .expect("a hint");
+    assert!(hint.contains("fleet's own"), "{hint}");
+    drop(s);
+
+    // No tracker at all: connect one.
+    let s = Store::open_in_memory().unwrap();
+    let top = local(&s, "Alone", None);
+    let top = s.get_work_item(top).unwrap().unwrap();
+    let hint = promote_hint(&s, &OrgScope::All, &top, &trackers_of(&s))
+        .unwrap()
+        .expect("a hint");
+    assert!(hint.contains("connect a Jira"), "{hint}");
+}
+
 #[test]
 fn promoting_is_refused_with_nothing_queued_where_it_may_not_go() {
     let f = jira_fx(false);
