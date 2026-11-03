@@ -1558,6 +1558,24 @@ impl Store {
         Ok(ids.len())
     }
 
+    /// Announce every live session on `host_alias` again, as
+    /// [`Self::reemit_live_sessions_on_account`] does for an account: its
+    /// signed-out logins changed. Returns how many.
+    pub fn reemit_live_sessions_on_host(&self, host_alias: &str) -> Result<usize, rusqlite::Error> {
+        let ids: Vec<i64> = self
+            .conn
+            .prepare_cached(
+                "SELECT id FROM sessions WHERE host_alias = ?1 AND status != 'ghost' \
+                 AND lost_at IS NULL AND kind NOT IN ('shell', 'external') ORDER BY id",
+            )?
+            .query_map([host_alias], |r| r.get(0))?
+            .collect::<Result<_, _>>()?;
+        for &id in &ids {
+            self.emit_session(id)?;
+        }
+        Ok(ids.len())
+    }
+
     /// Re-read `id` after a write and announce it: `session_updated` when
     /// the row exists, nothing when it is gone. Returns the row.
     pub(super) fn emit_session(&self, id: i64) -> Result<Option<SessionRow>, rusqlite::Error> {

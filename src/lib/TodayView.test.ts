@@ -18,6 +18,9 @@ import { session } from './hosts_fixture';
 import type { Today } from './today';
 import { tidyRequest, EMPTY_REPORT } from './tidy';
 import { expectAccessible } from './a11y_check';
+import { agents, type AgentsStatus } from './agents';
+import { failing, type FailingRoutine } from './routines';
+import { workspaceLanding } from './workspace';
 
 const digest: Today = {
   since: 0,
@@ -61,6 +64,28 @@ describe('TodayView', () => {
     expect(screen.queryByTestId('today-in-progress')).toBeNull();
     // A title is text, never markup.
     expect(screen.getByText('PAY-7 <i>Refund</i>')).toBeTruthy();
+  });
+
+  it('counts approvals and failed routines under Waiting on you, each opening the Inbox (review w11-8)', async () => {
+    agents.set({ rules: [], jobs: [], pending: [], pending_total: 2 } as unknown as AgentsStatus);
+    failing.set([
+      { may_change: true } as unknown as FailingRoutine,
+      // One this person may not change does not count, as on the rail.
+      { may_change: false } as unknown as FailingRoutine,
+    ]);
+    try {
+      render(TodayView);
+      await flush();
+      // 1 waiting session + 2 approvals + 1 failed routine.
+      expect(screen.getByTestId('today-waiting').textContent).toContain('4');
+      expect(screen.getByTestId('today-approvals').textContent).toBe('2 approvals');
+      expect(screen.getByTestId('today-failed-routines').textContent).toBe('1 failed routine');
+      await fireEvent.click(screen.getByTestId('today-approvals'));
+      expect(get(workspaceLanding)?.rail).toBe('inbox');
+    } finally {
+      agents.set(null);
+      failing.set([]);
+    }
   });
 
   // Minor M3 of the final review: `today.rs::digest` fills

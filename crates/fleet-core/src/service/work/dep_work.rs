@@ -389,7 +389,9 @@ mod tests {
 
     /// The script against real git: a lane dependency merges its verified
     /// commit, not the later work on its lane's branch; a commit the
-    /// repository lacks is missing.
+    /// repository lacks is missing. Unix only: on Windows `bash` is the WSL
+    /// launcher (as dce85ff6, #1049).
+    #[cfg(unix)]
     #[test]
     fn real_git_merges_a_lane_dependencys_verified_commit_only() {
         let d = tempfile::tempdir().unwrap();
