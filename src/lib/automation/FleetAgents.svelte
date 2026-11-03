@@ -111,6 +111,10 @@
    *  the instance and its settings, with no way back but filling the form
    *  again. */
   let revoking = $state<number | null>(null);
+  /** The confirm row opens on its safe answer: Enter keeps, Tab reaches Revoke. */
+  function focusKeep(el: HTMLElement): void {
+    el.focus();
+  }
 
   async function revoke(id: number) {
     revoking = null;
@@ -193,7 +197,7 @@
               >Revoke {ruleLine(r)}? It stops running and its settings are deleted.
               <span class="buttons">
                 <button class="act danger" type="button" data-testid="fleet-revoke-confirm" onclick={() => void revoke(r.id)}>Revoke</button>
-                <button class="act" type="button" data-testid="fleet-revoke-keep" onclick={() => (revoking = null)}>Keep</button>
+                <button class="act" type="button" data-testid="fleet-revoke-keep" use:focusKeep onclick={() => (revoking = null)}>Keep</button>
               </span></span
             >
           </li>
