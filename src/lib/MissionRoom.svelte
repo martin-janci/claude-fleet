@@ -62,6 +62,8 @@
   import type { NextStep } from './mission_triage';
   import type { IpcError, Result } from './result';
   import { parkedHeld } from './composer_hold';
+  import { budgetProblem, microsOf } from './routines';
+  import { formKeys } from './forms/form_frame';
   import {
     acceptWorkProposals,
     autonomyWords,
@@ -109,6 +111,7 @@
     POLICY_DEFAULT_PARALLEL,
     POLICY_MAX_PARALLEL,
     POLICY_MIN_WAKE_SECS,
+    MISSION_LEVELS,
     type FinishSession,
     type HumanError,
     type MissionCard,
@@ -574,8 +577,11 @@
   async function reviewOne(accept: boolean) {
     const id = reviewId;
     if (id == null) return;
-    // The decided one leaves the list: the next one takes its place.
-    await act(decideWorkProposal(id, accept));
+    // The decided one leaves the list: the next one takes its place. An
+    // accept one by one is undone as Accept all's is (ACCEPT_UNDO_SECS):
+    // a slipped Accept is one press away, not a trip to Work.
+    const out = await act(decideWorkProposal(id, accept));
+    if (out && accept) lastAccepted = [...lastAccepted, id];
     if (reviewAt >= proposals.ids.length) reviewing = false;
   }
 
@@ -624,11 +630,20 @@
   /** Hosts the grant lets the loop run on; none ticked: any host. */
   let grantHosts = $state<string[]>([]);
 
+  function focusNow(el: HTMLElement): void {
+    el.focus();
+  }
+
+  /** What is wrong with the grant's Budget, said under the field: "5,50"
+   *  is $5.50 and a typo is refused rather than signed as no cap. */
+  const grantBudgetBad = $derived(budgetProblem(grantBudget));
+
   async function grant() {
-    if (!mission) return;
-    const cents = Math.round(Number(grantBudget) * 100);
+    if (!mission || grantBudgetBad) return;
+    const micros = microsOf(grantBudget);
+    const cents = micros === undefined ? 0 : Math.round(micros / 10_000);
     const untilDone = grantUntilDone && mission.mode === 'finite';
-    if (untilDone && !(grantBudget.trim() && cents > 0)) {
+    if (untilDone && !(cents > 0)) {
       notice = 'A grant until the mission completes needs a budget.';
       return;
     }
@@ -636,7 +651,7 @@
       grantMission(mission.id, {
         level: grantLevel,
         ...(untilDone ? { until_done: true } : { hours: grantHours }),
-        ...(grantBudget.trim() && cents > 0 ? { budget_cents: cents } : {}),
+        ...(cents > 0 ? { budget_cents: cents } : {}),
         ...(grantHosts.length > 0 ? { hosts: [...grantHosts] } : {}),
       }),
     );
@@ -817,9 +832,11 @@
       <div class="scroll">
         <div class="col">
           {#if notice}<p class="notice" role="status" data-testid="mission-notice">{notice}</p>{/if}
-          <form class="create" data-testid="mission-create-form" onsubmit={(e) => (e.preventDefault(), void create())}>
+          <form class="create" data-testid="mission-create-form" use:formKeys onsubmit={(e) => (e.preventDefault(), void create())}>
             <h2 class="name">New mission</h2>
-            <input placeholder="Name" aria-label="Name" bind:value={newName} data-testid="mission-new-name" />
+            <!-- The name takes focus as the form opens: New mission is the
+                 press that asked for it, and the next thing is typing. -->
+            <input placeholder="Name" aria-label="Name" bind:value={newName} use:focusNow data-testid="mission-new-name" />
             <textarea
               rows="3"
               placeholder="Goal: what is true when it is done"
@@ -1346,10 +1363,7 @@
                 <label class="field"
                   >Autonomy
                   <select bind:value={editLevel} data-testid="mission-edit-level">
-                    <option value={0}>L0 · asks for everything</option>
-                    <option value={1}>L1 · You press Start</option>
-                    <option value={2}>L2 · runs within a grant</option>
-                    <option value={3}>L3 · reviews and integrates</option>
+                    {#each MISSION_LEVELS as l (l.level)}<option value={l.level}>{l.label}</option>{/each}
                   </select></label
                 >
                 <div class="row">
@@ -1467,13 +1481,11 @@
                   {/if}
                 </div>
                 {#if granting}
-                  <form class="grant" data-testid="mission-grant-form" onsubmit={(e) => (e.preventDefault(), void grant())}>
+                  <form class="grant" data-testid="mission-grant-form" use:formKeys onsubmit={(e) => (e.preventDefault(), void grant())}>
                     <label class="field inline"
                       >Level
                       <select bind:value={grantLevel}>
-                        <option value={1}>L1 · You press every step</option>
-                        <option value={2}>L2 · runs, retries, reviews</option>
-                        <option value={3}>L3 · also creates tasks</option>
+                        {#each MISSION_LEVELS.filter((l) => l.level >= 1) as l (l.level)}<option value={l.level}>{l.label}</option>{/each}
                       </select></label
                     >
                     <div class="row">
@@ -1485,10 +1497,14 @@
                           placeholder={grantUntilDone && mission.mode === 'finite' ? 'required' : 'none'}
                           bind:value={grantBudget}
                           class="role"
+                          inputmode="decimal"
+                          aria-invalid={grantBudgetBad ? 'true' : undefined}
+                          aria-describedby={grantBudgetBad ? 'mission-grant-budget-bad' : undefined}
                           data-testid="mission-grant-budget"
                         /></label
                       >
                     </div>
+                    {#if grantBudgetBad}<p class="muted small" id="mission-grant-budget-bad" role="alert" data-testid="mission-grant-budget-bad">{grantBudgetBad}</p>{/if}
                     {#if mission.mode === 'finite'}
                       <label class="field inline"
                         ><input type="checkbox" bind:checked={grantUntilDone} data-testid="mission-grant-until-done" /> Until the mission completes
@@ -1505,7 +1521,10 @@
                         {/each}
                       </fieldset>
                     {/if}
-                    <button class="btn" type="submit" disabled={busy} data-testid="mission-grant-save">Sign</button>
+                    <div class="row">
+                      <button class="btn" type="submit" disabled={busy || !!grantBudgetBad} data-testid="mission-grant-save">Sign the grant</button>
+                      <button class="btn btn--quiet" type="button" data-testid="mission-grant-cancel" onclick={() => (granting = false)}>Cancel</button>
+                    </div>
                   </form>
                 {/if}
               {/if}

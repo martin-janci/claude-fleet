@@ -18,6 +18,7 @@
   import { openExternal } from './open_external';
   import MissionGraph from './MissionGraph.svelte';
   import { tablistKeys } from './tablist_keys';
+  import { formKeys } from './forms/form_frame';
   import { defaultLaneBy, toneOf, type LaneBy } from './mission_graph';
   import { createWorkTask } from './work';
   import { projects } from './projects';
@@ -150,7 +151,7 @@
 
   /** The reason field takes focus as it opens: the Override… button that
    *  opened it is gone (review r8). */
-  function focusOnMount(el: HTMLInputElement): void {
+  function focusOnMount(el: HTMLInputElement | HTMLTextAreaElement): void {
     el.focus();
   }
 
@@ -318,6 +319,7 @@
                       placeholder="Lane name, e.g. backend"
                       maxlength="40"
                       bind:value={laneText}
+                      use:focusOnMount
                       data-testid="mission-lane-name"
                     />
                     <span class="row">
@@ -327,8 +329,9 @@
                   </form>
                 {/if}
                 {#if condsFor === n.item_id}
-                  <form class="conds" onsubmit={(e) => (e.preventDefault(), void saveConds())}>
+                  <form class="conds" use:formKeys onsubmit={(e) => (e.preventDefault(), void saveConds())}>
                     <textarea
+                      use:focusOnMount
                       rows="3"
                       aria-label="Done when, one condition per line"
                       placeholder={'ci\nreview\ntest:cargo test\nperson'}
