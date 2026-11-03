@@ -90,7 +90,24 @@ export async function routeSent(key: string, text: string): Promise<void> {
   // mock) keeps no receipt rather than throwing out of the send.
   if (!r.ok || !r.value || r.value.outcome === 'none') return;
   const route = r.value;
-  receipts.update((rs) => [...rs.filter((x) => x.key !== key), { key, route, chosen: null, followed: false, text, handed: null }].slice(-MAX_RECEIPTS));
+  // One open question at a time: a newer `ask` replaces an older one the
+  // person never answered, so two "Which mission or session…" pickers with
+  // slightly different lists never stack up under each other.
+  const stale = (x: Receipt) => route.outcome === 'ask' && isOpenAsk(x);
+  receipts.update((rs) =>
+    [...rs.filter((x) => x.key !== key && !stale(x)), { key, route, chosen: null, followed: false, text, handed: null }].slice(-MAX_RECEIPTS),
+  );
+}
+
+/** A receipt still asking where its message goes: nothing picked or handed on. */
+export function isOpenAsk(r: Receipt): boolean {
+  return r.route.outcome === 'ask' && r.chosen === null && r.handed === null;
+}
+
+/** The sent text, shortened for the line a receipt quotes it on. */
+export function quoteOf(text: string, max = 60): string {
+  const one = text.replace(/\s+/g, ' ').trim();
+  return one.length > max ? `${one.slice(0, max - 1).trimEnd()}…` : one;
 }
 
 /** Drop receipt `key` from Control: the person read it, or does not want it
