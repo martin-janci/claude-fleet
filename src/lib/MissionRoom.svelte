@@ -78,7 +78,9 @@
     finalMoveQuestion,
     getMission,
     grantMission,
+    grantSignLabel,
     grantSpanNotice,
+    grantWouldHelp,
     isFinal,
     missionTaskId,
     moveLabel,
@@ -104,6 +106,7 @@
     stepKey,
     stepLine,
     undoWorkAccept,
+    untilWords,
     updateMission,
     waitsOnPerson,
     wakeLabel,
@@ -151,6 +154,10 @@
   const missions = $derived($missionList.missions);
   let detail = $state.raw<MissionDetail | null>(null);
   let notice = $state<string | null>(null);
+  /** The notice came from an action in the right panel (the Plan tab's
+   *  Save, Sign, Import, Delete, a task edit): it is drawn there, beside the
+   *  press, and not at the top of the centre column out of sight. */
+  let noticeInPanel = $state(false);
   /** Review w17-4: the last re-read of the open mission failed; what was
    *  loaded stays on screen. */
   let refreshError = $state<IpcError | null>(null);
@@ -269,6 +276,7 @@
     moreOpen = false;
     confirmMove = null;
     notice = null;
+    noticeInPanel = false;
     refreshError = null;
     plannerFailure = null;
     plannerIsWait = false;
@@ -302,10 +310,12 @@
     });
   });
 
-  /** Run one write; on success re-read the list and the open mission. */
-  async function act<T>(p: Promise<Result<T>>): Promise<T | null> {
+  /** Run one write; on success re-read the list and the open mission.
+   *  `where` says which column pressed, so a refusal lands beside the press. */
+  async function act<T>(p: Promise<Result<T>>, where: 'centre' | 'panel' = 'centre'): Promise<T | null> {
     busy = true;
     notice = null;
+    noticeInPanel = where === 'panel';
     ciRed = false;
     try {
       const r = await p;
@@ -321,6 +331,16 @@
       busy = false;
     }
   }
+
+  /** `act` for the panel's own presses (the tasks block). */
+  function panelAct<T>(p: Promise<Result<T>>): Promise<T | null> {
+    return act(p, 'panel');
+  }
+
+  /** The mission's member tasks: every item but its root. */
+  const members = $derived((detail?.items ?? []).filter((i) => i.id !== mission?.root_item_id));
+  /** Nothing to run yet and nothing proposed: the centre says what comes next. */
+  const nothingYet = $derived(members.length === 0 && proposals.ids.length === 0 && (plan?.steps ?? []).length === 0);
 
   // ── Opening tasks and sessions ──
 
@@ -433,6 +453,7 @@
         },
         mission.version,
       ),
+      'panel',
     );
     if (m) editing = false;
   }
@@ -645,6 +666,7 @@
     const untilDone = grantUntilDone && mission.mode === 'finite';
     if (untilDone && !(cents > 0)) {
       notice = 'A grant until the mission completes needs a budget.';
+      noticeInPanel = true;
       return;
     }
     const out = await act(
@@ -654,6 +676,7 @@
         ...(cents > 0 ? { budget_cents: cents } : {}),
         ...(grantHosts.length > 0 ? { hosts: [...grantHosts] } : {}),
       }),
+      'panel',
     );
     if (out) {
       granting = false;
@@ -666,7 +689,7 @@
   }
 
   async function revokeGrant() {
-    if (mission) await act(revokeMissionGrant(mission.id));
+    if (mission) await act(revokeMissionGrant(mission.id), 'panel');
   }
 
   // ── Import a plan: a markdown step table read into the mission's tasks ──
@@ -683,7 +706,7 @@
 
   async function runImport() {
     if (!mission || !importRows || importRows.length === 0) return;
-    const out = await act(importMissionPlan(mission.id, importRows));
+    const out = await act(importMissionPlan(mission.id, importRows), 'panel');
     if (out) {
       importResult = importLine(out);
       importUnknown = out.unknown_needs ?? [];
@@ -703,7 +726,7 @@
 
   async function addRepo() {
     if (!mission || repoPick === '') return;
-    if (await act(setMissionRepo(mission.id, repoPick, true, repoRole))) {
+    if (await act(setMissionRepo(mission.id, repoPick, true, repoRole), 'panel')) {
       repoPick = '';
       repoRole = '';
     }
@@ -714,7 +737,7 @@
   let confirmDelete = $state(false);
   async function remove() {
     if (!mission) return;
-    if (await act(deleteMission(mission.id))) {
+    if (await act(deleteMission(mission.id), 'panel')) {
       roomMissionId.set(null);
       void open(null);
     }
@@ -966,7 +989,7 @@
 
       <div class="scroll">
         <div class="col" data-testid="mission-detail-centre">
-          {#if notice}<p class="notice" role="status" data-testid="mission-notice">{notice}</p>{/if}
+          {#if notice && !(noticeInPanel && $missionPanelOpen)}<p class="notice" role="status" data-testid="mission-notice">{notice}</p>{/if}
           {#if refreshError}
             <p class="refresh-error" role="status" data-testid="mission-refresh-error">
               Couldn't refresh ({readErrorText(refreshError)}) — showing what was loaded.
@@ -1170,6 +1193,36 @@
             <MissionTriage missionId={mission.id} reload={detail.events?.[0]?.id ?? 0} onstep={triageStep} />
           {/if}
 
+          {#if mayChange && nothingYet}
+            <!-- A mission with no tasks had nothing to press in the centre:
+                 the ways to get tasks sat in the panel's Plan tab only. -->
+            <div class="card" data-testid="mission-empty-next">
+              <p class="card-head">
+                <span class="tag">Next</span>
+                <span>No tasks yet</span>
+              </p>
+              <p class="muted small">
+                Tasks come from the planner, a plan you import, or your own hand in the Plan tab. The mission runs once it has tasks{#if (mission.repos ?? []).length === 0}
+                  {' '}and a repo (the Repos tab){/if}.
+              </p>
+              <div class="row">
+                {#if mission.mode !== 'plan'}
+                  <button class="btn btn--chip" type="button" disabled={busy || changeBlocked} data-testid="mission-empty-plan" onclick={() => void askPlanner()}
+                    >Ask the planner</button
+                  >
+                {/if}
+                <button
+                  class="btn btn--quiet"
+                  type="button"
+                  disabled={busy || importBlocked}
+                  data-testid="mission-empty-import"
+                  onclick={() => (showMissionPanel('plan'), (importOpen = true))}>Import a plan…</button
+                >
+                <button class="btn btn--quiet" type="button" data-testid="mission-empty-tasks" onclick={() => showMissionPanel('plan')}>Add tasks by hand</button>
+              </div>
+            </div>
+          {/if}
+
           {#if (plan?.steps ?? []).length > 0 || (mayChange && mission.state === 'active' && pressable.length > 0)}
             <div class="next" data-testid="mission-next">
               {#if (plan?.steps ?? []).length > 0}
@@ -1199,6 +1252,16 @@
                     onclick={() => void startWave()}>Start wave ({pressable.length})</button
                   >
                   {#if openCards.length > 0}<span class="muted small">once the cards are answered</span>{/if}
+                  {#if plan && grantWouldHelp(plan.autonomy)}
+                    <!-- Without a grant a person presses every wave; the way
+                         to change that sat in the panel's Autonomy block only. -->
+                    <button
+                      class="link"
+                      type="button"
+                      data-testid="mission-run-itself"
+                      onclick={() => (showMissionPanel('plan'), (granting = true))}>or let it run by itself…</button
+                    >
+                  {/if}
                 </p>
               {/if}
             </div>
@@ -1325,6 +1388,7 @@
         >
       </div>
       <div class="body" role="tabpanel" aria-label={MISSION_PANEL_TABS.find((t) => t.id === $missionPanelTab)?.label}>
+        {#if notice && noticeInPanel}<p class="notice panel-notice" role="status" data-testid="mission-notice">{notice}</p>{/if}
         {#if $missionPanelTab === 'session'}
           {#if focusRow}
             <SessionFocus
@@ -1472,7 +1536,7 @@
                     <button class="btn btn--quiet" type="button" disabled={busy || changeBlocked} data-testid="mission-revoke" onclick={() => void revokeGrant()}
                       >End the grant (L{plan.autonomy.grant.level}, {plan.autonomy.grant.until_done
                         ? 'until the mission completes'
-                        : `until ${new Date(plan.autonomy.grant.expires_at * 1000).toLocaleString()}`})</button
+                        : `until ${untilWords(plan.autonomy.grant.expires_at)}`})</button
                     >
                   {:else}
                     <button class="btn btn--quiet" type="button" disabled={busy || changeBlocked} data-testid="mission-grant" onclick={() => (granting = !granting)}
@@ -1522,7 +1586,13 @@
                       </fieldset>
                     {/if}
                     <div class="row">
-                      <button class="btn" type="submit" disabled={busy || !!grantBudgetBad} data-testid="mission-grant-save">Sign the grant</button>
+                      <button class="btn" type="submit" disabled={busy || !!grantBudgetBad} data-testid="mission-grant-save"
+                        >{grantSignLabel(
+                          grantLevel,
+                          grantUntilDone && mission.mode === 'finite' ? { untilDone: true } : { hours: grantHours },
+                          grantBudgetBad ? undefined : microsOf(grantBudget),
+                        )}</button
+                      >
                       <button class="btn btn--quiet" type="button" data-testid="mission-grant-cancel" onclick={() => (granting = false)}>Cancel</button>
                     </div>
                   </form>
@@ -1537,11 +1607,11 @@
                 {mayChange}
                 {busy}
                 {changeBlocked}
-                {act}
+                act={panelAct}
                 bind:tasksView
                 onopenitem={openItem}
                 onopensession={openSession}
-                onnotice={(t) => (notice = t)}
+                onnotice={(t) => ((notice = t), (noticeInPanel = true))}
               />
             </section>
 
@@ -1661,7 +1731,7 @@
                         aria-label="Remove repo"
                         title="Remove repo"
                         disabled={busy}
-                        onclick={() => void act(setMissionRepo(mission.id, r.project_id, false))}>×</button
+                        onclick={() => void act(setMissionRepo(mission.id, r.project_id, false), 'panel')}>×</button
                       >
                     {/if}
                   </li>
@@ -2290,6 +2360,9 @@
   .notice {
     margin: 0;
     color: var(--danger);
+  }
+  .panel-notice {
+    padding: 8px 12px 0;
   }
   .refresh-error {
     margin: 0;
