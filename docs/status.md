@@ -732,8 +732,11 @@ old key an alias) and reads the ticket back. Per tracker
 (`E_INVALID_STATE`), a tracker's ticket, an epic, a job, a proposal or a task
 under a task of fleet's own (`E_INVALID`). A failed promotion may be tried
 again. `TaskDetail.promotion` / `promote_targets` drive *Promote to
-ticket…* on the task page. Not yet: sending assignees,
-due dates, priority, labels or estimates, epics, and the phone.
+ticket…* on the task page and on the phone's task screen (fleet-mobile);
+with no target, `promote_hint` says what brings one (Create tickets off on
+the tracker, no tracker connected, a parent of fleet's own) and the button
+shows disabled with it. Not yet: sending assignees,
+due dates, priority, labels or estimates, epics.
 
 Ticket status moves (owner decision 2026-10-12, changing D29 again; CF-6):
 `work_link { set_status, item_id, status, status_name? }` on a tracker's
