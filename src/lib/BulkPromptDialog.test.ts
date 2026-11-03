@@ -65,4 +65,14 @@ describe('BulkPromptDialog', () => {
     await fireEvent.click(screen.getByTestId('bulk-prompt-send'));
     expect(onClose).toHaveBeenCalled();
   });
+
+  it('closing with a prompt typed asks before throwing it away', async () => {
+    const onClose = vi.fn();
+    render(BulkPromptDialog, { props: { targets: [idle, busy], onClose } });
+    await settle();
+    await fireEvent.input(screen.getByTestId('bulk-prompt-textarea'), { target: { value: 'status?' } });
+    await fireEvent.click(screen.getByTestId('sheet-cancel'));
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByTestId('form-discard-ask')).toBeTruthy();
+  });
 });

@@ -30,6 +30,26 @@ describe('AuthorSessionDialog', () => {
     expect((screen.getByTestId('author-instructions') as HTMLTextAreaElement).value).toBe('Improve this skill "worktree": ');
   });
 
+  it('closing with the instructions changed asks before throwing them away', async () => {
+    const onclose = vi.fn();
+    render(AuthorSessionDialog, { kind: 'skill', name: 'worktree', onclose });
+    await fireEvent.input(screen.getByTestId('author-instructions'), { target: { value: 'Improve this skill "worktree": make it shorter' } });
+    await fireEvent.click(screen.getByText('Cancel'));
+    expect(onclose).not.toHaveBeenCalled();
+    await fireEvent.click(screen.getByTestId('form-keep-editing'));
+    expect((screen.getByTestId('author-instructions') as HTMLTextAreaElement).value).toContain('make it shorter');
+    await fireEvent.click(screen.getByText('Cancel'));
+    await fireEvent.click(screen.getByTestId('form-discard'));
+    expect(onclose).toHaveBeenCalled();
+  });
+
+  it('closing untouched closes at once', async () => {
+    const onclose = vi.fn();
+    render(AuthorSessionDialog, { kind: 'skill', name: 'worktree', onclose });
+    await fireEvent.click(screen.getByText('Cancel'));
+    expect(onclose).toHaveBeenCalled();
+  });
+
   it('prefills a create-a-new-asset instruction when no target is given', () => {
     render(AuthorSessionDialog, { onclose: () => {} });
     expect((screen.getByTestId('author-instructions') as HTMLTextAreaElement).value).toContain('Create a new asset that');
