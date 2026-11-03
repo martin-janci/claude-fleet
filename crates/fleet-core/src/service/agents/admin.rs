@@ -395,10 +395,23 @@ pub fn status(store: &Mutex<Store>, args: &AgentsArgs, now: i64) -> Result<Agent
 /// The built-in agents next to their restated definitions, over the newest
 /// jobs (`super::compare`).
 pub fn compare(store: &Mutex<Store>) -> Result<super::compare::Comparison, IpcError> {
-    let jobs = lock(store)?
+    let s = lock(store)?;
+    let jobs = s
         .list_agent_jobs(None, super::compare::COMPARE_JOBS)
         .map_err(db)?;
-    Ok(super::compare::compare(&jobs))
+    let restated = s
+        .list_agent_rules()
+        .map_err(db)?
+        .into_iter()
+        .filter(|r| {
+            r.definition
+                .as_deref()
+                .is_some_and(|d| super::compare::RESTATED.contains(&d))
+        })
+        .map(|r| r.id)
+        .collect();
+    drop(s);
+    Ok(super::compare::compare(&jobs, &restated))
 }
 
 /// Write a rule. `granted_by` names the device, for the record.

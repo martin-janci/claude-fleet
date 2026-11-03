@@ -23,7 +23,6 @@
 //! [`MissionPolicy::lane_relay_after`]: crate::store::MissionPolicy
 
 use std::collections::{HashMap, HashSet};
-use std::time::Duration;
 
 use super::steps::{open_impl, Step};
 use super::Deps;
@@ -32,9 +31,6 @@ use crate::service::trackers::tickets::{self, StartArgs};
 use crate::service::view_scope::ViewScope;
 use crate::service::work::run;
 use crate::store::{MissionLaneRow, MissionRow, SessionRow, Store, TaskRow};
-
-/// The wall clock of reading a checkout's HEAD.
-const HEAD_READ: Duration = Duration::from_secs(20);
 
 /// PURE: the steps of a mission in lane execution. A lane takes one
 /// implement run at a time, the first of its steps in graph order, and
@@ -52,51 +48,47 @@ pub fn gate(steps: Vec<Step>, lane_of: &HashMap<i64, i64>, busy: &HashSet<i64>) 
         .collect()
 }
 
-/// PURE: a lane's test steps when its tests run at its end (mission
-/// improvements M5, `policy.lane_test_at = lane`): one per lane, the last
-/// of its test steps in graph order, and only once every task of the lane
-/// is implemented (done or verifying) and the lane is not busy. The run
-/// tests the lane's checkout at its head, so a pass answers the lane's
-/// other tasks too (`verify::check_line`); a failure is its own task's,
-/// whose retry goes to the lane's lead.
-pub fn gate_lane_tests(
-    steps: Vec<Step>,
+/// PURE: the items whose test run waits when a lane's tests run at its
+/// end (mission improvements M5, `policy.lane_test_at = lane`). A lane
+/// tests once, on the last of its tasks in graph order whose test is due,
+/// and only while it is not busy and none of its tasks is ready, running,
+/// in progress or failed (a retry is coming): every task is implemented, or
+/// what is left waits on that test (a task that depends on another of the
+/// lane waits for it to be done). Every other due test of the lane is held,
+/// before planning, so it takes no slot. The run tests the lane's checkout
+/// at its head, so a pass answers the lane's other tasks too
+/// (`verify::check_line`); a failure is its own task's, whose retry goes to
+/// the lane's lead.
+pub fn held_lane_tests(
+    graph: &crate::service::work::graph::MissionGraph,
     lane_of: &HashMap<i64, i64>,
     busy: &HashSet<i64>,
-    state_of: &HashMap<i64, &str>,
-) -> Vec<Step> {
-    let unfinished: HashSet<i64> = lane_of
+) -> HashSet<i64> {
+    let moving: HashSet<i64> = graph
+        .nodes
         .iter()
-        .filter(|(item, _)| {
-            !matches!(
-                state_of.get(item).copied(),
-                Some("done" | "verifying" | "proposed" | "rejected")
-            )
-        })
-        .map(|(_, lane)| *lane)
+        .filter(|n| matches!(n.state.as_str(), "ready" | "running" | "doing" | "failed"))
+        .filter_map(|n| lane_of.get(&n.item_id).copied())
         .collect();
-    let mut last: HashMap<i64, usize> = HashMap::new();
-    for (i, st) in steps.iter().enumerate() {
-        if st.kind == "test" {
-            if let Some(&lane) = st.item_id.and_then(|it| lane_of.get(&it)) {
-                last.insert(lane, i);
-            }
-        }
-    }
-    steps
-        .into_iter()
-        .enumerate()
-        .filter(|(i, st)| {
-            let Some(&lane) = st
-                .item_id
-                .and_then(|it| lane_of.get(&it))
-                .filter(|_| st.kind == "test")
-            else {
-                return true;
-            };
-            last.get(&lane) == Some(i) && !busy.contains(&lane) && !unfinished.contains(&lane)
+    let due: Vec<(i64, i64)> = graph
+        .nodes
+        .iter()
+        .filter(|n| n.state == "verifying")
+        .filter(|n| {
+            n.verification.as_ref().is_some_and(|v| {
+                v.checks
+                    .iter()
+                    .any(|c| c.kind == "test" && c.state == "pending" && c.by.is_none())
+            })
         })
-        .map(|(_, st)| st)
+        .filter_map(|n| lane_of.get(&n.item_id).map(|l| (n.item_id, *l)))
+        .collect();
+    let last: HashMap<i64, i64> = due.iter().map(|(item, lane)| (*lane, *item)).collect();
+    due.into_iter()
+        .filter(|(item, lane)| {
+            last.get(lane) != Some(item) || busy.contains(lane) || moving.contains(lane)
+        })
+        .map(|(item, _)| item)
         .collect()
 }
 
@@ -256,16 +248,6 @@ pub fn task_prompt(
         p.push_str(n);
     }
     p
-}
-
-/// The commit a checkout stands on, read on its host; `None` when it could
-/// not be read (the task's evidence then reads against the merge base).
-async fn read_head(deps: &Deps, host: &str, dir: &str) -> Option<String> {
-    let script = format!("git -C {} rev-parse HEAD", crate::shell::quote(dir));
-    let run = crate::service::catalog::inventory::run_host_script(&deps.ssh, host, &script);
-    let out = tokio::time::timeout(HEAD_READ, run).await.ok()?.ok()?;
-    let sha = out.trim().to_string();
-    crate::store::is_commit_id(&sha).then_some(sha)
 }
 
 /// The key and title of `item_id` as its task prompt names them.
@@ -444,7 +426,8 @@ async fn begin_task(
             .transpose()?
             .flatten();
         // M2: what this task depends on in another lane is merged into the
-        // lane's checkout first; this lane's own tasks are in it already.
+        // lane's checkout first, at its verified commit; this lane's own
+        // tasks are in it already.
         let dep_branches = if role == "implement" {
             let lane = s.item_lane(item_id)?;
             crate::service::work::dep_work::unmerged_deps(&s, item_id, lane)?
@@ -453,27 +436,13 @@ async fn begin_task(
         };
         (dir, dep_branches)
     };
-    let (merged, head) = match &dir {
-        Some(d) if !dep_branches.is_empty() => {
-            let (merged, head) = crate::service::work::dep_work::merge_into(
-                &deps.ssh,
-                &row.host_alias,
-                d,
-                &dep_branches,
-            )
-            .await;
-            let head = match head {
-                Some(h) => Some(h),
-                None => read_head(deps, &row.host_alias, d).await,
-            };
-            (merged, head)
-        }
-        Some(d) => (Vec::new(), read_head(deps, &row.host_alias, d).await),
-        None => (
-            vec![crate::service::work::dep_work::Merged::Missing; dep_branches.len()],
-            None,
-        ),
-    };
+    let prepared = crate::service::work::dep_work::prepare(
+        &deps.ssh,
+        &row.host_alias,
+        dir.as_deref(),
+        &dep_branches,
+    )
+    .await;
     let s = lock(&deps.store)?;
     let (key, title, notes) = key_title(&s, item_id)?;
     let mut task_text = task_prompt(
@@ -484,15 +453,15 @@ async fn begin_task(
         context,
         subagents_on(&s),
     );
-    if let Some(n) = crate::service::work::dep_work::note(&dep_branches, &merged) {
+    if let Some(n) = &prepared.note {
         task_text.push_str("\n\n");
-        task_text.push_str(&n);
+        task_text.push_str(n);
     }
     let prompt = format!("{preamble}{task_text}");
     let task = run::record_run(&s, row.id, &prompt, item_id, attempt, role)?;
     // The lead's spend so far: this task costs from here (M1).
     s.set_task_cost_start(task.id)?;
-    if let Some(h) = &head {
+    if let Some(h) = &prepared.head {
         s.set_task_start_head(task.id, h)?;
     }
     Ok((prompt, task))
@@ -513,7 +482,7 @@ async fn start_lead(
     context: Option<&str>,
     view: &ViewScope,
 ) -> Result<(String, Option<i64>), IpcError> {
-    let (brief, branch) = {
+    let (brief, branch, warm) = {
         let s = lock(&deps.store)?;
         let mut tasks = Vec::new();
         for id in &lane.item_ids {
@@ -523,7 +492,12 @@ async fn start_lead(
         let branch = lane.branch.clone().unwrap_or_else(|| {
             tickets::branch_slug(&format!("M{}", m.id), &format!("{} {}", m.name, lane.name))
         });
-        (lane_brief(m, &lane.name, &tasks), branch)
+        // M6: a warm build on a host with sccache.
+        let warm = crate::service::settings::get_bool(
+            &s,
+            crate::service::settings::ORCHESTRATOR_BUILD_CACHE,
+        );
+        (lane_brief(m, &lane.name, &tasks), branch, warm)
     };
     let args = StartArgs {
         item_id: Some(item_id),
@@ -536,11 +510,7 @@ async fn start_lead(
         with_brief: true,
         brief: Some(brief),
         base_branch: None,
-        // M6: a warm build on a host with sccache.
-        build_cache: crate::service::settings::get_bool(
-            &*lock(&deps.store)?,
-            crate::service::settings::ORCHESTRATOR_BUILD_CACHE,
-        ),
+        build_cache: warm,
         ..start
     };
     let (row, plan, _queued) =

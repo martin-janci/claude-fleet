@@ -40,6 +40,7 @@ import {
   type MissionStats,
 } from './missions';
 import { formatDuration } from './account_usage';
+import type { TopWait } from './mission_compare';
 
 // ── Where the room is ──
 
@@ -338,7 +339,7 @@ export function statsLine(st: MissionStats | null | undefined): string | null {
   parts.push(`idle ${idle}% of ${formatDuration(st.span_secs)}`);
   const waited = waitShares(st)
     .slice(0, 3)
-    .map((w) => `${WAIT_LABEL[w.cause] ?? w.cause} ${w.pct}%`);
+    .map(waitText);
   if (waited.length > 0) parts.push(`waited ${waited.join(', ')}`);
   return parts.join(' · ');
 }
@@ -354,10 +355,15 @@ export const WAIT_LABEL: Record<string, string> = {
   touches: 'on overlapping files',
 };
 
+/** "on a person 40%": one wait cause and its share. */
+export function waitText(w: TopWait): string {
+  return `${WAIT_LABEL[w.cause] ?? w.cause} ${w.pct}%`;
+}
+
 /** PURE: each wait cause's share of the working span, in whole percent,
  *  largest first; a cause under 1% is left out. They overlap, so the
  *  shares may add up past 100. */
-export function waitShares(st: MissionStats): { cause: string; pct: number }[] {
+export function waitShares(st: MissionStats): TopWait[] {
   if (st.span_secs <= 0) return [];
   return Object.entries(st.waits ?? {})
     .map(([cause, secs]) => ({ cause, pct: Math.min(100, Math.round((secs * 100) / st.span_secs)) }))

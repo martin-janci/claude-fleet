@@ -72,6 +72,18 @@ pub struct Checkout {
     pub snapshot: bool,
 }
 
+/// Whether `item_id` runs in a lane: its mission runs by lane and it has
+/// one.
+fn runs_in_lane(s: &Store, item_id: i64) -> bool {
+    let by_lane = s
+        .item_mission(item_id)
+        .ok()
+        .flatten()
+        .and_then(|m| s.get_mission(m).ok().flatten())
+        .is_some_and(|m| m.policy.execution == "lane");
+    by_lane && s.item_lane(item_id).ok().flatten().is_some()
+}
+
 /// The checkout of `item_id`'s latest finished implementation: done, not a
 /// failed attempt, with a commit, on a session and worktree fleet still
 /// knows. `None` when there is none.
@@ -93,7 +105,10 @@ pub fn implementer_checkout(s: &Store, item_id: i64) -> Option<Checkout> {
         host: w.host_alias,
         path: wt.path,
         head,
-        snapshot: start.is_some(),
+        // A lane's task, not merely one with a start: an item run that took
+        // its dependencies records where it began too (mission improvements
+        // M2), and its own checkout is its alone.
+        snapshot: runs_in_lane(s, item_id),
         merge_base: start.or_else(|| ev.merge_base.clone().filter(|b| is_commit_id(b))),
     })
 }

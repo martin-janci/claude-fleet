@@ -210,6 +210,7 @@
         {#each w.nodes as n (n.item_id)}
           {@const it = itemById.get(n.item_id)}
           {#if it}
+            {@const lane = laneOfItem(detail, it.id)}
             <li data-testid="mission-node" data-state={n.state}>
               <span class="node-dot" title={nodeLabel(n.state)}><StatusDot state={toneOf(n.state)} label={nodeLabel(n.state)} /></span>
               {#if trails.has(n.item_id)}
@@ -231,8 +232,8 @@
                     >
                   {/each}
                 </span>
-                {#if laneOfItem(detail, it.id)?.pr_url}
-                  {@const pr = laneOfItem(detail, it.id)?.pr_url ?? ''}
+                {#if lane?.pr_url}
+                  {@const pr = lane.pr_url}
                   <button
                     class="linkish small"
                     type="button"
@@ -369,7 +370,6 @@
               {#if it.id === mission.root_item_id}
                 <span class="muted small">root</span>
               {:else if mayChange}
-                {@const lane = laneOfItem(detail, it.id)}
                 {@const choices = depChoices(n)}
                 <select
                   class="dep-pick"

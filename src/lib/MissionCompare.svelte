@@ -9,7 +9,7 @@
   import { get } from 'svelte/store';
   import { formatDuration } from './account_usage';
   import { dollars } from './missions';
-  import { closeMissionCompare, missionList, openMissionRoom, WAIT_LABEL } from './mission_room';
+  import { closeMissionCompare, missionList, openMissionRoom, waitText } from './mission_room';
   import { loadCompare, rowTopWait, summarize, type CompareRow, type TopWait } from './mission_compare';
 
   let rows = $state<CompareRow[]>([]);
@@ -34,7 +34,7 @@
   const secs = (n: number | null) => (n == null ? '–' : formatDuration(n));
   const pct = (n: number | null) => (n == null ? '–' : `${Math.round(n)}%`);
   const usd = (n: number | null) => (n == null ? '–' : dollars(Math.round(n)));
-  const wait = (w: TopWait | null) => (w ? `${WAIT_LABEL[w.cause] ?? w.cause} ${w.pct}%` : '–');
+  const wait = (w: TopWait | null) => (w ? waitText(w) : '–');
 </script>
 
 <div class="scroll">
