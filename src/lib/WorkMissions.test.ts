@@ -1256,10 +1256,16 @@ describe('WorkMissions', () => {
       await fireEvent.click(screen.getByTestId('mission-grant-save'));
       await flush();
       expect(calls('grant_mission')).toHaveLength(0);
-      await fireEvent.input(screen.getByTestId('mission-grant-budget'), { target: { value: '20' } });
+      // A typo is refused under the field, never signed as no cap.
+      await fireEvent.input(screen.getByTestId('mission-grant-budget'), { target: { value: '2O' } });
+      await flush();
+      expect(screen.getByTestId('mission-grant-budget-bad').textContent).toContain('5.50');
+      expect((screen.getByTestId('mission-grant-save') as HTMLButtonElement).disabled).toBe(true);
+      // A comma is a decimal point ("12,50", the Slovak way).
+      await fireEvent.input(screen.getByTestId('mission-grant-budget'), { target: { value: '12,50' } });
       await fireEvent.click(screen.getByTestId('mission-grant-save'));
       await flush();
-      expect(calls('grant_mission')[0]).toEqual({ mission_id: 4, level: 2, until_done: true, budget_cents: 2000 });
+      expect(calls('grant_mission')[0]).toEqual({ mission_id: 4, level: 2, until_done: true, budget_cents: 1250 });
     });
 
     it('an older hub that signs hours for an until-done grant is said so (review r8)', async () => {
@@ -1397,6 +1403,11 @@ describe('WorkMissions', () => {
     renderMissions();
     await flush();
     await fireEvent.click(screen.getByTestId('missions-pause-all'));
+    await flush();
+    // It asks first: Pause all ends every grant.
+    expect(calls('pause_all_missions')).toHaveLength(0);
+    expect(screen.getByTestId('missions-pause-all-confirm-row').textContent).toContain('its grant ends');
+    await fireEvent.click(screen.getByTestId('missions-pause-all-confirm'));
     await flush();
     expect(calls('pause_all_missions')).toHaveLength(1);
     await fireEvent.click(screen.getByTestId('mission-row'));
@@ -1621,6 +1632,8 @@ describe('WorkMissions', () => {
       await fireEvent.click(screen.getByTestId('mission-review-accept'));
       await flush();
       expect(calls('accept_work_proposal')[0]).toEqual({ item_id: 11 });
+      // One by one is undone as Accept all is.
+      expect(screen.getByTestId('mission-accepted').textContent).toContain('Accepted 1.');
       await fireEvent.click(screen.getByTestId('mission-review-skip'));
       expect(screen.getByTestId('mission-review').textContent).toContain('CSV writer');
       await fireEvent.click(screen.getByTestId('mission-review-reject'));
@@ -2002,6 +2015,12 @@ describe('the Missions board (gap G3.6)', () => {
     const foot = screen.getByTestId('missions-footer');
     expect(screen.getByTestId('missions-loop').textContent).toBe('Mission loop on · ceiling L1');
     await fireEvent.click(foot.querySelector('[data-testid="missions-pause-all"]')!);
+    await flush();
+    await fireEvent.click(screen.getByTestId('missions-pause-all-keep'));
+    expect(screen.queryByTestId('missions-pause-all-confirm-row')).toBeNull();
+    expect(calls('pause_all_missions')).toHaveLength(0);
+    await fireEvent.click(foot.querySelector('[data-testid="missions-pause-all"]')!);
+    await fireEvent.click(screen.getByTestId('missions-pause-all-confirm'));
     await flush();
     expect(calls('pause_all_missions')).toHaveLength(1);
   });

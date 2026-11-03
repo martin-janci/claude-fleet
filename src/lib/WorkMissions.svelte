@@ -104,6 +104,12 @@
   );
   const footer = $derived(loopFooter([...rowDetails.values()]));
   const anyActive = $derived(missions.some((m) => m.state === 'active'));
+  const activeCount = $derived(missions.filter((m) => m.state === 'active').length);
+  /** Pause all asks first, as the phone's does: it ends every grant, and a
+   *  resumed mission does not get its grant back (review: UX antipatterns
+   *  2026-11-03, a bulk step one stray click away). The palette's Pause all
+   *  stays immediate: typing it is the deliberate act. */
+  let confirmPauseAll = $state(false);
 
   const saveBlocked = $derived(!!hubActionBlocked('save_mission', $hubStatus, $hubConnection));
   const changeBlocked = $derived(!!hubActionBlocked('set_mission_state', $hubStatus, $hubConnection));
@@ -321,9 +327,32 @@
     <div class="list-foot" data-testid="missions-footer">
       {#if footer}<span class="muted small" data-testid="missions-loop">{footer}</span>{/if}
       {#if anyActive}
-        <button class="btn btn--quiet" type="button" disabled={busy || changeBlocked} data-testid="missions-pause-all" onclick={() => void pauseAll()}
-          >Pause all</button
+        <button
+          class="btn btn--quiet"
+          type="button"
+          disabled={busy || changeBlocked}
+          aria-expanded={confirmPauseAll}
+          data-testid="missions-pause-all"
+          onclick={() => (confirmPauseAll = !confirmPauseAll)}>Pause all…</button
         >
+      {/if}
+      {#if confirmPauseAll && anyActive}
+        <div class="pause-confirm" role="alertdialog" aria-label="Pause all missions" data-testid="missions-pause-all-confirm-row">
+          <span
+            >Pause {activeCount} running mission{activeCount === 1 ? '' : 's'}? Each stops taking steps and its grant ends; runs already going keep
+            going.</span
+          >
+          <span class="row">
+            <button
+              class="btn btn--danger"
+              type="button"
+              disabled={busy || changeBlocked}
+              data-testid="missions-pause-all-confirm"
+              onclick={() => ((confirmPauseAll = false), void pauseAll())}>Pause all</button
+            >
+            <button class="btn btn--quiet" type="button" data-testid="missions-pause-all-keep" onclick={() => (confirmPauseAll = false)}>Keep</button>
+          </span>
+        </div>
       {/if}
     </div>
   {/if}
@@ -525,6 +554,17 @@
   .hidden-line,
   .empty {
     padding: var(--space-2) 14px;
+  }
+  .pause-confirm {
+    flex-basis: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    font-size: var(--text-sm);
+  }
+  .pause-confirm .row {
+    display: flex;
+    gap: 0.4rem;
   }
   .list-foot {
     display: flex;

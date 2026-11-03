@@ -92,6 +92,17 @@ export const POLICY_MIN_WAKE_SECS = 300;
 /** The default runs at once (`MissionPolicy::default`). */
 export const POLICY_DEFAULT_PARALLEL = 2;
 
+/** A mission's autonomy levels in words, one table for the Edit form's
+ *  "Autonomy" and the grant's "Level", so a level never reads two ways on
+ *  one page (`orchestrate::steps::AUTO_LEVEL` is 2; at 3 the loop also
+ *  accepts the tasks it creates). A grant is 1 to 3. */
+export const MISSION_LEVELS: readonly { level: number; label: string }[] = [
+  { level: 0, label: 'L0 · asks for everything' },
+  { level: 1, label: 'L1 · you press every step' },
+  { level: 2, label: 'L2 · runs, retries and reviews by itself' },
+  { level: 3, label: 'L3 · also creates tasks' },
+];
+
 /** The policy to save: the mission's own with `edits` on top, so a field
  *  the form does not show keeps its value. `wake_every_secs: null` clears
  *  the timer. */
