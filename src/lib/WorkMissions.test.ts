@@ -627,12 +627,12 @@ describe('WorkMissions', () => {
         graph: {
           nodes: [
             { item_id: 10, state: 'ready', wave: 1 },
-            { item_id: 11, state: 'ready', wave: 1 },
+            { item_id: 11, state: 'running', wave: 1 },
             { item_id: 12, state: 'ready', wave: 1 },
           ],
           waves: 1,
         },
-        lanes: [{ id: 1, mission_id: 4, name: 'backend', state: 'idle', item_ids: [11], pr_url: 'https://github.com/o/r/pull/9' }],
+        lanes: [{ id: 1, mission_id: 4, name: 'backend', state: 'idle', item_ids: [11], pr_url: 'https://github.com/o/r/pull/9', lead_waits: true }],
         touches: { 11: ['src/store/**', 'docs/status.md'] },
         events: [],
         may_change: true,
@@ -659,6 +659,11 @@ describe('WorkMissions', () => {
       await fireEvent.click(screen.getByTestId('mission-lane-save'));
       await flush();
       expect(calls('set_mission_item')[2]).toEqual({ mission_id: 4, item_id: 12, on: true, lane: 'web' });
+    });
+
+    it('says when a lane\'s lead waits on a dialog for you (N2)', async () => {
+      await open();
+      expect(screen.getAllByTestId('mission-lead-waits')).toHaveLength(1);
     });
 
     it('links a lane task to its lane\'s draft PR (M4)', async () => {

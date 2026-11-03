@@ -145,6 +145,13 @@ fn on_a_dialog(row: &SessionRow) -> bool {
     row.stuck_kind.is_some() || row.claude_status.as_deref() == Some("blocked")
 }
 
+/// Whether `lane`'s live lead waits on a dialog (a permission, a question,
+/// a stuck prompt): the lane is held by a person, not by its work
+/// (mission improvements N2).
+pub fn lead_on_dialog(s: &Store, m: &MissionRow, lane: &MissionLaneRow) -> Result<bool, IpcError> {
+    Ok(live_lead(s, m, lane)?.is_some_and(|r| on_a_dialog(&r)))
+}
+
 /// PURE: the members whose `test` line is still to pass while they are
 /// verified (lanes design §3.7, L4): their lane waits, so the test measures
 /// that task in the lane's checkout before the lead moves on.

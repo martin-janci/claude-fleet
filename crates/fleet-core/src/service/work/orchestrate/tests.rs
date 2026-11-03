@@ -1836,3 +1836,56 @@ async fn a_tick_books_its_waits_and_a_pause_waits_on_a_person() {
     // person's wait is that, not the 30 s after the resume.
     assert!(w.get("person").copied().unwrap_or(0) <= 1, "{w:?}");
 }
+
+/// Mission improvements N2: a lane held because its lead waits on a dialog
+/// waits on a person; held by its lead's work, it waits on the lane.
+#[test]
+fn a_lane_whose_lead_waits_on_a_dialog_waits_on_a_person() {
+    let fx = fixture();
+    let (a, b) = (member(&fx, "a"), member(&fx, "b"));
+    let s = lock(&fx.deps.store).unwrap();
+    set_policy(
+        &s,
+        fx.m.id,
+        crate::store::MissionPolicy {
+            execution: "lane".into(),
+            max_parallel: 8,
+            ..Default::default()
+        },
+    );
+    for i in [a, b] {
+        s.set_item_lane(fx.m.id, i, Some("api"), None, "t").unwrap();
+    }
+    s.upsert_host("h").unwrap();
+    let lead = s
+        .upsert_session("lead", "h", None, None, 1, 1, "running", None)
+        .unwrap();
+    s.set_session_origin(lead, &crate::store::SessionOrigin::mission(fx.m.id))
+        .unwrap();
+    let lane = s.mission_lanes(fx.m.id).unwrap()[0].id;
+    s.set_lane_lead(lane, lead, None, "m-api").unwrap();
+    let status = |st: &str| {
+        s.conn_ref()
+            .execute(
+                "UPDATE sessions SET claude_status = ?1 WHERE id = ?2",
+                rusqlite::params![st, lead],
+            )
+            .unwrap();
+    };
+    status("working");
+    assert_eq!(wait_causes(&s, fx.m.id), vec!["lane"]);
+    status("blocked");
+    assert_eq!(wait_causes(&s, fx.m.id), vec!["person"]);
+    drop(s);
+    let detail = crate::service::work::missions::mission(
+        &fx.deps.store,
+        &ViewScope::internal(),
+        fx.m.id,
+        None,
+    )
+    .unwrap();
+    assert!(
+        detail.lanes[0].lead_waits,
+        "the room says the lead waits for you"
+    );
+}

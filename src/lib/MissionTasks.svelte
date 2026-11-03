@@ -231,6 +231,11 @@
                     >
                   {/each}
                 </span>
+                {#if n.state === 'running' && laneOfItem(detail, it.id)?.lead_waits}
+                  <span class="muted small" data-testid="mission-lead-waits" title="The lane's lead waits on a dialog (a permission or a question): open its session to answer it"
+                    >lead waits for you</span
+                  >
+                {/if}
                 {#if laneOfItem(detail, it.id)?.pr_url}
                   {@const pr = laneOfItem(detail, it.id)?.pr_url ?? ''}
                   <button

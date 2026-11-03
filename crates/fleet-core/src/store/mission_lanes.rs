@@ -51,6 +51,10 @@ pub struct MissionLaneRow {
     /// The commit fleet last pushed to its branch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pr_head: Option<String>,
+    /// Its live lead waits on a dialog for a person (mission improvements
+    /// N2). Derived on a mission's read, never stored.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub lead_waits: bool,
 }
 
 /// PURE: a lane name as stored: trimmed, one line of at most
@@ -88,6 +92,7 @@ fn map_lane(r: &rusqlite::Row<'_>) -> rusqlite::Result<MissionLaneRow> {
         item_ids: Vec::new(),
         pr_url: r.get(11)?,
         pr_head: r.get(12)?,
+        lead_waits: false,
     })
 }
 

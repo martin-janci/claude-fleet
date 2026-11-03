@@ -311,6 +311,9 @@ pub fn mission(
         .mission_lanes(id)?
         .into_iter()
         .map(|mut l| {
+            // N2: a lead waiting on a dialog waits for a person.
+            l.lead_waits =
+                super::orchestrate::lanes::lead_on_dialog(&s, &mission, &l).unwrap_or(false);
             l.item_ids.retain(|i| status.contains_key(i));
             // A lane whose every task is done is done (lanes design L4),
             // derived on read like the mission's phase.

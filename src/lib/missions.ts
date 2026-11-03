@@ -280,6 +280,8 @@ export interface MissionLane {
   item_ids: number[];
   /** Its branch's pull request, once fleet opened or found it (M4). */
   pr_url?: string | null;
+  /** Its live lead waits on a dialog for a person (N2). */
+  lead_waits?: boolean;
 }
 
 /** The lane a task is in, if any. */

@@ -298,8 +298,17 @@ fn steps_and_waits(
     } else {
         steps
     };
-    if waits::held(&before, &steps) {
-        causes.insert("lane");
+    // N2: a lane whose lead waits on a dialog waits on a person.
+    let after = waits::impl_items(&steps);
+    for item in before.iter().filter(|i| !after.contains(i)) {
+        let on_dialog = match lane_of
+            .get(item)
+            .and_then(|l| lanes.iter().find(|x| x.id == *l))
+        {
+            Some(lane) => lanes::lead_on_dialog(s, m, lane)?,
+            None => false,
+        };
+        causes.insert(if on_dialog { "person" } else { "lane" });
     }
     let before = waits::impl_items(&steps);
     // Lanes L5: a lane starts beside another of its repository only when

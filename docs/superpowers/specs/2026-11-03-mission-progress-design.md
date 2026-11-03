@@ -35,6 +35,11 @@ M3 ukazuje, prečo misia čaká. Najväčšie čakania sú na človeka (karty, g
 
 **Veľkosť** S.
 
+**Ako je to postavené v N2:**
+- `lanes::lead_on_dialog`: živý vedúci línie je na dialógu (`stuck_kind` alebo `claude_status = blocked`, rovnaká podmienka ako v `busy_lanes`).
+- `steps_and_waits`: pre každý implement beh, ktorý línia zadržala, zistí, či jej vedúci je na dialógu: áno → `person`, inak `lane`. `busy_lanes` sa nemení (dôvod sa nevracia, odvodí sa pri počítaní príčin).
+- `work { mission }`: línia nesie `lead_waits` (odvodené pri čítaní, neuložené); riadok bežiacej úlohy takej línie ukáže „lead waits for you“ vedľa tlačidla Session.
+
 ## 3. N1: poučenia misie
 
 **Zdroj** (bez modelu, len zo store):
@@ -88,7 +93,7 @@ M3 ukazuje, prečo misia čaká. Najväčšie čakania sú na človeka (karty, g
 
 | Fáza | Obsah | Správanie | Veľkosť |
 |---|---|---|---|
-| **N2** | dôvod obsadenej línie, `person` pri dialógu | len meranie a zobrazenie | S |
+| **N2** (postavené) | dôvod obsadenej línie, `person` pri dialógu | len meranie a zobrazenie | S |
 | **N1** | `mission_lessons`, prompt a plánovač, zoznam v miestnosti | mení prompty | M |
 | **N5** | `stats.forecast` | len zobrazenie | S |
 | **N4** | `preset: finish`, tlačidlo | nový spôsob grantu | S–M |
