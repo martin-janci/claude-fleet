@@ -18,9 +18,9 @@ use crate::service::hooks_install::{is_fleet_owned_hook, HOOK_HEADERS_FILE};
 use crate::ssh::SshClient;
 
 /// The agent binaries the checklist looks for, in the order it lists them:
-/// Claude Code, Codex, Agy, Gemini CLI. Only names fleet knows how to run
+/// Claude Code, Codex, Agy, Hermes, Gemini CLI. Only names fleet knows how to run
 /// (or will) are asked about; the answer is the subset found.
-pub const AGENT_BINARIES: [&str; 4] = ["claude", "codex", "agy", "gemini"];
+pub const AGENT_BINARIES: [&str; 5] = ["claude", "codex", "agy", "hermes", "gemini"];
 
 /// Opens the settings section of [`check_script`]'s output.
 const SETTINGS_MARK: &str = "---FLEET:settings";

@@ -2516,6 +2516,12 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/216_lane_pr.sql"),
         already_applied: Some(lanes_have_pr_url),
     },
+    // Hermes Agent sessions: `sessions.agent`'s CHECK admits `hermes`.
+    // Rewrites the stored CHECK in place; idempotent, so plain.
+    Migration::plain(
+        217,
+        include_str!("../../migrations/217_session_agent_hermes.sql"),
+    ),
 ];
 
 /// The settings row [`Store::finish_realm_upgrade`] writes once migration

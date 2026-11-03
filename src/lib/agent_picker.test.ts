@@ -11,7 +11,15 @@ describe('agentChoices', () => {
       ['claude', true],
       ['codex', true],
       ['agy', false],
+      ['hermes', false],
     ]);
+  });
+
+  it('offers Hermes on a host that has it on its PATH', () => {
+    const hermes = agentChoices('box', { agents_on_path: ['claude', 'hermes'] })[3];
+    expect(hermes).toMatchObject({ agent: 'hermes', label: 'Hermes', enabled: true, tag: null });
+    const without = agentChoices('box', { agents_on_path: ['claude'] })[3];
+    expect(without).toMatchObject({ enabled: false, tag: 'not on box' });
   });
 
   it('greys Codex out on a host without it, naming the host', () => {

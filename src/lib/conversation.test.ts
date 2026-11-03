@@ -64,7 +64,7 @@ import {
   type ConvTurn,
   type ConvItem,
 } from './conversation';
-import { agentModelProfile, slashCommandsFor, presetForAgent, CODEX_MODEL_OPTIONS, CODEX_SLASH_COMMANDS } from './conversation';
+import { agentModelProfile, slashCommandsFor, presetForAgent, CODEX_MODEL_OPTIONS, CODEX_SLASH_COMMANDS, HERMES_SLASH_COMMANDS } from './conversation';
 import { notificationTone, notificationMark, notificationLabel } from './conversation';
 import type { SessionRow } from './sessions';
 import type { TaskRow } from './tasks';
@@ -1212,6 +1212,13 @@ describe('conversation copy names the row’s agent (Codex Conversation tab)', (
     }
   });
 
+  it('Hermes says its conversations cannot be shown yet: they live in its SQLite store', () => {
+    for (const [code, hasId] of [[null, false], [null, true], ['E_NO_TRANSCRIPT', true]] as const) {
+      expect(emptyStateText(code, hasId, 'hermes')).toBe('Hermes conversations can’t be shown yet');
+      expect(emptyStateHint(code, hasId, true, 'hermes')).toBe('Its terminal tab shows the session live.');
+    }
+  });
+
   it('Claude Code keeps its own wording', () => {
     expect(emptyStateText(null, false, 'claude')).toBe('No Claude session id yet');
     expect(emptyStateHint(null, false, true, 'claude')).toContain('as soon as Claude Code runs');
@@ -1222,6 +1229,7 @@ describe('conversation copy names the row’s agent (Codex Conversation tab)', (
       'Codex is working. The prompt is queued until the current turn ends.',
     );
     expect(agentLabel('agy')).toBe('Agy');
+    expect(agentLabel('hermes')).toBe('Hermes');
     expect(agentLabel('claude')).toBe('Claude Code');
   });
 });
@@ -1275,6 +1283,7 @@ describe('Codex in the composer', () => {
 
   it("matches a Codex session's slash commands, not Claude's", () => {
     expect(slashCommandsFor('codex')).toBe(CODEX_SLASH_COMMANDS);
+    expect(slashCommandsFor('hermes')).toBe(HERMES_SLASH_COMMANDS);
     expect(slashCommandsFor('claude')).toBe(SLASH_COMMANDS);
     const codex = matchSlashCommands('/c', [], slashCommandsFor('codex')).map((c) => c.name);
     expect(codex).toEqual(['compact', 'copy']);

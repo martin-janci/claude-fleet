@@ -74,6 +74,7 @@ const AGENT_NAMES: Record<string, string> = {
   claude: "Claude Code",
   codex: "Codex",
   agy: "Agy",
+  hermes: "Hermes",
   gemini: "Gemini CLI",
 };
 

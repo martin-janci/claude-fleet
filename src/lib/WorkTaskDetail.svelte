@@ -868,9 +868,9 @@
                 <strong>{ruleProject(startRule, $projects.map((t) => t.project))}</strong>{#if startRule.host_alias}&nbsp;on {startRule.host_alias}{:else}&nbsp;on its last host{/if}{#if startRule.fallback_host}, else {startRule.fallback_host}{/if}
                 <span class="muted small">· rule {startRule.pattern}</span>
               </p>
-              {#if startRule.profile || startRule.model || startRule.effort || startRule.agent === 'codex'}
+              {#if startRule.profile || startRule.model || startRule.effort || startRule.agent === 'codex' || startRule.agent === 'hermes'}
                 <dl class="props" data-testid="work-task-start-launch">
-                  {#if startRule.agent === 'codex'}<dt>Agent</dt><dd>Codex</dd>{/if}
+                  {#if startRule.agent === 'codex'}<dt>Agent</dt><dd>Codex</dd>{:else if startRule.agent === 'hermes'}<dt>Agent</dt><dd>Hermes</dd>{/if}
                   {#if startRule.profile}<dt>Account</dt><dd data-testid="work-task-start-account">{startRule.profile}</dd>{/if}
                   {#if startRule.model || startRule.effort}
                     <dt>Model</dt>

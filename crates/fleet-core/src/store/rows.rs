@@ -447,13 +447,24 @@ pub const AGENT_CODEX: &str = "codex";
 /// launched through `agent_adapter::Agy` (redesign step 12.3).
 pub const AGENT_AGY: &str = "agy";
 
+/// `sessions.agent` (migration 217): Nous Research's Hermes Agent CLI
+/// (`hermes`), launched through `agent_adapter::Hermes`.
+pub const AGENT_HERMES: &str = "hermes";
+
 /// `sessions.agent` (migration 121): no agent, a plain login shell
 /// (`kind = 'shell'`).
 pub const AGENT_SHELL: &str = "shell";
 
-/// Every value migration 121's `CHECK` admits. `agy` has its adapter but
-/// `new_session` refuses it until its start path is enabled.
-pub const AGENTS: [&str; 4] = [AGENT_CLAUDE, AGENT_CODEX, AGENT_AGY, AGENT_SHELL];
+/// Every value the `sessions.agent` `CHECK` admits (migration 121, widened
+/// by 217 for `hermes`). `agy` has its adapter but `new_session` refuses it
+/// until its start path is enabled.
+pub const AGENTS: [&str; 5] = [
+    AGENT_CLAUDE,
+    AGENT_CODEX,
+    AGENT_AGY,
+    AGENT_HERMES,
+    AGENT_SHELL,
+];
 
 /// [`SessionRow::agent`] when a frame carries no `agent` key: a hub built
 /// before migration 121, whose sessions all run Claude Code.

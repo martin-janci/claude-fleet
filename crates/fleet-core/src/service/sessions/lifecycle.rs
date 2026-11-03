@@ -59,7 +59,8 @@ pub struct NewSessionArgs {
     pub profile: Option<String>,
     /// Which agent runs in the pane (`sessions.agent`, migration 121):
     /// `"claude"` (the default), `"codex"` (OpenAI's Codex CLI), `"agy"`
-    /// (Google's Antigravity CLI) or `"shell"`, which is the same as
+    /// (Google's Antigravity CLI), `"hermes"` (Nous Research's Hermes Agent,
+    /// migration 217) or `"shell"`, which is the same as
     /// `kind: "shell"`. `None` / empty = Claude Code, or a shell for
     /// `kind: "shell"`. `"agy"` is refused (`E_UNSUPPORTED`) until its
     /// adapter is validated.
@@ -841,6 +842,12 @@ pub(crate) fn normalize_launch(args: &mut NewSessionArgs) -> Result<(), IpcError
                     "a credential profile applies to Claude Code sessions; agy keeps its own login",
                 ))
             }
+            Some(crate::store::AGENT_HERMES) => {
+                return Err(IpcError::new(
+                    codes::E_INVALID,
+                    "a credential profile applies to Claude Code sessions; Hermes keeps its own provider login",
+                ))
+            }
             _ => {}
         }
         crate::validate::claude_profile(p)?;
@@ -861,7 +868,7 @@ pub(crate) fn normalize_launch(args: &mut NewSessionArgs) -> Result<(), IpcError
 /// stays absent here; a Codex or agy row is written by `new_session`.
 /// An unknown name is invalid.
 fn normalize_agent(args: &mut NewSessionArgs) -> Result<(), IpcError> {
-    use crate::store::{AGENTS, AGENT_AGY, AGENT_CLAUDE, AGENT_CODEX, AGENT_SHELL};
+    use crate::store::{AGENTS, AGENT_AGY, AGENT_CLAUDE, AGENT_CODEX, AGENT_HERMES, AGENT_SHELL};
     let shell_kind = args.kind.as_deref() == Some("shell");
     match args.agent.as_deref() {
         None => {}
@@ -874,14 +881,14 @@ fn normalize_agent(args: &mut NewSessionArgs) -> Result<(), IpcError> {
                 ))
             }
         },
-        Some(AGENT_CLAUDE | AGENT_CODEX | AGENT_AGY) if shell_kind => {
+        Some(AGENT_CLAUDE | AGENT_CODEX | AGENT_AGY | AGENT_HERMES) if shell_kind => {
             return Err(IpcError::new(
                 codes::E_INVALID,
                 "a shell session runs no agent; drop agent or kind",
             ))
         }
         Some(AGENT_AGY) => refuse_unvalidated_agent(AGENT_AGY)?,
-        Some(AGENT_CLAUDE | AGENT_CODEX) => {}
+        Some(AGENT_CLAUDE | AGENT_CODEX | AGENT_HERMES) => {}
         Some(_) => {
             return Err(IpcError::new(
                 codes::E_INVALID,

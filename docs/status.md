@@ -213,6 +213,19 @@ repair refuse it with `E_UNSUPPORTED`
 (`sessions::refuse_unvalidated_agent`); `move_session` refuses it too. The
 adapter code stays, for when real captures validate it.
 
+Sessions can also run Nous Research's Hermes Agent (`agent_adapter::Hermes`,
+migration 217 widens `sessions.agent`'s CHECK): `hermes chat --cli --yolo`,
+`-m` for a provider-slug model (`validate::claude_model` now takes `/` and
+`:`), no effort and no login profile. Hermes picks its own session ids, so a
+new session starts bare and a relaunch resumes the cwd's newest CLI session
+from `~/.hermes/state.db`. The pane reader (idle, working, approval and
+question panels, the first-run setup guard, context %) is built from
+hermes-agent 0.19.0's render code, not from captured screens: replace its
+fixtures with real captures once a host runs Hermes. Not done: the
+Conversation tab (Hermes keeps history in SQLite; the tab says so), usage
+and cost, learning the session id from the banner, and the phone's agent
+picker.
+
 Iterations 1–4a are landed (multi-host, accounts, cross-host sessions, prompt
 transfer, async/events rework), plus the MCP control API, background sessions,
 the background reconcile tick, fleet_health roll-up, and the persistent session

@@ -29,7 +29,9 @@
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::service::orgs;
 use crate::service::view_scope::ViewScope;
-use crate::store::{now_unix, StartRuleLaunch, StartRuleRow, Store, AGENT_CLAUDE, AGENT_CODEX};
+use crate::store::{
+    now_unix, StartRuleLaunch, StartRuleRow, Store, AGENT_CLAUDE, AGENT_CODEX, AGENT_HERMES,
+};
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 
@@ -526,9 +528,15 @@ fn check_target(
             ))
         }
         Some(AGENT_CODEX) => {}
+        Some(AGENT_HERMES) if profile.is_some() => {
+            return Err(invalid(
+                "an account applies to Claude Code sessions; Hermes keeps its own provider login",
+            ))
+        }
+        Some(AGENT_HERMES) => {}
         Some(other) => {
             return Err(invalid(format!(
-                "a rule starts claude or codex, not {other:?}"
+                "a rule starts claude, codex or hermes, not {other:?}"
             )))
         }
     }

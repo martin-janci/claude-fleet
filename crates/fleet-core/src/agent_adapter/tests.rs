@@ -151,6 +151,23 @@ fn codex_lists_mirror_the_composer() {
     );
 }
 
+/// The composer's Hermes list (`src/lib/conversation.ts`
+/// HERMES_SLASH_COMMANDS) is the Hermes adapter's.
+#[test]
+fn hermes_lists_mirror_the_composer() {
+    let ts = crate::repo_files::read("src/lib/conversation.ts");
+    let a = by_id(crate::store::AGENT_HERMES).expect("hermes adapter");
+    let slash: Vec<(String, String, bool)> = a
+        .slash_commands()
+        .iter()
+        .map(|c| (c.name.to_string(), c.description.to_string(), c.args))
+        .collect();
+    assert_eq!(
+        ts_entries(&ts, "HERMES_SLASH_COMMANDS", ("name", "description")),
+        slash
+    );
+}
+
 // Agy (12.3). PROVISIONAL: no machine fleet runs on has agy, so the panes
 // and the stream below are transcribed from agy's documentation, not
 // captured. Replace them with `tmux capture-pane -p` output from a real agy.

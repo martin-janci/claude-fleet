@@ -1671,19 +1671,19 @@
   // layout (redesign 5.9), read once the draft starts a slash command.
   let projectCmds = $state<SlashCommand[]>([]);
   const slashDraft = $derived(draft.startsWith('/') && !/\s/.test(draft));
-  // A Codex session reads no `.claude/` commands, and runs a skill as
-  // `$name`, not `/name`, so only its built-ins are offered.
+  // A Codex or Hermes session reads no `.claude/` commands (Codex runs a
+  // skill as `$name`, not `/name`), so only its built-ins are offered.
   const builtinCmds = $derived(slashCommandsFor(agent));
   $effect(() => {
     // Another fleet's project is not read from here: its built-ins only.
-    if (!slashDraft || agent === 'codex' || away) return;
+    if (!slashDraft || agent === 'codex' || agent === 'hermes' || away) return;
     const id = session.id;
     void projectSkills(id).then((list) => {
       if (session.id === id && !session.fleet) projectCmds = list;
     });
   });
   const slashMatches = $derived(
-    slashDismissedFor === draft ? [] : matchSlashCommands(draft, agent === 'codex' ? [] : projectCmds, builtinCmds),
+    slashDismissedFor === draft ? [] : matchSlashCommands(draft, agent === 'codex' || agent === 'hermes' ? [] : projectCmds, builtinCmds),
   );
   // Ids for the combobox wiring, per panel instance so two panels never hand
   // the same id to assistive tech.
