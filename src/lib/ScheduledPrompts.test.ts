@@ -8,6 +8,8 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke } from '@tauri-apps/api/core';
 import ScheduledPrompts from './ScheduledPrompts.svelte';
 import { scheduledWhen, waitingPrompts } from './send_later';
+import { toasts } from './toasts';
+import { get } from 'svelte/store';
 
 const settle = async () => {
   for (let i = 0; i < 4; i++) await Promise.resolve();
@@ -49,6 +51,15 @@ describe('ScheduledPrompts', () => {
     await settle();
     expect(mocked).toHaveBeenCalledWith('cancel_queued_prompt', { args: { session_id: 7, id: 1 } });
     expect(screen.getAllByTestId('conv-scheduled-item')).toHaveLength(1);
+
+    // The cancel throws away words the person wrote: its toast puts them back.
+    const t = get(toasts).find((x) => x.message === 'Scheduled prompt cancelled');
+    expect(t?.action?.label).toBe('Undo');
+    t?.action?.run();
+    await settle();
+    expect(mocked).toHaveBeenCalledWith('queue_prompt', {
+      args: { session_id: 7, prompt: 'run the release checklist', not_before: 4_000_000_000 },
+    });
   });
 
   it('names each cancel button after its prompt', async () => {

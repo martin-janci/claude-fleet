@@ -30,7 +30,7 @@
   import { buildThreads, filterThreads, groupThreads, threadCounts, type ControlThread, type ThreadFilter } from './control_threads';
   import { activeThread, openInControl, openMissionInControl, showMainChat } from './control_room';
   import { promptPreview } from './attention';
-  import { shortAge } from './session_status';
+  import { shortAge, exactTime } from './session_status';
   import { routineBudget, type FleetBudget } from './routines';
   import { money } from './automation';
   import { leave } from './destination';
@@ -191,7 +191,7 @@
                   >{t.muted ? `Muted · ${t.line}` : t.unfollowed ? `${t.line} · not followed (${t.unfollowed})` : t.line}</span
                 >
               </span>
-              {#if t.at > 0}<span class="age">{shortAge(t.at, nowSec)}</span>{/if}
+              {#if t.at > 0}<span class="age" title={exactTime(t.at)}>{shortAge(t.at, nowSec)}</span>{/if}
             </button>
             <button
               type="button"
