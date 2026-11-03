@@ -3,7 +3,7 @@
   // tester found for the task's finished work, Test now / Rerun, Accept
   // anyway, and the project's switch.
   import { errorText } from './error_copy';
-  import { timeAgo } from './session_status';
+  import { timeAgo, exactTime } from './session_status';
   import StatusChip from './kit/StatusChip.svelte';
   import Badge from './Badge.svelte';
   import {
@@ -107,7 +107,7 @@
     <StatusChip state={head.state} label={head.label} testid="ticket-check-headline" />
     <span class="title">AI check</span>
     <Badge label="AI" tone="muted" title="A headless Claude ran the tests and read the change against the ticket" />
-    {#if check.at}<span class="when">{timeAgo(check.at)}</span>{/if}
+    {#if check.at}<span class="when" title={exactTime(check.at)}>{timeAgo(check.at)}</span>{/if}
   </header>
 
   {#if check.state === 'ready'}

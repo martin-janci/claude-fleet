@@ -106,7 +106,13 @@
     void loadAgents();
   }
 
+  /** The instance whose Revoke waits for a second press: a revoke deletes
+   *  the instance and its settings, with no way back but filling the form
+   *  again. */
+  let revoking = $state<number | null>(null);
+
   async function revoke(id: number) {
+    revoking = null;
     const r = await revokeAgentRule(id);
     note = r.ok ? `Instance ${id} revoked.` : (r.error?.message ?? 'Revoke failed');
     void loadAgents();
@@ -171,9 +177,26 @@
               >
             {/if}
             <button class="act" type="button" data-testid="fleet-instance-edit" onclick={() => void openForm(d.name, r.id)}>Edit</button>
-            <button class="act" type="button" data-testid="fleet-instance-revoke" onclick={() => void revoke(r.id)}>Revoke</button>
+            <button
+              class="act"
+              type="button"
+              aria-expanded={revoking === r.id}
+              data-testid="fleet-instance-revoke"
+              onclick={() => (revoking = revoking === r.id ? null : r.id)}>Revoke…</button
+            >
           </span>
         </li>
+        {#if revoking === r.id}
+          <li class="instance" data-testid="fleet-revoke-confirm-row">
+            <span class="main" role="alertdialog" aria-label="Revoke the instance"
+              >Revoke {ruleLine(r)}? It stops running and its settings are deleted.
+              <span class="buttons">
+                <button class="act danger" type="button" data-testid="fleet-revoke-confirm" onclick={() => void revoke(r.id)}>Revoke</button>
+                <button class="act" type="button" data-testid="fleet-revoke-keep" onclick={() => (revoking = null)}>Keep</button>
+              </span></span
+            >
+          </li>
+        {/if}
         {#if running?.id === r.id}
           <li class="instance run" data-testid="fleet-run-panel">
             <label class="wide">
@@ -268,6 +291,7 @@
   }
   .act:disabled { opacity: 0.5; cursor: default; }
   .act.primary { border-color: var(--accent); color: var(--accent); }
+  .act.danger { border-color: var(--danger); color: var(--danger); }
   .run { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: flex-end; }
   .run label { display: flex; flex-direction: column; gap: 2px; font-size: var(--text-sm); }
   .run label.wide { flex-basis: 100%; }
