@@ -14,6 +14,7 @@
   import { workRowClick } from './prefs';
   import { costChip, linkTone, liveLinks, occurrenceTitle, prChip, rowClickSession, rowSessionLink, taskLine, taskTone } from './work_row';
   import { isOccurrenceOf, taskLabel, trackerDown, trackerDownLabel, type WorkTask, type WorkTaskLink } from './work_view';
+  import { priorityLabel } from './work';
 
   let {
     task: t,
@@ -49,6 +50,8 @@
   const cost = $derived(costChip(t));
   /** An epic's, or any parent's, roll-up (sprints design §3). */
   const rollup = $derived((t.children_total ?? 0) > 0 ? `${t.children_done ?? 0}/${t.children_total} done` : null);
+  /** Urgent and high only, as on the task page: the rest is the usual case. */
+  const hot = $derived(t.priority === 'urgent' || t.priority === 'high' ? priorityLabel(t.priority) : null);
   const lit = $derived(live.some((l) => isOccurrenceOf(l, currentSessionId)));
   const shown = $derived(title ?? (t.title || (t.key ? '' : t.task_id)));
   /** The session the "+N" row's first chip opens: its primary, else the first. */
@@ -85,8 +88,11 @@
         >{#if line.failed}<span class="f">{line.lead}</span>{:else}{line.lead}{/if}{#if line.why}{' · '}{line.why}{/if}</span
       >
     </button>
-    {#if live.length > 0 || pr || cost || trackerDown(t) || (t.open_proposals ?? 0) > 0 || t.epic || rollup}
+    {#if live.length > 0 || pr || cost || trackerDown(t) || (t.open_proposals ?? 0) > 0 || t.epic || rollup || hot}
       <div class="chips">
+        {#if hot}<span class="of-chip" class:failed={t.priority === 'urgent'} class:waiting={t.priority === 'high'} data-testid="work-task-priority"
+            >{hot}</span
+          >{/if}
         {#if t.epic}<span class="of-chip accent" data-testid="work-task-epic">Epic</span>{/if}
         {#if rollup}<span class="of-chip tnum" data-testid="work-task-rollup" title="Tasks filed under it that are done">{rollup}</span>{/if}
         {#if live.length === 1}
