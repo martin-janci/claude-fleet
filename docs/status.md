@@ -671,7 +671,9 @@ with a parent is never a parent (`parent_for_new_child` now checks every
 local item, not only a native one), because `item_org` — and the org fences
 built on it — walks one level; a filed task cannot hold subtasks, and a task
 with subtasks is not filed. Going deeper is the owner's decision (it moves
-the org fence). Not yet: the phone. E9–E11 run on their defaults.
+the org fence). The phone files fleet's own task under an epic (or takes it
+out to the top; fleet-mobile #270); marking an epic stays on the desktop.
+E9–E11 run on their defaults.
 
 Task comments (migration 161, `work_item_comments`; the Comments tab G3.4
 had cut is back on the owner's word, 2026-10-10): `work_link { comment,
@@ -685,8 +687,8 @@ first with `mine`. Device names are their person's (owner decision
 `Placement.updated_by` (a device label with no person) only to the hub
 itself and the one person of a one-person hub. The
 task page's Activity tab also lists each session that started, was
-suggested, turned down or stopped, and each comment. Not yet: comments on
-the phone.
+suggested, turned down or stopped, and each comment. The phone's task page
+lists them and adds and deletes them too (fleet-mobile #270).
 
 Tracker attachments and a start's comments (owner report 2026-10-11, an
 Asana session briefed with the key alone): `tracker_comments` also answers
@@ -713,8 +715,10 @@ the setting off (`E_INVALID_STATE`). Queuing nudges the sync tick, which
 drains at once. Deleting a comment cancels a pending post; a sent one stays
 at the tracker. `CommentRow.tracker_post` carries the post's state, error
 and URL; `TaskDetail.comments_tracker` / `can_post_to_tracker` say whose
-comments the tab reads and whether the reader may post. Not yet: the phone,
-editing a posted comment, attachments from trackers other than Asana.
+comments the tab reads and whether the reader may post. The phone shows the
+tracker's comments beside fleet's and offers the post (fleet-mobile #270).
+Not yet: editing a posted comment, attachments from trackers other than
+Asana.
 
 Promoting a task to a ticket (owner decision 2026-10-11: local tasks and
 subtasks first, tracked later): `work_link { promote, item_id, tracker_id?,
@@ -785,8 +789,9 @@ A task's priority, labels and estimate (migration 171, `work_items.priority`
 priority name and story-points field or original estimate, Linear's
 priority, estimate and labels, GitHub labels, Asana tags) and shown in the
 task page's rail and header ([work-graph.md](work-graph.md#priority-labels-and-estimate)).
-Not yet: writing them back to a tracker, filtering or sorting by them, the
-Board card and the phone.
+The Board card shows the priority and the estimate; the phone shows all
+three on the task page, read only (fleet-mobile #270). Not yet: writing them
+back to a tracker, filtering or sorting by them.
 
 Task result, completion gate and follow-ups (spec
 `docs/superpowers/specs/2026-10-13-task-result-handover-design.md`, plans
@@ -937,7 +942,7 @@ link) even when the task is shared with sessions it cannot drive
 (`own_session_works_on`); any other sprint or release membership stays a
 person's, a task in a mission stays its owner's (`require_mission_change`),
 and `bucket_admin`, `hold` and `done_when` still refuse a per-host token. Not yet: the new task's brief
-waiting for the next prompt (J3), own tasks in ⌘K.
+waiting for the next prompt (J3). (Own tasks are in ⌘K, under *My tasks*.)
 C0: the operator is born with the `fleet-brainstorm` skill
 (`skills/fleet-brainstorm/SKILL.md`, written to its directory's
 `.claude/skills/` by `operator::operator_files`, so no catalog sync is
