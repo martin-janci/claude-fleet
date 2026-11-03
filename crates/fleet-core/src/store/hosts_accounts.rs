@@ -465,6 +465,12 @@ impl Store {
             rusqlite::params![alias, json],
         )?;
         self.emit_host(alias, |bus, row| bus.host_probed(row))?;
+        // A session is blocked on its own login (`attention::Facts::
+        // signed_out_logins`, review 2026-11-03 F2): the hub stamps
+        // `needs_attention` onto session frames only, so the host's live
+        // sessions are announced again with the new facts, or a phone keeps
+        // the old stamp on an idle one.
+        self.reemit_live_sessions_on_host(alias)?;
         Ok(true)
     }
 

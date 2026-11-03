@@ -10,7 +10,7 @@ import type { HostRow } from './hosts';
 import { hosts } from './hosts';
 import type { AccountUsageSnapshot, UsageStatus } from './account_usage_store';
 import { accountUsage } from './account_usage_store';
-import type { AttentionFacts, AttentionLimit } from './attention';
+import { loginSignedOut, type AttentionFacts, type AttentionLimit, type AttentionLogin } from './attention';
 
 /** The usage windows' lengths, seconds. */
 const FIVE_HOUR_SECS = 5 * 3600;
@@ -28,6 +28,9 @@ export function attentionFactsFrom(
   now: number,
 ): AttentionFacts {
   const down_hosts = hostRows.filter((h) => !h.reachable && h.last_pinged_at != null).map((h) => h.alias);
+  const signed_out_logins: AttentionLogin[] = hostRows.flatMap((h) =>
+    (h.signed_out_logins ?? []).map((l) => ({ host: h.alias, profile: l.profile ?? null })),
+  );
   const limited_accounts: Record<string, AttentionLimit> = {};
   const uncredentialed_accounts: string[] = [];
   for (const snap of Object.values(usage)) {
@@ -52,7 +55,7 @@ export function attentionFactsFrom(
       limited_accounts[snap.account_uuid] = { window: 'weekly', resets_at: weekly.resets_at };
     }
   }
-  return { down_hosts, limited_accounts, uncredentialed_accounts };
+  return { down_hosts, limited_accounts, uncredentialed_accounts, signed_out_logins };
 }
 
 /** The facts the stores hold now. The
@@ -74,7 +77,7 @@ export const attentionFacts: Readable<AttentionFacts> = stable(
  *  it is blocked on. `null` for any other bucket. */
 export function blockedLine(
   bucket: string,
-  sess: { host_alias: string; account_uuid: string | null },
+  sess: { host_alias: string; account_uuid: string | null; claude_profile?: string | null },
   facts: AttentionFacts | undefined,
   accountName: (uuid: string) => string,
 ): string | null {
@@ -87,6 +90,11 @@ export function blockedLine(
       return `Paused · ${w} limit on ${accountName(uuid)}`;
     }
     case 'no_credentials':
+      // The login on this host, when fleet saw it signed out there (F2):
+      // the same account may be signed in elsewhere.
+      if (loginSignedOut(facts, sess.host_alias, sess.claude_profile)) {
+        return `Needs you · signed out on ${sess.host_alias}${sess.claude_profile ? ` (${sess.claude_profile})` : ''}`;
+      }
       return `Needs you · blocked on ${accountName(sess.account_uuid ?? '')}, which is signed out`;
     default:
       return null;
