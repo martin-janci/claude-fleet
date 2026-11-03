@@ -1405,6 +1405,31 @@ describe('WorkMissions', () => {
       expect(screen.getByTestId('mission-grant-save').textContent).toBe('Sign L2 for 8 h, up to $20.00');
     });
 
+    it('what Start wave says lands under the Next block, where it was pressed', async () => {
+      current = mission({ state: 'active', level: 2 });
+      handlers.work_mission = () => ({
+        ...detailOf(current),
+        items: [item(10, 'Payments v2'), item(11, 'Cards')],
+        plan: {
+          steps: [{ kind: 'run', item_id: 11, role: 'implement', reason: 'Cards is ready', auto: true }],
+          cards: [],
+          autonomy: { asked: 2, ceiling: 3, effective: 2, why: '', enabled: true },
+          cost_micros: 0,
+          counts: { total: 2, open: 0 },
+        },
+      });
+      handlers.start_mission_wave = () => ({ results: [{ ok: false, detail: 'No repo is allowed on this mission' }] });
+      renderMissions();
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-row'));
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-start-wave'));
+      await flush();
+      const notice = screen.getByTestId('mission-notice');
+      expect(notice.textContent).toContain('No repo is allowed');
+      expect(screen.getByTestId('mission-next').contains(notice)).toBe(true);
+    });
+
     it('grantWouldHelp, grantSignLabel and untilWords', () => {
       const base = { asked: 2, ceiling: 3, effective: 1, why: '', enabled: true };
       expect(grantWouldHelp(base, 1_000)).toBe(true);

@@ -22,9 +22,10 @@
   goals, task titles) is rendered as text, never as markup.
 -->
 <script lang="ts">
-  import { onDestroy, onMount, untrack } from 'svelte';
+  import { onDestroy, onMount, tick, untrack } from 'svelte';
   import { get } from 'svelte/store';
   import Resizer from './Resizer.svelte';
+  import Skeleton from './states/Skeleton.svelte';
   import StatusChip from './kit/StatusChip.svelte';
   import OrbitMark from './kit/OrbitMark.svelte';
   import QuestionCard from './kit/QuestionCard.svelte';
@@ -154,10 +155,12 @@
   const missions = $derived($missionList.missions);
   let detail = $state.raw<MissionDetail | null>(null);
   let notice = $state<string | null>(null);
-  /** The notice came from an action in the right panel (the Plan tab's
-   *  Save, Sign, Import, Delete, a task edit): it is drawn there, beside the
-   *  press, and not at the top of the centre column out of sight. */
-  let noticeInPanel = $state(false);
+  /** Where the notice is drawn: beside the press that raised it. `panel`
+   *  for the right panel's own (the Plan tab's Save, Sign, Import, Delete,
+   *  a task edit), `next` for Start wave and Go (the Next block sits at the
+   *  end of the centre column, and its top is out of sight by then),
+   *  `centre` at the top for the rest. */
+  let noticeAt = $state<'centre' | 'panel' | 'next'>('centre');
   /** Review w17-4: the last re-read of the open mission failed; what was
    *  loaded stays on screen. */
   let refreshError = $state<IpcError | null>(null);
@@ -221,6 +224,14 @@
 
   // ── Loading ──
 
+  /** The centre column's scroller, while a mission is on show. */
+  let scroller = $state<HTMLDivElement>();
+  /** The person has not scrolled up from the end of the log. */
+  let pinnedToEnd = true;
+  function onScrolled() {
+    if (scroller) pinnedToEnd = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 32;
+  }
+
   /** The mission `open` last set up the room for. */
   let openedId: number | null = null;
   // Bumped per request and by every open: a late answer for a mission no
@@ -233,9 +244,17 @@
     if (mine !== detailSeq || get(roomMissionId) !== id) return;
     if (r.ok && r.value?.mission) {
       const first = detail?.mission.id !== id;
+      // The log reads as a chat: what needs a person (the cards, Next) is
+      // at its end. Opening lands there, and a room left at the end stays
+      // there as events arrive; one scrolled up is left alone.
+      const toEnd = first || pinnedToEnd;
       detail = r.value;
       refreshError = null;
       if (first) missionPanelTab.set(defaultPanelTab(r.value));
+      if (toEnd) {
+        await tick();
+        if (scroller) scroller.scrollTop = scroller.scrollHeight;
+      }
     } else if (!r.ok && r.error.code !== 'E_NOTFOUND' && detail?.mission.id === id) {
       // Review w17-4: a failed background re-read is not "the mission is
       // gone": the room, an open goal edit and a half-typed answer stay.
@@ -276,7 +295,8 @@
     moreOpen = false;
     confirmMove = null;
     notice = null;
-    noticeInPanel = false;
+    noticeAt = 'centre';
+    pinnedToEnd = true;
     refreshError = null;
     plannerFailure = null;
     plannerIsWait = false;
@@ -312,10 +332,10 @@
 
   /** Run one write; on success re-read the list and the open mission.
    *  `where` says which column pressed, so a refusal lands beside the press. */
-  async function act<T>(p: Promise<Result<T>>, where: 'centre' | 'panel' = 'centre'): Promise<T | null> {
+  async function act<T>(p: Promise<Result<T>>, where: 'centre' | 'panel' | 'next' = 'centre'): Promise<T | null> {
     busy = true;
     notice = null;
-    noticeInPanel = where === 'panel';
+    noticeAt = where;
     ciRed = false;
     try {
       const r = await p;
@@ -339,6 +359,10 @@
 
   /** The mission's member tasks: every item but its root. */
   const members = $derived((detail?.items ?? []).filter((i) => i.id !== mission?.root_item_id));
+  /** The Next block (the steps and Start wave) is on show. */
+  const nextShown = $derived(
+    (plan?.steps ?? []).length > 0 || (mayChange && !!mission && mission.state === 'active' && pressable.length > 0),
+  );
   /** Nothing to run yet and nothing proposed: the centre says what comes next. */
   const nothingYet = $derived(members.length === 0 && proposals.ids.length === 0 && (plan?.steps ?? []).length === 0);
 
@@ -521,7 +545,7 @@
 
   async function startWave(step?: string) {
     if (!mission) return;
-    const out = await act(startMissionWave(mission.id, step));
+    const out = await act(startMissionWave(mission.id, step), 'next');
     if (out) reportSteps(out.results);
   }
 
@@ -666,7 +690,7 @@
     const untilDone = grantUntilDone && mission.mode === 'finite';
     if (untilDone && !(cents > 0)) {
       notice = 'A grant until the mission completes needs a budget.';
-      noticeInPanel = true;
+      noticeAt = 'panel';
       return;
     }
     const out = await act(
@@ -987,9 +1011,9 @@
         {/if}
       </header>
 
-      <div class="scroll">
+      <div class="scroll" bind:this={scroller} onscroll={onScrolled}>
         <div class="col" data-testid="mission-detail-centre">
-          {#if notice && !(noticeInPanel && $missionPanelOpen)}<p class="notice" role="status" data-testid="mission-notice">{notice}</p>{/if}
+          {#if notice && !(noticeAt === 'panel' && $missionPanelOpen) && !(noticeAt === 'next' && nextShown)}<p class="notice" role="status" data-testid="mission-notice">{notice}</p>{/if}
           {#if refreshError}
             <p class="refresh-error" role="status" data-testid="mission-refresh-error">
               Couldn't refresh ({readErrorText(refreshError)}) — showing what was loaded.
@@ -1223,7 +1247,7 @@
             </div>
           {/if}
 
-          {#if (plan?.steps ?? []).length > 0 || (mayChange && mission.state === 'active' && pressable.length > 0)}
+          {#if nextShown}
             <div class="next" data-testid="mission-next">
               {#if (plan?.steps ?? []).length > 0}
                 <ul class="steps" aria-label="Next steps" data-testid="mission-steps">
@@ -1264,6 +1288,7 @@
                   {/if}
                 </p>
               {/if}
+              {#if notice && noticeAt === 'next'}<p class="notice" role="status" data-testid="mission-notice">{notice}</p>{/if}
             </div>
           {/if}
 
@@ -1331,7 +1356,7 @@
       <div class="scroll">
         <div class="col">
           {#if notice}<p class="notice" role="status" data-testid="mission-notice">{notice}</p>{/if}
-          <p class="muted" data-testid="mission-room-loading">Reading the mission…</p>
+          <div data-testid="mission-room-loading"><Skeleton rows={4} label="Reading the mission" /></div>
         </div>
       </div>
     {:else}
@@ -1388,7 +1413,7 @@
         >
       </div>
       <div class="body" role="tabpanel" aria-label={MISSION_PANEL_TABS.find((t) => t.id === $missionPanelTab)?.label}>
-        {#if notice && noticeInPanel}<p class="notice panel-notice" role="status" data-testid="mission-notice">{notice}</p>{/if}
+        {#if notice && noticeAt === 'panel'}<p class="notice panel-notice" role="status" data-testid="mission-notice">{notice}</p>{/if}
         {#if $missionPanelTab === 'session'}
           {#if focusRow}
             <SessionFocus
@@ -1611,7 +1636,7 @@
                 bind:tasksView
                 onopenitem={openItem}
                 onopensession={openSession}
-                onnotice={(t) => ((notice = t), (noticeInPanel = true))}
+                onnotice={(t) => ((notice = t), (noticeAt = 'panel'))}
               />
             </section>
 
