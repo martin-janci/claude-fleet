@@ -324,7 +324,8 @@ including tasks with no session at all — as reads of the `work` tool
   any depth of parents), `item_type` (the tracker's type name, any case)
   and `sort` (`activity`, the default: needing you first then the latest
   activity; `updated`, the tracker's last change; `key`, by number so
-  TK-9 comes before TK-10; `title`; `due`), which orders the tasks inside
+  TK-9 comes before TK-10; `title`; `due`; `priority`, urgent first and
+  none last), which orders the tasks inside
   each section; an unknown `sort` is refused. `query` matches every word
   of it in the key or title, in any order, case and accents ignored. Each
   task carries `item_type`, `hierarchy_level`, `iteration`,

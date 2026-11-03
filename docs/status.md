@@ -757,8 +757,9 @@ Write-back → *Move tickets*, confirm-gated). Refused with nothing sent for
 a per-host token (`E_FORBIDDEN`), the setting off (`E_INVALID_STATE`) or a
 tracker with no such move (`TrackerError::Unsupported` → `E_UNSUPPORTED`).
 `WorkTask.status_movable` unlocks the Board card (`boardMovesAtTracker`);
-`net::https` gained `PUT` for Asana's task update. Not yet: the List view,
-the phone.
+`net::https` gained `PUT` for Asana's task update. The phone's task screen
+moves such a ticket with its status chips (fleet-mobile #271), and the task
+page's status pick moves it too. Not yet: the List view.
 
 Task attachments (migration 168, `work_item_attachments` and the
 content-addressed `work_attachment_blobs`, deduplicated by SHA-256 and kept
@@ -790,8 +791,9 @@ priority name and story-points field or original estimate, Linear's
 priority, estimate and labels, GitHub labels, Asana tags) and shown in the
 task page's rail and header ([work-graph.md](work-graph.md#priority-labels-and-estimate)).
 The Board card shows the priority and the estimate; the phone shows all
-three on the task page, read only (fleet-mobile #270). Not yet: writing them
-back to a tracker, filtering or sorting by them.
+three on the task page, read only (fleet-mobile #270). The Work view sorts
+by priority (`sort: priority`, urgent first, none last). Not yet: writing
+them back to a tracker, filtering by them, the phone's sort.
 
 Task result, completion gate and follow-ups (spec
 `docs/superpowers/specs/2026-10-13-task-result-handover-design.md`, plans
@@ -822,8 +824,8 @@ shows as *Result* on the task page, above *Last outcome* (D6). Not built
 (the spec's §4, ordered in its §7): results from every dispatch and child
 results to the parent, asking about a result, Create PR / Merge PR buttons,
 one automation policy, lifecycle hooks and skills per task, Jev context
-selection, project memory, sub-agent results, action detection, and the
-phone.
+selection, project memory, sub-agent results, action detection. The phone
+shows the result read only on its task screen (fleet-mobile #271).
 
 The Jev evaluation (TypeSafe's decision model as an optional reader for
 closed-set decisions) has started with a local language census: `fleet-hub

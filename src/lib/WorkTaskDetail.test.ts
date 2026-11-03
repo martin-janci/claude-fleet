@@ -1514,6 +1514,23 @@ describe('WorkTaskDetail', () => {
       expect(screen.queryByTestId('work-task-status-pick')).toBeNull();
     });
 
+    it('a ticket whose tracker takes moves is moved there from the header, its own status name kept in view', async () => {
+      handlers.work_task = () => ({
+        ...trackerTask,
+        task: { ...trackerTask.task, status_movable: true, status_name: 'In Review', status_category: 'in_progress', tracker_name: 'Acme Jira' },
+      });
+      handlers.set_work_status = (a) => ({ id: a.item_id, status_category: a.status });
+      render(WorkTaskDetail, { taskId: 'item:12' });
+      await flush();
+      const pick = screen.getByTestId('work-task-status-pick') as HTMLSelectElement;
+      expect(pick.title).toBe('Move it on Acme Jira');
+      expect(screen.getByTestId('work-task-status').textContent).toBe('In Review');
+      pick.value = 'done';
+      await fireEvent.change(pick);
+      await flush();
+      expect(calls('set_work_status')[0]).toEqual({ item_id: 12, status: 'done' });
+    });
+
     it('Delivery names the column, the spend over its span and the owner; the rule names where a start lands', async () => {
       handlers.work_task = () => ({
         ...trackerTask,

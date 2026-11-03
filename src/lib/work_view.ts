@@ -92,7 +92,7 @@ export interface WorkTreeFilters {
 
 /** `filters.sort`: needing you then the latest activity (the default), the
  *  tracker's last change, the key's number, the title or the due date. */
-export const WORK_SORTS = ['activity', 'updated', 'key', 'title', 'due'] as const;
+export const WORK_SORTS = ['activity', 'updated', 'key', 'title', 'due', 'priority'] as const;
 export type WorkSort = (typeof WORK_SORTS)[number];
 export const WORK_SORT_LABELS: Record<WorkSort, string> = {
   activity: 'Activity',
@@ -100,6 +100,7 @@ export const WORK_SORT_LABELS: Record<WorkSort, string> = {
   key: 'Key',
   title: 'Title',
   due: 'Due date',
+  priority: 'Priority',
 };
 
 /** `WorkTask.stage`, in board order (the Work board's status chips). */

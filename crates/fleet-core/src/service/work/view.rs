@@ -151,7 +151,7 @@ pub struct WorkTreeFilters {
 }
 
 /// [`WorkTreeFilters::sort`]'s values.
-pub const SORT_VALUES: [&str; 5] = ["activity", "updated", "key", "title", "due"];
+pub const SORT_VALUES: [&str; 6] = ["activity", "updated", "key", "title", "due", "priority"];
 
 /// [`WorkTask::stage`]'s values, in board order.
 pub const STAGE_VALUES: [&str; 5] = ["backlog", "in_progress", "in_review", "blocked", "done"];
@@ -2939,7 +2939,7 @@ pub fn check_filters(f: &WorkTreeFilters) -> Result<(), IpcError> {
     if let Some(sort) = f.sort.as_deref() {
         if !SORT_VALUES.contains(&sort) {
             return Err(bad(format!(
-                "filters.sort is activity, updated, key, title or due, not {sort:?}"
+                "filters.sort is activity, updated, key, title, due or priority, not {sort:?}"
             )));
         }
     }
@@ -3239,6 +3239,16 @@ fn sort_key(t: &WorkTask, org_names: &HashMap<i64, String>, sort: Option<&str>) 
             Some(d) => (0, 0, format!("{d}\u{0}{}", t.task_id)),
             None => (1, 0, t.task_id.clone()),
         },
+        // Urgent first, then high, medium, low; no priority last. Inside a
+        // priority, the latest activity first.
+        Some("priority") => (
+            t.priority
+                .as_deref()
+                .and_then(|p| crate::store::PRIORITIES.iter().position(|q| *q == p))
+                .map_or(4, |i| i as u8),
+            -t.last_activity_at.unwrap_or(0),
+            t.task_id.clone(),
+        ),
         _ => (
             // Finished local work waiting to be closed (`close_suggested`)
             // sits right under the tasks that need a person.

@@ -170,7 +170,7 @@ const FIELD_HINTS: Record<QueryField, string> = {
   assignee: 'me or a name',
   status: 'backlog, todo, doing, review, blocked, done',
   is: 'mine, review, live, archived',
-  sort: 'activity, updated, key, title, due',
+  sort: 'activity, updated, key, title, due, priority',
 };
 
 export interface WorkQuerySuggestion {
