@@ -792,8 +792,10 @@ priority, estimate and labels, GitHub labels, Asana tags) and shown in the
 task page's rail and header ([work-graph.md](work-graph.md#priority-labels-and-estimate)).
 The Board card shows the priority and the estimate; the phone shows all
 three on the task page, read only (fleet-mobile #270). The Work view sorts
-by priority (`sort: priority`, urgent first, none last). Not yet: writing
-them back to a tracker, filtering by them, the phone's sort.
+by priority (`sort: priority`, urgent first, none last) and filters by one
+(`filters.priority`, `none` for tasks with none; the Planning picker and
+`priority:` in the search). Not yet: writing them back to a tracker,
+filtering by labels or estimate, the phone's sort and filter.
 
 Task result, completion gate and follow-ups (spec
 `docs/superpowers/specs/2026-10-13-task-result-handover-design.md`, plans

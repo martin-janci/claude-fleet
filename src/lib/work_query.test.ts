@@ -47,8 +47,11 @@ describe('parseWorkQuery', () => {
     expect(p.query).toBe('x');
   });
 
-  it('sorts by priority', () => {
+  it('filters and sorts by priority', () => {
     expect(parseWorkQuery('sort:priority ', vocab).patch).toEqual({ sort: 'priority' });
+    expect(parseWorkQuery('priority:High ', vocab).patch).toEqual({ priority: 'high' });
+    expect(parseWorkQuery('priority:none ', vocab).patch).toEqual({ priority: 'none' });
+    expect(parseWorkQuery('priority:asap ', vocab).patch).toEqual({});
   });
 
   it('leaves an unknown value in the box, and a word with a colon alone', () => {

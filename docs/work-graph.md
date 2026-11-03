@@ -321,8 +321,9 @@ including tasks with no session at all — as reads of the `work` tool
   Search phase 2 (2026-10) adds `iteration` (`current` for the tracker's
   active sprint or cycle, `none`, or a sprint's name, any case), `epic`
   (an epic's key or `item:<id>`: the epic and everything under it, through
-  any depth of parents), `item_type` (the tracker's type name, any case)
-  and `sort` (`activity`, the default: needing you first then the latest
+  any depth of parents), `item_type` (the tracker's type name, any case),
+  `priority` (`urgent`, `high`, `medium`, `low`, or `none` for tasks with
+  none; another value is refused) and `sort` (`activity`, the default: needing you first then the latest
   activity; `updated`, the tracker's last change; `key`, by number so
   TK-9 comes before TK-10; `title`; `due`; `priority`, urgent first and
   none last), which orders the tasks inside
@@ -334,7 +335,7 @@ including tasks with no session at all — as reads of the `work` tool
   carries `facets` (`iterations` with `active` and `count`, `epics` with
   `count`, `item_types`), every value among the tasks the caller sees
   whatever the filters, so a picker is not limited to the loaded page
-  (absent on a section's read). An older hub ignores all four filters.
+  (absent on a section's read). An older hub ignores all five filters.
 - `work { action: task, task_id }` (`item:<id>` or `ref:<KEY>`): one task
   with every session and why it is linked, its tracker description (at
   most 600 characters, with `description_chars`, the full length fleet

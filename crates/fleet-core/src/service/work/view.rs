@@ -142,6 +142,10 @@ pub struct WorkTreeFilters {
     /// ignores it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub item_type: Option<String>,
+    /// One priority (`urgent | high | medium | low`), or `none` for tasks
+    /// with none. An older hub ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<String>,
     /// The order inside each section, one of [`SORT_VALUES`]: `activity`
     /// (the default: needing you first, then the latest activity),
     /// `updated` (the tracker's last change), `key`, `title` or `due`. An
@@ -2936,6 +2940,13 @@ pub fn check_filters(f: &WorkTreeFilters) -> Result<(), IpcError> {
             return Err(bad(format!("filters.{name} is longer than 200 characters")));
         }
     }
+    if let Some(p) = f.priority.as_deref() {
+        if p != "none" && !crate::store::PRIORITIES.contains(&p) {
+            return Err(bad(format!(
+                "filters.priority is urgent, high, medium, low or none, not {p:?}"
+            )));
+        }
+    }
     if let Some(sort) = f.sort.as_deref() {
         if !SORT_VALUES.contains(&sort) {
             return Err(bad(format!(
@@ -3072,6 +3083,12 @@ fn matches_filters(t: &WorkTask, f: &WorkTreeFilters, with_group: bool) -> bool 
             .as_deref()
             .is_some_and(|k| crate::search_text::fold(k.trim()) == crate::search_text::fold(ty))
         {
+            return false;
+        }
+    }
+    if let Some(p) = f.priority.as_deref() {
+        let want = (p != "none").then_some(p);
+        if t.priority.as_deref() != want {
             return false;
         }
     }

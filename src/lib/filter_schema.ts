@@ -71,6 +71,7 @@ export const WORK_FILTER_SCHEMA: Record<WorkControlId, FilterControl<WorkFilterS
   iteration: { label: 'Sprint', place: 'Planning', testid: 'work-filter-sprint', when: 'a tracker has sprints' },
   epic: { label: 'Epic', place: 'Planning', testid: 'work-filter-epic', when: 'a tracker has epics' },
   item_type: { label: 'Type', place: 'Planning', testid: 'work-filter-type', when: 'a tracker names its types' },
+  priority: { label: 'Priority', place: 'Planning', testid: 'work-filter-priority' },
   has: { label: 'Only tasks with a live session', place: 'Sessions', testid: 'work-filter-live' },
   view: { label: 'Saved view', place: 'More', testid: 'work-view-select' },
   review: { label: 'To review', place: 'More', testid: 'work-filter-review' },
