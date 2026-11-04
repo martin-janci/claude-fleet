@@ -116,6 +116,11 @@
   const saveBlocked = $derived(!!saveWhy);
   const changeBlocked = $derived(!!changeWhy);
 
+  /** The confirm row's Keep takes focus as it mounts: the keyboard lands in the question, not on the page. */
+  function focusNow(el: HTMLElement): void {
+    el.focus();
+  }
+
   function open(id: number) {
     openMissionRoom(id);
   }
@@ -357,7 +362,7 @@
               data-testid="missions-pause-all-confirm"
               onclick={() => ((confirmPauseAll = false), void pauseAll())} title={changeWhy ?? undefined}>Pause all</button
             >
-            <button class="btn btn--quiet" type="button" data-testid="missions-pause-all-keep" onclick={() => (confirmPauseAll = false)}>Keep</button>
+            <button class="btn btn--quiet" type="button" data-testid="missions-pause-all-keep" use:focusNow onclick={() => (confirmPauseAll = false)}>Keep</button>
           </span>
         </div>
       {/if}

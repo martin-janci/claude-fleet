@@ -1012,7 +1012,7 @@
               data-testid="mission-move-confirm"
               onclick={() => void confirmFinal()} title={changeWhy ?? undefined}>{moveLabel(mission.state, confirmMove)}</button
             >
-            <button class="btn btn--quiet" type="button" data-testid="mission-move-keep" onclick={() => (confirmMove = null)}>Keep</button>
+            <button class="btn btn--quiet" type="button" data-testid="mission-move-keep" use:focusNow onclick={() => (confirmMove = null)}>Keep</button>
           </div>
         {/if}
         {#if mayChange && ciRed}
@@ -1025,7 +1025,7 @@
               data-testid="mission-ci-override"
               onclick={() => void move('completed', true)} title={changeWhy ?? undefined}>Complete anyway</button
             >
-            <button class="btn btn--quiet" type="button" data-testid="mission-ci-keep" onclick={() => (ciRed = false)}>Keep</button>
+            <button class="btn btn--quiet" type="button" data-testid="mission-ci-keep" use:focusNow onclick={() => (ciRed = false)}>Keep</button>
           </div>
         {/if}
       </header>
@@ -1692,7 +1692,7 @@
               {#if confirmDelete}
                 <div class="row" data-testid="mission-delete-row">
                   <span>Delete {mission.name}? Its tasks stay.</span>
-                  <button class="btn btn--quiet" type="button" onclick={() => (confirmDelete = false)}>Keep</button>
+                  <button class="btn btn--quiet" type="button" data-testid="mission-delete-keep" use:focusNow onclick={() => (confirmDelete = false)}>Keep</button>
                   <button class="btn btn--danger" type="button" disabled={busy} data-testid="mission-delete-confirm" onclick={() => void remove()}
                     >Delete</button
                   >
