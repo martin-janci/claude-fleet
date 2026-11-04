@@ -700,7 +700,7 @@
     const r = await safeKillSession(session.host_alias, session.tmux_name);
     busy = false;
     if (!r.ok) {
-      pushError(r.error, 'Safe remove failed');
+      pushError(r.error, 'Clean up failed');
       return;
     }
     confirmingSafeKill = false;
@@ -1009,17 +1009,17 @@
 {#snippet safeKillPill()}
   {#if session.safe_kill_state === 'requested'}
     <p class="safe-kill-pill pending" data-testid="safe-kill-pending">
-      Safe-remove in progress: asked Claude to commit + push. Will delete the
-      worktree and kill the session once it reports back.
+      Clean up in progress: asked Claude to commit and push. The worktree is
+      removed and the session killed once it reports back.
     </p>
   {:else if session.safe_kill_state === 'failed'}
     <p class="safe-kill-pill failed" data-testid="safe-kill-failed">
-      Safe-remove failed: {session.safe_kill_detail ?? 'no reason given'}.
+      Clean up failed: {session.safe_kill_detail ?? 'no reason given'}.
       Resolve in the session, then retry, or use <strong>Kill session…</strong>.
     </p>
   {:else if session.safe_kill_state === 'ready'}
     <p class="safe-kill-pill ready" data-testid="safe-kill-ready">
-      Safe-remove ready — finalizing.
+      Clean up ready: finishing.
     </p>
   {/if}
 {/snippet}
@@ -1114,7 +1114,7 @@
           {#if canSwitchLogin}
             {@render act('switch-account-from-details', 'Switch account…', openSwitchAccount, switchAccountBlocked, 'Resume this conversation under another login on this host')}
           {/if}
-          {@render act('restart-from-details', 'Restart…', askRestart, restartBlocked)}
+          {@render act('restart-from-details', 'Restart…', askRestart, restartBlocked, 'Stop the claude process and start a fresh one; the tmux session and the worktree stay')}
           {@render moveSteps()}
         </div>
         <p class="more-hint">
@@ -1392,13 +1392,13 @@
               {@render act('move-from-details', 'Move to host…', openMove, moveBlocked, 'Continue this conversation on another host: same branch, same Claude session')}
             {/if}
             {@render moveSteps()}
-            {@render act('restart-from-details', 'Restart…', askRestart, restartBlocked)}
-            {@render act('recreate-from-details', 'Recreate…', askRecreate, recreateBlocked)}
+            {@render act('restart-from-details', 'Restart…', askRestart, restartBlocked, 'Stop the claude process and start a fresh one; the tmux session and the worktree stay')}
+            {@render act('recreate-from-details', 'Recreate…', askRecreate, recreateBlocked, 'Kill the tmux session and start a fresh one in the same worktree')}
             {#if !hasNoPane(session) && session.project_id !== null}
               {@render act('repair-from-details', 'Repair workspace…', askRepair, repairing ? 'Repairing…' : repairBlocked, 'Recreate a deleted worktree directory, re-register it with git, and respawn the pane in it')}
             {/if}
-            {@render act('label-from-details', 'Rename and label…', openRenameLabel, setFriendlyNameBlocked)}
-            {@render act('rename-from-details', 'Rename tmux session', beginRename, renameBlocked)}
+            {@render act('label-from-details', 'Rename and label…', openRenameLabel, setFriendlyNameBlocked, 'The name the list shows, and its labels')}
+            {@render act('rename-from-details', 'Rename tmux session', beginRename, renameBlocked, 'The tmux name on the host; the name the list shows stays')}
           </div>
         </div>
         <div class="group" data-testid="actions-share">
@@ -1598,9 +1598,9 @@
 {/if}
 
 {#if confirmingSafeKill}
-  <Modal label="Safe remove {session.tmux_name}" onclose={cancelSafeKill} width="480px" testid="safe-kill-dialog">
+  <Modal label="Clean up {session.tmux_name}" onclose={cancelSafeKill} width="480px" testid="safe-kill-dialog">
     <div class="confirm wide">
-      <h3>Safe remove <code>{session.tmux_name}</code>?</h3>
+      <h3>Clean up <code>{session.tmux_name}</code>?</h3>
 
       {#if inspection === null && inspectError === null}
         <p class="muted">Inspecting worktree…</p>
@@ -1619,7 +1619,7 @@
             title={safeKillClaudeBlocked ?? ''}
             onclick={doSafeKillViaClaude}
             data-testid="confirm-safe-kill-claude"
-          >Ask Claude to commit + push</button>
+          >Ask Claude to commit and push</button>
         </div>
       {:else if inspection && inspection.safe_to_remove}
         <p>
@@ -1636,7 +1636,7 @@
             title={discardKillBlocked ?? ''}
             onclick={doDirectRemove}
             data-testid="confirm-safe-kill-direct"
-          >Remove worktree + kill</button>
+          >Remove worktree and kill</button>
         </div>
       {:else if inspection}
         {#if !inspection.has_worktree}
@@ -1678,10 +1678,10 @@
             {/if}
           </div>
           <p class="muted small">
-            "Let Claude commit it" sends a prompt asking Claude to commit + push
-            (to <code>main</code> or a PR) before fleet removes the worktree.
-            "Discard &amp; kill" force-removes the worktree and kills the
-            session — local-only changes will be lost.
+            "Ask Claude to commit and push" sends a prompt asking Claude to commit
+            and push (to <code>main</code> or a PR) before fleet removes the
+            worktree. "Discard and kill" force-removes the worktree and kills the
+            session: local-only changes are lost.
           </p>
         {/if}
         <div class="confirm-actions">
@@ -1691,14 +1691,14 @@
             title={safeKillClaudeBlocked ?? ''}
             onclick={doSafeKillViaClaude}
             data-testid="confirm-safe-kill-claude"
-          >Let Claude commit it</button>
+          >Ask Claude to commit and push</button>
           <button
             class="danger"
             disabled={busy || discardKillBlocked !== null}
             title={discardKillBlocked ?? ''}
             onclick={doDiscardAndKill}
             data-testid="confirm-safe-kill-discard"
-          >Discard &amp; kill</button>
+          >Discard and kill</button>
         </div>
       {/if}
     </div>

@@ -1093,8 +1093,9 @@
         placeholder={mode === 'new'
           ? pendingTicket
             ? `Repository for ${pendingTicket.key ?? 'this ticket'}…`
-            : 'project or ticket…'
-          : 'Jump to a session, host, task, ticket or asset… (name, key, title, project, host, branch, or paste a ticket URL)'}
+            : 'Project or ticket…'
+          : 'Jump to a session, host, task, ticket or asset…'}
+        title={mode === 'new' ? undefined : 'Type a name, key, title, project, host or branch, or paste a ticket URL'}
         autocomplete="off"
         spellcheck="false"
       />

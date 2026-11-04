@@ -105,7 +105,7 @@
     <div class="foot">
       <p class="muted small">
         New and existing worktrees: New session. Merging a branch: Ask AI, “Get the branch ready to
-        merge”. Removing a worktree: Safe remove on its session.
+        merge”. Removing a worktree: Clean up on its session.
       </p>
       <button
         class="ghost"
