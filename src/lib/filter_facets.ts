@@ -123,6 +123,7 @@ export type WorkFacetId =
   | 'epic'
   | 'item_type'
   | 'priority'
+  | 'label'
   | 'query';
 
 export interface WorkFacetNames {
@@ -164,6 +165,7 @@ export function workFacets(f: WorkTreeFilters, names: WorkFacetNames = {}): (Fac
   }
   if (n.item_type) out.push({ id: 'item_type', label: `Type: ${n.item_type}` });
   if (n.priority) out.push({ id: 'priority', label: n.priority === 'none' ? 'No priority' : `Priority: ${WORK_PRIORITY_FILTER_LABELS[n.priority]}` });
+  if (n.label) out.push({ id: 'label', label: `Label: ${n.label}` });
   if (n.query) out.push({ id: 'query', label: `Search: “${n.query}”` });
   return out;
 }

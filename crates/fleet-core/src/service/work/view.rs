@@ -146,6 +146,9 @@ pub struct WorkTreeFilters {
     /// with none. An older hub ignores it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<String>,
+    /// Tasks carrying this label, any case. An older hub ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
     /// The order inside each section, one of [`SORT_VALUES`]: `activity`
     /// (the default: needing you first, then the latest activity),
     /// `updated` (the tracker's last change), `key`, `title` or `due`. An
@@ -724,11 +727,17 @@ pub struct Facets {
     /// The trackers' type names, by name.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub item_types: Vec<String>,
+    /// The tasks' labels, by name (any case once).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
 }
 
 impl Facets {
     fn is_empty(&self) -> bool {
-        self.iterations.is_empty() && self.epics.is_empty() && self.item_types.is_empty()
+        self.iterations.is_empty()
+            && self.epics.is_empty()
+            && self.item_types.is_empty()
+            && self.labels.is_empty()
     }
 }
 
@@ -756,7 +765,13 @@ fn facets_of(tasks: &[&WorkTask]) -> Facets {
     let mut iterations: BTreeMap<String, (bool, u32)> = BTreeMap::new();
     let mut epics: BTreeMap<String, (TaskRef, u32)> = BTreeMap::new();
     let mut types: BTreeMap<String, String> = BTreeMap::new();
+    let mut labels: BTreeMap<String, String> = BTreeMap::new();
     for t in tasks {
+        for l in t.labels.iter().map(|l| l.trim()).filter(|l| !l.is_empty()) {
+            labels
+                .entry(crate::search_text::fold(l))
+                .or_insert_with(|| l.to_string());
+        }
         if let Some(i) = t
             .iteration
             .as_deref()
@@ -809,10 +824,13 @@ fn facets_of(tasks: &[&WorkTask]) -> Facets {
     epics.truncate(FACET_MAX);
     let mut item_types: Vec<String> = types.into_values().collect();
     item_types.truncate(FACET_MAX);
+    let mut labels: Vec<String> = labels.into_values().collect();
+    labels.truncate(FACET_MAX);
     Facets {
         iterations,
         epics,
         item_types,
+        labels,
     }
 }
 
@@ -2942,6 +2960,7 @@ pub fn check_filters(f: &WorkTreeFilters) -> Result<(), IpcError> {
         ("iteration", &f.iteration),
         ("epic", &f.epic),
         ("item_type", &f.item_type),
+        ("label", &f.label),
     ] {
         if v.as_deref().is_some_and(|q| q.chars().count() > 200) {
             return Err(bad(format!("filters.{name} is longer than 200 characters")));
@@ -3096,6 +3115,16 @@ fn matches_filters(t: &WorkTask, f: &WorkTreeFilters, with_group: bool) -> bool 
     if let Some(p) = f.priority.as_deref() {
         let want = (p != "none").then_some(p);
         if t.priority.as_deref() != want {
+            return false;
+        }
+    }
+    if let Some(l) = f.label.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+        let want = crate::search_text::fold(l);
+        if !t
+            .labels
+            .iter()
+            .any(|have| crate::search_text::fold(have.trim()) == want)
+        {
             return false;
         }
     }

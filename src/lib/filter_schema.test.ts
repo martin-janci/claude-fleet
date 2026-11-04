@@ -225,6 +225,7 @@ describe('Work: the Filters section (board “Work · tasks with filters open”
       iterations: [{ name: 'Sprint 42', active: true, count: 3 }],
       epics: [{ task_id: 'item:10', key: 'PAY-10', title: 'Checkout', count: 2 }],
       item_types: ['Bug', 'Story'],
+      labels: ['ui', 'auth'],
     },
   };
 
@@ -255,14 +256,16 @@ describe('Work: the Filters section (board “Work · tasks with filters open”
     await fireEvent.change(screen.getByTestId('work-filter-epic'), { target: { value: 'PAY-10' } });
     await fireEvent.change(screen.getByTestId('work-filter-type'), { target: { value: 'Bug' } });
     await fireEvent.change(screen.getByTestId('work-filter-priority'), { target: { value: 'urgent' } });
+    await fireEvent.change(screen.getByTestId('work-filter-label'), { target: { value: 'ui' } });
     await fireEvent.change(screen.getByTestId('work-sort-select'), { target: { value: 'key' } });
-    expect(get(workViewFilters)).toEqual({ iteration: 'current', epic: 'PAY-10', item_type: 'Bug', priority: 'urgent', sort: 'key' });
+    expect(get(workViewFilters)).toEqual({ iteration: 'current', epic: 'PAY-10', item_type: 'Bug', priority: 'urgent', label: 'ui', sort: 'key' });
     await fireEvent.click(screen.getByTestId('work-filters-open'));
     const strip = screen.getByTestId('work-active-filters').textContent ?? '';
     expect(strip).toContain('Current sprint');
     expect(strip).toContain('Epic: PAY-10 Checkout');
     expect(strip).toContain('Type: Bug');
     expect(strip).toContain('Priority: Urgent');
+    expect(strip).toContain('Label: ui');
   });
 
   it('the search box turns sprint: and epic: into filters and completes them', async () => {
