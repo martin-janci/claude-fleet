@@ -113,6 +113,28 @@ describe('Downloads', () => {
     expect(invoke).toHaveBeenCalledWith('remove_download', { id: 6 });
     expect(invoke).not.toHaveBeenCalledWith('remove_download', { id: 7 });
   });
+
+  it('asks before removing a copy nobody saved; a saved one goes at once', async () => {
+    await open([row(6, 'ready', { downloaded_at: 1 }), row(7, 'ready')]);
+    const [saved, fresh] = screen.getAllByTestId('download-remove');
+    await fireEvent.click(fresh);
+    expect(invoke).not.toHaveBeenCalledWith('remove_download', { id: 7 });
+    expect(screen.getByTestId('download-remove-ask')).toHaveTextContent('Not saved yet.');
+    expect(document.activeElement).toBe(screen.getByTestId('download-remove-keep'));
+    await fireEvent.click(screen.getByTestId('download-remove-keep'));
+    expect(screen.queryByTestId('download-remove-ask')).toBeNull();
+
+    await fireEvent.click(screen.getAllByTestId('download-remove')[1]);
+    invoke.mockResolvedValueOnce(true);
+    await fireEvent.click(screen.getByTestId('download-remove-confirm'));
+    await tick();
+    expect(invoke).toHaveBeenCalledWith('remove_download', { id: 7 });
+
+    invoke.mockResolvedValueOnce(true);
+    await fireEvent.click(saved);
+    await tick();
+    expect(invoke).toHaveBeenCalledWith('remove_download', { id: 6 });
+  });
 });
 
 describe('Notifications', () => {
