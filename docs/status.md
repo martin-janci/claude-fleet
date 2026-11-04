@@ -800,8 +800,11 @@ by priority (`sort: priority`, urgent first, none last) and filters by one
 with an urgent or high one (#279). The Work list row also shows a due date,
 red once it has passed (none on a done task). The task page's subtask list flags an
 urgent or high subtask and one past its due date (the hub sends
-`due_at` and `priority` on each subtask). Not yet: writing them
-back to a tracker, filtering by labels or estimate.
+`due_at` and `priority` on each subtask). The Work view filters by a
+label (`filters.label`, any case; the Planning picker from the page's
+`facets.labels`, and `label:` in the search). The phone sets priority,
+labels and estimate in its Edit sheet (fleet-mobile #283, #284). Not yet:
+writing them back to a tracker, filtering by estimate.
 
 Task result, completion gate and follow-ups (spec
 `docs/superpowers/specs/2026-10-13-task-result-handover-design.md`, plans

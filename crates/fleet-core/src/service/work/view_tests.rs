@@ -3392,6 +3392,56 @@ fn filter_by_priority_keeps_one_priority_or_none() {
     assert!(err.message.contains("filters.priority"), "{}", err.message);
 }
 
+/// `label` keeps the tasks carrying it, any case, and the page's facets
+/// list every label once.
+#[test]
+fn filter_by_label_keeps_the_tasks_carrying_it() {
+    let w = planned_world();
+    w.st.lock()
+        .unwrap()
+        .conn_ref()
+        .execute(
+            "UPDATE work_items SET labels = CASE key WHEN 'TK-1' THEN '[\"ui\",\"auth\"]' \
+             WHEN 'TK-3' THEN '[\"UI\"]' END WHERE key IN ('TK-1', 'TK-3')",
+            [],
+        )
+        .unwrap();
+    let only = |l: &str| {
+        let got = keys(&page(
+            &w,
+            &OrgScope::All,
+            WorkTreeFilters {
+                label: Some(l.into()),
+                sort: Some("key".into()),
+                group_by: Some("org".into()),
+                ..Default::default()
+            },
+        ));
+        got.into_iter()
+            .filter(|k| k.starts_with("TK-"))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(only("ui"), ["TK-1", "TK-3"]);
+    assert_eq!(only("Auth"), ["TK-1"]);
+    assert!(only("backend").is_empty());
+    let all = page(
+        &w,
+        &OrgScope::All,
+        WorkTreeFilters {
+            group_by: Some("org".into()),
+            ..Default::default()
+        },
+    );
+    let labels: Vec<String> = all.facets.labels.iter().map(|l| l.to_lowercase()).collect();
+    assert_eq!(labels, ["auth", "ui"], "each label once, whatever its case");
+    let err = check_filters(&WorkTreeFilters {
+        label: Some("x".repeat(201)),
+        ..Default::default()
+    })
+    .unwrap_err();
+    assert!(err.message.contains("filters.label"), "{}", err.message);
+}
+
 #[test]
 fn an_unknown_sort_is_refused() {
     let err = check_filters(&WorkTreeFilters {

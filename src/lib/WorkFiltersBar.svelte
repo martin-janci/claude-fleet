@@ -525,6 +525,7 @@
   {@const iterations = pageFacets.iterations ?? []}
   {@const epics = pageFacets.epics ?? []}
   {@const types = withCurrent(pageFacets.item_types ?? [], f.item_type)}
+  {@const labels = withCurrent(pageFacets.labels ?? [], f.label)}
   <!-- Always shown: Priority applies to native tasks too. -->
   <section class="group">
     <h3 class="label">Planning</h3>
@@ -583,6 +584,18 @@
         <option value="">Any priority</option>
         {#each WORK_PRIORITY_FILTERS as p (p)}<option value={p}>{WORK_PRIORITY_FILTER_LABELS[p]}</option>{/each}
       </select>
+      {#if labels.length > 0}
+        <select
+          class="of-btn pick-select"
+          aria-label="Label"
+          data-testid="work-filter-label"
+          value={f.label ?? ''}
+          onchange={(e) => set({ label: (e.currentTarget as HTMLSelectElement).value || undefined })}
+        >
+          <option value="">Any label</option>
+          {#each labels as l (l)}<option value={l}>{l}</option>{/each}
+        </select>
+      {/if}
     </div>
   </section>
 {/snippet}

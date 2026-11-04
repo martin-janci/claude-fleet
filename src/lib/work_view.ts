@@ -88,6 +88,8 @@ export interface WorkTreeFilters {
   item_type?: string;
   /** One priority, or `none` for tasks with none. An older hub ignores it. */
   priority?: WorkPriorityFilter;
+  /** Tasks carrying this label, any case. An older hub ignores it. */
+  label?: string;
   /** The order inside each section; absent is `activity`. */
   sort?: WorkSort;
 }
@@ -347,6 +349,8 @@ export interface WorkTreeFacets {
   iterations?: { name: string; active?: boolean; count: number }[];
   epics?: (WorkTaskRef & { count: number })[];
   item_types?: string[];
+  /** The tasks' labels, each once (absent from a hub before 0.6.5). */
+  labels?: string[];
 }
 
 /** A section header: every group of the whole filtered result. */
@@ -1246,7 +1250,7 @@ export function normalizeFilters(v: unknown): WorkTreeFilters {
     const stages = WORK_STAGES.filter((st) => (v.stages as unknown[]).includes(st));
     if (stages.length > 0) out.stages = stages;
   }
-  for (const k of ['iteration', 'epic', 'item_type'] as const) {
+  for (const k of ['iteration', 'epic', 'item_type', 'label'] as const) {
     const x = v[k];
     if (typeof x === 'string' && x.trim() !== '') out[k] = x.trim();
   }
@@ -1274,6 +1278,7 @@ const FILTER_ORDER: (keyof WorkTreeFilters)[] = [
   'epic',
   'item_type',
   'priority',
+  'label',
   'query',
   'group',
   'archived',

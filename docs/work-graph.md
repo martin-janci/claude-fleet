@@ -323,7 +323,8 @@ including tasks with no session at all — as reads of the `work` tool
   (an epic's key or `item:<id>`: the epic and everything under it, through
   any depth of parents), `item_type` (the tracker's type name, any case),
   `priority` (`urgent`, `high`, `medium`, `low`, or `none` for tasks with
-  none; another value is refused) and `sort` (`activity`, the default: needing you first then the latest
+  none; another value is refused), `label` (tasks carrying it, any case)
+  and `sort` (`activity`, the default: needing you first then the latest
   activity; `updated`, the tracker's last change; `key`, by number so
   TK-9 comes before TK-10; `title`; `due`; `priority`, urgent first and
   none last), which orders the tasks inside
@@ -333,9 +334,9 @@ including tasks with no session at all — as reads of the `work` tool
   `iteration_active`, `in_epic` (`{task_id, key, title}`: its nearest
   epic-level ancestor, else its top-most one) and `updated_at`; the page
   carries `facets` (`iterations` with `active` and `count`, `epics` with
-  `count`, `item_types`), every value among the tasks the caller sees
+  `count`, `item_types`, `labels`), every value among the tasks the caller sees
   whatever the filters, so a picker is not limited to the loaded page
-  (absent on a section's read). An older hub ignores all five filters.
+  (absent on a section's read). An older hub ignores all six filters.
 - `work { action: task, task_id }` (`item:<id>` or `ref:<KEY>`): one task
   with every session and why it is linked, its tracker description (at
   most 600 characters, with `description_chars`, the full length fleet
