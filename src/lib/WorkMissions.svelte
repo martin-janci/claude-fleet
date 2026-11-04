@@ -116,6 +116,11 @@
   const saveBlocked = $derived(!!saveWhy);
   const changeBlocked = $derived(!!changeWhy);
 
+  /** The confirm row's Keep takes focus as it mounts: the keyboard lands in the question, not on the page. */
+  function focusNow(el: HTMLElement): void {
+    el.focus();
+  }
+
   function open(id: number) {
     openMissionRoom(id);
   }
@@ -191,7 +196,7 @@
       class="btn btn--quiet new"
       type="button"
       disabled={saveBlocked}
-      title="New mission"
+      title={saveWhy ?? 'New mission'}
       data-testid="mission-new"
       onclick={startNewMission}>+ New</button
     >
@@ -255,7 +260,12 @@
     {:else if !$missionList.loaded}
       <div data-testid="missions-loading"><Skeleton rows={3} label="Loading missions" /></div>
     {:else if missions.length === 0 && !$missionList.error}
-      <p class="muted empty" data-testid="missions-empty">No missions yet. A mission is a goal with the tasks that reach it.</p>
+      <div class="empty" data-testid="missions-empty">
+        <p class="muted">No missions yet. A mission is a goal with the tasks that reach it.</p>
+        <button class="btn" type="button" disabled={saveBlocked} title={saveWhy ?? undefined} data-testid="missions-empty-new" onclick={startNewMission}
+          >New mission…</button
+        >
+      </div>
     {:else}
       {#if $missionList.error}
         <p class="refresh-error" role="status" data-testid="missions-refresh-error">
@@ -352,7 +362,7 @@
               data-testid="missions-pause-all-confirm"
               onclick={() => ((confirmPauseAll = false), void pauseAll())} title={changeWhy ?? undefined}>Pause all</button
             >
-            <button class="btn btn--quiet" type="button" data-testid="missions-pause-all-keep" onclick={() => (confirmPauseAll = false)}>Keep</button>
+            <button class="btn btn--quiet" type="button" data-testid="missions-pause-all-keep" use:focusNow onclick={() => (confirmPauseAll = false)}>Keep</button>
           </span>
         </div>
       {/if}
@@ -556,6 +566,9 @@
   .hidden-line,
   .empty {
     padding: var(--space-2) 14px;
+  }
+  .empty p {
+    margin: 0 0 var(--space-2);
   }
   .pause-confirm {
     flex-basis: 100%;

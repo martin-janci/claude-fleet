@@ -151,6 +151,8 @@ describe('WorkMissions', () => {
     renderMissions();
     await flush();
     expect(screen.getByTestId('missions-empty')).toBeTruthy();
+    // The empty list is not a dead end: the next step sits in it.
+    expect(screen.getByTestId('missions-empty-new').textContent).toContain('New mission');
   });
 
   // Review w17-7: a failed list refresh keeps the missions listed.
