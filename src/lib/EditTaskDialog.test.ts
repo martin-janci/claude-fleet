@@ -260,6 +260,13 @@ describe('EditTaskDialog', () => {
     await type('edit-task-estimate', '5');
     await type('edit-task-labels', Array.from({ length: 21 }, (_, i) => `l${i}`).join(','));
     expect(screen.getByTestId('edit-task-size-error').textContent).toContain('At most 20 labels');
+    // 40 emoji are 40 characters to the hub (80 UTF-16 units here).
+    await type('edit-task-labels', '🚀'.repeat(40));
+    expect(screen.queryByTestId('edit-task-size-error')).toBeNull();
+    await type('edit-task-labels', '🚀'.repeat(41));
+    expect(screen.getByTestId('edit-task-size-error').textContent).toContain('at most 40 characters');
+    await type('edit-task-labels', 'tab\there');
+    expect(screen.getByTestId('edit-task-size-error').textContent).toContain('no control characters');
     await type('edit-task-labels', 'ok');
     expect(screen.queryByTestId('edit-task-size-error')).toBeNull();
     expect((screen.getByTestId('edit-task-submit') as HTMLButtonElement).disabled).toBe(false);

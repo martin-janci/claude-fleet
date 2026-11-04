@@ -153,7 +153,10 @@
   const sizeError = $derived.by(() => {
     const tags = parseLabels(labels);
     if (tags.length > LABELS_MAX) return `At most ${LABELS_MAX} labels.`;
-    if (tags.some((t) => t.length > LABEL_MAX_CHARS)) return `A label is at most ${LABEL_MAX_CHARS} characters.`;
+    // Characters as the hub counts them (code points: an emoji is one).
+    if (tags.some((t) => [...t].length > LABEL_MAX_CHARS)) return `A label is at most ${LABEL_MAX_CHARS} characters.`;
+    // eslint-disable-next-line no-control-regex
+    if (tags.some((t) => /[\u0000-\u001f\u007f-\u009f]/.test(t))) return 'A label has no control characters.';
     if (estimateValue < 0 || estimateValue > ESTIMATE_MAX) return `An estimate is a number from 0 to ${ESTIMATE_MAX}.`;
     return null;
   });
