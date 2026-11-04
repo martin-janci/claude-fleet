@@ -259,6 +259,13 @@
     if (g.org_id != null) return `${g.org_name || `org #${g.org_id}`} (its members)`;
     return g.person_display_name || g.person_name || (g.person_id === null ? 'unknown' : `person #${g.person_id}`);
   }
+
+  /** The inline Revoke? confirm takes focus on its safe choice: the Revoke…
+   *  button that opened it is gone, and focus would otherwise drop to the
+   *  page (UX pass A22). */
+  function focusNow(el: HTMLElement) {
+    el.focus();
+  }
 </script>
 
 {#snippet trustNow(list: DeviceSummary[])}
@@ -274,7 +281,7 @@
           title={trustBlocked ?? `Make ${d.name} a full device`}
           onclick={() => void doTrust(d)}>Trust</button
         >
-        <button type="button" data-testid="share-trust-no" disabled={busy} onclick={() => (trusting = null)}>Keep</button>
+        <button type="button" data-testid="share-trust-no" disabled={busy} use:focusNow onclick={() => (trusting = null)}>Keep</button>
       </span>
     {:else}
       <button
@@ -395,7 +402,7 @@
                       title={revokeBlocked ?? 'Revoke this grant'}
                       onclick={() => name !== null && doRevoke(name)}>Revoke</button
                     >
-                    <button type="button" data-testid="share-revoke-no" disabled={busy}
+                    <button type="button" data-testid="share-revoke-no" disabled={busy} use:focusNow
                       onclick={() => (confirming = null)}>Keep</button
                     >
                   </span>
@@ -423,7 +430,7 @@
                     title={name === null
                       ? 'This hub did not name the recipient, so this app cannot act on the grant — use fleet-hub'
                       : (revokeBlocked ?? 'Revoke this grant')}
-                    onclick={() => (confirming = keyOf(name))}>Revoke</button
+                    onclick={() => (confirming = keyOf(name))}>Revoke…</button
                   >
                 {/if}
               </li>
