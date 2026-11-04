@@ -76,6 +76,7 @@
     finalMoveQuestion,
     getMission,
     grantMission,
+    finishGrantLabel,
     grantSpanNotice,
     isFinal,
     missionTaskId,
@@ -650,6 +651,21 @@
       // hours (review r8): say so rather than let it pass as asked.
       notice = grantSpanNotice(untilDone, out);
     }
+  }
+
+  /** N4: sign the grant "Finish it" proposes, as the form would. */
+  async function finishIt() {
+    const g = detail?.finish_grant;
+    if (!mission || !g) return;
+    const out = await act(
+      grantMission(mission.id, {
+        level: g.level,
+        until_done: true,
+        budget_cents: g.budget_cents,
+        ...((g.hosts ?? []).length > 0 ? { hosts: [...(g.hosts ?? [])] } : {}),
+      }),
+    );
+    if (out) notice = grantSpanNotice(true, out);
   }
 
   async function revokeGrant() {
@@ -1466,6 +1482,18 @@
                         : `until ${new Date(plan.autonomy.grant.expires_at * 1000).toLocaleString()}`})</button
                     >
                   {:else}
+                    {#if detail?.finish_grant}
+                      <button
+                        class="btn"
+                        type="button"
+                        disabled={busy || changeBlocked}
+                        data-testid="mission-finish-it"
+                        title={detail.finish_grant.ceiling < detail.finish_grant.level
+                          ? `The fleet's ceiling is L${detail.finish_grant.ceiling}: each step still waits for you until it is raised in Settings.`
+                          : 'Sign a grant that lets the loop take every step until the mission completes, within this budget.'}
+                        onclick={() => void finishIt()}>{finishGrantLabel(detail.finish_grant)}</button
+                      >
+                    {/if}
                     <button class="btn btn--quiet" type="button" disabled={busy || changeBlocked} data-testid="mission-grant" onclick={() => (granting = !granting)}
                       >Grant a budget so it runs by itself…</button
                     >

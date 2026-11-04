@@ -1253,6 +1253,24 @@ describe('WorkMissions', () => {
       hosts.set([]);
     });
 
+    it('"Finish it" signs the proposed grant in one tap (N4)', async () => {
+      current = mission({ state: 'active', level: 2 });
+      handlers.work_mission = () => ({
+        ...detailOf(current),
+        finish_grant: { level: 2, budget_cents: 1200, hosts: ['trn'], ceiling: 3, basis: 'mission' },
+      });
+      handlers.grant_mission = () => ({ id: 1, mission_id: 4, plan_version: 1, level: 2, granted_by: 'fleet', created_at: 1, expires_at: 253_402_300_799, until_done: true });
+      renderMissions();
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-row'));
+      await flush();
+      const btn = screen.getByTestId('mission-finish-it');
+      expect(btn.textContent).toBe('Finish it: L2 until done, up to $12.00 on trn');
+      await fireEvent.click(btn);
+      await flush();
+      expect(calls('grant_mission')[0]).toEqual({ mission_id: 4, level: 2, until_done: true, budget_cents: 1200, hosts: ['trn'] });
+    });
+
     it('a finite mission is granted until it completes, with a budget and no hours', async () => {
       current = mission({ state: 'active', level: 2 });
       handlers.work_mission = () => detailOf(current);

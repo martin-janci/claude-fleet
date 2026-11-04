@@ -113,6 +113,11 @@ pub struct MissionDetail {
     /// may see (mission progress N1). Absent from an older hub.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lessons: Vec<super::orchestrate::lessons::Lesson>,
+    /// The grant "Finish it" proposes (mission progress N4): a finite,
+    /// not finished mission with tasks left that this caller may change and
+    /// that holds no grant. Absent otherwise and from an older hub.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finish_grant: Option<stats::FinishGrant>,
     /// What each member this caller may see says it changes (lanes design
     /// L5), by item id; only members that say. Absent from an older hub.
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
@@ -326,6 +331,27 @@ pub fn mission(
         spent_micros: mission.cost_micros.unwrap_or(0),
         fleet_run_micros: s.run_cost_estimate(None)?.map(|(m, _)| m),
     });
+    // N4: "Finish it", for a finite mission a person may change and that
+    // runs on no grant yet.
+    let finish_grant = match &plan {
+        Some(p) if may_change && mission.mode == "finite" && p.autonomy.grant.is_none() => {
+            let mut hosts: Vec<String> = Vec::new();
+            for it in &items {
+                for t in s.tasks_for_item(it.id)? {
+                    if let Some(row) = t
+                        .worker_session_id
+                        .and_then(|w| s.get_session_by_id(w).ok().flatten())
+                    {
+                        if !hosts.contains(&row.host_alias) && hosts.len() < 5 {
+                            hosts.push(row.host_alias);
+                        }
+                    }
+                }
+            }
+            stats::finish_grant(stats.forecast.as_ref(), hosts, p.autonomy.ceiling)
+        }
+        _ => None,
+    };
     let stats = Some(stats);
     // Each visible item's status category: lanes and touches show those alone.
     let status: std::collections::HashMap<i64, &str> = items
@@ -383,6 +409,7 @@ pub fn mission(
         stats,
         lanes,
         lessons,
+        finish_grant,
         touches,
         limit_wait,
     })

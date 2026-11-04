@@ -82,6 +82,45 @@ pub struct Forecast {
     pub basis: String,
 }
 
+/// The grant "Finish it" proposes (mission progress N4, F3): level 2
+/// until the mission completes, a budget of what is left with half again
+/// to spare, on the hosts its runs used. A person still signs it through
+/// `work_link { mission_grant }`, which checks it as any other grant.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FinishGrant {
+    pub level: i64,
+    pub budget_cents: i64,
+    /// Empty: any host the mission's owner may drive.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hosts: Vec<String>,
+    /// The fleet's ceiling (`orchestrator.max_level`): below `level`, the
+    /// loop still waits for a person at each step.
+    pub ceiling: i64,
+    /// The forecast's basis: `mission` or `fleet` (a rough budget).
+    pub basis: String,
+}
+
+/// The smallest budget "Finish it" proposes, in cents (F3).
+pub const FINISH_MIN_CENTS: i64 = 500;
+
+/// PURE: what "Finish it" proposes for what is left (F3): the forecast's
+/// cost × 1.5, at least [`FINISH_MIN_CENTS`]; `None` with nothing left.
+pub fn finish_grant(f: Option<&Forecast>, hosts: Vec<String>, ceiling: i64) -> Option<FinishGrant> {
+    let f = f.filter(|f| f.tasks_left > 0)?;
+    let cents = f
+        .micros
+        .map(|m| (m.max(0).saturating_mul(3) / 2 + 9_999) / 10_000)
+        .unwrap_or(0)
+        .max(FINISH_MIN_CENTS);
+    Some(FinishGrant {
+        level: 2,
+        budget_cents: cents,
+        hosts,
+        ceiling,
+        basis: f.basis.clone(),
+    })
+}
+
 /// What [`forecast`] reads.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ForecastInput {
@@ -249,6 +288,40 @@ pub fn stats(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Mission progress N4: "Finish it" asks for what is left with half
+    /// again to spare, at least $5, and nothing once every task is done.
+    #[test]
+    fn finish_it_budgets_what_is_left_with_half_again() {
+        let f = Forecast {
+            tasks_left: 3,
+            secs: None,
+            micros: Some(8_000_000),
+            basis: "mission".into(),
+        };
+        let g = finish_grant(Some(&f), vec!["h1".into()], 3).unwrap();
+        assert_eq!((g.level, g.budget_cents, g.ceiling), (2, 1200, 3));
+        assert_eq!(g.hosts, vec!["h1".to_string()]);
+        let cheap = Forecast {
+            micros: Some(100_000),
+            ..f.clone()
+        };
+        assert_eq!(
+            finish_grant(Some(&cheap), vec![], 1).unwrap().budget_cents,
+            FINISH_MIN_CENTS
+        );
+        let unknown = Forecast {
+            micros: None,
+            ..f.clone()
+        };
+        assert_eq!(
+            finish_grant(Some(&unknown), vec![], 1)
+                .unwrap()
+                .budget_cents,
+            FINISH_MIN_CENTS
+        );
+        assert_eq!(finish_grant(None, vec![], 1), None);
+    }
 
     /// Mission progress N5: what is left runs `max_parallel` at a time but
     /// no faster than its waves, at a done task's time and cost.

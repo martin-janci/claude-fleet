@@ -259,6 +259,9 @@ export interface MissionDetail {
   /** What its runs ran into, newest first (N1); absent with none and from
    *  an older hub. Workers' words. */
   lessons?: MissionLesson[];
+  /** The grant "Finish it" proposes (N4); absent when the caller may not
+   *  change the mission, it holds a grant, or nothing is left. */
+  finish_grant?: FinishGrant | null;
   /** What each member says it changes (lanes design L5), by item id; only
    *  members that say. Absent from an older hub. */
   touches?: Record<number, string[]>;
@@ -285,6 +288,24 @@ export interface MissionLane {
   pr_url?: string | null;
   /** Its live lead waits on a dialog for a person (N2). */
   lead_waits?: boolean;
+}
+
+/** What "Finish it" proposes (`missions::stats::FinishGrant`). */
+export interface FinishGrant {
+  level: number;
+  budget_cents: number;
+  hosts?: string[];
+  /** The fleet's ceiling: below `level`, each step still waits for a person. */
+  ceiling: number;
+  /** `mission` or `fleet` (a rough budget). */
+  basis: string;
+}
+
+/** PURE: the "Finish it" button's words: what a person signs. */
+export function finishGrantLabel(g: FinishGrant): string {
+  const where = (g.hosts ?? []).length > 0 ? ` on ${(g.hosts ?? []).join(', ')}` : '';
+  const rough = g.basis === 'fleet' ? ' (a rough budget)' : '';
+  return `Finish it: L${g.level} until done, up to ${dollars(g.budget_cents * 10_000)}${where}${rough}`;
 }
 
 /** One thing an earlier run of a mission ran into (`orchestrate::lessons::Lesson`). */

@@ -70,6 +70,11 @@ M3 ukazuje, prečo misia čaká. Najväčšie čakania sú na človeka (karty, g
 
 **Veľkosť** S–M.
 
+**Ako je to postavené v N4:**
+- **Odchýlka od návrhu: bez nového parametra `preset`.** `work { mission }` vracia `finish_grant { level: 2, budget_cents, hosts, ceiling, basis }` (`missions/stats.rs::finish_grant`) pre konečnú misiu, ktorú volajúci smie meniť, ktorá nemá grant a má čo robiť. Rozpočet = cena z N5 × 1,5, najmenej $5 (F3); hosty = hosty jej doterajších behov (najviac 5), inak ľubovoľný. Tlačidlo „Finish it: L2 until done, up to $12.00 on h1“ podpíše presne tento grant cez existujúci `mission_grant` (`until_done`), takže kontroly a brzdy sú tie isté a API ani referencia nástrojov sa nemenia.
+- `ceiling` je strop flotily (`orchestrator.max_level`); pod úrovňou 2 tlačidlo v titulku povie, že každý krok ešte čaká na človeka, kým sa strop nezvýši.
+- Login (`profile`) návrh nenesie: posledný grant nie je v store dostupný a predvolený je vlastný login hosta. Telefón tlačidlo zatiaľ nemá.
+
 ## 5. N5: odhad dokončenia
 
 Čistá funkcia nad `stats` a grafom: zostávajúce úlohy (nie `done`), medián času úlohy (`item_secs_p50`), `max_parallel` a vlny grafu (kritická cesta) → čas; zostávajúce úlohy × cena na hotovú úlohu (M1) → cena. Bez hotovej úlohy sa použije priemer misií vo flotile (`run_cost_estimate(None)`) a odhad je označený ako hrubý.
@@ -106,7 +111,7 @@ M3 ukazuje, prečo misia čaká. Najväčšie čakania sú na človeka (karty, g
 | **N2** (postavené) | dôvod obsadenej línie, `person` pri dialógu | len meranie a zobrazenie | S |
 | **N1** (postavené) | poučenia zo `tasks`, prompt a plánovač, zoznam v miestnosti | mení prompty | M |
 | **N5** (postavené) | `stats.forecast` | len zobrazenie | S |
-| **N4** | `preset: finish`, tlačidlo | nový spôsob grantu | S–M |
+| **N4** (postavené) | `finish_grant` v detaile, tlačidlo | nový spôsob grantu | S–M |
 | **N6** | `merge-tree` pred štartom, karta s `dependents` | mení, kedy závislá úloha štartuje | M |
 | **N3** | karta `merge_train`, `orchestrator.merge_train` | opt-in, mení O11 | M–L |
 
