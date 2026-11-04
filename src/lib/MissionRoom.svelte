@@ -1659,6 +1659,7 @@
                 {mayChange}
                 {busy}
                 {changeBlocked}
+                {changeWhy}
                 act={panelAct}
                 bind:tasksView
                 onopenitem={openItem}

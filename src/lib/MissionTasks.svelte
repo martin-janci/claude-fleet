@@ -55,6 +55,7 @@
     mayChange,
     busy,
     changeBlocked,
+    changeWhy = null,
     act,
     tasksView = $bindable('list'),
     onopenitem,
@@ -65,6 +66,8 @@
     mayChange: boolean;
     busy: boolean;
     changeBlocked: boolean;
+    /** Why the hub refuses a change, when `changeBlocked`: the grey Retry's title. */
+    changeWhy?: string | null;
     /** Run one write; the room re-reads the mission on success. */
     act: <T>(p: Promise<Result<T>>) => Promise<T | null>;
     tasksView?: 'list' | 'graph';
@@ -408,7 +411,7 @@
                     class="btn btn--quiet btn--icon"
                     type="button"
                     aria-label="Retry"
-                    title="Try again, with the last failure in the prompt"
+                    title={changeWhy ?? 'Try again, with the last failure in the prompt'}
                     disabled={busy || changeBlocked}
                     data-testid="mission-retry"
                     onclick={() => void retry(it.id)}>↻</button
