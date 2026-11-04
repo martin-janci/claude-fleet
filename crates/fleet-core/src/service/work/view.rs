@@ -532,6 +532,13 @@ pub struct SubtaskView {
     pub live_sessions: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub job_state: Option<String>,
+    /// Its due date, `YYYY-MM-DD`: the parent's subtask list flags an
+    /// overdue one. An older hub sends none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub due_at: Option<String>,
+    /// `urgent | high | medium | low`, or none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<String>,
 }
 
 /// An agent's proposed subtask. `why` and `notes` are agent text.
@@ -4312,6 +4319,8 @@ fn native_work(
             project_id: c.project_id,
             live_sessions,
             job_state: g.job_states.get(&c.id).cloned(),
+            due_at: c.due_at.clone(),
+            priority: c.priority.clone(),
             // The row stays — it is structure, and the tree that shows the
             // same children would otherwise disagree about how many there
             // are — but its text does not. `JOB_TITLE_WITHHELD` is the label

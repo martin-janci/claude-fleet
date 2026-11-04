@@ -798,7 +798,9 @@ by priority (`sort: priority`, urgent first, none last) and filters by one
 `priority:` in the search). The phone filters by priority (fleet-mobile
 #274), sorts by it on a hub from 0.6.5 (#276) and its My work card leads
 with an urgent or high one (#279). The Work list row also shows a due date,
-red once it has passed (none on a done task). Not yet: writing them
+red once it has passed (none on a done task). The task page's subtask list flags an
+urgent or high subtask and one past its due date (the hub sends
+`due_at` and `priority` on each subtask). Not yet: writing them
 back to a tracker, filtering by labels or estimate.
 
 Task result, completion gate and follow-ups (spec

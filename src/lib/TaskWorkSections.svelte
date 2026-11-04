@@ -5,7 +5,7 @@
   // result, and agent steps per session — "per the agent", never a status.
   // `part` splits them around the page's Sessions list: the work above it,
   // the steps below. All text renders as text.
-  import { createWorkTask, decideWorkProposal, mergeWorkProposal } from './work';
+  import { createWorkTask, decideWorkProposal, dueLabel, isHotPriority, mergeWorkProposal, priorityLabel } from './work';
   import { duplicateProposal, openTask, readErrorText, type TaskDetail } from './work_view';
   import ProposedBy from './ProposedBy.svelte';
   import WorkButton from './WorkButton.svelte';
@@ -84,10 +84,17 @@
       {/if}
       {#each detail.subtasks ?? [] as s (s.item_id)}
         {@const mark = subtaskMark(s.status)}
+        {@const due = s.status === 'done' ? null : dueLabel(s.due_at)}
         <div class="row" data-testid="task-subtask">
           <span class="mark mark--{s.status ?? 'todo'}" role="img" aria-label={mark.label} data-testid="task-subtask-mark">{mark.glyph}</span>
           <button class="link" type="button" onclick={() => openTask(s.task_id)}>{s.title}</button>
           {#if s.key}<span class="key">{s.key}</span>{/if}
+          {#if isHotPriority(s.priority)}<span class="chip prio" class:urgent={s.priority === 'urgent'} data-testid="task-subtask-priority"
+              >{priorityLabel(s.priority)}</span
+            >{/if}
+          {#if due}<span class="chip due" class:overdue={due.overdue} data-testid="task-subtask-due" title="Due {s.due_at}"
+              >{due.overdue ? `Overdue · ${due.text}` : `Due ${due.text}`}</span
+            >{/if}
           {#if s.origin === 'agent'}<span class="chip agent">delegated job</span>{:else if s.origin === 'proposed'}<span class="chip prop"
               >from a proposal</span
             >{/if}
@@ -312,6 +319,19 @@
     color: var(--fg);
   }
   .agent {
+    background: var(--chip-bg);
+    color: var(--fg-2);
+  }
+  .prio {
+    background: var(--waiting-soft);
+    color: var(--status-waiting);
+  }
+  .prio.urgent,
+  .due.overdue {
+    background: var(--failed-soft);
+    color: var(--status-failed);
+  }
+  .due {
     background: var(--chip-bg);
     color: var(--fg-2);
   }

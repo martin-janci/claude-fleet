@@ -2226,6 +2226,34 @@ fn a_subtasks_steps_roll_up_to_its_parent_and_count_its_live_sessions() {
     let d = task(&w.st, &vs(&OrgScope::All), &format!("item:{}", parent.id)).unwrap();
     assert_eq!(d.subtasks[0].item_id, sub.id);
     assert_eq!(d.subtasks[0].live_sessions, 1);
+    assert_eq!(
+        (
+            d.subtasks[0].due_at.as_deref(),
+            d.subtasks[0].priority.as_deref()
+        ),
+        (None, None)
+    );
+    // Its due date and priority ride along, so the parent's list can flag
+    // an overdue or urgent subtask.
+    w.st.lock()
+        .unwrap()
+        .edit_local_item(
+            sub.id,
+            &crate::store::ItemEdit {
+                due_at: Some("2026-10-30"),
+                priority: Some("urgent"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let d = task(&w.st, &vs(&OrgScope::All), &format!("item:{}", parent.id)).unwrap();
+    assert_eq!(
+        (
+            d.subtasks[0].due_at.as_deref(),
+            d.subtasks[0].priority.as_deref()
+        ),
+        (Some("2026-10-30"), Some("urgent"))
+    );
     assert_eq!(d.steps.len(), 1);
     assert_eq!(
         (
