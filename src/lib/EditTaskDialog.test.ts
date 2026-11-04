@@ -84,6 +84,11 @@ describe('dueLabel / ownerDueChip', () => {
     expect(ownerDueChip({ assignees: ['Ana'] }, now)).toEqual({ text: 'Ana', overdue: false });
     expect(ownerDueChip({ due_at: '2026-10-16' }, now)).toEqual({ text: 'Tomorrow', overdue: false });
     expect(ownerDueChip({ assignees: [] }, now)).toBeNull();
+    // A done task's date is history: the Done column is never red.
+    expect(ownerDueChip({ assignees: ['Ana'], due_at: '2026-10-01', status_category: 'done' }, now)).toEqual({
+      text: 'Ana · Oct 1',
+      overdue: false,
+    });
   });
 });
 
