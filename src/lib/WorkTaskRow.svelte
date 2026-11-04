@@ -14,7 +14,7 @@
   import { workRowClick } from './prefs';
   import { costChip, linkTone, liveLinks, occurrenceTitle, prChip, rowClickSession, rowSessionLink, taskLine, taskTone } from './work_row';
   import { isOccurrenceOf, taskLabel, trackerDown, trackerDownLabel, type WorkTask, type WorkTaskLink } from './work_view';
-  import { dueLabel, priorityLabel } from './work';
+  import { dueLabel, isHotPriority, priorityLabel } from './work';
 
   let {
     task: t,
@@ -51,7 +51,7 @@
   /** An epic's, or any parent's, roll-up (sprints design §3). */
   const rollup = $derived((t.children_total ?? 0) > 0 ? `${t.children_done ?? 0}/${t.children_total} done` : null);
   /** Urgent and high only, as on the task page: the rest is the usual case. */
-  const hot = $derived(t.priority === 'urgent' || t.priority === 'high' ? priorityLabel(t.priority) : null);
+  const hot = $derived(isHotPriority(t.priority) ? priorityLabel(t.priority) : null);
   /** Its due date, as the Board card says it; a finished task's is history. */
   const due = $derived(t.status_category === 'done' ? null : dueLabel(t.due_at));
   const lit = $derived(live.some((l) => isOccurrenceOf(l, currentSessionId)));

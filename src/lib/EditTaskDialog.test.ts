@@ -12,7 +12,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { get } from 'svelte/store';
 import { clearToasts, runToastAction, toasts } from './toasts';
 import EditTaskDialog from './EditTaskDialog.svelte';
-import { dueLabel, estimateLabel, ownerDueChip, parseAssignees, priorityLabel } from './work';
+import { dueLabel, estimateLabel, isHotPriority, ownerDueChip, parseAssignees, priorityLabel } from './work';
 import type { TaskDetail, WorkTask } from './work_view';
 
 const task = (over: Partial<WorkTask> = {}): WorkTask => ({
@@ -93,6 +93,9 @@ describe('priorityLabel / estimateLabel', () => {
     expect(priorityLabel('low')).toBe('Low');
     expect(priorityLabel('p1')).toBeNull();
     expect(priorityLabel(null)).toBeNull();
+  });
+  it('calls out urgent and high only', () => {
+    expect(['urgent', 'high', 'medium', 'low', null, 'p1'].filter(isHotPriority)).toEqual(['urgent', 'high']);
   });
   it('says points and hours, and nothing for no estimate', () => {
     expect(estimateLabel(3, 'points')).toBe('3 pts');

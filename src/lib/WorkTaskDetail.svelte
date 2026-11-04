@@ -24,7 +24,7 @@
   import { shortAge, timeAgo } from './session_status';
   import { assessRow, hasReading, verdictLabel, verdictState } from './evidence';
   import StatusDot from './kit/StatusDot.svelte';
-  import { changedAny, describeEvidence, estimateLabel, onWorkChangedDebounced, priorityLabel } from './work';
+  import { changedAny, describeEvidence, estimateLabel, isHotPriority, onWorkChangedDebounced, priorityLabel } from './work';
   import { providerInfo, unavailableLabel, shownKey } from './trackers';
   import { hubStatus, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
@@ -687,7 +687,7 @@
         {/if}
         {#if task.resolution}<span class="chip">{task.resolution}</span>{/if}
         {#if isArchived(task)}<span class="chip" data-testid="work-task-archived-chip" title={task.archived_at != null ? `Archived ${timeAgo(task.archived_at)}` : 'Archived'}>Archived</span>{/if}
-        {#if task.priority === 'urgent' || task.priority === 'high'}
+        {#if isHotPriority(task.priority)}
           <span class="chip chip--prio-{task.priority}" data-testid="work-task-priority-chip"
             ><span class="prio-dot prio-dot--{task.priority}" aria-hidden="true"></span>{priorityLabel(task.priority)}</span
           >
