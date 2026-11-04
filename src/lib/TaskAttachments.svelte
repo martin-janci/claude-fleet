@@ -4,6 +4,7 @@
      show as thumbnails that open in a lightbox, other files download. Each
      card names who added it and when; its author may delete it. -->
 <script lang="ts">
+  import { focusNow } from './focus_now';
   import { onDestroy } from 'svelte';
   import { hubStatus, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
@@ -216,7 +217,7 @@
               <span class="acts">
                 {#if confirmDelete === a.id}
                   <button class="btn btn--crit" type="button" data-testid="task-attachment-delete-confirm" onclick={() => void remove(a.id)}>Delete</button>
-                  <button class="btn btn--quiet" type="button" onclick={() => (confirmDelete = null)}>Keep</button>
+                  <button class="btn btn--quiet" type="button" use:focusNow onclick={() => (confirmDelete = null)}>Keep</button>
                 {:else}
                   <button
                     class="btn btn--quiet"

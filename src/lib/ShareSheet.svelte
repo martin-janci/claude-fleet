@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { focusNow } from './focus_now';
   // The one Share sheet for the whole app (multi-user M1).
   //
   // Structure copied from `TransferSheet.svelte`, which solves the same
@@ -263,9 +264,6 @@
   /** The inline Revoke? confirm takes focus on its safe choice: the Revoke…
    *  button that opened it is gone, and focus would otherwise drop to the
    *  page (UX pass A22). */
-  function focusNow(el: HTMLElement) {
-    el.focus();
-  }
 </script>
 
 {#snippet trustNow(list: DeviceSummary[])}

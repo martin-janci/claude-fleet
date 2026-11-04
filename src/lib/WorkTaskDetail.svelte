@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { focusNow } from './focus_now';
   import { IS_MAC, shortcutLabel } from './shortcuts';
   // A task in Details (work graph M14), opened from the Work view: what the
   // tracker says (title, status, link, assignees, a description excerpt),
@@ -1188,7 +1189,7 @@
                             <button class="btn btn--crit" type="button" data-testid="work-task-comment-delete-confirm" onclick={() => void removeComment(c.id)}
                               >Delete</button
                             >
-                            <button class="btn btn--quiet" type="button" onclick={() => (confirmDelete = null)}>Keep</button>
+                            <button class="btn btn--quiet" type="button" use:focusNow onclick={() => (confirmDelete = null)}>Keep</button>
                           {:else}
                             <button
                               class="btn btn--quiet"
