@@ -24,7 +24,7 @@
   import { shortAge, timeAgo } from './session_status';
   import { assessRow, hasReading, verdictLabel, verdictState } from './evidence';
   import StatusDot from './kit/StatusDot.svelte';
-  import { changedAny, describeEvidence, estimateLabel, isHotPriority, onWorkChangedDebounced, priorityLabel } from './work';
+  import { changedAny, describeEvidence, dueLabel, estimateLabel, isHotPriority, onWorkChangedDebounced, priorityLabel } from './work';
   import { providerInfo, unavailableLabel, shownKey } from './trackers';
   import { hubStatus, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
@@ -545,6 +545,13 @@
   const initialOf = (name: string): string => ([...name.trim()][0] ?? '?').toUpperCase();
   /** "2 / 4" in the header chips, with any subtasks. */
   const subtaskCount = $derived(subtaskProgress(detail?.subtasks));
+  /** "Oct 30" while an open task is past its due date: the header says so,
+   *  as the Work row and the Board card do. */
+  const overdue = $derived.by(() => {
+    if (!task || task.status_category === 'done') return null;
+    const d = dueLabel(task.due_at);
+    return d?.overdue ? d.text : null;
+  });
   /** The task's own "finishes when" (G7.6), as one line. */
   const finishes = $derived.by(() => {
     const s = finishesWhen(task?.done_when);
@@ -692,6 +699,7 @@
             ><span class="prio-dot prio-dot--{task.priority}" aria-hidden="true"></span>{priorityLabel(task.priority)}</span
           >
         {/if}
+        {#if overdue}<span class="chip chip--overdue" data-testid="work-task-overdue-chip" title="Was due {task.due_at}">Overdue · {overdue}</span>{/if}
         {#if subtaskCount}<span class="chip" data-testid="work-task-subtask-chip" title="Subtasks done">✓ {subtaskCount}</span>{/if}
         <TaskBlockedSpend {task} lookup={depById} testid="work-task" />
         {#if trackerDown(task)}<span class="chip chip--warn" data-testid="work-task-tracker-down"
@@ -1554,6 +1562,11 @@
     background: var(--waiting-soft);
     color: var(--usage-warn);
     white-space: normal;
+  }
+  .chip--overdue {
+    background: var(--failed-soft);
+    color: var(--danger);
+    font-weight: 600;
   }
   .chip--prio-urgent {
     gap: 5px;

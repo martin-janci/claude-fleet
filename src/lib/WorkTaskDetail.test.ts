@@ -395,6 +395,23 @@ describe('WorkTaskDetail', () => {
     expect(screen.getByTestId('work-task-estimate').textContent).toBe('4 h');
   });
 
+  it('the header says when an open task is past its due date, never a done one', async () => {
+    handlers.work_task = () => ({ ...trackerTask, task: { ...trackerTask.task, due_at: '2020-01-02', status_category: 'in_progress' } });
+    const { unmount } = render(WorkTaskDetail, { taskId: 'item:12' });
+    await flush();
+    expect(screen.getByTestId('work-task-overdue-chip').textContent).toBe('Overdue · Jan 2');
+    unmount();
+    handlers.work_task = () => ({ ...trackerTask, task: { ...trackerTask.task, due_at: '2020-01-02', status_category: 'done' } });
+    const done = render(WorkTaskDetail, { taskId: 'item:12' });
+    await flush();
+    expect(screen.queryByTestId('work-task-overdue-chip')).toBeNull();
+    done.unmount();
+    handlers.work_task = () => ({ ...trackerTask, task: { ...trackerTask.task, due_at: '2999-01-02', status_category: 'todo' } });
+    render(WorkTaskDetail, { taskId: 'item:12' });
+    await flush();
+    expect(screen.queryByTestId('work-task-overdue-chip')).toBeNull();
+  });
+
   it('a task without priority, labels or estimate shows no such rows', async () => {
     render(WorkTaskDetail, { taskId: 'item:12' });
     await flush();
