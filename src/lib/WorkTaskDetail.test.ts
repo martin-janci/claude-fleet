@@ -20,7 +20,15 @@ import { sessions } from './sessions';
 import { selectedSession, clearSelection } from './selection';
 import { session } from './hosts_fixture';
 import { link, task } from './work_view_fixture';
-import { noteWorkChanged, selectedTaskId, workTreeMeta, type OrgImpact, type TaskDetail } from './work_view';
+import {
+  noteWorkChanged,
+  selectedTaskId,
+  sidebarView,
+  workTreeMeta,
+  workViewFilters,
+  type OrgImpact,
+  type TaskDetail,
+} from './work_view';
 import { fleetSettings, SETTING_DEFAULTS } from './fleet_settings';
 import { holdTaskBrief, taskBriefDrafts } from './start_preview';
 
@@ -379,6 +387,12 @@ describe('WorkTaskDetail', () => {
     expect(prio.querySelector('.prio-dot--urgent')).not.toBeNull();
     const labels = screen.getByTestId('work-task-labels');
     expect(Array.from(labels.querySelectorAll('.chip')).map((c) => c.textContent)).toEqual(['billing', 'q4']);
+    // A label opens Work on the tasks carrying it.
+    workViewFilters.set({ priority: 'high', group: 'org:1' });
+    await fireEvent.click(screen.getAllByTestId('work-task-label')[1]);
+    expect(get(workViewFilters)).toEqual({ priority: 'high', label: 'q4' });
+    expect(get(sidebarView)).toBe('work');
+    workViewFilters.set({});
     expect(screen.getByTestId('work-task-estimate').textContent).toBe('3 pts');
     expect(screen.getByTestId('work-task-priority-chip').textContent?.trim()).toBe('Urgent');
     unmount();
