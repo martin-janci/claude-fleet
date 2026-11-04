@@ -78,6 +78,10 @@ M3 ukazuje, prečo misia čaká. Najväčšie čakania sú na človeka (karty, g
 
 **Veľkosť** S.
 
+**Ako je to postavené v N5** (`missions/stats.rs::forecast`):
+- Čistá funkcia: úlohy, ktoré ešte nie sú hotové (bez koreňa), idú v kolách po `policy.max_parallel`, ale nie rýchlejšie ako počet ich otvorených vĺn; kolo trvá medián času hotovej úlohy. Cena = minuté / hotové úlohy × zostávajúce; bez hotovej úlohy priemerný beh flotily × zostávajúce, `basis = fleet` („rough“).
+- `stats.forecast { tasks_left, secs?, micros?, basis }` v `work { mission }`, riadok „about 2h 10m and $8.00 left for 5 tasks“ pod štatistikami v miestnosti misie. Bez hotovej úlohy čas chýba (nie je čo merať).
+
 ## 6. N3: merge vlak
 
 - Karta `merge_train`, keď má misia aspoň jeden overený PR (úloha `done`, jej PR otvorený, CI zelené alebo bez CI, nie draft): PR v poradí závislostí (najprv tie, od ktorých iné závisia), najviac 10.
@@ -101,7 +105,7 @@ M3 ukazuje, prečo misia čaká. Najväčšie čakania sú na človeka (karty, g
 |---|---|---|---|
 | **N2** (postavené) | dôvod obsadenej línie, `person` pri dialógu | len meranie a zobrazenie | S |
 | **N1** (postavené) | poučenia zo `tasks`, prompt a plánovač, zoznam v miestnosti | mení prompty | M |
-| **N5** | `stats.forecast` | len zobrazenie | S |
+| **N5** (postavené) | `stats.forecast` | len zobrazenie | S |
 | **N4** | `preset: finish`, tlačidlo | nový spôsob grantu | S–M |
 | **N6** | `merge-tree` pred štartom, karta s `dependents` | mení, kedy závislá úloha štartuje | M |
 | **N3** | karta `merge_train`, `orchestrator.merge_train` | opt-in, mení O11 | M–L |

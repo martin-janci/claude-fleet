@@ -135,6 +135,7 @@
     showMissionPanel,
     startNewMission,
     statsLine,
+    forecastLine,
     steerBlocked,
     steerBusy,
     steerPrefix,
@@ -164,6 +165,7 @@
   const autonomy = $derived(plan ? autonomyWords(plan.autonomy) : null);
   /** Its runs and its idle time (lanes design L0). */
   const statsText = $derived(statsLine(detail?.stats));
+  const forecastText = $derived(forecastLine(detail?.stats));
   const pressable = $derived((plan?.steps ?? []).filter((s) => s.kind !== 'ask'));
   const openCards = $derived((plan?.cards ?? []).filter((c) => c.state === 'open' && !hiddenCards.includes(c.id)));
   const runs = $derived(detail ? runsOf(detail) : []);
@@ -917,6 +919,9 @@
         {/if}
         {#if statsText}
           <p class="meta" data-testid="mission-stats" title="Runs per done task, retries, cold starts (sessions started), a task's median time, and the share of the working span with no run open">{statsText}</p>
+        {/if}
+        {#if forecastText}
+          <p class="meta" data-testid="mission-forecast" title="What is left: the median done task's time and cost, the tasks left running as many at once as the policy allows but no faster than their waves">{forecastText}</p>
         {/if}
         {#if mayChange && confirmMove}
           <div class="row confirm-move" role="alertdialog" aria-label="Confirm" data-testid="mission-move-confirm-row">

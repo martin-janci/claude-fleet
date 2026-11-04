@@ -32,6 +32,7 @@ import {
   sendSteer,
   startNewMission,
   statsLine,
+  forecastLine,
   waitShares,
   steerBlocked,
   steerBusy,
@@ -274,6 +275,16 @@ describe('the metrics line (lanes design L0)', () => {
       '7 runs (3.5 per done task) · 2 retries · 6 cold starts · a task takes 45 min · idle 33% of 3h 0m · waited on a person 50%, for a slot 17%, on its lane 3%',
     );
     expect(waitShares({ ...base, waits: {} })).toEqual([]);
+  });
+
+  it('says what is left, and that a guess from the fleet is rough (N5)', () => {
+    expect(forecastLine({ ...base, forecast: { tasks_left: 5, secs: 7800, micros: 8_000_000, basis: 'mission' } })).toBe(
+      'about 2h 10m and $8.00 left for 5 tasks',
+    );
+    expect(forecastLine({ ...base, forecast: { tasks_left: 1, micros: 1_500_000, basis: 'fleet' } })).toBe(
+      'about $1.50 left for 1 task (rough)',
+    );
+    expect(forecastLine({ ...base, forecast: null })).toBeNull();
   });
 
   it('says nothing before the first run, or from an older hub', () => {

@@ -343,6 +343,17 @@ export function statsLine(st: MissionStats | null | undefined): string | null {
   return parts.join(' · ');
 }
 
+/** PURE: "about 2h 10m and $8.00 left for 5 tasks", "(rough)" from the
+ *  fleet's average; null with nothing left (N5). */
+export function forecastLine(st: MissionStats | null | undefined): string | null {
+  const f = st?.forecast;
+  if (!f || f.tasks_left <= 0) return null;
+  const what = [f.secs != null ? formatDuration(f.secs) : null, f.micros != null ? money(f.micros) : null].filter(Boolean);
+  const tasks = `${f.tasks_left} task${f.tasks_left === 1 ? '' : 's'}`;
+  const head = what.length > 0 ? `about ${what.join(' and ')} left for ${tasks}` : `${tasks} left`;
+  return f.basis === 'fleet' ? `${head} (rough)` : head;
+}
+
 /** What a mission's ready work waited on (M3), as the stats line says it. */
 export const WAIT_LABEL: Record<string, string> = {
   person: 'on a person',

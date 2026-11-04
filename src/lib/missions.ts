@@ -331,6 +331,17 @@ export interface MissionStats {
   waits?: Record<string, number>;
   /** Subagents the workers started during the mission's attempts (M7). */
   subagents?: number;
+  /** What is left (N5); absent once every task is done. */
+  forecast?: MissionForecast | null;
+}
+
+/** What a mission likely still takes (`missions::stats::Forecast`). */
+export interface MissionForecast {
+  tasks_left: number;
+  secs?: number | null;
+  micros?: number | null;
+  /** `mission` (its own done tasks) or `fleet` (a rough guess). */
+  basis: string;
 }
 
 /** One live session on a mission's member item (`missions::FinishSession`). */

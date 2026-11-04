@@ -305,7 +305,28 @@ pub fn mission(
     let may_change = may_change_mission(&s, scope, &mission)?;
     let plan = super::orchestrate::plan_for(&s, &mission)?;
     let sessions = live_sessions(&s, scope, id)?;
-    let stats = Some(mission_stats(&s, &mission, &items)?);
+    let mut stats = mission_stats(&s, &mission, &items)?;
+    // N5: what is left, from the graph's open waves and the done tasks.
+    let open: Vec<&super::graph::GraphNode> = graph
+        .nodes
+        .iter()
+        .filter(|n| n.state != "done" && Some(n.item_id) != mission.root_item_id)
+        .collect();
+    let waves_left = open
+        .iter()
+        .map(|n| n.wave)
+        .collect::<std::collections::BTreeSet<_>>()
+        .len() as u32;
+    stats.forecast = stats::forecast(stats::ForecastInput {
+        tasks_left: stats.items.saturating_sub(stats.items_done),
+        waves_left,
+        max_parallel: mission.policy.max_parallel,
+        task_secs_p50: stats.item_secs_p50,
+        tasks_done: stats.items_done,
+        spent_micros: mission.cost_micros.unwrap_or(0),
+        fleet_run_micros: s.run_cost_estimate(None)?.map(|(m, _)| m),
+    });
+    let stats = Some(stats);
     // Each visible item's status category: lanes and touches show those alone.
     let status: std::collections::HashMap<i64, &str> = items
         .iter()

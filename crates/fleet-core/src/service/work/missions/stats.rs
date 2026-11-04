@@ -60,6 +60,65 @@ pub struct MissionStats {
     /// (mission improvements M7). Filled by the caller, as `waits` is.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub subagents: u32,
+    /// What is left (mission progress N5): filled by the caller; absent
+    /// once every task is done.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forecast: Option<Forecast>,
+}
+
+/// What a mission likely still takes (N5).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Forecast {
+    /// Tasks not done yet.
+    pub tasks_left: u32,
+    /// Wall clock, seconds; `None` before a task is done (nothing to time).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secs: Option<i64>,
+    /// Spend, micro-USD; `None` without anything to price it by.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub micros: Option<i64>,
+    /// `mission`: from its own done tasks; `fleet`: from every mission's
+    /// average run, a rough guess (F4).
+    pub basis: String,
+}
+
+/// What [`forecast`] reads.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ForecastInput {
+    pub tasks_left: u32,
+    /// The waves the tasks left span (their critical path).
+    pub waves_left: u32,
+    pub max_parallel: u32,
+    pub task_secs_p50: Option<i64>,
+    pub tasks_done: u32,
+    /// What the mission spent so far.
+    pub spent_micros: i64,
+    /// Every mission's average run, when the mission has no done task.
+    pub fleet_run_micros: Option<i64>,
+}
+
+/// PURE: what is left (F4): a task takes the median done task's time, the
+/// tasks left run `max_parallel` at a time but never faster than their
+/// waves, one after another; each costs what a done task cost on average,
+/// or, before one is done, one fleet-average run.
+pub fn forecast(i: ForecastInput) -> Option<Forecast> {
+    if i.tasks_left == 0 {
+        return None;
+    }
+    let parallel = i.max_parallel.max(1);
+    let rounds = i.waves_left.max(i.tasks_left.div_ceil(parallel)).max(1) as i64;
+    let own = i.tasks_done > 0 && i.spent_micros > 0;
+    let micros = if own {
+        Some(i.spent_micros / i.tasks_done as i64 * i.tasks_left as i64)
+    } else {
+        i.fleet_run_micros.map(|r| r * i.tasks_left as i64)
+    };
+    Some(Forecast {
+        tasks_left: i.tasks_left,
+        secs: i.task_secs_p50.map(|t| t * rounds),
+        micros,
+        basis: if own { "mission" } else { "fleet" }.into(),
+    })
 }
 
 fn is_zero(n: &u32) -> bool {
@@ -190,6 +249,47 @@ pub fn stats(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Mission progress N5: what is left runs `max_parallel` at a time but
+    /// no faster than its waves, at a done task's time and cost.
+    #[test]
+    fn the_forecast_spreads_the_tasks_left_over_slots_and_waves() {
+        let base = ForecastInput {
+            tasks_left: 5,
+            waves_left: 1,
+            max_parallel: 2,
+            task_secs_p50: Some(600),
+            tasks_done: 2,
+            spent_micros: 4_000_000,
+            fleet_run_micros: Some(1_000_000),
+        };
+        let f = forecast(base).unwrap();
+        assert_eq!(f.secs, Some(1800), "5 tasks, 2 at a time: 3 rounds");
+        assert_eq!(f.micros, Some(10_000_000), "$2 a done task × 5");
+        assert_eq!(f.basis, "mission");
+        let deep = forecast(ForecastInput {
+            waves_left: 4,
+            ..base
+        })
+        .unwrap();
+        assert_eq!(deep.secs, Some(2400), "four waves, one after another");
+        let fresh = forecast(ForecastInput {
+            tasks_done: 0,
+            spent_micros: 0,
+            task_secs_p50: None,
+            ..base
+        })
+        .unwrap();
+        assert_eq!((fresh.secs, fresh.micros), (None, Some(5_000_000)));
+        assert_eq!(fresh.basis, "fleet");
+        assert_eq!(
+            forecast(ForecastInput {
+                tasks_left: 0,
+                ..base
+            }),
+            None
+        );
+    }
 
     fn item(id: i64, done: bool) -> WorkItemRow {
         serde_json::from_value(serde_json::json!({
