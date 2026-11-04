@@ -693,6 +693,12 @@ export function priorityLabel(p: string | null | undefined): string | null {
   return WORK_PRIORITIES.find((x) => x.value === p)?.label ?? null;
 }
 
+/** Urgent or high: the priorities a list row, a card and the task header
+ *  call out. Medium and low are the usual case and stay quiet. */
+export function isHotPriority(p: string | null | undefined): p is 'urgent' | 'high' {
+  return p === 'urgent' || p === 'high';
+}
+
 /** An estimate as the task detail says it: "3 pts", "1 pt", "4 h";
  *  `null` for none. */
 export function estimateLabel(estimate: number | null | undefined, unit: string | null | undefined): string | null {

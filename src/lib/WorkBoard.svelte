@@ -36,7 +36,7 @@
   // button (Start new, Continue ▾).
   import { onDestroy, onMount, tick } from 'svelte';
   import { get } from 'svelte/store';
-  import { createWorkTask, estimateLabel, onWorkChangedDebounced, ownerDueChip, priorityLabel, setWorkStatus } from './work';
+  import { createWorkTask, estimateLabel, onWorkChangedDebounced, isHotPriority, ownerDueChip, priorityLabel, setWorkStatus } from './work';
   import { sessionAgent, sessions } from './sessions';
   import { AGENT_LABELS } from './row_groups';
   import { prChip } from './work_row';
@@ -665,7 +665,7 @@
       <span class="meta">
         {#if prio}<span
             class="prio"
-            class:hot={t.priority === 'urgent' || t.priority === 'high'}
+            class:hot={isHotPriority(t.priority)}
             title="Priority: {prio}"
             data-testid="work-board-priority">{prio}</span
           >{/if}
