@@ -67,7 +67,16 @@
     }
   }
 
+  /** A ready copy nobody has saved: removing it loses the file until the
+   *  session sends it again, so ✕ asks first (UX pass A21). */
+  let asking = $state<number | null>(null);
+  const unsaved = (d: Download) => d.state === 'ready' && d.downloaded_at == null && !$savedTo.has(d.id);
+  function focusNow(el: HTMLElement) {
+    el.focus();
+  }
+
   async function remove(d: Download) {
+    asking = null;
     busy = d.id;
     try {
       await removeDownload(d.id);
@@ -178,12 +187,21 @@
                 onclick={() => save(d)}>Save…</button
               >
             {/if}
-            <button
-              disabled={busy === d.id}
-              title="Remove the copy"
-              aria-label="Remove {d.name}"
-              onclick={() => remove(d)}>✕</button
-            >
+            {#if asking === d.id}
+              <span class="ask" role="alertdialog" aria-label="Remove {d.name} without saving it?" data-testid="download-remove-ask"
+                >Not saved yet.
+                <button data-testid="download-remove-confirm" disabled={busy === d.id} onclick={() => void remove(d)}>Remove</button>
+                <button data-testid="download-remove-keep" use:focusNow onclick={() => (asking = null)}>Keep</button></span
+              >
+            {:else}
+              <button
+                disabled={busy === d.id}
+                title="Remove the copy"
+                aria-label="Remove {d.name}"
+                data-testid="download-remove"
+                onclick={() => (unsaved(d) ? (asking = d.id) : void remove(d))}>✕</button
+              >
+            {/if}
           </div>
         </li>
       {/each}
@@ -291,6 +309,7 @@
     font-size: var(--text-2xs);
     padding: 0.2rem 0.55rem;
   }
+  .ask { display: inline-flex; align-items: center; gap: 6px; font-size: var(--text-xs); color: var(--fg-muted); }
   .actions button:hover {
     color: var(--fg);
   }
