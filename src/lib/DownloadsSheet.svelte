@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { focusNow } from './focus_now';
   import { tablistKeys } from './tablist_keys';
   import { onMount } from 'svelte';
   import Modal from './Modal.svelte';
@@ -71,9 +72,6 @@
    *  session sends it again, so ✕ asks first (UX pass A21). */
   let asking = $state<number | null>(null);
   const unsaved = (d: Download) => d.state === 'ready' && d.downloaded_at == null && !$savedTo.has(d.id);
-  function focusNow(el: HTMLElement) {
-    el.focus();
-  }
 
   async function remove(d: Download) {
     asking = null;

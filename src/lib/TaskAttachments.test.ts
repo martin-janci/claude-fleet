@@ -134,6 +134,8 @@ describe('TaskAttachments', () => {
     expect(screen.getAllByTestId('task-attachment-delete')).toHaveLength(1);
     await fireEvent.click(screen.getByTestId('task-attachment-delete'));
     expect(calls('delete_work_attachment')).toHaveLength(0);
+    // The Delete… that opened the confirm is gone: focus lands on Keep, not the page.
+    expect(document.activeElement?.textContent).toBe('Keep');
     await fireEvent.click(screen.getByTestId('task-attachment-delete-confirm'));
     await flush();
     expect(calls('delete_work_attachment')).toEqual([{ attachment_id: 3 }]);
