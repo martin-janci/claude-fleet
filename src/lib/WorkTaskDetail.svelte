@@ -85,12 +85,14 @@
     readErrorText,
     ruleDraftFor,
     selectedTaskId,
+    showWorkView,
     taskStatus,
     trackerDown,
     trackerDownLabel,
     workRules,
     workTask,
     workTreeMeta,
+    workViewFilters,
     type TaskDetail,
     type WorkRule,
     type WorkRuleDraft,
@@ -553,6 +555,12 @@
     const d = dueLabel(task.due_at);
     return d?.overdue ? d.text : null;
   });
+  /** A label in the rail opens Work on the tasks carrying it, keeping the
+   *  other filters (a section's `group` is per section, so it goes). */
+  function filterByLabel(label: string): void {
+    workViewFilters.update(({ group: _g, ...rest }) => ({ ...rest, label }));
+    showWorkView();
+  }
   /** The task's own "finishes when" (G7.6), as one line. */
   const finishes = $derived.by(() => {
     const s = finishesWhen(task?.done_when);
@@ -836,7 +844,13 @@
               {#if (task.labels ?? []).length > 0}
                 <dt>Labels</dt>
                 <dd class="labels" data-testid="work-task-labels">
-                  {#each task.labels ?? [] as label (label)}<span class="chip chip--label">{label}</span>{/each}
+                  {#each task.labels ?? [] as label (label)}<button
+                      class="chip chip--label"
+                      type="button"
+                      data-testid="work-task-label"
+                      title="Show the tasks labelled “{label}” in Work"
+                      onclick={() => filterByLabel(label)}>{label}</button
+                    >{/each}
                 </dd>
               {/if}
               {#if estimateLabel(task.estimate, task.estimate_unit)}
@@ -1584,6 +1598,12 @@
   .chip--label {
     height: auto;
     padding: 1px 6px;
+    font-family: inherit;
+    border: none;
+    cursor: pointer;
+  }
+  .chip--label:hover {
+    text-decoration: underline;
   }
   .prio-dot {
     flex: none;
