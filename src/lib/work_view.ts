@@ -596,6 +596,10 @@ export interface SubtaskView {
   project_id?: number | null;
   live_sessions: number;
   job_state?: string | null;
+  /** `YYYY-MM-DD`; absent from an older hub. */
+  due_at?: string | null;
+  /** `urgent | high | medium | low`; absent for none or from an older hub. */
+  priority?: string | null;
 }
 
 /** An agent's proposed subtask. `why` and `notes` are agent text: render as text. */
