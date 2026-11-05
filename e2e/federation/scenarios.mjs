@@ -143,7 +143,12 @@ export const scenarios = [
       t.check(checked === 'true', 'the Papaya chip is the checked one at launch', `aria-checked=${checked}`);
       await openHosts(t);
       await t.visible('hosts-primary-filtered', 'All hosts explains why own hosts are missing');
+      await t.text('hosts-primary-filtered', /Papaya POS/, 'the note names the fleet the filter is on');
       await t.shot('hosts-launch-filtered');
+      await t.byTestId('hosts-primary-filtered-show-all').click();
+      await t.visible('hosts-own-fleet', 'Show all fleets brings own hosts back on the Hosts page');
+      await t.visible('fleet-hosts-papaya');
+      await t.shot('hosts-after-show-all');
     },
   },
   {

@@ -55,7 +55,7 @@ covers the real hub and agent; this harness covers what the window shows.
 | `own-hub-plus-papaya` | Own hub + Papaya POS: both fleets on the sidebar, and all hosts of both on All hosts |
 | `standalone-plus-papaya` | This machine (no hub) + a federated fleet |
 | `filter-one-fleet` | Fleet filter on Papaya, then on own hub, then All: each page hides the other fleet and says so |
-| `remembered-filter` | A filter remembered from last time is visible at launch, and All hosts explains the missing own hosts |
+| `remembered-filter` | A filter remembered from last time (Martin's bug, 2026-11-05): the note on All hosts names the fleet and Show all fleets brings own hosts back |
 | `three-hubs` | Three hubs, each chip in turn on All hosts |
 | `offline-federated` | A hub offline since launch: state, reason, no false "No sessions"; then it reconnects and its hosts appear |
 | `unavailable-federated` | A configured fleet without a stored token: the reason is shown and nothing is listed from it |
