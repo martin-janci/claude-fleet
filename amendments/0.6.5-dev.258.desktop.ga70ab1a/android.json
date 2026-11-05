@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "version": "0.6.5-dev.258.desktop.ga70ab1a",
+  "mobile_accepts": [
+    0,
+    18
+  ],
+  "components": {
+    "android": {
+      "version": "0.6.5-dev.258.desktop.ga70ab1a",
+      "artifacts": [
+        {
+          "kind": "apk",
+          "url": "https://github.com/martin-janci/fleet-mobile/releases/download/v0.6.5-dev.258.desktop.ga70ab1a/fleet-mobile-0.6.5-dev.258.desktop.ga70ab1a.apk",
+          "sha256": "75de9293246a66989ce4fce6482fc189d52716a0f60cb2f4a68ce755f70f650a",
+          "size": 18483464,
+          "version_code": 444071,
+          "signer_sha256": "87081ff376e7ad2cb3082bf8f48dac2f451bffda66693b575c31cd4c354b9a15"
+        }
+      ]
+    }
+  }
+}
