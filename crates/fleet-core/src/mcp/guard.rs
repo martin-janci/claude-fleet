@@ -312,6 +312,15 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
+    // The projects an account is forbidden for: the hub owner's, as the
+    // nickname is.
+    ToolPolicy {
+        name: "set_account_projects",
+        access: Access::Person,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
     ToolPolicy {
         name: "account_usage",
         access: Access::Client,

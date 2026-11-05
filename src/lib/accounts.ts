@@ -13,6 +13,16 @@ export interface AccountRow {
   last_seen_at: number | null;
   nickname: string | null;
   has_extra_usage: boolean;
+  /** The projects this account is forbidden for (docs/accounts.md, *Keep
+   *  an account off a project*), ascending. Absent from an older hub. */
+  forbidden_project_ids?: number[];
+}
+
+/** The accounts project `projectId` may not run on, from `list` (the
+ *  accounts store's rows). Empty without a project. */
+export function accountsForbiddenFor(projectId: number | null | undefined, list: readonly AccountRow[]): string[] {
+  if (projectId == null) return [];
+  return list.filter((a) => a.forbidden_project_ids?.includes(projectId)).map((a) => a.uuid);
 }
 
 /**
@@ -81,6 +91,16 @@ export async function setAccountNickname(
   nickname: string | null,
 ): Promise<Result<AccountRow>> {
   const r = await invokeCmd<AccountRow>('set_account_nickname', { args: { uuid, nickname } });
+  if (r.ok) mergeAccount(r.value);
+  return r;
+}
+
+/** Replace the projects an account is forbidden for (`set_account_projects`;
+ *  empty allows every project again). The row comes back with the new list. */
+export async function setAccountProjects(uuid: string, projectIds: readonly number[]): Promise<Result<AccountRow>> {
+  const r = await invokeCmd<AccountRow>('set_account_projects', {
+    args: { uuid, forbidden_project_ids: [...projectIds] },
+  });
   if (r.ok) mergeAccount(r.value);
   return r;
 }

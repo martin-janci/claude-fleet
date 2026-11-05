@@ -540,6 +540,15 @@ pub async fn new_session(
                 args.profile.as_deref(),
                 crate::store::now_unix(),
             )?;
+            // An account the project forbids starts none of its work, from
+            // any caller (`service::project_accounts`).
+            crate::service::project_accounts::refuse_forbidden(
+                &s,
+                Some(args.project_id),
+                &args.host_alias,
+                args.profile.as_deref(),
+                crate::store::now_unix(),
+            )?;
         }
         reject_lost_session_name(&s, &args.host_alias, &args.name, args.owner_person_id)?;
         reject_adoptable_session_name(&s, &args.host_alias, &args.name)?;
@@ -2511,6 +2520,17 @@ pub async fn restart_session(
             launch.profile.as_deref(),
             crate::store::now_unix(),
         )?;
+        // A switch onto a login the project forbids is refused; a plain
+        // restart keeps the login the pane already ran under.
+        if switch.is_some() {
+            crate::service::project_accounts::refuse_forbidden(
+                &*lock(store)?,
+                project_id,
+                &args.host_alias,
+                launch.profile.as_deref(),
+                crate::store::now_unix(),
+            )?;
+        }
     }
     let pane_cmd: String =
         recreate_pane_command(&kind, &agent, claude_id.as_deref(), &args.name, &launch);

@@ -1981,6 +1981,7 @@ fn upsert_session_preserves_account_uuid_when_passed_existing_value() {
         last_seen_at: None,
         nickname: None,
         has_extra_usage: false,
+        forbidden_project_ids: Vec::new(),
     })
     .unwrap();
     // First reconcile captures host's account
@@ -1997,6 +1998,7 @@ fn upsert_session_preserves_account_uuid_when_passed_existing_value() {
         last_seen_at: None,
         nickname: None,
         has_extra_usage: false,
+        forbidden_project_ids: Vec::new(),
     })
     .unwrap();
     // Second reconcile: caller reads existing account before upsert
@@ -2728,6 +2730,7 @@ fn seed_account(s: &Store, uuid: &str) {
         last_seen_at: None,
         nickname: None,
         has_extra_usage: false,
+        forbidden_project_ids: Vec::new(),
     })
     .unwrap();
 }
@@ -3811,6 +3814,7 @@ fn upsert_session_captures_new_account_for_fresh_row() {
         last_seen_at: None,
         nickname: None,
         has_extra_usage: false,
+        forbidden_project_ids: Vec::new(),
     })
     .unwrap();
     // Brand new session — no existing row

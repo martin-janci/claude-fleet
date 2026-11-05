@@ -11,8 +11,9 @@
 //! and is under the recovery thresholds (`auto_restore::host_load`: low
 //! memory, memory pressure, CPU saturated); when a project is named, a host
 //! that has run it (when any host has). On it, a login that is on a known
-//! account, not signed out (`login_health`), under `accounts.pause_at` and
-//! not past its daily spend limit.
+//! account the project does not forbid (`project_accounts`), not signed out
+//! (`login_health`), under `accounts.pause_at` and not past its daily spend
+//! limit.
 //!
 //! **Rank.** By headroom: the account's unused share first, then the host's
 //! idle CPU and free memory. A preferred host (the one the work last ran
@@ -74,6 +75,10 @@ pub struct LoginFacts {
     /// Live sessions running on its account, on any host.
     #[serde(default)]
     pub live_sessions: u32,
+    /// The project asked about forbids its account
+    /// (`service::project_accounts`).
+    #[serde(default)]
+    pub forbidden: bool,
 }
 
 /// One host, as placement sees it.
@@ -189,6 +194,9 @@ fn host_out(h: &HostFacts, want: &Want) -> Option<String> {
 
 /// PURE: why one login is left out, or `None`.
 fn login_out(l: &LoginFacts, want: &Want, pause_at: f64) -> Option<String> {
+    if l.forbidden {
+        return Some("the project forbids its account".into());
+    }
     if want.not_account.as_deref() == Some(l.account_uuid.as_str()) {
         return Some("the account that ran out".into());
     }
@@ -353,6 +361,7 @@ pub fn facts(
         None => None,
     };
     let unseen = with_repo.as_ref().is_some_and(Vec::is_empty);
+    let forbidden = crate::service::project_accounts::forbidden_accounts(s, project_id)?;
     let mut out = Vec::with_capacity(hosts.len());
     for h in &hosts {
         let mut logins = Vec::new();
@@ -376,6 +385,7 @@ pub fn facts(
                 used_pct: used,
                 daily_limit_hit: daily,
                 live_sessions: live.get(&l.account_uuid).copied().unwrap_or(0),
+                forbidden: forbidden.contains(&l.account_uuid),
                 profile: l.profile,
                 account_uuid: l.account_uuid,
             });

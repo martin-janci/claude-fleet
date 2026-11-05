@@ -256,6 +256,7 @@ pub(crate) fn sample_account() -> AccountRow {
         last_seen_at: Some(1_725_000_000),
         nickname: Some("work".into()),
         has_extra_usage: true,
+        forbidden_project_ids: vec![7],
     }
 }
 

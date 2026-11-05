@@ -79,6 +79,10 @@ pub fn fix(r: &RoutineRow, run: &RoutineRunRow) -> Option<RunFix> {
             "Switch account or wait for the limit".to_string(),
             "accounts",
         ),
+        codes::E_ACCOUNT_FORBIDDEN => (
+            "Pick a login on an account this project allows".to_string(),
+            "accounts",
+        ),
         codes::E_SSH
         | codes::E_SSH_TIMEOUT
         | codes::E_HOST_OFFLINE

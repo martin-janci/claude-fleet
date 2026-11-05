@@ -1310,8 +1310,9 @@ pub fn plan_resolved(
         // own, gives way to a login on the host with headroom when its
         // account is past `accounts.pause_at` (a named host skips
         // placement, so this is its only look at the limits).
-        None if !codex => crate::service::account_limits::login_with_headroom(
+        None if !codex => crate::service::account_limits::login_with_headroom_for(
             &s,
+            Some(project_id),
             &host_alias,
             placed_profile.as_deref(),
             crate::store::now_unix(),

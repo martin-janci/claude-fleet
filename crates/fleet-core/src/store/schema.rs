@@ -2516,6 +2516,12 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/216_lane_pr.sql"),
         already_applied: Some(lanes_have_pr_url),
     },
+    // Forbid an account for a project: `account_project_blocks`. A new
+    // table, written idempotently.
+    Migration::plain(
+        217,
+        include_str!("../../migrations/217_account_project_blocks.sql"),
+    ),
 ];
 
 /// The settings row [`Store::finish_realm_upgrade`] writes once migration

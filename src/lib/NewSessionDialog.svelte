@@ -16,7 +16,7 @@
   import PickerList from './PickerList.svelte';
   import HostChips from './HostChips.svelte';
   import { refreshAccountUsage } from './account_usage_store';
-  import { accountByUuid, accountLabel } from './accounts';
+  import { accountByUuid, accountLabel, accounts, accountsForbiddenFor } from './accounts';
   import {
     checkAccountHeadroom,
     freestLogin,
@@ -370,10 +370,22 @@
       if (chosenHost !== host) return;
       const logins = h.ok && Array.isArray(h.value?.logins) ? h.value.logins : [];
       hostLogins = logins;
-      const best = pickedLogin ? null : freestLogin(logins);
+      const allowed = allowedLogins(logins);
+      // No reading anywhere: still never a login this project forbids.
+      const current = logins.find((l) => (l.profile ?? '') === chosenProfile);
+      const best = pickedLogin
+        ? null
+        : (freestLogin(allowed) ?? (current && !allowed.includes(current) ? (allowed[0] ?? null) : null));
       if (best) chosenProfile = best.profile ?? '';
     });
   });
+  // Accounts this project may not run on (docs/accounts.md, *Keep an
+  // account off a project*): never the default pick, and shown disabled.
+  const forbiddenHere = $derived(accountsForbiddenFor(project.project.id, $accounts));
+  function allowedLogins(logins: readonly HostLogin[]): HostLogin[] {
+    const forbidden = untrack(() => forbiddenHere);
+    return logins.filter((l) => !forbidden.includes(l.account_uuid));
+  }
   // A name typed while the headroom check is still out is a pick too: the
   // check's default must not overwrite it, and the field stays (review r05).
   function onTypeProfile() {
@@ -1513,7 +1525,7 @@
     const submittedWorktreeId = inNewMode ? null : chosenWorktreeId;
     if (runsClaude && !limitConfirmed) {
       busy = true;
-      const h = await checkAccountHeadroom(submittedHost, chosenProfile.trim() || null);
+      const h = await checkAccountHeadroom(submittedHost, chosenProfile.trim() || null, project.project.id);
       busy = false;
       // No answer (a hub client, an unknown host): start as before.
       if (h.ok && h.value?.over) {
@@ -1961,7 +1973,10 @@
               onchange={(e) => onPickLogin(e.currentTarget.value)}
             >
               {#each hostLogins as l (l.profile ?? '')}
-                <option value={l.profile ?? ''}>{loginLabel(l, accountName)} · {usedText(l)}</option>
+                {@const forbidden = forbiddenHere.includes(l.account_uuid)}
+                <option value={l.profile ?? ''} disabled={forbidden}
+                  >{loginLabel(l, accountName)} · {forbidden ? 'not for this project' : usedText(l)}</option
+                >
               {/each}
               <option value={OTHER_PROFILE}>Other profile…</option>
             </select>
@@ -1993,7 +2008,7 @@
                 data-testid="launch-profile-back"
                 onclick={() => {
                   otherProfile = false;
-                  chosenProfile = freestLogin(hostLogins ?? [])?.profile ?? '';
+                  chosenProfile = freestLogin(allowedLogins(hostLogins ?? []))?.profile ?? '';
                 }}>Back to accounts</button
               >
             {/if}

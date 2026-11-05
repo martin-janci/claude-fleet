@@ -758,6 +758,7 @@ pub fn run() {
             commands::hosts::merge_host,
             commands::hosts::hide_host,
             commands::hosts::set_account_nickname,
+            commands::hosts::set_account_projects,
             commands::account_usage::list_account_usage,
             commands::account_usage::refresh_account_usage,
             commands::account_usage::account_usage_history,
