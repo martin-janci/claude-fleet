@@ -1628,15 +1628,24 @@ pub struct AccountRow {
     /// `Store::upsert_account` (only `Store::set_account_forbidden_projects`
     /// changes it). An older hub sends no key: empty.
     pub forbidden_project_ids: Vec<i64>,
+    /// The orgs a person forbade this account for (migration 218),
+    /// ascending: every project of one of them, today's and later ones, is
+    /// treated as if it were in [`Self::forbidden_project_ids`]. Written only
+    /// by `Store::set_account_forbidden_orgs`. An older hub sends no key:
+    /// empty.
+    pub forbidden_org_ids: Vec<i64>,
 }
 
 /// Columns every `AccountRow` query selects (`FROM accounts`, unaliased), in
 /// [`map_account_row`] order. The last is the account's forbidden projects
-/// as a comma-separated list (migration 217).
+/// as a comma-separated list (migration 217), then its forbidden orgs
+/// the same way (migration 218).
 pub(super) const ACCOUNT_COLUMNS: &str =
     "uuid, email, display_name, organization_name, organization_uuid, \
      seat_tier, last_seen_at, nickname, has_extra_usage, \
      (SELECT group_concat(project_id) FROM account_project_blocks \
+       WHERE account_uuid = accounts.uuid), \
+     (SELECT group_concat(org_id) FROM account_org_blocks \
        WHERE account_uuid = accounts.uuid)";
 
 /// Map a row selected with [`ACCOUNT_COLUMNS`].
@@ -1651,15 +1660,18 @@ pub(super) fn map_account_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Accou
         last_seen_at: row.get(6)?,
         nickname: row.get(7)?,
         has_extra_usage: row.get::<_, i64>(8)? != 0,
-        forbidden_project_ids: {
-            let mut ids: Vec<i64> = row
-                .get::<_, Option<String>>(9)?
-                .map(|ids| ids.split(',').filter_map(|i| i.parse().ok()).collect())
-                .unwrap_or_default();
-            ids.sort_unstable();
-            ids
-        },
+        forbidden_project_ids: id_list(row.get(9)?),
+        forbidden_org_ids: id_list(row.get(10)?),
     })
+}
+
+/// A `group_concat` of ids, ascending; `NULL` is empty.
+fn id_list(ids: Option<String>) -> Vec<i64> {
+    let mut ids: Vec<i64> = ids
+        .map(|ids| ids.split(',').filter_map(|i| i.parse().ok()).collect())
+        .unwrap_or_default();
+    ids.sort_unstable();
+    ids
 }
 
 /// One row of the append-only per-session event timeline (migration 013).

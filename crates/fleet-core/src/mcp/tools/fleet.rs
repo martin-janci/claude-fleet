@@ -284,17 +284,22 @@ impl FleetTools {
         ok_json(&hosts::set_account_nickname(args, &self.store).map_err(to_mcp_err)?)
     }
 
-    #[tool(description = "Set the projects a Claude account is forbidden \
-        for (replaces the list; empty allows every project). Work in one never \
-        starts, resumes or switches onto a login on it: such a start fails \
-        E_ACCOUNT_FORBIDDEN. Returns the account row.")]
+    #[tool(description = "Set the projects or orgs a Claude account is \
+        forbidden for (each list given replaces it; empty clears). Work in one \
+        never starts, resumes or switches onto a login on it: such a start \
+        fails E_ACCOUNT_FORBIDDEN. Returns the account row.")]
     pub(super) async fn set_account_projects(
         &self,
         Parameters(args): Parameters<crate::service::project_accounts::SetAccountProjectsArgs>,
     ) -> Result<CallToolResult, McpError> {
         audit(
             "set_account_projects",
-            &format!("uuid={} n={}", args.uuid, args.forbidden_project_ids.len()),
+            &format!(
+                "uuid={} projects={:?} orgs={:?}",
+                args.uuid,
+                args.forbidden_project_ids.as_ref().map(Vec::len),
+                args.forbidden_org_ids.as_ref().map(Vec::len),
+            ),
         );
         ok_json(
             &crate::service::project_accounts::set_account_projects(args, &self.store)

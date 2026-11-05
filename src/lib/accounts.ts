@@ -16,13 +16,23 @@ export interface AccountRow {
   /** The projects this account is forbidden for (docs/accounts.md, *Keep
    *  an account off a project*), ascending. Absent from an older hub. */
   forbidden_project_ids?: number[];
+  /** The orgs this account is forbidden for: every project of one, today's
+   *  and later ones, ascending. Absent from an older hub. */
+  forbidden_org_ids?: number[];
 }
 
 /** The accounts project `projectId` may not run on, from `list` (the
- *  accounts store's rows). Empty without a project. */
-export function accountsForbiddenFor(projectId: number | null | undefined, list: readonly AccountRow[]): string[] {
+ *  accounts store's rows): forbidden for the project, or for its org
+ *  (`orgId`, `projectOrgId`). Empty without a project. */
+export function accountsForbiddenFor(
+  projectId: number | null | undefined,
+  list: readonly AccountRow[],
+  orgId: number | null = null,
+): string[] {
   if (projectId == null) return [];
-  return list.filter((a) => a.forbidden_project_ids?.includes(projectId)).map((a) => a.uuid);
+  return list
+    .filter((a) => a.forbidden_project_ids?.includes(projectId) || (orgId != null && a.forbidden_org_ids?.includes(orgId)))
+    .map((a) => a.uuid);
 }
 
 /**
@@ -95,12 +105,18 @@ export async function setAccountNickname(
   return r;
 }
 
-/** Replace the projects an account is forbidden for (`set_account_projects`;
- *  empty allows every project again). The row comes back with the new list. */
-export async function setAccountProjects(uuid: string, projectIds: readonly number[]): Promise<Result<AccountRow>> {
-  const r = await invokeCmd<AccountRow>('set_account_projects', {
-    args: { uuid, forbidden_project_ids: [...projectIds] },
-  });
+/** Replace the projects and/or orgs an account is forbidden for
+ *  (`set_account_projects`; a list left out stays as it is, empty clears).
+ *  The row comes back with the new lists. */
+export async function setAccountProjects(
+  uuid: string,
+  projectIds: readonly number[] | null,
+  orgIds: readonly number[] | null = null,
+): Promise<Result<AccountRow>> {
+  const args: { uuid: string; forbidden_project_ids?: number[]; forbidden_org_ids?: number[] } = { uuid };
+  if (projectIds) args.forbidden_project_ids = [...projectIds];
+  if (orgIds) args.forbidden_org_ids = [...orgIds];
+  const r = await invokeCmd<AccountRow>('set_account_projects', { args });
   if (r.ok) mergeAccount(r.value);
   return r;
 }
