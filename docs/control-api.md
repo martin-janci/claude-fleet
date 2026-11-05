@@ -372,7 +372,10 @@ Index by area (names only; see the reference for details):
   a project: `{host_alias, confidence_pct, run_id}` or null; a person's
   device only, never a per-host token; hub contract 17),
   `list_accounts`, `set_account_nickname` (an account's label on every
-  device; a fleet admin's devices, contract 17), `account_usage` (each account's latest plan usage: the
+  device; a fleet admin's devices, contract 17), `set_account_projects`
+  (the projects an account is forbidden for: work in one never starts,
+  resumes or switches onto a login on it, `E_ACCOUNT_FORBIDDEN`; a
+  person's device only), `account_usage` (each account's latest plan usage: the
   5-hour and weekly windows with their reset times, status and when it was
   fetched, as the hub's usage poll last answered; never fetches; hub
   contract 11), `check_account_headroom` (whether starting or switching a

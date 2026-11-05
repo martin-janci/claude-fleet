@@ -388,6 +388,8 @@ export const ROUTED_ACTIONS = [
   'install_agent',
   // An account's nickname: the hub's set_account_nickname.
   'set_account_nickname',
+  // The projects an account is forbidden for: the hub's set_account_projects.
+  'set_account_projects',
   'move_session',
   'new_session',
   'repair_session',

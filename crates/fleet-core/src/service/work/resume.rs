@@ -955,7 +955,8 @@ pub fn resume_session_args(
 /// login fleet picked (the past session's or the host's own) that is past
 /// `accounts.pause_at` gives way to another login on the host with headroom
 /// ([`account_limits::login_with_headroom`]): the conversation resumes under
-/// it, as an account switch does. Nothing here refuses: a resume is how
+/// it, as an account switch does; so does one on an account the project
+/// forbids (`project_accounts`). Nothing here refuses: a resume is how
 /// Control recovers work, so a spent login is the start's own to report.
 ///
 /// [`account_limits::login_with_headroom`]: crate::service::account_limits::login_with_headroom
@@ -978,7 +979,13 @@ pub(crate) fn resume_profile(
         Some(id) => past_session_login(s, id, host)?,
         None => None,
     };
-    crate::service::account_limits::login_with_headroom(s, host, past.flatten().as_deref(), now)
+    crate::service::account_limits::login_with_headroom_for(
+        s,
+        plan.project_id,
+        host,
+        past.flatten().as_deref(),
+        now,
+    )
 }
 
 /// The login of the session link `link_id` ran in, when that row is still

@@ -3760,6 +3760,7 @@ mod tests {
             last_seen_at: None,
             nickname: None,
             has_extra_usage: false,
+            forbidden_project_ids: Vec::new(),
         })
         .unwrap();
         s.conn_ref()

@@ -793,6 +793,12 @@ impl Store {
             "DELETE FROM routine_memory WHERE scope = 'project' AND owner_id = ?1",
             rusqlite::params![project_id],
         )?;
+        // Its forbidden accounts (migration 217) go too, for the same
+        // reason: the FK cascade does it, and this holds without the pragma.
+        tx.execute(
+            "DELETE FROM account_project_blocks WHERE project_id = ?1",
+            rusqlite::params![project_id],
+        )?;
         tx.execute(
             "DELETE FROM projects WHERE id = ?1",
             rusqlite::params![project_id],

@@ -169,7 +169,7 @@ Whether starting or switching a session on host_alias under login `profile` (a p
 
 Access: the master, a paired device or a per-host token · readonly tokens too · deadline 60 s.
 
-Parameters (* required): `host_alias`*, `profile`
+Parameters (* required): `host_alias`*, `profile`, `project_id`
 
 ### `check_host`
 
@@ -1133,6 +1133,14 @@ Access: the master or a fleet admin's own device · deadline 60 s.
 
 Parameters (* required): `nickname`, `uuid`*
 
+### `set_account_projects`
+
+Set the projects a Claude account is forbidden for (replaces the list; empty allows every project). Work in one never starts, resumes or switches onto a login on it: such a start fails E_ACCOUNT_FORBIDDEN. Returns the account row.
+
+Access: the master or a fleet admin's own device · deadline 60 s.
+
+Parameters (* required): `forbidden_project_ids`, `uuid`*
+
 ### `set_client_trust`
 
 Grant or withdraw trust in a paired client by name: a trusted client's prompts and messages are delivered without the untrusted-content marker, like the master's raw=true. Trust a device you type on, never an agent's token. E_NOTFOUND for an unknown live name. Master token only.
@@ -1717,6 +1725,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::hosts::merge_host`
 - `commands::hosts::hide_host`
 - `commands::hosts::set_account_nickname`
+- `commands::hosts::set_account_projects`
 - `commands::account_usage::list_account_usage`
 - `commands::account_usage::refresh_account_usage`
 - `commands::account_usage::account_usage_history`

@@ -18,6 +18,7 @@ use fleet_core::service::hosts::{
     self, AddHostArgs, HideHostArgs, HostAliasArgs, MergeHostArgs, ProbePreview, ProbeSshAliasArgs,
     SetAccountNicknameArgs,
 };
+use fleet_core::service::project_accounts::SetAccountProjectsArgs;
 use fleet_core::service::tunnel::TunnelSupervisor;
 use fleet_core::service::view_scope::ViewScope;
 use fleet_core::ssh::SshClient;
@@ -229,6 +230,18 @@ pub async fn set_account_nickname(
     routed::set_account_nickname(&backend, args, &store).await
 }
 
+/// The projects an account is forbidden for (`service::project_accounts`).
+/// Paired, the hub's (its `set_account_projects`): the hub is where work is
+/// started and refused; the row event follows.
+#[tauri::command]
+pub async fn set_account_projects(
+    args: SetAccountProjectsArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<AccountRow, IpcError> {
+    routed::set_account_projects(&backend, args, &store).await
+}
+
 /// The routing, away from `tauri::State` so the tests can drive it.
 pub(crate) mod routed {
     use super::*;
@@ -313,6 +326,17 @@ pub(crate) mod routed {
         match backend.hub() {
             Some(hub) => hub.route("set_account_nickname", &args).await,
             None => hosts::set_account_nickname(args, store),
+        }
+    }
+
+    pub async fn set_account_projects(
+        backend: &FleetBackend,
+        args: SetAccountProjectsArgs,
+        store: &Mutex<Store>,
+    ) -> Result<AccountRow, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("set_account_projects", &args).await,
+            None => fleet_core::service::project_accounts::set_account_projects(args, store),
         }
     }
 

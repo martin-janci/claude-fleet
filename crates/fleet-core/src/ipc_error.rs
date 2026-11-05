@@ -228,6 +228,11 @@ pub mod codes {
     /// (redesign step 4.4) that nobody confirmed: retry with
     /// `over_limit_ok: true`, or start under the login `details` names.
     pub const E_ACCOUNT_LIMIT: &str = "E_ACCOUNT_LIMIT";
+    /// A start, resume or switch of a project's work onto a login whose
+    /// account the project forbids (`service::project_accounts`): start
+    /// under the login `details.suggested_profile` names (`""` = the host's
+    /// own), on another host, or allow the account again. No flag passes it.
+    pub const E_ACCOUNT_FORBIDDEN: &str = "E_ACCOUNT_FORBIDDEN";
     /// Asset catalog: no catalog repo is configured, or it is configured but
     /// not loaded yet (`catalog_configure` / `catalog_load` first).
     pub const E_CATALOG_NOT_CONFIGURED: &str = "E_CATALOG_NOT_CONFIGURED";

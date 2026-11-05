@@ -1187,6 +1187,7 @@ mod tests {
                 last_seen_at: Some(1),
                 nickname: None,
                 has_extra_usage: false,
+                forbidden_project_ids: Vec::new(),
             })
             .unwrap();
         }

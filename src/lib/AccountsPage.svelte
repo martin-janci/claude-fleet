@@ -56,6 +56,7 @@
   import { moveToHeadroom, resetText, switchCheck, waitOut } from './account_limits';
   import LimitActions from './LimitActions.svelte';
   import AccountNickname from './AccountNickname.svelte';
+  import AccountProjects from './AccountProjects.svelte';
   import { dayLabel, loginCardText, loginShellCommand } from './control_escalations';
   import { copyText } from './clipboard';
   import { push } from './toasts';
@@ -223,6 +224,7 @@
     push({ message: parts.join(' · '), kind: r.failed > 0 ? 'error' : r.moved > 0 ? 'success' : 'info' });
   }
   const nicknameBlocked = $derived(hubActionBlocked('set_account_nickname', $hubStatus, $hubConnection));
+  const projectsBlocked = $derived(hubActionBlocked('set_account_projects', $hubStatus, $hubConnection));
   // Review 2026-11-03 D3: on a paired desktop usage is read by the hub, so
   // Refresh would only raise an error, and this app keeps no history.
   const refreshBlocked = $derived(hubActionBlocked('refresh_account_usage', $hubStatus, $hubConnection));
@@ -671,6 +673,8 @@
               {/each}
             </ul>
           {/if}
+
+          <AccountProjects account={a.account} blocked={projectsBlocked} />
 
           <h4>
             {onlyPaused ? 'Paused by its limit' : 'Sessions on it'}

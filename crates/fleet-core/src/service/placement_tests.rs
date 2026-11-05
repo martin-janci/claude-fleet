@@ -11,6 +11,7 @@ fn login(profile: Option<&str>, account: &str, used: Option<f64>) -> LoginFacts 
         daily_limit_hit: false,
         signed_out_since: None,
         live_sessions: 0,
+        forbidden: false,
     }
 }
 

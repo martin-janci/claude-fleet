@@ -320,6 +320,7 @@
     "session_unshare",
     "session_work_links",
     "set_account_nickname",
+    "set_account_projects",
     "set_device_person",
     "set_device_trust",
     "set_fleet_setting",
