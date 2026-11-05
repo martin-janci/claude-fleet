@@ -242,6 +242,30 @@ pub struct Facts {
     pub limited_accounts: BTreeMap<String, Limit>,
     /// Accounts whose login is gone, expired or rejected, by uuid.
     pub uncredentialed_accounts: BTreeSet<String>,
+    /// The logins fleet saw signed out (`hosts.signed_out_logins`,
+    /// `service::login_health`), by host and profile. An account can be
+    /// signed in on one host and out on another: a session is blocked on
+    /// its own login (review 2026-11-03 F2), not on what its account's
+    /// first usage source answered.
+    pub signed_out_logins: BTreeSet<LoginRef>,
+}
+
+/// One login on one host: `profile` `None` is the host's own login, as on
+/// [`SessionRow::claude_profile`] and [`crate::store::SignedOutLogin`].
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+pub struct LoginRef {
+    pub host: String,
+    #[serde(default)]
+    pub profile: Option<String>,
+}
+
+impl Facts {
+    /// Whether fleet saw the login `profile` on `host` signed out.
+    pub fn login_signed_out(&self, host: &str, profile: Option<&str>) -> bool {
+        self.signed_out_logins
+            .iter()
+            .any(|l| l.host == host && l.profile.as_deref() == profile)
+    }
 }
 
 /// A usage window at its limit.
@@ -275,6 +299,15 @@ impl Facts {
             .iter()
             .filter(|h| !h.reachable && h.last_pinged_at.is_some())
             .map(|h| h.alias.clone())
+            .collect();
+        let signed_out_logins = hosts
+            .iter()
+            .flat_map(|h| {
+                h.signed_out_logins.iter().map(|l| LoginRef {
+                    host: h.alias.clone(),
+                    profile: l.profile.clone(),
+                })
+            })
             .collect();
         let mut limited_accounts = BTreeMap::new();
         let mut uncredentialed_accounts = BTreeSet::new();
@@ -323,6 +356,7 @@ impl Facts {
             down_hosts,
             limited_accounts,
             uncredentialed_accounts,
+            signed_out_logins,
         }
     }
 }
@@ -397,7 +431,10 @@ pub fn needs_attention_in(
         Reason::HostDown
     } else if live && !working && account.is_some_and(|a| facts.limited_accounts.contains_key(a)) {
         Reason::AccountLimit
-    } else if live && !working && account.is_some_and(|a| facts.uncredentialed_accounts.contains(a))
+    } else if live
+        && !working
+        && (facts.login_signed_out(&row.host_alias, row.claude_profile.as_deref())
+            || account.is_some_and(|a| facts.uncredentialed_accounts.contains(a)))
     {
         Reason::NoCredentials
     } else if failed && !crate::store::has_no_pane(&row.kind) {
@@ -1286,6 +1323,36 @@ mod tests {
                 .reason,
             Reason::NoCredentials
         );
+        // Review 2026-11-03 F2: a login fleet saw signed out on its host
+        // blocks the session on that login only, while its account's usage
+        // answered fine through another login.
+        let mut htz = host("htz", true, Some(1));
+        htz.signed_out_logins = vec![crate::store::SignedOutLogin {
+            profile: Some("work".into()),
+            since: 1,
+            checked_at: 1,
+        }];
+        let f = Facts::from_fleet(
+            &[htz, host("mac", true, Some(1))],
+            &[snap("acc", UsageOutcomeKind::Ok, 10.0, 10.0, 2_000)],
+            1_000,
+        );
+        assert_eq!(
+            f.signed_out_logins.iter().collect::<Vec<_>>(),
+            [&LoginRef {
+                host: "htz".into(),
+                profile: Some("work".into())
+            }]
+        );
+        let mut on = |host: &str, profile: Option<&str>| {
+            r.account_uuid = Some("acc".into());
+            r.host_alias = host.into();
+            r.claude_profile = profile.map(str::to_string);
+            needs_attention_in(&r, DEFAULT_CONTEXT_RED_PCT, &f).map(|a| a.reason)
+        };
+        assert_eq!(on("htz", Some("work")), Some(Reason::NoCredentials));
+        assert_eq!(on("htz", None), None, "the host's own login is signed in");
+        assert_eq!(on("mac", Some("work")), None, "same profile, other host");
         // Both at their limit, the week freeing first: the 5-hour window
         // still holds the account after the weekly reset.
         let mut late = snap("late", UsageOutcomeKind::Ok, 100.0, 100.0, 3_000);

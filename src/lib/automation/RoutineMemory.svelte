@@ -3,7 +3,8 @@
   // `routines::memory`): what its runs read under their prompt and rewrite
   // with a `<routine-memory>` block in their reply, kept by the fleet
   // outside any git repo. One box per notebook it uses, as saved: Save
-  // writes it back, Clear empties it. While the routine form has unsaved
+  // writes it back; Clear only empties the box, so
+  // nothing is lost until Save, and Undo edits puts the saved text back. While the routine form has unsaved
   // changes they stay, read-only, with what is typed in them kept; and an
   // unsaved notebook edit makes leaving the editor ask, like the form.
   import { onDestroy, untrack } from 'svelte';
@@ -161,9 +162,22 @@
           size="sm"
           variant="quiet"
           testid={`routine-memory-clear-${nb.id}`}
-          disabled={busy || locked || !saved(nb.id)?.body}
-          onclick={() => write(nb.id, '')}>Clear</Button
+          title="Empty the box; Save notebook writes it"
+          disabled={busy || locked || text === ''}
+          onclick={() => (edits = { ...edits, [nb.id]: '' })}>Clear</Button
         >
+        {#if edits[nb.id] !== undefined}
+          <Button
+            size="sm"
+            variant="quiet"
+            testid={`routine-memory-revert-${nb.id}`}
+            disabled={busy || locked}
+            onclick={() => {
+              const { [nb.id]: _, ...rest } = edits;
+              edits = rest;
+            }}>Undo edits</Button
+          >
+        {/if}
       </div>
     {/if}
   {/each}

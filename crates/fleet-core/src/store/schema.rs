@@ -2516,11 +2516,17 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/216_lane_pr.sql"),
         already_applied: Some(lanes_have_pr_url),
     },
+    // Forbid an account for a project: `account_project_blocks`. A new
+    // table, written idempotently.
+    Migration::plain(
+        217,
+        include_str!("../../migrations/217_account_project_blocks.sql"),
+    ),
     // Hermes Agent sessions: `sessions.agent`'s CHECK admits `hermes`.
     // Rewrites the stored CHECK in place; idempotent, so plain.
     Migration::plain(
-        217,
-        include_str!("../../migrations/217_session_agent_hermes.sql"),
+        218,
+        include_str!("../../migrations/218_session_agent_hermes.sql"),
     ),
 ];
 

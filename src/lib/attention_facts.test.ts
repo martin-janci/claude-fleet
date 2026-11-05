@@ -55,6 +55,30 @@ describe('attentionFactsFrom (mirrors attention::Facts::from_fleet)', () => {
     expect(classify(idle('gone'), { idleSecs: 0, now: 1000, facts: f })).toBe('no_credentials');
   });
 
+  it("reads each host's signed-out logins, and blocks only the session on that login (review 2026-11-03 F2)", () => {
+    const f = attentionFactsFrom(
+      [
+        host('htz', { signed_out_logins: [{ profile: 'work', since: 1, checked_at: 1 }] }),
+        host('mac', { signed_out_logins: [{ profile: null, since: 1, checked_at: 1 }] }),
+        host('nas'),
+      ],
+      // The account answered through another login: its snapshot is fine.
+      { acc: usage('acc', 'ok', 10, 10, 2000) },
+      1000,
+    );
+    expect(f.signed_out_logins).toEqual([
+      { host: 'htz', profile: 'work' },
+      { host: 'mac', profile: null },
+    ]);
+    const idle = (h: string, profile: string | null) =>
+      session(h, 'a', { claude_status: 'idle', account_uuid: 'acc', claude_profile: profile });
+    const opts = { idleSecs: 0, now: 1000, facts: f };
+    expect(classify(idle('htz', 'work'), opts)).toBe('no_credentials');
+    expect(classify(idle('htz', null), opts)).toBe('idle');
+    expect(classify(idle('mac', null), opts)).toBe('no_credentials');
+    expect(classify(idle('nas', 'work'), opts)).toBe('idle');
+  });
+
   it('counts a full window with no reset time only while the reading is younger than it (review r05 F7)', () => {
     const now = 1_000_000;
     const full = (fetched_at: number) =>
@@ -100,5 +124,10 @@ describe('the Blocked buckets', () => {
     expect(blockedLine('host_down', s, facts, name)).toBe('Needs you · blocked on mefistos, which is down');
     expect(blockedLine('no_credentials', s, facts, name)).toBe('Needs you · blocked on tech.silvester, which is signed out');
     expect(blockedLine('waiting', s, facts, name)).toBeNull();
+    // A login fleet saw signed out on this host names the login (F2).
+    const out = { signed_out_logins: [{ host: s.host_alias, profile: 'work' }] };
+    expect(blockedLine('no_credentials', { ...s, claude_profile: 'work' }, out, name)).toBe(
+      `Needs you · signed out on ${s.host_alias} (work)`,
+    );
   });
 });

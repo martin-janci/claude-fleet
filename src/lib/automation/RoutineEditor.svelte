@@ -281,9 +281,15 @@
     onsave();
   }
 
+  // A bare Enter in the name or a budget field no longer saves the routine
+  // half-read (review w18-6's rule for a several-field form); ⌘↵ does.
+  const NOT_TEXT = ['checkbox', 'radio', 'button', 'submit'];
   function keydown(e: KeyboardEvent) {
+    const t = e.target as HTMLInputElement | null;
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
       submit(e);
+    } else if (e.key === 'Enter' && !e.altKey && !e.shiftKey && t?.tagName === 'INPUT' && !NOT_TEXT.includes(t.type)) {
+      e.preventDefault();
     } else if (e.key === 'Escape' && !e.defaultPrevented) {
       e.preventDefault();
       guard.request();

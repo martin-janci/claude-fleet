@@ -37,6 +37,7 @@
     completed,
     mayChange,
     reopenBlocked = false,
+    reopenWhy = null,
     nameOf = () => null,
     onreopen,
     onarchived,
@@ -46,6 +47,8 @@
     completed: number;
     mayChange: boolean;
     reopenBlocked?: boolean;
+    /** Why the hub refuses Reopen, on the greyed button's title. */
+    reopenWhy?: string | null;
     nameOf?: (personId: number) => string | null;
     onreopen: () => Promise<void>;
     onarchived: () => Promise<void>;
@@ -119,7 +122,13 @@
 
   {#if mayChange}
     <div class="row">
-      <button class="btn btn--quiet" type="button" disabled={busy || reopenBlocked} data-testid="mission-reopen" onclick={() => void reopen()}
+      <button
+        class="btn btn--quiet"
+        type="button"
+        disabled={busy || reopenBlocked}
+        title={reopenWhy ?? undefined}
+        data-testid="mission-reopen"
+        onclick={() => void reopen()}
         >Reopen</button
       >
       {#if live.length > 0}

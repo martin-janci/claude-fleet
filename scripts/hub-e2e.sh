@@ -1679,7 +1679,7 @@ else
   until_ok 300 'wcall "$TOKW" work_link "{\"action\":\"mission_start\",\"mission_id\":${DMID:-0}}" >/dev/null; [ -n "$(dattempt "${DT2:-0}" state)" ]'
   until_ok 600 '[ "$(dattempt "${DT2:-0}" state)" = done ]'
   DDIR=$(grep -l "already holds the work of the tasks this one depends on" "$WLOG"/*/prompts.log 2>/dev/null | head -1 | xargs -r dirname)
-  check "the second task's prompt says its checkout holds the first task's work" '[ -n "$DDIR" ] && grep -q "TASK-${DT2:-x}" "$DDIR/prompts.log" && grep -q "TASK-${DT1:-x} (branch" "$DDIR/prompts.log"' "$(tail -30 "$WLOG"/*/prompts.log 2>&1 | tail -60)"
+  check "the second task's prompt says its checkout holds the first task's work" '[ -n "$DDIR" ] && grep -qw "TASK-${DT2:-x}" "$DDIR/prompts.log" && grep -q "TASK-${DT1:-x} (branch" "$DDIR/prompts.log"' "$(tail -30 "$WLOG"/*/prompts.log 2>&1 | tail -60)"
   DWT=$(find "$WBASE" -maxdepth 4 -type d -name "task-${DT2:-x}-*" 2>/dev/null | head -1)
   check "the second task's branch holds the first task's commit and its own" '[ -n "$DWT" ] && [ "$(git -C "$DWT" log --format=%s | grep -c "^fake task")" = 2 ]' "$DWT: $(git -C "$DWT" log --oneline 2>&1 | head -5)"
   check "the second task's evidence is its own commit only, after the dependency's" '[ "$(dattempt "${DT2:-0}" state)" = done ] && [ "$(dattempt "${DT2:-0}" evidence.commits_total)" = 1 ]' "$(jt "$(wcall "$TOKW" work "{\"action\":\"mission\",\"mission_id\":${DMID:-0}}")" '[.graph.nodes[] | {item_id, state, ev: .attempt.evidence}]')"

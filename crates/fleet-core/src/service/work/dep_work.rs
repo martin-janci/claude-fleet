@@ -12,17 +12,25 @@
 //!   unless the checkout or the default branch already holds it, and backs
 //!   out of one that does not merge cleanly (`git merge --abort`);
 //! - [`note`] tells the worker what its checkout holds and which branch it
-//!   must merge itself.
+//!   must merge itself;
+//! - [`prepare`] does all of it for a run's checkout and answers the head
+//!   the run starts at.
 //!
-//! The run's `start_head` is read after the merges, so its evidence and its
-//! review's diff are its own commits only.
+//! A dependency in a lane merges its verified commit ([`verified_commit`]),
+//! not the lane's branch: the lane's lead has moved on past it. The run's
+//! `start_head` is read after the merges, so its evidence and its review's
+//! diff are its own commits only.
 
 use crate::ipc_error::IpcError;
 use crate::shell::quote as shq;
 use crate::store::Store;
+use std::time::Duration;
 
 /// The most dependencies one checkout takes.
 pub const DEP_BRANCHES_MAX: usize = 8;
+
+/// The wall clock of reading a checkout's HEAD.
+const HEAD_READ: Duration = Duration::from_secs(20);
 
 /// A dependency whose work is not on the default branch yet.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,6 +39,9 @@ pub struct DepBranch {
     /// Its key, else `#<id>`.
     pub label: String,
     pub branch: String,
+    /// The commit to merge instead of the branch's tip: a lane task's
+    /// verified commit, as the lane's branch moves on past it.
+    pub commit: Option<String>,
     /// Where its last implement run worked.
     pub host_alias: String,
     pub host_up: bool,
@@ -77,19 +88,24 @@ pub fn unmerged_deps(
                 continue;
             }
         }
-        if skip_lane.is_some() && s.item_lane(dep.id)? == skip_lane {
+        let dep_lane = s.item_lane(dep.id)?;
+        if skip_lane.is_some() && dep_lane == skip_lane {
             continue;
         }
         let Some(prior) = super::run::prior_work(s, dep.id)? else {
             continue;
         };
-        if s.branch_pull_request_merged(&prior.branch)? {
+        if s.branch_pull_request_merged(&prior.branch, dep.project_id)? {
             continue;
         }
         out.push(DepBranch {
             item_id: dep.id,
             label: dep.key.clone().unwrap_or_else(|| format!("#{}", dep.id)),
             branch: prior.branch,
+            commit: match dep_lane {
+                Some(_) => verified_commit(s, dep.id)?.map(|(_, h)| h),
+                None => None,
+            },
             host_alias: prior.host_alias,
             host_up: prior.host_up,
         });
@@ -100,11 +116,25 @@ pub fn unmerged_deps(
     Ok(out)
 }
 
+/// The commit `item_id`'s latest implement run ended on, as its evidence
+/// read it, with that run's id; `None` before one has.
+pub fn verified_commit(s: &Store, item_id: i64) -> Result<Option<(i64, String)>, IpcError> {
+    let Some(t) = s.latest_item_task(item_id, "implement")? else {
+        return Ok(None);
+    };
+    Ok(t.evidence
+        .as_ref()
+        .and_then(|e| e.head.clone())
+        .filter(|h| crate::store::is_commit_id(h))
+        .map(|h| (t.id, h)))
+}
+
 /// The script that merges `deps`' branches into the checkout at `dir`, one
 /// `__FLEET_DEP <i> <took|had|landed|conflict|missing>` line per branch,
 /// then `__FLEET_DEP_HEAD <sha>`. A branch is found locally, else on
-/// `origin` (fetched first). A merge commit takes the repository's own
-/// identity, or fleet's when it has none.
+/// `origin` (fetched first); a dependency's own commit is merged when it
+/// names one, and is missing when the repository lacks it. A merge commit
+/// takes the repository's own identity, or fleet's when it has none.
 pub fn merge_script(dir: &str, deps: &[DepBranch]) -> String {
     let mut s = format!(
         "cd -- {} || exit 0\n\
@@ -118,12 +148,20 @@ pub fn merge_script(dir: &str, deps: &[DepBranch]) -> String {
             "b={b}; r=\n\
              if git show-ref --verify --quiet \"refs/heads/$b\"; then r=\"$b\"\n\
              elif git show-ref --verify --quiet \"refs/remotes/origin/$b\"; then r=\"origin/$b\"; fi\n\
+             {pin}\
              if [ -z \"$r\" ]; then echo \"__FLEET_DEP {i} missing\"\n\
              elif git merge-base --is-ancestor \"$r\" HEAD 2>/dev/null; then echo \"__FLEET_DEP {i} had\"\n\
              elif [ -n \"$def\" ] && git merge-base --is-ancestor \"$r\" \"$def\" 2>/dev/null; then echo \"__FLEET_DEP {i} landed\"\n\
              elif git $who merge -q --no-edit \"$r\" >/dev/null 2>&1; then echo \"__FLEET_DEP {i} took\"\n\
              else git merge --abort >/dev/null 2>&1; echo \"__FLEET_DEP {i} conflict\"; fi\n",
             b = shq(&d.branch),
+            pin = match &d.commit {
+                Some(c) => format!(
+                    "c={c}; r=; git cat-file -e \"$c^{{commit}}\" 2>/dev/null && r=\"$c\"\n",
+                    c = shq(c)
+                ),
+                None => String::new(),
+            },
         ));
     }
     s.push_str("echo \"__FLEET_DEP_HEAD $(git rev-parse HEAD 2>/dev/null)\"\n");
@@ -170,7 +208,15 @@ pub fn note(deps: &[DepBranch], merged: &[Merged]) -> Option<String> {
         deps.iter()
             .zip(merged)
             .filter(|(_, m)| want.contains(m))
-            .map(|(d, _)| format!("{} (branch `{}`)", d.label, d.branch))
+            .map(|(d, _)| match &d.commit {
+                Some(c) => format!(
+                    "{} (commit `{}` of branch `{}`)",
+                    d.label,
+                    c.chars().take(12).collect::<String>(),
+                    d.branch
+                ),
+                None => format!("{} (branch `{}`)", d.label, d.branch),
+            })
             .collect()
     };
     let held = names(&[Merged::Took, Merged::Had]);
@@ -225,6 +271,56 @@ pub async fn merge_into(
     }
 }
 
+/// The commit the checkout at `dir` on `host` stands on; `None` when it
+/// could not be read.
+pub async fn read_head(
+    ssh: &std::sync::Arc<crate::ssh::SshClient>,
+    host: &str,
+    dir: &str,
+) -> Option<String> {
+    let script = format!("git -C {} rev-parse HEAD", shq(dir));
+    let run = crate::service::catalog::inventory::run_host_script(ssh, host, &script);
+    let out = tokio::time::timeout(HEAD_READ, run).await.ok()?.ok()?;
+    let sha = out.trim().to_string();
+    crate::store::is_commit_id(&sha).then_some(sha)
+}
+
+/// A run's checkout after its dependencies: what its prompt says of them,
+/// and the head its own work starts at.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Prepared {
+    pub note: Option<String>,
+    pub head: Option<String>,
+}
+
+/// Merge `deps` into the checkout at `dir` on `host` ([`merge_into`]) and
+/// read the head the run starts at: the merge's, else the checkout's own
+/// (a host that did not answer the merge), so the run's evidence never
+/// reaches back into its dependencies' commits. No checkout: every
+/// dependency is `Missing` and there is no head.
+pub async fn prepare(
+    ssh: &std::sync::Arc<crate::ssh::SshClient>,
+    host: &str,
+    dir: Option<&str>,
+    deps: &[DepBranch],
+) -> Prepared {
+    let Some(dir) = dir else {
+        return Prepared {
+            note: note(deps, &vec![Merged::Missing; deps.len()]),
+            head: None,
+        };
+    };
+    let (merged, head) = merge_into(ssh, host, dir, deps).await;
+    let head = match head {
+        Some(h) => Some(h),
+        None => read_head(ssh, host, dir).await,
+    };
+    Prepared {
+        note: note(deps, &merged),
+        head,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -234,6 +330,7 @@ mod tests {
             item_id: id,
             label: format!("T-{id}"),
             branch: branch.into(),
+            commit: None,
             host_alias: "h".into(),
             host_up: true,
         }
@@ -290,8 +387,62 @@ mod tests {
             .ends_with("__FLEET_DEP_HEAD $(git rev-parse HEAD 2>/dev/null)\""));
     }
 
+    /// The script against real git: a lane dependency merges its verified
+    /// commit, not the later work on its lane's branch; a commit the
+    /// repository lacks is missing. Unix only: on Windows `bash` is the WSL
+    /// launcher (as dce85ff6, #1049).
+    #[cfg(unix)]
+    #[test]
+    fn real_git_merges_a_lane_dependencys_verified_commit_only() {
+        let d = tempfile::tempdir().unwrap();
+        let repo = d.path().to_str().unwrap();
+        let sh = |cmd: &str| {
+            let out = crate::proc::std_command("bash")
+                .arg("-c")
+                .arg(format!("cd {} && {cmd}", shq(repo)))
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{cmd}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        let g = "git -c user.name=t -c user.email=t@t";
+        sh(&format!(
+            "git init -q -b main && echo base > f && git add f && {g} commit -qm base \
+             && git checkout -qb lane-a && echo a > a && git add a && {g} commit -qm a"
+        ));
+        let verified = sh("git rev-parse HEAD");
+        sh(&format!(
+            "echo wip > wip && git add wip && {g} commit -qm wip \
+             && git checkout -q main && git checkout -qb mine"
+        ));
+        let pinned = DepBranch {
+            commit: Some(verified.clone()),
+            ..dep(1, "lane-a")
+        };
+        let gone = DepBranch {
+            commit: Some("0123456789abcdef0123456789abcdef01234567".into()),
+            ..dep(2, "lane-a")
+        };
+        let out = crate::proc::std_command("bash")
+            .arg("-c")
+            .arg(merge_script(repo, &[pinned.clone(), gone.clone()]))
+            .output()
+            .unwrap();
+        let (m, _) = parse_merge(&String::from_utf8_lossy(&out.stdout), 2);
+        assert_eq!(m, vec![Merged::Took, Merged::Missing]);
+        assert!(d.path().join("a").exists(), "the verified commit's file");
+        assert!(!d.path().join("wip").exists(), "not the lead's later work");
+        let n = note(&[pinned, gone], &m).unwrap();
+        assert!(n.contains(&format!("commit `{}`", &verified[..12])), "{n}");
+    }
+
     /// The script against real git: a dependency branch merges, one the
     /// checkout holds is `had`, a conflicting one is backed out of.
+    #[cfg(unix)]
     #[test]
     fn real_git_merges_a_dependency_and_backs_out_of_a_conflict() {
         let d = tempfile::tempdir().unwrap();

@@ -6,7 +6,7 @@
   import type { SessionRow } from './sessions';
   import { assessRow, describeReason, hasReading, shortSha, verdictLabel, verdictState } from './evidence';
   import StatusChip from './kit/StatusChip.svelte';
-  import { timeAgo } from './session_status';
+  import { timeAgo, exactTime } from './session_status';
 
   let { session, nowSec }: { session: SessionRow; nowSec: number } = $props();
 
@@ -22,7 +22,7 @@
       <StatusChip state={verdictState(result.verdict)} label={verdictLabel(result.verdict)} testid="pr-result-verdict" />
       {#if result.commit}<code class="sha" title={result.commit}>{shortSha(result.commit)}</code>{/if}
       {#if result.checked_at != null}
-        <span class="muted" data-testid="pr-result-checked">checked {timeAgo(result.checked_at, nowSec * 1000)}</span>
+        <span class="muted" data-testid="pr-result-checked" title={exactTime(result.checked_at)}>checked {timeAgo(result.checked_at, nowSec * 1000)}</span>
       {/if}
     </div>
     <ul class="reasons">

@@ -166,9 +166,12 @@ describe('agents (design step 5)', () => {
     expect(comparisonLine({ pairs: [], agree: 0, differ: 2, builtin_only: 0, fleet_only: 1 })).toBe(
       '0 agree, 2 differ; 0 built-in only, 1 fleet only',
     );
+    expect(comparisonLine({ pairs: [], agree: 1, differ: 0, builtin_only: 0, fleet_only: 0 })).toBe(
+      '1 agrees, 0 differ; 0 built-in only, 0 fleet only',
+    );
   });
 
-    it('names rules, jobs and each agent’s state', () => {
+  it('names rules, jobs and each agent’s state', () => {
     expect(ruleLine(rule())).toBe('gh:o/r at propose on mercury');
     expect(ruleLine(rule({ active: false }))).toBe('gh:o/r at propose on mercury (expired)');
     expect(ruleLine(rule({ budget_micros: 25_000_000, spent_today_micros: 3_200_000 }))).toBe(

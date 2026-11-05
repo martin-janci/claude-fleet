@@ -107,7 +107,7 @@ pub enum Command {
     },
 }
 
-fn clip(s: &str, n: usize) -> String {
+pub(super) fn clip(s: &str, n: usize) -> String {
     let t: String = s.chars().take(n).collect();
     if s.chars().count() > n {
         format!("{t}…")

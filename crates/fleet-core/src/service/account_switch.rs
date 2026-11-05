@@ -26,7 +26,8 @@
 //!
 //! **Which login.** [`pick`] over [`candidates`]: another login on the same
 //! host, on another account (a second login on the same account shares its
-//! limit), not signed out, with a reading under `accounts.pause_at` no older
+//! limit) that the session's project does not forbid
+//! (`project_accounts`), not signed out, with a reading under `accounts.pause_at` no older
 //! than [`STALE_TARGET_SECS`], not at a limit and not past its daily spend
 //! limit, the least used first. An account takes one session per wave
 //! ([`plan`]), so a dozen sessions on a spent account do not all land on
@@ -294,6 +295,7 @@ pub fn plan(
     let opted_out = s.people_without_auto_switch()?;
     let personal_owner = s.personal_owner_id()?;
     let controller = s.get_controller()?;
+    let any_block = s.any_account_project_block()?;
     let mut taken: BTreeSet<String> = BTreeSet::new();
     let mut out = Vec::new();
     for row in &sessions {
@@ -322,8 +324,15 @@ pub fn plan(
             continue;
         };
         let from = row.account_uuid.clone().unwrap_or_default();
+        // Never onto an account the session's project forbids.
+        let forbidden = if any_block {
+            crate::service::project_accounts::forbidden_accounts(s, row.project_id)?
+        } else {
+            Vec::new()
+        };
         let logins = account_limits::host_logins(host, &[], now)
             .into_iter()
+            .filter(|l| !forbidden.contains(&l.account_uuid))
             // A signed-out login keeps its last good reading, but a session
             // resumed there lands on `/login`.
             .filter(|l| !crate::service::login_health::is_signed_out(host, l.profile.as_deref()))

@@ -175,6 +175,35 @@ describe('session commands: push and open in editor (3.9, 5.5)', () => {
   });
 });
 
+describe('Stop the turn (review w13-4)', () => {
+  beforeEach(() => {
+    invoke.mockReset();
+    toasts.set([]);
+  });
+  const ids = (sel: SessionRow) => paletteCommands({ selected: sel, sessionView: 'conversation' }).map((c) => c.id);
+
+  it('is offered only while a turn runs and the session is not stuck', () => {
+    expect(ids(session('mac', 'a', { claude_status: 'working' }))).toContain('session.stop');
+    expect(ids(session('mac', 'a', { claude_status: 'idle' }))).not.toContain('session.stop');
+    expect(ids(session('mac', 'a', { claude_status: 'working', stuck_kind: 'trust_prompt' }))).not.toContain('session.stop');
+    expect(ids(session('mac', 'a', { claude_status: 'working', status: 'ghost' }))).not.toContain('session.stop');
+  });
+
+  it("presses Escape in the session's pane, as the composer's Stop does", async () => {
+    const s = session('mac', 'fix-flake', { claude_status: 'working' });
+    invoke.mockResolvedValue(null);
+    await runCommand('session.stop', { selected: s, sessionView: 'conversation' });
+    expect(invoke).toHaveBeenCalledWith('send_prompt', {
+      args: { host_alias: 'mac', tmux_name: s.tmux_name, prompt: '', keys: 'Escape' },
+    });
+    expect(get(toasts).at(-1)?.message).toBe('Stopped the turn');
+    // The turn ended before the pick: nothing is pressed.
+    invoke.mockReset();
+    await runCommand('session.stop', { selected: { ...s, claude_status: 'idle' }, sessionView: 'conversation' });
+    expect(invoke).not.toHaveBeenCalled();
+  });
+});
+
 describe('every live chord has a palette row (review w18-4)', () => {
   afterEach(() => destination.set('session'));
 

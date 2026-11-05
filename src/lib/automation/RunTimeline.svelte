@@ -15,7 +15,7 @@
   import type { IpcError } from '../result';
   import { RUN_CHANGED_EVENT } from '../events';
   import { money } from '../automation';
-  import { copyText } from '../clipboard';
+  import { copyAndSay } from '../clipboard';
   import {
     hasTrace,
     outcomeLabel,
@@ -117,7 +117,7 @@
     s.kind === 'error' ? 'failed' : s.kind === 'decision' || s.actor === 'jev' ? 'decision' : s.phase === 'working' ? 'work' : 'phase';
 
   async function copyStep() {
-    if (pick) await copyText(JSON.stringify(pick, null, 2));
+    if (pick) await copyAndSay(JSON.stringify(pick, null, 2), 'Step');
   }
 </script>
 

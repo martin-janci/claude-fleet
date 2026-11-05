@@ -29,7 +29,7 @@
   import Modal from './Modal.svelte';
   import { claudeStatusLabel, stuckStatus } from './attention';
   import { formatAge, hookHealthLabel, type HookHealth } from './hook_health';
-  import { shortAge } from './session_status';
+  import { shortAge, exactTime } from './session_status';
   import { hideHostWithUndo, rotateToken, setTokenMode, showHost, viewHostSessions } from './host_actions';
   import { pushError, push } from './toasts';
   import {
@@ -966,7 +966,7 @@
                 <div class="d-main">
                   <span class="d-cwd">{c.cwd}</span>
                   {#if c.git_branch}<span class="muted">{c.git_branch}</span>{/if}
-                  <span class="muted">{shortAge(c.transcript_mtime, now)}</span>
+                  <span class="muted" title={exactTime(c.transcript_mtime)}>{shortAge(c.transcript_mtime, now)}</span>
                   {#if rankLabel(c.rank_hint)}<span class="badge">{rankLabel(c.rank_hint)}</span>{/if}
                   {#if c.derived_tmux_name}<span class="muted">{c.derived_tmux_name}</span>{/if}
                   {#if ignored.has(c.claude_session_id)}
@@ -1051,7 +1051,7 @@
             <div class="d-main">
               <span class="d-cwd">{p.tmux_name}</span>
               <span class="badge">outside fleet</span>
-              <span class="muted">running {shortAge(p.created_at, now)}</span>
+              <span class="muted" title={exactTime(p.created_at)}>running {shortAge(p.created_at, now)}</span>
             </div>
             {#if adoptingId === p.id}
               <LostTargetForm
@@ -1310,7 +1310,7 @@
           <li class="discover-item" data-testid="host-attach-item">
             <div class="d-main">
               <span class="d-cwd">{p.tmux_name}</span>
-              <span class="muted">running {shortAge(p.created_at, now)}</span>
+              <span class="muted" title={exactTime(p.created_at)}>running {shortAge(p.created_at, now)}</span>
             </div>
             {#if attachAdoptingId === p.id}
               <LostTargetForm

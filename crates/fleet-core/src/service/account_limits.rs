@@ -444,30 +444,68 @@ pub fn over_limit(
 /// The login on `host_alias` with the most headroom on an account other than
 /// `not_account`: signed in, with a reading under `accounts.pause_at` (from
 /// the store's newest snapshots). `None` when no such login exists or the
-/// host is unknown.
+/// host is unknown. [`freer_login_for`] with no project.
 pub fn freer_login(
     s: &Store,
     host_alias: &str,
     not_account: &str,
     now: i64,
 ) -> Result<Option<HostLogin>, IpcError> {
+    freer_login_for(s, None, host_alias, not_account, now)
+}
+
+/// [`freer_login`] for work in `project_id`: never a login on an account
+/// the project forbids (`service::project_accounts`).
+pub fn freer_login_for(
+    s: &Store,
+    project_id: Option<i64>,
+    host_alias: &str,
+    not_account: &str,
+    now: i64,
+) -> Result<Option<HostLogin>, IpcError> {
+    let forbidden = crate::service::project_accounts::forbidden_accounts(s, project_id)?;
+    best_login(s, host_alias, now, false, |l| {
+        l.account_uuid != not_account && !forbidden.contains(&l.account_uuid)
+    })
+}
+
+/// The signed-in login on `host_alias` that `keep` keeps with the most
+/// headroom: under `accounts.pause_at` first; with `any_reading`, failing
+/// that, the least used of the rest (a login without a reading counts as
+/// full). `None` when none is kept or the host is unknown.
+fn best_login(
+    s: &Store,
+    host_alias: &str,
+    now: i64,
+    any_reading: bool,
+    keep: impl Fn(&HostLogin) -> bool,
+) -> Result<Option<HostLogin>, IpcError> {
     let Some(host) = s.get_host_row(host_alias)? else {
         return Ok(None);
     };
     let snaps = s.latest_usage_snapshots()?;
     let pause_at = pause_at_pct(s);
-    Ok(logins_with(&host, |uuid| {
+    let kept: Vec<HostLogin> = logins_with(&host, |uuid| {
         snaps
             .iter()
             .find(|r| r.account_uuid == uuid)
             .and_then(|r| used_pct_of(&r.usage, Some(r.fetched_at), now))
     })
     .into_iter()
-    .filter(|l| l.account_uuid != not_account)
-    .filter(|l| !crate::service::login_health::is_signed_out(&host, l.profile.as_deref()))
-    .filter_map(|l| l.used_pct.filter(|u| *u < pause_at).map(|u| (u, l)))
-    .min_by(|(a, _), (b, _)| a.total_cmp(b))
-    .map(|(_, l)| l))
+    .filter(|l| {
+        keep(l) && !crate::service::login_health::is_signed_out(&host, l.profile.as_deref())
+    })
+    .collect();
+    let least = |under: bool| {
+        kept.iter()
+            .filter_map(|l| {
+                let u = l.used_pct.unwrap_or(100.0);
+                (!under || l.used_pct.is_some_and(|u| u < pause_at)).then_some((u, l))
+            })
+            .min_by(|(a, _), (b, _)| a.total_cmp(b))
+            .map(|(_, l)| l.clone())
+    };
+    Ok(least(true).or_else(|| if any_reading { least(false) } else { None }))
 }
 
 /// The login a start that nobody chose a login for runs under on
@@ -475,19 +513,48 @@ pub fn freer_login(
 /// at or past `accounts.pause_at` ([`over_limit`]) and another login on the
 /// host has headroom ([`freer_login`]), which it takes instead. Nothing here
 /// refuses: with no freer login the start keeps `profile`, and the start's
-/// own checks report a spent login.
+/// own checks report a spent login. [`login_with_headroom_for`] with no
+/// project.
 pub fn login_with_headroom(
     s: &Store,
     host_alias: &str,
     profile: Option<&str>,
     now: i64,
 ) -> Result<Option<String>, IpcError> {
+    login_with_headroom_for(s, None, host_alias, profile, now)
+}
+
+/// [`login_with_headroom`] for work in `project_id`: a login on an account
+/// the project forbids (`service::project_accounts`) gives way to the
+/// allowed login on the host with the most headroom, under the line or not
+/// (a spent allowed login is the start's to report, a forbidden one is
+/// refused outright); and a freer login is never a forbidden one. With no
+/// allowed login on the host it keeps `profile`, and the start refuses it.
+pub fn login_with_headroom_for(
+    s: &Store,
+    project_id: Option<i64>,
+    host_alias: &str,
+    profile: Option<&str>,
+    now: i64,
+) -> Result<Option<String>, IpcError> {
     let profile = profile.map(str::trim).filter(|p| !p.is_empty());
+    let forbidden = crate::service::project_accounts::forbidden_accounts(s, project_id)?;
+    if !forbidden.is_empty() {
+        let account = login_account(s, host_alias, profile, now)?.map(|a| a.login.account_uuid);
+        if account.is_some_and(|a| forbidden.contains(&a)) {
+            return Ok(best_login(s, host_alias, now, true, |l| {
+                !forbidden.contains(&l.account_uuid)
+            })?
+            .map_or_else(|| profile.map(str::to_string), |l| l.profile));
+        }
+    }
     let Some(over) = over_limit(s, host_alias, profile, now)? else {
         return Ok(profile.map(str::to_string));
     };
-    Ok(freer_login(s, host_alias, &over.login.account_uuid, now)?
-        .map_or_else(|| profile.map(str::to_string), |l| l.profile))
+    Ok(
+        freer_login_for(s, project_id, host_alias, &over.login.account_uuid, now)?
+            .map_or_else(|| profile.map(str::to_string), |l| l.profile),
+    )
 }
 
 /// Step 4.4 on a start that did not come through the desktop's own dialog
@@ -503,6 +570,18 @@ pub fn refuse_over_limit(
     profile: Option<&str>,
     now: i64,
 ) -> Result<(), IpcError> {
+    refuse_over_limit_for(s, None, host_alias, profile, now)
+}
+
+/// [`refuse_over_limit`] for a start in `project_id`: the login it names
+/// instead is never one on an account the project forbids.
+pub fn refuse_over_limit_for(
+    s: &Store,
+    project_id: Option<i64>,
+    host_alias: &str,
+    profile: Option<&str>,
+    now: i64,
+) -> Result<(), IpcError> {
     let Some(over) = over_limit(s, host_alias, profile, now)? else {
         return Ok(());
     };
@@ -512,7 +591,7 @@ pub fn refuse_over_limit(
         return refuse_over_daily_limit(s, host_alias, profile, now);
     }
     let pause_at = over.pause_at_pct;
-    let suggestion = freer_login(s, host_alias, &over.login.account_uuid, now)?;
+    let suggestion = freer_login_for(s, project_id, host_alias, &over.login.account_uuid, now)?;
     let email = |uuid: &str| {
         s.list_accounts()
             .ok()
@@ -530,7 +609,7 @@ pub fn refuse_over_limit(
         };
         crate::service::placement::suggest_with(
             s,
-            None,
+            project_id,
             &want,
             crate::service::hub::local_host_enabled(),
             now,
@@ -615,6 +694,33 @@ pub struct CheckAccountHeadroomArgs {
     /// for the host's own.
     #[serde(default)]
     pub profile: Option<String>,
+    /// The project the work is in: the suggestion is never a login on an
+    /// account it forbids.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<i64>,
+}
+
+/// [`Headroom::suggestion`] again without the accounts `forbidden` names:
+/// a suggestion on one gives way to the next allowed login with room.
+fn without_forbidden(mut h: Headroom, host: &HostRow, forbidden: &[String]) -> Headroom {
+    if forbidden.is_empty()
+        || h.suggestion
+            .as_ref()
+            .is_none_or(|l| !forbidden.contains(&l.account_uuid))
+    {
+        return h;
+    }
+    let current = h.chosen.as_ref().map(|c| c.account_uuid.clone());
+    h.suggestion = h
+        .logins
+        .iter()
+        .filter(|l| Some(&l.account_uuid) != current.as_ref())
+        .filter(|l| !forbidden.contains(&l.account_uuid))
+        .filter(|l| !crate::service::login_health::is_signed_out(host, l.profile.as_deref()))
+        .filter_map(|l| l.used_pct.filter(|u| *u < h.pause_at_pct).map(|u| (u, l)))
+        .min_by(|(a, _), (b, _)| a.total_cmp(b))
+        .map(|(_, l)| l.clone());
+    h
 }
 
 /// `check_account_headroom`: [`headroom`] for a host in the store, from the
@@ -626,23 +732,21 @@ pub fn check_account_headroom(
     cache: &Mutex<UsageCache>,
     now: i64,
 ) -> Result<Headroom, IpcError> {
-    let (host, pause_at, accounts) = {
+    let ((host, pause_at, accounts), forbidden) = {
         let s = store
             .lock()
             .map_err(|_| IpcError::new(codes::E_INTERNAL, "store lock poisoned"))?;
-        host_and_line(&s, args)?
+        (
+            host_and_line(&s, args)?,
+            crate::service::project_accounts::forbidden_accounts(&s, args.project_id)?,
+        )
     };
     let usage: Vec<AccountUsageSnapshot> = {
         let c = cache.lock().unwrap_or_else(|e| e.into_inner());
         accounts.iter().map(|a| c.snapshot(&a.uuid)).collect()
     };
-    Ok(headroom(
-        &host,
-        args.profile.as_deref(),
-        &usage,
-        pause_at,
-        now,
-    ))
+    let h = headroom(&host, args.profile.as_deref(), &usage, pause_at, now);
+    Ok(without_forbidden(h, &host, &forbidden))
 }
 
 /// The hub's `check_account_headroom` (contract 14): [`headroom`] from what
@@ -659,14 +763,10 @@ pub fn served_check_account_headroom(
         .lock()
         .map_err(|_| IpcError::new(codes::E_INTERNAL, "store lock poisoned"))?;
     let (host, pause_at, _) = host_and_line(&s, args)?;
+    let forbidden = crate::service::project_accounts::forbidden_accounts(&s, args.project_id)?;
     let usage = s.bus_account_usage();
-    Ok(headroom(
-        &host,
-        args.profile.as_deref(),
-        &usage,
-        pause_at,
-        now,
-    ))
+    let h = headroom(&host, args.profile.as_deref(), &usage, pause_at, now);
+    Ok(without_forbidden(h, &host, &forbidden))
 }
 
 fn host_and_line(
@@ -888,6 +988,26 @@ mod tests {
         );
     }
 
+    /// A project's forbidden account is never the suggestion: the next
+    /// allowed login with room is, or none.
+    #[test]
+    fn a_forbidden_account_is_never_offered() {
+        let usage = [
+            snap("own", 20.0, 95.0),
+            snap("work", 70.0, 40.0),
+            snap("spare", 10.0, 30.0),
+        ];
+        let h = headroom(&mac(), None, &usage, 90.0, NOW);
+        let h = without_forbidden(h, &mac(), &["spare".to_string()]);
+        assert_eq!(h.suggestion.unwrap().profile.as_deref(), Some("work"));
+        let h = headroom(&mac(), None, &usage, 90.0, NOW);
+        let h = without_forbidden(h, &mac(), &["spare".to_string(), "work".to_string()]);
+        assert_eq!(h.suggestion, None);
+        // Nothing forbidden: the answer as it was.
+        let h = headroom(&mac(), None, &usage, 90.0, NOW);
+        assert_eq!(without_forbidden(h.clone(), &mac(), &[]), h);
+    }
+
     #[test]
     fn under_the_line_there_is_nothing_to_ask() {
         let usage = [snap("own", 20.0, 89.0), snap("spare", 1.0, 1.0)];
@@ -957,6 +1077,7 @@ mod tests {
             &CheckAccountHeadroomArgs {
                 host_alias: "nowhere".into(),
                 profile: None,
+                project_id: None,
             },
             &store,
             &cache,
@@ -1031,6 +1152,7 @@ mod tests {
         let args = CheckAccountHeadroomArgs {
             host_alias: "mac".into(),
             profile: None,
+            project_id: None,
         };
         let now = crate::store::now_unix();
         let unknown = served_check_account_headroom(&args, &store, now).unwrap();
@@ -1053,6 +1175,7 @@ mod tests {
         let missing = CheckAccountHeadroomArgs {
             host_alias: "gone".into(),
             profile: None,
+            project_id: None,
         };
         let e = served_check_account_headroom(&missing, &store, now).unwrap_err();
         assert_eq!(e.code, codes::E_NOTFOUND);

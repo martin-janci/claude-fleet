@@ -1981,6 +1981,7 @@ fn upsert_session_preserves_account_uuid_when_passed_existing_value() {
         last_seen_at: None,
         nickname: None,
         has_extra_usage: false,
+        forbidden_project_ids: Vec::new(),
     })
     .unwrap();
     // First reconcile captures host's account
@@ -1997,6 +1998,7 @@ fn upsert_session_preserves_account_uuid_when_passed_existing_value() {
         last_seen_at: None,
         nickname: None,
         has_extra_usage: false,
+        forbidden_project_ids: Vec::new(),
     })
     .unwrap();
     // Second reconcile: caller reads existing account before upsert
@@ -2728,6 +2730,7 @@ fn seed_account(s: &Store, uuid: &str) {
         last_seen_at: None,
         nickname: None,
         has_extra_usage: false,
+        forbidden_project_ids: Vec::new(),
     })
     .unwrap();
 }
@@ -3811,6 +3814,7 @@ fn upsert_session_captures_new_account_for_fresh_row() {
         last_seen_at: None,
         nickname: None,
         has_extra_usage: false,
+        forbidden_project_ids: Vec::new(),
     })
     .unwrap();
     // Brand new session — no existing row
@@ -8026,6 +8030,62 @@ fn a_stored_profile_relaunches_under_its_config_dir_and_a_switch_drops_the_old_a
         s.get_session_by_id(id).unwrap().unwrap().claude_profile,
         None
     );
+}
+
+/// Review 2026-11-03 F6: a switch onto a login the host row lists links the
+/// session to that login's account straight away, so its account pill and
+/// limit triage hold until the next reconcile; back to the host login takes
+/// the host's account.
+#[test]
+fn a_switch_links_the_new_logins_known_account_at_once() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("local").unwrap();
+    let id = s
+        .upsert_session("dev-prof", "local", None, None, 1, 1, "running", None)
+        .unwrap();
+    for uuid in ["acc-host", "acc-work"] {
+        s.upsert_account(&crate::store::AccountRow {
+            uuid: uuid.into(),
+            ..Default::default()
+        })
+        .unwrap();
+    }
+    s.conn_for_test()
+        .execute(
+            "UPDATE hosts SET account_uuid = 'acc-host' WHERE alias = 'local'",
+            [],
+        )
+        .unwrap();
+    s.set_host_profiles(
+        "local",
+        &[
+            crate::store::HostProfileRow {
+                name: "work".into(),
+                account_uuid: Some("acc-work".into()),
+                email: None,
+            },
+            crate::store::HostProfileRow {
+                name: "fresh".into(),
+                account_uuid: None,
+                email: None,
+            },
+        ],
+    )
+    .unwrap();
+    let account = |s: &Store| s.get_session_by_id(id).unwrap().unwrap().account_uuid;
+
+    s.set_session_profile(id, Some("work")).unwrap();
+    assert_eq!(account(&s).as_deref(), Some("acc-work"));
+    s.set_session_profile(id, Some("fresh")).unwrap();
+    assert_eq!(
+        account(&s),
+        None,
+        "a login not signed in yet has no account"
+    );
+    s.set_session_profile(id, Some("unlisted")).unwrap();
+    assert_eq!(account(&s), None);
+    s.set_session_profile(id, None).unwrap();
+    assert_eq!(account(&s).as_deref(), Some("acc-host"));
 }
 
 #[test]

@@ -83,7 +83,13 @@
     placeholder={account.email ?? 'nickname'}
     aria-label="Nickname for {account.email ?? accountLabel(account)} (empty clears it)"
     onkeydown={onKeydown}
-    onblur={finish}
+    onblur={(e) => {
+      // Moving focus away keeps what was typed (review 2026-11-03 D14);
+      // Escape already finished, so its blur saves nothing.
+      const v = (e.currentTarget as HTMLInputElement).value;
+      if (v.trim() === (account.nickname ?? '').trim()) finish();
+      else void save(v);
+    }}
   />
 {:else}
   <button

@@ -98,6 +98,9 @@ describe('the fleet agents on the Agents tab', () => {
     await fireEvent.click(await screen.findByTestId('fleet-instance-edit'));
     expect(invoke).toHaveBeenCalledWith('agents_fleet', fleetArgs({ action: 'form', definition: 'l2-support', id: 12 }));
     await fireEvent.click(screen.getByTestId('fleet-instance-revoke'));
+    // A revoke deletes the instance: it asks first.
+    expect(invoke).not.toHaveBeenCalledWith('agents_fleet', fleetArgs({ action: 'revoke', id: 12 }));
+    await fireEvent.click(screen.getByTestId('fleet-revoke-confirm'));
     await waitFor(() => expect(screen.getByTestId('fleet-agents-note').textContent).toBe('Instance 12 revoked.'));
     expect(invoke).toHaveBeenCalledWith('agents_fleet', fleetArgs({ action: 'revoke', id: 12 }));
   });

@@ -18,6 +18,7 @@
   import { openExternal } from './open_external';
   import MissionGraph from './MissionGraph.svelte';
   import { tablistKeys } from './tablist_keys';
+  import { formKeys } from './forms/form_frame';
   import { defaultLaneBy, toneOf, type LaneBy } from './mission_graph';
   import { createWorkTask } from './work';
   import { projects } from './projects';
@@ -54,6 +55,7 @@
     mayChange,
     busy,
     changeBlocked,
+    changeWhy = null,
     act,
     tasksView = $bindable('list'),
     onopenitem,
@@ -64,6 +66,8 @@
     mayChange: boolean;
     busy: boolean;
     changeBlocked: boolean;
+    /** Why the hub refuses a change, when `changeBlocked`: the grey Retry's title. */
+    changeWhy?: string | null;
     /** Run one write; the room re-reads the mission on success. */
     act: <T>(p: Promise<Result<T>>) => Promise<T | null>;
     tasksView?: 'list' | 'graph';
@@ -150,7 +154,7 @@
 
   /** The reason field takes focus as it opens: the Override… button that
    *  opened it is gone (review r8). */
-  function focusOnMount(el: HTMLInputElement): void {
+  function focusOnMount(el: HTMLInputElement | HTMLTextAreaElement): void {
     el.focus();
   }
 
@@ -210,6 +214,7 @@
         {#each w.nodes as n (n.item_id)}
           {@const it = itemById.get(n.item_id)}
           {#if it}
+            {@const lane = laneOfItem(detail, it.id)}
             <li data-testid="mission-node" data-state={n.state}>
               <span class="node-dot" title={nodeLabel(n.state)}><StatusDot state={toneOf(n.state)} label={nodeLabel(n.state)} /></span>
               {#if trails.has(n.item_id)}
@@ -231,8 +236,8 @@
                     >
                   {/each}
                 </span>
-                {#if laneOfItem(detail, it.id)?.pr_url}
-                  {@const pr = laneOfItem(detail, it.id)?.pr_url ?? ''}
+                {#if lane?.pr_url}
+                  {@const pr = lane.pr_url}
                   <button
                     class="linkish small"
                     type="button"
@@ -317,6 +322,7 @@
                       placeholder="Lane name, e.g. backend"
                       maxlength="40"
                       bind:value={laneText}
+                      use:focusOnMount
                       data-testid="mission-lane-name"
                     />
                     <span class="row">
@@ -326,8 +332,9 @@
                   </form>
                 {/if}
                 {#if condsFor === n.item_id}
-                  <form class="conds" onsubmit={(e) => (e.preventDefault(), void saveConds())}>
+                  <form class="conds" use:formKeys onsubmit={(e) => (e.preventDefault(), void saveConds())}>
                     <textarea
+                      use:focusOnMount
                       rows="3"
                       aria-label="Done when, one condition per line"
                       placeholder={'ci\nreview\ntest:cargo test\nperson'}
@@ -369,7 +376,6 @@
               {#if it.id === mission.root_item_id}
                 <span class="muted small">root</span>
               {:else if mayChange}
-                {@const lane = laneOfItem(detail, it.id)}
                 {@const choices = depChoices(n)}
                 <select
                   class="dep-pick"
@@ -405,7 +411,7 @@
                     class="btn btn--quiet btn--icon"
                     type="button"
                     aria-label="Retry"
-                    title="Try again, with the last failure in the prompt"
+                    title={changeWhy ?? 'Try again, with the last failure in the prompt'}
                     disabled={busy || changeBlocked}
                     data-testid="mission-retry"
                     onclick={() => void retry(it.id)}>↻</button

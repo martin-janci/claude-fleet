@@ -50,7 +50,7 @@
   import { loadHostTokens } from './host_actions';
   import { hostsChordLabel, requestHostsView, settingsKey, settingsOpen, settingsSection } from './app_views';
   import { detectMac } from './terminal_keys';
-  import { copyText } from './clipboard';
+  import { copyAndSay } from './clipboard';
   import './settings_dialog.css';
   import {
     fleetSettings,
@@ -1073,7 +1073,7 @@
       {#if logDir}
         <p class="hook-desc log-path" data-testid="log-dir">
           Logs: <code>{logDir}</code>
-          <button onclick={() => copyText(logDir ?? '')} aria-label="Copy log folder path">Copy path</button>
+          <button onclick={() => copyAndSay(logDir ?? '', 'Log folder path')} aria-label="Copy log folder path">Copy path</button>
         </p>
       {/if}
     </section>

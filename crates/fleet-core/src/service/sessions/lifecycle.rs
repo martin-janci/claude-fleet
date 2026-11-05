@@ -60,7 +60,7 @@ pub struct NewSessionArgs {
     /// Which agent runs in the pane (`sessions.agent`, migration 121):
     /// `"claude"` (the default), `"codex"` (OpenAI's Codex CLI), `"agy"`
     /// (Google's Antigravity CLI), `"hermes"` (Nous Research's Hermes Agent,
-    /// migration 217) or `"shell"`, which is the same as
+    /// migration 218) or `"shell"`, which is the same as
     /// `kind: "shell"`. `None` / empty = Claude Code, or a shell for
     /// `kind: "shell"`. `"agy"` is refused (`E_UNSUPPORTED`) until its
     /// adapter is validated.
@@ -537,6 +537,15 @@ pub async fn new_session(
         if runs_claude {
             crate::service::account_limits::refuse_over_daily_limit(
                 &s,
+                &args.host_alias,
+                args.profile.as_deref(),
+                crate::store::now_unix(),
+            )?;
+            // An account the project forbids starts none of its work, from
+            // any caller (`service::project_accounts`).
+            crate::service::project_accounts::refuse_forbidden(
+                &s,
+                Some(args.project_id),
                 &args.host_alias,
                 args.profile.as_deref(),
                 crate::store::now_unix(),
@@ -2518,6 +2527,17 @@ pub async fn restart_session(
             launch.profile.as_deref(),
             crate::store::now_unix(),
         )?;
+        // A switch onto a login the project forbids is refused; a plain
+        // restart keeps the login the pane already ran under.
+        if switch.is_some() {
+            crate::service::project_accounts::refuse_forbidden(
+                &*lock(store)?,
+                project_id,
+                &args.host_alias,
+                launch.profile.as_deref(),
+                crate::store::now_unix(),
+            )?;
+        }
     }
     let pane_cmd: String =
         recreate_pane_command(&kind, &agent, claude_id.as_deref(), &args.name, &launch);

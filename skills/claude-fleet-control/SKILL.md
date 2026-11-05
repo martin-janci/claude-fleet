@@ -92,7 +92,7 @@ assets     list_assets scan_assets import_assets plan_sync apply_sync
            changesets catalog_admin list_layers propose_layers resolve_preview
            set_host_layers set_host_harnesses
 admin      add_host remove_host probe_host check_host hide_host merge_host
-           discover_hosts set_account_nickname
+           discover_hosts set_account_nickname set_account_projects
            provision_hosts install_agent agent_installs add_project
            forget_project list_github_repos list_host_worktrees
            refresh_projects delete_worktree pair_client list_clients

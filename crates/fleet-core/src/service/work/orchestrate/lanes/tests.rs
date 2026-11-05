@@ -206,24 +206,93 @@ fn a_lane_waits_for_its_tasks_test() {
     assert_eq!(awaiting_test(&graph), HashSet::from([10]));
 }
 
+/// A graph of `states` in graph order; a verifying item's test is due.
+fn graph(states: &[(i64, &str)]) -> crate::service::work::graph::MissionGraph {
+    let nodes: Vec<serde_json::Value> = states
+        .iter()
+        .map(|(id, st)| {
+            let mut n = serde_json::json!({"item_id": id, "state": st, "wave": 1});
+            if *st == "verifying" {
+                n["verification"] = serde_json::json!({"state": "unverified", "checks": [
+                    {"line": "test:cargo test", "kind": "test", "state": "pending", "detail": ""}]});
+            }
+            n
+        })
+        .collect();
+    serde_json::from_value(serde_json::json!({"nodes": nodes, "waves": 1})).unwrap()
+}
+
 /// Mission improvements M5: with a lane's tests at its end, the lane runs
-/// one test, its last test step, once all its tasks are implemented and it
-/// is not busy; a task in no lane tests as before.
+/// one test, on its last task whose test is due, once none of its tasks
+/// still moves and it is not busy; a task in no lane tests as before.
 #[test]
 fn a_lanes_one_test_waits_for_its_last_task() {
-    let steps = vec![
-        step("test", 10, "test"),
-        step("test", 11, "test"),
-        step("test", 30, "test"),
-    ];
-    let all_in = HashMap::from([(10, "verifying"), (11, "verifying"), (20, "done")]);
-    let got = gate_lane_tests(steps.clone(), &lane_of(), &HashSet::new(), &all_in);
-    assert_eq!(keys(&got), ["test:11", "test:30"]);
-    let still_running = HashMap::from([(10, "verifying"), (11, "running")]);
-    let got = gate_lane_tests(steps.clone(), &lane_of(), &HashSet::new(), &still_running);
-    assert_eq!(keys(&got), ["test:30"], "lane 1 still implements");
-    let got = gate_lane_tests(steps, &lane_of(), &HashSet::from([1]), &all_in);
-    assert_eq!(keys(&got), ["test:30"], "a busy lane tests nothing");
+    let none = HashSet::new();
+    let all_in = graph(&[(10, "verifying"), (11, "verifying"), (30, "verifying")]);
+    assert_eq!(
+        held_lane_tests(&all_in, &lane_of(), &none),
+        HashSet::from([10])
+    );
+    let still_running = graph(&[(10, "verifying"), (11, "running"), (30, "verifying")]);
+    assert_eq!(
+        held_lane_tests(&still_running, &lane_of(), &none),
+        HashSet::from([10]),
+        "lane 1 still implements"
+    );
+    assert_eq!(
+        held_lane_tests(&all_in, &lane_of(), &HashSet::from([1])),
+        HashSet::from([10, 11]),
+        "a busy lane tests nothing"
+    );
+}
+
+/// M5: a lane whose second task depends on its first tests the first
+/// while the second waits for it to be done; a ready task holds the test.
+#[test]
+fn a_lane_whose_tasks_depend_on_each_other_still_tests() {
+    let none = HashSet::new();
+    for left in ["waiting", "blocked", "held"] {
+        let g = graph(&[(10, "verifying"), (11, left)]);
+        assert!(held_lane_tests(&g, &lane_of(), &none).is_empty(), "{left}");
+    }
+    let g = graph(&[(10, "verifying"), (11, "ready")]);
+    assert_eq!(held_lane_tests(&g, &lane_of(), &none), HashSet::from([10]));
+}
+
+/// M5: a held lane test takes no slot, so ready work elsewhere still runs.
+#[test]
+fn a_held_lane_test_leaves_its_slot_to_ready_work() {
+    use crate::service::work::orchestrate::steps::{plan_steps_holding, StepInput};
+    let mut m = mission_row();
+    m.policy.max_parallel = 2;
+    let g = graph(&[(10, "verifying"), (11, "verifying"), (30, "ready")]);
+    let items: Vec<crate::store::WorkItemRow> = [10, 11, 30]
+        .iter()
+        .map(|id| {
+            serde_json::from_value(serde_json::json!({
+                "id": id, "source": "local", "title": format!("t{id}"),
+                "status_category": "todo", "created_at": 0, "updated_at": 0
+            }))
+            .unwrap()
+        })
+        .collect();
+    let held = held_lane_tests(&g, &lane_of(), &HashSet::new());
+    let steps = plan_steps_holding(
+        &StepInput {
+            mission: &m,
+            graph: &g,
+            items: &items,
+            attempts: &HashMap::new(),
+            counts: crate::store::MissionTaskCounts {
+                total: 0,
+                open: 0,
+                last_activity_at: None,
+            },
+            max_parallel: 2,
+        },
+        &held,
+    );
+    assert_eq!(keys(&steps), ["test:11", "run:30"]);
 }
 
 /// Mission improvements M4: under `lane_pr = draft` the brief tells the

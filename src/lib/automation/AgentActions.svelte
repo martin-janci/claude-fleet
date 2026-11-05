@@ -8,7 +8,7 @@
   // part of the Needs you badge (`pendingAgentCount`). What the person's
   // approvals of the last day came to ("Done: … — created task 42",
   // "Failed: … — why") shows under them (`status.recent`, review w08-3).
-  import { shortAge } from '../session_status';
+  import { shortAge, exactTime } from '../session_status';
   import { push, pushError } from '../toasts';
   import {
     actionBody,
@@ -48,7 +48,7 @@
         <span class="dot" aria-label="Waiting for you"></span>
         <div class="text">
           <span class="name">{actionTitle(a)} <span class="chip">agent</span></span>
-          <span class="line">proposed {shortAge(a.created_at)}</span>
+          <span class="line" title={exactTime(a.created_at)}>proposed {shortAge(a.created_at)}</span>
           <span class="buttons">
             <button type="button" class="btn btn--chip" data-testid="agent-action-approve" disabled={busy.has(a.id)} onclick={() => answer(a, true)}
               >Approve</button
@@ -75,7 +75,7 @@
         <span class="dot" class:failed={a.state === 'failed'} class:done={a.state !== 'failed'} aria-hidden="true"></span>
         <div class="text">
           <span class="outcome">{actionOutcome(a)}</span>
-          {#if a.executed_at}<span class="line">{shortAge(a.executed_at)}</span>{/if}
+          {#if a.executed_at}<span class="line" title={exactTime(a.executed_at)}>{shortAge(a.executed_at)}</span>{/if}
         </div>
       </div>
     {/each}

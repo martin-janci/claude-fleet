@@ -16,7 +16,7 @@
   import PickerList from './PickerList.svelte';
   import HostChips from './HostChips.svelte';
   import { refreshAccountUsage } from './account_usage_store';
-  import { accountByUuid, accountLabel } from './accounts';
+  import { accountByUuid, accountLabel, accounts, accountsForbiddenFor } from './accounts';
   import {
     checkAccountHeadroom,
     freestLogin,
@@ -370,10 +370,22 @@
       if (chosenHost !== host) return;
       const logins = h.ok && Array.isArray(h.value?.logins) ? h.value.logins : [];
       hostLogins = logins;
-      const best = pickedLogin ? null : freestLogin(logins);
+      const allowed = allowedLogins(logins);
+      // No reading anywhere: still never a login this project forbids.
+      const current = logins.find((l) => (l.profile ?? '') === chosenProfile);
+      const best = pickedLogin
+        ? null
+        : (freestLogin(allowed) ?? (current && !allowed.includes(current) ? (allowed[0] ?? null) : null));
       if (best) chosenProfile = best.profile ?? '';
     });
   });
+  // Accounts this project may not run on (docs/accounts.md, *Keep an
+  // account off a project*): never the default pick, and shown disabled.
+  const forbiddenHere = $derived(accountsForbiddenFor(project.project.id, $accounts));
+  function allowedLogins(logins: readonly HostLogin[]): HostLogin[] {
+    const forbidden = untrack(() => forbiddenHere);
+    return logins.filter((l) => !forbidden.includes(l.account_uuid));
+  }
   // A name typed while the headroom check is still out is a pick too: the
   // check's default must not overwrite it, and the field stays (review r05).
   function onTypeProfile() {
@@ -1513,11 +1525,19 @@
     const submittedWorktreeId = inNewMode ? null : chosenWorktreeId;
     if (runsClaude && !limitConfirmed) {
       busy = true;
-      const h = await checkAccountHeadroom(submittedHost, chosenProfile.trim() || null);
+      const h = await checkAccountHeadroom(submittedHost, chosenProfile.trim() || null, project.project.id);
       busy = false;
       // No answer (a hub client, an unknown host): start as before.
       if (h.ok && h.value?.over) {
         limitAsk = h.value;
+        return;
+      }
+      // Review 2026-11-03 D9: a signed-out login would open on /login, so
+      // ask as for a spent one and offer the freest signed-in login.
+      const chosenNow = h.ok ? (h.value?.chosen ?? null) : null;
+      if (h.ok && h.value && chosenNow?.signed_out) {
+        const others = (h.value.logins ?? []).filter((l) => (l.profile ?? '') !== (chosenNow.profile ?? ''));
+        limitAsk = { ...h.value, suggestion: h.value.suggestion ?? freestLogin(others) };
         return;
       }
     }
@@ -1953,7 +1973,10 @@
               onchange={(e) => onPickLogin(e.currentTarget.value)}
             >
               {#each hostLogins as l (l.profile ?? '')}
-                <option value={l.profile ?? ''}>{loginLabel(l, accountName)} · {usedText(l)}</option>
+                {@const forbidden = forbiddenHere.includes(l.account_uuid)}
+                <option value={l.profile ?? ''} disabled={forbidden}
+                  >{loginLabel(l, accountName)} · {forbidden ? 'not for this project' : usedText(l)}</option
+                >
               {/each}
               <option value={OTHER_PROFILE}>Other profile…</option>
             </select>
@@ -1966,7 +1989,7 @@
               data-testid="launch-profile"
               bind:value={chosenProfile}
               oninput={onTypeProfile}
-              placeholder="Host login"
+              placeholder="Empty: the host's own login"
               list="launch-profile-options"
               maxlength="32"
               aria-invalid={profileInvalid}
@@ -1977,6 +2000,18 @@
                 <option value={p.name}>{p.email ?? (p.account_uuid ? p.name : 'not logged in')}</option>
               {/each}
             </datalist>
+            {#if hostLogins && hostLogins.length > 0}
+              <!-- Review 2026-11-03 D10: "Other profile…" is not a one-way trip. -->
+              <button
+                type="button"
+                class="profile-back"
+                data-testid="launch-profile-back"
+                onclick={() => {
+                  otherProfile = false;
+                  chosenProfile = freestLogin(allowedLogins(hostLogins ?? []))?.profile ?? '';
+                }}>Back to accounts</button
+              >
+            {/if}
           </div>
         {/if}
       </div>
@@ -2173,10 +2208,15 @@
     <span class="hint">↵ or {createHint.label} create · {rerollKey} re-roll</span>
     {#if limitAsk && limitAsk.chosen}
       <div class="limit-ask" role="alert" data-testid="limit-ask">
-        <span
-          >{accountName(limitAsk.chosen.account_uuid)} is at {Math.round(limitAsk.chosen.used_pct ?? 0)}% of its
-          limit (this asks from {limitAsk.pause_at_pct}%).</span
-        >
+        {#if limitAsk.chosen.signed_out}
+          <span
+            >{loginLabel(limitAsk.chosen, accountName)} is signed out on {chosenHost}: the session would open on its
+            /login.</span
+          >
+        {:else}
+          {@const leftNow = Math.max(0, 100 - Math.round(limitAsk.chosen.used_pct ?? 0))}
+          <span>{accountName(limitAsk.chosen.account_uuid)} has {leftNow}% left (this asks under {100 - limitAsk.pause_at_pct}% left).</span>
+        {/if}
         {#if limitAsk.suggestion}
           {@const s = limitAsk.suggestion}
           <button class="primary" data-testid="limit-use-suggestion" onclick={() => useLogin(s)}
@@ -2306,6 +2346,16 @@
     text-decoration: underline;
   }
   .name-row input { flex: 1 1 auto; }
+  .profile-back {
+    align-self: flex-start;
+    background: none;
+    border: none;
+    padding: 0;
+    color: var(--accent);
+    cursor: pointer;
+    font-size: var(--text-2xs);
+    text-decoration: underline;
+  }
   .dice {
     font-size: var(--text-md);
     line-height: 1;

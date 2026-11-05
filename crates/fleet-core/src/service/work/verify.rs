@@ -268,7 +268,9 @@ fn lane_test_passes(
 ) -> Result<Vec<TaskRow>, IpcError> {
     let Some(mission) = s
         .item_mission(item_id)?
-        .and_then(|m| s.get_mission(m).ok().flatten())
+        .map(|m| s.get_mission(m))
+        .transpose()?
+        .flatten()
     else {
         return Ok(Vec::new());
     };
@@ -277,7 +279,9 @@ fn lane_test_passes(
     }
     let Some(lane) = s
         .item_lane(item_id)?
-        .and_then(|l| s.get_mission_lane(l).ok().flatten())
+        .map(|l| s.get_mission_lane(l))
+        .transpose()?
+        .flatten()
     else {
         return Ok(Vec::new());
     };
@@ -285,10 +289,9 @@ fn lane_test_passes(
     for other in lane.item_ids.iter().filter(|i| **i != item_id) {
         out.extend(s.item_tasks(*other, "test")?.into_iter().filter(|t| {
             t.state == "done"
-                && t.report.as_ref().is_some_and(|r| {
-                    r.outcome == "done"
-                        && command.is_none_or(|c| r.tests_run.iter().any(|x| x.contains(c)))
-                })
+                && t.report
+                    .as_ref()
+                    .is_some_and(|r| r.outcome == "done" && command.is_none_or(|c| ran(r, c)))
         }));
     }
     Ok(out)
@@ -299,6 +302,11 @@ fn lane_test_passes(
 /// commands. A line that waited on a run nobody starts again was stuck for
 /// good (the loop starts a run only for a pending line with no `by`).
 const UNREPORTED_TEST_RUNS: usize = 2;
+
+/// PURE: whether a test run's report says it ran `cmd`.
+fn ran(r: &crate::store::TaskReport, cmd: &str) -> bool {
+    r.tests_run.iter().any(|x| x.contains(cmd))
+}
 
 /// PURE: a test line over the runs that tested the current work, newest
 /// first, the newest finished. Each command is judged by the newest run that
@@ -331,11 +339,7 @@ fn test_check(line: &str, command: Option<&str>, runs: &[&TaskRow]) -> CondCheck
     let Some(cmd) = command else {
         return verdict(newest);
     };
-    let reported = |t: &&&TaskRow| {
-        t.report
-            .as_ref()
-            .is_some_and(|r| r.tests_run.iter().any(|x| x.contains(cmd)))
-    };
+    let reported = |t: &&&TaskRow| t.report.as_ref().is_some_and(|r| ran(r, cmd));
     if let Some(t) = runs.iter().find(reported) {
         return verdict(t);
     }

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { focusNow } from './focus_now';
   import { IS_MAC, shortcutLabel } from './shortcuts';
   // A task in Details (work graph M14), opened from the Work view: what the
   // tracker says (title, status, link, assignees, a description excerpt),
@@ -24,7 +25,7 @@
   import { shortAge, timeAgo } from './session_status';
   import { assessRow, hasReading, verdictLabel, verdictState } from './evidence';
   import StatusDot from './kit/StatusDot.svelte';
-  import { changedAny, describeEvidence, estimateLabel, onWorkChangedDebounced, priorityLabel } from './work';
+  import { changedAny, describeEvidence, dueLabel, estimateLabel, isHotPriority, onWorkChangedDebounced, priorityLabel } from './work';
   import { providerInfo, unavailableLabel, shownKey } from './trackers';
   import { hubStatus, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
@@ -84,12 +85,14 @@
     readErrorText,
     ruleDraftFor,
     selectedTaskId,
+    showWorkView,
     taskStatus,
     trackerDown,
     trackerDownLabel,
     workRules,
     workTask,
     workTreeMeta,
+    workViewFilters,
     type TaskDetail,
     type WorkRule,
     type WorkRuleDraft,
@@ -97,6 +100,7 @@
     type WorkTaskLink,
   } from './work_view';
   import type { IpcError } from './result';
+  import { boardMovesAtTracker } from './task_list';
 
   let {
     taskId,
@@ -125,6 +129,7 @@
   // (the hub's answer), and one on its way or refused.
   let promoting = $state(false);
   const promoteTargets = $derived(detail?.promote_targets ?? []);
+  const promoteHint = $derived(detail?.promote_hint ?? null);
   const promotion = $derived(detail?.promotion ?? null);
   const promoteBlocked = $derived(hubActionBlocked('promote_work_item', $hubStatus, $hubConnection));
   let assigning = $state(false);
@@ -454,6 +459,8 @@
   }
 
   // Inline status (a native task's own): set here, without the edit dialog.
+  // A ticket whose tracker takes moves from fleet (`status_movable`) is
+  // moved at its tracker the same way; the hub reads it back.
   let statusError = $state<string | null>(null);
   let statusBusy = $state(false);
   async function pickStatus(next: WorkItemStatus) {
@@ -541,6 +548,19 @@
   const initialOf = (name: string): string => ([...name.trim()][0] ?? '?').toUpperCase();
   /** "2 / 4" in the header chips, with any subtasks. */
   const subtaskCount = $derived(subtaskProgress(detail?.subtasks));
+  /** "Oct 30" while an open task is past its due date: the header says so,
+   *  as the Work row and the Board card do. */
+  const overdue = $derived.by(() => {
+    if (!task || task.status_category === 'done') return null;
+    const d = dueLabel(task.due_at);
+    return d?.overdue ? d.text : null;
+  });
+  /** A label in the rail opens Work on the tasks carrying it, keeping the
+   *  other filters (a section's `group` is per section, so it goes). */
+  function filterByLabel(label: string): void {
+    workViewFilters.update(({ group: _g, ...rest }) => ({ ...rest, label }));
+    showWorkView();
+  }
   /** The task's own "finishes when" (G7.6), as one line. */
   const finishes = $derived.by(() => {
     const s = finishesWhen(task?.done_when);
@@ -635,6 +655,11 @@
             title={promoteBlocked ?? promoteTitle(promoteTargets)}
             onclick={() => (promoting = true)}>Promote to ticket…</button
           >
+        {:else if task?.item_id != null && promoteHint && promotion?.state !== 'pending'}
+          <!-- Nowhere to promote it yet: the button says what brings it. -->
+          <button class="btn" type="button" data-testid="work-task-promote" disabled title={promoteHint}
+            >Promote to ticket…</button
+          >
         {/if}
         {#if task && canArchive(task)}
           <button
@@ -654,14 +679,19 @@
     </div>
     {#if task}
       <div class="chips">
-        {#if task.kind === 'local' && task.item_id != null}
+        {#if (task.kind === 'local' && task.item_id != null) || boardMovesAtTracker(task)}
+          {@const atTracker = boardMovesAtTracker(task) ? task.tracker_name || task.provider || 'its tracker' : null}
+          {#if atTracker && task.status_name}<span
+              class="chip chip--status chip--{task.status_category ?? 'todo'}"
+              data-testid="work-task-status">{task.status_name}</span
+            >{/if}
           <select
             class="status-pick status-pick--{task.status_category ?? 'todo'}"
             aria-label="Status"
             data-testid="work-task-status-pick"
             value={task.status_category ?? 'todo'}
             disabled={statusBlocked !== null || statusBusy}
-            title={statusBlocked ?? 'Set the status'}
+            title={statusBlocked ?? (atTracker ? `Move it on ${atTracker}` : 'Set the status')}
             onchange={(e) => void pickStatus((e.currentTarget as HTMLSelectElement).value as WorkItemStatus)}
           >
             <option value="todo">To do</option>
@@ -673,11 +703,12 @@
         {/if}
         {#if task.resolution}<span class="chip">{task.resolution}</span>{/if}
         {#if isArchived(task)}<span class="chip" data-testid="work-task-archived-chip" title={task.archived_at != null ? `Archived ${timeAgo(task.archived_at)}` : 'Archived'}>Archived</span>{/if}
-        {#if task.priority === 'urgent' || task.priority === 'high'}
+        {#if isHotPriority(task.priority)}
           <span class="chip chip--prio-{task.priority}" data-testid="work-task-priority-chip"
             ><span class="prio-dot prio-dot--{task.priority}" aria-hidden="true"></span>{priorityLabel(task.priority)}</span
           >
         {/if}
+        {#if overdue}<span class="chip chip--overdue" data-testid="work-task-overdue-chip" title="Was due {task.due_at}">Overdue · {overdue}</span>{/if}
         {#if subtaskCount}<span class="chip" data-testid="work-task-subtask-chip" title="Subtasks done">✓ {subtaskCount}</span>{/if}
         <TaskBlockedSpend {task} lookup={depById} testid="work-task" />
         {#if trackerDown(task)}<span class="chip chip--warn" data-testid="work-task-tracker-down"
@@ -813,7 +844,13 @@
               {#if (task.labels ?? []).length > 0}
                 <dt>Labels</dt>
                 <dd class="labels" data-testid="work-task-labels">
-                  {#each task.labels ?? [] as label (label)}<span class="chip chip--label">{label}</span>{/each}
+                  {#each task.labels ?? [] as label (label)}<button
+                      class="chip chip--label"
+                      type="button"
+                      data-testid="work-task-label"
+                      title="Show the tasks labelled “{label}” in Work"
+                      onclick={() => filterByLabel(label)}>{label}</button
+                    >{/each}
                 </dd>
               {/if}
               {#if estimateLabel(task.estimate, task.estimate_unit)}
@@ -1166,7 +1203,7 @@
                             <button class="btn btn--crit" type="button" data-testid="work-task-comment-delete-confirm" onclick={() => void removeComment(c.id)}
                               >Delete</button
                             >
-                            <button class="btn btn--quiet" type="button" onclick={() => (confirmDelete = null)}>Keep</button>
+                            <button class="btn btn--quiet" type="button" use:focusNow onclick={() => (confirmDelete = null)}>Keep</button>
                           {:else}
                             <button
                               class="btn btn--quiet"
@@ -1541,6 +1578,11 @@
     color: var(--usage-warn);
     white-space: normal;
   }
+  .chip--overdue {
+    background: var(--failed-soft);
+    color: var(--danger);
+    font-weight: 600;
+  }
   .chip--prio-urgent {
     gap: 5px;
     background: var(--failed-soft);
@@ -1556,6 +1598,12 @@
   .chip--label {
     height: auto;
     padding: 1px 6px;
+    font-family: inherit;
+    border: none;
+    cursor: pointer;
+  }
+  .chip--label:hover {
+    text-decoration: underline;
   }
   .prio-dot {
     flex: none;

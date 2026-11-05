@@ -53,6 +53,14 @@ export function timeAgo(unixSecs: number, nowMs: number = Date.now()): string {
   return `${Math.floor(ageSec / 86400)}d ago`;
 }
 
+/** The exact local time behind a relative one ("3h", "12d ago"), for its
+ *  hover title: an age says how long, the title says when. '' for an
+ *  unreadable stamp. */
+export function exactTime(unixSecs: number | null | undefined): string {
+  if (unixSecs == null || !Number.isFinite(unixSecs)) return '';
+  return new Date(unixSecs * 1000).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+}
+
 /** Elapsed since the session started ("3h 5m"), or '' before it started. */
 /** The short age the redesign's rows use (step 3.6, the manual's content
  *  rules): `now`, `2m`, `3h`, `4d`. */

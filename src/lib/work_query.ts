@@ -6,12 +6,19 @@
 //
 // Fields: sprint (current, none or a name, quoted when it has spaces),
 // epic (a key), type, assignee (me or a name), status (backlog, todo,
-// doing, review, blocked, done, open), is (mine, review, live, archived)
-// and sort. Pure, so the bar and its tests share it.
+// doing, review, blocked, done, open), is (mine, review, live, archived),
+// priority (urgent, high, medium, low, none), label and sort. Pure, so the bar and its tests share it.
 import { fold } from './text_fold';
-import { WORK_SORTS, type WorkStage, type WorkTreeFilters, type WorkTreeFacets } from './work_view';
+import {
+  WORK_PRIORITY_FILTERS,
+  WORK_SORTS,
+  type WorkPriorityFilter,
+  type WorkStage,
+  type WorkTreeFilters,
+  type WorkTreeFacets,
+} from './work_view';
 
-export const QUERY_FIELDS = ['sprint', 'epic', 'type', 'assignee', 'status', 'is', 'sort'] as const;
+export const QUERY_FIELDS = ['sprint', 'epic', 'type', 'assignee', 'status', 'is', 'priority', 'label', 'sort'] as const;
 export type QueryField = (typeof QUERY_FIELDS)[number];
 
 /** What the values are checked and completed against. */
@@ -96,6 +103,11 @@ export function resolveToken(field: QueryField, raw: string, vocab: WorkQueryVoc
       return STATUS_WORDS[v] ?? null;
     case 'is':
       return IS_WORDS[v] ?? null;
+    case 'priority':
+      return (WORK_PRIORITY_FILTERS as readonly string[]).includes(v) ? { priority: v as WorkPriorityFilter } : null;
+    case 'label':
+      // Any label: the hub matches it in any case; one the page lists keeps its spelling.
+      return { label: (vocab.facets?.labels ?? []).find((l) => fold(l) === v) ?? value };
     case 'sort':
       return (WORK_SORTS as readonly string[]).includes(v) ? { sort: v as (typeof WORK_SORTS)[number] } : null;
   }
@@ -158,6 +170,10 @@ function valuesOf(field: QueryField, vocab: WorkQueryVocab): { value: string; hi
       return Object.keys(STATUS_WORDS).map((value) => ({ value }));
     case 'is':
       return Object.keys(IS_WORDS).map((value) => ({ value }));
+    case 'priority':
+      return WORK_PRIORITY_FILTERS.map((value) => ({ value }));
+    case 'label':
+      return (vocab.facets?.labels ?? []).map((value) => ({ value }));
     case 'sort':
       return WORK_SORTS.map((value) => ({ value }));
   }
@@ -170,7 +186,9 @@ const FIELD_HINTS: Record<QueryField, string> = {
   assignee: 'me or a name',
   status: 'backlog, todo, doing, review, blocked, done',
   is: 'mine, review, live, archived',
-  sort: 'activity, updated, key, title, due',
+  priority: 'urgent, high, medium, low or none',
+  label: 'a label, any case',
+  sort: 'activity, updated, key, title, due, priority',
 };
 
 export interface WorkQuerySuggestion {

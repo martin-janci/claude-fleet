@@ -49,8 +49,9 @@ user-scope MCP server of the host's own `~/.claude.json` (Jira, a company's
 servers…; the host's entry wins over a profile's of the same name, a server
 only the profile has is kept). A mission's grant does the same for the
 logins its runs will use, once per grant (the access check, below). A
-profile added since then has neither until one of the two runs, and a
-session picks the servers up only when it starts.
+login added through + Add account gets them once the host reports it
+signed in (`login_status`); a profile made by hand has neither until one of
+those runs, and a session picks the servers up only when it starts.
 
 An OAuth server's sign-in is not shared: Claude Code keeps it with the
 login (`.credentials.json`, or the Keychain on macOS), so such a server asks
@@ -261,6 +262,39 @@ refused for a signed-out login, and for one past the line unless
 device (Switch account on a hub-paired desktop or the phone, org-bound or
 not) is the person's choice; the operator, a per-host token and the master
 token are held.
+
+### Keep an account off a project
+
+A person can forbid an account for some projects: on the Accounts page,
+the account's **Not for these projects** list (the phone's account sheet has
+the same list). MCP: `set_account_projects { uuid, forbidden_project_ids }`,
+which replaces the list; the account's row carries it as
+`forbidden_project_ids` (`account_project_blocks`, migration 217). Only the
+hub owner's devices change it, as with the nickname.
+
+No work in a forbidden project runs on a login on that account
+(`service::project_accounts`):
+
+- a start under such a login is refused with `E_ACCOUNT_FORBIDDEN`, from
+  every caller (the desktop, MCP and hub `new_session`, a ticket start, a
+  resume, a routine or mission run, `dispatch_task`); the refusal names the
+  allowed login on the host with the most headroom
+  (`details.suggested_profile`, `""` for the host's own), and no flag
+  passes it;
+- Switch account (`restart_session { profile }`) onto such a login is
+  refused; a plain restart keeps the login the pane already runs under;
+- where fleet picks the login, it never picks one: placement leaves it out
+  ("the project forbids its account"), a ticket start or a resume that names
+  no login moves to the allowed login on the host with the most headroom,
+  a routine on its host's own login does the same (and one that names a
+  forbidden login skips its run and says why), the over-limit refusal and
+  `check_account_headroom { project_id }` never suggest one, and the
+  automatic switch never moves a session onto one.
+
+A profile that is not logged in yet has no account, so a start under it is
+not refused; once the host reports its account, the next start, resume or
+switch is. Forbidding never stops a session already running on the
+account: it changes where work goes next.
 
 ### Signed-out logins
 

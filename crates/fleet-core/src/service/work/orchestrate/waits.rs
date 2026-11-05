@@ -22,17 +22,14 @@ pub fn held(before: &BTreeSet<i64>, after: &[Step]) -> bool {
 }
 
 /// PURE: the cause of the runs the slots left out: `wanted` is the plan
-/// with no cap on runs open at once, `planned` the plan under it. A plan
-/// that asks a person about its spent attempts waits on the person (the
-/// ask says so), not on a slot.
+/// with no cap on runs open at once, `planned` the plan under it. None
+/// when the plan asks a person about its spent attempts: that wait is the
+/// person's, which the ask books already.
 pub fn slot_cause(wanted: &[Step], planned: &[Step]) -> Option<&'static str> {
-    if !held(&impl_items(wanted), planned) {
-        return None;
-    }
     let attempts_spent = planned
         .iter()
         .any(|st| st.kind == "ask" && st.item_id.is_none());
-    Some(if attempts_spent { "person" } else { "slot" })
+    (!attempts_spent && held(&impl_items(wanted), planned)).then_some("slot")
 }
 
 #[cfg(test)]
@@ -67,7 +64,7 @@ mod tests {
         assert_eq!(slot_cause(&[run(1)], &[run(1)]), None);
         assert_eq!(
             slot_cause(&[run(1), run(2)], &[run(1), ask()]),
-            Some("person"),
+            None,
             "spent attempts are a person's call"
         );
     }

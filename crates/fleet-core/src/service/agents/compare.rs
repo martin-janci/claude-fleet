@@ -9,12 +9,21 @@
 //!   instance's tracker job on the same ticket comment (`<KEY>#c<id>`);
 //!   they agree on the same severity and confidence.
 //!
+//! Only the restatements count on the fleet side: instances of the
+//! [`RESTATED`] definitions. Another instance on the same triggers (the
+//! gallery's issue triage reads tracker comments too) is not the built-in
+//! agent's counterpart.
+//!
 //! [`compare`] is PURE over the jobs; `admin` reads them.
 
 use crate::store::AgentJobRow;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
+
+/// The definitions that restate a built-in agent: the PR reviewer and
+/// support.
+pub const RESTATED: [&str; 2] = ["pr-reviewer", "support"];
 
 /// Jobs `compare` reads, newest first, at most.
 pub const COMPARE_JOBS: usize = 1000;
@@ -73,12 +82,12 @@ fn text<'a>(v: &'a Value, k: &str) -> &'a str {
     v.get(k).and_then(Value::as_str).unwrap_or_default()
 }
 
-/// PURE: the head a review job's key names: after its last `@`, up to a
-/// `#` (a forced review's reason) or a `:` (a fleet reverify's).
+/// PURE: the head a review job's key names (`plan::sha_of_key`), up to a
+/// `:` (a fleet reverify's).
 fn head_of(key: &str) -> Option<&str> {
-    let (_, rest) = key.rsplit_once('@')?;
-    let head = rest.split(['#', ':']).next().unwrap_or(rest);
-    (!head.is_empty()).then_some(head)
+    super::review::plan::sha_of_key(key)
+        .and_then(|h| h.split(':').next())
+        .filter(|h| !h.is_empty())
 }
 
 /// PURE: the ticket comment a support job's key names: `<KEY>#<why>`.
@@ -91,7 +100,8 @@ fn ticket_of(key: &str) -> Option<String> {
 /// PURE: which work a job is about, and as which side: `(kind, key)`.
 fn work_of(j: &AgentJobRow) -> Option<(&'static str, String)> {
     match j.agent.as_str() {
-        "review" => Some((
+        // A debate answers a reply, not a head: it is no review's pair.
+        "review" if j.trigger != super::review::debate::TRIGGER => Some((
             "review",
             format!("{}@{}", j.subject, head_of(&j.dedup_key)?),
         )),
@@ -110,12 +120,11 @@ fn side(kind: &str, j: &AgentJobRow) -> Side {
     let r = result_of(j);
     // A fleet job's answer is under `answer`; the built-in ones' is the result.
     let answer = r
-        .as_ref()
-        .map(|r| {
+        .map(|mut r| {
             if j.agent == "fleet" {
-                r["answer"].clone()
+                r["answer"].take()
             } else {
-                r.clone()
+                r
             }
         })
         .filter(Value::is_object);
@@ -127,8 +136,12 @@ fn side(kind: &str, j: &AgentJobRow) -> Side {
                     .and_then(Value::as_array)
                     .map_or(0, Vec::len) as u64
             } else {
-                a.get("inline").and_then(Value::as_u64).unwrap_or(0)
-                    + a.get("orphans").and_then(Value::as_u64).unwrap_or(0)
+                // Every finding the model gave, as the fleet side counts
+                // them: those under the confidence threshold too.
+                ["inline", "orphans", "dropped"]
+                    .iter()
+                    .map(|k| a.get(*k).and_then(Value::as_u64).unwrap_or(0))
+                    .sum()
             };
             let s = if n == 1 { "" } else { "s" };
             (
@@ -163,21 +176,26 @@ fn side(kind: &str, j: &AgentJobRow) -> Side {
 }
 
 /// PURE: the jobs (newest first) as pairs of the same work: for each work,
-/// the newest job of each side.
-pub fn compare(jobs: &[AgentJobRow]) -> Comparison {
+/// the newest job of each side. `restated`: the fleet rules whose
+/// definition is one of [`RESTATED`]; another fleet rule's jobs are left out.
+pub fn compare(jobs: &[AgentJobRow], restated: &HashSet<i64>) -> Comparison {
     let mut builtin: BTreeMap<(&str, String), &AgentJobRow> = BTreeMap::new();
     let mut fleet: BTreeMap<(&str, String), &AgentJobRow> = BTreeMap::new();
     let mut order: Vec<(&str, String)> = Vec::new();
     for j in jobs {
+        if j.agent == "fleet" && !j.rule_id.is_some_and(|r| restated.contains(&r)) {
+            continue;
+        }
         let Some(w) = work_of(j) else { continue };
-        let map = if j.agent == "fleet" {
-            &mut fleet
+        let (map, other) = if j.agent == "fleet" {
+            (&mut fleet, &builtin)
         } else {
-            &mut builtin
+            (&mut builtin, &fleet)
         };
-        // Newest first: the first job of a side is the one kept.
+        // Newest first: the first job of a side is the one kept, and a work
+        // is ordered by its first job of either side.
         if let std::collections::btree_map::Entry::Vacant(e) = map.entry(w.clone()) {
-            if !order.contains(&w) {
+            if !other.contains_key(&w) {
                 order.push(w);
             }
             e.insert(j);
@@ -257,7 +275,7 @@ mod tests {
                 "review",
                 "gh:o/r#4",
                 "gh:o/r#4@abc",
-                json!({ "verdict": "APPROVE", "inline": 1, "orphans": 1 }),
+                json!({ "verdict": "APPROVE", "inline": 1, "orphans": 1, "dropped": 1 }),
             ),
             job(
                 2,
@@ -289,17 +307,49 @@ mod tests {
                 json!({ "verdict": "COMMENT" }),
             ),
         ];
-        let c = compare(&jobs);
+        let c = compare(&jobs, &HashSet::from([2]));
         assert_eq!(
             (c.agree, c.differ, c.builtin_only, c.fleet_only),
             (1, 1, 1, 0)
         );
         assert_eq!(c.pairs[0].key, "gh:o/r#4@abc");
-        assert_eq!(c.pairs[0].builtin.said, "APPROVE, 2 findings");
+        assert_eq!(c.pairs[0].builtin.said, "APPROVE, 3 findings");
         assert_eq!(c.pairs[0].fleet.said, "APPROVE, 2 findings");
         assert_eq!(c.pairs[0].agree, Some(true));
         assert_eq!(c.pairs[1].key, "gh:o/r#5@def");
         assert_eq!(c.pairs[1].agree, Some(false));
+    }
+
+    /// A built-in debate answers a reply, and another fleet instance on
+    /// the same pull requests restates nothing: neither pairs or counts.
+    #[test]
+    fn a_debate_and_another_instance_are_left_out() {
+        let mut debate = job(
+            3,
+            "review",
+            "gh:o/r#4",
+            "gh:o/r#4@debate:7:c9",
+            json!({ "verdict": "COMMENT" }),
+        );
+        debate.trigger = super::super::review::debate::TRIGGER.into();
+        let mut other = job(
+            2,
+            "fleet",
+            "gh:o/r#4",
+            "r9:gh:o/r#4@abc",
+            json!({ "answer": { "verdict": "COMMENT" } }),
+        );
+        other.rule_id = Some(9);
+        let built = job(
+            1,
+            "review",
+            "gh:o/r#4",
+            "gh:o/r#4@abc",
+            json!({ "verdict": "APPROVE" }),
+        );
+        let c = compare(&[debate, other, built], &HashSet::from([2]));
+        assert!(c.pairs.is_empty());
+        assert_eq!((c.builtin_only, c.fleet_only), (1, 0));
     }
 
     #[test]
@@ -320,7 +370,7 @@ mod tests {
                 json!({ "severity": "Major", "confidence": "High" }),
             ),
         ];
-        let c = compare(&jobs);
+        let c = compare(&jobs, &HashSet::from([2]));
         assert_eq!(c.pairs.len(), 1);
         let p = &c.pairs[0];
         assert_eq!((p.kind.as_str(), p.key.as_str()), ("support", "L2S-7#c100"));
@@ -332,7 +382,7 @@ mod tests {
         skipped.result = None;
         skipped.state = "skipped".into();
         skipped.error = Some("cooldown".into());
-        let c = compare(&[jobs[0].clone(), skipped]);
+        let c = compare(&[jobs[0].clone(), skipped], &HashSet::from([2]));
         assert_eq!(
             (c.pairs[0].agree, c.pairs[0].builtin.said.as_str()),
             (None, "cooldown")

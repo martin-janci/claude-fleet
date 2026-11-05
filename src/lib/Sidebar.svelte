@@ -1361,12 +1361,19 @@
     }
     return undefined;
   }
+  /** The chord and ⌘K's row: with nothing needing you it says so, rather
+   *  than do nothing and read as a dead key (UX antipatterns 2026-11-03). */
+  function openNextNeedingYou() {
+    const el = nextNeedingYou();
+    if (el) openRow(el);
+    else push({ kind: 'info', message: 'Nothing needs you right now' });
+  }
   // ⌘K's "Next session that needs you" row (review w18-4), as the chord.
   $effect(() => {
     if ($nextNeedsYouRequest === 0) return;
     untrack(() => {
       nextNeedsYouRequest.set(0);
-      openRow(nextNeedingYou());
+      openNextNeedingYou();
     });
   });
   function onWindowKeydown(e: KeyboardEvent, capture: boolean) {
@@ -1382,7 +1389,7 @@
     e.preventDefault();
     if (id === 'next-needs-you') {
       e.stopPropagation();
-      openRow(nextNeedingYou());
+      openNextNeedingYou();
     } else openRow(shownRows()[Number(e.key) - 1]);
   }
 

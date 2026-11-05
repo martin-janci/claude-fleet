@@ -9,6 +9,7 @@ use rusqlite::{Connection, OptionalExtension, Result, TransactionBehavior};
 use std::sync::Arc;
 
 mod access_requests;
+mod account_project_blocks;
 mod account_usage_snapshots;
 mod admin_events;
 mod agent_records;
@@ -168,6 +169,7 @@ pub use guides::{GuideProposalRow, NewGuideProposal, DECIDED_GUIDE_KEEP_SECS};
 pub use host_setup::{AgentInstallRow, HostSetupRow, SetupCheck};
 // For `realm_admin` (identity sub-project 1), which records its events
 // inside its own transactions.
+pub use account_project_blocks::MAX_FORBIDDEN_PROJECTS;
 #[allow(unused_imports)]
 pub(crate) use admin_events::record_admin_event_in_tx;
 pub use diagnostics::WindowEventRow;

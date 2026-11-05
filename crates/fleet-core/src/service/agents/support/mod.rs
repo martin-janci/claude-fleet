@@ -977,6 +977,11 @@ impl SupportRunner {
             }
         }
         result["fingerprint"] = fp.into();
+        // The bug it found the error in, so Compare shows it beside the
+        // fleet instance's.
+        if let Some(b) = &known_bug {
+            result["knownBug"] = b.clone().into();
+        }
         result["actions"] = ids.into();
         if waiting.is_empty() {
             RunOutcome::Done {

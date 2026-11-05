@@ -85,10 +85,13 @@ answer the same ticket comment.
 compare }`) puts the two side by side: each pull request head or ticket comment both have done,
 newest first, with what each said ("REQUEST_CHANGES, 3 findings", "major, high confidence,
 BUG-9"), what it cost, and whether they agree (a review on the verdict, an investigation on
-severity and confidence), and how much work only one of them did:
+severity and confidence), and how much work only one of them did. The fleet side is the
+instances of `pr-reviewer` and `support` alone; another instance on the same triggers is no
+built-in's counterpart. A finding count is every finding the model gave, those under the
+confidence threshold included:
 
 ```
-3 agree, 1 differ; 2 built-in only, 0 fleet only
+3 agree, 1 differs; 2 built-in only, 0 fleet only
 ≠ review gh:acme/pos#41@9f2c1e0
     built-in job 812 done: REQUEST_CHANGES, 2 findings ($0.41)
     fleet    job 815 done: COMMENT, 1 finding ($0.38)

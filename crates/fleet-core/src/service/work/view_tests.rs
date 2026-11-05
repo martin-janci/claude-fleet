@@ -2226,6 +2226,34 @@ fn a_subtasks_steps_roll_up_to_its_parent_and_count_its_live_sessions() {
     let d = task(&w.st, &vs(&OrgScope::All), &format!("item:{}", parent.id)).unwrap();
     assert_eq!(d.subtasks[0].item_id, sub.id);
     assert_eq!(d.subtasks[0].live_sessions, 1);
+    assert_eq!(
+        (
+            d.subtasks[0].due_at.as_deref(),
+            d.subtasks[0].priority.as_deref()
+        ),
+        (None, None)
+    );
+    // Its due date and priority ride along, so the parent's list can flag
+    // an overdue or urgent subtask.
+    w.st.lock()
+        .unwrap()
+        .edit_local_item(
+            sub.id,
+            &crate::store::ItemEdit {
+                due_at: Some("2026-10-30"),
+                priority: Some("urgent"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let d = task(&w.st, &vs(&OrgScope::All), &format!("item:{}", parent.id)).unwrap();
+    assert_eq!(
+        (
+            d.subtasks[0].due_at.as_deref(),
+            d.subtasks[0].priority.as_deref()
+        ),
+        (Some("2026-10-30"), Some("urgent"))
+    );
     assert_eq!(d.steps.len(), 1);
     assert_eq!(
         (
@@ -3324,6 +3352,96 @@ fn sort_by_key_reads_the_number_and_by_updated_newest_first() {
     assert_eq!(ticketed, ["TK-1", "TK-3", "TK-2"]);
 }
 
+/// `priority` keeps one priority, or (`none`) the tasks with none; an
+/// unknown one is refused.
+#[test]
+fn filter_by_priority_keeps_one_priority_or_none() {
+    let w = planned_world();
+    w.st.lock()
+        .unwrap()
+        .conn_ref()
+        .execute(
+            "UPDATE work_items SET priority = CASE key WHEN 'TK-1' THEN 'high' WHEN 'TK-3' THEN 'urgent' END \
+             WHERE key IN ('TK-1', 'TK-3')",
+            [],
+        )
+        .unwrap();
+    let only = |p: &str| {
+        let got = keys(&page(
+            &w,
+            &OrgScope::All,
+            WorkTreeFilters {
+                priority: Some(p.into()),
+                sort: Some("key".into()),
+                group_by: Some("org".into()),
+                ..Default::default()
+            },
+        ));
+        got.into_iter()
+            .filter(|k| k.starts_with("TK-"))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(only("high"), ["TK-1"]);
+    assert_eq!(only("urgent"), ["TK-3"]);
+    assert_eq!(only("none"), ["TK-2", "TK-10", "TK-11", "TK-12"]);
+    let err = check_filters(&WorkTreeFilters {
+        priority: Some("asap".into()),
+        ..Default::default()
+    })
+    .unwrap_err();
+    assert!(err.message.contains("filters.priority"), "{}", err.message);
+}
+
+/// `label` keeps the tasks carrying it, any case, and the page's facets
+/// list every label once.
+#[test]
+fn filter_by_label_keeps_the_tasks_carrying_it() {
+    let w = planned_world();
+    w.st.lock()
+        .unwrap()
+        .conn_ref()
+        .execute(
+            "UPDATE work_items SET labels = CASE key WHEN 'TK-1' THEN '[\"ui\",\"auth\"]' \
+             WHEN 'TK-3' THEN '[\"UI\"]' END WHERE key IN ('TK-1', 'TK-3')",
+            [],
+        )
+        .unwrap();
+    let only = |l: &str| {
+        let got = keys(&page(
+            &w,
+            &OrgScope::All,
+            WorkTreeFilters {
+                label: Some(l.into()),
+                sort: Some("key".into()),
+                group_by: Some("org".into()),
+                ..Default::default()
+            },
+        ));
+        got.into_iter()
+            .filter(|k| k.starts_with("TK-"))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(only("ui"), ["TK-1", "TK-3"]);
+    assert_eq!(only("Auth"), ["TK-1"]);
+    assert!(only("backend").is_empty());
+    let all = page(
+        &w,
+        &OrgScope::All,
+        WorkTreeFilters {
+            group_by: Some("org".into()),
+            ..Default::default()
+        },
+    );
+    let labels: Vec<String> = all.facets.labels.iter().map(|l| l.to_lowercase()).collect();
+    assert_eq!(labels, ["auth", "ui"], "each label once, whatever its case");
+    let err = check_filters(&WorkTreeFilters {
+        label: Some("x".repeat(201)),
+        ..Default::default()
+    })
+    .unwrap_err();
+    assert!(err.message.contains("filters.label"), "{}", err.message);
+}
+
 #[test]
 fn an_unknown_sort_is_refused() {
     let err = check_filters(&WorkTreeFilters {
@@ -3368,6 +3486,39 @@ fn finished_local_work_is_suggested_for_closing() {
     // Off the wire unless set, so an older client's fixtures still hold.
     let wire = serde_json::to_value(&plain).unwrap();
     assert!(wire.get("close_suggested").is_none(), "{wire}");
+}
+
+/// `sort: priority` puts urgent first and no priority last; inside one
+/// priority the latest activity leads.
+#[test]
+fn sort_by_priority_puts_urgent_first_and_none_last() {
+    let w = world();
+    finished_local(&w, w.s1, "LOC-51");
+    let p = page(&w, &OrgScope::All, hiding());
+    let t = task_of(&p, "LOC-51");
+    let org_names = HashMap::new();
+    let with = |priority: Option<&str>, at: i64| WorkTask {
+        priority: priority.map(Into::into),
+        last_activity_at: Some(at),
+        ..t.clone()
+    };
+    let key = |task: &WorkTask| sort_key(task, &org_names, Some("priority"));
+    let urgent = with(Some("urgent"), 10);
+    let high_new = with(Some("high"), 30);
+    let high_old = with(Some("high"), 20);
+    let low = with(Some("low"), 40);
+    let none = with(None, 50);
+    let odd = with(Some("whenever"), 60);
+    assert!(key(&urgent) < key(&high_new));
+    assert!(key(&high_new) < key(&high_old));
+    assert!(key(&high_old) < key(&low));
+    assert!(key(&low) < key(&none));
+    assert!(key(&low) < key(&odd), "an unknown priority sorts as none");
+    assert!(check_filters(&WorkTreeFilters {
+        sort: Some("priority".into()),
+        ..Default::default()
+    })
+    .is_ok());
 }
 
 /// Nothing is suggested while a session is on the work, for work with no

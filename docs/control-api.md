@@ -372,7 +372,10 @@ Index by area (names only; see the reference for details):
   a project: `{host_alias, confidence_pct, run_id}` or null; a person's
   device only, never a per-host token; hub contract 17),
   `list_accounts`, `set_account_nickname` (an account's label on every
-  device; a fleet admin's devices, contract 17), `account_usage` (each account's latest plan usage: the
+  device; a fleet admin's devices, contract 17), `set_account_projects`
+  (the projects an account is forbidden for: work in one never starts,
+  resumes or switches onto a login on it, `E_ACCOUNT_FORBIDDEN`; a
+  person's device only), `account_usage` (each account's latest plan usage: the
   5-hour and weekly windows with their reset times, status and when it was
   fetched, as the hub's usage poll last answered; never fetches; hub
   contract 11), `check_account_headroom` (whether starting or switching a
@@ -726,7 +729,7 @@ Index by area (names only; see the reference for details):
   the top into `container`, a Jira project key, an Asana project gid, a
   Linear team key or a GitHub `owner/repo` — and
   the task becomes that ticket once the outbox sends it; `work { task }`
-  answers `promotion` and `promote_targets`). `work { action: "tracker_comments", key }` reads a
+  answers `promotion` and `promote_targets`, and with no target `promote_hint`: what would bring one). `work { action: "tracker_comments", key }` reads a
   ticket's own comments live (newest 50, oldest first, no cache; the ones
   fleet posted from a live comment left out; bodies fenced for a per-host
   token; `can_post` says whether the caller may post there), and for Asana
@@ -1522,7 +1525,7 @@ derive from them.
   urgent first: `waiting` (blocked on a dialog), `stuck` (`stuck_kind` says
   which), `host_down` (the session's host was pinged and did not answer),
   `account_limit` (its account's 5-hour or weekly window is used up and the
-  session is not working), `no_credentials` (its account's login has
+  session is not working), `no_credentials` (the session's login on its host was seen signed out, or its account's login has
   expired or its token was rejected, and the session is not working), `stop_failed` (the
   last turn ended in an API error; re-prompt),
   `failed` (a pane-less agent reported failure), `context_full` (not idle, context at or
@@ -2092,7 +2095,6 @@ the session continues.
 | `Notification` | `quota_auto_resume_fired` | same | `working`, stuck cleared | `notification` — type |
 | `PostToolUse` | `EnterWorktree\|ExitWorktree` | `tool_name`, `tool_input`, `tool_response` | worktree row registered / removed | — |
 | `SubagentStart` | all | `session_id`, `agent_type` | none | `subagent_started` — type (quiet: no live event) |
-| `SubagentStop` | all | `session_id`, `agent_type` | none | `subagent_stopped` — type (quiet) |
 | `PreToolUse` | `Bash` (command hook, prefiltered) | `tool_name`, `tool_input.command` | none; answers `deny` for a mission's worker running a person's step (orchestration §7.2) | — |
 | `PromptSuggestion` | — (fleet's plugin, not a settings hook) | `session_id`, `suggestion` | `prompt_suggestion` set on the current conversation's row (one line, at most 300 chars, no bidi or zero-width characters); dropped while the row is `working` (a late POST the next prompt overtook); the next `UserPromptSubmit`, `Stop`/`StopFailure`, a genuine `SessionStart` or `SessionEnd` clears it | — |
 

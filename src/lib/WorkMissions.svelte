@@ -104,9 +104,22 @@
   );
   const footer = $derived(loopFooter([...rowDetails.values()]));
   const anyActive = $derived(missions.some((m) => m.state === 'active'));
+  const activeCount = $derived(missions.filter((m) => m.state === 'active').length);
+  /** Pause all asks first, as the phone's does: it ends every grant, and a
+   *  resumed mission does not get its grant back (review: UX antipatterns
+   *  2026-11-03, a bulk step one stray click away). The palette's Pause all
+   *  stays immediate: typing it is the deliberate act. */
+  let confirmPauseAll = $state(false);
 
-  const saveBlocked = $derived(!!hubActionBlocked('save_mission', $hubStatus, $hubConnection));
-  const changeBlocked = $derived(!!hubActionBlocked('set_mission_state', $hubStatus, $hubConnection));
+  const saveWhy = $derived(hubActionBlocked('save_mission', $hubStatus, $hubConnection));
+  const changeWhy = $derived(hubActionBlocked('set_mission_state', $hubStatus, $hubConnection));
+  const saveBlocked = $derived(!!saveWhy);
+  const changeBlocked = $derived(!!changeWhy);
+
+  /** The confirm row's Keep takes focus as it mounts: the keyboard lands in the question, not on the page. */
+  function focusNow(el: HTMLElement): void {
+    el.focus();
+  }
 
   function open(id: number) {
     openMissionRoom(id);
@@ -183,7 +196,7 @@
       class="btn btn--quiet new"
       type="button"
       disabled={saveBlocked}
-      title="New mission"
+      title={saveWhy ?? 'New mission'}
       data-testid="mission-new"
       onclick={startNewMission}>+ New</button
     >
@@ -247,7 +260,12 @@
     {:else if !$missionList.loaded}
       <div data-testid="missions-loading"><Skeleton rows={3} label="Loading missions" /></div>
     {:else if missions.length === 0 && !$missionList.error}
-      <p class="muted empty" data-testid="missions-empty">No missions yet. A mission is a goal with the tasks that reach it.</p>
+      <div class="empty" data-testid="missions-empty">
+        <p class="muted">No missions yet. A mission is a goal with the tasks that reach it.</p>
+        <button class="btn" type="button" disabled={saveBlocked} title={saveWhy ?? undefined} data-testid="missions-empty-new" onclick={startNewMission}
+          >New mission…</button
+        >
+      </div>
     {:else}
       {#if $missionList.error}
         <p class="refresh-error" role="status" data-testid="missions-refresh-error">
@@ -321,9 +339,32 @@
     <div class="list-foot" data-testid="missions-footer">
       {#if footer}<span class="muted small" data-testid="missions-loop">{footer}</span>{/if}
       {#if anyActive}
-        <button class="btn btn--quiet" type="button" disabled={busy || changeBlocked} data-testid="missions-pause-all" onclick={() => void pauseAll()}
-          >Pause all</button
+        <button
+          class="btn btn--quiet"
+          type="button"
+          disabled={busy || changeBlocked}
+          aria-expanded={confirmPauseAll}
+          data-testid="missions-pause-all"
+          onclick={() => (confirmPauseAll = !confirmPauseAll)} title={changeWhy ?? undefined}>Pause all…</button
         >
+      {/if}
+      {#if confirmPauseAll && anyActive}
+        <div class="pause-confirm" role="alertdialog" aria-label="Pause all missions" data-testid="missions-pause-all-confirm-row">
+          <span
+            >Pause {activeCount} running mission{activeCount === 1 ? '' : 's'}? Each stops taking steps and its grant ends; runs already going keep
+            going.</span
+          >
+          <span class="row">
+            <button
+              class="btn btn--danger"
+              type="button"
+              disabled={busy || changeBlocked}
+              data-testid="missions-pause-all-confirm"
+              onclick={() => ((confirmPauseAll = false), void pauseAll())} title={changeWhy ?? undefined}>Pause all</button
+            >
+            <button class="btn btn--quiet" type="button" data-testid="missions-pause-all-keep" use:focusNow onclick={() => (confirmPauseAll = false)}>Keep</button>
+          </span>
+        </div>
       {/if}
     </div>
   {/if}
@@ -525,6 +566,20 @@
   .hidden-line,
   .empty {
     padding: var(--space-2) 14px;
+  }
+  .empty p {
+    margin: 0 0 var(--space-2);
+  }
+  .pause-confirm {
+    flex-basis: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    font-size: var(--text-sm);
+  }
+  .pause-confirm .row {
+    display: flex;
+    gap: 0.4rem;
   }
   .list-foot {
     display: flex;

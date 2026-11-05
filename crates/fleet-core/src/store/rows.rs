@@ -447,7 +447,7 @@ pub const AGENT_CODEX: &str = "codex";
 /// launched through `agent_adapter::Agy` (redesign step 12.3).
 pub const AGENT_AGY: &str = "agy";
 
-/// `sessions.agent` (migration 217): Nous Research's Hermes Agent CLI
+/// `sessions.agent` (migration 218): Nous Research's Hermes Agent CLI
 /// (`hermes`), launched through `agent_adapter::Hermes`.
 pub const AGENT_HERMES: &str = "hermes";
 
@@ -456,7 +456,7 @@ pub const AGENT_HERMES: &str = "hermes";
 pub const AGENT_SHELL: &str = "shell";
 
 /// Every value the `sessions.agent` `CHECK` admits (migration 121, widened
-/// by 217 for `hermes`). `agy` has its adapter but `new_session` refuses it
+/// by 218 for `hermes`). `agy` has its adapter but `new_session` refuses it
 /// until its start path is enabled.
 pub const AGENTS: [&str; 5] = [
     AGENT_CLAUDE,
@@ -1632,12 +1632,23 @@ pub struct AccountRow {
     /// 028): hitting a usage limit spends pay-as-you-go money instead of
     /// blocking the account.
     pub has_extra_usage: bool,
+    /// The projects a person forbade this account for (migration 217,
+    /// `service::project_accounts`), ascending: no session, routine run or
+    /// mission run of one of them starts, resumes or switches onto a login
+    /// on the account. Read with the row; never written by
+    /// `Store::upsert_account` (only `Store::set_account_forbidden_projects`
+    /// changes it). An older hub sends no key: empty.
+    pub forbidden_project_ids: Vec<i64>,
 }
 
-/// Columns every `AccountRow` query selects, in [`map_account_row`] order.
+/// Columns every `AccountRow` query selects (`FROM accounts`, unaliased), in
+/// [`map_account_row`] order. The last is the account's forbidden projects
+/// as a comma-separated list (migration 217).
 pub(super) const ACCOUNT_COLUMNS: &str =
     "uuid, email, display_name, organization_name, organization_uuid, \
-     seat_tier, last_seen_at, nickname, has_extra_usage";
+     seat_tier, last_seen_at, nickname, has_extra_usage, \
+     (SELECT group_concat(project_id) FROM account_project_blocks \
+       WHERE account_uuid = accounts.uuid)";
 
 /// Map a row selected with [`ACCOUNT_COLUMNS`].
 pub(super) fn map_account_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AccountRow> {
@@ -1651,6 +1662,14 @@ pub(super) fn map_account_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Accou
         last_seen_at: row.get(6)?,
         nickname: row.get(7)?,
         has_extra_usage: row.get::<_, i64>(8)? != 0,
+        forbidden_project_ids: {
+            let mut ids: Vec<i64> = row
+                .get::<_, Option<String>>(9)?
+                .map(|ids| ids.split(',').filter_map(|i| i.parse().ok()).collect())
+                .unwrap_or_default();
+            ids.sort_unstable();
+            ids
+        },
     })
 }
 

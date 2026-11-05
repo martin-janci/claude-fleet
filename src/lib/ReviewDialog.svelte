@@ -93,6 +93,7 @@
   canConfirm={canStart}
   onconfirm={() => void start()}
   onclose={onClose}
+  dirty={prompt !== DEFAULT_REVIEW_PROMPT}
   {error}
   errorTestid="review-error"
   confirmTitle={spawnBlocked}

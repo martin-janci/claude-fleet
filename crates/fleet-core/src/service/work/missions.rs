@@ -293,8 +293,14 @@ pub fn mission(
     let mut graph = super::graph::build(&s, scope, &items)?;
     // M7: the subagents each latest attempt used, for its task row.
     let now = crate::store::now_unix();
+    let ids: Vec<i64> = graph
+        .nodes
+        .iter()
+        .filter_map(|n| n.attempt.as_ref().map(|a| a.task_id))
+        .collect();
+    let mut used = s.task_subagents(&ids, now)?;
     for a in graph.nodes.iter_mut().filter_map(|n| n.attempt.as_mut()) {
-        a.subagents = s.task_subagents(a.task_id, now)?;
+        a.subagents = used.remove(&a.task_id).unwrap_or_default();
     }
     let phase = (mission.state == "active").then(|| graph.phase().to_string());
     let events = s.mission_events(id, before_event, MISSION_EVENTS_PAGE)?;
@@ -369,9 +375,12 @@ fn mission_stats(
     let now = crate::store::now_unix();
     let mut st = stats::stats(items, mission.root_item_id, &attempts, &checkout_of, now);
     st.waits = s.mission_waits(mission.id, now)?;
-    for t in &attempts {
-        st.subagents += s.task_subagents(t.id, now)?.values().sum::<u32>();
-    }
+    let ids: Vec<i64> = attempts.iter().map(|t| t.id).collect();
+    st.subagents = s
+        .task_subagents(&ids, now)?
+        .values()
+        .flat_map(|by_type| by_type.values())
+        .sum();
     Ok(st)
 }
 

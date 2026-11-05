@@ -24,7 +24,8 @@ import { openRoutines } from './routines';
 import { openMissionRoom } from './mission_room';
 import { requestTerminalTab } from './terminals';
 import { fleetFilter, fleets, multiFleet } from './fleets';
-import { hasNoPane } from './sessions';
+import { hasNoPane, sendPrompt } from './sessions';
+import { canStop, STOP_KEY } from './composer_hold';
 import { pendingInputFor, type AnswerView } from './pending_input';
 import { sendAnswer } from './answer_send';
 import { hubActionBlocked, hubBlock, hubStatus } from './hub';
@@ -114,6 +115,18 @@ export function paletteCommands(ctx: CommandContext): PaletteCommand[] {
         section: 'This session',
         description: `${name} · presses ${ask.options[0].key} if the dialog is still on screen`,
         synonyms: ['approve', 'allow', 'yes', 'permission'],
+      });
+    }
+    // Review w13-4: ⌘K can stop a running turn too, as the composer's Stop
+    // does (the REPL's own Escape). Not while stuck, where Escape answers
+    // the prompt on screen instead.
+    if (canStop(s.claude_status, s.stuck_kind)) {
+      out.push({
+        id: 'session.stop',
+        label: 'Stop the turn',
+        section: 'This session',
+        description: `${name} · presses Escape in its pane`,
+        synonyms: ['stop', 'interrupt', 'cancel', 'escape', 'abort', 'halt'],
       });
     }
     const toTerminal = ctx.sessionView !== 'terminal';
@@ -344,6 +357,18 @@ export async function runCommand(id: string, ctx: CommandContext): Promise<void>
       else push({ kind: 'info', message: 'stale' in out ? out.stale : 'blocked' in out ? out.blocked : out.error });
       return;
     }
+    case 'session.stop': {
+      if (!s || !canStop(s.claude_status, s.stuck_kind)) return;
+      const why = s.fleet !== undefined ? null : (hubActionBlocked('send_prompt', get(hubStatus), get(hubConnection)) ?? sessionActionBlocked(s, 'send_prompt'));
+      if (why !== null) {
+        push({ kind: 'info', message: why });
+        return;
+      }
+      const r = await sendPrompt(s.host_alias, s.tmux_name, '', { keys: STOP_KEY, ...(s.fleet !== undefined ? { fleet: s.fleet } : {}) });
+      if (r.ok) push({ kind: 'success', message: 'Stopped the turn' });
+      else pushError(r.error);
+      return;
+    }
     case 'session.flip-view':
       sessionView.update((v) => (v === 'terminal' ? 'conversation' : 'terminal'));
       goTo('session');
@@ -440,6 +465,7 @@ export async function runCommand(id: string, ctx: CommandContext): Promise<void>
     case 'app.pause-all': {
       const r = await pauseAllMissions();
       if (!r.ok) pushError(r.error, 'Pause all failed');
+      else if (r.value.length === 0) push({ kind: 'info', message: 'No mission is running: nothing to pause' });
       else push({ kind: 'success', message: `Paused ${r.value.length} mission${r.value.length === 1 ? '' : 's'}` });
       return;
     }

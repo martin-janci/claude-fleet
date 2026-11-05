@@ -143,6 +143,7 @@ describe('ShareSheet', () => {
     expect(mockedShare).toHaveBeenCalledWith(42, { org: 'Acme' }, 'watch');
     expect(screen.getByTestId('share-grant-who').textContent).toContain('Acme');
     await fireEvent.click(screen.getByTestId('share-revoke'));
+    expect(document.activeElement).toBe(screen.getByTestId('share-revoke-no'));
     await fireEvent.click(screen.getByTestId('share-revoke-yes'));
     await settle();
     expect(mockedUnshare).toHaveBeenCalledWith(42, { org: 'Acme' });

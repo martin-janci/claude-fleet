@@ -321,19 +321,22 @@ including tasks with no session at all — as reads of the `work` tool
   Search phase 2 (2026-10) adds `iteration` (`current` for the tracker's
   active sprint or cycle, `none`, or a sprint's name, any case), `epic`
   (an epic's key or `item:<id>`: the epic and everything under it, through
-  any depth of parents), `item_type` (the tracker's type name, any case)
+  any depth of parents), `item_type` (the tracker's type name, any case),
+  `priority` (`urgent`, `high`, `medium`, `low`, or `none` for tasks with
+  none; another value is refused), `label` (tasks carrying it, any case)
   and `sort` (`activity`, the default: needing you first then the latest
   activity; `updated`, the tracker's last change; `key`, by number so
-  TK-9 comes before TK-10; `title`; `due`), which orders the tasks inside
+  TK-9 comes before TK-10; `title`; `due`; `priority`, urgent first and
+  none last), which orders the tasks inside
   each section; an unknown `sort` is refused. `query` matches every word
   of it in the key or title, in any order, case and accents ignored. Each
   task carries `item_type`, `hierarchy_level`, `iteration`,
   `iteration_active`, `in_epic` (`{task_id, key, title}`: its nearest
   epic-level ancestor, else its top-most one) and `updated_at`; the page
   carries `facets` (`iterations` with `active` and `count`, `epics` with
-  `count`, `item_types`), every value among the tasks the caller sees
+  `count`, `item_types`, `labels`), every value among the tasks the caller sees
   whatever the filters, so a picker is not limited to the loaded page
-  (absent on a section's read). An older hub ignores all four filters.
+  (absent on a section's read). An older hub ignores all six filters.
 - `work { action: task, task_id }` (`item:<id>` or `ref:<KEY>`): one task
   with every session and why it is linked, its tracker description (at
   most 600 characters, with `description_chars`, the full length fleet
@@ -1499,11 +1502,9 @@ not recorded: suggestions shown (only made, confirmed, rejected and expired are 
 The phone app (fleet-mobile) reads work from a hub over its paired client
 token:
 
-- work groups (per host), the **My work** chip and the row's work chip —
-  though not yet local work's live *in progress* / *done* (native item
-  status): the phone's wire model predates that field and reads a bare
-  key's status the old way, so a fleet-mobile release must add it before a
-  phone shows the same answer the desktop does for work with no ticket;
+- work groups (per host), the **My work** chip and the row's work chip,
+  with the same live status the desktop shows (`effective_status`, local
+  work's *in progress* / *done* included; fleet-mobile #68);
 - with a **full** token: Confirm / *Not this* on a suggestion, set or clear
   a link, start work from a ticket (*Start here*) and resume past work;
 - **Today** with *Copy standup*, and the ticket card with its acceptance

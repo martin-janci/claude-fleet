@@ -55,8 +55,7 @@ pub fn apply_hook(
         Some("SessionStart") => apply_session_start_hook(store, payload, ctx),
         Some("PreCompact") => apply_pre_compact_hook(store, payload, ctx),
         Some("PostCompact") => apply_post_compact_hook(store, ssh, payload, ctx),
-        Some("SubagentStart") => apply_subagent_hook(store, payload, ctx, "subagent_started"),
-        Some("SubagentStop") => apply_subagent_hook(store, payload, ctx, "subagent_stopped"),
+        Some("SubagentStart") => apply_subagent_hook(store, payload, ctx),
         Some("SessionEnd") => apply_session_end_hook(store, payload, ctx),
         Some("StopFailure") => apply_stop_failure_hook(store, ssh, payload, ctx),
         Some("Notification") => apply_notification_hook(store, ssh, payload, ctx),
@@ -1100,17 +1099,18 @@ fn subagent_type(payload: &HookPayload) -> Option<&str> {
     })
 }
 
-/// `SubagentStart` / `SubagentStop` (mission improvements M7): the current
-/// conversation used a subagent. Recorded as a quiet timeline event with
-/// the subagent's type (`subagent_started` / `subagent_stopped`), which a
-/// mission's task counts in its run's window; nothing else depends on it.
-/// A non-current id is a no-op.
+/// `SubagentStart` (mission improvements M7): the current conversation
+/// started a subagent. Recorded as a quiet `subagent_started` timeline event
+/// with the subagent's type, which a mission's task counts in its run's
+/// window; nothing else depends on it. A non-current id is a no-op. A stop
+/// is not recorded: nothing reads it, and it would take timeline rows (the
+/// per-session cap) from the starts that are counted.
 fn apply_subagent_hook(
     store: &Arc<Mutex<Store>>,
     payload: &HookPayload,
     ctx: &HookContext,
-    kind: &str,
 ) -> Result<(), IpcError> {
+    let kind = "subagent_started";
     let s = lock(store)?;
     s.atomically(|s| {
         let Some((row, Binding::Current)) =
@@ -3879,8 +3879,9 @@ mod tests {
         assert!(s.sessions_awaiting_rebind("local").unwrap().is_empty());
     }
 
-    /// Mission improvements M7: a subagent's start and stop are timeline
-    /// events with its type; a type that is no name is left out.
+    /// Mission improvements M7: a subagent's start is a timeline event with
+    /// its type; a type that is no name is left out, and a stop records
+    /// nothing.
     #[test]
     fn subagent_hooks_journal_the_subagent_and_its_type() {
         let store = make_store();
@@ -3889,8 +3890,11 @@ mod tests {
         let mut start = make_payload("SubagentStart", OLD);
         start.agent_type = Some("Explore".into());
         apply_hook(&store, &make_ssh(), &start, &ctx(&host, Some("%3"))).unwrap();
+        let mut odd = make_payload("SubagentStart", OLD);
+        odd.agent_type = Some("rm -rf /".into());
+        apply_hook(&store, &make_ssh(), &odd, &ctx(&host, Some("%3"))).unwrap();
         let mut stop = make_payload("SubagentStop", OLD);
-        stop.agent_type = Some("rm -rf /".into());
+        stop.agent_type = Some("Explore".into());
         apply_hook(&store, &make_ssh(), &stop, &ctx(&host, Some("%3"))).unwrap();
         let ev = events(&store, id);
         assert!(
@@ -3898,9 +3902,10 @@ mod tests {
             "{ev:?}"
         );
         assert!(
-            ev.contains(&("subagent_stopped".to_string(), None)),
+            ev.contains(&("subagent_started".to_string(), None)),
             "{ev:?}"
         );
+        assert!(!ev.iter().any(|(k, _)| k == "subagent_stopped"), "{ev:?}");
     }
 
     #[test]

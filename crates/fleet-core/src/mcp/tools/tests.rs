@@ -553,6 +553,7 @@ async fn the_owners_trusted_phone_administers_hosts_and_trackers_only() {
         "install_agent",
         "work_admin",
         "set_account_nickname",
+        "set_account_projects",
         "check_host",
     ] {
         assert!(guard::access_allows(&phone, t), "{t}");

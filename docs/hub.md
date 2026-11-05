@@ -2628,7 +2628,7 @@ phone the columns to re-derive the answer instead of the answer. Its reasons,
 most urgent first (`service/attention.rs`): `waiting`, `stuck`, `host_down`
 (the session's host was pinged and did not answer), `account_limit` (its
 account's 5-hour or weekly window is used up and the session is not
-working), `no_credentials` (its account's login has expired or its
+working), `no_credentials` (its login on its host was seen signed out, or its account's login has expired or its
 token was rejected, and the session is not working), `stop_failed`,
 `failed`, `context_full` (not idle, at or past `health.context_red_pct`),
 `stale_working` (a `working` row demoted after `reconcile.stale_working_secs`

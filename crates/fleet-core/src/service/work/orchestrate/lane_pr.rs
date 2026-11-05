@@ -9,12 +9,14 @@
 //!
 //! What it did is a `note` in the mission's log; a host with no `gh`, or one
 //! not signed in, says so once per commit and the lead's brief still asks
-//! it to open the PR itself.
+//! it to open the PR itself. A host that does not answer, or a `gh` that
+//! fails, is tried again on the next tick and said once per commit.
 
+use super::planner::clip;
 use super::{event, Deps};
 use crate::ipc_error::lock;
 use crate::shell::quote as shq;
-use crate::store::{MissionLaneRow, MissionRow, Store};
+use crate::store::{MissionRow, Store, WorkItemRow};
 use std::collections::HashMap;
 use std::sync::Mutex;
 
@@ -35,7 +37,6 @@ pub fn pr_title(m: &MissionRow, lane: &str) -> String {
 /// PURE: the PR's body: the mission's goal, the lane's tasks with the done
 /// ones ticked, and who decides.
 pub fn pr_body(m: &MissionRow, lane: &str, tasks: &[LaneTask]) -> String {
-    let clip = |s: &str, n: usize| s.chars().take(n).collect::<String>();
     let mut out = format!(
         "Lane \"{}\" of mission \"{}\".\n\n{}\n\n",
         clip(lane, 40),
@@ -66,12 +67,14 @@ pub enum Pushed {
     NoGh,
     /// The push was refused or failed.
     PushFailed(String),
+    /// Pushed, but `gh` could not open or refresh the PR.
+    PrFailed(String),
 }
 
 /// The script, run in the lane's checkout: push `sha` to `branch` on
-/// `origin`, then find the branch's PR or open it as a draft, or refresh its
-/// body. Says `__FLEET_PR pushed|no_gh|push_failed <why>` and
-/// `__FLEET_PR_URL <url>`.
+/// `origin`, then refresh the body of the branch's open PR, or open it as a
+/// draft. Says `__FLEET_PR pushed|no_gh|push_failed <why>|pr_failed <why>`
+/// and `__FLEET_PR_URL <url>`.
 pub fn pr_script(dir: &str, branch: &str, sha: &str, title: &str, body: &str) -> String {
     format!(
         "cd -- {dir} || {{ echo '__FLEET_PR push_failed no checkout'; exit 0; }}\n\
@@ -79,9 +82,10 @@ pub fn pr_script(dir: &str, branch: &str, sha: &str, title: &str, body: &str) ->
          if ! out=$(git push -q origin {sha}:\"refs/heads/$b\" 2>&1); then\n\
          echo \"__FLEET_PR push_failed $(printf '%s' \"$out\" | tail -1 | cut -c1-200)\"; exit 0; fi\n\
          if ! command -v gh >/dev/null 2>&1 || ! gh auth status >/dev/null 2>&1; then echo '__FLEET_PR no_gh'; exit 0; fi\n\
-         url=$(gh pr view \"$b\" --json url -q .url 2>/dev/null)\n\
-         if [ -n \"$url\" ]; then gh pr edit \"$b\" --body {body} >/dev/null 2>&1 || true\n\
-         else url=$(gh pr create --draft --head \"$b\" --title {title} --body {body} 2>/dev/null | tail -1); fi\n\
+         url=$(gh pr list --head \"$b\" --state open --json url -q '.[0].url // empty' 2>/dev/null)\n\
+         if [ -n \"$url\" ]; then err=$(gh pr edit \"$url\" --body {body} 2>&1 >/dev/null)\n\
+         else err=$(gh pr create --draft --head \"$b\" --title {title} --body {body} 2>&1) && url=$(printf '%s' \"$err\" | grep -o 'https://[^[:space:]]*' | tail -1); fi\n\
+         if [ $? -ne 0 ]; then echo \"__FLEET_PR pr_failed $(printf '%s' \"$err\" | tail -1 | cut -c1-200)\"; exit 0; fi\n\
          echo '__FLEET_PR pushed'\n\
          [ -n \"$url\" ] && echo \"__FLEET_PR_URL $url\"\n",
         dir = shq(dir),
@@ -103,13 +107,12 @@ pub fn parse_pr(stdout: &str) -> Option<Pushed> {
                 url = Some(u.to_string());
             }
         } else if let Some(rest) = line.strip_prefix("__FLEET_PR ") {
-            state = Some(
-                match rest.split_once(' ').map_or((rest, ""), |(a, b)| (a, b)) {
-                    ("pushed", _) => Pushed::Done { url: None },
-                    ("no_gh", _) => Pushed::NoGh,
-                    (_, why) => Pushed::PushFailed(why.trim().to_string()),
-                },
-            );
+            state = Some(match rest.split_once(' ').unwrap_or((rest, "")) {
+                ("pushed", _) => Pushed::Done { url: None },
+                ("no_gh", _) => Pushed::NoGh,
+                ("pr_failed", why) => Pushed::PrFailed(why.trim().to_string()),
+                (_, why) => Pushed::PushFailed(why.trim().to_string()),
+            });
         }
     }
     match state? {
@@ -118,30 +121,19 @@ pub fn parse_pr(stdout: &str) -> Option<Pushed> {
     }
 }
 
-/// The commit to push for `lane`: the newest done task's, as its implement
-/// run's evidence read it; `None` before a task of the lane is done.
-fn verified_head(s: &Store, lane: &MissionLaneRow) -> Option<String> {
-    let mut best: Option<(i64, String)> = None;
-    for item in &lane.item_ids {
-        let done = s
-            .get_work_item(*item)
-            .ok()
-            .flatten()
-            .is_some_and(|i| i.status_category == "done");
-        if !done {
-            continue;
-        }
-        let Some(t) = s.latest_item_task(*item, "implement").ok().flatten() else {
-            continue;
-        };
-        let Some(head) = t.evidence.as_ref().and_then(|e| e.head.clone()) else {
-            continue;
-        };
-        if crate::store::is_commit_id(&head) && best.as_ref().is_none_or(|(id, _)| t.id > *id) {
-            best = Some((t.id, head));
-        }
-    }
-    best.map(|(_, h)| h)
+/// The commit to push for a lane of `items`: the newest done task's, as
+/// its implement run's evidence read it; `None` before a task of it is done.
+fn verified_head(s: &Store, items: &[WorkItemRow]) -> Option<String> {
+    items
+        .iter()
+        .filter(|i| i.status_category == "done")
+        .filter_map(|i| {
+            crate::service::work::dep_work::verified_commit(s, i.id)
+                .ok()
+                .flatten()
+        })
+        .max_by_key(|(id, _)| *id)
+        .map(|(_, h)| h)
 }
 
 /// The heads a push was already tried for, per lane, so a failing push is
@@ -149,6 +141,15 @@ fn verified_head(s: &Store, lane: &MissionLaneRow) -> Option<String> {
 fn tried() -> &'static Mutex<HashMap<i64, String>> {
     static T: std::sync::OnceLock<Mutex<HashMap<i64, String>>> = std::sync::OnceLock::new();
     T.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Whether a try of `head` on `lane` that is tried again (no answer, or a
+/// `gh` that failed) is the first said for that head: the log says it once.
+fn first_retry_note(lane: i64, head: &str) -> bool {
+    static N: std::sync::OnceLock<Mutex<HashMap<i64, String>>> = std::sync::OnceLock::new();
+    N.get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .is_ok_and(|mut n| n.insert(lane, head.to_string()).as_deref() != Some(head))
 }
 
 /// Push each lane of `m` whose newest done task is not on its branch yet,
@@ -163,6 +164,7 @@ pub async fn sync(deps: &Deps, m: &MissionRow) {
         host: String,
         script: String,
         head: String,
+        had_url: bool,
     }
     let jobs: Vec<Job> = {
         let Ok(s) = lock(&deps.store) else {
@@ -178,7 +180,12 @@ pub async fn sync(deps: &Deps, m: &MissionRow) {
             }) else {
                 continue;
             };
-            let Some(head) = verified_head(&s, &lane) else {
+            let items: Vec<WorkItemRow> = lane
+                .item_ids
+                .iter()
+                .filter_map(|i| s.get_work_item(*i).ok().flatten())
+                .collect();
+            let Some(head) = verified_head(&s, &items) else {
                 continue;
             };
             if lane.pr_head.as_deref() == Some(head.as_str())
@@ -192,10 +199,8 @@ pub async fn sync(deps: &Deps, m: &MissionRow) {
             else {
                 continue;
             };
-            let tasks: Vec<LaneTask> = lane
-                .item_ids
+            let tasks: Vec<LaneTask> = items
                 .iter()
-                .filter_map(|i| s.get_work_item(*i).ok().flatten())
                 .map(|i| LaneTask {
                     label: i.key.clone().unwrap_or_else(|| format!("#{}", i.id)),
                     title: i.title.clone(),
@@ -215,14 +220,12 @@ pub async fn sync(deps: &Deps, m: &MissionRow) {
                 host: wt.host_alias.clone(),
                 script,
                 head,
+                had_url: lane.pr_url.is_some(),
             });
         }
         jobs
     };
     for j in jobs {
-        if let Ok(mut t) = tried().lock() {
-            t.insert(j.lane, j.head.clone());
-        }
         let out =
             crate::service::catalog::inventory::run_host_script(&deps.ssh, &j.host, &j.script)
                 .await;
@@ -239,17 +242,23 @@ pub async fn sync(deps: &Deps, m: &MissionRow) {
                 serde_json::json!({ "text": text }),
             )
         };
-        match out.ok().as_deref().and_then(parse_pr) {
+        let said = out.ok().as_deref().and_then(parse_pr);
+        // A try counts once the host answered it; a `gh` that failed after
+        // the push is tried again too.
+        if matches!(
+            said,
+            Some(Pushed::Done { .. } | Pushed::NoGh | Pushed::PushFailed(_))
+        ) {
+            if let Ok(mut t) = tried().lock() {
+                t.insert(j.lane, j.head.clone());
+            }
+        }
+        match said {
             Some(Pushed::Done { url }) => {
-                let first = s
-                    .get_mission_lane(j.lane)
-                    .ok()
-                    .flatten()
-                    .is_some_and(|l| l.pr_url.is_none());
                 if let Err(e) = s.set_lane_pr(j.lane, url.as_deref(), &j.head) {
                     tracing::debug!(lane = j.lane, error = %e.message, "[lane_pr] not recorded");
                 }
-                if let (true, Some(u)) = (first, url) {
+                if let (false, Some(u)) = (j.had_url, url) {
                     note(format!("Lane {}'s draft pull request: {u}", j.name));
                 }
             }
@@ -264,7 +273,24 @@ pub async fn sync(deps: &Deps, m: &MissionRow) {
                 "Lane {}'s branch was not pushed from {}: {why}",
                 j.name, j.host
             )),
-            None => tracing::debug!(lane = j.lane, host = %j.host, "[lane_pr] no answer"),
+            Some(Pushed::PrFailed(why)) => {
+                if first_retry_note(j.lane, &j.head) {
+                    note(format!(
+                        "Pushed lane {}'s branch; its draft pull request was not opened or \
+                         refreshed on {}: {why}. Fleet tries again.",
+                        j.name, j.host
+                    ));
+                }
+            }
+            None => {
+                tracing::debug!(lane = j.lane, host = %j.host, "[lane_pr] no answer");
+                if first_retry_note(j.lane, &j.head) {
+                    note(format!(
+                        "Lane {}'s branch was not pushed: {} did not answer. Fleet tries again.",
+                        j.name, j.host
+                    ));
+                }
+            }
         }
     }
 }
@@ -316,6 +342,11 @@ mod tests {
             "{s}"
         );
         assert!(s.contains("--draft"));
+        assert!(
+            s.contains("--state open"),
+            "only an open PR is refreshed: {s}"
+        );
+        assert!(s.contains("__FLEET_PR pr_failed"), "{s}");
         assert!(!s.contains("gh pr ready") && !s.contains("gh pr merge"));
         assert!(s.contains(&shq("it's")) && s.contains(&shq("x'y")));
     }
@@ -337,11 +368,16 @@ mod tests {
             parse_pr("__FLEET_PR pushed\n__FLEET_PR_URL javascript:x\n"),
             Some(Pushed::Done { url: None })
         );
+        assert_eq!(
+            parse_pr("__FLEET_PR pr_failed HTTP 422: no commits\n"),
+            Some(Pushed::PrFailed("HTTP 422: no commits".into()))
+        );
         assert_eq!(parse_pr("noise"), None);
     }
 
     /// The script against real git: it pushes the verified commit, not
     /// the lead's later work, to the lane's branch on `origin`.
+    #[cfg(unix)]
     #[test]
     fn real_git_pushes_the_verified_commit_only() {
         let d = tempfile::tempdir().unwrap();
@@ -389,6 +425,31 @@ mod tests {
         assert_eq!(
             sh("git --git-dir=origin.git rev-parse refs/heads/m1-pay-api"),
             verified
+        );
+        // A `gh` that cannot open the PR says why, so the tick tries again.
+        let bin = d.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        std::fs::write(
+            bin.join("gh"),
+            "#!/bin/sh\ncase \"$1 $2\" in \"pr create\") echo 'HTTP 422: no commits' >&2; exit 1;; esac\n",
+        )
+        .unwrap();
+        sh("chmod +x bin/gh");
+        let out = crate::proc::std_command("bash")
+            .arg("-c")
+            .arg(pr_script(
+                dir.to_str().unwrap(),
+                "m1-pay-api",
+                &verified,
+                "t",
+                "b",
+            ))
+            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+            .output()
+            .unwrap();
+        assert_eq!(
+            parse_pr(&String::from_utf8_lossy(&out.stdout)),
+            Some(Pushed::PrFailed("HTTP 422: no commits".into()))
         );
     }
 }

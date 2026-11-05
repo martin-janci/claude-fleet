@@ -710,7 +710,7 @@ describe('HostDetail find lost conversations', () => {
     await tick();
 
     const why = screen.getByTestId('discover-item-error').textContent ?? '';
-    expect(why).toContain('This login is at 96% of its limit');
+    expect(why).toContain('This login has 4% left');
     expect(why).toContain('c@d.com on mefistos has room');
     expect(why).not.toContain('over_limit_ok');
     await fireEvent.click(screen.getByTestId('discover-item-start-anyway'));

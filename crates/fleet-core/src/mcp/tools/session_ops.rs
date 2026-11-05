@@ -447,15 +447,28 @@ impl FleetTools {
                 p.agent.as_deref().map(str::trim).filter(|a| !a.is_empty()),
                 None | Some(crate::store::AGENT_CLAUDE)
             );
-        if runs_claude && !over_limit_ok {
+        if runs_claude {
             let s = lock(self.reader()).map_err(to_mcp_err)?;
-            crate::service::account_limits::refuse_over_limit(
+            // Before any card: an account the project forbids is no
+            // question to ask (`sessions::new_session` refuses it too).
+            crate::service::project_accounts::refuse_forbidden(
                 &s,
+                Some(p.project_id),
                 &p.host_alias,
                 p.profile.as_deref(),
                 crate::store::now_unix(),
             )
             .map_err(to_mcp_err)?;
+            if !over_limit_ok {
+                crate::service::account_limits::refuse_over_limit_for(
+                    &s,
+                    Some(p.project_id),
+                    &p.host_alias,
+                    p.profile.as_deref(),
+                    crate::store::now_unix(),
+                )
+                .map_err(to_mcp_err)?;
+            }
         }
         // A Claude start inside a running mission's grant goes without a
         // card at Autopilot (F2); a shell or another agent never does.

@@ -33,12 +33,14 @@ export interface CompareRow {
   costPerDoneMicros: number | null;
   /** Each wait cause's share of the span, whole percent (M3). */
   waits: Record<string, number>;
+  /** The largest of `waits`; null when it never waited. */
+  topWait: TopWait | null;
   /** Subagents started per done task (M7); null before one is done. */
   subagentsPerDone: number | null;
 }
 
-/** What one mode's ready work waited on most: the cause with the largest
- *  median share. */
+/** A wait cause and its share of the span, whole percent: a mission's
+ *  (`waitShares`) or, in a summary, the largest median share of a mode. */
 export interface TopWait {
   cause: string;
   pct: number;
@@ -67,6 +69,8 @@ export function compareRow(d: MissionDetail): CompareRow | null {
   if (!st || st.span_secs <= 0) return null;
   const done = st.items_done;
   const per = (n: number | null | undefined) => (done > 0 && n != null ? n / done : null);
+  // Largest first already, so [0] is the top wait.
+  const shares = waitShares(st);
   return {
     id: d.mission.id,
     name: d.mission.name,
@@ -80,15 +84,15 @@ export function compareRow(d: MissionDetail): CompareRow | null {
     taskSecs: st.item_secs_p50 ?? null,
     idlePct: Math.round((st.idle_secs * 100) / st.span_secs),
     costPerDoneMicros: per(d.mission.cost_micros),
-    waits: Object.fromEntries(waitShares(st).map((w) => [w.cause, w.pct])),
+    waits: Object.fromEntries(shares.map((w) => [w.cause, w.pct])),
+    topWait: shares[0] ?? null,
     subagentsPerDone: per(st.subagents ?? 0),
   };
 }
 
 /** PURE: a row's largest wait. */
 export function rowTopWait(r: CompareRow): TopWait | null {
-  const [cause, pct] = Object.entries(r.waits).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0] ?? [];
-  return cause ? { cause, pct } : null;
+  return r.topWait;
 }
 
 /** PURE: the cause with the largest median share over `rows` (a row that

@@ -338,9 +338,14 @@ fn run_on(store: &Mutex<Store>, cmd: AgentsCmd, now: i64) -> Result<ExitCode, St
         }
         AgentsCmd::Compare => {
             let c = fleet_core::service::agents::admin::compare(store).map_err(err)?;
+            let verb =
+                |n: u32, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
             out::line(&format!(
-                "{} agree, {} differ; {} built-in only, {} fleet only",
-                c.agree, c.differ, c.builtin_only, c.fleet_only
+                "{}, {}; {} built-in only, {} fleet only",
+                verb(c.agree, "agrees", "agree"),
+                verb(c.differ, "differs", "differ"),
+                c.builtin_only,
+                c.fleet_only
             ));
             for p in &c.pairs {
                 let mark = match p.agree {

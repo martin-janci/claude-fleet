@@ -36,7 +36,7 @@
   import { openInControl } from './control_room';
   import { handoffs } from './handoffs';
   import { claudeStatusLabel, displayName } from './attention';
-  import { timeAgo } from './session_status';
+  import { timeAgo, exactTime } from './session_status';
   import type { SessionRow } from './sessions';
   import WorkPrs from './WorkPrs.svelte';
   import TodayView from './TodayView.svelte';
@@ -184,7 +184,7 @@
   <button type="button" class="row" data-testid={testid} onclick={() => openRow(s)}>
     <span class="row-name">{displayName(s, true)}</span>
     <span class="row-why">{claudeStatusLabel(s.claude_status)} · {s.host_alias}</span>
-    {#if s.last_activity_at}<span class="row-age">{timeAgo(s.last_activity_at)}</span>{/if}
+    {#if s.last_activity_at}<span class="row-age" title={exactTime(s.last_activity_at)}>{timeAgo(s.last_activity_at)}</span>{/if}
   </button>
 {/snippet}
 

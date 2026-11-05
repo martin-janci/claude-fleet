@@ -91,6 +91,7 @@ pub mod placement;
 pub mod playbooks;
 pub mod pr_shepherd;
 pub mod presence;
+pub mod project_accounts;
 pub mod project_picks;
 pub mod projects;
 pub mod prompt_origin;

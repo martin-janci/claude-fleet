@@ -133,6 +133,27 @@ describe('Control routing receipts', () => {
     expect(screen.getByTestId('control-route-target').textContent).toBe('About Hub federation v2');
   });
 
+  it('a newer question replaces an unanswered older one, and quotes its message', async () => {
+    route = { outcome: 'ask', targets: TARGETS };
+    render(ControlRouteReceipts, { sessionId: 1 });
+    await send(msg('a', 'yes, that one'));
+    await send(msg('a', 'yes, that one'), msg('b', 'Zaloz tie meeting tasky'));
+    expect(screen.getAllByTestId('control-route-ask')).toHaveLength(1);
+    expect(screen.getByTestId('control-route-quote').textContent).toBe('“Zaloz tie meeting tasky”');
+  });
+
+  it('an answered question stays when a new one comes', async () => {
+    route = { outcome: 'ask', targets: TARGETS };
+    render(ControlRouteReceipts, { sessionId: 1 });
+    await send(msg('a', 'yes, that one'));
+    await fireEvent.click(screen.getAllByTestId('control-route-choice')[0]);
+    await tick();
+    await send(msg('a', 'yes, that one'), msg('b', 'and this'));
+    expect(screen.getAllByTestId('control-route-receipt')).toHaveLength(2);
+    expect(screen.getByTestId('control-route-target').textContent).toBe('About Hub federation v2');
+    expect(screen.getAllByTestId('control-route-ask')).toHaveLength(1);
+  });
+
   it('a question it asks can be dismissed without answering', async () => {
     route = { outcome: 'ask', targets: TARGETS };
     render(ControlRouteReceipts, { sessionId: 1 });

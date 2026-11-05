@@ -1435,6 +1435,12 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             tool: "set_account_nickname",
         },
     ),
+    (
+        "set_account_projects",
+        Verdict::Routed {
+            tool: "set_account_projects",
+        },
+    ),
     // ── account usage ───────────────────────────────────────────────────────
     (
         "list_account_usage",

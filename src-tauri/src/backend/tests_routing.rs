@@ -615,6 +615,7 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                 let args = fleet_core::service::account_limits::CheckAccountHeadroomArgs {
                     host_alias: "mac".into(),
                     profile: Some("work".into()),
+                    project_id: None,
                 };
                 block_on(commands::account_usage::routed::check_account_headroom(
                     b, args, s, &cache,
@@ -4643,6 +4644,23 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                     fleet_core::service::hosts::SetAccountNicknameArgs {
                         uuid: "u1".into(),
                         nickname: Some("Work".into()),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "set_account_projects",
+            "set_account_projects",
+            json!({ "uuid": "u1", "forbidden_project_ids": [3] }),
+            r#"{"uuid":"u1","forbidden_project_ids":[3]}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::hosts::routed::set_account_projects(
+                    b,
+                    fleet_core::service::project_accounts::SetAccountProjectsArgs {
+                        uuid: "u1".into(),
+                        forbidden_project_ids: vec![3],
                     },
                     s,
                 ))

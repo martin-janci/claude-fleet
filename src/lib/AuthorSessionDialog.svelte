@@ -19,6 +19,8 @@
   import { errorText } from './error_copy';
   import Loader from './Loader.svelte';
   import Modal from './Modal.svelte';
+  import DiscardAsk from './forms/DiscardAsk.svelte';
+  import { CloseGuard } from './forms/close_guard.svelte';
   import { formKeys, platformSubmitHint } from './forms/form_frame';
   import { untrack } from 'svelte';
   import { spawnAuthorSession } from './assets';
@@ -53,6 +55,7 @@
   }
 
   let instructions = $state(untrack(() => preset) ?? defaultInstructions());
+  const startedWith = untrack(() => instructions);
   // G2.6: where the session runs. `local` is the catalog's own checkout;
   // another host works in a clone and pushes.
   let host = $state('local');
@@ -81,9 +84,16 @@
   function cancelOpen() {
     controller?.abort();
   }
+
+  // Escape, the backdrop or Cancel with words typed asks once (FormsAnatomy's
+  // "Discard changes?"), rather than throw the instructions away.
+  const guard = new CloseGuard(
+    () => instructions.trim() !== '' && instructions !== startedWith,
+    () => onclose(),
+  );
 </script>
 
-<Modal title="Write it with Claude" onclose={busy ? undefined : onclose} width="480px" testid="author-session-dialog">
+<Modal title="Write it with Claude" onclose={busy ? undefined : guard.request} width="480px" testid="author-session-dialog">
   <!-- The form rule (review w18-6): ⌘↵ opens the session from the text box. -->
   <div class="keys" use:formKeys={{ submit: () => void openSession(), enabled: !busy && instructions.trim() !== '' }}>
   <p class="muted">
@@ -102,7 +112,10 @@
   {/if}
   {#if error}<p class="error" data-testid="author-error">{error}</p>{/if}
   <div class="actions">
-    <button onclick={onclose} disabled={busy}>Cancel</button>
+    {#if guard.asking}
+      <DiscardAsk onkeep={guard.keep} ondiscard={guard.discard} />
+    {:else}
+    <button onclick={guard.request} disabled={busy}>Cancel</button>
     {#if busy}<button onclick={cancelOpen} data-testid="author-cancel-inflight">Stop waiting</button>{/if}
     <button
       class="primary"
@@ -112,6 +125,7 @@
       aria-keyshortcuts={hint.aria}
       data-testid="author-open"
     >{#if busy}<Loader name="comet" size={12} class="btn-loader" />{/if}{busy ? 'Opening…' : 'Open session'}</button>
+    {/if}
   </div>
   </div>
 </Modal>
