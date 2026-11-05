@@ -4,6 +4,7 @@
 //! ([`super::AccountRow::forbidden_project_ids`]).
 
 use super::{AccountRow, Store};
+use crate::events::EventBus;
 use crate::ipc_error::{codes, IpcError};
 
 /// At most this many projects per account: a list a person picks by hand.
