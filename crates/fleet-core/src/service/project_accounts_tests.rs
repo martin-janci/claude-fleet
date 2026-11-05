@@ -154,7 +154,8 @@ fn set_account_projects_replaces_the_list_and_refuses_a_blank_uuid() {
     let row = set_account_projects(
         SetAccountProjectsArgs {
             uuid: " acct-own ".into(),
-            forbidden_project_ids: vec![p],
+            forbidden_project_ids: Some(vec![p]),
+            forbidden_org_ids: None,
         },
         &store,
     )
@@ -163,10 +164,54 @@ fn set_account_projects_replaces_the_list_and_refuses_a_blank_uuid() {
     let err = set_account_projects(
         SetAccountProjectsArgs {
             uuid: "  ".into(),
-            forbidden_project_ids: vec![],
+            forbidden_project_ids: Some(vec![]),
+            forbidden_org_ids: None,
         },
         &store,
     )
     .unwrap_err();
     assert_eq!(err.code, codes::E_INVALID);
+    // An org list alone leaves the projects as they were.
+    let org = lock(&store)
+        .unwrap()
+        .add_org("Acme", None, false)
+        .unwrap()
+        .id;
+    let row = set_account_projects(
+        SetAccountProjectsArgs {
+            uuid: "acct-own".into(),
+            forbidden_project_ids: None,
+            forbidden_org_ids: Some(vec![org]),
+        },
+        &store,
+    )
+    .unwrap();
+    assert_eq!(row.forbidden_project_ids, vec![p]);
+    assert_eq!(row.forbidden_org_ids, vec![org]);
+}
+
+#[test]
+fn a_start_in_a_forbidden_org_s_project_is_refused() {
+    let (s, p) = fleet();
+    let org = s.add_org("Acme", None, false).unwrap().id;
+    s.add_org_rule(crate::store::OrgRuleRow {
+        id: 0,
+        org_id: org,
+        owner: Some("acme".into()),
+        repo: None,
+        path_prefix: None,
+        host_alias: None,
+    })
+    .unwrap();
+    s.set_account_blocks("acct-own", None, Some(&[org]))
+        .unwrap();
+    let err = refuse_forbidden(&s, Some(p), "mac", None, NOW).unwrap_err();
+    assert_eq!(err.code, codes::E_ACCOUNT_FORBIDDEN);
+    assert!(
+        err.message.contains("acme/api (all of Acme)"),
+        "{}",
+        err.message
+    );
+    assert_eq!(err.details.unwrap()["suggested_profile"], "work");
+    assert!(refuse_forbidden(&s, Some(p), "mac", Some("work"), NOW).is_ok());
 }

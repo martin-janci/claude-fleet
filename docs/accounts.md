@@ -272,6 +272,17 @@ which replaces the list; the account's row carries it as
 `forbidden_project_ids` (`account_project_blocks`, migration 217). Only the
 hub owner's devices change it, as with the nickname.
 
+A whole org can be forbidden too (**Forbid for a whole org…** under the same
+list; the phone ticks "All of <org>"): every project of the org, those added
+later included, is treated as if it were on the list.
+`set_account_projects { uuid, forbidden_org_ids }` replaces that list
+(`forbidden_org_ids` on the row, `account_org_blocks`, migration 218); each
+of the two lists is replaced only when it is sent. A project's org is its own
+rule, the most specific org rule on its owner, repo or path
+(`Store::project_org`); a host-only rule and a host's org name a host, not a
+project, so they do not put its projects in the org. The refusal then says
+"(all of <org>)". Removing the org removes its blocks.
+
 No work in a forbidden project runs on a login on that account
 (`service::project_accounts`):
 

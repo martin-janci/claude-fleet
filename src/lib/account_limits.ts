@@ -4,6 +4,8 @@
 // answers from the usage it followed (hub contract 14).
 import { get, writable } from 'svelte/store';
 import { accounts, accountsForbiddenFor } from './accounts';
+import { orgs, projectOrgId } from './orgs';
+import { projects } from './projects';
 import { invokeCmd, type Result } from './result';
 import { formatResetShort } from './account_usage';
 
@@ -93,9 +95,11 @@ export function waitOut(sessionId: number, resetsAt: number): void {
   waitingOut.update((m) => new Map(m).set(sessionId, resetsAt));
 }
 
-/** The accounts the project forbids, from the accounts store. */
+/** The accounts the project forbids, itself or through its org, from the
+ *  accounts, projects and orgs stores. */
 function forbiddenOf(projectId: number | null | undefined): string[] {
-  return accountsForbiddenFor(projectId, get(accounts));
+  const p = projectId == null ? undefined : get(projects).find((t) => t.project.id === projectId)?.project;
+  return accountsForbiddenFor(projectId, get(accounts), p ? projectOrgId(p, get(orgs)) : null);
 }
 
 type SwitchSession = {

@@ -1,7 +1,9 @@
 //! Keep an account off a project (docs/accounts.md, *Keep an account off a
 //! project*): a person forbids a Claude account for some projects
-//! (`account_project_blocks`, migration 217), and no work in one of them
-//! runs on a login on that account.
+//! (`account_project_blocks`, migration 217) or for every project of an org
+//! (`account_org_blocks`, migration 218; a project's org is its owner, repo
+//! or path rule, `Store::project_org`), and no work in one of them runs on a
+//! login on that account.
 //!
 //! **Where it holds.** Every place fleet picks or takes a login for work in
 //! a project:
@@ -68,6 +70,21 @@ fn account_name(s: &Store, uuid: &str) -> String {
         .unwrap_or_else(|| uuid.to_string())
 }
 
+/// " (all of SalesTwins)" when the account is forbidden for the project
+/// through its org rather than by name; else empty.
+fn through_org(s: &Store, uuid: &str, project_id: i64) -> String {
+    let Some(org) = s.project_org(project_id).ok().flatten() else {
+        return String::new();
+    };
+    let by_org = s.get_account_by_uuid(uuid).ok().flatten().is_some_and(|a| {
+        a.forbidden_org_ids.contains(&org) && !a.forbidden_project_ids.contains(&project_id)
+    });
+    match (by_org, s.get_org(org).ok().flatten()) {
+        (true, Some(o)) => format!(" (all of {})", o.name),
+        _ => String::new(),
+    }
+}
+
 /// "profile work on mac" / "mac's own login".
 fn login_words(host_alias: &str, profile: Option<&str>) -> String {
     match profile {
@@ -126,10 +143,11 @@ pub fn refuse_forbidden(
     Err(IpcError::new(
         codes::E_ACCOUNT_FORBIDDEN,
         format!(
-            "{} is on {}, which is forbidden for {}{tail}",
+            "{} is on {}, which is forbidden for {}{}{tail}",
             login_words(host_alias, profile),
             account_name(s, account),
             project_name(s, project_id),
+            through_org(s, account, project_id),
         ),
     )
     .with_details(serde_json::json!({
@@ -156,19 +174,23 @@ pub fn forbidden_reason(
     }
 }
 
-/// `set_account_projects`: replace the projects an account is forbidden for.
+/// `set_account_projects`: replace the projects and/or orgs an account is
+/// forbidden for.
 #[derive(Debug, Clone, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars", rename = "SetAccountProjectsParams")]
 pub struct SetAccountProjectsArgs {
     /// Account uuid (list_accounts).
     pub uuid: String,
-    /// Every project the account may not run, by id; empty allows it
-    /// everywhere again.
-    #[serde(default)]
-    pub forbidden_project_ids: Vec<i64>,
+    /// Project ids it may not run; replaces the list, empty clears, omitted
+    /// keeps it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forbidden_project_ids: Option<Vec<i64>>,
+    /// Org ids (list_orgs): all their projects, later ones too; same rules.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forbidden_org_ids: Option<Vec<i64>>,
 }
 
-/// [`SetAccountProjectsArgs`] applied: the account's row, with its new list.
+/// [`SetAccountProjectsArgs`] applied: the account's row, with its new lists.
 pub fn set_account_projects(
     args: SetAccountProjectsArgs,
     store: &Mutex<Store>,
@@ -177,7 +199,11 @@ pub fn set_account_projects(
     if uuid.is_empty() {
         return Err(IpcError::new(codes::E_INVALID, "uuid is required"));
     }
-    lock(store)?.set_account_forbidden_projects(uuid, &args.forbidden_project_ids)
+    lock(store)?.set_account_blocks(
+        uuid,
+        args.forbidden_project_ids.as_deref(),
+        args.forbidden_org_ids.as_deref(),
+    )
 }
 
 #[cfg(test)]

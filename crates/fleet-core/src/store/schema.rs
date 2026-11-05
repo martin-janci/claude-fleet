@@ -2522,6 +2522,12 @@ const MIGRATIONS: &[Migration] = &[
         217,
         include_str!("../../migrations/217_account_project_blocks.sql"),
     ),
+    // Forbid an account for a whole org: `account_org_blocks`. A new table,
+    // written idempotently.
+    Migration::plain(
+        218,
+        include_str!("../../migrations/218_account_org_blocks.sql"),
+    ),
 ];
 
 /// The settings row [`Store::finish_realm_upgrade`] writes once migration

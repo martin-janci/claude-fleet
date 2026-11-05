@@ -4660,7 +4660,8 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                     b,
                     fleet_core::service::project_accounts::SetAccountProjectsArgs {
                         uuid: "u1".into(),
-                        forbidden_project_ids: vec![3],
+                        forbidden_project_ids: Some(vec![3]),
+                        forbidden_org_ids: None,
                     },
                     s,
                 ))

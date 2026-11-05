@@ -952,6 +952,7 @@ fn account_row_from(a: &OauthAccount, now: i64) -> Option<crate::store::AccountR
         nickname: None,
         has_extra_usage: a.has_extra_usage_enabled.unwrap_or(false),
         forbidden_project_ids: Vec::new(),
+        forbidden_org_ids: Vec::new(),
     })
 }
 
@@ -1319,6 +1320,7 @@ mod tests {
                 nickname: None,
                 has_extra_usage: false,
                 forbidden_project_ids: Vec::new(),
+                forbidden_org_ids: Vec::new(),
             })
             .unwrap();
 
@@ -1382,6 +1384,7 @@ mod tests {
             nickname: None,
             has_extra_usage: false,
             forbidden_project_ids: Vec::new(),
+            forbidden_org_ids: Vec::new(),
         })
         .unwrap();
         s.set_host_account("local", Some(uuid)).unwrap();
@@ -1799,6 +1802,7 @@ mod tests {
                 nickname: None,
                 has_extra_usage: false,
                 forbidden_project_ids: Vec::new(),
+                forbidden_org_ids: Vec::new(),
             })
             .unwrap();
             s.set_host_account("gamma", Some("acct-1")).unwrap();

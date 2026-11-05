@@ -250,8 +250,8 @@ person can turn it off for their own sessions, migration 187, and ask for
 is recorded only, `decide.jev.limit_switch`); a session parked by a quota
 notification (`quota_auto_resume_*`, read as blocked) is switched too, one
 waiting on a dialog or a form is not. An account can be forbidden for
-projects (landed, nothing forbidden by default; docs/accounts.md → *Keep an
-account off a project*, migration 217): every start, resume, switch, routine
+projects or for a whole org (landed, nothing forbidden by default; docs/accounts.md → *Keep an
+account off a project*, migrations 217 and 218): every start, resume, switch, routine
 and mission run of such a project refuses or avoids its logins. Not built: a
 hub vault for setup-tokens and API keys.
 

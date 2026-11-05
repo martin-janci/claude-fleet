@@ -17,6 +17,7 @@
   import HostChips from './HostChips.svelte';
   import { refreshAccountUsage } from './account_usage_store';
   import { accountByUuid, accountLabel, accounts, accountsForbiddenFor } from './accounts';
+  import { orgs, projectOrgId } from './orgs';
   import {
     checkAccountHeadroom,
     freestLogin,
@@ -381,7 +382,9 @@
   });
   // Accounts this project may not run on (docs/accounts.md, *Keep an
   // account off a project*): never the default pick, and shown disabled.
-  const forbiddenHere = $derived(accountsForbiddenFor(project.project.id, $accounts));
+  const forbiddenHere = $derived(
+    accountsForbiddenFor(project.project.id, $accounts, projectOrgId(project.project, $orgs)),
+  );
   function allowedLogins(logins: readonly HostLogin[]): HostLogin[] {
     const forbidden = untrack(() => forbiddenHere);
     return logins.filter((l) => !forbidden.includes(l.account_uuid));

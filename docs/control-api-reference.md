@@ -1135,11 +1135,11 @@ Parameters (* required): `nickname`, `uuid`*
 
 ### `set_account_projects`
 
-Set the projects a Claude account is forbidden for (replaces the list; empty allows every project). Work in one never starts, resumes or switches onto a login on it: such a start fails E_ACCOUNT_FORBIDDEN. Returns the account row.
+Set the projects or orgs a Claude account is forbidden for (each list given replaces it; empty clears). Work in one never starts, resumes or switches onto a login on it: such a start fails E_ACCOUNT_FORBIDDEN. Returns the account row.
 
 Access: the master or a fleet admin's own device · deadline 60 s.
 
-Parameters (* required): `forbidden_project_ids`, `uuid`*
+Parameters (* required): `forbidden_org_ids`, `forbidden_project_ids`, `uuid`*
 
 ### `set_client_trust`
 

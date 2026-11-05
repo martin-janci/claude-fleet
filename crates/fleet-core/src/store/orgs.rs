@@ -649,6 +649,11 @@ impl Store {
             "DELETE FROM org_projects WHERE org_id = ?1",
             rusqlite::params![id],
         )?;
+        // Migration 218: the accounts forbidden for it.
+        tx.execute(
+            "DELETE FROM account_org_blocks WHERE org_id = ?1",
+            rusqlite::params![id],
+        )?;
         // Org administration phase C (migration 106): its own settings and
         // its spend roll-up go with it.
         tx.execute(

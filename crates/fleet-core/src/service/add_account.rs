@@ -841,6 +841,7 @@ async fn add_api_key(
         nickname: None,
         has_extra_usage: false,
         forbidden_project_ids: Vec::new(),
+        forbidden_org_ids: Vec::new(),
     };
     s.upsert_account(&row)?;
     if nickname.is_some() {
