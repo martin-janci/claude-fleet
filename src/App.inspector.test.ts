@@ -179,6 +179,42 @@ describe('App: session tabs and the inspector (step 3.5)', () => {
     expect(inv.mock.calls.some(([cmd]) => cmd === 'open_session_in_editor')).toBe(false);
   });
 
+  it('another fleet’s session with none of this window’s open: the empty state does not cover it', async () => {
+    // Found by the federation e2e (docs/federation-e2e.md): the empty state
+    // ("No session open") is drawn after the fleet overlay and covered it
+    // whenever this window had no session of its own selected.
+    await mountApp();
+    expect(screen.getByTestId('no-session')).toBeInTheDocument();
+    const company: FleetInfo = {
+      id: 'company',
+      label: 'company',
+      url: 'https://fleet.example.dev',
+      color: '#e8833a',
+      primary: false,
+      local: false,
+      client_name: null,
+      connection: { state: 'connected' },
+      unavailable: null,
+      fleet_id: 'bbbbbbbb-2222',
+    };
+    _setFleetsForTest([{ ...company, id: PRIMARY, primary: true, label: 'home', fleet_id: 'aaaaaaaa-1111' }, company]);
+    _setFleetRowsForTest('company', {
+      sessions: new Map([[3, session('mac', 'pos-3', { id: 3, project_id: null, claude_session_id: 'c-3' })]]),
+      hosts: new Map(),
+      projects: [],
+      error: null,
+      loaded: true,
+    });
+    const base = inv.getMockImplementation() as (cmd: string, ...rest: unknown[]) => Promise<unknown>;
+    inv.mockImplementation(async (cmd: string, ...rest: unknown[]) =>
+      cmd === 'session_conversation' ? { truncated: false, context: null, events: [], turns: [] } : base(cmd, ...rest),
+    );
+    openFleetSession('company', 3);
+    await screen.findByTestId('fleet-session-overlay');
+    await waitFor(() => expect(screen.queryByTestId('no-session')).toBeNull());
+    expect(screen.queryByTestId('details-view')).toBeNull();
+  });
+
   it('Open in VS Code: the header button and its chord open the selected session (step 5.5)', async () => {
     await mountApp();
     selectSession(rows[0]);
