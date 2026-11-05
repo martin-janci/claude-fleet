@@ -38,7 +38,7 @@
   } from './hosts_view';
   import AddHostWizard from './AddHostWizard.svelte';
   import FleetHostsSection from './FleetHostsSection.svelte';
-  import { multiFleet, showPrimary } from './fleets';
+  import { fleets, multiFleet, showPrimary } from './fleets';
   import HubAddHostDialog from './HubAddHostDialog.svelte';
   import HostsList from './HostsList.svelte';
   import HostDetail from './HostDetail.svelte';
@@ -170,6 +170,8 @@
           .sort((a, b) => a.tmux_name.localeCompare(b.tmux_name))
       : [],
   );
+  /** This window's own fleet, named above its table beside other fleets. */
+  const ownFleet = $derived($fleets.find((f) => f.primary));
   const onlineCount = $derived($hosts.filter((h) => h.reachable).length);
 
   function defaultSelection(): string | null {
@@ -505,17 +507,7 @@
     </p>
   {/if}
 
-  {#if $multiFleet}
-    <!-- Multi-hub Phase 2: the extra fleets the sidebar's fleet filter
-         shows, each under its badge; this window's own hosts follow unless
-         the filter names another fleet. -->
-    <FleetHostsSection />
-  {/if}
-  {#if !$showPrimary}
-    <p class="empty" data-testid="hosts-primary-filtered">
-      This window's own hosts are hidden by the fleet filter in the sidebar.
-    </p>
-  {:else if showTable}
+  {#snippet ownTable()}
     <HostsTable
       hosts={tableHosts}
       {rowInfo}
@@ -533,6 +525,35 @@
       }}
       onopen={(a) => void openHost(a)}
     />
+  {/snippet}
+  {#if $multiFleet && showTable}
+    <!-- Multi-hub: this window's own hosts first, under their own badge, then
+         each extra fleet the sidebar's fleet filter shows. One scroll for
+         all of them: the table used to share the column with the fleets'
+         sections and was squeezed to nothing by a fleet with many hosts, so
+         only the other fleet's hosts were in view. -->
+    <div class="fleets-body" data-testid="hosts-fleets-body">
+      {#if $showPrimary}
+        <section class="own-fleet" style="--fleet: {ownFleet?.color ?? 'var(--accent)'}" data-testid="hosts-own-fleet">
+          <header>
+            <span class="badge">{ownFleet?.label ?? 'This fleet'}</span>
+            <span class="muted">{$hosts.length} hosts · {onlineCount} online</span>
+          </header>
+          {@render ownTable()}
+        </section>
+      {:else}
+        <p class="empty" data-testid="hosts-primary-filtered">
+          This window's own hosts are hidden by the fleet filter in the sidebar.
+        </p>
+      {/if}
+      <FleetHostsSection />
+    </div>
+  {:else if !$showPrimary}
+    <p class="empty" data-testid="hosts-primary-filtered">
+      This window's own hosts are hidden by the fleet filter in the sidebar.
+    </p>
+  {:else if showTable}
+    {@render ownTable()}
   {:else}
   <div class="panes">
     <div class="list-pane">
@@ -677,6 +698,26 @@
     color: var(--fg-muted);
     border-bottom: 1px solid var(--border);
   }
+  .fleets-body { flex: 1; min-height: 0; overflow: auto; }
+  .own-fleet {
+    border-left: 3px solid var(--fleet);
+    margin: var(--space-2) 0;
+  }
+  .own-fleet header {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3) 0;
+  }
+  .own-fleet .badge {
+    padding: 0 var(--space-2);
+    border-radius: var(--radius-xs);
+    border: 1px solid var(--fleet);
+    background: color-mix(in srgb, var(--fleet) 16%, transparent);
+    font-size: var(--text-xs);
+    font-weight: 600;
+  }
+  .own-fleet .muted { color: var(--fg-muted); font-size: var(--text-xs); }
   .panes { display: flex; flex: 1; min-height: 0; }
   .list-pane {
     width: 320px;
