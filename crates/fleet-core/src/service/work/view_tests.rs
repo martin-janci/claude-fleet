@@ -3434,8 +3434,14 @@ fn filter_by_label_keeps_the_tasks_carrying_it() {
     );
     let labels: Vec<String> = all.facets.labels.iter().map(|l| l.to_lowercase()).collect();
     assert_eq!(labels, ["auth", "ui"], "each label once, whatever its case");
+    // A tracker's long label (Jira allows 255) filters; past any, refused.
+    assert!(check_filters(&WorkTreeFilters {
+        label: Some("x".repeat(255)),
+        ..Default::default()
+    })
+    .is_ok());
     let err = check_filters(&WorkTreeFilters {
-        label: Some("x".repeat(201)),
+        label: Some("x".repeat(1001)),
         ..Default::default()
     })
     .unwrap_err();

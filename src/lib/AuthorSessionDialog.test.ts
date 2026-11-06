@@ -43,6 +43,24 @@ describe('AuthorSessionDialog', () => {
     expect(onclose).toHaveBeenCalled();
   });
 
+  it('Ctrl+Enter opens nothing while "Discard changes?" is up', async () => {
+    const onclose = vi.fn();
+    render(AuthorSessionDialog, { kind: 'skill', name: 'worktree', onclose });
+    const box = screen.getByTestId('author-instructions');
+    await fireEvent.input(box, { target: { value: 'Improve this skill "worktree": make it shorter' } });
+    await fireEvent.click(screen.getByText('Cancel'));
+    expect(screen.getByTestId('form-discard-ask')).toBeTruthy();
+    const isMac = /Mac/.test(navigator.platform) || /Macintosh/.test(navigator.userAgent);
+    const submit = { key: 'Enter', ...(isMac ? { metaKey: true } : { ctrlKey: true }) };
+    await fireEvent.keyDown(box, submit);
+    expect(invoke.mock.calls.some((c) => c[0] === 'catalog_spawn_author_session')).toBe(false);
+    // The same keys open it once the question is answered.
+    invoke.mockResolvedValueOnce(sessionRow);
+    await fireEvent.click(screen.getByTestId('form-keep-editing'));
+    await fireEvent.keyDown(box, submit);
+    await waitFor(() => expect(invoke.mock.calls.some((c) => c[0] === 'catalog_spawn_author_session')).toBe(true));
+  });
+
   it('closing untouched closes at once', async () => {
     const onclose = vi.fn();
     render(AuthorSessionDialog, { kind: 'skill', name: 'worktree', onclose });

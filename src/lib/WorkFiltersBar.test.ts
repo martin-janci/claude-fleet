@@ -116,6 +116,24 @@ describe('WorkFiltersBar', () => {
     expect((screen.getByTestId('work-search') as HTMLInputElement).value).toBe('');
   });
 
+  it('the Label select adds no second spelling of a facet label (case and diacritics folded)', async () => {
+    workViewFilters.set({ label: 'Café' });
+    render(WorkFiltersBar, { orgs, trackers, facets: { labels: ['cafe', 'q4'] } });
+    await flush();
+    await fireEvent.click(screen.getByTestId('work-filters-open'));
+    const pick = () => screen.getByTestId('work-filter-label') as HTMLSelectElement;
+    expect(Array.from(pick().options).map((o) => o.value)).toEqual(['', 'cafe', 'q4']);
+    // The facet's own spelling (what a task's label chip sets) is selected.
+    workViewFilters.set({ label: 'q4' });
+    await flush();
+    expect(pick().value).toBe('q4');
+    // A label no facet holds yet still gets an option.
+    workViewFilters.set({ label: 'new' });
+    await flush();
+    expect(Array.from(pick().options).map((o) => o.value)).toEqual(['', 'cafe', 'q4', 'new']);
+    expect(pick().value).toBe('new');
+  });
+
   it('a filter changing while the search is typed does not overwrite the typing', async () => {
     render(WorkFiltersBar, { orgs, trackers, searchDebounceMs: 20 });
     await flush();

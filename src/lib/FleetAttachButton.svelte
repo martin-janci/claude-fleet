@@ -4,8 +4,7 @@
   // reach it (`fleetAttachRefusal`).
   import { fleetAttachCommand, fleetAttachRefusal } from './fleets';
   import type { SessionRow } from './sessions';
-  import { copyText } from './clipboard';
-  import { push } from './toasts';
+  import { copyAndSay } from './clipboard';
   import Button from './kit/Button.svelte';
 
   let { session, testid }: { session: SessionRow; testid?: string } = $props();
@@ -14,7 +13,7 @@
 
   async function copy() {
     if (refusal) return;
-    if (await copyText(fleetAttachCommand(session))) push({ kind: 'success', message: 'Attach command copied' });
+    await copyAndSay(fleetAttachCommand(session), 'Attach command');
   }
 </script>
 

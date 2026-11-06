@@ -17,17 +17,11 @@
 
 <script lang="ts">
   import { errorText } from './error_copy';
-  import Loader from './Loader.svelte';
-  import Modal from './Modal.svelte';
-  import DiscardAsk from './forms/DiscardAsk.svelte';
-  import { CloseGuard } from './forms/close_guard.svelte';
-  import { formKeys, platformSubmitHint } from './forms/form_frame';
+  import DialogSheet from './DialogSheet.svelte';
   import { untrack } from 'svelte';
   import { spawnAuthorSession } from './assets';
   import { hosts } from './hosts';
   import { selectSessionExplicitly } from './selection';
-
-  const hint = platformSubmitHint();
 
   let {
     kind,
@@ -86,59 +80,44 @@
   }
 
   // Escape, the backdrop or Cancel with words typed asks once (FormsAnatomy's
-  // "Discard changes?"), rather than throw the instructions away.
-  const guard = new CloseGuard(
-    () => instructions.trim() !== '' && instructions !== startedWith,
-    () => onclose(),
-  );
+  // "Discard changes?"), rather than throw the instructions away; the sheet
+  // asks, and holds ⌘↵ while it does.
+  const dirty = $derived(instructions.trim() !== '' && instructions !== startedWith);
 </script>
 
-<Modal title="Write it with Claude" onclose={busy ? undefined : guard.request} width="480px" testid="author-session-dialog">
-  <!-- The form rule (review w18-6): ⌘↵ opens the session from the text box. -->
-  <div class="keys" use:formKeys={{ submit: () => void openSession(), enabled: !busy && instructions.trim() !== '' }}>
-  <p class="muted">
-    {#if kind && name}Opens a session that edits {name} in the catalog folder.{:else}Opens a session that writes a new asset in the catalog folder.{/if}
-  </p>
-  <label>What should change
+<DialogSheet
+  title="Write it with Claude"
+  lead={kind && name ? `Opens a session that edits ${name} in the catalog folder.` : 'Opens a session that writes a new asset in the catalog folder.'}
+  verb="Open session"
+  busyVerb="Opening…"
+  {busy}
+  {error}
+  canConfirm={instructions.trim() !== ''}
+  onconfirm={() => void openSession()}
+  {onclose}
+  {dirty}
+  testid="author-session-dialog"
+  confirmTestid="author-open"
+  errorTestid="author-error"
+>
+  {#snippet secondary()}
+    {#if busy}<button type="button" class="btn btn--quiet" onclick={cancelOpen} data-testid="author-cancel-inflight">Stop waiting</button>{/if}
+  {/snippet}
+  <label class="field">What should change
     <textarea bind:value={instructions} rows="4" disabled={busy} data-testid="author-instructions"></textarea>
   </label>
   {#if hostChoices.length > 1}
-    <label>Host
+    <label class="field">Host
       <select bind:value={host} disabled={busy} data-testid="author-host">
         {#each hostChoices as h (h.alias)}<option value={h.alias}>{h.alias}</option>{/each}
       </select>
     </label>
     {#if host !== 'local'}<p class="muted" data-testid="author-host-note">It works in a clone of the catalog on {host} and pushes when done.</p>{/if}
   {/if}
-  {#if error}<p class="error" data-testid="author-error">{error}</p>{/if}
-  <div class="actions">
-    {#if guard.asking}
-      <DiscardAsk onkeep={guard.keep} ondiscard={guard.discard} />
-    {:else}
-    <button onclick={guard.request} disabled={busy}>Cancel</button>
-    {#if busy}<button onclick={cancelOpen} data-testid="author-cancel-inflight">Stop waiting</button>{/if}
-    <button
-      class="primary"
-      onclick={openSession}
-      disabled={busy || instructions.trim() === ''}
-      data-shortcut={busy ? undefined : hint.label}
-      aria-keyshortcuts={hint.aria}
-      data-testid="author-open"
-    >{#if busy}<Loader name="comet" size={12} class="btn-loader" />{/if}{busy ? 'Opening…' : 'Open session'}</button>
-    {/if}
-  </div>
-  </div>
-</Modal>
+</DialogSheet>
 
 <style>
-  .keys { display: contents; }
-  .muted { color: var(--fg-muted); font-size: var(--text-xs); margin: 0 0 8px; }
-  label { display: flex; flex-direction: column; gap: 4px; font-size: var(--text-xs); color: var(--fg-muted); margin-bottom: 8px; }
+  .muted { color: var(--fg-muted); font-size: var(--text-xs); margin: 0; }
   select { font: inherit; padding: 4px 6px; border: 1px solid var(--border); background: var(--bg-pane); color: var(--fg); border-radius: var(--radius-sm); }
   textarea { font: inherit; padding: 6px; border: 1px solid var(--border); background: var(--bg-pane); color: var(--fg); border-radius: var(--radius-sm); resize: vertical; }
-  .error { color: var(--usage-crit); }
-  .actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 8px; }
-  .actions button { font-size: var(--text-xs); padding: 0.3rem 0.8rem; border: 1px solid var(--border); background: transparent; color: var(--fg); border-radius: var(--radius-sm); cursor: pointer; }
-  .actions button:disabled { opacity: 0.5; cursor: not-allowed; }
-  .actions button.primary { border-color: var(--accent); }
 </style>

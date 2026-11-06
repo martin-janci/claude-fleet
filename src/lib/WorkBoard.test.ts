@@ -162,7 +162,18 @@ describe('WorkBoard', () => {
     expect(owner('Login fails').classList.contains('overdue')).toBe(true);
   });
 
-  it('a card shows its priority (high and urgent stand out) and its estimate', async () => {
+  it('a done card shows no due date, only its owner', async () => {
+    const p = page();
+    p.tasks[1] = { ...p.tasks[1], assignees: ['Ana'], mine: false, due_at: '2020-01-02', status_category: 'done' };
+    (invoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => (cmd === 'work_tree' ? p : null));
+    render(WorkBoard);
+    await flush();
+    const owner = card('Login fails').querySelector('[data-testid="work-board-owner"]') as HTMLElement;
+    expect(owner.textContent).toBe('Ana');
+    expect(owner.classList.contains('overdue')).toBe(false);
+  });
+
+  it('a card shows its priority (urgent red, high amber) and its estimate', async () => {
     const p = page();
     p.tasks[0] = { ...p.tasks[0], priority: 'urgent', estimate: 3, estimate_unit: 'points' };
     p.tasks[1] = { ...p.tasks[1], priority: 'low', estimate: null };
@@ -171,11 +182,24 @@ describe('WorkBoard', () => {
     await flush();
     const q = (title: string, id: string) => card(title).querySelector(`[data-testid="${id}"]`) as HTMLElement | null;
     expect(q('Write notes', 'work-board-priority')?.textContent).toBe('Urgent');
-    expect(q('Write notes', 'work-board-priority')?.classList.contains('hot')).toBe(true);
+    expect(q('Write notes', 'work-board-priority')?.classList.contains('urgent')).toBe(true);
+    expect(q('Write notes', 'work-board-priority')?.classList.contains('high')).toBe(false);
     expect(q('Write notes', 'work-board-estimate')?.textContent).toBe('3 pts');
     expect(q('Login fails', 'work-board-priority')?.textContent).toBe('Low');
-    expect(q('Login fails', 'work-board-priority')?.classList.contains('hot')).toBe(false);
+    expect(q('Login fails', 'work-board-priority')?.classList.contains('urgent')).toBe(false);
+    expect(q('Login fails', 'work-board-priority')?.classList.contains('high')).toBe(false);
     expect(q('Login fails', 'work-board-estimate')).toBeNull();
+  });
+
+  it('a high card is amber, not red: the high class, not urgent', async () => {
+    const p = page();
+    p.tasks[0] = { ...p.tasks[0], priority: 'high' };
+    (invoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => (cmd === 'work_tree' ? p : null));
+    render(WorkBoard);
+    await flush();
+    const prio = card('Write notes').querySelector('[data-testid="work-board-priority"]') as HTMLElement;
+    expect(prio.classList.contains('high')).toBe(true);
+    expect(prio.classList.contains('urgent')).toBe(false);
   });
 
   it('dragging a native card to Doing sets its status and moves it at once', async () => {

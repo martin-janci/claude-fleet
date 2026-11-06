@@ -67,14 +67,17 @@ describe('TaskWorkSections', () => {
       },
     });
     const rows = screen.getAllByTestId('task-subtask');
-    expect(within(rows[0]).getByTestId('task-subtask-priority').textContent).toBe('Urgent');
+    const prio = within(rows[0]).getByTestId('task-subtask-priority');
+    expect(prio.textContent).toBe('Urgent');
+    expect(prio.classList.contains('failed')).toBe(true);
     const due = within(rows[0]).getByTestId('task-subtask-due');
     expect(due.textContent).toBe('Overdue · Jan 2');
-    expect(due.classList.contains('overdue')).toBe(true);
+    expect(due.classList.contains('failed')).toBe(true);
     expect(within(rows[1]).queryByTestId('task-subtask-priority')).toBeNull();
     expect(within(rows[1]).queryByTestId('task-subtask-due')).toBeNull();
     // Done: its date is history, its priority still says what it was.
     expect(within(rows[2]).getByTestId('task-subtask-priority').textContent).toBe('High');
+    expect(within(rows[2]).getByTestId('task-subtask-priority').classList.contains('waiting')).toBe(true);
     expect(within(rows[2]).queryByTestId('task-subtask-due')).toBeNull();
   });
 

@@ -27,7 +27,7 @@
     notes?: Snippet;
     onkill: () => void;
     /** Clean up was pressed: `removed` are gone already, `asked` finish
-     *  through their agent (Safe remove) and stay listed until then. */
+     *  through their agent (Clean up…) and stay listed until then. */
     oncleaned: (removed: SessionRow[], asked: SessionRow[]) => void;
     oncancel: () => void;
     confirmTestId?: string;

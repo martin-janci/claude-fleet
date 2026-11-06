@@ -233,7 +233,7 @@ const REASONS = {
     text: 'This deletes Claude Code state on every host over this machine’s SSH, and the hub can’t do it for a paired desktop.',
   },
   inspect_safe_kill: { text: 'This inspects the worktree over this machine’s SSH, and the hub can’t do it for a paired desktop. Ask Claude to check it in the session.' },
-  discard_kill_session: { text: 'The hub can’t discard a worktree and kill in one step. Use Safe remove’s “Ask Claude” instead.' },
+  discard_kill_session: { text: 'The hub can’t discard a worktree and kill in one step. Use Clean up…’s “Ask Claude to commit and push” instead.' },
   dismiss_agent_session: { text: 'Use Kill instead: it removes an inactive agent from the list the same way.' },
 } as const satisfies Record<string, Reason>;
 

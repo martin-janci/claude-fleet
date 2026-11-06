@@ -3307,6 +3307,23 @@ describe('List keys (redesign step 3.8)', () => {
     expect(get(toasts).some((t) => t.message === 'Nothing needs you right now')).toBe(true);
   });
 
+  it('the next-needs-you chord says a session the search hides needs you, not "Nothing needs you"', async () => {
+    // The one that needs you is in another project, which the search leaves out.
+    const rows = [...three().slice(0, 2), { ...sessionFor(2, 'dev-three'), claude_status: 'blocked' as const }];
+    mockBackend(fakeProjects, rows);
+    selectSession(null);
+    clearToasts();
+    render(Sidebar);
+    await tick(); await tick();
+    await fireEvent.input(screen.getByTestId('sidebar-search'), { target: { value: 'claude-fleet' } });
+    await waitFor(() => expect(screen.getAllByTestId('sess-row')).toHaveLength(2));
+    const isMac = /Mac/.test(navigator.platform) || /Macintosh/.test(navigator.userAgent);
+    const chord = isMac ? { key: 'n', metaKey: true, altKey: true } : { key: 'n', ctrlKey: true, altKey: true };
+    await fireEvent.keyDown(document.body, chord);
+    expect(get(selectedSession)).toBeNull();
+    expect(get(toasts).some((t) => t.message === '1 needs you, hidden by a filter, the search or a folded group')).toBe(true);
+  });
+
   it('the next-needs-you chord wins over a focused terminal (review w18-3)', async () => {
     const rows = three();
     mockBackend(fakeProjects, rows);

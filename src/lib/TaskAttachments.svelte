@@ -4,7 +4,7 @@
      show as thumbnails that open in a lightbox, other files download. Each
      card names who added it and when; its author may delete it. -->
 <script lang="ts">
-  import { focusNow } from './focus_now';
+  import InlineConfirm from './forms/InlineConfirm.svelte';
   import { onDestroy } from 'svelte';
   import { hubStatus, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
@@ -216,8 +216,14 @@
             {#if a.mine}
               <span class="acts">
                 {#if confirmDelete === a.id}
-                  <button class="btn btn--crit" type="button" data-testid="task-attachment-delete-confirm" onclick={() => void remove(a.id)}>Delete</button>
-                  <button class="btn btn--quiet" type="button" use:focusNow onclick={() => (confirmDelete = null)}>Keep</button>
+                  <InlineConfirm
+                    label="Delete {a.name}?"
+                    verb="Delete"
+                    confirmTestid="task-attachment-delete-confirm"
+                    keepTestid="task-attachment-delete-keep"
+                    onconfirm={() => void remove(a.id)}
+                    onkeep={() => (confirmDelete = null)}
+                  />
                 {:else}
                   <button
                     class="btn btn--quiet"

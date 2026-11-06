@@ -13,6 +13,7 @@
 -->
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
+  import InlineConfirm from './forms/InlineConfirm.svelte';
   import Skeleton from './states/Skeleton.svelte';
   import StatusDot from './kit/StatusDot.svelte';
   import Meter from './kit/Meter.svelte';
@@ -116,10 +117,12 @@
   const saveBlocked = $derived(!!saveWhy);
   const changeBlocked = $derived(!!changeWhy);
 
-  /** The confirm row's Keep takes focus as it mounts: the keyboard lands in the question, not on the page. */
-  function focusNow(el: HTMLElement): void {
-    el.focus();
-  }
+  // Nothing left to pause (paused elsewhere while the question was up):
+  // drop it, or it comes back on its own with the next active mission and
+  // takes focus onto Keep.
+  $effect(() => {
+    if (!anyActive) confirmPauseAll = false;
+  });
 
   function open(id: number) {
     openMissionRoom(id);
@@ -349,22 +352,20 @@
         >
       {/if}
       {#if confirmPauseAll && anyActive}
-        <div class="pause-confirm" role="alertdialog" aria-label="Pause all missions" data-testid="missions-pause-all-confirm-row">
-          <span
-            >Pause {activeCount} running mission{activeCount === 1 ? '' : 's'}? Each stops taking steps and its grant ends; runs already going keep
-            going.</span
-          >
-          <span class="row">
-            <button
-              class="btn btn--danger"
-              type="button"
-              disabled={busy || changeBlocked}
-              data-testid="missions-pause-all-confirm"
-              onclick={() => ((confirmPauseAll = false), void pauseAll())} title={changeWhy ?? undefined}>Pause all</button
-            >
-            <button class="btn btn--quiet" type="button" data-testid="missions-pause-all-keep" use:focusNow onclick={() => (confirmPauseAll = false)}>Keep</button>
-          </span>
-        </div>
+        <InlineConfirm
+          stacked
+          label="Pause all missions"
+          question="Pause {activeCount} running mission{activeCount === 1 ? '' : 's'}? Each stops taking steps and its grant ends; runs already going keep going."
+          verb="Pause all"
+          {busy}
+          disabled={changeBlocked}
+          confirmTitle={changeWhy}
+          testid="missions-pause-all-confirm-row"
+          confirmTestid="missions-pause-all-confirm"
+          keepTestid="missions-pause-all-keep"
+          onconfirm={() => ((confirmPauseAll = false), void pauseAll())}
+          onkeep={() => (confirmPauseAll = false)}
+        />
       {/if}
     </div>
   {/if}
@@ -569,17 +570,6 @@
   }
   .empty p {
     margin: 0 0 var(--space-2);
-  }
-  .pause-confirm {
-    flex-basis: 100%;
-    display: flex;
-    flex-direction: column;
-    gap: 0.4rem;
-    font-size: var(--text-sm);
-  }
-  .pause-confirm .row {
-    display: flex;
-    gap: 0.4rem;
   }
   .list-foot {
     display: flex;
