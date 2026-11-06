@@ -1368,3 +1368,120 @@ async fn a_bad_project_summary_or_key_is_refused_before_sending() {
     }
     assert!(f.requests().is_empty());
 }
+
+/// TASK-408: promoting a task into PD where Jira answers 400. The error
+/// names the call and the required fields fleet does not fill, read from
+/// the issue type's field metadata; it never fills them in.
+fn create_in_pd() -> WriteOp {
+    WriteOp::CreateItem {
+        container: Some("PD".into()),
+        parent: None,
+        title: "Promote me".into(),
+        description: "the task's body".into(),
+    }
+}
+
+fn pd_issue_types(f: &FakeTransport) {
+    f.once(
+        Method::Get,
+        "/rest/api/3/issue/createmeta/PD/issuetypes",
+        Ok(Response::json(
+            200,
+            &serde_json::json!({ "issueTypes": [
+                { "id": "10002", "name": "Task", "subtask": false, "hierarchyLevel": 0 },
+            ] }),
+        )),
+    );
+}
+
+fn team_required() -> Result<Response, TransportError> {
+    Ok(Response::json(
+        400,
+        &serde_json::json!({
+            "errorMessages": [],
+            "errors": { "customfield_10010": "Team is required." },
+        }),
+    ))
+}
+
+#[tokio::test]
+async fn a_create_refused_for_a_required_field_names_the_call_and_the_field() {
+    let f = FakeTransport::new();
+    pd_issue_types(&f);
+    f.once(Method::Post, "/rest/api/3/issue", team_required());
+    f.once(
+        Method::Get,
+        "/rest/api/3/issue/createmeta/PD/issuetypes/10002",
+        Ok(Response::json(
+            200,
+            &serde_json::json!({ "fields": [
+                { "fieldId": "summary", "name": "Summary", "required": true, "hasDefaultValue": false },
+                { "fieldId": "reporter", "name": "Reporter", "required": true, "hasDefaultValue": true },
+                { "fieldId": "customfield_10010", "name": "Team", "required": true, "hasDefaultValue": false },
+            ] }),
+        )),
+    );
+    let e = jira(&f).write(&create_in_pd()).await.unwrap_err();
+    let TrackerError::Invalid(m) = &e else {
+        panic!("{e:?}")
+    };
+    assert!(m.starts_with("POST issue in PD: HTTP 400"), "{m}");
+    assert!(m.contains("Team (customfield_10010)"), "{m}");
+    assert!(!m.contains("Summary") && !m.contains("Reporter"), "{m}");
+    // Jira's own words come along: the guess never hides another cause.
+    assert!(
+        m.contains("(Jira: customfield_10010: Team is required.)"),
+        "{m}"
+    );
+    // What last_error keeps carries it, and nothing of the credential.
+    let stored = crate::service::trackers::sync::metric_error(&e.explain());
+    assert!(stored.contains("Team (customfield_10010)"), "{stored}");
+    assert!(!stored.contains("ATATT"), "{stored}");
+    // Exactly one POST: a rejected create is never retried with a guess.
+    let posts = f
+        .requests()
+        .into_iter()
+        .filter(|r| r.method == Method::Post)
+        .count();
+    assert_eq!(posts, 1);
+}
+
+#[tokio::test]
+async fn an_unreadable_field_list_leaves_jiras_own_reason() {
+    let f = FakeTransport::new();
+    pd_issue_types(&f);
+    f.once(Method::Post, "/rest/api/3/issue", team_required());
+    f.once(
+        Method::Get,
+        "/rest/api/3/issue/createmeta/PD/issuetypes/10002",
+        Ok(Response::new(404, "")),
+    );
+    let e = jira(&f).write(&create_in_pd()).await.unwrap_err();
+    assert_eq!(
+        e,
+        TrackerError::Invalid(
+            "POST issue in PD: HTTP 400: customfield_10010: Team is required.".into()
+        )
+    );
+}
+
+#[tokio::test]
+async fn a_refused_createmeta_is_named_as_the_call_that_failed() {
+    let f = FakeTransport::new();
+    f.once(
+        Method::Get,
+        "/rest/api/3/issue/createmeta/PD/issuetypes",
+        Ok(Response::json(
+            400,
+            &serde_json::json!({ "errorMessages": ["No project could be found with key 'PD'."] }),
+        )),
+    );
+    let e = jira(&f).write(&create_in_pd()).await.unwrap_err();
+    assert_eq!(
+        e,
+        TrackerError::Invalid(
+            "createmeta for PD: HTTP 400: No project could be found with key 'PD'.".into()
+        )
+    );
+    assert_eq!(f.count("/rest/api/3/issue"), 1, "no create is sent");
+}

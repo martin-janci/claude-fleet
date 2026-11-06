@@ -34,6 +34,9 @@
   import { openMission } from './missions';
   import { waitWords } from './mission_waits';
   import { notWaitingSaid, proposalKey } from './inbox';
+  import { pendingAgentCount } from './agents';
+  import { failingCount } from './routines';
+  import { landOn } from './workspace';
   import Skeleton from './states/Skeleton.svelte';
   import { errorText } from './error_copy';
   import {
@@ -157,7 +160,10 @@
     copyTimer = setTimeout(() => (copied = false), 1_500);
   }
 
-  const kpis = $derived(view ? todayKpis(view) : null);
+  // Review w11-8: approvals and failed routines wait on the person too, as
+  // the Inbox and the rail count them.
+  const extras = $derived({ approvals: $pendingAgentCount, failedRoutines: $failingCount });
+  const kpis = $derived(view ? todayKpis(view, extras) : null);
   const dateLine = $derived(
     todayLine(
       now(),
@@ -316,10 +322,10 @@
   <MissionNudge />
 
   {#if view}
-    {#if isEmptyView(view)}
+    {#if isEmptyView(view) && extras.approvals + extras.failedRoutines === 0}
       <p class="empty" data-testid="details-empty">Nothing running today. Pick a session, or start work from {shortcutLabel('switcher', IS_MAC)}.</p>
     {/if}
-    {#if view.waiting.length > 0 || (view.missions?.length ?? 0) > 0}
+    {#if view.waiting.length > 0 || (view.missions?.length ?? 0) > 0 || extras.approvals + extras.failedRoutines > 0}
       <section class="block">
         <h3 class="waiting" data-testid="today-waiting">
           Waiting on you <span class="count">{kpis?.needsYou}</span>
@@ -340,6 +346,35 @@
                 <span class="tag">Mission</span>
               </li>
             {/each}
+          </ul>
+        {/if}
+        {#if extras.approvals + extras.failedRoutines > 0}
+          <!-- Review w11-8: what the Inbox lists beside sessions; each opens it. -->
+          <ul class="groups" data-testid="today-inbox-extras">
+            {#if extras.approvals > 0}
+              <li class="group">
+                <span class="sdot tone-waiting" aria-hidden="true"></span>
+                <div class="smain">
+                  <button class="btn btn--quiet session" type="button" data-testid="today-approvals" onclick={() => landOn('inbox')}
+                    >{extras.approvals === 1 ? '1 approval' : `${extras.approvals} approvals`}</button
+                  >
+                  <span class="meta">fleet agents wait for a yes or no</span>
+                </div>
+                <span class="tag">Inbox</span>
+              </li>
+            {/if}
+            {#if extras.failedRoutines > 0}
+              <li class="group">
+                <span class="sdot tone-failed" aria-hidden="true"></span>
+                <div class="smain">
+                  <button class="btn btn--quiet session" type="button" data-testid="today-failed-routines" onclick={() => landOn('inbox')}
+                    >{extras.failedRoutines === 1 ? '1 failed routine' : `${extras.failedRoutines} failed routines`}</button
+                  >
+                  <span class="meta">the newest run failed</span>
+                </div>
+                <span class="tag">Inbox</span>
+              </li>
+            {/if}
           </ul>
         {/if}
       </section>

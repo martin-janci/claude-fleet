@@ -9,8 +9,10 @@ pub mod archive;
 pub mod attachments;
 pub mod brief_draft;
 pub mod buckets;
+pub mod build_cache;
 pub mod card;
 pub mod confidence;
+pub mod dep_work;
 pub mod describe;
 pub mod detect;
 pub mod ended;
@@ -39,6 +41,7 @@ pub mod status;
 pub mod steps;
 pub mod structure;
 pub mod summary;
+pub mod ticket_check;
 pub mod tidy;
 pub mod title_draft;
 pub mod today;
@@ -388,6 +391,9 @@ pub struct WorkLinkArgs {
     /// verify: the condition line checked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub line: Option<String>,
+    /// check_setup: the test command ("" none).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
     /// verify: whether it is met. card_decide: apply (true) or dismiss.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ok: Option<bool>,
@@ -659,6 +665,8 @@ pub const WORK_LINK_ACTIONS: &[&str] = &[
     "undo_accept",
     "done_when",
     "verify",
+    "check",
+    "check_setup",
     "mission_start",
     "mission_plan",
     "mission_grant",
@@ -770,6 +778,9 @@ pub const ROUTED_WORK_COMMANDS: &[(&str, &str, &str)] = &[
     // Orchestration O3: acceptance conditions and a person's check.
     ("set_work_done_when", "work_link", "done_when"),
     ("verify_work_item", "work_link", "verify"),
+    // AI check on done: Test now / Rerun, and a project's switch.
+    ("run_ticket_check", "work_link", "check"),
+    ("set_ticket_check", "work_link", "check_setup"),
     ("start_mission_wave", "work_link", "mission_start"),
     ("retry_work_item", "work_link", "retry"),
     ("plan_mission", "work_link", "mission_plan"),
@@ -1022,6 +1033,8 @@ pub fn start_args_as(
         parallel: args.parallel.unwrap_or(false),
         // A run's own (`run::prior_work`), never a tool parameter.
         base_branch: None,
+        // A run's own (M6), never a tool parameter.
+        build_cache: false,
     }
 }
 

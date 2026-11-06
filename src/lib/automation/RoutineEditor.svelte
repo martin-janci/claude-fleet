@@ -22,6 +22,7 @@
   import NewRoutineMenu from './NewRoutineMenu.svelte';
   import RoutineEventTrigger from './RoutineEventTrigger.svelte';
   import RoutineMemory from './RoutineMemory.svelte';
+  import RoutineSeen from './RoutineSeen.svelte';
   import {
     AUTONOMY_CHOICES,
     budgetProblem,
@@ -33,8 +34,11 @@
     nextRunLabel,
     offsetWords,
     previewRoutine,
+    projectName,
+    repoName,
     routineAccountLabel,
     routineMemory,
+    routineSeen,
     SCHEDULE_DAYS,
     triggerWords,
     zoneChoices,
@@ -97,7 +101,12 @@
   onMount(() => {
     // Routine 0 is never one: a hub with notebooks answers E_NOT_FOUND.
     void routineMemory(0).then((r) => (memoryServed = r.ok || r.error.code !== 'E_INVALID'));
+    void routineSeen(0).then((r) => (seenServed = r.ok || r.error.code !== 'E_INVALID'));
   });
+  /** Whether the fleet keeps seen items (migration 212), asked the same way;
+   *  a saved routine's row says so itself (`track_seen`). */
+  let seenServed: boolean | null = $state(null);
+  const seenOffered = $derived(draft.track_seen !== undefined || (isNew && seenServed === true));
   // The prompt tuner (`prompt_tune.ts`): a model rewrites the prompt on the
   // routine's host and profile, saved or not; "Use this" writes draft.prompt.
   const tuneOn = $derived(settingBool($fleetSettings, SETTING_KEYS.workPromptTune));
@@ -141,10 +150,6 @@
   /** The prompt's limit (the hub's BRIEF_MAX_CHARS), and when to count. */
   const PROMPT_MAX = 4000;
   const PROMPT_COUNT_FROM = 3500;
-  const projectName = (id: number) => {
-    const p = $projects.find((x) => x.project.id === id)?.project;
-    return p ? `${p.owner}/${p.repo}` : `project ${id}`;
-  };
 
   const zone = deviceZone();
   const zoneOf = (d: RoutineDraft) => draftZone(d, zone);
@@ -189,7 +194,7 @@
     if (!preview) return previewError ? `Dry run unavailable: ${errorText(previewError)}.` : 'Dry run: checking what a run would do…';
     if (preview.problem) return `Dry run: it would not save: ${preview.problem}.`;
     const inp = draftInput(draft, enabled, zone);
-    return dryRunLine(inp, projectName(inp.project_id), preview.account ? accountName(preview.account) : null);
+    return dryRunLine(inp, projectName($projects, inp.project_id), preview.account ? accountName(preview.account) : null);
   });
 
   // ---- checks on blur and on submit, never on each key -----------------------
@@ -276,9 +281,15 @@
     onsave();
   }
 
+  // A bare Enter in the name or a budget field no longer saves the routine
+  // half-read (review w18-6's rule for a several-field form); ⌘↵ does.
+  const NOT_TEXT = ['checkbox', 'radio', 'button', 'submit'];
   function keydown(e: KeyboardEvent) {
+    const t = e.target as HTMLInputElement | null;
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
       submit(e);
+    } else if (e.key === 'Enter' && !e.altKey && !e.shiftKey && t?.tagName === 'INPUT' && !NOT_TEXT.includes(t.type)) {
+      e.preventDefault();
     } else if (e.key === 'Escape' && !e.defaultPrevented) {
       e.preventDefault();
       guard.request();
@@ -392,7 +403,7 @@
         {/if}
       {:else if draft.trigger === 'event'}
         <div class="event">
-          <RoutineEventTrigger bind:event={draft.event} bind:filter={draft.filter} routineHost={draft.host_alias} repos={pickable.map((p) => `${p.project.owner}/${p.project.repo}`)} />
+          <RoutineEventTrigger bind:event={draft.event} bind:filter={draft.filter} routineHost={draft.host_alias} repos={pickable.map((p) => repoName(p.project))} />
         </div>
       {:else}
         <p class="help" data-testid="routine-manual-note">It never starts on its own: Run now starts it, here or from the phone.</p>
@@ -412,9 +423,9 @@
       <label class="f">
         <span class="fl">Project</span>
         <select class="inp" class:bad={projectGone} data-testid="routine-project" bind:value={draft.project_id}>
-          {#each pickable as p (p.project.id)}<option value={String(p.project.id)}>{p.project.owner}/{p.project.repo}</option>{/each}
+          {#each pickable as p (p.project.id)}<option value={String(p.project.id)}>{repoName(p.project)}</option>{/each}
           {#if projectGone}<option value={draft.project_id}
-              >{projectName(Number(draft.project_id))} ({$projects.some((p) => String(p.project.id) === draft.project_id) ? 'not offered' : 'deleted'})</option
+              >{projectName($projects, Number(draft.project_id))} ({$projects.some((p) => String(p.project.id) === draft.project_id) ? 'not offered' : 'deleted'})</option
             >{/if}
         </select>
       </label>
@@ -599,6 +610,21 @@
     {:else}
       <h4 class="grp">Memory</h4>
       <p class="help" data-testid="routine-memory-unserved">This fleet's hub keeps no notebooks yet: update it to give a routine a memory.</p>
+    {/if}
+    {#if seenOffered}
+      <label class="ck">
+        <input
+          type="checkbox"
+          data-testid="routine-track-seen"
+          checked={draft.track_seen ?? true}
+          onchange={(e) => (draft.track_seen = (e.currentTarget as HTMLInputElement).checked)} />
+        <span>Remember what its runs already handled (pull requests, issues) and skip what did not change</span>
+      </label>
+      {#if draft.id !== undefined && (draft.track_seen ?? true)}
+        {#key draft.id}
+          <RoutineSeen routineId={draft.id} />
+        {/key}
+      {/if}
     {/if}
 
     <label class="f">

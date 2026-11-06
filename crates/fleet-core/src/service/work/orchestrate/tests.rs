@@ -1681,6 +1681,29 @@ fn the_planner_reads_the_missions_repo_only_when_asked() {
     );
 }
 
+/// Give mission `id` `policy`: a policy changes while the mission is paused.
+fn set_policy(s: &Store, id: i64, policy: crate::store::MissionPolicy) {
+    s.set_mission_state(id, None, "paused", "t").unwrap();
+    let patch = crate::store::MissionPatch {
+        policy: Some(policy),
+        ..Default::default()
+    };
+    s.update_mission(id, None, &patch, "t").unwrap();
+    s.set_mission_state(id, None, "active", "t").unwrap();
+}
+
+/// The items the loop would start a run on now, in order.
+fn run_items(s: &Store, id: i64) -> Vec<i64> {
+    let m = s.get_mission(id).unwrap().unwrap();
+    let a = autonomy(s, &m, now_unix()).unwrap();
+    steps_for(s, &m, &a)
+        .unwrap()
+        .into_iter()
+        .filter(|st| st.kind == "run")
+        .filter_map(|st| st.item_id)
+        .collect()
+}
+
 /// Lanes design L3: in lane execution the loop offers one implement run per
 /// lane; a task in no lane still runs on its own.
 #[test]
@@ -1688,34 +1711,20 @@ fn lane_execution_offers_one_run_per_lane() {
     let fx = fixture();
     let (a, b, c) = (member(&fx, "a"), member(&fx, "b"), member(&fx, "c"));
     let s = lock(&fx.deps.store).unwrap();
-    s.set_mission_state(fx.m.id, None, "paused", "t").unwrap();
-    s.update_mission(
+    set_policy(
+        &s,
         fx.m.id,
-        None,
-        &crate::store::MissionPatch {
-            policy: Some(crate::store::MissionPolicy {
-                execution: "lane".into(),
-                max_parallel: 8,
-                ..Default::default()
-            }),
+        crate::store::MissionPolicy {
+            execution: "lane".into(),
+            max_parallel: 8,
             ..Default::default()
         },
-        "t",
-    )
-    .unwrap();
-    s.set_mission_state(fx.m.id, None, "active", "t").unwrap();
+    );
     s.set_item_lane(fx.m.id, a, Some("backend"), None, "t")
         .unwrap();
     s.set_item_lane(fx.m.id, b, Some("backend"), None, "t")
         .unwrap();
-    let m = s.get_mission(fx.m.id).unwrap().unwrap();
-    let a_now = autonomy(&s, &m, now_unix()).unwrap();
-    let runs: Vec<i64> = steps_for(&s, &m, &a_now)
-        .unwrap()
-        .into_iter()
-        .filter(|st| st.kind == "run")
-        .filter_map(|st| st.item_id)
-        .collect();
+    let runs = run_items(&s, fx.m.id);
     assert_eq!(runs, vec![a, c], "b waits for its lane; c is in none");
 }
 
@@ -1730,28 +1739,100 @@ fn tasks_that_change_the_same_files_do_not_start_together() {
         .unwrap();
     s.set_item_touches(b, &["src/store/mod.rs".to_string()])
         .unwrap();
-    s.set_mission_state(fx.m.id, None, "paused", "t").unwrap();
-    s.update_mission(
+    set_policy(
+        &s,
         fx.m.id,
-        None,
-        &crate::store::MissionPatch {
-            policy: Some(crate::store::MissionPolicy {
-                max_parallel: 8,
-                ..Default::default()
-            }),
+        crate::store::MissionPolicy {
+            max_parallel: 8,
             ..Default::default()
         },
-        "t",
-    )
-    .unwrap();
-    s.set_mission_state(fx.m.id, None, "active", "t").unwrap();
-    let m = s.get_mission(fx.m.id).unwrap().unwrap();
-    let a_now = autonomy(&s, &m, now_unix()).unwrap();
-    let runs: Vec<i64> = steps_for(&s, &m, &a_now)
-        .unwrap()
-        .into_iter()
-        .filter(|st| st.kind == "run")
-        .filter_map(|st| st.item_id)
-        .collect();
+    );
+    let runs = run_items(&s, fx.m.id);
     assert_eq!(runs, vec![a, c], "b waits for a; c says nothing");
+}
+
+/// The causes the loop would book for `id` now (M3).
+fn wait_causes(s: &Store, id: i64) -> Vec<&'static str> {
+    let m = s.get_mission(id).unwrap().unwrap();
+    let a = autonomy(s, &m, now_unix()).unwrap();
+    steps_and_waits(s, &m, &a).unwrap().1.into_iter().collect()
+}
+
+/// Mission improvements M3: each gate that holds back a ready task names
+/// its cause: the slots, a lane, overlapping files.
+#[test]
+fn a_ready_task_held_back_names_why() {
+    let fx = fixture();
+    let (a, b, c) = (member(&fx, "a"), member(&fx, "b"), member(&fx, "c"));
+    let s = lock(&fx.deps.store).unwrap();
+    set_policy(
+        &s,
+        fx.m.id,
+        crate::store::MissionPolicy {
+            max_parallel: 8,
+            ..Default::default()
+        },
+    );
+    assert!(wait_causes(&s, fx.m.id).is_empty(), "every ready task runs");
+    set_policy(
+        &s,
+        fx.m.id,
+        crate::store::MissionPolicy {
+            max_parallel: 1,
+            ..Default::default()
+        },
+    );
+    assert_eq!(wait_causes(&s, fx.m.id), vec!["slot"]);
+    s.set_item_touches(a, &["src/store/**".to_string()])
+        .unwrap();
+    s.set_item_touches(b, &["src/store/mod.rs".to_string()])
+        .unwrap();
+    set_policy(
+        &s,
+        fx.m.id,
+        crate::store::MissionPolicy {
+            max_parallel: 8,
+            ..Default::default()
+        },
+    );
+    assert_eq!(wait_causes(&s, fx.m.id), vec!["touches"]);
+    s.set_item_touches(b, &[]).unwrap();
+    set_policy(
+        &s,
+        fx.m.id,
+        crate::store::MissionPolicy {
+            execution: "lane".into(),
+            max_parallel: 8,
+            ..Default::default()
+        },
+    );
+    s.set_item_lane(fx.m.id, b, Some("backend"), None, "t")
+        .unwrap();
+    s.set_item_lane(fx.m.id, c, Some("backend"), None, "t")
+        .unwrap();
+    assert_eq!(wait_causes(&s, fx.m.id), vec!["lane"]);
+}
+
+/// M3: a tick with ready runs and no grant to take them books a grant
+/// wait; a person's pause books the person until the resume.
+#[tokio::test]
+async fn a_tick_books_its_waits_and_a_pause_waits_on_a_person() {
+    let fx = fixture();
+    member(&fx, "a");
+    let now = now_unix();
+    tick_mission(&fx.deps, fx.m.id, now).await.unwrap();
+    tick_mission(&fx.deps, fx.m.id, now + 60).await.unwrap();
+    let s = lock(&fx.deps.store).unwrap();
+    let w = s.mission_waits(fx.m.id, now + 60).unwrap();
+    assert_eq!(w.get("grant"), Some(&60), "{w:?}");
+    s.set_mission_state(fx.m.id, None, "paused", "ana").unwrap();
+    let paused_at = now_unix();
+    s.set_mission_state(fx.m.id, None, "active", "ana").unwrap();
+    s.account_mission_waits(fx.m.id, paused_at + 30, &[])
+        .unwrap();
+    let w = s.mission_waits(fx.m.id, paused_at + 30).unwrap();
+    assert!(!w.contains_key("brake"), "{w:?}");
+    // The pause and the resume came within a second of each other: the
+    // person's wait is that, not the 30 s after the resume.
+    assert!(w.get("person").copied().unwrap_or(0) <= 1, "{w:?}");
 }

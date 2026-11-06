@@ -799,3 +799,53 @@ async fn an_unhosted_start_runs_under_the_login_placement_chose() {
         "the start bills the login placement ranked first"
     );
 }
+
+/// Usage hardening: a start on a named host skips placement, so with no
+/// login named it used to run under the host's own login however spent.
+/// Past `accounts.pause_at` it takes the login on the host with headroom;
+/// a login the caller names is kept, spent or not.
+#[tokio::test]
+async fn a_hosted_start_with_no_login_named_skips_a_spent_login() {
+    let w = w();
+    let first = w.item("PD-1");
+    w.start(first, w.pos, Decider::Person).await;
+    {
+        let s = w.store.lock().unwrap();
+        let now = crate::store::now_unix();
+        crate::service::account_limits::seed_usage(&s, "h", None, "acct-own", 95.0, now);
+        crate::service::account_limits::seed_usage(&s, "h", Some("work"), "acct-work", 10.0, now);
+        crate::service::account_limits::seed_usage(&s, "h", Some("full"), "acct-full", 97.0, now);
+    }
+    let second = w.item("PD-2");
+    let preview = |profile: Option<&str>| {
+        let args = StartArgs {
+            item_id: Some(second),
+            host_alias: Some("h".into()),
+            profile: profile.map(str::to_string),
+            ..Default::default()
+        };
+        let store = Arc::clone(&w.store);
+        async move {
+            let net = crate::service::trackers::TrackerNet::fake(Arc::new(
+                crate::net::https::FakeTransport::new(),
+            ));
+            tickets::preview_start_decided(&store, &args, &ViewScope::internal(), &net, None)
+                .await
+                .unwrap()
+                .plan
+                .unwrap()
+        }
+    };
+    let plan = preview(None).await;
+    assert_eq!(plan.host_alias, "h");
+    assert_eq!(
+        plan.profile.as_deref(),
+        Some("work"),
+        "the host's own login is past the line; the start bills the one with headroom"
+    );
+    assert_eq!(
+        preview(Some("full")).await.profile.as_deref(),
+        Some("full"),
+        "a login the caller names is the caller's call"
+    );
+}

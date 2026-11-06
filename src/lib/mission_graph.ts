@@ -20,7 +20,7 @@ export type LaneBy = 'lane' | 'repo' | 'assignee' | 'none';
 export const LANE_BY: readonly LaneBy[] = ['lane', 'repo', 'assignee', 'none'];
 
 export function isLaneBy(v: unknown): v is LaneBy {
-  return v === 'lane' || v === 'repo' || v === 'assignee' || v === 'none';
+  return LANE_BY.includes(v as LaneBy);
 }
 
 /** The design system's five states (StatusChip): a node's state mapped

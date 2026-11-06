@@ -32,8 +32,8 @@ pub const MAX_RULE_HOURS: i64 = 24 * 90;
 #[derive(Debug, Clone, Default, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars", rename = "AgentsParams")]
 pub struct AgentsArgs {
-    /// status | explain | job | definitions | gallery | form | grant | install |
-    /// revoke | pause_all | approve | reject | run.
+    /// status | explain | job | compare | definitions | gallery | form | grant |
+    /// install | revoke | pause_all | approve | reject | run.
     pub action: String,
     /// grant: review | support | fleet; status: only this agent's jobs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -94,7 +94,7 @@ impl AgentsArgs {
     pub fn is_read(&self) -> bool {
         matches!(
             self.action.as_str(),
-            "status" | "explain" | "job" | "definitions" | "gallery" | "form"
+            "status" | "explain" | "job" | "compare" | "definitions" | "gallery" | "form"
         )
     }
 }
@@ -106,6 +106,45 @@ pub struct AgentRuleView {
     pub rule: AgentRuleRow,
     /// Not expired.
     pub active: bool,
+    /// A fleet agent's instance with a day budget
+    /// (`limits.daily_budget_usd`, lowered by its `budget_input`): the
+    /// budget, and what its jobs cost since the UTC day began (micro-USD).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_micros: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spent_today_micros: Option<i64>,
+}
+
+/// Each fleet instance's day budget, by rule id: its catalog definition's
+/// limits over its input values. Read from the catalog, outside the store
+/// lock; a definition the catalog lacks has none.
+fn instance_budgets(rules: &[AgentRuleRow]) -> std::collections::BTreeMap<i64, i64> {
+    use crate::service::catalog::{model::Kind, CatalogTarget};
+    let fleet: Vec<&AgentRuleRow> = rules
+        .iter()
+        .filter(|r| r.agent == "fleet" && r.definition.is_some())
+        .collect();
+    if fleet.is_empty() {
+        return Default::default();
+    }
+    CatalogTarget::Personal
+        .with(|cat| {
+            Ok(fleet
+                .iter()
+                .filter_map(|r| {
+                    let loaded = cat
+                        .find(Kind::FleetAgent, r.definition.as_deref()?)?
+                        .fleet_agent()
+                        .ok()?;
+                    let values = match serde_json::from_str::<serde_json::Value>(&r.config) {
+                        Ok(serde_json::Value::Object(m)) => m,
+                        _ => Default::default(),
+                    };
+                    Some((r.id, loaded.definition.limits.budget_micros(&values)?))
+                })
+                .collect())
+        })
+        .unwrap_or_default()
 }
 
 /// What `status` answers.
@@ -121,6 +160,11 @@ pub struct AgentsStatus {
     /// older hub; read `pending.len()` then.
     #[serde(default)]
     pub pending_total: u64,
+    /// Each of `pending` in words: which agent asked, on what, and what the
+    /// write changes, with a `group` key for folding repeats into one card
+    /// (`super::about`). Absent from an older hub.
+    #[serde(default)]
+    pub pending_about: Vec<super::about::ActionAbout>,
     /// Actions a person approved that ran (or failed) in the last
     /// [`RECENT_WINDOW_SECS`], newest first, at most [`RECENT_MAX`]: an
     /// executed one's `error` says what it made, a failed one's why.
@@ -322,14 +366,36 @@ pub fn status(store: &Mutex<Store>, args: &AgentsArgs, now: i64) -> Result<Agent
         .limit
         .unwrap_or(STATUS_DEFAULT_LIMIT)
         .min(STATUS_MAX_LIMIT) as usize;
+    let rows = lock(store)?.list_agent_rules().map_err(db)?;
+    let budgets = instance_budgets(&rows);
+    let day = crate::service::routines::cron::local_day_start(now, 0);
     let s = lock(store)?;
-    let rules = s
-        .list_agent_rules()
-        .map_err(db)?
+    let rules: Vec<AgentRuleView> = rows
         .into_iter()
-        .map(|rule| AgentRuleView {
-            active: rule.active_at(now),
-            rule,
+        .map(|rule| {
+            let budget = budgets.get(&rule.id).copied();
+            AgentRuleView {
+                active: rule.active_at(now),
+                budget_micros: budget,
+                spent_today_micros: budget.and_then(|_| s.agent_rule_cost_since(rule.id, day).ok()),
+                rule,
+            }
+        })
+        .collect();
+    let pending = s
+        .list_agent_actions(Some("pending"), STATUS_PENDING_MAX)
+        .map_err(db)?;
+    let ids: Vec<i64> = pending.iter().map(|a| a.id).collect();
+    let origins = s.agent_action_origins(&ids).map_err(db)?;
+    let pending_about = pending
+        .iter()
+        .map(|a| {
+            let origin = origins.iter().find(|o| o.action_id == a.id);
+            let rule = origin
+                .and_then(|o| o.rule_id)
+                .and_then(|id| rules.iter().find(|r| r.rule.id == id))
+                .map(|r| &r.rule);
+            super::about::about(a, origin, rule)
         })
         .collect();
     Ok(AgentsStatus {
@@ -337,14 +403,35 @@ pub fn status(store: &Mutex<Store>, args: &AgentsArgs, now: i64) -> Result<Agent
         jobs: s
             .list_agent_jobs(args.agent.as_deref(), limit)
             .map_err(db)?,
-        pending: s
-            .list_agent_actions(Some("pending"), STATUS_PENDING_MAX)
-            .map_err(db)?,
+        pending,
+        pending_about,
         pending_total: s.count_agent_actions("pending").map_err(db)?,
         recent: s
             .recent_decided_agent_actions(now - RECENT_WINDOW_SECS, RECENT_MAX)
             .map_err(db)?,
     })
+}
+
+/// The built-in agents next to their restated definitions, over the newest
+/// jobs (`super::compare`).
+pub fn compare(store: &Mutex<Store>) -> Result<super::compare::Comparison, IpcError> {
+    let s = lock(store)?;
+    let jobs = s
+        .list_agent_jobs(None, super::compare::COMPARE_JOBS)
+        .map_err(db)?;
+    let restated = s
+        .list_agent_rules()
+        .map_err(db)?
+        .into_iter()
+        .filter(|r| {
+            r.definition
+                .as_deref()
+                .is_some_and(|d| super::compare::RESTATED.contains(&d))
+        })
+        .map(|r| r.id)
+        .collect();
+    drop(s);
+    Ok(super::compare::compare(&jobs, &restated))
 }
 
 /// Write a rule. `granted_by` names the device, for the record.
@@ -499,6 +586,7 @@ pub fn call(
     match args.action.as_str() {
         "status" => to_json(serde_json::to_value(status(store, args, now)?)),
         "explain" => to_json(serde_json::to_value(super::debug::explain(store, now)?)),
+        "compare" => to_json(serde_json::to_value(compare(store)?)),
         "job" => {
             let id = args.id.ok_or_else(|| invalid("job needs id"))?;
             to_json(serde_json::to_value(super::debug::job(store, id, now)?))
@@ -523,8 +611,8 @@ pub fn call(
             "agents install runs through admin::call_async",
         )),
         other => Err(invalid(format!(
-            "unknown agents action {other:?}: status | explain | job | grant | revoke | pause_all | \
-             approve | reject | run | definitions | gallery | form | install"
+            "unknown agents action {other:?}: status | explain | job | compare | grant | revoke | \
+             pause_all | approve | reject | run | definitions | gallery | form | install"
         ))),
     }
 }

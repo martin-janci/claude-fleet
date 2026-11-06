@@ -1602,6 +1602,88 @@ else
   rw=$(wcall "$TOKRO" work_link "{\"action\":\"place\",\"task_id\":\"item:${LID:-0}\",\"group\":\"RO\",\"expected_version\":1}")
   check "a readonly client reads the tree and may not place" '[ -n "$(jt "$ro" .total)" ] && echo "$rw" | grep -qE "E_FORBIDDEN|readonly|read-only"' "${ro:0:300} | ${rw:0:300}"
 
+  # --- 11. a mission run by lane (lanes design 2026-10-23, L6) -------------
+  # Two tasks in one lane of a mission whose tasks run by lane: the first
+  # Start wave starts the lane's lead (a real tmux session running the fake
+  # Claude, which commits a file and prints the done marker for a task's
+  # prompt); the second hands the next task to that same live lead, typed
+  # at its idle prompt. What only unit tests covered before: the delivery
+  # into a live session, the Stop closing each task on one worker, and a
+  # task's evidence counting its own commit only (from its start_head).
+  echo "-- 11. a mission by lane"
+  ms=$(wcall "$TOKW" work_link '{"action":"mission_save","mission":{"name":"E2E lanes","goal":"two tasks in one lead session","policy":{"execution":"lane"}}}')
+  MID=$(jt "$ms" .id)
+  rp=$(wcall "$TOKW" work_link "{\"action\":\"mission_repo\",\"mission_id\":${MID:-0},\"project_id\":${PAPI:-0}}")
+  LT=""
+  for t in "Lane task one" "Lane task two"; do
+    c=$(wcall "$TOKW" work_link "{\"action\":\"create\",\"title\":\"$t\"}")
+    i=$(jt "$c" .id)
+    wcall "$TOKW" work_link "{\"action\":\"mission_item\",\"mission_id\":${MID:-0},\"item_id\":${i:-0},\"lane\":\"api\"}" >/dev/null
+    LT="$LT ${i:-0}"
+  done
+  read -r LT1 LT2 <<<"$LT"
+  # The mission as the hub has it now.
+  mission_now() { wcall "$TOKW" work "{\"action\":\"mission\",\"mission_id\":${MID:-0}}"; }
+  md=$(mission_now)
+  check "a mission by lane holds its two tasks in one lane" '[ -n "$MID" ] && [ "$(jt "$md" .mission.policy.execution)" = lane ] && [ "$(jt "$md" "[.lanes[] | select(.name == \"api\") | .item_ids | length][0]")" = 2 ]' "${ms:0:300} | ${rp:0:200} | ${md:0:600}"
+  wcall "$TOKW" work_link "{\"action\":\"mission_state\",\"mission_id\":${MID:-0},\"status\":\"active\"}" >/dev/null
+  # A grant names where its runs go (a project no host has run yet has no
+  # placement of its own); at level 1 the loop takes no step by itself.
+  gr=$(wcall "$TOKW" work_link "{\"action\":\"mission_grant\",\"mission_id\":${MID:-0},\"level\":1,\"hours\":1,\"hosts\":[\"local\"]}")
+  check "a level-1 grant places the mission's runs on local" '! echo "$gr" | grep -q "\"isError\":true"' "${gr:0:400}"
+  # attempt_of ITEM FIELD -> that field of the item's latest attempt.
+  attempt_of() { jt "$(mission_now)" ".graph.nodes[] | select(.item_id == $1) | .attempt.$2 // empty"; }
+  st1=$(wcall "$TOKW" work_link "{\"action\":\"mission_start\",\"mission_id\":${MID:-0}}")
+  check "Start wave runs the lane's first task only" '[ "$(jt "$st1" "[.results[] | select(.ok and .step.kind == \"run\")] | length")" = 1 ] && [ "$(jt "$st1" "[.results[] | select(.ok) | .step.item_id][0]")" = "${LT1:-x}" ]' "${st1:0:800}"
+  until_ok 600 '[ "$(attempt_of "${LT1:-0}" state)" = done ]'
+  check "the lead did the first task: done, by its report" '[ "$(attempt_of "${LT1:-0}" state)" = done ] && [ "$(attempt_of "${LT1:-0}" outcome)" = done ]' "$(jt "$(mission_now)" '.graph.nodes')"
+  LEAD=$(jt "$(mission_now)" '.lanes[0].lead_session_id // empty')
+  # The lead is back at its prompt once the Stop is in.
+  until_ok 100 '[ "$(wrow "${LEAD:-0}" | jq -r .claude_status 2>/dev/null)" = idle ]'
+  st2=$(wcall "$TOKW" work_link "{\"action\":\"mission_start\",\"mission_id\":${MID:-0}}")
+  check "the second Start wave hands the next task to the lane's live lead" 'echo "$st2" | grep -q "handed to lane api" && [ -n "$LEAD" ]' "${st2:0:800}"
+  until_ok 600 '[ "$(attempt_of "${LT2:-0}" state)" = done ]'
+  md2=$(mission_now)
+  check "one lead did both tasks: the lane names it once and relayed once" '[ "$(attempt_of "${LT2:-0}" state)" = done ] && [ "$(jt "$md2" .lanes[0].lead_session_id)" = "$LEAD" ] && [ "$(jt "$md2" .lanes[0].relay)" = 1 ]' "$(jt "$md2" '{lanes, nodes: .graph.nodes}')"
+  LDIR=$(grep -l "^2$" "$WLOG"/*/tasks 2>/dev/null | head -1 | xargs -r dirname)
+  check "the fake Claude of that one session got both tasks, the second as the next in its lane" '[ -n "$LDIR" ] && [ "$(grep -c "Next task in your lane" "$LDIR/prompts.log")" = 2 ] && grep -q "Your lane.s brief is in your fleet brief" "$LDIR/prompts.log"' "$(ls "$WLOG"/*/tasks 2>&1; tail -20 "$LDIR/prompts.log" 2>&1)"
+  check "the second task's evidence is its own commit only (read from where it began)" '[ "$(attempt_of "${LT2:-0}" evidence.commits_total)" = 1 ] && [ "$(attempt_of "${LT1:-0}" evidence.commits_total)" = 1 ]' "$(jt "$md2" '[.graph.nodes[] | {item_id, ev: .attempt.evidence}]')"
+
+  # --- 12. a task starts from its dependency's work (M2, 2026-10-26) --------
+  # Two tasks of a mission that runs each in its own session, the second
+  # waiting for the first. The first's run commits a file on its branch;
+  # the second, once the first is done, starts from that branch (its PR is
+  # not merged), so its prompt says what its checkout holds and its
+  # evidence is its own commit only (read from after the dependency).
+  echo "-- 12. a dependent task starts from its dependency's work"
+  ms=$(wcall "$TOKW" work_link '{"action":"mission_save","mission":{"name":"E2E deps","goal":"the second task builds on the first"}}')
+  DMID=$(jt "$ms" .id)
+  wcall "$TOKW" work_link "{\"action\":\"mission_repo\",\"mission_id\":${DMID:-0},\"project_id\":${PAPI:-0}}" >/dev/null
+  DT=""
+  for t in "Dep task one" "Dep task two"; do
+    c=$(wcall "$TOKW" work_link "{\"action\":\"create\",\"title\":\"$t\"}")
+    i=$(jt "$c" .id)
+    wcall "$TOKW" work_link "{\"action\":\"mission_item\",\"mission_id\":${DMID:-0},\"item_id\":${i:-0}}" >/dev/null
+    DT="$DT ${i:-0}"
+  done
+  read -r DT1 DT2 <<<"$DT"
+  dp=$(wcall "$TOKW" work_link "{\"action\":\"dep\",\"item_id\":${DT2:-0},\"depends_on\":${DT1:-0}}")
+  wcall "$TOKW" work_link "{\"action\":\"mission_state\",\"mission_id\":${DMID:-0},\"status\":\"active\"}" >/dev/null
+  wcall "$TOKW" work_link "{\"action\":\"mission_grant\",\"mission_id\":${DMID:-0},\"level\":1,\"hours\":1,\"hosts\":[\"local\"]}" >/dev/null
+  dattempt() { jt "$(wcall "$TOKW" work "{\"action\":\"mission\",\"mission_id\":${DMID:-0}}")" ".graph.nodes[] | select(.item_id == $1) | .attempt.$2 // empty"; }
+  sd1=$(wcall "$TOKW" work_link "{\"action\":\"mission_start\",\"mission_id\":${DMID:-0}}")
+  check "Start wave runs the first task; the second waits for it" '[ "$(jt "$sd1" "[.results[] | select(.ok and .step.kind == \"run\") | .step.item_id] | map(tostring) | join(\",\")")" = "${DT1:-x}" ]' "${dp:0:200} | ${sd1:0:800}"
+  until_ok 600 '[ "$(dattempt "${DT1:-0}" state)" = done ]'
+  # Each Start wave takes the steps the plan has now: the first task's
+  # close, then the second task's run once nothing it waits for is open.
+  until_ok 300 'wcall "$TOKW" work_link "{\"action\":\"mission_start\",\"mission_id\":${DMID:-0}}" >/dev/null; [ -n "$(dattempt "${DT2:-0}" state)" ]'
+  until_ok 600 '[ "$(dattempt "${DT2:-0}" state)" = done ]'
+  DDIR=$(grep -l "already holds the work of the tasks this one depends on" "$WLOG"/*/prompts.log 2>/dev/null | head -1 | xargs -r dirname)
+  check "the second task's prompt says its checkout holds the first task's work" '[ -n "$DDIR" ] && grep -qw "TASK-${DT2:-x}" "$DDIR/prompts.log" && grep -q "TASK-${DT1:-x} (branch" "$DDIR/prompts.log"' "$(tail -30 "$WLOG"/*/prompts.log 2>&1 | tail -60)"
+  DWT=$(find "$WBASE" -maxdepth 4 -type d -name "task-${DT2:-x}-*" 2>/dev/null | head -1)
+  check "the second task's branch holds the first task's commit and its own" '[ -n "$DWT" ] && [ "$(git -C "$DWT" log --format=%s | grep -c "^fake task")" = 2 ]' "$DWT: $(git -C "$DWT" log --oneline 2>&1 | head -5)"
+  check "the second task's evidence is its own commit only, after the dependency's" '[ "$(dattempt "${DT2:-0}" state)" = done ] && [ "$(dattempt "${DT2:-0}" evidence.commits_total)" = 1 ]' "$(jt "$(wcall "$TOKW" work "{\"action\":\"mission\",\"mission_id\":${DMID:-0}}")" '[.graph.nodes[] | {item_id, state, ev: .attempt.evidence}]')"
+
   # --- operator confirm (M9.7): waits for the owner on a hub (9.2) ----------
   echo "-- operator"
   opc=$(wcall "$TOKW" pair_client '{"name":"ux-agent","mode":"full"}')

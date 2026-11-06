@@ -905,8 +905,14 @@
   const sessionChrome = $derived(
     !!$selectedSession && !fleetPageShown && !$settingsOpen && !missionsShown && !(taskShowing && !boardShown),
   );
+  // The empty state fills the column only when NO session is open: another
+  // fleet's session is one too, and the empty state (later in the markup)
+  // used to cover its overlay whenever this window had none of its own open.
   const detailsMain = $derived(
-    !wideMode && !boardShown && !missionsShown && ($destination === 'details' || taskShowing || !$selectedSession),
+    !wideMode &&
+      !boardShown &&
+      !missionsShown &&
+      ($destination === 'details' || taskShowing || (!$selectedSession && !$selectedFleetSession)),
   );
   // Review r08: a board card's task opens in the inspector column beside the
   // board, whatever the inspector pref.

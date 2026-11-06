@@ -73,7 +73,10 @@ impl FleetTools {
                     // operator, deliberately not fenced.
                     health::HealthView::Fleet
                 };
-                health::health_for(&s, &view, tunnels)
+                let mut h = health::health_for(&s, &view, tunnels);
+                drop(s);
+                h.storage = health::storage_for(&view, crate::store::now_unix());
+                h
             }
             Err(_) => {
                 let mut h = health::unready_health();
@@ -279,6 +282,29 @@ impl FleetTools {
     ) -> Result<CallToolResult, McpError> {
         audit("set_account_nickname", &format!("uuid={}", args.uuid));
         ok_json(&hosts::set_account_nickname(args, &self.store).map_err(to_mcp_err)?)
+    }
+
+    #[tool(description = "Set the projects or orgs a Claude account is \
+        forbidden for (each list given replaces it; empty clears). Work in one \
+        never starts, resumes or switches onto a login on it: such a start \
+        fails E_ACCOUNT_FORBIDDEN. Returns the account row.")]
+    pub(super) async fn set_account_projects(
+        &self,
+        Parameters(args): Parameters<crate::service::project_accounts::SetAccountProjectsArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "set_account_projects",
+            &format!(
+                "uuid={} projects={:?} orgs={:?}",
+                args.uuid,
+                args.forbidden_project_ids.as_ref().map(Vec::len),
+                args.forbidden_org_ids.as_ref().map(Vec::len),
+            ),
+        );
+        ok_json(
+            &crate::service::project_accounts::set_account_projects(args, &self.store)
+                .map_err(to_mcp_err)?,
+        )
     }
 
     #[tool(description = "Each Claude account's latest plan usage: 5-hour \
@@ -1077,7 +1103,15 @@ impl FleetTools {
     ) -> Result<CallToolResult, McpError> {
         audit("mcp_confirms", "");
         refuse_operator_answer(&caller)?;
-        ok_json_compact(&self.guards.confirms.pending())
+        let mut pending = self.guards.confirms.pending();
+        // The words name tickets and carry briefs and prompts: the owner's
+        // own devices read them, anyone else the bound summary as before.
+        if !caller.is_control_or_owner() {
+            for c in &mut pending {
+                c.about = None;
+            }
+        }
+        ok_json_compact(&pending)
     }
 
     #[tool(description = "Approve or deny one waiting call by nonce; \

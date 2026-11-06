@@ -127,6 +127,34 @@ fn git(dir: &std::path::Path, args: &[&str]) {
     );
 }
 
+/// A repository at `d` with one commit on `main`, that commit as
+/// `origin/main`, checked out on a new `branch`.
+#[cfg(unix)]
+fn repo_on(d: &std::path::Path, branch: &str) {
+    git(d, &["init", "-q", "-b", "main"]);
+    commit(d, "a.txt", "one\n", "base");
+    git(d, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+    git(d, &["checkout", "-qb", branch]);
+}
+
+/// Write `file` with `body` and commit it as `msg`.
+#[cfg(unix)]
+fn commit(d: &std::path::Path, file: &str, body: &str, msg: &str) {
+    std::fs::write(d.join(file), body).unwrap();
+    git(d, &["add", "."]);
+    git(d, &["commit", "-qm", msg]);
+}
+
+/// What an evidence script reads, run under bash.
+#[cfg(unix)]
+fn run_script(script: &str) -> TaskEvidence {
+    let out = crate::proc::std_command("bash")
+        .args(["-c", script])
+        .output()
+        .unwrap();
+    parse_evidence(&String::from_utf8_lossy(&out.stdout), 1)
+}
+
 // The script runs on a fleet host (a Unix shell); a Windows runner's
 // `bash` is not one.
 #[cfg(unix)]
@@ -134,21 +162,10 @@ fn git(dir: &std::path::Path, args: &[&str]) {
 fn the_script_reads_a_real_checkout_against_its_base() {
     let dir = tempfile::tempdir().unwrap();
     let d = dir.path();
-    git(d, &["init", "-q", "-b", "main"]);
-    std::fs::write(d.join("a.txt"), "one\n").unwrap();
-    git(d, &["add", "."]);
-    git(d, &["commit", "-qm", "base"]);
-    git(d, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
-    git(d, &["checkout", "-qb", "task"]);
-    std::fs::write(d.join("b.txt"), "two\nthree\n").unwrap();
-    git(d, &["add", "."]);
-    git(d, &["commit", "-qm", "Add b"]);
+    repo_on(d, "task");
+    commit(d, "b.txt", "two\nthree\n", "Add b");
     std::fs::write(d.join("a.txt"), "changed\n").unwrap();
-    let out = crate::proc::std_command("bash")
-        .args(["-c", &evidence_script(&d.to_string_lossy())])
-        .output()
-        .unwrap();
-    let ev = parse_evidence(&String::from_utf8_lossy(&out.stdout), 1);
+    let ev = run_script(&evidence_script(&d.to_string_lossy()));
     assert_eq!(ev.error, None, "{ev:?}");
     assert_eq!(ev.base.as_deref(), Some("origin/main"));
     assert_eq!(ev.commits_total, 1);
@@ -162,12 +179,8 @@ fn the_script_reads_a_real_checkout_against_its_base() {
         "a.txt was changed and not committed"
     );
 
-    let gone = crate::proc::std_command("bash")
-        .args(["-c", &evidence_script("/nonexistent/fleet-o3")])
-        .output()
-        .unwrap();
     assert_eq!(
-        parse_evidence(&String::from_utf8_lossy(&gone.stdout), 1)
+        run_script(&evidence_script("/nonexistent/fleet-o3"))
             .error
             .as_deref(),
         Some("no checkout")
@@ -236,26 +249,11 @@ fn a_lane_task_is_read_from_where_it_began() {
             .unwrap();
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     };
-    git(d, &["init", "-q", "-b", "main"]);
-    std::fs::write(d.join("a.txt"), "one\n").unwrap();
-    git(d, &["add", "."]);
-    git(d, &["commit", "-qm", "base"]);
-    git(d, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
-    git(d, &["checkout", "-qb", "lane"]);
-    std::fs::write(d.join("first.txt"), "1\n").unwrap();
-    git(d, &["add", "."]);
-    git(d, &["commit", "-qm", "First task"]);
+    repo_on(d, "lane");
+    commit(d, "first.txt", "1\n", "First task");
     let start = head(d);
-    std::fs::write(d.join("second.txt"), "2\n").unwrap();
-    git(d, &["add", "."]);
-    git(d, &["commit", "-qm", "Second task"]);
-    let run = |since: Option<&str>| {
-        let out = crate::proc::std_command("bash")
-            .args(["-c", &evidence_script_since(&d.to_string_lossy(), since)])
-            .output()
-            .unwrap();
-        parse_evidence(&String::from_utf8_lossy(&out.stdout), 1)
-    };
+    commit(d, "second.txt", "2\n", "Second task");
+    let run = |since: Option<&str>| run_script(&evidence_script_since(&d.to_string_lossy(), since));
     let ev = run(Some(&start));
     assert_eq!(ev.error, None, "{ev:?}");
     assert_eq!(ev.commits_total, 1);
@@ -267,9 +265,7 @@ fn a_lane_task_is_read_from_where_it_began() {
     assert_eq!(run(None).commits_total, 2, "the merge base sees both");
     // An amend that rewrites the task's start.
     git(d, &["reset", "-q", "--hard", "HEAD~2"]);
-    std::fs::write(d.join("other.txt"), "x\n").unwrap();
-    git(d, &["add", "."]);
-    git(d, &["commit", "-qm", "Rewritten"]);
+    commit(d, "other.txt", "x\n", "Rewritten");
     let ev = run(Some(&start));
     assert!(
         ev.error

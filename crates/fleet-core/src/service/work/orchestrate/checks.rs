@@ -36,7 +36,7 @@ use crate::service::view_scope::ViewScope;
 use crate::service::work::report;
 use crate::service::work::verify::{self, Cond};
 use crate::shell::quote;
-use crate::store::{MissionRow, Store, TaskRow};
+use crate::store::{is_commit_id, MissionRow, Store, TaskRow};
 
 /// The tag the scripts print before their verdict.
 pub const TAG: &str = "fleet-check=";
@@ -72,8 +72,16 @@ pub struct Checkout {
     pub snapshot: bool,
 }
 
-fn is_sha(s: &str) -> bool {
-    (7..=64).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_hexdigit())
+/// Whether `item_id` runs in a lane: its mission runs by lane and it has
+/// one.
+fn runs_in_lane(s: &Store, item_id: i64) -> bool {
+    let by_lane = s
+        .item_mission(item_id)
+        .ok()
+        .flatten()
+        .and_then(|m| s.get_mission(m).ok().flatten())
+        .is_some_and(|m| m.policy.execution == "lane");
+    by_lane && s.item_lane(item_id).ok().flatten().is_some()
 }
 
 /// The checkout of `item_id`'s latest finished implementation: done, not a
@@ -85,16 +93,23 @@ pub fn implementer_checkout(s: &Store, item_id: i64) -> Option<Checkout> {
         return None;
     }
     let ev = t.evidence.as_ref()?;
-    let head = ev.head.clone().filter(|h| is_sha(h))?;
+    let head = ev.head.clone().filter(|h| is_commit_id(h))?;
     let w = s.get_session_by_id(t.worker_session_id?).ok()??;
     let wt = s.get_worktree_row(w.worktree_id?).ok()??;
-    let start = s.task_start_head(t.id).ok().flatten().filter(|h| is_sha(h));
+    let start = s
+        .task_start_head(t.id)
+        .ok()
+        .flatten()
+        .filter(|h| is_commit_id(h));
     Some(Checkout {
         host: w.host_alias,
         path: wt.path,
         head,
-        snapshot: start.is_some(),
-        merge_base: start.or_else(|| ev.merge_base.clone().filter(|b| is_sha(b))),
+        // A lane's task, not merely one with a start: an item run that took
+        // its dependencies records where it began too (mission improvements
+        // M2), and its own checkout is its alone.
+        snapshot: runs_in_lane(s, item_id),
+        merge_base: start.or_else(|| ev.merge_base.clone().filter(|b| is_commit_id(b))),
     })
 }
 

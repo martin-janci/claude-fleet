@@ -7,8 +7,6 @@ use crate::service::account_usage_poll::{self, AccountUsagePoller};
 use crate::ssh::SshExec;
 use crate::store::{HostRow, Store};
 use crate::{service, ssh};
-use futures_util::FutureExt as _;
-use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -151,9 +149,8 @@ pub(crate) async fn run_cancellable_tick<F, Fut>(
             }
             _ = ticker.tick() => {}
         }
-        if AssertUnwindSafe(on_tick()).catch_unwind().await.is_err() {
-            tracing::error!("tick pass panicked; continuing with the next tick");
-        }
+        // A panicked pass is logged; the next tick runs another.
+        let _ = crate::service::loops::caught("the tick pass", on_tick()).await;
     }
 }
 

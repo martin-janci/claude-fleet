@@ -22,6 +22,7 @@ import {
 import type { Result } from './result';
 import { RESET_WEEK, session } from './hosts_fixture';
 import { autoSwitchState } from './account_switch';
+import { accounts } from './accounts';
 
 const invoke = mockedInvoke as ReturnType<typeof vi.fn>;
 const name = (u: string) => (u === 'acc-spare' ? 'spare@x' : 'own@x');
@@ -84,7 +85,7 @@ describe('LimitActions', () => {
     render(LimitActions, { props: { sess, resetsAt: RESET_WEEK, accountName: name } });
     await fireEvent.click(screen.getByTestId('limit-switch'));
     await vi.waitFor(() => expect(screen.getByTestId('limit-switch-ask')).toBeTruthy());
-    expect(screen.getByTestId('limit-switch-ask').textContent).toContain('spare (spare@x) · 30% used');
+    expect(screen.getByTestId('limit-switch-ask').textContent).toContain('spare (spare@x) · 70% left');
     expect(restarts()).toHaveLength(0);
     await fireEvent.click(screen.getByTestId('limit-switch-confirm'));
     await vi.waitFor(() => expect(restarts()).toHaveLength(1));
@@ -264,7 +265,7 @@ describe('LimitActions on a signed-out row', () => {
     expect(screen.queryByTestId('limit-auto')).toBeNull();
     expect(screen.queryByTestId('limit-wait')).toBeNull();
     await fireEvent.click(screen.getByTestId('limit-switch'));
-    await vi.waitFor(() => expect(screen.getByTestId('limit-switch-ask').textContent).toContain('40% used'));
+    await vi.waitFor(() => expect(screen.getByTestId('limit-switch-ask').textContent).toContain('60% left'));
   });
 });
 
@@ -276,6 +277,33 @@ describe('switchCheck', () => {
     });
     const r = await switchCheck({ host_alias: 'mac' });
     expect(r.ok).toBe(false);
+  });
+
+  // Keep an account off a project: the session's project forbids the
+  // freest account, so the switch goes to the next one with room.
+  it('never targets an account the session’s project forbids', async () => {
+    const logins = [
+      { profile: null, account_uuid: 'acc-own', used_pct: 100 },
+      { profile: 'free', account_uuid: 'acc-free', used_pct: 5 },
+      { profile: 'spare', account_uuid: 'acc-spare', used_pct: 30 },
+    ];
+    answer({ pause_at_pct: 90, chosen: logins[0], over: true, suggestion: logins[1], logins });
+    accounts.set([
+      { uuid: 'acc-free', email: null, display_name: null, organization_name: null, organization_uuid: null, seat_tier: null, last_seen_at: null, nickname: null, has_extra_usage: false, forbidden_project_ids: [7] },
+    ]);
+    try {
+      const r = await switchCheck({ host_alias: 'mac', account_uuid: 'acc-own', project_id: 7 });
+      expect(r.ok && r.value.target?.profile).toBe('spare');
+      expect(invoke).toHaveBeenCalledWith('check_account_headroom', {
+        args: { host_alias: 'mac', profile: null, project_id: 7 },
+      });
+      // Another project may still go there.
+      const other = await switchCheck({ host_alias: 'mac', account_uuid: 'acc-own', project_id: 8 });
+      expect(other.ok && other.value.target?.profile).toBe('free');
+      expect(headroomForAccount({ pause_at_pct: 90, chosen: null, over: false, suggestion: logins[1], logins }, null, ['acc-free']).suggestion).toBeNull();
+    } finally {
+      accounts.set([]);
+    }
   });
 
   it('names the soonest reset among the logins for the no-room line', () => {

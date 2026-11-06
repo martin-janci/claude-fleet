@@ -64,3 +64,13 @@ export async function copyText(text: string, onError?: (e: unknown) => void): Pr
     return false;
   }
 }
+
+/** A Copy button's whole job, said: "URL copied" on success and "URL not
+ *  copied" when the clipboard refused, rather than a press that reads as
+ *  nothing (UX antipatterns 2026-11-03). `what` names the thing ("URL"). */
+export async function copyAndSay(text: string, what: string): Promise<boolean> {
+  const { push } = await import('./toasts');
+  const ok = await copyText(text);
+  push(ok ? { kind: 'success', message: `${what} copied` } : { kind: 'error', message: `${what} not copied: the clipboard refused` });
+  return ok;
+}

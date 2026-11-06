@@ -546,15 +546,29 @@ const SCOPE_GUARDS: &[Guard] = &[
     },
     Guard {
         file: "crates/fleet-core/src/service/work/graph.rs",
-        func: "person_decides",
+        func: "person_only",
         nth: 0,
         code: "if !scope.org.is_all() {",
         verdict: Verdict::OrgBoundary,
-        why: "`decide` #0's rule for many proposals at once: deciding is a \
-              PERSON's act by design, so every scoped caller is refused before \
-              any row is reached. This is the org boundary, not a privacy \
-              fence; each item's mission is then fenced by owner and org \
-              membership (`graph::require_mission_change`)",
+        why: "A PERSON's decision by design: deciding proposals (`person_decides`, \
+              `decide` #0's rule for many at once) and Test now, Rerun and a \
+              project's AI check switch (`ticket_check::person_decides`, each a \
+              billed headless run), so every scoped caller is refused before any \
+              row is reached. This is the org boundary, not a privacy fence; each \
+              item is then fenced (`graph::require_mission_change`, \
+              `graph::visible_item`)",
+    },
+    Guard {
+        file: "crates/fleet-core/src/service/work/view.rs",
+        func: "task",
+        nth: 0,
+        code: "super::ticket_check::view(&s, &i.item, scope.is_all())?",
+        verdict: Verdict::OrgBoundary,
+        why: "Whether the AI check card offers Test now: only to a caller \
+              `ticket_check::person_decides` lets start one, so a scoped caller \
+              is not shown a button the hub refuses. This is the org boundary, \
+              not a privacy fence; the card itself is shown to every reader of \
+              the item",
     },
     Guard {
         file: "crates/fleet-core/src/service/work/local.rs",

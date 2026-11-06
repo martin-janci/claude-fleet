@@ -1,6 +1,7 @@
 <!-- Go to file (redesign step 5.6, ⌥⌘P / Ctrl+Alt+P, Files tab only): type
      part of a path, ↑/↓ to move, Enter opens it in the tree view. -->
 <script lang="ts">
+  import { focusNow } from './focus_now';
   import Modal from './Modal.svelte';
   import { goToFileMatches } from './files';
 
@@ -38,10 +39,6 @@
       if (p) onpick(p);
     }
   }
-
-  function focusOnMount(el: HTMLInputElement): void {
-    el.focus();
-  }
 </script>
 
 <Modal title="Go to file" {onclose} width="560px" testid="go-to-file">
@@ -59,7 +56,7 @@
     data-testid="go-to-file-input"
     bind:value={query}
     {onkeydown}
-    use:focusOnMount
+    use:focusNow
   />
   <ul class="list" id="go-to-file-list" role="listbox" aria-label="Matching files">
     {#each matches as p, i (p)}

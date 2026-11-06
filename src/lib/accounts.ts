@@ -13,6 +13,26 @@ export interface AccountRow {
   last_seen_at: number | null;
   nickname: string | null;
   has_extra_usage: boolean;
+  /** The projects this account is forbidden for (docs/accounts.md, *Keep
+   *  an account off a project*), ascending. Absent from an older hub. */
+  forbidden_project_ids?: number[];
+  /** The orgs this account is forbidden for: every project of one, today's
+   *  and later ones, ascending. Absent from an older hub. */
+  forbidden_org_ids?: number[];
+}
+
+/** The accounts project `projectId` may not run on, from `list` (the
+ *  accounts store's rows): forbidden for the project, or for its org
+ *  (`orgId`, `projectOrgId`). Empty without a project. */
+export function accountsForbiddenFor(
+  projectId: number | null | undefined,
+  list: readonly AccountRow[],
+  orgId: number | null = null,
+): string[] {
+  if (projectId == null) return [];
+  return list
+    .filter((a) => a.forbidden_project_ids?.includes(projectId) || (orgId != null && a.forbidden_org_ids?.includes(orgId)))
+    .map((a) => a.uuid);
 }
 
 /**
@@ -38,6 +58,10 @@ export function accountLabel(a: AccountRow | null | undefined): string {
   if (nickname) return nickname;
   const email = a.email?.trim();
   if (email) return email;
+  // An API-key login has no email: its display name ("API key · work") is
+  // the readable name, never its synthetic uuid (review 2026-11-03 D2).
+  const display = a.display_name?.trim();
+  if (display) return display;
   if (a.uuid) return a.uuid.slice(0, 8);
   return 'unknown account';
 }
@@ -45,11 +69,12 @@ export function accountLabel(a: AccountRow | null | undefined): string {
 const rows = createRowStore<AccountRow, string>({ key: (a) => a.uuid });
 export const accounts = rows.store;
 
-/** "email (seat_tier)" — the one-line account label used in session
- *  details and the prompt composer; '—' when there is no account. */
+/** "label (seat_tier)" — the one-line account label used in session
+ *  details and the prompt composer: the nickname when set, else the email,
+ *  as `accountLabel`; '—' when there is no account. */
 export function accountEmailTier(a: AccountRow | null): string {
   if (!a) return '—';
-  const email = a.email ?? a.uuid;
+  const email = a.nickname?.trim() || a.email || a.display_name?.trim() || a.uuid.slice(0, 8);
   return a.seat_tier ? `${email} (${a.seat_tier})` : email;
 }
 
@@ -76,6 +101,22 @@ export async function setAccountNickname(
   nickname: string | null,
 ): Promise<Result<AccountRow>> {
   const r = await invokeCmd<AccountRow>('set_account_nickname', { args: { uuid, nickname } });
+  if (r.ok) mergeAccount(r.value);
+  return r;
+}
+
+/** Replace the projects and/or orgs an account is forbidden for
+ *  (`set_account_projects`; a list left out stays as it is, empty clears).
+ *  The row comes back with the new lists. */
+export async function setAccountProjects(
+  uuid: string,
+  projectIds: readonly number[] | null,
+  orgIds: readonly number[] | null = null,
+): Promise<Result<AccountRow>> {
+  const args: { uuid: string; forbidden_project_ids?: number[]; forbidden_org_ids?: number[] } = { uuid };
+  if (projectIds) args.forbidden_project_ids = [...projectIds];
+  if (orgIds) args.forbidden_org_ids = [...orgIds];
+  const r = await invokeCmd<AccountRow>('set_account_projects', { args });
   if (r.ok) mergeAccount(r.value);
   return r;
 }

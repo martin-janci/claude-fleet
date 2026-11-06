@@ -67,6 +67,12 @@ export interface MissionPolicy {
   execution?: 'item' | 'lane';
   /** In `lane` execution, a lead hands over to a fresh one after this many tasks. */
   lane_relay_after?: number;
+  /** In `lane` execution, `item`: a task's tests run after it; `lane`: one
+   *  run at the lane's end answers all its tasks (M5). */
+  lane_test_at?: 'item' | 'lane';
+  /** In `lane` execution, `draft`: fleet pushes a lane's verified work and
+   *  opens its draft PR; `off`: the lead's brief asks it to (M4). */
+  lane_pr?: 'off' | 'draft';
   max_parallel?: number;
   max_retries?: number;
   require_review?: boolean;
@@ -85,6 +91,17 @@ export const POLICY_MAX_PARALLEL = 8;
 export const POLICY_MIN_WAKE_SECS = 300;
 /** The default runs at once (`MissionPolicy::default`). */
 export const POLICY_DEFAULT_PARALLEL = 2;
+
+/** A mission's autonomy levels in words, one table for the Edit form's
+ *  "Autonomy" and the grant's "Level", so a level never reads two ways on
+ *  one page (`orchestrate::steps::AUTO_LEVEL` is 2; at 3 the loop also
+ *  accepts the tasks it creates). A grant is 1 to 3. */
+export const MISSION_LEVELS: readonly { level: number; label: string }[] = [
+  { level: 0, label: 'L0 · asks for everything' },
+  { level: 1, label: 'L1 · you press every step' },
+  { level: 2, label: 'L2 · runs, retries and reviews by itself' },
+  { level: 3, label: 'L3 · also creates tasks' },
+];
 
 /** The policy to save: the mission's own with `edits` on top, so a field
  *  the form does not show keeps its value. `wake_every_secs: null` clears
@@ -208,6 +225,8 @@ export interface AttemptBrief {
   summary?: string | null;
   error?: string | null;
   evidence?: TaskEvidence | null;
+  /** The subagents its worker used during it, by type (M7). */
+  subagents?: Record<string, number>;
 }
 
 export interface OutsideItem {
@@ -270,6 +289,8 @@ export interface MissionLane {
   /** `idle` | `held` | `done`. */
   state: string;
   item_ids: number[];
+  /** Its branch's pull request, once fleet opened or found it (M4). */
+  pr_url?: string | null;
 }
 
 /** The lane a task is in, if any. */
@@ -300,6 +321,12 @@ export interface MissionStats {
   /** First run to the last run's end, and the part of it no run was open. */
   span_secs: number;
   idle_secs: number;
+  /** How long some ready work waited, seconds by cause (M3): `person`,
+   *  `grant`, `limit`, `brake`, `slot`, `lane`, `touches`. They overlap.
+   *  Absent from an older hub. */
+  waits?: Record<string, number>;
+  /** Subagents the workers started during the mission's attempts (M7). */
+  subagents?: number;
 }
 
 /** One live session on a mission's member item (`missions::FinishSession`). */
@@ -672,7 +699,22 @@ export function attemptLine(a: AttemptBrief): string {
       if (ev.uncommitted) parts.push(`${ev.uncommitted} uncommitted`);
     }
   }
+  const sub = subagentsText(a.subagents);
+  if (sub) parts.push(sub);
   return parts.join(' · ');
+}
+
+/** PURE: "3 subagents (Explore 2, general-purpose 1)", the most used first;
+ *  null with none (M7). */
+export function subagentsText(by: Record<string, number> | null | undefined): string | null {
+  const rows = Object.entries(by ?? {}).filter(([, n]) => n > 0);
+  const total = rows.reduce((a, [, n]) => a + n, 0);
+  if (total === 0) return null;
+  const kinds = rows
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([t, n]) => `${t} ${n}`)
+    .join(', ');
+  return `${total} subagent${total === 1 ? '' : 's'} (${kinds})`;
 }
 
 /** One log row as a sentence. */
@@ -739,6 +781,17 @@ export function eventSentence(e: MissionEvent): string {
     }
     case 'revoked':
       return 'Grant revoked';
+    case 'access_check': {
+      // What the grant's runs can reach (access review F6): the hosts and
+      // logins checked, the MCP servers shared into a login, what waits on
+      // a person (one ask card says what).
+      const targets = Array.isArray(p.targets) ? (p.targets as Record<string, unknown>[]) : [];
+      const shared = targets.flatMap((t) => (Array.isArray(t.shared) ? (t.shared as unknown[]).map(String) : []));
+      const problems = typeof p.problems === 'number' ? p.problems : 0;
+      const checked = `Checked access on ${targets.length} host${targets.length === 1 ? '' : 's'}`;
+      const share = shared.length ? `; shared ${[...new Set(shared)].join(', ')} with the run's login` : '';
+      return `${checked}${share}${problems ? `; ${problems} ${problems === 1 ? 'thing needs' : 'things need'} you` : '; all reachable'}`;
+    }
     case 'budget':
     case 'no_progress':
       return `Paused: ${String(p.why ?? '')}`;
@@ -1068,6 +1121,41 @@ export function grantMission(missionId: number, g: GrantInput): Promise<Result<M
  *  completes came back as an hours grant: a hub before grants until done
  *  drops `until_done` and signs its default hours (review r8). `null` when
  *  the grant is what was asked. */
+/** When a grant runs out, in words a person can place: "15:10" today,
+ *  "Thu 15:10" within the week, else "4 Nov 15:10". A 72 h grant's "until
+ *  15:10" named no day. */
+export function untilWords(expiresAt: number, now = Date.now() / 1000): string {
+  const d = new Date(expiresAt * 1000);
+  const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const n = new Date(now * 1000);
+  const sameDay = d.getFullYear() === n.getFullYear() && d.getMonth() === n.getMonth() && d.getDate() === n.getDate();
+  if (sameDay) return time;
+  const days = (expiresAt - now) / 86_400;
+  if (days > -1 && days < 6) return `${d.toLocaleDateString([], { weekday: 'short' })} ${time}`;
+  return `${d.toLocaleDateString([], { day: 'numeric', month: 'short' })} ${time}`;
+}
+
+/** A grant would let the mission run by itself: the loop is on, it asks for
+ *  more than a person's press (L2+), the fleet's ceiling allows it, and no
+ *  live grant signs it. Mirrors the phone's `grantAsk`. */
+export function grantWouldHelp(a: MissionAutonomy | null | undefined, now = Date.now() / 1000): boolean {
+  if (!a || !a.enabled) return false;
+  const live = a.grant && a.grant.revoked_at == null && (a.grant.until_done || a.grant.expires_at > now);
+  return !live && a.asked >= 2 && a.effective < a.asked && a.ceiling >= a.asked;
+}
+
+/** The grant form's button, every term on it as the phone's sheet says
+ *  them: "Sign L2 for 8 h, up to $20", "Sign L2 until it completes, up to
+ *  $20", "Sign L2 for 8 h, no cap". A bad or missing term reads "Sign the
+ *  grant", the form says what is wrong. */
+export function grantSignLabel(level: number, span: { hours: number } | { untilDone: true }, budgetMicros: number | undefined): string {
+  const when = 'untilDone' in span ? 'until it completes' : Number.isFinite(span.hours) && span.hours >= 1 ? `for ${span.hours} h` : null;
+  if (!when) return 'Sign the grant';
+  const cap = budgetMicros !== undefined && budgetMicros > 0 ? `up to ${dollars(budgetMicros)}` : 'untilDone' in span ? null : 'no cap';
+  if (cap === null) return 'Sign the grant';
+  return `Sign L${level} ${when}, ${cap}`;
+}
+
 export function grantSpanNotice(askedUntilDone: boolean, g: Pick<MissionGrant, 'until_done' | 'created_at' | 'expires_at'>): string | null {
   if (!askedUntilDone || g.until_done) return null;
   const hours = Math.round((g.expires_at - g.created_at) / 3600);
@@ -1190,11 +1278,7 @@ export interface AutonomyWords {
 
 export function autonomyWords(a: MissionAutonomy, now = Date.now() / 1000): AutonomyWords {
   const g = a.grant && (a.grant.revoked_at == null && a.grant.expires_at > now) ? a.grant : null;
-  const until = g
-    ? g.until_done
-      ? 'done'
-      : new Date(g.expires_at * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-    : '';
+  const until = g ? (g.until_done ? 'done' : untilWords(g.expires_at, now)) : '';
   const parts = [`L${a.asked} asked`, `L${a.ceiling} ceiling`, g ? `L${g.level} grant until ${until}` : 'no grant'];
   let hint: string | null = null;
   if (!a.enabled) hint = 'The mission loop is off for the whole fleet. Turn it on in Settings.';

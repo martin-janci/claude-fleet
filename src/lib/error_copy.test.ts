@@ -103,7 +103,7 @@ describe('error copy', () => {
     const message = 'a@b.com: 96% …; c@d.com has headroom (12% used): start with profile "work", or pass over_limit_ok: true once the person chose to start anyway';
     const near = { used_pct: 96.2, pause_at_pct: 90, suggested_host: 'mercury', suggested_email: 'c@d.com' };
     expect(errorText({ code: 'E_ACCOUNT_LIMIT', message, details: near })).toBe(
-      'This login is at 96% of its limit (the pause line is 90%). c@d.com on mercury has room; start it from New session to choose that login',
+      'This login has 4% left (fleet pauses a login at 10% left). c@d.com on mercury has room; start it from New session to choose that login',
     );
     expect(errorText({ code: 'E_ACCOUNT_LIMIT', message, details: { used_pct: 96, pause_at_pct: 90, suggested_host: null } })).toContain(
       'No other login has room',

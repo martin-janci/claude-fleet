@@ -71,8 +71,9 @@ function accountLimitText(details: unknown): string | undefined {
     | null
     | undefined;
   if (typeof d?.used_pct !== 'number') return undefined;
-  const line = typeof d.pause_at_pct === 'number' ? ` (the pause line is ${Math.round(d.pause_at_pct)}%)` : '';
-  const head = `This login is at ${Math.round(d.used_pct)}% of its limit${line}.`;
+  const left = (used: number) => Math.max(0, 100 - Math.round(used));
+  const line = typeof d.pause_at_pct === 'number' ? ` (fleet pauses a login at ${left(d.pause_at_pct)}% left)` : '';
+  const head = `This login has ${left(d.used_pct)}% left${line}.`;
   if (typeof d.suggested_host !== 'string') return `${head} No other login has room right now`;
   const who = typeof d.suggested_email === 'string' && d.suggested_email.includes('@') ? d.suggested_email : 'Another login';
   return `${head} ${who} on ${d.suggested_host} has room; start it from New session to choose that login`;

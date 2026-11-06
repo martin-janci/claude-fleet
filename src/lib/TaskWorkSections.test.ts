@@ -54,6 +54,30 @@ describe('TaskWorkSections', () => {
     expect(screen.getByTestId('task-steps').textContent).toContain('per the agent');
   });
 
+  it('flags an urgent or high subtask and one past its due date, but not a done one', () => {
+    const sub = (id: number, over: Record<string, unknown>) => ({ ...detail.subtasks![0], task_id: `item:${id}`, item_id: id, title: `S${id}`, ...over });
+    render(TaskWorkSections, {
+      detail: {
+        ...detail,
+        subtasks: [
+          sub(1, { priority: 'urgent', due_at: '2020-01-02' }),
+          sub(2, { priority: 'medium' }),
+          sub(3, { status: 'done', priority: 'high', due_at: '2020-01-02' }),
+        ],
+      },
+    });
+    const rows = screen.getAllByTestId('task-subtask');
+    expect(within(rows[0]).getByTestId('task-subtask-priority').textContent).toBe('Urgent');
+    const due = within(rows[0]).getByTestId('task-subtask-due');
+    expect(due.textContent).toBe('Overdue · Jan 2');
+    expect(due.classList.contains('overdue')).toBe(true);
+    expect(within(rows[1]).queryByTestId('task-subtask-priority')).toBeNull();
+    expect(within(rows[1]).queryByTestId('task-subtask-due')).toBeNull();
+    // Done: its date is history, its priority still says what it was.
+    expect(within(rows[2]).getByTestId('task-subtask-priority').textContent).toBe('High');
+    expect(within(rows[2]).queryByTestId('task-subtask-due')).toBeNull();
+  });
+
   it('counts subtasks done of all, "2 / 4", each with its ✓ ◐ ○ mark (G7.6)', () => {
     const sub = (id: number, status: string) => ({ ...detail.subtasks![0], task_id: `item:${id}`, item_id: id, title: `S${id}`, status });
     render(TaskWorkSections, {

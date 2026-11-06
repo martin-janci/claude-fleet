@@ -15,19 +15,22 @@
 //! Every step taken, refused or braked is a mission event, so the timeline
 //! says what the machine did and why it did not.
 
+pub mod access;
 pub mod checks;
 pub mod drafts;
 pub mod guard;
 pub mod integrate;
+pub mod lane_pr;
 pub mod lanes;
 pub mod limit;
 pub mod planner;
 pub mod steps;
 pub mod touches;
 pub mod triage;
+pub mod waits;
 
 use self::planner::{Command, PlannerOutput};
-use self::steps::{plan_steps, Step, StepInput, AUTO_LEVEL};
+use self::steps::{plan_steps_holding, Step, StepInput, AUTO_LEVEL};
 use super::missions::{changeable, mission_id};
 use super::WorkLinkArgs;
 use crate::cancel::CancellationRegistry;
@@ -43,7 +46,7 @@ use crate::store::{
     Store, TaskRow, WorkItemRow, GRANT_MAX_SECS, GRANT_UNTIL_DONE_AT,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -206,17 +209,88 @@ fn max_parallel(m: &MissionRow, a: &Autonomy) -> u32 {
 /// The mission's steps over every member (the loop's own view: no caller's
 /// scope narrows what it plans for).
 fn steps_for(s: &Store, m: &MissionRow, a: &Autonomy) -> Result<Vec<Step>, IpcError> {
+    Ok(plan_mission(s, m, a, false)?.0)
+}
+
+/// [`steps_for`], and why ready work it leaves out waits (M3,
+/// [`waits`]): the slots, a lane, what tasks change, a person.
+fn steps_and_waits(
+    s: &Store,
+    m: &MissionRow,
+    a: &Autonomy,
+) -> Result<(Vec<Step>, BTreeSet<&'static str>), IpcError> {
+    plan_mission(s, m, a, true)
+}
+
+/// The mission's steps, and with `with_waits` their wait causes (only the
+/// tick books them).
+fn plan_mission(
+    s: &Store,
+    m: &MissionRow,
+    a: &Autonomy,
+    with_waits: bool,
+) -> Result<(Vec<Step>, BTreeSet<&'static str>), IpcError> {
     let items = s.mission_items(m.id)?;
     let graph = super::graph::build(s, &ViewScope::internal(), &items)?;
     let attempts = attempts_of(s, &items)?;
-    let steps = plan_steps(&StepInput {
-        mission: m,
-        graph: &graph,
-        items: &items,
-        attempts: &attempts,
-        counts: s.mission_task_counts(m.id)?,
-        max_parallel: max_parallel(m, a),
-    });
+    let counts = s.mission_task_counts(m.id)?;
+    // Lanes L3: a lane takes one implement run at a time, when it is free.
+    // Read before planning, so a lane test that waits takes no slot (M5).
+    let in_lanes = m.policy.execution == "lane";
+    let lanes = if in_lanes {
+        s.mission_lanes(m.id)?
+    } else {
+        Vec::new()
+    };
+    let lane_of: HashMap<i64, i64> = lanes
+        .iter()
+        .flat_map(|l| l.item_ids.iter().map(move |i| (*i, l.id)))
+        .collect();
+    // M5: with a lane's tests at its end, a task waiting for its test does
+    // not hold the lane; the lane's one test run waits for its last task.
+    let tests_at_end = in_lanes && m.policy.lane_test_at == "lane";
+    let busy = if in_lanes {
+        let awaiting = if tests_at_end {
+            HashSet::new()
+        } else {
+            lanes::awaiting_test(&graph)
+        };
+        lanes::busy_lanes(s, m, &lanes, &attempts, &awaiting)?
+    } else {
+        HashSet::new()
+    };
+    let held_tests = if tests_at_end {
+        lanes::held_lane_tests(&graph, &lane_of, &busy)
+    } else {
+        HashSet::new()
+    };
+    let plan = |max_parallel: u32| {
+        plan_steps_holding(
+            &StepInput {
+                mission: m,
+                graph: &graph,
+                items: &items,
+                attempts: &attempts,
+                counts,
+                max_parallel,
+            },
+            &held_tests,
+        )
+    };
+    let steps = plan(max_parallel(m, a));
+    let mut causes: BTreeSet<&'static str> = BTreeSet::new();
+    // What a gate held back, for the causes: nothing to compare without them.
+    let before = |steps: &[Step]| with_waits.then(|| waits::impl_items(steps));
+    let held = |before: Option<BTreeSet<i64>>, after: &[Step]| {
+        before.is_some_and(|b| waits::held(&b, after))
+    };
+    if with_waits {
+        causes.extend(waits::slot_cause(&plan(u32::MAX), &steps));
+        if steps.iter().any(|st| st.kind == "ask") || graph.nodes.iter().any(|n| n.state == "held")
+        {
+            causes.insert("person");
+        }
+    }
     // Lanes L5: what each task says it changes, in which repository (a
     // mission with one repo names it for a task that names none).
     let sole_repo = match m.repos.as_slice() {
@@ -238,25 +312,23 @@ fn steps_for(s: &Store, m: &MissionRow, a: &Autonomy) -> Result<Vec<Step>, IpcEr
         .collect();
     let running: Vec<i64> = attempts
         .iter()
-        .filter(|(_, ts)| {
-            ts.iter().any(|t| {
-                matches!(t.state.as_str(), "queued" | "running")
-                    && matches!(t.role.as_deref(), None | Some("implement"))
-            })
-        })
+        .filter(|(_, ts)| ts.iter().any(steps::open_impl))
         .map(|(i, _)| *i)
         .collect();
-    if m.policy.execution != "lane" {
-        return Ok(touches::gate_items(steps, &known, &running, None));
+    if !in_lanes {
+        let b = before(&steps);
+        let steps = touches::gate_items(steps, &known, &running, None);
+        if held(b, &steps) {
+            causes.insert("touches");
+        }
+        return Ok((steps, causes));
     }
-    // Lanes L3: a lane takes one implement run at a time, when it is free.
-    let lanes = s.mission_lanes(m.id)?;
-    let lane_of: HashMap<i64, i64> = lanes
-        .iter()
-        .flat_map(|l| l.item_ids.iter().map(move |i| (*i, l.id)))
-        .collect();
-    let busy = lanes::busy_lanes(s, m, &lanes, &attempts, &lanes::awaiting_test(&graph))?;
+    let b = before(&steps);
     let steps = lanes::gate(steps, &lane_of, &busy);
+    if held(b, &steps) {
+        causes.insert("lane");
+    }
+    let b = before(&steps);
     // Lanes L5: a lane starts beside another of its repository only when
     // both say all they change and it does not meet.
     let done = |i: &i64| {
@@ -298,12 +370,11 @@ fn steps_for(s: &Store, m: &MissionRow, a: &Autonomy) -> Result<Vec<Step>, IpcEr
         .map(|i| i.id)
         .filter(|i| !lane_of.contains_key(i))
         .collect();
-    Ok(touches::gate_items(
-        steps,
-        &known,
-        &running,
-        Some(&laneless),
-    ))
+    let steps = touches::gate_items(steps, &known, &running, Some(&laneless));
+    if held(b, &steps) {
+        causes.insert("touches");
+    }
+    Ok((steps, causes))
 }
 
 /// The plan a mission's detail carries: `None` for a draft or a finished
@@ -396,7 +467,8 @@ fn start_for(
             return Err(IpcError::new(
                 codes::E_FORBIDDEN,
                 format!(
-                    "{} is in a repo outside {}'s allow-list",
+                    "{} is in a repo outside {}'s allow-list: add its repo to the \
+                     mission's repos, or take the task out of the mission",
                     item.key.as_deref().unwrap_or(&item.title),
                     m.name
                 ),
@@ -490,11 +562,32 @@ pub async fn apply_step(
     view: &ViewScope,
 ) -> StepResult {
     let res = apply_step_inner(deps, m, step, actor, view).await;
+    // A start the loop cannot make by itself (outside the repo allow-list,
+    // another organisation's host, a host the grant does not reach) waits on
+    // a person: ask, rather than only log a refusal on every tick.
+    let ask = match (&res, actor) {
+        (Err(e), Actor::Loop) if e.code == codes::E_FORBIDDEN => Some(e.message.clone()),
+        _ => None,
+    };
     let (ok, detail, task_id) = match res {
         Ok((d, t)) => (true, d, t),
         Err(e) => (false, e.message, None),
     };
     if let Ok(s) = deps.store.lock() {
+        if let Some(why) = ask {
+            let _ = ask_card(
+                &s,
+                m.id,
+                &Step {
+                    kind: "ask".into(),
+                    item_id: step.item_id,
+                    role: None,
+                    reason: format!("The loop cannot start {}: {why}", step.kind),
+                    context: None,
+                    auto: false,
+                },
+            );
+        }
         event(
             &s,
             m.id,
@@ -1169,9 +1262,6 @@ pub struct PlanOutcome {
     pub waiting: Option<limit::LimitWait>,
 }
 
-/// The host the planner runs on: the policy's, the grant's first, else the
-/// host of the mission's latest worker that may see the mission's org.
-///
 /// The project whose checkout the planner reads (`orchestrator.planner_reads`,
 /// lanes design L1): the root item's, else the mission's first repo. `None`
 /// when the setting is off or the mission names no repository.
@@ -1187,6 +1277,9 @@ fn planner_reads_project(s: &Store, m: &MissionRow) -> Result<Option<i64>, IpcEr
     Ok(root.or_else(|| m.repos.first().map(|r| r.project_id)))
 }
 
+/// The host the planner runs on: the policy's, the grant's first, else the
+/// host of the mission's latest worker that may see the mission's org.
+///
 /// Every LLM run of a mission (the planner, its release note, its triage
 /// card) is sent the mission's text, so the host must be one of the
 /// mission's org (transition plan, risk "Org text leaves the org"): a policy
@@ -1549,17 +1642,9 @@ pub async fn run_planner(
             None => None,
         };
         let prompt = format!("{}\n\n{snap}", planner::planner_prompt(checkout.is_some()));
-        let (script, secs) = match &checkout {
-            Some(dir) => (
-                planner::planner_script_in(&model, &prompt, profile, dir),
-                planner::PLANNER_READS_TIMEOUT_SECS,
-            ),
-            None => (
-                planner::planner_script_as(&model, &prompt, profile),
-                planner::PLANNER_HOST_TIMEOUT_SECS,
-            ),
-        };
-        let script = script.map_err(|e| IpcError::new(codes::E_INVALID, e))?;
+        let script = planner::planner_script_as(&model, &prompt, profile, checkout.as_deref())
+            .map_err(|e| IpcError::new(codes::E_INVALID, e))?;
+        let secs = planner::planner_timeout_secs(checkout.is_some());
         let out = crate::ssh::run_shell_bounded(
             deps.ssh.as_ref(),
             host,
@@ -1966,6 +2051,27 @@ pub fn grant(
             "lifted_from": lifted_from,
         }),
     );
+    // The grant's hosts against the tasks' organisations (access review
+    // F4): a run on a host of another organisation is refused at its
+    // start, so say it now. Hosts placement picks are checked by the loop.
+    // A card is best-effort: the grant is saved, and a mission at its open
+    // card cap must still wake.
+    if let Some(hosts) = g.hosts.as_ref().filter(|h| !h.is_empty()) {
+        for why in access::org_conflicts(&s, &m, hosts)? {
+            let _ = ask_card(
+                &s,
+                id,
+                &Step {
+                    kind: "ask".into(),
+                    item_id: None,
+                    role: None,
+                    reason: why,
+                    context: None,
+                    auto: false,
+                },
+            );
+        }
+    }
     s.wake_mission(id)?;
     Ok(g)
 }
@@ -2254,6 +2360,7 @@ pub async fn tick_mission(deps: &Deps, id: i64, now: i64) -> Result<(), IpcError
         let a = autonomy(&s, &m, now)?;
         let counts = s.mission_task_counts(id)?;
         if !a.enabled || m.state != "active" || !crate::store::mode_runs_loop(&m.mode) {
+            s.account_mission_waits(id, now, &[])?;
             s.release_mission_lease(id, Some(now + IDLE_RECHECK_SECS), Some(now))?;
             return Ok(());
         }
@@ -2292,15 +2399,35 @@ pub async fn tick_mission(deps: &Deps, id: i64, now: i64) -> Result<(), IpcError
             s.release_mission_lease(id, Some(now + IDLE_RECHECK_SECS), Some(now))?;
             return Ok(());
         }
-        let mut steps = steps_for(&s, &m, &a)?;
+        let (mut steps, mut causes) = steps_and_waits(&s, &m, &a)?;
         for st in steps.iter().filter(|st| st.kind == "ask") {
             ask_card(&s, id, st)?;
         }
         if a.effective >= AUTO_LEVEL {
+            let before = waits::impl_items(&steps);
             hold_runs_over_limit(&s, &m, a.grant.as_ref(), &mut steps, now)?;
+            if waits::held(&before, &steps) {
+                causes.insert("limit");
+            }
+        } else if steps
+            .iter()
+            .any(|st| st.auto && RUN_STEPS.contains(&st.kind.as_str()))
+        {
+            // Ready runs and no grant to take them: a person starts them.
+            causes.insert("grant");
         }
+        // A planner waiting for a usage limit to reset.
+        if limit::wake_at(&s, id, now)?.is_some() {
+            causes.insert("limit");
+        }
+        s.account_mission_waits(id, now, &causes.iter().copied().collect::<Vec<_>>())?;
         (m, a, steps, counts)
     };
+    // Under a grant, what its runs can reach is checked once, before they
+    // need it (access review F6).
+    if let Some(g) = a.grant.as_ref().filter(|_| a.effective >= AUTO_LEVEL) {
+        access::check_once(deps, &m, g, now).await;
+    }
     // Under a grant, the mechanical steps are the loop's own.
     if a.effective >= AUTO_LEVEL {
         for st in steps.iter().filter(|st| st.auto) {
@@ -2327,6 +2454,8 @@ pub async fn tick_mission(deps: &Deps, id: i64, now: i64) -> Result<(), IpcError
     // each other before it integrates (O7).
     if a.effective >= 1 {
         integrate::check(deps, &m).await;
+        // M4: a lane's branch up to its newest done task, and its draft PR.
+        lane_pr::sync(deps, &m).await;
     }
     let s = lock(&deps.store)?;
     let counts = s.mission_task_counts(id)?;
@@ -2385,6 +2514,10 @@ pub async fn tick_once(deps: &Deps, now: i64) {
     // holds it `pending` meanwhile. After the missions, outside every
     // mission's lease, and bounded per pass.
     crate::service::work::report::retry_unread_evidence(&deps.store, &deps.ssh, now).await;
+    // AI check on done: a ticket finished in a project whose check is on
+    // `auto` is checked. Outside missions, with the orchestrator off too;
+    // after the evidence retry, which a check needs. Stopped by Pause all.
+    crate::service::work::ticket_check::sweep(&deps.store, &deps.ssh, now).await;
     crate::service::loops::report("missions", failed.map_or(Ok(()), Err), next);
 }
 

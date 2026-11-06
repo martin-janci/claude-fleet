@@ -1,20 +1,35 @@
 <!-- The Agents tab's Debug section (`service::agents::debug`): per rule,
      whether it polls and why not, its next poll, its last poll error and its
-     jobs by state; a job opens whole, its proposed actions included. Loaded
-     when opened; nothing here changes a rule or answers an action. -->
+     jobs by state; a job opens whole, its proposed actions included. Compare
+     puts the built-in agents next to the fleet instances restating them
+     (`service::agents::compare`). Loaded when opened; nothing here changes a
+     rule or answers an action. -->
 <script lang="ts">
   import Button from '../kit/Button.svelte';
   import StatusDot from '../kit/StatusDot.svelte';
   import { errorText } from '../error_copy';
   import type { IpcError } from '../result';
   import { debugDot } from '../routines';
-  import { actionTitle, agentJob, explainAgents, jobCountsLine, ruleLine, type AgentJobDetail, type AgentsExplain } from '../agents';
+  import { money } from '../automation';
+  import {
+    actionTitle,
+    agentJob,
+    compareAgents,
+    comparisonLine,
+    explainAgents,
+    jobCountsLine,
+    ruleLine,
+    type AgentJobDetail,
+    type AgentsComparison,
+    type AgentsExplain,
+  } from '../agents';
 
   let { clock }: { clock: (s: number) => string } = $props();
 
   let open = $state(false);
   let explain = $state<AgentsExplain | null>(null);
   let job = $state<AgentJobDetail | null>(null);
+  let comparison = $state<AgentsComparison | null>(null);
   let error = $state<IpcError | null>(null);
 
   async function load() {
@@ -26,6 +41,17 @@
       error = r.error;
     }
   }
+
+  async function compare() {
+    const r = await compareAgents();
+    if (r.ok) {
+      comparison = r.value;
+      error = null;
+    } else {
+      error = r.error;
+    }
+  }
+
 
   async function openJob(id: number) {
     const r = await agentJob(id);
@@ -54,6 +80,7 @@
       </span>
     {/if}
     <span class="grow"></span>
+    <Button variant="quiet" size="sm" testid="agents-debug-compare" onclick={() => void compare()}>Compare</Button>
     <Button variant="quiet" size="sm" testid="agents-debug-refresh" onclick={() => void load()}>Refresh</Button>
   </div>
   {#if error}<p class="err" role="alert">{errorText(error)}</p>{/if}
@@ -85,6 +112,29 @@
         <li class="none meta">No agent has a rule.</li>
       {/each}
     </ul>
+  {/if}
+  {#if comparison}
+    <section class="job" data-testid="agents-debug-compare-result">
+      <strong>Built-in next to fleet</strong>
+      <p class="meta">{comparisonLine(comparison)}</p>
+      <ul class="list">
+        {#each comparison.pairs as p (p.kind + p.key)}
+          <li data-testid="agents-debug-pair">
+            <span class={p.agree === false ? 'bad' : 'meta'}>{p.agree === true ? '=' : p.agree === false ? '≠' : '?'}</span>
+            <span class="body">
+              <strong>{p.kind} · {p.key}</strong>
+              {#each [['built-in', p.builtin], ['fleet', p.fleet]] as const as [who, side] (who)}
+                <button type="button" class="link" onclick={() => void openJob(side.job_id)}
+                  >{who}: {side.said} · {side.state} · {money(side.cost_micros)}</button
+                >
+              {/each}
+            </span>
+          </li>
+        {:else}
+          <li class="none meta">No work both have done yet.</li>
+        {/each}
+      </ul>
+    </section>
   {/if}
   {#if job}
     <section class="job" data-testid="agents-debug-job">

@@ -40,6 +40,9 @@ ignore = [
   "RUSTSEC-2026-0367",
   "RUSTSEC-2026-0368",
   "RUSTSEC-2026-0369",
+  # RUSTSEC-2026-0429: extract() aborts on a symlink entry declaring a huge
+  # size; same path and same signed-archive reasoning as above, fixed in zip 9.
+  "RUSTSEC-2026-0429",
   # zbus_names / zvariant / zvariant_derive: marked unmaintained 2026-10, with
   # no replacement release. Our only path is zbus <- tauri-plugin-opener on
   # Linux (D-Bus to open URLs and files). Drop these when the opener moves off

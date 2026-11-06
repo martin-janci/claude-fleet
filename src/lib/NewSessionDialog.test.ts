@@ -10,6 +10,7 @@ vi.mock('@tauri-apps/api/core', () => ({
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import NewSessionDialog from './NewSessionDialog.svelte';
 import { hosts } from './hosts';
+import { accounts } from './accounts';
 import { fleetSettings, SETTING_DEFAULTS } from './fleet_settings';
 import { hubStatus, STANDALONE, type HubStatus } from './hub';
 import { hubConnection } from './hub_connection';
@@ -2138,7 +2139,7 @@ describe('NewSessionDialog limit handling', () => {
     await tick();
     await fireEvent.click(screen.getByText('Create'));
     await vi.waitFor(() => expect(screen.getByTestId('limit-ask')).toBeTruthy());
-    expect(screen.getByTestId('limit-ask').textContent).toContain('95% of its');
+    expect(screen.getByTestId('limit-ask').textContent).toContain('5% left');
     expect(created()).toHaveLength(0);
     expect(screen.getByTestId('limit-use-suggestion').textContent).toContain('spare');
     await fireEvent.click(screen.getByTestId('limit-use-suggestion'));
@@ -2157,6 +2158,26 @@ describe('NewSessionDialog limit handling', () => {
     expect((created()[0][1] as any).args.profile).toBeNull();
     // The person's choice travels, so a hub does not refuse it (step 4.4).
     expect((created()[0][1] as any).args.over_limit_ok).toBe(true);
+  });
+
+  it('asks before starting on a signed-out login and offers a signed-in one', async () => {
+    const spare = { profile: 'spare', account_uuid: 'acc-spare', used_pct: 30 };
+    answer({
+      ...over,
+      over: false,
+      chosen: { profile: null, account_uuid: 'acc-own', used_pct: 10, signed_out: true },
+      suggestion: null,
+      logins: [{ profile: null, account_uuid: 'acc-own', used_pct: 10, signed_out: true }, spare],
+    });
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    await fireEvent.click(screen.getByText('Create'));
+    await vi.waitFor(() => expect(screen.getByTestId('limit-ask')).toBeTruthy());
+    expect(screen.getByTestId('limit-ask').textContent).toContain('signed out');
+    expect(created()).toHaveLength(0);
+    await fireEvent.click(screen.getByTestId('limit-use-suggestion'));
+    await vi.waitFor(() => expect(created()).toHaveLength(1));
+    expect((created()[0][1] as any).args.profile).toBe('spare');
   });
 
   it('under the line, or with no answer, starts straight away', async () => {
@@ -2194,6 +2215,27 @@ describe('NewSessionDialog in the New layout', () => {
       if (cmd === 'list_sessions') return [];
       return null;
     });
+  });
+
+  // Keep an account off a project: the freest login's account is forbidden
+  // for this project, so it is shown disabled and never the default.
+  it('never defaults to a login on an account the project forbids', async () => {
+    accounts.set([
+      { uuid: 'acc-spare', email: null, display_name: null, organization_name: null, organization_uuid: null, seat_tier: null, last_seen_at: null, nickname: null, has_extra_usage: false, forbidden_project_ids: [project.project.id] },
+    ]);
+    try {
+      render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+      const select = (await vi.waitFor(() => screen.getByTestId('launch-account'))) as HTMLSelectElement;
+      // `spare` (20% used) would win; it is forbidden, so the host's own login stays.
+      await vi.waitFor(() => expect(calls('check_account_headroom').length).toBeGreaterThan(0));
+      await tick();
+      expect(select.value).toBe('');
+      const spare = Array.from(select.options).find((o) => o.value === 'spare') as HTMLOptionElement;
+      expect(spare.disabled).toBe(true);
+      expect(spare.textContent).toContain('not for this project');
+    } finally {
+      accounts.set([]);
+    }
   });
 
   it('offers Claude Code and Shell; Codex only where it is on the PATH, Agy as coming', async () => {
@@ -2263,7 +2305,7 @@ describe('NewSessionDialog in the New layout', () => {
     await vi.waitFor(() => expect(screen.getByTestId('launch-account')).toBeTruthy());
     const sel = screen.getByTestId('launch-account') as HTMLSelectElement;
     await vi.waitFor(() => expect(sel.value).toBe('spare'));
-    expect(sel.textContent).toContain('20% used');
+    expect(sel.textContent).toContain('80% left');
     expect(sel.textContent).toContain('no reading');
     await fireEvent.click(screen.getByText('Create'));
     await vi.waitFor(() => expect(calls('new_session')).toHaveLength(1));

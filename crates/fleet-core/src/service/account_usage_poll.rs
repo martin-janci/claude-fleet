@@ -134,6 +134,25 @@ fn reannounce_lapsed(
     }
 }
 
+/// One account's place in [`AccountUsagePoller::in_flight`], given up when
+/// the fetch task ends however it ends: a fetch that panicked used to leave
+/// its account marked in flight, and [`poll_due_accounts`] then skipped it
+/// until the app restarted, its meters going stale with no failure shown.
+struct InFlight {
+    poller: Arc<AccountUsagePoller>,
+    account: String,
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        self.poller
+            .in_flight
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&self.account);
+    }
+}
+
 impl Default for AccountUsagePoller {
     fn default() -> Self {
         Self::new()
@@ -348,6 +367,12 @@ pub(crate) fn poll_due_accounts(
                 continue; // already being fetched (or queued for a permit)
             }
         }
+        // Made before the spawn: a task dropped before its first poll (the
+        // runtime shutting down) still gives the account back.
+        let in_flight = InFlight {
+            poller: Arc::clone(poller),
+            account: account.clone(),
+        };
         let poller = Arc::clone(poller);
         let hosts = Arc::clone(&hosts);
         let ssh = Arc::clone(&ssh);
@@ -355,6 +380,7 @@ pub(crate) fn poll_due_accounts(
         let bus = Arc::clone(&bus);
         let store = store.clone();
         handles.push(tokio::spawn(async move {
+            let _in_flight = in_flight;
             let _permit = poller
                 .limit
                 .clone()
@@ -370,11 +396,6 @@ pub(crate) fn poll_due_accounts(
                 store.as_deref(),
             )
             .await;
-            poller
-                .in_flight
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .remove(&account);
         }));
     }
     handles
@@ -711,6 +732,28 @@ mod tests {
         );
     }
 
+    /// Usage hardening: a fetch task that panics gives its account back, so
+    /// the next pass polls it again instead of skipping it for good.
+    #[tokio::test]
+    async fn a_fetch_that_panics_does_not_stay_in_flight() {
+        let poller = Arc::new(AccountUsagePoller::new());
+        poller
+            .in_flight
+            .lock()
+            .unwrap()
+            .insert("acct-1".to_string());
+        let p = Arc::clone(&poller);
+        let task = tokio::spawn(async move {
+            let _in_flight = InFlight {
+                poller: p,
+                account: "acct-1".to_string(),
+            };
+            panic!("a fetch that panics");
+        });
+        assert!(task.await.is_err());
+        assert!(poller.in_flight.lock().unwrap().is_empty());
+    }
+
     #[tokio::test]
     async fn in_flight_account_is_not_spawned_again() {
         let hosts = Arc::new(vec![host("h1", "acct-1")]);
@@ -864,6 +907,8 @@ mod tests {
             last_seen_at: Some(1),
             nickname: None,
             has_extra_usage: false,
+            forbidden_project_ids: Vec::new(),
+            forbidden_org_ids: Vec::new(),
         })
         .unwrap();
         Mutex::new(s)
@@ -912,6 +957,8 @@ mod tests {
                 last_seen_at: Some(1),
                 nickname: None,
                 has_extra_usage: false,
+                forbidden_project_ids: Vec::new(),
+                forbidden_org_ids: Vec::new(),
             })
             .unwrap();
         }
@@ -1252,8 +1299,9 @@ mod tests {
 
     /// Review r05 F9: an account moving into or out of a lost login (or a
     /// limit) re-announces its live sessions, so the hub's stamped
-    /// `needs_attention` follows; a dead row, another account's session and
-    /// an answer that moves nothing send no session frame.
+    /// `needs_attention` follows; a dead row and an answer that moves
+    /// nothing send no session frame. The login's own stamp re-announces
+    /// every live session on its host first.
     #[tokio::test]
     async fn an_account_entering_or_leaving_a_block_re_announces_its_live_sessions() {
         let bus = Arc::new(crate::events::BroadcastEventBus::new(64));
@@ -1310,8 +1358,21 @@ mod tests {
         assert_eq!(
             frames(),
             vec![
-                // h1's login is now on record as signed out (login_health).
+                // h1's login is now on record as signed out (login_health),
+                // which blocks every live session on that login, whatever
+                // account it last reported (review 2026-11-03 F2): the
+                // ghost sends nothing.
                 ("host:probed", None, None),
+                (
+                    "session:updated",
+                    Some(ids[0]),
+                    Some("no_credentials".into())
+                ),
+                (
+                    "session:updated",
+                    Some(ids[2]),
+                    Some("no_credentials".into())
+                ),
                 ("account_usage:updated", None, None),
                 (
                     "session:updated",
@@ -1327,8 +1388,15 @@ mod tests {
         assert_eq!(
             frames(),
             vec![
-                // ... and off the record again.
+                // ... and off the record again. idle-1 stays blocked until
+                // its account's new reading lands, a frame later.
                 ("host:probed", None, None),
+                (
+                    "session:updated",
+                    Some(ids[0]),
+                    Some("no_credentials".into())
+                ),
+                ("session:updated", Some(ids[2]), None),
                 ("account_usage:updated", None, None),
                 ("session:updated", Some(ids[0]), None),
             ],

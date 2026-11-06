@@ -219,6 +219,30 @@ export async function loadOrgSuggestions(): Promise<Result<OrgSuggestion[]>> {
 }
 
 /** A rule as a chip: `acme/*`, `acme/api`, `path: ~/w/acme`, `host: h`. */
+/**
+ * A project's org by its own rules (`Store::project_org`): the most specific
+ * rule on its owner, repo or path (path, longer first > owner/repo > owner).
+ * Host-only rules and a host's org name a host, not the project, so they do
+ * not count. `null` with no matching rule.
+ */
+export function projectOrgId(
+  p: { owner: string; repo: string; base_path: string },
+  list: readonly Pick<OrgDetail, 'rules'>[],
+): number | null {
+  const eq = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
+  let best: { rank: number; id: number; org: number } | null = null;
+  for (const r of list.flatMap((o) => o.rules ?? [])) {
+    if (r.host_alias) continue;
+    if (r.owner && (p.owner === 'local' || !eq(p.owner, r.owner))) continue;
+    if (r.repo && !eq(p.repo, r.repo)) continue;
+    if (r.path_prefix && p.base_path !== r.path_prefix && !p.base_path.startsWith(`${r.path_prefix}/`)) continue;
+    const rank = r.path_prefix ? 3000 + [...r.path_prefix].length : r.repo ? 2000 : r.owner ? 1000 : 0;
+    // A tie goes to the older rule, as in Rust.
+    if (!best || rank > best.rank || (rank === best.rank && r.id < best.id)) best = { rank, id: r.id, org: r.org_id };
+  }
+  return best?.org ?? null;
+}
+
 export function ruleChip(r: OrgRuleRow): string {
   const parts: string[] = [];
   if (r.owner) parts.push(r.repo ? `${r.owner}/${r.repo}` : `${r.owner}/*`);

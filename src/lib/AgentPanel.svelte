@@ -40,18 +40,18 @@
   } from './operator';
   import { openSettingsAt, requestHostsView, requestNewSessionOnHost } from './app_views';
   import { hosts } from './hosts';
+  import { accountByUuid, accountLabel } from './accounts';
+  import { openAccount } from './account_pill';
   import { fleetSettings, hubHasSetting, hubSettingKeys, settingBool, SETTING_KEYS } from './fleet_settings';
   import { agentContext, missionContext, type AgentContextInput } from './agent_context';
   import { missionList } from './mission_room';
   import ControlPlusMenu from './ControlPlusMenu.svelte';
   import { insertIntoComposer } from './conversation';
   import ConfirmCards from './ConfirmCards.svelte';
-  import ControlEscalations from './ControlEscalations.svelte';
-  import HandoffCards from './HandoffCards.svelte';
+  import ControlActivity from './ControlActivity.svelte';
   import { controlThinking } from './control_loaders';
   import ControlRouteReceipts from './ControlRouteReceipts.svelte';
   import ControlCommandReceipts from './ControlCommandReceipts.svelte';
-  import ControlSuggestions from './ControlSuggestions.svelte';
   import AutonomyChip from './AutonomyChip.svelte';
   import { takeControlCommand } from './control_slash';
   import { linkableTasks, type TaskLink } from './control_task_link';
@@ -206,13 +206,24 @@
   const firstHost = $derived($hosts.find((h) => !h.hidden)?.alias ?? $operatorHost);
   // Control review F7: Control's own login, said only when it is in trouble.
   const accountLine = $derived(
-    $operatorAccount && $operatorAccount.state !== 'ok' && $operatorAccount.state !== 'unknown' ? operatorAccountLine($operatorAccount) : null,
+    $operatorAccount && $operatorAccount.state !== 'ok' && $operatorAccount.state !== 'unknown' ? operatorAccountLine($operatorAccount, (u) => {
+          const a = $accountByUuid.get(u);
+          return a ? accountLabel(a) : null;
+        })
+      : null,
   );
 </script>
 
 {#snippet chip()}
   {#if accountLine}
-    <p class="account-line" data-testid="control-account" data-state={$operatorAccount?.state}>{accountLine}</p>
+    <p class="account-line" data-testid="control-account" data-state={$operatorAccount?.state}>
+      {accountLine}
+      {#if $operatorAccount?.account_uuid}
+        {@const uuid = $operatorAccount.account_uuid}
+        <!-- Review 2026-11-03 D17: the warning leads to the account. -->
+        · <button type="button" class="account-open" data-testid="control-account-open" onclick={() => openAccount(uuid)}>Open account</button>
+      {/if}
+    </p>
   {/if}
   {#if firstRun && session}
     <!-- Thread room (board A2Empty): the empty chat's starters, centred
@@ -239,18 +250,15 @@
        Mounted only while this row renders, so a request is never parked on
        a card nobody can see (confirms.ts). -->
   <ConfirmCards />
-  <!-- Thread room: what in the fleet needs the person, as amber cards. -->
-  <ControlEscalations />
-  <!-- Steps 9.3 and 9.6: what the agent handed on, as chips and cards
-       that follow their target's state. -->
-  <HandoffCards />
   <!-- Step 9.9 (Jev K2): where each message just sent here goes. Keyed, so
        another Control session primes afresh instead of routing its history. -->
   {#if session}{#key session.id}<ControlRouteReceipts sessionId={session.id} />{/key}{/if}
   <!-- G3.9: what /task, /done, /assign and /start did (control_slash.ts). -->
   <ControlCommandReceipts />
-  <!-- G3.9: suggestions read from the fleet's rows; a press runs them. -->
-  {#if session}<ControlSuggestions sessionId={session.id} />{/if}
+  <!-- Compact Control (2026-10-30): what needs the person (Thread room's
+       amber cards), what the agent handed on (steps 9.3, 9.6) and what the
+       fleet suggests (G3.9), as one row of counts right above the box; each opens its cards. -->
+  <ControlActivity sessionId={session?.id ?? null} />
 {/snippet}
 
 {#snippet tools()}
@@ -351,6 +359,15 @@
     margin: 0;
     font-size: var(--text-xs);
     color: var(--usage-warn);
+  }
+  .account-open {
+    background: none;
+    border: none;
+    padding: 0;
+    font: inherit;
+    color: var(--accent);
+    text-decoration: underline;
+    cursor: pointer;
   }
   .blocked-state {
     margin: auto;

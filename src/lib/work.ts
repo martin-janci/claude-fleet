@@ -693,6 +693,12 @@ export function priorityLabel(p: string | null | undefined): string | null {
   return WORK_PRIORITIES.find((x) => x.value === p)?.label ?? null;
 }
 
+/** Urgent or high: the priorities a list row, a card and the task header
+ *  call out. Medium and low are the usual case and stay quiet. */
+export function isHotPriority(p: string | null | undefined): p is 'urgent' | 'high' {
+  return p === 'urgent' || p === 'high';
+}
+
 /** An estimate as the task detail says it: "3 pts", "1 pt", "4 h";
  *  `null` for none. */
 export function estimateLabel(estimate: number | null | undefined, unit: string | null | undefined): string | null {
@@ -744,9 +750,9 @@ export function dueLabel(due: string | null | undefined, now: Date = new Date())
 
 /** The Board card's owner-and-due chip ("You · Fri"): the first assignee
  *  ("You" when the task is the viewer's), then the due date. `null` when
- *  the task names neither. */
+ *  the task names neither. Never overdue once the task is done. */
 export function ownerDueChip(
-  t: { assignees?: string[] | null; mine?: boolean | null; due_at?: string | null },
+  t: { assignees?: string[] | null; mine?: boolean | null; due_at?: string | null; status_category?: string | null },
   now: Date = new Date(),
 ): { text: string; overdue: boolean } | null {
   const first = t.assignees?.find((a) => a.trim() !== '');
@@ -755,7 +761,8 @@ export function ownerDueChip(
   if (who === null && due === null) return null;
   const extra = !t.mine && (t.assignees?.length ?? 0) > 1 ? ` +${(t.assignees?.length ?? 1) - 1}` : '';
   const parts = [who !== null ? `${who}${extra}` : null, due?.text ?? null].filter((x): x is string => x !== null);
-  return { text: parts.join(' · '), overdue: due?.overdue ?? false };
+  // A done task's date is history: the Done column is never red.
+  return { text: parts.join(' · '), overdue: (due?.overdue ?? false) && t.status_category !== 'done' };
 }
 
 /** Assignees typed as one line: split on commas, trimmed, empty ones and

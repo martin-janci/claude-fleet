@@ -234,6 +234,14 @@
             },
             {
               "type": "field",
+              "key": "orchestrator.build_cache",
+              "when": {
+                "key": "orchestrator.enabled",
+                "truthy": true
+              }
+            },
+            {
+              "type": "field",
               "key": "orchestrator.planner_reads",
               "when": {
                 "key": "orchestrator.enabled",

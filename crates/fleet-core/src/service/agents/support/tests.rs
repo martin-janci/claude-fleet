@@ -209,8 +209,9 @@ impl SupportHost for FakeHost {
         _: &str,
         root: &str,
         job_id: i64,
-        branch: &str,
+        branch: Option<&str>,
     ) -> Result<(Prepared, String), IpcError> {
+        let branch = branch.unwrap_or("<default>");
         self.log(format!("prepare {branch}"));
         Ok((Prepared::Ready, workspace::workspace_dir(root, job_id)))
     }
@@ -389,6 +390,21 @@ async fn an_investigation_runs_in_the_home_with_the_default_skill() {
     assert!(
         prompt.contains("\"asked_in_comment\": \"/analyze please\""),
         "{prompt}"
+    );
+}
+
+/// A rule that names no branch reads origin's default, whatever it is
+/// called (papayapos-backend's is `develop`, with no `main`).
+#[tokio::test]
+async fn a_rule_without_a_branch_reads_origins_default() {
+    let f = fx("{}", true);
+    let job = f.job().await;
+    let out = f.runner().run(&job, Some(&f.rule)).await;
+    assert!(matches!(out, RunOutcome::Done { .. }), "{out:?}");
+    assert!(
+        f.host.logged().contains(&"prepare <default>".to_string()),
+        "{:?}",
+        f.host.logged()
     );
 }
 

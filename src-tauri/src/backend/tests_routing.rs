@@ -615,6 +615,7 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                 let args = fleet_core::service::account_limits::CheckAccountHeadroomArgs {
                     host_alias: "mac".into(),
                     profile: Some("work".into()),
+                    project_id: None,
                 };
                 block_on(commands::account_usage::routed::check_account_headroom(
                     b, args, s, &cache,
@@ -4007,6 +4008,42 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
             }),
         ),
         (
+            "run_ticket_check",
+            "work_link",
+            json!({ "session_id": null, "action": "check", "key": null, "item_id": 9,
+                    "link_id": null, "source": null }),
+            TASK_PAYLOAD,
+            Box::new(|b, s, ssh| {
+                block_on(commands::work::routed::run_ticket_check(
+                    b,
+                    commands::work::RunTicketCheckArgs { item_id: 9 },
+                    s,
+                    ssh,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "set_ticket_check",
+            "work_link",
+            json!({ "session_id": null, "action": "check_setup", "key": null, "item_id": null,
+                    "link_id": null, "source": null, "project_id": 7, "mode": "auto",
+                    "command": "cargo test" }),
+            r#"{"project_id":7,"project":"o/r","mode":"auto","command":"cargo test"}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::set_ticket_check(
+                    b,
+                    commands::work::SetTicketCheckArgs {
+                        project_id: 7,
+                        mode: "auto".into(),
+                        command: Some("cargo test".into()),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "summarize_past_work",
             "work_link",
             json!({ "session_id": null, "action": "summarize", "key": "ABC-1", "item_id": null,
@@ -4607,6 +4644,24 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                     fleet_core::service::hosts::SetAccountNicknameArgs {
                         uuid: "u1".into(),
                         nickname: Some("Work".into()),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "set_account_projects",
+            "set_account_projects",
+            json!({ "uuid": "u1", "forbidden_project_ids": [3] }),
+            r#"{"uuid":"u1","forbidden_project_ids":[3]}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::hosts::routed::set_account_projects(
+                    b,
+                    fleet_core::service::project_accounts::SetAccountProjectsArgs {
+                        uuid: "u1".into(),
+                        forbidden_project_ids: Some(vec![3]),
+                        forbidden_org_ids: None,
                     },
                     s,
                 ))

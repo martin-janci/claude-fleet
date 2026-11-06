@@ -67,8 +67,6 @@ pub const SCAN_CALL_SECS: u64 = 120;
 pub const SUBJECT_TTL_SECS: i64 = 30 * 24 * 3600;
 /// Records one `recent` context lookup reads at most.
 pub const CONTEXT_RECENT_MAX: u32 = 50;
-/// The branch a `project` workspace reads.
-pub const WORKSPACE_BRANCH: &str = "main";
 /// Output kept of a run.
 const OUTPUT_CAP: usize = 1 << 20;
 /// Longest JSON block of the subject or the context in a prompt.
@@ -126,6 +124,10 @@ pub struct Cursor {
     /// `mcp_scan`: the last scan.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scan: Option<i64>,
+    /// `mcp_scan`: the last scan that read its window: the next one reads
+    /// back to it, so a failed scan leaves no gap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scan_ok: Option<i64>,
     /// The first poll: a tracker that is not Jira takes no comment from
     /// before it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -437,6 +439,53 @@ fn schedule_job(rule_id: i64, at: i64, now: i64) -> NewAgentJob {
         trigger: "schedule".into(),
         dedup_key: format!("r{rule_id}:schedule:{at}"),
         not_before: now,
+    }
+}
+
+/// Queue a write for a person, unless one of the rule's earlier proposals
+/// already waits for the very same write: a scheduled agent proposes the
+/// same change every tick while the first one waits, and a person was handed
+/// seven identical "Call jira.jira_update_issue" cards (2026-11-06). The
+/// same payload is not queued again; a different one for the same item
+/// (`about::identity`) replaces the older, which ends `expired`. Answers the
+/// action's state for the job's result.
+pub(super) fn queue_pending(
+    s: &Store,
+    rule_id: i64,
+    job_id: i64,
+    kind: &str,
+    payload: &str,
+    now: i64,
+) -> String {
+    use crate::service::agents::about::identity;
+    let value: Value = serde_json::from_str(payload).unwrap_or(Value::Null);
+    let id = identity(kind, &value);
+    let earlier: Vec<_> = s
+        .pending_agent_actions_of_rule(rule_id, kind)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|a| a.job_id != job_id)
+        .filter(|a| {
+            serde_json::from_str::<Value>(&a.payload).is_ok_and(|v| identity(kind, &v) == id)
+        })
+        .collect();
+    if let Some(same) = earlier
+        .iter()
+        .find(|a| serde_json::from_str::<Value>(&a.payload).is_ok_and(|v| v == value))
+    {
+        return format!("already waiting as #{}", same.id);
+    }
+    match s.insert_agent_action(job_id, kind, payload, now) {
+        Ok(new) => {
+            for a in &earlier {
+                let why = format!("replaced by #{new}, a newer proposal of the same change");
+                if let Err(e) = s.supersede_agent_action(a.id, &why, now) {
+                    tracing::warn!(action = a.id, error = %e, "[agents] fleet: supersede");
+                }
+            }
+            "pending".into()
+        }
+        Err(e) => format!("not queued: {e}"),
     }
 }
 
@@ -1066,6 +1115,14 @@ pub fn agent(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>) -> AgentImpl {
 }
 
 /// A subject record's key: the job's dedup key, cut to what a record keeps.
+/// PURE: the pull request a GitHub subject names, `(repo, number)`.
+fn pr_ref(subject: &Value) -> Option<(String, i64)> {
+    Some((
+        subject.get("repo")?.as_str()?.to_string(),
+        subject.get("number")?.as_i64()?,
+    ))
+}
+
 fn subject_key(dedup_key: &str) -> String {
     dedup_key.chars().take(300).collect()
 }
@@ -1353,28 +1410,31 @@ impl FleetPoller {
     ) -> Vec<(NewAgentJob, Value)> {
         use super::actions::{review_key, REVIEW_KIND};
         let ns = subjects_namespace(rule.id);
-        let due: Vec<(&crate::service::agents::review::plan::OpenPr, i64, Value)> = {
+        // Each due review with its record, whose expiry and writing job the
+        // rewrite below keeps.
+        let due: Vec<(
+            &crate::service::agents::review::plan::OpenPr,
+            i64,
+            Value,
+            crate::store::AgentRecordRow,
+        )> = {
             let Ok(s) = self.store.lock() else {
                 return Vec::new();
             };
-            prs.iter()
-                .filter(|p| !p.is_draft)
-                .filter(|p| {
-                    !(gate.skip_wip && crate::service::agents::review::plan::is_wip(&p.title))
-                })
+            super::github::gated(prs, gate)
                 .filter_map(|p| {
                     let row = s
                         .agent_record(&ns, REVIEW_KIND, &review_key(repo, p.number), now)
                         .ok()??;
                     let v: Value = serde_json::from_str(&row.value).ok()?;
                     let id = super::github::reverify_due(&v, &p.head_sha, mins, now)?;
-                    Some((p, id, v))
+                    Some((p, id, v, row))
                 })
                 .take(super::github::MAX_REVERIFIES)
                 .collect()
         };
         let mut out = Vec::new();
-        for (p, id, mut v) in due {
+        for (p, id, mut v, row) in due {
             let gone = match self
                 .host
                 .review_state(&rule.host_alias, repo, p.number, id)
@@ -1400,8 +1460,8 @@ impl FleetPoller {
                         kind: REVIEW_KIND.into(),
                         key: review_key(repo, p.number),
                         value: v.to_string(),
-                        expires_at: None,
-                        written_by_job: None,
+                        expires_at: row.expires_at,
+                        written_by_job: row.written_by_job,
                     },
                     now,
                 );
@@ -1434,20 +1494,11 @@ impl FleetPoller {
         }
         let prs = self.host.open_prs(host, repo).await?;
         let mark = super::actions::marker(&rule.scope);
-        let max_rounds = inst
-            .loaded()
-            .definition
-            .trigger
-            .max_rounds
-            .unwrap_or(super::definition::DEFAULT_MAX_ROUNDS);
         let mut out = Vec::new();
-        for n in super::github::reply_prs(&replies, &prs) {
-            let Some(p) = prs.iter().find(|p| p.number == n) else {
-                continue;
-            };
-            let thread = self.host.pr_review_comments(host, repo, n).await?;
+        for p in super::github::reply_prs(&replies, &prs) {
+            let thread = self.host.pr_review_comments(host, repo, p.number).await?;
             out.extend(super::github::plan_reply_jobs(
-                rule.id, inst, ctx, repo, &mark, p, &replies, &thread, max_rounds, now,
+                rule.id, inst, ctx, repo, &mark, p, &replies, &thread, now,
             )?);
         }
         Ok(out)
@@ -1542,9 +1593,13 @@ impl AgentPoller for FleetPoller {
                 if c.scan.is_some_and(|t| now - t < every) {
                     Vec::new()
                 } else {
-                    let prev = c.scan.replace(now);
+                    let prev = c.scan_ok.or(c.scan);
+                    c.scan = Some(now);
                     match self.scan(rule, &inst, prev, now).await {
-                        Ok(j) => j,
+                        Ok(j) => {
+                            c.scan_ok = Some(now);
+                            j
+                        }
                         // A failed scan waits for its next turn.
                         Err(e) => {
                             tracing::warn!(rule_id = rule.id, error = %e, "[agents] fleet: scan failed");
@@ -1721,6 +1776,32 @@ impl FleetRunner {
                 continue;
             };
             let rows = match (&l.key, l.recent) {
+                (None, n) if l.prefix.is_some() => {
+                    let text = template::render(l.prefix.as_deref().unwrap_or_default(), ctx);
+                    if text.trim().is_empty() {
+                        continue;
+                    }
+                    s.agent_records_with_prefix(
+                        std::slice::from_ref(namespace),
+                        text.trim(),
+                        n.unwrap_or(20).min(CONTEXT_RECENT_MAX) as usize,
+                        now,
+                    )
+                    .unwrap_or_default()
+                }
+                (None, n) if l.find.is_some() => {
+                    let text = template::render(l.find.as_deref().unwrap_or_default(), ctx);
+                    if text.trim().is_empty() {
+                        continue;
+                    }
+                    s.find_agent_records(
+                        std::slice::from_ref(namespace),
+                        Some(text.trim()),
+                        n.unwrap_or(20).min(CONTEXT_RECENT_MAX) as usize,
+                        now,
+                    )
+                    .unwrap_or_default()
+                }
                 (Some(k), _) => {
                     let key = template::render(k, ctx);
                     if key.trim().is_empty() {
@@ -1819,11 +1900,19 @@ impl FleetRunner {
             Ok(s) => s,
             Err(o) => return o,
         };
+        // A comment asks whatever the head is when it runs: a push since the
+        // poll moves the job to that head rather than skipping it.
+        if let Err(o) = self.current_head(rule, &inst, &mut subject).await {
+            return o;
+        }
         let diff = match self.pull_request(rule, &inst, &subject).await {
             Ok(d) => d,
             Err(o) => return o,
         };
         self.with_review_context(rule, &inst, &mut subject, diff.as_deref(), now);
+        if let Err(o) = self.description_state(rule, &inst, &mut subject).await {
+            return o;
+        }
         let ctx = json!({ "inputs": inst.values, "subject": subject, "now": now });
         let context = self.context(&inst, rule.id, &ctx, now);
         let d = &inst.loaded().definition;
@@ -1939,6 +2028,64 @@ impl FleetRunner {
                 cost_micros: cost,
             },
         }
+    }
+
+    /// `github_comments` / `github_review_replies`: the open pull request's
+    /// head, base and branch now, over what the poll saw.
+    async fn current_head(
+        &self,
+        rule: &AgentRuleRow,
+        inst: &Instance,
+        subject: &mut Value,
+    ) -> Result<(), RunOutcome> {
+        let source = inst.loaded().definition.trigger.source;
+        if !source.is_github() || source == TriggerSource::GithubPrs {
+            return Ok(());
+        }
+        let Some((repo, number)) = pr_ref(subject) else {
+            return Ok(());
+        };
+        let open = self
+            .host
+            .open_prs(&rule.host_alias, &repo)
+            .await
+            .map_err(|e| failed(ErrorKind::Transient, e))?;
+        if let Some(p) = open.iter().find(|p| p.number == number) {
+            subject["head_sha"] = json!(p.head_sha);
+            subject["base_ref"] = json!(p.base_ref);
+            subject["head_ref"] = json!(p.head_ref);
+        }
+        Ok(())
+    }
+
+    /// A definition with a `pr_description` action: whether the pull
+    /// request has a description (`subject.has_description`), so one is
+    /// only written, and only proposed, where it would be sent.
+    async fn description_state(
+        &self,
+        rule: &AgentRuleRow,
+        inst: &Instance,
+        subject: &mut Value,
+    ) -> Result<(), RunOutcome> {
+        let d = &inst.loaded().definition;
+        if !d.trigger.source.is_github()
+            || !d
+                .actions
+                .iter()
+                .any(|a| a.kind == super::definition::ActionKind::PrDescription)
+        {
+            return Ok(());
+        }
+        let Some((repo, number)) = pr_ref(subject) else {
+            return Ok(());
+        };
+        let meta = self
+            .host
+            .pr_meta(&rule.host_alias, &repo, number)
+            .await
+            .map_err(|e| failed(ErrorKind::Transient, e))?;
+        subject["has_description"] = json!(!meta.body.trim().is_empty());
+        Ok(())
     }
 
     /// A pull request's subject gains what the PR reviewer knows of it:
@@ -2185,14 +2332,12 @@ impl FleetRunner {
                 ("watch", _) => "kept".to_string(),
                 (_, None) => "not queued: store lock".to_string(),
                 (level, Some(s)) => {
-                    let queued = if level == "act" && p.auto {
+                    if level == "act" && p.auto {
                         s.insert_approved_agent_action(job.id, p.kind, &p.payload, "rule:act", now)
-                            .map(|_| "approved")
+                            .map_or_else(|e| format!("not queued: {e}"), |_| "approved".into())
                     } else {
-                        s.insert_agent_action(job.id, p.kind, &p.payload, now)
-                            .map(|_| "pending")
-                    };
-                    queued.map_or_else(|e| format!("not queued: {e}"), str::to_string)
+                        queue_pending(s, rule.id, job.id, p.kind, &p.payload, now)
+                    }
                 }
             };
             out.push(json!({ "id": p.id, "do": p.kind, "body": p.body, "state": state }));
@@ -2247,6 +2392,17 @@ impl FleetRunner {
                     .await
                     .map_err(|e| failed(ErrorKind::Transient, e.message))?;
                 base.prune(host, &root).await;
+                // No branch named: origin's default, whatever it is called.
+                let branch = d
+                    .run
+                    .branch
+                    .as_deref()
+                    .map(|b| {
+                        template::render(b, &inst.ctx(crate::store::now_unix()))
+                            .trim()
+                            .to_string()
+                    })
+                    .filter(|b| !b.is_empty());
                 let prepared = match &pr_head {
                     Some((number, sha)) => {
                         self.host
@@ -2254,24 +2410,16 @@ impl FleetRunner {
                             .await
                     }
                     None => {
-                        let branch = d
-                            .run
-                            .branch
+                        if let Some(b) = branch
                             .as_deref()
-                            .map(|b| {
-                                template::render(b, &inst.ctx(crate::store::now_unix()))
-                                    .trim()
-                                    .to_string()
-                            })
-                            .filter(|b| !b.is_empty())
-                            .unwrap_or_else(|| WORKSPACE_BRANCH.to_string());
-                        if !crate::service::agents::workspace::branch_ok(&branch) {
+                            .filter(|b| !crate::service::agents::workspace::branch_ok(b))
+                        {
                             return Err(failed(
                                 ErrorKind::Permanent,
-                                format!("run › branch {branch:?} is not a branch name"),
+                                format!("run › branch {b:?} is not a branch name"),
                             ));
                         }
-                        base.prepare(host, &root, job.id, &branch).await
+                        base.prepare(host, &root, job.id, branch.as_deref()).await
                     }
                 };
                 match prepared {
@@ -2285,6 +2433,15 @@ impl FleetRunner {
                         return Err(failed(
                             ErrorKind::Permanent,
                             format!("no git checkout at {root}"),
+                        ))
+                    }
+                    Ok((Prepared::NoRef, _)) if pr_head.is_none() => {
+                        return Err(failed(
+                            ErrorKind::Permanent,
+                            format!(
+                                "{} (set run › branch)",
+                                crate::service::agents::workspace::missing_ref(branch.as_deref())
+                            ),
                         ))
                     }
                     Ok((other, _)) => {

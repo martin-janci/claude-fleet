@@ -44,9 +44,27 @@ Keychain entry is per config dir too.
 
 Because the profile's `.claude.json` is its own, so are its user-scope MCP
 servers. Provisioning a host (not the `content_only` refresh) merges fleet's
-`claude-fleet` entry into every profile's `.claude.json`; a profile added
-since then has no fleet MCP server until the host is provisioned again, and
-a session picks the entry up only when it starts.
+`claude-fleet` entry into every profile's `.claude.json`, and with it every
+user-scope MCP server of the host's own `~/.claude.json` (Jira, a company's
+servers…; the host's entry wins over a profile's of the same name, a server
+only the profile has is kept). A mission's grant does the same for the
+logins its runs will use, once per grant (the access check, below). A
+login added through + Add account gets them once the host reports it
+signed in (`login_status`); a profile made by hand has neither until one of
+those runs, and a session picks the servers up only when it starts.
+
+An OAuth server's sign-in is not shared: Claude Code keeps it with the
+login (`.credentials.json`, or the Keychain on macOS), so such a server asks
+to be signed in once under each login
+(`CLAUDE_CONFIG_DIR=~/.claude-profiles/<name> claude`, then `/mcp`).
+
+**The access check.** When a mission's grant lets the loop act, the loop
+looks once where the grant's runs will go (its hosts, else placement's pick
+for each repo) and under which login, on provisioned hosts: it shares the
+host's MCP servers into that login, names a server signed in on the host's
+login but not on this one, asks each repo's `origin` for its `HEAD`, and
+compares the hosts' organisation with the tasks'. The mission's log gets one
+`access_check` event; anything a person must do is one ask card.
 
 Sharing `projects/` is what lets a conversation move between logins: the
 transcript is in the same place under every profile, so `--resume` finds it.
@@ -175,7 +193,11 @@ host has room, offering only Wait.
 Which login: another account on the same host (a second login on the same
 account shares its limit), not signed out, with a usage reading under
 `accounts.pause_at` taken in the last hour, not at a limit and not past its
-daily spend limit, the least used first. An account takes one session per
+daily spend limit, the least used first. For an account no session in the
+fleet runs on, a reading up to a day old counts: nothing under such a login
+refreshes its access token, so after a few idle hours the usage check reads
+"access token expired" and its number stops moving, as its use does. The
+first session sent there refreshes the token. An account takes one session per
 wave: one per run, and the next only after a usage reading newer than that
 move, so a dozen sessions on a spent account spread out instead of all
 landing on the same spare login and spending it too. With none, nothing moves and the row waits for a person. With
@@ -221,20 +243,69 @@ start the worker on the login a refusal named.
 A resume (`work_link { resume }`, Resume in the desktop) runs under the
 login `profile` names (`""` = the host's own); without one, under the past
 session's login when its row is still known and the resume lands on the
-same host, else the host's own login, or the login on the host with
-headroom when the host's own is past `accounts.pause_at`. Neither a ticket
-start nor a resume refuses an over-limit login: they are how Control
-recovers work, so a spent login is the session's to report.
+same host, else the host's own login; either gives way to the login on the
+host with headroom when it is past `accounts.pause_at`. A ticket start on a
+named host that names no login does the same with the host's own
+(`account_limits::login_with_headroom`). Neither a ticket start nor a resume
+refuses an over-limit login, and neither moves off a login the caller or a
+rule named: they are how Control recovers work, so a spent login is the
+session's to report.
 
 Automation leaves a login alone that is past `accounts.pause_at` or that
-fleet knows is signed out: a routine's fire goes to its fallback host, else
-skips and says why (with the reset time, or the sign-in command); a
+fleet knows is signed out: a routine that names no login, whose host's own
+login is past the line, runs under the login on that host with the most
+headroom (as a ticket start does; the run's note names it); otherwise a
+routine's fire goes to its fallback host, else skips and says why (with the reset time, or the sign-in command); a
 mission's run waits. A `restart_session { profile }` onto another login is
 refused for a signed-out login, and for one past the line unless
 `over_limit_ok` says the person chose it. A switch from a person's paired
 device (Switch account on a hub-paired desktop or the phone, org-bound or
 not) is the person's choice; the operator, a per-host token and the master
 token are held.
+
+### Keep an account off a project
+
+A person can forbid an account for some projects: on the Accounts page,
+the account's **Not for these projects** list (the phone's account sheet has
+the same list). MCP: `set_account_projects { uuid, forbidden_project_ids }`,
+which replaces the list; the account's row carries it as
+`forbidden_project_ids` (`account_project_blocks`, migration 217). Only the
+hub owner's devices change it, as with the nickname.
+
+A whole org can be forbidden too (**Forbid for a whole org…** under the same
+list; the phone ticks "All of <org>"): every project of the org, those added
+later included, is treated as if it were on the list.
+`set_account_projects { uuid, forbidden_org_ids }` replaces that list
+(`forbidden_org_ids` on the row, `account_org_blocks`, migration 218); each
+of the two lists is replaced only when it is sent. A project's org is its own
+rule, the most specific org rule on its owner, repo or path
+(`Store::project_org`); a host-only rule and a host's org name a host, not a
+project, so they do not put its projects in the org. The refusal then says
+"(all of <org>)". Removing the org removes its blocks.
+
+No work in a forbidden project runs on a login on that account
+(`service::project_accounts`):
+
+- a start under such a login is refused with `E_ACCOUNT_FORBIDDEN`, from
+  every caller (the desktop, MCP and hub `new_session`, a ticket start, a
+  resume, a routine or mission run, `dispatch_task`); the refusal names the
+  allowed login on the host with the most headroom
+  (`details.suggested_profile`, `""` for the host's own), and no flag
+  passes it;
+- Switch account (`restart_session { profile }`) onto such a login is
+  refused; a plain restart keeps the login the pane already runs under;
+- where fleet picks the login, it never picks one: placement leaves it out
+  ("the project forbids its account"), a ticket start or a resume that names
+  no login moves to the allowed login on the host with the most headroom,
+  a routine on its host's own login does the same (and one that names a
+  forbidden login skips its run and says why), the over-limit refusal and
+  `check_account_headroom { project_id }` never suggest one, and the
+  automatic switch never moves a session onto one.
+
+A profile that is not logged in yet has no account, so a start under it is
+not refused; once the host reports its account, the next start, resume or
+switch is. Forbidding never stops a session already running on the
+account: it changes where work goes next.
 
 ### Signed-out logins
 

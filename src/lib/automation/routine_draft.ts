@@ -50,6 +50,10 @@ export interface RoutineDraft {
   /** The saved routine keeps a notebook: clearing `memory` then sends
    *  `memory: ''`, since a change without it keeps the routine's. */
   saved_memory?: boolean;
+  /** Its runs skip what earlier runs handled (migration 212); absent until
+   *  the hub's row carries it or the person ticks the box, and then not sent
+   *  (a hub older than it refuses the field). */
+  track_seen?: boolean;
   /** The schedule's zone (G7.4's Time zone select); '' = this device's. */
   zone: string;
   /** A routine saved without a zone at an offset no zone here stands for
@@ -117,6 +121,7 @@ export function draftOf(i: RoutineInput, id?: number): RoutineDraft {
     memory: i.memory ?? '',
     memory_auto: i.memory_auto ?? false,
     ...(i.memory ? { saved_memory: true } : {}),
+    ...(i.track_seen !== undefined ? { track_seen: i.track_seen } : {}),
     zone: z.zone,
     ...(z.offset !== undefined ? { saved_offset: z.offset } : {}),
   };
@@ -216,5 +221,6 @@ export function draftInput(d: RoutineDraft, enabled: boolean, device: string | n
     // `memory` keeps the routine's): a hub that predates memory refuses
     // the fields, and every other routine still saves there.
     ...(d.memory ? { memory: d.memory, memory_auto: d.memory_auto ?? false } : d.saved_memory ? { memory: '' as const } : {}),
+    ...(d.track_seen !== undefined ? { track_seen: d.track_seen } : {}),
   };
 }

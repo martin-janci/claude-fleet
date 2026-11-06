@@ -1,7 +1,7 @@
 {
   "spec": "fleet.form/1",
   "title": "Add an account",
-  "intro": "A new login on a host, for sessions to bill. Each account is a login profile there (~/.claude-profiles/<name>).",
+  "intro": "A new login on a host, for sessions to bill. Each login has its own name on that host, so one host can hold several accounts.",
   "submit": "Add account",
   "steps": [
     {
@@ -23,7 +23,7 @@
           "required": true,
           "max_len": 32,
           "placeholder": "work",
-          "help": "Letters, digits, _ or -. New sessions pick the account by this name."
+          "help": "Letters, digits, _ or -. New sessions pick the account by this name. On the host it lives in ~/.claude-profiles/<name>."
         },
         {
           "name": "api_key",

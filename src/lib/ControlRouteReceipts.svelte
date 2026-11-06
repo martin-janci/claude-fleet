@@ -16,7 +16,7 @@
   import ProposedBy from './ProposedBy.svelte';
   import { outbox, type OutboxMessage } from './outbox';
   import { openInControl, openMissionInControl } from './control_room';
-  import { CONTROL, choose, dismissReceipt, handOn, optionOf, receipts, routeSent, shownOption, targetOf, type Receipt } from './control_route';
+  import { CONTROL, choose, dismissReceipt, handOn, optionOf, quoteOf, receipts, routeSent, shownOption, targetOf, type Receipt } from './control_route';
 
   let { sessionId }: { sessionId: number } = $props();
 
@@ -118,6 +118,9 @@
           {/if}
         {:else}
           <span class="ask" data-testid="control-route-ask">Which mission or session is this about?</span>
+          {#if r.text.trim()}
+            <span class="quote" data-testid="control-route-quote" title={r.text}>“{quoteOf(r.text)}”</span>
+          {/if}
           <div class="choices">
             {#each r.route.targets as t (optionOf(t))}
               <button type="button" class="choice" data-testid="control-route-choice" onclick={() => pick(r, optionOf(t))}
@@ -163,6 +166,13 @@
   }
   .target {
     color: var(--fg);
+  }
+  .quote {
+    font-style: italic;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 40ch;
   }
   .link {
     background: none;

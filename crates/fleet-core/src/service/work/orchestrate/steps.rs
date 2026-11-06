@@ -17,7 +17,7 @@ use crate::service::work::graph::{GraphNode, MissionGraph};
 use crate::service::work::verify::{parse_cond, Cond};
 use crate::store::{MissionRow, MissionTaskCounts, TaskRow, WorkItemRow};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// The steps the loop never takes itself, at any level. An `ask` needs a
 /// person's answer. `complete` declares the mission done, and what makes it
@@ -66,6 +66,11 @@ pub struct Step {
 }
 
 impl Step {
+    /// Whether this step is an implement run (a `run` or a `retry`).
+    pub fn is_impl(&self) -> bool {
+        matches!(self.kind.as_str(), "run" | "retry") && implements(self.role.as_deref())
+    }
+
     fn new(kind: &str, item: Option<i64>, role: Option<&str>, reason: String) -> Step {
         Step {
             kind: kind.into(),
@@ -131,12 +136,29 @@ pub fn attempt_failed(t: &TaskRow) -> bool {
     }
 }
 
+/// Whether a run's role is implement (a run without one is too).
+fn implements(role: Option<&str>) -> bool {
+    matches!(role, None | Some("implement"))
+}
+
 fn is_impl(t: &TaskRow) -> bool {
-    matches!(t.role.as_deref(), None | Some("implement"))
+    implements(t.role.as_deref())
+}
+
+/// Whether `t` is an open (queued or running) implement run.
+pub fn open_impl(t: &TaskRow) -> bool {
+    matches!(t.state.as_str(), "queued" | "running") && is_impl(t)
 }
 
 /// PURE: the mission's next steps, in graph order.
 pub fn plan_steps(input: &StepInput<'_>) -> Vec<Step> {
+    plan_steps_holding(input, &HashSet::new())
+}
+
+/// [`plan_steps`], with no test run for the items in `held_tests` (a lane
+/// whose tests wait for its end, `lanes::held_lane_tests`): a held test
+/// takes no slot and spends no attempt.
+pub fn plan_steps_holding(input: &StepInput<'_>, held_tests: &HashSet<i64>) -> Vec<Step> {
     let m = input.mission;
     let p = &m.policy;
     let mut steps: Vec<Step> = Vec::new();
@@ -253,6 +275,7 @@ pub fn plan_steps(input: &StepInput<'_>) -> Vec<Step> {
                     tries,
                     &open_role,
                     p.max_retries,
+                    held_tests.contains(&n.item_id),
                     &mut || take(&mut slots, &mut spent),
                 ));
             }
@@ -310,7 +333,9 @@ fn close_step(n: &GraphNode, title: &str, reason: String) -> Option<Step> {
 
 /// The steps of an item whose implementation finished: review and test
 /// runs its lines ask for, a retry when a reviewer or tester found it not
-/// done, and closing it once it is verified.
+/// done, and closing it once it is verified. No test run while
+/// `test_held`.
+#[allow(clippy::too_many_arguments)]
 fn verify_steps(
     n: &GraphNode,
     title: &str,
@@ -318,6 +343,7 @@ fn verify_steps(
     tries: &[TaskRow],
     open_role: &dyn Fn(&str) -> bool,
     max_retries: u32,
+    test_held: bool,
     take: &mut dyn FnMut() -> bool,
 ) -> Vec<Step> {
     let mut out = Vec::new();
@@ -443,7 +469,13 @@ fn verify_steps(
                     format!("{title} waits for its review"),
                 ));
             }
-            Cond::Test(cmd) if !test_planned && !open_role("test") && c.by.is_none() && take() => {
+            Cond::Test(cmd)
+                if !test_planned
+                    && !test_held
+                    && !open_role("test")
+                    && c.by.is_none()
+                    && take() =>
+            {
                 test_planned = true;
                 let what = cmd.clone().unwrap_or_else(|| "its tests".into());
                 // One run answers every command still waiting, so two

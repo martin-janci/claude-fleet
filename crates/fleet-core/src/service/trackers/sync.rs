@@ -1069,8 +1069,12 @@ pub fn spawn_tracker_sync(
                 // A write was just queued (a comment to post): drain the
                 // outbox now, not at the next pass.
                 _ = super::write_back::nudged() => {
-                    let n = sync.drain_writes(&store).await;
-                    if n > 0 {
+                    // A panic is logged; the next pass drains the rest.
+                    let drained = crate::service::loops::caught(
+                        "[write-back] draining the outbox",
+                        sync.drain_writes(&store),
+                    );
+                    if let Ok(n @ 1..) = drained.await {
                         tracing::debug!(sent = n, "[write-back] drained on nudge");
                     }
                     continue;
@@ -1079,10 +1083,17 @@ pub fn spawn_tracker_sync(
             if !crate::service::loops::gate("trackers", &store, Some(period)) {
                 continue;
             }
-            if let Some(passes) = sync.run_pass(&store).await {
-                let _ = status_map.after_pass(&passes);
-            }
-            crate::service::loops::report("trackers", Ok::<_, String>(()), Some(period));
+            // A pass that panics (a tracker's reply this code did not expect)
+            // is caught and reported, and the loop goes on: uncaught, it ended
+            // the task and tracker sync stopped for good while the hub stayed
+            // up, the reconcile tick's old failure (`run_cancellable_tick`).
+            let outcome = crate::service::loops::caught("the sync pass", async {
+                if let Some(passes) = sync.run_pass(&store).await {
+                    let _ = status_map.after_pass(&passes);
+                }
+            })
+            .await;
+            crate::service::loops::report("trackers", outcome, Some(period));
         }
     }))
 }

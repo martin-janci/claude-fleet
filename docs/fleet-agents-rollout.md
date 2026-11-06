@@ -70,7 +70,10 @@ fingerprints:
 ]
 ```
 
-An `env` value names a secret, never a value. Each MCP binding is started on the host and asked
+An `env` value names a secret, never a value. With no override the server reads the hub's
+secrets under its own names (`GRAYLOG_API_TOKEN`), shared by every instance; the grant form's
+*this instance's own secrets* switch names each one `AGENT_<INSTANCE>_<ROLE>_<NAME>` instead
+(`AGENT_L2_PROD_LOGS_GRAYLOG_API_TOKEN`), so add those under Assets › Secrets first. Each MCP binding is started on the host and asked
 for its tools before the rule is written, so a wrong server or secret fails the grant, not a run.
 
 Give the instance its own trigger phrase while it watches (e.g. `/analyze-next`), or both agents
@@ -78,7 +81,23 @@ answer the same ticket comment.
 
 ## 3. Compare
 
-For a week or two of real traffic, per job: `fleet-hub agents status` (the rules, newest jobs,
+`fleet-hub agents compare` (or Automation › Agents › Debug › *Compare*, or `agents { action:
+compare }`) puts the two side by side: each pull request head or ticket comment both have done,
+newest first, with what each said ("REQUEST_CHANGES, 3 findings", "major, high confidence,
+BUG-9"), what it cost, and whether they agree (a review on the verdict, an investigation on
+severity and confidence), and how much work only one of them did. The fleet side is the
+instances of `pr-reviewer` and `support` alone; another instance on the same triggers is no
+built-in's counterpart. A finding count is every finding the model gave, those under the
+confidence threshold included:
+
+```
+3 agree, 1 differs; 2 built-in only, 0 fleet only
+≠ review gh:acme/pos#41@9f2c1e0
+    built-in job 812 done: REQUEST_CHANGES, 2 findings ($0.41)
+    fleet    job 815 done: COMMENT, 1 finding ($0.38)
+```
+
+Open a pair's two jobs where they differ. For a week or two of real traffic, per job: `fleet-hub agents status` (the rules, newest jobs,
 waiting actions), `fleet-hub agents job <id>` (one job whole: its answer and the actions it
 planned), `fleet-hub agents explain` (why a rule does or does not poll). The same is under
 Automation › Agents.

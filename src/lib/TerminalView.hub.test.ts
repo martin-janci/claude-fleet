@@ -190,6 +190,23 @@ describe('the terminal tab against a hub', () => {
     expect(why.textContent).not.toContain('Nothing can dial');
   });
 
+  it('shows a local spawn failure on an agent host as itself, not as a missing route', async () => {
+    hubStatus.set(remote);
+    hosts.set([makeHost({ alias: 'trn', transport: 'agent' })]);
+    inv().mockImplementation(async (cmd: string) => {
+      if (cmd === 'pty_drain') return { data: '', bytes: 0 };
+      if (cmd === 'pty_open') {
+        throw { code: 'E_PTY', message: 'spawn ssh: Resource temporarily unavailable (os error 35)' };
+      }
+      return null;
+    });
+    render(TerminalView);
+    selectSession(session);
+    await settle();
+    expect(screen.queryByTestId('terminal-agent-transport')).toBeNull();
+    expect(screen.getByTestId('terminal-open-error').textContent).toContain('Resource temporarily unavailable');
+  });
+
   it('keeps a non-agent host on its ordinary error, not the agent sentence', async () => {
     hosts.set([makeHost({ alias: 'trn', transport: 'ssh' })]);
     inv().mockImplementation(async (cmd: string) => {

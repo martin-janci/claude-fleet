@@ -304,7 +304,10 @@
           {/if}
         </li>
       {:else}
-        {#if !f.unavailable && view.hiddenByAnchor === 0}<li class="note" data-testid="fleet-empty-{f.id}"
+        <!-- "No sessions" only once the hub has answered a list: a fleet that
+             is offline since launch (or still connecting) has told us nothing,
+             and saying it has none was a false claim (federation e2e). -->
+        {#if !f.unavailable && view.hiddenByAnchor === 0 && (rows.loaded || rows.sessions.size > 0)}<li class="note" data-testid="fleet-empty-{f.id}"
             >{rows.sessions.size > 0 ? `No session on ${f.label} matches the filters.` : `No sessions on ${f.label}.`}</li
           >{/if}
       {/each}

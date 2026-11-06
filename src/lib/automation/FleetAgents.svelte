@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { focusNow } from '../focus_now';
   // The Agents tab's fleet agents (configurable agents, step 5): the
   // catalog's `fleet_agent` definitions, each with its instances (the
   // `agent = fleet` rules naming it) under it. New instance and Edit open
@@ -15,6 +16,7 @@
   import { onMount, tick } from 'svelte';
   import WizardDialog from '../forms/WizardDialog.svelte';
   import StatusDot from '../kit/StatusDot.svelte';
+  import { errorText } from '../error_copy';
   import type { Values } from '../forms/forms';
   import type { Wizard } from '../forms/wizards';
   import {
@@ -58,7 +60,7 @@
       defs = r.value ?? [];
       loadError = null;
     } else {
-      loadError = r.error?.message ?? 'Could not read the catalog';
+      loadError = r.error ? errorText(r.error) : 'Could not read the catalog';
     }
     gallery = g.ok && Array.isArray(g.value) ? g.value.filter((e) => !e.installed) : [];
   }
@@ -69,7 +71,7 @@
     note = null;
     try {
       const r = await installFleet(name);
-      note = r.ok ? `${name} added to the catalog: start an instance of it above.` : (r.error?.message ?? 'Could not add it');
+      note = r.ok ? `${name} added to the catalog: start an instance of it above.` : (r.error ? errorText(r.error) : 'Could not add it');
       await load();
     } finally {
       installing = null;
@@ -89,7 +91,7 @@
     note = null;
     const r = await fleetForm(definition, id);
     if (r.ok) open = { wizard: fleetWizard(r.value), definition };
-    else note = r.error?.message ?? 'Could not build the form';
+    else note = r.error ? errorText(r.error) : 'Could not build the form';
   }
 
   async function run(values: Values) {
@@ -99,16 +101,22 @@
     const r = await grantFleet(open.definition, values);
     busy = false;
     if (!r.ok) {
-      error = r.error?.message ?? 'The grant failed';
+      error = r.error ? errorText(r.error) : 'The grant failed';
       return;
     }
     open = null;
     void loadAgents();
   }
 
+  /** The instance whose Revoke waits for a second press: a revoke deletes
+   *  the instance and its settings, with no way back but filling the form
+   *  again. */
+  let revoking = $state<number | null>(null);
+
   async function revoke(id: number) {
+    revoking = null;
     const r = await revokeAgentRule(id);
-    note = r.ok ? `Instance ${id} revoked.` : (r.error?.message ?? 'Revoke failed');
+    note = r.ok ? `Instance ${id} revoked.` : (r.error ? errorText(r.error) : 'Revoke failed');
     void loadAgents();
   }
 
@@ -121,7 +129,7 @@
     queuing = true;
     const r = await runFleetAgent(running.id, running.request, running.scope);
     queuing = false;
-    note = r.ok ? 'Queued: it runs on the next pass.' : (r.error?.message ?? 'Run failed');
+    note = r.ok ? 'Queued: it runs on the next pass.' : (r.error ? errorText(r.error) : 'Run failed');
     if (r.ok) running = null;
     void loadAgents();
   }
@@ -171,9 +179,26 @@
               >
             {/if}
             <button class="act" type="button" data-testid="fleet-instance-edit" onclick={() => void openForm(d.name, r.id)}>Edit</button>
-            <button class="act" type="button" data-testid="fleet-instance-revoke" onclick={() => void revoke(r.id)}>Revoke</button>
+            <button
+              class="act"
+              type="button"
+              aria-expanded={revoking === r.id}
+              data-testid="fleet-instance-revoke"
+              onclick={() => (revoking = revoking === r.id ? null : r.id)}>Revoke…</button
+            >
           </span>
         </li>
+        {#if revoking === r.id}
+          <li class="instance" data-testid="fleet-revoke-confirm-row">
+            <span class="main" role="alertdialog" aria-label="Revoke the instance"
+              >Revoke {ruleLine(r)}? It stops running and its settings are deleted.
+              <span class="buttons">
+                <button class="act danger" type="button" data-testid="fleet-revoke-confirm" onclick={() => void revoke(r.id)}>Revoke</button>
+                <button class="act" type="button" data-testid="fleet-revoke-keep" use:focusNow onclick={() => (revoking = null)}>Keep</button>
+              </span></span
+            >
+          </li>
+        {/if}
         {#if running?.id === r.id}
           <li class="instance run" data-testid="fleet-run-panel">
             <label class="wide">
@@ -268,6 +293,7 @@
   }
   .act:disabled { opacity: 0.5; cursor: default; }
   .act.primary { border-color: var(--accent); color: var(--accent); }
+  .act.danger { border-color: var(--danger); color: var(--danger); }
   .run { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: flex-end; }
   .run label { display: flex; flex-direction: column; gap: 2px; font-size: var(--text-sm); }
   .run label.wide { flex-basis: 100%; }

@@ -11,6 +11,7 @@ fn login(profile: Option<&str>, account: &str, used: Option<f64>) -> LoginFacts 
         daily_limit_hit: false,
         signed_out_since: None,
         live_sessions: 0,
+        forbidden: false,
     }
 }
 
@@ -308,8 +309,8 @@ fn the_store_wrapper_charges_live_sessions_linked_or_not_yet() {
         .unwrap();
     assert_eq!(top(&s), "acct-a", "linked runs cost their account");
 
-    // Runs just started under profile `b`: reconcile linked them to the
-    // host's account, the profile start dropped the link.
+    // Runs just switched to profile `b`: the switch links them to the
+    // account the host row lists for `b` straight away.
     let s = fresh();
     for n in ["p1", "p2", "p3"] {
         let id = s
@@ -317,6 +318,17 @@ fn the_store_wrapper_charges_live_sessions_linked_or_not_yet() {
             .unwrap();
         s.set_session_profile(id, Some("b")).unwrap();
     }
+    assert!(
+        s.live_unlinked_sessions_per_login().unwrap().is_empty(),
+        "a switch links the login's known account"
+    );
+    assert_eq!(top(&s), "acct-a", "switched runs cost their new account");
+
+    // Runs on profile `b` whose account is not linked yet (a login the host
+    // row has no account for when they started) still cost that login.
+    s.conn_for_test()
+        .execute("UPDATE sessions SET account_uuid = NULL", [])
+        .unwrap();
     assert_eq!(
         s.live_unlinked_sessions_per_login().unwrap()[&("mac".to_string(), Some("b".to_string()))],
         3

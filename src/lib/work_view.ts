@@ -16,6 +16,7 @@
  * whatever the hub answered.
  */
 
+import type { TicketCheckView } from './ticket_check';
 import { errorText } from './error_copy';
 import type { ProposalLike, ProposalSource } from './ai_proposal';
 import { derived, get, writable, type Readable } from 'svelte/store';
@@ -85,13 +86,17 @@ export interface WorkTreeFilters {
   epic?: string;
   /** The tracker's type name (Story, Bug …). */
   item_type?: string;
+  /** One priority, or `none` for tasks with none. An older hub ignores it. */
+  priority?: WorkPriorityFilter;
+  /** Tasks carrying this label, any case. An older hub ignores it. */
+  label?: string;
   /** The order inside each section; absent is `activity`. */
   sort?: WorkSort;
 }
 
 /** `filters.sort`: needing you then the latest activity (the default), the
  *  tracker's last change, the key's number, the title or the due date. */
-export const WORK_SORTS = ['activity', 'updated', 'key', 'title', 'due'] as const;
+export const WORK_SORTS = ['activity', 'updated', 'key', 'title', 'due', 'priority'] as const;
 export type WorkSort = (typeof WORK_SORTS)[number];
 export const WORK_SORT_LABELS: Record<WorkSort, string> = {
   activity: 'Activity',
@@ -99,6 +104,18 @@ export const WORK_SORT_LABELS: Record<WorkSort, string> = {
   key: 'Key',
   title: 'Title',
   due: 'Due date',
+  priority: 'Priority',
+};
+
+/** `filters.priority`: one priority, or `none` for tasks with none. */
+export const WORK_PRIORITY_FILTERS = ['urgent', 'high', 'medium', 'low', 'none'] as const;
+export type WorkPriorityFilter = (typeof WORK_PRIORITY_FILTERS)[number];
+export const WORK_PRIORITY_FILTER_LABELS: Record<WorkPriorityFilter, string> = {
+  urgent: 'Urgent',
+  high: 'High',
+  medium: 'Medium',
+  low: 'Low',
+  none: 'No priority',
 };
 
 /** `WorkTask.stage`, in board order (the Work board's status chips). */
@@ -332,6 +349,8 @@ export interface WorkTreeFacets {
   iterations?: { name: string; active?: boolean; count: number }[];
   epics?: (WorkTaskRef & { count: number })[];
   item_types?: string[];
+  /** The tasks' labels, each once (absent from a hub before 0.6.5). */
+  labels?: string[];
 }
 
 /** A section header: every group of the whole filtered result. */
@@ -463,6 +482,13 @@ export interface TaskDetail {
   /** Where this reader may promote a task of fleet's own. Empty: a
    *  tracker's ticket, an agent, or no tracker takes new tickets. */
   promote_targets?: PromoteTarget[];
+  /** Why there is nowhere to promote this task of fleet's own yet and what
+   *  brings it (Create tickets off on its tracker, no tracker connected, a
+   *  parent of fleet's own). Only while `promote_targets` is empty. */
+  promote_hint?: string | null;
+  /** The AI check of the item's finished work (`ticket_check`); absent when
+   *  there is neither finished work nor a check, and from an older hub. */
+  check?: TicketCheckView | null;
 }
 
 /** `service::work::promote::PromotionView`. */
@@ -574,6 +600,10 @@ export interface SubtaskView {
   project_id?: number | null;
   live_sessions: number;
   job_state?: string | null;
+  /** `YYYY-MM-DD`; absent from an older hub. */
+  due_at?: string | null;
+  /** `urgent | high | medium | low`; absent for none or from an older hub. */
+  priority?: string | null;
 }
 
 /** An agent's proposed subtask. `why` and `notes` are agent text: render as text. */
@@ -1220,9 +1250,12 @@ export function normalizeFilters(v: unknown): WorkTreeFilters {
     const stages = WORK_STAGES.filter((st) => (v.stages as unknown[]).includes(st));
     if (stages.length > 0) out.stages = stages;
   }
-  for (const k of ['iteration', 'epic', 'item_type'] as const) {
+  for (const k of ['iteration', 'epic', 'item_type', 'label'] as const) {
     const x = v[k];
     if (typeof x === 'string' && x.trim() !== '') out[k] = x.trim();
+  }
+  if (typeof v.priority === 'string' && (WORK_PRIORITY_FILTERS as readonly string[]).includes(v.priority)) {
+    out.priority = v.priority as WorkPriorityFilter;
   }
   if (typeof v.sort === 'string' && (WORK_SORTS as readonly string[]).includes(v.sort) && v.sort !== 'activity') {
     out.sort = v.sort as WorkSort;
@@ -1244,6 +1277,8 @@ const FILTER_ORDER: (keyof WorkTreeFilters)[] = [
   'iteration',
   'epic',
   'item_type',
+  'priority',
+  'label',
   'query',
   'group',
   'archived',

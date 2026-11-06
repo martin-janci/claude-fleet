@@ -3,7 +3,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
-import { builtInAgents, jevFeaturesOn, loopEvery, loopLine, money, runsToday, spendMicros, startOfToday } from './automation';
+import { builtInAgents, jevFeaturesOn, loopEvery, loopLine, loopStalled, money, runsToday, spendMicros, startOfToday } from './automation';
 import { SETTING_DEFAULTS } from './fleet_settings';
 import type { LoopHealth } from './ipc';
 import type { RunRow } from './runs';
@@ -44,6 +44,22 @@ describe('automation (redesign step 8.4)', () => {
     expect(loopLine(loop(), NOW, false)).toBe('not run yet here');
     expect(loopEvery(loop({ last_run_at: NOW, next_run_at: NOW + 6 * 3600 }))).toBe('every 6h');
     expect(loopEvery(loop())).toBeNull();
+  });
+
+  it('says a loop that missed its run by more than a period may have stopped', () => {
+    // Every 5m, due 3m ago: late, not stalled.
+    const late = loop({ last_run_at: NOW - 480, next_run_at: NOW - 180, result: 'ok' });
+    expect(loopStalled(late, NOW)).toBe(false);
+    expect(loopLine(late, NOW, false)).toBe('last run 8m ago · due now');
+    // Every 5m, due 2h ago: its task died with its last good run on show.
+    const dead = loop({ last_run_at: NOW - 7500, next_run_at: NOW - 7200, result: 'ok' });
+    expect(loopStalled(dead, NOW)).toBe(true);
+    expect(loopLine(dead, NOW, false)).toBe('last run 2h ago · overdue by 2h; it may have stopped');
+    // Every 6h, due 4h ago: within a period.
+    expect(loopStalled(loop({ last_run_at: NOW - 36000, next_run_at: NOW - 14400 }), NOW)).toBe(false);
+    // Paused, it is not due at all.
+    expect(loopLine(dead, NOW, true)).toBe('paused · last run 2h ago');
+    expect(loopStalled(loop({ last_run_at: NOW - 60 }), NOW)).toBe(false);
   });
 
   it('names the built-in agents with what each is doing', () => {

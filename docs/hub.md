@@ -422,7 +422,19 @@ StatefulSet updates itself the same way (`deploy/kubernetes/fleet-updater.yaml`,
 usage roll-ups. The hub keeps it in WAL mode, so a `cp` of the file from a
 running hub is a stale database (pages still in `state.db-wal` are missing)
 and a `cp` of the `state.db*` triple can be torn. Use SQLite's online backup
-API instead — one self-contained file, no stop:
+API instead — one self-contained file, no stop.
+
+**Built in.** `fleet-hub serve` takes one itself: once a day, unless a newer
+backup already sits in `<data>/backups` or `<data>/../backups`, it writes
+`<data>/backups/daily-YYYYmmdd-HHMMSS.db` (the same integrity-checked copy as
+`fleet-hub backup`) and keeps the newest 14 `daily-*` files; other prefixes
+are never pruned (`service::hub_storage`). `fleet_health.storage` reports the
+newest backup's time and the free space under the data dir; the desktop and
+the phone warn when the newest backup is over two days old or under 2 GB (or
+5%) is free. Keep copying `backups/` off the box (Hyper Backup): a backup on
+the same disk does not survive the disk.
+
+Or by hand, or from a scheduler:
 
 ```bash
 sudo FLEET_HUB_DATA=/volume1/docker/fleet-hub/data deploy/hub/backup.sh
@@ -2616,13 +2628,13 @@ phone the columns to re-derive the answer instead of the answer. Its reasons,
 most urgent first (`service/attention.rs`): `waiting`, `stuck`, `host_down`
 (the session's host was pinged and did not answer), `account_limit` (its
 account's 5-hour or weekly window is used up and the session is not
-working), `no_credentials` (its account's login has expired or its
+working), `no_credentials` (its login on its host was seen signed out, or its account's login has expired or its
 token was rejected, and the session is not working), `stop_failed`,
-`failed`, `context_full` (at or past `health.context_red_pct`),
+`failed`, `context_full` (not idle, at or past `health.context_red_pct`),
 `stale_working` (a `working` row demoted after `reconcile.stale_working_secs`
 with no activity; it lifts on the next hook, when its terminal is opened,
 when the row works again, or after `reconcile.stale_working_ttl_secs`),
-`ci_failing`, `probably_waiting` (contract 15: Jev read a silent turn's end
+`ci_failing` (the PR still open), `probably_waiting` (contract 15: Jev read a silent turn's end
 as a question; a proposal, not a fact) and `lifecycle`. The three after `stuck` are decided from what
 the hub's event bus follows of hosts and account usage, not from the row, so
 every site that stamps `needs_attention` (`list_sessions`, `/events`, Today,

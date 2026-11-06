@@ -44,7 +44,7 @@
   import type { IpcError } from './result';
   import LoadError from './states/LoadError.svelte';
   import Skeleton from './states/Skeleton.svelte';
-  import { timeAgo } from './session_status';
+  import { timeAgo, exactTime } from './session_status';
   import {
     automationTab,
     builtInAgents,
@@ -397,7 +397,7 @@
               {#each runs as run (run.id)}
                 <li data-testid="automation-run" data-outcome={run.outcome}>
                   <StatusDot state={RUN_DOT[run.outcome] ?? 'idle'} label={outcomeLabel(run)} />
-                  <span class="when tnum">{timeAgo(run.started_at, nowSec * 1000)}</span>
+                  <span class="when tnum" title={exactTime(run.started_at)}>{timeAgo(run.started_at, nowSec * 1000)}</span>
                   <span class="main">
                     <strong>{run.owner}</strong>
                     <span class="meta">{run.kind}{run.host ? ` · ${run.host}` : ''}</span>

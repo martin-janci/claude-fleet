@@ -80,6 +80,10 @@ pub enum AgentsCmd {
     /// One job whole: what it is waiting for or came to, its error, its
     /// answer and the actions it proposed.
     Job { id: i64 },
+    /// The built-in reviewer and support agent next to the fleet instances
+    /// restating them (docs/fleet-agents-rollout.md): the same pull request
+    /// head or ticket comment, side by side, and whether they agree.
+    Compare,
     /// Check a configurable agent's definition (a `fleet_agent` catalog
     /// asset): its directory (`asset.yaml` + `skill.md`) or its
     /// `asset.yaml`. Prints every problem; exits 1 when there is one.
@@ -331,6 +335,35 @@ fn run_on(store: &Mutex<Store>, cmd: AgentsCmd, now: i64) -> Result<ExitCode, St
             };
             let row = admin::decide(store, &a, approve, "console", now).map_err(err)?;
             out::line(&format!("action {id}: {}", row.state));
+        }
+        AgentsCmd::Compare => {
+            let c = fleet_core::service::agents::admin::compare(store).map_err(err)?;
+            let verb =
+                |n: u32, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
+            out::line(&format!(
+                "{}, {}; {} built-in only, {} fleet only",
+                verb(c.agree, "agrees", "agree"),
+                verb(c.differ, "differs", "differ"),
+                c.builtin_only,
+                c.fleet_only
+            ));
+            for p in &c.pairs {
+                let mark = match p.agree {
+                    Some(true) => "=",
+                    Some(false) => "≠",
+                    None => "?",
+                };
+                out::line(&format!("{mark} {} {}", p.kind, p.key));
+                for (who, s) in [("built-in", &p.builtin), ("fleet", &p.fleet)] {
+                    out::line(&format!(
+                        "    {who:<8} job {} {}: {} (${:.2})",
+                        s.job_id,
+                        s.state,
+                        s.said,
+                        s.cost_micros as f64 / 1_000_000.0
+                    ));
+                }
+            }
         }
         AgentsCmd::Explain => {
             let e = fleet_core::service::agents::debug::explain(store, now).map_err(err)?;

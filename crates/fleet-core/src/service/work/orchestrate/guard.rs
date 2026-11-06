@@ -14,9 +14,54 @@
 /// Branches a worker never pushes to.
 pub const DEFAULT_BRANCHES: [&str; 2] = ["main", "master"];
 
-/// Tracker command-line tools a worker never runs (writes to Jira / Asana
-/// / Linear are a person's, C3).
+/// Tracker command-line tools a worker writes with only through a person
+/// (writes to Jira / Asana / Linear are a person's, C3). Reading is the
+/// worker's own: a ticket, its comments, a search ([`READ_VERBS`]).
 pub const TRACKER_CLIS: [&str; 4] = ["jira", "acli", "asana", "linear"];
+
+/// Subcommands that only read a tracker (`jira issue view ABC-1`, `acli jira
+/// workitem search --jql …`, `linear issue list`). A tracker command passes
+/// when its verb, the first of its leading words that is not one of
+/// [`NOUNS`], is one of these; anything else, a subcommand this list does
+/// not know included, stays a person's step.
+pub const READ_VERBS: [&str; 9] = [
+    "list",
+    "ls",
+    "view",
+    "show",
+    "get",
+    "search",
+    "me",
+    "serverinfo",
+    "version",
+];
+
+/// What a tracker command acts on, named before its verb (`jira issue
+/// view`, `acli jira workitem search`).
+const NOUNS: [&str; 18] = [
+    "jira",
+    "issue",
+    "issues",
+    "workitem",
+    "workitems",
+    "project",
+    "projects",
+    "sprint",
+    "sprints",
+    "board",
+    "boards",
+    "epic",
+    "epics",
+    "task",
+    "tasks",
+    "ticket",
+    "tickets",
+    "team",
+];
+
+/// How many leading words name a tracker command's subcommand (`acli jira
+/// workitem view`: three).
+const VERB_WORDS: usize = 3;
 
 /// Words that may stand before the real command in a segment.
 const PREFIXES: [&str; 6] = ["sudo", "command", "env", "exec", "nohup", "time"];
@@ -51,11 +96,23 @@ fn segment_reason(words: &[String], branch: Option<&str>) -> Option<&'static str
     match tool {
         "gh" => gh_reason(rest),
         "git" => git_reason(rest, branch),
-        t if TRACKER_CLIS.contains(&t) => {
-            Some("a tracker write is a person's step (orchestration §7.3)")
-        }
+        t if TRACKER_CLIS.contains(&t) => tracker_reason(rest),
         _ => None,
     }
+}
+
+fn tracker_reason(args: &[String]) -> Option<&'static str> {
+    // Only the words before the first flag name the subcommand, and its verb
+    // is the first that is no noun: a flag's value or a summary
+    // (`jira issue create -s "Show login error"`) never reads as one.
+    let verb = args
+        .iter()
+        .take_while(|a| !a.starts_with('-'))
+        .take(VERB_WORDS)
+        .map(|a| a.to_ascii_lowercase())
+        .find(|a| !NOUNS.contains(&a.as_str()));
+    let reads = verb.is_some_and(|v| READ_VERBS.contains(&v.as_str()));
+    (!reads).then_some("a tracker write is a person's step (orchestration §7.3)")
 }
 
 fn gh_reason(args: &[String]) -> Option<&'static str> {

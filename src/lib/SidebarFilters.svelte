@@ -299,8 +299,8 @@
   function accountLabel(host: { account_uuid: string | null }): string {
     if (!host.account_uuid) return '';
     const acc = $accountByUuid.get(host.account_uuid);
-    if (!acc) return ` · ${host.account_uuid}`;
-    const email = acc.email ?? acc.uuid;
+    if (!acc) return ` · ${host.account_uuid.slice(0, 8)}`;
+    const email = accountName(acc);
     return acc.seat_tier ? ` · ${email} (${acc.seat_tier})` : ` · ${email}`;
   }
   function hostTitle(h: (typeof visibleHosts)[number]): string {
@@ -663,7 +663,7 @@
         class="btn btn--chip"
         data-testid="bulk-send"
         disabled={bulkSendBlocked !== null}
-        title={bulkSendBlocked ?? ''}
+        title={bulkSendBlocked ?? 'One prompt to every selected session'}
         onclick={() => onBulkSend()}
       >→ Send prompt</button>
       {#if onBulkArchive}
@@ -719,7 +719,7 @@
         class="btn btn--chip btn--crit"
         data-testid="bulk-kill"
         disabled={bulkKillBlocked !== null}
-        title={bulkKillBlocked ?? ''}
+        title={bulkKillBlocked ?? 'Kill the selected sessions; asks first and lists what each leaves behind'}
         onclick={() => onBulkKill()}
       >× Kill</button>
       <button class="btn btn--quiet" data-testid="bulk-clear" onclick={clearSelected}>Clear</button>

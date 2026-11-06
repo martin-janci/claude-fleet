@@ -40,6 +40,7 @@ import {
   type MissionStats,
 } from './missions';
 import { formatDuration } from './account_usage';
+import type { TopWait } from './mission_compare';
 
 // ── Where the room is ──
 
@@ -51,16 +52,33 @@ export const roomMissionId = writable<number | null>(null);
 
 /** The New mission form shows in the room's centre. */
 export const roomCreating = writable<boolean>(false);
+/** The room shows Compare (lanes design L6): the missions that ran, side
+ *  by side, and the median per execution mode. */
+export const roomComparing = writable<boolean>(false);
+
+/** Open Compare in the room. */
+export function openMissionCompare(): void {
+  roomCreating.set(false);
+  roomComparing.set(true);
+  goTo('missions');
+}
+
+/** Leave Compare for the mission the room had. */
+export function closeMissionCompare(): void {
+  roomComparing.set(false);
+}
 
 /** Open the room on `id` (null: the starter, or the list's first look). */
 export function openMissionRoom(id: number | null): void {
   roomCreating.set(false);
+  roomComparing.set(false);
   roomMissionId.set(id);
   goTo('missions');
 }
 
 /** "+ New" and the starter's New mission: the form, in the room. */
 export function startNewMission(): void {
+  roomComparing.set(false);
   roomCreating.set(true);
   goTo('missions');
 }
@@ -301,7 +319,6 @@ export function sendSteer(m: Pick<Mission, 'id' | 'name'>, text: string, operato
   return receipt;
 }
 
-/** Test seam: the room as a fresh run has it. */
 /**
  * The room's metrics line (lanes design L0): how many runs its done tasks
  * took, the retries, the cold starts, and how much of its working span no
@@ -311,7 +328,8 @@ export function statsLine(st: MissionStats | null | undefined): string | null {
   if (!st || st.span_secs <= 0) return null;
   const runs = Object.values(st.runs_by_role).reduce((a, b) => a + b, 0);
   const parts = [`${runs} run${runs === 1 ? '' : 's'}`];
-  if (st.items_done > 0 && st.runs_per_done_item_x100 != null) {
+  // The backend sends the ratio only once a task is done.
+  if (st.runs_per_done_item_x100 != null) {
     parts[0] += ` (${(st.runs_per_done_item_x100 / 100).toFixed(1)} per done task)`;
   }
   if (st.retries > 0) parts.push(`${st.retries} retr${st.retries === 1 ? 'y' : 'ies'}`);
@@ -319,14 +337,47 @@ export function statsLine(st: MissionStats | null | undefined): string | null {
   if (st.item_secs_p50 != null) parts.push(`a task takes ${formatDuration(st.item_secs_p50)}`);
   const idle = Math.round((st.idle_secs * 100) / st.span_secs);
   parts.push(`idle ${idle}% of ${formatDuration(st.span_secs)}`);
+  const waited = waitShares(st)
+    .slice(0, 3)
+    .map(waitText);
+  if (waited.length > 0) parts.push(`waited ${waited.join(', ')}`);
   return parts.join(' · ');
 }
 
+/** What a mission's ready work waited on (M3), as the stats line says it. */
+export const WAIT_LABEL: Record<string, string> = {
+  person: 'on a person',
+  grant: 'for a grant',
+  limit: 'on a usage limit',
+  brake: 'on a brake',
+  slot: 'for a slot',
+  lane: 'on its lane',
+  touches: 'on overlapping files',
+};
+
+/** "on a person 40%": one wait cause and its share. */
+export function waitText(w: TopWait): string {
+  return `${WAIT_LABEL[w.cause] ?? w.cause} ${w.pct}%`;
+}
+
+/** PURE: each wait cause's share of the working span, in whole percent,
+ *  largest first; a cause under 1% is left out. They overlap, so the
+ *  shares may add up past 100. */
+export function waitShares(st: MissionStats): TopWait[] {
+  if (st.span_secs <= 0) return [];
+  return Object.entries(st.waits ?? {})
+    .map(([cause, secs]) => ({ cause, pct: Math.min(100, Math.round((secs * 100) / st.span_secs)) }))
+    .filter((w) => w.pct >= 1)
+    .sort((a, b) => b.pct - a.pct || a.cause.localeCompare(b.cause));
+}
+
+/** Test seam: the room as a fresh run has it. */
 export function resetMissionRoomForTests(): void {
   listSeq++;
   missionList.set({ loaded: false, missions: [], error: null });
   roomMissionId.set(null);
   roomCreating.set(false);
+  roomComparing.set(false);
   missionPanelTab.set('plan');
   missionSessionId.set(null);
   missionPanelOpen.set(true);

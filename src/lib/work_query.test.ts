@@ -47,6 +47,20 @@ describe('parseWorkQuery', () => {
     expect(p.query).toBe('x');
   });
 
+  it('filters and sorts by priority', () => {
+    expect(parseWorkQuery('sort:priority ', vocab).patch).toEqual({ sort: 'priority' });
+    expect(parseWorkQuery('priority:High ', vocab).patch).toEqual({ priority: 'high' });
+    expect(parseWorkQuery('priority:none ', vocab).patch).toEqual({ priority: 'none' });
+    expect(parseWorkQuery('priority:asap ', vocab).patch).toEqual({});
+  });
+
+  it('filters by a label, keeping the spelling the page lists', () => {
+    const v = { ...vocab, facets: { ...vocab.facets, labels: ['UI', 'auth'] } };
+    expect(parseWorkQuery('label:ui ', v).patch).toEqual({ label: 'UI' });
+    expect(parseWorkQuery('label:"needs design" ', v).patch).toEqual({ label: 'needs design' });
+    expect(suggestWorkQuery('label:a', v).map((s) => s.label)).toContain('label:auth');
+  });
+
   it('leaves an unknown value in the box, and a word with a colon alone', () => {
     const p = parseWorkQuery('type:feature fix: login ', vocab);
     expect(p.patch).toEqual({});

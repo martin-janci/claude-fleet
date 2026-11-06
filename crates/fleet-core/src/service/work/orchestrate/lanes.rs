@@ -23,30 +23,14 @@
 //! [`MissionPolicy::lane_relay_after`]: crate::store::MissionPolicy
 
 use std::collections::{HashMap, HashSet};
-use std::time::Duration;
 
-use super::steps::Step;
+use super::steps::{open_impl, Step};
 use super::Deps;
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::service::trackers::tickets::{self, StartArgs};
 use crate::service::view_scope::ViewScope;
 use crate::service::work::run;
 use crate::store::{MissionLaneRow, MissionRow, SessionRow, Store, TaskRow};
-
-/// The wall clock of reading a checkout's HEAD.
-const HEAD_READ: Duration = Duration::from_secs(20);
-
-/// Whether `t` is an open implement run.
-fn open_impl(t: &TaskRow) -> bool {
-    matches!(t.state.as_str(), "queued" | "running")
-        && matches!(t.role.as_deref(), None | Some("implement"))
-}
-
-/// Whether a step is an implement run (a `run` or a `retry`).
-fn is_impl_step(st: &Step) -> bool {
-    matches!(st.kind.as_str(), "run" | "retry")
-        && matches!(st.role.as_deref(), None | Some("implement"))
-}
 
 /// PURE: the steps of a mission in lane execution. A lane takes one
 /// implement run at a time, the first of its steps in graph order, and
@@ -59,8 +43,52 @@ pub fn gate(steps: Vec<Step>, lane_of: &HashMap<i64, i64>, busy: &HashSet<i64>) 
             let Some(&lane) = st.item_id.and_then(|i| lane_of.get(&i)) else {
                 return true;
             };
-            !is_impl_step(st) || (!busy.contains(&lane) && taken.insert(lane))
+            !st.is_impl() || (!busy.contains(&lane) && taken.insert(lane))
         })
+        .collect()
+}
+
+/// PURE: the items whose test run waits when a lane's tests run at its
+/// end (mission improvements M5, `policy.lane_test_at = lane`). A lane
+/// tests once, on the last of its tasks in graph order whose test is due,
+/// and only while it is not busy and none of its tasks is ready, running,
+/// in progress or failed (a retry is coming): every task is implemented, or
+/// what is left waits on that test (a task that depends on another of the
+/// lane waits for it to be done). Every other due test of the lane is held,
+/// before planning, so it takes no slot. The run tests the lane's checkout
+/// at its head, so a pass answers the lane's other tasks too
+/// (`verify::check_line`); a failure is its own task's, whose retry goes to
+/// the lane's lead.
+pub fn held_lane_tests(
+    graph: &crate::service::work::graph::MissionGraph,
+    lane_of: &HashMap<i64, i64>,
+    busy: &HashSet<i64>,
+) -> HashSet<i64> {
+    let moving: HashSet<i64> = graph
+        .nodes
+        .iter()
+        .filter(|n| matches!(n.state.as_str(), "ready" | "running" | "doing" | "failed"))
+        .filter_map(|n| lane_of.get(&n.item_id).copied())
+        .collect();
+    let due: Vec<(i64, i64)> = graph
+        .nodes
+        .iter()
+        .filter(|n| n.state == "verifying")
+        .filter(|n| {
+            n.verification.as_ref().is_some_and(|v| {
+                v.checks
+                    .iter()
+                    .any(|c| c.kind == "test" && c.state == "pending" && c.by.is_none())
+            })
+        })
+        .filter_map(|n| lane_of.get(&n.item_id).map(|l| (n.item_id, *l)))
+        .collect();
+    let last: HashMap<i64, i64> = due.iter().map(|(item, lane)| (*lane, *item)).collect();
+    due.into_iter()
+        .filter(|(item, lane)| {
+            last.get(lane) != Some(item) || busy.contains(lane) || moving.contains(lane)
+        })
+        .map(|(item, _)| item)
         .collect()
 }
 
@@ -180,10 +208,16 @@ pub fn lane_brief(m: &MissionRow, lane: &str, tasks: &[String]) -> String {
     out.push_str(
         "\nFor each task: work on that task only, and commit your work on this branch at its \
          end (never amend, rebase or squash the commits of an earlier task); then report it as \
-         its prompt asks. Do not start the next task until fleet hands it to you. After your \
-         first task, open a draft pull request for this branch if you may push it; never mark \
-         it ready or merge it.",
+         its prompt asks. Do not start the next task until fleet hands it to you. ",
     );
+    // M4: under `lane_pr = draft` fleet pushes the branch and opens the PR.
+    out.push_str(if m.policy.lane_pr == "draft" {
+        "Fleet pushes this branch as your tasks are done and opens its draft pull request: \
+         do not push it or open one yourself, and never mark it ready or merge it."
+    } else {
+        "After your first task, open a draft pull request for this branch if you may push it; \
+         never mark it ready or merge it."
+    });
     out.chars()
         .take(crate::service::work::handover::BRIEF_MAX_CHARS)
         .collect()
@@ -214,16 +248,6 @@ pub fn task_prompt(
         p.push_str(n);
     }
     p
-}
-
-/// The commit a checkout stands on, read on its host; `None` when it could
-/// not be read (the task's evidence then reads against the merge base).
-async fn read_head(deps: &Deps, host: &str, dir: &str) -> Option<String> {
-    let script = format!("git -C {} rev-parse HEAD", crate::shell::quote(dir));
-    let run = crate::service::catalog::inventory::run_host_script(&deps.ssh, host, &script);
-    let out = tokio::time::timeout(HEAD_READ, run).await.ok()?.ok()?;
-    let sha = out.trim().to_string();
-    crate::store::is_commit_id(&sha).then_some(sha)
 }
 
 /// The key and title of `item_id` as its task prompt names them.
@@ -341,37 +365,8 @@ async fn deliver(
             format!("lane {}'s lead is not at its prompt yet", lane.name),
         ));
     }
-    let dir = {
-        let s = lock(&deps.store)?;
-        row.worktree_id
-            .map(|w| s.worktree_path(w))
-            .transpose()?
-            .flatten()
-    };
-    let head = match &dir {
-        Some(d) => read_head(deps, &row.host_alias, d).await,
-        None => None,
-    };
-    let (body, task) = {
-        let s = lock(&deps.store)?;
-        let (key, title, notes) = key_title(&s, item_id)?;
-        let prompt = task_prompt(
-            &key,
-            &title,
-            notes.as_deref(),
-            role,
-            context,
-            subagents_on(&s),
-        );
-        let task = run::record_run(&s, row.id, &prompt, item_id, attempt, role)?;
-        if let Some(h) = &head {
-            s.set_task_start_head(task.id, h)?;
-        }
-        (
-            crate::service::work::report::with_run_instruction(&prompt, task.id, &task.nonce),
-            task,
-        )
-    };
+    let (prompt, task) = begin_task(deps, row, item_id, role, attempt, context, "").await?;
+    let body = crate::service::work::report::with_run_instruction(&prompt, task.id, &task.nonce);
     let sent = crate::service::sessions::deferred::send_direct(&deps.store, row, &body, |d| {
         let body = body.clone();
         async move {
@@ -412,6 +407,66 @@ async fn deliver(
     ))
 }
 
+/// Record attempt `attempt` of `item_id` as a run on `row`, its prompt the
+/// task's after `preamble`, stamped with the head its checkout starts at.
+async fn begin_task(
+    deps: &Deps,
+    row: &SessionRow,
+    item_id: i64,
+    role: &str,
+    attempt: i64,
+    context: Option<&str>,
+    preamble: &str,
+) -> Result<(String, TaskRow), IpcError> {
+    let (dir, dep_branches) = {
+        let s = lock(&deps.store)?;
+        let dir = row
+            .worktree_id
+            .map(|w| s.worktree_path(w))
+            .transpose()?
+            .flatten();
+        // M2: what this task depends on in another lane is merged into the
+        // lane's checkout first, at its verified commit; this lane's own
+        // tasks are in it already.
+        let dep_branches = if role == "implement" {
+            let lane = s.item_lane(item_id)?;
+            crate::service::work::dep_work::unmerged_deps(&s, item_id, lane)?
+        } else {
+            Vec::new()
+        };
+        (dir, dep_branches)
+    };
+    let prepared = crate::service::work::dep_work::prepare(
+        &deps.ssh,
+        &row.host_alias,
+        dir.as_deref(),
+        &dep_branches,
+    )
+    .await;
+    let s = lock(&deps.store)?;
+    let (key, title, notes) = key_title(&s, item_id)?;
+    let mut task_text = task_prompt(
+        &key,
+        &title,
+        notes.as_deref(),
+        role,
+        context,
+        subagents_on(&s),
+    );
+    if let Some(n) = &prepared.note {
+        task_text.push_str("\n\n");
+        task_text.push_str(n);
+    }
+    let prompt = format!("{preamble}{task_text}");
+    let task = run::record_run(&s, row.id, &prompt, item_id, attempt, role)?;
+    // The lead's spend so far: this task costs from here (M1).
+    s.set_task_cost_start(task.id)?;
+    if let Some(h) = &prepared.head {
+        s.set_task_start_head(task.id, h)?;
+    }
+    Ok((prompt, task))
+}
+
 /// Start a lead for the lane in the lane's own checkout (made on its first
 /// lead, kept for the next): its brief is the lane's, its first prompt the
 /// task.
@@ -427,7 +482,7 @@ async fn start_lead(
     context: Option<&str>,
     view: &ViewScope,
 ) -> Result<(String, Option<i64>), IpcError> {
-    let (brief, branch) = {
+    let (brief, branch, warm) = {
         let s = lock(&deps.store)?;
         let mut tasks = Vec::new();
         for id in &lane.item_ids {
@@ -437,7 +492,12 @@ async fn start_lead(
         let branch = lane.branch.clone().unwrap_or_else(|| {
             tickets::branch_slug(&format!("M{}", m.id), &format!("{} {}", m.name, lane.name))
         });
-        (lane_brief(m, &lane.name, &tasks), branch)
+        // M6: a warm build on a host with sccache.
+        let warm = crate::service::settings::get_bool(
+            &s,
+            crate::service::settings::ORCHESTRATOR_BUILD_CACHE,
+        );
+        (lane_brief(m, &lane.name, &tasks), branch, warm)
     };
     let args = StartArgs {
         item_id: Some(item_id),
@@ -450,43 +510,15 @@ async fn start_lead(
         with_brief: true,
         brief: Some(brief),
         base_branch: None,
+        build_cache: warm,
         ..start
     };
     let (row, plan, _queued) =
         tickets::start_work_unprompted(&deps.store, &deps.ssh, &deps.reg, &args, view, &deps.net)
             .await?;
-    let dir = {
-        let s = lock(&deps.store)?;
-        s.set_lane_lead(lane.id, row.id, row.worktree_id, &plan.branch)?;
-        row.worktree_id
-            .map(|w| s.worktree_path(w))
-            .transpose()?
-            .flatten()
-    };
-    let head = match &dir {
-        Some(d) => read_head(deps, &row.host_alias, d).await,
-        None => None,
-    };
-    let (prompt, task) = {
-        let s = lock(&deps.store)?;
-        let (key, title, notes) = key_title(&s, item_id)?;
-        let prompt = format!(
-            "Your lane's brief is in your fleet brief: read it first.\n\n{}",
-            task_prompt(
-                &key,
-                &title,
-                notes.as_deref(),
-                role,
-                context,
-                subagents_on(&s)
-            )
-        );
-        let task = run::record_run(&s, row.id, &prompt, item_id, attempt, role)?;
-        if let Some(h) = &head {
-            s.set_task_start_head(task.id, h)?;
-        }
-        (prompt, task)
-    };
+    lock(&deps.store)?.set_lane_lead(lane.id, row.id, row.worktree_id, &plan.branch)?;
+    let preamble = "Your lane's brief is in your fleet brief: read it first.\n\n";
+    let (prompt, task) = begin_task(deps, &row, item_id, role, attempt, context, preamble).await?;
     crate::service::work::resume::spawn_run_prompt(
         std::sync::Arc::clone(&deps.store),
         std::sync::Arc::clone(&deps.ssh),

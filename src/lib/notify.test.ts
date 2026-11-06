@@ -134,4 +134,14 @@ describe('the matrix watcher (11.9)', () => {
     expect(newlyNotifiable(prev, [{ ...base, stuck_kind: 'oom' } as SessionRow], opts)).toEqual([]);
     expect(newlyNotifiable(new Map(), [{ ...base, kind: 'external', claude_status: 'failed' } as SessionRow], opts)).toEqual([]);
   });
+
+  it("does not ring for a routine run's finished turn, only for its failures and questions", () => {
+    const prev = notifySnapshot([base], opts);
+    const done = { ...base, lost_at: null, claude_status: 'idle', last_stop_at: 950, last_viewed_at: 900 } as unknown as SessionRow;
+    expect(newlyNotifiable(prev, [done], opts).map((n) => n.state)).toEqual(['done']);
+    const routineDone = { ...done, origin: 'routine', origin_ref: '4' } as SessionRow;
+    expect(newlyNotifiable(prev, [routineDone], opts)).toEqual([]);
+    const routineFailed = { ...base, origin: 'routine', claude_status: 'failed' } as SessionRow;
+    expect(newlyNotifiable(prev, [routineFailed], opts).map((n) => n.state)).toEqual(['failed']);
+  });
 });

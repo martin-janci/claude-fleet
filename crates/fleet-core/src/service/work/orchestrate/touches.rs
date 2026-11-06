@@ -21,11 +21,6 @@ use std::collections::{HashMap, HashSet};
 use super::steps::Step;
 use crate::store::touches_overlap;
 
-fn is_impl(st: &Step) -> bool {
-    matches!(st.kind.as_str(), "run" | "retry")
-        && matches!(st.role.as_deref(), None | Some("implement"))
-}
-
 fn same_repo(a: Option<i64>, b: Option<i64>) -> bool {
     a.is_none() || b.is_none() || a == b
 }
@@ -56,7 +51,7 @@ pub fn gate_items(
     steps
         .into_iter()
         .filter(|st| {
-            if !is_impl(st) {
+            if !st.is_impl() {
                 return true;
             }
             let Some(item) = st.item_id else {
@@ -104,7 +99,7 @@ pub fn gate_lane_starts(
     steps
         .into_iter()
         .filter(|st| {
-            if !is_impl(st) {
+            if !st.is_impl() {
                 return true;
             }
             let Some(lane) = st

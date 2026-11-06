@@ -17,9 +17,6 @@ use serde::{Deserialize, Serialize};
 /// The longest lane name.
 pub const LANE_NAME_MAX_CHARS: usize = 40;
 
-/// The stored lane states; `working` and `waiting` are derived on read.
-pub const LANE_STATES: [&str; 3] = ["idle", "held", "done"];
-
 /// One lane, with its tasks.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MissionLaneRow {
@@ -39,13 +36,21 @@ pub struct MissionLaneRow {
     /// How many lead sessions it has had (L3's relay).
     #[serde(default)]
     pub relay: i64,
-    /// One of [`LANE_STATES`].
+    /// Stored as `idle`, `held` or `done`; `working` and `waiting` are
+    /// derived on read.
     pub state: String,
     pub created_at: i64,
     pub updated_at: i64,
     /// Its member tasks, by id.
     #[serde(default)]
     pub item_ids: Vec<i64>,
+    /// Its branch's pull request, once fleet opened or found it (mission
+    /// improvements M4, `policy.lane_pr`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_url: Option<String>,
+    /// The commit fleet last pushed to its branch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_head: Option<String>,
 }
 
 /// PURE: a lane name as stored: trimmed, one line of at most
@@ -65,7 +70,7 @@ pub fn lane_name(raw: &str) -> Result<String, IpcError> {
 }
 
 const LANE_COLUMNS: &str = "id, orchestration_project_id, name, project_id, branch, \
-     worktree_id, lead_session_id, relay, state, created_at, updated_at";
+     worktree_id, lead_session_id, relay, state, created_at, updated_at, pr_url, pr_head";
 
 fn map_lane(r: &rusqlite::Row<'_>) -> rusqlite::Result<MissionLaneRow> {
     Ok(MissionLaneRow {
@@ -81,6 +86,8 @@ fn map_lane(r: &rusqlite::Row<'_>) -> rusqlite::Result<MissionLaneRow> {
         created_at: r.get(9)?,
         updated_at: r.get(10)?,
         item_ids: Vec::new(),
+        pr_url: r.get(11)?,
+        pr_head: r.get(12)?,
     })
 }
 
@@ -130,6 +137,18 @@ impl Store {
             .query_map([id], |r| r.get::<_, i64>(0))?
             .collect::<rusqlite::Result<_>>()?;
         Ok(Some(lane))
+    }
+
+    /// Record what fleet pushed to lane `id`'s branch, and its pull request
+    /// once known (mission improvements M4). A `None` url keeps the one
+    /// recorded.
+    pub fn set_lane_pr(&self, id: i64, url: Option<&str>, head: &str) -> Result<(), IpcError> {
+        self.conn.execute(
+            "UPDATE mission_lanes SET pr_url = COALESCE(?2, pr_url), pr_head = ?3, \
+               updated_at = ?4 WHERE id = ?1",
+            rusqlite::params![id, url, head, now_unix()],
+        )?;
+        Ok(())
     }
 
     /// Record a new lead session of lane `id` (lanes design L3): its
@@ -237,11 +256,7 @@ impl Store {
             rusqlite::params![after, item_id],
         )?;
         if let Some(old) = before {
-            tx.execute(
-                "DELETE FROM mission_lanes WHERE id = ?1 AND lead_session_id IS NULL \
-                   AND NOT EXISTS (SELECT 1 FROM work_items WHERE lane_id = ?1)",
-                [old],
-            )?;
+            drop_lane_if_empty(&tx, old)?;
         }
         self.touch_mission(id)?;
         self.append_mission_event(
@@ -268,13 +283,18 @@ impl Store {
             "UPDATE work_items SET lane_id = NULL WHERE id = ?1",
             [item_id],
         )?;
-        self.conn.execute(
-            "DELETE FROM mission_lanes WHERE id = ?1 AND lead_session_id IS NULL \
-               AND NOT EXISTS (SELECT 1 FROM work_items WHERE lane_id = ?1)",
-            [old],
-        )?;
+        drop_lane_if_empty(&self.conn, old)?;
         Ok(())
     }
+}
+
+/// Delete lane `lane` when nothing is left in it and no lead holds it.
+fn drop_lane_if_empty(conn: &rusqlite::Connection, lane: i64) -> rusqlite::Result<usize> {
+    conn.execute(
+        "DELETE FROM mission_lanes WHERE id = ?1 AND lead_session_id IS NULL \
+           AND NOT EXISTS (SELECT 1 FROM work_items WHERE lane_id = ?1)",
+        [lane],
+    )
 }
 
 #[cfg(test)]

@@ -345,14 +345,6 @@
     border-radius: 50%;
     background: var(--status-working);
   }
-  .sr-only {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    overflow: hidden;
-    clip: rect(0 0 0 0);
-    white-space: nowrap;
-  }
   .menu-wrap {
     position: relative;
     display: inline-flex;

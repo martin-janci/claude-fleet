@@ -412,11 +412,66 @@ fn routine_runs_has_memory_read_at(conn: &Connection) -> rusqlite::Result<bool> 
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 216: `mission_lanes` already has
+/// its `pr_url` column.
+fn lanes_have_pr_url(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('mission_lanes') WHERE name = 'pr_url'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 215: `orchestration_projects`
+/// already has its `waits_at` column.
+fn missions_have_waits_at(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('orchestration_projects') WHERE name = 'waits_at'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 214: `tasks` already has its
+/// `cost_start_micros` column.
+fn tasks_has_cost_start(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name = 'cost_start_micros'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 212: `routines` already has its
+/// `track_seen` column.
+fn routines_has_track_seen(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('routines') WHERE name = 'track_seen'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 211: `work_items` already has its
 /// `touches_json` column.
 fn work_items_has_touches(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('work_items') WHERE name = 'touches_json'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 213: `projects` already has its
+/// `check_mode` column (the migration adds it and `check_command` together).
+fn projects_has_check_mode(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('projects') WHERE name = 'check_mode'",
         [],
         |r| r.get(0),
     )?;
@@ -2426,6 +2481,53 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/211_item_touches.sql"),
         already_applied: Some(work_items_has_touches),
     },
+    // Routine seen items: `routine_seen` and the routines' `track_seen`.
+    // An ADD COLUMN, so guarded.
+    Migration {
+        version: 212,
+        sql: include_str!("../../migrations/212_routine_seen.sql"),
+        already_applied: Some(routines_has_track_seen),
+    },
+    // AI check on done: a project's check switch and test command. Two ADD
+    // COLUMNs, so guarded.
+    Migration {
+        version: 213,
+        sql: include_str!("../../migrations/213_project_checks.sql"),
+        already_applied: Some(projects_has_check_mode),
+    },
+    // Mission improvements M1: what a lane task's lead session had spent
+    // when it got the task. An ADD COLUMN, so guarded.
+    Migration {
+        version: 214,
+        sql: include_str!("../../migrations/214_task_cost_start.sql"),
+        already_applied: Some(tasks_has_cost_start),
+    },
+    // Mission improvements M3: why a mission's ready work waits. A new
+    // table and an ADD COLUMN, so guarded.
+    Migration {
+        version: 215,
+        sql: include_str!("../../migrations/215_mission_waits.sql"),
+        already_applied: Some(missions_have_waits_at),
+    },
+    // Mission improvements M4: a lane's draft pull request. ADD COLUMNs,
+    // so guarded.
+    Migration {
+        version: 216,
+        sql: include_str!("../../migrations/216_lane_pr.sql"),
+        already_applied: Some(lanes_have_pr_url),
+    },
+    // Forbid an account for a project: `account_project_blocks`. A new
+    // table, written idempotently.
+    Migration::plain(
+        217,
+        include_str!("../../migrations/217_account_project_blocks.sql"),
+    ),
+    // Forbid an account for a whole org: `account_org_blocks`. A new table,
+    // written idempotently.
+    Migration::plain(
+        218,
+        include_str!("../../migrations/218_account_org_blocks.sql"),
+    ),
 ];
 
 /// The settings row [`Store::finish_realm_upgrade`] writes once migration

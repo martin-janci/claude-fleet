@@ -18,6 +18,7 @@
   // dialog shows everything else.
   import { onMount } from 'svelte';
   import Modal from './Modal.svelte';
+  import ConfirmAbout from './ConfirmAbout.svelte';
   import { answerConfirm, answering, dialogConfirms, startConfirmQueue } from './confirms';
 
   const queue = $derived($dialogConfirms);
@@ -36,12 +37,18 @@
   <!-- Escape / backdrop = Deny: dismissing must never count as approval. -->
   <Modal label="Confirm control-API call" onclose={() => answer(false)} width="440px" testid="mcp-confirm">
     <div class="body">
-      <h3>Approve <code>{current.tool}</code>?</h3>
+      {#if current.about}
+        <h3>{current.about.title}?</h3>
+      {:else}
+        <h3>Approve <code>{current.tool}</code>?</h3>
+      {/if}
       <p class="who">
         An agent{current.caller ? ` (${current.caller})` : ''} asked the control API to run
         <code>{current.tool}</code>.
       </p>
-      {#if current.summary}
+      {#if current.about}
+        <ConfirmAbout about={current.about} tool={current.tool} summary={current.summary} />
+      {:else if current.summary}
         <pre class="summary">{current.summary}</pre>
       {/if}
       {#if queue.length > 1}

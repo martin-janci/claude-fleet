@@ -12,6 +12,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import QuestionCard from './kit/QuestionCard.svelte';
+  import ConfirmAbout from './ConfirmAbout.svelte';
   import { answerConfirm, answering, cardConfirms, dismissConfirm, failedConfirms, hostConfirmCards } from './confirms';
   import { shortAge } from './session_status';
   import type { ConfirmRequest } from './mcp';
@@ -32,15 +33,14 @@
     new_session: 'Start a session',
     kill_session: 'Kill a session',
     restart_session: 'Restart a session',
-    fork_session: 'Fork a session',
-    rewind_session: 'Rewind a session',
+    rewind_conversation: 'Fork or rewind a conversation',
     broadcast_prompt: 'Send a prompt to several sessions',
     delete_worktree: 'Delete a worktree',
     set_clipboard: 'Set the clipboard',
   };
 
   function question(r: ConfirmRequest): string {
-    return `${WORDS[r.tool] ?? `Run ${r.tool}`}?`;
+    return `${r.about?.title ?? WORDS[r.tool] ?? `Run ${r.tool}`}?`;
   }
 
   function detail(r: ConfirmRequest): string {
@@ -82,7 +82,10 @@
     >
       <ol class="steps" data-testid="confirm-plan-steps">
         {#each plan as r (r.nonce)}
-          <li data-testid="confirm-plan-step"><span>{question(r).replace(/\?$/, '')}</span> <span class="mono">{detail(r)}</span></li>
+          <li data-testid="confirm-plan-step">
+            <span>{question(r).replace(/\?$/, '')}</span>
+            {#if r.about}<ConfirmAbout about={r.about} tool={r.tool} summary={r.summary} />{:else}<span class="mono">{detail(r)}</span>{/if}
+          </li>
         {/each}
       </ol>
       <p class="why">They start, move or kill sessions, so each waits for you. Nothing runs until you confirm.</p>
@@ -97,7 +100,7 @@
       <QuestionCard
         question={question(r)}
         age={r.asked_at > 0 ? `asked ${shortAge(r.asked_at, nowSec)} ago` : undefined}
-        detail={detail(r)}
+        detail={r.about ? undefined : detail(r)}
         label="The agent needs your OK"
         testid="confirm-card"
         enter
@@ -108,6 +111,7 @@
           ...(failed !== undefined ? [{ label: 'Dismiss', onselect: () => dismissConfirm(r.nonce), disabled: busy, testid: 'confirm-card-dismiss' }] : []),
         ]}
       >
+        {#if r.about}<ConfirmAbout about={r.about} tool={r.tool} summary={r.summary} />{/if}
         <p class="why">The agent's starts and kills always wait for you. Nothing runs until you approve.</p>
         {#if failed !== undefined}<p class="failed" role="status" data-testid="confirm-card-failed">Your answer did not reach the hub: {failed}. Try again, or dismiss this card.</p>{/if}
       </QuestionCard>

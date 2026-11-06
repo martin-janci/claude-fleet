@@ -92,7 +92,7 @@ pub fn limit_resume_at(s: &Store, host: &str, profile: Option<&str>, now: i64) -
         .flatten()
         .filter(|a| a.over)?;
     if acc.daily.is_some() {
-        return Some((now.div_euclid(86_400) + 1) * 86_400);
+        return Some(super::cron::local_day_start(now, 0) + 86_400);
     }
     let pause_at = crate::service::account_limits::pause_at_pct(s);
     let snap = s
@@ -101,6 +101,17 @@ pub fn limit_resume_at(s: &Store, host: &str, profile: Option<&str>, now: i64) -
         .into_iter()
         .find(|r| r.account_uuid == acc.login.account_uuid)?;
     resume_at_of(&snap.usage, snap.fetched_at, pause_at, now)
+}
+
+/// Whether `run` was skipped because `r`'s account is at its limit: not
+/// because its last run was still going or a budget was spent, while a
+/// fallback host could take every fire.
+fn skipped_at_limit(s: &Store, r: &RoutineRow, run: &RoutineRunRow, now: i64) -> bool {
+    run.state == "skipped"
+        && crate::service::account_limits::over_limit(s, &r.host_alias, r.profile.as_deref(), now)
+            .ok()
+            .flatten()
+            .is_some_and(|o| run.reason.as_deref() == Some(o.reason().as_str()))
 }
 
 /// Why the next fire is later than the schedule says.
@@ -112,14 +123,19 @@ pub struct Held {
 
 /// The next fire of cron routine `r` after its fire at `now` whose run is
 /// `run` (`None` when none was recorded), and why it is later than the
-/// schedule when it is.
+/// schedule when it is; none while `r` is off (a person paused it while it
+/// fired).
 pub fn next_fire(
     s: &Store,
     r: &RoutineRow,
     run: Option<&RoutineRunRow>,
     now: i64,
 ) -> (Option<i64>, Option<Held>) {
-    let next_after = |t: i64| super::next_fire_of(r, t);
+    // Parsed once: the hold below may walk many fires.
+    let Some(cron) = super::schedule(&r.trigger, r.cron.as_deref()).filter(|_| r.enabled) else {
+        return (None, None);
+    };
+    let next_after = |t: i64| cron.next_after(t, r.utc_offset_min);
     let Some(first) = next_after(now) else {
         return (None, None);
     };
@@ -141,7 +157,7 @@ pub fn next_fire(
         }
     }
     if settings::get_bool(s, settings::ROUTINES_PAUSE_AT_LIMIT)
-        && run.is_some_and(|run| run.state == "skipped")
+        && run.is_some_and(|run| skipped_at_limit(s, r, run, now))
     {
         if let Some(reset) = limit_resume_at(s, &r.host_alias, r.profile.as_deref(), now) {
             if reset > not_before {

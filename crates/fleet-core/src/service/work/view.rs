@@ -142,6 +142,13 @@ pub struct WorkTreeFilters {
     /// ignores it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub item_type: Option<String>,
+    /// One priority (`urgent | high | medium | low`), or `none` for tasks
+    /// with none. An older hub ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<String>,
+    /// Tasks carrying this label, any case. An older hub ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
     /// The order inside each section, one of [`SORT_VALUES`]: `activity`
     /// (the default: needing you first, then the latest activity),
     /// `updated` (the tracker's last change), `key`, `title` or `due`. An
@@ -151,7 +158,7 @@ pub struct WorkTreeFilters {
 }
 
 /// [`WorkTreeFilters::sort`]'s values.
-pub const SORT_VALUES: [&str; 5] = ["activity", "updated", "key", "title", "due"];
+pub const SORT_VALUES: [&str; 6] = ["activity", "updated", "key", "title", "due", "priority"];
 
 /// [`WorkTask::stage`]'s values, in board order.
 pub const STAGE_VALUES: [&str; 5] = ["backlog", "in_progress", "in_review", "blocked", "done"];
@@ -388,7 +395,9 @@ pub struct WorkTask {
     pub blocked_by: Vec<String>,
     /// What its sessions have spent, in micro-USD: the usage of every
     /// distinct session this caller sees on an active or ended link. A
-    /// session that worked on two tasks counts in both.
+    /// session that worked on two tasks counts in both, except a lane's
+    /// lead, whose spend is split by the tasks it was handed (mission
+    /// improvements M1).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub cost_micros: i64,
     /// Where the task stands, one word of [`STAGE_VALUES`]: `done`, then
@@ -526,6 +535,13 @@ pub struct SubtaskView {
     pub live_sessions: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub job_state: Option<String>,
+    /// Its due date, `YYYY-MM-DD`: the parent's subtask list flags an
+    /// overdue one. An older hub sends none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub due_at: Option<String>,
+    /// `urgent | high | medium | low`, or none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<String>,
 }
 
 /// An agent's proposed subtask. `why` and `notes` are agent text.
@@ -711,11 +727,17 @@ pub struct Facets {
     /// The trackers' type names, by name.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub item_types: Vec<String>,
+    /// The tasks' labels, by name (any case once).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
 }
 
 impl Facets {
     fn is_empty(&self) -> bool {
-        self.iterations.is_empty() && self.epics.is_empty() && self.item_types.is_empty()
+        self.iterations.is_empty()
+            && self.epics.is_empty()
+            && self.item_types.is_empty()
+            && self.labels.is_empty()
     }
 }
 
@@ -743,7 +765,13 @@ fn facets_of(tasks: &[&WorkTask]) -> Facets {
     let mut iterations: BTreeMap<String, (bool, u32)> = BTreeMap::new();
     let mut epics: BTreeMap<String, (TaskRef, u32)> = BTreeMap::new();
     let mut types: BTreeMap<String, String> = BTreeMap::new();
+    let mut labels: BTreeMap<String, String> = BTreeMap::new();
     for t in tasks {
+        for l in t.labels.iter().map(|l| l.trim()).filter(|l| !l.is_empty()) {
+            labels
+                .entry(crate::search_text::fold(l))
+                .or_insert_with(|| l.to_string());
+        }
         if let Some(i) = t
             .iteration
             .as_deref()
@@ -796,10 +824,13 @@ fn facets_of(tasks: &[&WorkTask]) -> Facets {
     epics.truncate(FACET_MAX);
     let mut item_types: Vec<String> = types.into_values().collect();
     item_types.truncate(FACET_MAX);
+    let mut labels: Vec<String> = labels.into_values().collect();
+    labels.truncate(FACET_MAX);
     Facets {
         iterations,
         epics,
         item_types,
+        labels,
     }
 }
 
@@ -927,6 +958,17 @@ pub struct TaskDetail {
     /// ticket, or where no tracker's admin turned creating on.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub promote_targets: Vec<super::promote::PromoteTarget>,
+    /// Why a person sees no Promote on this task of fleet's own and what
+    /// brings it (creating is off on its tracker, no tracker is connected,
+    /// its parent is fleet's own). Only while `promote_targets` is empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub promote_hint: Option<String>,
+    /// The AI check of the task's finished work (`ticket_check`): its
+    /// verdict, or Test now when there is work and no check of it. Absent
+    /// with neither, and for an agent (the tester's words are a person's
+    /// to read).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check: Option<super::ticket_check::TicketCheckView>,
 }
 
 /// The task one of a session's links points at, briefly.
@@ -1178,6 +1220,10 @@ pub(crate) struct Graph {
     /// Every `work_item_deps` edge out of an item in [`Self::items`]: item
     /// id → the items it waits for (redesign step 6.3).
     pub(crate) deps: HashMap<i64, Vec<i64>>,
+    /// A lane lead's spend split by the items of its tasks (mission
+    /// improvements M1, `Store::shared_session_spend`): session id → item
+    /// id → micro-USD. A session absent from it counts whole on each task.
+    pub(crate) shared_spend: HashMap<i64, HashMap<i64, i64>>,
     /// The scope the graph was loaded for, so a task's `blocked_by` names
     /// only items this caller may see.
     pub(crate) scope: OrgScope,
@@ -1432,6 +1478,7 @@ impl Graph {
             item_proposals,
             visible_proposers,
             deps,
+            shared_spend: s.shared_session_spend()?,
             scope: scope.clone(),
             missions_by_item: HashMap::new(),
             mission_waves: HashMap::new(),
@@ -2209,7 +2256,7 @@ pub(crate) fn task_kind(item: Option<&ViewItem>) -> &'static str {
 
 /// Does this live session need a person (`list_sessions`' judgement)?
 fn needs_you_of(g: &Graph, row: Option<&SessionRow>) -> bool {
-    row.is_some_and(|r| attention::needs_attention_in(r, g.context_red_pct, &g.facts).is_some())
+    row.is_some_and(|r| attention::needs_person_in(r, g.context_red_pct, &g.facts))
 }
 
 /// One session a task counts: the live session, else the participant it
@@ -2468,7 +2515,15 @@ fn summarize<'g>(g: &Graph, b: &Built<'g>, with_rejected: bool) -> TaskSummary<'
     for (l, st) in links {
         let row = g.session_of(l);
         if let (Some(r), "active" | "ended") = (row, st) {
-            spent.insert(r.id, r.usage.usage_cost_micros);
+            // A lane's lead worked on several tasks: this one's share.
+            let micros = match g.shared_spend.get(&r.id) {
+                Some(by_item) => item
+                    .and_then(|i| by_item.get(&i.item.id))
+                    .copied()
+                    .unwrap_or(0),
+                None => r.usage.usage_cost_micros,
+            };
+            spent.insert(r.id, micros);
         }
         let link_needs_you = needs_you_of(g, row);
         listed.push((l, st, link_needs_you));
@@ -2905,15 +2960,23 @@ pub fn check_filters(f: &WorkTreeFilters) -> Result<(), IpcError> {
         ("iteration", &f.iteration),
         ("epic", &f.epic),
         ("item_type", &f.item_type),
+        ("label", &f.label),
     ] {
         if v.as_deref().is_some_and(|q| q.chars().count() > 200) {
             return Err(bad(format!("filters.{name} is longer than 200 characters")));
         }
     }
+    if let Some(p) = f.priority.as_deref() {
+        if p != "none" && !crate::store::PRIORITIES.contains(&p) {
+            return Err(bad(format!(
+                "filters.priority is urgent, high, medium, low or none, not {p:?}"
+            )));
+        }
+    }
     if let Some(sort) = f.sort.as_deref() {
         if !SORT_VALUES.contains(&sort) {
             return Err(bad(format!(
-                "filters.sort is activity, updated, key, title or due, not {sort:?}"
+                "filters.sort is activity, updated, key, title, due or priority, not {sort:?}"
             )));
         }
     }
@@ -3045,6 +3108,22 @@ fn matches_filters(t: &WorkTask, f: &WorkTreeFilters, with_group: bool) -> bool 
             .item_type
             .as_deref()
             .is_some_and(|k| crate::search_text::fold(k.trim()) == crate::search_text::fold(ty))
+        {
+            return false;
+        }
+    }
+    if let Some(p) = f.priority.as_deref() {
+        let want = (p != "none").then_some(p);
+        if t.priority.as_deref() != want {
+            return false;
+        }
+    }
+    if let Some(l) = f.label.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+        let want = crate::search_text::fold(l);
+        if !t
+            .labels
+            .iter()
+            .any(|have| crate::search_text::fold(have.trim()) == want)
         {
             return false;
         }
@@ -3213,6 +3292,16 @@ fn sort_key(t: &WorkTask, org_names: &HashMap<i64, String>, sort: Option<&str>) 
             Some(d) => (0, 0, format!("{d}\u{0}{}", t.task_id)),
             None => (1, 0, t.task_id.clone()),
         },
+        // Urgent first, then high, medium, low; no priority last. Inside a
+        // priority, the latest activity first.
+        Some("priority") => (
+            t.priority
+                .as_deref()
+                .and_then(|p| crate::store::PRIORITIES.iter().position(|q| *q == p))
+                .map_or(4, |i| i as u8),
+            -t.last_activity_at.unwrap_or(0),
+            t.task_id.clone(),
+        ),
         _ => (
             // Finished local work waiting to be closed (`close_suggested`)
             // sits right under the tasks that need a person.
@@ -3890,15 +3979,32 @@ pub fn task(
             && crate::service::trackers::write_back::writes_comments(t)
     });
     let comments_tracker = comments_tracker.map(|t| t.name.clone());
-    let (promotion, promote_targets) = match item {
+    let (promotion, promote_targets, promote_hint) = match item {
         Some(i) if i.item.source == "local" => {
             let s = lock(store)?;
+            let targets = super::promote::targets(&s, scope, &i.item, &g.trackers)?;
+            let hint = if targets.is_empty() {
+                super::promote::promote_hint(&s, scope, &i.item, &g.trackers)?
+            } else {
+                None
+            };
             (
                 super::promote::promotion_view(&s, i.item.id, &g.trackers)?,
-                super::promote::targets(&s, scope, &i.item, &g.trackers)?,
+                targets,
+                hint,
             )
         }
-        _ => (None, Vec::new()),
+        _ => (None, Vec::new(), None),
+    };
+    let check = match item {
+        Some(i) if !matches!(scope, OrgScope::Host { .. }) => {
+            let s = lock(store)?;
+            // Test now is offered only to a caller who may start one. This
+            // is the org boundary, not a privacy fence: every reader sees
+            // the card.
+            super::ticket_check::view(&s, &i.item, scope.is_all())?
+        }
+        _ => None,
     };
     let excerpt = meta.description.clone().filter(|d| !d.trim().is_empty());
     // The full length and whether the answer shows less of it, for every
@@ -4071,6 +4177,8 @@ pub fn task(
         attachments,
         promotion,
         promote_targets,
+        promote_hint,
+        check,
     })
 }
 
@@ -4240,6 +4348,8 @@ fn native_work(
             project_id: c.project_id,
             live_sessions,
             job_state: g.job_states.get(&c.id).cloned(),
+            due_at: c.due_at.clone(),
+            priority: c.priority.clone(),
             // The row stays — it is structure, and the tree that shows the
             // same children would otherwise disagree about how many there
             // are — but its text does not. `JOB_TITLE_WITHHELD` is the label

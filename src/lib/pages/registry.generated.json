@@ -360,6 +360,27 @@
         "level": "none"
       },
       "default": "false",
+      "help": "A mission run's session compiles Rust through sccache when its host has it, so a fresh checkout's build reuses what earlier runs compiled. A host without sccache runs as before.",
+      "key": "orchestrator.build_cache",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Workers share a build cache",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "experimental"
+      ],
+      "unit": "none",
+      "value": "false"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "false",
       "help": "The mission planner may read the mission's repository (read, search and list files in its checkout, nothing else) before it breaks a goal into tasks, so it can split the work along the files it touches. Planning takes longer and costs more.",
       "key": "orchestrator.planner_reads",
       "kind": {
@@ -1752,7 +1773,7 @@
         "level": "none"
       },
       "default": "3600",
-      "help": "How long a reachable host with a live session may send no hook before it reads as hooks silent.",
+      "help": "How long a reachable host with a working session (or a turn in that time) may send no hook before it reads as hooks silent. Idle and failed sessions call no hooks, so they do not count.",
       "key": "health.hooks_silent_secs",
       "kind": {
         "max": 315360000,
@@ -5362,6 +5383,14 @@
                 },
                 {
                   "key": "orchestrator.run_subagents",
+                  "type": "field",
+                  "when": {
+                    "key": "orchestrator.enabled",
+                    "truthy": true
+                  }
+                },
+                {
+                  "key": "orchestrator.build_cache",
                   "type": "field",
                   "when": {
                     "key": "orchestrator.enabled",

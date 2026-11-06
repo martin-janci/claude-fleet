@@ -271,16 +271,44 @@ impl TriggerSource {
             ],
             TriggerSource::TrackerAssigned | TriggerSource::TrackerQuery => ISSUE,
             TriggerSource::GithubPrs => &[
-                "repo", "number", "title", "head_sha", "base_ref", "head_ref", "author", "url",
-                "previous", "paths",
+                "repo",
+                "number",
+                "title",
+                "head_sha",
+                "base_ref",
+                "head_ref",
+                "author",
+                "url",
+                "previous",
+                "paths",
+                "has_description",
             ],
             TriggerSource::GithubComments => &[
-                "repo", "number", "title", "url", "comment", "head_sha", "base_ref", "head_ref",
-                "previous", "paths",
+                "repo",
+                "number",
+                "title",
+                "url",
+                "comment",
+                "head_sha",
+                "base_ref",
+                "head_ref",
+                "previous",
+                "paths",
+                "has_description",
             ],
             TriggerSource::GithubReviewReplies => &[
-                "repo", "number", "title", "url", "comment", "thread", "head_sha", "base_ref",
-                "head_ref", "previous", "paths",
+                "repo",
+                "number",
+                "title",
+                "url",
+                "comment",
+                "thread",
+                "head_sha",
+                "base_ref",
+                "head_ref",
+                "previous",
+                "paths",
+                "has_description",
             ],
             TriggerSource::McpScan => &["key", "entry"],
             TriggerSource::Schedule => &["at", "request", "scope"],
@@ -456,6 +484,16 @@ pub struct ContextLookup {
     /// Or the newest N records.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recent: Option<u32>,
+    /// Or the newest records (`recent` of them, default 20) whose key or
+    /// value contains this text (a template).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub find: Option<String>,
+    /// Or the newest records (`recent` of them, default 20) whose key
+    /// starts with this text (a template): a pull request's own records in
+    /// a store many share, never another repository's whose name only ends
+    /// the same.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix: Option<String>,
 }
 
 fn default_max_turns() -> u32 {
@@ -505,7 +543,7 @@ pub struct Run {
     #[serde(default, skip_serializing_if = "is_zero")]
     pub cooldown_secs: i64,
     /// `project`: the branch the worktree is made from (a template over
-    /// the inputs; default `main`).
+    /// the inputs; default origin's default branch).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
     /// The pull request's diff in the prompt (a GitHub trigger).
@@ -955,7 +993,8 @@ impl Limits {
             .as_ref()
             .and_then(|i| values.get(i))
             .and_then(|v| v.as_f64().or_else(|| v.as_str()?.trim().parse().ok()))
-            .filter(|v| v.is_finite() && *v >= 0.0);
+            // 0 or less is no value: it would hold every run for good.
+            .filter(|v| v.is_finite() && *v > 0.0);
         let usd = own.map_or(ceiling, |o| o.min(ceiling));
         Some((usd * 1_000_000.0).round() as i64)
     }
@@ -1514,11 +1553,29 @@ pub fn problems(d: &Definition, templates: &BTreeMap<String, String>) -> Vec<Str
             }
             _ => {}
         }
-        match (&c.key, c.recent) {
-            (Some(k), None) => check_template(k, &format!("{at} › key"), before_run, &mut out),
-            (None, Some(n)) if (1..=50).contains(&n) => {}
-            (None, Some(_)) => out.push(format!("{at}: recent is 1-50")),
-            _ => out.push(format!("{at}: give key or recent, one of them")),
+        let text = match (&c.find, &c.prefix) {
+            (Some(f), None) => Some(("find", f)),
+            (None, Some(p)) => Some(("prefix", p)),
+            (None, None) => None,
+            (Some(_), Some(_)) => {
+                out.push(format!("{at}: give find or prefix, not both"));
+                continue;
+            }
+        };
+        match (&c.key, text, c.recent) {
+            (Some(k), None, None) => {
+                check_template(k, &format!("{at} › key"), before_run, &mut out)
+            }
+            (None, _, Some(n)) if !(1..=50).contains(&n) => {
+                out.push(format!("{at}: recent is 1-50"))
+            }
+            (None, Some((name, t)), _) => {
+                check_template(t, &format!("{at} › {name}"), before_run, &mut out)
+            }
+            (None, None, Some(_)) => {}
+            _ => out.push(format!(
+                "{at}: give key, find, prefix or recent (find and prefix may take recent)"
+            )),
         }
     }
 

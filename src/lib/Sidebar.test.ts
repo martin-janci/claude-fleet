@@ -3293,6 +3293,20 @@ describe('List keys (redesign step 3.8)', () => {
     expect(get(selectedSession)?.id).toBe(rows[2].id);
   });
 
+  it('the next-needs-you chord says so when nothing needs you', async () => {
+    const rows = three().map((r) => ({ ...r, claude_status: 'working' as const }));
+    mockBackend(fakeProjects, rows);
+    selectSession(null);
+    clearToasts();
+    render(Sidebar);
+    await tick(); await tick();
+    const isMac = /Mac/.test(navigator.platform) || /Macintosh/.test(navigator.userAgent);
+    const chord = isMac ? { key: 'n', metaKey: true, altKey: true } : { key: 'n', ctrlKey: true, altKey: true };
+    await fireEvent.keyDown(document.body, chord);
+    expect(get(selectedSession)).toBeNull();
+    expect(get(toasts).some((t) => t.message === 'Nothing needs you right now')).toBe(true);
+  });
+
   it('the next-needs-you chord wins over a focused terminal (review w18-3)', async () => {
     const rows = three();
     mockBackend(fakeProjects, rows);
@@ -3959,6 +3973,33 @@ describe('the Sessions board: tabs, agent, organisation, the running cap', () =>
     await tick();
     expect(names()).toHaveLength(6);
     expect(screen.queryByTestId('group-more')).toBeNull();
+  });
+});
+
+describe('Routine sessions', () => {
+  it('folds the sessions routines started into one Routines section, a line per routine', async () => {
+    const mine = sessionFor(1, 'dev-mine');
+    const runA = { ...sessionFor(1, 'dev-run-a'), origin: 'routine' as const, origin_ref: '3', friendly_name: 'Morning PR sweep', started_at: 2_000 };
+    const runB = { ...sessionFor(1, 'dev-run-b'), origin: 'routine' as const, origin_ref: '3', friendly_name: 'Morning PR sweep', started_at: 3_000 };
+    const other = { ...sessionFor(null, 'dev-run-c'), origin: 'routine' as const, origin_ref: '9', started_at: 1_000 };
+    mockBackend(fakeProjects, [mine, runA, runB, other]);
+    render(Sidebar);
+    await tick(); await tick();
+    const section = await screen.findByTestId('routine-sessions');
+    expect(within(section).getByTestId('routines-toggle').textContent).toContain('Routines (3)');
+    const groups = within(section).getAllByTestId('routine-group');
+    expect(groups.map((g) => g.dataset.routineId)).toEqual(['3', '9']);
+    expect(groups[0].textContent).toContain('Morning PR sweep');
+    expect(groups[0].textContent).toContain('2 runs');
+    // Folded: the runs' rows are not drawn, in the section or the tree.
+    const drawn = () => screen.getAllByTestId('sess-row').map((r) => r.textContent ?? '');
+    expect(drawn().some((t) => t.includes('dev-mine'))).toBe(true);
+    expect(drawn().some((t) => t.includes('dev-run-'))).toBe(false);
+    await fireEvent.click(within(groups[0]).getByTestId('routine-group-toggle'));
+    const runs = within(groups[0]).getAllByTestId('sess-row').map((r) => r.textContent ?? '');
+    expect(runs).toHaveLength(2);
+    expect(runs[0]).toContain('dev-run-b');
+    expect(drawn().filter((t) => t.includes('dev-run-a'))).toHaveLength(1);
   });
 });
 

@@ -18,7 +18,7 @@ use tauri::State;
 /// The `routines` tool's arguments, as the tool reads them.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RoutinesArgs {
-    /// list | get | runs | failing | budget | save | preview | delete | set_enabled | skip_next | run_now | set_run_outcome | explain | decisions | dry_run | tune_prompt | memory | set_memory
+    /// list | get | runs | failing | budget | save | preview | delete | set_enabled | skip_next | run_now | set_run_outcome | explain | decisions | dry_run | tune_prompt | memory | set_memory | seen | forget_seen
     pub action: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routine_id: Option<i64>,
@@ -42,7 +42,8 @@ pub struct RoutinesArgs {
     /// set_memory: routine | project.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notebook: Option<String>,
-    /// set_memory: the notebook's whole new text ("" clears it).
+    /// set_memory: the notebook's whole new text ("" clears it); forget_seen:
+    /// the item to forget (absent: all).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
 }
@@ -182,6 +183,8 @@ pub(crate) mod routed {
                     fleet_core::store::now_unix(),
                 )?)
             }
+            "seen" => json(svc::seen::get(store, &scope, id()?, args.limit)?),
+            "forget_seen" => json(svc::seen::forget(store, &scope, id()?, args.text.as_deref())?),
             "set_run_outcome" => {
                 let run_id = args
                     .run_id

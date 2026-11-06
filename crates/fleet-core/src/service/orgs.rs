@@ -715,7 +715,8 @@ pub fn require_key(s: &Store, scope: &OrgScope, key: &str) -> Result<(), IpcErro
     }
     // An open run on the host is work its sessions do too: a mission's
     // worker reads its step by the task that names the item, whatever
-    // became of the link (`Store::work_item_on_host`'s run arm).
+    // became of the link (`Store::work_item_on_host`'s run arm), and the
+    // rest of that mission's items with it (its mission arm).
     for item in s.work_items_by_key(&key)? {
         if scope.sees_org(s.item_org(item.id)?) && s.open_run_on_host(h, item.id)? {
             return Ok(());
@@ -825,11 +826,12 @@ fn counted_rows(
         .collect())
 }
 
-/// Whether a row waits on a person (`service::attention::needs_attention`).
+/// Whether a row waits on a person (`service::attention::needs_person_in`:
+/// a paused row does not).
 fn needs_person(s: &Store) -> impl Fn(&SessionRow) -> bool {
     let red = crate::service::health::context_red_pct(s);
     let facts = s.attention_facts();
-    move |r: &SessionRow| crate::service::attention::needs_attention_in(r, red, &facts).is_some()
+    move |r: &SessionRow| crate::service::attention::needs_person_in(r, red, &facts)
 }
 
 /// `org id → (sessions, sessions that need a person)` over `rows`.

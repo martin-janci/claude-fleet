@@ -33,6 +33,8 @@
     normalizeFilters,
     sameFilters,
     saveWorkView,
+    WORK_PRIORITY_FILTER_LABELS,
+    WORK_PRIORITY_FILTERS,
     WORK_SORT_LABELS,
     WORK_SORTS,
     WORK_STAGE_LABELS,
@@ -41,6 +43,7 @@
     workViewFilters,
     workViews,
     type ConflictNotice,
+    type WorkPriorityFilter,
     type WorkSort,
     type WorkTreeFacets,
     type WorkTreeFilters,
@@ -522,57 +525,79 @@
   {@const iterations = pageFacets.iterations ?? []}
   {@const epics = pageFacets.epics ?? []}
   {@const types = withCurrent(pageFacets.item_types ?? [], f.item_type)}
-  {#if iterations.length > 0 || epics.length > 0 || types.length > 0 || f.iteration || f.epic}
-    <section class="group">
-      <h3 class="label">Planning</h3>
-      <div class="pair">
-        {#if iterations.length > 0 || f.iteration}
-          <select
-            class="of-btn pick-select"
-            aria-label="Sprint"
-            data-testid="work-filter-sprint"
-            value={f.iteration ?? ''}
-            onchange={(e) => set({ iteration: (e.currentTarget as HTMLSelectElement).value || undefined })}
-          >
-            <option value="">Any sprint</option>
-            <option value="current" title="The tracker's active sprint or cycle">Current sprint</option>
-            {#each iterations as it (it.name)}<option value={it.name}>{it.name}{it.active ? ' (active)' : ''} · {it.count}</option>{/each}
-            {#if f.iteration && f.iteration !== 'current' && f.iteration !== 'none' && !iterations.some((i) => i.name === f.iteration)}
-              <option value={f.iteration}>{f.iteration}</option>
-            {/if}
-            <option value="none">No sprint</option>
-          </select>
-        {/if}
-        {#if epics.length > 0 || f.epic}
-          <select
-            class="of-btn pick-select"
-            aria-label="Epic"
-            data-testid="work-filter-epic"
-            value={f.epic ?? ''}
-            onchange={(e) => set({ epic: (e.currentTarget as HTMLSelectElement).value || undefined })}
-          >
-            <option value="">Any epic</option>
-            {#each epics as ep (ep.task_id)}
-              <option value={ep.key ?? ep.task_id}>{ep.key ? `${ep.key} ` : ''}{ep.title} · {ep.count}</option>
-            {/each}
-            {#if f.epic && !epics.some((ep) => (ep.key ?? ep.task_id) === f.epic)}<option value={f.epic}>{f.epic}</option>{/if}
-          </select>
-        {/if}
-        {#if types.length > 0}
-          <select
-            class="of-btn pick-select"
-            aria-label="Type"
-            data-testid="work-filter-type"
-            value={f.item_type ?? ''}
-            onchange={(e) => set({ item_type: (e.currentTarget as HTMLSelectElement).value || undefined })}
-          >
-            <option value="">Any type</option>
-            {#each types as ty (ty)}<option value={ty}>{ty}</option>{/each}
-          </select>
-        {/if}
-      </div>
-    </section>
-  {/if}
+  {@const labels = withCurrent(pageFacets.labels ?? [], f.label)}
+  <!-- Always shown: Priority applies to native tasks too. -->
+  <section class="group">
+    <h3 class="label">Planning</h3>
+    <div class="pair">
+      {#if iterations.length > 0 || f.iteration}
+        <select
+          class="of-btn pick-select"
+          aria-label="Sprint"
+          data-testid="work-filter-sprint"
+          value={f.iteration ?? ''}
+          onchange={(e) => set({ iteration: (e.currentTarget as HTMLSelectElement).value || undefined })}
+        >
+          <option value="">Any sprint</option>
+          <option value="current" title="The tracker's active sprint or cycle">Current sprint</option>
+          {#each iterations as it (it.name)}<option value={it.name}>{it.name}{it.active ? ' (active)' : ''} · {it.count}</option>{/each}
+          {#if f.iteration && f.iteration !== 'current' && f.iteration !== 'none' && !iterations.some((i) => i.name === f.iteration)}
+            <option value={f.iteration}>{f.iteration}</option>
+          {/if}
+          <option value="none">No sprint</option>
+        </select>
+      {/if}
+      {#if epics.length > 0 || f.epic}
+        <select
+          class="of-btn pick-select"
+          aria-label="Epic"
+          data-testid="work-filter-epic"
+          value={f.epic ?? ''}
+          onchange={(e) => set({ epic: (e.currentTarget as HTMLSelectElement).value || undefined })}
+        >
+          <option value="">Any epic</option>
+          {#each epics as ep (ep.task_id)}
+            <option value={ep.key ?? ep.task_id}>{ep.key ? `${ep.key} ` : ''}{ep.title} · {ep.count}</option>
+          {/each}
+          {#if f.epic && !epics.some((ep) => (ep.key ?? ep.task_id) === f.epic)}<option value={f.epic}>{f.epic}</option>{/if}
+        </select>
+      {/if}
+      {#if types.length > 0}
+        <select
+          class="of-btn pick-select"
+          aria-label="Type"
+          data-testid="work-filter-type"
+          value={f.item_type ?? ''}
+          onchange={(e) => set({ item_type: (e.currentTarget as HTMLSelectElement).value || undefined })}
+        >
+          <option value="">Any type</option>
+          {#each types as ty (ty)}<option value={ty}>{ty}</option>{/each}
+        </select>
+      {/if}
+      <select
+        class="of-btn pick-select"
+        aria-label="Priority"
+        data-testid="work-filter-priority"
+        value={f.priority ?? ''}
+        onchange={(e) => set({ priority: ((e.currentTarget as HTMLSelectElement).value || undefined) as WorkPriorityFilter | undefined })}
+      >
+        <option value="">Any priority</option>
+        {#each WORK_PRIORITY_FILTERS as p (p)}<option value={p}>{WORK_PRIORITY_FILTER_LABELS[p]}</option>{/each}
+      </select>
+      {#if labels.length > 0}
+        <select
+          class="of-btn pick-select"
+          aria-label="Label"
+          data-testid="work-filter-label"
+          value={f.label ?? ''}
+          onchange={(e) => set({ label: (e.currentTarget as HTMLSelectElement).value || undefined })}
+        >
+          <option value="">Any label</option>
+          {#each labels as l (l)}<option value={l}>{l}</option>{/each}
+        </select>
+      {/if}
+    </div>
+  </section>
 {/snippet}
 
 {#snippet panelFoot()}

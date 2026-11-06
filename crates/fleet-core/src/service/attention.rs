@@ -242,6 +242,30 @@ pub struct Facts {
     pub limited_accounts: BTreeMap<String, Limit>,
     /// Accounts whose login is gone, expired or rejected, by uuid.
     pub uncredentialed_accounts: BTreeSet<String>,
+    /// The logins fleet saw signed out (`hosts.signed_out_logins`,
+    /// `service::login_health`), by host and profile. An account can be
+    /// signed in on one host and out on another: a session is blocked on
+    /// its own login (review 2026-11-03 F2), not on what its account's
+    /// first usage source answered.
+    pub signed_out_logins: BTreeSet<LoginRef>,
+}
+
+/// One login on one host: `profile` `None` is the host's own login, as on
+/// [`SessionRow::claude_profile`] and [`crate::store::SignedOutLogin`].
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+pub struct LoginRef {
+    pub host: String,
+    #[serde(default)]
+    pub profile: Option<String>,
+}
+
+impl Facts {
+    /// Whether fleet saw the login `profile` on `host` signed out.
+    pub fn login_signed_out(&self, host: &str, profile: Option<&str>) -> bool {
+        self.signed_out_logins
+            .iter()
+            .any(|l| l.host == host && l.profile.as_deref() == profile)
+    }
 }
 
 /// A usage window at its limit.
@@ -275,6 +299,15 @@ impl Facts {
             .iter()
             .filter(|h| !h.reachable && h.last_pinged_at.is_some())
             .map(|h| h.alias.clone())
+            .collect();
+        let signed_out_logins = hosts
+            .iter()
+            .flat_map(|h| {
+                h.signed_out_logins.iter().map(|l| LoginRef {
+                    host: h.alias.clone(),
+                    profile: l.profile.clone(),
+                })
+            })
             .collect();
         let mut limited_accounts = BTreeMap::new();
         let mut uncredentialed_accounts = BTreeSet::new();
@@ -323,6 +356,7 @@ impl Facts {
             down_hosts,
             limited_accounts,
             uncredentialed_accounts,
+            signed_out_logins,
         }
     }
 }
@@ -397,18 +431,23 @@ pub fn needs_attention_in(
         Reason::HostDown
     } else if live && !working && account.is_some_and(|a| facts.limited_accounts.contains_key(a)) {
         Reason::AccountLimit
-    } else if live && !working && account.is_some_and(|a| facts.uncredentialed_accounts.contains(a))
+    } else if live
+        && !working
+        && (facts.login_signed_out(&row.host_alias, row.claude_profile.as_deref())
+            || account.is_some_and(|a| facts.uncredentialed_accounts.contains(a)))
     {
         Reason::NoCredentials
     } else if failed && !crate::store::has_no_pane(&row.kind) {
         Reason::StopFailed
     } else if failed {
         Reason::Failed
-    } else if live && row.context_pct.is_some_and(|p| p >= context_red_pct) {
+    } else if live && !idle && row.context_pct.is_some_and(|p| p >= context_red_pct) {
+        // An idle session has nothing running out of room: its context
+        // matters when it is next given work, not before.
         Reason::ContextFull
     } else if live && row.stale_working_at.is_some() {
         Reason::StaleWorking
-    } else if idle && row.ci_status.as_deref() == Some("failing") {
+    } else if idle && row.ci_status.as_deref() == Some("failing") && !pr_is_finished(row) {
         Reason::CiFailing
     } else if live && jev("asked") {
         // After every reason a person must act on: a proposal never hides
@@ -424,6 +463,22 @@ pub fn needs_attention_in(
         since: since_for(row, reason),
         state: reason.state(),
     })
+}
+
+/// The session's PR is merged or closed: the checks on it can fail for good
+/// and nobody has anything left to fix. A reading from before the probe kept
+/// the state says nothing, so it counts as open.
+fn pr_is_finished(row: &SessionRow) -> bool {
+    row.pr_evidence
+        .as_ref()
+        .is_some_and(crate::service::outcome::PrEvidence::is_finished)
+}
+
+/// What the `needs_attention` filter of `list_sessions` means: everything
+/// the Inbox lists, Jev's proposals included. A `Paused` row carries an
+/// [`Attention`] to draw, and is not waiting on anyone.
+pub fn needs_person_in(row: &SessionRow, context_red_pct: f64, facts: &Facts) -> bool {
+    needs_attention_in(row, context_red_pct, facts).is_some_and(|a| a.state != State::Paused)
 }
 
 /// Why a mission waits on a person (gap plan G1.6): the class of the one
@@ -849,6 +904,30 @@ mod tests {
         assert_eq!(needs_attention(&r), None, "a shell has no Claude in it");
     }
 
+    /// The `needs_attention` filter returned 23 paused rows beside the real
+    /// ones, which the Inbox's own count leaves out.
+    #[test]
+    fn the_filter_leaves_out_paused_rows() {
+        let in_filter =
+            |r: &SessionRow| needs_person_in(r, DEFAULT_CONTEXT_RED_PCT, &Facts::default());
+        let mut r = row();
+        r.claude_status = Some("blocked".into());
+        assert!(in_filter(&r));
+        let mut r = row();
+        r.status = "ghost".into();
+        r.claude_status = Some("idle".into());
+        assert_eq!(needs_attention(&r).unwrap().state, State::Paused);
+        assert!(!in_filter(&r));
+        let mut r = row();
+        r.claude_status = Some("idle".into());
+        r.turn_outcome = Some("asked".into());
+        assert_eq!(needs_attention(&r).unwrap().state, State::Proposed);
+        assert!(
+            in_filter(&r),
+            "the documented listing keeps Jev's proposals"
+        );
+    }
+
     /// Every reason a person can act on outranks a broken lifecycle.
     #[test]
     fn every_actionable_reason_outranks_lifecycle() {
@@ -1244,6 +1323,36 @@ mod tests {
                 .reason,
             Reason::NoCredentials
         );
+        // Review 2026-11-03 F2: a login fleet saw signed out on its host
+        // blocks the session on that login only, while its account's usage
+        // answered fine through another login.
+        let mut htz = host("htz", true, Some(1));
+        htz.signed_out_logins = vec![crate::store::SignedOutLogin {
+            profile: Some("work".into()),
+            since: 1,
+            checked_at: 1,
+        }];
+        let f = Facts::from_fleet(
+            &[htz, host("mac", true, Some(1))],
+            &[snap("acc", UsageOutcomeKind::Ok, 10.0, 10.0, 2_000)],
+            1_000,
+        );
+        assert_eq!(
+            f.signed_out_logins.iter().collect::<Vec<_>>(),
+            [&LoginRef {
+                host: "htz".into(),
+                profile: Some("work".into())
+            }]
+        );
+        let mut on = |host: &str, profile: Option<&str>| {
+            r.account_uuid = Some("acc".into());
+            r.host_alias = host.into();
+            r.claude_profile = profile.map(str::to_string);
+            needs_attention_in(&r, DEFAULT_CONTEXT_RED_PCT, &f).map(|a| a.reason)
+        };
+        assert_eq!(on("htz", Some("work")), Some(Reason::NoCredentials));
+        assert_eq!(on("htz", None), None, "the host's own login is signed in");
+        assert_eq!(on("mac", Some("work")), None, "same profile, other host");
         // Both at their limit, the week freeing first: the 5-hour window
         // still holds the account after the weekly reset.
         let mut late = snap("late", UsageOutcomeKind::Ok, 100.0, 100.0, 3_000);

@@ -204,7 +204,9 @@ pub fn check_line(
             from_run(c, &t)
         }
         Cond::Test(command) => {
-            let all = s.item_tasks(item.id, "test")?;
+            let mut all = s.item_tasks(item.id, "test")?;
+            all.extend(lane_test_passes(s, item.id, command.as_deref())?);
+            all.sort_by_key(|t| std::cmp::Reverse(t.id));
             if all.is_empty() {
                 return Ok(check(line, kind, "pending", "no test run yet"));
             }
@@ -226,9 +228,73 @@ pub fn check_line(
                     newest,
                 ));
             }
+            // A person accepted the newest check anyway (`ticket_check`'s
+            // Accept anyway): it holds until a newer test run.
+            let accepted = recorded.iter().find(|r| {
+                r.line == super::ticket_check::CHECK_LINE
+                    && r.ok
+                    && newest.finished_at.is_some_and(|f| r.at >= f)
+            });
+            if let Some(r) = accepted {
+                let mut c = check(
+                    line,
+                    kind,
+                    "pass",
+                    r.note
+                        .clone()
+                        .unwrap_or_else(|| "a person accepted the test run anyway".into()),
+                );
+                c.by = Some(r.actor.clone());
+                c.at = Some(r.at);
+                return Ok(c);
+            }
             test_check(line, command.as_deref(), &runs)
         }
     })
+}
+
+/// The passing test runs of `item_id`'s lane-mates when its mission runs a
+/// lane's tests at the lane's end (mission improvements M5): one run in the
+/// lane's checkout tested every task of the lane. Only a pass is shared; a
+/// failure stays its own task's, so only that task is retried, and a run
+/// that did not report running `command` is not this line's (it would count
+/// toward the line's unreported runs). The usual staleness rule still
+/// applies: a run older than this task's latest implementation did not
+/// test it.
+fn lane_test_passes(
+    s: &Store,
+    item_id: i64,
+    command: Option<&str>,
+) -> Result<Vec<TaskRow>, IpcError> {
+    let Some(mission) = s
+        .item_mission(item_id)?
+        .map(|m| s.get_mission(m))
+        .transpose()?
+        .flatten()
+    else {
+        return Ok(Vec::new());
+    };
+    if mission.policy.execution != "lane" || mission.policy.lane_test_at != "lane" {
+        return Ok(Vec::new());
+    }
+    let Some(lane) = s
+        .item_lane(item_id)?
+        .map(|l| s.get_mission_lane(l))
+        .transpose()?
+        .flatten()
+    else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::new();
+    for other in lane.item_ids.iter().filter(|i| **i != item_id) {
+        out.extend(s.item_tasks(*other, "test")?.into_iter().filter(|t| {
+            t.state == "done"
+                && t.report
+                    .as_ref()
+                    .is_some_and(|r| r.outcome == "done" && command.is_none_or(|c| ran(r, c)))
+        }));
+    }
+    Ok(out)
 }
 
 /// How many finished test runs may leave a `test:<command>` line unreported
@@ -236,6 +302,11 @@ pub fn check_line(
 /// commands. A line that waited on a run nobody starts again was stuck for
 /// good (the loop starts a run only for a pending line with no `by`).
 const UNREPORTED_TEST_RUNS: usize = 2;
+
+/// PURE: whether a test run's report says it ran `cmd`.
+fn ran(r: &crate::store::TaskReport, cmd: &str) -> bool {
+    r.tests_run.iter().any(|x| x.contains(cmd))
+}
 
 /// PURE: a test line over the runs that tested the current work, newest
 /// first, the newest finished. Each command is judged by the newest run that
@@ -268,11 +339,7 @@ fn test_check(line: &str, command: Option<&str>, runs: &[&TaskRow]) -> CondCheck
     let Some(cmd) = command else {
         return verdict(newest);
     };
-    let reported = |t: &&&TaskRow| {
-        t.report
-            .as_ref()
-            .is_some_and(|r| r.tests_run.iter().any(|x| x.contains(cmd)))
-    };
+    let reported = |t: &&&TaskRow| t.report.as_ref().is_some_and(|r| ran(r, cmd));
     if let Some(t) = runs.iter().find(reported) {
         return verdict(t);
     }
@@ -474,6 +541,8 @@ pub fn set_done_when(
 /// `line: "run evidence"` (`gate::EVIDENCE_LINE`) is the completion gate's
 /// override for an implement run that left no git evidence: `ok: true`
 /// needs a `note`, the reason, and holds until a newer implement run.
+/// `line: "ai check"` (`ticket_check::CHECK_LINE`) accepts an AI check
+/// that did not pass.
 pub fn verify(
     args: &WorkLinkArgs,
     store: &Mutex<Store>,
@@ -509,6 +578,17 @@ pub fn verify(
             return Err(IpcError::new(
                 codes::E_INVALID,
                 "overriding the run evidence needs a note: the reason",
+            ));
+        }
+    } else if !own_line && line == super::ticket_check::CHECK_LINE {
+        // Accept anyway: a person overrules an AI check that did not pass
+        // (`ticket_check`); it holds until a newer check.
+        if s.latest_item_task(item_id, super::ticket_check::ROLE)?
+            .is_none()
+        {
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                format!("work item {item_id} has no AI check to accept"),
             ));
         }
     } else if !own_line {

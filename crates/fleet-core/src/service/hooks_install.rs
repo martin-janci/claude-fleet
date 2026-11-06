@@ -145,8 +145,10 @@ pub enum HookKind {
 /// API-error completion (→ idle, `turn_seq` bump, `stop_failure` timeline
 /// event), `Notification` the waiting-on-a-human signal (→ blocked),
 /// `SessionStart` the conversation-open signal (installed as a command hook,
-/// see [`session_start_command`]), and `PreCompact`/`PostCompact` bracket a
-/// compaction.
+/// see [`session_start_command`]), `PreCompact`/`PostCompact` bracket a
+/// compaction, and `SubagentStart` journals the subagents a conversation
+/// used (mission improvements M7; nothing reads a stop, so it is not asked
+/// for).
 pub const FLEET_HOOK_EVENTS: &[(&str, &str, HookKind)] = &[
     ("Stop", "", HookKind::Http),
     ("UserPromptSubmit", "", HookKind::Http),
@@ -158,6 +160,7 @@ pub const FLEET_HOOK_EVENTS: &[(&str, &str, HookKind)] = &[
     ("PreCompact", "", HookKind::Http),
     ("PostCompact", "", HookKind::Http),
     ("PreToolUse", "Bash", HookKind::Guard),
+    ("SubagentStart", "", HookKind::Http),
 ];
 
 /// A token- and URL-free rendering of what `provision_hook` installs:
@@ -844,10 +847,11 @@ mod tests {
             "PreCompact",
             "PostCompact",
             "PreToolUse",
+            "SubagentStart",
         ] {
             assert_eq!(v["hooks"][ev].as_array().unwrap().len(), 1, "{ev}");
         }
-        assert_eq!(FLEET_HOOK_EVENTS.len(), 10);
+        assert_eq!(FLEET_HOOK_EVENTS.len(), 11);
         assert_eq!(v["hooks"]["PreToolUse"][0]["matcher"], "Bash");
         assert_eq!(
             v["hooks"]["SessionEnd"][0]["matcher"],

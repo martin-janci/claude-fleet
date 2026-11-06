@@ -1177,13 +1177,27 @@ impl Store {
     /// reconcile only ever fills an empty link (a profile session's from
     /// nothing yet, a host-login session's from the host). `claude_profile`
     /// is on the row (the sidebar shows it), so this emits `session_updated`.
+    ///
+    /// The new link is the login's account as the host row knows it (the
+    /// listed profile's, or the host's own for `None`), so the row's account
+    /// pill and limit triage hold across a switch instead of blanking until
+    /// the next reconcile (review 2026-11-03 F6); NULL when the host lists
+    /// no account for it or the account has no row yet.
     pub fn set_session_profile(
         &self,
         id: i64,
         profile: Option<&str>,
     ) -> Result<(), rusqlite::Error> {
         let n = self.conn.execute(
-            "UPDATE sessions SET claude_profile = ?1, account_uuid = NULL \
+            "UPDATE sessions SET claude_profile = ?1, account_uuid = ( \
+               SELECT a.uuid FROM accounts a WHERE a.uuid = CASE WHEN ?1 IS NULL \
+                 THEN (SELECT h.account_uuid FROM hosts h WHERE h.alias = sessions.host_alias) \
+                 ELSE (SELECT json_extract(p.value, '$.account_uuid') FROM hosts h, \
+                         json_each(CASE WHEN json_valid(h.claude_profiles) \
+                                   THEN h.claude_profiles ELSE '[]' END) p \
+                       WHERE h.alias = sessions.host_alias \
+                         AND json_extract(p.value, '$.name') = ?1 LIMIT 1) \
+               END) \
              WHERE id = ?2 AND claude_profile IS NOT ?1",
             rusqlite::params![profile, id],
         )?;
@@ -1537,6 +1551,24 @@ impl Store {
                  AND lost_at IS NULL AND kind NOT IN ('shell', 'external') ORDER BY id",
             )?
             .query_map([account_uuid], |r| r.get(0))?
+            .collect::<Result<_, _>>()?;
+        for &id in &ids {
+            self.emit_session(id)?;
+        }
+        Ok(ids.len())
+    }
+
+    /// Announce every live session on `host_alias` again, as
+    /// [`Self::reemit_live_sessions_on_account`] does for an account: its
+    /// signed-out logins changed. Returns how many.
+    pub fn reemit_live_sessions_on_host(&self, host_alias: &str) -> Result<usize, rusqlite::Error> {
+        let ids: Vec<i64> = self
+            .conn
+            .prepare_cached(
+                "SELECT id FROM sessions WHERE host_alias = ?1 AND status != 'ghost' \
+                 AND lost_at IS NULL AND kind NOT IN ('shell', 'external') ORDER BY id",
+            )?
+            .query_map([host_alias], |r| r.get(0))?
             .collect::<Result<_, _>>()?;
         for &id in &ids {
             self.emit_session(id)?;

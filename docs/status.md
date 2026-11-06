@@ -249,8 +249,11 @@ person can turn it off for their own sessions, migration 187, and ask for
 "continue" after a switch, migration 188; Jev's pick
 is recorded only, `decide.jev.limit_switch`); a session parked by a quota
 notification (`quota_auto_resume_*`, read as blocked) is switched too, one
-waiting on a dialog or a form is not. Not built: a hub vault for
-setup-tokens and API keys.
+waiting on a dialog or a form is not. An account can be forbidden for
+projects or for a whole org (landed, nothing forbidden by default; docs/accounts.md → *Keep an
+account off a project*, migrations 217 and 218): every start, resume, switch, routine
+and mission run of such a project refuses or avoids its logins. Not built: a
+hub vault for setup-tokens and API keys.
 
 Placement and login health (Control review F5/F6, landed, ON): one rule,
 `service::placement`, picks the host and login for new work: hosts that
@@ -671,7 +674,9 @@ with a parent is never a parent (`parent_for_new_child` now checks every
 local item, not only a native one), because `item_org` — and the org fences
 built on it — walks one level; a filed task cannot hold subtasks, and a task
 with subtasks is not filed. Going deeper is the owner's decision (it moves
-the org fence). Not yet: the phone. E9–E11 run on their defaults.
+the org fence). The phone files fleet's own task under an epic (or takes it
+out to the top; fleet-mobile #270); marking an epic stays on the desktop.
+E9–E11 run on their defaults.
 
 Task comments (migration 161, `work_item_comments`; the Comments tab G3.4
 had cut is back on the owner's word, 2026-10-10): `work_link { comment,
@@ -685,8 +690,8 @@ first with `mine`. Device names are their person's (owner decision
 `Placement.updated_by` (a device label with no person) only to the hub
 itself and the one person of a one-person hub. The
 task page's Activity tab also lists each session that started, was
-suggested, turned down or stopped, and each comment. Not yet: comments on
-the phone.
+suggested, turned down or stopped, and each comment. The phone's task page
+lists them and adds and deletes them too (fleet-mobile #270).
 
 Tracker attachments and a start's comments (owner report 2026-10-11, an
 Asana session briefed with the key alone): `tracker_comments` also answers
@@ -713,8 +718,10 @@ the setting off (`E_INVALID_STATE`). Queuing nudges the sync tick, which
 drains at once. Deleting a comment cancels a pending post; a sent one stays
 at the tracker. `CommentRow.tracker_post` carries the post's state, error
 and URL; `TaskDetail.comments_tracker` / `can_post_to_tracker` say whose
-comments the tab reads and whether the reader may post. Not yet: the phone,
-editing a posted comment, attachments from trackers other than Asana.
+comments the tab reads and whether the reader may post. The phone shows the
+tracker's comments beside fleet's and offers the post (fleet-mobile #270).
+Not yet: editing a posted comment, attachments from trackers other than
+Asana.
 
 Promoting a task to a ticket (owner decision 2026-10-11: local tasks and
 subtasks first, tracked later): `work_link { promote, item_id, tracker_id?,
@@ -732,8 +739,11 @@ old key an alias) and reads the ticket back. Per tracker
 (`E_INVALID_STATE`), a tracker's ticket, an epic, a job, a proposal or a task
 under a task of fleet's own (`E_INVALID`). A failed promotion may be tried
 again. `TaskDetail.promotion` / `promote_targets` drive *Promote to
-ticket…* on the task page. Not yet: sending assignees,
-due dates, priority, labels or estimates, epics, and the phone.
+ticket…* on the task page and on the phone's task screen (fleet-mobile);
+with no target, `promote_hint` says what brings one (Create tickets off on
+the tracker, no tracker connected, a parent of fleet's own) and the button
+shows disabled with it. Not yet: sending assignees,
+due dates, priority, labels or estimates, epics.
 
 Ticket status moves (owner decision 2026-10-12, changing D29 again; CF-6):
 `work_link { set_status, item_id, status, status_name? }` on a tracker's
@@ -750,8 +760,9 @@ Write-back → *Move tickets*, confirm-gated). Refused with nothing sent for
 a per-host token (`E_FORBIDDEN`), the setting off (`E_INVALID_STATE`) or a
 tracker with no such move (`TrackerError::Unsupported` → `E_UNSUPPORTED`).
 `WorkTask.status_movable` unlocks the Board card (`boardMovesAtTracker`);
-`net::https` gained `PUT` for Asana's task update. Not yet: the List view,
-the phone.
+`net::https` gained `PUT` for Asana's task update. The phone's task screen
+moves such a ticket with its status chips (fleet-mobile #271), and the task
+page's status pick moves it too. Not yet: the List view.
 
 Task attachments (migration 168, `work_item_attachments` and the
 content-addressed `work_attachment_blobs`, deduplicated by SHA-256 and kept
@@ -782,8 +793,21 @@ A task's priority, labels and estimate (migration 171, `work_items.priority`
 priority name and story-points field or original estimate, Linear's
 priority, estimate and labels, GitHub labels, Asana tags) and shown in the
 task page's rail and header ([work-graph.md](work-graph.md#priority-labels-and-estimate)).
-Not yet: writing them back to a tracker, filtering or sorting by them, the
-Board card and the phone.
+The Board card shows the priority and the estimate, the Work list row an
+urgent or high priority; the phone shows all
+three on the task page, read only (fleet-mobile #270). The Work view sorts
+by priority (`sort: priority`, urgent first, none last) and filters by one
+(`filters.priority`, `none` for tasks with none; the Planning picker and
+`priority:` in the search). The phone filters by priority (fleet-mobile
+#274), sorts by it on a hub from 0.6.5 (#276) and its My work card leads
+with an urgent or high one (#279). The Work list row also shows a due date,
+red once it has passed (none on a done task). The task page's subtask list flags an
+urgent or high subtask and one past its due date (the hub sends
+`due_at` and `priority` on each subtask). The Work view filters by a
+label (`filters.label`, any case; the Planning picker from the page's
+`facets.labels`, and `label:` in the search). The phone sets priority,
+labels and estimate in its Edit sheet (fleet-mobile #283, #284). Not yet:
+writing them back to a tracker, filtering by estimate.
 
 Task result, completion gate and follow-ups (spec
 `docs/superpowers/specs/2026-10-13-task-result-handover-design.md`, plans
@@ -814,8 +838,8 @@ shows as *Result* on the task page, above *Last outcome* (D6). Not built
 (the spec's §4, ordered in its §7): results from every dispatch and child
 results to the parent, asking about a result, Create PR / Merge PR buttons,
 one automation policy, lifecycle hooks and skills per task, Jev context
-selection, project memory, sub-agent results, action detection, and the
-phone.
+selection, project memory, sub-agent results, action detection. The phone
+shows the result read only on its task screen (fleet-mobile #271).
 
 The Jev evaluation (TypeSafe's decision model as an optional reader for
 closed-set decisions) has started with a local language census: `fleet-hub
@@ -934,7 +958,7 @@ link) even when the task is shared with sessions it cannot drive
 (`own_session_works_on`); any other sprint or release membership stays a
 person's, a task in a mission stays its owner's (`require_mission_change`),
 and `bucket_admin`, `hold` and `done_when` still refuse a per-host token. Not yet: the new task's brief
-waiting for the next prompt (J3), own tasks in ⌘K.
+waiting for the next prompt (J3). (Own tasks are in ⌘K, under *My tasks*.)
 C0: the operator is born with the `fleet-brainstorm` skill
 (`skills/fleet-brainstorm/SKILL.md`, written to its directory's
 `.claude/skills/` by `operator::operator_files`, so no catalog sync is
@@ -1093,7 +1117,7 @@ planner's `create_item` may name `touches` (repository paths or globs the
 task changes); a task whose touches meet an open run's in the same
 repository waits (a task that names none is not held), and a lane starts
 beside another of its repository only when both name every task's touches
-and they do not meet. The task row says what a task changes. A mission's worker is refused a person's
+and they do not meet. The task row says what a task changes. Lanes L6: Missions → Compare sets the missions that ran side by side with the median per mode (`src/lib/mission_compare.ts`), the measuring runbook is §7.1 of the lanes design, and `scripts/hub-e2e.sh` §11 runs a two-task lane over real tmux. The default stays `item` until the owner has measured. Mission improvements M1 (design 2026-10-26, migration 214, `store/task_cost.rs`): a lane task records its lead's spend when it is handed over (`tasks.cost_start_micros`), and the Work view splits a lead's spend by its tasks instead of counting it whole on each. M3 (migration 215, `store/mission_waits.rs`, `orchestrate/waits.rs`): the loop books why ready work waits (person, grant, limit, brake, slot, lane, touches) on every tick and state change; `work { mission }` carries `stats.waits`, shown in the room's stats line and as Compare's "Waited most". M2 (`service/work/dep_work.rs`): a task's first implementation starts from its done dependencies' branches whose pull request is not merged (the first as its base, the others merged into the new checkout before the prompt), and a lane merges what a task depends on in another lane before handing it over; a branch that does not merge cleanly is backed out of and left to the worker, and the task's `start_head` is read after the merges. M7: fleet installs a `SubagentStart` hook (hosts pick it up on re-provisioning) and journals `subagent_started` quietly on the timeline; a mission's task row and `stats.subagents` count the ones started during each attempt, and Compare shows subagents per task. M5: with `policy.lane_test_at = lane` ("Tests run: at the lane's end", only in lane execution) a task waiting for its test does not hold its lane, the lane runs one test once all its tasks are implemented, and a passing run that ran a task's command answers that task's `test:` line for every task of the lane; a failure retries only the tested task. M4 (migration 216, `orchestrate/lane_pr.rs`): with `policy.lane_pr = draft` ("Lane PR: fleet opens a draft", off by default) the loop pushes a lane's branch up to its newest done task's commit and opens or refreshes its draft pull request with `gh` (`mission_lanes.pr_url`, a "lane PR" link on the task row); ready and merge stay a person's. M6 (`service/work/build_cache.rs`): with `orchestrator.build_cache` (off, experimental) a mission run's session, and a new lane lead, gets `RUSTC_WRAPPER=sccache` in its environment when its host has `sccache` (probed once an hour); a host without it runs as before. A mission's worker is refused a person's
 step (`gh pr merge` / `ready`, a push to `main` / `master`, a tracker CLI)
 by fleet's `PreToolUse(Bash)` guard (`orchestrate/guard.rs`): a shell
 prefilter that asks the hub only about those commands and lets the command
@@ -1141,8 +1165,11 @@ ce84e5d28 (migration 201) they also include more session kinds
 (`fleet_events`, written by `service/fleet_events.rs`'s watcher and by
 `set_mission_state`): `host_offline` / `host_online` / `host_low`,
 `account_limited` / `account_available`, `login_signed_out`,
-`mission_done` / `mission_failed`; any event routine but an account or
-mission one may narrow to one host (`event_host`). The scheduler stops on
+`mission_done` / `mission_failed`, and since migration 213 the ticket
+events `ticket_done` / `check_passed` / `check_failed` of the AI check on
+done (work-graph.md; built, OFF per project until a person turns it on);
+any event routine but an account, mission or ticket one may narrow to one
+host (`event_host`). The scheduler stops on
 `automation.paused`, a fire past the routine's day budget is skipped, a run
 past its run budget fails and pauses the routine, and a run whose account
 is at or past `accounts.pause_at` is skipped (8.7). M15 G3.8 (migration
@@ -1178,6 +1205,14 @@ once the run finishes; `memory_auto` also notes each finished run in it. The
 routine editor's Memory group picks them and shows the saved notebooks to
 read, edit or clear (`routines { memory | set_memory }`). Off by default
 per routine. The phone shows nothing of it yet.
+Routine seen items (migration 212, `routines/seen.rs`): a routine remembers
+what its runs already handled (`pr owner/repo#12 | head=… checks=…`); each
+run is shown the list, skips what did not change and reports what it looked
+at in a `<routine-seen>` block, and a run with nothing new or changed comes
+to `nothing`, out of the Inbox. On for every routine (the editor's Memory
+group turns it off and lists or forgets the items). The Sessions list (desktop
+and phone) folds routine sessions into one Routines section, one group per
+routine, and a routine session's finished turn no longer notifies.
 
 The prompt tuner is landed and OFF by default (`work.prompt_tune`;
 `service/prompt_tune.rs`, `PromptTune.svelte`, mechanics in
@@ -1348,7 +1383,9 @@ most `max_rounds` times), and the gallery's `pr-reviewer` and
 `pr-test-debate`, which share a store of accepted test exemptions; a
 definition's `limits.daily_budget_usd` (a UTC day's cap on one instance's
 runs, past it a job waits for the next day) with `limits.budget_input` to
-lower it per instance. All the
+lower it per instance; the grant form's *this instance's own secrets*
+switch (generated `AGENT_<INSTANCE>_<ROLE>_<NAME>` secret names per MCP
+binding). All the
 migration's steps are built; deleting the built-in agents and converting
 their rules waits on the definitions having run for real.
 

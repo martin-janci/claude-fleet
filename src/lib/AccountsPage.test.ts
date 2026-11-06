@@ -418,7 +418,7 @@ describe('AccountsPage automatic switching', () => {
       expect(inv).toHaveBeenCalledWith('auto_switch_account', { args: { enabled: false } }),
     );
     await waitFor(() => expect(box.checked).toBe(false));
-    expect(screen.getByTestId('accounts-auto-switch').textContent).toContain('wait for you');
+    expect(screen.getByTestId('accounts-auto-switch').textContent).toContain('wait until you switch them');
     expect((screen.getByTestId('accounts-auto-switch-continue') as HTMLInputElement).disabled).toBe(true);
   });
 

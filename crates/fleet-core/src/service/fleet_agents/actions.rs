@@ -47,23 +47,33 @@ pub fn marker(instance: &str) -> String {
     format!("{MARKER_PREFIX}{instance}]")
 }
 
+/// PURE: `text` fitted to `max` characters with instance `instance`'s
+/// marker line after it.
+fn marked(text: &str, instance: &str, max: usize) -> String {
+    let mark = format!("\n\n{}", marker(instance));
+    format!(
+        "{}{mark}",
+        fit(text, max.saturating_sub(mark.chars().count()))
+    )
+}
+
 /// Whether a comment is a fleet agent's own.
 pub fn is_agent_comment(body: &str) -> bool {
     body.contains(MARKER_PREFIX)
 }
 
-/// PURE: a comment's text without the fleet agents' markers in it.
+/// PURE: a comment's text without the fleet agents' markers in it. A marker
+/// prefix with no closing `]` is not a marker (a person quoting one): it and
+/// what follows stay.
 pub fn without_markers(body: &str) -> String {
     let mut out = String::new();
     let mut rest = body;
     while let Some(at) = rest.find(MARKER_PREFIX) {
+        let Some(end) = rest[at..].find(']') else {
+            break;
+        };
         out.push_str(&rest[..at]);
-        match rest[at..].find(']') {
-            Some(end) => rest = &rest[at + end + 1..],
-            None => {
-                rest = "";
-            }
-        }
+        rest = &rest[at + end + 1..];
     }
     out.push_str(rest);
     out.trim().to_string()
@@ -175,6 +185,10 @@ pub struct PrReviewPayload {
     pub event: String,
     pub body: String,
     pub findings: Vec<ReviewFinding>,
+    /// The findings past [`MAX_REVIEW_COMMENTS`], listed in the body: kept
+    /// so the review remembers them all (`remembered_review`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub listed: Vec<ReviewFinding>,
 }
 
 /// Most line comments one `pr_review` posts; the rest go into its body.
@@ -364,7 +378,7 @@ pub fn remembered_review(p: &PrReviewPayload, event: &str, id: i64, now: i64) ->
         // GitHub's id, while the review stands (`runner`'s reverify).
         "id": id,
         "verified_at": now,
-        "findings": p.findings.iter().map(|f| json!({
+        "findings": p.findings.iter().chain(&p.listed).map(|f| json!({
             "path": f.path, "line": f.line, "blocking": f.blocking,
         })).collect::<Vec<_>>(),
     })
@@ -374,7 +388,10 @@ pub fn remembered_review(p: &PrReviewPayload, event: &str, id: i64, now: i64) ->
 /// (`agents::review::post::adjust_verdict`) against the previous review's
 /// findings and the answer's `resolutions` of them: REQUEST_CHANGES while a
 /// blocking one is resolved `open` (or not at all), and a COMMENT with
-/// nothing blocking left an APPROVE. No previous findings: `said`.
+/// nothing blocking left an APPROVE. An answer that resolves nothing while a
+/// previous finding was blocking does not approve (APPROVE is COMMENT): the
+/// reviewer's own adjustment lets it through, but nothing says the blocker
+/// was looked at. No previous findings: `said`.
 pub fn adjusted_verdict(
     said: &str,
     previous: &Value,
@@ -418,6 +435,9 @@ pub fn adjusted_verdict(
     });
     if !res.is_empty() && !settled {
         return "REQUEST_CHANGES".into();
+    }
+    if res.is_empty() && !settled && said == "APPROVE" {
+        return "COMMENT".into();
     }
     if said == "COMMENT" && settled && !findings.iter().any(|f| f.blocking) {
         return "APPROVE".into();
@@ -747,11 +767,7 @@ pub fn plan(
                     if key.is_empty() || text.is_empty() {
                         return Err(skip("the target or the body is empty"));
                     }
-                    let mark = format!("\n\n{}", marker(instance));
-                    let body = format!(
-                        "{}{mark}",
-                        fit(&text, max.saturating_sub(mark.chars().count()))
-                    );
+                    let body = marked(&text, instance, max);
                     let p = CommentPayload {
                         action: a.id.clone(),
                         tracker,
@@ -876,11 +892,7 @@ pub fn plan(
                     }
                     // The marker counts the instance's rounds in the thread
                     // and keeps its own reply from starting another.
-                    let mark = format!("\n\n{}", marker(instance));
-                    let body = format!(
-                        "{}{mark}",
-                        fit(&text, max.saturating_sub(mark.chars().count()))
-                    );
+                    let body = marked(&text, instance, max);
                     let p = PrReplyPayload {
                         action: a.id.clone(),
                         repo,
@@ -933,11 +945,8 @@ pub fn plan(
                             ),
                             None => r(&a.verdict),
                         };
-                        let more: Vec<String> = findings
-                            .split_off(findings.len().min(MAX_REVIEW_COMMENTS))
-                            .iter()
-                            .map(listed_finding)
-                            .collect();
+                        let listed = findings.split_off(findings.len().min(MAX_REVIEW_COMMENTS));
+                        let more: Vec<String> = listed.iter().map(listed_finding).collect();
                         // Unattended only when it is sent with no person: a
                         // person approving it at `propose` signs the verdict.
                         let event =
@@ -963,10 +972,20 @@ pub fn plan(
                             event,
                             body,
                             findings,
+                            listed,
                         };
                         return Ok((serde_json::to_string(&p).unwrap_or_default(), shown));
                     }
                     if a.kind == ActionKind::PrDescription {
+                        let first = ctx["subject"]["previous"].is_null();
+                        // `subject.has_description` (the runner reads it):
+                        // a description someone wrote stays, so nothing is
+                        // proposed that sending would expire.
+                        if ctx["subject"]["has_description"] == json!(true)
+                            && !(a.overwrite && first)
+                        {
+                            return Err(skip("the pull request has a description"));
+                        }
                         let body = fit(&body_text(), max);
                         if body.is_empty() {
                             return Err(skip("the body is empty"));
@@ -981,7 +1000,7 @@ pub fn plan(
                                 .to_string(),
                             body: body.clone(),
                             overwrite: a.overwrite,
-                            first: ctx["subject"]["previous"].is_null(),
+                            first,
                         };
                         return Ok((serde_json::to_string(&p).unwrap_or_default(), body));
                     }
@@ -990,11 +1009,7 @@ pub fn plan(
                         if text.is_empty() {
                             return Err(skip("the body is empty"));
                         }
-                        let mark = format!("\n\n{}", marker(instance));
-                        let body = format!(
-                            "{}{mark}",
-                            fit(&text, max.saturating_sub(mark.chars().count()))
-                        );
+                        let body = marked(&text, instance, max);
                         let p = PrCommentPayload {
                             action: a.id.clone(),
                             repo,
@@ -1424,7 +1439,13 @@ impl FleetExecutor {
 
     /// Send a `pr_reply`: only into a thread that is still there, on a pull
     /// request still open; resolving it (`resolve`) after the reply.
-    async fn send_reply(&self, rule: &AgentRuleRow, repo: &str, p: PrReplyPayload) -> ActionResult {
+    async fn send_reply(
+        &self,
+        rule: &AgentRuleRow,
+        inst: &Instance,
+        repo: &str,
+        p: PrReplyPayload,
+    ) -> ActionResult {
         let host = &rule.host_alias;
         match self.host.open_prs(host, repo).await {
             Ok(open) if open.iter().any(|o| o.number == p.number) => {}
@@ -1438,6 +1459,29 @@ impl FleetExecutor {
         let Some(root) = thread.iter().find(|c| c.id == p.root_id) else {
             return ActionResult::Expired("the thread is gone".into());
         };
+        // The poll counted the rounds when it found the reply; another job
+        // on the same thread may have answered since.
+        let mark = marker(&rule.scope);
+        let mut answers: Vec<_> = thread
+            .iter()
+            .filter(|c| c.in_reply_to == Some(p.root_id))
+            .collect();
+        answers.sort_by_key(|c| c.id);
+        let rounds = answers.iter().filter(|c| c.body.contains(&mark)).count();
+        let max_rounds = inst
+            .loaded()
+            .definition
+            .trigger
+            .max_rounds
+            .unwrap_or(super::definition::DEFAULT_MAX_ROUNDS);
+        if rounds >= max_rounds {
+            return ActionResult::Expired(format!("answered {rounds} times already"));
+        }
+        if answers.last().is_some_and(|c| c.body.contains(&mark)) {
+            return ActionResult::Expired(
+                "the thread's last word is already this instance's".into(),
+            );
+        }
         let req = crate::service::agents::review::debate::DebateReply {
             host: host.clone(),
             repo: repo.to_string(),
@@ -1852,7 +1896,7 @@ impl FleetExecutor {
                     if !fits(&p.body) {
                         return refuse(format!("the reply is over {max} characters"));
                     }
-                    return self.send_reply(rule, &repo, p).await;
+                    return self.send_reply(rule, inst, &repo, p).await;
                 }
                 if def_action.kind == ActionKind::PrDescription {
                     let p = payload!(PrDescriptionPayload);

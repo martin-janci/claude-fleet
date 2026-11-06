@@ -112,6 +112,7 @@ pnpm test                       # frontend (Vitest), all of it
 cargo deny check                # licenses + advisories (cargo install cargo-deny --locked)
 cargo build -p fleet-hub --locked   # headless hub (no Tauri libs needed)
 scripts/hub-e2e.sh               # real fleet-hub/-agent e2e; needs tmux, opt-in via ci-local.sh --hub-e2e
+node scripts/federation-e2e.mjs  # the window vs fake hubs in Chromium, screenshots + checks (docs/federation-e2e.md)
 ```
 
 The Rust toolchain is pinned in `rust-toolchain.toml` (bump it in its own PR,

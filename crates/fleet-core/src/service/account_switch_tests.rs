@@ -230,16 +230,53 @@ fn a_dozen_sessions_on_a_spent_account_do_not_all_pile_onto_one_login() {
 #[test]
 fn a_login_whose_reading_went_stale_is_no_target() {
     let (s, _, _) = fleet();
-    // spare's poll has been failing for a day; its 10% is a day old.
+    // spare's poll has been failing for two days; its 10% is that old,
+    // past even an idle login's allowance.
     s.conn_for_test()
         .execute(
             "UPDATE account_usage_snapshots SET fetched_at = ?1 WHERE account_uuid = 'acct-spare'",
-            [NOW - 86_400],
+            [NOW - IDLE_TARGET_SECS - 86_400],
         )
         .unwrap();
     let p = plan_now(&s);
     assert_eq!(p.len(), 1);
     assert_eq!(p[0].target.profile.as_deref(), Some("work"));
+}
+
+#[test]
+fn an_idle_logins_old_reading_still_makes_it_a_target() {
+    let (s, _, _) = fleet();
+    // Nothing runs on spare: its access token lapsed overnight, so its
+    // 10% is twenty hours old; work runs a session and read an hour ago.
+    session(&s, "s2", "acct-work", None);
+    s.conn_for_test()
+        .execute(
+            "UPDATE account_usage_snapshots SET fetched_at = ?1 WHERE account_uuid = 'acct-spare'",
+            [NOW - 20 * 3600],
+        )
+        .unwrap();
+    let p = plan_now(&s);
+    assert_eq!(p.len(), 1);
+    assert_eq!(p[0].target.profile.as_deref(), Some("spare"));
+}
+
+#[test]
+fn a_busy_logins_old_reading_is_no_target() {
+    let (s, _, _) = fleet();
+    // A session runs on spare, so its two-hour-old 10% may be far behind.
+    session(&s, "s2", "acct-spare", None);
+    s.conn_for_test()
+        .execute(
+            "UPDATE account_usage_snapshots SET fetched_at = ?1 WHERE account_uuid = 'acct-spare'",
+            [NOW - 2 * 3600],
+        )
+        .unwrap();
+    let p = plan_now(&s);
+    assert!(
+        p.iter()
+            .all(|x| x.target.profile.as_deref() != Some("spare")),
+        "{p:?}"
+    );
 }
 
 #[test]

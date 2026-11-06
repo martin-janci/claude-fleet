@@ -369,6 +369,9 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ("request_work_result", Verdict::Routed { tool: "work_link" }),
     ("work_result", Verdict::Routed { tool: "work" }),
     ("create_followup_task", Verdict::Routed { tool: "work_link" }),
+    // AI check on done: Test now / Rerun, and a project's switch.
+    ("run_ticket_check", Verdict::Routed { tool: "work_link" }),
+    ("set_ticket_check", Verdict::Routed { tool: "work_link" }),
     // Work graph M13.4c: a Claude-written summary of past work (on demand,
     // D10). Routed: the run happens on the session's own host, which the
     // hub reaches.
@@ -1430,6 +1433,12 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         "set_account_nickname",
         Verdict::Routed {
             tool: "set_account_nickname",
+        },
+    ),
+    (
+        "set_account_projects",
+        Verdict::Routed {
+            tool: "set_account_projects",
         },
     ),
     // ── account usage ───────────────────────────────────────────────────────

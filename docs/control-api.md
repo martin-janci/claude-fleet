@@ -372,7 +372,10 @@ Index by area (names only; see the reference for details):
   a project: `{host_alias, confidence_pct, run_id}` or null; a person's
   device only, never a per-host token; hub contract 17),
   `list_accounts`, `set_account_nickname` (an account's label on every
-  device; a fleet admin's devices, contract 17), `account_usage` (each account's latest plan usage: the
+  device; a fleet admin's devices, contract 17), `set_account_projects`
+  (the projects an account is forbidden for: work in one never starts,
+  resumes or switches onto a login on it, `E_ACCOUNT_FORBIDDEN`; a
+  person's device only), `account_usage` (each account's latest plan usage: the
   5-hour and weekly windows with their reset times, status and when it was
   fetched, as the hub's usage poll last answered; never fetches; hub
   contract 11), `check_account_headroom` (whether starting or switching a
@@ -726,7 +729,7 @@ Index by area (names only; see the reference for details):
   the top into `container`, a Jira project key, an Asana project gid, a
   Linear team key or a GitHub `owner/repo` — and
   the task becomes that ticket once the outbox sends it; `work { task }`
-  answers `promotion` and `promote_targets`). `work { action: "tracker_comments", key }` reads a
+  answers `promotion` and `promote_targets`, and with no target `promote_hint`: what would bring one). `work { action: "tracker_comments", key }` reads a
   ticket's own comments live (newest 50, oldest first, no cache; the ones
   fleet posted from a live comment left out; bodies fenced for a per-host
   token; `can_post` says whether the caller may post there), and for Asana
@@ -1090,11 +1093,13 @@ Index by area (names only; see the reference for details):
   201, `service::fleet_events`) are about a host, an account or a mission
   rather than a session: `host_offline`, `host_online`, `host_low` (disk
   or memory), `account_limited`, `account_available`, `login_signed_out`,
-  `mission_done`, `mission_failed`; each is written once when the
+  `mission_done`, `mission_failed`, and the ticket events `ticket_done`,
+  `check_passed`, `check_failed` (work-graph.md, *AI check on done*);
+  each is written once when the
   condition starts (and for a host down or an account at its limit, once
   when it ends), a flapping one again only after ten minutes, and fires a
   routine of the org it belongs to (a mission's, only its owner's). Any
-  event routine may set `event_host` (not on an account or mission event):
+  event routine may set `event_host` (not on an account, mission or ticket event):
   only a host event of that host, a session on it, a PR seen there; and
   `event_rate_secs` (up to a week): at most one run per PR, per session,
   or per host, account or mission, in that window; a fire inside it is
@@ -1120,8 +1125,8 @@ Index by area (names only; see the reference for details):
   whose prompt could not be typed fails with `E_PROMPT_NOT_DELIVERED`,
   fix: open its session). A run is `done` when its session's first turn finishes,
   `failed` on an error, a lost or removed session, six quiet hours, or a
-  session past the run budget (which also turns the routine off with
-  `paused_reason`), and `skipped` when the last run is still going under
+  session past the run budget (which also stops its turn and turns the
+  routine off with `paused_reason`), and `skipped` when the last run is still going under
   `overlap: skip`, today's budget is spent, the account its login bills
   is at or past `accounts.pause_at` (Orbit Fleet 8.7, read from the stored
   usage readings), or a person skipped it.
@@ -1197,6 +1202,20 @@ Index by area (names only; see the reference for details):
   use or text past the cap). Deleting a routine deletes its own notebook;
   its project's stays until the project is removed. The operator may
   read them, fenced as untrusted text, not write them.
+  Seen items (migration 212, `routines/seen.rs`): `track_seen` (on unless
+  turned off; absent keeps a routine's) has each run's prompt list the
+  items earlier runs handled, `item | state`, fenced as untrusted text, and
+  ask the run to skip one whose state is the same now and to end its reply
+  with a `<routine-seen>` block, one `item | state` line per item it looked
+  at. The same read as the notebooks records each (new, changed or the
+  same; the item lower-cased), drops an item no run reported for 30 days
+  and keeps the last 500; a done run whose block names nothing new or
+  changed comes to `nothing` (rule), so it stays out of the Inbox, unless
+  something already said otherwise. `seen { routine_id, limit? }` answers
+  `{ routine_id, track_seen, items: [{ item, state, first_seen_at, seen_at,
+  changed_at, run_id? }], total, may_change }`, the last seen first;
+  `forget_seen { routine_id, text? }` forgets that item, or all, with the
+  fence of changing the routine.
 - **Start rules** — `start_rules`, by `action` (Orbit Fleet 8.11): a task
   key pattern (`PD-*`, `*` for any run of characters, any case) that names
   the project, and optionally the host, a start of a matching task lands
@@ -1506,12 +1525,12 @@ derive from them.
   urgent first: `waiting` (blocked on a dialog), `stuck` (`stuck_kind` says
   which), `host_down` (the session's host was pinged and did not answer),
   `account_limit` (its account's 5-hour or weekly window is used up and the
-  session is not working), `no_credentials` (its account's login has
+  session is not working), `no_credentials` (the session's login on its host was seen signed out, or its account's login has
   expired or its token was rejected, and the session is not working), `stop_failed` (the
   last turn ended in an API error; re-prompt),
-  `failed` (a pane-less agent reported failure), `context_full` (context at or
+  `failed` (a pane-less agent reported failure), `context_full` (not idle, context at or
   past `health.context_red_pct`), `stale_working` (the demotion above),
-  `ci_failing` (idle with failing PR checks), `probably_waiting` (contract
+  `ci_failing` (idle with failing checks on a PR that is still open), `probably_waiting` (contract
   15: Jev read the end of a silent turn as a question; a proposal, never
   counted as Needs you) and `lifecycle` (a failed or
   pending safe kill, a ghost, a lost row). `since` is when the session
@@ -1519,7 +1538,7 @@ derive from them.
   reason puts it in: `action_required`, `failed`, `blocked` (`host_down`,
   `account_limit`, `no_credentials`), `proposed` (`probably_waiting`) or
   `paused` (`lifecycle`). A `needs_attention=true` listing includes
-  `probably_waiting` rows; the Needs you count is the first three states.
+  `probably_waiting` rows and leaves out `paused` ones; the Needs you count is the first three states.
 - **`waiting_on`** (on a mission row, contract 15): why an active mission
   waits on a person: `question` (an open `ask` card), `sign_grant` (it asks
   for autonomy and no live grant covers its plan) or `confirm` (open cards
@@ -1976,7 +1995,7 @@ timeline instead of a reply. See `docs/hub.md` → *Link two hubs*.
    profile whose entry is already current is not rewritten. A profile added
    after the last full provisioning gets the entry at the next one.
 4. **`~/.tmux.conf` clipboard passthrough** — ensures `set -g set-clipboard on` is present (appended if missing, file created if absent) so OSC 52 clipboard writes from inside tmux reach the host clipboard.
-5. **Hooks in `~/.claude/settings.json`** — merges fleet's `Stop`, `UserPromptSubmit`, `PostToolUse(EnterWorktree|ExitWorktree|TaskCreate|TaskUpdate|TodoWrite)`, `SessionEnd(logout|prompt_input_exit|other|clear|resume)`, `StopFailure`, `Notification(permission_prompt|elicitation_dialog|elicitation_url_dialog|quota_auto_resume_stale|quota_auto_resume_disabled|quota_auto_resume_fired)`, `PreCompact` and `PostCompact` hooks as Claude Code `type: "http"` hooks, leaving the user's own hooks alone. Each entry POSTs the hook payload to `http://127.0.0.1:<port>/hook` with `"headers": { "Authorization": "Bearer <host-token>" }` and a 5 s timeout — the token never appears in a process argv. `SessionStart` is the one event Claude Code refuses to fire as `type: "http"`, so it is instead installed as an async `curl` command hook that reads its bearer header from `~/.claude/fleet-hook.headers` (mode `0600`) rather than embedding it in the command string (see *Hook contract*). On a remote host the URL's `127.0.0.1:<port>` is the reverse tunnel's loopback end (step 6); on a `fleet-hub` daemon with a public URL, the URL is that public URL's `/hook` instead (e.g. `https://fleet.example.com/hook`) and no tunnel is used. The one exception is an agent host whose `fleet-agent` runs the hook relay: its hooks post to `http://127.0.0.1:<hook_port>/hook` (4181 by default), which the agent forwards to the public `/hook`, because Claude Code refuses an http hook whose host resolves to a private address (see [`hub.md`](hub.md) → *The hook relay*). Any older fleet entry for the same port (including the pre-0.3 `curl … /hook?token=` command form) is replaced, so re-running upgrades in place; the file and the headers file are written `0600`. Required for `safe_kill_session` to finalize, for real-time `idle` / `working` status, `turn_seq`, task completion and conversation tracking (`session_conversations`) on every host that runs Claude Code. **Settings → Install Hook (local)** performs only this step for the `local` host, using the `local` host token. **Hosts provisioned before the `UserPromptSubmit` hook existed must be re-provisioned** (no rotate needed) to get the busy signal; until then their status only flips to `working` on the next reconcile pass. **Hosts provisioned before the `SessionEnd` / `StopFailure` / `Notification` hooks existed must be re-provisioned** to get `stopped`, API-error turn completion and hook-driven `blocked`. **Hosts provisioned before the `SessionStart` / `PreCompact` / `PostCompact` hooks existed must be re-provisioned** to get conversation tracking across `/clear`, `/resume` and compaction (see *Hook contract*). **Hosts provisioned before the task-tool matcher (`TaskCreate|TaskUpdate|TodoWrite`) existed must be re-provisioned** to capture agent steps live; until then (the host reads `provision_stale`) the Stop hook backfills them from the transcript tail. The worker guard (orchestration §7.2) is a `PreToolUse(Bash)` command hook: a `case` prefilter posts the hook body synchronously (1 s connect, 3 s cap, `|| true`) only for a command that mentions `gh pr`, `git … push` or a tracker CLI, and prints the hub's answer — `permissionDecision: "deny"` for a mission's worker running a person's step, nothing otherwise. **Hosts provisioned before it existed must be re-provisioned** to get it.
+5. **Hooks in `~/.claude/settings.json`** — merges fleet's `Stop`, `UserPromptSubmit`, `PostToolUse(EnterWorktree|ExitWorktree|TaskCreate|TaskUpdate|TodoWrite)`, `SessionEnd(logout|prompt_input_exit|other|clear|resume)`, `StopFailure`, `Notification(permission_prompt|elicitation_dialog|elicitation_url_dialog|quota_auto_resume_stale|quota_auto_resume_disabled|quota_auto_resume_fired)`, `PreCompact` and `PostCompact` hooks as Claude Code `type: "http"` hooks, leaving the user's own hooks alone. Each entry POSTs the hook payload to `http://127.0.0.1:<port>/hook` with `"headers": { "Authorization": "Bearer <host-token>" }` and a 5 s timeout — the token never appears in a process argv. `SessionStart` is the one event Claude Code refuses to fire as `type: "http"`, so it is instead installed as an async `curl` command hook that reads its bearer header from `~/.claude/fleet-hook.headers` (mode `0600`) rather than embedding it in the command string (see *Hook contract*). On a remote host the URL's `127.0.0.1:<port>` is the reverse tunnel's loopback end (step 6); on a `fleet-hub` daemon with a public URL, the URL is that public URL's `/hook` instead (e.g. `https://fleet.example.com/hook`) and no tunnel is used. The one exception is an agent host whose `fleet-agent` runs the hook relay: its hooks post to `http://127.0.0.1:<hook_port>/hook` (4181 by default), which the agent forwards to the public `/hook`, because Claude Code refuses an http hook whose host resolves to a private address (see [`hub.md`](hub.md) → *The hook relay*). Any older fleet entry for the same port (including the pre-0.3 `curl … /hook?token=` command form) is replaced, so re-running upgrades in place; the file and the headers file are written `0600`. Required for `safe_kill_session` to finalize, for real-time `idle` / `working` status, `turn_seq`, task completion and conversation tracking (`session_conversations`) on every host that runs Claude Code. **Settings → Install Hook (local)** performs only this step for the `local` host, using the `local` host token. **Hosts provisioned before the `UserPromptSubmit` hook existed must be re-provisioned** (no rotate needed) to get the busy signal; until then their status only flips to `working` on the next reconcile pass. **Hosts provisioned before the `SessionEnd` / `StopFailure` / `Notification` hooks existed must be re-provisioned** to get `stopped`, API-error turn completion and hook-driven `blocked`. **Hosts provisioned before the `SessionStart` / `PreCompact` / `PostCompact` hooks existed must be re-provisioned** to get conversation tracking across `/clear`, `/resume` and compaction (see *Hook contract*). **Hosts provisioned before the task-tool matcher (`TaskCreate|TaskUpdate|TodoWrite`) existed must be re-provisioned** to capture agent steps live; until then (the host reads `provision_stale`) the Stop hook backfills them from the transcript tail. The worker guard (orchestration §7.2) is a `PreToolUse(Bash)` command hook: a `case` prefilter posts the hook body synchronously (1 s connect, 3 s cap, `|| true`) only for a command that mentions `gh pr`, `git … push` or a tracker CLI, and prints the hub's answer — `permissionDecision: "deny"` for a mission's worker running a person's step, nothing otherwise. A tracker CLI that only reads (`jira issue view`, `acli jira workitem search`, `linear issue list`: its verb, the first of its words before any flag that names no object like `issue` or `workitem`, is `list`, `ls`, `view`, `show`, `get`, `search`, `me`, `serverinfo` or `version`, so a summary or a flag's value never reads as one) is the worker's own; every other tracker command is a person's step. **Hosts provisioned before it existed must be re-provisioned** to get it.
 6. **Reverse SSH tunnel** (remote hosts only, loopback hubs only) — starts an `ssh -R` tunnel so the remote host's `127.0.0.1:<port>` is forwarded to the central machine's MCP server. The server stays bound to `127.0.0.1` on the central machine; remote hosts reach it only through this authenticated tunnel. A `fleet-hub` daemon configured with a public URL skips this step entirely — every host already reaches the hub's public address directly.
 
 **After provisioning, each host must restart Claude** to load the MCP server (skill files and CLAUDE.md are picked up live, but the MCP server entry requires a restart).
@@ -2023,7 +2042,7 @@ reported. `fleet_health.hosts[]` judges them per host:
 | `disk_low` | `disk_home_pct >= health.disk_low_pct` (default 90). |
 | `claude_behind` | More than `health.claude_max_behind` (default 30) patch releases behind the fleet's newest version among stamps younger than 24 h. |
 | `agent_behind` | An agent host whose agent is not the hub's version (the live registry outranks the stored hello). |
-| `hooks_silent` | Reachable, with a live non-external session, and no hook from its token within `health.hooks_silent_secs` (default 1 h). |
+| `hooks_silent` | Reachable, with a non-external session that is `working` or ended a turn within `health.hooks_silent_secs` (default 1 h), and no hook from its token in that time. Idle, failed, stopped and blocked sessions call no hooks, so they do not count. |
 | `cpu_pct` | CPU busy percent over the last interval, rounded: the `/proc/stat` delta between two samples on Linux, summed `ps` %CPU over the online CPUs on macOS. Absent when unknown. |
 | `mem_used_pct` | Used percent of physical memory (`MemAvailable` on Linux, `kern.memorystatus_level` on macOS). |
 | `mem_pressure` | 0–100: PSI `some avg10` of `/proc/pressure/memory` on Linux; the macOS pressure level (normal 0, warn 50, critical 100). Absent when the kernel cannot tell. |
@@ -2075,6 +2094,7 @@ the session continues.
 | `Notification` | `quota_auto_resume_disabled` | same | `blocked` | `notification` — type |
 | `Notification` | `quota_auto_resume_fired` | same | `working`, stuck cleared | `notification` — type |
 | `PostToolUse` | `EnterWorktree\|ExitWorktree` | `tool_name`, `tool_input`, `tool_response` | worktree row registered / removed | — |
+| `SubagentStart` | all | `session_id`, `agent_type` | none | `subagent_started` — type (quiet: no live event) |
 | `PreToolUse` | `Bash` (command hook, prefiltered) | `tool_name`, `tool_input.command` | none; answers `deny` for a mission's worker running a person's step (orchestration §7.2) | — |
 | `PromptSuggestion` | — (fleet's plugin, not a settings hook) | `session_id`, `suggestion` | `prompt_suggestion` set on the current conversation's row (one line, at most 300 chars, no bidi or zero-width characters); dropped while the row is `working` (a late POST the next prompt overtook); the next `UserPromptSubmit`, `Stop`/`StopFailure`, a genuine `SessionStart` or `SessionEnd` clears it | — |
 

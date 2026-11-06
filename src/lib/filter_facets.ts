@@ -21,6 +21,7 @@ import {
   HAS_FILTER_LABELS,
   normalizeFilters,
   STATUS_FILTER_LABELS as WORK_STATUS_LABELS,
+  WORK_PRIORITY_FILTER_LABELS,
   WORK_STAGE_LABELS,
   type WorkTreeFilters,
 } from './work_view';
@@ -121,6 +122,8 @@ export type WorkFacetId =
   | 'iteration'
   | 'epic'
   | 'item_type'
+  | 'priority'
+  | 'label'
   | 'query';
 
 export interface WorkFacetNames {
@@ -161,6 +164,8 @@ export function workFacets(f: WorkTreeFilters, names: WorkFacetNames = {}): (Fac
     out.push({ id: 'epic', label: `Epic: ${title ? `${n.epic} ${title}` : n.epic}` });
   }
   if (n.item_type) out.push({ id: 'item_type', label: `Type: ${n.item_type}` });
+  if (n.priority) out.push({ id: 'priority', label: n.priority === 'none' ? 'No priority' : `Priority: ${WORK_PRIORITY_FILTER_LABELS[n.priority]}` });
+  if (n.label) out.push({ id: 'label', label: `Label: ${n.label}` });
   if (n.query) out.push({ id: 'query', label: `Search: “${n.query}”` });
   return out;
 }

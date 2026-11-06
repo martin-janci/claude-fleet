@@ -26,6 +26,8 @@ struct Base {
     log: Mutex<Vec<String>>,
     /// Writes sent, in order.
     writes: Mutex<Vec<(i64, WriteOp)>>,
+    /// What `prepare` answers; `Ready` when unset.
+    prepared: Mutex<Option<Prepared>>,
 }
 
 #[async_trait::async_trait]
@@ -48,10 +50,12 @@ impl SupportHost for Base {
         _: &str,
         root: &str,
         job_id: i64,
-        branch: &str,
+        branch: Option<&str>,
     ) -> Result<(Prepared, String), IpcError> {
+        let branch = branch.unwrap_or("<default>");
         self.log.lock().unwrap().push(format!("prepare {branch}"));
-        Ok((Prepared::Ready, workspace::workspace_dir(root, job_id)))
+        let prepared = self.prepared.lock().unwrap().unwrap_or(Prepared::Ready);
+        Ok((prepared, workspace::workspace_dir(root, job_id)))
     }
     async fn run(&self, _: &str, run: &PrintRun, prompt: &str) -> Result<PrintOutcome, IpcError> {
         // What the run's token opens while it runs.
@@ -483,6 +487,13 @@ fn finish_done(s: &Store, id: i64, result: Option<String>, now: i64) {
 }
 
 impl Fx {
+    /// A poll at `at`, its cursor 100 s before.
+    async fn poll_at(&self, at: i64) -> crate::service::agents::Polled {
+        self.poller()
+            .poll(&self.rule, Some(&self.cursor(at - 100, None)), at)
+            .await
+            .unwrap()
+    }
     fn poller(&self) -> FleetPoller {
         FleetPoller {
             store: Arc::clone(&self.store),
@@ -1402,11 +1413,7 @@ async fn a_pr_answer_comments_and_labels_within_the_repos() {
     *f.world.prs.lock().unwrap() = vec![pr(4, "abc", false)];
     // The kept subject lives from now (the run reads it at now).
     let now = crate::store::now_unix();
-    let polled = f
-        .poller()
-        .poll(&f.rule, Some(&f.cursor(now - 100, None)), now)
-        .await
-        .unwrap();
+    let polled = f.poll_at(now).await;
     let jobs = f.claim(&polled.jobs);
     *f.world.base.answer.lock().unwrap() = Some(PrintOutcome::Answered {
         text: r#"{"summary":"Looks fine","risky":true}"#.into(),
@@ -1513,11 +1520,7 @@ async fn reviewed(f: &Fx, answer: &str) -> crate::store::AgentActionRow {
     *f.world.prs.lock().unwrap() = vec![pr(4, "abc", false)];
     *f.world.diff.lock().unwrap() = REVIEW_DIFF.into();
     let now = crate::store::now_unix();
-    let polled = f
-        .poller()
-        .poll(&f.rule, Some(&f.cursor(now - 100, None)), now)
-        .await
-        .unwrap();
+    let polled = f.poll_at(now).await;
     let jobs = f.claim(&polled.jobs);
     *f.world.base.answer.lock().unwrap() = Some(PrintOutcome::Answered {
         text: answer.into(),
@@ -2467,6 +2470,7 @@ fn placing_a_review_keeps_the_body_plan_fitted() {
             body: "Off by one.".into(),
             blocking: false,
         }],
+        listed: Vec::new(),
     };
     let req = place_review(&p, "", "[fleet-agent:inst]", max);
     assert!(req.body.contains("… and 3 more findings"), "{}", req.body);
@@ -2487,6 +2491,57 @@ fn a_late_scan_reaches_back_to_the_previous_one() {
     assert_eq!(scan_from(60, Some(now - 1800), now), now - 3600);
     assert_eq!(scan_from(60, Some(now - 3900), now), now - 3900);
     assert_eq!(scan_from(60, Some(0), now), now - 10_080 * 60);
+}
+
+/// Without `run.branch` the worktree is origin's default branch, whatever
+/// it is called (papayapos-backend's is `develop`, and it has no `main`);
+/// a branch origin does not have fails the job for good, not three times.
+#[tokio::test]
+async fn a_run_without_a_branch_takes_origins_default_and_a_missing_one_is_permanent() {
+    let f = fx(
+        l2(),
+        json!({ "jira_tracker": "3", "project": "L2S", "phrases": "Tech help!" }),
+        json!([
+            { "role": "logs", "server": "graylog", "name": "logs-prod",
+              "env": { "GRAYLOG_API_TOKEN": "${GRAYLOG_PROD_TOKEN}" } },
+            { "role": "kb", "server": "kb" },
+            { "role": "memory", "namespace": "rule" }
+        ]),
+        true,
+    );
+    *f.world.base.threads.lock().unwrap() = vec![thread(&[("1", "Tech help!", 1500)])];
+    *f.world.base.answer.lock().unwrap() = Some(PrintOutcome::Answered {
+        text: GOOD.into(),
+        cost_micros: 1,
+    });
+    let job = |key: &str| crate::store::NewAgentJob {
+        rule_id: f.rule.id,
+        agent: AGENT.into(),
+        subject: "tracker:3:L2S-7".into(),
+        trigger: "comment".into(),
+        dedup_key: key.into(),
+        not_before: 0,
+    };
+    let first = f.claim(&[job("c1")]);
+    assert!(matches!(
+        f.runner().run(&first[0], Some(&f.rule)).await,
+        RunOutcome::Done { .. }
+    ));
+    let log = f.world.base.log.lock().unwrap().clone();
+    assert!(log.contains(&"prepare <default>".to_string()), "{log:?}");
+    finish_done(
+        &f.store.lock().unwrap(),
+        first[0].id,
+        None,
+        crate::store::now_unix(),
+    );
+
+    *f.world.base.prepared.lock().unwrap() = Some(Prepared::NoRef);
+    let second = f.claim(&[job("c2")]);
+    match f.runner().run(&second[0], Some(&f.rule)).await {
+        RunOutcome::Failed { kind, .. } => assert_eq!(kind, ErrorKind::Permanent),
+        other => panic!("{other:?}"),
+    }
 }
 
 /// `run.branch` picks the worktree's branch, and `run.cooldown_secs` defers
@@ -2676,10 +2731,11 @@ async fn the_support_definition_fingerprints_links_and_files_once() {
     assert_eq!(
         states(&r),
         [
+            ("remember".to_string(), "approved".to_string()),
             ("comment".to_string(), "approved".to_string()),
             ("similar".to_string(), "pending".to_string())
         ],
-        "a similar bug is linked by a person, and no new bug is filed"
+        "remembered; a similar bug is linked by a person, and no new bug is filed"
     );
 
     // No open bug like it: a high-confidence bug is filed, a person approving.
@@ -2705,6 +2761,7 @@ async fn the_support_definition_fingerprints_links_and_files_once() {
     assert_eq!(
         states(&r),
         [
+            ("remember".to_string(), "approved".to_string()),
             ("comment".to_string(), "approved".to_string()),
             ("known".to_string(), "approved".to_string())
         ]
@@ -2826,11 +2883,7 @@ diff --git a/docs/x.md b/docs/x.md\n--- a/docs/x.md\n+++ b/docs/x.md\n@@ -1 +1 @
         cost_micros: 0,
     });
     let now = crate::store::now_unix();
-    let polled = f
-        .poller()
-        .poll(&f.rule, Some(&f.cursor(now - 100, None)), now)
-        .await
-        .unwrap();
+    let polled = f.poll_at(now).await;
     let jobs = f.claim(&polled.jobs);
     let out = f.runner().run(&jobs[0], Some(&f.rule)).await;
     assert!(matches!(out, RunOutcome::Done { .. }), "{out:?}");
@@ -2859,11 +2912,7 @@ async fn a_diff_github_will_not_serve_is_skipped_and_a_missing_pr_is_permanent()
     let f = head_fx();
     *f.world.prs.lock().unwrap() = vec![pr(4, "abc", false)];
     let now = crate::store::now_unix();
-    let polled = f
-        .poller()
-        .poll(&f.rule, Some(&f.cursor(now - 100, None)), now)
-        .await
-        .unwrap();
+    let polled = f.poll_at(now).await;
     let jobs = f.claim(&polled.jobs);
     *f.world.diff_refusal.lock().unwrap() =
         Some("HTTP 406: Sorry, the diff exceeded the maximum number of lines".into());
@@ -2891,11 +2940,7 @@ async fn a_comment_on_an_open_pr_carries_its_head() {
     };
     *f.world.comments.lock().unwrap() = vec![c(1, 4), c(2, 9)];
     let now = crate::store::now_unix();
-    let polled = f
-        .poller()
-        .poll(&f.rule, Some(&f.cursor(now - 100, None)), now)
-        .await
-        .unwrap();
+    let polled = f.poll_at(now).await;
     assert_eq!(polled.jobs.len(), 2);
     let kept = |job: &crate::store::NewAgentJob| {
         let s = f.store.lock().unwrap();
@@ -2979,11 +3024,7 @@ async fn answered_at(
     *f.world.prs.lock().unwrap() = vec![pr(4, sha, false)];
     *f.world.diff.lock().unwrap() = REVIEW_DIFF.into();
     let now = crate::store::now_unix();
-    let polled = f
-        .poller()
-        .poll(&f.rule, Some(&f.cursor(now - 100, None)), now)
-        .await
-        .unwrap();
+    let polled = f.poll_at(now).await;
     let jobs = f.claim(&polled.jobs);
     let job = jobs
         .iter()
@@ -3063,11 +3104,9 @@ async fn a_review_remembers_its_findings_and_the_next_verdict_waits_on_them() {
     .await;
     let p: Value = serde_json::from_str(&open["pr_review"].payload).unwrap();
     assert_eq!(p["event"], "REQUEST_CHANGES", "a person sends it: {p}");
-    // Not the first review any more: a description is left alone.
-    assert!(matches!(
-        ex.execute(&open["pr_description"]).await,
-        ActionResult::Expired(e) if e.contains("has a description")
-    ));
+    // Not the first review any more: a description is left alone, and
+    // nothing is proposed that sending would expire.
+    assert!(!open.contains_key("pr_description"), "{:?}", open.keys());
 }
 
 #[test]
@@ -3105,6 +3144,43 @@ fn the_verdict_is_adjusted_against_the_previous_review() {
         adjusted_verdict("COMMENT", &Value::Null, &res("open"), &[]),
         "COMMENT",
         "no previous review"
+    );
+    assert_eq!(
+        adjusted_verdict("APPROVE", &prev, &json!(null), &[]),
+        "COMMENT",
+        "a blocker not looked at is not approved over"
+    );
+    let settled = json!({ "findings": [{ "path": "src/b.rs", "line": 9, "blocking": false }] });
+    assert_eq!(
+        adjusted_verdict("APPROVE", &settled, &json!(null), &[]),
+        "APPROVE"
+    );
+}
+
+#[test]
+fn a_review_remembers_the_findings_past_its_line_comments_too() {
+    use super::actions::{remembered_review, PrReviewPayload, ReviewFinding};
+    let f = |line: u32, blocking: bool| ReviewFinding {
+        path: "src/a.rs".into(),
+        line,
+        body: "x".into(),
+        blocking,
+    };
+    let p = PrReviewPayload {
+        action: "review".into(),
+        repo: "acme/pos".into(),
+        number: 4,
+        sha: "abc".into(),
+        event: "COMMENT".into(),
+        body: "b".into(),
+        findings: vec![f(1, false)],
+        listed: vec![f(33, true)],
+    };
+    let r = remembered_review(&p, "COMMENT", 7, 100);
+    assert_eq!(r["findings"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        r["findings"][1],
+        json!({ "path": "src/a.rs", "line": 33, "blocking": true })
     );
 }
 
@@ -3164,13 +3240,7 @@ async fn a_dismissed_review_is_made_again_at_the_same_head() {
     ));
     let now = crate::store::now_unix();
     let f = &f;
-    let poll = |at: i64| async move {
-        f.poller()
-            .poll(&f.rule, Some(&f.cursor(at - 100, None)), at)
-            .await
-            .unwrap()
-            .jobs
-    };
+    let poll = |at: i64| async move { f.poll_at(at).await.jobs };
     // Too soon: the review is not looked up.
     f.world.gh_writes.lock().unwrap().clear();
     assert!(poll(now + 30).await.is_empty());
@@ -3189,6 +3259,21 @@ async fn a_dismissed_review_is_made_again_at_the_same_head() {
         .lock()
         .unwrap()
         .contains(&"state r77".to_string()));
+    // The look-up rewrites the record, and keeps which job wrote it.
+    let record = f
+        .store
+        .lock()
+        .unwrap()
+        .agent_record(
+            &subjects_namespace(f.rule.id),
+            super::actions::REVIEW_KIND,
+            &super::actions::review_key("acme/pos", 4),
+            now + 120,
+        )
+        .unwrap()
+        .unwrap();
+    assert!(record.value.contains("verified_at"), "{}", record.value);
+    assert_eq!(record.written_by_job, Some(a.job_id));
     // Dismissed: made again at the same head, once.
     f.world
         .review_states
@@ -3225,10 +3310,7 @@ fn rc(
 
 /// The gallery's pr-test-debate definition at act, on acme/pos.
 fn debate_fx() -> Fx {
-    let seed = super::gallery::SEEDS
-        .iter()
-        .find(|s| s.name == "pr-test-debate")
-        .unwrap();
+    let seed = super::gallery::seed("pr-test-debate").unwrap();
     let l = seed.asset().unwrap().fleet_agent().unwrap();
     let f = fx(
         l,
@@ -3255,19 +3337,19 @@ async fn a_reply_to_a_missing_test_finding_is_judged_and_a_concession_kept() {
         rc(31, Some(30), "agreed", "User"),
     ];
     let now = crate::store::now_unix();
-    let polled = f
-        .poller()
-        .poll(&f.rule, Some(&f.cursor(now - 100, None)), now)
-        .await
-        .unwrap();
+    let polled = f.poll_at(now).await;
     assert_eq!(polled.jobs.len(), 1, "{:?}", polled.jobs);
     let jobs = f.claim(&polled.jobs);
     *f.world.base.answer.lock().unwrap() = Some(PrintOutcome::Answered {
         text: r#"{"decision":"concede","reply":"Fair: tests/a.rs covers c().","reason":"covered by tests/a.rs"}"#.into(),
         cost_micros: 0,
     });
+    // A push since the poll: the reply is judged at the new head, not skipped.
+    *f.world.prs.lock().unwrap() = vec![pr(4, "def", false)];
     let out = f.runner().run(&jobs[0], Some(&f.rule)).await;
     assert!(matches!(out, RunOutcome::Done { .. }), "{out:?}");
+    let log = f.world.base.log.lock().unwrap().clone();
+    assert!(log.contains(&"prepare_pr #4@def".to_string()), "{log:?}");
     let (_, prompt) = f.world.base.last.lock().unwrap().clone().unwrap();
     assert!(
         prompt.contains("cover c()") && prompt.contains("It is covered by tests/a.rs"),
@@ -3275,13 +3357,10 @@ async fn a_reply_to_a_missing_test_finding_is_judged_and_a_concession_kept() {
     );
     assert!(!prompt.contains("[fleet-agent:rv]"), "markers are left out");
     let actions = f.actions();
-    let kinds: Vec<&str> = actions.iter().map(|a| a.kind.as_str()).collect();
+    let mut kinds: Vec<&str> = actions.iter().map(|a| a.kind.as_str()).collect();
+    kinds.sort();
     assert_eq!(
-        {
-            let mut k = kinds.clone();
-            k.sort();
-            k
-        },
+        kinds,
         vec!["pr_reply", "record"],
         "the hold reply is not planned"
     );
@@ -3347,15 +3426,23 @@ async fn a_reply_to_a_missing_test_finding_is_judged_and_a_concession_kept() {
         done.jobs.is_empty(),
         "two rounds: the thread is the people's"
     );
+    // A reply planned before those rounds is not sent past them.
+    let reply = f
+        .actions()
+        .into_iter()
+        .find(|a| a.kind == "pr_reply")
+        .unwrap();
+    assert!(matches!(
+        f.executor().execute(&reply).await,
+        ActionResult::Expired(e) if e.contains("answered 2 times")
+    ));
 }
 
 #[test]
 fn the_reviewer_pair_ships_in_the_gallery() {
     use definition::TriggerSource;
     let load = |name: &str| {
-        super::gallery::SEEDS
-            .iter()
-            .find(|s| s.name == name)
+        super::gallery::seed(name)
             .unwrap()
             .asset()
             .unwrap()
@@ -3383,7 +3470,20 @@ fn the_reviewer_pair_ships_in_the_gallery() {
         "they share the exemptions"
     );
     assert!(db.definition.stores[0].shared_by_default && rv.definition.stores[0].shared_by_default);
-    assert!(super::actions::without_markers("a [fleet-agent:x] b\n\n[fleet-agent:y]") == "a  b");
+}
+
+#[test]
+fn a_reply_is_read_without_the_agents_markers() {
+    use super::actions::without_markers;
+    assert_eq!(
+        without_markers("a [fleet-agent:x] b\n\n[fleet-agent:y]"),
+        "a  b"
+    );
+    assert_eq!(
+        without_markers("why quote [fleet-agent: like this? the rest stays"),
+        "why quote [fleet-agent: like this? the rest stays",
+        "an unclosed marker is a person's text"
+    );
 }
 
 #[test]
@@ -3436,11 +3536,7 @@ async fn a_spent_day_budget_holds_the_next_run_until_tomorrow() {
         async move {
             *f.world.prs.lock().unwrap() = vec![pr(4, sha, false)];
             *f.world.diff.lock().unwrap() = REVIEW_DIFF.into();
-            let polled = f
-                .poller()
-                .poll(&f.rule, Some(&f.cursor(now - 100, None)), now)
-                .await
-                .unwrap();
+            let polled = f.poll_at(now).await;
             let jobs = f.claim(&polled.jobs);
             let job = jobs
                 .iter()
@@ -3494,6 +3590,11 @@ fn an_instance_may_lower_its_budget_never_raise_it() {
     let l = limits(Some("budget"));
     assert_eq!(l.budget_micros(&values(json!({}))), Some(10_000_000));
     assert_eq!(
+        l.budget_micros(&values(json!({ "budget": 0 }))),
+        Some(10_000_000),
+        "0 would hold every run for good: it is no value"
+    );
+    assert_eq!(
         l.budget_micros(&values(json!({ "budget": 2.5 }))),
         Some(2_500_000)
     );
@@ -3540,4 +3641,126 @@ fn an_instance_may_lower_its_budget_never_raise_it() {
     );
     let p = problems(json!({ "budget_input": "budget" }));
     assert!(p.iter().any(|p| p.contains("set it")), "{p:?}");
+}
+
+#[test]
+fn a_context_lookup_may_find_a_pull_requests_own_records() {
+    let problems = |lookup: Value| {
+        let d = definition::parse_value(&json!({
+            "stores": [{ "role": "ex", "kind": "fleet", "label": "Ex" }],
+            "trigger": { "source": "github_prs", "repo": "acme/pos" },
+            "run": { "workspace": "home", "context": [lookup], "output_schema": { "type": "object",
+                "required": ["summary"], "properties": { "summary": { "type": "string" } } } }
+        }))
+        .unwrap();
+        definition::problems(&d, &BTreeMap::new())
+    };
+    assert_eq!(
+        problems(json!({ "store": "ex", "find": "{{subject.repo}}#{{subject.number}}:" })),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        problems(json!({ "store": "ex", "find": "x", "recent": 50 })),
+        Vec::<String>::new()
+    );
+    assert!(
+        problems(json!({ "store": "ex", "find": "x", "recent": 99 }))
+            .iter()
+            .any(|p| p.contains("recent is 1-50"))
+    );
+    assert!(problems(json!({ "store": "ex", "key": "k", "find": "x" }))
+        .iter()
+        .any(|p| p.contains("give key, find, prefix or recent")));
+    assert_eq!(
+        problems(
+            json!({ "store": "ex", "prefix": "{{subject.repo}}#{{subject.number}}:", "recent": 50 })
+        ),
+        Vec::<String>::new()
+    );
+    assert!(
+        problems(json!({ "store": "ex", "find": "x", "prefix": "y" }))
+            .iter()
+            .any(|p| p.contains("not both"))
+    );
+}
+
+/// A scheduled agent proposes the same Jira change every tick while the
+/// first proposal waits: the very same payload is not queued again, and a
+/// newer wording for the same issue replaces the older (2026-11-06, seven
+/// identical "Call jira.jira_update_issue" cards).
+#[test]
+fn a_repeated_proposal_does_not_queue_twice() {
+    let s = Store::open_in_memory().unwrap();
+    let rule = NewAgentRule {
+        agent: "fleet".into(),
+        scope: "triage".into(),
+        level: "propose".into(),
+        host_alias: "local".into(),
+        project_id: None,
+        config: "{}".into(),
+        granted_by: "console".into(),
+        granted_at: 100,
+        expires_at: None,
+        definition: Some("jira-triage".into()),
+        bindings: "[]".into(),
+    };
+    let rid = s.grant_agent_rule(&rule).unwrap();
+    let job = |at: i64| crate::store::NewAgentJob {
+        rule_id: rid,
+        agent: "fleet".into(),
+        subject: format!("schedule:{at}"),
+        trigger: "schedule".into(),
+        dedup_key: format!("r{rid}:schedule:{at}"),
+        not_before: 0,
+    };
+    s.record_agent_poll(rid, 1000, None, &[job(1000), job(2000), job(3000)])
+        .unwrap();
+    let mut jobs: Vec<i64> = s
+        .list_agent_jobs(None, 10)
+        .unwrap()
+        .iter()
+        .map(|j| j.id)
+        .collect();
+    jobs.sort_unstable();
+    let call = |key: &str, status: &str| {
+        json!({ "action": "move", "store": "jira", "binding": "jira", "tool": "jira_update_issue",
+                "arguments": { "issue_key": key, "fields": { "status": status } }, "body": "" })
+        .to_string()
+    };
+    assert_eq!(
+        queue_pending(&s, rid, jobs[0], "mcp_call", &call("PD-1", "Done"), 10),
+        "pending"
+    );
+    assert_eq!(
+        queue_pending(&s, rid, jobs[0], "mcp_call", &call("PD-2", "Done"), 10),
+        "pending"
+    );
+    let first = s.pending_agent_actions_of_rule(rid, "mcp_call").unwrap();
+    assert_eq!(first.len(), 2);
+
+    // The next tick proposes PD-1 again, word for word: nothing new waits.
+    let again = queue_pending(&s, rid, jobs[1], "mcp_call", &call("PD-1", "Done"), 20);
+    assert_eq!(again, format!("already waiting as #{}", first[0].id));
+    assert_eq!(s.count_agent_actions("pending").unwrap(), 2);
+
+    // A different change to PD-2 replaces the one waiting.
+    assert_eq!(
+        queue_pending(&s, rid, jobs[2], "mcp_call", &call("PD-2", "In review"), 30),
+        "pending"
+    );
+    let now = s.pending_agent_actions_of_rule(rid, "mcp_call").unwrap();
+    assert_eq!(now.len(), 2);
+    assert!(now.iter().all(|a| a.id != first[1].id));
+    let old = s
+        .list_agent_actions(Some("expired"), 10)
+        .unwrap()
+        .into_iter()
+        .find(|a| a.id == first[1].id)
+        .unwrap();
+    assert!(old.error.unwrap().contains("replaced by"));
+
+    // Where each came from, for the cards.
+    let origins = s.agent_action_origins(&[now[0].id]).unwrap();
+    assert_eq!(origins[0].rule_id, Some(rid));
+    assert_eq!(origins[0].subject, "schedule:1000");
 }

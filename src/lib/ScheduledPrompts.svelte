@@ -4,10 +4,10 @@
   // a scheduled prompt was invisible on the desktop once the Undo toast went:
   // withdrawing it needed the phone or MCP.
   import { untrack } from 'svelte';
-  import { cancelQueuedPrompt, queuedPrompts, type QueuedPrompt } from './sessions';
+  import { cancelQueuedPrompt, queuePrompt, queuedPrompts, type QueuedPrompt } from './sessions';
   import { scheduledWhen, waitingPrompts } from './send_later';
   import { heldPreview } from './composer_hold';
-  import { pushError } from './toasts';
+  import { push, pushError } from './toasts';
   import { hubActionBlocked, hubStatus } from './hub';
   import { hubConnection } from './hub_connection';
   import { sessionIdBlocked } from './share';
@@ -95,6 +95,26 @@
     const r = await cancelQueuedPrompt(owner, q.id);
     cancelling = null;
     if (!r.ok) pushError(r.error, 'Could not cancel it');
+    else {
+      // A cancel throws away words the person wrote: Undo queues them again
+      // with the same timing (a time already passed sends when idle).
+      push({
+        kind: 'info',
+        message: 'Scheduled prompt cancelled',
+        sub: heldPreview(q.body),
+        action: { label: 'Undo', run: () => void restore(owner, q) },
+      });
+    }
+    if (sessionId === owner) await load(owner);
+  }
+
+  async function restore(owner: number, q: QueuedPrompt) {
+    const r = await queuePrompt(owner, q.body, {
+      ...(q.not_before != null ? { notBefore: q.not_before } : {}),
+      untilLimitReset: !!q.until_limit_reset,
+      skipIfArchived: !!q.skip_if_archived,
+    });
+    if (!r.ok) pushError(r.error, 'Could not schedule it again');
     if (sessionId === owner) await load(owner);
   }
 </script>

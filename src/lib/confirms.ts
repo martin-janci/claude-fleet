@@ -173,6 +173,7 @@ function normalise(p: Partial<ConfirmRequest> & { nonce: string; tool: string })
     caller: p.caller ?? '',
     operator: p.operator ?? false,
     asked_at: p.asked_at ?? 0,
+    ...(p.about ? { about: p.about } : {}),
   };
 }
 

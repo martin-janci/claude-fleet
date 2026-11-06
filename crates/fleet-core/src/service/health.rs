@@ -136,6 +136,12 @@ pub struct Health {
     /// runs. Not sent when empty.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub playbooks_week: BTreeMap<String, u32>,
+    /// The hub's own disk and backups (`service::hub_storage`, hardening
+    /// survey 2026-10-26): free space under its data dir and its newest
+    /// backup, each flagged past its warning line. `None` (not sent) on a
+    /// desktop, for a scoped caller and from an older hub.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage: Option<crate::service::hub_storage::StorageHealth>,
 }
 
 /// [`Health::devices`].
@@ -247,8 +253,10 @@ pub struct HostHealthRow {
     pub claude_behind: bool,
     /// An agent host whose agent is older than the hub (not merely different).
     pub agent_behind: bool,
-    /// Reachable, has a live non-external session, and no hook from its
-    /// token within `hooks_silent_secs`.
+    /// Reachable, has a non-external session that is working or ended a
+    /// turn within `hooks_silent_secs`, and no hook from its token within
+    /// `hooks_silent_secs`. Idle, failed, stopped and blocked sessions call
+    /// no hooks, so they are not evidence.
     pub hooks_silent: bool,
     /// What the last provisioning warned about, when it delivered the content
     /// but degraded part way (migration 092) — the `ag` launcher did not
@@ -473,9 +481,18 @@ pub fn hosts_health(
                 .find(|(a, _)| a == &h.alias)
                 .map(|(_, v)| v.clone());
             let agent_version = live.or_else(|| h.agent_version.clone());
-            let has_live_session = sessions
-                .iter()
-                .any(|s| s.host_alias == h.alias && s.status != "ghost" && s.kind != "external");
+            // Evidence that hooks should have arrived: a session working
+            // now, or one whose turn ended within the window. An idle,
+            // failed, stopped or blocked session calls no hook, so it says
+            // nothing about whether the host's hooks still work.
+            let hooks_expected = sessions.iter().any(|s| {
+                s.host_alias == h.alias
+                    && s.status != "ghost"
+                    && s.kind != "external"
+                    && (s.claude_status.as_deref() == Some("working")
+                        || s.last_turn_at
+                            .is_some_and(|at| now - at <= t.hooks_silent_secs))
+            });
             HostHealthRow {
                 alias: h.alias.clone(),
                 reachable: h.reachable,
@@ -493,7 +510,7 @@ pub fn hosts_health(
                 },
                 agent_behind: agent_behind(&h.transport, agent_version.as_deref(), hub_version),
                 hooks_silent: h.reachable
-                    && has_live_session
+                    && hooks_expected
                     && h.last_hook_at
                         .is_none_or(|at| now - at > t.hooks_silent_secs),
                 provision_warning: h.provision_warning.clone(),
@@ -1010,6 +1027,15 @@ pub enum HealthView {
     Blank,
 }
 
+impl HealthView {
+    /// Whether this view reads the hub's OWN health (its decision envelope,
+    /// its storage): the master and a person's device do, a per-host token
+    /// and an org-bound client do not.
+    pub fn reads_the_hubs_own(&self) -> bool {
+        matches!(self, HealthView::Fleet | HealthView::Person(_))
+    }
+}
+
 /// `usage_by_day` for a person's own device (multi-user M1, T8d).
 ///
 /// `usage_daily` is keyed by `(day, host_alias, backfill)`: there is no
@@ -1051,18 +1077,29 @@ fn health_at(
     tunnels: std::collections::HashMap<String, crate::service::tunnel::TunnelHealth>,
     now: i64,
 ) -> Health {
-    // TODO(T3): once IpcError exists, surface the failure reason here
-    // instead of silently falling back to schema_version=0 / db_ready=false.
-    let schema_version = s.schema_version().unwrap_or(0);
+    let schema_version = s.schema_version().unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "[health] cannot read the schema version");
+        0
+    });
     // Cached reconcile state only — no network / reconcile here. On a read
-    // error, fall back to empty slices so health still reports core fields.
+    // error, fall back to empty slices so health still reports core fields,
+    // and say the store is not ready: an empty fleet read from a store that
+    // cannot answer read as healthy, with no hosts and nothing wrong.
+    let mut reads_ok = true;
     let (sessions, hosts) = if matches!(view, HealthView::Blank) {
         (Vec::new(), Vec::new())
     } else {
-        (
-            s.list_all_sessions().unwrap_or_default(),
-            s.list_hosts().unwrap_or_default(),
-        )
+        let sessions = s.list_all_sessions().unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "[health] cannot read the sessions");
+            reads_ok = false;
+            Vec::new()
+        });
+        let hosts = s.list_hosts().unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "[health] cannot read the hosts");
+            reads_ok = false;
+            Vec::new()
+        });
+        (sessions, hosts)
     };
     let red = context_red_pct(s);
     // The live agents are overlaid by `fleet_health`, which holds the
@@ -1128,8 +1165,9 @@ fn health_at(
                 .into_iter()
                 .filter(|r| view.sees_session_row(r).is_visible())
                 .collect();
-            // `hooks_silent` is computed from `has_live_session` — "does
-            // ANYBODY have a live session on this host" — so the rows are
+            // `hooks_silent` is computed from `hooks_expected` — "does
+            // ANYBODY have a session on this host that should be sending
+            // hooks" — so the rows are
             // rebuilt over the sessions this caller may see, exactly as the
             // `Person` arm does. Rebuilt over EVERY host (`all_hosts`) and
             // narrowed afterwards, which is the order the pass at the top
@@ -1175,8 +1213,9 @@ fn health_at(
                 .filter(|r| person.sees_session_row(r).is_visible())
                 .collect();
             // `hosts[]` is a fleet operation and is not narrowed — but
-            // `hooks_silent` is computed from `has_live_session`, i.e. "does
-            // ANYBODY have a live session on this host", which is one bit
+            // `hooks_silent` is computed from `hooks_expected`, i.e. "does
+            // ANYBODY have a session on this host that should be sending
+            // hooks", which is one bit
             // wider than rule 6's per-host count of `unclaimed` rows. Rebuild
             // the rows over the sessions this person may see (multi-user M1,
             // T9b); every other field of a `HostHealthRow` comes from the
@@ -1209,7 +1248,7 @@ fn health_at(
         version: crate::app_version::get().to_string(),
         tunnels: Default::default(),
         tunnels_flapping: 0,
-        db_ready: schema_version >= 1,
+        db_ready: reads_ok && schema_version >= 1,
         schema_version,
         hosts_reachable: summary.hosts_reachable,
         hosts_total: summary.hosts_total,
@@ -1234,12 +1273,11 @@ fn health_at(
         peer_links_total: s.peer_links_total().unwrap_or_default(),
         updates: None,
         hosts: host_rows,
-        // The decision envelope is the hub's own business: a scoped view
-        // gets none of it (`fleet_health` also drops it for those callers).
         // The decision envelope is the HUB's own health, not anybody's
         // session: the master and a person's device read it, a per-host token
-        // and an org-bound client do not.
-        decide: if matches!(view, HealthView::Fleet | HealthView::Person(_)) {
+        // and an org-bound client do not (`fleet_health` also drops it for
+        // those callers).
+        decide: if view.reads_the_hubs_own() {
             crate::service::decide::health(s, now)
         } else {
             None
@@ -1255,6 +1293,10 @@ fn health_at(
         automation_paused: crate::service::loops::paused(s),
         devices: None,
         playbooks_week,
+        // The hub's own business, like `decide`; it reads the disk, so the
+        // caller fills it in once the store's lock is released
+        // ([`storage_for`]).
+        storage: None,
     };
     h.set_tunnels(tunnels);
     if matches!(view, HealthView::Blank) {
@@ -1300,9 +1342,27 @@ use crate::store::now_unix;
 pub fn health_check(store: &Mutex<Store>) -> Health {
     // A poisoned store mutex IS an unhealthy state — report db_ready=false
     // rather than panicking the command (which the old `.expect` did).
-    match store.lock() {
-        Ok(s) => health_from_store(&s),
-        Err(_) => unready_health(),
+    let Ok(s) = store.lock() else {
+        return unready_health();
+    };
+    let mut h = health_from_store(&s);
+    drop(s);
+    h.storage = storage_for(&HealthView::Fleet, now_unix());
+    h
+}
+
+/// The hub's storage health for `view`, read after the store's lock is
+/// released: it reads the disk, and a stalled mount (the hub's data on a
+/// NAS) must not hold every user of the store behind it. `None` for a view
+/// that does not read the hub's own health.
+pub fn storage_for(
+    view: &HealthView,
+    now: i64,
+) -> Option<crate::service::hub_storage::StorageHealth> {
+    if view.reads_the_hubs_own() {
+        crate::service::hub_storage::health(now)
+    } else {
+        None
     }
 }
 
@@ -1338,12 +1398,21 @@ pub fn unready_health() -> Health {
         automation_paused: false,
         devices: None,
         playbooks_week: BTreeMap::new(),
+        storage: None,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The defaults `host_thresholds` falls back to.
+    const THRESHOLDS: HostHealthThresholds = HostHealthThresholds {
+        disk_low_pct: 90,
+        claude_max_behind: 30,
+        hooks_silent_secs: 3600,
+        mem_low_pct: 10.0,
+    };
     use crate::service::tunnel::TunnelHealth;
     use std::collections::HashMap;
     use std::sync::Mutex;
@@ -1508,12 +1577,7 @@ mod tests {
         let rows = hosts_health(
             &[full, fine],
             &sessions,
-            &HostHealthThresholds {
-                disk_low_pct: 90,
-                claude_max_behind: 30,
-                hooks_silent_secs: 3600,
-                mem_low_pct: 10.0,
-            },
+            &THRESHOLDS,
             &[("full".to_string(), "0.2.26".to_string())],
             "0.3.1",
             now,
@@ -1531,6 +1595,51 @@ mod tests {
         let fine = rows.iter().find(|r| r.alias == "fine").unwrap();
         assert_eq!(fine.disk_home_pct, Some(25));
         assert!(!fine.disk_low && !fine.claude_behind && !fine.agent_behind && !fine.hooks_silent);
+    }
+
+    /// Idle, failed, stopped and blocked sessions call no hooks, so a host
+    /// with only those is not hooks silent; a working session or a recent
+    /// turn is evidence.
+    #[test]
+    fn hooks_silent_counts_only_working_or_recent_turns() {
+        let now = 1_700_000_000;
+        let t = THRESHOLDS;
+        let quiet = |alias: &str| {
+            let mut h = host(alias, true);
+            h.last_hook_at = Some(now - 7200);
+            h
+        };
+        let mut old_turn = session_on("dormant", Some("idle"));
+        old_turn.last_turn_at = Some(now - 7200);
+        let mut recent_turn = session_on("turned", Some("idle"));
+        recent_turn.last_turn_at = Some(now - 600);
+        let mut ghost = session_on("ghosted", Some("working"));
+        ghost.status = "ghost".into();
+        let sessions = vec![
+            session_on("dormant", Some("idle")),
+            session_on("dormant", Some("failed")),
+            session_on("dormant", Some("stopped")),
+            session_on("dormant", Some("completed")),
+            session_on("dormant", Some("blocked")),
+            session_on("dormant", None),
+            old_turn,
+            session_on("busy", Some("working")),
+            recent_turn,
+            ghost,
+        ];
+        let hosts: Vec<HostRow> = ["dormant", "busy", "turned", "ghosted"]
+            .into_iter()
+            .map(quiet)
+            .collect();
+        let rows = hosts_health(&hosts, &sessions, &t, &[], "0.3.1", now);
+        let silent = |alias: &str| rows.iter().find(|r| r.alias == alias).unwrap().hooks_silent;
+        assert!(
+            !silent("dormant"),
+            "idle / failed / blocked sessions call no hooks"
+        );
+        assert!(silent("busy"), "a working session and no hook for 2 h");
+        assert!(silent("turned"), "a turn 10 min ago and no hook for 2 h");
+        assert!(!silent("ghosted"), "a ghost row is not evidence");
     }
 
     /// The live registry outranks the stored hello: an agent that
@@ -1587,12 +1696,7 @@ mod tests {
     #[test]
     fn hosts_health_ignores_a_stale_disk_sample() {
         let now = 1_700_000_000;
-        let t = HostHealthThresholds {
-            disk_low_pct: 90,
-            claude_max_behind: 30,
-            hooks_silent_secs: 3600,
-            mem_low_pct: 10.0,
-        };
+        let t = THRESHOLDS;
         let mut stale = host("stale", true);
         stale.disk_home_free_kb = Some(3_000_000);
         stale.disk_home_total_kb = Some(150_000_000);
@@ -2220,6 +2324,21 @@ mod tests {
         assert!(h.by_status.is_empty());
     }
 
+    /// A store that cannot list its hosts is not ready: the empty fleet the
+    /// read falls back to used to come back `db_ready: true`, an all-clear
+    /// with no hosts and nothing wrong.
+    #[test]
+    fn a_failed_read_says_the_store_is_not_ready() {
+        let store = Store::open_in_memory().expect("in-memory store");
+        store
+            .conn_for_test()
+            .execute_batch("ALTER TABLE hosts RENAME TO hosts_unreadable")
+            .expect("rename hosts");
+        let h = health_from_store(&store);
+        assert!(!h.db_ready, "a failed host read must not read as ready");
+        assert_eq!(h.schema_version, crate::store::LATEST_SCHEMA_VERSION);
+    }
+
     /// The hub client deserialises `fleet_health`'s answer into this type. A
     /// `Health` that arrives short of a field must be an ERROR, not a
     /// silently zeroed fleet: `stuck: 0, ghosts: 0, context_red: 0` is the
@@ -2279,6 +2398,7 @@ mod tests {
             automation_paused: false,
             devices: None,
             playbooks_week: BTreeMap::new(),
+            storage: None,
         })
         .expect("Health serialises");
         let back: Health = serde_json::from_str(&whole).expect("a whole Health parses");

@@ -553,6 +553,7 @@ async fn the_owners_trusted_phone_administers_hosts_and_trackers_only() {
         "install_agent",
         "work_admin",
         "set_account_nickname",
+        "set_account_projects",
         "check_host",
     ] {
         assert!(guard::access_allows(&phone, t), "{t}");
@@ -10320,6 +10321,64 @@ async fn an_approved_start_cannot_be_replayed_with_other_arguments() {
     assert_ne!(confirm_nonce_of(&e), nonce);
 }
 
+/// The card says what approving does (`confirm_about`), from the arguments
+/// `call_tool` keeps beside the call: the host and the project by name.
+/// The approval still binds to the summary alone.
+#[tokio::test]
+async fn an_operator_start_card_carries_the_call_in_words() {
+    let (s, pid, _) = two_host_store();
+    let t = guarded_tools(s, true);
+    let args = serde_json::json!({ "host_alias": "hostb", "project_id": pid, "name": "bad name" });
+    let asked = guard::with_call_args(
+        args.clone(),
+        t.new_session(Extension(operator()), Parameters(new_session_params(args))),
+    )
+    .await
+    .unwrap_err();
+    let nonce = confirm_nonce_of(&asked);
+    let card = t
+        .guards
+        .confirms
+        .pending()
+        .into_iter()
+        .find(|c| c.nonce == nonce)
+        .expect("the card");
+    let about = card.about.expect("the call in words");
+    assert_eq!(about.title, "Start a Claude session on hostb");
+    assert!(
+        about
+            .facts
+            .iter()
+            .any(|f| f.label == "Host" && f.value == "hostb"),
+        "{about:?}"
+    );
+    assert!(
+        about
+            .facts
+            .iter()
+            .any(|f| f.label == "Project" && !f.value.starts_with('#')),
+        "{about:?}"
+    );
+    // A call made outside `call_tool` keeps no arguments: no words, the
+    // summary as before.
+    let bare = t
+        .new_session(
+            Extension(operator()),
+            Parameters(new_session_params(
+                serde_json::json!({ "host_alias": "hostb", "project_id": pid, "name": "other" }),
+            )),
+        )
+        .await
+        .unwrap_err();
+    let bare = confirm_nonce_of(&bare);
+    assert!(t
+        .guards
+        .confirms
+        .pending()
+        .iter()
+        .any(|c| c.nonce == bare && c.about.is_none()));
+}
+
 #[test]
 fn start_summaries_bind_every_argument_readably() {
     let p = new_session_params(serde_json::json!({
@@ -13475,6 +13534,19 @@ const WORK_ACTION_NO_GATE: &[(&str, &str, &str)] = &[
         "verify",
         "a person's check of a work ITEM's condition; refused outright to a \
          per-host token and a bound client, as `accept` is",
+    ),
+    (
+        "work_link",
+        "check",
+        "an AI check of a work ITEM's finished work, a headless run with no \
+         worker session; refused outright to a per-host token, a bound client \
+         and the operator, as `verify` is",
+    ),
+    (
+        "work_link",
+        "check_setup",
+        "a project's AI check switch (a project, not a session); refused as \
+         `check` is",
     ),
     (
         "work_link",
@@ -18898,6 +18970,15 @@ async fn fleet_healths_hooks_flag_is_not_an_oracle_for_another_persons_session()
         .upsert_session("a-dev-2", "h2", None, None, 1, 1, "running", None)
         .unwrap();
     assert!(g.store.claim_if_unclaimed(a2, Some(ada)).unwrap());
+    // `hooks_silent` counts only a working session (or a recent turn) as
+    // evidence: an idle one calls no hooks.
+    g.store
+        .conn_ref()
+        .execute(
+            "UPDATE sessions SET claude_status = 'working' WHERE id = ?1",
+            rusqlite::params![a2],
+        )
+        .unwrap();
     let t = test_tools(g.store);
     let flag = |caller: Caller| {
         let t = t.clone();
@@ -18923,7 +19004,7 @@ async fn fleet_healths_hooks_flag_is_not_an_oracle_for_another_persons_session()
     assert_eq!(
         flag(Caller::master()).await,
         serde_json::json!(true),
-        "the operator sees the real flag: a reachable host with a live \
+        "the operator sees the real flag: a reachable host with a working \
          session and no hook traffic is silent (§4.5)"
     );
     assert_eq!(

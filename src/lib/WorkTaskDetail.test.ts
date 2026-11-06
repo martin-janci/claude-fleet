@@ -20,7 +20,15 @@ import { sessions } from './sessions';
 import { selectedSession, clearSelection } from './selection';
 import { session } from './hosts_fixture';
 import { link, task } from './work_view_fixture';
-import { noteWorkChanged, selectedTaskId, workTreeMeta, type OrgImpact, type TaskDetail } from './work_view';
+import {
+  noteWorkChanged,
+  selectedTaskId,
+  sidebarView,
+  workTreeMeta,
+  workViewFilters,
+  type OrgImpact,
+  type TaskDetail,
+} from './work_view';
 import { fleetSettings, SETTING_DEFAULTS } from './fleet_settings';
 import { holdTaskBrief, taskBriefDrafts } from './start_preview';
 
@@ -379,6 +387,12 @@ describe('WorkTaskDetail', () => {
     expect(prio.querySelector('.prio-dot--urgent')).not.toBeNull();
     const labels = screen.getByTestId('work-task-labels');
     expect(Array.from(labels.querySelectorAll('.chip')).map((c) => c.textContent)).toEqual(['billing', 'q4']);
+    // A label opens Work on the tasks carrying it.
+    workViewFilters.set({ priority: 'high', group: 'org:1' });
+    await fireEvent.click(screen.getAllByTestId('work-task-label')[1]);
+    expect(get(workViewFilters)).toEqual({ priority: 'high', label: 'q4' });
+    expect(get(sidebarView)).toBe('work');
+    workViewFilters.set({});
     expect(screen.getByTestId('work-task-estimate').textContent).toBe('3 pts');
     expect(screen.getByTestId('work-task-priority-chip').textContent?.trim()).toBe('Urgent');
     unmount();
@@ -393,6 +407,23 @@ describe('WorkTaskDetail', () => {
     expect(screen.queryByTestId('work-task-priority-chip')).toBeNull();
     expect(screen.queryByTestId('work-task-labels')).toBeNull();
     expect(screen.getByTestId('work-task-estimate').textContent).toBe('4 h');
+  });
+
+  it('the header says when an open task is past its due date, never a done one', async () => {
+    handlers.work_task = () => ({ ...trackerTask, task: { ...trackerTask.task, due_at: '2020-01-02', status_category: 'in_progress' } });
+    const { unmount } = render(WorkTaskDetail, { taskId: 'item:12' });
+    await flush();
+    expect(screen.getByTestId('work-task-overdue-chip').textContent).toBe('Overdue · Jan 2');
+    unmount();
+    handlers.work_task = () => ({ ...trackerTask, task: { ...trackerTask.task, due_at: '2020-01-02', status_category: 'done' } });
+    const done = render(WorkTaskDetail, { taskId: 'item:12' });
+    await flush();
+    expect(screen.queryByTestId('work-task-overdue-chip')).toBeNull();
+    done.unmount();
+    handlers.work_task = () => ({ ...trackerTask, task: { ...trackerTask.task, due_at: '2999-01-02', status_category: 'todo' } });
+    render(WorkTaskDetail, { taskId: 'item:12' });
+    await flush();
+    expect(screen.queryByTestId('work-task-overdue-chip')).toBeNull();
   });
 
   it('a task without priority, labels or estimate shows no such rows', async () => {
@@ -1260,6 +1291,16 @@ describe('WorkTaskDetail', () => {
       await flush();
       expect(screen.queryByTestId('work-task-promote')).toBeNull();
     });
+
+    it('a task no tracker takes yet shows Promote off, saying what turns it on', async () => {
+      const hint = 'To promote it, a tracker admin turns on Create tickets for Jira (acme) in Settings → Trackers.';
+      handlers.work_task = () => ({ ...localTask, promote_hint: hint });
+      render(WorkTaskDetail, { taskId: 'item:77' });
+      await flush();
+      const button = screen.getByTestId('work-task-promote') as HTMLButtonElement;
+      expect(button.disabled).toBe(true);
+      expect(button.getAttribute('title')).toBe(hint);
+    });
   });
 
   describe('G3.4: tabs, Delivery, inline status, the start rule', () => {
@@ -1502,6 +1543,23 @@ describe('WorkTaskDetail', () => {
       render(WorkTaskDetail, { taskId: 'item:12' });
       await flush();
       expect(screen.queryByTestId('work-task-status-pick')).toBeNull();
+    });
+
+    it('a ticket whose tracker takes moves is moved there from the header, its own status name kept in view', async () => {
+      handlers.work_task = () => ({
+        ...trackerTask,
+        task: { ...trackerTask.task, status_movable: true, status_name: 'In Review', status_category: 'in_progress', tracker_name: 'Acme Jira' },
+      });
+      handlers.set_work_status = (a) => ({ id: a.item_id, status_category: a.status });
+      render(WorkTaskDetail, { taskId: 'item:12' });
+      await flush();
+      const pick = screen.getByTestId('work-task-status-pick') as HTMLSelectElement;
+      expect(pick.title).toBe('Move it on Acme Jira');
+      expect(screen.getByTestId('work-task-status').textContent).toBe('In Review');
+      pick.value = 'done';
+      await fireEvent.change(pick);
+      await flush();
+      expect(calls('set_work_status')[0]).toEqual({ item_id: 12, status: 'done' });
     });
 
     it('Delivery names the column, the spend over its span and the owner; the rule names where a start lands', async () => {

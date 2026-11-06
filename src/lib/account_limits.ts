@@ -2,7 +2,10 @@
 // is past `accounts.pause_at`, and which other login there has headroom.
 // Mirrors `service::account_limits`. A hub client asks the hub, which
 // answers from the usage it followed (hub contract 14).
-import { writable } from 'svelte/store';
+import { get, writable } from 'svelte/store';
+import { accounts, accountsForbiddenFor } from './accounts';
+import { orgs, projectOrgId } from './orgs';
+import { projects } from './projects';
 import { invokeCmd, type Result } from './result';
 import { formatResetShort } from './account_usage';
 
@@ -27,9 +30,16 @@ export interface Headroom {
   logins: HostLogin[];
 }
 
-export function checkAccountHeadroom(hostAlias: string, profile: string | null): Promise<Result<Headroom>> {
+/** `projectId`: the project the work is in, so the suggestion is never a
+ *  login on an account it forbids (docs/accounts.md, *Keep an account off a
+ *  project*). Sent only when known: an older hub ignores it either way. */
+export function checkAccountHeadroom(
+  hostAlias: string,
+  profile: string | null,
+  projectId?: number | null,
+): Promise<Result<Headroom>> {
   return invokeCmd<Headroom>('check_account_headroom', {
-    args: { host_alias: hostAlias, profile },
+    args: projectId == null ? { host_alias: hostAlias, profile } : { host_alias: hostAlias, profile, project_id: projectId },
   });
 }
 
@@ -39,10 +49,11 @@ export function loginLabel(l: HostLogin, accountName: (uuid: string) => string):
   return l.profile ? `${l.profile} (${who})` : who;
 }
 
-/** "95% used", "no reading", or "signed out". */
+/** "5% left", "no reading", or "signed out": every usage figure in the app
+ *  reads as % left (review 2026-11-03 D8). */
 export function usedText(l: HostLogin): string {
   if (l.signed_out) return 'signed out';
-  return l.used_pct == null ? 'no reading' : `${Math.round(l.used_pct)}% used`;
+  return l.used_pct == null ? 'no reading' : `${Math.max(0, 100 - Math.round(l.used_pct))}% left`;
 }
 
 /** When a paused row's limit resets, for its Wait button, the Wait toast
@@ -84,10 +95,18 @@ export function waitOut(sessionId: number, resetsAt: number): void {
   waitingOut.update((m) => new Map(m).set(sessionId, resetsAt));
 }
 
+/** The accounts the project forbids, itself or through its org, from the
+ *  accounts, projects and orgs stores. */
+function forbiddenOf(projectId: number | null | undefined): string[] {
+  const p = projectId == null ? undefined : get(projects).find((t) => t.project.id === projectId)?.project;
+  return accountsForbiddenFor(projectId, get(accounts), p ? projectOrgId(p, get(orgs)) : null);
+}
+
 type SwitchSession = {
   host_alias: string;
   claude_profile?: string | null;
   account_uuid?: string | null;
+  project_id?: number | null;
 };
 
 /** Where a paused session would go: the login on its host with the most
@@ -105,17 +124,23 @@ export async function switchCheck(
   sess: SwitchSession,
   opts: { signedOut?: boolean } = {},
 ): Promise<Result<{ target: HostLogin | null; headroom: Headroom | null }>> {
-  const h = await checkAccountHeadroom(sess.host_alias, sess.claude_profile ?? null);
+  const h = await checkAccountHeadroom(sess.host_alias, sess.claude_profile ?? null, sess.project_id);
   if (!h.ok) return h;
   // An empty answer (an older backend): nothing to propose.
   if (!h.value) return { ok: true, value: { target: null, headroom: null } };
-  const headroom = headroomForAccount(h.value, sess.account_uuid);
+  // Never a login on an account the session's project forbids.
+  const forbidden = forbiddenOf(sess.project_id);
+  const headroom = headroomForAccount(h.value, sess.account_uuid, forbidden);
   if (opts.signedOut) {
     // A session whose login is signed out (review w03-3) goes to any other
     // signed-in login with room, whether or not its own account is over.
     const own = sess.claude_profile ?? null;
     const others = headroom.logins.filter(
-      (l) => (l.profile ?? null) !== own && !l.signed_out && (l.used_pct == null || l.used_pct < headroom.pause_at_pct),
+      (l) =>
+        (l.profile ?? null) !== own &&
+        !l.signed_out &&
+        !forbidden.includes(l.account_uuid) &&
+        (l.used_pct == null || l.used_pct < headroom.pause_at_pct),
     );
     return { ok: true, value: { target: freestLogin(others) ?? others[0] ?? null, headroom } };
   }
@@ -155,14 +180,22 @@ type Win = { utilization: number; resets_at: number | null } | null;
  *  start), so when the row names an account the host has a login for, `over`
  *  and the suggestion are read for that account, as `account_limits::
  *  headroom` reads them for a profile (review r05). */
-export function headroomForAccount(h: Headroom, accountUuid: string | null | undefined): Headroom {
+export function headroomForAccount(
+  h: Headroom,
+  accountUuid: string | null | undefined,
+  forbidden: readonly string[] = [],
+): Headroom {
   const chosen = accountUuid ? h.logins.find((l) => l.account_uuid === accountUuid) : undefined;
-  if (!chosen) return h;
+  if (!chosen) {
+    if (h.suggestion && forbidden.includes(h.suggestion.account_uuid)) return { ...h, suggestion: null };
+    return h;
+  }
   const over = chosen.used_pct != null && chosen.used_pct >= h.pause_at_pct;
   let suggestion: HostLogin | null = null;
   if (over) {
     for (const l of h.logins) {
       if (l.account_uuid === chosen.account_uuid || l.signed_out || l.used_pct == null || l.used_pct >= h.pause_at_pct) continue;
+      if (forbidden.includes(l.account_uuid)) continue;
       if (suggestion == null || l.used_pct < (suggestion.used_pct as number)) suggestion = l;
     }
   }
@@ -178,17 +211,18 @@ export async function moveToHeadroom(
     tmux_name: string;
     claude_profile?: string | null;
     account_uuid?: string | null;
+    project_id?: number | null;
   }[],
   restart: (host: string, name: string, profile: string) => Promise<Result<unknown>>,
 ): Promise<{ moved: number; stayed: number; nowhere: number; failed: number }> {
   const out = { moved: 0, stayed: 0, nowhere: 0, failed: 0 };
   for (const s of rows) {
-    const r0 = await checkAccountHeadroom(s.host_alias, s.claude_profile ?? null);
+    const r0 = await checkAccountHeadroom(s.host_alias, s.claude_profile ?? null, s.project_id);
     if (!r0.ok) {
       out.failed += 1;
       continue;
     }
-    const h = headroomForAccount(r0.value, s.account_uuid);
+    const h = headroomForAccount(r0.value, s.account_uuid, forbiddenOf(s.project_id));
     if (!h.over) {
       out.stayed += 1;
       continue;
@@ -219,7 +253,7 @@ export async function moveToAccount(
   if (accountUuid === null) return moveToHeadroom(rows, restart);
   const out = { moved: 0, stayed: 0, nowhere: 0, failed: 0 };
   for (const s of rows) {
-    const r0 = await checkAccountHeadroom(s.host_alias, s.claude_profile ?? null);
+    const r0 = await checkAccountHeadroom(s.host_alias, s.claude_profile ?? null, s.project_id);
     if (!r0.ok) {
       out.failed += 1;
       continue;
@@ -229,7 +263,9 @@ export async function moveToAccount(
       out.stayed += 1;
       continue;
     }
-    const to = h.logins.find((l) => l.account_uuid === accountUuid && !l.signed_out);
+    const to = forbiddenOf(s.project_id).includes(accountUuid)
+      ? undefined
+      : h.logins.find((l) => l.account_uuid === accountUuid && !l.signed_out);
     if (!to) {
       out.nowhere += 1;
       continue;

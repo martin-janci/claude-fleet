@@ -50,12 +50,16 @@ pub struct MissionStats {
     /// The part of the span no run was open: time the mission waited on a
     /// person, a slot, a usage limit or the loop's tick.
     pub idle_secs: i64,
-}
-
-/// Whether an attempt ended without the work (the loop's own reading,
-/// `orchestrate::steps::attempt_failed`).
-fn failed(t: &TaskRow) -> bool {
-    crate::service::work::orchestrate::steps::attempt_failed(t)
+    /// How long some ready work waited, by cause (mission improvements M3,
+    /// `Store::mission_waits`): `person`, `grant`, `limit`, `brake`,
+    /// `slot`, `lane`, `touches`. Causes overlap, so they may sum past
+    /// `span_secs`. Filled by the caller; [`stats`] leaves it empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub waits: BTreeMap<String, i64>,
+    /// Subagents the mission's workers started during its attempts
+    /// (mission improvements M7). Filled by the caller, as `waits` is.
+    #[serde(default, skip_serializing_if = "crate::serde_util::is_zero_u32")]
+    pub subagents: u32,
 }
 
 fn role(t: &TaskRow) -> &str {
@@ -117,7 +121,8 @@ pub fn stats(
     let mut by_item: BTreeMap<i64, (i64, i64)> = BTreeMap::new();
     let mut spans: Vec<(i64, i64)> = Vec::new();
     for t in attempts {
-        *out.runs_by_role.entry(role(t).to_string()).or_default() += 1;
+        let role = role(t);
+        *out.runs_by_role.entry(role.to_string()).or_default() += 1;
         if let Some(w) = t.worker_session_id {
             out.session_runs += 1;
             sessions.insert(w);
@@ -125,11 +130,12 @@ pub fn stats(
                 checkouts.insert(c);
             }
         }
-        if failed(t) {
+        // The loop's own reading of an attempt that ended without the work.
+        if crate::service::work::orchestrate::steps::attempt_failed(t) {
             out.failed_runs += 1;
         }
         let item = t.work_item_id.unwrap_or(0);
-        if role(t) == "implement" {
+        if role == "implement" {
             *impls.entry(item).or_default() += 1;
         }
         if done.contains(&item) {

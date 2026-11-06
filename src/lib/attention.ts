@@ -152,6 +152,21 @@ export interface AttentionFacts {
   down_hosts?: readonly string[];
   limited_accounts?: Readonly<Record<string, AttentionLimit>>;
   uncredentialed_accounts?: readonly string[];
+  /** The logins fleet saw signed out, by host and profile (`null` = the
+   *  host's own login): a session is blocked on its own login, not on its
+   *  account's (review 2026-11-03 F2). */
+  signed_out_logins?: readonly AttentionLogin[];
+}
+
+/** One login on one host. Mirrors `attention::LoginRef`. */
+export interface AttentionLogin {
+  host: string;
+  profile: string | null;
+}
+
+/** Whether `facts` hold the login `profile` on `host` signed out. */
+export function loginSignedOut(facts: AttentionFacts | undefined, host: string, profile: string | null | undefined): boolean {
+  return (facts?.signed_out_logins ?? []).some((l) => l.host === host && (l.profile ?? null) === (profile ?? null));
 }
 
 /** Triage buckets, most urgent first. `classify()` puts a row in exactly one,
@@ -338,9 +353,15 @@ export function classify(s: SessionRow, opts: AttentionOptions): TriageBucket {
   const blocked = live ? blockedBy(s, opts) : null;
   if (blocked) return blocked;
   if (s.claude_status === 'failed') return s.kind === 'bg' ? 'failed' : 'stop_failed';
-  if (live && contextLevel(s.context_pct) === 'crit') return 'context_full';
+  // An idle session has nothing running out of room: its context matters
+  // when it is next given work, not before.
+  if (live && !isIdleStatus(s.claude_status) && contextLevel(s.context_pct) === 'crit') return 'context_full';
   if (live && (s.stale_working_at ?? null) !== null) return 'stale_working';
-  if (s.ci_status === 'failing' && isIdleStatus(s.claude_status)) return 'ci_failing';
+  // A merged or closed PR's checks can fail for good: nobody has anything
+  // left to fix.
+  const prState = s.pr_evidence?.state;
+  const prFinished = prState === 'MERGED' || prState === 'CLOSED';
+  if (s.ci_status === 'failing' && isIdleStatus(s.claude_status) && !prFinished) return 'ci_failing';
   // G1.6: Jev's reading of a silent turn's end as a question is a proposal,
   // after every reason a person must act on, and never on a dead row.
   if (live && jevSays(s, 'asked')) return 'probably_waiting';
@@ -353,15 +374,16 @@ export function classify(s: SessionRow, opts: AttentionOptions): TriageBucket {
 
 /** The Blocked bucket the fleet's facts put a live row in, if any: its host
  *  is down; or, while it is not working, its account is at a limit that has
- *  not reset yet ("Paused · limit"), or has no usable login. */
+ *  not reset yet ("Paused · limit"), or its login is signed out. */
 function blockedBy(s: SessionRow, opts: AttentionOptions): TriageBucket | null {
   const f = opts.facts;
   if (!f) return null;
   if (f.down_hosts?.includes(s.host_alias)) return 'host_down';
-  if (s.claude_status === 'working' || !s.account_uuid) return null;
-  const limit = f.limited_accounts?.[s.account_uuid];
+  if (s.claude_status === 'working') return null;
+  const limit = s.account_uuid ? f.limited_accounts?.[s.account_uuid] : undefined;
   if (limit && (limit.resets_at == null || limit.resets_at > opts.now)) return 'account_limit';
-  if (f.uncredentialed_accounts?.includes(s.account_uuid)) return 'no_credentials';
+  if (loginSignedOut(f, s.host_alias, s.claude_profile)) return 'no_credentials';
+  if (s.account_uuid && f.uncredentialed_accounts?.includes(s.account_uuid)) return 'no_credentials';
   return null;
 }
 

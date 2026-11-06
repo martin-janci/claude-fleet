@@ -87,9 +87,22 @@ export function loopLine(loop: LoopHealth, nowSec: number, paused: boolean): str
     parts.push('not run yet here');
   }
   if (loop.next_run_at && !(paused && loop.pausable)) {
-    parts.push(loop.next_run_at > nowSec ? `next in ${inWords(loop.next_run_at - nowSec)}` : 'due now');
+    if (loopStalled(loop, nowSec)) parts.push(`overdue by ${inWords(nowSec - loop.next_run_at)}; it may have stopped`);
+    else parts.push(loop.next_run_at > nowSec ? `next in ${inWords(loop.next_run_at - nowSec)}` : 'due now');
   }
   return parts.join(' · ');
+}
+
+/** Least time past its due run before a loop reads stalled, whatever its period. */
+export const LOOP_STALL_GRACE_SECS = 600;
+
+/** Whether a loop missed its next run by more than a whole period (and at
+ *  least {@link LOOP_STALL_GRACE_SECS}): a loop whose task died still shows
+ *  its last good run, and read "due now" forever. */
+export function loopStalled(loop: LoopHealth, nowSec: number): boolean {
+  if (!loop.last_run_at || !loop.next_run_at) return false;
+  const period = Math.max(0, loop.next_run_at - loop.last_run_at);
+  return nowSec - loop.next_run_at > Math.max(period, LOOP_STALL_GRACE_SECS);
 }
 
 /** How often a loop runs, from its last and next run. */

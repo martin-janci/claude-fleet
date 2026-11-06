@@ -1993,20 +1993,25 @@ pub fn spawn_refresh_tick(
                         _ = DECIDE_WAKE.notified() => {}
                         _ = tokio::time::sleep(DECIDE_BEAT) => {}
                     }
-                    match rollout::advance(&store, crate::store::now_unix()) {
-                        Ok(moved) => {
-                            for m in moved {
-                                tracing::info!(component = %m.component, version = %m.version, what = m.what, wave = m.wave + 1, "update rollout moved");
+                    // Caught like a tick pass (`run_cancellable_tick`): a panic
+                    // here ended the pusher for good, and rollouts stopped
+                    // moving while the hub stayed up.
+                    let _ = crate::service::loops::caught_sync("the update decision pass", || {
+                        match rollout::advance(&store, crate::store::now_unix()) {
+                            Ok(moved) => {
+                                for m in moved {
+                                    tracing::info!(component = %m.component, version = %m.version, what = m.what, wave = m.wave + 1, "update rollout moved");
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(error = %e.message, "could not advance the update rollouts")
                             }
                         }
-                        Err(e) => {
-                            tracing::warn!(error = %e.message, "could not advance the update rollouts")
+                        let pushed = push_decisions(&store, &keys, crate::store::now_unix());
+                        if !pushed.is_empty() {
+                            tracing::info!(targets = ?pushed, "update decisions changed");
                         }
-                    }
-                    let pushed = push_decisions(&store, &keys, crate::store::now_unix());
-                    if !pushed.is_empty() {
-                        tracing::info!(targets = ?pushed, "update decisions changed");
-                    }
+                    });
                 }
             });
         }
@@ -2017,7 +2022,12 @@ pub fn spawn_refresh_tick(
         loop {
             let base = channel_base_url();
             let fetch = HttpsFetch::new(Some(&base));
-            let refreshed = refresh(&store, &fetch, &base, &keys, crate::store::now_unix()).await;
+            let refreshed = crate::service::loops::caught(
+                "the update channel refresh",
+                refresh(&store, &fetch, &base, &keys, crate::store::now_unix()),
+            )
+            .await
+            .unwrap_or_else(|why| Err(IpcError::new(codes::E_INTERNAL, why)));
             let outcome = refreshed
                 .as_ref()
                 .map(|_| ())

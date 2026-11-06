@@ -25,14 +25,14 @@
   import { projectById } from './projects';
   import { selectSession, selectSessionExplicitly, clearSelection } from './selection';
   import { hostByAlias } from './hosts';
-  import { accountByUuid, accountEmailTier, sessionAccountUuid, type AccountRow } from './accounts';
+  import { accountByUuid, accountEmailTier, accountLabel, sessionAccountUuid, type AccountRow } from './accounts';
   import { timeAgo } from './session_status';
   import { applySessionRename, renameKeyHandler } from './session_rename';
   import PromptComposer from './PromptComposer.svelte';
   import WatchSummary from './WatchSummary.svelte';
   import ReviewDialog from './ReviewDialog.svelte';
   import { reviewerOf } from './review_scope';
-  import { prEvidenceLine, reviewDecisionWords } from './prs';
+  import { listPullRequests, otherSessionPrs, prEvidenceLine, prStateLabel, reviewDecisionWords, type PullRequestRow } from './prs';
   import Modal from './Modal.svelte';
   import ConfirmDialog from './ConfirmDialog.svelte';
   import DialogSheet from './DialogSheet.svelte';
@@ -95,7 +95,8 @@
   import { archiveBlocked } from './kill_check';
   import Meter from './kit/Meter.svelte';
   import { accountUsage } from './account_usage_store';
-  import { leftPct, loginHeadroomText } from './account_usage';
+  import { leftPct, loginHeadroomText, severity } from './account_usage';
+  import { compactWindow } from './hosts_view';
   import { goTo } from './destination';
   import { shortcutLabel } from './shortcuts';
   import { detectMac } from './terminal_keys';
@@ -446,10 +447,12 @@
   const detailsOwned = $derived($accessOf(session) === 'own');
 
   // Past a month the relative form stops being useful; show the date.
+  // Reads `nowSec`, so "5 min ago" moves on with the clock instead of
+  // keeping the age it had when the panel opened.
   function formatRelative(unix: number): string {
-    const ageSec = Math.floor(Date.now() / 1000) - unix;
+    const ageSec = nowSec - unix;
     if (ageSec >= 30 * 86400) return new Date(unix * 1000).toISOString().slice(0, 10);
-    return timeAgo(unix);
+    return timeAgo(unix, nowSec * 1000);
   }
 
   let copied = $state(false);
@@ -632,6 +635,28 @@
   // G7.9: "15/15 checks · no reviews" beside the PR in the inspector.
   const prLine = $derived(session.pr_url ? prEvidenceLine(session.pr_evidence) : '');
   const prReview = $derived(session.pr_url ? reviewDecisionWords(session.pr_evidence?.review_decision) : null);
+
+  // A session can open more than one PR; its row carries only the one its
+  // branch is on now. The rest come from the PR list (Work › Pull requests),
+  // read again whenever the row's PR, CI or turn moves, so the inspector
+  // keeps up without a poll of its own. Only for a session with a PR: one
+  // that never had any has nothing to list.
+  let otherPrs = $state<PullRequestRow[]>([]);
+  const otherPrsKey = $derived(
+    session.pr_url ? `${session.id}|${session.pr_url}|${session.ci_status ?? ''}|${session.last_turn_at ?? ''}` : '',
+  );
+  $effect(() => {
+    const key = otherPrsKey;
+    if (!key) {
+      otherPrs = [];
+      return;
+    }
+    const { id, pr_url, project_id } = untrack(() => session);
+    void listPullRequests({ projectId: project_id ?? undefined, limit: 500 }).then((r) => {
+      if (key !== otherPrsKey) return;
+      otherPrs = r.ok ? otherSessionPrs(r.value?.items ?? [], id, pr_url) : [];
+    });
+  });
   const reviewsShown = $derived(session.kind !== 'external' || reviewsOfThis.length > 0 || prReview !== null);
 
   let confirmingKill = $state(false);
@@ -675,7 +700,7 @@
     const r = await safeKillSession(session.host_alias, session.tmux_name);
     busy = false;
     if (!r.ok) {
-      pushError(r.error, 'Safe remove failed');
+      pushError(r.error, 'Clean up failed');
       return;
     }
     confirmingSafeKill = false;
@@ -951,6 +976,18 @@
     {#if prLine}
       <span class="pr-line" data-testid="details-pr-line">{prLine}</span>
     {/if}
+    {#if otherPrs.length}
+      <span class="pr-others" data-testid="details-other-prs">
+        Also opened:
+        {#each otherPrs as pr (pr.id)}
+          <span class="pr-other"
+            ><a class="pr-link" href={pr.url} target="_blank" rel="noreferrer" title={pr.title ?? pr.url}
+              >{pr.number != null ? `#${pr.number}` : pr.url}</a
+            ><span class="pr-state">{prStateLabel(pr).toLowerCase()}</span></span
+          >
+        {/each}
+      </span>
+    {/if}
   {/if}
 {/snippet}
 
@@ -972,17 +1009,17 @@
 {#snippet safeKillPill()}
   {#if session.safe_kill_state === 'requested'}
     <p class="safe-kill-pill pending" data-testid="safe-kill-pending">
-      Safe-remove in progress: asked Claude to commit + push. Will delete the
-      worktree and kill the session once it reports back.
+      Clean up in progress: asked Claude to commit and push. The worktree is
+      removed and the session killed once it reports back.
     </p>
   {:else if session.safe_kill_state === 'failed'}
     <p class="safe-kill-pill failed" data-testid="safe-kill-failed">
-      Safe-remove failed: {session.safe_kill_detail ?? 'no reason given'}.
+      Clean up failed: {session.safe_kill_detail ?? 'no reason given'}.
       Resolve in the session, then retry, or use <strong>Kill session…</strong>.
     </p>
   {:else if session.safe_kill_state === 'ready'}
     <p class="safe-kill-pill ready" data-testid="safe-kill-ready">
-      Safe-remove ready — finalizing.
+      Clean up ready: finishing.
     </p>
   {/if}
 {/snippet}
@@ -1012,12 +1049,17 @@
         <dd data-testid="details-tags">{@render tagChips()}</dd>
       {/if}
       <dt>Account</dt>
-      <dd data-testid="session-account">{accountRow?.email ?? accountEmailTier(accountRow)}</dd>
+      <dd data-testid="session-account">{accountRow ? accountLabel(accountRow) : '—'}</dd>
       {#if fiveHour || week}
+        {@const c5 = compactWindow('5h', usageSnap, nowSec)}
+        {@const cw = compactWindow('weekly', usageSnap, nowSec)}
         <dt>Usage</dt>
         <dd data-testid="inspector-usage">
-          {#if fiveHour}5h {leftPct(fiveHour)}% left{/if}{#if fiveHour && week} · {/if}{#if week}week {leftPct(week)}%{/if}
-          {#if fiveHour}<Meter value={leftPct(fiveHour) / 100} level={leftPct(fiveHour) < 10 ? 'crit' : leftPct(fiveHour) < 25 ? 'warn' : 'ok'} label="{leftPct(fiveHour)}% of the 5-hour window left" />{/if}
+          {#if fiveHour}5h {c5.left}{/if}{#if fiveHour && week} · {/if}{#if week}week {cw.left}{/if}
+          {#if fiveHour && c5.freshness !== 'expired'}
+            {@const lvl = severity('5h', leftPct(fiveHour), fiveHour.resets_at ?? null, nowSec)}
+            <Meter value={leftPct(fiveHour) / 100} level={lvl === 'limit' || lvl === 'low' ? 'crit' : lvl === 'caution' ? 'warn' : 'ok'} label="{leftPct(fiveHour)}% of the 5-hour window left" />
+          {/if}
         </dd>
       {/if}
       {#if worktree?.branch}
@@ -1034,7 +1076,18 @@
       {/if}
       {#if session.work}
         <dt>Task</dt>
-        <dd>{#if session.work.key}<span class="mono">{session.work.key}</span> {/if}{session.work.title}</dd>
+        <dd data-testid="inspector-task">
+          {#if session.work.key}
+            {#if session.work.url}
+              <a class="mono task-link" href={session.work.url} target="_blank" rel="noreferrer" data-testid="inspector-task-link"
+                >{session.work.key}</a
+              >
+            {:else}
+              <span class="mono">{session.work.key}</span>
+            {/if}
+          {/if}
+          {session.work.title}
+        </dd>
       {/if}
       <dt>Started by</dt>
       <dd>{startedBy}, {formatRelative(sessionStart(session))}</dd>
@@ -1061,7 +1114,7 @@
           {#if canSwitchLogin}
             {@render act('switch-account-from-details', 'Switch account…', openSwitchAccount, switchAccountBlocked, 'Resume this conversation under another login on this host')}
           {/if}
-          {@render act('restart-from-details', 'Restart…', askRestart, restartBlocked)}
+          {@render act('restart-from-details', 'Restart…', askRestart, restartBlocked, 'Stop the claude process and start a fresh one; the tmux session and the worktree stay')}
           {@render moveSteps()}
         </div>
         <p class="more-hint">
@@ -1339,13 +1392,13 @@
               {@render act('move-from-details', 'Move to host…', openMove, moveBlocked, 'Continue this conversation on another host: same branch, same Claude session')}
             {/if}
             {@render moveSteps()}
-            {@render act('restart-from-details', 'Restart…', askRestart, restartBlocked)}
-            {@render act('recreate-from-details', 'Recreate…', askRecreate, recreateBlocked)}
+            {@render act('restart-from-details', 'Restart…', askRestart, restartBlocked, 'Stop the claude process and start a fresh one; the tmux session and the worktree stay')}
+            {@render act('recreate-from-details', 'Recreate…', askRecreate, recreateBlocked, 'Kill the tmux session and start a fresh one in the same worktree')}
             {#if !hasNoPane(session) && session.project_id !== null}
               {@render act('repair-from-details', 'Repair workspace…', askRepair, repairing ? 'Repairing…' : repairBlocked, 'Recreate a deleted worktree directory, re-register it with git, and respawn the pane in it')}
             {/if}
-            {@render act('label-from-details', 'Rename and label…', openRenameLabel, setFriendlyNameBlocked)}
-            {@render act('rename-from-details', 'Rename tmux session', beginRename, renameBlocked)}
+            {@render act('label-from-details', 'Rename and label…', openRenameLabel, setFriendlyNameBlocked, 'The name the list shows, and its labels')}
+            {@render act('rename-from-details', 'Rename tmux session', beginRename, renameBlocked, 'The tmux name on the host; the name the list shows stays')}
           </div>
         </div>
         <div class="group" data-testid="actions-share">
@@ -1427,7 +1480,7 @@
 
 {#if switchOpen}
   <DialogSheet
-    title="Switch login for this session"
+    title="Switch account for this session"
     lead="The agent restarts with the other account and keeps the conversation. Anything it is doing right now is lost."
     verb="Switch and restart"
     busyVerb="Switching…"
@@ -1500,17 +1553,17 @@
 
 {#if confirmingSwitch}
   <ConfirmDialog
-    title="Switch login?"
-    confirmLabel="Switch"
+    title="Switch account?"
+    confirmLabel="Switch account"
     danger
     onconfirm={onSwitchLogin}
     oncancel={() => (confirmingSwitch = false)}
     confirmTestId="confirm-login-switch"
   >
-    This restarts claude in <code>{session.tmux_name}</code> and resumes the same
-    conversation under <code>{loginTarget || 'the host login'}</code>. Anything it is
-    working on right now is lost. A profile that is not logged in yet asks for
-    <code>/login</code> in the session.
+    {@const target = loginOptions.find((o) => o.value === loginTarget)}
+    This restarts the agent in {session.friendly_name ?? session.tmux_name} and resumes the same
+    conversation under {target ? loginOptionText({ ...target, current: false }) : 'the host login'}. Anything it is
+    working on right now is lost. A login that is not signed in yet asks you to sign in, in the session.
   </ConfirmDialog>
 {/if}
 
@@ -1545,9 +1598,9 @@
 {/if}
 
 {#if confirmingSafeKill}
-  <Modal label="Safe remove {session.tmux_name}" onclose={cancelSafeKill} width="480px" testid="safe-kill-dialog">
+  <Modal label="Clean up {session.tmux_name}" onclose={cancelSafeKill} width="480px" testid="safe-kill-dialog">
     <div class="confirm wide">
-      <h3>Safe remove <code>{session.tmux_name}</code>?</h3>
+      <h3>Clean up <code>{session.tmux_name}</code>?</h3>
 
       {#if inspection === null && inspectError === null}
         <p class="muted">Inspecting worktree…</p>
@@ -1566,7 +1619,7 @@
             title={safeKillClaudeBlocked ?? ''}
             onclick={doSafeKillViaClaude}
             data-testid="confirm-safe-kill-claude"
-          >Ask Claude to commit + push</button>
+          >Ask Claude to commit and push</button>
         </div>
       {:else if inspection && inspection.safe_to_remove}
         <p>
@@ -1583,7 +1636,7 @@
             title={discardKillBlocked ?? ''}
             onclick={doDirectRemove}
             data-testid="confirm-safe-kill-direct"
-          >Remove worktree + kill</button>
+          >Remove worktree and kill</button>
         </div>
       {:else if inspection}
         {#if !inspection.has_worktree}
@@ -1625,10 +1678,10 @@
             {/if}
           </div>
           <p class="muted small">
-            "Let Claude commit it" sends a prompt asking Claude to commit + push
-            (to <code>main</code> or a PR) before fleet removes the worktree.
-            "Discard &amp; kill" force-removes the worktree and kills the
-            session — local-only changes will be lost.
+            "Ask Claude to commit and push" sends a prompt asking Claude to commit
+            and push (to <code>main</code> or a PR) before fleet removes the
+            worktree. "Discard and kill" force-removes the worktree and kills the
+            session: local-only changes are lost.
           </p>
         {/if}
         <div class="confirm-actions">
@@ -1638,14 +1691,14 @@
             title={safeKillClaudeBlocked ?? ''}
             onclick={doSafeKillViaClaude}
             data-testid="confirm-safe-kill-claude"
-          >Let Claude commit it</button>
+          >Ask Claude to commit and push</button>
           <button
             class="danger"
             disabled={busy || discardKillBlocked !== null}
             title={discardKillBlocked ?? ''}
             onclick={doDiscardAndKill}
             data-testid="confirm-safe-kill-discard"
-          >Discard &amp; kill</button>
+          >Discard and kill</button>
         </div>
       {/if}
     </div>
@@ -1828,6 +1881,10 @@
   }
   .pr-link { color: var(--accent); font-size: var(--text-xs); overflow-wrap: anywhere; }
   .pr-line { color: var(--fg-muted); font-size: var(--text-xs); margin-left: 6px; }
+  .pr-others { display: block; margin-top: 2px; color: var(--fg-muted); font-size: var(--text-xs); }
+  .pr-other { margin-left: 6px; white-space: nowrap; }
+  .pr-state { margin-left: 3px; }
+  .task-link { color: var(--accent); }
   .host {
     color: var(--fg-muted);
     border: 1px solid var(--border);

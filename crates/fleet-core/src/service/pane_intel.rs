@@ -239,10 +239,15 @@ pub struct PendingInput {
     pub options: Vec<PendingOption>,
     /// A multi-select question (AskUserQuestion with `multiSelect`): a digit
     /// TOGGLES that option's checkbox instead of answering, so no keystroke a
-    /// single-select card sends ever finishes it. `Tab` keeps the ticks and
-    /// moves on, to the next question or to the "Review your answers" step,
-    /// whose `1. Submit answers` is an ordinary single-select dialog. Left off
-    /// the wire when false.
+    /// single-select card sends ever finishes it. Moving on keeps the ticks
+    /// and goes to the next question or to the "Review your answers" step,
+    /// whose `1. Submit answers` is an ordinary single-select dialog. The key
+    /// that moves on depends on the cursor (checked live against Claude Code
+    /// 2.1.316): on an option, `Tab`; on the `Next` / `Submit` row (no option
+    /// `selected`), `Enter` — `Tab` does nothing there; on the free-text row,
+    /// `Tab` only moves the cursor onto that row. The `Chat about this` row
+    /// ([`is_chat_choice`]) is listed with no checkbox. Left off the wire
+    /// when false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub multi: bool,
     /// What a permission dialog asks to run, as the tool-call line above it
@@ -691,6 +696,16 @@ fn split_checkbox(label: &str) -> Option<(bool, &str)> {
     Some((checked, rest.trim_start()))
 }
 
+/// AskUserQuestion's own way out, drawn under every question below a rule,
+/// numbered one past the free-text row: `5. Chat about this`. It carries no
+/// checkbox even on a multi-select, and its digit does not toggle anything:
+/// it turns the questions down and leaves the person in the chat. Only
+/// AskUserQuestion draws it (Claude Code 2.1.3xx), so a dialog showing it is
+/// a question, never a permission.
+pub fn is_chat_choice(label: &str) -> bool {
+    label.trim().eq_ignore_ascii_case("chat about this")
+}
+
 /// The row a multi-select dialog submits from, when it carries the `❯`
 /// cursor: `❯ Submit` on the last question, `❯ Next` on an earlier one.
 fn is_focused_submit_row(line: &str) -> bool {
@@ -763,6 +778,7 @@ fn detect_dialog(stripped: &str) -> Option<Dialog> {
             // "Ready to submit your answers?" line.
             review.is_none_or(|r| r < a)
                 && ask_choices(a).count() >= 2
+                && !ask_choices(a).any(|(_, _, label, _)| is_chat_choice(label))
                 && !ask_choices(a).all(|(_, _, label, _)| split_checkbox(label).is_some())
         }) {
         WaitingFor::Permission
@@ -879,10 +895,14 @@ fn detect_dialog(stripped: &str) -> Option<Dialog> {
         },
     };
     // Every choice of a multi-select question carries a checkbox (the
-    // "Type something" row included); one stray `[x] …` label in a
-    // single-select menu does not make it one.
-    let multi =
-        kind == WaitingFor::Input && !options.is_empty() && options.iter().all(|o| o.multi_choice);
+    // "Type something" row included), except the "Chat about this" row
+    // drawn under it; one stray `[x] …` label in a single-select menu does
+    // not make it one.
+    let multi = kind == WaitingFor::Input
+        && options.iter().any(|o| o.multi_choice)
+        && options
+            .iter()
+            .all(|o| o.multi_choice || is_chat_choice(&o.raw_label));
     let options = options
         .into_iter()
         .map(|o| PendingOption {
@@ -1727,6 +1747,133 @@ mod tests {
         assert!(p.multi);
         assert_eq!(p.options.len(), 4);
         assert!(p.options.iter().all(|o| !o.selected));
+    }
+
+    /// LIVE CAPTURE (Claude Code 2.1.316 in tmux against a stub Messages
+    /// API, two `multiSelect` questions, `1` and `2` pressed): under the
+    /// options and the `Next` row the dialog now draws a rule and
+    /// `5. Chat about this`, with no checkbox. That row made the dialog read
+    /// as single-select — and, its question reading "do you want to", as a
+    /// PERMISSION — so the card offered no Continue and a tick read as an
+    /// answer: the person could tick, but not move on or submit.
+    #[test]
+    fn live_multi_select_with_chat_about_this_is_a_multi_select_question() {
+        let text = include_str!("testdata/pane_intel/question_multi_select_live.txt");
+        assert_dialog(
+            "question_multi_select_live",
+            text,
+            WaitingFor::Input,
+            "waiting for input: Which features do you want to enable?",
+            5,
+        );
+        let p = fixture_intel("question_multi_select_live", text)
+            .pending_input
+            .expect("dialog");
+        assert_eq!(p.kind, "input");
+        assert!(p.multi);
+        let got: Vec<(u8, &str, bool, bool)> = p
+            .options
+            .iter()
+            .map(|o| (o.n, o.label.as_str(), o.selected, o.checked))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (1, "Auth", true, true),
+                (2, "Logging", false, true),
+                (3, "Metrics", false, false),
+                (4, "Type something", false, false),
+                (5, "Chat about this", false, false),
+            ]
+        );
+    }
+
+    /// LIVE CAPTURE: the cursor on the `Next` row (where `Tab` does nothing
+    /// and `Enter` moves on) and on the free-text row. Both are the same
+    /// multi-select question, told apart by which option is `selected`.
+    #[test]
+    fn live_multi_select_cursor_positions_are_the_same_question() {
+        let on_next = analyze(include_str!(
+            "testdata/pane_intel/question_multi_select_live_cursor_next.txt"
+        ))
+        .pending_input
+        .expect("dialog with the cursor on Next");
+        assert!(on_next.multi);
+        assert_eq!(on_next.kind, "input");
+        assert!(on_next.options.iter().all(|o| !o.selected));
+
+        let on_text = analyze(include_str!(
+            "testdata/pane_intel/question_multi_select_live_cursor_free_text.txt"
+        ))
+        .pending_input
+        .expect("dialog with the cursor in the free-text row");
+        assert!(on_text.multi);
+        assert_eq!(
+            on_text.options.iter().find(|o| o.selected).map(|o| o.n),
+            Some(4)
+        );
+        assert_eq!(on_next.question, on_text.question);
+        assert_eq!(
+            on_next
+                .options
+                .iter()
+                .map(|o| (o.n, &o.label))
+                .collect::<Vec<_>>(),
+            on_text
+                .options
+                .iter()
+                .map(|o| (o.n, &o.label))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// LIVE CAPTURE: a single-select question in the same set draws the
+    /// same `Chat about this` row. It stays an ordinary question.
+    #[test]
+    fn live_single_select_with_chat_about_this_stays_single_select() {
+        let p = analyze(include_str!(
+            "testdata/pane_intel/question_single_in_multi_flow_live.txt"
+        ))
+        .pending_input
+        .expect("dialog");
+        assert_eq!(p.kind, "input");
+        assert!(!p.multi);
+        assert_eq!(
+            p.options
+                .iter()
+                .map(|o| o.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Fly", "Docker", "Type something.", "Chat about this"]
+        );
+    }
+
+    /// A single-select question that reads "Do you want to …?" is a
+    /// question, not a permission, once it shows the `Chat about this` row
+    /// only AskUserQuestion draws.
+    #[test]
+    fn a_do_you_want_to_question_with_chat_about_this_is_not_a_permission() {
+        let text = include_str!("testdata/pane_intel/question_single_in_multi_flow_live.txt")
+            .replace("Which deploy target?", "Do you want to deploy now?");
+        let p = analyze(&text).pending_input.expect("dialog");
+        assert_eq!(p.kind, "input");
+    }
+
+    /// LIVE CAPTURE of the review step, with its "You have not answered all
+    /// questions" warning and the answers echoed above it.
+    #[test]
+    fn live_review_step_offers_submit_answers() {
+        let text = include_str!("testdata/pane_intel/question_review_live.txt");
+        assert_dialog(
+            "question_review_live",
+            text,
+            WaitingFor::Input,
+            "waiting for input: Ready to submit your answers?",
+            2,
+        );
+        let p = analyze(text).pending_input.expect("dialog");
+        assert!(!p.multi);
+        assert_eq!(p.options[0].label, "Submit answers");
+        assert!(p.options[0].selected);
     }
 
     /// The step a multi-select ends on: no "Enter to select" footer, only

@@ -12,7 +12,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { get } from 'svelte/store';
 import { clearToasts, runToastAction, toasts } from './toasts';
 import EditTaskDialog from './EditTaskDialog.svelte';
-import { dueLabel, estimateLabel, ownerDueChip, parseAssignees, priorityLabel } from './work';
+import { dueLabel, estimateLabel, isHotPriority, ownerDueChip, parseAssignees, priorityLabel } from './work';
 import type { TaskDetail, WorkTask } from './work_view';
 
 const task = (over: Partial<WorkTask> = {}): WorkTask => ({
@@ -84,6 +84,11 @@ describe('dueLabel / ownerDueChip', () => {
     expect(ownerDueChip({ assignees: ['Ana'] }, now)).toEqual({ text: 'Ana', overdue: false });
     expect(ownerDueChip({ due_at: '2026-10-16' }, now)).toEqual({ text: 'Tomorrow', overdue: false });
     expect(ownerDueChip({ assignees: [] }, now)).toBeNull();
+    // A done task's date is history: the Done column is never red.
+    expect(ownerDueChip({ assignees: ['Ana'], due_at: '2026-10-01', status_category: 'done' }, now)).toEqual({
+      text: 'Ana · Oct 1',
+      overdue: false,
+    });
   });
 });
 
@@ -93,6 +98,9 @@ describe('priorityLabel / estimateLabel', () => {
     expect(priorityLabel('low')).toBe('Low');
     expect(priorityLabel('p1')).toBeNull();
     expect(priorityLabel(null)).toBeNull();
+  });
+  it('calls out urgent and high only', () => {
+    expect(['urgent', 'high', 'medium', 'low', null, 'p1'].filter(isHotPriority)).toEqual(['urgent', 'high']);
   });
   it('says points and hours, and nothing for no estimate', () => {
     expect(estimateLabel(3, 'points')).toBe('3 pts');
@@ -252,6 +260,13 @@ describe('EditTaskDialog', () => {
     await type('edit-task-estimate', '5');
     await type('edit-task-labels', Array.from({ length: 21 }, (_, i) => `l${i}`).join(','));
     expect(screen.getByTestId('edit-task-size-error').textContent).toContain('At most 20 labels');
+    // 40 emoji are 40 characters to the hub (80 UTF-16 units here).
+    await type('edit-task-labels', '🚀'.repeat(40));
+    expect(screen.queryByTestId('edit-task-size-error')).toBeNull();
+    await type('edit-task-labels', '🚀'.repeat(41));
+    expect(screen.getByTestId('edit-task-size-error').textContent).toContain('at most 40 characters');
+    await type('edit-task-labels', 'tab\there');
+    expect(screen.getByTestId('edit-task-size-error').textContent).toContain('no control characters');
     await type('edit-task-labels', 'ok');
     expect(screen.queryByTestId('edit-task-size-error')).toBeNull();
     expect((screen.getByTestId('edit-task-submit') as HTMLButtonElement).disabled).toBe(false);

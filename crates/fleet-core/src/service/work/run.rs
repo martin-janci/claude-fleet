@@ -178,7 +178,9 @@ pub fn prior_work(s: &Store, item_id: i64) -> Result<Option<PriorWork>, IpcError
             .branch
             .filter(|b| !b.trim().is_empty() && b != "HEAD")
             .unwrap_or(wt.name);
-        if !branch_is_plain(&branch) {
+        // A worktree row's branch can come from a host's hook report: only
+        // a name git would take as a branch goes into the prompt.
+        if !crate::service::agents::workspace::branch_ok(&branch) {
             continue;
         }
         let host_up = session.host_alias == crate::service::projects::LOCAL_HOST
@@ -191,16 +193,6 @@ pub fn prior_work(s: &Store, item_id: i64) -> Result<Option<PriorWork>, IpcError
         }));
     }
     Ok(None)
-}
-
-/// A branch name a prompt may carry as is: `[A-Za-z0-9._/-]`, not starting
-/// with `-`. A worktree row's branch can come from a host's hook report.
-fn branch_is_plain(b: &str) -> bool {
-    !b.is_empty()
-        && b.len() <= 200
-        && !b.starts_with('-')
-        && b.chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '/' | '-'))
 }
 
 /// What a run's prompt says about the work it builds on ([`prior_work`]).
@@ -365,11 +357,27 @@ pub async fn run_item_with(
     // item (another role's run, a failed attempt's session that lives on,
     // a person's own) is not a reason to refuse, but a reason for this
     // attempt to get its own `-N` checkout, as a parallel start does.
-    let (parallel, prior) = {
+    let (parallel, prior, deps, warm) = {
         let s = lock(store.as_ref())?;
+        // M6: a warm build on a host with sccache.
+        let warm = crate::service::settings::get_bool(
+            &s,
+            crate::service::settings::ORCHESTRATOR_BUILD_CACHE,
+        );
+        let prior = prior_work(&s, item_id)?;
+        // M2: a first implementation starts from the work of the tasks it
+        // depends on; a later one from its own earlier attempt, which
+        // already holds theirs.
+        let deps = if role == "implement" && prior.is_none() {
+            super::dep_work::unmerged_deps(&s, item_id, None)?
+        } else {
+            Vec::new()
+        };
         (
             start.parallel || has_live_work(&s, item_id)?,
-            prior_work(&s, item_id)?,
+            prior,
+            deps,
+            warm,
         )
     };
     let start = StartArgs {
@@ -385,12 +393,35 @@ pub async fn run_item_with(
                 .as_ref()
                 .filter(|p| p.host_up)
                 .map(|p| p.host_alias.clone())
+                .or_else(|| {
+                    deps.first()
+                        .filter(|d| d.host_up)
+                        .map(|d| d.host_alias.clone())
+                })
         }),
-        base_branch: prior.as_ref().map(|p| p.branch.clone()),
+        // A dependency pinned to its commit (a lane's) merges below, never
+        // as the base: its branch has moved on past it.
+        base_branch: prior.as_ref().map(|p| p.branch.clone()).or_else(|| {
+            deps.iter()
+                .find(|d| d.commit.is_none())
+                .map(|d| d.branch.clone())
+        }),
+        build_cache: warm,
         ..start.clone()
     };
     let (row, plan, queued) =
         tickets::start_work_unprompted(store, ssh, reg, &start, view, net).await?;
+    // M2: the other dependencies merge into the new checkout before the
+    // prompt says what it holds; the run's own work begins after them.
+    let prepared = if deps.is_empty() {
+        super::dep_work::Prepared::default()
+    } else {
+        let dir = match row.worktree_id {
+            Some(w) => lock(store.as_ref())?.worktree_path(w)?,
+            None => None,
+        };
+        super::dep_work::prepare(ssh, &row.host_alias, dir.as_deref(), &deps).await
+    };
     let (prompt, task) = {
         let s = lock(store.as_ref())?;
         let notes = s.get_work_item(item_id)?.and_then(|i| i.notes);
@@ -404,6 +435,10 @@ pub async fn run_item_with(
         if let Some(p) = &prior {
             prompt.push_str("\n\n");
             prompt.push_str(&prior_work_note(role, &p.branch));
+        }
+        if let Some(n) = &prepared.note {
+            prompt.push_str("\n\n");
+            prompt.push_str(n);
         }
         let claude = plan
             .agent
@@ -420,6 +455,10 @@ pub async fn run_item_with(
             prompt.push_str(n);
         }
         let task = record_run(&s, row.id, &prompt, item_id, attempt, role)?;
+        // Its evidence and review read from after the merged dependencies.
+        if let Some(h) = &prepared.head {
+            s.set_task_start_head(task.id, h)?;
+        }
         (prompt, task)
     };
     crate::service::work::resume::spawn_run_prompt(
@@ -526,8 +565,8 @@ mod tests {
         record_run(&s, odd, "do it", item, 1, "implement").unwrap();
         record_run(&s, plain, "do it", item, 2, "implement").unwrap();
         assert_eq!(prior_work(&s, item).unwrap(), None);
-        assert!(!branch_is_plain("-delete"));
-        assert!(branch_is_plain("feat/x_1.2"));
+        assert!(!crate::service::agents::workspace::branch_ok("-delete"));
+        assert!(crate::service::agents::workspace::branch_ok("feat/x_1.2"));
     }
 
     #[test]

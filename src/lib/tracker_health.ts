@@ -16,6 +16,7 @@ import { setContextRedPct } from './attention';
 import { decideHealth } from './decide_health';
 import { orgBudgets } from './org_budget';
 import { updatesHealth } from './update_health';
+import { storageHealth } from './storage_health';
 import { writable } from 'svelte/store';
 import { healthCheck } from './ipc';
 
@@ -74,6 +75,7 @@ export async function refreshTrackersHealth(): Promise<void> {
     decideHealth.set(r.value.decide ?? null);
     orgBudgets.set(r.value.org_budgets ?? []);
     updatesHealth.set(r.value.updates ?? null);
+    storageHealth.set(r.value.storage ?? null);
     setContextRedPct(r.value.context_red_pct);
   }
 }

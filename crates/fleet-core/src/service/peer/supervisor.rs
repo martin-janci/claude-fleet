@@ -49,8 +49,13 @@ pub fn spawn_peer_supervisor(
             // The guard is dropped at the end of this statement, before any
             // `.await` below.
             let listed = lock(&ctx.store).and_then(|s| s.live_dialer_links());
-            let outcome = listed.as_ref().map(|_| ()).map_err(|e| e.message.clone());
-            reconcile(&ctx, &mut running, listed).await;
+            let mut outcome = listed.as_ref().map(|_| ()).map_err(|e| e.message.clone());
+            // Caught like a tick pass (`run_cancellable_tick`): uncaught, one
+            // panic ended the supervisor, and no link was restarted again.
+            let rescan = reconcile(&ctx, &mut running, listed);
+            if let Err(why) = crate::service::loops::caught("the peer rescan", rescan).await {
+                outcome = Err(why);
+            }
             crate::service::loops::report("peers", outcome, Some(RESCAN));
             tokio::select! {
                 _ = ctx.cancel.cancelled() => break,

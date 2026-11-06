@@ -1575,7 +1575,9 @@ impl FleetTools {
         done_when {item_id, done_when: [ci[:check] | review | test[:cmd] | \
         person | text]}; verify {item_id, line, ok, note?}: a person's check \
         (line \"run evidence\" with a note: accept an implement run with no \
-        commits or files). \
+        commits or files; \"ai check\": accept a failed AI check). check \
+        {item_id}: an AI check of its finished work; check_setup {project_id, \
+        mode: off|ask|auto, command?}: a project's check. \
         mission_start {mission_id, step?}: take the next steps; retry \
         {item_id, note?}; mission_plan: ask the planner; card_decide \
         {card_id, ok, note?}; mission_grant {mission_id, level, hours?, \
@@ -2080,6 +2082,34 @@ impl FleetTools {
             let view_scope = self.view_scope(&caller)?;
             return ok_json(
                 &crate::service::work::verify::verify(&args, &self.store, &view_scope)
+                    .map_err(to_mcp_err)?,
+            );
+        }
+        if args.action == "check" {
+            // AI check on done: Test now / Rerun. A person's ask, as `verify`
+            // is: the operator and every scoped caller are refused before any
+            // row; the item's org fence is inside.
+            refuse_operator_decision(&caller)?;
+            let view_scope = self.view_scope(&caller)?;
+            let item = args
+                .item_id
+                .ok_or_else(|| mcp_err("E_INVALID", "check needs item_id", None))?;
+            let task = crate::service::work::ticket_check::start(
+                &self.store,
+                &self.ssh,
+                item,
+                &view_scope,
+            )
+            .await
+            .map_err(to_mcp_err)?;
+            return ok_json(&task);
+        }
+        if args.action == "check_setup" {
+            // A project's AI check switch: fleet configuration a person sets.
+            refuse_operator_decision(&caller)?;
+            let view_scope = self.view_scope(&caller)?;
+            return ok_json(
+                &crate::service::work::ticket_check::setup(&args, &self.store, &view_scope)
                     .map_err(to_mcp_err)?,
             );
         }

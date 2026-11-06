@@ -74,6 +74,18 @@ describe('FleetSessionGroups', () => {
     expect(screen.getByTestId('fleet-bg-company-7')).toBeTruthy();
   });
 
+  it('a fleet never listed (offline since launch) does not claim it has no sessions', async () => {
+    _setFleetsForTest([primary, { ...company, connection: { state: 'offline', attempt: 2, retry_in_secs: 30, reason: 'connection refused' } }]);
+    _setFleetRowsForTest('company', emptyRows());
+    render(FleetSessionGroups);
+    expect(await screen.findByTestId('fleet-trouble-company')).toHaveTextContent('connection refused');
+    expect(screen.queryByTestId('fleet-empty-company')).toBeNull();
+    // Once its hub has answered an empty list, it does say so.
+    _setFleetsForTest([primary, company]);
+    _setFleetRowsForTest('company', { ...emptyRows(), loaded: true });
+    expect(await screen.findByTestId('fleet-empty-company')).toHaveTextContent('No sessions on Papaya POS (hub).');
+  });
+
   it('honours the search and the background-agents switch', async () => {
     render(FleetSessionGroups, { props: { search: 'nothing-like-it' } });
     await tick();

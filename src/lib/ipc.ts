@@ -3,6 +3,7 @@ import type { DecideHealth } from './decide_health';
 import type { TrackersHealth } from './tracker_health';
 import type { OrgBudgetAlert } from './org_budget';
 import type { UpdatesHealth } from './update_health';
+import type { StorageHealth } from './storage_health';
 
 export interface Health {
   version: string;
@@ -27,6 +28,9 @@ export interface Health {
   /** The fleet's own updates: what needs a person (review w26-3); absent
    *  from an older hub. */
   updates?: UpdatesHealth | null;
+  /** The hub's own disk and backups (hardening survey 2026-10-26); absent
+   *  on a desktop of its own, from an older hub and for a scoped caller. */
+  storage?: StorageHealth | null;
 }
 
 /** One background loop (`service::loops::LoopHealth`). */
