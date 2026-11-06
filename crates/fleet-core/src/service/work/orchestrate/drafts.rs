@@ -344,7 +344,7 @@ pub(super) async fn run_draft_costed(
     )
     .await?;
     let stdout = String::from_utf8_lossy(&out.stdout);
-    let mut cost = None;
+    let cost: Option<i64>;
     let text = match planner::parse_planner_output(&stdout) {
         PlannerOutput::Ran(ran) => {
             let (answer, usage) = planner::planner_answer(ran);
