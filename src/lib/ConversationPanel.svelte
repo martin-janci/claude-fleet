@@ -14,6 +14,7 @@
   // send-keys into the REPL), so anything typed here is what the terminal
   // would have received. bg / external rows have no REPL to type into, so
   // they stay read-only.
+  import { chipLabel, chipTitle, promptParts, type PromptChip } from './prompt_parts';
   import { errorText } from './error_copy';
   import { conversationFindRequest } from './search_api';
   import { untrack, tick, setContext, onDestroy, type Snippet } from 'svelte';
@@ -2504,6 +2505,10 @@
 
 </script>
 
+{#snippet promptChips(chips: PromptChip[])}{#if chips.length}<div class="prompt-chips" data-testid="conv-prompt-chips"
+      >{#each chips as c, k (k)}<span class="prompt-chip" data-kind={c.kind} title={chipTitle(c)}>{chipLabel(c)}</span>{/each}</div
+    >{/if}{/snippet}
+
 {#snippet promptBody(text: string)}{#if refs}{#each refSegments(text, refs) as seg, k (k)}{#if seg.ref}<button
           type="button"
           class="ref-chip"
@@ -2680,7 +2685,11 @@
                      federation address reads by the fleet this window knows
                      it as, and opens there when that fleet shows it. -->
                 {@const marked = splitMarker(turn.prompt)}
-                {@const long = isLongPrompt(marked.text)}
+                <!-- The person's own words, with what the app put in front
+                     of them (context, mission, a dashboard to change) as
+                     chips: prompt_parts.ts. -->
+                {@const parts = marked.from ? { chips: [], text: marked.text } : promptParts(marked.text)}
+                {@const long = isLongPrompt(parts.text)}
                 <div class="prompt" data-testid="conv-prompt">
                   <div class="prompt-head">
                     {#if marked.from}
@@ -2703,11 +2712,12 @@
                       {/if}
                     </span>
                   </div>
+                  {@render promptChips(parts.chips)}
                   <div
                     class="prompt-text"
                     class:clamped={long && !expanded.has(turnKey(turn, i))}
                     style:--clamp-lines={PROMPT_CLAMP_LINES}
-                  >{@render promptBody(marked.text)}</div>
+                  >{@render promptBody(parts.text)}</div>
                   {#if long}
                     <button type="button" class="linkish" data-testid="conv-prompt-toggle" onclick={() => togglePrompt(turnKey(turn, i))}
                       >{expanded.has(turnKey(turn, i)) ? 'Show less' : 'Show more'}</button
@@ -2887,6 +2897,7 @@
           {#each outgoing as m (m.id)}
             {@const held = isHeld(outgoing, m.id)}
             {@const r = receipt(m, held, nowMs)}
+            {@const parts = promptParts(m.prefix && m.kind === 'prompt' ? `${m.prefix}\n\n${m.text}` : m.text)}
             <!-- The bubble is the same prompt block the thread draws, so the
                  swap to the transcript's own turn does not move a pixel. -->
             <section class="turn outgoing" data-testid="conv-outgoing" data-state={held ? 'held' : m.state}>
@@ -2895,7 +2906,8 @@
                   <span class="who">You</span>
                   <time datetime={m.at}>{relativeTime(m.at, nowMs)}</time>
                 </div>
-                <div class="prompt-text">{@render promptBody(m.text)}</div>
+                {@render promptChips(parts.chips)}
+                <div class="prompt-text">{@render promptBody(parts.text)}</div>
                 {#if m.attachments.length}
                   <div class="outgoing-files" data-testid="conv-outgoing-files">
                     {m.attachments.length === 1 ? m.attachments[0].name : `${m.attachments.length} files`}
@@ -3686,6 +3698,26 @@
   .fe-open:focus-visible {
     outline: var(--ring-w) solid var(--ring);
     outline-offset: 1px;
+  }
+  .prompt-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin: 2px 0 4px;
+  }
+  .prompt-chip {
+    display: inline-block;
+    max-width: 100%;
+    padding: 0 6px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--bg-pane);
+    color: var(--fg-muted);
+    font-size: var(--text-2xs);
+    line-height: 1.6;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .ref-chip {
     display: inline;
