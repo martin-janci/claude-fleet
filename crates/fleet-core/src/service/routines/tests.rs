@@ -4442,6 +4442,8 @@ async fn a_routine_that_writes_a_dashboard_feed_has_its_reply_read_for_it() {
         "Count today's deploys; answer with <dashboard-feed key=\"deploys\">N</dashboard-feed>."
             .into();
     i.overlap = Some("parallel".into());
+    // No notebook and no seen items: only the feed has its reply read.
+    i.track_seen = Some(false);
     let r = new_routine(&f, i);
     assert!(r.memory.is_none() && !r.track_seen);
     let run = finished_run(&f, &r, OCT8).await;
