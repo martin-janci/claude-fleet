@@ -1,5 +1,7 @@
 //! LLM drafts in Control (Orbit Fleet redesign step 9.11): a finished
-//! mission's release note and Today's morning brief.
+//! mission's release note and Today's morning brief; and a dashboard's
+//! summary widget (owner report 2026-11-06: "the view could be extended
+//! with AI"), the person's request answered from the widget's counts.
 //!
 //! Both are the plan's "LLM for writing" engine and follow its rules:
 //!
@@ -54,6 +56,17 @@ whose day it is. Plain text, at most 10 lines: what needs them first (waiting on
 progress, what shipped since yesterday, and what has gone stale. Use only the facts below; do \
 not invent work. Do not use tools.";
 
+/// What a summary widget's request answers from: its instruction. The
+/// person's request and the counts follow it.
+pub const DASHBOARD_SUMMARY_PROMPT: &str = "Answer the person's request below about their \
+work, from the counts of their tasks that follow it (the Work view's own numbers, under their \
+access). Plain text, at most 8 lines. Use only these numbers; when they cannot answer the \
+request, say what is missing; do not invent work. Do not use tools.";
+
+/// The longest request a summary widget carries, in characters (the
+/// block's own cap, `pages::chat_blocks`).
+pub const SUMMARY_REQUEST_MAX_CHARS: usize = 500;
+
 /// A draft and where it came from: what `DraftField` shows.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Draft {
@@ -67,6 +80,9 @@ pub struct Draft {
     /// The answer was longer than [`DRAFT_MAX_CHARS`] and was cut.
     #[serde(default)]
     pub truncated: bool,
+    /// What the run cost, micro-USD, when `claude` reported it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_micros: Option<i64>,
 }
 
 /// Today's brief: the draft, the org it covers, or none yet.
@@ -306,6 +322,17 @@ pub(super) async fn run_draft(
     run: &Run<'_>,
     prompt: &str,
 ) -> Result<(String, bool), IpcError> {
+    run_draft_costed(deps, run, prompt)
+        .await
+        .map(|(text, truncated, _)| (text, truncated))
+}
+
+/// [`run_draft`], with what the run cost (micro-USD) when `claude` said.
+pub(super) async fn run_draft_costed(
+    deps: &Deps,
+    run: &Run<'_>,
+    prompt: &str,
+) -> Result<(String, bool, Option<i64>), IpcError> {
     let _slot = HostSlot::take(run.host)?;
     let script = planner::planner_script(run.model, prompt);
     let out = crate::ssh::run_shell_bounded(
@@ -317,10 +344,12 @@ pub(super) async fn run_draft(
     )
     .await?;
     let stdout = String::from_utf8_lossy(&out.stdout);
+    let cost: Option<i64>;
     let text = match planner::parse_planner_output(&stdout) {
         PlannerOutput::Ran(ran) => {
             let (answer, usage) = planner::planner_answer(ran);
             book(deps, run, usage.as_ref());
+            cost = usage.as_ref().and_then(|u| u.cost_microusd);
             if claude_print::run_signed_out(usage.as_ref(), &answer, &out.stderr) {
                 return Err(claude_print::signed_out_error(run.host, None));
             }
@@ -358,7 +387,8 @@ pub(super) async fn run_draft(
             "the draft came back empty",
         ));
     }
-    Ok(clean_draft(&text))
+    let (text, truncated) = clean_draft(&text);
+    Ok((text, truncated, cost))
 }
 
 /// Book a draft run in `aux_usage`. A failed write is logged, never the
@@ -457,6 +487,7 @@ pub async fn release_note(
         from,
         at: crate::store::now_unix(),
         truncated,
+        cost_micros: None,
     })
 }
 
@@ -516,6 +547,7 @@ pub async fn brief(args: &WorkLinkArgs, deps: &Deps, scope: &ViewScope) -> Resul
             from,
             at: crate::store::now_unix(),
             truncated,
+            cost_micros: None,
         }),
         org_id,
     };
@@ -524,6 +556,95 @@ pub async fn brief(args: &WorkLinkArgs, deps: &Deps, scope: &ViewScope) -> Resul
         .unwrap_or_else(|e| e.into_inner())
         .insert(key, brief.clone());
     Ok(brief)
+}
+
+/// PURE: a summary widget's prompt: the instruction, the person's request,
+/// then the counts (`work { stats }`'s answer, as JSON). Also a few words
+/// on what it read.
+pub fn dashboard_summary_prompt(
+    request: &str,
+    stats: &crate::service::work::stats::WorkStats,
+) -> (String, String) {
+    let counts = serde_json::to_string_pretty(stats).unwrap_or_default();
+    let prompt = format!(
+        "{DASHBOARD_SUMMARY_PROMPT}\n\nThe person's request: {}\n\nThe counts:\n{counts}\n",
+        request.trim()
+    );
+    let from = count(stats.total as usize, "task", "tasks");
+    (prompt, from)
+}
+
+/// `work_link { action: dashboard_summary, prompt, filters?, org_id? }`: a
+/// dashboard's summary widget. Reads the widget's counts under the
+/// caller's access (`work { stats }`), runs the request over them on the
+/// host a brief would run on (the host of the caller's latest session
+/// today that may see the org), books it as `dashboard_summary` and
+/// answers the draft with its cost. Runs every time it is called: the
+/// page calls it on the widget's Write or Refresh only, and keeps the
+/// answer.
+pub async fn dashboard_summary(
+    args: &WorkLinkArgs,
+    deps: &Deps,
+    scope: &ViewScope,
+) -> Result<Draft, IpcError> {
+    let request = args
+        .prompt
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .ok_or_else(|| IpcError::new(codes::E_INVALID, "dashboard_summary needs prompt"))?;
+    if request.chars().count() > SUMMARY_REQUEST_MAX_CHARS {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            format!("prompt is at most {SUMMARY_REQUEST_MAX_CHARS} characters"),
+        ));
+    }
+    let filters: Option<crate::service::work::view::WorkTreeFilters> = match &args.filters {
+        None | Some(serde_json::Value::Null) => None,
+        Some(v) => Some(serde_json::from_value(v.clone()).map_err(|e| {
+            IpcError::new(
+                codes::E_INVALID,
+                format!("filters are not the Work view's: {e}"),
+            )
+        })?),
+    };
+    let stats = crate::service::work::stats::stats(&deps.store, scope, filters.as_ref(), None)?;
+    let today = crate::service::work::today::today(&deps.store, None, scope)?;
+    let target = {
+        let s = lock(&deps.store)?;
+        brief_target(&today, args.org_id, |host, org| {
+            host_sees_org(&s, host, org).unwrap_or(false)
+        })
+    };
+    let Some((org_id, host)) = target else {
+        return Err(IpcError::new(
+            codes::E_INVALID_STATE,
+            "no session of yours is running today on a host that may see this work, so \
+             there is no host to write the summary on",
+        ));
+    };
+    let (prompt, from) = dashboard_summary_prompt(request, &stats);
+    let model = {
+        let s = lock(&deps.store)?;
+        settings::get_string_for(&s, settings::WORK_SUMMARY_MODEL, org_id)
+    };
+    let run = Run {
+        origin: crate::store::AUX_ORIGIN_DASHBOARD_SUMMARY,
+        host: &host,
+        model: &model,
+        mission_id: None,
+        org_id,
+    };
+    let (text, truncated, cost_micros) = run_draft_costed(deps, &run, &prompt).await?;
+    Ok(Draft {
+        text,
+        model,
+        host_alias: host,
+        from,
+        at: crate::store::now_unix(),
+        truncated,
+        cost_micros,
+    })
 }
 
 #[cfg(test)]

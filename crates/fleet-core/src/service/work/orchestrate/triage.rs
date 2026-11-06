@@ -131,6 +131,7 @@ pub async fn triage_with(
             from,
             at: crate::store::now_unix(),
             truncated,
+            cost_micros: None,
         })
     } else {
         None

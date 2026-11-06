@@ -8,9 +8,13 @@
 //! (`ViewScope::may_own_person_row`), as `wizard_state` does. Anyone
 //! else's row answers as absent. A per-host token is not served the tool.
 //!
-//! **Who pins.** A person, from the card or the Dashboards page. The agent
-//! may `list` and `get`; its `pin` and `unpin` are refused (`may_pin`
-//! false): it proposes with a block and the person decides.
+//! **Who pins.** A person, from the card or the Dashboards page, and
+//! Control's agent when the person asked it for a change ("Change with the
+//! agent"): owner report 2026-11-06, a change that waited for a click on
+//! the card in the chat read as a change that never happened. A
+//! replacement keeps the version it overwrote, and the page offers
+//! *Undo* (`undo`) on a dashboard Control changed. Only a person unpins
+//! or undoes (`is_person` false refuses them).
 //!
 //! **Who hears of it.** A pin or an unpin emits `dashboards:changed`, an
 //! empty frame: the person's open devices re-read through this tool, so no
@@ -22,6 +26,7 @@
 
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::pages::chat_blocks;
+use crate::service::operator::OPERATOR_CLIENT_NAME;
 use crate::service::view_scope::ViewScope;
 use crate::store::{PinnedDashboardRow, PinnedDashboardWrite, Store};
 use serde::{Deserialize, Serialize};
@@ -222,36 +227,73 @@ pub fn unpin(store: &Mutex<Store>, scope: &ViewScope, id: &str) -> Result<bool, 
 /// Run one `dashboards` call for `scope`: `list` answers the rows, `get`
 /// the row or `null`, `pin` the row as it now stands, `unpin`
 /// `{ removed }`. `may_pin` is false for the agent: it reads, a person pins.
+/// Take back the last change to a pinned dashboard: the version before its
+/// last replacement comes back. A dashboard Control pinned new (no earlier
+/// version, pinned from Control's device) is unpinned instead, so Undo
+/// always takes back what Control did. `{undone, removed, dashboard?}`.
+pub fn undo(
+    store: &Mutex<Store>,
+    scope: &ViewScope,
+    id: &str,
+) -> Result<serde_json::Value, IpcError> {
+    let s = lock(store)?;
+    let Some(r) = readable(&s, scope, id)? else {
+        return Err(IpcError::new(
+            codes::E_NOTFOUND,
+            format!("no pinned dashboard {id}"),
+        ));
+    };
+    if r.can_undo {
+        let row = s.undo_dashboard(id, r.person_id)?;
+        s.bus_dashboards_changed();
+        return Ok(serde_json::json!({ "undone": true, "removed": false, "dashboard": row }));
+    }
+    if r.device.as_deref() == Some(OPERATOR_CLIENT_NAME) {
+        let removed = s.unpin_dashboard(id, r.person_id)?;
+        if removed {
+            s.bus_dashboards_changed();
+        }
+        return Ok(serde_json::json!({ "undone": removed, "removed": removed }));
+    }
+    Err(invalid(format!(
+        "{id} keeps no earlier version to go back to"
+    )))
+}
+
+/// `is_person`: the caller is a person's device, not Control's agent. The
+/// agent pins (a change the person asked it for, which the page offers to
+/// undo) but never unpins or undoes.
 pub fn run(
     store: &Mutex<Store>,
     scope: &ViewScope,
     args: &DashboardsArgs,
     device: Option<&str>,
-    may_pin: bool,
+    is_person: bool,
 ) -> Result<serde_json::Value, IpcError> {
     let person_only = || -> Result<(), IpcError> {
-        if may_pin {
+        if is_person {
             Ok(())
         } else {
             Err(IpcError::new(
                 codes::E_FORBIDDEN,
-                "a person pins and unpins a dashboard; propose it with a `dashboard` block",
+                "a person unpins a dashboard or undoes a change; pin the changed block instead",
             ))
         }
     };
     match args.action.as_str() {
         "list" => to_json(&list(store, scope)?),
         "get" => to_json(&get(store, scope, id_of(args)?)?),
-        "pin" => {
-            person_only()?;
-            to_json(&pin(store, scope, args, device)?)
-        }
+        "pin" => to_json(&pin(store, scope, args, device)?),
         "unpin" => {
             person_only()?;
             Ok(serde_json::json!({ "removed": unpin(store, scope, id_of(args)?)? }))
         }
+        "undo" => {
+            person_only()?;
+            undo(store, scope, id_of(args)?)
+        }
         other => Err(invalid(format!(
-            "action must be list | get | pin | unpin, got {other:?}"
+            "action must be list | get | pin | unpin | undo, got {other:?}"
         ))),
     }
 }

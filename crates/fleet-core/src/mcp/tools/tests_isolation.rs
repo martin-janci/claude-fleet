@@ -3723,6 +3723,23 @@ async fn run_matrix(isolate: bool) {
         },
     )
     .await;
+    // A dashboard's summary widget: with no request it runs nothing and says
+    // so; a host's token is refused as for the brief.
+    m.row(
+        "work_link",
+        "dashboard_summary",
+        |_, _| json!({ "action": "dashboard_summary" }),
+        |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            match who {
+                w if w.is_host() => is_code(who, a, "E_FORBIDDEN", "a session does not run"),
+                _ => is_code(who, a, "E_INVALID", "dashboard_summary needs prompt"),
+            }
+        },
+    )
+    .await;
     // Redesign 9.10: B's mission is not stuck, so whoever sees it gets an
     // empty card; triage changes nothing either way.
     m.row(

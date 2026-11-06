@@ -7,6 +7,7 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
   import BurnupChart from './BurnupChart.svelte';
+  import SummaryWidget from './SummaryWidget.svelte';
   import Loader from './Loader.svelte';
   import { workChanged } from './work';
   import { errorText } from './error_copy';
@@ -125,7 +126,9 @@
               onclick={() => onchange?.(w.title)}>Change</button
             >
           {/if}
-          {#if err}
+          {#if w.kind === 'summary'}
+            <SummaryWidget dashId={dash.id} widget={w} />
+          {:else if err}
             <h2>{w.title}</h2>
             <p class="err">Could not read: {err}</p>
           {:else if !s}

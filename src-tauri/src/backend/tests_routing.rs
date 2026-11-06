@@ -5751,6 +5751,25 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                 .map(|_| ())
             }),
         ),
+        (
+            "dashboard_summary",
+            "work_link",
+            json!({ "session_id": null, "key": null, "link_id": null, "source": null, "action": "dashboard_summary", "item_id": null, "prompt": "What blocks it?", "filters": { "status": "open" } }),
+            r#"{"text":"t","model":"haiku","host_alias":"h","from":"1 task","at":1}"#,
+            Box::new(|b, s, ssh| {
+                block_on(commands::missions::routed::dashboard_summary(
+                    b,
+                    commands::missions::DashboardSummaryArgs {
+                        prompt: "What blocks it?".into(),
+                        filters: Some(json!({ "status": "open" })),
+                    },
+                    s,
+                    ssh,
+                    &fleet_core::cancel::CancellationRegistry::new(),
+                ))
+                .map(|_| ())
+            }),
+        ),
         // ── multi-user M1 (T13): the three sharing mutations ─────────────
         //
         // `level` crosses as the string the user chose and is validated by

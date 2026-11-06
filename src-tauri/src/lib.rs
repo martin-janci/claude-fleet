@@ -551,6 +551,7 @@ pub fn run() {
             commands::missions::mission_release_note,
             commands::missions::today_brief,
             commands::missions::mission_triage,
+            commands::missions::dashboard_summary,
             commands::trackers::add_tracker,
             commands::trackers::update_tracker,
             commands::trackers::set_tracker_credential,

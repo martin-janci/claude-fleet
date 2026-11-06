@@ -829,6 +829,32 @@
             "title",
             "query"
           ]
+        },
+        {
+          "description": "A model's few lines over the query's counts, answering `prompt`;\nwritten only when the person presses Write or Refresh.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "summary"
+            },
+            "prompt": {
+              "description": "What to write, in the person's words.",
+              "type": "string"
+            },
+            "query": {
+              "$ref": "#/$defs/DashQuery",
+              "default": {}
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "title",
+            "prompt"
+          ]
         }
       ]
     },

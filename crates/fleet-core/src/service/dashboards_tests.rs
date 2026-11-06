@@ -1,6 +1,6 @@
 //! Pinned dashboards (persona design, step 6): pinned on one device, shown
-//! on another, nobody else's, checked as blocks, and never pinned by the
-//! agent.
+//! on another, nobody else's, checked as blocks, changed by the agent
+//! when asked and taken back with undo.
 
 use super::*;
 use crate::mcp::auth::{Caller, ClientRef, TokenMode};
@@ -164,7 +164,7 @@ fn a_pin_checks_the_block_refuses_a_builtin_and_stops_at_the_limit() {
 }
 
 #[test]
-fn the_agent_reads_but_never_pins_or_unpins() {
+fn the_agent_pins_a_change_but_never_unpins_or_undoes() {
     let st = store();
     let (ada, _) = people(&st);
     let desk = device(&st, ada, "Ada's Mac");
@@ -185,11 +185,80 @@ fn the_agent_reads_but_never_pins_or_unpins() {
         run(&st, &desk, &id_args("get", "dash.r42"), None, false).unwrap()["id"],
         "dash.r42"
     );
-    for args in [pin_args(block("dash.x", "X")), id_args("unpin", "dash.r42")] {
-        let e = run(&st, &desk, &args, None, false).unwrap_err();
+    // Owner report 2026-11-06: a change asked of Control now lands.
+    let changed = run(
+        &st,
+        &desk,
+        &pin_args(block("dash.r42", "R, by person")),
+        Some(OPERATOR_CLIENT_NAME),
+        false,
+    )
+    .unwrap();
+    assert_eq!(changed["title"], "R, by person");
+    assert_eq!(changed["device"], OPERATOR_CLIENT_NAME);
+    assert_eq!(changed["can_undo"], true);
+    for args in [id_args("unpin", "dash.r42"), id_args("undo", "dash.r42")] {
+        let e = run(&st, &desk, &args, Some(OPERATOR_CLIENT_NAME), false).unwrap_err();
         assert_eq!(e.code, codes::E_FORBIDDEN);
     }
     assert_eq!(list(&st, &desk).unwrap().len(), 1);
+}
+
+#[test]
+fn undo_puts_back_the_version_before_controls_change_once() {
+    let st = store();
+    let (ada, _) = people(&st);
+    let desk = device(&st, ada, "Ada's Mac");
+    pin(
+        &st,
+        &desk,
+        &pin_args(block("dash.r42", "Mine")),
+        Some("Ada's Mac"),
+    )
+    .unwrap();
+    // A pin of the same block keeps nothing to undo.
+    let same = pin(
+        &st,
+        &desk,
+        &pin_args(block("dash.r42", "Mine")),
+        Some("Ada's Mac"),
+    )
+    .unwrap();
+    assert!(!same.can_undo);
+    let e = undo(&st, &desk, "dash.r42").unwrap_err();
+    assert_eq!(e.code, codes::E_INVALID);
+
+    pin(
+        &st,
+        &desk,
+        &pin_args(block("dash.r42", "Control's")),
+        Some(OPERATOR_CLIENT_NAME),
+    )
+    .unwrap();
+    let back = run(&st, &desk, &id_args("undo", "dash.r42"), None, true).unwrap();
+    assert_eq!(back["undone"], true);
+    let row = get(&st, &desk, "dash.r42").unwrap().unwrap();
+    assert_eq!(row.title, "Mine");
+    assert_eq!(row.spec["title"], "Mine");
+    assert_eq!(row.device.as_deref(), Some("Ada's Mac"));
+    assert!(!row.can_undo, "one step only");
+    assert!(undo(&st, &desk, "dash.r42").is_err());
+
+    // A dashboard Control pinned new is taken back by unpinning it.
+    pin(
+        &st,
+        &desk,
+        &pin_args(block("dash.scrum.mine", "Copy")),
+        Some(OPERATOR_CLIENT_NAME),
+    )
+    .unwrap();
+    let gone = undo(&st, &desk, "dash.scrum.mine").unwrap();
+    assert_eq!(gone["removed"], true);
+    assert!(get(&st, &desk, "dash.scrum.mine").unwrap().is_none());
+    assert_eq!(
+        undo(&st, &desk, "nope").unwrap_err().code,
+        codes::E_NOTFOUND
+    );
 }
 
 #[test]

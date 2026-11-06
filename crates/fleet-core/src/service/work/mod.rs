@@ -434,6 +434,12 @@ pub struct WorkLinkArgs {
     /// today_brief: the start of the viewer's day, unix seconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub since: Option<i64>,
+    /// dashboard_summary: what to write.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+    /// dashboard_summary: Work view filters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filters: Option<serde_json::Value>,
 }
 
 /// `work_link { action: dismiss, item_id }`.
@@ -677,6 +683,7 @@ pub const WORK_LINK_ACTIONS: &[&str] = &[
     "mission_release_note",
     "today_brief",
     "mission_triage",
+    "dashboard_summary",
 ];
 
 /// The desktop's Routed work commands and the hub action each one calls
@@ -792,6 +799,8 @@ pub const ROUTED_WORK_COMMANDS: &[(&str, &str, &str)] = &[
     ("mission_release_note", "work_link", "mission_release_note"),
     ("today_brief", "work_link", "today_brief"),
     ("mission_triage", "work_link", "mission_triage"),
+    // A dashboard's summary widget (owner report 2026-11-06).
+    ("dashboard_summary", "work_link", "dashboard_summary"),
 ];
 
 /// `work_link`'s `task_id` as text, from a string or a bare integer:

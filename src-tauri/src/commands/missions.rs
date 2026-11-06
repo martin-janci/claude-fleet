@@ -213,6 +213,15 @@ pub struct TodayBriefArgs {
     pub org_id: Option<i64>,
 }
 
+/// `dashboard_summary` (owner report 2026-11-06): a dashboard summary
+/// widget's text, `prompt` answered over the counts of `filters`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DashboardSummaryArgs {
+    pub prompt: String,
+    #[serde(default)]
+    pub filters: Option<serde_json::Value>,
+}
+
 /// `mission_triage` (redesign 9.10): a stuck mission's card, its words
 /// drafted only when `refresh`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -444,6 +453,17 @@ pub async fn mission_release_note(
     reg: State<'_, Arc<CancellationRegistry>>,
 ) -> Result<Draft, IpcError> {
     routed::mission_release_note(&backend, args, &store, &ssh, &reg).await
+}
+
+#[tauri::command]
+pub async fn dashboard_summary(
+    args: DashboardSummaryArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+    reg: State<'_, Arc<CancellationRegistry>>,
+) -> Result<Draft, IpcError> {
+    routed::dashboard_summary(&backend, args, &store, &ssh, &reg).await
 }
 
 #[tauri::command]
@@ -909,6 +929,31 @@ pub(crate) mod routed {
             Some(hub) => hub.route("today_brief", &wire).await,
             None => {
                 orchestrate::drafts::brief(&wire, &deps(store, ssh, reg), &internal_view()).await
+            }
+        }
+    }
+
+    pub async fn dashboard_summary(
+        backend: &FleetBackend,
+        args: DashboardSummaryArgs,
+        store: &Arc<Mutex<Store>>,
+        ssh: &Arc<SshClient>,
+        reg: &Arc<CancellationRegistry>,
+    ) -> Result<Draft, IpcError> {
+        let wire = WorkLinkArgs {
+            prompt: Some(args.prompt),
+            filters: args.filters,
+            ..write("dashboard_summary", None)
+        };
+        match backend.hub() {
+            Some(hub) => hub.route("dashboard_summary", &wire).await,
+            None => {
+                orchestrate::drafts::dashboard_summary(
+                    &wire,
+                    &deps(store, ssh, reg),
+                    &internal_view(),
+                )
+                .await
             }
         }
     }
