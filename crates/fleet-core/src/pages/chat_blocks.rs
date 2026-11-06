@@ -68,7 +68,18 @@ pub const RESULT_CHARTS: &[&str] = &["line", "bar", "sparkline"];
 const RESULT_ITEM_TYPES: &[&str] = &["stat", "chart", "table"];
 /// What a `dashboard` block's widgets are (persona design, step 5): the
 /// widgets of `src/lib/dashboards.ts`, drawn from `work { stats }`.
-pub const DASH_WIDGET_KINDS: &[&str] = &["stat", "groups", "buckets", "burnup", "summary"];
+pub const DASH_WIDGET_KINDS: &[&str] = &[
+    "stat", "groups", "buckets", "burnup", "summary", "feed", "fleet",
+];
+/// What a `fleet` widget counts (owner report 2026-11-06): the app's own
+/// rows, drawn from what the desktop already holds.
+pub const DASH_FLEET_SOURCES: &[&str] = &["sessions", "hosts", "accounts"];
+/// How a `fleet` widget shows its source: one number, or a row each.
+pub const DASH_FLEET_SHOWS: &[&str] = &["stat", "list"];
+/// How a `feed` widget shows its value: as text, or as one big number.
+pub const DASH_FEED_SHOWS: &[&str] = &["text", "stat"];
+/// What a summary widget reads besides the work's counts.
+pub const DASH_SUMMARY_SOURCES: &[&str] = &["work", "sessions", "hosts", "accounts", "feeds"];
 /// A summary widget's longest request (`SUMMARY_REQUEST_MAX_CHARS` in
 /// work/orchestrate/drafts.rs).
 pub const DASH_SUMMARY_PROMPT_MAX: usize = 500;
@@ -367,6 +378,30 @@ pub enum DashWidget {
         prompt: String,
         #[serde(default)]
         query: DashQuery,
+        /// What it reads: work, sessions, hosts, accounts, feeds (default
+        /// work).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sources: Option<Vec<String>>,
+    },
+    /// The value written last to feed `key` (`dashboards { feed }`, or a
+    /// routine's `<dashboard-feed key="…">` reply block); never computed.
+    Feed {
+        title: String,
+        /// The feed's key: letters, digits and . _ : -.
+        key: String,
+        /// text (default) or stat.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        show: Option<String>,
+    },
+    /// The fleet's own rows: sessions by state, hosts reachable, accounts'
+    /// usage.
+    Fleet {
+        title: String,
+        /// sessions, hosts or accounts.
+        source: String,
+        /// stat (default) or list.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        show: Option<String>,
     },
 }
 
@@ -777,6 +812,17 @@ fn dash_widget(p: &mut Problems, o: &Map<String, Value>, at: &str) {
         }
         Some("summary") => {
             p.str(o, "prompt", at, true, DASH_SUMMARY_PROMPT_MAX);
+            if let Some(list) = p.opt_arr(o, "sources", at, 1, DASH_SUMMARY_SOURCES.len()) {
+                p.one_of_each(&list, &format!("{at} › source"), DASH_SUMMARY_SOURCES);
+            }
+        }
+        Some("feed") => {
+            p.key(o, "key", at);
+            p.one_of(o, "show", at, DASH_FEED_SHOWS, false);
+        }
+        Some("fleet") => {
+            p.one_of(o, "source", at, DASH_FLEET_SOURCES, true);
+            p.one_of(o, "show", at, DASH_FLEET_SHOWS, false);
         }
         Some("burnup") => {
             let days = p.num(o, "days", at, 2);

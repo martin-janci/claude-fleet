@@ -23,12 +23,20 @@
 //! **What a row holds.** A block that passes the same check the app draws
 //! it with (`pages::chat_blocks::check`), never a built-in's id, at most
 //! [`MAX_PINNED`] per person.
+//!
+//! **Feeds** (migration 222, owner report 2026-11-06: dashboards from
+//! dynamic data). A `feed` widget shows a value by its key, never computed
+//! by the app: Control's agent or the person writes one (`feed {key,
+//! value}`; an empty value removes it), and a routine's run writes one in
+//! its reply (`<dashboard-feed key="…">…</dashboard-feed>`, read by
+//! `service::routines::memory`). A feed is its writer's person's, like a
+//! pin, at most [`MAX_FEEDS`] each; a write emits `dashboards:changed`.
 
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::pages::chat_blocks;
 use crate::service::operator::OPERATOR_CLIENT_NAME;
 use crate::service::view_scope::ViewScope;
-use crate::store::{PinnedDashboardRow, PinnedDashboardWrite, Store};
+use crate::store::{DashboardFeedRow, PinnedDashboardRow, PinnedDashboardWrite, Store};
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 
@@ -46,6 +54,12 @@ pub const BUILTIN_IDS: &[&str] = &[
 pub const MAX_PINNED: usize = 20;
 /// `why` and a device name: at most this many characters.
 const TEXT_MAX_CHARS: usize = 500;
+/// The most feeds one person keeps.
+pub const MAX_FEEDS: usize = 50;
+/// A feed's value, in characters (`FEED_VALUE_MAX` in dashboards.ts).
+pub const FEED_VALUE_MAX_CHARS: usize = 4000;
+/// A feed's key, in characters.
+pub const FEED_KEY_MAX_CHARS: usize = 64;
 
 /// One `dashboards` call: the MCP tool's parameters and the desktop
 /// command's arguments alike.
@@ -53,7 +67,7 @@ const TEXT_MAX_CHARS: usize = 500;
 #[schemars(crate = "rmcp::schemars")]
 #[serde(deny_unknown_fields)]
 pub struct DashboardsArgs {
-    /// list | get | pin | unpin.
+    /// list | get | pin | unpin | undo | feeds | feed.
     pub action: String,
     /// get, unpin.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -64,6 +78,12 @@ pub struct DashboardsArgs {
     /// pin: why, one line.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub why: Option<String>,
+    /// feed key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    /// feed: text; empty removes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
 }
 
 fn invalid(msg: impl Into<String>) -> IpcError {
@@ -260,6 +280,136 @@ pub fn undo(
     )))
 }
 
+/// PURE: `key` if it names a feed: letters, digits and `. _ : -`, at most
+/// [`FEED_KEY_MAX_CHARS`].
+pub fn feed_key(key: Option<&str>) -> Result<&str, IpcError> {
+    let key = key.map(str::trim).unwrap_or_default();
+    let ok = !key.is_empty()
+        && key.chars().count() <= FEED_KEY_MAX_CHARS
+        && key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '-'));
+    if ok {
+        Ok(key)
+    } else {
+        Err(invalid(format!(
+            "a feed's key is 1-{FEED_KEY_MAX_CHARS} letters, digits and . _ : -"
+        )))
+    }
+}
+
+/// PURE: a feed's value as it is kept: trimmed, cut to
+/// [`FEED_VALUE_MAX_CHARS`]; `None` when empty (a removal).
+pub fn feed_value(v: &str) -> Option<String> {
+    let v = v.trim();
+    (!v.is_empty()).then(|| v.chars().take(FEED_VALUE_MAX_CHARS).collect())
+}
+
+/// `dashboards { feeds }`: the caller's feeds, by key. On a fleet where the
+/// caller reads others' rows too (the hub's own), its own come first and
+/// win a key.
+pub fn feeds(store: &Mutex<Store>, scope: &ViewScope) -> Result<Vec<DashboardFeedRow>, IpcError> {
+    let s = lock(store)?;
+    let mut rows: Vec<DashboardFeedRow> = s
+        .all_dashboard_feeds()?
+        .into_iter()
+        .filter(|r| scope.may_own_person_row(None, r.person_id))
+        .collect();
+    // Others' first, so the caller's own overwrite them by key.
+    rows.sort_by_key(|r| r.person_id == scope.person);
+    let by_key: std::collections::BTreeMap<String, DashboardFeedRow> =
+        rows.into_iter().map(|r| (r.key.clone(), r)).collect();
+    Ok(by_key.into_values().collect())
+}
+
+/// Write feed `key` of `person`, by `by` (person | agent | routine): an
+/// empty value removes it. `None` when removed (or there was none).
+pub fn write_feed(
+    s: &Store,
+    person: Option<i64>,
+    key: &str,
+    value: &str,
+    by: &str,
+    by_ref: Option<&str>,
+    now: i64,
+) -> Result<Option<DashboardFeedRow>, IpcError> {
+    let Some(value) = feed_value(value) else {
+        if s.delete_dashboard_feed(person, key)? {
+            s.bus_dashboards_changed();
+        }
+        return Ok(None);
+    };
+    let held = s.dashboard_feeds(person)?;
+    if held.len() >= MAX_FEEDS && !held.iter().any(|r| r.key == key) {
+        return Err(invalid(format!(
+            "{MAX_FEEDS} feeds are kept; write an empty value to one to remove it first"
+        )));
+    }
+    let row = s.set_dashboard_feed(person, key, &value, by, by_ref, now)?;
+    s.bus_dashboards_changed();
+    Ok(Some(row))
+}
+
+/// `dashboards { feed, key, value }`: the caller's feed, written by the
+/// person (`is_person`) or Control's agent.
+pub fn feed(
+    store: &Mutex<Store>,
+    scope: &ViewScope,
+    args: &DashboardsArgs,
+    is_person: bool,
+) -> Result<Option<DashboardFeedRow>, IpcError> {
+    let key = feed_key(args.key.as_deref())?;
+    let value = args
+        .value
+        .as_deref()
+        .ok_or_else(|| invalid("feed needs value (empty removes the feed)"))?;
+    let s = lock(store)?;
+    let by = if is_person { "person" } else { "agent" };
+    write_feed(
+        &s,
+        scope.person,
+        key,
+        value,
+        by,
+        None,
+        crate::store::now_unix(),
+    )
+}
+
+/// The tag a routine's reply writes a feed with.
+const FEED_TAG_OPEN: &str = "<dashboard-feed";
+const FEED_TAG_CLOSE: &str = "</dashboard-feed>";
+
+/// PURE: each `<dashboard-feed key="…">…</dashboard-feed>` block in a
+/// reply, as (key, value), in order. A block with no key, an unclosed one,
+/// or one quoted as code (`` `<dashboard-feed>` ``) is left out.
+pub fn feed_blocks(text: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some(at) = rest.find(FEED_TAG_OPEN) {
+        let quoted = rest[..at].ends_with('`');
+        let after = &rest[at + FEED_TAG_OPEN.len()..];
+        let Some(gt) = after.find('>') else { break };
+        let attrs = &after[..gt];
+        let body_from = &after[gt + 1..];
+        let Some(end) = body_from.find(FEED_TAG_CLOSE) else {
+            break;
+        };
+        let key = attrs
+            .trim()
+            .strip_prefix("key=\"")
+            .and_then(|k| k.strip_suffix('"'))
+            .filter(|k| !k.contains('"'));
+        if let (false, Some(key)) = (quoted, key) {
+            if feed_key(Some(key)).is_ok() {
+                out.push((key.to_string(), body_from[..end].trim().to_string()));
+            }
+        }
+        rest = &body_from[end + FEED_TAG_CLOSE.len()..];
+    }
+    out
+}
+
 /// `is_person`: the caller is a person's device, not Control's agent. The
 /// agent pins (a change the person asked it for, which the page offers to
 /// undo) but never unpins or undoes.
@@ -292,8 +442,10 @@ pub fn run(
             person_only()?;
             undo(store, scope, id_of(args)?)
         }
+        "feeds" => to_json(&feeds(store, scope)?),
+        "feed" => to_json(&feed(store, scope, args, is_person)?),
         other => Err(invalid(format!(
-            "action must be list | get | pin | unpin | undo, got {other:?}"
+            "action must be list | get | pin | unpin | undo | feeds | feed, got {other:?}"
         ))),
     }
 }

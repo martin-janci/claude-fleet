@@ -57,7 +57,8 @@ fn memory_unread_sql() -> String {
          WHERE rr.memory_read_at IS NULL AND rr.state IN ('done', 'failed') \
            AND rr.finished_at >= ?1 \
            AND (rr.memory_retry_at IS NULL OR rr.memory_retry_at <= ?3) \
-           AND (r.memory IS NOT NULL OR r.track_seen = 1) \
+           AND (r.memory IS NOT NULL OR r.track_seen = 1 \
+                OR instr(r.prompt, '<dashboard-feed') > 0) \
          ORDER BY rr.finished_at, rr.id LIMIT ?2",
         super::routines::RUN_COLS_RR
     )

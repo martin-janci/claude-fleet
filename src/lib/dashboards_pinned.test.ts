@@ -22,6 +22,7 @@ import { emit } from '@tauri-apps/api/event';
 import {
   BUILTIN_DASHBOARDS,
   changePrompt,
+  dashboardFeeds,
   dashboardBlock,
   dashboardChanges,
   followPinned,
@@ -30,6 +31,7 @@ import {
   pinStateOf,
   pinnedDashboards,
   unpinDashboard,
+  writeFeed,
   type Dashboard,
 } from './dashboards';
 import { checkUiBlock } from './rich_blocks';
@@ -38,6 +40,8 @@ const mock = invoke as ReturnType<typeof vi.fn>;
 
 /** The hub's side: rows by id, as `service::dashboards` keeps them. */
 let rows: Map<string, { id: string; title: string; spec: Record<string, unknown>; why?: string; pinned_at: number }>;
+/** Its feeds by key (`dashboards { feeds | feed }`). */
+let feeds: Map<string, { key: string; value: string; by: string; by_ref?: string; updated_at: number }>;
 
 const release: Dashboard = {
   id: 'dash.release-42',
@@ -51,7 +55,9 @@ const release: Dashboard = {
 
 beforeEach(() => {
   rows = new Map();
+  feeds = new Map();
   pinnedDashboards.set([]);
+  dashboardFeeds.set({});
   localStorage.clear();
   mock.mockReset();
   mock.mockImplementation(async (cmd: string, a: { args: { action: string; id?: string; dashboard?: Record<string, unknown>; why?: string } }) => {
@@ -67,6 +73,17 @@ beforeEach(() => {
       return row;
     }
     if (action === 'unpin') return { removed: rows.delete(id!) };
+    if (action === 'feeds') return [...feeds.values()];
+    if (action === 'feed') {
+      const { key, value } = a.args as unknown as { key: string; value: string };
+      if (!value.trim()) {
+        feeds.delete(key);
+        return null;
+      }
+      const f = { key, value: value.trim(), by: 'person', updated_at: 200 };
+      feeds.set(key, f);
+      return f;
+    }
     throw new Error(action);
   });
 });
@@ -146,7 +163,7 @@ describe('pinned dashboards', () => {
   it('follows the pins: another device’s pin arrives as a frame, and the last release stops', async () => {
     const stop = followPinned();
     const second = followPinned();
-    await vi.waitFor(() => expect(mock).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(mock).toHaveBeenCalledTimes(2));
     expect(get(pinnedDashboards)).toEqual([]);
     // Pinned on the phone: the hub sends an empty frame and the list re-reads.
     rows.set('dash.release-42', { id: 'dash.release-42', title: 'R', spec: dashboardBlock(release), pinned_at: 7 });
@@ -162,11 +179,31 @@ describe('pinned dashboards', () => {
 
   it('re-reads the pins after a gap the hub could not replay', async () => {
     const stop = followPinned();
-    await vi.waitFor(() => expect(mock).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(mock).toHaveBeenCalledTimes(2));
     // The `dashboards:changed` for this pin fell into the gap.
     rows.set('dash.release-42', { id: 'dash.release-42', title: 'R', spec: dashboardBlock(release), pinned_at: 7 });
     await emit('hub:resynced', null);
     await vi.waitFor(() => expect(get(pinnedDashboards).map((p) => p.id)).toEqual(['dash.release-42']));
     stop();
+  });
+});
+
+describe('dashboard feeds', () => {
+  it('reads the feeds with the pins and again when the hub says they moved', async () => {
+    feeds.set('deploys', { key: 'deploys', value: '3 today', by: 'routine', by_ref: 'Nightly', updated_at: 9 });
+    const stop = followPinned();
+    await vi.waitFor(() => expect(get(dashboardFeeds).deploys?.value).toBe('3 today'));
+    feeds.set('deploys', { key: 'deploys', value: '4 today', by: 'agent', updated_at: 10 });
+    await emit('dashboards:changed', {});
+    await vi.waitFor(() => expect(get(dashboardFeeds).deploys?.by).toBe('agent'));
+    stop();
+  });
+
+  it('writes a feed as the person, and an empty value removes it', async () => {
+    const w = await writeFeed('notes', ' ship Friday ');
+    expect(w.ok && w.value?.value).toBe('ship Friday');
+    expect(get(dashboardFeeds).notes?.value).toBe('ship Friday');
+    await writeFeed('notes', '');
+    expect(get(dashboardFeeds).notes).toBeUndefined();
   });
 });

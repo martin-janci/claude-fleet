@@ -213,11 +213,11 @@ Parameters (* required): `action`*, `chosen`, `run_id`, `text`
 
 ### `dashboards`
 
-The person's pinned dashboards (`dashboard` blocks): list | get {id} | pin {dashboard, why?} | unpin {id} | undo {id}. The agent pins; unpin and undo are a person's (E_FORBIDDEN).
+The person's pinned dashboards (`dashboard` blocks): list | get {id} | pin {dashboard, why?} | unpin {id} | undo {id} | feeds | feed {key, value}. Agent pins, feeds; unpin and undo are a person's (E_FORBIDDEN).
 
 Access: the master or a paired device; not a per-host token · deadline 60 s.
 
-Parameters (* required): `action`*, `dashboard`, `id`, `why`
+Parameters (* required): `action`*, `dashboard`, `id`, `key`, `value`, `why`
 
 ### `debug_devices`
 
@@ -1377,7 +1377,7 @@ Decide a session's work: action link (becomes its primary; key or item_id), reje
 
 Access: the master, a paired device or a per-host token · confirm-gated (mcp.confirm_destructive) · deadline 900 s.
 
-Parameters (* required): `ack_live`, `action`*, `assignees`, `attachment_id`, `brief`, `bucket_id`, `bucket_op`, `budget_cents`, `card_id`, `ci_override`, `command`, `comment_id`, `confirm_nonce`, `container`, `data_base64`, `days`, `decisions`, `depends_on`, `done_when`, `draft_brief`, `due_at`, `epic`, `estimate`, `estimate_unit`, `expected_primary`, `expected_version`, `filters`, `force_cross_org`, `globs`, `group`, `host_alias`, `hosts`, `hours`, `impact_token`, `index`, `item_id`, `item_ids`, `items`, `key`, `labels`, `lane`, `level`, `line`, `link_id`, `max_parallel`, `mime`, `mission`, `mission_id`, `mode`, `name`, `note`, `notes`, `ok`, `on`, `org_id`, `parallel`, `parent`, `plan`, `post_to_tracker`, `primary`, `priority`, `profile`, `project_id`, `project_ids`, `prompt`, `refresh`, `role`, `rule`, `rule_id`, `session_id`, `since`, `source`, `status`, `status_name`, `step`, `task_id`, `title`, `tracker_id`, `tree`, `until_done`, `url`, `view`, `view_id`, `why`, `with_brief`, `worktree`
+Parameters (* required): `ack_live`, `action`*, `assignees`, `attachment_id`, `brief`, `bucket_id`, `bucket_op`, `budget_cents`, `card_id`, `ci_override`, `command`, `comment_id`, `confirm_nonce`, `container`, `context`, `data_base64`, `days`, `decisions`, `depends_on`, `done_when`, `draft_brief`, `due_at`, `epic`, `estimate`, `estimate_unit`, `expected_primary`, `expected_version`, `filters`, `force_cross_org`, `globs`, `group`, `host_alias`, `hosts`, `hours`, `impact_token`, `index`, `item_id`, `item_ids`, `items`, `key`, `labels`, `lane`, `level`, `line`, `link_id`, `max_parallel`, `mime`, `mission`, `mission_id`, `mode`, `name`, `note`, `notes`, `ok`, `on`, `org_id`, `parallel`, `parent`, `plan`, `post_to_tracker`, `primary`, `priority`, `profile`, `project_id`, `project_ids`, `prompt`, `refresh`, `role`, `rule`, `rule_id`, `session_id`, `since`, `source`, `status`, `status_name`, `step`, `task_id`, `title`, `tracker_id`, `tree`, `until_done`, `url`, `view`, `view_id`, `why`, `with_brief`, `worktree`
 
 ## Tauri IPC commands
 

@@ -25,6 +25,7 @@ import { checkUiBlock, UI_SPEC } from './rich_blocks';
 import { invokeCmd, type Result } from './result';
 import type { WorkTreeFilters, WorkGroupBy } from './work_view';
 import type { WorkspaceId } from './workspace';
+import type { DashboardFeed } from './dashboard_sources';
 
 // ---------------------------------------------------------------------------
 // Wire types (`WorkStats`)
@@ -96,6 +97,11 @@ export function workStats(filters: WorkTreeFilters, since?: number): Promise<Res
 /** What a stat shows of an answer. */
 export type StatValue = 'total' | 'open' | 'needs_you' | 'pct_done' | 'cost' | StageKey;
 
+/** What a summary widget reads (`DASH_SUMMARY_SOURCES`); work alone when absent. */
+export type SummarySource = 'work' | 'sessions' | 'hosts' | 'accounts' | 'feeds';
+/** What a `fleet` widget counts. */
+export type FleetSource = 'sessions' | 'hosts' | 'accounts';
+
 export type Widget =
   | {
       /** A model's few lines over the query's counts, answering `prompt`;
@@ -105,6 +111,28 @@ export type Widget =
       query: WorkTreeFilters;
       /** What to write, in the person's words; at most 500 characters. */
       prompt: string;
+      /** What else it reads: the page's sessions, hosts, accounts and
+       *  feeds, sent with the request (owner report 2026-11-06). */
+      sources?: SummarySource[];
+    }
+  | {
+      /** The value written last to feed `key`: by Control
+       *  (`dashboards { feed }`), the person, or a routine's reply
+       *  (`<dashboard-feed key="…">`). Never computed by the app. */
+      kind: 'feed';
+      title: string;
+      key: string;
+      /** text (default), or one big number. */
+      show?: 'text' | 'stat';
+    }
+  | {
+      /** The fleet's own rows, as this desktop holds them: sessions by
+       *  state, hosts reachable, accounts' usage. */
+      kind: 'fleet';
+      title: string;
+      source: FleetSource;
+      /** stat (default): one number; list: a row each. */
+      show?: 'stat' | 'list';
     }
   | {
       kind: 'stat';
@@ -241,6 +269,8 @@ export function burnupDaysOf(w: Widget): number | undefined {
 
 /** The read a widget answers from: its filters, and a burn-up's window. */
 export function widgetKey(w: Widget): string {
+  if (w.kind === 'feed') return `feed:${w.key}`;
+  if (w.kind === 'fleet') return `fleet:${w.source}`;
   const days = burnupDaysOf(w);
   return days === undefined ? queryKey(w.query) : `${queryKey(w.query)}|burnup:${days}`;
 }
@@ -255,8 +285,9 @@ export interface StatsAsk {
 export function dashboardQueries(d: Dashboard): Map<string, StatsAsk> {
   const out = new Map<string, StatsAsk>();
   for (const w of d.widgets) {
-    // A summary widget's counts are read by the hub that writes it.
-    if (w.kind === 'summary') continue;
+    // A summary widget's counts are read by the hub that writes it; a
+    // feed and the fleet's rows are not the work's.
+    if (w.kind === 'summary' || w.kind === 'feed' || w.kind === 'fleet') continue;
     // Archived work counts: a done task is still done.
     const filters: WorkTreeFilters = { archived: true, ...w.query };
     const days = burnupDaysOf(w);
@@ -448,6 +479,24 @@ export async function loadPinned(): Promise<void> {
   pinnedDashboards.set(rows.flatMap((x) => fromRow(x) ?? []));
 }
 
+/** The person's feeds by key (`dashboards { feeds }`): what `feed`
+ *  widgets show. Read with the pins, and again on `dashboards:changed`. */
+export const dashboardFeeds = writable<Record<string, DashboardFeed>>({});
+
+/** Read the feeds again. A hub before feeds answers an error: none then. */
+export async function loadFeeds(): Promise<void> {
+  const r = await call<DashboardFeed[]>({ action: 'feeds' });
+  if (!r.ok || !Array.isArray(r.value)) return;
+  dashboardFeeds.set(Object.fromEntries(r.value.map((f) => [f.key, f])));
+}
+
+/** Write feed `key` as the person; an empty value removes it. */
+export async function writeFeed(key: string, value: string): Promise<Result<DashboardFeed | null>> {
+  const r = await call<DashboardFeed | null>({ action: 'feed', key, value });
+  if (r.ok) await loadFeeds();
+  return r;
+}
+
 let followers = 0;
 let stopFollowing: (() => void) | null = null;
 
@@ -467,11 +516,15 @@ export function followPinned(): () => void {
       if (disposed) u();
       else unlisteners.push(u);
     };
-    void loadPinned();
-    void listen(DASHBOARDS_CHANGED_EVENT, () => void loadPinned()).then(keep, () => {});
+    const reload = () => {
+      void loadPinned();
+      void loadFeeds();
+    };
+    reload();
+    void listen(DASHBOARDS_CHANGED_EVENT, reload).then(keep, () => {});
     // A gap the hub could not replay can have swallowed a
     // `dashboards:changed`: re-read rather than trust what we hold.
-    void listen('hub:resynced', () => void loadPinned()).then(keep, () => {});
+    void listen('hub:resynced', reload).then(keep, () => {});
     stopFollowing = () => {
       disposed = true;
       for (const u of unlisteners.splice(0)) u();

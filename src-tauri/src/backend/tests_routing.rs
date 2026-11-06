@@ -5782,6 +5782,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                     commands::missions::DashboardSummaryArgs {
                         prompt: "What blocks it?".into(),
                         filters: Some(json!({ "status": "open" })),
+                        context: None,
                     },
                     s,
                     ssh,

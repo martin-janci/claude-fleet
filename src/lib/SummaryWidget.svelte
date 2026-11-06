@@ -11,9 +11,19 @@
   import { errorText } from './error_copy';
   import { readPref, writePref } from './prefs';
   import { dashboardSummary, draftedAt, type Draft } from './drafts';
-  import { summaryKey, type Widget } from './dashboards';
+  import { dashboardFeeds, summaryKey, type Widget } from './dashboards';
+  import { summaryContext, type FleetData } from './dashboard_sources';
 
-  let { dashId, widget }: { dashId: string; widget: Extract<Widget, { kind: 'summary' }> } = $props();
+  let {
+    dashId,
+    widget,
+    fleet,
+  }: {
+    dashId: string;
+    widget: Extract<Widget, { kind: 'summary' }>;
+    /** What the page holds of the fleet, for `sources` other than work. */
+    fleet?: FleetData;
+  } = $props();
 
   type Kept = { prompt: string; draft: Draft };
   const isKept = (v: unknown): v is Kept =>
@@ -35,7 +45,8 @@
   async function write() {
     busy = true;
     error = null;
-    const r = await dashboardSummary(widget.prompt, { archived: true, ...widget.query });
+    const context = fleet ? summaryContext(widget.sources, fleet, $dashboardFeeds) : {};
+    const r = await dashboardSummary(widget.prompt, { archived: true, ...widget.query }, context);
     busy = false;
     if (!r.ok) {
       error = errorText(r.error);
@@ -48,6 +59,9 @@
 
 <h2 class="title">{widget.title}</h2>
 <p class="ask" data-testid="summary-prompt">{widget.prompt}</p>
+{#if widget.sources?.some((x) => x !== 'work')}
+  <p class="reads" data-testid="summary-sources">Reads {widget.sources.join(', ')}</p>
+{/if}
 {#if kept}
   <p class="text" data-testid="summary-text">{kept.draft.text}</p>
   <p class="meta" data-testid="summary-meta">
@@ -68,6 +82,7 @@
 <style>
   .title { margin: 0 0 var(--space-2); font-size: var(--text-sm); font-weight: 600; }
   .ask { margin: 0; font-size: var(--text-xs); color: var(--fg-muted); font-style: italic; }
+  .reads { margin: 2px 0 0; font-size: var(--text-2xs); color: var(--fg-muted); }
   .text { margin: 6px 0 0; font-size: var(--text-sm); white-space: pre-wrap; color: var(--fg); }
   .meta { margin: 6px 0 0; font-size: var(--text-2xs); color: var(--fg-muted); }
   .none { margin: 6px 0 0; font-size: var(--text-sm); color: var(--fg-muted); }

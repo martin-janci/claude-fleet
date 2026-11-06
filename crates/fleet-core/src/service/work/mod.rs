@@ -445,6 +445,9 @@ pub struct WorkLinkArgs {
     /// dashboard_summary: Work view filters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filters: Option<serde_json::Value>,
+    /// dashboard_summary: page data.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<serde_json::Value>,
 }
 
 /// `work_link { action: dismiss, item_id }`.
