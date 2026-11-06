@@ -912,6 +912,37 @@ fleet-mobile #50).
 > **[Screenshot placeholder]** The New session dialog on a ticket, with
 > Brief Claude and Also start in.
 
+### New worktree setup
+
+A fresh worktree has none of the files git ignores (`.env`, local config)
+and no dependencies installed. A project's **new worktree setup** fixes
+both before its agent starts: right-click a project in the New session
+picker (or ⇧F10 on it), **New worktree setup…**, then
+
+- **Copy from the project folder:** one relative path or glob per line
+  (`.env`, `config/*.local`, `**/.env.local`), copied from the project's
+  base checkout into the new worktree. A glob may not start with `/` or
+  `~`, climb out with `..`, or name `.git`; `**` reaches subfolders where
+  the host's bash has `globstar` (bash 4+; macOS's bash 3.2 reads it as
+  `*`). A path that matches nothing is skipped.
+- **Then run:** one shell line run in the new worktree on its host
+  (`pnpm install --frozen-lockfile`), up to 10 minutes.
+
+It runs only when a start creates the worktree (New session with a new
+worktree, a ticket start, a run), inside the start's Worktree step. An
+existing worktree is never touched. If the copy or the command fails, the
+start stops with `E_SETUP_FAILED`: "Setup failed: …", the last 20 lines of
+output, and where the worktree is; starting a session on that worktree
+skips setup, so fix the command or the checkout and start again.
+
+The setup is the project's (migration 221, `projects.setup_copy` /
+`setup_command`), and only a person sets or reads it: the command runs on
+the fleet's hosts. A per-host token, an org-bound client and the operator
+are refused. The wire is `work_link { action: worktree_setup, project_id,
+globs?, command? }`: with neither it reads, with either it sets both
+(`globs: []` and `command: ""` clear them); the desktop command is
+`worktree_setup` (Routed).
+
 ## Resuming work
 
 Work whose sessions have ended shows in its group's **Done** section and

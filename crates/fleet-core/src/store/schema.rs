@@ -489,6 +489,17 @@ fn projects_has_check_mode(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 221: `projects` already has its
+/// `setup_copy` column (the migration adds it and `setup_command` together).
+fn projects_has_setup_copy(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('projects') WHERE name = 'setup_copy'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 210: `tasks` already has its
 /// `start_head` column.
 fn tasks_has_start_head(conn: &Connection) -> rusqlite::Result<bool> {
@@ -2551,6 +2562,11 @@ const MIGRATIONS: &[Migration] = &[
         version: 220,
         sql: include_str!("../../migrations/220_pinned_dashboard_previous.sql"),
         already_applied: Some(pinned_dashboards_have_previous),
+    },
+    Migration {
+        version: 221,
+        sql: include_str!("../../migrations/221_project_worktree_setup.sql"),
+        already_applied: Some(projects_has_setup_copy),
     },
 ];
 

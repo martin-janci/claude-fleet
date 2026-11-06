@@ -8,7 +8,7 @@
 
   let {
     title, pinned, hidden, groups, counts = {}, currentGroup, manualGroup, startIn,
-    onpin, onhide, ongroup, onclose,
+    onpin, onhide, ongroup, onclose, onsetup,
   }: {
     title: string;
     pinned: boolean;
@@ -23,6 +23,8 @@
     onhide: () => void;
     ongroup: (name: string | null) => void;
     onclose: () => void;
+    /** New worktree setup… (copy globs and a setup command); absent hides it. */
+    onsetup?: () => void;
   } = $props();
 
   let mode = $state<'main' | 'groups'>(untrack(() => startIn)); // the opening mode only
@@ -102,6 +104,9 @@
     <button type="button" role="menuitem" class="mi" onclick={onpin}>{pinned ? 'Unpin' : 'Pin to top'}<kbd>{platformChord('⌘P', IS_MAC)}</kbd></button>
     <button type="button" role="menuitem" class="mi" onclick={() => { mode = 'groups'; void focusFirst(); }}>Move to group…<kbd>{platformChord('⌘G', IS_MAC)}</kbd></button>
     <button type="button" role="menuitem" class="mi" onclick={onhide}>{hidden ? 'Unhide' : 'Hide'}<kbd>{platformChord('⌘⌫', IS_MAC)}</kbd></button>
+    {#if onsetup}
+      <button type="button" role="menuitem" class="mi" data-testid="project-worktree-setup" onclick={onsetup}>New worktree setup…</button>
+    {/if}
   {:else}
     <input
       class="gi"

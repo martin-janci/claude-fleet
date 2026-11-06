@@ -13550,6 +13550,12 @@ const WORK_ACTION_NO_GATE: &[(&str, &str, &str)] = &[
     ),
     (
         "work_link",
+        "worktree_setup",
+        "a project's new worktree setup, a command run on the fleet's hosts \
+         (a project, not a session); refused as `check_setup` is",
+    ),
+    (
+        "work_link",
         "mission_delete",
         "a draft or finished mission; its items stay",
     ),
