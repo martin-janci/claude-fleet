@@ -387,13 +387,19 @@ replacement and says what it changes (`adds “Spent”, removes “By person”
 one the same as the pinned one says *Pinned*. A block may not take a
 built-in's id (`dash.developer`, `dash.tester`, `dash.pm`, `dash.scrum`,
 `dash.po`). A person keeps at most 20. The agent reads what is pinned with
-`dashboards { list }` and `{ get, id }`; only a person pins or unpins.
+`dashboards { list }` and `{ get, id }`. When the person asked it for a
+change (*Change with the agent*, below), the agent pins the changed block
+itself (`dashboards { pin }`); the replacement keeps the version before,
+and the Dashboards page says *Changed by Control* with *Undo*
+(`dashboards { undo, id }`, the person's, as unpinning is). Undo of a
+dashboard Control pinned new unpins it.
 
 On the page, *Change with the agent* (or a widget's *Change*) puts the
 dashboard, as this block, in the agent's composer in Control, followed by
 `Change the widget "<title>": `; the person finishes the sentence and
-presses Enter, and the agent answers with a block of the same `id`. A
-built-in goes as a copy with the id `<its id>.mine`.
+presses Enter, and the agent pins the changed block under the same `id`
+and answers with it. A built-in goes as a copy with the id `<its id>.mine`,
+which the page then shows in the built-in's place.
 
 ```json
 { "spec": "fleet.ui/1", "kind": "dashboard", "id": "dash.release-42", "title": "Release 4.2",

@@ -412,6 +412,17 @@ fn routine_runs_has_memory_read_at(conn: &Connection) -> rusqlite::Result<bool> 
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 219: `pinned_dashboards` already
+/// has its `previous_spec` column.
+fn pinned_dashboards_have_previous(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('pinned_dashboards') WHERE name = 'previous_spec'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 216: `mission_lanes` already has
 /// its `pr_url` column.
 fn lanes_have_pr_url(conn: &Connection) -> rusqlite::Result<bool> {
@@ -2528,6 +2539,13 @@ const MIGRATIONS: &[Migration] = &[
         218,
         include_str!("../../migrations/218_account_org_blocks.sql"),
     ),
+    // A pinned dashboard's version before its last replacement, for Undo
+    // of a change Control made. ADD COLUMNs, so guarded.
+    Migration {
+        version: 219,
+        sql: include_str!("../../migrations/219_pinned_dashboard_previous.sql"),
+        already_applied: Some(pinned_dashboards_have_previous),
+    },
 ];
 
 /// The settings row [`Store::finish_realm_upgrade`] writes once migration

@@ -13,7 +13,10 @@
 // Step 6: pinned dashboards are kept on the hub, per person, so every
 // device of theirs shows them and the agent reads them. A change
 // goes back through the agent: "Change" puts the dashboard as it is into
-// the agent's composer, and its answer is a new block with the same id.
+// the agent's composer, and the agent pins its change under the same id
+// itself (owner report 2026-11-06: a change waiting on a click in the chat
+// read as one that never happened); the page says "Changed by Control"
+// and offers Undo, which puts the version before back.
 import { writable } from 'svelte/store';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { DASHBOARDS_CHANGED_EVENT } from './events';
@@ -343,7 +346,14 @@ export type PinnedDashboard = Dashboard & {
   pinned_at: number;
   /** The agent's one sentence on why, as the block gave it. */
   why?: string;
+  /** Pinned or last changed by Control's agent. */
+  by_agent?: boolean;
+  /** The hub keeps the version before the last change (`undo`). */
+  can_undo?: boolean;
 };
+
+/** The device name Control's agent pins under (`OPERATOR_CLIENT_NAME`). */
+export const AGENT_DEVICE = 'ux-agent';
 
 /** The most dashboards one person keeps pinned (`MAX_PINNED` in
  *  service/dashboards.rs). */
@@ -361,6 +371,8 @@ interface PinnedRow {
   spec: unknown;
   why?: string | null;
   pinned_at: number;
+  device?: string | null;
+  can_undo?: boolean;
 }
 
 /** A block checked again as the card checks it: a row a newer build wrote,
@@ -370,6 +382,13 @@ function fromBlock(spec: unknown, pinned_at: number, why?: string | null): Pinne
   if (!c.ok || c.block.kind !== 'dashboard') return null;
   const { kind: _k, why: _w, ...d } = c.block;
   return { ...d, pinned_at, ...(why ? { why } : {}) };
+}
+
+/** A hub row as the page keeps it: the block, plus who changed it last. */
+function fromRow(x: PinnedRow): PinnedDashboard | null {
+  const d = fromBlock(x.spec, x.pinned_at, x.why);
+  if (!d) return null;
+  return { ...d, ...(x.device === AGENT_DEVICE ? { by_agent: true } : {}), ...(x.can_undo ? { can_undo: true } : {}) };
 }
 
 /** The person's pinned dashboards, as the last read or write left them.
@@ -409,7 +428,7 @@ export async function loadPinned(): Promise<void> {
     if (p.ok) rows = [...rows, p.value];
   }
   if (local.length || readPref<unknown[]>(LOCAL_KEY, [], isList).length) writePref(LOCAL_KEY, []);
-  pinnedDashboards.set(rows.flatMap((x) => fromBlock(x.spec, x.pinned_at, x.why) ?? []));
+  pinnedDashboards.set(rows.flatMap((x) => fromRow(x) ?? []));
 }
 
 let followers = 0;
@@ -477,7 +496,7 @@ export function pinStateOf(d: Dashboard, pinned: readonly PinnedDashboard[]): Pi
 export async function pinDashboard(d: Dashboard, why?: string): Promise<Result<PinnedDashboard>> {
   const r = await call<PinnedRow>({ action: 'pin', dashboard: dashboardBlock(d), ...(why ? { why } : {}) });
   if (!r.ok) return r;
-  const entry = fromBlock(r.value.spec, r.value.pinned_at, r.value.why);
+  const entry = fromRow(r.value);
   if (!entry) return { ok: false, error: { code: 'E_INVALID', message: 'the hub kept a dashboard this app cannot draw' } };
   pinnedDashboards.update((list) =>
     list.some((p) => p.id === entry.id) ? list.map((p) => (p.id === entry.id ? entry : p)) : [...list, entry],
@@ -490,6 +509,21 @@ export async function unpinDashboard(id: string): Promise<Result<boolean>> {
   if (!r.ok) return r;
   pinnedDashboards.update((list) => list.filter((p) => p.id !== id));
   return { ok: true, value: r.value.removed };
+}
+
+/** Take back Control's last change to `id`: the version before comes
+ *  back, or a dashboard Control pinned new is unpinned. Re-reads the pins. */
+export async function undoDashboard(id: string): Promise<Result<{ undone: boolean; removed: boolean }>> {
+  const r = await call<{ undone: boolean; removed: boolean }>({ action: 'undo', id });
+  if (r.ok) await loadPinned();
+  return r;
+}
+
+/** The dashboard a workspace opens on: the person's own copy of its
+ *  built-in (`<id>.mine`, what "Change" on a built-in makes) when pinned,
+ *  else the built-in. */
+export function workspaceDashboard(builtin: Dashboard, pinned: readonly PinnedDashboard[]): Dashboard {
+  return pinned.find((p) => p.id === `${builtin.id}.mine`) ?? builtin;
 }
 
 /** In words, what a replacement changes: widgets added, removed and
@@ -518,7 +552,7 @@ export function changePrompt(d: Dashboard, widget?: string): string {
     ? `The built-in dashboard "${d.title}", to make my own copy of (keep the id ${base.id}):`
     : `My pinned dashboard "${d.title}", as it is now:`;
   const ask = widget ? `Change the widget "${widget}": ` : 'Change it: ';
-  return `${head}\n\n\`\`\`fleet-ui\n${json}\n\`\`\`\n\nAnswer with a \`dashboard\` block with the same id. ${ask}`;
+  return `${head}\n\n\`\`\`fleet-ui\n${json}\n\`\`\`\n\nSave the change with \`dashboards { pin }\` under the same id, then answer with the \`dashboard\` block. ${ask}`;
 }
 
 /** The dashboard the page shows instead of the workspace's own, and the
