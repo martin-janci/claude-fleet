@@ -94,6 +94,62 @@ export interface AgentsStatus {
    *  first: an executed one's `error` is what it made (`created task 42`),
    *  a failed one's is why. Absent from a hub older than review w08. */
   recent?: AgentAction[];
+  /** Each pending action in words, by id (`service::agents::about`).
+   *  Absent from a hub older than 2026-11-06. */
+  pending_about?: ActionAbout[];
+}
+
+/** A waiting action explained: who asked, on what, what it changes. */
+export interface ActionAbout {
+  id: number;
+  rule_id?: number;
+  /** "PR reviewer", "jira-triage · PD board". */
+  from: string;
+  /** "PD-2709", "a scheduled run". */
+  subject?: string;
+  /** The hub's title when it says more than `actionTitle` can (an
+   *  `mcp_call`): "Jira: update issue PD-2709 (status, labels)". */
+  title?: string;
+  /** The write in general, a group's heading: "Jira: update issue". */
+  what: string;
+  /** The same key: the same agent's proposals of the same write. */
+  group: string;
+}
+
+/** One card of the waiting actions: a single one, or several proposals of
+ *  the same write by the same agent folded together. */
+export interface ActionGroup {
+  key: string;
+  /** "jira-triage · PD board"; null from an older hub. */
+  from: string | null;
+  what: string;
+  items: { action: AgentAction; about: ActionAbout | null }[];
+}
+
+function toolOf(a: Pick<AgentAction, 'kind' | 'payload'>): string {
+  const p = parse(a.payload);
+  return a.kind === 'mcp_call' && p ? `${p.binding}.${p.tool}` : '';
+}
+
+/** PURE: the waiting actions as cards, newest group first, each group's
+ *  items newest first. An older hub sends no `pending_about`: its actions
+ *  fold by kind and tool alone. */
+export function groupActions(pending: AgentAction[], about: ActionAbout[] | undefined): ActionGroup[] {
+  const byId = new Map((about ?? []).map((x) => [x.id, x]));
+  const groups = new Map<string, ActionGroup>();
+  for (const action of pending) {
+    const ab = byId.get(action.id) ?? null;
+    // Without the hub's key only tool calls fold: two of an older hub's
+    // other proposals may be about anything.
+    const key = ab?.group ?? (action.kind === 'mcp_call' ? `${action.kind}:${toolOf(action)}` : `id:${action.id}`);
+    let g = groups.get(key);
+    if (!g) {
+      g = { key, from: ab?.from ?? null, what: ab?.what ?? action.kind.replace(/_/g, ' '), items: [] };
+      groups.set(key, g);
+    }
+    g.items.push({ action, about: ab });
+  }
+  return [...groups.values()];
 }
 
 export function agentsStatus(agent?: AgentKind, limit?: number): Promise<Result<AgentsStatus>> {
@@ -211,6 +267,8 @@ export const agents = writable<AgentsStatus | null>(null);
 
 /** The actions waiting for a person: the Inbox's Needs you carries them. */
 export const pendingAgentActions = derived(agents, ($a) => $a?.pending ?? []);
+/** The same, as cards: repeats of one write by one agent fold together. */
+export const pendingAgentGroups = derived(agents, ($a) => groupActions($a?.pending ?? [], $a?.pending_about));
 /** What the person's recent approvals came to: under the pending ones. */
 export const recentAgentOutcomes = derived(agents, ($a) => $a?.recent ?? []);
 
@@ -233,6 +291,23 @@ export const pendingAgentCount = derived(
 export async function loadAgents(): Promise<void> {
   const r = await agentsStatus(undefined, 20);
   agents.set(r.ok ? r.value : null);
+}
+
+/** Approve or reject several, one after another, then read the status
+ *  once. Answers how many went through and the first error. */
+export async function answerAgentActions(
+  ids: number[],
+  approve: boolean,
+): Promise<{ done: number; error: Result<AgentAction> | null }> {
+  let done = 0;
+  let error: Result<AgentAction> | null = null;
+  for (const id of ids) {
+    const r = await decideAgentAction(id, approve);
+    if (r.ok) done += 1;
+    else error ??= r;
+  }
+  await loadAgents();
+  return { done, error };
 }
 
 /** Approve or reject, then read the status again. */
@@ -279,7 +354,8 @@ function parse(text: string | null): Record<string, unknown> | null {
 
 /** "Post a review on o/r#4: request changes, 2 comments", "Comment on
  *  L2S-7" — what an action will do, from its payload. */
-export function actionTitle(a: Pick<AgentAction, 'kind' | 'payload'>): string {
+export function actionTitle(a: Pick<AgentAction, 'kind' | 'payload'>, about?: Pick<ActionAbout, 'title'> | null): string {
+  if (about?.title) return about.title;
   const p = parse(a.payload);
   if (a.kind === 'post_review' && p) {
     const event = String(p.event ?? 'COMMENT').toLowerCase().replace('_', ' ');

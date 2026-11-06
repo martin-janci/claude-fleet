@@ -3683,3 +3683,84 @@ fn a_context_lookup_may_find_a_pull_requests_own_records() {
             .any(|p| p.contains("not both"))
     );
 }
+
+/// A scheduled agent proposes the same Jira change every tick while the
+/// first proposal waits: the very same payload is not queued again, and a
+/// newer wording for the same issue replaces the older (2026-11-06, seven
+/// identical "Call jira.jira_update_issue" cards).
+#[test]
+fn a_repeated_proposal_does_not_queue_twice() {
+    let s = Store::open_in_memory().unwrap();
+    let rule = NewAgentRule {
+        agent: "fleet".into(),
+        scope: "triage".into(),
+        level: "propose".into(),
+        host_alias: "local".into(),
+        project_id: None,
+        config: "{}".into(),
+        granted_by: "console".into(),
+        granted_at: 100,
+        expires_at: None,
+        definition: Some("jira-triage".into()),
+        bindings: "[]".into(),
+    };
+    let rid = s.grant_agent_rule(&rule).unwrap();
+    let job = |at: i64| crate::store::NewAgentJob {
+        rule_id: rid,
+        agent: "fleet".into(),
+        subject: format!("schedule:{at}"),
+        trigger: "schedule".into(),
+        dedup_key: format!("r{rid}:schedule:{at}"),
+        not_before: 0,
+    };
+    s.record_agent_poll(rid, 1000, None, &[job(1000), job(2000), job(3000)])
+        .unwrap();
+    let mut jobs: Vec<i64> = s
+        .list_agent_jobs(None, 10)
+        .unwrap()
+        .iter()
+        .map(|j| j.id)
+        .collect();
+    jobs.sort_unstable();
+    let call = |key: &str, status: &str| {
+        json!({ "action": "move", "store": "jira", "binding": "jira", "tool": "jira_update_issue",
+                "arguments": { "issue_key": key, "fields": { "status": status } }, "body": "" })
+        .to_string()
+    };
+    assert_eq!(
+        queue_pending(&s, rid, jobs[0], "mcp_call", &call("PD-1", "Done"), 10),
+        "pending"
+    );
+    assert_eq!(
+        queue_pending(&s, rid, jobs[0], "mcp_call", &call("PD-2", "Done"), 10),
+        "pending"
+    );
+    let first = s.pending_agent_actions_of_rule(rid, "mcp_call").unwrap();
+    assert_eq!(first.len(), 2);
+
+    // The next tick proposes PD-1 again, word for word: nothing new waits.
+    let again = queue_pending(&s, rid, jobs[1], "mcp_call", &call("PD-1", "Done"), 20);
+    assert_eq!(again, format!("already waiting as #{}", first[0].id));
+    assert_eq!(s.count_agent_actions("pending").unwrap(), 2);
+
+    // A different change to PD-2 replaces the one waiting.
+    assert_eq!(
+        queue_pending(&s, rid, jobs[2], "mcp_call", &call("PD-2", "In review"), 30),
+        "pending"
+    );
+    let now = s.pending_agent_actions_of_rule(rid, "mcp_call").unwrap();
+    assert_eq!(now.len(), 2);
+    assert!(now.iter().all(|a| a.id != first[1].id));
+    let old = s
+        .list_agent_actions(Some("expired"), 10)
+        .unwrap()
+        .into_iter()
+        .find(|a| a.id == first[1].id)
+        .unwrap();
+    assert!(old.error.unwrap().contains("replaced by"));
+
+    // Where each came from, for the cards.
+    let origins = s.agent_action_origins(&[now[0].id]).unwrap();
+    assert_eq!(origins[0].rule_id, Some(rid));
+    assert_eq!(origins[0].subject, "schedule:1000");
+}

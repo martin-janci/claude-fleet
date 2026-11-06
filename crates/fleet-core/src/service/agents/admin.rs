@@ -160,6 +160,11 @@ pub struct AgentsStatus {
     /// older hub; read `pending.len()` then.
     #[serde(default)]
     pub pending_total: u64,
+    /// Each of `pending` in words: which agent asked, on what, and what the
+    /// write changes, with a `group` key for folding repeats into one card
+    /// (`super::about`). Absent from an older hub.
+    #[serde(default)]
+    pub pending_about: Vec<super::about::ActionAbout>,
     /// Actions a person approved that ran (or failed) in the last
     /// [`RECENT_WINDOW_SECS`], newest first, at most [`RECENT_MAX`]: an
     /// executed one's `error` says what it made, a failed one's why.
@@ -377,14 +382,29 @@ pub fn status(store: &Mutex<Store>, args: &AgentsArgs, now: i64) -> Result<Agent
             }
         })
         .collect();
+    let pending = s
+        .list_agent_actions(Some("pending"), STATUS_PENDING_MAX)
+        .map_err(db)?;
+    let ids: Vec<i64> = pending.iter().map(|a| a.id).collect();
+    let origins = s.agent_action_origins(&ids).map_err(db)?;
+    let pending_about = pending
+        .iter()
+        .map(|a| {
+            let origin = origins.iter().find(|o| o.action_id == a.id);
+            let rule = origin
+                .and_then(|o| o.rule_id)
+                .and_then(|id| rules.iter().find(|r| r.rule.id == id))
+                .map(|r| &r.rule);
+            super::about::about(a, origin, rule)
+        })
+        .collect();
     Ok(AgentsStatus {
         rules,
         jobs: s
             .list_agent_jobs(args.agent.as_deref(), limit)
             .map_err(db)?,
-        pending: s
-            .list_agent_actions(Some("pending"), STATUS_PENDING_MAX)
-            .map_err(db)?,
+        pending,
+        pending_about,
         pending_total: s.count_agent_actions("pending").map_err(db)?,
         recent: s
             .recent_decided_agent_actions(now - RECENT_WINDOW_SECS, RECENT_MAX)
