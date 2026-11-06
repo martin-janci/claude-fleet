@@ -370,7 +370,7 @@ pub fn status(store: &Mutex<Store>, args: &AgentsArgs, now: i64) -> Result<Agent
     let budgets = instance_budgets(&rows);
     let day = crate::service::routines::cron::local_day_start(now, 0);
     let s = lock(store)?;
-    let rules = rows
+    let rules: Vec<AgentRuleView> = rows
         .into_iter()
         .map(|rule| {
             let budget = budgets.get(&rule.id).copied();
