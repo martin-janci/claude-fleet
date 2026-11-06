@@ -157,6 +157,7 @@ pub(crate) async fn run(
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     fn setup(copy: &[&str], command: Option<&str>) -> WorktreeSetup {
         WorktreeSetup {
             copy: copy.iter().map(|s| s.to_string()).collect(),
@@ -164,6 +165,8 @@ mod tests {
         }
     }
 
+    // Bash with POSIX paths: the Windows runner has neither.
+    #[cfg(unix)]
     async fn run_local(
         base: &std::path::Path,
         wt: &std::path::Path,
@@ -186,6 +189,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn copies_the_matching_files_and_runs_the_command_in_the_worktree() {
         let d = tempfile::tempdir().unwrap();
@@ -230,6 +234,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_failing_command_says_setup_failed_and_keeps_its_output() {
         let d = tempfile::tempdir().unwrap();
@@ -258,6 +263,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_missing_worktree_is_not_blamed_on_the_command() {
         let d = tempfile::tempdir().unwrap();
