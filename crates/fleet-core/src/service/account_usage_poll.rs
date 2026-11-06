@@ -908,6 +908,7 @@ mod tests {
             nickname: None,
             has_extra_usage: false,
             forbidden_project_ids: Vec::new(),
+            forbidden_org_ids: Vec::new(),
         })
         .unwrap();
         Mutex::new(s)
@@ -957,6 +958,7 @@ mod tests {
                 nickname: None,
                 has_extra_usage: false,
                 forbidden_project_ids: Vec::new(),
+                forbidden_org_ids: Vec::new(),
             })
             .unwrap();
         }

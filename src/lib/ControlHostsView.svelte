@@ -17,6 +17,7 @@
   import { fleetLoads, type LoadLimits } from './host_health';
   import { multiFleet, showPrimary } from './fleets';
   import FleetHostHealth from './FleetHostHealth.svelte';
+  import FleetFilterNote from './FleetFilterNote.svelte';
 
   let nowSec = $state(Math.floor(Date.now() / 1000));
   let clock: ReturnType<typeof setInterval> | undefined;
@@ -35,7 +36,7 @@
   {#if loads.length > 0}
     <HostHealthList {loads} focus={$operatorHost} now={nowSec} focusNote="Control's host" onopen={(a) => requestHostsView(a)} />
   {:else if !$showPrimary}
-    <p class="empty" data-testid="control-hosts-primary-filtered">This window's own hosts are hidden by the fleet filter in the sidebar.</p>
+    <FleetFilterNote testid="control-hosts-primary-filtered" />
   {:else if !$multiFleet}
     <ListGate load={$hostsLoad} what="hosts" onretry={() => void loadHosts()} testid="control-hosts">
       <p class="empty" data-testid="control-hosts-empty">No hosts yet.</p>

@@ -60,7 +60,7 @@ pub struct NewSessionArgs {
     /// Which agent runs in the pane (`sessions.agent`, migration 121):
     /// `"claude"` (the default), `"codex"` (OpenAI's Codex CLI), `"agy"`
     /// (Google's Antigravity CLI), `"hermes"` (Nous Research's Hermes Agent,
-    /// migration 218) or `"shell"`, which is the same as
+    /// migration 219) or `"shell"`, which is the same as
     /// `kind: "shell"`. `None` / empty = Claude Code, or a shell for
     /// `kind: "shell"`. `"agy"` is refused (`E_UNSUPPORTED`) until its
     /// adapter is validated.

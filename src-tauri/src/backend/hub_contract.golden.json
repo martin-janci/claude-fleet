@@ -15,6 +15,7 @@
     "AccountRow": [
       "display_name",
       "email",
+      "forbidden_org_ids",
       "forbidden_project_ids",
       "has_extra_usage",
       "last_seen_at",

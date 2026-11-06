@@ -38,6 +38,7 @@
   } from './hosts_view';
   import AddHostWizard from './AddHostWizard.svelte';
   import FleetHostsSection from './FleetHostsSection.svelte';
+  import FleetFilterNote from './FleetFilterNote.svelte';
   import { fleets, multiFleet, showPrimary } from './fleets';
   import HubAddHostDialog from './HubAddHostDialog.svelte';
   import HostsList from './HostsList.svelte';
@@ -526,7 +527,7 @@
       onopen={(a) => void openHost(a)}
     />
   {/snippet}
-  {#if $multiFleet && showTable}
+  {#if $multiFleet && (showTable || !$showPrimary)}
     <!-- Multi-hub: this window's own hosts first, under their own badge, then
          each extra fleet the sidebar's fleet filter shows. One scroll for
          all of them: the table used to share the column with the fleets'
@@ -542,16 +543,12 @@
           {@render ownTable()}
         </section>
       {:else}
-        <p class="empty" data-testid="hosts-primary-filtered">
-          This window's own hosts are hidden by the fleet filter in the sidebar.
-        </p>
+        <FleetFilterNote testid="hosts-primary-filtered" />
       {/if}
       <FleetHostsSection />
     </div>
   {:else if !$showPrimary}
-    <p class="empty" data-testid="hosts-primary-filtered">
-      This window's own hosts are hidden by the fleet filter in the sidebar.
-    </p>
+    <FleetFilterNote testid="hosts-primary-filtered" />
   {:else if showTable}
     {@render ownTable()}
   {:else}

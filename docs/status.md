@@ -214,7 +214,7 @@ repair refuse it with `E_UNSUPPORTED`
 adapter code stays, for when real captures validate it.
 
 Sessions can also run Nous Research's Hermes Agent (`agent_adapter::Hermes`,
-migration 218 widens `sessions.agent`'s CHECK): `hermes chat --cli --yolo`,
+migration 219 widens `sessions.agent`'s CHECK): `hermes chat --cli --yolo`,
 `-m` for a provider-slug model (`validate::claude_model` now takes `/` and
 `:`), no effort and no login profile. Hermes picks its own session ids, so a
 new session starts bare and a relaunch resumes the cwd's newest CLI session
@@ -263,8 +263,8 @@ person can turn it off for their own sessions, migration 187, and ask for
 is recorded only, `decide.jev.limit_switch`); a session parked by a quota
 notification (`quota_auto_resume_*`, read as blocked) is switched too, one
 waiting on a dialog or a form is not. An account can be forbidden for
-projects (landed, nothing forbidden by default; docs/accounts.md → *Keep an
-account off a project*, migration 217): every start, resume, switch, routine
+projects or for a whole org (landed, nothing forbidden by default; docs/accounts.md → *Keep an
+account off a project*, migrations 217 and 218): every start, resume, switch, routine
 and mission run of such a project refuses or avoids its logins. Not built: a
 hub vault for setup-tokens and API keys.
 

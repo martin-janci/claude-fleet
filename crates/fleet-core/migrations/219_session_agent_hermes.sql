@@ -1,4 +1,4 @@
--- 218: `sessions.agent` admits `hermes`, Nous Research's Hermes Agent CLI
+-- 219: `sessions.agent` admits `hermes`, Nous Research's Hermes Agent CLI
 -- (`agent_adapter::Hermes`).
 --
 -- Migration 121 wrote the allowed agents as a column CHECK, and SQLite has
@@ -26,10 +26,10 @@ PRAGMA writable_schema = RESET;
 
 -- Fail the migration (and roll it back) when the edit above matched
 -- nothing, rather than leave a schema that still refuses `hermes`.
-CREATE TEMP TABLE migration_218_check (ok INTEGER NOT NULL CHECK (ok = 1));
-INSERT INTO migration_218_check (ok)
+CREATE TEMP TABLE migration_219_check (ok INTEGER NOT NULL CHECK (ok = 1));
+INSERT INTO migration_219_check (ok)
   SELECT instr(sql, '''hermes''') > 0 FROM sqlite_master
    WHERE type = 'table' AND name = 'sessions';
-DROP TABLE migration_218_check;
+DROP TABLE migration_219_check;
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (218);
+INSERT OR IGNORE INTO schema_version (version) VALUES (219);

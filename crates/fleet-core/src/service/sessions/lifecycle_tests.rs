@@ -1869,7 +1869,7 @@ fn the_agent_settles_against_the_kind() {
         normalize_launch(&mut args).unwrap_err().code,
         crate::ipc_error::codes::E_UNSUPPORTED
     );
-    // Hermes (migration 218) takes a provider-slug model, but no login
+    // Hermes (migration 219) takes a provider-slug model, but no login
     // profile, and runs in no shell session.
     let mut args = args_named("dev-z", None);
     args.agent = Some("hermes".into());

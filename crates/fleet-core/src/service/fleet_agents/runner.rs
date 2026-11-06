@@ -442,6 +442,53 @@ fn schedule_job(rule_id: i64, at: i64, now: i64) -> NewAgentJob {
     }
 }
 
+/// Queue a write for a person, unless one of the rule's earlier proposals
+/// already waits for the very same write: a scheduled agent proposes the
+/// same change every tick while the first one waits, and a person was handed
+/// seven identical "Call jira.jira_update_issue" cards (2026-11-06). The
+/// same payload is not queued again; a different one for the same item
+/// (`about::identity`) replaces the older, which ends `expired`. Answers the
+/// action's state for the job's result.
+pub(super) fn queue_pending(
+    s: &Store,
+    rule_id: i64,
+    job_id: i64,
+    kind: &str,
+    payload: &str,
+    now: i64,
+) -> String {
+    use crate::service::agents::about::identity;
+    let value: Value = serde_json::from_str(payload).unwrap_or(Value::Null);
+    let id = identity(kind, &value);
+    let earlier: Vec<_> = s
+        .pending_agent_actions_of_rule(rule_id, kind)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|a| a.job_id != job_id)
+        .filter(|a| {
+            serde_json::from_str::<Value>(&a.payload).is_ok_and(|v| identity(kind, &v) == id)
+        })
+        .collect();
+    if let Some(same) = earlier
+        .iter()
+        .find(|a| serde_json::from_str::<Value>(&a.payload).is_ok_and(|v| v == value))
+    {
+        return format!("already waiting as #{}", same.id);
+    }
+    match s.insert_agent_action(job_id, kind, payload, now) {
+        Ok(new) => {
+            for a in &earlier {
+                let why = format!("replaced by #{new}, a newer proposal of the same change");
+                if let Err(e) = s.supersede_agent_action(a.id, &why, now) {
+                    tracing::warn!(action = a.id, error = %e, "[agents] fleet: supersede");
+                }
+            }
+            "pending".into()
+        }
+        Err(e) => format!("not queued: {e}"),
+    }
+}
+
 // ── the prompt and the answer, PURE ──
 
 fn block(v: &Value) -> String {
@@ -2285,14 +2332,12 @@ impl FleetRunner {
                 ("watch", _) => "kept".to_string(),
                 (_, None) => "not queued: store lock".to_string(),
                 (level, Some(s)) => {
-                    let queued = if level == "act" && p.auto {
+                    if level == "act" && p.auto {
                         s.insert_approved_agent_action(job.id, p.kind, &p.payload, "rule:act", now)
-                            .map(|_| "approved")
+                            .map_or_else(|e| format!("not queued: {e}"), |_| "approved".into())
                     } else {
-                        s.insert_agent_action(job.id, p.kind, &p.payload, now)
-                            .map(|_| "pending")
-                    };
-                    queued.map_or_else(|e| format!("not queued: {e}"), str::to_string)
+                        queue_pending(s, rule.id, job.id, p.kind, &p.payload, now)
+                    }
                 }
             };
             out.push(json!({ "id": p.id, "do": p.kind, "body": p.body, "state": state }));

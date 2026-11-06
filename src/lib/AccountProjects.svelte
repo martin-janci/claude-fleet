@@ -2,9 +2,12 @@
   // The projects an account is forbidden for (docs/accounts.md, *Keep an
   // account off a project*): work in one never starts, resumes or switches
   // onto a login on this account, wherever it is started from. Each listed
-  // project has Allow; the picker below adds one. Every change replaces the
-  // whole list (`set_account_projects`), and the row comes back with it.
+  // project has Allow; the picker below adds one. A whole org can be
+  // forbidden the same way: every project of it, later ones too. Every change
+  // replaces that list (`set_account_projects`), and the row comes back with
+  // it.
   import { setAccountProjects, type AccountRow } from './accounts';
+  import { orgs } from './orgs';
   import { projects } from './projects';
   import { pushError } from './toasts';
 
@@ -31,10 +34,22 @@
   const listed = $derived(forbidden.map((id) => ({ id, name: nameOf(id) })).sort((a, b) => a.name.localeCompare(b.name)));
   const addable = $derived(choices.filter((c) => !forbidden.includes(c.id)));
 
-  async function save(ids: number[]) {
+  const forbiddenOrgs = $derived(account.forbidden_org_ids ?? []);
+  const orgName = (id: number): string => $orgs.find((o) => o.id === id)?.name ?? `org ${id}`;
+  const listedOrgs = $derived(
+    forbiddenOrgs.map((id) => ({ id, name: orgName(id) })).sort((a, b) => a.name.localeCompare(b.name)),
+  );
+  const addableOrgs = $derived(
+    $orgs
+      .filter((o) => !forbiddenOrgs.includes(o.id))
+      .map((o) => ({ id: o.id, name: o.name }))
+      .sort((a, b) => a.name.localeCompare(b.name)),
+  );
+
+  async function save(projectIds: number[] | null, orgIds: number[] | null = null) {
     if (blocked) return;
     busy = true;
-    const r = await setAccountProjects(account.uuid, ids);
+    const r = await setAccountProjects(account.uuid, projectIds, orgIds);
     busy = false;
     if (!r.ok) pushError(r.error, 'Projects not saved');
   }
@@ -45,6 +60,14 @@
   }
   function allow(id: number) {
     void save(forbidden.filter((x) => x !== id));
+  }
+  function forbidOrg(value: string) {
+    const id = Number(value);
+    if (!Number.isInteger(id) || forbiddenOrgs.includes(id)) return;
+    void save(null, [...forbiddenOrgs, id]);
+  }
+  function allowOrg(id: number) {
+    void save(null, forbiddenOrgs.filter((x) => x !== id));
   }
 </script>
 
@@ -88,6 +111,42 @@
     </select>
   {:else if listed.length === 0}
     <p class="sub">No projects yet.</p>
+  {/if}
+  {#if listedOrgs.length > 0}
+    <ul class="chips" data-testid="account-orgs-list">
+      {#each listedOrgs as o (o.id)}
+        <li class="chip">
+          <span>All of {o.name}</span>
+          <button
+            type="button"
+            class="link"
+            disabled={busy || blocked !== null}
+            title={blocked ?? `Let ${o.name}'s projects run on this account again`}
+            aria-label="Allow {o.name} again"
+            data-testid="account-orgs-allow"
+            onclick={() => allowOrg(o.id)}>Allow</button
+          >
+        </li>
+      {/each}
+    </ul>
+  {/if}
+  {#if addableOrgs.length > 0}
+    <select
+      aria-label="Forbid this account for every project of an org"
+      data-testid="account-orgs-add"
+      disabled={busy || blocked !== null}
+      title={blocked ?? 'Every project of the org, including ones added later'}
+      value=""
+      onchange={(e) => {
+        forbidOrg(e.currentTarget.value);
+        e.currentTarget.value = '';
+      }}
+    >
+      <option value="" disabled>Forbid for a whole org…</option>
+      {#each addableOrgs as o (o.id)}
+        <option value={String(o.id)}>{o.name}</option>
+      {/each}
+    </select>
   {/if}
 </section>
 

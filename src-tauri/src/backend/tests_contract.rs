@@ -257,6 +257,7 @@ pub(crate) fn sample_account() -> AccountRow {
         nickname: Some("work".into()),
         has_extra_usage: true,
         forbidden_project_ids: vec![7],
+        forbidden_org_ids: vec![2],
     }
 }
 

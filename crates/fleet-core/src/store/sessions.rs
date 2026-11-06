@@ -4361,10 +4361,10 @@ mod tests {
             .upsert_session("s", "alpha", None, None, 1, 3, "running", None)
             .unwrap();
         assert_eq!(agent(), AGENT_CODEX, "a re-probe keeps a Codex row Codex");
-        // Migration 218 admits Hermes.
+        // Migration 219 admits Hermes.
         store.set_session_agent(id, AGENT_HERMES).unwrap();
         assert_eq!(agent(), AGENT_HERMES);
-        // The column refuses a name migrations 121 and 218 do not know.
+        // The column refuses a name migrations 121 and 219 do not know.
         assert!(store.set_session_agent(id, "gemini").is_err());
     }
 
