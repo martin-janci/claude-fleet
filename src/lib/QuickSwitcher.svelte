@@ -20,6 +20,7 @@
   import { get } from 'svelte/store';
   import { newTaskOwnsChord } from './new_task';
   import ProjectActionsMenu from './ProjectActionsMenu.svelte';
+  import WorktreeSetupDialog from './WorktreeSetupDialog.svelte';
   import Icon from './kit/Icon.svelte';
   import { switcherRequest } from './switcher_request';
   import { newSessionHostRequest, addProjectRequest } from './app_views';
@@ -139,6 +140,9 @@
   // Re-rank triggers besides the query: open, the person's own actions, folds.
   let seq = $state(0);
   let menu = $state<{ key: string; startIn: 'main' | 'groups' } | null>(null);
+  /** New worktree setup… open for this project (its own dialog, so it
+   *  outlives the picker). */
+  let setupFor = $state<{ id: number; title: string } | null>(null);
   let menuAt = $state<{ top?: number; bottom?: number }>({ top: 0 });
   let listWrap: HTMLElement | undefined = $state();
   let lastUndo: (() => void) | null = null;
@@ -1157,6 +1161,10 @@
             }}
             ongroup={(g) => setGroup(e, g)}
             onclose={closeMenu}
+            onsetup={e.project.project.system ? undefined : () => {
+              setupFor = { id: e.id, title: e.key };
+              closeMenu();
+            }}
           />
         </div>
       {/if}
@@ -1187,6 +1195,10 @@
       {/if}
     </div>
   </Modal>
+{/if}
+
+{#if setupFor}
+  <WorktreeSetupDialog projectId={setupFor.id} title={setupFor.title} onclose={() => (setupFor = null)} />
 {/if}
 
 <!-- Redesign 4.3: a session row carries its account. -->

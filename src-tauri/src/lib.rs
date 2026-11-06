@@ -483,6 +483,7 @@ pub fn run() {
             commands::work::create_followup_task,
             commands::work::run_ticket_check,
             commands::work::set_ticket_check,
+            commands::work::worktree_setup,
             commands::work::summarize_past_work,
             commands::work::name_session_work,
             commands::work::rename_work_item,

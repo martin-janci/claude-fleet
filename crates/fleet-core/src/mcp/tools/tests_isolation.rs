@@ -3567,6 +3567,21 @@ async fn run_matrix(isolate: bool) {
     .await;
     m.row(
         "work_link",
+        "worktree_setup",
+        |_, _| json!({ "action": "worktree_setup", "project_id": 987_654, "command": "true" }),
+        |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            match who {
+                Who::Master | Who::ClientFull => is_code(who, a, "E_NOTFOUND", "no such project"),
+                _ => is_code(who, a, "E_FORBIDDEN", "a person decides"),
+            }
+        },
+    )
+    .await;
+    m.row(
+        "work_link",
         "check_setup",
         |_, _| json!({ "action": "check_setup", "project_id": 987_654, "mode": "ask" }),
         |_, who, a| {

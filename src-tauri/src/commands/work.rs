@@ -44,6 +44,7 @@ use fleet_core::service::work::summary::SummaryOutcome;
 use fleet_core::service::work::ticket_check::CheckSetup;
 use fleet_core::service::work::tidy::{TidyApplyItem, TidyApplyReport, TidyReport};
 use fleet_core::service::work::today::Today;
+use fleet_core::service::work::worktree_setup::WorktreeSetupView;
 use fleet_core::service::work::{self, Dismissed, PurgeImpact, WorkArgs, WorkLinkArgs};
 use fleet_core::ssh::SshClient;
 use fleet_core::store::{ReopenedWork, SessionRow, Store, TaskRow, WorkItemRow, WorkLinkRow};
@@ -540,6 +541,26 @@ pub async fn set_ticket_check(
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<CheckSetup, IpcError> {
     routed::set_ticket_check(&backend, args, &store).await
+}
+
+/// A project's new worktree setup: with neither `copy` nor `command` it
+/// reads it; with either it sets both (`[]` / "" clear).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct WorktreeSetupArgs {
+    pub project_id: i64,
+    #[serde(default)]
+    pub copy: Option<Vec<String>>,
+    #[serde(default)]
+    pub command: Option<String>,
+}
+
+#[tauri::command]
+pub async fn worktree_setup(
+    args: WorktreeSetupArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<WorktreeSetupView, IpcError> {
+    routed::worktree_setup(&backend, args, &store).await
 }
 
 /// A Claude-written summary of past work (work graph M13.4c, on demand):
@@ -1320,6 +1341,28 @@ pub(crate) mod routed {
         match backend.hub() {
             Some(hub) => hub.route("set_ticket_check", &wire).await,
             None => work::ticket_check::setup(
+                &wire,
+                store,
+                &fleet_core::service::view_scope::ViewScope::internal(),
+            ),
+        }
+    }
+
+    pub async fn worktree_setup(
+        backend: &FleetBackend,
+        args: WorktreeSetupArgs,
+        store: &Mutex<Store>,
+    ) -> Result<WorktreeSetupView, IpcError> {
+        let wire = WorkLinkArgs {
+            action: "worktree_setup".into(),
+            project_id: Some(args.project_id),
+            globs: args.copy.clone(),
+            command: args.command.clone(),
+            ..Default::default()
+        };
+        match backend.hub() {
+            Some(hub) => hub.route("worktree_setup", &wire).await,
+            None => work::worktree_setup::setup(
                 &wire,
                 store,
                 &fleet_core::service::view_scope::ViewScope::internal(),
