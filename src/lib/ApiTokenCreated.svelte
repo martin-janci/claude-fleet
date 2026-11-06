@@ -3,8 +3,7 @@
   // shown. Copy token, Copy as env line, Done; closing forgets it, and the
   // table shows only its name and last use from then on.
   import Modal from './Modal.svelte';
-  import { copyText } from './clipboard';
-  import { push } from './toasts';
+  import { copyAndSay } from './clipboard';
   import type { ApiTokenCreated } from './api_tokens';
 
   let { created, onclose }: { created: ApiTokenCreated; onclose: () => void } = $props();
@@ -16,7 +15,7 @@
   );
 
   async function copy(text: string, what: string) {
-    if (await copyText(text)) push({ kind: 'success', message: `${what} copied.` });
+    await copyAndSay(text, what);
   }
 </script>
 

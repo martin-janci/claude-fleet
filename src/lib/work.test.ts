@@ -17,6 +17,8 @@ import {
   workWhy,
   bumpWorkChanged,
   onWorkChangedDebounced,
+  openDue,
+  ownerDueChip,
   type WorkLink,
 } from './work';
 
@@ -153,5 +155,22 @@ describe('onWorkChangedDebounced', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe('openDue', () => {
+  // Thursday 2026-10-15, mid-afternoon local time.
+  const now = new Date(2026, 9, 15, 15, 30);
+  it("says the chip's words; a past date is overdue", () => {
+    expect(openDue('2026-10-16', 'todo', now)).toEqual({ text: 'Tomorrow', overdue: false, chip: 'Due Tomorrow' });
+    expect(openDue('2026-10-02', 'in_progress', now)).toEqual({ text: 'Oct 2', overdue: true, chip: 'Overdue · Oct 2' });
+    expect(openDue('2026-10-02', null, now)?.overdue).toBe(true);
+    expect(openDue(null, 'todo', now)).toBeNull();
+  });
+  it('a done task shows no due date, here and on the Board card', () => {
+    expect(openDue('2026-10-02', 'done', now)).toBeNull();
+    expect(openDue('2026-10-20', 'done', now)).toBeNull();
+    expect(ownerDueChip({ assignees: ['Ana'], due_at: '2026-10-01', status_category: 'done' }, now)).toEqual({ text: 'Ana', overdue: false });
+    expect(ownerDueChip({ due_at: '2026-10-01', status_category: 'done' }, now)).toBeNull();
   });
 });

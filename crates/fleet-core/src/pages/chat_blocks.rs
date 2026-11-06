@@ -102,6 +102,7 @@ const DASH_TEXT_FILTERS: &[&str] = &[
     "iteration",
     "epic",
     "item_type",
+    "label",
 ];
 const FIELD_TYPES_SHOWN: &[&str] = &[
     "text",
@@ -806,6 +807,20 @@ fn dash_query(p: &mut Problems, v: Option<&Value>, at: &str) -> Option<String> {
             "stages" => {
                 let list = p.arr(o, k, &where_, 1, WORK_STAGES.len());
                 p.one_of_each(&list, &format!("{where_} › stage"), WORK_STAGES);
+            }
+            "priority" => {
+                let ok = o[k]
+                    .as_str()
+                    .is_some_and(|v| v == "none" || crate::store::PRIORITIES.contains(&v));
+                if !ok {
+                    p.add(
+                        &where_,
+                        format!(
+                            "`priority` must be one of {}, none",
+                            crate::store::PRIORITIES.join(", ")
+                        ),
+                    );
+                }
             }
             t if DASH_TEXT_FILTERS.contains(&t) => {
                 p.str(o, k, &where_, true, 200);

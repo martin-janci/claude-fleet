@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { focusNow } from './focus_now';
+  import InlineConfirm from './forms/InlineConfirm.svelte';
   // The one Share sheet for the whole app (multi-user M1).
   //
   // Structure copied from `TransferSheet.svelte`, which solves the same
@@ -260,26 +260,25 @@
     if (g.org_id != null) return `${g.org_name || `org #${g.org_id}`} (its members)`;
     return g.person_display_name || g.person_name || (g.person_id === null ? 'unknown' : `person #${g.person_id}`);
   }
-
-  /** The inline Revoke? confirm takes focus on its safe choice: the Revoke…
-   *  button that opened it is gone, and focus would otherwise drop to the
-   *  page (UX pass A22). */
 </script>
 
 {#snippet trustNow(list: DeviceSummary[])}
   {#each list as d (d.name)}
     {#if trusting === d.name}
-      <span class="confirm" data-testid="share-trust-confirm">
-        {d.name} becomes a full device: it can send prompts wherever its person may.
-        <button
-          type="button"
-          class="primary"
-          data-testid="share-trust-yes"
-          disabled={busy || trustBlocked !== null}
-          title={trustBlocked ?? `Make ${d.name} a full device`}
-          onclick={() => void doTrust(d)}>Trust</button
-        >
-        <button type="button" data-testid="share-trust-no" disabled={busy} use:focusNow onclick={() => (trusting = null)}>Keep</button>
+      <span class="confirm">
+        <InlineConfirm
+          question="{d.name} becomes a full device: it can send prompts wherever its person may."
+          verb="Trust"
+          danger={false}
+          {busy}
+          disabled={trustBlocked !== null}
+          confirmTitle={trustBlocked ?? `Make ${d.name} a full device`}
+          testid="share-trust-confirm"
+          confirmTestid="share-trust-yes"
+          keepTestid="share-trust-no"
+          onconfirm={() => void doTrust(d)}
+          onkeep={() => (trusting = null)}
+        />
       </span>
     {:else}
       <button
@@ -390,19 +389,19 @@
                   >
                 {/if}
                 {#if confirming !== null && confirming === keyOf(name) && name !== null}
-                  <span class="confirm" data-testid="share-revoke-confirm">
-                    Revoke?
-                    <button
-                      type="button"
-                      class="danger"
-                      data-testid="share-revoke-yes"
-                      disabled={busy || revokeBlocked !== null}
-                      title={revokeBlocked ?? 'Revoke this grant'}
-                      onclick={() => name !== null && doRevoke(name)}>Revoke</button
-                    >
-                    <button type="button" data-testid="share-revoke-no" disabled={busy} use:focusNow
-                      onclick={() => (confirming = null)}>Keep</button
-                    >
+                  <span class="confirm">
+                    <InlineConfirm
+                      question="Revoke?"
+                      verb="Revoke"
+                      {busy}
+                      disabled={revokeBlocked !== null}
+                      confirmTitle={revokeBlocked ?? 'Revoke this grant'}
+                      testid="share-revoke-confirm"
+                      confirmTestid="share-revoke-yes"
+                      keepTestid="share-revoke-no"
+                      onconfirm={() => name !== null && doRevoke(name)}
+                      onkeep={() => (confirming = null)}
+                    />
                   </span>
                 {:else}
                   {#if g.level === 'drive' || g.level === 'answer'}
@@ -569,8 +568,7 @@
   .grant button {
     margin-left: auto;
   }
-  .grant button + button,
-  .confirm button {
+  .grant button + button {
     margin-left: 0;
   }
   .limit {

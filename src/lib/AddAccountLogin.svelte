@@ -9,7 +9,7 @@
   // flow becomes.
   import { tick } from 'svelte';
   import Modal from './Modal.svelte';
-  import { copyText } from './clipboard';
+  import { copyAndSay } from './clipboard';
   import { openExternal } from './open_external';
   import { push } from './toasts';
   import { refreshAccountUsage } from './account_usage_store';
@@ -127,7 +127,7 @@
   }
 
   async function copy(text: string, what: string) {
-    if (await copyText(text)) push({ kind: 'success', message: `${what} copied.` });
+    await copyAndSay(text, what);
   }
 
   async function finish() {

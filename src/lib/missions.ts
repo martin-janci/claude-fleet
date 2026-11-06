@@ -1117,10 +1117,6 @@ export function grantMission(missionId: number, g: GrantInput): Promise<Result<M
   return invokeCmd<MissionGrant>('grant_mission', { args: { mission_id: missionId, ...g } });
 }
 
-/** What to tell the person when a grant asked to last until the mission
- *  completes came back as an hours grant: a hub before grants until done
- *  drops `until_done` and signs its default hours (review r8). `null` when
- *  the grant is what was asked. */
 /** When a grant runs out, in words a person can place: "15:10" today,
  *  "Thu 15:10" within the week, else "4 Nov 15:10". A 72 h grant's "until
  *  15:10" named no day. */
@@ -1144,18 +1140,35 @@ export function grantWouldHelp(a: MissionAutonomy | null | undefined, now = Date
   return !live && a.asked >= 2 && a.effective < a.asked && a.ceiling >= a.asked;
 }
 
+/** The longest grant in hours: a week, the hub's `GRANT_MAX_SECS`. */
+export const GRANT_MAX_HOURS = 168;
+
+/** What is wrong with the grant's Hours, or null for whole hours from 1 to
+ *  a week. Empty is not "the default": the hub would sign its 8 h while
+ *  the button said "Sign the grant"; 1.5 fails its whole-hours field and
+ *  past a week it refuses. */
+export function grantHoursProblem(hours: number | null | undefined): string | null {
+  return typeof hours === 'number' && Number.isInteger(hours) && hours >= 1 && hours <= GRANT_MAX_HOURS
+    ? null
+    : `Whole hours, 1 to ${GRANT_MAX_HOURS}.`;
+}
+
 /** The grant form's button, every term on it as the phone's sheet says
  *  them: "Sign L2 for 8 h, up to $20", "Sign L2 until it completes, up to
  *  $20", "Sign L2 for 8 h, no cap". A bad or missing term reads "Sign the
  *  grant", the form says what is wrong. */
-export function grantSignLabel(level: number, span: { hours: number } | { untilDone: true }, budgetMicros: number | undefined): string {
-  const when = 'untilDone' in span ? 'until it completes' : Number.isFinite(span.hours) && span.hours >= 1 ? `for ${span.hours} h` : null;
+export function grantSignLabel(level: number, span: { hours: number | null } | { untilDone: true }, budgetMicros: number | undefined): string {
+  const when = 'untilDone' in span ? 'until it completes' : grantHoursProblem(span.hours) === null ? `for ${span.hours} h` : null;
   if (!when) return 'Sign the grant';
   const cap = budgetMicros !== undefined && budgetMicros > 0 ? `up to ${dollars(budgetMicros)}` : 'untilDone' in span ? null : 'no cap';
   if (cap === null) return 'Sign the grant';
   return `Sign L${level} ${when}, ${cap}`;
 }
 
+/** What to tell the person when a grant asked to last until the mission
+ *  completes came back as an hours grant: a hub before grants until done
+ *  drops `until_done` and signs its default hours (review r8). `null` when
+ *  the grant is what was asked. */
 export function grantSpanNotice(askedUntilDone: boolean, g: Pick<MissionGrant, 'until_done' | 'created_at' | 'expires_at'>): string | null {
   if (!askedUntilDone || g.until_done) return null;
   const hours = Math.round((g.expires_at - g.created_at) / 3600);

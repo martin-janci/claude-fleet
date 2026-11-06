@@ -14,7 +14,7 @@
   import { workRowClick } from './prefs';
   import { costChip, linkTone, liveLinks, occurrenceTitle, prChip, rowClickSession, rowSessionLink, taskLine, taskTone } from './work_row';
   import { isOccurrenceOf, taskLabel, trackerDown, trackerDownLabel, type WorkTask, type WorkTaskLink } from './work_view';
-  import { dueLabel, isHotPriority, priorityLabel } from './work';
+  import { isHotPriority, openDue, priorityLabel } from './work';
 
   let {
     task: t,
@@ -53,7 +53,7 @@
   /** Urgent and high only, as on the task page: the rest is the usual case. */
   const hot = $derived(isHotPriority(t.priority) ? priorityLabel(t.priority) : null);
   /** Its due date, as the Board card says it; a finished task's is history. */
-  const due = $derived(t.status_category === 'done' ? null : dueLabel(t.due_at));
+  const due = $derived(openDue(t.due_at, t.status_category));
   const lit = $derived(live.some((l) => isOccurrenceOf(l, currentSessionId)));
   const shown = $derived(title ?? (t.title || (t.key ? '' : t.task_id)));
   /** The session the "+N" row's first chip opens: its primary, else the first. */
@@ -99,7 +99,7 @@
             class="of-chip"
             class:failed={due.overdue}
             data-testid="work-task-due"
-            title={due.overdue ? `Overdue: was due ${t.due_at}` : `Due ${t.due_at}`}>{due.overdue ? `Overdue · ${due.text}` : `Due ${due.text}`}</span
+            title={due.overdue ? `Overdue: was due ${t.due_at}` : `Due ${t.due_at}`}>{due.chip}</span
           >{/if}
         {#if t.epic}<span class="of-chip accent" data-testid="work-task-epic">Epic</span>{/if}
         {#if rollup}<span class="of-chip tnum" data-testid="work-task-rollup" title="Tasks filed under it that are done">{rollup}</span>{/if}

@@ -36,7 +36,7 @@
   // button (Start new, Continue ▾).
   import { onDestroy, onMount, tick } from 'svelte';
   import { get } from 'svelte/store';
-  import { createWorkTask, estimateLabel, onWorkChangedDebounced, isHotPriority, ownerDueChip, priorityLabel, setWorkStatus } from './work';
+  import { createWorkTask, estimateLabel, onWorkChangedDebounced, ownerDueChip, priorityLabel, setWorkStatus } from './work';
   import { sessionAgent, sessions } from './sessions';
   import { AGENT_LABELS } from './row_groups';
   import { prChip } from './work_row';
@@ -665,7 +665,8 @@
       <span class="meta">
         {#if prio}<span
             class="prio"
-            class:hot={isHotPriority(t.priority)}
+            class:urgent={t.priority === 'urgent'}
+            class:high={t.priority === 'high'}
             title="Priority: {prio}"
             data-testid="work-board-priority">{prio}</span
           >{/if}
@@ -982,9 +983,16 @@
   .prop {
     color: var(--accent);
   }
-  .prio.hot {
-    color: var(--status-failed);
+  /* Urgent red, High amber: as the row, the task header and the subtask list. */
+  .prio.urgent,
+  .prio.high {
     font-weight: 600;
+  }
+  .prio.urgent {
+    color: var(--status-failed);
+  }
+  .prio.high {
+    color: var(--status-waiting);
   }
   .owner {
     align-self: flex-start;

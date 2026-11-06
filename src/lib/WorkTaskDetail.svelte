@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { focusNow } from './focus_now';
+  import InlineConfirm from './forms/InlineConfirm.svelte';
   import { IS_MAC, shortcutLabel } from './shortcuts';
   // A task in Details (work graph M14), opened from the Work view: what the
   // tracker says (title, status, link, assignees, a description excerpt),
@@ -25,7 +25,7 @@
   import { shortAge, timeAgo } from './session_status';
   import { assessRow, hasReading, verdictLabel, verdictState } from './evidence';
   import StatusDot from './kit/StatusDot.svelte';
-  import { changedAny, describeEvidence, dueLabel, estimateLabel, isHotPriority, onWorkChangedDebounced, priorityLabel } from './work';
+  import { changedAny, describeEvidence, estimateLabel, isHotPriority, onWorkChangedDebounced, openDue, priorityLabel } from './work';
   import { providerInfo, unavailableLabel, shownKey } from './trackers';
   import { hubStatus, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
@@ -51,6 +51,7 @@
   import Icon from './kit/Icon.svelte';
   import { copyText } from './clipboard';
   import { finishesWhen } from './handoffs';
+  import { fold } from './text_fold';
   import { keepWorkOpen, setWorkArchived, setWorkStatus, type WorkItemStatus } from './work';
   import { listStartRules, ruleProject, type StartRuleView } from './start_rules';
   import { projects } from './projects';
@@ -78,6 +79,7 @@
     dependencyName,
     groupSessionLinks,
     groupSourceText,
+    knownWorkFacets,
     occurrenceKind,
     orgSourceText,
     placeWork,
@@ -548,16 +550,18 @@
   const initialOf = (name: string): string => ([...name.trim()][0] ?? '?').toUpperCase();
   /** "2 / 4" in the header chips, with any subtasks. */
   const subtaskCount = $derived(subtaskProgress(detail?.subtasks));
-  /** "Oct 30" while an open task is past its due date: the header says so,
-   *  as the Work row and the Board card do. */
+  /** "Overdue · Oct 30" while an open task is past its due date: the header
+   *  says so, as the Work row and the Board card do. */
   const overdue = $derived.by(() => {
-    if (!task || task.status_category === 'done') return null;
-    const d = dueLabel(task.due_at);
-    return d?.overdue ? d.text : null;
+    const d = task ? openDue(task.due_at, task.status_category) : null;
+    return d?.overdue ? d.chip : null;
   });
   /** A label in the rail opens Work on the tasks carrying it, keeping the
    *  other filters (a section's `group` is per section, so it goes). */
-  function filterByLabel(label: string): void {
+  function filterByLabel(own: string): void {
+    // The facet's spelling (the first the hub met), folded as the query
+    // box's `resolveToken` matches it, so the Label select shows it.
+    const label = ($knownWorkFacets?.labels ?? []).find((l) => fold(l) === fold(own)) ?? own;
     workViewFilters.update(({ group: _g, ...rest }) => ({ ...rest, label }));
     showWorkView();
   }
@@ -708,7 +712,7 @@
             ><span class="prio-dot prio-dot--{task.priority}" aria-hidden="true"></span>{priorityLabel(task.priority)}</span
           >
         {/if}
-        {#if overdue}<span class="chip chip--overdue" data-testid="work-task-overdue-chip" title="Was due {task.due_at}">Overdue · {overdue}</span>{/if}
+        {#if overdue}<span class="chip chip--overdue" data-testid="work-task-overdue-chip" title="Was due {task.due_at}">{overdue}</span>{/if}
         {#if subtaskCount}<span class="chip" data-testid="work-task-subtask-chip" title="Subtasks done">✓ {subtaskCount}</span>{/if}
         <TaskBlockedSpend {task} lookup={depById} testid="work-task" />
         {#if trackerDown(task)}<span class="chip chip--warn" data-testid="work-task-tracker-down"
@@ -1195,15 +1199,20 @@
                       {#if c.mine}
                         <span class="cacts">
                           {#if confirmDelete === c.id}
-                            {#if c.tracker_post?.state === 'done'}
-                              <span class="muted small">Stays on {commentsTracker ?? 'the tracker'}.</span>
-                            {:else if c.tracker_post?.state === 'pending'}
-                              <span class="muted small">Its post is cancelled.</span>
-                            {/if}
-                            <button class="btn btn--crit" type="button" data-testid="work-task-comment-delete-confirm" onclick={() => void removeComment(c.id)}
-                              >Delete</button
+                            <InlineConfirm
+                              label="Delete your comment"
+                              verb="Delete"
+                              confirmTestid="work-task-comment-delete-confirm"
+                              keepTestid="work-task-comment-delete-keep"
+                              onconfirm={() => void removeComment(c.id)}
+                              onkeep={() => (confirmDelete = null)}
                             >
-                            <button class="btn btn--quiet" type="button" use:focusNow onclick={() => (confirmDelete = null)}>Keep</button>
+                              {#if c.tracker_post?.state === 'done'}
+                                <span class="muted small">Stays on {commentsTracker ?? 'the tracker'}.</span>
+                              {:else if c.tracker_post?.state === 'pending'}
+                                <span class="muted small">Its post is cancelled.</span>
+                              {/if}
+                            </InlineConfirm>
                           {:else}
                             <button
                               class="btn btn--quiet"
@@ -1580,7 +1589,7 @@
   }
   .chip--overdue {
     background: var(--failed-soft);
-    color: var(--danger);
+    color: var(--status-failed);
     font-weight: 600;
   }
   .chip--prio-urgent {

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { focusNow } from './focus_now';
+  import InlineConfirm from './forms/InlineConfirm.svelte';
   // Placement rules (work graph M14): find, edit, enable / disable and
   // delete the rules that put similar tasks under a group. Enabling a rule
   // (or editing one) goes through the editor's preview; disabling and
@@ -173,8 +173,15 @@
               >
               <button class="btn btn--quiet" type="button" data-testid="rule-edit" disabled={saveBlocked !== null} onclick={() => edit(r)}>Edit…</button>
               {#if confirmDelete === r.id}
-                <button class="btn btn--crit" type="button" data-testid="rule-delete-confirm" disabled={busy} onclick={() => void remove(r)}>Delete</button>
-                <button class="btn btn--quiet" type="button" use:focusNow onclick={() => (confirmDelete = null)}>Keep</button>
+                <InlineConfirm
+                  label="Delete this rule?"
+                  verb="Delete"
+                  {busy}
+                  confirmTestid="rule-delete-confirm"
+                  keepTestid="rule-delete-keep"
+                  onconfirm={() => void remove(r)}
+                  onkeep={() => (confirmDelete = null)}
+                />
               {:else}
                 <button
                   class="btn btn--quiet"

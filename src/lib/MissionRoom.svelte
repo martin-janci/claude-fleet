@@ -24,6 +24,8 @@
 <script lang="ts">
   import { onDestroy, onMount, tick, untrack } from 'svelte';
   import { get } from 'svelte/store';
+  import InlineConfirm from './forms/InlineConfirm.svelte';
+  import { focusNow } from './focus_now';
   import Resizer from './Resizer.svelte';
   import Skeleton from './states/Skeleton.svelte';
   import StatusChip from './kit/StatusChip.svelte';
@@ -80,6 +82,8 @@
     getMission,
     grantMission,
     grantSignLabel,
+    grantHoursProblem,
+    GRANT_MAX_HOURS,
     grantSpanNotice,
     grantWouldHelp,
     isFinal,
@@ -154,13 +158,16 @@
 
   const missions = $derived($missionList.missions);
   let detail = $state.raw<MissionDetail | null>(null);
-  let notice = $state<string | null>(null);
-  /** Where the notice is drawn: beside the press that raised it. `panel`
+  /** Where a notice is drawn: beside the press that raised it. `panel`
    *  for the right panel's own (the Plan tab's Save, Sign, Import, Delete,
    *  a task edit), `next` for Start wave and Go (the Next block sits at the
    *  end of the centre column, and its top is out of sight by then),
    *  `centre` at the top for the rest. */
-  let noticeAt = $state<'centre' | 'panel' | 'next'>('centre');
+  type NoticeAt = 'centre' | 'panel' | 'next';
+  /** The room's notice and its column, one value: a notice set without
+   *  its place showed in whatever column the previous press used. */
+  let notice = $state<{ text: string; at: NoticeAt } | null>(null);
+  const say = (text: string, at: NoticeAt = 'centre') => (notice = { text, at });
   /** Review w17-4: the last re-read of the open mission failed; what was
    *  loaded stays on screen. */
   let refreshError = $state<IpcError | null>(null);
@@ -267,8 +274,7 @@
       // mission with it, never with `ok` and no mission): review w30-1.
       refreshError = r.error;
     } else {
-      notice =
-        r.ok || r.error.code === 'E_NOTFOUND' ? 'That mission is not in the fleet any more.' : readErrorText(r.error);
+      say(r.ok || r.error.code === 'E_NOTFOUND' ? 'That mission is not in the fleet any more.' : readErrorText(r.error));
       detail = null;
       roomMissionId.set(null);
       openedId = null;
@@ -300,7 +306,6 @@
     moreOpen = false;
     confirmMove = null;
     notice = null;
-    noticeAt = 'centre';
     pinnedToEnd = true;
     refreshError = null;
     plannerFailure = null;
@@ -316,6 +321,9 @@
     reviewing = false;
     reviewAt = 0;
     granting = false;
+    grantLevel = 2;
+    grantHours = 8;
+    grantBudget = '';
     grantUntilDone = false;
     grantHosts = [];
     earlierShown = false;
@@ -338,15 +346,14 @@
 
   /** Run one write; on success re-read the list and the open mission.
    *  `where` says which column pressed, so a refusal lands beside the press. */
-  async function act<T>(p: Promise<Result<T>>, where: 'centre' | 'panel' | 'next' = 'centre'): Promise<T | null> {
+  async function act<T>(p: Promise<Result<T>>, where: NoticeAt = 'centre'): Promise<T | null> {
     busy = true;
     notice = null;
-    noticeAt = where;
     ciRed = false;
     try {
       const r = await p;
       if (!r.ok) {
-        notice = readErrorText(r.error);
+        say(readErrorText(r.error), where);
         ciRed = r.error.code === 'E_CI_FAILING';
         if (r.error.code === 'E_CONFLICT') await load();
         return null;
@@ -543,21 +550,21 @@
   // ── The loop (orchestration O4–O8) ──
 
   /** A short report of what a press did, failures first. */
-  function reportSteps(results: { ok: boolean; detail: string }[] | undefined) {
+  function reportSteps(results: { ok: boolean; detail: string }[] | undefined, at: NoticeAt) {
     const bad = (results ?? []).filter((r) => !r.ok);
-    if (bad.length > 0) notice = bad.map((r) => r.detail).join(' · ');
-    else if ((results ?? []).length === 0) notice = 'Nothing to start right now.';
+    if (bad.length > 0) say(bad.map((r) => r.detail).join(' · '), at);
+    else if ((results ?? []).length === 0) say('Nothing to start right now.', at);
   }
 
   async function startWave(step?: string) {
     if (!mission) return;
     const out = await act(startMissionWave(mission.id, step), 'next');
-    if (out) reportSteps(out.results);
+    if (out) reportSteps(out.results, 'next');
   }
 
   async function retry(itemId: number) {
     const out = await act(retryWorkItem(itemId));
-    if (out && !out.ok) notice = out.detail;
+    if (out && !out.ok) say(out.detail);
   }
 
   /** Redesign 9.10: a step picked on the stuck card, through the action a
@@ -630,9 +637,12 @@
     if (id == null) return;
     // The decided one leaves the list: the next one takes its place. An
     // accept one by one is undone as Accept all's is (ACCEPT_UNDO_SECS):
-    // a slipped Accept is one press away, not a trip to Work.
+    // a slipped Accept is one press away, not a trip to Work. Its Undo is
+    // that one accept's alone: the hub's undo is all or none, so a list
+    // would take the earlier, deliberate accepts back with the slip (or
+    // fail for all once the loop worked on any of them).
     const out = await act(decideWorkProposal(id, accept));
-    if (out && accept) lastAccepted = [...lastAccepted, id];
+    if (out && accept) lastAccepted = [id];
     if (reviewAt >= proposals.ids.length) reviewing = false;
   }
 
@@ -657,15 +667,16 @@
   async function decide(c: MissionCard, ok: boolean) {
     const note = c.kind === 'ask' && ok ? (answers[c.id] ?? '').trim() : undefined;
     if (c.kind === 'ask' && ok && !note) {
-      notice = 'Write an answer first.';
+      say('Write an answer first.');
+      cardNote = { id: c.id, text: 'Write an answer first.' };
       return;
     }
     const out = await act(decideMissionCard(c.id, ok, note));
-    if (out?.state === 'refused') notice = out.note ?? 'Refused';
+    if (out?.state === 'refused') say(out.note ?? 'Refused');
     // Said under the card that was pressed, too: the room's notice sits at
     // its top, out of sight from a card further down, and the press looked
     // like it did nothing.
-    cardNote = notice !== null ? { id: c.id, text: notice } : null;
+    cardNote = notice !== null ? { id: c.id, text: notice.text } : null;
   }
   let cardNote = $state<{ id: number; text: string } | null>(null);
   /** Cards this person cannot act on and hid, by id (per window). */
@@ -688,35 +699,34 @@
   // The grant: what the loop may do by itself, for how long, on what.
   let granting = $state(false);
   let grantLevel = $state(2);
-  let grantHours = $state(8);
+  let grantHours = $state<number | null>(8);
   let grantBudget = $state('');
   /** Until the mission completes (a finite mission's), bounded by the budget. */
   let grantUntilDone = $state(false);
   /** Hosts the grant lets the loop run on; none ticked: any host. */
   let grantHosts = $state<string[]>([]);
 
-  function focusNow(el: HTMLElement): void {
-    el.focus();
-  }
-
   /** What is wrong with the grant's Budget, said under the field: "5,50"
    *  is $5.50 and a typo is refused rather than signed as no cap. */
   const grantBudgetBad = $derived(budgetProblem(grantBudget));
+  /** The same for Hours, when the grant runs for hours: empty, 1.5 or past
+   *  a week is said, not sent (the hub signs 8 h for none, and refuses the
+   *  others). */
+  const grantHoursBad = $derived(grantUntilDone && mission?.mode === 'finite' ? null : grantHoursProblem(grantHours));
 
   async function grant() {
-    if (!mission || grantBudgetBad) return;
+    if (!mission || grantBudgetBad || grantHoursBad) return;
     const micros = microsOf(grantBudget);
     const cents = micros === undefined ? 0 : Math.round(micros / 10_000);
     const untilDone = grantUntilDone && mission.mode === 'finite';
     if (untilDone && !(cents > 0)) {
-      notice = 'A grant until the mission completes needs a budget.';
-      noticeAt = 'panel';
+      say('A grant until the mission completes needs a budget.', 'panel');
       return;
     }
     const out = await act(
       grantMission(mission.id, {
         level: grantLevel,
-        ...(untilDone ? { until_done: true } : { hours: grantHours }),
+        ...(untilDone ? { until_done: true } : { hours: grantHours ?? undefined }),
         ...(cents > 0 ? { budget_cents: cents } : {}),
         ...(grantHosts.length > 0 ? { hosts: [...grantHosts] } : {}),
       }),
@@ -728,7 +738,8 @@
       grantUntilDone = false;
       // A hub before grants until done drops the flag and signs its default
       // hours (review r8): say so rather than let it pass as asked.
-      notice = grantSpanNotice(untilDone, out);
+      const span = grantSpanNotice(untilDone, out);
+      notice = span === null ? null : { text: span, at: 'panel' };
     }
   }
 
@@ -801,11 +812,11 @@
     const name = newName.trim();
     const goal = newGoal.trim();
     if (!name || !goal) {
-      notice = 'A mission needs a name and a goal.';
+      say('A mission needs a name and a goal.');
       return;
     }
     if (newImportOpen && newImportText.trim() && !newImportRows) {
-      notice = 'The plan is not ready to import: see the rows above.';
+      say('The plan is not ready to import: see the rows above.');
       return;
     }
     const m = await act(createMission({ name, goal }));
@@ -898,7 +909,7 @@
     {:else if $roomCreating}
       <div class="scroll">
         <div class="col">
-          {#if notice}<p class="notice" role="status" data-testid="mission-notice">{notice}</p>{/if}
+          {#if notice}<p class="notice" role="status" data-testid="mission-notice">{notice.text}</p>{/if}
           <form class="create" data-testid="mission-create-form" use:formKeys onsubmit={(e) => (e.preventDefault(), void create())}>
             <h2 class="name">New mission</h2>
             <!-- The name takes focus as the form opens: New mission is the
@@ -1002,37 +1013,45 @@
           <p class="meta" data-testid="mission-stats" title="Runs per done task, retries, cold starts (sessions started), a task's median time, and the share of the working span with no run open">{statsText}</p>
         {/if}
         {#if mayChange && confirmMove}
-          <div class="row confirm-move" role="alertdialog" aria-label="Confirm" data-testid="mission-move-confirm-row">
-            <span>{finalMoveQuestion(mission.name, confirmMove)}</span>
-            <button
-              class="btn"
-              class:btn--danger={confirmMove !== 'completed'}
-              type="button"
-              disabled={busy || changeBlocked}
-              data-testid="mission-move-confirm"
-              onclick={() => void confirmFinal()} title={changeWhy ?? undefined}>{moveLabel(mission.state, confirmMove)}</button
-            >
-            <button class="btn btn--quiet" type="button" data-testid="mission-move-keep" use:focusNow onclick={() => (confirmMove = null)}>Keep</button>
+          <div class="confirm-move">
+            <InlineConfirm
+              label="Confirm"
+              question={finalMoveQuestion(mission.name, confirmMove)}
+              verb={moveLabel(mission.state, confirmMove)}
+              danger={confirmMove !== 'completed'}
+              {busy}
+              disabled={changeBlocked}
+              confirmTitle={changeWhy}
+              testid="mission-move-confirm-row"
+              confirmTestid="mission-move-confirm"
+              keepTestid="mission-move-keep"
+              onconfirm={() => void confirmFinal()}
+              onkeep={() => (confirmMove = null)}
+            />
           </div>
         {/if}
         {#if mayChange && ciRed}
-          <div class="row confirm-move" role="alertdialog" aria-label="CI is failing" data-testid="mission-ci-override-row">
-            <span>CI is failing on this mission's pull requests. Complete it anyway? Fleet records that you did.</span>
-            <button
-              class="btn btn--danger"
-              type="button"
-              disabled={busy || changeBlocked}
-              data-testid="mission-ci-override"
-              onclick={() => void move('completed', true)} title={changeWhy ?? undefined}>Complete anyway</button
-            >
-            <button class="btn btn--quiet" type="button" data-testid="mission-ci-keep" use:focusNow onclick={() => (ciRed = false)}>Keep</button>
+          <div class="confirm-move">
+            <InlineConfirm
+              label="CI is failing"
+              question="CI is failing on this mission's pull requests. Complete it anyway? Fleet records that you did."
+              verb="Complete anyway"
+              {busy}
+              disabled={changeBlocked}
+              confirmTitle={changeWhy}
+              testid="mission-ci-override-row"
+              confirmTestid="mission-ci-override"
+              keepTestid="mission-ci-keep"
+              onconfirm={() => void move('completed', true)}
+              onkeep={() => (ciRed = false)}
+            />
           </div>
         {/if}
       </header>
 
       <div class="scroll" bind:this={scroller} onscroll={onScrolled}>
         <div class="col" data-testid="mission-detail-centre">
-          {#if notice && !(noticeAt === 'panel' && $missionPanelOpen) && !(noticeAt === 'next' && nextShown)}<p class="notice" role="status" data-testid="mission-notice">{notice}</p>{/if}
+          {#if notice && !(notice.at === 'panel' && $missionPanelOpen) && !(notice.at === 'next' && nextShown)}<p class="notice" role="status" data-testid="mission-notice">{notice.text}</p>{/if}
           {#if refreshError}
             <p class="refresh-error" role="status" data-testid="mission-refresh-error">
               Couldn't refresh ({readErrorText(refreshError)}) — showing what was loaded.
@@ -1161,6 +1180,7 @@
             <div class="row line" role="status" data-testid="mission-accepted">
               <span>Accepted {lastAccepted.length}.</span>
               <button class="btn btn--quiet" type="button" disabled={busy} data-testid="mission-undo-accept" onclick={() => void undoAccept()}>Undo</button>
+              <button class="btn btn--quiet btn--icon" type="button" aria-label="Dismiss" title="Dismiss" data-testid="mission-accepted-dismiss" onclick={() => (lastAccepted = [])}>✕</button>
             </div>
           {/if}
 
@@ -1318,7 +1338,7 @@
                   {/if}
                 </p>
               {/if}
-              {#if notice && noticeAt === 'next'}<p class="notice" role="status" data-testid="mission-notice">{notice}</p>{/if}
+              {#if notice?.at === 'next'}<p class="notice" role="status" data-testid="mission-notice">{notice.text}</p>{/if}
             </div>
           {/if}
 
@@ -1386,13 +1406,13 @@
     {:else if $roomMissionId != null}
       <div class="scroll">
         <div class="col">
-          {#if notice}<p class="notice" role="status" data-testid="mission-notice">{notice}</p>{/if}
+          {#if notice}<p class="notice" role="status" data-testid="mission-notice">{notice.text}</p>{/if}
           <div data-testid="mission-room-loading"><Skeleton rows={4} label="Reading the mission" /></div>
         </div>
       </div>
     {:else}
       <div class="starter" data-testid="mission-room-starter">
-        {#if notice}<p class="notice" role="status" data-testid="mission-notice">{notice}</p>{/if}
+        {#if notice}<p class="notice" role="status" data-testid="mission-notice">{notice.text}</p>{/if}
         <OrbitMark size={56} label={null} />
         <h2 class="starter-title">{missions.length === 0 ? 'No missions yet' : 'Pick a mission'}</h2>
         <p class="muted">
@@ -1443,7 +1463,7 @@
         >
       </div>
       <div class="body" role="tabpanel" aria-label={MISSION_PANEL_TABS.find((t) => t.id === $missionPanelTab)?.label}>
-        {#if notice && noticeAt === 'panel'}<p class="notice panel-notice" role="status" data-testid="mission-notice">{notice}</p>{/if}
+        {#if notice?.at === 'panel'}<p class="notice panel-notice" role="status" data-testid="mission-notice">{notice.text}</p>{/if}
         {#if $missionPanelTab === 'session'}
           {#if focusRow}
             <SessionFocus
@@ -1606,7 +1626,19 @@
                     >
                     <div class="row">
                       {#if !(grantUntilDone && mission.mode === 'finite')}
-                        <label class="field inline">Hours <input type="number" min="1" max="168" bind:value={grantHours} class="role" /></label>
+                        <label class="field inline"
+                          >Hours <input
+                            type="number"
+                            min="1"
+                            max={GRANT_MAX_HOURS}
+                            step="1"
+                            bind:value={grantHours}
+                            class="role"
+                            aria-invalid={grantHoursBad ? 'true' : undefined}
+                            aria-describedby={grantHoursBad ? 'mission-grant-hours-bad' : undefined}
+                            data-testid="mission-grant-hours"
+                          /></label
+                        >
                       {/if}
                       <label class="field inline"
                         >Budget $ <input
@@ -1620,6 +1652,7 @@
                         /></label
                       >
                     </div>
+                    {#if grantHoursBad}<p class="muted small" id="mission-grant-hours-bad" role="alert" data-testid="mission-grant-hours-bad">{grantHoursBad}</p>{/if}
                     {#if grantBudgetBad}<p class="muted small" id="mission-grant-budget-bad" role="alert" data-testid="mission-grant-budget-bad">{grantBudgetBad}</p>{/if}
                     {#if mission.mode === 'finite'}
                       <label class="field inline"
@@ -1638,7 +1671,7 @@
                       </fieldset>
                     {/if}
                     <div class="row">
-                      <button class="btn" type="submit" disabled={busy || !!grantBudgetBad} data-testid="mission-grant-save"
+                      <button class="btn" type="submit" disabled={busy || !!grantBudgetBad || !!grantHoursBad} data-testid="mission-grant-save"
                         >{grantSignLabel(
                           grantLevel,
                           grantUntilDone && mission.mode === 'finite' ? { untilDone: true } : { hours: grantHours },
@@ -1664,7 +1697,7 @@
                 bind:tasksView
                 onopenitem={openItem}
                 onopensession={openSession}
-                onnotice={(t) => ((notice = t), (noticeAt = 'panel'))}
+                onnotice={(t) => say(t, 'panel')}
               />
             </section>
 
@@ -1690,13 +1723,16 @@
 
             {#if detail.may_change}
               {#if confirmDelete}
-                <div class="row" data-testid="mission-delete-row">
-                  <span>Delete {mission.name}? Its tasks stay.</span>
-                  <button class="btn btn--quiet" type="button" data-testid="mission-delete-keep" use:focusNow onclick={() => (confirmDelete = false)}>Keep</button>
-                  <button class="btn btn--danger" type="button" disabled={busy} data-testid="mission-delete-confirm" onclick={() => void remove()}
-                    >Delete</button
-                  >
-                </div>
+                <InlineConfirm
+                  question="Delete {mission.name}? Its tasks stay."
+                  verb="Delete"
+                  {busy}
+                  testid="mission-delete-row"
+                  confirmTestid="mission-delete-confirm"
+                  keepTestid="mission-delete-keep"
+                  onconfirm={() => void remove()}
+                  onkeep={() => (confirmDelete = false)}
+                />
               {:else}
                 <div class="row foot-actions">
                   {#if mayChange && !importOpen}

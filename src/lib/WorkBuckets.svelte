@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { focusNow } from './focus_now';
+  import InlineConfirm from './forms/InlineConfirm.svelte';
   // Sprints and releases (sprints design 2026-09-28 §5, §6): list them with
   // their roll-ups, create one, start a planned sprint, release a planned
   // release, close a sprint (E9: a person confirms which unfinished tasks
@@ -322,8 +322,15 @@
                   >
                 {/if}
                 {#if confirmDelete === b.id}
-                  <button class="btn btn--crit" type="button" data-testid="bucket-delete-confirm" disabled={busy} onclick={() => void remove(b)}>Delete</button>
-                  <button class="btn btn--quiet" type="button" use:focusNow onclick={() => (confirmDelete = null)}>Keep</button>
+                  <InlineConfirm
+                    label="Delete {b.name}?"
+                    verb="Delete"
+                    {busy}
+                    confirmTestid="bucket-delete-confirm"
+                    keepTestid="bucket-delete-keep"
+                    onconfirm={() => void remove(b)}
+                    onkeep={() => (confirmDelete = null)}
+                  />
                 {:else}
                   <button
                     class="btn btn--quiet"

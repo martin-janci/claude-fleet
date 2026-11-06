@@ -11,9 +11,8 @@
   import { retryHubNow } from './hub_connection';
   import { loadOfflineSessions, OFFLINE_HOST, offlineSessions, type OfflineSession } from './offline';
   import { openSessionInEditor } from './editor';
-  import { copyText } from './clipboard';
+  import { copyAndSay } from './clipboard';
   import { sinceWords } from './states/states';
-  import { push } from './toasts';
 
   let { onhubsettings }: { onhubsettings: () => void } = $props();
 
@@ -32,7 +31,7 @@
   onMount(() => void load());
 
   async function copyAttach(s: OfflineSession) {
-    if (await copyText(s.attach)) push({ kind: 'info', message: `Copied: ${s.attach}` });
+    await copyAndSay(s.attach, 'Attach command');
   }
 </script>
 

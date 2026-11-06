@@ -55,6 +55,7 @@
   import WorkConflictNotice from './WorkConflictNotice.svelte';
   import { railWorkViewId } from './work_rail_view';
   import { parseWorkQuery, suggestWorkQuery, type WorkQuerySuggestion } from './work_query';
+  import { fold } from './text_fold';
 
   let {
     orgs,
@@ -81,9 +82,10 @@
     facets?: WorkTreeFacets;
   } = $props();
 
-  // A chip for the value on now, even when no task loaded carries it.
+  // A chip for the value on now, even when no task loaded carries it;
+  // matched as the hub matches it (case and diacritics folded).
   const withCurrent = (names: readonly string[], cur: string | undefined) =>
-    cur && !names.some((n) => n.toLowerCase() === cur.toLowerCase()) ? [...names, cur] : names;
+    cur && !names.some((n) => fold(n) === fold(cur)) ? [...names, cur] : names;
   const peopleChips = $derived(withCurrent(people, $workViewFilters.assignee));
   const columnChips = $derived(withCurrent(columns, $workViewFilters.status_name));
   // The Group control: List, or Grouped with each org's sections by

@@ -2891,6 +2891,9 @@ fn bad(msg: impl Into<String>) -> IpcError {
     IpcError::new(codes::E_INVALID, msg)
 }
 
+/// Longest label filter: past any label a tracker stores.
+const LABEL_FILTER_MAX_CHARS: usize = 1000;
+
 /// Validate filters before any work: a bad value is refused, never
 /// silently ignored (a filter the client thinks applied must apply).
 pub fn check_filters(f: &WorkTreeFilters) -> Result<(), IpcError> {
@@ -2960,11 +2963,21 @@ pub fn check_filters(f: &WorkTreeFilters) -> Result<(), IpcError> {
         ("iteration", &f.iteration),
         ("epic", &f.epic),
         ("item_type", &f.item_type),
-        ("label", &f.label),
     ] {
         if v.as_deref().is_some_and(|q| q.chars().count() > 200) {
             return Err(bad(format!("filters.{name} is longer than 200 characters")));
         }
+    }
+    // A tracker's labels are stored as it sends them (Jira allows 255
+    // characters), and the facets offer each one: the filter takes any of
+    // them, so a long one never errors the whole view.
+    if f.label
+        .as_deref()
+        .is_some_and(|q| q.chars().count() > LABEL_FILTER_MAX_CHARS)
+    {
+        return Err(bad(format!(
+            "filters.label is longer than {LABEL_FILTER_MAX_CHARS} characters"
+        )));
     }
     if let Some(p) = f.priority.as_deref() {
         if p != "none" && !crate::store::PRIORITIES.contains(&p) {

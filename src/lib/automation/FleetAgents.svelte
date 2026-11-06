@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { focusNow } from '../focus_now';
+  import InlineConfirm from '../forms/InlineConfirm.svelte';
   // The Agents tab's fleet agents (configurable agents, step 5): the
   // catalog's `fleet_agent` definitions, each with its instances (the
   // `agent = fleet` rules naming it) under it. New instance and Edit open
@@ -190,13 +190,15 @@
         </li>
         {#if revoking === r.id}
           <li class="instance" data-testid="fleet-revoke-confirm-row">
-            <span class="main" role="alertdialog" aria-label="Revoke the instance"
-              >Revoke {ruleLine(r)}? It stops running and its settings are deleted.
-              <span class="buttons">
-                <button class="act danger" type="button" data-testid="fleet-revoke-confirm" onclick={() => void revoke(r.id)}>Revoke</button>
-                <button class="act" type="button" data-testid="fleet-revoke-keep" use:focusNow onclick={() => (revoking = null)}>Keep</button>
-              </span></span
-            >
+            <InlineConfirm
+              label="Revoke the instance"
+              question="Revoke {ruleLine(r)}? It stops running and its settings are deleted."
+              verb="Revoke"
+              confirmTestid="fleet-revoke-confirm"
+              keepTestid="fleet-revoke-keep"
+              onconfirm={() => void revoke(r.id)}
+              onkeep={() => (revoking = null)}
+            />
           </li>
         {/if}
         {#if running?.id === r.id}
@@ -293,7 +295,6 @@
   }
   .act:disabled { opacity: 0.5; cursor: default; }
   .act.primary { border-color: var(--accent); color: var(--accent); }
-  .act.danger { border-color: var(--danger); color: var(--danger); }
   .run { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: flex-end; }
   .run label { display: flex; flex-direction: column; gap: 2px; font-size: var(--text-sm); }
   .run label.wide { flex-basis: 100%; }
