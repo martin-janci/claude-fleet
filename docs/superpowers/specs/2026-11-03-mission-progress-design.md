@@ -104,6 +104,12 @@ M3 ukazuje, prečo misia čaká. Najväčšie čakania sú na človeka (karty, g
 
 **Veľkosť** M.
 
+**Ako je to postavené v N6** (`orchestrate/integrate.rs::precheck_deps`):
+- Pred implement behom (oba režimy, `apply_step_inner`) úlohy s aspoň dvoma nemergnutými závislosťami (M2) loop vezme ich hotové vetvy (`integrate::branches`), a ak sú na jednom hoste a v jednom repe, spustí `merge-tree`. Výsledok si pamätá podľa úlohy a hláv, takže rovnaké hlavy sa cez ssh nepýta znova.
+- Konflikt: integračná karta (`integration_card`, rovnaké `decision_id` ako pri kontrole pred uzavretím, takže tá istá karta) s `dependents: [X]`; beh je odmietnutý („waits for their integration“). Kým je karta otvorená, `steps_and_waits` krok úlohy, ktorej dve závislosti karta kryje, vynechá a zapíše čakanie `person`.
+- Schválenie karty vytvorí integračnú úlohu a pridá hranu X → integračná úloha (zdroj `planner`, ako karta `add_dep`). M2 potom dá integračnú vetvu na prvé miesto, takže X začne z nej a vetvy, ktoré už obsahuje, sú `had`.
+- Bez odpovede gitu (iný host, git < 2.38, ssh zlyhalo) ostáva M2: beh začne a worker zlúči sám.
+
 ## 8. Roadmap
 
 | Fáza | Obsah | Správanie | Veľkosť |
@@ -112,7 +118,7 @@ M3 ukazuje, prečo misia čaká. Najväčšie čakania sú na človeka (karty, g
 | **N1** (postavené) | poučenia zo `tasks`, prompt a plánovač, zoznam v miestnosti | mení prompty | M |
 | **N5** (postavené) | `stats.forecast` | len zobrazenie | S |
 | **N4** (postavené) | `finish_grant` v detaile, tlačidlo | nový spôsob grantu | S–M |
-| **N6** | `merge-tree` pred štartom, karta s `dependents` | mení, kedy závislá úloha štartuje | M |
+| **N6** (postavené) | `merge-tree` pred štartom, karta s `dependents` | mení, kedy závislá úloha štartuje | M |
 | **N3** | karta `merge_train`, `orchestrator.merge_train` | opt-in, mení O11 | M–L |
 
 N5 pred N4 (rozpočet z odhadu). N3 posledné, lebo mení pravidlo o merge.

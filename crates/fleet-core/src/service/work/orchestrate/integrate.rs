@@ -315,7 +315,7 @@ pub async fn check(deps: &Deps, m: &MissionRow) -> Vec<PairState> {
                 .map(|(_, b)| *b)
                 .collect();
             if let Ok(s) = deps.store.lock() {
-                match integration_card(&s, m, &live, &conflicts) {
+                match integration_card(&s, m, &live, &conflicts, &[]) {
                     Carded::Done => {}
                     Carded::Held => at_cap = true,
                     // Not carded: ask again next tick rather than never.
@@ -332,6 +332,111 @@ pub async fn check(deps: &Deps, m: &MissionRow) -> Vec<PairState> {
                 c.insert(m.id, held(&key));
             }
         }
+    }
+    out
+}
+
+/// What [`precheck_deps`] found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DepCheck {
+    /// Nothing against starting: no conflict, or git could not say.
+    Clear,
+    /// The dependencies' branches conflict: an integration card asks for
+    /// one branch, and the task waits for it.
+    Carded,
+}
+
+/// The dependency sets already checked, by item and heads: the same heads
+/// are not asked about again over ssh every tick.
+fn deps_checked() -> &'static Mutex<HashMap<String, DepCheck>> {
+    static C: std::sync::OnceLock<Mutex<HashMap<String, DepCheck>>> = std::sync::OnceLock::new();
+    C.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Mission progress N6 (E4): before item `item_id`'s implementation
+/// starts from two or more unmerged dependencies (M2), whether their
+/// branches merge with each other (`git merge-tree` on their host). A
+/// conflict raises the one integration card for those branches, naming
+/// the item as waiting for it (its edge is drawn when the card is
+/// applied), and the run does not start. Anything git cannot answer
+/// (another host, git < 2.38, no answer) is `Clear`: the run starts and
+/// M2 merges in its checkout as before.
+pub async fn precheck_deps(deps: &Deps, m: &MissionRow, item_id: i64) -> DepCheck {
+    let (group, key) = {
+        let Ok(s) = deps.store.lock() else {
+            return DepCheck::Clear;
+        };
+        let wanted: Vec<i64> =
+            match crate::service::work::dep_work::unmerged_deps(&s, item_id, None) {
+                Ok(d) => d.iter().map(|d| d.item_id).collect(),
+                Err(_) => return DepCheck::Clear,
+            };
+        if wanted.len() < 2 {
+            return DepCheck::Clear;
+        }
+        let group: Vec<Branch> = branches(&s, m)
+            .into_iter()
+            .filter(|b| wanted.contains(&b.item_id))
+            .collect();
+        let one_place = group
+            .windows(2)
+            .all(|w| w[0].host == w[1].host && w[0].project_id == w[1].project_id);
+        if group.len() < 2 || !one_place {
+            return DepCheck::Clear;
+        }
+        let key = format!(
+            "{item_id};{}",
+            group
+                .iter()
+                .map(|b| format!("{}={}", b.item_id, b.head))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        (group, key)
+    };
+    if let Some(known) = deps_checked()
+        .lock()
+        .ok()
+        .and_then(|c| c.get(&key).copied())
+    {
+        return known;
+    }
+    let heads: Vec<String> = group.iter().map(|b| b.head.clone()).collect();
+    let cwds: Vec<&str> = group.iter().map(|b| b.path.as_str()).collect();
+    let script = merge_tree_script(&cwds, &heads);
+    let Ok(stdout) =
+        crate::service::catalog::inventory::run_host_script(&deps.ssh, &group[0].host, &script)
+            .await
+    else {
+        return DepCheck::Clear;
+    };
+    let contained = parse_contained(&stdout, group.len());
+    let conflicts: Vec<(&Branch, &Branch, Vec<String>)> = parse_merge_tree(&stdout, group.len())
+        .into_iter()
+        .filter(|(i, j, state, _)| {
+            state == "conflict" && !contained.contains(i) && !contained.contains(j)
+        })
+        .map(|(i, j, _, files)| (&group[i], &group[j], files))
+        .collect();
+    let out = if conflicts.is_empty() {
+        DepCheck::Clear
+    } else {
+        let live: Vec<&Branch> = group
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !contained.contains(i))
+            .map(|(_, b)| b)
+            .collect();
+        match deps.store.lock() {
+            Ok(s) => match integration_card(&s, m, &live, &conflicts, &[item_id]) {
+                Carded::Failed => DepCheck::Clear,
+                _ => DepCheck::Carded,
+            },
+            Err(_) => DepCheck::Clear,
+        }
+    };
+    if let Ok(mut c) = deps_checked().lock() {
+        c.insert(key, out);
     }
     out
 }
@@ -406,6 +511,7 @@ fn integration_card(
     m: &MissionRow,
     live: &[&Branch],
     conflicts: &[(&Branch, &Branch, Vec<String>)],
+    dependents: &[i64],
 ) -> Carded {
     let mut heads: Vec<String> = live
         .iter()
@@ -440,6 +546,8 @@ fn integration_card(
                 "tree": [entry],
                 "done_when": [["review"]],
                 "role": "integrate",
+                // N6: the tasks that wait for this integration to start.
+                "dependents": dependents,
             })),
         },
     );
@@ -484,7 +592,7 @@ fn integration_card(
 /// The decision ids of mission `id`'s open cards. The store lists open
 /// cards first and holds at most `CARDS_OPEN_CAP` of them, so one page of
 /// that many has them all.
-fn open_cards(s: &Store, id: i64) -> Result<Vec<String>, crate::ipc_error::IpcError> {
+pub(super) fn open_cards(s: &Store, id: i64) -> Result<Vec<String>, crate::ipc_error::IpcError> {
     Ok(s.mission_cards(id, crate::store::CARDS_OPEN_CAP)?
         .into_iter()
         .filter(|c| c.state == "open")

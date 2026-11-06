@@ -97,6 +97,17 @@ pub fn unmerged_deps(
             break;
         }
     }
+    // N6: an integration of the others comes first, so the checkout starts
+    // from it and the branches it merged are already held.
+    let integration = |d: &DepBranch| {
+        s.get_work_item(d.item_id)
+            .ok()
+            .flatten()
+            .and_then(|i| i.proposal_why)
+            .as_deref()
+            == Some(super::orchestrate::integrate::INTEGRATION_WHY)
+    };
+    out.sort_by_key(|d| !integration(d));
     Ok(out)
 }
 

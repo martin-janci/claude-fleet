@@ -77,8 +77,8 @@ fn one_integration_covers_every_conflicting_pair() {
         (&a, &b, vec!["CHANGELOG.md".to_string()]),
         (&b, &c, vec!["src/toolbar.tsx".to_string()]),
     ];
-    integration_card(&s, &m, &live, &conflicts);
-    integration_card(&s, &m, &live, &conflicts);
+    integration_card(&s, &m, &live, &conflicts, &[]);
+    integration_card(&s, &m, &live, &conflicts, &[]);
     let cards = s.mission_cards(m.id, 50).unwrap();
     assert_eq!(cards.len(), 1, "{cards:?}");
     let tree = &cards[0].payload.as_ref().unwrap()["tree"][0];
@@ -130,7 +130,7 @@ fn a_card_the_cap_refuses_is_held_until_a_card_is_decided() {
     let (a, b) = (branch(300, "aaaa"), branch(301, "bbbb"));
     let conflicts = vec![(&a, &b, vec!["CHANGELOG.md".to_string()])];
     assert_eq!(
-        integration_card(&s, &m, &[&a, &b], &conflicts),
+        integration_card(&s, &m, &[&a, &b], &conflicts, &[]),
         Carded::Held
     );
     let key = "300=aaaa,301=bbbb".to_string();
@@ -173,7 +173,10 @@ fn the_largest_integration_still_fits_one_card() {
             conflicts.push((&all[i], &all[j], files.clone()));
         }
     }
-    assert_eq!(integration_card(&s, &m, &live, &conflicts), Carded::Done);
+    assert_eq!(
+        integration_card(&s, &m, &live, &conflicts, &[]),
+        Carded::Done
+    );
     let cards = s.mission_cards(m.id, 50).unwrap();
     assert_eq!(cards.len(), 1, "{cards:?}");
     let notes = cards[0].payload.as_ref().unwrap()["tree"][0]["notes"]

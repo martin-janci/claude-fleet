@@ -1889,3 +1889,101 @@ fn a_lane_whose_lead_waits_on_a_dialog_waits_on_a_person() {
         "the room says the lead waits for you"
     );
 }
+
+/// Mission progress N6 (E4): a task two of whose dependencies an open
+/// integration card covers waits for the card (a person's); applying the
+/// card makes the task wait for the integration it creates.
+#[tokio::test]
+async fn a_task_on_conflicting_dependencies_waits_for_their_integration() {
+    let fx = fixture();
+    let (a, b, x) = (member(&fx, "a"), member(&fx, "b"), member(&fx, "x"));
+    let card = {
+        let s = lock(&fx.deps.store).unwrap();
+        set_policy(
+            &s,
+            fx.m.id,
+            crate::store::MissionPolicy {
+                max_parallel: 8,
+                ..Default::default()
+            },
+        );
+        for d in [a, b] {
+            s.conn_ref()
+                .execute(
+                    "UPDATE work_items SET status_category = 'done' WHERE id = ?1",
+                    [d],
+                )
+                .unwrap();
+            s.add_item_dep(x, d, "person", "t").unwrap();
+        }
+        assert_eq!(
+            run_items(&s, fx.m.id),
+            vec![x],
+            "x is ready on its done dependencies"
+        );
+        let entry = TreeEntry {
+            title: "Integrate a and b into one branch".into(),
+            why: Some(integrate::INTEGRATION_WHY.into()),
+            depends_on: vec![
+                crate::store::TreeRef::Item(a),
+                crate::store::TreeRef::Item(b),
+            ],
+            ..Default::default()
+        };
+        let card = s
+            .add_card(
+                fx.m.id,
+                &NewCard {
+                    decision_id: &format!("integrate:{a}:aaa,{b}:bbb"),
+                    source: "loop",
+                    kind: "create",
+                    work_item_id: None,
+                    payload: Some(serde_json::json!({
+                        "tree": [entry],
+                        "role": "integrate",
+                        "dependents": [x],
+                    })),
+                },
+            )
+            .unwrap()
+            .unwrap();
+        assert!(run_items(&s, fx.m.id).is_empty(), "x waits for the card");
+        assert!(wait_causes(&s, fx.m.id).contains(&"person"));
+        card
+    };
+    let decided = decide_card(
+        &WorkLinkArgs {
+            action: "card_decide".into(),
+            card_id: Some(card.id),
+            ok: Some(true),
+            ..Default::default()
+        },
+        &fx.deps,
+        &fx.me,
+    )
+    .await
+    .unwrap();
+    assert_eq!(decided.state, "applied", "{:?}", decided.note);
+    let s = lock(&fx.deps.store).unwrap();
+    let waits_on: Vec<i64> = s
+        .item_deps(&[x])
+        .unwrap()
+        .iter()
+        .map(|e| e.depends_on)
+        .collect();
+    assert_eq!(
+        waits_on.len(),
+        3,
+        "x now waits for the integration too: {waits_on:?}"
+    );
+    let integration = waits_on
+        .iter()
+        .copied()
+        .find(|d| *d != a && *d != b)
+        .unwrap();
+    assert_eq!(
+        run_items(&s, fx.m.id),
+        vec![integration],
+        "the integration runs; x waits for it"
+    );
+}

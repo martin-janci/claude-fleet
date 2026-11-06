@@ -240,6 +240,34 @@ fn steps_and_waits(
     if steps.iter().any(|st| st.kind == "ask") || graph.nodes.iter().any(|n| n.state == "held") {
         causes.insert("person");
     }
+    // N6: a task two of whose dependencies an open integration card covers
+    // waits for that card, a person's to decide.
+    let covered = integrate::covered_items(&integrate::open_cards(s, m.id)?);
+    let steps = if covered.is_empty() {
+        steps
+    } else {
+        let before = waits::impl_items(&steps);
+        let mut kept = Vec::with_capacity(steps.len());
+        for st in steps {
+            let waits_for_card = match st.item_id.filter(|_| st.is_impl()) {
+                Some(i) => {
+                    s.item_deps(&[i])?
+                        .iter()
+                        .filter(|e| covered.contains(&e.depends_on))
+                        .count()
+                        >= 2
+                }
+                None => false,
+            };
+            if !waits_for_card {
+                kept.push(st);
+            }
+        }
+        if waits::held(&before, &kept) {
+            causes.insert("person");
+        }
+        kept
+    };
     // Lanes L5: what each task says it changes, in which repository (a
     // mission with one repo names it for a task that names none).
     let sole_repo = match m.repos.as_slice() {
@@ -675,6 +703,16 @@ async fn apply_step_inner(
                 (start_for(&s, m, item_id, actor, a.grant.as_ref())?, a.grant)
             };
             let role = step.role.as_deref().unwrap_or("implement");
+            // N6 (E4): dependencies whose branches conflict are integrated
+            // first; the task waits for that card rather than start on them.
+            if role == "implement"
+                && integrate::precheck_deps(deps, m, item_id).await == integrate::DepCheck::Carded
+            {
+                return Err(IpcError::new(
+                    codes::E_INVALID_STATE,
+                    "its dependencies' branches conflict: it waits for their integration (a card asks)",
+                ));
+            }
             // Lanes L3: a lane's task runs in the lane's lead session.
             if role == "implement" && m.policy.execution == "lane" {
                 let lane = lock(&deps.store)?.item_lane(item_id)?;
@@ -953,6 +991,10 @@ async fn apply_card(
             let touches: Vec<Vec<String>> =
                 serde_json::from_value(p.get("touches").cloned().unwrap_or_default())
                     .unwrap_or_default();
+            // N6: tasks that wait for what this card makes (an integration).
+            let dependents: Vec<i64> =
+                serde_json::from_value(p.get("dependents").cloned().unwrap_or_default())
+                    .unwrap_or_default();
             let s = lock(&deps.store)?;
             let made = s.propose_tree(root, &tree, "planner")?;
             for (i, row) in made.iter().enumerate() {
@@ -966,6 +1008,11 @@ async fn apply_card(
                 // Lanes design L5: what it said the task changes.
                 if let Some(t) = touches.get(i).filter(|t| !t.is_empty()) {
                     s.set_item_touches(row.id, t)?;
+                }
+            }
+            if let Some(first) = made.first() {
+                for d in &dependents {
+                    s.add_item_dep(*d, first.id, "planner", &actor.name())?;
                 }
             }
             if accept_created {
