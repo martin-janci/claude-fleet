@@ -68,7 +68,7 @@ export type TurnOutcome = 'finished' | 'asked' | 'stuck' | 'working' | 'unsure';
 export type SessionOrigin = 'person' | 'operator' | 'mission' | 'background' | 'token' | 'routine';
 
 /** `sessions.agent` (migration 121). */
-export type SessionAgent = 'claude' | 'codex' | 'agy' | 'shell';
+export type SessionAgent = 'claude' | 'codex' | 'agy' | 'hermes' | 'shell';
 
 /** The agent a row runs, reading an older hub's missing field as Claude
  *  Code (a shell row there still says `kind: 'shell'`). */

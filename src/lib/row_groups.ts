@@ -48,13 +48,14 @@ export const STATE_LABELS: Record<AttentionState, string> = {
   idle: 'Idle',
 };
 
-const AGENTS: readonly SessionAgent[] = ['claude', 'codex', 'agy', 'shell'];
+const AGENTS: readonly SessionAgent[] = ['claude', 'codex', 'agy', 'hermes', 'shell'];
 
 /** The agent's own name, as the agent tab spells it. */
 export const AGENT_LABELS: Record<SessionAgent, string> = {
   claude: 'Claude Code',
   codex: 'Codex',
   agy: 'Agy',
+  hermes: 'Hermes',
   shell: 'Shell',
 };
 

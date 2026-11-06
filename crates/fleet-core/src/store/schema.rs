@@ -2528,6 +2528,12 @@ const MIGRATIONS: &[Migration] = &[
         218,
         include_str!("../../migrations/218_account_org_blocks.sql"),
     ),
+    // Hermes Agent sessions: `sessions.agent`'s CHECK admits `hermes`.
+    // Rewrites the stored CHECK in place; idempotent, so plain.
+    Migration::plain(
+        219,
+        include_str!("../../migrations/219_session_agent_hermes.sql"),
+    ),
 ];
 
 /// The settings row [`Store::finish_realm_upgrade`] writes once migration

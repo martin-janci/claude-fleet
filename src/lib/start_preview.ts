@@ -49,6 +49,7 @@ export interface StartPlanView {
 export function planLaunchLine(p: Pick<StartPlanView, 'profile' | 'model' | 'effort' | 'agent' | 'fell_back_from'>): string {
   const parts: string[] = [];
   if (p.agent === 'codex') parts.push('Codex');
+  else if (p.agent === 'hermes') parts.push('Hermes');
   if (p.profile) parts.push(`account ${p.profile}`);
   if (p.model) parts.push(p.model);
   if (p.effort) parts.push(`effort ${p.effort}`);

@@ -229,9 +229,9 @@ export function isPinned(scrollTop: number, clientHeight: number, scrollHeight: 
  * code (there was nothing to fetch in the first place).
  */
 export function emptyStateText(code: string | null, hasId: boolean, agent: SessionAgent = 'claude'): string | null {
-  // Agy keeps its conversations in its own database, which nothing reads yet:
-  // say so rather than wait on a transcript that never comes.
-  if (agent === 'agy') return 'Agy conversations can’t be shown yet';
+  // Agy and Hermes keep their conversations in their own databases, which
+  // nothing reads yet: say so rather than wait on a transcript that never comes.
+  if (agent === 'agy' || agent === 'hermes') return `${agentLabel(agent)} conversations can’t be shown yet`;
   if (!hasId) return agent === 'claude' ? 'No Claude session id yet' : 'No conversation yet';
   if (code === 'E_NO_TRANSCRIPT') return 'No conversation yet';
   return null;
@@ -245,7 +245,7 @@ export function emptyStateHint(
   canPrompt: boolean,
   agent: SessionAgent = 'claude',
 ): string | null {
-  if (agent === 'agy') return 'Its terminal tab shows the session live.';
+  if (agent === 'agy' || agent === 'hermes') return 'Its terminal tab shows the session live.';
   // Codex picks its conversation's id itself and writes it on the first prompt.
   if (!hasId && agent === 'codex') {
     return canPrompt
@@ -262,7 +262,8 @@ export function emptyStateHint(
 /** The agent's name in conversation copy ("Codex is working"), as the agent
  *  tab spells it (`row_groups.ts` AGENT_LABELS). */
 export function agentLabel(agent: SessionAgent): string {
-  return agent === 'codex' ? 'Codex' : agent === 'agy' ? 'Agy' : agent === 'shell' ? 'The shell' : 'Claude Code';
+  if (agent === 'shell') return 'The shell';
+  return agent === 'codex' ? 'Codex' : agent === 'agy' ? 'Agy' : agent === 'hermes' ? 'Hermes' : 'Claude Code';
 }
 
 /** Pure relative-time formatter for an ISO timestamp against a reference clock. */
@@ -978,9 +979,41 @@ export const CODEX_SLASH_COMMANDS: readonly SlashCommand[] = [
   { name: 'exit', description: 'Quit Codex (the tmux session stays)' },
 ];
 
+/**
+ * Hermes Agent's commands the composer offers, the Hermes adapter's own
+ * (`crates/fleet-core/src/agent_adapter/hermes.rs` SLASH).
+ */
+export const HERMES_SLASH_COMMANDS: readonly SlashCommand[] = [
+  { name: 'model', description: 'Switch model for this session', args: true },
+  { name: 'reasoning', description: 'Set reasoning effort and display', args: true },
+  { name: 'new', description: 'Start a new session' },
+  { name: 'title', description: 'Set a title for the current session', args: true },
+  { name: 'compress', description: 'Compress conversation context' },
+  { name: 'status', description: 'Show session, model, token and context info' },
+  { name: 'usage', description: 'Show token usage and rate limits' },
+  { name: 'context', description: 'Show what fills the context window' },
+  { name: 'retry', description: 'Resend the last message' },
+  { name: 'undo', description: 'Back up one user turn' },
+  { name: 'branch', description: 'Branch the current session' },
+  { name: 'queue', description: 'Queue a prompt for the next turn', args: true },
+  { name: 'steer', description: 'Steer after the next tool call', args: true },
+  { name: 'goal', description: 'Set a standing goal for this session', args: true },
+  { name: 'background', description: 'Run a prompt in the background', args: true },
+  { name: 'agents', description: 'Show active agents and running tasks' },
+  { name: 'stop', description: 'Kill all running background processes' },
+  { name: 'rollback', description: 'List or restore filesystem checkpoints' },
+  { name: 'skills', description: 'Search, install or manage skills', args: true },
+  { name: 'tools', description: 'List, enable or disable tools', args: true },
+  { name: 'yolo', description: 'Toggle skipping dangerous-command approvals' },
+  { name: 'help', description: 'Show available commands' },
+  { name: 'quit', description: 'Quit Hermes (the tmux session stays)' },
+];
+
 /** The built-in slash commands the composer offers for `agent`'s session. */
 export function slashCommandsFor(agent: SessionAgent): readonly SlashCommand[] {
-  return agent === 'codex' ? CODEX_SLASH_COMMANDS : SLASH_COMMANDS;
+  if (agent === 'codex') return CODEX_SLASH_COMMANDS;
+  if (agent === 'hermes') return HERMES_SLASH_COMMANDS;
+  return SLASH_COMMANDS;
 }
 
 /** Claude Code commands Codex runs under another name: a `/clear` chip in

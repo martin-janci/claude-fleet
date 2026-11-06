@@ -256,7 +256,7 @@
   // session's composer naming the file and which diff is shown; the person
   // writes the question and sends it, nothing goes on its own.
   const askName = $derived(
-    session.agent === 'codex' || session.agent === 'agy' ? agentLabel(session.agent) : 'Claude',
+    session.agent && session.agent !== 'claude' && session.agent !== 'shell' ? agentLabel(session.agent) : 'Claude',
   );
   function askAboutDiff(p: string): void {
     const which = commit

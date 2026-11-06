@@ -346,22 +346,24 @@ pub fn friendly_name(value: &str) -> Result<(), IpcError> {
     no_control("friendly name", value)
 }
 
-/// Validate a `claude --model` value: an alias (`opus`, `sonnet[1m]`) or a
-/// full model id (`claude-opus-5-5`). ASCII letters, digits, `.`, `_`, `-`,
-/// `[` and `]` only, at most 64 characters, and never a leading `-` (an
-/// option parser would read it as a flag).
+/// Validate a session's `--model` value: a Claude alias (`opus`,
+/// `sonnet[1m]`), a full model id (`claude-opus-5-5`), or a provider slug
+/// as Hermes takes it (`anthropic/claude-sonnet-5`, `qwen/qwen3:free`).
+/// ASCII letters, digits, `.`, `_`, `-`, `[`, `]`, `/` and `:` only, at most
+/// 64 characters, and never a leading `-` (an option parser would read it
+/// as a flag). Every launch line shell-quotes it all the same.
 pub fn claude_model(value: &str) -> Result<(), IpcError> {
     let ok = !value.is_empty()
         && value.len() <= 64
         && !value.starts_with('-')
-        && value
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '[' | ']'));
+        && value.chars().all(|c| {
+            c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '[' | ']' | '/' | ':')
+        });
     if ok {
         Ok(())
     } else {
         Err(invalid(
-            "model must be a Claude model alias or id (letters, digits, . _ - [ ])",
+            "model must be a model alias or id (letters, digits, . _ - [ ] / :)",
         ))
     }
 }
