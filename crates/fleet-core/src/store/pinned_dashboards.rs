@@ -25,7 +25,7 @@ pub struct PinnedDashboardRow {
     pub pinned_at: i64,
     pub updated_at: i64,
     /// Whether the version before the last replacement is kept, so
-    /// `dashboards { undo }` can put it back (migration 219).
+    /// `dashboards { undo }` can put it back (migration 220).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub can_undo: bool,
 }

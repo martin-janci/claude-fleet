@@ -1869,6 +1869,46 @@ fn the_agent_settles_against_the_kind() {
         normalize_launch(&mut args).unwrap_err().code,
         crate::ipc_error::codes::E_UNSUPPORTED
     );
+    // Hermes (migration 219) takes a provider-slug model, but no login
+    // profile, and runs in no shell session.
+    let mut args = args_named("dev-z", None);
+    args.agent = Some("hermes".into());
+    args.model = Some("anthropic/claude-sonnet-5".into());
+    assert!(normalize_launch(&mut args).is_ok());
+    assert_eq!(args.agent.as_deref(), Some("hermes"));
+    args.profile = Some("work".into());
+    assert_eq!(normalize_launch(&mut args).unwrap_err().code, E_INVALID);
+    let mut args = args_named("dev-z", None);
+    args.agent = Some("hermes".into());
+    args.kind = Some("shell".into());
+    assert_eq!(normalize_launch(&mut args).unwrap_err().code, E_INVALID);
+}
+
+/// A new Hermes session starts bare (Hermes names its own session), and a
+/// relaunch resumes by id, or the cwd's newest Hermes session, never Claude.
+#[test]
+fn a_hermes_session_launches_hermes() {
+    use super::lifecycle::claude_id_and_pane_cmd;
+    let mut args = args_named("dev-hm", None);
+    args.agent = Some("hermes".into());
+    args.model = Some("anthropic/claude-sonnet-5".into());
+    let (id, pane) = claude_id_and_pane_cmd(&args);
+    assert_eq!(id, None);
+    assert!(
+        pane.contains("hermes chat --cli --yolo -m 'anthropic/claude-sonnet-5'; exec"),
+        "{pane}"
+    );
+    let id = "20261103_152210_a1b2c3";
+    let pane = recreate_pane_command("work", "hermes", Some(id), "dev-hm", &Default::default());
+    assert!(
+        pane.contains(&format!("hermes chat --cli --yolo --resume '{id}'")),
+        "{pane}"
+    );
+    let pane = recreate_pane_command("work", "hermes", None, "dev-hm", &Default::default());
+    assert!(
+        pane.contains("state.db") && !pane.contains("cl --"),
+        "{pane}"
+    );
 }
 
 /// A new Codex session starts bare (Codex names its own conversation, so

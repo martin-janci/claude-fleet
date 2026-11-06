@@ -276,6 +276,7 @@ pub fn agent_name(bin: &str) -> &str {
         "claude" => "Claude Code",
         "codex" => "Codex",
         "agy" => "Agy",
+        "hermes" => "Hermes",
         "gemini" => "Gemini CLI",
         other => other,
     }

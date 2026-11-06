@@ -122,9 +122,10 @@ pub use agent_records::{
     AGENT_RECORD_VALUE_MAX,
 };
 pub use agents::{
-    AgentActionRow, AgentCursorRow, AgentJobEnd, AgentJobRow, AgentRuleRow, NewAgentJob,
-    NewAgentRule, AGENT_ACTION_STATES, AGENT_BINDINGS_MAX_CHARS, AGENT_CONFIG_MAX_CHARS,
-    AGENT_DEFINITION_MAX_CHARS, AGENT_JOB_STATES, AGENT_KINDS, AGENT_LEVELS, AGENT_SCOPE_MAX_CHARS,
+    ActionOrigin, AgentActionRow, AgentCursorRow, AgentJobEnd, AgentJobRow, AgentRuleRow,
+    NewAgentJob, NewAgentRule, AGENT_ACTION_STATES, AGENT_BINDINGS_MAX_CHARS,
+    AGENT_CONFIG_MAX_CHARS, AGENT_DEFINITION_MAX_CHARS, AGENT_JOB_STATES, AGENT_KINDS,
+    AGENT_LEVELS, AGENT_SCOPE_MAX_CHARS,
 };
 pub use autofix::{AutofixBudget, AutofixRow, NewAutofixFinding, AUTOFIX_LIVE};
 pub use aux_usage::{

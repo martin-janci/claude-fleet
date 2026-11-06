@@ -78,6 +78,27 @@ export const sessionView = writable<SessionView>(
 );
 sessionView.subscribe((v) => writePref('ui.sessionView', v));
 
+/**
+ * Which parts of Control's Session tab are folded open, so the person picks
+ * what takes the room and the conversation is not squeezed to nothing
+ * (2026-11-06). `auto` is "not chosen yet": the siblings strip opens while
+ * it is short (`SIBLINGS_AUTO_OPEN` chips or fewer) and folds when it is
+ * long. Running missions start open. A fold the person toggles is kept
+ * across restarts.
+ */
+export type FoldPref = 'auto' | 'open' | 'closed';
+const isFoldPref = (v: unknown): v is FoldPref => v === 'auto' || v === 'open' || v === 'closed';
+export const SIBLINGS_AUTO_OPEN = 6;
+export const siblingsFold = writable<FoldPref>(readPref<FoldPref>('ui.panel.siblings', 'auto', isFoldPref));
+siblingsFold.subscribe((v) => writePref('ui.panel.siblings', v));
+export const runningMissionsFold = writable<FoldPref>(readPref<FoldPref>('ui.panel.missions', 'open', isFoldPref));
+runningMissionsFold.subscribe((v) => writePref('ui.panel.missions', v));
+
+/** Whether a fold is open: `auto` opens it while it holds `n` ≤ `limit` items. */
+export function foldOpen(pref: FoldPref, n: number, limit: number = SIBLINGS_AUTO_OPEN): boolean {
+  return pref === 'open' || (pref === 'auto' && n <= limit);
+}
+
 // ─── Retired layout pref ─────────────────────────────────────────────────
 
 // Step 13.1 removed the Classic layout, and with it the Classic/New switch

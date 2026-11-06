@@ -49,4 +49,39 @@ describe('AgentActions', () => {
     await vi.waitFor(() => expect(a).not.toBeDisabled());
     expect(b).toBeDisabled();
   });
+
+  it('folds one agent\'s repeats of a write into one card that names each item', async () => {
+    const call = (id: number, key: string) => ({
+      ...action(id),
+      kind: 'mcp_call',
+      payload: JSON.stringify({ binding: 'jira', tool: 'jira_update_issue', arguments: { issue_key: key }, body: 'x' }),
+    });
+    const about = (id: number, key: string) => ({
+      id,
+      rule_id: 4,
+      from: 'jira-triage · PD board',
+      subject: 'a scheduled run',
+      title: `Jira: update issue ${key} (status)`,
+      what: 'Jira: update issue',
+      group: '4:mcp_call:jira_update_issue',
+    });
+    agents.set({
+      rules: [],
+      jobs: [],
+      pending: [call(1, 'PD-1'), call(2, 'PD-2'), action(3)],
+      pending_about: [about(1, 'PD-1'), about(2, 'PD-2')],
+    });
+    render(AgentActions);
+    await tick();
+    const group = screen.getByTestId('agent-action-group');
+    expect(group.textContent).toContain('2 proposals: Jira: update issue');
+    expect(group.textContent).toContain('from jira-triage · PD board');
+    expect(screen.getByTestId('agent-group-approve').textContent).toContain('Approve all 2');
+    // The other proposal stays a card of its own.
+    expect(screen.getAllByTestId('agent-action')).toHaveLength(1);
+    await fireEvent.click(screen.getByTestId('agent-group-show'));
+    const items = screen.getByTestId('agent-group-items');
+    expect(items.textContent).toContain('Jira: update issue PD-1 (status)');
+    expect(items.textContent).toContain('on a scheduled run');
+  });
 });

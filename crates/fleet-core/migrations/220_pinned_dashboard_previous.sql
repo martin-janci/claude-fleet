@@ -8,4 +8,4 @@
 ALTER TABLE pinned_dashboards ADD COLUMN previous_spec TEXT;
 ALTER TABLE pinned_dashboards ADD COLUMN previous_device TEXT;
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (219);
+INSERT OR IGNORE INTO schema_version (version) VALUES (220);

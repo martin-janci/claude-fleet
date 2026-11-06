@@ -226,6 +226,7 @@ const AGENTS: readonly { bin: string; name: string }[] = [
   { bin: "claude", name: "Claude Code" },
   { bin: "codex", name: "Codex" },
   { bin: "agy", name: "Agy" },
+  { bin: "hermes", name: "Hermes" },
   { bin: "gemini", name: "Gemini CLI" },
 ];
 

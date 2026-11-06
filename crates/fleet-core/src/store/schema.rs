@@ -412,7 +412,7 @@ fn routine_runs_has_memory_read_at(conn: &Connection) -> rusqlite::Result<bool> 
     Ok(n > 0)
 }
 
-/// `already_applied` guard of migration 219: `pinned_dashboards` already
+/// `already_applied` guard of migration 220: `pinned_dashboards` already
 /// has its `previous_spec` column.
 fn pinned_dashboards_have_previous(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
@@ -2539,11 +2539,17 @@ const MIGRATIONS: &[Migration] = &[
         218,
         include_str!("../../migrations/218_account_org_blocks.sql"),
     ),
+    // Hermes Agent sessions: `sessions.agent`'s CHECK admits `hermes`.
+    // Rewrites the stored CHECK in place; idempotent, so plain.
+    Migration::plain(
+        219,
+        include_str!("../../migrations/219_session_agent_hermes.sql"),
+    ),
     // A pinned dashboard's version before its last replacement, for Undo
     // of a change Control made. ADD COLUMNs, so guarded.
     Migration {
-        version: 219,
-        sql: include_str!("../../migrations/219_pinned_dashboard_previous.sql"),
+        version: 220,
+        sql: include_str!("../../migrations/220_pinned_dashboard_previous.sql"),
         already_applied: Some(pinned_dashboards_have_previous),
     },
 ];
