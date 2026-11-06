@@ -1881,9 +1881,9 @@ describe('ConversationPanel live indicator', () => {
       visible: true,
     });
     await settle();
-    await fireEvent.click(screen.getAllByTestId('answer-option')[1]);
+    await fireEvent.click(screen.getAllByTestId('answer-option')[2]);
     await settle();
-    expect(mockedSend).toHaveBeenCalledWith('local', 'ctl', '', { keys: '2' });
+    expect(mockedSend).toHaveBeenCalledWith('local', 'ctl', '', { keys: '3' });
   });
 
   it('a blocked row whose dialog the probe no longer sees falls back to the banner', async () => {
@@ -1925,7 +1925,7 @@ describe('ConversationPanel live indicator', () => {
       expect(card.querySelector('.of-btn.primary')).toBeNull();
       expect(screen.getAllByTestId('answer-option').map((b) => b.textContent?.trim())).toEqual([
         '1Yes',
-        "2Yes, and don't ask again",
+        "2Yes, and don't ask again…",
         '3No, and tell Claude what to do differently',
       ]);
 
