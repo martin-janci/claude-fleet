@@ -78,10 +78,10 @@ pub struct DashboardsArgs {
     /// pin: why, one line.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub why: Option<String>,
-    /// feed: its key.
+    /// feed key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
-    /// feed: the text to show; empty removes it.
+    /// feed: text; empty removes it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<String>,
 }

@@ -213,7 +213,7 @@ Parameters (* required): `action`*, `chosen`, `run_id`, `text`
 
 ### `dashboards`
 
-The person's pinned dashboards (`dashboard` blocks): list | get {id} | pin {dashboard, why?} | unpin {id} | undo {id} | feeds | feed {key, value} (what a feed widget shows; empty value removes it). The agent pins and feeds; unpin and undo are a person's (E_FORBIDDEN).
+The person's pinned dashboards (`dashboard` blocks): list | get {id} | pin {dashboard, why?} | unpin {id} | undo {id} | feeds | feed {key, value}. Agent pins, feeds; unpin and undo are a person's (E_FORBIDDEN).
 
 Access: the master or a paired device; not a per-host token · deadline 60 s.
 

@@ -15,9 +15,8 @@ use crate::service::operator::OPERATOR_CLIENT_NAME;
 impl FleetTools {
     #[tool(description = "The person's pinned dashboards (`dashboard` \
         blocks): list | get {id} | pin {dashboard, why?} | unpin {id} | \
-        undo {id} | feeds | feed {key, value} (what a feed widget shows; \
-        empty value removes it). The agent pins and feeds; unpin and undo \
-        are a person's (E_FORBIDDEN).")]
+        undo {id} | feeds | feed {key, value}. Agent pins, feeds; unpin \
+        and undo are a person's (E_FORBIDDEN).")]
     pub(super) async fn dashboards(
         &self,
         Extension(caller): Extension<Caller>,
