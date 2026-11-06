@@ -318,3 +318,100 @@ fn a_pin_and_an_unpin_tell_the_persons_devices_with_an_empty_frame() {
         json!({})
     );
 }
+
+fn feed_args(key: &str, value: &str) -> DashboardsArgs {
+    DashboardsArgs {
+        action: "feed".into(),
+        key: Some(key.into()),
+        value: Some(value.into()),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn a_feed_is_written_by_control_or_the_person_and_read_by_them_only() {
+    let st = store();
+    let (ada, bob) = people(&st);
+    let desk = device(&st, ada, "Ada's Mac");
+    let theirs = device(&st, bob, "Bob's Mac");
+    let w = run(
+        &st,
+        &desk,
+        &feed_args("deploys", "  3 today  "),
+        Some(OPERATOR_CLIENT_NAME),
+        false,
+    )
+    .unwrap();
+    assert_eq!(w["value"], "3 today");
+    assert_eq!(w["by"], "agent");
+    run(&st, &desk, &feed_args("deploys", "4 today"), None, true).unwrap();
+    let mine = feeds(&st, &desk).unwrap();
+    assert_eq!(mine.len(), 1);
+    assert_eq!(
+        (mine[0].value.as_str(), mine[0].by.as_str()),
+        ("4 today", "person")
+    );
+    assert!(feeds(&st, &theirs).unwrap().is_empty());
+    // An empty value removes it.
+    assert_eq!(
+        run(&st, &desk, &feed_args("deploys", " "), None, true).unwrap(),
+        json!(null)
+    );
+    assert!(feeds(&st, &desk).unwrap().is_empty());
+    for bad in ["", "has space", "quote\"d"] {
+        let e = run(&st, &desk, &feed_args(bad, "x"), None, true).unwrap_err();
+        assert_eq!(e.code, codes::E_INVALID, "{bad:?}");
+    }
+}
+
+#[test]
+fn a_feed_value_is_cut_and_the_feeds_stop_at_the_limit() {
+    let st = store();
+    let me = ViewScope::internal();
+    let long = "x".repeat(FEED_VALUE_MAX_CHARS + 10);
+    let w = feed(&st, &me, &feed_args("long", &long), true)
+        .unwrap()
+        .unwrap();
+    assert_eq!(w.value.chars().count(), FEED_VALUE_MAX_CHARS);
+    for i in 1..MAX_FEEDS {
+        feed(&st, &me, &feed_args(&format!("k{i}"), "1"), true).unwrap();
+    }
+    let e = feed(&st, &me, &feed_args("one.more", "1"), true).unwrap_err();
+    assert!(e.message.contains("feeds are kept"), "{}", e.message);
+    // Rewriting one already kept still works when full.
+    feed(&st, &me, &feed_args("k1", "2"), true).unwrap();
+}
+
+#[test]
+fn a_routine_reply_names_its_feeds_in_blocks() {
+    let reply = "Done.\n<dashboard-feed key=\"deploys\">\n3 today\n</dashboard-feed>\n\
+                 The tag is `<dashboard-feed key=\"x\">no</dashboard-feed>`.\n\
+                 <dashboard-feed>no key</dashboard-feed>\
+                 <dashboard-feed key=\"bad key\">no</dashboard-feed>\
+                 <dashboard-feed key=\"ci:main\">green</dashboard-feed>";
+    assert_eq!(
+        feed_blocks(reply),
+        vec![
+            ("deploys".to_string(), "3 today".to_string()),
+            ("ci:main".to_string(), "green".to_string()),
+        ]
+    );
+    assert!(feed_blocks("<dashboard-feed key=\"open\">never closed").is_empty());
+}
+
+#[test]
+fn a_feed_write_tells_the_persons_devices() {
+    let bus = std::sync::Arc::new(crate::events::RecordingEventBus::new());
+    let st = Mutex::new(Store::open_with_bus_in_memory(bus.clone()).unwrap());
+    let me = ViewScope::internal();
+    feed(&st, &me, &feed_args("k", "1"), false).unwrap();
+    feed(&st, &me, &feed_args("k", ""), true).unwrap();
+    // Removing what is not there says nothing.
+    feed(&st, &me, &feed_args("k", ""), true).unwrap();
+    let n = bus
+        .names()
+        .iter()
+        .filter(|n| **n == "dashboards:changed")
+        .count();
+    assert_eq!(n, 2);
+}

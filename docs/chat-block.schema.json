@@ -846,6 +846,16 @@
               "$ref": "#/$defs/DashQuery",
               "default": {}
             },
+            "sources": {
+              "description": "What it reads: work, sessions, hosts, accounts, feeds (default\nwork).",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "string"
+              }
+            },
             "title": {
               "type": "string"
             }
@@ -854,6 +864,64 @@
             "kind",
             "title",
             "prompt"
+          ]
+        },
+        {
+          "description": "The value written last to feed `key` (`dashboards { feed }`, or a\nroutine's `<dashboard-feed key=\"…\">` reply block); never computed.",
+          "type": "object",
+          "properties": {
+            "key": {
+              "description": "The feed's key: letters, digits and . _ : -.",
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "feed"
+            },
+            "show": {
+              "description": "text (default) or stat.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "title",
+            "key"
+          ]
+        },
+        {
+          "description": "The fleet's own rows: sessions by state, hosts reachable, accounts'\nusage.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "fleet"
+            },
+            "show": {
+              "description": "stat (default) or list.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "source": {
+              "description": "sessions, hosts or accounts.",
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "title",
+            "source"
           ]
         }
       ]

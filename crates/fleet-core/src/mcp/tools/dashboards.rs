@@ -1,8 +1,9 @@
 //! MCP tool: dashboards (persona design step 6, `service::dashboards`).
 //! The dashboards a person pinned from a `dashboard` block, kept on the
 //! hub so every device of theirs shows them. The agent (Control's
-//! operator) reads them and pins the change a person asked it for; only a
-//! person unpins or undoes a change. A per-host token
+//! operator) reads them and pins the change a person asked it for, and
+//! writes the feeds `feed` widgets show; only a person unpins or undoes a
+//! change. A per-host token
 //! is not served it (`NOT_FOR_HOST_TOKENS`).
 
 use super::*;
@@ -14,8 +15,9 @@ use crate::service::operator::OPERATOR_CLIENT_NAME;
 impl FleetTools {
     #[tool(description = "The person's pinned dashboards (`dashboard` \
         blocks): list | get {id} | pin {dashboard, why?} | unpin {id} | \
-        undo {id}. The agent pins; unpin and undo are a person's \
-        (E_FORBIDDEN).")]
+        undo {id} | feeds | feed {key, value} (what a feed widget shows; \
+        empty value removes it). The agent pins and feeds; unpin and undo \
+        are a person's (E_FORBIDDEN).")]
     pub(super) async fn dashboards(
         &self,
         Extension(caller): Extension<Caller>,

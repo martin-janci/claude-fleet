@@ -22,7 +22,7 @@ import type { FormField, FormSpec } from './forms/forms';
 import { CHAT_WIZARD_IDS, type ChatWizardId } from './forms/chat_wizard_ids';
 import { fenceOpen, isClosingFence } from './markdown';
 import { HANDOVER_BEGIN, handoverMarker, parseHandover, type Handover } from './handover';
-import type { Dashboard, Widget } from './dashboards';
+import type { Dashboard, SummarySource, Widget } from './dashboards';
 import { HAS_FILTERS, STATUS_FILTERS, WORK_GROUP_BY, WORK_STAGES } from './work_view';
 
 export const UI_SPEC = 'fleet.ui/1';
@@ -688,7 +688,13 @@ function checkForm(v: unknown, p: Problems): FormSpec | null {
 
 // ── A dashboard's widgets (persona design, step 5; chat_blocks.rs `widget`) ─
 
-export const DASH_WIDGET_KINDS = ['stat', 'groups', 'buckets', 'burnup', 'summary'] as const;
+export const DASH_WIDGET_KINDS = ['stat', 'groups', 'buckets', 'burnup', 'summary', 'feed', 'fleet'] as const;
+/** What a `fleet` widget counts (`DASH_FLEET_SOURCES`). */
+export const DASH_FLEET_SOURCES = ['sessions', 'hosts', 'accounts'] as const;
+export const DASH_FLEET_SHOWS = ['stat', 'list'] as const;
+export const DASH_FEED_SHOWS = ['text', 'stat'] as const;
+/** What a summary widget reads besides the work's counts (`DASH_SUMMARY_SOURCES`). */
+export const DASH_SUMMARY_SOURCES = ['work', 'sessions', 'hosts', 'accounts', 'feeds'] as const;
 /** A summary widget's longest request (`DASH_SUMMARY_PROMPT_MAX`). */
 export const DASH_SUMMARY_PROMPT_MAX = 500;
 /** A burn-up's longest window (`BURNUP_MAX_DAYS` in stats.rs). */
@@ -805,7 +811,23 @@ function dashWidget(o: Record<string, unknown>, p: Problems, at: string): Widget
     }
     case 'summary': {
       const prompt = str(o, 'prompt', p, at, { required: true, max: DASH_SUMMARY_PROMPT_MAX }) ?? '';
-      return { kind, title, query, prompt };
+      const list = optArr(o, 'sources', p, at, 1, DASH_SUMMARY_SOURCES.length);
+      const sources = list?.filter((x, j) => {
+        const ok = typeof x === 'string' && (DASH_SUMMARY_SOURCES as readonly string[]).includes(x);
+        if (!ok) p.add(`${at} › source ${j + 1}`, `must be one of ${DASH_SUMMARY_SOURCES.join(', ')}`);
+        return ok;
+      }) as SummarySource[] | undefined;
+      return { kind, title, query, prompt, ...(sources ? { sources } : {}) };
+    }
+    case 'feed': {
+      const k = key(o, 'key', p, at);
+      const show = oneOf(o, 'show', p, at, DASH_FEED_SHOWS, 'text') ?? 'text';
+      return { kind, title, key: k, ...(o.show !== undefined && o.show !== null ? { show } : {}) };
+    }
+    case 'fleet': {
+      const source = oneOf(o, 'source', p, at, DASH_FLEET_SOURCES) ?? 'sessions';
+      const show = oneOf(o, 'show', p, at, DASH_FLEET_SHOWS, 'stat') ?? 'stat';
+      return { kind, title, source, ...(o.show !== undefined && o.show !== null ? { show } : {}) };
     }
     default:
       return null;

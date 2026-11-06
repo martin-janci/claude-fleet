@@ -4431,3 +4431,38 @@ async fn the_scheduler_tick_reads_a_finished_runs_reply_into_its_notebook() {
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
 }
+
+// ---- dashboard feeds (migration 221) ---------------------------------------
+
+#[tokio::test]
+async fn a_routine_that_writes_a_dashboard_feed_has_its_reply_read_for_it() {
+    let f = fx();
+    let mut i = input(&f);
+    i.prompt =
+        "Count today's deploys; answer with <dashboard-feed key=\"deploys\">N</dashboard-feed>."
+            .into();
+    i.overlap = Some("parallel".into());
+    let r = new_routine(&f, i);
+    assert!(r.memory.is_none() && !r.track_seen);
+    let run = finished_run(&f, &r, OCT8).await;
+    let at = run.finished_at.unwrap() + 1;
+    let s = lock(&f.store).unwrap();
+    let unread = s
+        .routine_runs_memory_unread(at - memory::READ_WITHIN_SECS, at, 10)
+        .unwrap();
+    assert_eq!(
+        unread.len(),
+        1,
+        "a feed's routine is read without a notebook"
+    );
+    let reply = [
+        "<dashboard-feed key=\"deploys\">2</dashboard-feed>".to_string(),
+        "Done: <dashboard-feed key=\"deploys\">3</dashboard-feed>".to_string(),
+    ];
+    memory::apply(&s, &r, &run, Ok(&reply), at).unwrap();
+    let feeds = s.dashboard_feeds(r.owner_person_id).unwrap();
+    assert_eq!(feeds.len(), 1);
+    assert_eq!(feeds[0].value, "3", "the last block of a key wins");
+    assert_eq!(feeds[0].by, "routine");
+    assert_eq!(feeds[0].by_ref.as_deref(), Some(r.name.as_str()));
+}

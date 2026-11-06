@@ -506,6 +506,7 @@ pub fn apply(
         if let Err(e) = super::seen::apply(s, r, run, texts, now) {
             tracing::warn!(run = run.id, error = %e.message, "[routines] run's seen items not recorded");
         }
+        apply_feeds(s, r, run, texts, now);
     }
     s.mark_routine_run_memory_read(run.id, now)?;
     for w in &written {
@@ -527,6 +528,44 @@ pub fn apply(
         );
     }
     Ok(written)
+}
+
+/// The dashboard feeds a run's reply writes (`<dashboard-feed key="…">`,
+/// migration 221): each key's last block wins, written as the routine
+/// owner's, by `routine`. A feed that cannot be written is said in the
+/// run's trace, not failed.
+fn apply_feeds(s: &Store, r: &RoutineRow, run: &RoutineRunRow, texts: &[String], now: i64) {
+    let mut latest: Vec<(String, String)> = Vec::new();
+    for t in texts {
+        for (key, value) in crate::service::dashboards::feed_blocks(t) {
+            latest.retain(|(k, _)| *k != key);
+            latest.push((key, value));
+        }
+    }
+    for (key, value) in latest {
+        let summary = match crate::service::dashboards::write_feed(
+            s,
+            r.owner_person_id,
+            &key,
+            &value,
+            "routine",
+            Some(&r.name),
+            now,
+        ) {
+            Ok(Some(_)) => format!("Its reply wrote the dashboard feed {key}"),
+            Ok(None) => format!("Its reply cleared the dashboard feed {key}"),
+            Err(e) => format!(
+                "Its reply's dashboard feed {key} was not written: {}",
+                clip(&e.message, NOTE_SUMMARY_MAX)
+            ),
+        };
+        trace::write_one(
+            s,
+            run.id,
+            Step::new(now, "outcome", "feed", "hub", summary)
+                .data(serde_json::json!({ "key": key })),
+        );
+    }
 }
 
 /// PURE: the reply texts of `conv`, oldest first: what Claude wrote, never

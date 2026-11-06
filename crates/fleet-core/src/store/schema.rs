@@ -2552,6 +2552,12 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/220_pinned_dashboard_previous.sql"),
         already_applied: Some(pinned_dashboards_have_previous),
     },
+    // Dashboard feeds: the values `feed` widgets show, written by Control,
+    // the person or a routine's run. CREATE TABLE IF NOT EXISTS, so plain.
+    Migration::plain(
+        221,
+        include_str!("../../migrations/221_dashboard_feeds.sql"),
+    ),
 ];
 
 /// The settings row [`Store::finish_realm_upgrade`] writes once migration

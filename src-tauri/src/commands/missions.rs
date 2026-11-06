@@ -220,6 +220,9 @@ pub struct DashboardSummaryArgs {
     pub prompt: String,
     #[serde(default)]
     pub filters: Option<serde_json::Value>,
+    /// What else the widget reads: the page's fleet data and feeds.
+    #[serde(default)]
+    pub context: Option<serde_json::Value>,
 }
 
 /// `mission_triage` (redesign 9.10): a stuck mission's card, its words
@@ -943,6 +946,7 @@ pub(crate) mod routed {
         let wire = WorkLinkArgs {
             prompt: Some(args.prompt),
             filters: args.filters,
+            context: args.context,
             ..write("dashboard_summary", None)
         };
         match backend.hub() {
