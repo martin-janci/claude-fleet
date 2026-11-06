@@ -414,3 +414,67 @@ async fn a_release_note_never_runs_on_another_orgs_host() {
         .unwrap();
     assert_eq!(booked, 0, "nothing ran");
 }
+
+#[test]
+fn a_summary_widgets_prompt_carries_the_request_and_the_counts() {
+    let stats = crate::service::work::stats::stats_of(&[], "group", 1_760_000_000);
+    let (prompt, from) = dashboard_summary_prompt("  What blocks the release?  ", &stats);
+    assert!(prompt.starts_with(DASHBOARD_SUMMARY_PROMPT), "{prompt}");
+    assert!(
+        prompt.contains("The person's request: What blocks the release?\n"),
+        "{prompt}"
+    );
+    assert!(prompt.contains("\"total\": 0"), "{prompt}");
+    assert_eq!(from, "0 tasks");
+}
+
+/// A summary widget runs only with a request, refuses a long one and
+/// filters that are not the Work view's, and with no session today has no
+/// host: nothing is booked.
+#[tokio::test]
+async fn a_summary_widget_needs_a_request_and_a_host() {
+    let (deps, me, _) = fixture("summary-reader");
+    let ask = |prompt: Option<&str>, filters: Option<serde_json::Value>| WorkLinkArgs {
+        action: "dashboard_summary".into(),
+        prompt: prompt.map(str::to_string),
+        filters,
+        ..Default::default()
+    };
+    let err = dashboard_summary(&ask(None, None), &deps, &me)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, codes::E_INVALID);
+    let long = "x".repeat(SUMMARY_REQUEST_MAX_CHARS + 1);
+    let err = dashboard_summary(&ask(Some(&long), None), &deps, &me)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, codes::E_INVALID);
+    let err = dashboard_summary(
+        &ask(
+            Some("How is it going?"),
+            Some(serde_json::json!({ "status": 3 })),
+        ),
+        &deps,
+        &me,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.code, codes::E_INVALID, "{}", err.message);
+    let err = dashboard_summary(
+        &ask(
+            Some("How is it going?"),
+            Some(serde_json::json!({ "status": "open" })),
+        ),
+        &deps,
+        &me,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.code, codes::E_INVALID_STATE, "{}", err.message);
+    let booked: i64 = lock(&deps.store)
+        .unwrap()
+        .conn_for_test()
+        .query_row("SELECT COUNT(*) FROM aux_usage", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(booked, 0);
+}

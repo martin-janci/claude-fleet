@@ -23,6 +23,7 @@ export type RunKind =
   | 'triage'
   | 'context_help'
   | 'headless_check'
+  | 'dashboard_summary'
   | 'routine'
   | 'review'
   | 'support';

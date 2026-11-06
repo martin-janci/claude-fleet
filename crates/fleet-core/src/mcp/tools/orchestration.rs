@@ -1587,7 +1587,8 @@ impl FleetTools {
         since?}: Today's morning brief, drafted only on refresh; \
         mission_triage {mission_id, refresh?}: a stuck mission's card, Jev's \
         proposed outcome and next step (never applied), and with refresh its \
-        drafted words. \
+        drafted words; dashboard_summary {prompt, filters?}: a model's answer \
+        from those counts. \
         Work view: \
         primary:false links a secondary; expected_* guard (E_CONFLICT). \
         place {task_id|item_id, group, note?, expected_version}: group a \
@@ -2581,6 +2582,22 @@ impl FleetTools {
             let view_scope = self.view_scope(&caller)?;
             return ok_json(
                 &crate::service::work::orchestrate::drafts::brief(
+                    &args,
+                    &self.mission_deps(),
+                    &view_scope,
+                )
+                .await
+                .map_err(to_mcp_err)?,
+            );
+        }
+        // A dashboard's summary widget (owner report 2026-11-06): the
+        // person's request over their own counts, run when they press
+        // Write or Refresh.
+        if args.action == "dashboard_summary" {
+            mission_caller(&caller)?;
+            let view_scope = self.view_scope(&caller)?;
+            return ok_json(
+                &crate::service::work::orchestrate::drafts::dashboard_summary(
                     &args,
                     &self.mission_deps(),
                     &view_scope,

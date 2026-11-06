@@ -16,6 +16,8 @@ export interface Draft {
   /** Unix seconds. */
   at: number;
   truncated?: boolean;
+  /** What the run cost, micro-USD, when claude reported it. */
+  cost_micros?: number | null;
 }
 
 export interface Brief {
@@ -30,6 +32,13 @@ export function draftReleaseNote(missionId: number): Promise<Result<Draft>> {
 /** The brief drafted last (`refresh: false`, runs nothing) or a new one. */
 export function todayBrief(refresh: boolean, since: number = localMidnight()): Promise<Result<Brief>> {
   return invokeCmd<Brief>('today_brief', { args: { refresh, since } });
+}
+
+/** A dashboard summary widget's text: `prompt` answered over the counts
+ *  of `filters`, written on the hub (`work_link dashboard_summary`). Runs
+ *  every call; the widget calls it only on Write or Refresh. */
+export function dashboardSummary(prompt: string, filters: Record<string, unknown>): Promise<Result<Draft>> {
+  return invokeCmd<Draft>('dashboard_summary', { args: { prompt, filters } });
 }
 
 /**

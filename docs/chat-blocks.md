@@ -363,6 +363,17 @@ Each widget has a `kind`, a `title` (≤ 80) and a `query`:
   the tasks' status history (`work { stats, since }`). History starts the
   day the hub began keeping it; a task older than that counts for the whole
   window in its stage now.
+- `{ "kind": "summary", "title", "prompt", "query"? }`: a few lines a model
+  writes over the query's counts, answering `prompt` (the person's request,
+  ≤ 500 chars: "what blocks the release, in three lines"). It is never
+  written on open: *Write* (then *Refresh*) asks the hub
+  (`work_link { dashboard_summary, prompt, filters }`), which reads the
+  counts under the person's access, runs `work.summary_model` on the host
+  a morning brief would use (their latest session today on a host that may
+  see the org) and books it as `dashboard_summary`. The widget shows the
+  text with when, which model on which host and what it cost, and keeps
+  the last one on that device; a changed `prompt` starts empty. The model
+  sees only the counts, never a task's text.
 
 A `query` is the Work view's filters (`work { tree }`'s `filters`): `org`
 (an id or `none`), `status` (`any`, `open`, `todo`, `in_progress`, `done`),

@@ -98,6 +98,15 @@ export type StatValue = 'total' | 'open' | 'needs_you' | 'pct_done' | 'cost' | S
 
 export type Widget =
   | {
+      /** A model's few lines over the query's counts, answering `prompt`;
+       *  written only on Write or Refresh (`work_link dashboard_summary`). */
+      kind: 'summary';
+      title: string;
+      query: WorkTreeFilters;
+      /** What to write, in the person's words; at most 500 characters. */
+      prompt: string;
+    }
+  | {
       kind: 'stat';
       title: string;
       query: WorkTreeFilters;
@@ -246,12 +255,20 @@ export interface StatsAsk {
 export function dashboardQueries(d: Dashboard): Map<string, StatsAsk> {
   const out = new Map<string, StatsAsk>();
   for (const w of d.widgets) {
+    // A summary widget's counts are read by the hub that writes it.
+    if (w.kind === 'summary') continue;
     // Archived work counts: a done task is still done.
     const filters: WorkTreeFilters = { archived: true, ...w.query };
     const days = burnupDaysOf(w);
     out.set(widgetKey(w), days === undefined ? { filters } : { filters, days });
   }
   return out;
+}
+
+/** Where a summary widget keeps the text it was written last, per device:
+ *  the dashboard and the widget's title. */
+export function summaryKey(dashId: string, title: string): string {
+  return `ui.dashboards.summary.${dashId}|${title}`;
 }
 
 /** A burn-up's start for `days` days ending today, as `work_stats` takes

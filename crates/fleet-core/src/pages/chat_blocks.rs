@@ -68,7 +68,10 @@ pub const RESULT_CHARTS: &[&str] = &["line", "bar", "sparkline"];
 const RESULT_ITEM_TYPES: &[&str] = &["stat", "chart", "table"];
 /// What a `dashboard` block's widgets are (persona design, step 5): the
 /// widgets of `src/lib/dashboards.ts`, drawn from `work { stats }`.
-pub const DASH_WIDGET_KINDS: &[&str] = &["stat", "groups", "buckets", "burnup"];
+pub const DASH_WIDGET_KINDS: &[&str] = &["stat", "groups", "buckets", "burnup", "summary"];
+/// A summary widget's longest request (`SUMMARY_REQUEST_MAX_CHARS` in
+/// work/orchestrate/drafts.rs).
+pub const DASH_SUMMARY_PROMPT_MAX: usize = 500;
 /// A burn-up's longest window (`BURNUP_MAX_DAYS` in service/work/stats.rs).
 pub const DASH_BURNUP_MAX_DAYS: u32 = 90;
 /// The Work view's stages (`WORK_STAGES` in work_view.ts).
@@ -355,6 +358,15 @@ pub enum DashWidget {
         /// Only buckets in these states: planned, active, closed, released.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         states: Option<Vec<String>>,
+    },
+    /// A model's few lines over the query's counts, answering `prompt`;
+    /// written only when the person presses Write or Refresh.
+    Summary {
+        title: String,
+        /// What to write, in the person's words.
+        prompt: String,
+        #[serde(default)]
+        query: DashQuery,
     },
 }
 
@@ -762,6 +774,9 @@ fn dash_widget(p: &mut Problems, o: &Map<String, Value>, at: &str) {
             if let Some(states) = p.opt_arr(o, "states", at, 1, DASH_BUCKET_STATES.len()) {
                 p.one_of_each(&states, &format!("{at} › state"), DASH_BUCKET_STATES);
             }
+        }
+        Some("summary") => {
+            p.str(o, "prompt", at, true, DASH_SUMMARY_PROMPT_MAX);
         }
         Some("burnup") => {
             let days = p.num(o, "days", at, 2);

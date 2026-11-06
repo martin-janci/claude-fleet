@@ -13618,6 +13618,12 @@ const WORK_ACTION_NO_GATE: &[(&str, &str, &str)] = &[
          drafted only on refresh, written to no session",
     ),
     (
+        "work_link",
+        "dashboard_summary",
+        "a model's text over the caller's own scoped work stats; text comes \
+         back, nothing is written to a session or a row",
+    ),
+    (
         "work",
         "purge_impact",
         "answers keys only (`PurgeImpact { keys }`), never a session row",
