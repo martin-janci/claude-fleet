@@ -4452,9 +4452,10 @@ async fn a_routine_that_writes_a_dashboard_feed_has_its_reply_read_for_it() {
     let unread = s
         .routine_runs_memory_unread(at - memory::READ_WITHIN_SECS, at, 10)
         .unwrap();
-    assert_eq!(
-        unread.len(),
-        1,
+    // The scheduler's own pass may already have read it (and found no
+    // reply in the fake): either way it was picked for reading.
+    assert!(
+        unread.len() == 1 || s.routine_run_memory_read_at(run.id).is_some(),
         "a feed's routine is read without a notebook"
     );
     let reply = [
