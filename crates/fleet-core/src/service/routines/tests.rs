@@ -4432,7 +4432,7 @@ async fn the_scheduler_tick_reads_a_finished_runs_reply_into_its_notebook() {
     }
 }
 
-// ---- dashboard feeds (migration 221) ---------------------------------------
+// ---- dashboard feeds (migration 222) ---------------------------------------
 
 #[tokio::test]
 async fn a_routine_that_writes_a_dashboard_feed_has_its_reply_read_for_it() {

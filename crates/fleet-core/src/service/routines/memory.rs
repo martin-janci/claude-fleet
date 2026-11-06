@@ -531,7 +531,7 @@ pub fn apply(
 }
 
 /// The dashboard feeds a run's reply writes (`<dashboard-feed key="…">`,
-/// migration 221): each key's last block wins, written as the routine
+/// migration 222): each key's last block wins, written as the routine
 /// owner's, by `routine`. A feed that cannot be written is said in the
 /// run's trace, not failed.
 fn apply_feeds(s: &Store, r: &RoutineRow, run: &RoutineRunRow, texts: &[String], now: i64) {

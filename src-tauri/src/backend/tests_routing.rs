@@ -4024,6 +4024,26 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
             }),
         ),
         (
+            "worktree_setup",
+            "work_link",
+            json!({ "session_id": null, "action": "worktree_setup", "key": null, "item_id": null,
+                    "link_id": null, "source": null, "project_id": 7,
+                    "command": "pnpm install", "globs": [".env"] }),
+            r#"{"project_id":7,"project":"o/r","copy":[".env"],"command":"pnpm install"}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::worktree_setup(
+                    b,
+                    commands::work::WorktreeSetupArgs {
+                        project_id: 7,
+                        copy: Some(vec![".env".into()]),
+                        command: Some("pnpm install".into()),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "set_ticket_check",
             "work_link",
             json!({ "session_id": null, "action": "check_setup", "key": null, "item_id": null,

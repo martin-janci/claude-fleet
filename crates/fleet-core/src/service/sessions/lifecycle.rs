@@ -1208,6 +1208,9 @@ pub(super) async fn new_session_inner(
         &pane_cmd,
     )
     .await?;
+    // The checkout a brand-new worktree was made from: its project's new
+    // worktree setup copies from it (`worktree_setup`).
+    let mut setup_base: Option<String> = None;
     let path: PathBuf = if let Some(p) = fixed.clone() {
         PathBuf::from(p)
     } else if args.host_alias == "local" {
@@ -1217,9 +1220,9 @@ pub(super) async fn new_session_inner(
                 let s = lock(store)?;
                 fetch_base_path(&s, args.project_id)?
             };
-            PathBuf::from(
-                create_worktree_local(&base_path, name, args.base_branch.as_deref()).await?,
-            )
+            let wt = create_worktree_local(&base_path, name, args.base_branch.as_deref()).await?;
+            setup_base = Some(base_path);
+            PathBuf::from(wt)
         } else {
             let s = lock(store)?;
             if let Some(wid) = args.worktree_id {
@@ -1267,7 +1270,7 @@ pub(super) async fn new_session_inner(
                     &args.host_alias,
                     &["bash", "-lc", &quoted],
                     std::time::Duration::from_secs(60),
-                    token,
+                    token.clone(),
                 )
                 .await?;
             if !out.status.success() {
@@ -1276,6 +1279,7 @@ pub(super) async fn new_session_inner(
                     String::from_utf8_lossy(&out.stderr).trim().to_string(),
                 ));
             }
+            setup_base = Some(project_root);
             PathBuf::from(worktree_path_from_stdout(&out.stdout)?)
         } else {
             let (owner, repo, wt_info) = {
@@ -1322,7 +1326,7 @@ pub(super) async fn new_session_inner(
                 &repo,
                 &project_root,
                 worktree_for_clone.as_ref(),
-                token,
+                token.clone(),
             )
             .await?;
             PathBuf::from(cwd)
@@ -1360,6 +1364,25 @@ pub(super) async fn new_session_inner(
     } else {
         (path, None)
     };
+
+    // New worktree setup: copy the project's untracked files and run its
+    // setup command, still under the Worktree step. A failure keeps the
+    // worktree and refuses the start (`E_SETUP_FAILED`).
+    if let Some(base) = setup_base {
+        let setup = {
+            let s = lock(store)?;
+            s.worktree_setup(args.project_id)?.unwrap_or_default()
+        };
+        super::worktree_setup::run(
+            ssh,
+            &args.host_alias,
+            &base,
+            &path.to_string_lossy(),
+            &setup,
+            token.clone(),
+        )
+        .await?;
+    }
 
     progress.advance(StartStep::Tmux);
     let tmux = exec_for(&args.host_alias, ssh);

@@ -1,5 +1,6 @@
 import '@testing-library/jest-dom/vitest';
-import { vi } from 'vitest';
+import { beforeEach, vi } from 'vitest';
+import { answerArm } from './src/lib/answer_guard';
 
 // Global Tauri IPC mock: keeps components that call invoke() on mount
 // (e.g. App.svelte's healthCheck(), Sidebar's loadProjects() and
@@ -226,3 +227,10 @@ if (typeof HTMLDialogElement !== 'undefined') {
     });
   }
 }
+
+// A new answer card ignores presses for 600 ms (`answer_guard.ts`). Under fake
+// timers `Date.now()` stands still, so every test would sit inside that
+// window; tests that are about the window set it back themselves.
+beforeEach(() => {
+  answerArm.ms = 0;
+});

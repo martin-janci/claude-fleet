@@ -49,6 +49,7 @@ pub mod tracker_comments;
 pub mod usage;
 pub mod verify;
 pub mod view;
+pub mod worktree_setup;
 pub mod wrapup;
 
 use crate::ipc_error::{codes, lock, IpcError};
@@ -391,9 +392,13 @@ pub struct WorkLinkArgs {
     /// verify: the condition line checked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub line: Option<String>,
-    /// check_setup: the test command ("" none).
+    /// check_setup: the test command ("" none). worktree_setup: the
+    /// command run in a new worktree ("" none).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
+    /// worktree_setup: relative globs copied into a new worktree ([] none).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub globs: Option<Vec<String>>,
     /// verify: whether it is met. card_decide: apply (true) or dismiss.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ok: Option<bool>,
@@ -676,6 +681,7 @@ pub const WORK_LINK_ACTIONS: &[&str] = &[
     "verify",
     "check",
     "check_setup",
+    "worktree_setup",
     "mission_start",
     "mission_plan",
     "mission_grant",
@@ -791,6 +797,8 @@ pub const ROUTED_WORK_COMMANDS: &[(&str, &str, &str)] = &[
     // AI check on done: Test now / Rerun, and a project's switch.
     ("run_ticket_check", "work_link", "check"),
     ("set_ticket_check", "work_link", "check_setup"),
+    // New worktree setup: a project's copy globs and setup command.
+    ("worktree_setup", "work_link", "worktree_setup"),
     ("start_mission_wave", "work_link", "mission_start"),
     ("retry_work_item", "work_link", "retry"),
     ("plan_mission", "work_link", "mission_plan"),

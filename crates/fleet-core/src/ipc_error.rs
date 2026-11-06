@@ -93,6 +93,9 @@ pub mod codes {
     pub const E_GIT: &str = "E_GIT";
     /// Git identity / remote setup on a host failed.
     pub const E_GIT_SETUP: &str = "E_GIT_SETUP";
+    /// A project's new worktree setup (copy globs, setup command) failed.
+    /// The worktree exists; the message ends with the output's last lines.
+    pub const E_SETUP_FAILED: &str = "E_SETUP_FAILED";
     /// A repo-browsing command (`commands/repo.rs`) failed.
     pub const E_REPO: &str = "E_REPO";
     /// The session has no project / repo to run a repo operation against.

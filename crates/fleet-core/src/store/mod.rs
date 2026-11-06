@@ -114,6 +114,7 @@ mod work_tasks;
 mod work_tidy;
 mod work_usage;
 mod work_view;
+mod worktree_setup;
 
 pub use access_requests::{AccessRequestRow, ACCESS_REQUEST_COOLDOWN_SECS};
 pub use account_usage_snapshots::{UsageSnapshotRow, USAGE_HISTORY_KEEP_SECS};
@@ -353,6 +354,7 @@ pub use work_usage::{DetectionCounts, JournalCounts};
 pub use work_view::{
     version_conflict, Placement, RuleConditions, ViewItem, ViewLink, WorkRule, WorkView,
 };
+pub use worktree_setup::{check_setup, check_setup_glob, WorktreeSetup, SETUP_GLOBS_MAX};
 
 /// One number per `Store` ever built in this process, never reused — see
 /// [`Store::instance_id`].

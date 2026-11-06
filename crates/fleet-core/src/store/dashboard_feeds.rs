@@ -1,4 +1,4 @@
-//! Dashboard feeds (migration 221): the values `feed` widgets show, one row
+//! Dashboard feeds (migration 222): the values `feed` widgets show, one row
 //! per owner and key. Who may write which and what a value may hold are in
 //! `service::dashboards`; this is the rows.
 

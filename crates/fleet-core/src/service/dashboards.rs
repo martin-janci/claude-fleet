@@ -24,7 +24,7 @@
 //! it with (`pages::chat_blocks::check`), never a built-in's id, at most
 //! [`MAX_PINNED`] per person.
 //!
-//! **Feeds** (migration 221, owner report 2026-11-06: dashboards from
+//! **Feeds** (migration 222, owner report 2026-11-06: dashboards from
 //! dynamic data). A `feed` widget shows a value by its key, never computed
 //! by the app: Control's agent or the person writes one (`feed {key,
 //! value}`; an empty value removes it), and a routine's run writes one in

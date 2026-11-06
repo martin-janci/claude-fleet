@@ -1577,7 +1577,9 @@ impl FleetTools {
         (line \"run evidence\" with a note: accept an implement run with no \
         commits or files; \"ai check\": accept a failed AI check). check \
         {item_id}: an AI check of its finished work; check_setup {project_id, \
-        mode: off|ask|auto, command?}: a project's check. \
+        mode: off|ask|auto, command?}: a project's check; worktree_setup \
+        {project_id, globs?, command?}: files copied into and a command run \
+        in each new worktree (neither: read it). \
         mission_start {mission_id, step?}: take the next steps; retry \
         {item_id, note?}; mission_plan: ask the planner; card_decide \
         {card_id, ok, note?}; mission_grant {mission_id, level, hours?, \
@@ -2104,6 +2106,16 @@ impl FleetTools {
             .await
             .map_err(to_mcp_err)?;
             return ok_json(&task);
+        }
+        if args.action == "worktree_setup" {
+            // A project's new worktree setup: a command run on the fleet's
+            // hosts, fleet configuration a person sets.
+            refuse_operator_decision(&caller)?;
+            let view_scope = self.view_scope(&caller)?;
+            return ok_json(
+                &crate::service::work::worktree_setup::setup(&args, &self.store, &view_scope)
+                    .map_err(to_mcp_err)?,
+            );
         }
         if args.action == "check_setup" {
             // A project's AI check switch: fleet configuration a person sets.

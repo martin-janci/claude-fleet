@@ -20,4 +20,4 @@ CREATE TABLE IF NOT EXISTS dashboard_feeds (
   PRIMARY KEY (owner, key)
 );
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (221);
+INSERT OR IGNORE INTO schema_version (version) VALUES (222);
