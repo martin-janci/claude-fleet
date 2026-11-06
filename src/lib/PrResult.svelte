@@ -6,6 +6,7 @@
   import type { SessionRow } from './sessions';
   import { assessRow, describeReason, hasReading, shortSha, verdictLabel, verdictState } from './evidence';
   import StatusChip from './kit/StatusChip.svelte';
+  import PrFeedback from './PrFeedback.svelte';
   import { timeAgo, exactTime } from './session_status';
 
   let { session, nowSec }: { session: SessionRow; nowSec: number } = $props();
@@ -39,6 +40,7 @@
         {/each}
       </ul>
     {/if}
+    <PrFeedback {session} />
   </div>
 {/if}
 

@@ -238,6 +238,9 @@
   .split {
     display: grid;
     grid-template-columns: minmax(14rem, 1fr) 2fr;
+    /* One row that may shrink below its content: without it the row grows to
+       the diff's height, past max-height, and the diff runs under the footer. */
+    grid-template-rows: minmax(0, 1fr);
     gap: 0.6rem;
     margin: 0.5rem 0;
     min-height: 16rem;
@@ -245,6 +248,7 @@
   }
   .files {
     list-style: none;
+    min-height: 0;
     margin: 0;
     padding: 0;
     overflow: auto;
@@ -283,7 +287,7 @@
   }
   .origin-local { border-color: var(--usage-warn); color: var(--usage-warn); }
   .origin-remote { border-color: var(--accent); color: var(--accent); }
-  .diff { overflow: auto; min-width: 0; }
+  .diff { overflow: auto; min-width: 0; min-height: 0; }
   .actions { display: flex; flex-direction: column; gap: 0.4rem; }
   .row { display: flex; gap: 0.4rem; flex-wrap: wrap; align-items: center; }
   select, .msg, textarea {

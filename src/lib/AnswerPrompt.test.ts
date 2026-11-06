@@ -14,6 +14,7 @@ import AnswerPrompt from './AnswerPrompt.svelte';
 import { expectAccessible } from './a11y_check';
 import { sessionActivity, type ActivityProbe } from './conversation';
 import { answerDialog, type SessionRow } from './sessions';
+import { answerArm } from './answer_guard';
 import { pendingInputFor, type AnswerView, type PendingInput } from './pending_input';
 
 const mockedAct = vi.mocked(sessionActivity);
@@ -81,23 +82,73 @@ describe('AnswerPrompt', () => {
     expect(opts[0].textContent).toContain('Yes');
   });
 
-  it('flags an option that stops Claude asking again', () => {
-    // Not a confirm step — the labels are Claude's own words and a dialog
-    // about a dialog is noise — but the one option that changes future
-    // behaviour should not look like the two that do not.
-    render(AnswerPrompt, { session: session(), view: view() });
+  it('asks before a choice that saves a rule for every later session in the folder', async () => {
+    // Claude Code keeps "don't ask again for: …" in the folder's settings,
+    // so it answers sessions that do not exist yet. The first press only
+    // says so; "Save rule and allow" sends the key (plan v2, R4).
+    const label = 'Yes, and don’t ask again for: git push:* in /home/user/claude-fleet';
+    const push: PendingInput = { ...DIALOG, options: [DIALOG.options[0], { n: 2, label, selected: false }, DIALOG.options[2]] };
+    mockedAct.mockResolvedValue({ ok: true, value: probe(push) });
+    render(AnswerPrompt, { session: session({ pending_input: push }), view: view(push) });
     const opts = screen.getAllByTestId('answer-option');
-    expect(opts[1].title).toContain('this also stops Claude asking again');
-    expect(opts[0].title).not.toContain('stops Claude asking again');
+    expect(opts[1].textContent).toContain(`${label}…`);
+    expect(opts[1].title).toContain('every later session');
+    expect(opts[0].title).not.toContain('every later session');
+
+    await fireEvent.click(opts[1]);
+    await settle();
+    expect(mockedSend).not.toHaveBeenCalled();
+    expect(screen.getByTestId('answer-persist').textContent).toContain('/home/user/claude-fleet');
+    expect(screen.getByTestId('answer-persist-rule').textContent).toBe('git push:*');
+
+    await fireEvent.click(screen.getByTestId('answer-persist-cancel'));
+    expect(screen.queryByTestId('answer-persist')).toBeNull();
+    expect(mockedSend).not.toHaveBeenCalled();
+
+    await fireEvent.click(screen.getAllByTestId('answer-option')[1]);
+    await fireEvent.click(screen.getByTestId('answer-persist-save'));
+    await settle();
+    expect(mockedSend).toHaveBeenCalledWith('local', 'dev-foo', '2', expect.anything());
+    expect(screen.getByTestId('answer-sent').textContent).toContain(label);
+  });
+
+  it('keeps a session-only "don\'t ask again" a one-press choice', async () => {
+    const once: PendingInput = {
+      ...DIALOG,
+      options: [DIALOG.options[0], { n: 2, label: "Yes, and don't ask again this session", selected: false }, DIALOG.options[2]],
+    };
+    mockedAct.mockResolvedValue({ ok: true, value: probe(once) });
+    render(AnswerPrompt, { session: session({ pending_input: once }), view: view(once) });
+    await fireEvent.click(screen.getAllByTestId('answer-option')[1]);
+    await settle();
+    expect(screen.queryByTestId('answer-persist')).toBeNull();
+    expect(mockedSend).toHaveBeenCalledWith('local', 'dev-foo', '2', expect.anything());
+  });
+
+  it('ignores a press that lands just after the card appeared', async () => {
+    // A tap aimed at the card that was there before must not answer its
+    // replacement (plan v2 §3).
+    answerArm.ms = 600;
+    const now = vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
+    render(AnswerPrompt, { session: session(), view: view() });
+    await fireEvent.click(screen.getAllByTestId('answer-option')[0]);
+    await settle();
+    expect(mockedSend).not.toHaveBeenCalled();
+
+    now.mockReturnValue(1_000_700);
+    await fireEvent.click(screen.getAllByTestId('answer-option')[0]);
+    await settle();
+    expect(mockedSend).toHaveBeenCalledWith('local', 'dev-foo', '1', expect.anything());
+    now.mockRestore();
   });
 
   it('re-reads the pane and sends that option key when the dialog is unchanged', async () => {
     render(AnswerPrompt, { session: session(), view: view() });
-    await fireEvent.click(screen.getAllByTestId('answer-option')[1]);
+    await fireEvent.click(screen.getAllByTestId('answer-option')[2]);
     await settle();
 
     expect(mockedAct).toHaveBeenCalledWith(7);
-    expect(mockedSend).toHaveBeenCalledWith('local', 'dev-foo', '2', expect.anything());
+    expect(mockedSend).toHaveBeenCalledWith('local', 'dev-foo', '3', expect.anything());
   });
 
   it('sends nothing when the pane is now showing a different dialog', async () => {
@@ -215,10 +266,10 @@ describe('AnswerPrompt', () => {
     // with live buttons until the next 20 s tick — long enough to invite a
     // second press at a dialog that is already answered.
     render(AnswerPrompt, { session: session(), view: view() });
-    await fireEvent.click(screen.getAllByTestId('answer-option')[1]);
+    await fireEvent.click(screen.getAllByTestId('answer-option')[2]);
     await settle();
 
-    expect(screen.getByTestId('answer-sent').textContent).toContain("Yes, and don't ask again");
+    expect(screen.getByTestId('answer-sent').textContent).toContain('No, and tell Claude');
     expect(screen.queryAllByTestId('answer-option')).toHaveLength(0);
   });
 
@@ -429,11 +480,22 @@ describe('AnswerPrompt, multi-select', () => {
 describe('AnswerPrompt 1–9 (redesign step 3.8)', () => {
   it('a digit answers the Conversation card when no field has focus', async () => {
     render(AnswerPrompt, { session: session(), view: view() });
-    await fireEvent.keyDown(document.body, { key: '2' });
+    await fireEvent.keyDown(document.body, { key: '1' });
     await settle();
     expect(mockedSend).toHaveBeenCalledTimes(1);
-    expect(mockedSend.mock.calls[0][2]).toBe('2');
-    expect(screen.getByTestId('answer-sent').textContent).toContain("Yes, and don't ask again");
+    expect(mockedSend.mock.calls[0][2]).toBe('1');
+    expect(screen.getByTestId('answer-sent').textContent).toContain('Yes');
+  });
+
+  it('a digit on the folder-wide choice opens its explanation, and Escape closes it', async () => {
+    render(AnswerPrompt, { session: session(), view: view() });
+    await fireEvent.keyDown(document.body, { key: '2' });
+    await settle();
+    expect(mockedSend).not.toHaveBeenCalled();
+    expect(screen.getByTestId('answer-persist')).toBeTruthy();
+    await fireEvent.keyDown(document.body, { key: 'Escape' });
+    expect(screen.queryByTestId('answer-persist')).toBeNull();
+    expect(mockedSend).not.toHaveBeenCalled();
   });
 
   it('a digit typed in a field, with a modifier, or past the options does nothing', async () => {

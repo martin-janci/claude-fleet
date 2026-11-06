@@ -9,6 +9,7 @@
   // Multi-hub Phase 2: with extra fleets, the list is every fleet the
   // sidebar's fleet filter shows, each PR read from its own hub and marked
   // with its fleet's badge; a PR's session opens on its own fleet.
+  import PrFeedback from './PrFeedback.svelte';
   import Skeleton from './states/Skeleton.svelte';
   import { onDestroy, onMount } from 'svelte';
   import { get } from 'svelte/store';
@@ -265,6 +266,10 @@
                 <span data-testid="work-pr-session-gone">{pr.session_name}{#if pr.host_alias}&nbsp;· {pr.host_alias}{/if} (gone)</span>
               {/if}
             </div>
+          {/if}
+          {#if live && !pr.fleet && live.pr_url === pr.url && pr.state === 'OPEN'}
+            <!-- Plan v2 R10: the same two sends as the session's Result card. -->
+            <PrFeedback session={live} />
           {/if}
         </li>
       {/each}
