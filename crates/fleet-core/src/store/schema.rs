@@ -2568,6 +2568,11 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/221_project_worktree_setup.sql"),
         already_applied: Some(projects_has_setup_copy),
     },
+    Migration {
+        version: 222,
+        sql: include_str!("../../migrations/222_review_notes.sql"),
+        already_applied: None,
+    },
 ];
 
 /// The settings row [`Store::finish_realm_upgrade`] writes once migration

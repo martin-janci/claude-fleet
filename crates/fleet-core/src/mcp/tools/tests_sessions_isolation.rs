@@ -749,6 +749,7 @@ async fn call(fx: &Fx, who: Who, tool: &str, args: Value) -> Answer {
         "send_prompt" => fx.t.send_prompt(ext, p!()).await,
         "queue_prompt" => fx.t.queue_prompt(ext, p!()).await,
         "queued_prompts" => fx.t.queued_prompts(ext, p!()).await,
+        "review_notes" => fx.t.review_notes(ext, p!()).await,
         "broadcast_prompt" => fx.t.broadcast_prompt(ext, p!()).await,
         "session_history" => fx.t.session_history(ext, p!()).await,
         "session_conversations" => fx.t.session_conversations(ext, p!()).await,
@@ -1260,6 +1261,28 @@ async fn run_matrix() {
         "queued_prompts",
         Reach::Drive,
         |fx, _| json!({ "session_id": fx.row }),
+    )
+    .await;
+    // Review notes: a list is the conversation's (`read`); resolving one
+    // changes what every device shows (`drive`). A send is the same `drive`
+    // gate and then types, which this matrix does not do.
+    m.gated(
+        "review_notes",
+        Reach::Read,
+        |fx, _| json!({ "session_id": fx.row }),
+    )
+    .await;
+    m.at(
+        "review_notes",
+        Reach::Drive,
+        |fx, _| json!({ "session_id": fx.row, "action": "resolve", "note_id": 987_654 }),
+        |who| {
+            if who.is_host() {
+                Out::Code(codes::E_FORBIDDEN)
+            } else {
+                tier(Reach::Drive, who)
+            }
+        },
     )
     .await;
     m.gated(

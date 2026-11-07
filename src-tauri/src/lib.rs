@@ -626,6 +626,7 @@ pub fn run() {
             commands::sessions::spawn_review,
             commands::sessions::queue_prompt,
             commands::sessions::queued_prompts,
+            commands::sessions::review_notes,
             commands::sessions::cancel_queued_prompt,
             commands::sessions::recreate_session,
             commands::sessions::restore_host_sessions,

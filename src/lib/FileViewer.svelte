@@ -17,6 +17,7 @@
   import { timeAgo } from './session_status';
   import { repoCommitDiff } from './history';
   import DiffView from './DiffView.svelte';
+  import ReviewDiff from './ReviewDiff.svelte';
   import { highlight, langForPath } from './highlight';
   import { sendFile } from './downloads';
   import { sessionView } from './prefs';
@@ -355,7 +356,13 @@
           {#if diff.truncated}
             <p class="hint">Diff truncated (over 1 MiB).</p>
           {/if}
-          <DiffView diff={diff.diff} />
+          {#if commit === null}
+            <!-- Review notes: on the changes not pushed yet, never on a
+                 commit that is already history. -->
+            <ReviewDiff {session} path={p} diff={diff.diff} agentName={askName} />
+          {:else}
+            <DiffView diff={diff.diff} />
+          {/if}
         {/if}
       {:else if view === 'file' && file}
         {#if file.is_dir}

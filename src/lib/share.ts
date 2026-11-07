@@ -138,6 +138,9 @@ const SESSION_TIER = {
   queue_prompt: 'drive',
   queued_prompts: 'drive',
   cancel_queued_prompt: 'drive',
+  // Review notes: sending types one prompt, resolving changes what every
+  // device shows. Reading the sent notes needs no more than `read`.
+  review_notes: 'drive',
   answer_form: 'drive',
   decline_form: 'drive',
   // `send_message { deliver, submit }` is a pane write by another route, so

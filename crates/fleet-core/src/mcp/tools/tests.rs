@@ -12374,6 +12374,8 @@ pub(super) const SESSION_REACH: &[(&str, &[&str])] = &[
     ("send_prompt", &["Answer", "Drive"]),
     ("queue_prompt", &["Drive"]),
     ("queued_prompts", &["Drive"]),
+    // `Read` to list, `Drive` to send or resolve.
+    ("review_notes", &["Drive", "Read"]),
     ("session_conversations", &["Read"]),
     ("session_history", &["Read"]),
     ("wait_for_reply", &["Read"]),

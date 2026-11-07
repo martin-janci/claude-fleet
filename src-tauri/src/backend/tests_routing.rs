@@ -523,6 +523,27 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
             }),
         ),
         (
+            "review_notes",
+            "review_notes",
+            json!({ "session_id": 7, "action": "resolve", "note_id": 3, "resolved": true }),
+            "{}",
+            Box::new(|b, s, h| {
+                block_on(commands::sessions::routed::review_notes(
+                    b,
+                    fleet_core::service::sessions::review_notes::ReviewNotesArgs {
+                        session_id: 7,
+                        action: Some("resolve".into()),
+                        note_id: Some(3),
+                        resolved: Some(true),
+                        ..Default::default()
+                    },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "agent_installs",
             "agent_installs",
             json!({ "alias": "trn" }),
