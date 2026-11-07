@@ -49,7 +49,7 @@
 
   async function loadSent(sid: number): Promise<void> {
     const r = await listReviewNotes(sid);
-    if (r.ok && sid === session.id) sent = r.value;
+    if (r.ok && sid === session.id && Array.isArray(r.value)) sent = r.value;
   }
   $effect(() => {
     void loadSent(session.id);
@@ -133,6 +133,7 @@
   }
 
   async function resolve(n: ReviewNote, on: boolean): Promise<void> {
+    if (blocked !== null) return;
     const r = await resolveReviewNote(session.id, n.id, on);
     if (!r.ok) {
       push({ kind: 'error', message: errorText(r.error) });
