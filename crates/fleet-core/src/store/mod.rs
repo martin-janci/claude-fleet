@@ -67,6 +67,7 @@ mod read_pool;
 mod realm;
 mod reconcile;
 mod reports;
+mod review_notes;
 mod review_prs;
 mod routine_decisions;
 mod routine_memory;
@@ -243,6 +244,10 @@ pub use read_cursors::CursorRow;
 pub use read_pool::{read_via, ReadPool, READ_POOL_SIZE};
 pub use realm::*;
 pub use reports::{ReportFilter, ReportRow};
+pub use review_notes::{
+    check_notes as check_review_notes, NewReviewNote, ReviewNoteRow, REVIEW_NOTES_MAX,
+    REVIEW_NOTE_MAX,
+};
 pub use review_prs::{
     NewReviewRecord, ReviewPrRow, ReviewRecordRow, TestExemptionRow, REVIEW_PR_STATUSES,
     REVIEW_SKIP_REASONS,

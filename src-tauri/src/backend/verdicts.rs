@@ -777,6 +777,13 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             tool: "queued_prompts",
         },
     ),
+    // Review notes on a session's diff: list, send, resolve.
+    (
+        "review_notes",
+        Verdict::Routed {
+            tool: "review_notes",
+        },
+    ),
     (
         "cancel_queued_prompt",
         Verdict::Routed {

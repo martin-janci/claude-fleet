@@ -392,6 +392,27 @@ pub struct QueuePromptParams {
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct ReviewNotesParams {
+    /// Session id.
+    pub session_id: i64,
+    /// list | send | resolve
+    #[serde(default)]
+    pub action: Option<String>,
+    /// send's id
+    #[serde(default)]
+    pub client_msg_id: Option<String>,
+    /// [{path, line?, side?: new|old, quote?, body}]
+    #[serde(default)]
+    pub notes: Option<Vec<crate::store::NewReviewNote>>,
+    /// resolve: the note
+    #[serde(default)]
+    pub note_id: Option<i64>,
+    /// false reopens
+    #[serde(default)]
+    pub resolved: Option<bool>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct QueuedPromptsParams {
     /// Fleet session id.
     pub session_id: i64,

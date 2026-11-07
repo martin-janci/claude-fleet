@@ -31,6 +31,7 @@ mod prompt;
 mod reconcile;
 mod restore;
 mod review;
+pub mod review_notes;
 pub mod seed;
 mod sharing;
 mod start_progress;

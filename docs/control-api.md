@@ -478,6 +478,9 @@ Index by area (names only; see the reference for details):
 - **Steering & observing** — `send_prompt`, `broadcast_prompt`,
   `queue_prompt` and `queued_prompts` (a prompt typed as a new turn once the
   session is idle; list or take back what still waits),
+  `review_notes` (a person's notes on lines of the diff, sent as one
+  numbered prompt with an idempotent `client_msg_id`, then resolved;
+  [review-notes.md](review-notes.md)),
   `capture_session`, `session_transcript` (the conversation of any session,
   including pane-less `bg:<uuid>` rows — track background runs with it),
   `peer_status`, `session_history`, `session_conversations` (the Claude

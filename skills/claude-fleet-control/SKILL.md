@@ -70,7 +70,7 @@ steer      send_prompt run_prompt queue_prompt queued_prompts wait_for_session
            capture_session session_transcript session_conversation
            session_conversations session_tool_detail session_summary_since
            session_context_help session_prompt_tune rewind_conversation broadcast_prompt
-           touch_session_viewed ask
+           touch_session_viewed ask review_notes
 coordinate send_message inbox wait_for_reply dispatch_task wait_for_task
            list_tasks cancel_task task_report set_session_tags session_history
            register_self work work_link decide_related_session runs routines
