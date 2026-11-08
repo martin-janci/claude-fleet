@@ -2568,9 +2568,15 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/221_project_worktree_setup.sql"),
         already_applied: Some(projects_has_setup_copy),
     },
+    // Dashboard feeds: the values `feed` widgets show, written by Control,
+    // the person or a routine's run. CREATE TABLE IF NOT EXISTS, so plain.
+    Migration::plain(
+        222,
+        include_str!("../../migrations/222_dashboard_feeds.sql"),
+    ),
     Migration {
-        version: 222,
-        sql: include_str!("../../migrations/222_review_notes.sql"),
+        version: 223,
+        sql: include_str!("../../migrations/223_review_notes.sql"),
         already_applied: None,
     },
 ];

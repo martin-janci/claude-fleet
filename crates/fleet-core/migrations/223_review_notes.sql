@@ -38,4 +38,4 @@ CREATE TABLE IF NOT EXISTS review_notes (
 CREATE UNIQUE INDEX IF NOT EXISTS review_notes_batch
   ON review_notes (session_id, batch, seq);
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (222);
+INSERT OR IGNORE INTO schema_version (version) VALUES (223);

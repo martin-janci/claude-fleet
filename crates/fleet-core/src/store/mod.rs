@@ -25,6 +25,7 @@ mod control_handoffs;
 mod control_journal;
 mod control_tokens;
 mod conversations;
+mod dashboard_feeds;
 mod debug_devices;
 mod decisions;
 mod deferred_prompts;
@@ -175,6 +176,7 @@ pub use host_setup::{AgentInstallRow, HostSetupRow, SetupCheck};
 pub use account_project_blocks::MAX_FORBIDDEN_PROJECTS;
 #[allow(unused_imports)]
 pub(crate) use admin_events::record_admin_event_in_tx;
+pub use dashboard_feeds::{DashboardFeedRow, DASHBOARD_FEED_WRITERS};
 pub use diagnostics::WindowEventRow;
 pub use fleet_events::{FleetEventRow, NewFleetEvent, FLEET_EVENTS, FLEET_EVENTS_CAP};
 /// How follow-up titles compare: the same line twice, whitespace and case aside.

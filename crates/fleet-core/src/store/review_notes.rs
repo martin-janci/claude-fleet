@@ -1,4 +1,4 @@
-//! Review notes (migration 222): a person's notes on lines of a session's
+//! Review notes (migration 223): a person's notes on lines of a session's
 //! diff, stored once they are sent to the session's agent. What a send types
 //! is `service::sessions::review_notes`.
 

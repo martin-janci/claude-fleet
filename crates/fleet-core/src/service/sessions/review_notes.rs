@@ -2,7 +2,7 @@
 //! session's diff before anything is pushed. Drafts stay on the device; Send
 //! types them into the session as ONE numbered prompt, through the same
 //! queue as `queue_prompt` (now if the session is idle, else after its turn),
-//! and stores them (migration 222) so every device of the session shows what
+//! and stores them (migration 223) so every device of the session shows what
 //! was sent, by whom, and which a person has resolved.
 //!
 //! A send carries the device's `client_msg_id` as its batch: a repeat (a

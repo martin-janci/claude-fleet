@@ -1194,7 +1194,11 @@ Index by area (names only; see the reference for details):
   `<routine-memory scope="routine|project">…</routine-memory>` block
   replaces that notebook, the last block of a scope winning, and a scope
   the routine does not use is ignored, as is a block of a run older than
-  the notebook's last writer; the run's trace says what changed.
+  the notebook's last writer; the run's trace says what changed. The same
+  read takes `<dashboard-feed key="…">…</dashboard-feed>` blocks: each
+  writes that dashboard feed for the routine's owner (`dashboards { feed
+  }`, the last block of a key winning); a routine whose prompt names
+  `<dashboard-feed` has its replies read for this even with no notebook.
   A notebook is at most 4000 characters (a longer block is cut). `memory {
   routine_id }` answers `{ routine_id, memory?, memory_auto, routine?,
   project?, max_chars, may_change }`, each notebook `{ scope, owner_id,
@@ -1338,11 +1342,19 @@ Index by area (names only; see the reference for details):
 - **Dashboards** — `dashboards`, the dashboards a person pinned from a
   `dashboard` block (`docs/chat-blocks.md`), kept on the hub so every
   device of theirs shows them: `list` | `get {id}` | `pin {dashboard, why?}`
-  | `unpin {id}`. A pin checks the block as the app draws it, refuses a
-  built-in's id and keeps at most 20 per person. The agent (Control's
-  operator) reads them; its `pin` and `unpin` answer `E_FORBIDDEN`. Not
-  served to a per-host token. A pin or an unpin emits an empty
-  `dashboards:changed` event, and the person's open devices re-read.
+  | `unpin {id}` | `undo {id}` | `feeds` | `feed {key, value}`. A pin
+  checks the block as the app draws it, refuses a built-in's id and keeps
+  at most 20 per person. The agent (Control's operator) reads and pins
+  them (a replacement keeps the version before, for the person's `undo`);
+  its `unpin` and `undo` answer `E_FORBIDDEN`. `feed` writes the value a
+  `feed` widget shows by `key` (letters, digits, `. _ : -`; at most 4000
+  characters, an empty value removes it; at most 50 feeds per person),
+  as the caller's person, `by` `agent` for Control and `person` otherwise;
+  a routine's reply writes one too (`<dashboard-feed key="…">`, see
+  *Routines*). `feeds` answers the caller's `[{key, value, by, by_ref?,
+  updated_at}]`. Not served to a per-host token. A pin, an unpin, an undo
+  or a feed emits an empty `dashboards:changed` event, and the person's
+  open devices re-read.
 - **Operator settings** — `get_settings` (every registered key of the
   settings registry, `service/settings.rs`, with its effective value; a
   read, but master token only, since the values name hosts and their

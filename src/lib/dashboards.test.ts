@@ -49,7 +49,7 @@ describe('dashboards', () => {
 
   it('two widgets over the same filters share one read, archived work counted', () => {
     const qs = dashboardQueries(BUILTIN_DASHBOARDS.scrum);
-    const opens = BUILTIN_DASHBOARDS.scrum.widgets.filter((w) => queryKey(w.query) === queryKey({ status: 'open' }));
+    const opens = BUILTIN_DASHBOARDS.scrum.widgets.filter((w) => 'query' in w && queryKey(w.query) === queryKey({ status: 'open' }));
     expect(opens.length).toBeGreaterThan(1);
     expect(qs.size).toBeLessThan(BUILTIN_DASHBOARDS.scrum.widgets.length);
     for (const q of qs.values()) expect(q.filters.archived).toBe(true);

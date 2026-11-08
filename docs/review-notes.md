@@ -27,7 +27,7 @@ Each send carries an id (`client_msg_id`). If the answer never comes (a
 timeout, a dropped connection), sending again reuses that id: the hub
 finds the send already stored and types nothing a second time.
 
-Sent notes are stored on the session (migration 222, `review_notes`) with
+Sent notes are stored on the session (migration 223, `review_notes`) with
 **who sent them** ("Ada · desktop"), and show under their line on every
 device of the session. A person marks each one **Resolved** (or Reopens
 it); the agent's reply in the conversation says what it changed.
