@@ -1,16 +1,21 @@
 {
   "schema": 1,
   "track": "nightly",
-  "sequence": 132,
-  "generated_at": "2026-11-06T23:10:50Z",
-  "expires_at": "2026-11-20T23:10:50Z",
-  "current": "0.6.5-dev.295.desktop.g6c08039",
-  "recommended": "0.6.5-dev.295.desktop.g6c08039",
+  "sequence": 133,
+  "generated_at": "2026-11-08T17:33:52Z",
+  "expires_at": "2026-11-22T17:33:52Z",
+  "current": "0.6.5-dev.306.desktop.g331ed87",
+  "recommended": "0.6.5-dev.306.desktop.g331ed87",
   "minimum_supported": {},
   "mandatory": [],
   "rollback": null,
   "withdrawn": [],
   "releases": [
+    {
+      "version": "0.6.5-dev.306.desktop.g331ed87",
+      "manifest": "https://github.com/martin-janci/claude-fleet/releases/download/v0.6.5-dev.306.desktop.g331ed87/release-manifest.json",
+      "manifest_sha256": "fb6f31580c95b5edd1cf8e3cf469feda22f0ff12886bcd0865387a5b428d4ca2"
+    },
     {
       "version": "0.6.5-dev.295.desktop.g6c08039",
       "manifest": "https://github.com/martin-janci/claude-fleet/releases/download/v0.6.5-dev.295.desktop.g6c08039/release-manifest.json",
@@ -171,18 +176,6 @@
       "version": "0.6.5-dev.113.desktop.g9fd9fb2",
       "manifest": "https://github.com/martin-janci/claude-fleet/releases/download/v0.6.5-dev.113.desktop.g9fd9fb2/release-manifest.json",
       "manifest_sha256": "0a583b1c9dc799b7e493df9d7d72a6080bc2a84f82323f6c15ced7b0f1595c76"
-    },
-    {
-      "version": "0.6.5-dev.102.desktop.g460a23e",
-      "manifest": "https://github.com/martin-janci/claude-fleet/releases/download/v0.6.5-dev.102.desktop.g460a23e/release-manifest.json",
-      "manifest_sha256": "0ca4cf4b05ea3da79d539b32914eb983c7c162dcd85d9d1fba8033eb661d61dc",
-      "amendments": [
-        {
-          "component": "android",
-          "manifest": "https://raw.githubusercontent.com/martin-janci/claude-fleet/update-channels/amendments/0.6.5-dev.102.desktop.g460a23e/android.json",
-          "manifest_sha256": "5cd8dacc1aa6e58361815ad61bd2a04525fa5ea6ea64b80b3703e860d221e9a0"
-        }
-      ]
     }
   ],
   "next_keys": []
