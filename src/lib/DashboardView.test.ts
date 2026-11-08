@@ -13,6 +13,7 @@ import { composerDrafts } from './conversation';
 import { destination } from './destination';
 import { fireEvent } from '@testing-library/svelte';
 import type { SessionRow } from './sessions';
+import { hosts, type HostRow } from './hosts';
 
 const mock = invoke as ReturnType<typeof vi.fn>;
 
@@ -82,6 +83,37 @@ afterEach(() => {
 });
 
 describe('DashboardView', () => {
+  it('draws a feed as written and the fleet’s own rows', async () => {
+    workspace.set('pm');
+    seed({
+      id: 'dash.ops',
+      title: 'Ops',
+      intro: '',
+      widgets: [
+        { kind: 'feed', title: 'Deploys today', key: 'deploys', show: 'stat' },
+        { kind: 'feed', title: 'Notes', key: 'notes' },
+        { kind: 'fleet', title: 'Hosts', source: 'hosts', show: 'list' },
+      ],
+    });
+    shownDashboard.set({ id: 'dash.ops', workspace: 'pm' });
+    hosts.set([{ alias: 'mac', reachable: true, hidden: false } as HostRow, { alias: 'htz', reachable: false, hidden: false } as HostRow]);
+    const base = mock.getMockImplementation() as (cmd: string, a?: unknown) => Promise<unknown>;
+    mock.mockImplementation(async (cmd: string, a?: { args?: { action?: string } }) => {
+      if (cmd === 'dashboards' && a?.args?.action === 'feeds')
+        return [{ key: 'deploys', value: '3', by: 'routine', by_ref: 'Nightly', updated_at: 1_760_000_000 }];
+      return base(cmd, a);
+    });
+    const r = render(DashboardView);
+    await waitFor(() => expect(r.getAllByTestId('feed-value')[0].textContent).toBe('3'));
+    const metas = r.getAllByTestId('feed-meta').map((m) => m.textContent ?? '');
+    expect(metas[0]).toContain('by routine Nightly');
+    expect(metas[1]).toContain('Nothing written to “notes” yet');
+    const rows = r.getByTestId('fleet-rows').textContent ?? '';
+    expect(rows).toContain('mac');
+    expect(rows).toContain('offline');
+    hosts.set([]);
+  });
+
   it('draws the scrum master’s sprint health from work stats', async () => {
     workspace.set('scrum');
     const r = render(DashboardView);

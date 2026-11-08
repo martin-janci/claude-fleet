@@ -373,7 +373,24 @@ Each widget has a `kind`, a `title` (≤ 80) and a `query`:
   see the org) and books it as `dashboard_summary`. The widget shows the
   text with when, which model on which host and what it cost, and keeps
   the last one on that device; a changed `prompt` starts empty. The model
-  sees only the counts, never a task's text.
+  sees only the counts, never a task's text. `sources` (any of `work`,
+  `sessions`, `hosts`, `accounts`, `feeds`; `work` alone when absent) adds
+  what the page shows of those to the request (`context`, at most 24 KiB of
+  JSON, fenced as data), so the model can answer "which host is behind"
+  or "what did last night's routine find" too.
+- `{ "kind": "feed", "title", "key", "show"? }`: the value written last to
+  feed `key` (letters, digits, `. _ : -`), never computed by the app:
+  Control writes it (`dashboards { feed, key, value }`), as can the
+  person, and so does a routine whose reply holds
+  `<dashboard-feed key="deploys">3 today</dashboard-feed>` (the last block
+  of a key wins; a routine whose prompt names `<dashboard-feed` has its
+  reply read for it). `show`: `text` (default) or `stat`, its first line
+  as one big number. The widget says who wrote it and when.
+- `{ "kind": "fleet", "title", "source", "show"? }`: the fleet's own rows
+  as the desktop holds them, live: `sessions` (working, needing the
+  person, idle), `hosts` (reachable of shown, load) or `accounts` (5-hour
+  and weekly use, the busiest first). `show`: `stat` (default) or `list`,
+  a row each.
 
 A `query` is the Work view's filters (`work { tree }`'s `filters`): `org`
 (an id or `none`), `status` (`any`, `open`, `todo`, `in_progress`, `done`),
@@ -382,6 +399,8 @@ A `query` is the Work view's filters (`work { tree }`'s `filters`): `org`
 `epic` (a key or `item:<id>`) and `item_type`. Any other key is a problem:
 a misspelt filter would count the wrong tasks. Absent, a stat counts
 every task the person can open.
+
+A `feed` or `fleet` widget takes no `query`.
 
 The block names filters and never a number. The card reads each query
 with `work { stats }` under the person's own access and draws the answer,
