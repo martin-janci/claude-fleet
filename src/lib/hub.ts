@@ -363,6 +363,7 @@ export const ROUTED_ACTIONS = [
   // Send prompt's "when idle" (step 5.10): queue, list, take back.
   'queue_prompt',
   'queued_prompts',
+  'review_notes',
   'cancel_queued_prompt',
   // The composer's context help: one claude -p the hub runs and books.
   'session_context_help',

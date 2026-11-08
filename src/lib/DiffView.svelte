@@ -1,4 +1,12 @@
 <script lang="ts" module>
+  /** A line a note can sit on: the new side's number, or the old side's
+   *  for a removed line. */
+  export interface NoteLine {
+    side: 'new' | 'old';
+    line: number;
+    text: string;
+  }
+
   interface DiffRow {
     kind: 'hunk' | 'add' | 'del' | 'ctx' | 'meta';
     oldNo: number | null;
@@ -61,20 +69,56 @@
 </script>
 
 <script lang="ts">
-  let { diff, testid = 'diff-view' }: { diff: string; testid?: string } = $props();
+  import type { Snippet } from 'svelte';
+
+  let {
+    diff,
+    testid = 'diff-view',
+    onnote,
+    below,
+  }: {
+    diff: string;
+    testid?: string;
+    /** Review notes (docs/review-notes.md): the line number becomes a
+     *  button that starts a note on that line. */
+    onnote?: (l: NoteLine) => void;
+    /** Rendered under a line: its notes and the note being written. */
+    below?: Snippet<[NoteLine]>;
+  } = $props();
   const rows = $derived(parseUnifiedDiff(diff));
+
+  function lineOf(row: DiffRow): NoteLine | null {
+    if (row.kind === 'del' && row.oldNo !== null) return { side: 'old', line: row.oldNo, text: row.text };
+    if ((row.kind === 'add' || row.kind === 'ctx') && row.newNo !== null) return { side: 'new', line: row.newNo, text: row.text };
+    return null;
+  }
 </script>
 
 <div class="diff" data-testid={testid}>
   {#each rows as row}
+    {@const nl = onnote || below ? lineOf(row) : null}
     <div class="row {row.kind}">
       <span class="gutter old">{row.oldNo ?? ''}</span>
-      <span class="gutter new">{row.newNo ?? ''}</span>
+      {#if onnote && nl}
+        <button
+          type="button"
+          class="gutter new note-btn"
+          data-testid="diff-note-line"
+          title="Add a note on line {nl.line}"
+          aria-label="Add a note on {nl.side === 'old' ? 'removed ' : ''}line {nl.line}"
+          onclick={() => onnote(nl)}>{row.newNo ?? row.oldNo ?? ''}</button
+        >
+      {:else}
+        <span class="gutter new">{row.newNo ?? ''}</span>
+      {/if}
       <span class="marker"
         >{row.kind === 'add' ? '+' : row.kind === 'del' ? '-' : ' '}</span
       >
       <span class="text">{row.text || ' '}</span>
     </div>
+    {#if below && nl}
+      {@render below(nl)}
+    {/if}
   {/each}
 </div>
 
@@ -109,6 +153,19 @@
   }
   .text {
     flex: 1 1 auto;
+  }
+  .note-btn {
+    font: inherit;
+    background: none;
+    border: 0;
+    cursor: pointer;
+    color: var(--fg-muted);
+  }
+  .note-btn:hover,
+  .note-btn:focus-visible {
+    opacity: 1;
+    color: var(--accent);
+    text-decoration: underline;
   }
   .row.add {
     background: color-mix(in srgb, var(--usage-ok) 16%, transparent);

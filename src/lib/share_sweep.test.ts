@@ -851,6 +851,21 @@ const EXTRA_FLEET_PINS = [
 ] as const;
 
 const EXEMPT_SITES: Record<string, readonly Exemption[]> = {
+  './ReviewDiff.svelte': [
+    {
+      writer: 'listReviewNotes',
+      action: 'review_notes',
+      sites: ['await listReviewNotes(sid)'],
+      why:
+        'A READ of the same tool: `review_notes` with no action lists the sent notes, which the hub ' +
+        'serves at `read` (a viewer sees them). Send and resolve, the writes, are gated by `blocked` ' +
+        'in this file.',
+      pins: [
+        { file: './review_notes.ts', needle: "invokeCmd<ReviewNote[]>('review_notes', { args: { session_id: sessionId } })" },
+        { file: './ReviewDiff.svelte', needle: "if (sending || blocked || $drafts.length === 0) return;" },
+      ],
+    },
+  ],
   './FleetSessionGroups.svelte': [
     { writer: 'fleetPinSession', action: 'pin_session', sites: ['fleetPinSession(f.id, s, !s.pinned_at)'], why: EXTRA_FLEET_WHY, pins: EXTRA_FLEET_PINS },
     { writer: 'fleetSendPrompt', action: 'send_prompt', sites: ['fleetSendPrompt(f.id, s, text)'], why: EXTRA_FLEET_WHY, pins: EXTRA_FLEET_PINS },

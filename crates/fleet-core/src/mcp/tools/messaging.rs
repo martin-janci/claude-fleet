@@ -284,6 +284,117 @@ impl FleetTools {
         ok_json(&rows)
     }
 
+    #[tool(description = "Review notes on a session's diff. list \
+        (default); send {client_msg_id, notes}: one numbered prompt, a repeated \
+        id types nothing; resolve {note_id, resolved?}.")]
+    pub(super) async fn review_notes(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(p): Parameters<ReviewNotesParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let action = p.action.as_deref().unwrap_or("list");
+        // Note bodies intentionally not logged.
+        audit(
+            "review_notes",
+            &format!("session_id={} action={action}", p.session_id),
+        );
+        // Reading what was sent is the session's conversation (`read`); a
+        // send types into the pane and a resolve changes what every device
+        // shows (`drive`).
+        // A note is a person's: an agent's host token neither sends nor
+        // resolves one, refused before the session is even looked up.
+        if action != "list" && caller.host_alias.is_some() {
+            return Err(mcp_err(
+                codes::E_FORBIDDEN,
+                "a person sends and resolves review notes",
+                None,
+            ));
+        }
+        let reach = if action == "list" {
+            Reach::Read
+        } else {
+            Reach::Drive
+        };
+        let row = self.resolve_target_row(
+            &caller,
+            Some(p.session_id),
+            None,
+            None,
+            reach,
+            "the session whose review notes to read or send",
+        )?;
+        let (author, person) = {
+            let s = lock(&self.store).map_err(to_mcp_err)?;
+            review_author(&s, &caller)
+        };
+        match action {
+            "list" => {
+                let rows = lock(&self.store)
+                    .map_err(to_mcp_err)?
+                    .review_notes(row.id)
+                    .map_err(to_mcp_err)?;
+                ok_json(&rows)
+            }
+            "send" => {
+                if caller.mode == TokenMode::Answer {
+                    return Err(mcp_err(
+                        codes::E_FORBIDDEN,
+                        "an answer-only device does not send review notes",
+                        None,
+                    ));
+                }
+                let args = sessions::review_notes::SendReviewNotesArgs {
+                    session_id: row.id,
+                    client_msg_id: p.client_msg_id.unwrap_or_default(),
+                    notes: p.notes.unwrap_or_default(),
+                };
+                let origin = marker_origin(&caller);
+                let out = sessions::review_notes::send(
+                    args,
+                    &author,
+                    person,
+                    |prompt| {
+                        apply_marker(prompt, &origin, &caller, false)
+                            .map_err(|e| IpcError::new(codes::E_FORBIDDEN, e.message.to_string()))
+                    },
+                    &self.store,
+                    &self.ssh,
+                )
+                .await
+                .map_err(to_mcp_err)?;
+                ok_json(&out)
+            }
+            "resolve" => {
+                let id = p
+                    .note_id
+                    .ok_or_else(|| mcp_err(codes::E_INVALID, "resolve needs note_id", None))?;
+                let out = lock(&self.store)
+                    .map_err(to_mcp_err)?
+                    .resolve_review_note(
+                        row.id,
+                        id,
+                        p.resolved.unwrap_or(true),
+                        &author,
+                        crate::store::now_unix(),
+                    )
+                    .map_err(to_mcp_err)?
+                    .ok_or_else(|| {
+                        mcp_err(
+                            codes::E_NOTFOUND,
+                            format!("review note {id} not found"),
+                            None,
+                        )
+                    })?;
+                ok_json(&out)
+            }
+            other => Err(mcp_err(
+                codes::E_INVALID,
+                format!("review_notes action {other:?}; list, send or resolve"),
+                None,
+            )),
+        }
+    }
+
     #[tool(description = "Send one prompt to every matching work session \
         (not the controller), skipping blocked or stuck ones unless \
         status=\"blocked\". Returns per-session results. Rate-limited per \
@@ -1181,5 +1292,30 @@ mod answer_key_tests {
         assert!(!is_folder_rule("Yes, and don't ask again this session"));
         assert!(!is_folder_rule("Yes, allow all edits during this session"));
         assert!(!is_folder_rule("Yes"));
+    }
+}
+
+/// Who a review note is from, as the conversation shows it, and their
+/// person: "Ada · phone" for a paired device, the owner's name for the
+/// master token (the desktop on its own hub), the token's name otherwise.
+pub(super) fn review_author(s: &crate::store::Store, caller: &Caller) -> (String, Option<i64>) {
+    let name_of = |id: i64| {
+        s.get_person(id)
+            .ok()
+            .flatten()
+            .map(|p| p.display_name.unwrap_or(p.name))
+    };
+    match (&caller.host_alias, &caller.client, &caller.api) {
+        (Some(h), _, _) => (format!("an agent on {h}"), None),
+        (None, Some(c), _) => match c.person_id.and_then(|id| name_of(id).map(|n| (id, n))) {
+            Some((id, n)) => (format!("{n} · {}", c.name), Some(id)),
+            None => (c.name.clone(), c.person_id),
+        },
+        (None, None, Some(a)) => (format!("token {}", a.name), None),
+        (None, None, None) => {
+            let owner = s.personal_owner_id().ok().flatten();
+            let name = owner.and_then(name_of).unwrap_or_else(|| "you".to_string());
+            (name, owner)
+        }
     }
 }

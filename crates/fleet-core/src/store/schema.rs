@@ -2574,6 +2574,11 @@ const MIGRATIONS: &[Migration] = &[
         222,
         include_str!("../../migrations/222_dashboard_feeds.sql"),
     ),
+    Migration {
+        version: 223,
+        sql: include_str!("../../migrations/223_review_notes.sql"),
+        already_applied: None,
+    },
 ];
 
 /// The settings row [`Store::finish_realm_upgrade`] writes once migration

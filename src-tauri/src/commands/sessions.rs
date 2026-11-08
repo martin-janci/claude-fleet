@@ -283,6 +283,18 @@ pub async fn queue_prompt(
     routed::queue_prompt(&backend, args, &store, &ssh).await
 }
 
+/// Review notes on a session's diff (docs/review-notes.md): list, send as
+/// one prompt, resolve.
+#[tauri::command]
+pub async fn review_notes(
+    args: fleet_core::service::sessions::review_notes::ReviewNotesArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<serde_json::Value, IpcError> {
+    routed::review_notes(&backend, args, &store, &ssh).await
+}
+
 #[tauri::command]
 pub async fn queued_prompts(
     args: sessions::QueuedPromptsArgs,
@@ -1059,6 +1071,21 @@ pub(crate) mod routed {
         match backend.hub() {
             Some(hub) => hub.route("queue_prompt", &args).await,
             None => sessions::queue_prompt(args, store, ssh).await,
+        }
+    }
+
+    pub async fn review_notes(
+        backend: &FleetBackend,
+        args: fleet_core::service::sessions::review_notes::ReviewNotesArgs,
+        store: &Mutex<Store>,
+        ssh: &Arc<SshClient>,
+    ) -> Result<serde_json::Value, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("review_notes", &args).await,
+            None => {
+                fleet_core::service::sessions::review_notes::review_notes_local(args, store, ssh)
+                    .await
+            }
         }
     }
 

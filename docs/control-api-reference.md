@@ -909,6 +909,14 @@ Access: a fleet admin's own device (not the master) · deadline 60 s.
 
 Parameters (* required): `action`*, `chosen`, `key`*
 
+### `review_notes`
+
+Review notes on a session's diff. list (default); send {client_msg_id, notes}: one numbered prompt, a repeated id types nothing; resolve {note_id, resolved?}.
+
+Access: the master, a paired device or a per-host token · deadline 60 s.
+
+Parameters (* required): `action`, `client_msg_id`, `note_id`, `notes`, `resolved`, `session_id`*
+
 ### `revoke_client`
 
 Revoke a paired client's token by name: its next request is refused and the name is free to pair again; the row is kept, revoked, for the audit trail. E_NOTFOUND when no live client has that name. Master token only.
@@ -1593,6 +1601,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::sessions::spawn_review`
 - `commands::sessions::queue_prompt`
 - `commands::sessions::queued_prompts`
+- `commands::sessions::review_notes`
 - `commands::sessions::cancel_queued_prompt`
 - `commands::sessions::recreate_session`
 - `commands::sessions::restore_host_sessions`

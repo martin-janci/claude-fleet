@@ -1138,6 +1138,15 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
+    // Review notes on a session's diff: list reads, send types one prompt,
+    // resolve marks a note done.
+    ToolPolicy {
+        name: "review_notes",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
     ToolPolicy {
         name: "broadcast_prompt",
         access: Access::Client,

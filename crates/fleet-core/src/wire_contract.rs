@@ -331,4 +331,8 @@
 //!   input field only for a routine whose row carried it, so a hub without
 //!   it still saves the routine; one that has no `seen` action answers
 //!   `E_INVALID`, which the editor shows as no list.
+//!   Review notes (migration 223) are new without a bump: the
+//!   `review_notes` tool (the desktop's command of the same name;
+//!   docs/review-notes.md). A hub without it answers `E_HUB_PROTOCOL`, which
+//!   the diff shows as the send's error, with the drafts kept on the device.
 pub const CONTRACT_REVISION: u32 = 18;
