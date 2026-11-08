@@ -268,10 +268,6 @@ const sessionsIn = (gs: readonly TodayGroup[]) => gs.reduce((n, g) => n + g.sess
 const waitingIn = (gs: readonly TodayGroup[]) =>
   gs.reduce((n, g) => n + g.sessions.filter((s) => s.attention).length, 0);
 
-/** The four tiles: sessions (and missions) that need you, sessions in
- *  progress, what shipped today, stale sessions. A waiting group waits on
- *  one of its sessions; its siblings count as in progress, as the rail
- *  counts them (review w11-3). */
 /** What else waits on the person beside sessions and missions, as the
  *  Inbox counts it (review w11-8): agent actions to approve, routines whose
  *  newest run failed. */
@@ -280,6 +276,10 @@ export interface TodayExtras {
   failedRoutines: number;
 }
 
+/** The four tiles: sessions (and missions) that need you, sessions in
+ *  progress, what shipped today, stale sessions. A waiting group waits on
+ *  one of its sessions; its siblings count as in progress, as the rail
+ *  counts them (review w11-3). */
 export function todayKpis(v: TodayView, extras: TodayExtras = { approvals: 0, failedRoutines: 0 }): TodayKpis {
   const waiting = waitingIn(v.waiting);
   return {

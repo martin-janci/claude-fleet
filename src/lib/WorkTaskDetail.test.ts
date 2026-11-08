@@ -21,6 +21,7 @@ import { selectedSession, clearSelection } from './selection';
 import { session } from './hosts_fixture';
 import { link, task } from './work_view_fixture';
 import {
+  knownWorkFacets,
   noteWorkChanged,
   selectedTaskId,
   sidebarView,
@@ -407,6 +408,23 @@ describe('WorkTaskDetail', () => {
     expect(screen.queryByTestId('work-task-priority-chip')).toBeNull();
     expect(screen.queryByTestId('work-task-labels')).toBeNull();
     expect(screen.getByTestId('work-task-estimate').textContent).toBe('4 h');
+  });
+
+  it("a label filters by the facet's spelling, case and diacritics folded", async () => {
+    handlers.work_task = () => ({ ...trackerTask, task: { ...trackerTask.task, labels: ['Q4', 'Café', 'new'] } });
+    knownWorkFacets.set({ labels: ['q4', 'cafe'] });
+    render(WorkTaskDetail, { taskId: 'item:12' });
+    await flush();
+    const chips = screen.getAllByTestId('work-task-label');
+    await fireEvent.click(chips[0]);
+    expect(get(workViewFilters).label).toBe('q4');
+    await fireEvent.click(chips[1]);
+    expect(get(workViewFilters).label).toBe('cafe');
+    // One the facets do not hold yet keeps the task's own spelling.
+    await fireEvent.click(chips[2]);
+    expect(get(workViewFilters).label).toBe('new');
+    knownWorkFacets.set(null);
+    workViewFilters.set({});
   });
 
   it('the header says when an open task is past its due date, never a done one', async () => {

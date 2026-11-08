@@ -748,21 +748,34 @@ export function dueLabel(due: string | null | undefined, now: Date = new Date())
   return { text: date, overdue: false };
 }
 
+/** A task's due date as every chip says it, or `null`: `dueLabel`'s
+ *  `text` and `overdue`, and `chip`, the chip's words ("Due Fri",
+ *  "Overdue · Oct 2"). A done task shows no due date: it is history, never
+ *  overdue (the row, the Board card, the task header, the subtask list). */
+export function openDue(
+  due: string | null | undefined,
+  statusCategory: string | null | undefined,
+  now: Date = new Date(),
+): { text: string; overdue: boolean; chip: string } | null {
+  if (statusCategory === 'done') return null;
+  const d = dueLabel(due, now);
+  return d ? { ...d, chip: d.overdue ? `Overdue · ${d.text}` : `Due ${d.text}` } : null;
+}
+
 /** The Board card's owner-and-due chip ("You · Fri"): the first assignee
- *  ("You" when the task is the viewer's), then the due date. `null` when
- *  the task names neither. Never overdue once the task is done. */
+ *  ("You" when the task is the viewer's), then the due date (none once the
+ *  task is done, `openDue`). `null` when it names neither. */
 export function ownerDueChip(
   t: { assignees?: string[] | null; mine?: boolean | null; due_at?: string | null; status_category?: string | null },
   now: Date = new Date(),
 ): { text: string; overdue: boolean } | null {
   const first = t.assignees?.find((a) => a.trim() !== '');
   const who = t.mine ? 'You' : (first ?? null);
-  const due = dueLabel(t.due_at, now);
+  const due = openDue(t.due_at, t.status_category, now);
   if (who === null && due === null) return null;
   const extra = !t.mine && (t.assignees?.length ?? 0) > 1 ? ` +${(t.assignees?.length ?? 1) - 1}` : '';
   const parts = [who !== null ? `${who}${extra}` : null, due?.text ?? null].filter((x): x is string => x !== null);
-  // A done task's date is history: the Done column is never red.
-  return { text: parts.join(' · '), overdue: (due?.overdue ?? false) && t.status_category !== 'done' };
+  return { text: parts.join(' · '), overdue: due?.overdue ?? false };
 }
 
 /** Assignees typed as one line: split on commas, trimmed, empty ones and

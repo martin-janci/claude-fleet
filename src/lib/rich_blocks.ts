@@ -705,7 +705,9 @@ export const DASH_BUCKET_STATES = ['planned', 'active', 'closed', 'released'] as
 const DASH_BUCKET_GROUPS = ['sprint', 'release'] as const;
 /** The filters a widget's query may name: the Work view's, less the ones
  *  that only page or order it. */
-const DASH_TEXT_FILTERS = ['query', 'assignee', 'status_name', 'iteration', 'epic', 'item_type'] as const;
+const DASH_TEXT_FILTERS = ['query', 'assignee', 'status_name', 'iteration', 'epic', 'item_type', 'label'] as const;
+/** `filters.priority`: the store's PRIORITIES, or none (tasks with no priority). */
+const DASH_PRIORITIES = ['urgent', 'high', 'medium', 'low', 'none'] as const;
 
 function bool(o: Record<string, unknown>, k: string, p: Problems, where: string): boolean | undefined {
   const v = o[k];
@@ -744,6 +746,9 @@ function dashQuery(v: unknown, p: Problems, at: string): Record<string, unknown>
       case 'mine':
       case 'review':
         out[k] = bool(v, k, p, where);
+        break;
+      case 'priority':
+        out.priority = oneOf(v, k, p, where, DASH_PRIORITIES);
         break;
       case 'stages': {
         const list = arr(v, k, p, where, 1, WORK_STAGES.length);

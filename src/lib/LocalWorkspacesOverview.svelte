@@ -3,7 +3,7 @@
   // counts, who drives it, and why it is stale when it is. Clean up stale
   // disconnects the stale ones; the files stay on both sides. Creating,
   // attaching, merging and removing worktrees stay where fleet already does
-  // them (New session, the merge intent, Safe remove).
+  // them (New session, the merge intent, Clean up…).
   import Modal from './Modal.svelte';
   import ConfirmDialog from './ConfirmDialog.svelte';
   import { sessions } from './sessions';

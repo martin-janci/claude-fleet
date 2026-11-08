@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { focusNow } from './focus_now';
+  import InlineConfirm from './forms/InlineConfirm.svelte';
   import { tablistKeys } from './tablist_keys';
   import { onMount } from 'svelte';
   import Modal from './Modal.svelte';
@@ -186,11 +186,17 @@
               >
             {/if}
             {#if asking === d.id}
-              <span class="ask" role="alertdialog" aria-label="Remove {d.name} without saving it?" data-testid="download-remove-ask"
-                >Not saved yet.
-                <button data-testid="download-remove-confirm" disabled={busy === d.id} onclick={() => void remove(d)}>Remove</button>
-                <button data-testid="download-remove-keep" use:focusNow onclick={() => (asking = null)}>Keep</button></span
-              >
+              <InlineConfirm
+                label="Remove {d.name} without saving it?"
+                question="Not saved yet."
+                verb="Remove"
+                disabled={busy === d.id}
+                testid="download-remove-ask"
+                confirmTestid="download-remove-confirm"
+                keepTestid="download-remove-keep"
+                onconfirm={() => void remove(d)}
+                onkeep={() => (asking = null)}
+              />
             {:else}
               <button
                 disabled={busy === d.id}
@@ -307,7 +313,6 @@
     font-size: var(--text-2xs);
     padding: 0.2rem 0.55rem;
   }
-  .ask { display: inline-flex; align-items: center; gap: 6px; font-size: var(--text-xs); color: var(--fg-muted); }
   .actions button:hover {
     color: var(--fg);
   }

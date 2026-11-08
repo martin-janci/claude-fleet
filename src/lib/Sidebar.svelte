@@ -1362,11 +1362,17 @@
     return undefined;
   }
   /** The chord and ⌘K's row: with nothing needing you it says so, rather
-   *  than do nothing and read as a dead key (UX antipatterns 2026-11-03). */
+   *  than do nothing and read as a dead key (UX antipatterns 2026-11-03).
+   *  Only drawn rows are walked, so a session a filter, the search or a
+   *  folded group hides is counted by the badge's own rule and said as
+   *  hidden, never as "Nothing needs you" beside a badge that counts it. */
+  function nextNeedingYouMissed(n: number): string {
+    return n === 0 ? 'Nothing needs you right now' : `${n} need${n === 1 ? 's' : ''} you, hidden by a filter, the search or a folded group`;
+  }
   function openNextNeedingYou() {
     const el = nextNeedingYou();
     if (el) openRow(el);
-    else push({ kind: 'info', message: 'Nothing needs you right now' });
+    else push({ kind: 'info', message: nextNeedingYouMissed(needsYouTotal) });
   }
   // ⌘K's "Next session that needs you" row (review w18-4), as the chord.
   $effect(() => {

@@ -36,7 +36,7 @@ describe('OfflineFleet', () => {
     const { container } = render(OfflineFleet, { props: { onhubsettings: vi.fn() } });
     await waitFor(() => expect(screen.getAllByTestId('offline-session')).toHaveLength(1));
     await fireEvent.click(screen.getByTestId('offline-copy'));
-    expect(writeText).toHaveBeenCalledWith("tmux attach -t '=api'");
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("tmux attach -t '=api'"));
     await expectAccessible(container);
   });
 

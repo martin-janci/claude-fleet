@@ -26,8 +26,7 @@
   } from './forms/add_host_wizard';
   import { discoverHosts } from './hosts';
   import { hubStatus } from './hub';
-  import { copyText } from './clipboard';
-  import { push } from './toasts';
+  import { copyAndSay } from './clipboard';
   import type { FieldProblem, Values } from './forms/forms';
   import type { Wizard } from './forms/wizards';
 
@@ -74,7 +73,7 @@
   const commands = $derived(added ? agentSetupCommands(added.alias, get(hubStatus).url) : null);
 
   async function copy(text: string) {
-    if (await copyText(text)) push({ kind: 'success', message: 'Command copied.' });
+    await copyAndSay(text, 'Command');
   }
 </script>
 

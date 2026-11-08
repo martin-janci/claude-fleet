@@ -12,6 +12,8 @@
 -->
 <script lang="ts">
   import { tick } from 'svelte';
+  // A reason field takes focus as it opens: the Override… button that opened it is gone (review r8).
+  import { focusNow } from './focus_now';
   import Icon from './kit/Icon.svelte';
   import StatusDot from './kit/StatusDot.svelte';
   import Loader from './Loader.svelte';
@@ -150,12 +152,6 @@
     if (overrideFor == null || !overrideText.trim()) return;
     const id = overrideFor;
     if (await act(overrideRunEvidence(id, overrideText))) closeOverride(id);
-  }
-
-  /** The reason field takes focus as it opens: the Override… button that
-   *  opened it is gone (review r8). */
-  function focusOnMount(el: HTMLInputElement | HTMLTextAreaElement): void {
-    el.focus();
   }
 
   /** Close the reason form and give focus back to its Override… button,
@@ -302,7 +298,7 @@
                         aria-label="Why the task is done without commits or files"
                         placeholder="Why it is done without commits or files"
                         bind:value={overrideText}
-                        use:focusOnMount
+                        use:focusNow
                         data-testid="mission-evidence-reason"
                       />
                       <span class="row">
@@ -322,7 +318,7 @@
                       placeholder="Lane name, e.g. backend"
                       maxlength="40"
                       bind:value={laneText}
-                      use:focusOnMount
+                      use:focusNow
                       data-testid="mission-lane-name"
                     />
                     <span class="row">
@@ -334,7 +330,7 @@
                 {#if condsFor === n.item_id}
                   <form class="conds" use:formKeys onsubmit={(e) => (e.preventDefault(), void saveConds())}>
                     <textarea
-                      use:focusOnMount
+                      use:focusNow
                       rows="3"
                       aria-label="Done when, one condition per line"
                       placeholder={'ci\nreview\ntest:cargo test\nperson'}

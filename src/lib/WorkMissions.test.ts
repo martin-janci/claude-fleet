@@ -29,6 +29,7 @@ import {
   splitMoves,
   eventSentence,
   grantSignLabel,
+  grantHoursProblem,
   grantSpanNotice,
   grantWouldHelp,
   moveLabel,
@@ -1273,6 +1274,57 @@ describe('WorkMissions', () => {
       expect(calls('grant_mission')[0]).toEqual({ mission_id: 4, level: 2, until_done: true, budget_cents: 1250 });
     });
 
+    it('Hours is whole hours from 1 to a week: empty, 1.5 or 169 is said under the field and not signed', async () => {
+      current = mission({ state: 'active', level: 2 });
+      handlers.work_mission = () => detailOf(current);
+      handlers.grant_mission = () => ({ id: 1, mission_id: 4, plan_version: 1, level: 2, granted_by: 'fleet', created_at: 0, expires_at: 3600 });
+      renderMissions();
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-row'));
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-grant'));
+      await flush();
+      const save = () => screen.getByTestId('mission-grant-save') as HTMLButtonElement;
+      for (const bad of ['', '1.5', '169']) {
+        await fireEvent.input(screen.getByTestId('mission-grant-hours'), { target: { value: bad } });
+        await flush();
+        expect(screen.getByTestId('mission-grant-hours-bad').textContent).toBe('Whole hours, 1 to 168.');
+        expect(save().disabled).toBe(true);
+        expect(save().textContent).toContain('Sign the grant');
+      }
+      await fireEvent.input(screen.getByTestId('mission-grant-hours'), { target: { value: '168' } });
+      await flush();
+      expect(screen.queryByTestId('mission-grant-hours-bad')).toBeNull();
+      expect(save().textContent).toContain('Sign L2 for 168 h');
+      await fireEvent.click(save());
+      await flush();
+      expect(calls('grant_mission')[0]).toEqual({ mission_id: 4, level: 2, hours: 168 });
+      expect(grantHoursProblem(8)).toBeNull();
+      expect(grantHoursProblem(0)).not.toBeNull();
+      expect(grantHoursProblem(null)).not.toBeNull();
+    });
+
+    it('the grant form opens fresh on the next mission: level, hours and budget reset', async () => {
+      current = mission({ state: 'active', level: 2 });
+      handlers.work_mission = () => detailOf(current);
+      renderMissions();
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-row'));
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-grant'));
+      await flush();
+      await fireEvent.input(screen.getByTestId('mission-grant-hours'), { target: { value: '24' } });
+      await fireEvent.input(screen.getByTestId('mission-grant-budget'), { target: { value: '9' } });
+      roomMissionId.set(null);
+      await flush();
+      roomMissionId.set(4);
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-grant'));
+      await flush();
+      expect((screen.getByTestId('mission-grant-hours') as HTMLInputElement).value).toBe('8');
+      expect((screen.getByTestId('mission-grant-budget') as HTMLInputElement).value).toBe('');
+    });
+
     it('an older hub that signs hours for an until-done grant is said so (review r8)', async () => {
       current = mission({ state: 'active', level: 2 });
       handlers.work_mission = () => detailOf(current);
@@ -1348,6 +1400,30 @@ describe('WorkMissions', () => {
       await fireEvent.click(screen.getByTestId('mission-panel-close'));
       await flush();
       expect(screen.getByTestId('mission-detail-centre').contains(screen.getByTestId('mission-notice'))).toBe(true);
+    });
+
+    it('a notice raised in the centre is drawn in the centre, whatever column the press before it used', async () => {
+      current = mission({ state: 'active', level: 2 });
+      const base = detailOf(current);
+      const ask = { id: 7, mission_id: 4, decision_id: 'd7', source: 'planner', kind: 'ask', state: 'open', created_at: 1, payload: { question: 'Which gateway?' } };
+      handlers.work_mission = () => ({ ...base, plan: { ...base.plan, cards: [ask] } });
+      handlers.grant_mission = () => Object.assign(new Error('Only the owner may grant'), { code: 'E_FORBIDDEN' });
+      renderMissions();
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-row'));
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-grant'));
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-grant-save'));
+      await flush();
+      expect(screen.getByTestId('mission-panel').contains(screen.getByTestId('mission-notice'))).toBe(true);
+      await fireEvent.click(screen.getByTestId('question-own-words'));
+      await fireEvent.click(screen.getByTestId('mission-card-apply'));
+      await flush();
+      expect(calls('decide_mission_card')).toHaveLength(0);
+      const notice = screen.getByTestId('mission-notice');
+      expect(notice.textContent).toBe('Write an answer first.');
+      expect(screen.getByTestId('mission-detail-centre').contains(notice)).toBe(true);
     });
 
     it('a mission with no tasks says what comes next in the centre, and Ask the planner runs from there', async () => {
@@ -1809,6 +1885,47 @@ describe('WorkMissions', () => {
       await fireEvent.click(screen.getByTestId('mission-proposals-replan'));
       await flush();
       expect(calls('plan_mission')[0]).toEqual({ mission_id: 4 });
+    });
+
+    it("a one-by-one accept's Undo takes back that accept alone, and the bar can be put away", async () => {
+      handlers.work_mission = () => ({
+        mission: current,
+        items: [
+          item(10, 'Payments v2'),
+          { ...item(11, 'Ledger query'), proposal_state: 'proposed' },
+          { ...item(12, 'CSV writer'), proposal_state: 'proposed' },
+        ],
+        graph: {
+          nodes: [
+            { item_id: 10, state: 'ready', wave: 1 },
+            { item_id: 11, state: 'proposed', wave: 1 },
+            { item_id: 12, state: 'proposed', wave: 2 },
+          ],
+          waves: 2,
+        },
+        events: [],
+        may_change: true,
+      });
+      handlers.accept_work_proposal = () => item(11, 'Ledger query');
+      handlers.undo_work_accept = () => [];
+      await openIt();
+      await fireEvent.click(screen.getByTestId('mission-review-one'));
+      await fireEvent.click(screen.getByTestId('mission-review-accept'));
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-review-skip'));
+      await fireEvent.click(screen.getByTestId('mission-review-accept'));
+      await flush();
+      expect(calls('accept_work_proposal').map((c) => c.item_id)).toEqual([11, 12]);
+      // The hub's undo is all or none: a list would take the deliberate first accept back too.
+      expect(screen.getByTestId('mission-accepted').textContent).toContain('Accepted 1.');
+      await fireEvent.click(screen.getByTestId('mission-undo-accept'));
+      await flush();
+      expect(calls('undo_work_accept')[0]).toEqual({ item_ids: [12] });
+      await fireEvent.click(screen.getByTestId('mission-review-accept'));
+      await flush();
+      expect(screen.getByTestId('mission-accepted')).toBeTruthy();
+      await fireEvent.click(screen.getByTestId('mission-accepted-dismiss'));
+      expect(screen.queryByTestId('mission-accepted')).toBeNull();
     });
 
     it('Finish… in the Plan tab asks first, in the header', async () => {

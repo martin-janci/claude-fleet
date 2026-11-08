@@ -622,7 +622,9 @@ describe('the routine form (FormsAutomation board)', () => {
     });
     await fireEvent.input(screen.getByTestId('routine-name'), { target: { value: 'Nightly' } });
     await fireEvent.input(screen.getByTestId('routine-prompt'), { target: { value: 'Tidy up.' } });
-    await fireEvent.keyDown(screen.getByTestId('routine-prompt'), { key: 'Enter', metaKey: true });
+    // ⌘↵ on the Mac, Ctrl+Enter elsewhere (`formKeys`).
+    const isMac = /Mac/.test(navigator.platform) || /Macintosh/.test(navigator.userAgent);
+    await fireEvent.keyDown(screen.getByTestId('routine-prompt'), { key: 'Enter', ...(isMac ? { metaKey: true } : { ctrlKey: true }) });
     expect(await screen.findByTestId('routine-save-error')).toBeInTheDocument();
     expect((screen.getByTestId('routine-name') as HTMLInputElement).value).toBe('Nightly');
   });
