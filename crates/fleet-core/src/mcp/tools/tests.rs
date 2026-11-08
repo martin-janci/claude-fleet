@@ -13550,6 +13550,12 @@ const WORK_ACTION_NO_GATE: &[(&str, &str, &str)] = &[
     ),
     (
         "work_link",
+        "worktree_setup",
+        "a project's new worktree setup, a command run on the fleet's hosts \
+         (a project, not a session); refused as `check_setup` is",
+    ),
+    (
+        "work_link",
         "mission_delete",
         "a draft or finished mission; its items stay",
     ),
@@ -13616,6 +13622,12 @@ const WORK_ACTION_NO_GATE: &[(&str, &str, &str)] = &[
         "today_brief",
         "the caller's own morning brief over their scoped view of today; \
          drafted only on refresh, written to no session",
+    ),
+    (
+        "work_link",
+        "dashboard_summary",
+        "a model's text over the caller's own scoped work stats; text comes \
+         back, nothing is written to a session or a row",
     ),
     (
         "work",

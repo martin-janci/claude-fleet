@@ -483,6 +483,8 @@ export const ROUTED_ACTIONS = [
   'set_mission_state',
   // The Missions tab's Import plan.
   'import_mission_plan',
+  // New worktree setup: a project's copy globs and setup command.
+  'worktree_setup',
 ] as const;
 
 export type RoutedAction = (typeof ROUTED_ACTIONS)[number];

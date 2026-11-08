@@ -141,7 +141,7 @@ describe('AddHostWizard', () => {
       'claude',
       'codex',
     ]);
-    expect(screen.getByTestId('wizard-agents-lead').textContent).toContain('Fleet runs Claude Code and Codex sessions');
+    expect(screen.getByTestId('wizard-agents-lead').textContent).toContain('Fleet runs Claude Code, Codex and Hermes sessions');
     await fireEvent.click(screen.getByTestId('wizard-next')); // → Accounts
     expect((await screen.findByTestId('wizard-account')).textContent).toContain('m.janci@32bit.sk');
     await fireEvent.click(screen.getByTestId('wizard-next')); // → Done

@@ -208,6 +208,23 @@ describe('ConversationPanel', () => {
     expect(screen.getByText(/Older turns not shown/)).toBeTruthy();
   });
 
+  it('shows what the person typed, with the app’s context and dashboard head as chips', async () => {
+    const prompt =
+      '[context] the person is looking at session "ST staging" on host mac. "this one" and "here" mean that session unless they say otherwise.\n\n' +
+      'The built-in dashboard "My work", to make my own copy of (keep the id dash.developer.mine):\n\n```fleet-ui\n{"dashboard":{}}\n```\n\n' +
+      'Save the change with `dashboards { pin }` under the same id, then answer with the `dashboard` block. Change it:  Add more data to dashboard';
+    mockedConv.mockReturnValue(ok(conv({ turns: [{ prompt, at: null, ended_at: null, items: [] }] })));
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    const chips = screen.getByTestId('conv-prompt-chips').textContent ?? '';
+    expect(chips).toContain('ST staging · mac');
+    expect(chips).toContain('Dashboard “My work” (your copy)');
+    const body = screen.getByTestId('conv-prompt').textContent ?? '';
+    expect(body).toContain('Add more data to dashboard');
+    expect(body).not.toContain('fleet-ui');
+    expect(body).not.toContain('[context]');
+  });
+
   it('draws a done marker and its report as a card whose follow-up fills the composer', async () => {
     const text = 'Finished.\n\nFLEET_TASK_DONE_ab12\n```json\n{"summary": "Wrote the guide", "outcome": "done", "followups": ["Open a PR"]}\n```';
     mockedConv.mockReturnValue(ok(conv({ turns: [{ prompt: 'go', at: null, ended_at: null, items: [{ kind: 'text', text }] }] })));
@@ -1881,9 +1898,9 @@ describe('ConversationPanel live indicator', () => {
       visible: true,
     });
     await settle();
-    await fireEvent.click(screen.getAllByTestId('answer-option')[1]);
+    await fireEvent.click(screen.getAllByTestId('answer-option')[2]);
     await settle();
-    expect(mockedSend).toHaveBeenCalledWith('local', 'ctl', '', { keys: '2' });
+    expect(mockedSend).toHaveBeenCalledWith('local', 'ctl', '', { keys: '3' });
   });
 
   it('a blocked row whose dialog the probe no longer sees falls back to the banner', async () => {
@@ -1925,7 +1942,7 @@ describe('ConversationPanel live indicator', () => {
       expect(card.querySelector('.of-btn.primary')).toBeNull();
       expect(screen.getAllByTestId('answer-option').map((b) => b.textContent?.trim())).toEqual([
         '1Yes',
-        "2Yes, and don't ask again",
+        "2Yes, and don't ask again…",
         '3No, and tell Claude what to do differently',
       ]);
 

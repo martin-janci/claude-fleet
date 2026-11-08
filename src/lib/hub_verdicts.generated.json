@@ -157,6 +157,7 @@
     "control_route_propose",
     "create_followup_task",
     "create_work_task",
+    "dashboard_summary",
     "dashboards",
     "debug_device_logs",
     "debug_device_screenshot",
@@ -389,7 +390,8 @@
     "work_today",
     "work_tracker_comments",
     "work_tree",
-    "work_views"
+    "work_views",
+    "worktree_setup"
   ],
   "routed_unless": [
     {

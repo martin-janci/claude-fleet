@@ -13,7 +13,10 @@
 // Step 6: pinned dashboards are kept on the hub, per person, so every
 // device of theirs shows them and the agent reads them. A change
 // goes back through the agent: "Change" puts the dashboard as it is into
-// the agent's composer, and its answer is a new block with the same id.
+// the agent's composer, and the agent pins its change under the same id
+// itself (owner report 2026-11-06: a change waiting on a click in the chat
+// read as one that never happened); the page says "Changed by Control"
+// and offers Undo, which puts the version before back.
 import { writable } from 'svelte/store';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { DASHBOARDS_CHANGED_EVENT } from './events';
@@ -22,6 +25,7 @@ import { checkUiBlock, UI_SPEC } from './rich_blocks';
 import { invokeCmd, type Result } from './result';
 import type { WorkTreeFilters, WorkGroupBy } from './work_view';
 import type { WorkspaceId } from './workspace';
+import type { DashboardFeed } from './dashboard_sources';
 
 // ---------------------------------------------------------------------------
 // Wire types (`WorkStats`)
@@ -93,7 +97,43 @@ export function workStats(filters: WorkTreeFilters, since?: number): Promise<Res
 /** What a stat shows of an answer. */
 export type StatValue = 'total' | 'open' | 'needs_you' | 'pct_done' | 'cost' | StageKey;
 
+/** What a summary widget reads (`DASH_SUMMARY_SOURCES`); work alone when absent. */
+export type SummarySource = 'work' | 'sessions' | 'hosts' | 'accounts' | 'feeds';
+/** What a `fleet` widget counts. */
+export type FleetSource = 'sessions' | 'hosts' | 'accounts';
+
 export type Widget =
+  | {
+      /** A model's few lines over the query's counts, answering `prompt`;
+       *  written only on Write or Refresh (`work_link dashboard_summary`). */
+      kind: 'summary';
+      title: string;
+      query: WorkTreeFilters;
+      /** What to write, in the person's words; at most 500 characters. */
+      prompt: string;
+      /** What else it reads: the page's sessions, hosts, accounts and
+       *  feeds, sent with the request (owner report 2026-11-06). */
+      sources?: SummarySource[];
+    }
+  | {
+      /** The value written last to feed `key`: by Control
+       *  (`dashboards { feed }`), the person, or a routine's reply
+       *  (`<dashboard-feed key="…">`). Never computed by the app. */
+      kind: 'feed';
+      title: string;
+      key: string;
+      /** text (default), or one big number. */
+      show?: 'text' | 'stat';
+    }
+  | {
+      /** The fleet's own rows, as this desktop holds them: sessions by
+       *  state, hosts reachable, accounts' usage. */
+      kind: 'fleet';
+      title: string;
+      source: FleetSource;
+      /** stat (default): one number; list: a row each. */
+      show?: 'stat' | 'list';
+    }
   | {
       kind: 'stat';
       title: string;
@@ -229,6 +269,8 @@ export function burnupDaysOf(w: Widget): number | undefined {
 
 /** The read a widget answers from: its filters, and a burn-up's window. */
 export function widgetKey(w: Widget): string {
+  if (w.kind === 'feed') return `feed:${w.key}`;
+  if (w.kind === 'fleet') return `fleet:${w.source}`;
   const days = burnupDaysOf(w);
   return days === undefined ? queryKey(w.query) : `${queryKey(w.query)}|burnup:${days}`;
 }
@@ -243,12 +285,21 @@ export interface StatsAsk {
 export function dashboardQueries(d: Dashboard): Map<string, StatsAsk> {
   const out = new Map<string, StatsAsk>();
   for (const w of d.widgets) {
+    // A summary widget's counts are read by the hub that writes it; a
+    // feed and the fleet's rows are not the work's.
+    if (w.kind === 'summary' || w.kind === 'feed' || w.kind === 'fleet') continue;
     // Archived work counts: a done task is still done.
     const filters: WorkTreeFilters = { archived: true, ...w.query };
     const days = burnupDaysOf(w);
     out.set(widgetKey(w), days === undefined ? { filters } : { filters, days });
   }
   return out;
+}
+
+/** Where a summary widget keeps the text it was written last, per device:
+ *  the dashboard and the widget's title. */
+export function summaryKey(dashId: string, title: string): string {
+  return `ui.dashboards.summary.${dashId}|${title}`;
 }
 
 /** A burn-up's start for `days` days ending today, as `work_stats` takes
@@ -343,7 +394,14 @@ export type PinnedDashboard = Dashboard & {
   pinned_at: number;
   /** The agent's one sentence on why, as the block gave it. */
   why?: string;
+  /** Pinned or last changed by Control's agent. */
+  by_agent?: boolean;
+  /** The hub keeps the version before the last change (`undo`). */
+  can_undo?: boolean;
 };
+
+/** The device name Control's agent pins under (`OPERATOR_CLIENT_NAME`). */
+export const AGENT_DEVICE = 'ux-agent';
 
 /** The most dashboards one person keeps pinned (`MAX_PINNED` in
  *  service/dashboards.rs). */
@@ -361,6 +419,8 @@ interface PinnedRow {
   spec: unknown;
   why?: string | null;
   pinned_at: number;
+  device?: string | null;
+  can_undo?: boolean;
 }
 
 /** A block checked again as the card checks it: a row a newer build wrote,
@@ -370,6 +430,13 @@ function fromBlock(spec: unknown, pinned_at: number, why?: string | null): Pinne
   if (!c.ok || c.block.kind !== 'dashboard') return null;
   const { kind: _k, why: _w, ...d } = c.block;
   return { ...d, pinned_at, ...(why ? { why } : {}) };
+}
+
+/** A hub row as the page keeps it: the block, plus who changed it last. */
+function fromRow(x: PinnedRow): PinnedDashboard | null {
+  const d = fromBlock(x.spec, x.pinned_at, x.why);
+  if (!d) return null;
+  return { ...d, ...(x.device === AGENT_DEVICE ? { by_agent: true } : {}), ...(x.can_undo ? { can_undo: true } : {}) };
 }
 
 /** The person's pinned dashboards, as the last read or write left them.
@@ -409,7 +476,25 @@ export async function loadPinned(): Promise<void> {
     if (p.ok) rows = [...rows, p.value];
   }
   if (local.length || readPref<unknown[]>(LOCAL_KEY, [], isList).length) writePref(LOCAL_KEY, []);
-  pinnedDashboards.set(rows.flatMap((x) => fromBlock(x.spec, x.pinned_at, x.why) ?? []));
+  pinnedDashboards.set(rows.flatMap((x) => fromRow(x) ?? []));
+}
+
+/** The person's feeds by key (`dashboards { feeds }`): what `feed`
+ *  widgets show. Read with the pins, and again on `dashboards:changed`. */
+export const dashboardFeeds = writable<Record<string, DashboardFeed>>({});
+
+/** Read the feeds again. A hub before feeds answers an error: none then. */
+export async function loadFeeds(): Promise<void> {
+  const r = await call<DashboardFeed[]>({ action: 'feeds' });
+  if (!r.ok || !Array.isArray(r.value)) return;
+  dashboardFeeds.set(Object.fromEntries(r.value.map((f) => [f.key, f])));
+}
+
+/** Write feed `key` as the person; an empty value removes it. */
+export async function writeFeed(key: string, value: string): Promise<Result<DashboardFeed | null>> {
+  const r = await call<DashboardFeed | null>({ action: 'feed', key, value });
+  if (r.ok) await loadFeeds();
+  return r;
 }
 
 let followers = 0;
@@ -431,11 +516,15 @@ export function followPinned(): () => void {
       if (disposed) u();
       else unlisteners.push(u);
     };
-    void loadPinned();
-    void listen(DASHBOARDS_CHANGED_EVENT, () => void loadPinned()).then(keep, () => {});
+    const reload = () => {
+      void loadPinned();
+      void loadFeeds();
+    };
+    reload();
+    void listen(DASHBOARDS_CHANGED_EVENT, reload).then(keep, () => {});
     // A gap the hub could not replay can have swallowed a
     // `dashboards:changed`: re-read rather than trust what we hold.
-    void listen('hub:resynced', () => void loadPinned()).then(keep, () => {});
+    void listen('hub:resynced', reload).then(keep, () => {});
     stopFollowing = () => {
       disposed = true;
       for (const u of unlisteners.splice(0)) u();
@@ -477,7 +566,7 @@ export function pinStateOf(d: Dashboard, pinned: readonly PinnedDashboard[]): Pi
 export async function pinDashboard(d: Dashboard, why?: string): Promise<Result<PinnedDashboard>> {
   const r = await call<PinnedRow>({ action: 'pin', dashboard: dashboardBlock(d), ...(why ? { why } : {}) });
   if (!r.ok) return r;
-  const entry = fromBlock(r.value.spec, r.value.pinned_at, r.value.why);
+  const entry = fromRow(r.value);
   if (!entry) return { ok: false, error: { code: 'E_INVALID', message: 'the hub kept a dashboard this app cannot draw' } };
   pinnedDashboards.update((list) =>
     list.some((p) => p.id === entry.id) ? list.map((p) => (p.id === entry.id ? entry : p)) : [...list, entry],
@@ -490,6 +579,21 @@ export async function unpinDashboard(id: string): Promise<Result<boolean>> {
   if (!r.ok) return r;
   pinnedDashboards.update((list) => list.filter((p) => p.id !== id));
   return { ok: true, value: r.value.removed };
+}
+
+/** Take back Control's last change to `id`: the version before comes
+ *  back, or a dashboard Control pinned new is unpinned. Re-reads the pins. */
+export async function undoDashboard(id: string): Promise<Result<{ undone: boolean; removed: boolean }>> {
+  const r = await call<{ undone: boolean; removed: boolean }>({ action: 'undo', id });
+  if (r.ok) await loadPinned();
+  return r;
+}
+
+/** The dashboard a workspace opens on: the person's own copy of its
+ *  built-in (`<id>.mine`, what "Change" on a built-in makes) when pinned,
+ *  else the built-in. */
+export function workspaceDashboard(builtin: Dashboard, pinned: readonly PinnedDashboard[]): Dashboard {
+  return pinned.find((p) => p.id === `${builtin.id}.mine`) ?? builtin;
 }
 
 /** In words, what a replacement changes: widgets added, removed and
@@ -518,7 +622,7 @@ export function changePrompt(d: Dashboard, widget?: string): string {
     ? `The built-in dashboard "${d.title}", to make my own copy of (keep the id ${base.id}):`
     : `My pinned dashboard "${d.title}", as it is now:`;
   const ask = widget ? `Change the widget "${widget}": ` : 'Change it: ';
-  return `${head}\n\n\`\`\`fleet-ui\n${json}\n\`\`\`\n\nAnswer with a \`dashboard\` block with the same id. ${ask}`;
+  return `${head}\n\n\`\`\`fleet-ui\n${json}\n\`\`\`\n\nSave the change with \`dashboards { pin }\` under the same id, then answer with the \`dashboard\` block. ${ask}`;
 }
 
 /** The dashboard the page shows instead of the workspace's own, and the

@@ -11,6 +11,7 @@ import ControlMissions from './ControlMissions.svelte';
 import { missionNow, missionOpenRequest, type MissionDetail } from './missions';
 import { destination } from './destination';
 import { expectAccessible } from './a11y_check';
+import { runningMissionsFold } from './prefs';
 
 const mission = (id: number, name: string, state = 'active') => ({
   id,
@@ -102,5 +103,22 @@ describe('ControlMissions', () => {
     await fireEvent.click(rows[1].querySelector('button')!);
     expect(get(missionOpenRequest)).toEqual({ id: 2 });
     expect(get(destination)).toBe('session');
+  });
+
+  it('folds on its heading and keeps the choice, so the session above gets the room (2026-11-06)', async () => {
+    runningMissionsFold.set('open');
+    render(ControlMissions);
+    await vi.waitFor(() => expect(screen.getAllByTestId('control-mission')).toHaveLength(2));
+    const toggle = screen.getByTestId('control-missions-toggle');
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    await fireEvent.click(toggle);
+    expect(screen.queryAllByTestId('control-mission')).toHaveLength(0);
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(toggle.textContent).toContain('2');
+    expect(get(runningMissionsFold)).toBe('closed');
+    expect(localStorage.getItem('cf:pref:ui.panel.missions')).toBe('"closed"');
+    await fireEvent.click(toggle);
+    expect(screen.getAllByTestId('control-mission')).toHaveLength(2);
+    runningMissionsFold.set('open');
   });
 });

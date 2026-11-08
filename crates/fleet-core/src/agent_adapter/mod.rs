@@ -11,9 +11,10 @@
 //! A session's agent is `sessions.agent` (migration 121): [`for_session`]
 //! maps a `shell` session to no adapter (a shell has no agent) and any
 //! other to its agent's, Claude Code for an agent with none. [`by_id`]
-//! knows `claude`, `codex` ([`CodexCli`], 12.2) and `agy` ([`Agy`], 12.3,
+//! knows `claude`, `codex` ([`CodexCli`], 12.2), `agy` ([`Agy`], 12.3,
 //! built from agy's docs and provisional until real agy screens are
-//! captured).
+//! captured) and `hermes` ([`Hermes`], Nous Research's Hermes Agent, built
+//! from its source).
 //!
 //! Claude Code moved behind [`ClaudeCode`] with no behaviour change: it
 //! delegates to the functions that did the work before (`tmux`'s launch
@@ -22,10 +23,12 @@
 mod agy;
 mod claude;
 pub(crate) mod codex;
+mod hermes;
 
 pub use agy::Agy;
 pub use claude::ClaudeCode;
 pub use codex::CodexCli;
+pub use hermes::Hermes;
 
 use crate::service::pane_intel::PaneIntel;
 use crate::service::transcript::ConvTurn;
@@ -141,6 +144,7 @@ pub trait AgentAdapter: Send + Sync {
 static CLAUDE_CODE: ClaudeCode = ClaudeCode;
 static AGY: Agy = Agy;
 static CODEX_CLI: CodexCli = CodexCli;
+static HERMES: Hermes = Hermes;
 
 /// Claude Code's adapter.
 pub fn claude() -> &'static dyn AgentAdapter {
@@ -154,6 +158,7 @@ pub fn by_id(agent: &str) -> Option<&'static dyn AgentAdapter> {
         crate::store::AGENT_CLAUDE => Some(claude()),
         crate::store::AGENT_CODEX => Some(&CODEX_CLI),
         crate::store::AGENT_AGY => Some(&AGY),
+        crate::store::AGENT_HERMES => Some(&HERMES),
         _ => None,
     }
 }

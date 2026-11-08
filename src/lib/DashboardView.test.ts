@@ -13,6 +13,7 @@ import { composerDrafts } from './conversation';
 import { destination } from './destination';
 import { fireEvent } from '@testing-library/svelte';
 import type { SessionRow } from './sessions';
+import { hosts, type HostRow } from './hosts';
 
 const mock = invoke as ReturnType<typeof vi.fn>;
 
@@ -24,6 +25,14 @@ function fakeDashboards(rows: Map<string, Record<string, unknown>>, a: { args: {
     const row = { id: dashboard!.id, title: dashboard!.title, spec: dashboard!, why, pinned_at: 100 };
     rows.set(dashboard!.id as string, row);
     return row;
+  }
+  if (action === 'undo') {
+    const row = rows.get(id!) as { previous?: Record<string, unknown> } | undefined;
+    if (row?.previous) {
+      rows.set(id!, row.previous);
+      return { undone: true, removed: false };
+    }
+    return { undone: rows.delete(id!), removed: true };
   }
   return { removed: rows.delete(id!) };
 }
@@ -74,6 +83,37 @@ afterEach(() => {
 });
 
 describe('DashboardView', () => {
+  it('draws a feed as written and the fleet’s own rows', async () => {
+    workspace.set('pm');
+    seed({
+      id: 'dash.ops',
+      title: 'Ops',
+      intro: '',
+      widgets: [
+        { kind: 'feed', title: 'Deploys today', key: 'deploys', show: 'stat' },
+        { kind: 'feed', title: 'Notes', key: 'notes' },
+        { kind: 'fleet', title: 'Hosts', source: 'hosts', show: 'list' },
+      ],
+    });
+    shownDashboard.set({ id: 'dash.ops', workspace: 'pm' });
+    hosts.set([{ alias: 'mac', reachable: true, hidden: false } as HostRow, { alias: 'htz', reachable: false, hidden: false } as HostRow]);
+    const base = mock.getMockImplementation() as (cmd: string, a?: unknown) => Promise<unknown>;
+    mock.mockImplementation(async (cmd: string, a?: { args?: { action?: string } }) => {
+      if (cmd === 'dashboards' && a?.args?.action === 'feeds')
+        return [{ key: 'deploys', value: '3', by: 'routine', by_ref: 'Nightly', updated_at: 1_760_000_000 }];
+      return base(cmd, a);
+    });
+    const r = render(DashboardView);
+    await waitFor(() => expect(r.getAllByTestId('feed-value')[0].textContent).toBe('3'));
+    const metas = r.getAllByTestId('feed-meta').map((m) => m.textContent ?? '');
+    expect(metas[0]).toContain('by routine Nightly');
+    expect(metas[1]).toContain('Nothing written to “notes” yet');
+    const rows = r.getByTestId('fleet-rows').textContent ?? '';
+    expect(rows).toContain('mac');
+    expect(rows).toContain('offline');
+    hosts.set([]);
+  });
+
   it('draws the scrum master’s sprint health from work stats', async () => {
     workspace.set('scrum');
     const r = render(DashboardView);
@@ -140,6 +180,36 @@ describe('DashboardView', () => {
     await fireEvent.click(r.getByTestId('dashboard-unpin'));
     await waitFor(() => expect(r.getByRole('heading', { level: 1 }).textContent).toBe('Epics and releases'));
     expect(get(pinnedDashboards)).toEqual([]);
+    expect(hub.size).toBe(0);
+  });
+
+  it('a change Control made says so, and Undo puts the version before back', async () => {
+    workspace.set('po');
+    const mine: Dashboard = { id: 'dash.x', title: 'Mine', intro: '', widgets: [{ kind: 'stat', title: 'Open', query: {}, value: 'open' }] };
+    const changed: Dashboard = { ...mine, title: 'Mine, with cost', widgets: [...mine.widgets, { kind: 'stat', title: 'Spent', query: {}, value: 'cost' }] };
+    hub.set('dash.x', {
+      id: 'dash.x', title: changed.title, spec: dashboardBlock(changed), pinned_at: 1_760_000_000, device: 'ux-agent', can_undo: true,
+      previous: { id: 'dash.x', title: 'Mine', spec: dashboardBlock(mine), pinned_at: 1_760_000_000 },
+    });
+    shownDashboard.set({ id: 'dash.x', workspace: 'po' });
+    const r = render(DashboardView);
+    await waitFor(() => expect(r.getByRole('heading', { level: 1 }).textContent).toBe('Mine, with cost'));
+    expect(r.getByTestId('dashboard-by-agent').textContent).toBe('Changed by Control');
+    await fireEvent.click(r.getByTestId('dashboard-undo'));
+    await waitFor(() => expect(r.getByRole('heading', { level: 1 }).textContent).toBe('Mine'));
+    expect(r.queryByTestId('dashboard-undo')).toBeNull();
+    expect(mock.mock.calls.some((c) => c[0] === 'dashboards' && (c[1] as { args: { action: string } }).args.action === 'undo')).toBe(true);
+  });
+
+  it('opens on the person’s own copy of the built-in once Control made one', async () => {
+    workspace.set('po');
+    const copy: Dashboard = { id: 'dash.po.mine', title: 'My releases', intro: '', widgets: [{ kind: 'stat', title: 'Open', query: {}, value: 'open' }] };
+    hub.set(copy.id, { id: copy.id, title: copy.title, spec: dashboardBlock(copy), pinned_at: 1_760_000_000, device: 'ux-agent' });
+    const r = render(DashboardView);
+    await waitFor(() => expect(r.getByRole('heading', { level: 1 }).textContent).toBe('My releases'));
+    // Undo of a copy Control pinned new unpins it: the built-in is back.
+    await fireEvent.click(r.getByTestId('dashboard-undo'));
+    await waitFor(() => expect(r.getByRole('heading', { level: 1 }).textContent).toBe('Epics and releases'));
     expect(hub.size).toBe(0);
   });
 });

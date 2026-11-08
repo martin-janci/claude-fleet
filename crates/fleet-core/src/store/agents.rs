@@ -870,6 +870,81 @@ impl Store {
             )
             .optional()
     }
+
+    /// The actions still waiting for a person that rule `rule_id`'s jobs
+    /// proposed, of `kind`, oldest first: what a new proposal of the same
+    /// write is checked against, so a rule that runs on a schedule does not
+    /// queue the same write again every run.
+    pub fn pending_agent_actions_of_rule(
+        &self,
+        rule_id: i64,
+        kind: &str,
+    ) -> Result<Vec<AgentActionRow>, rusqlite::Error> {
+        let cols: String = ACTION_COLS
+            .split(", ")
+            .map(|c| format!("a.{}", c.trim()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {cols} FROM agent_actions a JOIN agent_jobs j ON j.id = a.job_id \
+             WHERE j.rule_id = ?1 AND a.kind = ?2 AND a.state = 'pending' ORDER BY a.id"
+        ))?;
+        let rows = stmt.query_map(params![rule_id, kind], action_row)?;
+        rows.collect()
+    }
+
+    /// Retire a pending action a newer proposal of the same write replaced:
+    /// `expired`, with `why`. `false` when a person answered it first.
+    pub fn supersede_agent_action(
+        &self,
+        id: i64,
+        why: &str,
+        now: i64,
+    ) -> Result<bool, rusqlite::Error> {
+        let n = self.conn.execute(
+            "UPDATE agent_actions SET state = 'expired', error = ?2, decided_by = 'superseded', \
+               decided_at = ?3 WHERE id = ?1 AND state = 'pending'",
+            params![id, why, now],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Where each of actions `ids` came from: its job's rule, agent, subject
+    /// and trigger, keyed by the action's id. An id with no row is left out.
+    pub fn agent_action_origins(&self, ids: &[i64]) -> Result<Vec<ActionOrigin>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT a.id, j.rule_id, j.agent, j.subject, j.trigger FROM agent_actions a \
+             JOIN agent_jobs j ON j.id = a.job_id WHERE a.id = ?1",
+        )?;
+        let mut out = Vec::with_capacity(ids.len());
+        for id in ids {
+            if let Some(o) = stmt
+                .query_row(params![id], |r| {
+                    Ok(ActionOrigin {
+                        action_id: r.get(0)?,
+                        rule_id: r.get(1)?,
+                        agent: r.get(2)?,
+                        subject: r.get(3)?,
+                        trigger: r.get(4)?,
+                    })
+                })
+                .optional()?
+            {
+                out.push(o);
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// Where an action came from (`Store::agent_action_origins`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActionOrigin {
+    pub action_id: i64,
+    pub rule_id: Option<i64>,
+    pub agent: String,
+    pub subject: String,
+    pub trigger: String,
 }
 
 #[cfg(test)]

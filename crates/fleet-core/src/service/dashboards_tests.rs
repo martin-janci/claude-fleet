@@ -1,6 +1,6 @@
 //! Pinned dashboards (persona design, step 6): pinned on one device, shown
-//! on another, nobody else's, checked as blocks, and never pinned by the
-//! agent.
+//! on another, nobody else's, checked as blocks, changed by the agent
+//! when asked and taken back with undo.
 
 use super::*;
 use crate::mcp::auth::{Caller, ClientRef, TokenMode};
@@ -164,7 +164,7 @@ fn a_pin_checks_the_block_refuses_a_builtin_and_stops_at_the_limit() {
 }
 
 #[test]
-fn the_agent_reads_but_never_pins_or_unpins() {
+fn the_agent_pins_a_change_but_never_unpins_or_undoes() {
     let st = store();
     let (ada, _) = people(&st);
     let desk = device(&st, ada, "Ada's Mac");
@@ -185,11 +185,80 @@ fn the_agent_reads_but_never_pins_or_unpins() {
         run(&st, &desk, &id_args("get", "dash.r42"), None, false).unwrap()["id"],
         "dash.r42"
     );
-    for args in [pin_args(block("dash.x", "X")), id_args("unpin", "dash.r42")] {
-        let e = run(&st, &desk, &args, None, false).unwrap_err();
+    // Owner report 2026-11-06: a change asked of Control now lands.
+    let changed = run(
+        &st,
+        &desk,
+        &pin_args(block("dash.r42", "R, by person")),
+        Some(OPERATOR_CLIENT_NAME),
+        false,
+    )
+    .unwrap();
+    assert_eq!(changed["title"], "R, by person");
+    assert_eq!(changed["device"], OPERATOR_CLIENT_NAME);
+    assert_eq!(changed["can_undo"], true);
+    for args in [id_args("unpin", "dash.r42"), id_args("undo", "dash.r42")] {
+        let e = run(&st, &desk, &args, Some(OPERATOR_CLIENT_NAME), false).unwrap_err();
         assert_eq!(e.code, codes::E_FORBIDDEN);
     }
     assert_eq!(list(&st, &desk).unwrap().len(), 1);
+}
+
+#[test]
+fn undo_puts_back_the_version_before_controls_change_once() {
+    let st = store();
+    let (ada, _) = people(&st);
+    let desk = device(&st, ada, "Ada's Mac");
+    pin(
+        &st,
+        &desk,
+        &pin_args(block("dash.r42", "Mine")),
+        Some("Ada's Mac"),
+    )
+    .unwrap();
+    // A pin of the same block keeps nothing to undo.
+    let same = pin(
+        &st,
+        &desk,
+        &pin_args(block("dash.r42", "Mine")),
+        Some("Ada's Mac"),
+    )
+    .unwrap();
+    assert!(!same.can_undo);
+    let e = undo(&st, &desk, "dash.r42").unwrap_err();
+    assert_eq!(e.code, codes::E_INVALID);
+
+    pin(
+        &st,
+        &desk,
+        &pin_args(block("dash.r42", "Control's")),
+        Some(OPERATOR_CLIENT_NAME),
+    )
+    .unwrap();
+    let back = run(&st, &desk, &id_args("undo", "dash.r42"), None, true).unwrap();
+    assert_eq!(back["undone"], true);
+    let row = get(&st, &desk, "dash.r42").unwrap().unwrap();
+    assert_eq!(row.title, "Mine");
+    assert_eq!(row.spec["title"], "Mine");
+    assert_eq!(row.device.as_deref(), Some("Ada's Mac"));
+    assert!(!row.can_undo, "one step only");
+    assert!(undo(&st, &desk, "dash.r42").is_err());
+
+    // A dashboard Control pinned new is taken back by unpinning it.
+    pin(
+        &st,
+        &desk,
+        &pin_args(block("dash.scrum.mine", "Copy")),
+        Some(OPERATOR_CLIENT_NAME),
+    )
+    .unwrap();
+    let gone = undo(&st, &desk, "dash.scrum.mine").unwrap();
+    assert_eq!(gone["removed"], true);
+    assert!(get(&st, &desk, "dash.scrum.mine").unwrap().is_none());
+    assert_eq!(
+        undo(&st, &desk, "nope").unwrap_err().code,
+        codes::E_NOTFOUND
+    );
 }
 
 #[test]
@@ -248,4 +317,101 @@ fn a_pin_and_an_unpin_tell_the_persons_devices_with_an_empty_frame() {
         crate::events::RowChange::DashboardsChanged.payload(),
         json!({})
     );
+}
+
+fn feed_args(key: &str, value: &str) -> DashboardsArgs {
+    DashboardsArgs {
+        action: "feed".into(),
+        key: Some(key.into()),
+        value: Some(value.into()),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn a_feed_is_written_by_control_or_the_person_and_read_by_them_only() {
+    let st = store();
+    let (ada, bob) = people(&st);
+    let desk = device(&st, ada, "Ada's Mac");
+    let theirs = device(&st, bob, "Bob's Mac");
+    let w = run(
+        &st,
+        &desk,
+        &feed_args("deploys", "  3 today  "),
+        Some(OPERATOR_CLIENT_NAME),
+        false,
+    )
+    .unwrap();
+    assert_eq!(w["value"], "3 today");
+    assert_eq!(w["by"], "agent");
+    run(&st, &desk, &feed_args("deploys", "4 today"), None, true).unwrap();
+    let mine = feeds(&st, &desk).unwrap();
+    assert_eq!(mine.len(), 1);
+    assert_eq!(
+        (mine[0].value.as_str(), mine[0].by.as_str()),
+        ("4 today", "person")
+    );
+    assert!(feeds(&st, &theirs).unwrap().is_empty());
+    // An empty value removes it.
+    assert_eq!(
+        run(&st, &desk, &feed_args("deploys", " "), None, true).unwrap(),
+        json!(null)
+    );
+    assert!(feeds(&st, &desk).unwrap().is_empty());
+    for bad in ["", "has space", "quote\"d"] {
+        let e = run(&st, &desk, &feed_args(bad, "x"), None, true).unwrap_err();
+        assert_eq!(e.code, codes::E_INVALID, "{bad:?}");
+    }
+}
+
+#[test]
+fn a_feed_value_is_cut_and_the_feeds_stop_at_the_limit() {
+    let st = store();
+    let me = ViewScope::internal();
+    let long = "x".repeat(FEED_VALUE_MAX_CHARS + 10);
+    let w = feed(&st, &me, &feed_args("long", &long), true)
+        .unwrap()
+        .unwrap();
+    assert_eq!(w.value.chars().count(), FEED_VALUE_MAX_CHARS);
+    for i in 1..MAX_FEEDS {
+        feed(&st, &me, &feed_args(&format!("k{i}"), "1"), true).unwrap();
+    }
+    let e = feed(&st, &me, &feed_args("one.more", "1"), true).unwrap_err();
+    assert!(e.message.contains("feeds are kept"), "{}", e.message);
+    // Rewriting one already kept still works when full.
+    feed(&st, &me, &feed_args("k1", "2"), true).unwrap();
+}
+
+#[test]
+fn a_routine_reply_names_its_feeds_in_blocks() {
+    let reply = "Done.\n<dashboard-feed key=\"deploys\">\n3 today\n</dashboard-feed>\n\
+                 The tag is `<dashboard-feed key=\"x\">no</dashboard-feed>`.\n\
+                 <dashboard-feed>no key</dashboard-feed>\
+                 <dashboard-feed key=\"bad key\">no</dashboard-feed>\
+                 <dashboard-feed key=\"ci:main\">green</dashboard-feed>";
+    assert_eq!(
+        feed_blocks(reply),
+        vec![
+            ("deploys".to_string(), "3 today".to_string()),
+            ("ci:main".to_string(), "green".to_string()),
+        ]
+    );
+    assert!(feed_blocks("<dashboard-feed key=\"open\">never closed").is_empty());
+}
+
+#[test]
+fn a_feed_write_tells_the_persons_devices() {
+    let bus = std::sync::Arc::new(crate::events::RecordingEventBus::new());
+    let st = Mutex::new(Store::open_with_bus_in_memory(bus.clone()).unwrap());
+    let me = ViewScope::internal();
+    feed(&st, &me, &feed_args("k", "1"), false).unwrap();
+    feed(&st, &me, &feed_args("k", ""), true).unwrap();
+    // Removing what is not there says nothing.
+    feed(&st, &me, &feed_args("k", ""), true).unwrap();
+    let n = bus
+        .names()
+        .iter()
+        .filter(|n| **n == "dashboards:changed")
+        .count();
+    assert_eq!(n, 2);
 }

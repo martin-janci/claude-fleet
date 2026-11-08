@@ -49,6 +49,7 @@ pub mod tracker_comments;
 pub mod usage;
 pub mod verify;
 pub mod view;
+pub mod worktree_setup;
 pub mod wrapup;
 
 use crate::ipc_error::{codes, lock, IpcError};
@@ -391,9 +392,13 @@ pub struct WorkLinkArgs {
     /// verify: the condition line checked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub line: Option<String>,
-    /// check_setup: the test command ("" none).
+    /// check_setup: the test command ("" none). worktree_setup: the
+    /// command run in a new worktree ("" none).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
+    /// worktree_setup: relative globs copied into a new worktree ([] none).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub globs: Option<Vec<String>>,
     /// verify: whether it is met. card_decide: apply (true) or dismiss.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ok: Option<bool>,
@@ -434,6 +439,15 @@ pub struct WorkLinkArgs {
     /// today_brief: the start of the viewer's day, unix seconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub since: Option<i64>,
+    /// dashboard_summary: what to write.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+    /// dashboard_summary: Work view filters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filters: Option<serde_json::Value>,
+    /// dashboard_summary: page data.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<serde_json::Value>,
 }
 
 /// `work_link { action: dismiss, item_id }`.
@@ -667,6 +681,7 @@ pub const WORK_LINK_ACTIONS: &[&str] = &[
     "verify",
     "check",
     "check_setup",
+    "worktree_setup",
     "mission_start",
     "mission_plan",
     "mission_grant",
@@ -677,6 +692,7 @@ pub const WORK_LINK_ACTIONS: &[&str] = &[
     "mission_release_note",
     "today_brief",
     "mission_triage",
+    "dashboard_summary",
 ];
 
 /// The desktop's Routed work commands and the hub action each one calls
@@ -781,6 +797,8 @@ pub const ROUTED_WORK_COMMANDS: &[(&str, &str, &str)] = &[
     // AI check on done: Test now / Rerun, and a project's switch.
     ("run_ticket_check", "work_link", "check"),
     ("set_ticket_check", "work_link", "check_setup"),
+    // New worktree setup: a project's copy globs and setup command.
+    ("worktree_setup", "work_link", "worktree_setup"),
     ("start_mission_wave", "work_link", "mission_start"),
     ("retry_work_item", "work_link", "retry"),
     ("plan_mission", "work_link", "mission_plan"),
@@ -792,6 +810,8 @@ pub const ROUTED_WORK_COMMANDS: &[(&str, &str, &str)] = &[
     ("mission_release_note", "work_link", "mission_release_note"),
     ("today_brief", "work_link", "today_brief"),
     ("mission_triage", "work_link", "mission_triage"),
+    // A dashboard's summary widget (owner report 2026-11-06).
+    ("dashboard_summary", "work_link", "dashboard_summary"),
 ];
 
 /// `work_link`'s `task_id` as text, from a string or a bare integer:

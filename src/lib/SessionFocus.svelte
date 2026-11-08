@@ -5,6 +5,11 @@
   it in full, "status · host · account · PR", its last prompt, and its
   conversation. Control's Session tab and Work → Missions' Session tab both
   draw it; each says which siblings to show and what a click does.
+
+  The strip folds (2026-11-06): its title is a toggle with the count, a long
+  strip starts folded, the choice is kept (`siblingsFold` in prefs.ts), and
+  an open strip scrolls past a third of the panel, so the conversation
+  always keeps its room.
 -->
 <script lang="ts">
   import type { Snippet } from 'svelte';
@@ -15,6 +20,7 @@
   import { accountByUuid, accountLabel, sessionAccountUuid } from './accounts';
   import { hostByAlias } from './hosts';
   import type { SessionRow } from './sessions';
+  import { foldOpen, siblingsFold } from './prefs';
 
   let {
     session,
@@ -47,24 +53,35 @@
     return a ? accountLabel(a) : null;
   });
   const name = $derived(displayName(session, true));
+  const open = $derived(foldOpen($siblingsFold, siblings.length));
 </script>
 
 <div class="focus" data-testid="{prefix}-focus">
   {#if siblings.length > 0}
-    <div class="siblings" data-testid="{prefix}-siblings">
-      <span class="sib-title">{siblingsTitle}</span>
-      <div class="sib-row">
-        {#each siblings as sib (sib.id)}
-          <button
-            type="button"
-            class="sib"
-            class:on={sib.id === session.id}
-            aria-current={sib.id === session.id ? 'true' : undefined}
-            data-testid="{prefix}-sibling"
-            onclick={() => onpick(sib)}><StatusDot state={sessionState(sib)} size={6} />{displayName(sib, true)}</button
-          >
-        {/each}
-      </div>
+    <div class="siblings" data-testid="{prefix}-siblings" data-open={open}>
+      <button
+        type="button"
+        class="sib-title"
+        aria-expanded={open}
+        data-testid="{prefix}-siblings-toggle"
+        title={open ? 'Fold the sessions beside it' : 'Show the sessions beside it'}
+        onclick={() => siblingsFold.set(open ? 'closed' : 'open')}
+        ><span class="chev" aria-hidden="true">{open ? '▾' : '▸'}</span>{siblingsTitle}<span class="sib-n">{siblings.length}</span></button
+      >
+      {#if open}
+        <div class="sib-row">
+          {#each siblings as sib (sib.id)}
+            <button
+              type="button"
+              class="sib"
+              class:on={sib.id === session.id}
+              aria-current={sib.id === session.id ? 'true' : undefined}
+              data-testid="{prefix}-sibling"
+              onclick={() => onpick(sib)}><StatusDot state={sessionState(sib)} size={6} />{displayName(sib, true)}</button
+            >
+          {/each}
+        </div>
+      {/if}
     </div>
   {/if}
   <div class="focus-head">
@@ -98,21 +115,54 @@
     min-height: 0;
   }
   .siblings {
+    flex: none;
     display: flex;
     flex-direction: column;
     gap: var(--space-2);
-    padding: 10px var(--space-3);
+    padding: 6px var(--space-3);
     border-bottom: 1px solid var(--border);
   }
   .sib-title {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    align-self: flex-start;
+    max-width: 100%;
+    border: 0;
+    background: transparent;
+    padding: 2px 0;
     color: var(--fg-muted);
+    font: inherit;
     font-size: var(--text-2xs);
     font-weight: 500;
+    cursor: pointer;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
+  .sib-title:hover {
+    color: var(--fg);
+  }
+  .sib-title:focus-visible {
+    outline: var(--ring-w) solid var(--ring);
+    outline-offset: 1px;
+  }
+  .chev {
+    width: 10px;
+  }
+  .sib-n {
+    padding: 0 5px;
+    border-radius: var(--radius-sm);
+    background: var(--chip-bg);
+    color: var(--fg-2);
+  }
+  /* An open strip never takes more than a third of the panel. */
   .sib-row {
     display: flex;
     flex-wrap: wrap;
     gap: 6px;
+    max-height: 30vh;
+    overflow-y: auto;
   }
   .sib {
     display: inline-flex;
@@ -140,6 +190,7 @@
     outline-offset: 1px;
   }
   .focus-head {
+    flex: none;
     padding: var(--space-2) var(--space-3);
     border-bottom: 1px solid var(--border);
   }
@@ -165,6 +216,13 @@
     color: var(--fg-muted);
     font-size: var(--text-xs);
   }
+  .prompt {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
   .icon {
     border: 0;
     background: transparent;
@@ -183,9 +241,11 @@
     outline: 2px solid var(--accent);
     outline-offset: -2px;
   }
+  /* The conversation keeps room to read: below this the panel scrolls
+     instead of squeezing it. */
   .conv {
     flex: 1 1 auto;
-    min-height: 0;
+    min-height: 280px;
     display: flex;
     flex-direction: column;
   }

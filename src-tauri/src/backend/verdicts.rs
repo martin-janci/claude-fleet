@@ -372,6 +372,8 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     // AI check on done: Test now / Rerun, and a project's switch.
     ("run_ticket_check", Verdict::Routed { tool: "work_link" }),
     ("set_ticket_check", Verdict::Routed { tool: "work_link" }),
+    // New worktree setup: a project's copy globs and setup command.
+    ("worktree_setup", Verdict::Routed { tool: "work_link" }),
     // Work graph M13.4c: a Claude-written summary of past work (on demand,
     // D10). Routed: the run happens on the session's own host, which the
     // hub reaches.
@@ -495,6 +497,7 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ),
     ("today_brief", Verdict::Routed { tool: "work_link" }),
     ("mission_triage", Verdict::Routed { tool: "work_link" }),
+    ("dashboard_summary", Verdict::Routed { tool: "work_link" }),
     // Work graph M3.1: trackers and their credentials are fleet
     // administration. The hub's `work_admin` is master-only, and a paired
     // desktop is a client, never the master (review C17).

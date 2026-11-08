@@ -31,6 +31,7 @@
 //! The pollers and runners are injected ([`Registry`]), as the shepherd's
 //! executor is; production registers the PR reviewer ([`review`]).
 
+pub mod about;
 pub mod admin;
 pub mod compare;
 pub mod debug;

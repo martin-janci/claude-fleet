@@ -441,7 +441,7 @@ const GLYPH_PREFIX = /^(?![✓✗✦✎])\p{Extended_Pictographic}\uFE0F?\s+\p{L
 /** Words that keep their capital inside a sentence-case title: names of
  *  products, places in the app, and keys. All-caps words (API, MCP) pass. */
 export const PROPER_WORDS = new Set([
-  'Orbit', 'Fleet', 'Claude', 'Code', 'Codex', 'Agy', 'Jev', 'GitHub', 'GitLab', 'Jira', 'Linear', 'Asana',
+  'Orbit', 'Fleet', 'Claude', 'Code', 'Codex', 'Agy', 'Hermes', 'Jev', 'GitHub', 'GitLab', 'Jira', 'Linear', 'Asana',
   'Control', 'Inbox', 'Sessions', 'Work', 'Automation', 'Accounts', 'Toolkit', 'Settings', 'Today',
   'Mac', 'Windows', 'Linux', 'Android', 'Enter', 'Esc', 'Tab', 'Ctrl', 'Alt', 'Shift', 'Data', 'Center', 'Cloud',
 ]);

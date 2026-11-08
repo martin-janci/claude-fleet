@@ -9,10 +9,10 @@
 import type { HostRow } from './hosts';
 
 /** The agents the picker lists, in its order. */
-export type PickerAgent = 'claude' | 'codex' | 'agy';
+export type PickerAgent = 'claude' | 'codex' | 'agy' | 'hermes';
 
 /** Agents fleet can start today. Agy has an adapter but no launch yet. */
-export const STARTABLE_AGENTS: readonly PickerAgent[] = ['claude', 'codex'];
+export const STARTABLE_AGENTS: readonly PickerAgent[] = ['claude', 'codex', 'hermes'];
 
 export interface AgentChoice {
   agent: PickerAgent;
@@ -24,12 +24,12 @@ export interface AgentChoice {
   tag: string | null;
 }
 
-const LABELS: Record<PickerAgent, string> = { claude: 'Claude Code', codex: 'Codex', agy: 'Agy' };
+const LABELS: Record<PickerAgent, string> = { claude: 'Claude Code', codex: 'Codex', agy: 'Agy', hermes: 'Hermes' };
 
 /** The picker's agents for `host` (by alias, as the dialog chose it). */
 export function agentChoices(hostAlias: string, host: Pick<HostRow, 'agents_on_path'> | undefined): AgentChoice[] {
   const onPath = host?.agents_on_path ?? null;
-  return (['claude', 'codex', 'agy'] as const).map((agent) => {
+  return (['claude', 'codex', 'agy', 'hermes'] as const).map((agent) => {
     const label = LABELS[agent];
     if (agent === 'claude') return { agent, label, enabled: true, reason: null, tag: null };
     if (!STARTABLE_AGENTS.includes(agent)) {

@@ -7,8 +7,14 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
   import BurnupChart from './BurnupChart.svelte';
+  import SummaryWidget from './SummaryWidget.svelte';
   import Loader from './Loader.svelte';
   import { workChanged } from './work';
+  import { sessions } from './sessions';
+  import { hosts } from './hosts';
+  import { accounts } from './accounts';
+  import { accountUsage } from './account_usage_store';
+  import { feedBy, feedStat, fleetFacts, type FleetData } from './dashboard_sources';
   import { errorText } from './error_copy';
   import {
     PACE_LABELS,
@@ -16,6 +22,7 @@
     STAGE_LABELS,
     bucketsShown,
     burnupSince,
+    dashboardFeeds,
     dashboardQueries,
     groupsShown,
     paceOf,
@@ -98,6 +105,14 @@
     seq++;
   });
 
+  // Sessions, hosts and accounts as this desktop holds them: a `fleet`
+  // widget is live with the rows themselves.
+  const fleet = $derived<FleetData>({ sessions: $sessions, hosts: $hosts, accounts: $accounts, usage: $accountUsage });
+
+  function clock(unix: number): string {
+    return new Date(unix * 1000).toLocaleString(undefined, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+  }
+
   const answerOf = (w: Widget) => answers[widgetKey(w)];
   const errorOf = (w: Widget) => errors[widgetKey(w)];
 </script>
@@ -111,7 +126,7 @@
         {@const err = errorOf(w)}
         <section
           class="card"
-          class:wide={w.kind !== 'stat'}
+          class:wide={!(w.kind === 'stat' || (w.kind === 'fleet' && w.show !== 'list') || (w.kind === 'feed' && w.show === 'stat'))}
           aria-label={w.title}
           data-testid="widget-{w.kind}"
         >
@@ -125,7 +140,39 @@
               onclick={() => onchange?.(w.title)}>Change</button
             >
           {/if}
-          {#if err}
+          {#if w.kind === 'summary'}
+            <SummaryWidget dashId={dash.id} widget={w} {fleet} />
+          {:else if w.kind === 'feed'}
+            {@const f = $dashboardFeeds[w.key]}
+            {#if w.show === 'stat'}
+              <div class="stat-label">{w.title}</div>
+              <div class="stat tnum" data-testid="feed-value">{f ? feedStat(f.value) : '—'}</div>
+            {:else}
+              <h2>{w.title}</h2>
+              {#if f}<p class="feed-text" data-testid="feed-value">{f.value}</p>{/if}
+            {/if}
+            <div class="stat-note" data-testid="feed-meta">
+              {#if f}by {feedBy(f)} · {clock(f.updated_at)}{:else}Nothing written to “{w.key}” yet: Control, you or a routine writes it.{/if}
+            </div>
+          {:else if w.kind === 'fleet'}
+            {@const x = fleetFacts(w.source, fleet)}
+            {#if w.show === 'list'}
+              <h2>{w.title}</h2>
+              {#if x.rows.length === 0}
+                <p class="none">None here.</p>
+              {:else}
+                <ul class="facts" data-testid="fleet-rows">
+                  {#each x.rows as r, k (k)}
+                    <li><span class="label" title={r.label}>{r.label}</span><span class="fact tnum" class:warn={r.warn}>{r.value}</span></li>
+                  {/each}
+                </ul>
+              {/if}
+            {:else}
+              <div class="stat-label">{w.title}</div>
+              <div class="stat tnum" class:warn={x.warn} data-testid="fleet-value">{x.value}</div>
+              <div class="stat-note">{x.note}</div>
+            {/if}
+          {:else if err}
             <h2>{w.title}</h2>
             <p class="err">Could not read: {err}</p>
           {:else if !s}
@@ -236,6 +283,11 @@
   .tnum { font-variant-numeric: tabular-nums; }
   .none, .err { margin: 0; font-size: var(--text-sm); color: var(--fg-muted); }
   .err { color: var(--status-failed); }
+  .feed-text { margin: 0; font-size: var(--text-sm); white-space: pre-wrap; overflow-wrap: anywhere; color: var(--fg); max-height: 16rem; overflow: auto; }
+  .facts { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+  .facts li { display: flex; justify-content: space-between; gap: 10px; font-size: var(--text-sm); }
+  .fact { color: var(--fg); white-space: nowrap; }
+  .fact.warn { color: var(--status-waiting); }
   .rows, .buckets { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
   .rows li { display: grid; grid-template-columns: minmax(0, 9rem) minmax(0, 1fr) 3.5rem; gap: 10px; align-items: center; font-size: var(--text-sm); }
   .label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg-2); }

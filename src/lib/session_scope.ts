@@ -84,7 +84,7 @@ export function sharedByLine(
 // ── Agent facet ──
 
 export type AgentFilter = 'any' | SessionAgent;
-export const AGENT_FILTERS: readonly AgentFilter[] = ['any', 'claude', 'codex', 'agy', 'shell'];
+export const AGENT_FILTERS: readonly AgentFilter[] = ['any', 'claude', 'codex', 'agy', 'hermes', 'shell'];
 const isAgentFilter = (v: unknown): v is AgentFilter =>
   typeof v === 'string' && (AGENT_FILTERS as readonly string[]).includes(v);
 /** "Agent: any" — persisted like the host filter. */

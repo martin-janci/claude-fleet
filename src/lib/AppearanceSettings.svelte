@@ -162,7 +162,7 @@
     <div class="pref-text">
       <span class="lbl">Agent tab name</span>
       <p class="hook-desc">
-        Per agent shows the agent's own name and icon: Claude Code, Codex, Agy. Terminal names every one Terminal.
+        Per agent shows the agent's own name and icon: Claude Code, Codex, Agy, Hermes. Terminal names every one Terminal.
       </p>
     </div>
     <SegmentedControl

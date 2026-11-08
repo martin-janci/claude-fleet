@@ -3567,6 +3567,21 @@ async fn run_matrix(isolate: bool) {
     .await;
     m.row(
         "work_link",
+        "worktree_setup",
+        |_, _| json!({ "action": "worktree_setup", "project_id": 987_654, "command": "true" }),
+        |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            match who {
+                Who::Master | Who::ClientFull => is_code(who, a, "E_NOTFOUND", "no such project"),
+                _ => is_code(who, a, "E_FORBIDDEN", "a person decides"),
+            }
+        },
+    )
+    .await;
+    m.row(
+        "work_link",
         "check_setup",
         |_, _| json!({ "action": "check_setup", "project_id": 987_654, "mode": "ask" }),
         |_, who, a| {
@@ -3719,6 +3734,23 @@ async fn run_matrix(isolate: bool) {
             match who {
                 w if w.is_host() => is_code(who, a, "E_FORBIDDEN", "a session does not run"),
                 _ => is_ok(who, a, "today_brief"),
+            }
+        },
+    )
+    .await;
+    // A dashboard's summary widget: with no request it runs nothing and says
+    // so; a host's token is refused as for the brief.
+    m.row(
+        "work_link",
+        "dashboard_summary",
+        |_, _| json!({ "action": "dashboard_summary" }),
+        |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            match who {
+                w if w.is_host() => is_code(who, a, "E_FORBIDDEN", "a session does not run"),
+                _ => is_code(who, a, "E_INVALID", "dashboard_summary needs prompt"),
             }
         },
     )

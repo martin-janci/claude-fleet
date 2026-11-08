@@ -25,6 +25,7 @@ mod control_handoffs;
 mod control_journal;
 mod control_tokens;
 mod conversations;
+mod dashboard_feeds;
 mod debug_devices;
 mod decisions;
 mod deferred_prompts;
@@ -113,6 +114,7 @@ mod work_tasks;
 mod work_tidy;
 mod work_usage;
 mod work_view;
+mod worktree_setup;
 
 pub use access_requests::{AccessRequestRow, ACCESS_REQUEST_COOLDOWN_SECS};
 pub use account_usage_snapshots::{UsageSnapshotRow, USAGE_HISTORY_KEEP_SECS};
@@ -122,16 +124,17 @@ pub use agent_records::{
     AGENT_RECORD_VALUE_MAX,
 };
 pub use agents::{
-    AgentActionRow, AgentCursorRow, AgentJobEnd, AgentJobRow, AgentRuleRow, NewAgentJob,
-    NewAgentRule, AGENT_ACTION_STATES, AGENT_BINDINGS_MAX_CHARS, AGENT_CONFIG_MAX_CHARS,
-    AGENT_DEFINITION_MAX_CHARS, AGENT_JOB_STATES, AGENT_KINDS, AGENT_LEVELS, AGENT_SCOPE_MAX_CHARS,
+    ActionOrigin, AgentActionRow, AgentCursorRow, AgentJobEnd, AgentJobRow, AgentRuleRow,
+    NewAgentJob, NewAgentRule, AGENT_ACTION_STATES, AGENT_BINDINGS_MAX_CHARS,
+    AGENT_CONFIG_MAX_CHARS, AGENT_DEFINITION_MAX_CHARS, AGENT_JOB_STATES, AGENT_KINDS,
+    AGENT_LEVELS, AGENT_SCOPE_MAX_CHARS,
 };
 pub use autofix::{AutofixBudget, AutofixRow, NewAutofixFinding, AUTOFIX_LIVE};
 pub use aux_usage::{
     AuxUsageRow, NewAuxUsage, AUX_ORIGINS, AUX_ORIGIN_BRIEF, AUX_ORIGIN_COMMIT_MESSAGE,
-    AUX_ORIGIN_CONTEXT_HELP, AUX_ORIGIN_HEADLESS_CHECK, AUX_ORIGIN_MORNING_BRIEF,
-    AUX_ORIGIN_PLANNER, AUX_ORIGIN_RELEASE_NOTE, AUX_ORIGIN_SUMMARY, AUX_ORIGIN_TASK_TITLE,
-    AUX_ORIGIN_TRIAGE, AUX_ORIGIN_WATCH_SUMMARY,
+    AUX_ORIGIN_CONTEXT_HELP, AUX_ORIGIN_DASHBOARD_SUMMARY, AUX_ORIGIN_HEADLESS_CHECK,
+    AUX_ORIGIN_MORNING_BRIEF, AUX_ORIGIN_PLANNER, AUX_ORIGIN_RELEASE_NOTE, AUX_ORIGIN_SUMMARY,
+    AUX_ORIGIN_TASK_TITLE, AUX_ORIGIN_TRIAGE, AUX_ORIGIN_WATCH_SUMMARY,
 };
 pub use bench_work_link::{BenchHostLink, BenchItemRow, BenchLinkRow, BenchUnlinkedRow};
 pub use changesets::{
@@ -172,6 +175,7 @@ pub use host_setup::{AgentInstallRow, HostSetupRow, SetupCheck};
 pub use account_project_blocks::MAX_FORBIDDEN_PROJECTS;
 #[allow(unused_imports)]
 pub(crate) use admin_events::record_admin_event_in_tx;
+pub use dashboard_feeds::{DashboardFeedRow, DASHBOARD_FEED_WRITERS};
 pub use diagnostics::WindowEventRow;
 pub use fleet_events::{FleetEventRow, NewFleetEvent, FLEET_EVENTS, FLEET_EVENTS_CAP};
 /// How follow-up titles compare: the same line twice, whitespace and case aside.
@@ -350,6 +354,7 @@ pub use work_usage::{DetectionCounts, JournalCounts};
 pub use work_view::{
     version_conflict, Placement, RuleConditions, ViewItem, ViewLink, WorkRule, WorkView,
 };
+pub use worktree_setup::{check_setup, check_setup_glob, WorktreeSetup, SETUP_GLOBS_MAX};
 
 /// One number per `Store` ever built in this process, never reused — see
 /// [`Store::instance_id`].

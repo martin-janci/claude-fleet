@@ -150,9 +150,10 @@
       <select data-testid="start-rules-agent" bind:value={agent}>
         <option value="">Claude Code</option>
         <option value="codex">Codex</option>
+        <option value="hermes">Hermes</option>
       </select>
     </label>
-    {#if agent !== 'codex'}
+    {#if agent !== 'codex' && agent !== 'hermes'}
       <label>
         <span>Account</span>
         <select data-testid="start-rules-account" bind:value={profile}>

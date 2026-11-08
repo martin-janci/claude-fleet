@@ -10,6 +10,7 @@ import {
   actionTitle,
   agents,
   agentState,
+  groupActions,
   answerAgentAction,
   jobLine,
   pendingAgentCount,
@@ -251,5 +252,38 @@ describe('agents (design step 5)', () => {
     expect(load).toHaveBeenCalledTimes(2);
     stop();
     vi.useRealTimers();
+  });
+});
+
+describe('groupActions', () => {
+  const a = (id: number, kind: string, payload: object = {}) => ({
+    id,
+    job_id: 1,
+    kind,
+    payload: JSON.stringify(payload),
+    state: 'pending',
+    decided_by: null,
+    decided_at: null,
+    executed_at: null,
+    error: null,
+    created_at: id,
+  });
+  it('folds by the hub\'s group key, in order', () => {
+    const ab = (id: number, group: string) => ({ id, from: 'x', what: 'w', group });
+    const g = groupActions([a(3, 'mcp_call'), a(2, 'kb_learn'), a(1, 'mcp_call')], [ab(3, 'g1'), ab(2, 'g2'), ab(1, 'g1')]);
+    expect(g.map((x) => [x.key, x.items.map((i) => i.action.id)])).toEqual([
+      ['g1', [3, 1]],
+      ['g2', [2]],
+    ]);
+  });
+  it('folds only tool calls for an older hub', () => {
+    const call = { binding: 'jira', tool: 't' };
+    const g = groupActions([a(3, 'mcp_call', call), a(2, 'kb_learn'), a(1, 'kb_learn'), a(0, 'mcp_call', call)], undefined);
+    expect(g.map((x) => x.items.length)).toEqual([2, 1, 1]);
+  });
+  it('prefers the hub\'s title', () => {
+    const x = a(1, 'mcp_call', { binding: 'jira', tool: 'jira_update_issue' });
+    expect(actionTitle(x)).toBe('Call jira.jira_update_issue');
+    expect(actionTitle(x, { title: 'Jira: update issue PD-1 (status)' })).toBe('Jira: update issue PD-1 (status)');
   });
 });

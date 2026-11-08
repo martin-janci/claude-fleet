@@ -41,6 +41,7 @@
   import type { SessionRow } from './sessions';
   import QuestionCard from './kit/QuestionCard.svelte';
   import type { Answer } from './kit/status';
+  import { answerArm, persistentRule } from './answer_guard';
   import {
     answerFingerprint,
     isChatOption,
@@ -104,12 +105,22 @@
 
   // A new question is a new card: whatever the last one answered is spent.
   const identity = $derived(answerFingerprint(view));
+  /** When this card last appeared or changed (`answer_guard.ts`). */
+  let shownAt = 0;
+  /** The "always allow in this folder" choice waiting for its second press. */
+  let confirming = $state<AnswerOption | null>(null);
   $effect(() => {
     void identity;
     sent = null;
     errorMsg = null;
     staleMsg = null;
+    confirming = null;
+    shownAt = Date.now();
   });
+  /** A press this soon after the card appeared or changed was aimed at
+   *  whatever was there before it: ignored, as Android ignores a tap on an
+   *  obscured window. */
+  const tooSoon = () => Date.now() - shownAt < answerArm.ms;
   const ticks = $derived(view.options.filter((o) => o.checked).map((o) => o.n).join());
   $effect(() => {
     void identity;
@@ -180,7 +191,9 @@
           ? (toggleBlocked ?? `Press ${o.key} — ${isChecked(o) ? 'untick' : 'tick'} it`)
           : view.multi
             ? (toggleBlocked ?? `Press ${o.key} — leave these questions and chat with Claude instead`)
-            : `Press ${o.key}${isSticky(o) ? ' — this also stops Claude asking again' : ''}`;
+            : persistentRule(o.label) !== null
+              ? `${o.label} — asks first: Claude Code saves this rule for every later session in that folder`
+              : `Press ${o.key}${isSticky(o) ? ' — this also stops Claude asking again' : ''}`;
 
   /** Re-read the pane, then press `key` only if it still shows this card's
    *  dialog (`answer_send.ts`). `label` is what the card reports as sent; a
@@ -210,8 +223,14 @@
   }
 
   function choose(o: AnswerOption) {
-    if (o.key === null) return;
+    if (o.key === null || tooSoon()) return;
     if (view.multi && toggleBlocked !== null) return;
+    // A rule Claude Code keeps for the folder outlives this session: the
+    // first press (click or digit) only says so; "Save rule and allow" sends.
+    if (!view.multi && persistentRule(o.label) !== null) {
+      confirming = o;
+      return;
+    }
     if (!isBox(o)) {
       void press(o.key, o.label).then((ok) => {
         if (ok) onAnswered?.(o.label);
@@ -259,6 +278,19 @@
   // sidebar's compact cards take no digits: there could be several.
   const isMac = detectMac(typeof navigator === 'undefined' ? undefined : navigator);
   function onWindowKeydown(e: KeyboardEvent) {
+    if (
+      !compact &&
+      confirming !== null &&
+      e.key === 'Escape' &&
+      !e.defaultPrevented &&
+      $destination === 'session' &&
+      !isEditable(e.target as HTMLElement | null) &&
+      !(e.target as HTMLElement | null)?.closest?.('dialog')
+    ) {
+      e.preventDefault();
+      confirming = null;
+      return;
+    }
     if (compact || sent !== null || busy || e.defaultPrevented || $destination !== 'session') return;
     if (matchShortcut('question-card', e, isMac) !== 'question-card.answer') return;
     const target = e.target as HTMLElement | null;
@@ -277,7 +309,7 @@
     sent !== null
       ? []
       : order.shown.map((o, i) => ({
-          label: o.label,
+          label: persistentRule(o.label) !== null && !view.multi ? `${o.label}…` : o.label,
           // Reordered by the quick answer, the number is the shown place.
           kbd: order.proposed ? String(i + 1) : (o.key ?? undefined),
           primary: order.primary === o || undefined,
@@ -291,6 +323,16 @@
   const cardQuestion = $derived(
     view.question ?? `Claude is waiting for one of these${view.kind === 'permission' ? ' (permission)' : ''}.`,
   );
+  function confirmPersistent() {
+    const o = confirming;
+    if (o === null || o.key === null) return;
+    confirming = null;
+    void press(o.key, o.label).then((ok) => {
+      if (ok) onAnswered?.(o.label);
+    });
+  }
+  const confirmRule = $derived(confirming === null ? null : persistentRule(confirming.label));
+
   /** Own words: Escape dismisses the dialog (the re-read guards it like any
    *  answer), then the caller's composer takes the words. */
   function ownWords() {
@@ -331,6 +373,32 @@
         changeLabel="Keep the order"
         testid="answer-proposed"
         onchange={() => (keepOrder = true)} />
+    {/if}
+    {#if confirming !== null && confirmRule !== null && sent === null}
+      <div class="persist" role="group" aria-label="Always allow in this folder" data-testid="answer-persist">
+        <strong>Always allow in this folder?</strong>
+        <span class="hint"
+          >Claude Code saves this on {session.host_alias} for every later session in {confirmRule.folder ??
+            'this folder'}, not only this one. Nothing is saved yet.</span
+        >
+        {#if confirmRule.rule}<code class="rule" data-testid="answer-persist-rule">{confirmRule.rule}</code>{/if}
+        <div class="persist-actions">
+          <button
+            type="button"
+            class="btn btn--chip btn--quiet"
+            data-testid="answer-persist-cancel"
+            onclick={(e) => mine(e, () => (confirming = null))}>Cancel</button
+          >
+          <button
+            type="button"
+            class="btn btn--primary btn--danger"
+            data-testid="answer-persist-save"
+            disabled={busy || writeBlocked !== null}
+            title={writeBlocked ?? `Press ${confirming.key}`}
+            onclick={(e) => mine(e, confirmPersistent)}>Save rule and allow</button
+          >
+        </div>
+      </div>
     {/if}
     {#if sent !== null}
       <p class="sent" role="status" data-testid="answer-sent">✓ Sent: {sent} · <button
@@ -382,6 +450,29 @@
 </div>
 
 <style>
+  .persist {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    padding: 0.5rem 0.6rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--bg-pane);
+    font-size: var(--text-xs);
+  }
+  .persist .rule {
+    font-family: var(--mono);
+    font-size: var(--text-2xs);
+    align-self: flex-start;
+    padding: 0.1rem 0.4rem;
+    border-radius: var(--radius-sm);
+    background: var(--bg-sunk, var(--bg));
+  }
+  .persist-actions {
+    display: flex;
+    gap: 0.4rem;
+    justify-content: flex-end;
+  }
   .answer-new {
     margin: 0.35rem 0 0.6rem;
   }

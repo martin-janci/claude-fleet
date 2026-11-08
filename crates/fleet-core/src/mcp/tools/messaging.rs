@@ -97,6 +97,23 @@ impl FleetTools {
                 answer_key_allowed(key, probe.pending_input.as_ref())
                     .map_err(|why| mcp_err(codes::E_FORBIDDEN, why, None))?;
             }
+            // Claude Code's "don't ask again for: <rule> in <folder>" answers
+            // every LATER session in that folder, not only this one: only a
+            // person on a full device presses it (HumanLayer plan v2, R0).
+            // Control, an agent, a peer and an answer-only device are refused
+            // the digit, and the Enter that would pick it from the cursor.
+            if !presses_folder_rules(&caller)
+                && matches!(
+                    key,
+                    crate::tmux::NamedKey::Digit(_) | crate::tmux::NamedKey::Enter
+                )
+            {
+                let probe = sessions::session_activity(&self.store, &self.ssh, row.id)
+                    .await
+                    .map_err(to_mcp_err)?;
+                folder_rule_refused(key, probe.pending_input.as_ref())
+                    .map_err(|why| mcp_err(codes::E_FORBIDDEN, why, None))?;
+            }
             // The client's check and its press, made one step here: the pane
             // is re-read now and the key goes out right after, with no round
             // trip to the client in between.
@@ -993,6 +1010,52 @@ pub(crate) fn answer_key_allowed(
     }
 }
 
+/// Whether `caller` may press a dialog option that saves a rule for the
+/// whole folder ([`is_folder_rule`]): the master token or a person's paired
+/// full device. Never Control (the operator), an agent's host token, a peer,
+/// or an answer-only device.
+fn presses_folder_rules(caller: &Caller) -> bool {
+    caller.host_alias.is_none()
+        && !caller.is_operator()
+        && caller.mode != TokenMode::Answer
+        && caller.mode != TokenMode::Peer
+}
+
+/// PURE: Claude Code's "Yes, and don't ask again for: <rule> in <folder>",
+/// which it saves in the folder's settings for every later session there.
+/// The session-only "…don't ask again this session" is not one. Mirrors the
+/// desktop's `src/lib/answer_guard.ts::persistentRule`.
+pub(crate) fn is_folder_rule(label: &str) -> bool {
+    let l = label.to_lowercase().replace('\u{2019}', "'");
+    let asks = l.contains("don't ask again") || l.contains("dont ask again");
+    asks && !(l.contains("this session") || l.contains("the session") || l.contains("during this"))
+}
+
+/// PURE: refuse `key` when it would pick a folder-wide rule on `dialog`: its
+/// digit, or Enter with the cursor on it. A multi-select only toggles boxes.
+pub(crate) fn folder_rule_refused(
+    key: crate::tmux::NamedKey,
+    dialog: Option<&crate::service::pane_intel::PendingInput>,
+) -> Result<(), String> {
+    use crate::tmux::NamedKey;
+    let Some(d) = dialog.filter(|d| !d.multi) else {
+        return Ok(());
+    };
+    let picked = match key {
+        NamedKey::Digit(n) => d.options.iter().find(|o| o.n == n.get()),
+        NamedKey::Enter => d.options.iter().find(|o| o.selected),
+        _ => None,
+    };
+    match picked {
+        Some(o) if is_folder_rule(&o.label) => Err(format!(
+            "option {} saves a rule for every later session in that folder; \
+             a person presses it on the desktop",
+            o.n
+        )),
+        _ => Ok(()),
+    }
+}
+
 /// The half of [`answer_key_allowed`] that needs no pane: refused before the
 /// pane is read, so a key no dialog takes costs no round trip.
 fn answer_key_kind(key: crate::tmux::NamedKey) -> Result<(), String> {
@@ -1021,7 +1084,7 @@ fn answer_key_kind(key: crate::tmux::NamedKey) -> Result<(), String> {
 
 #[cfg(test)]
 mod answer_key_tests {
-    use super::answer_key_allowed;
+    use super::{answer_key_allowed, folder_rule_refused, is_folder_rule};
     use crate::service::pane_intel::{PendingInput, PendingOption};
     use crate::tmux::NamedKey;
 
@@ -1075,5 +1138,48 @@ mod answer_key_tests {
                 "{k} with no dialog"
             );
         }
+    }
+
+    fn rule_dialog(cursor: u8) -> PendingInput {
+        let mut d = dialog(3);
+        d.options[1].label =
+            "Yes, and don\u{2019}t ask again for: git push:* in /home/user/claude-fleet".into();
+        for o in &mut d.options {
+            o.selected = o.n == cursor;
+        }
+        d
+    }
+
+    #[test]
+    fn a_folder_wide_rule_is_refused_by_digit_and_by_enter_on_it() {
+        let d = rule_dialog(1);
+        assert!(folder_rule_refused(key("2"), Some(&d)).is_err());
+        assert_eq!(folder_rule_refused(key("1"), Some(&d)), Ok(()));
+        assert_eq!(folder_rule_refused(key("3"), Some(&d)), Ok(()));
+        assert_eq!(folder_rule_refused(key("Enter"), Some(&d)), Ok(()));
+        assert!(folder_rule_refused(key("Enter"), Some(&rule_dialog(2))).is_err());
+        assert_eq!(
+            folder_rule_refused(key("Escape"), Some(&rule_dialog(2))),
+            Ok(())
+        );
+        assert_eq!(folder_rule_refused(key("2"), None), Ok(()));
+    }
+
+    #[test]
+    fn a_multi_select_box_is_never_a_folder_rule() {
+        let mut d = rule_dialog(1);
+        d.multi = true;
+        assert_eq!(folder_rule_refused(key("2"), Some(&d)), Ok(()));
+    }
+
+    #[test]
+    fn only_a_rule_that_outlives_the_session_counts() {
+        assert!(is_folder_rule("Yes, and don't ask again"));
+        assert!(is_folder_rule(
+            "Yes, and don\u{2019}t ask again for: ls * in /tmp"
+        ));
+        assert!(!is_folder_rule("Yes, and don't ask again this session"));
+        assert!(!is_folder_rule("Yes, allow all edits during this session"));
+        assert!(!is_folder_rule("Yes"));
     }
 }

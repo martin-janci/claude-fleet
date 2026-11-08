@@ -36,6 +36,10 @@ pub const AUX_ORIGIN_CONTEXT_HELP: &str = "context_help";
 /// (`work::orchestrate::checks`).
 pub const AUX_ORIGIN_HEADLESS_CHECK: &str = "headless_check";
 
+/// [`NewAuxUsage::origin`] of a dashboard's summary widget: a model's text
+/// from the widget's counts (`work::orchestrate::drafts::dashboard_summary`).
+pub const AUX_ORIGIN_DASHBOARD_SUMMARY: &str = "dashboard_summary";
+
 /// Every origin above: each is also a run kind (`RUN_KINDS`).
 pub const AUX_ORIGINS: &[&str] = &[
     AUX_ORIGIN_PLANNER,
@@ -49,6 +53,7 @@ pub const AUX_ORIGINS: &[&str] = &[
     AUX_ORIGIN_TRIAGE,
     AUX_ORIGIN_CONTEXT_HELP,
     AUX_ORIGIN_HEADLESS_CHECK,
+    AUX_ORIGIN_DASHBOARD_SUMMARY,
 ];
 
 /// One run to book.

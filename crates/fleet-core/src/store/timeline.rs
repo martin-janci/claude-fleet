@@ -18,6 +18,22 @@ const STUCK_EVENT_WINDOW_SECS: i64 = 3600;
 const MARK_READ_CHUNK: usize = 10_000;
 
 impl Store {
+    /// How many events of `kind` with exactly `detail` the session has.
+    pub fn count_session_events(
+        &self,
+        session_id: i64,
+        kind: &str,
+        detail: &str,
+    ) -> Result<i64, crate::ipc_error::IpcError> {
+        Ok(self
+            .conn
+            .prepare_cached(
+                "SELECT COUNT(*) FROM session_events \
+                 WHERE session_id = ?1 AND kind = ?2 AND detail = ?3",
+            )?
+            .query_row(rusqlite::params![session_id, kind, detail], |r| r.get(0))?)
+    }
+
     /// Append one row to the per-session event timeline (migration 013). The
     /// timeline is append-only; callers must treat a write failure as
     /// non-fatal (log + continue) so it can never block the mutation that

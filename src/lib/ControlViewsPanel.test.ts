@@ -14,6 +14,7 @@ import { session, snapshot } from './hosts_fixture';
 import { accountUsage } from './account_usage_store';
 import { expectAccessible } from './a11y_check';
 import { openInControl } from './control_room';
+import { siblingsFold } from './prefs';
 import { tick } from 'svelte';
 import { findings, fixedRecently, type Finding } from './autofix';
 
@@ -172,6 +173,27 @@ describe('ControlViewsPanel (step 9.4)', () => {
     await fireEvent.click(getByTestId('control-session-full'));
     expect(get(destination)).toBe('session');
     expect(get(selectedSession)?.id).toBe(b.id);
+  });
+
+  it('a long sibling strip starts folded behind its count; the toggle opens it and is remembered (2026-11-06)', async () => {
+    siblingsFold.set('auto');
+    const many = Array.from({ length: 12 }, (_, i) => session('mercury', `w-${i}`, { origin: 'mission', origin_ref: '9', claude_status: 'idle' }));
+    sessions.set([...many, busy]);
+    destination.set('control');
+    const { getByTestId, queryAllByTestId } = render(ControlViewsPanel);
+    openInControl(many[0].id);
+    await tick();
+    const toggle = getByTestId('control-session-siblings-toggle');
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(toggle.textContent).toContain('12');
+    expect(queryAllByTestId('control-session-sibling')).toHaveLength(0);
+    await fireEvent.click(toggle);
+    expect(queryAllByTestId('control-session-sibling')).toHaveLength(12);
+    expect(localStorage.getItem('cf:pref:ui.panel.siblings')).toBe('"open"');
+    await fireEvent.click(toggle);
+    expect(queryAllByTestId('control-session-sibling')).toHaveLength(0);
+    expect(get(siblingsFold)).toBe('closed');
+    siblingsFold.set('auto');
   });
 
   it('passes the axe and audit checks', async () => {

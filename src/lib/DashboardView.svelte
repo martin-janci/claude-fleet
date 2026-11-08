@@ -7,7 +7,10 @@
 
   "Change" (the page's, or a widget's) hands the dashboard to the agent:
   it lands in Control's composer, the person says what to change, and the
-  agent answers with a new block of the same id to pin over this one.
+  agent pins its change under the same id itself. A dashboard Control
+  changed says so, with Undo (the version before comes back). A built-in
+  changed that way becomes the person's copy (`<id>.mine`), which the
+  workspace then opens on.
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
@@ -22,7 +25,9 @@
     pinnedDashboards,
     shownDashboard,
     followPinned,
+    undoDashboard,
     unpinDashboard,
+    workspaceDashboard,
     type Dashboard,
     type PinnedDashboard,
   } from './dashboards';
@@ -31,9 +36,11 @@
   // holds while the workspace it was made in is the active one.
   const builtin = $derived(BUILTIN_DASHBOARDS[$workspace]);
   const pick_ = $derived($shownDashboard?.workspace === $workspace ? $shownDashboard.id : null);
-  const pinned = $derived<PinnedDashboard | null>($pinnedDashboards.find((p) => p.id === pick_) ?? null);
+  const picked = $derived<PinnedDashboard | null>($pinnedDashboards.find((p) => p.id === pick_) ?? null);
   const pickedBuiltin = $derived(Object.values(BUILTIN_DASHBOARDS).find((d) => d.id === pick_) ?? null);
-  const dash = $derived<Dashboard>(pinned ?? pickedBuiltin ?? builtin);
+  const dash = $derived<Dashboard>(picked ?? pickedBuiltin ?? workspaceDashboard(builtin, $pinnedDashboards));
+  /** The pinned row the page shows, if it shows one. */
+  const pinned = $derived<PinnedDashboard | null>($pinnedDashboards.find((p) => p.id === dash.id) ?? null);
   const owner = $derived(WORKSPACES.find((w) => BUILTIN_DASHBOARDS[w.id].id === dash.id)?.id ?? $workspace);
 
   let body = $state<ReturnType<typeof DashboardBody> | null>(null);
@@ -51,6 +58,16 @@
   // Pinned on another device: read on every visit, and again whenever the
   // hub says the person's pins moved (`dashboards:changed`).
   onMount(() => followPinned());
+
+  let undoing = $state(false);
+  async function undo() {
+    if (!pinned) return;
+    undoing = true;
+    const r = await undoDashboard(pinned.id);
+    undoing = false;
+    if (!r.ok) pushError(r.error, 'Undo the change');
+    else if (r.value.removed) shownDashboard.set(null);
+  }
 
   async function unpin() {
     if (!pinned) return;
@@ -73,7 +90,7 @@
   <header class="head">
     <div class="titles">
       <div class="kicker">
-        {#if pinned}Pinned · proposed by the agent{:else}{workspacePreset(owner).name} · dashboard{/if}
+        {#if pinned?.by_agent}<span data-testid="dashboard-by-agent">Changed by Control</span>{:else if pinned}Pinned · proposed by the agent{:else}{workspacePreset(owner).name} · dashboard{/if}
       </div>
       <h1>{dash.title}</h1>
       {#if dash.intro}<p class="intro">{dash.intro}</p>{/if}
@@ -97,6 +114,9 @@
         </select>
       </label>
       <Button size="sm" onclick={() => change()} testid="dashboard-change">Change with the agent</Button>
+      {#if pinned?.by_agent}
+        <Button size="sm" onclick={undo} disabled={undoing} testid="dashboard-undo">Undo</Button>
+      {/if}
       {#if pinned}
         <Button size="sm" onclick={unpin} testid="dashboard-unpin">Unpin</Button>
       {/if}

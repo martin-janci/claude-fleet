@@ -24,6 +24,10 @@ pub struct PinnedDashboardRow {
     pub device: Option<String>,
     pub pinned_at: i64,
     pub updated_at: i64,
+    /// Whether the version before the last replacement is kept, so
+    /// `dashboards { undo }` can put it back (migration 220).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub can_undo: bool,
 }
 
 /// What one pin writes.
@@ -37,7 +41,8 @@ pub struct PinnedDashboardWrite<'a> {
     pub device: Option<&'a str>,
 }
 
-const COLS: &str = "dash_id, person_id, title, spec, why, device, pinned_at, updated_at";
+const COLS: &str = "dash_id, person_id, title, spec, why, device, pinned_at, updated_at, \
+                    previous_spec IS NOT NULL";
 
 fn row(r: &rusqlite::Row<'_>) -> Result<PinnedDashboardRow> {
     let spec: String = r.get(3)?;
@@ -51,20 +56,28 @@ fn row(r: &rusqlite::Row<'_>) -> Result<PinnedDashboardRow> {
         device: r.get(5)?,
         pinned_at: r.get(6)?,
         updated_at: r.get(7)?,
+        can_undo: r.get(8)?,
     })
 }
 
 impl Store {
     /// Pin a dashboard, or replace the one of the same id and person (its
-    /// `pinned_at` stays).
+    /// `pinned_at` stays). A replacement that changes the spec keeps the
+    /// version it overwrote, for [`Store::undo_dashboard`].
     pub fn pin_dashboard(&self, w: &PinnedDashboardWrite<'_>) -> Result<PinnedDashboardRow> {
         self.conn.execute(
             "INSERT INTO pinned_dashboards
                (dash_id, person_id, title, spec, why, device, pinned_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
              ON CONFLICT (dash_id, COALESCE(person_id, 0)) DO UPDATE SET
+               previous_spec = CASE WHEN pinned_dashboards.spec = excluded.spec
+                 THEN pinned_dashboards.previous_spec ELSE pinned_dashboards.spec END,
+               previous_device = CASE WHEN pinned_dashboards.spec = excluded.spec
+                 THEN pinned_dashboards.previous_device ELSE pinned_dashboards.device END,
                title = excluded.title, spec = excluded.spec, why = excluded.why,
-               device = excluded.device, updated_at = excluded.updated_at",
+               device = CASE WHEN pinned_dashboards.spec = excluded.spec
+                 THEN pinned_dashboards.device ELSE excluded.device END,
+               updated_at = excluded.updated_at",
             rusqlite::params![
                 w.id,
                 w.person_id,
@@ -104,6 +117,30 @@ impl Store {
         ))?;
         let rows = st.query_map([], row)?;
         rows.collect()
+    }
+
+    /// Put back the version the last replacement overwrote, and forget it
+    /// (one step). `None` when the row is gone or keeps no earlier version.
+    pub fn undo_dashboard(
+        &self,
+        id: &str,
+        person_id: Option<i64>,
+    ) -> Result<Option<PinnedDashboardRow>> {
+        let n = self.conn.execute(
+            "UPDATE pinned_dashboards SET
+               spec = previous_spec,
+               title = COALESCE(json_extract(previous_spec, '$.title'), title),
+               device = previous_device,
+               previous_spec = NULL, previous_device = NULL,
+               updated_at = ?3
+             WHERE dash_id = ?1 AND COALESCE(person_id, 0) = COALESCE(?2, 0)
+               AND previous_spec IS NOT NULL",
+            rusqlite::params![id, person_id, now_unix()],
+        )?;
+        if n == 0 {
+            return Ok(None);
+        }
+        self.pinned_dashboard(id, person_id)
     }
 
     /// `true` when it was pinned.

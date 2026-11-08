@@ -414,3 +414,92 @@ async fn a_release_note_never_runs_on_another_orgs_host() {
         .unwrap();
     assert_eq!(booked, 0, "nothing ran");
 }
+
+#[test]
+fn a_summary_widgets_prompt_carries_the_request_and_the_counts() {
+    let stats = crate::service::work::stats::stats_of(&[], "group", 1_760_000_000);
+    let (prompt, from) = dashboard_summary_prompt("  What blocks the release?  ", &stats, None);
+    assert!(prompt.starts_with(DASHBOARD_SUMMARY_PROMPT), "{prompt}");
+    assert!(
+        prompt.contains("The person's request: What blocks the release?\n"),
+        "{prompt}"
+    );
+    assert!(prompt.contains("\"total\": 0"), "{prompt}");
+    assert!(!prompt.contains("Other data"), "{prompt}");
+    assert_eq!(from, "0 tasks");
+}
+
+#[test]
+fn a_summary_widgets_other_data_is_fenced_and_named() {
+    let stats = crate::service::work::stats::stats_of(&[], "group", 1_760_000_000);
+    let context = serde_json::json!({
+        "sessions": { "working": 2 },
+        "feeds": { "deploys": "3 today" },
+    });
+    let (prompt, from) = dashboard_summary_prompt("How is it going?", &stats, Some(&context));
+    assert!(prompt.contains("\"deploys\": \"3 today\""), "{prompt}");
+    assert!(
+        prompt.contains(&crate::mcp::guard::untrusted_marker("dashboard data")),
+        "{prompt}"
+    );
+    assert_eq!(from, "0 tasks and feeds, sessions");
+    let empty = serde_json::json!({});
+    let (_, from) = dashboard_summary_prompt("x", &stats, Some(&empty));
+    assert_eq!(from, "0 tasks");
+    assert!(check_summary_context(Some(&context)).is_ok());
+    assert!(check_summary_context(None).is_ok());
+    assert!(check_summary_context(Some(&serde_json::json!([1]))).is_err());
+    let big = serde_json::json!({ "feeds": "x".repeat(SUMMARY_CONTEXT_MAX_BYTES) });
+    assert!(check_summary_context(Some(&big)).is_err());
+}
+
+/// A summary widget runs only with a request, refuses a long one and
+/// filters that are not the Work view's, and with no session today has no
+/// host: nothing is booked.
+#[tokio::test]
+async fn a_summary_widget_needs_a_request_and_a_host() {
+    let (deps, me, _) = fixture("summary-reader");
+    let ask = |prompt: Option<&str>, filters: Option<serde_json::Value>| WorkLinkArgs {
+        action: "dashboard_summary".into(),
+        prompt: prompt.map(str::to_string),
+        filters,
+        ..Default::default()
+    };
+    let err = dashboard_summary(&ask(None, None), &deps, &me)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, codes::E_INVALID);
+    let long = "x".repeat(SUMMARY_REQUEST_MAX_CHARS + 1);
+    let err = dashboard_summary(&ask(Some(&long), None), &deps, &me)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, codes::E_INVALID);
+    let err = dashboard_summary(
+        &ask(
+            Some("How is it going?"),
+            Some(serde_json::json!({ "status": 3 })),
+        ),
+        &deps,
+        &me,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.code, codes::E_INVALID, "{}", err.message);
+    let err = dashboard_summary(
+        &ask(
+            Some("How is it going?"),
+            Some(serde_json::json!({ "status": "open" })),
+        ),
+        &deps,
+        &me,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.code, codes::E_INVALID_STATE, "{}", err.message);
+    let booked: i64 = lock(&deps.store)
+        .unwrap()
+        .conn_for_test()
+        .query_row("SELECT COUNT(*) FROM aux_usage", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(booked, 0);
+}

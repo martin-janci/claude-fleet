@@ -75,7 +75,7 @@ export function startRuleWire(rule: StartRuleInput): StartRuleInput {
     ...rule,
     host_alias: v(rule.host_alias),
     fallback_host: v(rule.fallback_host),
-    profile: agent === 'codex' ? null : v(rule.profile),
+    profile: agent === 'codex' || agent === 'hermes' ? null : v(rule.profile),
     model: v(rule.model),
     effort: v(rule.effort),
     agent,
@@ -112,6 +112,7 @@ export function ruleLaunchLine(rule: Pick<StartRule, 'host_alias' | 'fallback_ho
   else if (rule.model) parts.push(rule.model);
   else if (rule.effort) parts.push(`effort ${rule.effort}`);
   if (rule.agent === 'codex') parts.push('Codex');
+  else if (rule.agent === 'hermes') parts.push('Hermes');
   return parts.join(' · ');
 }
 export const acceptStartRule = (ruleId: number) => call<StartRuleView>({ action: 'accept', rule_id: ruleId });

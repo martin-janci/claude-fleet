@@ -256,7 +256,7 @@
   // session's composer naming the file and which diff is shown; the person
   // writes the question and sends it, nothing goes on its own.
   const askName = $derived(
-    session.agent === 'codex' || session.agent === 'agy' ? agentLabel(session.agent) : 'Claude',
+    session.agent && session.agent !== 'claude' && session.agent !== 'shell' ? agentLabel(session.agent) : 'Claude',
   );
   function askAboutDiff(p: string): void {
     const which = commit
@@ -416,15 +416,16 @@
   }
   .bar {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
-    gap: 0.5rem;
+    gap: 0.35rem 0.5rem;
     padding: 0.35rem 0.6rem;
     border-bottom: 1px solid var(--border);
     background: var(--bg-pane);
     flex: 0 0 auto;
   }
   .path {
-    flex: 1 1 auto;
+    flex: 1 1 8rem;
     min-width: 0;
     font-family: var(--mono);
     font-size: var(--text-2xs);
@@ -435,7 +436,11 @@
     text-align: left;
   }
   .actions {
+    /* Never shrinks under its buttons (they would draw over each other at
+       1440 px); the bar wraps it to a second line instead. */
+    flex: none;
     display: flex;
+    flex-wrap: wrap;
     gap: 0.3rem;
     margin-left: auto;
   }
@@ -457,6 +462,7 @@
     cursor: default;
   }
   .send {
+    flex: none;
     margin-left: 0.5rem;
     background: transparent;
     border: 1px solid var(--border);
@@ -471,6 +477,7 @@
     color: var(--fg);
   }
   .blame-toggle {
+    flex: none;
     background: transparent;
     border: 1px solid var(--border);
     border-radius: var(--radius-sm);
