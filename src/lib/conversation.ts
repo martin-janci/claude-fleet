@@ -70,6 +70,24 @@ export interface ConvTurn {
    *  the text cannot hold. Retry re-sends `prompt` as "the same prompt", so it
    *  is not offered on such a turn. Absent from a hub that predates it. */
   prompt_partial?: boolean;
+  /** Who sent the prompt, when a hub tool typed it (migration 224); absent
+   *  for a prompt typed in the terminal or from a hub that predates it. */
+  author?: TurnAuthor | null;
+}
+
+/** `transcript::TurnAuthor`. */
+export interface TurnAuthor {
+  /** "Ada · phone". */
+  name: string;
+  person_id?: number | null;
+  /** The reader sent it. */
+  mine?: boolean;
+}
+
+/** Who a prompt reads as: "You" for the reader's own (and for a prompt with
+ *  no author, typed in the terminal), else the sender's name. */
+export function promptWho(author: TurnAuthor | null | undefined): string {
+  return !author || author.mine ? 'You' : author.name;
 }
 
 /** Current-conversation context size, read from the same transcript tail. */
@@ -816,7 +834,7 @@ export function transcriptMarkdown(conv: Pick<Conversation, 'turns' | 'truncated
   const out: string[] = [`# ${title}`];
   if (conv.truncated) out.push('_Older turns are not included._');
   for (const t of conv.turns) {
-    if (t.prompt != null && t.prompt.trim() !== '') out.push(`## You\n\n${splitMarker(t.prompt).text.trim()}`);
+    if (t.prompt != null && t.prompt.trim() !== '') out.push(`## ${promptWho(t.author)}\n\n${splitMarker(t.prompt).text.trim()}`);
     const reply: string[] = [];
     for (const it of t.items) {
       switch (it.kind) {

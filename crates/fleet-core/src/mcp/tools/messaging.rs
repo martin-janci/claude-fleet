@@ -176,7 +176,10 @@ impl FleetTools {
         // which is the one thing `client_msg_id` exists to allow.
         let delivered = async {
             let prompt = apply_marker(p.prompt, &marker_origin(&caller), &caller, p.raw)?;
-            self.deliver_prompt(&row, prompt, p.submit, p.force).await
+            let typed = prompt.clone();
+            let out = self.deliver_prompt(&row, prompt, p.submit, p.force).await?;
+            note_prompt_author(&self.store, &caller, row.id, &typed);
+            Ok(out)
         }
         .await;
         let out = match delivered {
@@ -227,6 +230,7 @@ impl FleetTools {
             GateTarget::Session(row.id),
         )?;
         let prompt = apply_marker(p.prompt, &marker_origin(&caller), &caller, p.raw)?;
+        let typed = prompt.clone();
         let out = sessions::queue_prompt(
             sessions::QueuePromptArgs {
                 session_id: row.id,
@@ -240,6 +244,7 @@ impl FleetTools {
         )
         .await
         .map_err(to_mcp_err)?;
+        note_prompt_author(&self.store, &caller, row.id, &typed);
         ok_json(&out)
     }
 
@@ -349,19 +354,27 @@ impl FleetTools {
                     notes: p.notes.unwrap_or_default(),
                 };
                 let origin = marker_origin(&caller);
+                let mut typed: Option<String> = None;
                 let out = sessions::review_notes::send(
                     args,
                     &author,
                     person,
                     |prompt| {
-                        apply_marker(prompt, &origin, &caller, false)
-                            .map_err(|e| IpcError::new(codes::E_FORBIDDEN, e.message.to_string()))
+                        let marked =
+                            apply_marker(prompt, &origin, &caller, false).map_err(|e| {
+                                IpcError::new(codes::E_FORBIDDEN, e.message.to_string())
+                            })?;
+                        typed = Some(marked.clone());
+                        Ok(marked)
                     },
                     &self.store,
                     &self.ssh,
                 )
                 .await
                 .map_err(to_mcp_err)?;
+                if let Some(t) = typed.as_deref() {
+                    note_prompt_author(&self.store, &caller, row.id, t);
+                }
                 ok_json(&out)
             }
             "resolve" => {
@@ -1298,6 +1311,34 @@ mod answer_key_tests {
 /// Who a review note is from, as the conversation shows it, and their
 /// person: "Ada · phone" for a paired device, the owner's name for the
 /// master token (the desktop on its own hub), the token's name otherwise.
+/// Note who typed `typed` into session `session_id`, so the conversation
+/// shows the turn as theirs (migration 224). Best effort: a failure costs
+/// the name on one turn, never the send.
+pub(super) fn note_prompt_author(
+    store: &std::sync::Mutex<crate::store::Store>,
+    caller: &Caller,
+    session_id: i64,
+    typed: &str,
+) {
+    let Ok(s) = lock(store) else { return };
+    let (name, person) = review_author(&s, caller);
+    if let Err(e) =
+        s.record_prompt_author(session_id, typed, &name, person, crate::store::now_unix())
+    {
+        tracing::warn!(session_id, code = %e.code, "prompt author not recorded");
+    }
+}
+
+/// The person `caller` speaks for, if any: a paired device's person, or the
+/// hub's owner for the master token.
+pub(super) fn caller_person(s: &crate::store::Store, caller: &Caller) -> Option<i64> {
+    match (&caller.host_alias, &caller.client, &caller.api) {
+        (None, Some(c), _) => c.person_id,
+        (None, None, None) => s.personal_owner_id().ok().flatten(),
+        _ => None,
+    }
+}
+
 pub(super) fn review_author(s: &crate::store::Store, caller: &Caller) -> (String, Option<i64>) {
     let name_of = |id: i64| {
         s.get_person(id)

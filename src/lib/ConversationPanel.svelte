@@ -103,6 +103,7 @@
     modelShortLabel,
     sessionActivity,
     splitMarker,
+    promptWho,
     indicatorFor,
     doingNow,
     hasPendingCall,
@@ -2701,7 +2702,9 @@
                           >{:else}{sender.text}{/if} · untrusted</span
                       >
                     {:else}
-                      <span class="who">You</span>
+                      <span class="who" class:other={turn.author && !turn.author.mine} data-testid="conv-prompt-who"
+                        >{promptWho(turn.author)}</span
+                      >
                     {/if}
                     <span class="head-right">
                       <span class="copy-slot"><CopyButton text={turn.prompt} label="Copy prompt" /></span>
@@ -3585,6 +3588,10 @@
   }
   .chat-look .who {
     display: none;
+  }
+  /* A colleague's prompt names them even in the chat look. */
+  .chat-look .who.other {
+    display: inline;
   }
   /* The bubble's time and Copy sit beside it, shown on hover or focus. */
   .chat-look .prompt-head {

@@ -55,3 +55,17 @@ untrusted-input marker for a caller that needs one, as `queue_prompt` does.
 
 The desktop command is `review_notes` (Routed). A hub older than the tool
 answers `E_HUB_PROTOCOL`, which the diff shows as the send's error.
+
+## Who sent each prompt
+
+A hub with several people shows whose prompt each turn is. Every prompt a
+hub tool types or queues (`send_prompt`, `queue_prompt`, a review-notes
+send) leaves a row in `prompt_authors` (migration 224): the session, when,
+the prompt's first 80 characters with whitespace folded, and the sender as
+the notes show them ("Ada · phone"). `session_conversation` matches each
+turn to the newest unused row whose head its prompt starts with, written no
+later than the turn (two minutes of clock skew allowed) and no more than a
+week before it, and returns it as the turn's `author`, with `mine` set when
+the reader is that person. The conversation then says "You" for your own
+prompts and the colleague's name for theirs. A prompt typed in the terminal
+has no row and still reads "You". A session keeps its newest 500 rows.

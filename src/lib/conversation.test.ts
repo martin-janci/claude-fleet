@@ -1301,3 +1301,24 @@ describe('Codex in the composer', () => {
     expect(presetForAgent(chip('/my-skill'), 'claude')?.text).toBe('/my-skill');
   });
 });
+
+describe('prompt authors', () => {
+  it('names a colleague and keeps "You" for the reader and the terminal', async () => {
+    const { promptWho, transcriptMarkdown } = await import('./conversation');
+    expect(promptWho(undefined)).toBe('You');
+    expect(promptWho({ name: 'Ada · phone', mine: true })).toBe('You');
+    expect(promptWho({ name: 'Ada · phone', person_id: 2 })).toBe('Ada · phone');
+    const md = transcriptMarkdown(
+      {
+        truncated: false,
+        turns: [
+          { prompt: 'fix it', at: null, ended_at: null, items: [], author: { name: 'Ada · phone' } },
+          { prompt: 'thanks', at: null, ended_at: null, items: [] },
+        ],
+      },
+      'T',
+    );
+    expect(md).toContain('## Ada · phone\n\nfix it');
+    expect(md).toContain('## You\n\nthanks');
+  });
+});
