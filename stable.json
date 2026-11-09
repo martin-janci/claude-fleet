@@ -1,9 +1,9 @@
 {
   "schema": 1,
   "track": "stable",
-  "sequence": 28,
-  "generated_at": "2026-11-02T06:34:32Z",
-  "expires_at": "2026-11-16T06:34:32Z",
+  "sequence": 29,
+  "generated_at": "2026-11-09T06:35:29Z",
+  "expires_at": "2026-11-23T06:35:29Z",
   "current": "0.6.4",
   "recommended": "0.6.4",
   "minimum_supported": {},
