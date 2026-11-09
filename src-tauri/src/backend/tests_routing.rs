@@ -5892,6 +5892,25 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
             }),
         ),
         (
+            "review_request",
+            "review_request",
+            json!({ "action": "done", "id": 4, "done": true }),
+            "{}",
+            Box::new(|b, s, _| {
+                block_on(commands::sessions::routed::review_request(
+                    b,
+                    fleet_core::service::sessions::ReviewRequestArgs {
+                        action: Some("done".into()),
+                        id: Some(4),
+                        done: Some(true),
+                        ..Default::default()
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "access_requests",
             "access_requests",
             json!({ "action": "grant", "id": 3 }),

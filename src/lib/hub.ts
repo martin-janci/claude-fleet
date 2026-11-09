@@ -364,6 +364,7 @@ export const ROUTED_ACTIONS = [
   'queue_prompt',
   'queued_prompts',
   'review_notes',
+  'review_request',
   'cancel_queued_prompt',
   // The composer's context help: one claude -p the hub runs and books.
   'session_context_help',
