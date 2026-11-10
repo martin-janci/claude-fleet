@@ -92,9 +92,12 @@ describe('+ Add account', () => {
     const a = readAnswers({ host: 'mercury', kind: 'setup_token', profile: 'tok', token: 'sk-ant-api03-x' });
     expect(answerProblems(a).map((p) => p.field)).toEqual(['token']);
     expect(tokenAccountChoices([{ uuid: 'setuptoken-1' }, { uuid: 'u' }], (r) => r.uuid)).toEqual([
-      ['', 'Not listed: its own account'],
+      ['own', 'Not listed: its own account'],
       ['u', 'u'],
     ]);
+    // "Not listed" sends no account: the token is its own.
+    expect(readAnswers({ host: 'm', kind: 'setup_token', profile: 't', account: 'own' }).accountUuid).toBe('');
+    expect(readAnswers({ host: 'm', kind: 'setup_token', profile: 't', account: 'u' }).accountUuid).toBe('u');
   });
 
   it('adds an API key with its daily limit in one call', async () => {

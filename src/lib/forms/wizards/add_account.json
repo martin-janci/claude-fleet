@@ -46,7 +46,7 @@
           "name": "account",
           "type": "select",
           "label": "Account",
-          "options": [["", "Not listed: its own account"]],
+          "options": [["own", "Not listed: its own account"]],
           "help": "Whose subscription the token is. Anthropic does not say, so pick it: sessions under the token then count against that account's limits.",
           "when": { "field": "kind", "eq": "setup_token" }
         },

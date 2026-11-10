@@ -1092,11 +1092,12 @@ async fn add_setup_token(
     }
     // A renewal names no account and keeps the profile's: its sessions,
     // nickname and history stay on the same account row.
+    // "own" is the wizard's "Not listed" (a form option value is never empty).
     let picked = args
         .account_uuid
         .as_deref()
         .map(str::trim)
-        .filter(|u| !u.is_empty());
+        .filter(|u| !u.is_empty() && *u != "own");
     let (picked, standalone) = match (picked, renewing.as_deref()) {
         (Some(u), _) => (Some(u), None),
         (None, Some(r)) if r.starts_with(SETUP_TOKEN_ACCOUNT_PREFIX) => (None, Some(r.to_string())),

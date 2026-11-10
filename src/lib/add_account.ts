@@ -70,7 +70,7 @@ export function readAnswers(v: Values): AddAccountAnswers {
     profile: String(v.profile ?? '').trim(),
     apiKey: String(v.api_key ?? '').trim(),
     token: String(v.token ?? '').trim(),
-    accountUuid: String(v.account ?? '').trim(),
+    accountUuid: tokenAccountUuid(v.account),
     dailyLimit: v.daily_limit === undefined || v.daily_limit === null || v.daily_limit === '' || !Number.isFinite(limit) || limit <= 0 ? null : limit,
   };
 }
@@ -116,9 +116,19 @@ export function addSetupToken(a: AddAccountAnswers): Promise<Result<SetupTokenAd
 
 /** The accounts a setup token can be tied to: `/login` accounts fleet
  *  knows, not API keys or other tokens (`add_account::has_no_usage_windows`). */
+/** The account select's value for "Not listed: its own account". A form
+ *  option value must not be empty (fleet.form/1). */
+export const TOKEN_OWN_ACCOUNT = 'own';
+
+/** The account a setup token is for, from the select: '' = its own. */
+function tokenAccountUuid(v: unknown): string {
+  const u = String(v ?? '').trim();
+  return u === TOKEN_OWN_ACCOUNT ? '' : u;
+}
+
 export function tokenAccountChoices<R extends { uuid: string }>(rows: readonly R[], label: (r: R) => string): [string, string][] {
   return [
-    ['', 'Not listed: its own account'],
+    [TOKEN_OWN_ACCOUNT, 'Not listed: its own account'],
     ...rows
       .filter((r) => !r.uuid.startsWith('apikey-') && !r.uuid.startsWith('setuptoken-'))
       .map((r): [string, string] => [r.uuid, label(r)]),
