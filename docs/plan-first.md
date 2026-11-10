@@ -20,9 +20,13 @@ The agent is told to:
 With a ticket and **Brief Claude with the ticket** on, the paragraph rides
 under the brief in the same first prompt. Otherwise it is sent as the
 session's first prompt (`queue_prompt`), and your task is the next message.
+A ticket started in several repositories tells every session it starts. When
+the prompt cannot be sent, a toast names the session and the reason; the
+session is started all the same.
 
-The phone's New session has the same switch under **First message**: the
-paragraph goes out under what you typed there, as one prompt.
+The phone's New session has the same tick under **First message**: the
+paragraph goes out under what you typed there, as one prompt, on a plain
+start and on a ticket start alike.
 
 ## Plan ready
 
@@ -40,7 +44,7 @@ The card carries the file's path and:
 - **Approve and start** sends one prompt saying the plan is approved.
 - **Ask for changes…** puts the file's name in the composer for you to say
   what to change; the work does not start.
-- **×** hides the card.
+- **×** (**Hide** on the phone) hides the card.
 
 The card is about what the agent said last. The next prompt takes it away,
 whoever sent it and from wherever: Approve on the card, "looks good, go
@@ -53,13 +57,20 @@ device and for a session started anywhere: with the checkbox, by Control, or
 by typing the same instructions yourself. An agent that does not say "Plan
 ready" gets no card and still waits, in words.
 
+The session's changes are read when the agent's turn ends, once for what it
+said. If that read fails (the host or the hub does not answer), a card that
+is showing stays, and one that was not showing yet appears the next time the
+session is opened. A session on another fleet has no card in this window:
+its own hub's window, and a phone paired with that hub, show it.
+
 ## What is kept, and where
 
 Only that a card was answered (approved or hidden), **on this device**
-(`localStorage`, the newest 200 sessions), so it does not come back while
-the approval waits in the queue. The plan itself is a file in the branch,
-reviewed and committed with the code. The hub stores nothing new and no tool
-changed.
+(`localStorage`, the newest 200 sessions; the phone keeps its own newest
+100 and drops them when it pairs with another hub), so it does not come
+back while the approval waits in the queue. The plan itself is a file in
+the branch, reviewed and committed with the code. The hub stores nothing
+new and no tool changed.
 
 ## Measure
 

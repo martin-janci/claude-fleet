@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import type { ConvTurn } from './conversation';
+import type { ConvItem, ConvTurn } from './conversation';
 import type { ChangedFile } from './files';
 import {
   planApprovedPrompt,
@@ -20,6 +20,8 @@ const turn = (prompt: string | null, at: string, ...said: string[]): ConvTurn =>
   ended_at: at,
   items: said.map((text) => ({ kind: 'text', text })),
 });
+const text = (words: string): ConvItem => ({ kind: 'text', text: words });
+const tool = (summary: string): ConvItem => ({ kind: 'tool', summary, id: null, name: 'Bash', target: null, at: null, ended_at: null, done: true });
 
 describe('plan first', () => {
   beforeEach(() => localStorage.clear());
@@ -35,6 +37,17 @@ describe('plan first', () => {
     // The next prompt, whoever sent it, ends the announcement.
     expect(planSaid([turn('x', 't1', 'Plan ready: docs/plans/a.md'), turn('Looks good, go ahead', 't2', 'Starting step 1.')])).toBeNull();
     expect(planSaid([turn('x', 't1', 'Plan ready: docs/plans/a.md'), turn('go', 't2')])).toBeNull();
+  });
+
+  it('counts only what the agent said, not what a command printed', () => {
+    const t = turn('x', 't1');
+    // A search for the words, or a file that holds them, is not the agent saying so.
+    expect(planSaid([{ ...t, items: [text('Looking at the last plan.'), tool('grep -r "Plan ready" docs/plans/a.md')] }])).toBeNull();
+    // What it said around a tool call is heard as it was said, one line each.
+    expect(planSaid([{ ...t, items: [text('Wrote it.'), tool('Write docs/plans/a.md'), text('Plan ready: docs/plans/a.md')] }])).toEqual({
+      text: 'Wrote it.\nPlan ready: docs/plans/a.md',
+      at: 't1',
+    });
   });
 
   it('finds the plan the reply names among the changes', () => {
@@ -53,6 +66,16 @@ describe('plan first', () => {
         'Plan ready. I split it: 2026-11-01-old.md, 2026-11-09-a.md and 2026-11-10-b.md',
       ),
     ).toBe('docs/plans/2026-11-10-b.md');
+    // The edited one sorts last by name here, and the new one still wins.
+    expect(
+      planFile(
+        [f('docs/plans/2026-11-12-later.md', 'modified'), f('docs/plans/2026-11-10-b.md')],
+        'Plan ready: 2026-11-10-b.md. I also fixed a link in 2026-11-12-later.md',
+      ),
+    ).toBe('docs/plans/2026-11-10-b.md');
+    // A plan that was committed and then changed is announced as an edited file.
+    expect(planFile([f('docs/plans/2026-11-10-retry.md', 'modified'), f('src/a.ts', 'modified')], reply)).toBe('docs/plans/2026-11-10-retry.md');
+    expect(planFile([f('docs/plans/a.md', 'modified'), f('docs/plans/b.md', 'modified')], 'Plan ready: a.md and b.md')).toBe('docs/plans/b.md');
   });
 
   it('an answered announcement stays answered on this device; the next one asks again', () => {
@@ -62,6 +85,8 @@ describe('plan first', () => {
     // The same file, said again after another prompt, and another session.
     expect(planSettled(7, 'docs/plans/a.md', 't2')).toBe(false);
     expect(planSettled(8, 'docs/plans/a.md', 't1')).toBe(false);
+    // Another plan, announced before any other prompt (a turn no prompt opened).
+    expect(planSettled(7, 'docs/plans/b.md', 't1')).toBe(false);
   });
 
   it('keeps the newest 200 sessions, by when they were answered', () => {
@@ -90,5 +115,8 @@ describe('plan first', () => {
     expect(planApprovedPrompt('docs/plans/a.md')).toContain('docs/plans/a.md is approved');
     expect(planChangesPrefix('docs/plans/a.md')).toContain('say "Plan ready" again');
     expect(planDate(new Date(2026, 0, 5))).toBe('2026-01-05');
+    // The day on this machine's clock, at both ends of it (UTC's differs east and west of Greenwich).
+    expect(planDate(new Date(2026, 0, 5, 0, 30))).toBe('2026-01-05');
+    expect(planDate(new Date(2026, 0, 5, 23, 30))).toBe('2026-01-05');
   });
 });
