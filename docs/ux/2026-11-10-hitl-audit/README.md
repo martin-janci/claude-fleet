@@ -54,6 +54,7 @@ The weak points are one level up, in how the loop is put together:
 | 2 | Make the row say why: line two is the ask, the failure or the result, and the dot is the state | H-11, H-12 | S |
 | 3 | Keep names visible: the selected row and the session header | H-15, H-16 | S |
 | 4 | Count and announce every ask: review requests, operator confirms, a new ask while the window has focus | H-08, H-09 | S–M |
+| 4b | A confirm card never gives Approve focus, and Escape never denies | H-57, H-58 | S |
 | 5 | Ask before a person's step in every session, through the guard that already exists | H-01 | M |
 | 6 | Give finished work a lane: Review, with its own count, cleared by a verdict | H-05 | M |
 | 7 | Show a turn's last words on the row, and treat a closing question as an ask by rule | H-06 | M |
@@ -730,6 +731,21 @@ From a third capture set (178 screenshots, focus and IPC recorded per dialog).
 | H-56 | L | "Move to host…" opens a sheet titled "Transfer"; Ctrl+Shift+N is listed for New session and New task; the Clean up dialog opens with nothing focused; git write controls on a paired hub give their reason only in a tooltip. | A copy and focus pass |
 
 The blank line in the review-notes diff (H-25) shows here too, against 16.5 px rows in a commit's diff from the same component; removed lines also print the old number in both gutters.
+
+### 4.11 Control, missions and Work (later captures)
+
+From the fourth capture set (177 screenshots, focus and IPC recorded).
+
+| Id | Sev | Finding | Fix |
+|---|---|---|---|
+| H-57 | H | When an operator confirm card arrives, focus moves to its first answer, **Approve**, so Enter approves a kill or a force push. The card component focuses its first answer on arrival (`QuestionCard` `enter`, `src/lib/kit/QuestionCard.svelte:51-62`), and `ConfirmCards` lists Approve first. The modal for the same request starts on Deny, which is the fix the 2026-09-21 audit made (UX-124). | Focus the card, not an answer; or Deny first, as the modal does |
+| H-58 | H | Escape on a focused confirm card leaves Control and sends `mcp_confirm approved:false`: a navigation key denies the request. | Escape only leaves; Deny is a button |
+| H-59 | M | After Approve the card disappears; after Deny nothing remains. The only trace is "5 handed off" turning to "6". | The "after the answer" card of the Decision card board, kept in the chat |
+| H-60 | M | A kill gets the raw call `kill_session host=mac name=…`; a start gets a title, facts and a brief. | H-13: the riskier the call, the more the card says |
+| H-61 | M | A mission waiting on a person reads "Failed · stuck" in triage beside a "Needs you" chip. Finish checks run label into value ("ci:buildbuild passed"); Done-when shows open circles on a completed mission. | One state word; a copy pass |
+| H-62 | M | The Work tab strip overlaps itself at the default width ("Tasks 24Missions 2oard"); board cards are clipped at the column edge; one agent is "client:ux-agent", "ux-agent" and "Control". | Tabs wrap or scroll; one agent name |
+| H-63 | L | Clicking a mission row in Control's views froze the renderer, also with the fixture from `ControlMissionView.test.ts`. Not confirmed in a real build. | Check in a real build |
+| H-64 | L | Today has no page of its own; it lives in Control's right panel, where ⤢ is disabled. | Let it open full width |
 
 ---
 
