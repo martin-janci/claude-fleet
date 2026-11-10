@@ -5,7 +5,6 @@
 import { render, screen, fireEvent } from '@testing-library/svelte';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { tick } from 'svelte';
-import { get } from 'svelte/store';
 
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn(),
@@ -17,9 +16,7 @@ import * as sessionsModule from './sessions';
 import { hosts } from './hosts';
 import { hubStatus, STANDALONE } from './hub';
 import { hubConnection } from './hub_connection';
-import { toasts, clearToasts } from './toasts';
-import { selectedSession } from './selection';
-import { detectMac } from './terminal_keys';
+import { clearToasts } from './toasts';
 
 const invoke = mockedInvoke as ReturnType<typeof vi.fn>;
 const calls = (cmd: string) => invoke.mock.calls.filter((c) => c[0] === cmd);
@@ -61,8 +58,6 @@ function answer(answers: Record<string, unknown>) {
   });
 }
 
-const isMac = detectMac(typeof navigator === 'undefined' ? undefined : navigator);
-const submitChord = isMac ? { metaKey: true } : { ctrlKey: true };
 
 beforeEach(() => {
   invoke.mockReset();
