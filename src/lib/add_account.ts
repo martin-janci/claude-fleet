@@ -4,11 +4,14 @@
 // only: it lives in the form's answers until the one call that sends it and
 // is never kept here. A subscription opens a login pane on the host
 // (`fleet-login--<name>`, running `claude /login`) that AddAccountLogin
-// reads back and answers until the host reports the login.
+// reads back and answers until the host reports the login. A setup token
+// (what `claude setup-token` prints) is checked with Anthropic and written
+// to the host like an API key; sessions under the profile run with it as
+// CLAUDE_CODE_OAUTH_TOKEN. The same name again replaces it.
 import { invokeCmd, type Result } from './result';
 import type { FieldProblem, Values } from './forms/forms';
 
-export type AccountKind = 'subscription' | 'api_key';
+export type AccountKind = 'subscription' | 'setup_token' | 'api_key';
 
 export interface LoginStatus {
   logged_in: boolean;
@@ -20,6 +23,15 @@ export interface LoginStatus {
   sign_in_url?: string;
   /** "Run it there": the command for a terminal on the host. */
   command: string;
+}
+
+export interface SetupTokenAdded {
+  host_alias: string;
+  profile: string;
+  account_uuid: string;
+  email?: string;
+  /** The profile held a token already, now replaced. */
+  replaced: boolean;
 }
 
 export interface ApiKeyAdded {
@@ -47,6 +59,9 @@ export interface AddAccountAnswers {
   kind: AccountKind;
   profile: string;
   apiKey: string;
+  setupToken: string;
+  /** The known account a setup token signs in to; null = none of them. */
+  account: string | null;
   dailyLimit: number | null;
 }
 
@@ -54,9 +69,11 @@ export function readAnswers(v: Values): AddAccountAnswers {
   const limit = typeof v.daily_limit === 'number' ? v.daily_limit : Number(v.daily_limit);
   return {
     host: String(v.host ?? '').trim(),
-    kind: v.kind === 'api_key' ? 'api_key' : 'subscription',
+    kind: v.kind === 'api_key' || v.kind === 'setup_token' ? v.kind : 'subscription',
     profile: String(v.profile ?? '').trim(),
     apiKey: String(v.api_key ?? '').trim(),
+    setupToken: String(v.setup_token ?? '').trim(),
+    account: typeof v.account === 'string' && v.account !== '' && v.account !== 'none' ? v.account : null,
     dailyLimit: v.daily_limit === undefined || v.daily_limit === null || v.daily_limit === '' || !Number.isFinite(limit) || limit <= 0 ? null : limit,
   };
 }
@@ -69,6 +86,14 @@ export function answerProblems(a: AddAccountAnswers): FieldProblem[] {
   if (p) out.push({ field: 'profile', problem: p });
   if (a.kind === 'api_key' && !a.apiKey.startsWith('sk-ant-')) {
     out.push({ field: 'api_key', problem: 'An Anthropic API key starts with sk-ant-.' });
+  }
+  if (a.kind === 'setup_token' && !a.setupToken.startsWith('sk-ant-oat')) {
+    out.push({
+      field: 'setup_token',
+      problem: a.setupToken.startsWith('sk-ant-api')
+        ? 'That is an API key; pick API key above, or paste what claude setup-token printed.'
+        : 'Paste the token claude setup-token printed (sk-ant-oat…).',
+    });
   }
   return out;
 }
@@ -85,6 +110,25 @@ export function addApiKey(a: AddAccountAnswers): Promise<Result<ApiKeyAdded>> {
     api_key: a.apiKey,
     daily_limit_usd: a.dailyLimit,
   });
+}
+
+export function addSetupToken(a: AddAccountAnswers): Promise<Result<SetupTokenAdded>> {
+  return call<SetupTokenAdded>({
+    action: 'setup_token',
+    host_alias: a.host,
+    profile: a.profile,
+    setup_token: a.setupToken,
+    ...(a.account ? { account: a.account } : {}),
+  });
+}
+
+/** The "Same account as" choices for a setup token: the subscription
+ *  accounts fleet knows (not API keys, not other setup tokens), by label. */
+export function tokenAccountChoices(accounts: readonly { uuid: string; email: string | null; nickname?: string | null; display_name?: string | null }[]): [string, string][] {
+  return accounts
+    .filter((a) => !a.uuid.startsWith('apikey-') && !a.uuid.startsWith('setuptoken-'))
+    .map((a): [string, string] => [a.uuid, a.nickname || a.email || a.display_name || a.uuid])
+    .sort((x, y) => x[1].localeCompare(y[1]));
 }
 
 export function startLogin(host: string, profile: string): Promise<Result<{ session: string }>> {

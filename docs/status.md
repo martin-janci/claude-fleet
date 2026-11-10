@@ -265,8 +265,11 @@ notification (`quota_auto_resume_*`, read as blocked) is switched too, one
 waiting on a dialog or a form is not. An account can be forbidden for
 projects or for a whole org (landed, nothing forbidden by default; docs/accounts.md → *Keep an
 account off a project*, migrations 217 and 218): every start, resume, switch, routine
-and mission run of such a project refuses or avoids its logins. Not built: a
-hub vault for setup-tokens and API keys.
+and mission run of such a project refuses or avoids its logins. A login profile can be
+signed in with a `claude setup-token` token (landed, docs/accounts.md →
+*Setup token*): written to the host only, exported as
+`CLAUDE_CODE_OAUTH_TOKEN`. Not built: a hub vault for setup-tokens and API
+keys (fleet keeps no copy; each token lives on its host).
 
 Placement and login health (Control review F5/F6, landed, ON): one rule,
 `service::placement`, picks the host and login for new work: hosts that

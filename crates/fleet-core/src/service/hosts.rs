@@ -865,6 +865,11 @@ pub(crate) fn sync_host_profiles(
             let mut rows = Vec::with_capacity(profiles.len());
             for p in profiles {
                 let account = probed_account_row(s, p.account.as_ref(), now)?;
+                let account_credential = account.as_ref().and(
+                    p.account
+                        .as_ref()
+                        .and_then(crate::service::add_account::credential_of),
+                );
                 if let Some(a) = account.as_ref() {
                     s.upsert_account(a)?;
                 }
@@ -872,6 +877,7 @@ pub(crate) fn sync_host_profiles(
                     name: p.name.clone(),
                     account_uuid: account.as_ref().map(|a| a.uuid.clone()),
                     email: account.and_then(|a| a.email),
+                    credential: account_credential,
                 });
             }
             s.set_host_profiles(alias, &rows)?;
@@ -921,6 +927,16 @@ pub struct OauthAccount {
     /// blocking the account (migration 028).
     #[serde(rename = "hasExtraUsageEnabled")]
     pub has_extra_usage_enabled: Option<bool>,
+    /// What signs a profile in when it is not a `/login`: `setup_token`
+    /// for a `claude setup-token` token fleet wrote
+    /// (`service::add_account`). Only in a `.fleet-account.json`, never in
+    /// Claude Code's own `oauthAccount`.
+    #[serde(
+        rename = "fleetCredential",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub fleet_credential: Option<String>,
 }
 
 /// Parse the third probe section. Empty / "null" / "{}" → None.

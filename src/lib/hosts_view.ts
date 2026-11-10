@@ -195,7 +195,9 @@ export function loginConflicts(
     }
   };
   add(host.account_uuid, null, null);
-  for (const p of host.claude_profiles ?? []) add(p.account_uuid, p.name, p.email ?? null);
+  // A setup token is a token of its own, not a second /login sharing one
+  // refresh token (`login_conflicts::find`).
+  for (const p of host.claude_profiles ?? []) if (!p.credential) add(p.account_uuid, p.name, p.email ?? null);
   for (const g of groups.values()) {
     if (g.logins.length > 1) out.push({ kind: 'shared_account', logins: g.logins, email: g.email });
   }
