@@ -695,6 +695,25 @@ Beyond H-06, H-07, H-11, H-15, H-21:
 - **Federated fleets.** Their rows use another anatomy: the name, then five text
   buttons always shown, and "needs you" in lower case (`src/lib/FleetInbox.svelte`).
 
+### 4.9 Settings, sizes and first run (later captures)
+
+From a second capture set (166 screenshots, axe-core on five screens). File names
+are in the capture set, not in `images/`.
+
+| Id | Sev | Finding | Fix |
+|---|---|---|---|
+| H-41 | H | One world, seven "need you" numbers: rail badge 5, "5 NEED YOU", section 4, footer "3 waiting", Control 3, dashboard widget 2, org page 2. | Part of H-08 and H-16: one count, from the ask table |
+| H-42 | M | Usage reads "% left" in the header (`5h 39%`) and "% used" in the dashboard widget (`5h 61%`), neither labelled. The limit card says "No other login has room" while each paused row offers Switch account. The header says 5-hour limit, the rows say weekly. | "75% left" everywhere; hide Switch when nothing has room |
+| H-43 | M | Pause all asks nothing and stops everything in one click; paused routines still show "next in 8h" and Run now. | A confirm that lists what stops; paused rows say Paused |
+| H-44 | M | At 150% text size the header items overlap, the session title goes and answer buttons are cut. At 1100×720 the title reads `cl…` and the composer `Effor`. | The title rule of H-15; the header folds into a menu |
+| H-45 | M | In Settings, Tab walks into the hidden session pane and stops on `terminal-ime` with no ring: 5 of 20 stops are invisible. Sessions and Inbox: 20 of 20. | `inert` on what a dialog covers |
+| H-46 | M | axe-core: a form field without a label (`.port`, critical), a tablist without tabs (Terminals, critical), `aria-label` on status dots where it is not allowed (serious). Settings checkboxes are 13×13 px (23 of them). | Fix the three rules; 24 px targets |
+| H-47 | M | First run: the Welcome dialog covers the Get started card, a coach mark sits on the tour, and tour steps 3 to 6 point at an empty pane. | Show one at a time; tour steps only where their target exists |
+| H-48 | L | Missing spaces and clipped text: `(paired as`, `limituntil`, `timed out.Sessions`, `Sessions3`, `Orbi`; 12- and 24-hour clocks on one page. | A copy pass |
+
+Measured and fine: every status word and all muted text is at least 4.5:1 in both
+themes (lowest 5.22:1); no target under 24 px in Sessions or the Inbox.
+
 ---
 
 ## 5. Target design
