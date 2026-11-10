@@ -714,6 +714,23 @@ are in the capture set, not in `images/`.
 Measured and fine: every status word and all muted text is at least 4.5:1 in both
 themes (lowest 5.22:1); no target under 24 px in Sessions or the Inbox.
 
+### 4.10 Review flow and consequential dialogs (later captures)
+
+From a third capture set (178 screenshots, focus and IPC recorded per dialog).
+
+| Id | Sev | Finding | Fix |
+|---|---|---|---|
+| H-49 | H | Tidy-up opens with destructive rows already ticked: 3 of 4, Kill and Clean up among them, and the button reads "Tidy 3". A suggestion should start unticked, as the design says for agent proposals. | Nothing ticked; the button counts what the person ticked |
+| H-50 | M | The Kill dialog lists 6 uncommitted files and 3 unpushed commits, and Kill still sends at once. Cancel has focus, which is right; the safer path is not the first offer. | With unsaved work, Clean up is the first button and Kill takes the two presses of H-13 |
+| H-51 | M | Enter in New session's Name field starts the session (`start_work`); the "can't be cancelled" line then overlaps Cancel. | Enter submits only a one-field form, as `keyboard.md` says; ⌘↵ starts |
+| H-52 | M | A review note's editor does not take focus: typing after clicking a line number goes nowhere. | Focus the textarea when it opens |
+| H-53 | M | One state, four labels: Failed in the header and row, Done in Details › Status, "Failed · cannot merge" in Result, "completed" in ⌘K. | One status word from the attention table, everywhere |
+| H-54 | M | A host goes down and the status bar still reads "All systems OK"; its session's terminal is blank with no message. | Part of H-16; the pane says the host is down |
+| H-55 | L | The sender of "Ask for review" sees only a toast; no screen lists the asks they sent. | A "Sent" view in Review |
+| H-56 | L | "Move to host…" opens a sheet titled "Transfer"; Ctrl+Shift+N is listed for New session and New task; the Clean up dialog opens with nothing focused; git write controls on a paired hub give their reason only in a tooltip. | A copy and focus pass |
+
+The blank line in the review-notes diff (H-25) shows here too, against 16.5 px rows in a commit's diff from the same component; removed lines also print the old number in both gutters.
+
 ---
 
 ## 5. Target design
