@@ -12505,6 +12505,9 @@ pub(super) const SESSION_REACH: &[(&str, &[&str])] = &[
     ("session_ask_access", &["Read"]),
     ("session_narrow", &["Own"]),
     ("session_share", &["Own"]),
+    // An ask shares the session, as `session_share` does; a list and done
+    // are the asked person's own rows, gated by no session.
+    ("review_request", &["Own"]),
     ("session_unshare", &["Own"]),
     // presence.rs — redesign 11.7b. `Read`: being on a session you may read
     // is what a watch share is for. Who ELSE is looking is narrowed inside

@@ -568,6 +568,7 @@ fn sample_conversation() -> Conversation {
             reminders: vec!["the harness stapled this on".into()],
             prompt_uuid: None,
             prompt_partial: true,
+            author: None,
             items: vec![
                 ConvItem::Text {
                     text: "hi back".into(),

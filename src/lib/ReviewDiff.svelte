@@ -4,7 +4,9 @@
   // until "Send N notes to Claude", which types them into the session as one
   // numbered prompt. Sent notes show under their line with who sent them,
   // and a person resolves each one. A viewer can write drafts but not send.
+  import AskReviewDialog from './AskReviewDialog.svelte';
   import DiffView, { type NoteLine } from './DiffView.svelte';
+  import { accessOf } from './access';
   import { errorText } from './error_copy';
   import { hubActionBlocked, hubStatus } from './hub';
   import { hubConnection } from './hub_connection';
@@ -143,9 +145,17 @@
   }
 
   const openSent = $derived(sent.filter((n) => !n.resolved_at).length);
+  /** "Ask for review…" is the owner's (it shares the session), and only on a
+   *  hub: a desktop with no hub has nobody to ask. */
+  const owned = $derived($accessOf(session) === 'own' && $hubStatus.remote);
+  let asking = $state(false);
 </script>
 
-{#if $drafts.length > 0 || openSent > 0}
+{#if asking}
+  <AskReviewDialog {session} onclose={() => (asking = false)} />
+{/if}
+
+{#if $drafts.length > 0 || openSent > 0 || owned}
   <div class="notes-bar" data-testid="review-notes-bar" role="group" aria-label="Review notes">
     {#if $drafts.length > 0}
       <span class="count" data-testid="review-notes-drafts"
@@ -166,6 +176,15 @@
     {/if}
     {#if failure}
       <span class="err" role="alert" data-testid="review-notes-error">{failure}</span>
+    {/if}
+    {#if owned}
+      <button
+        type="button"
+        class="ask"
+        data-testid="review-ask"
+        title="Share this session with a colleague and ask them to review its changes"
+        onclick={() => (asking = true)}>Ask for review…</button
+      >
     {/if}
   </div>
 {/if}
@@ -246,6 +265,7 @@
   .count { color: var(--fg); }
   .muted { color: var(--fg-muted); }
   .err { color: var(--danger); }
+  .ask { margin-left: auto; }
   .note {
     margin: 0.2rem 0.5rem 0.3rem 4.6em;
     padding: 0.35rem 0.5rem;

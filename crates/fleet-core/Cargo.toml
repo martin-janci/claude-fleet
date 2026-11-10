@@ -40,7 +40,7 @@ qrcode = { version = "0.14", default-features = false }
 sysinfo = "0.33"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 directories = "5"
 regex = "1"
 tokio = { version = "1", features = ["full"] }
@@ -145,7 +145,7 @@ fleet-update = { path = "../fleet-update", features = ["testkit"] }
 # package added.
 # `backup` only in tests: every in-memory test store is a page copy of one
 # database migrated once per process (`store::migrated_template_copy`).
-rusqlite = { version = "0.32", features = ["bundled", "trace", "functions", "backup"] }
+rusqlite = { version = "0.41", features = ["bundled", "trace", "functions", "backup"] }
 # `test-util` only: `#[tokio::test(start_paused = true)]`, so the listener's
 # handshake timeout can be tested without the test waiting it out in real time.
 tokio = { version = "1", features = ["full", "test-util"] }

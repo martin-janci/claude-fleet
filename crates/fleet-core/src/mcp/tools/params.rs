@@ -1623,6 +1623,28 @@ pub struct SessionShareParams {
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct ReviewRequestParams {
+    /// list | ask | done
+    #[serde(default)]
+    pub action: Option<String>,
+    /// ask: your session
+    #[serde(default)]
+    pub session_id: Option<i64>,
+    /// ask: their name
+    #[serde(default)]
+    pub person: Option<String>,
+    /// ask: for them
+    #[serde(default)]
+    pub note: Option<String>,
+    /// done: the ask
+    #[serde(default)]
+    pub id: Option<i64>,
+    /// list: also done ones; done: false reopens
+    #[serde(default)]
+    pub done: Option<bool>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct SessionGrantParams {
     /// The session, by fleet row id.
     pub session_id: i64,

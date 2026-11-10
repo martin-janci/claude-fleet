@@ -536,6 +536,71 @@ pub struct ConvTurn {
     /// older hub's `false` is the old behaviour, not a new lie.
     #[serde(default)]
     pub prompt_partial: bool,
+    /// Who sent this turn's prompt, when a hub tool typed it
+    /// (`store::prompt_authors`, migration 224): `None` for a prompt typed
+    /// in the terminal, by an older hub, or not matched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<TurnAuthor>,
+}
+
+/// Who sent a turn's prompt ([`ConvTurn::author`]).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct TurnAuthor {
+    /// As the conversation shows it: "Ada · phone".
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub person_id: Option<i64>,
+    /// The person reading is the one who sent it: the client says "You".
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mine: bool,
+}
+
+/// How long before a turn's prompt shows up its author row may have been
+/// written: a queued prompt is typed when the turn before it ends, or when
+/// the account's limit resets.
+const AUTHOR_MATCH_BEFORE_SECS: i64 = 7 * 86_400;
+/// How far after the turn's timestamp a row may be: the hub's clock and the
+/// host's need not agree.
+const AUTHOR_MATCH_SKEW_SECS: i64 = 120;
+
+/// Give each turn the author of its prompt: the newest unused row whose
+/// head the prompt starts with, written no later than the turn (give or
+/// take [`AUTHOR_MATCH_SKEW_SECS`]) and no earlier than
+/// [`AUTHOR_MATCH_BEFORE_SECS`] before it. A turn whose prompt's head was
+/// cut ([`ConvTurn::prompt_partial`]) is left alone.
+pub fn attach_prompt_authors(turns: &mut [ConvTurn], rows: &[crate::store::PromptAuthorRow]) {
+    let mut used = vec![false; rows.len()];
+    for t in turns.iter_mut() {
+        let (Some(prompt), Some(at)) = (t.prompt.as_deref(), t.at.as_deref()) else {
+            continue;
+        };
+        if t.prompt_partial {
+            continue;
+        }
+        let Some(at) = crate::service::account_usage::parse_rfc3339(at) else {
+            continue;
+        };
+        let head = crate::store::prompt_head(prompt);
+        let hit = rows
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(i, r)| {
+                !used[*i]
+                    && r.at <= at + AUTHOR_MATCH_SKEW_SECS
+                    && r.at >= at - AUTHOR_MATCH_BEFORE_SECS
+                    && head.starts_with(&r.head)
+            })
+            .map(|(i, _)| i);
+        if let Some(i) = hit {
+            used[i] = true;
+            t.author = Some(TurnAuthor {
+                name: rows[i].author.clone(),
+                person_id: rows[i].author_person_id,
+                mine: false,
+            });
+        }
+    }
 }
 
 /// One line of a turn's reply.
@@ -1067,6 +1132,7 @@ pub fn parse_conversation(jsonl: &str) -> Vec<ConvTurn> {
                     reminders: std::mem::take(&mut pending_reminders),
                     prompt_uuid: None,
                     prompt_partial: false,
+                    author: None,
                     items: vec![ConvItem::Compact {
                         trigger: meta
                             .and_then(|m| m.get("trigger"))
@@ -1209,6 +1275,7 @@ pub fn parse_conversation(jsonl: &str) -> Vec<ConvTurn> {
                                 reminders: std::mem::take(&mut pending_reminders),
                                 prompt_uuid: None,
                                 prompt_partial: false,
+                                author: None,
                                 items: Vec::new(),
                             });
                         }
@@ -1234,6 +1301,7 @@ pub fn parse_conversation(jsonl: &str) -> Vec<ConvTurn> {
                             reminders: std::mem::take(&mut pending_reminders),
                             prompt_uuid: None,
                             prompt_partial: false,
+                            author: None,
                             items: vec![ConvItem::Command {
                                 name,
                                 args: tag_text(&text, "command-args"),
@@ -1273,6 +1341,7 @@ pub fn parse_conversation(jsonl: &str) -> Vec<ConvTurn> {
                                 reminders: std::mem::take(&mut pending_reminders),
                                 prompt_uuid: None,
                                 prompt_partial: false,
+                                author: None,
                                 items: vec![ConvItem::Bash {
                                     command,
                                     stdout: tag_text(&text, "bash-stdout")
@@ -1296,6 +1365,7 @@ pub fn parse_conversation(jsonl: &str) -> Vec<ConvTurn> {
                             reminders: std::mem::take(&mut pending_reminders),
                             prompt_uuid: None,
                             prompt_partial: false,
+                            author: None,
                             items: vec![ConvItem::Harness {
                                 tag,
                                 body: cap_chars(&body, COMMAND_OUTPUT_MAX_CHARS),
@@ -1316,6 +1386,7 @@ pub fn parse_conversation(jsonl: &str) -> Vec<ConvTurn> {
                             reminders: Vec::new(),
                             prompt_uuid: None,
                             prompt_partial: false,
+                            author: None,
                         });
                         turn.items.push(ConvItem::Interrupt {
                             during_tool: text.contains("for tool use"),
@@ -1338,6 +1409,7 @@ pub fn parse_conversation(jsonl: &str) -> Vec<ConvTurn> {
                         reminders: std::mem::take(&mut pending_reminders),
                         prompt_uuid: v.get("uuid").and_then(|u| u.as_str()).map(String::from),
                         prompt_partial: has_non_text_blocks(content),
+                        author: None,
                     });
                 }
             }
@@ -1351,6 +1423,7 @@ pub fn parse_conversation(jsonl: &str) -> Vec<ConvTurn> {
                         reminders: std::mem::take(&mut pending_reminders),
                         prompt_uuid: None,
                         prompt_partial: false,
+                        author: None,
                     });
                     if let Some(ts) = at() {
                         turn.ended_at = Some(ts);
@@ -1872,6 +1945,22 @@ pub async fn fetch_conversation_for_row(
                 }
             }
         };
+        let first = conv
+            .turns
+            .iter()
+            .filter_map(|t| t.at.as_deref())
+            .find_map(crate::service::account_usage::parse_rfc3339);
+        if let Some(first) = first {
+            match s.prompt_authors(row.id, first - AUTHOR_MATCH_BEFORE_SECS) {
+                Ok(rows) if !rows.is_empty() => attach_prompt_authors(&mut conv.turns, &rows),
+                Ok(_) => {}
+                Err(e) => tracing::warn!(
+                    session_id = row.id,
+                    code = %e.code,
+                    "prompt authors query failed; turns go without"
+                ),
+            }
+        }
         if row.claude_session_id.as_deref() == Some(claude_id.as_str()) {
             if let Some(v) = &conv.context {
                 let _ = s.set_context(row.id, &claude_id, v.tokens, v.window, "transcript", None);
@@ -4348,6 +4437,7 @@ mod tests {
             reminders: Vec::new(),
             prompt_uuid: None,
             prompt_partial: false,
+            author: None,
             items: vec![ConvItem::Text {
                 text: "x".repeat(n),
             }],
@@ -4392,6 +4482,7 @@ mod tests {
                 reminders: Vec::new(),
                 prompt_uuid: None,
                 prompt_partial: false,
+                author: None,
                 items: vec![
                     ConvItem::Text { text: "hi".into() },
                     tool_item("Bash(command=ls)", false),
@@ -4430,6 +4521,7 @@ mod tests {
             reminders: Vec::new(),
             prompt_uuid: None,
             prompt_partial: false,
+            author: None,
             items: vec![
                 ConvItem::Text {
                     text: "a".repeat(10),
@@ -4474,6 +4566,7 @@ mod tests {
             reminders: Vec::new(),
             prompt_uuid: None,
             prompt_partial: false,
+            author: None,
             items: vec![ConvItem::Text {
                 text: format!("{}END", "x".repeat(100)),
             }],
@@ -4498,6 +4591,7 @@ mod tests {
             reminders: Vec::new(),
             prompt_uuid: None,
             prompt_partial: false,
+            author: None,
             items: vec![ConvItem::Text {
                 text: "earlier".into(),
             }],
@@ -4509,6 +4603,7 @@ mod tests {
             reminders: Vec::new(),
             prompt_uuid: None,
             prompt_partial: false,
+            author: None,
             items: vec![
                 tool_item("Bash(command=ls)", false),
                 ConvItem::Text {
@@ -4540,6 +4635,7 @@ mod tests {
             reminders: Vec::new(),
             prompt_uuid: None,
             prompt_partial: false,
+            author: None,
             items: vec![ConvItem::Text {
                 text: format!("{}END", "x".repeat(100)),
             }],
@@ -4561,6 +4657,7 @@ mod tests {
             reminders: Vec::new(),
             prompt_uuid: None,
             prompt_partial: false,
+            author: None,
             items: vec![ConvItem::Text { text: "abc".into() }],
         };
         let c = trim_conversation(vec![tiny], 10, 1);
@@ -5490,6 +5587,7 @@ mod tests {
             reminders: vec!["r".repeat(500)],
             prompt_uuid: None,
             prompt_partial: false,
+            author: None,
         };
         // Two turns, ~1 022 chars of which 1 000 are reminders: a 100 budget
         // has to see them.
@@ -5654,6 +5752,7 @@ mod tests {
             reminders: Vec::new(),
             prompt_uuid: Some("aaaaaaaa-0000-0000-0000-000000000001".into()),
             prompt_partial: false,
+            author: None,
         };
         let c = trim_conversation(vec![turn.clone()], 10, 600);
         assert!(c.truncated);
@@ -5661,5 +5760,60 @@ mod tests {
         assert!(c.turns[0].prompt_partial, "a cut prompt is not the prompt");
         let whole = trim_conversation(vec![turn], 10, 10_000);
         assert!(!whole.turns[0].prompt_partial, "an uncut prompt is");
+    }
+}
+
+#[cfg(test)]
+mod prompt_author_tests {
+    use super::*;
+    use crate::store::PromptAuthorRow;
+
+    fn turn(at: &str, prompt: &str) -> ConvTurn {
+        serde_json::from_value(serde_json::json!({ "prompt": prompt, "at": at, "items": [] }))
+            .unwrap()
+    }
+
+    fn row(at: i64, head: &str, author: &str, person: Option<i64>) -> PromptAuthorRow {
+        PromptAuthorRow {
+            at,
+            head: crate::store::prompt_head(head),
+            author: author.into(),
+            author_person_id: person,
+        }
+    }
+
+    #[test]
+    fn each_turn_takes_the_newest_matching_row_once() {
+        // 2026-11-09T12:00:00Z
+        let t0 = 1_794_225_600;
+        let mut turns = vec![
+            turn("2026-11-09T12:00:30Z", "fix the test\r\nplease"),
+            turn("2026-11-09T12:10:00Z", "fix the test please"),
+            turn("2026-11-09T12:20:00Z", "typed in the terminal"),
+            turn("2026-11-09T12:30:00Z", "sent long ago"),
+        ];
+        turns.push(ConvTurn {
+            prompt_partial: true,
+            ..turn("2026-11-09T12:40:00Z", "cut head")
+        });
+        let rows = vec![
+            row(t0 - 8 * 86_400, "sent long ago", "Old", None),
+            row(t0, "fix the test please", "Ada · phone", Some(2)),
+            row(t0 + 590, "fix the test please", "Bo · desktop", Some(3)),
+            row(t0 + 2390, "cut head", "Ada", None),
+        ];
+        attach_prompt_authors(&mut turns, &rows);
+        let names: Vec<_> = turns
+            .iter()
+            .map(|t| t.author.as_ref().map(|a| a.name.as_str()))
+            .collect();
+        // The first turn cannot take Bo's row: it was written after it.
+        assert_eq!(
+            names,
+            vec![Some("Ada · phone"), Some("Bo · desktop"), None, None, None]
+        );
+        assert_eq!(turns[0].author.as_ref().unwrap().person_id, Some(2));
+        let wire = serde_json::to_value(&turns[2]).unwrap();
+        assert!(wire.get("author").is_none(), "{wire}");
     }
 }

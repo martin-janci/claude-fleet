@@ -289,6 +289,7 @@
     "resume_work",
     "retry_work_item",
     "review_notes",
+    "review_request",
     "revoke_device",
     "revoke_mission_grant",
     "revoke_org_member_grants",
