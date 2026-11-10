@@ -661,6 +661,45 @@ pub(crate) fn attach_argv_with(
     argv
 }
 
+/// The alias the attach really goes to: `local` when THIS machine is
+/// `host_alias` — its own fleet-agent recorded that alias from the hub's
+/// `welcome` ([`fleet_proto::identity`]) and its tmux has the session —
+/// else `host_alias` itself.
+///
+/// The case it exists for is a Mac that is both the desktop and an agent
+/// host. Carried away from the network its SSH alias points into, `ssh mac`
+/// from the Mac itself has nowhere to go, though the session is right here.
+/// Both conditions must hold, so a stale file (the agent since moved to
+/// another alias, or another fleet's host happens to share the alias) never
+/// attaches a session this machine does not have: `has_session` is asked
+/// only once the alias matches.
+pub(crate) fn attach_alias(
+    host_alias: &str,
+    identity: Option<fleet_proto::identity::LocalIdentity>,
+    has_session: impl FnOnce() -> bool,
+) -> String {
+    let mine = host_alias != "local"
+        && identity.is_some_and(|id| id.host_alias == host_alias)
+        && has_session();
+    if mine {
+        "local".to_string()
+    } else {
+        host_alias.to_string()
+    }
+}
+
+/// Whether this machine's own tmux has the session `name`, exactly. Blocking
+/// (one short `tmux has-session`); never called under a lock.
+fn local_tmux_has_session(name: &str) -> bool {
+    fleet_core::proc::std_command("tmux")
+        .args(["has-session", "-t", &fleet_core::tmux::exact_session(name)])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
 /// `mux_opts` for the attach site: none for `local` (no ssh in the path),
 /// otherwise [`SshClient::mux_opts_for_pty`] — the terminal's own
 /// ControlPath and a gentler keepalive, so a probe's master reset (a
@@ -803,7 +842,9 @@ pub struct PtyOpenArgs {
 /// as a standalone one does, using its own `~/.ssh/config`.
 ///
 /// What it cannot reach is an **agent** host, which has no SSH route from
-/// anywhere; `TerminalView` does not offer an attach for one. A host this
+/// anywhere — unless it is THIS machine, which [`attach_alias`] recognises
+/// from the local agent's identity file and attaches with a plain `tmux
+/// attach`. A host this
 /// machine simply lacks a `Host` block for fails in `ssh` with ssh's own
 /// message, in the pane, which is more use than a refusal would be.
 ///
@@ -835,9 +876,20 @@ pub fn pty_open(
             return Err(too_many_ptys());
         }
     }
-    let mux_opts = attach_mux_opts(&ssh, &args.host_alias);
+    // This machine may BE the session's host (an agent host the desktop
+    // runs on): then attach locally, not over an ssh to itself.
     let is_wsl = fleet_core::wsl::is_wsl_host(&args.host_alias);
-    let program = attach_program_label(&args.host_alias, is_wsl);
+    let host_alias = if is_wsl {
+        args.host_alias.clone()
+    } else {
+        attach_alias(
+            &args.host_alias,
+            fleet_core::home::home_dir().and_then(|h| fleet_proto::identity::read(&h)),
+            || local_tmux_has_session(&args.session_name),
+        )
+    };
+    let mux_opts = attach_mux_opts(&ssh, &host_alias);
+    let program = attach_program_label(&host_alias, is_wsl);
 
     let pty_system = native_pty_system();
     let pair = pty_system
@@ -848,7 +900,7 @@ pub fn pty_open(
     log_conpty_once();
     let argv = attach_argv(
         &ssh.ssh_binary().to_string_lossy(),
-        &args.host_alias,
+        &host_alias,
         &args.session_name,
         &mux_opts,
     );
@@ -1234,6 +1286,33 @@ mod tests {
 
     /// The attach runs the program every probe runs, not a bare `ssh` a
     /// Windows PATH may resolve to Git's or Cygwin's.
+    #[test]
+    fn this_machine_s_own_alias_attaches_locally_only_when_its_tmux_has_the_session() {
+        use fleet_proto::identity::LocalIdentity;
+        let me = || {
+            Some(LocalIdentity {
+                host_alias: "mac".into(),
+                hub: "wss://hub.example/agent".into(),
+            })
+        };
+        assert_eq!(attach_alias("mac", me(), || true), "local");
+        // No such session here: the alias is kept, so ssh says what it says.
+        assert_eq!(attach_alias("mac", me(), || false), "mac");
+        // Another host, or no identity file: never asked, never local.
+        assert_eq!(
+            attach_alias("hetzner", me(), || panic!("must not ask tmux")),
+            "hetzner"
+        );
+        assert_eq!(
+            attach_alias("mac", None, || panic!("must not ask tmux")),
+            "mac"
+        );
+        assert_eq!(
+            attach_alias("local", me(), || panic!("never asked")),
+            "local"
+        );
+    }
+
     #[test]
     fn remote_attach_runs_the_configured_ssh_binary() {
         let bin = r"C:\Windows\System32\OpenSSH\ssh.exe";

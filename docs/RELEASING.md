@@ -257,7 +257,7 @@ before you do it:
 
 ### The assets
 
-14 per release from 0.4.1 (12 from 0.3.4, 11 before it), every one version-bearing:
+16 per release from 0.6.5 (14 from 0.4.1, 12 from 0.3.4, 11 before it), every one version-bearing:
 
 | asset | built by |
 |-------|----------|
@@ -267,6 +267,7 @@ before you do it:
 | `claude-fleet_<v>_x64-setup.exe` (from 0.3.4; bundles Microsoft's ConPTY, fetched and SHA-256-checked by `scripts/fetch-conpty.sh`) | `build`, `windows-latest` |
 | `fleet-agent-<v>-x86_64-unknown-linux-gnu.tar.gz`, `fleet-hub-<v>-…` | `agent-hub-binaries`, `ubuntu-22.04` |
 | `fleet-agent-<v>-aarch64-unknown-linux-gnu.tar.gz`, `fleet-hub-<v>-…` | `agent-hub-binaries`, `ubuntu-22.04-arm` |
+| `fleet-agent-<v>-aarch64-apple-darwin.tar.gz`, `fleet-agent-<v>-x86_64-apple-darwin.tar.gz` (from 0.6.5; the agent only, for a Mac as an agent host) | `agent-hub-binaries`, `macos-latest` (x86_64 cross-compiled) |
 | `release-manifest.json`, `release-manifest.json.minisig` (from 0.4.1) | `manifest` |
 | `SHA256SUMS` | `checksums` |
 
@@ -291,7 +292,9 @@ dependency on or from `build`). It builds `fleet-agent` and `fleet-hub`
 `--release --locked` for `x86_64-unknown-linux-gnu` and
 `aarch64-unknown-linux-gnu` on native `ubuntu-22.04` / `ubuntu-22.04-arm`
 runners (22.04 rather than 24.04 so the binaries need only **glibc 2.35+** on
-the host — see `docs/hub.md`), then `scripts/package-linux-release.sh` packs
+the host — see `docs/hub.md`), and, from 0.6.5, `fleet-agent` alone for
+`aarch64-apple-darwin` and `x86_64-apple-darwin` on `macos-latest` (a Mac is
+an agent host, never a hub host), then `scripts/package-linux-release.sh` packs
 each binary with a `README.txt` — which records the **exact commit** the
 binary was built from, not just the tag — and this repository's root
 `LICENSE` file *if one exists* (as of this writing it does not: a tarball

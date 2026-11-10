@@ -148,6 +148,9 @@ fn self_update_plan() -> Option<fleet_agent::self_update::SelfUpdate> {
 }
 
 fn install_cmd(args: cli::InstallArgs) -> Result<(), String> {
+    if cfg!(target_os = "macos") {
+        return install_launchd(args);
+    }
     let binary = std::env::current_exe()
         .and_then(|p| p.canonicalize())
         .map_err(|e| format!("where is this binary? {e}"))?;
@@ -171,6 +174,79 @@ fn install_cmd(args: cli::InstallArgs) -> Result<(), String> {
     };
     let plan = cli::install_plan(&args, &env, install::lookup_user, &mut std::io::stdin())?;
     install::install(&plan, &mut RealSystemctl, &mut std::io::stdout())
+}
+
+/// `install` on macOS: a LaunchAgent (`fleet_agent::launchd`).
+fn install_launchd(args: cli::InstallArgs) -> Result<(), String> {
+    let binary = std::env::current_exe()
+        .and_then(|p| p.canonicalize())
+        .map_err(|e| format!("where is this binary? {e}"))?;
+    let binary = match home() {
+        Some(h) => {
+            let paths = fleet_agent::update::UpdatePaths::user(&h);
+            fleet_agent::update::stable_binary(&binary, &paths.root, None, &paths.default_link)
+        }
+        None => binary,
+    };
+    let env = cli::LaunchdEnv {
+        binary,
+        root: is_root(),
+        uid: uid(),
+        home: home(),
+        config_home: config_home(),
+    };
+    let plan = cli::launchd_plan(&args, &env, &mut std::io::stdin())?;
+    fleet_agent::launchd::install(
+        &plan,
+        &mut fleet_agent::launchd::RealLaunchctl,
+        &mut std::io::stdout(),
+    )
+}
+
+/// `status` on macOS: launchd's view of the job, and the agent's own last
+/// status line from its status file.
+fn status_launchd() -> ExitCode {
+    use fleet_agent::launchd;
+    let out = match std::process::Command::new("launchctl")
+        .args(launchd::print_args(uid()))
+        .output()
+    {
+        Ok(out) => out,
+        Err(e) => return fail(&format!("could not run launchctl: {e}")),
+    };
+    let state = launchd::parse_print(&String::from_utf8_lossy(&out.stdout));
+    println!(
+        "{} (launchd, gui/{}): {}",
+        launchd::LABEL,
+        uid(),
+        state.as_deref().unwrap_or("not loaded")
+    );
+    let line = home()
+        .and_then(|h| std::fs::read_to_string(h.join(fleet_agent::conn::STATUS_FILE)).ok())
+        .map(|l| l.trim().to_string())
+        .unwrap_or_default();
+    if !line.is_empty() {
+        println!("agent: {line}");
+    }
+    if let Some(id) = home().and_then(|h| fleet_proto::identity::read(&h)) {
+        println!("this machine is {} on its hub", id.host_alias);
+    }
+    if state.as_deref() == Some("running") && line.starts_with(fleet_agent::conn::CONNECTED) {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(3)
+    }
+}
+
+#[cfg(unix)]
+fn uid() -> u32 {
+    // SAFETY: getuid has no preconditions.
+    unsafe { libc::getuid() }
+}
+
+#[cfg(not(unix))]
+fn uid() -> u32 {
+    0
 }
 
 /// Running as root.
@@ -202,6 +278,9 @@ fn systemd_status() -> SystemdStatus {
 }
 
 fn status(user: bool) -> ExitCode {
+    if cfg!(target_os = "macos") {
+        return status_launchd();
+    }
     let out = match std::process::Command::new("systemctl")
         .args(install::show_args(user))
         .output()
