@@ -2439,6 +2439,81 @@ The detector's language models add about 45 MB to `fleet-hub` (cargo
 feature `nl-detect` of `fleet-core`, which only the hub turns on; the
 desktop app is built without it).
 
+## Limit census (is Claude out everywhere?)
+
+How often was every Claude account at its usage limit at the same time?
+That is the one case another login cannot help with, and the answer says
+whether a way to carry a session on with another agent is worth building.
+The hub already keeps what it takes: every usage reading of the last 35
+days (`account_usage_snapshots`, one per account every 5 to 30 minutes).
+The census adds them up. Like the language census it is local and
+read-only: it opens `state.db` directly, never writes it and sends nothing
+anywhere.
+
+```bash
+fleet-hub census limits                    # the last 28 days
+fleet-hub census limits --days 14 --json
+fleet-hub census limits --db backups/daily-20261110-030000.db   # a backup, or another hub's
+```
+
+```text
+limit census: how often every Claude account was at its limit at the same time
+window: 7 days to Oct 4 00:00 UTC; schema 225
+accounts counted: 2, for 7 d of the window; the hub read usage during 7 d of it
+
+all at their limit (100% of the 5-hour or weekly window) at once:
+  2 times on 2 days; 3 h 40 min in total (2.2% of the time counted); longest 2 h 10 min
+    Sep 29 09:00 UTC for 2 h 10 min
+    Oct 2 14:00 UTC for 1 h 30 min
+
+all past the pause line (90%, accounts.pause_at) at once:
+  3 times on 3 days; 5 h 40 min in total (3.4% of the time counted); longest 2 h 10 min
+    ...
+
+per account:
+  home: 288 readings; at its limit 3 times for 9 h; past the pause line 3 times for 9 h
+  work: 336 readings; at its limit 2 times for 5 h 10 min; past the pause line 3 times for 7 h 10 min; extra usage is on
+
+logins with no usage reading: ci (API key)
+```
+
+How it counts, at every moment of the window:
+
+- **Which accounts.** An account is counted from its first reading on, and
+  each reading stands until the next one. An account some login uses now
+  (a host's own login or one of its profiles, hidden hosts left out) keeps
+  its last reading however old it is: a spare login nothing runs on is not
+  read after a few hours (its access token goes stale, see
+  [`accounts.md`](accounts.md)), and it is the login with room. An account
+  no login uses any more is counted for a day after each reading and then
+  left out, at its limit or not, because the history does not say when it
+  left. The line `no login uses it now` marks such an account.
+- **At its limit.** A counted account is at its limit when its 5-hour or
+  weekly window read 100% and has not reset since, which is what a row's
+  **Paused · limit** goes by. Past the reset it has room until a reading
+  says otherwise. The second count takes the same from `accounts.pause_at`
+  (90% unless changed), the line a start asks at and automation stops at.
+- **All at once.** Every counted account at the line, with at least one
+  counted. With one account, that is the account alone.
+
+`the hub read usage during` is the part of the window within an hour of a
+reading: when it is well short of the window, the hub was stopped or
+nothing ran, and a limit that came and went in that time is not seen.
+
+The output ends with what the history cannot tell (`not counted`): a login
+without a usage reading (an API key, which has a daily spend limit and no
+usage windows; an account signed in on macOS hosts only, whose token is in
+the Keychain), use the hub did not see, a login that could not be used for
+another reason while its account had room (signed out, host down), the
+minutes between a limit and the next reading, and extra usage (an account
+with it on keeps working past its limit and is counted at its limit all
+the same; its line says `extra usage is on`). Logins that have no reading
+are named in `logins with no usage reading`.
+
+`--db` reads any database from schema 122 on, so a backup of a hub that
+runs an older release can be counted with a newer `fleet-hub` without
+upgrading that hub.
+
 ## Decisions (Jev) — experimental, off
 
 The hub is the one place a decision model may be called from (a desktop

@@ -373,3 +373,7 @@ script runs with `CLAUDE_CONFIG_DIR` at the profile and reads that
 profile's `.credentials.json`. The source shows as `<host> (<profile>)`. A
 host's own login is asked before its profiles. On macOS, where Claude Code
 keeps the token in the Keychain, fleet cannot read it, as for a host login.
+
+The readings are kept for 35 days. `fleet-hub census limits` counts from
+them how often every account was at its limit at the same time, the one
+case another login cannot help with ([`hub.md`](hub.md), *Limit census*).
