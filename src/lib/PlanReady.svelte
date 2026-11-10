@@ -38,6 +38,9 @@
 
   const agent = $derived(sessionAgent(session));
   const name = $derived(agent === 'claude' ? 'Claude' : agentLabel(agent));
+  // A session on another hub gets no card here (its changes are not read,
+  // below). Were one drawn, its answers stay off: `queue_prompt` goes to this
+  // hub, where the same id is another session.
   const blocked = $derived(
     session.fleet
       ? 'This session is on another hub: answer it from there'
@@ -61,9 +64,11 @@
   let error = $state<string | null>(null);
   let sentNote = $state<string | null>(null);
 
+  // Not while it works (a turn no prompt opened, such as a notification): the
+  // card is back, read again, when that turn ends.
   const pending = $derived.by(() => {
     void settled;
-    return path !== null && !planSettled(sKey, path, saidAt);
+    return path !== null && !working && !planSettled(sKey, path, saidAt);
   });
 
   // Another session, or the conversation moved on: what was shown, opened or
@@ -90,7 +95,8 @@
   async function look(k: number, id: number, words: string) {
     const r = await repoChanges(id);
     if (k !== sKey || words !== reply) return;
-    path = r.ok ? planFile(r.value, words) : null;
+    // A read that fails keeps what is shown: a dropped connection is not "no plan".
+    if (r.ok) path = planFile(r.value, words);
   }
 
   async function toggle() {

@@ -1401,7 +1401,8 @@
       return;
     }
     if (toast) push(toast);
-    planStarted(first, briefOn);
+    // Every session it started is told, not only the one that opens.
+    for (const row of r.value.started) planStarted(row, briefOn);
     finished(first, host);
   }
 
