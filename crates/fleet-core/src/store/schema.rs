@@ -2579,6 +2579,9 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/223_review_notes.sql"),
         already_applied: None,
     },
+    // Prompt authors: who sent each prompt a hub tool typed. CREATE TABLE
+    // IF NOT EXISTS, so plain.
+    Migration::plain(224, include_str!("../../migrations/224_prompt_authors.sql")),
 ];
 
 /// The settings row [`Store::finish_realm_upgrade`] writes once migration

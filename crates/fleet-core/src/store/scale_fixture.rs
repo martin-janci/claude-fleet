@@ -619,14 +619,36 @@ impl Store {
     /// [`Self::finish_trace`]. Recording is per thread.
     pub(crate) fn start_trace(&mut self) {
         TRACED.with(|t| *t.borrow_mut() = Some(Vec::new()));
-        self.conn.trace(Some(record));
+        // `trace_v2`'s statement event, read the way the legacy `trace` was:
+        // the SQL with its bound parameters inlined (`expanded_sql`), and a
+        // trigger's statements as the `-- …` comment SQLite hands over for
+        // them, which `finish_trace` drops.
+        self.conn
+            .trace_v2(
+                rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
+                Some(|e: rusqlite::trace::TraceEvent<'_>| {
+                    if let rusqlite::trace::TraceEvent::Stmt(stmt, sql) = e {
+                        if sql.trim_start().starts_with("--") {
+                            record(sql);
+                        } else {
+                            record(&stmt.expanded_sql().unwrap_or_else(|| sql.to_string()));
+                        }
+                    }
+                }),
+            )
+            .expect("start the SQL trace");
     }
 
     /// Test-only: stop recording; the distinct statements run since
     /// [`Self::start_trace`], in first-run order. Statements a trigger runs
     /// are left out (the trace reports them as comments).
     pub(crate) fn finish_trace(&mut self) -> Vec<String> {
-        self.conn.trace(None);
+        self.conn
+            .trace_v2(
+                rusqlite::trace::TraceEventCodes::empty(),
+                None::<fn(rusqlite::trace::TraceEvent<'_>)>,
+            )
+            .expect("stop the SQL trace");
         let mut seen = std::collections::HashSet::new();
         TRACED
             .with(|t| t.borrow_mut().take())
