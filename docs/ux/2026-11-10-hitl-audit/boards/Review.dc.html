@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Review of a finished session</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:#0f161e}
+a{color:#34d5e4;text-decoration:none}a:hover{color:#7fe6f0}
+.app{--bg:#0f161e;--pane:#141c24;--raise:#171f28;--sunk:#0c1219;--hover:#1d252e;--fg:#d5e5f7;--fg2:#a1b6cc;--muted:#869ab0;--line:#213244;--line2:#2c4057;--accent:#34d5e4;--accent-soft:#022d31;--on-accent:#0b0f17;--working:#98bbfb;--waiting:#f3a949;--failed:#fa9e93;--done:#72d48a;--idle:#869ab0;--waiting-soft:rgba(243,169,73,.13);--waiting-faint:rgba(243,169,73,.07);--waiting-line:rgba(243,169,73,.45);--failed-soft:rgba(250,158,147,.12);--failed-line:rgba(250,158,147,.35);--done-soft:rgba(114,212,138,.12);--chip-bg:#1b232b;--count-bg:#1c242d;--track:#232b34;--add:rgba(114,212,138,.14);--del:rgba(250,158,147,.14);font-family:"Geist",-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;color:var(--fg);background:var(--bg);font-size:13px;line-height:18px}
+.app *{box-sizing:border-box}
+.mono{font-family:"Geist Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px}
+.meta{font-size:12px;line-height:16px;color:var(--muted)}
+.tnum{font-variant-numeric:tabular-nums}
+.btn{height:24px;padding:0 8px;border-radius:4px;border:1px solid var(--line2);background:var(--raise);color:var(--fg);font:inherit;font-size:12px;display:inline-flex;align-items:center;gap:6px;cursor:pointer;white-space:nowrap}
+.btn:hover{background:var(--hover)}
+.btn.quiet{background:transparent;border-color:transparent;color:var(--fg2)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent);font-weight:500}
+.btn.sm{height:22px;padding:0 6px}.btn.lg{height:28px;padding:0 10px}
+.kbd{font-size:11px;line-height:14px;padding:0 4px;border-radius:3px;border:1px solid var(--line2);color:var(--muted)}
+.btn.primary .kbd{border-color:rgba(11,15,23,.35);color:var(--on-accent)}
+.chip{height:20px;padding:0 6px;border-radius:4px;font-size:11px;font-weight:500;display:inline-flex;align-items:center;gap:4px;background:var(--chip-bg);color:var(--fg2);white-space:nowrap}
+.chip.waiting{background:var(--waiting-soft);color:var(--waiting)}.chip.done{background:var(--done-soft);color:var(--done)}
+.chip.failed{background:var(--failed-soft);color:var(--failed)}
+.dot{width:8px;height:8px;border-radius:50%;flex:none}
+.count{font-size:11px;font-weight:500;padding:0 5px;border-radius:4px;background:var(--count-bg);color:var(--fg2);line-height:16px}
+.row{display:flex;gap:10px;padding:7px 12px;border-radius:6px;margin:0 6px;align-items:flex-start}
+.row:hover{background:var(--hover)}
+.row[aria-selected="true"]{background:var(--accent-soft);box-shadow:inset 2px 0 0 var(--accent)}
+.rtitle{font-size:13px;line-height:18px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rline{font-size:12px;line-height:16px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rail a{display:flex;flex-direction:column;align-items:center;gap:3px;padding:8px 0;border-radius:6px;color:var(--muted);font-size:11px;line-height:14px;position:relative}
+.rail a:hover{background:var(--hover);color:var(--fg)}
+:focus-visible{outline:2px solid var(--accent);outline-offset:1px;border-radius:4px}
+.lane{display:flex;align-items:center;gap:6px;padding:12px 12px 4px;font-size:11px;line-height:16px;font-weight:600;color:var(--fg2)}
+.lane .meta{font-size:11px;font-weight:400}
+.well{background:var(--sunk);border:1px solid var(--line);border-radius:4px}
+.dl{display:flex;padding:0 10px;white-space:pre}
+.dl span:first-child{width:28px;flex:none;color:var(--muted);opacity:.7;text-align:right;margin-right:12px}
+.dl.add{background:var(--add)}.dl.del{background:var(--del)}
+.h{font-size:12px;line-height:16px;font-weight:600;color:var(--fg);margin:0;display:flex;align-items:baseline;gap:6px}
+.h span{font-weight:400;color:var(--muted)}
+.ev{display:grid;grid-template-columns:16px minmax(0,1fr);gap:2px 8px;font-size:12px;line-height:17px;color:var(--fg2)}
+.ev b{color:var(--fg);font-weight:500}
+.ev .src{grid-column:2;color:var(--muted);font-size:11px;line-height:15px}
+.ok{color:var(--done)}.bad{color:var(--failed)}.unk{color:var(--muted)}
+.f{display:flex;align-items:center;gap:8px;padding:4px 10px;font-size:12px;line-height:16px;border-radius:4px}
+.f[aria-selected="true"]{background:var(--accent-soft)}
+.f .p{flex:1 1 auto;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.f .meta{white-space:nowrap}
+.st{width:14px;text-align:center;font-weight:600;font-size:11px}
+.box{width:14px;height:14px;border:1px solid var(--line2);border-radius:3px;background:var(--raise);flex:none;display:inline-flex;align-items:center;justify-content:center;font-size:10px;color:var(--on-accent)}
+.box.on{background:var(--accent);border-color:var(--accent)}
+</style>
+</helmet>
+<div class="app" style="width: 100%; height: 1000px; display: flex; flex-direction: column;">
+
+<header style="height: 44px; display: flex; align-items: center; gap: 12px; padding: 0 12px 0 16px; border-bottom: 1px solid var(--line); background: var(--pane);">
+<span style="display: inline-flex; align-items: center; gap: 8px;"><svg width="22" height="22" viewBox="0 0 108 108" aria-hidden="true"><rect width="108" height="108" rx="24" fill="#1B2430"></rect><circle cx="54" cy="54" r="24" fill="none" stroke="#F2F4F7" stroke-opacity="0.5" stroke-width="5"></circle><circle cx="54" cy="54" r="10" fill="#F2F4F7"></circle><circle cx="54" cy="30" r="7.5" fill="#F2F4F7"></circle><circle cx="74.78" cy="66" r="7.5" fill="#D29B4A"></circle><circle cx="33.22" cy="66" r="7.5" fill="#F2F4F7"></circle></svg><strong style="font-size: 13px; font-weight: 600; white-space: nowrap;">Orbit Fleet</strong></span>
+<button class="btn" style="width: 260px; justify-content: space-between; color: var(--muted);"><span>Search or run a command</span><span class="kbd">⌘K</span></button>
+<div style="display: flex; align-items: center; gap: 6px;" aria-label="Fleet pulse">
+<span class="chip waiting tnum"><span class="dot" style="width: 6px; height: 6px; background: var(--waiting);"></span>2 need you · oldest 6m</span>
+<span class="chip tnum">3 to review</span>
+<span class="chip tnum" style="background: rgba(152,187,251,.12); color: var(--working);">6 working</span>
+</div>
+<div style="flex: 1 1 0;"></div>
+<button class="btn quiet" style="gap: 8px;"><span class="dot" style="background: var(--done);"></span><span>m.janci@32bit.sk</span><span class="meta tnum">5h 75% · wk 85%</span></button>
+<span style="width: 1px; height: 20px; background: var(--line);"></span>
+<button class="btn quiet" style="gap: 8px;"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="8" cy="8" r="6"></circle><path d="M8 4.5V8l2.5 1.5"></path></svg><span>Automation 3 active</span><span class="meta tnum">$4.10 today</span></button><button class="btn quiet sm" aria-label="Pause all automation">Pause all</button>
+</header>
+
+<div style="flex: 1 1 auto; display: flex; min-height: 0;">
+
+<nav class="rail" aria-label="Main" style="width: 68px; flex: none; padding: 8px 6px; border-right: 1px solid var(--line); background: var(--pane); display: flex; flex-direction: column; gap: 2px;">
+<a href="#control"><svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="8" cy="8" r="5.5"></circle><circle cx="8" cy="8" r="2"></circle><path d="M8 1v2.5M8 12.5V15M1 8h2.5M12.5 8H15"></path></svg>Control</a>
+<a href="#inbox" aria-current="page" style="background: var(--accent-soft); color: var(--fg);"><svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M2 9.5h3.5l1 1.5h3l1-1.5H14"></path><path d="M3.5 3h9L14 9.5V13H2V9.5z"></path></svg>Inbox<span style="position: absolute; top: 4px; right: 8px; font-size: 11px; line-height: 14px; padding: 0 4px; border-radius: 7px; background: var(--waiting); color: #1a1205; font-weight: 600;">2</span></a>
+<a href="#sessions"><svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="2" y="3" width="12" height="10" rx="1.5"></rect><path d="M4.5 6.5 6.5 8l-2 1.5M8 10h3"></path></svg>Sessions</a>
+<a href="#work"><svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="2.5" y="2.5" width="11" height="11" rx="2"></rect><path d="m5.5 8 1.8 1.8L10.8 6"></path></svg>Work</a>
+<a href="#dashboards"><svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="2" y="2" width="12" height="12" rx="1.5"></rect><path d="M5 11.5V9M8 11.5V5.5M11 11.5V7.5"></path></svg>Dashboards</a>
+<a href="#automation"><svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M13 8a5 5 0 1 1-1.5-3.6"></path><path d="M13 2.5v2.5h-2.5"></path><path d="M8 5.5V8l1.8 1.2"></path></svg>Automation</a>
+<a href="#accounts"><svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="8" cy="5.5" r="2.5"></circle><path d="M3 13.5c.6-2.6 2.6-4 5-4s4.4 1.4 5 4"></path></svg>Accounts</a>
+<a href="#toolkit"><svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M9.5 2.5a3 3 0 0 0-3 4L2.5 10.5l3 3 4-4a3 3 0 0 0 4-3l-2 1-2-2z"></path></svg>Toolkit</a>
+<div style="flex: 1 1 auto;"></div>
+<a href="#settings"><svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="8" cy="8" r="2"></circle><path d="M8 1.8v2M8 12.2v2M1.8 8h2M12.2 8h2M3.6 3.6l1.4 1.4M11 11l1.4 1.4M3.6 12.4 5 11M11 5l1.4-1.4"></path></svg>Settings</a>
+</nav>
+
+<aside aria-label="Inbox list" style="width: 300px; flex: none; border-right: 1px solid var(--line); background: var(--pane); display: flex; flex-direction: column;">
+<div style="padding: 14px 12px 8px; display: flex; align-items: baseline; justify-content: space-between;">
+<h1 style="margin: 0; font-size: 16px; line-height: 22px; font-weight: 600;">Inbox</h1>
+<span class="meta tnum">2 need you · 3 to review</span>
+</div>
+<div style="flex: 1 1 auto; overflow: auto; padding-bottom: 8px;">
+<div class="lane" style="color: var(--waiting);">Answer <span class="count">2</span><span class="meta">oldest 6m</span></div>
+<div class="row">
+<span class="dot" aria-label="Waiting for you" style="background: var(--waiting); margin-top: 5px;"></span>
+<div style="flex: 1 1 auto; min-width: 0;">
+<div style="display: flex; gap: 6px; align-items: center;"><span class="rtitle" style="flex: 1 1 auto;">PD-3012 Hub migration renumber</span><span class="meta tnum">6m</span></div>
+<div class="rline"><span style="color: var(--waiting);">Waiting for you:</span> which migration number?</div>
+</div>
+</div>
+<div class="row">
+<span class="dot" aria-label="Waiting for you" style="background: var(--waiting); margin-top: 5px;"></span>
+<div style="flex: 1 1 auto; min-width: 0;">
+<div style="display: flex; gap: 6px; align-items: center;"><span class="rtitle" style="flex: 1 1 auto;">Mobile offline sync</span><span class="meta tnum">2m</span></div>
+<div class="rline"><span style="color: var(--waiting);">Waiting for you:</span> keep the queue on disk?</div>
+</div>
+</div>
+
+<div class="lane">Review <span class="count">3</span><span class="meta">finished, no verdict yet · oldest 5h</span></div>
+<div class="row" aria-selected="true">
+<span class="dot" aria-label="Done" style="background: var(--done); margin-top: 5px;"></span>
+<div style="flex: 1 1 auto; min-width: 0;">
+<div style="display: flex; gap: 6px; align-items: center;"><span class="rtitle" style="flex: 1 1 auto;">Inbox grouping (FLT-212)</span><span class="meta tnum">40m</span></div>
+<div class="rline"><span style="color: var(--done);">Done:</span> <span class="tnum">+412 −96</span> in 9 files · 1 check failing</div>
+</div>
+</div>
+<div class="row">
+<span class="dot" aria-label="Done" style="background: var(--done); margin-top: 5px;"></span>
+<div style="flex: 1 1 auto; min-width: 0;">
+<div style="display: flex; gap: 6px; align-items: center;"><span class="rtitle" style="flex: 1 1 auto;">Quiet hours</span><span class="meta tnum">3h</span></div>
+<div class="rline"><span style="color: var(--done);">Done:</span> <span class="tnum">+88 −12</span> · 15/15 checks · PR ready</div>
+</div>
+</div>
+<div class="row">
+<span class="dot" aria-label="Done" style="background: var(--done); margin-top: 5px;"></span>
+<div style="flex: 1 1 auto; min-width: 0;">
+<div style="display: flex; gap: 6px; align-items: center;"><span class="rtitle" style="flex: 1 1 auto;">Hub docs refresh</span><span class="meta tnum">5h</span></div>
+<div class="rline"><span style="color: var(--done);">Done:</span> answered in the chat · no file changed</div>
+</div>
+</div>
+<a href="#sessions" class="meta" style="display: flex; gap: 6px; padding: 12px 18px 4px; color: var(--muted);"><span class="tnum">6 working · 9 idle</span><span style="flex: 1 1 auto;"></span><span style="color: var(--accent);">→ All sessions</span></a>
+</div>
+<div style="display: flex; align-items: center; gap: 10px; padding: 6px 12px; border-top: 1px solid var(--line); font-size: 11px; color: var(--muted);">
+<span><span class="kbd">j</span> <span class="kbd">k</span> move</span><span><span class="kbd">n</span> <span class="kbd">p</span> file</span><span><span class="kbd">v</span> viewed</span><span><span class="kbd">c</span> note</span>
+</div>
+</aside>
+
+<main style="flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; background: var(--bg);">
+<div style="padding: 12px 20px 10px; border-bottom: 1px solid var(--line); background: var(--pane);">
+<div style="display: flex; align-items: center; gap: 10px;">
+<h2 style="margin: 0; font-size: 16px; line-height: 22px; font-weight: 600;">Inbox grouping (FLT-212)</h2>
+<span class="chip done">Done</span>
+<span class="meta tnum">finished 40m ago · worked 1h 12m · $6.40</span>
+<div style="flex: 1 1 auto;"></div>
+<span class="meta tnum">1 of 3</span>
+<button class="btn">Open the session <span class="kbd">↵</span></button>
+</div>
+<div class="meta" style="margin-top: 4px;">mercury · <span class="mono">FLT-212-inbox-grouping</span> · <a href="#pr">PR #1107</a> draft · <a href="#ticket">FLT-212</a> Group the Inbox by state</div>
+</div>
+
+<div style="flex: 1 1 auto; display: flex; min-height: 0;">
+
+<div style="width: 380px; flex: none; border-right: 1px solid var(--line); overflow: auto; padding: 14px 16px; display: flex; flex-direction: column; gap: 14px;">
+
+<section style="display: flex; flex-direction: column; gap: 6px;">
+<h3 class="h">What it says it did <span>· reported by Claude, not checked</span></h3>
+<div style="font-size: 12px; line-height: 18px; color: var(--fg2); border-left: 2px solid var(--line2); padding-left: 10px;">Grouped the Inbox by state with a count per section, moved the legacy list out, and added tests for the grouping. All tests pass.</div>
+</section>
+
+<section style="display: flex; flex-direction: column; gap: 6px;">
+<h3 class="h">What fleet read <span>· each line names its source</span></h3>
+<div class="ev">
+<span class="ok" aria-label="Passed">✓</span><span><b>212 tests passed</b>, ran <span class="mono">pnpm test</span></span>
+<span class="src">in the session at 14:02, on commit <span class="mono">3f2a9c1</span></span>
+<span class="bad" aria-label="Problem">✗</span><span><b>2 commits since that run</b> were not tested</span>
+<span class="src">git log on mercury · <span class="mono">b81d07e</span> is the head</span>
+<span class="bad" aria-label="Failed">✗</span><span><b>1 of 15 checks failing</b>: hub-headless</span>
+<span class="src">GitHub, on <span class="mono">b81d07e</span>, 31m ago · <a href="#log">log</a></span>
+<span class="bad" aria-label="Problem">✗</span><span><b>2 files are not committed</b></span>
+<span class="src">git status on mercury, 8s ago</span>
+<span class="unk" aria-label="Unknown">?</span><span><b>Type check:</b> no run found</span>
+<span class="src">nothing in the session ran <span class="mono">pnpm check</span></span>
+</div>
+</section>
+
+<section style="display: flex; flex-direction: column; gap: 6px;">
+<h3 class="h">What FLT-212 asks for <span>· you tick these</span></h3>
+<label style="display: flex; gap: 8px; font-size: 12px; line-height: 17px; color: var(--fg2);"><span class="box on" aria-hidden="true">✓</span><span>Sections for Needs you and Failed, each with a count</span></label>
+<label style="display: flex; gap: 8px; font-size: 12px; line-height: 17px; color: var(--fg2);"><span class="box" aria-hidden="true"></span><span>The footer says what finished today</span></label>
+<label style="display: flex; gap: 8px; font-size: 12px; line-height: 17px; color: var(--fg2);"><span class="box" aria-hidden="true"></span><span>A mass loss folds into one Restore line</span></label>
+</section>
+
+<section style="display: flex; flex-direction: column; gap: 6px;">
+<h3 class="h">Worth a look <span>· by rule</span></h3>
+<div class="ev">
+<span class="bad" aria-hidden="true">·</span><span><b>Deletes a test file</b> <span class="mono">InboxLegacyList.test.ts</span></span>
+<span class="bad" aria-hidden="true">·</span><span><b>508 changed lines.</b> Past about 400, reviews find less; ask for it in two parts.</span>
+<span class="unk" aria-hidden="true">·</span><span>Touches Rust and Svelte in one change</span>
+</div>
+</section>
+</div>
+
+<div style="flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column;">
+<div style="display: flex; align-items: center; gap: 8px; padding: 8px 14px; border-bottom: 1px solid var(--line);">
+<strong style="font-size: 12px; font-weight: 600;">9 files</strong><span class="meta tnum"><span class="ok">+412</span> <span class="bad">−96</span> against main</span>
+<span style="flex: 1 1 auto;"></span>
+<span class="meta tnum">3 of 9 viewed</span>
+<div class="bar" style="width: 72px; height: 4px; border-radius: 2px; background: var(--track); overflow: hidden;"><span style="display: block; height: 100%; width: 33%; background: var(--accent);"></span></div>
+</div>
+<div style="display: flex; flex: 1 1 auto; min-height: 0;">
+<div style="width: 232px; flex: none; border-right: 1px solid var(--line); padding: 6px; overflow: auto;" aria-label="Changed files">
+<div class="f"><span class="box on" aria-label="Viewed">✓</span><span class="st" style="color: var(--waiting);">M</span><span class="p mono">Sidebar.svelte</span><span class="meta tnum">+120 −40</span></div>
+<div class="f"><span class="box on" aria-label="Viewed">✓</span><span class="st ok">A</span><span class="p mono">inbox_groups.ts</span><span class="meta tnum">+96</span></div>
+<div class="f"><span class="box on" aria-label="Viewed">✓</span><span class="st ok">A</span><span class="p mono">inbox_groups.test.ts</span><span class="meta tnum">+74</span></div>
+<div class="f" aria-selected="true"><span class="box" aria-label="Not viewed"></span><span class="st" style="color: var(--waiting);">M</span><span class="p mono">inbox.ts</span><span class="meta tnum">+41 −12</span><span class="chip waiting" style="height: 16px; padding: 0 4px;">2</span></div>
+<div class="f"><span class="box" aria-label="Not viewed"></span><span class="st" style="color: var(--waiting);">M</span><span class="p mono">attention.rs</span><span class="meta tnum">+38 −9</span></div>
+<div class="f"><span class="box" aria-label="Not viewed"></span><span class="st bad">D</span><span class="p mono">InboxLegacyList.svelte</span><span class="meta tnum">−31</span></div>
+<div class="f"><span class="box" aria-label="Not viewed"></span><span class="st bad">D</span><span class="p mono">InboxLegacyList.test.ts</span><span class="meta tnum">−4</span></div>
+<div class="f"><span class="box" aria-label="Not viewed"></span><span class="st" style="color: var(--working);">R</span><span class="p mono">RailBadge.svelte</span><span class="meta tnum">+2</span></div>
+<div class="f"><span class="box" aria-label="Not viewed"></span><span class="st" style="color: var(--waiting);">M</span><span class="p mono">architecture.md</span><span class="meta tnum">+41</span></div>
+</div>
+<div style="flex: 1 1 auto; min-width: 0; overflow: auto;">
+<div style="display: flex; align-items: center; gap: 8px; padding: 8px 14px;"><span class="mono" style="color: var(--fg);">src/lib/inbox.ts</span><span class="meta tnum"><span class="ok">+41</span> <span class="bad">−12</span></span><span style="flex: 1 1 auto;"></span><button class="btn sm quiet">Whole file</button><button class="btn sm">Viewed <span class="kbd">v</span></button></div>
+<div class="mono" style="line-height: 18px; padding-bottom: 8px;">
+<div class="dl" style="color: var(--accent); background: rgba(52,213,228,.08);"><span></span><span>@@ -33,16 +37,36 @@ export function inboxRows(</span></div>
+<div class="dl"><span>37</span><span>  export function inboxRows(rows, opts) {</span></div>
+<div class="dl del"><span>38</span><span>-   return rows.filter((s) =&gt; needsYou(s, opts));</span></div>
+<div class="dl add"><span>38</span><span>+   return byTriage(</span></div>
+<div class="dl add"><span>39</span><span>+     rows.filter((s) =&gt; countsTowardBadge(attentionState(s, opts))),</span></div>
+<div class="dl add"><span>40</span><span>+     opts,</span></div>
+<div class="dl add"><span>41</span><span>+   );</span></div>
+<div class="dl"><span>42</span><span>  }</span></div>
+<div style="margin: 6px 14px 6px 50px; border: 1px solid var(--waiting-line); border-radius: 6px; background: var(--waiting-faint); padding: 8px 10px; font-family: Geist, system-ui, sans-serif; font-size: 12px; line-height: 17px; white-space: normal;">
+<div style="display: flex; gap: 6px; align-items: baseline;"><b style="font-weight: 600;">You</b><span class="meta">line 39 · draft</span></div>
+<div style="color: var(--fg2);">This drops rows that are Done and unread. Keep them out of the badge, but list them under Review.</div>
+</div>
+<div class="dl"><span>43</span><span></span></div>
+<div class="dl add"><span>44</span><span>+ /** The readings the person set aside with "Not waiting". */</span></div>
+<div class="dl add"><span>45</span><span>+ export const notWaitingSaid = writable(new Set(readPref(NOT_WAITING_PREF, [])));</span></div>
+<div class="dl"><span>46</span><span>  export function proposedRows(rows, opts, setAside) {</span></div>
+<div class="dl"><span>47</span><span>    return byTriage(rows.filter((s) =&gt; isProposed(s, opts, setAside)), opts);</span></div>
+<div class="dl"><span>48</span><span>  }</span></div>
+</div>
+</div>
+</div>
+</div>
+</div>
+
+<div style="display: flex; align-items: center; gap: 8px; padding: 10px 20px; border-top: 1px solid var(--line); background: var(--pane);">
+<button class="btn lg primary">Send 2 notes to Claude <span class="kbd">⌘↵</span></button>
+<button class="btn lg">Ask a colleague…</button>
+<button class="btn lg">Run a review…</button>
+<span style="flex: 1 1 auto;"></span>
+<span class="meta">6 files not viewed · 1 check failing</span>
+<button class="btn lg">Mark PR ready…</button>
+<button class="btn lg">Reviewed, nothing to send <span class="kbd">e</span></button>
+</div>
+</main>
+
+</div>
+
+<footer style="height: 25px; display: flex; align-items: center; gap: 16px; padding: 0 16px; border-top: 1px solid var(--line); background: var(--pane); font-size: 11px; color: var(--muted);">
+<span class="tnum"><span class="dot" style="display: inline-block; width: 6px; height: 6px; background: var(--done); margin-right: 6px;" aria-hidden="true"></span>All systems OK</span><span>Downloads</span><span>hub: fleet.rlt.sk</span><span style="margin-left: auto;">? Shortcuts</span>
+</footer>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":1000}}'>
+class Component extends DCLogic {
+renderVals() {
+return {};
+}
+}
+</script>
+</body>
+</html>

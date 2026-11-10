@@ -1,0 +1,101 @@
+{
+  "v": 3,
+  "createdOnFiles": {
+    "v": 1,
+    "at": "2026-11-10T20:05:00Z"
+  },
+  "title": "Orbit Fleet HITL boards",
+  "launch": {
+    "view": "canvas"
+  },
+  "pages": [],
+  "boards": {
+    "Main.dc.html": {
+      "x": 0,
+      "y": 0,
+      "w": 1440,
+      "h": 1000,
+      "title": "Inbox · a queue of decisions, answered in place",
+      "expand": "fill"
+    },
+    "Review.dc.html": {
+      "x": 1520,
+      "y": 0,
+      "w": 1440,
+      "h": 1000,
+      "title": "Review · claim, evidence, diff, verdict",
+      "expand": "fill"
+    },
+    "Rules.dc.html": {
+      "x": 3040,
+      "y": 0,
+      "w": 1440,
+      "h": 1000,
+      "title": "Rules · approvals you taught once",
+      "expand": "fill"
+    },
+    "Autonomy.dc.html": {
+      "x": 4560,
+      "y": 0,
+      "w": 1440,
+      "h": 1000,
+      "title": "Autonomy · what each level does alone",
+      "expand": "fill"
+    },
+    "DecisionCard.dc.html": {
+      "x": 0,
+      "y": 1420,
+      "w": 1440,
+      "h": 1010,
+      "title": "Decision card · one anatomy, friction by risk"
+    },
+    "Status.dc.html": {
+      "x": 1520,
+      "y": 1420,
+      "w": 1440,
+      "h": 880,
+      "title": "Status language · one dot, one word, one line"
+    },
+    "Attention.dc.html": {
+      "x": 3040,
+      "y": 1420,
+      "w": 1440,
+      "h": 980,
+      "title": "Notifications · tiers, batching, escalation"
+    },
+    "Phone.dc.html": {
+      "x": 4560,
+      "y": 1420,
+      "w": 1440,
+      "h": 1030,
+      "title": "Phone · pager first"
+    }
+  },
+  "order": [
+    "Main.dc.html",
+    "Review.dc.html",
+    "Rules.dc.html",
+    "Autonomy.dc.html",
+    "DecisionCard.dc.html",
+    "Status.dc.html",
+    "Attention.dc.html",
+    "Phone.dc.html"
+  ],
+  "notes": {
+    "row1": {
+      "x": 0,
+      "y": -300,
+      "text": "Human in the loop: decide, review, teach, steer",
+      "kind": "title1",
+      "maxW": 6000
+    },
+    "row2": {
+      "x": 0,
+      "y": 1120,
+      "text": "The parts: decision card, status language, notifications, phone",
+      "kind": "title1",
+      "maxW": 6000
+    }
+  },
+  "designSystems": []
+}

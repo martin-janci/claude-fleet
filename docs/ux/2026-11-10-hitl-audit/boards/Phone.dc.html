@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Phone: pager first</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:#0f161e}
+a{color:#34d5e4;text-decoration:none}a:hover{color:#7fe6f0}
+.app{--bg:#0f161e;--pane:#141c24;--raise:#171f28;--sunk:#0c1219;--hover:#1d252e;--fg:#d5e5f7;--fg2:#a1b6cc;--muted:#869ab0;--line:#213244;--line2:#2c4057;--accent:#34d5e4;--accent-soft:#022d31;--on-accent:#0b0f17;--working:#98bbfb;--waiting:#f3a949;--failed:#fa9e93;--done:#72d48a;--idle:#869ab0;--waiting-soft:rgba(243,169,73,.13);--waiting-faint:rgba(243,169,73,.07);--waiting-line:rgba(243,169,73,.45);--danger-fill:#c62828;--chip-bg:#1b232b;--track:#232b34;font-family:"Geist",-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;color:var(--fg);background:var(--bg);font-size:13px;line-height:18px}
+.app *{box-sizing:border-box}
+.mono{font-family:"Geist Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px}
+.meta{font-size:12px;line-height:16px;color:var(--muted)}
+.tnum{font-variant-numeric:tabular-nums}
+.ph{width:320px;height:740px;border:1px solid var(--line2);border-radius:28px;background:var(--bg);overflow:hidden;display:flex;flex-direction:column;flex:none}
+.sb{height:30px;display:flex;align-items:center;justify-content:space-between;padding:0 20px;font-size:12px;font-weight:600;flex:none}
+.bb{height:58px;border-top:1px solid var(--line);background:var(--pane);display:flex;flex:none}
+.bb a{flex:1 1 0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;font-size:11px;color:var(--muted);position:relative}
+.bb a[aria-current="page"]{color:var(--fg);font-weight:600}
+.tb{min-height:48px;padding:0 14px;border-radius:8px;border:1px solid var(--line2);background:var(--raise);color:var(--fg);font:inherit;font-size:14px;display:flex;align-items:center;gap:10px;cursor:pointer;text-align:left;width:100%}
+.tb.quiet{background:transparent;border-color:transparent;color:var(--fg2)}
+.tb .k{font-size:12px;color:var(--muted);width:14px;flex:none}
+.chip{height:22px;padding:0 7px;border-radius:5px;font-size:11px;font-weight:500;display:inline-flex;align-items:center;gap:4px;background:var(--chip-bg);color:var(--fg2);white-space:nowrap}
+.dot{width:9px;height:9px;border-radius:50%;flex:none}
+.lane{display:flex;align-items:center;gap:6px;padding:12px 16px 4px;font-size:11px;font-weight:600;color:var(--fg2)}
+.lane .meta{font-size:11px;font-weight:400}
+.prow{display:flex;gap:10px;padding:10px 16px;align-items:flex-start;border-bottom:1px solid var(--line);min-height:56px}
+.pt{font-size:14px;line-height:19px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1 1 auto;min-width:0}
+.pl{font-size:12px;line-height:17px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.w{color:var(--waiting)}.f{color:var(--failed)}.d{color:var(--done)}
+.ask{border:1px solid var(--waiting-line);border-radius:10px;background:var(--waiting-faint);padding:12px;display:flex;flex-direction:column;gap:9px}
+.well{background:var(--sunk);border:1px solid var(--line);border-radius:6px;padding:7px 9px;color:var(--fg);overflow-wrap:anywhere}
+.fact{display:flex;gap:8px;font-size:12px;line-height:17px;color:var(--fg2)}
+.fact b{color:var(--fg);font-weight:500}
+.n{border:1px solid rgba(255,255,255,.1);border-radius:16px;background:rgba(26,35,45,.92);padding:10px 12px;display:flex;flex-direction:column;gap:3px}
+.cap{font-size:12px;line-height:17px;color:var(--muted);margin:0;width:320px}
+.cap b{color:var(--fg2);font-weight:600;display:block;font-size:13px;line-height:18px;margin-bottom:2px}
+.ev{display:grid;grid-template-columns:14px minmax(0,1fr);gap:1px 8px;font-size:12px;line-height:17px;color:var(--fg2)}
+.ev b{color:var(--fg);font-weight:500}
+.ev .src{grid-column:2;color:var(--muted);font-size:11px;line-height:15px}
+:focus-visible{outline:2px solid var(--accent);outline-offset:1px;border-radius:4px}
+</style>
+</helmet>
+<div class="app" style="box-sizing: border-box; width: 1440px; height: 1030px; padding: 28px 32px; display: flex; flex-direction: column; gap: 18px;">
+
+<div style="display: flex; align-items: baseline; gap: 14px;">
+<h1 style="margin: 0; font-size: 20px; line-height: 26px; font-weight: 600;">Phone · pager first</h1>
+<p class="meta" style="font-size: 13px; margin: 0;">Told in time, answered in two touches, and safe in a pocket.</p>
+</div>
+
+<div style="display: flex; gap: 32px; align-items: flex-start;">
+
+<div style="display: flex; flex-direction: column; gap: 12px;">
+<div class="ph" style="background: linear-gradient(180deg, #0a1017 0%, #142231 100%);">
+<div class="sb"><span>9:41</span><span class="meta" style="font-weight: 500;">5G</span></div>
+<div style="text-align: center; padding: 26px 0 22px;"><div style="font-size: 54px; line-height: 60px; font-weight: 500;" class="tnum">9:41</div><div class="meta" style="font-size: 13px;">Tuesday 10 November</div></div>
+<div style="padding: 0 12px; display: flex; flex-direction: column; gap: 8px;">
+<div class="n">
+<div style="display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--muted);"><span class="dot" style="width: 6px; height: 6px; background: var(--waiting);"></span>Orbit Fleet<span style="margin-left: auto;">now</span></div>
+<div style="font-size: 14px; font-weight: 600;">Stripe webhook retry needs you</div>
+<div style="font-size: 13px; color: var(--fg2);">A person's step · mercury</div>
+<div style="display: flex; gap: 8px; margin-top: 6px;"><button class="tb" style="min-height: 40px; width: auto; flex: 1 1 0; justify-content: center;">Answer</button><button class="tb quiet" style="min-height: 40px; width: auto; flex: 1 1 0; justify-content: center;">Later, 30 min</button></div>
+</div>
+<div class="n">
+<div style="display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--muted);"><span class="dot" style="width: 6px; height: 6px; background: var(--waiting);"></span>Orbit Fleet<span style="margin-left: auto;">30m</span></div>
+<div style="font-size: 14px; font-weight: 600;">Still waiting: Invoice PDF layout</div>
+<div style="font-size: 13px; color: var(--fg2);">A question · 1 task waits behind it</div>
+</div>
+<div class="n" style="padding: 8px 12px;">
+<div style="font-size: 12px; color: var(--fg2);">Orbit Fleet · 2 more need you</div>
+</div>
+</div>
+</div>
+<p class="cap"><b>Told in time</b>The lock screen names the kind, not the command. Answer opens the question behind the fingerprint. A reminder comes once. Never Approve.</p>
+</div>
+
+<div style="display: flex; flex-direction: column; gap: 12px;">
+<div class="ph">
+<div class="sb"><span>9:41</span><span class="meta" style="font-weight: 500;">5G</span></div>
+<div style="padding: 6px 16px 8px; display: flex; align-items: baseline; gap: 8px;"><span style="font-size: 22px; line-height: 28px; font-weight: 600;">Inbox</span><span class="meta tnum">4 need you · 2 to review</span></div>
+<div style="flex: 1 1 auto; overflow: hidden;">
+<div class="lane w">Approve <span class="meta">1</span></div>
+<div class="prow">
+<span class="dot" style="background: var(--waiting); margin-top: 6px;"></span>
+<div style="flex: 1 1 auto; min-width: 0;"><div style="display: flex; gap: 6px;"><span class="pt">Stripe webhook retry</span><span class="meta tnum">4m</span></div><div class="pl"><span class="w">Waiting for you:</span> push to main</div></div>
+</div>
+<div class="lane w">Answer <span class="meta">2 · oldest 38m</span></div>
+<div style="padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--waiting-faint); display: flex; flex-direction: column; gap: 8px;">
+<div style="display: flex; gap: 10px;"><span class="dot" style="background: var(--waiting); margin-top: 6px;"></span><div style="flex: 1 1 auto; min-width: 0;"><div style="display: flex; gap: 6px;"><span class="pt">Hub client split</span><span class="meta tnum">25m</span></div><div style="font-size: 13px; line-height: 18px; color: var(--fg);">Which transport should the hub client use for the event stream?</div></div></div>
+<button class="tb"><span class="k">1</span>Server-sent events</button>
+<button class="tb"><span class="k">2</span>WebSocket</button>
+<button class="tb"><span class="k">3</span>Long polling</button>
+<button class="tb quiet" style="min-height: 44px;">Answer in your own words…</button>
+</div>
+<div class="prow">
+<span class="dot" style="background: var(--waiting); margin-top: 6px;"></span>
+<div style="flex: 1 1 auto; min-width: 0;"><div style="display: flex; gap: 6px;"><span class="pt">Invoice PDF layout</span><span class="meta tnum w">38m</span></div><div class="pl"><span class="w">Waiting for you:</span> what VAT ID should the footer show?</div></div>
+</div>
+<div class="lane">Fix <span class="meta">1</span></div>
+<div class="prow">
+<span class="dot" style="background: var(--failed); margin-top: 6px;"></span>
+<div style="flex: 1 1 auto; min-width: 0;"><div style="display: flex; gap: 6px;"><span class="pt">Index rebuild</span><span class="meta tnum">1h</span></div><div class="pl"><span class="f">Failed:</span> stuck on the trust prompt</div></div>
+</div>
+<div class="lane">Review <span class="meta">2</span></div>
+</div>
+<div class="bb"><a href="#i" aria-current="page"><span>Inbox</span><span style="position: absolute; top: 6px; right: 14px; font-size: 10px; line-height: 14px; padding: 0 4px; border-radius: 7px; background: var(--waiting); color: #1a1205; font-weight: 600;">4</span></a><a href="#s">Sessions</a><a href="#c">Control</a><a href="#w">Work</a><a href="#m">More</a></div>
+</div>
+<p class="cap"><b>Answered where you read it</b>A question opens into its card in the list: no trip to the session and back. A person's step still opens the session.</p>
+</div>
+
+<div style="display: flex; flex-direction: column; gap: 12px;">
+<div class="ph">
+<div class="sb"><span>9:41</span><span class="meta" style="font-weight: 500;">5G</span></div>
+<div style="padding: 4px 16px 8px;"><div style="font-size: 17px; line-height: 23px; font-weight: 600;">Stripe webhook retry</div><div class="meta">mercury · acme · <span class="w">Needs you</span> · asked 4m ago</div></div>
+<div style="flex: 1 1 auto; padding: 0 12px; display: flex; flex-direction: column; gap: 10px; overflow: hidden;">
+<div style="font-size: 13px; line-height: 19px; color: var(--fg2); border-left: 2px solid var(--line2); padding-left: 10px;">23 passed in 4.1s. Retries now back off 1 s, 2 s, 4 s, capped at 5 minutes. Committing and pushing.</div>
+<section class="ask" aria-label="Permission request">
+<div style="display: flex; gap: 8px; align-items: baseline;"><span class="dot" style="background: var(--waiting);"></span><strong style="font-size: 15px; line-height: 20px; font-weight: 600;">Push to main needs your OK</strong></div>
+<div class="mono well">git push origin main</div>
+<div class="fact"><span aria-hidden="true">·</span><span>Pushes <b>3 commits</b> to <b>main</b>. CI has not run on them.</span></div>
+<div class="fact"><span aria-hidden="true">·</span><span>Cannot be taken back once someone pulls.</span></div>
+<button class="tb" style="min-height: 52px; justify-content: center; border-color: var(--danger-fill); position: relative; overflow: hidden;"><span style="position: absolute; left: 0; top: 0; bottom: 0; width: 46%; background: rgba(198,40,40,.35);"></span><span style="position: relative;">Hold to push to main</span></button>
+<button class="tb" style="justify-content: center;">No</button>
+<button class="tb quiet" style="min-height: 44px; justify-content: center;">Open a PR instead…</button>
+</section>
+</div>
+<div style="padding: 8px 12px 12px;"><div class="tb" style="color: var(--muted);">Or type an answer…</div></div>
+</div>
+<p class="cap"><b>Friction by risk</b>A tap runs the tests. A person's step takes a hold, and the button says what it does. The lock covers every approve, not only this card.</p>
+</div>
+
+<div style="display: flex; flex-direction: column; gap: 12px;">
+<div class="ph">
+<div class="sb"><span>9:41</span><span class="meta" style="font-weight: 500;">5G</span></div>
+<div style="padding: 4px 16px 8px;"><div style="font-size: 17px; line-height: 23px; font-weight: 600;">Inbox grouping (FLT-212)</div><div class="meta">mercury · <span class="d">Done</span> 40m ago · worked 1h 12m</div></div>
+<div style="flex: 1 1 auto; padding: 0 16px; display: flex; flex-direction: column; gap: 12px; overflow: hidden;">
+<div>
+<div class="meta" style="font-weight: 600; color: var(--fg2); margin-bottom: 4px;">What it says it did</div>
+<div style="font-size: 13px; line-height: 19px; color: var(--fg2); border-left: 2px solid var(--line2); padding-left: 10px;">Grouped the Inbox by state with a count per section and added tests. All tests pass.</div>
+</div>
+<div>
+<div class="meta" style="font-weight: 600; color: var(--fg2); margin-bottom: 4px;">What fleet read</div>
+<div class="ev">
+<span class="d">✓</span><span><b>212 tests passed</b></span><span class="src">in the session, 14:02, on 3f2a9c1</span>
+<span class="f">✗</span><span><b>2 commits since then, not tested</b></span><span class="src">git log on mercury</span>
+<span class="f">✗</span><span><b>1 of 15 checks failing</b></span><span class="src">GitHub, 31m ago</span>
+<span class="f">✗</span><span><b>2 files not committed</b></span><span class="src">git status, 8s ago</span>
+</div>
+</div>
+<div style="display: flex; align-items: center; gap: 8px; min-height: 48px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line);"><span style="flex: 1 1 auto; font-size: 13px;">9 files · <span class="d tnum">+412</span> <span class="f tnum">−96</span></span><a href="#diff" style="font-size: 13px;">Read the diff</a></div>
+</div>
+<div style="padding: 10px 12px 14px; display: flex; flex-direction: column; gap: 8px;">
+<button class="tb" style="justify-content: center;">Send it back…</button>
+<div style="display: flex; gap: 8px;"><button class="tb" style="justify-content: center;">Later, at the desk</button><button class="tb" style="justify-content: center;">Reviewed</button></div>
+</div>
+</div>
+<p class="cap"><b>Reviews are triaged, not done, in a pocket</b>The claim against what fleet read. Send it back with one sentence, or park it for the desk, where it waits at the top of Review.</p>
+</div>
+
+</div>
+
+<div style="display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 32px; margin-top: 4px;">
+<div class="meta"><span style="color: var(--fg2); font-weight: 600;">Needs:</span> push from the hub (FCM, APNs), a boot receiver on Android, and one re-notify. Today Android holds a socket only after the app was opened, and iOS checks about hourly.</div>
+<div class="meta"><span style="color: var(--fg2); font-weight: 600;">Keeps:</span> the 600 ms arm, the re-read of the pane before a key is sent, and “That question is gone”.</div>
+<div class="meta"><span style="color: var(--fg2); font-weight: 600;">Changes:</span> the lock asks before Control's Approve, an agent action's Approve all, a form with a secret, and the autonomy sheet. Today it asks only before the session card.</div>
+<div class="meta"><span style="color: var(--fg2); font-weight: 600;">Leaves to the desk:</span> line-by-line review, merge, and rules. “Always allow in this folder” stays a desktop choice.</div>
+</div>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":1030}}'>
+class Component extends DCLogic {
+renderVals() {
+return {};
+}
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Notifications: tiers, batching and escalation</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:#0f161e}
+a{color:#34d5e4;text-decoration:none}a:hover{color:#7fe6f0}
+.app{--bg:#0f161e;--pane:#141c24;--raise:#171f28;--sunk:#0c1219;--hover:#1d252e;--fg:#d5e5f7;--fg2:#a1b6cc;--muted:#869ab0;--line:#213244;--line2:#2c4057;--accent:#34d5e4;--accent-soft:#022d31;--on-accent:#0b0f17;--working:#98bbfb;--waiting:#f3a949;--failed:#fa9e93;--done:#72d48a;--idle:#869ab0;--waiting-soft:rgba(243,169,73,.13);--waiting-line:rgba(243,169,73,.45);--chip-bg:#1b232b;--track:#232b34;font-family:"Geist",-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;color:var(--fg);background:var(--bg);font-size:13px;line-height:18px}
+.app *{box-sizing:border-box}
+.mono{font-family:"Geist Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px}
+.meta{font-size:12px;line-height:16px;color:var(--muted)}
+.tnum{font-variant-numeric:tabular-nums}
+.btn{height:24px;padding:0 8px;border-radius:4px;border:1px solid var(--line2);background:var(--raise);color:var(--fg);font:inherit;font-size:12px;display:inline-flex;align-items:center;gap:6px;cursor:pointer;white-space:nowrap}
+.btn.quiet{background:transparent;border-color:transparent;color:var(--fg2)}
+.chip{height:20px;padding:0 6px;border-radius:4px;font-size:11px;font-weight:500;display:inline-flex;align-items:center;gap:4px;background:var(--chip-bg);color:var(--fg2);white-space:nowrap}
+.dot{width:8px;height:8px;border-radius:50%;flex:none}
+.card{border:1px solid var(--line);border-radius:6px;background:var(--pane)}
+.h{font-size:13px;line-height:18px;font-weight:600;margin:0}
+.cap{font-size:12px;line-height:17px;color:var(--muted);margin:0}
+.cap b{color:var(--fg2);font-weight:600}
+.t{width:100%;border-collapse:collapse;font-size:12px;line-height:16px}
+.t th{font-weight:500;color:var(--muted);text-align:left;padding:6px 10px;border-bottom:1px solid var(--line);vertical-align:bottom}
+.t td{padding:7px 10px;border-bottom:1px solid var(--line);vertical-align:top;color:var(--fg2)}
+.t tr:last-child td{border-bottom:0}
+.t td b{color:var(--fg);font-weight:500}
+.now{color:var(--waiting);font-weight:500}
+.n{border:1px solid var(--line2);border-radius:10px;background:#1a232d;padding:10px 12px;display:flex;flex-direction:column;gap:4px;box-shadow:0 6px 18px rgba(0,0,0,.35)}
+.n .top{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--muted)}
+.n .ttl{font-size:13px;line-height:18px;font-weight:600}
+.n .body{font-size:12px;line-height:17px;color:var(--fg2)}
+.n .acts{display:flex;gap:6px;margin-top:4px}
+.sw{width:28px;height:16px;border-radius:8px;background:var(--accent);position:relative;flex:none}
+.sw::after{content:"";position:absolute;top:2px;right:2px;width:12px;height:12px;border-radius:50%;background:var(--on-accent)}
+.sw.off{background:var(--track)}.sw.off::after{right:auto;left:2px;background:var(--muted)}
+.kv{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:6px 10px;font-size:12px;line-height:17px;align-items:center}
+</style>
+</helmet>
+<div class="app" style="box-sizing: border-box; width: 1440px; height: 980px; padding: 28px 32px; display: flex; flex-direction: column; gap: 18px;">
+
+<div style="display: flex; align-items: baseline; gap: 14px;">
+<h1 style="margin: 0; font-size: 20px; line-height: 26px; font-weight: 600;">Notifications</h1>
+<p class="cap" style="font-size: 13px;">Who is told, on which device, and what happens when nobody answers. Decided once, on the hub, for every device.</p>
+</div>
+
+<div style="display: flex; gap: 24px; flex: 1 1 auto; min-height: 0;">
+
+<div style="flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 14px;">
+<div style="display: flex; flex-direction: column; gap: 8px;">
+<div style="display: flex; align-items: baseline; gap: 10px;"><h2 class="h">Who is told, and when</h2><span class="meta">each cell is a choice · these are the defaults</span></div>
+<div class="card" style="overflow: hidden;">
+<table class="t">
+<thead><tr><th style="width: 30%;">When a session…</th><th>At the desk</th><th>Away from it</th><th>Still waiting</th></tr></thead>
+<tbody>
+<tr><td><b>asks for a person's step</b><div class="meta">push to main, merge, delete</div></td><td><span class="now">Now</span> · sound</td><td>Phone after 2 min</td><td>Again at 15 min, then each hour</td></tr>
+<tr><td><b>asks a question</b><div class="meta">a choice, a form, your own words</div></td><td><span class="now">Now</span></td><td>Phone after 5 min</td><td>Again at 30 min</td></tr>
+<tr><td><b>asks to run something in its worktree</b></td><td><span class="now">Now</span>, grouped</td><td>Phone after 5 min</td><td>Again at 30 min</td></tr>
+<tr><td><b>fails or is stuck</b></td><td><span class="now">Now</span></td><td>Phone now</td><td>Again at 1 h</td></tr>
+<tr><td><b>is paused by a limit, a login, a host</b></td><td>Once for the cause</td><td>Once for the cause</td><td>When it lifts</td></tr>
+<tr><td><b>finishes with changes to review</b></td><td>In the digest</td><td>In the digest</td><td>The Review count</td></tr>
+<tr><td><b>finishes with nothing to look at</b></td><td class="meta">no</td><td class="meta">no</td><td class="meta">no</td></tr>
+</tbody>
+</table>
+</div>
+<p class="cap"><b>At the desk</b> means this desktop saw a key or the pointer in the last 2 minutes. The phone stays silent while you are there. A notification opens the question. It never carries Approve.</p>
+</div>
+
+<div style="display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px;">
+<div class="card" style="padding: 12px; display: flex; flex-direction: column; gap: 8px;">
+<div style="display: flex; align-items: center; gap: 8px;"><h2 class="h" style="flex: 1 1 auto;">Focus</h2><span class="sw" role="img" aria-label="On"></span></div>
+<div class="meta" style="color: var(--fg2);">Hold everything except a person's step and a failure. The header keeps the count. A digest arrives when it ends.</div>
+<div style="display: flex; gap: 6px;"><button class="btn">25 min</button><button class="btn" style="border-color: var(--accent);">45 min</button><button class="btn">Until I answer one</button></div>
+</div>
+<div class="card" style="padding: 12px; display: flex; flex-direction: column; gap: 8px;">
+<div style="display: flex; align-items: center; gap: 8px;"><h2 class="h" style="flex: 1 1 auto;">Quiet hours</h2><span class="sw" role="img" aria-label="On"></span></div>
+<div class="meta" style="color: var(--fg2);">22:00 to 07:00 on each device's own clock. Still tells you: Failed. In the morning, one digest of what waited.</div>
+<div style="display: flex; gap: 6px;"><button class="btn">22:00</button><button class="btn">07:00</button><button class="btn quiet">Still tells you ▾</button></div>
+</div>
+</div>
+
+<div style="display: flex; flex-direction: column; gap: 8px;">
+<h2 class="h">Delivery you can check</h2>
+<div class="card" style="overflow: hidden;">
+<table class="t">
+<thead><tr><th style="width: 30%;">Device</th><th>How it is reached</th><th>Last delivered</th><th></th></tr></thead>
+<tbody>
+<tr><td><b>mac-desktop</b><div class="meta">this desktop</div></td><td>System notifications · on</td><td class="tnum">14:02 · shown</td><td style="text-align: right;"><button class="btn quiet">Send a test</button></td></tr>
+<tr><td><b>Pixel 9</b><div class="meta">Martin's phone</div></td><td>Push · on</td><td class="tnum">14:01 · 1.2 s</td><td style="text-align: right;"><button class="btn quiet">Send a test</button></td></tr>
+<tr><td><b>iPhone</b><div class="meta">Martin's phone</div></td><td><span style="color: var(--waiting);">Checks about once an hour</span></td><td class="tnum">13:10</td><td style="text-align: right;"><button class="btn">Set up push…</button></td></tr>
+</tbody>
+</table>
+</div>
+<p class="cap">When no device took a “Needs you” within 10 minutes, the hub says so here and in the status bar.</p>
+</div>
+</div>
+
+<div style="width: 400px; flex: none; display: flex; flex-direction: column; gap: 12px;">
+<h2 class="h">What arrives</h2>
+
+<div class="n">
+<div class="top"><span class="dot" style="width: 6px; height: 6px; background: var(--waiting);"></span><span>Orbit Fleet</span><span style="margin-left: auto;" class="tnum">now</span></div>
+<div class="ttl">Stripe webhook retry needs you</div>
+<div class="body">Push to main · mercury</div>
+<div class="acts"><button class="btn">Open</button><button class="btn quiet">Later, 30 min</button></div>
+</div>
+<p class="cap"><b>The ask, not “needs you”.</b> Open lands on the question. Later is a real snooze, with a time.</p>
+
+<div class="n">
+<div class="top"><span class="dot" style="width: 6px; height: 6px; background: var(--waiting);"></span><span>Orbit Fleet</span><span style="margin-left: auto;" class="tnum">2m</span></div>
+<div class="ttl">3 sessions need you</div>
+<div class="body">2 questions · 1 asks to run the tests · oldest 6m</div>
+<div class="acts"><button class="btn">Open the Inbox</button></div>
+</div>
+<p class="cap"><b>Three in a minute are one notification.</b> The count names the kinds.</p>
+
+<div class="n">
+<div class="top"><span class="dot" style="width: 6px; height: 6px; background: var(--waiting);"></span><span>Orbit Fleet</span><span style="margin-left: auto;" class="tnum">30m</span></div>
+<div class="ttl">Still waiting: Invoice PDF layout</div>
+<div class="body">What VAT ID should the sample invoice footer show? · 1 task waits behind it</div>
+<div class="acts"><button class="btn">Open</button><button class="btn quiet">Later, 1 h</button></div>
+</div>
+<p class="cap"><b>A second telling, once, with what it holds up.</b> Today a waiting session is never announced again.</p>
+
+<div class="n">
+<div class="top"><span class="dot" style="width: 6px; height: 6px; background: var(--idle);"></span><span>Orbit Fleet</span><span style="margin-left: auto;" class="tnum">1h</span></div>
+<div class="ttl">acme reached its 5-hour limit</div>
+<div class="body">4 sessions paused · resets 20:19</div>
+<div class="acts"><button class="btn">Open</button></div>
+</div>
+<p class="cap"><b>The cause, once.</b> Not four “is blocked”.</p>
+
+<div class="n">
+<div class="top"><span class="dot" style="width: 6px; height: 6px; background: var(--done);"></span><span>Orbit Fleet</span><span style="margin-left: auto;" class="tnum">45m</span></div>
+<div class="ttl">While you were heads down</div>
+<div class="body">2 finished and wait for review · 5 ran by rule · nothing waits on you</div>
+<div class="acts"><button class="btn">Open the Inbox</button></div>
+</div>
+<p class="cap"><b>The digest at a breakpoint</b>: when Focus ends, or when you answer the last ask.</p>
+</div>
+
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":980}}'>
+class Component extends DCLogic {
+renderVals() {
+return {};
+}
+}
+</script>
+</body>
+</html>

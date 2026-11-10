@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Decision card: anatomy and variants</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:#0f161e}
+a{color:#34d5e4;text-decoration:none}a:hover{color:#7fe6f0}
+.app{--bg:#0f161e;--pane:#141c24;--raise:#171f28;--sunk:#0c1219;--hover:#1d252e;--fg:#d5e5f7;--fg2:#a1b6cc;--muted:#869ab0;--line:#213244;--line2:#2c4057;--accent:#34d5e4;--accent-soft:#022d31;--on-accent:#0b0f17;--working:#98bbfb;--waiting:#f3a949;--failed:#fa9e93;--done:#72d48a;--idle:#869ab0;--waiting-soft:rgba(243,169,73,.13);--waiting-faint:rgba(243,169,73,.07);--waiting-line:rgba(243,169,73,.45);--failed-soft:rgba(250,158,147,.12);--failed-line:rgba(250,158,147,.35);--done-soft:rgba(114,212,138,.12);--danger-fill:#c62828;--chip-bg:#1b232b;--add:rgba(114,212,138,.14);--del:rgba(250,158,147,.14);font-family:"Geist",-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;color:var(--fg);background:var(--bg);font-size:13px;line-height:18px}
+.app *{box-sizing:border-box}
+.mono{font-family:"Geist Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px}
+.meta{font-size:12px;line-height:16px;color:var(--muted)}
+.tnum{font-variant-numeric:tabular-nums}
+.btn{height:28px;padding:0 10px;border-radius:4px;border:1px solid var(--line2);background:var(--raise);color:var(--fg);font:inherit;font-size:12px;display:inline-flex;align-items:center;gap:6px;cursor:pointer;white-space:nowrap}
+.btn:hover{background:var(--hover)}
+.btn.quiet{background:transparent;border-color:transparent;color:var(--fg2)}
+.btn.danger-fill{background:var(--danger-fill);border-color:var(--danger-fill);color:#fff;font-weight:500}
+.btn[disabled]{opacity:.5;cursor:default}
+.kbd{font-size:11px;line-height:14px;padding:0 4px;border-radius:3px;border:1px solid var(--line2);color:var(--muted)}
+.chip{height:20px;padding:0 6px;border-radius:4px;font-size:11px;font-weight:500;display:inline-flex;align-items:center;gap:4px;background:var(--chip-bg);color:var(--fg2);white-space:nowrap}
+.dot{width:8px;height:8px;border-radius:50%;flex:none;background:var(--waiting)}
+:focus-visible{outline:2px solid var(--accent);outline-offset:1px;border-radius:4px}
+.ask{border:1px solid var(--waiting-line);border-radius:6px;background:var(--waiting-faint);padding:12px 14px;display:flex;flex-direction:column;gap:9px}
+.ask.calm{border-color:var(--line);background:var(--pane)}
+.q{display:flex;align-items:center;gap:8px}
+.q strong{font-size:14px;line-height:20px;font-weight:600}
+.q .meta{margin-left:auto;white-space:nowrap}
+.well{background:var(--sunk);border:1px solid var(--line);border-radius:4px;padding:7px 10px;color:var(--fg);overflow-wrap:anywhere}
+.fact{display:flex;gap:8px;font-size:12px;line-height:17px;color:var(--fg2)}
+.fact b{color:var(--fg);font-weight:500}
+.acts{display:flex;flex-wrap:wrap;align-items:center;gap:6px}
+.cap{font-size:12px;line-height:17px;color:var(--muted);margin:0}
+.cap b{color:var(--fg2);font-weight:600}
+.tag{font-size:11px;font-weight:600;color:var(--fg2);letter-spacing:.02em}
+.step{font-size:11px;font-weight:500;color:var(--waiting);border:1px solid var(--waiting-line);border-radius:4px;padding:0 6px;line-height:18px;white-space:nowrap}
+.dl{display:flex;white-space:pre}
+.dl span:first-child{width:22px;flex:none;color:var(--muted);opacity:.7;text-align:right;margin-right:10px}
+.dl.add{background:var(--add)}.dl.del{background:var(--del)}
+.in{flex:1 1 220px;height:28px;padding:0 8px;border-radius:4px;border:1px solid var(--line2);background:var(--sunk);color:var(--fg);font:inherit;font-size:12px;min-width:0}
+.box{width:13px;height:13px;border:1px solid var(--line2);border-radius:3px;display:inline-flex;align-items:center;justify-content:center;font-size:9px;color:var(--on-accent);flex:none}
+.box.on{background:var(--accent);border-color:var(--accent)}
+.col{display:flex;flex-direction:column;gap:6px;min-width:0}
+</style>
+</helmet>
+<div class="app" style="box-sizing: border-box; width: 1440px; height: 1010px; padding: 28px 32px; display: flex; flex-direction: column; gap: 18px;">
+
+<div style="display: flex; align-items: baseline; gap: 14px;">
+<h1 style="margin: 0; font-size: 20px; line-height: 26px; font-weight: 600;">Decision card</h1>
+<p class="cap" style="font-size: 13px;">One card for every ask. It says what in the app's words, shows exactly what will run, and the friction grows with what cannot be taken back.</p>
+</div>
+
+<div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 30px 24px; align-content: start;">
+
+<div class="col">
+<span class="tag">Inside the worktree</span>
+<section class="ask" aria-label="Permission request">
+<div class="q"><span class="dot"></span><strong>Run the tests?</strong><span class="meta tnum">asked 1m ago</span></div>
+<div class="mono well">pnpm exec vitest run src/lib/inbox.test.ts</div>
+<div class="fact"><span aria-hidden="true">·</span><span>Stays in its worktree. Changes no tracked file.</span></div>
+<div class="acts"><button class="btn"><span class="kbd">1</span>Yes</button><button class="btn"><span class="kbd">2</span>Yes, for this session</button><button class="btn"><span class="kbd">3</span>No</button><button class="btn quiet">Make it a rule…</button></div>
+</section>
+<p class="cap"><b>The headline is the app's.</b> “Do you want to proceed?” says nothing in a list of 17. The command stays in mono, never behind a toggle.</p>
+</div>
+
+<div class="col">
+<span class="tag">A person's step</span>
+<section class="ask" aria-label="Permission request">
+<div class="q"><span class="dot"></span><strong>Push to main needs your OK</strong><span class="step">A person's step</span><span class="meta tnum">asked 4m ago</span></div>
+<div class="mono well">git push origin main</div>
+<div class="fact"><span aria-hidden="true">·</span><span>Pushes <b>3 commits</b> to <b>main</b> on origin. CI has not run on them.</span></div>
+<div class="fact"><span aria-hidden="true">·</span><span>Cannot be taken back once someone pulls.</span></div>
+<div style="border: 1px solid var(--line2); border-radius: 4px; background: var(--pane); padding: 8px 10px; display: flex; align-items: center; gap: 8px;">
+<span style="font-size: 12px; flex: 1 1 auto;">Push 3 commits to <b style="font-weight: 600;">main</b>?</span>
+<button class="btn quiet">Cancel</button><button class="btn danger-fill">Push to main</button>
+</div>
+<div class="acts"><button class="btn" disabled><span class="kbd">1</span>Yes</button><button class="btn"><span class="kbd">3</span>No</button><span class="meta">Open a PR instead: say so in your own words</span></div>
+</section>
+<p class="cap"><b>Two presses, the second names the act.</b> The same step as “Save rule and allow” today. No session-wide “don't ask again” is offered for it.</p>
+</div>
+
+<div class="col">
+<span class="tag">An edit</span>
+<section class="ask" aria-label="Permission request">
+<div class="q"><span class="dot"></span><strong>Edit docs/pricing.md?</strong><span class="meta tnum">asked 20s ago</span></div>
+<div class="mono well" style="padding: 5px 0; line-height: 17px;">
+<div class="dl" style="padding: 0 10px;"><span>41</span><span>  ## Team plan</span></div>
+<div class="dl del" style="padding: 0 10px;"><span>42</span><span>- €19 per seat, billed yearly</span></div>
+<div class="dl add" style="padding: 0 10px;"><span>42</span><span>+ €24 per seat, billed yearly</span></div>
+<div class="dl" style="padding: 0 10px;"><span>43</span><span>  Includes the hub and both apps.</span></div>
+</div>
+<div class="acts"><button class="btn"><span class="kbd">1</span>Yes</button><button class="btn"><span class="kbd">2</span>Yes, all edits this session</button><button class="btn"><span class="kbd">3</span>No</button></div>
+</section>
+<p class="cap"><b>You approve what you can read.</b> Today the card names the file and nothing else; the change is only in the terminal.</p>
+</div>
+
+<div class="col">
+<span class="tag">A choice</span>
+<section class="ask" aria-label="Question from Claude">
+<div class="q"><span class="dot"></span><strong>Which approach should the notification action use?</strong></div>
+<div class="acts"><button class="btn"><span class="kbd">1</span>Direct reply over the hub websocket</button><button class="btn"><span class="kbd">2</span>Queue it in WorkManager and retry</button><button class="btn"><span class="kbd">3</span>Open the app on tap and answer there</button></div>
+<div class="acts"><input class="in" aria-label="Your own answer" placeholder="Or answer in your own words…"><button class="btn quiet">Ask it something first</button></div>
+</section>
+<p class="cap"><b>Only real options get a number.</b> “Type something.” and “Chat about this” are the terminal's rows; here they are the text field and one link.</p>
+</div>
+
+<div class="col">
+<span class="tag">A question with no options</span>
+<section class="ask" aria-label="Question from Claude">
+<div class="q"><span class="dot"></span><strong>What VAT ID should the sample invoice footer show?</strong><span class="meta tnum" style="color: var(--waiting);">asked 38m ago</span></div>
+<div class="acts"><input class="in" aria-label="Your answer" value="SK2020123456"><button class="btn">Send <span class="kbd">↵</span></button></div>
+<div class="meta">Held up: 1 task of mission Invoices v2 waits on this.</div>
+</section>
+<p class="cap"><b>Type the answer where the question is.</b> The age turns amber past 15 minutes, and the card says what else waits behind it.</p>
+</div>
+
+<div class="col">
+<span class="tag">Several at once</span>
+<section class="ask" aria-label="Three permission requests">
+<div class="q"><span class="dot"></span><strong>3 sessions ask to run the tests</strong><span class="meta tnum">oldest 4m</span></div>
+<div class="mono well">pnpm test</div>
+<div style="display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: var(--fg2);">
+<label style="display: flex; gap: 8px; align-items: center;"><span class="box on" aria-hidden="true">✓</span>Rail badge polish <span class="meta">· mac</span></label>
+<label style="display: flex; gap: 8px; align-items: center;"><span class="box on" aria-hidden="true">✓</span>Hub docs refresh <span class="meta">· mac</span></label>
+<label style="display: flex; gap: 8px; align-items: center;"><span class="box on" aria-hidden="true">✓</span>Mobile offline sync <span class="meta">· oci</span></label>
+</div>
+<div class="acts"><button class="btn"><span class="kbd">1</span>Yes for 3</button><button class="btn"><span class="kbd">3</span>No for 3</button><button class="btn quiet">One by one</button></div>
+</section>
+<p class="cap"><b>Same command, same answer, one decision.</b> Only for asks that stay in a worktree. A person's step is never grouped.</p>
+</div>
+
+<div class="col">
+<span class="tag">After the answer</span>
+<section class="ask calm" aria-label="Answered">
+<div class="q"><span class="dot" style="background: var(--done);"></span><strong>Push to main needs your OK</strong></div>
+<div class="mono well">git push origin main</div>
+<div style="font-size: 12px; color: var(--fg2);">✓ You approved it on this desktop at 14:02. <a href="#stop">Stop the session</a> · <a href="#back">Back to it</a></div>
+</section>
+<p class="cap"><b>Who, where, when.</b> A key press cannot be undone, so the card offers Stop, and “Back to it” replaces the toast's Undo.</p>
+</div>
+
+<div class="col">
+<span class="tag">Answered somewhere else</span>
+<section class="ask calm" aria-label="Answered elsewhere">
+<div class="q"><span class="dot" style="background: var(--idle);"></span><strong>Which tables should migration 208 backfill?</strong></div>
+<div style="font-size: 12px; color: var(--fg2);">Ada answered on her phone at 14:01: <b style="color: var(--fg); font-weight: 500;">sessions.turn_outcome, hosts.signed_out_logins</b></div>
+<div class="meta">Nothing was sent from here.</div>
+</section>
+<p class="cap"><b>The losing side of a race says what happened</b>, in place of “That dialog is gone”. The answer log keeps both names.</p>
+</div>
+
+<div class="col">
+<span class="tag">You may read, not answer</span>
+<section class="ask" aria-label="Permission request, read only">
+<div class="q"><span class="dot"></span><strong>Delete 2 files outside the worktree?</strong><span class="meta tnum">asked 9m ago</span></div>
+<div class="mono well">rm ~/src/billing-api/tmp/ledger-*.csv</div>
+<div class="acts"><button class="btn" disabled><span class="kbd">1</span>Yes</button><button class="btn" disabled><span class="kbd">3</span>No</button><button class="btn">Ask Ada to answer</button></div>
+<div class="meta">Ada shared this session with you to watch.</div>
+</section>
+<p class="cap"><b>A watcher can still move it along</b>: one press pings the owner with the question attached.</p>
+</div>
+
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":1010}}'>
+class Component extends DCLogic {
+renderVals() {
+return {};
+}
+}
+</script>
+</body>
+</html>

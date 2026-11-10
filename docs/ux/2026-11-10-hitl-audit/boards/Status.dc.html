@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Status language for rows and headers</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:#0f161e}
+a{color:#34d5e4;text-decoration:none}a:hover{color:#7fe6f0}
+.app{--bg:#0f161e;--pane:#141c24;--raise:#171f28;--sunk:#0c1219;--hover:#1d252e;--fg:#d5e5f7;--fg2:#a1b6cc;--muted:#869ab0;--line:#213244;--line2:#2c4057;--accent:#34d5e4;--accent-soft:#022d31;--on-accent:#0b0f17;--working:#98bbfb;--waiting:#f3a949;--failed:#fa9e93;--done:#72d48a;--idle:#869ab0;--waiting-soft:rgba(243,169,73,.13);--waiting-faint:rgba(243,169,73,.07);--waiting-line:rgba(243,169,73,.45);--failed-soft:rgba(250,158,147,.12);--done-soft:rgba(114,212,138,.12);--chip-bg:#1b232b;--count-bg:#1c242d;--track:#232b34;font-family:"Geist",-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;color:var(--fg);background:var(--bg);font-size:13px;line-height:18px}
+.app *{box-sizing:border-box}
+.mono{font-family:"Geist Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px}
+.meta{font-size:12px;line-height:16px;color:var(--muted)}
+.tnum{font-variant-numeric:tabular-nums}
+.btn{height:22px;padding:0 6px;border-radius:4px;border:1px solid var(--line2);background:var(--raise);color:var(--fg);font:inherit;font-size:12px;display:inline-flex;align-items:center;gap:6px;cursor:pointer;white-space:nowrap}
+.btn.quiet{background:transparent;border-color:transparent;color:var(--fg2)}
+.chip{height:20px;padding:0 6px;border-radius:4px;font-size:11px;font-weight:500;display:inline-flex;align-items:center;gap:4px;background:var(--chip-bg);color:var(--fg2);white-space:nowrap}
+.chip.waiting{background:var(--waiting-soft);color:var(--waiting)}
+.dot{width:8px;height:8px;border-radius:50%;flex:none;margin-top:5px}
+.ring{width:8px;height:8px;border-radius:50%;flex:none;margin-top:5px;border:1.5px solid var(--idle)}
+.lost{width:8px;height:8px;border-radius:50%;flex:none;margin-top:5px;border:1.5px dashed var(--idle)}
+.row{display:flex;gap:10px;padding:7px 12px;border-radius:6px;align-items:flex-start}
+.row[aria-selected="true"]{background:var(--accent-soft);box-shadow:inset 2px 0 0 var(--accent)}
+.rtitle{font-size:13px;line-height:18px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1 1 auto;min-width:0}
+.rline{font-size:12px;line-height:16px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.w{color:var(--waiting)}.f{color:var(--failed)}.d{color:var(--done)}.k{color:var(--working)}
+.card{border:1px solid var(--line);border-radius:6px;background:var(--pane)}
+.h{font-size:13px;line-height:18px;font-weight:600;margin:0}
+.cap{font-size:12px;line-height:17px;color:var(--muted);margin:0}
+.cap b{color:var(--fg2);font-weight:600}
+.t{width:100%;border-collapse:collapse;font-size:12px;line-height:16px}
+.t th{font-weight:500;color:var(--muted);text-align:left;padding:6px 10px;border-bottom:1px solid var(--line)}
+.t td{padding:7px 10px;border-bottom:1px solid var(--line);vertical-align:top;color:var(--fg2)}
+.t tr:last-child td{border-bottom:0}
+.old{font-size:12px;line-height:17px;color:var(--muted);text-decoration:line-through;text-decoration-color:rgba(134,154,176,.6)}
+.new{font-size:12px;line-height:17px;color:var(--fg)}
+.kbd{font-size:11px;line-height:14px;padding:0 4px;border-radius:3px;border:1px solid var(--line2);color:var(--muted)}
+.ic{width:22px;height:22px;border-radius:4px;display:inline-flex;align-items:center;justify-content:center;color:var(--fg2);border:1px solid transparent;background:transparent}
+</style>
+</helmet>
+<div class="app" style="box-sizing: border-box; width: 1440px; height: 880px; padding: 28px 32px; display: flex; flex-direction: column; gap: 18px;">
+
+<div style="display: flex; align-items: baseline; gap: 14px;">
+<h1 style="margin: 0; font-size: 20px; line-height: 26px; font-weight: 600;">Status language</h1>
+<p class="cap" style="font-size: 13px;">One dot, one word, one line that says why. The same on the desktop list, the Inbox, the header and the phone.</p>
+</div>
+
+<div style="display: flex; gap: 24px; flex: 1 1 auto; min-height: 0;">
+
+<div style="width: 400px; flex: none; display: flex; flex-direction: column; gap: 8px;">
+<h2 class="h">Every state, one row each</h2>
+<div class="card" style="padding: 6px 0; display: flex; flex-direction: column;">
+
+<div class="row" aria-selected="true">
+<span class="dot" style="background: var(--waiting);" aria-label="Needs you"></span>
+<div style="flex: 1 1 auto; min-width: 0;">
+<div style="display: flex; gap: 6px; align-items: center;"><span class="rtitle">Stripe webhook retry</span><span class="meta tnum">4m</span></div>
+<div class="rline"><span class="w">Waiting for you:</span> push to main</div>
+</div>
+</div>
+
+<div class="row">
+<span class="dot" style="background: var(--waiting);" aria-label="Needs you"></span>
+<div style="flex: 1 1 auto; min-width: 0;">
+<div style="display: flex; gap: 6px; align-items: center;"><span class="rtitle">Invoice PDF layout</span><span class="meta tnum w">38m</span></div>
+<div class="rline"><span class="w">Waiting for you:</span> what VAT ID should the footer show?</div>
+</div>
+</div>
+
+<div class="row">
+<span class="dot" style="background: var(--waiting);" aria-label="Needs you"></span>
+<div style="flex: 1 1 auto; min-width: 0;">
+<div style="display: flex; gap: 6px; align-items: center;"><span class="rtitle">Hub reconnect backoff</span><span class="meta tnum w">52m</span></div>
+<div class="rline"><span class="w">Waiting for you:</span> a form, 3 fields</div>
+</div>
+</div>
+
+<div class="row">
+<span class="dot" style="background: var(--failed);" aria-label="Failed"></span>
+<div style="flex: 1 1 auto; min-width: 0;">
+<div style="display: flex; gap: 6px; align-items: center;"><span class="rtitle">Hub e2e runner</span><span class="meta tnum">2h</span></div>
+<div class="rline"><span class="f">Failed:</span> stuck on the trust prompt</div>
+<div style="display: flex; gap: 6px; margin-top: 5px;"><button class="btn">Trust the folder…</button></div>
+</div>
+</div>
+
+<div class="row">
+<span class="dot" style="background: var(--failed);" aria-label="Failed"></span>
+<div style="flex: 1 1 auto; min-width: 0;">
+<div style="display: flex; gap: 6px; align-items: center;"><span class="rtitle">Voice latency</span><span class="meta tnum">1h</span></div>
+<div class="rline"><span class="f">Failed:</span> the API was overloaded (529)</div>
+</div>
+</div>
+
+<div class="row">
+<span class="ring" aria-label="Paused"></span>
+<div style="flex: 1 1 auto; min-width: 0;">
+<div style="display: flex; gap: 6px; align-items: center;"><span class="rtitle">Partial refunds</span><span class="meta tnum">1h</span></div>
+<div class="rline"><span class="w">Paused · 5-hour limit</span> on acme</div>
+<div style="display: flex; gap: 6px; margin-top: 5px;"><button class="btn">Switch account</button><button class="btn quiet">Wait until 20:19</button></div>
+</div>
+</div>
+
+<div class="row">
+<span class="ring" aria-label="Paused"></span>
+<div style="flex: 1 1 auto; min-width: 0;">
+<div style="display: flex; gap: 6px; align-items: center;"><span class="rtitle">Load test</span><span class="meta tnum">2h</span></div>
+<div class="rline">Paused · oci-arm is down</div>
+</div>
+</div>
+
+<div class="row">
+<span class="dot" style="background: var(--working);" aria-label="Working"></span>
+<div style="flex: 1 1 auto; min-width: 0;">
+<div style="display: flex; gap: 6px; align-items: center;"><span class="rtitle">Inbox grouping</span><span class="meta tnum">12m</span></div>
+<div class="rline"><span class="k">Working:</span> reading Sidebar.svelte</div>
+</div>
+</div>
+
+<div class="row">
+<span class="dot" style="background: var(--done);" aria-label="Done"></span>
+<div style="flex: 1 1 auto; min-width: 0;">
+<div style="display: flex; gap: 6px; align-items: center;"><span class="rtitle">Settings search</span><span class="meta tnum">1h</span></div>
+<div class="rline"><span class="d">Done:</span> Settings has a search box now · PR #479 ✓</div>
+</div>
+</div>
+
+<div class="row">
+<span class="dot" style="background: var(--idle);" aria-label="Idle"></span>
+<div style="flex: 1 1 auto; min-width: 0;">
+<div style="display: flex; gap: 6px; align-items: center;"><span class="rtitle">Docs pass</span><span class="meta tnum">1d</span></div>
+<div class="rline">Idle since yesterday · reviewed</div>
+</div>
+</div>
+
+<div class="row">
+<span class="lost" aria-label="Paused, lost"></span>
+<div style="flex: 1 1 auto; min-width: 0;">
+<div style="display: flex; gap: 6px; align-items: center;"><span class="rtitle" style="color: var(--fg2);">old-spike-tauri3</span><span class="meta tnum">3d</span></div>
+<div class="rline">Paused · lost when mac restarted</div>
+</div>
+</div>
+
+</div>
+<p class="cap"><b>Shape backs the colour:</b> filled for a live state, a ring for paused, dashed for lost.</p>
+</div>
+
+<div style="flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 16px;">
+
+<div style="display: flex; flex-direction: column; gap: 8px;">
+<h2 class="h">What each word promises</h2>
+<div class="card" style="overflow: hidden;">
+<table class="t">
+<thead><tr><th style="width: 15%;">Word</th><th style="width: 41%;">Line two always says</th><th>In the badge</th><th>Notifies</th></tr></thead>
+<tbody>
+<tr><td><span class="w" style="font-weight: 600;">Needs you</span></td><td>the ask itself: the command, the question, the form</td><td>yes</td><td>now, then again if it keeps waiting</td></tr>
+<tr><td><span class="f" style="font-weight: 600;">Failed</span></td><td>why, in words, and the one fix when there is one</td><td>yes</td><td>now</td></tr>
+<tr><td><span style="font-weight: 600; color: var(--fg);">Paused</span></td><td>what it waits on and until when</td><td>yes while a person can lift it</td><td>once</td></tr>
+<tr><td><span class="k" style="font-weight: 600;">Working</span></td><td>what it is doing now</td><td>no</td><td>no</td></tr>
+<tr><td><span class="d" style="font-weight: 600;">Done</span></td><td>the first line of its last message, then the PR and checks</td><td>its own count: to review</td><td>in the digest</td></tr>
+<tr><td><span style="font-weight: 600; color: var(--fg);">Idle</span></td><td>since when, and that someone has looked</td><td>no</td><td>no</td></tr>
+</tbody>
+</table>
+</div>
+</div>
+
+<div style="display: flex; flex-direction: column; gap: 8px;">
+<h2 class="h">What changes on the desktop row</h2>
+<div class="card" style="padding: 10px 12px; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px 20px;">
+<div class="meta" style="font-weight: 600; color: var(--fg2);">Today</div><div class="meta" style="font-weight: 600; color: var(--fg2);">Then</div>
+<div class="old">A green dot on every row: it means the tmux session is alive</div><div class="new">The dot is the state. tmux and host health move to the inspector.</div>
+<div class="old">Needs you · Claude Code · htz-1 · Run scripts/hub-e2…</div><div class="new"><span class="f">Failed:</span> stuck on the trust prompt</div>
+<div class="old">Waiting for you: Do you want to proceed?</div><div class="new"><span class="w">Waiting for you:</span> push to main</div>
+<div class="old">Failed · Claude Code · mac · API Error: 529 {"type":"ov…</div><div class="new"><span class="f">Failed:</span> the API was overloaded (529)</div>
+<div class="old">Idle · Claude Code · mac · FLT-201: add fuzzy search t…</div><div class="new"><span class="d">Done:</span> Settings has a search box now · PR #479 ✓</div>
+<div class="old">FORM WAITING in a box, in capitals</div><div class="new"><span class="w">Waiting for you:</span> a form, 3 fields</div>
+</div>
+</div>
+
+<div style="display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px;">
+
+<div style="display: flex; flex-direction: column; gap: 8px;">
+<h2 class="h">The selected row keeps its name</h2>
+<div class="card" style="padding: 6px 0;">
+<div class="row" aria-selected="true">
+<span class="dot" style="background: var(--waiting);"></span>
+<div style="flex: 1 1 auto; min-width: 0;">
+<div style="display: flex; gap: 4px; align-items: center;"><span class="rtitle">Stripe webhook retry</span><button class="ic" aria-label="Restart"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M13 8a5 5 0 1 1-1.5-3.6"></path><path d="M13 2.5v2.5h-2.5"></path></svg></button><button class="ic" aria-label="More actions">⋯</button></div>
+<div class="rline"><span class="w">Waiting for you:</span> push to main</div>
+</div>
+</div>
+</div>
+<p class="cap">Today eight hover icons and a PRIVATE chip cut the name to “Stripe w…”. Two icons and a menu; Private moves to the inspector.</p>
+</div>
+
+<div style="display: flex; flex-direction: column; gap: 8px;">
+<h2 class="h">The header keeps its title</h2>
+<div class="card" style="padding: 10px 12px; display: flex; align-items: center; gap: 8px;">
+<strong style="font-size: 14px; font-weight: 600; white-space: nowrap;">Stripe webhook retry</strong><span class="chip waiting">Needs you</span><span style="flex: 1 1 auto;"></span><span class="meta tnum">58%</span><span class="chip" title="Ada is watching">A</span><button class="ic" aria-label="More actions">⋯</button>
+</div>
+<p class="cap">Today the title is the first thing to shrink: “Invoic…”, or gone when a watcher shows. The title never goes under 24 characters; actions fold into the menu first.</p>
+</div>
+
+<div style="display: flex; flex-direction: column; gap: 8px;">
+<h2 class="h">One count, one colour</h2>
+<div class="card" style="padding: 10px 12px; display: flex; align-items: center; gap: 10px;">
+<strong style="font-size: 16px; font-weight: 600;">Inbox</strong><span class="meta tnum"><span class="w" style="font-weight: 600;">15 need you</span> · 2 failed · 3 to review</span>
+</div>
+<p class="cap">Today: a red 17 by the title, an amber 17 on the rail, “17 need you”, then “Needs you 15”, then “17 waiting” in the footer.</p>
+</div>
+
+<div style="display: flex; flex-direction: column; gap: 8px;">
+<h2 class="h">The status bar tells the truth</h2>
+<div class="card" style="padding: 6px 12px; display: flex; align-items: center; gap: 14px; font-size: 11px; color: var(--muted);">
+<span><span style="display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--waiting); margin-right: 6px;"></span><span class="w">1 host offline · acme at its 5-hour limit</span></span><span>hub: fleet.janci.dev</span><span style="margin-left: auto;">? Shortcuts</span>
+</div>
+<p class="cap">Today it reads “oci-arm still connecting · All systems OK … oci-arm offline” on one line.</p>
+</div>
+
+</div>
+</div>
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":880}}'>
+class Component extends DCLogic {
+renderVals() {
+return {};
+}
+}
+</script>
+</body>
+</html>

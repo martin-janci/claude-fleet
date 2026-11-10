@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Inbox as a queue of decisions</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:#0f161e}
+a{color:#34d5e4;text-decoration:none}a:hover{color:#7fe6f0}
+.app{--bg:#0f161e;--pane:#141c24;--raise:#171f28;--sunk:#0c1219;--hover:#1d252e;--fg:#d5e5f7;--fg2:#a1b6cc;--muted:#869ab0;--line:#213244;--line2:#2c4057;--accent:#34d5e4;--accent-soft:#022d31;--on-accent:#0b0f17;--working:#98bbfb;--waiting:#f3a949;--failed:#fa9e93;--done:#72d48a;--idle:#869ab0;--waiting-soft:rgba(243,169,73,.13);--waiting-faint:rgba(243,169,73,.07);--waiting-line:rgba(243,169,73,.45);--failed-soft:rgba(250,158,147,.12);--failed-line:rgba(250,158,147,.35);--done-soft:rgba(114,212,138,.12);--working-soft:rgba(152,187,251,.12);--danger-fill:#c62828;--on-danger:#fff;--on-waiting:#1a1205;--code:#22cde5;--chip-bg:#1b232b;--count-bg:#1c242d;--track:#232b34;--add:rgba(114,212,138,.14);--del:rgba(250,158,147,.14);font-family:"Geist",-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;color:var(--fg);background:var(--bg);font-size:13px;line-height:18px}
+.app *{box-sizing:border-box}
+.mono{font-family:"Geist Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px}
+.meta{font-size:12px;line-height:16px;color:var(--muted)}
+.tnum{font-variant-numeric:tabular-nums}
+.btn{height:24px;padding:0 8px;border-radius:4px;border:1px solid var(--line2);background:var(--raise);color:var(--fg);font:inherit;font-size:12px;display:inline-flex;align-items:center;gap:6px;cursor:pointer;white-space:nowrap}
+.btn:hover{background:var(--hover)}
+.btn.quiet{background:transparent;border-color:transparent;color:var(--fg2)}
+.btn.danger{background:transparent;border-color:transparent;color:var(--failed)}
+.btn.sm{height:22px;padding:0 6px}.btn.lg{height:28px;padding:0 10px}
+.kbd{font-size:11px;line-height:14px;padding:0 4px;border-radius:3px;border:1px solid var(--line2);color:var(--muted)}
+.chip{height:20px;padding:0 6px;border-radius:4px;font-size:11px;font-weight:500;display:inline-flex;align-items:center;gap:4px;background:var(--chip-bg);color:var(--fg2);white-space:nowrap}
+.chip.waiting{background:var(--waiting-soft);color:var(--waiting)}
+.chip.working{background:var(--working-soft);color:var(--working)}
+.dot{width:8px;height:8px;border-radius:50%;flex:none}
+.count{font-size:11px;font-weight:500;padding:0 5px;border-radius:4px;background:var(--count-bg);color:var(--fg2);line-height:16px}
+.row{display:flex;gap:10px;padding:7px 12px;border-radius:6px;margin:0 6px;align-items:flex-start}
+.row:hover{background:var(--hover)}
+.row[aria-selected="true"]{background:var(--accent-soft);box-shadow:inset 2px 0 0 var(--accent)}
+.rtitle{font-size:13px;line-height:18px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rline{font-size:12px;line-height:16px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rail a{display:flex;flex-direction:column;align-items:center;gap:3px;padding:8px 0;border-radius:6px;color:var(--muted);font-size:11px;line-height:14px;position:relative}
+.rail a:hover{background:var(--hover);color:var(--fg)}
+.kv{display:grid;grid-template-columns:88px minmax(0,1fr);gap:6px 10px;font-size:12px;line-height:16px;margin:0}
+.kv dt{color:var(--muted)}.kv dd{margin:0;color:var(--fg);min-width:0}
+.bar{height:4px;border-radius:2px;background:var(--track);overflow:hidden}
+.bar span{display:block;height:100%;border-radius:2px}
+.ai{display:inline-flex;align-items:center;gap:4px;font-size:11px;line-height:16px;font-weight:500;color:var(--accent);padding:0 6px;border-radius:4px;background:var(--accent-soft);white-space:nowrap}
+.ai::before{content:"\2726";font-size:10px}
+:focus-visible{outline:2px solid var(--accent);outline-offset:1px;border-radius:4px}
+.lane{display:flex;align-items:center;gap:6px;padding:12px 12px 4px;font-size:11px;line-height:16px;font-weight:600;color:var(--fg2)}
+.lane .meta{font-size:11px;font-weight:400}
+.risk{height:20px;padding:0 6px;border-radius:4px;font-size:11px;font-weight:500;display:inline-flex;align-items:center;border:1px solid var(--line2);color:var(--fg2);white-space:nowrap}
+.fact{display:flex;gap:8px;font-size:12px;line-height:18px;color:var(--fg2)}
+.fact b{color:var(--fg);font-weight:500}
+.well{background:var(--sunk);border:1px solid var(--line);border-radius:4px}
+.dl{display:flex;padding:0 10px;white-space:pre}
+.dl span:first-child{width:28px;flex:none;color:var(--muted);opacity:.7;text-align:right;margin-right:12px}
+.dl.add{background:var(--add)}.dl.del{background:var(--del)}
+</style>
+</helmet>
+<div class="app" style="width: 100%; height: 1000px; display: flex; flex-direction: column;">
+
+<header style="height: 44px; display: flex; align-items: center; gap: 12px; padding: 0 12px 0 16px; border-bottom: 1px solid var(--line); background: var(--pane);">
+<span style="display: inline-flex; align-items: center; gap: 8px;"><svg width="22" height="22" viewBox="0 0 108 108" aria-hidden="true"><rect width="108" height="108" rx="24" fill="#1B2430"></rect><circle cx="54" cy="54" r="24" fill="none" stroke="#F2F4F7" stroke-opacity="0.5" stroke-width="5"></circle><circle cx="54" cy="54" r="10" fill="#F2F4F7"></circle><circle cx="54" cy="30" r="7.5" fill="#F2F4F7"></circle><circle cx="74.78" cy="66" r="7.5" fill="#D29B4A"></circle><circle cx="33.22" cy="66" r="7.5" fill="#F2F4F7"></circle></svg><strong style="font-size: 13px; font-weight: 600; white-space: nowrap;">Orbit Fleet</strong></span>
+<button class="btn" style="width: 180px; justify-content: space-between; color: var(--muted);"><span>Search or run…</span><span class="kbd">⌘K</span></button>
+<div style="display: flex; align-items: center; gap: 6px;" aria-label="Fleet pulse">
+<span class="chip waiting tnum"><span class="dot" style="width: 6px; height: 6px; background: var(--waiting);"></span>6 need you · oldest 40m</span>
+<span class="chip tnum">3 to review</span>
+<span class="chip working tnum">6 working</span>
+</div>
+<div style="flex: 1 1 0;"></div>
+<button class="btn quiet" style="gap: 8px;"><span class="dot" style="background: var(--done);"></span><span>m.janci@32bit.sk</span><span class="meta tnum">5h 75% · wk 85%</span></button>
+<button class="btn quiet" style="gap: 8px;"><span class="dot" style="background: var(--failed);"></span><span>tech.silvester</span><span class="tnum" style="font-size: 12px; color: var(--waiting);">weekly limit · Fri 11:00</span></button>
+<span style="width: 1px; height: 20px; background: var(--line);"></span>
+<button class="btn quiet" style="gap: 8px;"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="8" cy="8" r="6"></circle><path d="M8 4.5V8l2.5 1.5"></path></svg><span>Automation 3 active</span><span class="meta tnum">$4.10 today</span></button><button class="btn quiet sm" aria-label="Pause all automation">Pause all</button>
+</header>
+
+<div style="flex: 1 1 auto; display: flex; min-height: 0;">
+
+<nav class="rail" aria-label="Main" style="width: 68px; flex: none; padding: 8px 6px; border-right: 1px solid var(--line); background: var(--pane); display: flex; flex-direction: column; gap: 2px;">
+<a href="#control" title="Control  ⌘E"><svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="8" cy="8" r="5.5"></circle><circle cx="8" cy="8" r="2"></circle><path d="M8 1v2.5M8 12.5V15M1 8h2.5M12.5 8H15"></path></svg>Control</a>
+<a href="#inbox" aria-current="page" style="background: var(--accent-soft); color: var(--fg);"><svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M2 9.5h3.5l1 1.5h3l1-1.5H14"></path><path d="M3.5 3h9L14 9.5V13H2V9.5z"></path></svg>Inbox<span style="position: absolute; top: 4px; right: 8px; font-size: 11px; line-height: 14px; padding: 0 4px; border-radius: 7px; background: var(--waiting); color: var(--on-waiting); font-weight: 600;">6</span></a>
+<a href="#sessions" title="Sessions"><svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="2" y="3" width="12" height="10" rx="1.5"></rect><path d="M4.5 6.5 6.5 8l-2 1.5M8 10h3"></path></svg>Sessions</a>
+<a href="#work" title="Work"><svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="2.5" y="2.5" width="11" height="11" rx="2"></rect><path d="m5.5 8 1.8 1.8L10.8 6"></path></svg>Work</a>
+<a href="#dashboards"><svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="2" y="2" width="12" height="12" rx="1.5"></rect><path d="M5 11.5V9M8 11.5V5.5M11 11.5V7.5"></path></svg>Dashboards</a>
+<a href="#automation"><svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M13 8a5 5 0 1 1-1.5-3.6"></path><path d="M13 2.5v2.5h-2.5"></path><path d="M8 5.5V8l1.8 1.2"></path></svg>Automation</a>
+<a href="#accounts" title="Accounts &amp; hosts  ⌘I"><svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="8" cy="5.5" r="2.5"></circle><path d="M3 13.5c.6-2.6 2.6-4 5-4s4.4 1.4 5 4"></path></svg>Accounts</a>
+<a href="#toolkit"><svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M9.5 2.5a3 3 0 0 0-3 4L2.5 10.5l3 3 4-4a3 3 0 0 0 4-3l-2 1-2-2z"></path></svg>Toolkit</a>
+<div style="flex: 1 1 auto;"></div>
+<a href="#settings" title="Settings  ⌘,"><svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="8" cy="8" r="2"></circle><path d="M8 1.8v2M8 12.2v2M1.8 8h2M12.2 8h2M3.6 3.6l1.4 1.4M11 11l1.4 1.4M3.6 12.4 5 11M11 5l1.4-1.4"></path></svg>Settings</a>
+</nav>
+
+<aside aria-label="Inbox list" style="width: 360px; flex: none; border-right: 1px solid var(--line); background: var(--pane); display: flex; flex-direction: column;">
+<div style="padding: 14px 12px 8px; display: flex; align-items: baseline; justify-content: space-between;">
+<h1 style="margin: 0; font-size: 16px; line-height: 22px; font-weight: 600;">Inbox</h1>
+<span class="meta tnum">6 need you · 3 to review</span>
+</div>
+<div style="padding: 0 12px; display: flex; flex-direction: column; gap: 6px;">
+<label style="display: flex; align-items: center; gap: 6px; height: 28px; padding: 0 8px; border-radius: 4px; border: 1px solid var(--line2); background: var(--raise);"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="#869ab0" stroke-width="1.5" aria-hidden="true"><circle cx="7" cy="7" r="4.5"></circle><path d="m10.5 10.5 3 3"></path></svg><input aria-label="Search the inbox" placeholder="Search sessions, tasks, hosts" style="flex: 1 1 auto; min-width: 0; background: transparent; border: 0; color: var(--fg); font: inherit; font-size: 12px;"></label>
+<div style="display: flex; align-items: center; gap: 6px;">
+<button class="btn" style="padding: 0 6px;"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M2 3.5h12L9.5 9v4l-3-1.5V9z"></path></svg>Filters</button>
+<div style="flex: 1 1 auto;"></div>
+<button class="btn quiet" style="padding: 0 4px;">Group: kind of ask ▾</button>
+</div>
+</div>
+
+<div style="flex: 1 1 auto; overflow: auto; padding-bottom: 8px;">
+
+<div class="lane" style="color: var(--waiting);">Approve <span class="count">2</span><span class="meta">a yes or no · oldest 4m</span></div>
+
+<div class="row" aria-selected="true">
+<span class="dot" aria-label="Waiting for you" style="background: var(--waiting); margin-top: 5px;"></span>
+<div style="flex: 1 1 auto; min-width: 0;">
+<div style="display: flex; gap: 6px; align-items: center;"><span class="rtitle" style="flex: 1 1 auto;">Fix hub-e2e flake</span><span class="meta tnum">2m</span></div>
+<div class="rline"><span style="color: var(--waiting);">Waiting for you:</span> push 3 commits to origin</div>
+<div style="display: flex; gap: 4px; margin-top: 4px;"><span class="risk">Writes to the remote</span><span class="chip">PR #476 <span style="color: var(--done);">✓</span></span><span class="chip">mac</span></div>
+</div>
+</div>
+
+<div class="row">
+<span class="dot" aria-label="Waiting for you" style="background: var(--waiting); margin-top: 5px;"></span>
+<div style="flex: 1 1 auto; min-width: 0;">
+<div style="display: flex; gap: 6px; align-items: center;"><span class="rtitle" style="flex: 1 1 auto;">3 sessions ask the same thing</span><span class="meta tnum">4m</span></div>
+<div class="rline"><span style="color: var(--waiting);">Waiting for you:</span> run <span class="mono">pnpm test</span></div>
+<div style="display: flex; gap: 4px; margin-top: 4px;"><span class="risk">Stays in its worktree</span><span class="chip">Rail badge polish</span><span class="chip">+2</span></div>
+</div>
+</div>
+
+<div class="lane" style="color: var(--waiting);">Answer <span class="count">2</span><span class="meta">needs a thought · oldest 25m</span></div>
+
+<div class="row">
+<span class="dot" aria-label="Waiting for you" style="background: var(--waiting); margin-top: 5px;"></span>
+<div style="flex: 1 1 auto; min-width: 0;">
+<div style="display: flex; gap: 6px; align-items: center;"><span class="rtitle" style="flex: 1 1 auto;">PD-3012 Hub migration renumber</span><span class="meta tnum">6m</span></div>
+<div class="rline"><span style="color: var(--waiting);">Waiting for you:</span> which migration number to use?</div>
+<div style="display: flex; gap: 4px; margin-top: 4px;"><span class="chip">3 options</span><span class="chip">mercury</span></div>
+</div>
+</div>
+
+<div class="row">
+<span class="dot" aria-label="Waiting for you" style="background: var(--waiting); margin-top: 5px;"></span>
+<div style="flex: 1 1 auto; min-width: 0;">
+<div style="display: flex; gap: 6px; align-items: center;"><span class="rtitle" style="flex: 1 1 auto;">Hub federation v2</span><span class="meta tnum" style="color: var(--waiting);">25m</span></div>
+<div class="rline"><span style="color: var(--waiting);">Waiting for you:</span> sign the autonomy grant</div>
+<div style="display: flex; gap: 4px; margin-top: 4px;"><span class="chip">Mission</span><span class="chip">2 tasks held</span></div>
+</div>
+</div>
+
+<div class="lane">Fix <span class="count">2</span><span class="meta">something broke or ran out · oldest 40m</span></div>
+
+<div class="row">
+<span class="dot" aria-label="Paused" style="background: var(--idle); margin-top: 5px;"></span>
+<div style="flex: 1 1 auto; min-width: 0;">
+<div style="display: flex; gap: 6px; align-items: center;"><span class="rtitle" style="flex: 1 1 auto;">Weekly limit on tech.silvester</span><span class="meta tnum" style="color: var(--waiting);">40m</span></div>
+<div class="rline"><span style="color: var(--waiting);">Paused · weekly limit:</span> 4 sessions wait on this account</div>
+<div style="display: flex; gap: 6px; margin-top: 6px;"><button class="btn sm">Switch all 4…</button><button class="btn sm quiet">Wait until Fri 11:00</button></div>
+</div>
+</div>
+
+<div class="row">
+<span class="dot" aria-label="Failed" style="background: var(--failed); margin-top: 5px;"></span>
+<div style="flex: 1 1 auto; min-width: 0;">
+<div style="display: flex; gap: 6px; align-items: center;"><span class="rtitle" style="flex: 1 1 auto;">PD-2592 Support access for service</span><span class="meta tnum">14m</span></div>
+<div class="rline"><span style="color: var(--failed);">Failed:</span> tests crashed on claude-fleet-trn</div>
+</div>
+</div>
+
+<div class="lane">Review <span class="count">3</span><span class="meta">finished, nobody has looked · oldest 5h</span></div>
+
+<div class="row">
+<span class="dot" aria-label="Done" style="background: var(--done); margin-top: 5px;"></span>
+<div style="flex: 1 1 auto; min-width: 0;">
+<div style="display: flex; gap: 6px; align-items: center;"><span class="rtitle" style="flex: 1 1 auto;">Inbox grouping (FLT-212)</span><span class="meta tnum">40m</span></div>
+<div class="rline"><span style="color: var(--done);">Done:</span> <span class="tnum">+412 −96</span> in 9 files · 1 check failing</div>
+</div>
+</div>
+
+<div class="row">
+<span class="dot" aria-label="Done" style="background: var(--done); margin-top: 5px;"></span>
+<div style="flex: 1 1 auto; min-width: 0;">
+<div style="display: flex; gap: 6px; align-items: center;"><span class="rtitle" style="flex: 1 1 auto;">Quiet hours</span><span class="meta tnum">3h</span></div>
+<div class="rline"><span style="color: var(--done);">Done:</span> <span class="tnum">+88 −12</span> · 15/15 checks · PR #112 is ready</div>
+</div>
+</div>
+
+<div class="row">
+<span class="dot" aria-label="Done" style="background: var(--done); margin-top: 5px;"></span>
+<div style="flex: 1 1 auto; min-width: 0;">
+<div style="display: flex; gap: 6px; align-items: center;"><span class="rtitle" style="flex: 1 1 auto;">Hub docs refresh</span><span class="meta tnum">5h</span></div>
+<div class="rline"><span style="color: var(--done);">Done:</span> answered in the chat · no file changed</div>
+</div>
+</div>
+
+<div class="row">
+<span class="dot" aria-label="Idle" style="background: var(--idle); margin-top: 5px;"></span>
+<div style="flex: 1 1 auto; min-width: 0;">
+<div style="display: flex; gap: 6px; align-items: center;"><span class="rtitle" style="flex: 1 1 auto;">PD-2988 Receipt card document type</span><span class="meta tnum">9m</span></div>
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 2px;" class="meta"><span class="ai">Proposed by Jev</span> ended with a question · <a href="#not-waiting">Not waiting</a></div>
+</div>
+</div>
+
+<a href="#sessions" class="meta" style="display: flex; gap: 6px; padding: 12px 18px 4px; color: var(--muted);"><span class="tnum">6 working · 9 idle · 6 completed today</span><span style="flex: 1 1 auto;"></span><span style="color: var(--accent);">→ All sessions</span></a>
+</div>
+
+<div style="display: flex; align-items: center; gap: 10px; padding: 6px 12px; border-top: 1px solid var(--line); font-size: 11px; color: var(--muted);">
+<span><span class="kbd">j</span> <span class="kbd">k</span> move</span><span><span class="kbd">1</span>–<span class="kbd">9</span> answer</span><span><span class="kbd">↵</span> open</span><span><span class="kbd">l</span> later</span><span><span class="kbd">u</span> undo</span>
+</div>
+</aside>
+
+<main style="flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; background: var(--bg);">
+<div style="padding: 12px 20px 10px; border-bottom: 1px solid var(--line); background: var(--pane);">
+<div style="display: flex; align-items: center; gap: 10px;">
+<h2 style="margin: 0; font-size: 16px; line-height: 22px; font-weight: 600;">Fix hub-e2e flake</h2>
+<span class="chip waiting">Needs you</span>
+<div style="flex: 1 1 auto;"></div>
+<span class="meta tnum">1 of 6</span>
+<button class="btn">Open the session <span class="kbd">↵</span></button>
+</div>
+<div class="meta" style="margin-top: 4px;">mac · m.janci@32bit.sk · <span class="mono">fix-hub-e2e-federation-pair-flake</span> · <a href="#pr">PR #476</a></div>
+</div>
+
+<div style="flex: 1 1 auto; overflow: auto; padding: 16px 20px; display: flex; flex-direction: column; gap: 14px;">
+
+<section aria-label="Question from the session" style="border: 1px solid var(--waiting-line); border-radius: 6px; background: var(--waiting-faint); padding: 12px 14px; display: flex; flex-direction: column; gap: 10px; max-width: 760px;">
+<div style="display: flex; align-items: center; gap: 8px;"><span class="dot" style="background: var(--waiting);"></span><strong style="font-size: 14px; font-weight: 600;">Push to origin needs your OK</strong><span style="flex: 1 1 auto;"></span><span class="meta tnum">asked 2m ago · the session waits</span></div>
+<div class="mono well" style="padding: 8px 10px; color: var(--fg);">git push -u origin fix-hub-e2e-federation-pair-flake</div>
+
+<div style="display: flex; flex-direction: column; gap: 2px;">
+<div class="meta" style="font-weight: 500; color: var(--fg2);">What it does <span style="font-weight: 400; color: var(--muted);">· read from git on mac, 4s ago</span></div>
+<div class="fact"><span aria-hidden="true">·</span><span>Pushes <b>3 commits</b> to a <b>new branch</b> on origin. No force.</span></div>
+<div class="fact"><span aria-hidden="true">·</span><span><b class="tnum">+41 −7</b> in one file, <span class="mono">scripts/hub-e2e.sh</span></span></div>
+<div class="fact"><span aria-hidden="true">·</span><span>Not <span class="mono">main</span>, not a protected branch. Opens no pull request.</span></div>
+<div class="fact"><span aria-hidden="true">·</span><span>To take it back: delete the remote branch.</span></div>
+</div>
+
+<div style="display: flex; flex-direction: column; gap: 2px;">
+<div class="meta" style="font-weight: 500; color: var(--fg2);">Why it asks <span style="font-weight: 400; color: var(--muted);">· its last words</span></div>
+<div style="font-size: 13px; line-height: 19px; color: var(--fg2); border-left: 2px solid var(--line2); padding-left: 10px;">I committed only <span class="mono">scripts/hub-e2e.sh</span>. The full script on this Mac: 188 passed, 1 failed, the macOS-only one. Ready to push and open the PR. <a href="#turn">Show the turn</a></div>
+</div>
+
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 6px;">
+<button class="btn lg"><span class="kbd">1</span>Approve</button>
+<button class="btn lg"><span class="kbd">2</span>Approve for this session</button>
+<button class="btn lg"><span class="kbd">3</span>Deny</button>
+<button class="btn lg quiet">Answer in your own words…</button>
+</div>
+<div class="meta">Nothing is pre-selected. Fleet reads the pane again before it presses the key.</div>
+</section>
+
+<section aria-label="What is being pushed" style="max-width: 760px; display: flex; flex-direction: column; gap: 6px;">
+<div style="display: flex; align-items: center; gap: 8px;"><strong style="font-size: 12px; font-weight: 600;">What is being pushed</strong><span class="meta mono">scripts/hub-e2e.sh</span><span class="meta tnum"><span style="color: var(--done);">+41</span> <span style="color: var(--failed);">−7</span></span><span style="flex: 1 1 auto;"></span><a href="#files" style="font-size: 12px;">Open in Files</a></div>
+<div class="well mono" style="padding: 6px 0; line-height: 18px; overflow: hidden;">
+<div class="dl"><span>212</span><span>  probe_pair() {</span></div>
+<div class="dl del"><span>213</span><span>-   code=$(hub pair --name probe --ttl 60)</span></div>
+<div class="dl add"><span>213</span><span>+   # each probe claims its own address, as the multi-user section does</span></div>
+<div class="dl add"><span>214</span><span>+   code=$(hub pair --name "probe-$1" --ttl 60)</span></div>
+<div class="dl add"><span>215</span><span>+   curl -fsS -H "X-Forwarded-For: 10.0.0.$1" "$HUB/pair" -d "code=$code"</span></div>
+<div class="dl"><span>216</span><span>  }</span></div>
+<div class="dl" style="color: var(--muted);"><span></span><span>  2 more hunks · 34 lines</span></div>
+</div>
+</section>
+
+</div>
+
+<div style="display: flex; align-items: center; gap: 8px; padding: 8px 20px; border-top: 1px solid var(--line); background: var(--pane); font-size: 12px; color: var(--muted);">
+<span>Next:</span><span style="color: var(--fg2);">3 sessions ask to run <span class="mono">pnpm test</span></span><span class="kbd">j</span>
+<span style="flex: 1 1 auto;"></span>
+<span>Later puts this back in 30 min, or when you come back to the desk</span><span class="kbd">l</span>
+</div>
+</main>
+
+<aside aria-label="Inspector" style="width: 288px; flex: none; border-left: 1px solid var(--line); background: var(--pane); padding: 14px 14px; display: flex; flex-direction: column; gap: 14px;">
+<div style="display: flex; align-items: center; justify-content: space-between;"><strong style="font-size: 13px; font-weight: 600;">Inspector</strong><span class="kbd">⌥⌘B</span></div>
+<dl class="kv">
+<dt>Host</dt><dd><span class="dot" style="display: inline-block; background: var(--done); margin-right: 6px;"></span>mac · online</dd>
+<dt>Account</dt><dd>m.janci@32bit.sk</dd>
+<dt>Usage</dt><dd><div class="meta tnum" style="color: var(--fg);">5h 75% left · week 85%</div><div class="bar" style="margin-top: 4px;"><span style="width: 25%; background: var(--done);"></span></div></dd>
+<dt>Branch</dt><dd class="mono" style="overflow-wrap: anywhere;">fix-hub-e2e-federation-pair-flake</dd>
+<dt>Pull request</dt><dd><a href="#pr">#476</a> · <span style="color: var(--done);">15/15 checks</span></dd>
+<dt>Task</dt><dd><a href="#task">TASK-219</a> guide tool, person side</dd>
+<dt>Started by</dt><dd>You, 21h ago</dd>
+<dt>Cost</dt><dd class="tnum">$8.51</dd>
+</dl>
+<div style="display: flex; flex-direction: column; gap: 6px; border-top: 1px solid var(--line); padding-top: 12px;">
+<strong style="font-size: 12px; font-weight: 600;">What it may do alone</strong>
+<div class="meta" style="color: var(--fg2);">Edits and runs commands inside its worktree. Asks before a push, a delete outside the worktree and anything on <span class="mono">main</span>.</div>
+<div class="meta">2 rules apply here · <a href="#rules">Rules</a></div>
+</div>
+<div style="display: flex; flex-direction: column; gap: 6px; border-top: 1px solid var(--line); padding-top: 12px;">
+<strong style="font-size: 12px; font-weight: 600;">Asked before</strong>
+<div class="meta" style="color: var(--fg2);">A push from this session: 2 times, approved both. From this project this week: 9 times, approved 9.</div>
+<button class="btn sm" style="align-self: flex-start;">Make it a rule…</button>
+</div>
+<div style="flex: 1 1 auto;"></div>
+<div style="display: flex; gap: 6px; border-top: 1px solid var(--line); padding-top: 10px;"><button class="btn quiet">Archive</button><button class="btn quiet">Share…</button><span style="flex: 1 1 auto;"></span><button class="btn danger">Force kill…</button></div>
+</aside>
+
+</div>
+
+<footer style="height: 25px; display: flex; align-items: center; gap: 16px; padding: 0 16px; border-top: 1px solid var(--line); background: var(--pane); font-size: 11px; color: var(--muted);">
+<span class="tnum"><span class="dot" style="display: inline-block; width: 6px; height: 6px; background: var(--done); margin-right: 6px;" aria-hidden="true"></span>All systems OK</span><span>Downloads</span><span>hub: fleet.rlt.sk</span><span style="margin-left: auto;">? Shortcuts</span>
+</footer>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":1000}}'>
+class Component extends DCLogic {
+renderVals() {
+return {};
+}
+}
+</script>
+</body>
+</html>
