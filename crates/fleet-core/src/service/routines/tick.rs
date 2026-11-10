@@ -483,9 +483,10 @@ pub(super) enum Plan {
 /// fallback bills the same profile there. A routine that names no login
 /// (its host's own) whose host's login is past the line first takes the
 /// login on the same host with the most headroom, as a ticket start does
-/// (`account_limits::login_with_headroom`); a routine that names its login
+/// (`account_limits::login_with_headroom_for`); a routine that names its login
 /// keeps it. A login on an account the project forbids gives way the same
-/// way, and a routine that names one skips. A host the last probe could not
+/// way, and a routine that names one skips; a fallback host's is tested the
+/// same way. A host the last probe could not
 /// reach, with no fallback that can, is tried anyway: the probe may be
 /// stale, and a failed start says why.
 pub(super) fn plan(s: &Store, r: &RoutineRow, now: i64) -> Result<Plan, IpcError> {
@@ -524,8 +525,9 @@ pub(super) fn plan(s: &Store, r: &RoutineRow, now: i64) -> Result<Plan, IpcError
     let down = !reachable(&r.host_alias)?;
     // An account the routine's project forbids (`project_accounts`): a
     // routine on its host's own login moves to the allowed login there with
-    // the most headroom; one that names its login, or finds none allowed,
-    // skips and says why (its start would be refused).
+    // the most headroom under the line ([`freer_login_for_run`], as past the
+    // line below: a spent one would stall the run); one that names its
+    // login, or finds none, skips and says why (its start would be refused).
     if !down {
         if let Some(why) = crate::service::project_accounts::forbidden_reason(
             s,
@@ -535,13 +537,7 @@ pub(super) fn plan(s: &Store, r: &RoutineRow, now: i64) -> Result<Plan, IpcError
             now,
         )? {
             if profile.is_none() {
-                if let Some(l) = crate::service::account_limits::login_with_headroom_for(
-                    s,
-                    Some(r.project_id),
-                    &r.host_alias,
-                    None,
-                    now,
-                )? {
+                if let Some(l) = freer_login_for_run(s, r.project_id, &r.host_alias, "", now)? {
                     return Ok(Plan::Start {
                         host: r.host_alias.clone(),
                         note: Some(format!(
@@ -579,20 +575,20 @@ pub(super) fn plan(s: &Store, r: &RoutineRow, now: i64) -> Result<Plan, IpcError
         }
     }
     if let Some(fb) = r.fallback_host.as_deref() {
-        let fb_over = crate::service::account_limits::over_limit(s, fb, profile, now)?;
-        if fb_over.is_none()
-            && reachable(fb)?
-            && crate::service::login_health::signed_out_reason(s, fb, profile)?.is_none()
-        {
+        if let Some(login) = fallback_login(s, r, fb, now)? {
             let why = match (&over, &signed_out) {
                 (Some(o), _) => o.reason(),
                 (None, Some(why)) => why.clone(),
                 (None, None) => format!("{} was unreachable", r.host_alias),
             };
+            let note = match &login {
+                Some(l) => format!("on {fb} under profile {l}: {why}"),
+                None => format!("on {fb}: {why}"),
+            };
             return Ok(Plan::Start {
                 host: fb.to_string(),
-                note: Some(format!("on {fb}: {why}")),
-                login: None,
+                note: Some(note),
+                login,
             });
         }
     }
@@ -607,10 +603,41 @@ pub(super) fn plan(s: &Store, r: &RoutineRow, now: i64) -> Result<Plan, IpcError
     })
 }
 
+/// The login a run takes on its fallback host `fb`, or `None` when `fb`
+/// cannot take it: unreachable, or its login past the line or signed out.
+/// `Some(None)` is the routine's own login there; `Some(Some(l))` the profile
+/// `l` when the project forbids the account of `fb`'s own login, taken as on
+/// the routine's own host ([`freer_login_for_run`]). A routine that names a
+/// forbidden login, or finds no allowed one with room, does not move there.
+fn fallback_login(
+    s: &Store,
+    r: &RoutineRow,
+    fb: &str,
+    now: i64,
+) -> Result<Option<Option<String>>, IpcError> {
+    if !s.get_host_row(fb)?.is_some_and(|row| row.reachable) {
+        return Ok(None);
+    }
+    let profile = r.profile.as_deref();
+    if crate::service::project_accounts::forbidden_reason(s, Some(r.project_id), fb, profile, now)?
+        .is_some()
+    {
+        return Ok(match profile {
+            None => freer_login_for_run(s, r.project_id, fb, "", now)?.map(Some),
+            Some(_) => None,
+        });
+    }
+    let usable = crate::service::account_limits::over_limit(s, fb, profile, now)?.is_none()
+        && crate::service::login_health::signed_out_reason(s, fb, profile)?.is_none();
+    Ok(usable.then_some(None))
+}
+
 /// The profile on `host` a run moves to off its host's own login (on
-/// `not_account`, past the line): [`crate::service::account_limits::freer_login`], a
-/// profile, and not past its account's daily spend limit (an unreadable
-/// spend is not known to be under it).
+/// `not_account`; `""` for none, off a forbidden one):
+/// [`crate::service::account_limits::freer_login_for`] (signed in, under the
+/// line, never on an account the project forbids), a profile, and not past
+/// its account's daily spend limit (an unreadable spend is not known to be
+/// under it).
 fn freer_login_for_run(
     s: &Store,
     project_id: i64,

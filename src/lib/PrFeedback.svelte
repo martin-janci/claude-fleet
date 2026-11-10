@@ -4,11 +4,13 @@
   // prompt (`pr_feedback.ts`). The prompt goes through `queue_prompt`, so it
   // waits for the turn to end instead of typing into one.
   //
-  // A button sends once per PR reading: after a send it says so and stays
-  // off until the next reading, so a double click is one prompt.
+  // A button sends once per PR head: after a send it says so and stays off
+  // until a newer push, so a double click is one prompt. What was sent is
+  // kept per session in `prFeedbackSends`, keyed before the await, so a
+  // reply that lands after a switch to another session marks the right one.
   import { queuePrompt, sessionAgent, type SessionRow } from './sessions';
   import { agentLabel } from './conversation';
-  import { failingChecksPrompt, reviewCommentsPrompt } from './pr_feedback';
+  import { failingChecksPrompt, prFeedbackKey, prFeedbackSends, reviewCommentsPrompt, type PrFeedbackKind } from './pr_feedback';
   import { hubActionBlocked, hubStatus } from './hub';
   import { hubConnection } from './hub_connection';
   import { sessionIdBlocked } from './share';
@@ -23,8 +25,6 @@
   const open = $derived(ev !== null && (ev.state === undefined || ev.state === 'OPEN'));
   const failing = $derived(ev?.checks.failing ?? []);
   const failingTotal = $derived(ev?.checks.failing_total ?? 0);
-  /** One reading of the PR: a send is spent until the next one. */
-  const reading = $derived(`${session.pr_checked_at ?? ''}|${ev?.head_oid ?? ''}`);
 
   const blocked = $derived(
     session.fleet
@@ -32,23 +32,39 @@
       : (hubActionBlocked('queue_prompt', $hubStatus, $hubConnection) ?? $sessionIdBlocked(session.id, 'queue_prompt')),
   );
 
-  let busy = $state<'checks' | 'review' | null>(null);
-  let sent = $state<Record<string, string>>({});
-  let error = $state<string | null>(null);
-  const doneChecks = $derived(sent[`checks|${reading}`]);
-  const doneReview = $derived(sent[`review|${reading}`]);
+  const keyOf = (kind: PrFeedbackKind) => prFeedbackKey(session.id, kind, ev?.head_oid);
+  const checksKey = $derived(keyOf('checks'));
+  const reviewKey = $derived(keyOf('review'));
+  /** A send in flight for this session. */
+  const busy = $derived(
+    Object.entries($prFeedbackSends).some(([k, v]) => v === null && k.startsWith(`${session.id}|`)),
+  );
+  const doneChecks = $derived($prFeedbackSends[checksKey] ?? undefined);
+  const doneReview = $derived($prFeedbackSends[reviewKey] ?? undefined);
+  /** The last failed send's words, by session. */
+  let errors = $state<Record<number, string>>({});
+  const error = $derived(errors[session.id] ?? null);
 
-  async function send(kind: 'checks' | 'review') {
-    if (busy !== null || blocked !== null || prUrl === null || sent[`${kind}|${reading}`]) return;
-    busy = kind;
-    error = null;
+  async function send(kind: PrFeedbackKind) {
+    // Everything the reply is filed under is read now, before the await.
+    const key = keyOf(kind);
+    const sid = session.id;
+    if (busy || blocked !== null || prUrl === null || key in $prFeedbackSends) return;
+    prFeedbackSends.update((m) => ({ ...m, [key]: null }));
+    errors = { ...errors, [sid]: '' };
     const prompt = kind === 'checks' ? failingChecksPrompt(prUrl, failing, failingTotal) : reviewCommentsPrompt(prUrl);
-    const r = await queuePrompt(session.id, prompt);
-    busy = null;
+    const r = await queuePrompt(sid, prompt);
     if (r.ok) {
       const at = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-      sent = { ...sent, [`${kind}|${reading}`]: r.value.delivered ? `Sent ${at}` : `Waits for the turn to end · ${at}` };
-    } else error = errorText(r.error);
+      prFeedbackSends.update((m) => ({ ...m, [key]: r.value.delivered ? `Sent ${at}` : `Waits for the turn to end · ${at}` }));
+    } else {
+      prFeedbackSends.update((m) => {
+        const rest = { ...m };
+        delete rest[key];
+        return rest;
+      });
+      errors = { ...errors, [sid]: errorText(r.error) };
+    }
   }
 </script>
 
@@ -59,7 +75,7 @@
         type="button"
         class="btn btn--chip"
         data-testid="pr-feedback-checks"
-        disabled={busy !== null || blocked !== null || doneChecks !== undefined}
+        disabled={busy || blocked !== null || doneChecks !== undefined}
         title={blocked ?? `One prompt naming the ${failingTotal} failing check${failingTotal === 1 ? '' : 's'}; ${name} reads the logs itself`}
         onclick={() => void send('checks')}>Send failing checks to {name}</button
       >
@@ -69,7 +85,7 @@
       type="button"
       class="btn btn--chip"
       data-testid="pr-feedback-review"
-      disabled={busy !== null || blocked !== null || doneReview !== undefined}
+      disabled={busy || blocked !== null || doneReview !== undefined}
       title={blocked ?? `${name} reads the unresolved review comments with gh and answers each one`}
       onclick={() => void send('review')}>Send review comments to {name}</button
     >

@@ -1642,7 +1642,7 @@ pub struct AccountRow {
     /// The orgs a person forbade this account for (migration 218),
     /// ascending: every project of one of them, today's and later ones, is
     /// treated as if it were in [`Self::forbidden_project_ids`]. Written only
-    /// by `Store::set_account_forbidden_orgs`. An older hub sends no key:
+    /// by `Store::set_account_blocks`. An older hub sends no key:
     /// empty.
     pub forbidden_org_ids: Vec<i64>,
 }

@@ -718,10 +718,15 @@ pub fn cancel_queued_prompt(
     store: &Mutex<Store>,
 ) -> Result<(), IpcError> {
     let s = lock(store)?;
-    let mine = s
+    let row = s
         .get_deferred_prompt(args.id)?
-        .is_some_and(|r| r.session_id == args.session_id);
-    if mine && s.cancel_deferred_prompt(args.id, now_unix())? {
+        .filter(|r| r.session_id == args.session_id);
+    if row.is_some() && s.cancel_deferred_prompt(args.id, now_unix())? {
+        // A prompt taken back was never sent: its author row must not be
+        // handed to a later prompt with the same opening words.
+        if let Some(r) = row {
+            let _ = s.forget_prompt_author(r.session_id, &r.body, r.created_at);
+        }
         Ok(())
     } else {
         Err(IpcError::new(

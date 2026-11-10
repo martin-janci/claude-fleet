@@ -151,12 +151,25 @@ fn codex_lists_mirror_the_composer() {
     );
 }
 
-/// The composer's Hermes list (`src/lib/conversation.ts`
-/// HERMES_SLASH_COMMANDS) is the Hermes adapter's.
+/// The composer's Hermes lists (`src/lib/conversation.ts` HERMES_*) are the
+/// Hermes adapter's: its model slugs, no efforts, its commands.
 #[test]
 fn hermes_lists_mirror_the_composer() {
     let ts = crate::repo_files::read("src/lib/conversation.ts");
     let a = by_id(crate::store::AGENT_HERMES).expect("hermes adapter");
+    let models: Vec<(String, String, bool)> = a
+        .models()
+        .iter()
+        .map(|o| (o.value.to_string(), o.label.to_string(), false))
+        .collect();
+    assert_eq!(
+        ts_entries(&ts, "HERMES_MODEL_OPTIONS", ("value", "label")),
+        models
+    );
+    assert!(
+        a.effort_levels().is_empty(),
+        "the composer offers Hermes none"
+    );
     let slash: Vec<(String, String, bool)> = a
         .slash_commands()
         .iter()

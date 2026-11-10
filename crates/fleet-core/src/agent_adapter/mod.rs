@@ -52,6 +52,24 @@ pub struct SlashCommand {
     pub args: bool,
 }
 
+/// A [`PickerOption`], for the adapters' const lists.
+const fn opt(value: &'static str, label: &'static str) -> PickerOption {
+    PickerOption { value, label }
+}
+
+/// A [`SlashCommand`], for the adapters' const lists.
+const fn cmd(name: &'static str, description: &'static str, args: bool) -> SlashCommand {
+    SlashCommand {
+        name,
+        description,
+        args,
+    }
+}
+
+/// What a pane falls back to when a non-Claude agent exits: a login shell,
+/// so the tmux session stays (as Claude's launch does).
+const AGENT_EXIT_TAIL: &str = "exec ${SHELL:-/bin/zsh} -l";
+
 /// A sent line that switches the session's model or effort. `None` inside
 /// means back to the host's default (`/model default`, `/effort auto`).
 #[derive(Debug, PartialEq, Eq)]

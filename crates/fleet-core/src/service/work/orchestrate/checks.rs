@@ -344,9 +344,38 @@ pub fn plan(
         _ => Vec::new(),
     };
     let item = s.get_work_item(item_id).ok()??;
+    // The check is `claude -p` in the project's checkout, so its login is
+    // held to the project's forbidden accounts (`service::project_accounts`):
+    // a forbidden one gives way to an allowed login on the host, and with
+    // none the step takes the session path, whose start refuses and says
+    // why. A failed read does the same: never headless on an unchecked login.
+    let project = item.project_id.or_else(|| {
+        let t = s.latest_item_task(item_id, "implement").ok()??;
+        s.get_session_by_id(t.worker_session_id?).ok()??.project_id
+    });
+    let now = crate::store::now_unix();
+    let forbidden = |profile: Option<&str>| {
+        crate::service::project_accounts::forbidden_reason(s, project, &at.host, profile, now)
+            .map(|why| why.is_some())
+            .ok()
+    };
+    let mut profile = profile.map(str::to_string);
+    if forbidden(profile.as_deref())? {
+        profile = crate::service::project_accounts::login_for(
+            s,
+            project,
+            &at.host,
+            profile.as_deref(),
+            now,
+        )
+        .ok()?;
+        if forbidden(profile.as_deref())? {
+            return None;
+        }
+    }
     Some(Plan {
         model: settings::get_string(s, settings::ORCHESTRATOR_HEADLESS_MODEL),
-        profile: profile.map(str::to_string),
+        profile,
         cmds,
         label: match &item.key {
             Some(k) => format!("{k} {}", item.title),

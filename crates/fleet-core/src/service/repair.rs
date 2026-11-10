@@ -1919,6 +1919,21 @@ async fn ensure_workspace_reporting(
         .iter()
         .any(|s| matches!(s, Step::TmuxCreate { .. } | Step::TmuxRespawn { .. }))
     {
+        // Bringing an existing session's pane back relaunches its agent
+        // under the stored login: not on an account its project forbids
+        // (`refuse_forbidden_relaunch`; a live pane respawned on the account
+        // it already runs on is exempt). Before any git step, as below.
+        if let Some(id) = spec.session_id {
+            lock(store)
+                .and_then(|s| {
+                    crate::service::project_accounts::refuse_forbidden_relaunch_of(
+                        &s,
+                        id,
+                        crate::store::now_unix(),
+                    )
+                })
+                .map_err(|e| fail(store, spec, e))?;
+        }
         exec.launch_cmd(store, spec)
             .await
             .map_err(|e| fail(store, spec, e))?

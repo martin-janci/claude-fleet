@@ -22,7 +22,7 @@
 //! - The tool approval dialog reads "Do you want to proceed?" over numbered
 //!   choices (`1. Yes` … `4. No`), the cursor drawn as `>`.
 
-use super::{AgentAdapter, LaunchSwitch, PickerOption, SlashCommand};
+use super::{cmd, opt, AgentAdapter, LaunchSwitch, PickerOption, SlashCommand};
 use crate::service::pane_intel::{self, PaneIntel};
 use crate::service::transcript::{ConvItem, ConvTurn};
 use crate::tmux::ClaudeLaunch;
@@ -30,18 +30,6 @@ use crate::tmux::ClaudeLaunch;
 /// The Agy adapter.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Agy;
-
-const fn opt(value: &'static str, label: &'static str) -> PickerOption {
-    PickerOption { value, label }
-}
-
-const fn cmd(name: &'static str, description: &'static str, args: bool) -> SlashCommand {
-    SlashCommand {
-        name,
-        description,
-        args,
-    }
-}
 
 /// A hint list only: the slugs `agy models` printed in its documentation.
 /// Which models an account may use depends on its tier, and `agy models`

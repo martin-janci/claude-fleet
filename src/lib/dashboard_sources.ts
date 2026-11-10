@@ -12,7 +12,10 @@
 // Pure: the stores are read by the caller.
 import type { AccountRow } from './accounts';
 import { accountLabel } from './accounts';
-import type { AccountUsageSnapshot } from './account_usage_store';
+import type { AccountUsageSnapshot, UsageWindow } from './account_usage_store';
+import { freshness, usedPct, type UsageWindowKind } from './account_usage';
+import { classify, countNeedsYou, type AttentionFacts } from './attention';
+import { hostLoad } from './host_health';
 import type { HostRow } from './hosts';
 import type { SessionRow } from './sessions';
 import type { FleetSource, SummarySource } from './dashboards';
@@ -28,15 +31,15 @@ export interface DashboardFeed {
   updated_at: number;
 }
 
-/** The longest feed value the hub keeps (`FEED_VALUE_MAX_CHARS`). */
-export const FEED_VALUE_MAX = 4000;
-
 /** What the desktop holds that a `fleet` widget counts. */
 export interface FleetData {
   sessions: readonly SessionRow[];
   hosts: readonly HostRow[];
   accounts: readonly AccountRow[];
   usage: Readonly<Record<string, AccountUsageSnapshot>>;
+  /** Hosts down and accounts at a limit, as the Needs you badge reads
+   *  them (`attention_facts.ts`). */
+  facts?: AttentionFacts;
 }
 
 export interface FleetRow {
@@ -63,23 +66,27 @@ function liveSessions(list: readonly SessionRow[]): SessionRow[] {
 
 type SessionBucket = 'working' | 'needs_you' | 'idle';
 
-function bucketOf(s: SessionRow): SessionBucket {
-  if (s.claude_status === 'working') return 'working';
-  if (s.claude_status === 'blocked' || s.status === 'blocked') return 'needs_you';
-  return 'idle';
-}
-
 const BUCKET_WORDS: Record<SessionBucket, string> = { working: 'Working', needs_you: 'Needs you', idle: 'Idle' };
 
 const pct = (n: number) => `${Math.round(n)}%`;
 
-/** A source's facts from what the desktop holds. */
-export function fleetFacts(source: FleetSource, d: FleetData): FleetFacts {
+/** A window's % used, as every usage surface shows it: `null` once its
+ *  number is withheld (never read, too old, or past its reset). */
+function shownUsed(kind: UsageWindowKind, w: UsageWindow | null | undefined, snap: AccountUsageSnapshot | undefined, now: number): number | null {
+  if (!w || freshness(kind, snap?.fetched_at ?? null, w.resets_at, now) === 'expired') return null;
+  return usedPct(w);
+}
+
+/** A source's facts from what the desktop holds, at `now` (unix seconds). */
+export function fleetFacts(source: FleetSource, d: FleetData, now: number = Math.floor(Date.now() / 1000)): FleetFacts {
   switch (source) {
     case 'sessions': {
       const live = liveSessions(d.sessions);
-      const n = { working: 0, needs_you: 0, idle: 0 };
-      for (const s of live) n[bucketOf(s)] += 1;
+      // The Needs you badge's own rule (`attention.ts`).
+      const opts = { idleSecs: 0, now, facts: d.facts };
+      const needs = countNeedsYou(live, opts);
+      const working = live.filter((s) => classify(s, opts) === 'working').length;
+      const n = { working, needs_you: needs, idle: live.length - working - needs };
       return {
         value: String(n.working),
         note: `working · ${n.needs_you} need you · ${n.idle} idle`,
@@ -92,24 +99,26 @@ export function fleetFacts(source: FleetSource, d: FleetData): FleetFacts {
       };
     }
     case 'hosts': {
-      const shown = d.hosts.filter((h) => !h.hidden);
-      const up = shown.filter((h) => h.reachable).length;
+      // The status bar's own reading (`host_health.ts`): `local` is always
+      // up, and a host in trouble says what.
+      const shown = d.hosts.filter((h) => !h.hidden).map((h) => ({ h, l: hostLoad(h, now) }));
+      const up = shown.filter(({ l }) => l.reachable).length;
       return {
         value: `${up}/${shown.length}`,
         note: 'hosts reachable',
-        warn: up < shown.length,
-        rows: shown.map((h) => ({
+        warn: shown.some(({ l }) => l.trouble != null),
+        rows: shown.map(({ h, l }) => ({
           label: h.alias,
-          value: h.reachable ? (h.load_1m != null ? `load ${h.load_1m.toFixed(1)}` : 'online') : 'offline',
-          ...(h.reachable ? {} : { warn: true }),
+          value: !l.reachable ? 'offline' : (l.trouble ?? (h.load_1m != null ? `load ${h.load_1m.toFixed(1)}` : 'online')),
+          ...(l.trouble != null ? { warn: true } : {}),
         })),
       };
     }
     case 'accounts': {
       const rows: (FleetRow & { five: number })[] = d.accounts.map((a) => {
-        const u = d.usage[a.uuid]?.usage;
-        const five = u?.five_hour?.utilization;
-        const week = u?.seven_day?.utilization;
+        const snap = d.usage[a.uuid];
+        const five = shownUsed('5h', snap?.usage?.five_hour, snap, now);
+        const week = shownUsed('weekly', snap?.usage?.seven_day, snap, now);
         const parts = [five != null ? `5h ${pct(five)}` : null, week != null ? `week ${pct(week)}` : null].filter(Boolean);
         const top = Math.max(five ?? 0, week ?? 0);
         return {
@@ -145,20 +154,25 @@ export function feedBy(f: DashboardFeed): string {
 }
 
 /** What a summary widget sends besides its request (`context`): the facts
- *  of each source but work, which the hub counts itself. Empty: none. */
+ *  of each source but work, which the hub counts itself. Empty: none.
+ *  `feedKeys`: the feeds its dashboard's `feed` widgets name, the only ones
+ *  sent (all of a person's feeds would pass the hub's cap on context). */
 export function summaryContext(
   sources: readonly SummarySource[] | undefined,
   d: FleetData,
   feeds: Readonly<Record<string, DashboardFeed>>,
+  feedKeys: readonly string[] = [],
+  now: number = Math.floor(Date.now() / 1000),
 ): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const s of sources ?? []) {
     if (s === 'work') continue;
     if (s === 'feeds') {
-      out.feeds = Object.fromEntries(Object.values(feeds).map((f) => [f.key, { value: f.value, by: feedBy(f), at: f.updated_at }]));
+      const named = [...new Set(feedKeys)].flatMap((k) => (feeds[k] ? [feeds[k]] : []));
+      out.feeds = Object.fromEntries(named.map((f) => [f.key, { value: f.value, by: feedBy(f), at: f.updated_at }]));
       continue;
     }
-    const f = fleetFacts(s, d);
+    const f = fleetFacts(s, d, now);
     out[s] = { summary: `${f.value} ${f.note}`, rows: f.rows.map((r) => `${r.label}: ${r.value}`) };
   }
   return out;

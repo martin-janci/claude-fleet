@@ -418,4 +418,79 @@ fn a_review_without_its_report_is_asked_about_not_retried() {
         "{}",
         s[0].reason
     );
+    // The same for a reviewer failed for stopping twice without its marker:
+    // it gave no verdict, so the implementation is not redone.
+    let attempts = HashMap::from([(
+        11,
+        vec![
+            task(2, "review", "failed", Some("the worker stopped 2 times")),
+            task(1, "implement", "done", None),
+        ],
+    )]);
+    let s = plan(
+        &m,
+        vec![node(10, "waiting"), node(11, "verifying")],
+        &items,
+        attempts,
+        0,
+    );
+    assert_eq!(kinds(&s), vec!["ask:11"]);
+}
+
+/// A line that waits on a review or test run that ended without its report
+/// (past its one rerun) asks a person instead of leaving the item
+/// `verifying` with no step; two lines on one run ask once.
+#[test]
+fn a_line_waiting_on_a_check_run_without_its_report_asks() {
+    let m = mission(MissionPolicy::default());
+    let items = [item(10, "todo"), item(11, "todo")];
+    let waiting = |line: &str, kind: &str, by: i64| CondCheck {
+        line: line.into(),
+        kind: kind.into(),
+        state: "pending".into(),
+        detail: "the test run ended without its report".into(),
+        by: Some(format!("task:{by}")),
+        at: None,
+    };
+    let mut n = node(11, "verifying");
+    n.verification = Some(Verification {
+        state: "unverified".into(),
+        checks: vec![
+            waiting("review", "review", 3),
+            waiting("test:cargo test", "test", 2),
+            waiting("test:pnpm test", "test", 2),
+        ],
+    });
+    let attempts = HashMap::from([(
+        11,
+        vec![
+            bare(3, "review"),
+            task(2, "test", "failed", Some("the worker stopped 2 times")),
+            task(1, "implement", "done", None),
+        ],
+    )]);
+    let s = plan(
+        &m,
+        vec![node(10, "waiting"), n.clone()],
+        &items,
+        attempts,
+        0,
+    );
+    assert_eq!(kinds(&s), vec!["ask:11", "ask:11"]);
+    assert!(s[0].reason.starts_with("the review of"), "{}", s[0].reason);
+    assert!(
+        s[1].reason.starts_with("the test run of"),
+        "{}",
+        s[1].reason
+    );
+    // A run still going is waited on, as before.
+    let attempts = HashMap::from([(
+        11,
+        vec![
+            task(3, "review", "running", None),
+            task(2, "test", "running", None),
+            task(1, "implement", "done", None),
+        ],
+    )]);
+    assert!(plan(&m, vec![node(10, "waiting"), n], &items, attempts, 0).is_empty());
 }

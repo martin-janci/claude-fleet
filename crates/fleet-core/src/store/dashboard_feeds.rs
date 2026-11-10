@@ -85,6 +85,33 @@ impl Store {
         rows.collect()
     }
 
+    /// Feed `key` of `person_id`, if it is kept.
+    pub fn dashboard_feed(
+        &self,
+        person_id: Option<i64>,
+        key: &str,
+    ) -> Result<Option<DashboardFeedRow>> {
+        use rusqlite::OptionalExtension;
+        self.conn
+            .query_row(
+                &format!(
+                    "SELECT {COLS} FROM dashboard_feeds WHERE owner = COALESCE(?1, 0) AND key = ?2"
+                ),
+                rusqlite::params![person_id, key],
+                row,
+            )
+            .optional()
+    }
+
+    /// How many feeds `person_id` keeps besides `key`.
+    pub fn count_other_dashboard_feeds(&self, person_id: Option<i64>, key: &str) -> Result<usize> {
+        self.conn.query_row(
+            "SELECT COUNT(*) FROM dashboard_feeds WHERE owner = COALESCE(?1, 0) AND key <> ?2",
+            rusqlite::params![person_id, key],
+            |r| r.get::<_, i64>(0).map(|n| n as usize),
+        )
+    }
+
     /// Every feed, by owner and key.
     pub fn all_dashboard_feeds(&self) -> Result<Vec<DashboardFeedRow>> {
         let mut st = self.conn.prepare(&format!(
@@ -119,6 +146,17 @@ mod tests {
         assert_eq!(theirs[0].by_ref.as_deref(), Some("Nightly"));
         assert_eq!(theirs[0].person_id, Some(7));
         assert_eq!(s.all_dashboard_feeds().unwrap().len(), 2);
+        s.set_dashboard_feed(None, "ci", "green", "agent", None, 13)
+            .unwrap();
+        assert_eq!(s.count_other_dashboard_feeds(None, "deploys").unwrap(), 1);
+        assert_eq!(s.count_other_dashboard_feeds(None, "new").unwrap(), 2);
+        assert_eq!(s.count_other_dashboard_feeds(Some(7), "x").unwrap(), 1);
+        assert_eq!(
+            s.dashboard_feed(None, "ci").unwrap().unwrap().updated_at,
+            13
+        );
+        assert!(s.dashboard_feed(Some(7), "ci").unwrap().is_none());
+        assert!(s.delete_dashboard_feed(None, "ci").unwrap());
         assert!(s.delete_dashboard_feed(None, "deploys").unwrap());
         assert!(!s.delete_dashboard_feed(None, "deploys").unwrap());
         assert_eq!(s.dashboard_feeds(Some(7)).unwrap().len(), 1);

@@ -615,6 +615,9 @@
   // inspector has no room.
   const unsubRowAction = sessionActionRequest.subscribe((r) => {
     if (!r) return;
+    // The action is on this window's own session: another fleet's session
+    // open over it would hide its Details.
+    if (get(selectedFleetSession)) closeFleetSession();
     if (inspectorRoom) inspectorOpen = true;
     else if (!detailsMain) goTo('details');
   });
@@ -908,11 +911,15 @@
   // The empty state fills the column only when NO session is open: another
   // fleet's session is one too, and the empty state (later in the markup)
   // used to cover its overlay whenever this window had none of its own open.
+  // Nor does this session's Details tab: it stays over the overlay of
+  // another fleet's session opened from the sidebar.
   const detailsMain = $derived(
     !wideMode &&
       !boardShown &&
       !missionsShown &&
-      ($destination === 'details' || taskShowing || (!$selectedSession && !$selectedFleetSession)),
+      (($destination === 'details' && !$selectedFleetSession) ||
+        taskShowing ||
+        (!$selectedSession && !$selectedFleetSession)),
   );
   // Review r08: a board card's task opens in the inspector column beside the
   // board, whatever the inspector pref.

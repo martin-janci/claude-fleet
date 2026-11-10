@@ -446,46 +446,82 @@ fn schedule_job(rule_id: i64, at: i64, now: i64) -> NewAgentJob {
 /// already waits for the very same write: a scheduled agent proposes the
 /// same change every tick while the first one waits, and a person was handed
 /// seven identical "Call jira.jira_update_issue" cards (2026-11-06). The
-/// same payload is not queued again; a different one for the same item
-/// (`about::identity`) replaces the older, which ends `expired`. Answers the
-/// action's state for the job's result.
-pub(super) fn queue_pending(
-    s: &Store,
-    rule_id: i64,
-    job_id: i64,
-    kind: &str,
-    payload: &str,
-    now: i64,
-) -> String {
-    use crate::service::agents::about::identity;
-    let value: Value = serde_json::from_str(payload).unwrap_or(Value::Null);
-    let id = identity(kind, &value);
-    let earlier: Vec<_> = s
-        .pending_agent_actions_of_rule(rule_id, kind)
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|a| a.job_id != job_id)
-        .filter(|a| {
-            serde_json::from_str::<Value>(&a.payload).is_ok_and(|v| identity(kind, &v) == id)
-        })
-        .collect();
-    if let Some(same) = earlier
-        .iter()
-        .find(|a| serde_json::from_str::<Value>(&a.payload).is_ok_and(|v| v == value))
-    {
-        return format!("already waiting as #{}", same.id);
-    }
-    match s.insert_agent_action(job_id, kind, payload, now) {
-        Ok(new) => {
-            for a in &earlier {
-                let why = format!("replaced by #{new}, a newer proposal of the same change");
-                if let Err(e) = s.supersede_agent_action(a.id, &why, now) {
-                    tracing::warn!(action = a.id, error = %e, "[agents] fleet: supersede");
-                }
-            }
-            "pending".into()
+/// same proposal (`about::same_proposal`: the same payload, or the same
+/// `fingerprint`) is not queued again; a different one for the same item
+/// (`about::identity`) replaces the older, which ends `expired` — but only
+/// once the whole job is in ([`PendingQueue::finish`]), and only when none
+/// of the job's proposals is that older one: a job that proposes A' and
+/// keeps B, both of one identity, must not retire B.
+#[derive(Default)]
+pub(super) struct PendingQueue {
+    /// Every proposal of the job, queued or already waiting.
+    proposed: Vec<(String, Value)>,
+    /// (older action, its payload, the new action replacing it).
+    replaced: Vec<(i64, String, Value, i64)>,
+}
+
+impl PendingQueue {
+    /// Queue one proposal. Answers the action's state for the job's result.
+    pub(super) fn queue(
+        &mut self,
+        s: &Store,
+        rule_id: i64,
+        job_id: i64,
+        kind: &str,
+        payload: &str,
+        now: i64,
+    ) -> String {
+        use crate::service::agents::about::{identity, same_proposal};
+        let value: Value = serde_json::from_str(payload).unwrap_or(Value::Null);
+        let id = identity(kind, &value);
+        let earlier: Vec<(i64, Value)> = s
+            .pending_agent_actions_of_rule(rule_id, kind)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|a| a.job_id != job_id)
+            .filter_map(|a| Some((a.id, serde_json::from_str::<Value>(&a.payload).ok()?)))
+            .filter(|(_, v)| identity(kind, v) == id)
+            .collect();
+        let already = earlier
+            .iter()
+            .find(|(_, v)| same_proposal(v, &value))
+            .map(|(i, _)| *i);
+        self.proposed.push((kind.to_string(), value));
+        if let Some(same) = already {
+            return format!("already waiting as #{same}");
         }
-        Err(e) => format!("not queued: {e}"),
+        match s.insert_agent_action(job_id, kind, payload, now) {
+            Ok(new) => {
+                self.replaced.extend(
+                    earlier
+                        .into_iter()
+                        .map(|(old, v)| (old, kind.to_string(), v, new)),
+                );
+                "pending".into()
+            }
+            Err(e) => format!("not queued: {e}"),
+        }
+    }
+
+    /// Retire the older proposals the job's new ones replace, but none that
+    /// one of the job's proposals is again.
+    pub(super) fn finish(self, s: &Store, now: i64) {
+        use crate::service::agents::about::same_proposal;
+        let mut done: Vec<i64> = Vec::new();
+        for (old, kind, v, new) in &self.replaced {
+            let kept = self
+                .proposed
+                .iter()
+                .any(|(k, p)| k == kind && same_proposal(p, v));
+            if kept || done.contains(old) {
+                continue;
+            }
+            done.push(*old);
+            let why = format!("replaced by #{new}, a newer proposal of the same change");
+            if let Err(e) = s.supersede_agent_action(*old, &why, now) {
+                tracing::warn!(action = old, error = %e, "[agents] fleet: supersede");
+            }
+        }
     }
 }
 
@@ -2315,6 +2351,7 @@ impl FleetRunner {
         );
         let s = lock(&self.store).ok();
         let mut out: Vec<Value> = Vec::new();
+        let mut queue = PendingQueue::default();
         if let Some(s) = &s {
             planned.retain_mut(|p| match with_current_setting(s, p) {
                 Ok(()) => true,
@@ -2336,11 +2373,14 @@ impl FleetRunner {
                         s.insert_approved_agent_action(job.id, p.kind, &p.payload, "rule:act", now)
                             .map_or_else(|e| format!("not queued: {e}"), |_| "approved".into())
                     } else {
-                        queue_pending(s, rule.id, job.id, p.kind, &p.payload, now)
+                        queue.queue(s, rule.id, job.id, p.kind, &p.payload, now)
                     }
                 }
             };
             out.push(json!({ "id": p.id, "do": p.kind, "body": p.body, "state": state }));
+        }
+        if let Some(s) = &s {
+            queue.finish(s, now);
         }
         for u in unplanned {
             out.push(json!({ "id": u.id, "state": "skipped", "why": u.why }));
@@ -2360,6 +2400,17 @@ impl FleetRunner {
         mcp: bindings::RunMcp,
     ) -> Result<PrintOutcome, RunOutcome> {
         let host = rule.host_alias.as_str();
+        // The run is `claude -p` on the host's own login: not on an account
+        // the rule's project forbids (`vehicle::forbidden_login`). Before
+        // the checkout, so a skipped job has touched nothing. A failed read
+        // skips too: never a run on an unchecked login.
+        match lock(&self.store).and_then(|s| {
+            vehicle::forbidden_login(&s, rule.project_id, host, crate::store::now_unix())
+        }) {
+            Ok(None) => {}
+            Ok(Some(reason)) => return Err(RunOutcome::Skipped { reason }),
+            Err(e) => return Err(failed(ErrorKind::Transient, e.message)),
+        }
         let base = self.host.base();
         let d = &inst.loaded().definition;
         let (cwd, root) = match (d.run.workspace, rule.project_id) {

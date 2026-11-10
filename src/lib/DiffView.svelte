@@ -20,6 +20,10 @@
     const rows: DiffRow[] = [];
     let oldNo = 0;
     let newNo = 0;
+    // Past a file's first `@@`, a line starting `--- ` / `+++ ` is a removed
+    // `-- …` or an added `++ …` line, not a file header: a header comes only
+    // before the hunks, and `diff --git` starts the next file's.
+    let inHunk = false;
     const lines = diff.split('\n');
     // A diff that ends in \n yields a trailing '' — drop it so it isn't
     // rendered as a spurious blank context row.
@@ -32,14 +36,14 @@
           oldNo = parseInt(m[1], 10);
           newNo = parseInt(m[2], 10);
         }
+        inHunk = true;
         rows.push({ kind: 'hunk', oldNo: null, newNo: null, text: line });
         continue;
       }
+      if (line.startsWith('diff --git')) inHunk = false;
       if (
         line.startsWith('diff --git') ||
-        line.startsWith('index ') ||
-        line.startsWith('--- ') ||
-        line.startsWith('+++ ') ||
+        (!inHunk && (line.startsWith('index ') || line.startsWith('--- ') || line.startsWith('+++ '))) ||
         line.startsWith('old mode') ||
         line.startsWith('new mode') ||
         line.startsWith('similarity ') ||

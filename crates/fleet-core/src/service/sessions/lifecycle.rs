@@ -323,7 +323,9 @@ pub(super) fn git_setup_error(
 /// directory [`crate::projects::worktree_dir_name`] gives (`feat/imports` →
 /// `feat-imports`; the branch keeps its `/`). Idempotent:
 /// if the worktree dir already exists it's reused. Git's chatter goes to
-/// stderr; the ONLY stdout is the absolute PHYSICAL path of the worktree
+/// stderr; stdout is [`WORKTREE_CREATED_MARK`] on a line of its own when
+/// this run created the worktree (nothing when it reused one), then the
+/// absolute PHYSICAL path of the worktree
 /// (`pwd -P`, last line), which the caller uses as the tmux cwd. The logical
 /// `pwd` echoed a symlinked root's spelling, a second identity for the same
 /// checkout next to the physical one tmux and git report.
@@ -361,6 +363,7 @@ pub(super) fn worktree_add_script(root: &str, name: &str, base: Option<&str>) ->
          else\n\
          git worktree add \"$wt\" -b \"$name\" \"$start\" 1>&2\n\
          fi\n\
+         echo {WORKTREE_CREATED_MARK}\n\
          fi\n\
          ( cd \"$wt\" && pwd -P )\n",
         root = quote(root),
@@ -394,11 +397,38 @@ pub(crate) fn validate_new_worktree_name(name: &str) -> Result<(), IpcError> {
     Ok(())
 }
 
+/// What [`worktree_add_script`] prints, on the line before the path, when it
+/// created the worktree and did not reuse an existing directory.
+pub(super) const WORKTREE_CREATED_MARK: &str = "__fleet_worktree_created__";
+
+/// Whether [`worktree_add_script`]'s output says it created the worktree:
+/// the line before the path (see [`worktree_path_from_stdout`]) is the mark.
+/// New worktree setup runs only then, so a start that lands in an existing
+/// worktree never copies over its files or re-runs the command there.
+pub(super) fn worktree_was_created(stdout: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(stdout);
+    let mut lines = text.lines().map(str::trim).filter(|l| !l.is_empty()).rev();
+    lines.next();
+    lines.next() == Some(WORKTREE_CREATED_MARK)
+}
+
+/// The path alone, for the tests that only ask where the worktree is.
+#[cfg(test)]
 pub(super) async fn create_worktree_local(
     root: &str,
     name: &str,
     base: Option<&str>,
 ) -> Result<String, IpcError> {
+    Ok(create_worktree_local_reporting(root, name, base).await?.0)
+}
+
+/// [`create_worktree_local`], with whether this call created the worktree
+/// (`false`: the directory was already there and is reused).
+pub(super) async fn create_worktree_local_reporting(
+    root: &str,
+    name: &str,
+    base: Option<&str>,
+) -> Result<(String, bool), IpcError> {
     crate::service::hub::ensure_local_allowed(crate::service::projects::LOCAL_HOST)?;
     let script = worktree_add_script(root, name, base);
     let out = crate::proc::command("bash")
@@ -412,7 +442,10 @@ pub(super) async fn create_worktree_local(
             String::from_utf8_lossy(&out.stderr).trim().to_string(),
         ));
     }
-    worktree_path_from_stdout(&out.stdout)
+    Ok((
+        worktree_path_from_stdout(&out.stdout)?,
+        worktree_was_created(&out.stdout),
+    ))
 }
 
 /// The worktree path [`worktree_add_script`] printed: its LAST non-empty
@@ -838,26 +871,19 @@ pub(crate) fn normalize_launch(args: &mut NewSessionArgs) -> Result<(), IpcError
         ));
     }
     if let Some(p) = args.profile.as_deref() {
-        match args.agent.as_deref() {
-            Some(crate::store::AGENT_CODEX) => {
-                return Err(IpcError::new(
-                    codes::E_INVALID,
-                    "a credential profile applies to Claude Code sessions; Codex has none",
-                ))
-            }
-            Some(crate::store::AGENT_AGY) => {
-                return Err(IpcError::new(
-                    codes::E_INVALID,
-                    "a credential profile applies to Claude Code sessions; agy keeps its own login",
-                ))
-            }
-            Some(crate::store::AGENT_HERMES) => {
-                return Err(IpcError::new(
-                    codes::E_INVALID,
-                    "a credential profile applies to Claude Code sessions; Hermes keeps its own provider login",
-                ))
-            }
-            _ => {}
+        // Every agent but Claude keeps its own login.
+        if let Some(a) = args
+            .agent
+            .as_deref()
+            .filter(|a| *a != crate::store::AGENT_CLAUDE)
+        {
+            let label = crate::agent_adapter::by_id(a).map_or(a, |ad| ad.label());
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                format!(
+                    "a credential profile applies to Claude Code sessions; {label} keeps its own login"
+                ),
+            ));
         }
         crate::validate::claude_profile(p)?;
     }
@@ -1189,25 +1215,15 @@ pub(super) async fn new_session_inner(
             args.new_worktree.as_deref(),
         )?
     };
-    // The session's environment, resolved and written before any workspace
-    // step: an unresolved or invalid variable refuses the create with no
-    // worktree or branch left behind. Both launchers below
-    // (`ensure_for_new_session` and `new_session`) get the wrapped command.
-    // No store guard is held here (`prepare` locks and awaits).
+    // The session's environment, checked before any workspace step: an
+    // unresolved or invalid variable refuses the create with no worktree or
+    // branch left behind. The file itself is written after the worktree
+    // setup (below), which can run for minutes: the tick sweeps env files
+    // older than `ENV_FILE_MAX_AGE_MIN`, and a swept one would start the
+    // agent without its variables.
+    crate::service::env::check(store, &args.host_alias, Some(args.project_id), None)?;
     let (claude_id, pane_cmd) = claude_id_and_pane_cmd(&args);
     let env_extra = args.env.clone().unwrap_or_default();
-    let pane_cmd = crate::service::env::prepare(
-        store,
-        &**ssh,
-        &args.host_alias,
-        Some(args.project_id),
-        // The row does not exist yet: the owner it is about to record.
-        args.owner_person_id,
-        None,
-        &env_extra,
-        &pane_cmd,
-    )
-    .await?;
     // The checkout a brand-new worktree was made from: its project's new
     // worktree setup copies from it (`worktree_setup`).
     let mut setup_base: Option<String> = None;
@@ -1220,8 +1236,11 @@ pub(super) async fn new_session_inner(
                 let s = lock(store)?;
                 fetch_base_path(&s, args.project_id)?
             };
-            let wt = create_worktree_local(&base_path, name, args.base_branch.as_deref()).await?;
-            setup_base = Some(base_path);
+            let (wt, created) =
+                create_worktree_local_reporting(&base_path, name, args.base_branch.as_deref())
+                    .await?;
+            // An existing worktree of that name is reused as it is: no setup.
+            setup_base = created.then_some(base_path);
             PathBuf::from(wt)
         } else {
             let s = lock(store)?;
@@ -1279,7 +1298,7 @@ pub(super) async fn new_session_inner(
                     String::from_utf8_lossy(&out.stderr).trim().to_string(),
                 ));
             }
-            setup_base = Some(project_root);
+            setup_base = worktree_was_created(&out.stdout).then_some(project_root);
             PathBuf::from(worktree_path_from_stdout(&out.stdout)?)
         } else {
             let (owner, repo, wt_info) = {
@@ -1336,6 +1355,44 @@ pub(super) async fn new_session_inner(
     // Claude Code. Any other value (incl. None) is treated as a "work" session.
     let is_shell = args.kind.as_deref() == Some("shell");
 
+    // New worktree setup: copy the project's untracked files and run its
+    // setup command, still under the Worktree step. A failure keeps the
+    // worktree and refuses the start (`E_SETUP_FAILED`). Only a new worktree
+    // has a `setup_base`, and the repair below runs only for an existing
+    // one, so this goes first and `path` is the same for both.
+    if let Some(base) = setup_base {
+        let setup = {
+            let s = lock(store)?;
+            s.worktree_setup(args.project_id)?.unwrap_or_default()
+        };
+        super::worktree_setup::run(
+            ssh,
+            &args.host_alias,
+            &base,
+            &path.to_string_lossy(),
+            &setup,
+            token.clone(),
+        )
+        .await?;
+    }
+
+    // The session's environment file, written after the setup so the tick
+    // cannot sweep it before the pane sources it. Both launchers below
+    // (`ensure_for_new_session` and `new_session`) get the wrapped command.
+    // No store guard is held here (`prepare` locks and awaits).
+    let pane_cmd = crate::service::env::prepare(
+        store,
+        &**ssh,
+        &args.host_alias,
+        Some(args.project_id),
+        // The row does not exist yet: the owner it is about to record.
+        args.owner_person_id,
+        None,
+        &env_extra,
+        &pane_cmd,
+    )
+    .await?;
+
     // Automatic self-repair for an EXISTING worktree row / main checkout: the
     // row may point at a directory that was deleted since it was written.
     // Automatic means create-only (re-add a missing worktree from its existing
@@ -1364,25 +1421,6 @@ pub(super) async fn new_session_inner(
     } else {
         (path, None)
     };
-
-    // New worktree setup: copy the project's untracked files and run its
-    // setup command, still under the Worktree step. A failure keeps the
-    // worktree and refuses the start (`E_SETUP_FAILED`).
-    if let Some(base) = setup_base {
-        let setup = {
-            let s = lock(store)?;
-            s.worktree_setup(args.project_id)?.unwrap_or_default()
-        };
-        super::worktree_setup::run(
-            ssh,
-            &args.host_alias,
-            &base,
-            &path.to_string_lossy(),
-            &setup,
-            token.clone(),
-        )
-        .await?;
-    }
 
     progress.advance(StartStep::Tmux);
     let tmux = exec_for(&args.host_alias, ssh);
@@ -2494,6 +2532,20 @@ pub async fn restart_session(
                 if let Some(effort) = effort_switch.as_ref() {
                     launch.effort = effort.clone();
                 }
+                // A restart that keeps the login is exempt from the
+                // project's forbidden accounts only while the session is
+                // live on the account it already runs on; a ghost or lost
+                // row coming back, or a login signed in to another account
+                // since, is checked (`refuse_forbidden_relaunch`). A switch
+                // is checked below, whatever the row's state.
+                if switch.is_none() {
+                    crate::service::project_accounts::refuse_forbidden_relaunch(
+                        &s,
+                        &r,
+                        launch.profile.as_deref(),
+                        crate::store::now_unix(),
+                    )?;
+                }
                 (
                     r.kind,
                     r.agent,
@@ -2550,8 +2602,8 @@ pub async fn restart_session(
             launch.profile.as_deref(),
             crate::store::now_unix(),
         )?;
-        // A switch onto a login the project forbids is refused; a plain
-        // restart keeps the login the pane already ran under.
+        // A switch onto a login the project forbids is refused; a restart
+        // that keeps the login was checked above, under the first lock.
         if switch.is_some() {
             crate::service::project_accounts::refuse_forbidden(
                 &*lock(store)?,
@@ -3036,12 +3088,35 @@ pub async fn recreate_session(
             ));
         }
         let cwd_src = cwd_source_for_session(&s, &sess)?;
+        let launch = stored_launch(&s, sess.id)?;
+        // As a start and a restart: a Claude pane is not rebuilt under a
+        // login past its daily limit, nor (a lost row coming back, or a
+        // login signed in to another account since) on an account the
+        // project forbids. `restore_host_sessions` recreates through here.
+        if sess.agent == crate::store::AGENT_CLAUDE
+            && sess.kind != "shell"
+            && !crate::store::has_no_pane(&sess.kind)
+        {
+            let now = crate::store::now_unix();
+            crate::service::account_limits::refuse_over_daily_limit(
+                &s,
+                &sess.host_alias,
+                launch.profile.as_deref(),
+                now,
+            )?;
+            crate::service::project_accounts::refuse_forbidden_relaunch(
+                &s,
+                &sess,
+                launch.profile.as_deref(),
+                now,
+            )?;
+        }
         let pane_cmd = recreate_pane_command(
             &sess.kind,
             &sess.agent,
             sess.claude_session_id.as_deref(),
             &sess.tmux_name,
-            &stored_launch(&s, sess.id)?,
+            &launch,
         );
         (sess, cwd_src, pane_cmd)
     };

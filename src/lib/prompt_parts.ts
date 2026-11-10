@@ -28,45 +28,32 @@ export interface PromptParts {
   text: string;
 }
 
+// Names are matched non-greedily, so a person's own `": ` after the head
+// stays theirs. Read on `\n` line ends (`\r\n` and `\r` made `\n` first).
 const SESSION_CONTEXT =
-  /^\[context\] the person is looking at session "(.*)" on host (\S+?)(?: \(branch (.+)\))?\. "this one" and "here" mean that session unless they say otherwise\.(?:\n\n|$)/;
+  /^\[context\] the person is looking at session "(.*?)" on host (\S+?)(?: \(branch (.+)\))?\. "this one" and "here" mean that session unless they say otherwise\.(?:\n\n|$)/;
 const HOST_CONTEXT =
   /^\[context\] the person is looking at host (\S+) with no session selected\. "here" means that host\.(?:\n\n|$)/;
-const MISSION = /^About mission #(\d+) "(.*)":(?:\n\n|$)/;
+const MISSION = /^About mission #(\d+) "(.*?)":(?:\n\n|$)/;
 const DASHBOARD =
-  /^(?:My pinned dashboard "(.*)", as it is now:|The built-in dashboard "(.*)", to make my own copy of \(keep the id [A-Za-z0-9._:-]+\):)\n\n```fleet-ui\n[\s\S]*?\n```\n\n(?:Save the change with `dashboards \{ pin \}` under the same id, then answer with the `dashboard` block\.|Answer with a `dashboard` block with the same id\.) (?:Change the widget "(.*)": |Change it: )/;
+  /^(?:My pinned dashboard "(.*?)", as it is now:|The built-in dashboard "(.*?)", to make my own copy of \(keep the id [A-Za-z0-9._:-]+\):)\n\n```fleet-ui\n[\s\S]*?\n```\n\n(?:Save the change with `dashboards \{ pin \}` under the same id, then answer with the `dashboard` block\.|Answer with a `dashboard` block with the same id\.) (?:Change the widget "(.*?)":|Change it:)(?: |\n|$)/;
 
-/** `prompt` with the app's own head lines read into chips. */
+/** `prompt` with the app's own head lines read into chips: at most one
+ *  context or mission head, then at most one dashboard head, as the app
+ *  writes them. A second head is the person's own words. */
 export function promptParts(prompt: string): PromptParts {
   const chips: PromptChip[] = [];
-  let rest = prompt;
-  for (;;) {
-    let m = SESSION_CONTEXT.exec(rest);
-    if (m) {
-      chips.push({ kind: 'session', name: m[1], host: m[2], branch: m[3] ?? null });
-      rest = rest.slice(m[0].length);
-      continue;
-    }
-    m = HOST_CONTEXT.exec(rest);
-    if (m) {
-      chips.push({ kind: 'host', host: m[1] });
-      rest = rest.slice(m[0].length);
-      continue;
-    }
-    m = MISSION.exec(rest);
-    if (m) {
-      chips.push({ kind: 'mission', id: Number(m[1]), name: m[2] });
-      rest = rest.slice(m[0].length);
-      continue;
-    }
-    m = DASHBOARD.exec(rest);
-    if (m) {
-      const copy = m[2] !== undefined;
-      chips.push({ kind: 'dashboard', title: (copy ? m[2] : m[1]) ?? '', widget: m[3] ?? null, copy });
-      rest = rest.slice(m[0].length);
-      continue;
-    }
-    break;
+  let rest = prompt.replace(/\r\n?/g, '\n');
+  let m = SESSION_CONTEXT.exec(rest);
+  if (m) chips.push({ kind: 'session', name: m[1], host: m[2], branch: m[3] ?? null });
+  else if ((m = HOST_CONTEXT.exec(rest))) chips.push({ kind: 'host', host: m[1] });
+  else if ((m = MISSION.exec(rest))) chips.push({ kind: 'mission', id: Number(m[1]), name: m[2] });
+  if (m) rest = rest.slice(m[0].length);
+  m = DASHBOARD.exec(rest);
+  if (m) {
+    const copy = m[2] !== undefined;
+    chips.push({ kind: 'dashboard', title: (copy ? m[2] : m[1]) ?? '', widget: m[3] ?? null, copy });
+    rest = rest.slice(m[0].length);
   }
   return { chips, text: chips.length ? rest.trim() : prompt };
 }

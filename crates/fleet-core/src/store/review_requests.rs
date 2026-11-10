@@ -1,9 +1,10 @@
 //! Review requests (migration 225): "Ask for review…" puts "X asks you to
 //! review" in a colleague's Inbox; the share it comes with is an ordinary
-//! grant. What an ask does end to end is `service::sessions::review_requests`.
+//! grant. What an ask does end to end is `service::sessions::sharing`
+//! (`ask_for_review`, `review_request`).
 
 use super::Store;
-use crate::ipc_error::IpcError;
+use crate::ipc_error::{codes, IpcError};
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 
@@ -27,14 +28,20 @@ pub struct ReviewRequestRow {
     pub created_at: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub done_at: Option<i64>,
+    /// The session's caption (its friendly name, else its tmux name), so a
+    /// client need not find the session in its own list to title the ask.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_name: Option<String>,
 }
 
 const SELECT: &str = "SELECT r.id, r.session_id, r.from_person_id, \
        COALESCE(f.display_name, f.name, ''), r.to_person_id, \
-       COALESCE(t.display_name, t.name, ''), r.level, r.note, r.created_at, r.done_at \
+       COALESCE(t.display_name, t.name, ''), r.level, r.note, r.created_at, r.done_at, \
+       COALESCE(s.friendly_name, s.tmux_name) \
   FROM review_requests r \
   LEFT JOIN people f ON f.id = r.from_person_id \
-  LEFT JOIN people t ON t.id = r.to_person_id";
+  LEFT JOIN people t ON t.id = r.to_person_id \
+  LEFT JOIN sessions s ON s.id = r.session_id";
 
 fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ReviewRequestRow> {
     Ok(ReviewRequestRow {
@@ -48,6 +55,7 @@ fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ReviewRequestRow> {
         note: r.get(7)?,
         created_at: r.get(8)?,
         done_at: r.get(9)?,
+        session_name: r.get(10)?,
     })
 }
 
@@ -110,6 +118,28 @@ impl Store {
         done: bool,
         now: i64,
     ) -> Result<Option<ReviewRequestRow>, IpcError> {
+        // One open ask per session and person (a partial unique index):
+        // reopening an older one while a newer one is open is refused in
+        // words rather than as the index's raw constraint error.
+        if !done {
+            let newer_open: bool = self.conn.query_row(
+                "SELECT EXISTS (SELECT 1 FROM review_requests o \
+                   JOIN review_requests r ON r.id = ?1 AND r.to_person_id = ?2 \
+                  WHERE o.session_id = r.session_id AND o.to_person_id = r.to_person_id \
+                    AND o.id <> r.id AND o.done_at IS NULL)",
+                rusqlite::params![id, person],
+                |r| r.get(0),
+            )?;
+            if newer_open {
+                return Err(IpcError::new(
+                    codes::E_INVALID_STATE,
+                    format!(
+                        "a newer ask for review of this session is open; review request {id} \
+                         stays done"
+                    ),
+                ));
+            }
+        }
         let n = self.conn.execute(
             "UPDATE review_requests SET done_at = ?3 WHERE id = ?1 AND to_person_id = ?2",
             rusqlite::params![id, person, done.then_some(now)],
@@ -121,6 +151,22 @@ impl Store {
             .conn
             .query_row(&format!("{SELECT} WHERE r.id = ?1"), [id], row)
             .optional()?)
+    }
+
+    /// Close the open ask to `person` on `session_id`, if any: the share it
+    /// came with was revoked (`revoke_session_grant_to`). Returns how many
+    /// it closed (0 or 1).
+    pub(crate) fn close_review_requests_to(
+        &self,
+        session_id: i64,
+        person: i64,
+        now: i64,
+    ) -> Result<usize, IpcError> {
+        Ok(self.conn.execute(
+            "UPDATE review_requests SET done_at = ?3 \
+              WHERE session_id = ?1 AND to_person_id = ?2 AND done_at IS NULL",
+            rusqlite::params![session_id, person, now],
+        )?)
     }
 
     /// Whether `person` is only ever a viewer: they hold live org
@@ -182,6 +228,45 @@ mod tests {
         // A new ask after a done one is a new row.
         let c = s.ask_for_review(sid, ada, bo, "drive", None, 60).unwrap();
         assert_ne!(c.id, a.id);
+    }
+
+    /// Review finding 4: reopening an older ask while a newer one is open is
+    /// a plain `E_INVALID_STATE`, not the unique index's raw error; and an
+    /// ask carries its session's caption.
+    #[test]
+    fn reopening_under_a_newer_open_ask_is_refused_in_words() {
+        let (s, sid, ada, bo) = setup();
+        let a = s.ask_for_review(sid, ada, bo, "drive", None, 10).unwrap();
+        assert_eq!(a.session_name.as_deref(), Some("api-1"));
+        s.finish_review_request(a.id, bo, true, 20).unwrap();
+        let b = s.ask_for_review(sid, ada, bo, "drive", None, 30).unwrap();
+        let e = s.finish_review_request(a.id, bo, false, 40).unwrap_err();
+        assert_eq!(e.code, codes::E_INVALID_STATE, "{}", e.message);
+        // With the newer one done, the older one reopens.
+        s.finish_review_request(b.id, bo, true, 50).unwrap();
+        let again = s
+            .finish_review_request(a.id, bo, false, 60)
+            .unwrap()
+            .unwrap();
+        assert_eq!(again.done_at, None);
+    }
+
+    /// Review finding 4: revoking the share an ask came with closes the ask.
+    #[test]
+    fn revoking_the_share_closes_the_ask() {
+        let (s, sid, ada, bo) = setup();
+        s.conn
+            .execute(
+                "UPDATE sessions SET owner_person_id = ?2, visibility = 'private' WHERE id = ?1",
+                rusqlite::params![sid, ada],
+            )
+            .unwrap();
+        s.grant_session(sid, crate::store::GrantRecipient::Person(bo), "drive", ada)
+            .unwrap();
+        s.ask_for_review(sid, ada, bo, "drive", None, 10).unwrap();
+        assert_eq!(s.review_requests_for(bo, false, 20).unwrap().len(), 1);
+        s.revoke_session_grant(sid, bo, ada).unwrap();
+        assert!(s.review_requests_for(bo, false, 30).unwrap().is_empty());
     }
 
     #[test]

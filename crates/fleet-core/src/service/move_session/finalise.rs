@@ -158,6 +158,15 @@ pub(super) async fn finalise_source(
                 return Err(tag_step("re-pointing the queued prompts", e));
             }
         }
+        // And its review notes, which the source row's delete would cascade:
+        // a review prompt queued above names notes that must still be there.
+        match lock(store).and_then(|s| s.repoint_review_notes(a.source_row_id, a.target_row_id)) {
+            Ok(n) => repointed.review_notes = n,
+            Err(e) => {
+                repointed.undo(store, a.source_row_id, a.target_row_id);
+                return Err(tag_step("re-pointing the review notes", e));
+            }
+        }
         // So do its open tasks: the conversation goes on there and prints
         // its done marker on the target, which must find them; left on the
         // source they fail as lost the moment it is killed.
@@ -333,6 +342,7 @@ pub(super) async fn finalise_source(
 struct Repointed {
     participant: Option<i64>,
     prompts: usize,
+    review_notes: usize,
     work: Vec<i64>,
     waits: Vec<i64>,
 }
@@ -365,6 +375,15 @@ impl Repointed {
                     session_id = source,
                     error = %re.message,
                     "move_session: the move stopped and the queued prompts stay on the target"
+                );
+            }
+        }
+        if self.review_notes > 0 {
+            if let Err(re) = lock(store).and_then(|s| s.repoint_review_notes(target, source)) {
+                tracing::warn!(
+                    session_id = source,
+                    error = %re.message,
+                    "move_session: the move stopped and the review notes stay on the target"
                 );
             }
         }

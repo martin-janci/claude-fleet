@@ -64,7 +64,7 @@ import {
   type ConvTurn,
   type ConvItem,
 } from './conversation';
-import { agentModelProfile, slashCommandsFor, presetForAgent, CODEX_MODEL_OPTIONS, CODEX_SLASH_COMMANDS, HERMES_SLASH_COMMANDS } from './conversation';
+import { agentModelProfile, slashCommandsFor, presetForAgent, CODEX_MODEL_OPTIONS, CODEX_SLASH_COMMANDS, HERMES_MODEL_OPTIONS, HERMES_SLASH_COMMANDS } from './conversation';
 import { notificationTone, notificationMark, notificationLabel } from './conversation';
 import type { SessionRow } from './sessions';
 import type { TaskRow } from './tasks';
@@ -1299,6 +1299,27 @@ describe('Codex in the composer', () => {
     expect(presetForAgent(chip('continue'), 'codex')?.text).toBe('continue');
     // Claude may run a project skill no list knows of: left alone.
     expect(presetForAgent(chip('/my-skill'), 'claude')?.text).toBe('/my-skill');
+  });
+});
+
+describe('Hermes in the composer', () => {
+  it('offers Hermes its own model slugs and no effort, sent as /model', () => {
+    const hermes = agentModelProfile('hermes');
+    expect(hermes.mode).toBe('command');
+    expect(hermes.models).toBe(HERMES_MODEL_OPTIONS);
+    expect(hermes.launchModels).toBe(HERMES_MODEL_OPTIONS);
+    expect(hermes.models.some((o) => o.value === 'opus' || o.value.includes('[1m]'))).toBe(false);
+    expect(hermes.efforts).toEqual([]);
+    expect(hermes.launchEfforts).toEqual([]);
+  });
+
+  it('fits quick-action chips to Hermes', () => {
+    const chip = (text: string) => ({ label: 'x', text });
+    expect(presetForAgent(chip('/clear'), 'hermes')?.text).toBe('/new');
+    expect(presetForAgent(chip('/compact focus'), 'hermes')?.text).toBe('/compress focus');
+    expect(presetForAgent(chip('/context'), 'hermes')?.text).toBe('/context');
+    expect(presetForAgent(chip('/effort high'), 'hermes')).toBeNull();
+    expect(presetForAgent(chip('continue'), 'hermes')?.text).toBe('continue');
   });
 });
 

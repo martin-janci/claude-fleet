@@ -1980,9 +1980,44 @@ fn snapshot(s: &Store, args: &MoveSessionArgs) -> Result<Snapshot, IpcError> {
             .account_uuid
             .clone()
             .or_else(|| login_account_on(&src, launch.profile.as_deref()).map(str::to_string));
-        if let Some(account) = account {
-            launch.profile = target_login(&dst, launch.profile.as_deref(), &account);
+        if let Some(account) = account.as_deref() {
+            launch.profile = target_login(&dst, launch.profile.as_deref(), account);
         }
+        // The target login is held to the project's forbidden accounts
+        // (`service::project_accounts`), here in the snapshot so the dry run
+        // refuses too and a refused move has touched neither host. When the
+        // account did not travel, the conversation lands on whatever login
+        // the target has: take an allowed one if that one is forbidden.
+        // When it did travel, the move is refused rather than re-billed.
+        let now = crate::store::now_unix();
+        let traveled = account
+            .as_deref()
+            .is_some_and(|a| login_account_on(&dst, launch.profile.as_deref()) == Some(a));
+        if !traveled
+            && crate::service::project_accounts::forbidden_reason(
+                s,
+                Some(project_id),
+                target,
+                launch.profile.as_deref(),
+                now,
+            )?
+            .is_some()
+        {
+            launch.profile = crate::service::project_accounts::login_for(
+                s,
+                Some(project_id),
+                target,
+                launch.profile.as_deref(),
+                now,
+            )?;
+        }
+        crate::service::project_accounts::refuse_forbidden(
+            s,
+            Some(project_id),
+            target,
+            launch.profile.as_deref(),
+            now,
+        )?;
     }
     Ok(Snapshot {
         launch,
@@ -4243,6 +4278,43 @@ mod tests {
         assert_eq!(snap.worktree_path, None, "the layout path is used instead");
     }
 
+    /// Accounts review finding 3: the login a moved session lands on is
+    /// held to the project's forbidden accounts. The snapshot refuses (so
+    /// the dry run does, and nothing was touched), or takes an allowed
+    /// login on the target when the session's account has none there.
+    #[test]
+    fn a_move_never_lands_on_a_login_the_project_forbids() {
+        use crate::service::account_limits::seed_usage;
+        let f = fixture();
+        let s = f.store.lock().unwrap();
+        let now = crate::store::now_unix();
+        seed_usage(&s, "alpha", None, "acct-w", 10.0, now);
+        seed_usage(&s, "beta", None, "acct-x", 10.0, now);
+        // Nothing forbidden: the target's own login takes it.
+        assert_eq!(snapshot(&s, &args(&f, false)).unwrap().launch.profile, None);
+        s.set_account_forbidden_projects("acct-x", &[f.project_id])
+            .unwrap();
+        let err = snapshot(&s, &args(&f, false)).err().expect("refused");
+        assert_eq!(err.code, codes::E_ACCOUNT_FORBIDDEN, "{err:?}");
+        // An allowed login on the target takes the session instead.
+        seed_usage(&s, "beta", Some("work"), "acct-y", 10.0, now);
+        assert_eq!(
+            snapshot(&s, &args(&f, false))
+                .unwrap()
+                .launch
+                .profile
+                .as_deref(),
+            Some("work")
+        );
+        // The session's own account, forbidden and signed in on the target:
+        // refused rather than moved to another account.
+        s.set_account_forbidden_projects("acct-w", &[f.project_id])
+            .unwrap();
+        seed_usage(&s, "beta", Some("same"), "acct-w", 10.0, now);
+        let err = snapshot(&s, &args(&f, false)).err().expect("refused");
+        assert_eq!(err.code, codes::E_ACCOUNT_FORBIDDEN, "{err:?}");
+    }
+
     fn args(f: &Fixture, keep_source: bool) -> MoveSessionArgs {
         MoveSessionArgs {
             session_id: f.source_id,
@@ -5653,6 +5725,15 @@ mod tests {
             let s = f.store.lock().unwrap();
             let pid = s.ensure_participant_for_session(f.source_id).unwrap();
             let prompt = s.insert_deferred_prompt(f.source_id, "later", 1).unwrap();
+            let note = crate::store::NewReviewNote {
+                path: "a.rs".into(),
+                line: Some(1),
+                side: "new".into(),
+                quote: None,
+                body: "x".into(),
+            };
+            s.insert_review_notes(f.source_id, "rn-1", &[note], "Ada", None, 1)
+                .unwrap();
             let task = s.insert_task(None, Some(f.source_id), "w", "n1").unwrap();
             s.conn_for_test()
                 .execute_batch(
@@ -5674,6 +5755,7 @@ mod tests {
             s.get_deferred_prompt(prompt).unwrap().unwrap().session_id,
             f.source_id
         );
+        assert_eq!(s.review_notes(f.source_id).unwrap().len(), 1, "notes back");
         assert_eq!(
             s.get_task(task.id).unwrap().unwrap().worker_session_id,
             Some(f.source_id)

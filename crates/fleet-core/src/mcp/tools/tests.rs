@@ -893,6 +893,44 @@ async fn an_answer_only_device_answers_forms_and_never_opens_one() {
     assert!(err.message.contains("never opens one"), "{err:?}");
 }
 
+/// Review finding 2: a readonly (a viewer's) or answer-only device lists
+/// and finishes the asks for review to its person, and never asks one.
+#[tokio::test]
+async fn a_readonly_device_reads_its_review_asks_and_never_asks() {
+    let g = gate_fixture();
+    let t = test_tools(g.store);
+    for mode in [TokenMode::Readonly, TokenMode::Answer] {
+        let c = client_caller("phone", mode);
+        assert!(enforce_mode(&c, "review_request").is_ok(), "{mode:?}");
+        let listed = t
+            .review_request(
+                Extension(c.clone()),
+                Parameters(
+                    serde_json::from_value(serde_json::json!({ "action": "list" })).unwrap(),
+                ),
+            )
+            .await;
+        assert!(listed.is_ok(), "{mode:?}: {listed:?}");
+        let err = t
+            .review_request(
+                Extension(c),
+                Parameters(
+                    serde_json::from_value(
+                        serde_json::json!({ "action": "ask", "session_id": 1, "person": "bob" }),
+                    )
+                    .unwrap(),
+                ),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            err.message.starts_with("E_FORBIDDEN") && err.message.contains("full device"),
+            "{mode:?}: {}",
+            err.message
+        );
+    }
+}
+
 #[tokio::test]
 async fn keys_refuse_an_unknown_key_and_text_alongside_it() {
     let (tools, _store, sid) = keys_test_tools();
@@ -2451,6 +2489,66 @@ async fn a_restart_onto_a_spent_or_signed_out_login_is_refused() {
     // Confirmed: past the account checks, on to the restart itself.
     let past = call("full", Some(true)).await;
     assert!(!past.starts_with("E_ACCOUNT_LIMIT"), "{past}");
+}
+
+/// Accounts review finding 9: the login a dispatched worker's or a switch's
+/// over-limit refusal names instead is never one on an account the work's
+/// project forbids, though it is the freest.
+#[tokio::test]
+async fn an_over_limit_refusal_never_names_a_forbidden_login() {
+    let s = crate::store::Store::open_in_memory().unwrap();
+    let now = crate::store::now_unix();
+    let seed = crate::service::account_limits::seed_usage;
+    seed(&s, "hosta", None, "acct-own", 95.0, now);
+    seed(&s, "hosta", Some("spare"), "acct-spare", 10.0, now);
+    seed(&s, "hosta", Some("work"), "acct-work", 30.0, now);
+    seed(&s, "hosta", Some("full"), "acct-full", 99.0, now);
+    let p = s.upsert_project("acme", "api", "/srv/acme/api").unwrap();
+    s.set_account_blocks("acct-spare", Some(&[p]), None)
+        .unwrap();
+    let id = s
+        .upsert_session("dev-x", "hosta", Some(p), None, 1, 1, "running", None)
+        .unwrap();
+    let t = test_tools(s);
+    let dispatched = t
+        .dispatch_task(
+            Extension(host_caller("hosta", TokenMode::Full)),
+            Parameters(DispatchTaskParams {
+                worker_session_id: None,
+                new_worker: Some(NewWorkerSpec {
+                    host_alias: "hosta".into(),
+                    project_id: p,
+                    name: None,
+                    profile: None,
+                    over_limit_ok: None,
+                }),
+                prompt: "work".into(),
+                requester_session_id: None,
+                raw: false,
+                confirm_nonce: None,
+            }),
+        )
+        .await
+        .unwrap_err()
+        .message;
+    assert!(dispatched.starts_with("E_ACCOUNT_LIMIT"), "{dispatched}");
+    assert!(dispatched.contains("profile \"work\""), "{dispatched}");
+    let switched = t
+        .restart_session(
+            Extension(Caller::master()),
+            Parameters(
+                serde_json::from_value(serde_json::json!({
+                    "session_id": id,
+                    "profile": "full",
+                }))
+                .unwrap(),
+            ),
+        )
+        .await
+        .unwrap_err()
+        .message;
+    assert!(switched.starts_with("E_ACCOUNT_LIMIT"), "{switched}");
+    assert!(switched.contains("profile \"work\""), "{switched}");
 }
 
 /// A restart onto another login is a start on it: past `accounts.pause_at`
@@ -11055,6 +11153,58 @@ fn add_project_serves_the_source_variants_and_no_call_id() {
             "source kind {kind} missing: {text}"
         );
     }
+}
+
+/// Accounts review finding 4: which account may bill a project is a
+/// person's rule. The operator (a full, org-free client bound to the hub
+/// owner, so the policy row serves it) and an untrusted device are refused
+/// by the handler and change nothing; the master and a trusted full device
+/// set it.
+#[tokio::test]
+async fn set_account_projects_is_a_trusted_persons_and_never_the_operators() {
+    let store = Store::open_in_memory().unwrap();
+    store
+        .upsert_account(&crate::store::AccountRow {
+            uuid: "u1".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    let pid = store
+        .upsert_project("acme", "api", "/srv/acme/api")
+        .unwrap();
+    store.set_account_forbidden_projects("u1", &[pid]).unwrap();
+    let t = test_tools(store);
+    let call = |c: Caller, ids: Vec<i64>| {
+        let t = t.clone();
+        let args = serde_json::from_value(serde_json::json!({
+            "uuid": "u1", "forbidden_project_ids": ids
+        }))
+        .unwrap();
+        async move { t.set_account_projects(Extension(c), Parameters(args)).await }
+    };
+    let blocked = || {
+        t.store
+            .lock()
+            .unwrap()
+            .project_forbidden_accounts(pid)
+            .unwrap()
+    };
+    let operator = trusted(client_caller(
+        crate::service::operator::OPERATOR_CLIENT_NAME,
+        TokenMode::Full,
+    ));
+    assert!(operator.is_operator());
+    for refused in [operator, client_caller("phone", TokenMode::Full)] {
+        let e = call(refused, vec![]).await.expect_err("refused");
+        assert!(e.message.contains("E_FORBIDDEN"), "{}", e.message);
+        assert_eq!(blocked(), vec!["u1"], "a refused call changes nothing");
+    }
+    call(trusted(client_caller("phone", TokenMode::Full)), vec![])
+        .await
+        .expect("a trusted full device");
+    assert!(blocked().is_empty());
+    call(Caller::master(), vec![pid]).await.expect("the master");
+    assert_eq!(blocked(), vec!["u1"]);
 }
 
 // ---- declarative pages P6: the fleet's settings on a person's device ----

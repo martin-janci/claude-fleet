@@ -4,6 +4,7 @@ import { get } from 'svelte/store';
 import { sessions, sessionsLoaded } from './sessions';
 import type { ConvItem, ThreadRow } from './conversation';
 import { fold, foldedIncludes } from './text_fold';
+import { chipLabel, promptParts } from './prompt_parts';
 
 /** The key the panel's `{#each thread}` uses for a row. */
 export function rowKey(row: ThreadRow): string {
@@ -73,7 +74,11 @@ export function turnIndex(rows: ThreadRow[]): TurnIndexEntry[] {
     const { turn } = row;
     let label: string | null = null;
     if (turn.prompt !== null && turn.prompt.trim() !== '') {
-      const first = turn.prompt.trim().split('\n')[0].trim();
+      // What the person typed, the app's head lines left out
+      // (prompt_parts.ts); only chips: what they name.
+      const parts = promptParts(turn.prompt);
+      const said = parts.text.trim() || parts.chips.map(chipLabel).join(' · ');
+      const first = said.split('\n')[0].trim();
       // By code point: a UTF-16 cut splits an emoji into a lone surrogate.
       const chars = first.length > INDEX_LABEL_MAX ? Array.from(first) : null;
       label = chars && chars.length > INDEX_LABEL_MAX ? `${chars.slice(0, INDEX_LABEL_MAX - 1).join('')}…` : first;

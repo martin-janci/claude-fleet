@@ -1877,7 +1877,13 @@ fn the_agent_settles_against_the_kind() {
     assert!(normalize_launch(&mut args).is_ok());
     assert_eq!(args.agent.as_deref(), Some("hermes"));
     args.profile = Some("work".into());
-    assert_eq!(normalize_launch(&mut args).unwrap_err().code, E_INVALID);
+    let err = normalize_launch(&mut args).unwrap_err();
+    assert_eq!(err.code, E_INVALID);
+    assert!(
+        err.message.ends_with("Hermes keeps its own login"),
+        "the adapter's label: {}",
+        err.message
+    );
     let mut args = args_named("dev-z", None);
     args.agent = Some("hermes".into());
     args.kind = Some("shell".into());

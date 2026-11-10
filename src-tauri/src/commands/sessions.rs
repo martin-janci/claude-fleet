@@ -1334,7 +1334,7 @@ pub(crate) mod routed {
         // The helper takes (and releases) the lock itself; nothing holds it
         // across the fetch.
         let (turns, max_chars) = transcript::conv_limits(args.turns);
-        transcript::fetch_conversation_for_row(
+        let mut conv = transcript::fetch_conversation_for_row(
             store,
             ssh,
             &row,
@@ -1343,7 +1343,12 @@ pub(crate) mod routed {
             max_chars,
             transcript::CONV_EVENTS_LIMIT_UI,
         )
-        .await
+        .await?;
+        // This desktop is its own hub, read by its owner: a prompt the
+        // owner's phone sent says "You" here as it does through a hub.
+        let me = sessions::hub_personal_owner(store);
+        transcript::stamp_mine(&mut conv, me);
+        Ok(conv)
     }
 
     /// The session id is the hub's and the transcript lives on the hub's

@@ -2574,11 +2574,8 @@ const MIGRATIONS: &[Migration] = &[
         222,
         include_str!("../../migrations/222_dashboard_feeds.sql"),
     ),
-    Migration {
-        version: 223,
-        sql: include_str!("../../migrations/223_review_notes.sql"),
-        already_applied: None,
-    },
+    // Review notes. CREATE TABLE IF NOT EXISTS, so plain.
+    Migration::plain(223, include_str!("../../migrations/223_review_notes.sql")),
     // Prompt authors: who sent each prompt a hub tool typed. CREATE TABLE
     // IF NOT EXISTS, so plain.
     Migration::plain(224, include_str!("../../migrations/224_prompt_authors.sql")),
@@ -2587,6 +2584,13 @@ const MIGRATIONS: &[Migration] = &[
     Migration::plain(
         225,
         include_str!("../../migrations/225_review_requests.sql"),
+    ),
+    // Review notes kept for a busy session: which prompt carries them, so a
+    // cancelled or failed one does not read "Sent". CREATE TABLE IF NOT
+    // EXISTS, so plain.
+    Migration::plain(
+        226,
+        include_str!("../../migrations/226_review_note_queue.sql"),
     ),
 ];
 

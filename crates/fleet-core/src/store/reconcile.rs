@@ -2269,6 +2269,7 @@ mod tests {
                 label: "Yes".into(),
                 selected: true,
                 checked: false,
+                persists: false,
             }],
             multi: false,
             detail: None,

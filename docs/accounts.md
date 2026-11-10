@@ -246,7 +246,7 @@ session's login when its row is still known and the resume lands on the
 same host, else the host's own login; either gives way to the login on the
 host with headroom when it is past `accounts.pause_at`. A ticket start on a
 named host that names no login does the same with the host's own
-(`account_limits::login_with_headroom`). Neither a ticket start nor a resume
+(`account_limits::login_with_headroom_for`). Neither a ticket start nor a resume
 refuses an over-limit login, and neither moves off a login the caller or a
 rule named: they are how Control recovers work, so a spent login is the
 session's to report.
@@ -270,7 +270,8 @@ the account's **Not for these projects** list (the phone's account sheet has
 the same list). MCP: `set_account_projects { uuid, forbidden_project_ids }`,
 which replaces the list; the account's row carries it as
 `forbidden_project_ids` (`account_project_blocks`, migration 217). Only the
-hub owner's devices change it, as with the nickname.
+hub owner changes it, as with Add account: the master or a trusted full
+device. Control cannot, so it cannot lift the block that refused its start.
 
 A whole org can be forbidden too (**Forbid for a whole org…** under the same
 list; the phone ticks "All of <org>"): every project of the org, those added
@@ -279,9 +280,11 @@ later included, is treated as if it were on the list.
 (`forbidden_org_ids` on the row, `account_org_blocks`, migration 218); each
 of the two lists is replaced only when it is sent. A project's org is its own
 rule, the most specific org rule on its owner, repo or path
-(`Store::project_org`); a host-only rule and a host's org name a host, not a
-project, so they do not put its projects in the org. The refusal then says
-"(all of <org>)". Removing the org removes its blocks.
+(`Store::project_org`), and, for work on a given host, also the org a
+session there is filed under: a host-qualified rule or the host's own org
+(`Store::project_orgs_on`). The start, switch, move and relaunch checks know
+the host and count both; a pick made before a host is chosen sees only the
+project's own. The refusal then says "(all of <org>)". Removing the org removes its blocks.
 
 No work in a forbidden project runs on a login on that account
 (`service::project_accounts`):
@@ -293,7 +296,15 @@ No work in a forbidden project runs on a login on that account
   (`details.suggested_profile`, `""` for the host's own), and no flag
   passes it;
 - Switch account (`restart_session { profile }`) onto such a login is
-  refused; a plain restart keeps the login the pane already runs under;
+  refused; a plain restart of a live session keeps the login it already
+  runs under, as long as that login is still on the account the session ran
+  on. A restart, recreate, repair or restore that brings a lost session
+  back, or relaunches it under a login signed in to another account since,
+  is refused the same way;
+- a review session and a moved session take an allowed login on the host
+  or are refused; a background session, a fleet agent's run (both bill the
+  host's own login) are refused or skipped; a mission's headless check
+  moves to an allowed login or runs as a session instead;
 - where fleet picks the login, it never picks one: placement leaves it out
   ("the project forbids its account"), a ticket start or a resume that names
   no login moves to the allowed login on the host with the most headroom,

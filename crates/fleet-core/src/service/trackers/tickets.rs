@@ -1293,7 +1293,12 @@ pub fn plan_resolved(
         }
         None => start_name(&key, &title),
     };
-    let codex = rule.as_ref().and_then(|r| r.agent.as_deref()) == Some(crate::store::AGENT_CODEX);
+    // Any agent but Claude keeps its own login: a Claude profile handed to
+    // it is refused at launch (`normalize_launch`).
+    let own_login = rule
+        .as_ref()
+        .and_then(|r| r.agent.as_deref())
+        .is_some_and(|a| a != crate::store::AGENT_CLAUDE);
     let named_profile = args
         .profile
         .clone()
@@ -1302,7 +1307,7 @@ pub fn plan_resolved(
             placement
                 .as_ref()
                 .and_then(|w| w.profile.clone())
-                .filter(|_| !codex)
+                .filter(|_| !own_login)
         });
     let profile = match named_profile {
         Some(p) => Some(p),
@@ -1310,7 +1315,7 @@ pub fn plan_resolved(
         // own, gives way to a login on the host with headroom when its
         // account is past `accounts.pause_at` (a named host skips
         // placement, so this is its only look at the limits).
-        None if !codex => crate::service::account_limits::login_with_headroom_for(
+        None if !own_login => crate::service::account_limits::login_with_headroom_for(
             &s,
             Some(project_id),
             &host_alias,

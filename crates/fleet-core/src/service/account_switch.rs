@@ -326,7 +326,11 @@ pub fn plan(
         let from = row.account_uuid.clone().unwrap_or_default();
         // Never onto an account the session's project forbids.
         let forbidden = if any_block {
-            crate::service::project_accounts::forbidden_accounts(s, row.project_id)?
+            crate::service::project_accounts::forbidden_accounts_on(
+                s,
+                row.project_id,
+                &row.host_alias,
+            )?
         } else {
             Vec::new()
         };

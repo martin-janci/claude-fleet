@@ -176,6 +176,15 @@ const JOB_COLS: &str = "id, rule_id, agent, subject, trigger, dedup_key, state, 
 const ACTION_COLS: &str = "id, job_id, kind, payload, state, decided_by, decided_at, \
                            executed_at, error, created_at";
 
+/// [`ACTION_COLS`] for a query that names `agent_actions` as `a`.
+fn action_cols_of_a() -> String {
+    ACTION_COLS
+        .split(", ")
+        .map(|c| format!("a.{}", c.trim()))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn rule_row(r: &Row<'_>) -> rusqlite::Result<AgentRuleRow> {
     Ok(AgentRuleRow {
         id: r.get(0)?,
@@ -722,11 +731,7 @@ impl Store {
         &self,
         limit: usize,
     ) -> Result<Vec<(String, AgentActionRow)>, rusqlite::Error> {
-        let cols: String = ACTION_COLS
-            .split(", ")
-            .map(|c| format!("a.{}", c.trim()))
-            .collect::<Vec<_>>()
-            .join(", ");
+        let cols = action_cols_of_a();
         let mut stmt = self.conn.prepare(&format!(
             "SELECT j.agent, {cols} FROM agent_actions a JOIN agent_jobs j ON j.id = a.job_id \
              WHERE a.state = 'approved' AND a.executed_at IS NULL \
@@ -880,11 +885,7 @@ impl Store {
         rule_id: i64,
         kind: &str,
     ) -> Result<Vec<AgentActionRow>, rusqlite::Error> {
-        let cols: String = ACTION_COLS
-            .split(", ")
-            .map(|c| format!("a.{}", c.trim()))
-            .collect::<Vec<_>>()
-            .join(", ");
+        let cols = action_cols_of_a();
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {cols} FROM agent_actions a JOIN agent_jobs j ON j.id = a.job_id \
              WHERE j.rule_id = ?1 AND a.kind = ?2 AND a.state = 'pending' ORDER BY a.id"
@@ -909,11 +910,11 @@ impl Store {
         Ok(n > 0)
     }
 
-    /// Where each of actions `ids` came from: its job's rule, agent, subject
-    /// and trigger, keyed by the action's id. An id with no row is left out.
+    /// Where each of actions `ids` came from: its job's rule, agent and
+    /// subject, keyed by the action's id. An id with no row is left out.
     pub fn agent_action_origins(&self, ids: &[i64]) -> Result<Vec<ActionOrigin>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
-            "SELECT a.id, j.rule_id, j.agent, j.subject, j.trigger FROM agent_actions a \
+            "SELECT a.id, j.rule_id, j.agent, j.subject FROM agent_actions a \
              JOIN agent_jobs j ON j.id = a.job_id WHERE a.id = ?1",
         )?;
         let mut out = Vec::with_capacity(ids.len());
@@ -925,7 +926,6 @@ impl Store {
                         rule_id: r.get(1)?,
                         agent: r.get(2)?,
                         subject: r.get(3)?,
-                        trigger: r.get(4)?,
                     })
                 })
                 .optional()?
@@ -944,7 +944,6 @@ pub struct ActionOrigin {
     pub rule_id: Option<i64>,
     pub agent: String,
     pub subject: String,
-    pub trigger: String,
 }
 
 #[cfg(test)]

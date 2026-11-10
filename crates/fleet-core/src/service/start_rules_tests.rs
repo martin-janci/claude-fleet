@@ -709,6 +709,22 @@ fn save_checks_the_fallback_account_model_effort_and_agent() {
         codes::E_INVALID,
         "Codex keeps its own login"
     );
+    let hermes = save(
+        &w.store,
+        &ViewScope::internal(),
+        None,
+        &StartRuleInput {
+            agent: Some("hermes".into()),
+            ..base()
+        },
+    )
+    .unwrap_err();
+    assert_eq!(hermes.code, codes::E_INVALID);
+    assert!(
+        hermes.message.contains("cannot start Hermes yet"),
+        "a Hermes start would never get its brief: {}",
+        hermes.message
+    );
     let ok = w.rule(StartRuleInput {
         agent: Some("codex".into()),
         fallback_host: Some(" g ".into()),
@@ -767,6 +783,18 @@ async fn a_placement_rule_names_the_host_and_account_when_no_start_rule_does() {
         Some("work"),
         "the account still applies"
     );
+    // Review finding 7: a rule for any agent with its own login (here an
+    // older Hermes rule, which a save now refuses) is never handed the
+    // placement's Claude account; the launch would refuse it.
+    {
+        let s = w.store.lock().unwrap();
+        s.conn_for_test()
+            .execute("UPDATE start_rules SET agent = 'hermes'", [])
+            .unwrap();
+    }
+    let plan = w.preview_unhosted(second).await.plan.unwrap();
+    assert_eq!(plan.agent.as_deref(), Some("hermes"));
+    assert_eq!(plan.profile, None, "Hermes keeps its own provider login");
 }
 
 /// Review w02-1: a start that names no host takes the LOGIN placement chose

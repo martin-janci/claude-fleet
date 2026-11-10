@@ -2180,6 +2180,34 @@ describe('NewSessionDialog limit handling', () => {
     expect((created()[0][1] as any).args.profile).toBe('spare');
   });
 
+  // Review finding 9: the signed-in login offered instead is never one on an
+  // account the project forbids, though it is the freest.
+  it('offers no forbidden login in place of a signed-out one', async () => {
+    const spare = { profile: 'spare', account_uuid: 'acc-spare', used_pct: 20 };
+    const work = { profile: 'work', account_uuid: 'acc-work', used_pct: 50 };
+    answer({
+      ...over,
+      over: false,
+      chosen: { profile: null, account_uuid: 'acc-own', used_pct: 10, signed_out: true },
+      suggestion: null,
+      logins: [{ profile: null, account_uuid: 'acc-own', used_pct: 10, signed_out: true }, spare, work],
+    });
+    accounts.set([
+      { uuid: 'acc-spare', email: null, display_name: null, organization_name: null, organization_uuid: null, seat_tier: null, last_seen_at: null, nickname: null, has_extra_usage: false, forbidden_project_ids: [project.project.id] },
+    ]);
+    try {
+      render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+      await tick();
+      await fireEvent.click(screen.getByText('Create'));
+      await vi.waitFor(() => expect(screen.getByTestId('limit-ask')).toBeTruthy());
+      await fireEvent.click(screen.getByTestId('limit-use-suggestion'));
+      await vi.waitFor(() => expect(created()).toHaveLength(1));
+      expect((created()[0][1] as any).args.profile).toBe('work');
+    } finally {
+      accounts.set([]);
+    }
+  });
+
   it('under the line, or with no answer, starts straight away', async () => {
     answer({ ...over, over: false, suggestion: null });
     render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });

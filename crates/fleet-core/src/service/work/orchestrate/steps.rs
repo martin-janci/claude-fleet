@@ -365,9 +365,11 @@ fn verify_steps(
                     title,
                     format!("{title} is implemented and reviewed"),
                 ));
-            } else if r.state == "done" && r.report.is_none() {
-                // The reviewer's run gave no verdict: nothing says the
-                // implementation is wrong, so it is not retried.
+            } else if r.report.is_none() {
+                // The reviewer's run gave no verdict, whether it printed
+                // its marker without the block or stopped twice without
+                // either and was failed: nothing says the implementation
+                // is wrong, so it is not retried.
                 out.push(
                     Step::new(
                         "ask",
@@ -459,7 +461,38 @@ fn verify_steps(
         return out;
     }
     let mut test_planned = false;
+    let mut asked: Vec<i64> = Vec::new();
     for c in v.checks.iter().filter(|c| c.state == "pending") {
+        // A check run that ended without its report, past the one rerun
+        // (`verify::unreported`): the line waits on it, so a person is
+        // asked rather than the item sitting `verifying` with no step.
+        let quiet = c
+            .by
+            .as_deref()
+            .and_then(|b| b.strip_prefix("task:"))
+            .and_then(|id| id.parse::<i64>().ok())
+            .and_then(|id| tries.iter().find(|t| t.id == id))
+            .filter(|t| t.report.is_none() && !matches!(t.state.as_str(), "queued" | "running"));
+        if let Some(t) = quiet {
+            if !asked.contains(&t.id) {
+                asked.push(t.id);
+                let what = if t.role.as_deref() == Some("review") {
+                    "the review"
+                } else {
+                    "the test run"
+                };
+                out.push(
+                    Step::new(
+                        "ask",
+                        Some(n.item_id),
+                        None,
+                        format!("{what} of {title} ended without its report"),
+                    )
+                    .with_context(failure_text(t)),
+                );
+            }
+            continue;
+        }
         match parse_cond(&c.line) {
             Cond::Review if !open_role("review") && c.by.is_none() && take() => {
                 out.push(Step::new(

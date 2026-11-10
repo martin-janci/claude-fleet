@@ -19,6 +19,27 @@ impl Store {
     /// ([`Store::project_org`]). Empty for a project with none (the usual
     /// case) or no such project.
     pub fn project_forbidden_accounts(&self, project_id: i64) -> Result<Vec<String>, IpcError> {
+        self.forbidden_accounts_of(project_id, None)
+    }
+
+    /// [`Store::project_forbidden_accounts`] for work on `host_alias`: also
+    /// the accounts forbidden for the org a session there would be filed
+    /// under ([`Store::project_orgs_on`]). Every caller that knows the host
+    /// asks this one, so an org that is a host (`hosts.org_id`, a
+    /// host-qualified rule) is blocked like one that is an owner.
+    pub fn project_forbidden_accounts_on(
+        &self,
+        project_id: i64,
+        host_alias: &str,
+    ) -> Result<Vec<String>, IpcError> {
+        self.forbidden_accounts_of(project_id, Some(host_alias))
+    }
+
+    fn forbidden_accounts_of(
+        &self,
+        project_id: i64,
+        host_alias: Option<&str>,
+    ) -> Result<Vec<String>, IpcError> {
         let mut stmt = self.conn.prepare_cached(
             "SELECT account_uuid FROM account_project_blocks WHERE project_id = ?1",
         )?;
@@ -26,7 +47,11 @@ impl Store {
             .query_map(rusqlite::params![project_id], |r| r.get(0))?
             .collect::<Result<Vec<String>, _>>()?;
         if self.any_account_org_block()? {
-            if let Some(org) = self.project_org(project_id)? {
+            let orgs = match host_alias {
+                Some(h) => self.project_orgs_on(project_id, h)?,
+                None => self.project_org(project_id)?.into_iter().collect(),
+            };
+            for org in orgs {
                 let mut stmt = self.conn.prepare_cached(
                     "SELECT account_uuid FROM account_org_blocks WHERE org_id = ?1",
                 )?;
@@ -39,6 +64,22 @@ impl Store {
         rows.sort_unstable();
         rows.dedup();
         Ok(rows)
+    }
+
+    /// The orgs work in `project_id` on `host_alias` belongs to, for an org
+    /// block: the project's own ([`Store::project_org`]) and the one a
+    /// session started there now would be filed under
+    /// ([`Store::org_for_new_session`]: host-qualified rules and the host's
+    /// own org count). Usually one org or none; two when a host-qualified
+    /// rule outranks the project's own.
+    pub fn project_orgs_on(&self, project_id: i64, host_alias: &str) -> Result<Vec<i64>, IpcError> {
+        let mut orgs: Vec<i64> = self.project_org(project_id)?.into_iter().collect();
+        if let Some(o) = self.org_for_new_session(host_alias, project_id)? {
+            if !orgs.contains(&o) {
+                orgs.push(o);
+            }
+        }
+        Ok(orgs)
     }
 
     /// The org project `project_id` belongs to by its own rules: the most
@@ -71,6 +112,46 @@ impl Store {
                  OR EXISTS (SELECT 1 FROM account_org_blocks)",
         )?;
         Ok(stmt.query_row([], |r| r.get::<_, bool>(0))?)
+    }
+
+    /// The accounts forbidden for project `project_id` by name (not through
+    /// its org): read before the project row and its blocks are deleted, so
+    /// [`Store::announce_accounts`] can tell clients afterwards.
+    pub(super) fn accounts_blocked_for_project(
+        &self,
+        project_id: i64,
+    ) -> Result<Vec<String>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT account_uuid FROM account_project_blocks WHERE project_id = ?1 \
+             ORDER BY account_uuid",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![project_id], |r| r.get(0))?;
+        rows.collect()
+    }
+
+    /// [`Store::accounts_blocked_for_project`] for an org.
+    pub(super) fn accounts_blocked_for_org(
+        &self,
+        org_id: i64,
+    ) -> Result<Vec<String>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT account_uuid FROM account_org_blocks WHERE org_id = ?1 \
+             ORDER BY account_uuid",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![org_id], |r| r.get(0))?;
+        rows.collect()
+    }
+
+    /// `account_upserted` for each of `uuids`, re-read: after a deleted
+    /// project or org took its blocks with it, so a client's copy of the
+    /// account drops the dead id instead of sending it back on its next
+    /// edit. Best effort: the delete already committed.
+    pub(super) fn announce_accounts(&self, uuids: &[String]) {
+        for uuid in uuids {
+            if let Ok(Some(row)) = self.get_account_by_uuid(uuid) {
+                self.bus.account_upserted(&row);
+            }
+        }
     }
 
     fn any_account_org_block(&self) -> Result<bool, IpcError> {
@@ -268,6 +349,81 @@ mod tests {
             .unwrap()
             .unwrap()
             .forbidden_project_ids
+            .is_empty());
+    }
+
+    /// Review finding 8: a deleted project or org takes its block rows with
+    /// it, and each account that lost one is announced so no client keeps
+    /// the dead id on its copy.
+    #[test]
+    fn a_deleted_project_or_org_announces_the_accounts_it_unblocked() {
+        let bus = std::sync::Arc::new(crate::events::RecordingEventBus::new());
+        let s = Store::open_with_bus_in_memory(bus.clone()).unwrap();
+        account(&s, "u1");
+        account(&s, "u2");
+        let api = s.upsert_project("acme", "api", "/srv/acme/api").unwrap();
+        let org = s.add_org("Acme", None, false).unwrap().id;
+        s.set_account_blocks("u1", Some(&[api]), Some(&[org]))
+            .unwrap();
+        bus.take();
+
+        s.delete_project(api, &crate::store::FingerprintKeys::new())
+            .unwrap();
+        let events = bus.take();
+        assert!(
+            events.contains(&"account:upserted:u1".to_string()),
+            "{events:?}"
+        );
+        assert!(!events.contains(&"account:upserted:u2".to_string()));
+        assert!(s
+            .get_account_by_uuid("u1")
+            .unwrap()
+            .unwrap()
+            .forbidden_project_ids
+            .is_empty());
+
+        assert!(s.remove_org(org).unwrap());
+        let events = bus.take();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| e.as_str() == "account:upserted:u1")
+                .count(),
+            1,
+            "{events:?}"
+        );
+    }
+
+    /// Review finding 6: an org a project reaches only through its host
+    /// (the host's own org, a host-qualified rule) is blocked on that host.
+    #[test]
+    fn an_org_block_reaches_a_project_through_the_host_it_runs_on() {
+        let s = Store::open_in_memory().unwrap();
+        account(&s, "u1");
+        s.upsert_host("vm1").unwrap();
+        s.upsert_host("mac").unwrap();
+        let api = s.upsert_project("acme", "api", "/srv/acme/api").unwrap();
+        let org = s.add_org("Client", None, false).unwrap().id;
+        s.add_org_rule(OrgRuleRow {
+            id: 0,
+            org_id: org,
+            owner: None,
+            repo: None,
+            path_prefix: None,
+            host_alias: Some("vm1".into()),
+        })
+        .unwrap();
+        s.set_account_blocks("u1", None, Some(&[org])).unwrap();
+        // Host-blind, the project has no org.
+        assert_eq!(s.project_org(api).unwrap(), None);
+        assert!(s.project_forbidden_accounts(api).unwrap().is_empty());
+        assert_eq!(
+            s.project_forbidden_accounts_on(api, "vm1").unwrap(),
+            vec!["u1"]
+        );
+        assert!(s
+            .project_forbidden_accounts_on(api, "mac")
+            .unwrap()
             .is_empty());
     }
 

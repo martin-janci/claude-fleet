@@ -266,9 +266,18 @@ pub async fn new_bg_session_tracked(
     let launch_started = now_unix();
     // Redesign 8.7: a background session bills the host's own login; say so
     // when that account is past `accounts.pause_at`. A warning, not a
-    // refusal: a person or an agent asked for it now.
+    // refusal: a person or an agent asked for it now. An account the project
+    // forbids is a refusal (`service::project_accounts`): there is no other
+    // login a background session could take, and nothing has run yet.
     let over = {
         let s = lock(store)?;
+        crate::service::project_accounts::refuse_forbidden(
+            &s,
+            args.project_id,
+            &host_alias,
+            None,
+            launch_started,
+        )?;
         crate::service::account_limits::over_limit(&s, &host_alias, None, launch_started)?
     };
     args.validate()?;
@@ -1430,6 +1439,45 @@ mod tests {
         }
         let projects = store.lock().unwrap().list_projects().unwrap();
         assert!(projects.iter().any(|p| p.id == pid), "row must survive");
+    }
+
+    /// Accounts review finding 2: a Claude background session bills the
+    /// host's own login, so one in a project that forbids that account is
+    /// refused before anything runs on the host.
+    #[tokio::test]
+    async fn a_background_session_is_refused_on_an_account_its_project_forbids() {
+        let store = make_store();
+        let now = now_unix();
+        let pid = {
+            let s = store.lock().unwrap();
+            crate::service::account_limits::seed_usage(&s, "mac", None, "acct-own", 20.0, now);
+            let pid = s.upsert_project("acme", "api", "/srv/acme/api").unwrap();
+            s.set_account_forbidden_projects("acct-own", &[pid])
+                .unwrap();
+            pid
+        };
+        // An `ssh` that cannot run: reaching it would fail another way.
+        let ssh = Arc::new(SshClient::with_ssh_binary("/nonexistent/fleet-test-ssh"));
+        let reg = crate::cancel::CancellationRegistry::new();
+        let err = new_bg_session_tracked(
+            NewBgSessionArgs {
+                project_id: Some(pid),
+                ..bg_args()
+            },
+            &store,
+            &ssh,
+            &reg,
+            None,
+        )
+        .await
+        .expect_err("refused");
+        assert_eq!(err.code, codes::E_ACCOUNT_FORBIDDEN, "{err:?}");
+        assert!(store
+            .lock()
+            .unwrap()
+            .list_sessions_for_host("mac")
+            .unwrap()
+            .is_empty());
     }
 
     fn in_project_args() -> NewBgSessionArgs {

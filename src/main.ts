@@ -17,6 +17,7 @@ import { trackPresence } from './lib/presence';
 import { trackFailingRoutines } from './lib/routines';
 import { trackAgents } from './lib/agents';
 import { trackWaitingMissions } from './lib/mission_waits';
+import { trackReviewRequests } from './lib/review_requests';
 import { startTraySync } from './lib/tray_state';
 import { currentPopout } from './lib/terminal_popout';
 import TerminalPopout from './lib/TerminalPopout.svelte';
@@ -40,6 +41,8 @@ if (popout) {
   trackAgents();
   // Missions waiting on a person reach the Inbox and the badge (G1.6).
   trackWaitingMissions();
+  // Reviews a colleague asked of you, likewise ("Ask for review…").
+  trackReviewRequests();
   // The tray and menu-bar icon follows the fleet (redesign 3.17).
   startTraySync();
   app = mount(App, { target });

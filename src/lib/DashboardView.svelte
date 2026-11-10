@@ -16,6 +16,7 @@
   import { onMount } from 'svelte';
   import Button from './kit/Button.svelte';
   import DashboardBody from './DashboardBody.svelte';
+  import InlineConfirm from './forms/InlineConfirm.svelte';
   import { workspace, WORKSPACES, workspacePreset } from './workspace';
   import { askAgent } from './operator';
   import { pushError } from './toasts';
@@ -60,11 +61,18 @@
   onMount(() => followPinned());
 
   let undoing = $state(false);
+  /** Undo that unpins (a dashboard Control pinned new) asks first. */
+  let confirmRemove = $state(false);
+  $effect(() => {
+    void dash.id;
+    confirmRemove = false;
+  });
   async function undo() {
     if (!pinned) return;
     undoing = true;
     const r = await undoDashboard(pinned.id);
     undoing = false;
+    confirmRemove = false;
     if (!r.ok) pushError(r.error, 'Undo the change');
     else if (r.value.removed) shownDashboard.set(null);
   }
@@ -114,8 +122,23 @@
         </select>
       </label>
       <Button size="sm" onclick={() => change()} testid="dashboard-change">Change with the agent</Button>
-      {#if pinned?.by_agent}
-        <Button size="sm" onclick={undo} disabled={undoing} testid="dashboard-undo">Undo</Button>
+      {#if pinned?.undo === 'remove' && confirmRemove}
+        <InlineConfirm
+          question="Control made this dashboard: Undo unpins it."
+          verb="Unpin it"
+          busy={undoing}
+          confirmTestid="dashboard-undo-confirm"
+          keepTestid="dashboard-undo-keep"
+          onconfirm={() => void undo()}
+          onkeep={() => (confirmRemove = false)}
+        />
+      {:else if pinned?.undo}
+        <Button
+          size="sm"
+          onclick={() => (pinned?.undo === 'remove' ? (confirmRemove = true) : void undo())}
+          disabled={undoing}
+          testid="dashboard-undo">Undo</Button
+        >
       {/if}
       {#if pinned}
         <Button size="sm" onclick={unpin} testid="dashboard-unpin">Unpin</Button>

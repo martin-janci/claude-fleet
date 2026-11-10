@@ -10,7 +10,8 @@
   import Loader from './Loader.svelte';
   import { errorText } from './error_copy';
   import { readPref, writePref } from './prefs';
-  import { dashboardSummary, draftedAt, type Draft } from './drafts';
+  import { dashboardSummary, type Draft } from './drafts';
+  import { exactTime, timeAgo } from './session_status';
   import { dashboardFeeds, summaryKey, type Widget } from './dashboards';
   import { summaryContext, type FleetData } from './dashboard_sources';
 
@@ -18,22 +19,28 @@
     dashId,
     widget,
     fleet,
+    feedKeys = [],
   }: {
     dashId: string;
     widget: Extract<Widget, { kind: 'summary' }>;
     /** What the page holds of the fleet, for `sources` other than work. */
     fleet?: FleetData;
+    /** The feeds the dashboard's `feed` widgets name: the ones sent. */
+    feedKeys?: readonly string[];
   } = $props();
 
-  type Kept = { prompt: string; draft: Draft };
+  /** What the text answered: the request, the counts' filters and the
+   *  sources. A text kept for another ask is not shown. */
+  type Kept = { ask: string; draft: Draft };
   const isKept = (v: unknown): v is Kept =>
-    typeof v === 'object' && v !== null && typeof (v as Kept).prompt === 'string' && typeof (v as Kept).draft?.text === 'string';
+    typeof v === 'object' && v !== null && typeof (v as Kept).ask === 'string' && typeof (v as Kept).draft?.text === 'string';
+  const askOf = (w: typeof widget) => JSON.stringify([w.prompt, w.query ?? {}, w.sources ?? []]);
 
   const key = $derived(summaryKey(dashId, widget.title));
   let kept = $state<Kept | null>(null);
   $effect(() => {
     const k = readPref<Kept | null>(key, null, (v): v is Kept | null => v === null || isKept(v));
-    kept = k && k.prompt === widget.prompt ? k : null;
+    kept = k && k.ask === askOf(widget) ? k : null;
   });
 
   /** A run costs cents or less: show what it cost, not $0.00. */
@@ -45,14 +52,15 @@
   async function write() {
     busy = true;
     error = null;
-    const context = fleet ? summaryContext(widget.sources, fleet, $dashboardFeeds) : {};
+    const ask = askOf(widget);
+    const context = fleet ? summaryContext(widget.sources, fleet, $dashboardFeeds, feedKeys) : {};
     const r = await dashboardSummary(widget.prompt, { archived: true, ...widget.query }, context);
     busy = false;
     if (!r.ok) {
       error = errorText(r.error);
       return;
     }
-    kept = { prompt: widget.prompt, draft: r.value };
+    kept = { ask, draft: r.value };
     writePref(key, kept);
   }
 </script>
@@ -65,7 +73,7 @@
 {#if kept}
   <p class="text" data-testid="summary-text">{kept.draft.text}</p>
   <p class="meta" data-testid="summary-meta">
-    AI · {draftedAt(kept.draft.at)} · {kept.draft.model} on {kept.draft.host_alias} · from {kept.draft.from}{#if kept.draft.cost_micros != null}
+    AI · <span title={exactTime(kept.draft.at)}>written {timeAgo(kept.draft.at)}</span> · {kept.draft.model} on {kept.draft.host_alias} · from {kept.draft.from}{#if kept.draft.cost_micros != null}
       · {cost(kept.draft.cost_micros)}{/if}{#if kept.draft.truncated} · cut short{/if}
   </p>
 {:else if !busy}

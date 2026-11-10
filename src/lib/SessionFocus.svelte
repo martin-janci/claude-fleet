@@ -54,6 +54,14 @@
   });
   const name = $derived(displayName(session, true));
   const open = $derived(foldOpen($siblingsFold, siblings.length));
+  /** What a folded strip hides that wants a look: its waiting and failed
+   *  sessions, said on the toggle ("· 1 waiting · 2 failed"). */
+  const attention = $derived.by(() => {
+    const states = siblings.map((s) => sessionState(s));
+    const waiting = states.filter((s) => s === 'waiting').length;
+    const failed = states.filter((s) => s === 'failed').length;
+    return [waiting > 0 ? `${waiting} waiting` : '', failed > 0 ? `${failed} failed` : ''].filter(Boolean);
+  });
 </script>
 
 <div class="focus" data-testid="{prefix}-focus">
@@ -66,7 +74,8 @@
         data-testid="{prefix}-siblings-toggle"
         title={open ? 'Fold the sessions beside it' : 'Show the sessions beside it'}
         onclick={() => siblingsFold.set(open ? 'closed' : 'open')}
-        ><span class="chev" aria-hidden="true">{open ? '▾' : '▸'}</span>{siblingsTitle}<span class="sib-n">{siblings.length}</span></button
+        ><span class="chev" aria-hidden="true">{open ? '▾' : '▸'}</span>{siblingsTitle}<span class="sib-n">{siblings.length}</span
+        >{#if !open && attention.length > 0}<span class="sib-attn" data-testid="{prefix}-siblings-attention">· {attention.join(' · ')}</span>{/if}</button
       >
       {#if open}
         <div class="sib-row">
@@ -155,6 +164,9 @@
     border-radius: var(--radius-sm);
     background: var(--chip-bg);
     color: var(--fg-2);
+  }
+  .sib-attn {
+    color: var(--status-waiting);
   }
   /* An open strip never takes more than a third of the panel. */
   .sib-row {

@@ -150,7 +150,9 @@
       <select data-testid="start-rules-agent" bind:value={agent}>
         <option value="">Claude Code</option>
         <option value="codex">Codex</option>
-        <option value="hermes">Hermes</option>
+        <!-- A rule cannot start Hermes (its start's brief needs Claude Code's
+             hooks; the backend refuses it): only an older rule shows it. -->
+        {#if agent === 'hermes'}<option value="hermes">Hermes (a rule cannot start it)</option>{/if}
       </select>
     </label>
     {#if agent !== 'codex' && agent !== 'hermes'}
@@ -164,24 +166,28 @@
         </select>
       </label>
     {/if}
-    <label>
-      <span>Model</span>
-      <select data-testid="start-rules-model" bind:value={model}>
-        <option value="">The host's default</option>
-        {#each models as m (m.value)}
-          <option value={m.value}>{m.label}</option>
-        {/each}
-      </select>
-    </label>
-    <label>
-      <span>Effort</span>
-      <select data-testid="start-rules-effort" bind:value={effort}>
-        <option value="">Default</option>
-        {#each LAUNCH_EFFORT_OPTIONS as e (e.value)}
-          <option value={e.value}>{e.label}</option>
-        {/each}
-      </select>
-    </label>
+    {#if agent !== 'hermes'}
+      <!-- Claude's models and efforts: never offered for Hermes, which has
+           its own model slugs and no effort. -->
+      <label>
+        <span>Model</span>
+        <select data-testid="start-rules-model" bind:value={model}>
+          <option value="">The host's default</option>
+          {#each models as m (m.value)}
+            <option value={m.value}>{m.label}</option>
+          {/each}
+        </select>
+      </label>
+      <label>
+        <span>Effort</span>
+        <select data-testid="start-rules-effort" bind:value={effort}>
+          <option value="">Default</option>
+          {#each LAUNCH_EFFORT_OPTIONS as e (e.value)}
+            <option value={e.value}>{e.label}</option>
+          {/each}
+        </select>
+      </label>
+    {/if}
     {#if problem && pattern.trim()}<p class="hint" data-testid="start-rules-problem">{problem}</p>{/if}
     <div class="acts">
       <button class="btn btn--quiet" type="button" onclick={() => (editing = null)}>Cancel</button>

@@ -20,9 +20,6 @@ use serde_json::{Map, Value};
 pub struct ActionAbout {
     /// The action's id.
     pub id: i64,
-    /// The rule whose job proposed it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rule_id: Option<i64>,
     /// The agent that asked: "PR reviewer", "jira-triage · PD board".
     pub from: String,
     /// What its run was about: "PD-2709", "a scheduled run".
@@ -34,8 +31,9 @@ pub struct ActionAbout {
     pub title: Option<String>,
     /// The same write in general, for a group's heading: "Jira: update issue".
     pub what: String,
-    /// Actions with the same key are the same agent's proposals of the same
-    /// write: a client shows them as one card.
+    /// Actions with the same key are the same agent's calls of the same
+    /// tool (`<rule>:<binding>.<tool>`): a client shows them as one card.
+    /// Any other kind is `id:<n>`, a card of its own.
     pub group: String,
 }
 
@@ -101,27 +99,44 @@ pub fn tool_words(binding: &str, tool: &str) -> String {
     }
 }
 
-/// PURE: the fields a call changes: the keys of its `fields` object when it
-/// has one, else its other arguments, without the target.
-fn changed_fields(args: &Map<String, Value>, target: Option<&str>) -> Vec<String> {
-    let names: Vec<String> = match args.get("fields").and_then(Value::as_object) {
-        Some(f) => f.keys().cloned().collect(),
-        None => args
-            .keys()
-            .filter(|k| Some(k.as_str()) != target)
-            .cloned()
-            .collect(),
+/// A scalar argument's value shown in a title up to this many characters;
+/// a longer one, or an object or a list, is named only.
+const SHORT_VALUE: usize = 30;
+
+/// PURE: `v` when it is a short one-line scalar.
+fn short_value(v: &Value) -> Option<String> {
+    let s = match v {
+        Value::String(s) => s.trim().to_string(),
+        Value::Number(n) => n.to_string(),
+        Value::Bool(b) => b.to_string(),
+        _ => return None,
     };
-    let mut out: Vec<String> = Vec::new();
-    for n in names {
-        if !out.contains(&n) {
-            out.push(n);
+    (!s.is_empty() && !s.contains('\n') && s.chars().count() <= SHORT_VALUE).then_some(s)
+}
+
+/// PURE: what a call changes and with what: the keys of its `fields`
+/// object, then its other arguments but the target, each with its value
+/// when that is a short scalar (`transition_id=31`).
+fn changed_fields(args: &Map<String, Value>, target: Option<&str>) -> Vec<String> {
+    let mut out: Vec<String> = args
+        .get("fields")
+        .and_then(Value::as_object)
+        .map(|f| f.keys().cloned().collect())
+        .unwrap_or_default();
+    for (k, v) in args {
+        if k == "fields" || Some(k.as_str()) == target || out.contains(k) {
+            continue;
         }
+        out.push(match short_value(v) {
+            Some(s) => format!("{k}={s}"),
+            None => k.clone(),
+        });
     }
     out
 }
 
-/// PURE: "Jira: update issue PD-2709 (status, labels)".
+/// PURE: "Jira: update issue PD-2709 (status, labels)", "Jira: transition
+/// issue PD-1 (resolution, comment, transition_id=31)".
 pub fn mcp_title(binding: &str, tool: &str, args: &Value) -> String {
     let mut t = tool_words(binding, tool);
     let Some(args) = args.as_object() else {
@@ -194,41 +209,47 @@ pub fn about(
     rule: Option<&AgentRuleRow>,
 ) -> ActionAbout {
     let p = parse(&a.payload);
-    let (title, what) = if a.kind == "mcp_call" {
+    let agent = origin.map_or("agent", |o| o.agent.as_str());
+    // Only tool calls fold: the same tool of the same server is the same
+    // write in general. Any other kind names the write in its payload alone
+    // (two `post_review`s are two pull requests), so each is its own card.
+    let (title, what, group) = if a.kind == "mcp_call" {
         let binding = p.get("binding").and_then(Value::as_str).unwrap_or_default();
         let tool = p.get("tool").and_then(Value::as_str).unwrap_or_default();
-        let args = p.get("arguments").cloned().unwrap_or(Value::Null);
+        let by = origin
+            .and_then(|o| o.rule_id)
+            .map_or_else(|| agent.to_string(), |r| r.to_string());
         (
-            Some(mcp_title(binding, tool, &args)),
+            Some(mcp_title(
+                binding,
+                tool,
+                p.get("arguments").unwrap_or(&Value::Null),
+            )),
             tool_words(binding, tool),
+            format!("{by}:{binding}.{tool}"),
         )
     } else {
-        (None, a.kind.replace('_', " "))
+        (None, a.kind.replace('_', " "), format!("id:{}", a.id))
     };
-    let rule_id = origin.and_then(|o| o.rule_id);
-    let agent = origin.map_or("agent", |o| o.agent.as_str());
-    let tool = p.get("tool").and_then(Value::as_str).unwrap_or_default();
     ActionAbout {
         id: a.id,
-        rule_id,
         from: agent_words(agent, rule),
         subject: origin.and_then(|o| subject_words(&o.subject)),
         title,
         what,
-        group: format!(
-            "{}:{}:{}",
-            rule_id.map_or_else(|| agent.to_string(), |r| r.to_string()),
-            a.kind,
-            tool
-        ),
+        group,
     }
 }
 
 /// PURE: which write a proposal is, apart from its wording: two pending
 /// proposals of one rule with the same identity change the same thing, so
 /// the newer one replaces the older (`queue_actions`). A kind it does not
-/// know is identified by its whole payload.
+/// know is identified by its whole payload. A payload carrying the
+/// definition's `fingerprint` is identified by it, whatever its wording.
 pub fn identity(kind: &str, payload: &Value) -> String {
+    if let Some(fp) = fingerprint(payload) {
+        return format!("fp:{kind}:{fp}");
+    }
     let f = |k: &str| payload.get(k).and_then(text).unwrap_or_default();
     let action = f("action");
     match kind {
@@ -247,6 +268,22 @@ pub fn identity(kind: &str, payload: &Value) -> String {
         "tracker_issue" => format!("issue:{action}:{}:{}", f("project"), f("summary")),
         "record" => format!("record:{action}:{}:{}", f("namespace"), f("key")),
         _ => format!("{kind}:{payload}"),
+    }
+}
+
+/// PURE: the finding a payload says it is (`actions::with_fingerprint`),
+/// when it carries one.
+fn fingerprint(payload: &Value) -> Option<String> {
+    payload.get("fingerprint").and_then(text)
+}
+
+/// PURE: whether two proposals of one kind are the very same proposal: the
+/// same fingerprint when both carry one (an LLM rewords a finding every
+/// run), else the same payload.
+pub fn same_proposal(a: &Value, b: &Value) -> bool {
+    match (fingerprint(a), fingerprint(b)) {
+        (Some(x), Some(y)) => x == y,
+        _ => a == b,
     }
 }
 
@@ -294,7 +331,24 @@ mod tests {
         let flat = json!({ "key": "PD-1", "a": 1, "b": 2, "c": 3, "d": 4, "e": 5 });
         assert_eq!(
             mcp_title("jira", "jira_update_issue", &flat),
-            "Jira: update issue PD-1 (a, b, c, d and 1 more)"
+            "Jira: update issue PD-1 (a=1, b=2, c=3, d=4 and 1 more)"
+        );
+        // The other arguments of a call with `fields` are named too, with
+        // their values when short.
+        let transition = json!({ "issue_key": "PD-1", "transition_id": "31",
+            "fields": { "resolution": { "name": "Fixed" } },
+            "comment": "Fixed in #42, released in 1.4, see the notes there" });
+        assert_eq!(
+            mcp_title("jira", "jira_transition_issue", &transition),
+            "Jira: transition issue PD-1 (resolution, comment, transition_id=31)"
+        );
+        assert_eq!(
+            mcp_title(
+                "jira",
+                "jira_update_issue",
+                &json!({ "issue_key": "PD-1", "fields": {} })
+            ),
+            "Jira: update issue PD-1"
         );
     }
 
@@ -325,7 +379,6 @@ mod tests {
             rule_id: Some(4),
             agent: "fleet".into(),
             subject: "schedule:1".into(),
-            trigger: "schedule".into(),
         };
         let rule = AgentRuleRow {
             id: 4,
@@ -346,10 +399,31 @@ mod tests {
         assert_eq!(x.from, "jira-triage · PD board");
         assert_eq!(x.subject.as_deref(), Some("a scheduled run"));
         assert_eq!(x.what, "Jira: update issue");
-        assert_eq!(x.group, "4:mcp_call:jira_update_issue");
-        // A built-in agent's action keeps the client's own title.
+        assert_eq!(x.group, "4:jira.jira_update_issue");
+        // A built-in agent's action keeps the client's own title, and is
+        // never folded with another: two reviews are two pull requests.
         let r = about(&action("post_review", json!({})), None, None);
         assert_eq!(r.title, None);
+        assert_eq!(r.group, "id:7");
+        let s = about(&action("setting", json!({})), Some(&origin), Some(&rule));
+        assert_eq!(s.group, "id:7");
+    }
+
+    #[test]
+    fn a_fingerprint_identifies_a_proposal_whatever_its_wording() {
+        let p = |body: &str, fp: &str| json!({ "body": body, "fingerprint": fp });
+        assert_eq!(
+            identity("fix_session", &p("Restart it", "f1")),
+            identity("fix_session", &p("Please restart", "f1"))
+        );
+        assert_ne!(
+            identity("fix_session", &p("Restart it", "f1")),
+            identity("fix_session", &p("Restart it", "f2"))
+        );
+        assert!(same_proposal(&p("a", "f1"), &p("b", "f1")));
+        assert!(!same_proposal(&p("a", "f1"), &p("a", "f2")));
+        assert!(same_proposal(&json!({ "x": 1 }), &json!({ "x": 1 })));
+        assert!(!same_proposal(&json!({ "x": 1 }), &json!({ "x": 2 })));
     }
 
     #[test]

@@ -18,6 +18,9 @@ Output goes to `target/federation-e2e/`: one PNG per step
 (`<scenario>--NN-<step>.png`), `report.json` (checks, screenshots, the
 commands nothing answered, console errors) and `index.html`, a contact sheet
 of every screenshot with its checks. Exit status 1 when any check failed.
+`--out <folder>` writes there instead; the folder is created when missing,
+and a run replaces only its own files in it (`*--NN-*.png`, `report.json`,
+`index.html`), never anything else.
 
 Playwright is not a project dependency. Cloud containers have it
 preinstalled; elsewhere run `npm i -g playwright && npx playwright install chromium` once.

@@ -954,12 +954,12 @@ pub fn resume_session_args(
 /// when its row is still known and was on `host`; else the host's own. A
 /// login fleet picked (the past session's or the host's own) that is past
 /// `accounts.pause_at` gives way to another login on the host with headroom
-/// ([`account_limits::login_with_headroom`]): the conversation resumes under
+/// ([`account_limits::login_with_headroom_for`]): the conversation resumes under
 /// it, as an account switch does; so does one on an account the project
 /// forbids (`project_accounts`). Nothing here refuses: a resume is how
 /// Control recovers work, so a spent login is the start's own to report.
 ///
-/// [`account_limits::login_with_headroom`]: crate::service::account_limits::login_with_headroom
+/// [`account_limits::login_with_headroom_for`]: crate::service::account_limits::login_with_headroom_for
 pub(crate) fn resume_profile(
     s: &Store,
     plan: &ResumePlan,
