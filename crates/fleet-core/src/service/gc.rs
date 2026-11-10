@@ -318,6 +318,11 @@ pub struct GcReport {
     /// `#[serde(default)]` for the same wire reason.
     #[serde(default)]
     pub swept_routine_runs: usize,
+    /// Fleet-agent actions that ended more than `AGENT_ACTION_KEEP_DAYS` ago
+    /// swept this sweep ([`sweep_agent_actions`]). Ungated like the retention
+    /// sweeps above; `#[serde(default)]` for the same wire reason.
+    #[serde(default)]
+    pub swept_agent_actions: usize,
 }
 
 /// Run one sweep against `exec`. Reads rows/hosts/controller under one brief
@@ -486,6 +491,9 @@ pub async fn sweep_with(
     // `ROUTINE_RUN_KEEP_DAYS`, each routine keeping its newest
     // `ROUTINE_RUNS_KEPT`; bounded per tick, one batch per lock.
     report.swept_routine_runs = sweep_routine_runs(store, now);
+    // Fleet-agent actions (same survey, decision B): the ones that ended
+    // past `AGENT_ACTION_KEEP_DAYS`; bounded per tick, one batch per lock.
+    report.swept_agent_actions = sweep_agent_actions(store, now);
     // The admin audit log: `auth.audit_retention_days` (0 = forever). One
     // statement under one brief lock, like the decision record's.
     report.swept_admin_events = sweep_admin_events(store, now);
@@ -515,6 +523,24 @@ fn sweep_routine_runs(store: &Mutex<Store>, now: i64) -> usize {
         crate::service::decide::RETENTION_TICK_CAP,
         "routine_runs",
         |s, want| s.sweep_routine_runs(cutoff, ROUTINE_RUNS_KEPT, want),
+    )
+}
+
+/// How long a fleet-agent action that ended (rejected, executed, failed or
+/// expired) is kept. One still waiting for a person or for its run is kept
+/// whatever its age, and so is every job row.
+pub const AGENT_ACTION_KEEP_DAYS: i64 = 180;
+
+/// Ended fleet-agent actions past [`AGENT_ACTION_KEEP_DAYS`]; the number
+/// deleted.
+fn sweep_agent_actions(store: &Mutex<Store>, now: i64) -> usize {
+    let cutoff = now - AGENT_ACTION_KEEP_DAYS * 86_400;
+    crate::service::work::retention::sweep_batches(
+        store,
+        crate::service::decide::RETENTION_BATCH,
+        crate::service::decide::RETENTION_TICK_CAP,
+        "agent_actions",
+        |s, want| s.sweep_agent_actions(cutoff, want),
     )
 }
 
@@ -634,6 +660,7 @@ pub async fn maybe_sweep(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>) -> Opt
             swept_decision_runs = report.swept_decision_runs,
             swept_admin_events = report.swept_admin_events,
             swept_routine_runs = report.swept_routine_runs,
+            swept_agent_actions = report.swept_agent_actions,
             "[gc] sweep"
         );
     }
@@ -1008,6 +1035,7 @@ mod tests {
                 swept_downloads: 0,
                 swept_admin_events: 0,
                 swept_routine_runs: 0,
+                swept_agent_actions: 0,
             }
         );
         assert_eq!(exec.inspects.load(Ordering::SeqCst), 1);
@@ -1094,6 +1122,7 @@ mod tests {
                 swept_downloads: 0,
                 swept_admin_events: 0,
                 swept_routine_runs: 0,
+                swept_agent_actions: 0,
             }
         );
         assert_eq!(exec.kills.load(Ordering::SeqCst), 0);
@@ -1187,6 +1216,7 @@ mod tests {
                 swept_downloads: 0,
                 swept_admin_events: 0,
                 swept_routine_runs: 0,
+                swept_agent_actions: 0,
             }
         );
         let s = store.lock().unwrap();
@@ -1250,6 +1280,7 @@ mod tests {
                 swept_downloads: 0,
                 swept_admin_events: 0,
                 swept_routine_runs: 0,
+                swept_agent_actions: 0,
             },
             "the retention sweep must run regardless of gc.enabled"
         );
