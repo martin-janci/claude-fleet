@@ -429,7 +429,9 @@ Index by area (names only; see the reference for details):
   `control_auto_continue` (Control's auto-continue, run by the fleet:
   `status` for the countdown, `cancel`, `take` for Send now; Control itself
   may only read it).
-- **Sharing & ownership** (multi-user M1) — `session_share` (give one
+- **Sharing & ownership** (multi-user M1) — `review_request` ("Ask for
+  review…": share a session you own with a colleague and put the ask in
+  their Inbox; [review-notes.md](review-notes.md)), `session_share` (give one
   person `watch`, `answer` or `drive` on a session you own — or, with `org` instead of
   `person`, an org you are a member of: its members and admins as of now,
   never a later joiner or a viewer), `session_unshare` (take it

@@ -473,3 +473,115 @@ fn row_after(s: &Store, session_id: i64) -> Result<SessionRow, IpcError> {
         )
     })
 }
+
+/// "Ask for review…" (HumanLayer plan v2, R11 lean): share `session_id` with
+/// the person named `person` — at drive, so their notes can go to the agent,
+/// or at watch for someone who is only ever a viewer (they read and draft) —
+/// and put the ask in their Inbox. A share already in place is kept as it
+/// is: an ask never raises or lowers a grant. `asker` must own the session.
+pub fn ask_for_review(
+    s: &Store,
+    session_id: i64,
+    person: &str,
+    note: Option<&str>,
+    asker: Option<i64>,
+    now: i64,
+) -> Result<crate::store::ReviewRequestRow, IpcError> {
+    let asker = require_granter(asker, "ask for a review of")?;
+    let to = person_named(s, person)?;
+    if to == asker {
+        return Err(IpcError::new(
+            codes::E_VALIDATE,
+            "ask someone else: you own this session",
+        ));
+    }
+    let note = note.map(str::trim).filter(|n| !n.is_empty());
+    if note.is_some_and(|n| n.len() > crate::store::REVIEW_REQUEST_NOTE_MAX) {
+        return Err(IpcError::new(codes::E_VALIDATE, "the note is too long"));
+    }
+    let level = if s.person_is_viewer_only(to)? {
+        "watch"
+    } else {
+        "drive"
+    };
+    match s.grant_session(session_id, GrantRecipient::Person(to), level, asker) {
+        Ok(_) => {}
+        Err(e) if e.code == codes::E_EXISTS => {}
+        Err(e) => return Err(e),
+    }
+    s.ask_for_review(session_id, asker, to, level, note, now)
+}
+
+/// The desktop's `review_request` command, the hub tool's arguments as they
+/// go on the wire.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct ReviewRequestArgs {
+    /// list (default) | ask | done.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub person: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub done: Option<bool>,
+}
+
+/// The same three actions on this machine's own store (a desktop with no
+/// hub): the person is the fleet's owner.
+pub fn review_request_local(
+    args: ReviewRequestArgs,
+    store: &std::sync::Mutex<Store>,
+) -> Result<serde_json::Value, IpcError> {
+    let me = hub_personal_owner(store);
+    let s = crate::ipc_error::lock(store)?;
+    let now = crate::store::now_unix();
+    match args.action.as_deref().unwrap_or("list") {
+        "list" => {
+            let rows = match me {
+                Some(me) => s.review_requests_for(me, args.done.unwrap_or(false), now)?,
+                None => Vec::new(),
+            };
+            to_value(&rows)
+        }
+        "ask" => {
+            let sid = args
+                .session_id
+                .ok_or_else(|| IpcError::new(codes::E_INVALID, "ask needs session_id"))?;
+            let row = ask_for_review(
+                &s,
+                sid,
+                args.person.as_deref().unwrap_or(""),
+                args.note.as_deref(),
+                me,
+                now,
+            )?;
+            to_value(&row)
+        }
+        "done" => {
+            let id = args
+                .id
+                .ok_or_else(|| IpcError::new(codes::E_INVALID, "done needs id"))?;
+            let row = match me {
+                Some(me) => s.finish_review_request(id, me, args.done.unwrap_or(true), now)?,
+                None => None,
+            }
+            .ok_or_else(|| {
+                IpcError::new(codes::E_NOTFOUND, format!("no review request {id} to you"))
+            })?;
+            to_value(&row)
+        }
+        other => Err(IpcError::new(
+            codes::E_INVALID,
+            format!("review_request action {other:?}; list, ask or done"),
+        )),
+    }
+}
+
+fn to_value<T: serde::Serialize>(v: &T) -> Result<serde_json::Value, IpcError> {
+    serde_json::to_value(v).map_err(|e| IpcError::new(codes::E_SERIALIZE, e.to_string()))
+}

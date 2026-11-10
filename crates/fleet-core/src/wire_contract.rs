@@ -335,4 +335,8 @@
 //!   `review_notes` tool (the desktop's command of the same name;
 //!   docs/review-notes.md). A hub without it answers `E_HUB_PROTOCOL`, which
 //!   the diff shows as the send's error, with the drafts kept on the device.
+//!   Review requests (migration 225) are new without a bump: the
+//!   `review_request` tool (the desktop's command of the same name;
+//!   docs/review-notes.md). A hub without it answers `E_HUB_PROTOCOL`: "Ask
+//!   for review…" says so, and the Inbox shows no asks.
 pub const CONTRACT_REVISION: u32 = 18;

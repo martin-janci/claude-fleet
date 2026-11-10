@@ -849,6 +849,17 @@ pub async fn session_ask_access(
     routed::session_ask_access(&backend, args, &store).await
 }
 
+/// "Ask for review…" (docs/review-notes.md): ask a colleague, list the asks
+/// to you, mark one done.
+#[tauri::command]
+pub async fn review_request(
+    args: sessions::ReviewRequestArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<serde_json::Value, IpcError> {
+    routed::review_request(&backend, args, &store).await
+}
+
 /// The open asks on your sessions, or grant / decline one (gap plan G4.2).
 #[tauri::command]
 pub async fn access_requests(
@@ -1573,6 +1584,17 @@ pub(crate) mod routed {
                 let s = lock(store)?;
                 sessions::ask_access(&s, args.session_id, &args.level, who)
             }
+        }
+    }
+
+    pub async fn review_request(
+        backend: &FleetBackend,
+        args: sessions::ReviewRequestArgs,
+        store: &Mutex<Store>,
+    ) -> Result<serde_json::Value, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("review_request", &args).await,
+            None => sessions::review_request_local(args, store),
         }
     }
 

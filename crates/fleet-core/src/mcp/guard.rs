@@ -1741,6 +1741,15 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
+    // An ask shares the session (owner only, like `session_share`) and
+    // writes an Inbox row; destroys nothing.
+    ToolPolicy {
+        name: "review_request",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
     ToolPolicy {
         name: "session_unshare",
         access: Access::Client,
@@ -2125,6 +2134,7 @@ pub const NOT_FOR_HOST_TOKENS: &[&str] = &[
     "dashboards",
     "propose_host_placement",
     "session_share",
+    "review_request",
     "session_unshare",
     "session_narrow",
     "session_access",
