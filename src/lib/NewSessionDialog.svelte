@@ -6,7 +6,9 @@
   import { endedWorkLinks, pastWorkSummary, type WorkLink } from './work';
   import ResumeDialog from './ResumeDialog.svelte';
   import { selectSessionExplicitly } from './selection';
-  import { newBgSession, newSessionAbortable, sessions, type SessionRow } from './sessions';
+  import { newBgSession, newSessionAbortable, queuePrompt, sessions, type SessionRow } from './sessions';
+  import { markPlanFirst, planDate, planFirstBrief, withPlanFirst } from './plan_first';
+  import { sessionKey } from './fleets';
   import { defaultHost, hosts, isPickableHost } from './hosts';
   import { readPref, writePref } from './prefs';
   import { MODEL_OPTIONS, LAUNCH_EFFORT_OPTIONS, CODEX_MODEL_OPTIONS, CODEX_EFFORT_OPTIONS } from './conversation';
@@ -914,6 +916,23 @@
     if (error) errorEl?.scrollIntoView?.({ block: 'nearest' });
   });
 
+  // Plan first (docs/plan-first.md): the agent writes a plan file and stops;
+  // the conversation shows a "Plan ready" card when the file is there. Only
+  // for an agent session started here, in the foreground, on this hub.
+  let planFirst = $state(false);
+  const planFirstOffered = $derived.by(() => chosenKind === 'work' && !asBackground && !fleetChoice);
+  const planFirstOn = $derived(planFirst && planFirstOffered);
+  /** After a start with Plan first: remember it for the card, and send the
+   *  instructions unless the ticket brief already carried them. */
+  function planStarted(row: SessionRow, inBrief: boolean) {
+    if (!planFirstOn) return;
+    markPlanFirst(sessionKey(row));
+    if (inBrief) return;
+    void queuePrompt(row.id, planFirstBrief(planDate())).then((r) => {
+      if (!r.ok) push({ kind: 'warning', message: `Plan first was not sent to ${row.friendly_name || row.tmux_name}: ${errorText(r.error)}` });
+    });
+  }
+
   /** A start that finished: open it. When the dialog was closed (Escape)
    *  while it ran, say so in a toast instead, so a later New session dialog
    *  is never closed and the selection never jumps under the person
@@ -1351,7 +1370,7 @@
       with_brief: briefOn,
       // The brief and name as edited, the same as a single start: the
       // backend applies them to every sibling.
-      brief: briefOn && briefEdited ? briefDraft : undefined,
+      brief: briefOn && planFirstOn ? withPlanFirst(briefText, planDate()) : briefOn && briefEdited ? briefDraft : undefined,
       ...(forceCrossOrg ? { force_cross_org: true } : {}),
       ...(parallel ? { parallel: true } : {}),
     };
@@ -1376,6 +1395,7 @@
       return;
     }
     if (toast) push(toast);
+    planStarted(first, briefOn);
     finished(first, host);
   }
 
@@ -1410,7 +1430,7 @@
       name: friendlyName.trim() || undefined,
       worktree: inNewMode ? newWorktreeName.trim() : (chosenWorktree?.name ?? undefined),
       with_brief: briefOn,
-      brief: briefOn && briefEdited ? briefDraft : undefined,
+      brief: briefOn && planFirstOn ? withPlanFirst(briefText, planDate()) : briefOn && briefEdited ? briefDraft : undefined,
       // The person ticked "Start across organisations" (review w12-7).
       ...(forceCrossOrg ? { force_cross_org: true } : {}),
       // "Start another" beside the live session on this key (review w12-8).
@@ -1461,6 +1481,7 @@
     }
     remember(submittedHost, submittedWorktreeId);
     answerHostProposal(submittedHost);
+    planStarted(r.value, briefOn);
     finished(r.value, submittedHost);
   }
 
@@ -1589,6 +1610,7 @@
     remember(submittedHost, submittedWorktreeId);
     answerHostProposal(submittedHost);
     if (fleetOptions.length > 0) rememberFleetFor(owner, repo, PRIMARY);
+    planStarted(r.value, false);
     finished(r.value, submittedHost);
   }
 
@@ -2205,6 +2227,14 @@
          conversation, which waits on the agent's first status. -->
     {@const c = $creatingStart}
     <div class="pulse-row"><StartPulse start={c} title="Starting {c.name || 'a session'} on {c.host_alias}" /></div>
+  {/if}
+
+  {#if planFirstOffered}
+    <label class="brief-toggle" data-testid="plan-first">
+      <input type="checkbox" data-testid="plan-first-on" bind:checked={planFirst} />
+      Plan first
+      <span class="muted small">It writes a plan to docs/plans/ and waits for your yes before changing code.</span>
+    </label>
   {/if}
 
   <div class="actions">

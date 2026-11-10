@@ -21,6 +21,7 @@
   import { requestOpenPath, OPEN_PATH_CONTEXT, type OpenPathFn } from './app_views';
   import { sendPrompt, hasNoPane, sessions, sessionAgent, restartSession, type SessionRow } from './sessions';
   import AnswerPrompt from './AnswerPrompt.svelte';
+  import PlanReady from './PlanReady.svelte';
   import { canStop, cancelInto, drop, due, heldPreview, hold, parkHeld, unparkHeld, STOP_KEY, type HeldLine } from './composer_hold';
   import FormCard from './forms/FormCard.svelte';
   import ChatWizards from './forms/ChatWizards.svelte';
@@ -1391,6 +1392,12 @@
     held = drop(held, next.id);
     void sendText(next.text);
   });
+  /** "Ask for changes…" on the Plan ready card: the composer starts with
+   *  the plan file named, and whatever was typed stays after it. */
+  function planChanges(prefix: string) {
+    if (!draft.startsWith(prefix)) draft = prefix + draft;
+    void tick().then(() => box?.focus());
+  }
   function cancelHeld(line: HeldLine) {
     held = drop(held, line.id);
     draft = cancelInto(draft, line);
@@ -2955,6 +2962,16 @@
           {/each}
         {/if}
         {#if viewing === null}
+        {#if !away}
+          <!-- Plan first (docs/plan-first.md): the plan file is there and the
+               agent waits for a yes. -->
+          <PlanReady
+            {session}
+            {sKey}
+            status={liveStatus}
+            onAskChanges={showComposer && writeBlocked === null ? planChanges : undefined}
+          />
+        {/if}
         {#if pendingForm && pendingForm.form_id !== hiddenForm}
           <FormCard
             formId={pendingForm.form_id}
