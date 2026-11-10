@@ -1,7 +1,7 @@
 // Plan first (docs/plan-first.md): the checkbox on New session. A plain start
 // sends the instructions as the first prompt; a ticket start with its brief on
-// carries them under the brief; either way the session is remembered for the
-// "Plan ready" card.
+// carries them under the brief. Nothing is remembered about the session: the
+// "Plan ready" card goes by what the agent says.
 import { render, screen, fireEvent } from '@testing-library/svelte';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { tick } from 'svelte';
@@ -71,10 +71,8 @@ beforeEach(() => {
   clearToasts();
 });
 
-import { isPlanFirst } from './plan_first';
-
 describe('Plan first on New session', () => {
-  it('a plain start sends the instructions as the first prompt and remembers the session', async () => {
+  it('a plain start sends the instructions as the first prompt', async () => {
     vi.spyOn(sessionsModule, 'newSessionAbortable').mockResolvedValue({ ok: true, value: row({ id: 91 }) } as never);
     answer({ check_account_headroom: null, queue_prompt: { delivered: true } });
     const onCreate = vi.fn();
@@ -86,11 +84,11 @@ describe('Plan first on New session', () => {
     await vi.waitFor(() => expect(calls('queue_prompt')).toHaveLength(1));
     expect(argsOf('queue_prompt').session_id).toBe(91);
     expect(String(argsOf('queue_prompt').prompt)).toContain('docs/plans/');
-    expect(isPlanFirst(91)).toBe(true);
+    expect(String(argsOf('queue_prompt').prompt)).toContain('Say "Plan ready"');
     vi.restoreAllMocks();
   });
 
-  it('without the tick nothing is sent or remembered', async () => {
+  it('without the tick nothing is sent', async () => {
     vi.spyOn(sessionsModule, 'newSessionAbortable').mockResolvedValue({ ok: true, value: row({ id: 92 }) } as never);
     answer({ check_account_headroom: null });
     const onCreate = vi.fn();
@@ -99,7 +97,6 @@ describe('Plan first on New session', () => {
     await fireEvent.click(screen.getByTestId('create-btn'));
     await vi.waitFor(() => expect(onCreate).toHaveBeenCalled());
     expect(calls('queue_prompt')).toHaveLength(0);
-    expect(isPlanFirst(92)).toBe(false);
     vi.restoreAllMocks();
   });
 
@@ -117,6 +114,5 @@ describe('Plan first on New session', () => {
     expect(String(a.brief)).toContain('Plan first.');
     await vi.waitFor(() => expect(onCreate).toHaveBeenCalled());
     expect(calls('queue_prompt')).toHaveLength(0);
-    expect(isPlanFirst(93)).toBe(true);
   });
 });

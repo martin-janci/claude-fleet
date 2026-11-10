@@ -11,37 +11,55 @@ foreground on this hub; not a shell, a background run, or another fleet).
 The agent is told to:
 
 1. research how things work today, describing and not proposing;
-2. write the plan to `docs/plans/<date>-<short-slug>.md`: the goal, what it
-   found, the steps as small vertical slices that each end with a check, and
-   its open questions for you;
-3. stop, say "Plan ready" with the path, and wait.
+2. write the plan to `docs/plans/<date>-<short-slug>.md`, uncommitted: the
+   goal, what it found, the steps as small vertical slices that each end
+   with a check, and its open questions for you;
+3. stop, say "Plan ready" with the path, and wait; and say it again each
+   time it changes the plan.
 
 With a ticket and **Brief Claude with the ticket** on, the paragraph rides
 under the brief in the same first prompt. Otherwise it is sent as the
 session's first prompt (`queue_prompt`), and your task is the next message.
 
+The phone's New session has the same switch under **First message**: the
+paragraph goes out under what you typed there, as one prompt.
+
 ## Plan ready
 
-When the session's turn ends and its changes hold a new Markdown file
-directly in `docs/plans/` (or `docs/superpowers/plans/`), the conversation
-shows a **Plan ready** card with the file's path:
+The conversation shows a **Plan ready** card when all of this holds:
 
-- **Read plan** shows the file rendered, in place.
+- the agent's turn has ended;
+- since the last prompt it said "Plan ready" (or "the plan is ready") and
+  named the file;
+- that file is among the session's changes: a new or edited Markdown file
+  directly in `docs/plans/` (or `docs/superpowers/plans/`).
+
+The card carries the file's path and:
+
+- **Read plan** shows the file rendered, in place (on the phone: in Files).
 - **Approve and start** sends one prompt saying the plan is approved.
 - **Ask for changes…** puts the file's name in the composer for you to say
   what to change; the work does not start.
-- **×** hides the card for that plan.
+- **×** hides the card.
 
-The card asks once per plan file. A second plan file in the same session
-asks again. Someone who may not write to the session sees the card with its
-answers off.
+The card is about what the agent said last. The next prompt takes it away,
+whoever sent it and from wherever: Approve on the card, "looks good, go
+ahead" typed by hand, or a colleague's answer on another device. When the
+agent changes the plan and says "Plan ready" again, the card is back.
+Someone who may not write to the session sees the card with its answers off.
+
+Because the agent's own words are the signal, the card shows on every
+device and for a session started anywhere: with the checkbox, by Control, or
+by typing the same instructions yourself. An agent that does not say "Plan
+ready" gets no card and still waits, in words.
 
 ## What is kept, and where
 
-Which sessions were started with Plan first is remembered **on this device**
-(`localStorage`, the newest 200). Another device shows no card; the agent
-still waits there, in words. The plan itself is a file in the branch, reviewed
-and committed with the code. The hub stores nothing new and no tool changed.
+Only that a card was answered (approved or hidden), **on this device**
+(`localStorage`, the newest 200 sessions), so it does not come back while
+the approval waits in the queue. The plan itself is a file in the branch,
+reviewed and committed with the code. The hub stores nothing new and no tool
+changed.
 
 ## Measure
 

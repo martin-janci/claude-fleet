@@ -7,8 +7,8 @@
   import ResumeDialog from './ResumeDialog.svelte';
   import { selectSessionExplicitly } from './selection';
   import { newBgSession, newSessionAbortable, queuePrompt, sessions, type SessionRow } from './sessions';
-  import { markPlanFirst, planDate, planFirstBrief, withPlanFirst } from './plan_first';
-  import { sessionKey } from './fleets';
+  import { planDate, planFirstBrief, withPlanFirst } from './plan_first';
+  import { sessionBlocked } from './share';
   import { defaultHost, hosts, isPickableHost } from './hosts';
   import { readPref, writePref } from './prefs';
   import { MODEL_OPTIONS, LAUNCH_EFFORT_OPTIONS, CODEX_MODEL_OPTIONS, CODEX_EFFORT_OPTIONS } from './conversation';
@@ -916,20 +916,26 @@
     if (error) errorEl?.scrollIntoView?.({ block: 'nearest' });
   });
 
-  // Plan first (docs/plan-first.md): the agent writes a plan file and stops;
-  // the conversation shows a "Plan ready" card when the file is there. Only
+  // Plan first (docs/plan-first.md): the agent writes a plan file, says
+  // "Plan ready" and stops; the conversation then shows a card for it. Only
   // for an agent session started here, in the foreground, on this hub.
   let planFirst = $state(false);
   const planFirstOffered = $derived.by(() => chosenKind === 'work' && !asBackground && !fleetChoice);
   const planFirstOn = $derived(planFirst && planFirstOffered);
-  /** After a start with Plan first: remember it for the card, and send the
-   *  instructions unless the ticket brief already carried them. */
+  /** After a start with Plan first: send the instructions, unless the
+   *  ticket brief already carried them. */
   function planStarted(row: SessionRow, inBrief: boolean) {
-    if (!planFirstOn) return;
-    markPlanFirst(sessionKey(row));
-    if (inBrief) return;
+    if (!planFirstOn || inBrief) return;
+    const notSent = (why: string) =>
+      push({ kind: 'warning', message: `Plan first was not sent to ${row.friendly_name || row.tmux_name}: ${why}` });
+    // The session is the starter's own; the gate is asked where the write is all the same.
+    const blocked = hubActionBlocked('queue_prompt', $hubStatus, $hubConnection) ?? $sessionBlocked(row, 'queue_prompt');
+    if (blocked !== null) {
+      notSent(blocked);
+      return;
+    }
     void queuePrompt(row.id, planFirstBrief(planDate())).then((r) => {
-      if (!r.ok) push({ kind: 'warning', message: `Plan first was not sent to ${row.friendly_name || row.tmux_name}: ${errorText(r.error)}` });
+      if (!r.ok) notSent(errorText(r.error));
     });
   }
 

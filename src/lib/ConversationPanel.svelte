@@ -22,6 +22,7 @@
   import { sendPrompt, hasNoPane, sessions, sessionAgent, restartSession, type SessionRow } from './sessions';
   import AnswerPrompt from './AnswerPrompt.svelte';
   import PlanReady from './PlanReady.svelte';
+  import { planSaid } from './plan_first';
   import { canStop, cancelInto, drop, due, heldPreview, hold, parkHeld, unparkHeld, STOP_KEY, type HeldLine } from './composer_hold';
   import FormCard from './forms/FormCard.svelte';
   import ChatWizards from './forms/ChatWizards.svelte';
@@ -2963,12 +2964,13 @@
         {/if}
         {#if viewing === null}
         {#if !away}
-          <!-- Plan first (docs/plan-first.md): the plan file is there and the
-               agent waits for a yes. -->
+          <!-- Plan first (docs/plan-first.md): the agent said "Plan ready",
+               the file is there, and it waits for a yes. -->
           <PlanReady
             {session}
             {sKey}
             status={liveStatus}
+            said={conv ? planSaid(conv.turns) : null}
             onAskChanges={showComposer && writeBlocked === null ? planChanges : undefined}
           />
         {/if}

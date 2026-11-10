@@ -1,19 +1,21 @@
 <script lang="ts">
-  // The "Plan ready" card (docs/plan-first.md): a session started with Plan
-  // first has written its plan file and stopped. The card names the file,
-  // shows it rendered on request, and offers the two answers: approve (one
-  // prompt, through `queue_prompt`) or ask for changes (the composer, with
-  // the file named). Nothing advances by itself.
+  // The "Plan ready" card (docs/plan-first.md): the agent has said its plan
+  // is ready and named the file, and that file is among the session's
+  // changes. The card names the file, shows it rendered on request, and
+  // offers the two answers: approve (one prompt, through `queue_prompt`) or
+  // ask for changes (the composer, with the file named). Nothing advances by
+  // itself.
   //
-  // The session's changes are read when the session is shown and each time
-  // its turn ends, never while it works.
+  // The session's changes are read once the agent has said so and its turn
+  // has ended, never while it works. The card is about what the agent said
+  // last: the next prompt, whoever sends it, takes it away.
   import MarkdownView from './MarkdownView.svelte';
   import { agentLabel } from './conversation';
   import { errorText } from './error_copy';
   import { repoChanges, repoFile } from './files';
   import { hubActionBlocked, hubStatus } from './hub';
   import { hubConnection } from './hub_connection';
-  import { isPlanFirst, planApprovedPrompt, planChangesPrefix, planFile, planPending, settlePlan } from './plan_first';
+  import { planApprovedPrompt, planChangesPrefix, planFile, planSettled, settlePlan, type PlanSaid } from './plan_first';
   import { queuePrompt, sessionAgent, type ClaudeStatus, type SessionRow } from './sessions';
   import { sessionIdBlocked } from './share';
 
@@ -21,12 +23,15 @@
     session,
     sKey,
     status,
+    said,
     onAskChanges,
   }: {
     session: SessionRow;
     /** The panel's key for the session (an extra fleet's ids never collide). */
     sKey: number;
     status: ClaudeStatus | null;
+    /** The agent's "Plan ready", when that is what it said last (`planSaid`). */
+    said: PlanSaid | null;
     /** Put words in the composer; absent where there is none. */
     onAskChanges?: (prefix: string) => void;
   } = $props();
@@ -39,8 +44,16 @@
       : (hubActionBlocked('queue_prompt', $hubStatus, $hubConnection) ?? $sessionIdBlocked(session.id, 'queue_prompt')),
   );
 
+  // By value: the panel hands over a new object each time it reads the
+  // conversation or the row changes, and neither may read the changes again.
+  const reply = $derived(said?.text ?? '');
+  const saidAt = $derived(said?.at ?? '');
+  const key = $derived(sKey);
+  const sessionId = $derived(session.id);
+  const elsewhere = $derived(Boolean(session.fleet));
+  const working = $derived(status === 'working');
+
   let path = $state<string | null>(null);
-  let readFor = $state<number | null>(null);
   let settled = $state(0); // bumped after approve/dismiss so `pending` re-reads storage
   let text = $state<string | null>(null);
   let open = $state(false);
@@ -50,27 +63,34 @@
 
   const pending = $derived.by(() => {
     void settled;
-    return planPending(sKey, path);
+    return path !== null && !planSettled(sKey, path, saidAt);
+  });
+
+  // Another session, or the conversation moved on: what was shown, opened or
+  // sent belonged to the last announcement.
+  $effect(() => {
+    void key;
+    void saidAt;
+    path = null;
+    text = null;
+    open = false;
+    sentNote = null;
+    error = null;
   });
 
   $effect(() => {
-    const key = sKey;
-    const working = status === 'working';
-    if (session.fleet || !isPlanFirst(key) || working) return;
-    void look(key, session.id);
+    const k = key;
+    const words = reply;
+    // Read with the reset above, so a card it took away is looked for again.
+    void saidAt;
+    if (elsewhere || words === '' || working) return;
+    void look(k, sessionId, words);
   });
 
-  async function look(key: number, id: number) {
+  async function look(k: number, id: number, words: string) {
     const r = await repoChanges(id);
-    if (key !== sKey) return;
-    if (readFor !== key) {
-      text = null;
-      open = false;
-      sentNote = null;
-      error = null;
-    }
-    readFor = key;
-    path = r.ok ? planFile(r.value) : null;
+    if (k !== sKey || words !== reply) return;
+    path = r.ok ? planFile(r.value, words) : null;
   }
 
   async function toggle() {
@@ -88,13 +108,14 @@
     busy = true;
     error = null;
     const p = path;
+    const at = saidAt;
     const r = await queuePrompt(session.id, planApprovedPrompt(p));
     busy = false;
     if (!r.ok) {
       error = errorText(r.error);
       return;
     }
-    settlePlan(sKey, p);
+    settlePlan(sKey, p, at);
     settled += 1;
     sentNote = r.value.delivered ? `Approved: ${name} is starting.` : `Approved: ${name} starts when its turn ends.`;
   }
@@ -106,12 +127,12 @@
 
   function dismiss() {
     if (path === null) return;
-    settlePlan(sKey, path);
+    settlePlan(sKey, path, saidAt);
     settled += 1;
   }
 </script>
 
-{#if readFor === sKey && pending && path}
+{#if pending && path}
   <div class="plan-ready" data-testid="plan-ready" role="group" aria-label="Plan ready">
     <div class="head">
       <strong>Plan ready</strong>
@@ -151,7 +172,7 @@
       </div>
     {/if}
   </div>
-{:else if readFor === sKey && sentNote}
+{:else if sentNote}
   <p class="sent" role="status" data-testid="plan-ready-sent">{sentNote}</p>
 {/if}
 
