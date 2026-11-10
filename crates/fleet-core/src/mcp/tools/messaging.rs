@@ -102,17 +102,8 @@ impl FleetTools {
             // person on a full device presses it (HumanLayer plan v2, R0).
             // Control, an agent, a peer and an answer-only device are refused
             // the digit, and the Enter that would pick it from the cursor.
-            if !presses_folder_rules(&caller)
-                && matches!(
-                    key,
-                    crate::tmux::NamedKey::Digit(_) | crate::tmux::NamedKey::Enter
-                )
-            {
-                let probe = sessions::session_activity(&self.store, &self.ssh, row.id)
-                    .await
-                    .map_err(to_mcp_err)?;
-                folder_rule_refused(key, probe.pending_input.as_ref())
-                    .map_err(|why| mcp_err(codes::E_FORBIDDEN, why, None))?;
+            if matches!(key, crate::tmux::NamedKey::Digit(_)) || confirms_selected(key) {
+                self.refuse_folder_rule_press(&caller, &row, key).await?;
             }
             // The client's check and its press, made one step here: the pane
             // is re-read now and the key goes out right after, with no round
@@ -176,6 +167,10 @@ impl FleetTools {
         // which is the one thing `client_msg_id` exists to allow.
         let delivered = async {
             let prompt = apply_marker(p.prompt, &marker_origin(&caller), &caller, p.raw)?;
+            if p.submit {
+                self.refuse_bare_enter_on_folder_rule(&caller, &row, &prompt)
+                    .await?;
+            }
             let typed = prompt.clone();
             let out = self.deliver_prompt(&row, prompt, p.submit, p.force).await?;
             note_prompt_author(&self.store, &caller, row.id, &typed);
@@ -306,9 +301,13 @@ impl FleetTools {
         // Reading what was sent is the session's conversation (`read`); a
         // send types into the pane and a resolve changes what every device
         // shows (`drive`).
-        // A note is a person's: an agent's host token neither sends nor
-        // resolves one, refused before the session is even looked up.
-        if action != "list" && caller.host_alias.is_some() {
+        // A note is a person's: an agent neither sends nor resolves one,
+        // refused before the session is even looked up. That is a host's
+        // token and the operator alike: the operator is a full client bound
+        // to the hub's owner, and a send here types its text into the pane
+        // with no approval card, which `send_prompt` and `queue_prompt`
+        // make it wait for (`OPERATOR_CONFIRMS`).
+        if action != "list" && (caller.host_alias.is_some() || caller.is_operator()) {
             return Err(mcp_err(
                 codes::E_FORBIDDEN,
                 "a person sends and resolves review notes",
@@ -1145,6 +1144,54 @@ fn presses_folder_rules(caller: &Caller) -> bool {
         && caller.mode != TokenMode::Peer
 }
 
+impl FleetTools {
+    /// Refuse `key` when `caller` is not one who [`presses_folder_rules`]
+    /// and a FRESH read of the pane says the key would pick a folder-wide
+    /// rule ([`folder_rule_refused`]). A no-op for a person on a full
+    /// device, who is not made to wait for the read.
+    pub(super) async fn refuse_folder_rule_press(
+        &self,
+        caller: &Caller,
+        row: &crate::store::SessionRow,
+        key: crate::tmux::NamedKey,
+    ) -> Result<(), McpError> {
+        if presses_folder_rules(caller) {
+            return Ok(());
+        }
+        let probe = sessions::session_activity(&self.store, &self.ssh, row.id)
+            .await
+            .map_err(to_mcp_err)?;
+        folder_rule_refused(key, probe.pending_input.as_ref())
+            .map_err(|why| mcp_err(codes::E_FORBIDDEN, why, None))
+    }
+
+    /// The text path's half of the same rule. An EMPTY prompt that submits
+    /// is a bare Enter ([`bypasses_gate`]): the `Enter` key by another
+    /// spelling, which skips the delivery gate on purpose. So it is held to
+    /// what `keys: "Enter"` is held to, or a cursor key (no gate) and then
+    /// an empty prompt would press the folder-wide rule the key gate
+    /// refuses. `marked` is the prompt after [`apply_marker`], as
+    /// [`FleetTools::deliver_prompt`] takes it.
+    pub(super) async fn refuse_bare_enter_on_folder_rule(
+        &self,
+        caller: &Caller,
+        row: &crate::store::SessionRow,
+        marked: &str,
+    ) -> Result<(), McpError> {
+        if !bare_enter_is_gated(caller, marked) {
+            return Ok(());
+        }
+        self.refuse_folder_rule_press(caller, row, crate::tmux::NamedKey::Enter)
+            .await
+    }
+}
+
+/// PURE: whether a submitting prompt on the text path is a bare Enter from a
+/// caller who does not press folder-wide rules, so the pane is read first.
+pub(super) fn bare_enter_is_gated(caller: &Caller, marked: &str) -> bool {
+    !presses_folder_rules(caller) && bypasses_gate(marked)
+}
+
 /// PURE: Claude Code's "Yes, and don't ask again for: <rule> in <folder>",
 /// which it saves in the folder's settings for every later session there.
 /// The session-only "…don't ask again this session" is not one. Mirrors the
@@ -1155,8 +1202,22 @@ pub(crate) fn is_folder_rule(label: &str) -> bool {
     asks && !(l.contains("this session") || l.contains("the session") || l.contains("during this"))
 }
 
+/// PURE: whether `key` confirms the option under the cursor: `Enter`, and
+/// `M-Enter`, which reaches the pane as ESC then CR and which a select
+/// dialog may read as Enter with a modifier. `C-m` and `C-j` are not in the
+/// vocabulary at all, for the same reason.
+fn confirms_selected(key: crate::tmux::NamedKey) -> bool {
+    use crate::tmux::NamedKey;
+    match key {
+        NamedKey::Enter => true,
+        NamedKey::Meta(m) => m.tmux_name() == "M-Enter",
+        _ => false,
+    }
+}
+
 /// PURE: refuse `key` when it would pick a folder-wide rule on `dialog`: its
-/// digit, or Enter with the cursor on it. A multi-select only toggles boxes.
+/// digit, or Enter (or `M-Enter`) with the cursor on it. A multi-select only
+/// toggles boxes.
 pub(crate) fn folder_rule_refused(
     key: crate::tmux::NamedKey,
     dialog: Option<&crate::service::pane_intel::PendingInput>,
@@ -1167,7 +1228,7 @@ pub(crate) fn folder_rule_refused(
     };
     let picked = match key {
         NamedKey::Digit(n) => d.options.iter().find(|o| o.n == n.get()),
-        NamedKey::Enter => d.options.iter().find(|o| o.selected),
+        _ if confirms_selected(key) => d.options.iter().find(|o| o.selected),
         _ => None,
     };
     match picked {
@@ -1282,6 +1343,13 @@ mod answer_key_tests {
         assert_eq!(folder_rule_refused(key("3"), Some(&d)), Ok(()));
         assert_eq!(folder_rule_refused(key("Enter"), Some(&d)), Ok(()));
         assert!(folder_rule_refused(key("Enter"), Some(&rule_dialog(2))).is_err());
+        // M-Enter is ESC then CR: held to what Enter is held to.
+        assert_eq!(folder_rule_refused(key("M-Enter"), Some(&d)), Ok(()));
+        assert!(folder_rule_refused(key("M-Enter"), Some(&rule_dialog(2))).is_err());
+        assert_eq!(
+            folder_rule_refused(key("M-b"), Some(&rule_dialog(2))),
+            Ok(())
+        );
         assert_eq!(
             folder_rule_refused(key("Escape"), Some(&rule_dialog(2))),
             Ok(())

@@ -95,6 +95,43 @@ fn a_login_nobody_chose_gives_way_to_an_allowed_one() {
 }
 
 #[test]
+fn a_start_that_names_no_login_takes_an_allowed_one_or_is_refused() {
+    let (s, p) = fleet();
+    // Nothing forbidden: the login stays, the busier one too. Only a block
+    // moves the work.
+    assert_eq!(allowed_login(&s, Some(p), "mac", None, NOW).unwrap(), None);
+    assert_eq!(
+        allowed_login(&s, Some(p), "mac", Some("spare"), NOW).unwrap(),
+        Some("spare".into())
+    );
+    s.set_account_forbidden_projects("acct-own", &[p]).unwrap();
+    // The host's own login is forbidden: the allowed one with the most
+    // headroom takes the work. Another project, and no project, keep it.
+    assert_eq!(
+        allowed_login(&s, Some(p), "mac", None, NOW).unwrap(),
+        Some("work".into())
+    );
+    assert_eq!(allowed_login(&s, None, "mac", None, NOW).unwrap(), None);
+    // An allowed login is kept as it is.
+    assert_eq!(
+        allowed_login(&s, Some(p), "mac", Some("spare"), NOW).unwrap(),
+        Some("spare".into())
+    );
+    // No allowed login left on the host: refused, not started on a
+    // forbidden one.
+    for a in ["acct-work", "acct-spare"] {
+        s.set_account_forbidden_projects(a, &[p]).unwrap();
+    }
+    let err = allowed_login(&s, Some(p), "mac", None, NOW).unwrap_err();
+    assert_eq!(err.code, codes::E_ACCOUNT_FORBIDDEN);
+    assert!(
+        err.message.contains("no other login on mac"),
+        "{}",
+        err.message
+    );
+}
+
+#[test]
 fn a_freer_login_is_never_a_forbidden_one() {
     let (s, p) = fleet();
     seed_usage(&s, "mac", None, "acct-own", 95.0, NOW + 1);

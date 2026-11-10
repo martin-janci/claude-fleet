@@ -10233,6 +10233,103 @@ fn operator() -> Caller {
     )
 }
 
+/// A review note and the list of projects an account is forbidden for are
+/// a person's. The operator is a full client bound to the hub's owner, so
+/// it is refused by name: a note would type its text into a session with no
+/// approval card, and an empty list would lift the block that refuses its
+/// own starts. Reading both stays open to it.
+#[tokio::test]
+async fn the_operator_sends_no_review_note_and_lifts_no_account_block() {
+    let (s, _, on_b) = two_host_store();
+    s.upsert_account(&crate::store::AccountRow {
+        uuid: "acct-1".into(),
+        ..Default::default()
+    })
+    .unwrap();
+    let t = guarded_tools(s, true);
+    let notes = |action: &str| {
+        Parameters(
+            serde_json::from_value::<ReviewNotesParams>(serde_json::json!({
+                "session_id": on_b,
+                "action": action,
+                "client_msg_id": "m-1",
+                "notes": [{ "path": "src/a.rs", "line": 3, "body": "do something else" }],
+                "note_id": 1,
+            }))
+            .unwrap(),
+        )
+    };
+    for action in ["send", "resolve"] {
+        let e = t
+            .review_notes(Extension(operator()), notes(action))
+            .await
+            .expect_err("a person's");
+        assert_eq!(err_code(&e), "E_FORBIDDEN", "{action}: {e:?}");
+    }
+    t.review_notes(Extension(operator()), notes("list"))
+        .await
+        .expect("the operator reads the notes");
+    assert!(
+        t.store
+            .lock()
+            .unwrap()
+            .review_notes(on_b)
+            .unwrap()
+            .is_empty(),
+        "nothing was stored"
+    );
+
+    let blocks = || {
+        Parameters(
+            serde_json::from_value(serde_json::json!({
+                "uuid": "acct-1", "forbidden_project_ids": [],
+            }))
+            .unwrap(),
+        )
+    };
+    let e = t
+        .set_account_projects(Extension(operator()), blocks())
+        .await
+        .expect_err("the person's rule");
+    assert_eq!(err_code(&e), "E_FORBIDDEN", "{e:?}");
+    t.set_account_projects(
+        Extension(client_caller("laptop", TokenMode::Full)),
+        blocks(),
+    )
+    .await
+    .expect("a person's own device changes it");
+}
+
+/// An empty prompt that submits is a bare Enter, which skips the delivery
+/// gate: from a caller who may not press a folder-wide "don't ask again"
+/// it is held to the `Enter` key's rule (the pane is read first), or a
+/// cursor key and then an empty prompt would press what `keys: "Enter"`
+/// refuses. A person's own device is not made to wait for the read, and a
+/// prompt with text is the delivery gate's.
+#[test]
+fn a_bare_enter_from_an_agent_is_held_to_the_folder_rule_gate() {
+    use super::messaging::bare_enter_is_gated;
+    let marked = |caller: &Caller, text: &str| {
+        apply_marker(text.into(), &marker_origin(caller), caller, false).unwrap()
+    };
+    let agent = host_caller("hosta", TokenMode::Full);
+    let answer_only = client_caller("phone", TokenMode::Answer);
+    for caller in [&agent, &operator(), &answer_only] {
+        assert!(
+            bare_enter_is_gated(caller, &marked(caller, "")),
+            "{}",
+            caller.label()
+        );
+        assert!(
+            !bare_enter_is_gated(caller, &marked(caller, "go on")),
+            "{}",
+            caller.label()
+        );
+    }
+    let person = client_caller("laptop", TokenMode::Full);
+    assert!(!bare_enter_is_gated(&person, &marked(&person, "")));
+}
+
 fn new_session_params(v: serde_json::Value) -> NewSessionParams {
     serde_json::from_value(v).unwrap()
 }

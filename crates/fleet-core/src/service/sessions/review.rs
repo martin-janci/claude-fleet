@@ -74,7 +74,33 @@ pub async fn spawn_review(
     // refuses with nothing created; no store guard is held here.
     let short = format!("{:x}", now_unix() & 0xfffff);
     let review_name = format!("{}--review-{}", source.tmux_name, short);
-    let launch = crate::tmux::ClaudeLaunch::default();
+    // A review runs under the host's own login. When the source's project
+    // forbids that login's account, the review takes an allowed login on
+    // the host, or is refused with nothing created: a review is work in
+    // the project like any other start (`service::project_accounts`). Only
+    // Claude Code has logins fleet knows.
+    let profile = if agent.id() == crate::store::AGENT_CLAUDE {
+        let s = lock(store)?;
+        crate::service::project_accounts::allowed_login(
+            &s,
+            source.project_id,
+            &source.host_alias,
+            None,
+            now_unix(),
+        )?
+    } else {
+        None
+    };
+    // Checked here and not by `ClaudeLaunch::checked`, which would drop a
+    // name it does not like and so launch under the host's own login after
+    // all.
+    if let Some(p) = profile.as_deref() {
+        crate::validate::claude_profile(p)?;
+    }
+    let launch = crate::tmux::ClaudeLaunch {
+        profile,
+        ..Default::default()
+    };
     let claude_id = agent.mint_conversation_id();
     let pane = match claude_id.as_deref() {
         Some(id) => agent.launch_command(Some(id), &review_name, &launch),
@@ -167,6 +193,12 @@ pub async fn spawn_review(
         )?;
         if let Some(id) = claude_id.as_deref() {
             let _ = s.set_claude_session_id(row.id, id);
+        }
+        // Not soft, as in `new_session`: a restart or a repair relaunches
+        // from the stored profile, and a row without it would go back to
+        // the host's own login, the one the project forbids.
+        if launch.profile.is_some() {
+            s.set_session_profile(row.id, launch.profile.as_deref())?;
         }
         let _ = s.set_started_at(row.id, now_unix());
         row.id

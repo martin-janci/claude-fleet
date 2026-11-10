@@ -543,6 +543,9 @@ impl FleetTools {
         };
         self.recheck_now(&recheck)?;
         let prompt = apply_marker(p.prompt, &marker_origin(&caller), &caller, p.raw)?;
+        // An empty prompt is a bare Enter here too (`send_prompt`).
+        self.refuse_bare_enter_on_folder_rule(&caller, &row, &prompt)
+            .await?;
         // The turn this prompt's reply ends, not `row.turn_seq` itself: a
         // queued prompt that took the idle moment first runs its turn ahead
         // of this one, and that turn's Stop is not this prompt's answer.

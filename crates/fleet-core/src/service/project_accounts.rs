@@ -21,6 +21,11 @@
 //!   headroom (`account_limits::login_with_headroom_for`), a routine whose
 //!   own login is forbidden moves to one, and the automatic account switch
 //!   never moves a session onto a forbidden account.
+//! * a start that takes no login from its caller runs under an allowed one
+//!   or not at all ([`allowed_login`]): a review of a session
+//!   (`sessions::spawn_review`), a mission's headless review or test
+//!   (`work::orchestrate::checks`), and a move to a host that has no login
+//!   on the session's own account (`move_session`).
 //!
 //! **What it cannot see.** A login is matched to its account by what the
 //! host reported (`hosts.account_uuid`, `hosts.claude_profiles`). A profile
@@ -172,6 +177,33 @@ pub fn forbidden_reason(
         Err(e) if e.code == codes::E_ACCOUNT_FORBIDDEN => Ok(Some(e.message)),
         Err(e) => Err(e),
     }
+}
+
+/// The login a start that names none runs under, for work in `project_id`
+/// on `host_alias`: `profile` (`None` = the host's own) when the project
+/// allows its account or the account is not known, else the allowed login
+/// on the host with the most headroom. `E_ACCOUNT_FORBIDDEN`
+/// ([`refuse_forbidden`]) when the host has no login on an allowed account.
+///
+/// For the starts that take no login from their caller and so can offer
+/// none to switch to: a review of a session, a move's fallback login on the
+/// target, a mission's headless check. Unlike
+/// `account_limits::login_with_headroom_for` it never leaves an allowed
+/// login for a freer one: only a block moves the work.
+pub fn allowed_login(
+    s: &Store,
+    project_id: Option<i64>,
+    host_alias: &str,
+    profile: Option<&str>,
+    now: i64,
+) -> Result<Option<String>, IpcError> {
+    let profile = profile.map(str::trim).filter(|p| !p.is_empty());
+    if forbidden_reason(s, project_id, host_alias, profile, now)?.is_none() {
+        return Ok(profile.map(str::to_string));
+    }
+    let instead = account_limits::login_with_headroom_for(s, project_id, host_alias, profile, now)?;
+    refuse_forbidden(s, project_id, host_alias, instead.as_deref(), now)?;
+    Ok(instead)
 }
 
 /// `set_account_projects`: replace the projects and/or orgs an account is

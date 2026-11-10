@@ -8872,6 +8872,57 @@ mod env_launch {
         assert!(body.contains("export FLEET_T='1'"), "{body}");
     }
 
+    /// A review is work in the source's project: when the project forbids
+    /// the account of the host's own login, the review runs under an
+    /// allowed login on the host and keeps it, and with none it is refused
+    /// with nothing created.
+    #[tokio::test]
+    async fn a_review_never_runs_on_an_account_its_project_forbids() {
+        use crate::service::account_limits::seed_usage;
+        let h = Harness::new();
+        let row = new_session(h.args("dev-review-acct", None), &h.store, &h.ssh, &h.reg)
+            .await
+            .expect("create");
+        std::fs::write(h.dir.path().join("trust"), "").unwrap();
+        {
+            let s = h.store.lock().unwrap();
+            let now = crate::store::now_unix();
+            seed_usage(&s, "h", None, "acct-own", 20.0, now);
+            seed_usage(&s, "h", Some("work"), "acct-work", 10.0, now);
+            s.set_account_forbidden_projects("acct-own", &[h.project_id])
+                .unwrap();
+        }
+        let review = |id: i64| -> SpawnReviewArgs {
+            serde_json::from_value(serde_json::json!({
+                "source_session_id": id, "prompt": "review it"
+            }))
+            .unwrap()
+        };
+        let spawned = spawn_review(review(row.id), &h.store, &h.ssh)
+            .await
+            .expect("spawn_review");
+        assert_eq!(
+            spawned.claude_profile.as_deref(),
+            Some("work"),
+            "{spawned:?}"
+        );
+        let panes = h.panes();
+        assert_eq!(panes.len(), 2, "{panes:?}");
+        assert!(panes[1].contains(".claude-profiles/"), "{}", panes[1]);
+
+        // No allowed login left on the host: refused before anything starts.
+        h.store
+            .lock()
+            .unwrap()
+            .set_account_forbidden_projects("acct-work", &[h.project_id])
+            .unwrap();
+        let err = spawn_review(review(row.id), &h.store, &h.ssh)
+            .await
+            .expect_err("no allowed login");
+        assert_eq!(err.code, codes::E_ACCOUNT_FORBIDDEN, "{err:?}");
+        assert_eq!(h.panes().len(), 2, "nothing was started");
+    }
+
     #[tokio::test]
     async fn a_recreate_sources_its_environment() {
         let h = Harness::new();

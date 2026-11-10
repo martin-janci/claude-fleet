@@ -1975,6 +1975,7 @@ fn snapshot(s: &Store, args: &MoveSessionArgs) -> Result<Snapshot, IpcError> {
     // The login travels by ACCOUNT, not by name (review w02-5): a profile
     // name the target has on another account, or not at all, would bill
     // another account or open `/login` there.
+    let mut same_account = false;
     if let (Some(src), Some(dst)) = (s.get_host_row(&row.host_alias)?, s.get_host_row(target)?) {
         let account = row
             .account_uuid
@@ -1982,7 +1983,23 @@ fn snapshot(s: &Store, args: &MoveSessionArgs) -> Result<Snapshot, IpcError> {
             .or_else(|| login_account_on(&src, launch.profile.as_deref()).map(str::to_string));
         if let Some(account) = account {
             launch.profile = target_login(&dst, launch.profile.as_deref(), &account);
+            same_account =
+                login_account_on(&dst, launch.profile.as_deref()) == Some(account.as_str());
         }
+    }
+    // A login on the session's own account travels with it, as a restart
+    // keeps it (forbidding an account never stops work already on it). Any
+    // other login is one fleet picked for the target, so it gives way to an
+    // allowed one, and with none the move is refused here, before anything
+    // is carried (`service::project_accounts`).
+    if !same_account {
+        launch.profile = crate::service::project_accounts::allowed_login(
+            s,
+            Some(project_id),
+            target,
+            launch.profile.as_deref(),
+            crate::store::now_unix(),
+        )?;
     }
     Ok(Snapshot {
         launch,
@@ -4241,6 +4258,43 @@ mod tests {
         let snap = snapshot(&s, &args(&f, false)).unwrap();
         assert_eq!(snap.worktree_id, remote);
         assert_eq!(snap.worktree_path, None, "the layout path is used instead");
+    }
+
+    /// A move never relaunches work on an account its project forbids: a
+    /// target with no login on the session's own account falls back to an
+    /// allowed login there, and with none the move is refused before
+    /// anything is carried. A login on the session's own account travels.
+    #[test]
+    fn a_move_never_lands_on_an_account_the_project_forbids() {
+        use crate::service::account_limits::seed_usage;
+        let f = fixture();
+        let s = f.store.lock().unwrap();
+        let now = crate::store::now_unix();
+        // The session runs on `acct-x` (the source's own login). The target
+        // has no login on it: its own is on `acct-y`, profile `work` on
+        // `acct-z`.
+        seed_usage(&s, "alpha", None, "acct-x", 10.0, now);
+        seed_usage(&s, "beta", None, "acct-y", 10.0, now);
+        seed_usage(&s, "beta", Some("work"), "acct-z", 30.0, now);
+        let login = |s: &Store| snapshot(s, &args(&f, false)).map(|snap| snap.launch.profile);
+        // Nothing forbidden: the target's own login, as before.
+        assert_eq!(login(&s).unwrap(), None);
+        // The target's own login is forbidden: the allowed one takes it.
+        s.set_account_forbidden_projects("acct-y", &[f.project_id])
+            .unwrap();
+        assert_eq!(login(&s).unwrap().as_deref(), Some("work"));
+        // No allowed login on the target: the move is refused.
+        s.set_account_forbidden_projects("acct-z", &[f.project_id])
+            .unwrap();
+        let err = login(&s).unwrap_err();
+        assert_eq!(err.code, codes::E_ACCOUNT_FORBIDDEN, "{err:?}");
+        assert!(err.message.contains("beta"), "{}", err.message);
+        // The session's own account, forbidden since it started, still
+        // travels to a target that has a login on it.
+        seed_usage(&s, "beta", Some("same"), "acct-x", 10.0, now);
+        s.set_account_forbidden_projects("acct-x", &[f.project_id])
+            .unwrap();
+        assert_eq!(login(&s).unwrap().as_deref(), Some("same"));
     }
 
     fn args(f: &Fixture, keep_source: bool) -> MoveSessionArgs {

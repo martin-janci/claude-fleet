@@ -113,6 +113,12 @@ pub fn implementer_checkout(s: &Store, item_id: i64) -> Option<Checkout> {
     })
 }
 
+/// The project [`implementer_checkout`]'s session works in.
+fn implementer_project(s: &Store, item_id: i64) -> Option<i64> {
+    let t = s.latest_item_task(item_id, "implement").ok()??;
+    s.get_session_by_id(t.worker_session_id?).ok()??.project_id
+}
+
 /// PURE: whether `cmd` may be pre-approved as `Bash(<cmd>)`: one line of
 /// words, paths and flags, no shell syntax (no quote, pipe, redirect,
 /// substitution, glob or separator), at most [`COMMAND_MAX`] bytes.
@@ -339,6 +345,18 @@ pub fn plan(
     if hosts.is_some_and(|h| !h.contains(&at.host)) {
         return None;
     }
+    // A check is work in the implementer's project: it runs under a login
+    // the project allows (`service::project_accounts`). With none on the
+    // host the step goes down the session path, whose start refuses and
+    // says why.
+    let profile = crate::service::project_accounts::allowed_login(
+        s,
+        implementer_project(s, item_id),
+        &at.host,
+        profile,
+        crate::store::now_unix(),
+    )
+    .ok()?;
     let cmds = match role {
         "test" => test_commands(s, item_id)?,
         _ => Vec::new(),
@@ -346,7 +364,7 @@ pub fn plan(
     let item = s.get_work_item(item_id).ok()??;
     Some(Plan {
         model: settings::get_string(s, settings::ORCHESTRATOR_HEADLESS_MODEL),
-        profile: profile.map(str::to_string),
+        profile,
         cmds,
         label: match &item.key {
             Some(k) => format!("{k} {}", item.title),

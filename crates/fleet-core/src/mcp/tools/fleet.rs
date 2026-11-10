@@ -290,6 +290,7 @@ impl FleetTools {
         fails E_ACCOUNT_FORBIDDEN. Returns the account row.")]
     pub(super) async fn set_account_projects(
         &self,
+        Extension(caller): Extension<Caller>,
         Parameters(args): Parameters<crate::service::project_accounts::SetAccountProjectsArgs>,
     ) -> Result<CallToolResult, McpError> {
         audit(
@@ -301,6 +302,18 @@ impl FleetTools {
                 args.forbidden_org_ids.as_ref().map(Vec::len),
             ),
         );
+        // The block is the person's own rule, and it is what refuses the
+        // agent's starts (`E_ACCOUNT_FORBIDDEN`). The operator is a full
+        // client bound to the hub's owner, so the admin gate lets it in:
+        // without this it could clear the list and start again. It reads
+        // the lists (`list_accounts`); a person changes them.
+        if caller.is_operator() {
+            return Err(to_mcp_err(IpcError::new(
+                codes::E_FORBIDDEN,
+                "which projects an account is forbidden for is the person's rule: \
+                 an agent reads it (list_accounts), a person changes it on the Accounts page",
+            )));
+        }
         ok_json(
             &crate::service::project_accounts::set_account_projects(args, &self.store)
                 .map_err(to_mcp_err)?,

@@ -39,8 +39,11 @@ it); the agent's reply in the conversation says what it changed.
 | owner, or a `drive` grant | yes | yes | yes |
 | a `read` grant (a viewer) | yes | yes | no |
 | an agent's host token | its sessions | — | no |
+| Control (the agent) | yes | — | no |
 
-An answer-only device sends nothing. The prompt goes through the hub's
+An answer-only device sends nothing. A note is a person's review: Control's
+own text for a session goes through `send_prompt` / `queue_prompt`, where a
+person approves it. The prompt goes through the hub's
 untrusted-input marker for a caller that needs one, as `queue_prompt` does.
 
 ## Wire

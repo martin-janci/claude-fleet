@@ -270,7 +270,9 @@ the account's **Not for these projects** list (the phone's account sheet has
 the same list). MCP: `set_account_projects { uuid, forbidden_project_ids }`,
 which replaces the list; the account's row carries it as
 `forbidden_project_ids` (`account_project_blocks`, migration 217). Only the
-hub owner's devices change it, as with the nickname.
+hub owner's devices change it, as with the nickname; Control (the agent)
+reads the lists and is refused the change (`E_FORBIDDEN`), since the block
+is what refuses its own starts.
 
 A whole org can be forbidden too (**Forbid for a whole org…** under the same
 list; the phone ticks "All of <org>"): every project of the org, those added
@@ -300,7 +302,15 @@ No work in a forbidden project runs on a login on that account
   a routine on its host's own login does the same (and one that names a
   forbidden login skips its run and says why), the over-limit refusal and
   `check_account_headroom { project_id }` never suggest one, and the
-  automatic switch never moves a session onto one.
+  automatic switch never moves a session onto one;
+- a start that takes no login from its caller runs under an allowed login
+  on the host, or is refused when the host has none: a review of a session
+  (`spawn_review`, which otherwise runs under the host's own login and
+  keeps the login it took), a mission's headless review or test (with no
+  allowed login the step starts a session instead, and that start is
+  refused), and a move to a host that has no login on the session's own
+  account. A move to a host that does have one keeps the account, as a
+  restart does.
 
 A profile that is not logged in yet has no account, so a start under it is
 not refused; once the host reports its account, the next start, resume or

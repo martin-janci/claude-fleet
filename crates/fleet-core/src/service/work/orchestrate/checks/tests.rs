@@ -136,6 +136,35 @@ fn a_check_runs_in_the_implementers_checkout() {
     assert!(plan(&s, item, "review", None, Some(&["mars".to_string()])).is_some());
 }
 
+/// A check is work in the implementer's project: it never runs on an
+/// account the project forbids. An allowed login on the host takes it, and
+/// with none it is not headless (the session path's start refuses).
+#[test]
+fn a_check_never_runs_on_an_account_the_project_forbids() {
+    use crate::service::account_limits::seed_usage;
+    let (s, item) = world();
+    on(&s);
+    let now = crate::store::now_unix();
+    seed_usage(&s, "mars", None, "acct-own", 20.0, now);
+    seed_usage(&s, "mars", Some("work"), "acct-work", 10.0, now);
+    // The upsert answers the id of the project `world` made.
+    let project = s.upsert_project("acme", "pos", "/p/acme/pos").unwrap();
+    s.set_account_forbidden_projects("acct-own", &[project])
+        .unwrap();
+    // The host's own login is forbidden: the review moves to the allowed
+    // one. A named allowed login is kept.
+    let p = plan(&s, item, "review", None, None).expect("a review");
+    assert_eq!(p.profile.as_deref(), Some("work"));
+    let p = plan(&s, item, "review", Some("work"), None).expect("a review");
+    assert_eq!(p.profile.as_deref(), Some("work"));
+    // Every login on the host forbidden: no headless run at all.
+    s.set_account_forbidden_projects("acct-work", &[project])
+        .unwrap();
+    for role in ["review", "test"] {
+        assert!(plan(&s, item, role, None, None).is_none(), "{role}");
+    }
+}
+
 #[test]
 fn a_test_line_that_is_not_plain_takes_the_session_path() {
     let (s, item) = world();
