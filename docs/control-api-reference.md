@@ -23,11 +23,11 @@ Access: the master, a paired device or a per-host token · readonly tokens too �
 
 ### `add_account`
 
-Add a Claude login profile on a host: a subscription login or an API key.
+Add a Claude login profile on a host: a subscription login, a setup token or an API key.
 
 Access: the master or a fleet admin's own device · deadline 300 s.
 
-Parameters (* required): `action`*, `api_key`, `code`, `daily_limit_usd`, `host_alias`*, `key`, `nickname`, `profile`*
+Parameters (* required): `account_uuid`, `action`*, `api_key`, `code`, `daily_limit_usd`, `host_alias`*, `key`, `nickname`, `profile`*, `token`
 
 ### `add_host`
 

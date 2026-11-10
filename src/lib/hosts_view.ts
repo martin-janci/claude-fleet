@@ -183,9 +183,9 @@ export function loginConflicts(
   // Accounts in first-seen order, the host's own login first.
   const groups = new Map<string, { logins: (string | null)[]; email: string | null }>();
   const add = (uuid: string | null | undefined, login: string | null, email: string | null) => {
-    // An API key (`add_account::is_api_key_account`) has no refresh token to
-    // revoke, so one key under two profiles is not a conflict.
-    if (!uuid || uuid.startsWith('apikey-')) return;
+    // An API key or a setup token (`add_account::has_no_usage_windows`) has
+    // no refresh token to revoke, so one under two profiles is not a conflict.
+    if (!uuid || uuid.startsWith('apikey-') || uuid.startsWith('setuptoken-')) return;
     const g = groups.get(uuid);
     if (g) {
       g.logins.push(login);
@@ -195,7 +195,9 @@ export function loginConflicts(
     }
   };
   add(host.account_uuid, null, null);
-  for (const p of host.claude_profiles ?? []) add(p.account_uuid, p.name, p.email ?? null);
+  for (const p of host.claude_profiles ?? []) {
+    if (!p.credential) add(p.account_uuid, p.name, p.email ?? null);
+  }
   for (const g of groups.values()) {
     if (g.logins.length > 1) out.push({ kind: 'shared_account', logins: g.logins, email: g.email });
   }

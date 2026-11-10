@@ -318,6 +318,13 @@ describe('host health helpers', () => {
       ],
     });
     expect(hostAttention({ ...base, host: keys })).toBeNull();
+    // Nor does a setup token beside a /login of its account.
+    const token = host('tok', {
+      login_split: false,
+      account_uuid: 'a',
+      claude_profiles: [{ name: 'tok', account_uuid: 'a', credential: 'setup_token' }],
+    });
+    expect(hostAttention({ ...base, host: token })).toBeNull();
     // One login per account, or nothing known, earns no mark.
     const clean = host('ok', {
       login_split: false,

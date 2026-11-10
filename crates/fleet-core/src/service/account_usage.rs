@@ -652,7 +652,10 @@ pub fn source_hosts(account_uuid: &str, hosts: &[HostRow], sticky: Option<&str>)
             out.push(h.alias.clone());
         }
         for p in h.claude_profiles.iter().flatten() {
+            // A setup-token profile cannot read usage (its token is
+            // inference-only), so it is never a source.
             if p.account_uuid.as_deref() == Some(account_uuid)
+                && p.credential.is_none()
                 && crate::validate::claude_profile(&p.name).is_ok()
             {
                 out.push(source_label(&h.alias, Some(&p.name)));
@@ -2398,6 +2401,7 @@ curl() { echo HIJACKED; }
             name: name.into(),
             account_uuid: Some(acct.into()),
             email: None,
+            credential: None,
         };
         let mut b = host("b", Some("H"), true);
         b.claude_profiles = Some(vec![profile("work", "A"), profile("bad name", "A")]);
@@ -2414,6 +2418,19 @@ curl() { echo HIJACKED; }
         assert_eq!(parse_source("b"), ("b", None));
     }
 
+    #[test]
+    fn a_setup_token_profile_is_never_a_usage_source() {
+        // Its token is inference-only: /api/oauth/usage refuses it.
+        let mut a = host("a", Some("H"), true);
+        a.claude_profiles = Some(vec![crate::store::HostProfileRow {
+            name: "tok".into(),
+            account_uuid: Some("A".into()),
+            email: None,
+            credential: Some("setup_token".into()),
+        }]);
+        assert!(source_hosts("A", &[a], None).is_empty());
+    }
+
     #[tokio::test]
     async fn a_profile_source_reads_that_profiles_credentials() {
         let mut b = host("b", None, true);
@@ -2421,6 +2438,7 @@ curl() { echo HIJACKED; }
             name: "work".into(),
             account_uuid: Some("acct".into()),
             email: None,
+            credential: None,
         }]);
         let fake = FakeSsh::new();
         fake.on_host(

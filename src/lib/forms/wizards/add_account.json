@@ -14,7 +14,8 @@
           "label": "Sign in with",
           "required": true,
           "value": "subscription",
-          "options": [["subscription", "Claude subscription"], ["api_key", "API key"]]
+          "options": [["subscription", "Claude subscription"], ["setup_token", "Setup token"], ["api_key", "API key"]],
+          "help": "Setup token: a claude setup-token token, valid about a year and never revoked by another copy of the login. Best on a host nobody signs in on by hand."
         },
         {
           "name": "profile",
@@ -32,6 +33,22 @@
           "required": true,
           "secret_note": "sk-ant-…, checked with Anthropic, then written to the host only. Fleet keeps no copy.",
           "when": { "field": "kind", "eq": "api_key" }
+        },
+        {
+          "name": "token",
+          "type": "secret",
+          "label": "Setup token",
+          "required": true,
+          "secret_note": "sk-ant-oat01-…, from claude setup-token on any machine. Written to the host only. Fleet keeps no copy.",
+          "when": { "field": "kind", "eq": "setup_token" }
+        },
+        {
+          "name": "account",
+          "type": "select",
+          "label": "Account",
+          "options": [["", "Not listed: its own account"]],
+          "help": "Whose subscription the token is. Anthropic does not say, so pick it: sessions under the token then count against that account's limits.",
+          "when": { "field": "kind", "eq": "setup_token" }
         },
         {
           "name": "daily_limit",

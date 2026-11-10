@@ -1,8 +1,8 @@
 <script lang="ts">
   // + Add account (M15 step G2.9). The form asks for the host, the kind
-  // (Claude subscription or API key) and the account's name; an API key is
-  // checked with Anthropic and written to the host in one call, and its
-  // provider's refusal comes back on the field. A subscription opens a login
+  // (Claude subscription, setup token or API key) and the account's name; a
+  // key or setup token is checked with Anthropic and written to the host in
+  // one call, and its provider's refusal comes back on the field. A subscription opens a login
   // pane on the host and goes on to the sign-in step (AddAccountLogin).
   import WizardDialog from './forms/WizardDialog.svelte';
   import AddAccountLogin from './AddAccountLogin.svelte';
@@ -11,7 +11,8 @@
   import { push } from './toasts';
   import type { IpcError } from './result';
   import type { FieldProblem, Values } from './forms/forms';
-  import { addApiKey, answerProblems, readAnswers, startLogin } from './add_account';
+  import { addApiKey, addSetupToken, answerProblems, readAnswers, startLogin, tokenAccountChoices } from './add_account';
+  import { accounts, accountLabel } from './accounts';
 
   let {
     onclose,
@@ -28,6 +29,7 @@
     ...WIZARDS.add_account,
     spec: withChoices(WIZARDS.add_account.spec, {
       host: $hosts.filter((h) => !h.hidden).map((h): [string, string] => [h.alias, h.alias]),
+      account: tokenAccountChoices($accounts, accountLabel),
     }),
   });
 
@@ -53,6 +55,19 @@
       busy = false;
       if (r.ok) {
         push({ kind: 'success', message: `${a.profile} added on ${a.host}. New sessions there can bill it.` });
+        onclose();
+      } else {
+        problems = problemsOf(r.error);
+        error = problems.length > 0 ? null : r.error;
+      }
+      return;
+    }
+    if (a.kind === 'setup_token') {
+      const r = await addSetupToken(a);
+      busy = false;
+      if (r.ok) {
+        const note = r.value.verified ? '' : ' Anthropic did not confirm it yet; the first session there will.';
+        push({ kind: 'success', message: `${a.profile} added on ${a.host}. New sessions there can bill it.${note}` });
         onclose();
       } else {
         problems = problemsOf(r.error);

@@ -2917,11 +2917,13 @@ async fn reconcile_attributes_a_profile_session_to_its_profiles_login() {
                     name: "work".into(),
                     account_uuid: Some("acc-work".into()),
                     email: Some("work@x.com".into()),
+                    credential: None,
                 },
                 crate::store::HostProfileRow {
                     name: "fresh".into(),
                     account_uuid: None,
                     email: None,
+                    credential: None,
                 },
             ]
         );
@@ -8067,11 +8069,13 @@ fn a_switch_links_the_new_logins_known_account_at_once() {
                 name: "work".into(),
                 account_uuid: Some("acc-work".into()),
                 email: None,
+                credential: None,
             },
             crate::store::HostProfileRow {
                 name: "fresh".into(),
                 account_uuid: None,
                 email: None,
+                credential: None,
             },
         ],
     )

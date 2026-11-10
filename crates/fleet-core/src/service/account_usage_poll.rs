@@ -50,9 +50,11 @@ pub(crate) fn distinct_account_uuids(hosts: &[HostRow]) -> Vec<String> {
             hosts
                 .iter()
                 .flat_map(|h| h.claude_profiles.iter().flatten())
+                // A setup token is inference-only: it cannot read usage.
+                .filter(|p| p.credential.is_none())
                 .filter_map(|p| p.account_uuid.clone()),
         )
-        .filter(|u| !crate::service::add_account::is_api_key_account(u))
+        .filter(|u| !crate::service::add_account::has_no_usage_windows(u))
         .filter(|u| seen.insert(u.clone()))
         .collect()
 }

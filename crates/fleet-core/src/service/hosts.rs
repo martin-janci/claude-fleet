@@ -868,10 +868,17 @@ pub(crate) fn sync_host_profiles(
                 if let Some(a) = account.as_ref() {
                     s.upsert_account(a)?;
                 }
+                let credential = p
+                    .account
+                    .as_ref()
+                    .and_then(|a| a.fleet_credential.as_deref())
+                    .filter(|c| *c == crate::service::add_account::SETUP_TOKEN_CREDENTIAL)
+                    .map(str::to_string);
                 rows.push(crate::store::HostProfileRow {
                     name: p.name.clone(),
                     account_uuid: account.as_ref().map(|a| a.uuid.clone()),
                     email: account.and_then(|a| a.email),
+                    credential,
                 });
             }
             s.set_host_profiles(alias, &rows)?;
@@ -921,6 +928,15 @@ pub struct OauthAccount {
     /// blocking the account (migration 028).
     #[serde(rename = "hasExtraUsageEnabled")]
     pub has_extra_usage_enabled: Option<bool>,
+    /// Fleet's own mark in a profile's `.fleet-account.json`: how the
+    /// profile holds its credential (`"setup_token"`). Never in a real
+    /// `.claude.json`.
+    #[serde(
+        rename = "fleetCredential",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub fleet_credential: Option<String>,
 }
 
 /// Parse the third probe section. Empty / "null" / "{}" → None.

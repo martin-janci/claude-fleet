@@ -11,10 +11,12 @@ import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import AddAccountDialog from './AddAccountDialog.svelte';
 import { hosts } from './hosts';
 import { toasts } from './toasts';
-import { answerProblems, asksForCode, paneChoices, profileProblem, readAnswers } from './add_account';
+import { answerProblems, asksForCode, paneChoices, profileProblem, readAnswers, tokenAccountChoices } from './add_account';
+import { accounts } from './accounts';
 
 const invoke = mockedInvoke as ReturnType<typeof vi.fn>;
 const KEY = 'sk-ant-api03-abcdefghijklmnopqrstuvwxyz';
+const TOKEN = 'sk-ant-oat01-abcdefghijklmnopqrstuvwxyz0123456789';
 
 let loggedIn = false;
 let calls: Record<string, unknown>[] = [];
@@ -39,6 +41,9 @@ beforeEach(() => {
       }
       return { host_alias: a.host_alias, profile: a.profile, account_uuid: 'apikey-0123456789abcdef', daily_limit_usd: a.daily_limit_usd };
     }
+    if (a.action === 'setup_token') {
+      return { host_alias: a.host_alias, profile: a.profile, account_uuid: a.account_uuid ?? 'setuptoken-0123456789abcdef', verified: false };
+    }
     if (a.action === 'start_login') return { session: `fleet-login--${a.profile}` };
     if (a.action === 'login_status') {
       return loggedIn
@@ -54,7 +59,7 @@ beforeEach(() => {
   });
 });
 
-async function fill(kind: 'subscription' | 'api_key', profile: string, key?: string, limit?: string) {
+async function fill(kind: 'subscription' | 'setup_token' | 'api_key', profile: string, key?: string, limit?: string) {
   await fireEvent.click(screen.getByTestId(`form-field-kind-${kind}`));
   await fireEvent.input(screen.getByTestId('form-field-profile'), { target: { value: profile } });
   if (key !== undefined) await fireEvent.input(screen.getByTestId('form-field-api_key'), { target: { value: key } });
@@ -63,6 +68,35 @@ async function fill(kind: 'subscription' | 'api_key', profile: string, key?: str
 }
 
 describe('+ Add account', () => {
+  it('adds a setup token in one call, tied to the account picked', async () => {
+    accounts.set([
+      { uuid: 'acct-real', email: 'me@x.com', display_name: 'Me' } as never,
+      { uuid: 'apikey-0123456789abcdef', display_name: 'API key · team' } as never,
+    ]);
+    const onclose = vi.fn();
+    render(AddAccountDialog, { props: { onclose, host: 'mercury' } });
+    await fireEvent.click(screen.getByTestId('form-field-kind-setup_token'));
+    await fireEvent.input(screen.getByTestId('form-field-profile'), { target: { value: 'tok' } });
+    await fireEvent.input(screen.getByTestId('form-field-token'), { target: { value: TOKEN } });
+    expect(screen.queryByTestId('form-field-account-apikey-0123456789abcdef')).toBeNull();
+    await fireEvent.click(screen.getByTestId('form-field-account-acct-real'));
+    await fireEvent.click(screen.getByTestId('form-submit'));
+    await waitFor(() => expect(onclose).toHaveBeenCalled());
+    expect(calls).toEqual([
+      { action: 'setup_token', host_alias: 'mercury', profile: 'tok', token: TOKEN, account_uuid: 'acct-real' },
+    ]);
+    accounts.set([]);
+  });
+
+  it('asks for a setup token, not an API key, before sending', () => {
+    const a = readAnswers({ host: 'mercury', kind: 'setup_token', profile: 'tok', token: 'sk-ant-api03-x' });
+    expect(answerProblems(a).map((p) => p.field)).toEqual(['token']);
+    expect(tokenAccountChoices([{ uuid: 'setuptoken-1' }, { uuid: 'u' }], (r) => r.uuid)).toEqual([
+      ['', 'Not listed: its own account'],
+      ['u', 'u'],
+    ]);
+  });
+
   it('adds an API key with its daily limit in one call', async () => {
     const onclose = vi.fn();
     render(AddAccountDialog, { props: { onclose, host: 'mercury' } });
@@ -123,6 +157,8 @@ describe('add_account helpers', () => {
       kind: 'api_key',
       profile: 'p',
       apiKey: 'k',
+      token: '',
+      accountUuid: '',
       dailyLimit: null,
     });
     expect(readAnswers({ host: 'm', profile: 'p', daily_limit: 5 }).kind).toBe('subscription');

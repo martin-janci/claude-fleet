@@ -8,7 +8,7 @@
 import { invokeCmd, type Result } from './result';
 import type { FieldProblem, Values } from './forms/forms';
 
-export type AccountKind = 'subscription' | 'api_key';
+export type AccountKind = 'subscription' | 'setup_token' | 'api_key';
 
 export interface LoginStatus {
   logged_in: boolean;
@@ -29,6 +29,14 @@ export interface ApiKeyAdded {
   daily_limit_usd?: number;
 }
 
+export interface SetupTokenAdded {
+  host_alias: string;
+  profile: string;
+  account_uuid: string;
+  /** Anthropic accepted the token on a request; false: not refused, not proven. */
+  verified: boolean;
+}
+
 /** The keys the login pane takes: the CLI's numbered choices and these. */
 export const LOGIN_KEYS = ['Enter', 'Up', 'Down', 'Escape'] as const;
 export type LoginKey = (typeof LOGIN_KEYS)[number] | '1' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9';
@@ -47,6 +55,10 @@ export interface AddAccountAnswers {
   kind: AccountKind;
   profile: string;
   apiKey: string;
+  /** setup_token: the `claude setup-token` token. */
+  token: string;
+  /** setup_token: whose account it is; '' = its own. */
+  accountUuid: string;
   dailyLimit: number | null;
 }
 
@@ -54,9 +66,11 @@ export function readAnswers(v: Values): AddAccountAnswers {
   const limit = typeof v.daily_limit === 'number' ? v.daily_limit : Number(v.daily_limit);
   return {
     host: String(v.host ?? '').trim(),
-    kind: v.kind === 'api_key' ? 'api_key' : 'subscription',
+    kind: v.kind === 'api_key' || v.kind === 'setup_token' ? v.kind : 'subscription',
     profile: String(v.profile ?? '').trim(),
     apiKey: String(v.api_key ?? '').trim(),
+    token: String(v.token ?? '').trim(),
+    accountUuid: String(v.account ?? '').trim(),
     dailyLimit: v.daily_limit === undefined || v.daily_limit === null || v.daily_limit === '' || !Number.isFinite(limit) || limit <= 0 ? null : limit,
   };
 }
@@ -69,6 +83,9 @@ export function answerProblems(a: AddAccountAnswers): FieldProblem[] {
   if (p) out.push({ field: 'profile', problem: p });
   if (a.kind === 'api_key' && !a.apiKey.startsWith('sk-ant-')) {
     out.push({ field: 'api_key', problem: 'An Anthropic API key starts with sk-ant-.' });
+  }
+  if (a.kind === 'setup_token' && !a.token.startsWith('sk-ant-oat01-')) {
+    out.push({ field: 'token', problem: 'A setup token starts with sk-ant-oat01-. Run claude setup-token to make one.' });
   }
   return out;
 }
@@ -85,6 +102,27 @@ export function addApiKey(a: AddAccountAnswers): Promise<Result<ApiKeyAdded>> {
     api_key: a.apiKey,
     daily_limit_usd: a.dailyLimit,
   });
+}
+
+export function addSetupToken(a: AddAccountAnswers): Promise<Result<SetupTokenAdded>> {
+  return call<SetupTokenAdded>({
+    action: 'setup_token',
+    host_alias: a.host,
+    profile: a.profile,
+    token: a.token,
+    ...(a.accountUuid ? { account_uuid: a.accountUuid } : {}),
+  });
+}
+
+/** The accounts a setup token can be tied to: `/login` accounts fleet
+ *  knows, not API keys or other tokens (`add_account::has_no_usage_windows`). */
+export function tokenAccountChoices<R extends { uuid: string }>(rows: readonly R[], label: (r: R) => string): [string, string][] {
+  return [
+    ['', 'Not listed: its own account'],
+    ...rows
+      .filter((r) => !r.uuid.startsWith('apikey-') && !r.uuid.startsWith('setuptoken-'))
+      .map((r): [string, string] => [r.uuid, label(r)]),
+  ];
 }
 
 export function startLogin(host: string, profile: string): Promise<Result<{ session: string }>> {

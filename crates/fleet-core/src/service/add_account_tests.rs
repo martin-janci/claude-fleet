@@ -235,6 +235,7 @@ async fn a_key_never_lands_on_a_login_profile() {
                 name: "api".into(),
                 account_uuid: Some("6f1c-real-login".into()),
                 email: Some("me@x.com".into()),
+                credential: None,
             }],
         )
         .unwrap();
@@ -414,6 +415,7 @@ fn a_spent_daily_limit_refuses_a_start_under_that_login() {
             name: "api".into(),
             account_uuid: Some(uuid.clone()),
             email: None,
+            credential: None,
         }],
     )
     .unwrap();
@@ -470,7 +472,7 @@ fn the_written_profile_is_listed_and_exported() {
     let write = |profile: &str| {
         let mut child = std::process::Command::new("bash")
             .arg("-c")
-            .arg(write_script(profile))
+            .arg(write_script(profile, API_KEY_FILE))
             .env("HOME", home.path())
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
@@ -688,4 +690,324 @@ fn a_cancelled_login_leaves_no_profile_it_made_behind() {
     assert!(dir("done").join(".claude.json").exists());
     assert!(!dir("done").join(NEW_LOGIN_MARK).exists());
     assert!(dir("mine").join(".claude.json").exists());
+}
+
+// --- setup token ---------------------------------------------------------
+
+const TOKEN: &str = "sk-ant-oat01-abcdefghijklmnopqrstuvwxyz0123456789_ABCDEFGHIJ";
+
+fn anthropic_says(status: u16) -> FakeTransport {
+    let http = FakeTransport::new();
+    http.always(
+        Method::Get,
+        "/v1/models",
+        Ok(Response::json(
+            status,
+            &serde_json::json!({"error": {"message": "nope"}}),
+        )),
+    );
+    http
+}
+
+fn store_with_login_account() -> Mutex<Store> {
+    let store = store_with_host();
+    store
+        .lock()
+        .unwrap()
+        .upsert_account(&crate::store::AccountRow {
+            uuid: "acct-real".into(),
+            email: Some("me@x.com".into()),
+            display_name: Some("Me".into()),
+            organization_name: Some("Org".into()),
+            organization_uuid: Some("org-1".into()),
+            seat_tier: Some("max".into()),
+            last_seen_at: Some(NOW),
+            nickname: None,
+            has_extra_usage: false,
+            forbidden_project_ids: Vec::new(),
+            forbidden_org_ids: Vec::new(),
+        })
+        .unwrap();
+    store
+}
+
+#[tokio::test]
+async fn a_setup_token_on_a_known_account_goes_to_the_host_on_stdin() {
+    let store = store_with_login_account();
+    let ssh = Arc::new(FakeSsh::new());
+    ssh.on(
+        Match::script_contains(SETUP_TOKEN_FILE),
+        Reply::ok("__fleet_ok__\n"),
+    );
+    let mut a = args("setup_token");
+    a.profile = "tok".into();
+    a.token = Some(TOKEN.into());
+    a.account_uuid = Some("acct-real".into());
+    // An inference-only token may not list models: not refused, not proven.
+    let http = anthropic_says(403);
+    let out = run(&a, &store, ssh.as_ref(), &tmux(&ssh), &http, NOW)
+        .await
+        .unwrap();
+    assert_eq!(out["account_uuid"], "acct-real");
+    assert_eq!(out["verified"], false);
+    assert!(!out.to_string().contains(TOKEN));
+    let req = &http.requests()[0];
+    assert_eq!(
+        req.header_value("authorization"),
+        Some(format!("Bearer {TOKEN}").as_str())
+    );
+    assert!(!format!("{req:?}").contains(TOKEN), "Debug masks it");
+    assert!(!format!("{a:?}").contains(TOKEN));
+    assert!(!a.audit_detail().contains(TOKEN));
+
+    let call = &ssh.calls()[0];
+    assert!(!call.command().contains(TOKEN), "never in argv");
+    let stdin = String::from_utf8(call.stdin.clone().unwrap()).unwrap();
+    let mut lines = stdin.lines();
+    assert_eq!(lines.next(), Some(TOKEN));
+    let acct: serde_json::Value = serde_json::from_str(lines.next().unwrap()).unwrap();
+    assert_eq!(acct["accountUuid"], "acct-real");
+    assert_eq!(acct["fleetCredential"], "setup_token");
+    assert!(
+        acct.get("emailAddress").is_none(),
+        "the /login reports those"
+    );
+
+    let s = store.lock().unwrap();
+    let account = s.get_account_by_uuid("acct-real").unwrap().unwrap();
+    assert_eq!(account.seat_tier.as_deref(), Some("max"), "left alone");
+    let profiles = s
+        .get_host_row("mercury")
+        .unwrap()
+        .unwrap()
+        .claude_profiles
+        .unwrap();
+    assert_eq!(profiles[0].name, "tok");
+    assert_eq!(profiles[0].account_uuid.as_deref(), Some("acct-real"));
+    assert_eq!(profiles[0].credential.as_deref(), Some("setup_token"));
+    assert_eq!(profiles[0].email.as_deref(), Some("me@x.com"));
+}
+
+#[tokio::test]
+async fn a_setup_token_without_an_account_is_its_own_and_can_be_renewed() {
+    let store = store_with_host();
+    let ssh = Arc::new(FakeSsh::new());
+    ssh.on(
+        Match::script_contains(SETUP_TOKEN_FILE),
+        Reply::ok("__fleet_ok__\n"),
+    );
+    let mut a = args("setup_token");
+    a.profile = "tok".into();
+    a.token = Some(TOKEN.into());
+    let out = run(&a, &store, ssh.as_ref(), &tmux(&ssh), &anthropic_ok(), NOW)
+        .await
+        .unwrap();
+    let uuid = setup_token_account_uuid(TOKEN);
+    assert!(uuid.starts_with("setuptoken-") && uuid.len() == 27);
+    assert!(has_no_usage_windows(&uuid) && !is_api_key_account(&uuid));
+    assert_eq!(out["account_uuid"], uuid.as_str());
+    assert_eq!(out["verified"], true);
+    let seat = store
+        .lock()
+        .unwrap()
+        .get_account_by_uuid(&uuid)
+        .unwrap()
+        .unwrap()
+        .seat_tier;
+    assert_eq!(seat.as_deref(), Some("setup_token"));
+
+    // The yearly renewal: a new token over a setup-token profile. It is
+    // the sign-in again, so the profile's signed-out card goes.
+    let out_since = crate::store::SignedOutLogin {
+        profile: Some("tok".into()),
+        since: 5,
+        checked_at: 5,
+    };
+    store
+        .lock()
+        .unwrap()
+        .set_host_signed_out_logins(&a.host_alias, &[out_since])
+        .unwrap();
+    let renewed = format!("{TOKEN}X");
+    a.token = Some(renewed.clone());
+    let out = run(&a, &store, ssh.as_ref(), &tmux(&ssh), &anthropic_ok(), NOW)
+        .await
+        .unwrap();
+    let host = store
+        .lock()
+        .unwrap()
+        .get_host_row(&a.host_alias)
+        .unwrap()
+        .unwrap();
+    assert!(
+        host.signed_out_logins.is_empty(),
+        "the new token signs it in"
+    );
+    assert!(crate::service::login_health::is_setup_token(
+        &host,
+        Some("tok")
+    ));
+    assert!(!crate::service::login_health::is_setup_token(&host, None));
+    // It stays on the account it was: the id is the first token's.
+    assert_eq!(out["account_uuid"], uuid.as_str());
+    // But an API key is not accepted over it.
+    a.action = "api_key".into();
+    a.api_key = Some(KEY.into());
+    let e = run(&a, &store, ssh.as_ref(), &tmux(&ssh), &anthropic_ok(), NOW)
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, codes::E_EXISTS);
+}
+
+#[tokio::test]
+async fn a_setup_token_is_refused_where_it_does_not_belong() {
+    let store = store_with_login_account();
+    let ssh = Arc::new(FakeSsh::new());
+    let http = anthropic_ok();
+    let mut a = args("setup_token");
+    a.profile = "tok".into();
+
+    // Not a setup token: an API key, or nothing like one.
+    for bad in [KEY, "hello", ""] {
+        a.token = Some(bad.into());
+        let e = run(&a, &store, ssh.as_ref(), &tmux(&ssh), &http, NOW)
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, codes::E_INVALID, "{bad}");
+        assert_eq!(e.details.as_ref().unwrap()["problems"][0]["field"], "token");
+    }
+    // And a setup token pasted as an API key says which to pick.
+    let mut k = args("api_key");
+    k.api_key = Some(TOKEN.into());
+    let e = run(&k, &store, ssh.as_ref(), &tmux(&ssh), &http, NOW)
+        .await
+        .unwrap_err();
+    assert!(e.message.contains("setup token"), "{}", e.message);
+
+    // An account fleet does not know, or one that is not a /login.
+    a.token = Some(TOKEN.into());
+    for acct in ["acct-unknown", "apikey-0123456789abcdef"] {
+        a.account_uuid = Some(acct.into());
+        let e = run(&a, &store, ssh.as_ref(), &tmux(&ssh), &http, NOW)
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, codes::E_INVALID, "{acct}");
+    }
+    // A /login profile is never overwritten.
+    a.account_uuid = None;
+    a.profile = "work".into();
+    store
+        .lock()
+        .unwrap()
+        .set_host_profiles(
+            "mercury",
+            &[crate::store::HostProfileRow {
+                name: "work".into(),
+                account_uuid: Some("acct-real".into()),
+                email: None,
+                credential: None,
+            }],
+        )
+        .unwrap();
+    let e = run(&a, &store, ssh.as_ref(), &tmux(&ssh), &http, NOW)
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, codes::E_EXISTS);
+    assert!(ssh.calls().is_empty() && http.requests().is_empty());
+
+    // A 401 is Anthropic's refusal, on the field; nothing is written.
+    a.profile = "tok".into();
+    let e = run(
+        &a,
+        &store,
+        ssh.as_ref(),
+        &tmux(&ssh),
+        &anthropic_says(401),
+        NOW,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(e.code, codes::E_INVALID);
+    assert!(!e.message.contains(TOKEN));
+    // A 5xx is no answer: try again.
+    let e = run(
+        &a,
+        &store,
+        ssh.as_ref(),
+        &tmux(&ssh),
+        &anthropic_says(503),
+        NOW,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(e.code, codes::E_PROBE);
+    assert!(ssh.calls().is_empty());
+}
+
+/// The real shell: the token lands mode 600, the profile lists as a
+/// setup-token one (remote script and local read alike), and a launch
+/// exports it as CLAUDE_CODE_OAUTH_TOKEN, not as an API key.
+#[cfg(unix)]
+#[test]
+fn a_written_setup_token_is_listed_marked_and_exported() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    let mut child = std::process::Command::new("bash")
+        .arg("-c")
+        .arg(write_script("tok", SETUP_TOKEN_FILE))
+        .env("HOME", home.path())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let account = serde_json::json!({"accountUuid": "acct-real", "fleetCredential": "setup_token"});
+    use std::io::Write as _;
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(format!("{TOKEN}\n{account}\n{{\"hasCompletedOnboarding\":true}}\n").as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(String::from_utf8_lossy(&out.stdout).contains(OK_MARK));
+    let file = home
+        .path()
+        .join(".claude-profiles/tok")
+        .join(SETUP_TOKEN_FILE);
+    assert_eq!(
+        std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+
+    let listed = std::process::Command::new("bash")
+        .arg("-c")
+        .arg(crate::tmux::profiles_script())
+        .env("HOME", home.path())
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&listed.stdout);
+    assert!(!stdout.contains(TOKEN));
+    let remote = crate::tmux::parse_profiles(&stdout);
+    let local = crate::tmux::read_local_profiles(home.path()).unwrap();
+    for got in [&remote, &local] {
+        let a = got[0].account.as_ref().unwrap();
+        assert_eq!(a.uuid.as_deref(), Some("acct-real"));
+        assert_eq!(a.fleet_credential.as_deref(), Some("setup_token"));
+    }
+
+    let exported = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!(
+            "export CLAUDE_CONFIG_DIR=\"$HOME/.claude-profiles/tok\"; {}printf '%s|%s' \"$CLAUDE_CODE_OAUTH_TOKEN\" \"$ANTHROPIC_API_KEY\"",
+            crate::tmux::PROFILE_API_KEY
+        ))
+        .env("HOME", home.path())
+        .env_remove("CLAUDE_CODE_OAUTH_TOKEN")
+        .env_remove("ANTHROPIC_API_KEY")
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&exported.stdout),
+        format!("{TOKEN}|")
+    );
 }

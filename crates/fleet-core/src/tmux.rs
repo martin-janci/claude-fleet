@@ -446,13 +446,14 @@ pub struct HostProfile {
 /// at the profile, and squeezed onto one line. An API-key profile (M15 step
 /// G2.9: `.fleet-api-key` beside a `.fleet-account.json` that
 /// `service::add_account` wrote) has no `/login`; its line carries that
-/// file instead, so it is an account like any other. The key file is only
-/// tested for, never read.
+/// file instead, so it is an account like any other. A setup-token profile
+/// (`.fleet-oauth-token`) is read the same way. The key and token files are
+/// only tested for, never read.
 pub(crate) fn profiles_script() -> String {
     format!(
         "for d in \"$HOME\"/.claude-profiles/*/; do [ -d \"$d\" ] || continue; n=$(basename \"$d\"); \
          case \"$n\" in ''|[!A-Za-z0-9]*|*[!A-Za-z0-9_-]*) continue;; esac; \
-         if [ -r \"$d.fleet-api-key\" ] && [ -r \"$d.fleet-account.json\" ]; then a=$(head -c 4096 \"$d.fleet-account.json\" | tr -d '\\n'); \
+         if {{ [ -r \"$d.fleet-api-key\" ] || [ -r \"$d.fleet-oauth-token\" ]; }} && [ -r \"$d.fleet-account.json\" ]; then a=$(head -c 4096 \"$d.fleet-account.json\" | tr -d '\\n'); \
          else a=$(CLAUDE_CONFIG_DIR=\"${{d%/}}\"; {} | tr -d '\\n'); fi; \
          printf '@@P\\t%s\\t%s\\n' \"$n\" \"$a\"; done",
         crate::service::hosts::OAUTH_ACCOUNT_SCRIPT
@@ -511,14 +512,13 @@ pub(crate) fn read_local_profiles(home: &std::path::Path) -> Option<Vec<HostProf
     Some(out)
 }
 
-/// The account of an API-key profile at `dir`, as [`profiles_script`]
-/// reads it on a remote host: `.fleet-account.json` when `.fleet-api-key`
-/// is beside it. The key file is only tested for, never read.
+/// The account of an API-key or setup-token profile at `dir`, as
+/// [`profiles_script`] reads it on a remote host: `.fleet-account.json`
+/// when `.fleet-api-key` or `.fleet-oauth-token` is beside it. The key and
+/// token files are only tested for, never read.
 fn api_key_account_in(dir: &std::path::Path) -> Option<crate::service::hosts::OauthAccount> {
-    if !dir
-        .join(crate::service::add_account::API_KEY_FILE)
-        .is_file()
-    {
+    use crate::service::add_account::{API_KEY_FILE, SETUP_TOKEN_FILE};
+    if !dir.join(API_KEY_FILE).is_file() && !dir.join(SETUP_TOKEN_FILE).is_file() {
         return None;
     }
     let raw = std::fs::read(dir.join(crate::service::add_account::API_ACCOUNT_FILE)).ok()?;
@@ -1912,8 +1912,11 @@ pub(crate) const CL_FALLBACK: &str = r#"if ! command -v cl >/dev/null 2>&1; then
 /// `claude` that follows (rung 3 of docs/accounts.md, ahead of any
 /// `/login`). Read with the shell's own `read`, so the key is never in an
 /// argv, a tmux environment or the pane command; a profile without the file
-/// is untouched. Follows the `export CLAUDE_CONFIG_DIR=…;` it needs.
-pub const PROFILE_API_KEY: &str = r#"if [ -r "$CLAUDE_CONFIG_DIR/.fleet-api-key" ]; then IFS= read -r ANTHROPIC_API_KEY < "$CLAUDE_CONFIG_DIR/.fleet-api-key"; export ANTHROPIC_API_KEY; fi; "#;
+/// is untouched. Likewise a setup-token profile's `.fleet-oauth-token`
+/// becomes `CLAUDE_CODE_OAUTH_TOKEN` (rung 5: a long-lived token with no
+/// refresh token, so no other copy can revoke it). Follows the `export
+/// CLAUDE_CONFIG_DIR=…;` it needs.
+pub const PROFILE_API_KEY: &str = r#"if [ -r "$CLAUDE_CONFIG_DIR/.fleet-api-key" ]; then IFS= read -r ANTHROPIC_API_KEY < "$CLAUDE_CONFIG_DIR/.fleet-api-key"; export ANTHROPIC_API_KEY; fi; if [ -r "$CLAUDE_CONFIG_DIR/.fleet-oauth-token" ]; then IFS= read -r CLAUDE_CODE_OAUTH_TOKEN < "$CLAUDE_CONFIG_DIR/.fleet-oauth-token"; export CLAUDE_CODE_OAUTH_TOKEN; fi; "#;
 
 /// Makes `$CLAUDE_CONFIG_DIR` a credential profile that shares everything
 /// with `~/.claude` except the login (docs/accounts.md). Each visible entry

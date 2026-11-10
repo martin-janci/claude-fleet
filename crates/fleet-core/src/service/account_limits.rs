@@ -826,6 +826,7 @@ pub(crate) fn seed_usage(
                 name: p.into(),
                 account_uuid: Some(uuid.into()),
                 email: None,
+                credential: None,
             });
             s.set_host_profiles(host_alias, &list).unwrap();
         }
@@ -940,6 +941,7 @@ mod tests {
             name: name.into(),
             account_uuid: uuid.map(Into::into),
             email: None,
+            credential: None,
         }
     }
 
@@ -1145,6 +1147,7 @@ mod tests {
                 name: "work".into(),
                 account_uuid: Some("acct-work".into()),
                 email: None,
+                credential: None,
             }],
         )
         .unwrap();

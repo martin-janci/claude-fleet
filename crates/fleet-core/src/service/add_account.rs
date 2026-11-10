@@ -25,6 +25,19 @@
 //! never in an argv, a log, an audit line, the store or a reply; fleet keeps
 //! no copy, so changing it means adding it again.
 //!
+//! **Setup token.** `setup_token` writes a `claude setup-token` token
+//! (`sk-ant-oat01-…`, valid about a year) the same way, into
+//! `.fleet-oauth-token`; a session exports it as `CLAUDE_CODE_OAUTH_TOKEN`.
+//! It has no refresh token, so no other copy of the login can revoke it
+//! ("Two copies of one login", docs/accounts.md), which makes it the login
+//! to use on a headless host. Its scope is `user:inference` only: Anthropic
+//! will not say whose it is (`/api/oauth/profile` refuses it) and it cannot
+//! read usage, so the person names the account (`account_uuid`, an account
+//! fleet already knows from a `/login`), and the profile is never a usage
+//! source (`HostProfileRow::credential`). Without one it is listed as its
+//! own account, `setuptoken-` + 16 hex of the token's SHA-256. Writing a
+//! token over a setup-token profile replaces it (the yearly renewal).
+//!
 //! **Daily limit.** An API-key account may carry a daily spend limit in
 //! USD (`accounts.daily_limits`, a JSON map by account). Spend is the same
 //! per-account roll-up the Accounts page shows (`usage_daily_account`), so
@@ -52,6 +65,14 @@ pub const API_ACCOUNT_FILE: &str = ".fleet-account.json";
 /// Every API-key account's uuid starts with this; no `/login` account does
 /// (theirs are UUIDs).
 pub const API_KEY_ACCOUNT_PREFIX: &str = "apikey-";
+/// A setup-token profile's token file, read by `tmux::PROFILE_API_KEY`.
+pub const SETUP_TOKEN_FILE: &str = ".fleet-oauth-token";
+/// `HostProfileRow::credential` (and `fleetCredential` in the profile's
+/// `.fleet-account.json`) of a setup-token profile.
+pub const SETUP_TOKEN_CREDENTIAL: &str = "setup_token";
+/// A setup token fleet could not tie to a known account is listed under
+/// this prefix and 16 hex of its SHA-256.
+pub const SETUP_TOKEN_ACCOUNT_PREFIX: &str = "setuptoken-";
 /// The internal setting holding the daily limits: `{account_uuid: usd}`.
 pub const DAILY_LIMITS_KEY: &str = "accounts.daily_limits";
 /// The highest daily limit accepted, in USD.
@@ -60,6 +81,8 @@ pub const MAX_DAILY_LIMIT_USD: f64 = 100_000.0;
 const MODELS_URL: &str = "https://api.anthropic.com/v1/models?limit=1";
 const ANTHROPIC_HOST: &str = "api.anthropic.com";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
+/// The beta header an OAuth bearer token needs on Anthropic's API.
+const OAUTH_BETA: &str = "oauth-2025-04-20";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const WRITE_WALL_CLOCK: Duration = Duration::from_secs(30);
 /// Lines of the login pane `login_status` hands back.
@@ -72,13 +95,20 @@ pub fn is_api_key_account(uuid: &str) -> bool {
     uuid.starts_with(API_KEY_ACCOUNT_PREFIX)
 }
 
+/// Whether `uuid` is an account fleet made up for a credential with no
+/// usage windows it can read: an API key, or a setup token not tied to a
+/// known account. Neither has a refresh token either.
+pub fn has_no_usage_windows(uuid: &str) -> bool {
+    is_api_key_account(uuid) || uuid.starts_with(SETUP_TOKEN_ACCOUNT_PREFIX)
+}
+
 /// The tool's and the desktop command's arguments. `api_key` and `code` are
 /// secrets: `Debug` prints neither, and no caller logs them.
 #[derive(Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars", rename = "AddAccountParams")]
 pub struct AddAccountArgs {
     /// start_login, login_status, login_key, login_code, end_login, api_key,
-    /// daily_limit.
+    /// setup_token, daily_limit.
     pub action: String,
     /// Host.
     pub host_alias: String,
@@ -93,6 +123,12 @@ pub struct AddAccountArgs {
     /// sk-ant-… key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
+    /// sk-ant-oat01-… token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+    /// Its account.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_uuid: Option<String>,
     /// Nickname.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nickname: Option<String>,
@@ -110,6 +146,8 @@ impl std::fmt::Debug for AddAccountArgs {
             .field("key", &self.key)
             .field("code", &self.code.as_ref().map(|_| "<redacted>"))
             .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
+            .field("token", &self.token.as_ref().map(|_| "<redacted>"))
+            .field("account_uuid", &self.account_uuid)
             .field("nickname", &self.nickname)
             .field("daily_limit_usd", &self.daily_limit_usd)
             .finish()
@@ -120,11 +158,12 @@ impl AddAccountArgs {
     /// The audit line: identifying fields only, never the key or the code.
     pub fn audit_detail(&self) -> String {
         format!(
-            "action={} host={} profile={} key={:?} limit={:?}",
+            "action={} host={} profile={} key={:?} account={:?} limit={:?}",
             self.action.escape_debug(),
             self.host_alias.escape_debug(),
             self.profile.escape_debug(),
             self.key.as_deref().map(str::escape_debug),
+            self.account_uuid.as_deref().map(str::escape_debug),
             self.daily_limit_usd,
         )
     }
@@ -157,6 +196,18 @@ pub struct ApiKeyAdded {
     pub account_uuid: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub daily_limit_usd: Option<f64>,
+}
+
+/// What `setup_token` added.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SetupTokenAdded {
+    pub host_alias: String,
+    pub profile: String,
+    pub account_uuid: String,
+    /// Anthropic accepted the token on a request. `false` when it neither
+    /// accepted nor refused it (an inference-only token may not list
+    /// models): the first session tells.
+    pub verified: bool,
 }
 
 /// [`run`] in production: tmux and SSH through the shared client, Anthropic
@@ -241,6 +292,7 @@ pub async fn run(
             serde_json::json!({ "closed": true })
         }
         "api_key" => to_value(add_api_key(args, store, ssh, http, now).await?),
+        "setup_token" => to_value(add_setup_token(args, store, ssh, http, now).await?),
         "daily_limit" => {
             let uuid = profile_account(store, &args.host_alias, &args.profile)?
                 .filter(|u| is_api_key_account(u))
@@ -261,7 +313,7 @@ pub async fn run(
             return Err(IpcError::new(
                 codes::E_INVALID,
                 format!(
-                    "unknown action {:?}: start_login, login_status, login_key, login_code, end_login, api_key or daily_limit",
+                    "unknown action {:?}: start_login, login_status, login_key, login_code, end_login, api_key, setup_token or daily_limit",
                     other.escape_debug().to_string()
                 ),
             ))
@@ -291,13 +343,21 @@ fn profile_account(
     host: &str,
     profile: &str,
 ) -> Result<Option<String>, IpcError> {
+    Ok(profile_row(store, host, profile)?.and_then(|p| p.account_uuid))
+}
+
+/// The stored host row's entry for `profile`, if any.
+fn profile_row(
+    store: &Mutex<Store>,
+    host: &str,
+    profile: &str,
+) -> Result<Option<crate::store::HostProfileRow>, IpcError> {
     let s = lock(store)?;
     Ok(s.get_host_row(host)?
         .and_then(|h| h.claude_profiles)
         .unwrap_or_default()
         .into_iter()
-        .find(|p| p.name == profile)
-        .and_then(|p| p.account_uuid))
+        .find(|p| p.name == profile))
 }
 
 /// The login pane's tmux session for `profile` (a validated name). Every
@@ -349,8 +409,13 @@ async fn start_login(
     store: &Mutex<Store>,
     tmux: &dyn TmuxExec,
 ) -> Result<(), IpcError> {
-    if let Some(uuid) = profile_account(store, &args.host_alias, &args.profile)? {
-        let what = if is_api_key_account(&uuid) {
+    if let Some(row) = profile_row(store, &args.host_alias, &args.profile)?
+        .filter(|r| r.account_uuid.is_some() || r.credential.is_some())
+    {
+        let uuid = row.account_uuid.unwrap_or_default();
+        let what = if row.credential.is_some() {
+            "a setup token"
+        } else if is_api_key_account(&uuid) {
             "an API key"
         } else {
             "a login"
@@ -578,6 +643,16 @@ async fn login_code(args: &AddAccountArgs, ssh: &dyn SshExec) -> Result<(), IpcE
 /// characters in all. Checked before anything leaves this process.
 fn checked_key(key: Option<&str>) -> Result<&str, IpcError> {
     let key = key.map(str::trim).unwrap_or("");
+    if key.starts_with(SETUP_TOKEN_TOKEN_PREFIX) {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            "that is a setup token (sk-ant-oat01-…), not an API key; add it as a setup token",
+        )
+        .with_details(problems(
+            "api_key",
+            "This is a claude setup-token token. Choose Setup token instead.",
+        )));
+    }
     let ok = key.starts_with("sk-ant-")
         && (20..=300).contains(&key.len())
         && key
@@ -718,11 +793,13 @@ fn unsupported_hint(e: IpcError, instead: &str) -> IpcError {
     }
 }
 
-/// The script writing an API-key profile. Reads the key, the account line
-/// and the fresh `.claude.json` from stdin, one line each. Refuses a
-/// profile that is already a `/login` profile (it has `.claude.json` and no
-/// key), so a key never shadows a subscription login.
-fn write_script(profile: &str) -> String {
+/// The script writing an API-key profile ([`API_KEY_FILE`]) or a
+/// setup-token one ([`SETUP_TOKEN_FILE`]): `secret_file` names which.
+/// Reads the secret, the account line and the fresh `.claude.json` from
+/// stdin, one line each. Refuses a profile that is already another kind
+/// (it has `.claude.json` and no `secret_file`), so a key or token never
+/// shadows a subscription login, or each other.
+fn write_script(profile: &str, secret_file: &str) -> String {
     format!(
         "umask 077; d=\"$HOME/.claude-profiles/\"{p}; \
          if [ -e \"$d/.claude.json\" ] && [ ! -e \"$d/{key}\" ]; then echo {busy}; exit 3; fi; \
@@ -733,7 +810,7 @@ fn write_script(profile: &str) -> String {
          if [ ! -e \"$d/.claude.json\" ]; then printf '%s\\n' \"$cj\" > \"$d/.claude.json\" || exit 1; fi; \
          echo {ok}",
         p = quote(profile),
-        key = API_KEY_FILE,
+        key = secret_file,
         acct = API_ACCOUNT_FILE,
         busy = LOGIN_PROFILE_MARK,
         ok = OK_MARK,
@@ -780,8 +857,9 @@ async fn add_api_key(
                 .with_details(problems("nickname", "32 characters at most.")),
         );
     }
-    if let Some(uuid) = profile_account(store, &args.host_alias, &args.profile)? {
-        if !is_api_key_account(&uuid) {
+    if let Some(row) = profile_row(store, &args.host_alias, &args.profile)? {
+        let uuid = row.account_uuid.as_deref().unwrap_or("");
+        if row.credential.is_some() || (!uuid.is_empty() && !is_api_key_account(uuid)) {
             return Err(login_profile_taken(args));
         }
     }
@@ -797,7 +875,7 @@ async fn add_api_key(
         "organizationName": "Anthropic API",
         "seatTier": "api_key",
     });
-    let script = quote(&write_script(&args.profile));
+    let script = quote(&write_script(&args.profile, API_KEY_FILE));
     let out = ssh
         .run_with_stdin(
             &args.host_alias,
@@ -856,6 +934,7 @@ async fn add_api_key(
         name: args.profile.clone(),
         account_uuid: Some(uuid.clone()),
         email: None,
+        credential: None,
     });
     profiles.sort_by(|a, b| a.name.cmp(&b.name));
     s.set_host_profiles(&args.host_alias, &profiles)?;
@@ -865,6 +944,276 @@ async fn add_api_key(
         profile: args.profile.clone(),
         account_uuid: uuid,
         daily_limit_usd: limit,
+    })
+}
+
+/// Every `claude setup-token` token starts with this.
+pub const SETUP_TOKEN_TOKEN_PREFIX: &str = "sk-ant-oat01-";
+
+/// PURE: the token, trimmed, when it looks like a setup token.
+fn checked_token(token: Option<&str>) -> Result<&str, IpcError> {
+    let token = token.map(str::trim).unwrap_or("");
+    let ok = token.starts_with(SETUP_TOKEN_TOKEN_PREFIX)
+        && (40..=400).contains(&token.len())
+        && token
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    if ok {
+        return Ok(token);
+    }
+    let problem = if token.starts_with("sk-ant-") {
+        "This is an API key, not a setup token. Choose API key instead."
+    } else {
+        "A setup token starts with sk-ant-oat01-. Run claude setup-token to make one."
+    };
+    Err(IpcError::new(
+        codes::E_INVALID,
+        "that is not a claude setup-token token (sk-ant-oat01-…)",
+    )
+    .with_details(problems("token", problem)))
+}
+
+/// The account a setup token no known account owns is listed under.
+pub fn setup_token_account_uuid(token: &str) -> String {
+    let sha = crate::mcp::auth::sha256_hex(token);
+    format!("{SETUP_TOKEN_ACCOUNT_PREFIX}{}", &sha[..16])
+}
+
+/// Ask Anthropic whether `token` works. Only a 401 is a refusal; a 2xx is
+/// `true`. Anything else that is an answer (a 403 for the token's narrow
+/// scope, a 400) is `false`: not refused, not proven. No answer, a 429 or a
+/// 5xx is an error to try again.
+pub async fn verify_token(http: &dyn HttpTransport, token: &str) -> Result<bool, IpcError> {
+    let req = Request::get(MODELS_URL)
+        .header("authorization", format!("Bearer {token}"))
+        .header("anthropic-version", ANTHROPIC_VERSION)
+        .header("anthropic-beta", OAUTH_BETA)
+        .with_timeout(Duration::from_secs(20));
+    let resp = match http.send(req).await {
+        Ok(r) => r,
+        Err(TransportError::Timeout) => {
+            return Err(IpcError::new(
+                codes::E_TIMEOUT,
+                "Anthropic did not answer in time; try again",
+            ))
+        }
+        Err(e) => {
+            return Err(IpcError::new(
+                codes::E_PROBE,
+                format!(
+                    "could not reach Anthropic to check the token: {}",
+                    scrub(&e.to_string(), token)
+                ),
+            ))
+        }
+    };
+    if resp.is_success() {
+        return Ok(true);
+    }
+    let said = provider_message(&resp.text(), token);
+    let said = said
+        .as_deref()
+        .map(|m| format!(": {m}"))
+        .unwrap_or_default();
+    match resp.status {
+        401 => {
+            let problem = format!(
+                "Anthropic rejected this token (401{said}). It may be revoked or past its year; run claude setup-token again."
+            );
+            Err(IpcError::new(codes::E_INVALID, problem.clone())
+                .with_details(problems("token", &problem)))
+        }
+        429 | 500..=599 => Err(IpcError::new(
+            codes::E_PROBE,
+            format!(
+                "Anthropic answered {}{said} while checking the token; try again",
+                resp.status
+            ),
+        )),
+        _ => Ok(false),
+    }
+}
+
+/// The account a setup token is listed under: `account_uuid` when it names
+/// a `/login` account fleet knows, else its own `setuptoken-…` account.
+fn token_account(
+    store: &Mutex<Store>,
+    account_uuid: Option<&str>,
+) -> Result<Option<crate::store::AccountRow>, IpcError> {
+    let Some(uuid) = account_uuid.map(str::trim).filter(|u| !u.is_empty()) else {
+        return Ok(None);
+    };
+    let problem = |m: &str| {
+        IpcError::new(codes::E_INVALID, m.to_string()).with_details(problems("account_uuid", m))
+    };
+    if has_no_usage_windows(uuid) {
+        return Err(problem(
+            "A setup token belongs to a Claude subscription account, not an API key or another token.",
+        ));
+    }
+    match lock(store)?.get_account_by_uuid(uuid)? {
+        Some(a) => Ok(Some(a)),
+        None => Err(problem(
+            "Fleet does not know that account. Pick one from the list, or leave it empty.",
+        )),
+    }
+}
+
+async fn add_setup_token(
+    args: &AddAccountArgs,
+    store: &Mutex<Store>,
+    ssh: &dyn SshExec,
+    http: &dyn HttpTransport,
+    now: i64,
+) -> Result<SetupTokenAdded, IpcError> {
+    let token = checked_token(args.token.as_deref())?;
+    let nickname = args
+        .nickname
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty());
+    if nickname.is_some_and(|n| n.chars().count() > 32) {
+        return Err(
+            IpcError::new(codes::E_INVALID, "nickname must be 32 characters or fewer")
+                .with_details(problems("nickname", "32 characters at most.")),
+        );
+    }
+    // A `/login` or API-key profile is not overwritten; a setup-token one
+    // is (a new token replaces the old one).
+    let mut renewing: Option<String> = None;
+    if let Some(row) = profile_row(store, &args.host_alias, &args.profile)? {
+        let is_token = row.credential.as_deref() == Some(SETUP_TOKEN_CREDENTIAL);
+        if !is_token && row.account_uuid.is_some() {
+            return Err(login_profile_taken(args));
+        }
+        if is_token {
+            renewing = row.account_uuid;
+        }
+    }
+    // A renewal names no account and keeps the profile's: its sessions,
+    // nickname and history stay on the same account row.
+    let picked = args
+        .account_uuid
+        .as_deref()
+        .map(str::trim)
+        .filter(|u| !u.is_empty());
+    let (picked, standalone) = match (picked, renewing.as_deref()) {
+        (Some(u), _) => (Some(u), None),
+        (None, Some(r)) if r.starts_with(SETUP_TOKEN_ACCOUNT_PREFIX) => (None, Some(r.to_string())),
+        (None, Some(r)) => (Some(r), None),
+        (None, None) => (None, None),
+    };
+    let known = token_account(store, picked)?;
+    let verified = verify_token(http, token).await?;
+
+    let (uuid, account) = match known.as_ref() {
+        // Only the uuid and fleet's mark: the account's other fields are the
+        // `/login`'s to report (`hosts::probed_account_row` keeps them).
+        Some(a) => (
+            a.uuid.clone(),
+            serde_json::json!({
+                "accountUuid": a.uuid,
+                "fleetCredential": SETUP_TOKEN_CREDENTIAL,
+            }),
+        ),
+        None => {
+            let uuid = standalone.unwrap_or_else(|| setup_token_account_uuid(token));
+            let display = nickname
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("Setup token · {}", args.profile));
+            let account = serde_json::json!({
+                "accountUuid": uuid,
+                "displayName": display,
+                "organizationName": "Claude subscription",
+                "seatTier": SETUP_TOKEN_CREDENTIAL,
+                "fleetCredential": SETUP_TOKEN_CREDENTIAL,
+            });
+            (uuid, account)
+        }
+    };
+    let config = serde_json::json!({ "hasCompletedOnboarding": true });
+    let stdin = format!("{token}\n{account}\n{config}\n").into_bytes();
+    let script = quote(&write_script(&args.profile, SETUP_TOKEN_FILE));
+    let out = ssh
+        .run_with_stdin(
+            &args.host_alias,
+            &["bash", "-lc", script.as_str()],
+            stdin,
+            CONNECT_TIMEOUT,
+            WRITE_WALL_CLOCK,
+            64 * 1024,
+        )
+        .await
+        .map_err(|e| {
+            unsupported_hint(
+                e,
+                "this host cannot take a token from fleet; set CLAUDE_CODE_OAUTH_TOKEN there yourself",
+            )
+        })?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    if stdout.contains(LOGIN_PROFILE_MARK) {
+        return Err(login_profile_taken(args));
+    }
+    if !out.status.success() || !stdout.contains(OK_MARK) {
+        return Err(IpcError::new(
+            codes::E_HOST_WRITE,
+            format!(
+                "could not write the token to {}: {}",
+                args.host_alias,
+                scrub(&first_line(&out.stderr), token)
+            ),
+        ));
+    }
+
+    let s = lock(store)?;
+    if known.is_none() {
+        let row = crate::store::AccountRow {
+            uuid: uuid.clone(),
+            email: None,
+            display_name: account["displayName"].as_str().map(str::to_string),
+            organization_name: Some("Claude subscription".into()),
+            organization_uuid: None,
+            seat_tier: Some(SETUP_TOKEN_CREDENTIAL.into()),
+            last_seen_at: Some(now),
+            nickname: None,
+            has_extra_usage: false,
+            forbidden_project_ids: Vec::new(),
+            forbidden_org_ids: Vec::new(),
+        };
+        s.upsert_account(&row)?;
+    }
+    if nickname.is_some() {
+        s.set_account_nickname(&uuid, nickname)?;
+    }
+    let mut profiles = s
+        .get_host_row(&args.host_alias)?
+        .and_then(|h| h.claude_profiles)
+        .unwrap_or_default();
+    profiles.retain(|p| p.name != args.profile);
+    profiles.push(crate::store::HostProfileRow {
+        name: args.profile.clone(),
+        account_uuid: Some(uuid.clone()),
+        email: known.and_then(|a| a.email),
+        credential: Some(SETUP_TOKEN_CREDENTIAL.into()),
+    });
+    profiles.sort_by(|a, b| a.name.cmp(&b.name));
+    s.set_host_profiles(&args.host_alias, &profiles)?;
+    // A new token is the sign-in again: no usage poll ever asks a token
+    // profile, so its signed-out card would otherwise stay up.
+    crate::service::login_health::record(
+        &s,
+        &[crate::service::login_health::Observation {
+            host_alias: args.host_alias.clone(),
+            profile: Some(args.profile.clone()),
+            signed_out: false,
+        }],
+        now,
+    )?;
+    Ok(SetupTokenAdded {
+        host_alias: args.host_alias.clone(),
+        profile: args.profile.clone(),
+        account_uuid: uuid,
+        verified,
     })
 }
 

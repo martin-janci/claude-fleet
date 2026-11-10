@@ -123,6 +123,9 @@ export interface HostProfile {
   name: string;
   account_uuid?: string | null;
   email?: string | null;
+  /** 'setup_token' for a `claude setup-token` profile (no refresh token,
+   *  never a usage source); absent for a `/login` or an API key. */
+  credential?: string | null;
 }
 
 /** The volatile half of a host row, as `host:pinged` carries it. */
