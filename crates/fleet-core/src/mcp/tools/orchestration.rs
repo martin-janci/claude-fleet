@@ -285,7 +285,7 @@ impl FleetTools {
             p.since_turn,
             row.turn_seq,
         ));
-        let conv = transcript::fetch_conversation_for_row(
+        let mut conv = transcript::fetch_conversation_for_row(
             &self.store,
             &self.ssh,
             &row,
@@ -296,6 +296,14 @@ impl FleetTools {
         )
         .await
         .map_err(to_mcp_err)?;
+        // A turn this caller's person sent reads as theirs ("You").
+        if conv.turns.iter().any(|t| t.author.is_some()) {
+            let me =
+                super::messaging::caller_person(&*lock(&self.store).map_err(to_mcp_err)?, &caller);
+            for a in conv.turns.iter_mut().filter_map(|t| t.author.as_mut()) {
+                a.mine = me.is_some() && a.person_id == me;
+            }
+        }
         ok_json_compact(&conv)
     }
 

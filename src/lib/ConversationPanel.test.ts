@@ -1063,6 +1063,19 @@ describe('ConversationPanel composer', () => {
     expect(screen.getAllByTestId('conv-prompt')).toHaveLength(2);
   });
 
+  it("a colleague's prompt names them; the reader's own reads as You", async () => {
+    const c = conv();
+    c.turns.push(
+      { prompt: 'from Ada', at: '2026-09-13T10:01:00.000Z', ended_at: null, items: [], author: { name: 'Ada · phone', person_id: 2 } },
+      { prompt: 'mine', at: '2026-09-13T10:02:00.000Z', ended_at: null, items: [], author: { name: 'Martin · desktop', person_id: 1, mine: true } },
+    );
+    mockedConv.mockReturnValue(ok(c));
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    const who = screen.getAllByTestId('conv-prompt-who').map((e) => e.textContent?.trim());
+    expect(who.slice(-2)).toEqual(['Ada · phone', 'You']);
+  });
+
   it('bg and external rows get a read-only note instead of a composer', async () => {
     mockedConv.mockReturnValue(ok(conv()));
     const { unmount } = render(ConversationPanel, { session: session({ kind: 'bg', tmux_name: 'bg:abc' }), visible: true });
