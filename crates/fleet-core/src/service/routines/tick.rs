@@ -767,6 +767,23 @@ fn fail(
     close(s, id, "failed", Some(reason), Some(code), cost_micros, now)
 }
 
+/// Whether a run whose turn finished at `ended` still waits for a usage
+/// pass to read that turn: usage is collected, the session can be read (it
+/// has a Claude id and is not lost), no pass has written its cost since the
+/// turn ended, and the wait is under two usage intervals and a tick. A pass
+/// that finds nothing new writes nothing, so the bound closes that run.
+fn cost_pending(s: &Store, row: &SessionRow, ended: i64, now: i64) -> bool {
+    use crate::service::settings;
+    let interval = settings::get_secs(s, settings::USAGE_INTERVAL_SECS);
+    let readable = settings::get_bool(s, settings::USAGE_ENABLED)
+        && interval > 0
+        && row.claude_session_id.is_some()
+        && row.lost_at.is_none();
+    let read_since = row.usage.usage_updated_at.is_some_and(|u| u >= ended);
+    let bound = 2 * i64::try_from(interval).unwrap_or(i64::MAX / 4) + TICK_EVERY.as_secs() as i64;
+    readable && !read_since && now - ended < bound
+}
+
 /// A turn to stop: a run past its budget or time cap (G3.8), `(host, tmux name)`.
 pub type StopTurn = (String, String);
 
@@ -806,10 +823,12 @@ fn settle_run(
     now: i64,
     stop: &mut Vec<StopTurn>,
 ) -> Result<(), IpcError> {
-    let Some(sid) = run.session_id else {
+    if run.session_id.is_none() {
         return fail(s, run.id, E_NO_SESSION, "it started no session", 0, now);
-    };
-    let Some(row) = s.get_session_by_id(sid)? else {
+    }
+    // Its own session only: an id whose row was deleted goes to the next
+    // session started, whose cost and turns are not the run's.
+    let Some(row) = super::run_session(s, run)? else {
         return fail(
             s,
             run.id,
@@ -819,10 +838,40 @@ fn settle_run(
             now,
         );
     };
+    let sid = row.id;
     let cost = row.usage.usage_cost_micros;
     let routine = s.get_routine(run.routine_id)?;
-    if s.session_event_since(sid, "turn_done", 0)? {
-        close(s, run.id, "done", None, None, cost, now)?;
+    let over_budget = |cost: i64| {
+        routine
+            .as_ref()
+            .and_then(|r| r.budget_run_micros)
+            .filter(|b| cost >= *b)
+    };
+    if let Some(ended) = s.first_session_event_at(sid, "turn_done")? {
+        // Its turn is over, but the session's cost moves only on a usage
+        // pass: closed now, the run would keep what the last pass read
+        // before its turn ended. It waits for a pass after the turn, a
+        // bounded while, and the run's budget is checked on what that read.
+        let waiting = cost_pending(s, &row, ended, now);
+        if let Some(budget) = over_budget(cost) {
+            let why = format!(
+                "its session spent {} of the run's {}",
+                usd(cost),
+                usd(budget)
+            );
+            fail(s, run.id, E_RUN_BUDGET, &why, cost, now)?;
+            s.set_routine_enabled(
+                run.routine_id,
+                false,
+                Some(&format!("paused: a run went over its budget ({why})")),
+                None,
+            )?;
+            // Its turn is over: nothing to stop.
+        } else if !waiting {
+            close(s, run.id, "done", None, None, cost, now)?;
+        } else if cost != run.cost_micros {
+            s.set_routine_run_cost(run.id, cost)?;
+        }
     } else if s.session_event_since(sid, "stop_failure", 0)? {
         let detail = s
             .newest_session_event_of(sid, &["stop_failure"])?
@@ -834,11 +883,7 @@ fn settle_run(
         fail(s, run.id, turn_code(detail.as_deref()), &why, cost, now)?;
     } else if row.lost_at.is_some() {
         fail(s, run.id, E_SESSION_LOST, "its session was lost", cost, now)?;
-    } else if let Some(budget) = routine
-        .as_ref()
-        .and_then(|r| r.budget_run_micros)
-        .filter(|b| cost >= *b)
-    {
+    } else if let Some(budget) = over_budget(cost) {
         let why = format!(
             "its session spent {} of the run's {}",
             usd(cost),

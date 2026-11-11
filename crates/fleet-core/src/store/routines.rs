@@ -602,6 +602,37 @@ impl Store {
             .is_some())
     }
 
+    /// Whether a run newer than `run_id` started session `session_id`: the
+    /// id was handed on after the older run's session row was deleted.
+    pub fn routine_session_taken_after(
+        &self,
+        session_id: i64,
+        run_id: i64,
+    ) -> Result<bool, IpcError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT 1 FROM routine_runs WHERE session_id = ?1 AND id > ?2 LIMIT 1",
+                rusqlite::params![session_id, run_id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+
+    /// When `session_id` first wrote an event of `kind` (unix secs), if it did.
+    pub fn first_session_event_at(
+        &self,
+        session_id: i64,
+        kind: &str,
+    ) -> Result<Option<i64>, IpcError> {
+        Ok(self.conn.query_row(
+            "SELECT MIN(at) FROM session_events WHERE session_id = ?1 AND kind = ?2",
+            rusqlite::params![session_id, kind],
+            |r| r.get(0),
+        )?)
+    }
+
     pub fn insert_routine_run(&self, r: &NewRoutineRun<'_>) -> Result<RoutineRunRow, IpcError> {
         let now = r.at;
         let finished = (r.state != "running").then_some(now);
@@ -693,12 +724,18 @@ impl Store {
         )?)
     }
 
-    /// Whether the routine has a run open.
+    /// Whether the routine has a run still going: open, and its session has
+    /// not finished a turn. A run whose turn finished stays open only to
+    /// wait for a usage pass to read that turn's cost (`tick::settle`), and
+    /// holds no `overlap: skip` while it does.
     pub fn routine_run_open(&self, routine_id: i64) -> Result<bool, IpcError> {
         Ok(self
             .conn
             .query_row(
-                "SELECT 1 FROM routine_runs WHERE routine_id = ?1 AND state = 'running' LIMIT 1",
+                "SELECT 1 FROM routine_runs r WHERE r.routine_id = ?1 AND r.state = 'running' \
+                   AND NOT EXISTS (SELECT 1 FROM session_events e \
+                     WHERE e.session_id = r.session_id AND e.kind = 'turn_done') \
+                 LIMIT 1",
                 [routine_id],
                 |_| Ok(()),
             )

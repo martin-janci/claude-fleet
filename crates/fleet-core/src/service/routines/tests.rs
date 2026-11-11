@@ -4633,3 +4633,176 @@ async fn a_routine_that_writes_a_dashboard_feed_has_its_reply_read_for_it() {
     assert_eq!(feeds[0].by, "routine");
     assert_eq!(feeds[0].by_ref.as_deref(), Some(r.name.as_str()));
 }
+
+/// A usage pass on `session` at `at` that brings its cost to `cost`.
+fn spend_at(f: &Fx, session: i64, cost: i64, at: i64) {
+    lock(&f.store)
+        .unwrap()
+        .apply_usage(
+            session,
+            "mac",
+            &UsageDelta {
+                reset: true,
+                totals: UsageTotals {
+                    cost_micros: cost,
+                    ..Default::default()
+                },
+                model: None,
+                offset: cost,
+                source: "s.jsonl".into(),
+                last_msg_id: None,
+                last_msg_usage: None,
+                now: at,
+                by_day: Vec::new(),
+                backfill_until: None,
+            },
+        )
+        .unwrap();
+}
+
+/// A run whose session has a Claude id (usage can read it) and finished
+/// its turn, having been read at `cost` before the turn ended; when the
+/// turn ended.
+async fn run_past_its_turn(f: &Fx, r: &RoutineRow, cost: i64) -> (RoutineRunRow, i64) {
+    let ana = person(&f.store, None, f.ana);
+    let run = run_now(&f.deps, &ana, r.id, OCT8).await.unwrap();
+    typing_done().await;
+    let sid = run.session_id.unwrap();
+    lock(&f.store)
+        .unwrap()
+        .set_claude_session_id(sid, &format!("c-{sid}"))
+        .unwrap();
+    spend(f, sid, cost);
+    event(f, sid, "turn_done");
+    let ended = lock(&f.store)
+        .unwrap()
+        .first_session_event_at(sid, "turn_done")
+        .unwrap()
+        .unwrap();
+    (run, ended)
+}
+
+fn settle_at(f: &Fx, now: i64) -> Vec<tick::StopTurn> {
+    let mut stop = Vec::new();
+    tick::settle(&lock(&f.store).unwrap(), now, &mut stop).unwrap();
+    stop
+}
+
+/// Review R5: the session's cost moves only on a usage pass, so a run
+/// closed at its turn's end kept what the pass before it read (often
+/// nothing), and its routine's day budget and the fleet's never saw the
+/// rest. It waits for the pass after its turn.
+#[tokio::test]
+async fn a_finished_run_waits_for_the_usage_pass_that_reads_its_turn() {
+    let f = fx();
+    let r = new_routine(&f, input(&f));
+    let (run, ended) = run_past_its_turn(&f, &r, 100_000).await;
+    settle_at(&f, ended + 20);
+    let held = run_row(&f, run.id);
+    assert_eq!(
+        (held.state.as_str(), held.cost_micros),
+        ("running", 100_000)
+    );
+    // Waiting for its cost holds no `overlap: skip`.
+    assert!(!lock(&f.store).unwrap().routine_run_open(r.id).unwrap());
+    spend_at(&f, run.session_id.unwrap(), 900_000, ended + 100);
+    settle_at(&f, ended + 120);
+    let done = run_row(&f, run.id);
+    assert_eq!((done.state.as_str(), done.cost_micros), ("done", 900_000));
+    assert_eq!(
+        lock(&f.store).unwrap().routine_cost_since(r.id, 0).unwrap(),
+        900_000
+    );
+}
+
+#[tokio::test]
+async fn a_finished_run_waits_two_usage_intervals_at_most() {
+    let f = fx();
+    let r = new_routine(&f, input(&f));
+    let (run, ended) = run_past_its_turn(&f, &r, 100_000).await;
+    settle_at(&f, ended + 600);
+    assert_eq!(run_row(&f, run.id).state, "running");
+    settle_at(&f, ended + 2 * 300 + 21);
+    let done = run_row(&f, run.id);
+    assert_eq!((done.state.as_str(), done.cost_micros), ("done", 100_000));
+}
+
+#[tokio::test]
+async fn a_finished_run_closes_at_once_when_usage_is_not_collected() {
+    let f = fx();
+    let r = new_routine(&f, input(&f));
+    lock(&f.store)
+        .unwrap()
+        .set_setting(crate::service::settings::USAGE_ENABLED, "false")
+        .unwrap();
+    let (run, ended) = run_past_its_turn(&f, &r, 100_000).await;
+    settle_at(&f, ended + 20);
+    assert_eq!(run_row(&f, run.id).state, "done");
+}
+
+#[tokio::test]
+async fn a_finished_run_whose_late_cost_passes_its_budget_fails_and_pauses_the_routine() {
+    let f = fx();
+    let mut i = input(&f);
+    i.budget_run_micros = Some(500_000);
+    let r = new_routine(&f, i);
+    let (run, ended) = run_past_its_turn(&f, &r, 100_000).await;
+    settle_at(&f, ended + 20);
+    spend_at(&f, run.session_id.unwrap(), 600_000, ended + 100);
+    let stop = settle_at(&f, ended + 120);
+    let over = run_row(&f, run.id);
+    assert_eq!((over.state.as_str(), over.cost_micros), ("failed", 600_000));
+    assert!(
+        over.reason
+            .as_deref()
+            .unwrap()
+            .contains("$0.60 of the run's $0.50"),
+        "{over:?}"
+    );
+    assert!(!routine(&f, r.id).enabled);
+    // Its turn is over: there is nothing to stop.
+    assert!(stop.is_empty());
+}
+
+/// Review R5: a session id is handed to the next session once its row is
+/// deleted. A run whose session was killed and reaped does not adopt the
+/// next session's cost, turn or reply.
+#[tokio::test]
+async fn a_run_does_not_adopt_a_session_that_reused_its_sessions_id() {
+    let f = fx();
+    let r = memory_routine(&f, "routine", true);
+    let ana = person(&f.store, None, f.ana);
+    let run = run_now(&f.deps, &ana, r.id, OCT8).await.unwrap();
+    typing_done().await;
+    let sid = run.session_id.unwrap();
+    let other = {
+        let s = lock(&f.store).unwrap();
+        s.delete_session(sid).unwrap();
+        s.upsert_session(
+            "manual",
+            "mac",
+            Some(f.project),
+            None,
+            1,
+            1,
+            "running",
+            None,
+        )
+        .unwrap()
+    };
+    assert_eq!(other, sid, "the id is reused");
+    spend(&f, other, 5_000_000);
+    event(&f, other, "turn_done");
+    tick_once(&f.deps, OCT8 + 60).await;
+    let gone = run_row(&f, run.id);
+    assert_eq!(gone.state, "failed");
+    assert_eq!(gone.cost_micros, 0);
+    assert_eq!(
+        gone.reason.as_deref(),
+        Some("its session was removed before its turn finished")
+    );
+    // Nor is the other session's reply read into its notebook.
+    let reader = replies(&["<routine-memory>someone else's</routine-memory>"]);
+    memory::read_finished(&f.store, &reader, OCT8 + 120).await;
+    assert_eq!(reader.reads.load(Ordering::SeqCst), 0);
+}

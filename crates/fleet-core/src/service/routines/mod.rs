@@ -1250,6 +1250,28 @@ pub(crate) fn decide(s: &Store, r: &RoutineRow, d: Decision<'_>, now: i64) {
     }
 }
 
+/// The session run `run` started, while that row is still its: a session
+/// id is handed to the next session once its row is deleted (migration
+/// 044), so a row that this routine did not start, or that a later run
+/// started, is another session, and the run's is gone. Its cost, its turns
+/// and its reply are never the run's. (Not `created_at`: that is the
+/// host's clock, the run's start the hub's.)
+pub(crate) fn run_session(
+    s: &Store,
+    run: &RoutineRunRow,
+) -> Result<Option<crate::store::SessionRow>, IpcError> {
+    let Some(sid) = run.session_id else {
+        return Ok(None);
+    };
+    let own = crate::store::SessionOrigin::routine(run.routine_id);
+    let Some(row) = s.get_session_by_id(sid)?.filter(|row| {
+        row.origin.as_deref() == Some(own.origin) && row.origin_ref == own.origin_ref
+    }) else {
+        return Ok(None);
+    };
+    Ok((!s.routine_session_taken_after(sid, run.id)?).then_some(row))
+}
+
 /// Dollars, for a reason a person reads.
 pub(crate) fn usd(micros: i64) -> String {
     format!("${:.2}", micros as f64 / 1e6)
