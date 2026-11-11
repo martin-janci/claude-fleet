@@ -1,6 +1,6 @@
 //! MCP tool: Add account (M15 step G2.9, `service::add_account`). Fleet
 //! administration like `add_host`: the master and the hub owner's trusted
-//! full device (`Access::Person`, then `owner_device_admin`). The API key
+//! full device (`Access::Person`, then `owner_device_admin`). The API key,
 //! the setup token and the sign-in code are never in the audit line or a log.
 
 use super::*;

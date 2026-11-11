@@ -76,7 +76,13 @@ crate_version() {
 # reports. Nothing made those agree — a re-tag, a hand-made tag, or a run
 # against an older tag would produce a mislabelled tarball whose checksums
 # all verify. Checked once, before anything is packaged.
-for bin in fleet-agent fleet-hub; do
+# A macOS target ships the agent alone (scripts/release-assets.sh).
+case "$TARGET" in
+  *-apple-darwin) bins="fleet-agent" ;;
+  *) bins="fleet-agent fleet-hub" ;;
+esac
+
+for bin in $bins; do
   manifest="crates/$bin/Cargo.toml"
   if [ ! -f "$manifest" ]; then
     echo "package-linux-release.sh: $manifest not found (run from the repository root)" >&2
@@ -108,7 +114,7 @@ for candidate in LICENSE LICENSE.md LICENSE.txt; do
   fi
 done
 
-for bin in fleet-agent fleet-hub; do
+for bin in $bins; do
   src="$bin_dir/$bin"
   if [ ! -x "$src" ]; then
     echo "package-linux-release.sh: $src not found or not executable" >&2
@@ -149,7 +155,13 @@ done
 # good. sha256sum -c expects a bare filename to match a downloaded file in
 # the same directory; a `./` prefix works with --ignore-missing too, but
 # the requirement is bare names, so this is `*.tar.gz`, not `./*.tar.gz`.
-( cd "$out" && sha256sum -- *.tar.gz >"SHA256SUMS.${TARGET}" )
+# macOS runners have `shasum`, not always `sha256sum`; both print the same
+# `<hex>  <name>` lines.
+if command -v sha256sum >/dev/null 2>&1; then
+  ( cd "$out" && sha256sum -- *.tar.gz >"SHA256SUMS.${TARGET}" )
+else
+  ( cd "$out" && shasum -a 256 -- *.tar.gz >"SHA256SUMS.${TARGET}" )
+fi
 
 # The tarballs just written must be exactly the ones the release manifest
 # says this leg produces — no more, no fewer, no differently spelled. Without

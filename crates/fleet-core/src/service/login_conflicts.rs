@@ -23,7 +23,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::service::add_account::has_no_usage_windows;
+use crate::service::add_account::is_api_key_account;
 use crate::store::{HostProfileRow, HostRow};
 
 /// One conflict on a host.
@@ -108,13 +108,14 @@ pub fn find(
         }
         None => groups.push((uuid.to_string(), vec![login], email.cloned())),
     };
-    // An API key or a setup token has no refresh token to revoke, so one
-    // under two profiles, or beside a `/login` of the same account, is not
-    // a conflict.
-    let oauth = |u: &&str| !u.is_empty() && !has_no_usage_windows(u);
+    // An API key has no refresh token to revoke, so one key under two
+    // profiles is not a conflict.
+    let oauth = |u: &&str| !u.is_empty() && !is_api_key_account(u);
     if let Some(uuid) = host_account.filter(oauth) {
         add(uuid, None, None);
     }
+    // Nor does a setup token: it is a token of its own, not a second
+    // `/login` sharing one refresh token.
     for p in profiles.iter().filter(|p| p.credential.is_none()) {
         if let Some(uuid) = p.account_uuid.as_deref().filter(oauth) {
             add(uuid, Some(p.name.clone()), p.email.as_ref());
@@ -205,16 +206,12 @@ mod tests {
     }
 
     #[test]
-    fn a_setup_token_beside_a_login_of_its_account_is_not_a_conflict() {
-        // No refresh token: nothing for the /login's refresh to revoke.
-        let mut tok = profile("tok", Some("A"), Some("a@x"));
-        tok.credential = Some("setup_token".into());
-        assert!(find(None, Some("A"), &[tok.clone()]).is_empty());
-        let mut tok2 = tok.clone();
-        tok2.name = "tok2".into();
-        assert!(find(None, None, &[tok, tok2]).is_empty());
-        let lone = profile("x", Some("setuptoken-0123456789abcdef"), None);
-        assert!(find(None, Some("setuptoken-0123456789abcdef"), &[lone]).is_empty());
+    fn a_setup_token_on_the_hosts_own_account_is_not_a_conflict() {
+        let tok = HostProfileRow {
+            credential: Some("setup_token".into()),
+            ..profile("tok", Some("A"), None)
+        };
+        assert!(find(None, Some("A"), &[tok]).is_empty());
     }
 
     #[test]

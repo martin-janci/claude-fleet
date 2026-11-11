@@ -865,20 +865,19 @@ pub(crate) fn sync_host_profiles(
             let mut rows = Vec::with_capacity(profiles.len());
             for p in profiles {
                 let account = probed_account_row(s, p.account.as_ref(), now)?;
+                let account_credential = account.as_ref().and(
+                    p.account
+                        .as_ref()
+                        .and_then(crate::service::add_account::credential_of),
+                );
                 if let Some(a) = account.as_ref() {
                     s.upsert_account(a)?;
                 }
-                let credential = p
-                    .account
-                    .as_ref()
-                    .and_then(|a| a.fleet_credential.as_deref())
-                    .filter(|c| *c == crate::service::add_account::SETUP_TOKEN_CREDENTIAL)
-                    .map(str::to_string);
                 rows.push(crate::store::HostProfileRow {
                     name: p.name.clone(),
                     account_uuid: account.as_ref().map(|a| a.uuid.clone()),
                     email: account.and_then(|a| a.email),
-                    credential,
+                    credential: account_credential,
                 });
             }
             s.set_host_profiles(alias, &rows)?;
@@ -928,9 +927,10 @@ pub struct OauthAccount {
     /// blocking the account (migration 028).
     #[serde(rename = "hasExtraUsageEnabled")]
     pub has_extra_usage_enabled: Option<bool>,
-    /// Fleet's own mark in a profile's `.fleet-account.json`: how the
-    /// profile holds its credential (`"setup_token"`). Never in a real
-    /// `.claude.json`.
+    /// What signs a profile in when it is not a `/login`: `setup_token`
+    /// for a `claude setup-token` token fleet wrote
+    /// (`service::add_account`). Only in a `.fleet-account.json`, never in
+    /// Claude Code's own `oauthAccount`.
     #[serde(
         rename = "fleetCredential",
         default,

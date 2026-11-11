@@ -123,8 +123,9 @@ export interface HostProfile {
   name: string;
   account_uuid?: string | null;
   email?: string | null;
-  /** 'setup_token' for a `claude setup-token` profile (no refresh token,
-   *  never a usage source); absent for a `/login` or an API key. */
+  /** `setup_token`: signed in by a `claude setup-token` token fleet wrote
+   *  (sessions get it as CLAUDE_CODE_OAUTH_TOKEN); absent for a /login or
+   *  an API key, and from an older hub. */
   credential?: string | null;
 }
 

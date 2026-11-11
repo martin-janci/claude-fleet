@@ -472,7 +472,7 @@ fn the_written_profile_is_listed_and_exported() {
     let write = |profile: &str| {
         let mut child = std::process::Command::new("bash")
             .arg("-c")
-            .arg(write_script(profile, API_KEY_FILE))
+            .arg(write_script(profile))
             .env("HOME", home.path())
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
@@ -692,292 +692,484 @@ fn a_cancelled_login_leaves_no_profile_it_made_behind() {
     assert!(dir("mine").join(".claude.json").exists());
 }
 
-// --- setup token ---------------------------------------------------------
+const TOKEN: &str =
+    "sk-ant-oat01-ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_AA";
 
-const TOKEN: &str = "sk-ant-oat01-abcdefghijklmnopqrstuvwxyz0123456789_ABCDEFGHIJ";
-
-fn anthropic_says(status: u16) -> FakeTransport {
+/// Anthropic for a token whose scopes do not reach the profile (what
+/// `claude setup-token` hands out): the profile is refused, models answer.
+fn anthropic_inference_only() -> FakeTransport {
     let http = FakeTransport::new();
     http.always(
         Method::Get,
-        "/v1/models",
+        "/api/oauth/profile",
         Ok(Response::json(
-            status,
-            &serde_json::json!({"error": {"message": "nope"}}),
+            403,
+            &serde_json::json!({"type": "error", "error": {"type": "permission_error", "message": "OAuth token does not meet scope requirement user:profile"}}),
         )),
+    );
+    http.always(
+        Method::Get,
+        "/v1/models",
+        Ok(Response::json(200, &serde_json::json!({"data": []}))),
     );
     http
 }
 
-fn store_with_login_account() -> Mutex<Store> {
+fn token_args() -> AddAccountArgs {
+    AddAccountArgs {
+        action: "setup_token".into(),
+        host_alias: "mercury".into(),
+        profile: "tok".into(),
+        setup_token: Some(TOKEN.into()),
+        ..Default::default()
+    }
+}
+
+fn token_writes(ssh: &FakeSsh) -> Vec<crate::ssh_fake::Call> {
+    ssh.calls()
+        .into_iter()
+        .filter(|c| c.script().is_some_and(|s| s.contains(SETUP_TOKEN_FILE)))
+        .collect()
+}
+
+#[test]
+fn a_setup_token_is_checked_before_anything_leaves() {
+    assert_eq!(checked_setup_token(Some(TOKEN)).unwrap(), TOKEN);
+    assert_eq!(
+        checked_setup_token(Some(&format!("  {TOKEN}\n"))).unwrap(),
+        TOKEN
+    );
+    for bad in [
+        "",
+        "sk-ant-oat01-short",
+        "sk-ant-oat01-has space here and more text to be long enough!!",
+        "oat01-ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz",
+    ] {
+        let e = checked_setup_token(Some(bad)).unwrap_err();
+        assert_eq!(e.details.unwrap()["problems"][0]["field"], "setup_token");
+    }
+    // An API key pasted here is told apart.
+    let e = checked_setup_token(Some(KEY)).unwrap_err();
+    assert!(e.details.unwrap()["problems"][0]["problem"]
+        .as_str()
+        .unwrap()
+        .contains("That is an API key"));
+}
+
+#[test]
+fn the_debug_form_never_prints_a_setup_token() {
+    let a = token_args();
+    let printed = format!("{a:?} {}", a.audit_detail());
+    assert!(!printed.contains(TOKEN), "{printed}");
+}
+
+#[tokio::test]
+async fn a_setup_token_is_checked_with_anthropic_as_a_bearer_token() {
+    // Inference only: valid, nobody named.
+    let http = anthropic_inference_only();
+    assert!(verify_setup_token(&http, TOKEN).await.unwrap().is_none());
+    let sent = http.requests();
+    assert_eq!(sent.len(), 2);
+    for r in &sent {
+        assert!(r.url.starts_with("https://api.anthropic.com/"));
+        assert_eq!(
+            r.header_value("authorization"),
+            Some(format!("Bearer {TOKEN}").as_str())
+        );
+        assert_eq!(r.header_value("anthropic-beta"), Some(OAUTH_BETA));
+        assert_eq!(r.header_value("x-api-key"), None);
+    }
+
+    // A token that may read its profile names its account.
+    let named = FakeTransport::new();
+    named.always(
+        Method::Get,
+        "/api/oauth/profile",
+        Ok(Response::json(
+            200,
+            &serde_json::json!({
+                "account": {"uuid": "6f1c-acct", "email": "ada@x.com", "display_name": "Ada"},
+                "organization": {"uuid": "org-1", "name": "Ada's org"}
+            }),
+        )),
+    );
+    let who = verify_setup_token(&named, TOKEN).await.unwrap().unwrap();
+    assert_eq!(who.uuid.as_deref(), Some("6f1c-acct"));
+    assert_eq!(who.email.as_deref(), Some("ada@x.com"));
+    assert_eq!(who.organization_uuid.as_deref(), Some("org-1"));
+    assert_eq!(named.requests().len(), 1, "no second request");
+
+    // A revoked token: the provider's 401, on the field, token scrubbed.
+    let revoked = FakeTransport::new();
+    revoked.always(
+        Method::Get,
+        "/api/oauth/profile",
+        Ok(Response::json(
+            401,
+            &serde_json::json!({"type": "error", "error": {"type": "authentication_error", "message": format!("Invalid bearer token {TOKEN}")}}),
+        )),
+    );
+    let e = verify_setup_token(&revoked, TOKEN).await.unwrap_err();
+    assert_eq!(e.code, codes::E_INVALID);
+    assert!(
+        e.message.contains("rejected this token (401"),
+        "{}",
+        e.message
+    );
+    assert!(!e.message.contains(TOKEN));
+    assert_eq!(e.details.unwrap()["problems"][0]["field"], "setup_token");
+
+    // Refused by models too: rejected. Anthropic down: try again.
+    let refused = FakeTransport::new();
+    refused.always(
+        Method::Get,
+        "/api/oauth/profile",
+        Ok(Response::new(403, "{}")),
+    );
+    refused.always(Method::Get, "/v1/models", Ok(Response::new(403, "{}")));
+    assert_eq!(
+        verify_setup_token(&refused, TOKEN).await.unwrap_err().code,
+        codes::E_INVALID
+    );
+    let down = FakeTransport::new();
+    down.always(
+        Method::Get,
+        "/api/oauth/profile",
+        Ok(Response::new(529, "overloaded")),
+    );
+    down.always(
+        Method::Get,
+        "/v1/models",
+        Ok(Response::new(529, "overloaded")),
+    );
+    assert_eq!(
+        verify_setup_token(&down, TOKEN).await.unwrap_err().code,
+        codes::E_PROBE
+    );
+}
+
+#[tokio::test]
+async fn a_setup_token_goes_to_the_host_on_stdin_and_signs_the_profile_in() {
     let store = store_with_host();
     store
         .lock()
         .unwrap()
-        .upsert_account(&crate::store::AccountRow {
-            uuid: "acct-real".into(),
-            email: Some("me@x.com".into()),
-            display_name: Some("Me".into()),
-            organization_name: Some("Org".into()),
-            organization_uuid: Some("org-1".into()),
-            seat_tier: Some("max".into()),
-            last_seen_at: Some(NOW),
-            nickname: None,
-            has_extra_usage: false,
-            forbidden_project_ids: Vec::new(),
-            forbidden_org_ids: Vec::new(),
-        })
+        .set_host_signed_out_logins(
+            "mercury",
+            &[
+                crate::store::SignedOutLogin {
+                    profile: Some("tok".into()),
+                    since: NOW - 100,
+                    checked_at: NOW - 10,
+                },
+                crate::store::SignedOutLogin {
+                    profile: None,
+                    since: NOW - 100,
+                    checked_at: NOW - 10,
+                },
+            ],
+        )
         .unwrap();
-    store
-}
-
-#[tokio::test]
-async fn a_setup_token_on_a_known_account_goes_to_the_host_on_stdin() {
-    let store = store_with_login_account();
     let ssh = Arc::new(FakeSsh::new());
     ssh.on(
         Match::script_contains(SETUP_TOKEN_FILE),
-        Reply::ok("__fleet_ok__\n"),
+        Reply::ok("motd\n__fleet_ok__\n"),
     );
-    let mut a = args("setup_token");
-    a.profile = "tok".into();
-    a.token = Some(TOKEN.into());
-    a.account_uuid = Some("acct-real".into());
-    // An inference-only token may not list models: not refused, not proven.
-    let http = anthropic_says(403);
-    let out = run(&a, &store, ssh.as_ref(), &tmux(&ssh), &http, NOW)
-        .await
-        .unwrap();
-    assert_eq!(out["account_uuid"], "acct-real");
-    assert_eq!(out["verified"], false);
+    let mut a = token_args();
+    a.nickname = Some("Laptop token".into());
+    let out = run(
+        &a,
+        &store,
+        ssh.as_ref(),
+        &tmux(&ssh),
+        &anthropic_inference_only(),
+        NOW,
+    )
+    .await
+    .unwrap();
+    let uuid = setup_token_account_uuid(TOKEN);
+    assert!(uuid.starts_with(SETUP_TOKEN_ACCOUNT_PREFIX) && is_setup_token_account(&uuid));
+    assert_eq!(out["account_uuid"], uuid.as_str());
+    assert_eq!(out["replaced"], false);
     assert!(!out.to_string().contains(TOKEN));
-    let req = &http.requests()[0];
-    assert_eq!(
-        req.header_value("authorization"),
-        Some(format!("Bearer {TOKEN}").as_str())
-    );
-    assert!(!format!("{req:?}").contains(TOKEN), "Debug masks it");
-    assert!(!format!("{a:?}").contains(TOKEN));
-    assert!(!a.audit_detail().contains(TOKEN));
 
-    let call = &ssh.calls()[0];
+    let writes = token_writes(&ssh);
+    assert_eq!(writes.len(), 1);
+    let call = &writes[0];
     assert!(!call.command().contains(TOKEN), "never in argv");
+    let script = call.script().unwrap();
+    assert!(script.contains("umask 077") && script.contains("chmod 600"));
+    assert!(script.contains("\"$HOME/.claude-profiles/\"'tok'"));
     let stdin = String::from_utf8(call.stdin.clone().unwrap()).unwrap();
     let mut lines = stdin.lines();
     assert_eq!(lines.next(), Some(TOKEN));
     let acct: serde_json::Value = serde_json::from_str(lines.next().unwrap()).unwrap();
-    assert_eq!(acct["accountUuid"], "acct-real");
-    assert_eq!(acct["fleetCredential"], "setup_token");
-    assert!(
-        acct.get("emailAddress").is_none(),
-        "the /login reports those"
-    );
+    assert_eq!(acct["accountUuid"], uuid.as_str());
+    assert_eq!(acct["displayName"], "Laptop token");
+    assert_eq!(acct["fleetCredential"], SETUP_TOKEN_CREDENTIAL);
+    let cj: serde_json::Value = serde_json::from_str(lines.next().unwrap()).unwrap();
+    assert_eq!(cj["hasCompletedOnboarding"], true);
+    // Every other call (sharing MCP servers) never carries the token.
+    assert!(ssh.calls().iter().all(|c| !c.command().contains(TOKEN)));
 
     let s = store.lock().unwrap();
-    let account = s.get_account_by_uuid("acct-real").unwrap().unwrap();
-    assert_eq!(account.seat_tier.as_deref(), Some("max"), "left alone");
-    let profiles = s
-        .get_host_row("mercury")
-        .unwrap()
-        .unwrap()
-        .claude_profiles
-        .unwrap();
+    let account = s.get_account_by_uuid(&uuid).unwrap().unwrap();
+    assert_eq!(account.nickname.as_deref(), Some("Laptop token"));
+    let host = s.get_host_row("mercury").unwrap().unwrap();
+    let profiles = host.claude_profiles.unwrap();
     assert_eq!(profiles[0].name, "tok");
-    assert_eq!(profiles[0].account_uuid.as_deref(), Some("acct-real"));
-    assert_eq!(profiles[0].credential.as_deref(), Some("setup_token"));
-    assert_eq!(profiles[0].email.as_deref(), Some("me@x.com"));
+    assert_eq!(profiles[0].account_uuid.as_deref(), Some(uuid.as_str()));
+    assert_eq!(
+        profiles[0].credential.as_deref(),
+        Some(SETUP_TOKEN_CREDENTIAL)
+    );
+    // The token signed `tok` in; the host's own login is still out.
+    assert_eq!(host.signed_out_logins.len(), 1);
+    assert_eq!(host.signed_out_logins[0].profile, None);
+    let dump: Vec<String> = s
+        .conn_for_test()
+        .prepare("SELECT value FROM settings")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert!(dump.iter().all(|v| !v.contains(TOKEN)));
 }
 
 #[tokio::test]
-async fn a_setup_token_without_an_account_is_its_own_and_can_be_renewed() {
-    let store = store_with_host();
-    let ssh = Arc::new(FakeSsh::new());
-    ssh.on(
-        Match::script_contains(SETUP_TOKEN_FILE),
-        Reply::ok("__fleet_ok__\n"),
-    );
-    let mut a = args("setup_token");
-    a.profile = "tok".into();
-    a.token = Some(TOKEN.into());
-    let out = run(&a, &store, ssh.as_ref(), &tmux(&ssh), &anthropic_ok(), NOW)
-        .await
-        .unwrap();
-    let uuid = setup_token_account_uuid(TOKEN);
-    assert!(uuid.starts_with("setuptoken-") && uuid.len() == 27);
-    assert!(has_no_usage_windows(&uuid) && !is_api_key_account(&uuid));
-    assert_eq!(out["account_uuid"], uuid.as_str());
-    assert_eq!(out["verified"], true);
-    let seat = store
-        .lock()
-        .unwrap()
-        .get_account_by_uuid(&uuid)
-        .unwrap()
-        .unwrap()
-        .seat_tier;
-    assert_eq!(seat.as_deref(), Some("setup_token"));
-
-    // The yearly renewal: a new token over a setup-token profile. It is
-    // the sign-in again, so the profile's signed-out card goes.
-    let out_since = crate::store::SignedOutLogin {
-        profile: Some("tok".into()),
-        since: 5,
-        checked_at: 5,
+async fn a_setup_token_is_listed_as_the_account_it_belongs_to() {
+    let real = crate::store::AccountRow {
+        uuid: "6f1c-real-login".into(),
+        email: Some("ada@x.com".into()),
+        display_name: Some("Ada".into()),
+        organization_name: Some("Ada's org".into()),
+        organization_uuid: Some("org-1".into()),
+        seat_tier: Some("max".into()),
+        last_seen_at: Some(1),
+        nickname: None,
+        has_extra_usage: false,
+        forbidden_project_ids: Vec::new(),
+        forbidden_org_ids: Vec::new(),
     };
-    store
+    let ok = || {
+        let ssh = Arc::new(FakeSsh::new());
+        ssh.on(
+            Match::script_contains(SETUP_TOKEN_FILE),
+            Reply::ok("replaced\n__fleet_ok__\n"),
+        );
+        ssh
+    };
+
+    // Named by the person.
+    let store = store_with_host();
+    store.lock().unwrap().upsert_account(&real).unwrap();
+    let ssh = ok();
+    let mut a = token_args();
+    a.account = Some("6f1c-real-login".into());
+    let out = run(
+        &a,
+        &store,
+        ssh.as_ref(),
+        &tmux(&ssh),
+        &anthropic_inference_only(),
+        NOW,
+    )
+    .await
+    .unwrap();
+    assert_eq!(out["account_uuid"], "6f1c-real-login");
+    assert_eq!(out["email"], "ada@x.com");
+    assert_eq!(out["replaced"], true);
+    let stdin = String::from_utf8(token_writes(&ssh)[0].stdin.clone().unwrap()).unwrap();
+    let acct: serde_json::Value = serde_json::from_str(stdin.lines().nth(1).unwrap()).unwrap();
+    assert_eq!(acct["accountUuid"], "6f1c-real-login");
+    assert_eq!(acct["emailAddress"], "ada@x.com");
+    assert_eq!(acct["fleetCredential"], SETUP_TOKEN_CREDENTIAL);
+    // The known account row is left as it was.
+    let kept = store
         .lock()
         .unwrap()
-        .set_host_signed_out_logins(&a.host_alias, &[out_since])
-        .unwrap();
-    let renewed = format!("{TOKEN}X");
-    a.token = Some(renewed.clone());
-    let out = run(&a, &store, ssh.as_ref(), &tmux(&ssh), &anthropic_ok(), NOW)
-        .await
-        .unwrap();
-    let host = store
-        .lock()
-        .unwrap()
-        .get_host_row(&a.host_alias)
+        .get_account_by_uuid("6f1c-real-login")
         .unwrap()
         .unwrap();
-    assert!(
-        host.signed_out_logins.is_empty(),
-        "the new token signs it in"
-    );
-    assert!(crate::service::login_health::is_setup_token(
-        &host,
-        Some("tok")
-    ));
-    assert!(!crate::service::login_health::is_setup_token(&host, None));
-    // It stays on the account it was: the id is the first token's.
-    assert_eq!(out["account_uuid"], uuid.as_str());
-    // But an API key is not accepted over it.
-    a.action = "api_key".into();
-    a.api_key = Some(KEY.into());
-    let e = run(&a, &store, ssh.as_ref(), &tmux(&ssh), &anthropic_ok(), NOW)
+    assert_eq!(kept.seat_tier.as_deref(), Some("max"));
+
+    // The profile's own (expired) /login, when nobody names one.
+    let store = store_with_host();
+    {
+        let s = store.lock().unwrap();
+        s.upsert_account(&real).unwrap();
+        s.set_host_profiles(
+            "mercury",
+            &[crate::store::HostProfileRow {
+                name: "tok".into(),
+                account_uuid: Some("6f1c-real-login".into()),
+                email: Some("ada@x.com".into()),
+                credential: None,
+            }],
+        )
+        .unwrap();
+    }
+    let ssh = ok();
+    let out = run(
+        &token_args(),
+        &store,
+        ssh.as_ref(),
+        &tmux(&ssh),
+        &anthropic_inference_only(),
+        NOW,
+    )
+    .await
+    .unwrap();
+    assert_eq!(out["account_uuid"], "6f1c-real-login");
+
+    // An account fleet does not know, or an API key's, is refused before
+    // anything is written.
+    for named in ["nobody", "apikey-0123456789abcdef"] {
+        let store = store_with_host();
+        let ssh = ok();
+        let mut a = token_args();
+        a.account = Some(named.into());
+        let e = run(
+            &a,
+            &store,
+            ssh.as_ref(),
+            &tmux(&ssh),
+            &anthropic_inference_only(),
+            NOW,
+        )
         .await
         .unwrap_err();
-    assert_eq!(e.code, codes::E_EXISTS);
+        assert_eq!(e.code, codes::E_INVALID, "{named}");
+        assert!(token_writes(&ssh).is_empty());
+    }
 }
 
 #[tokio::test]
-async fn a_setup_token_is_refused_where_it_does_not_belong() {
-    let store = store_with_login_account();
-    let ssh = Arc::new(FakeSsh::new());
-    let http = anthropic_ok();
-    let mut a = args("setup_token");
-    a.profile = "tok".into();
-
-    // Not a setup token: an API key, or nothing like one.
-    for bad in [KEY, "hello", ""] {
-        a.token = Some(bad.into());
-        let e = run(&a, &store, ssh.as_ref(), &tmux(&ssh), &http, NOW)
-            .await
-            .unwrap_err();
-        assert_eq!(e.code, codes::E_INVALID, "{bad}");
-        assert_eq!(e.details.as_ref().unwrap()["problems"][0]["field"], "token");
-    }
-    // And a setup token pasted as an API key says which to pick.
-    let mut k = args("api_key");
-    k.api_key = Some(TOKEN.into());
-    let e = run(&k, &store, ssh.as_ref(), &tmux(&ssh), &http, NOW)
-        .await
-        .unwrap_err();
-    assert!(e.message.contains("setup token"), "{}", e.message);
-
-    // An account fleet does not know, or one that is not a /login.
-    a.token = Some(TOKEN.into());
-    for acct in ["acct-unknown", "apikey-0123456789abcdef"] {
-        a.account_uuid = Some(acct.into());
-        let e = run(&a, &store, ssh.as_ref(), &tmux(&ssh), &http, NOW)
-            .await
-            .unwrap_err();
-        assert_eq!(e.code, codes::E_INVALID, "{acct}");
-    }
-    // A /login profile is never overwritten.
-    a.account_uuid = None;
-    a.profile = "work".into();
+async fn a_setup_token_never_lands_on_an_api_key_profile() {
+    let store = store_with_host();
     store
         .lock()
         .unwrap()
         .set_host_profiles(
             "mercury",
             &[crate::store::HostProfileRow {
-                name: "work".into(),
-                account_uuid: Some("acct-real".into()),
+                name: "tok".into(),
+                account_uuid: Some(api_key_account_uuid(KEY)),
                 email: None,
                 credential: None,
             }],
         )
         .unwrap();
-    let e = run(&a, &store, ssh.as_ref(), &tmux(&ssh), &http, NOW)
+    let ssh = Arc::new(FakeSsh::new());
+    let http = anthropic_inference_only();
+    let e = run(&token_args(), &store, ssh.as_ref(), &tmux(&ssh), &http, NOW)
         .await
         .unwrap_err();
     assert_eq!(e.code, codes::E_EXISTS);
     assert!(ssh.calls().is_empty() && http.requests().is_empty());
 
-    // A 401 is Anthropic's refusal, on the field; nothing is written.
-    a.profile = "tok".into();
-    let e = run(
-        &a,
-        &store,
-        ssh.as_ref(),
-        &tmux(&ssh),
-        &anthropic_says(401),
-        NOW,
-    )
-    .await
-    .unwrap_err();
-    assert_eq!(e.code, codes::E_INVALID);
-    assert!(!e.message.contains(TOKEN));
-    // A 5xx is no answer: try again.
-    let e = run(
-        &a,
-        &store,
-        ssh.as_ref(),
-        &tmux(&ssh),
-        &anthropic_says(503),
-        NOW,
-    )
-    .await
-    .unwrap_err();
-    assert_eq!(e.code, codes::E_PROBE);
-    assert!(ssh.calls().is_empty());
+    // The host says so too.
+    let store = store_with_host();
+    ssh.on(
+        Match::script_contains(SETUP_TOKEN_FILE),
+        Reply::Exit {
+            code: 3,
+            stdout: b"__fleet_api_key_profile__\n".to_vec(),
+            stderr: vec![],
+        },
+    );
+    let e = run(&token_args(), &store, ssh.as_ref(), &tmux(&ssh), &http, NOW)
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, codes::E_EXISTS, "{}", e.message);
 }
 
-/// The real shell: the token lands mode 600, the profile lists as a
-/// setup-token one (remote script and local read alike), and a launch
-/// exports it as CLAUDE_CODE_OAUTH_TOKEN, not as an API key.
+/// The script for real, in a sandbox `HOME`: the token lands mode 600, a
+/// second write replaces it, a `/login` profile keeps its own files, an
+/// API-key profile is refused, the profile is listed as a setup token, and
+/// a session's launch exports the token (and drops a shell API key).
 #[cfg(unix)]
 #[test]
-fn a_written_setup_token_is_listed_marked_and_exported() {
+fn the_written_setup_token_is_listed_and_exported() {
     use std::os::unix::fs::PermissionsExt;
     let home = tempfile::tempdir().unwrap();
-    let mut child = std::process::Command::new("bash")
-        .arg("-c")
-        .arg(write_script("tok", SETUP_TOKEN_FILE))
-        .env("HOME", home.path())
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
-    let account = serde_json::json!({"accountUuid": "acct-real", "fleetCredential": "setup_token"});
-    use std::io::Write as _;
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(format!("{TOKEN}\n{account}\n{{\"hasCompletedOnboarding\":true}}\n").as_bytes())
-        .unwrap();
-    let out = child.wait_with_output().unwrap();
-    assert!(String::from_utf8_lossy(&out.stdout).contains(OK_MARK));
-    let file = home
-        .path()
-        .join(".claude-profiles/tok")
-        .join(SETUP_TOKEN_FILE);
+    let write = |profile: &str, token: &str| {
+        let mut child = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(token_write_script(profile))
+            .env("HOME", home.path())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let account = crate::service::hosts::OauthAccount {
+            uuid: Some(setup_token_account_uuid(token)),
+            display_name: Some("Setup token · tok".into()),
+            fleet_credential: Some(SETUP_TOKEN_CREDENTIAL.into()),
+            ..Default::default()
+        };
+        use std::io::Write as _;
+        match child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(&token_write_stdin(token, &account))
+        {
+            Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
+            r => r.unwrap(),
+        }
+        child.wait_with_output().unwrap()
+    };
+    let out = write("tok", TOKEN);
+    let said = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        said.contains(OK_MARK) && !said.contains("replaced"),
+        "{said}"
+    );
+    let dir = home.path().join(".claude-profiles/tok");
+    let file = dir.join(SETUP_TOKEN_FILE);
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        format!("{TOKEN}\n")
+    );
     assert_eq!(
         std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
         0o600
     );
+    let cj: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join(".claude.json")).unwrap()).unwrap();
+    assert_eq!(cj["hasCompletedOnboarding"], true);
+
+    // Replace.
+    let newer = format!("{TOKEN}NEW");
+    let out = write("tok", &newer);
+    assert!(String::from_utf8_lossy(&out.stdout).contains("replaced"));
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        format!("{newer}\n")
+    );
+
+    // A /login profile takes the token in front of its login, its own
+    // .claude.json untouched.
+    let login = home.path().join(".claude-profiles/work");
+    std::fs::create_dir_all(&login).unwrap();
+    std::fs::write(login.join(".claude.json"), "{\"oauthAccount\":{}}").unwrap();
+    let out = write("work", TOKEN);
+    assert!(String::from_utf8_lossy(&out.stdout).contains(OK_MARK));
+    assert_eq!(
+        std::fs::read_to_string(login.join(".claude.json")).unwrap(),
+        "{\"oauthAccount\":{}}"
+    );
+
+    // An API-key profile is refused, untouched.
+    let api = home.path().join(".claude-profiles/api");
+    std::fs::create_dir_all(&api).unwrap();
+    std::fs::write(api.join(API_KEY_FILE), format!("{KEY}\n")).unwrap();
+    let out = write("api", TOKEN);
+    assert_eq!(out.status.code(), Some(3));
+    assert!(String::from_utf8_lossy(&out.stdout).contains(API_KEY_PROFILE_MARK));
+    assert!(!api.join(SETUP_TOKEN_FILE).exists());
 
     let listed = std::process::Command::new("bash")
         .arg("-c")
@@ -985,29 +1177,60 @@ fn a_written_setup_token_is_listed_marked_and_exported() {
         .env("HOME", home.path())
         .output()
         .unwrap();
-    let stdout = String::from_utf8_lossy(&listed.stdout);
-    assert!(!stdout.contains(TOKEN));
-    let remote = crate::tmux::parse_profiles(&stdout);
+    let got = crate::tmux::parse_profiles(&String::from_utf8_lossy(&listed.stdout));
+    let tok = got.iter().find(|p| p.name == "tok").unwrap();
+    let account = tok.account.as_ref().unwrap();
+    assert_eq!(
+        account.uuid.as_deref(),
+        Some(setup_token_account_uuid(newer.as_str()).as_str())
+    );
+    assert_eq!(
+        credential_of(account).as_deref(),
+        Some(SETUP_TOKEN_CREDENTIAL)
+    );
     let local = crate::tmux::read_local_profiles(home.path()).unwrap();
-    for got in [&remote, &local] {
-        let a = got[0].account.as_ref().unwrap();
-        assert_eq!(a.uuid.as_deref(), Some("acct-real"));
-        assert_eq!(a.fleet_credential.as_deref(), Some("setup_token"));
-    }
+    let local_tok = local.iter().find(|p| p.name == "tok").unwrap();
+    assert_eq!(local_tok.account.as_ref().unwrap().uuid, account.uuid);
 
     let exported = std::process::Command::new("sh")
         .arg("-c")
         .arg(format!(
-            "export CLAUDE_CONFIG_DIR=\"$HOME/.claude-profiles/tok\"; {}printf '%s|%s' \"$CLAUDE_CODE_OAUTH_TOKEN\" \"$ANTHROPIC_API_KEY\"",
+            "export CLAUDE_CONFIG_DIR=\"$HOME/.claude-profiles/tok\"; {}printf '%s|%s' \"$CLAUDE_CODE_OAUTH_TOKEN\" \"${{ANTHROPIC_API_KEY-unset}}\"",
             crate::tmux::PROFILE_API_KEY
         ))
         .env("HOME", home.path())
+        .env("ANTHROPIC_API_KEY", "sk-ant-from-the-shell")
         .env_remove("CLAUDE_CODE_OAUTH_TOKEN")
-        .env_remove("ANTHROPIC_API_KEY")
         .output()
         .unwrap();
     assert_eq!(
         String::from_utf8_lossy(&exported.stdout),
-        format!("{TOKEN}|")
+        format!("{newer}|unset")
     );
+    assert!(!crate::tmux::PROFILE_API_KEY.contains("sk-ant"));
+}
+
+#[test]
+fn a_probed_setup_token_profile_is_kept_as_one() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("mercury").unwrap();
+    let line = serde_json::json!({
+        "accountUuid": "setuptoken-0123456789abcdef",
+        "displayName": "Setup token · tok",
+        "fleetCredential": SETUP_TOKEN_CREDENTIAL,
+    })
+    .to_string();
+    let probed = crate::tmux::parse_profiles(&format!(
+        "@@P\ttok\t{line}\n@@P\twork\t{{\"accountUuid\":\"6f1c\"}}\n"
+    ));
+    crate::service::hosts::sync_host_profiles(&s, "mercury", Some(&probed)).unwrap();
+    let rows = s
+        .get_host_row("mercury")
+        .unwrap()
+        .unwrap()
+        .claude_profiles
+        .unwrap();
+    assert_eq!(rows[0].name, "tok");
+    assert_eq!(rows[0].credential.as_deref(), Some(SETUP_TOKEN_CREDENTIAL));
+    assert_eq!(rows[1].credential, None);
 }

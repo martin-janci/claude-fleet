@@ -178,6 +178,8 @@ pub struct Dialer {
     endpoint: Endpoint,
     token: String,
     tls: Option<tokio_rustls::TlsConnector>,
+    /// An HTTP proxy to `CONNECT` through ([`crate::proxy`]), or none.
+    proxy: Option<crate::proxy::Proxy>,
 }
 
 impl Dialer {
@@ -192,7 +194,14 @@ impl Dialer {
             endpoint,
             token,
             tls,
+            proxy: None,
         })
+    }
+
+    /// Reach the hub through `proxy` (an `http://` proxy, `CONNECT`).
+    pub fn with_proxy(mut self, proxy: Option<crate::proxy::Proxy>) -> Self {
+        self.proxy = proxy;
+        self
     }
 
     pub fn endpoint(&self) -> &Endpoint {
@@ -246,9 +255,15 @@ impl Dialer {
     /// (`crate::hook_relay`) sends its one HTTP request per hook over one.
     pub(crate) async fn connect_io(&self) -> Result<Box<dyn Io>, DialError> {
         let ep = &self.endpoint;
-        let tcp = tokio::net::TcpStream::connect((ep.host(), ep.port()))
-            .await
-            .map_err(|e| DialError::Failed(format!("{}:{}: {e}", ep.host(), ep.port())))?;
+        let tcp = match &self.proxy {
+            Some(proxy) => proxy
+                .tunnel(ep.host(), ep.port())
+                .await
+                .map_err(DialError::Failed)?,
+            None => tokio::net::TcpStream::connect((ep.host(), ep.port()))
+                .await
+                .map_err(|e| DialError::Failed(format!("{}:{}: {e}", ep.host(), ep.port())))?,
+        };
         let _ = tcp.set_nodelay(true);
         let io: Box<dyn Io> = match &self.tls {
             None => Box::new(tcp),
@@ -341,6 +356,10 @@ pub struct Agent {
     /// The port the hook relay bound (`crate::hook_relay`), told to the hub in
     /// every `hello`. Unset while there is no relay.
     hook_port: std::sync::OnceLock<u16>,
+    /// Where to record the alias the hub's `welcome` names (`$HOME`, set by
+    /// `run`), and the hub URL to record beside it. Unset in tests, so a
+    /// test agent never writes into a real home.
+    identity: std::sync::OnceLock<(PathBuf, String)>,
 }
 
 /// One `exec` counted in [`Agent::running`] for as long as it lives.
@@ -374,7 +393,38 @@ impl Agent {
             running: tokio::sync::watch::Sender::new(0),
             report_errors,
             hook_port: std::sync::OnceLock::new(),
+            identity: std::sync::OnceLock::new(),
         })
+    }
+
+    /// Record the alias each `welcome` names in `home`'s identity file
+    /// ([`fleet_proto::identity`]), beside `hub`. Set once.
+    pub fn set_identity_home(&self, home: PathBuf, hub: String) {
+        let _ = self.identity.set((home, hub));
+    }
+
+    /// Write the identity file for `alias`, if this agent keeps one and the
+    /// file does not already say so. Best effort: a failure is logged, never
+    /// fatal — it only costs a desktop on this machine its local attach.
+    fn record_identity(&self, alias: &str) {
+        let Some((home, hub)) = self.identity.get() else {
+            return;
+        };
+        let id = fleet_proto::identity::LocalIdentity {
+            host_alias: alias.to_string(),
+            hub: hub.clone(),
+        };
+        if fleet_proto::identity::read(home).as_ref() == Some(&id) {
+            return;
+        }
+        match fleet_proto::identity::write(home, &id) {
+            Ok(()) => tracing::info!(alias, "[agent] recorded this machine's hub alias"),
+            Err(e) => tracing::warn!(
+                alias = %fleet_proto::sanitize_for_log(alias, 64),
+                error = %e,
+                "[agent] could not record this machine's hub alias"
+            ),
+        }
     }
 
     /// Record the port the hook relay bound, so every later `hello` carries
@@ -598,7 +648,11 @@ where
                     // `handle`, because a refusal has to END this loop, which
                     // a plain function cannot do.
                     Message::Text(text) => match decode_hub_frame_lenient(&text) {
-                        Ok(Decoded::Frame(HubFrame::Welcome { hub_version, proto })) => {
+                        Ok(Decoded::Frame(HubFrame::Welcome {
+                            hub_version,
+                            proto,
+                            host_alias,
+                        })) => {
                             // A hub AHEAD of this agent is not refused: it
                             // already judged our `hello.proto` and admitted
                             // it, so it speaks ours on this connection. Only
@@ -617,6 +671,9 @@ where
                             tracing::info!(
                                 hub_version, proto, "[agent] hub protocol compatible"
                             );
+                            if let Some(alias) = host_alias.as_deref() {
+                                agent.record_identity(alias);
+                            }
                         }
                         // Anything else at all, before a compatible welcome:
                         // this hub either predates the protocol entirely (no
@@ -1204,6 +1261,10 @@ fn backoff() -> Backoff {
 /// file: this is how "is it connected" is answered.
 pub struct Notifier {
     socket: Option<PathBuf>,
+    /// Where no systemd reads `STATUS=` (launchd on a Mac): the same line,
+    /// written to [`STATUS_FILE`] under `$HOME`, which `fleet-agent status`
+    /// reads back.
+    file: Option<PathBuf>,
     /// The same line, kept for the in-process updater
     /// ([`crate::self_update`]), which has no `systemctl show` to read it.
     link: Arc<LinkStatus>,
@@ -1238,8 +1299,15 @@ impl Notifier {
     pub fn at(socket: Option<PathBuf>) -> Self {
         Self {
             socket,
+            file: None,
             link: Arc::default(),
         }
+    }
+
+    /// Also write each status line to `path` (best effort).
+    pub fn with_file(mut self, path: Option<PathBuf>) -> Self {
+        self.file = path;
+        self
     }
 
     pub fn link(&self) -> Arc<LinkStatus> {
@@ -1260,8 +1328,18 @@ impl Notifier {
         }
         #[cfg(not(unix))]
         let _ = text;
+        if let Some(path) = &self.file {
+            if let Some(dir) = path.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            let _ = std::fs::write(path, format!("{}\n", text.replace('\n', " ")));
+        }
     }
 }
+
+/// Where the status line goes when no systemd takes it, relative to `$HOME`
+/// (beside [`fleet_proto::identity::RELATIVE_PATH`]).
+pub const STATUS_FILE: &str = ".local/state/fleet-agent/status";
 
 #[cfg(unix)]
 fn send_notify(socket: &Path, message: &[u8]) -> std::io::Result<()> {
@@ -1422,6 +1500,17 @@ pub async fn run(
     self_update: Option<crate::self_update::SelfUpdate>,
 ) -> Result<(), String> {
     let notifier = Notifier::from_env();
+    // No systemd to keep the line (launchd, or a hand-started agent): a file
+    // `fleet-agent status` can read instead.
+    let notifier = if std::env::var_os("NOTIFY_SOCKET").is_none() {
+        let file = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .filter(|h| h.is_absolute())
+            .map(|h| h.join(STATUS_FILE));
+        notifier.with_file(file)
+    } else {
+        notifier
+    };
     if let Some(u) = self_update {
         let (config, link) = (config.clone(), notifier.link());
         tokio::spawn(supervise_self_update(u, config, link));
@@ -1430,16 +1519,21 @@ pub async fn run(
     // unit's cgroup, so an oom-kill of the agent is not one of every session.
     tokio::spawn(crate::scope::run());
     let endpoint = Endpoint::parse(&config.hub, config.insecure)?;
-    let dialer = Arc::new(Dialer::new(
-        endpoint,
-        config.token,
-        config.ca_file.as_deref(),
-    )?);
-    let agent = Agent::with_report_errors(
-        std::env::var_os("HOME").map(PathBuf::from),
-        exec::MAX_CONCURRENT,
-        config.report_errors,
-    );
+    let proxy = crate::proxy::Proxy::resolve(config.proxy.as_deref(), endpoint.host(), |k| {
+        std::env::var(k).ok()
+    })?;
+    if let Some(p) = &proxy {
+        tracing::info!(proxy = %format!("{}:{}", p.host, p.port), "[agent] reaching the hub through a proxy");
+    }
+    let dialer =
+        Arc::new(Dialer::new(endpoint, config.token, config.ca_file.as_deref())?.with_proxy(proxy));
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|h| h.is_absolute());
+    let agent = Agent::with_report_errors(home.clone(), exec::MAX_CONCURRENT, config.report_errors);
+    if let Some(home) = home {
+        agent.set_identity_home(home, dialer.endpoint().url().to_string());
+    }
     // Bound before the first dial, so the first `hello` already says where
     // the hooks can post. A port that is taken (a second agent on this
     // machine, another service) is logged and left: the hub then keeps this
@@ -1742,6 +1836,7 @@ mod tests {
         HubFrame::Welcome {
             hub_version: "0.9.0".into(),
             proto: fleet_proto::PROTO_VERSION,
+            host_alias: None,
         }
     }
 
@@ -2585,6 +2680,7 @@ mod tests {
                 encode_hub_frame(&HubFrame::Welcome {
                     hub_version: "0.1.0".into(),
                     proto: 0,
+                    host_alias: None,
                 })
                 .unwrap()
                 .into(),
@@ -2624,6 +2720,7 @@ mod tests {
                 encode_hub_frame(&HubFrame::Welcome {
                     hub_version: "9.0.0".into(),
                     proto: fleet_proto::PROTO_VERSION + 5,
+                    host_alias: None,
                 })
                 .unwrap()
                 .into(),
@@ -2895,6 +2992,40 @@ mod tests {
         assert_eq!(code, 0);
     }
 
+    /// A `welcome` naming the host's alias lands in the identity file a
+    /// desktop on the same machine reads for its local attach; one without
+    /// (an older hub) writes nothing.
+    #[tokio::test]
+    async fn a_welcome_naming_the_alias_records_it_for_a_desktop_on_this_machine() {
+        let home = tempfile::tempdir().unwrap();
+        let agent = quiet_agent(None, 1);
+        agent.set_identity_home(home.path().to_path_buf(), "wss://hub.example/agent".into());
+        let mut p = pair_before_welcome(Arc::clone(&agent)).await;
+        send(
+            &mut p.hub,
+            &HubFrame::Welcome {
+                hub_version: "0.9.0".into(),
+                proto: fleet_proto::PROTO_VERSION,
+                host_alias: Some("mac".into()),
+            },
+        )
+        .await;
+        send(&mut p.hub, &exec("ok", &["true"], None)).await;
+        let (code, ..) = result_for(&mut p.hub, "ok").await;
+        assert_eq!(code, 0);
+        let id = fleet_proto::identity::read(home.path()).expect("the identity file");
+        assert_eq!(id.host_alias, "mac");
+        assert_eq!(id.hub, "wss://hub.example/agent");
+
+        let other = tempfile::tempdir().unwrap();
+        let agent = quiet_agent(None, 1);
+        agent.set_identity_home(other.path().to_path_buf(), String::new());
+        let mut p = pair_with(agent).await;
+        send(&mut p.hub, &exec("ok", &["true"], None)).await;
+        let _ = result_for(&mut p.hub, "ok").await;
+        assert_eq!(fleet_proto::identity::read(other.path()), None);
+    }
+
     /// End to end through `run_with`: a version refusal forces the maximum
     /// backoff on the very next delay — not the normal growing sequence —
     /// and stays there on a following ordinary refusal too.
@@ -2936,6 +3067,7 @@ mod tests {
             &HubFrame::Welcome {
                 hub_version: "0.1.0".into(),
                 proto: 0,
+                host_alias: None,
             },
         )
         .await;
@@ -3073,6 +3205,15 @@ mod tests {
     #[test]
     fn a_notifier_with_nowhere_to_report_is_quiet() {
         Notifier::at(None).status("anything");
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("state/status");
+        Notifier::at(None)
+            .with_file(Some(file.clone()))
+            .status("connected to wss://hub.example/agent\nsince now");
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "connected to wss://hub.example/agent since now\n"
+        );
         Notifier::at(Some(PathBuf::from("/nonexistent/notify"))).status("anything");
     }
 }

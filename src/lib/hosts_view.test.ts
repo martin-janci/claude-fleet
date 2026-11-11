@@ -318,9 +318,8 @@ describe('host health helpers', () => {
       ],
     });
     expect(hostAttention({ ...base, host: keys })).toBeNull();
-    // Nor does a setup token beside a /login of its account.
-    const token = host('tok', {
-      login_split: false,
+    // Nor does a setup token on the host's own account: a token of its own.
+    const token = host('token', {
       account_uuid: 'a',
       claude_profiles: [{ name: 'tok', account_uuid: 'a', credential: 'setup_token' }],
     });

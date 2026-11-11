@@ -59,6 +59,7 @@
 //!   never has to be guessed from prose.
 
 pub mod backoff;
+pub mod identity;
 pub mod net;
 pub mod report;
 
@@ -432,6 +433,15 @@ pub enum HubFrame {
         /// which at least tells an operator what is wrong.
         #[serde(default)]
         proto: u32,
+        /// The alias the hub knows this host by. The agent writes it to its
+        /// local identity file (`fleet-agent`'s `identity.rs`), so a desktop
+        /// app running on the same machine can tell that a session on this
+        /// alias is its own and attach to it with a local `tmux attach`
+        /// instead of `ssh <alias>` (which has no route to an agent host).
+        /// An optional field: an older agent ignores it and an older hub
+        /// omits it, so `PROTO_VERSION` does not move for it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        host_alias: Option<String>,
     },
 }
 

@@ -643,7 +643,8 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
 /// A host's login profile logged into the account is a source too
 /// (docs/accounts.md), named `<alias> (<profile>)` ([`source_label`]); it is
 /// read with `CLAUDE_CONFIG_DIR` at that profile. A host's own login ranks
-/// before its profiles, so an existing "via" label does not move.
+/// before its profiles, so an existing "via" label does not move. A
+/// setup-token profile is never a source.
 pub fn source_hosts(account_uuid: &str, hosts: &[HostRow], sticky: Option<&str>) -> Vec<String> {
     let local = crate::service::projects::LOCAL_HOST;
     let mut out: Vec<String> = Vec::new();
@@ -652,8 +653,8 @@ pub fn source_hosts(account_uuid: &str, hosts: &[HostRow], sticky: Option<&str>)
             out.push(h.alias.clone());
         }
         for p in h.claude_profiles.iter().flatten() {
-            // A setup-token profile cannot read usage (its token is
-            // inference-only), so it is never a source.
+            // A setup-token profile has no `.credentials.json` to read
+            // usage with (its token is inference only), so it is no source.
             if p.account_uuid.as_deref() == Some(account_uuid)
                 && p.credential.is_none()
                 && crate::validate::claude_profile(&p.name).is_ok()
@@ -2414,21 +2415,16 @@ curl() { echo HIJACKED; }
             "an invalid stored name is never a source"
         );
         assert_eq!(source_hosts("A", &hosts, Some("b (work)"))[0], "b (work)");
+        // A setup-token profile has no credentials file to read usage with.
+        let mut c = host("c", None, true);
+        c.claude_profiles = Some(vec![crate::store::HostProfileRow {
+            credential: Some("setup_token".into()),
+            ..profile("tok", "A")
+        }]);
+        assert!(!source_hosts("A", &[c.clone()], None).contains(&"c (tok)".to_string()));
+        assert!(crate::service::account_usage_poll::distinct_account_uuids(&[c]).is_empty());
         assert_eq!(parse_source("b (work)"), ("b", Some("work")));
         assert_eq!(parse_source("b"), ("b", None));
-    }
-
-    #[test]
-    fn a_setup_token_profile_is_never_a_usage_source() {
-        // Its token is inference-only: /api/oauth/usage refuses it.
-        let mut a = host("a", Some("H"), true);
-        a.claude_profiles = Some(vec![crate::store::HostProfileRow {
-            name: "tok".into(),
-            account_uuid: Some("A".into()),
-            email: None,
-            credential: Some("setup_token".into()),
-        }]);
-        assert!(source_hosts("A", &[a], None).is_empty());
     }
 
     #[tokio::test]

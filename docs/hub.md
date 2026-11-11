@@ -741,7 +741,10 @@ host the hub cannot reach.
    ```
    These are built on `ubuntu-22.04` runners and need **glibc 2.35 or
    newer** on the host — Ubuntu 22.04+, Debian 12+ and equivalents; not
-   Debian 11. No matching release yet, or an older host? Build from a
+   Debian 11. From 0.6.5 a release also carries `fleet-agent` for
+   `aarch64-apple-darwin` and `x86_64-apple-darwin`: see *A Mac as an agent
+   host* below (check it there with `shasum -a 256 -c SHA256SUMS
+   --ignore-missing`). No matching release yet, or an older host? Build from a
    checkout instead: `cargo build -p fleet-agent --release --locked` needs
    neither the Tauri system libraries nor `fleet-core` (see
    `crates/fleet-agent/Cargo.toml`).
@@ -843,13 +846,69 @@ the same loop, just in the foreground, under whatever supervises it instead.)
   `ManagedOOMPreference` line to the unit.
 - **No terminal.** The desktop's terminal view attaches over SSH, and an
   agent host has none. Sessions, prompts, captures, provisioning and
-  everything else in the MCP API work. The interactive terminal does not.
+  everything else in the MCP API work. The interactive terminal does not,
+  except from a desktop running on the agent host itself (*A Mac as an agent
+  host*).
 - **Offline.** A call for an agent host with no agent connected fails at
   once with `E_AGENT_OFFLINE`; it never waits out a timeout.
 - **Updates.** `install --auto-update` adds a timer that runs `fleet-agent
   update`: the hub decides (`update.agent.mode`, pins), the agent installs
   the signed release and goes back to the previous one when it does not
   reconnect. See `docs/updates.md` → *The agent updates itself*.
+
+### A Mac as an agent host
+
+A Mac that is both the machine you work on and a fleet host — a laptop
+carried from home to work — is the case the agent exists for: at home the hub
+may reach it over SSH, but on another network its SSH alias points nowhere
+and the whole host goes offline, though its sessions keep running. On the
+agent it dials the hub itself, over HTTPS (443), from any network that lets
+the Mac open the hub's URL.
+
+- **Install** (fleet-agent 0.6.5 and later): from a paired desktop, Host
+  detail → the fleet-agent row → *Install <version>* while the hub still
+  reaches the Mac over SSH (at home); the job picks the macOS build from
+  `uname` and installs it as below. By hand, on the Mac, as yourself and
+  without `sudo`:
+  ```bash
+  fleet-agent install --user --hub https://fleet.example.com --token-file -
+  ```
+  That writes `~/Library/LaunchAgents/sk.rlt.fleet-agent.plist` and the 0600
+  config in `~/.config/fleet-agent/config.json`, and loads the job into your
+  login session (`launchctl bootstrap gui/<uid>`): it starts at login and
+  whenever it exits. `AbandonProcessGroup` keeps a reload or an upgrade from
+  taking the tmux servers it started (systemd's `KillMode=process`), its
+  `PATH` adds `~/.local/bin`, `/opt/homebrew/bin` and `/usr/local/bin`, and
+  it logs to `~/Library/Logs/fleet-agent.log`. There is no system scope and
+  no update timer: the agent updates itself in-process. `fleet-agent status`
+  reads launchd's state of the job and the agent's own last status line
+  (`~/.local/state/fleet-agent/status`).
+- **The terminal stays local.** An agent host has no SSH route from
+  anywhere, so the desktop on another machine cannot attach its sessions
+  (*Known limitations*). The desktop on the Mac itself can: the hub's
+  `welcome` names the alias it knows the host by, the agent records it in
+  `~/.local/state/fleet-agent/identity.json`, and the desktop attaches a
+  session on that alias with a local `tmux attach` instead of `ssh <alias>`,
+  provided the Mac's own tmux has the session. A hub older than 0.6.5 sends
+  no alias, and the desktop then keeps trying `ssh <alias>`.
+- **Sleep.** A sleeping Mac runs nothing: sessions pause, the agent's
+  connection drops, and the host reads as offline until it wakes and the
+  agent reconnects (seconds). To keep it working while the lid is open and
+  it is on power, `sudo pmset -c sleep 0`.
+
+### Behind a proxy
+
+A network that lets nothing out but through an HTTP proxy stops the agent's
+dial. Give it the proxy with `install --proxy http://proxy.corp:3128` (written
+to the config: a LaunchAgent or a systemd unit does not see your shell's
+environment) or `run --proxy`; without one, `HTTPS_PROXY` / `ALL_PROXY` (and
+their lower-case forms) apply unless `NO_PROXY` names the hub. Credentials go
+in the URL (`http://user:password@proxy:3128`, percent-encoded). `--proxy ""`
+turns the environment's off. Only an `http://` proxy is spoken: the agent
+tunnels its own TLS through `CONNECT`, so the proxy sees the hub's name and
+nothing else. A proxy that inspects TLS re-signs the hub's certificate with its
+own CA: pass that CA as `--ca-file`. The hook relay uses the same proxy. The
+in-process updater's downloads do not (yet).
 
 ### The hook relay
 
@@ -3663,9 +3722,11 @@ for the app.
   this machine has no `Host` block for fails in `ssh`, with ssh's own message,
   in the pane: the fleet's aliases come from the *hub's* `ssh/config`, and
   where the two disagree that is what you see. And a session on an
-  **agent host** is not offered an attach at all — nothing anywhere can dial
-  such a host, which is the whole reason it dials the hub instead — so the tab
-  says that rather than showing a command that cannot work. Dropping files on
+  **agent host** has no SSH route — nothing anywhere can dial such a host,
+  which is the whole reason it dials the hub instead — so a failed attach says
+  that rather than ssh's words. The exception is the desktop running ON that
+  host: its local agent recorded the host's alias, and the session is attached
+  with a local `tmux attach` (*A Mac as an agent host*). Dropping files on
   the pane (`upload_to_session`) follows the same rule, for the same reason.
 - **The asset catalog** is the hub's. The Assets tab asks the hub's
   `catalog_admin` once when it opens. For a client granted the catalog
@@ -3867,8 +3928,9 @@ the missing parameters, route it then.
 ### Known limitations
 
 - **The terminal, for an agent host only.** A session on an agent host cannot
-  be attached from anywhere; see *The terminal attaches, the same as
-  standalone* under *What is different from standalone* above.
+  be attached from any other machine; see *The terminal attaches, the same as
+  standalone* under *What is different from standalone* above. The desktop
+  running on that host itself attaches locally (*A Mac as an agent host*).
 - **Projects and worktrees are not re-listed on reconnect**, because their
   list tools answer a different shape from their events. They refresh when
   the window regains focus.

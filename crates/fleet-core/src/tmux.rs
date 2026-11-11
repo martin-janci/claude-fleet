@@ -447,8 +447,8 @@ pub struct HostProfile {
 /// G2.9: `.fleet-api-key` beside a `.fleet-account.json` that
 /// `service::add_account` wrote) has no `/login`; its line carries that
 /// file instead, so it is an account like any other. A setup-token profile
-/// (`.fleet-oauth-token`) is read the same way. The key and token files are
-/// only tested for, never read.
+/// (`.fleet-oauth-token`) is listed the same way. The key and token files
+/// are only tested for, never read.
 pub(crate) fn profiles_script() -> String {
     format!(
         "for d in \"$HOME\"/.claude-profiles/*/; do [ -d \"$d\" ] || continue; n=$(basename \"$d\"); \
@@ -1912,11 +1912,14 @@ pub(crate) const CL_FALLBACK: &str = r#"if ! command -v cl >/dev/null 2>&1; then
 /// `claude` that follows (rung 3 of docs/accounts.md, ahead of any
 /// `/login`). Read with the shell's own `read`, so the key is never in an
 /// argv, a tmux environment or the pane command; a profile without the file
-/// is untouched. Likewise a setup-token profile's `.fleet-oauth-token`
-/// becomes `CLAUDE_CODE_OAUTH_TOKEN` (rung 5: a long-lived token with no
-/// refresh token, so no other copy can revoke it). Follows the `export
-/// CLAUDE_CONFIG_DIR=…;` it needs.
-pub const PROFILE_API_KEY: &str = r#"if [ -r "$CLAUDE_CONFIG_DIR/.fleet-api-key" ]; then IFS= read -r ANTHROPIC_API_KEY < "$CLAUDE_CONFIG_DIR/.fleet-api-key"; export ANTHROPIC_API_KEY; fi; if [ -r "$CLAUDE_CONFIG_DIR/.fleet-oauth-token" ]; then IFS= read -r CLAUDE_CODE_OAUTH_TOKEN < "$CLAUDE_CONFIG_DIR/.fleet-oauth-token"; export CLAUDE_CODE_OAUTH_TOKEN; fi; "#;
+/// is untouched. Follows the `export CLAUDE_CONFIG_DIR=…;` it needs.
+///
+/// A setup-token profile's `.fleet-oauth-token` (a `claude setup-token`
+/// token) becomes `CLAUDE_CODE_OAUTH_TOKEN` the same way (rung 5, ahead of
+/// the profile's own `/login`), and an `ANTHROPIC_AUTH_TOKEN` /
+/// `ANTHROPIC_API_KEY` from the host's shell, which would outrank it, is
+/// dropped for that `claude`: the person picked this login.
+pub const PROFILE_API_KEY: &str = r#"if [ -r "$CLAUDE_CONFIG_DIR/.fleet-api-key" ]; then IFS= read -r ANTHROPIC_API_KEY < "$CLAUDE_CONFIG_DIR/.fleet-api-key"; export ANTHROPIC_API_KEY; fi; if [ -r "$CLAUDE_CONFIG_DIR/.fleet-oauth-token" ]; then IFS= read -r CLAUDE_CODE_OAUTH_TOKEN < "$CLAUDE_CONFIG_DIR/.fleet-oauth-token"; export CLAUDE_CODE_OAUTH_TOKEN; unset ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY; fi; "#;
 
 /// Makes `$CLAUDE_CONFIG_DIR` a credential profile that shares everything
 /// with `~/.claude` except the login (docs/accounts.md). Each visible entry

@@ -1394,11 +1394,9 @@ pub struct HostProfileRow {
     pub account_uuid: Option<String>,
     #[serde(default)]
     pub email: Option<String>,
-    /// How the profile holds its credential when it is not a `/login`:
-    /// `"setup_token"` for a `claude setup-token` token fleet wrote
-    /// (`service::add_account`). Such a login has no refresh token, so it is
-    /// never a login conflict, and its token is inference-only, so it is
-    /// never a usage source. `None` = a `/login` or an API key.
+    /// What signs it in when it is not a `/login`: `setup_token` (a
+    /// `claude setup-token` token, `service::add_account`). `None` = a
+    /// `/login` or an API key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential: Option<String>,
 }

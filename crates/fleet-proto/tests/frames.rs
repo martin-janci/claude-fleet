@@ -48,6 +48,7 @@ fn hub_frames() -> Vec<HubFrame> {
         HubFrame::Welcome {
             hub_version: "0.9.0".into(),
             proto: PROTO_VERSION,
+            host_alias: Some("laptop".into()),
         },
     ]
 }
@@ -129,7 +130,7 @@ fn hub_frames_use_the_spec_s_tag_and_field_names() {
         }),
         json!({ "kind": "cancel", "id": "01J3" }),
         json!({ "kind": "ping", "id": "01J4" }),
-        json!({ "kind": "welcome", "hub_version": "0.9.0", "proto": PROTO_VERSION }),
+        json!({ "kind": "welcome", "hub_version": "0.9.0", "proto": PROTO_VERSION, "host_alias": "laptop" }),
     ];
     for (frame, want) in hub_frames().into_iter().zip(expected) {
         let text = encode_hub_frame(&frame).expect("encodes");
@@ -634,6 +635,7 @@ fn a_welcome_with_only_its_kind_decodes_and_is_refused_by_version() {
         HubFrame::Welcome {
             hub_version: String::new(),
             proto: 0,
+            host_alias: None,
         }
     );
     let HubFrame::Welcome { proto, .. } = decoded else {
@@ -667,6 +669,7 @@ fn a_welcome_without_hub_version_but_in_range_is_accepted() {
         HubFrame::Welcome {
             hub_version: String::new(),
             proto: PROTO_VERSION,
+            host_alias: None,
         }
     );
     assert_eq!(judge_proto(PROTO_VERSION), ProtoVerdict::Compatible);
@@ -680,6 +683,7 @@ fn the_optional_fields_are_still_always_written() {
     let text = encode_hub_frame(&HubFrame::Welcome {
         hub_version: String::new(),
         proto: 0,
+        host_alias: None,
     })
     .expect("encodes");
     assert_eq!(text, r#"{"kind":"welcome","hub_version":"","proto":0}"#);
