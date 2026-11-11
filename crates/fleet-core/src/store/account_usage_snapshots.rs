@@ -335,6 +335,7 @@ mod tests {
             name: name.into(),
             account_uuid: account.map(Into::into),
             email: None,
+            credential: None,
         };
         for host in ["h1", "h2", "h3", "gone"] {
             s.insert_host(host, Some(host)).unwrap();
