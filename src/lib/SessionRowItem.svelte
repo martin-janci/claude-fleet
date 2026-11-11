@@ -805,6 +805,10 @@
               >{shortAge(sess.last_activity_at, nowSec)}</span
             >
           {/if}
+          <!-- HITL audit H-15: on hover the row shows Work and ⋯ only. Restart,
+               Recreate, the two renames and Kill sit in the ⋯ menu (and the
+               right-click menu), so the toolbar no longer covers the name or
+               puts Restart under a click aimed at the row. -->
           <div class="row-actions">
             {#if isInactiveAgent(sess)}
               <button
@@ -818,6 +822,7 @@
             {/if}
             <button
               class="icon-btn small"
+              class:in-menu={rowMenuOn}
               data-testid="restart-session"
               onclick={(e) => askRestart(sess, e)}
               disabled={restartBlocked !== null}
@@ -835,6 +840,7 @@
             >#</button>
             <button
               class="icon-btn small"
+              class:in-menu={rowMenuOn}
               data-testid="edit-label"
               onclick={(e) => beginLabelEdit(sess, e)}
               disabled={labelBlocked !== null}
@@ -843,6 +849,7 @@
             ><Icon name="tag" size={12} /></button>
             <button
               class="icon-btn small"
+              class:in-menu={rowMenuOn}
               data-testid="rename-tmux"
               onclick={(e) => beginRename(sess, e)}
               disabled={tmuxRenameBlocked !== null}
@@ -851,6 +858,7 @@
             ><Icon name="edit" size={12} /></button>
             <button
               class="icon-btn small"
+              class:in-menu={rowMenuOn}
               data-testid="recreate-live"
               onclick={(e) => askRecreate(sess, e)}
               disabled={!hostIsReachable(sess.host_alias) || recreateBlocked !== null}
@@ -864,6 +872,7 @@
                    only removal action. -->
               <button
                 class="icon-btn small danger"
+                class:in-menu={rowMenuOn}
                 onclick={(e) => askKill(sess, e)}
                 disabled={killBlocked !== null}
                 title={killBlocked ?? 'Kill session'}
@@ -1174,9 +1183,11 @@
     display: none;
     gap: 0.05rem;
   }
+  /* Hover, or keyboard focus inside the row; not merely "selected", which
+     kept the toolbar over the open session's name (HITL audit H-15). */
   .sess-row:hover .row-actions,
-  .sess-row:focus-within .row-actions,
-  .sess-row.selected .row-actions { display: flex; }
+  .sess-row:has(:focus-visible) .row-actions { display: flex; }
+  .row-actions .in-menu { display: none; }
 
   /* Line 1's actions must never take flex width: reserving space for them
      permanently narrows the name, and NOT reserving space (the old rule)
@@ -1381,14 +1392,17 @@
   .acct { display: contents; }
   .sess-row.compact .chips,
   .sess-row.compact .acct { display: none; }
+  /* Hover or keyboard focus only: shown on the selected row they cut the
+     open session's own name to "I…" (HITL audit H-15); the inspector says
+     the same facts beside it. */
   .sess-row.compact:hover .chips,
-  .sess-row.compact:focus-within .chips,
-  .sess-row.compact.selected .chips,
+  .sess-row.compact:has(:focus-visible) .chips,
   .sess-row.compact:hover .acct,
-  .sess-row.compact:focus-within .acct,
-  .sess-row.compact.selected .acct { display: contents; }
+  .sess-row.compact:has(:focus-visible) .acct { display: contents; }
   .sess-row.compact .sess-name {
     flex: 1 1 auto;
+    /* The name is the last thing to shrink: chips and badges give way first. */
+    min-width: min(20ch, 55%);
     font-family: var(--font-sans);
     font-size: var(--text-sm);
     font-weight: 500;
