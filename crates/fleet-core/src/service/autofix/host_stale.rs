@@ -43,6 +43,17 @@ fn provision(alias: &str, auto: bool) -> Fix {
     }
 }
 
+/// [`provision`] for a host whose hooks report to another fleet: the same
+/// refresh, which points them here, so it waits for a person.
+fn provision_takeover(alias: &str) -> Fix {
+    let mut fix = provision(alias, false);
+    fix.safety = Safety::NeedsApproval;
+    fix.changes.push(format!(
+        "{alias}'s hooks then report to this fleet instead of the other one."
+    ));
+    fix
+}
+
 pub fn scan(cx: &ScanCx) -> Vec<Finding> {
     let mut out = Vec::new();
     for h in cx.health.iter().filter(|h| h.reachable) {
@@ -62,17 +73,37 @@ pub fn scan(cx: &ScanCx) -> Vec<Finding> {
             ));
         }
         if h.hooks_silent {
-            out.push(finding(
-                alias,
-                "hooks_silent",
-                Severity::Degraded,
-                format!("{alias} stopped reporting session events"),
-                "Claude Code on this host is not calling fleet's hooks, so fleet learns about \
-                 finished or waiting sessions late or not at all. Reinstalling fleet's files \
-                 restores the hooks.",
-                vec!["no hook call from this host recently, while it has live sessions".into()],
-                Some(provision(alias, true)),
-            ));
+            // Hooks that post to another fleet are silent here because they
+            // report there: reinstalling them would take the host away from
+            // it, which only a person decides.
+            match cx.foreign_owner(alias, None) {
+                Some(theirs) => out.push(finding(
+                    alias,
+                    "hooks_silent",
+                    Severity::Degraded,
+                    format!("{alias} reports its session events to another fleet"),
+                    "This host's fleet hooks post to another fleet (a hub, or another \
+                     desktop), so this one hears nothing from it. Fleet does not reinstall \
+                     them by itself: that would take the host away from the other fleet. Take \
+                     it over only if this fleet should manage the host from now on.",
+                    vec![
+                        "no hook call from this host recently, while it has live sessions".into(),
+                        format!("its hooks report to {theirs}"),
+                    ],
+                    Some(provision_takeover(alias)),
+                )),
+                None => out.push(finding(
+                    alias,
+                    "hooks_silent",
+                    Severity::Degraded,
+                    format!("{alias} stopped reporting session events"),
+                    "Claude Code on this host is not calling fleet's hooks, so fleet learns \
+                     about finished or waiting sessions late or not at all. Reinstalling \
+                     fleet's files restores the hooks.",
+                    vec!["no hook call from this host recently, while it has live sessions".into()],
+                    Some(provision(alias, true)),
+                )),
+            }
         }
         if h.agent_behind {
             out.push(finding(
@@ -205,6 +236,35 @@ mod tests {
             by("host.claude_behind").body.fix.is_none(),
             "fleet has no claude update path"
         );
+    }
+
+    /// A desktop beside a hub: the host's hooks post to the hub, so they
+    /// are silent here. Reinstalling them would take the host from the hub,
+    /// so it waits for a person; hooks that post to this fleet's own base or
+    /// to loopback are still repaired by themselves.
+    #[test]
+    fn silent_hooks_that_report_to_another_fleet_wait_for_a_person() {
+        let s = Store::open_in_memory().unwrap();
+        let mut h = host(&s, "h1");
+        h.reachable = true;
+        let mut hh = health("h1");
+        hh.hooks_silent = true;
+        let cx = |hook: &str| ScanCx {
+            hosts: vec![h.clone()],
+            health: vec![hh.clone()],
+            mcp_url: Some("http://127.0.0.1:4180/mcp".into()),
+            hook_urls: vec![("h1".into(), hook.into())],
+            ..Default::default()
+        };
+        let f = scan(&cx("https://hub.example/hook")).remove(0);
+        assert_eq!(f.kind, "host.hooks_silent");
+        assert!(f.body.title.contains("another fleet"), "{}", f.body.title);
+        let fix = f.body.fix.unwrap();
+        assert_eq!((fix.safety, fix.auto), (Safety::NeedsApproval, false));
+        for ours in ["http://127.0.0.1:39001/hook", "http://localhost:4180/hook"] {
+            let fix = scan(&cx(ours)).remove(0).body.fix.unwrap();
+            assert_eq!((fix.safety, fix.auto), (Safety::Safe, true), "{ours}");
+        }
     }
 
     #[test]

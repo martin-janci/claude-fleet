@@ -73,6 +73,33 @@ pub(crate) fn is_fleet_hook_entry(h: &serde_json::Value) -> bool {
         && h.get("timeout").and_then(|t| t.as_u64()) == Some(u64::from(HOOK_TIMEOUT_SECS))
 }
 
+/// PURE: the URLs of fleet's http hook entries ([`is_fleet_hook_entry`]) in
+/// a `~/.claude/settings.json`, in file order; none for a file that is
+/// empty or not JSON.
+pub fn fleet_hook_urls(settings_json: &str) -> Vec<String> {
+    fn walk(v: &serde_json::Value, out: &mut Vec<String>) {
+        match v {
+            serde_json::Value::Object(m) => {
+                if is_fleet_hook_entry(v) {
+                    if let Some(u) = m.get("url").and_then(|u| u.as_str()) {
+                        out.push(u.to_string());
+                    }
+                }
+                m.values().for_each(|x| walk(x, out));
+            }
+            serde_json::Value::Array(a) => a.iter().for_each(|x| walk(x, out)),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(settings_json) {
+        if let Some(h) = v.get("hooks") {
+            walk(h, &mut out);
+        }
+    }
+    out
+}
+
 /// True when `h` is fleet's SessionStart `command` hook: a curl that sends
 /// the headers file fleet writes and the pane header.
 pub(crate) fn is_fleet_command_entry(h: &serde_json::Value) -> bool {

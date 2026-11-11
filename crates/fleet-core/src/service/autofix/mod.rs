@@ -10,6 +10,7 @@ pub mod apply;
 pub mod host_stale;
 pub mod mcp_entry;
 pub mod operator_unbound;
+pub mod owner;
 pub mod stuck;
 pub mod sync;
 pub mod tick;
@@ -133,12 +134,46 @@ pub struct ScanCx {
     pub mcp_url: Option<String>,
     /// Detector 2: the last probe of each host's global MCP entry.
     pub mcp_probes: Vec<mcp_entry::HostProbe>,
+    /// Detectors 2 and 4: `(host, URL)` of fleet's hook block in each
+    /// probed host's `~/.claude/settings.json`, when it has one
+    /// ([`mcp_entry::hook_urls`]).
+    pub hook_urls: Vec<(String, String)>,
     /// Detector 2: `(host, sha256 of its stored token)`.
     pub host_token_shas: Vec<(String, String)>,
     /// Detector 2: revoked client tokens, to name a stale bearer.
     pub revoked_client_tokens: Vec<ClientTokenRow>,
     /// Detector 2: the operator's token hash (`operator.token_sha`).
     pub operator_sha: Option<String>,
+}
+
+impl ScanCx {
+    /// The other fleet `alias` reports to, as its wiring says: its MCP
+    /// entry's URL (`entry_url`) or its hook block's, when either names a
+    /// base that is neither this process's own nor loopback
+    /// ([`owner::foreign_base`]). An automatic fix never rewrites such a
+    /// host; a person may take it over.
+    pub fn foreign_owner(&self, alias: &str, entry_url: Option<&str>) -> Option<String> {
+        let ours: Vec<&str> = self.mcp_url.as_deref().into_iter().collect();
+        let hook = self
+            .hook_urls
+            .iter()
+            .find(|(h, _)| h == alias)
+            .map(|(_, u)| u.as_str());
+        let entry = entry_url.or_else(|| {
+            self.mcp_probes
+                .iter()
+                .find(|p| p.alias == alias)
+                .and_then(|p| match &p.probe {
+                    mcp_entry::EntryProbe::Entry { url, .. } => url.as_deref(),
+                    _ => None,
+                })
+        });
+        [entry, hook]
+            .into_iter()
+            .flatten()
+            .find(|u| owner::foreign_base(u, &ours))
+            .map(str::to_string)
+    }
 }
 
 pub struct Detector {

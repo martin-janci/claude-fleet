@@ -876,6 +876,29 @@ async fn reprovision_stale_pass(
         Err(_) => return None,
     };
     for host in &stale {
+        // A host whose hooks post to another fleet (the hub a desktop
+        // migrated to, or a desktop beside a hub) is that fleet's: an
+        // unattended refresh would point them here. A person takes it over
+        // from Hosts (provision_hosts), which still writes.
+        if let Some(theirs) = foreign_hook_owner(store, ssh, host, base).await {
+            book.failed(host, now);
+            if let Ok(s) = store.lock() {
+                let _ = s.record_host_provision_outcome(
+                    host,
+                    Some(&format!(
+                        "not refreshed: its hooks report to another fleet at {theirs}; \
+                         refresh it from Hosts to take it over"
+                    )),
+                    true,
+                );
+            }
+            tracing::info!(
+                host,
+                theirs,
+                "[provision] stale host reports to another fleet; left alone"
+            );
+            continue;
+        }
         match provision_content_only(store, ssh, host, base).await {
             Ok(None) => {
                 book.succeeded(host);
@@ -914,6 +937,28 @@ async fn reprovision_stale_pass(
 }
 
 const SETTINGS_JSON: &str = "~/.claude/settings.json";
+
+/// The other fleet `host`'s hook block posts to, when it names a base that
+/// is neither this one (`base`, or the host's own relay) nor loopback
+/// ([`crate::service::autofix::owner::foreign_base`]). `None` when the file
+/// cannot be read: the refresh then runs and reports its own error.
+async fn foreign_hook_owner(
+    store: &Mutex<Store>,
+    ssh: &dyn SshExec,
+    host: &str,
+    base: &HubBase,
+) -> Option<String> {
+    let ours_hook = {
+        let s = store.lock().ok()?;
+        base.for_host(&s, host).hook_url()
+    };
+    let existing = read_host_file(ssh, host, SETTINGS_JSON).await.ok()?;
+    let ours = [base.mcp_url(), ours_hook];
+    let ours: Vec<&str> = ours.iter().map(String::as_str).collect();
+    super::hooks_install::fleet_hook_urls(&existing)
+        .into_iter()
+        .find(|u| crate::service::autofix::owner::foreign_base(u, &ours))
+}
 
 /// Merge fleet's hook block (see [`super::hooks_install::FLEET_HOOK_EVENTS`])
 /// into the host's `~/.claude/settings.json`, and write the SessionStart
@@ -3625,6 +3670,67 @@ mod tests {
         assert!(!row.provision_stale);
         assert_eq!(row.provision_warning, None);
         assert!(book.0.is_empty());
+    }
+
+    /// A desktop beside a hub (or one the hub was migrated from): the
+    /// host's hooks post to the hub, so the unattended refresh leaves the
+    /// host alone and says why, instead of pointing its hooks here. Hooks
+    /// at loopback (this desktop's own tunnel) are refreshed as before.
+    #[tokio::test]
+    async fn the_stale_refresh_leaves_a_host_of_another_fleet_alone() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        {
+            let s = store.lock().unwrap();
+            s.insert_host("h1", Some("h1")).unwrap();
+            s.update_host_probe("h1", true, None, None, 1).unwrap();
+            s.upsert_host_token("h1", TOKEN).unwrap();
+            s.set_host_provisioned("h1", true).unwrap();
+            s.conn_for_test()
+                .execute(
+                    "UPDATE hosts SET provision_fingerprint='old' WHERE alias='h1'",
+                    [],
+                )
+                .unwrap();
+        }
+        let settings = |hook_url: &str| {
+            format!(
+                "\n__CF_OUT__\n{}",
+                crate::service::hooks_install::merge_hook_into_settings_json("", hook_url, TOKEN)
+                    .unwrap()
+            )
+        };
+        let hubs = fresh_host();
+        hubs.on(
+            Match::script(&remote_read_script(SETTINGS_JSON)),
+            Reply::ok(&settings("https://hub.example/hook")),
+        );
+        let mut book = RetryBook::default();
+        assert_eq!(
+            reprovision_stale_pass(&store, &hubs, &base(), &mut book).await,
+            Some(vec!["h1".to_string()])
+        );
+        assert_eq!(
+            hubs.calls().len(),
+            1,
+            "only the read, nothing written: {:?}",
+            hubs.commands()
+        );
+        let row = store.lock().unwrap().get_host_row("h1").unwrap().unwrap();
+        assert!(row.provision_stale);
+        let warning = row.provision_warning.expect("says why");
+        assert!(warning.contains("https://hub.example/hook"), "{warning}");
+
+        // Its own loopback hooks: refreshed.
+        let own = fresh_host();
+        own.on(
+            Match::script(&remote_read_script(SETTINGS_JSON)),
+            Reply::ok(&settings(&base().hook_url())),
+        );
+        book.0.get_mut("h1").unwrap().1 = 0;
+        reprovision_stale_pass(&store, &own, &base(), &mut book).await;
+        let row = store.lock().unwrap().get_host_row("h1").unwrap().unwrap();
+        assert!(!row.provision_stale);
+        assert_eq!(row.provision_warning, None);
     }
 
     #[test]
