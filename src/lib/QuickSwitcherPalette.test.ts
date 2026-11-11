@@ -129,6 +129,29 @@ describe('QuickSwitcher palette (redesign step 3.9)', () => {
     expect(vi.mocked(sendAnswer).mock.calls[0][2]).toBe('1');
   });
 
+  it('over another fleet’s session, Approve answers that session, not the primary one hidden under it', async () => {
+    const { _resetFleetsForTest, _setFleetRowsForTest, _setFleetsForTest, fleetSelection, PRIMARY } = await import('./fleets');
+    const { fleetInfo } = await import('./fleets_fixture');
+    selectSessionExplicitly(get(sessions)[0]);
+    const away = { ...session('mac', 'pos-9', { claude_status: 'blocked', pending_input: PERMISSION }), fleet: 'company' };
+    _setFleetsForTest([fleetInfo(PRIMARY), fleetInfo('company')]);
+    _setFleetRowsForTest('company', { sessions: new Map([[away.id, away]]), hosts: new Map(), projects: [], error: null });
+    fleetSelection.set({ fleet: 'company', id: away.id });
+    try {
+      const input = await typeInSwitcher('approve');
+      const first = screen.getAllByTestId('switcher-command')[0];
+      expect(first.getAttribute('data-key')).toBe('cmd:session.approve');
+      expect(first.textContent).toContain('pos-9');
+      await fireEvent.keyDown(input, { key: 'Enter' });
+      await tick();
+      await tick();
+      expect(sendAnswer).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(sendAnswer).mock.calls[0][0]).toMatchObject({ fleet: 'company', tmux_name: 'pos-9' });
+    } finally {
+      _resetFleetsForTest();
+    }
+  });
+
   it('a settings change in plain words is one row that writes the setting', async () => {
     const input = await typeInSwitcher('set recent work to 3 days');
     const row = screen.getByTestId('switcher-setting');

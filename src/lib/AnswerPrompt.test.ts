@@ -1,5 +1,5 @@
 import { render, screen, fireEvent } from '@testing-library/svelte';
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 vi.mock('./conversation', async () => {
   const actual = await vi.importActual<typeof import('./conversation')>('./conversation');
@@ -15,6 +15,10 @@ import { expectAccessible } from './a11y_check';
 import { sessionActivity, type ActivityProbe } from './conversation';
 import { answerDialog, type SessionRow } from './sessions';
 import { answerArm } from './answer_guard';
+import { PRIMARY, _resetFleetsForTest, _setFleetRowsForTest, _setFleetsForTest, fleetSelection } from './fleets';
+import { fleetInfo } from './fleets_fixture';
+import { settingsOpen } from './app_views';
+import { selectedTaskId, sidebarView, taskDetailOpen } from './work_view';
 import { pendingInputFor, type AnswerView, type PendingInput } from './pending_input';
 
 const mockedAct = vi.mocked(sessionActivity);
@@ -515,6 +519,86 @@ describe('AnswerPrompt 1–9 (redesign step 3.8)', () => {
     await fireEvent.keyDown(document.body, { key: '1' });
     await settle();
     expect(mockedSend).not.toHaveBeenCalled();
+  });
+  describe('a covered card takes no keys', () => {
+    beforeEach(() => {
+      _resetFleetsForTest();
+      settingsOpen.set(false);
+      sidebarView.set('sessions');
+      taskDetailOpen.set(false);
+      selectedTaskId.set(null);
+    });
+    afterEach(() => {
+      _resetFleetsForTest();
+      settingsOpen.set(false);
+      sidebarView.set('sessions');
+      taskDetailOpen.set(false);
+      selectedTaskId.set(null);
+    });
+
+    it('under another fleet’s session, its own card takes the digit, not the hidden primary one', async () => {
+      const company = fleetInfo('company');
+      const away = session({ id: 7, fleet: 'company', host_alias: 'mac', tmux_name: 'pos-7' });
+      _setFleetsForTest([{ ...company, id: PRIMARY, primary: true, label: 'home' }, company]);
+      _setFleetRowsForTest('company', { sessions: new Map([[7, away]]), hosts: new Map(), projects: [], error: null });
+      fleetSelection.set({ fleet: 'company', id: 7 });
+      // The primary panel stays mounted (hidden) under the overlay, mounted first.
+      render(AnswerPrompt, { session: session(), view: view(), keys: false });
+      render(AnswerPrompt, { session: away, view: view() });
+      await fireEvent.keyDown(document.body, { key: '1' });
+      await settle();
+      expect(mockedSend).toHaveBeenCalledTimes(1);
+      expect(mockedSend.mock.calls[0][1]).toBe('pos-7');
+      expect(mockedSend.mock.calls[0][4]).toBe('company');
+    });
+
+    it('a primary card ignores digits while another fleet’s session is open, even if told it is shown', async () => {
+      const company = fleetInfo('company');
+      const away = session({ id: 7, fleet: 'company', host_alias: 'mac', tmux_name: 'pos-7' });
+      _setFleetsForTest([{ ...company, id: PRIMARY, primary: true, label: 'home' }, company]);
+      _setFleetRowsForTest('company', { sessions: new Map([[7, away]]), hosts: new Map(), projects: [], error: null });
+      fleetSelection.set({ fleet: 'company', id: 7 });
+      render(AnswerPrompt, { session: session(), view: view() });
+      await fireEvent.keyDown(document.body, { key: '1' });
+      await settle();
+      expect(mockedSend).not.toHaveBeenCalled();
+    });
+
+    it('a hidden card (keys off) takes neither a digit nor Escape', async () => {
+      render(AnswerPrompt, { session: session(), view: view(), keys: false });
+      await fireEvent.keyDown(document.body, { key: '1' });
+      await settle();
+      expect(mockedSend).not.toHaveBeenCalled();
+    });
+
+    it('Escape no longer closes the folder-wide explanation once the card is covered', async () => {
+      render(AnswerPrompt, { session: session(), view: view() });
+      await fireEvent.keyDown(document.body, { key: '2' });
+      await settle();
+      expect(screen.getByTestId('answer-persist')).toBeTruthy();
+      settingsOpen.set(true);
+      await settle();
+      const esc = new KeyboardEvent('keydown', { key: 'Escape', cancelable: true, bubbles: true });
+      document.body.dispatchEvent(esc);
+      expect(esc.defaultPrevented).toBe(false);
+    });
+
+    it('Settings or a Work task’s detail over the session: no digit answers', async () => {
+      render(AnswerPrompt, { session: session(), view: view() });
+      settingsOpen.set(true);
+      await settle();
+      await fireEvent.keyDown(document.body, { key: '1' });
+      await settle();
+      expect(mockedSend).not.toHaveBeenCalled();
+      settingsOpen.set(false);
+      sidebarView.set('work');
+      selectedTaskId.set('t-1');
+      taskDetailOpen.set(true);
+      await settle();
+      await fireEvent.keyDown(document.body, { key: '1' });
+      await settle();
+      expect(mockedSend).not.toHaveBeenCalled();
+    });
   });
 });
 

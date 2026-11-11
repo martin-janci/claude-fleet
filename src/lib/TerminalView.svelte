@@ -330,7 +330,12 @@
     seenRequest = req.seq;
     untrack(() => {
       if (req.to === 'agent') selectTab(null);
-      else if (req.to === 'new') void newTerminal();
+      else if (req.to === 'new') {
+        // Another fleet's session covers this pane, as the chord handler
+        // checks: a shell opened here would open unseen, on this window's
+        // own session.
+        if (!get(selectedFleetSession)) void newTerminal();
+      }
       else if (req.n != null && listed && shells.includes(req.n)) selectTab(req.n);
       else {
         // Before the list: the terminal it names is the one showShells

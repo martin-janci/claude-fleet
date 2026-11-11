@@ -293,6 +293,30 @@ describe('the session bar\'s Terminals tab (step 5.3)', () => {
     expect(get(terminalPane).active).toBeNull();
   });
 
+  it('a New request opens nothing while another fleet’s session covers this pane', async () => {
+    const { _resetFleetsForTest, _setFleetRowsForTest, _setFleetsForTest, fleetSelection, PRIMARY } = await import('./fleets');
+    const { fleetInfo } = await import('./fleets_fixture');
+    _setFleetsForTest([fleetInfo(PRIMARY), fleetInfo('company')]);
+    _setFleetRowsForTest('company', {
+      sessions: new Map([[1, { ...row, fleet: 'company' } as SessionRow]]),
+      hosts: new Map(),
+      projects: [],
+      error: null,
+    });
+    fleetSelection.set({ fleet: 'company', id: 1 });
+    try {
+      render(TerminalView);
+      selectSession(row);
+      await settle();
+      const opens = () => calls('shell_terminals').filter((c) => args(c).action === 'open').length;
+      requestTerminalTab('new');
+      await settle();
+      expect(opens()).toBe(0);
+    } finally {
+      _resetFleetsForTest();
+    }
+  });
+
   it('goes back to the terminal last picked rather than opening another', async () => {
     open = [1, 3];
     render(TerminalView);
