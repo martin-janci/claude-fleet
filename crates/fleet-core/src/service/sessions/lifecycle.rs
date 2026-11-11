@@ -412,8 +412,9 @@ pub(super) fn worktree_was_created(stdout: &[u8]) -> bool {
     lines.next() == Some(WORKTREE_CREATED_MARK)
 }
 
-/// The path alone, for the tests that only ask where the worktree is.
-#[cfg(test)]
+/// The path alone, for the tests that only ask where the worktree is (all
+/// `cfg(unix)`: they run git and bash).
+#[cfg(all(test, unix))]
 pub(super) async fn create_worktree_local(
     root: &str,
     name: &str,

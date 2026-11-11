@@ -47,7 +47,7 @@ const NO_DIR: i32 = 96;
 /// unquoted variable with `IFS` set to a newline, so a space inside a glob
 /// is part of it and nothing else in it is ever run. `**` reaches into
 /// subfolders where bash has `globstar` (bash 4+; macOS's bash 3.2 reads it
-/// as `*`). The command is the person's own and runs as typed, in `wt`.
+/// as `*`, so there a leading `**/` also matches at the top). The command is the person's own and runs as typed, in `wt`.
 ///
 /// The copy loop runs in a subshell, so its `shopt`s and `IFS` never reach
 /// the command (under `nullglob`, `pip install -e .[dev]` lost its last
@@ -76,8 +76,17 @@ pub(crate) fn setup_script(base: &str, wt: &str, setup: &WorktreeSetup) -> Strin
         );
         let pats: Vec<String> = setup.copy.iter().map(|g| quote(g)).collect();
         s.push_str(&format!("for pat in {}; do\n", pats.join(" ")));
+        // Without globstar (macOS's bash 3.2) `**/` is a plain `*/`, so a
+        // leading `**/` also tries the rest at the top: `**/.env` still
+        // takes the checkout's own `.env` there.
+        s.push_str(
+            "  pp=$pat\n\
+             \x20 if ! shopt -q globstar 2>/dev/null; then\n\
+             \x20   case \"$pat\" in '**/'*) pp=\"${pat#'**/'}\"$'\\n'\"$pat\" ;; esac\n\
+             \x20 fi\n",
+        );
         s.push_str(&format!(
-            "  for f in $pat; do\n\
+            "  for f in $pp; do\n\
              \x20   while [ \"${{f#./}}\" != \"$f\" ]; do f=${{f#./}}; done\n\
              \x20   f=${{f%/}}\n\
              \x20   [ -e \"./$f\" ] || continue\n\
@@ -509,7 +518,9 @@ mod tests {
         let close = s.find("\n) || exit $?\n").expect("subshell closes");
         let cmd = s.find("pip install -e .[dev]").unwrap();
         assert!(open < close && close < cmd, "{s}");
-        assert_eq!(s.matches("shopt").count(), 2, "{s}");
+        // Two options set, and the globstar probe for a bash without it.
+        assert_eq!(s.matches("shopt").count(), 3, "{s}");
+        assert!(!s[..open].contains("shopt") && !s[close..].contains("shopt"));
         assert!(s[..open].find("IFS").is_none() && s[close..].find("IFS").is_none());
         // No globs: no loop, and so no options at all.
         let bare = setup_script(

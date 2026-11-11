@@ -15,7 +15,8 @@
 //!    `fleet-agent run` under `nohup` (no supervisor: it will not come back
 //!    after a reboot, and the job says so). `FLEET_AGENT_NO_SYSTEMD=1` in
 //!    the host's login environment takes the second path on a systemd host
-//!    too (hub-e2e sets it, so a CI runner never gets a user unit).
+//!    or a Mac too (hub-e2e and the tests set it, so a CI runner never gets
+//!    a user unit or a LaunchAgent).
 //! 4. `connect`: the host's transport becomes `agent`, and the job waits for
 //!    the agent's hello. No hello in [`CONNECT_WAIT`]: the transport goes
 //!    back to `ssh`, so the host is never left unreachable by a failed job.
@@ -152,7 +153,8 @@ pub fn start_script(hub_url: &str, insecure: bool) -> String {
          umask 077\n\
          {guard}\
          bin=\"$HOME/.local/bin/fleet-agent\"; hub={h}\n\
-         if [ \"$(uname -s)\" = Darwin ] && command -v launchctl >/dev/null 2>&1; then\n\
+         if [ -z \"${{FLEET_AGENT_NO_SYSTEMD:-}}\" ] && [ \"$(uname -s)\" = Darwin ] \
+            && command -v launchctl >/dev/null 2>&1; then\n\
            \"$bin\" install --user --hub \"$hub\"{ins} --token-file - >/dev/null\n\
            echo started=launchd\n\
          elif [ -z \"${{FLEET_AGENT_NO_SYSTEMD:-}}\" ] && [ -d /run/systemd/system ] \
@@ -884,7 +886,8 @@ mod tests {
             .args(["-c", script])
             .env("HOME", home)
             .env_remove("XDG_CONFIG_HOME")
-            // Never a user unit (or linger) on the machine running the tests.
+            // Never a user unit (or linger), nor a LaunchAgent, on the
+            // machine running the tests.
             .env("FLEET_AGENT_NO_SYSTEMD", "1")
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
