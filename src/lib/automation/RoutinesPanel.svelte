@@ -348,15 +348,22 @@
 
   const unsub = routinesRequest.subscribe((req) => {
     if (!req) return;
-    leaveDraft(() => {
-      if (req.template) openTemplate(req.template === 'blank' ? null : req.template);
-      if (req.select !== undefined) {
-        selected = req.select;
-        draft = null;
-        void loadDetail();
-      }
-      if (req.tab) tab = req.tab;
-    });
+    const apply = () =>
+      leaveDraft(() => {
+        if (req.template) openTemplate(req.template === 'blank' ? null : req.template);
+        if (req.select !== undefined) {
+          selected = req.select;
+          draft = null;
+          void loadDetail();
+        }
+        if (req.tab) tab = req.tab;
+      });
+    // A request that opens Automation reaches a panel that is only now
+    // mounting, with a stashed draft restored but no editor bound yet to ask
+    // "Discard changes?": wait for the editor rather than drop the draft.
+    if (draft && !editor) void tick().then(apply);
+    else apply();
+    // Cleared now, not after the wait, so it is not applied twice.
     routinesRequest.set(null);
   });
   onDestroy(unsub);

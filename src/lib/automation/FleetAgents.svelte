@@ -17,6 +17,7 @@
   import WizardDialog from '../forms/WizardDialog.svelte';
   import StatusDot from '../kit/StatusDot.svelte';
   import { errorText } from '../error_copy';
+  import { automationPaused } from '../automation';
   import type { Values } from '../forms/forms';
   import type { Wizard } from '../forms/wizards';
   import {
@@ -129,7 +130,9 @@
     queuing = true;
     const r = await runFleetAgent(running.id, running.request, running.scope);
     queuing = false;
-    note = r.ok ? 'Queued: it runs on the next pass.' : (r.error ? errorText(r.error) : 'Run failed');
+    // Pause all holds the run pass, so a queued run waits for Resume.
+    const queued = $automationPaused ? 'Queued: it runs once automation resumes (Pause all is on).' : 'Queued: it runs on the next pass.';
+    note = r.ok ? queued : (r.error ? errorText(r.error) : 'Run failed');
     if (r.ok) running = null;
     void loadAgents();
   }
