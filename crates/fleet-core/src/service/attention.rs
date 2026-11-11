@@ -283,6 +283,31 @@ pub enum LimitWindow {
     Weekly,
 }
 
+/// Whether every login on `account` that a reachable, shown host reports
+/// (its own login, its profiles) is one fleet saw signed out there. A poll
+/// whose every source failed is stored as its worst answer, so one gone
+/// login among others whose access token merely lapsed overnight (which
+/// refreshes by itself) reads `login_expired` for the whole account: the
+/// account counts as signed out only when no login on it is left
+/// (acct-limits-2). With no host reporting a login on it, the poll's word
+/// stands. Mirrors `attentionFactsFrom` in `src/lib/attention_facts.ts`.
+fn every_login_signed_out(hosts: &[HostRow], account: &str) -> bool {
+    hosts
+        .iter()
+        .filter(|h| h.reachable && !h.hidden)
+        .flat_map(|h| {
+            let own = (h.account_uuid.as_deref() == Some(account)).then_some((h, None));
+            let profiles = h
+                .claude_profiles
+                .iter()
+                .flatten()
+                .filter(|p| p.account_uuid.as_deref() == Some(account))
+                .map(move |p| (h, Some(p.name.as_str())));
+            own.into_iter().chain(profiles)
+        })
+        .all(|(h, profile)| crate::service::login_health::is_signed_out(h, profile))
+}
+
 impl Facts {
     /// The facts the host rows and the usage snapshots hold at `now`.
     ///
@@ -315,7 +340,8 @@ impl Facts {
             if matches!(
                 snap.status,
                 UsageOutcomeKind::LoginExpired | UsageOutcomeKind::TokenRejected
-            ) {
+            ) && every_login_signed_out(hosts, &snap.account_uuid)
+            {
                 uncredentialed_accounts.insert(snap.account_uuid.clone());
             }
             let Some(u) = &snap.usage else { continue };
@@ -1397,6 +1423,58 @@ mod tests {
         assert_eq!(on("htz", Some("work")), Some(Reason::NoCredentials));
         assert_eq!(on("htz", None), None, "the host's own login is signed in");
         assert_eq!(on("mac", Some("work")), None, "same profile, other host");
+        // acct-limits-2: one gone login (nas `work`) among idle ones whose
+        // access token lapsed overnight stores the account `login_expired`.
+        // Only the gone login's sessions are blocked, not every session of
+        // the account; once every login on it is signed out, the account is.
+        let on_acc = |h: &str| {
+            let mut h = host(h, true, Some(1));
+            h.account_uuid = Some("acc".into());
+            h
+        };
+        let mut nas = host("nas", true, Some(1));
+        nas.claude_profiles = Some(vec![crate::store::HostProfileRow {
+            name: "work".into(),
+            account_uuid: Some("acc".into()),
+            email: None,
+            credential: None,
+        }]);
+        nas.signed_out_logins = vec![crate::store::SignedOutLogin {
+            profile: Some("work".into()),
+            since: 1,
+            checked_at: 1,
+        }];
+        let gone = [snap("acc", UsageOutcomeKind::LoginExpired, 0.0, 0.0, 2_000)];
+        let mut hosts = vec![on_acc("htz"), on_acc("mac"), nas];
+        let f = Facts::from_fleet(&hosts, &gone, 1_000);
+        assert!(f.uncredentialed_accounts.is_empty(), "{f:?}");
+        let mut on = |host: &str, profile: Option<&str>, f: &Facts| {
+            r.account_uuid = Some("acc".into());
+            r.host_alias = host.into();
+            r.claude_profile = profile.map(str::to_string);
+            needs_attention_in(&r, DEFAULT_CONTEXT_RED_PCT, f).map(|a| a.reason)
+        };
+        assert_eq!(on("htz", None, &f), None);
+        assert_eq!(on("nas", Some("work"), &f), Some(Reason::NoCredentials));
+        // A host that is down, or hidden, is not asked: its login does not
+        // keep the account signed in.
+        hosts[0].reachable = false;
+        hosts[1].hidden = true;
+        let f = Facts::from_fleet(&hosts, &gone, 1_000);
+        assert!(f.uncredentialed_accounts.contains("acc"));
+        assert_eq!(on("mac", None, &f), Some(Reason::NoCredentials));
+        // Every login signed out: the whole account.
+        for h in &mut hosts[..2] {
+            h.reachable = true;
+            h.hidden = false;
+            h.signed_out_logins = vec![crate::store::SignedOutLogin {
+                profile: None,
+                since: 1,
+                checked_at: 1,
+            }];
+        }
+        let f = Facts::from_fleet(&hosts, &gone, 1_000);
+        assert!(f.uncredentialed_accounts.contains("acc"));
         // Both at their limit, the week freeing first: the 5-hour window
         // still holds the account after the weekly reset.
         let mut late = snap("late", UsageOutcomeKind::Ok, 100.0, 100.0, 3_000);
