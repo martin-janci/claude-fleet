@@ -156,10 +156,13 @@ export function wash(node: HTMLElement, state: AttentionState) {
 
 /**
  * Svelte action (G4.9, the Motion board's "A question arrives"): a question
- * card fades up 8 px as it enters, and focus moves to its first answer so a
- * key press answers it. The chat does not jump: only the card moves. Focus
- * stays where it is while the person is typing somewhere. Reduced is an
- * 80 ms fade; Off neither moves nor fades, but focus still moves.
+ * card fades up 8 px as it enters, and focus moves to the card itself, so a
+ * number key answers it. Never to an answer: the first answer is often
+ * Approve or Yes, and Enter or Space on a focused button would press it
+ * (HITL audit H-57; the modal confirm has started on Deny since UX-124).
+ * The chat does not jump: only the card moves. Focus stays where it is
+ * while the person is typing somewhere. Reduced is an 80 ms fade; Off
+ * neither moves nor fades, but focus still moves.
  */
 export function questionEnter(node: HTMLElement) {
   const motion = level();
@@ -176,7 +179,9 @@ export function questionEnter(node: HTMLElement) {
   }
   const active = typeof document !== 'undefined' ? (document.activeElement as HTMLElement | null) : null;
   const typing = !!active?.closest?.('input, textarea, select, [contenteditable="true"]');
-  if (!typing) node.querySelector<HTMLElement>('button:not([disabled])')?.focus({ preventScroll: true });
+  if (typing) return;
+  if (!node.hasAttribute('tabindex')) node.setAttribute('tabindex', '-1');
+  node.focus({ preventScroll: true });
 }
 
 /**

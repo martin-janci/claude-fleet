@@ -288,10 +288,25 @@ describe('a multi-step plan is one card', () => {
     expect(answers.every((a) => a.approved === false)).toBe(true);
   });
 
-  it('the card that arrives takes focus on its first answer, unless the person is typing', async () => {
+  it('the card that arrives takes focus itself, never on Approve', async () => {
     await mountBoth();
     await emit('mcp:confirm-required', KILL);
     await tick();
-    expect(document.activeElement).toBe(screen.getByTestId('confirm-card-approve'));
+    // HITL audit H-57: with Approve focused, Enter approved a kill.
+    expect(document.activeElement).toBe(screen.getByTestId('confirm-card'));
+    expect(document.activeElement).not.toBe(screen.getByTestId('confirm-card-approve'));
+  });
+
+  it('Escape in a card answers nothing and does not reach the page', async () => {
+    await mountBoth();
+    await emit('mcp:confirm-required', KILL);
+    await tick();
+    const ev = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+    screen.getByTestId('confirm-card-approve').dispatchEvent(ev);
+    await tick();
+    // HITL audit H-58: the page's Escape left Control and the modal denied.
+    expect(ev.defaultPrevented).toBe(true);
+    expect(inv.mock.calls.filter((c) => c[0] === 'mcp_confirm')).toEqual([]);
+    expect(screen.getByTestId('confirm-card')).toBeTruthy();
   });
 });

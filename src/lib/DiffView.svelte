@@ -123,11 +123,14 @@
 </div>
 
 <style>
+  /* `pre` sits on the line's own text, not on the list: between a row and
+     the notes snippet after it Svelte keeps a space, and under a `pre`
+     parent that space drew a blank line after every row (HITL audit H-25). */
   .diff {
     font-family: var(--mono);
     font-size: var(--text-2xs);
     line-height: 1.5;
-    white-space: pre;
+    white-space: nowrap;
     overflow: auto;
     height: 100%;
   }
@@ -153,11 +156,15 @@
   }
   .text {
     flex: 1 1 auto;
+    white-space: pre;
   }
   .note-btn {
     font: inherit;
+    line-height: inherit;
     background: none;
     border: 0;
+    margin: 0;
+    padding-block: 0;
     cursor: pointer;
     color: var(--fg-muted);
   }

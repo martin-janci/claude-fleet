@@ -21,6 +21,14 @@
 
   onMount(() => hostConfirmCards());
 
+  // Escape inside a card stays in the card. Reaching the page it would leave
+  // Control, which moves the request to the modal (no card host left), and
+  // the modal took the same Escape as Deny (HITL audit H-58). Answering is a
+  // press of Approve or Deny, never a navigation key.
+  function keepEscape(e: KeyboardEvent) {
+    if (e.key === 'Escape') e.preventDefault();
+  }
+
   // A ticking clock for "asked 2m ago"; a minute is the finest it says.
   let nowSec = $state(Math.floor(Date.now() / 1000));
   onMount(() => {
@@ -66,7 +74,8 @@
 </script>
 
 {#if plan}
-  <div class="confirm-cards" data-testid="confirm-cards">
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div class="confirm-cards" data-testid="confirm-cards" onkeydown={keepEscape}>
     <QuestionCard
       question={`${plan.length} steps need your OK`}
       age={plan[0].asked_at > 0 ? `asked ${shortAge(plan[0].asked_at, nowSec)} ago` : undefined}
@@ -93,7 +102,8 @@
     </QuestionCard>
   </div>
 {:else if $cardConfirms.length > 0}
-  <div class="confirm-cards" data-testid="confirm-cards">
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div class="confirm-cards" data-testid="confirm-cards" onkeydown={keepEscape}>
     {#each $cardConfirms as r (r.nonce)}
       {@const busy = $answering.has(r.nonce)}
       {@const failed = $failedConfirms.get(r.nonce)}

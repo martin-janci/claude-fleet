@@ -221,12 +221,14 @@ describe('a question card arrives', () => {
   }
   afterEach(() => (document.body.innerHTML = ''));
 
-  it('fades up 8 px at Full and focus moves to the first answer', () => {
+  it('fades up 8 px at Full and focus moves to the card, never to an answer', () => {
     const el = card();
     questionEnter(el);
     expect(calls[0].keyframes[0]).toEqual({ opacity: 0, transform: 'translateY(8px)' });
     expect(calls[0].opts.duration).toBe(160);
-    expect(document.activeElement?.textContent).toBe('Approve');
+    // Enter or Space on a focused Approve would press it (HITL audit H-57).
+    expect(document.activeElement).toBe(el);
+    expect(el.getAttribute('tabindex')).toBe('-1');
   });
 
   it('Reduced is a plain 80 ms fade; Off does not move', () => {

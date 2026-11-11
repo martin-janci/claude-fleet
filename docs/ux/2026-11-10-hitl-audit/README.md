@@ -54,7 +54,7 @@ The weak points are one level up, in how the loop is put together:
 | 2 | Make the row say why: line two is the ask, the failure or the result, and the dot is the state | H-11, H-12 | S |
 | 3 | Keep names visible: the selected row and the session header | H-15, H-16 | S |
 | 4 | Count and announce every ask: review requests, operator confirms, a new ask while the window has focus | H-08, H-09 | S–M |
-| 4b | A confirm card never gives Approve focus, and Escape never denies | H-57, H-58 | S |
+| 4b | A confirm card never gives Approve focus, and Escape never denies (done) | H-57, H-58 | S |
 | 5 | Ask before a person's step in every session, through the guard that already exists | H-01 | M |
 | 6 | Give finished work a lane: Review, with its own count, cleared by a verdict | H-05 | M |
 | 7 | Show a turn's last words on the row, and treat a closing question as an ask by rule | H-06 | M |
@@ -595,9 +595,11 @@ Svelte keeps the space between them as a text node. Inside `pre` that space is a
 line. The compiled template is `<div>…</div> <!>`. The note button also makes each
 row 24 px tall.
 
-**Do.** Move `white-space: pre` to `.text`, and give `.note-btn` no padding and
-the line's height. **Size:** S. **Check:** a test that the diff's height is
-`rows × line-height`.
+**Do.** Move `white-space: pre` to `.text`. **Done** in Wave 0: rows now follow
+each other with no gap. Rows with a note button stay 24 px tall: that is the
+app's 24 px target floor (`src/app.css`, WCAG 2.5.8), kept on purpose. A denser
+review diff would need the note target moved off the line number (the whole row,
+or a gutter button that appears on hover). **Size:** S.
 
 <a id="h-26"></a>
 #### H-26 · H · Review has no home
@@ -787,7 +789,7 @@ Sizes as above. Each row is a PR or a short series.
 
 | Step | What | Finding | Check |
 |---|---|---|---|
-| 0.1 | Diff: no blank line, 16.5 px rows | H-25 | height = rows × line-height |
+| 0.1 | Diff: no blank line after each row (done) | H-25 | rows follow each other with no gap |
 | 0.2 | Row line two says the reason, in every state; only the lead is coloured; no raw payload | H-11 | no bare "Needs you" in the capture world |
 | 0.3 | The dot is the state | H-12 | a Failed row's dot is `--status-failed` |
 | 0.4 | The title keeps 24 characters; two hover icons and a menu, after the name | H-15 | a click at the row's centre opens the session |
