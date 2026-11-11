@@ -9,16 +9,26 @@
   import FixCard from '../FixCard.svelte';
   import { findings, findingsError, findingsLoaded, fixedRecently, watchFindings } from '../autofix';
   import type { UiBlock } from '../rich_blocks';
+  import { fleets } from '../fleets';
 
-  let { block }: { block: Extract<UiBlock, { kind: 'fix' }> } = $props();
+  // `fleet`: an extra fleet's conversation. Its finding ids are that hub's,
+  // and this window reads and applies fixes on its primary only, so the
+  // card says where the problem is instead of matching the id here.
+  let { block, fleet = null }: { block: Extract<UiBlock, { kind: 'fix' }>; fleet?: string | null } = $props();
 
-  onMount(() => watchFindings());
+  onMount(() => (fleet ? undefined : watchFindings()));
+
+  const fleetLabel = $derived(fleet ? ($fleets.find((f) => f.id === fleet)?.label ?? fleet) : null);
 
   const live = $derived($findings.find((f) => f.id === block.finding_id) ?? null);
   const fixed = $derived($fixedRecently.find((f) => f.id === block.finding_id) ?? null);
 </script>
 
-{#if live}
+{#if fleetLabel !== null}
+  <p class="quiet" data-testid="rich-fix-away">
+    A problem {fleetLabel} can fix (finding {block.finding_id}). Open it on {fleetLabel}: this window does not fix another fleet's problems.
+  </p>
+{:else if live}
   <div class="wrap" data-testid="rich-fix">
     <FixCard finding={live} />
   </div>

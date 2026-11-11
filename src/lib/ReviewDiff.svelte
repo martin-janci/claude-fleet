@@ -16,7 +16,6 @@
   import {
     lineKey,
     listReviewNotes,
-    newSendId,
     noteDrafts,
     removeDraft,
     resolveReviewNote,
@@ -38,16 +37,13 @@
     agentName?: string;
   } = $props();
 
-  const drafts = $derived(noteDrafts(session.id));
+  const drafts = $derived(noteDrafts(session));
   let sent = $state<ReviewNote[]>([]);
   /** The line a note is being written on, and the draft it edits. */
   let editing = $state<{ key: string; line: NoteLine; draftId?: string } | null>(null);
   let text = $state('');
   let sending = $state(false);
   let failure = $state<string | null>(null);
-  /** The id of a send whose answer never came: a retry reuses it, so
-   *  nothing is typed twice. */
-  let pendingSend: string | null = null;
 
   async function loadSent(sid: number): Promise<void> {
     const r = await listReviewNotes(sid);
@@ -85,7 +81,7 @@
   }
   function save(): void {
     if (!editing) return;
-    saveDraft(session.id, {
+    saveDraft(session, {
       id: editing.draftId,
       path,
       line: editing.line.line,
@@ -114,21 +110,23 @@
     if (sending || blocked || $drafts.length === 0) return;
     sending = true;
     failure = null;
-    const id = pendingSend ?? newSendId();
-    pendingSend = id;
-    const r = await sendReviewNotes(session.id, $drafts, id);
+    // A send whose answer never came is retried under its own id (kept with
+    // the drafts), so nothing is typed twice.
+    const r = await sendReviewNotes(session, $drafts);
     sending = false;
     if (!r.ok) {
       failure = errorText(r.error);
       return;
     }
-    pendingSend = null;
+    const kept = r.value.kept;
     push({
       kind: 'info',
-      message: r.value.delivered
-        ? `Sent ${r.value.notes.length} ${r.value.notes.length === 1 ? 'note' : 'notes'} to ${agentName}.`
-        : r.value.repeat
-          ? 'Those notes were already sent.'
+      message: r.value.repeat
+        ? kept > 0
+          ? `Those notes were already sent. ${kept} ${kept === 1 ? 'note' : 'notes'} added or changed since ${kept === 1 ? 'is' : 'are'} still here to send.`
+          : 'Those notes were already sent.'
+        : r.value.delivered
+          ? `Sent ${r.value.notes.length} ${r.value.notes.length === 1 ? 'note' : 'notes'} to ${agentName}.`
           : `${r.value.notes.length === 1 ? 'The note goes' : 'The notes go'} to ${agentName} when its turn ends.`,
     });
     await loadSent(session.id);
@@ -230,7 +228,7 @@
               type="button"
               data-testid="review-note-delete"
               onclick={() => {
-                if (editing?.draftId) removeDraft(session.id, editing.draftId);
+                if (editing?.draftId) removeDraft(session, editing.draftId);
                 cancel();
               }}>Delete</button
             >

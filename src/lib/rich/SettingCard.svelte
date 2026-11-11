@@ -27,8 +27,13 @@
     whoWords,
   } from '../pages/review';
   import type { UiBlock } from '../rich_blocks';
+  import { fleets } from '../fleets';
 
-  let { block }: { block: Extract<UiBlock, { kind: 'setting' }> } = $props();
+  // `fleet`: an extra fleet's conversation. The proposal id is that hub's,
+  // and deciding proposals is not routed to another fleet, so the card is
+  // read-only there and never matches the id against this window's hub.
+  let { block, fleet = null }: { block: Extract<UiBlock, { kind: 'setting' }>; fleet?: string | null } = $props();
+  const fleetLabel = $derived(fleet ? ($fleets.find((f) => f.id === fleet)?.label ?? fleet) : null);
 
   let loaded = $state(false);
   let busy = $state(false);
@@ -43,13 +48,14 @@
   });
 
   onMount(() => {
+    if (fleet) return;
     const waits: Promise<unknown>[] = [loadProposals()];
     if ($descriptors.size === 0) waits.push(loadDescriptors());
     if ($pagesBundle.pages.length === 0) waits.push(loadPages());
     void Promise.all(waits).then(() => (loaded = true));
   });
 
-  const p = $derived($settingProposals.find((x) => x.id === block.proposal) ?? null);
+  const p = $derived(fleet ? null : ($settingProposals.find((x) => x.id === block.proposal) ?? null));
   const key = $derived(p?.key ?? applied?.key ?? null);
   const d = $derived(key ? $descriptors.get(key) : undefined);
   const home = $derived(key ? homeOf($pagesBundle.pages, key) : null);
@@ -102,7 +108,11 @@
     <span class="tag">setting</span>
   </header>
 
-  {#if done === 'applied'}
+  {#if fleetLabel !== null}
+    <p class="meta" data-testid="rich-setting-away">
+      A settings change proposed on {fleetLabel}. Open it on {fleetLabel}: this window does not decide another fleet's settings.
+    </p>
+  {:else if done === 'applied'}
     <p class="receipt" data-testid="rich-setting-applied">
       Applied{#if applied}: {d?.label ?? applied.key} is now {valueInWords(d, applied.value)}{/if}.
       <button type="button" class="link" data-testid="rich-setting-open" onclick={openInSettings}>Undo in Settings</button>

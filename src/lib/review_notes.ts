@@ -6,8 +6,9 @@
 // notes come back from the session's store with who sent them, and a person
 // resolves each one.
 
-import { writable, type Readable } from 'svelte/store';
+import { derived, get, writable, type Readable } from 'svelte/store';
 import { invokeCmd, type Result } from './result';
+import { sessionIdentity, type SessionRow } from './sessions';
 
 export type NoteSide = 'new' | 'old';
 
@@ -57,47 +58,88 @@ export function lineKey(path: string, side: NoteSide, line: number | null | unde
 
 const KEY = 'review-note-drafts:';
 
-function read(sessionId: number): NoteDraft[] {
+/** The session a set of drafts belongs to. Ids are small per-backend
+ *  integers that SQLite hands out again once the newest session is reaped,
+ *  so the drafts carry who they were written for: the fleet, the host, the
+ *  tmux name and the creation time (`sessionIdentity`). */
+export type DraftSession = Pick<SessionRow, 'id' | 'host_alias' | 'tmux_name' | 'created_at'> & { fleet?: string };
+
+function ownerOf(s: DraftSession): string {
+  return `${s.fleet ?? ''}\u0001${sessionIdentity(s as SessionRow)}`;
+}
+
+/** A send whose answer never came: its id, and the drafts (id and body) it
+ *  carried. Kept with the drafts, so a remount does not lose it. */
+interface PendingSend {
+  id: string;
+  drafts: { id: string; body: string }[];
+}
+
+interface Stored {
+  owner: string;
+  drafts: NoteDraft[];
+  pending?: PendingSend | null;
+}
+
+const isDraft = (d: unknown): d is NoteDraft =>
+  !!d && typeof (d as NoteDraft).body === 'string' && typeof (d as NoteDraft).path === 'string';
+
+function read(s: DraftSession): Stored {
+  const owner = ownerOf(s);
+  const empty: Stored = { owner, drafts: [], pending: null };
   try {
-    const raw = localStorage.getItem(KEY + sessionId);
-    const v: unknown = raw ? JSON.parse(raw) : [];
-    return Array.isArray(v) ? (v as NoteDraft[]).filter((d) => d && typeof d.body === 'string' && typeof d.path === 'string') : [];
+    const raw = localStorage.getItem(KEY + s.id);
+    const v: unknown = raw ? JSON.parse(raw) : null;
+    // Before the owner was kept: a bare array, adopted as this session's.
+    if (Array.isArray(v)) return { owner, drafts: v.filter(isDraft), pending: null };
+    if (!v || typeof v !== 'object') return empty;
+    const st = v as Partial<Stored>;
+    // Another session that had this id: its drafts are not this one's.
+    if (st.owner !== owner) return empty;
+    const pending =
+      st.pending && typeof st.pending.id === 'string' && Array.isArray(st.pending.drafts) ? st.pending : null;
+    return { owner, drafts: Array.isArray(st.drafts) ? st.drafts.filter(isDraft) : [], pending };
   } catch {
-    return [];
+    return empty;
   }
 }
 
-function write(sessionId: number, drafts: NoteDraft[]): void {
+function write(id: number, st: Stored): void {
   try {
-    if (drafts.length) localStorage.setItem(KEY + sessionId, JSON.stringify(drafts));
-    else localStorage.removeItem(KEY + sessionId);
+    if (st.drafts.length || st.pending) localStorage.setItem(KEY + id, JSON.stringify(st));
+    else localStorage.removeItem(KEY + id);
   } catch {
     // Storage off (a private window): the drafts live as long as the page.
   }
 }
 
-const stores = new Map<number, ReturnType<typeof writable<NoteDraft[]>>>();
+const stores = new Map<string, ReturnType<typeof writable<Stored>>>();
 
-function storeFor(sessionId: number) {
-  let s = stores.get(sessionId);
-  if (!s) {
-    s = writable(read(sessionId));
-    stores.set(sessionId, s);
+function storeFor(s: DraftSession) {
+  const k = `${s.id}\u0002${ownerOf(s)}`;
+  let st = stores.get(k);
+  if (!st) {
+    st = writable(read(s));
+    stores.set(k, st);
   }
-  return s;
+  return st;
 }
 
 /** This device's drafts for a session, kept in browser storage. */
-export function noteDrafts(sessionId: number): Readable<NoteDraft[]> {
-  return { subscribe: storeFor(sessionId).subscribe };
+export function noteDrafts(s: DraftSession): Readable<NoteDraft[]> {
+  return derived(storeFor(s), (st) => st.drafts);
 }
 
-function update(sessionId: number, f: (d: NoteDraft[]) => NoteDraft[]): void {
-  storeFor(sessionId).update((d) => {
-    const next = f(d);
-    write(sessionId, next);
+function update(s: DraftSession, f: (st: Stored) => Stored): void {
+  storeFor(s).update((cur) => {
+    const next = f(cur);
+    write(s.id, next);
     return next;
   });
+}
+
+function updateDrafts(s: DraftSession, f: (d: NoteDraft[]) => NoteDraft[]): void {
+  update(s, (st) => ({ ...st, drafts: f(st.drafts) }));
 }
 
 let seq = 0;
@@ -108,9 +150,9 @@ function newId(prefix: string): string {
 }
 
 /** Add or replace a draft (same id); an empty body removes it. */
-export function saveDraft(sessionId: number, d: Omit<NoteDraft, 'id'> & { id?: string }): void {
+export function saveDraft(s: DraftSession, d: Omit<NoteDraft, 'id'> & { id?: string }): void {
   const body = d.body.trim();
-  update(sessionId, (all) => {
+  updateDrafts(s, (all) => {
     if (!body) return all.filter((x) => x.id !== d.id);
     const draft: NoteDraft = { ...d, body, id: d.id ?? newId('nd') };
     const i = all.findIndex((x) => x.id === draft.id);
@@ -118,12 +160,12 @@ export function saveDraft(sessionId: number, d: Omit<NoteDraft, 'id'> & { id?: s
   });
 }
 
-export function removeDraft(sessionId: number, id: string): void {
-  update(sessionId, (all) => all.filter((x) => x.id !== id));
+export function removeDraft(s: DraftSession, id: string): void {
+  updateDrafts(s, (all) => all.filter((x) => x.id !== id));
 }
 
-export function clearDrafts(sessionId: number): void {
-  update(sessionId, () => []);
+export function clearDrafts(s: DraftSession): void {
+  update(s, (st) => ({ ...st, drafts: [], pending: null }));
 }
 
 /** Drafts in the order the prompt numbers them: by file, then line. */
@@ -137,16 +179,22 @@ export async function listReviewNotes(sessionId: number): Promise<Result<ReviewN
   return invokeCmd<ReviewNote[]>('review_notes', { args: { session_id: sessionId } });
 }
 
+/** A send's answer, and how many drafts it left in place: on a repeat of a
+ *  send whose answer never came, the drafts added or edited since. */
+export type ReviewNotesSent = SentReviewNotes & { kept: number };
+
 /**
- * Send this device's drafts as one prompt. `clientMsgId` is the send's id:
- * pass the same one to retry a send whose answer never came, and nothing is
- * typed twice. The drafts are cleared only once the send is in.
+ * Send this device's drafts as one prompt. Each send carries an id; a send
+ * whose answer never came keeps it (with the drafts it carried) beside the
+ * drafts, and the next send reuses it, so nothing is typed twice. The
+ * backend answers a known id with the notes it already has (`repeat`):
+ * then only the drafts that send carried, unchanged, are cleared, and any
+ * added or edited since stay for another send.
  */
-export async function sendReviewNotes(
-  sessionId: number,
-  drafts: readonly NoteDraft[],
-  clientMsgId: string,
-): Promise<Result<SentReviewNotes>> {
+export async function sendReviewNotes(s: DraftSession, drafts: readonly NoteDraft[]): Promise<Result<ReviewNotesSent>> {
+  const st = get(storeFor(s));
+  const pending = st.pending ?? { id: newSendId(), drafts: drafts.map(({ id, body }) => ({ id, body })) };
+  if (!st.pending) update(s, (cur) => ({ ...cur, pending }));
   const notes = ordered(drafts).map(({ path, line, side, quote, body }) => ({
     path,
     line: line ?? undefined,
@@ -155,13 +203,19 @@ export async function sendReviewNotes(
     body,
   }));
   const r = await invokeCmd<SentReviewNotes>('review_notes', {
-    args: { session_id: sessionId, action: 'send', client_msg_id: clientMsgId, notes },
+    args: { session_id: s.id, action: 'send', client_msg_id: pending.id, notes },
   });
-  if (r.ok) {
-    const sent = new Set(drafts.map((d) => d.id));
-    update(sessionId, (all) => all.filter((d) => !sent.has(d.id)));
-  }
-  return r;
+  if (!r.ok) return r;
+  const gone = r.value.repeat
+    ? new Set(pending.drafts.filter((p) => drafts.some((d) => d.id === p.id && d.body === p.body)).map((p) => p.id))
+    : new Set(drafts.map((d) => d.id));
+  let kept = 0;
+  update(s, (cur) => {
+    const left = cur.drafts.filter((d) => !gone.has(d.id));
+    kept = left.length;
+    return { ...cur, drafts: left, pending: null };
+  });
+  return { ok: true, value: { ...r.value, kept } };
 }
 
 export function newSendId(): string {

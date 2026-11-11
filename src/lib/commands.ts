@@ -23,7 +23,7 @@ import { openNewSessionPicker } from './switcher_request';
 import { openRoutines } from './routines';
 import { openMissionRoom } from './mission_room';
 import { requestTerminalTab } from './terminals';
-import { fleetFilter, fleets, multiFleet } from './fleets';
+import { fleetBlocked, fleetFilter, fleets, multiFleet } from './fleets';
 import { hasNoPane, sendPrompt } from './sessions';
 import { canStop, STOP_KEY } from './composer_hold';
 import { pendingInputFor, type AnswerView } from './pending_input';
@@ -129,6 +129,11 @@ export function paletteCommands(ctx: CommandContext): PaletteCommand[] {
         synonyms: ['stop', 'interrupt', 'cancel', 'escape', 'abort', 'halt'],
       });
     }
+    // Another fleet's session (its row carries `fleet`, its id is that hub's):
+    // only Approve and Stop route to its hub. The rest speak to this window's
+    // own hub, disk, terminal or row menu by id, so they would act on another
+    // session, or on the primary one hidden under it.
+    if (s.fleet !== undefined) return withAppCommands(out);
     const toTerminal = ctx.sessionView !== 'terminal';
     out.push({
       id: 'session.flip-view',
@@ -185,6 +190,11 @@ export function paletteCommands(ctx: CommandContext): PaletteCommand[] {
       });
     }
   }
+  return withAppCommands(out);
+}
+
+/** The app-wide rows, after the session's own. */
+function withAppCommands(out: PaletteCommand[]): PaletteCommand[] {
   out.push(
     { id: 'app.settings', label: 'Open Settings', section: 'Commands', description: 'Settings',
       synonyms: ['settings', 'preferences', 'options'], shortcut: 'settings' },
@@ -311,6 +321,8 @@ const SESSION_ACTION = 'session.action.';
 /** Run a palette command. Returns once the command has been handed off. */
 export async function runCommand(id: string, ctx: CommandContext): Promise<void> {
   const s = ctx.selected;
+  // Only Approve and Stop reach another fleet's session (see paletteCommands).
+  if (s?.fleet !== undefined && id.startsWith('session.') && id !== 'session.approve' && id !== 'session.stop') return;
   if (id.startsWith(SESSION_ACTION)) {
     // Details runs it, with its own gate, confirm and dialog, as it does for
     // the row menu; the request opens the inspector or the Details tab.
@@ -347,7 +359,11 @@ export async function runCommand(id: string, ctx: CommandContext): Promise<void>
       if (!s || !v) return;
       // Asked here too (the sweep wants the gate where the write is), so a
       // refusal is a toast before the pane is read; sendAnswer asks again.
-      const why = hubActionBlocked('send_prompt', get(hubStatus), get(hubConnection)) ?? sessionActionBlocked(s, 'answer_dialog');
+      // Another fleet's session: its own link is the one to ask, as sendAnswer does.
+      const why =
+        s.fleet !== undefined
+          ? get(fleetBlocked)(s.fleet)
+          : (hubActionBlocked('send_prompt', get(hubStatus), get(hubConnection)) ?? sessionActionBlocked(s, 'answer_dialog'));
       if (why !== null) {
         push({ kind: 'info', message: why });
         return;
@@ -359,7 +375,10 @@ export async function runCommand(id: string, ctx: CommandContext): Promise<void>
     }
     case 'session.stop': {
       if (!s || !canStop(s.claude_status, s.stuck_kind)) return;
-      const why = s.fleet !== undefined ? null : (hubActionBlocked('send_prompt', get(hubStatus), get(hubConnection)) ?? sessionActionBlocked(s, 'send_prompt'));
+      const why =
+        s.fleet !== undefined
+          ? get(fleetBlocked)(s.fleet)
+          : (hubActionBlocked('send_prompt', get(hubStatus), get(hubConnection)) ?? sessionActionBlocked(s, 'send_prompt'));
       if (why !== null) {
         push({ kind: 'info', message: why });
         return;

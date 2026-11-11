@@ -156,7 +156,7 @@
   import { hubStatus, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
   import { sessionBlocked } from './share';
-  import { accessOf, myGrantInfo } from './access';
+  import { accessOf, myGrantInfo, pairedLocalRefusal } from './access';
   import { orgs as orgList } from './orgs';
   import { isSharedAccess } from './session_scope';
   import { readOnlyAnswerLine, sharerName } from './shared_view';
@@ -1451,7 +1451,9 @@
   // write itself), and no tray: an upload is this machine's own copy onto a
   // host only that fleet's hub reaches.
   const shareBlocked = $derived(away ? null : $sessionBlocked(session, 'send_prompt'));
-  const attachBlocked = $derived(away ? AWAY_ONLY : shareBlocked);
+  // A paired desktop and the hub's own-machine row: an attachment is staged
+  // through this machine's tmux and disk, which `local` would mean here.
+  const attachBlocked = $derived(away ? AWAY_ONLY : (shareBlocked ?? pairedLocalRefusal(session, $hubStatus)));
   /** The grant level this person holds on someone else's session, or null
    *  for their own (gap plan G4.2: the answer card shows to a recipient). */
   const recipientLevel = $derived.by(() => {
@@ -2756,6 +2758,7 @@
                       <RichText
                         source={g.text}
                         sessionId={cardsAct ? session.id : null}
+                        fleet={sFleet ?? null}
                         answered={!isLast}
                         result={taskResult}
                         resultTitle={session.work?.title ?? ''}
@@ -2995,6 +2998,7 @@
           <AnswerPrompt
             {session}
             view={answerView}
+            keys={visible}
             onOpenTerminal={writeBlocked === null ? onOpenTerminal : undefined}
             onAnswered={advanceOnAnswer ? afterAnswer : undefined}
             onGone={dismissGoneAnswer}
@@ -3112,9 +3116,12 @@
       onSend={(text) => void sendText(text)}
     />
   {/if}
-  {#if showComposer && canPrompt && bgEntry === null && viewing === null}
+  {#if showComposer && canPrompt && bgEntry === null && viewing === null && !away}
     <!-- Review w13-9: Send later's waiting prompts, with a cancel each. A new
-         turn may be one of them going out, so it reads again on each. -->
+         turn may be one of them going out, so it reads again on each. Not for
+         another fleet's session: queued_prompts / cancel_queued_prompt /
+         queue_prompt are not fleet-scoped, so they would read and cancel the
+         primary's session with the same id (send later is off there too). -->
     <ScheduledPrompts sessionId={session.id} refreshKey={scheduledKey + (session.turn_seq ?? 0)} />
   {/if}
   {#if held.length > 0 && showComposer && canPrompt && bgEntry === null}

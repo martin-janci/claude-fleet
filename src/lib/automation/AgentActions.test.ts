@@ -14,6 +14,9 @@ vi.mock('@tauri-apps/api/core', () => ({
 
 import AgentActions from './AgentActions.svelte';
 import { agents, type AgentAction } from '../agents';
+import { get } from 'svelte/store';
+import { fleetSettings, SETTING_DEFAULTS } from '../fleet_settings';
+import { clearToasts, toasts } from '../toasts';
 
 function action(id: number): AgentAction {
   return {
@@ -83,5 +86,22 @@ describe('AgentActions', () => {
     const items = screen.getByTestId('agent-group-items');
     expect(items.textContent).toContain('Jira: update issue PD-1 (status)');
     expect(items.textContent).toContain('on a scheduled run');
+  });
+
+  it('under Pause all, Approve says it runs when automation resumes, not within a minute', async () => {
+    fleetSettings.set({ ...SETTING_DEFAULTS, 'automation.paused': 'true' });
+    clearToasts();
+    try {
+      agents.set({ rules: [], jobs: [], pending: [action(1)] });
+      render(AgentActions);
+      await tick();
+      await fireEvent.click(screen.getByTestId('agent-action-approve'));
+      decide.get(1)!(action(1));
+      await vi.waitFor(() => expect(get(toasts).map((t) => t.message)).toContain('Approved: it runs when automation resumes (Pause all is on)'));
+      expect(get(toasts).some((t) => t.message.includes('within a minute'))).toBe(false);
+    } finally {
+      fleetSettings.set({ ...SETTING_DEFAULTS });
+      clearToasts();
+    }
   });
 });

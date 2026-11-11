@@ -33,6 +33,9 @@
   let done = $state(false);
   let errors = $state<Record<number, string>>({});
   let outcome = $state<Record<number, 'sent' | 'queued'>>({});
+  /** The text has gone out at least once: from then on it is fixed, so a
+   *  retry cannot send other words to some of the sessions. */
+  let sentOnce = $state(false);
 
   /**
    * Narrowed per target, then again at the send (multi-user M1, F2b). Sidebar
@@ -55,6 +58,10 @@
     prompt.trim().length > 0 && sendable.length > 0 && !sending && hubBlocked === null,
   );
   const n = $derived(sendable.length);
+  /** After a partial failure, only the sessions it failed for get it again:
+   *  the others already have it (a second copy would be a second turn). */
+  const retryable = $derived(sentOnce ? sendable.filter((t) => errors[t.id] !== undefined) : []);
+  const retrying = $derived(sentOnce && !done && retryable.length > 0);
 
   async function send() {
     if (done) {
@@ -64,11 +71,22 @@
     // Re-asked at the call: `canSend` reads the same two halves, and the
     // fan-out below walks `sendable`, which is the narrowed list.
     if (!canSend) return;
+    let to: SessionRow[];
+    if (sentOnce) {
+      to = retryable;
+      if (to.length === 0) return;
+      const left = { ...errors };
+      for (const t of to) delete left[t.id];
+      errors = left;
+    } else {
+      to = sendable;
+      errors = {};
+      outcome = {};
+    }
     sending = true;
-    errors = {};
-    outcome = {};
+    sentOnce = true;
     await Promise.allSettled(
-      sendable.map(async (t) => {
+      to.map(async (t) => {
         const r = await queuePrompt(t.id, prompt);
         if (r.ok) outcome[t.id] = r.value.delivered ? 'sent' : 'queued';
         else errors[t.id] = errorText(r.error);
@@ -84,10 +102,10 @@
 <DialogSheet
   title="Send prompt to {n} session{n === 1 ? '' : 's'}"
   lead="Each gets the same text as a new turn. Busy sessions get it when they are idle."
-  verb={done ? 'Done' : `Send to ${n}`}
+  verb={done ? 'Done' : retrying ? `Retry ${retryable.length} failed` : `Send to ${n}`}
   busyVerb="Sending…"
   busy={sending}
-  canConfirm={done || canSend}
+  canConfirm={done || (canSend && (!sentOnce || retrying))}
   onconfirm={() => void send()}
   onclose={onClose}
   dirty={!done && prompt.trim() !== ''}
@@ -124,7 +142,7 @@
     rows="6"
     placeholder="Prompt to send to every selected session…"
     data-testid="bulk-prompt-textarea"
-    disabled={sending || done}
+    disabled={sending || done || sentOnce}
   ></textarea>
   <div class="presets">
     <span class="field-label">Presets:</span>
@@ -133,7 +151,7 @@
         type="button"
         class="btn btn--chip"
         data-testid="bulk-preset-{p.label.toLowerCase().replace(/ /g, '-')}"
-        disabled={sending || done}
+        disabled={sending || done || sentOnce}
         onclick={() => (prompt = p.text)}>{p.label}</button
       >
     {/each}

@@ -36,12 +36,16 @@
   // that can only be hidden: its buttons would only fill the composer with
   // an answer nobody waits for any more (2026-10-16: Control's old cards
   // stayed up with buttons that seemed to do nothing).
+  // `fleet`: the extra fleet this conversation is on, null on the primary.
+  // A setting or fix card names a row by that hub's id, so it is never
+  // looked up (or decided) on this window's primary.
   let {
     block,
     raw,
     sessionId = null,
+    fleet = null,
     answered = false,
-  }: { block: UiBlock; raw: string; sessionId?: number | null; answered?: boolean } = $props();
+  }: { block: UiBlock; raw: string; sessionId?: number | null; fleet?: string | null; answered?: boolean } = $props();
 
   const asks = $derived(block.kind === 'choices' || block.kind === 'form' || block.kind === 'wizard' || (block.kind === 'error' && block.next.length > 0));
   const blockId = $derived(blockKey(raw));
@@ -201,9 +205,9 @@
 {:else if block.kind === 'error'}
   <ErrorCard {block} onfill={fill} canFill={sessionId !== null} />
 {:else if block.kind === 'setting'}
-  <SettingCard {block} />
+  <SettingCard {block} {fleet} />
 {:else if block.kind === 'fix'}
-  <FixBlockCard {block} />
+  <FixBlockCard {block} {fleet} />
 {:else if block.kind === 'dashboard'}
   <DashboardCard {block} />
 {:else if block.kind === 'device'}

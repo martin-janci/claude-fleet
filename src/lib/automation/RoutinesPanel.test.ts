@@ -781,6 +781,19 @@ describe('the routine editor (review w05)', () => {
     expect(screen.getByTestId('form-discard-ask')).toBeInTheDocument();
   });
 
+  it('a stashed changed draft is not dropped by the request that reopens Automation: it asks first', async () => {
+    const v = await openBlankOver();
+    await fireEvent.input(screen.getByTestId('routine-name'), { target: { value: 'Nightly' } });
+    v.unmount();
+    // The Inbox's routine link (or its Fix) while Automation is closed: the
+    // request is set before the panel mounts again.
+    openRoutines({ select: 3 });
+    render(RoutinesPanel);
+    expect(await screen.findByTestId('form-discard-ask')).toBeInTheDocument();
+    await fireEvent.click(screen.getByTestId('form-keep-editing'));
+    expect((screen.getByTestId('routine-name') as HTMLInputElement).value).toBe('Nightly');
+  });
+
   it('w05-3: a routine saved without a zone at UTC is saved back at UTC', async () => {
     route([{ ...sweep, utc_offset_min: 0 }]);
     render(RoutinesPanel);

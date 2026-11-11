@@ -6,6 +6,7 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import FleetAgents from './FleetAgents.svelte';
 import { ruleAgentName, type AgentRule } from '../agents';
+import { fleetSettings, SETTING_DEFAULTS } from '../fleet_settings';
 
 const invoke = mockedInvoke as ReturnType<typeof vi.fn>;
 
@@ -139,6 +140,18 @@ describe('the fleet agents on the Agents tab', () => {
     );
     await waitFor(() => expect(screen.queryByTestId('fleet-run-panel')).toBeNull());
     expect(screen.getByTestId('fleet-agents-note').textContent).toBe('Queued: it runs on the next pass.');
+  });
+
+  it('under Pause all, a queued run says it waits for automation to resume', async () => {
+    fleetSettings.set({ ...SETTING_DEFAULTS, 'automation.paused': 'true' });
+    try {
+      render(FleetAgents, { props: { rules: [rule({ id: 21, scope: 'debug', definition: 'self-debug' })] } });
+      await fireEvent.click(await screen.findByTestId('fleet-instance-run'));
+      await fireEvent.click(screen.getByTestId('fleet-run-go'));
+      await waitFor(() => expect(screen.getByTestId('fleet-agents-note').textContent).toBe('Queued: it runs once automation resumes (Pause all is on).'));
+    } finally {
+      fleetSettings.set({ ...SETTING_DEFAULTS });
+    }
   });
 
   it('runs with no request or scope when none is given', async () => {

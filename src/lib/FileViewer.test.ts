@@ -98,3 +98,30 @@ describe('FileViewer blame', () => {
     expect(screen.queryByTestId('blame-toggle')).toBeNull();
   });
 });
+
+// A cached pick while a slow fetch is in flight: the fresh load owns the
+// spinner, and the superseded fetch must not leave "Loading…" behind.
+describe('FileViewer load ordering', () => {
+  it('a cached file picked while another loads shows it, not Loading…', async () => {
+    const inv = mockedInvoke as ReturnType<typeof vi.fn>;
+    let release: (v: unknown) => void = () => {};
+    inv.mockImplementation(async (cmd: string, payload?: { args?: { path?: string } }) => {
+      if (cmd !== 'repo_file') return null;
+      const p = payload?.args?.path ?? '';
+      if (p === 'slow-b.ts') return new Promise((r) => (release = r));
+      return { path: p, content: `content of ${p}`, truncated: false, binary: false, is_dir: false, size: 10 };
+    });
+    const { rerender } = render(FileViewer, { props: { session, path: 'order-a.ts', status: undefined, reloadKey: 0 } });
+    await settle();
+    expect(document.body.textContent).toContain('content of order-a.ts');
+    await rerender({ session, path: 'slow-b.ts', status: undefined, reloadKey: 0 });
+    await settle();
+    expect(document.body.textContent).toContain('Loading…');
+    await rerender({ session, path: 'order-a.ts', status: undefined, reloadKey: 0 });
+    await settle();
+    release({ path: 'slow-b.ts', content: 'content of b', truncated: false, binary: false, is_dir: false, size: 10 });
+    await settle();
+    expect(document.body.textContent).not.toContain('Loading…');
+    expect(document.body.textContent).toContain('content of order-a.ts');
+  });
+});

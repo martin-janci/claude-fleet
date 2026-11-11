@@ -28,6 +28,7 @@
 import { writable, get } from 'svelte/store';
 import { invokeCmd, type Result } from './result';
 import { sessionIdActionBlocked } from './share';
+import { pairedLocalRefusal } from './access';
 import { sendPrompt, sessions } from './sessions';
 import { markNeedsReattach, type Attachment } from './attachments';
 import { withAttachments, tooLong } from './attach_prompt';
@@ -452,6 +453,31 @@ export function createOutbox(deps: OutboxDeps) {
 
 export type Outbox = ReturnType<typeof createOutbox>;
 
+/** The app outbox's upload: this machine's own copy onto the session's
+ *  host, refused where that copy would land somewhere else. */
+export async function uploadAttachments(
+  host: string,
+  tmux: string,
+  localPaths: string[],
+  fleet?: string,
+): Promise<Result<string[]>> {
+  // An upload is this machine's own copy onto the host, which an extra
+  // fleet's hub reaches and this machine may not: its composer offers no
+  // attachments, and none is sent there.
+  if (fleet !== undefined)
+    return { ok: false, error: { code: 'E_INVALID', message: 'Files cannot be attached to another fleet’s session yet.' } };
+  // Paired, the hub's own machine (`local`, a Windows `wsl-…`): the upload
+  // resolves the alias on this machine and would stage the files here.
+  const here = pairedLocalRefusal({ host_alias: host });
+  if (here !== null) return { ok: false, error: { code: 'E_INVALID', message: here } };
+  const r = await invokeCmd<string[]>('upload_attachments', {
+    args: { host_alias: host, session_name: tmux, local_paths: localPaths },
+  });
+  // Control's Library (9.7) lists what was put on the host.
+  if (r.ok) recordAttachments(host, tmux, r.value);
+  return r;
+}
+
 // ─── The app's outbox ───────────────────────────────────────────────────────
 
 /** The one outbox every composer shares: sends go through `send_prompt`,
@@ -466,19 +492,7 @@ export const outbox = createOutbox({
   // An extra fleet's session (a negative key): its own link, and its hub
   // judges the write.
   blocked: (id) => (id < 0 ? get(fleetBlocked)(keyTarget(id)?.fleet) : sessionIdActionBlocked(id, 'send_prompt')),
-  upload: async (host, tmux, localPaths, fleet) => {
-    // An upload is this machine's own copy onto the host, which an extra
-    // fleet's hub reaches and this machine may not: its composer offers no
-    // attachments, and none is sent there.
-    if (fleet !== undefined)
-      return { ok: false, error: { code: 'E_INVALID', message: 'Files cannot be attached to another fleet’s session yet.' } };
-    const r = await invokeCmd<string[]>('upload_attachments', {
-      args: { host_alias: host, session_name: tmux, local_paths: localPaths },
-    });
-    // Control's Library (9.7) lists what was put on the host.
-    if (r.ok) recordAttachments(host, tmux, r.value);
-    return r;
-  },
+  upload: uploadAttachments,
   row: (id) => (id < 0 ? awayRow(id) : get(sessions).find((s) => s.id === id)),
 });
 
