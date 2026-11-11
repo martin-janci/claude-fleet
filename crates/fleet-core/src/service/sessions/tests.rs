@@ -325,9 +325,41 @@ fn stale_probe(s: &Store, pane_status: crate::service::pane_intel::ClaudeStatus)
             derived_status: Some(pane_status),
             waiting_for: None,
             pending_input: None,
+            signed_out: false,
         },
     );
     probe
+}
+
+/// A pane whose last turn ended in "Please run /login" notes the row's
+/// login for `login_health`: the profile's when the row has one, and nothing
+/// for a session seen for the first time (no stored profile to tell which
+/// login it is).
+#[test]
+fn a_pane_that_lost_its_login_notes_the_rows_login() {
+    use crate::service::pane_intel::ClaudeStatus;
+    let mut s = Store::open_in_memory().unwrap();
+    s.upsert_host("vps").unwrap();
+    let projects = s.list_projects().unwrap();
+    let mut probe = stale_probe(&s, ClaudeStatus::Idle);
+    probe.intel.get_mut("dev-a").unwrap().signed_out = true;
+    reconcile_write_one_host(&mut s, &probe, &projects).unwrap();
+    crate::service::login_health::drain_noted(&s, now_unix());
+    let host = |s: &Store| s.get_host_row("vps").unwrap().unwrap();
+    assert!(
+        host(&s).signed_out_logins.is_empty(),
+        "a first sighting notes nothing"
+    );
+
+    s.conn_for_test()
+        .execute("UPDATE sessions SET claude_profile = 'work'", [])
+        .unwrap();
+    reconcile_write_one_host(&mut s, &probe, &projects).unwrap();
+    reconcile_write_one_host(&mut s, &probe, &projects).unwrap();
+    crate::service::login_health::drain_noted(&s, now_unix());
+    let out = host(&s).signed_out_logins;
+    assert_eq!(out.len(), 1, "one note per login, however many passes");
+    assert_eq!(out[0].profile.as_deref(), Some("work"));
 }
 
 /// Stamp every row as observed by a reconcile pass at `at`: the stale sweep

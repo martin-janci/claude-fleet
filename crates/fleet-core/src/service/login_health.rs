@@ -275,15 +275,21 @@ fn with_noted<R>(f: impl FnOnce(&mut Vec<Observation>) -> R) -> R {
 /// login: remember it for the next pass ([`drain_noted`]). No store at hand
 /// where that is found, so it waits here; bounded, the oldest dropped.
 pub fn note_signed_out(host_alias: &str, profile: Option<&str>) {
+    let o = Observation {
+        host_alias: host_alias.to_string(),
+        profile: profile.map(str::to_string),
+        signed_out: true,
+    };
     with_noted(|q| {
+        // A pane keeps showing its error every reconcile pass until the
+        // next turn: one note per login is enough.
+        if q.contains(&o) {
+            return;
+        }
         if q.len() >= NOTED_MAX {
             q.remove(0);
         }
-        q.push(Observation {
-            host_alias: host_alias.to_string(),
-            profile: profile.map(str::to_string),
-            signed_out: true,
-        });
+        q.push(o);
     });
 }
 
@@ -450,6 +456,16 @@ mod tests {
         assert!(apply(&again, &[obs("h", None, false)], 600).is_empty());
         let other = apply(&again, &[obs("h", Some("w"), false)], 600);
         assert_eq!(other, again, "another login's answer leaves this one");
+    }
+
+    #[test]
+    fn a_login_is_noted_once_however_often_it_is_seen() {
+        for _ in 0..5 {
+            note_signed_out("nh", Some("work"));
+        }
+        note_signed_out("nh", None);
+        assert_eq!(with_noted(|q| q.len()), 2);
+        with_noted(std::mem::take);
     }
 
     #[test]

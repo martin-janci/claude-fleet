@@ -211,6 +211,11 @@ pub struct PaneIntel {
     /// (`sessions.pending_input`) so a client can turn them into buttons.
     /// `None` whenever the pane shows no permission/question dialog.
     pub pending_input: Option<PendingInput>,
+    /// The pane's last turn ended in Claude Code saying its login is gone
+    /// ([`detect_signed_out`]). Not a stuck state: the REPL is live and a
+    /// `/login` there or elsewhere fixes it, so reconcile notes the login
+    /// for `service::login_health` instead.
+    pub signed_out: bool,
 }
 
 /// One numbered choice of a permission or question dialog.
@@ -517,6 +522,45 @@ pub(crate) fn detect_stuck(text: &str) -> Option<StuckKind> {
     }
 
     None
+}
+
+/// How Claude Code's error line opens, lowercased, when the turn failed
+/// for want of a login: `⎿  API Error: 401 {…"authentication_error"…} ·
+/// Please run /login`, `⎿  Login expired · Run /login to sign in again`,
+/// `⎿  Invalid API key · Please run /login`, `⎿  OAuth token has expired…`.
+const SIGNED_OUT_OPENINGS: &[&str] = &[
+    "api error: 401",
+    "login expired",
+    "invalid api key",
+    "not logged in",
+    "oauth token has expired",
+    "oauth token has been revoked",
+    "invalid bearer token",
+];
+
+/// PURE: whether the pane's last turn ended in Claude Code saying its login
+/// is gone. Read strictly, since a fleet session may well be printing or
+/// discussing these very words:
+/// * only the LAST `⎿` line counts, and only when it OPENS with one of
+///   [`SIGNED_OUT_OPENINGS`]: an error is drawn as its own `⎿` line, while
+///   tool output that merely contains the words (a grep hit) opens with
+///   something else, and a `/login` run afterwards ("⎿  Login successful")
+///   is a later `⎿` line;
+/// * no answer (`●`) below it: a later turn went through.
+pub fn detect_signed_out(stripped: &str) -> bool {
+    let lines: Vec<&str> = stripped.lines().collect();
+    let Some(at) = lines.iter().rposition(|l| l.trim_start().starts_with('⎿')) else {
+        return false;
+    };
+    let said = lines[at]
+        .trim_start()
+        .trim_start_matches('⎿')
+        .trim_start()
+        .to_lowercase();
+    SIGNED_OUT_OPENINGS.iter().any(|p| said.starts_with(p))
+        && !lines[at + 1..]
+            .iter()
+            .any(|l| l.trim_start().starts_with('●'))
 }
 
 /// Pick the last non-empty, non-pure-decoration line as the activity summary.
@@ -1182,12 +1226,59 @@ pub fn analyze(pane_tail: &str) -> PaneIntel {
         derived_status,
         waiting_for: dialog.map(|d| d.kind),
         pending_input,
+        signed_out: detect_signed_out(&stripped),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The tail of an interactive Claude Code whose login is gone: the
+    /// error under the prompt, then the live input box and footer.
+    fn signed_out_tail(error: &str) -> String {
+        format!(
+            "> fix the flaky test\n  ⎿  {error}\n\n╭──────────────╮\n│ >            │\n╰──────────────╯\n  ? for shortcuts\n"
+        )
+    }
+
+    #[test]
+    fn claude_saying_its_login_is_gone_is_read_as_signed_out() {
+        for error in [
+            "API Error: 401 {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"OAuth token has expired.\"}} · Please run /login",
+            "Login expired · Run /login to sign in again",
+            "Invalid API key · Please run /login",
+            "OAuth token has expired. Please obtain a new token",
+        ] {
+            let intel = analyze(&signed_out_tail(error));
+            assert!(intel.signed_out, "{error}");
+            assert_eq!(intel.stuck, None, "{error}: the REPL is live, not stuck");
+        }
+    }
+
+    #[test]
+    fn the_words_alone_are_not_a_signed_out_pane() {
+        // Tool output that contains them: a grep hit opens with its path.
+        let grep = "● Bash(grep -rn \"login expired\" src)\n  ⎿  src/a.rs:12: \"Login expired · Run /login\"\n     src/b.rs:40: // invalid api key\n";
+        assert!(!analyze(grep).signed_out);
+        // An answer that discusses it, with no error line at all.
+        let prose = "● The pane said \"Login expired · Run /login\", so I re-ran it.\n  Login expired cards now clear.\n";
+        assert!(!analyze(prose).signed_out);
+        // A later turn went through.
+        let later = format!(
+            "{}> retry\n● Done: the test passes.\n",
+            signed_out_tail("Login expired · Run /login")
+        );
+        assert!(!analyze(&later).signed_out);
+        // `/login` was run there afterwards.
+        let relogged = format!(
+            "{}> /login\n  ⎿  Login successful\n",
+            signed_out_tail("Invalid API key · Please run /login")
+        );
+        assert!(!analyze(&relogged).signed_out);
+        // Any other API error.
+        assert!(!analyze(&signed_out_tail("API Error: 529 Overloaded")).signed_out);
+    }
 
     #[test]
     fn context_pct_survives_a_multibyte_char_before_the_digits() {

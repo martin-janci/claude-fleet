@@ -457,6 +457,7 @@ fn analyze(pane_tail: &str) -> PaneIntel {
             multi: false,
             detail: d.detail,
         }),
+        signed_out: false,
     }
 }
 

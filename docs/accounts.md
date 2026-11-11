@@ -211,6 +211,15 @@ used) is resumed under the login on its host with the most headroom, without any
 restart Switch account makes (`restart_session { profile }`), so the
 conversation carries on and the row keeps the new login.
 
+The same goes for a session whose own login is **signed out** (the
+"no credentials" rows, *Signed-out logins* below): it is resumed under
+another login on its host, chosen as below except that another login of
+the same account counts too (a setup token beside an expired `/login`,
+say), and never the signed-out one. Fleet learns a login is signed out from
+the usage check, a refused headless run, the session's pane, or a
+StopFailure hook whose error is a 401 / `authentication_error`. The
+timeline event's detail says `"reason": "signed_out"` (else `"limit"`).
+
 Each person decides for their own sessions: the Accounts page's **Switch my
 sessions automatically when their account runs out** (MCP:
 `auto_switch_account { enabled }`) is on by default and turns it off for
@@ -225,7 +234,8 @@ limit. A working session is never moved, early or not.
 Below it, **then tell it to continue where it stopped** (MCP:
 `auto_switch_account { continue_after: true }`, off by default): when the
 limit cut the session's last turn off (its newest turn end is a
-`stop_failure` of class `rate_limit`), a switch that went through queues
+`stop_failure` of class `rate_limit`, or of class `auth` for a signed-out
+login), a switch that went through queues
 "Continue where you left off." as a deferred prompt. It goes in no sooner
 than 30 seconds after the switch, once the resumed session is idle, and is
 held if the new login is over `accounts.pause_at` too. A session that had
@@ -355,14 +365,25 @@ account: it changes where work goes next.
 ### Signed-out logins
 
 A login whose sign-in is gone (the usage check found it expired or its
-token rejected, or a headless `claude -p` run was refused with "Login
-expired · Run /login") is kept on its host row
+token rejected, a headless `claude -p` run was refused with "Login
+expired · Run /login", or a session's pane ended its last turn in Claude
+Code's own error line for it) is kept on its host row
 (`hosts.signed_out_logins`) with the day fleet first saw it, until fleet
 sees it signed in again; one signed-out login is asked again at most once
 an hour. Placement leaves it out, Control's chat shows one card per login
 ("Claude login expired on htz (since Aug 9) · ssh htz then claude /login";
 for a profile, `CLAUDE_CONFIG_DIR=~/.claude-profiles/<name> claude
 /login`), and Control's feed says it once. Only a person can sign it in.
+
+The pane reading (`pane_intel::detect_signed_out`, every reconcile pass) is
+strict, since a session may be printing or discussing these words: only the
+pane's last `⎿` line counts, and only when it opens with `API Error: 401`,
+`Login expired`, `Invalid API key`, `Not logged in`, `OAuth token has
+expired` / `has been revoked` or `Invalid bearer token`, with no answer
+(`●`) below it. A `/login` run there afterwards ("⎿  Login successful") or a
+later turn ends it. The login noted is the session's profile, else its
+host's own; a session reconcile sees for the first time notes nothing. Its
+sessions then read `no_credentials` (Needs you) while they are not working.
 
 ### Two copies of one login
 
