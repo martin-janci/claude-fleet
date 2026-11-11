@@ -391,6 +391,7 @@ const NEVER_A_HOST_TOKENS: &[&str] = &[
     "session_presence",
     "session_ask_access",
     "access_requests",
+    "review_request",
     "list_downloads",
     "library",
     // The Automation screen's Runs list (Orbit Fleet 8.3): a person's.
@@ -812,6 +813,7 @@ async fn call(fx: &Fx, who: Who, tool: &str, args: Value) -> Answer {
         "new_bg_session" => fx.t.new_bg_session(ext, p!()).await,
         // ---- sharing.rs ---------------------------------------------------
         "session_share" => fx.t.session_share(ext, p!()).await,
+        "review_request" => fx.t.review_request(ext, p!()).await,
         "session_unshare" => fx.t.session_unshare(ext, p!()).await,
         "session_narrow" => fx.t.session_narrow(ext, p!()).await,
         "session_access" => fx.t.session_access(ext, p!()).await,
@@ -1121,6 +1123,13 @@ async fn run_matrix() {
         .await;
     }
     m.gated("session_access", Reach::Own, row).await;
+    // "Ask for review…" shares the session: `Own`, like `session_share`.
+    m.gated(
+        "review_request",
+        Reach::Own,
+        |fx, _| json!({ "session_id": fx.row, "action": "ask", "person": PERSON_SPARE }),
+    )
+    .await;
     // Presence (11.7b): a watch grantee may say it is looking; a stranger
     // gets the not-found every session tool answers, and learns nobody's
     // there.
@@ -2246,6 +2255,9 @@ fn own_tier_args(fx: &Fx, tool: &str) -> Value {
         "delete_worktree" => json!({ "worktree_id": fx.worktree, "force": true }),
         "session_share" | "session_unshare" | "session_narrow" => {
             json!({ "session_id": fx.row, "person": PERSON_SPARE, "level": "watch" })
+        }
+        "review_request" => {
+            json!({ "session_id": fx.row, "action": "ask", "person": PERSON_SPARE })
         }
         "work_link" => {
             json!({ "action": "summarize", "key": WORK_KEY, "link_id": fx.link })

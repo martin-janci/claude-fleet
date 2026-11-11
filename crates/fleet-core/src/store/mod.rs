@@ -62,6 +62,7 @@ mod pr_shepherd;
 mod project_checks;
 mod project_picks;
 mod projects;
+mod prompt_authors;
 mod pull_requests;
 mod read_cursors;
 mod read_pool;
@@ -70,6 +71,7 @@ mod reconcile;
 mod reports;
 mod review_notes;
 mod review_prs;
+mod review_requests;
 mod routine_decisions;
 mod routine_memory;
 mod routine_seen;
@@ -238,6 +240,7 @@ pub use pr_shepherd::{
 };
 pub use project_checks::{ProjectCheck, CHECK_ASK, CHECK_AUTO, CHECK_MODES, CHECK_OFF};
 pub use project_picks::{ProjectPickRow, PROJECT_GROUP_MAX_CHARS, PROJECT_VIS};
+pub use prompt_authors::{prompt_head, PromptAuthorRow, PROMPT_HEAD_CHARS};
 pub use pull_requests::{
     pr_events, repo_and_number, PrSeenBy, PullRequestRow, PR_EVENT_CI_FAILED, PR_EVENT_CI_PASSED,
     PR_EVENT_MERGED, PR_EVENT_OPENED, PR_EVENT_REVIEW,
@@ -254,6 +257,7 @@ pub use review_prs::{
     NewReviewRecord, ReviewPrRow, ReviewRecordRow, TestExemptionRow, REVIEW_PR_STATUSES,
     REVIEW_SKIP_REASONS,
 };
+pub use review_requests::{ReviewRequestRow, REVIEW_REQUEST_NOTE_MAX};
 pub use routine_decisions::{
     NewRoutineDecision, RecentEvent, RoutineDecisionRow, ROUTINE_DECISIONS_KEPT,
     ROUTINE_DECISION_VERDICTS,

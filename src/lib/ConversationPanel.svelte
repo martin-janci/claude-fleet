@@ -21,6 +21,8 @@
   import { requestOpenPath, OPEN_PATH_CONTEXT, type OpenPathFn } from './app_views';
   import { sendPrompt, hasNoPane, sessions, sessionAgent, restartSession, type SessionRow } from './sessions';
   import AnswerPrompt from './AnswerPrompt.svelte';
+  import PlanReady from './PlanReady.svelte';
+  import { planSaid } from './plan_first';
   import { canStop, cancelInto, drop, due, heldPreview, hold, parkHeld, unparkHeld, STOP_KEY, type HeldLine } from './composer_hold';
   import FormCard from './forms/FormCard.svelte';
   import ChatWizards from './forms/ChatWizards.svelte';
@@ -103,6 +105,7 @@
     modelShortLabel,
     sessionActivity,
     splitMarker,
+    promptWho,
     indicatorFor,
     doingNow,
     hasPendingCall,
@@ -1390,6 +1393,12 @@
     held = drop(held, next.id);
     void sendText(next.text);
   });
+  /** "Ask for changes…" on the Plan ready card: the composer starts with
+   *  the plan file named, and whatever was typed stays after it. */
+  function planChanges(prefix: string) {
+    if (!draft.startsWith(prefix)) draft = prefix + draft;
+    void tick().then(() => box?.focus());
+  }
   function cancelHeld(line: HeldLine) {
     held = drop(held, line.id);
     draft = cancelInto(draft, line);
@@ -2701,7 +2710,9 @@
                           >{:else}{sender.text}{/if} · untrusted</span
                       >
                     {:else}
-                      <span class="who">You</span>
+                      <span class="who" class:other={turn.author && !turn.author.mine} data-testid="conv-prompt-who"
+                        >{promptWho(turn.author)}</span
+                      >
                     {/if}
                     <span class="head-right">
                       <span class="copy-slot"><CopyButton text={turn.prompt} label="Copy prompt" /></span>
@@ -2952,6 +2963,17 @@
           {/each}
         {/if}
         {#if viewing === null}
+        {#if !away}
+          <!-- Plan first (docs/plan-first.md): the agent said "Plan ready",
+               the file is there, and it waits for a yes. -->
+          <PlanReady
+            {session}
+            {sKey}
+            status={liveStatus}
+            said={conv ? planSaid(conv.turns) : null}
+            onAskChanges={showComposer && writeBlocked === null ? planChanges : undefined}
+          />
+        {/if}
         {#if pendingForm && pendingForm.form_id !== hiddenForm}
           <FormCard
             formId={pendingForm.form_id}
@@ -3585,6 +3607,10 @@
   }
   .chat-look .who {
     display: none;
+  }
+  /* A colleague's prompt names them even in the chat look. */
+  .chat-look .who.other {
+    display: inline;
   }
   /* The bubble's time and Copy sit beside it, shown on hover or focus. */
   .chat-look .prompt-head {

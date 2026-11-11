@@ -231,6 +231,94 @@ impl FleetTools {
         ok_json(&view)
     }
 
+    #[tool(description = "Ask a colleague to review a session you OWN: \
+        ask {session_id, person, note?} shares it (drive; watch for a viewer) \
+        and puts it in their Inbox; list (default) the asks to you; done {id}.")]
+    pub(super) async fn review_request(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(p): Parameters<ReviewRequestParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let action = p.action.as_deref().unwrap_or("list");
+        audit(
+            "review_request",
+            &format!(
+                "action={action} session_id={:?} person={:?} id={:?}",
+                p.session_id, p.person, p.id
+            ),
+        );
+        let s = lock(&self.store).map_err(to_mcp_err)?;
+        let me = super::fleet::owner_for(&caller, &s);
+        let now = crate::store::now_unix();
+        match action {
+            "list" => {
+                let Some(me) = me else {
+                    return ok_json(&Vec::<crate::store::ReviewRequestRow>::new());
+                };
+                let rows = s
+                    .review_requests_for(me, p.done.unwrap_or(false), now)
+                    .map_err(to_mcp_err)?;
+                ok_json(&rows)
+            }
+            "ask" => {
+                if caller.mode == TokenMode::Answer {
+                    return Err(mcp_err(
+                        codes::E_FORBIDDEN,
+                        "an answer-only device does not ask for reviews",
+                        None,
+                    ));
+                }
+                let sid = p
+                    .session_id
+                    .ok_or_else(|| mcp_err(codes::E_INVALID, "ask needs session_id", None))?;
+                // `Reach::Own`: asking shares the session, which is the owner's.
+                resolve_row_and_gate(
+                    &s,
+                    &caller,
+                    Some(sid),
+                    None,
+                    None,
+                    Reach::Own,
+                    "the session to ask a review of",
+                )?;
+                let out = sessions::ask_for_review(
+                    &s,
+                    sid,
+                    p.person.as_deref().unwrap_or(""),
+                    p.note.as_deref(),
+                    me,
+                    now,
+                )
+                .map_err(to_mcp_err)?;
+                ok_json(&out)
+            }
+            "done" => {
+                let id =
+                    p.id.ok_or_else(|| mcp_err(codes::E_INVALID, "done needs id", None))?;
+                let row = me
+                    .and_then(|me| {
+                        s.finish_review_request(id, me, p.done.unwrap_or(true), now)
+                            .transpose()
+                    })
+                    .transpose()
+                    .map_err(to_mcp_err)?
+                    .ok_or_else(|| {
+                        mcp_err(
+                            codes::E_NOTFOUND,
+                            format!("no review request {id} to you"),
+                            None,
+                        )
+                    })?;
+                ok_json(&row)
+            }
+            other => Err(mcp_err(
+                codes::E_INVALID,
+                format!("review_request action {other:?}; list, ask or done"),
+                None,
+            )),
+        }
+    }
+
     #[tool(description = "Asks for a wider level on sessions you OWN. \
         list (default; session_id narrows it), grant {id} (re-shares at the \
         asked level) or decline {id}. Errors: E_NOTFOUND, E_FORBIDDEN, \

@@ -741,6 +741,13 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             tool: "access_requests",
         },
     ),
+    // "Ask for review…": share with a colleague and ask in their Inbox.
+    (
+        "review_request",
+        Verdict::Routed {
+            tool: "review_request",
+        },
+    ),
     (
         "restart_session",
         Verdict::Routed {

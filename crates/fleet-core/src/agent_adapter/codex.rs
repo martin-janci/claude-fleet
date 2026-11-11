@@ -556,6 +556,7 @@ fn new_turn(prompt: Option<String>, at: Option<String>, uuid: Option<String>) ->
         reminders: Vec::new(),
         prompt_uuid: uuid,
         prompt_partial: false,
+        author: None,
     }
 }
 

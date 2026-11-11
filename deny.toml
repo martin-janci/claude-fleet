@@ -50,6 +50,14 @@ ignore = [
   "RUSTSEC-2026-0370",
   "RUSTSEC-2026-0371",
   "RUSTSEC-2026-0372",
+  # RUSTSEC-2026-0462 (rmcp < 3.9): the Streamable HTTP *clients* buffer a
+  # response body without a size limit. fleet-core enables only `server`,
+  # `macros`, `transport-streamable-http-server` and `schemars`, so neither
+  # affected client (`transport-streamable-http-client-reqwest` / `-unix-socket`)
+  # is compiled in. The fix ships only in rmcp 3.x, a protocol-level migration
+  # (new MCP version, loopback-only Host allow-list by default) done on its
+  # own. Ignore approved by the owner 2026-11-10; drop it with that upgrade.
+  "RUSTSEC-2026-0462",
 ]
 
 [licenses]

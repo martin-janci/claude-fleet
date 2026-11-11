@@ -274,6 +274,7 @@ fn parse_stream_json(ndjson: &str) -> Vec<ConvTurn> {
                 reminders: Vec::new(),
                 prompt_uuid: None,
                 prompt_partial: false,
+                author: None,
             }),
             Some("agent_response") if !text.is_empty() => {
                 turn_for_reply(&mut turns, &at)
@@ -315,6 +316,7 @@ fn turn_for_reply<'a>(turns: &'a mut Vec<ConvTurn>, at: &Option<String>) -> &'a 
             reminders: Vec::new(),
             prompt_uuid: None,
             prompt_partial: false,
+            author: None,
         });
     }
     let turn = turns.last_mut().expect("pushed above");
