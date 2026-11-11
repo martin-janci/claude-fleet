@@ -642,12 +642,30 @@ pub fn carry_verdict(state: &SourceState, branch: &str) -> Result<(), IpcError> 
 /// One GiB of headroom on top of the worktree the carry recreates.
 const TARGET_DISK_HEADROOM_KB: i64 = 1_048_576;
 
-/// `du -sk` of the source worktree; empty output (an unmatched fake, a
-/// missing `du`) is "unknown" and skips the check.
+/// Seconds the source's `du` may run before it gives up, inside the
+/// script, so it ends well before [`GIT_TIMEOUT`] and frees the host.
+const WORKTREE_SIZE_DU_SECS: u64 = 25;
+
+/// `du -sk` of the source worktree, without the [`carry::DENYLIST`]
+/// directories: the carry never recreates them, and a pnpm `node_modules`
+/// on a loaded disk took `du` past 200 s (mefistos, 2026-11-11), failing
+/// every move of that session before it started. GNU `du` takes
+/// `--exclude`, BSD `du` (macOS) `-I`; both match the last path component.
+/// The `du` is cut off after [`WORKTREE_SIZE_DU_SECS`] where `timeout`
+/// exists. Empty output (an unmatched fake, a missing `du`, a cut-off run)
+/// is "unknown" and skips the check.
 fn worktree_size_script(worktree: &str) -> String {
+    let deny = carry::DENYLIST.join(" ");
     format!(
-        "# cf-move:size\ndu -sk -- {} 2>/dev/null | cut -f1",
-        quote(worktree)
+        "# cf-move:wtsize\n\
+         set -f\n\
+         if du --version >/dev/null 2>&1; then flag=--exclude=; else flag='-I '; fi\n\
+         ex=''\n\
+         for d in {deny}; do ex=\"$ex $flag$d\"; done\n\
+         t=''\n\
+         command -v timeout >/dev/null 2>&1 && t='timeout {WORKTREE_SIZE_DU_SECS}'\n\
+         $t du -sk $ex -- {wt} 2>/dev/null | cut -f1\n",
+        wt = quote(worktree),
     )
 }
 
@@ -2621,19 +2639,33 @@ async fn gather(
         s.get_host_row(&target)?.and_then(|h| h.disk_home_free_kb)
     };
     let source_kb = if target_free_kb.is_some() {
-        let out = sh(
+        // A size that cannot be read in time is unknown, never a refusal:
+        // the check is a courtesy, and failing here stopped every move of
+        // a session whose worktree `du` could not finish.
+        match sh(
             ssh,
             &src,
             &worktree_size_script(&state.worktree),
             GIT_TIMEOUT,
         )
-        .await?;
-        // The first word: `cut -f1` leaves a bare number, a `du` without
-        // it (or a fake) leaves `<kb>\t<path>`; either way the size.
-        String::from_utf8_lossy(&out.stdout)
-            .split_whitespace()
-            .next()
-            .and_then(|v| v.parse::<i64>().ok())
+        .await
+        {
+            // The first word: `cut -f1` leaves a bare number, a `du` without
+            // it (or a fake) leaves `<kb>\t<path>`; either way the size.
+            Ok(out) => String::from_utf8_lossy(&out.stdout)
+                .split_whitespace()
+                .next()
+                .and_then(|v| v.parse::<i64>().ok()),
+            Err(e) => {
+                tracing::warn!(
+                    "move: the worktree size on {src} could not be read ({}: {}); \
+                     the target disk check is skipped",
+                    e.code,
+                    e.message
+                );
+                None
+            }
+        }
     } else {
         None
     };
@@ -4854,7 +4886,7 @@ mod tests {
         }
         f.fake.on_host(
             "alpha",
-            Match::script_contains("# cf-move:size"),
+            Match::script_contains("# cf-move:wtsize"),
             Reply::ok("2097152\t/local/o/r/.claude/worktrees/feat\n"),
         );
         let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
@@ -4866,6 +4898,80 @@ mod tests {
             2_097_152 + 1_048_576
         );
         assert_eq!(progress_of(&f, &bus), ["check:started", "check:failed"]);
+    }
+
+    /// mefistos, 2026-11-11: `du` over a pnpm `node_modules` on a loaded
+    /// disk never finished, and the size probe's error failed every move
+    /// (dry runs included) with E_SSH_TIMEOUT. A size that cannot be read
+    /// is unknown: the move goes on, exactly as for an unsampled target.
+    #[tokio::test]
+    async fn a_source_size_that_cannot_be_read_does_not_block_the_move() {
+        let f = fixture();
+        {
+            let s = f.store.lock().unwrap();
+            s.set_host_health(
+                "beta",
+                &crate::tmux::HostHealthSample {
+                    disk_home_free_kb: Some(1_500_000),
+                    disk_home_total_kb: Some(150_000_000),
+                    ..Default::default()
+                },
+                1,
+            )
+            .unwrap();
+        }
+        f.fake.on_host(
+            "alpha",
+            Match::script_contains("# cf-move:wtsize"),
+            Reply::SpawnError {
+                message: "agent on alpha did not answer within 40s".into(),
+            },
+        );
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let report = run(&f, &hooks, false).await;
+        assert!(report.is_ok(), "{report:?}");
+        assert!(
+            f.fake
+                .calls_for("alpha")
+                .iter()
+                .any(|c| c.command().contains("# cf-move:wtsize")),
+            "the size probe ran"
+        );
+    }
+
+    /// The size the check weighs leaves out what the carry never recreates
+    /// (`carry::DENYLIST`), on GNU and BSD `du` alike.
+    #[cfg(unix)]
+    #[test]
+    fn the_worktree_size_script_leaves_out_the_denylisted_directories() {
+        use carry::tests::bash;
+        if !carry::tests::require(&["bash"]) {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let wt = tmp.path().join("wt with space");
+        std::fs::create_dir_all(wt.join("src")).unwrap();
+        std::fs::write(wt.join("src/a.txt"), vec![b'a'; 64 * 1024]).unwrap();
+        let measure = || {
+            let out = bash(&worktree_size_script(wt.to_str().unwrap()), &home);
+            assert!(out.status.success(), "{out:?}");
+            String::from_utf8_lossy(&out.stdout)
+                .trim()
+                .parse::<i64>()
+                .unwrap_or_else(|_| panic!("a size, got {out:?}"))
+        };
+        let without = measure();
+        for d in ["node_modules/.pnpm/pkg", ".next/cache"] {
+            std::fs::create_dir_all(wt.join(d)).unwrap();
+            std::fs::write(wt.join(d).join("big.bin"), vec![b'x'; 4 * 1024 * 1024]).unwrap();
+        }
+        let with = measure();
+        assert!(
+            with < without + 1024,
+            "denylisted dirs counted: {without} KiB before, {with} KiB after"
+        );
     }
 
     /// An unsampled target (no health row yet) or an unmeasurable source
