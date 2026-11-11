@@ -3,6 +3,7 @@
 </script>
 
 <script lang="ts">
+  import { attentionFacts } from './attention_facts';
   import { tablistKeys } from './tablist_keys';
   // The session header and its one tab bar (Orbit Fleet
   // redesign step 3.5, Main board): the session's name, state and where it
@@ -82,7 +83,9 @@
 
   const state = $derived(
     session
-      ? attentionState(session, { idleSecs: $attentionIdleMinutes * 60, now: Math.floor(Date.now() / 1000) })
+      ? // The same facts the rows read (down hosts, limits), so the header
+        // never says another word than the session's row (HITL audit H-53).
+        attentionState(session, { idleSecs: $attentionIdleMinutes * 60, now: Math.floor(Date.now() / 1000), facts: $attentionFacts })
       : null,
   );
   // Settings › Appearance › Agent tab name (G4.6): the agent's own name
@@ -268,11 +271,16 @@
     gap: var(--space-2);
     min-width: 0;
   }
+  /* The title is the last thing to shrink (HITL audit H-15): it read
+     "Invoic…", or nothing once a watcher showed, while button labels kept
+     their room. */
   .name {
     font-weight: 600;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+    flex-shrink: 0;
+    max-width: 45%;
   }
   .state {
     flex-shrink: 0;
@@ -335,7 +343,7 @@
   .mono { font-family: var(--font-mono); }
   /* A narrow column keeps the icons and drops the words (the title and
      aria-label still name each one). */
-  @container (max-width: 600px) {
+  @container (max-width: 960px) {
     .lbl { display: none; }
     .ctx-of { display: none; }
   }
