@@ -5,7 +5,7 @@ For the agent that picks this up. Read `README.md` first: findings H-01…H-40 w
 
 ## State
 
-- Audit and target design: done, nothing in the code changed.
+- Audit and target design: done. Wave 0 landed on this branch (below).
 - Boards: `boards/*.dc.html` (same format as `docs/ux/2026-10-08-orbit-fleet-redesign/canvas`).
   Live canvas, private to the owner: <https://claude.ai/artifact/XJx4FE3DVFx8YeEroWDpU3>.
   Renders: `images/board-*.webp`. Screenshots of today's apps: `images/today-*.webp`.
@@ -22,9 +22,15 @@ toast, H-13 card headline from the tool call and wrapping answers, H-17
 failed clean up is Failed (hub, desktop, phone), H-16 Inbox header adds
 up, H-02 confirm-card wording, H-22 Escape leaves select mode.
 
-Left in Wave 0: 0.10's phone card scrolling and `maxLines` (H-33, H-36),
-the session header title (H-15, `SessionTabs.svelte`), the status bar's
-"All systems OK" (H-16). Then Wave 1.
+Also done: the session header keeps its title and reads the row's state
+(H-15, `SessionTabs.svelte`), the status bar names a host that is down
+instead of "All systems OK" (H-16, `app_version.ts`), and the phone's
+question card prints the command once with answers that wrap, plus one-line
+bottom-bar labels (H-33, H-36; fleet-mobile `QuestionCard.kt`, `BottomBar.kt`).
+
+**Wave 0 is complete.** Next is Wave 1 (README §6). 1.1, the leash (ask before
+a step a person owns), waits on owner decision 1 in README §8; the audit
+recommends asking. 1.2–1.9 can start now.
 
 Memory: the fleet-core test target needs most of the 16 GB box. Stop any
 Gradle daemon (`./gradlew --stop`) and run nothing beside
