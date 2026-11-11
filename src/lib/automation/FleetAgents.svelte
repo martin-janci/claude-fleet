@@ -43,7 +43,7 @@
   let defs = $state<FleetDefinition[] | null>(null);
   let gallery = $state<GalleryEntry[]>([]);
   let loadError = $state<string | null>(null);
-  let open = $state<{ wizard: Wizard; definition: string } | null>(null);
+  let open = $state<{ wizard: Wizard; definition: string; id?: number } | null>(null);
   let busy = $state(false);
   let error = $state<string | null>(null);
   let note = $state<string | null>(null);
@@ -90,7 +90,7 @@
     error = null;
     note = null;
     const r = await fleetForm(definition, id);
-    if (r.ok) open = { wizard: fleetWizard(r.value), definition };
+    if (r.ok) open = { wizard: fleetWizard(r.value), definition, id };
     else note = r.error ? errorText(r.error) : 'Could not build the form';
   }
 
@@ -98,7 +98,7 @@
     if (!open) return;
     busy = true;
     error = null;
-    const r = await grantFleet(open.definition, values);
+    const r = await grantFleet(open.definition, values, open.id);
     busy = false;
     if (!r.ok) {
       error = r.error ? errorText(r.error) : 'The grant failed';

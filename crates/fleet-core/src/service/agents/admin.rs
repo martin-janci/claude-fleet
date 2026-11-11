@@ -80,7 +80,8 @@ pub struct AgentsArgs {
     /// session | routine | mission | jev | update.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_scope: Option<serde_json::Value>,
-    /// revoke, run: a rule's id; approve, reject: an action's id; job: a job's id.
+    /// revoke, run: a rule's id (grant, fleet: the instance an Edit saves);
+    /// approve, reject: an action's id; job: a job's id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<i64>,
     /// status: jobs, ≤ 200 (default 20); pending actions are listed up to

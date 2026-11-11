@@ -223,6 +223,46 @@ pub fn prepare(
             "instance {instance:?} is [a-z0-9][a-z0-9-]*, at most 60"
         )));
     }
+    // An instance name is one rule's, whatever its definition (UNIQUE
+    // (agent, scope)): a grant under a name another definition holds would
+    // take that instance over, its jobs, cursor and records included
+    // (review R6). The same definition's is the "same name, change" edit.
+    let held = s
+        .list_agent_rules()
+        .map_err(db)?
+        .into_iter()
+        .find(|r| r.agent == "fleet" && r.scope == instance);
+    if let Some(other) = held
+        .as_ref()
+        .filter(|r| r.definition.as_deref() != Some(def_name))
+    {
+        return Err(IpcError::new(
+            codes::E_CONFLICT,
+            format!(
+                "instance {instance} is already an instance of {}; pick another name",
+                other.definition.as_deref().unwrap_or("another agent")
+            ),
+        ));
+    }
+    // An Edit names the rule it edits: a new name there would start a
+    // second instance beside it, so it is refused (its secrets are named
+    // after the instance; start a new one and revoke this one instead).
+    if let Some(id) = args.id {
+        let edited = s
+            .agent_rule(id)
+            .map_err(db)?
+            .filter(|r| r.agent == "fleet" && r.definition.as_deref() == Some(def_name))
+            .ok_or_else(|| {
+                IpcError::new(codes::E_NOTFOUND, format!("no {def_name} instance {id}"))
+            })?;
+        if edited.scope != instance {
+            return Err(invalid(format!(
+                "an instance keeps its name: {} cannot become {instance}; start a new \
+                 instance named {instance} and revoke {}",
+                edited.scope, edited.scope
+            )));
+        }
+    }
     let level = args.level.as_deref().unwrap_or("watch");
     if !AGENT_LEVELS.contains(&level) {
         return Err(invalid(format!(
@@ -308,7 +348,14 @@ pub fn prepare(
             config,
             granted_by: granted_by.to_string(),
             granted_at: now,
-            expires_at: args.hours.map(|h| now + h * 3600),
+            // Hours as Edit showed them keep the end time: each save would
+            // otherwise push it out by up to the hour rounded up.
+            expires_at: match (args.hours, held.as_ref().and_then(|r| r.expires_at)) {
+                (Some(h), Some(end)) if end > now && super::form::hours_left(end - now) == h => {
+                    Some(end)
+                }
+                (h, _) => h.map(|h| now + h * 3600),
+            },
             definition: Some(def_name.to_string()),
             bindings: serde_json::to_string(&binds).unwrap_or_else(|_| "[]".into()),
         },
@@ -368,8 +415,10 @@ pub async fn grant_or_answers(
         .ok_or_else(|| invalid("a fleet grant names its definition"))?;
     let sources = Sources::from_catalog(def_name, &[])?;
     let ctx = super::form::FormContext::read(store)?;
-    let from_form =
+    let mut from_form =
         super::form::answers_to_args(&sources.definition, &ctx, answers).map_err(invalid)?;
+    // Edit: the instance it was opened on.
+    from_form.id = args.id;
     grant(store, ssh, &from_form, granted_by, now).await
 }
 
