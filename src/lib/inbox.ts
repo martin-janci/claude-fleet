@@ -33,6 +33,7 @@ import { attentionFacts } from './attention_facts';
 import { failingCount } from './routines';
 import { pendingAgentCount } from './agents';
 import { waitingMissionCount } from './mission_waits';
+import { reviewRequestCount } from './review_requests';
 import { groupRows } from './row_groups';
 import { localMidnight } from './today';
 import { badgeCounts, badgeNumber, readPref, writePref } from './prefs';
@@ -163,6 +164,9 @@ export interface InboxExtras {
   proposed: number;
   /** Agent actions waiting for a person (`pendingAgentCount`); absent is 0. */
   agentActions?: number;
+  /** Open review asks to this person (`reviewRequestCount`); absent is 0.
+   *  Listed and counted in Needs you, as missions are. */
+  reviewAsks?: number;
 }
 
 /**
@@ -178,7 +182,8 @@ export function inboxSections(
   extra: InboxExtras,
 ): InboxSection[] {
   const queue = inboxRows(rows, opts);
-  const agentActions = extra.agentActions ?? 0;
+  // Agent actions and review asks: listed and counted in Needs you.
+  const agentActions = (extra.agentActions ?? 0) + (extra.reviewAsks ?? 0);
   const others = extra.failingOthers ?? 0;
   if (by === 'none') {
     const count = queue.length + extra.missions + extra.failingRoutines + agentActions;
@@ -220,7 +225,8 @@ export function inboxSections(
 /** The rail's Inbox count: the Needs you pill's number, under the same host,
  *  background-agent and organisation filters, plus the routines whose
  *  newest run failed (redesign 8.6: a failed run raises the badge) and the
- *  missions waiting on a person (G1.6). Jev's proposed rows never count. */
+ *  missions waiting on a person (G1.6) and the review asks to this person.
+ *  Jev's proposed rows never count. */
 export const inboxCount = derived(
   [
     sessions,
@@ -235,8 +241,23 @@ export const inboxCount = derived(
     showPrimary,
     fleetInboxCount,
     attentionFacts,
+    reviewRequestCount,
   ],
-  ([$sessions, $host, $bg, $scope, $of, $idle, $failing, $missions, $agentActions, $showPrimary, $fleets, $facts]) => {
+  ([
+    $sessions,
+    $host,
+    $bg,
+    $scope,
+    $of,
+    $idle,
+    $failing,
+    $missions,
+    $agentActions,
+    $showPrimary,
+    $fleets,
+    $facts,
+    $asks,
+  ]) => {
     const scope = $scope === 'all' ? null : { id: $scope, of: $of };
     // Multi-hub Phase 2: the extra fleets the fleet filter shows count too,
     // and this window's own rows only while the filter shows them.
@@ -249,7 +270,8 @@ export const inboxCount = derived(
       countNeedsYou(visible, { idleSecs: $idle * 60, now: Math.floor(Date.now() / 1000), facts: $facts }) +
       $failing +
       $missions +
-      $agentActions
+      $agentActions +
+      $asks
     );
   },
 );

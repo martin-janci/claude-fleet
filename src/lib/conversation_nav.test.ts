@@ -113,6 +113,15 @@ describe('conversation_nav', () => {
     const idx = turnIndex([{ kind: 'turn', turn: turn('a'.repeat(78) + '😀tail', []), index: 0 }]);
     expect(idx[0].label).toBe('a'.repeat(78) + '😀…');
   });
+
+  it('turnIndex names what the person typed, not the app’s context line', () => {
+    const ctx = '[context] the person is looking at host htz with no session selected. "here" means that host.';
+    const idx = turnIndex([
+      { kind: 'turn', turn: turn(`${ctx}\n\nwhy is it slow`, []), index: 0 },
+      { kind: 'turn', turn: turn(ctx, []), index: 1 },
+    ]);
+    expect(idx.map((e) => e.label)).toEqual(['why is it slow', 'htz']);
+  });
 });
 
 describe('scroll memory', () => {

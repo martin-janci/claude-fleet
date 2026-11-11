@@ -649,7 +649,9 @@ impl Store {
             "DELETE FROM org_projects WHERE org_id = ?1",
             rusqlite::params![id],
         )?;
-        // Migration 218: the accounts forbidden for it.
+        // Migration 218: the accounts forbidden for it. Each is announced
+        // after the commit, so no client keeps the dead org id on its row.
+        let unblocked = self.accounts_blocked_for_org(id)?;
         tx.execute(
             "DELETE FROM account_org_blocks WHERE org_id = ?1",
             rusqlite::params![id],
@@ -723,6 +725,7 @@ impl Store {
         if revoked > 0 {
             super::session_grants::bump_grant_generation();
         }
+        self.announce_accounts(&unblocked);
         Ok(removed)
     }
 

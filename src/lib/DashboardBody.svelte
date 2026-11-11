@@ -14,6 +14,8 @@
   import { hosts } from './hosts';
   import { accounts } from './accounts';
   import { accountUsage } from './account_usage_store';
+  import { attentionFacts } from './attention_facts';
+  import { exactTime } from './session_status';
   import { feedBy, feedStat, fleetFacts, type FleetData } from './dashboard_sources';
   import { errorText } from './error_copy';
   import {
@@ -107,11 +109,9 @@
 
   // Sessions, hosts and accounts as this desktop holds them: a `fleet`
   // widget is live with the rows themselves.
-  const fleet = $derived<FleetData>({ sessions: $sessions, hosts: $hosts, accounts: $accounts, usage: $accountUsage });
-
-  function clock(unix: number): string {
-    return new Date(unix * 1000).toLocaleString(undefined, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
-  }
+  const fleet = $derived<FleetData>({ sessions: $sessions, hosts: $hosts, accounts: $accounts, usage: $accountUsage, facts: $attentionFacts });
+  /** The feeds this dashboard's `feed` widgets name: all a summary sends. */
+  const feedKeys = $derived(dash.widgets.flatMap((w) => (w.kind === 'feed' ? [w.key] : [])));
 
   const answerOf = (w: Widget) => answers[widgetKey(w)];
   const errorOf = (w: Widget) => errors[widgetKey(w)];
@@ -141,7 +141,7 @@
             >
           {/if}
           {#if w.kind === 'summary'}
-            <SummaryWidget dashId={dash.id} widget={w} {fleet} />
+            <SummaryWidget dashId={dash.id} widget={w} {fleet} {feedKeys} />
           {:else if w.kind === 'feed'}
             {@const f = $dashboardFeeds[w.key]}
             {#if w.show === 'stat'}
@@ -152,7 +152,7 @@
               {#if f}<p class="feed-text" data-testid="feed-value">{f.value}</p>{/if}
             {/if}
             <div class="stat-note" data-testid="feed-meta">
-              {#if f}by {feedBy(f)} · {clock(f.updated_at)}{:else}Nothing written to “{w.key}” yet: Control, you or a routine writes it.{/if}
+              {#if f}by {feedBy(f)} · {exactTime(f.updated_at)}{:else}Nothing written to “{w.key}” yet: Control, you or a routine writes it.{/if}
             </div>
           {:else if w.kind === 'fleet'}
             {@const x = fleetFacts(w.source, fleet)}

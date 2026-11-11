@@ -509,7 +509,13 @@ pub fn ask_for_review(
         Err(e) if e.code == codes::E_EXISTS => {}
         Err(e) => return Err(e),
     }
-    s.ask_for_review(session_id, asker, to, level, note, now)
+    // The level the ask states is the grant in force — a share already in
+    // place at watch stays watch, and the Inbox must not promise notes.
+    let level = s
+        .grants_for_person(to)?
+        .remove(&session_id)
+        .unwrap_or_else(|| level.to_string());
+    s.ask_for_review(session_id, asker, to, &level, note, now)
 }
 
 /// The desktop's `review_request` command, the hub tool's arguments as they
@@ -532,28 +538,57 @@ pub struct ReviewRequestArgs {
 }
 
 /// The same three actions on this machine's own store (a desktop with no
-/// hub): the person is the fleet's owner.
+/// hub): the person is the fleet's owner, who sees every session.
 pub fn review_request_local(
     args: ReviewRequestArgs,
     store: &std::sync::Mutex<Store>,
 ) -> Result<serde_json::Value, IpcError> {
     let me = hub_personal_owner(store);
     let s = crate::ipc_error::lock(store)?;
-    let now = crate::store::now_unix();
+    review_request(
+        &s,
+        args,
+        me,
+        &crate::service::view_scope::ViewScope::internal(),
+        crate::store::now_unix(),
+    )
+}
+
+/// `review_request`'s three actions for the person `me` (the desktop's
+/// command and the hub tool alike). `list` keeps only the asks whose session
+/// `view` admits — an ask whose share was fenced off or is gone is not
+/// shown. The CALLER gates `ask` first (the tool: a full device that owns
+/// the session); `ask_for_review`'s own writes then hold the owner rule.
+pub fn review_request(
+    s: &Store,
+    args: ReviewRequestArgs,
+    me: Option<i64>,
+    view: &crate::service::view_scope::ViewScope,
+    now: i64,
+) -> Result<serde_json::Value, IpcError> {
     match args.action.as_deref().unwrap_or("list") {
         "list" => {
             let rows = match me {
                 Some(me) => s.review_requests_for(me, args.done.unwrap_or(false), now)?,
                 None => Vec::new(),
             };
-            to_value(&rows)
+            let mut keep = Vec::with_capacity(rows.len());
+            for r in rows {
+                let seen = s
+                    .get_session_by_id(r.session_id)?
+                    .is_some_and(|row| view.sees_session_row(&row).is_visible());
+                if seen {
+                    keep.push(r);
+                }
+            }
+            to_value(&keep)
         }
         "ask" => {
             let sid = args
                 .session_id
                 .ok_or_else(|| IpcError::new(codes::E_INVALID, "ask needs session_id"))?;
             let row = ask_for_review(
-                &s,
+                s,
                 sid,
                 args.person.as_deref().unwrap_or(""),
                 args.note.as_deref(),
@@ -584,4 +619,79 @@ pub fn review_request_local(
 
 fn to_value<T: serde::Serialize>(v: &T) -> Result<serde_json::Value, IpcError> {
     serde_json::to_value(v).map_err(|e| IpcError::new(codes::E_SERIALIZE, e.to_string()))
+}
+
+#[cfg(test)]
+mod review_request_tests {
+    use super::*;
+    use crate::mcp::auth::{Caller, ClientRef, TokenMode};
+
+    /// The hub's owner (Ada), Bo, and a session Ada owns.
+    fn setup() -> (Store, i64, i64, i64) {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("h").unwrap();
+        let ada = s.personal_owner_id().unwrap().expect("096 mints one");
+        let bo = s.create_person("bo", None).unwrap().id;
+        let sid = s
+            .upsert_session("work", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+        s.claim_if_unclaimed(sid, Some(ada)).unwrap();
+        (s, ada, bo, sid)
+    }
+
+    fn device_of(person: i64) -> Caller {
+        Caller {
+            api: None,
+            host_alias: None,
+            client: Some(ClientRef {
+                id: 9,
+                name: "phone".into(),
+                trusted: false,
+                org_id: None,
+                person_id: Some(person),
+            }),
+            mode: TokenMode::Readonly,
+            pane: None,
+            is_personal_owner: false,
+            is_fleet_admin: false,
+        }
+    }
+
+    fn list_as(s: &Store, person: i64) -> Vec<crate::store::ReviewRequestRow> {
+        let view = device_of(person).view_scope(s).unwrap();
+        let out =
+            review_request(s, ReviewRequestArgs::default(), Some(person), &view, 100).unwrap();
+        serde_json::from_value(out).unwrap()
+    }
+
+    /// Review finding 6: a share already in place at watch stays watch, and
+    /// the ask says watch, not the drive it would have granted.
+    #[test]
+    fn an_ask_states_the_grant_in_force() {
+        let (s, ada, _, sid) = setup();
+        share_session(&s, sid, "bo", "watch", Some(ada)).unwrap();
+        let r = ask_for_review(&s, sid, "bo", None, Some(ada), 10).unwrap();
+        assert_eq!(r.level, "watch");
+        let fresh = setup();
+        let r = ask_for_review(&fresh.0, fresh.3, "bo", None, Some(fresh.1), 10).unwrap();
+        assert_eq!(r.level, "drive");
+    }
+
+    /// Review finding 4: the list keeps only asks whose session the reader's
+    /// view admits, and names the session.
+    #[test]
+    fn the_list_keeps_only_sessions_the_reader_sees() {
+        let (s, ada, bo, sid) = setup();
+        ask_for_review(&s, sid, "bo", Some("the retry loop"), Some(ada), 10).unwrap();
+        // An ask whose share never reached Bo (written straight to the store).
+        let other = s
+            .upsert_session("secret", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+        s.claim_if_unclaimed(other, Some(ada)).unwrap();
+        s.ask_for_review(other, ada, bo, "drive", None, 20).unwrap();
+        let rows = list_as(&s, bo);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].session_id, sid);
+        assert_eq!(rows[0].session_name.as_deref(), Some("work"));
+    }
 }

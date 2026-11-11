@@ -83,6 +83,7 @@ fn pending(kind: &str, labels: &[&str]) -> PendingInput {
                 label: (*l).into(),
                 selected: i == 0,
                 checked: false,
+                persists: false,
             })
             .collect(),
         multi: false,

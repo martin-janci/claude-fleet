@@ -77,6 +77,39 @@ describe('parseUnifiedDiff', () => {
     const ctx = rows.find((r) => r.kind === 'ctx');
     expect(ctx?.text).toBe('hello');
   });
+
+  it('reads `--- ` / `+++ ` inside a hunk as lines, and as headers only before it', () => {
+    const diff = [
+      'diff --git a/m.sql b/m.sql',
+      '--- a/m.sql',
+      '+++ b/m.sql',
+      '@@ -1,3 +1,2 @@',
+      '--- a comment',
+      '-drop table x;',
+      '+++ counter',
+      ' end',
+      'diff --git a/n.sql b/n.sql',
+      '--- a/n.sql',
+      '+++ b/n.sql',
+      '@@ -1 +1 @@',
+      '-a',
+      '+b',
+    ].join('\n');
+    const rows = parseUnifiedDiff(diff);
+    expect(rows.filter((r) => r.kind === 'meta').map((r) => r.text)).toEqual([
+      'diff --git a/m.sql b/m.sql',
+      '--- a/m.sql',
+      '+++ b/m.sql',
+      'diff --git a/n.sql b/n.sql',
+      '--- a/n.sql',
+      '+++ b/n.sql',
+    ]);
+    expect(rows.find((r) => r.text === '-- a comment')).toMatchObject({ kind: 'del', oldNo: 1 });
+    // The next removed line keeps its own number, not one too low.
+    expect(rows.find((r) => r.text === 'drop table x;')).toMatchObject({ kind: 'del', oldNo: 2 });
+    expect(rows.find((r) => r.text === '++ counter')).toMatchObject({ kind: 'add', newNo: 1 });
+    expect(rows.find((r) => r.text === 'end')).toMatchObject({ kind: 'ctx', oldNo: 3, newNo: 2 });
+  });
 });
 
 describe('buildTree', () => {

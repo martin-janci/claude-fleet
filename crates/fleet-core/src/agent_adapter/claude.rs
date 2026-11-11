@@ -5,7 +5,7 @@
 //! The model, effort and slash-command lists mirror the composer's
 //! (`src/lib/conversation.ts`), which a test holds them to.
 
-use super::{AgentAdapter, LaunchSwitch, PickerOption, SlashCommand};
+use super::{cmd, opt, AgentAdapter, LaunchSwitch, PickerOption, SlashCommand};
 use crate::service::pane_intel::{self, PaneIntel};
 use crate::service::transcript::{self, ConvTurn};
 use crate::tmux::ClaudeLaunch;
@@ -13,18 +13,6 @@ use crate::tmux::ClaudeLaunch;
 /// The Claude Code adapter.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ClaudeCode;
-
-const fn opt(value: &'static str, label: &'static str) -> PickerOption {
-    PickerOption { value, label }
-}
-
-const fn cmd(name: &'static str, description: &'static str, args: bool) -> SlashCommand {
-    SlashCommand {
-        name,
-        description,
-        args,
-    }
-}
 
 /// Claude Code's `/model` aliases (`MODEL_OPTIONS` in conversation.ts).
 const MODELS: &[PickerOption] = &[

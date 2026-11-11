@@ -215,3 +215,97 @@ fn a_start_in_a_forbidden_org_s_project_is_refused() {
     assert_eq!(err.details.unwrap()["suggested_profile"], "work");
     assert!(refuse_forbidden(&s, Some(p), "mac", Some("work"), NOW).is_ok());
 }
+
+/// Review finding 6: an org that is a host (`hosts.org_id`) or a
+/// host-qualified rule is blocked on that host, and the login fleet picks
+/// there is an allowed one; the same project elsewhere is untouched.
+#[test]
+fn an_org_block_holds_for_an_org_that_is_a_host() {
+    let (s, p) = fleet();
+    seed_usage(&s, "vm1", None, "acct-own", 20.0, NOW);
+    seed_usage(&s, "vm1", Some("work"), "acct-work", 10.0, NOW);
+    let org = s.add_org("Client", None, false).unwrap().id;
+    s.add_org_rule(crate::store::OrgRuleRow {
+        id: 0,
+        org_id: org,
+        owner: None,
+        repo: None,
+        path_prefix: None,
+        host_alias: Some("vm1".into()),
+    })
+    .unwrap();
+    s.set_account_blocks("acct-own", None, Some(&[org]))
+        .unwrap();
+    assert!(forbidden_accounts(&s, Some(p)).unwrap().is_empty());
+    assert_eq!(
+        forbidden_accounts_on(&s, Some(p), "vm1").unwrap(),
+        vec!["acct-own"]
+    );
+    assert!(forbidden_accounts_on(&s, Some(p), "mac")
+        .unwrap()
+        .is_empty());
+    assert!(forbidden_accounts_on(&s, None, "vm1").unwrap().is_empty());
+
+    let err = refuse_forbidden(&s, Some(p), "vm1", None, NOW).unwrap_err();
+    assert_eq!(err.code, codes::E_ACCOUNT_FORBIDDEN);
+    assert!(err.message.contains("(all of Client)"), "{}", err.message);
+    assert_eq!(err.details.unwrap()["suggested_profile"], "work");
+    assert!(refuse_forbidden(&s, Some(p), "mac", None, NOW).is_ok());
+    // The pick moves off the forbidden login on that host only.
+    assert_eq!(
+        login_for(&s, Some(p), "vm1", None, NOW).unwrap(),
+        Some("work".into())
+    );
+    assert_eq!(login_for(&s, Some(p), "mac", None, NOW).unwrap(), None);
+    // No allowed login left there: the pick stays and the start refuses it.
+    s.set_account_blocks("acct-work", None, Some(&[org]))
+        .unwrap();
+    assert_eq!(login_for(&s, Some(p), "vm1", None, NOW).unwrap(), None);
+    let err = refuse_forbidden(&s, Some(p), "vm1", None, NOW).unwrap_err();
+    assert!(err.details.unwrap()["suggested_profile"].is_null());
+}
+
+/// Review finding 7: a relaunch is checked when the row is not live or its
+/// login is on another account than the row ran on; a live session on an
+/// unchanged account, a shell and a session outside any project are exempt.
+#[test]
+fn a_relaunch_is_checked_unless_the_session_is_live_on_the_same_account() {
+    let (s, p) = fleet();
+    let id = s
+        .upsert_session("dev-api", "mac", Some(p), None, 1, 1, "running", None)
+        .unwrap();
+    let set = |sql: &str| {
+        s.conn_for_test()
+            .execute(&format!("UPDATE sessions SET {sql} WHERE id = {id}"), [])
+            .unwrap();
+    };
+    set("account_uuid = 'acct-own'");
+    s.set_account_forbidden_projects("acct-own", &[p]).unwrap();
+    let row = || s.get_session_by_id(id).unwrap().unwrap();
+    let check = |profile: Option<&str>| refuse_forbidden_relaunch(&s, &row(), profile, NOW);
+
+    // Live, on the account it already runs on: forbidding stops nothing.
+    assert!(check(None).is_ok());
+    assert!(refuse_forbidden_relaunch_of(&s, id, NOW).is_ok());
+    // The same row under a login on another, allowed account is fine too.
+    assert!(check(Some("work")).is_ok());
+    // The row ran on another account than its login is on now.
+    set("account_uuid = 'acct-work'");
+    assert_eq!(check(None).unwrap_err().code, codes::E_ACCOUNT_FORBIDDEN);
+    // …or on one nobody recorded.
+    set("account_uuid = NULL");
+    assert!(check(None).is_err());
+    // A lost or ghost row coming back is work going somewhere again.
+    set("account_uuid = 'acct-own', lost_at = 5");
+    assert!(check(None).is_err());
+    assert!(refuse_forbidden_relaunch_of(&s, id, NOW).is_err());
+    set("lost_at = NULL, status = 'ghost'");
+    assert!(check(None).is_err());
+    // A shell bills no login; a session outside a project has no rule.
+    set("kind = 'shell'");
+    assert!(check(None).is_ok());
+    set("kind = 'work', project_id = NULL");
+    assert!(check(None).is_ok());
+    // A row that is gone refuses nothing.
+    assert!(refuse_forbidden_relaunch_of(&s, id + 99, NOW).is_ok());
+}

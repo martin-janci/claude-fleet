@@ -43,6 +43,8 @@ pub fn setup(
     let pid = args
         .project_id
         .ok_or_else(|| IpcError::new(codes::E_INVALID, "worktree_setup needs project_id"))?;
+    // One guard throughout: the project read below proves the row for the
+    // write and the re-read.
     let s = lock(store)?;
     let project = s
         .get_project(pid)?
@@ -52,13 +54,9 @@ pub fn setup(
             copy: args.globs.clone().unwrap_or_default(),
             command: args.command.clone(),
         };
-        if !s.set_worktree_setup(pid, &next)? {
-            return Err(orgs::not_found("project", pid));
-        }
+        s.set_worktree_setup(pid, &next)?;
     }
-    let cur = s
-        .worktree_setup(pid)?
-        .ok_or_else(|| orgs::not_found("project", pid))?;
+    let cur = s.worktree_setup(pid)?.unwrap_or_default();
     Ok(WorktreeSetupView {
         project_id: pid,
         project: format!("{}/{}", project.owner, project.repo),

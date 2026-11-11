@@ -58,12 +58,11 @@ describe('AgentActions', () => {
     });
     const about = (id: number, key: string) => ({
       id,
-      rule_id: 4,
       from: 'jira-triage · PD board',
       subject: 'a scheduled run',
       title: `Jira: update issue ${key} (status)`,
       what: 'Jira: update issue',
-      group: '4:mcp_call:jira_update_issue',
+      group: '4:jira.jira_update_issue',
     });
     agents.set({
       rules: [],
@@ -83,5 +82,32 @@ describe('AgentActions', () => {
     const items = screen.getByTestId('agent-group-items');
     expect(items.textContent).toContain('Jira: update issue PD-1 (status)');
     expect(items.textContent).toContain('on a scheduled run');
+  });
+
+  it('asks before Approve all, listing what it approves', async () => {
+    const call = (id: number, key: string) => ({
+      ...action(id),
+      kind: 'mcp_call',
+      payload: JSON.stringify({ binding: 'jira', tool: 'jira_update_issue', arguments: { issue_key: key } }),
+    });
+    const about = (id: number, key: string) => ({
+      id,
+      from: 'jira-triage',
+      title: `Jira: update issue ${key} (status)`,
+      what: 'Jira: update issue',
+      group: '4:jira.jira_update_issue',
+    });
+    agents.set({ rules: [], jobs: [], pending: [call(1, 'PD-1'), call(2, 'PD-2')], pending_about: [about(1, 'PD-1'), about(2, 'PD-2')] });
+    render(AgentActions);
+    await tick();
+    await fireEvent.click(screen.getByTestId('agent-group-approve'));
+    // Nothing is decided by the first click.
+    expect(decide.size).toBe(0);
+    const list = screen.getByTestId('agent-group-confirm-items');
+    expect(list.textContent).toContain('Jira: update issue PD-1 (status)');
+    expect(list.textContent).toContain('Jira: update issue PD-2 (status)');
+    await fireEvent.click(screen.getByTestId('agent-group-confirm-approve'));
+    await vi.waitFor(() => expect(decide.has(1)).toBe(true));
+    expect(screen.queryByTestId('agent-group-confirm')).toBeNull();
   });
 });

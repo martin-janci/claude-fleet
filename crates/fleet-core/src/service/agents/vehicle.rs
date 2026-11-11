@@ -276,6 +276,20 @@ pub fn outcome_of(stdout: &str, stderr: &[u8]) -> PrintOutcome {
     }
 }
 
+/// Why a run for `project_id` may not start on `host`: a run is `claude -p`
+/// on the host's own login (the script names no profile), and the project
+/// forbids that login's account (`service::project_accounts`). `None` when
+/// it may. Asked before the workspace is prepared, so a run that is not
+/// started has touched nothing; there is no other login a run could take.
+pub fn forbidden_login(
+    s: &crate::store::Store,
+    project_id: Option<i64>,
+    host: &str,
+    now: i64,
+) -> Result<Option<String>, IpcError> {
+    crate::service::project_accounts::forbidden_reason(s, project_id, host, None, now)
+}
+
 /// Run `run` on `host` with `prompt`. The wall clock is the run's own
 /// timeout plus a minute for the connection and the copy.
 pub async fn run_print(
@@ -323,6 +337,28 @@ mod tests {
             timeout_secs: 600,
             output_cap: 1 << 20,
         }
+    }
+
+    /// Accounts review finding 5: a run bills the host's own login, so a
+    /// project that forbids that account gets no run there.
+    #[test]
+    fn a_run_is_not_started_on_a_login_the_project_forbids() {
+        use crate::service::account_limits::seed_usage;
+        let s = crate::store::Store::open_in_memory().unwrap();
+        seed_usage(&s, "mac", None, "acct-own", 20.0, 1_000);
+        seed_usage(&s, "mac", Some("work"), "acct-work", 10.0, 1_000);
+        let p = s.upsert_project("acme", "api", "/srv/acme/api").unwrap();
+        assert_eq!(forbidden_login(&s, Some(p), "mac", 1_000).unwrap(), None);
+        // A profile's account is not the run's: only the host's own counts.
+        s.set_account_forbidden_projects("acct-work", &[p]).unwrap();
+        assert_eq!(forbidden_login(&s, Some(p), "mac", 1_000).unwrap(), None);
+        s.set_account_forbidden_projects("acct-own", &[p]).unwrap();
+        let why = forbidden_login(&s, Some(p), "mac", 1_000)
+            .unwrap()
+            .expect("forbidden");
+        assert!(why.contains("forbidden for acme/api"), "{why}");
+        // No project, nothing forbidden.
+        assert_eq!(forbidden_login(&s, None, "mac", 1_000).unwrap(), None);
     }
 
     #[test]

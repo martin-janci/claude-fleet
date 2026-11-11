@@ -188,7 +188,7 @@ describe('DashboardView', () => {
     const mine: Dashboard = { id: 'dash.x', title: 'Mine', intro: '', widgets: [{ kind: 'stat', title: 'Open', query: {}, value: 'open' }] };
     const changed: Dashboard = { ...mine, title: 'Mine, with cost', widgets: [...mine.widgets, { kind: 'stat', title: 'Spent', query: {}, value: 'cost' }] };
     hub.set('dash.x', {
-      id: 'dash.x', title: changed.title, spec: dashboardBlock(changed), pinned_at: 1_760_000_000, device: 'ux-agent', can_undo: true,
+      id: 'dash.x', title: changed.title, spec: dashboardBlock(changed), pinned_at: 1_760_000_000, device: 'ux-agent', can_undo: true, undo: 'restore',
       previous: { id: 'dash.x', title: 'Mine', spec: dashboardBlock(mine), pinned_at: 1_760_000_000 },
     });
     shownDashboard.set({ id: 'dash.x', workspace: 'po' });
@@ -204,12 +204,26 @@ describe('DashboardView', () => {
   it('opens on the person’s own copy of the built-in once Control made one', async () => {
     workspace.set('po');
     const copy: Dashboard = { id: 'dash.po.mine', title: 'My releases', intro: '', widgets: [{ kind: 'stat', title: 'Open', query: {}, value: 'open' }] };
-    hub.set(copy.id, { id: copy.id, title: copy.title, spec: dashboardBlock(copy), pinned_at: 1_760_000_000, device: 'ux-agent' });
+    hub.set(copy.id, { id: copy.id, title: copy.title, spec: dashboardBlock(copy), pinned_at: 1_760_000_000, device: 'ux-agent', undo: 'remove' });
     const r = render(DashboardView);
     await waitFor(() => expect(r.getByRole('heading', { level: 1 }).textContent).toBe('My releases'));
-    // Undo of a copy Control pinned new unpins it: the built-in is back.
+    // Undo of a copy Control pinned new unpins it, once the person says so.
     await fireEvent.click(r.getByTestId('dashboard-undo'));
+    await fireEvent.click(r.getByTestId('dashboard-undo-keep'));
+    expect(hub.size).toBe(1);
+    await fireEvent.click(r.getByTestId('dashboard-undo'));
+    await fireEvent.click(r.getByTestId('dashboard-undo-confirm'));
     await waitFor(() => expect(r.getByRole('heading', { level: 1 }).textContent).toBe('Epics and releases'));
     expect(hub.size).toBe(0);
+  });
+
+  it('offers no Undo on a dashboard the hub says has nothing to undo', async () => {
+    workspace.set('po');
+    const mine: Dashboard = { id: 'dash.y', title: 'Y', intro: '', widgets: [{ kind: 'stat', title: 'Open', query: {}, value: 'open' }] };
+    hub.set(mine.id, { id: mine.id, title: mine.title, spec: dashboardBlock(mine), pinned_at: 1_760_000_000, device: 'Ada’s Mac' });
+    shownDashboard.set({ id: 'dash.y', workspace: 'po' });
+    const r = render(DashboardView);
+    await waitFor(() => expect(r.getByRole('heading', { level: 1 }).textContent).toBe('Y'));
+    expect(r.queryByTestId('dashboard-undo')).toBeNull();
   });
 });

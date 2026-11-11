@@ -28,7 +28,16 @@ pub struct PinnedDashboardRow {
     /// `dashboards { undo }` can put it back (migration 220).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub can_undo: bool,
+    /// What `dashboards { undo }` does to it: `restore` (puts back the
+    /// version before Control's change), `remove` (Control pinned it new:
+    /// it is unpinned), absent when there is nothing to undo.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub undo: Option<String>,
 }
+
+/// The device Control's agent pins from
+/// ([`crate::service::operator::OPERATOR_CLIENT_NAME`]).
+const AGENT_DEVICE: &str = crate::service::operator::OPERATOR_CLIENT_NAME;
 
 /// What one pin writes.
 #[derive(Debug, Clone, PartialEq)]
@@ -46,6 +55,15 @@ const COLS: &str = "dash_id, person_id, title, spec, why, device, pinned_at, upd
 
 fn row(r: &rusqlite::Row<'_>) -> Result<PinnedDashboardRow> {
     let spec: String = r.get(3)?;
+    let device: Option<String> = r.get(5)?;
+    let can_undo: bool = r.get(8)?;
+    let undo = if can_undo {
+        Some("restore".to_string())
+    } else if device.as_deref() == Some(AGENT_DEVICE) {
+        Some("remove".to_string())
+    } else {
+        None
+    };
     Ok(PinnedDashboardRow {
         id: r.get(0)?,
         person_id: r.get(1)?,
@@ -53,17 +71,20 @@ fn row(r: &rusqlite::Row<'_>) -> Result<PinnedDashboardRow> {
         // A spec this build cannot read stays a row; the service drops it.
         spec: serde_json::from_str(&spec).unwrap_or(serde_json::Value::Null),
         why: r.get(4)?,
-        device: r.get(5)?,
+        device,
         pinned_at: r.get(6)?,
         updated_at: r.get(7)?,
-        can_undo: r.get(8)?,
+        can_undo,
+        undo,
     })
 }
 
 impl Store {
     /// Pin a dashboard, or replace the one of the same id and person (its
     /// `pinned_at` stays). A replacement that changes the spec keeps the
-    /// version it overwrote, for [`Store::undo_dashboard`].
+    /// version it overwrote, for [`Store::undo_dashboard`]; Control's
+    /// second change in a row keeps the version before its first, so Undo
+    /// takes back all it did, never the person's own dashboard.
     pub fn pin_dashboard(&self, w: &PinnedDashboardWrite<'_>) -> Result<PinnedDashboardRow> {
         self.conn.execute(
             "INSERT INTO pinned_dashboards
@@ -71,8 +92,10 @@ impl Store {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
              ON CONFLICT (dash_id, COALESCE(person_id, 0)) DO UPDATE SET
                previous_spec = CASE WHEN pinned_dashboards.spec = excluded.spec
+                   OR (pinned_dashboards.device = ?8 AND excluded.device = ?8)
                  THEN pinned_dashboards.previous_spec ELSE pinned_dashboards.spec END,
                previous_device = CASE WHEN pinned_dashboards.spec = excluded.spec
+                   OR (pinned_dashboards.device = ?8 AND excluded.device = ?8)
                  THEN pinned_dashboards.previous_device ELSE pinned_dashboards.device END,
                title = excluded.title, spec = excluded.spec, why = excluded.why,
                device = CASE WHEN pinned_dashboards.spec = excluded.spec
@@ -85,7 +108,8 @@ impl Store {
                 w.spec.to_string(),
                 w.why,
                 w.device,
-                now_unix()
+                now_unix(),
+                AGENT_DEVICE
             ],
         )?;
         Ok(self

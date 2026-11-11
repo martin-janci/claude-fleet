@@ -290,17 +290,35 @@ impl FleetTools {
         fails E_ACCOUNT_FORBIDDEN. Returns the account row.")]
     pub(super) async fn set_account_projects(
         &self,
+        Extension(caller): Extension<Caller>,
         Parameters(args): Parameters<crate::service::project_accounts::SetAccountProjectsArgs>,
     ) -> Result<CallToolResult, McpError> {
+        // The ids, not their count: the line is the record of which rule
+        // was set or lifted. The uuid is free text from the request.
         audit(
             "set_account_projects",
             &format!(
                 "uuid={} projects={:?} orgs={:?}",
-                args.uuid,
-                args.forbidden_project_ids.as_ref().map(Vec::len),
-                args.forbidden_org_ids.as_ref().map(Vec::len),
+                args.uuid.escape_debug(),
+                args.forbidden_project_ids,
+                args.forbidden_org_ids,
             ),
         );
+        // Which account may bill a project is a person's rule. Control's
+        // token is a full, org-free client bound to the hub owner, so the
+        // policy row alone would let it lift the very block that refused
+        // its start (accounts review, finding 4).
+        if caller.is_operator() {
+            return Err(mcp_err(
+                codes::E_FORBIDDEN,
+                "a person sets the projects an account is forbidden for, on the Accounts \
+                 page of the desktop or the phone; the operator may not",
+                None,
+            ));
+        }
+        // As `add_account`: the master, or the hub owner's trusted full
+        // device.
+        owner_device_admin(&caller, "changing an account's forbidden projects")?;
         ok_json(
             &crate::service::project_accounts::set_account_projects(args, &self.store)
                 .map_err(to_mcp_err)?,

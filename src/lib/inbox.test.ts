@@ -16,6 +16,7 @@ import {
 import { sessions } from './sessions';
 import { readPref } from './prefs';
 import { waitingMissions, waitingOf } from './mission_waits';
+import { reviewRequests } from './review_requests';
 import { attentionState, countNeedsYou } from './attention';
 import { host, session } from './hosts_fixture';
 import { hosts } from './hosts';
@@ -100,6 +101,17 @@ describe('G1.6: Jev proposals and waiting missions', () => {
     expect(get(inboxCount)).toBe(1);
     waitingMissions.set([]);
   });
+
+  it('counts a review asked of you in the rail badge', () => {
+    sessions.set([]);
+    waitingMissions.set([]);
+    reviewRequests.set([
+      { id: 1, session_id: 7, from_person_id: 1, from_name: 'Martin', to_person_id: 2, to_name: 'Ada', level: 'drive', created_at: 1 },
+    ]);
+    expect(get(inboxCount)).toBe(1);
+    reviewRequests.set([]);
+    expect(get(inboxCount)).toBe(0);
+  });
 });
 
 describe('review w11-1: the rail counts Blocked rows', () => {
@@ -151,6 +163,12 @@ describe('G3.1: the Inbox by state, from the attention model', () => {
       ['needs_you', 0],
     ]);
     expect(inboxSections([rows[2]], opts, 'state', none)).toEqual([]);
+  });
+
+  it('opens Needs you for a review ask alone, and counts it', () => {
+    const secs = inboxSections([], opts, 'state', { ...none, reviewAsks: 1 });
+    expect(secs.map((s) => [s.key, s.count, s.missions])).toEqual([['needs_you', 1, true]]);
+    expect(inboxSections([], opts, 'none', { ...none, reviewAsks: 2 }).map((s) => [s.key, s.count])).toEqual([['all', 2]]);
   });
 
   it('puts the agents’ waiting actions in Needs you and counts them', () => {

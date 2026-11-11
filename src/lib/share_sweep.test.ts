@@ -855,14 +855,14 @@ const EXEMPT_SITES: Record<string, readonly Exemption[]> = {
     {
       writer: 'listReviewNotes',
       action: 'review_notes',
-      sites: ['await listReviewNotes(sid)'],
+      sites: ['await listReviewNotes(id)'],
       why:
         'A READ of the same tool: `review_notes` with no action lists the sent notes, which the hub ' +
         'serves at `read` (a viewer sees them). Send and resolve, the writes, are gated by `blocked` ' +
         'in this file.',
       pins: [
         { file: './review_notes.ts', needle: "invokeCmd<ReviewNote[]>('review_notes', { args: { session_id: sessionId } })" },
-        { file: './ReviewDiff.svelte', needle: "if (sending || blocked || $drafts.length === 0) return;" },
+        { file: './ReviewDiff.svelte', needle: "if (sending || blocked || tooMany || $drafts.length === 0) return;" },
       ],
     },
   ],

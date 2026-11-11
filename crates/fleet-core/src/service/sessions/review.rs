@@ -58,13 +58,36 @@ pub async fn spawn_review(
     let agent = reviewer_agent(args.agent.as_deref())?;
     // 1. Snapshot source + capture cwd-resolution inputs under a brief lock.
     //    For remote hosts the cwd is finalized off-lock via `ssh.remote_home`.
-    let (source, cwd_src) = {
+    let (source, cwd_src, launch) = {
         let s = lock(store)?;
         let source = s
             .get_session_by_id(args.source_session_id)?
             .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, "source session not found"))?;
         let cwd_src = cwd_source_for_session(&s, &source)?;
-        (source, cwd_src)
+        // A Claude review is new work in the source's project: it runs on a
+        // login the project allows (the source's own when it is one, else
+        // the allowed login on the host with the most headroom) or not at
+        // all (`service::project_accounts`). Here, before anything is
+        // created.
+        let mut launch = crate::tmux::ClaudeLaunch::default();
+        if agent.id() == crate::store::AGENT_CLAUDE {
+            let now = now_unix();
+            launch.profile = crate::service::project_accounts::login_for(
+                &s,
+                source.project_id,
+                &source.host_alias,
+                stored_launch(&s, source.id)?.profile.as_deref(),
+                now,
+            )?;
+            crate::service::project_accounts::refuse_forbidden(
+                &s,
+                source.project_id,
+                &source.host_alias,
+                launch.profile.as_deref(),
+                now,
+            )?;
+        }
+        (source, cwd_src, launch)
     };
     // The review's pane command: its agent's plain one, as a "work" session
     // of that agent would run (Claude Code under a minted conversation id,
@@ -74,7 +97,6 @@ pub async fn spawn_review(
     // refuses with nothing created; no store guard is held here.
     let short = format!("{:x}", now_unix() & 0xfffff);
     let review_name = format!("{}--review-{}", source.tmux_name, short);
-    let launch = crate::tmux::ClaudeLaunch::default();
     let claude_id = agent.mint_conversation_id();
     let pane = match claude_id.as_deref() {
         Some(id) => agent.launch_command(Some(id), &review_name, &launch),
@@ -142,6 +164,11 @@ pub async fn spawn_review(
         // Claude would be resumed, read and answered as Claude's.
         if agent.id() != crate::store::AGENT_CLAUDE {
             s.set_session_agent(row.id, agent.id())?;
+        }
+        // The login the pane runs under, so a later restart or recreate
+        // keeps it instead of falling back to the host's own.
+        if launch.profile.is_some() {
+            s.set_session_profile(row.id, launch.profile.as_deref())?;
         }
         // Ownership (multi-user M1, T5 / spec §4.3 invariant 6): a review
         // inherits the SOURCE row's owner and visibility, never the caller's.

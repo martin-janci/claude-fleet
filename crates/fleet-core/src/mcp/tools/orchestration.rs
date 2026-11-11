@@ -296,13 +296,20 @@ impl FleetTools {
         )
         .await
         .map_err(to_mcp_err)?;
-        // A turn this caller's person sent reads as theirs ("You").
+        // A turn this caller's person sent reads as theirs ("You"), and a
+        // grantee is not told who the other grantees are (the rule presence
+        // keeps: the owner sees everyone, anyone else the owner and
+        // themselves).
         if conv.turns.iter().any(|t| t.author.is_some()) {
             let me =
                 super::messaging::caller_person(&*lock(&self.store).map_err(to_mcp_err)?, &caller);
-            for a in conv.turns.iter_mut().filter_map(|t| t.author.as_mut()) {
-                a.mine = me.is_some() && a.person_id == me;
-            }
+            let sees_all = caller.is_master() || (me.is_some() && me == row.owner_person_id);
+            super::messaging::veil_authors(
+                conv.turns.iter_mut().filter_map(|t| t.author.as_mut()),
+                me,
+                row.owner_person_id,
+                sees_all,
+            );
         }
         ok_json_compact(&conv)
     }
@@ -703,8 +710,10 @@ impl FleetTools {
                     .map(str::to_string);
                 if !spec.over_limit_ok.unwrap_or(false) {
                     let s = lock(self.reader()).map_err(to_mcp_err)?;
-                    crate::service::account_limits::refuse_over_limit(
+                    // The login it names instead is one the project allows.
+                    crate::service::account_limits::refuse_over_limit_for(
                         &s,
+                        Some(spec.project_id),
                         &spec.host_alias,
                         profile.as_deref(),
                         crate::store::now_unix(),

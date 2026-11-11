@@ -197,7 +197,7 @@ export interface SessionRow {
     question: string | null;
     /** `checked`: ticked, on a multi-select (absent = false, and from a hub
      *  older than multi-select support). The label never carries the box. */
-    options: { n: number; label: string; selected: boolean; checked?: boolean }[];
+    options: { n: number; label: string; selected: boolean; checked?: boolean; persists?: boolean }[];
     /** A multi-select question: a digit TOGGLES an option, `Tab` moves on
      *  with the ticks kept (see `AnswerPrompt.svelte`). Absent = false. */
     multi?: boolean;

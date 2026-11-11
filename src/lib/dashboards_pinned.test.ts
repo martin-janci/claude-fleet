@@ -26,12 +26,13 @@ import {
   dashboardBlock,
   dashboardChanges,
   followPinned,
+  loadFeeds,
   loadPinned,
   pinDashboard,
   pinStateOf,
   pinnedDashboards,
+  RELOAD_DEBOUNCE_MS,
   unpinDashboard,
-  writeFeed,
   type Dashboard,
 } from './dashboards';
 import { checkUiBlock } from './rich_blocks';
@@ -171,10 +172,41 @@ describe('pinned dashboards', () => {
     await vi.waitFor(() => expect(get(pinnedDashboards).map((p) => p.id)).toEqual(['dash.release-42']));
     stop();
     await emit('dashboards:changed', {});
-    expect(mock.mock.calls.filter((c) => c[1].args.action === 'list').length).toBe(3);
+    await vi.waitFor(() => expect(mock.mock.calls.filter((c) => c[1].args.action === 'list').length).toBe(3));
     second();
     await emit('dashboards:changed', {});
+    await new Promise((r) => setTimeout(r, RELOAD_DEBOUNCE_MS + 50));
     expect(mock.mock.calls.filter((c) => c[1].args.action === 'list').length).toBe(3);
+  });
+
+  it('reads a burst of frames once, and keeps the list as it was when nothing changed', async () => {
+    rows.set('dash.release-42', { id: 'dash.release-42', title: 'R', spec: dashboardBlock(release), pinned_at: 7 });
+    const stop = followPinned();
+    await vi.waitFor(() => expect(get(pinnedDashboards).length).toBe(1));
+    const before = get(pinnedDashboards);
+    const lists = () => mock.mock.calls.filter((c) => c[1].args.action === 'list').length;
+    const n = lists();
+    // A routine's run writes three feeds: three frames, one re-read.
+    for (let i = 0; i < 3; i++) await emit('dashboards:changed', {});
+    await vi.waitFor(() => expect(lists()).toBe(n + 1));
+    await new Promise((r) => setTimeout(r, RELOAD_DEBOUNCE_MS + 50));
+    expect(lists()).toBe(n + 1);
+    // The same rows: the same list object, so an open dashboard is not rebuilt.
+    expect(get(pinnedDashboards)).toBe(before);
+    stop();
+  });
+
+  it('drops a re-read that lands after a later one', async () => {
+    const first = { id: 'dash.release-42', title: 'Old', spec: dashboardBlock({ ...release, title: 'Old' }), pinned_at: 7 };
+    let release1: (v: unknown) => void = () => {};
+    mock.mockImplementationOnce(() => new Promise((r) => (release1 = r)));
+    const slow = loadPinned();
+    rows.set('dash.release-42', { id: 'dash.release-42', title: 'New', spec: dashboardBlock({ ...release, title: 'New' }), pinned_at: 7 });
+    await loadPinned();
+    expect(get(pinnedDashboards).map((p) => p.title)).toEqual(['New']);
+    release1([first]);
+    await slow;
+    expect(get(pinnedDashboards).map((p) => p.title)).toEqual(['New']);
   });
 
   it('re-reads the pins after a gap the hub could not replay', async () => {
@@ -199,11 +231,17 @@ describe('dashboard feeds', () => {
     stop();
   });
 
-  it('writes a feed as the person, and an empty value removes it', async () => {
-    const w = await writeFeed('notes', ' ship Friday ');
-    expect(w.ok && w.value?.value).toBe('ship Friday');
-    expect(get(dashboardFeeds).notes?.value).toBe('ship Friday');
-    await writeFeed('notes', '');
-    expect(get(dashboardFeeds).notes).toBeUndefined();
+  it('keeps the feeds as they were when a re-read changed nothing', async () => {
+    feeds.set('deploys', { key: 'deploys', value: '3 today', by: 'routine', updated_at: 9 });
+    await loadFeeds();
+    const before = get(dashboardFeeds);
+    await loadFeeds();
+    expect(get(dashboardFeeds)).toBe(before);
+    feeds.set('deploys', { key: 'deploys', value: '4 today', by: 'routine', updated_at: 10 });
+    await loadFeeds();
+    expect(get(dashboardFeeds).deploys.value).toBe('4 today');
+    feeds.clear();
+    await loadFeeds();
+    expect(get(dashboardFeeds)).toEqual({});
   });
 });

@@ -639,6 +639,11 @@ impl Store {
                     ),
                 )
             })?;
+        // The share an ask for review came with is gone: so is the ask, or
+        // it would sit in their Inbox pointing at a session they cannot open.
+        if let GrantRecipient::Person(p) = to {
+            self.close_review_requests_to(session_id, p, now)?;
+        }
         let changes = self.grant_changes(session_id, to, None, row.granted_at)?;
         self.announce_grant_change(&changes)?;
         Ok(row)

@@ -1146,8 +1146,12 @@ async fn finish_by_markers(
     let transcript = read_worker_transcript(ssh, worker, stored_path, cwd).await;
     let mut resolved = resolve_markers(open, &[transcript.as_deref().unwrap_or("")]);
     let mut pane: Option<String> = None;
-    // The JSONL can flush AFTER Stop fires; scan the pane for the rest.
-    if resolved.len() < open.len() && !worker.tmux_name.starts_with("bg:") {
+    // The JSONL can flush AFTER Stop fires; scan the pane for the rest:
+    // for a marker not in it yet, and for a run's report block when the
+    // transcript has the marker line but not the block after it.
+    if needs_pane(open, &resolved, transcript.as_deref().unwrap_or(""))
+        && !worker.tmux_name.starts_with("bg:")
+    {
         match capture_worker_pane(ssh, worker).await {
             Ok(text) => {
                 let pane = &*pane.insert(text);
@@ -1186,6 +1190,7 @@ async fn finish_by_markers(
     }
     let mut finished: Vec<TaskRow> = Vec::new();
     let mut remind: Vec<TaskRow> = Vec::new();
+    let mut stop_worker = false;
     {
         let Ok(s) = store.lock() else {
             return finished;
@@ -1197,7 +1202,17 @@ async fn finish_by_markers(
                 .iter()
                 .filter(|t| !resolved.iter().any(|(id, _)| *id == t.id))
                 .collect();
-            remind = unmarked_stops(&s, worker.id, &unmarked);
+            let stops = unmarked_stops(&s, worker.id, &unmarked);
+            // A run failed for stopping unmarked: its mission worker is
+            // stopped, as an undelivered run's is (`resume::spawn_run_prompt`),
+            // so it does not race the step that follows or post a late
+            // report nobody reads — once nothing else of it is open.
+            stop_worker = !stops.failed.is_empty()
+                && worker.origin.as_deref() == Some("mission")
+                && open.iter().all(|t| {
+                    stops.failed.contains(&t.id) || resolved.iter().any(|(id, _)| *id == t.id)
+                });
+            remind = stops.remind;
         }
         let sources = [
             transcript.as_deref().unwrap_or(""),
@@ -1238,7 +1253,37 @@ async fn finish_by_markers(
             );
         }
     }
+    if stop_worker {
+        if let Err(e) = crate::service::sessions::kill_session(
+            crate::service::sessions::KillSessionArgs {
+                host_alias: worker.host_alias.clone(),
+                name: worker.tmux_name.clone(),
+                force: false,
+            },
+            store,
+            ssh,
+        )
+        .await
+        {
+            tracing::warn!(host = %worker.host_alias, session = %worker.tmux_name, error = %e,
+                "[tasks] the worker of a run failed for stopping unmarked was not stopped");
+        }
+    }
     finished
+}
+
+/// PURE: whether the pane must be read after the transcript: a task's
+/// marker is not in it, or a work item's run has its marker there but no
+/// report block after it (the marker line flushed first, `report_in`), so
+/// the pane is the second source before the run completes report-missing.
+fn needs_pane(open: &[TaskRow], resolved: &[(i64, String)], transcript: &str) -> bool {
+    resolved.len() < open.len()
+        || resolved.iter().any(|(id, _)| {
+            open.iter().find(|t| t.id == *id).is_some_and(|t| {
+                t.work_item_id.is_some()
+                    && crate::service::work::report::report_in(&[transcript], &t.nonce).is_none()
+            })
+        })
 }
 
 /// How a scanned source reads in a log line: its size, or that it was not
@@ -1256,11 +1301,13 @@ fn source_size(text: Option<&str>) -> String {
 /// [`report::UNMARKED_STOP_EVENT`](crate::service::work::report::UNMARKED_STOP_EVENT)
 /// and is returned, to be reminded; past
 /// [`report::UNMARKED_STOPS_MAX`](crate::service::work::report::UNMARKED_STOPS_MAX)
-/// the run fails, and the loop retries it with that reason. A plain
+/// the run fails, and the loop retries it with that reason (an implement
+/// run) or asks (a review or test run, which gave no verdict). A plain
 /// dispatch and a wrap-up keep the old rule.
-pub fn unmarked_stops(s: &Store, worker_id: i64, unmarked: &[&TaskRow]) -> Vec<TaskRow> {
+pub fn unmarked_stops(s: &Store, worker_id: i64, unmarked: &[&TaskRow]) -> UnmarkedStops {
     use crate::service::work::report::{UNMARKED_STOPS_MAX, UNMARKED_STOP_EVENT};
     let mut remind = Vec::new();
+    let mut failed = Vec::new();
     for t in unmarked {
         let is_run = t.work_item_id.is_some()
             && t.role
@@ -1284,12 +1331,23 @@ pub fn unmarked_stops(s: &Store, worker_id: i64, unmarked: &[&TaskRow]) -> Vec<T
                 "the worker stopped {} times without printing {DONE_PREFIX}<nonce>",
                 seen + 1
             );
-            if let Err(e) = fail_task(s, t.id, &why) {
-                tracing::warn!(task = t.id, error = %e.message, "[tasks] unmarked run not failed");
+            match fail_task(s, t.id, &why) {
+                Ok(_) => failed.push(t.id),
+                Err(e) => {
+                    tracing::warn!(task = t.id, error = %e.message, "[tasks] unmarked run not failed")
+                }
             }
         }
     }
-    remind
+    UnmarkedStops { remind, failed }
+}
+
+/// What [`unmarked_stops`] made of a Stop: the runs to remind, and the
+/// runs it failed.
+#[derive(Debug, Default)]
+pub struct UnmarkedStops {
+    pub remind: Vec<TaskRow>,
+    pub failed: Vec<i64>,
 }
 
 /// PURE: does a pane tail show the Claude REPL's input chrome (i.e. it will
@@ -2083,6 +2141,39 @@ mod tests {
                 (b.id, "B done in pane.".to_string())
             ]
         );
+    }
+
+    /// A run whose transcript has its marker but not the block after it
+    /// (the marker line flushed first) reads the pane too before it
+    /// completes report-missing; a plain dispatch does not need a block.
+    #[test]
+    fn a_runs_marker_without_its_block_still_reads_the_pane() {
+        let s = Store::open_in_memory().unwrap();
+        let w = seed(&s, "local", "w");
+        let mut run = create_task(&s, None, Some(w), "a").unwrap();
+        let plain = create_task(&s, None, Some(w), "b").unwrap();
+        let transcript = format!(
+            "{}\n{}\n",
+            done_marker(&run.nonce),
+            done_marker(&plain.nonce)
+        );
+        let resolved = vec![(run.id, String::new()), (plain.id, String::new())];
+        let open = vec![run.clone(), plain.clone()];
+        assert!(
+            !needs_pane(&open, &resolved, &transcript),
+            "no run among them"
+        );
+        run.work_item_id = Some(1);
+        let open = vec![run.clone(), plain.clone()];
+        assert!(needs_pane(&open, &resolved, &transcript));
+        // Only one marker found: the pane is read as before.
+        assert!(needs_pane(&open, &resolved[..1], &transcript));
+        // The block followed the run's marker: nothing more to read.
+        let whole = format!(
+            "{}\n{{\"outcome\":\"done\",\"summary\":\"ok\"}}\n",
+            done_marker(&run.nonce)
+        );
+        assert!(!needs_pane(&open[..1], &resolved[..1], &whole));
     }
 
     #[test]

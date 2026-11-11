@@ -60,6 +60,7 @@ pub const READ_MAX_CHARS: usize = 64_000;
 /// What opens a fleet note line, so the oldest are found to drop.
 pub const NOTE_PREFIX: &str = "- [run ";
 
+const TAG_NAME: &str = "routine-memory";
 const TAG_OPEN: &str = "<routine-memory";
 const TAG_CLOSE: &str = "</routine-memory>";
 
@@ -202,67 +203,85 @@ pub fn prompt_block(mem: &RunMemory) -> Option<String> {
     Some(out)
 }
 
-/// PURE: the `scope` attribute of a block's opening tag (`scope="x"`,
+/// PURE: attribute `name` of a block's opening tag (`scope="x"`,
 /// `scope='x'`), if it has one.
-fn scope_attr(tag: &str) -> Option<&str> {
-    let at = tag.find("scope=")? + "scope=".len();
+fn attr<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
+    let key = format!("{name}=");
+    let at = tag.find(&key)? + key.len();
     let rest = &tag[at..];
     let q = rest.chars().next().filter(|c| *c == '"' || *c == '\'')?;
     let inner = &rest[1..];
     inner.find(q).map(|end| &inner[..end])
 }
 
-/// PURE: where the first real opening tag in `text` starts, and its
-/// attributes: `<routine-memory>` or `<routine-memory scope="…">`, nothing
-/// else, and not quoted as code (`` `<routine-memory>` ``).
-fn real_open(text: &str) -> Option<(usize, &str)> {
+/// PURE: where the first real opening tag `open` (`<routine-memory`) in
+/// `text` starts, and its attributes: `<routine-memory>` or
+/// `<routine-memory scope="…">`, nothing else, and not quoted as code
+/// (`` `<routine-memory>` ``).
+fn real_open<'a>(text: &'a str, open: &str) -> Option<(usize, &'a str)> {
     let mut from = 0;
-    while let Some(i) = text[from..].find(TAG_OPEN) {
-        let open = from + i;
-        let after = &text[open + TAG_OPEN.len()..];
-        from = open + TAG_OPEN.len();
+    while let Some(i) = text[from..].find(open) {
+        let at = from + i;
+        let after = &text[at + open.len()..];
+        from = at + open.len();
         if (!after.starts_with('>') && !after.starts_with(char::is_whitespace))
-            || text[..open].ends_with('`')
+            || text[..at].ends_with('`')
         {
             continue;
         }
         let gt = after.find('>')?;
-        return Some((open, &after[..gt]));
+        return Some((at, &after[..gt]));
     }
     None
 }
 
-/// PURE: each `<routine-memory scope="…">…</routine-memory>` block in
-/// `text`, in order, as `(scope, body)`; a block without a scope names
-/// `default`. An unclosed block is left out, and so is a tag in code
-/// (`` `<routine-memory>` ``, as a reply names it in prose). A block whose
+/// PURE: each `<tag name="…">…</tag>` block in `text`, in order, as
+/// (attribute `name`, body). An unclosed block is left out, and so is a tag
+/// in code (`` `<tag>` ``, as a reply names it in prose). A block whose
 /// text holds another real opening tag starts at that one: what came
-/// before it was a mention, not the notebook. Unless the outer tag names
-/// a scope and the inner one none: then the inner is the notebook's text
-/// naming the tag, and the block is the outer one.
-pub fn parse_blocks<'a>(text: &'a str, default: &'a str) -> Vec<(&'a str, &'a str)> {
+/// before it was a mention, not the block. Unless the outer tag names the
+/// attribute and the inner one does not: then the inner is the block's
+/// text naming the tag, and the block is the outer one. Shared by the
+/// notebooks' `<routine-memory scope>` and dashboards' `<dashboard-feed
+/// key>` (`service::dashboards::feed_blocks`).
+pub(crate) fn tagged_blocks<'a>(
+    text: &'a str,
+    tag: &str,
+    name: &str,
+) -> Vec<(Option<&'a str>, &'a str)> {
+    let open_tag = format!("<{tag}");
+    let close_tag = format!("</{tag}>");
     let mut out = Vec::new();
     let mut rest = text;
-    while let Some((open, tag)) = real_open(rest) {
-        let inner = &rest[open + TAG_OPEN.len() + tag.len() + 1..];
-        let Some(close) = inner.find(TAG_CLOSE) else {
+    while let Some((open, attrs)) = real_open(rest, &open_tag) {
+        let inner = &rest[open + open_tag.len() + attrs.len() + 1..];
+        let Some(close) = inner.find(&close_tag) else {
             break;
         };
-        if let Some((at, inner_tag)) = real_open(&inner[..close]) {
-            if scope_attr(tag).is_none() || scope_attr(inner_tag).is_some() {
+        if let Some((at, inner_attrs)) = real_open(&inner[..close], &open_tag) {
+            if attr(attrs, name).is_none() || attr(inner_attrs, name).is_some() {
                 // Parse again from the inner opening tag.
                 rest = &inner[at..];
                 continue;
             }
         }
-        let scope = scope_attr(tag).unwrap_or(default);
         out.push((
-            scope,
+            attr(attrs, name),
             inner[..close].trim_matches(|c| c == '\n' || c == '\r'),
         ));
-        rest = &inner[close + TAG_CLOSE.len()..];
+        rest = &inner[close + close_tag.len()..];
     }
     out
+}
+
+/// PURE: each `<routine-memory scope="…">…</routine-memory>` block in
+/// `text`, in order, as `(scope, body)`; a block without a scope names
+/// `default`. The rules are [`tagged_blocks`]'.
+pub fn parse_blocks<'a>(text: &'a str, default: &'a str) -> Vec<(&'a str, &'a str)> {
+    tagged_blocks(text, TAG_NAME, "scope")
+        .into_iter()
+        .map(|(scope, body)| (scope.unwrap_or(default), body))
+        .collect()
 }
 
 /// PURE: `text` without its `<routine-memory>` blocks.
@@ -532,38 +551,63 @@ pub fn apply(
 
 /// The dashboard feeds a run's reply writes (`<dashboard-feed key="…">`,
 /// migration 222): each key's last block wins, written as the routine
-/// owner's, by `routine`. A feed that cannot be written is said in the
-/// run's trace, not failed.
+/// owner's, by `routine`. Only a routine whose prompt names the tag writes
+/// one (the read's own predicate, `routine_runs_memory_unread`): text a
+/// reply quotes from a pull request writes none. A run's feed is stamped
+/// when the run finished, and one written after that (by a later run whose
+/// reply was read first, or by a person) is kept. A
+/// feed that cannot be written, or was cut, is said in the run's trace,
+/// not failed.
 fn apply_feeds(s: &Store, r: &RoutineRow, run: &RoutineRunRow, texts: &[String], now: i64) {
+    use crate::service::dashboards::{self, FEED_TAG, FEED_VALUE_MAX_CHARS};
+    if !r.prompt.contains(&format!("<{FEED_TAG}")) {
+        return;
+    }
     let mut latest: Vec<(String, String)> = Vec::new();
     for t in texts {
-        for (key, value) in crate::service::dashboards::feed_blocks(t) {
+        for (key, value) in dashboards::feed_blocks(t) {
             latest.retain(|(k, _)| *k != key);
             latest.push((key, value));
         }
     }
+    let finished = run.finished_at.unwrap_or(run.started_at);
     for (key, value) in latest {
-        let summary = match crate::service::dashboards::write_feed(
-            s,
-            r.owner_person_id,
-            &key,
-            &value,
-            "routine",
-            Some(&r.name),
-            now,
-        ) {
-            Ok(Some(_)) => format!("Its reply wrote the dashboard feed {key}"),
-            Ok(None) => format!("Its reply cleared the dashboard feed {key}"),
-            Err(e) => format!(
-                "Its reply's dashboard feed {key} was not written: {}",
-                clip(&e.message, NOTE_SUMMARY_MAX)
-            ),
+        let newer = s
+            .dashboard_feed(r.owner_person_id, &key)
+            .ok()
+            .flatten()
+            .is_some_and(|f| f.updated_at > finished);
+        let cut = value.chars().count() > FEED_VALUE_MAX_CHARS;
+        let summary = if newer {
+            format!("Its reply's dashboard feed {key} was older than the feed, kept as it is")
+        } else {
+            match dashboards::write_feed(
+                s,
+                r.owner_person_id,
+                &key,
+                &value,
+                "routine",
+                Some(&r.name),
+                // Stamped when the run finished, so runs read out of order
+                // keep the latest run's value.
+                finished,
+            ) {
+                Ok(Some(_)) if cut => format!(
+                    "Its reply wrote the dashboard feed {key}, cut to {FEED_VALUE_MAX_CHARS} characters"
+                ),
+                Ok(Some(_)) => format!("Its reply wrote the dashboard feed {key}"),
+                Ok(None) => format!("Its reply cleared the dashboard feed {key}"),
+                Err(e) => format!(
+                    "Its reply's dashboard feed {key} was not written: {}",
+                    clip(&e.message, NOTE_SUMMARY_MAX)
+                ),
+            }
         };
         trace::write_one(
             s,
             run.id,
             Step::new(now, "outcome", "feed", "hub", summary)
-                .data(serde_json::json!({ "key": key })),
+                .data(serde_json::json!({ "key": key, "cut": cut && !newer, "stale": newer })),
         );
     }
 }

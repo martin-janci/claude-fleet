@@ -232,6 +232,33 @@ pub struct PendingOption {
     /// the wire when false, so a single-select dialog reads as it always has.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub checked: bool,
+    /// Picking it answers more than this one request ([`persists_label`]):
+    /// it saves a rule for later sessions or stops later prompts. Decided
+    /// here once; the hub's guard and every client read this flag instead of
+    /// matching the label themselves. Left off the wire when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub persists: bool,
+}
+
+/// PURE: a permission dialog's choice that outlives the one request it
+/// answers. Claude Code's "Yes, and don't ask again for: <rule>" and "always
+/// allow …" are saved in the folder's settings for every later session; "Yes,
+/// and switch to auto mode", "Yes, and bypass permissions" and "… all future
+/// MCP servers …" end the asking. The session-only "…don't ask again this
+/// session" is an ordinary choice: the phrase is read at the label's END, so
+/// a rule or folder that merely contains those words does not excuse it.
+pub fn persists_label(label: &str) -> bool {
+    let l = label.to_lowercase().replace('\u{2019}', "'");
+    let l = l.trim_end_matches(|c: char| c.is_whitespace() || c == '.');
+    if l.contains("auto mode") || l.contains("bypass permissions") || l.contains("all future") {
+        return l.starts_with("yes") || l.starts_with("use ");
+    }
+    let asks = l.contains("don't ask again") || l.contains("dont ask again");
+    let always = l.contains("always allow");
+    let session_only = ["this session", "the session", "during this session"]
+        .iter()
+        .any(|end| l.ends_with(end));
+    (asks || always) && !session_only
 }
 
 /// The permission/question dialog a blocked pane is showing, as stored on
@@ -669,6 +696,7 @@ impl Dialog {
                     label: o.label.chars().take(PENDING_LABEL_MAX).collect(),
                     selected: o.selected,
                     checked: o.checked,
+                    persists: self.kind == WaitingFor::Permission && persists_label(&o.label),
                 })
                 .collect(),
             multi: self.multi,
@@ -1073,6 +1101,7 @@ fn choice_option(n: u8, label: &str, selected: bool) -> ParsedOption {
             label: text.to_string(),
             selected,
             checked,
+            persists: false,
         },
         multi_choice,
         raw_label: label.to_string(),
@@ -1732,24 +1761,28 @@ mod tests {
                     label: "24 hours (Recommended)".into(),
                     selected: true,
                     checked: false,
+                    persists: false,
                 },
                 PendingOption {
                     n: 2,
                     label: "1 hour".into(),
                     selected: false,
                     checked: false,
+                    persists: false,
                 },
                 PendingOption {
                     n: 3,
                     label: "Until dismissed".into(),
                     selected: false,
                     checked: false,
+                    persists: false,
                 },
                 PendingOption {
                     n: 4,
                     label: "Type something.".into(),
                     selected: false,
                     checked: false,
+                    persists: false,
                 },
             ]
         );
@@ -2049,6 +2082,7 @@ Enter to select · ↑/↓ to navigate · Esc to cancel
                 label: "A".into(),
                 selected: true,
                 checked: false,
+                persists: false,
             }],
             multi: false,
             detail: None,
@@ -2311,6 +2345,7 @@ Enter to select · ↑/↓ to navigate · Esc to cancel
                     label: long_label.clone(),
                     selected: false,
                     checked: false,
+                    persists: false,
                 })
                 .collect(),
             multi: false,
@@ -2349,6 +2384,7 @@ Do you want to make this edit to src/main.rs?
                 label: "Yes".into(),
                 selected: true,
                 checked: false,
+                persists: false,
             }
         );
         assert_eq!(p.options[2].n, 3);
@@ -2410,12 +2446,14 @@ Some unrelated prose line
                     label: "Yes".into(),
                     selected: true,
                     checked: false,
+                    persists: false,
                 },
                 PendingOption {
                     n: 2,
                     label: "No, and tell Claude what to do differently".into(),
                     selected: false,
                     checked: false,
+                    persists: false,
                 },
             ]
         );
@@ -2586,5 +2624,39 @@ Enter to select
         // broadcast_prompt must be real values, so the doc examples parse.
         assert!("idle".parse::<ClaudeStatus>().is_ok());
         assert!("working".parse::<ClaudeStatus>().is_ok());
+    }
+    /// One rule for "this choice outlives the request", read by the hub's
+    /// guard and every client. The dialog is Claude Code 2.1.267's own.
+    #[test]
+    fn a_choice_that_outlives_the_request_is_flagged_once() {
+        for yes in [
+            "Yes, and don't ask again",
+            "Yes, and don\u{2019}t ask again for: ls *",
+            "Yes, and don't ask again for: git push:* in /srv/the sessions",
+            "Yes, and switch to auto mode · auto mode handles these prompts for you",
+            "Yes, and bypass permissions",
+            "Yes, and always allow access to src/ from this project",
+            "Use this and all future MCP servers in this project",
+        ] {
+            assert!(persists_label(yes), "{yes}");
+        }
+        for no in [
+            "Yes",
+            "No",
+            "Yes, and don't ask again this session",
+            "Yes, allow all edits during this session",
+            "No, and tell Claude what to do differently",
+        ] {
+            assert!(!persists_label(no), "{no}");
+        }
+        let pane = include_str!("testdata/pane_intel/permission_bash.txt");
+        let p = detect_dialog(pane).expect("dialog").pending_input();
+        let flagged: Vec<u8> = p
+            .options
+            .iter()
+            .filter(|o| o.persists)
+            .map(|o| o.n)
+            .collect();
+        assert_eq!(flagged, vec![2, 3]);
     }
 }

@@ -69,6 +69,17 @@ describe('ControlThreads', () => {
     expect(screen.getByTestId('control-thread-group-working').textContent).toContain('Hub federation v2');
   });
 
+  it('Main chat’s line is what the person typed, not the context line in front of it', async () => {
+    const ctx = '[context] the person is looking at host htz with no session selected. "here" means that host.';
+    const typed = { ...operator, last_prompt: `${ctx}\n\nwhy is htz slow` };
+    sessions.set([typed, flake, release, mine]);
+    operatorSession.set(typed);
+    render(ControlThreads, { oncollapse: () => {} });
+    const line = screen.getByTestId('control-thread-main').textContent ?? '';
+    expect(line).toContain('why is htz slow');
+    expect(line).not.toContain('[context]');
+  });
+
   it('the chips narrow to Needs you and to Missions, with their counts', async () => {
     render(ControlThreads, { oncollapse: () => {} });
     await waitFor(() => expect(screen.getAllByTestId('control-thread')).toHaveLength(3));

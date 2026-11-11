@@ -340,8 +340,11 @@ impl FleetTools {
                     )));
                 }
                 if !person_chose {
-                    crate::service::account_limits::refuse_over_limit(
+                    // The login it names instead is one the session's
+                    // project allows.
+                    crate::service::account_limits::refuse_over_limit_for(
                         &s,
+                        row.project_id,
                         &host_alias,
                         target,
                         crate::store::now_unix(),

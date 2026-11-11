@@ -30,6 +30,7 @@
   import { buildThreads, filterThreads, groupThreads, threadCounts, type ControlThread, type ThreadFilter } from './control_threads';
   import { activeThread, openInControl, openMissionInControl, showMainChat } from './control_room';
   import { promptPreview } from './attention';
+  import { promptParts } from './prompt_parts';
   import { shortAge, exactTime } from './session_status';
   import { routineBudget, type FleetBudget } from './routines';
   import { money } from './automation';
@@ -96,7 +97,10 @@
     { id: 'missions', label: 'Missions' },
   ];
 
-  const mainLine = $derived(promptPreview($operatorRow?.last_prompt ?? null, 48) || 'Talk to the fleet');
+  // What the person typed, the app's context line left out (prompt_parts.ts).
+  const mainLine = $derived(
+    promptPreview($operatorRow?.last_prompt ? promptParts($operatorRow.last_prompt).text : null, 48) || 'Talk to the fleet',
+  );
 
   function open(t: ControlThread) {
     if (t.kind === 'session') openInControl(t.id, t.title);

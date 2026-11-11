@@ -9,7 +9,6 @@
 use super::*;
 use crate::ipc_error::lock;
 use crate::service::dashboards;
-use crate::service::operator::OPERATOR_CLIENT_NAME;
 
 #[tool_router(router = dashboards_router, vis = "pub(super)")]
 impl FleetTools {
@@ -35,7 +34,7 @@ impl FleetTools {
             caller.view_scope(&s).map_err(to_mcp_err)?
         };
         let device = caller.client.as_ref().map(|c| c.name.as_str());
-        let is_person = device != Some(OPERATOR_CLIENT_NAME);
+        let is_person = !caller.is_operator();
         ok_json_compact(
             &dashboards::run(&self.store, &scope, &p, device, is_person).map_err(to_mcp_err)?,
         )

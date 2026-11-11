@@ -443,19 +443,9 @@ pub fn over_limit(
 
 /// The login on `host_alias` with the most headroom on an account other than
 /// `not_account`: signed in, with a reading under `accounts.pause_at` (from
-/// the store's newest snapshots). `None` when no such login exists or the
-/// host is unknown. [`freer_login_for`] with no project.
-pub fn freer_login(
-    s: &Store,
-    host_alias: &str,
-    not_account: &str,
-    now: i64,
-) -> Result<Option<HostLogin>, IpcError> {
-    freer_login_for(s, None, host_alias, not_account, now)
-}
-
-/// [`freer_login`] for work in `project_id`: never a login on an account
-/// the project forbids (`service::project_accounts`).
+/// the store's newest snapshots), and for work in `project_id` never one on
+/// an account the project forbids (`service::project_accounts`). `None` when
+/// no such login exists or the host is unknown.
 pub fn freer_login_for(
     s: &Store,
     project_id: Option<i64>,
@@ -511,25 +501,15 @@ fn best_login(
 /// The login a start that nobody chose a login for runs under on
 /// `host_alias`: `profile` (`None` = the host's own), unless its account is
 /// at or past `accounts.pause_at` ([`over_limit`]) and another login on the
-/// host has headroom ([`freer_login`]), which it takes instead. Nothing here
-/// refuses: with no freer login the start keeps `profile`, and the start's
-/// own checks report a spent login. [`login_with_headroom_for`] with no
-/// project.
-pub fn login_with_headroom(
-    s: &Store,
-    host_alias: &str,
-    profile: Option<&str>,
-    now: i64,
-) -> Result<Option<String>, IpcError> {
-    login_with_headroom_for(s, None, host_alias, profile, now)
-}
-
-/// [`login_with_headroom`] for work in `project_id`: a login on an account
-/// the project forbids (`service::project_accounts`) gives way to the
-/// allowed login on the host with the most headroom, under the line or not
-/// (a spent allowed login is the start's to report, a forbidden one is
-/// refused outright); and a freer login is never a forbidden one. With no
-/// allowed login on the host it keeps `profile`, and the start refuses it.
+/// host has headroom ([`freer_login_for`]), which it takes instead. Nothing
+/// here refuses: with no freer login the start keeps `profile`, and the
+/// start's own checks report a spent login. For work in `project_id`
+/// (`None`: no project), a login on an account the project forbids
+/// (`service::project_accounts`) gives way to the allowed login on the host
+/// with the most headroom, under the line or not (a spent allowed login is
+/// the start's to report, a forbidden one is refused outright); and a freer
+/// login is never a forbidden one. With no allowed login on the host it
+/// keeps `profile`, and the start refuses it.
 pub fn login_with_headroom_for(
     s: &Store,
     project_id: Option<i64>,

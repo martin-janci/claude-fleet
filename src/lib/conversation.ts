@@ -1038,20 +1038,30 @@ export function slashCommandsFor(agent: SessionAgent): readonly SlashCommand[] {
  *  a Codex session starts a new chat, as it does in Claude Code. */
 const CODEX_SLASH_ALIASES: Readonly<Record<string, string>> = { clear: 'new' };
 
+/** The same for Hermes: `/clear` starts a new session, `/compact` is its
+ *  `/compress`. */
+const HERMES_SLASH_ALIASES: Readonly<Record<string, string>> = { clear: 'new', compact: 'compress' };
+
 /**
  * A quick-action chip as `agent`'s session can take it: the same chip, a
  * slash command renamed to the agent's own spelling, or `null` when it names
  * a command the agent does not have (Claude's `/context` typed into Codex
- * would be sent as a prompt). Only Codex is narrowed: a Claude session may
- * run a project skill no list here knows of.
+ * would be sent as a prompt). Codex and Hermes are narrowed: a Claude
+ * session may run a project skill no list here knows of.
  */
 export function presetForAgent<P extends { text: string }>(p: P, agent: SessionAgent): P | null {
-  if (agent !== 'codex') return p;
+  const own =
+    agent === 'codex'
+      ? { commands: CODEX_SLASH_COMMANDS, aliases: CODEX_SLASH_ALIASES }
+      : agent === 'hermes'
+        ? { commands: HERMES_SLASH_COMMANDS, aliases: HERMES_SLASH_ALIASES }
+        : null;
+  if (!own) return p;
   const m = /^\/([A-Za-z][\w:-]*)(.*)$/s.exec(p.text.trim());
   if (!m) return p;
   const name = m[1].toLowerCase();
-  if (CODEX_SLASH_COMMANDS.some((c) => c.name === name)) return p;
-  const alias = CODEX_SLASH_ALIASES[name];
+  if (own.commands.some((c) => c.name === name)) return p;
+  const alias = own.aliases[name];
   return alias ? { ...p, text: `/${alias}${m[2]}` } : null;
 }
 
@@ -1146,6 +1156,18 @@ export const CODEX_EFFORT_OPTIONS: readonly PickerOption[] = [
   { value: 'max', label: 'Max' },
 ];
 
+/** A hint list of Hermes' provider slugs, the adapter's MODELS
+ *  (`crates/fleet-core/src/agent_adapter/hermes.rs`). Hermes has no effort
+ *  levels a session stores (`/reasoning` sets it inside), so none. */
+export const HERMES_MODEL_OPTIONS: readonly PickerOption[] = [
+  { value: 'anthropic/claude-opus-4.8', label: 'Claude Opus 4.8' },
+  { value: 'anthropic/claude-sonnet-5', label: 'Claude Sonnet 5' },
+  { value: 'openai/gpt-5.6-sol', label: 'GPT-5.6-Sol' },
+  { value: 'google/gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro' },
+  { value: 'deepseek/deepseek-v4-pro', label: 'DeepSeek V4 Pro' },
+  { value: 'qwen/qwen3.7-max', label: 'Qwen3.7 Max' },
+];
+
 /**
  * How `agent` changes its model or effort mid-session. Claude Code reads
  * `/model <alias>` and `/effort <level>` from the prompt line (`'command'`).
@@ -1175,6 +1197,16 @@ export function agentModelProfile(agent: SessionAgent): AgentModelProfile {
       efforts: CODEX_EFFORT_OPTIONS,
       launchModels: CODEX_MODEL_OPTIONS,
       launchEfforts: CODEX_EFFORT_OPTIONS,
+    };
+  }
+  if (agent === 'hermes') {
+    // Hermes reads `/model <slug>` from its prompt line; it has no `/effort`.
+    return {
+      mode: 'command',
+      models: HERMES_MODEL_OPTIONS,
+      efforts: [],
+      launchModels: HERMES_MODEL_OPTIONS,
+      launchEfforts: [],
     };
   }
   return {

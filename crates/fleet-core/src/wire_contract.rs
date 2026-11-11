@@ -335,8 +335,14 @@
 //!   `review_notes` tool (the desktop's command of the same name;
 //!   docs/review-notes.md). A hub without it answers `E_HUB_PROTOCOL`, which
 //!   the diff shows as the send's error, with the drafts kept on the device.
+//!   Prompt authors (migration 224) are new without a bump: a conversation
+//!   turn's `author` (`ConvTurn.author`, additive, absent for a prompt no
+//!   hub tool typed). A hub without it never sends one, so every prompt
+//!   reads as before; a client that predates it ignores the field.
 //!   Review requests (migration 225) are new without a bump: the
 //!   `review_request` tool (the desktop's command of the same name;
 //!   docs/review-notes.md). A hub without it answers `E_HUB_PROTOCOL`: "Ask
-//!   for review…" says so, and the Inbox shows no asks.
+//!   for review…" says so, and the Inbox shows no asks. A row's
+//!   `session_name` is additive: a client titles an ask without it from its
+//!   own session list, as before.
 pub const CONTRACT_REVISION: u32 = 18;

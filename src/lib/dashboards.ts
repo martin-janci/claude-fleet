@@ -17,9 +17,10 @@
 // itself (owner report 2026-11-06: a change waiting on a click in the chat
 // read as one that never happened); the page says "Changed by Control"
 // and offers Undo, which puts the version before back.
-import { writable } from 'svelte/store';
+import { get, writable } from 'svelte/store';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { DASHBOARDS_CHANGED_EVENT } from './events';
+import { createListRace } from './row_store';
 import { readPref, writePref } from './prefs';
 import { checkUiBlock, UI_SPEC } from './rich_blocks';
 import { invokeCmd, type Result } from './result';
@@ -396,9 +397,12 @@ export type PinnedDashboard = Dashboard & {
   why?: string;
   /** Pinned or last changed by Control's agent. */
   by_agent?: boolean;
-  /** The hub keeps the version before the last change (`undo`). */
-  can_undo?: boolean;
+  /** What Undo does, as the hub says: `restore` the version before
+   *  Control's change, or `remove` a dashboard Control pinned new. */
+  undo?: PinnedUndo;
 };
+
+export type PinnedUndo = 'restore' | 'remove';
 
 /** The device name Control's agent pins under (`OPERATOR_CLIENT_NAME`). */
 export const AGENT_DEVICE = 'ux-agent';
@@ -420,6 +424,8 @@ interface PinnedRow {
   why?: string | null;
   pinned_at: number;
   device?: string | null;
+  undo?: string | null;
+  /** A hub before `undo` says only this. */
   can_undo?: boolean;
 }
 
@@ -436,7 +442,16 @@ function fromBlock(spec: unknown, pinned_at: number, why?: string | null): Pinne
 function fromRow(x: PinnedRow): PinnedDashboard | null {
   const d = fromBlock(x.spec, x.pinned_at, x.why);
   if (!d) return null;
-  return { ...d, ...(x.device === AGENT_DEVICE ? { by_agent: true } : {}), ...(x.can_undo ? { can_undo: true } : {}) };
+  const byAgent = x.device === AGENT_DEVICE;
+  const undo: PinnedUndo | undefined =
+    x.undo === 'restore' || x.undo === 'remove'
+      ? x.undo
+      : x.undo == null && x.can_undo
+        ? 'restore'
+        : x.undo == null && byAgent
+          ? 'remove'
+          : undefined;
+  return { ...d, ...(byAgent ? { by_agent: true } : {}), ...(undo ? { undo } : {}) };
 }
 
 /** The person's pinned dashboards, as the last read or write left them.
@@ -465,8 +480,22 @@ function call<T>(args: Record<string, unknown>): Promise<Result<T>> {
   return invokeCmd<T>('dashboards', { args });
 }
 
+const sameJson = <T>(a: T, b: T) => JSON.stringify(a) === JSON.stringify(b);
+
+/** `next`, or `cur` itself when it holds the same rows in the same order:
+ *  a re-read that changed nothing keeps every subscriber's object, so an
+ *  open dashboard is not rebuilt (and its summaries not torn down). */
+function keepSame<T>(cur: readonly T[], next: T[]): readonly T[] {
+  return next.length === cur.length && next.every((x, i) => x === cur[i]) ? cur : next;
+}
+
+/** A re-read loses to a pin or an unpin made while it was in flight, and
+ *  to a later re-read. */
+const pinRace = createListRace<string>();
+
 /** Read the pinned dashboards again; moves step 5's local pins first. */
 export async function loadPinned(): Promise<void> {
+  const token = pinRace.begin();
   const r = await call<PinnedRow[]>({ action: 'list' });
   if (!r.ok || !Array.isArray(r.value)) return;
   let rows = r.value;
@@ -476,26 +505,35 @@ export async function loadPinned(): Promise<void> {
     if (p.ok) rows = [...rows, p.value];
   }
   if (local.length || readPref<unknown[]>(LOCAL_KEY, [], isList).length) writePref(LOCAL_KEY, []);
-  pinnedDashboards.set(rows.flatMap((x) => fromRow(x) ?? []));
+  const cur = get(pinnedDashboards);
+  const listed = rows.flatMap((x) => fromRow(x) ?? []);
+  const merged = pinRace.mergeList(cur, listed, token, (p) => p.id, sameJson);
+  if (merged) pinnedDashboards.set(keepSame(cur, merged) as PinnedDashboard[]);
 }
 
 /** The person's feeds by key (`dashboards { feeds }`): what `feed`
  *  widgets show. Read with the pins, and again on `dashboards:changed`. */
 export const dashboardFeeds = writable<Record<string, DashboardFeed>>({});
 
-/** Read the feeds again. A hub before feeds answers an error: none then. */
+const feedRace = createListRace<string>();
+
+/** Read the feeds again. A hub before feeds answers an error: none then.
+ *  A later read wins; a feed that did not change keeps its object, and an
+ *  unchanged set keeps the record. */
 export async function loadFeeds(): Promise<void> {
+  const token = feedRace.begin();
   const r = await call<DashboardFeed[]>({ action: 'feeds' });
   if (!r.ok || !Array.isArray(r.value)) return;
-  dashboardFeeds.set(Object.fromEntries(r.value.map((f) => [f.key, f])));
+  const curMap = get(dashboardFeeds);
+  const cur = Object.values(curMap);
+  const merged = feedRace.mergeList(cur, r.value, token, (f) => f.key, sameJson);
+  if (!merged || keepSame(cur, merged) === cur) return;
+  dashboardFeeds.set(Object.fromEntries(merged.map((f) => [f.key, f])));
 }
 
-/** Write feed `key` as the person; an empty value removes it. */
-export async function writeFeed(key: string, value: string): Promise<Result<DashboardFeed | null>> {
-  const r = await call<DashboardFeed | null>({ action: 'feed', key, value });
-  if (r.ok) await loadFeeds();
-  return r;
-}
+/** How long `dashboards:changed` frames are gathered into one re-read: a
+ *  routine's run writes one per feed. */
+export const RELOAD_DEBOUNCE_MS = 250;
 
 let followers = 0;
 let stopFollowing: (() => void) | null = null;
@@ -516,17 +554,27 @@ export function followPinned(): () => void {
       if (disposed) u();
       else unlisteners.push(u);
     };
-    const reload = () => {
+    const reloadNow = () => {
       void loadPinned();
       void loadFeeds();
     };
-    reload();
+    // A burst of frames (one per feed a run writes) is one re-read.
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const reload = () => {
+      if (timer !== null) clearTimeout(timer);
+      timer = setTimeout(() => {
+        timer = null;
+        if (!disposed) reloadNow();
+      }, RELOAD_DEBOUNCE_MS);
+    };
+    reloadNow();
     void listen(DASHBOARDS_CHANGED_EVENT, reload).then(keep, () => {});
     // A gap the hub could not replay can have swallowed a
     // `dashboards:changed`: re-read rather than trust what we hold.
     void listen('hub:resynced', reload).then(keep, () => {});
     stopFollowing = () => {
       disposed = true;
+      if (timer !== null) clearTimeout(timer);
       for (const u of unlisteners.splice(0)) u();
     };
   }
@@ -566,6 +614,7 @@ export function pinStateOf(d: Dashboard, pinned: readonly PinnedDashboard[]): Pi
 export async function pinDashboard(d: Dashboard, why?: string): Promise<Result<PinnedDashboard>> {
   const r = await call<PinnedRow>({ action: 'pin', dashboard: dashboardBlock(d), ...(why ? { why } : {}) });
   if (!r.ok) return r;
+  pinRace.touch(d.id);
   const entry = fromRow(r.value);
   if (!entry) return { ok: false, error: { code: 'E_INVALID', message: 'the hub kept a dashboard this app cannot draw' } };
   pinnedDashboards.update((list) =>
@@ -577,6 +626,7 @@ export async function pinDashboard(d: Dashboard, why?: string): Promise<Result<P
 export async function unpinDashboard(id: string): Promise<Result<boolean>> {
   const r = await call<{ removed: boolean }>({ action: 'unpin', id });
   if (!r.ok) return r;
+  pinRace.touch(id);
   pinnedDashboards.update((list) => list.filter((p) => p.id !== id));
   return { ok: true, value: r.value.removed };
 }

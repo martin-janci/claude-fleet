@@ -57,6 +57,22 @@ describe('WorktreeSetupDialog', () => {
     });
   });
 
+  it('asks before closing over typed globs, and closes at once when nothing changed', async () => {
+    invoke.mockImplementation(async () => ({ project_id: 7, project: 'acme/api', copy: ['.env'], command: null }));
+    const onclose = vi.fn();
+    render(WorktreeSetupDialog, { props: { projectId: 7, title: 'acme/api', onclose } });
+    const globs = screen.getByTestId('worktree-setup-globs') as HTMLTextAreaElement;
+    await waitFor(() => expect(globs.value).toBe('.env'));
+    await fireEvent.input(globs, { target: { value: '.env\nconfig/*.local' } });
+    await fireEvent.click(screen.getByTestId('sheet-cancel'));
+    expect(onclose).not.toHaveBeenCalled();
+    expect(screen.getByTestId('form-discard-ask')).toBeTruthy();
+    await fireEvent.click(screen.getByTestId('form-keep-editing'));
+    await fireEvent.input(globs, { target: { value: '.env' } });
+    await fireEvent.click(screen.getByTestId('sheet-cancel'));
+    expect(onclose).toHaveBeenCalled();
+  });
+
   it('says why when the setup cannot be read', async () => {
     invoke.mockImplementation(async (cmd: string) => {
       if (cmd === 'worktree_setup') throw { code: 'E_FORBIDDEN', message: 'a person sets a project’s worktree setup' };

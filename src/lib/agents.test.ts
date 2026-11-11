@@ -273,8 +273,14 @@ describe('groupActions', () => {
     const g = groupActions([a(3, 'mcp_call'), a(2, 'kb_learn'), a(1, 'mcp_call')], [ab(3, 'g1'), ab(2, 'g2'), ab(1, 'g1')]);
     expect(g.map((x) => [x.key, x.items.map((i) => i.action.id)])).toEqual([
       ['g1', [3, 1]],
-      ['g2', [2]],
+      ['id:2', [2]],
     ]);
+  });
+  it('never folds two proposals that are not tool calls, whatever the hub keys them', () => {
+    // An older hub keyed two reviews of two pull requests `2:post_review:`.
+    const ab = (id: number) => ({ id, from: 'PR reviewer', what: 'post review', group: '2:post_review:' });
+    const g = groupActions([a(5, 'post_review'), a(4, 'post_review')], [ab(5), ab(4)]);
+    expect(g.map((x) => x.key)).toEqual(['id:5', 'id:4']);
   });
   it('folds only tool calls for an older hub', () => {
     const call = { binding: 'jira', tool: 't' };

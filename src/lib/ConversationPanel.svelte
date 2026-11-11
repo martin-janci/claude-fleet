@@ -2723,6 +2723,11 @@
                       {/if}
                     </span>
                   </div>
+                  {#if !marked.from && turn.author && !turn.author.mine}
+                    <!-- The chat look hides the head until hover: a colleague's
+                         name is said inside the bubble instead. -->
+                    <span class="who other in-bubble" data-testid="conv-prompt-colleague">{promptWho(turn.author)}</span>
+                  {/if}
                   {@render promptChips(parts.chips)}
                   <div
                     class="prompt-text"
@@ -3394,23 +3399,25 @@
               <option value={o.value}>{o.label}</option>
             {/each}
           </select>
-          <select
-            class="composer-pick"
-            data-testid="conv-effort-pick"
-            aria-label="Effort"
-            title={currentEffort
-              ? `Effort: ${currentEffort}. Pick one to ${pickVerb ?? 'send /effort'}.`
-              : `Pick an effort level to ${pickVerb ?? 'send /effort'}.`}
-            value={currentEffort}
-            disabled={pickersDisabled}
-            onchange={(e) => pickSetting('effort', e)}>
-            {#if !modelProfile.efforts.some((o) => o.value === currentEffort)}
-              <option value={currentEffort} disabled>{currentEffort || 'Effort'}</option>
-            {/if}
-            {#each modelProfile.efforts as o (o.value)}
-              <option value={o.value}>{o.label}</option>
-            {/each}
-          </select>
+          {#if modelProfile.efforts.length > 0}
+            <select
+              class="composer-pick"
+              data-testid="conv-effort-pick"
+              aria-label="Effort"
+              title={currentEffort
+                ? `Effort: ${currentEffort}. Pick one to ${pickVerb ?? 'send /effort'}.`
+                : `Pick an effort level to ${pickVerb ?? 'send /effort'}.`}
+              value={currentEffort}
+              disabled={pickersDisabled}
+              onchange={(e) => pickSetting('effort', e)}>
+              {#if !modelProfile.efforts.some((o) => o.value === currentEffort)}
+                <option value={currentEffort} disabled>{currentEffort || 'Effort'}</option>
+              {/if}
+              {#each modelProfile.efforts as o (o.value)}
+                <option value={o.value}>{o.label}</option>
+              {/each}
+            </select>
+          {/if}
           <span class="composer-hint" id={COMPOSER_HINT_ID} data-testid="conv-composer-hint">{composerHint}</span>
           <span class="sr-only" role="status" aria-live="polite" data-testid="conv-suggestion-taken">{suggestionTaken}</span>
           {#if tuneOn}
@@ -3608,9 +3615,11 @@
   .chat-look .who {
     display: none;
   }
-  /* A colleague's prompt names them even in the chat look. */
-  .chat-look .who.other {
-    display: inline;
+  /* A colleague's prompt names them even in the chat look: inside the
+     bubble, since the head shows only on hover. */
+  .chat-look .who.in-bubble {
+    display: block;
+    margin-bottom: 0.2rem;
   }
   /* The bubble's time and Copy sit beside it, shown on hover or focus. */
   .chat-look .prompt-head {
@@ -4291,6 +4300,11 @@
     letter-spacing: 0.02em;
     text-transform: uppercase;
     color: var(--accent);
+  }
+  /* The in-bubble name is the chat look's (`.chat-look .who.in-bubble`);
+     the plain look names the colleague in the head. */
+  .who.in-bubble {
+    display: none;
   }
   time {
     flex: 0 0 auto;

@@ -121,4 +121,29 @@ describe('ControlMissions', () => {
     expect(screen.getAllByTestId('control-mission')).toHaveLength(2);
     runningMissionsFold.set('open');
   });
+
+  it('counts every active mission, and says on the folded heading how many wait for you', async () => {
+    const waits = { kind: 'card', since: 1 } as never;
+    vi.mocked(invoke).mockImplementation(async (cmd: string, raw?: unknown) => {
+      if (cmd === 'work_missions')
+        return [1, 2, 3, 4, 5].map((id) => ({ ...mission(id, `M${id}`), ...(id === 5 ? { waiting_on: waits } : {}) }));
+      if (cmd === 'work_mission') {
+        const id = (raw as { args: { mission_id: number } }).args.mission_id;
+        return id === 2
+          ? detail(2, 'M2', { plan: { ...detail(2, 'M2').plan!, steps: [{ kind: 'ask', reason: 'r', auto: false }] } })
+          : detail(id, `M${id}`);
+      }
+      return null;
+    });
+    runningMissionsFold.set('closed');
+    render(ControlMissions);
+    const toggle = await vi.waitFor(() => screen.getByTestId('control-missions-toggle'));
+    await vi.waitFor(() => expect(toggle.textContent).toContain('Running missions 5'));
+    // M2 (listed, an ask) and M5 (past the three listed, `waiting_on`).
+    expect(screen.getByTestId('control-missions-waiting').textContent).toContain('2 wait for you');
+    await fireEvent.click(toggle);
+    expect(screen.getAllByTestId('control-mission')).toHaveLength(3);
+    expect(screen.queryByTestId('control-missions-waiting')).toBeNull();
+    runningMissionsFold.set('open');
+  });
 });

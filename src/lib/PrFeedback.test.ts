@@ -10,6 +10,7 @@ vi.mock('./sessions', async () => {
 import PrFeedback from './PrFeedback.svelte';
 import { session, NOW } from './hosts_fixture';
 import { queuePrompt, type PrEvidence } from './sessions';
+import { prFeedbackSends } from './pr_feedback';
 
 const mockedQueue = vi.mocked(queuePrompt);
 const ev = (over: Partial<PrEvidence> = {}): PrEvidence => ({
@@ -23,6 +24,7 @@ const row = (over = {}) =>
 const settle = () => new Promise((r) => setTimeout(r, 0));
 
 beforeEach(() => {
+  prFeedbackSends.set({});
   mockedQueue.mockReset();
   mockedQueue.mockResolvedValue({ ok: true, value: { session_id: 1, delivered: false, queued_id: 4 } });
 });
@@ -37,8 +39,8 @@ describe('PrFeedback', () => {
     await settle();
     expect(mockedQueue).toHaveBeenCalledTimes(1);
     const [, prompt] = mockedQueue.mock.calls[0];
-    expect(prompt).toContain('CI is failing on https://github.com/o/r/pull/1');
-    expect(prompt).toContain('- rust (https://ci/9)');
+    expect(prompt).toContain('CI is failing on o/r#1 (https://github.com/o/r/pull/1)');
+    expect(prompt).toContain('- "rust" ("https://ci/9")');
     expect(screen.getByTestId('pr-feedback-checks-sent')).toHaveTextContent('Waits for the turn to end');
     expect(btn).toBeDisabled();
   });
@@ -67,6 +69,26 @@ describe('PrFeedback', () => {
   it('names the agent the session runs', () => {
     render(PrFeedback, { session: row({ agent: 'codex' }) });
     expect(screen.getByTestId('pr-feedback-review')).toHaveTextContent('Send review comments to Codex');
+  });
+
+  it('files a reply under the session it was sent for, and remembers it across mounts and re-reads', async () => {
+    let reply!: (v: unknown) => void;
+    mockedQueue.mockImplementation(() => new Promise((res) => (reply = res as never)) as never);
+    const a = row({ pr_evidence: ev({ head_oid: 'aaa' }) });
+    const b = { ...row({ pr_evidence: ev({ head_oid: 'bbb' }) }), id: a.id + 1 };
+    const view = render(PrFeedback, { session: a });
+    await fireEvent.click(screen.getByTestId('pr-feedback-review'));
+    // Switch to B before A's reply comes back.
+    await view.rerender({ session: b });
+    reply({ ok: true, value: { session_id: a.id, delivered: true, queued_id: null } });
+    await settle();
+    expect(screen.queryByTestId('pr-feedback-review-sent')).toBeNull();
+    expect(screen.getByTestId('pr-feedback-review')).not.toBeDisabled();
+    // Back on A, a fresh mount and a newer reading of the same head: still sent.
+    view.unmount();
+    render(PrFeedback, { session: { ...a, pr_checked_at: (a.pr_checked_at ?? 0) + 600 } });
+    expect(screen.getByTestId('pr-feedback-review-sent')).toHaveTextContent('Sent');
+    expect(screen.getByTestId('pr-feedback-review')).toBeDisabled();
   });
 
   it('shows why a send failed', async () => {

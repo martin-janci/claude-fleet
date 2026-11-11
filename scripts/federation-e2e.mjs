@@ -14,7 +14,7 @@
 // Exit status 1 when any check failed. See docs/federation-e2e.md.
 import { createRequire } from 'node:module';
 import { execSync } from 'node:child_process';
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -88,8 +88,12 @@ const server = await createServer({ configFile: join(HARNESS, 'vite.config.mjs')
 await server.listen();
 const base = server.resolvedUrls.local[0];
 
-rmSync(outDir, { recursive: true, force: true });
+// The output folder is whatever `--out` names (`.`, a Desktop): never remove
+// it, only the files an earlier run wrote there.
 mkdirSync(outDir, { recursive: true });
+for (const f of readdirSync(outDir)) {
+  if (/--\d\d-.*\.png$|^report\.json$|^index\.html$/.test(f)) rmSync(join(outDir, f), { force: true });
+}
 const shim = readFileSync(join(HARNESS, 'fake-hubs.js'), 'utf8');
 const browser = await chromium.launch({ headless: !headed });
 

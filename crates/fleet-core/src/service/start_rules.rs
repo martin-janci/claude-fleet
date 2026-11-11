@@ -528,15 +528,19 @@ fn check_target(
             ))
         }
         Some(AGENT_CODEX) => {}
-        Some(AGENT_HERMES) if profile.is_some() => {
+        // A rule's start hands its brief over through Claude Code's prompt
+        // hook and types its first prompt once Claude's REPL is up; Hermes
+        // has neither, so its session would start and never get the work.
+        Some(AGENT_HERMES) => {
             return Err(invalid(
-                "an account applies to Claude Code sessions; Hermes keeps its own provider login",
+                "a rule cannot start Hermes yet: a rule's start delivers its brief through \
+                 Claude Code's hooks, which Hermes does not run. Start a Hermes session from \
+                 New session instead",
             ))
         }
-        Some(AGENT_HERMES) => {}
         Some(other) => {
             return Err(invalid(format!(
-                "a rule starts claude, codex or hermes, not {other:?}"
+                "a rule starts claude or codex, not {other:?}"
             )))
         }
     }

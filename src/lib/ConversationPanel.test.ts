@@ -1074,6 +1074,12 @@ describe('ConversationPanel composer', () => {
     await settle();
     const who = screen.getAllByTestId('conv-prompt-who').map((e) => e.textContent?.trim());
     expect(who.slice(-2)).toEqual(['Ada · phone', 'You']);
+    // The chat look hides the head until hover, so a colleague's name also
+    // sits inside the bubble, outside `.prompt-head`; never the reader's own.
+    const inBubble = screen.getAllByTestId('conv-prompt-colleague');
+    expect(inBubble.map((e) => e.textContent?.trim())).toEqual(['Ada · phone']);
+    expect(inBubble[0].closest('.prompt-head')).toBeNull();
+    expect(inBubble[0].closest('[data-testid="conv-prompt"]')).toBeTruthy();
   });
 
   it('bg and external rows get a read-only note instead of a composer', async () => {

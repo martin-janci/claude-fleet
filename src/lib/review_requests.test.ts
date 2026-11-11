@@ -1,7 +1,17 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { get } from 'svelte/store';
 import { invoke } from '@tauri-apps/api/core';
-import { askForReview, finishReviewRequest, levelWords, loadReviewRequests, reviewRequests, type ReviewRequest } from './review_requests';
+import {
+  askForReview,
+  askSessionName,
+  finishReviewRequest,
+  levelWords,
+  loadReviewRequests,
+  reviewRequestCount,
+  reviewRequests,
+  trackReviewRequests,
+  type ReviewRequest,
+} from './review_requests';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 const mocked = vi.mocked(invoke);
@@ -44,6 +54,36 @@ describe('review requests', () => {
     expect(mocked).toHaveBeenLastCalledWith('review_request', {
       args: { action: 'ask', session_id: 7, person: 'Ada', note: 'the retry loop' },
     });
+  });
+
+  it('is tracked while the app shows, and stops on a hub that refuses the read', async () => {
+    const load = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: true, value: [ask(1)] })
+      .mockResolvedValueOnce({ ok: false, error: { code: 'E_INVALID', message: 'unknown tool' } });
+    const doc = { visibilityState: 'visible', addEventListener: () => {}, removeEventListener: () => {} } as unknown as Document;
+    const win = { addEventListener: () => {}, removeEventListener: () => {} } as unknown as Window;
+    vi.useFakeTimers();
+    try {
+      const stop = trackReviewRequests({ load, doc, win, every: 1000 });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(get(reviewRequests).map((r) => r.id)).toEqual([1]);
+      expect(get(reviewRequestCount)).toBe(1);
+      await vi.advanceTimersByTimeAsync(1000);
+      // The refusal keeps what was read and stops asking.
+      expect(get(reviewRequests)).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(load).toHaveBeenCalledTimes(2);
+      stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('names the session from the row, else the name the hub sent', () => {
+    expect(askSessionName(ask(1), { friendly_name: 'API', tmux_name: 'api' })).toBe('API');
+    expect(askSessionName({ ...ask(1), session_name: 'pay-fix' }, undefined)).toBe('pay-fix');
+    expect(askSessionName(ask(1), undefined)).toBe('Session 7');
   });
 
   it('says what the colleague can do', () => {

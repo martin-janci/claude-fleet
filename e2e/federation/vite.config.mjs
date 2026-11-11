@@ -8,6 +8,9 @@ import { fileURLToPath } from 'node:url';
 export default defineConfig({
   root: fileURLToPath(new URL('../..', import.meta.url)),
   plugins: [svelte()],
+  // A dep cache of its own: the plugin list is part of Vite's cache hash, so
+  // sharing `node_modules/.vite` re-bundled it under a running `pnpm dev`.
+  cacheDir: 'node_modules/.vite-federation-e2e',
   logLevel: 'warn',
   clearScreen: false,
   server: { strictPort: false, hmr: false },
