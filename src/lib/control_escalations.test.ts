@@ -89,6 +89,8 @@ describe('escalations', () => {
       signed_out_logins: [{ profile: 'tok', since }],
     } as unknown as HostRow;
     expect(isSetupToken(host, 'tok')).toBe(true);
+    // The card carries its login, for Sign in again (here: New token…).
+    expect(escalations([], opts, null, new Set(), [host])[0].login).toEqual({ host: 'htz', profile: 'tok', token: true });
     expect(isSetupToken(host, null)).toBe(false);
     const [card] = escalations([], opts, null, new Set(), [host]);
     expect(card.line).toBe(

@@ -27,7 +27,7 @@ Add a Claude login profile on a host: a subscription login, a setup token or an 
 
 Access: the master or a fleet admin's own device · deadline 300 s.
 
-Parameters (* required): `account`, `action`*, `api_key`, `code`, `daily_limit_usd`, `host_alias`*, `key`, `nickname`, `profile`*, `setup_token`
+Parameters (* required): `account`, `action`*, `again`, `api_key`, `code`, `daily_limit_usd`, `host_alias`*, `key`, `nickname`, `profile`*, `setup_token`
 
 ### `add_host`
 

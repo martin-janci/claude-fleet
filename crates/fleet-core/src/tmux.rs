@@ -59,8 +59,9 @@ pub const LOGIN_SESSION_PREFIX: &str = "fleet-login--";
 /// Whether `name` is an Add account login pane: fleet's own, never a
 /// session, so every list leaves it out as it does a shell terminal.
 pub fn is_login_session_name(name: &str) -> bool {
-    name.strip_prefix(LOGIN_SESSION_PREFIX)
-        .is_some_and(|p| crate::validate::claude_profile(p).is_ok())
+    name.strip_prefix(LOGIN_SESSION_PREFIX).is_some_and(|p| {
+        p == crate::service::add_account::OWN_LOGIN || crate::validate::claude_profile(p).is_ok()
+    })
 }
 
 /// Every tmux session name on the server, one per line; nothing when no

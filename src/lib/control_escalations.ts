@@ -43,6 +43,8 @@ export interface Escalation {
   session: SessionRow | null;
   /** The mission to open, for a mission that waits on the person (w04-7). */
   missionId?: number;
+  /** The signed-out login a login card is about, for its Sign in again. */
+  login?: { host: string; profile: string | null; token: boolean };
   bucket: TriageBucket;
   /** "fed-v2 is waiting for your answer". */
   line: string;
@@ -118,7 +120,15 @@ export function loginEscalations(hosts: readonly HostRow[], later: ReadonlySet<s
     for (const l of h.signed_out_logins ?? []) {
       const key = `login:${h.alias}:${l.profile ?? ''}:${l.since}`;
       if (later.has(key)) continue;
-      out.push({ key, session: null, bucket: 'no_credentials', line: loginCardText(h.alias, l, isSetupToken(h, l.profile ?? null)), detail: null });
+      const token = isSetupToken(h, l.profile ?? null);
+      out.push({
+        key,
+        session: null,
+        bucket: 'no_credentials',
+        line: loginCardText(h.alias, l, token),
+        detail: null,
+        login: { host: h.alias, profile: l.profile ?? null, token },
+      });
     }
   }
   return out;

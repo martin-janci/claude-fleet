@@ -375,6 +375,21 @@ an hour. Placement leaves it out, Control's chat shows one card per login
 for a profile, `CLAUDE_CONFIG_DIR=~/.claude-profiles/<name> claude
 /login`), and Control's feed says it once. Only a person can sign it in.
 
+**Sign in again** (on the card, on the session's row, and on the Accounts
+page beside Copy sign-in command) opens + Add account's sign-in step over
+the login that is there: the login pane runs `claude /login` under the
+profile, or with no `CLAUDE_CONFIG_DIR` for the host's own login (pane
+`fleet-login--_own`). It is done when the pane says "Login successful"
+(the profile had its account all along, so that says nothing); the login's
+signed-out note then goes at once, so its card clears and placement takes
+it again. A setup-token profile's button is **New token…** (+ Add account
+preset to a new token for it); an API-key profile has no `/login` to renew
+and is refused. MCP: the login actions take `again: true` (`start_login`,
+`login_status`, `login_key`, `login_code`, `end_login`), `profile: ""` for
+the host's own login. Signing in on one host does not fix a copy of the
+same login on another: each copy refreshes on its own (*Two copies of one
+login*).
+
 The pane reading (`pane_intel::detect_signed_out`, every reconcile pass) is
 strict, since a session may be printing or discussing these words: only the
 pane's last `⎿` line counts, and only when it opens with `API Error: 401`,
