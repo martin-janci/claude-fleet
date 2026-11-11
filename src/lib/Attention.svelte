@@ -49,7 +49,8 @@
   import { failing } from './routines';
   import type { AttentionState } from './attention';
   import { push } from './toasts';
-  import { selectSessionExplicitly } from './selection';
+  import { selectSessionExplicitly, selectedSession } from './selection';
+  import { destination } from './destination';
   import { sidebarView } from './work_view';
 
   /** Open a session of this window's fleet from a toast or a notification:
@@ -108,8 +109,21 @@
     tag: string,
     mayChime: boolean,
     onclick?: () => void,
+    sessionId?: number,
   ): boolean {
-    if (typeof document !== 'undefined' && document.hasFocus()) return false;
+    if (typeof document !== 'undefined' && document.hasFocus()) {
+      // In the window: a quiet toast with Open, for what asks something of
+      // the person (HITL audit H-07). Before, a new question while the
+      // window had focus changed only the rail's number. Not for the
+      // session already on screen, and not for Done or Blocked (the cause
+      // is said once elsewhere).
+      const asks = state === 'needs_you' || state === 'failed' || state === 'routine_failed';
+      const shown = sessionId !== undefined && get(selectedSession)?.id === sessionId && get(destination) === 'session';
+      if (asks && onclick && !shown && get(notifyStuckToast)) {
+        push({ kind: 'info', code: 'ASKS', message: `${title} · ${body}`, sticky: false, action: { label: 'Open', run: onclick } });
+      }
+      return false;
+    }
     const settings = get(fleetSettings);
     if (get(notifyStuckOs) && notificationAllowed('desktop', state, settings)) showOsNotification(title, body, tag, onclick);
     return mayChime && notificationAllowed('sound', state, settings) && playChime();
@@ -142,7 +156,7 @@
         const name = friendly && row.friendly_name ? row.friendly_name : row.tmux_name;
         const id = row.id;
         chimed =
-          notifyMatrix(state, `${name} ${TITLES[state]}`, row.host_alias, `${state}-${id}`, !chimed, () => openRow(id)) || chimed;
+          notifyMatrix(state, `${name} ${TITLES[state]}`, row.host_alias, `${state}-${id}`, !chimed, () => openRow(id), id) || chimed;
       }
     });
     const unsubRuns = failing.subscribe((list) => {

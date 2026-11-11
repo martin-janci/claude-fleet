@@ -211,6 +211,32 @@ describe('Attention: the notifications matrix (11.9)', () => {
     expect(shown).toEqual([]);
   });
 
+  it('in the window, a new ask is a quiet toast with Open, not for the session on screen (HITL audit H-07)', async () => {
+    vi.mocked(document.hasFocus).mockReturnValue(true);
+    notifyStuckToast.set(true);
+    clearToasts();
+    clearSelection();
+    const a = row({ tmux_name: 'dev-t', claude_status: 'working' });
+    const b = row({ tmux_name: 'dev-u', claude_status: 'working' });
+    sessions.set([a, b]);
+    render(Attention);
+    await tick();
+    sessions.set([{ ...a, claude_status: 'blocked' }, b]);
+    await tick();
+    expect(shown).toEqual([]);
+    const t = get(toasts).find((x) => x.message.startsWith('dev-t needs you'));
+    expect(t?.action?.label).toBe('Open');
+    runToastAction(t!.id);
+    expect(get(selectedSession)?.id).toBe(a.id);
+    // dev-t is now open: its own next ask needs no toast; dev-u's does.
+    clearToasts();
+    sessions.set([{ ...a, claude_status: 'working' }, b]);
+    await tick();
+    sessions.set([{ ...a, claude_status: 'blocked' }, { ...b, claude_status: 'blocked' }]);
+    await tick();
+    expect(get(toasts).map((x) => x.message.split(' · ')[0])).toEqual(['dev-u needs you']);
+  });
+
   describe('extra fleets (review w01)', () => {
     const base = fleetInfo(PRIMARY, { label: 'home' });
     const extra = (id: string, over: Partial<FleetInfo> = {}): FleetInfo => ({
