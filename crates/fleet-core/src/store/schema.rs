@@ -1167,6 +1167,16 @@ fn work_items_has_held_at(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 228.
+fn hosts_has_login_fingerprints(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('hosts') WHERE name = 'login_fingerprints'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 203.
 fn hosts_has_login_split(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
@@ -2610,6 +2620,13 @@ const MIGRATIONS: &[Migration] = &[
         version: 227,
         sql: include_str!("../../migrations/227_task_worker_spend.sql"),
         already_applied: Some(tasks_have_worker_spent),
+    },
+    // Login fingerprints: one login copied onto two hosts. ADD COLUMN, so
+    // guarded.
+    Migration {
+        version: 228,
+        sql: include_str!("../../migrations/228_host_login_fingerprints.sql"),
+        already_applied: Some(hosts_has_login_fingerprints),
     },
 ];
 

@@ -461,6 +461,7 @@ pub fn hosts_health(
         .filter_map(|h| h.claude_version.clone())
         .filter(|v| version_parts(v).is_some())
         .max_by(|a, b| version_parts(a).cmp(&version_parts(b)));
+    let copied = crate::service::login_conflicts::copied(hosts);
     hosts
         .iter()
         .filter(|h| !h.hidden)
@@ -525,7 +526,13 @@ pub fn hosts_health(
                 mem_pressure: h.mem_pressure.map(round_pct),
                 mem_low: mem_low(h, t.mem_low_pct, now),
                 cpu_saturated: cpu_saturated(h, now),
-                login_conflicts: crate::service::login_conflicts::for_host(h),
+                login_conflicts: {
+                    let mut c = crate::service::login_conflicts::for_host(h);
+                    c.extend(crate::service::login_conflicts::copied_on(
+                        &h.alias, &copied,
+                    ));
+                    c
+                },
             }
         })
         .collect()
@@ -1541,6 +1548,7 @@ mod tests {
             cpu_saturated: false,
             signed_out_logins: Vec::new(),
             login_split: None,
+            login_fingerprints: Vec::new(),
             harnesses: None,
         }
     }

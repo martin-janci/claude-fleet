@@ -244,6 +244,10 @@ pub(crate) fn sample_host() -> HostRow {
         signed_out_logins: Vec::new(),
         // Some so the name is in the golden.
         login_split: Some(true),
+        login_fingerprints: vec![fleet_core::store::LoginFingerprint {
+            profile: None,
+            seen: vec!["0123456789ab".into()],
+        }],
     }
 }
 

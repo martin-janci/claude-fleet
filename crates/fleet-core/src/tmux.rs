@@ -696,6 +696,13 @@ pub struct HostHealthSample {
     /// never what it holds. `None`: not macOS, `local` (its sessions read
     /// the Keychain, see `local_health`), or the host could not tell.
     pub login_split: Option<bool>,
+    /// The fingerprint of each Claude login's refresh token on the host
+    /// (migration 228, `loginfp=`, `service::login_conflicts`): `None` in a
+    /// pair is the host's own login, else the profile's name. The first 12
+    /// hex digits of the token's SHA-256, computed on the host; the token
+    /// itself never leaves it. `None`: the host could not tell (an older
+    /// agent); `Some(empty)`: no `/login` file there.
+    pub login_fingerprints: Option<Vec<(Option<String>, String)>>,
 }
 
 /// The variables that outrank a Claude Code `/login` subscription
@@ -731,6 +738,14 @@ pub const AUTH_OVERRIDE_VARS: [&str; 7] = [
 /// `find-generic-password` without `-w` reads the item's attributes, which
 /// an SSH session can do even while the Keychain will not hand out its
 /// secret, and prints nothing fleet keeps. Empty elsewhere.
+/// `loginfp=` (migration 228) lists `<login>:<fingerprint>` for each
+/// `.credentials.json` the host's logins keep, `_own` for the host's own
+/// (`~/.claude`), else the profile's name: the refresh token is read into a
+/// shell variable and piped into `sha256sum` (or `shasum -a 256`), and only
+/// the first 12 hex digits are printed, so one login copied onto another
+/// host shows as one fingerprint twice (`service::login_conflicts`). Its
+/// `case` pattern opens with `(`: bash 3.2, macOS's `sh`, otherwise reads
+/// the pattern's `)` as the end of the `$(…)` around it.
 ///
 /// Host load (migration 193): `memkb=` falls back on macOS to
 /// `kern.memorystatus_level` (the percent of memory the kernel counts as
@@ -742,7 +757,7 @@ pub const AUTH_OVERRIDE_VARS: [&str; 7] = [
 /// script is the same text over SSH, on `local` and through an agent
 /// (`remote_sh`), so every transport gets the new lines with no protocol
 /// change; an older hub simply never prints them.
-pub const HOST_HEALTH_SCRIPT: &str = "printf 'dfhome=%s\\n' \"$(df -Pk \"$HOME\" 2>/dev/null | tail -n 1)\"; \
+pub const HOST_HEALTH_SCRIPT: &str = concat!("printf 'dfhome=%s\\n' \"$(df -Pk \"$HOME\" 2>/dev/null | tail -n 1)\"; \
 printf 'dftmp=%s\\n' \"$(df -Pk \"${TMPDIR:-/tmp}\" 2>/dev/null | tail -n 1)\"; \
 printf 'load=%s\\n' \"$(cat /proc/loadavg 2>/dev/null || sysctl -n vm.loadavg 2>/dev/null)\"; \
 printf 'memkb=%s\\n' \"$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo 2>/dev/null || { l=$(sysctl -n kern.memorystatus_level 2>/dev/null); m=$(sysctl -n hw.memsize 2>/dev/null); [ -n \"$l\" ] && [ -n \"$m\" ] && echo $(( m / 1024 * l / 100 )); })\"; \
@@ -756,17 +771,49 @@ printf 'memtotal=%s\\n' \"$(awk '/^MemTotal:/ {print $2}' /proc/meminfo 2>/dev/n
 printf 'bootat=%s\\n' \"$(awk '/^btime / {print $2}' /proc/stat 2>/dev/null || sysctl -n kern.boottime 2>/dev/null | sed -n 's/.*{ sec = \\([0-9]*\\),.*/\\1/p')\"; \
 printf 'authenv=%s\\n' \"$({ env; tmux show-environment -g 2>/dev/null; } | grep -E '^(CLAUDE_CODE_USE_BEDROCK|CLAUDE_CODE_USE_VERTEX|CLAUDE_CODE_USE_FOUNDRY|ANTHROPIC_AUTH_TOKEN|ANTHROPIC_API_KEY|CLAUDE_CODE_OAUTH_TOKEN|ANTHROPIC_PROFILE)=.' | cut -d= -f1 | sort -u | tr '\\n' ' ')\"; \
 printf 'agents=%s\\n' \"$(for a in claude codex agy hermes gemini; do command -v \"$a\" >/dev/null 2>&1 && printf '%s ' \"$a\"; done)\"; \
-printf 'credsplit=%s\\n' \"$([ \"$(uname -s 2>/dev/null)\" = Darwin ] && { [ -f \"$HOME/.claude/.credentials.json\" ] && security find-generic-password -s 'Claude Code-credentials' >/dev/null 2>&1 && echo 1 || echo 0; })\"";
+printf 'credsplit=%s\\n' \"$([ \"$(uname -s 2>/dev/null)\" = Darwin ] && { [ -f \"$HOME/.claude/.credentials.json\" ] && security find-generic-password -s 'Claude Code-credentials' >/dev/null 2>&1 && echo 1 || echo 0; })\"; ",
+r#"printf 'loginfp=%s\n' "$(for f in "$HOME/.claude/.credentials.json" "$HOME"/.claude-profiles/*/.credentials.json; do [ -r "$f" ] || continue; d=${f%/.credentials.json}; if [ "$d" = "$HOME/.claude" ]; then n=_own; else n=${d##*/}; case "$n" in (''|[!A-Za-z0-9]*|*[!A-Za-z0-9_-]*) continue;; esac; fi; t=$(jq -r '.claudeAiOauth.refreshToken // empty' "$f" 2>/dev/null || python3 -c 'import json,sys; print((json.load(open(sys.argv[1])).get("claudeAiOauth") or {}).get("refreshToken") or "")' "$f" 2>/dev/null); [ -n "$t" ] || continue; h=$(printf '%s' "$t" | { sha256sum 2>/dev/null || shasum -a 256 2>/dev/null; } | cut -c1-12); t=; [ -n "$h" ] && printf '%s:%s ' "$n" "$h"; done)""#);
 
 /// A [`HOST_HEALTH_SCRIPT`] sample taken on `local`, with `login_split`
 /// dropped: the split is about `claude` started over SSH, which finds the
 /// Keychain locked and falls back to `.credentials.json`. Fleet's local
 /// tmux server is started from the login session, so its sessions read the
 /// Keychain like the desktop app does, and a `.credentials.json` left over
-/// next to it is a copy nothing of fleet's refreshes.
+/// next to it is a copy nothing of fleet's refreshes. For the same reason
+/// the host's own login drops out of `login_fingerprints`: that file is not
+/// the login fleet's local sessions use, so a host it was copied to is not
+/// fighting them over a refresh token. Profiles stay.
 fn local_health(mut sample: HostHealthSample) -> HostHealthSample {
     sample.login_split = None;
+    if let Some(fps) = sample.login_fingerprints.as_mut() {
+        fps.retain(|(p, _)| p.is_some());
+    }
     sample
+}
+
+/// Parse a `loginfp=` value: `<login>:<fingerprint>` pairs, `_own` the
+/// host's own login. A pair whose name is not a profile name, or whose
+/// fingerprint is not 12 hex digits, is dropped; the first pair of a login
+/// wins.
+pub(crate) fn parse_login_fingerprints(v: &str) -> Vec<(Option<String>, String)> {
+    let mut out: Vec<(Option<String>, String)> = Vec::new();
+    for pair in v.split_whitespace() {
+        let Some((name, fp)) = pair.split_once(':') else {
+            continue;
+        };
+        if fp.len() != 12 || !fp.bytes().all(|b| b.is_ascii_hexdigit()) {
+            continue;
+        }
+        let login = match name {
+            crate::service::add_account::OWN_LOGIN => None,
+            n if crate::validate::claude_profile(n).is_ok() => Some(n.to_string()),
+            _ => continue,
+        };
+        if out.iter().all(|(l, _)| *l != login) {
+            out.push((login, fp.to_ascii_lowercase()));
+        }
+    }
+    out
 }
 
 /// Second field of a `df -Pk` data line is total kB, fourth is available kB.
@@ -840,6 +887,8 @@ pub fn parse_host_health(stdout: &str) -> HostHealthSample {
                     .map(|n| n.to_string())
                     .collect(),
             );
+        } else if let Some(v) = line.strip_prefix("loginfp=") {
+            h.login_fingerprints = Some(parse_login_fingerprints(v));
         } else if let Some(v) = line.strip_prefix("credsplit=") {
             h.login_split = match v.trim() {
                 "1" => Some(true),
@@ -3548,6 +3597,87 @@ mod tests {
         assert_eq!(parse_host_health("authenv=\n").auth_overrides, Some(vec![]));
         // An older agent's sample has no line at all: unknown, not clean.
         assert_eq!(parse_host_health("uptime=5\n").auth_overrides, None);
+    }
+
+    #[test]
+    fn parse_host_health_reads_the_login_fingerprints() {
+        let h = parse_host_health(
+            "loginfp=_own:0123456789ab work:ABCDEF012345 bad/name:0123456789ab work:111111111111 short:abc x:\n",
+        );
+        assert_eq!(
+            h.login_fingerprints,
+            Some(vec![
+                (None, "0123456789ab".to_string()),
+                (Some("work".to_string()), "abcdef012345".to_string()),
+            ])
+        );
+        assert_eq!(
+            parse_host_health("loginfp=\n").login_fingerprints,
+            Some(vec![])
+        );
+        assert_eq!(parse_host_health("uptime=5\n").login_fingerprints, None);
+        // `local`: its own login's file is not what its sessions use.
+        let l = local_health(parse_host_health(
+            "loginfp=_own:0123456789ab p:111111111111\n",
+        ));
+        assert_eq!(
+            l.login_fingerprints,
+            Some(vec![(Some("p".to_string()), "111111111111".to_string())])
+        );
+    }
+
+    /// The `loginfp=` line against a fake `$HOME`: one line per login file,
+    /// the fingerprint the token's SHA-256 starts with, the token nowhere
+    /// in the output, an empty or tokenless file skipped.
+    #[test]
+    fn the_login_fingerprint_line_hashes_each_token_on_the_host() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        let write = |rel: &str, body: &str| {
+            let p = h.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        write(
+            ".claude/.credentials.json",
+            r#"{"claudeAiOauth":{"accessToken":"x","refreshToken":"sk-ant-ort01-SECRET"}}"#,
+        );
+        write(
+            ".claude-profiles/work/.credentials.json",
+            r#"{"claudeAiOauth":{"refreshToken":"sk-ant-ort01-OTHER"}}"#,
+        );
+        write(".claude-profiles/empty/.credentials.json", r#"{}"#);
+        write(
+            ".claude-profiles/-bad/.credentials.json",
+            r#"{"claudeAiOauth":{"refreshToken":"t"}}"#,
+        );
+        let line = &HOST_HEALTH_SCRIPT[HOST_HEALTH_SCRIPT.find("printf 'loginfp=").unwrap()..];
+        let out = crate::proc::std_command("sh")
+            .arg("-c")
+            .arg(line)
+            .env("HOME", h)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8(out.stdout).unwrap();
+        assert!(
+            !stdout.contains("SECRET") && !stdout.contains("OTHER"),
+            "{stdout}"
+        );
+        let sha = |t: &str| {
+            use sha2::Digest;
+            let d = sha2::Sha256::digest(t.as_bytes());
+            d.iter().map(|b| format!("{b:02x}")).collect::<String>()[..12].to_string()
+        };
+        let mut fps = parse_host_health(&stdout).login_fingerprints.unwrap();
+        fps.sort();
+        assert_eq!(
+            fps,
+            vec![
+                (None, sha("sk-ant-ort01-SECRET")),
+                (Some("work".to_string()), sha("sk-ant-ort01-OTHER")),
+            ],
+            "{stdout}"
+        );
     }
 
     #[test]

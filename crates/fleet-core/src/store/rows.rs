@@ -1370,6 +1370,56 @@ pub struct HostRow {
     /// an older hub omits it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub login_split: Option<bool>,
+    /// The last few fingerprints of each Claude login's refresh token on
+    /// the host (migration 228, `loginfp=` of
+    /// [`crate::tmux::HOST_HEALTH_SCRIPT`]), to spot one login copied onto
+    /// two hosts (`service::login_conflicts::copied`). Empty: never
+    /// sampled, or no `/login` file there. Per-field default: an older hub
+    /// omits it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub login_fingerprints: Vec<LoginFingerprint>,
+}
+
+/// One login's refresh-token fingerprints ([`HostRow::login_fingerprints`]).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LoginFingerprint {
+    /// `None` = the host's own login; else the login profile's name.
+    #[serde(default)]
+    pub profile: Option<String>,
+    /// Newest first, at most [`LOGIN_FINGERPRINTS_KEPT`]: the first 12 hex
+    /// digits of the refresh token's SHA-256. The older ones let a copy
+    /// still match its original after the original refreshed.
+    pub seen: Vec<String>,
+}
+
+/// How many fingerprints a login keeps ([`LoginFingerprint::seen`]).
+pub const LOGIN_FINGERPRINTS_KEPT: usize = 3;
+
+/// PURE: the stored fingerprints after a sample: each login the sample
+/// names gets its new fingerprint first, then those it had; a login the
+/// sample does not name is gone (its file was deleted). `None` (the host
+/// could not tell) keeps `prev`.
+pub fn merge_login_fingerprints(
+    prev: &[LoginFingerprint],
+    sample: Option<&[(Option<String>, String)]>,
+) -> Vec<LoginFingerprint> {
+    let Some(sample) = sample else {
+        return prev.to_vec();
+    };
+    sample
+        .iter()
+        .map(|(profile, fp)| {
+            let mut seen = vec![fp.clone()];
+            if let Some(old) = prev.iter().find(|p| p.profile == *profile) {
+                seen.extend(old.seen.iter().filter(|f| *f != fp).cloned());
+            }
+            seen.truncate(LOGIN_FINGERPRINTS_KEPT);
+            LoginFingerprint {
+                profile: profile.clone(),
+                seen,
+            }
+        })
+        .collect()
 }
 
 /// One signed-out login on a host ([`HostRow::signed_out_logins`]).
@@ -1450,6 +1500,9 @@ pub struct HostHealth {
     /// a stale `true` after the host stops reporting a split.
     #[serde(default)]
     pub login_split: Option<bool>,
+    /// Migration 228. Always sent, empty too, for the same reason.
+    #[serde(default)]
+    pub login_fingerprints: Vec<LoginFingerprint>,
 }
 
 impl HostHealth {
@@ -1474,6 +1527,7 @@ impl HostHealth {
             mem_low: row.mem_low,
             cpu_saturated: row.cpu_saturated,
             login_split: row.login_split,
+            login_fingerprints: row.login_fingerprints.clone(),
         }
     }
 }
@@ -1504,7 +1558,7 @@ pub(super) const HOST_COLUMNS: &str =
      harnesses, provision_warning, auth_overrides, claude_profiles, cpu_count, mem_total_kb, \
      boot_at, latency_ms, worktree_kb, worktree_at, agents_on_path, \
      last_reachable_at, last_probe_error_code, last_probe_error, \
-     cpu_pct, mem_pressure, mem_low, cpu_saturated, signed_out_logins, login_split";
+     cpu_pct, mem_pressure, mem_low, cpu_saturated, signed_out_logins, login_split, login_fingerprints";
 
 /// Map a row selected with [`HOST_COLUMNS`].
 pub(super) fn map_host_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostRow> {
@@ -1584,6 +1638,11 @@ pub(super) fn map_host_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostRow>
             .unwrap_or_default(),
         // Migration 203.
         login_split: row.get::<_, Option<i64>>(42)?.map(|v| v != 0),
+        // Migration 228. Same lenient read as `harnesses`.
+        login_fingerprints: row
+            .get::<_, Option<String>>(43)?
+            .and_then(|t| serde_json::from_str::<Vec<LoginFingerprint>>(&t).ok())
+            .unwrap_or_default(),
     })
 }
 
