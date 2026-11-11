@@ -917,6 +917,14 @@ Access: the master, a paired device or a per-host token · deadline 60 s.
 
 Parameters (* required): `action`, `client_msg_id`, `note_id`, `notes`, `resolved`, `session_id`*
 
+### `review_request`
+
+Ask a colleague to review a session you OWN: ask {session_id, person, note?} shares it (drive; watch for a viewer) and puts it in their Inbox; list (default) the asks to you; done {id}.
+
+Access: the master or a paired device; not a per-host token · deadline 60 s.
+
+Parameters (* required): `action`, `done`, `id`, `note`, `person`, `session_id`
+
 ### `revoke_client`
 
 Revoke a paired client's token by name: its next request is refused and the name is free to pair again; the row is kept, revoked, for the audit trail. E_NOTFOUND when no live client has that name. Master token only.
@@ -1602,6 +1610,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::sessions::queue_prompt`
 - `commands::sessions::queued_prompts`
 - `commands::sessions::review_notes`
+- `commands::sessions::review_request`
 - `commands::sessions::cancel_queued_prompt`
 - `commands::sessions::recreate_session`
 - `commands::sessions::restore_host_sessions`

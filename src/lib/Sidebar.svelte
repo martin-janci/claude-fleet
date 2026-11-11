@@ -47,6 +47,7 @@
   } from './inbox';
   import RoutineFailures from './automation/RoutineFailures.svelte';
   import MissionWaits from './MissionWaits.svelte';
+  import ReviewRequests from './ReviewRequests.svelte';
   import AgentActions from './automation/AgentActions.svelte';
   import { loadAgents, pendingAgentCount } from './agents';
   import ProposedBy from './ProposedBy.svelte';
@@ -1775,6 +1776,8 @@
         {#if sec.routines}<RoutineFailures />{/if}
         <!-- G1.6: missions waiting on a person (a grant to sign, a question). -->
         {#if sec.missions}<MissionWaits />{/if}
+        <!-- Reviews a colleague asked of you ("Ask for review…"). -->
+        {#if sec.missions}<ReviewRequests />{/if}
         {#if sec.agents}<AgentActions />{/if}
         {#if sec.proposed && inboxProposed.length > 0}
           <!-- G1.6/G3.1: Jev's "probably waiting", at the foot of Needs you,

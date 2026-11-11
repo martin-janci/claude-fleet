@@ -71,6 +71,7 @@ mod reconcile;
 mod reports;
 mod review_notes;
 mod review_prs;
+mod review_requests;
 mod routine_decisions;
 mod routine_memory;
 mod routine_seen;
@@ -256,6 +257,7 @@ pub use review_prs::{
     NewReviewRecord, ReviewPrRow, ReviewRecordRow, TestExemptionRow, REVIEW_PR_STATUSES,
     REVIEW_SKIP_REASONS,
 };
+pub use review_requests::{ReviewRequestRow, REVIEW_REQUEST_NOTE_MAX};
 pub use routine_decisions::{
     NewRoutineDecision, RecentEvent, RoutineDecisionRow, ROUTINE_DECISIONS_KEPT,
     ROUTINE_DECISION_VERDICTS,

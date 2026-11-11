@@ -84,7 +84,7 @@ review     repo_changes repo_diff repo_file repo_tree repo_log repo_blame
            repo_commit_diff
 share      session_share session_narrow session_unshare session_access
            session_presence my_grants my_profile session_ask_access
-           access_requests
+           access_requests review_request
 files      send_file list_downloads pause_download remove_download library
            get_clipboard set_clipboard
 devices    debug_devices
