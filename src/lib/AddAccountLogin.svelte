@@ -35,11 +35,15 @@
     onclose,
     pollMs = 2000,
   }: {
-    login: { host: string; profile: string };
+    /** `again`: an existing login signed in again (profile '' = the host's own). */
+    login: { host: string; profile: string; again?: boolean };
     onclose: () => void;
     pollMs?: number;
   } = $props();
 
+  const again = $derived(!!login.again);
+  /** "work" or, signing the host's own login in again, "the host login". */
+  const loginName = $derived(login.profile || 'the host login');
   let status = $state<LoginStatus | null>(null);
   /** When this link first showed (M15 G7.12: its expiry counts from here). */
   let linkSeen = $state<{ url: string; at: number } | null>(null);
@@ -71,7 +75,8 @@
   const sameAs = $derived.by(() => {
     const uuid = status?.logged_in ? (status.account_uuid ?? null) : null;
     const h = $hostByAlias.get(login.host);
-    if (!uuid || !h) return null;
+    // Signing a login in again adds no login: nothing new to compare.
+    if (!uuid || !h || again) return null;
     if (h.account_uuid === uuid) return 'the host login';
     const p = (h.claude_profiles ?? []).find((x) => x.name !== login.profile && x.account_uuid === uuid);
     return p ? `the ${p.name} login` : null;
@@ -83,7 +88,7 @@
   }
 
   async function poll() {
-    const r = await loginStatus(login.host, login.profile);
+    const r = await loginStatus(login.host, login.profile, again);
     if (r.ok) {
       status = r.value;
       const url = r.value.sign_in_url;
@@ -94,8 +99,8 @@
 
   async function startOver() {
     stepError = null;
-    await endLogin(login.host, login.profile);
-    const r = await startLogin(login.host, login.profile);
+    await endLogin(login.host, login.profile, again);
+    const r = await startLogin(login.host, login.profile, again);
     if (!r.ok) stepError = errorText(r.error);
     linkSeen = null;
     void poll();
@@ -110,7 +115,7 @@
 
   async function press(key: LoginKey) {
     stepError = null;
-    const r = await loginKey(login.host, login.profile, key);
+    const r = await loginKey(login.host, login.profile, key, again);
     if (!r.ok) stepError = errorText(r.error);
     void poll();
   }
@@ -119,7 +124,7 @@
     if (!code.trim()) return;
     sending = true;
     stepError = null;
-    const r = await loginCode(login.host, login.profile, code);
+    const r = await loginCode(login.host, login.profile, code, again);
     sending = false;
     if (r.ok) code = '';
     else stepError = errorText(r.error);
@@ -131,11 +136,11 @@
   }
 
   async function finish() {
-    await endLogin(login.host, login.profile);
+    await endLogin(login.host, login.profile, again);
     if (status?.logged_in) {
       push({
         kind: 'success',
-        message: `${login.profile} on ${login.host} is signed in${status.email ? ` as ${status.email}` : ''}.`,
+        message: `${again ? `${loginName} on ${login.host} is signed in again` : `${login.profile} on ${login.host} is signed in`}${status.email ? ` as ${status.email}` : ''}.`,
       });
     }
     onclose();
@@ -148,7 +153,7 @@
 
 <Modal label="Sign in" width="560px" testid="add-account-login">
   <div class="sheet">
-    <h3>Sign in {login.profile} on {login.host}</h3>
+    <h3>{again ? `Sign ${loginName} in again on ${login.host}` : `Sign in ${login.profile} on ${login.host}`}</h3>
     {#if status?.logged_in}
       <p class="done" role="status" data-testid="add-account-signed-in">
         Signed in{status.email ? ` as ${status.email}` : ''}. New sessions on {login.host} can bill it.

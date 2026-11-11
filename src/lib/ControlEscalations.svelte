@@ -28,6 +28,7 @@
   import { refreshMutes, threadFollows } from './control_journal';
   import { hosts } from './hosts';
   import { loadMissionList, missionList } from './mission_room';
+  import SignInAgain from './SignInAgain.svelte';
   import { openMission } from './missions';
   import { onWorkChangedDebounced } from './work';
 
@@ -105,7 +106,14 @@
     }
     return null;
   }
+  /** The login card whose Sign in again is open. */
+  let signingIn = $state<{ host: string; profile: string | null; token: boolean } | null>(null);
 </script>
+
+{#if signingIn}
+  {@const g = signingIn}
+  <SignInAgain host={g.host} profile={g.profile} token={g.token} onclose={() => (signingIn = null)} />
+{/if}
 
 {#if shown.length > 0 || others > 0}
   <ul class="escalations" data-testid="control-escalations" aria-label="Needs you" aria-live="polite" bind:this={list}>
@@ -124,6 +132,15 @@
             data-testid="control-escalation-open"
             aria-describedby="{uid}-{i}"
             onclick={() => openInControl(s.id, displayName(s, true))}>Open</button
+          >
+        {:else if e.login}
+          {@const g = e.login}
+          <button
+            type="button"
+            class="btn btn--chip"
+            data-testid="control-escalation-sign-in"
+            aria-describedby="{uid}-{i}"
+            onclick={() => (signingIn = g)}>{g.token ? 'New token…' : 'Sign in again'}</button
           >
         {:else if e.missionId != null}
           {@const id = e.missionId}
