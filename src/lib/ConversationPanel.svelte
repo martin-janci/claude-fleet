@@ -2995,6 +2995,7 @@
           <AnswerPrompt
             {session}
             view={answerView}
+            keys={visible}
             onOpenTerminal={writeBlocked === null ? onOpenTerminal : undefined}
             onAnswered={advanceOnAnswer ? afterAnswer : undefined}
             onGone={dismissGoneAnswer}
@@ -3112,9 +3113,12 @@
       onSend={(text) => void sendText(text)}
     />
   {/if}
-  {#if showComposer && canPrompt && bgEntry === null && viewing === null}
+  {#if showComposer && canPrompt && bgEntry === null && viewing === null && !away}
     <!-- Review w13-9: Send later's waiting prompts, with a cancel each. A new
-         turn may be one of them going out, so it reads again on each. -->
+         turn may be one of them going out, so it reads again on each. Not for
+         another fleet's session: queued_prompts / cancel_queued_prompt /
+         queue_prompt are not fleet-scoped, so they would read and cancel the
+         primary's session with the same id (send later is off there too). -->
     <ScheduledPrompts sessionId={session.id} refreshKey={scheduledKey + (session.turn_seq ?? 0)} />
   {/if}
   {#if held.length > 0 && showComposer && canPrompt && bgEntry === null}
