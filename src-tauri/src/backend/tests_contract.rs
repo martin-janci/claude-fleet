@@ -222,6 +222,7 @@ pub(crate) fn sample_host() -> HostRow {
             name: "work".into(),
             account_uuid: Some("acct-work".into()),
             email: Some("work@example.com".into()),
+            credential: None,
         }]),
         cpu_count: Some(16),
         mem_total_kb: Some(65_842_312),

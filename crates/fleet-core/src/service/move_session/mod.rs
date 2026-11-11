@@ -3662,6 +3662,7 @@ mod tests {
             name: name.into(),
             account_uuid: Some(uuid.into()),
             email: None,
+            credential: None,
         };
         s.set_host_profiles("htz", &[profile("work", "acct-c"), profile("ci", "acct-a")])
             .unwrap();

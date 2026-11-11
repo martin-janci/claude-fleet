@@ -114,7 +114,9 @@ pub fn find(
     if let Some(uuid) = host_account.filter(oauth) {
         add(uuid, None, None);
     }
-    for p in profiles {
+    // Nor does a setup token: it is a token of its own, not a second
+    // `/login` sharing one refresh token.
+    for p in profiles.iter().filter(|p| p.credential.is_none()) {
         if let Some(uuid) = p.account_uuid.as_deref().filter(oauth) {
             add(uuid, Some(p.name.clone()), p.email.as_ref());
         }
@@ -137,6 +139,7 @@ mod tests {
             name: name.to_string(),
             account_uuid: uuid.map(str::to_string),
             email: email.map(str::to_string),
+            credential: None,
         }
     }
 
@@ -200,6 +203,15 @@ mod tests {
             profile("two", Some("apikey-0123456789abcdef"), None),
         ];
         assert!(find(None, Some("apikey-0123456789abcdef"), &profiles).is_empty());
+    }
+
+    #[test]
+    fn a_setup_token_on_the_hosts_own_account_is_not_a_conflict() {
+        let tok = HostProfileRow {
+            credential: Some("setup_token".into()),
+            ..profile("tok", Some("A"), None)
+        };
+        assert!(find(None, Some("A"), &[tok]).is_empty());
     }
 
     #[test]

@@ -910,6 +910,26 @@ impl Store {
         Ok(n > 0)
     }
 
+    /// Retention: delete up to `limit` actions that reached an end state
+    /// (`rejected`, `executed`, `failed`, `expired`) and were created before
+    /// `cutoff`; the number deleted. A `pending` action still waits for a
+    /// person and an `approved` one for its run, so neither is ever swept.
+    /// The job row stays: its `UNIQUE(agent, dedup_key)` is what stops the
+    /// job from running again.
+    pub fn sweep_agent_actions(
+        &self,
+        cutoff: i64,
+        limit: usize,
+    ) -> Result<usize, crate::ipc_error::IpcError> {
+        Ok(self.conn.execute(
+            "DELETE FROM agent_actions WHERE id IN \
+               (SELECT id FROM agent_actions \
+                WHERE state IN ('rejected', 'executed', 'failed', 'expired') \
+                  AND created_at < ?1 ORDER BY id LIMIT ?2)",
+            params![cutoff, limit as i64],
+        )?)
+    }
+
     /// Where each of actions `ids` came from: its job's rule, agent and
     /// subject, keyed by the action's id. An id with no row is left out.
     pub fn agent_action_origins(&self, ids: &[i64]) -> Result<Vec<ActionOrigin>, rusqlite::Error> {
@@ -1199,6 +1219,49 @@ mod tests {
             error: None,
         };
         assert!(s.finish_agent_job(j.id, &bad, 0, 0).is_err());
+    }
+
+    #[test]
+    fn the_sweep_takes_only_old_actions_that_ended() {
+        let s = Store::open_in_memory().unwrap();
+        let rid = s.grant_agent_rule(&rule("review", "gh:o/r")).unwrap();
+        s.record_agent_poll(rid, 1000, None, &[job(rid, "gh:o/r#1", "k1")])
+            .unwrap();
+        let jid = s.list_agent_jobs(None, 1).unwrap()[0].id;
+        let add = |at: i64| s.insert_agent_action(jid, "post_review", "{}", at).unwrap();
+        // Old: one of each end state, one still pending, one approved and
+        // waiting for its run.
+        let (executed, failed, rejected, expired) = (add(10), add(11), add(12), add(13));
+        let (pending, approved) = (add(14), add(15));
+        s.decide_agent_action(executed, true, "p", 20).unwrap();
+        s.finish_agent_action(executed, "executed", None, 21)
+            .unwrap();
+        s.decide_agent_action(failed, true, "p", 20).unwrap();
+        s.finish_agent_action(failed, "failed", Some("422"), 21)
+            .unwrap();
+        s.decide_agent_action(rejected, false, "p", 20).unwrap();
+        assert!(s.supersede_agent_action(expired, "newer", 20).unwrap());
+        s.decide_agent_action(approved, true, "p", 20).unwrap();
+        // Recent, and ended.
+        let recent = add(900);
+        s.decide_agent_action(recent, false, "p", 901).unwrap();
+
+        // `limit` bounds a call.
+        assert_eq!(s.sweep_agent_actions(500, 1).unwrap(), 1);
+        assert_eq!(s.sweep_agent_actions(500, 100).unwrap(), 3);
+        assert_eq!(s.sweep_agent_actions(500, 100).unwrap(), 0);
+        let left: Vec<i64> = s
+            .agent_actions_of_job(jid)
+            .unwrap()
+            .iter()
+            .map(|a| a.id)
+            .collect();
+        assert_eq!(left, [pending, approved, recent]);
+        assert_eq!(
+            s.list_agent_jobs(None, 10).unwrap().len(),
+            1,
+            "the job stays"
+        );
     }
 
     #[test]

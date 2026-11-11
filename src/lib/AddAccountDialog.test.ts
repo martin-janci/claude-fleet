@@ -4,6 +4,7 @@
 // the login.
 import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { get } from 'svelte/store';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 
@@ -11,10 +12,12 @@ import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import AddAccountDialog from './AddAccountDialog.svelte';
 import { hosts } from './hosts';
 import { toasts } from './toasts';
-import { answerProblems, asksForCode, paneChoices, profileProblem, readAnswers } from './add_account';
+import { accounts } from './accounts';
+import { answerProblems, asksForCode, paneChoices, profileProblem, readAnswers, tokenAccountChoices } from './add_account';
 
 const invoke = mockedInvoke as ReturnType<typeof vi.fn>;
 const KEY = 'sk-ant-api03-abcdefghijklmnopqrstuvwxyz';
+const TOKEN = 'sk-ant-oat01-ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123';
 
 let loggedIn = false;
 let calls: Record<string, unknown>[] = [];
@@ -23,6 +26,10 @@ beforeEach(() => {
   loggedIn = false;
   calls = [];
   hosts.set([{ alias: 'mercury', hidden: false } as never]);
+  accounts.set([
+    { uuid: 'u-ada', email: 'ada@x.com', nickname: null } as never,
+    { uuid: 'apikey-0123456789abcdef', email: null, nickname: 'Team API' } as never,
+  ]);
   toasts.set([]);
   invoke.mockReset();
   invoke.mockImplementation(async (cmd: string, args?: unknown) => {
@@ -38,6 +45,9 @@ beforeEach(() => {
         };
       }
       return { host_alias: a.host_alias, profile: a.profile, account_uuid: 'apikey-0123456789abcdef', daily_limit_usd: a.daily_limit_usd };
+    }
+    if (a.action === 'setup_token') {
+      return { host_alias: a.host_alias, profile: a.profile, account_uuid: a.account ?? 'setuptoken-0123456789abcdef', replaced: a.profile === 'old' };
     }
     if (a.action === 'start_login') return { session: `fleet-login--${a.profile}` };
     if (a.action === 'login_status') {
@@ -116,6 +126,51 @@ describe('+ Add account', () => {
   });
 });
 
+describe('+ Add account · setup token', () => {
+  async function token(profile: string, value: string, account?: string) {
+    await fireEvent.click(screen.getByTestId('form-field-kind-setup_token'));
+    await fireEvent.input(screen.getByTestId('form-field-profile'), { target: { value: profile } });
+    await fireEvent.input(screen.getByTestId('form-field-setup_token'), { target: { value } });
+    if (account) await fireEvent.click(screen.getByTestId(`form-field-account-${account}`));
+    await fireEvent.click(screen.getByTestId('form-submit'));
+  }
+
+  it('sends the token in one call, under the account picked', async () => {
+    const onclose = vi.fn();
+    render(AddAccountDialog, { props: { onclose, host: 'mercury' } });
+    await token('laptop', ` ${TOKEN} `, 'u-ada');
+    await waitFor(() => expect(onclose).toHaveBeenCalled());
+    expect(calls).toEqual([{ action: 'setup_token', host_alias: 'mercury', profile: 'laptop', setup_token: TOKEN, account: 'u-ada' }]);
+  });
+
+  it('offers only subscription accounts, and none by default', async () => {
+    render(AddAccountDialog, { props: { onclose: () => {}, host: 'mercury' } });
+    await fireEvent.click(screen.getByTestId('form-field-kind-setup_token'));
+    expect(screen.getByTestId('form-field-account-u-ada')).toBeTruthy();
+    expect(screen.queryByTestId('form-field-account-apikey-0123456789abcdef')).toBeNull();
+    await fireEvent.input(screen.getByTestId('form-field-profile'), { target: { value: 'tok' } });
+    await fireEvent.input(screen.getByTestId('form-field-setup_token'), { target: { value: TOKEN } });
+    await fireEvent.click(screen.getByTestId('form-submit'));
+    await waitFor(() => expect(calls.length).toBe(1));
+    expect(calls[0]).not.toHaveProperty('account');
+  });
+
+  it('says when a token was replaced', async () => {
+    render(AddAccountDialog, { props: { onclose: () => {}, host: 'mercury', kind: 'setup_token', profile: 'old' } });
+    await fireEvent.input(screen.getByTestId('form-field-setup_token'), { target: { value: TOKEN } });
+    await fireEvent.click(screen.getByTestId('form-submit'));
+    await waitFor(() => expect(JSON.stringify(get(toasts))).toContain('is replaced'));
+    expect(calls[0]).toMatchObject({ action: 'setup_token', profile: 'old' });
+  });
+
+  it('catches an API key pasted as a token before sending', async () => {
+    render(AddAccountDialog, { props: { onclose: () => {}, host: 'mercury' } });
+    await token('tok', KEY);
+    await waitFor(() => expect(document.body.textContent).toContain('That is an API key'));
+    expect(calls).toEqual([]);
+  });
+});
+
 describe('add_account helpers', () => {
   it('reads the answers', () => {
     expect(readAnswers({ host: 'm', kind: 'api_key', profile: ' p ', api_key: ' k ', daily_limit: 0 })).toEqual({
@@ -123,8 +178,26 @@ describe('add_account helpers', () => {
       kind: 'api_key',
       profile: 'p',
       apiKey: 'k',
+      setupToken: '',
+      account: null,
       dailyLimit: null,
     });
+    expect(readAnswers({ host: 'm', kind: 'setup_token', profile: 'p', setup_token: ' t ', account: 'none' })).toMatchObject({
+      kind: 'setup_token',
+      setupToken: 't',
+      account: null,
+    });
+    expect(readAnswers({ kind: 'setup_token', account: 'u1' }).account).toBe('u1');
+    expect(
+      tokenAccountChoices([
+        { uuid: 'u2', email: 'b@x' },
+        { uuid: 'setuptoken-1', email: null, display_name: 'Setup token · t' },
+        { uuid: 'u1', email: 'a@x', nickname: 'Ada' },
+      ]),
+    ).toEqual([
+      ['u1', 'Ada'],
+      ['u2', 'b@x'],
+    ]);
     expect(readAnswers({ host: 'm', profile: 'p', daily_limit: 5 }).kind).toBe('subscription');
     expect(profileProblem('a'.repeat(33))).toBe('32 characters at most.');
     expect(profileProblem('-x')).not.toBeNull();

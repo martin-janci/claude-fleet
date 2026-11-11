@@ -126,6 +126,44 @@ session under the profile exports the key as `ANTHROPIC_API_KEY`
 already a `/login` profile on that host is refused. The usage poll skips
 API-key accounts: they have spend, not usage windows.
 
+**Setup token.** For a host without a browser, or a login that keeps
+expiring: run `claude setup-token` on any computer signed in to the
+subscription and paste the `sk-ant-oat…` token it prints (MCP: `add_account
+{ action: "setup_token", setup_token, account? }`). Fleet asks Anthropic
+whether it works (`GET /api/oauth/profile`, and when the token's scopes do
+not reach it, `GET /v1/models`, from this machine to `api.anthropic.com`
+only); a refusal is the provider's own 401 or 403 on the token field. The
+token then goes to the host on stdin, never in an argv, into
+`~/.claude-profiles/<name>/.fleet-oauth-token` (mode 600), and a session
+under the profile exports it as `CLAUDE_CODE_OAUTH_TOKEN` (rung 5 above,
+ahead of the profile's `/login`; an `ANTHROPIC_API_KEY` or
+`ANTHROPIC_AUTH_TOKEN` from the host's shell is dropped for that
+`claude`). Fleet keeps no copy and writes it to no log, audit line or reply.
+
+The profile is listed as the token's account: the one Anthropic names when
+the token may read its profile, else the one picked under **Same account
+as** (a subscription fleet knows from a login, so the token shares its
+limits and usage readings), else the profile's existing `/login`, else an
+account of its own (`setuptoken-` and 16 hex of the token's SHA-256).
+`.fleet-account.json` carries it, with `"fleetCredential": "setup_token"`,
+and `list_hosts` shows the profile with `credential: "setup_token"`.
+
+- **Replace** a token (they last a year): the same call with the same name.
+  Running sessions keep the old one until they restart.
+- **On a `/login` profile** (say one that is signed out): the token goes in
+  front of that login and the profile keeps its account; its signed-out
+  note is cleared.
+- **Never on an API-key profile**: refused (`E_EXISTS`).
+- **Usage**: a setup token is inference only, so its profile is never a
+  usage source; the account's 5-hour and weekly readings come from a
+  `/login` of the same account elsewhere, if there is one. Nor is a token
+  beside a `/login` of the same account a login conflict: it has no refresh
+  token to revoke.
+
+Desktop: Accounts or Host details → **+ Add account** → *Sign in with*
+**Setup token**; Host details → Login profiles → **Setup token…** opens it
+preset.
+
 **Daily limit.** An API-key account can carry a daily limit in USD (the
 form's field; MCP: `add_account { action: "daily_limit", daily_limit_usd }`,
 0 clears it), kept in the `accounts.daily_limits` setting. When the

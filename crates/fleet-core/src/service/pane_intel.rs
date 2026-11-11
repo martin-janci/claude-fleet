@@ -471,6 +471,16 @@ fn is_live_repl_line(lower: &str) -> bool {
         || l.contains("% used")
 }
 
+/// One lower-cased line that only a running REPL draws: its input prompt
+/// (`❯ …`, not a numbered dialog choice) or a [`LIVE_REPL_CUES`] hint. The
+/// narrow reading [`detect_dialog`] uses: the mode footer and the status line
+/// can be painted under a dialog, so they prove nothing here.
+fn is_live_input_line(lower: &str) -> bool {
+    let l = clean_line(lower);
+    (l.starts_with('❯') && parse_choice(l).is_none() && !is_focused_submit_row(l))
+        || LIVE_REPL_CUES.iter().any(|c| l.contains(c))
+}
+
 /// Detect a stuck state from the (already ANSI-stripped) tail. First match wins,
 /// ordered most-specific first.
 pub(crate) fn detect_stuck(text: &str) -> Option<StuckKind> {
@@ -493,11 +503,17 @@ pub(crate) fn detect_stuck(text: &str) -> Option<StuckKind> {
         }
     }
 
-    // Trust-folder prompt.
-    if (lower.contains("do you trust") && lower.contains("files"))
-        || lower.contains("trust the files in this folder")
-        || lower.contains("trust this folder")
-    {
+    // Trust-folder prompt. The dialog is drawn before the REPL exists, so a
+    // live input box or spinner hint BELOW the words means they are text a
+    // session printed (the operator reporting a trust prompt it answered for
+    // another session), not the dialog.
+    let names_files = lower.contains("files");
+    let trust_cue = lines.iter().rposition(|l| {
+        (l.contains("do you trust") && names_files)
+            || l.contains("trust the files in this folder")
+            || l.contains("trust this folder")
+    });
+    if trust_cue.is_some_and(|at| !lines[at + 1..].iter().any(|l| is_live_input_line(l))) {
         return Some(StuckKind::TrustPrompt);
     }
 
@@ -2092,6 +2108,36 @@ Enter to select · ↑/↓ to navigate · Esc to cancel
             analyze("Select a theme\nEnter to select · Esc to cancel").derived_status,
             Some(ClaudeStatus::Idle)
         );
+    }
+
+    /// The operator's pane on 2026-11-10: its own reply QUOTES the trust
+    /// dialog it answered for another session, and the live input box sits
+    /// under it. Read as a trust prompt, the hub held every prompt to the
+    /// operator for 45 minutes while it sat idle.
+    #[test]
+    fn a_reply_that_quotes_the_trust_dialog_is_not_one() {
+        let tail = "\
+● Stav rozrobených vecí:
+  #24124, deploy panel: session stála na potvrdení „Trust this folder“, ktoré som odklikol
+✻ Cogitated for 15s · done 2:29 PM
+────────────────────────────────────────
+❯ pošli otázky k PD-3319 Branislavovi do Jiry
+────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ⧉ PapayaPOS BE/FE – práca
+";
+        let intel = analyze(tail);
+        assert_eq!(intel.stuck, None);
+        assert_ne!(intel.derived_status, Some(ClaudeStatus::Blocked));
+    }
+
+    #[test]
+    fn the_current_trust_dialog_is_still_a_trust_prompt() {
+        let intel = analyze(
+            "Quick safety check: Is this a project you created or one you trust?\n\
+             ❯ 1. Yes, I trust this folder\n  2. No, exit\n\nEnter to confirm · Esc to cancel\n",
+        );
+        assert_eq!(intel.stuck, Some(StuckKind::TrustPrompt));
+        assert_eq!(intel.derived_status, Some(ClaudeStatus::Blocked));
     }
 
     #[test]

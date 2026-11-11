@@ -50,9 +50,13 @@ pub(crate) fn distinct_account_uuids(hosts: &[HostRow]) -> Vec<String> {
             hosts
                 .iter()
                 .flat_map(|h| h.claude_profiles.iter().flatten())
+                // A setup-token profile cannot be read for usage
+                // (`account_usage::source_hosts`).
+                .filter(|p| p.credential.is_none())
                 .filter_map(|p| p.account_uuid.clone()),
         )
         .filter(|u| !crate::service::add_account::is_api_key_account(u))
+        .filter(|u| !crate::service::add_account::is_setup_token_account(u))
         .filter(|u| seen.insert(u.clone()))
         .collect()
 }

@@ -1,8 +1,8 @@
 <script lang="ts">
   // + Add account (M15 step G2.9). The form asks for the host, the kind
-  // (Claude subscription or API key) and the account's name; an API key is
-  // checked with Anthropic and written to the host in one call, and its
-  // provider's refusal comes back on the field. A subscription opens a login
+  // (Claude subscription, setup token or API key) and the account's name; a
+  // setup token or an API key is checked with Anthropic and written to the
+  // host in one call, and the provider's refusal comes back on the field. A subscription opens a login
   // pane on the host and goes on to the sign-in step (AddAccountLogin).
   import WizardDialog from './forms/WizardDialog.svelte';
   import AddAccountLogin from './AddAccountLogin.svelte';
@@ -11,23 +11,37 @@
   import { push } from './toasts';
   import type { IpcError } from './result';
   import type { FieldProblem, Values } from './forms/forms';
-  import { addApiKey, answerProblems, readAnswers, startLogin } from './add_account';
+  import { accounts } from './accounts';
+  import { addApiKey, addSetupToken, answerProblems, readAnswers, startLogin, tokenAccountChoices, type AccountKind } from './add_account';
 
   let {
     onclose,
     host = undefined,
+    kind = undefined,
+    profile = undefined,
     pollMs = 2000,
   }: {
     onclose: () => void;
     /** Preselect a host (the Hosts page's row). */
     host?: string;
+    /** Preselect how it signs in (a login profile's "Setup token…"). */
+    kind?: AccountKind;
+    /** Preselect the name: an existing profile gets the token. */
+    profile?: string;
     pollMs?: number;
   } = $props();
+
+  const initial = $derived({
+    ...(host ? { host } : {}),
+    ...(kind ? { kind } : {}),
+    ...(profile ? { profile } : {}),
+  });
 
   const wizard = $derived({
     ...WIZARDS.add_account,
     spec: withChoices(WIZARDS.add_account.spec, {
       host: $hosts.filter((h) => !h.hidden).map((h): [string, string] => [h.alias, h.alias]),
+      account: [['none', 'None of these'], ...tokenAccountChoices($accounts)],
     }),
   });
 
@@ -48,6 +62,24 @@
     error = null;
     if (problems.length > 0) return;
     busy = true;
+    if (a.kind === 'setup_token') {
+      const r = await addSetupToken(a);
+      busy = false;
+      if (r.ok) {
+        const who = r.value.email ? ` (${r.value.email})` : '';
+        push({
+          kind: 'success',
+          message: r.value.replaced
+            ? `The setup token of ${a.profile} on ${a.host} is replaced${who}. Sessions pick it up when they next start.`
+            : `${a.profile} added on ${a.host} with a setup token${who}. New sessions there can bill it.`,
+        });
+        onclose();
+      } else {
+        problems = problemsOf(r.error);
+        error = problems.length > 0 ? null : r.error;
+      }
+      return;
+    }
     if (a.kind === 'api_key') {
       const r = await addApiKey(a);
       busy = false;
@@ -76,7 +108,7 @@
 {:else}
   <WizardDialog
     {wizard}
-    initial={host ? { host } : {}}
+    {initial}
     {busy}
     {error}
     {problems}

@@ -177,9 +177,14 @@ impl Artifact {
                     && (platforms.is_empty() || platforms.contains_key(&p.docker_platform()))
             }
             Artifact::Tarball { target, .. } => {
-                p.os == "linux"
-                    && p.variant == "tarball"
-                    && target.starts_with(&format!("{}-", p.arch))
+                // The os from the target triple: a Linux tarball never
+                // installs on a Mac of the same architecture, or the reverse.
+                let os_ok = match p.os.as_str() {
+                    "linux" => target.contains("-linux-"),
+                    "darwin" => target.ends_with("-apple-darwin"),
+                    _ => false,
+                };
+                os_ok && p.variant == "tarball" && target.starts_with(&format!("{}-", p.arch))
             }
             Artifact::Tauri {
                 platform, variant, ..
@@ -295,6 +300,18 @@ mod tests {
         };
         assert!(tar.matches(&Platform::new("linux", "aarch64", "tarball")));
         assert!(!tar.matches(&Platform::new("linux", "x86_64", "tarball")));
+        // A Mac of the same architecture never takes the Linux build.
+        assert!(!tar.matches(&Platform::new("darwin", "aarch64", "tarball")));
+
+        let mac = Artifact::Tarball {
+            target: "aarch64-apple-darwin".into(),
+            name: "n".into(),
+            sha256: "s".into(),
+            size: 1,
+        };
+        assert!(mac.matches(&Platform::new("darwin", "aarch64", "tarball")));
+        assert!(!mac.matches(&Platform::new("darwin", "x86_64", "tarball")));
+        assert!(!mac.matches(&Platform::new("linux", "aarch64", "tarball")));
 
         let appimage = Artifact::Tauri {
             platform: "linux-x86_64".into(),

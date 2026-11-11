@@ -31,6 +31,11 @@ pub struct Config {
     /// default: an upgrade alone is enough.
     #[serde(default = "default_hook_port")]
     pub hook_port: u16,
+    /// An `http://` proxy to reach the hub through (`crate::proxy`). Absent:
+    /// `HTTPS_PROXY` and friends from the environment, if any. Empty: no
+    /// proxy, whatever the environment says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy: Option<String>,
 }
 
 pub fn default_report_errors() -> bool {
@@ -313,6 +318,7 @@ mod tests {
             ca_file: None,
             report_errors: true,
             hook_port: default_hook_port(),
+            proxy: None,
         }
     }
 

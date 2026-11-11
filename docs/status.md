@@ -265,8 +265,11 @@ notification (`quota_auto_resume_*`, read as blocked) is switched too, one
 waiting on a dialog or a form is not. An account can be forbidden for
 projects or for a whole org (landed, nothing forbidden by default; docs/accounts.md → *Keep an
 account off a project*, migrations 217 and 218): every start, resume, switch, routine
-and mission run of such a project refuses or avoids its logins. Not built: a
-hub vault for setup-tokens and API keys.
+and mission run of such a project refuses or avoids its logins. A login profile can be
+signed in with a `claude setup-token` token (landed, docs/accounts.md →
+*Setup token*): written to the host only, exported as
+`CLAUDE_CODE_OAUTH_TOKEN`. Not built: a hub vault for setup-tokens and API
+keys (fleet keeps no copy; each token lives on its host).
 
 Placement and login health (Control review F5/F6, landed, ON): one rule,
 `service::placement`, picks the host and login for new work: hosts that
@@ -358,7 +361,15 @@ The hub's fleet-agent install job (redesign 4.9, `service/agent_install.rs`)
 starts from a paired desktop's Host detail (*Install <version>* on the
 fleet-agent row, the job's steps beside the Hex field) and from the add-host
 wizard's fleet-agent row where the checks say a hub could use one; a
-standalone desktop reaches its hosts over SSH and offers none. Since contract revision 5 a hub client adds
+standalone desktop reaches its hosts over SSH and offers none. From 0.6.5
+`fleet-agent` also ships for macOS (`aarch64`/`x86_64-apple-darwin`, a
+LaunchAgent from `install --user`, the install job picks it from `uname`),
+reaches a hub through an HTTP proxy (`--proxy`, `HTTPS_PROXY`), and records
+the alias the hub's `welcome` names so the desktop on that same machine
+attaches its own sessions with a local `tmux attach` (`docs/hub.md` → *A Mac
+as an agent host*). Not built: the terminal of an agent host from another
+machine (a PTY relayed through the hub), sleep prevention while a session
+works, and Wake host. Since contract revision 5 a hub client adds
 projects through the hub (`add_project` / `list_github_repos` tools), per
 `docs/superpowers/specs/2026-09-27-hub-add-project-design.md`. Host
 reboot handling is landed in both halves, per

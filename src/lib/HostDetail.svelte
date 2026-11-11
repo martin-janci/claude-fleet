@@ -500,7 +500,7 @@
   }
 
   // + Add account… (G2.9 from the host, G4.5): the wizard with this host picked.
-  let addingAccount = $state(false);
+  let addingAccount = $state<false | 'any' | 'setup_token'>(false);
   let adoptingId = $state<number | null>(null);
   let restoringId = $state<string | null>(null);
   const adoptHubBlocked = $derived(hubActionBlocked('adopt_session', $hubStatus, $hubConnection));
@@ -696,11 +696,14 @@
         class="small"
         title="Sign in to another Claude account on this host"
         data-testid="detail-add-account"
-        onclick={() => (addingAccount = true)}>+ Add account…</button
+        onclick={() => (addingAccount = 'any')}>+ Add account…</button
       >
     </div>
     {#if addingAccount}
-      <AddAccountDialog host={host.alias} onclose={() => (addingAccount = false)} />
+      <AddAccountDialog
+        host={host.alias}
+        kind={addingAccount === 'setup_token' ? 'setup_token' : undefined}
+        onclose={() => (addingAccount = false)} />
     {/if}
     {#if !host.reachable && !isLocal}
       <!-- The states kit: an offline host is said here, in its own pane.
@@ -856,8 +859,15 @@
           {#each host.claude_profiles as p, i (p.name)}{#if i > 0}, {/if}<span
               class="profile"
               title="~/.claude-profiles/{p.name}"
-            ><code>{p.name}</code> <span class="muted">{p.email ?? (p.account_uuid ? '' : 'not logged in')}</span></span>{/each}
+            ><code>{p.name}</code> <span class="muted">{p.email ?? (p.account_uuid ? '' : 'not logged in')}{#if p.credential === 'setup_token'}<span data-testid="detail-profile-token"> · setup token</span>{/if}</span></span>{/each}
         </span>
+        <button
+          type="button"
+          class="small"
+          title="Sign a login in with a token from claude setup-token, or replace one: type the login's name"
+          data-testid="detail-setup-token"
+          onclick={() => (addingAccount = 'setup_token')}>Setup token…</button
+        >
       </div>
     {/if}
     <!-- Usage is the embed page `embed.host_detail` (declarative pages L8). -->
