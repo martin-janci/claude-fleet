@@ -13,7 +13,9 @@ line takes the new side, a removed line the old side. **Save note** (or
 
 Drafts stay **on this device**, in the browser storage of this window, per
 session. Nothing reaches the hub until you send. Editing a draft and
-clearing its text deletes it.
+clearing its text deletes it. They are kept with the session they were
+written for (its fleet, host, tmux name and creation time), so a later
+session that is given the same id does not inherit them.
 
 ## Sending
 
@@ -25,7 +27,11 @@ when its turn ends, through the same queue as Send later.
 
 Each send carries an id (`client_msg_id`). If the answer never comes (a
 timeout, a dropped connection), sending again reuses that id: the hub
-finds the send already stored and types nothing a second time.
+finds the send already stored and types nothing a second time. The id is
+kept with the drafts, together with the notes that send carried, so it
+survives closing the diff. On such a repeat only those notes, unchanged,
+are cleared: a note added or edited since stays a draft, and the next
+Send types it under a new id.
 
 Sent notes are stored on the session (migration 223, `review_notes`) with
 **who sent them** ("Ada · desktop"), and show under their line on every
