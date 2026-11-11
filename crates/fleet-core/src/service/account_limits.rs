@@ -548,6 +548,18 @@ pub fn login_with_headroom_for(
             .map_or_else(|| profile.map(str::to_string), |l| l.profile));
         }
     }
+    // A login fleet knows is signed out would start at `/login`: it gives
+    // way to the signed-in, allowed login with the most headroom, under the
+    // line or not, as a forbidden one does. With none signed in it is kept,
+    // and the start reports it.
+    if let Some(host) = s.get_host_row(host_alias)? {
+        if crate::service::login_health::is_signed_out(&host, profile) {
+            return Ok(best_login(s, host_alias, now, true, |l| {
+                !forbidden.contains(&l.account_uuid)
+            })?
+            .map_or_else(|| profile.map(str::to_string), |l| l.profile));
+        }
+    }
     let Some(over) = over_limit(s, host_alias, profile, now)? else {
         return Ok(profile.map(str::to_string));
     };
@@ -848,6 +860,24 @@ pub(crate) fn seed_usage(
         source_host: None,
     })
     .unwrap();
+}
+
+/// Test seam: give account `uuid` a daily limit of `limit_usd` and book
+/// `spent_usd` of live spend on it today (UTC).
+#[cfg(test)]
+pub(crate) fn seed_daily_spend(s: &Store, uuid: &str, limit_usd: f64, spent_usd: f64, now: i64) {
+    crate::service::add_account::set_daily_limit(s, uuid, Some(limit_usd)).unwrap();
+    s.conn_for_test()
+        .execute(
+            "INSERT INTO usage_daily_account (day, account_uuid, model, backfill, cost_micros) \
+             VALUES (?1, ?2, 'm', 0, ?3)",
+            rusqlite::params![
+                now.div_euclid(86_400),
+                uuid,
+                (spent_usd * 1_000_000.0) as i64
+            ],
+        )
+        .unwrap();
 }
 
 #[cfg(test)]

@@ -118,6 +118,23 @@ fn fx() -> Fx {
         let s = lock(&store).unwrap();
         s.insert_host("mac", Some("mac")).unwrap();
         s.insert_host("nas", Some("nas")).unwrap();
+        // The fallback host has the routines' `work` login, signed in to
+        // account `work` (journeys-5: a fallback runs on the same account).
+        s.upsert_account(&crate::store::AccountRow {
+            uuid: "work".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        s.set_host_profiles(
+            "nas",
+            &[crate::store::HostProfileRow {
+                name: "work".into(),
+                account_uuid: Some("work".into()),
+                email: None,
+                credential: None,
+            }],
+        )
+        .unwrap();
         (
             s.create_person("ana", None).unwrap().id,
             s.create_person("bo", None).unwrap().id,
@@ -2071,6 +2088,144 @@ fn reachable(f: &Fx, host: &str, up: bool) {
         .unwrap();
 }
 
+/// Accounts review (acct-paths-8): a routine on its host's own login, whose
+/// account the project forbids, moves to an allowed login on the host only
+/// under the line (and within its daily limit); else its fallback host
+/// takes the run, held to the same rules there; else it skips.
+#[test]
+fn a_forbidden_own_login_gives_way_under_the_line_or_to_the_fallback() {
+    use crate::service::account_limits::seed_usage;
+    use crate::service::routines::tick::{plan, Plan};
+    let f = fx();
+    let mut i = input(&f);
+    i.profile = None;
+    i.fallback_host = Some("nas".into());
+    let r = new_routine(&f, i);
+    reachable(&f, "mac", true);
+    reachable(&f, "nas", true);
+    let s = lock(&f.store).unwrap();
+    seed_usage(&s, "mac", None, "mac-own", 20.0, OCT8);
+    seed_usage(&s, "mac", Some("spare"), "spare", 30.0, OCT8);
+    seed_usage(&s, "nas", None, "nas-own", 20.0, OCT8);
+    s.set_account_forbidden_projects("mac-own", &[f.project])
+        .unwrap();
+    // An allowed login under the line on its own host: that one.
+    match plan(&s, &r, OCT8).unwrap() {
+        Plan::Start { host, login, .. } => {
+            assert_eq!((host.as_str(), login.as_deref()), ("mac", Some("spare")))
+        }
+        other => panic!("{other:?}"),
+    }
+    // Past the pause line: not that one, the fallback's own login.
+    seed_usage(&s, "mac", Some("spare"), "spare", 96.0, OCT8 + 1);
+    match plan(&s, &r, OCT8).unwrap() {
+        Plan::Start { host, login, note } => {
+            assert_eq!((host.as_str(), login), ("nas", None));
+            assert!(note.unwrap().contains("forbidden"));
+        }
+        other => panic!("{other:?}"),
+    }
+    // The fallback's own account forbidden too: skipped, saying both.
+    s.set_account_forbidden_projects("nas-own", &[f.project])
+        .unwrap();
+    match plan(&s, &r, OCT8).unwrap() {
+        Plan::Skip(why) => {
+            assert!(why.contains("forbidden"), "{why}");
+            assert!(why.contains("its fallback nas cannot take it"), "{why}");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+/// Journeys-5: a routine that names its login runs on its fallback host
+/// only under a login there on the same account, never in an empty profile
+/// that asks for `/login` nor on another account; a start that failed on
+/// its host is held to the same check.
+#[tokio::test]
+async fn a_fallback_host_without_the_routines_login_does_not_take_its_run() {
+    use crate::service::routines::tick::{plan, Plan};
+    let f = fx();
+    let mut i = input(&f);
+    i.fallback_host = Some("nas".into());
+    i.overlap = Some("parallel".into());
+    let r = new_routine(&f, i);
+    reachable(&f, "mac", false);
+    reachable(&f, "nas", true);
+    let set_nas = |account: Option<&str>| {
+        let s = lock(&f.store).unwrap();
+        let list: Vec<crate::store::HostProfileRow> = account
+            .map(|a| crate::store::HostProfileRow {
+                name: "work".into(),
+                account_uuid: Some(a.into()),
+                email: None,
+                credential: None,
+            })
+            .into_iter()
+            .collect();
+        s.set_host_profiles("nas", &list).unwrap();
+    };
+    let skipped = |why: &str| {
+        let s = lock(&f.store).unwrap();
+        match plan(&s, &r, OCT8).unwrap() {
+            Plan::Skip(w) => assert!(w.contains(why), "{w}"),
+            other => panic!("{other:?}"),
+        }
+    };
+    // nas has no `work` login: the run does not go there.
+    set_nas(None);
+    {
+        let s = lock(&f.store).unwrap();
+        // mac is down and the fallback cannot take it: tried on mac anyway.
+        assert!(matches!(
+            plan(&s, &r, OCT8).unwrap(),
+            Plan::Start { ref host, .. } if host == "mac"
+        ));
+        crate::service::account_limits::seed_usage(&s, "mac", Some("work"), "work", 95.0, OCT8);
+    }
+    reachable(&f, "mac", true);
+    skipped("profile work is not signed in on nas");
+    // A `work` on nas signed in to another account: not that one either.
+    {
+        let s = lock(&f.store).unwrap();
+        s.upsert_account(&crate::store::AccountRow {
+            uuid: "other".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    }
+    set_nas(Some("other"));
+    skipped("profile work is not signed in on nas");
+    // A start that fails on mac: nas cannot take it, the run fails once.
+    {
+        let s = lock(&f.store).unwrap();
+        crate::service::account_limits::seed_usage(&s, "mac", Some("work"), "work", 10.0, OCT8 + 1);
+    }
+    *f.fake.fail_on.lock().unwrap() = Some("mac".into());
+    let ana = person(&f.store, None, f.ana);
+    let failed = run_now(&f.deps, &ana, r.id, OCT8 + 2).await.unwrap();
+    assert_eq!(failed.state, "failed");
+    assert!(
+        failed
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains("its fallback nas cannot take it"),
+        "{failed:?}"
+    );
+    assert!(f
+        .fake
+        .started
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|s| s.host == "mac"));
+    // With the login on its account there, the fallback takes it.
+    set_nas(Some("work"));
+    let moved = run_now(&f.deps, &ana, r.id, OCT8 + 3).await.unwrap();
+    assert_eq!(moved.state, "running", "{moved:?}");
+    assert_eq!(moved.host_alias.as_deref(), Some("nas"));
+}
+
 #[tokio::test]
 async fn a_fallback_host_takes_a_run_its_host_cannot() {
     let f = fx();
@@ -2097,10 +2252,15 @@ async fn a_fallback_host_takes_a_run_its_host_cannot() {
         let s = lock(&f.store).unwrap();
         crate::service::account_limits::seed_usage(&s, "mac", Some("work"), "work", 95.0, OCT8);
     }
+    // Its login past the line: the fallback would bill the same account,
+    // past the line there too, so the run skips and says so (journeys-5).
     let over = run_now(&f.deps, &ana, r.id, OCT8).await.unwrap();
-    assert_eq!(over.host_alias.as_deref(), Some("nas"));
+    assert_eq!(over.state, "skipped", "{over:?}");
     assert!(
-        over.reason.as_deref().unwrap().starts_with("on nas: "),
+        over.reason
+            .as_deref()
+            .unwrap()
+            .contains("its fallback nas cannot take it"),
         "{over:?}"
     );
     {
@@ -2128,7 +2288,7 @@ async fn a_fallback_host_takes_a_run_its_host_cannot() {
         .iter()
         .map(|s| s.host.clone())
         .collect();
-    assert_eq!(hosts, ["mac", "nas", "nas", "nas"]);
+    assert_eq!(hosts, ["mac", "nas", "nas"]);
     // Both down: no fallback can take it, the run fails on its own host.
     *f.fake.fail_on.lock().unwrap() = None;
     f.fake.fail.store(true, Ordering::SeqCst);
@@ -3006,6 +3166,10 @@ async fn a_rate_limited_retry_goes_to_the_fallback_a_fire_would_use() {
     let mut i = input(&f);
     i.retry_once = Some(true);
     i.fallback_host = Some("nas".into());
+    // On its host's own login: the fallback runs on nas's own (a routine
+    // that names its login keeps its account, which would be past the
+    // line on nas too).
+    i.profile = None;
     let r = new_routine(&f, i);
     reachable(&f, "mac", true);
     reachable(&f, "nas", true);
@@ -3015,8 +3179,8 @@ async fn a_rate_limited_retry_goes_to_the_fallback_a_fire_would_use() {
     crate::service::account_limits::seed_usage(
         &lock(&f.store).unwrap(),
         "mac",
-        Some("work"),
-        "work",
+        None,
+        "mac-own",
         93.0,
         OCT8,
     );

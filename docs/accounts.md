@@ -182,17 +182,28 @@ MCP: `restart_session { session_id, profile: "work" }` restarts the session,
 resuming its conversation under that login, and stores the new profile once
 the relaunch succeeded (a failed one leaves the row as it was).
 `profile: ""` switches back to the host's login; leaving `profile` out keeps
-the current one. Restart, recreate, repair and rewind all relaunch with the
-stored profile (`sessions.claude_profile`, migration 113).
+the current one. Restart, recreate, repair (and the attach path that
+recreates a dead pane) and rewind all relaunch with the stored profile
+(`sessions.claude_profile`, migration 113), and all are refused past that
+account's daily limit (`run_login::refuse_relaunch`). A restore skips such a
+session with the reason, and auto-restore defers it (`daily_limit`) without
+spending an attempt, until the limit resets.
 
 A move keeps the login by account, not by name. On the target it takes the
 same profile name when that profile is signed in to the same account there;
 else the target's signed-in login on that account (the host's own login
 first); else the same name when the target has a signed-in profile of that
-name on another account; else the target's own login. A signed-out login is
-skipped, and a move never lands on an empty profile that asks for `/login`.
-When fleet does not know the session's account, the profile name is kept
-as it was.
+name on another account; else the target's own login, or, when that one is
+signed out, forbidden or spent, the signed-in, allowed login there with the
+most headroom. A signed-out login, one on an account the session's project
+forbids and one whose daily limit is spent are skipped at every step, and a
+move never lands on an empty profile that asks for `/login`; with no login
+left it is refused (`E_ACCOUNT_FORBIDDEN` naming `suggested_profile`,
+`E_ACCOUNT_LIMIT`, or the sign-in command) before anything is carried, and
+again when a deferred move runs. A session already running on an account
+its project forbade later keeps that account where the target has a login on
+it, as a plain restart does. When fleet does not know the session's account,
+the profile name is kept as it was, held to the same refusals.
 
 ### Switch automatically
 
@@ -293,7 +304,15 @@ Automation leaves a login alone that is past `accounts.pause_at` or that
 fleet knows is signed out: a routine that names no login, whose host's own
 login is past the line, runs under the login on that host with the most
 headroom (as a ticket start does; the run's note names it); otherwise a
-routine's fire goes to its fallback host, else skips and says why (with the reset time, or the sign-in command); a
+routine's fire goes to its fallback host, else skips and says why (with the reset time, or the sign-in command). On the
+fallback a routine that names its login runs under a login there on the
+same account (the same name first), never an empty profile or another
+account, and one on its host's own login takes the fallback's own login or
+the profile there with the most headroom; either is held to the project's
+forbidden accounts, the daily limit, the sign-in and the pause line there,
+and so is the fallback a failed start goes to. A ticket start or a resume
+that names no login steps off a login fleet knows is signed out onto the
+signed-in, allowed one with the most headroom on the host; a
 mission's run waits. A `restart_session { profile }` onto another login is
 refused for a signed-out login, and for one past the line unless
 `over_limit_ok` says the person chose it. A switch from a person's paired
@@ -335,8 +354,10 @@ No work in a forbidden project runs on a login on that account
 - where fleet picks the login, it never picks one: placement leaves it out
   ("the project forbids its account"), a ticket start or a resume that names
   no login moves to the allowed login on the host with the most headroom,
-  a routine on its host's own login does the same (and one that names a
-  forbidden login skips its run and says why), the over-limit refusal and
+  a routine on its host's own login moves to an allowed login under the
+  pause line there, else to its fallback host (and one that names a
+  forbidden login skips its run and says why), a move takes an allowed
+  login on the target or is refused, the over-limit refusal and
   `check_account_headroom { project_id }` never suggest one, and the
   automatic switch never moves a session onto one;
 - Claude work that does not go through `new_session` holds to the same rule,

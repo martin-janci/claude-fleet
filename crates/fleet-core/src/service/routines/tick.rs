@@ -253,11 +253,28 @@ pub async fn fire_with(
                 "on {fb}: the start on {} failed ({})",
                 r.host_alias, e.message
             ));
-            host = fb.to_string();
-            steps.push(trace::placement_step(r, &host, note.as_deref(), now));
-            let started = std::time::Instant::now();
-            spawned = deps.spawn.spawn(session_args(r, &host, None, owner)).await;
-            steps.push(spawn_step(&host, &spawned, started, now));
+            // Held to the same account rules a planned fallback is.
+            let fb_login = lock(&deps.store)
+                .and_then(|s| fallback_login(&s, r, fb, now))
+                .unwrap_or_else(|e| Err(format!("its logins could not be checked: {}", e.message)));
+            match fb_login {
+                Ok(login) => {
+                    host = fb.to_string();
+                    steps.push(trace::placement_step(r, &host, note.as_deref(), now));
+                    let started = std::time::Instant::now();
+                    spawned = deps
+                        .spawn
+                        .spawn(session_args(r, &host, login.as_deref(), owner))
+                        .await;
+                    steps.push(spawn_step(&host, &spawned, started, now));
+                }
+                Err(why) => {
+                    if let Err(e) = &mut spawned {
+                        e.message =
+                            format!("{}; its fallback {fb} cannot take it: {why}", e.message);
+                    }
+                }
+            }
         }
     }
     let s = lock(&deps.store)?;
@@ -524,41 +541,42 @@ pub(super) fn plan(s: &Store, r: &RoutineRow, now: i64) -> Result<Plan, IpcError
     let down = !reachable(&r.host_alias)?;
     // An account the routine's project forbids (`project_accounts`): a
     // routine on its host's own login moves to the allowed login there with
-    // the most headroom; one that names its login, or finds none allowed,
-    // skips and says why (its start would be refused).
-    if !down {
-        if let Some(why) = crate::service::project_accounts::forbidden_reason(
+    // the most headroom, under the line and within its daily limit
+    // ([`freer_login_for_run`]), as one past the line does; failing that,
+    // or for one that names its login, its fallback host takes the run,
+    // else it skips and says why (its start would be refused).
+    let forbidden = if down {
+        None
+    } else {
+        crate::service::project_accounts::forbidden_reason(
             s,
             Some(r.project_id),
             &r.host_alias,
             profile,
             now,
-        )? {
-            if profile.is_none() {
-                if let Some(l) = crate::service::account_limits::login_with_headroom_for(
-                    s,
-                    Some(r.project_id),
-                    &r.host_alias,
-                    None,
-                    now,
-                )? {
-                    return Ok(Plan::Start {
-                        host: r.host_alias.clone(),
-                        note: Some(format!(
-                            "under profile {l}: the project forbids the account of {}'s own login",
-                            r.host_alias
-                        )),
-                        login: Some(l),
-                    });
-                }
+        )?
+    };
+    if forbidden.is_some() && profile.is_none() {
+        let own = crate::service::account_limits::login_account(s, &r.host_alias, None, now)?;
+        if let Some(own) = own {
+            if let Some(l) =
+                freer_login_for_run(s, r.project_id, &r.host_alias, &own.login.account_uuid, now)?
+            {
+                return Ok(Plan::Start {
+                    host: r.host_alias.clone(),
+                    note: Some(format!(
+                        "under profile {l}: the project forbids the account of {}'s own login",
+                        r.host_alias
+                    )),
+                    login: Some(l),
+                });
             }
-            return Ok(Plan::Skip(why));
         }
     }
     // A login fleet knows is signed out answers a run with `/login` (review
     // w02-6): like one past the line, the fallback takes it, else it skips.
     let signed_out = crate::service::login_health::signed_out_reason(s, &r.host_alias, profile)?;
-    if over.is_none() && signed_out.is_none() && !down {
+    if forbidden.is_none() && over.is_none() && signed_out.is_none() && !down {
         return Ok(Plan::Start {
             host: r.host_alias.clone(),
             note: None,
@@ -567,7 +585,7 @@ pub(super) fn plan(s: &Store, r: &RoutineRow, now: i64) -> Result<Plan, IpcError
     }
     // The host's own login past the line, on a routine that named none:
     // another login on the same host with room takes the run.
-    if let (Some(o), None, false) = (&over, profile, down) {
+    if let (None, Some(o), None, false) = (&forbidden, &over, profile, down) {
         if let Some(l) =
             freer_login_for_run(s, r.project_id, &r.host_alias, &o.login.account_uuid, now)?
         {
@@ -578,33 +596,116 @@ pub(super) fn plan(s: &Store, r: &RoutineRow, now: i64) -> Result<Plan, IpcError
             });
         }
     }
+    let why = match (&forbidden, &over, &signed_out) {
+        (Some(why), _, _) => Some(why.clone()),
+        (None, Some(o), _) => Some(o.reason()),
+        (None, None, Some(why)) => Some(why.clone()),
+        (None, None, None) => None,
+    };
+    let mut fb_refused = None;
     if let Some(fb) = r.fallback_host.as_deref() {
-        let fb_over = crate::service::account_limits::over_limit(s, fb, profile, now)?;
-        if fb_over.is_none()
-            && reachable(fb)?
-            && crate::service::login_health::signed_out_reason(s, fb, profile)?.is_none()
-        {
-            let why = match (&over, &signed_out) {
-                (Some(o), _) => o.reason(),
-                (None, Some(why)) => why.clone(),
-                (None, None) => format!("{} was unreachable", r.host_alias),
-            };
-            return Ok(Plan::Start {
-                host: fb.to_string(),
-                note: Some(format!("on {fb}: {why}")),
-                login: None,
-            });
+        if reachable(fb)? {
+            match fallback_login(s, r, fb, now)? {
+                Ok(login) => {
+                    let why = why
+                        .clone()
+                        .unwrap_or_else(|| format!("{} was unreachable", r.host_alias));
+                    return Ok(Plan::Start {
+                        host: fb.to_string(),
+                        note: Some(format!("on {fb}: {why}")),
+                        login,
+                    });
+                }
+                Err(refused) => {
+                    fb_refused = Some(format!("; its fallback {fb} cannot take it: {refused}"))
+                }
+            }
         }
     }
-    Ok(match (over, signed_out) {
-        (Some(o), _) => Plan::Skip(o.reason()),
-        (None, Some(why)) => Plan::Skip(why),
-        (None, None) => Plan::Start {
+    Ok(match why {
+        Some(why) => Plan::Skip(format!("{why}{}", fb_refused.unwrap_or_default())),
+        None => Plan::Start {
             host: r.host_alias.clone(),
             note: None,
             login: None,
         },
     })
+}
+
+/// The login a run of `r` takes on its fallback host `fb`, held to the
+/// account rules there (`service::run_login`: an account the project
+/// forbids, a spent daily limit, a signed-out login) and to
+/// `accounts.pause_at`; `Ok(None)` is the routine's own, `Ok(Some(""))` the
+/// fallback host's own login. `Err` says why `fb` cannot take it.
+///
+/// A routine that names its login keeps its ACCOUNT, as a moved session
+/// does (`move_session::target_login`): the login on `fb` signed in to the
+/// account its profile is on at home (the same name first, then the host's
+/// own, then any profile), never an empty profile that asks for `/login`
+/// nor another account it did not choose. One on the host's own login takes
+/// the fallback's own login, or the profile there with the most headroom
+/// when that one may not take it.
+fn fallback_login(
+    s: &Store,
+    r: &RoutineRow,
+    fb: &str,
+    now: i64,
+) -> Result<Result<Option<String>, String>, IpcError> {
+    use crate::service::account_limits::{login_account, over_limit};
+    // Why the login `p` on `fb` may not take the run, if it may not.
+    let refused = |p: Option<&str>| -> Result<Option<String>, IpcError> {
+        if let Some(st) = crate::service::run_login::stop(s, Some(r.project_id), fb, p, now)? {
+            return Ok(Some(st.reason()));
+        }
+        Ok(over_limit(s, fb, p, now)?.map(|o| o.reason()))
+    };
+    let Some(profile) = r.profile.as_deref() else {
+        let Some(why) = refused(None)? else {
+            return Ok(Ok(None));
+        };
+        if let Some(own) = login_account(s, fb, None, now)? {
+            if let Some(l) = freer_login_for_run(s, r.project_id, fb, &own.login.account_uuid, now)?
+            {
+                return Ok(Ok(Some(l)));
+            }
+        }
+        return Ok(Err(why));
+    };
+    let Some(host) = s.get_host_row(fb)? else {
+        return Ok(Err(format!("{fb} is not a known host")));
+    };
+    let account =
+        login_account(s, &r.host_alias, Some(profile), now)?.map(|a| a.login.account_uuid);
+    let names = std::iter::once(Some(profile.to_string()))
+        .chain(std::iter::once(None))
+        .chain(
+            host.claude_profiles
+                .iter()
+                .flatten()
+                .map(|p| Some(p.name.clone())),
+        );
+    let mut last = None;
+    for name in names {
+        let on = login_account(s, fb, name.as_deref(), now)?.map(|a| a.login.account_uuid);
+        let same = match &account {
+            Some(a) => on.as_ref() == Some(a),
+            // Its account is not known at home: the same name, signed in
+            // to a known account there.
+            None => name.as_deref() == Some(profile) && on.is_some(),
+        };
+        if !same {
+            continue;
+        }
+        match refused(name.as_deref())? {
+            Some(why) => last = Some(why),
+            None => {
+                return Ok(Ok(Some(name.unwrap_or_default())));
+            }
+        }
+    }
+    Ok(Err(last.unwrap_or_else(|| {
+        format!("profile {profile} is not signed in on {fb}")
+    })))
 }
 
 /// The profile on `host` a run moves to off its host's own login (on
