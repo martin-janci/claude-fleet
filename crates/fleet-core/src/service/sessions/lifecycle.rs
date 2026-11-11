@@ -2541,15 +2541,17 @@ pub async fn restart_session(
     )
     .await;
     refuse_unvalidated_agent(&agent)?;
+    // As `new_session`: no relaunch under a login past its daily limit,
+    // the host's own login included (`run_login::refuse_relaunch`).
+    crate::service::run_login::refuse_relaunch(
+        &*lock(store)?,
+        &args.host_alias,
+        &kind,
+        &agent,
+        launch.profile.as_deref(),
+        crate::store::now_unix(),
+    )?;
     if agent == crate::store::AGENT_CLAUDE && kind != "shell" {
-        // As `new_session`: no relaunch under a login past its daily limit,
-        // the host's own login included.
-        crate::service::account_limits::refuse_over_daily_limit(
-            &*lock(store)?,
-            &args.host_alias,
-            launch.profile.as_deref(),
-            crate::store::now_unix(),
-        )?;
         // A switch onto a login the project forbids is refused; a plain
         // restart keeps the login the pane already ran under.
         if switch.is_some() {
@@ -3026,6 +3028,9 @@ pub async fn recreate_session(
             "recreate_session",
         )?;
         refuse_unvalidated_agent(&sess.agent)?;
+        // As `restart_session`: no relaunch under a login past its daily
+        // limit (`run_login::refuse_relaunch`), before anything is torn down.
+        crate::service::run_login::refuse_relaunch_of(&s, sess.id, crate::store::now_unix())?;
         let host = s
             .get_host_row(&sess.host_alias)?
             .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, "host not found"))?;

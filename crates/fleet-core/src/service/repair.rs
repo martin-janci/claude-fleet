@@ -1919,6 +1919,17 @@ async fn ensure_workspace_reporting(
         .iter()
         .any(|s| matches!(s, Step::TmuxCreate { .. } | Step::TmuxRespawn { .. }))
     {
+        // A pane (re)launched for a session that exists runs its Claude
+        // under the login it already ran on: refused, before any git step,
+        // while that account's daily limit is spent, as a restart is
+        // (`run_login::refuse_relaunch`). A new session's start asked
+        // already.
+        if let Some(id) = spec.session_id {
+            let held = lock(store).and_then(|s| {
+                crate::service::run_login::refuse_relaunch_of(&s, id, crate::store::now_unix())
+            });
+            held.map_err(|e| fail(store, spec, e))?;
+        }
         exec.launch_cmd(store, spec)
             .await
             .map_err(|e| fail(store, spec, e))?
@@ -3903,6 +3914,36 @@ mod tests {
         let row = s.get_session_by_id(sid).unwrap().unwrap();
         assert_eq!(row.status, "running");
         assert!(row.lost_at.is_none());
+    }
+
+    /// tests-ci-docs-3: a repair (or the attach path) that would relaunch
+    /// the session's Claude under a login whose account spent its daily
+    /// limit is refused, before any tmux call, as a restart is; the refusal
+    /// is on the session's timeline.
+    #[tokio::test]
+    async fn a_repair_relaunching_claude_past_its_daily_limit_is_refused() {
+        let (store, sid, pid) = seeded_store("/repo/.claude/worktrees/feat");
+        {
+            let s = store.lock().unwrap();
+            let now = crate::store::now_unix();
+            crate::service::account_limits::seed_usage(&s, "local", None, "acct-api", 10.0, now);
+            crate::service::account_limits::seed_daily_spend(&s, "acct-api", 5.0, 6.0, now);
+        }
+        let out = HEALTHY_OUT.replace("tmux_alive=1", "tmux_alive=0\ntmux_dead=1");
+        let exec = FakeExec::new(vec![ok(&out)]);
+        let err = ensure_workspace(
+            &spec_with_ids(sid, pid),
+            Policy::Explicit,
+            vec![],
+            &store,
+            &exec,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, codes::E_ACCOUNT_LIMIT, "{err:?}");
+        assert!(exec.tmux_calls().is_empty());
+        let ev = store.lock().unwrap().list_session_events(sid, 10).unwrap();
+        assert_eq!(ev[0].kind, EVENT_REPAIR_FAILED);
     }
 
     #[tokio::test]

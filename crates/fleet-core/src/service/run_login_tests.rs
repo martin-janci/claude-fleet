@@ -67,9 +67,30 @@ fn choose_steps_off_a_forbidden_login_and_refuses_when_none_is_left() {
         choose(&s, Some(p), "mac", None, NOW).unwrap_err().code,
         codes::E_ACCOUNT_FORBIDDEN
     );
-    // Signed out, and nothing else to take: refused.
+    // Signed out: the signed-in login takes it (acct-paths-7) ...
     let (s, p) = fleet();
     sign_out(&s, None);
+    assert_eq!(
+        choose(&s, Some(p), "mac", None, NOW).unwrap().as_deref(),
+        Some("work")
+    );
+    // ... and with nothing signed in left: refused.
+    s.set_host_signed_out_logins(
+        "mac",
+        &[
+            SignedOutLogin {
+                profile: None,
+                since: 1,
+                checked_at: 1,
+            },
+            SignedOutLogin {
+                profile: Some("work".into()),
+                since: 1,
+                checked_at: 1,
+            },
+        ],
+    )
+    .unwrap();
     assert_eq!(
         choose(&s, Some(p), "mac", None, NOW).unwrap_err().code,
         codes::E_CLAUDE_CLI
@@ -192,6 +213,35 @@ const SITES: &[Site] = &[
         file: "service/sessions/lifecycle.rs",
         signature: "pub async fn new_session(",
         guards: &["refuse_forbidden(", "refuse_over_daily_limit("],
+    },
+    Site {
+        file: "service/sessions/lifecycle.rs",
+        signature: "pub async fn restart_session(",
+        guards: &["run_login::refuse_relaunch("],
+    },
+    Site {
+        file: "service/sessions/lifecycle.rs",
+        signature: "pub async fn recreate_session(",
+        guards: &["run_login::refuse_relaunch_of("],
+    },
+    Site {
+        file: "service/repair.rs",
+        signature: "async fn ensure_workspace_reporting(",
+        guards: &["run_login::refuse_relaunch_of("],
+    },
+    Site {
+        file: "service/move_session/mod.rs",
+        signature: "fn snapshot(",
+        guards: &["target_login_in("],
+    },
+    Site {
+        file: "service/move_session/mod.rs",
+        signature: "pub(crate) fn target_login_in(",
+        guards: &[
+            "run_login::stop(",
+            "run_login::choose(",
+            "run_login::refuse(",
+        ],
     },
     Site {
         file: "service/sessions/review.rs",

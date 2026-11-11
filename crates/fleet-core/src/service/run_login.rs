@@ -18,7 +18,10 @@
 //!   `E_CLAUDE_CLI`, the code a run that met `/login` answers).
 //!
 //! Unattended work ([`unattended_hold`]) also waits while the login is at
-//! or past `accounts.pause_at`, as a routine does.
+//! or past `accounts.pause_at`, as a routine does. A relaunch under the
+//! login a session already runs on (restart, recreate, repair, the attach
+//! path, a restore, a move that keeps its account) holds to the daily limit
+//! only ([`refuse_relaunch`]).
 //!
 //! `run_login_tests::every_claude_launch_path_holds_to_the_account_rules`
 //! lists the launch paths and checks each one asks.
@@ -114,6 +117,55 @@ pub fn choose(
     let picked = account_limits::login_with_headroom_for(s, project_id, host, norm(profile), now)?;
     refuse(s, project_id, host, picked.as_deref(), now)?;
     Ok(picked)
+}
+
+/// A relaunch of a session's Claude under the login it already runs on
+/// (restart, recreate, repair, the attach path, a restore): refused while
+/// that login's account has spent its daily limit (`E_ACCOUNT_LIMIT`, as a
+/// start is), the host's own login included. Nothing else is: a plain
+/// relaunch keeps the account its work already runs on, forbidden or not
+/// (a session already running keeps running), and a signed-out login says
+/// so in its own pane. Shells and other agents bill no Claude login.
+pub fn refuse_relaunch(
+    s: &Store,
+    host: &str,
+    kind: &str,
+    agent: &str,
+    profile: Option<&str>,
+    now: i64,
+) -> Result<(), IpcError> {
+    if agent != crate::store::AGENT_CLAUDE || kind == "shell" {
+        return Ok(());
+    }
+    account_limits::refuse_over_daily_limit(s, host, norm(profile), now)
+}
+
+/// [`refuse_relaunch`] for session `session_id` under its stored login.
+/// `Ok` for a session that is gone (its caller says so).
+pub fn refuse_relaunch_of(s: &Store, session_id: i64, now: i64) -> Result<(), IpcError> {
+    let Some(row) = s.get_session_by_id(session_id)? else {
+        return Ok(());
+    };
+    let launch = crate::service::sessions::stored_launch(s, session_id)?;
+    refuse_relaunch(
+        s,
+        &row.host_alias,
+        &row.kind,
+        &row.agent,
+        launch.profile.as_deref(),
+        now,
+    )
+}
+
+/// Why a relaunch of session `session_id` waits (a spent daily limit:
+/// [`refuse_relaunch_of`]), for automation that defers or skips rather
+/// than fail. `None` when it may relaunch, or the check could not answer
+/// (the relaunch itself asks again).
+pub fn relaunch_held(s: &Store, session_id: i64, now: i64) -> Option<String> {
+    match refuse_relaunch_of(s, session_id, now) {
+        Err(e) if e.code == codes::E_ACCOUNT_LIMIT => Some(e.message),
+        _ => None,
+    }
 }
 
 /// Why an unattended run (an agent's job, a held mission step) waits: a

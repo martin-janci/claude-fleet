@@ -1984,6 +1984,47 @@ async fn restart_and_recreate_refuse_an_agy_row() {
     assert!(err.message.contains("agy"), "{}", err.message);
 }
 
+/// tests-ci-docs-3: recreate relaunches Claude under the session's stored
+/// login, so it is refused past that account's daily limit, as restart is,
+/// before any tmux or SSH call (the client here reaches no host); a shell
+/// bills no login and is not.
+#[tokio::test]
+async fn recreate_is_refused_past_the_daily_limit_like_restart() {
+    use super::lifecycle::recreate_session;
+    let s = Store::open_in_memory().unwrap();
+    let now = crate::store::now_unix();
+    crate::service::account_limits::seed_usage(&s, "h", None, "acct-api", 10.0, now);
+    crate::service::account_limits::seed_daily_spend(&s, "acct-api", 20.0, 21.0, now);
+    let id = s
+        .upsert_session("dev-x", "h", None, None, 1, 1, "running", None)
+        .unwrap();
+    let store = Mutex::new(s);
+    let ssh = Arc::new(crate::ssh::SshClient::with_ssh_binary(
+        "/nonexistent/fleet-test-ssh",
+    ));
+    let recreate = serde_json::from_value(serde_json::json!({ "session_id": id })).unwrap();
+    let err = recreate_session(recreate, &store, &ssh).await.unwrap_err();
+    assert_eq!(
+        err.code,
+        crate::ipc_error::codes::E_ACCOUNT_LIMIT,
+        "{err:?}"
+    );
+    assert!(err.message.contains("daily limit"), "{}", err.message);
+    let s = store.lock().unwrap();
+    assert!(crate::service::run_login::refuse_relaunch(
+        &s,
+        "h",
+        "shell",
+        crate::store::AGENT_CLAUDE,
+        None,
+        now
+    )
+    .is_ok());
+    assert!(
+        crate::service::run_login::refuse_relaunch(&s, "h", "work", "codex", None, now).is_ok()
+    );
+}
+
 /// Recreate on a remote host whose checkout was deleted clones it back into
 /// the root the repair resolved, without a worktree step: the repair that
 /// runs next re-adds the worktree from its branch on origin.

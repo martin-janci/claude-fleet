@@ -170,6 +170,10 @@ pub const DEFER_MEM_HEADROOM: &str = "memory_headroom";
 pub const DEFER_CPU: &str = "cpu_saturated";
 /// [`EVENT_DEFERRED`] detail: Jev chose to wait.
 pub const DEFER_JEV: &str = "jev_defer";
+/// [`EVENT_DEFERRED`] detail: the session's login has spent its account's
+/// daily limit, which refuses its relaunch until 00:00 UTC
+/// (`run_login::refuse_relaunch`): it waits, spending no attempt.
+pub const DEFER_DAILY_LIMIT: &str = "daily_limit";
 
 /// The `recovery.*` settings in force.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -234,6 +238,9 @@ pub struct Candidate {
     /// The host is under the hard low-memory floor: nothing resumes there,
     /// whatever Jev says.
     pub floor: bool,
+    /// Its login's account spent its daily limit, so a relaunch is refused
+    /// (`run_login::refuse_relaunch`) until it resets.
+    pub daily_limit: bool,
     /// What Jev would be asked (its `baseline` set by the planner).
     pub question: RestoreQuestion,
 }
@@ -299,6 +306,9 @@ pub fn plan(cands: &[Candidate], cfg: &AutoRestoreConfig, now: i64) -> Vec<Plann
                 continue;
             }
             (Action::Skip(SKIP_BUDGET), false)
+        } else if c.daily_limit {
+            // Not Jev's to weigh: a relaunch is refused until the reset.
+            (Action::Defer(DEFER_DAILY_LIMIT.to_string()), false)
         } else if let Some(why) = c.load {
             (Action::Defer(why.to_string()), true)
         } else if restores >= MAX_RESTORES_PER_TICK
@@ -824,6 +834,7 @@ fn candidates(s: &Store, cfg: &AutoRestoreConfig, now: i64) -> Option<Vec<Candid
                     floor: host.is_some_and(|h| {
                         memory_floor(h, cfg, starting_on(&h.alias), now).is_some()
                     }),
+                    daily_limit: crate::service::run_login::relaunch_held(s, r.id, now).is_some(),
                     question,
                 }
             })
@@ -1139,6 +1150,7 @@ mod tests {
             sampled_since_loss: true,
             load: None,
             floor: false,
+            daily_limit: false,
             question: question(id),
         }
     }
@@ -1245,6 +1257,46 @@ mod tests {
             actions(&plan(&[loaded], &CFG, 1_000)),
             vec![(2, Action::Restore)]
         );
+    }
+
+    /// tests-ci-docs-3: a session whose login spent its account's daily
+    /// limit is refused a relaunch until the reset, so auto-restore waits
+    /// (one deferral per episode, no attempt spent, no failure written, no
+    /// restore slot taken) rather than fail it twice and give up.
+    #[test]
+    fn a_spent_daily_limit_defers_without_asking_or_spending_an_attempt() {
+        let mut c = cand(1, "process_died", 0);
+        c.daily_limit = true;
+        let other = cand(2, "process_died", 0);
+        let p = plan(&[c.clone(), other], &CFG, 1_000);
+        assert_eq!(
+            actions(&p),
+            vec![
+                (1, Action::Defer(DEFER_DAILY_LIMIT.into())),
+                (2, Action::Restore)
+            ]
+        );
+        assert!(!p[0].ask, "a refusal is not Jev's to weigh");
+        c.daily_limit = false;
+        assert_eq!(
+            actions(&plan(&[c], &CFG, 1_000)),
+            vec![(1, Action::Restore)]
+        );
+    }
+
+    /// The candidate reads the daily limit off the session's stored login.
+    #[test]
+    fn a_candidate_on_a_spent_daily_limit_says_so() {
+        let s = Store::open_in_memory().unwrap();
+        let now = 2_000_000;
+        crate::service::account_limits::seed_usage(&s, "h", None, "acct-api", 10.0, now);
+        let id = s
+            .upsert_session("w", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+        assert_eq!(crate::service::run_login::relaunch_held(&s, id, now), None);
+        crate::service::account_limits::seed_daily_spend(&s, "acct-api", 5.0, 6.0, now);
+        let why = crate::service::run_login::relaunch_held(&s, id, now).expect("held");
+        assert!(why.contains("daily limit"), "{why}");
     }
 
     #[test]
