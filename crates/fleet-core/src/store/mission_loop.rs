@@ -352,7 +352,9 @@ impl Store {
 
     /// What the mission has spent, in micro-USD: the usage of every session
     /// that ran an attempt at one of its members, plus its planner's
-    /// `claude -p` runs (`aux_usage`, redesign 8.2).
+    /// `claude -p` runs (`aux_usage`, redesign 8.2). A worker whose session
+    /// row was deleted (a lane relay, a cancel, Clean up) counts what it had
+    /// spent then (`tasks.worker_spent_micros`, migration 226).
     pub fn mission_cost_micros(&self, mission_id: i64) -> Result<i64, IpcError> {
         Ok(self.conn.query_row(
             "SELECT (SELECT COALESCE(SUM(s.usage_cost_micros), 0) FROM sessions s \
@@ -360,6 +362,10 @@ impl Store {
                                     JOIN work_items i ON i.id = t.work_item_id \
                                     WHERE i.orchestration_project_id = ?1 \
                                       AND COALESCE(t.role, '') <> 'wrapup')) \
+                  + (SELECT COALESCE(SUM(t.worker_spent_micros), 0) FROM tasks t \
+                     JOIN work_items i ON i.id = t.work_item_id \
+                     WHERE i.orchestration_project_id = ?1 \
+                       AND COALESCE(t.role, '') <> 'wrapup') \
                   + (SELECT COALESCE(SUM(cost_micros), 0) FROM aux_usage \
                      WHERE mission_id = ?1)",
             [mission_id],
@@ -371,22 +377,26 @@ impl Store {
     /// finished runs over their count, for `mission_id`'s members, or for
     /// every mission's when `None`. `None` until a finished run spent
     /// something. A worker session can carry more than one run, so this is an
-    /// estimate, as the phone's spend ask shows it.
+    /// estimate, as the phone's spend ask shows it. A finished run whose
+    /// worker's row was deleted counts, with what that worker had spent
+    /// (migration 226).
     pub fn run_cost_estimate(
         &self,
         mission_id: Option<i64>,
     ) -> Result<Option<(i64, i64)>, IpcError> {
         let (runs, spent): (i64, i64) = self.conn.query_row(
             "WITH done AS ( \
-                 SELECT t.id, t.worker_session_id FROM tasks t \
+                 SELECT t.id, t.worker_session_id, t.worker_spent_micros FROM tasks t \
                    JOIN work_items i ON i.id = t.work_item_id \
-                  WHERE t.finished_at IS NOT NULL AND t.worker_session_id IS NOT NULL \
+                  WHERE t.finished_at IS NOT NULL \
+                    AND (t.worker_session_id IS NOT NULL OR t.worker_spent_micros IS NOT NULL) \
                     AND i.orchestration_project_id IS NOT NULL \
                     AND COALESCE(t.role, '') <> 'wrapup' \
                     AND (?1 IS NULL OR i.orchestration_project_id = ?1)) \
              SELECT (SELECT COUNT(*) FROM done), \
                     (SELECT COALESCE(SUM(s.usage_cost_micros), 0) FROM sessions s \
-                      WHERE s.id IN (SELECT worker_session_id FROM done))",
+                      WHERE s.id IN (SELECT worker_session_id FROM done)) \
+                    + (SELECT COALESCE(SUM(worker_spent_micros), 0) FROM done)",
             [mission_id],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?;

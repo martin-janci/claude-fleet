@@ -174,6 +174,58 @@ fn counts_and_cost_cover_the_members_attempts() {
     assert_eq!(s.mission_cost_micros(m).unwrap(), 1_500_000);
 }
 
+/// Review R5: a worker's session row is deleted when it is killed and
+/// reaped (a lane relay, the loop's cancel, Clean up), and 101's trigger
+/// NULLs the task's worker id. The mission's spend keeps what it had
+/// spent, once for a lead that ran several tasks, and the run estimate
+/// keeps its runs.
+#[test]
+fn a_reaped_workers_spend_stays_with_its_mission() {
+    let s = Store::open_in_memory().unwrap();
+    let m = mission(&s);
+    s.upsert_host("h").unwrap();
+    let lead = s
+        .upsert_session("lead", "h", None, None, 1, 1, "running", None)
+        .unwrap();
+    let a = s.create_local_work_item(None, "a").unwrap().id;
+    let b = s.create_local_work_item(None, "b").unwrap().id;
+    s.set_mission_item(m, a, true, "fleet").unwrap();
+    s.set_mission_item(m, b, true, "fleet").unwrap();
+    let t1 = s.insert_task(None, Some(lead), "a", "n").unwrap();
+    s.set_task_run(t1.id, a, 1, "implement").unwrap();
+    let t2 = s.insert_task(None, Some(lead), "b", "n").unwrap();
+    s.set_task_run(t2.id, b, 1, "implement").unwrap();
+    s.conn_ref()
+        .execute(
+            "UPDATE sessions SET usage_cost_micros = 4000000 WHERE id = ?1",
+            [lead],
+        )
+        .unwrap();
+    s.conn_ref()
+        .execute("UPDATE tasks SET finished_at = 100", [])
+        .unwrap();
+    assert_eq!(s.mission_cost_micros(m).unwrap(), 4_000_000);
+    assert_eq!(s.run_cost_estimate(Some(m)).unwrap(), Some((2_000_000, 2)));
+    s.delete_session(lead).unwrap();
+    assert_eq!(s.mission_cost_micros(m).unwrap(), 4_000_000);
+    assert_eq!(s.run_cost_estimate(Some(m)).unwrap(), Some((2_000_000, 2)));
+    // The next session takes the id; it is no worker of the mission and
+    // its spend is not the mission's.
+    let next = s
+        .upsert_session("next", "h", None, None, 1, 1, "running", None)
+        .unwrap();
+    assert_eq!(next, lead, "the id is reused");
+    s.conn_ref()
+        .execute(
+            "UPDATE sessions SET usage_cost_micros = 9000000 WHERE id = ?1",
+            [next],
+        )
+        .unwrap();
+    assert_eq!(s.mission_cost_micros(m).unwrap(), 4_000_000);
+    s.delete_session(next).unwrap();
+    assert_eq!(s.mission_cost_micros(m).unwrap(), 4_000_000);
+}
+
 /// A person's "Finish task" on a member (a `wrapup` row, design 2026-10-13
 /// D2) is not one of the mission's runs: it spends no attempt, takes no
 /// slot, adds no cost and makes its session no mission worker.

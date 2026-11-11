@@ -445,6 +445,17 @@ fn missions_have_waits_at(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 226: `tasks` already has its
+/// `worker_spent_micros` column.
+fn tasks_have_worker_spent(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name = 'worker_spent_micros'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 214: `tasks` already has its
 /// `cost_start_micros` column.
 fn tasks_has_cost_start(conn: &Connection) -> rusqlite::Result<bool> {
@@ -2588,6 +2599,14 @@ const MIGRATIONS: &[Migration] = &[
         225,
         include_str!("../../migrations/225_review_requests.sql"),
     ),
+    // A mission's spend outlives its workers' session rows: what a worker
+    // had spent when its row was deleted, kept on its newest task. An ADD
+    // COLUMN, so guarded.
+    Migration {
+        version: 226,
+        sql: include_str!("../../migrations/226_task_worker_spend.sql"),
+        already_applied: Some(tasks_have_worker_spent),
+    },
 ];
 
 /// The settings row [`Store::finish_realm_upgrade`] writes once migration
