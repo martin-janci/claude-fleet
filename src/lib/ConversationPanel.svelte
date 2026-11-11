@@ -156,7 +156,7 @@
   import { hubStatus, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
   import { sessionBlocked } from './share';
-  import { accessOf, myGrantInfo } from './access';
+  import { accessOf, myGrantInfo, pairedLocalRefusal } from './access';
   import { orgs as orgList } from './orgs';
   import { isSharedAccess } from './session_scope';
   import { readOnlyAnswerLine, sharerName } from './shared_view';
@@ -1451,7 +1451,9 @@
   // write itself), and no tray: an upload is this machine's own copy onto a
   // host only that fleet's hub reaches.
   const shareBlocked = $derived(away ? null : $sessionBlocked(session, 'send_prompt'));
-  const attachBlocked = $derived(away ? AWAY_ONLY : shareBlocked);
+  // A paired desktop and the hub's own-machine row: an attachment is staged
+  // through this machine's tmux and disk, which `local` would mean here.
+  const attachBlocked = $derived(away ? AWAY_ONLY : (shareBlocked ?? pairedLocalRefusal(session, $hubStatus)));
   /** The grant level this person holds on someone else's session, or null
    *  for their own (gap plan G4.2: the answer card shows to a recipient). */
   const recipientLevel = $derived.by(() => {

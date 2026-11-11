@@ -295,7 +295,7 @@ describe('routing', () => {
   });
 
   it('quotes the attach command for a shell', () => {
-    expect(fleetAttachCommand({ host_alias: 'mac', tmux_name: 'dev-x' })).toBe("ssh -t mac tmux attach -t =dev-x");
+    expect(fleetAttachCommand({ host_alias: 'mac', tmux_name: 'dev-x' })).toBe("ssh -t mac tmux attach -t '=dev-x'");
     expect(fleetAttachCommand({ host_alias: 'mac', tmux_name: "it's" })).toBe(
       "ssh -t mac tmux attach -t '=it'\\''s'",
     );

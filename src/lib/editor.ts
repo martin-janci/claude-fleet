@@ -4,9 +4,9 @@
 import { invokeCmd } from './result';
 import { push, pushError } from './toasts';
 import { hasNoPane, type SessionRow } from './sessions';
-import { noAttachReason, type SessionAccess } from './access';
+import { noAttachReason, pairedLocalRefusal, type SessionAccess } from './access';
 
-type Target = Pick<SessionRow, 'host_alias' | 'tmux_name' | 'kind'>;
+type Target = Pick<SessionRow, 'host_alias' | 'tmux_name' | 'kind'> & { fleet?: string };
 
 /** Why this session cannot open in VS Code from here, or null when it can.
  *  Like the terminal, it needs a pane and a session this client owns: the
@@ -14,6 +14,9 @@ type Target = Pick<SessionRow, 'host_alias' | 'tmux_name' | 'kind'>;
 export function editorBlockedReason(s: Target | null, access: SessionAccess): string | null {
   if (!s) return 'No session selected';
   if (hasNoPane(s)) return 'Runs outside tmux — no folder to open';
+  // Paired, the hub's own machine: `local` would open this machine's folder.
+  const here = pairedLocalRefusal(s);
+  if (here !== null) return here;
   if (access !== 'own') return noAttachReason(access) ?? 'Only your own sessions open in VS Code';
   return null;
 }

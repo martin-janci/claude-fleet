@@ -1070,9 +1070,11 @@ export function fleetSessionAt(
   return hit ? { fleet: a.fleet.id, id: hit.id } : null;
 }
 
-/** POSIX single-quoting for a command a person pastes into a shell. */
+/** POSIX single-quoting for a command a person pastes into a shell. A
+ *  leading `=` is quoted too: zsh (the macOS shell) expands `=word` to the
+ *  path of the command `word`. */
 export function shq(s: string): string {
-  return /^[A-Za-z0-9_.@%+=:,/-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`;
+  return /^[A-Za-z0-9_.@%+:,/-][A-Za-z0-9_.@%+=:,/-]*$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
 /** The command that attaches to an extra fleet's session from this machine.

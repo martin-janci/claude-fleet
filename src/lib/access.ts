@@ -92,6 +92,90 @@ export function backendMode(status: HubStatus = get(hubStatus)): BackendMode {
   return status.remote ? 'remote' : 'local';
 }
 
+/** Whether the hub this desktop is paired with is on this machine's own
+ *  loopback, where its `local` may well be this machine. */
+function hubOnLoopback(status: HubStatus): boolean {
+  const url = status.url;
+  if (!url) return false;
+  try {
+    const h = new URL(url).hostname.replace(/^\[|\]$/g, '');
+    return h === 'localhost' || h === '::1' || /^127\./.test(h);
+  } catch {
+    return false;
+  }
+}
+
+/** Whether this desktop runs on Windows, the one place `wsl-<distro>` names
+ *  a distribution of this machine (`fleet_core::wsl`). */
+export function onWindows(): boolean {
+  if (typeof navigator === 'undefined') return false;
+  return /Win/.test(navigator.platform ?? '') || /Windows/.test(navigator.userAgent ?? '');
+}
+
+/**
+ * Why a desktop paired with a hub must not attach to, upload into, or open
+ * an editor on one of the hub's own-machine sessions, or null when it may.
+ * `local` is the name a hub gives ITS machine; the terminal, a dropped file,
+ * a composer attachment and Open in VS Code resolve the alias on THIS
+ * machine, so they would reach this machine's tmux and disk (a different
+ * session that may share the name). `wsl-<distro>` is the same hazard, but
+ * only on a Windows desktop, where the alias names this machine's WSL; on a
+ * Mac or Linux desktop a hub host called `wsl-…` is an ordinary ssh alias.
+ * Another fleet's row says so through `fleetAttachRefusal` instead, and a
+ * hub on this machine's loopback keeps the attach (its `local` may be here).
+ */
+export function pairedLocalRefusal(
+  s: Pick<SessionRow, 'host_alias'> & { fleet?: string },
+  status: HubStatus = get(hubStatus),
+  windows: boolean = onWindows(),
+): string | null {
+  if (s.fleet !== undefined || backendMode(status) !== 'remote' || hubOnLoopback(status)) return null;
+  if (s.host_alias === 'local')
+    return 'This session runs on the hub’s own machine, which it calls "local". From here "local" would mean this machine, so it cannot be attached, given files or opened in an editor from here: use the Conversation tab, or attach on that machine.';
+  if (windows && /^wsl-/.test(s.host_alias))
+    return `This session runs in the hub’s own WSL ("${s.host_alias}"). From here that name would mean this machine’s WSL, so it cannot be attached, given files or opened in an editor from here: use the Conversation tab, or attach on that machine.`;
+  return null;
+}
+
+/** POSIX single-quoting, always: `=name` must be quoted too, or zsh (the
+ *  macOS shell) reads it as a command lookup. */
+function quoteAlways(s: string): string {
+  return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
+/**
+ * The command that attaches `s` from another terminal on this machine, or
+ * why there is none. `=name` is tmux's exact match (a bare name falls back
+ * to prefix and pattern matching, and could attach `dev-foo-2`).
+ *
+ *  - Paired, the hub's own machine (`pairedLocalRefusal`): none.
+ *  - An agent host: it dials in to the hub, and this machine has no SSH
+ *    route to it.
+ *  - `local`: this machine's tmux.
+ *  - A Windows desktop's `wsl-…`: no SSH alias; a shell in the distribution.
+ *  - Any other host: through this machine's ssh, as the terminal attaches.
+ */
+export function attachCommandFor(
+  s: Pick<SessionRow, 'host_alias' | 'tmux_name'> & { fleet?: string },
+  transport: 'ssh' | 'agent' | null | undefined,
+  status: HubStatus = get(hubStatus),
+  windows: boolean = onWindows(),
+): { command: string; why: null } | { command: null; why: string } {
+  const exact = `tmux attach -t ${quoteAlways(`=${s.tmux_name}`)}`;
+  const here = pairedLocalRefusal(s, status, windows);
+  if (here !== null) return { command: null, why: here };
+  if (transport === 'agent')
+    return {
+      command: null,
+      why: `${s.host_alias} reaches the hub through its fleet-agent, and this machine has no SSH route to it, so there is no command to attach it from another terminal.`,
+    };
+  if (s.host_alias === 'local') return { command: exact, why: null };
+  if (windows && /^wsl-/.test(s.host_alias))
+    return { command: null, why: `This session runs in WSL ("${s.host_alias}"): attach from a shell in that distribution with ${exact}.` };
+  const host = /^[A-Za-z0-9_.@%+:,/-][A-Za-z0-9_.@%+=:,/-]*$/.test(s.host_alias) ? s.host_alias : quoteAlways(s.host_alias);
+  return { command: `ssh -t ${host} ${exact}`, why: null };
+}
+
 /**
  * What this client may do with `row`. Evaluated in this order, first match
  * winning; the order is load-bearing and is the plan's, not a preference.
