@@ -282,8 +282,10 @@ start that names no host takes the best host that ran the project, and the
 over-limit refusal names a login on another host when its own host has none.
 Jev's placement stays its own, off-by-default proposal. Signed-out logins
 are kept on the host row (`hosts.signed_out_logins`, migration 197), learnt
-from the usage poll's sources and from headless runs refused for want of a
-login, re-asked hourly; each is one amber card in Control's chat ("Claude
+from the usage poll's sources, from headless runs refused for want of a
+login and from session panes whose last turn ended in Claude Code's own
+"Please run /login" error (`pane_intel::detect_signed_out`), re-asked
+hourly; each is one amber card in Control's chat ("Claude
 login expired on <host> (since <day>) · ssh <host> then claude /login") and
 one line in Control's feed. Control's own account (F7, ON:
 `control.switch_at_limit`): `operator_status` reports its login, usage and

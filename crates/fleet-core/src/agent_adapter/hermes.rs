@@ -537,6 +537,7 @@ fn analyze(pane_tail: &str) -> PaneIntel {
             derived_status: stuck.map(|_| ClaudeStatus::Blocked),
             waiting_for: None,
             pending_input: None,
+            signed_out: false,
         };
     };
     let dialog = dialog(lines, &screen);
@@ -568,6 +569,7 @@ fn analyze(pane_tail: &str) -> PaneIntel {
             multi: false,
             detail: d.detail,
         }),
+        signed_out: false,
     }
 }
 
