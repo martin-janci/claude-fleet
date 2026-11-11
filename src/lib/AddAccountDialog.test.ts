@@ -83,6 +83,24 @@ describe('+ Add account', () => {
     ]);
   });
 
+  it('leaves the daily limit out when its field is empty, so the account keeps its limit', async () => {
+    const onclose = vi.fn();
+    render(AddAccountDialog, { props: { onclose, host: 'mercury' } });
+    await fill('api_key', 'team', KEY);
+    await waitFor(() => expect(onclose).toHaveBeenCalled());
+    expect(calls).toEqual([{ action: 'api_key', host_alias: 'mercury', profile: 'team', api_key: KEY }]);
+  });
+
+  it('sends an explicit 0 to remove the limit', async () => {
+    const onclose = vi.fn();
+    render(AddAccountDialog, { props: { onclose, host: 'mercury' } });
+    await fill('api_key', 'team', KEY, '0');
+    await waitFor(() => expect(onclose).toHaveBeenCalled());
+    expect(calls).toEqual([
+      { action: 'api_key', host_alias: 'mercury', profile: 'team', api_key: KEY, daily_limit_usd: 0 },
+    ]);
+  });
+
   it("shows the provider's 401 on the key field", async () => {
     const onclose = vi.fn();
     render(AddAccountDialog, { props: { onclose, host: 'mercury' } });
@@ -180,8 +198,9 @@ describe('add_account helpers', () => {
       apiKey: 'k',
       setupToken: '',
       account: null,
-      dailyLimit: null,
+      dailyLimit: 0,
     });
+    expect(readAnswers({ host: 'm', kind: 'api_key', profile: 'p', daily_limit: '' }).dailyLimit).toBeNull();
     expect(readAnswers({ host: 'm', kind: 'setup_token', profile: 'p', setup_token: ' t ', account: 'none' })).toMatchObject({
       kind: 'setup_token',
       setupToken: 't',

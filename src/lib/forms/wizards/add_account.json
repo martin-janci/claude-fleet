@@ -56,7 +56,7 @@
           "label": "Daily limit (USD)",
           "min": 0,
           "max": 100000,
-          "help": "Empty: no limit. Past it, no session starts on this account until midnight UTC.",
+          "help": "Empty: keep this account's limit (none for a new key); 0 removes it. Past it, no session starts on this account until midnight UTC.",
           "when": { "field": "kind", "eq": "api_key" }
         }
       ]
