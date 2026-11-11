@@ -1417,6 +1417,9 @@ async fn signed_in_again_once_the_pane_says_so_and_the_card_goes() {
     assert!(!signed_in_again("Login expired · Run /login"));
 }
 
+/// Like the login pane's: a Windows runner's `bash` is WSL's, not a shell
+/// this script ever runs in.
+#[cfg(unix)]
 #[test]
 fn the_own_login_pane_script_parses() {
     for sh in ["bash", "sh"] {
