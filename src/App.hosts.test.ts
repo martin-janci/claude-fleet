@@ -539,7 +539,9 @@ describe('App: the footer usage segment', () => {
     expect(seg.dataset.state).toBe('ok');
     expect(seg.getAttribute('aria-label')).toContain('all 3 accounts have headroom');
     // It sits in the footer beside the version line.
-    expect(seg.closest('footer')?.textContent).toContain('All systems OK');
+    // This fixture has a host down, so the version line names it rather
+    // than saying "All systems OK" (HITL audit H-16).
+    expect(seg.closest('footer')?.textContent).toContain('claude-fleet-htz is offline');
   });
 
   it('names the worst account, and clicking it opens Hosts on that account’s host', async () => {
