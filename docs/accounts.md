@@ -211,6 +211,15 @@ used) is resumed under the login on its host with the most headroom, without any
 restart Switch account makes (`restart_session { profile }`), so the
 conversation carries on and the row keeps the new login.
 
+The same goes for a session whose own login is **signed out** (the
+"no credentials" rows, *Signed-out logins* below): it is resumed under
+another login on its host, chosen as below except that another login of
+the same account counts too (a setup token beside an expired `/login`,
+say), and never the signed-out one. Fleet learns a login is signed out from
+the usage check, a refused headless run, the session's pane, or a
+StopFailure hook whose error is a 401 / `authentication_error`. The
+timeline event's detail says `"reason": "signed_out"` (else `"limit"`).
+
 Each person decides for their own sessions: the Accounts page's **Switch my
 sessions automatically when their account runs out** (MCP:
 `auto_switch_account { enabled }`) is on by default and turns it off for
@@ -225,7 +234,8 @@ limit. A working session is never moved, early or not.
 Below it, **then tell it to continue where it stopped** (MCP:
 `auto_switch_account { continue_after: true }`, off by default): when the
 limit cut the session's last turn off (its newest turn end is a
-`stop_failure` of class `rate_limit`), a switch that went through queues
+`stop_failure` of class `rate_limit`, or of class `auth` for a signed-out
+login), a switch that went through queues
 "Continue where you left off." as a deferred prompt. It goes in no sooner
 than 30 seconds after the switch, once the resumed session is idle, and is
 held if the new login is over `accounts.pause_at` too. A session that had
