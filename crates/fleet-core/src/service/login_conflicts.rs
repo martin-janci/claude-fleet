@@ -18,13 +18,43 @@
 //! * [`LoginConflict::SharedAccount`]: the host's login and a login profile
 //!   (or two profiles) signed into the same account, each in its own config
 //!   dir. Derived from what the host row already holds.
+//! * [`LoginConflict::Copied`], across hosts: one `.credentials.json`
+//!   copied onto another host (or into another profile), by a dotfiles
+//!   sync, `rsync` of `~/.claude`, a copied profile dir. Both copies hold
+//!   the same refresh token, so the same race runs between hosts. The
+//!   health probe prints a fingerprint of each login's refresh token
+//!   (`loginfp=`, the first 12 hex digits of its SHA-256, computed on the
+//!   host), the store keeps each login's last few
+//!   ([`HostRow::login_fingerprints`]), and [`copied`] matches them across
+//!   the fleet: one login's newest fingerprint among another's means one
+//!   is a copy of the other. The older ones keep the match after the
+//!   first copy refreshes, until the other is signed in on its own.
 //!
 //! Fleet only reports these; which copy goes is the person's call.
 
 use serde::{Deserialize, Serialize};
 
 use crate::service::add_account::is_api_key_account;
-use crate::store::{HostProfileRow, HostRow};
+use crate::store::{HostProfileRow, HostRow, LoginFingerprint};
+
+/// One login in the fleet: a host and its own login (`profile` `None`) or
+/// one of its profiles.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoginAt {
+    pub host: String,
+    #[serde(default)]
+    pub profile: Option<String>,
+}
+
+impl LoginAt {
+    /// "the host login on mac", "profile work on trn".
+    fn name(&self) -> String {
+        match &self.profile {
+            None => format!("the host login on {}", self.host),
+            Some(p) => format!("profile {p} on {}", self.host),
+        }
+    }
+}
 
 /// One conflict on a host.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -39,6 +69,14 @@ pub enum LoginConflict {
         logins: Vec<Option<String>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         email: Option<String>,
+    },
+    /// The host's login `profile` (`None`: its own) holds the same refresh
+    /// token as each of `copies`, logins elsewhere in the fleet (or on the
+    /// same host, under another profile).
+    Copied {
+        #[serde(default)]
+        profile: Option<String>,
+        copies: Vec<LoginAt>,
     },
 }
 
@@ -70,8 +108,91 @@ impl LoginConflict {
                     names.join(" and ")
                 )
             }
+            LoginConflict::Copied { profile, copies } => {
+                let this = match profile {
+                    None => "the host login".to_string(),
+                    Some(p) => format!("profile {p}"),
+                };
+                let others: Vec<String> = copies.iter().map(LoginAt::name).collect();
+                format!(
+                    "{alias}: {this} is a copy of one Claude login that is also {}: they share \
+                     one refresh token, so each refresh revokes the others' copy and they take \
+                     turns hitting \"Login expired\". Sign each host in on its own (Sign in \
+                     again), and stop copying .credentials.json between hosts (a dotfiles or \
+                     ~/.claude sync, a copied profile dir).",
+                    others.join(" and ")
+                )
+            }
         }
     }
+}
+
+/// PURE: whether two logins' fingerprints say one is a copy of the other:
+/// either's newest is among the other's.
+fn same_token(a: &LoginFingerprint, b: &LoginFingerprint) -> bool {
+    let has = |x: &LoginFingerprint, f: Option<&String>| f.is_some_and(|f| x.seen.contains(f));
+    has(b, a.seen.first()) || has(a, b.seen.first())
+}
+
+/// PURE: the fleet's copied logins, each group two or more logins holding
+/// one refresh token, in host order. A login counts once, in the first
+/// group it matches.
+pub fn copied(hosts: &[HostRow]) -> Vec<Vec<LoginAt>> {
+    let logins: Vec<(LoginAt, &LoginFingerprint)> = hosts
+        .iter()
+        .flat_map(|h| {
+            h.login_fingerprints.iter().map(move |f| {
+                (
+                    LoginAt {
+                        host: h.alias.clone(),
+                        profile: f.profile.clone(),
+                    },
+                    f,
+                )
+            })
+        })
+        .collect();
+    let mut taken = vec![false; logins.len()];
+    let mut out = Vec::new();
+    for i in 0..logins.len() {
+        if taken[i] {
+            continue;
+        }
+        // Grow the group until nothing more matches any member.
+        let mut group = vec![i];
+        let mut k = 0;
+        while k < group.len() {
+            let m = group[k];
+            for j in 0..logins.len() {
+                if !taken[j] && !group.contains(&j) && same_token(logins[m].1, logins[j].1) {
+                    group.push(j);
+                }
+            }
+            k += 1;
+        }
+        if group.len() > 1 {
+            for &g in &group {
+                taken[g] = true;
+            }
+            out.push(group.into_iter().map(|g| logins[g].0.clone()).collect());
+        }
+    }
+    out
+}
+
+/// PURE: [`LoginConflict::Copied`] for each of `alias`'s logins in a
+/// [`copied`] group.
+pub fn copied_on(alias: &str, groups: &[Vec<LoginAt>]) -> Vec<LoginConflict> {
+    let mut out = Vec::new();
+    for g in groups {
+        for l in g.iter().filter(|l| l.host == alias) {
+            out.push(LoginConflict::Copied {
+                profile: l.profile.clone(),
+                copies: g.iter().filter(|o| *o != l).cloned().collect(),
+            });
+        }
+    }
+    out
 }
 
 /// PURE: the conflicts on one host.
@@ -232,8 +353,113 @@ mod tests {
         );
     }
 
+    fn host_with(alias: &str, fps: &[(Option<&str>, &[&str])]) -> HostRow {
+        let s = crate::store::Store::open_in_memory().unwrap();
+        s.upsert_host(alias).unwrap();
+        let mut h = s.get_host_row(alias).unwrap().unwrap();
+        h.login_fingerprints = fps
+            .iter()
+            .map(|(p, seen)| LoginFingerprint {
+                profile: p.map(str::to_string),
+                seen: seen.iter().map(|s| s.to_string()).collect(),
+            })
+            .collect();
+        h
+    }
+
+    fn at(host: &str, profile: Option<&str>) -> LoginAt {
+        LoginAt {
+            host: host.into(),
+            profile: profile.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn one_token_on_two_hosts_is_a_copied_login() {
+        // mac's ~/.claude synced onto mefistos: one token, two hosts.
+        let hosts = [
+            host_with(
+                "mac",
+                &[(None, &["aaaaaaaaaaaa"]), (Some("work"), &["bbbbbbbbbbbb"])],
+            ),
+            host_with("mefistos", &[(None, &["aaaaaaaaaaaa"])]),
+            host_with("trn", &[(None, &["cccccccccccc"])]),
+        ];
+        let groups = copied(&hosts);
+        assert_eq!(groups, vec![vec![at("mac", None), at("mefistos", None)]]);
+        assert_eq!(
+            copied_on("mefistos", &groups),
+            vec![LoginConflict::Copied {
+                profile: None,
+                copies: vec![at("mac", None)],
+            }]
+        );
+        assert!(copied_on("trn", &groups).is_empty());
+    }
+
+    #[test]
+    fn a_copy_still_matches_after_the_original_refreshed() {
+        // mac refreshed (new token first, the copied one kept); mefistos
+        // still holds the old one and is about to be signed out.
+        let hosts = [
+            host_with("mac", &[(None, &["dddddddddddd", "aaaaaaaaaaaa"])]),
+            host_with("mefistos", &[(None, &["aaaaaaaaaaaa"])]),
+        ];
+        assert_eq!(copied(&hosts).len(), 1);
+        // Once mefistos is signed in on its own, its newest is not mac's,
+        // nor mac's newest its: the mark goes.
+        let hosts = [
+            host_with("mac", &[(None, &["dddddddddddd", "aaaaaaaaaaaa"])]),
+            host_with("mefistos", &[(None, &["eeeeeeeeeeee", "aaaaaaaaaaaa"])]),
+        ];
+        assert!(copied(&hosts).is_empty());
+    }
+
+    #[test]
+    fn a_profile_dir_copied_on_one_host_is_a_copied_login_too() {
+        let hosts = [host_with(
+            "trn",
+            &[
+                (None, &["aaaaaaaaaaaa"]),
+                (Some("spare"), &["aaaaaaaaaaaa"]),
+            ],
+        )];
+        let groups = copied(&hosts);
+        assert_eq!(
+            groups,
+            vec![vec![at("trn", None), at("trn", Some("spare"))]]
+        );
+        assert_eq!(copied_on("trn", &groups).len(), 2);
+        let s = copied_on("trn", &groups)[0].describe("trn");
+        assert!(
+            s.starts_with("trn: the host login is a copy of one Claude login that is also profile spare on trn"),
+            "{s}"
+        );
+    }
+
+    #[test]
+    fn three_copies_are_one_group() {
+        let hosts = [
+            host_with("a", &[(None, &["111111111111"])]),
+            host_with("b", &[(None, &["222222222222", "111111111111"])]),
+            host_with("c", &[(None, &["222222222222"])]),
+        ];
+        assert_eq!(
+            copied(&hosts),
+            vec![vec![at("a", None), at("b", None), at("c", None)]]
+        );
+    }
+
     #[test]
     fn a_conflict_crosses_the_wire_tagged_by_kind() {
+        assert_eq!(
+            serde_json::to_value(LoginConflict::Copied {
+                profile: None,
+                copies: vec![at("mac", Some("p"))],
+            })
+            .unwrap(),
+            serde_json::json!({"kind": "copied", "profile": null, "copies": [{"host": "mac", "profile": "p"}]})
+        );
         let v = serde_json::to_value(LoginConflict::SharedAccount {
             logins: vec![None, Some("p".into())],
             email: None,

@@ -429,6 +429,17 @@ only starts the next round. Fleet flags such a host in Hosts (⚿) and in
   never the secret; migration 203, `hosts.login_split`).
 - **Shared account.** The host's login and a login profile, or two
   profiles, signed into the same account.
+- **Copied login**, across hosts. One `.credentials.json` copied onto
+  another host, or into another profile: a dotfiles or `~/.claude` sync,
+  `rsync`, a copied profile dir. Both copies hold one refresh token, so the
+  same race runs between hosts. The health probe reads each login's
+  refresh token into a shell variable, hashes it with SHA-256 on the host
+  and prints only its first 12 hex digits (`loginfp=`; migration 227,
+  `hosts.login_fingerprints`). The store keeps each login's last three, and
+  one login's newest fingerprint among another's marks both: the older ones
+  keep the mark after the first copy refreshes, until the other is signed
+  in on its own. `local`'s own login is left out, for the same reason as
+  Keychain and file below; its profiles are not.
 
 Fix it by keeping one copy per login on a host. For Keychain and file, run
 fleet's sessions on that host under a login profile, then delete
@@ -436,8 +447,10 @@ fleet's sessions on that host under a login profile, then delete
 exist, so the mark stays until one is gone. `local` is never flagged, since
 fleet's local tmux server starts in the login session and reads the
 Keychain. For a shared account, sign the duplicate profile into another
-account. An API key under two profiles is not a conflict: it has no refresh
-token to revoke.
+account. For a copied login, sign each host in on its own (Sign in again)
+and stop the copying: leave `.credentials.json` out of whatever syncs
+`~/.claude` or the profiles. An API key under two profiles is not a
+conflict: it has no refresh token to revoke.
 
 ### Control's own login
 

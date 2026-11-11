@@ -1156,6 +1156,16 @@ fn work_items_has_held_at(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 227.
+fn hosts_has_login_fingerprints(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('hosts') WHERE name = 'login_fingerprints'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 203.
 fn hosts_has_login_split(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
@@ -2592,6 +2602,13 @@ const MIGRATIONS: &[Migration] = &[
         226,
         include_str!("../../migrations/226_review_note_queue.sql"),
     ),
+    // Login fingerprints: one login copied onto two hosts. ADD COLUMN, so
+    // guarded.
+    Migration {
+        version: 227,
+        sql: include_str!("../../migrations/227_host_login_fingerprints.sql"),
+        already_applied: Some(hosts_has_login_fingerprints),
+    },
 ];
 
 /// The settings row [`Store::finish_realm_upgrade`] writes once migration

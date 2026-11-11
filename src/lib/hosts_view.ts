@@ -173,10 +173,44 @@ export function newestClaudeVersion(hosts: readonly HostRow[], now: number, maxA
  *  signed into one account. */
 export type LoginConflict =
   | { kind: 'keychain_and_file' }
-  | { kind: 'shared_account'; logins: (string | null)[]; email: string | null };
+  | { kind: 'shared_account'; logins: (string | null)[]; email: string | null }
+  | { kind: 'copied'; profile: string | null; copies: LoginAt[] };
+
+/** One login in the fleet: a host's own (`profile` null) or one of its profiles. */
+export interface LoginAt {
+  host: string;
+  profile: string | null;
+}
+
+/** The fleet's copied logins: groups of two or more logins holding one refresh
+ *  token, matched by fingerprint (one's newest among the other's). Mirrors
+ *  `login_conflicts::copied`. */
+export function copiedLogins(hosts: readonly Pick<HostRow, 'alias' | 'login_fingerprints'>[]): LoginAt[][] {
+  const logins = hosts.flatMap((h) =>
+    (h.login_fingerprints ?? []).map((f) => ({ at: { host: h.alias, profile: f.profile ?? null }, seen: f.seen })),
+  );
+  const same = (a: string[], b: string[]) => (a.length > 0 && b.includes(a[0])) || (b.length > 0 && a.includes(b[0]));
+  const taken = new Array<boolean>(logins.length).fill(false);
+  const out: LoginAt[][] = [];
+  for (let i = 0; i < logins.length; i++) {
+    if (taken[i]) continue;
+    const group = [i];
+    for (let k = 0; k < group.length; k++) {
+      for (let j = 0; j < logins.length; j++) {
+        if (!taken[j] && !group.includes(j) && same(logins[group[k]].seen, logins[j].seen)) group.push(j);
+      }
+    }
+    if (group.length > 1) {
+      for (const g of group) taken[g] = true;
+      out.push(group.map((g) => logins[g].at));
+    }
+  }
+  return out;
+}
 
 export function loginConflicts(
-  host: Pick<HostRow, 'login_split' | 'account_uuid' | 'claude_profiles'>,
+  host: Pick<HostRow, 'alias' | 'login_split' | 'account_uuid' | 'claude_profiles'>,
+  copied: readonly LoginAt[][] = [],
 ): LoginConflict[] {
   const out: LoginConflict[] = [];
   if (host.login_split === true) out.push({ kind: 'keychain_and_file' });
@@ -201,6 +235,12 @@ export function loginConflicts(
   for (const g of groups.values()) {
     if (g.logins.length > 1) out.push({ kind: 'shared_account', logins: g.logins, email: g.email });
   }
+  for (const g of copied) {
+    for (const l of g) {
+      if (l.host !== host.alias) continue;
+      out.push({ kind: 'copied', profile: l.profile, copies: g.filter((o) => o !== l) });
+    }
+  }
   return out;
 }
 
@@ -211,6 +251,16 @@ export function describeLoginConflict(alias: string, c: LoginConflict): string {
       `and in ~/.claude/.credentials.json (sessions started over SSH). Each refresh revokes the other copy, so one ` +
       `side keeps hitting "Login expired". Run fleet's sessions there under a login profile, then delete ` +
       `~/.claude/.credentials.json: the mark stays while both copies exist.`
+    );
+  }
+  if (c.kind === 'copied') {
+    const self = c.profile === null ? 'the host login' : `profile ${c.profile}`;
+    const others = c.copies.map((o) => (o.profile === null ? `the host login on ${o.host}` : `profile ${o.profile} on ${o.host}`));
+    return (
+      `${alias}: ${self} is a copy of one Claude login that is also ${others.join(' and ')}: they share one refresh ` +
+      `token, so each refresh revokes the others' copy and they take turns hitting "Login expired". Sign each host in ` +
+      `on its own (Sign in again), and stop copying .credentials.json between hosts (a dotfiles or ~/.claude sync, a ` +
+      `copied profile dir).`
     );
   }
   const names = c.logins.map((l) => (l === null ? 'the host login' : `profile ${l}`));
@@ -264,6 +314,8 @@ export function hostAttention(args: {
   diskLowPct: number;
   /** The hub's (or this app's) version; null until known. */
   hubVersion: string | null;
+  /** The fleet's copied logins (`copiedLogins` over every host). */
+  copied?: readonly LoginAt[][];
 }): HostAttention | null {
   const { host, hasToken, tokensLoaded, hook, sessionCount, newestClaude, now, versionMaxAgeSecs, diskLowPct, hubVersion } =
     args;
@@ -334,7 +386,7 @@ export function hostAttention(args: {
   // token, so sessions there keep stopping at "Login expired · Please run /login".
   // Below disk_low: a full disk breaks every session there, and this mark can
   // outlive its cause until a stale copy is deleted.
-  const conflicts = loginConflicts(host);
+  const conflicts = loginConflicts(host, args.copied);
   if (conflicts.length > 0) {
     return {
       kind: 'login_conflict',

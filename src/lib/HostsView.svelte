@@ -31,6 +31,7 @@
     filterGroups,
     groupHostsByAccount,
     hostAttention,
+    copiedLogins,
     newestClaudeVersion,
     sessionCounts,
     sharedWith,
@@ -130,6 +131,7 @@
 
   const rowInfo = $derived.by(() => {
     const m = new Map<string, HostRowInfo>();
+    const copied = copiedLogins($hosts);
     for (const h of $hosts) {
       const counts = sessionCounts(h.alias, $sessions);
       const attention = hostAttention({
@@ -143,6 +145,7 @@
         versionMaxAgeSecs: versionMaxAge,
         diskLowPct,
         hubVersion,
+        copied,
       });
       m.set(h.alias, { counts, attention });
     }

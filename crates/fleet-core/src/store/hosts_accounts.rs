@@ -283,18 +283,30 @@ impl Store {
     ) -> Result<(), rusqlite::Error> {
         use crate::service::health;
         use rusqlite::OptionalExtension;
-        // (busy ticks, total ticks, cpu %, sampled at) of the previous sample.
-        type Prev = (Option<i64>, Option<i64>, Option<f64>, Option<i64>);
+        // (busy ticks, total ticks, cpu %, sampled at, login fingerprints)
+        // of the previous sample.
+        type Prev = (
+            Option<i64>,
+            Option<i64>,
+            Option<f64>,
+            Option<i64>,
+            Option<String>,
+        );
         let prev: Option<Prev> = self
             .conn
             .query_row(
-                "SELECT cpu_busy_ticks, cpu_total_ticks, cpu_pct, health_at \
+                "SELECT cpu_busy_ticks, cpu_total_ticks, cpu_pct, health_at, login_fingerprints \
                  FROM hosts WHERE alias = ?1",
                 [alias],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
             )
             .optional()?;
-        let (prev_busy, prev_total, prev_cpu, prev_at) = prev.unwrap_or_default();
+        let (prev_busy, prev_total, prev_cpu, prev_at, prev_fps) = prev.unwrap_or_default();
+        let prev_fps: Vec<crate::store::LoginFingerprint> = prev_fps
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_default();
+        let fps =
+            crate::store::merge_login_fingerprints(&prev_fps, h.login_fingerprints.as_deref());
         let ticks = |b: Option<i64>, t: Option<i64>| b.zip(t);
         let cpu = health::cpu_from_ticks(
             ticks(prev_busy, prev_total),
@@ -323,8 +335,8 @@ impl Store {
             "UPDATE hosts SET disk_home_free_kb = ?1, disk_home_total_kb = ?2, \
              disk_tmp_free_kb = ?3, load_1m = ?4, mem_avail_kb = ?5, uptime_secs = ?6, \
              health_at = ?7, auth_overrides = ?8, cpu_count = ?9, mem_total_kb = ?10, \
-             boot_at = ?11, latency_ms = ?12, agents_on_path = ?14, login_split = ?15 \
-             WHERE alias = ?13",
+             boot_at = ?11, latency_ms = ?12, agents_on_path = ?14, login_split = ?15, \
+             login_fingerprints = ?16 WHERE alias = ?13",
             rusqlite::params![
                 h.disk_home_free_kb,
                 h.disk_home_total_kb,
@@ -345,6 +357,8 @@ impl Store {
                     .as_ref()
                     .map(|v| serde_json::to_string(v).unwrap_or_else(|_| "[]".into())),
                 h.login_split,
+                (!fps.is_empty())
+                    .then(|| serde_json::to_string(&fps).unwrap_or_else(|_| "[]".into())),
             ],
         )?;
         Ok(())
@@ -1379,6 +1393,49 @@ mod tests {
         assert!(!tuned.cpu_saturated && tuned.mem_low);
         // Counters that went backwards (a reboot) give no percent.
         assert_eq!(write(10, 20, 500, 2040).cpu_pct, None);
+    }
+
+    #[test]
+    fn set_host_health_keeps_each_logins_last_fingerprints() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("trn").unwrap();
+        let sample = |fps: Option<Vec<(Option<&str>, &str)>>| crate::tmux::HostHealthSample {
+            login_fingerprints: fps.map(|v| {
+                v.into_iter()
+                    .map(|(p, f)| (p.map(str::to_string), f.to_string()))
+                    .collect()
+            }),
+            ..Default::default()
+        };
+        let seen = |s: &Store| -> Vec<(Option<String>, Vec<String>)> {
+            s.get_host_row("trn")
+                .unwrap()
+                .unwrap()
+                .login_fingerprints
+                .into_iter()
+                .map(|f| (f.profile, f.seen))
+                .collect()
+        };
+        for fp in ["a1", "a2", "a2", "a3", "a4"] {
+            s.set_host_health("trn", &sample(Some(vec![(None, fp), (Some("w"), "b1")])), 1)
+                .unwrap();
+        }
+        assert_eq!(
+            seen(&s),
+            vec![
+                (None, vec!["a4".into(), "a3".into(), "a2".into()]),
+                (Some("w".into()), vec!["b1".into()]),
+            ]
+        );
+        // An older agent that cannot tell keeps them; a deleted file drops
+        // its login.
+        s.set_host_health("trn", &sample(None), 2).unwrap();
+        assert_eq!(seen(&s).len(), 2);
+        s.set_host_health("trn", &sample(Some(vec![(Some("w"), "b1")])), 3)
+            .unwrap();
+        assert_eq!(seen(&s), vec![(Some("w".into()), vec!["b1".into()])]);
+        s.set_host_health("trn", &sample(Some(vec![])), 4).unwrap();
+        assert!(seen(&s).is_empty());
     }
 
     #[test]

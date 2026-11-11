@@ -481,6 +481,7 @@
       "last_reachable_at",
       "latency_ms",
       "load_1m",
+      "login_fingerprints",
       "login_split",
       "mem_avail_kb",
       "mem_low",

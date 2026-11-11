@@ -12,6 +12,7 @@ import {
   HEALTH_SAMPLE_FRESH_SECS,
   hostAttention,
   loginConflicts,
+  copiedLogins,
   memUsedPct,
   NO_ACCOUNT_LABEL,
   newestClaudeVersion,
@@ -337,6 +338,7 @@ describe('host health helpers', () => {
   it('loginConflicts groups profiles on one account without the host login', () => {
     expect(
       loginConflicts({
+        alias: 'h',
         login_split: null,
         account_uuid: 'a',
         claude_profiles: [
@@ -345,6 +347,42 @@ describe('host health helpers', () => {
         ],
       }),
     ).toEqual([{ kind: 'shared_account', logins: ['one', 'two'], email: 'b@x' }]);
+  });
+
+  it('copiedLogins finds one refresh token on two hosts, and the mark names the copy', () => {
+    // mac's ~/.claude synced onto mefistos; mac has refreshed once since.
+    const hosts = [
+      host('mac', { login_fingerprints: [{ profile: null, seen: ['dddddddddddd', 'aaaaaaaaaaaa'] }, { profile: 'work', seen: ['bbbbbbbbbbbb'] }] }),
+      host('mefistos', { login_fingerprints: [{ profile: null, seen: ['aaaaaaaaaaaa'] }] }),
+      host('trn', { login_fingerprints: [{ profile: null, seen: ['cccccccccccc'] }] }),
+    ];
+    const copied = copiedLogins(hosts);
+    expect(copied).toEqual([
+      [
+        { host: 'mac', profile: null },
+        { host: 'mefistos', profile: null },
+      ],
+    ]);
+    const a = hostAttention({
+      host: hosts[1],
+      hasToken: true,
+      tokensLoaded: true,
+      hook: { state: 'seen' as const, lastAt: NOW },
+      sessionCount: 1,
+      newestClaude: null,
+      now: NOW,
+      versionMaxAgeSecs: 86400,
+      diskLowPct: 90,
+      hubVersion: null,
+      copied,
+    });
+    expect(a?.kind).toBe('login_conflict');
+    expect(a?.title).toContain('mefistos: the host login is a copy of one Claude login that is also the host login on mac');
+    expect(loginConflicts(hosts[2], copied)).toEqual([]);
+    // Signed in on its own, mefistos no longer matches.
+    expect(
+      copiedLogins([hosts[0], host('mefistos', { login_fingerprints: [{ profile: null, seen: ['eeeeeeeeeeee', 'aaaaaaaaaaaa'] }] })]),
+    ).toEqual([]);
   });
 
   it('disk_low outranks claude_old; agent_old fires when the agent is older than the hub version', () => {
