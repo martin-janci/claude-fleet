@@ -564,6 +564,22 @@ describe('AnswerPrompt 1–9 (redesign step 3.8)', () => {
       expect(mockedSend).not.toHaveBeenCalled();
     });
 
+    it('a Work task’s detail over another fleet’s session: its card takes no digit', async () => {
+      const company = fleetInfo('company');
+      const away = session({ id: 7, fleet: 'company', host_alias: 'mac', tmux_name: 'pos-7' });
+      _setFleetsForTest([{ ...company, id: PRIMARY, primary: true, label: 'home' }, company]);
+      _setFleetRowsForTest('company', { sessions: new Map([[7, away]]), hosts: new Map(), projects: [], error: null });
+      fleetSelection.set({ fleet: 'company', id: 7 });
+      render(AnswerPrompt, { session: away, view: view() });
+      sidebarView.set('work');
+      selectedTaskId.set('t-1');
+      taskDetailOpen.set(true);
+      await settle();
+      await fireEvent.keyDown(document.body, { key: '1' });
+      await settle();
+      expect(mockedSend).not.toHaveBeenCalled();
+    });
+
     it('a hidden card (keys off) takes neither a digit nor Escape', async () => {
       render(AnswerPrompt, { session: session(), view: view(), keys: false });
       await fireEvent.keyDown(document.body, { key: '1' });

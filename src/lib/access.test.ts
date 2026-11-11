@@ -352,10 +352,10 @@ describe('attachCommandFor', () => {
   const s = (host_alias: string, tmux_name = 'dev-foo') => ({ host_alias, tmux_name });
   it('attaches the exact session, through ssh for a host that is not this machine', () => {
     expect(attachCommandFor(s('local'), 'ssh', STANDALONE, false).command).toBe("tmux attach -t '=dev-foo'");
-    expect(attachCommandFor(s('mefistos'), 'ssh', STANDALONE, false).command).toBe("ssh -t mefistos tmux attach -t '=dev-foo'");
-    expect(attachCommandFor(s('mefistos', "it's"), 'ssh', remote, false).command).toBe("ssh -t mefistos tmux attach -t '=it'\\''s'");
+    expect(attachCommandFor(s('mefistos'), 'ssh', STANDALONE, false).command).toBe("ssh -t mefistos 'tmux attach -t '\\''=dev-foo'\\'''");
+    expect(attachCommandFor(s('mefistos', "it's"), 'ssh', remote, false).command).toBe("ssh -t mefistos 'tmux attach -t '\\''=it'\\''\\'\\'''\\''s'\\'''");
     // On a Mac or Linux desktop a `wsl-` host is reached over ssh.
-    expect(attachCommandFor(s('wsl-ubuntu'), 'ssh', STANDALONE, false).command).toBe("ssh -t wsl-ubuntu tmux attach -t '=dev-foo'");
+    expect(attachCommandFor(s('wsl-ubuntu'), 'ssh', STANDALONE, false).command).toBe("ssh -t wsl-ubuntu 'tmux attach -t '\\''=dev-foo'\\'''");
   });
 
   it('gives none, with why, where this machine cannot reach the pane', () => {

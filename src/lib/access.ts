@@ -173,7 +173,10 @@ export function attachCommandFor(
   if (windows && /^wsl-/.test(s.host_alias))
     return { command: null, why: `This session runs in WSL ("${s.host_alias}"): attach from a shell in that distribution with ${exact}.` };
   const host = /^[A-Za-z0-9_.@%+:,/-][A-Za-z0-9_.@%+=:,/-]*$/.test(s.host_alias) ? s.host_alias : quoteAlways(s.host_alias);
-  return { command: `ssh -t ${host} ${exact}`, why: null };
+  // ssh joins its words into one string the REMOTE shell parses again, so
+  // the remote command is quoted once more as one word: the remote shell
+  // then reads `tmux attach -t '=name'`, quoted (zsh there too).
+  return { command: `ssh -t ${host} ${quoteAlways(exact)}`, why: null };
 }
 
 /**

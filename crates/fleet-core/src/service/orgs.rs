@@ -1702,7 +1702,7 @@ fn org_details_locked(
             use crate::service::org_needs::AdminNeed;
             needs.extend(
                 cs.iter()
-                    .filter(|c| c.mode == "full" && !c.trusted_by(&trusted_people))
+                    .filter(|c| waits_for_trust(c, &trusted_people))
                     .map(|c| AdminNeed::UntrustedDevice {
                         device: c.name.clone(),
                         paired_at: c.created_at,
@@ -1963,6 +1963,16 @@ fn org_accounts(
     Ok(out)
 }
 
+/// Whether `c` is a full device an admin could still trust: not trusted yet,
+/// and not the operator's token (`ux-agent`), which never takes trust
+/// (`Store::set_client_trust` refuses it), so naming it would offer a Trust
+/// button that always fails.
+fn waits_for_trust(c: &crate::store::ClientTokenRow, trusted_people: &[i64]) -> bool {
+    c.mode == "full"
+        && c.name != crate::service::operator::OPERATOR_CLIENT_NAME
+        && !c.trusted_by(trusted_people)
+}
+
 /// The live members of `org`, admins first, as the overview lists them;
 /// with each one's devices out of `devices` when the caller administers it.
 fn org_member_list(
@@ -1993,7 +2003,7 @@ fn org_member_list(
                     .map(|cs| cs.iter().map(|c| c.name.clone()).collect()),
                 untrusted_devices: theirs.as_ref().map(|cs| {
                     cs.iter()
-                        .filter(|c| c.mode == "full" && !c.trusted_by(trusted_people))
+                        .filter(|c| waits_for_trust(c, trusted_people))
                         .map(|c| c.name.clone())
                         .collect()
                 }),

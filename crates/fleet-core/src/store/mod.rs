@@ -1078,8 +1078,26 @@ impl Store {
         if unhold.is_some() {
             let held = self.bus.release();
             if result.is_ok() {
+                let uncredentialed = self.uncredentialed_accounts();
                 for e in &held {
                     self.bus.deliver(e);
+                }
+                // A host write held here moved the bus's facts only now: the
+                // sessions whose account it moved into or out of the
+                // signed-out verdict are announced again after it.
+                let hosts_moved = held.iter().any(|e| {
+                    matches!(
+                        e,
+                        RowChange::HostAdded(_)
+                            | RowChange::HostProbed(_)
+                            | RowChange::HostPinged { .. }
+                            | RowChange::HostRemoved(_)
+                    )
+                });
+                if hosts_moved {
+                    if let Err(e) = self.reemit_after_host_write(&uncredentialed, None) {
+                        tracing::warn!("re-announcing sessions after a host write failed: {e}");
+                    }
                 }
             }
         }

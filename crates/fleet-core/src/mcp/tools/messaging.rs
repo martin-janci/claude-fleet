@@ -318,7 +318,10 @@ impl FleetTools {
         // operator, whose `send_prompt` waits on a card this tool has none
         // of), a peer and an answer-only device neither send nor resolve
         // one, refused before the session is even looked up.
-        if action != "list" && !presses_folder_rules(&caller, true) {
+        // A named `act` token may (it may send prompts too): the stricter
+        // [`presses_folder_rules`] is for a press that saves a lasting
+        // choice, and a note's send types a prompt, never a dialog's option.
+        if action != "list" && !sends_review_notes(&caller) {
             return Err(mcp_err(
                 codes::E_FORBIDDEN,
                 "a person sends and resolves review notes",
@@ -1164,6 +1167,16 @@ pub(crate) fn answer_key_allowed(
     }
 }
 
+/// Whether `caller` may send or resolve review notes: anyone but an agent's
+/// host token, Control (the operator), an answer-only device and a peer. A
+/// named `act` token (CI, a script) may, as it may send prompts.
+fn sends_review_notes(caller: &Caller) -> bool {
+    caller.host_alias.is_none()
+        && !caller.is_operator()
+        && caller.mode != TokenMode::Answer
+        && caller.mode != TokenMode::Peer
+}
+
 /// Whether `caller` may press a dialog option that saves a rule for the
 /// whole folder, or otherwise outlives the request ([`folder_rule_refused`]):
 /// the master token (an `admin` named token is one), or a person's paired
@@ -1586,6 +1599,56 @@ mod answer_key_tests {
             ..Caller::master()
         };
         assert!(!presses_folder_rules(&host, true));
+    }
+
+    /// Review notes keep main's rule: a named `act` token sends them (it may
+    /// send prompts), though it presses no folder rule; the operator, a host
+    /// token, an answer-only device and a peer do not.
+    #[test]
+    fn a_named_act_token_sends_review_notes() {
+        use super::sends_review_notes;
+        use crate::mcp::auth::{ApiTokenRef, ClientRef, TokenMode};
+        use crate::mcp::Caller;
+        use crate::store::ApiScope;
+        let device = |name: &str, mode: TokenMode| Caller {
+            host_alias: None,
+            client: Some(ClientRef {
+                id: 3,
+                name: name.into(),
+                trusted: true,
+                org_id: None,
+                person_id: Some(1),
+            }),
+            mode,
+            pane: None,
+            is_personal_owner: true,
+            is_fleet_admin: true,
+            api: None,
+        };
+        let act = Caller {
+            api: Some(ApiTokenRef {
+                id: 1,
+                name: "ci".into(),
+                scope: ApiScope::Act,
+                hosts: None,
+            }),
+            ..Caller::master()
+        };
+        assert!(sends_review_notes(&act), "a CI act token");
+        assert!(sends_review_notes(&Caller::master()));
+        assert!(sends_review_notes(&device("phone", TokenMode::Full)));
+        assert!(!sends_review_notes(&device(
+            crate::service::operator::OPERATOR_CLIENT_NAME,
+            TokenMode::Full
+        )));
+        assert!(!sends_review_notes(&device("phone", TokenMode::Answer)));
+        assert!(!sends_review_notes(&device("peer", TokenMode::Peer)));
+        let host = Caller {
+            host_alias: Some("mefistos".into()),
+            client: None,
+            ..Caller::master()
+        };
+        assert!(!sends_review_notes(&host));
     }
 }
 

@@ -296,16 +296,17 @@
   // sidebar's compact cards take no digits: there could be several.
   const isMac = detectMac(typeof navigator === 'undefined' ? undefined : navigator);
   // The same covers TerminalView's chords check: Settings over everything,
-  // and over this window's own session another fleet's session or a Work
-  // task's detail, all with the destination still 'session'. A covered card
+  // a Work task's detail over any session (another fleet's too: the detail
+  // view sits above that overlay), and another fleet's session over this
+  // window's own, all with the destination still 'session'. A covered card
   // stays mounted with a live dialog; a digit meant for the card on screen
   // must not answer this one unseen.
   const onScreen = $derived(
     keys &&
       $destination === 'session' &&
       !$settingsOpen &&
-      (session.fleet !== undefined ||
-        (!$selectedFleetSession && !($sidebarView === 'work' && !!$selectedTaskId && $taskDetailOpen))),
+      !($sidebarView === 'work' && !!$selectedTaskId && $taskDetailOpen) &&
+      (session.fleet !== undefined || !$selectedFleetSession),
   );
   function onWindowKeydown(e: KeyboardEvent) {
     if (

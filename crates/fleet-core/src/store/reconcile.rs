@@ -1175,6 +1175,7 @@ impl Store {
 
         // Phase 2: savepoint released — now it is safe to emit (directly when
         // it was the transaction, held by `atomically` when nested).
+        let uncredentialed = self.uncredentialed_accounts();
         for change in &changes {
             // Task 7 (R5): one INFO line per session lifecycle transition —
             // a host reboot used to leave nothing in the log to forensically
@@ -1204,6 +1205,9 @@ impl Store {
             }
             self.bus.emit_change(change);
         }
+        // The probe may have moved the host's reachability, and with it the
+        // signed-out verdict of an account a login there is on.
+        self.reemit_after_host_write(&uncredentialed, None)?;
         Ok(())
     }
 

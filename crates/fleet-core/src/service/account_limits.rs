@@ -498,6 +498,13 @@ fn best_login(
     Ok(least(true).or_else(|| if any_reading { least(false) } else { None }))
 }
 
+/// Whether `account_uuid` has spent its daily limit today: a login on it is
+/// refused at the start whatever anyone says, so stepping off a forbidden or
+/// signed-out login never lands on it. A failed read counts as spent.
+fn daily_spent(s: &Store, account_uuid: &str, now: i64) -> bool {
+    !daily_limit_hit(s, account_uuid, now).is_ok_and(|h| h.is_none())
+}
+
 /// The login a start that nobody chose a login for runs under on
 /// `host_alias`: `profile` (`None` = the host's own), unless its account is
 /// at or past `accounts.pause_at` ([`over_limit`]) and another login on the
@@ -523,7 +530,7 @@ pub fn login_with_headroom_for(
         let account = login_account(s, host_alias, profile, now)?.map(|a| a.login.account_uuid);
         if account.is_some_and(|a| forbidden.contains(&a)) {
             return Ok(best_login(s, host_alias, now, true, |l| {
-                !forbidden.contains(&l.account_uuid)
+                !forbidden.contains(&l.account_uuid) && !daily_spent(s, &l.account_uuid, now)
             })?
             .map_or_else(|| profile.map(str::to_string), |l| l.profile));
         }
@@ -535,7 +542,7 @@ pub fn login_with_headroom_for(
     if let Some(host) = s.get_host_row(host_alias)? {
         if crate::service::login_health::is_signed_out(&host, profile) {
             return Ok(best_login(s, host_alias, now, true, |l| {
-                !forbidden.contains(&l.account_uuid)
+                !forbidden.contains(&l.account_uuid) && !daily_spent(s, &l.account_uuid, now)
             })?
             .map_or_else(|| profile.map(str::to_string), |l| l.profile));
         }

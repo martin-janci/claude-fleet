@@ -136,6 +136,37 @@ fn a_login_nobody_chose_gives_way_when_it_is_signed_out() {
     );
 }
 
+/// Review of #1118: stepping off a signed-out or forbidden login never lands
+/// on a login whose account spent its daily limit (the start would refuse
+/// it whatever anyone says) while another login has room.
+#[test]
+fn stepping_off_a_login_passes_over_a_spent_daily_limit() {
+    use crate::service::account_limits::seed_daily_spend;
+    use crate::store::SignedOutLogin;
+    let (s, p) = fleet();
+    // `work` (10%) is the freest, but its account's day is spent.
+    seed_daily_spend(&s, "acct-work", 1.0, 2.0, NOW);
+    s.set_host_signed_out_logins(
+        "mac",
+        &[SignedOutLogin {
+            profile: None,
+            since: 1,
+            checked_at: 1,
+        }],
+    )
+    .unwrap();
+    assert_eq!(
+        login_with_headroom_for(&s, None, "mac", None, NOW).unwrap(),
+        Some("spare".into())
+    );
+    s.set_host_signed_out_logins("mac", &[]).unwrap();
+    s.set_account_forbidden_projects("acct-own", &[p]).unwrap();
+    assert_eq!(
+        login_with_headroom_for(&s, Some(p), "mac", None, NOW).unwrap(),
+        Some("spare".into())
+    );
+}
+
 #[test]
 fn a_freer_login_is_never_a_forbidden_one() {
     let (s, p) = fleet();

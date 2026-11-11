@@ -226,6 +226,41 @@ fn a_reaped_workers_spend_stays_with_its_mission() {
     assert_eq!(s.mission_cost_micros(m).unwrap(), 4_000_000);
 }
 
+/// Review of #1118: a reaped lead's spend stays with its mission when the
+/// lead's newest task is outside it (a dispatched task with no item, or a
+/// run of another mission's item); each mission keeps what it counted live.
+#[test]
+fn a_reaped_workers_later_task_outside_the_mission_keeps_the_missions_spend() {
+    let s = Store::open_in_memory().unwrap();
+    let m = mission(&s);
+    let other = mission(&s);
+    s.upsert_host("h").unwrap();
+    let lead = s
+        .upsert_session("lead", "h", None, None, 1, 1, "running", None)
+        .unwrap();
+    let a = s.create_local_work_item(None, "a").unwrap().id;
+    let b = s.create_local_work_item(None, "b").unwrap().id;
+    s.set_mission_item(m, a, true, "fleet").unwrap();
+    s.set_mission_item(other, b, true, "fleet").unwrap();
+    let t1 = s.insert_task(None, Some(lead), "a", "n").unwrap();
+    s.set_task_run(t1.id, a, 1, "implement").unwrap();
+    let t2 = s.insert_task(None, Some(lead), "b", "n").unwrap();
+    s.set_task_run(t2.id, b, 1, "implement").unwrap();
+    // A dispatched task with no item, newest of all.
+    s.insert_task(None, Some(lead), "chore", "n").unwrap();
+    s.conn_ref()
+        .execute(
+            "UPDATE sessions SET usage_cost_micros = 4000000 WHERE id = ?1",
+            [lead],
+        )
+        .unwrap();
+    assert_eq!(s.mission_cost_micros(m).unwrap(), 4_000_000);
+    assert_eq!(s.mission_cost_micros(other).unwrap(), 4_000_000);
+    s.delete_session(lead).unwrap();
+    assert_eq!(s.mission_cost_micros(m).unwrap(), 4_000_000);
+    assert_eq!(s.mission_cost_micros(other).unwrap(), 4_000_000);
+}
+
 /// A person's "Finish task" on a member (a `wrapup` row, design 2026-10-13
 /// D2) is not one of the mission's runs: it spends no attempt, takes no
 /// slot, adds no cost and makes its session no mission worker.

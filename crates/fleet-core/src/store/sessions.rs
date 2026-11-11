@@ -1566,14 +1566,63 @@ impl Store {
     /// [`Self::reemit_live_sessions_on_account`] does for an account: its
     /// signed-out logins changed. Returns how many.
     pub fn reemit_live_sessions_on_host(&self, host_alias: &str) -> Result<usize, rusqlite::Error> {
-        let ids: Vec<i64> = self
-            .conn
+        let ids = self.live_session_ids_on_host(host_alias)?;
+        for &id in &ids {
+            self.emit_session(id)?;
+        }
+        Ok(ids.len())
+    }
+
+    fn live_session_ids_on_host(&self, host_alias: &str) -> Result<Vec<i64>, rusqlite::Error> {
+        self.conn
             .prepare_cached(
                 "SELECT id FROM sessions WHERE host_alias = ?1 AND status != 'ghost' \
                  AND lost_at IS NULL AND kind NOT IN ('shell', 'external') ORDER BY id",
             )?
             .query_map([host_alias], |r| r.get(0))?
-            .collect::<Result<_, _>>()?;
+            .collect()
+    }
+
+    /// The accounts this store's bus counts without a login
+    /// ([`crate::service::attention::Facts::uncredentialed_accounts`]): read
+    /// before a host write, for [`Self::reemit_after_host_write`]. Empty off
+    /// the hub.
+    pub(super) fn uncredentialed_accounts(&self) -> std::collections::BTreeSet<String> {
+        self.attention_facts().uncredentialed_accounts
+    }
+
+    /// After a host write the bus has seen: announce again every live
+    /// session on an account that moved into or out of
+    /// `uncredentialed_accounts` (`before`, from
+    /// [`Self::uncredentialed_accounts`]), and, with `host`, every live
+    /// session on that host; each session once. An account counts as signed
+    /// out only when every login on it, on every reachable and shown host,
+    /// is (`attention::every_login_signed_out`), so one host's signed-out
+    /// logins, reachability or hidden flag moves the sessions of OTHER hosts
+    /// on the account; the hub stamps `needs_attention` onto session frames
+    /// only, and without this a phone kept the old stamp on an idle one
+    /// (review of #1118). Returns how many.
+    pub(super) fn reemit_after_host_write(
+        &self,
+        before: &std::collections::BTreeSet<String>,
+        host: Option<&str>,
+    ) -> Result<usize, rusqlite::Error> {
+        let after = self.uncredentialed_accounts();
+        let mut ids = std::collections::BTreeSet::new();
+        if let Some(h) = host {
+            ids.extend(self.live_session_ids_on_host(h)?);
+        }
+        for account in before.symmetric_difference(&after) {
+            let on: Vec<i64> = self
+                .conn
+                .prepare_cached(
+                    "SELECT id FROM sessions WHERE account_uuid = ?1 AND status != 'ghost' \
+                     AND lost_at IS NULL AND kind NOT IN ('shell', 'external')",
+                )?
+                .query_map([account], |r| r.get(0))?
+                .collect::<Result<_, _>>()?;
+            ids.extend(on);
+        }
         for &id in &ids {
             self.emit_session(id)?;
         }

@@ -9,11 +9,16 @@
 --
 -- tasks
 --   worker_spent_micros  what the task's worker session had spent when its
---                        row was deleted. Written once per session, on the
---                        newest of its tasks (not a wrapup when it has
+--                        row was deleted. Written once per session and
+--                        mission it served, on the newest of its tasks on
+--                        that mission's items (not a wrapup when it has
 --                        another), so a lead with several tasks is counted
---                        once; its other tasks get 0. NULL while the
---                        session row lives (its spend is read live).
+--                        once by its mission, and a later task outside the
+--                        mission (a dispatched task, another mission's run)
+--                        does not take the mission's share; its tasks on no
+--                        mission keep one copy the same way. Its other tasks
+--                        get 0. NULL while the session row lives (its spend
+--                        is read live, once per mission that counts it).
 --
 -- BEFORE DELETE, so the tasks still name the session: 101's AFTER DELETE
 -- trigger NULLs the id.
@@ -24,10 +29,17 @@ BEFORE DELETE ON sessions
 BEGIN
   UPDATE tasks
      SET worker_spent_micros = COALESCE(worker_spent_micros, 0) +
-           CASE WHEN id = (SELECT t.id FROM tasks t
-                            WHERE t.worker_session_id = old.id
-                            ORDER BY COALESCE(t.role, '') = 'wrapup', t.id DESC
-                            LIMIT 1)
+           CASE WHEN id IN (
+                  SELECT (SELECT t.id FROM tasks t
+                            LEFT JOIN work_items i ON i.id = t.work_item_id
+                           WHERE t.worker_session_id = old.id
+                             AND i.orchestration_project_id IS m.mission
+                           ORDER BY COALESCE(t.role, '') = 'wrapup', t.id DESC
+                           LIMIT 1)
+                    FROM (SELECT DISTINCT i.orchestration_project_id AS mission
+                            FROM tasks t
+                            LEFT JOIN work_items i ON i.id = t.work_item_id
+                           WHERE t.worker_session_id = old.id) m)
                 THEN COALESCE(old.usage_cost_micros, 0) ELSE 0 END
    WHERE worker_session_id = old.id;
 END;

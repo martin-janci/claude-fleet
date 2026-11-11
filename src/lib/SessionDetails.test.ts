@@ -765,7 +765,7 @@ describe('SessionDetails actions for pane-less rows (external read-only, inactiv
   it('a tmux row still shows its attach command and Kill', async () => {
     render(SessionDetails, { props: { session: sampleSession } });
     await tick();
-    expect(screen.getByTestId('attach-command').textContent).toBe("ssh -t mefistos tmux attach -t '=dev-foo'");
+    expect(screen.getByTestId('attach-command').textContent).toBe("ssh -t mefistos 'tmux attach -t '\\''=dev-foo'\\'''");
     expect(screen.getByTestId('kill-from-details')).toBeTruthy();
   });
 });
@@ -1016,7 +1016,7 @@ describe('SessionDetails attach command against a grant', () => {
     const mine = { ...sampleSession, id: 32, owner_person_id: ME, visibility: 'private' as const };
     render(SessionDetails, { props: { session: mine } });
     await tick();
-    expect(screen.getByTestId('attach-command').textContent).toBe("ssh -t mefistos tmux attach -t '=dev-foo'");
+    expect(screen.getByTestId('attach-command').textContent).toBe("ssh -t mefistos 'tmux attach -t '\\''=dev-foo'\\'''");
     expect(screen.getByTestId('copy-attach')).toBeTruthy();
   });
 
