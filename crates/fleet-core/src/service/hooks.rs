@@ -688,29 +688,42 @@ pub fn take_pending_stop_delivery(
     ))
 }
 
-/// The worker guard's answer to a `PreToolUse(Bash)` hook (orchestration
-/// §7.2): why the command is a person's step, for a mission's worker only;
-/// `None` lets it run. Never an error: a guard that cannot read the store
-/// lets the command through, as a hub that does not answer would.
+/// The worker guard's answer to a `PreToolUse` hook (orchestration §7.2):
+/// why the Bash command, or the MCP tool call (`mcp__<server>__<tool>`), is
+/// a person's step, for a mission's worker only; `None` lets it run. Never
+/// an error: a guard that cannot read the store lets the command through,
+/// as a hub that does not answer would.
 pub fn pre_tool_use_denial(
     store: &Arc<Mutex<Store>>,
     payload: &HookPayload,
     ctx: &HookContext,
 ) -> Option<&'static str> {
-    if payload.tool_name.as_deref() != Some("Bash") {
+    use crate::service::work::orchestrate::guard;
+    let tool = payload.tool_name.as_deref()?;
+    if tool.starts_with("mcp__") {
+        let why = guard::mcp_deny_reason(tool)?;
+        let s = lock(store).ok()?;
+        let (row, _) = resolve_hook_row(&s, payload, ctx, false).ok()??;
+        if !s.is_mission_worker(row.id).ok()? {
+            return None;
+        }
+        tracing::info!(session = %row.tmux_name, tool, why, "[hook] worker guard refused an MCP tool");
+        return Some(why);
+    }
+    if tool != "Bash" {
         return None;
     }
     let command = payload.tool_input.as_ref()?.get("command")?.as_str()?;
     // The pure reading first, as if on the default branch: most commands
     // that reach here are not a person's step on any branch.
-    crate::service::work::orchestrate::guard::deny_reason(command, Some("main"))?;
+    guard::deny_reason(command, Some("main"))?;
     let s = lock(store).ok()?;
     let (row, _) = resolve_hook_row(&s, payload, ctx, false).ok()??;
     if !s.is_mission_worker(row.id).ok()? {
         return None;
     }
     let branch = s.session_branch(row.id).ok().flatten();
-    let why = crate::service::work::orchestrate::guard::deny_reason(command, branch.as_deref())?;
+    let why = guard::deny_reason(command, branch.as_deref())?;
     tracing::info!(session = %row.tmux_name, why, "[hook] worker guard refused a command");
     Some(why)
 }
@@ -4984,6 +4997,13 @@ mod tests {
             None,
             "not a worker"
         );
+        let mut mcp_merge = bash("");
+        mcp_merge.tool_name = Some("mcp__github__merge_pull_request".into());
+        assert_eq!(
+            pre_tool_use_denial(&store, &mcp_merge, &c),
+            None,
+            "not a worker"
+        );
         {
             let s = store.lock().unwrap();
             let m = s
@@ -5012,6 +5032,29 @@ mod tests {
         let mut other_tool = bash("gh pr merge 3");
         other_tool.tool_name = Some("Read".into());
         assert_eq!(pre_tool_use_denial(&store, &other_tool, &c), None);
+        // An MCP server's tracker write or PR merge is refused like the
+        // CLI's; its reads, and fleet's own tools, run.
+        let mcp = |tool: &str| HookPayload {
+            tool_name: Some(tool.into()),
+            tool_input: Some(serde_json::json!({ "issueIdOrKey": "SHOP-41" })),
+            ..make_payload("PreToolUse", "uuid-1")
+        };
+        for tool in [
+            "mcp__atlassian__transitionJiraIssue",
+            "mcp__github__merge_pull_request",
+            "mcp__github__update_pull_request",
+        ] {
+            assert!(
+                pre_tool_use_denial(&store, &mcp(tool), &c).is_some(),
+                "{tool}"
+            );
+        }
+        for tool in [
+            "mcp__atlassian__getJiraIssue",
+            "mcp__claude-fleet__work_link",
+        ] {
+            assert_eq!(pre_tool_use_denial(&store, &mcp(tool), &c), None, "{tool}");
+        }
     }
     fn suggestion_payload(session_id: &str, text: &str) -> HookPayload {
         HookPayload {

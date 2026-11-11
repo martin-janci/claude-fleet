@@ -203,6 +203,40 @@ fn a_wrapup_on_a_member_is_not_a_mission_run() {
     assert_eq!(s.run_cost_estimate(Some(m)).unwrap(), None);
 }
 
+/// Ending a mission, or taking its item out, stops no session: a worker
+/// the mission started stays one, so the guard does not lift mid-turn. A
+/// person's own run on a member is a worker only while the mission is live.
+#[test]
+fn a_missions_own_worker_stays_one_after_the_mission_ends_or_drops_its_item() {
+    let s = Store::open_in_memory().unwrap();
+    let m = mission(&s);
+    s.set_mission_state(m, None, "active", "fleet").unwrap();
+    s.upsert_host("h").unwrap();
+    let w = s
+        .upsert_session("w", "h", None, None, 1, 1, "running", None)
+        .unwrap();
+    s.set_session_origin(w, &crate::store::SessionOrigin::mission(m))
+        .unwrap();
+    let own = s
+        .upsert_session("own", "h", None, None, 1, 1, "running", None)
+        .unwrap();
+    let item = s.create_local_work_item(None, "a").unwrap().id;
+    s.set_mission_item(m, item, true, "fleet").unwrap();
+    for sid in [w, own] {
+        let t = s.insert_task(None, Some(sid), "go", "n").unwrap();
+        s.set_task_run(t.id, item, 1, "implement").unwrap();
+    }
+    assert!(s.is_mission_worker(w).unwrap());
+    assert!(s.is_mission_worker(own).unwrap());
+    s.set_mission_item(m, item, false, "fleet").unwrap();
+    assert!(s.is_mission_worker(w).unwrap(), "item taken out");
+    assert!(!s.is_mission_worker(own).unwrap());
+    s.set_mission_item(m, item, true, "fleet").unwrap();
+    s.set_mission_state(m, None, "cancelled", "fleet").unwrap();
+    assert!(s.is_mission_worker(w).unwrap(), "mission cancelled");
+    assert!(!s.is_mission_worker(own).unwrap());
+}
+
 /// An active mission, its next wake an hour away.
 fn sleeping(s: &Store) -> i64 {
     let m = mission(s);

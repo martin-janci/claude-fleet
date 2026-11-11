@@ -205,16 +205,22 @@ impl Store {
         Ok(wake_session_missions_in_tx(&self.conn, session_id)?)
     }
 
-    /// Whether `session_id` is a worker of a live mission: a run of one of
-    /// its members, while the mission is active or paused (the worker
-    /// guard's scope, orchestration §7.2). A `wrapup` row (a person's
-    /// "Finish task", design 2026-10-13 D2) makes no session a worker: it is
-    /// never one of the mission's runs, here or in the counts below.
+    /// Whether `session_id` is a mission's worker (the worker guard's
+    /// scope, orchestration §7.2): a session a mission started (its origin
+    /// is `mission`: a run's worker or a lane lead), whatever the mission's
+    /// state now and whether or not its item is still a member — ending a
+    /// mission or taking an item out of it stops no session, so the guard
+    /// must not lift while it runs on; or a run of one of a live (active or
+    /// paused) mission's members. A `wrapup` row (a person's "Finish task",
+    /// design 2026-10-13 D2) makes no session a worker: it is never one of
+    /// the mission's runs, here or in the counts below.
     pub fn is_mission_worker(&self, session_id: i64) -> Result<bool, IpcError> {
         Ok(self
             .conn
             .query_row(
-                "SELECT 1 FROM tasks t \
+                "SELECT 1 FROM sessions s WHERE s.id = ?1 AND s.origin = 'mission' \
+                 UNION ALL \
+                 SELECT 1 FROM tasks t \
                  JOIN work_items i ON i.id = t.work_item_id \
                  JOIN orchestration_projects p ON p.id = i.orchestration_project_id \
                  WHERE t.worker_session_id = ?1 AND p.state IN ('active', 'paused') \
