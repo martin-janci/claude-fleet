@@ -597,6 +597,9 @@ async fn serve(socket: WebSocket, session: Session, limits: Limits, hello_deadli
     let _ = tx.send(HubFrame::Welcome {
         hub_version: crate::app_version::get().to_string(),
         proto: fleet_proto::PROTO_VERSION.min(hello.proto),
+        // Lets a desktop on the same machine attach its own sessions locally
+        // (the agent writes it to its identity file).
+        host_alias: Some(alias.clone()),
     });
     let conn_id = registry.connect_bound(&alias, hello, tx, credential.clone());
     if stale() {

@@ -89,7 +89,7 @@ impl BinaryConfig {
             root: root.to_path_buf(),
             link: link.to_path_buf(),
             state_dir: state_dir.to_path_buf(),
-            platform: Platform::new("linux", std::env::consts::ARCH, "tarball"),
+            platform: Platform::new(tarball_os(), std::env::consts::ARCH, "tarball"),
             speaks: Speaks::default(),
             data_dir: None,
             ready_timeout: Duration::from_secs(90),
@@ -447,6 +447,15 @@ impl<H: Host> BinaryUpdater<H> {
         let Artifact::Tarball { sha256, size, .. } = &t.artifact else {
             return Outcome::Failed(format!("{} is not a tarball for this platform", t.version));
         };
+        // The hub picked it for our platform, but a hub from before macOS
+        // agents existed matched a tarball on its architecture alone.
+        if !t.artifact.matches(&self.cfg.platform) {
+            return Outcome::Failed(format!(
+                "{} is not a tarball for this platform ({})",
+                t.version,
+                self.cfg.platform.os_arch()
+            ));
+        }
         if self.state.bad.is_bad(&t.version, Some(sha256)) {
             self.log(&format!(
                 "{} failed here before; not retrying it",
@@ -1010,6 +1019,16 @@ pub fn needs_restore(prev: &Before, cand: Option<&Candidate>, cand_schema: Optio
     match cand_schema.or_else(|| cand.and_then(|c| c.schema_to)) {
         Some(after) => after > before,
         None => true,
+    }
+}
+
+/// The `os` a release tarball is matched on (`Artifact::matches`): `darwin`
+/// on macOS, the desktop's spelling, else `linux`.
+pub fn tarball_os() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "darwin"
+    } else {
+        "linux"
     }
 }
 

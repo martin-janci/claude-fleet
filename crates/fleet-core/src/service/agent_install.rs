@@ -5,12 +5,13 @@
 //!
 //! The steps, each a row update on `agent_installs`:
 //!
-//! 1. `target`: `uname` picks the release tarball (x86_64 or aarch64 Linux).
+//! 1. `target`: `uname` picks the release tarball (x86_64 or aarch64, Linux
+//!    or macOS).
 //! 2. `download`: the host fetches the tarball and `SHA256SUMS` itself,
 //!    checks the sum and installs the binary as `~/.local/bin/fleet-agent`.
 //! 3. `start`: the host's token goes in on **stdin** — never argv, never a
 //!    file the script names in its text — to `fleet-agent install --user`
-//!    where systemd runs, else to a token file (mode 0600) and
+//!    where systemd runs (or launchd, on a Mac: a LaunchAgent), else to a token file (mode 0600) and
 //!    `fleet-agent run` under `nohup` (no supervisor: it will not come back
 //!    after a reboot, and the job says so). `FLEET_AGENT_NO_SYSTEMD=1` in
 //!    the host's login environment takes the second path on a systemd host
@@ -76,12 +77,16 @@ pub fn target_for(uname: &str) -> Option<&'static str> {
     uname.lines().find_map(|line| {
         let mut it = line.split_whitespace();
         let (os, arch) = (it.next()?, it.next()?);
-        if os != "Linux" || it.next().is_some() {
+        if it.next().is_some() {
             return None;
         }
-        match arch {
-            "x86_64" | "amd64" => Some("x86_64-unknown-linux-gnu"),
-            "aarch64" | "arm64" => Some("aarch64-unknown-linux-gnu"),
+        match (os, arch) {
+            ("Linux", "x86_64" | "amd64") => Some("x86_64-unknown-linux-gnu"),
+            ("Linux", "aarch64" | "arm64") => Some("aarch64-unknown-linux-gnu"),
+            // A Mac (fleet-agent 0.6.5 and later): an Apple silicon `uname -m`
+            // says arm64, an Intel one x86_64.
+            ("Darwin", "arm64" | "aarch64") => Some("aarch64-apple-darwin"),
+            ("Darwin", "x86_64") => Some("x86_64-apple-darwin"),
             _ => None,
         }
     })
@@ -106,7 +111,7 @@ pub fn download_script(base: &str, version: &str, target: &str) -> String {
          curl -fsSL -o \"$f\" \"$base/$f\" || {{ echo \"error=could not download $base/$f: the release may have been pruned (dev builds keep only the newest), or this host cannot reach it: pass another version, or point FLEET_AGENT_DIST on the hub at a mirror\"; exit 4; }}\n\
          curl -fsSL -o SHA256SUMS \"$base/SHA256SUMS\" || {{ echo 'error=could not download SHA256SUMS'; exit 4; }}\n\
          want=$(awk -v f=\"$f\" '$2==f || $2==\"*\"f {{print $1}}' SHA256SUMS)\n\
-         got=$(sha256sum \"$f\" | cut -d' ' -f1)\n\
+         if command -v sha256sum >/dev/null 2>&1; then got=$(sha256sum \"$f\" | cut -d' ' -f1); else got=$(shasum -a 256 \"$f\" | cut -d' ' -f1); fi\n\
          [ -n \"$want\" ] && [ \"$want\" = \"$got\" ] || {{ echo \"error=checksum of $f does not match SHA256SUMS\"; exit 4; }}\n\
          tar xzf \"$f\"\n\
          mkdir -p \"$HOME/.local/bin\"\n\
@@ -147,7 +152,10 @@ pub fn start_script(hub_url: &str, insecure: bool) -> String {
          umask 077\n\
          {guard}\
          bin=\"$HOME/.local/bin/fleet-agent\"; hub={h}\n\
-         if [ -z \"${{FLEET_AGENT_NO_SYSTEMD:-}}\" ] && [ -d /run/systemd/system ] \
+         if [ \"$(uname -s)\" = Darwin ] && command -v launchctl >/dev/null 2>&1; then\n\
+           \"$bin\" install --user --hub \"$hub\"{ins} --token-file - >/dev/null\n\
+           echo started=launchd\n\
+         elif [ -z \"${{FLEET_AGENT_NO_SYSTEMD:-}}\" ] && [ -d /run/systemd/system ] \
             && command -v systemctl >/dev/null 2>&1; then\n\
            \"$bin\" install --user --hub \"$hub\"{ins} --token-file - >/dev/null\n\
            loginctl enable-linger \"$(id -un)\" >/dev/null 2>&1 || true\n\
@@ -469,7 +477,7 @@ async fn run(
     }
     let uname = String::from_utf8_lossy(&out.stdout).trim().to_string();
     let target = target_for(&uname).ok_or_else(|| {
-        format!("no fleet-agent release for {uname:?}: releases are for x86_64 and aarch64 Linux")
+        format!("no fleet-agent release for {uname:?}: releases are for x86_64 and aarch64 Linux and macOS")
     })?;
 
     // 2. tmux, which every session runs in (review r09/r18)
@@ -559,7 +567,7 @@ async fn run(
                 .trim()
         ));
     }
-    let supervised = line_value(&text, "started") == Some("systemd");
+    let started = line_value(&text, "started").map(str::to_string);
 
     // 5. connect
     step(store, id, "connect", "waiting for the agent to connect");
@@ -573,7 +581,7 @@ async fn run(
             let _ = lock(store).and_then(|s| s.set_host_transport(&plan.alias, "ssh"));
             return Err(format!(
                 "the agent did not connect within {} s; the host is back on SSH. On the host, \
-                 `fleet-agent status --user` (or ~/.config/fleet-agent/agent.log) says why",
+                 `fleet-agent status --user` (or ~/.config/fleet-agent/agent.log; ~/Library/Logs/fleet-agent.log on a Mac) says why",
                 wait.as_secs()
             ));
         }
@@ -585,8 +593,10 @@ async fn run(
         .find(|a| a.alias == plan.alias)
         .map(|a| a.agent_version)
         .unwrap_or_else(|| plan.version.clone());
-    Ok(if supervised {
+    Ok(if started.as_deref() == Some("systemd") {
         format!("connected · fleet-agent {version} · systemd user unit")
+    } else if started.as_deref() == Some("launchd") {
+        format!("connected · fleet-agent {version} · launchd user agent")
     } else {
         format!(
             "connected · fleet-agent {version} · no systemd on this host: it runs under nohup \
@@ -600,13 +610,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn targets_are_the_two_linux_releases() {
+    fn targets_are_the_linux_and_macos_releases() {
         assert_eq!(target_for("Linux x86_64"), Some("x86_64-unknown-linux-gnu"));
         assert_eq!(
             target_for("Linux aarch64"),
             Some("aarch64-unknown-linux-gnu")
         );
-        assert_eq!(target_for("Darwin arm64"), None);
+        assert_eq!(target_for("Darwin arm64"), Some("aarch64-apple-darwin"));
+        assert_eq!(target_for("Darwin x86_64"), Some("x86_64-apple-darwin"));
+        assert_eq!(target_for("Darwin riscv64"), None);
         assert_eq!(target_for("Linux riscv64"), None);
         assert_eq!(target_for(""), None);
         // A login profile that prints before the answer.

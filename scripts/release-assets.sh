@@ -45,8 +45,10 @@ self="$(basename "$0")"
 # `manifest` is the signed update manifest (scripts/release-manifest.sh,
 # update-channel design §4), required from 0.4.1.
 #
-# Runner choices are explained in release.yml (22.04 for the bins legs so the
-# binaries only need glibc 2.35+). The macOS `.app.tar.gz` names here are the
+# Runner choices are explained in release.yml (22.04 for the Linux bins legs so
+# the binaries only need glibc 2.35+). The two macOS bins legs ship fleet-agent
+# only (a Mac is an agent host, never a hub host); the x86_64 one is
+# cross-compiled on the arm64 runner. The macOS `.app.tar.gz` names here are the
 # VERSIONED names the assets end up with — tauri-action itself uploads them
 # unversioned (`claude-fleet_aarch64.app.tar.gz`) and
 # scripts/rename-updater-asset.sh renames them to these afterwards.
@@ -75,6 +77,8 @@ desktop-x86_64-linux|desktop|ubuntu-24.04||--bundles appimage,deb|claude-fleet_{
 desktop-x86_64-windows|desktop|windows-latest||--bundles nsis --config src-tauri/tauri.conpty.conf.json|claude-fleet_{v}_x64-setup.exe|0.3.4
 bins-x86_64-unknown-linux-gnu|bins|ubuntu-22.04|x86_64-unknown-linux-gnu||fleet-agent-{v}-x86_64-unknown-linux-gnu.tar.gz fleet-hub-{v}-x86_64-unknown-linux-gnu.tar.gz
 bins-aarch64-unknown-linux-gnu|bins|ubuntu-22.04-arm|aarch64-unknown-linux-gnu||fleet-agent-{v}-aarch64-unknown-linux-gnu.tar.gz fleet-hub-{v}-aarch64-unknown-linux-gnu.tar.gz
+bins-aarch64-apple-darwin|bins|macos-latest|aarch64-apple-darwin||fleet-agent-{v}-aarch64-apple-darwin.tar.gz|0.6.5
+bins-x86_64-apple-darwin|bins|macos-latest|x86_64-apple-darwin||fleet-agent-{v}-x86_64-apple-darwin.tar.gz|0.6.5
 checksums|checksums|ubuntu-24.04|||SHA256SUMS
 manifest|manifest|ubuntu-24.04|||release-manifest.json release-manifest.json.minisig|0.4.1
 LEGS

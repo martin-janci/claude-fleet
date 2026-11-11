@@ -7,6 +7,7 @@
 use crate::config::{self, Config};
 use crate::conn::Endpoint;
 use crate::install::{Layout, Plan, Scope, SystemdStatus};
+use crate::launchd;
 use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
 
@@ -25,10 +26,11 @@ pub struct Cli {
 pub enum Command {
     /// Dial the hub and serve it, reconnecting for as long as this runs.
     Run(RunArgs),
-    /// Write a systemd unit that runs the agent, then enable and start it.
-    /// Needs a Linux host with systemd already running; refuses cleanly,
-    /// before writing anything, otherwise — see `run` for how to run the
-    /// agent under your own supervisor instead.
+    /// Write a systemd unit that runs the agent, then enable and start it —
+    /// on macOS, a LaunchAgent for the user running it. On Linux it needs
+    /// systemd already running; refuses cleanly, before writing anything,
+    /// otherwise — see `run` for how to run the agent under your own
+    /// supervisor instead.
     Install(InstallArgs),
     /// Is the service running, and is it connected to its hub?
     Status(StatusArgs),
@@ -83,6 +85,11 @@ pub struct RunArgs {
     /// it off. With --hub only: a --config run reads it from the config.
     #[arg(long, requires = "hub")]
     pub hook_port: Option<u16>,
+    /// An http:// proxy to reach the hub through (CONNECT); without it,
+    /// HTTPS_PROXY / ALL_PROXY apply unless NO_PROXY names the hub; `""`
+    /// for none. With --hub only: a --config run reads it from the config.
+    #[arg(long, requires = "hub")]
+    pub proxy: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -128,6 +135,11 @@ pub struct InstallArgs {
     /// hooks on the hub's public URL.
     #[arg(long)]
     pub hook_port: Option<u16>,
+    /// An http:// proxy to reach the hub through (CONNECT), written to the
+    /// config — a service does not see your shell's HTTPS_PROXY. `""` for
+    /// none, whatever the environment says.
+    #[arg(long)]
+    pub proxy: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -197,6 +209,7 @@ pub fn run_config(
                 ca_file: args.ca_file.clone(),
                 report_errors: config::default_report_errors(),
                 hook_port: args.hook_port.unwrap_or_else(config::default_hook_port),
+                proxy: args.proxy.clone(),
             };
             config::check_token(&config.token).map_err(|e| e.to_string())?;
             config
@@ -212,7 +225,98 @@ pub fn run_config(
     // Checked here as well as at dial time, so a plain hub is refused at
     // startup rather than as a reconnect loop.
     Endpoint::parse(&config.hub, config.insecure)?;
+    check_proxy(config.proxy.as_deref())?;
     Ok(config)
+}
+
+/// A configured proxy that will not parse is refused up front, not as a
+/// reconnect loop.
+fn check_proxy(proxy: Option<&str>) -> Result<(), String> {
+    match proxy {
+        Some(p) if !p.trim().is_empty() => crate::proxy::Proxy::parse(p).map(|_| ()),
+        _ => Ok(()),
+    }
+}
+
+/// The config `install` writes, from its flags — the same on both
+/// supervisors. Refuses before anything is written.
+fn install_config(args: &InstallArgs, stdin: &mut dyn std::io::Read) -> Result<Config, String> {
+    Endpoint::parse(&args.hub, args.insecure)?;
+    // The service runs in the user's home, not the directory `install` ran
+    // in, so a relative bundle would resolve somewhere else and fail every
+    // start: a service that restarts forever.
+    if let Some(ca) = args.ca_file.as_deref().filter(|p| !p.is_absolute()) {
+        return Err(format!(
+            "--ca-file {} is relative; pass an absolute path (the service does \
+             not run in this directory)",
+            ca.display()
+        ));
+    }
+    check_proxy(args.proxy.as_deref())?;
+    let token = read_token(args.token.as_deref(), args.token_file.as_deref(), stdin)?;
+    config::check_token(&token).map_err(|e| e.to_string())?;
+    Ok(Config {
+        hub: args.hub.clone(),
+        token,
+        insecure: args.insecure,
+        ca_file: args.ca_file.clone(),
+        report_errors: config::default_report_errors(),
+        hook_port: args.hook_port.unwrap_or_else(config::default_hook_port),
+        proxy: args.proxy.clone(),
+    })
+}
+
+/// What `install` needs on macOS.
+#[derive(Debug, Clone)]
+pub struct LaunchdEnv {
+    pub binary: PathBuf,
+    pub root: bool,
+    pub uid: u32,
+    /// `$HOME`.
+    pub home: Option<PathBuf>,
+    /// `$XDG_CONFIG_HOME`, else `~/.config`.
+    pub config_home: Option<PathBuf>,
+}
+
+/// `install` on macOS: a LaunchAgent for the user running it
+/// ([`crate::launchd`]). `--user` is implied; there is no system scope.
+pub fn launchd_plan(
+    args: &InstallArgs,
+    env: &LaunchdEnv,
+    stdin: &mut dyn std::io::Read,
+) -> Result<launchd::Plan, String> {
+    if env.root || args.run_as.is_some() {
+        return Err(
+            "on macOS the agent is a LaunchAgent of the user whose sessions it runs: \
+             run `fleet-agent install --user` as that user, without sudo"
+                .into(),
+        );
+    }
+    let config = install_config(args, stdin)?;
+    let home = env.home.clone().ok_or("install needs $HOME")?;
+    let config_home = env
+        .config_home
+        .clone()
+        .ok_or("install needs $XDG_CONFIG_HOME or $HOME to find ~/.config")?;
+    let mut layout = launchd::Layout::user(&home, &config_home);
+    if let Some(path) = &args.config {
+        if !path.is_absolute() {
+            return Err(format!(
+                "--config {} is relative; pass an absolute path",
+                path.display()
+            ));
+        }
+        layout.config_path = path.clone();
+    }
+    Ok(launchd::Plan {
+        binary: env.binary.clone(),
+        home,
+        layout,
+        config,
+        uid: env.uid,
+        start: !args.no_start,
+        auto_update: args.auto_update,
+    })
 }
 
 /// Turn `install`'s flags into a [`Plan`], refusing anything wrong BEFORE a
@@ -231,27 +335,7 @@ pub fn install_plan(
     if !env.systemd.available() {
         return Err(env.systemd.refusal());
     }
-    Endpoint::parse(&args.hub, args.insecure)?;
-    // The unit runs in the service user's home, not the directory `install`
-    // ran in, so a relative bundle would resolve somewhere else and fail
-    // every start: a unit that restarts forever.
-    if let Some(ca) = args.ca_file.as_deref().filter(|p| !p.is_absolute()) {
-        return Err(format!(
-            "--ca-file {} is relative; pass an absolute path (the service does \
-             not run in this directory)",
-            ca.display()
-        ));
-    }
-    let token = read_token(args.token.as_deref(), args.token_file.as_deref(), stdin)?;
-    config::check_token(&token).map_err(|e| e.to_string())?;
-    let config = Config {
-        hub: args.hub.clone(),
-        token,
-        insecure: args.insecure,
-        ca_file: args.ca_file.clone(),
-        report_errors: config::default_report_errors(),
-        hook_port: args.hook_port.unwrap_or_else(config::default_hook_port),
-    };
+    let config = install_config(args, stdin)?;
     let (scope, mut layout, owner) = if args.user {
         let home = env
             .config_home
@@ -330,6 +414,76 @@ mod tests {
     #[test]
     fn the_command_line_is_well_formed() {
         Cli::command().debug_assert();
+    }
+
+    fn mac(root: bool) -> LaunchdEnv {
+        LaunchdEnv {
+            binary: PathBuf::from("/Users/alice/.local/bin/fleet-agent"),
+            root,
+            uid: 501,
+            home: Some(PathBuf::from("/Users/alice")),
+            config_home: Some(PathBuf::from("/Users/alice/.config")),
+        }
+    }
+
+    #[test]
+    fn a_mac_install_is_a_launch_agent_of_the_user_running_it() {
+        let a = install_args(&[
+            "install",
+            "--user",
+            "--hub",
+            "https://hub.example",
+            "--token",
+            "t",
+            "--proxy",
+            "http://proxy.corp:3128",
+        ]);
+        let plan = launchd_plan(&a, &mac(false), &mut std::io::empty()).unwrap();
+        assert_eq!(plan.uid, 501);
+        assert_eq!(
+            plan.layout.plist_path,
+            PathBuf::from("/Users/alice/Library/LaunchAgents/sk.rlt.fleet-agent.plist")
+        );
+        assert_eq!(
+            plan.layout.config_path,
+            PathBuf::from("/Users/alice/.config/fleet-agent/config.json")
+        );
+        assert_eq!(plan.config.proxy.as_deref(), Some("http://proxy.corp:3128"));
+        assert!(plan.start);
+
+        // No --user needed: there is no other scope on a Mac.
+        let a = install_args(&["install", "--hub", "https://hub.example", "--token", "t"]);
+        assert!(launchd_plan(&a, &mac(false), &mut std::io::empty()).is_ok());
+    }
+
+    #[test]
+    fn a_mac_install_refuses_sudo_a_run_as_and_a_bad_proxy() {
+        let a = install_args(&["install", "--hub", "https://hub.example", "--token", "t"]);
+        let err = launchd_plan(&a, &mac(true), &mut std::io::empty()).unwrap_err();
+        assert!(err.contains("without sudo"), "{err}");
+
+        let a = install_args(&[
+            "install",
+            "--hub",
+            "https://hub.example",
+            "--token",
+            "t",
+            "--run-as",
+            "bob",
+        ]);
+        assert!(launchd_plan(&a, &mac(false), &mut std::io::empty()).is_err());
+
+        let a = install_args(&[
+            "install",
+            "--hub",
+            "https://hub.example",
+            "--token",
+            "t",
+            "--proxy",
+            "socks5://proxy:1080",
+        ]);
+        let err = launchd_plan(&a, &mac(false), &mut std::io::empty()).unwrap_err();
+        assert!(err.contains("http://"), "{err}");
     }
 
     #[test]
