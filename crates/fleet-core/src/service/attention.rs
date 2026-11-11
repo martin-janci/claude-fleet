@@ -449,6 +449,11 @@ pub fn needs_attention_in(
         Reason::StaleWorking
     } else if idle && row.ci_status.as_deref() == Some("failing") && !pr_is_finished(row) {
         Reason::CiFailing
+    } else if row.safe_kill_state.as_deref() == Some("failed") {
+        // Clean up could not commit or push: work may be lost if nobody
+        // looks, so it is Failed and counted, not Paused (HITL audit H-17).
+        // A pending request stays `Lifecycle`: it is in hand.
+        Reason::Failed
     } else if live && jev("asked") {
         // After every reason a person must act on: a proposal never hides
         // one, and a dead row is `Lifecycle` whatever Jev read.
@@ -801,8 +806,12 @@ mod tests {
         r.claude_status = Some("failed".into());
         assert_eq!(needs_attention(&r).unwrap().reason, Reason::StopFailed);
 
+        // A failed clean up is Failed, counted (HITL audit H-17).
+        let mut r = row();
+        r.safe_kill_state = Some("failed".into());
+        assert_eq!(needs_attention(&r).unwrap().reason, Reason::Failed);
+
         for broken in [
-            |r: &mut SessionRow| r.safe_kill_state = Some("failed".into()),
             |r: &mut SessionRow| r.safe_kill_state = Some("requested".into()),
             |r: &mut SessionRow| r.status = "ghost".into(),
             |r: &mut SessionRow| r.lost_at = Some(99),

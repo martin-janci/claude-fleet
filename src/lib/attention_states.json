@@ -44,6 +44,7 @@
     { "name": "a lost row leaves the count", "row": { "lost_at": 80, "claude_status": "working" }, "bucket": "lifecycle", "state": "paused", "counted": false },
     { "name": "a ghost keeps its last context but leaves the count", "row": { "status": "ghost", "context_pct": 99.0 }, "bucket": "lifecycle", "state": "paused", "counted": false },
     { "name": "a pending safe kill", "row": { "safe_kill_state": "requested", "safe_kill_requested_at": 70 }, "bucket": "lifecycle", "state": "paused", "counted": false },
+    { "name": "a failed clean up is Failed and counted: its work may be lost (HITL audit H-17)", "row": { "safe_kill_state": "failed" }, "bucket": "failed", "state": "failed", "counted": true },
     { "name": "a lost row that is blocked still counts", "row": { "lost_at": 80, "claude_status": "blocked" }, "bucket": "waiting", "state": "action_required", "counted": true },
     { "name": "a session on a down host is blocked", "row": {}, "facts": { "down_hosts": ["alpha"] }, "bucket": "host_down", "state": "blocked", "counted": true },
     { "name": "a lost row on a down host leaves the count", "row": { "lost_at": 80 }, "facts": { "down_hosts": ["alpha"] }, "bucket": "lifecycle", "state": "paused", "counted": false },

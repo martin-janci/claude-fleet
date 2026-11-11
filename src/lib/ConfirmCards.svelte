@@ -97,7 +97,7 @@
           </li>
         {/each}
       </ol>
-      <p class="why">They start, move or kill sessions, so each waits for you. Nothing runs until you confirm.</p>
+      <p class="why">Each step waits for you. Nothing runs until you confirm.</p>
       {#if planFailed}<p class="failed" role="status" data-testid="confirm-plan-failed">Your answer did not reach the hub. Try again, or dismiss the steps it could not take.</p>{/if}
     </QuestionCard>
   </div>
@@ -122,7 +122,10 @@
         ]}
       >
         {#if r.about}<ConfirmAbout about={r.about} tool={r.tool} summary={r.summary} />{/if}
-        <p class="why">The agent's starts and kills always wait for you. Nothing runs until you approve.</p>
+        <!-- HITL audit H-02: "starts and kills always wait for you" was
+             untrue at Autopilot, where session care restarts and retires
+             without a card; say what is true of every card. -->
+        <p class="why">This waits for you. Nothing runs until you approve.</p>
         {#if failed !== undefined}<p class="failed" role="status" data-testid="confirm-card-failed">Your answer did not reach the hub: {failed}. Try again, or dismiss this card.</p>{/if}
       </QuestionCard>
     {/each}

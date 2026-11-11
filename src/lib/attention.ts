@@ -326,7 +326,8 @@ function isDoneUnread(s: SessionRow): boolean {
 }
 
 function isLifecycleBroken(s: SessionRow): boolean {
-  if (s.safe_kill_state === 'failed' || s.safe_kill_state === 'requested') return true;
+  // A failed clean up is not lifecycle: `classify` files it Failed first.
+  if (s.safe_kill_state === 'requested') return true;
   return s.status === 'ghost' || s.lost_at !== null;
 }
 
@@ -362,6 +363,9 @@ export function classify(s: SessionRow, opts: AttentionOptions): TriageBucket {
   const prState = s.pr_evidence?.state;
   const prFinished = prState === 'MERGED' || prState === 'CLOSED';
   if (s.ci_status === 'failing' && isIdleStatus(s.claude_status) && !prFinished) return 'ci_failing';
+  // Clean up could not commit or push: Failed and counted, not Paused
+  // (HITL audit H-17). Mirrors `attention::needs_attention_in`.
+  if (s.safe_kill_state === 'failed') return 'failed';
   // G1.6: Jev's reading of a silent turn's end as a question is a proposal,
   // after every reason a person must act on, and never on a dead row.
   if (live && jevSays(s, 'asked')) return 'probably_waiting';

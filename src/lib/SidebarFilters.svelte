@@ -833,8 +833,11 @@
     gap: var(--space-1);
   }
 
+  /* Wraps rather than overlapping its own buttons at the list's width
+     (HITL audit H-22). */
   .bulk-bar {
     display: flex;
+    flex-wrap: wrap;
     gap: var(--space-1);
     align-items: center;
     padding: var(--space-1) 6px;
@@ -844,7 +847,7 @@
     font-size: var(--control-font);
   }
   .bulk-count {
-    flex: 1;
+    flex: 1 0 100%;
     color: var(--fg);
   }
   .focus-bar {

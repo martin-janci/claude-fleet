@@ -259,7 +259,8 @@ describe('triage rank', () => {
     expect(classify(row({ claude_status: 'working', ci_status: 'failing' }), opts)).toBe('working');
     expect(classify(row({ kind: 'shell', claude_status: 'idle', context_pct: 99 }), opts)).toBe('idle');
     expect(classify(row({ safe_kill_state: 'requested' }), opts)).toBe('lifecycle');
-    expect(classify(row({ safe_kill_state: 'failed' }), opts)).toBe('lifecycle');
+    // HITL audit H-17: a failed clean up is Failed, not lifecycle.
+    expect(classify(row({ safe_kill_state: 'failed' }), opts)).toBe('failed');
     expect(classify(row({ status: 'ghost' }), opts)).toBe('lifecycle');
     // A dead row's last context reading or stale stamp is not actionable.
     expect(classify(row({ status: 'ghost', context_pct: 99, stale_working_at: 5 }), opts)).toBe('lifecycle');

@@ -1152,9 +1152,22 @@
         void loadAgents();
       });
   });
+  // The Inbox's one count (HITL audit H-16): by section when grouped by
+  // state, so the header adds up to what is listed below it ("15 need you ·
+  // 2 failed"), instead of a total beside a section that says another number.
+  const inboxHeadText = $derived.by(() => {
+    const plural = (n: number) => `${n} need${n === 1 ? 's' : ''} you`;
+    if ($inboxGroupBy === 'none') return plural(inboxNeeding);
+    const of = (k: string) => inboxSectionList.find((x) => x.key === k)?.count ?? 0;
+    const needs = of('needs_you') + $fleetInboxCount;
+    const failed = of('failed');
+    const parts = [needs > 0 ? plural(needs) : '', failed > 0 ? `${failed} failed` : ''].filter(Boolean);
+    return parts.length ? parts.join(' · ') : plural(inboxNeeding);
+  });
   // The footer's row count (UX audit L4): what this list holds right now.
+  // Not in the Inbox, whose header already counts it (H-16).
   const listCountText = $derived.by(() => {
-    if ($sidebarView === 'work') return '';
+    if ($sidebarView === 'work' || $sidebarView === 'inbox') return '';
     const n = $sidebarView === 'inbox' ? inboxList.length : visibleIds.size + sharedWithMe.length;
     return `${n} ${$sidebarView === 'inbox' ? 'waiting' : n === 1 ? 'session' : 'sessions'}`;
   });
@@ -1387,6 +1400,17 @@
   });
   function onWindowKeydown(e: KeyboardEvent, capture: boolean) {
     if (e.defaultPrevented) return;
+    // Escape leaves select mode (HITL audit H-22): the checkboxes stayed on
+    // every row, into later tabs and searches. A field, a dialog or a menu
+    // keeps its own Escape.
+    if (!capture && e.key === 'Escape' && (selectMode || selectedIds.size > 0)) {
+      const t = e.target instanceof HTMLElement ? e.target : null;
+      if (t?.closest?.('dialog, [role="menu"]') || isEditable(t)) return;
+      e.preventDefault();
+      selectMode = false;
+      clearSelected();
+      return;
+    }
     const id = matchShortcut('global', e, isMac);
     // Next-needs-you is taken in the capture phase (review w18-3): the
     // terminal's own keydown would otherwise send Ctrl+Alt+N to the pty as
@@ -1750,7 +1774,7 @@
         ? 'Inbox'
         : inboxNeeding === 0
           ? 'Nothing needs you'
-          : `${inboxNeeding} need${inboxNeeding === 1 ? 's' : ''} you`}
+          : inboxHeadText}
       <!-- One queue has no section header: "+1 proposed" sits here. -->
       {#if $inboxGroupBy === 'none' && inboxProposed.length > 0}<span class="muted" data-testid="inbox-proposed-count"
           >{proposedText(inboxProposed.length)}</span

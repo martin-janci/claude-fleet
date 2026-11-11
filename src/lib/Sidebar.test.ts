@@ -1529,9 +1529,10 @@ describe('Sidebar triage (W2 Track D)', () => {
     render(Sidebar);
     await tick(); await tick();
     const pill = await needsYouPill();
-    // Redesign 0.4: the safe-kill and ghost rows (Paused) stay in the queue
-    // but leave the count; stuck and failed still raise it.
-    expect(pill).toHaveTextContent('Needs you 2');
+    // Redesign 0.4: the ghost row (Paused) stays in the queue but leaves the
+    // count; stuck and failed raise it, and since HITL audit H-17 so does a
+    // failed clean up, whose work may be lost.
+    expect(pill).toHaveTextContent('Needs you 3');
     await fireEvent.click(pill);
     await tick();
     const names = screen.getAllByTestId('sess-row').map((r) => r.textContent ?? '');
@@ -1573,6 +1574,20 @@ describe('Sidebar triage (W2 Track D)', () => {
     const kills = (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls.filter((c) => c[0] === 'kill_session');
     expect(kills.map((c) => (c[1] as { args: { name: string } }).args.name).sort()).toEqual(['dev-a', 'dev-b']);
     expect(screen.queryByTestId('bulk-bar')).toBeNull();
+  });
+
+  it('Escape leaves select mode and drops the selection (HITL audit H-22)', async () => {
+    mockBackend(fakeProjects, [sessionFor(1, 'dev-a'), sessionFor(1, 'dev-b')]);
+    render(Sidebar);
+    await tick(); await tick();
+    const rows = screen.getAllByTestId('sess-row');
+    await fireEvent.click(rows[0], { shiftKey: true });
+    await tick();
+    expect(screen.getByTestId('bulk-bar')).toHaveTextContent('1 selected');
+    await fireEvent.keyDown(document.body, { key: 'Escape' });
+    await tick();
+    expect(screen.queryByTestId('bulk-bar')).toBeNull();
+    expect(screen.queryAllByRole('checkbox', { name: /select/i })).toHaveLength(0);
   });
 
   it('bulk Archive archives the rows with work, says what it left, and Undo un-archives (step 1.7)', async () => {
@@ -3395,7 +3410,8 @@ describe('Inbox (redesign step 3.3)', () => {
     const shown = screen.getAllByTestId('sess-row').map((r) => r.textContent ?? '');
     expect(shown).toHaveLength(2);
     expect(shown.some((t) => t.includes('dev-busy'))).toBe(false);
-    expect(screen.getByTestId('inbox-head').textContent).toContain('2 need you');
+    // HITL audit H-16: the header adds up to the sections below it.
+    expect(screen.getByTestId('inbox-head').textContent).toContain('1 needs you · 1 failed');
     expect(screen.getByTestId('inbox-rest').textContent).toContain('1 running');
     // Links to review and sessions to tidy stay on the Inbox's attention line.
     expect(screen.getByTestId('attention-line')).toBeTruthy();
@@ -3416,7 +3432,7 @@ describe('Inbox (redesign step 3.3)', () => {
       await tick(); await tick();
       const shown = screen.getAllByTestId('sess-row').map((r) => r.textContent ?? '');
       expect(shown.some((t) => t.includes('dev-pay'))).toBe(true);
-      expect(screen.getByTestId('inbox-head').textContent).toContain('3 need you');
+      expect(screen.getByTestId('inbox-head').textContent).toContain('2 need you · 1 failed');
     } finally {
       sidebarGroupBy.set('project');
     }
@@ -3449,7 +3465,7 @@ describe('Inbox (redesign step 3.3)', () => {
     expect(within(proposed).getByTestId('inbox-proposed-by').textContent).toContain('Proposed by Jev');
     expect(within(failed).getByTestId('inbox-section-head').textContent).toMatch(/Failed\s*1/);
     expect(within(failed).getByTestId('sess-row').textContent).toContain('dev-crashed');
-    expect(screen.getByTestId('inbox-head').textContent).toContain('3 need you');
+    expect(screen.getByTestId('inbox-head').textContent).toContain('2 need you · 1 failed');
     // w11-7: the title's badge counts what the header counts, the mission too.
     expect(screen.getByTestId('inbox-title').textContent).toBe('Inbox3');
     // "Not waiting" sets the reading aside: the row and "+1 proposed" go.
