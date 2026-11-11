@@ -2505,10 +2505,11 @@ without a usage reading (an API key, which has a daily spend limit and no
 usage windows; an account signed in on macOS hosts only, whose token is in
 the Keychain), use the hub did not see, a login that could not be used for
 another reason while its account had room (signed out, host down), the
-minutes between a limit and the next reading, and extra usage (an account
+minutes between a limit and the next reading, extra usage (an account
 with it on keeps working past its limit and is counted at its limit all
-the same; its line says `extra usage is on`). Logins that have no reading
-are named in `logins with no usage reading`.
+the same; its line says `extra usage is on`), and a weekly limit on one
+model only (Opus, Sonnet), which fleet does not pause a row for either.
+Logins that have no reading are named in `logins with no usage reading`.
 
 `--db` reads any database from schema 122 on, so a backup of a hub that
 runs an older release can be counted with a newer `fleet-hub` without

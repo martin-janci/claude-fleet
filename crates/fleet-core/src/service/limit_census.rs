@@ -68,6 +68,7 @@ pub const NOT_COUNTED: &[&str] = &[
     "a login that could not be used for another reason while its account had room (signed out, host down)",
     "the minutes between a limit being hit and the next reading (readings are 5 to 30 minutes apart)",
     "extra usage: an account with it on keeps working past its limit on pay-as-you-go money, and is counted at its limit all the same",
+    "a weekly limit on one model only (Opus, Sonnet): fleet does not pause a row for it, and it is not counted here either",
 ];
 
 /// What to count.
@@ -733,6 +734,28 @@ mod tests {
     }
 
     #[test]
+    fn stretches_are_cut_to_the_window_joined_where_they_touch_and_never_empty() {
+        let w = stretch(0, 100);
+        let mut v = Vec::new();
+        add(&mut v, -5, 10, w);
+        assert_eq!(v, vec![stretch(0, 10)], "cut at the window's start");
+        add(&mut v, 10, 20, w);
+        assert_eq!(v, vec![stretch(0, 20)], "joined where the last one ends");
+        add(&mut v, 5, 8, w);
+        assert_eq!(v, vec![stretch(0, 20)], "one inside the last adds nothing");
+        add(&mut v, 30, 30, w);
+        add(&mut v, 40, 35, w);
+        assert_eq!(v, vec![stretch(0, 20)], "an empty one is no stretch");
+        add(&mut v, 21, 200, w);
+        add(&mut v, 100, 120, w);
+        assert_eq!(
+            v,
+            vec![stretch(0, 20), stretch(21, 100)],
+            "apart from the last, cut at the window's end, and nothing past it"
+        );
+    }
+
+    #[test]
     fn one_account_at_its_limit_is_all_at_once_from_that_reading_until_its_window_resets() {
         let start = NOW - 2 * DAY;
         // Used up at a reading; it resets ten minutes after one, twenty before the next.
@@ -950,6 +973,23 @@ mod tests {
     }
 
     #[test]
+    fn accounts_counted_one_after_the_other_are_never_two_at_once() {
+        let t = NOW - 5 * DAY;
+        // No login uses either: a reading stands for a day, and the other
+        // account's begins the second it ends, both ways round.
+        let r = census_with(
+            vec![
+                read("a", t, 20.0, t + HOUR),
+                read("b", t + DAY, 20.0, t + DAY + HOUR),
+                read("a", t + 2 * DAY, 20.0, t + 2 * DAY + HOUR),
+            ],
+            &[],
+        );
+        assert_eq!(r.accounts.len(), 2);
+        assert_eq!((r.most_at_once, r.counted_secs), (1, 3 * DAY));
+    }
+
+    #[test]
     fn a_reading_from_before_the_window_still_stands_inside_it() {
         let s = Store::open_in_memory().unwrap();
         // Read once more, long before, to show which reading is taken.
@@ -1025,9 +1065,23 @@ mod tests {
             "it ends at midnight UTC: the day after is not one of its days"
         );
         assert_eq!((r.counted_secs, r.read_secs), (30 * MIN, 30 * MIN));
-        // A reading stamped after now (another clock) is not in the window.
-        let r = census(vec![read("a", NOW + MIN, 100.0, NOW + 2 * HOUR)]);
-        assert_eq!((r.accounts.len(), r.counted_secs, r.read_secs), (0, 0, 0));
+        // A reading stamped at now, or after it (another clock), is not in
+        // the window.
+        for at in [NOW, NOW + MIN] {
+            let r = census(vec![read("a", at, 100.0, NOW + 2 * HOUR)]);
+            assert_eq!(
+                (r.accounts.len(), r.counted_secs, r.read_secs),
+                (0, 0, 0),
+                "{at}"
+            );
+        }
+        // Nor is it one of the readings an account took in it.
+        let r = census(vec![
+            read("a", NOW - HOUR, 20.0, NOW),
+            read("a", NOW + MIN, 100.0, NOW + 2 * HOUR),
+        ]);
+        assert_eq!(account(&r, "a").readings, 1);
+        assert_eq!(limit(&r).stretches, vec![]);
     }
 
     #[test]
@@ -1128,6 +1182,15 @@ mod tests {
         ] {
             let r = census(vec![row("a", t, five.clone(), None)]);
             assert_eq!(limit(&r).stretches, vec![], "{five:?}");
+            assert_eq!(
+                account(&r, "a").past[0],
+                AccountPast {
+                    line: LIMIT,
+                    times: 0,
+                    secs: 0
+                },
+                "{five:?}"
+            );
             assert_eq!(r.counted_secs, 2 * DAY, "it is counted all the same");
         }
     }
@@ -1529,6 +1592,19 @@ not counted:";
                 "    Oct 3 00:00 UTC for 1 h",
                 "    Oct 3 23:30 UTC for 30 min, and still"
             ]
+        );
+
+        // One reading two days ago, used up for six hours: a quarter of a
+        // day in two days counted, whatever the hour the hub was reading.
+        let at = NOW - 2 * DAY;
+        let lines = census(vec![read("a", at, 100.0, at + 6 * HOUR)]).lines();
+        assert_eq!(
+            lines[2],
+            "accounts counted: 1 (so \"all at once\" is that account alone), for 2 d of the window; the hub read usage during 1 h of it"
+        );
+        assert_eq!(
+            lines[5],
+            "  once on 1 day; 6 h in total (12.5% of the time counted); longest 6 h"
         );
 
         // Room all along.
