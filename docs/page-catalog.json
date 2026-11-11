@@ -3155,6 +3155,18 @@
       ]
     },
     {
+      "default_widget": "switch",
+      "key": "sessions.ask_before_person_steps",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Ask before a person's step",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
       "default_widget": "number",
       "key": "restore.batch_size",
       "kind": {

@@ -127,6 +127,25 @@
       "danger": {
         "level": "none"
       },
+      "default": "true",
+      "help": "In every session fleet started, merging or readying a pull request, pushing to main or master, and writing to Jira, Asana or Linear wait for your OK in the session's permission prompt. Mission workers are refused these whatever this says. Off: they run unasked.",
+      "key": "sessions.ask_before_person_steps",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Ask before a person's step",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [],
+      "unit": "none",
+      "value": "true"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
       "default": "4",
       "help": "Sessions resumed in parallel by Restore lost sessions.",
       "key": "restore.batch_size",
@@ -4604,6 +4623,15 @@
             }
           ],
           "title": "Pause all"
+        },
+        {
+          "items": [
+            {
+              "key": "sessions.ask_before_person_steps",
+              "type": "field"
+            }
+          ],
+          "title": "What waits for you"
         },
         {
           "items": [

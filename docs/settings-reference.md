@@ -20,6 +20,7 @@ Scope says where a value lives: *fleet* is one value for the whole fleet, kept o
 | Setting | Default | Range | Scope | What it does |
 |---|---|---|---|---|
 | `sessions.lost_ttl_secs` | `1209600` | seconds, shown in hours, `0` = removed on the next pass | fleet | How long a resumable session lost to a host reboot, the tmux server exiting or its process being killed (out of memory) is kept before it is deleted, counted from when it was lost. |
+| `sessions.ask_before_person_steps` | `true` | on / off | fleet | In every session fleet started, merging or readying a pull request, pushing to main or master, and writing to Jira, Asana or Linear wait for your OK in the session's permission prompt. Mission workers are refused these whatever this says. Off: they run unasked. |
 
 ## Restoring lost sessions
 

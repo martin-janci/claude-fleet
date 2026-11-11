@@ -16,6 +16,15 @@
       ]
     },
     {
+      "title": "What waits for you",
+      "items": [
+        {
+          "type": "field",
+          "key": "sessions.ask_before_person_steps"
+        }
+      ]
+    },
+    {
       "title": "Routines",
       "items": [
         {
