@@ -62,6 +62,9 @@ export interface AddAccountAnswers {
   setupToken: string;
   /** The known account a setup token signs in to; null = none of them. */
   account: string | null;
+  /** USD a day; 0 removes the account's limit; null (left empty) keeps
+   *  whatever limit the account has, none for a new key: the same key on
+   *  another host is the same account. */
   dailyLimit: number | null;
 }
 
@@ -74,7 +77,7 @@ export function readAnswers(v: Values): AddAccountAnswers {
     apiKey: String(v.api_key ?? '').trim(),
     setupToken: String(v.setup_token ?? '').trim(),
     account: typeof v.account === 'string' && v.account !== '' && v.account !== 'none' ? v.account : null,
-    dailyLimit: v.daily_limit === undefined || v.daily_limit === null || v.daily_limit === '' || !Number.isFinite(limit) || limit <= 0 ? null : limit,
+    dailyLimit: v.daily_limit === undefined || v.daily_limit === null || v.daily_limit === '' || !Number.isFinite(limit) || limit < 0 ? null : limit,
   };
 }
 
@@ -108,7 +111,8 @@ export function addApiKey(a: AddAccountAnswers): Promise<Result<ApiKeyAdded>> {
     host_alias: a.host,
     profile: a.profile,
     api_key: a.apiKey,
-    daily_limit_usd: a.dailyLimit,
+    // Left empty, the field is not sent: the account keeps its limit.
+    ...(a.dailyLimit === null ? {} : { daily_limit_usd: a.dailyLimit }),
   });
 }
 

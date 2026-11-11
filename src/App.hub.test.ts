@@ -659,3 +659,43 @@ describe('the Session tab for a shared session', () => {
     }
   });
 });
+
+// probe3 c-2: the window's copy of the fleet's settings (the brake, the
+// autonomy dial, the notifier) follows the hub: a `settings:changed` frame, a
+// gap the hub could not replay and a link that comes back each re-read it.
+describe('the fleet settings follow the hub', () => {
+  it('re-reads get_fleet_settings on settings:changed, on hub:resynced and when the link comes back', async () => {
+    const { listen } = await import('@tauri-apps/api/event');
+    const lis = listen as ReturnType<typeof vi.fn>;
+    const handlers = new Map<string, (e: { payload: unknown }) => void>();
+    lis.mockImplementation(async (name: string, fn: (e: { payload: unknown }) => void) => {
+      handlers.set(name, fn);
+      return () => {};
+    });
+    const { inv, restore } = await routeInvoke((cmd) => (cmd === 'hub_status' ? remote : cmd === 'hub_connection' ? { state: 'connected' } : undefined));
+    const reads = () => inv.mock.calls.filter((c) => c[0] === 'get_fleet_settings').length;
+    try {
+      render(App);
+      await waitFor(() => expect(handlers.has('settings:changed')).toBe(true));
+      await waitFor(() => expect(handlers.has('hub:resynced')).toBe(true));
+      await waitFor(() => expect(reads()).toBeGreaterThan(0));
+
+      let before = reads();
+      handlers.get('settings:changed')!({ payload: { key: 'automation.paused' } });
+      await waitFor(() => expect(reads()).toBe(before + 1));
+
+      before = reads();
+      handlers.get('hub:resynced')!({ payload: null });
+      await waitFor(() => expect(reads()).toBeGreaterThan(before));
+
+      before = reads();
+      hubConnection.set({ state: 'reconnecting', attempt: 1, retry_in_secs: 1, reason: 'down' });
+      await Promise.resolve();
+      hubConnection.set({ state: 'connected' });
+      await waitFor(() => expect(reads()).toBeGreaterThan(before));
+    } finally {
+      restore();
+      lis.mockImplementation(async () => () => {});
+    }
+  });
+});

@@ -229,15 +229,24 @@ pub fn draft_prompt(template: &str, notes: &[ContextEntry]) -> String {
     out
 }
 
-/// PURE: the one command the draft runs on the host. The model must be one
-/// of [`settings::SUMMARY_MODELS`]; the prompt is one quoted word.
-pub fn draft_script(model: &str, prompt: &str) -> Result<String, String> {
+/// PURE: the one command the draft runs on the host, under the login
+/// `profile` (`None` = the host's own). The model must be one of
+/// [`settings::SUMMARY_MODELS`]; the prompt is one quoted word.
+pub fn draft_script(model: &str, prompt: &str, profile: Option<&str>) -> Result<String, String> {
     use crate::service::claude_print;
     use crate::service::headless::{self, HeadlessJob};
     if !settings::SUMMARY_MODELS.contains(&model) {
         return Err(format!("refusing brief model {model:?}"));
     }
     let agent = headless::default_agent();
+    let env = match profile {
+        Some(_) => format!(
+            "{}{}",
+            agent.login_env(profile)?,
+            crate::tmux::PROFILE_API_KEY
+        ),
+        None => String::new(),
+    };
     let claude = agent.command(&HeadlessJob {
         model,
         prompt: Some(prompt),
@@ -247,7 +256,7 @@ pub fn draft_script(model: &str, prompt: &str) -> Result<String, String> {
     });
     let t = DRAFT_TAG;
     Ok(format!(
-        "set -o pipefail; cd -- \"$HOME\" 2>/dev/null || cd /; {noclaude} {run}",
+        "set -o pipefail; cd -- \"$HOME\" 2>/dev/null || cd /; {noclaude} {env}{run}",
         noclaude = agent.missing_check(t),
         run = claude_print::run_capped(t, &claude, HOST_TIMEOUT_SECS, OUTPUT_CAP_BYTES, true),
     ))
@@ -350,12 +359,22 @@ pub async fn draft_into(
             ),
         ));
     }
-    let (model, org_id) = {
+    let (model, org_id, profile) = {
         let s = lock(store)?;
         let org = plan.item_id.map(|id| s.item_org(id)).transpose()?.flatten();
+        // The ticket's text goes to the login the start would bill, held to
+        // the project's account rules (`service::run_login`).
+        let profile = crate::service::run_login::choose(
+            &s,
+            Some(plan.project_id),
+            &plan.host_alias,
+            plan.profile.as_deref(),
+            crate::store::now_unix(),
+        )?;
         (
             settings::get_string_for(&s, settings::WORK_SUMMARY_MODEL, org),
             org,
+            profile,
         )
     };
     let _slot = HostSlot::take(&plan.host_alias)?;
@@ -372,7 +391,7 @@ pub async fn draft_into(
         CONTEXT_TOP_K,
         CONTEXT_BUDGET_CHARS,
     );
-    let script = draft_script(&model, &draft_prompt(&template, &notes))
+    let script = draft_script(&model, &draft_prompt(&template, &notes), profile.as_deref())
         .map_err(|e| IpcError::new(codes::E_INVALID, e))?;
     let out = crate::ssh::run_shell_bounded(
         exec,
@@ -404,7 +423,7 @@ pub async fn draft_into(
         _ if crate::service::claude_print::run_signed_out(None, "", &out.stderr) => {
             return Err(crate::service::claude_print::signed_out_error(
                 &plan.host_alias,
-                None,
+                profile.as_deref(),
             ))
         }
         _ => {
@@ -423,7 +442,7 @@ pub async fn draft_into(
         &out.stderr,
         crate::service::headless::RunAt {
             host: &plan.host_alias,
-            profile: None,
+            profile: profile.as_deref(),
             what: "the draft run",
         },
         |usage| book(store, &plan, &model, org_id, usage),

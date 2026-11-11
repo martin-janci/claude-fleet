@@ -253,12 +253,15 @@ fn plan_all_lost(s: &Store, rows: &[SessionRow]) -> Result<Vec<RestorePlanEntry>
         .into_iter()
         .map(|r| {
             let reason = if is_controller(controller.as_ref(), r) {
-                Some(CONTROLLER_SKIP_REASON)
+                Some(CONTROLLER_SKIP_REASON.to_string())
             } else if crate::service::operator::is_operator_session(s, &r.host_alias, &r.tmux_name)
             {
-                Some(OPERATOR_SKIP_REASON)
+                Some(OPERATOR_SKIP_REASON.to_string())
             } else {
-                None
+                // A login whose account spent its daily limit relaunches
+                // nothing until the reset: a skip with the reason, not a
+                // failure (`run_login::refuse_relaunch`).
+                crate::service::run_login::relaunch_held(s, r.id, crate::store::now_unix())
             };
             RestorePlanEntry {
                 session_id: r.id,
@@ -267,7 +270,7 @@ fn plan_all_lost(s: &Store, rows: &[SessionRow]) -> Result<Vec<RestorePlanEntry>
                 claude_session_id: r.claude_session_id.clone(),
                 friendly_name: r.friendly_name.clone(),
                 action: if reason.is_some() { "skip" } else { "restore" }.into(),
-                reason: reason.map(str::to_string),
+                reason,
             }
         })
         .collect())
@@ -343,6 +346,14 @@ fn plan_one_explicit(s: &Store, host_alias: &str, id: i64) -> Result<RestorePlan
         return Ok(RestorePlanEntry {
             action: "skip".into(),
             reason: Some(OPERATOR_SKIP_REASON.to_string()),
+            ..base
+        });
+    }
+    if let Some(why) = crate::service::run_login::relaunch_held(s, row.id, crate::store::now_unix())
+    {
+        return Ok(RestorePlanEntry {
+            action: "skip".into(),
+            reason: Some(why),
             ..base
         });
     }
@@ -875,6 +886,38 @@ mod tests {
 
     fn session_events_count(s: &Store, session_id: i64) -> usize {
         s.list_session_events(session_id, 1000).unwrap().len()
+    }
+
+    /// tests-ci-docs-3: a lost session whose login spent its account's
+    /// daily limit is planned as a skip with the reason, in the batch and
+    /// by id, never a restore that fails (and writes a failure) on the
+    /// relaunch's refusal.
+    #[tokio::test]
+    async fn a_lost_session_past_its_daily_limit_is_skipped_with_the_reason() {
+        let (s, (lost1, lost2, ..)) = seed_mixed_host("h");
+        let now = crate::store::now_unix();
+        crate::service::account_limits::seed_usage(&s, "h", None, "acct-api", 10.0, now);
+        crate::service::account_limits::seed_daily_spend(&s, "acct-api", 5.0, 6.0, now);
+        // lost2 runs under a profile on another account: not held.
+        crate::service::account_limits::seed_usage(&s, "h", Some("spare"), "acct-spare", 10.0, now);
+        s.set_session_profile(lost2, Some("spare")).unwrap();
+        let rows = s.list_sessions_for_host("h").unwrap();
+        let plan = plan_all_lost(&s, &rows).unwrap();
+        let entry = |id| plan.iter().find(|e| e.session_id == id).unwrap();
+        assert_eq!(entry(lost1).action, "skip");
+        assert!(
+            entry(lost1)
+                .reason
+                .as_deref()
+                .unwrap()
+                .contains("daily limit"),
+            "{:?}",
+            entry(lost1)
+        );
+        assert_eq!(entry(lost2).action, "restore");
+        let one = plan_one_explicit(&s, "h", lost1).unwrap();
+        assert_eq!(one.action, "skip");
+        assert!(one.reason.unwrap().contains("daily limit"));
     }
 
     #[tokio::test]

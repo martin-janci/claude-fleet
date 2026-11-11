@@ -12,4 +12,4 @@
 -- ADD COLUMN is not idempotent: guarded in schema.rs.
 ALTER TABLE hosts ADD COLUMN login_fingerprints TEXT;
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (227);
+INSERT OR IGNORE INTO schema_version (version) VALUES (228);

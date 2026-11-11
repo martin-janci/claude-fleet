@@ -1629,10 +1629,11 @@ impl ClientSummary {
     ) -> Self {
         let trusted = r.revoked_at.is_none() && r.trusted_by(trusted_people);
         // Mirrors `LIVE_GRANT_ELIGIBLE` in `store/clients.rs`: live, full,
-        // bound to no org.
+        // bound to no org, not the operator's token.
         let assets_admin = r.revoked_at.is_none()
             && r.mode == "full"
             && r.org_id.is_none()
+            && r.name != crate::service::operator::OPERATOR_CLIENT_NAME
             && r.person_id.is_some_and(|p| assets_admins.contains(&p));
         Self {
             id: r.id,
@@ -2975,6 +2976,16 @@ pub(super) const LONG_POLL_CAP: std::time::Duration = std::time::Duration::from_
 /// host probes, fan-outs, reads that may page through large files).
 pub(super) const LIFECYCLE_CAP: std::time::Duration = std::time::Duration::from_secs(300);
 
+/// Cap for [`guard::Deadline::Start`]: a start in a new worktree runs, in
+/// one call, the clone (`ensure_remote_project`, up to 360 s), the worktree
+/// add (up to 180 s), the project's setup command (`SETUP_TIMEOUT`, 240 s)
+/// and then tmux, the reconcile and the agent wait. The cap is the setup's
+/// own clock plus room for the rest, so a setup the docs allow is never cut
+/// off by the call around it.
+pub(super) const START_CAP: std::time::Duration = std::time::Duration::from_secs(
+    crate::service::sessions::worktree_setup::SETUP_TIMEOUT.as_secs() + 660,
+);
+
 /// Cap for [`guard::Deadline::Quick`]: everything else — store reads and
 /// single SSH round trips. Also the default for a tool with no
 /// [`guard::TOOL_POLICIES`] row.
@@ -2990,6 +3001,7 @@ pub fn tool_deadline(tool: &str) -> std::time::Duration {
             let work = match p.deadline {
                 guard::Deadline::LongPoll => LONG_POLL_CAP,
                 guard::Deadline::Lifecycle => LIFECYCLE_CAP,
+                guard::Deadline::Start => START_CAP,
                 guard::Deadline::Quick => QUICK_CAP,
             };
             // A confirm-gated call may sit blocked on a human. The class cap

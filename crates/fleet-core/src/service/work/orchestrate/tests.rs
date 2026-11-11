@@ -991,6 +991,30 @@ fn the_hold_checks_the_host_a_start_rule_picks() {
     assert!(why.contains("mac's own login"), "{why}");
 }
 
+/// A mission with two repos and an item with no project of its own: the
+/// start carries the allow-list, so wherever the start picks a project
+/// (a start rule, the last same-prefix ticket) it stays inside it.
+#[test]
+fn a_start_without_a_project_carries_the_missions_repos() {
+    let fx = fixture();
+    let item = member(&fx, "a");
+    let s = lock(&fx.deps.store).unwrap();
+    let web = s.upsert_project("o", "web", "/web").unwrap();
+    let api = s.upsert_project("o", "api", "/api").unwrap();
+    s.set_mission_repo(fx.m.id, web, None, true, "fleet")
+        .unwrap();
+    let m = s
+        .set_mission_repo(fx.m.id, api, None, true, "fleet")
+        .unwrap();
+    let start = start_for(&s, &m, item, &Actor::Loop, None).unwrap();
+    assert_eq!(start.project_id, None);
+    let mut allowed = start.allowed_projects.clone();
+    allowed.sort();
+    assert_eq!(allowed, vec![web, api]);
+    let none = start_for(&s, &fx.m, item, &Actor::Loop, None).unwrap();
+    assert!(none.allowed_projects.is_empty(), "no repos: no list");
+}
+
 /// Review round 15, F19: what makes a mission due rests partly on agents'
 /// own reports, so completing it is a person's act at every level. The
 /// loop's step is not its own to take, the planner's card is not applied by
@@ -1214,6 +1238,53 @@ fn a_run_goes_to_the_best_host_inside_its_grant() {
     let start = start_for(&s, &fx.m, item, &Actor::Loop, Some(&g)).unwrap();
     assert_eq!(start.host_alias.as_deref(), Some("mac"));
     assert_eq!(start.profile, None);
+}
+
+/// Accounts review: the planner reads the mission (and, with
+/// `planner_reads`, its repository), so it never runs on a login whose
+/// account the mission's project forbids; with no other login it refuses
+/// and names the forbid, and no limit wait is recorded. The release note
+/// and triage drafts take their login from the same chooser.
+#[test]
+fn the_planner_never_takes_a_login_the_missions_project_forbids() {
+    let fx = fixture();
+    let m = planned_on_mac(&fx);
+    let s = lock(&fx.deps.store).unwrap();
+    let now = now_unix();
+    crate::service::account_limits::seed_usage(&s, "mac", None, "own", 10.0, now);
+    crate::service::account_limits::seed_usage(&s, "mac", Some("work"), "work", 20.0, now);
+    let project = s.upsert_project("acme", "api", "/srv/acme/api").unwrap();
+    s.conn_ref()
+        .execute(
+            "UPDATE work_items SET project_id = ?1 WHERE id = ?2",
+            rusqlite::params![project, fx.root],
+        )
+        .unwrap();
+    let own = limit::Login {
+        host: "mac".into(),
+        profile: None,
+    };
+    let work = limit::Login {
+        host: "mac".into(),
+        profile: Some("work".into()),
+    };
+    assert_eq!(limit::choose(&s, &m, None, now).unwrap(), Ok(own.clone()));
+    assert_eq!(limit::draft_login(&s, &m, now).unwrap(), own);
+    s.set_account_forbidden_projects("own", &[project]).unwrap();
+    assert_eq!(limit::mission_forbidden(&s, &m).unwrap(), vec!["own"]);
+    assert_eq!(limit::candidates(&s, &m, None).unwrap(), vec![work.clone()]);
+    assert_eq!(limit::choose(&s, &m, None, now).unwrap(), Ok(work.clone()));
+    assert_eq!(limit::draft_login(&s, &m, now).unwrap(), work);
+    s.set_account_forbidden_projects("work", &[project])
+        .unwrap();
+    let e = limit::choose(&s, &m, None, now).unwrap_err();
+    assert_eq!(e.code, codes::E_ACCOUNT_FORBIDDEN, "{e:?}");
+    assert!(e.message.contains("mac's own login"), "{}", e.message);
+    assert_eq!(
+        limit::draft_login(&s, &m, now).unwrap_err().code,
+        codes::E_ACCOUNT_FORBIDDEN
+    );
+    assert!(!limit::waiting(&s, m.id).unwrap(), "no usage-limit wait");
 }
 
 /// The fixture's mission with its planner on `mac`.
@@ -1597,6 +1668,57 @@ fn a_far_reset_is_not_believed() {
         (wait.resets_at, wait.reset_known),
         (now + limit::LIMIT_WAIT_GUESS_SECS, false)
     );
+}
+
+/// Review R6: disabling a mission's owner revokes its live grants in the
+/// same transaction, and the loop then pauses it instead of starting runs.
+#[tokio::test]
+async fn a_disabled_owners_mission_loses_its_grant_and_is_paused() {
+    let fx = fixture();
+    member(&fx, "a");
+    let now = now_unix();
+    let ana = {
+        let s = lock(&fx.deps.store).unwrap();
+        s.add_grant(
+            fx.m.id,
+            &crate::store::NewGrant {
+                level: 2,
+                granted_by: "ana",
+                hosts: None,
+                budget_micros: Some(40_000_000),
+                max_parallel: None,
+                profile: None,
+                expires_at: now + 3600,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            s.live_automation_of(fx.m.owner_person_id.unwrap())
+                .unwrap()
+                .1,
+            1
+        );
+        fx.m.owner_person_id.unwrap()
+    };
+    lock(&fx.deps.store).unwrap().disable_person(ana).unwrap();
+    {
+        let s = lock(&fx.deps.store).unwrap();
+        assert!(s.live_mission_grant(fx.m.id, now).unwrap().is_none());
+        assert_eq!(s.live_automation_of(ana).unwrap(), (0, 0));
+    }
+    tick_mission(&fx.deps, fx.m.id, now).await.unwrap();
+    assert_eq!(mission_now(&fx).state, "paused");
+    let braked: i64 = lock(&fx.deps.store)
+        .unwrap()
+        .conn_for_test()
+        .query_row(
+            "SELECT COUNT(*) FROM orchestration_events \
+             WHERE orchestration_project_id = ?1 AND kind = 'owner_disabled'",
+            [fx.m.id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(braked, 1);
 }
 
 /// Mission #6 (2026-10-20): a run stuck open for over an hour braked the

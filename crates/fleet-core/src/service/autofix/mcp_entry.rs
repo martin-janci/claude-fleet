@@ -48,8 +48,38 @@ pub struct HostProbe {
 /// token, which goes from `jq -j` into the hash on the host's side of the
 /// pipe (or is hashed inside python). `None` of jq and python3: `no_tool`,
 /// and the host is not judged.
+///
+/// First, `@@AF hook <url>`: the URL of fleet's hook block in
+/// `~/.claude/settings.json` (the first `type: "http"` hook whose URL ends
+/// in `/hook`; empty when there is none), so the scan can tell a host that
+/// reports to another fleet ([`super::owner`]).
 pub fn probe_script() -> String {
-    r#"f="$HOME/.claude.json"
+    r#"s="$HOME/.claude/settings.json"
+if [ ! -s "$s" ]; then echo '@@AF hook '
+elif command -v jq >/dev/null 2>&1; then
+  printf '@@AF hook %s\n' "$(jq -r '[(.hooks // {}) | .. | objects | select(.type? == "http" and ((.url? | type) == "string") and (.url | endswith("/hook"))) | .url] | first // ""' "$s" 2>/dev/null)"
+elif command -v python3 >/dev/null 2>&1; then
+  python3 - "$s" <<'PY'
+import json, sys
+def walk(v):
+    if isinstance(v, dict):
+        u = v.get("url")
+        if v.get("type") == "http" and isinstance(u, str) and u.endswith("/hook"):
+            yield u
+        for x in v.values():
+            yield from walk(x)
+    elif isinstance(v, list):
+        for x in v:
+            yield from walk(x)
+try:
+    d = json.load(open(sys.argv[1]))
+    h = d.get("hooks") if isinstance(d, dict) else None
+    print("@@AF hook " + next(walk(h), ""))
+except Exception:
+    pass
+PY
+fi
+f="$HOME/.claude.json"
 if [ ! -s "$f" ]; then echo '@@AF missing'; exit 0; fi
 if command -v sha256sum >/dev/null 2>&1; then af_h() { sha256sum; }; else af_h() { shasum -a 256; }; fi
 if command -v jq >/dev/null 2>&1; then
@@ -121,14 +151,54 @@ pub fn parse_probe(stdout: &str) -> Option<EntryProbe> {
     }
 }
 
+/// PURE: the probe's `@@AF hook` line: `Some(None)` when the host has no
+/// fleet hook block, `Some(Some(url))` when it has one, `None` when the
+/// probe could not read `settings.json` (no line).
+pub fn parse_hook_url(stdout: &str) -> Option<Option<String>> {
+    stdout.lines().find_map(|l| {
+        let rest = l.trim_end().strip_prefix("@@AF hook")?;
+        let url = rest.trim();
+        Some((!url.is_empty()).then(|| url.to_string()))
+    })
+}
+
 /// Probe one host. `Ok(None)`: the host answered but could not be judged.
+/// What it read of the hook block is kept for [`hook_urls`].
 pub async fn probe(ssh: &dyn SshExec, host: &str) -> Result<Option<EntryProbe>, IpcError> {
     crate::validate::host_alias(host)?;
     let out = crate::ssh::run_shell(ssh, host, &probe_script(), PROBE_TIMEOUT).await?;
     if !out.status.success() {
         return Ok(None);
     }
-    Ok(parse_probe(&String::from_utf8_lossy(&out.stdout)))
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    if let Some(hook) = parse_hook_url(&stdout) {
+        remember_hook(host, hook);
+    }
+    Ok(parse_probe(&stdout))
+}
+
+/// Per host, the URL of fleet's hook block as the last probe that could
+/// read it saw it. In memory, like [`CACHE`].
+static HOOKS: LazyLock<Mutex<BTreeMap<String, String>>> =
+    LazyLock::new(|| Mutex::new(BTreeMap::new()));
+
+/// Record what a probe of `alias` read of its hook block (`None`: no
+/// fleet hook block there).
+pub fn remember_hook(alias: &str, url: Option<String>) {
+    if let Ok(mut h) = HOOKS.lock() {
+        match url {
+            Some(u) => h.insert(alias.to_string(), u),
+            None => h.remove(alias),
+        };
+    }
+}
+
+/// `(host, URL)` of every probed host's fleet hook block.
+pub fn hook_urls() -> Vec<(String, String)> {
+    HOOKS
+        .lock()
+        .map(|h| h.iter().map(|(a, u)| (a.clone(), u.clone())).collect())
+        .unwrap_or_default()
 }
 
 /// Per host: when it was last tried, and the last reading that could be
@@ -208,6 +278,31 @@ fn rewrite(alias: &str, safety: Safety, why: &str) -> Fix {
     }
 }
 
+/// A host whose wiring names another fleet: no automatic rewrite, only a
+/// person's take-over.
+fn foreign(alias: &str, theirs: &str, ours: &str, evidence: Vec<String>) -> Finding {
+    let mut evidence = evidence;
+    evidence.insert(
+        0,
+        format!("{alias} reports to the fleet at {theirs}; this fleet is at {ours}"),
+    );
+    finding(
+        alias,
+        "foreign",
+        format!("{alias} reports to another fleet"),
+        "This host's fleet connection points at another fleet (a hub, or another desktop), \
+         so fleet does not repair it by itself: that would take the host away from the other \
+         fleet, whose sessions there would stop reaching it. Take it over only if this fleet \
+         should manage the host from now on; otherwise leave it, or remove the host here.",
+        evidence,
+        Some(rewrite(
+            alias,
+            Safety::NeedsApproval,
+            "The host then reports to this fleet instead of the other one.",
+        )),
+    )
+}
+
 /// Whose token the entry carries, in words, never the full hash.
 fn whose(cx: &ScanCx, alias: &str, sha: &str) -> String {
     if sha == EMPTY_SHA {
@@ -276,6 +371,29 @@ pub fn scan(cx: &ScanCx) -> Vec<Finding> {
         };
         if !reachable {
             continue;
+        }
+        // Another fleet's host: whatever is wrong with the entry, only a
+        // person takes it over (a bearer that is not the host's own is the
+        // `token` finding below, which already waits for one).
+        let entry_url = match &p.probe {
+            EntryProbe::Entry { url, .. } => url.as_deref(),
+            _ => None,
+        };
+        let token_ok =
+            !matches!(&p.probe, EntryProbe::Entry { bearer_sha, .. } if bearer_sha != own);
+        if token_ok && !matches!(p.probe, EntryProbe::ParseError) {
+            if let Some(theirs) = cx.foreign_owner(alias, entry_url) {
+                let evidence = match &p.probe {
+                    EntryProbe::Missing => {
+                        vec![format!(
+                            "{alias}'s ~/.claude.json has no `claude-fleet` server"
+                        )]
+                    }
+                    _ => Vec::new(),
+                };
+                out.push(foreign(alias, &theirs, url, evidence));
+                continue;
+            }
         }
         match &p.probe {
             EntryProbe::Missing => out.push(finding(
@@ -399,6 +517,56 @@ mod tests {
         let mut f = scan(cx);
         assert_eq!(f.len(), 1, "{f:?}");
         f.remove(0)
+    }
+
+    /// An entry with the host's own token that points at another fleet's
+    /// base (the hub a desktop migrated to) is a take-over a person
+    /// decides, never an automatic rewrite; one at this fleet's own base or
+    /// at loopback is still repaired by itself, and a hook block that names
+    /// another fleet holds back even the "missing" repair.
+    #[test]
+    fn an_entry_or_hook_block_of_another_fleet_waits_for_a_person() {
+        let mut desktop = cx(entry("https://hub.example/mcp", true, H1_SHA));
+        desktop.mcp_url = Some("http://127.0.0.1:4180/mcp".into());
+        let f = only(&desktop);
+        assert_eq!(f.kind, "host_mcp_entry.foreign");
+        assert!(
+            f.body.evidence[0].contains("https://hub.example/mcp"),
+            "{f:?}"
+        );
+        let fix = f.body.fix.unwrap();
+        assert_eq!((fix.safety, fix.auto), (Safety::NeedsApproval, false));
+        assert_eq!(fix.plan, FixPlan::RewriteMcpEntry { host: "h1".into() });
+
+        // The hub looking at a desktop's loopback entry: loopback is never
+        // another fleet, so the usual safe repair stands.
+        let hub = cx(entry("http://127.0.0.1:4180/mcp", true, H1_SHA));
+        let fix = only(&hub).body.fix.unwrap();
+        assert_eq!((fix.safety, fix.auto), (Safety::Safe, true));
+
+        let mut missing = cx(EntryProbe::Missing);
+        missing.hook_urls = vec![("h1".into(), "https://other.example/hook".into())];
+        let f = only(&missing);
+        assert_eq!(f.kind, "host_mcp_entry.foreign");
+        assert!(!f.body.fix.unwrap().auto);
+        // This fleet's own hook URL holds nothing back.
+        missing.hook_urls = vec![("h1".into(), "https://fleet.example/hook".into())];
+        assert_eq!(only(&missing).kind, "host_mcp_entry.missing");
+    }
+
+    #[test]
+    fn the_probe_reads_the_hook_blocks_url() {
+        assert_eq!(
+            parse_hook_url("@@AF hook https://hub.example/hook\n@@AF missing\n"),
+            Some(Some("https://hub.example/hook".into()))
+        );
+        assert_eq!(parse_hook_url("@@AF hook \n@@AF missing\n"), Some(None));
+        assert_eq!(parse_hook_url("@@AF missing\n"), None);
+        // The hook line never hides the entry's own reading.
+        assert_eq!(
+            parse_probe("@@AF hook https://hub.example/hook\n@@AF missing\n"),
+            Some(EntryProbe::Missing)
+        );
     }
 
     #[test]
@@ -586,6 +754,17 @@ mod tests {
             .to_string(),
         )
         .unwrap();
+        std::fs::create_dir_all(home.path().join(".claude")).unwrap();
+        std::fs::write(
+            home.path().join(".claude/settings.json"),
+            serde_json::json!({"hooks": {"Stop": [{"hooks": [
+                {"type": "command", "command": "echo hi"},
+                {"type": "http", "url": "https://hub.example/hook",
+                 "headers": {"Authorization": format!("Bearer {secret}")}}
+            ]}]}})
+            .to_string(),
+        )
+        .unwrap();
         let out = crate::proc::std_command("bash")
             .args(["-c", &probe_script()])
             .env("HOME", home.path())
@@ -597,6 +776,11 @@ mod tests {
         assert_eq!(
             parse_probe(&stdout),
             Some(entry(URL, true, &crate::mcp::auth::sha256_hex(secret)))
+        );
+        assert_eq!(
+            parse_hook_url(&stdout),
+            Some(Some("https://hub.example/hook".into())),
+            "{stdout}"
         );
     }
 }

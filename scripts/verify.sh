@@ -160,8 +160,30 @@ readers_of() {
   done < <(grep -rlF --include='*.rs' -- "$key\"" crates/*/src src-tauri/src 2>/dev/null || true)
 }
 
+# The vitest files that name this repo path (last two components, e.g.
+# `design/tokens.json`): tests that read it with readFileSync, which
+# `vitest related` cannot see. Only for a path outside src/.
+vitest_readers_of() {
+  local p=$1 key
+  case "$p" in src/*) return ;; esac
+  key=$(echo "$p" | awk -F/ '{ if (NF >= 2) print $(NF-1) "/" $NF; else print $NF }')
+  [[ -z "$key" ]] && return
+  grep -rlF --include='*.test.ts' -- "$key" src 2>/dev/null || true
+}
+# Data only frontend tests read (the design manual, the theme boot script,
+# example fixtures): a change no test names runs the whole suite.
+is_vitest_data() {
+  case "$1" in
+    docs/ux/*|docs/design/*|docs/redesign/*|docs/form-examples/*|docs/chat-block-examples/*|public/*) return 0 ;;
+  esac
+  return 1
+}
+
 rust_changed=0
 frontend_changed=0
+vitest_data=0
+vitest_all=0
+vitest_tests=()
 frontend_config=0
 all_tests=0
 all_targets=0
@@ -193,9 +215,21 @@ while IFS= read -r f; do
     fi
   fi
   r=$(readers_of "$f" | sort -u | tr '\n' ' ')
+  v=""
+  if ! is_frontend "$f"; then
+    v=$(vitest_readers_of "$f" | sort -u)
+    if [[ -n "$v" ]]; then
+      vitest_data=1
+      while IFS= read -r t; do [[ -n "$t" ]] && vitest_tests+=("$t"); done <<< "$v"
+    elif is_vitest_data "$f"; then
+      vitest_data=1
+      vitest_all=1
+      v=all
+    fi
+  fi
   if [[ -n "${r// /}" ]]; then
     filters="$filters $r"
-  elif ! is_frontend "$f"; then
+  elif ! is_frontend "$f" && [[ -z "$v" ]]; then
     uncovered+=("$f")
   fi
 done <<< "$changed"
@@ -209,9 +243,9 @@ nfilters=$(echo "$filters" | wc -w | tr -d ' ')
 # --- full: the gate ----------------------------------------------------------
 if [[ $level == full ]]; then
   args=()
-  if [[ -n "$changed" && $frontend_changed == 0 ]]; then
+  if [[ -n "$changed" && $frontend_changed == 0 && $vitest_data == 0 ]]; then
     args=(--rust-only)
-  elif [[ $frontend_changed == 1 && $rust_changed == 0 && $nfilters == 0 && ${#uncovered[@]} == 0 ]]; then
+  elif [[ ($frontend_changed == 1 || $vitest_data == 1) && $rust_changed == 0 && $nfilters == 0 && ${#uncovered[@]} == 0 ]]; then
     args=(--frontend-only)
   fi
   echo "verify full: scripts/ci-local.sh ${args[*]+"${args[*]}"}"
@@ -232,7 +266,7 @@ if [[ -z "$headless" ]]; then
     headless=1
   fi
 fi
-headless_pkgs="-p fleet-core -p fleet-hub -p fleet-proto -p fleet-agent -p fleet-update"
+headless_pkgs="--workspace --exclude claude-fleet"
 
 if [[ $rust_changed == 1 ]]; then
   plan+=("cargo fmt --all --check")
@@ -281,6 +315,16 @@ if [[ $frontend_changed == 1 ]]; then
     plan+=("pnpm exec vitest related --run$(printf ' %q' "${frontend_files[@]}")")
   fi
 fi
+# A file only frontend tests read: those tests (`vitest related` follows
+# imports, not readFileSync), or the whole suite when none names it.
+if [[ $vitest_data == 1 && $frontend_config == 0 ]]; then
+  if [[ $vitest_all == 1 ]]; then
+    plan+=("pnpm run test")
+  else
+    t=$(printf '%s\n' "${vitest_tests[@]}" | sort -u | tr '\n' ' ')
+    plan+=("pnpm exec vitest run$(for x in $t; do printf ' %q' "$x"; done)")
+  fi
+fi
 
 if [[ ${#plan[@]} == 0 ]]; then
   echo "verify quick: nothing to check for this change."
@@ -292,7 +336,7 @@ fi
 [[ $dry == 1 ]] && exit 0
 
 # --- quick: run --------------------------------------------------------------
-if [[ $frontend_changed == 1 && $frontend_config == 0 && ! -d node_modules ]]; then
+if [[ ($frontend_changed == 1 || $vitest_data == 1) && $frontend_config == 0 && ! -d node_modules ]]; then
   plan=("pnpm install --frozen-lockfile" ${plan[@]+"${plan[@]}"})
 fi
 summary=()

@@ -1668,7 +1668,8 @@ mod tests {
                 })
                 .unwrap();
             assert!(
-                !ev.iter().any(|e| e.resource_id == "bob-phone"),
+                !ev.iter()
+                    .any(|e| e.resource_id == "bob-phone" && e.action != "pair_refused"),
                 "no pair event for the refused redeem"
             );
         }
@@ -1760,9 +1761,56 @@ mod tests {
                 })
                 .unwrap();
             assert!(
-                !ev.iter().any(|e| e.resource_id == "dave-phone"),
+                !ev.iter()
+                    .any(|e| e.resource_id == "dave-phone" && e.action != "pair_refused"),
                 "no pair event for the refused redeem"
             );
+        }
+
+        // Review R6: a code minted for a live person, who is disabled before
+        // the redeem, is refused: no device, no new person of that name,
+        // and the attempt is an admin event. A trusted fleet-authority code
+        // too.
+        let erin = store
+            .lock()
+            .unwrap()
+            .create_person("erin", None)
+            .unwrap()
+            .id;
+        let for_erin = pairings.mint_for(
+            pairing::MintRequest {
+                person: Some("erin"),
+                ..mint_req("erin-laptop", "full", true)
+            },
+            Some(erin),
+        );
+        store.lock().unwrap().disable_person(erin).unwrap();
+        let refused = round_trip(addr, &pair_req(&for_erin.code, "phone.invalid")).await;
+        assert!(refused.contains("403"), "{refused}");
+        assert!(body_of(&refused).contains("disabled"), "{refused}");
+        {
+            let s = store.lock().unwrap();
+            assert!(!s
+                .list_client_tokens(true)
+                .unwrap()
+                .iter()
+                .any(|r| r.name == "erin-laptop"));
+            assert!(
+                s.get_person_by_name("erin").unwrap().is_none(),
+                "no new live erin"
+            );
+            let ev = s
+                .admin_events(&crate::store::AdminEventQuery {
+                    limit: 400,
+                    ..Default::default()
+                })
+                .unwrap();
+            assert!(ev
+                .iter()
+                .any(|e| e.action == "pair_refused" && e.resource_id == "erin-laptop"));
+            assert!(!ev
+                .iter()
+                .any(|e| e.action == "pair" && e.resource_id == "erin-laptop"));
         }
 
         // A camera scan opens `GET /pair`, which must explain what to do

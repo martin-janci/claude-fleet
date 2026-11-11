@@ -765,7 +765,7 @@ describe('SessionDetails actions for pane-less rows (external read-only, inactiv
   it('a tmux row still shows its attach command and Kill', async () => {
     render(SessionDetails, { props: { session: sampleSession } });
     await tick();
-    expect(screen.getByTestId('attach-command').textContent).toBe('tmux attach -t dev-foo');
+    expect(screen.getByTestId('attach-command').textContent).toBe("ssh -t mefistos 'tmux attach -t '\\''=dev-foo'\\'''");
     expect(screen.getByTestId('kill-from-details')).toBeTruthy();
   });
 });
@@ -1016,7 +1016,7 @@ describe('SessionDetails attach command against a grant', () => {
     const mine = { ...sampleSession, id: 32, owner_person_id: ME, visibility: 'private' as const };
     render(SessionDetails, { props: { session: mine } });
     await tick();
-    expect(screen.getByTestId('attach-command').textContent).toBe('tmux attach -t dev-foo');
+    expect(screen.getByTestId('attach-command').textContent).toBe("ssh -t mefistos 'tmux attach -t '\\''=dev-foo'\\'''");
     expect(screen.getByTestId('copy-attach')).toBeTruthy();
   });
 
@@ -1031,6 +1031,31 @@ describe('SessionDetails attach command against a grant', () => {
       expect(screen.queryByTestId('copy-attach')).toBeNull();
     },
   );
+
+  it('names the exact session: this machine’s tmux for local, ssh for a host, none for the hub’s own machine or an agent host', async () => {
+    const local = { ...sampleSession, id: 33, host_alias: 'local' };
+    const first = render(SessionDetails, { props: { session: local } });
+    await tick();
+    expect(screen.getByTestId('attach-command').textContent).toBe("tmux attach -t '=dev-foo'");
+    first.unmount();
+    // Paired, `local` is the hub's machine: from here it would be this one.
+    hubStatus.set(remote);
+    setMyGrants(ME, []);
+    const hubLocal = { ...local, id: 34, owner_person_id: ME, visibility: 'private' as const };
+    const second = render(SessionDetails, { props: { session: hubLocal } });
+    await tick();
+    expect(screen.queryByTestId('attach-command')).toBeNull();
+    expect(screen.queryByTestId('copy-attach')).toBeNull();
+    expect(screen.getByTestId('attach-command-none').textContent).toContain('hub’s own machine');
+    second.unmount();
+    hosts.set([
+      { alias: 'mefistos', ssh_alias: 'mefistos', reachable: true, claude_version: null, tmux_version: null, hidden: false, last_pinged_at: 1, account_uuid: null, provisioned: false, transport: 'agent' },
+    ]);
+    render(SessionDetails, { props: { session: { ...sampleSession, id: 35, owner_person_id: ME, visibility: 'private' as const } } });
+    await tick();
+    expect(screen.queryByTestId('attach-command')).toBeNull();
+    expect(screen.getByTestId('attach-command-none').textContent).toContain('no SSH route');
+  });
 
   it('takes it away on a revoke with no row event, and never says the row has no pane', async () => {
     hubStatus.set(remote);

@@ -158,10 +158,7 @@ pub fn on_close(s: &Store, run_id: i64, now: i64) -> Result<(), IpcError> {
     let Some(run) = s.get_routine_run(run_id)? else {
         return Ok(());
     };
-    let row = match run.session_id {
-        Some(sid) => s.get_session_by_id(sid)?,
-        None => None,
-    };
+    let row = super::run_session(s, &run)?;
     if let Some((o, src)) = rule_outcome(&run, row.as_ref()) {
         record(s, &run, o, src, now)?;
     }

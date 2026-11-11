@@ -385,6 +385,7 @@ pub fn gather(s: &Store, live_agents: &[(String, String)], now: i64) -> Result<S
             .ok()
             .map(|b| b.mcp_url()),
         mcp_probes: super::mcp_entry::cached(),
+        hook_urls: super::mcp_entry::hook_urls(),
         host_token_shas: s
             .list_host_tokens()?
             .into_iter()

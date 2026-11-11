@@ -573,6 +573,60 @@ mod grants {
         assert!(s.list_agent_rules().unwrap().is_empty());
     }
 
+    /// Review R6: an instance name is one rule's. Another definition's name
+    /// is refused (no silent takeover of its jobs and records); the same
+    /// definition's is the edit, which keeps its id; an Edit by id may not
+    /// rename (that would start a second instance beside it).
+    #[test]
+    fn an_instance_name_is_one_rules_and_an_edit_keeps_it() {
+        let (s, pid, tid) = store();
+        let p = prepare(&s, &args(pid, tid), &sources(), &secrets(), "x", 100).unwrap();
+        let id = s.grant_agent_rule(&p.rule).unwrap();
+        // Another definition already holds "web".
+        let mut other = p.rule.clone();
+        other.scope = "web".into();
+        other.definition = Some("pr-questions".into());
+        s.grant_agent_rule(&other).unwrap();
+        let mut a = args(pid, tid);
+        a.scope = Some("web".into());
+        let e = prepare(&s, &a, &sources(), &secrets(), "x", 100).unwrap_err();
+        assert_eq!(e.code, codes::E_CONFLICT);
+        assert!(e.message.contains("pr-questions"), "{}", e.message);
+        // An Edit of l2-prod by id under a new name is refused.
+        let mut renamed = args(pid, tid);
+        renamed.id = Some(id);
+        renamed.scope = Some("l2-renamed".into());
+        let e = prepare(&s, &renamed, &sources(), &secrets(), "x", 100).unwrap_err();
+        assert!(e.message.contains("keeps its name"), "{}", e.message);
+        // The same name, same definition: the change, same id.
+        let mut edit = args(pid, tid);
+        edit.id = Some(id);
+        edit.level = Some("act".into());
+        let p = prepare(&s, &edit, &sources(), &secrets(), "x", 200).unwrap();
+        assert_eq!(s.grant_agent_rule(&p.rule).unwrap(), id);
+    }
+
+    /// Review R6: an Edit saved with the hours it showed keeps the end time;
+    /// other hours re-base it from now.
+    #[test]
+    fn an_edit_with_the_hours_it_showed_keeps_the_end() {
+        let (s, pid, tid) = store();
+        let mut a = args(pid, tid);
+        a.hours = Some(24);
+        let p = prepare(&s, &a, &sources(), &secrets(), "x", 0).unwrap();
+        assert_eq!(p.rule.expires_at, Some(24 * 3600));
+        s.grant_agent_rule(&p.rule).unwrap();
+        // Two and a half hours on, Edit shows 22 (21.5 rounded up).
+        let at = 2 * 3600 + 1800;
+        assert_eq!(super::super::form::hours_left(24 * 3600 - at), 22);
+        a.hours = Some(22);
+        let p = prepare(&s, &a, &sources(), &secrets(), "x", at).unwrap();
+        assert_eq!(p.rule.expires_at, Some(24 * 3600), "the end stays");
+        a.hours = Some(5);
+        let p = prepare(&s, &a, &sources(), &secrets(), "x", at).unwrap();
+        assert_eq!(p.rule.expires_at, Some(at + 5 * 3600));
+    }
+
     #[test]
     fn a_store_without_the_definitions_tools_fails_the_grant() {
         let (s, pid, tid) = store();
@@ -643,6 +697,7 @@ mod grant_form {
                 ("tenants".to_string(), vec!["TENANTS_TOKEN".to_string()]),
             ]
             .into(),
+            now: 0,
         }
     }
 
@@ -855,6 +910,35 @@ mod grant_form {
         assert_eq!(value("f_env_logs"), Some(json!("A=${B}")));
         assert_eq!(spec.submit.as_deref(), Some("Save"));
         assert_eq!(forms::validate(&spec), Vec::<String>::new());
+        // No end: Hours stays empty and optional.
+        let hours = |spec: &forms::FormSpec| {
+            spec.steps
+                .iter()
+                .flat_map(|s| s.fields.iter())
+                .find(|f| f.name == "f_hours")
+                .cloned()
+                .unwrap()
+        };
+        assert_eq!(hours(&spec).value, None);
+        assert!(!hours(&spec).required);
+        // Review R6: an end is prefilled as the hours left, rounded up, so
+        // an Edit's save keeps it; an ended one asks for new hours.
+        let mut c = ctx();
+        c.now = 1_000;
+        let timed = AgentRuleRow {
+            expires_at: Some(1_000 + 5 * 3600 + 60),
+            ..rule.clone()
+        };
+        let spec = grant_form(&loaded(), &c, Some(&timed));
+        assert_eq!(hours(&spec).value, Some(json!(6)));
+        assert!(!hours(&spec).required);
+        let ended = AgentRuleRow {
+            expires_at: Some(900),
+            ..rule
+        };
+        let spec = grant_form(&loaded(), &c, Some(&ended));
+        assert_eq!(hours(&spec).value, None);
+        assert!(hours(&spec).required);
     }
 }
 

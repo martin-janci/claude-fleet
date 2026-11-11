@@ -64,27 +64,20 @@ pub async fn spawn_review(
             .get_session_by_id(args.source_session_id)?
             .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, "source session not found"))?;
         let cwd_src = cwd_source_for_session(&s, &source)?;
-        // A Claude review is new work in the source's project: it runs on a
-        // login the project allows (the source's own when it is one, else
-        // the allowed login on the host with the most headroom) or not at
-        // all (`service::project_accounts`). Here, before anything is
-        // created.
+        // A Claude review is new Claude work in the source's project: it
+        // runs under the source's own login when the project allows it,
+        // stepped off one the project forbids (onto the allowed login on the
+        // host with the most headroom) or that is past the pause line, and
+        // is refused (forbidden, daily limit, signed out) before anything is
+        // created (`service::run_login::choose`). Codex keeps its own login.
         let mut launch = crate::tmux::ClaudeLaunch::default();
         if agent.id() == crate::store::AGENT_CLAUDE {
-            let now = now_unix();
-            launch.profile = crate::service::project_accounts::login_for(
+            launch.profile = crate::service::run_login::choose(
                 &s,
                 source.project_id,
                 &source.host_alias,
                 stored_launch(&s, source.id)?.profile.as_deref(),
-                now,
-            )?;
-            crate::service::project_accounts::refuse_forbidden(
-                &s,
-                source.project_id,
-                &source.host_alias,
-                launch.profile.as_deref(),
-                now,
+                now_unix(),
             )?;
         }
         (source, cwd_src, launch)
@@ -168,7 +161,7 @@ pub async fn spawn_review(
         // The login the pane runs under, so a later restart or recreate
         // keeps it instead of falling back to the host's own.
         if launch.profile.is_some() {
-            s.set_session_profile(row.id, launch.profile.as_deref())?;
+            store_start_launch(&s, row.id, &review_name, &launch)?;
         }
         // Ownership (multi-user M1, T5 / spec §4.3 invariant 6): a review
         // inherits the SOURCE row's owner and visibility, never the caller's.

@@ -879,6 +879,11 @@ fn may_admin_catalog_row(
     let (None, Some(c)) = (&caller.host_alias, &caller.client) else {
         return Ok(false);
     };
+    // The operator is bound to the owner but does not inherit the owner's
+    // catalog role (the store's `LIVE_GRANT_ELIGIBLE` says the same).
+    if caller.is_operator() {
+        return Ok(false);
+    }
     let s = store
         .lock()
         .map_err(|_| mcp_err(codes::E_LOCK, "store mutex poisoned", None))?;

@@ -697,7 +697,7 @@ pub struct HostHealthSample {
     /// the Keychain, see `local_health`), or the host could not tell.
     pub login_split: Option<bool>,
     /// The fingerprint of each Claude login's refresh token on the host
-    /// (migration 227, `loginfp=`, `service::login_conflicts`): `None` in a
+    /// (migration 228, `loginfp=`, `service::login_conflicts`): `None` in a
     /// pair is the host's own login, else the profile's name. The first 12
     /// hex digits of the token's SHA-256, computed on the host; the token
     /// itself never leaves it. `None`: the host could not tell (an older
@@ -738,7 +738,7 @@ pub const AUTH_OVERRIDE_VARS: [&str; 7] = [
 /// `find-generic-password` without `-w` reads the item's attributes, which
 /// an SSH session can do even while the Keychain will not hand out its
 /// secret, and prints nothing fleet keeps. Empty elsewhere.
-/// `loginfp=` (migration 227) lists `<login>:<fingerprint>` for each
+/// `loginfp=` (migration 228) lists `<login>:<fingerprint>` for each
 /// `.credentials.json` the host's logins keep, `_own` for the host's own
 /// (`~/.claude`), else the profile's name: the refresh token is read into a
 /// shell variable and piped into `sha256sum` (or `shasum -a 256`), and only

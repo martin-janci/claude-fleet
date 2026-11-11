@@ -103,9 +103,20 @@ impl Store {
                AND (r.done_at IS NULL OR (?2 AND r.done_at >= ?3)) \
              ORDER BY r.done_at IS NOT NULL, r.created_at DESC, r.id DESC LIMIT 100"
         ))?;
-        let rows = stmt
+        let mut rows = stmt
             .query_map(rusqlite::params![person, done, now - 7 * 86_400], row)?
             .collect::<Result<Vec<_>, _>>()?;
+        // An open ask shows the level the person holds now: a share narrowed
+        // since the ask must not still read "can send notes". (An ask whose
+        // share is gone keeps its stored level; what to show for it is open.)
+        if rows.iter().any(|r| r.done_at.is_none()) {
+            let live = self.grants_for_person(person)?;
+            for r in rows.iter_mut().filter(|r| r.done_at.is_none()) {
+                if let Some(level) = live.get(&r.session_id) {
+                    r.level.clone_from(level);
+                }
+            }
+        }
         Ok(rows)
     }
 

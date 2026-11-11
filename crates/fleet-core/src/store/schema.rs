@@ -445,6 +445,17 @@ fn missions_have_waits_at(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 227: `tasks` already has its
+/// `worker_spent_micros` column.
+fn tasks_have_worker_spent(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name = 'worker_spent_micros'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 214: `tasks` already has its
 /// `cost_start_micros` column.
 fn tasks_has_cost_start(conn: &Connection) -> rusqlite::Result<bool> {
@@ -1156,7 +1167,7 @@ fn work_items_has_held_at(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
-/// `already_applied` guard of migration 227.
+/// `already_applied` guard of migration 228.
 fn hosts_has_login_fingerprints(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('hosts') WHERE name = 'login_fingerprints'",
@@ -2602,11 +2613,19 @@ const MIGRATIONS: &[Migration] = &[
         226,
         include_str!("../../migrations/226_review_note_queue.sql"),
     ),
+    // A mission's spend outlives its workers' session rows: what a worker
+    // had spent when its row was deleted, kept on its newest task. An ADD
+    // COLUMN, so guarded.
+    Migration {
+        version: 227,
+        sql: include_str!("../../migrations/227_task_worker_spend.sql"),
+        already_applied: Some(tasks_have_worker_spent),
+    },
     // Login fingerprints: one login copied onto two hosts. ADD COLUMN, so
     // guarded.
     Migration {
-        version: 227,
-        sql: include_str!("../../migrations/227_host_login_fingerprints.sql"),
+        version: 228,
+        sql: include_str!("../../migrations/228_host_login_fingerprints.sql"),
         already_applied: Some(hosts_has_login_fingerprints),
     },
 ];

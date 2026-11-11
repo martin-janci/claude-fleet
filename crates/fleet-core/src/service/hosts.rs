@@ -360,9 +360,8 @@ pub async fn probe_host(
     };
     let target = ssh_alias.as_deref().unwrap_or(&args.alias);
     // The `local` host has no ssh_alias; probe is best-effort via local shell.
-    // For remote hosts we use the lenient probe so a Re-probe of an
-    // unreachable host updates `reachable=false` instead of returning an
-    // error to the UI.
+    // For a remote host a failed probe is not an error to the UI: a Re-probe
+    // of an unreachable host updates `reachable=false` and answers the row.
     let (reachable, claude_ver, tmux_ver, account) = if args.alias == "local" {
         crate::service::hub::ensure_local_allowed(&args.alias)?;
         // probe_local does blocking std::process + fs I/O — keep it off the
@@ -378,7 +377,24 @@ pub async fn probe_host(
         // The CancelGuard releases the slot even if the probe panics.
         let (id, token) = reg.register_anonymous();
         let _guard = crate::cancel::CancelGuard::new(Arc::clone(reg), id);
-        probe_lenient_with_token(ssh, target, token).await
+        let cancelled = token.clone();
+        match probe_with_token(ssh, target, token).await {
+            Ok(probed) => probed,
+            // Cancelled: nothing was learned, so nothing is written.
+            Err(_) if cancelled.is_cancelled() => return list_one(store, &args.alias),
+            // Not answering says nothing about what is installed there or
+            // who is signed in: the row goes unreachable with its versions
+            // and its account link as they were (as the reconcile's
+            // unreachable pass leaves them), and says why.
+            Err(e) => {
+                lock(store)?.mark_host_probe_failed(
+                    &args.alias,
+                    now_unix(),
+                    (&e.code, &e.message),
+                )?;
+                return list_one(store, &args.alias);
+            }
+        }
     };
     {
         let s = lock(store)?;
@@ -629,17 +645,6 @@ fn probe_sections(stdout: &str) -> (String, String, String) {
         claude.to_string(),
         oauth.trim().to_string(),
     )
-}
-
-/// Lenient probe with an explicit cancellation token. Used by `probe_host`.
-/// An SSH failure collapses to "unreachable, nothing known" rather than an
-/// error, so a Re-probe of a down host updates `reachable=false` in the UI.
-async fn probe_lenient_with_token(
-    ssh: &dyn SshExec,
-    host: &str,
-    token: CancellationToken,
-) -> (bool, Option<String>, Option<String>, Option<OauthAccount>) {
-    probe_with_token(ssh, host, token).await.unwrap_or_default()
 }
 
 /// The real local home directory (`$HOME`), used by production callers of
@@ -1968,6 +1973,10 @@ mod tests {
             s.insert_host("beta", Some("beta.example")).unwrap();
             s.update_host_probe("beta", true, Some("2.1.0"), Some("3.4"), 1)
                 .unwrap();
+            s.conn_ref()
+                .execute("INSERT INTO accounts (uuid) VALUES ('acc-1')", [])
+                .unwrap();
+            s.set_host_account("beta", Some("acc-1")).unwrap();
         }
         let fake = fake_fleet();
         fake.unreachable("beta.example");
@@ -1987,6 +1996,12 @@ mod tests {
         assert_eq!(row.ssh_alias.as_deref(), Some("beta.example"));
         assert!(row.last_pinged_at.unwrap() > 1, "probe time stamped");
         assert!(host_row(&store, "beta").is_some_and(|h| !h.reachable));
+        // A host that does not answer keeps what is known about it: placement
+        // and the health checks read these until the next probe that answers.
+        assert_eq!(row.claude_version.as_deref(), Some("2.1.0"));
+        assert_eq!(row.tmux_version.as_deref(), Some("3.4"));
+        assert_eq!(row.account_uuid.as_deref(), Some("acc-1"));
+        assert!(row.last_probe_error.is_some(), "and says why");
         assert_eq!(fake.calls_for("beta.example").len(), 1);
         // The registry slot was released (CancelGuard) — nothing to cancel.
         reg.cancel(0);

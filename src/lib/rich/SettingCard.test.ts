@@ -140,4 +140,15 @@ describe('setting card', () => {
     expect(get(settingsSection)).toContain('.');
     expect(get(settingsKey)).toBe('work.recent_days');
   });
+
+  it("an extra fleet's card is read-only and never decides this window's proposal of the same id (probe3 c-4)", async () => {
+    pending = [proposal({ id: 4 })];
+    render(RichText, { props: { source: ui({ proposal: 4 }), sessionId: null, fleet: 'nas' } });
+    const line = await screen.findByTestId('rich-setting-away');
+    expect(line.textContent).toContain('Open it on nas');
+    expect(screen.queryByTestId('rich-setting-diff')).toBeNull();
+    expect(screen.queryByTestId('rich-setting-apply')).toBeNull();
+    expect(screen.queryByTestId('rich-setting-gone')).toBeNull();
+    expect(inv.mock.calls.some((c) => c[0] === 'setting_proposals')).toBe(false);
+  });
 });

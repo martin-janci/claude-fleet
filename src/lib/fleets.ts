@@ -1070,15 +1070,19 @@ export function fleetSessionAt(
   return hit ? { fleet: a.fleet.id, id: hit.id } : null;
 }
 
-/** POSIX single-quoting for a command a person pastes into a shell. */
+/** POSIX single-quoting for a command a person pastes into a shell. A
+ *  leading `=` is quoted too: zsh (the macOS shell) expands `=word` to the
+ *  path of the command `word`. */
 export function shq(s: string): string {
-  return /^[A-Za-z0-9_.@%+=:,/-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`;
+  return /^[A-Za-z0-9_.@%+:,/-][A-Za-z0-9_.@%+=:,/-]*$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
 /** The command that attaches to an extra fleet's session from this machine.
- *  Works where this machine's ssh knows the host alias (design: Risks). */
+ *  Works where this machine's ssh knows the host alias (design: Risks). The
+ *  remote command is one quoted word: ssh hands it to the remote shell,
+ *  which parses it again, and must still see `=name` quoted. */
 export function fleetAttachCommand(s: Pick<SessionRow, 'host_alias' | 'tmux_name'>): string {
-  return `ssh -t ${shq(s.host_alias)} tmux attach -t ${shq(`=${s.tmux_name}`)}`;
+  return `ssh -t ${shq(s.host_alias)} ${shq(`tmux attach -t ${shq(`=${s.tmux_name}`)}`)}`;
 }
 
 /** Why this machine must not attach to an extra fleet's session, or null

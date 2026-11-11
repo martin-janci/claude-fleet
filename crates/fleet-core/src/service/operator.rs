@@ -1050,10 +1050,26 @@ pub(crate) fn operator_status_with(
     }
     // A revoked token is a deliberate act, so nothing re-mints itself — the
     // panel offers a button and the person presses it.
+    //
+    // An EXPIRED one (`auth.device_token_ttl_days` idle, or
+    // `auth.device_token_max_age_days` since birth) is refused by the auth
+    // layer exactly as a revoked one is, so it answers the same: otherwise
+    // every MCP call Control makes 401s while this still says `ready`, and
+    // guard #1 of `ensure_operator` never re-mints. `token_revoked` is the
+    // state both clients already offer Replace for. A policy that cannot be
+    // read expires nothing here, as it expires nothing in the auth layer
+    // on a first request.
     let sha = s.get_setting(SETTING_OPERATOR_TOKEN_SHA).ok().flatten();
+    let policy = s.device_token_policy().unwrap_or_default();
+    let now = crate::store::now_unix();
     let live = s
         .active_client_tokens()
-        .map(|rows| rows.iter().any(|t| Some(&t.token_sha256) == sha.as_ref()))
+        .map(|rows| {
+            rows.iter().any(|t| {
+                Some(&t.token_sha256) == sha.as_ref()
+                    && !crate::mcp::auth::device_token_expired(t, &policy, now)
+            })
+        })
         .unwrap_or(false);
     if !live {
         return Ok(blocked("token_revoked", Some(row), None));
@@ -1396,7 +1412,10 @@ pub(crate) async fn ensure_operator_with(
         // same fail-closed rule that leaves the session `unclaimed`; the
         // agent then sees nothing until the hub has an owner, which is what
         // the master token sees on such a hub too. Migration 195 heals a
-        // token minted before this.
+        // token minted before this. The binding gives the owner's REACH,
+        // never the owner's trust or catalog role: `auth::apply_realm`,
+        // `Caller::is_trusted_client` and `LIVE_GRANT_ELIGIBLE` all leave
+        // this token out.
         match s.personal_owner_id()? {
             Some(owner) => {
                 s.set_client_person(OPERATOR_CLIENT_NAME, Some(owner))?;
@@ -2599,6 +2618,26 @@ mod tests {
         assert!(st.ready);
         assert!(st.blocked.is_none());
         assert!(st.session.is_some());
+
+        // Past the device max age the auth layer refuses that token as it
+        // refuses a revoked one, so the status says so too and the panel
+        // offers Replace, rather than reading `ready` while every call 401s.
+        {
+            let s = store.lock().unwrap();
+            s.set_setting(crate::service::settings::DEVICE_TOKEN_MAX_AGE_DAYS, "1")
+                .unwrap();
+            s.conn_for_test()
+                .execute(
+                    "UPDATE client_tokens SET created_at = created_at - 2 * 86400 \
+                     WHERE token_sha256 = 'a-live-token-sha'",
+                    [],
+                )
+                .unwrap();
+        }
+        let st = operator_status(&store).unwrap();
+        assert!(!st.ready, "an expired token is not ready");
+        assert_eq!(st.blocked.as_deref(), Some("token_revoked"));
+        assert!(st.session.is_some(), "the session itself is fine");
     }
 
     /// A failing `write_files` must not leave the operator's token

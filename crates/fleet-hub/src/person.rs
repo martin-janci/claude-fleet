@@ -342,12 +342,16 @@ pub fn run(
             }
             let devices = live_devices(&store, row.id)?;
             let grants = live_grants(&store, row.id)?;
+            let (routines, mission_grants) =
+                store.live_automation_of(row.id).map_err(|e| e.message)?;
             if !force {
                 return Err(format!(
                     "disabling {} (person {}) would revoke {devices} device(s) of theirs and \
-                     {grants} grant(s) made TO them, in one transaction. Their own sessions \
-                     stay private and stay theirs, and the shares they MADE stand. `person \
-                     enable` lifts it later but gives none of it back. Pass --force to do it.",
+                     {grants} grant(s) made TO them, pause {routines} routine(s) of theirs and \
+                     revoke {mission_grants} grant(s) on their missions, in one transaction. \
+                     Their own sessions stay private and stay theirs, and the shares they MADE \
+                     stand. `person enable` lifts it later but gives none of it back. Pass \
+                     --force to do it.",
                     row.name, row.id
                 ));
             }
@@ -364,12 +368,17 @@ pub fn run(
             // rather than a restatement of what was meant to happen.
             let devices_left = live_devices(&store, row.id)?;
             let grants_left = live_grants(&store, row.id)?;
+            let (routines_left, mission_grants_left) =
+                store.live_automation_of(row.id).map_err(|e| e.message)?;
             out::line(&format!(
-                "disabled {} (person {}): {} device(s) revoked, {} grant(s) to them revoked",
+                "disabled {} (person {}): {} device(s) revoked, {} grant(s) to them revoked, \
+                 {} routine(s) paused, {} mission grant(s) revoked",
                 row.name,
                 row.id,
                 devices - devices_left,
-                grants - grants_left
+                grants - grants_left,
+                routines - routines_left,
+                mission_grants - mission_grants_left
             ));
             out::line(
                 "Their own sessions are untouched: still private, still theirs, readable by \

@@ -704,3 +704,37 @@ describe('personArchived (review w10-8/9/10)', () => {
     expect(taskTabCount(page, true, true)).toBe(4);
   });
 });
+
+// An older hub (before the priority sort) refuses the whole read over it:
+// Work reads again in the default order and stops asking for it.
+describe('the priority sort on a hub that lacks it', () => {
+  it('reads again without it, drops it from the Work filters once and says so', async () => {
+    const { workTree, workViewFilters, prioritySortUnsupported, PRIORITY_SORT_UNSUPPORTED } = await import('./work_view');
+    const { toasts, clearToasts } = await import('./toasts');
+    clearToasts();
+    prioritySortUnsupported.set(false);
+    workViewFilters.set({ sort: 'priority' });
+    const page = { tasks: [], groups: [], orgs: [], trackers: [], total: 0 };
+    vi.mocked(invoke).mockImplementation(async (_cmd: string, a?: unknown) => {
+      const f = (a as { args: { filters: { sort?: string } } }).args.filters;
+      if (f.sort === 'priority') throw { code: 'E_INVALID', message: 'filters.sort is activity, updated, key, title or due, not "priority"' };
+      return page;
+    });
+    const r = await workTree({ filters: get(workViewFilters) });
+    expect(r.ok).toBe(true);
+    const sorts = vi.mocked(invoke).mock.calls.map((c) => (c[1] as { args: { filters: { sort?: string } } }).args.filters.sort);
+    expect(sorts).toEqual(['priority', undefined]);
+    expect(get(workViewFilters).sort).toBeUndefined();
+    expect(get(prioritySortUnsupported)).toBe(true);
+    expect(get(toasts).map((t) => t.message)).toEqual([PRIORITY_SORT_UNSUPPORTED]);
+    // Another refusal is only the sentence, not a fallback.
+    vi.mocked(invoke).mockReset();
+    vi.mocked(invoke).mockRejectedValue({ code: 'E_INVALID', message: 'filters.status is wrong' });
+    const r2 = await workTree({ filters: { status: 'open' } });
+    expect(r2.ok).toBe(false);
+    expect(vi.mocked(invoke)).toHaveBeenCalledTimes(1);
+    prioritySortUnsupported.set(false);
+    workViewFilters.set({});
+    clearToasts();
+  });
+});

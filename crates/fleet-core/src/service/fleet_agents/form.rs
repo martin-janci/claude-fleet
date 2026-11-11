@@ -101,6 +101,9 @@ pub struct FormContext {
     /// The secrets each catalog MCP server reads (its `${NAME}`s), by name.
     #[serde(default)]
     pub server_secrets: BTreeMap<String, Vec<String>>,
+    /// The clock an instance's time left is read at (Edit's Hours).
+    #[serde(default)]
+    pub now: i64,
 }
 
 impl FormContext {
@@ -141,6 +144,7 @@ impl FormContext {
         }
         shared.sort();
         Ok(FormContext {
+            now: crate::store::now_unix(),
             hosts: s
                 .list_hosts()
                 .map_err(db)?
@@ -246,6 +250,12 @@ pub fn writes_line(loaded: &Loaded) -> String {
     }
 }
 
+/// `secs` left of an instance, in whole hours rounded up: what Edit shows
+/// in Hours, and what a save with that same answer keeps the end time for.
+pub fn hours_left(secs: i64) -> i64 {
+    (secs + 3599).div_euclid(3600)
+}
+
 /// The current values of `rule` (an instance being edited), by field.
 fn current(rule: Option<&AgentRuleRow>, ctx: &FormContext) -> Map<String, Value> {
     let mut out = Map::new();
@@ -262,6 +272,12 @@ fn current(rule: Option<&AgentRuleRow>, ctx: &FormContext) -> Map<String, Value>
         out.insert(F_PROJECT.into(), p.1.clone().into());
     }
     out.insert(F_LEVEL.into(), r.level.clone().into());
+    // The time it has left, in whole hours rounded up (review R6): left
+    // empty, an Edit's save would take its end away. An ended one gets
+    // none, so its Edit asks for new hours.
+    if let Some(left) = r.expires_at.map(|e| e - ctx.now).filter(|l| *l > 0) {
+        out.insert(F_HOURS.into(), hours_left(left).min(MAX_RULE_HOURS).into());
+    }
     for b in super::bindings::parse(&r.bindings).unwrap_or_default() {
         if let Some(s) = &b.server {
             out.insert(f_store(&b.role), s.clone().into());
@@ -497,13 +513,16 @@ pub fn grant_form(loaded: &Loaded, ctx: &FormContext, rule: Option<&AgentRuleRow
             ]),
             ..field(F_LEVEL, FieldType::Select, "Level")
         }),
-        FormField {
+        with_value(FormField {
             help: Some("The instance ends after this many hours; empty: never.".into()),
+            // An ended instance's Edit asks for new hours, rather than
+            // bringing it back for good on an empty box.
+            required: rule.is_some_and(|r| !r.active_at(ctx.now)),
             min: Some(1.0),
             max: Some(MAX_RULE_HOURS as f64),
             integer: true,
             ..field(F_HOURS, FieldType::Number, "Hours")
-        },
+        }),
     ];
 
     let mut steps = vec![step("What", what), step("Where", where_)];

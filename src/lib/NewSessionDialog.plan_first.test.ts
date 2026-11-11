@@ -119,6 +119,10 @@ describe('Plan first on New session', () => {
     expect(a.with_brief).toBe(true);
     expect(String(a.brief)).toContain('ABC-7');
     expect(String(a.brief)).toContain('Plan first.');
+    // The backend builds the ticket's own brief and puts this after it: the
+    // untouched preview in `brief` is only for a hub older than the field.
+    expect(String(a.plan_first)).toMatch(/^Plan first\./);
+    expect(a.brief_edited).toBe(false);
     await vi.waitFor(() => expect(onCreate).toHaveBeenCalled());
     expect(calls('queue_prompt')).toHaveLength(0);
   });

@@ -205,6 +205,12 @@ export interface StartWorkArgs {
   with_brief?: boolean;
   /** The brief as edited in the preview. */
   brief?: string;
+  /** Plan first: the paragraph the start puts after the brief it builds
+   *  (or after the edited one, with `brief_edited`). `brief` then also
+   *  carries it, for a hub older than this field. */
+  plan_first?: string;
+  /** With `plan_first`: `brief` is the person's edit, not the preview. */
+  brief_edited?: boolean;
   /** The preview only: have a model draft the brief on the planned host
    *  (redesign 6.10). A start never drafts; it sends `brief`. */
   draft_brief?: boolean;

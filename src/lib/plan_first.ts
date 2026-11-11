@@ -44,6 +44,30 @@ export function withPlanFirst(brief: string, today: string): string {
   return b ? `${b}\n\n${planFirstBrief(today)}` : planFirstBrief(today);
 }
 
+/** The brief half of a start's arguments. Without Plan first, `brief` only
+ *  when the person edited it: an untouched preview lets the backend build
+ *  the canonical one (comments, attachments, parent and origin context, the
+ *  org fence). With Plan first, `plan_first` carries the paragraph and the
+ *  backend puts it after the brief it builds, or after the edit
+ *  (`brief_edited`); `brief` still carries the composed text for a hub that
+ *  predates `plan_first`, which reads only it. */
+export function startBriefArgs(o: {
+  briefOn: boolean;
+  planFirstOn: boolean;
+  edited: boolean;
+  /** The text the dialog shows: the edit, or the preview. */
+  text: string;
+  today: string;
+}): { brief?: string; plan_first?: string; brief_edited?: boolean } {
+  if (!o.briefOn) return {};
+  if (!o.planFirstOn) return o.edited ? { brief: o.text } : {};
+  return {
+    brief: withPlanFirst(o.text, o.today),
+    plan_first: planFirstBrief(o.today),
+    brief_edited: o.edited,
+  };
+}
+
 /** "Plan ready", as the instructions ask for it ("the plan is ready" too). */
 const SAYS_READY = /\bplan\s+(is\s+)?ready\b/i;
 

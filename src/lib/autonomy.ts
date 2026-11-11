@@ -10,7 +10,16 @@
 // `autonomy_positions_mirror_the_dial` keeps the rows in step) and
 // pre-approves the operator's calls by it (`guard::operator_must_confirm`):
 // Custom grants what Ask first does.
-import { setFleetSetting, settingBool, settingInt, SETTING_KEYS, type FleetSettings, type SettingKey } from './fleet_settings';
+import {
+  loadFleetSettings,
+  setFleetSetting,
+  settingBool,
+  settingInt,
+  SETTING_DEFAULTS,
+  SETTING_KEYS,
+  type FleetSettings,
+  type SettingKey,
+} from './fleet_settings';
 import { errorText } from './error_copy';
 
 export type AutonomyId = 'ask' | 'brief' | 'autopilot';
@@ -86,11 +95,26 @@ export function autonomyWrites(id: AutonomyId, map: FleetSettings): [SettingKey,
 }
 
 /** Set a position. Answers an error message, or null. A failed write stops
- *  the rest, and says which setting it was. */
-export async function setAutonomy(id: AutonomyId, map: FleetSettings): Promise<string | null> {
-  for (const [key, value] of autonomyWrites(id, map)) {
+ *  the rest, and says which setting it was.
+ *
+ *  The writes are worked out from a fresh read of the hub's settings, not
+ *  from the window's copy: the phone or another desktop may have moved the
+ *  dial since, and a write list taken from a stale copy skips a key the hub
+ *  holds differently (or writes nothing at all) and still reports success.
+ *  What the last answer holds must then read as the position picked;
+ *  otherwise the pick did not land and the person is told. */
+export async function setAutonomy(id: AutonomyId): Promise<string | null> {
+  const read = await loadFleetSettings();
+  if (!read.ok) return `Couldn't read the fleet's settings: ${errorText(read.error)}`;
+  let now: FleetSettings = { ...SETTING_DEFAULTS, ...(read.value ?? {}) };
+  for (const [key, value] of autonomyWrites(id, now)) {
     const r = await setFleetSetting(key, value);
     if (!r.ok) return `Couldn't set ${key}: ${errorText(r.error)}`;
+    if (r.value) now = { ...SETTING_DEFAULTS, ...r.value };
+  }
+  const landed = autonomyOf(now);
+  if (landed !== id) {
+    return `The settings read ${autonomyLabel(landed)} after the change, not ${autonomyLabel(id)}: another device may have changed one meanwhile. Pick again.`;
   }
   return null;
 }

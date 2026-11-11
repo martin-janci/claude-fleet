@@ -134,8 +134,23 @@ impl Store {
         alias: &str,
         emit: fn(&dyn EventBus, &HostRow),
     ) -> Result<(), rusqlite::Error> {
+        self.emit_host_and(alias, emit, false)
+    }
+
+    /// [`Self::emit_host`], then announce again the live sessions whose
+    /// account the write moved into or out of the signed-out verdict
+    /// ([`Self::reemit_after_host_write`]), and with `its_sessions` every
+    /// live session on the host too, each once.
+    fn emit_host_and(
+        &self,
+        alias: &str,
+        emit: fn(&dyn EventBus, &HostRow),
+        its_sessions: bool,
+    ) -> Result<(), rusqlite::Error> {
         if let Some(row) = fetch_host(&self.conn, alias)? {
+            let before = self.uncredentialed_accounts();
             emit(&self.bus, &row);
+            self.reemit_after_host_write(&before, its_sessions.then_some(alias))?;
         }
         Ok(())
     }
@@ -245,6 +260,32 @@ impl Store {
             tmux_version,
             last_pinged_at,
             None,
+        )?;
+        self.emit_host(alias, |bus, row| bus.host_probed(row))
+    }
+
+    /// A probe of `alias` that did not answer: the row goes unreachable
+    /// with `error` (code, message), and keeps its versions — not answering
+    /// says nothing about what is installed there. The account link is
+    /// not touched either.
+    pub fn mark_host_probe_failed(
+        &self,
+        alias: &str,
+        last_pinged_at: i64,
+        error: (&str, &str),
+    ) -> Result<(), rusqlite::Error> {
+        let (claude, tmux) = match self.get_host_row(alias)? {
+            Some(h) => (h.claude_version, h.tmux_version),
+            None => (None, None),
+        };
+        super::reconcile::write_host_probe(
+            &self.conn,
+            alias,
+            false,
+            claude.as_deref(),
+            tmux.as_deref(),
+            last_pinged_at,
+            Some(error),
         )?;
         self.emit_host(alias, |bus, row| bus.host_probed(row))
     }
@@ -478,13 +519,13 @@ impl Store {
             "UPDATE hosts SET signed_out_logins = ?2 WHERE alias = ?1",
             rusqlite::params![alias, json],
         )?;
-        self.emit_host(alias, |bus, row| bus.host_probed(row))?;
         // A session is blocked on its own login (`attention::Facts::
         // signed_out_logins`, review 2026-11-03 F2): the hub stamps
         // `needs_attention` onto session frames only, so the host's live
         // sessions are announced again with the new facts, or a phone keeps
-        // the old stamp on an idle one.
-        self.reemit_live_sessions_on_host(alias)?;
+        // the old stamp on an idle one; and so are those of every account
+        // whose signed-out verdict this login moved, on any host.
+        self.emit_host_and(alias, |bus, row| bus.host_probed(row), true)?;
         Ok(true)
     }
 
@@ -1150,6 +1191,81 @@ impl Store {
 mod tests {
     use super::*;
     use crate::store::test_support::*;
+
+    /// Review of #1118: an account counts as signed out only when every
+    /// login on it, on every reachable and shown host, is. So a login
+    /// signing out (or in) on one host, or a host going hidden, moves the
+    /// sessions of ANOTHER host on that account, and the hub announces them
+    /// again; a write that moves no verdict announces nothing there.
+    #[test]
+    fn a_login_on_one_host_moves_the_accounts_sessions_on_another() {
+        use crate::service::account_usage::{AccountUsageSnapshot, UsageOutcomeKind};
+        use crate::store::SignedOutLogin;
+        let bus = std::sync::Arc::new(crate::events::BroadcastEventBus::new(256));
+        let s = Store::open_with_bus_in_memory(bus.clone()).unwrap();
+        s.upsert_account(&crate::store::AccountRow {
+            uuid: "acc".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        for h in ["w", "nas"] {
+            s.insert_host(h, None).unwrap();
+            s.update_host_probe(h, true, None, None, 1).unwrap();
+        }
+        // nas's own login is the one login fleet knows on `acc`; the
+        // session on w last reported `acc`.
+        s.set_host_account("nas", Some("acc")).unwrap();
+        let id = s
+            .upsert_session("idle", "w", None, None, 1, 1, "running", None)
+            .unwrap();
+        s.conn_for_test()
+            .execute(
+                "UPDATE sessions SET account_uuid = 'acc', claude_status = 'idle' WHERE id = ?1",
+                [id],
+            )
+            .unwrap();
+        let mut snap = AccountUsageSnapshot::never_fetched("acc");
+        snap.status = UsageOutcomeKind::LoginExpired;
+        crate::events::EventBus::account_usage_updated(bus.as_ref(), &snap);
+        let mut rx = bus.subscribe();
+        let mut frames = || {
+            let mut out = Vec::new();
+            while let Ok(m) = rx.try_recv() {
+                if m.name == "session:updated" && m.payload["id"].as_i64() == Some(id) {
+                    out.push(
+                        m.payload["needs_attention"]["reason"]
+                            .as_str()
+                            .map(String::from),
+                    );
+                }
+            }
+            out
+        };
+        let out = |profile: Option<&str>| SignedOutLogin {
+            profile: profile.map(str::to_string),
+            since: 1,
+            checked_at: 1,
+        };
+        s.set_host_signed_out_logins("nas", &[out(None)]).unwrap();
+        assert_eq!(frames(), vec![Some("no_credentials".to_string())]);
+        // Another login on the account, signed in: the verdict lifts.
+        s.set_host_profiles(
+            "nas",
+            &[crate::store::HostProfileRow {
+                name: "work".into(),
+                account_uuid: Some("acc".into()),
+                email: None,
+                credential: None,
+            }],
+        )
+        .unwrap();
+        assert_eq!(frames(), vec![None]);
+        // nas hidden: none of its logins counts, the poll's word stands.
+        s.set_host_hidden("nas", true).unwrap();
+        assert_eq!(frames(), vec![Some("no_credentials".to_string())]);
+        s.set_host_hidden("nas", true).unwrap();
+        assert!(frames().is_empty(), "nothing moved, nothing announced");
+    }
 
     #[test]
     fn host_tokens_upsert_keeps_mode_and_rotates_token() {

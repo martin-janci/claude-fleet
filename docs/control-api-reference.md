@@ -553,7 +553,7 @@ Parameters (* required): `agent`, `confirm_nonce`, `host_alias`*, `name`*, `proj
 
 Create a Claude Code tmux session on a host, in a project (and optional worktree, or a fresh one with new_worktree). Auto-clones the repo on remote hosts.
 
-Access: the master, a paired device or a per-host token · deadline 300 s.
+Access: the master, a paired device or a per-host token · deadline 900 s.
 
 Parameters (* required): `agent`, `base_branch`, `confirm_nonce`, `effort`, `env`, `friendly_name`, `host_alias`*, `kind`, `model`, `name`*, `new_worktree`, `over_limit_ok`, `profile`, `project_id`*, `resume_claude_session_id`, `start_command`, `start_token`, `worktree_id`
 
@@ -561,7 +561,7 @@ Parameters (* required): `agent`, `base_branch`, `confirm_nonce`, `effort`, `env
 
 Create a plain-shell tmux session (an interactive login shell, no Claude Code): new_session's project/worktree plumbing plus a start_command. Steer it with send_prompt and read it with capture_session.
 
-Access: the master, a paired device or a per-host token · deadline 300 s.
+Access: the master, a paired device or a per-host token · deadline 900 s.
 
 Parameters (* required): `base_branch`, `confirm_nonce`, `host_alias`*, `name`*, `new_worktree`, `project_id`*, `start_command`, `worktree_id`
 
@@ -937,7 +937,7 @@ Parameters (* required): `name`*
 
 Truncate a session's transcript into a new conversation: "fork" starts a new session there, "rewind" restarts this one. The original is unchanged. Returns the row (a fork's is the new session).
 
-Access: the master, a paired device or a per-host token · deadline 300 s.
+Access: the master, a paired device or a per-host token · deadline 900 s.
 
 Parameters (* required): `anchor_uuid`, `confirm_nonce`, `mode`*, `new_worktree`, `session_id`*
 
@@ -1003,7 +1003,7 @@ Send a peer-to-peer message (to_session_id or to_addr) to the recipient's inbox;
 
 Access: the master, a paired device or a per-host token · deadline 60 s.
 
-Parameters (* required): `body`*, `client_msg_id`, `deliver`, `from_session_id`*, `kind`, `raw`, `reply_to`, `submit`, `to_addr`, `to_session_id`*, `wake`
+Parameters (* required): `body`*, `client_msg_id`, `confirm_nonce`, `deliver`, `from_session_id`*, `kind`, `raw`, `reply_to`, `submit`, `to_addr`, `to_session_id`*, `wake`
 
 ### `send_prompt`
 
@@ -1391,9 +1391,9 @@ Parameters (* required): `action`*, `auth_kind`, `auto_tidy`, `bound_sees_unassi
 
 Decide a session's work: action link (becomes its primary; key or item_id), reject (sticky 'not this'; or a suggestion's link_id), confirm (link_id), unlink (link_id). Returns the updated row. switch {link_id, key|item_id}: end that link, take the primary. trust_project {project_id, on}. resume {key, mode}: new session on past work. start {key|url|item_id}: new session on a ticket (project_ids: one per repo; parallel: beside a live one); preview_start: where it would land, nothing made. abandon_start {session_id}: undo an unused start. run {item_id, role?}: an attempt at the item in its own session and worktree, tracked as a task. handover {session_id}: ask it to write its hand-off. wrap_up {session_id}: ask it for its task result. summarize {key, link_id}: a Claude-written summary of past work. archive|unarchive (UI only; with no session_id: the ended links of link_id|key|item_id|task_id), unlink {link_id} with no session_id removes an ended link; snooze {days}|never (tidy-up); dismiss {item_id} (reopened); archive_item {item_id|task_id, on?}: a person archives a ticket or task (on: false unarchives); tidy_apply {items}: kills (safe kill when dirty). set_status {item_id, status, status_name?}: a person's status for work with no ticket, or a ticket moved at its tracker; keep_open {item_id} answers close_suggested. edit {item_id, title?, notes?, assignees?, due_at?, priority?, labels?, estimate?, estimate_unit?}: a person edits work with no ticket. attach {item_id, name, mime, data_base64, comment_id?}: a file on a task; attachment_delete {attachment_id}. create {title, parent?, notes?, assignees?, due_at?}: a task or subtask. followup {task_id, index|title}: a result's follow-up as a task. promote {item_id, tracker_id?, container?}: make it a ticket. propose {parent, title, why?}: a subtask a person accepts or rejects {item_id, no session_id}. bucket_add|bucket_remove {bucket_id, item_id}: sprint/release. mission_save {mission, mission_id?, item_id?: root}; mission_state {mission_id, status, ci_override?} (paused reopens a finished one; failing CI on its open or merged PRs refuses completed with E_CI_FAILING unless a person sets ci_override); mission_repo {project_id, role?, on?}; mission_item {item_id, on?, lane?}; mission_delete; mission_import {plan}. dep {item_id, depends_on, on?}; hold {item_id, on?}; propose_tree {parent, tree}; accept_many | undo_accept {item_ids}. done_when {item_id, done_when: [ci[:check] | review | test[:cmd] | person | text]}; verify {item_id, line, ok, note?}: a person's check (line "run evidence" with a note: accept an implement run with no commits or files; "ai check": accept a failed AI check). check {item_id}: an AI check of its finished work; check_setup {project_id, mode: off|ask|auto, command?}: a project's check; worktree_setup {project_id, globs?, command?}: files copied into and a command run in each new worktree (neither: read it). mission_start {mission_id, step?}: take the next steps; retry {item_id, note?}; mission_plan: ask the planner; card_decide {card_id, ok, note?}; mission_grant {mission_id, level, hours?, budget_cents?, until_done?, hosts?, max_parallel?, profile?}; mission_revoke; missions_pause_all. mission_release_note {mission_id}: a drafted release note of a completed mission; today_brief {refresh?, org_id?, since?}: Today's morning brief, drafted only on refresh; mission_triage {mission_id, refresh?}: a stuck mission's card, Jev's proposed outcome and next step (never applied), and with refresh its drafted words; dashboard_summary {prompt, filters?}: a model's answer from those counts. Work view: primary:false links a secondary; expected_* guard (E_CONFLICT). place {task_id|item_id, group, note?, expected_version}: group a task; unplace clears it.
 
-Access: the master, a paired device or a per-host token · confirm-gated (mcp.confirm_destructive) · deadline 900 s.
+Access: the master, a paired device or a per-host token · confirm-gated (mcp.confirm_destructive) · deadline 1500 s.
 
-Parameters (* required): `ack_live`, `action`*, `assignees`, `attachment_id`, `brief`, `bucket_id`, `bucket_op`, `budget_cents`, `card_id`, `ci_override`, `command`, `comment_id`, `confirm_nonce`, `container`, `context`, `data_base64`, `days`, `decisions`, `depends_on`, `done_when`, `draft_brief`, `due_at`, `epic`, `estimate`, `estimate_unit`, `expected_primary`, `expected_version`, `filters`, `force_cross_org`, `globs`, `group`, `host_alias`, `hosts`, `hours`, `impact_token`, `index`, `item_id`, `item_ids`, `items`, `key`, `labels`, `lane`, `level`, `line`, `link_id`, `max_parallel`, `mime`, `mission`, `mission_id`, `mode`, `name`, `note`, `notes`, `ok`, `on`, `org_id`, `parallel`, `parent`, `plan`, `post_to_tracker`, `primary`, `priority`, `profile`, `project_id`, `project_ids`, `prompt`, `refresh`, `role`, `rule`, `rule_id`, `session_id`, `since`, `source`, `status`, `status_name`, `step`, `task_id`, `title`, `tracker_id`, `tree`, `until_done`, `url`, `view`, `view_id`, `why`, `with_brief`, `worktree`
+Parameters (* required): `ack_live`, `action`*, `assignees`, `attachment_id`, `brief`, `brief_edited`, `bucket_id`, `bucket_op`, `budget_cents`, `card_id`, `ci_override`, `command`, `comment_id`, `confirm_nonce`, `container`, `context`, `data_base64`, `days`, `decisions`, `depends_on`, `done_when`, `draft_brief`, `due_at`, `epic`, `estimate`, `estimate_unit`, `expected_primary`, `expected_version`, `filters`, `force_cross_org`, `globs`, `group`, `host_alias`, `hosts`, `hours`, `impact_token`, `index`, `item_id`, `item_ids`, `items`, `key`, `labels`, `lane`, `level`, `line`, `link_id`, `max_parallel`, `mime`, `mission`, `mission_id`, `mode`, `name`, `note`, `notes`, `ok`, `on`, `org_id`, `parallel`, `parent`, `plan`, `plan_first`, `post_to_tracker`, `primary`, `priority`, `profile`, `project_id`, `project_ids`, `prompt`, `refresh`, `role`, `rule`, `rule_id`, `session_id`, `since`, `source`, `status`, `status_name`, `step`, `task_id`, `title`, `tracker_id`, `tree`, `until_done`, `url`, `view`, `view_id`, `why`, `with_brief`, `worktree`
 
 ## Tauri IPC commands
 

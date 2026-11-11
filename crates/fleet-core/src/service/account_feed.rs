@@ -26,6 +26,12 @@ const LOGIN_PREFIX: &str = "l:";
 /// at `now` (`Some(None)` = at the limit, reset unknown), `None` when under
 /// it. With both windows full, the later reset.
 pub fn limit_reset(row: &UsageSnapshotRow, now: i64) -> Option<Option<i64>> {
+    limit_hit(row, now).map(|(at, _)| at)
+}
+
+/// PURE: [`limit_reset`] plus the words for the window that holds the
+/// account ("weekly limit", "5-hour limit"; `None` when no live window says).
+fn limit_hit(row: &UsageSnapshotRow, now: i64) -> Option<(Option<i64>, Option<&'static str>)> {
     if used_pct_of(&row.usage, Some(row.fetched_at), now).is_none_or(|u| u < 100.0) {
         return None;
     }
@@ -34,31 +40,40 @@ pub fn limit_reset(row: &UsageSnapshotRow, now: i64) -> Option<Option<i64>> {
             .filter(|w| w.utilization >= 100.0 && w.live_at(Some(row.fetched_at), len, now))
             .map(|w| w.resets_at)
     };
-    match (
-        full(&row.usage.five_hour, FIVE_HOUR_SECS),
-        full(&row.usage.seven_day, WEEK_SECS),
-    ) {
-        (Some(a), Some(b)) => Some(a.max(b)),
-        (a, b) => a.or(b).or(Some(None)),
-    }
+    Some(
+        match (
+            full(&row.usage.five_hour, FIVE_HOUR_SECS),
+            full(&row.usage.seven_day, WEEK_SECS),
+        ) {
+            (Some(a), Some(b)) => (a.max(b), Some("5-hour and weekly limits")),
+            (Some(a), None) => (a, Some("5-hour limit")),
+            (None, Some(b)) => (b, Some("weekly limit")),
+            (None, None) => (None, None),
+        },
+    )
 }
 
-/// PURE: "14:05 UTC" for a unix second.
-fn clock(at: i64) -> String {
-    let secs = at.rem_euclid(86_400);
-    format!("{:02}:{:02} UTC", secs / 3600, (secs % 3600) / 60)
-}
-
-/// PURE: the condition of an account at its limit.
-pub fn limit_condition(uuid: &str, label: &str, reset: Option<i64>) -> Condition {
+/// PURE: the condition of an account at its limit. `window` names the
+/// window that holds it; the reset carries its day ("Oct 24 11:00 UTC"),
+/// since a weekly reset can be days away and a bare time reads as today.
+pub fn limit_condition(
+    uuid: &str,
+    label: &str,
+    window: Option<&str>,
+    reset: Option<i64>,
+) -> Condition {
     let when = match reset {
-        Some(at) => format!("; it resets at {}", clock(at)),
+        Some(at) => format!(
+            "; it resets {}",
+            crate::service::account_limits::utc_stamp(at)
+        ),
         None => String::new(),
     };
+    let what = window.unwrap_or("usage limit");
     Condition {
         key: format!("{LIMIT_PREFIX}{uuid}:limit"),
         text: format!(
-            "account {label} hit its usage limit{when}: its sessions wait, and a switch moves them to a login with headroom"
+            "account {label} hit its {what}{when}: its sessions wait, and a switch moves them to a login with headroom"
         ),
     }
 }
@@ -128,12 +143,17 @@ fn conditions_over(
     let mut out = Vec::new();
     let accounts: Vec<String> = crate::service::account_usage_poll::distinct_account_uuids(hosts);
     for uuid in &accounts {
-        if let Some(reset) = snaps
+        if let Some((reset, window)) = snaps
             .iter()
             .find(|r| r.account_uuid == *uuid)
-            .and_then(|r| limit_reset(r, now))
+            .and_then(|r| limit_hit(r, now))
         {
-            out.push(limit_condition(uuid, &account_label(s, uuid), reset));
+            out.push(limit_condition(
+                uuid,
+                &account_label(s, uuid),
+                window,
+                reset,
+            ));
         }
     }
     for h in hosts {
@@ -208,12 +228,35 @@ mod tests {
     }
 
     #[test]
+    fn a_weekly_reset_days_away_names_its_day_and_window() {
+        // Tue 2026-10-20 10:00 UTC; the weekly window resets Sat 09:00.
+        let now = 1_792_490_400;
+        let mut r = row(20.0, 100.0, now);
+        let sat = now + 4 * 86_400 - 3_600;
+        r.usage.seven_day.as_mut().unwrap().resets_at = Some(sat);
+        let (reset, window) = limit_hit(&r, now).expect("at its limit");
+        assert_eq!(reset, Some(sat));
+        let c = limit_condition("A", "work", window, reset);
+        assert!(
+            c.text
+                .contains("account work hit its weekly limit; it resets Oct 24 09:00 UTC"),
+            "{}",
+            c.text
+        );
+        let (_, five) = limit_hit(&row(100.0, 20.0, now), now).unwrap();
+        assert_eq!(five, Some("5-hour limit"));
+    }
+
+    #[test]
     fn raised_and_cleared_lines_name_the_account_and_the_login() {
-        let c = limit_condition("A", "me@x", Some(13 * 3600 + 5 * 60));
+        let c = limit_condition("A", "me@x", None, Some(13 * 3600 + 5 * 60));
         assert_eq!(c.key, "a:A:limit");
-        assert!(c
-            .text
-            .contains("me@x hit its usage limit; it resets at 13:05 UTC"));
+        assert!(
+            c.text
+                .contains("me@x hit its usage limit; it resets Jan 1 13:05 UTC"),
+            "{}",
+            c.text
+        );
         let l = login_condition(
             "htz",
             &crate::store::SignedOutLogin {

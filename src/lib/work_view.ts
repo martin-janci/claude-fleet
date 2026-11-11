@@ -22,6 +22,7 @@ import type { ProposalLike, ProposalSource } from './ai_proposal';
 import { derived, get, writable, type Readable } from 'svelte/store';
 import { invokeCmd, type IpcError, type Result } from './result';
 import { readPref, writePref } from './prefs';
+import { push as pushToast } from './toasts';
 import { uncoverWork } from './destination';
 import type { DecisionProposal } from './proposals';
 import { acceptCommandRow, formatCostMicros, sessions, type SessionEvent, type SessionRow } from './sessions';
@@ -942,10 +943,38 @@ export interface WorkTreeQuery {
 /** `archived` always goes on the wire: the hub hides archived tasks only
  *  when asked (`archived: false`), so a phone from before the archive, which
  *  never sends it, keeps seeing them. */
-export function workTree(q: WorkTreeQuery = {}): Promise<Result<WorkTreePage>> {
+export async function workTree(q: WorkTreeQuery = {}): Promise<Result<WorkTreePage>> {
   const n = normalizeFilters(q.filters);
   const filters: WorkTreeFilters = { ...n, archived: n.archived === true };
   if (q.filters?.archived_only === true) filters.archived_only = true;
+  const r = await workTreeOnce(q, filters);
+  if (r.ok || filters.sort !== 'priority' || !refusesSort(r.error)) return r;
+  // A hub from before the priority sort refuses the whole read over it.
+  // Read again in the default order, and take the choice out of the Work
+  // view's filters (which persist) so Work does not open on the refusal.
+  prioritySortUnsupported.set(true);
+  if (get(workViewFilters).sort === 'priority') {
+    workViewFilters.update(({ sort: _s, ...rest }) => rest);
+    pushToast({ kind: 'info', message: PRIORITY_SORT_UNSUPPORTED });
+  }
+  const { sort: _s, ...rest } = filters;
+  return workTreeOnce(q, rest);
+}
+
+/** What Work says when its hub cannot sort by priority. */
+export const PRIORITY_SORT_UNSUPPORTED = 'This hub cannot sort by priority yet.';
+
+/** The hub refused `filters.sort` (an older hub: `filters.sort is activity,
+ *  updated, key, title or due, not "priority"`). */
+function refusesSort(e: IpcError): boolean {
+  return e.code === 'E_INVALID' && /\bfilters\.sort\b/.test(e.message);
+}
+
+/** The serving hub refused the priority sort: the Sort select stops
+ *  offering it until the app restarts. */
+export const prioritySortUnsupported = writable(false);
+
+function workTreeOnce(q: WorkTreeQuery, filters: WorkTreeFilters): Promise<Result<WorkTreePage>> {
   return invokeCmd<WorkTreePage>('work_tree', {
     args: clean({
       filters,

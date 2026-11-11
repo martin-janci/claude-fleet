@@ -4603,7 +4603,9 @@ describe('ConversationPanel attachments', () => {
   async function renderPanelInHubMode() {
     hubStatus.set(REMOTE);
     myPersonId.set(7);
-    await renderPanel({ owner_person_id: 7 });
+    // One of the hub's hosts, not its own machine (`local`, which a paired
+    // desktop refuses: see below).
+    await renderPanel({ owner_person_id: 7, host_alias: 'mac' });
   }
 
   /**
@@ -4671,6 +4673,17 @@ describe('ConversationPanel attachments', () => {
     const btn = screen.getByTestId('conv-attach-button');
     expect(btn.getAttribute('aria-disabled')).toBeNull();
     expect(btn.getAttribute('title')).toBe('Attach files');
+  });
+
+  // Except on the hub's own machine: `local` there would mean this machine
+  // here, and the attachment would be staged in this machine's checkout.
+  it('the attach button is off, saying why, for the hub’s own-machine `local` row', async () => {
+    hubStatus.set(REMOTE);
+    myPersonId.set(7);
+    await renderPanel({ owner_person_id: 7, host_alias: 'local' });
+    const btn = screen.getByTestId('conv-attach-button') as HTMLButtonElement;
+    expect(btn.disabled).toBe(true);
+    expect(btn.getAttribute('title')).toMatch(/hub’s own machine/);
   });
 
   /**
@@ -5273,7 +5286,8 @@ describe('ConversationPanel composer access (multi-user M1)', () => {
     // `visibility` stays `private`: a grant is not a visibility (there is no
     // `shared` on the wire — `access.ts`), and that is exactly the row a
     // watcher holds.
-    const row = session({ owner_person_id: 7, visibility: 'private', ...over });
+    // On one of the hub's hosts: its own machine (`local`) has no tray here.
+    const row = session({ owner_person_id: 7, visibility: 'private', host_alias: 'mac', ...over });
     // In the store as well as in the prop: the OUTBOX re-asks at the send
     // (multi-user M1, F2c) and resolves the row by id out of `$sessions`,
     // which is where the panel's own selection comes from in the app. A row
@@ -5540,7 +5554,7 @@ describe('ConversationPanel composer access (multi-user M1)', () => {
     hubConnection.set({ state: 'offline', attempt: 2, retry_in_secs: 5, reason: 'socket closed' });
     myPersonId.set(3);
     mockedConv.mockReturnValue(ok(conv()));
-    render(ConversationPanel, { session: session({ owner_person_id: 3 }), visible: true });
+    render(ConversationPanel, { session: session({ owner_person_id: 3, host_alias: 'mac' }), visible: true });
     await settle();
     expect(box().disabled).toBe(false);
     expect(attachBtn().disabled).toBe(false);

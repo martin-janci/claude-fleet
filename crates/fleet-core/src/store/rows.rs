@@ -1371,7 +1371,7 @@ pub struct HostRow {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub login_split: Option<bool>,
     /// The last few fingerprints of each Claude login's refresh token on
-    /// the host (migration 227, `loginfp=` of
+    /// the host (migration 228, `loginfp=` of
     /// [`crate::tmux::HOST_HEALTH_SCRIPT`]), to spot one login copied onto
     /// two hosts (`service::login_conflicts::copied`). Empty: never
     /// sampled, or no `/login` file there. Per-field default: an older hub
@@ -1500,7 +1500,7 @@ pub struct HostHealth {
     /// a stale `true` after the host stops reporting a split.
     #[serde(default)]
     pub login_split: Option<bool>,
-    /// Migration 227. Always sent, empty too, for the same reason.
+    /// Migration 228. Always sent, empty too, for the same reason.
     #[serde(default)]
     pub login_fingerprints: Vec<LoginFingerprint>,
 }
@@ -1638,7 +1638,7 @@ pub(super) fn map_host_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostRow>
             .unwrap_or_default(),
         // Migration 203.
         login_split: row.get::<_, Option<i64>>(42)?.map(|v| v != 0),
-        // Migration 227. Same lenient read as `harnesses`.
+        // Migration 228. Same lenient read as `harnesses`.
         login_fingerprints: row
             .get::<_, Option<String>>(43)?
             .and_then(|t| serde_json::from_str::<Vec<LoginFingerprint>>(&t).ok())
@@ -1821,8 +1821,13 @@ impl ClientTokenRow {
     /// `fleet-trusted` (`Store::people_with_realm_role`). The rule
     /// `auth::apply_realm` decides a caller by; for lists and answers that
     /// show a device's trust. `trusted_at` is only its mirror.
+    ///
+    /// The operator's token (`ux-agent`) is never trusted: it is bound to
+    /// the owner, but it is an agent, not one of the owner's devices.
     pub fn trusted_by(&self, trusted_people: &[i64]) -> bool {
-        self.mode == "full" && self.person_id.is_some_and(|p| trusted_people.contains(&p))
+        self.mode == "full"
+            && self.name != crate::service::operator::OPERATOR_CLIENT_NAME
+            && self.person_id.is_some_and(|p| trusted_people.contains(&p))
     }
 }
 

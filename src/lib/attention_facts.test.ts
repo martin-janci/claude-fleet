@@ -79,6 +79,37 @@ describe('attentionFactsFrom (mirrors attention::Facts::from_fleet)', () => {
     expect(classify(idle('nas', 'work'), opts)).toBe('idle');
   });
 
+  it('marks the whole account signed out only when every login on it is (acct-limits-2)', () => {
+    // nas `work` is gone; htz and mac only let their access token lapse.
+    // The all-failed poll stores the worst answer: `login_expired`.
+    const gone = { acc: usage('acc', 'login_expired', 0, 0, 2000) };
+    const nas = host('nas', {
+      claude_profiles: [{ name: 'work', account_uuid: 'acc', email: null }],
+      signed_out_logins: [{ profile: 'work', since: 1, checked_at: 1 }],
+    });
+    const out = { signed_out_logins: [{ profile: null, since: 1, checked_at: 1 }] };
+    const idle = (h: string, profile: string | null) =>
+      session(h, 'a', { claude_status: 'idle', account_uuid: 'acc', claude_profile: profile });
+    let f = attentionFactsFrom([host('htz', { account_uuid: 'acc' }), host('mac', { account_uuid: 'acc' }), nas], gone, 1000);
+    expect(f.uncredentialed_accounts).toEqual([]);
+    expect(classify(idle('htz', null), { idleSecs: 0, now: 1000, facts: f })).toBe('idle');
+    expect(classify(idle('nas', 'work'), { idleSecs: 0, now: 1000, facts: f })).toBe('no_credentials');
+    // A host that is down, or hidden, is not asked.
+    f = attentionFactsFrom(
+      [host('htz', { account_uuid: 'acc', reachable: false }), host('mac', { account_uuid: 'acc', hidden: true }), nas],
+      gone,
+      1000,
+    );
+    expect(f.uncredentialed_accounts).toEqual(['acc']);
+    f = attentionFactsFrom(
+      [host('htz', { account_uuid: 'acc', ...out }), host('mac', { account_uuid: 'acc', ...out }), nas],
+      gone,
+      1000,
+    );
+    expect(f.uncredentialed_accounts).toEqual(['acc']);
+    expect(classify(idle('htz', null), { idleSecs: 0, now: 1000, facts: f })).toBe('no_credentials');
+  });
+
   it('counts a full window with no reset time only while the reading is younger than it (review r05 F7)', () => {
     const now = 1_000_000;
     const full = (fetched_at: number) =>
@@ -111,6 +142,23 @@ describe('the Blocked buckets', () => {
     const facts = { limited_accounts: { acc: { window: 'weekly' as const, resets_at: 2000 } } };
     expect(classify(s, { idleSecs: 0, now: 1999, facts })).toBe('account_limit');
     expect(classify(s, { idleSecs: 0, now: 2000, facts })).toBe('idle');
+  });
+
+  it('never holds a Codex or Hermes row on Claude\'s limit or sign-in', () => {
+    const facts = {
+      limited_accounts: { acc: { window: 'weekly' as const, resets_at: 2000 } },
+      signed_out_logins: [{ host: 'mefistos', profile: null }],
+      down_hosts: [] as string[],
+    };
+    for (const agent of ['hermes', 'codex'] as const) {
+      const s = session('mefistos', 'a', { claude_status: 'idle', account_uuid: 'acc', agent });
+      expect(classify(s, { idleSecs: 0, now: 1000, facts })).toBe('idle');
+      expect(classify(s, { idleSecs: 0, now: 1000, facts: { ...facts, down_hosts: ['mefistos'] } })).toBe(
+        'host_down',
+      );
+    }
+    const claude = session('mefistos', 'a', { claude_status: 'idle', account_uuid: 'acc', agent: 'claude' });
+    expect(classify(claude, { idleSecs: 0, now: 1000, facts })).toBe('account_limit');
   });
 
   it('words each reason line as the Main board does', () => {

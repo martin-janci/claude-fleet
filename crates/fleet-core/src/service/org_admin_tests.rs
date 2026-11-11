@@ -1496,6 +1496,43 @@ fn a_members_row_names_the_devices_not_trusted_yet_and_the_org_counts_them() {
     assert_eq!(ben["untrusted_devices"], serde_json::json!(["ben-phone"]));
 }
 
+/// The operator's token (`ux-agent`) never takes trust, so a member's row
+/// does not name it as waiting for a Trust press that would always fail.
+#[test]
+fn the_operators_token_is_never_a_device_waiting_for_trust() {
+    use crate::service::operator::OPERATOR_CLIENT_NAME;
+    let st = store();
+    device(&st, "ada-laptop", "full");
+    device(&st, OPERATOR_CLIENT_NAME, "full");
+    {
+        let s = st.lock().unwrap();
+        let org = s.add_org("Acme", None, false).unwrap();
+        let ada = s.create_person("ada", None).unwrap();
+        s.set_client_person("ada-laptop", Some(ada.id)).unwrap();
+        s.set_client_person(OPERATOR_CLIENT_NAME, Some(ada.id))
+            .unwrap();
+        s.set_client_trust("ada-laptop", true).unwrap();
+        s.set_org_member(org.id, ada.id, "member", None).unwrap();
+    }
+    let orgs = run(&args("list_orgs"), &st, Me::LOCAL).unwrap();
+    let ada = orgs[0]["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["name"] == "ada")
+        .unwrap()
+        .clone();
+    assert!(
+        ada["devices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d == OPERATOR_CLIENT_NAME),
+        "it is still listed: {ada}"
+    );
+    assert_eq!(ada["untrusted_devices"], serde_json::json!([]), "{ada}");
+}
+
 /// Trust is the person's, so untrusting ANOTHER device of the caller's own
 /// person would untrust the device in hand too: refused like the device in
 /// hand. Another person's device, and trusting, stay allowed.

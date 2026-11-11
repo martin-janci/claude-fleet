@@ -35,8 +35,10 @@
 #                  On Linux without the Tauri system libs (no gtk+-3.0 via
 #                  pkg-config; macOS and Windows need none), it runs a
 #                  headless subset instead:
-#                  fmt, clippy/test/build scoped to fleet-core, fleet-hub,
-#                  fleet-proto and fleet-agent, and cargo deny check.
+#                  fmt, clippy/test over every workspace crate but the
+#                  desktop's (`--workspace --exclude claude-fleet`: fleet-
+#                  updater and fleet-agent-e2e build without Tauri too), the
+#                  hub and agent builds, and cargo deny check.
 #   frontend job:  pnpm install --frozen-lockfile
 #                  pnpm run check
 #                  pnpm run test
@@ -152,8 +154,8 @@ run_rust() {
   if [[ "$(uname -s)" == Linux ]] && ! pkg-config --exists gtk+-3.0 2>/dev/null; then
     echo "ci-local: no Tauri system libs (gtk+-3.0); running the headless subset only" >&2
     step cargo fmt --all --check
-    step cargo clippy -p fleet-core -p fleet-hub -p fleet-proto -p fleet-agent -p fleet-update --all-targets -- -D warnings
-    step cargo test -p fleet-core -p fleet-hub -p fleet-proto -p fleet-agent -p fleet-update
+    step cargo clippy --workspace --exclude claude-fleet --all-targets -- -D warnings
+    step cargo test --workspace --exclude claude-fleet
     step cargo deny check
     step cargo build -p fleet-hub --locked
     step cargo build -p fleet-agent --locked

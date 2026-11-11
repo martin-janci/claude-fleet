@@ -2593,17 +2593,20 @@ pub async fn restart_session(
     )
     .await;
     refuse_unvalidated_agent(&agent)?;
+    // As `new_session`: no relaunch under a login past its daily limit,
+    // the host's own login included (`run_login::refuse_relaunch`).
+    crate::service::run_login::refuse_relaunch(
+        &*lock(store)?,
+        &args.host_alias,
+        &kind,
+        &agent,
+        launch.profile.as_deref(),
+        crate::store::now_unix(),
+    )?;
     if agent == crate::store::AGENT_CLAUDE && kind != "shell" {
-        // As `new_session`: no relaunch under a login past its daily limit,
-        // the host's own login included.
-        crate::service::account_limits::refuse_over_daily_limit(
-            &*lock(store)?,
-            &args.host_alias,
-            launch.profile.as_deref(),
-            crate::store::now_unix(),
-        )?;
         // A switch onto a login the project forbids is refused; a restart
-        // that keeps the login was checked above, under the first lock.
+        // that keeps the login was checked above, under the first lock (and
+        // its daily limit by `run_login::refuse_relaunch` just before).
         if switch.is_some() {
             crate::service::project_accounts::refuse_forbidden(
                 &*lock(store)?,
@@ -3078,6 +3081,12 @@ pub async fn recreate_session(
             "recreate_session",
         )?;
         refuse_unvalidated_agent(&sess.agent)?;
+        // As a start and a restart: a Claude pane is not rebuilt under a
+        // login past its daily limit, nor (a lost row coming back, or a
+        // login signed in to another account since) on an account the
+        // project forbids (`run_login::refuse_relaunch_of`), before anything
+        // is torn down. `restore_host_sessions` recreates through here.
+        crate::service::run_login::refuse_relaunch_of(&s, sess.id, crate::store::now_unix())?;
         let host = s
             .get_host_row(&sess.host_alias)?
             .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, "host not found"))?;
@@ -3089,28 +3098,6 @@ pub async fn recreate_session(
         }
         let cwd_src = cwd_source_for_session(&s, &sess)?;
         let launch = stored_launch(&s, sess.id)?;
-        // As a start and a restart: a Claude pane is not rebuilt under a
-        // login past its daily limit, nor (a lost row coming back, or a
-        // login signed in to another account since) on an account the
-        // project forbids. `restore_host_sessions` recreates through here.
-        if sess.agent == crate::store::AGENT_CLAUDE
-            && sess.kind != "shell"
-            && !crate::store::has_no_pane(&sess.kind)
-        {
-            let now = crate::store::now_unix();
-            crate::service::account_limits::refuse_over_daily_limit(
-                &s,
-                &sess.host_alias,
-                launch.profile.as_deref(),
-                now,
-            )?;
-            crate::service::project_accounts::refuse_forbidden_relaunch(
-                &s,
-                &sess,
-                launch.profile.as_deref(),
-                now,
-            )?;
-        }
         let pane_cmd = recreate_pane_command(
             &sess.kind,
             &sess.agent,

@@ -17,7 +17,7 @@
 //!   never sets Verified.
 
 use super::drafts::{run_draft, Draft, Run};
-use super::{changeable, mission_id, planner_host, Deps};
+use super::{changeable, mission_id, Deps};
 use crate::ipc_error::{lock, IpcError};
 use crate::service::decide::mission_triage::{self, Proposals, Stuck};
 use crate::service::decide::DecideCtx;
@@ -107,18 +107,22 @@ pub async fn triage_with(
     let m = detail.mission;
     let proposals = mission_triage::ask(ctx, &m, &stuck).await;
     let card = if args.refresh == Some(true) {
-        let (host, model) = {
+        let (login, model) = {
             let s = lock(&deps.store)?;
             changeable(&s, scope, id)?;
             (
-                planner_host(&s, &m, None)?,
+                // The planner's chooser: never a login on an account the
+                // mission's projects forbid (`limit::draft_login`).
+                super::limit::draft_login(&s, &m, crate::store::now_unix())?,
                 settings::get_string_for(&s, settings::WORK_SUMMARY_MODEL, m.org_id),
             )
         };
+        let host = login.host;
         let (prompt, from) = card_prompt(&m, &stuck, &proposals);
         let run = Run {
             origin: crate::store::AUX_ORIGIN_TRIAGE,
             host: &host,
+            profile: login.profile.as_deref(),
             model: &model,
             mission_id: Some(m.id),
             org_id: m.org_id,

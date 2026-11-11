@@ -99,10 +99,12 @@ impl FleetTools {
             }
             // A choice that outlives the request it answers (a saved folder
             // rule, auto mode, bypass: `PendingOption::persists`) is a
-            // person's on a full device (HumanLayer plan v2, R0). Control, an
-            // agent, a peer and an answer-only device are refused its digit
-            // and any Enter that could pick it from the cursor.
-            if !presses_folder_rules(&caller) && picks_an_option(key) {
+            // person's on a full device that drives the session (HumanLayer
+            // plan v2, R0). Control, an agent, a peer, a named token, an
+            // answer-only device and a device holding only an `answer` grant
+            // are refused its digit and any Enter that could pick it from the
+            // cursor.
+            if !presses_folder_rules(&caller, drives) && picks_an_option(key) {
                 self.refuse_persistent_choice(&row, key).await?;
             }
             // The client's check and its press, made one step here: the pane
@@ -134,10 +136,17 @@ impl FleetTools {
         // An empty prompt is a bare Enter ([`bypasses_gate`]): the same key
         // as `keys: "Enter"`, so it meets the same rule. Without this an
         // arrow key (never an answer by itself) and then an empty prompt
-        // walked the cursor onto the folder rule and pressed it.
-        if p.prompt.is_empty() && p.submit && !presses_folder_rules(&caller) {
-            self.refuse_persistent_choice(&row, crate::tmux::NamedKey::Enter)
-                .await?;
+        // walked the cursor onto the folder rule and pressed it. Forced text
+        // into a dialog that offers a persistent choice is refused too: its
+        // first character may be that option's digit. Every caller here
+        // reached the row at `drive`.
+        if !presses_folder_rules(&caller, true) {
+            if p.prompt.is_empty() && p.submit {
+                self.refuse_persistent_choice(&row, crate::tmux::NamedKey::Enter)
+                    .await?;
+            } else if p.force {
+                self.refuse_forced_text(&row).await?;
+            }
         }
         let label = caller.label();
         // The key is RESERVED before the send, not written after it. A send
@@ -309,7 +318,10 @@ impl FleetTools {
         // operator, whose `send_prompt` waits on a card this tool has none
         // of), a peer and an answer-only device neither send nor resolve
         // one, refused before the session is even looked up.
-        if action != "list" && !presses_folder_rules(&caller) {
+        // A named `act` token may (it may send prompts too): the stricter
+        // [`presses_folder_rules`] is for a press that saves a lasting
+        // choice, and a note's send types a prompt, never a dialog's option.
+        if action != "list" && !sends_review_notes(&caller) {
             return Err(mcp_err(
                 codes::E_FORBIDDEN,
                 "a person sends and resolves review notes",
@@ -698,6 +710,26 @@ impl FleetTools {
         // none of them may do is reach a caller with only `watch`, and
         // `Reach::Drive` is exactly that refusal.
         self.require_message_recipient(&caller, &p)?;
+        // `deliver` and `wake` type into the recipient's pane: `send_prompt`
+        // by another route, so the operator's waits for a person as its
+        // `send_prompt` does (F21). Asked before the `client_msg_id` is
+        // reserved, so the approved replay (same id) is not E_IN_FLIGHT. A
+        // plain inbox message types nothing and is not asked about here.
+        // Another fleet's address has no local session to pre-approve.
+        if p.deliver || p.wake {
+            let target = if p.to_addr.is_some() {
+                GateTarget::Other
+            } else {
+                GateTarget::Session(p.to_session_id)
+            };
+            self.confirm_gate_target(
+                "send_message",
+                p.confirm_nonce.as_deref(),
+                &message_summary(&p),
+                &caller,
+                target,
+            )?;
+        }
         let body = apply_marker(
             p.body,
             &format!("session {} on {from_host}", p.from_session_id),
@@ -1135,15 +1167,35 @@ pub(crate) fn answer_key_allowed(
     }
 }
 
-/// Whether `caller` may press a dialog option that saves a rule for the
-/// whole folder ([`folder_rule_refused`]): the master token or a person's paired
-/// full device. Never Control (the operator), an agent's host token, a peer,
-/// or an answer-only device.
-fn presses_folder_rules(caller: &Caller) -> bool {
+/// Whether `caller` may send or resolve review notes: anyone but an agent's
+/// host token, Control (the operator), an answer-only device and a peer. A
+/// named `act` token (CI, a script) may, as it may send prompts.
+fn sends_review_notes(caller: &Caller) -> bool {
     caller.host_alias.is_none()
         && !caller.is_operator()
         && caller.mode != TokenMode::Answer
         && caller.mode != TokenMode::Peer
+}
+
+/// Whether `caller` may press a dialog option that saves a rule for the
+/// whole folder, or otherwise outlives the request ([`folder_rule_refused`]):
+/// the master token (an `admin` named token is one), or a person's paired
+/// full device that may `drive` the session (`drives`). Never Control (the
+/// operator), an agent's host token, a peer or updater, a named `read`/`act`
+/// token (CI), an answer-only device, or a full device holding only an
+/// `answer` grant on someone else's session — a rule it saved would outlive
+/// its grant.
+fn presses_folder_rules(caller: &Caller, drives: bool) -> bool {
+    if !drives {
+        return false;
+    }
+    if caller.is_master() {
+        return true;
+    }
+    caller.host_alias.is_none()
+        && caller.client.is_some()
+        && !caller.is_operator()
+        && caller.mode == TokenMode::Full
 }
 
 /// PURE: stamp `mine` and hide a co-grantee. The session's owner (and the
@@ -1164,6 +1216,27 @@ pub(super) fn veil_authors<'a>(
             a.name = "someone else".into();
             a.person_id = None;
         }
+    }
+}
+
+/// PURE: refuse text forced into `dialog` when one of its options outlives
+/// the request ([`crate::service::pane_intel::PendingOption::persists`]): a
+/// typed character may be that option's digit. A multi-select only toggles
+/// boxes.
+fn forced_text_refused(
+    dialog: Option<&crate::service::pane_intel::PendingInput>,
+) -> Result<(), String> {
+    match dialog
+        .filter(|d| !d.multi)
+        .and_then(|d| d.options.iter().find(|o| o.persists))
+    {
+        Some(o) => Err(format!(
+            "the dialog on the pane offers option {}, which answers more than this request \
+             (it saves a rule or stops later prompts); text is not forced into it (answer it \
+             with keys, or a person does on the desktop)",
+            o.n
+        )),
+        None => Ok(()),
     }
 }
 
@@ -1240,6 +1313,16 @@ impl FleetTools {
             .map_err(to_mcp_err)?;
         let blocked = probe.claude_status.as_deref() == Some("blocked");
         folder_rule_refused(key, probe.pending_input.as_ref(), blocked)
+            .map_err(|why| mcp_err(codes::E_FORBIDDEN, why, None))
+    }
+
+    /// Read the pane now and refuse forced text when its dialog offers a
+    /// persistent choice ([`forced_text_refused`]).
+    async fn refuse_forced_text(&self, row: &crate::store::SessionRow) -> Result<(), McpError> {
+        let probe = sessions::session_activity(&self.store, &self.ssh, row.id)
+            .await
+            .map_err(to_mcp_err)?;
+        forced_text_refused(probe.pending_input.as_ref())
             .map_err(|why| mcp_err(codes::E_FORBIDDEN, why, None))
     }
 }
@@ -1432,6 +1515,141 @@ mod answer_key_tests {
         d.multi = true;
         assert_eq!(folder_rule_refused(key("2"), Some(&d), true), Ok(()));
     }
+
+    /// Forced text is refused into a dialog that offers a persistent choice
+    /// anywhere, and allowed into one that does not.
+    #[test]
+    fn forced_text_never_reaches_a_dialog_offering_a_folder_rule() {
+        assert!(super::forced_text_refused(Some(&rule_dialog(1))).is_err());
+        assert_eq!(super::forced_text_refused(Some(&dialog(3))), Ok(()));
+        assert_eq!(super::forced_text_refused(None), Ok(()));
+        let mut multi = rule_dialog(1);
+        multi.multi = true;
+        assert_eq!(super::forced_text_refused(Some(&multi)), Ok(()));
+    }
+
+    /// Who may press a folder rule (sec-access-4 b, c): the master or a
+    /// person's full device that drives the session; never the operator, a
+    /// named `act` token, a host token, an answer-only device, or a full
+    /// device holding only an `answer` grant.
+    #[test]
+    fn only_a_driving_person_or_the_master_presses_folder_rules() {
+        use super::presses_folder_rules;
+        use crate::mcp::auth::{ApiTokenRef, ClientRef, TokenMode};
+        use crate::mcp::Caller;
+        use crate::store::ApiScope;
+        let device = |name: &str, mode: TokenMode| Caller {
+            host_alias: None,
+            client: Some(ClientRef {
+                id: 3,
+                name: name.into(),
+                trusted: true,
+                org_id: None,
+                person_id: Some(1),
+            }),
+            mode,
+            pane: None,
+            is_personal_owner: true,
+            is_fleet_admin: true,
+            api: None,
+        };
+        let token = |scope: ApiScope| Caller {
+            api: Some(ApiTokenRef {
+                id: 1,
+                name: "ci".into(),
+                scope,
+                hosts: None,
+            }),
+            ..Caller::master()
+        };
+        assert!(presses_folder_rules(&Caller::master(), true));
+        assert!(presses_folder_rules(&token(ApiScope::Admin), true));
+        assert!(presses_folder_rules(
+            &device("phone", TokenMode::Full),
+            true
+        ));
+        assert!(
+            !presses_folder_rules(&device("phone", TokenMode::Full), false),
+            "a full device with only an answer grant"
+        );
+        assert!(!presses_folder_rules(&Caller::master(), false));
+        assert!(
+            !presses_folder_rules(&token(ApiScope::Act), true),
+            "a CI act token"
+        );
+        assert!(!presses_folder_rules(&token(ApiScope::Read), true));
+        assert!(!presses_folder_rules(
+            &device(
+                crate::service::operator::OPERATOR_CLIENT_NAME,
+                TokenMode::Full
+            ),
+            true
+        ));
+        assert!(!presses_folder_rules(
+            &device("phone", TokenMode::Answer),
+            true
+        ));
+        assert!(!presses_folder_rules(
+            &device("peer", TokenMode::Peer),
+            true
+        ));
+        let host = Caller {
+            host_alias: Some("mefistos".into()),
+            client: None,
+            ..Caller::master()
+        };
+        assert!(!presses_folder_rules(&host, true));
+    }
+
+    /// Review notes keep main's rule: a named `act` token sends them (it may
+    /// send prompts), though it presses no folder rule; the operator, a host
+    /// token, an answer-only device and a peer do not.
+    #[test]
+    fn a_named_act_token_sends_review_notes() {
+        use super::sends_review_notes;
+        use crate::mcp::auth::{ApiTokenRef, ClientRef, TokenMode};
+        use crate::mcp::Caller;
+        use crate::store::ApiScope;
+        let device = |name: &str, mode: TokenMode| Caller {
+            host_alias: None,
+            client: Some(ClientRef {
+                id: 3,
+                name: name.into(),
+                trusted: true,
+                org_id: None,
+                person_id: Some(1),
+            }),
+            mode,
+            pane: None,
+            is_personal_owner: true,
+            is_fleet_admin: true,
+            api: None,
+        };
+        let act = Caller {
+            api: Some(ApiTokenRef {
+                id: 1,
+                name: "ci".into(),
+                scope: ApiScope::Act,
+                hosts: None,
+            }),
+            ..Caller::master()
+        };
+        assert!(sends_review_notes(&act), "a CI act token");
+        assert!(sends_review_notes(&Caller::master()));
+        assert!(sends_review_notes(&device("phone", TokenMode::Full)));
+        assert!(!sends_review_notes(&device(
+            crate::service::operator::OPERATOR_CLIENT_NAME,
+            TokenMode::Full
+        )));
+        assert!(!sends_review_notes(&device("phone", TokenMode::Answer)));
+        assert!(!sends_review_notes(&device("peer", TokenMode::Peer)));
+        let host = Caller {
+            host_alias: Some("mefistos".into()),
+            client: None,
+            ..Caller::master()
+        };
+        assert!(!sends_review_notes(&host));
+    }
 }
 
 /// Note who typed the prompt whose [`crate::store::prompt_head`] is `head`
@@ -1462,6 +1680,24 @@ pub(super) fn caller_person(s: &crate::store::Store, caller: &Caller) -> Option<
         (None, None, None) => s.personal_owner_id().ok().flatten(),
         _ => None,
     }
+}
+
+/// Bound confirmation summary for `send_message { deliver | wake }`: every
+/// argument that decides what the recipient's pane gets.
+fn message_summary(p: &SendMessageParams) -> String {
+    format!(
+        "from={} to={} to_addr={} kind={} deliver={} submit={} wake={} raw={} reply_to={:?} body={}",
+        p.from_session_id,
+        p.to_session_id,
+        bound_text(p.to_addr.as_deref()),
+        bound_text(p.kind.as_deref()),
+        p.deliver,
+        p.submit,
+        p.wake,
+        p.raw,
+        p.reply_to,
+        bound_text(Some(&p.body)),
+    )
 }
 
 /// Who a review note is from, as the conversation shows it, and their

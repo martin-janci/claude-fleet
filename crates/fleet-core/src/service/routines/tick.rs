@@ -253,11 +253,28 @@ pub async fn fire_with(
                 "on {fb}: the start on {} failed ({})",
                 r.host_alias, e.message
             ));
-            host = fb.to_string();
-            steps.push(trace::placement_step(r, &host, note.as_deref(), now));
-            let started = std::time::Instant::now();
-            spawned = deps.spawn.spawn(session_args(r, &host, None, owner)).await;
-            steps.push(spawn_step(&host, &spawned, started, now));
+            // Held to the same account rules a planned fallback is.
+            let fb_login = lock(&deps.store)
+                .and_then(|s| fallback_login(&s, r, fb, now))
+                .unwrap_or_else(|e| Err(format!("its logins could not be checked: {}", e.message)));
+            match fb_login {
+                Ok(login) => {
+                    host = fb.to_string();
+                    steps.push(trace::placement_step(r, &host, note.as_deref(), now));
+                    let started = std::time::Instant::now();
+                    spawned = deps
+                        .spawn
+                        .spawn(session_args(r, &host, login.as_deref(), owner))
+                        .await;
+                    steps.push(spawn_step(&host, &spawned, started, now));
+                }
+                Err(why) => {
+                    if let Err(e) = &mut spawned {
+                        e.message =
+                            format!("{}; its fallback {fb} cannot take it: {why}", e.message);
+                    }
+                }
+            }
         }
     }
     let s = lock(&deps.store)?;
@@ -490,6 +507,19 @@ pub(super) enum Plan {
 /// reach, with no fallback that can, is tried anyway: the probe may be
 /// stale, and a failed start says why.
 pub(super) fn plan(s: &Store, r: &RoutineRow, now: i64) -> Result<Plan, IpcError> {
+    // A disabled person's routine starts nothing (review R6):
+    // `disable_person` pauses it, and this holds for one turned on since.
+    if let Some(owner) = r.owner_person_id {
+        if s.get_person(owner)?
+            .is_some_and(|p| p.disabled_at.is_some())
+        {
+            return Ok(Plan::Skip(
+                crate::store::PAUSED_OWNER_DISABLED
+                    .trim_start_matches("paused: ")
+                    .into(),
+            ));
+        }
+    }
     if r.overlap == "skip" && s.routine_run_open(r.id)? {
         return Ok(Plan::Skip("its last run is still going".into()));
     }
@@ -525,31 +555,41 @@ pub(super) fn plan(s: &Store, r: &RoutineRow, now: i64) -> Result<Plan, IpcError
     let down = !reachable(&r.host_alias)?;
     // An account the routine's project forbids (`project_accounts`): a
     // routine on its host's own login moves to the allowed login there with
-    // the most headroom under the line ([`freer_login_for_run`], as past the
-    // line below: a spent one would stall the run); one that names its
-    // login, or finds none, skips and says why (its start would be refused).
-    if !down {
-        if let Some(why) = crate::service::project_accounts::forbidden_reason(
+    // the most headroom under the line and within its daily limit
+    // ([`freer_login_for_run`], as past the line below: a spent one would
+    // stall the run); one that names its login, or finds none, skips and
+    // says why (its start would be refused). A fallback host is for a host
+    // that cannot run it, not for a rule that forbids it.
+    let forbidden = if down {
+        None
+    } else {
+        crate::service::project_accounts::forbidden_reason(
             s,
             Some(r.project_id),
             &r.host_alias,
             profile,
             now,
-        )? {
-            if profile.is_none() {
-                if let Some(l) = freer_login_for_run(s, r.project_id, &r.host_alias, "", now)? {
-                    return Ok(Plan::Start {
-                        host: r.host_alias.clone(),
-                        note: Some(format!(
-                            "under profile {l}: the project forbids the account of {}'s own login",
-                            r.host_alias
-                        )),
-                        login: Some(l),
-                    });
-                }
+        )?
+    };
+    if forbidden.is_some() && profile.is_none() {
+        let own = crate::service::account_limits::login_account(s, &r.host_alias, None, now)?;
+        if let Some(own) = own {
+            if let Some(l) =
+                freer_login_for_run(s, r.project_id, &r.host_alias, &own.login.account_uuid, now)?
+            {
+                return Ok(Plan::Start {
+                    host: r.host_alias.clone(),
+                    note: Some(format!(
+                        "under profile {l}: the project forbids the account of {}'s own login",
+                        r.host_alias
+                    )),
+                    login: Some(l),
+                });
             }
-            return Ok(Plan::Skip(why));
         }
+    }
+    if let Some(why) = forbidden {
+        return Ok(Plan::Skip(why));
     }
     // A login fleet knows is signed out answers a run with `/login` (review
     // w02-6): like one past the line, the fallback takes it, else it skips.
@@ -574,28 +614,41 @@ pub(super) fn plan(s: &Store, r: &RoutineRow, now: i64) -> Result<Plan, IpcError
             });
         }
     }
+    let why = match (&over, &signed_out) {
+        (Some(o), _) => Some(o.reason()),
+        (None, Some(why)) => Some(why.clone()),
+        (None, None) => None,
+    };
+    let mut fb_refused = None;
     if let Some(fb) = r.fallback_host.as_deref() {
-        if let Some(login) = fallback_login(s, r, fb, now)? {
-            let why = match (&over, &signed_out) {
-                (Some(o), _) => o.reason(),
-                (None, Some(why)) => why.clone(),
-                (None, None) => format!("{} was unreachable", r.host_alias),
-            };
-            let note = match &login {
-                Some(l) => format!("on {fb} under profile {l}: {why}"),
-                None => format!("on {fb}: {why}"),
-            };
-            return Ok(Plan::Start {
-                host: fb.to_string(),
-                note: Some(note),
-                login,
-            });
+        if reachable(fb)? {
+            match fallback_login(s, r, fb, now)? {
+                Ok(login) => {
+                    let why = why
+                        .clone()
+                        .unwrap_or_else(|| format!("{} was unreachable", r.host_alias));
+                    // A profile the run takes instead of its own is named.
+                    let note = match login.as_deref() {
+                        Some(l) if !l.is_empty() && Some(l) != r.profile.as_deref() => {
+                            format!("on {fb} under profile {l}: {why}")
+                        }
+                        _ => format!("on {fb}: {why}"),
+                    };
+                    return Ok(Plan::Start {
+                        host: fb.to_string(),
+                        note: Some(note),
+                        login,
+                    });
+                }
+                Err(refused) => {
+                    fb_refused = Some(format!("; its fallback {fb} cannot take it: {refused}"))
+                }
+            }
         }
     }
-    Ok(match (over, signed_out) {
-        (Some(o), _) => Plan::Skip(o.reason()),
-        (None, Some(why)) => Plan::Skip(why),
-        (None, None) => Plan::Start {
+    Ok(match why {
+        Some(why) => Plan::Skip(format!("{why}{}", fb_refused.unwrap_or_default())),
+        None => Plan::Start {
             host: r.host_alias.clone(),
             note: None,
             login: None,
@@ -603,33 +656,80 @@ pub(super) fn plan(s: &Store, r: &RoutineRow, now: i64) -> Result<Plan, IpcError
     })
 }
 
-/// The login a run takes on its fallback host `fb`, or `None` when `fb`
-/// cannot take it: unreachable, or its login past the line or signed out.
-/// `Some(None)` is the routine's own login there; `Some(Some(l))` the profile
-/// `l` when the project forbids the account of `fb`'s own login, taken as on
-/// the routine's own host ([`freer_login_for_run`]). A routine that names a
-/// forbidden login, or finds no allowed one with room, does not move there.
+/// The login a run of `r` takes on its fallback host `fb`, held to the
+/// account rules there (`service::run_login`: an account the project
+/// forbids, a spent daily limit, a signed-out login) and to
+/// `accounts.pause_at`; `Ok(None)` is the routine's own, `Ok(Some(""))` the
+/// fallback host's own login. `Err` says why `fb` cannot take it.
+///
+/// A routine that names its login keeps its ACCOUNT, as a moved session
+/// does (`move_session::target_login`): the login on `fb` signed in to the
+/// account its profile is on at home (the same name first, then the host's
+/// own, then any profile), never an empty profile that asks for `/login`
+/// nor another account it did not choose. One on the host's own login takes
+/// the fallback's own login, or the profile there with the most headroom
+/// when that one may not take it.
 fn fallback_login(
     s: &Store,
     r: &RoutineRow,
     fb: &str,
     now: i64,
-) -> Result<Option<Option<String>>, IpcError> {
-    if !s.get_host_row(fb)?.is_some_and(|row| row.reachable) {
-        return Ok(None);
+) -> Result<Result<Option<String>, String>, IpcError> {
+    use crate::service::account_limits::{login_account, over_limit};
+    // Why the login `p` on `fb` may not take the run, if it may not.
+    let refused = |p: Option<&str>| -> Result<Option<String>, IpcError> {
+        if let Some(st) = crate::service::run_login::stop(s, Some(r.project_id), fb, p, now)? {
+            return Ok(Some(st.reason()));
+        }
+        Ok(over_limit(s, fb, p, now)?.map(|o| o.reason()))
+    };
+    let Some(profile) = r.profile.as_deref() else {
+        let Some(why) = refused(None)? else {
+            return Ok(Ok(None));
+        };
+        if let Some(own) = login_account(s, fb, None, now)? {
+            if let Some(l) = freer_login_for_run(s, r.project_id, fb, &own.login.account_uuid, now)?
+            {
+                return Ok(Ok(Some(l)));
+            }
+        }
+        return Ok(Err(why));
+    };
+    let Some(host) = s.get_host_row(fb)? else {
+        return Ok(Err(format!("{fb} is not a known host")));
+    };
+    let account =
+        login_account(s, &r.host_alias, Some(profile), now)?.map(|a| a.login.account_uuid);
+    let names = std::iter::once(Some(profile.to_string()))
+        .chain(std::iter::once(None))
+        .chain(
+            host.claude_profiles
+                .iter()
+                .flatten()
+                .map(|p| Some(p.name.clone())),
+        );
+    let mut last = None;
+    for name in names {
+        let on = login_account(s, fb, name.as_deref(), now)?.map(|a| a.login.account_uuid);
+        let same = match &account {
+            Some(a) => on.as_ref() == Some(a),
+            // Its account is not known at home: the same name, signed in
+            // to a known account there.
+            None => name.as_deref() == Some(profile) && on.is_some(),
+        };
+        if !same {
+            continue;
+        }
+        match refused(name.as_deref())? {
+            Some(why) => last = Some(why),
+            None => {
+                return Ok(Ok(Some(name.unwrap_or_default())));
+            }
+        }
     }
-    let profile = r.profile.as_deref();
-    if crate::service::project_accounts::forbidden_reason(s, Some(r.project_id), fb, profile, now)?
-        .is_some()
-    {
-        return Ok(match profile {
-            None => freer_login_for_run(s, r.project_id, fb, "", now)?.map(Some),
-            Some(_) => None,
-        });
-    }
-    let usable = crate::service::account_limits::over_limit(s, fb, profile, now)?.is_none()
-        && crate::service::login_health::signed_out_reason(s, fb, profile)?.is_none();
-    Ok(usable.then_some(None))
+    Ok(Err(last.unwrap_or_else(|| {
+        format!("profile {profile} is not signed in on {fb}")
+    })))
 }
 
 /// The profile on `host` a run moves to off its host's own login (on
@@ -693,6 +793,23 @@ fn fail(
     close(s, id, "failed", Some(reason), Some(code), cost_micros, now)
 }
 
+/// Whether a run whose turn finished at `ended` still waits for a usage
+/// pass to read that turn: usage is collected, the session can be read (it
+/// has a Claude id and is not lost), no pass has written its cost since the
+/// turn ended, and the wait is under two usage intervals and a tick. A pass
+/// that finds nothing new writes nothing, so the bound closes that run.
+fn cost_pending(s: &Store, row: &SessionRow, ended: i64, now: i64) -> bool {
+    use crate::service::settings;
+    let interval = settings::get_secs(s, settings::USAGE_INTERVAL_SECS);
+    let readable = settings::get_bool(s, settings::USAGE_ENABLED)
+        && interval > 0
+        && row.claude_session_id.is_some()
+        && row.lost_at.is_none();
+    let read_since = row.usage.usage_updated_at.is_some_and(|u| u >= ended);
+    let bound = 2 * i64::try_from(interval).unwrap_or(i64::MAX / 4) + TICK_EVERY.as_secs() as i64;
+    readable && !read_since && now - ended < bound
+}
+
 /// A turn to stop: a run past its budget or time cap (G3.8), `(host, tmux name)`.
 pub type StopTurn = (String, String);
 
@@ -732,10 +849,12 @@ fn settle_run(
     now: i64,
     stop: &mut Vec<StopTurn>,
 ) -> Result<(), IpcError> {
-    let Some(sid) = run.session_id else {
+    if run.session_id.is_none() {
         return fail(s, run.id, E_NO_SESSION, "it started no session", 0, now);
-    };
-    let Some(row) = s.get_session_by_id(sid)? else {
+    }
+    // Its own session only: an id whose row was deleted goes to the next
+    // session started, whose cost and turns are not the run's.
+    let Some(row) = super::run_session(s, run)? else {
         return fail(
             s,
             run.id,
@@ -745,10 +864,40 @@ fn settle_run(
             now,
         );
     };
+    let sid = row.id;
     let cost = row.usage.usage_cost_micros;
     let routine = s.get_routine(run.routine_id)?;
-    if s.session_event_since(sid, "turn_done", 0)? {
-        close(s, run.id, "done", None, None, cost, now)?;
+    let over_budget = |cost: i64| {
+        routine
+            .as_ref()
+            .and_then(|r| r.budget_run_micros)
+            .filter(|b| cost >= *b)
+    };
+    if let Some(ended) = s.first_session_event_at(sid, "turn_done")? {
+        // Its turn is over, but the session's cost moves only on a usage
+        // pass: closed now, the run would keep what the last pass read
+        // before its turn ended. It waits for a pass after the turn, a
+        // bounded while, and the run's budget is checked on what that read.
+        let waiting = cost_pending(s, &row, ended, now);
+        if let Some(budget) = over_budget(cost) {
+            let why = format!(
+                "its session spent {} of the run's {}",
+                usd(cost),
+                usd(budget)
+            );
+            fail(s, run.id, E_RUN_BUDGET, &why, cost, now)?;
+            s.set_routine_enabled(
+                run.routine_id,
+                false,
+                Some(&format!("paused: a run went over its budget ({why})")),
+                None,
+            )?;
+            // Its turn is over: nothing to stop.
+        } else if !waiting {
+            close(s, run.id, "done", None, None, cost, now)?;
+        } else if cost != run.cost_micros {
+            s.set_routine_run_cost(run.id, cost)?;
+        }
     } else if s.session_event_since(sid, "stop_failure", 0)? {
         let detail = s
             .newest_session_event_of(sid, &["stop_failure"])?
@@ -760,11 +909,7 @@ fn settle_run(
         fail(s, run.id, turn_code(detail.as_deref()), &why, cost, now)?;
     } else if row.lost_at.is_some() {
         fail(s, run.id, E_SESSION_LOST, "its session was lost", cost, now)?;
-    } else if let Some(budget) = routine
-        .as_ref()
-        .and_then(|r| r.budget_run_micros)
-        .filter(|b| cost >= *b)
-    {
+    } else if let Some(budget) = over_budget(cost) {
         let why = format!(
             "its session spent {} of the run's {}",
             usd(cost),

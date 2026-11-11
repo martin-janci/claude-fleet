@@ -108,7 +108,7 @@ export interface HostRow {
    *  other out (`service::login_conflicts`). Absent when not macOS, unknown, or
    *  from an older hub. */
   login_split?: boolean | null;
-  /** Migration 227: the last few fingerprints of each Claude login's refresh
+  /** Migration 228: the last few fingerprints of each Claude login's refresh
    *  token, to spot one login copied onto two hosts (`login_conflicts::copied`).
    *  Absent when none, and from an older hub. */
   login_fingerprints?: LoginFingerprint[];
@@ -165,7 +165,7 @@ export interface HostHealth {
   cpu_saturated?: boolean;
   /** Migration 203; absent from an older hub's ping and off macOS. */
   login_split?: boolean | null;
-  /** Migration 227; absent from an older hub's ping. */
+  /** Migration 228; absent from an older hub's ping. */
   login_fingerprints?: LoginFingerprint[];
 }
 

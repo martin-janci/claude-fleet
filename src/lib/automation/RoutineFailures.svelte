@@ -16,6 +16,7 @@
     openRoutines,
     pauseRoutine,
     retryRoutine,
+    runNowNote,
     runWords,
     type FailingRoutine,
   } from '../routines';
@@ -38,7 +39,7 @@
     const r = await retryRoutine(f);
     setBusy(f.routine.id, false);
     if (!r.ok) pushError(r.error, `Retry ${f.routine.name} failed`);
-    else push({ kind: 'success', message: `${f.routine.name} is running again` });
+    else push(runNowNote(f.routine.name, r.value, `${f.routine.name} is running again`));
   }
 
   // A retry fix goes through `retry`, so a refusal shows (fixRoutine's own is silent).

@@ -281,8 +281,8 @@ pub async fn send(
             Err(e)
         }
         Err(e) => {
-            // Not typed and not kept: the send never happened, so a retry
-            // with the same id must be able to make it.
+            // Any other error typed nothing: the batch goes, and the same id
+            // may retry.
             if let Ok(s) = lock(store) {
                 let _ = s.delete_review_note_batch(args.session_id, &args.client_msg_id);
             }
@@ -526,6 +526,13 @@ mod tests {
         let ssh = Arc::new(SshClient::new());
         // The marker step stands in for the typing: an error that may have
         // run keeps the batch, so a retry with the same id types nothing.
+        for code in [
+            codes::E_SSH_TIMEOUT,
+            codes::E_TIMEOUT,
+            codes::E_AGENT_PROTOCOL,
+        ] {
+            assert!(codes::may_have_run(code), "{code}");
+        }
         let err = send(
             one_note("rn-2", sid),
             "Ada",

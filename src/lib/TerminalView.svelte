@@ -37,7 +37,7 @@
   import { voiceState, releaseVoice, followSession, abandonFollow } from './voice';
   import { fitCells } from './terminal_size';
   import { hubStatus, ownsTheFleet } from './hub';
-  import { accessOf, noAttachReason } from './access';
+  import { accessOf, noAttachReason, pairedLocalRefusal } from './access';
   import { sessionBlocked } from './share';
   import { matchShortcut } from './shortcuts';
   import { destination, goTo } from './destination';
@@ -179,9 +179,12 @@
   // Another fleet's session: that hub owns the question, and this pane only
   // ever opens this machine's own ssh to it, as the primary's own pane does. The
   // refusal below covers the names that would mean this machine.
-  const termAccess = $derived(away ? (awayRefusal ? null : 'own') : $accessOf(tsel));
+  /** A paired desktop and the hub's own-machine row (`local`, a Windows
+   *  `wsl-…`): the attach would resolve that alias on THIS machine. */
+  const hubLocalRefusal = $derived(!away && tsel ? pairedLocalRefusal(tsel, $hubStatus) : null);
+  const termAccess = $derived(away ? (awayRefusal ? null : 'own') : hubLocalRefusal ? null : $accessOf(tsel));
   const termOwned = $derived(termAccess === 'own');
-  const termNoAttachWhy = $derived(awayRefusal ?? noAttachReason(termAccess, $hubStatus));
+  const termNoAttachWhy = $derived(awayRefusal ?? hubLocalRefusal ?? noAttachReason(termAccess, $hubStatus));
 
   // ── Shell terminals (step 5.3) ──────────────────────────────────────
   // The strip of the session's terminals, beside the agent's own pane.
@@ -330,7 +333,12 @@
     seenRequest = req.seq;
     untrack(() => {
       if (req.to === 'agent') selectTab(null);
-      else if (req.to === 'new') void newTerminal();
+      else if (req.to === 'new') {
+        // Another fleet's session covers this pane, as the chord handler
+        // checks: a shell opened here would open unseen, on this window's
+        // own session.
+        if (!get(selectedFleetSession)) void newTerminal();
+      }
       else if (req.n != null && listed && shells.includes(req.n)) selectTab(req.n);
       else {
         // Before the list: the terminal it names is the one showShells

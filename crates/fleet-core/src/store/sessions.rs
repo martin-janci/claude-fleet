@@ -912,9 +912,13 @@ impl Store {
     /// with. A shell row's agent follows its kind instead
     /// ([`Store::set_session_kind`]). The column's `CHECK` refuses a value
     /// outside [`crate::store::AGENTS`].
+    /// Only a Claude pane bills a Claude account, so a row of another
+    /// agent drops the account link it was first given.
     pub fn set_session_agent(&self, id: i64, agent: &str) -> Result<(), rusqlite::Error> {
         self.conn.execute(
-            "UPDATE sessions SET agent = ?1 WHERE id = ?2",
+            "UPDATE sessions SET agent = ?1, \
+               account_uuid = CASE WHEN ?1 IN ('claude', 'shell') THEN account_uuid ELSE NULL END \
+             WHERE id = ?2",
             rusqlite::params![agent, id],
         )?;
         self.emit_session(id)?;
@@ -1562,14 +1566,63 @@ impl Store {
     /// [`Self::reemit_live_sessions_on_account`] does for an account: its
     /// signed-out logins changed. Returns how many.
     pub fn reemit_live_sessions_on_host(&self, host_alias: &str) -> Result<usize, rusqlite::Error> {
-        let ids: Vec<i64> = self
-            .conn
+        let ids = self.live_session_ids_on_host(host_alias)?;
+        for &id in &ids {
+            self.emit_session(id)?;
+        }
+        Ok(ids.len())
+    }
+
+    fn live_session_ids_on_host(&self, host_alias: &str) -> Result<Vec<i64>, rusqlite::Error> {
+        self.conn
             .prepare_cached(
                 "SELECT id FROM sessions WHERE host_alias = ?1 AND status != 'ghost' \
                  AND lost_at IS NULL AND kind NOT IN ('shell', 'external') ORDER BY id",
             )?
             .query_map([host_alias], |r| r.get(0))?
-            .collect::<Result<_, _>>()?;
+            .collect()
+    }
+
+    /// The accounts this store's bus counts without a login
+    /// ([`crate::service::attention::Facts::uncredentialed_accounts`]): read
+    /// before a host write, for [`Self::reemit_after_host_write`]. Empty off
+    /// the hub.
+    pub(super) fn uncredentialed_accounts(&self) -> std::collections::BTreeSet<String> {
+        self.attention_facts().uncredentialed_accounts
+    }
+
+    /// After a host write the bus has seen: announce again every live
+    /// session on an account that moved into or out of
+    /// `uncredentialed_accounts` (`before`, from
+    /// [`Self::uncredentialed_accounts`]), and, with `host`, every live
+    /// session on that host; each session once. An account counts as signed
+    /// out only when every login on it, on every reachable and shown host,
+    /// is (`attention::every_login_signed_out`), so one host's signed-out
+    /// logins, reachability or hidden flag moves the sessions of OTHER hosts
+    /// on the account; the hub stamps `needs_attention` onto session frames
+    /// only, and without this a phone kept the old stamp on an idle one
+    /// (review of #1118). Returns how many.
+    pub(super) fn reemit_after_host_write(
+        &self,
+        before: &std::collections::BTreeSet<String>,
+        host: Option<&str>,
+    ) -> Result<usize, rusqlite::Error> {
+        let after = self.uncredentialed_accounts();
+        let mut ids = std::collections::BTreeSet::new();
+        if let Some(h) = host {
+            ids.extend(self.live_session_ids_on_host(h)?);
+        }
+        for account in before.symmetric_difference(&after) {
+            let on: Vec<i64> = self
+                .conn
+                .prepare_cached(
+                    "SELECT id FROM sessions WHERE account_uuid = ?1 AND status != 'ghost' \
+                     AND lost_at IS NULL AND kind NOT IN ('shell', 'external')",
+                )?
+                .query_map([account], |r| r.get(0))?
+                .collect::<Result<_, _>>()?;
+            ids.extend(on);
+        }
         for &id in &ids {
             self.emit_session(id)?;
         }
@@ -2651,7 +2704,7 @@ impl Store {
         let mut st = self.conn.prepare_cached(
             "SELECT account_uuid, COUNT(*) FROM sessions \
              WHERE status = 'running' AND lost_at IS NULL \
-               AND account_uuid IS NOT NULL AND kind != 'shell' \
+               AND account_uuid IS NOT NULL AND kind != 'shell' AND agent = 'claude' \
              GROUP BY account_uuid",
         )?;
         let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, u32>(1)?)))?;
@@ -2669,7 +2722,7 @@ impl Store {
         let mut st = self.conn.prepare_cached(
             "SELECT host_alias, claude_profile, COUNT(*) FROM sessions \
              WHERE status = 'running' AND lost_at IS NULL \
-               AND account_uuid IS NULL AND kind != 'shell' \
+               AND account_uuid IS NULL AND kind != 'shell' AND agent = 'claude' \
              GROUP BY host_alias, claude_profile",
         )?;
         let rows = st.query_map([], |r| {
@@ -2702,6 +2755,55 @@ mod tests {
         s.upsert_host("local").unwrap();
         s.upsert_session(name, "local", None, None, 0, 0, "running", None)
             .unwrap()
+    }
+
+    /// Only a Claude pane bills a Claude account: a Codex or Hermes row
+    /// drops the account it was first given, and placement charges no
+    /// login for it.
+    #[test]
+    fn a_row_of_another_agent_takes_no_claude_account() {
+        let s = store();
+        s.upsert_account(&crate::store::AccountRow {
+            uuid: "acct".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        let claude = s
+            .upsert_session("c", "local", None, None, 0, 0, "running", Some("acct"))
+            .unwrap();
+        let hermes = s
+            .upsert_session("h", "local", None, None, 0, 0, "running", Some("acct"))
+            .unwrap();
+        s.upsert_session("x", "local", None, None, 0, 0, "running", None)
+            .unwrap();
+        let codex = s
+            .upsert_session("y", "local", None, None, 0, 0, "running", None)
+            .unwrap();
+        assert_eq!(s.live_sessions_per_account().unwrap()["acct"], 2);
+        assert_eq!(
+            s.live_unlinked_sessions_per_login().unwrap()[&("local".to_string(), None)],
+            2
+        );
+        s.set_session_agent(hermes, "hermes").unwrap();
+        s.set_session_agent(codex, "codex").unwrap();
+        assert_eq!(
+            s.get_session_by_id(hermes).unwrap().unwrap().account_uuid,
+            None
+        );
+        assert_eq!(
+            s.get_session_by_id(claude)
+                .unwrap()
+                .unwrap()
+                .account_uuid
+                .as_deref(),
+            Some("acct")
+        );
+        assert_eq!(s.live_sessions_per_account().unwrap()["acct"], 1);
+        assert_eq!(
+            s.live_unlinked_sessions_per_login().unwrap()[&("local".to_string(), None)],
+            1,
+            "the Codex row is not charged to the host's own login"
+        );
     }
 
     /// `find_sessions_by_tmux_name` is a direct `WHERE tmux_name=?` (plus an

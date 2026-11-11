@@ -156,7 +156,10 @@ impl FleetTools {
                 id.escape_debug()
             ),
         );
-        if caller.host_alias.is_some() {
+        // An agent never answers: a host's own Claude, Control (whose token
+        // is bound to the owner, so `drive` below would let it tick a
+        // consent box in the person's place) and a peer hub alike.
+        if caller.work_decider() == crate::store::Decider::Agent {
             return Err(mcp_err(
                 codes::E_FORBIDDEN,
                 "an agent never answers a form; a person does",

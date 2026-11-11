@@ -1787,17 +1787,22 @@ fn login_account_on<'a>(host: &'a crate::store::HostRow, profile: Option<&str>) 
 /// PURE: the login on `target` a moved session runs under (review w02-5):
 /// the same name when it is signed in to the same `account` there; else
 /// the target's signed-in login on that account (its own first); else the
-/// name it had, when the target has a signed-in login of that name; else
-/// the target's own login, which is at least signed in, rather than an
-/// empty profile that asks for `/login`.
+/// name it had, when the target has a signed-in login of that name. A login
+/// `may` refuses (the project forbids its account, its daily limit is
+/// spent: `service::run_login`) is passed over at every step. `None` when
+/// no login fits: the caller picks the best signed-in, allowed login on the
+/// target ([`target_login_in`]), or refuses, rather than an empty profile
+/// that asks for `/login` or a login on a forbidden account.
 pub(crate) fn target_login(
     target: &crate::store::HostRow,
     profile: Option<&str>,
     account: &str,
-) -> Option<String> {
-    let usable = |p: Option<&str>| !crate::service::login_health::is_signed_out(target, p);
+    may: impl Fn(Option<&str>) -> bool,
+) -> Option<Option<String>> {
+    let usable =
+        |p: Option<&str>| !crate::service::login_health::is_signed_out(target, p) && may(p);
     if login_account_on(target, profile) == Some(account) && usable(profile) {
-        return profile.map(str::to_string);
+        return Some(profile.map(str::to_string));
     }
     let own = std::iter::once(None);
     let profiles = target
@@ -1809,12 +1814,80 @@ pub(crate) fn target_login(
         .chain(profiles)
         .find(|p| login_account_on(target, *p) == Some(account) && usable(*p))
     {
-        return p.map(str::to_string);
+        return Some(p.map(str::to_string));
     }
     if login_account_on(target, profile).is_some() && usable(profile) {
-        return profile.map(str::to_string);
+        return Some(profile.map(str::to_string));
     }
     None
+}
+
+/// The login a session in `project_id` that runs under `profile` on
+/// `account` (when known) resumes under on `target`, held to the account
+/// rules (`service::run_login`): [`target_login`]'s chain with every login
+/// the project forbids, whose daily limit is spent or that is signed out
+/// passed over; else the target's own login, or the signed-in, allowed
+/// login there with the most headroom
+/// (`account_limits::login_with_headroom_for`). `Err` (`E_ACCOUNT_FORBIDDEN`
+/// with `suggested_profile`, `E_ACCOUNT_LIMIT`, or the signed-out reason)
+/// when none may take it, before anything is carried.
+///
+/// A session whose own account its project forbids, and which a login on
+/// the target would carry there, is refused rather than re-billed on
+/// another account (accounts review finding 3).
+pub(crate) fn target_login_in(
+    s: &Store,
+    project_id: i64,
+    target: &str,
+    profile: Option<&str>,
+    account: Option<&str>,
+    now: i64,
+) -> Result<Option<String>, IpcError> {
+    use crate::service::run_login;
+    let Some(dst) = s.get_host_row(target)? else {
+        return Ok(profile.map(str::to_string));
+    };
+    let Some(account) = account else {
+        // The session's account is unknown: it keeps its login name, held to
+        // the rules like any start.
+        run_login::refuse(s, Some(project_id), target, profile, now)?;
+        return Ok(profile.map(str::to_string));
+    };
+    // The account travels and is forbidden: refused, not re-billed.
+    let forbidden =
+        crate::service::project_accounts::forbidden_accounts_on(s, Some(project_id), target)?;
+    if forbidden.iter().any(|a| a == account) {
+        let carries = |p: Option<&str>| login_account_on(&dst, p) == Some(account);
+        if let Some(carried) = target_login(&dst, profile, account, carries) {
+            crate::service::project_accounts::refuse_forbidden(
+                s,
+                Some(project_id),
+                target,
+                carried.as_deref(),
+                now,
+            )?;
+        }
+    }
+    // Every login on the target, and whether it may take the work.
+    let mut allowed: Vec<(Option<String>, bool)> = Vec::new();
+    let names = std::iter::once(None).chain(
+        dst.claude_profiles
+            .iter()
+            .flatten()
+            .map(|x| Some(x.name.clone())),
+    );
+    for login in names.chain(std::iter::once(profile.map(str::to_string))) {
+        if allowed.iter().any(|(l, _)| *l == login) {
+            continue;
+        }
+        let ok = run_login::stop(s, Some(project_id), target, login.as_deref(), now)?.is_none();
+        allowed.push((login, ok));
+    }
+    let may = |p: Option<&str>| allowed.iter().any(|(l, ok)| *ok && l.as_deref() == p);
+    match target_login(&dst, profile, account, may) {
+        Some(login) => Ok(login),
+        None => run_login::choose(s, Some(project_id), target, None, now),
+    }
 }
 
 fn snapshot(s: &Store, args: &MoveSessionArgs) -> Result<Snapshot, IpcError> {
@@ -1975,50 +2048,24 @@ fn snapshot(s: &Store, args: &MoveSessionArgs) -> Result<Snapshot, IpcError> {
     // The login travels by ACCOUNT, not by name (review w02-5): a profile
     // name the target has on another account, or not at all, would bill
     // another account or open `/login` there.
-    if let (Some(src), Some(dst)) = (s.get_host_row(&row.host_alias)?, s.get_host_row(target)?) {
-        let account = row
-            .account_uuid
-            .clone()
-            .or_else(|| login_account_on(&src, launch.profile.as_deref()).map(str::to_string));
-        if let Some(account) = account.as_deref() {
-            launch.profile = target_login(&dst, launch.profile.as_deref(), account);
-        }
-        // The target login is held to the project's forbidden accounts
-        // (`service::project_accounts`), here in the snapshot so the dry run
-        // refuses too and a refused move has touched neither host. When the
-        // account did not travel, the conversation lands on whatever login
-        // the target has: take an allowed one if that one is forbidden.
-        // When it did travel, the move is refused rather than re-billed.
-        let now = crate::store::now_unix();
-        let traveled = account
-            .as_deref()
-            .is_some_and(|a| login_account_on(&dst, launch.profile.as_deref()) == Some(a));
-        if !traveled
-            && crate::service::project_accounts::forbidden_reason(
-                s,
-                Some(project_id),
-                target,
-                launch.profile.as_deref(),
-                now,
-            )?
-            .is_some()
-        {
-            launch.profile = crate::service::project_accounts::login_for(
-                s,
-                Some(project_id),
-                target,
-                launch.profile.as_deref(),
-                now,
-            )?;
-        }
-        crate::service::project_accounts::refuse_forbidden(
-            s,
-            Some(project_id),
-            target,
-            launch.profile.as_deref(),
-            now,
-        )?;
-    }
+    // Nor does it land on a login the account rules keep off the project
+    // (`service::run_login`): refused here, in the snapshot, so the dry run
+    // refuses too and a refused move has touched neither host, and again
+    // when a deferred move runs.
+    let account = row.account_uuid.clone().or_else(|| {
+        s.get_host_row(&row.host_alias)
+            .ok()
+            .flatten()
+            .and_then(|src| login_account_on(&src, launch.profile.as_deref()).map(str::to_string))
+    });
+    launch.profile = target_login_in(
+        s,
+        project_id,
+        target,
+        launch.profile.as_deref(),
+        account.as_deref(),
+        crate::store::now_unix(),
+    )?;
     Ok(Snapshot {
         launch,
         claude_id,
@@ -3667,21 +3714,30 @@ mod tests {
         s.set_host_profiles("htz", &[profile("work", "acct-c"), profile("ci", "acct-a")])
             .unwrap();
         let htz = || s.get_host_row("htz").unwrap().unwrap();
+        let any = |_: Option<&str>| true;
         // Same name, other account; a login on the account exists: that one.
         assert_eq!(
-            target_login(&htz(), Some("work"), "acct-a").as_deref(),
-            Some("ci")
+            target_login(&htz(), Some("work"), "acct-a", any),
+            Some(Some("ci".into()))
         );
         // The host's own login is on the account.
-        assert_eq!(target_login(&htz(), Some("missing"), "acct-b"), None);
+        assert_eq!(
+            target_login(&htz(), Some("missing"), "acct-b", any),
+            Some(None)
+        );
         // Same name, same account: kept.
         assert_eq!(
-            target_login(&htz(), Some("work"), "acct-c").as_deref(),
-            Some("work")
+            target_login(&htz(), Some("work"), "acct-c", any),
+            Some(Some("work".into()))
         );
-        // No login on the account and no such profile: the host's own, not
-        // an empty profile at `/login`.
-        assert_eq!(target_login(&htz(), Some("missing"), "acct-z"), None);
+        // No login on the account and no such profile: nothing in the
+        // chain; the caller picks a signed-in, allowed login.
+        assert_eq!(target_login(&htz(), Some("missing"), "acct-z", any), None);
+        // A login `may` refuses is passed over.
+        assert_eq!(
+            target_login(&htz(), Some("work"), "acct-a", |p| p != Some("ci")),
+            Some(Some("work".into()))
+        );
         // A signed-out login on the account is passed over.
         s.set_host_signed_out_logins(
             "htz",
@@ -3693,8 +3749,88 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            target_login(&htz(), Some("work"), "acct-a").as_deref(),
-            Some("work")
+            target_login(&htz(), Some("work"), "acct-a", any),
+            Some(Some("work".into()))
+        );
+    }
+
+    /// Accounts review (acct-paths-6, tests-ci-docs-2): a move never lands
+    /// on a login its project forbids, on a spent daily limit or on a
+    /// signed-out login. It takes a signed-in, allowed login on the target,
+    /// else it is refused before anything is carried.
+    #[test]
+    fn a_moved_login_holds_to_the_account_rules() {
+        use crate::service::account_limits::seed_usage;
+        use crate::store::SignedOutLogin;
+        let now = 1_000;
+        // htz: its own login on personal@ (`acct-own`), profile `max2` on
+        // `acct-max`. The session ran on mac under `work` (`acct-work`),
+        // which htz has no login on.
+        let s = Store::open_in_memory().unwrap();
+        seed_usage(&s, "htz", None, "acct-own", 20.0, now);
+        seed_usage(&s, "htz", Some("max2"), "acct-max", 30.0, now);
+        seed_usage(&s, "mac", Some("work"), "acct-work", 10.0, now);
+        let p = s
+            .upsert_project("salestwins", "api", "/srv/st/api")
+            .unwrap();
+        let pick = |profile: Option<&str>, account: &str| {
+            target_login_in(&s, p, "htz", profile, Some(account), now)
+        };
+        // Nothing forbidden: the host's own login, as before.
+        assert_eq!(pick(Some("work"), "acct-work").unwrap(), None);
+        // The host's own account is forbidden: the allowed `max2`.
+        s.set_account_forbidden_projects("acct-own", &[p]).unwrap();
+        assert_eq!(
+            pick(Some("work"), "acct-work").unwrap().as_deref(),
+            Some("max2")
+        );
+        // A same-name profile on a forbidden account is passed over too.
+        seed_usage(&s, "htz", Some("work"), "acct-own", 5.0, now);
+        assert_eq!(
+            pick(Some("work"), "acct-work").unwrap().as_deref(),
+            Some("max2")
+        );
+        // Nothing allowed left: refused, naming no login.
+        s.set_account_forbidden_projects("acct-max", &[p]).unwrap();
+        let e = pick(Some("work"), "acct-work").unwrap_err();
+        assert_eq!(e.code, codes::E_ACCOUNT_FORBIDDEN, "{}", e.message);
+        // A session already on the forbidden account, which the target
+        // has a login on, is refused rather than re-billed elsewhere
+        // (accounts review finding 3).
+        let e = pick(Some("max2"), "acct-max").unwrap_err();
+        assert_eq!(e.code, codes::E_ACCOUNT_FORBIDDEN, "{}", e.message);
+
+        // Signed out: the host's own login gives way to a signed-in one.
+        let s = Store::open_in_memory().unwrap();
+        seed_usage(&s, "htz", None, "acct-own", 20.0, now);
+        seed_usage(&s, "htz", Some("max2"), "acct-max", 30.0, now);
+        let p = s
+            .upsert_project("salestwins", "api", "/srv/st/api")
+            .unwrap();
+        s.set_host_signed_out_logins(
+            "htz",
+            &[SignedOutLogin {
+                profile: None,
+                since: 1,
+                checked_at: 1,
+            }],
+        )
+        .unwrap();
+        assert_eq!(
+            target_login_in(&s, p, "htz", Some("work"), Some("acct-work"), now)
+                .unwrap()
+                .as_deref(),
+            Some("max2")
+        );
+        // A spent daily limit on the account the target holds: passed over
+        // for a login with room.
+        s.set_host_signed_out_logins("htz", &[]).unwrap();
+        crate::service::account_limits::seed_daily_spend(&s, "acct-own", 1.0, 2.0, now);
+        assert_eq!(
+            target_login_in(&s, p, "htz", None, Some("acct-own"), now)
+                .unwrap()
+                .as_deref(),
+            Some("max2")
         );
     }
 

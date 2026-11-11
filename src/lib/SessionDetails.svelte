@@ -65,7 +65,7 @@
     STUCK_COLOR,
   } from './attention';
   import { hubStatus, hubBlock, hubActionBlocked } from './hub';
-  import { accessOf } from './access';
+  import { accessOf, attachCommandFor } from './access';
   import { shareSheetFor, sessionBlocked } from './share';
   import { hubConnection } from './hub_connection';
   import {
@@ -434,8 +434,10 @@
     if (!r.ok) pushError(r.error, linked ? 'Linking the session failed' : 'Saving “Not related” failed');
   }
 
-  // Local-only for v0.2 (Phase 4 will branch on host_alias for remote attach).
-  const attachCommand = $derived(`tmux attach -t ${session.tmux_name}`);
+  // The exact-match attach, through ssh for a host that is not this machine;
+  // none (and why) where this machine cannot reach the pane.
+  const attach = $derived(attachCommandFor(session, hostRow?.transport, $hubStatus));
+  const attachCommand = $derived(attach.command ?? '');
 
   // Multi-user M1: "sharing never confers a terminal" (spec §4.3 invariant 4)
   // covers this section too, and it is the easiest one to miss, because
@@ -1409,10 +1411,14 @@
               {@render act('copy-transcript-from-details', 'Copy transcript', onCopyTranscript, copyingTranscript ? 'Copying…' : copyTranscriptBlocked, 'Copy this conversation as Markdown')}
             {/if}
             {#if !hasNoPane(session) && detailsOwned}
-              <button class="btn btn--quiet is-bounded" onclick={onCopy} data-testid="copy-attach" title="Copy the command that attaches this session in another terminal">
-                {copied ? '✓ Copied' : 'Copy tmux attach'}
-              </button>
-              <code class="cmd" data-testid="attach-command">{attachCommand}</code>
+              {#if attach.command !== null}
+                <button class="btn btn--quiet is-bounded" onclick={onCopy} data-testid="copy-attach" title="Copy the command that attaches this session in another terminal">
+                  {copied ? '✓ Copied' : 'Copy tmux attach'}
+                </button>
+                <code class="cmd" data-testid="attach-command">{attachCommand}</code>
+              {:else}
+                <span class="muted" data-testid="attach-command-none">{attach.why}</span>
+              {/if}
             {/if}
           </div>
         </div>

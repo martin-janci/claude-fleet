@@ -465,15 +465,19 @@
   // moved at its tracker the same way; the hub reads it back.
   let statusError = $state<string | null>(null);
   let statusBusy = $state(false);
-  async function pickStatus(next: WorkItemStatus) {
+  async function pickStatus(next: WorkItemStatus, pick?: HTMLSelectElement) {
     const t = task;
     if (!t || t.item_id == null || statusBusy || next === t.status_category) return;
     statusBusy = true;
     statusError = null;
     const r = await setWorkStatus(t.item_id, next);
     statusBusy = false;
-    if (!r.ok) statusError = readErrorText(r.error);
-    else void load(taskId);
+    if (!r.ok) {
+      statusError = readErrorText(r.error);
+      // The select is bound one way and the status did not change, so Svelte
+      // would leave it on the refused pick: put it back on the real one.
+      if (pick) pick.value = t.status_category ?? 'todo';
+    } else void load(taskId);
   }
 
   // "Finished — close?" answered with Keep open: not a status, so the
@@ -696,7 +700,10 @@
             value={task.status_category ?? 'todo'}
             disabled={statusBlocked !== null || statusBusy}
             title={statusBlocked ?? (atTracker ? `Move it on ${atTracker}` : 'Set the status')}
-            onchange={(e) => void pickStatus((e.currentTarget as HTMLSelectElement).value as WorkItemStatus)}
+            onchange={(e) => {
+              const pick = e.currentTarget as HTMLSelectElement;
+              void pickStatus(pick.value as WorkItemStatus, pick);
+            }}
           >
             <option value="todo">To do</option>
             <option value="in_progress">In progress</option>

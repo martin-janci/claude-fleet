@@ -73,6 +73,33 @@ pub(crate) fn is_fleet_hook_entry(h: &serde_json::Value) -> bool {
         && h.get("timeout").and_then(|t| t.as_u64()) == Some(u64::from(HOOK_TIMEOUT_SECS))
 }
 
+/// PURE: the URLs of fleet's http hook entries ([`is_fleet_hook_entry`]) in
+/// a `~/.claude/settings.json`, in file order; none for a file that is
+/// empty or not JSON.
+pub fn fleet_hook_urls(settings_json: &str) -> Vec<String> {
+    fn walk(v: &serde_json::Value, out: &mut Vec<String>) {
+        match v {
+            serde_json::Value::Object(m) => {
+                if is_fleet_hook_entry(v) {
+                    if let Some(u) = m.get("url").and_then(|u| u.as_str()) {
+                        out.push(u.to_string());
+                    }
+                }
+                m.values().for_each(|x| walk(x, out));
+            }
+            serde_json::Value::Array(a) => a.iter().for_each(|x| walk(x, out)),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(settings_json) {
+        if let Some(h) = v.get("hooks") {
+            walk(h, &mut out);
+        }
+    }
+    out
+}
+
 /// True when `h` is fleet's SessionStart `command` hook: a curl that sends
 /// the headers file fleet writes and the pane header.
 pub(crate) fn is_fleet_command_entry(h: &serde_json::Value) -> bool {
@@ -135,7 +162,13 @@ pub enum HookKind {
     /// only a command naming a person's step, synchronously, and prints the
     /// hub's answer ([`guard_command`]).
     Guard,
+    /// The worker guard for MCP tools: the same post, for a tool call that
+    /// is neither fleet's own nor plainly a read ([`mcp_guard_command`]).
+    McpGuard,
 }
+
+/// The matcher of the MCP worker guard: every MCP server's tools.
+pub const MCP_GUARD_MATCHER: &str = "mcp__.*";
 
 /// The hook events fleet installs, with their matcher and installation kind.
 /// `Stop` is the completion signal (turn over → idle, `turn_seq` bump),
@@ -160,6 +193,7 @@ pub const FLEET_HOOK_EVENTS: &[(&str, &str, HookKind)] = &[
     ("PreCompact", "", HookKind::Http),
     ("PostCompact", "", HookKind::Http),
     ("PreToolUse", "Bash", HookKind::Guard),
+    ("PreToolUse", MCP_GUARD_MATCHER, HookKind::McpGuard),
     ("SubagentStart", "", HookKind::Http),
 ];
 
@@ -174,11 +208,13 @@ pub fn hook_shape() -> String {
             HookKind::Http => "http",
             HookKind::Command => "command",
             HookKind::Guard => "guard",
+            HookKind::McpGuard => "mcp-guard",
         };
         s.push_str(&format!("{event}|{matcher}|{k};"));
     }
     s.push_str(&session_start_command("<hook_url>"));
     s.push_str(&guard_command("<hook_url>"));
+    s.push_str(&mcp_guard_command("<hook_url>"));
     s
 }
 
@@ -264,9 +300,18 @@ fn command_hook_entry(hook_url: &str, sync: bool) -> serde_json::Value {
 pub const GUARD_MAX_SECS: u32 = 3;
 
 /// What a command must mention for the guard to ask the hub at all: the
-/// tools `orchestrate::guard` reads. Everything else costs one `case`, no
-/// network.
-const GUARD_PREFILTER: &str = "*'gh pr '*|*'git '*push*|*'jira '*|*'acli '*|*'asana '*|*'linear '*";
+/// tools `orchestrate::guard` reads. `gh`, then `pr` or `api` anywhere after
+/// it, so `gh -R acme/app pr merge` and `gh  pr merge` (two spaces) reach
+/// the hub too; a shell wrapper (`bash -c "gh pr merge 1"`) still names the
+/// tool. Everything else costs one `case`, no network.
+const GUARD_PREFILTER: &str = "*gh[[:space:]]*pr[[:space:]]*|*gh[[:space:]]*api*|*'git '*push*|*'jira '*|*'acli '*|*'asana '*|*'linear '*";
+
+/// MCP tool names the MCP guard lets run without asking the hub: fleet's
+/// own server, and a name that plainly reads (the prefixes of
+/// `orchestrate::guard::MCP_READ_VERBS`, and a `…_read` suffix).
+const MCP_GUARD_SKIP: &str = "mcp__claude-fleet__*|mcp__*__get*|mcp__*__list*|mcp__*__search*|\
+mcp__*__view*|mcp__*__show*|mcp__*__read*|mcp__*__fetch*|mcp__*__find*|mcp__*__lookup*|\
+mcp__*__download*|mcp__*_read";
 
 /// The worker guard's `PreToolUse(Bash)` command (orchestration §7.2): read
 /// the hook body, and only when it mentions a tool the guard reads, post it
@@ -286,10 +331,32 @@ pub fn guard_command(hook_url: &str) -> String {
     )
 }
 
-fn guard_hook_entry(hook_url: &str) -> serde_json::Value {
+/// The worker guard's `PreToolUse(mcp__.*)` command: as [`guard_command`],
+/// but keyed on the hook body's `tool_name`. Fleet's own tools and a read
+/// never leave the host; any other MCP tool call is posted, and the hub
+/// refuses a mission worker's tracker write or PR merge
+/// (`orchestrate::guard::mcp_deny_reason`). Every `"tool_name": "…"` in the
+/// body is read, so a tool input carrying a key of that name cannot make a
+/// write look like a read: one name that is not skipped posts the body.
+pub fn mcp_guard_command(hook_url: &str) -> String {
+    format!(
+        "input=$(cat); ask=; for t in $(printf '%s' \"$input\" | \
+         grep -o '\"tool_name\": *\"[^\"]*\"' | sed 's/.*: *\"//; s/\"$//'); do \
+         case \"$t\" in {MCP_GUARD_SKIP}) ;; *) ask=1;; esac; done; \
+         [ -z \"$ask\" ] || printf '%s' \"$input\" | \
+         curl -sf --connect-timeout {SYNC_START_CONNECT_SECS} -m {GUARD_MAX_SECS} -X POST \
+         -H @\"$HOME/.claude/{HOOK_HEADERS_FILE}\" \
+         -H \"X-Fleet-Pane: ${{TMUX_PANE:-}}\" \
+         -H 'Content-Type: application/json' \
+         --data-binary @- {} || true",
+        crate::shell::quote(hook_url)
+    )
+}
+
+fn guard_hook_entry(command: String) -> serde_json::Value {
     serde_json::json!({
         "type": "command",
-        "command": guard_command(hook_url),
+        "command": command,
         "timeout": GUARD_MAX_SECS + 1
     })
 }
@@ -394,12 +461,22 @@ pub fn merge_hook_into_settings_json_with(
         .as_object_mut()
         .ok_or_else(|| IpcError::new(codes::E_PARSE, "hooks is not an object"))?;
 
+    // An event with two entries (PreToolUse: Bash and MCP) is stripped once,
+    // before its first, so the second does not strip the first.
+    let mut stripped: Vec<&str> = Vec::new();
     for (event, matcher, kind) in FLEET_HOOK_EVENTS {
-        let mut arr = strip_fleet(hooks.get(*event).unwrap_or(&serde_json::json!([])));
+        let current = hooks.get(*event).cloned().unwrap_or(serde_json::json!([]));
+        let mut arr = if stripped.contains(event) {
+            current
+        } else {
+            stripped.push(event);
+            strip_fleet(&current)
+        };
         let entry = match kind {
             HookKind::Http => hook_entry(hook_url, token),
             HookKind::Command => command_hook_entry(hook_url, sync_start),
-            HookKind::Guard => guard_hook_entry(hook_url),
+            HookKind::Guard => guard_hook_entry(guard_command(hook_url)),
+            HookKind::McpGuard => guard_hook_entry(mcp_guard_command(hook_url)),
         };
         arr.as_array_mut().unwrap().push(serde_json::json!({
             "matcher": matcher,
@@ -846,13 +923,14 @@ mod tests {
             "SessionStart",
             "PreCompact",
             "PostCompact",
-            "PreToolUse",
             "SubagentStart",
         ] {
             assert_eq!(v["hooks"][ev].as_array().unwrap().len(), 1, "{ev}");
         }
-        assert_eq!(FLEET_HOOK_EVENTS.len(), 11);
+        assert_eq!(FLEET_HOOK_EVENTS.len(), 12);
+        assert_eq!(v["hooks"]["PreToolUse"].as_array().unwrap().len(), 2);
         assert_eq!(v["hooks"]["PreToolUse"][0]["matcher"], "Bash");
+        assert_eq!(v["hooks"]["PreToolUse"][1]["matcher"], "mcp__.*");
         assert_eq!(
             v["hooks"]["SessionEnd"][0]["matcher"],
             "logout|prompt_input_exit|other|clear|resume"
@@ -954,6 +1032,108 @@ mod tests {
         assert!(!run("git status"));
         assert!(run("gh pr merge 12"));
         assert!(run("git push origin main"));
+        // `gh`'s global options, two spaces and `gh api` reach the hub too.
+        assert!(run("gh -R acme/app pr merge 41 --squash --admin"));
+        assert!(run("gh --repo acme/app pr ready 41"));
+        assert!(run("gh  pr merge 41"));
+        assert!(run("gh api -X PUT repos/acme/app/pulls/41/merge"));
+    }
+
+    /// Re-merging keeps one Bash and one MCP guard: the second PreToolUse
+    /// entry never strips the first, and neither is duplicated.
+    #[test]
+    fn both_guards_survive_a_second_merge_once_each() {
+        let url = "http://127.0.0.1:4180/hook";
+        let user = r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"echo mine"}]}]}}"#;
+        let once = merge_hook_into_settings_json(user, url, "t").unwrap();
+        let twice = merge_hook_into_settings_json(&once, url, "t").unwrap();
+        assert_eq!(once, twice);
+        let v: serde_json::Value = serde_json::from_str(&twice).unwrap();
+        let pre = v["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(pre.len(), 3, "{pre:?}");
+        assert_eq!(pre[0]["hooks"][0]["command"], "echo mine");
+        assert_eq!(pre[1]["hooks"][0]["command"], guard_command(url));
+        assert_eq!(pre[2]["hooks"][0]["command"], mcp_guard_command(url));
+    }
+
+    /// The MCP guard, run by a real `sh`: fleet's own tools and reads never
+    /// reach curl; a write does, and a tool input naming another
+    /// `tool_name` cannot pass a write off as a read. A hub that is down
+    /// prints nothing and lets the call run.
+    #[test]
+    #[cfg(unix)]
+    fn the_mcp_guard_asks_only_about_writes_and_fails_open() {
+        let run = |body: String| {
+            let dir = tempfile::tempdir().unwrap();
+            let log = dir.path().join("curl.log");
+            std::fs::write(
+                dir.path().join("curl"),
+                format!(
+                    "#!/bin/sh\ncat >/dev/null; echo called >> {}\nexit 7\n",
+                    log.display()
+                ),
+            )
+            .unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                dir.path().join("curl"),
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
+            let path = format!(
+                "{}:{}",
+                dir.path().display(),
+                std::env::var("PATH").unwrap_or_default()
+            );
+            let mut child = crate::proc::std_command("sh")
+                .args(["-c", &mcp_guard_command("http://127.0.0.1:9/hook")])
+                .env("PATH", path)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            use std::io::Write;
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(body.as_bytes())
+                .unwrap();
+            let out = child.wait_with_output().unwrap();
+            assert!(out.status.success(), "{body}: never fails the call");
+            assert!(
+                out.stdout.is_empty(),
+                "{body}: a hub that is down says nothing"
+            );
+            log.exists()
+        };
+        let call = |tool: &str| {
+            serde_json::json!({
+                "hook_event_name": "PreToolUse",
+                "tool_name": tool,
+                "tool_input": { "issueIdOrKey": "SHOP-41" },
+            })
+            .to_string()
+        };
+        assert!(!run(call("mcp__claude-fleet__work_link")));
+        assert!(!run(call("mcp__atlassian__getJiraIssue")));
+        assert!(!run(call("mcp__github__list_issues")));
+        assert!(!run(call("mcp__github__pull_request_read")));
+        assert!(run(call("mcp__atlassian__transitionJiraIssue")));
+        assert!(run(call("mcp__github__merge_pull_request")));
+        let forged = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "mcp__github__merge_pull_request",
+            "tool_input": { "tool_name": "mcp__claude-fleet__x" },
+        })
+        .to_string();
+        assert!(run(forged));
+        // Pretty-printed, as another Claude Code version might send it.
+        let pretty = serde_json::to_string_pretty(&serde_json::json!({
+            "tool_name": "mcp__atlassian__addCommentToJiraIssue",
+        }))
+        .unwrap();
+        assert!(run(pretty));
     }
 
     #[test]

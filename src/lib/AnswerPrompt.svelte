@@ -34,7 +34,9 @@
   import { hubActionBlocked, hubStatus } from './hub';
   import { hubConnection } from './hub_connection';
   import { sessionBlocked } from './share';
-  import { fleetBlocked } from './fleets';
+  import { fleetBlocked, selectedFleetSession } from './fleets';
+  import { settingsOpen } from './app_views';
+  import { selectedTaskId, sidebarView, taskDetailOpen } from './work_view';
   import ProposedBy from './ProposedBy.svelte';
   import { quickOrder, quickProposal } from './quick_answer';
   import { untrack } from 'svelte';
@@ -69,9 +71,23 @@
     /** The pane no longer shows this dialog: "Dismiss" under the stale note
      *  hides the card until the dialog on the pane changes. */
     onGone?: () => void;
+    /** The card is on screen, so the keyboard may answer it: false while the
+     *  panel holding it is mounted but not shown (the primary panel under
+     *  another fleet's session, the Conversation tab not picked). */
+    keys?: boolean;
   }
 
-  const { session, view, compact = false, onOpenTerminal, onAnswered, onOwnWords, readOnlyNote, onGone }: Props = $props();
+  const {
+    session,
+    view,
+    compact = false,
+    onOpenTerminal,
+    onAnswered,
+    onOwnWords,
+    readOnlyNote,
+    onGone,
+    keys = true,
+  }: Props = $props();
 
   let busy = $state(false);
   let errorMsg = $state<string | null>(null);
@@ -279,13 +295,26 @@
   // while a text field, the terminal or a dialog has the keyboard. The
   // sidebar's compact cards take no digits: there could be several.
   const isMac = detectMac(typeof navigator === 'undefined' ? undefined : navigator);
+  // The same covers TerminalView's chords check: Settings over everything,
+  // a Work task's detail over any session (another fleet's too: the detail
+  // view sits above that overlay), and another fleet's session over this
+  // window's own, all with the destination still 'session'. A covered card
+  // stays mounted with a live dialog; a digit meant for the card on screen
+  // must not answer this one unseen.
+  const onScreen = $derived(
+    keys &&
+      $destination === 'session' &&
+      !$settingsOpen &&
+      !($sidebarView === 'work' && !!$selectedTaskId && $taskDetailOpen) &&
+      (session.fleet !== undefined || !$selectedFleetSession),
+  );
   function onWindowKeydown(e: KeyboardEvent) {
     if (
       !compact &&
       confirming !== null &&
       e.key === 'Escape' &&
       !e.defaultPrevented &&
-      $destination === 'session' &&
+      onScreen &&
       !isEditable(e.target as HTMLElement | null) &&
       !(e.target as HTMLElement | null)?.closest?.('dialog')
     ) {
@@ -293,7 +322,7 @@
       confirming = null;
       return;
     }
-    if (compact || sent !== null || busy || e.defaultPrevented || $destination !== 'session') return;
+    if (compact || sent !== null || busy || e.defaultPrevented || !onScreen) return;
     if (matchShortcut('question-card', e, isMac) !== 'question-card.answer') return;
     const target = e.target as HTMLElement | null;
     if (isEditable(target) || target?.dataset?.imeProxy !== undefined || target?.closest?.('dialog')) return;

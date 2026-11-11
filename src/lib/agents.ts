@@ -500,9 +500,15 @@ export function fleetForm(definition: string, id?: number): Promise<Result<FormS
   return fleetCmd<FormSpec>('form', { definition, id });
 }
 
-/** Start (or, same instance name, change) an instance from the form's answers. */
-export function grantFleet(definition: string, answers: Values): Promise<Result<{ changed: number; id?: number }>> {
-  return fleetCmd('grant', { definition, answers });
+/** Start (or, same instance name, change) an instance from the form's
+ *  answers. `id`: the instance an Edit saves, so a new name there is refused
+ *  rather than starting a second instance (an older hub ignores it). */
+export function grantFleet(
+  definition: string,
+  answers: Values,
+  id?: number,
+): Promise<Result<{ changed: number; id?: number }>> {
+  return fleetCmd('grant', id === undefined ? { definition, answers } : { definition, answers, id });
 }
 
 export function revokeAgentRule(id: number): Promise<Result<{ changed: number }>> {

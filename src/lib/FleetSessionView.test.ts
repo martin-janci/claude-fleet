@@ -162,7 +162,19 @@ describe('FleetSessionView', () => {
     expect((screen.getByTestId('conv-attach-button') as HTMLButtonElement).disabled).toBe(true);
     // Send later is the primary's queue.
     expect((screen.getByTestId('conv-send-later') as HTMLButtonElement).disabled).toBe(true);
-    for (const cmd of ['work_result', 'get_form', 'list_debug_devices', 'session_history']) {
+    // Its waiting prompts would be the primary's session with the same id.
+    await tick();
+    await tick();
+    expect(screen.queryByTestId('conv-scheduled')).toBeNull();
+    for (const cmd of [
+      'work_result',
+      'get_form',
+      'list_debug_devices',
+      'session_history',
+      'queued_prompts',
+      'cancel_queued_prompt',
+      'queue_prompt',
+    ]) {
       expect(inv.mock.calls.some(([c]) => c === cmd)).toBe(false);
     }
   });

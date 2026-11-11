@@ -328,15 +328,83 @@ fn the_prompt_quotes_the_ticket_and_names_the_commands() {
 fn the_script_checks_in_place_or_in_a_snapshot_of_the_commit() {
     let w = world();
     let at = target_for(&w.s, w.item).unwrap();
-    let sc = check_script(&at, "sonnet", &["cargo test".into()], "check it").unwrap();
+    let sc = check_script(&at, "sonnet", None, &["cargo test".into()], "check it").unwrap();
     assert!(sc.contains("cd -- '/w/pos-2'"), "{sc}");
     assert!(sc.contains(&format!("git cat-file -e '{HEAD}'")), "{sc}");
     assert!(sc.contains("git worktree add --detach"), "{sc}");
     assert!(sc.contains("worktree remove --force"), "{sc}");
     assert!(sc.contains(&format!("{BASE}..HEAD")), "{sc}");
     assert!(sc.contains("Bash(cargo test)"), "{sc}");
-    assert!(check_script(&at, "gpt-9", &[], "x").is_err());
-    assert!(check_script(&at, "sonnet", &["cargo test; id".into()], "x").is_err());
+    assert!(check_script(&at, "gpt-9", None, &[], "x").is_err());
+    assert!(check_script(&at, "sonnet", None, &["cargo test; id".into()], "x").is_err());
+}
+
+/// The check runs under the login the work ran under: the worker row's,
+/// exported as a mission's headless check exports it.
+#[test]
+fn the_check_runs_under_the_workers_login() {
+    let w = world();
+    let at = target_for(&w.s, w.item).unwrap();
+    assert_eq!(at.profile, None);
+    let own = check_script(&at, "sonnet", None, &[], "x").unwrap();
+    assert!(!own.contains("CLAUDE_CONFIG_DIR"), "{own}");
+    w.s.conn_ref()
+        .execute(
+            "UPDATE sessions SET claude_profile = 'work' WHERE id = ?1",
+            [w.worker],
+        )
+        .unwrap();
+    let at = target_for(&w.s, w.item).unwrap();
+    assert_eq!(at.profile.as_deref(), Some("work"));
+    let sc = check_script(&at, "sonnet", Some("work"), &[], "x").unwrap();
+    assert!(sc.contains(".claude-profiles/\"'work'"), "{sc}");
+    assert!(sc.contains(crate::tmux::PROFILE_API_KEY), "{sc}");
+}
+
+/// Accounts review: the AI check is `claude -p` in the project's checkout,
+/// so it never runs on a login the project forbids. Refused before any
+/// task is recorded (the sweep then waits and tries again), and nothing
+/// reaches the host.
+#[tokio::test]
+async fn a_check_is_refused_on_a_login_the_project_forbids() {
+    let w = world();
+    let now = crate::store::now_unix();
+    crate::service::account_limits::seed_usage(&w.s, "mars", None, "acct-own", 20.0, now);
+    w.s.set_account_forbidden_projects("acct-own", &[w.project])
+        .unwrap();
+    let item = w.item;
+    let store = Arc::new(Mutex::new(w.s));
+    let ssh = Arc::new(SshClient::with_ssh_binary("/nonexistent/fleet-test-ssh"));
+    let err = start_checked(&store, &ssh, item).await.unwrap_err();
+    assert_eq!(err.code, codes::E_ACCOUNT_FORBIDDEN, "{err:?}");
+    assert!(
+        err.message.contains("could not be checked"),
+        "{}",
+        err.message
+    );
+    assert!(store
+        .lock()
+        .unwrap()
+        .open_task_for_item(item, ROLE)
+        .unwrap()
+        .is_none());
+    // A signed-out login is refused the same way, before anything runs.
+    {
+        let s = store.lock().unwrap();
+        s.set_account_forbidden_projects("acct-own", &[]).unwrap();
+        s.set_host_signed_out_logins(
+            "mars",
+            &[crate::store::SignedOutLogin {
+                profile: None,
+                since: 1,
+                checked_at: 1,
+            }],
+        )
+        .unwrap();
+    }
+    let err = start_checked(&store, &ssh, item).await.unwrap_err();
+    assert_eq!(err.code, codes::E_CLAUDE_CLI, "{err:?}");
+    assert!(err.message.contains("signed out"), "{}", err.message);
 }
 
 #[test]

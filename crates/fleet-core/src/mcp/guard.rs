@@ -218,7 +218,7 @@ fn is_a_persons_device(caller: &crate::mcp::Caller) -> bool {
 }
 
 /// Wall-clock class a tool call is bounded to. The caps themselves
-/// (`LONG_POLL_CAP` / `LIFECYCLE_CAP` / `QUICK_CAP`) and the lookup that
+/// (`LONG_POLL_CAP` / `LIFECYCLE_CAP` / `START_CAP` / `QUICK_CAP`) and the lookup that
 /// applies them per call (`tool_deadline`) live in `tools::support`, next to
 /// `bounded`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -230,6 +230,11 @@ pub enum Deadline {
     /// host (session lifecycle, provisioning, host probes, fan-outs, reads
     /// that may page through large files).
     Lifecycle,
+    /// Tools that start a session in a new worktree, which may clone the
+    /// repository, add the worktree and run the project's setup command
+    /// (`pnpm install` on a cold cache) before tmux starts: the cap sits
+    /// above the sum of those steps' own clocks.
+    Start,
     /// Everything else: store reads and single SSH round trips.
     Quick,
 }
@@ -908,14 +913,14 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         access: Access::Client,
         readonly: false,
         confirm: false,
-        deadline: Deadline::Lifecycle,
+        deadline: Deadline::Start,
     },
     ToolPolicy {
         name: "new_shell_session",
         access: Access::Client,
         readonly: false,
         confirm: false,
-        deadline: Deadline::Lifecycle,
+        deadline: Deadline::Start,
     },
     ToolPolicy {
         name: "capture_session",
@@ -1068,7 +1073,7 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         access: Access::Client,
         readonly: false,
         confirm: false,
-        deadline: Deadline::Lifecycle,
+        deadline: Deadline::Start,
     },
     ToolPolicy {
         name: "spawn_review",
@@ -1346,7 +1351,7 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         access: Access::Client,
         readonly: false,
         confirm: true,
-        deadline: Deadline::Lifecycle,
+        deadline: Deadline::Start,
     },
     // Trackers and their credentials (work graph M3): fleet admin. Since
     // contract 13 the hub owner's trusted phone reaches the tracker actions
@@ -1906,13 +1911,22 @@ pub const OPERATOR_CONFIRMS: &[&str] = &[
     "send_prompt",
     "run_prompt",
     "queue_prompt",
+    // Gated at the call site for the actions that type into a pane:
+    // `send_message { deliver | wake }`. (`review_notes` refuses the
+    // operator outright: a note is a person's.)
+    "send_message",
 ];
 
 /// The operator's calls that type its text into a session: pre-approved at
 /// "Within your brief" and "Autopilot" when the session is one of Control's
 /// open handoffs (review 2026-10-17, F2).
-pub const OPERATOR_PROMPT_TOOLS: &[&str] =
-    &["send_prompt", "queue_prompt", "run_prompt", "dispatch_task"];
+pub const OPERATOR_PROMPT_TOOLS: &[&str] = &[
+    "send_prompt",
+    "queue_prompt",
+    "run_prompt",
+    "dispatch_task",
+    "send_message",
+];
 
 /// The operator's calls that start a Claude session: pre-approved at
 /// "Autopilot" inside a running mission's grant (F2). `dispatch_task` is here
@@ -2069,7 +2083,7 @@ pub fn caller_must_confirm_with(
 pub fn operator_confirm_reason(tool: &str) -> &'static str {
     match tool {
         // Review round 15, F21, narrowed by the 2026-10-17 review's F2.
-        "send_prompt" | "run_prompt" | "queue_prompt" | "dispatch_task" => {
+        "send_prompt" | "run_prompt" | "queue_prompt" | "dispatch_task" | "send_message" => {
             "what the operator writes reaches a session without a person only at \
              \"Within your brief\" or \"Autopilot\", and only into a session it \
              started or briefed, whatever mcp.confirm_destructive says"
@@ -3183,7 +3197,13 @@ mod tests {
     #[test]
     fn operator_pre_approval_truth_table() {
         use Position::{Ask, Autopilot, Brief, Custom};
-        let prompts = ["send_prompt", "queue_prompt", "run_prompt", "dispatch_task"];
+        let prompts = [
+            "send_prompt",
+            "queue_prompt",
+            "run_prompt",
+            "dispatch_task",
+            "send_message",
+        ];
         let always = [
             "add_project",
             "new_shell_session",
@@ -3409,7 +3429,13 @@ mod tests {
     /// `mcp.confirm_destructive`, which cannot turn any of this off.
     #[test]
     fn the_operators_refusal_never_calls_a_prompt_a_start_or_a_kill() {
-        for t in ["send_prompt", "run_prompt", "queue_prompt", "dispatch_task"] {
+        for t in [
+            "send_prompt",
+            "run_prompt",
+            "queue_prompt",
+            "dispatch_task",
+            "send_message",
+        ] {
             assert!(
                 caller_must_confirm(true, t, Position::Ask, false, false),
                 "{t} is gated for the operator"

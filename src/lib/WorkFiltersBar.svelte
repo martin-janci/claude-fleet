@@ -37,6 +37,7 @@
     WORK_PRIORITY_FILTERS,
     WORK_SORT_LABELS,
     WORK_SORTS,
+    prioritySortUnsupported,
     WORK_STAGE_LABELS,
     WORK_STAGES,
     workLayout,
@@ -763,7 +764,9 @@
           set({ sort: v === 'activity' ? undefined : v });
         }}
       >
-        {#each WORK_SORTS as o (o)}<option value={o}>{WORK_SORT_LABELS[o].toLowerCase()}</option>{/each}
+        {#each WORK_SORTS.filter((o) => o !== 'priority' || !$prioritySortUnsupported || f.sort === 'priority') as o (o)}<option
+            value={o}>{WORK_SORT_LABELS[o].toLowerCase()}</option
+          >{/each}
       </select>
       <span aria-hidden="true">▾</span>
     </label>

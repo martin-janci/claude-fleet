@@ -278,9 +278,11 @@ impl FleetTools {
         or null clears). Returns the account row.")]
     pub(super) async fn set_account_nickname(
         &self,
+        Extension(caller): Extension<Caller>,
         Parameters(args): Parameters<hosts::SetAccountNicknameArgs>,
     ) -> Result<CallToolResult, McpError> {
         audit("set_account_nickname", &format!("uuid={}", args.uuid));
+        refuse_operator_account_write(&caller)?;
         ok_json(&hosts::set_account_nickname(args, &self.store).map_err(to_mcp_err)?)
     }
 
@@ -308,21 +310,31 @@ impl FleetTools {
         // token is a full, org-free client bound to the hub owner, so the
         // policy row alone would let it lift the very block that refused
         // its start (accounts review, finding 4).
-        if caller.is_operator() {
-            return Err(mcp_err(
-                codes::E_FORBIDDEN,
-                "a person sets the projects an account is forbidden for, on the Accounts \
-                 page of the desktop or the phone; the operator may not",
-                None,
-            ));
-        }
+        refuse_operator_account_write(&caller)?;
         // As `add_account`: the master, or the hub owner's trusted full
         // device.
         owner_device_admin(&caller, "changing an account's forbidden projects")?;
-        ok_json(
-            &crate::service::project_accounts::set_account_projects(args, &self.store)
-                .map_err(to_mcp_err)?,
-        )
+        let representation = serde_json::json!({
+            "forbidden_project_ids": args.forbidden_project_ids,
+            "forbidden_org_ids": args.forbidden_org_ids,
+            "by": caller.label(),
+        });
+        let row = crate::service::project_accounts::set_account_projects(args, &self.store)
+            .map_err(to_mcp_err)?;
+        // A block is a person's rule over which login may run where: who
+        // changed it belongs in the admin log, as a device's trust does.
+        {
+            let s = lock(&self.store).map_err(to_mcp_err)?;
+            s.record_admin_event_or_log(&crate::store::AdminEvent {
+                actor_person: owner_for(&caller, &s),
+                actor_device: caller.client.as_ref().map(|c| c.id),
+                action: "set_account_projects",
+                resource_type: "account",
+                resource_id: &row.uuid,
+                representation,
+            });
+        }
+        ok_json(&row)
     }
 
     #[tool(description = "Each Claude account's latest plan usage: 5-hour \
@@ -772,7 +784,7 @@ impl FleetTools {
         );
         let ttl = pair_ttl(p.ttl_s);
         // Every read under one lock, released before the mint.
-        let (base, person) = {
+        let (base, person, person_id) = {
             let s = lock(&self.store).map_err(to_mcp_err)?;
             // A code minted for a name a live client already holds could only
             // ever fail at redemption (the partial unique index), wasting the
@@ -824,20 +836,31 @@ impl FleetTools {
                     )
                 })?),
             };
+            // The live person that name is now, so the redeem binds to
+            // them and refuses once they are disabled (review R6); a new
+            // name is created at the redeem.
+            let person_id = match person.as_deref() {
+                Some(n) => s.get_person_by_name(n).map_err(to_mcp_err)?.map(|p| p.id),
+                None => None,
+            };
             (
                 crate::service::hub::HubBase::read(&s).map_err(to_mcp_err)?,
                 person,
+                person_id,
             )
         };
-        let req = self.guards.pairings.mint(crate::mcp::pairing::MintRequest {
-            name: &name,
-            mode: &mode,
-            trusted: p.trusted,
-            org_id: p.org_id,
-            person: person.as_deref(),
-            ttl,
-            minter,
-        });
+        let req = self.guards.pairings.mint_for(
+            crate::mcp::pairing::MintRequest {
+                name: &name,
+                mode: &mode,
+                trusted: p.trusted,
+                org_id: p.org_id,
+                person: person.as_deref(),
+                ttl,
+                minter,
+            },
+            person_id,
+        );
         // A master mint is an administrative write. `pair_device` records its
         // own `pair_device` event (in `org_admin`), so only `pair_client`
         // records here: one row per write. Never the code or the token.
@@ -1797,15 +1820,31 @@ pub(super) fn settings_actor(caller: &Caller) -> SettingsWho {
 /// proposal) is the master's, or a trusted device's (declarative pages P6):
 /// trust is the operator vouching that the device is a person's own
 /// (`fleet-hub client trust`). An agent's client proposes instead.
-/// The operator asks; a person answers. `Access::PersonDevice` already
-/// keeps the operator's token out (it has no person), and this says so
-/// where the rule matters, so a later access change cannot let the agent
-/// approve itself.
+/// The operator asks; a person answers. The operator's token is bound to
+/// the hub's owner (#932), so `Access::PersonDevice` admits it: this is the
+/// rule that keeps the agent from approving itself.
 fn refuse_operator_answer(caller: &Caller) -> Result<(), McpError> {
     if caller.is_operator() {
         return Err(mcp_err(
             "E_FORBIDDEN",
             "the agent asks for confirmation; a person answers it",
+            None,
+        ));
+    }
+    Ok(())
+}
+
+/// Naming an account or changing which projects it is forbidden for is a
+/// person's rule (docs/accounts.md: "Only the hub owner's devices change
+/// it"). `Access::Person` admits the operator, whose token is bound to the
+/// owner; this refuses it, as `settings_writer` refuses an agent, so Control
+/// cannot lift a ban it was refused by (E_ACCOUNT_FORBIDDEN).
+fn refuse_operator_account_write(caller: &Caller) -> Result<(), McpError> {
+    if caller.is_operator() {
+        return Err(mcp_err(
+            "E_FORBIDDEN",
+            "the agent does not change a Claude account's name or the projects it is \
+             forbidden for; ask the person to do it on the Accounts page",
             None,
         ));
     }

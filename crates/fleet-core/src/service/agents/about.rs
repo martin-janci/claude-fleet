@@ -56,6 +56,22 @@ const TARGET_ARGS: &[&str] = &[
     "id",
 ];
 
+/// The argument names that say which container the item is in (a repo, a
+/// Jira site or project): `#12` of `o/api` and of `o/web` are different
+/// items, so they are part of a call's identity.
+const CONTAINER_ARGS: &[&str] = &[
+    "owner",
+    "repo",
+    "project",
+    "projectKey",
+    "project_key",
+    "cloudId",
+    "cloud_id",
+    "workspace",
+    "org",
+    "site",
+];
+
 fn parse(payload: &str) -> Value {
     serde_json::from_str(payload).unwrap_or(Value::Null)
 }
@@ -261,7 +277,16 @@ pub fn identity(kind: &str, payload: &Value) -> String {
                 .map(|(_, v)| v)
                 // No item argument: only the very same call is the same write.
                 .unwrap_or_else(|| args.map(Value::to_string).unwrap_or_default());
-            format!("mcp:{action}:{}.{}:{item}", f("binding"), f("tool"))
+            let within: String = args
+                .and_then(Value::as_object)
+                .map(|a| {
+                    CONTAINER_ARGS
+                        .iter()
+                        .filter_map(|k| a.get(*k).and_then(text).map(|v| format!("{k}={v};")))
+                        .collect()
+                })
+                .unwrap_or_default();
+            format!("mcp:{action}:{}.{}:{within}{item}", f("binding"), f("tool"))
         }
         "tracker_comment" => format!("comment:{action}:{}", f("key")),
         "tracker_link" => format!("link:{action}:{}:{}:{}", f("from"), f("to"), f("link_type")),
@@ -439,6 +464,19 @@ mod tests {
         assert_ne!(
             identity("mcp_call", &call("PD-1", "Done")),
             identity("mcp_call", &call("PD-2", "Done"))
+        );
+        // The same number in another repo is another item (review R6).
+        let review = |owner: &str, repo: &str, body: &str| {
+            json!({ "action": "review", "binding": "gh", "tool": "review",
+                    "arguments": { "owner": owner, "repo": repo, "pull_number": 12, "body": body } })
+        };
+        assert_ne!(
+            identity("mcp_call", &review("o", "api", "x")),
+            identity("mcp_call", &review("o", "web", "x"))
+        );
+        assert_eq!(
+            identity("mcp_call", &review("o", "api", "x")),
+            identity("mcp_call", &review("o", "api", "reworded"))
         );
         // Without an item argument only the very same arguments match.
         let bare = |q: &str| json!({ "action": "a", "binding": "b", "tool": "t", "arguments": { "q": q } });

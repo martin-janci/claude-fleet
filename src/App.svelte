@@ -116,6 +116,7 @@
   import UpdateReveal from './lib/UpdateReveal.svelte';
   import { markStartup, startCatchUp, takeUpdateReveal, trackActivity } from './lib/startup';
   import { loadProjectPicks } from './lib/project_picks';
+  import { loadFleetSettings } from './lib/fleet_settings';
   import HubConnectionBanner from './lib/HubConnectionBanner.svelte';
   import UpdateBanner from './lib/UpdateBanner.svelte';
   import { startUpdateChecks } from './lib/updates';
@@ -173,6 +174,7 @@
   async function retryBootstrap() {
     bootstrapRetrying = true;
     const [pr, sr, hr, ar] = await Promise.all([loadProjects(), loadSessions({ force: true }), loadHosts(), loadAccounts()]);
+    void loadFleetSettings();
     bootstrapRetrying = false;
     noteBootstrap(pr, sr, hr, ar);
   }
@@ -354,6 +356,11 @@
       // terminal gate included — re-evaluates without a re-list. A revoke
       // closing an attached PTY depends on this frame arriving.
       onGrantChanged: onGrantFrames,
+      // `settings:changed`: the brake, the autonomy dial and the notifier
+      // read the fleet's settings from one store, so a write from the phone
+      // or another desktop is read back here, not only while Settings is
+      // open. One call per flush, however many keys the flush carried.
+      onSettingsChanged: () => void loadFleetSettings(),
     });
     markStartup('backend');
     const [pr, sr, hr, ar] = await Promise.all([
@@ -442,6 +449,9 @@
       // Re-read it rather than trusting the patched copy.
       void loadMyGrants();
       void loadAccessRequests();
+      // A swallowed `settings:changed` leaves the brake and the dial showing
+      // a value the hub no longer holds.
+      void loadFleetSettings();
     });
     // The composer's chip row. Fleet state since it moved off `localStorage`
     // (so the phone and this window share one list), and never on the
@@ -493,6 +503,9 @@
     // toast on every alt-tab back into the window would only repeat that.
     void loadProjects();
     void loadSessions();
+    // The fleet's settings: a first read that failed (the hub was not up
+    // yet) or a frame missed while away is healed here too.
+    void loadFleetSettings();
     // A Transfer waiting for its session to go idle hears of the wait's end
     // only through the live timeline push; one missed while the window was
     // away (sleep, a dropped stream) is read back from the timeline here.
@@ -657,7 +670,12 @@
   let lastHubState: string | null = null;
   $effect(() => {
     const st = $hubConnection.state;
-    if (lastHubState !== null && st !== lastHubState) void loadProjectPicks();
+    if (lastHubState !== null && st !== lastHubState) {
+      void loadProjectPicks();
+      // The settings too: a write made while the link was down never sent
+      // this window its frame, and a failed first read is retried.
+      if (st === 'connected') void loadFleetSettings();
+    }
     lastHubState = st;
   });
   $effect(() => {

@@ -604,7 +604,10 @@ impl Store {
                project_id=CASE WHEN excluded.project_id IS NULL AND started_at IS NOT NULL
                                THEN project_id ELSE excluded.project_id END,
                last_activity_at=excluded.last_activity_at,
-               account_uuid=COALESCE(excluded.account_uuid, account_uuid),
+               -- Only a Claude pane bills a Claude account: a Codex or
+               -- Hermes row keeps none, and one it took before is cleared.
+               account_uuid=CASE WHEN agent NOT IN ('claude', 'shell') THEN NULL
+                                 ELSE COALESCE(excluded.account_uuid, account_uuid) END,
                worktree_key=COALESCE(excluded.worktree_key, worktree_key),
                -- The resurrect. Reached only for a row this observation is
                -- allowed to touch at all (the `WHERE` below, #170).
@@ -1172,6 +1175,7 @@ impl Store {
 
         // Phase 2: savepoint released — now it is safe to emit (directly when
         // it was the transaction, held by `atomically` when nested).
+        let uncredentialed = self.uncredentialed_accounts();
         for change in &changes {
             // Task 7 (R5): one INFO line per session lifecycle transition —
             // a host reboot used to leave nothing in the log to forensically
@@ -1201,6 +1205,9 @@ impl Store {
             }
             self.bus.emit_change(change);
         }
+        // The probe may have moved the host's reachability, and with it the
+        // signed-out verdict of an account a login there is on.
+        self.reemit_after_host_write(&uncredentialed, None)?;
         Ok(())
     }
 

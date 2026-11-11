@@ -101,7 +101,9 @@ jobs:
   # control-api.md, hub.md, updates.md, work-graph.md, decisions.md,
   # settings-reference.md and the page schema/catalog there, so an edit to one
   # can fail CI. Before adding a path, grep crates/, src-tauri/, src/ and
-  # scripts/ for it; a file a test reads must stay off this list.
+  # scripts/ for it; a file a test reads must stay off this list. (docs/ux/
+  # is off it: vitest reads the design manual's bundle.css, keyboard.md and
+  # canvases there.)
   #
   # Pushes to main and manual runs always run everything, so each merge keeps
   # its own full verdict. If this job fails, its output is empty and every
@@ -130,7 +132,7 @@ jobs:
           while IFS= read -r f; do
             [ -n "$f" ] || continue
             case "$f" in
-              docs/superpowers/*|docs/plans/*|docs/specs/*|docs/adr/*|docs/ux/*|docs/images/*) ;;
+              docs/superpowers/*|docs/plans/*|docs/specs/*|docs/adr/*|docs/images/*) ;;
               README.md|CLAUDE.md|RUST-BUILD-PERFORMANCE-AUDIT.md) ;;
               docs/architecture.md|docs/status.md) ;;
               *) echo "runs the build: $f"; code=true; break ;;

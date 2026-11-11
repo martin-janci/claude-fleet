@@ -174,6 +174,93 @@ fn counts_and_cost_cover_the_members_attempts() {
     assert_eq!(s.mission_cost_micros(m).unwrap(), 1_500_000);
 }
 
+/// Review R5: a worker's session row is deleted when it is killed and
+/// reaped (a lane relay, the loop's cancel, Clean up), and 101's trigger
+/// NULLs the task's worker id. The mission's spend keeps what it had
+/// spent, once for a lead that ran several tasks, and the run estimate
+/// keeps its runs.
+#[test]
+fn a_reaped_workers_spend_stays_with_its_mission() {
+    let s = Store::open_in_memory().unwrap();
+    let m = mission(&s);
+    s.upsert_host("h").unwrap();
+    let lead = s
+        .upsert_session("lead", "h", None, None, 1, 1, "running", None)
+        .unwrap();
+    let a = s.create_local_work_item(None, "a").unwrap().id;
+    let b = s.create_local_work_item(None, "b").unwrap().id;
+    s.set_mission_item(m, a, true, "fleet").unwrap();
+    s.set_mission_item(m, b, true, "fleet").unwrap();
+    let t1 = s.insert_task(None, Some(lead), "a", "n").unwrap();
+    s.set_task_run(t1.id, a, 1, "implement").unwrap();
+    let t2 = s.insert_task(None, Some(lead), "b", "n").unwrap();
+    s.set_task_run(t2.id, b, 1, "implement").unwrap();
+    s.conn_ref()
+        .execute(
+            "UPDATE sessions SET usage_cost_micros = 4000000 WHERE id = ?1",
+            [lead],
+        )
+        .unwrap();
+    s.conn_ref()
+        .execute("UPDATE tasks SET finished_at = 100", [])
+        .unwrap();
+    assert_eq!(s.mission_cost_micros(m).unwrap(), 4_000_000);
+    assert_eq!(s.run_cost_estimate(Some(m)).unwrap(), Some((2_000_000, 2)));
+    s.delete_session(lead).unwrap();
+    assert_eq!(s.mission_cost_micros(m).unwrap(), 4_000_000);
+    assert_eq!(s.run_cost_estimate(Some(m)).unwrap(), Some((2_000_000, 2)));
+    // The next session takes the id; it is no worker of the mission and
+    // its spend is not the mission's.
+    let next = s
+        .upsert_session("next", "h", None, None, 1, 1, "running", None)
+        .unwrap();
+    assert_eq!(next, lead, "the id is reused");
+    s.conn_ref()
+        .execute(
+            "UPDATE sessions SET usage_cost_micros = 9000000 WHERE id = ?1",
+            [next],
+        )
+        .unwrap();
+    assert_eq!(s.mission_cost_micros(m).unwrap(), 4_000_000);
+    s.delete_session(next).unwrap();
+    assert_eq!(s.mission_cost_micros(m).unwrap(), 4_000_000);
+}
+
+/// Review of #1118: a reaped lead's spend stays with its mission when the
+/// lead's newest task is outside it (a dispatched task with no item, or a
+/// run of another mission's item); each mission keeps what it counted live.
+#[test]
+fn a_reaped_workers_later_task_outside_the_mission_keeps_the_missions_spend() {
+    let s = Store::open_in_memory().unwrap();
+    let m = mission(&s);
+    let other = mission(&s);
+    s.upsert_host("h").unwrap();
+    let lead = s
+        .upsert_session("lead", "h", None, None, 1, 1, "running", None)
+        .unwrap();
+    let a = s.create_local_work_item(None, "a").unwrap().id;
+    let b = s.create_local_work_item(None, "b").unwrap().id;
+    s.set_mission_item(m, a, true, "fleet").unwrap();
+    s.set_mission_item(other, b, true, "fleet").unwrap();
+    let t1 = s.insert_task(None, Some(lead), "a", "n").unwrap();
+    s.set_task_run(t1.id, a, 1, "implement").unwrap();
+    let t2 = s.insert_task(None, Some(lead), "b", "n").unwrap();
+    s.set_task_run(t2.id, b, 1, "implement").unwrap();
+    // A dispatched task with no item, newest of all.
+    s.insert_task(None, Some(lead), "chore", "n").unwrap();
+    s.conn_ref()
+        .execute(
+            "UPDATE sessions SET usage_cost_micros = 4000000 WHERE id = ?1",
+            [lead],
+        )
+        .unwrap();
+    assert_eq!(s.mission_cost_micros(m).unwrap(), 4_000_000);
+    assert_eq!(s.mission_cost_micros(other).unwrap(), 4_000_000);
+    s.delete_session(lead).unwrap();
+    assert_eq!(s.mission_cost_micros(m).unwrap(), 4_000_000);
+    assert_eq!(s.mission_cost_micros(other).unwrap(), 4_000_000);
+}
+
 /// A person's "Finish task" on a member (a `wrapup` row, design 2026-10-13
 /// D2) is not one of the mission's runs: it spends no attempt, takes no
 /// slot, adds no cost and makes its session no mission worker.
@@ -201,6 +288,40 @@ fn a_wrapup_on_a_member_is_not_a_mission_run() {
     assert_eq!(s.mission_cost_micros(m).unwrap(), 0);
     assert!(!s.is_mission_worker(p).unwrap());
     assert_eq!(s.run_cost_estimate(Some(m)).unwrap(), None);
+}
+
+/// Ending a mission, or taking its item out, stops no session: a worker
+/// the mission started stays one, so the guard does not lift mid-turn. A
+/// person's own run on a member is a worker only while the mission is live.
+#[test]
+fn a_missions_own_worker_stays_one_after_the_mission_ends_or_drops_its_item() {
+    let s = Store::open_in_memory().unwrap();
+    let m = mission(&s);
+    s.set_mission_state(m, None, "active", "fleet").unwrap();
+    s.upsert_host("h").unwrap();
+    let w = s
+        .upsert_session("w", "h", None, None, 1, 1, "running", None)
+        .unwrap();
+    s.set_session_origin(w, &crate::store::SessionOrigin::mission(m))
+        .unwrap();
+    let own = s
+        .upsert_session("own", "h", None, None, 1, 1, "running", None)
+        .unwrap();
+    let item = s.create_local_work_item(None, "a").unwrap().id;
+    s.set_mission_item(m, item, true, "fleet").unwrap();
+    for sid in [w, own] {
+        let t = s.insert_task(None, Some(sid), "go", "n").unwrap();
+        s.set_task_run(t.id, item, 1, "implement").unwrap();
+    }
+    assert!(s.is_mission_worker(w).unwrap());
+    assert!(s.is_mission_worker(own).unwrap());
+    s.set_mission_item(m, item, false, "fleet").unwrap();
+    assert!(s.is_mission_worker(w).unwrap(), "item taken out");
+    assert!(!s.is_mission_worker(own).unwrap());
+    s.set_mission_item(m, item, true, "fleet").unwrap();
+    s.set_mission_state(m, None, "cancelled", "fleet").unwrap();
+    assert!(s.is_mission_worker(w).unwrap(), "mission cancelled");
+    assert!(!s.is_mission_worker(own).unwrap());
 }
 
 /// An active mission, its next wake an hour away.

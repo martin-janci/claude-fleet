@@ -46,4 +46,13 @@ describe('persistentRule', () => {
   it('reads the session phrase at the end only', () => {
     expect(of("Yes, and don't ask again for: ls * in /srv/the session logs")).not.toBeNull();
   });
+
+  it('asks about other wordings of a choice that outlives the session', () => {
+    expect(
+      of("Yes, and always allow for commands that start with 'python cli.py' (Persist to settings.json)"),
+    ).toEqual({ rule: null, folder: null, saved: true });
+    expect(of('Yes, always allow git push')).toEqual({ rule: null, folder: null, saved: true });
+    // The hub flags a bare "allow all" (pane_intel::persists_label); the card follows the flag.
+    expect(of('Yes, allow all edits', true)).toEqual({ rule: null, folder: null, saved: false });
+  });
 });
