@@ -15,6 +15,7 @@
   import { AUTONOMY, autonomyLabel, autonomyOf, setAutonomy, type AutonomyId } from './autonomy';
   import Meter from './kit/Meter.svelte';
   import { radiogroupKeys } from './radiogroup_keys';
+  import { errorText } from './error_copy';
 
   const current = $derived(autonomyOf($fleetSettings));
   let open = $state(false);
@@ -41,9 +42,20 @@
   async function pick(id: AutonomyId) {
     if (busy) return;
     busy = true;
-    error = await setAutonomy(id, $fleetSettings);
+    error = await setAutonomy(id);
     busy = false;
     if (!error) closeToChip();
+  }
+
+  /** The popover's brake reports a refusal (an untrusted device, a hub
+   *  that is down) on its error line, as the header's does. */
+  async function togglePause() {
+    if (busy) return;
+    busy = true;
+    error = null;
+    const r = await setAutomationPaused(!$automationPaused);
+    busy = false;
+    if (!r.ok) error = `Couldn't ${$automationPaused ? 'resume' : 'pause'} automation: ${errorText(r.error)}`;
   }
 
   function toggle() {
@@ -133,7 +145,8 @@
           class="btn btn--quiet"
           data-testid="autonomy-pause"
           aria-pressed={$automationPaused}
-          onclick={() => void setAutomationPaused(!$automationPaused)}>{$automationPaused ? 'Resume all' : 'Pause all'}</button
+          disabled={busy}
+          onclick={() => void togglePause()}>{$automationPaused ? 'Resume all' : 'Pause all'}</button
         >
       </div>
     </div>
