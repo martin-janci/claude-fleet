@@ -84,4 +84,37 @@ describe('AgentActions', () => {
     expect(items.textContent).toContain('Jira: update issue PD-1 (status)');
     expect(items.textContent).toContain('on a scheduled run');
   });
+
+  it('shows what an mcp_call will send as labelled, readable fields, not escaped JSON', async () => {
+    const description = '**Context**\n\nThe report page, **Custom range**.\n\nPicking a ("Custom") range…';
+    agents.set({
+      rules: [],
+      jobs: [],
+      pending: [
+        {
+          ...action(1),
+          kind: 'mcp_call',
+          payload: JSON.stringify({
+            binding: 'jira',
+            tool: 'jira_update_issue',
+            arguments: { description, issue_key: 'DEMO-42', returnIssue: true },
+            body: 'jira.jira_update_issue({…})',
+          }),
+        },
+      ],
+    });
+    render(AgentActions);
+    await tick();
+    await fireEvent.click(screen.getByTestId('agent-action-show'));
+    const body = screen.getByTestId('agent-action-body');
+    const labels = Array.from(body.querySelectorAll('dt')).map((d) => d.textContent);
+    // Short fields first, the long text last.
+    expect(labels).toEqual(['Issue key', 'Return issue', 'Description']);
+    expect(body.textContent).toContain('jira · jira_update_issue');
+    expect(body.textContent).toContain('yes');
+    expect(body.textContent).not.toContain('\\n');
+    expect(body.textContent).not.toContain('**');
+    expect(body.textContent).toContain('("Custom")');
+    expect(Array.from(body.querySelectorAll('strong')).map((b) => b.textContent)).toEqual(['Context', 'Custom range']);
+  });
 });

@@ -74,7 +74,7 @@ export async function capture({ outDir, cacheDir, runs, only = null }) {
           ` for (const [k, v] of Object.entries(${JSON.stringify(prefs)})) localStorage.setItem('cf:pref:' + k, JSON.stringify(v)); } catch {}`,
       });
       await context.addInitScript({ content: shim });
-      if (run.extraFile) await context.addInitScript({ content: readFileSync(run.extraFile, 'utf8') });
+      for (const f of [run.extraFile ?? []].flat()) await context.addInitScript({ content: readFileSync(f, 'utf8') });
       await context.addInitScript({ content: WRAP });
       const page = await context.newPage();
       page.on('pageerror', (e) => entry.errors.push(`pageerror: ${e.message}`));

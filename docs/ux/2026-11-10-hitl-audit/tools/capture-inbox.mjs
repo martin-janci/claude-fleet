@@ -377,6 +377,14 @@ runs.push({ name: 'sessions-comfortable', world: full, prefs: { 'ui.rowDensity':
 } });
 
 const wanted = only ? only.split(',') : null;
+// Agent action Details: what an mcp_call will send, readable (2026-11-11).
+runs.push({ name: 'agent-details', world: full, extraFile: [EXTRA, EXTRA.replace('extra-inbox.js', 'extra-agents.js')], async steps(t) {
+  await boot(t);
+  await t.click('rail-inbox'); await park(t);
+  await t.click('agent-action-show'); await t.settle(300);
+  await t.shotOf(t.page.getByTestId('agent-action'), 'details', m('Inbox', 'agent action Details: labelled fields, line breaks kept', 'rail-inbox; Details'));
+} });
+
 const picked = wanted ? runs.filter((r) => wanted.some((w) => r.name === w)) : runs;
 const report = await capture({ outDir: D, cacheDir: D + '/vite-cache', runs: picked });
 writeFileSync(D + '/capture-log.json', JSON.stringify({ log, report: report.map((e) => ({ run: e.run, theme: e.theme, w: e.viewport.width, errors: e.errors, unknown: e.unknown })) }, null, 2));

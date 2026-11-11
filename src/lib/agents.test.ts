@@ -6,6 +6,9 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import {
   actionBody,
+  actionDetails,
+  boldRuns,
+  fieldLabel,
   actionOutcome,
   actionTitle,
   agents,
@@ -285,5 +288,39 @@ describe('groupActions', () => {
     const x = a(1, 'mcp_call', { binding: 'jira', tool: 'jira_update_issue' });
     expect(actionTitle(x)).toBe('Call jira.jira_update_issue');
     expect(actionTitle(x, { title: 'Jira: update issue PD-1 (status)' })).toBe('Jira: update issue PD-1 (status)');
+  });
+});
+
+describe('actionDetails (readable Details)', () => {
+  it('labels arguments in words', () => {
+    expect(fieldLabel('issue_key')).toBe('Issue key');
+    expect(fieldLabel('returnIssue')).toBe('Return issue');
+  });
+
+  it('keeps a string as written, joins lists, and indents only what is nested', () => {
+    const d = actionDetails({
+      kind: 'mcp_call',
+      payload: JSON.stringify({ binding: 'jira', tool: 'x', arguments: { labels: ['a', 'b'], fields: { a: 1 }, text: 'one\ntwo' } }),
+    });
+    expect(d?.tool).toBe('jira · x');
+    expect(d?.fields).toEqual([
+      { label: 'Labels', value: 'a, b', code: false },
+      { label: 'Fields', value: '{\n  "a": 1\n}', code: true },
+      { label: 'Text', value: 'one\ntwo', code: false },
+    ]);
+  });
+
+  it('shows any other action\'s body as it is, and nothing when there is none', () => {
+    expect(actionDetails({ kind: 'jira_comment', payload: '{"body":"h3. x"}' })?.fields).toEqual([{ label: '', value: 'h3. x', code: false }]);
+    expect(actionDetails({ kind: 'jira_link', payload: '{"bug_key":"PD-4"}' })).toBeNull();
+  });
+
+  it('draws markdown bold without its stars and touches nothing else', () => {
+    expect(boldRuns('**A** b **c**')).toEqual([
+      { bold: true, text: 'A' },
+      { bold: false, text: ' b ' },
+      { bold: true, text: 'c' },
+    ]);
+    expect(boldRuns('a * b <i>')).toEqual([{ bold: false, text: 'a * b <i>' }]);
   });
 });

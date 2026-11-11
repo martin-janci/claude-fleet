@@ -15,8 +15,9 @@
   import { shortAge, exactTime } from '../session_status';
   import { push, pushError } from '../toasts';
   import {
-    actionBody,
+    actionDetails,
     actionOutcome,
+    boldRuns,
     actionTitle,
     answerAgentAction,
     answerAgentActions,
@@ -26,6 +27,8 @@
     type ActionGroup,
     type AgentAction,
   } from '../agents';
+
+  type Details = ReturnType<typeof actionDetails>;
 
   // One id per call in flight (review w11-13): a single id let the first
   // call's return re-enable a second item's buttons mid-call.
@@ -79,7 +82,9 @@
   }
 </script>
 
-{#snippet buttons(a: AgentAction, body: string | null)}
+{#snippet text(value: string)}{#each boldRuns(value) as r, i (i)}{#if r.bold}<strong>{r.text}</strong>{:else}{r.text}{/if}{/each}{/snippet}
+
+{#snippet buttons(a: AgentAction, details: Details)}
   <span class="buttons">
     <button type="button" class="btn btn--chip" data-testid="agent-action-approve" disabled={busy.has(a.id)} onclick={() => answer(a, true)}
       >Approve</button
@@ -87,13 +92,27 @@
     <button type="button" class="btn btn--chip" data-testid="agent-action-reject" disabled={busy.has(a.id)} onclick={() => answer(a, false)}
       >Reject</button
     >
-    {#if body}
+    {#if details}
       <button type="button" class="btn btn--chip" data-testid="agent-action-show" aria-expanded={shown === a.id} onclick={() => (shown = shown === a.id ? null : a.id)}
         >{shown === a.id ? 'Hide details' : 'Details'}</button
       >
     {/if}
   </span>
-  {#if body && shown === a.id}<pre class="body" data-testid="agent-action-body">{body}</pre>{/if}
+  {#if details && shown === a.id}
+    <div class="body" data-testid="agent-action-body">
+      {#if details.tool}<div class="tool">{details.tool}</div>{/if}
+      {#if details.fields.length === 1 && !details.fields[0].label}
+        <div class="value">{@render text(details.fields[0].value)}</div>
+      {:else}
+        <dl class="fields">
+          {#each details.fields as f, i (i)}
+            <dt>{f.label}</dt>
+            {#if f.code}<dd><pre class="code">{f.value}</pre></dd>{:else}<dd class="value">{@render text(f.value)}</dd>{/if}
+          {/each}
+        </dl>
+      {/if}
+    </div>
+  {/if}
 {/snippet}
 
 {#if $pendingAgentGroups.length > 0}
@@ -108,7 +127,7 @@
           <div class="text">
             <span class="name">{actionTitle(a, about)} <span class="chip">agent</span></span>
             <span class="line" title={exactTime(a.created_at)}>{from ? `${from} · ` : ''}proposed {shortAge(a.created_at)}</span>
-            {@render buttons(a, actionBody(a))}
+            {@render buttons(a, actionDetails(a))}
           </div>
         </div>
       {:else}
@@ -141,7 +160,7 @@
                   <li class="sub" data-testid="agent-action">
                     <span class="name">{actionTitle(it.action, it.about)}</span>
                     <span class="line" title={exactTime(it.action.created_at)}>{on ? `${on} · ` : ''}proposed {shortAge(it.action.created_at)}</span>
-                    {@render buttons(it.action, actionBody(it.action))}
+                    {@render buttons(it.action, actionDetails(it.action))}
                   </li>
                 {/each}
               </ul>
@@ -179,7 +198,16 @@
   .chip { font-size: var(--text-2xs); color: var(--fg-muted); border: 1px solid var(--border); border-radius: var(--radius-pill); padding: 0 6px; font-weight: 400; }
   .line { color: var(--fg-muted); font-size: var(--text-xs); overflow-wrap: anywhere; }
   .buttons { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
-  .body { max-height: 240px; overflow: auto; white-space: pre-wrap; font-size: var(--text-xs); background: var(--bg-sunk); border-radius: var(--radius-md); padding: 6px; margin: 4px 0 0; }
+  /* What it will send, readable before Approve: labelled fields, line breaks
+     kept, the body font (2026-11-11: the raw escaped JSON could not be read). */
+  .body { container-type: inline-size; max-height: 360px; overflow: auto; font-size: var(--text-sm); line-height: 1.5; background: var(--bg-sunk); border-radius: var(--radius-md); padding: 8px 10px; margin: 4px 0 0; color: var(--fg); }
+  .tool { font-family: var(--font-mono); font-size: var(--text-xs); color: var(--fg-muted); margin-bottom: 6px; }
+  .fields { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 12px; margin: 0; }
+  .fields dt { color: var(--fg-muted); font-size: var(--text-xs); padding-top: 2px; }
+  .fields dd { margin: 0; min-width: 0; }
+  .value { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .code { margin: 0; white-space: pre-wrap; font-size: var(--text-xs); overflow-wrap: anywhere; }
+  @container (max-width: 420px) { .fields { grid-template-columns: minmax(0, 1fr); } .fields dd { margin-bottom: 6px; } }
   .group-items { list-style: none; margin: 6px 0 0; padding: 0 0 0 8px; border-left: 2px solid var(--border); display: flex; flex-direction: column; gap: 8px; }
   .sub { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
   .sub .name { font-weight: 400; }

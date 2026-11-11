@@ -403,6 +403,76 @@ export function actionTitle(a: Pick<AgentAction, 'kind' | 'payload'>, about?: Pi
   return a.kind.replace(/_/g, ' ');
 }
 
+/** One field of what an action sends, as a person reads it. */
+export interface DetailField {
+  /** "Description", "Issue key". */
+  label: string;
+  /** The value as text: a string as written (its line breaks kept), a list
+   *  joined with commas, anything nested as indented JSON. */
+  value: string;
+  /** Nested JSON, drawn in the code font; text otherwise. */
+  code: boolean;
+}
+
+/** "issue_key" / "returnIssue" → "Issue key" / "Return issue". */
+export function fieldLabel(key: string): string {
+  const words = key
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/[_-]+/g, ' ')
+    .trim()
+    .toLowerCase();
+  return words ? words[0].toUpperCase() + words.slice(1) : key;
+}
+
+function fieldValue(v: unknown): { value: string; code: boolean } {
+  if (typeof v === 'string') return { value: v, code: false };
+  if (v == null) return { value: '—', code: false };
+  if (typeof v === 'boolean') return { value: v ? 'yes' : 'no', code: false };
+  if (typeof v === 'number') return { value: String(v), code: false };
+  if (Array.isArray(v) && v.every((x) => typeof x === 'string' || typeof x === 'number'))
+    return { value: v.length ? v.join(', ') : '—', code: false };
+  return { value: JSON.stringify(v, null, 2), code: true };
+}
+
+/**
+ * What an action will send, field by field, for its Details (2026-11-11: an
+ * `mcp_call`'s body is `jira.jira_update_issue({"description": "**Context**\n\n…"})`,
+ * escaped JSON a person cannot read before approving). An `mcp_call` lists its
+ * arguments, longest last so the short ones (key, format) read first; any other
+ * action that carries a body shows it as written. Null when there is nothing
+ * to show.
+ */
+export function actionDetails(a: Pick<AgentAction, 'kind' | 'payload'>): { tool: string | null; fields: DetailField[] } | null {
+  const p = parse(a.payload);
+  if (!p) return null;
+  const args = p.arguments;
+  if (a.kind === 'mcp_call' && args && typeof args === 'object' && !Array.isArray(args)) {
+    const fields = Object.entries(args as Record<string, unknown>).map(([k, v]) => ({ label: fieldLabel(k), ...fieldValue(v) }));
+    const long = (f: DetailField) => f.code || f.value.length > 80 || f.value.includes('\n');
+    fields.sort((x, y) => Number(long(x)) - Number(long(y)));
+    const tool = typeof p.tool === 'string' ? `${p.binding ?? ''}${p.binding ? ' · ' : ''}${p.tool}` : null;
+    return fields.length > 0 || tool ? { tool, fields } : null;
+  }
+  const body = actionBody(a);
+  return body ? { tool: null, fields: [{ label: '', value: body, code: false }] } : null;
+}
+
+/** "**Context**: text" → [{bold:true,text:"Context"}, {bold:false,text:": text"}]:
+ *  the markdown bold an agent writes, drawn bold instead of with its stars.
+ *  Nothing else is interpreted, and nothing becomes HTML. */
+export function boldRuns(text: string): { bold: boolean; text: string }[] {
+  const out: { bold: boolean; text: string }[] = [];
+  const re = /\*\*([^*\n]+?)\*\*/g;
+  let at = 0;
+  for (let m = re.exec(text); m; m = re.exec(text)) {
+    if (m.index > at) out.push({ bold: false, text: text.slice(at, m.index) });
+    out.push({ bold: true, text: m[1] });
+    at = m.index + m[0].length;
+  }
+  if (at < text.length) out.push({ bold: false, text: text.slice(at) });
+  return out;
+}
+
 /** The body an action will post, when it carries one. */
 export function actionBody(a: Pick<AgentAction, 'payload'>): string | null {
   const b = parse(a.payload)?.body;
