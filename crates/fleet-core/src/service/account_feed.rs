@@ -64,13 +64,13 @@ pub fn limit_condition(uuid: &str, label: &str, reset: Option<i64>) -> Condition
 }
 
 /// PURE: the condition of a signed-out login.
-pub fn login_condition(host: &str, login: &crate::store::SignedOutLogin) -> Condition {
+pub fn login_condition(host: &str, login: &crate::store::SignedOutLogin, token: bool) -> Condition {
     Condition {
         key: format!(
             "{LOGIN_PREFIX}{host}:{}:out",
             login.profile.as_deref().unwrap_or("-")
         ),
-        text: login_health::card_text(host, login),
+        text: login_health::card_text(host, login, token),
     }
 }
 
@@ -138,7 +138,11 @@ fn conditions_over(
     }
     for h in hosts {
         for l in &h.signed_out_logins {
-            out.push(login_condition(&h.alias, l));
+            out.push(login_condition(
+                &h.alias,
+                l,
+                login_health::is_setup_token(h, l.profile.as_deref()),
+            ));
         }
     }
     out
@@ -217,6 +221,7 @@ mod tests {
                 since: 0,
                 checked_at: 0,
             },
+            false,
         );
         assert_eq!(l.key, "l:htz:work:out");
         assert!(l

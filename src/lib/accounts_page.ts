@@ -27,6 +27,8 @@ export interface AccountLogin {
   /** When fleet first saw this login signed out (`hosts.signed_out_logins`,
    *  review w03-1); absent while it is signed in. */
   signedOutSince?: number;
+  /** The profile holds a setup token (`credential: 'setup_token'`). */
+  setupToken?: boolean;
 }
 
 export interface AccountSummary {
@@ -59,7 +61,13 @@ export function loginsFor(uuid: string, hosts: readonly HostRow[]): AccountLogin
     };
     if (h.account_uuid === uuid) out.push({ host: h.alias, profile: null, ...since(null) });
     for (const p of h.claude_profiles ?? []) {
-      if (p.account_uuid === uuid) out.push({ host: h.alias, profile: p.name, ...since(p.name) });
+      if (p.account_uuid === uuid)
+        out.push({
+          host: h.alias,
+          profile: p.name,
+          ...since(p.name),
+          ...(p.credential === 'setup_token' ? { setupToken: true } : {}),
+        });
     }
   }
   return out;

@@ -159,6 +159,13 @@ and `list_hosts` shows the profile with `credential: "setup_token"`.
   `/login` of the same account elsewhere, if there is one. Nor is a token
   beside a `/login` of the same account a login conflict: it has no refresh
   token to revoke.
+- **Signed out** (the token expired or was revoked): the login card, the
+  refusal of automation and the Accounts page say "make a new token with
+  `claude setup-token`" instead of `claude /login`, which does not touch the
+  exported token; the Accounts page copies `claude setup-token` to run. The
+  hourly recheck of signed-out logins skips the profile (a usage fetch
+  cannot read a token), so the note goes when a new token replaces it. A
+  headless run's refusal, which has no host row to tell, names both fixes.
 
 Desktop: Accounts or Host details → **+ Add account** → *Sign in with*
 **Setup token**; Host details → Login profiles → **Setup token…** opens it

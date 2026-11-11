@@ -277,6 +277,7 @@ const SIGNED_OUT: &[&str] = &[
     "not logged in",
     "oauth token has expired",
     "oauth token has been revoked",
+    "invalid bearer token",
     "authentication_error",
 ];
 
@@ -314,16 +315,21 @@ pub fn run_signed_out(env: Option<&Envelope>, text: &str, stderr: &[u8]) -> bool
 pub fn signed_out_error(host: &str, profile: Option<&str>) -> crate::ipc_error::IpcError {
     // Login health (control review F6): the next usage pass records it.
     crate::service::login_health::note_signed_out(host, profile);
-    let (whose, login) = match profile {
+    // No store here to tell a setup-token profile from a `/login` one, so a
+    // profile's refusal names both fixes; the card `login_health` raises
+    // from the note knows which it is.
+    let (whose, login, token) = match profile {
         Some(p) => (
             format!("{host} (login profile {p})"),
             format!("CLAUDE_CONFIG_DIR=~/.claude-profiles/{p} claude /login"),
+            " (a setup-token profile: make a new token with `claude setup-token` \
+             and add it with + Add account instead)",
         ),
-        None => (host.to_string(), "claude /login".to_string()),
+        None => (host.to_string(), "claude /login".to_string(), ""),
     };
     crate::ipc_error::IpcError::new(
         crate::ipc_error::codes::E_CLAUDE_CLI,
-        format!("Claude login expired on {whose}: run `{login}` there, then retry"),
+        format!("Claude login expired on {whose}: run `{login}` there, then retry{token}"),
     )
 }
 
@@ -548,7 +554,9 @@ mod tests {
         assert_eq!(
             e.message,
             "Claude login expired on mercury (login profile work): run \
-             `CLAUDE_CONFIG_DIR=~/.claude-profiles/work claude /login` there, then retry"
+             `CLAUDE_CONFIG_DIR=~/.claude-profiles/work claude /login` there, then retry \
+             (a setup-token profile: make a new token with `claude setup-token` and add \
+             it with + Add account instead)"
         );
     }
 

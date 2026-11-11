@@ -655,7 +655,7 @@
                   >
                   <span class="sub">{l.profile ? `profile ${l.profile}` : 'host login'}</span>
                   {#if l.signedOutSince != null}
-                    {@const card = loginCardText(l.host, { profile: l.profile, since: l.signedOutSince, checked_at: 0 })}
+                    {@const card = loginCardText(l.host, { profile: l.profile, since: l.signedOutSince, checked_at: 0 }, l.setupToken)}
                     <span class="signed-out" data-testid="account-login-signed-out">signed out since {dayLabel(l.signedOutSince)}</span>
                     <button
                       type="button"
@@ -663,10 +663,10 @@
                       data-testid="account-login-copy"
                       title={card}
                       onclick={() =>
-                        void copyText(loginShellCommand(l.host, l.profile)).then((ok) =>
-                          push(ok ? { kind: 'info', message: 'Sign-in command copied' } : { kind: 'error', message: `Could not copy. Run: ${loginShellCommand(l.host, l.profile)}` }),
+                        void copyText(loginShellCommand(l.host, l.profile, l.setupToken)).then((ok) =>
+                          push(ok ? { kind: 'info', message: 'Sign-in command copied' } : { kind: 'error', message: `Could not copy. Run: ${loginShellCommand(l.host, l.profile, l.setupToken)}` }),
                         )}
-                      >Copy sign-in command</button
+                      >{l.setupToken ? 'Copy setup-token command' : 'Copy sign-in command'}</button
                     >
                   {/if}
                 </li>
