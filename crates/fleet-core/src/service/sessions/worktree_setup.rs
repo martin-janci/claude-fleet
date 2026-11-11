@@ -35,6 +35,15 @@ const NO_DIR: i32 = 96;
 /// is part of it and nothing else in it is ever run. `**` reaches into
 /// subfolders where bash has `globstar` (bash 4+; macOS's bash 3.2 reads it
 /// as `*`). The command is the person's own and runs as typed, in `wt`.
+///
+/// New worktrees live inside the checkout (`.worktrees/`,
+/// `.claude/worktrees/`), so the copy never takes from a worktree: not a
+/// match inside one (`**/.env` would copy every sibling's), and not one
+/// inside a matched folder (`.claude` holds `.claude/worktrees/`, the new
+/// worktree among them), which is copied entry by entry around it. The
+/// worktrees are fleet's two folders and every one `git worktree list`
+/// names. `.` and `..` are never a match (bash before 5.2 lets `.*` match
+/// them), nor is any `.git`.
 pub(crate) fn setup_script(base: &str, wt: &str, setup: &WorktreeSetup) -> String {
     let mut s = String::new();
     s.push_str(&format!("base={}\nwt={}\n", quote(base), quote(wt)));
@@ -42,17 +51,75 @@ pub(crate) fn setup_script(base: &str, wt: &str, setup: &WorktreeSetup) -> Strin
         "cd \"$base\" || exit {NO_DIR}\n[ -d \"$wt\" ] || exit {NO_DIR}\n"
     ));
     if !setup.copy.is_empty() {
-        s.push_str("shopt -s nullglob dotglob\nshopt -s globstar 2>/dev/null\n");
+        s.push_str(
+            "shopt -s nullglob dotglob\nshopt -s globstar 2>/dev/null\n\
+             shopt -s globskipdots 2>/dev/null\n",
+        );
+        // The worktrees under the checkout, relative to it, one per line.
+        s.push_str(&format!(
+            "top=$(pwd -P)\n\
+             wtp=$(cd \"$wt\" && pwd -P) || exit {NO_DIR}\n\
+             skips=\n\
+             while IFS= read -r p; do\n\
+             \x20 case \"$p\" in \"$top\"|'') continue ;; \"$top\"/*) p=${{p#\"$top\"/}} ;; /*) continue ;; esac\n\
+             \x20 skips=\"$skips$p\"$'\\n'\n\
+             done <<FLEET_WORKTREES\n\
+             .worktrees\n\
+             .claude/worktrees\n\
+             $wtp\n\
+             $(git worktree list --porcelain 2>/dev/null | sed -n 's/^worktree //p')\n\
+             FLEET_WORKTREES\n"
+        ));
+        // `under P`: P is a worktree or inside one. `holds D`: folder D has
+        // one inside it.
+        s.push_str(
+            "under() {\n\
+             \x20 while IFS= read -r k; do\n\
+             \x20   [ -n \"$k\" ] || continue\n\
+             \x20   case \"$1/\" in \"$k\"/*) return 0 ;; esac\n\
+             \x20 done <<< \"$skips\"\n\
+             \x20 return 1\n\
+             }\n\
+             holds() {\n\
+             \x20 while IFS= read -r k; do\n\
+             \x20   [ -n \"$k\" ] || continue\n\
+             \x20   case \"$k/\" in \"$1\"/*) return 0 ;; esac\n\
+             \x20 done <<< \"$skips\"\n\
+             \x20 return 1\n\
+             }\n",
+        );
+        s.push_str(&format!(
+            "copy_dir() {{\n\
+             \x20 if ! holds \"$1\"; then\n\
+             \x20   mkdir -p \"$wt/$1\" && cp -R \"$1/.\" \"$wt/$1/\" || exit {COPY_FAILED}\n\
+             \x20   return\n\
+             \x20 fi\n\
+             \x20 mkdir -p \"$wt/$1\" || exit {COPY_FAILED}\n\
+             \x20 local e\n\
+             \x20 for e in \"$1\"/*; do\n\
+             \x20   case \"${{e##*/}}\" in .|..|.git) continue ;; esac\n\
+             \x20   under \"$e\" && continue\n\
+             \x20   if [ -d \"$e\" ] && [ ! -L \"$e\" ]; then\n\
+             \x20     copy_dir \"$e\"\n\
+             \x20   else\n\
+             \x20     cp -pR \"$e\" \"$wt/$e\" || exit {COPY_FAILED}\n\
+             \x20   fi\n\
+             \x20 done\n\
+             }}\n"
+        ));
         s.push_str("IFS=$'\\n'\n");
         let pats: Vec<String> = setup.copy.iter().map(|g| quote(g)).collect();
         s.push_str(&format!("for pat in {}; do\n", pats.join(" ")));
         s.push_str(&format!(
             "  for f in $pat; do\n\
+             \x20   while case \"$f\" in ./*) true ;; *) false ;; esac; do f=${{f#./}}; done\n\
+             \x20   case \"$f\" in .|..|*/.|*/..|'') continue ;; esac\n\
              \x20   [ -e \"$f\" ] || continue\n\
              \x20   case \"/$f/\" in */.git/*) continue ;; esac\n\
+             \x20   under \"$f\" && continue\n\
              \x20   echo \"copy $f\"\n\
              \x20   if [ -d \"$f\" ]; then\n\
-             \x20     mkdir -p \"$wt/$f\" && cp -R \"$f/.\" \"$wt/$f/\" || exit {COPY_FAILED}\n\
+             \x20     copy_dir \"$f\"\n\
              \x20   else\n\
              \x20     mkdir -p \"$wt/$(dirname \"$f\")\" && cp -p \"$f\" \"$wt/$f\" || exit {COPY_FAILED}\n\
              \x20   fi\n\
@@ -232,6 +299,105 @@ mod tests {
             std::fs::read_to_string(wt.join("marker")).unwrap().trim(),
             "ran"
         );
+    }
+
+    /// New worktrees live inside the checkout: a `**` glob does not copy
+    /// the other worktrees' files, and a matched folder that holds them
+    /// (`.claude` around `.claude/worktrees/`) is copied around them, the
+    /// new worktree included, instead of into itself.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_copy_never_takes_from_a_worktree_inside_the_checkout() {
+        let d = tempfile::tempdir().unwrap();
+        let base = d.path().join("repo");
+        for dir in [
+            ".worktrees/a/app",
+            ".claude/worktrees/b",
+            ".claude/worktrees/new",
+            ".claude/commands",
+            "app",
+        ] {
+            std::fs::create_dir_all(base.join(dir)).unwrap();
+        }
+        std::fs::write(base.join(".env"), "TOP").unwrap();
+        std::fs::write(base.join("app/.env"), "APP").unwrap();
+        std::fs::write(base.join(".worktrees/a/.env"), "A").unwrap();
+        std::fs::write(base.join(".worktrees/a/app/.env"), "A-APP").unwrap();
+        std::fs::write(base.join(".worktrees/a/.git"), "gitdir: x").unwrap();
+        std::fs::write(base.join(".claude/settings.json"), "{}").unwrap();
+        std::fs::write(base.join(".claude/commands/go.md"), "go").unwrap();
+        std::fs::write(base.join(".claude/worktrees/b/.env"), "B").unwrap();
+        let wt = base.join(".claude/worktrees/new");
+        run_local(&base, &wt, &setup(&["**/.env", ".claude"], None))
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(wt.join(".env")).unwrap(), "TOP");
+        assert_eq!(std::fs::read_to_string(wt.join("app/.env")).unwrap(), "APP");
+        assert!(!wt.join(".worktrees").exists(), "no sibling's files");
+        assert!(wt.join(".claude/settings.json").exists());
+        assert!(wt.join(".claude/commands/go.md").exists());
+        assert!(
+            !wt.join(".claude/worktrees").exists(),
+            "the worktrees inside a copied folder stay out"
+        );
+    }
+
+    /// A worktree `git worktree list` names, wherever it sits in the
+    /// checkout, is not copied from either.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_worktree_git_lists_is_not_copied_from() {
+        let d = tempfile::tempdir().unwrap();
+        let base = d.path().join("repo");
+        std::fs::create_dir_all(&base).unwrap();
+        let git = |args: &[&str]| {
+            let ok = crate::proc::std_command("git")
+                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                .args(args)
+                .current_dir(&base)
+                .output()
+                .unwrap()
+                .status
+                .success();
+            assert!(ok, "git {args:?}");
+        };
+        git(&["init", "-q"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "i"]);
+        git(&["worktree", "add", "-q", "work/other", "-b", "other"]);
+        std::fs::write(base.join("work/other/.env"), "OTHER").unwrap();
+        std::fs::write(base.join(".env"), "TOP").unwrap();
+        let wt = d.path().join("new");
+        std::fs::create_dir_all(&wt).unwrap();
+        run_local(&base, &wt, &setup(&["**/.env", "work"], None))
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(wt.join(".env")).unwrap(), "TOP");
+        assert!(!wt.join("work/other").exists());
+    }
+
+    /// `.` and `..` are never a match: a `.` glob, or `.*` on a bash that
+    /// lets it match them (before 5.2), does not copy the checkout over the
+    /// new worktree.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_dot_glob_never_copies_the_checkout_itself() {
+        let d = tempfile::tempdir().unwrap();
+        let base = d.path().join("repo");
+        std::fs::create_dir_all(base.join("src")).unwrap();
+        std::fs::write(base.join("src/a.txt"), "uncommitted").unwrap();
+        std::fs::write(base.join(".env"), "TOP").unwrap();
+        let wt = base.join(".worktrees/new");
+        std::fs::create_dir_all(wt.join("src")).unwrap();
+        std::fs::write(wt.join("src/a.txt"), "branch").unwrap();
+        run_local(&base, &wt, &setup(&[".", "./.", ".*", "./.env"], None))
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(wt.join("src/a.txt")).unwrap(),
+            "branch"
+        );
+        assert_eq!(std::fs::read_to_string(wt.join(".env")).unwrap(), "TOP");
+        assert!(!wt.join(".worktrees").exists());
     }
 
     #[cfg(unix)]
