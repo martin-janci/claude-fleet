@@ -37,6 +37,7 @@ import { groupRows } from './row_groups';
 import { localMidnight } from './today';
 import { badgeCounts, badgeNumber, readPref, writePref } from './prefs';
 import { fleetInboxCount, showPrimary } from './fleets';
+import { reviewRequestCount } from './review_requests';
 
 /** The rows that need you, worst first (`byTriage`). */
 export function inboxRows(rows: readonly SessionRow[], opts: AttentionOptions): SessionRow[] {
@@ -163,6 +164,10 @@ export interface InboxExtras {
   proposed: number;
   /** Agent actions waiting for a person (`pendingAgentCount`); absent is 0. */
   agentActions?: number;
+  /** Reviews a colleague asked of this person (`reviewRequestCount`);
+   *  absent is 0. Counted, and they open the Needs you section on their
+   *  own (HITL audit H-08). */
+  reviews?: number;
 }
 
 /**
@@ -179,9 +184,10 @@ export function inboxSections(
 ): InboxSection[] {
   const queue = inboxRows(rows, opts);
   const agentActions = extra.agentActions ?? 0;
+  const reviews = extra.reviews ?? 0;
   const others = extra.failingOthers ?? 0;
   if (by === 'none') {
-    const count = queue.length + extra.missions + extra.failingRoutines + agentActions;
+    const count = queue.length + extra.missions + extra.failingRoutines + agentActions + reviews;
     if (count === 0 && extra.proposed === 0 && others === 0) return [];
     return [{ key: 'all', label: null, rows: queue, count, missions: true, routines: true, proposed: true, agents: true }];
   }
@@ -189,12 +195,12 @@ export function inboxSections(
   const of = (state: string) => groups.find((g) => g.key === `state:${state}`)?.rows ?? [];
   const out: InboxSection[] = [];
   const needs = of('action_required');
-  if (needs.length + extra.missions + extra.proposed + agentActions > 0) {
+  if (needs.length + extra.missions + extra.proposed + agentActions + reviews > 0) {
     out.push({
       key: 'needs_you',
       label: 'Needs you',
       rows: needs,
-      count: needs.length + extra.missions + agentActions,
+      count: needs.length + extra.missions + agentActions + reviews,
       missions: true,
       routines: false,
       proposed: true,
@@ -235,8 +241,9 @@ export const inboxCount = derived(
     showPrimary,
     fleetInboxCount,
     attentionFacts,
+    reviewRequestCount,
   ],
-  ([$sessions, $host, $bg, $scope, $of, $idle, $failing, $missions, $agentActions, $showPrimary, $fleets, $facts]) => {
+  ([$sessions, $host, $bg, $scope, $of, $idle, $failing, $missions, $agentActions, $showPrimary, $fleets, $facts, $reviews]) => {
     const scope = $scope === 'all' ? null : { id: $scope, of: $of };
     // Multi-hub Phase 2: the extra fleets the fleet filter shows count too,
     // and this window's own rows only while the filter shows them.
@@ -249,7 +256,8 @@ export const inboxCount = derived(
       countNeedsYou(visible, { idleSecs: $idle * 60, now: Math.floor(Date.now() / 1000), facts: $facts }) +
       $failing +
       $missions +
-      $agentActions
+      $agentActions +
+      $reviews
     );
   },
 );

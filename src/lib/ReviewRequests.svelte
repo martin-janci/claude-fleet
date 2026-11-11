@@ -3,7 +3,7 @@
   // open ask to this person — who asked, on which session, their note —
   // opening the session, and Done to take it off the list. Read when the
   // Inbox shows and every minute while it does.
-  import { onDestroy, onMount } from 'svelte';
+  import { onMount } from 'svelte';
   import { errorSentence } from './error_copy';
   import { hubActionBlocked, hubStatus } from './hub';
   import { hubConnection } from './hub_connection';
@@ -14,12 +14,9 @@
   import { push } from './toasts';
 
   const blocked = $derived(hubActionBlocked('review_request', $hubStatus, $hubConnection));
-  let timer: ReturnType<typeof setInterval> | undefined;
-  onMount(() => {
-    void loadReviewRequests();
-    timer = setInterval(() => void loadReviewRequests(), 60_000);
-  });
-  onDestroy(() => clearInterval(timer));
+  // The rail keeps the asks fresh (`startReviewRequests`); opening the
+  // Inbox reads them once more.
+  onMount(() => void loadReviewRequests());
 
   function open(r: ReviewRequest): void {
     const s = $sessions.find((x) => x.id === r.session_id);

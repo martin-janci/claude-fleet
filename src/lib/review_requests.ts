@@ -3,7 +3,7 @@
 // the session with them (drive, so their notes can go to the agent; watch
 // for someone who is only a viewer, who reads and drafts) and puts the ask
 // in their Inbox, where they open it and mark it done.
-import { writable } from 'svelte/store';
+import { derived, writable } from 'svelte/store';
 import { invokeCmd, type Result } from './result';
 
 /** One ask (`store::ReviewRequestRow`). */
@@ -28,6 +28,27 @@ export const reviewRequests = writable<readonly ReviewRequest[]>([]);
 export async function loadReviewRequests(): Promise<void> {
   const r = await invokeCmd<ReviewRequest[]>('review_request', { args: { action: 'list' } });
   if (r.ok && Array.isArray(r.value)) reviewRequests.set(r.value);
+}
+
+/** How many asks wait on this person: part of the Inbox count (HITL audit
+ *  H-08), so a colleague's ask raises the badge like any other. */
+export const reviewRequestCount = derived(reviewRequests, (r) => r.length);
+
+/** How often the asks are read again while the app runs. */
+export const REVIEW_POLL_MS = 60_000;
+
+let polling: ReturnType<typeof setInterval> | null = null;
+
+/** Read the asks now and every minute, from wherever the app starts it (the
+ *  rail, always mounted), so the count is right before the Inbox opens.
+ *  Returns the stop. Starting twice keeps one timer. */
+export function startReviewRequests(): () => void {
+  void loadReviewRequests();
+  if (polling === null) polling = setInterval(() => void loadReviewRequests(), REVIEW_POLL_MS);
+  return () => {
+    if (polling !== null) clearInterval(polling);
+    polling = null;
+  };
 }
 
 /** Ask `person` (by name) to review session `sessionId`, which you own. */

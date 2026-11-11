@@ -160,6 +160,15 @@ describe('G3.1: the Inbox by state, from the attention model', () => {
     expect(one.map((s) => [s.key, s.count, s.agents])).toEqual([['all', 1, true]]);
   });
 
+  it('a colleague’s review ask opens Needs you on its own and is counted (HITL audit H-08)', () => {
+    // Before, the asks rendered inside a section only something else opened,
+    // and the header read "Nothing needs you" while one waited.
+    const secs = inboxSections([], opts, 'state', { ...none, reviews: 1 });
+    expect(secs.map((s) => [s.key, s.count, s.missions])).toEqual([['needs_you', 1, true]]);
+    const one = inboxSections([], opts, 'none', { ...none, reviews: 2 });
+    expect(one.map((s) => [s.key, s.count])).toEqual([['all', 2]]);
+  });
+
   it('as one queue: every row worst first, under no header', () => {
     const secs = inboxSections(rows, opts, 'none', { ...none, missions: 1 });
     expect(secs).toHaveLength(1);

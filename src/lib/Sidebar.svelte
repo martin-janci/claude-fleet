@@ -50,6 +50,7 @@
   import ReviewRequests from './ReviewRequests.svelte';
   import AgentActions from './automation/AgentActions.svelte';
   import { loadAgents, pendingAgentCount } from './agents';
+  import { reviewRequestCount } from './review_requests';
   import ProposedBy from './ProposedBy.svelte';
   import FleetSwitcher from './FleetSwitcher.svelte';
   import FleetSessionGroups from './FleetSessionGroups.svelte';
@@ -1122,7 +1123,7 @@
   );
   const inboxList = $derived(inboxRows(inboxPool, attentionOpts));
   const inboxNeeding = $derived(
-    inboxList.length + $failingCount + $waitingMissionCount + $pendingAgentCount + $fleetInboxCount,
+    inboxList.length + $failingCount + $waitingMissionCount + $pendingAgentCount + $fleetInboxCount + $reviewRequestCount,
   );
   // G1.6: Jev's "probably waiting" rows, listed apart and never counted.
   const inboxProposed = $derived(proposedRows(inboxPool, attentionOpts, $notWaitingSaid));
@@ -1136,6 +1137,7 @@
       failingOthers: $failingOthersCount,
       proposed: inboxProposed.length,
       agentActions: $pendingAgentCount,
+      reviews: $reviewRequestCount,
     }),
   );
   // Opening the Inbox reads the failed routines and the waiting missions

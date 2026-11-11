@@ -21,6 +21,7 @@
   import { railWorkView, startRailWorkView } from './work_rail_view';
   import { workspace, workspaceRailItems } from './workspace';
   import WorkspaceSwitcher from './WorkspaceSwitcher.svelte';
+  import { startReviewRequests } from './review_requests';
 
   interface Props {
     isMac: boolean;
@@ -41,6 +42,9 @@
 
   // The rail ids are the manual's icon names (kit/icons.ts).
   onMount(() => startRailWorkView());
+  // A colleague's review ask counts in the Inbox badge (HITL audit H-08):
+  // read before the Inbox is ever opened.
+  onMount(() => startReviewRequests());
 
   const workView = $derived($railWorkView);
   const entries = $derived(
