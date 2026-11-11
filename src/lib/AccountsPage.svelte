@@ -70,6 +70,7 @@
   import { requestHostsView, openSettingsAt } from './app_views';
   import { autoSwitchState, loadAutoSwitch, setAutoSwitch, type AutoSwitchPatch } from './account_switch';
   import AddAccountDialog from './AddAccountDialog.svelte';
+  import SignInAgain from './SignInAgain.svelte';
   import { untrack } from 'svelte';
   import { get } from 'svelte/store';
 
@@ -150,6 +151,8 @@
   let pausedOnly = $state<string | null>(null);
   /** + Add account's dialog is open (M15 G2.9). */
   let adding = $state(false);
+  /** The signed-out login whose "Sign in again" is open. */
+  let signingIn = $state<{ host: string; profile: string | null; token: boolean } | null>(null);
   function showPaused(uuid: string) {
     picked = uuid;
     pausedOnly = uuid;
@@ -437,6 +440,10 @@
   {#if adding}
     <AddAccountDialog onclose={() => (adding = false)} />
   {/if}
+  {#if signingIn}
+    {@const g = signingIn}
+    <SignInAgain host={g.host} profile={g.profile} token={g.token} onclose={() => (signingIn = null)} />
+  {/if}
 
   {#if list.length === 0}
     <ListGate load={$accountsLoad} what="accounts" onretry={() => void loadAccounts()} testid="accounts">
@@ -655,7 +662,7 @@
                   >
                   <span class="sub">{l.profile ? `profile ${l.profile}` : 'host login'}</span>
                   {#if l.signedOutSince != null}
-                    {@const card = loginCardText(l.host, { profile: l.profile, since: l.signedOutSince, checked_at: 0 })}
+                    {@const card = loginCardText(l.host, { profile: l.profile, since: l.signedOutSince, checked_at: 0 }, l.setupToken)}
                     <span class="signed-out" data-testid="account-login-signed-out">signed out since {dayLabel(l.signedOutSince)}</span>
                     <button
                       type="button"
@@ -663,10 +670,17 @@
                       data-testid="account-login-copy"
                       title={card}
                       onclick={() =>
-                        void copyText(loginShellCommand(l.host, l.profile)).then((ok) =>
-                          push(ok ? { kind: 'info', message: 'Sign-in command copied' } : { kind: 'error', message: `Could not copy. Run: ${loginShellCommand(l.host, l.profile)}` }),
+                        void copyText(loginShellCommand(l.host, l.profile, l.setupToken)).then((ok) =>
+                          push(ok ? { kind: 'info', message: 'Sign-in command copied' } : { kind: 'error', message: `Could not copy. Run: ${loginShellCommand(l.host, l.profile, l.setupToken)}` }),
                         )}
-                      >Copy sign-in command</button
+                      >{l.setupToken ? 'Copy setup-token command' : 'Copy sign-in command'}</button
+                    >
+                    <button
+                      type="button"
+                      class="link"
+                      data-testid="account-login-sign-in-again"
+                      onclick={() => (signingIn = { host: l.host, profile: l.profile, token: !!l.setupToken })}
+                      >{l.setupToken ? 'New token…' : 'Sign in again'}</button
                     >
                   {/if}
                 </li>

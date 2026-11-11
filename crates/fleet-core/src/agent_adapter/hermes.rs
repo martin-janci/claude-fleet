@@ -36,7 +36,7 @@
 //!   not a text log; nothing reads them yet, so the Conversation tab says
 //!   so and the terminal tab shows the session live.
 
-use super::{AgentAdapter, LaunchSwitch, PickerOption, SlashCommand};
+use super::{cmd, opt, AgentAdapter, LaunchSwitch, PickerOption, SlashCommand};
 use crate::service::pane_intel::{self, ClaudeStatus, PaneIntel, PendingInput, PendingOption};
 use crate::service::pane_intel::{StuckKind, WaitingFor};
 use crate::service::transcript::ConvTurn;
@@ -45,18 +45,6 @@ use crate::tmux::ClaudeLaunch;
 /// The Hermes Agent adapter.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Hermes;
-
-const fn opt(value: &'static str, label: &'static str) -> PickerOption {
-    PickerOption { value, label }
-}
-
-const fn cmd(name: &'static str, description: &'static str, args: bool) -> SlashCommand {
-    SlashCommand {
-        name,
-        description,
-        args,
-    }
-}
 
 /// A hint list: the head of Hermes' curated OpenRouter / Nous Portal list
 /// (`hermes_cli/models.py`). Which slugs work depends on the provider the
@@ -106,7 +94,7 @@ const SLASH: &[SlashCommand] = &[
 ];
 
 /// What a pane falls back to when Hermes exits, as for Claude.
-const TAIL: &str = "exec ${SHELL:-/bin/zsh} -l";
+const TAIL: &str = super::AGENT_EXIT_TAIL;
 
 /// The interactive REPL every launch runs; see the module docs.
 const BASE: &str = "hermes chat --cli --yolo";
@@ -451,6 +439,7 @@ fn dialog(lines: &[&str], screen: &Screen) -> Option<Dialog> {
                 label: label.chars().take(pane_intel::PENDING_LABEL_MAX).collect(),
                 selected,
                 checked: false,
+                persists: pane_intel::persists_label(&label),
             });
         }
     }
@@ -537,6 +526,7 @@ fn analyze(pane_tail: &str) -> PaneIntel {
             derived_status: stuck.map(|_| ClaudeStatus::Blocked),
             waiting_for: None,
             pending_input: None,
+            signed_out: false,
         };
     };
     let dialog = dialog(lines, &screen);
@@ -568,6 +558,7 @@ fn analyze(pane_tail: &str) -> PaneIntel {
             multi: false,
             detail: d.detail,
         }),
+        signed_out: false,
     }
 }
 

@@ -26,6 +26,9 @@
   import { accountUsage } from './account_usage_store';
   import { get } from 'svelte/store';
   import { autoSwitchState, loadAutoSwitch, switchesAutomatically } from './account_switch';
+  import { hostByAlias } from './hosts';
+  import { isSetupToken } from './control_escalations';
+  import SignInAgain from './SignInAgain.svelte';
 
   let {
     sess,
@@ -38,8 +41,9 @@
     resetsAt: number | null;
     accountName: (uuid: string) => string;
     /** The row is blocked because its login is signed out, not at a limit
-     *  (review w03-3): Switch account only, to any signed-in login with
-     *  room; the automatic switch does not apply. */
+     *  (review w03-3): Switch account, to any signed-in login with room,
+     *  and Sign in again for the login itself. The row names no automatic
+     *  target: that preview reads the limit's rule. */
     signedOut?: boolean;
   } = $props();
 
@@ -135,6 +139,19 @@
     target = null;
   }
 
+  /** The session's own login, signed in again from its row. */
+  let signingIn = $state(false);
+  const profile = $derived(sess.claude_profile ?? null);
+  const token = $derived.by(() => {
+    const h = $hostByAlias.get(sess.host_alias);
+    return h ? isSetupToken(h, profile) : false;
+  });
+
+  function signInAgain(e: MouseEvent) {
+    e.stopPropagation();
+    signingIn = true;
+  }
+
   function wait(e: MouseEvent) {
     e.stopPropagation();
     if (resetsAt != null) waitOut(sess.id, resetsAt);
@@ -166,11 +183,20 @@
       title={restartBlocked ?? 'Resume this conversation under the login on its host with the most headroom'}
       onclick={propose}
     >{auto && autoTarget ? 'Switch now' : 'Switch account'}</button>
+    {#if signedOut}
+      <button class="btn btn--quiet" data-testid="limit-sign-in-again" onclick={signInAgain}
+        >{token ? 'New token…' : 'Sign in again'}</button
+      >
+    {/if}
     {#if resetsAt != null}
       <button class="btn btn--quiet" data-testid="limit-wait" onclick={wait}>Wait until {resetText(resetsAt)}</button>
     {/if}
   {/if}
 </div>
+
+{#if signingIn}
+  <SignInAgain host={sess.host_alias} {profile} {token} onclose={() => (signingIn = false)} />
+{/if}
 
 <style>
   .limit-actions {

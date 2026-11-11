@@ -43,6 +43,30 @@ describe('promptParts', () => {
     }
   });
 
+  it('keeps a person’s own words after the app’s head (review of the dashboards work, 7)', () => {
+    const head = 'My pinned dashboard "R", as it is now:\n\n```fleet-ui\n{}\n```\n\nSave the change with `dashboards { pin }` under the same id, then answer with the `dashboard` block. ';
+    // Their own `": ` is not part of the widget's name.
+    expect(promptParts(head + 'Change the widget "Open": rename it to "Open items": and add cost')).toEqual({
+      chips: [{ kind: 'dashboard', title: 'R', widget: 'Open', copy: false }],
+      text: 'rename it to "Open items": and add cost',
+    });
+    // Nothing typed (the transcript trims), or typed on the next line.
+    expect(promptParts((head + 'Change it: ').trimEnd())).toEqual({ chips: [{ kind: 'dashboard', title: 'R', widget: null, copy: false }], text: '' });
+    expect(promptParts(head + 'Change it:\nadd a burn-up').text).toBe('add a burn-up');
+    // CR line ends.
+    const crlf = `${steerPrefix({ id: 4, name: 'P' })}\r\n\r\n${head.replace(/\n/g, '\r\n')}Change it: more`;
+    expect(promptParts(crlf)).toEqual({
+      chips: [{ kind: 'mission', id: 4, name: 'P' }, { kind: 'dashboard', title: 'R', widget: null, copy: false }],
+      text: 'more',
+    });
+    // One context or mission head only: a second is the person's own words.
+    const twice = 'About mission #4 "Payments v2":\n\nAbout mission #5 "Refunds":\n\ncompare them';
+    expect(promptParts(twice)).toEqual({
+      chips: [{ kind: 'mission', id: 4, name: 'Payments v2' }],
+      text: 'About mission #5 "Refunds":\n\ncompare them',
+    });
+  });
+
   it('the older dashboard instruction reads the same', () => {
     const old = 'My pinned dashboard "R", as it is now:\n\n```fleet-ui\n{}\n```\n\nAnswer with a `dashboard` block with the same id. Change it: more';
     expect(promptParts(old)).toEqual({ chips: [{ kind: 'dashboard', title: 'R', widget: null, copy: false }], text: 'more' });

@@ -207,8 +207,10 @@
           ? (toggleBlocked ?? `Press ${o.key} — ${isChecked(o) ? 'untick' : 'tick'} it`)
           : view.multi
             ? (toggleBlocked ?? `Press ${o.key} — leave these questions and chat with Claude instead`)
-            : persistentRule(o.label) !== null
+            : persistentRule(o)?.saved
               ? `${o.label} — asks first: Claude Code saves this rule for every later session in that folder`
+              : persistentRule(o) !== null
+                ? `${o.label} — asks first: this answers more than this one request`
               : `Press ${o.key}${isSticky(o) ? ' — this also stops Claude asking again' : ''}`;
 
   /** Re-read the pane, then press `key` only if it still shows this card's
@@ -243,7 +245,7 @@
     if (view.multi && toggleBlocked !== null) return;
     // A rule Claude Code keeps for the folder outlives this session: the
     // first press (click or digit) only says so; "Save rule and allow" sends.
-    if (!view.multi && persistentRule(o.label) !== null) {
+    if (!view.multi && persistentRule(o) !== null) {
       confirming = o;
       return;
     }
@@ -337,7 +339,7 @@
     sent !== null
       ? []
       : order.shown.map((o, i) => ({
-          label: persistentRule(o.label) !== null && !view.multi ? `${o.label}…` : o.label,
+          label: persistentRule(o) !== null && !view.multi ? `${o.label}…` : o.label,
           // Reordered by the quick answer, the number is the shown place.
           kbd: order.proposed ? String(i + 1) : (o.key ?? undefined),
           primary: order.primary === o || undefined,
@@ -359,7 +361,7 @@
       if (ok) onAnswered?.(o.label);
     });
   }
-  const confirmRule = $derived(confirming === null ? null : persistentRule(confirming.label));
+  const confirmRule = $derived(confirming === null ? null : persistentRule(confirming));
 
   /** Own words: Escape dismisses the dialog (the re-read guards it like any
    *  answer), then the caller's composer takes the words. */
@@ -403,12 +405,25 @@
         onchange={() => (keepOrder = true)} />
     {/if}
     {#if confirming !== null && confirmRule !== null && sent === null}
-      <div class="persist" role="group" aria-label="Always allow in this folder" data-testid="answer-persist">
-        <strong>Always allow in this folder?</strong>
-        <span class="hint"
-          >Claude Code saves this on {session.host_alias} for every later session in {confirmRule.folder ??
-            'this folder'}, not only this one. Nothing is saved yet.</span
-        >
+      <div
+        class="persist"
+        role="group"
+        aria-label={confirmRule.saved ? 'Always allow in this folder' : 'Stop asking'}
+        data-testid="answer-persist"
+      >
+        {#if confirmRule.saved}
+          <strong>Always allow in this folder?</strong>
+          <span class="hint"
+            >Claude Code saves this on {session.host_alias} for every later session in {confirmRule.folder ??
+              'this folder'}, not only this one. Nothing is saved yet.</span
+          >
+        {:else}
+          <strong>Stop asking?</strong>
+          <span class="hint"
+            >“{confirming.label}” answers more than this one request: Claude stops asking before it acts. Nothing is
+            sent yet.</span
+          >
+        {/if}
         {#if confirmRule.rule}<code class="rule" data-testid="answer-persist-rule">{confirmRule.rule}</code>{/if}
         <div class="persist-actions">
           <button
@@ -423,7 +438,7 @@
             data-testid="answer-persist-save"
             disabled={busy || writeBlocked !== null}
             title={writeBlocked ?? `Press ${confirming.key}`}
-            onclick={(e) => mine(e, confirmPersistent)}>Save rule and allow</button
+            onclick={(e) => mine(e, confirmPersistent)}>{confirmRule.saved ? 'Save rule and allow' : 'Allow and stop asking'}</button
           >
         </div>
       </div>

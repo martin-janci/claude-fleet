@@ -461,6 +461,8 @@ impl SupportHost for LiveSupportHost {
     }
 
     async fn checkout(&self, host: &str, project_id: i64) -> Result<String, IpcError> {
+        // The account rules were asked before this (`vehicle::login_hold`
+        // in the runner), so a held run never reaches the checkout.
         crate::service::sessions::project_checkout_on(&self.store, &self.ssh, host, project_id)
             .await
     }

@@ -1057,6 +1057,17 @@ fn write_reachable_host(
                 (!tail.is_empty()).then(|| a.analyze_pane(tail))
             });
         let pane = own_read.as_ref().or_else(|| intel.get(&sess.name));
+        // The pane's last turn failed for want of a login: note that login
+        // (the row's profile, else the host's own) for `login_health`, which
+        // raises its card, marks its sessions `no_credentials` and leaves it
+        // out of placement until a usage read sees it signed in again. A
+        // first sighting has no stored profile to tell which login it is.
+        if let Some(row) = prior_row.filter(|_| pane.is_some_and(|p| p.signed_out)) {
+            crate::service::login_health::note_signed_out(
+                &host.alias,
+                row.claude_profile.as_deref(),
+            );
+        }
         // PR probe result for this pass (PROD-5). `pr_observed`
         // makes the values authoritative so a closed PR's stale
         // link clears; an unprobed session keeps its stored fields.

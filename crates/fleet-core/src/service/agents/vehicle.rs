@@ -276,26 +276,42 @@ pub fn outcome_of(stdout: &str, stderr: &[u8]) -> PrintOutcome {
     }
 }
 
-/// How long a job waits on a login that waits on a person (a forbidden
-/// account, a signed-out login, a spent daily limit) before it is looked
-/// at again.
+/// How long a job waits on a login that waits on a person or the clock (a
+/// signed-out login, a spent daily limit) before it is looked at again.
 pub const LOGIN_HOLD_SECS: i64 = 3600;
+
+/// Why a run for `project_id` may not start on `host`: a run is `claude -p`
+/// on the host's own login (the script names no profile), and the project
+/// forbids that login's account (`service::project_accounts`). `None` when
+/// it may. Asked before the workspace is prepared, so a run that is not
+/// started has touched nothing; there is no other login a run could take.
+pub fn forbidden_login(
+    s: &crate::store::Store,
+    project_id: Option<i64>,
+    host: &str,
+    now: i64,
+) -> Result<Option<String>, IpcError> {
+    crate::service::project_accounts::forbidden_reason(s, project_id, host, None, now)
+}
 
 /// Whether an agent's run for `project_id` (`None`: the rule names none, so
 /// no account is forbidden) may start on `host` now. A run is `claude -p` on
-/// the host's own login (the script names no profile), so it waits while
-/// that login may not take it (`service::run_login::unattended_hold`: the
-/// project forbids its account, its daily limit is spent, it is signed out,
-/// or it is past `accounts.pause_at`): the job is deferred, which gives its
-/// attempt back, until the line clears (or [`LOGIN_HOLD_SECS`]), rather
-/// than run or fail once per job. Asked before the workspace is prepared,
-/// so a held job has touched nothing. `None` when it may run.
+/// the host's own login. A project that forbids its account skips the job
+/// ([`forbidden_login`]). While that login may not take it otherwise
+/// (`service::run_login::unattended_hold`: its daily limit is spent, it is
+/// signed out, or it is past `accounts.pause_at`) the job is deferred, which
+/// gives its attempt back, until the line clears (or [`LOGIN_HOLD_SECS`]),
+/// rather than run or fail once per job. Asked before the workspace is
+/// prepared, so a held job has touched nothing. `None` when it may run.
 pub fn login_hold(
     s: &crate::store::Store,
     project_id: Option<i64>,
     host: &str,
     now: i64,
 ) -> Result<Option<super::RunOutcome>, IpcError> {
+    if let Some(reason) = forbidden_login(s, project_id, host, now)? {
+        return Ok(Some(super::RunOutcome::Skipped { reason }));
+    }
     Ok(
         crate::service::run_login::unattended_hold(s, project_id, host, None, now)?.map(|h| {
             super::RunOutcome::Deferred {
@@ -376,10 +392,11 @@ mod tests {
     }
 
     /// Accounts review: an agent's run bills the host's own login, so a
-    /// job waits (deferred, its attempt given back) while the rule's
-    /// project forbids that account, while it is past the pause line (until
-    /// it resets) or while it is signed out. A profile's account is not the
-    /// run's; with no project only the limit and the sign-in count.
+    /// job is skipped while the rule's project forbids that account (finding
+    /// 5), and waits (deferred, its attempt given back) while it is past the
+    /// pause line (until it resets) or while it is signed out. A profile's
+    /// account is not the run's; with no project only the limit and the
+    /// sign-in count.
     #[test]
     fn a_run_waits_while_the_hosts_own_login_may_not_take_it() {
         use crate::service::account_limits::seed_usage;
@@ -394,8 +411,7 @@ mod tests {
         assert_eq!(login_hold(&s, Some(p), "mac", now).unwrap(), None);
         s.set_account_forbidden_projects("acct-own", &[p]).unwrap();
         match login_hold(&s, Some(p), "mac", now).unwrap() {
-            Some(RunOutcome::Deferred { at, reason }) => {
-                assert_eq!(at, now + LOGIN_HOLD_SECS);
+            Some(RunOutcome::Skipped { reason }) => {
                 assert!(reason.contains("forbidden for acme/api"), "{reason}");
             }
             other => panic!("{other:?}"),
@@ -421,11 +437,34 @@ mod tests {
         )
         .unwrap();
         match login_hold(&s, None, "mac", now).unwrap() {
-            Some(RunOutcome::Deferred { reason, .. }) => {
+            Some(RunOutcome::Deferred { at, reason }) => {
+                assert_eq!(at, now + LOGIN_HOLD_SECS);
                 assert!(reason.contains("signed out"), "{reason}")
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    /// Accounts review finding 5: a run bills the host's own login, so a
+    /// project that forbids that account gets no run there.
+    #[test]
+    fn a_run_is_not_started_on_a_login_the_project_forbids() {
+        use crate::service::account_limits::seed_usage;
+        let s = crate::store::Store::open_in_memory().unwrap();
+        seed_usage(&s, "mac", None, "acct-own", 20.0, 1_000);
+        seed_usage(&s, "mac", Some("work"), "acct-work", 10.0, 1_000);
+        let p = s.upsert_project("acme", "api", "/srv/acme/api").unwrap();
+        assert_eq!(forbidden_login(&s, Some(p), "mac", 1_000).unwrap(), None);
+        // A profile's account is not the run's: only the host's own counts.
+        s.set_account_forbidden_projects("acct-work", &[p]).unwrap();
+        assert_eq!(forbidden_login(&s, Some(p), "mac", 1_000).unwrap(), None);
+        s.set_account_forbidden_projects("acct-own", &[p]).unwrap();
+        let why = forbidden_login(&s, Some(p), "mac", 1_000)
+            .unwrap()
+            .expect("forbidden");
+        assert!(why.contains("forbidden for acme/api"), "{why}");
+        // No project, nothing forbidden.
+        assert_eq!(forbidden_login(&s, None, "mac", 1_000).unwrap(), None);
     }
 
     #[test]

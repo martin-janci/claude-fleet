@@ -175,7 +175,6 @@ pub use guides::{GuideProposalRow, NewGuideProposal, DECIDED_GUIDE_KEEP_SECS};
 pub use host_setup::{AgentInstallRow, HostSetupRow, SetupCheck};
 // For `realm_admin` (identity sub-project 1), which records its events
 // inside its own transactions.
-pub use account_project_blocks::MAX_FORBIDDEN_PROJECTS;
 #[allow(unused_imports)]
 pub(crate) use admin_events::record_admin_event_in_tx;
 pub use dashboard_feeds::{DashboardFeedRow, DASHBOARD_FEED_WRITERS};
@@ -249,10 +248,7 @@ pub use read_cursors::CursorRow;
 pub use read_pool::{read_via, ReadPool, READ_POOL_SIZE};
 pub use realm::*;
 pub use reports::{ReportFilter, ReportRow};
-pub use review_notes::{
-    check_notes as check_review_notes, NewReviewNote, ReviewNoteRow, REVIEW_NOTES_MAX,
-    REVIEW_NOTE_MAX,
-};
+pub use review_notes::{check_notes as check_review_notes, NewReviewNote, ReviewNoteRow};
 pub use review_prs::{
     NewReviewRecord, ReviewPrRow, ReviewRecordRow, TestExemptionRow, REVIEW_PR_STATUSES,
     REVIEW_SKIP_REASONS,
@@ -365,7 +361,7 @@ pub use work_usage::{DetectionCounts, JournalCounts};
 pub use work_view::{
     version_conflict, Placement, RuleConditions, ViewItem, ViewLink, WorkRule, WorkView,
 };
-pub use worktree_setup::{check_setup, check_setup_glob, WorktreeSetup, SETUP_GLOBS_MAX};
+pub use worktree_setup::WorktreeSetup;
 
 /// One number per `Store` ever built in this process, never reused — see
 /// [`Store::instance_id`].

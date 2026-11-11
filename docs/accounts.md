@@ -159,6 +159,13 @@ and `list_hosts` shows the profile with `credential: "setup_token"`.
   `/login` of the same account elsewhere, if there is one. Nor is a token
   beside a `/login` of the same account a login conflict: it has no refresh
   token to revoke.
+- **Signed out** (the token expired or was revoked): the login card, the
+  refusal of automation and the Accounts page say "make a new token with
+  `claude setup-token`" instead of `claude /login`, which does not touch the
+  exported token; the Accounts page copies `claude setup-token` to run. The
+  hourly recheck of signed-out logins skips the profile (a usage fetch
+  cannot read a token), so the note goes when a new token replaces it. A
+  headless run's refusal, which has no host row to tell, names both fixes.
 
 Desktop: Accounts or Host details → **+ Add account** → *Sign in with*
 **Setup token**; Host details → Login profiles → **Setup token…** opens it
@@ -201,8 +208,8 @@ move never lands on an empty profile that asks for `/login`; with no login
 left it is refused (`E_ACCOUNT_FORBIDDEN` naming `suggested_profile`,
 `E_ACCOUNT_LIMIT`, or the sign-in command) before anything is carried, and
 again when a deferred move runs. A session already running on an account
-its project forbade later keeps that account where the target has a login on
-it, as a plain restart does. When fleet does not know the session's account,
+its project forbade later, whose account the target has a login on, is
+refused rather than moved onto another account. When fleet does not know the session's account,
 the profile name is kept as it was, held to the same refusals.
 
 ### Switch automatically
@@ -214,6 +221,15 @@ form and not stuck, whose account has its 5-hour or weekly window fully
 used) is resumed under the login on its host with the most headroom, without anyone pressing Switch account. It is the same
 restart Switch account makes (`restart_session { profile }`), so the
 conversation carries on and the row keeps the new login.
+
+The same goes for a session whose own login is **signed out** (the
+"no credentials" rows, *Signed-out logins* below): it is resumed under
+another login on its host, chosen as below except that another login of
+the same account counts too (a setup token beside an expired `/login`,
+say), and never the signed-out one. Fleet learns a login is signed out from
+the usage check, a refused headless run, the session's pane, or a
+StopFailure hook whose error is a 401 / `authentication_error`. The
+timeline event's detail says `"reason": "signed_out"` (else `"limit"`).
 
 Each person decides for their own sessions: the Accounts page's **Switch my
 sessions automatically when their account runs out** (MCP:
@@ -229,7 +245,8 @@ limit. A working session is never moved, early or not.
 Below it, **then tell it to continue where it stopped** (MCP:
 `auto_switch_account { continue_after: true }`, off by default): when the
 limit cut the session's last turn off (its newest turn end is a
-`stop_failure` of class `rate_limit`), a switch that went through queues
+`stop_failure` of class `rate_limit`, or of class `auth` for a signed-out
+login), a switch that went through queues
 "Continue where you left off." as a deferred prompt. It goes in no sooner
 than 30 seconds after the switch, once the resumed session is idle, and is
 held if the new login is over `accounts.pause_at` too. A session that had
@@ -295,7 +312,7 @@ session's login when its row is still known and the resume lands on the
 same host, else the host's own login; either gives way to the login on the
 host with headroom when it is past `accounts.pause_at`. A ticket start on a
 named host that names no login does the same with the host's own
-(`account_limits::login_with_headroom`). Neither a ticket start nor a resume
+(`account_limits::login_with_headroom_for`). Neither a ticket start nor a resume
 refuses an over-limit login, and neither moves off a login the caller or a
 rule named: they are how Control recovers work, so a spent login is the
 session's to report.
@@ -327,7 +344,8 @@ the account's **Not for these projects** list (the phone's account sheet has
 the same list). MCP: `set_account_projects { uuid, forbidden_project_ids }`,
 which replaces the list; the account's row carries it as
 `forbidden_project_ids` (`account_project_blocks`, migration 217). Only the
-hub owner's devices change it, as with the nickname.
+hub owner changes it, as with Add account: the master or a trusted full
+device. Control cannot, so it cannot lift the block that refused its start.
 
 A whole org can be forbidden too (**Forbid for a whole org…** under the same
 list; the phone ticks "All of <org>"): every project of the org, those added
@@ -336,9 +354,11 @@ later included, is treated as if it were on the list.
 (`forbidden_org_ids` on the row, `account_org_blocks`, migration 218); each
 of the two lists is replaced only when it is sent. A project's org is its own
 rule, the most specific org rule on its owner, repo or path
-(`Store::project_org`); a host-only rule and a host's org name a host, not a
-project, so they do not put its projects in the org. The refusal then says
-"(all of <org>)". Removing the org removes its blocks.
+(`Store::project_org`), and, for work on a given host, also the org a
+session there is filed under: a host-qualified rule or the host's own org
+(`Store::project_orgs_on`). The start, switch, move and relaunch checks know
+the host and count both; a pick made before a host is chosen sees only the
+project's own. The refusal then says "(all of <org>)". Removing the org removes its blocks.
 
 No work in a forbidden project runs on a login on that account
 (`service::project_accounts`):
@@ -350,13 +370,22 @@ No work in a forbidden project runs on a login on that account
   (`details.suggested_profile`, `""` for the host's own), and no flag
   passes it;
 - Switch account (`restart_session { profile }`) onto such a login is
-  refused; a plain restart keeps the login the pane already runs under;
+  refused; a plain restart of a live session keeps the login it already
+  runs under, as long as that login is still on the account the session ran
+  on. A restart, recreate, repair or restore that brings a lost session
+  back, or relaunches it under a login signed in to another account since,
+  is refused the same way;
+- a review session and a moved session take an allowed login on the host
+  or are refused; a background session, a fleet agent's run (both bill the
+  host's own login) are refused or skipped; a mission's headless check
+  moves to an allowed login or runs as a session instead;
 - where fleet picks the login, it never picks one: placement leaves it out
   ("the project forbids its account"), a ticket start or a resume that names
   no login moves to the allowed login on the host with the most headroom,
   a routine on its host's own login moves to an allowed login under the
-  pause line there, else to its fallback host (and one that names a
-  forbidden login skips its run and says why), a move takes an allowed
+  pause line (and within its daily limit) there, else skips its run and
+  says why, as one that names a forbidden login does (a fallback host
+  takes a run its host cannot, not one the rule forbids), a move takes an allowed
   login on the target or is refused, the over-limit refusal and
   `check_account_headroom { project_id }` never suggest one, and the
   automatic switch never moves a session onto one;
@@ -371,9 +400,10 @@ No work in a forbidden project runs on a login on that account
   do the same or are refused before anything runs; the mission planner and
   its release-note and triage drafts never pick such a login (with none
   left the planner refuses and records no limit wait); and a PR-reviewer,
-  support or fleet-agent job waits (deferred, its attempt given back) while
-  the rule host's own login is forbidden, signed out or past
-  `accounts.pause_at`. `run_login_tests` lists every launch path.
+  support or fleet-agent job is skipped while the rule host's own login is
+  forbidden, and waits (deferred, its attempt given back) while it is
+  signed out, over its daily limit or past `accounts.pause_at`.
+  `run_login_tests` lists every launch path.
 
 A profile that is not logged in yet has no account, so a start under it is
 not refused; once the host reports its account, the next start, resume or
@@ -383,14 +413,40 @@ account: it changes where work goes next.
 ### Signed-out logins
 
 A login whose sign-in is gone (the usage check found it expired or its
-token rejected, or a headless `claude -p` run was refused with "Login
-expired · Run /login") is kept on its host row
+token rejected, a headless `claude -p` run was refused with "Login
+expired · Run /login", or a session's pane ended its last turn in Claude
+Code's own error line for it) is kept on its host row
 (`hosts.signed_out_logins`) with the day fleet first saw it, until fleet
 sees it signed in again; one signed-out login is asked again at most once
 an hour. Placement leaves it out, Control's chat shows one card per login
 ("Claude login expired on htz (since Aug 9) · ssh htz then claude /login";
 for a profile, `CLAUDE_CONFIG_DIR=~/.claude-profiles/<name> claude
 /login`), and Control's feed says it once. Only a person can sign it in.
+
+**Sign in again** (on the card, on the session's row, and on the Accounts
+page beside Copy sign-in command) opens + Add account's sign-in step over
+the login that is there: the login pane runs `claude /login` under the
+profile, or with no `CLAUDE_CONFIG_DIR` for the host's own login (pane
+`fleet-login--_own`). It is done when the pane says "Login successful"
+(the profile had its account all along, so that says nothing); the login's
+signed-out note then goes at once, so its card clears and placement takes
+it again. A setup-token profile's button is **New token…** (+ Add account
+preset to a new token for it); an API-key profile has no `/login` to renew
+and is refused. MCP: the login actions take `again: true` (`start_login`,
+`login_status`, `login_key`, `login_code`, `end_login`), `profile: ""` for
+the host's own login. Signing in on one host does not fix a copy of the
+same login on another: each copy refreshes on its own (*Two copies of one
+login*).
+
+The pane reading (`pane_intel::detect_signed_out`, every reconcile pass) is
+strict, since a session may be printing or discussing these words: only the
+pane's last `⎿` line counts, and only when it opens with `API Error: 401`,
+`Login expired`, `Invalid API key`, `Not logged in`, `OAuth token has
+expired` / `has been revoked` or `Invalid bearer token`, with no answer
+(`●`) below it. A `/login` run there afterwards ("⎿  Login successful") or a
+later turn ends it. The login noted is the session's profile, else its
+host's own; a session reconcile sees for the first time notes nothing. Its
+sessions then read `no_credentials` (Needs you) while they are not working.
 
 ### Two copies of one login
 

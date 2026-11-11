@@ -1,6 +1,7 @@
 //! Automatic account switching (docs/accounts.md, *Switch automatically*):
-//! a session whose account ran out is resumed under the login on its host
-//! with the most headroom, without a person pressing Switch account.
+//! a session whose account ran out, or whose login is signed out, is
+//! resumed under the login on its host with the most headroom, without a
+//! person pressing Switch account.
 //!
 //! **Who it applies to.** Two answers, both needed:
 //! * the fleet's, `accounts.auto_switch` (off by default), which the owner
@@ -18,7 +19,10 @@
 //! it is switched too), whose account has a 5-hour or weekly window fully used that
 //! has not reset. With `accounts.auto_switch_early` on (off by default), the
 //! same session moves once its account passes `accounts.pause_at`, so its
-//! next turn does not stall at the limit. Never touched: shells, pane-less
+//! next turn does not stall at the limit. The same rows also move when
+//! their own login (the host's, or the row's profile) is signed out
+//! (`hosts.signed_out_logins`, `login_health`), the "Needs you · no
+//! credentials" rows: [`Reason::SignedOut`]. Never touched: shells, pane-less
 //! (`bg` / `external`) sessions, other agents, ghosts and lost rows, the
 //! registered controller, Control itself (`operator_account` fails it over
 //! and tells it), sessions on a hidden or unreachable host, and a
@@ -26,7 +30,9 @@
 //!
 //! **Which login.** [`pick`] over [`candidates`]: another login on the same
 //! host, on another account (a second login on the same account shares its
-//! limit) that the session's project does not forbid
+//! limit; for a signed-out login, any other login, its own account's
+//! included, a setup token beside a `/login` say) that the session's
+//! project does not forbid
 //! (`project_accounts`), not signed out, with a reading under `accounts.pause_at` no older
 //! than [`STALE_TARGET_SECS`], not at a limit and not past its daily spend
 //! limit, the least used first. An account takes one session per wave
@@ -45,7 +51,8 @@
 //! **Carry on.** A person can also ask for the session to continue
 //! (`people.auto_switch_continue`, migration 188, off by default). Then,
 //! when the session's last turn was cut off by the limit (its newest turn
-//! end is a `stop_failure` of class `rate_limit`, not a `turn_done`), a
+//! end is a `stop_failure` of class `rate_limit`, not a `turn_done`), or,
+//! for a signed-out login, by an `auth` one, a
 //! switch that went through queues [`CONTINUE_PROMPT`] as a deferred
 //! prompt, not before [`CONTINUE_AFTER_SECS`] so the resumed pane is up;
 //! the deferred-prompt delivery types it once the session is idle. A
@@ -101,10 +108,13 @@ pub const EVENT_SWITCH_FAILED: &str = "account_switch_failed";
 /// One switch the pass will make.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Planned {
+    /// Why the session moves.
+    pub reason: Reason,
     pub session_id: i64,
     pub host_alias: String,
     pub tmux_name: String,
-    /// The account that ran out.
+    /// The account that ran out, or whose login is signed out (`""` when
+    /// the row has none).
     pub from_account: String,
     /// The login the session resumes under.
     pub target: HostLogin,
@@ -114,6 +124,16 @@ pub struct Planned {
     /// Queue [`CONTINUE_PROMPT`] once switched: its owner asked for it and
     /// the limit cut its last turn off.
     pub continue_after: bool,
+}
+
+/// Why a session is switched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Reason {
+    /// Its account is at a limit (or past `accounts.pause_at`, early).
+    Limit,
+    /// Its own login is signed out (`login_health`).
+    SignedOut,
 }
 
 /// Whether the fleet has it on (`accounts.auto_switch`).
@@ -132,18 +152,24 @@ pub fn quota_parked(newest_notification: Option<&str>) -> bool {
     newest_notification.is_some_and(|k| QUOTA_NOTIFICATIONS.contains(&k))
 }
 
-/// PURE: whether `row` is "Paused · limit" on `limited` accounts and a
-/// session this pass may switch at all. `quota_parked` ([`quota_parked`]):
+/// PURE: why `row` is due a switch, if this pass may switch it at all: its
+/// account is `due` (at a limit), else its login is signed out
+/// (`login_out`). `quota_parked` ([`quota_parked`]):
 /// its blocked status (and the Enter a stale auto-resume waits for) is
 /// Claude Code parking it at the limit, which a switch is for; a dialog's or
 /// a form's still keeps it where it is.
-pub fn switchable(row: &SessionRow, is_limited: impl Fn(&str) -> bool, quota_parked: bool) -> bool {
+pub fn switchable(
+    row: &SessionRow,
+    due: impl Fn(&str) -> bool,
+    login_out: bool,
+    quota_parked: bool,
+) -> Option<Reason> {
     let blocked = row.claude_status.as_deref() == Some("blocked");
     let stuck_ok = match row.stuck_kind.as_deref() {
         None => true,
         Some(k) => quota_parked && k == crate::service::pane_intel::StuckKind::PressEnter.as_str(),
     };
-    row.kind != "shell"
+    let may = row.kind != "shell"
         && !crate::store::has_no_pane(&row.kind)
         && row.agent == crate::store::AGENT_CLAUDE
         && row.status != "ghost"
@@ -154,8 +180,16 @@ pub fn switchable(row: &SessionRow, is_limited: impl Fn(&str) -> bool, quota_par
         // A quota note is no dialog (review F8).
         && (!blocked || (quota_parked && row.pending_input.is_none()))
         && row.pending_form.is_none()
-        && stuck_ok
-        && row.account_uuid.as_deref().is_some_and(is_limited)
+        && stuck_ok;
+    if !may {
+        None
+    } else if row.account_uuid.as_deref().is_some_and(due) {
+        Some(Reason::Limit)
+    } else if login_out {
+        Some(Reason::SignedOut)
+    } else {
+        None
+    }
 }
 
 /// PURE: whether the owner of `row` lets it be switched: its owner, or the
@@ -185,27 +219,39 @@ pub fn cut_off_by_limit(kind: &str, detail: Option<&str>) -> bool {
     kind == "stop_failure" && detail.is_some_and(|d| d.starts_with("rate_limit"))
 }
 
-/// Whether the session's newest turn end is one the limit cut off.
-fn last_turn_cut_off(s: &Store, session_id: i64) -> Result<bool, IpcError> {
+/// PURE: whether a turn-end event says a lost login cut the turn off: a
+/// `stop_failure` whose class is `auth`.
+pub fn cut_off_by_sign_out(kind: &str, detail: Option<&str>) -> bool {
+    kind == "stop_failure" && detail.is_some_and(|d| d.starts_with("auth"))
+}
+
+/// Whether the session's newest turn end is one `reason` cut off.
+fn last_turn_cut_off(s: &Store, session_id: i64, reason: Reason) -> Result<bool, IpcError> {
+    let cut = match reason {
+        Reason::Limit => cut_off_by_limit,
+        Reason::SignedOut => cut_off_by_sign_out,
+    };
     Ok(
         s.newest_session_event_of(session_id, &["turn_done", "stop_failure"])?
-            .is_some_and(|e| cut_off_by_limit(&e.kind, e.detail.as_deref())),
+            .is_some_and(|e| cut(&e.kind, e.detail.as_deref())),
     )
 }
 
-/// PURE: the logins on `host` a session on `from_account` may move to, the
-/// host's own first: another account, with a reading under `pause_at`, not
-/// at a limit (`is_limited`) and not past its daily limit (`daily_hit`).
+/// PURE: the logins on `host` a session may move to, the host's own first:
+/// on another account than `leave` (`None`: any account, for a session
+/// leaving a signed-out login, whose own login the caller has left out),
+/// with a reading under `pause_at`, not at a limit (`is_limited`) and not
+/// past its daily limit (`daily_hit`).
 pub fn candidates(
     logins: Vec<HostLogin>,
-    from_account: &str,
+    leave: Option<&str>,
     pause_at: f64,
     is_limited: impl Fn(&str) -> bool,
     daily_hit: impl Fn(&str) -> bool,
 ) -> Vec<HostLogin> {
     logins
         .into_iter()
-        .filter(|l| l.account_uuid != from_account)
+        .filter(|l| leave.is_none_or(|a| l.account_uuid != a))
         .filter(|l| l.used_pct.is_some_and(|u| u < pause_at))
         .filter(|l| !is_limited(&l.account_uuid) && !daily_hit(&l.account_uuid))
         .collect()
@@ -284,14 +330,16 @@ pub fn plan(
         100.0
     };
     let due = |uuid: &str| used(uuid).is_some_and(|u| u >= line);
-    if !snaps.iter().any(|r| due(&r.account_uuid)) {
-        return Ok(Vec::new());
-    }
     let hosts: Vec<HostRow> =
         crate::service::hosts::active_hosts(s.list_hosts()?, local_host_enabled)
             .into_iter()
             .filter(|h| h.reachable || h.alias == "local")
             .collect();
+    if !snaps.iter().any(|r| due(&r.account_uuid))
+        && hosts.iter().all(|h| h.signed_out_logins.is_empty())
+    {
+        return Ok(Vec::new());
+    }
     let opted_out = s.people_without_auto_switch()?;
     let personal_owner = s.personal_owner_id()?;
     let controller = s.get_controller()?;
@@ -305,8 +353,15 @@ pub fn plan(
                     .and_then(|e| e.detail)
                     .as_deref(),
             );
-        if !switchable(row, due, parked)
-            || !owner_allows(row, personal_owner, &opted_out)
+        let Some(host) = hosts.iter().find(|h| h.alias == row.host_alias) else {
+            continue;
+        };
+        let login_out =
+            crate::service::login_health::is_signed_out(host, row.claude_profile.as_deref());
+        let Some(reason) = switchable(row, due, login_out, parked) else {
+            continue;
+        };
+        if !owner_allows(row, personal_owner, &opted_out)
             || controller
                 .as_ref()
                 .is_some_and(|(h, t)| *h == row.host_alias && *t == row.tmux_name)
@@ -320,13 +375,14 @@ pub fn plan(
         {
             continue;
         }
-        let Some(host) = hosts.iter().find(|h| h.alias == row.host_alias) else {
-            continue;
-        };
         let from = row.account_uuid.clone().unwrap_or_default();
         // Never onto an account the session's project forbids.
         let forbidden = if any_block {
-            crate::service::project_accounts::forbidden_accounts(s, row.project_id)?
+            crate::service::project_accounts::forbidden_accounts_on(
+                s,
+                row.project_id,
+                &row.host_alias,
+            )?
         } else {
             Vec::new()
         };
@@ -342,7 +398,10 @@ pub fn plan(
                 l
             })
             .collect();
-        let cands = candidates(logins, &from, pause_at, is_limited, |uuid| {
+        // Off a signed-out login, another login of the same account is as
+        // good as any: the signed-out one is already left out above.
+        let leave = (reason == Reason::Limit).then_some(from.as_str());
+        let cands = candidates(logins, leave, pause_at, is_limited, |uuid| {
             // An unreadable spend is not known to be under its limit.
             account_limits::daily_limit_hit(s, uuid, now).map_or(true, |h| h.is_some())
         });
@@ -351,10 +410,11 @@ pub fn plan(
         };
         taken.insert(target.account_uuid.clone());
         let continue_after = match answering_person(row, personal_owner) {
-            Some(p) => s.person_auto_switch_continue(p)? && last_turn_cut_off(s, row.id)?,
+            Some(p) => s.person_auto_switch_continue(p)? && last_turn_cut_off(s, row.id, reason)?,
             None => false,
         };
         out.push(Planned {
+            reason,
             continue_after,
             session_id: row.id,
             host_alias: row.host_alias.clone(),
@@ -373,6 +433,7 @@ pub fn plan(
 /// The timeline detail of one attempt: logins by profile, accounts by uuid.
 pub fn detail(p: &Planned, error_code: Option<&str>, jev: Option<&str>) -> String {
     serde_json::json!({
+        "reason": p.reason,
         "continue": p.continue_after && error_code.is_none(),
         "from_account": p.from_account,
         "to_account": p.target.account_uuid,

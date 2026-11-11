@@ -53,11 +53,12 @@ const STANDALONE = {
 /** Open Accounts › All hosts (the Hosts page), on its table: the page
  *  reopens on the host it last showed, so step back to the list. */
 async function openHosts(t) {
-  for (let i = 0; i < 3 && !(await t.byTestId('hosts-view').isVisible()); i++) {
-    await t.page.keyboard.press('Control+Shift+H');
-    await t.settle(300);
-  }
-  await t.byTestId('hosts-view').waitFor({ state: 'visible', timeout: 5000 });
+  // The chord toggles the page, so press it once and wait: a second press
+  // would close a page that was only slow to show. `Meta+I` is bound on
+  // every platform (`Ctrl+Shift+H` is not, on a Mac).
+  const hosts = t.byTestId('hosts-view');
+  if (!(await hosts.isVisible())) await t.page.keyboard.press('Meta+I');
+  await hosts.waitFor({ state: 'visible', timeout: 5000 });
   const back = t.byTestId('hosts-back-to-table');
   if (await back.isVisible()) await back.click();
   await t.settle(400);
@@ -250,7 +251,7 @@ export const scenarios = [
       extras: [PAPAYA, { ...ACME, connection: { state: 'reconnecting', attempt: 1, retry_in_secs: 5, reason: 'timed out' } }],
     },
     async run(t) {
-      await t.page.keyboard.press('Control+,');
+      await t.page.keyboard.press('Meta+,'); // bound on every platform
       await t.settle(500);
       const section = t.byTestId('fleets-section');
       if (!(await section.isVisible())) {

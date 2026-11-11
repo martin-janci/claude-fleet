@@ -12,6 +12,7 @@
   // you badge (`pendingAgentCount`). What the person's approvals of the last
   // day came to ("Done: … — created task 42", "Failed: … — why") shows under
   // them (`status.recent`, review w08-3).
+  import InlineConfirm from '../forms/InlineConfirm.svelte';
   import { shortAge, exactTime } from '../session_status';
   import { automationPaused } from '../automation';
   import { push, pushError } from '../toasts';
@@ -43,6 +44,8 @@
   let shown = $state<number | null>(null);
   /** Groups opened, by key. */
   let open = $state<ReadonlySet<string>>(new Set());
+  /** The group whose Approve all asks first, listing what it approves. */
+  let confirming = $state<string | null>(null);
   const toggle = (key: string) => {
     const next = new Set(open);
     if (next.has(key)) next.delete(key);
@@ -138,8 +141,29 @@
             <span class="line" title={exactTime(newest.created_at)}
               >{g.from ? `from ${g.from} · ` : ''}newest {shortAge(newest.created_at)}</span
             >
+            {#if confirming === g.key}
+              <InlineConfirm
+                stacked
+                danger={false}
+                verb={`Approve all ${g.items.length}`}
+                label={`Approve all ${g.items.length}?`}
+                busy={anyBusy}
+                testid="agent-group-confirm"
+                confirmTestid="agent-group-confirm-approve"
+                onconfirm={() => {
+                  confirming = null;
+                  void answerAll(g, true);
+                }}
+                onkeep={() => (confirming = null)}
+              >
+                <span class="line">Approve all {g.items.length}?</span>
+                <ul class="confirm-list" data-testid="agent-group-confirm-items">
+                  {#each g.items as it (it.action.id)}<li>{actionTitle(it.action, it.about)}</li>{/each}
+                </ul>
+              </InlineConfirm>
+            {/if}
             <span class="buttons">
-              <button type="button" class="btn btn--chip" data-testid="agent-group-approve" disabled={anyBusy} onclick={() => answerAll(g, true)}
+              <button type="button" class="btn btn--chip" data-testid="agent-group-approve" disabled={anyBusy || confirming === g.key} onclick={() => (confirming = g.key)}
                 >Approve all {g.items.length}</button
               >
               <button type="button" class="btn btn--chip" data-testid="agent-group-reject" disabled={anyBusy} onclick={() => answerAll(g, false)}
@@ -189,13 +213,13 @@
   .dot.done { background: var(--status-done); }
   .dot.failed { background: var(--status-failed); }
   .outcome { color: var(--fg); overflow-wrap: anywhere; font-size: var(--text-xs); }
-  .text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  .text, .sub { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
   .name { color: var(--fg); font-weight: 500; overflow-wrap: anywhere; }
   .chip { font-size: var(--text-2xs); color: var(--fg-muted); border: 1px solid var(--border); border-radius: var(--radius-pill); padding: 0 6px; font-weight: 400; }
   .line { color: var(--fg-muted); font-size: var(--text-xs); overflow-wrap: anywhere; }
   .buttons { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
   .body { max-height: 240px; overflow: auto; white-space: pre-wrap; font-size: var(--text-xs); background: var(--bg-sunk); border-radius: var(--radius-md); padding: 6px; margin: 4px 0 0; }
   .group-items { list-style: none; margin: 6px 0 0; padding: 0 0 0 8px; border-left: 2px solid var(--border); display: flex; flex-direction: column; gap: 8px; }
-  .sub { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
   .sub .name { font-weight: 400; }
+  .confirm-list { margin: 2px 0 0; padding: 0 0 0 16px; font-size: var(--text-xs); color: var(--fg); overflow-wrap: anywhere; }
 </style>

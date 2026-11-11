@@ -118,9 +118,12 @@ impl HeadlessAgent for ClaudeCode {
             return Ok(String::new());
         };
         crate::validate::claude_profile(p).map_err(|e| e.message)?;
+        // An API-key or setup-token profile has no `/login`: its key or
+        // token is exported as an interactive session's is.
         Ok(format!(
-            "export CLAUDE_CONFIG_DIR=\"$HOME/.claude-profiles/\"{}; ",
-            quote(p)
+            "export CLAUDE_CONFIG_DIR=\"$HOME/.claude-profiles/\"{}; {}",
+            quote(p),
+            crate::tmux::PROFILE_API_KEY
         ))
     }
 
@@ -242,7 +245,10 @@ mod tests {
         assert_eq!(a.login_env(None).unwrap(), "");
         assert_eq!(
             a.login_env(Some("work")).unwrap(),
-            "export CLAUDE_CONFIG_DIR=\"$HOME/.claude-profiles/\"'work'; "
+            format!(
+                "export CLAUDE_CONFIG_DIR=\"$HOME/.claude-profiles/\"'work'; {}",
+                crate::tmux::PROFILE_API_KEY
+            )
         );
         assert!(a.login_env(Some("../x")).is_err());
     }

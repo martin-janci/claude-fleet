@@ -70,6 +70,53 @@ fn run(st: &Mutex<Store>, item: i64, role: &str, outcome: &str, tests: &[&str]) 
     crate::service::tasks::complete_task_reported(&s, &t, "", Some(&report)).unwrap();
 }
 
+/// A run of `item` in `role` that ended without its report: `done` (the
+/// marker without the block) or `failed` (it stopped twice unmarked).
+fn unreported_run(st: &Mutex<Store>, item: i64, role: &str, failed: bool) -> i64 {
+    let s = lock(st).unwrap();
+    let t = s
+        .insert_task(None, None, "go", &format!("n-{role}-quiet-{failed}"))
+        .unwrap();
+    s.set_task_run(t.id, item, 1, role).unwrap();
+    let t = s.get_task(t.id).unwrap().unwrap();
+    if failed {
+        crate::service::tasks::fail_task(&s, t.id, "the worker stopped 2 times").unwrap();
+    } else {
+        crate::service::tasks::complete_task_reported(&s, &t, "", None).unwrap();
+    }
+    t.id
+}
+
+/// A review or test run that stopped without its report, in any state,
+/// says nothing of the work: the line runs again once (no `by`), then waits
+/// on that run (`by`), which the loop asks a person about. It never fails
+/// the item, so the implementation is not redone.
+#[test]
+fn a_check_run_without_its_report_runs_again_then_waits_on_a_person() {
+    for line in ["review", "test", "test:cargo test"] {
+        let role = if line == "review" { "review" } else { "test" };
+        let (st, me, item) = fixture();
+        set(&st, &me, item, &[line]);
+        run(&st, item, "implement", "done", &[]);
+        unreported_run(&st, item, role, true);
+        let v = now_check(&st, item, 0);
+        let c = check_of(&v, line);
+        assert_eq!(
+            (c.state.as_str(), c.by.is_none()),
+            ("pending", true),
+            "{line}: {}",
+            c.detail
+        );
+        assert_eq!(v.state, "unverified");
+        let second = unreported_run(&st, item, role, false);
+        let v = now_check(&st, item, 0);
+        let c = check_of(&v, line);
+        assert_eq!(c.state, "pending", "{line}: {}", c.detail);
+        assert_eq!(c.by, Some(format!("task:{second}")), "{line}");
+        assert!(c.detail.contains("without its report"), "{}", c.detail);
+    }
+}
+
 #[test]
 fn lines_are_typed_by_prefix_and_free_text_is_a_persons() {
     assert_eq!(parse_cond("ci"), Cond::Ci(None));

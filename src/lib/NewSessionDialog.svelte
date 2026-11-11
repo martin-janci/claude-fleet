@@ -1568,7 +1568,7 @@
       const chosenNow = h.ok ? (h.value?.chosen ?? null) : null;
       if (h.ok && h.value && chosenNow?.signed_out) {
         const others = (h.value.logins ?? []).filter((l) => (l.profile ?? '') !== (chosenNow.profile ?? ''));
-        limitAsk = { ...h.value, suggestion: h.value.suggestion ?? freestLogin(others) };
+        limitAsk = { ...h.value, suggestion: h.value.suggestion ?? freestLogin(allowedLogins(others)) };
         return;
       }
     }

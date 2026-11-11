@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::mcp::auth::{Caller, ClientRef, TokenMode};
+use crate::service::operator::OPERATOR_CLIENT_NAME;
 use serde_json::json;
 
 fn store() -> Mutex<Store> {
@@ -261,12 +262,113 @@ fn undo_puts_back_the_version_before_controls_change_once() {
     );
 }
 
+/// Review of the dashboards work, 2: Control's second change in a row
+/// keeps the version before its first, so Undo never takes away the
+/// person's own dashboard; and the row says what Undo does.
 #[test]
-fn standalone_rows_are_fleets_own_and_a_bad_stored_spec_is_left_out() {
+fn undo_after_two_control_changes_puts_back_the_persons_version() {
+    let st = store();
+    let (ada, _) = people(&st);
+    let desk = device(&st, ada, "Ada's Mac");
+    let mine = pin(
+        &st,
+        &desk,
+        &pin_args(block("dash.r42", "Mine")),
+        Some("Ada's Mac"),
+    )
+    .unwrap();
+    assert_eq!(mine.undo, None);
+    for title in ["Control's", "Control's, fixed"] {
+        let row = pin(
+            &st,
+            &desk,
+            &pin_args(block("dash.r42", title)),
+            Some(OPERATOR_CLIENT_NAME),
+        )
+        .unwrap();
+        assert_eq!(row.undo.as_deref(), Some("restore"), "{title}");
+    }
+    let back = undo(&st, &desk, "dash.r42").unwrap();
+    assert_eq!(
+        (back["undone"].clone(), back["removed"].clone()),
+        (json!(true), json!(false))
+    );
+    let row = get(&st, &desk, "dash.r42").unwrap().unwrap();
+    assert_eq!(row.title, "Mine");
+    assert_eq!(row.device.as_deref(), Some("Ada's Mac"));
+    assert_eq!(row.undo, None);
+
+    // Pinned new by Control, changed by it again: Undo still removes it.
+    for title in ["Copy", "Copy, fixed"] {
+        let row = pin(
+            &st,
+            &desk,
+            &pin_args(block("dash.new", title)),
+            Some(OPERATOR_CLIENT_NAME),
+        )
+        .unwrap();
+        assert_eq!(row.undo.as_deref(), Some("remove"), "{title}");
+    }
+    assert_eq!(
+        serde_json::to_value(get(&st, &desk, "dash.new").unwrap().unwrap()).unwrap()["undo"],
+        "remove"
+    );
+    assert_eq!(undo(&st, &desk, "dash.new").unwrap()["removed"], true);
+}
+
+/// Review of the dashboards work, 1: on the standalone desktop (the hub's
+/// own caller) a dashboard Control pinned as the hub's owner is the
+/// desktop's: it undoes, unpins and is replaced in place, never doubled.
+#[test]
+fn the_standalone_desktop_owns_what_control_pinned_as_the_hubs_owner() {
+    let st = store();
+    let owner = lock(&st).unwrap().personal_owner_id().unwrap().unwrap();
+    let control = device(&st, owner, OPERATOR_CLIENT_NAME);
+    let desk = ViewScope::internal();
+    pin(
+        &st,
+        &control,
+        &pin_args(block("dash.developer.mine", "Mine")),
+        Some(OPERATOR_CLIENT_NAME),
+    )
+    .unwrap();
+    assert_eq!(list(&st, &desk).unwrap().len(), 1);
+    let replaced = pin(
+        &st,
+        &desk,
+        &pin_args(block("dash.developer.mine", "Mine, again")),
+        None,
+    )
+    .unwrap();
+    assert_eq!(replaced.person_id, Some(owner));
+    assert_eq!(list(&st, &desk).unwrap().len(), 1, "replaced in place");
+    assert_eq!(
+        undo(&st, &desk, "dash.developer.mine").unwrap()["undone"],
+        true
+    );
+    assert!(unpin(&st, &desk, "dash.developer.mine").unwrap());
+    assert!(list(&st, &desk).unwrap().is_empty());
+
+    // A feed Control writes is the desktop's too.
+    feed(&st, &control, &feed_args("deploys", "3"), false).unwrap();
+    feed(&st, &desk, &feed_args("deploys", "4"), true).unwrap();
+    let rows = feeds(&st, &desk).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        (rows[0].value.as_str(), rows[0].person_id),
+        ("4", Some(owner))
+    );
+}
+
+#[test]
+fn standalone_rows_are_the_hub_owners_and_a_bad_stored_spec_is_left_out() {
     let st = store();
     let me = ViewScope::internal();
     let row = pin(&st, &me, &pin_args(block("dash.r42", "R")), None).unwrap();
-    assert_eq!(row.person_id, None);
+    assert_eq!(
+        row.person_id,
+        lock(&st).unwrap().personal_owner_id().unwrap()
+    );
     lock(&st)
         .unwrap()
         .pin_dashboard(&PinnedDashboardWrite {
@@ -397,6 +499,23 @@ fn a_routine_reply_names_its_feeds_in_blocks() {
         ]
     );
     assert!(feed_blocks("<dashboard-feed key=\"open\">never closed").is_empty());
+    // Review of the dashboards work, 4: a quoted tag does not swallow the
+    // real block after it, and a mention restarts at the real open.
+    let one = vec![("deploys".to_string(), "3".to_string())];
+    assert_eq!(
+        feed_blocks(
+            "Updated `<dashboard-feed key=\"deploys\">` as asked:\n\
+             <dashboard-feed key=\"deploys\">3</dashboard-feed>"
+        ),
+        one
+    );
+    assert_eq!(
+        feed_blocks(
+            "I end with <dashboard-feed key=\"deploys\"> as told.\n\n\
+             <dashboard-feed key=\"deploys\">3</dashboard-feed>"
+        ),
+        one
+    );
 }
 
 #[test]

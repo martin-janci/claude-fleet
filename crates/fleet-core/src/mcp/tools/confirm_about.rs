@@ -33,7 +33,6 @@ pub(super) fn describe(store: &Store, tool: &str, args: &Value) -> Option<Confir
         "send_prompt" | "queue_prompt" | "run_prompt" => d.prompt(tool),
         "dispatch_task" => d.dispatch_task(),
         "send_message" => d.message(),
-        "review_notes" => d.review_notes(),
         "safe_kill_session"
         | "kill_session"
         | "restart_session"
@@ -338,20 +337,6 @@ impl<'a> Describer<'a> {
             format!("Wake {name} with a message")
         };
         (title, self.body("Message", "body"))
-    }
-
-    /// `review_notes { send }`: the notes become one numbered prompt.
-    fn review_notes(&mut self) -> (String, Option<ConfirmBody>) {
-        let name = self
-            .session_facts("session_id", "Session")
-            .unwrap_or_else(|| "a session".into());
-        let n = self
-            .args
-            .get("notes")
-            .and_then(Value::as_array)
-            .map_or(0, Vec::len);
-        self.fact("Notes", n.to_string());
-        (format!("Send review notes to {name}"), None)
     }
 
     fn dispatch_task(&mut self) -> (String, Option<ConfirmBody>) {

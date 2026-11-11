@@ -1542,6 +1542,16 @@ pub(crate) fn stop_failure_class(error: &str) -> &'static str {
     }
 }
 
+/// PURE: whether a StopFailure's error says the session's login is gone:
+/// `authentication_error`, a 401, an expired or revoked OAuth token.
+pub(crate) fn signed_out_failure(error: &str) -> bool {
+    let e = error.to_ascii_lowercase();
+    e.contains("authentication")
+        || e.contains("401")
+        || e.contains("token has expired")
+        || e.contains("token has been revoked")
+}
+
 /// The StopFailure hook: the turn ended in an API error (rate limit, auth,
 /// overloaded, …). Counts the turn on the conversation it names; for the
 /// current conversation it ends the turn like `Stop` — waiters return and
@@ -1584,6 +1594,15 @@ fn apply_stop_failure_hook(
                     _ => head,
                 };
                 best_effort_event_for(s, row.id, Some(session_id), "stop_failure", Some(&detail))?;
+                // A 401 is the login gone (a 403 may be a refused request
+                // on a working login): `login_health` raises its card, and
+                // auto-switch may move the session off it.
+                if signed_out_failure(error) {
+                    crate::service::login_health::note_signed_out(
+                        &row.host_alias,
+                        row.claude_profile.as_deref(),
+                    );
+                }
             }
             Ok(Some(row.id))
         })?
@@ -3302,6 +3321,10 @@ mod tests {
         assert_eq!(stop_failure_class("401 Unauthorized"), "auth");
         assert_eq!(stop_failure_class("server_error"), "other");
         assert_eq!(stop_failure_class(""), "other");
+        assert!(signed_out_failure("authentication_error"));
+        assert!(signed_out_failure("401 Unauthorized"));
+        assert!(!signed_out_failure("403 Forbidden"));
+        assert!(!signed_out_failure("rate_limit"));
     }
 
     #[test]

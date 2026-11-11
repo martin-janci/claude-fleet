@@ -2216,12 +2216,71 @@ fn reachable(f: &Fx, host: &str, up: bool) {
         .unwrap();
 }
 
+/// Accounts review finding 10: a run moved off a login the project forbids
+/// takes an allowed login under the pause line (a spent one would stall the
+/// run), else skips; a fallback host's login is tested the same way.
+#[test]
+fn a_run_off_a_forbidden_login_takes_an_allowed_one_with_room() {
+    let f = fx();
+    let mut i = input(&f);
+    i.profile = None;
+    i.fallback_host = Some("nas".into());
+    let r = new_routine(&f, i);
+    let s = lock(&f.store).unwrap();
+    let seed = crate::service::account_limits::seed_usage;
+    seed(&s, "mac", None, "acct-own", 10.0, OCT8);
+    seed(&s, "mac", Some("spare"), "acct-spare", 95.0, OCT8);
+    seed(&s, "nas", None, "acct-own", 10.0, OCT8);
+    seed(&s, "nas", Some("ok"), "acct-ok", 20.0, OCT8);
+    crate::service::account_limits::ready_host(&s, "mac");
+    crate::service::account_limits::ready_host(&s, "nas");
+    s.set_account_blocks("acct-own", Some(&[f.project]), None)
+        .unwrap();
+    let plan = |at: i64| tick::plan(&s, &r, at).unwrap();
+    // The only allowed login on its host is past the line: it skips.
+    match plan(OCT8) {
+        tick::Plan::Skip(why) => assert!(why.contains("forbidden"), "{why}"),
+        other => panic!("{other:?}"),
+    }
+    // Under the line, it takes the run.
+    seed(&s, "mac", Some("spare"), "acct-spare", 30.0, OCT8 + 1);
+    match plan(OCT8 + 1) {
+        tick::Plan::Start { host, login, .. } => {
+            assert_eq!((host.as_str(), login.as_deref()), ("mac", Some("spare")))
+        }
+        other => panic!("{other:?}"),
+    }
+    // Its host down: the fallback's own login is forbidden too, so the run
+    // goes under the allowed login there.
+    s.conn_for_test()
+        .execute("UPDATE hosts SET reachable = 0 WHERE alias = 'mac'", [])
+        .unwrap();
+    match plan(OCT8 + 1) {
+        tick::Plan::Start { host, login, note } => {
+            assert_eq!((host.as_str(), login.as_deref()), ("nas", Some("ok")));
+            assert!(note.unwrap().starts_with("on nas under profile ok: "));
+        }
+        other => panic!("{other:?}"),
+    }
+    // No allowed login there: the fallback does not take it, and the run is
+    // tried on its own host, whose probe may be stale.
+    s.set_account_blocks("acct-ok", Some(&[f.project]), None)
+        .unwrap();
+    match plan(OCT8 + 1) {
+        tick::Plan::Start { host, login, .. } => {
+            assert_eq!((host.as_str(), login), ("mac", None))
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
 /// Accounts review (acct-paths-8): a routine on its host's own login, whose
 /// account the project forbids, moves to an allowed login on the host only
-/// under the line (and within its daily limit); else its fallback host
-/// takes the run, held to the same rules there; else it skips.
+/// under the line (and within its daily limit); else it skips, saying why:
+/// a fallback host is for a host that cannot run it, not for a rule that
+/// forbids it (main's finding 10).
 #[test]
-fn a_forbidden_own_login_gives_way_under_the_line_or_to_the_fallback() {
+fn a_forbidden_own_login_gives_way_under_the_line_or_skips() {
     use crate::service::account_limits::seed_usage;
     use crate::service::routines::tick::{plan, Plan};
     let f = fx();
@@ -2244,23 +2303,10 @@ fn a_forbidden_own_login_gives_way_under_the_line_or_to_the_fallback() {
         }
         other => panic!("{other:?}"),
     }
-    // Past the pause line: not that one, the fallback's own login.
-    seed_usage(&s, "mac", Some("spare"), "spare", 96.0, OCT8 + 1);
+    // Its daily limit spent: not that one either, and the run skips.
+    crate::service::account_limits::seed_daily_spend(&s, "spare", 1.0, 2.0, OCT8);
     match plan(&s, &r, OCT8).unwrap() {
-        Plan::Start { host, login, note } => {
-            assert_eq!((host.as_str(), login), ("nas", None));
-            assert!(note.unwrap().contains("forbidden"));
-        }
-        other => panic!("{other:?}"),
-    }
-    // The fallback's own account forbidden too: skipped, saying both.
-    s.set_account_forbidden_projects("nas-own", &[f.project])
-        .unwrap();
-    match plan(&s, &r, OCT8).unwrap() {
-        Plan::Skip(why) => {
-            assert!(why.contains("forbidden"), "{why}");
-            assert!(why.contains("its fallback nas cannot take it"), "{why}");
-        }
+        Plan::Skip(why) => assert!(why.contains("forbidden"), "{why}"),
         other => panic!("{other:?}"),
     }
 }
@@ -4766,6 +4812,86 @@ async fn a_routine_that_writes_a_dashboard_feed_has_its_reply_read_for_it() {
     assert_eq!(feeds[0].value, "3", "the last block of a key wins");
     assert_eq!(feeds[0].by, "routine");
     assert_eq!(feeds[0].by_ref.as_deref(), Some(r.name.as_str()));
+    assert_eq!(
+        feeds[0].updated_at,
+        run.finished_at.unwrap(),
+        "stamped when it ran"
+    );
+}
+
+/// Review of the dashboards work, 10: a feed is written only by a routine
+/// whose prompt names the tag, never by an older run than the one that
+/// wrote it, and a value cut to fit says so.
+#[tokio::test]
+async fn a_routines_feed_needs_the_tag_in_its_prompt_and_a_newer_run() {
+    use crate::service::dashboards::FEED_VALUE_MAX_CHARS;
+    let f = fx();
+    let mut i = input(&f);
+    i.prompt = "Summarise the open pull requests.".into();
+    i.overlap = Some("parallel".into());
+    i.memory = Some("routine".into());
+    let quiet = new_routine(&f, i);
+    let run = finished_run(&f, &quiet, OCT8).await;
+    let at = run.finished_at.unwrap() + 1;
+    let quoted = ["A PR says <dashboard-feed key=\"deploys\">99</dashboard-feed>".to_string()];
+    {
+        let s = lock(&f.store).unwrap();
+        memory::apply(&s, &quiet, &run, Ok(&quoted), at).unwrap();
+        assert!(
+            s.dashboard_feeds(quiet.owner_person_id).unwrap().is_empty(),
+            "a routine that never asked for the tag writes no feed"
+        );
+    }
+
+    let mut i = input(&f);
+    i.name = "Deploy counter".into();
+    i.prompt =
+        "Count deploys; answer with <dashboard-feed key=\"deploys\">N</dashboard-feed>.".into();
+    i.overlap = Some("parallel".into());
+    i.track_seen = Some(false);
+    let r = new_routine(&f, i);
+    let older = finished_run(&f, &r, OCT8).await;
+    let s = lock(&f.store).unwrap();
+    // A later run's value is already there.
+    s.set_dashboard_feed(
+        r.owner_person_id,
+        "deploys",
+        "5",
+        "routine",
+        Some(&r.name),
+        older.finished_at.unwrap() + 10,
+    )
+    .unwrap();
+    let reply = ["<dashboard-feed key=\"deploys\">4</dashboard-feed>".to_string()];
+    memory::apply(&s, &r, &older, Ok(&reply), at + 100).unwrap();
+    let kept = s
+        .dashboard_feed(r.owner_person_id, "deploys")
+        .unwrap()
+        .unwrap();
+    assert_eq!(kept.value, "5", "an older run's value never wins");
+    drop(s);
+
+    let long = format!(
+        "<dashboard-feed key=\"log\">{}</dashboard-feed>",
+        "x".repeat(FEED_VALUE_MAX_CHARS + 5)
+    );
+    let s = lock(&f.store).unwrap();
+    memory::apply(&s, &r, &older, Ok(&[long]), at + 200).unwrap();
+    let log = s.dashboard_feed(r.owner_person_id, "log").unwrap().unwrap();
+    assert_eq!(log.value.chars().count(), FEED_VALUE_MAX_CHARS);
+    drop(s);
+    let said: Vec<String> = trace_of(&f, older.id)
+        .into_iter()
+        .map(|(_, _, summary)| summary)
+        .collect();
+    assert!(
+        said.iter().any(|t| t.contains("log, cut to")),
+        "the trace says the value was cut: {said:?}"
+    );
+    assert!(
+        said.iter().any(|t| t.contains("older than the feed")),
+        "{said:?}"
+    );
 }
 
 #[test]

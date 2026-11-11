@@ -262,7 +262,8 @@ person can turn it off for their own sessions, migration 187, and ask for
 "continue" after a switch, migration 188; Jev's pick
 is recorded only, `decide.jev.limit_switch`); a session parked by a quota
 notification (`quota_auto_resume_*`, read as blocked) is switched too, one
-waiting on a dialog or a form is not. An account can be forbidden for
+waiting on a dialog or a form is not; so is a session whose own login is
+signed out (onto any other login on its host, its own account's included). An account can be forbidden for
 projects or for a whole org (landed, nothing forbidden by default; docs/accounts.md → *Keep an
 account off a project*, migrations 217 and 218): every start, resume, switch, routine
 and mission run of such a project refuses or avoids its logins. A login profile can be
@@ -282,8 +283,10 @@ start that names no host takes the best host that ran the project, and the
 over-limit refusal names a login on another host when its own host has none.
 Jev's placement stays its own, off-by-default proposal. Signed-out logins
 are kept on the host row (`hosts.signed_out_logins`, migration 197), learnt
-from the usage poll's sources and from headless runs refused for want of a
-login, re-asked hourly; each is one amber card in Control's chat ("Claude
+from the usage poll's sources, from headless runs refused for want of a
+login and from session panes whose last turn ended in Claude Code's own
+"Please run /login" error (`pane_intel::detect_signed_out`), re-asked
+hourly; each is one amber card in Control's chat ("Claude
 login expired on <host> (since <day>) · ssh <host> then claude /login") and
 one line in Control's feed. Control's own account (F7, ON:
 `control.switch_at_limit`): `operator_status` reports its login, usage and

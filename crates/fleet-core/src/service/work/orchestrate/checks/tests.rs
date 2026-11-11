@@ -178,25 +178,31 @@ fn a_check_never_runs_on_a_login_the_project_forbids() {
     // The host's own login is forbidden: `work` takes it.
     let p = plan(&s, item, "review", None, None).expect("a review");
     assert_eq!(p.profile.as_deref(), Some("work"));
+    // A login that is allowed is kept as asked.
+    let p = plan(&s, item, "review", Some("work"), None).expect("a review");
+    assert_eq!(p.profile.as_deref(), Some("work"));
     // No allowed login left on the host: not headless.
     s.set_account_forbidden_projects("acct-work", &[project])
         .unwrap();
     assert!(plan(&s, item, "review", None, None).is_none());
     assert!(plan(&s, item, "test", Some("work"), None).is_none());
-    // A signed-out login is not taken headless either.
+    // A signed-out login is not taken headless either: the check steps off
+    // it onto a signed-in one, and with none it takes the session path.
     s.set_account_forbidden_projects("acct-own", &[]).unwrap();
     s.set_account_forbidden_projects("acct-work", &[]).unwrap();
-    s.set_host_signed_out_logins(
-        "mars",
-        &[crate::store::SignedOutLogin {
-            profile: None,
-            since: 1,
-            checked_at: 1,
-        }],
-    )
-    .unwrap();
-    assert!(plan(&s, item, "review", None, None).is_none());
+    let out = |profile: Option<&str>| crate::store::SignedOutLogin {
+        profile: profile.map(str::to_string),
+        since: 1,
+        checked_at: 1,
+    };
+    s.set_host_signed_out_logins("mars", &[out(None)]).unwrap();
+    let p = plan(&s, item, "review", None, None).expect("a review");
+    assert_eq!(p.profile.as_deref(), Some("work"));
     assert!(plan(&s, item, "review", Some("work"), None).is_some());
+    s.set_host_signed_out_logins("mars", &[out(None), out(Some("work"))])
+        .unwrap();
+    assert!(plan(&s, item, "review", None, None).is_none());
+    assert!(plan(&s, item, "review", Some("work"), None).is_none());
 }
 
 #[test]

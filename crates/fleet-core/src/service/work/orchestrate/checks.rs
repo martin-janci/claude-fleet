@@ -346,6 +346,8 @@ pub fn plan(
         _ => Vec::new(),
     };
     let item = s.get_work_item(item_id).ok()??;
+    // The check is `claude -p` in the project's checkout, so its login is
+    // held to the account rules (`service::run_login`).
     let profile = login_for(s, item_id, item.project_id, &at.host, profile)?;
     Some(Plan {
         model: settings::get_string(s, settings::ORCHESTRATOR_HEADLESS_MODEL),

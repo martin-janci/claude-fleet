@@ -2783,12 +2783,10 @@ async fn a_burst_of_one_error_files_one_bug() {
         .into_iter()
         .filter(|a| a.kind == "tracker_issue")
         .collect();
-    assert_eq!(bugs.len(), 2, "each run proposed one");
+    // The second run's proposal carries the same fingerprint as the one
+    // still waiting, so it is that one again and not queued twice.
+    assert_eq!(bugs.len(), 1, "one proposal for one error");
     assert_eq!(f.executor().execute(&bugs[0]).await, ActionResult::Executed);
-    match f.executor().execute(&bugs[1]).await {
-        ActionResult::Expired(e) => assert!(e.contains("duplicate: BUG-9"), "{e}"),
-        other => panic!("{other:?}"),
-    }
     let creates = f
         .world
         .base
@@ -2907,12 +2905,11 @@ diff --git a/docs/x.md b/docs/x.md\n--- a/docs/x.md\n+++ b/docs/x.md\n@@ -1 +1 @
     }
 }
 
-/// Accounts review: an agent's run is `claude -p` on the rule host's own
-/// login. When the rule's project forbids that account the job is
-/// deferred with the reason (its attempt given back), before any checkout,
-/// and nothing runs.
+/// Accounts review finding 5: an agent's run is `claude -p` on the rule
+/// host's own login. When the rule's project forbids that account the job
+/// is skipped with the reason, before any checkout.
 #[tokio::test]
-async fn a_run_waits_on_a_login_the_rules_project_forbids() {
+async fn a_run_is_skipped_on_a_login_the_rules_project_forbids() {
     let f = head_fx();
     *f.world.prs.lock().unwrap() = vec![pr(4, "abc", false)];
     *f.world.diff.lock().unwrap() = "diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1 +1,2 @@\n fn a() {}\n+fn b() {}\n".into();
@@ -2930,8 +2927,7 @@ async fn a_run_waits_on_a_login_the_rules_project_forbids() {
             .unwrap();
     }
     match f.runner().run(&jobs[0], Some(&f.rule)).await {
-        RunOutcome::Deferred { at, reason } => {
-            assert!(at > now, "{at}");
+        RunOutcome::Skipped { reason } => {
             assert!(reason.contains("forbidden for o/r"), "{reason}")
         }
         other => panic!("{other:?}"),
@@ -3764,14 +3760,22 @@ fn a_repeated_proposal_does_not_queue_twice() {
                 "arguments": { "issue_key": key, "fields": { "status": status } }, "body": "" })
         .to_string()
     };
+    let queue_pending = |s: &Store, rid: i64, job: i64, kind: &str, payload: &str, now: i64| {
+        let mut q = PendingQueue::default();
+        let state = q.queue(s, rid, job, kind, payload, now);
+        q.finish(s, now);
+        state
+    };
+    let mut first_job = PendingQueue::default();
     assert_eq!(
-        queue_pending(&s, rid, jobs[0], "mcp_call", &call("PD-1", "Done"), 10),
+        first_job.queue(&s, rid, jobs[0], "mcp_call", &call("PD-1", "Done"), 10),
         "pending"
     );
     assert_eq!(
-        queue_pending(&s, rid, jobs[0], "mcp_call", &call("PD-2", "Done"), 10),
+        first_job.queue(&s, rid, jobs[0], "mcp_call", &call("PD-2", "Done"), 10),
         "pending"
     );
+    first_job.finish(&s, 10);
     let first = s.pending_agent_actions_of_rule(rid, "mcp_call").unwrap();
     assert_eq!(first.len(), 2);
 
@@ -3800,4 +3804,101 @@ fn a_repeated_proposal_does_not_queue_twice() {
     let origins = s.agent_action_origins(&[now[0].id]).unwrap();
     assert_eq!(origins[0].rule_id, Some(rid));
     assert_eq!(origins[0].subject, "schedule:1000");
+}
+
+/// Two waiting proposals of one identity, B and A: a job that keeps B word
+/// for word and changes A retires only A, whatever order it proposes them
+/// in; a reworded proposal with the same `fingerprint` is the same one.
+#[test]
+fn a_job_supersedes_only_what_none_of_its_proposals_repeats() {
+    let s = Store::open_in_memory().unwrap();
+    let rule = NewAgentRule {
+        agent: "fleet".into(),
+        scope: "triage".into(),
+        level: "propose".into(),
+        host_alias: "local".into(),
+        project_id: None,
+        config: "{}".into(),
+        granted_by: "console".into(),
+        granted_at: 100,
+        expires_at: None,
+        definition: Some("jira-triage".into()),
+        bindings: "[]".into(),
+    };
+    let rid = s.grant_agent_rule(&rule).unwrap();
+    let job = |at: i64| crate::store::NewAgentJob {
+        rule_id: rid,
+        agent: "fleet".into(),
+        subject: format!("schedule:{at}"),
+        trigger: "schedule".into(),
+        dedup_key: format!("r{rid}:schedule:{at}"),
+        not_before: 0,
+    };
+    s.record_agent_poll(rid, 1000, None, &[job(1000), job(2000), job(3000)])
+        .unwrap();
+    let mut jobs: Vec<i64> = s
+        .list_agent_jobs(None, 10)
+        .unwrap()
+        .iter()
+        .map(|j| j.id)
+        .collect();
+    jobs.sort_unstable();
+    // Two comments on one issue: one identity (`comment:c:PD-1`).
+    let comment = |body: &str| json!({ "action": "c", "key": "PD-1", "body": body }).to_string();
+    let mut q = PendingQueue::default();
+    q.queue(&s, rid, jobs[0], "tracker_comment", &comment("A"), 10);
+    q.queue(&s, rid, jobs[0], "tracker_comment", &comment("B"), 10);
+    q.finish(&s, 10);
+    let waiting = s
+        .pending_agent_actions_of_rule(rid, "tracker_comment")
+        .unwrap();
+    assert_eq!(waiting.len(), 2);
+    let (a, b) = (waiting[0].id, waiting[1].id);
+
+    // B unchanged first, then A changed.
+    let mut q = PendingQueue::default();
+    assert_eq!(
+        q.queue(&s, rid, jobs[1], "tracker_comment", &comment("B"), 20),
+        format!("already waiting as #{b}")
+    );
+    assert_eq!(
+        q.queue(&s, rid, jobs[1], "tracker_comment", &comment("A2"), 20),
+        "pending"
+    );
+    q.finish(&s, 20);
+    let ids: Vec<i64> = s
+        .pending_agent_actions_of_rule(rid, "tracker_comment")
+        .unwrap()
+        .iter()
+        .map(|x| x.id)
+        .collect();
+    assert!(ids.contains(&b), "B is kept: the job proposed it again");
+    assert!(!ids.contains(&a), "A is replaced by A2");
+    assert_eq!(ids.len(), 2);
+
+    // A fingerprint makes a reworded finding the same proposal.
+    let finding = |body: &str| json!({ "body": body, "fingerprint": "f1" }).to_string();
+    let mut q = PendingQueue::default();
+    assert_eq!(
+        q.queue(&s, rid, jobs[1], "fix_session", &finding("Restart it"), 20),
+        "pending"
+    );
+    q.finish(&s, 20);
+    let mut q = PendingQueue::default();
+    let again = q.queue(
+        &s,
+        rid,
+        jobs[2],
+        "fix_session",
+        &finding("Please restart"),
+        30,
+    );
+    q.finish(&s, 30);
+    assert!(again.starts_with("already waiting as #"), "{again}");
+    assert_eq!(
+        s.pending_agent_actions_of_rule(rid, "fix_session")
+            .unwrap()
+            .len(),
+        1
+    );
 }

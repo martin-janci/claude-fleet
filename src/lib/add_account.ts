@@ -135,24 +135,27 @@ export function tokenAccountChoices(accounts: readonly { uuid: string; email: st
     .sort((x, y) => x[1].localeCompare(y[1]));
 }
 
-export function startLogin(host: string, profile: string): Promise<Result<{ session: string }>> {
-  return call({ action: 'start_login', host_alias: host, profile });
+/** `again`: sign an existing login in again; profile '' is the host's own. */
+const againArg = (again: boolean) => (again ? { again: true } : {});
+
+export function startLogin(host: string, profile: string, again = false): Promise<Result<{ session: string }>> {
+  return call({ action: 'start_login', host_alias: host, profile, ...againArg(again) });
 }
 
-export function loginStatus(host: string, profile: string): Promise<Result<LoginStatus>> {
-  return call<LoginStatus>({ action: 'login_status', host_alias: host, profile });
+export function loginStatus(host: string, profile: string, again = false): Promise<Result<LoginStatus>> {
+  return call<LoginStatus>({ action: 'login_status', host_alias: host, profile, ...againArg(again) });
 }
 
-export function loginKey(host: string, profile: string, key: LoginKey): Promise<Result<{ sent: boolean }>> {
-  return call({ action: 'login_key', host_alias: host, profile, key });
+export function loginKey(host: string, profile: string, key: LoginKey, again = false): Promise<Result<{ sent: boolean }>> {
+  return call({ action: 'login_key', host_alias: host, profile, key, ...againArg(again) });
 }
 
-export function loginCode(host: string, profile: string, code: string): Promise<Result<{ sent: boolean }>> {
-  return call({ action: 'login_code', host_alias: host, profile, code: code.trim() });
+export function loginCode(host: string, profile: string, code: string, again = false): Promise<Result<{ sent: boolean }>> {
+  return call({ action: 'login_code', host_alias: host, profile, code: code.trim(), ...againArg(again) });
 }
 
-export function endLogin(host: string, profile: string): Promise<Result<{ closed: boolean }>> {
-  return call({ action: 'end_login', host_alias: host, profile });
+export function endLogin(host: string, profile: string, again = false): Promise<Result<{ closed: boolean }>> {
+  return call({ action: 'end_login', host_alias: host, profile, ...againArg(again) });
 }
 
 export function setDailyLimit(host: string, profile: string, usd: number | null): Promise<Result<unknown>> {

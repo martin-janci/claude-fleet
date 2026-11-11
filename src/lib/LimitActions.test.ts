@@ -267,6 +267,15 @@ describe('LimitActions on a signed-out row', () => {
     await fireEvent.click(screen.getByTestId('limit-switch'));
     await vi.waitFor(() => expect(screen.getByTestId('limit-switch-ask').textContent).toContain('60% left'));
   });
+
+  it('offers Sign in again for its own login; a limited row does not', () => {
+    const sess = session('mac', 'a', { claude_profile: 'gone', account_uuid: 'acc-own' });
+    const { unmount } = render(LimitActions, { props: { sess, resetsAt: null, signedOut: true, accountName: name } });
+    expect(screen.getByTestId('limit-sign-in-again').textContent).toBe('Sign in again');
+    unmount();
+    render(LimitActions, { props: { sess, resetsAt: null, accountName: name } });
+    expect(screen.queryByTestId('limit-sign-in-again')).toBeNull();
+  });
 });
 
 // Review w03-9: a failed check is an error, never "no room".

@@ -44,4 +44,4 @@ UPDATE routines
  WHERE paused_reason = 'paused: its project was removed'
     OR project_id NOT IN (SELECT id FROM projects);
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (226);
+INSERT OR IGNORE INTO schema_version (version) VALUES (227);

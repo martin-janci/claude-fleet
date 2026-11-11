@@ -593,3 +593,83 @@ fn a_session_parked_by_a_quota_notification_still_moves() {
     }
     assert!(plan_now(&s).is_empty());
 }
+
+/// `fleet()` with nothing at a limit, and `s1` on the `work` profile.
+fn on_work_nothing_spent() -> (Store, i64) {
+    let (s, id, _) = fleet();
+    seed_usage(&s, "mac", None, "acct-out", 20.0, NOW);
+    s.conn_for_test()
+        .execute(
+            "UPDATE sessions SET claude_profile = 'work', account_uuid = 'acct-work' WHERE id = ?1",
+            [id],
+        )
+        .unwrap();
+    (s, id)
+}
+
+#[test]
+fn a_session_whose_login_is_signed_out_moves_off_it() {
+    let (s, id) = on_work_nothing_spent();
+    assert!(plan_now(&s).is_empty(), "nothing spent, nothing signed out");
+    sign_out(&s, &["work"]);
+    let p = plan_now(&s);
+    assert_eq!(p.len(), 1);
+    assert_eq!(p[0].session_id, id);
+    assert_eq!(p[0].reason, Reason::SignedOut);
+    assert_eq!(p[0].from_account, "acct-work");
+    assert_eq!(
+        p[0].target.profile.as_deref(),
+        Some("spare"),
+        "the least used"
+    );
+    assert!(
+        p[0].candidates
+            .iter()
+            .all(|l| l.profile.as_deref() != Some("work")),
+        "never back onto the signed-out login"
+    );
+    assert!(detail(&p[0], None, None).contains("\"reason\":\"signed_out\""));
+}
+
+#[test]
+fn off_a_signed_out_login_its_own_account_is_a_way_out() {
+    let (s, _) = on_work_nothing_spent();
+    // A setup token of the same account beside the expired `/login`.
+    seed_usage(&s, "mac", Some("tok"), "acct-work", 5.0, NOW);
+    sign_out(&s, &["work"]);
+    let p = plan_now(&s);
+    assert_eq!(p[0].target.profile.as_deref(), Some("tok"));
+    // At the limit, though, a second login of the account is no way out.
+    seed_usage(&s, "mac", Some("work"), "acct-work", 100.0, NOW);
+    seed_usage(&s, "mac", Some("tok"), "acct-work", 100.0, NOW);
+    s.set_host_signed_out_logins("mac", &[]).unwrap();
+    let p = plan_now(&s);
+    assert_eq!(p[0].reason, Reason::Limit);
+    assert!(p[0]
+        .candidates
+        .iter()
+        .all(|l| l.account_uuid != "acct-work"));
+}
+
+#[test]
+fn a_working_session_on_a_signed_out_login_is_left_alone() {
+    let (s, _) = on_work_nothing_spent();
+    sign_out(&s, &["work"]);
+    s.conn_for_test()
+        .execute("UPDATE sessions SET claude_status = 'working'", [])
+        .unwrap();
+    assert!(plan_now(&s).is_empty());
+    // Another login being signed out is no reason to move this one.
+    s.conn_for_test()
+        .execute("UPDATE sessions SET claude_status = 'idle'", [])
+        .unwrap();
+    sign_out(&s, &["spare"]);
+    assert!(plan_now(&s).is_empty());
+}
+
+#[test]
+fn an_auth_failure_is_what_cuts_a_turn_off_a_signed_out_login() {
+    assert!(cut_off_by_sign_out("stop_failure", Some("auth (401)")));
+    assert!(!cut_off_by_sign_out("stop_failure", Some("rate_limit")));
+    assert!(!cut_off_by_sign_out("turn_done", Some("auth")));
+}

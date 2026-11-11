@@ -6,9 +6,9 @@
 // notes come back from the session's store with who sent them, and a person
 // resolves each one.
 
-import { derived, get, writable, type Readable } from 'svelte/store';
-import { invokeCmd, type Result } from './result';
-import { sessionIdentity, type SessionRow } from './sessions';
+import { get, writable, type Readable } from 'svelte/store';
+import { errorText } from './error_copy';
+import { invokeCmd, type IpcError, type Result } from './result';
 
 export type NoteSide = 'new' | 'old';
 
@@ -41,7 +41,18 @@ export interface ReviewNote {
   created_at: number;
   resolved_at?: number | null;
   resolved_by?: string | null;
+  /** Absent once the send reached the session. `waiting`: its prompt is
+   *  kept for the session's next idle moment; `not_delivered`: that prompt
+   *  was cancelled, dropped or failed; `uncertain`: the typing may or may not
+   *  have landed. (Older hubs never send it.) */
+  delivery?: ReviewNoteDelivery | null;
+  /** Why, for `not_delivered` / `uncertain`. */
+  delivery_error?: string | null;
+  /** The kept prompt carrying the send (Send later's id). */
+  queued_id?: number | null;
 }
+
+export type ReviewNoteDelivery = 'waiting' | 'not_delivered' | 'uncertain';
 
 export interface SentReviewNotes {
   session_id: number;
@@ -56,103 +67,88 @@ export function lineKey(path: string, side: NoteSide, line: number | null | unde
   return `${path}\u0000${side}\u0000${line ?? ''}`;
 }
 
+/** The hub's limits (`store::review_notes`): at most this many notes in
+ *  one send, and this many characters in a note's body. */
+export const NOTES_MAX = 50;
+export const NOTE_MAX = 4000;
+/** A note's quote (the line it is on) is cut to this many characters, so a
+ *  long line (minified code, a data URI) never makes a send too long. */
+export const QUOTE_MAX = 300;
+
+/** A line as a note quotes it: trailing space off, cut to `QUOTE_MAX`
+ *  characters. A sent note sits on a row only where the row's quote equals
+ *  the note's. */
+export function quoteOf(text: string | null | undefined): string {
+  const t = (text ?? '').trimEnd();
+  return t.length <= QUOTE_MAX ? t : Array.from(t).slice(0, QUOTE_MAX).join('');
+}
+
+// Drafts and the pending send are keyed by the session's identity
+// (`sessionIdentity`: host, tmux name, created_at), not its id: a killed
+// newest session's id goes to the next one, and an id means another
+// session on another hub.
 const KEY = 'review-note-drafts:';
+const SEND_KEY = 'review-note-send:';
 
-/** The session a set of drafts belongs to. Ids are small per-backend
- *  integers that SQLite hands out again once the newest session is reaped,
- *  so the drafts carry who they were written for: the fleet, the host, the
- *  tmux name and the creation time (`sessionIdentity`). */
-export type DraftSession = Pick<SessionRow, 'id' | 'host_alias' | 'tmux_name' | 'created_at'> & { fleet?: string };
-
-function ownerOf(s: DraftSession): string {
-  return `${s.fleet ?? ''}\u0001${sessionIdentity(s as SessionRow)}`;
+function storageKey(prefix: string, key: string): string {
+  return prefix + encodeURIComponent(key);
 }
 
-/** A send whose answer never came: its id, and the drafts (id and body) it
- *  carried. Kept with the drafts, so a remount does not lose it. */
-interface PendingSend {
-  id: string;
-  drafts: { id: string; body: string }[];
-}
-
-interface Stored {
-  owner: string;
-  drafts: NoteDraft[];
-  pending?: PendingSend | null;
-}
-
-const isDraft = (d: unknown): d is NoteDraft =>
-  !!d && typeof (d as NoteDraft).body === 'string' && typeof (d as NoteDraft).path === 'string';
-
-function read(s: DraftSession): Stored {
-  const owner = ownerOf(s);
-  const empty: Stored = { owner, drafts: [], pending: null };
+function read(key: string): NoteDraft[] {
   try {
-    const raw = localStorage.getItem(KEY + s.id);
-    const v: unknown = raw ? JSON.parse(raw) : null;
-    // Before the owner was kept: a bare array, adopted as this session's.
-    if (Array.isArray(v)) return { owner, drafts: v.filter(isDraft), pending: null };
-    if (!v || typeof v !== 'object') return empty;
-    const st = v as Partial<Stored>;
-    // Another session that had this id: its drafts are not this one's.
-    if (st.owner !== owner) return empty;
-    const pending =
-      st.pending && typeof st.pending.id === 'string' && Array.isArray(st.pending.drafts) ? st.pending : null;
-    return { owner, drafts: Array.isArray(st.drafts) ? st.drafts.filter(isDraft) : [], pending };
+    const raw = localStorage.getItem(storageKey(KEY, key));
+    const v: unknown = raw ? JSON.parse(raw) : [];
+    return Array.isArray(v) ? (v as NoteDraft[]).filter((d) => d && typeof d.body === 'string' && typeof d.path === 'string') : [];
   } catch {
-    return empty;
+    return [];
   }
 }
 
-function write(id: number, st: Stored): void {
+function write(key: string, drafts: NoteDraft[]): void {
   try {
-    if (st.drafts.length || st.pending) localStorage.setItem(KEY + id, JSON.stringify(st));
-    else localStorage.removeItem(KEY + id);
+    if (drafts.length) localStorage.setItem(storageKey(KEY, key), JSON.stringify(drafts));
+    else localStorage.removeItem(storageKey(KEY, key));
   } catch {
     // Storage off (a private window): the drafts live as long as the page.
   }
 }
 
-const stores = new Map<string, ReturnType<typeof writable<Stored>>>();
+const stores = new Map<string, ReturnType<typeof writable<NoteDraft[]>>>();
 
-function storeFor(s: DraftSession) {
-  const k = `${s.id}\u0002${ownerOf(s)}`;
-  let st = stores.get(k);
-  if (!st) {
-    st = writable(read(s));
-    stores.set(k, st);
+function storeFor(key: string) {
+  let s = stores.get(key);
+  if (!s) {
+    s = writable(read(key));
+    stores.set(key, s);
   }
-  return st;
+  return s;
 }
 
-/** This device's drafts for a session, kept in browser storage. */
-export function noteDrafts(s: DraftSession): Readable<NoteDraft[]> {
-  return derived(storeFor(s), (st) => st.drafts);
+/** This device's drafts for a session (by `sessionIdentity`), kept in
+ *  browser storage. */
+export function noteDrafts(key: string): Readable<NoteDraft[]> {
+  return { subscribe: storeFor(key).subscribe };
 }
 
-function update(s: DraftSession, f: (st: Stored) => Stored): void {
-  storeFor(s).update((cur) => {
-    const next = f(cur);
-    write(s.id, next);
+function update(key: string, f: (d: NoteDraft[]) => NoteDraft[]): void {
+  storeFor(key).update((d) => {
+    const next = f(d);
+    write(key, next);
     return next;
   });
-}
-
-function updateDrafts(s: DraftSession, f: (d: NoteDraft[]) => NoteDraft[]): void {
-  update(s, (st) => ({ ...st, drafts: f(st.drafts) }));
 }
 
 let seq = 0;
 function newId(prefix: string): string {
   seq += 1;
-  const rnd = Math.random().toString(36).slice(2, 8).replace(/[^a-z0-9]/g, '');
+  const rnd = Math.random().toString(36).slice(2, 8);
   return `${prefix}-${Date.now().toString(36)}-${seq}${rnd}`;
 }
 
 /** Add or replace a draft (same id); an empty body removes it. */
-export function saveDraft(s: DraftSession, d: Omit<NoteDraft, 'id'> & { id?: string }): void {
+export function saveDraft(key: string, d: Omit<NoteDraft, 'id'> & { id?: string }): void {
   const body = d.body.trim();
-  updateDrafts(s, (all) => {
+  update(key, (all) => {
     if (!body) return all.filter((x) => x.id !== d.id);
     const draft: NoteDraft = { ...d, body, id: d.id ?? newId('nd') };
     const i = all.findIndex((x) => x.id === draft.id);
@@ -160,12 +156,59 @@ export function saveDraft(s: DraftSession, d: Omit<NoteDraft, 'id'> & { id?: str
   });
 }
 
-export function removeDraft(s: DraftSession, id: string): void {
-  updateDrafts(s, (all) => all.filter((x) => x.id !== id));
+export function removeDraft(key: string, id: string): void {
+  update(key, (all) => all.filter((x) => x.id !== id));
 }
 
-export function clearDrafts(s: DraftSession): void {
-  update(s, (st) => ({ ...st, drafts: [], pending: null }));
+/**
+ * A send whose answer has not come in, per session beside its drafts: its
+ * id, a hash of the notes it carried, and whether a call is running now.
+ * Every view of the session sees it (a second diff cannot send the same
+ * notes again while the first call runs), and the id survives a remount or
+ * a reload, so a retry of the SAME notes reuses it and the hub types
+ * nothing twice. Different notes get a new id.
+ */
+export interface PendingSend {
+  id: string;
+  hash: string;
+  inFlight: boolean;
+}
+
+const sendStores = new Map<string, ReturnType<typeof writable<PendingSend | null>>>();
+
+function readSend(key: string): PendingSend | null {
+  try {
+    const raw = localStorage.getItem(storageKey(SEND_KEY, key));
+    const v = raw ? (JSON.parse(raw) as Partial<PendingSend>) : null;
+    // A call does not outlive the page: a stored send is never in flight.
+    return v && typeof v.id === 'string' && typeof v.hash === 'string' ? { id: v.id, hash: v.hash, inFlight: false } : null;
+  } catch {
+    return null;
+  }
+}
+
+function sendStoreFor(key: string) {
+  let s = sendStores.get(key);
+  if (!s) {
+    s = writable(readSend(key));
+    sendStores.set(key, s);
+  }
+  return s;
+}
+
+function setSend(key: string, v: PendingSend | null): void {
+  sendStoreFor(key).set(v);
+  try {
+    if (v) localStorage.setItem(storageKey(SEND_KEY, key), JSON.stringify({ id: v.id, hash: v.hash }));
+    else localStorage.removeItem(storageKey(SEND_KEY, key));
+  } catch {
+    // Storage off: the id lives as long as the page.
+  }
+}
+
+/** The session's send whose answer has not come in, if any. */
+export function pendingSend(key: string): Readable<PendingSend | null> {
+  return { subscribe: sendStoreFor(key).subscribe };
 }
 
 /** Drafts in the order the prompt numbers them: by file, then line. */
@@ -179,47 +222,85 @@ export async function listReviewNotes(sessionId: number): Promise<Result<ReviewN
   return invokeCmd<ReviewNote[]>('review_notes', { args: { session_id: sessionId } });
 }
 
-/** A send's answer, and how many drafts it left in place: on a repeat of a
- *  send whose answer never came, the drafts added or edited since. */
-export type ReviewNotesSent = SentReviewNotes & { kept: number };
-
-/**
- * Send this device's drafts as one prompt. Each send carries an id; a send
- * whose answer never came keeps it (with the drafts it carried) beside the
- * drafts, and the next send reuses it, so nothing is typed twice. The
- * backend answers a known id with the notes it already has (`repeat`):
- * then only the drafts that send carried, unchanged, are cleared, and any
- * added or edited since stay for another send.
- */
-export async function sendReviewNotes(s: DraftSession, drafts: readonly NoteDraft[]): Promise<Result<ReviewNotesSent>> {
-  const st = get(storeFor(s));
-  const pending = st.pending ?? { id: newSendId(), drafts: drafts.map(({ id, body }) => ({ id, body })) };
-  if (!st.pending) update(s, (cur) => ({ ...cur, pending }));
-  const notes = ordered(drafts).map(({ path, line, side, quote, body }) => ({
+function wireNotes(drafts: readonly NoteDraft[]) {
+  return ordered(drafts).map(({ path, line, side, quote, body }) => ({
     path,
     line: line ?? undefined,
     side,
     quote: quote ?? undefined,
     body,
   }));
-  const r = await invokeCmd<SentReviewNotes>('review_notes', {
-    args: { session_id: s.id, action: 'send', client_msg_id: pending.id, notes },
-  });
-  if (!r.ok) return r;
-  const gone = r.value.repeat
-    ? new Set(pending.drafts.filter((p) => drafts.some((d) => d.id === p.id && d.body === p.body)).map((p) => p.id))
-    : new Set(drafts.map((d) => d.id));
-  let kept = 0;
-  update(s, (cur) => {
-    const left = cur.drafts.filter((d) => !gone.has(d.id));
-    kept = left.length;
-    return { ...cur, drafts: left, pending: null };
-  });
-  return { ok: true, value: { ...r.value, kept } };
 }
 
-export function newSendId(): string {
-  return newId('rn');
+/** A short hash (FNV-1a) of the notes a send carries, in order. */
+export function notesHash(drafts: readonly NoteDraft[]): string {
+  const s = JSON.stringify(wireNotes(drafts));
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h.toString(16).padStart(8, '0');
+}
+
+const sameNote = (d: NoteDraft, n: Pick<ReviewNote, 'path' | 'side' | 'line' | 'body'>) =>
+  d.path === n.path && d.side === n.side && (d.line ?? null) === (n.line ?? null) && d.body.trim() === n.body.trim();
+
+/**
+ * Send the session's drafts (`key`: its `sessionIdentity`) as one prompt.
+ * The send's id is kept with the drafts until the answer comes: a retry of
+ * the same notes, from this view or another, after a remount or a reload,
+ * reuses it and nothing is typed twice; changed notes get a new id. While
+ * a call runs, another send of the session answers `E_IN_FLIGHT` here.
+ * Only the drafts that were in the send are dropped, once it is in (on a
+ * `repeat`, the ones the hub's stored batch holds).
+ */
+export async function sendReviewNotes(sessionId: number, key: string): Promise<Result<SentReviewNotes>> {
+  const was = get(sendStoreFor(key));
+  if (was?.inFlight) {
+    return { ok: false, error: { code: 'E_IN_FLIGHT', message: 'These notes are still being sent.' } };
+  }
+  const drafts = get(storeFor(key));
+  if (drafts.length === 0) return { ok: false, error: { code: 'E_INVALID', message: 'No notes to send.' } };
+  if (drafts.length > NOTES_MAX) {
+    return {
+      ok: false,
+      error: { code: 'E_INVALID', message: `At most ${NOTES_MAX} notes go in one send; you have ${drafts.length}.` },
+    };
+  }
+  const hash = notesHash(drafts);
+  const id = was?.hash === hash ? was.id : newId('rn');
+  setSend(key, { id, hash, inFlight: true });
+  const r = await invokeCmd<SentReviewNotes>('review_notes', {
+    args: { session_id: sessionId, action: 'send', client_msg_id: id, notes: wireNotes(drafts) },
+  });
+  if (r.ok) {
+    setSend(key, null);
+    const inSend = r.value.repeat
+      ? drafts.filter((d) => (r.value.notes ?? []).some((n) => sameNote(d, n)))
+      : drafts;
+    const sent = new Set(inSend.map((d) => d.id));
+    update(key, (all) => all.filter((d) => !sent.has(d.id)));
+  } else if (r.error.code === 'E_CONFLICT') {
+    // The hub holds other notes under this id: the next send is a new one.
+    setSend(key, null);
+  } else {
+    // No answer, or a refusal: keep the id for a retry of these notes.
+    setSend(key, { id, hash, inFlight: false });
+  }
+  return r;
+}
+
+/** A failed send in words. The drafts are kept whatever the failure. */
+export function sendFailureText(e: IpcError): string {
+  switch (e.code) {
+    case 'E_IN_FLIGHT':
+      return 'These notes are still being sent. Your drafts are kept; try again in a moment.';
+    case 'E_CONFLICT':
+      return 'An earlier try of this send carried other notes. Nothing was sent now and your drafts are kept: send again.';
+    default:
+      return errorText(e);
+  }
 }
 
 export async function resolveReviewNote(sessionId: number, noteId: number, resolved = true): Promise<Result<ReviewNote>> {
@@ -231,4 +312,5 @@ export async function resolveReviewNote(sessionId: number, noteId: number, resol
 /** For tests: forget the in-memory stores. */
 export function resetNoteDraftsForTest(): void {
   stores.clear();
+  sendStores.clear();
 }

@@ -43,6 +43,8 @@ export interface Escalation {
   session: SessionRow | null;
   /** The mission to open, for a mission that waits on the person (w04-7). */
   missionId?: number;
+  /** The signed-out login a login card is about, for its Sign in again. */
+  login?: { host: string; profile: string | null; token: boolean };
   bucket: TriageBucket;
   /** "fed-v2 is waiting for your answer". */
   line: string;
@@ -70,26 +72,43 @@ export function dayLabel(at: number): string {
   return `${m} ${d.getUTCDate()}`;
 }
 
+/** Mirrors `login_health::is_setup_token`: the login `profile` on `h` holds
+ *  a setup token fleet wrote, not a `/login`. */
+export function isSetupToken(h: Pick<HostRow, 'claude_profiles'>, profile: string | null): boolean {
+  if (!profile) return false;
+  return (h.claude_profiles ?? []).some((p) => p.name === profile && p.credential === 'setup_token');
+}
+
 /** Mirrors `login_health::card_text`: "Claude login expired on htz (since
- *  Aug 9) · ssh htz then claude /login". */
-export function loginCardText(host: string, l: SignedOutLogin): string {
+ *  Aug 9) · ssh htz then claude /login"; a setup-token profile (`token`)
+ *  is renewed with a new token instead. */
+export function loginCardText(host: string, l: SignedOutLogin, token = false): string {
   const whose = l.profile ? `${host} (profile ${l.profile})` : host;
-  const cmd = l.profile
-    ? `ssh ${host} then CLAUDE_CONFIG_DIR=~/.claude-profiles/${l.profile} claude /login`
-    : `ssh ${host} then claude /login`;
-  return `Claude login expired on ${whose} (since ${dayLabel(l.since)}) · ${cmd}`;
+  const cmd =
+    l.profile && token
+      ? `make a new token with \`claude setup-token\`, then + Add account → Setup token on ${host}, profile ${l.profile}`
+      : l.profile
+        ? `ssh ${host} then CLAUDE_CONFIG_DIR=~/.claude-profiles/${l.profile} claude /login`
+        : `ssh ${host} then claude /login`;
+  return `Claude ${token ? 'setup token' : 'login'} expired on ${whose} (since ${dayLabel(l.since)}) · ${cmd}`;
 }
 
 /** The sign-in command a person can paste into a terminal on this machine:
  *  `ssh -t htz 'CLAUDE_CONFIG_DIR=~/.claude-profiles/work claude /login'`,
  *  or the bare `claude /login` line for the `local` host. The card text's
- *  "ssh htz then …" reads well but does not run (review 2026-11-03 D1). */
+ *  "ssh htz then …" reads well but does not run (review 2026-11-03 D1).
+ *  For a setup-token profile (`token`) it is `claude setup-token`, whose
+ *  token then goes into + Add account. */
 function shq(s: string): string {
   return /^[A-Za-z0-9_.@%+=:,/-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
-export function loginShellCommand(host: string, profile: string | null): string {
-  const inner = profile ? `CLAUDE_CONFIG_DIR=~/.claude-profiles/${profile} claude /login` : 'claude /login';
+export function loginShellCommand(host: string, profile: string | null, token = false): string {
+  const inner = token
+    ? 'claude setup-token'
+    : profile
+      ? `CLAUDE_CONFIG_DIR=~/.claude-profiles/${profile} claude /login`
+      : 'claude /login';
   return host === 'local' ? inner : `ssh -t ${shq(host)} ${shq(inner)}`;
 }
 
@@ -101,7 +120,15 @@ export function loginEscalations(hosts: readonly HostRow[], later: ReadonlySet<s
     for (const l of h.signed_out_logins ?? []) {
       const key = `login:${h.alias}:${l.profile ?? ''}:${l.since}`;
       if (later.has(key)) continue;
-      out.push({ key, session: null, bucket: 'no_credentials', line: loginCardText(h.alias, l), detail: null });
+      const token = isSetupToken(h, l.profile ?? null);
+      out.push({
+        key,
+        session: null,
+        bucket: 'no_credentials',
+        line: loginCardText(h.alias, l, token),
+        detail: null,
+        login: { host: h.alias, profile: l.profile ?? null, token },
+      });
     }
   }
   return out;

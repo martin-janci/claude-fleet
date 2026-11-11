@@ -34,7 +34,6 @@
 
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::pages::chat_blocks;
-use crate::service::operator::OPERATOR_CLIENT_NAME;
 use crate::service::view_scope::ViewScope;
 use crate::store::{DashboardFeedRow, PinnedDashboardRow, PinnedDashboardWrite, Store};
 use serde::{Deserialize, Serialize};
@@ -56,7 +55,7 @@ pub const MAX_PINNED: usize = 20;
 const TEXT_MAX_CHARS: usize = 500;
 /// The most feeds one person keeps.
 pub const MAX_FEEDS: usize = 50;
-/// A feed's value, in characters (`FEED_VALUE_MAX` in dashboards.ts).
+/// A feed's value, in characters.
 pub const FEED_VALUE_MAX_CHARS: usize = 4000;
 /// A feed's key, in characters.
 pub const FEED_KEY_MAX_CHARS: usize = 64;
@@ -147,6 +146,17 @@ fn shown(r: PinnedDashboardRow) -> Option<PinnedDashboardRow> {
     chat_blocks::check(&r.spec).ok().map(|_| r)
 }
 
+/// The person whose rows `scope` writes: its own, and for the hub's own
+/// caller (the standalone desktop) the hub's personal owner, as
+/// `routines::save` does, so a row Control's agent (whose token is the
+/// owner's) wrote is the desktop's too. `None` on a hub with no people.
+fn own_person(s: &Store, scope: &ViewScope) -> Result<Option<i64>, IpcError> {
+    Ok(match scope.person {
+        None if scope.is_internal() => s.personal_owner_id()?,
+        p => p,
+    })
+}
+
 /// The row `scope` may read, or `None`.
 fn readable(
     s: &Store,
@@ -154,13 +164,14 @@ fn readable(
     id: &str,
 ) -> Result<Option<PinnedDashboardRow>, IpcError> {
     // The caller's own row first; on a single-person fleet, fleet's own.
-    for person in [scope.person, None] {
+    let own = own_person(s, scope)?;
+    for person in [own, None] {
         if let Some(r) = s.pinned_dashboard(id, person)? {
             if scope.may_own_person_row(None, r.person_id) {
                 return Ok(Some(r));
             }
         }
-        if scope.person.is_none() {
+        if own.is_none() {
             break;
         }
     }
@@ -213,7 +224,7 @@ pub fn pin(
                     "{MAX_PINNED} dashboards are pinned; unpin one first"
                 )));
             }
-            scope.person
+            own_person(&s, scope)?
         }
     };
     let row = s.pin_dashboard(&PinnedDashboardWrite {
@@ -244,13 +255,11 @@ pub fn unpin(store: &Mutex<Store>, scope: &ViewScope, id: &str) -> Result<bool, 
     }
 }
 
-/// Run one `dashboards` call for `scope`: `list` answers the rows, `get`
-/// the row or `null`, `pin` the row as it now stands, `unpin`
-/// `{ removed }`. `may_pin` is false for the agent: it reads, a person pins.
-/// Take back the last change to a pinned dashboard: the version before its
-/// last replacement comes back. A dashboard Control pinned new (no earlier
-/// version, pinned from Control's device) is unpinned instead, so Undo
-/// always takes back what Control did. `{undone, removed, dashboard?}`.
+/// Take back the last change to a pinned dashboard, as its row's `undo`
+/// says: `restore` puts back the version before its last replacement (or
+/// before Control's run of changes); `remove` unpins a dashboard Control
+/// pinned new, so Undo always takes back what Control did.
+/// `{undone, removed, dashboard?}`.
 pub fn undo(
     store: &Mutex<Store>,
     scope: &ViewScope,
@@ -263,21 +272,23 @@ pub fn undo(
             format!("no pinned dashboard {id}"),
         ));
     };
-    if r.can_undo {
-        let row = s.undo_dashboard(id, r.person_id)?;
-        s.bus_dashboards_changed();
-        return Ok(serde_json::json!({ "undone": true, "removed": false, "dashboard": row }));
-    }
-    if r.device.as_deref() == Some(OPERATOR_CLIENT_NAME) {
-        let removed = s.unpin_dashboard(id, r.person_id)?;
-        if removed {
+    match r.undo.as_deref() {
+        Some("restore") => {
+            let row = s.undo_dashboard(id, r.person_id)?;
             s.bus_dashboards_changed();
+            Ok(serde_json::json!({ "undone": true, "removed": false, "dashboard": row }))
         }
-        return Ok(serde_json::json!({ "undone": removed, "removed": removed }));
+        Some("remove") => {
+            let removed = s.unpin_dashboard(id, r.person_id)?;
+            if removed {
+                s.bus_dashboards_changed();
+            }
+            Ok(serde_json::json!({ "undone": removed, "removed": removed }))
+        }
+        _ => Err(invalid(format!(
+            "{id} keeps no earlier version to go back to"
+        ))),
     }
-    Err(invalid(format!(
-        "{id} keeps no earlier version to go back to"
-    )))
 }
 
 /// PURE: `key` if it names a feed: letters, digits and `. _ : -`, at most
@@ -310,13 +321,24 @@ pub fn feed_value(v: &str) -> Option<String> {
 /// win a key.
 pub fn feeds(store: &Mutex<Store>, scope: &ViewScope) -> Result<Vec<DashboardFeedRow>, IpcError> {
     let s = lock(store)?;
-    let mut rows: Vec<DashboardFeedRow> = s
-        .all_dashboard_feeds()?
+    let own = own_person(&s, scope)?;
+    // Only the hub's own caller reads every person's; anyone else reads
+    // their own and, on a single-person fleet, fleet's own.
+    let read = if scope.is_internal() {
+        s.all_dashboard_feeds()?
+    } else {
+        let mut v = s.dashboard_feeds(None)?;
+        if own.is_some() {
+            v.extend(s.dashboard_feeds(own)?);
+        }
+        v
+    };
+    let mut rows: Vec<DashboardFeedRow> = read
         .into_iter()
         .filter(|r| scope.may_own_person_row(None, r.person_id))
         .collect();
     // Others' first, so the caller's own overwrite them by key.
-    rows.sort_by_key(|r| r.person_id == scope.person);
+    rows.sort_by_key(|r| r.person_id == own);
     let by_key: std::collections::BTreeMap<String, DashboardFeedRow> =
         rows.into_iter().map(|r| (r.key.clone(), r)).collect();
     Ok(by_key.into_values().collect())
@@ -339,8 +361,7 @@ pub fn write_feed(
         }
         return Ok(None);
     };
-    let held = s.dashboard_feeds(person)?;
-    if held.len() >= MAX_FEEDS && !held.iter().any(|r| r.key == key) {
+    if s.count_other_dashboard_feeds(person, key)? >= MAX_FEEDS {
         return Err(invalid(format!(
             "{MAX_FEEDS} feeds are kept; write an empty value to one to remove it first"
         )));
@@ -365,49 +386,27 @@ pub fn feed(
         .ok_or_else(|| invalid("feed needs value (empty removes the feed)"))?;
     let s = lock(store)?;
     let by = if is_person { "person" } else { "agent" };
-    write_feed(
-        &s,
-        scope.person,
-        key,
-        value,
-        by,
-        None,
-        crate::store::now_unix(),
-    )
+    let own = own_person(&s, scope)?;
+    write_feed(&s, own, key, value, by, None, crate::store::now_unix())
 }
 
-/// The tag a routine's reply writes a feed with.
-const FEED_TAG_OPEN: &str = "<dashboard-feed";
-const FEED_TAG_CLOSE: &str = "</dashboard-feed>";
+/// The tag a routine's reply writes a feed with (its routine's prompt names
+/// it: `<dashboard-feed`).
+pub const FEED_TAG: &str = "dashboard-feed";
 
 /// PURE: each `<dashboard-feed key="…">…</dashboard-feed>` block in a
-/// reply, as (key, value), in order. A block with no key, an unclosed one,
-/// or one quoted as code (`` `<dashboard-feed>` ``) is left out.
+/// reply, as (key, value), in order, by the notebooks' own parser
+/// (`routines::memory::tagged_blocks`): a block with no key or a bad one,
+/// an unclosed one, or one quoted as code (`` `<dashboard-feed>` ``) is
+/// left out, and a block holding another opening tag starts at that one.
 pub fn feed_blocks(text: &str) -> Vec<(String, String)> {
-    let mut out = Vec::new();
-    let mut rest = text;
-    while let Some(at) = rest.find(FEED_TAG_OPEN) {
-        let quoted = rest[..at].ends_with('`');
-        let after = &rest[at + FEED_TAG_OPEN.len()..];
-        let Some(gt) = after.find('>') else { break };
-        let attrs = &after[..gt];
-        let body_from = &after[gt + 1..];
-        let Some(end) = body_from.find(FEED_TAG_CLOSE) else {
-            break;
-        };
-        let key = attrs
-            .trim()
-            .strip_prefix("key=\"")
-            .and_then(|k| k.strip_suffix('"'))
-            .filter(|k| !k.contains('"'));
-        if let (false, Some(key)) = (quoted, key) {
-            if feed_key(Some(key)).is_ok() {
-                out.push((key.to_string(), body_from[..end].trim().to_string()));
-            }
-        }
-        rest = &body_from[end + FEED_TAG_CLOSE.len()..];
-    }
-    out
+    crate::service::routines::memory::tagged_blocks(text, FEED_TAG, "key")
+        .into_iter()
+        .filter_map(|(key, body)| {
+            let key = feed_key(key).ok()?;
+            Some((key.to_string(), body.trim().to_string()))
+        })
+        .collect()
 }
 
 /// `is_person`: the caller is a person's device, not Control's agent. The

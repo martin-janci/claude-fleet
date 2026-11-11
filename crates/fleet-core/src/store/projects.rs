@@ -799,6 +799,9 @@ impl Store {
         )?;
         // Its forbidden accounts (migration 217) go too, for the same
         // reason: the FK cascade does it, and this holds without the pragma.
+        // Each account is announced after the commit, so no client keeps
+        // the dead project id on its row.
+        let unblocked = self.accounts_blocked_for_project(project_id)?;
         tx.execute(
             "DELETE FROM account_project_blocks WHERE project_id = ?1",
             rusqlite::params![project_id],
@@ -812,6 +815,7 @@ impl Store {
             self.bus.session_killed(killed);
         }
         self.emit_sessions_updated(&cross);
+        self.announce_accounts(&unblocked);
         Ok(())
     }
 

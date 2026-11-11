@@ -555,6 +555,15 @@ pub struct TurnAuthor {
     pub mine: bool,
 }
 
+/// Mark each turn whose author is `reader` as [`TurnAuthor::mine`] (a
+/// `None` reader owns none). The hub's tool does it for its caller; the
+/// desktop's own read, with no hub, for the hub's personal owner.
+pub fn stamp_mine(conv: &mut Conversation, reader: Option<i64>) {
+    for a in conv.turns.iter_mut().filter_map(|t| t.author.as_mut()) {
+        a.mine = reader.is_some() && a.person_id == reader;
+    }
+}
+
 /// How long before a turn's prompt shows up its author row may have been
 /// written: a queued prompt is typed when the turn before it ends, or when
 /// the account's limit resets.
@@ -563,33 +572,38 @@ const AUTHOR_MATCH_BEFORE_SECS: i64 = 7 * 86_400;
 /// host's need not agree.
 const AUTHOR_MATCH_SKEW_SECS: i64 = 120;
 
-/// Give each turn the author of its prompt: the newest unused row whose
-/// head the prompt starts with, written no later than the turn (give or
-/// take [`AUTHOR_MATCH_SKEW_SECS`]) and no earlier than
-/// [`AUTHOR_MATCH_BEFORE_SECS`] before it. A turn whose prompt's head was
-/// cut ([`ConvTurn::prompt_partial`]) is left alone.
+/// Give each turn the author of its prompt: the oldest unused row (`rows`
+/// come oldest first) whose head IS the prompt's head, written no later
+/// than the turn (give or take [`AUTHOR_MATCH_SKEW_SECS`]) and no earlier
+/// than the previous prompt turn (the same skew), or, for the first one
+/// read, [`AUTHOR_MATCH_BEFORE_SECS`] before it. So a row nobody's turn took
+/// (a send that never landed) is never handed to a later prompt typed in
+/// the terminal. A turn whose prompt's head was cut
+/// ([`ConvTurn::prompt_partial`]) is left alone, though it still bounds the
+/// next one.
 pub fn attach_prompt_authors(turns: &mut [ConvTurn], rows: &[crate::store::PromptAuthorRow]) {
     let mut used = vec![false; rows.len()];
+    let mut prev_at: Option<i64> = None;
     for t in turns.iter_mut() {
         let (Some(prompt), Some(at)) = (t.prompt.as_deref(), t.at.as_deref()) else {
             continue;
         };
-        if t.prompt_partial {
-            continue;
-        }
         let Some(at) = crate::service::account_usage::parse_rfc3339(at) else {
             continue;
         };
+        let since = match prev_at.replace(at) {
+            Some(prev) => prev - AUTHOR_MATCH_SKEW_SECS,
+            None => at - AUTHOR_MATCH_BEFORE_SECS,
+        };
+        if t.prompt_partial {
+            continue;
+        }
         let head = crate::store::prompt_head(prompt);
         let hit = rows
             .iter()
             .enumerate()
-            .rev()
             .find(|(i, r)| {
-                !used[*i]
-                    && r.at <= at + AUTHOR_MATCH_SKEW_SECS
-                    && r.at >= at - AUTHOR_MATCH_BEFORE_SECS
-                    && head.starts_with(&r.head)
+                !used[*i] && r.at <= at + AUTHOR_MATCH_SKEW_SECS && r.at >= since && r.head == head
             })
             .map(|(i, _)| i);
         if let Some(i) = hit {
@@ -1925,7 +1939,21 @@ pub async fn fetch_conversation_for_row(
         None => resolve_args(store, row, turns, max_chars)?,
     };
     let claude_id = args.claude_session_id.clone();
-    let mut conv = fetch_conversation_as(args, row_adapter(row), ssh).await?;
+    // Read before the fetch, so the match runs over every turn the tail
+    // parsed rather than the window kept: a turn trimmed away still takes
+    // its row, which is then no later turn's.
+    let authors = match lock(store) {
+        Ok(s) => s.prompt_authors(row.id, 0).unwrap_or_else(|e| {
+            tracing::warn!(
+                session_id = row.id,
+                code = %e.code,
+                "prompt authors query failed; turns go without"
+            );
+            Vec::new()
+        }),
+        Err(_) => Vec::new(),
+    };
+    let mut conv = fetch_conversation_as(args, row_adapter(row), ssh, &authors).await?;
     if let Ok(s) = lock(store) {
         // Zero means the caller draws no timeline, so the query is skipped
         // rather than run and thrown away — one fewer statement under the
@@ -1945,22 +1973,6 @@ pub async fn fetch_conversation_for_row(
                 }
             }
         };
-        let first = conv
-            .turns
-            .iter()
-            .filter_map(|t| t.at.as_deref())
-            .find_map(crate::service::account_usage::parse_rfc3339);
-        if let Some(first) = first {
-            match s.prompt_authors(row.id, first - AUTHOR_MATCH_BEFORE_SECS) {
-                Ok(rows) if !rows.is_empty() => attach_prompt_authors(&mut conv.turns, &rows),
-                Ok(_) => {}
-                Err(e) => tracing::warn!(
-                    session_id = row.id,
-                    code = %e.code,
-                    "prompt authors query failed; turns go without"
-                ),
-            }
-        }
         if row.claude_session_id.as_deref() == Some(claude_id.as_str()) {
             if let Some(v) = &conv.context {
                 let _ = s.set_context(row.id, &claude_id, v.tokens, v.window, "transcript", None);
@@ -2639,7 +2651,7 @@ pub async fn fetch_conversation(
     args: TranscriptArgs,
     ssh: &Arc<SshClient>,
 ) -> Result<Conversation, IpcError> {
-    fetch_conversation_as(args, crate::agent_adapter::claude(), ssh).await
+    fetch_conversation_as(args, crate::agent_adapter::claude(), ssh, &[]).await
 }
 
 /// The agent whose transcript a row's conversation is: the row's adapter,
@@ -2650,18 +2662,25 @@ fn row_adapter(row: &SessionRow) -> &'static dyn crate::agent_adapter::AgentAdap
         .unwrap_or_else(crate::agent_adapter::claude)
 }
 
-/// [`fetch_conversation`] for a transcript `agent` wrote.
+/// [`fetch_conversation`] for a transcript `agent` wrote, with each turn's
+/// author matched from `authors` ([`attach_prompt_authors`]) before the
+/// window is trimmed.
 async fn fetch_conversation_as(
     args: TranscriptArgs,
     agent: &dyn crate::agent_adapter::AgentAdapter,
     ssh: &Arc<SshClient>,
+    authors: &[crate::store::PromptAuthorRow],
 ) -> Result<Conversation, IpcError> {
     let script = conversation_read_script(&args)?;
     let text = read_tail(&args, &script, ssh).await?;
+    let mut turns = agent.parse_transcript(&text);
+    if !authors.is_empty() {
+        attach_prompt_authors(&mut turns, authors);
+    }
     // The Conversation tab may ask for a wider window than the MCP text
     // tool's cap; its own ceiling applies here.
     let mut conv = trim_conversation(
-        agent.parse_transcript(&text),
+        turns,
         args.turns.max(1),
         args.max_chars.clamp(1, CONV_MAX_CHARS_CEILING),
     );
@@ -5783,7 +5802,7 @@ mod prompt_author_tests {
     }
 
     #[test]
-    fn each_turn_takes_the_newest_matching_row_once() {
+    fn each_turn_takes_a_matching_row_once() {
         // 2026-11-09T12:00:00Z
         let t0 = 1_794_225_600;
         let mut turns = vec![
@@ -5815,5 +5834,64 @@ mod prompt_author_tests {
         assert_eq!(turns[0].author.as_ref().unwrap().person_id, Some(2));
         let wire = serde_json::to_value(&turns[2]).unwrap();
         assert!(wire.get("author").is_none(), "{wire}");
+    }
+
+    /// Review finding 3: a row is the author of the prompt whose head it IS,
+    /// written since the previous prompt turn; the oldest such row goes
+    /// first. An unused row is never handed to a later prompt.
+    #[test]
+    fn a_row_matches_its_own_head_since_the_previous_prompt_oldest_first() {
+        // 2026-11-09T12:00:00Z
+        let t0 = 1_794_225_600;
+        let mut turns = vec![
+            // Ada's "no" never landed in this window; the owner types a
+            // prompt that merely starts with it.
+            turn("2026-11-09T12:00:00Z", "now run the tests"),
+            // A row from before the previous prompt turn, same head: stale.
+            turn("2026-11-09T12:10:00Z", "again"),
+            // Two people send the same text within the skew: oldest first.
+            turn("2026-11-09T12:20:00Z", "ship it"),
+            turn("2026-11-09T12:20:30Z", "ship it"),
+        ];
+        let rows = vec![
+            row(t0 - 60, "no", "Ada · phone", Some(2)),
+            row(t0 - 300, "again", "Ada · phone", Some(2)),
+            row(t0 + 1190, "ship it", "Ada · phone", Some(2)),
+            row(t0 + 1200, "ship it", "Bo · desktop", Some(3)),
+        ];
+        attach_prompt_authors(&mut turns, &rows);
+        let names: Vec<_> = turns
+            .iter()
+            .map(|t| t.author.as_ref().map(|a| a.name.as_str()))
+            .collect();
+        assert_eq!(
+            names,
+            vec![None, None, Some("Ada · phone"), Some("Bo · desktop")]
+        );
+    }
+
+    /// Review finding 7: the desktop's own read stamps "You" for its owner.
+    #[test]
+    fn stamp_mine_marks_only_the_readers_turns() {
+        let t0 = 1_794_225_600;
+        let mut turns = vec![
+            turn("2026-11-09T12:00:00Z", "a"),
+            turn("2026-11-09T12:10:00Z", "b"),
+        ];
+        let rows = vec![
+            row(t0, "a", "Ada · phone", Some(2)),
+            row(t0 + 600, "b", "Bo", Some(3)),
+        ];
+        attach_prompt_authors(&mut turns, &rows);
+        let mut conv = trim_conversation(turns, 10, 10_000);
+        stamp_mine(&mut conv, Some(2));
+        let mine: Vec<_> = conv
+            .turns
+            .iter()
+            .map(|t| t.author.as_ref().unwrap().mine)
+            .collect();
+        assert_eq!(mine, vec![true, false]);
+        stamp_mine(&mut conv, None);
+        assert!(conv.turns.iter().all(|t| !t.author.as_ref().unwrap().mine));
     }
 }

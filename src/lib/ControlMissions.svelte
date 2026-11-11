@@ -15,13 +15,20 @@
   import Loader from './Loader.svelte';
   import { getMission, listMissions, missionNow, openMission, type MissionNow } from './missions';
   import { onWorkChangedDebounced } from './work';
-  import { foldOpen, runningMissionsFold } from './prefs';
+  import { runningMissionsFold } from './prefs';
 
   /** Most missions listed; the rest are in Work. */
   const MAX = 3;
 
   let running = $state<MissionNow[]>([]);
-  const open = $derived(foldOpen($runningMissionsFold, running.length, MAX));
+  /** Every active mission, not only the ones listed. */
+  let total = $state(0);
+  /** Of those past [`MAX`], how many wait on a person (the list's `waiting_on`). */
+  let waitingPast = $state(0);
+  // The pref is never `auto` here: open unless folded.
+  const open = $derived($runningMissionsFold !== 'closed');
+  /** What waits for you, said on the folded heading so it is not out of sight. */
+  const waiting = $derived(running.filter((m) => m.waiting).length + waitingPast);
   let gen = 0;
 
   async function load() {
@@ -29,10 +36,13 @@
     const list = await listMissions();
     // A hub that predates missions answers nothing.
     if (!list.ok || !Array.isArray(list.value)) return;
-    const active = list.value.filter((m) => m.state === 'active').slice(0, MAX);
+    const all = list.value.filter((m) => m.state === 'active');
+    const active = all.slice(0, MAX);
     const details = await Promise.all(active.map((m) => getMission(m.id)));
     if (mine !== gen) return;
     running = details.flatMap((d) => (d.ok && d.value?.mission ? [missionNow(d.value)] : []));
+    total = all.length;
+    waitingPast = all.slice(MAX).filter((m) => m.waiting_on != null).length;
   }
 
   let stop: (() => void) | undefined;
@@ -52,7 +62,8 @@
         aria-expanded={open}
         data-testid="control-missions-toggle"
         onclick={() => runningMissionsFold.set(open ? 'closed' : 'open')}
-        ><span class="chev" aria-hidden="true">{open ? '▾' : '▸'}</span>Running missions <span class="n">{running.length}</span></button
+        ><span class="chev" aria-hidden="true">{open ? '▾' : '▸'}</span>Running missions <span class="n">{total}</span
+        >{#if !open && waiting > 0}<span class="wait" data-testid="control-missions-waiting">· {waiting} wait{waiting === 1 ? 's' : ''} for you</span>{/if}</button
       >
     </h4>
     {#if open}
@@ -80,8 +91,6 @@
   .missions {
     border-top: 1px solid var(--border);
     padding: 0.4rem 0.6rem;
-  }
-  .missions {
     flex: none;
   }
   h4 {
@@ -111,8 +120,12 @@
   .chev {
     width: 10px;
   }
-  .n {
+  .n,
+  .wait {
     font-weight: 400;
+  }
+  .wait {
+    color: var(--status-waiting);
   }
   ul {
     list-style: none;

@@ -149,6 +149,9 @@ pub struct AddAccountArgs {
     /// (the same key on another host is the same account).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub daily_limit_usd: Option<f64>,
+    /// Sign an existing login in again; profile "" is the host's own.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub again: bool,
 }
 
 impl std::fmt::Debug for AddAccountArgs {
@@ -167,20 +170,33 @@ impl std::fmt::Debug for AddAccountArgs {
             .field("account", &self.account)
             .field("nickname", &self.nickname)
             .field("daily_limit_usd", &self.daily_limit_usd)
+            .field("again", &self.again)
             .finish()
     }
 }
 
 impl AddAccountArgs {
+    /// The login directory the action is about: the profile's, or `None`
+    /// for the host's own login (`again` with an empty profile).
+    pub fn login_dir(&self) -> Option<&str> {
+        (!(self.again && self.profile.is_empty())).then_some(self.profile.as_str())
+    }
+
+    /// The name the login pane is known by: the profile, or [`OWN_LOGIN`].
+    pub fn pane_id(&self) -> &str {
+        self.login_dir().unwrap_or(OWN_LOGIN)
+    }
+
     /// The audit line: identifying fields only, never the key or the code.
     pub fn audit_detail(&self) -> String {
         format!(
-            "action={} host={} profile={} key={:?} limit={:?}",
+            "action={} host={} profile={} key={:?} limit={:?}{}",
             self.action.escape_debug(),
             self.host_alias.escape_debug(),
             self.profile.escape_debug(),
             self.key.as_deref().map(str::escape_debug),
             self.daily_limit_usd,
+            if self.again { " again" } else { "" },
         )
     }
 }
@@ -257,7 +273,15 @@ pub async fn run(
     now: i64,
 ) -> Result<serde_json::Value, IpcError> {
     crate::validate::host_alias(&args.host_alias)?;
-    crate::validate::claude_profile(&args.profile)?;
+    if args.login_dir().is_some() {
+        crate::validate::claude_profile(&args.profile)?;
+    }
+    if args.again && !LOGIN_ACTIONS.contains(&args.action.as_str()) {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            format!("again applies to {} only", LOGIN_ACTIONS.join(", ")),
+        ));
+    }
     {
         let s = lock(store)?;
         if s.get_host_row(&args.host_alias)?.is_none() {
@@ -270,11 +294,11 @@ pub async fn run(
     let out = match args.action.as_str() {
         "start_login" => {
             start_login(args, store, tmux).await?;
-            serde_json::json!({ "session": login_session_name(&args.profile) })
+            serde_json::json!({ "session": login_session_name(args.pane_id()) })
         }
         "login_status" => {
-            let status = login_status(args, store, tmux).await?;
-            if status.logged_in {
+            let status = login_status(args, store, tmux, now).await?;
+            if status.logged_in && !args.again {
                 // Review 2026-11-03 F3: a new login's first session must not
                 // miss the host's MCP servers (fleet's own among them). Best
                 // effort, and a no-op once the profile has them all.
@@ -304,7 +328,7 @@ pub async fn run(
             serde_json::json!({ "sent": true })
         }
         "end_login" => {
-            end_login(&args.profile, tmux).await?;
+            end_login(args, tmux).await?;
             serde_json::json!({ "closed": true })
         }
         "api_key" => to_value(add_api_key(args, store, ssh, http, now).await?),
@@ -367,9 +391,35 @@ fn lock(store: &Mutex<Store>) -> Result<std::sync::MutexGuard<'_, Store>, IpcErr
         .map_err(|_| IpcError::new(codes::E_LOCK, "store lock poisoned"))
 }
 
-/// The "run it there" command for `profile`.
-pub fn login_command(profile: &str) -> String {
-    format!("CLAUDE_CONFIG_DIR=~/.claude-profiles/{profile} claude /login")
+/// The actions `again` applies to: the login pane's.
+const LOGIN_ACTIONS: [&str; 5] = [
+    "start_login",
+    "login_status",
+    "login_key",
+    "login_code",
+    "end_login",
+];
+
+/// The "run it there" command for the login `dir` (`None` = the host's own).
+pub fn login_command(dir: Option<&str>) -> String {
+    match dir {
+        Some(profile) => format!("CLAUDE_CONFIG_DIR=~/.claude-profiles/{profile} claude /login"),
+        None => "claude /login".to_string(),
+    }
+}
+
+/// The stored host row's entry for `profile`, if any.
+fn profile_row(
+    store: &Mutex<Store>,
+    host: &str,
+    profile: &str,
+) -> Result<Option<crate::store::HostProfileRow>, IpcError> {
+    let s = lock(store)?;
+    Ok(s.get_host_row(host)?
+        .and_then(|h| h.claude_profiles)
+        .unwrap_or_default()
+        .into_iter()
+        .find(|p| p.name == profile))
 }
 
 /// The account the stored host row lists `profile` on, if any.
@@ -387,7 +437,16 @@ fn profile_account(
         .and_then(|p| p.account_uuid))
 }
 
-/// The login pane's tmux session for `profile` (a validated name). Every
+/// The login pane's id for the host's own login (`again` with no profile).
+/// Not a profile name (those start with a letter or digit), so it never
+/// meets one.
+pub const OWN_LOGIN: &str = "_own";
+
+/// What `claude /login` prints once a sign-in went through.
+const LOGIN_SUCCESS: &str = "login successful";
+
+/// The login pane's tmux session for `profile` (a validated name, or
+/// [`OWN_LOGIN`]). Every
 /// session list leaves it out (`tmux::is_login_session_name`).
 pub fn login_session_name(profile: &str) -> String {
     format!("{}{profile}", crate::tmux::LOGIN_SESSION_PREFIX)
@@ -417,17 +476,36 @@ fn start_login_script(profile: &str) -> String {
         p = quote(profile),
         links = quote(crate::tmux::PROFILE_LINKS),
     );
+    start_pane_script(&name, &pane, Some(profile))
+}
+
+/// PURE: the script opening the pane signing the host's own login in again
+/// (no `CLAUDE_CONFIG_DIR`: `~/.claude`), unless one is open.
+fn start_own_login_script() -> String {
+    let pane = "claude /login; echo; echo 'claude exited. Close this from fleet.'; exec sleep 3600";
+    start_pane_script(&login_session_name(OWN_LOGIN), pane, None)
+}
+
+/// PURE: open the login pane `name` running `pane`; for a profile, make its
+/// directory first (marked as this flow's, [`NEW_LOGIN_MARK`]) with
+/// onboarding done.
+fn start_pane_script(name: &str, pane: &str, profile: Option<&str>) -> String {
+    let dir = match profile {
+        Some(p) => format!(
+            "umask 077; d=\"$HOME/.claude-profiles/\"{p}; \
+             [ -d \"$d\" ] || {{ mkdir -p \"$d\" || exit 1; : > \"$d/{NEW_LOGIN_MARK}\"; }}; \
+             [ -e \"$d/.claude.json\" ] || printf '%s\\n' '{{\"hasCompletedOnboarding\":true}}' > \"$d/.claude.json\"; ",
+            p = quote(p),
+        ),
+        None => String::new(),
+    };
     format!(
-        "tmux has-session -t {exact} 2>/dev/null && exit 0; \
-         umask 077; d=\"$HOME/.claude-profiles/\"{p}; \
-         [ -d \"$d\" ] || {{ mkdir -p \"$d\" || exit 1; : > \"$d/{NEW_LOGIN_MARK}\"; }}; \
-         [ -e \"$d/.claude.json\" ] || printf '%s\\n' '{{\"hasCompletedOnboarding\":true}}' > \"$d/.claude.json\"; \
+        "tmux has-session -t {exact} 2>/dev/null && exit 0; {dir}\
          tmux new-session -d -s {name} -x 120 -y 40 -c \"$HOME\" -e COLORTERM=truecolor \
          -e TERM=xterm-256color -e \"PATH=$PATH\" {pane}",
-        exact = quote(&crate::tmux::exact_session(&name)),
-        p = quote(profile),
-        name = quote(&name),
-        pane = quote(&pane),
+        exact = quote(&crate::tmux::exact_session(name)),
+        name = quote(name),
+        pane = quote(pane),
     )
 }
 
@@ -436,6 +514,9 @@ async fn start_login(
     store: &Mutex<Store>,
     tmux: &dyn TmuxExec,
 ) -> Result<(), IpcError> {
+    if args.again {
+        return start_login_again(args, store, tmux).await;
+    }
     if let Some(uuid) = profile_account(store, &args.host_alias, &args.profile)? {
         let what = if is_api_key_account(&uuid) {
             "an API key"
@@ -460,6 +541,45 @@ async fn start_login(
     Ok(())
 }
 
+/// `start_login { again }`: open the login pane over a login that exists,
+/// so a person signs it in again. A profile that holds an API key or a
+/// setup token has no `/login` to renew: refused, naming what renews it.
+async fn start_login_again(
+    args: &AddAccountArgs,
+    store: &Mutex<Store>,
+    tmux: &dyn TmuxExec,
+) -> Result<(), IpcError> {
+    let Some(profile) = args.login_dir() else {
+        run_tmux(tmux, &start_own_login_script(), "open the login pane").await?;
+        return Ok(());
+    };
+    let row = profile_row(store, &args.host_alias, profile)?;
+    let token = row
+        .as_ref()
+        .is_some_and(|r| r.credential.as_deref() == Some(SETUP_TOKEN_CREDENTIAL));
+    let key = row
+        .as_ref()
+        .and_then(|r| r.account_uuid.as_deref())
+        .is_some_and(is_api_key_account);
+    if token || key {
+        let problem = if token {
+            format!(
+                "{profile} on {} signs in with a setup token: add a new token to it (Setup token)",
+                args.host_alias
+            )
+        } else {
+            format!(
+                "{profile} on {} uses an API key: add a new key to it",
+                args.host_alias
+            )
+        };
+        return Err(IpcError::new(codes::E_INVALID, problem.clone())
+            .with_details(problems("profile", &problem)));
+    }
+    run_tmux(tmux, &start_login_script(profile), "open the login pane").await?;
+    Ok(())
+}
+
 /// The keys `login_key` presses: the CLI's numbered choices and the few
 /// keys its screens take, as tmux names. Nothing typed as text.
 const LOGIN_KEYS: [&str; 14] = [
@@ -474,7 +594,9 @@ async fn login_key(args: &AddAccountArgs, tmux: &dyn TmuxExec) -> Result<(), Ipc
             format!("key must be one of {}", LOGIN_KEYS.join(", ")),
         ));
     };
-    let target = quote(&crate::tmux::exact_pane(&login_session_name(&args.profile)));
+    let target = quote(&crate::tmux::exact_pane(&login_session_name(
+        args.pane_id(),
+    )));
     run_tmux(
         tmux,
         &format!("tmux send-keys -t {target} {key}"),
@@ -507,8 +629,15 @@ fn end_login_script(profile: &str) -> String {
     )
 }
 
-async fn end_login(profile: &str, tmux: &dyn TmuxExec) -> Result<(), IpcError> {
-    run_tmux(tmux, &end_login_script(profile), "close the login pane").await?;
+async fn end_login(args: &AddAccountArgs, tmux: &dyn TmuxExec) -> Result<(), IpcError> {
+    let script = match args.login_dir() {
+        Some(profile) => end_login_script(profile),
+        None => format!(
+            "tmux kill-session -t {} 2>/dev/null; true",
+            quote(&crate::tmux::exact_session(&login_session_name(OWN_LOGIN)))
+        ),
+    };
+    run_tmux(tmux, &script, "close the login pane").await?;
     Ok(())
 }
 
@@ -516,7 +645,11 @@ async fn login_status(
     args: &AddAccountArgs,
     store: &Mutex<Store>,
     tmux: &dyn TmuxExec,
+    now: i64,
 ) -> Result<LoginStatus, IpcError> {
+    if args.again {
+        return login_status_again(args, store, tmux, now).await;
+    }
     let profiles = tmux.read_profiles().await;
     let account_uuid = {
         let s = lock(store)?;
@@ -524,7 +657,7 @@ async fn login_status(
             .remove(&args.profile)
             .flatten()
     };
-    let command = login_command(&args.profile);
+    let command = login_command(Some(&args.profile));
     if let Some(uuid) = account_uuid {
         let email = lock(store)?
             .get_account_by_uuid(&uuid)?
@@ -552,6 +685,72 @@ async fn login_status(
         sign_in_url,
         command,
     })
+}
+
+/// `login_status { again }`: the login exists already, so its account
+/// says nothing; the pane saying the sign-in went through does. Then the
+/// login's signed-out note goes (`login_health`), so its card clears and
+/// placement takes it again without waiting for a usage read.
+async fn login_status_again(
+    args: &AddAccountArgs,
+    store: &Mutex<Store>,
+    tmux: &dyn TmuxExec,
+    now: i64,
+) -> Result<LoginStatus, IpcError> {
+    let dir = args.login_dir();
+    let command = login_command(dir);
+    let text = tmux
+        .capture_pane(&login_session_name(args.pane_id()))
+        .await
+        .ok();
+    let done = text.as_deref().is_some_and(signed_in_again);
+    if !done {
+        return Ok(LoginStatus {
+            logged_in: false,
+            account_uuid: None,
+            email: None,
+            pane: text.as_deref().map(pane_tail),
+            sign_in_url: text.as_deref().and_then(sign_in_url),
+            command,
+        });
+    }
+    let s = lock(store)?;
+    crate::service::login_health::record(
+        &s,
+        &[crate::service::login_health::Observation {
+            host_alias: args.host_alias.clone(),
+            profile: dir.map(str::to_string),
+            signed_out: false,
+        }],
+        now,
+    )?;
+    let host = s.get_host_row(&args.host_alias)?;
+    let account_uuid = match dir {
+        None => host.and_then(|h| h.account_uuid),
+        Some(p) => host
+            .and_then(|h| h.claude_profiles)
+            .unwrap_or_default()
+            .into_iter()
+            .find(|x| x.name == p)
+            .and_then(|x| x.account_uuid),
+    };
+    let email = match account_uuid.as_deref() {
+        Some(u) => s.get_account_by_uuid(u)?.and_then(|a| a.email),
+        None => None,
+    };
+    Ok(LoginStatus {
+        logged_in: true,
+        account_uuid,
+        email,
+        pane: None,
+        sign_in_url: None,
+        command,
+    })
+}
+
+/// PURE: whether the login pane says the sign-in went through.
+pub fn signed_in_again(pane: &str) -> bool {
+    pane.to_lowercase().contains(LOGIN_SUCCESS)
 }
 
 /// PURE: the pane's last [`PANE_LINES`] lines, trailing blanks dropped.
@@ -626,7 +825,7 @@ fn checked_code(code: Option<&str>) -> Result<&str, IpcError> {
 
 async fn login_code(args: &AddAccountArgs, ssh: &dyn SshExec) -> Result<(), IpcError> {
     let code = checked_code(args.code.as_deref())?;
-    let name = login_session_name(&args.profile);
+    let name = login_session_name(args.pane_id());
     // The code goes on stdin into a tmux buffer, pasted without bracketing
     // (the login prompt is a plain text field), then Enter.
     let target = quote(&crate::tmux::exact_pane(&name));

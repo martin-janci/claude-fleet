@@ -445,7 +445,7 @@ fn missions_have_waits_at(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
-/// `already_applied` guard of migration 226: `tasks` already has its
+/// `already_applied` guard of migration 227: `tasks` already has its
 /// `worker_spent_micros` column.
 fn tasks_have_worker_spent(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
@@ -2585,11 +2585,8 @@ const MIGRATIONS: &[Migration] = &[
         222,
         include_str!("../../migrations/222_dashboard_feeds.sql"),
     ),
-    Migration {
-        version: 223,
-        sql: include_str!("../../migrations/223_review_notes.sql"),
-        already_applied: None,
-    },
+    // Review notes. CREATE TABLE IF NOT EXISTS, so plain.
+    Migration::plain(223, include_str!("../../migrations/223_review_notes.sql")),
     // Prompt authors: who sent each prompt a hub tool typed. CREATE TABLE
     // IF NOT EXISTS, so plain.
     Migration::plain(224, include_str!("../../migrations/224_prompt_authors.sql")),
@@ -2599,12 +2596,19 @@ const MIGRATIONS: &[Migration] = &[
         225,
         include_str!("../../migrations/225_review_requests.sql"),
     ),
+    // Review notes kept for a busy session: which prompt carries them, so a
+    // cancelled or failed one does not read "Sent". CREATE TABLE IF NOT
+    // EXISTS, so plain.
+    Migration::plain(
+        226,
+        include_str!("../../migrations/226_review_note_queue.sql"),
+    ),
     // A mission's spend outlives its workers' session rows: what a worker
     // had spent when its row was deleted, kept on its newest task. An ADD
     // COLUMN, so guarded.
     Migration {
-        version: 226,
-        sql: include_str!("../../migrations/226_task_worker_spend.sql"),
+        version: 227,
+        sql: include_str!("../../migrations/227_task_worker_spend.sql"),
         already_applied: Some(tasks_have_worker_spent),
     },
 ];

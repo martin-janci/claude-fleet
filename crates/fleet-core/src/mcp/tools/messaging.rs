@@ -97,23 +97,15 @@ impl FleetTools {
                 answer_key_allowed(key, probe.pending_input.as_ref())
                     .map_err(|why| mcp_err(codes::E_FORBIDDEN, why, None))?;
             }
-            // Claude Code's "don't ask again for: <rule> in <folder>" answers
-            // every LATER session in that folder, not only this one: only a
-            // person on a full device presses it (HumanLayer plan v2, R0).
-            // Control, an agent, a peer, a named token, an answer-only device
-            // and a device holding only an `answer` grant are refused the
-            // digit, and the Enter that would pick it from the cursor.
-            if !presses_folder_rules(&caller, drives)
-                && matches!(
-                    key,
-                    crate::tmux::NamedKey::Digit(_) | crate::tmux::NamedKey::Enter
-                )
-            {
-                let probe = sessions::session_activity(&self.store, &self.ssh, row.id)
-                    .await
-                    .map_err(to_mcp_err)?;
-                folder_rule_refused(key, probe.pending_input.as_ref())
-                    .map_err(|why| mcp_err(codes::E_FORBIDDEN, why, None))?;
+            // A choice that outlives the request it answers (a saved folder
+            // rule, auto mode, bypass: `PendingOption::persists`) is a
+            // person's on a full device that drives the session (HumanLayer
+            // plan v2, R0). Control, an agent, a peer, a named token, an
+            // answer-only device and a device holding only an `answer` grant
+            // are refused its digit and any Enter that could pick it from the
+            // cursor.
+            if !presses_folder_rules(&caller, drives) && picks_an_option(key) {
+                self.refuse_persistent_choice(&row, key).await?;
             }
             // The client's check and its press, made one step here: the pane
             // is re-read now and the key goes out right after, with no round
@@ -141,23 +133,20 @@ impl FleetTools {
                 "turn_seq_before": row.turn_seq,
             }));
         }
-        // A bare Enter (an empty prompt) presses whatever option the dialog's
-        // cursor is on, so it is held to the same folder-rule check as
-        // `keys: "Enter"`: `keys: "Down"` then `prompt: ""` must not pick the
-        // rule the digit could not. Forced text into a dialog that offers a
-        // folder-wide rule is refused too: its first character may be the
-        // rule's digit. Every caller here reached the row at `drive`.
-        if !presses_folder_rules(&caller, true) && ((p.prompt.is_empty() && p.submit) || p.force) {
-            let probe = sessions::session_activity(&self.store, &self.ssh, row.id)
-                .await
-                .map_err(to_mcp_err)?;
-            let pending = probe.pending_input.as_ref();
-            if p.prompt.is_empty() {
-                folder_rule_refused(crate::tmux::NamedKey::Enter, pending)
-            } else {
-                forced_text_refused(pending)
+        // An empty prompt is a bare Enter ([`bypasses_gate`]): the same key
+        // as `keys: "Enter"`, so it meets the same rule. Without this an
+        // arrow key (never an answer by itself) and then an empty prompt
+        // walked the cursor onto the folder rule and pressed it. Forced text
+        // into a dialog that offers a persistent choice is refused too: its
+        // first character may be that option's digit. Every caller here
+        // reached the row at `drive`.
+        if !presses_folder_rules(&caller, true) {
+            if p.prompt.is_empty() && p.submit {
+                self.refuse_persistent_choice(&row, crate::tmux::NamedKey::Enter)
+                    .await?;
+            } else if p.force {
+                self.refuse_forced_text(&row).await?;
             }
-            .map_err(|why| mcp_err(codes::E_FORBIDDEN, why, None))?;
         }
         let label = caller.label();
         // The key is RESERVED before the send, not written after it. A send
@@ -195,9 +184,9 @@ impl FleetTools {
         // which is the one thing `client_msg_id` exists to allow.
         let delivered = async {
             let prompt = apply_marker(p.prompt, &marker_origin(&caller), &caller, p.raw)?;
-            let typed = prompt.clone();
+            let head = crate::store::prompt_head(&prompt);
             let out = self.deliver_prompt(&row, prompt, p.submit, p.force).await?;
-            note_prompt_author(&self.store, &caller, row.id, &typed);
+            note_prompt_author(&self.store, &caller, row.id, &head);
             Ok(out)
         }
         .await;
@@ -249,7 +238,7 @@ impl FleetTools {
             GateTarget::Session(row.id),
         )?;
         let prompt = apply_marker(p.prompt, &marker_origin(&caller), &caller, p.raw)?;
-        let typed = prompt.clone();
+        let head = crate::store::prompt_head(&prompt);
         let out = sessions::queue_prompt(
             sessions::QueuePromptArgs {
                 session_id: row.id,
@@ -263,7 +252,7 @@ impl FleetTools {
         )
         .await
         .map_err(to_mcp_err)?;
-        note_prompt_author(&self.store, &caller, row.id, &typed);
+        note_prompt_author(&self.store, &caller, row.id, &head);
         ok_json(&out)
     }
 
@@ -325,9 +314,11 @@ impl FleetTools {
         // Reading what was sent is the session's conversation (`read`); a
         // send types into the pane and a resolve changes what every device
         // shows (`drive`).
-        // A note is a person's: an agent's host token neither sends nor
-        // resolves one, refused before the session is even looked up.
-        if action != "list" && caller.host_alias.is_some() {
+        // A note is a person's: an agent's host token, Control (the
+        // operator, whose `send_prompt` waits on a card this tool has none
+        // of), a peer and an answer-only device neither send nor resolve
+        // one, refused before the session is even looked up.
+        if action != "list" && !presses_folder_rules(&caller, true) {
             return Err(mcp_err(
                 codes::E_FORBIDDEN,
                 "a person sends and resolves review notes",
@@ -367,17 +358,6 @@ impl FleetTools {
                         None,
                     ));
                 }
-                // A send types a prompt into the session (through the
-                // service's `queue_prompt`), so the operator's waits for a
-                // person exactly as its `queue_prompt` does (F21); for any
-                // other caller this is a no-op.
-                self.confirm_gate_target(
-                    "review_notes",
-                    p.confirm_nonce.as_deref(),
-                    &review_notes_summary(&row, p.client_msg_id.as_deref(), p.notes.as_deref()),
-                    &caller,
-                    GateTarget::Session(row.id),
-                )?;
                 let args = sessions::review_notes::SendReviewNotesArgs {
                     session_id: row.id,
                     client_msg_id: p.client_msg_id.unwrap_or_default(),
@@ -394,7 +374,7 @@ impl FleetTools {
                             apply_marker(prompt, &origin, &caller, false).map_err(|e| {
                                 IpcError::new(codes::E_FORBIDDEN, e.message.to_string())
                             })?;
-                        typed = Some(marked.clone());
+                        typed = Some(crate::store::prompt_head(&marked));
                         Ok(marked)
                     },
                     &self.store,
@@ -411,27 +391,6 @@ impl FleetTools {
                 let id = p
                     .note_id
                     .ok_or_else(|| mcp_err(codes::E_INVALID, "resolve needs note_id", None))?;
-                // An agent never resolves a person's note: the operator may
-                // resolve only the notes it wrote itself.
-                // Fail closed: a note it cannot find among the session's is
-                // not one it wrote.
-                if caller.is_operator() {
-                    let mine = lock(&self.store)
-                        .map_err(to_mcp_err)?
-                        .review_notes(row.id)
-                        .map_err(to_mcp_err)?
-                        .into_iter()
-                        .find(|n| n.id == id)
-                        .is_some_and(|n| n.author == author);
-                    if !mine {
-                        return Err(mcp_err(
-                            codes::E_FORBIDDEN,
-                            "the agent resolves only the review notes it wrote; a person's \
-                             note is theirs to resolve",
-                            None,
-                        ));
-                    }
-                }
                 let out = lock(&self.store)
                     .map_err(to_mcp_err)?
                     .resolve_review_note(
@@ -1206,12 +1165,13 @@ pub(crate) fn answer_key_allowed(
 }
 
 /// Whether `caller` may press a dialog option that saves a rule for the
-/// whole folder ([`is_folder_rule`]): the master token (an `admin` named
-/// token is one), or a person's paired full device that may `drive` the
-/// session (`drives`). Never Control (the operator), an agent's host token,
-/// a peer or updater, a named `read`/`act` token (CI), an answer-only
-/// device, or a full device holding only an `answer` grant on someone
-/// else's session — a rule it saved would outlive its grant.
+/// whole folder, or otherwise outlives the request ([`folder_rule_refused`]):
+/// the master token (an `admin` named token is one), or a person's paired
+/// full device that may `drive` the session (`drives`). Never Control (the
+/// operator), an agent's host token, a peer or updater, a named `read`/`act`
+/// token (CI), an answer-only device, or a full device holding only an
+/// `answer` grant on someone else's session — a rule it saved would outlive
+/// its grant.
 fn presses_folder_rules(caller: &Caller, drives: bool) -> bool {
     if !drives {
         return false;
@@ -1225,70 +1185,132 @@ fn presses_folder_rules(caller: &Caller, drives: bool) -> bool {
         && caller.mode == TokenMode::Full
 }
 
-/// PURE: a dialog option that outlives the session — Claude Code's "Yes, and
-/// don't ask again for: <rule> in <folder>", saved in the folder's settings
-/// for every later session there, and any other agent's "always allow …"
-/// or "… (Persist to settings.json)". Fail closed: a "don't ask again",
-/// "always" or "allow all" label counts unless it says it ends with this
-/// session or conversation, and one that says it persists always counts.
-/// Mirrors the desktop's `src/lib/answer_guard.ts::persistentRule`.
-pub(crate) fn is_folder_rule(label: &str) -> bool {
-    let l = label.to_lowercase().replace('\u{2019}', "'");
-    if l.contains("persist") {
-        return true;
+/// PURE: stamp `mine` and hide a co-grantee. The session's owner (and the
+/// master token) reads every author; anyone else reads the owner's name and
+/// their own, and another person's prompt as "someone else" with no person
+/// id, so one grantee never learns who the others are or what devices they
+/// use. An author with no person (the hub's own name) is nobody's secret.
+pub(super) fn veil_authors<'a>(
+    authors: impl Iterator<Item = &'a mut crate::service::transcript::TurnAuthor>,
+    me: Option<i64>,
+    owner: Option<i64>,
+    sees_all: bool,
+) {
+    for a in authors {
+        a.mine = me.is_some() && a.person_id == me;
+        let theirs = a.person_id.is_some() && a.person_id != owner;
+        if !sees_all && !a.mine && theirs {
+            a.name = "someone else".into();
+            a.person_id = None;
+        }
     }
-    let asks = l.contains("don't ask again")
-        || l.contains("dont ask again")
-        || l.contains("always")
-        || l.contains("allow all");
-    let session_only = l.contains("this session")
-        || l.contains("the session")
-        || l.contains("during this")
-        || l.contains("this conversation");
-    asks && !session_only
 }
 
-/// PURE: refuse text forced into `dialog` when one of its options saves a
-/// folder-wide rule: a typed character may be that option's digit.
+/// PURE: refuse text forced into `dialog` when one of its options outlives
+/// the request ([`crate::service::pane_intel::PendingOption::persists`]): a
+/// typed character may be that option's digit. A multi-select only toggles
+/// boxes.
 fn forced_text_refused(
     dialog: Option<&crate::service::pane_intel::PendingInput>,
 ) -> Result<(), String> {
     match dialog
         .filter(|d| !d.multi)
-        .and_then(|d| d.options.iter().find(|o| is_folder_rule(&o.label)))
+        .and_then(|d| d.options.iter().find(|o| o.persists))
     {
         Some(o) => Err(format!(
-            "the dialog on the pane offers option {}, which saves a rule for every later \
-             session in that folder; text is not forced into it (answer it with keys, or a \
-             person does on the desktop)",
+            "the dialog on the pane offers option {}, which answers more than this request \
+             (it saves a rule or stops later prompts); text is not forced into it (answer it \
+             with keys, or a person does on the desktop)",
             o.n
         )),
         None => Ok(()),
     }
 }
 
-/// PURE: refuse `key` when it would pick a folder-wide rule on `dialog`: its
-/// digit, or Enter with the cursor on it. A multi-select only toggles boxes.
+/// PURE: a key that can choose a dialog's option: its digit, or an Enter
+/// (M-Enter included: what a dialog does with it is not ours to assume).
+fn picks_an_option(key: crate::tmux::NamedKey) -> bool {
+    use crate::tmux::NamedKey;
+    matches!(key, NamedKey::Digit(_) | NamedKey::Enter) || is_meta_enter(key)
+}
+
+fn is_meta_enter(key: crate::tmux::NamedKey) -> bool {
+    crate::tmux::NamedKey::parse("M-Enter") == Some(key)
+}
+
+/// PURE: refuse `key` when it would, or could, pick a choice that outlives
+/// the request ([`crate::service::pane_intel::PendingOption::persists`]).
+/// A digit is refused on that option. An Enter is refused with the cursor on
+/// it, and also when the dialog has such an option but shows no cursor: the
+/// press cannot be shown to land elsewhere. `blocked` with no dialog read is
+/// a dialog fleet could not parse, refused for the same reason. A
+/// multi-select only toggles boxes.
 pub(crate) fn folder_rule_refused(
     key: crate::tmux::NamedKey,
     dialog: Option<&crate::service::pane_intel::PendingInput>,
+    blocked: bool,
 ) -> Result<(), String> {
     use crate::tmux::NamedKey;
-    let Some(d) = dialog.filter(|d| !d.multi) else {
+    let Some(d) = dialog else {
+        return if blocked {
+            Err("the session waits on a dialog fleet could not read; a person answers it".into())
+        } else {
+            Ok(())
+        };
+    };
+    if d.multi {
         return Ok(());
+    }
+    let refuse = |n: u8| {
+        Err(format!(
+            "option {n} answers more than this request (it saves a rule or stops \
+             later prompts); a person presses it on the desktop"
+        ))
     };
-    let picked = match key {
-        NamedKey::Digit(n) => d.options.iter().find(|o| o.n == n.get()),
-        NamedKey::Enter => d.options.iter().find(|o| o.selected),
-        _ => None,
-    };
-    match picked {
-        Some(o) if is_folder_rule(&o.label) => Err(format!(
-            "option {} saves a rule for every later session in that folder; \
-             a person presses it on the desktop",
-            o.n
-        )),
+    match key {
+        NamedKey::Digit(n) => match d.options.iter().find(|o| o.n == n.get()) {
+            Some(o) if o.persists => refuse(o.n),
+            _ => Ok(()),
+        },
+        k if k == NamedKey::Enter || is_meta_enter(k) => {
+            match d.options.iter().find(|o| o.selected) {
+                Some(o) if o.persists => refuse(o.n),
+                Some(_) => Ok(()),
+                None => match d.options.iter().find(|o| o.persists) {
+                    Some(o) => refuse(o.n),
+                    None => Ok(()),
+                },
+            }
+        }
         _ => Ok(()),
+    }
+}
+
+impl FleetTools {
+    /// Read the pane now and refuse `key` when it could pick a persistent
+    /// choice ([`folder_rule_refused`]). One fresh read, right before the
+    /// press: the row's own dialog is up to a tick old.
+    async fn refuse_persistent_choice(
+        &self,
+        row: &crate::store::SessionRow,
+        key: crate::tmux::NamedKey,
+    ) -> Result<(), McpError> {
+        let probe = sessions::session_activity(&self.store, &self.ssh, row.id)
+            .await
+            .map_err(to_mcp_err)?;
+        let blocked = probe.claude_status.as_deref() == Some("blocked");
+        folder_rule_refused(key, probe.pending_input.as_ref(), blocked)
+            .map_err(|why| mcp_err(codes::E_FORBIDDEN, why, None))
+    }
+
+    /// Read the pane now and refuse forced text when its dialog offers a
+    /// persistent choice ([`forced_text_refused`]).
+    async fn refuse_forced_text(&self, row: &crate::store::SessionRow) -> Result<(), McpError> {
+        let probe = sessions::session_activity(&self.store, &self.ssh, row.id)
+            .await
+            .map_err(to_mcp_err)?;
+        forced_text_refused(probe.pending_input.as_ref())
+            .map_err(|why| mcp_err(codes::E_FORBIDDEN, why, None))
     }
 }
 
@@ -1320,7 +1342,7 @@ fn answer_key_kind(key: crate::tmux::NamedKey) -> Result<(), String> {
 
 #[cfg(test)]
 mod answer_key_tests {
-    use super::{answer_key_allowed, folder_rule_refused, is_folder_rule};
+    use super::{answer_key_allowed, folder_rule_refused};
     use crate::service::pane_intel::{PendingInput, PendingOption};
     use crate::tmux::NamedKey;
 
@@ -1334,6 +1356,7 @@ mod answer_key_tests {
                     label: format!("option {i}"),
                     selected: i == 1,
                     checked: false,
+                    persists: false,
                 })
                 .collect(),
             multi: false,
@@ -1376,10 +1399,55 @@ mod answer_key_tests {
         }
     }
 
+    #[test]
+    fn a_grantee_is_not_told_who_the_other_grantees_are() {
+        use crate::service::transcript::TurnAuthor;
+        let authors = || {
+            vec![
+                TurnAuthor {
+                    name: "Owner · laptop".into(),
+                    person_id: Some(1),
+                    mine: false,
+                },
+                TurnAuthor {
+                    name: "Ada · pixel".into(),
+                    person_id: Some(2),
+                    mine: false,
+                },
+                TurnAuthor {
+                    name: "Bo · phone".into(),
+                    person_id: Some(3),
+                    mine: false,
+                },
+                TurnAuthor {
+                    name: "hub".into(),
+                    person_id: None,
+                    mine: false,
+                },
+            ]
+        };
+        // Bo (a grantee) reads the owner, himself, and not Ada.
+        let mut a = authors();
+        super::veil_authors(a.iter_mut(), Some(3), Some(1), false);
+        let names: Vec<&str> = a.iter().map(|x| x.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["Owner · laptop", "someone else", "Bo · phone", "hub"]
+        );
+        assert_eq!(a[1].person_id, None);
+        assert!(a[2].mine && !a[0].mine);
+        // The owner reads everyone.
+        let mut a = authors();
+        super::veil_authors(a.iter_mut(), Some(1), Some(1), true);
+        assert_eq!(a[1].name, "Ada · pixel");
+        assert!(a[0].mine);
+    }
+
     fn rule_dialog(cursor: u8) -> PendingInput {
         let mut d = dialog(3);
         d.options[1].label =
             "Yes, and don\u{2019}t ask again for: git push:* in /home/user/claude-fleet".into();
+        d.options[1].persists = true;
         for o in &mut d.options {
             o.selected = o.n == cursor;
         }
@@ -1389,54 +1457,53 @@ mod answer_key_tests {
     #[test]
     fn a_folder_wide_rule_is_refused_by_digit_and_by_enter_on_it() {
         let d = rule_dialog(1);
-        assert!(folder_rule_refused(key("2"), Some(&d)).is_err());
-        assert_eq!(folder_rule_refused(key("1"), Some(&d)), Ok(()));
-        assert_eq!(folder_rule_refused(key("3"), Some(&d)), Ok(()));
-        assert_eq!(folder_rule_refused(key("Enter"), Some(&d)), Ok(()));
-        assert!(folder_rule_refused(key("Enter"), Some(&rule_dialog(2))).is_err());
+        assert!(folder_rule_refused(key("2"), Some(&d), true).is_err());
+        assert_eq!(folder_rule_refused(key("1"), Some(&d), true), Ok(()));
+        assert_eq!(folder_rule_refused(key("3"), Some(&d), true), Ok(()));
+        assert_eq!(folder_rule_refused(key("Enter"), Some(&d), true), Ok(()));
+        assert!(folder_rule_refused(key("Enter"), Some(&rule_dialog(2)), true).is_err());
+        assert!(folder_rule_refused(key("M-Enter"), Some(&rule_dialog(2)), true).is_err());
         assert_eq!(
-            folder_rule_refused(key("Escape"), Some(&rule_dialog(2))),
+            folder_rule_refused(key("Escape"), Some(&rule_dialog(2)), true),
             Ok(())
         );
-        assert_eq!(folder_rule_refused(key("2"), None), Ok(()));
+        assert_eq!(folder_rule_refused(key("2"), None, false), Ok(()));
+    }
+
+    /// The fail-open cases the first guard had: an Enter with no cursor
+    /// drawn, and a blocked pane whose dialog did not parse.
+    #[test]
+    fn an_enter_that_cannot_be_shown_to_land_elsewhere_is_refused() {
+        assert!(folder_rule_refused(key("Enter"), Some(&rule_dialog(0)), true).is_err());
+        let mut plain = rule_dialog(0);
+        plain.options[1].persists = false;
+        assert_eq!(
+            folder_rule_refused(key("Enter"), Some(&plain), true),
+            Ok(())
+        );
+        assert!(folder_rule_refused(key("Enter"), None, true).is_err());
+        assert!(folder_rule_refused(key("2"), None, true).is_err());
+        assert_eq!(folder_rule_refused(key("Enter"), None, false), Ok(()));
+    }
+
+    #[test]
+    fn every_key_that_can_pick_an_option_is_checked() {
+        for k in ["1", "9", "Enter", "M-Enter"] {
+            assert!(super::picks_an_option(key(k)), "{k}");
+        }
+        for k in ["Down", "Up", "Tab", "Escape", "M-b"] {
+            assert!(!super::picks_an_option(key(k)), "{k}");
+        }
     }
 
     #[test]
     fn a_multi_select_box_is_never_a_folder_rule() {
         let mut d = rule_dialog(1);
         d.multi = true;
-        assert_eq!(folder_rule_refused(key("2"), Some(&d)), Ok(()));
+        assert_eq!(folder_rule_refused(key("2"), Some(&d), true), Ok(()));
     }
 
-    #[test]
-    fn only_a_rule_that_outlives_the_session_counts() {
-        assert!(is_folder_rule("Yes, and don't ask again"));
-        assert!(is_folder_rule(
-            "Yes, and don\u{2019}t ask again for: ls * in /tmp"
-        ));
-        assert!(!is_folder_rule("Yes, and don't ask again this session"));
-        assert!(!is_folder_rule("Yes, allow all edits during this session"));
-        assert!(!is_folder_rule("Yes"));
-        assert!(!is_folder_rule(
-            "No, and tell Claude what to do differently"
-        ));
-    }
-
-    /// Fail closed (sec-access-4 d): another agent's wording of a rule that
-    /// outlives the session counts; "this conversation" is session-scoped.
-    #[test]
-    fn other_wordings_of_a_lasting_rule_count() {
-        assert!(is_folder_rule(
-            "Yes, and always allow for commands that start with 'python cli.py' (Persist to settings.json)"
-        ));
-        assert!(is_folder_rule("Yes, always allow git push"));
-        assert!(is_folder_rule("Yes, allow all edits"));
-        assert!(!is_folder_rule(
-            "Yes, and always allow in this conversation for commands that start with 'python cli.py'"
-        ));
-    }
-
-    /// Forced text is refused into a dialog that offers a folder-wide rule
+    /// Forced text is refused into a dialog that offers a persistent choice
     /// anywhere, and allowed into one that does not.
     #[test]
     fn forced_text_never_reaches_a_dialog_offering_a_folder_rule() {
@@ -1522,22 +1589,21 @@ mod answer_key_tests {
     }
 }
 
-/// Who a review note is from, as the conversation shows it, and their
-/// person: "Ada · phone" for a paired device, the owner's name for the
-/// master token (the desktop on its own hub), the token's name otherwise.
-/// Note who typed `typed` into session `session_id`, so the conversation
-/// shows the turn as theirs (migration 224). Best effort: a failure costs
-/// the name on one turn, never the send.
+/// Note who typed the prompt whose [`crate::store::prompt_head`] is `head`
+/// into session `session_id`, so the conversation shows the turn as theirs
+/// (migration 224). The head, not the prompt, so a caller takes it before
+/// the prompt moves into the send instead of cloning all of it. Best
+/// effort: a failure costs the name on one turn, never the send.
 pub(super) fn note_prompt_author(
     store: &std::sync::Mutex<crate::store::Store>,
     caller: &Caller,
     session_id: i64,
-    typed: &str,
+    head: &str,
 ) {
     let Ok(s) = lock(store) else { return };
     let (name, person) = review_author(&s, caller);
     if let Err(e) =
-        s.record_prompt_author(session_id, typed, &name, person, crate::store::now_unix())
+        s.record_prompt_author(session_id, head, &name, person, crate::store::now_unix())
     {
         tracing::warn!(session_id, code = %e.code, "prompt author not recorded");
     }
@@ -1551,24 +1617,6 @@ pub(super) fn caller_person(s: &crate::store::Store, caller: &Caller) -> Option<
         (None, None, None) => s.personal_owner_id().ok().flatten(),
         _ => None,
     }
-}
-
-/// Bound confirmation summary for `review_notes { send }`: the session, the
-/// send's id and a digest of every note.
-fn review_notes_summary(
-    row: &crate::store::SessionRow,
-    client_msg_id: Option<&str>,
-    notes: Option<&[crate::store::NewReviewNote]>,
-) -> String {
-    let notes = serde_json::to_string(&notes.unwrap_or_default()).unwrap_or_default();
-    format!(
-        "session={} host={} name={} client_msg_id={} notes={}",
-        row.id,
-        bound_text(Some(&row.host_alias)),
-        bound_text(Some(&row.tmux_name)),
-        bound_text(client_msg_id),
-        bound_text(Some(&notes)),
-    )
 }
 
 /// Bound confirmation summary for `send_message { deliver | wake }`: every
@@ -1589,6 +1637,9 @@ fn message_summary(p: &SendMessageParams) -> String {
     )
 }
 
+/// Who a review note is from, as the conversation shows it, and their
+/// person: "Ada · phone" for a paired device, the owner's name for the
+/// master token (the desktop on its own hub), the token's name otherwise.
 pub(super) fn review_author(s: &crate::store::Store, caller: &Caller) -> (String, Option<i64>) {
     let name_of = |id: i64| {
         s.get_person(id)

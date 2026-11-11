@@ -2978,7 +2978,7 @@ pub(super) const LIFECYCLE_CAP: std::time::Duration = std::time::Duration::from_
 
 /// Cap for [`guard::Deadline::Start`]: a start in a new worktree runs, in
 /// one call, the clone (`ensure_remote_project`, up to 360 s), the worktree
-/// add (up to 180 s), the project's setup command (`SETUP_TIMEOUT`, 600 s)
+/// add (up to 180 s), the project's setup command (`SETUP_TIMEOUT`, 240 s)
 /// and then tmux, the reconcile and the agent wait. The cap is the setup's
 /// own clock plus room for the rest, so a setup the docs allow is never cut
 /// off by the call around it.

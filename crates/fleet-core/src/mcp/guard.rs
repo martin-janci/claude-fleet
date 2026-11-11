@@ -317,8 +317,10 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
-    // The projects an account is forbidden for: the hub owner's, as the
-    // nickname is.
+    // The projects an account is forbidden for: the hub owner's. The handler
+    // narrows the row as `add_account`'s does (the master or a trusted full
+    // device, `owner_device_admin`) and refuses the operator, whose token
+    // this row alone would serve.
     ToolPolicy {
         name: "set_account_projects",
         access: Access::Person,
@@ -1747,7 +1749,9 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         deadline: Deadline::Quick,
     },
     // An ask shares the session (owner only, like `session_share`) and
-    // writes an Inbox row; destroys nothing.
+    // writes an Inbox row; destroys nothing. Not `readonly` (an ask writes),
+    // yet a readonly or answer-only device may list and finish its own asks
+    // ([`PERSON_INBOX_TOOLS`]); the handler refuses it `ask`.
     ToolPolicy {
         name: "review_request",
         access: Access::Client,
@@ -1846,13 +1850,25 @@ pub fn is_readonly_tool(name: &str) -> bool {
 /// declines a form and never opens one.
 pub const ANSWER_TOOLS: &[&str] = &["send_prompt", "ask"];
 
+/// The tools a readonly or answer-only device may call beyond the readonly
+/// ones because they touch only its own person's Inbox. Each narrows itself:
+/// `review_request` lists and finishes the asks to that person and refuses
+/// `ask` (which shares a session) to anything but a full device. A viewer's
+/// device is always readonly, and "Ask for review…" picks watch exactly for
+/// a viewer, so without this the ask could never reach them.
+pub const PERSON_INBOX_TOOLS: &[&str] = &["review_request"];
+
 /// May a token in `mode` call `tool` at all (the readonly and answer-only
 /// half of `enforce_mode`)?
 pub fn mode_allows_tool(mode: crate::mcp::auth::TokenMode, tool: &str) -> bool {
     use crate::mcp::auth::TokenMode;
     match mode {
-        TokenMode::Readonly => is_readonly_tool(tool),
-        TokenMode::Answer => is_readonly_tool(tool) || ANSWER_TOOLS.contains(&tool),
+        TokenMode::Readonly => is_readonly_tool(tool) || PERSON_INBOX_TOOLS.contains(&tool),
+        TokenMode::Answer => {
+            is_readonly_tool(tool)
+                || ANSWER_TOOLS.contains(&tool)
+                || PERSON_INBOX_TOOLS.contains(&tool)
+        }
         _ => true,
     }
 }
@@ -1896,9 +1912,8 @@ pub const OPERATOR_CONFIRMS: &[&str] = &[
     "run_prompt",
     "queue_prompt",
     // Gated at the call site for the actions that type into a pane:
-    // `review_notes { send }` (a numbered prompt through the service's
-    // `queue_prompt`) and `send_message { deliver | wake }`.
-    "review_notes",
+    // `send_message { deliver | wake }`. (`review_notes` refuses the
+    // operator outright: a note is a person's.)
     "send_message",
 ];
 
@@ -1910,7 +1925,6 @@ pub const OPERATOR_PROMPT_TOOLS: &[&str] = &[
     "queue_prompt",
     "run_prompt",
     "dispatch_task",
-    "review_notes",
     "send_message",
 ];
 
@@ -2069,8 +2083,7 @@ pub fn caller_must_confirm_with(
 pub fn operator_confirm_reason(tool: &str) -> &'static str {
     match tool {
         // Review round 15, F21, narrowed by the 2026-10-17 review's F2.
-        "send_prompt" | "run_prompt" | "queue_prompt" | "dispatch_task" | "review_notes"
-        | "send_message" => {
+        "send_prompt" | "run_prompt" | "queue_prompt" | "dispatch_task" | "send_message" => {
             "what the operator writes reaches a session without a person only at \
              \"Within your brief\" or \"Autopilot\", and only into a session it \
              started or briefed, whatever mcp.confirm_destructive says"
@@ -3071,6 +3084,7 @@ pub fn strip_marker(text: &str) -> &str {
 /// Argument keys whose values are free text an agent authored (or a secret):
 /// never persisted, only their length.
 /// `initial_prompt` and `brief` (work graph) may carry third-party ticket text.
+/// `note` is a person's words (`review_request`'s ask, a decline's reason).
 const REDACT_KEYS: &[&str] = &[
     "prompt",
     "body",
@@ -3078,6 +3092,7 @@ const REDACT_KEYS: &[&str] = &[
     "start_command",
     "initial_prompt",
     "brief",
+    "note",
 ];
 /// Argument keys dropped from the summary entirely: a confirmation nonce is
 /// a one-time credential and must not land in the timeline, and `value` is
@@ -3096,7 +3111,9 @@ pub(crate) const SKIP_KEYS: &[&str] =
 /// (`catalog_admin`'s `set_secret` carries its value there, review r04 S2),
 /// which the top-level keys above cannot see into. `env` is `new_session`'s
 /// session-scope variables: their names and values are the session's own.
-const COUNT_KEYS: &[&str] = &["values", "args", "env"];
+/// `notes` is `review_notes`' array of a person's notes (bodies and quoted
+/// source lines): only `<N items>` is kept.
+const COUNT_KEYS: &[&str] = &["values", "args", "env", "notes"];
 const SUMMARY_MAX_CHARS: usize = 240;
 
 /// Replace every character that could end a line downstream — see
@@ -3142,6 +3159,7 @@ pub fn redact_args(args: Option<&serde_json::Map<String, serde_json::Value>>) ->
         let rendered = if COUNT_KEYS.contains(&k.as_str()) {
             match v {
                 serde_json::Value::Object(o) => format!("<{} fields>", o.len()),
+                serde_json::Value::Array(a) => format!("<{} items>", a.len()),
                 serde_json::Value::Null => "null".to_string(),
                 _ => "<redacted>".to_string(),
             }
@@ -3184,7 +3202,6 @@ mod tests {
             "queue_prompt",
             "run_prompt",
             "dispatch_task",
-            "review_notes",
             "send_message",
         ];
         let always = [
@@ -3417,7 +3434,6 @@ mod tests {
             "run_prompt",
             "queue_prompt",
             "dispatch_task",
-            "review_notes",
             "send_message",
         ] {
             assert!(
@@ -4052,6 +4068,29 @@ mod tests {
     }
 
     #[test]
+    fn redact_args_never_keeps_a_review_note() {
+        let args = serde_json::json!({
+            "action": "send",
+            "session_id": 4,
+            "notes": [
+                { "path": "a.rs", "line": 2, "quote": "let key = x;", "body": "secret-body" },
+                { "path": "b.rs", "body": "y" },
+            ],
+            "note": "please look at the auth change",
+        });
+        let out = redact_args(args.as_object());
+        assert!(
+            !out.contains("secret-body")
+                && !out.contains("let key")
+                && !out.contains("auth change"),
+            "{out}"
+        );
+        assert!(out.contains("notes=<2 items>"), "{out}");
+        assert!(out.contains("note=<30 chars>"), "{out}");
+        assert!(out.contains("action=send"), "{out}");
+    }
+
+    #[test]
     fn redact_args_never_keeps_an_api_key() {
         let args = serde_json::json!({
             "action": "api_key",
@@ -4271,5 +4310,18 @@ mod tests {
         // defuse() neutralised the body's copy of the closing marker, so the
         // fence the notice sits outside of is fleet's own.
         assert_eq!(out.matches(UNTRUSTED_END).count(), 1);
+    }
+
+    /// Review finding 2: a viewer's device is readonly, and the ask for
+    /// review meant for it must reach its Inbox — the tool is admitted to
+    /// readonly and answer-only devices (the handler refuses them `ask`).
+    #[test]
+    fn a_readonly_or_answer_device_may_read_its_review_asks() {
+        use crate::mcp::auth::TokenMode;
+        for mode in [TokenMode::Readonly, TokenMode::Answer, TokenMode::Full] {
+            assert!(mode_allows_tool(mode, "review_request"), "{mode:?}");
+        }
+        assert!(!is_readonly_tool("review_request"));
+        assert!(!mode_allows_tool(TokenMode::Readonly, "session_share"));
     }
 }

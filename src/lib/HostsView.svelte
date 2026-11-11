@@ -547,8 +547,8 @@
       {/if}
       <FleetHostsSection />
     </div>
-  {:else if !$showPrimary}
-    <FleetFilterNote testid="hosts-primary-filtered" />
+    <!-- A filter that hides this fleet names another one, so `$multiFleet`
+         holds and the branch above took it. -->
   {:else if showTable}
     {@render ownTable()}
   {:else}

@@ -1,7 +1,7 @@
 -- Who sent each prompt (HumanLayer plan v2, item 4): a hub with several
 -- people shows a colleague's prompt as theirs, not as "You". One row per
 -- prompt a hub tool typed or queued; the conversation matches a turn to
--- its row by the prompt's head and time (`service::prompt_authors`).
+-- its row by the prompt's head and time (`service::transcript`).
 --
 -- prompt_authors
 --   session_id        the session the prompt went to

@@ -500,9 +500,10 @@ pub(super) enum Plan {
 /// fallback bills the same profile there. A routine that names no login
 /// (its host's own) whose host's login is past the line first takes the
 /// login on the same host with the most headroom, as a ticket start does
-/// (`account_limits::login_with_headroom`); a routine that names its login
+/// (`account_limits::login_with_headroom_for`); a routine that names its login
 /// keeps it. A login on an account the project forbids gives way the same
-/// way, and a routine that names one skips. A host the last probe could not
+/// way, and a routine that names one skips; a fallback host's is tested the
+/// same way. A host the last probe could not
 /// reach, with no fallback that can, is tried anyway: the probe may be
 /// stale, and a failed start says why.
 pub(super) fn plan(s: &Store, r: &RoutineRow, now: i64) -> Result<Plan, IpcError> {
@@ -554,10 +555,11 @@ pub(super) fn plan(s: &Store, r: &RoutineRow, now: i64) -> Result<Plan, IpcError
     let down = !reachable(&r.host_alias)?;
     // An account the routine's project forbids (`project_accounts`): a
     // routine on its host's own login moves to the allowed login there with
-    // the most headroom, under the line and within its daily limit
-    // ([`freer_login_for_run`]), as one past the line does; failing that,
-    // or for one that names its login, its fallback host takes the run,
-    // else it skips and says why (its start would be refused).
+    // the most headroom under the line and within its daily limit
+    // ([`freer_login_for_run`], as past the line below: a spent one would
+    // stall the run); one that names its login, or finds none, skips and
+    // says why (its start would be refused). A fallback host is for a host
+    // that cannot run it, not for a rule that forbids it.
     let forbidden = if down {
         None
     } else {
@@ -586,10 +588,13 @@ pub(super) fn plan(s: &Store, r: &RoutineRow, now: i64) -> Result<Plan, IpcError
             }
         }
     }
+    if let Some(why) = forbidden {
+        return Ok(Plan::Skip(why));
+    }
     // A login fleet knows is signed out answers a run with `/login` (review
     // w02-6): like one past the line, the fallback takes it, else it skips.
     let signed_out = crate::service::login_health::signed_out_reason(s, &r.host_alias, profile)?;
-    if forbidden.is_none() && over.is_none() && signed_out.is_none() && !down {
+    if over.is_none() && signed_out.is_none() && !down {
         return Ok(Plan::Start {
             host: r.host_alias.clone(),
             note: None,
@@ -598,7 +603,7 @@ pub(super) fn plan(s: &Store, r: &RoutineRow, now: i64) -> Result<Plan, IpcError
     }
     // The host's own login past the line, on a routine that named none:
     // another login on the same host with room takes the run.
-    if let (None, Some(o), None, false) = (&forbidden, &over, profile, down) {
+    if let (Some(o), None, false) = (&over, profile, down) {
         if let Some(l) =
             freer_login_for_run(s, r.project_id, &r.host_alias, &o.login.account_uuid, now)?
         {
@@ -609,11 +614,10 @@ pub(super) fn plan(s: &Store, r: &RoutineRow, now: i64) -> Result<Plan, IpcError
             });
         }
     }
-    let why = match (&forbidden, &over, &signed_out) {
-        (Some(why), _, _) => Some(why.clone()),
-        (None, Some(o), _) => Some(o.reason()),
-        (None, None, Some(why)) => Some(why.clone()),
-        (None, None, None) => None,
+    let why = match (&over, &signed_out) {
+        (Some(o), _) => Some(o.reason()),
+        (None, Some(why)) => Some(why.clone()),
+        (None, None) => None,
     };
     let mut fb_refused = None;
     if let Some(fb) = r.fallback_host.as_deref() {
@@ -623,9 +627,16 @@ pub(super) fn plan(s: &Store, r: &RoutineRow, now: i64) -> Result<Plan, IpcError
                     let why = why
                         .clone()
                         .unwrap_or_else(|| format!("{} was unreachable", r.host_alias));
+                    // A profile the run takes instead of its own is named.
+                    let note = match login.as_deref() {
+                        Some(l) if !l.is_empty() && Some(l) != r.profile.as_deref() => {
+                            format!("on {fb} under profile {l}: {why}")
+                        }
+                        _ => format!("on {fb}: {why}"),
+                    };
                     return Ok(Plan::Start {
                         host: fb.to_string(),
-                        note: Some(format!("on {fb}: {why}")),
+                        note: Some(note),
                         login,
                     });
                 }
@@ -722,9 +733,11 @@ fn fallback_login(
 }
 
 /// The profile on `host` a run moves to off its host's own login (on
-/// `not_account`, past the line): [`crate::service::account_limits::freer_login`], a
-/// profile, and not past its account's daily spend limit (an unreadable
-/// spend is not known to be under it).
+/// `not_account`; `""` for none, off a forbidden one):
+/// [`crate::service::account_limits::freer_login_for`] (signed in, under the
+/// line, never on an account the project forbids), a profile, and not past
+/// its account's daily spend limit (an unreadable spend is not known to be
+/// under it).
 fn freer_login_for_run(
     s: &Store,
     project_id: i64,

@@ -5,9 +5,8 @@
   // starts. A failure stops that start with "Setup failed" and keeps the
   // worktree; nothing runs for an existing worktree.
   import { onMount } from 'svelte';
-  import Modal from './Modal.svelte';
+  import DialogSheet from './DialogSheet.svelte';
   import { errorText } from './error_copy';
-  import { formKeys, platformSubmitHint } from './forms/form_frame';
   import { hubActionBlocked, hubStatus } from './hub';
   import { hubConnection } from './hub_connection';
   import { SETUP_GLOBS_MAX, getWorktreeSetup, globError, parseGlobs, setWorktreeSetup } from './worktree_setup';
@@ -26,6 +25,9 @@
   let loaded = $state(false);
   let globsText = $state('');
   let command = $state('');
+  /** What the setup held when it was read: closing with other text asks
+   *  "Discard changes?". */
+  let saved = $state({ globs: '', command: '' });
   let busy = $state(false);
   let failure = $state<string | null>(null);
 
@@ -34,6 +36,7 @@
     if (r.ok) {
       globsText = r.value.copy.join('\n');
       command = r.value.command ?? '';
+      saved = { globs: globsText, command };
       loaded = true;
     } else {
       failure = errorText(r.error, { read: true });
@@ -45,12 +48,12 @@
     globs.map(globError).find((e) => e !== null) ??
       (globs.length > SETUP_GLOBS_MAX ? `At most ${SETUP_GLOBS_MAX} lines` : null),
   );
-  const commandProblem = $derived(/[\r\n]/.test(command.trim()) ? 'One line; chain steps with &&' : null);
   const blocked = $derived(hubActionBlocked('worktree_setup', $hubStatus, $hubConnection));
-  const canSave = $derived(loaded && !busy && blocked === null && globProblem === null && commandProblem === null);
+  const canSave = $derived(loaded && !busy && blocked === null && globProblem === null);
+  const dirty = $derived(loaded && (globsText !== saved.globs || command !== saved.command));
+  const why = $derived(blocked ?? (globProblem !== null ? 'Fix the globs first.' : null));
 
-  async function submit(e?: Event) {
-    e?.preventDefault();
+  async function submit() {
     if (!canSave) return;
     busy = true;
     failure = null;
@@ -62,18 +65,27 @@
     }
     onclose();
   }
-
-  const hint = platformSubmitHint();
 </script>
 
-<Modal title="New worktree setup" {onclose} width="460px" testid="worktree-setup-dialog">
-  <form class="form" use:formKeys onsubmit={submit}>
-    <p class="note">
-      Runs for each new worktree of <strong>{title}</strong>, before its agent starts. An existing worktree is left as
-      it is.
-    </p>
+<DialogSheet
+  title="New worktree setup"
+  lead={`Runs for each new worktree of ${title}, before its agent starts. An existing worktree is left as it is.`}
+  verb="Save"
+  busyVerb="Saving…"
+  onconfirm={submit}
+  {onclose}
+  canConfirm={canSave}
+  {busy}
+  error={failure}
+  {dirty}
+  width="460px"
+  testid="worktree-setup-dialog"
+  confirmTestid="worktree-setup-save"
+  errorTestid="worktree-setup-error"
+  confirmTitle={why}
+>
     <label class="field">
-      <span>Copy from the project folder</span>
+      <span class="field-label">Copy from the project folder</span>
       <textarea
         rows="4"
         bind:value={globsText}
@@ -86,12 +98,12 @@
         data-testid="worktree-setup-globs"
       ></textarea>
     </label>
-    <p class="note">One path or glob per line, relative to the project folder. Files git ignores, like .env, are the usual ones.</p>
+    <p class="field-note">One path or glob per line, relative to the project folder. Files git ignores, like .env, are the usual ones.</p>
     {#if globProblem}
       <p class="err" data-testid="worktree-setup-glob-error">{globProblem}</p>
     {/if}
     <label class="field">
-      <span>Then run</span>
+      <span class="field-label">Then run</span>
       <input
         type="text"
         bind:value={command}
@@ -99,64 +111,20 @@
         spellcheck="false"
         autocomplete="off"
         disabled={!loaded}
-        aria-invalid={commandProblem !== null}
         data-testid="worktree-setup-command"
       />
     </label>
-    <p class="note">In the new worktree, on its host. If it fails, the start stops with "Setup failed" and its output; the worktree stays.</p>
-    {#if commandProblem}
-      <p class="err" data-testid="worktree-setup-command-error">{commandProblem}</p>
-    {/if}
-    {#if blocked}
-      <p class="err" data-testid="worktree-setup-blocked">{blocked}</p>
-    {/if}
-    {#if failure}
-      <p class="err" role="alert" data-testid="worktree-setup-error">{failure}</p>
-    {/if}
-    <div class="actions">
-      <button type="button" onclick={onclose}>Cancel</button>
-      <button
-        type="submit"
-        class="primary"
-        disabled={!canSave}
-        title={blocked ?? ''}
-        data-shortcut={hint.label}
-        aria-keyshortcuts={hint.aria}
-        data-testid="worktree-setup-save">Save</button
-      >
-    </div>
-  </form>
-</Modal>
+    <p class="field-note">
+      In the new worktree, on its host, for up to 4 minutes. If it fails, the start stops with "Setup failed" and its
+      output; the worktree stays.
+    </p>
+</DialogSheet>
 
 <style>
-  .form { display: flex; flex-direction: column; gap: 0.5rem; }
-  .field { display: flex; flex-direction: column; gap: 0.25rem; }
-  .field span { font-size: var(--text-2xs); color: var(--fg-muted); text-transform: uppercase; letter-spacing: 0.04em; }
   .field input,
   .field textarea {
-    font: inherit;
     font-family: var(--font-mono, monospace);
-    font-size: var(--text-xs);
-    padding: 0.35rem 0.5rem;
-    border: 1px solid var(--border);
-    background: var(--bg-pane);
-    color: var(--fg);
-    border-radius: var(--radius-sm);
-    resize: vertical;
   }
   .field [aria-invalid='true'] { border-color: var(--danger); }
-  .note { font-size: var(--text-2xs); color: var(--fg-muted); margin: 0; }
-  .err { color: var(--danger); font-size: var(--text-2xs); margin: 0; }
-  .actions { display: flex; gap: 0.4rem; justify-content: flex-end; }
-  .actions button {
-    font-size: var(--text-xs);
-    padding: 0.3rem 0.8rem;
-    border: 1px solid var(--border);
-    background: transparent;
-    color: var(--fg);
-    border-radius: var(--radius-sm);
-    cursor: pointer;
-  }
-  .actions button:disabled { opacity: 0.5; cursor: not-allowed; }
-  .actions button.primary { border-color: var(--accent); }
+  .err { color: var(--danger); font-size: var(--text-xs); margin: 0; }
 </style>

@@ -1,30 +1,29 @@
 <script lang="ts">
   // The Inbox's review asks ("Ask for review…", docs/review-notes.md): each
   // open ask to this person — who asked, on which session, their note —
-  // opening the session, and Done to take it off the list. Read when the
-  // Inbox shows and every minute while it does.
-  import { onDestroy, onMount } from 'svelte';
+  // opening the session, and Done to take it off the list. The list is the
+  // `reviewRequests` store, which `trackReviewRequests` (main.ts) keeps fresh.
+  import { get } from 'svelte/store';
   import { errorSentence } from './error_copy';
   import { hubActionBlocked, hubStatus } from './hub';
   import { hubConnection } from './hub_connection';
-  import { finishReviewRequest, levelWords, loadReviewRequests, reviewRequests, type ReviewRequest } from './review_requests';
+  import { askSessionName, finishReviewRequest, levelWords, reviewRequests, type ReviewRequest } from './review_requests';
   import { selectSessionExplicitly } from './selection';
   import { shortAge } from './session_status';
-  import { sessions } from './sessions';
+  import { loadSessions, sessions } from './sessions';
   import { push } from './toasts';
 
   const blocked = $derived(hubActionBlocked('review_request', $hubStatus, $hubConnection));
-  let timer: ReturnType<typeof setInterval> | undefined;
-  onMount(() => {
-    void loadReviewRequests();
-    timer = setInterval(() => void loadReviewRequests(), 60_000);
-  });
-  onDestroy(() => clearInterval(timer));
 
-  function open(r: ReviewRequest): void {
-    const s = $sessions.find((x) => x.id === r.session_id);
+  async function open(r: ReviewRequest): Promise<void> {
+    let s = $sessions.find((x) => x.id === r.session_id);
+    if (!s) {
+      // The share may be newer than this device's list: read it once more.
+      await loadSessions({ force: true });
+      s = get(sessions).find((x) => x.id === r.session_id);
+    }
     if (s) selectSessionExplicitly(s);
-    else push({ kind: 'info', message: 'That session is not in your list yet; it shows once the share reaches this device.' });
+    else push({ kind: 'info', message: 'You cannot open that session any more: its owner took the share back. Mark the ask done to clear it.' });
   }
   async function done(r: ReviewRequest): Promise<void> {
     if (blocked !== null) return;
@@ -40,8 +39,8 @@
       <div class="item" data-testid="review-request">
         <span class="dot" aria-label="Needs you"></span>
         <div class="text">
-          <button type="button" class="name" data-testid="review-request-open" onclick={() => open(r)}
-            >{s?.friendly_name || s?.tmux_name || `Session ${r.session_id}`} <span class="chip">review</span></button
+          <button type="button" class="name" data-testid="review-request-open" onclick={() => void open(r)}
+            >{askSessionName(r, s)} <span class="chip">review</span></button
           >
           <span class="line">{r.from_name} asks you to review · you {levelWords(r.level)} · {shortAge(r.created_at)}</span>
           {#if r.note}<span class="note" data-testid="review-request-note">{r.note}</span>{/if}

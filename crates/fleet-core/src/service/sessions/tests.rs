@@ -325,9 +325,41 @@ fn stale_probe(s: &Store, pane_status: crate::service::pane_intel::ClaudeStatus)
             derived_status: Some(pane_status),
             waiting_for: None,
             pending_input: None,
+            signed_out: false,
         },
     );
     probe
+}
+
+/// A pane whose last turn ended in "Please run /login" notes the row's
+/// login for `login_health`: the profile's when the row has one, and nothing
+/// for a session seen for the first time (no stored profile to tell which
+/// login it is).
+#[test]
+fn a_pane_that_lost_its_login_notes_the_rows_login() {
+    use crate::service::pane_intel::ClaudeStatus;
+    let mut s = Store::open_in_memory().unwrap();
+    s.upsert_host("vps").unwrap();
+    let projects = s.list_projects().unwrap();
+    let mut probe = stale_probe(&s, ClaudeStatus::Idle);
+    probe.intel.get_mut("dev-a").unwrap().signed_out = true;
+    reconcile_write_one_host(&mut s, &probe, &projects).unwrap();
+    crate::service::login_health::drain_noted(&s, now_unix());
+    let host = |s: &Store| s.get_host_row("vps").unwrap().unwrap();
+    assert!(
+        host(&s).signed_out_logins.is_empty(),
+        "a first sighting notes nothing"
+    );
+
+    s.conn_for_test()
+        .execute("UPDATE sessions SET claude_profile = 'work'", [])
+        .unwrap();
+    reconcile_write_one_host(&mut s, &probe, &projects).unwrap();
+    reconcile_write_one_host(&mut s, &probe, &projects).unwrap();
+    crate::service::login_health::drain_noted(&s, now_unix());
+    let out = host(&s).signed_out_logins;
+    assert_eq!(out.len(), 1, "one note per login, however many passes");
+    assert_eq!(out[0].profile.as_deref(), Some("work"));
 }
 
 /// Stamp every row as observed by a reconcile pass at `at`: the stale sweep
@@ -4701,6 +4733,18 @@ fn worktree_add_script_blank_base_normalizes_to_default() {
 
 // ── create_worktree_local integration test ────────────────────────────────
 
+/// Setup runs only for a worktree this start created: the add script says so
+/// on the line before the path, and a reused directory prints the path alone.
+#[test]
+fn the_add_script_reports_a_worktree_it_created() {
+    assert!(worktree_add_script("/r", "x", None).contains("echo __fleet_worktree_created__"));
+    assert!(worktree_was_created(
+        b"banner\n__fleet_worktree_created__\n/p\n"
+    ));
+    assert!(!worktree_was_created(b"/p\n"));
+    assert!(!worktree_was_created(b"__fleet_worktree_created__\n"));
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn create_worktree_local_creates_and_is_idempotent() {
@@ -8876,10 +8920,10 @@ mod env_launch {
         assert!(body.contains("export FLEET_T='1'"), "{body}");
     }
 
-    /// Accounts review: a review is new Claude work in the source's
-    /// project, so it never starts on a login the project forbids. With no
-    /// allowed login on the host it is refused and nothing is created; with
-    /// one it runs there, and the row records it for a later restart.
+    /// Accounts review finding 1: a review is new Claude work in the
+    /// source's project, so it never starts on a login the project forbids.
+    /// With no allowed login on the host it is refused and nothing is
+    /// created; with one, it runs there and the row records it.
     #[tokio::test]
     async fn a_review_never_starts_on_a_login_its_project_forbids() {
         use crate::service::account_limits::seed_usage;
@@ -8906,6 +8950,15 @@ mod env_launch {
             .expect_err("refused");
         assert_eq!(err.code, codes::E_ACCOUNT_FORBIDDEN, "{err:?}");
         assert_eq!(h.panes().len(), 1, "{:?}", h.panes());
+        assert_eq!(
+            h.store
+                .lock()
+                .unwrap()
+                .list_sessions_for_host("h")
+                .unwrap()
+                .len(),
+            1
+        );
         // An allowed login on the host takes the review.
         seed_usage(
             &h.store.lock().unwrap(),
@@ -8956,6 +9009,68 @@ mod env_launch {
             "{}",
             panes[1]
         );
+    }
+
+    /// Accounts review finding 7: a lost Claude session is not brought back
+    /// (recreate, and so restore; a restart) on an account its project
+    /// forbids, and nothing is launched; live on that same account it is
+    /// exempt.
+    #[tokio::test]
+    async fn a_lost_session_is_not_relaunched_on_a_forbidden_account() {
+        use crate::service::account_limits::seed_usage;
+        let h = Harness::new();
+        let row = new_session(h.args("dev-relaunch-acct", None), &h.store, &h.ssh, &h.reg)
+            .await
+            .expect("create");
+        let set = |sql: &str| {
+            h.store
+                .lock()
+                .unwrap()
+                .conn_for_test()
+                .execute(
+                    &format!("UPDATE sessions SET {sql} WHERE id = {}", row.id),
+                    [],
+                )
+                .unwrap();
+        };
+        {
+            let s = h.store.lock().unwrap();
+            seed_usage(&s, "h", None, "acct-own", 20.0, now_unix());
+            s.set_account_forbidden_projects("acct-own", &[h.project_id])
+                .unwrap();
+        }
+        // The harness starts shells; this row is a Claude session that ran
+        // on the host's own login.
+        set("kind = 'work', agent = 'claude', account_uuid = 'acct-own'");
+        let restart = || -> RestartSessionArgs {
+            serde_json::from_value(serde_json::json!({
+                "host_alias": "h", "name": "dev-relaunch-acct"
+            }))
+            .unwrap()
+        };
+        let launched = h.panes().len();
+        // Live on the account it runs on: the rule itself lets it restart
+        // (`a_relaunch_is_checked_unless_the_session_is_live_on_the_same_account`).
+        assert!(
+            crate::service::project_accounts::refuse_forbidden_relaunch_of(
+                &h.store.lock().unwrap(),
+                row.id,
+                now_unix()
+            )
+            .is_ok()
+        );
+
+        set("lost_at = 5, lost_reason = 'host_reboot'");
+        let recreate = serde_json::from_value(serde_json::json!({ "session_id": row.id })).unwrap();
+        let err = recreate_session(recreate, &h.store, &h.ssh)
+            .await
+            .expect_err("refused");
+        assert_eq!(err.code, codes::E_ACCOUNT_FORBIDDEN, "{err:?}");
+        let err = restart_session(restart(), &h.store, &h.ssh)
+            .await
+            .expect_err("refused");
+        assert_eq!(err.code, codes::E_ACCOUNT_FORBIDDEN, "{err:?}");
+        assert_eq!(h.panes().len(), launched, "{:?}", h.panes());
     }
 
     #[tokio::test]

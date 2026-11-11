@@ -23,7 +23,7 @@
 //!   `event_msg` / `item_completed` `UserMessage` opens a turn, and the
 //!   `response_item` lines carry the assistant's messages and tool calls.
 
-use super::{AgentAdapter, LaunchSwitch, PickerOption, SlashCommand};
+use super::{cmd, opt, AgentAdapter, LaunchSwitch, PickerOption, SlashCommand};
 use crate::service::context::ContextUsage;
 use crate::service::pane_intel::{
     self, ClaudeStatus, PaneIntel, PendingInput, PendingOption, StuckKind, WaitingFor,
@@ -34,18 +34,6 @@ use crate::tmux::ClaudeLaunch;
 /// The Codex CLI adapter.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct CodexCli;
-
-const fn opt(value: &'static str, label: &'static str) -> PickerOption {
-    PickerOption { value, label }
-}
-
-const fn cmd(name: &'static str, description: &'static str, args: bool) -> SlashCommand {
-    SlashCommand {
-        name,
-        description,
-        args,
-    }
-}
 
 /// The models Codex lists (`codex debug models`, visibility `list`), newest
 /// first as its `/model` picker orders them.
@@ -104,7 +92,7 @@ const SLASH: &[SlashCommand] = &[
 const YOLO: &str = "--dangerously-bypass-approvals-and-sandbox";
 
 /// What a pane falls back to when Codex exits, as for Claude.
-const TAIL: &str = "exec ${SHELL:-/bin/zsh} -l";
+const TAIL: &str = super::AGENT_EXIT_TAIL;
 
 /// ` -m 'm' -c 'model_reasoning_effort="e"'`, each only when set.
 fn flags(launch: &ClaudeLaunch) -> String {
@@ -336,6 +324,7 @@ fn dialog(lines: &[&str]) -> Option<Dialog> {
                     label: label.chars().take(pane_intel::PENDING_LABEL_MAX).collect(),
                     selected,
                     checked: false,
+                    persists: kind == WaitingFor::Permission && pane_intel::persists_label(label),
                 });
                 top = i;
             }
@@ -457,6 +446,7 @@ fn analyze(pane_tail: &str) -> PaneIntel {
             multi: false,
             detail: d.detail,
         }),
+        signed_out: false,
     }
 }
 

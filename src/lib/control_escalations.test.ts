@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { controlMissionIds, controlSessionIds, escalations, missionEscalations, escalationKey, loginCardText, loginShellCommand, pruneLater, LATER_KEPT, LATER_MAX_AGE_SECS } from './control_escalations';
+import { controlMissionIds, controlSessionIds, escalations, missionEscalations, escalationKey, loginCardText, loginShellCommand, isSetupToken, pruneLater, LATER_KEPT, LATER_MAX_AGE_SECS } from './control_escalations';
 import type { ControlHandoff } from './handoffs';
 import type { HostRow } from './hosts';
 import type { SessionRow } from './sessions';
@@ -78,6 +78,26 @@ describe('escalations', () => {
     expect(loginShellCommand('htz', 'work')).toBe("ssh -t htz 'CLAUDE_CONFIG_DIR=~/.claude-profiles/work claude /login'");
     expect(loginShellCommand('htz', null)).toBe("ssh -t htz 'claude /login'");
     expect(loginShellCommand('local', 'work')).toBe('CLAUDE_CONFIG_DIR=~/.claude-profiles/work claude /login');
+  });
+
+  it('tells a signed-out setup-token profile to make a new token, not to /login', () => {
+    const since = 1_786_276_800;
+    const host = {
+      alias: 'htz',
+      hidden: false,
+      claude_profiles: [{ name: 'tok', account_uuid: 'a', email: null, credential: 'setup_token' }],
+      signed_out_logins: [{ profile: 'tok', since }],
+    } as unknown as HostRow;
+    expect(isSetupToken(host, 'tok')).toBe(true);
+    // The card carries its login, for Sign in again (here: New token…).
+    expect(escalations([], opts, null, new Set(), [host])[0].login).toEqual({ host: 'htz', profile: 'tok', token: true });
+    expect(isSetupToken(host, null)).toBe(false);
+    const [card] = escalations([], opts, null, new Set(), [host]);
+    expect(card.line).toBe(
+      'Claude setup token expired on htz (profile tok) (since Aug 9) · make a new token with `claude setup-token`, then + Add account → Setup token on htz, profile tok',
+    );
+    expect(loginShellCommand('htz', 'tok', true)).toBe("ssh -t htz 'claude setup-token'");
+    expect(loginShellCommand('local', 'tok', true)).toBe('claude setup-token');
   });
 
   it("by default only Control's threads raise a card; null scope is the whole fleet", () => {

@@ -130,6 +130,7 @@ pub fn signed_out_reason(
     let Some(row) = s.get_host_row(host)? else {
         return Ok(None);
     };
+    let token = is_setup_token(&row, profile);
     Ok(row
         .signed_out_logins
         .iter()
@@ -142,9 +143,22 @@ pub fn signed_out_reason(
             format!(
                 "{who} is signed out since {} · {}",
                 day_label(l.since),
-                login_command(host, profile)
+                relogin_command(host, profile, token)
             )
         }))
+}
+
+/// PURE: whether the login `profile` on `h` holds a setup token fleet
+/// wrote (`service::add_account`) rather than a `/login`. The host's own
+/// login (`None`) never does.
+pub fn is_setup_token(h: &HostRow, profile: Option<&str>) -> bool {
+    let Some(p) = profile else {
+        return false;
+    };
+    h.claude_profiles.iter().flatten().any(|x| {
+        x.name == p
+            && x.credential.as_deref() == Some(crate::service::add_account::SETUP_TOKEN_CREDENTIAL)
+    })
 }
 
 /// PURE: what a person types to sign the login in again.
@@ -157,17 +171,31 @@ pub fn login_command(host_alias: &str, profile: Option<&str>) -> String {
     }
 }
 
+/// PURE: [`login_command`], or for a setup-token profile (`token`) the way
+/// to renew it: `/login` does not touch the token fleet exports, so a new
+/// token is the only sign-in again.
+pub fn relogin_command(host_alias: &str, profile: Option<&str>, token: bool) -> String {
+    match profile {
+        Some(p) if token => format!(
+            "make a new token with `claude setup-token`, then + Add account → Setup token on {host_alias}, profile {p}"
+        ),
+        _ => login_command(host_alias, profile),
+    }
+}
+
 /// PURE: the one-line card text: "Claude login expired on htz (since Aug 9)
-/// · ssh htz then claude /login". `since` is a calendar day (UTC).
-pub fn card_text(host_alias: &str, login: &SignedOutLogin) -> String {
+/// · ssh htz then claude /login". `since` is a calendar day (UTC); `token`
+/// = the login is a setup-token profile ([`is_setup_token`]).
+pub fn card_text(host_alias: &str, login: &SignedOutLogin, token: bool) -> String {
     let whose = match &login.profile {
         Some(p) => format!("{host_alias} (profile {p})"),
         None => host_alias.to_string(),
     };
+    let what = if token { "setup token" } else { "login" };
     format!(
-        "Claude login expired on {whose} (since {}) · {}",
+        "Claude {what} expired on {whose} (since {}) · {}",
         day_label(login.since),
-        login_command(host_alias, login.profile.as_deref())
+        relogin_command(host_alias, login.profile.as_deref(), token)
     )
 }
 
@@ -247,15 +275,21 @@ fn with_noted<R>(f: impl FnOnce(&mut Vec<Observation>) -> R) -> R {
 /// login: remember it for the next pass ([`drain_noted`]). No store at hand
 /// where that is found, so it waits here; bounded, the oldest dropped.
 pub fn note_signed_out(host_alias: &str, profile: Option<&str>) {
+    let o = Observation {
+        host_alias: host_alias.to_string(),
+        profile: profile.map(str::to_string),
+        signed_out: true,
+    };
     with_noted(|q| {
+        // A pane keeps showing its error every reconcile pass until the
+        // next turn: one note per login is enough.
+        if q.contains(&o) {
+            return;
+        }
         if q.len() >= NOTED_MAX {
             q.remove(0);
         }
-        q.push(Observation {
-            host_alias: host_alias.to_string(),
-            profile: profile.map(str::to_string),
-            signed_out: true,
-        });
+        q.push(o);
     });
 }
 
@@ -316,6 +350,8 @@ pub fn recheck_due(
         .filter(|h| h.reachable && !h.hidden)
         .flat_map(|h| h.signed_out_logins.iter().map(move |l| (h, l)))
         .filter(|(_, l)| now - l.checked_at >= RECHECK_EVERY_SECS)
+        // A usage fetch cannot read a setup token's state (inference-only).
+        .filter(|(h, l)| !is_setup_token(h, l.profile.as_deref()))
         .filter(|(h, l)| login_account(h, l.profile.as_deref()) == Some(account_uuid))
         .min_by_key(|(_, l)| l.checked_at)
         .map(|(h, l)| (narrowed(h, l.profile.as_deref()), l.profile.clone()))
@@ -423,6 +459,16 @@ mod tests {
     }
 
     #[test]
+    fn a_login_is_noted_once_however_often_it_is_seen() {
+        for _ in 0..5 {
+            note_signed_out("nh", Some("work"));
+        }
+        note_signed_out("nh", None);
+        assert_eq!(with_noted(|q| q.len()), 2);
+        with_noted(std::mem::take);
+    }
+
+    #[test]
     fn the_card_names_the_host_the_day_and_the_command() {
         // 2026-08-09 12:00 UTC.
         let l = SignedOutLogin {
@@ -431,15 +477,20 @@ mod tests {
             checked_at: 0,
         };
         assert_eq!(
-            card_text("htz", &l),
+            card_text("htz", &l, false),
             "Claude login expired on htz (since Aug 9) · ssh htz then claude /login"
         );
         let p = SignedOutLogin {
             profile: Some("work".into()),
             ..l
         };
-        assert!(card_text("htz", &p)
+        assert!(card_text("htz", &p, false)
             .ends_with("ssh htz then CLAUDE_CONFIG_DIR=~/.claude-profiles/work claude /login"));
+        assert_eq!(
+            card_text("htz", &p, true),
+            "Claude setup token expired on htz (profile work) (since Aug 9) · make a new token \
+             with `claude setup-token`, then + Add account → Setup token on htz, profile work"
+        );
         assert_eq!(day_label(0), "Jan 1");
     }
 

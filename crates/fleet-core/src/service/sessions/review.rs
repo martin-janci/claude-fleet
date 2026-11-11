@@ -65,10 +65,11 @@ pub async fn spawn_review(
             .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, "source session not found"))?;
         let cwd_src = cwd_source_for_session(&s, &source)?;
         // A Claude review is new Claude work in the source's project: it
-        // runs under the source's own login, stepped off one the project
-        // forbids or that is past the pause line, and is refused (forbidden,
-        // daily limit, signed out) before anything is created
-        // (`service::run_login`). Codex keeps its own login.
+        // runs under the source's own login when the project allows it,
+        // stepped off one the project forbids (onto the allowed login on the
+        // host with the most headroom) or that is past the pause line, and
+        // is refused (forbidden, daily limit, signed out) before anything is
+        // created (`service::run_login::choose`). Codex keeps its own login.
         let mut launch = crate::tmux::ClaudeLaunch::default();
         if agent.id() == crate::store::AGENT_CLAUDE {
             launch.profile = crate::service::run_login::choose(

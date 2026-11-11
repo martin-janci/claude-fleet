@@ -893,6 +893,44 @@ async fn an_answer_only_device_answers_forms_and_never_opens_one() {
     assert!(err.message.contains("never opens one"), "{err:?}");
 }
 
+/// Review finding 2: a readonly (a viewer's) or answer-only device lists
+/// and finishes the asks for review to its person, and never asks one.
+#[tokio::test]
+async fn a_readonly_device_reads_its_review_asks_and_never_asks() {
+    let g = gate_fixture();
+    let t = test_tools(g.store);
+    for mode in [TokenMode::Readonly, TokenMode::Answer] {
+        let c = client_caller("phone", mode);
+        assert!(enforce_mode(&c, "review_request").is_ok(), "{mode:?}");
+        let listed = t
+            .review_request(
+                Extension(c.clone()),
+                Parameters(
+                    serde_json::from_value(serde_json::json!({ "action": "list" })).unwrap(),
+                ),
+            )
+            .await;
+        assert!(listed.is_ok(), "{mode:?}: {listed:?}");
+        let err = t
+            .review_request(
+                Extension(c),
+                Parameters(
+                    serde_json::from_value(
+                        serde_json::json!({ "action": "ask", "session_id": 1, "person": "bob" }),
+                    )
+                    .unwrap(),
+                ),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            err.message.starts_with("E_FORBIDDEN") && err.message.contains("full device"),
+            "{mode:?}: {}",
+            err.message
+        );
+    }
+}
+
 #[tokio::test]
 async fn keys_refuse_an_unknown_key_and_text_alongside_it() {
     let (tools, _store, sid) = keys_test_tools();
@@ -2453,6 +2491,66 @@ async fn a_restart_onto_a_spent_or_signed_out_login_is_refused() {
     assert!(!past.starts_with("E_ACCOUNT_LIMIT"), "{past}");
 }
 
+/// Accounts review finding 9: the login a dispatched worker's or a switch's
+/// over-limit refusal names instead is never one on an account the work's
+/// project forbids, though it is the freest.
+#[tokio::test]
+async fn an_over_limit_refusal_never_names_a_forbidden_login() {
+    let s = crate::store::Store::open_in_memory().unwrap();
+    let now = crate::store::now_unix();
+    let seed = crate::service::account_limits::seed_usage;
+    seed(&s, "hosta", None, "acct-own", 95.0, now);
+    seed(&s, "hosta", Some("spare"), "acct-spare", 10.0, now);
+    seed(&s, "hosta", Some("work"), "acct-work", 30.0, now);
+    seed(&s, "hosta", Some("full"), "acct-full", 99.0, now);
+    let p = s.upsert_project("acme", "api", "/srv/acme/api").unwrap();
+    s.set_account_blocks("acct-spare", Some(&[p]), None)
+        .unwrap();
+    let id = s
+        .upsert_session("dev-x", "hosta", Some(p), None, 1, 1, "running", None)
+        .unwrap();
+    let t = test_tools(s);
+    let dispatched = t
+        .dispatch_task(
+            Extension(host_caller("hosta", TokenMode::Full)),
+            Parameters(DispatchTaskParams {
+                worker_session_id: None,
+                new_worker: Some(NewWorkerSpec {
+                    host_alias: "hosta".into(),
+                    project_id: p,
+                    name: None,
+                    profile: None,
+                    over_limit_ok: None,
+                }),
+                prompt: "work".into(),
+                requester_session_id: None,
+                raw: false,
+                confirm_nonce: None,
+            }),
+        )
+        .await
+        .unwrap_err()
+        .message;
+    assert!(dispatched.starts_with("E_ACCOUNT_LIMIT"), "{dispatched}");
+    assert!(dispatched.contains("profile \"work\""), "{dispatched}");
+    let switched = t
+        .restart_session(
+            Extension(Caller::master()),
+            Parameters(
+                serde_json::from_value(serde_json::json!({
+                    "session_id": id,
+                    "profile": "full",
+                }))
+                .unwrap(),
+            ),
+        )
+        .await
+        .unwrap_err()
+        .message;
+    assert!(switched.starts_with("E_ACCOUNT_LIMIT"), "{switched}");
+    assert!(switched.contains("profile \"work\""), "{switched}");
+}
+
 /// A restart onto another login is a start on it: past `accounts.pause_at`
 /// it is refused with `E_ACCOUNT_LIMIT` unless the person chose it. A plain
 /// restart (same login) is recovery and is never held.
@@ -3532,8 +3630,8 @@ fn a_tool_name_an_old_hub_does_not_know_refuses_a_client_with_e_forbidden() {
 fn tool_deadline_uses_the_documented_caps() {
     assert_eq!(tool_deadline("wait_for_session"), Duration::from_secs(660));
     assert_eq!(tool_deadline("run_prompt"), Duration::from_secs(660));
-    // A start may clone, add a worktree and run its setup (600 s) first.
-    assert_eq!(tool_deadline("new_session"), Duration::from_secs(1260));
+    // A start may clone, add a worktree and run its setup (240 s) first.
+    assert_eq!(tool_deadline("new_session"), Duration::from_secs(900));
     assert_eq!(tool_deadline("provision_hosts"), Duration::from_secs(300));
     // session_conversation reads over SSH like session_transcript, so it
     // gets the lifecycle class, not the quick default.
@@ -9480,11 +9578,12 @@ async fn the_operators_prompts_wait_for_a_person() {
     );
 }
 
-/// sec-access-2 / sec-exec-1: `review_notes { send }` and `send_message {
-/// deliver | wake }` type into a session's pane, so the operator's wait for
-/// a person exactly as its `send_prompt` does; a plain inbox message does
-/// not. The operator resolves only its own review notes, and never answers
-/// a person's form.
+/// sec-access-2 / sec-exec-1: `send_message { deliver | wake }` types into
+/// a session's pane, so the operator's waits for a person exactly as its
+/// `send_prompt` does; a plain inbox message does not. A review note is a
+/// person's: the operator neither sends nor resolves one (main's #1113
+/// refusal, which replaced this branch's confirm card), and never answers a
+/// person's form.
 #[tokio::test]
 async fn the_operators_messages_and_review_notes_wait_for_a_person() {
     let (s, pid, on_b) = two_host_store();
@@ -9493,36 +9592,22 @@ async fn the_operators_messages_and_review_notes_wait_for_a_person() {
         .unwrap();
     let t = guarded_tools(s, true);
     let notes = serde_json::json!([{ "path": "db/migrate.sql", "body": "drop this table" }]);
-    let review = |nonce: Option<&str>| {
-        serde_json::from_value::<ReviewNotesParams>(serde_json::json!({
-            "session_id": on_b,
-            "action": "send",
-            "client_msg_id": "x",
-            "notes": notes,
-            "confirm_nonce": nonce,
-        }))
-        .unwrap()
-    };
-    let asked = t
-        .review_notes(Extension(operator()), Parameters(review(None)))
-        .await
-        .unwrap_err();
-    let nonce = confirm_nonce_of(&asked);
-    // The approval is bound to the notes: other notes ask again.
-    assert!(t.guards.confirms.resolve(&nonce, true));
-    let other = serde_json::from_value::<ReviewNotesParams>(serde_json::json!({
+    let review = serde_json::from_value::<ReviewNotesParams>(serde_json::json!({
         "session_id": on_b,
         "action": "send",
         "client_msg_id": "x",
-        "notes": [{ "path": "a.rs", "body": "force-push" }],
-        "confirm_nonce": nonce,
+        "notes": notes,
     }))
     .unwrap();
-    let again = t
-        .review_notes(Extension(operator()), Parameters(other))
+    let e = t
+        .review_notes(Extension(operator()), Parameters(review))
         .await
         .unwrap_err();
-    assert_ne!(confirm_nonce_of(&again), nonce);
+    assert!(
+        e.message.starts_with("E_FORBIDDEN") && e.message.contains("a person sends"),
+        "{}",
+        e.message
+    );
 
     let message = |deliver: bool, wake: bool| {
         serde_json::from_value::<SendMessageParams>(serde_json::json!({
@@ -9554,7 +9639,8 @@ async fn the_operators_messages_and_review_notes_wait_for_a_person() {
         .await,
     );
 
-    // Resolve: its own note yes, a person's no.
+    // Resolve: the operator resolves no note, not even one it wrote; a
+    // person resolves theirs.
     let (mine, theirs) = {
         let s = t.store.lock().unwrap();
         let (op_author, op_person) = super::messaging::review_author(&s, &operator());
@@ -9578,19 +9664,13 @@ async fn the_operators_messages_and_review_notes_wait_for_a_person() {
         }))
         .unwrap()
     };
-    let e = t
-        .review_notes(Extension(operator()), Parameters(resolve(theirs)))
-        .await
-        .unwrap_err();
-    assert!(
-        e.message.starts_with("E_FORBIDDEN")
-            && e.message.contains("only the review notes it wrote"),
-        "{}",
-        e.message
-    );
-    t.review_notes(Extension(operator()), Parameters(resolve(mine)))
-        .await
-        .expect("the operator resolves its own note");
+    for id in [theirs, mine] {
+        let e = t
+            .review_notes(Extension(operator()), Parameters(resolve(id)))
+            .await
+            .unwrap_err();
+        assert!(e.message.starts_with("E_FORBIDDEN"), "{}", e.message);
+    }
     t.review_notes(
         Extension(client_caller("phone", TokenMode::Full)),
         Parameters(resolve(theirs)),
@@ -9751,7 +9831,7 @@ async fn an_account_ban_change_is_an_admin_event() {
     .unwrap();
     let t = test_tools(s);
     t.set_account_projects(
-        Extension(client_caller("phone", TokenMode::Full)),
+        Extension(trusted(client_caller("phone", TokenMode::Full))),
         Parameters(crate::service::project_accounts::SetAccountProjectsArgs {
             uuid: "acct-1".into(),
             forbidden_project_ids: Some(vec![]),
@@ -11404,6 +11484,58 @@ fn add_project_serves_the_source_variants_and_no_call_id() {
             "source kind {kind} missing: {text}"
         );
     }
+}
+
+/// Accounts review finding 4: which account may bill a project is a
+/// person's rule. The operator (a full, org-free client bound to the hub
+/// owner, so the policy row serves it) and an untrusted device are refused
+/// by the handler and change nothing; the master and a trusted full device
+/// set it.
+#[tokio::test]
+async fn set_account_projects_is_a_trusted_persons_and_never_the_operators() {
+    let store = Store::open_in_memory().unwrap();
+    store
+        .upsert_account(&crate::store::AccountRow {
+            uuid: "u1".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    let pid = store
+        .upsert_project("acme", "api", "/srv/acme/api")
+        .unwrap();
+    store.set_account_forbidden_projects("u1", &[pid]).unwrap();
+    let t = test_tools(store);
+    let call = |c: Caller, ids: Vec<i64>| {
+        let t = t.clone();
+        let args = serde_json::from_value(serde_json::json!({
+            "uuid": "u1", "forbidden_project_ids": ids
+        }))
+        .unwrap();
+        async move { t.set_account_projects(Extension(c), Parameters(args)).await }
+    };
+    let blocked = || {
+        t.store
+            .lock()
+            .unwrap()
+            .project_forbidden_accounts(pid)
+            .unwrap()
+    };
+    let operator = trusted(client_caller(
+        crate::service::operator::OPERATOR_CLIENT_NAME,
+        TokenMode::Full,
+    ));
+    assert!(operator.is_operator());
+    for refused in [operator, client_caller("phone", TokenMode::Full)] {
+        let e = call(refused, vec![]).await.expect_err("refused");
+        assert!(e.message.contains("E_FORBIDDEN"), "{}", e.message);
+        assert_eq!(blocked(), vec!["u1"], "a refused call changes nothing");
+    }
+    call(trusted(client_caller("phone", TokenMode::Full)), vec![])
+        .await
+        .expect("a trusted full device");
+    assert!(blocked().is_empty());
+    call(Caller::master(), vec![pid]).await.expect("the master");
+    assert_eq!(blocked(), vec!["u1"]);
 }
 
 // ---- declarative pages P6: the fleet's settings on a person's device ----

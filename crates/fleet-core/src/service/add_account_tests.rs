@@ -1269,3 +1269,165 @@ fn a_probed_setup_token_profile_is_kept_as_one() {
     assert_eq!(rows[0].credential.as_deref(), Some(SETUP_TOKEN_CREDENTIAL));
     assert_eq!(rows[1].credential, None);
 }
+
+/// `fleet()`-like: `mercury` with a `/login` profile `work` on `u-work`,
+/// an API-key profile `api` and a setup-token profile `tok`, `work` and the
+/// host's own login signed out.
+fn store_with_signed_out_logins() -> Mutex<Store> {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("mercury").unwrap();
+    let row = |name: &str, uuid: &str, credential: Option<&str>| crate::store::HostProfileRow {
+        name: name.into(),
+        account_uuid: Some(uuid.into()),
+        email: None,
+        credential: credential.map(str::to_string),
+    };
+    s.set_host_profiles(
+        "mercury",
+        &[
+            row("api", "apikey-0123456789abcdef", None),
+            row("tok", "u-work", Some(SETUP_TOKEN_CREDENTIAL)),
+            row("work", "u-work", None),
+        ],
+    )
+    .unwrap();
+    let out = |profile: Option<&str>| crate::store::SignedOutLogin {
+        profile: profile.map(str::to_string),
+        since: NOW - 60,
+        checked_at: NOW - 60,
+    };
+    s.set_host_signed_out_logins("mercury", &[out(None), out(Some("work"))])
+        .unwrap();
+    Mutex::new(s)
+}
+
+#[tokio::test]
+async fn sign_in_again_opens_the_login_pane_over_the_login_that_is_there() {
+    let store = store_with_signed_out_logins();
+    let http = FakeTransport::new();
+    let ssh = Arc::new(FakeSsh::new());
+    ssh.on(Match::script_contains("new-session"), Reply::ok(""));
+    let mut a = args("start_login");
+    a.profile = "work".into();
+    // Not without `again`: the profile has its login.
+    let e = run(&a, &store, ssh.as_ref(), &tmux(&ssh), &http, NOW)
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, codes::E_EXISTS);
+    a.again = true;
+    let out = run(&a, &store, ssh.as_ref(), &tmux(&ssh), &http, NOW)
+        .await
+        .unwrap();
+    assert_eq!(out["session"], "fleet-login--work");
+    let script = ssh.calls().last().unwrap().script().unwrap();
+    assert!(
+        script.contains("claude-profiles/\"'\\''work'\\''"),
+        "{script}"
+    );
+
+    // The host's own login: no profile, no CLAUDE_CONFIG_DIR.
+    a.profile = String::new();
+    let out = run(&a, &store, ssh.as_ref(), &tmux(&ssh), &http, NOW)
+        .await
+        .unwrap();
+    assert_eq!(out["session"], "fleet-login--_own");
+    let script = ssh.calls().last().unwrap().script().unwrap();
+    assert!(script.contains("claude /login"), "{script}");
+    assert!(!script.contains("CLAUDE_CONFIG_DIR"), "{script}");
+    assert!(!script.contains("mkdir"), "{script}");
+    assert!(crate::tmux::is_login_session_name("fleet-login--_own"));
+    assert_eq!(login_command(None), "claude /login");
+}
+
+#[tokio::test]
+async fn sign_in_again_is_refused_where_there_is_no_login_to_renew() {
+    let store = store_with_signed_out_logins();
+    let http = FakeTransport::new();
+    let ssh = Arc::new(FakeSsh::new());
+    let mut a = args("start_login");
+    a.again = true;
+    for (profile, says) in [("tok", "setup token"), ("api", "API key")] {
+        a.profile = profile.into();
+        let e = run(&a, &store, ssh.as_ref(), &tmux(&ssh), &http, NOW)
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, codes::E_INVALID, "{profile}");
+        assert!(e.message.contains(says), "{profile}: {}", e.message);
+    }
+    // `again` is the login pane's alone, and an empty profile needs it.
+    a.profile = "work".into();
+    a.action = "api_key".into();
+    let e = run(&a, &store, ssh.as_ref(), &tmux(&ssh), &http, NOW)
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, codes::E_INVALID);
+    a.again = false;
+    a.action = "start_login".into();
+    a.profile = String::new();
+    assert!(run(&a, &store, ssh.as_ref(), &tmux(&ssh), &http, NOW)
+        .await
+        .is_err());
+    assert!(ssh.calls().is_empty(), "nothing reached the host");
+}
+
+#[tokio::test]
+async fn signed_in_again_once_the_pane_says_so_and_the_card_goes() {
+    let store = store_with_signed_out_logins();
+    let http = FakeTransport::new();
+    let mut a = args("login_status");
+    a.again = true;
+    a.profile = "work".into();
+    // The profile has its account all along: that alone is not "signed in".
+    let ssh = Arc::new(FakeSsh::new());
+    ssh.on(
+        Match::contains("capture-pane"),
+        Reply::ok("Paste code here if prompted >\nhttps://claude.ai/oauth/authorize?x=1\n"),
+    );
+    let out = run(&a, &store, ssh.as_ref(), &tmux(&ssh), &http, NOW)
+        .await
+        .unwrap();
+    assert_eq!(out["logged_in"], false);
+    assert_eq!(out["sign_in_url"], "https://claude.ai/oauth/authorize?x=1");
+
+    let ssh = Arc::new(FakeSsh::new());
+    ssh.on(
+        Match::contains("capture-pane"),
+        Reply::ok("Login successful. Press Enter to continue…\n"),
+    );
+    let out = run(&a, &store, ssh.as_ref(), &tmux(&ssh), &http, NOW)
+        .await
+        .unwrap();
+    assert_eq!(out["logged_in"], true);
+    assert_eq!(out["account_uuid"], "u-work");
+    let host = store
+        .lock()
+        .unwrap()
+        .get_host_row("mercury")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        host.signed_out_logins
+            .iter()
+            .map(|l| l.profile.clone())
+            .collect::<Vec<_>>(),
+        vec![None],
+        "work's card goes; the host's own login stays signed out"
+    );
+    assert!(signed_in_again("⎿  Login successful"));
+    assert!(!signed_in_again("Login expired · Run /login"));
+}
+
+#[test]
+fn the_own_login_pane_script_parses() {
+    for sh in ["bash", "sh"] {
+        let out = std::process::Command::new(sh)
+            .args(["-n", "-c", &start_own_login_script()])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{sh}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}

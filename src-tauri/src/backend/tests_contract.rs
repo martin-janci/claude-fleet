@@ -150,6 +150,7 @@ pub(crate) fn sample_session() -> SessionRow {
                 label: "Yes".into(),
                 selected: true,
                 checked: false,
+                persists: false,
             }],
             multi: false,
             detail: None,

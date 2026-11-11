@@ -119,6 +119,30 @@ fn from_run(mut c: CondCheck, t: &TaskRow) -> CondCheck {
     c
 }
 
+/// How many runs of one check (a review, a test run) may end without their
+/// report before the line waits on a person: the first is run again, the
+/// next is handed to the loop, which asks. A run that stopped without its
+/// report says nothing about the implementation, so it never retries it.
+const UNREPORTED_CHECK_RUNS: usize = 2;
+
+/// PURE: a run that finished, in any state, with no report block.
+fn ended_unreported(t: &TaskRow) -> bool {
+    t.report.is_none() && !matches!(t.state.as_str(), "queued" | "running")
+}
+
+/// PURE: the line after a check run `t` that ended without its report,
+/// the `unreported`th such run on the current work: pending with no `by`
+/// (the loop runs the check again) until [`UNREPORTED_CHECK_RUNS`], then
+/// pending on `t` (the loop asks a person).
+fn unreported(line: &str, kind: &str, who: &str, t: &TaskRow, unreported: usize) -> CondCheck {
+    let detail = format!("the {who} ended without its report");
+    if unreported < UNREPORTED_CHECK_RUNS {
+        check(line, kind, "pending", format!("{detail}; it runs again"))
+    } else {
+        from_run(check(line, kind, "pending", detail), t)
+    }
+}
+
 fn clip(s: &str, n: usize) -> String {
     let t: String = s.chars().take(n).collect();
     if s.chars().count() > n {
@@ -198,7 +222,14 @@ pub fn check_line(
                         clip(&r.summary, 200)
                     ),
                 ),
-                ("done", None) => check(line, kind, "pending", "the reviewer gave no verdict"),
+                (_, None) => {
+                    let n = s
+                        .item_tasks(item.id, "review")?
+                        .iter()
+                        .filter(|r| !stale(r) && ended_unreported(r))
+                        .count();
+                    return Ok(unreported(line, kind, "review", &t, n));
+                }
                 _ => check(line, kind, "fail", "the review run did not finish"),
             };
             from_run(c, &t)
@@ -330,18 +361,30 @@ fn test_check(line: &str, command: Option<&str>, runs: &[&TaskRow]) -> CondCheck
                 Some(cmd) => check(line, kind, "pass", format!("ran {cmd}")),
                 None => check(line, kind, "pass", "the test run passed"),
             },
-            ("done", None) => check(line, kind, "pending", "the tester gave no verdict"),
             _ => check(line, kind, "fail", "the test run did not finish"),
         };
         from_run(c, t)
     };
     let newest = runs[0];
+    // The newest run stopped without its report: it says nothing of the
+    // work, so the check runs again, then waits on a person.
+    let unreported_newest = || {
+        let n = runs.iter().filter(|t| ended_unreported(t)).count();
+        unreported(line, kind, "test run", newest, n)
+    };
     let Some(cmd) = command else {
-        return verdict(newest);
+        return if ended_unreported(newest) {
+            unreported_newest()
+        } else {
+            verdict(newest)
+        };
     };
     let reported = |t: &&&TaskRow| t.report.as_ref().is_some_and(|r| ran(r, cmd));
     if let Some(t) = runs.iter().find(reported) {
         return verdict(t);
+    }
+    if ended_unreported(newest) {
+        return unreported_newest();
     }
     // No run reported this command. A run that failed or broke still
     // fails the item; a passing one that skipped it asks for another.

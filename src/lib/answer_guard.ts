@@ -18,20 +18,26 @@ export interface PersistentRule {
   rule: string | null;
   /** The folder it is saved for, when the label says. */
   folder: string | null;
+  /** Saved in the folder's settings for later sessions (a rule), as opposed
+   *  to a choice that only stops the asking (auto mode, bypass). */
+  saved: boolean;
 }
 
-const SESSION_ONLY = /\b(?:this|the) session\b|\bduring this\b|\bthis conversation\b/i;
-// Fail closed (mirrors `is_folder_rule` in crates/fleet-core/src/mcp/tools/
-// messaging.rs): "don't ask again", "always" and "allow all" count unless the
-// label says it ends with this session or conversation; "persist" always does.
-const DONT_ASK = /don['’]?t ask again|\balways\b|\ballow all\b/i;
-const PERSIST = /persist/i;
-const SHAPE = /don['’]?t ask again\s+for:?\s*(.+?)\s+in\s+(\S.*?)\s*$/i;
+const SESSION_ONLY = /\b(?:this|the) session[\s.]*$|\bduring this session[\s.]*$/i;
+const SAVES = /don['’]?t ask again|always allow/i;
+const FOR = /don['’]?t ask again\s+for:?\s*(\S.*?)\s*$/i;
+// The folder is the label's LAST " in <path>": a rule may hold " in " itself.
+const IN_FOLDER = /^(.*\S)\s+in\s+((?:~|\/|[A-Za-z]:[\\/])\S*)$/;
 
-/** The rule a choice would save for every later session in a folder, or
- *  `null` when the choice ends with this session (or saves nothing). */
-export function persistentRule(label: string): PersistentRule | null {
-  if (!PERSIST.test(label) && (!DONT_ASK.test(label) || SESSION_ONLY.test(label))) return null;
-  const m = SHAPE.exec(label);
-  return m ? { rule: m[1], folder: m[2] } : { rule: null, folder: null };
+/** What a choice does beyond answering this one request, or `null` for an
+ *  ordinary choice. The hub decides it (`persists` on the option, from
+ *  `pane_intel::persists_label`); the label is read only for a hub that
+ *  predates the flag, and for the rule and folder to show. */
+export function persistentRule(o: { label: string; persists?: boolean }): PersistentRule | null {
+  const saved = SAVES.test(o.label) && !SESSION_ONLY.test(o.label);
+  if (o.persists !== true && !saved) return null;
+  const m = FOR.exec(o.label);
+  if (!m) return { rule: null, folder: null, saved };
+  const f = IN_FOLDER.exec(m[1]);
+  return f ? { rule: f[1], folder: f[2], saved } : { rule: m[1], folder: null, saved };
 }

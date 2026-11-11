@@ -1436,10 +1436,11 @@ mod tests {
         assert!(projects.iter().any(|p| p.id == pid), "row must survive");
     }
 
-    /// Accounts review: a Claude background session bills the host's own
-    /// login, so one in a project that forbids that account, or on a login
-    /// whose daily limit is spent, is refused before anything runs on the
-    /// host (the `ssh` here cannot run: reaching it would fail otherwise).
+    /// Accounts review finding 2: a Claude background session bills the
+    /// host's own login, so one in a project that forbids that account, or
+    /// on a login whose daily limit is spent or that is signed out, is
+    /// refused before anything runs on the host (the `ssh` here cannot run:
+    /// reaching it would fail otherwise).
     #[tokio::test]
     async fn a_background_session_is_refused_on_an_account_its_project_forbids() {
         let store = make_store();

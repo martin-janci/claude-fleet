@@ -926,13 +926,16 @@ picker (or ⇧F10 on it), **New worktree setup…**, then
   the host's bash has `globstar` (bash 4+; macOS's bash 3.2 reads it as
   `*`). A path that matches nothing is skipped.
 - **Then run:** one shell line run in the new worktree on its host
-  (`pnpm install --frozen-lockfile`), up to 10 minutes.
+  (`pnpm install --frozen-lockfile`), up to 4 minutes (the start's own
+  call is cut at 5). Past that the start stops with "Setup failed … did
+  not finish within 4 minutes"; processes the command started may still be
+  running on the host. A host ssh cannot reach fails within 10 seconds.
 
 It runs only when a start creates the worktree (New session with a new
 worktree, a ticket start, a run), inside the start's Worktree step. An
 existing worktree is never touched. If the copy or the command fails, the
 start stops with `E_SETUP_FAILED`: "Setup failed: …", the last 20 lines of
-output, and where the worktree is; starting a session on that worktree
+output (from its last 4 000 bytes, each line cut at 300 characters), and where the worktree is; starting a session on that worktree
 skips setup, so fix the command or the checkout and start again.
 
 The setup is the project's (migration 221, `projects.setup_copy` /

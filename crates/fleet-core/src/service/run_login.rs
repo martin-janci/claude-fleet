@@ -21,7 +21,9 @@
 //! or past `accounts.pause_at`, as a routine does. A relaunch under the
 //! login a session already runs on (restart, recreate, repair, the attach
 //! path, a restore, a move that keeps its account) holds to the daily limit
-//! only ([`refuse_relaunch`]).
+//! ([`refuse_relaunch`]) and, for a session that is not live or whose login
+//! changed account, to its project's forbidden accounts
+//! (`project_accounts::refuse_forbidden_relaunch`, [`refuse_relaunch_of`]).
 //!
 //! `run_login_tests::every_claude_launch_path_holds_to_the_account_rules`
 //! lists the launch paths and checks each one asks.
@@ -104,9 +106,10 @@ pub fn refuse(
 
 /// The login a Claude run in `project_id` on `host` takes when it would run
 /// under `profile` (`None` = the host's own) and nobody chose otherwise:
-/// `account_limits::login_with_headroom_for`, which steps off a forbidden
-/// login and off one past `accounts.pause_at` when the host has another,
-/// then [`refuse`]d. `Err` when the login it lands on may not take it.
+/// `project_accounts::login_for` (`account_limits::login_with_headroom_for`,
+/// stepping off a login past `accounts.pause_at`, and off a forbidden one
+/// onto an allowed, signed-in login when the host has one), then
+/// [`refuse`]d. `Err` when the login it lands on may not take it.
 pub fn choose(
     s: &Store,
     project_id: Option<i64>,
@@ -114,7 +117,7 @@ pub fn choose(
     profile: Option<&str>,
     now: i64,
 ) -> Result<Option<String>, IpcError> {
-    let picked = account_limits::login_with_headroom_for(s, project_id, host, norm(profile), now)?;
+    let picked = project_accounts::login_for(s, project_id, host, norm(profile), now)?;
     refuse(s, project_id, host, picked.as_deref(), now)?;
     Ok(picked)
 }
@@ -122,10 +125,10 @@ pub fn choose(
 /// A relaunch of a session's Claude under the login it already runs on
 /// (restart, recreate, repair, the attach path, a restore): refused while
 /// that login's account has spent its daily limit (`E_ACCOUNT_LIMIT`, as a
-/// start is), the host's own login included. Nothing else is: a plain
-/// relaunch keeps the account its work already runs on, forbidden or not
-/// (a session already running keeps running), and a signed-out login says
-/// so in its own pane. Shells and other agents bill no Claude login.
+/// start is), the host's own login included. A signed-out login says so in
+/// its own pane. The forbidden-account half needs the row
+/// (`project_accounts::refuse_forbidden_relaunch`; [`refuse_relaunch_of`]
+/// asks both). Shells and other agents bill no Claude login.
 pub fn refuse_relaunch(
     s: &Store,
     host: &str,
@@ -140,13 +143,15 @@ pub fn refuse_relaunch(
     account_limits::refuse_over_daily_limit(s, host, norm(profile), now)
 }
 
-/// [`refuse_relaunch`] for session `session_id` under its stored login.
-/// `Ok` for a session that is gone (its caller says so).
+/// [`refuse_relaunch`] and `project_accounts::refuse_forbidden_relaunch`
+/// for session `session_id` under its stored login. `Ok` for a session that
+/// is gone (its caller says so).
 pub fn refuse_relaunch_of(s: &Store, session_id: i64, now: i64) -> Result<(), IpcError> {
     let Some(row) = s.get_session_by_id(session_id)? else {
         return Ok(());
     };
     let launch = crate::service::sessions::stored_launch(s, session_id)?;
+    project_accounts::refuse_forbidden_relaunch(s, &row, launch.profile.as_deref(), now)?;
     refuse_relaunch(
         s,
         &row.host_alias,

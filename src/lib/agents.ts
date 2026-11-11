@@ -102,7 +102,6 @@ export interface AgentsStatus {
 /** A waiting action explained: who asked, on what, what it changes. */
 export interface ActionAbout {
   id: number;
-  rule_id?: number;
   /** "PR reviewer", "jira-triage · PD board". */
   from: string;
   /** "PD-2709", "a scheduled run". */
@@ -139,9 +138,10 @@ export function groupActions(pending: AgentAction[], about: ActionAbout[] | unde
   const groups = new Map<string, ActionGroup>();
   for (const action of pending) {
     const ab = byId.get(action.id) ?? null;
-    // Without the hub's key only tool calls fold: two of an older hub's
-    // other proposals may be about anything.
-    const key = ab?.group ?? (action.kind === 'mcp_call' ? `${action.kind}:${toolOf(action)}` : `id:${action.id}`);
+    // Only tool calls fold: two of any other kind may be about anything
+    // (two `post_review`s are two pull requests), and an older hub's key
+    // folded them by kind alone.
+    const key = action.kind === 'mcp_call' ? (ab?.group ?? `${action.kind}:${toolOf(action)}`) : `id:${action.id}`;
     let g = groups.get(key);
     if (!g) {
       g = { key, from: ab?.from ?? null, what: ab?.what ?? action.kind.replace(/_/g, ' '), items: [] };
@@ -265,9 +265,8 @@ export function jobCountsLine(jobs: Record<string, number>): string {
  *  hub that does not serve `agents` to this device). */
 export const agents = writable<AgentsStatus | null>(null);
 
-/** The actions waiting for a person: the Inbox's Needs you carries them. */
-export const pendingAgentActions = derived(agents, ($a) => $a?.pending ?? []);
-/** The same, as cards: repeats of one write by one agent fold together. */
+/** The actions waiting for a person, as cards: the Inbox's Needs you
+ *  carries them, and repeats of one write by one agent fold together. */
 export const pendingAgentGroups = derived(agents, ($a) => groupActions($a?.pending ?? [], $a?.pending_about));
 /** What the person's recent approvals came to: under the pending ones. */
 export const recentAgentOutcomes = derived(agents, ($a) => $a?.recent ?? []);

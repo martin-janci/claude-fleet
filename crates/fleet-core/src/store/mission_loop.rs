@@ -354,7 +354,7 @@ impl Store {
     /// that ran an attempt at one of its members, plus its planner's
     /// `claude -p` runs (`aux_usage`, redesign 8.2). A worker whose session
     /// row was deleted (a lane relay, a cancel, Clean up) counts what it had
-    /// spent then (`tasks.worker_spent_micros`, migration 226).
+    /// spent then (`tasks.worker_spent_micros`, migration 227).
     pub fn mission_cost_micros(&self, mission_id: i64) -> Result<i64, IpcError> {
         Ok(self.conn.query_row(
             "SELECT (SELECT COALESCE(SUM(s.usage_cost_micros), 0) FROM sessions s \
@@ -379,7 +379,7 @@ impl Store {
     /// something. A worker session can carry more than one run, so this is an
     /// estimate, as the phone's spend ask shows it. A finished run whose
     /// worker's row was deleted counts, with what that worker had spent
-    /// (migration 226).
+    /// (migration 227).
     pub fn run_cost_estimate(
         &self,
         mission_id: Option<i64>,

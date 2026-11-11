@@ -248,30 +248,20 @@ impl FleetTools {
             ),
         );
         let s = lock(&self.store).map_err(to_mcp_err)?;
-        let me = super::fleet::owner_for(&caller, &s);
-        let now = crate::store::now_unix();
-        match action {
-            "list" => {
-                let Some(me) = me else {
-                    return ok_json(&Vec::<crate::store::ReviewRequestRow>::new());
-                };
-                let rows = s
-                    .review_requests_for(me, p.done.unwrap_or(false), now)
-                    .map_err(to_mcp_err)?;
-                ok_json(&rows)
+        if action == "ask" {
+            // A readonly or answer-only device may list and finish the asks
+            // to its person (`guard::PERSON_INBOX_TOOLS`), never ask: an ask
+            // shares the session.
+            if caller.mode != TokenMode::Full {
+                return Err(mcp_err(
+                    codes::E_FORBIDDEN,
+                    "only a full device asks for reviews; this one reads and answers",
+                    None,
+                ));
             }
-            "ask" => {
-                if caller.mode == TokenMode::Answer {
-                    return Err(mcp_err(
-                        codes::E_FORBIDDEN,
-                        "an answer-only device does not ask for reviews",
-                        None,
-                    ));
-                }
-                let sid = p
-                    .session_id
-                    .ok_or_else(|| mcp_err(codes::E_INVALID, "ask needs session_id", None))?;
-                // `Reach::Own`: asking shares the session, which is the owner's.
+            // `Reach::Own`: asking shares the session, which is the owner's.
+            // A missing session_id is the shared function's refusal.
+            if let Some(sid) = p.session_id {
                 resolve_row_and_gate(
                     &s,
                     &caller,
@@ -281,42 +271,21 @@ impl FleetTools {
                     Reach::Own,
                     "the session to ask a review of",
                 )?;
-                let out = sessions::ask_for_review(
-                    &s,
-                    sid,
-                    p.person.as_deref().unwrap_or(""),
-                    p.note.as_deref(),
-                    me,
-                    now,
-                )
-                .map_err(to_mcp_err)?;
-                ok_json(&out)
             }
-            "done" => {
-                let id =
-                    p.id.ok_or_else(|| mcp_err(codes::E_INVALID, "done needs id", None))?;
-                let row = me
-                    .and_then(|me| {
-                        s.finish_review_request(id, me, p.done.unwrap_or(true), now)
-                            .transpose()
-                    })
-                    .transpose()
-                    .map_err(to_mcp_err)?
-                    .ok_or_else(|| {
-                        mcp_err(
-                            codes::E_NOTFOUND,
-                            format!("no review request {id} to you"),
-                            None,
-                        )
-                    })?;
-                ok_json(&row)
-            }
-            other => Err(mcp_err(
-                codes::E_INVALID,
-                format!("review_request action {other:?}; list, ask or done"),
-                None,
-            )),
         }
+        let me = super::fleet::owner_for(&caller, &s);
+        let view = caller.view_scope(&s).map_err(to_mcp_err)?;
+        let args = sessions::ReviewRequestArgs {
+            action: p.action,
+            session_id: p.session_id,
+            person: p.person,
+            note: p.note,
+            id: p.id,
+            done: p.done,
+        };
+        let out = sessions::review_request(&s, args, me, &view, crate::store::now_unix())
+            .map_err(to_mcp_err)?;
+        ok_json(&out)
     }
 
     #[tool(description = "Asks for a wider level on sessions you OWN. \

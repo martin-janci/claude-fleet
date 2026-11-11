@@ -295,16 +295,25 @@ impl FleetTools {
         Extension(caller): Extension<Caller>,
         Parameters(args): Parameters<crate::service::project_accounts::SetAccountProjectsArgs>,
     ) -> Result<CallToolResult, McpError> {
+        // The ids, not their count: the line is the record of which rule
+        // was set or lifted. The uuid is free text from the request.
         audit(
             "set_account_projects",
             &format!(
                 "uuid={} projects={:?} orgs={:?}",
-                args.uuid,
-                args.forbidden_project_ids.as_ref().map(Vec::len),
-                args.forbidden_org_ids.as_ref().map(Vec::len),
+                args.uuid.escape_debug(),
+                args.forbidden_project_ids,
+                args.forbidden_org_ids,
             ),
         );
+        // Which account may bill a project is a person's rule. Control's
+        // token is a full, org-free client bound to the hub owner, so the
+        // policy row alone would let it lift the very block that refused
+        // its start (accounts review, finding 4).
         refuse_operator_account_write(&caller)?;
+        // As `add_account`: the master, or the hub owner's trusted full
+        // device.
+        owner_device_admin(&caller, "changing an account's forbidden projects")?;
         let representation = serde_json::json!({
             "forbidden_project_ids": args.forbidden_project_ids,
             "forbidden_org_ids": args.forbidden_org_ids,

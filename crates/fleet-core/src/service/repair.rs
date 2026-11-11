@@ -1919,11 +1919,12 @@ async fn ensure_workspace_reporting(
         .iter()
         .any(|s| matches!(s, Step::TmuxCreate { .. } | Step::TmuxRespawn { .. }))
     {
-        // A pane (re)launched for a session that exists runs its Claude
-        // under the login it already ran on: refused, before any git step,
-        // while that account's daily limit is spent, as a restart is
-        // (`run_login::refuse_relaunch`). A new session's start asked
-        // already.
+        // Bringing an existing session's pane back relaunches its agent
+        // under the stored login: refused, before any git step, while that
+        // account's daily limit is spent, or on an account its project
+        // forbids (a live pane respawned on the account it already runs on
+        // is exempt): `run_login::refuse_relaunch_of`. A new session's
+        // start asked already.
         if let Some(id) = spec.session_id {
             let held = lock(store).and_then(|s| {
                 crate::service::run_login::refuse_relaunch_of(&s, id, crate::store::now_unix())
