@@ -451,6 +451,7 @@ mod tests {
             name: "work".into(),
             account_uuid: Some("B".into()),
             email: None,
+            credential: None,
         }]);
         h.signed_out_logins = vec![SignedOutLogin {
             profile: Some("work".into()),
@@ -489,6 +490,7 @@ mod tests {
             name: "work".into(),
             account_uuid: Some("A".into()),
             email: None,
+            credential: None,
         }]);
         let now = 10_000;
         let (_, first) = recheck_due(std::slice::from_ref(&h), "A", now).expect("due");

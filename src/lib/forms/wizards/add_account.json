@@ -14,7 +14,7 @@
           "label": "Sign in with",
           "required": true,
           "value": "subscription",
-          "options": [["subscription", "Claude subscription"], ["api_key", "API key"]]
+          "options": [["subscription", "Claude subscription"], ["setup_token", "Setup token"], ["api_key", "API key"]]
         },
         {
           "name": "profile",
@@ -24,6 +24,23 @@
           "max_len": 32,
           "placeholder": "work",
           "help": "Letters, digits, _ or -. New sessions pick the account by this name. On the host it lives in ~/.claude-profiles/<name>."
+        },
+        {
+          "name": "setup_token",
+          "type": "secret",
+          "label": "Setup token",
+          "required": true,
+          "secret_note": "Run claude setup-token on any computer signed in to the subscription and paste the sk-ant-oat… it prints. Checked with Anthropic, then written to the host only. Fleet keeps no copy. It lasts a year; paste a new one here under the same name to replace it.",
+          "when": { "field": "kind", "eq": "setup_token" }
+        },
+        {
+          "name": "account",
+          "type": "select",
+          "label": "Same account as",
+          "value": "none",
+          "options": [["none", "None of these"]],
+          "help": "The subscription the token signs in to, when fleet already knows it from a login. Sessions then share that account's limits and usage.",
+          "when": { "field": "kind", "eq": "setup_token" }
         },
         {
           "name": "api_key",
