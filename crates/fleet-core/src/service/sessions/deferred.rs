@@ -552,8 +552,14 @@ pub async fn deliver_due(
     session_id: i64,
 ) -> Result<Option<DeferredPromptRow>, IpcError> {
     let _lane = typing_lane(store, session_id).await;
+    // An agent host whose agent is not connected: the reconcile's redial
+    // grace (`DownLog::Hold`) leaves its row reachable, so the row alone
+    // does not say so.
+    let agent_down = |host: &str| {
+        ssh.routes_through_agent(host) && ssh.agent_registry().is_some_and(|r| !r.connected(host))
+    };
     // The clock after the lane wait, as in `queue_prompt`.
-    deliver_due_in_lane(store, session_id, now_unix(), |row, body| {
+    deliver_due_in_lane(store, session_id, now_unix(), agent_down, |row, body| {
         let ssh = Arc::clone(ssh);
         async move {
             prompt::send_prompt_inner(
@@ -585,7 +591,7 @@ where
     // The lane first, so a direct send that loses this moment waits for the
     // paste below.
     let _lane = typing_lane(store, session_id).await;
-    deliver_due_in_lane(store, session_id, now, type_it).await
+    deliver_due_in_lane(store, session_id, now, |_| false, type_it).await
 }
 
 /// [`deliver_due`] with the session's typing lane held: read, decide and
@@ -594,6 +600,7 @@ async fn deliver_due_in_lane<F, Fut>(
     store: &Mutex<Store>,
     session_id: i64,
     now: i64,
+    agent_down: impl FnOnce(&str) -> bool,
     type_it: F,
 ) -> Result<Option<DeferredPromptRow>, IpcError>
 where
@@ -611,6 +618,12 @@ where
             s.skip_archived_deferred_prompts(session_id, now)?;
         }
         if !idle_for_prompt(&row) {
+            return Ok(None);
+        }
+        // A host that does not answer keeps its last-known rows, so a
+        // session last seen idle still reads idle: the prompt waits, with no
+        // attempt counted, and goes out on the first pass after it is back.
+        if host_down(&s, &row.host_alias)? || agent_down(&row.host_alias) {
             return Ok(None);
         }
         let due = s.due_deferred_prompts(session_id, now)?;
@@ -652,6 +665,12 @@ where
             Err(e)
         }
     }
+}
+
+/// Whether `host`'s row says its last probe did not reach it. An unknown
+/// host is not down: nothing says so.
+fn host_down(s: &Store, host: &str) -> Result<bool, IpcError> {
+    Ok(s.get_host_row(host)?.is_some_and(|h| !h.reachable))
 }
 
 /// The Stop hook's follow-up: give the REPL a moment, then type the next
@@ -1032,6 +1051,62 @@ mod tests {
             .next_deferred_prompt(id)
             .unwrap()
             .is_none());
+    }
+
+    /// A host that does not answer keeps its last-known rows, so its idle
+    /// session still reads idle: the due prompt waits, no attempt is
+    /// counted, and it goes out once the host answers again.
+    #[tokio::test]
+    async fn a_due_prompt_waits_while_its_host_is_unreachable() {
+        let (store, id) = store_with("working");
+        let now = now_unix();
+        queue_prompt_with(args(id, "later"), &store, now - 20, |_, _| async {
+            panic!()
+        })
+        .await
+        .unwrap();
+        set_idle_since(&store, id, now - 10);
+        store
+            .lock()
+            .unwrap()
+            .update_host_probe("local", false, None, None, now)
+            .unwrap();
+        for _ in 0..5 {
+            let out = deliver_due_with(&store, id, now - 5, |_, _| async {
+                panic!("nothing is typed to a host that does not answer")
+            })
+            .await
+            .unwrap();
+            assert!(out.is_none());
+        }
+        let waiting = store
+            .lock()
+            .unwrap()
+            .next_deferred_prompt(id)
+            .unwrap()
+            .unwrap();
+        assert_eq!((waiting.attempts, waiting.failed_at), (0, None));
+        // The agent's side of the same gate: an agent host with no live
+        // connection is down too, whatever its row says.
+        store
+            .lock()
+            .unwrap()
+            .update_host_probe("local", true, None, None, now)
+            .unwrap();
+        let out = deliver_due_in_lane(
+            &store,
+            id,
+            now - 5,
+            |_| true,
+            |_, _| async { panic!("an agent host whose agent is gone is not typed to") },
+        )
+        .await
+        .unwrap();
+        assert!(out.is_none());
+        let out = deliver_due_with(&store, id, now - 5, |_, _| async { Ok(()) })
+            .await
+            .unwrap();
+        assert_eq!(out.map(|r| r.body), Some("later".to_string()));
     }
 
     /// The UserPromptSubmit of the turn a delivery started was missed, so

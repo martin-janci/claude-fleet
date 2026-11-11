@@ -3532,7 +3532,8 @@ fn a_tool_name_an_old_hub_does_not_know_refuses_a_client_with_e_forbidden() {
 fn tool_deadline_uses_the_documented_caps() {
     assert_eq!(tool_deadline("wait_for_session"), Duration::from_secs(660));
     assert_eq!(tool_deadline("run_prompt"), Duration::from_secs(660));
-    assert_eq!(tool_deadline("new_session"), Duration::from_secs(300));
+    // A start may clone, add a worktree and run its setup (600 s) first.
+    assert_eq!(tool_deadline("new_session"), Duration::from_secs(1260));
     assert_eq!(tool_deadline("provision_hosts"), Duration::from_secs(300));
     // session_conversation reads over SSH like session_transcript, so it
     // gets the lifecycle class, not the quick default.
@@ -3542,6 +3543,28 @@ fn tool_deadline_uses_the_documented_caps() {
     );
     assert_eq!(tool_deadline("list_sessions"), Duration::from_secs(60));
     assert_eq!(tool_deadline("not_a_tool"), Duration::from_secs(60));
+}
+
+/// Every tool that can start a session in a new worktree waits out the
+/// worktree's setup and the steps around it, rather than dropping the start
+/// mid-install with "may have partially completed".
+#[test]
+fn the_tools_that_run_worktree_setup_outlast_it() {
+    let setup = crate::service::sessions::worktree_setup::SETUP_TIMEOUT;
+    // ensure_remote_project (360 s) + the worktree add (180 s) + tmux.
+    let around = Duration::from_secs(360 + 180 + 60);
+    for tool in [
+        "new_session",
+        "new_shell_session",
+        "rewind_conversation",
+        "work_link",
+    ] {
+        assert!(
+            tool_deadline(tool) >= setup + around,
+            "{tool}: {:?} cuts a {setup:?} setup short",
+            tool_deadline(tool)
+        );
+    }
 }
 
 #[test]

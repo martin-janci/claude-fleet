@@ -20,6 +20,10 @@ use tokio_util::sync::CancellationToken;
 /// a cold cache is minutes, not seconds).
 pub(crate) const SETUP_TIMEOUT: Duration = Duration::from_secs(600);
 
+/// How long reaching a remote host for the setup may take: a dead host
+/// fails in seconds, not after the setup's whole budget.
+const SETUP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// How many output lines a failure keeps.
 const TAIL_LINES: usize = 20;
 
@@ -199,8 +203,16 @@ pub(crate) async fn run(
         }
     } else {
         let quoted = quote(&script);
+        // A connect bound of its own: `run_cancellable` would make the 600 s
+        // budget ssh's ConnectTimeout and its wall clock 3 × that (30 min).
         match ssh
-            .run_cancellable(host, &["bash", "-lc", &quoted], SETUP_TIMEOUT, token)
+            .run_bounded_cancellable(
+                host,
+                &["bash", "-lc", &quoted],
+                SETUP_CONNECT_TIMEOUT,
+                SETUP_TIMEOUT,
+                token,
+            )
             .await
         {
             Ok(out) => out,

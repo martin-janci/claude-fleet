@@ -37,7 +37,7 @@ mod sharing;
 mod start_progress;
 mod targeting;
 pub mod terminals;
-mod worktree_setup;
+pub(crate) mod worktree_setup;
 pub mod worktree_sizes;
 
 #[cfg(test)]

@@ -218,7 +218,7 @@ fn is_a_persons_device(caller: &crate::mcp::Caller) -> bool {
 }
 
 /// Wall-clock class a tool call is bounded to. The caps themselves
-/// (`LONG_POLL_CAP` / `LIFECYCLE_CAP` / `QUICK_CAP`) and the lookup that
+/// (`LONG_POLL_CAP` / `LIFECYCLE_CAP` / `START_CAP` / `QUICK_CAP`) and the lookup that
 /// applies them per call (`tool_deadline`) live in `tools::support`, next to
 /// `bounded`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -230,6 +230,11 @@ pub enum Deadline {
     /// host (session lifecycle, provisioning, host probes, fan-outs, reads
     /// that may page through large files).
     Lifecycle,
+    /// Tools that start a session in a new worktree, which may clone the
+    /// repository, add the worktree and run the project's setup command
+    /// (`pnpm install` on a cold cache) before tmux starts: the cap sits
+    /// above the sum of those steps' own clocks.
+    Start,
     /// Everything else: store reads and single SSH round trips.
     Quick,
 }
@@ -906,14 +911,14 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         access: Access::Client,
         readonly: false,
         confirm: false,
-        deadline: Deadline::Lifecycle,
+        deadline: Deadline::Start,
     },
     ToolPolicy {
         name: "new_shell_session",
         access: Access::Client,
         readonly: false,
         confirm: false,
-        deadline: Deadline::Lifecycle,
+        deadline: Deadline::Start,
     },
     ToolPolicy {
         name: "capture_session",
@@ -1066,7 +1071,7 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         access: Access::Client,
         readonly: false,
         confirm: false,
-        deadline: Deadline::Lifecycle,
+        deadline: Deadline::Start,
     },
     ToolPolicy {
         name: "spawn_review",
@@ -1344,7 +1349,7 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         access: Access::Client,
         readonly: false,
         confirm: true,
-        deadline: Deadline::Lifecycle,
+        deadline: Deadline::Start,
     },
     // Trackers and their credentials (work graph M3): fleet admin. Since
     // contract 13 the hub owner's trusted phone reaches the tracker actions
