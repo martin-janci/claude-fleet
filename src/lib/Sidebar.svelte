@@ -1168,8 +1168,8 @@
   // Not in the Inbox, whose header already counts it (H-16).
   const listCountText = $derived.by(() => {
     if ($sidebarView === 'work' || $sidebarView === 'inbox') return '';
-    const n = $sidebarView === 'inbox' ? inboxList.length : visibleIds.size + sharedWithMe.length;
-    return `${n} ${$sidebarView === 'inbox' ? 'waiting' : n === 1 ? 'session' : 'sessions'}`;
+    const n = visibleIds.size + sharedWithMe.length;
+    return `${n} ${n === 1 ? 'session' : 'sessions'}`;
   });
   // Redesign step 7.4: a row whose state moves it to another group is a new
   // element there; snapshot every row's place before the groups re-render so
