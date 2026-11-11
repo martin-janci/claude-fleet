@@ -25,13 +25,27 @@
   let active = $state<number | null>(null);
   let spend = $state<number | null>(null);
   let pausing = $state(false);
+  const SETTINGS_RETRY_MS = 15_000;
 
   onMount(() => {
-    void loadFleetSettings();
+    // The brake and the dial read this store. A first read that fails (the
+    // hub not reachable yet at launch) is tried again until it answers,
+    // rather than leaving the defaults up for the whole session.
+    let retry: ReturnType<typeof setTimeout> | undefined;
+    let gone = false;
+    const read = async () => {
+      const r = await loadFleetSettings();
+      if (!r.ok && !gone) retry = setTimeout(() => void read(), SETTINGS_RETRY_MS);
+    };
+    void read();
     // Usage readings age out; the pills re-read them on the same cadence as
     // the status bar's mark.
     const t = setInterval(() => (nowSec = Math.floor(Date.now() / 1000)), 30_000);
-    return () => clearInterval(t);
+    return () => {
+      gone = true;
+      clearTimeout(retry);
+      clearInterval(t);
+    };
   });
 
   async function loadActive() {

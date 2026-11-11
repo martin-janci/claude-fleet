@@ -546,7 +546,23 @@ export const failingCount = derived(failing, ($f) => $f.filter((f) => f.may_chan
 /** The failed routines listed for the viewer to see but not to change. */
 export const failingOthersCount = derived(failing, ($f) => $f.filter((f) => !f.may_change).length);
 
-/** Retry: run it again now; the newer run takes it out of the Inbox. */
+/** What a Run now or Retry answer says. The hub answers ok for a run it
+ *  skipped (a login past the line, a spent budget, a run still open) or
+ *  could not start too, so the run's state decides (review R6): `started`
+ *  only for a run that is running. */
+export function runNowNote(
+  name: string,
+  run: RoutineRunRow | null | undefined,
+  started: string,
+): { kind: 'success' | 'warning' | 'error'; message: string } {
+  const why = run?.reason ? `: ${run.reason}` : '';
+  if (run?.state === 'skipped') return { kind: 'warning', message: `${name} did not run${why}.` };
+  if (run?.state === 'failed') return { kind: 'error', message: `${name} could not start${why}.` };
+  return { kind: 'success', message: started };
+}
+
+/** Retry: run it again now; a newer run that did something takes it out of
+ *  the Inbox (one the hub skipped leaves the failure there). */
 export async function retryRoutine(f: FailingRoutine): Promise<Result<RoutineRunRow>> {
   const r = await runRoutineNow(f.routine.id);
   await loadFailing();

@@ -210,7 +210,7 @@ pub const NAME_MAX_CHARS: usize = 80;
 #[serde(deny_unknown_fields)]
 pub struct RoutineInput {
     pub name: String,
-    /// Default true.
+    /// Default true; a change without it keeps the routine's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
     /// cron | event | manual
@@ -443,7 +443,7 @@ pub struct FailingRoutine {
 
 /// `routines { action: failing }`: each routine this caller may read whose
 /// newest run failed, newest failure first. A newer run (Retry) takes it
-/// out, and so does a person switching it off after the failure (Pause);
+/// out, unless the hub skipped it (a skip ran nothing), and so does a person switching it off after the failure (Pause);
 /// a routine the scheduler paused, over its budget, stays, since that
 /// pause is news too.
 pub fn failing(store: &Mutex<Store>, scope: &ViewScope) -> Result<Vec<FailingRoutine>, IpcError> {
@@ -453,7 +453,9 @@ pub fn failing(store: &Mutex<Store>, scope: &ViewScope) -> Result<Vec<FailingRou
         if !sees_routine(&s, scope, &r)? {
             continue;
         }
-        let Some(run) = s.routine_runs(r.id, 1)?.into_iter().next() else {
+        // A skip after the failure (a Retry or a fire the hub declined)
+        // ran nothing: the failure stays until a run does something.
+        let Some(run) = s.latest_unskipped_routine_run(r.id)? else {
             continue;
         };
         if !fix::failed(&run) {
@@ -593,7 +595,12 @@ fn check(
     Ok((
         RoutineFields {
             name: name.to_string(),
-            enabled: input.enabled.unwrap_or(true),
+            // A change without `enabled` keeps the routine's switch: an
+            // edit must not turn back on what a person, the budget or a
+            // removal paused (review R6).
+            enabled: input
+                .enabled
+                .unwrap_or_else(|| before.is_none_or(|b| b.enabled)),
             trigger: input.trigger.clone(),
             cron: cron_line,
             utc_offset_min: offset,
@@ -1036,7 +1043,17 @@ pub fn save(
             } else {
                 next_fire(&f, now)
             };
-            s.update_routine(id, &f, next, cursor)?
+            // A routine that stays off keeps why it stopped, unless the
+            // change answers it: a project or host picked again for one
+            // stopped because its own was removed.
+            let reason = before.paused_reason.as_deref().filter(|why| {
+                !f.enabled
+                    && !(*why == crate::store::PAUSED_PROJECT_REMOVED
+                        && f.project_id != before.project_id)
+                    && !(*why == crate::store::PAUSED_HOST_REMOVED
+                        && f.host_alias != before.host_alias)
+            });
+            s.update_routine(id, &f, next, cursor, reason)?
                 .ok_or_else(|| not_found(id))
         }
     }
@@ -1061,6 +1078,17 @@ pub fn set_enabled(
     let s = lock(store)?;
     let r = changeable(&s, scope, id)?;
     let now = crate::store::now_unix();
+    // One whose project was removed starts nowhere until a save picks a
+    // project again (review R6): a reused id would be another repository.
+    if enabled && s.get_project(r.project_id)?.is_none() {
+        return Err(IpcError::new(
+            codes::E_INVALID_STATE,
+            format!(
+                "{}: its project was removed; pick a project in Edit first",
+                r.name
+            ),
+        ));
+    }
     if enabled && !r.enabled && r.trigger == "event" {
         s.set_routine_event_cursor(id, start_cursor(&s, r.event.as_deref())?)?;
     }
@@ -1248,6 +1276,28 @@ pub(crate) fn decide(s: &Store, r: &RoutineRow, d: Decision<'_>, now: i64) {
     if let Err(e) = s.insert_routine_decision(&row) {
         tracing::warn!(routine = r.id, error = %e.message, "[routines] recording a decision failed");
     }
+}
+
+/// The session run `run` started, while that row is still its: a session
+/// id is handed to the next session once its row is deleted (migration
+/// 044), so a row that this routine did not start, or that a later run
+/// started, is another session, and the run's is gone. Its cost, its turns
+/// and its reply are never the run's. (Not `created_at`: that is the
+/// host's clock, the run's start the hub's.)
+pub(crate) fn run_session(
+    s: &Store,
+    run: &RoutineRunRow,
+) -> Result<Option<crate::store::SessionRow>, IpcError> {
+    let Some(sid) = run.session_id else {
+        return Ok(None);
+    };
+    let own = crate::store::SessionOrigin::routine(run.routine_id);
+    let Some(row) = s.get_session_by_id(sid)?.filter(|row| {
+        row.origin.as_deref() == Some(own.origin) && row.origin_ref == own.origin_ref
+    }) else {
+        return Ok(None);
+    };
+    Ok((!s.routine_session_taken_after(sid, run.id)?).then_some(row))
 }
 
 /// Dollars, for a reason a person reads.

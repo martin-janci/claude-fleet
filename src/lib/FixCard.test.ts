@@ -235,4 +235,17 @@ describe('the fix chat card', () => {
     const line = await screen.findByTestId('rich-fix-resolved');
     expect(line.textContent).toContain('Fixed: Fleet’s files on h1 are out of date');
   });
+
+  it("an extra fleet's card never matches the id against this window's hub (probe3 c-4)", async () => {
+    // The primary happens to hold a live finding with the same id.
+    live = [finding({ id: 12 })];
+    inv.mockClear();
+    render(RichText, { props: { source: ui({ finding_id: 12 }), sessionId: null, fleet: 'nas' } });
+    const line = await screen.findByTestId('rich-fix-away');
+    expect(line.textContent).toContain('Open it on nas');
+    expect(screen.queryByTestId('rich-fix')).toBeNull();
+    expect(screen.queryByTestId('fix-card-fix')).toBeNull();
+    expect(screen.queryByTestId('rich-fix-resolved')).toBeNull();
+    expect(inv.mock.calls.some((c) => c[0] === 'autofix_findings')).toBe(false);
+  });
 });

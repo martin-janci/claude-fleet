@@ -3,6 +3,8 @@ import { get } from 'svelte/store';
 import {
   accessOf,
   applyGrantChanges,
+  attachCommandFor,
+  pairedLocalRefusal,
   backendMode,
   myGrants,
   myPersonId,
@@ -320,5 +322,45 @@ describe('noAttachReason', () => {
       expect(why).toContain('read-only snapshot');
     }
     expect(noAttachReason('drive', remote)).toContain('drive');
+  });
+});
+
+// A paired desktop resolves `local` (and, on Windows, `wsl-…`) on THIS
+// machine: the hub's own-machine sessions get no attach, upload or editor.
+describe('pairedLocalRefusal', () => {
+  it('refuses the hub’s local row only when paired', () => {
+    expect(pairedLocalRefusal({ host_alias: 'local' }, STANDALONE, false)).toBeNull();
+    expect(pairedLocalRefusal({ host_alias: 'local' }, remote, false)).toMatch(/hub’s own machine/);
+    expect(pairedLocalRefusal({ host_alias: 'mac' }, remote, false)).toBeNull();
+  });
+
+  it('refuses wsl- only on a Windows desktop, where the alias names this machine’s WSL', () => {
+    expect(pairedLocalRefusal({ host_alias: 'wsl-ubuntu' }, remote, true)).toMatch(/WSL/);
+    // On a Mac or Linux desktop it is an ordinary ssh alias of a hub host.
+    expect(pairedLocalRefusal({ host_alias: 'wsl-ubuntu' }, remote, false)).toBeNull();
+    expect(pairedLocalRefusal({ host_alias: 'wsl-ubuntu' }, STANDALONE, true)).toBeNull();
+  });
+
+  it('leaves another fleet’s row to fleetAttachRefusal, and a hub on this machine’s loopback alone', () => {
+    expect(pairedLocalRefusal({ host_alias: 'local', fleet: 'company' }, remote, false)).toBeNull();
+    expect(pairedLocalRefusal({ host_alias: 'local' }, { ...remote, url: 'http://127.0.0.1:7878' }, false)).toBeNull();
+    expect(pairedLocalRefusal({ host_alias: 'local' }, { ...remote, url: 'http://localhost:7878' }, false)).toBeNull();
+  });
+});
+
+describe('attachCommandFor', () => {
+  const s = (host_alias: string, tmux_name = 'dev-foo') => ({ host_alias, tmux_name });
+  it('attaches the exact session, through ssh for a host that is not this machine', () => {
+    expect(attachCommandFor(s('local'), 'ssh', STANDALONE, false).command).toBe("tmux attach -t '=dev-foo'");
+    expect(attachCommandFor(s('mefistos'), 'ssh', STANDALONE, false).command).toBe("ssh -t mefistos 'tmux attach -t '\\''=dev-foo'\\'''");
+    expect(attachCommandFor(s('mefistos', "it's"), 'ssh', remote, false).command).toBe("ssh -t mefistos 'tmux attach -t '\\''=it'\\''\\'\\'''\\''s'\\'''");
+    // On a Mac or Linux desktop a `wsl-` host is reached over ssh.
+    expect(attachCommandFor(s('wsl-ubuntu'), 'ssh', STANDALONE, false).command).toBe("ssh -t wsl-ubuntu 'tmux attach -t '\\''=dev-foo'\\'''");
+  });
+
+  it('gives none, with why, where this machine cannot reach the pane', () => {
+    expect(attachCommandFor(s('local'), 'ssh', remote, false)).toMatchObject({ command: null, why: expect.stringMatching(/hub’s own machine/) });
+    expect(attachCommandFor(s('nas'), 'agent', STANDALONE, false)).toMatchObject({ command: null, why: expect.stringMatching(/no SSH route/) });
+    expect(attachCommandFor(s('wsl-ubuntu'), 'ssh', STANDALONE, true)).toMatchObject({ command: null, why: expect.stringMatching(/WSL/) });
   });
 });

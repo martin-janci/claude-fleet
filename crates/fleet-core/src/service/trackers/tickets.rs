@@ -650,6 +650,10 @@ pub struct StartArgs {
     pub with_brief: bool,
     /// The brief as a person edited it (implies `with_brief`).
     pub brief: Option<String>,
+    /// Plan first (docs/plan-first.md): a paragraph put after whatever
+    /// brief this start sends (built or edited), within the brief's budget,
+    /// and on its own when the org fence leaves no ticket text.
+    pub plan_first: Option<String>,
     /// The session's name as a person edited it (default `KEY title`).
     pub name: Option<String>,
     /// The worktree (branch) name as a person edited it (default
@@ -697,6 +701,11 @@ pub struct StartArgs {
     /// ([`crate::service::work::build_cache`]). Set by a run, never from a
     /// tool's own parameters.
     pub build_cache: bool,
+    /// A mission's repo allow-list (orchestration §4.2): the projects the
+    /// start may land in, however it picks one (the item's, its parent's, a
+    /// start rule's, the last same-prefix ticket's). Empty: any. Set by a
+    /// mission's run, never from a tool's own parameters.
+    pub allowed_projects: Vec<i64>,
 }
 
 /// Where a start lands and what it is called.
@@ -1138,6 +1147,31 @@ pub fn plan_resolved(
             .with_details(serde_json::json!({ "missing": "project", "candidates": candidates })));
         }
     };
+    // A mission's run stays inside its repos (orchestration §4.2), whatever
+    // picked the project: an item with none takes a start rule's or the
+    // last same-prefix ticket's, which no mission chose. E_FORBIDDEN, so the
+    // loop asks a person rather than starting it elsewhere.
+    if !args.allowed_projects.is_empty() && !args.allowed_projects.contains(&project_id) {
+        let repo = |pid: i64| -> Result<String, IpcError> {
+            Ok(s.get_project(pid)?
+                .map(|p| format!("{}/{}", p.owner, p.repo))
+                .unwrap_or_else(|| format!("project {pid}")))
+        };
+        let allowed = args
+            .allowed_projects
+            .iter()
+            .map(|p| repo(*p))
+            .collect::<Result<Vec<_>, _>>()?
+            .join(", ");
+        return Err(IpcError::new(
+            codes::E_FORBIDDEN,
+            format!(
+                "{key} would start in {}, outside the mission's repos ({allowed}): start it \
+                 by hand in one of them, or add the repo to the mission's repos",
+                repo(project_id)?
+            ),
+        ));
+    }
     // How the start runs (gap plan G7.1): the start rule's account, model,
     // effort and agent; with no start rule naming a host, the placement
     // rule's "its sessions start here" host and account.
@@ -1293,11 +1327,27 @@ pub fn plan_resolved(
         }
         None => start_name(&key, &title),
     };
+    // A mission's run is Claude whatever agent a start rule names: the
+    // worker guard is a Claude Code hook, and Codex and Hermes run with
+    // their approvals off (orchestration §7.2). Decided here, so Claude's
+    // login choice below applies.
+    let mission_run = args.origin.as_ref().is_some_and(|o| o.origin == "mission");
+    let agent = match rule.as_ref().and_then(|r| r.agent.clone()) {
+        Some(a) if mission_run && a != crate::store::AGENT_CLAUDE => {
+            tracing::info!(
+                key = %key,
+                agent = %a,
+                "[start] a mission's run starts Claude, not the start rule's agent: \
+                 the worker guard covers Claude Code only"
+            );
+            None
+        }
+        a => a,
+    };
     // Any agent but Claude keeps its own login: a Claude profile handed to
     // it is refused at launch (`normalize_launch`).
-    let own_login = rule
-        .as_ref()
-        .and_then(|r| r.agent.as_deref())
+    let own_login = agent
+        .as_deref()
         .is_some_and(|a| a != crate::store::AGENT_CLAUDE);
     let named_profile = args
         .profile
@@ -1343,7 +1393,7 @@ pub fn plan_resolved(
         profile,
         model: rule.as_ref().and_then(|r| r.model.clone()),
         effort: rule.as_ref().and_then(|r| r.effort.clone()),
-        agent: rule.as_ref().and_then(|r| r.agent.clone()),
+        agent,
         fell_back_from,
         placement_rule_id: placement.as_ref().map(|w| w.id),
         rule_id: rule.map(|r| r.id),
@@ -1990,6 +2040,7 @@ pub async fn start_work_unprompted(
         }
         (None, _) => None,
     };
+    let brief = with_plan_first(brief, args.plan_first.as_deref());
     let (row, queued) = start_with(store, &plan, brief, view, |a| {
         crate::service::sessions::new_session(a, store.as_ref(), ssh, reg)
     })
@@ -2676,6 +2727,32 @@ fn sibling_labels(store: &Mutex<Store>, plans: &[StartPlan]) -> Vec<String> {
         .collect()
 }
 
+/// PURE: `brief` with the Plan first paragraph after it. The brief is cut
+/// first, so the paragraph always fits the queued budget
+/// ([`BRIEF_MAX_CHARS`](crate::service::work::handover::BRIEF_MAX_CHARS));
+/// with no brief (none asked, or the org fence held the ticket back) the
+/// paragraph goes alone.
+pub fn with_plan_first(brief: Option<String>, plan: Option<&str>) -> Option<String> {
+    let Some(plan) = plan.map(str::trim).filter(|p| !p.is_empty()) else {
+        return brief;
+    };
+    let max = crate::service::work::handover::BRIEF_MAX_CHARS;
+    let plan: String = plan.chars().take(max).collect();
+    let room = max.saturating_sub(plan.chars().count() + 2);
+    let body: String = brief
+        .as_deref()
+        .unwrap_or_default()
+        .chars()
+        .take(room)
+        .collect();
+    let body = body.trim_end();
+    Some(if body.is_empty() {
+        plan
+    } else {
+        format!("{body}\n\n{plan}")
+    })
+}
+
 /// The brief one sibling queues: the person's own, or the ticket's (only
 /// when its org may reach the plan's host), with the siblings line.
 fn sibling_brief(
@@ -2774,7 +2851,7 @@ where
             .collect();
         let sib = siblings_line(&plan.key, &labels[i], &others, &plan.branch);
         let brief = match sibling_brief(store, args, plan, &sib, &tail) {
-            Ok(b) => b,
+            Ok(b) => with_plan_first(b, args.plan_first.as_deref()),
             Err(e) => {
                 out.failed.push(StartFailure::of(plan.project_id, &e));
                 continue;

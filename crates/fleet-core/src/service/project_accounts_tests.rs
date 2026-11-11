@@ -94,6 +94,79 @@ fn a_login_nobody_chose_gives_way_to_an_allowed_one() {
     );
 }
 
+/// Accounts review (acct-paths-7): a ticket start or a resume that names no
+/// login never lands on one fleet knows is signed out while a signed-in,
+/// allowed login on the host could take the work; with none signed in it
+/// keeps the login, and the start reports it.
+#[test]
+fn a_login_nobody_chose_gives_way_when_it_is_signed_out() {
+    use crate::store::SignedOutLogin;
+    let (s, p) = fleet();
+    let sign_out = |profiles: &[Option<&str>]| {
+        let list: Vec<SignedOutLogin> = profiles
+            .iter()
+            .map(|p| SignedOutLogin {
+                profile: p.map(str::to_string),
+                since: 1,
+                checked_at: 1,
+            })
+            .collect();
+        s.set_host_signed_out_logins("mac", &list).unwrap();
+    };
+    sign_out(&[None]);
+    assert_eq!(
+        login_with_headroom_for(&s, Some(p), "mac", None, NOW).unwrap(),
+        Some("work".into())
+    );
+    assert_eq!(
+        login_with_headroom_for(&s, None, "mac", None, NOW).unwrap(),
+        Some("work".into())
+    );
+    // Never a forbidden one in its place.
+    s.set_account_forbidden_projects("acct-work", &[p]).unwrap();
+    assert_eq!(
+        login_with_headroom_for(&s, Some(p), "mac", None, NOW).unwrap(),
+        Some("spare".into())
+    );
+    // Nothing signed in left: the login is kept.
+    sign_out(&[None, Some("spare")]);
+    assert_eq!(
+        login_with_headroom_for(&s, Some(p), "mac", None, NOW).unwrap(),
+        None
+    );
+}
+
+/// Review of #1118: stepping off a signed-out or forbidden login never lands
+/// on a login whose account spent its daily limit (the start would refuse
+/// it whatever anyone says) while another login has room.
+#[test]
+fn stepping_off_a_login_passes_over_a_spent_daily_limit() {
+    use crate::service::account_limits::seed_daily_spend;
+    use crate::store::SignedOutLogin;
+    let (s, p) = fleet();
+    // `work` (10%) is the freest, but its account's day is spent.
+    seed_daily_spend(&s, "acct-work", 1.0, 2.0, NOW);
+    s.set_host_signed_out_logins(
+        "mac",
+        &[SignedOutLogin {
+            profile: None,
+            since: 1,
+            checked_at: 1,
+        }],
+    )
+    .unwrap();
+    assert_eq!(
+        login_with_headroom_for(&s, None, "mac", None, NOW).unwrap(),
+        Some("spare".into())
+    );
+    s.set_host_signed_out_logins("mac", &[]).unwrap();
+    s.set_account_forbidden_projects("acct-own", &[p]).unwrap();
+    assert_eq!(
+        login_with_headroom_for(&s, Some(p), "mac", None, NOW).unwrap(),
+        Some("spare".into())
+    );
+}
+
 #[test]
 fn a_freer_login_is_never_a_forbidden_one() {
     let (s, p) = fleet();

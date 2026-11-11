@@ -118,6 +118,23 @@ fn fx() -> Fx {
         let s = lock(&store).unwrap();
         s.insert_host("mac", Some("mac")).unwrap();
         s.insert_host("nas", Some("nas")).unwrap();
+        // The fallback host has the routines' `work` login, signed in to
+        // account `work` (journeys-5: a fallback runs on the same account).
+        s.upsert_account(&crate::store::AccountRow {
+            uuid: "work".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        s.set_host_profiles(
+            "nas",
+            &[crate::store::HostProfileRow {
+                name: "work".into(),
+                account_uuid: Some("work".into()),
+                email: None,
+                credential: None,
+            }],
+        )
+        .unwrap();
         (
             s.create_person("ana", None).unwrap().id,
             s.create_person("bo", None).unwrap().id,
@@ -424,6 +441,35 @@ async fn a_fire_missed_while_down_runs_once() {
         routine(&f, r.id).next_run_at,
         Some(OCT8 + 5 * 24 * H + 9 * H)
     );
+}
+
+/// Review R6: disabling a routine's owner pauses it with the reason, and a
+/// due fire of one turned on again since (or racing the disable) records a
+/// skip and starts no session owned by the disabled person.
+#[tokio::test]
+async fn a_disabled_owners_routine_is_paused_and_starts_nothing() {
+    let f = fx();
+    let r = new_routine(&f, input(&f));
+    assert_eq!(r.owner_person_id, Some(f.ana));
+    lock(&f.store).unwrap().disable_person(f.ana).unwrap();
+    let off = routine(&f, r.id);
+    assert!(!off.enabled && off.next_run_at.is_none());
+    assert_eq!(
+        off.paused_reason.as_deref(),
+        Some(crate::store::PAUSED_OWNER_DISABLED)
+    );
+    // Turned on behind the disable's back: the fire is a skip.
+    let nine = OCT8 + 9 * H;
+    {
+        let s = lock(&f.store).unwrap();
+        s.set_routine_enabled(r.id, true, None, Some(nine)).unwrap();
+    }
+    tick_once(&f.deps, nine).await;
+    let runs = runs_of(&f, r.id);
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].state, "skipped");
+    assert_eq!(runs[0].reason.as_deref(), Some("its owner was disabled"));
+    assert!(f.fake.started.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -1172,6 +1218,81 @@ fn turning_a_routine_back_on_restarts_its_schedule_and_cursor() {
     );
 }
 
+/// Review R6: an edit that does not name `enabled` keeps the switch, and a
+/// routine that stays off keeps why it stopped (a person's switch, the run
+/// budget), so a save from a stale list never turns it back on.
+#[test]
+fn an_edit_keeps_a_paused_routine_off_with_its_reason() {
+    let f = fx();
+    let r = new_routine(&f, input(&f));
+    let ana = person(&f.store, None, f.ana);
+    set_enabled(&f.store, &ana, r.id, false).unwrap();
+    let mut edited = input(&f);
+    edited.prompt = "Review my open PRs, oldest first.".into();
+    let saved = save(&f.store, &ana, Some(r.id), &edited).unwrap();
+    assert!(!saved.enabled && saved.next_run_at.is_none());
+    // The scheduler's budget pause keeps its reason through an edit.
+    let why = "paused: a run went over its budget";
+    lock(&f.store)
+        .unwrap()
+        .set_routine_enabled(r.id, false, Some(why), None)
+        .unwrap();
+    let saved = save(&f.store, &ana, Some(r.id), &edited).unwrap();
+    assert!(!saved.enabled);
+    assert_eq!(saved.paused_reason.as_deref(), Some(why));
+    // Turning it on in the save clears the reason.
+    edited.enabled = Some(true);
+    let on = save(&f.store, &ana, Some(r.id), &edited).unwrap();
+    assert!(on.enabled && on.next_run_at.is_some() && on.paused_reason.is_none());
+    // And an edit of an on routine without `enabled` keeps it on.
+    edited.enabled = None;
+    assert!(save(&f.store, &ana, Some(r.id), &edited).unwrap().enabled);
+}
+
+/// Review R6: a removed project's routines let go of its id, so the next
+/// project (which SQLite gives the same rowid) does not inherit them, and
+/// Resume refuses until a save picks a project again.
+#[test]
+fn a_removed_projects_routine_needs_a_project_picked_again() {
+    let f = fx();
+    let ana = person(&f.store, None, f.ana);
+    let mut i = input(&f);
+    let on = new_routine(&f, i.clone());
+    i.name = "Already off".into();
+    let off = new_routine(&f, i);
+    set_enabled(&f.store, &ana, off.id, false).unwrap();
+    let reused = {
+        let s = lock(&f.store).unwrap();
+        s.delete_project(f.project, &Default::default()).unwrap();
+        s.upsert_project("acme", "billing", "/src2").unwrap()
+    };
+    assert_eq!(reused, f.project, "SQLite hands the id out again");
+    for id in [on.id, off.id] {
+        let r = get(&f.store, &ana, id).unwrap().routine;
+        assert!(!r.enabled);
+        assert_eq!(r.project_id, crate::store::ROUTINE_NO_PROJECT);
+        assert_eq!(
+            r.paused_reason.as_deref(),
+            Some(crate::store::PAUSED_PROJECT_REMOVED)
+        );
+        assert_eq!(
+            set_enabled(&f.store, &ana, id, true).unwrap_err().code,
+            codes::E_INVALID_STATE
+        );
+    }
+    // A save that leaves the project unpicked is refused; one that picks
+    // a project clears the reason, and the routine may run again.
+    let mut keep = input(&f);
+    keep.project_id = crate::store::ROUTINE_NO_PROJECT;
+    assert_eq!(
+        save(&f.store, &ana, Some(on.id), &keep).unwrap_err().code,
+        codes::E_NOTFOUND
+    );
+    let picked = save(&f.store, &ana, Some(on.id), &input(&f)).unwrap();
+    assert!(!picked.enabled && picked.paused_reason.is_none());
+    assert!(set_enabled(&f.store, &ana, on.id, true).unwrap().enabled);
+}
+
 /// A fire that is due but not yet ticked survives an edit that keeps the
 /// schedule, and a "turn on" of a routine that is already on.
 #[test]
@@ -1408,6 +1529,30 @@ async fn a_failed_run_is_in_the_inbox_until_retried_or_paused() {
     assert_eq!(failing(&f.store, &ana).unwrap().len(), 1);
     set_enabled(&f.store, &ana, other.id, false).unwrap();
     assert!(failing(&f.store, &ana).unwrap().is_empty());
+}
+
+/// Review R6: a Retry the hub skips (here: today's budget is spent) ran
+/// nothing, so the failure stays in the Inbox.
+#[tokio::test]
+async fn a_skipped_retry_leaves_the_failure_in_the_inbox() {
+    let f = fx();
+    let mut i = input(&f);
+    i.budget_day_micros = Some(1_000_000);
+    let r = new_routine(&f, i);
+    let ana = person(&f.store, None, f.ana);
+    f.fake.fail.store(true, Ordering::SeqCst);
+    let failed = run_now(&f.deps, &ana, r.id, OCT8).await.unwrap();
+    assert_eq!(failed.state, "failed");
+    lock(&f.store)
+        .unwrap()
+        .set_routine_run_cost(failed.id, 2_000_000)
+        .unwrap();
+    f.fake.fail.store(false, Ordering::SeqCst);
+    let retry = run_now(&f.deps, &ana, r.id, OCT8 + 60).await.unwrap();
+    assert_eq!(retry.state, "skipped", "{:?}", retry.reason);
+    let inbox = failing(&f.store, &ana).unwrap();
+    assert_eq!(inbox.len(), 1);
+    assert_eq!(inbox[0].run.id, failed.id);
 }
 
 #[tokio::test]
@@ -2129,6 +2274,132 @@ fn a_run_off_a_forbidden_login_takes_an_allowed_one_with_room() {
     }
 }
 
+/// Accounts review (acct-paths-8): a routine on its host's own login, whose
+/// account the project forbids, moves to an allowed login on the host only
+/// under the line (and within its daily limit); else it skips, saying why:
+/// a fallback host is for a host that cannot run it, not for a rule that
+/// forbids it (main's finding 10).
+#[test]
+fn a_forbidden_own_login_gives_way_under_the_line_or_skips() {
+    use crate::service::account_limits::seed_usage;
+    use crate::service::routines::tick::{plan, Plan};
+    let f = fx();
+    let mut i = input(&f);
+    i.profile = None;
+    i.fallback_host = Some("nas".into());
+    let r = new_routine(&f, i);
+    reachable(&f, "mac", true);
+    reachable(&f, "nas", true);
+    let s = lock(&f.store).unwrap();
+    seed_usage(&s, "mac", None, "mac-own", 20.0, OCT8);
+    seed_usage(&s, "mac", Some("spare"), "spare", 30.0, OCT8);
+    seed_usage(&s, "nas", None, "nas-own", 20.0, OCT8);
+    s.set_account_forbidden_projects("mac-own", &[f.project])
+        .unwrap();
+    // An allowed login under the line on its own host: that one.
+    match plan(&s, &r, OCT8).unwrap() {
+        Plan::Start { host, login, .. } => {
+            assert_eq!((host.as_str(), login.as_deref()), ("mac", Some("spare")))
+        }
+        other => panic!("{other:?}"),
+    }
+    // Its daily limit spent: not that one either, and the run skips.
+    crate::service::account_limits::seed_daily_spend(&s, "spare", 1.0, 2.0, OCT8);
+    match plan(&s, &r, OCT8).unwrap() {
+        Plan::Skip(why) => assert!(why.contains("forbidden"), "{why}"),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// Journeys-5: a routine that names its login runs on its fallback host
+/// only under a login there on the same account, never in an empty profile
+/// that asks for `/login` nor on another account; a start that failed on
+/// its host is held to the same check.
+#[tokio::test]
+async fn a_fallback_host_without_the_routines_login_does_not_take_its_run() {
+    use crate::service::routines::tick::{plan, Plan};
+    let f = fx();
+    let mut i = input(&f);
+    i.fallback_host = Some("nas".into());
+    i.overlap = Some("parallel".into());
+    let r = new_routine(&f, i);
+    reachable(&f, "mac", false);
+    reachable(&f, "nas", true);
+    let set_nas = |account: Option<&str>| {
+        let s = lock(&f.store).unwrap();
+        let list: Vec<crate::store::HostProfileRow> = account
+            .map(|a| crate::store::HostProfileRow {
+                name: "work".into(),
+                account_uuid: Some(a.into()),
+                email: None,
+                credential: None,
+            })
+            .into_iter()
+            .collect();
+        s.set_host_profiles("nas", &list).unwrap();
+    };
+    let skipped = |why: &str| {
+        let s = lock(&f.store).unwrap();
+        match plan(&s, &r, OCT8).unwrap() {
+            Plan::Skip(w) => assert!(w.contains(why), "{w}"),
+            other => panic!("{other:?}"),
+        }
+    };
+    // nas has no `work` login: the run does not go there.
+    set_nas(None);
+    {
+        let s = lock(&f.store).unwrap();
+        // mac is down and the fallback cannot take it: tried on mac anyway.
+        assert!(matches!(
+            plan(&s, &r, OCT8).unwrap(),
+            Plan::Start { ref host, .. } if host == "mac"
+        ));
+        crate::service::account_limits::seed_usage(&s, "mac", Some("work"), "work", 95.0, OCT8);
+    }
+    reachable(&f, "mac", true);
+    skipped("profile work is not signed in on nas");
+    // A `work` on nas signed in to another account: not that one either.
+    {
+        let s = lock(&f.store).unwrap();
+        s.upsert_account(&crate::store::AccountRow {
+            uuid: "other".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    }
+    set_nas(Some("other"));
+    skipped("profile work is not signed in on nas");
+    // A start that fails on mac: nas cannot take it, the run fails once.
+    {
+        let s = lock(&f.store).unwrap();
+        crate::service::account_limits::seed_usage(&s, "mac", Some("work"), "work", 10.0, OCT8 + 1);
+    }
+    *f.fake.fail_on.lock().unwrap() = Some("mac".into());
+    let ana = person(&f.store, None, f.ana);
+    let failed = run_now(&f.deps, &ana, r.id, OCT8 + 2).await.unwrap();
+    assert_eq!(failed.state, "failed");
+    assert!(
+        failed
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains("its fallback nas cannot take it"),
+        "{failed:?}"
+    );
+    assert!(f
+        .fake
+        .started
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|s| s.host == "mac"));
+    // With the login on its account there, the fallback takes it.
+    set_nas(Some("work"));
+    let moved = run_now(&f.deps, &ana, r.id, OCT8 + 3).await.unwrap();
+    assert_eq!(moved.state, "running", "{moved:?}");
+    assert_eq!(moved.host_alias.as_deref(), Some("nas"));
+}
+
 #[tokio::test]
 async fn a_fallback_host_takes_a_run_its_host_cannot() {
     let f = fx();
@@ -2155,10 +2426,15 @@ async fn a_fallback_host_takes_a_run_its_host_cannot() {
         let s = lock(&f.store).unwrap();
         crate::service::account_limits::seed_usage(&s, "mac", Some("work"), "work", 95.0, OCT8);
     }
+    // Its login past the line: the fallback would bill the same account,
+    // past the line there too, so the run skips and says so (journeys-5).
     let over = run_now(&f.deps, &ana, r.id, OCT8).await.unwrap();
-    assert_eq!(over.host_alias.as_deref(), Some("nas"));
+    assert_eq!(over.state, "skipped", "{over:?}");
     assert!(
-        over.reason.as_deref().unwrap().starts_with("on nas: "),
+        over.reason
+            .as_deref()
+            .unwrap()
+            .contains("its fallback nas cannot take it"),
         "{over:?}"
     );
     {
@@ -2186,7 +2462,7 @@ async fn a_fallback_host_takes_a_run_its_host_cannot() {
         .iter()
         .map(|s| s.host.clone())
         .collect();
-    assert_eq!(hosts, ["mac", "nas", "nas", "nas"]);
+    assert_eq!(hosts, ["mac", "nas", "nas"]);
     // Both down: no fallback can take it, the run fails on its own host.
     *f.fake.fail_on.lock().unwrap() = None;
     f.fake.fail.store(true, Ordering::SeqCst);
@@ -3064,6 +3340,10 @@ async fn a_rate_limited_retry_goes_to_the_fallback_a_fire_would_use() {
     let mut i = input(&f);
     i.retry_once = Some(true);
     i.fallback_host = Some("nas".into());
+    // On its host's own login: the fallback runs on nas's own (a routine
+    // that names its login keeps its account, which would be past the
+    // line on nas too).
+    i.profile = None;
     let r = new_routine(&f, i);
     reachable(&f, "mac", true);
     reachable(&f, "nas", true);
@@ -3073,8 +3353,8 @@ async fn a_rate_limited_retry_goes_to_the_fallback_a_fire_would_use() {
     crate::service::account_limits::seed_usage(
         &lock(&f.store).unwrap(),
         "mac",
-        Some("work"),
-        "work",
+        None,
+        "mac-own",
         93.0,
         OCT8,
     );
@@ -4505,22 +4785,28 @@ async fn a_routine_that_writes_a_dashboard_feed_has_its_reply_read_for_it() {
     let r = new_routine(&f, i);
     assert!(r.memory.is_none() && !r.track_seen);
     let run = finished_run(&f, &r, OCT8).await;
+    assert_eq!(run.state, "done");
     let at = run.finished_at.unwrap() + 1;
+    {
+        let s = lock(&f.store).unwrap();
+        // Closing the run left it for the pass: the fixture runs none.
+        assert!(s.routine_run_memory_read_at(run.id).is_none());
+        let unread = s
+            .routine_runs_memory_unread(at - memory::READ_WITHIN_SECS, at, 10)
+            .unwrap();
+        assert_eq!(
+            unread.len(),
+            1,
+            "a feed's routine is read without a notebook"
+        );
+    }
+    let reader = replies(&[
+        "<dashboard-feed key=\"deploys\">2</dashboard-feed>",
+        "Done: <dashboard-feed key=\"deploys\">3</dashboard-feed>",
+    ]);
+    memory::read_finished(&f.store, &reader, at).await;
     let s = lock(&f.store).unwrap();
-    let unread = s
-        .routine_runs_memory_unread(at - memory::READ_WITHIN_SECS, at, 10)
-        .unwrap();
-    // The scheduler's own pass may already have read it (and found no
-    // reply in the fake): either way it was picked for reading.
-    assert!(
-        unread.len() == 1 || s.routine_run_memory_read_at(run.id).is_some(),
-        "a feed's routine is read without a notebook"
-    );
-    let reply = [
-        "<dashboard-feed key=\"deploys\">2</dashboard-feed>".to_string(),
-        "Done: <dashboard-feed key=\"deploys\">3</dashboard-feed>".to_string(),
-    ];
-    memory::apply(&s, &r, &run, Ok(&reply), at).unwrap();
+    assert!(s.routine_run_memory_read_at(run.id).is_some());
     let feeds = s.dashboard_feeds(r.owner_person_id).unwrap();
     assert_eq!(feeds.len(), 1);
     assert_eq!(feeds[0].value, "3", "the last block of a key wins");
@@ -4606,4 +4892,208 @@ async fn a_routines_feed_needs_the_tag_in_its_prompt_and_a_newer_run() {
         said.iter().any(|t| t.contains("older than the feed")),
         "{said:?}"
     );
+}
+
+#[test]
+fn a_failed_run_of_a_feed_routine_is_left_for_the_pass() {
+    // The default setup (seen items on, no notebook): a failed run's seen
+    // items are never recorded, but a feed it printed before failing is.
+    let f = fx();
+    let mut i = input(&f);
+    i.prompt = "Count; answer with <dashboard-feed key=\"n\">N</dashboard-feed>.".into();
+    let r = new_routine(&f, i);
+    assert!(r.memory.is_none() && r.track_seen);
+    let s = lock(&f.store).unwrap();
+    let run = s
+        .insert_routine_run(&crate::store::NewRoutineRun {
+            routine_id: r.id,
+            trigger: "cron",
+            trigger_ref: None,
+            state: "running",
+            reason: None,
+            session_id: None,
+            scheduled_for: None,
+            at: OCT8,
+            error_code: None,
+            host_alias: None,
+        })
+        .unwrap();
+    s.finish_routine_run(run.id, "failed", Some("cut off"), 0, OCT8 + 60)
+        .unwrap();
+    assert!(s.routine_run_memory_read_at(run.id).is_none());
+    let unread = s.routine_runs_memory_unread(OCT8, OCT8 + 61, 10).unwrap();
+    assert_eq!(unread.len(), 1);
+}
+
+/// A usage pass on `session` at `at` that brings its cost to `cost`.
+fn spend_at(f: &Fx, session: i64, cost: i64, at: i64) {
+    lock(&f.store)
+        .unwrap()
+        .apply_usage(
+            session,
+            "mac",
+            &UsageDelta {
+                reset: true,
+                totals: UsageTotals {
+                    cost_micros: cost,
+                    ..Default::default()
+                },
+                model: None,
+                offset: cost,
+                source: "s.jsonl".into(),
+                last_msg_id: None,
+                last_msg_usage: None,
+                now: at,
+                by_day: Vec::new(),
+                backfill_until: None,
+            },
+        )
+        .unwrap();
+}
+
+/// A run whose session has a Claude id (usage can read it) and finished
+/// its turn, having been read at `cost` before the turn ended; when the
+/// turn ended.
+async fn run_past_its_turn(f: &Fx, r: &RoutineRow, cost: i64) -> (RoutineRunRow, i64) {
+    let ana = person(&f.store, None, f.ana);
+    let run = run_now(&f.deps, &ana, r.id, OCT8).await.unwrap();
+    typing_done().await;
+    let sid = run.session_id.unwrap();
+    lock(&f.store)
+        .unwrap()
+        .set_claude_session_id(sid, &format!("c-{sid}"))
+        .unwrap();
+    spend(f, sid, cost);
+    event(f, sid, "turn_done");
+    let ended = lock(&f.store)
+        .unwrap()
+        .first_session_event_at(sid, "turn_done")
+        .unwrap()
+        .unwrap();
+    (run, ended)
+}
+
+fn settle_at(f: &Fx, now: i64) -> Vec<tick::StopTurn> {
+    let mut stop = Vec::new();
+    tick::settle(&lock(&f.store).unwrap(), now, &mut stop).unwrap();
+    stop
+}
+
+/// Review R5: the session's cost moves only on a usage pass, so a run
+/// closed at its turn's end kept what the pass before it read (often
+/// nothing), and its routine's day budget and the fleet's never saw the
+/// rest. It waits for the pass after its turn.
+#[tokio::test]
+async fn a_finished_run_waits_for_the_usage_pass_that_reads_its_turn() {
+    let f = fx();
+    let r = new_routine(&f, input(&f));
+    let (run, ended) = run_past_its_turn(&f, &r, 100_000).await;
+    settle_at(&f, ended + 20);
+    let held = run_row(&f, run.id);
+    assert_eq!(
+        (held.state.as_str(), held.cost_micros),
+        ("running", 100_000)
+    );
+    // Waiting for its cost holds no `overlap: skip`.
+    assert!(!lock(&f.store).unwrap().routine_run_open(r.id).unwrap());
+    spend_at(&f, run.session_id.unwrap(), 900_000, ended + 100);
+    settle_at(&f, ended + 120);
+    let done = run_row(&f, run.id);
+    assert_eq!((done.state.as_str(), done.cost_micros), ("done", 900_000));
+    assert_eq!(
+        lock(&f.store).unwrap().routine_cost_since(r.id, 0).unwrap(),
+        900_000
+    );
+}
+
+#[tokio::test]
+async fn a_finished_run_waits_two_usage_intervals_at_most() {
+    let f = fx();
+    let r = new_routine(&f, input(&f));
+    let (run, ended) = run_past_its_turn(&f, &r, 100_000).await;
+    settle_at(&f, ended + 600);
+    assert_eq!(run_row(&f, run.id).state, "running");
+    settle_at(&f, ended + 2 * 300 + 21);
+    let done = run_row(&f, run.id);
+    assert_eq!((done.state.as_str(), done.cost_micros), ("done", 100_000));
+}
+
+#[tokio::test]
+async fn a_finished_run_closes_at_once_when_usage_is_not_collected() {
+    let f = fx();
+    let r = new_routine(&f, input(&f));
+    lock(&f.store)
+        .unwrap()
+        .set_setting(crate::service::settings::USAGE_ENABLED, "false")
+        .unwrap();
+    let (run, ended) = run_past_its_turn(&f, &r, 100_000).await;
+    settle_at(&f, ended + 20);
+    assert_eq!(run_row(&f, run.id).state, "done");
+}
+
+#[tokio::test]
+async fn a_finished_run_whose_late_cost_passes_its_budget_fails_and_pauses_the_routine() {
+    let f = fx();
+    let mut i = input(&f);
+    i.budget_run_micros = Some(500_000);
+    let r = new_routine(&f, i);
+    let (run, ended) = run_past_its_turn(&f, &r, 100_000).await;
+    settle_at(&f, ended + 20);
+    spend_at(&f, run.session_id.unwrap(), 600_000, ended + 100);
+    let stop = settle_at(&f, ended + 120);
+    let over = run_row(&f, run.id);
+    assert_eq!((over.state.as_str(), over.cost_micros), ("failed", 600_000));
+    assert!(
+        over.reason
+            .as_deref()
+            .unwrap()
+            .contains("$0.60 of the run's $0.50"),
+        "{over:?}"
+    );
+    assert!(!routine(&f, r.id).enabled);
+    // Its turn is over: there is nothing to stop.
+    assert!(stop.is_empty());
+}
+
+/// Review R5: a session id is handed to the next session once its row is
+/// deleted. A run whose session was killed and reaped does not adopt the
+/// next session's cost, turn or reply.
+#[tokio::test]
+async fn a_run_does_not_adopt_a_session_that_reused_its_sessions_id() {
+    let f = fx();
+    let r = memory_routine(&f, "routine", true);
+    let ana = person(&f.store, None, f.ana);
+    let run = run_now(&f.deps, &ana, r.id, OCT8).await.unwrap();
+    typing_done().await;
+    let sid = run.session_id.unwrap();
+    let other = {
+        let s = lock(&f.store).unwrap();
+        s.delete_session(sid).unwrap();
+        s.upsert_session(
+            "manual",
+            "mac",
+            Some(f.project),
+            None,
+            1,
+            1,
+            "running",
+            None,
+        )
+        .unwrap()
+    };
+    assert_eq!(other, sid, "the id is reused");
+    spend(&f, other, 5_000_000);
+    event(&f, other, "turn_done");
+    tick_once(&f.deps, OCT8 + 60).await;
+    let gone = run_row(&f, run.id);
+    assert_eq!(gone.state, "failed");
+    assert_eq!(gone.cost_micros, 0);
+    assert_eq!(
+        gone.reason.as_deref(),
+        Some("its session was removed before its turn finished")
+    );
+    // Nor is the other session's reply read into its notebook.
+    let reader = replies(&["<routine-memory>someone else's</routine-memory>"]);
+    memory::read_finished(&f.store, &reader, OCT8 + 120).await;
+    assert_eq!(reader.reads.load(Ordering::SeqCst), 0);
 }

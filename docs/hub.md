@@ -1642,8 +1642,15 @@ writes nothing. With `--force` it says what it actually revoked, counted
 afterwards, so you can see both halves happened:
 
 ```
-disabled ada (person 3): 2 device(s) revoked, 1 grant(s) to them revoked
+disabled ada (person 3): 2 device(s) revoked, 1 grant(s) to them revoked, 1 routine(s) paused, 0 mission grant(s) revoked
 ```
+
+Their automation stops in the same transaction: every routine of theirs that
+is on is turned off with "paused: its owner was disabled", and every live grant
+on a mission they own is revoked, so the mission loop starts no run and pauses
+the mission ("its owner was disabled"). Nothing is deleted, and re-enabling
+the person turns none of it back on: each routine and mission is resumed on
+purpose.
 
 What it does **not** do, plainly: it does not re-attribute their sessions —
 those rows stay theirs and stay private, readable by nobody, and no command
@@ -3571,6 +3578,16 @@ instead of reconciling independently.
 Run `provision_hosts` from only one of the two — the hub or the desktop —
 for a given host. Running it from both leaves the host's hook block pointed
 at whichever one provisioned it last.
+
+Neither side takes a host over from the other by itself. When a host's MCP
+entry or hook block points at a base that is neither this process's own nor
+loopback (a hub's public URL, seen from a desktop), autofix raises
+`host_mcp_entry.foreign` (or `host.hooks_silent` worded as a take-over) as a
+fix that waits for a person, and the five-minute stale-host refresh leaves
+the host alone with a `provision_warning` that names the other fleet. An
+explicit `provision_hosts` still writes. The rule reads the URL only:
+loopback is always treated as this fleet's, so a hub still repairs a host a
+desktop pointed at its own tunnel.
 
 ## Point a desktop at the hub
 

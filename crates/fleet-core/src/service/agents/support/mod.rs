@@ -461,19 +461,8 @@ impl SupportHost for LiveSupportHost {
     }
 
     async fn checkout(&self, host: &str, project_id: i64) -> Result<String, IpcError> {
-        // The run is `claude -p` on the host's own login: never on an
-        // account the project forbids (`vehicle::forbidden_login`). Asked
-        // here, before the checkout, so a refused run has touched nothing.
-        let forbidden = {
-            let s = lock(&self.store)?;
-            vehicle::forbidden_login(&s, Some(project_id), host, crate::store::now_unix())?
-        };
-        if let Some(why) = forbidden {
-            return Err(IpcError::new(
-                crate::ipc_error::codes::E_ACCOUNT_FORBIDDEN,
-                why,
-            ));
-        }
+        // The account rules were asked before this (`vehicle::login_hold`
+        // in the runner), so a held run never reaches the checkout.
         crate::service::sessions::project_checkout_on(&self.store, &self.ssh, host, project_id)
             .await
     }
@@ -772,6 +761,11 @@ impl SupportRunner {
                 Err(e) => return failed(ErrorKind::Transient, e),
             },
         };
+        // The run bills the rule host's own login: it waits while that
+        // login may not take the work (`vehicle::login_hold`).
+        if let Some(hold) = vehicle::login_hold_in(&self.store, rule.project_id, host) {
+            return hold;
+        }
         // The workspace: the rule's project at its branch, else the home.
         let (cwd, root) = match rule.project_id {
             None => (home.clone(), None),

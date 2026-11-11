@@ -1054,20 +1054,23 @@ pub async fn handle_callback(
             mode = %mode,
             "[oidc] signed in; minted a pairing code"
         );
-        state.pairings.mint(MintRequest {
-            name: &name,
-            mode: &mode,
-            trusted: false,
-            org_id: None,
-            person: Some(&person.name),
-            ttl: CODE_TTL,
-            minter: Minter {
-                person: Some(person.id),
-                device: None,
-                via: "oidc",
-                fenced_org: None,
+        state.pairings.mint_for(
+            MintRequest {
+                name: &name,
+                mode: &mode,
+                trusted: false,
+                org_id: None,
+                person: Some(&person.name),
+                ttl: CODE_TTL,
+                minter: Minter {
+                    person: Some(person.id),
+                    device: None,
+                    via: "oidc",
+                    fenced_org: None,
+                },
             },
-        })
+            Some(person.id),
+        )
     };
     let pair_url = super::pairing::pair_url(&state.base_url, &minted.code);
     let app_link = format!("claudefleet:{pair_url}");

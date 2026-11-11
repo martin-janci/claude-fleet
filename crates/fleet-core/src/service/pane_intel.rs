@@ -253,11 +253,30 @@ pub fn persists_label(label: &str) -> bool {
     if l.contains("auto mode") || l.contains("bypass permissions") || l.contains("all future") {
         return l.starts_with("yes") || l.starts_with("use ");
     }
+    // Another agent's "… (Persist to settings.json)" says so outright.
+    if l.contains("persist to") {
+        return true;
+    }
+    // A trailing key hint ("… during this session (shift+tab)") is not the
+    // label's end.
+    let l = match l.rfind(" (") {
+        Some(i) if l.ends_with(')') => {
+            l[..i].trim_end_matches(|c: char| c.is_whitespace() || c == '.')
+        }
+        _ => l,
+    };
     let asks = l.contains("don't ask again") || l.contains("dont ask again");
-    let always = l.contains("always allow");
-    let session_only = ["this session", "the session", "during this session"]
-        .iter()
-        .any(|end| l.ends_with(end));
+    // Fail closed: "always allow" and a bare "allow all" count unless the
+    // label ends with this session or conversation.
+    let always = l.contains("always allow") || l.contains("allow all");
+    let session_only = [
+        "this session",
+        "the session",
+        "during this session",
+        "this conversation",
+    ]
+    .iter()
+    .any(|end| l.ends_with(end));
     (asks || always) && !session_only
 }
 
@@ -2637,6 +2656,13 @@ Enter to select
             "Yes, and bypass permissions",
             "Yes, and always allow access to src/ from this project",
             "Use this and all future MCP servers in this project",
+            // Fail closed on other agents' wordings (sec-access-4 d).
+            "Yes, and always allow for commands that start with 'python cli.py' (Persist to settings.json)",
+            "Yes, always allow git push",
+            "Yes, allow all edits",
+            // The session phrase is read at the end only, so one in the
+            // middle does not excuse the rule.
+            "Yes, and always allow in this conversation for commands that start with 'python cli.py'",
         ] {
             assert!(persists_label(yes), "{yes}");
         }
@@ -2645,6 +2671,8 @@ Enter to select
             "No",
             "Yes, and don't ask again this session",
             "Yes, allow all edits during this session",
+            "Yes, allow all edits during this session (shift+tab)",
+            "Yes, and always allow for the rest of this conversation",
             "No, and tell Claude what to do differently",
         ] {
             assert!(!persists_label(no), "{no}");

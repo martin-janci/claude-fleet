@@ -504,17 +504,18 @@ pub fn ask_for_review(
     } else {
         "drive"
     };
-    match s.grant_session(session_id, GrantRecipient::Person(to), level, asker) {
-        Ok(_) => {}
-        Err(e) if e.code == codes::E_EXISTS => {}
+    let level = match s.grant_session(session_id, GrantRecipient::Person(to), level, asker) {
+        Ok(_) => level.to_string(),
+        // A share already in place is kept, so the ask records the level
+        // the person really holds (their own or an org's, the wider), not
+        // the one this ask would have granted: a kept watch share must not
+        // read as "can send notes".
+        Err(e) if e.code == codes::E_EXISTS => s
+            .grants_for_person(to)?
+            .remove(&session_id)
+            .unwrap_or_else(|| level.to_string()),
         Err(e) => return Err(e),
-    }
-    // The level the ask states is the grant in force — a share already in
-    // place at watch stays watch, and the Inbox must not promise notes.
-    let level = s
-        .grants_for_person(to)?
-        .remove(&session_id)
-        .unwrap_or_else(|| level.to_string());
+    };
     s.ask_for_review(session_id, asker, to, &level, note, now)
 }
 
@@ -619,6 +620,49 @@ pub fn review_request(
 
 fn to_value<T: serde::Serialize>(v: &T) -> Result<serde_json::Value, IpcError> {
     serde_json::to_value(v).map_err(|e| IpcError::new(codes::E_SERIALIZE, e.to_string()))
+}
+
+#[cfg(test)]
+mod ask_for_review_tests {
+    use super::*;
+
+    #[test]
+    fn an_ask_on_a_kept_watch_share_records_watch_and_the_list_follows_the_live_share() {
+        let s = Store::open_in_memory().unwrap();
+        let ada = s.create_person("ada", None).unwrap().id;
+        let bo = s.create_person("bo", None).unwrap().id;
+        s.upsert_host("web-1").unwrap();
+        let sid = s
+            .upsert_session("api-7", "web-1", None, None, 1, 1, "running", None)
+            .unwrap();
+        assert!(s.claim_if_unclaimed(sid, Some(ada)).unwrap());
+        s.grant_session(sid, GrantRecipient::Person(bo), "watch", ada)
+            .unwrap();
+        let ask = ask_for_review(&s, sid, "bo", None, Some(ada), 10).unwrap();
+        assert_eq!(
+            ask.level, "watch",
+            "the kept share, not the drive an ask grants"
+        );
+        let listed = s.review_requests_for(bo, false, 20).unwrap();
+        assert_eq!(listed[0].level, "watch");
+        // A fresh ask to someone with no share grants drive and says so.
+        let cy = s.create_person("cy", None).unwrap().id;
+        let fresh = ask_for_review(&s, sid, "cy", None, Some(ada), 10).unwrap();
+        assert_eq!(fresh.level, "drive");
+        assert_eq!(
+            s.grants_for_person(cy)
+                .unwrap()
+                .get(&sid)
+                .map(String::as_str),
+            Some("drive")
+        );
+        // The share is narrowed afterwards: cy's open ask follows it.
+        s.narrow_session_grant(sid, cy, ada).unwrap();
+        assert_eq!(
+            s.review_requests_for(cy, false, 20).unwrap()[0].level,
+            "watch"
+        );
+    }
 }
 
 #[cfg(test)]

@@ -666,10 +666,7 @@ fn pending(
         let Some(r) = s.get_routine(run.routine_id)? else {
             continue;
         };
-        let row = match run.session_id {
-            Some(id) => s.get_session_by_id(id)?,
-            None => None,
-        };
+        let row = super::run_session(s, &run)?;
         out.push((r, run, row));
     }
     Ok(out)

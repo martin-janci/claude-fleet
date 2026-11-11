@@ -85,7 +85,7 @@ if [[ "$run_rust" == 1 ]]; then
   if [[ "$(uname -s)" == Linux ]] && ! pkg-config --exists gtk+-3.0 2>/dev/null; then
     echo "pre-commit: no Tauri system libs (gtk+-3.0); linting the headless crates only"
     cargo fmt --all --check
-    cargo clippy -p fleet-core -p fleet-hub -p fleet-proto -p fleet-agent -p fleet-update --all-targets -- -D warnings
+    cargo clippy --workspace --exclude claude-fleet --all-targets -- -D warnings
   else
     echo "pre-commit: rust files staged -> cargo fmt --check, cargo clippy"
     cargo fmt --all --check

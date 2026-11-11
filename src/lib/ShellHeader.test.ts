@@ -84,4 +84,28 @@ describe('ShellHeader (3.17)', () => {
     await waitFor(() => expect(screen.getByTestId('header-automation').textContent).toContain('active'));
     await expectAccessible(container);
   });
+
+  it('a first settings read that fails is tried again, so the brake does not stay on the defaults (probe3 c-2)', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      let reads = 0;
+      const base = invoke.getMockImplementation() as (cmd: string, ...rest: unknown[]) => Promise<unknown>;
+      invoke.mockImplementation(async (cmd: string, ...rest: unknown[]) => {
+        if (cmd === 'get_fleet_settings') {
+          reads += 1;
+          if (reads === 1) throw { code: 'E_HUB_UNREACHABLE', message: 'not yet' };
+          return { 'automation.paused': 'true' };
+        }
+        return base(cmd, ...rest);
+      });
+      render(ShellHeader, { mac: true });
+      await vi.waitFor(() => expect(reads).toBe(1));
+      expect(get(fleetSettings)['automation.paused']).toBe('false');
+      await vi.advanceTimersByTimeAsync(15_000);
+      await vi.waitFor(() => expect(get(fleetSettings)['automation.paused']).toBe('true'));
+      expect(reads).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

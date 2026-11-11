@@ -262,6 +262,15 @@ impl Store {
         let id = self.in_one_tx(|conn| {
             let row = self.live_client_token(name)?;
             if trusted {
+                if row.name == crate::service::operator::OPERATOR_CLIENT_NAME {
+                    return Err(crate::ipc_error::IpcError::new(
+                        codes::E_VALIDATE,
+                        format!(
+                            "'{name}' is the Control agent's token; it is never trusted \
+                             (trust the owner's own devices instead)"
+                        ),
+                    ));
+                }
                 if let Some(kind) = super::machine_token_kind(&row.mode) {
                     return Err(crate::ipc_error::IpcError::new(
                         codes::E_VALIDATE,
@@ -462,9 +471,11 @@ impl Store {
     /// once and reused by [`Self::client_is_assets_admin`],
     /// [`Self::client_may_admin_catalog`] and [`Self::catalog_grantees`] so
     /// the three can never drift apart. Assumes the query aliases
-    /// `client_tokens` as `t`.
-    const LIVE_GRANT_ELIGIBLE: &'static str =
-        "t.revoked_at IS NULL AND t.mode = 'full' AND t.org_id IS NULL";
+    /// `client_tokens` as `t`. The operator's token (`ux-agent`,
+    /// `OPERATOR_CLIENT_NAME`) is never eligible: it is bound to the owner,
+    /// but it is an agent and does not inherit the owner's catalog role.
+    pub(crate) const LIVE_GRANT_ELIGIBLE: &'static str =
+        "t.revoked_at IS NULL AND t.mode = 'full' AND t.org_id IS NULL AND t.name <> 'ux-agent'";
 
     /// The live client `name`, checked as eligible to hold a catalog grant
     /// when `on` (Rulings R3): a peer hub link, a `readonly` client and a
@@ -498,6 +509,9 @@ impl Store {
                     format!("'{name}' {why}; it cannot manage the asset catalog"),
                 ))
             };
+            if row.name == crate::service::operator::OPERATOR_CLIENT_NAME {
+                return refuse("is the Control agent's token");
+            }
             match row.mode.as_str() {
                 "full" => {}
                 "peer" => return refuse("is a peer hub link"),
@@ -1001,6 +1015,41 @@ mod tests {
             crate::mcp::auth::apply_realm(&mut c, &realm_sets_of(&s));
             assert_eq!(c.client.unwrap().trusted, trusted, "{tok}");
         }
+    }
+
+    /// sec-access-1: the operator's token (`ux-agent`) is bound to the owner
+    /// (#932), but it never carries the owner's trust or catalog role, as
+    /// `authorize` resolves it, as a listing shows it, and as a grant tries.
+    #[test]
+    fn the_operators_token_never_inherits_the_owners_trust() {
+        use crate::service::operator::OPERATOR_CLIENT_NAME;
+        let s = Store::open_in_memory().unwrap();
+        let owner = s.personal_owner_id().unwrap().expect("an owner");
+        pair_test_device(&s, "desktop", "full", Some(owner));
+        let op = pair_test_device(&s, OPERATOR_CLIENT_NAME, "full", Some(owner));
+        s.set_client_trust("desktop", true).unwrap();
+        s.set_client_assets_admin("desktop", true).unwrap();
+        let realm = s.realm_sets().unwrap();
+        assert!(realm.1.contains(&owner), "the owner is trusted");
+
+        let c = caller_for(&s, &op);
+        assert!(c.is_operator());
+        assert!(c.is_fleet_admin, "it still reaches the owner's sessions");
+        assert!(!c.client.as_ref().unwrap().trusted);
+        assert!(!c.is_trusted_client());
+
+        let row = s.live_client_token(OPERATOR_CLIENT_NAME).unwrap();
+        assert!(!row.trusted_by(&realm.1), "a listing shows it untrusted");
+        assert!(
+            !s.client_is_assets_admin(row.id).unwrap(),
+            "the owner's catalog role is not its"
+        );
+        let e = s.set_client_trust(OPERATOR_CLIENT_NAME, true).unwrap_err();
+        assert_eq!(e.code, codes::E_VALIDATE, "{}", e.message);
+        let e = s
+            .set_client_assets_admin(OPERATOR_CLIENT_NAME, true)
+            .unwrap_err();
+        assert_eq!(e.code, codes::E_VALIDATE, "{}", e.message);
     }
 
     /// Trust held through a group is withdrawn at the group: untrusting a

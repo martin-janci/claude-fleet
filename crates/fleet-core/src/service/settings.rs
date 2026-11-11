@@ -1482,7 +1482,7 @@ pub const SPECS: &[Spec] = &[
         "true",
         Kind::Bool,
         "Collect token usage",
-        "Sum each session's token usage from its Claude transcript and show an estimated cost.",
+        "Sum each session's token usage from its Claude transcript and show an estimated cost. The daily spend limits and the mission, routine and organisation budgets count this spend: while it is off, they do not move.",
     ),
     Spec::new(
         SEARCH_INDEX_TRANSCRIPTS,
@@ -1507,7 +1507,7 @@ pub const SPECS: &[Spec] = &[
         "300",
         Kind::Secs,
         "Usage interval",
-        "Seconds between usage passes, one batched read per host.",
+        "Seconds between usage passes, one batched read per host. Off, spend limits and budgets do not move.",
     )
     .unit(Unit::Seconds)
     .zero("off")

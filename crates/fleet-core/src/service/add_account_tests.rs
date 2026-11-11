@@ -223,6 +223,41 @@ async fn an_api_key_goes_to_the_host_on_stdin_and_becomes_an_account() {
     assert!(dump.iter().all(|v| !v.contains(KEY)));
 }
 
+/// Review R5: the same key is the same account wherever it is added, so
+/// adding it again with the limit field left empty keeps the limit its
+/// owner set; only an explicit 0 removes it.
+#[tokio::test]
+async fn adding_a_key_again_without_a_limit_keeps_its_accounts_limit() {
+    let store = store_with_host();
+    let ssh = Arc::new(FakeSsh::new());
+    ssh.on(
+        Match::script_contains(".fleet-api-key"),
+        Reply::ok("__fleet_ok__\n"),
+    );
+    let uuid = api_key_account_uuid(KEY);
+    let mut a = args("api_key");
+    a.api_key = Some(KEY.into());
+    a.daily_limit_usd = Some(50.0);
+    run(&a, &store, ssh.as_ref(), &tmux(&ssh), &anthropic_ok(), NOW)
+        .await
+        .unwrap();
+    a.daily_limit_usd = None;
+    let out = run(&a, &store, ssh.as_ref(), &tmux(&ssh), &anthropic_ok(), NOW)
+        .await
+        .unwrap();
+    assert_eq!(
+        out["daily_limit_usd"], 50.0,
+        "the reply says the limit kept"
+    );
+    assert_eq!(daily_limit_usd(&store.lock().unwrap(), &uuid), Some(50.0));
+    a.daily_limit_usd = Some(0.0);
+    let out = run(&a, &store, ssh.as_ref(), &tmux(&ssh), &anthropic_ok(), NOW)
+        .await
+        .unwrap();
+    assert!(out.get("daily_limit_usd").is_none(), "{out}");
+    assert_eq!(daily_limit_usd(&store.lock().unwrap(), &uuid), None);
+}
+
 #[tokio::test]
 async fn a_key_never_lands_on_a_login_profile() {
     let store = store_with_host();

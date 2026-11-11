@@ -145,7 +145,8 @@ pub struct AddAccountArgs {
     /// Nickname.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nickname: Option<String>,
-    /// USD a day; 0 clears.
+    /// USD a day; 0 clears. Left out, `api_key` keeps the account's limit
+    /// (the same key on another host is the same account).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub daily_limit_usd: Option<f64>,
     /// Sign an existing login in again; profile "" is the host's own.
@@ -1147,7 +1148,13 @@ async fn add_api_key(
     });
     profiles.sort_by(|a, b| a.name.cmp(&b.name));
     s.set_host_profiles(&args.host_alias, &profiles)?;
-    set_daily_limit(&s, &uuid, limit)?;
+    // Only a limit the request carries is written (0 clears it): the same
+    // key added on another host is the same account, and leaving the field
+    // empty there must not erase the limit its owner set.
+    if args.daily_limit_usd.is_some() {
+        set_daily_limit(&s, &uuid, limit)?;
+    }
+    let limit = daily_limit_usd(&s, &uuid);
     Ok(ApiKeyAdded {
         host_alias: args.host_alias.clone(),
         profile: args.profile.clone(),

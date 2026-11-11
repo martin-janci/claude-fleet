@@ -83,6 +83,11 @@ expect_line "a .ts mirror → vitest related" "verify quick: pnpm exec vitest re
 expect_line "a guide a Rust test reads" "verify quick: cargo fleet-test -- service::settings" -- \
   docs/updates.md
 
+expect_line "a design file only vitest reads → the tests that read it" "verify quick: pnpm exec vitest run src/lib/palette.test.ts" -- \
+  docs/design/palette-golden.json
+expect "the design manual → the tests that read it, and full runs the frontend" full "verify full: scripts/ci-local.sh --frontend-only" -- \
+  docs/ux/2026-10-08-orbit-fleet-redesign/design-system/keyboard.md
+
 expect "a package file → the whole frontend suite" quick "verify quick: pnpm install --frozen-lockfile
 verify quick: pnpm run check
 verify quick: pnpm run test" -- \
@@ -93,8 +98,8 @@ verify quick: not covered here (run 'scripts/verify.sh full'): .github/workflows
   .github/workflows/ci.yml scripts/ag-test.sh
 
 HEADLESS=1 expect "headless Linux → the crates that build without Tauri" quick "verify quick: cargo fmt --all --check
-verify quick: cargo clippy -p fleet-core -p fleet-hub -p fleet-proto -p fleet-agent -p fleet-update --all-targets -- -D warnings
-verify quick: cargo test -p fleet-core -p fleet-hub -p fleet-proto -p fleet-agent -p fleet-update --lib --bins -- service::health" -- \
+verify quick: cargo clippy --workspace --exclude claude-fleet --all-targets -- -D warnings
+verify quick: cargo test --workspace --exclude claude-fleet --lib --bins -- service::health" -- \
   crates/fleet-core/src/service/health.rs
 
 expect "full, Rust only" full "verify full: scripts/ci-local.sh --rust-only" -- \

@@ -1426,7 +1426,7 @@
         "level": "none"
       },
       "default": "true",
-      "help": "Sum each session's token usage from its Claude transcript and show an estimated cost.",
+      "help": "Sum each session's token usage from its Claude transcript and show an estimated cost. The daily spend limits and the mission, routine and organisation budgets count this spend: while it is off, they do not move.",
       "key": "usage.enabled",
       "kind": {
         "type": "bool"
@@ -1490,7 +1490,7 @@
         "level": "none"
       },
       "default": "300",
-      "help": "Seconds between usage passes, one batched read per host.",
+      "help": "Seconds between usage passes, one batched read per host. Off, spend limits and budgets do not move.",
       "key": "usage.interval_secs",
       "kind": {
         "max": 315360000,

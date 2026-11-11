@@ -32,6 +32,7 @@ pub(super) fn describe(store: &Store, tool: &str, args: &Value) -> Option<Confir
         "new_session" | "new_shell_session" => d.new_session(tool),
         "send_prompt" | "queue_prompt" | "run_prompt" => d.prompt(tool),
         "dispatch_task" => d.dispatch_task(),
+        "send_message" => d.message(),
         "safe_kill_session"
         | "kill_session"
         | "restart_session"
@@ -313,6 +314,29 @@ impl<'a> Describer<'a> {
             _ => format!("Send a prompt to {name}"),
         };
         (title, self.body("Prompt", "prompt"))
+    }
+
+    /// `send_message { deliver | wake }`: the only forms the operator is
+    /// asked about, because they type into the recipient's pane.
+    fn message(&mut self) -> (String, Option<ConfirmBody>) {
+        let name = match self.str("to_addr") {
+            Some(addr) => {
+                self.fact("Address", addr.to_string());
+                addr.to_string()
+            }
+            None => self
+                .session_facts("to_session_id", "Session")
+                .unwrap_or_else(|| "a session".into()),
+        };
+        if self.flag("deliver") == Some(true) && self.flag("submit") == Some(false) {
+            self.fact("Enter", "typed but not sent");
+        }
+        let title = if self.flag("deliver") == Some(true) {
+            format!("Type a message into {name}")
+        } else {
+            format!("Wake {name} with a message")
+        };
+        (title, self.body("Message", "body"))
     }
 
     fn dispatch_task(&mut self) -> (String, Option<ConfirmBody>) {

@@ -82,7 +82,8 @@
   // claim may mutate `loading`/`diff`/`file`/`error`. A fetch that was
   // superseded (newer selection, view flip, or session switch) returns
   // silently — so a slow stale fetch can never clear a fresh load's spinner
-  // or overwrite its result.
+  // or overwrite its result. A fresh load that hits the cache clears the
+  // spinner itself, since the stale fetch it superseded never will.
   let loadSeq = 0;
 
   const canDiff = $derived(hasDiff(status));
@@ -122,6 +123,10 @@
     const v = view;
     reloadKey; // tracked — a Refresh invalidates caches via cacheKey()
     if (!p) {
+      // Nothing picked: a fetch still in flight is superseded, and its
+      // spinner goes with it.
+      loadSeq++;
+      loading = false;
       diff = null;
       file = null;
       error = null;
@@ -140,6 +145,9 @@
     if (v === 'diff') {
       const cached = diffCache.get(k);
       if (cached) {
+        // This load holds the newest token, so it owns the spinner: a
+        // superseded fetch still in flight returns without clearing it.
+        loading = false;
         diff = cached;
         return;
       }
@@ -161,6 +169,7 @@
     } else {
       const cached = fileCache.get(k);
       if (cached) {
+        loading = false;
         file = cached;
         return;
       }

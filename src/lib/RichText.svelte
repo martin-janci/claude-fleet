@@ -4,7 +4,10 @@
   // as cards. A card
   // that acts only ever fills the session's composer; nothing is sent from
   // here. `sessionId` null (an earlier conversation, a read-only row) keeps
-  // every card but turns its actions off.
+  // every card but turns its actions off. `fleet` names the extra fleet a
+  // conversation belongs to: the cards that read and decide the hub's own
+  // rows (a setting proposal, an autofix finding) then stay read-only rather
+  // than look the id up on this window's primary hub.
   //
   // `result` is the task result of the work this session is on (design
   // 2026-10-13, D6). The report it was read from, matched on its done
@@ -23,6 +26,7 @@
   let {
     source,
     sessionId = null,
+    fleet = null,
     answered = false,
     result = null,
     resultTitle = '',
@@ -31,6 +35,7 @@
   }: {
     source: string;
     sessionId?: number | null;
+    fleet?: string | null;
     answered?: boolean;
     result?: TaskResultView | null;
     resultTitle?: string;
@@ -51,7 +56,7 @@
   {:else if s.t === 'handover'}
     <HandoverCard handover={s.handover} raw={s.raw} nonce={s.nonce} {sessionId} />
   {:else if s.t === 'ui'}
-    <UiBlockCard block={s.block} raw={s.raw} {sessionId} {answered} />
+    <UiBlockCard block={s.block} raw={s.raw} {sessionId} {fleet} {answered} />
   {:else}
     <Markdown source={fenced(s.lang, s.raw)} />
     <p class="invalid" data-testid="rich-invalid">

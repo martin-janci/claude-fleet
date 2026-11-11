@@ -14,15 +14,27 @@ import { expectAccessible } from './a11y_check';
 
 const inv = invoke as unknown as ReturnType<typeof vi.fn>;
 let budget: unknown = null;
+/** What the hub holds when it differs from the window's copy. */
+let hub: Record<string, string> | null = null;
+let pauseRefused = false;
 
 beforeEach(() => {
   budget = null;
+  hub = null;
+  pauseRefused = false;
   settingsSection.set(null);
   fleetSettings.set({ ...SETTING_DEFAULTS, 'orchestrator.max_level': '2', 'control.auto_continue': 'true', 'control.auto_continue_minutes': '10', 'control.react_to_events': 'true' });
   inv.mockReset();
   inv.mockImplementation(async (cmd: string, a?: { key?: string; value?: string; args?: { action?: string } }) => {
     if (cmd === 'routines' && a?.args?.action === 'budget') return budget;
-    if (cmd === 'set_fleet_setting') return { ...get(fleetSettings), [a!.key!]: a!.value! };
+    if (cmd === 'get_fleet_settings') return hub ?? get(fleetSettings);
+    if (cmd === 'set_fleet_setting') {
+      if (pauseRefused && a!.key === 'automation.paused') throw { code: 'E_FORBIDDEN', message: 'this device may read the settings' };
+      const base = hub ?? get(fleetSettings);
+      const next = { ...base, [a!.key!]: a!.value! };
+      if (hub) hub = next;
+      return next;
+    }
     return null;
   });
 });
@@ -87,5 +99,30 @@ describe('AutonomyChip', () => {
     await fireEvent.keyDown(document.activeElement!, { key: 'Escape' });
     expect(screen.queryByTestId('autonomy-popover')).toBeNull();
     expect(document.activeElement).toBe(chip);
+  });
+
+  it('a pick re-reads the hub: the phone moved it to Autopilot, so Ask first writes every key that differs there (probe3 c-1)', async () => {
+    fleetSettings.set({ ...SETTING_DEFAULTS, 'orchestrator.max_level': '1', 'control.auto_continue': 'false', 'control.react_to_events': 'true' });
+    hub = { ...SETTING_DEFAULTS, 'orchestrator.max_level': '3', 'control.auto_continue': 'true', 'control.auto_continue_minutes': '2', 'control.react_to_events': 'true' };
+    render(AutonomyChip);
+    expect(screen.getByTestId('autonomy-chip').textContent).toContain('Ask first');
+    await fireEvent.click(screen.getByTestId('autonomy-chip'));
+    await fireEvent.click(screen.getByTestId('autonomy-option-ask'));
+    await waitFor(() => expect(screen.queryByTestId('autonomy-popover')).toBeNull());
+    const writes = inv.mock.calls.filter((c) => c[0] === 'set_fleet_setting').map((c) => [c[1].key, c[1].value]);
+    expect(writes).toEqual([
+      ['orchestrator.max_level', '1'],
+      ['control.auto_continue', 'false'],
+    ]);
+    expect(hub['orchestrator.max_level']).toBe('1');
+  });
+
+  it("a refused Pause all says so on the popover's error line (probe3 c-3)", async () => {
+    pauseRefused = true;
+    render(AutonomyChip);
+    await fireEvent.click(screen.getByTestId('autonomy-chip'));
+    await fireEvent.click(screen.getByTestId('autonomy-pause'));
+    expect((await screen.findByRole('alert')).textContent).toContain("Couldn't pause automation");
+    expect(screen.getByTestId('autonomy-pause').textContent).toBe('Pause all');
   });
 });

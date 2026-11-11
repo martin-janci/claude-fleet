@@ -41,6 +41,7 @@
   import { requestAssetsView, requestHostsView } from './app_views';
   import { catalog } from './assets';
   import { selectedSession, selectSessionExplicitly } from './selection';
+  import { selectedFleetSession } from './fleets';
   import { requestNewSession } from './new_session_request';
   import { detectMac } from './terminal_keys';
   import {
@@ -301,6 +302,10 @@
     descriptorsAsked = true;
     if (untrack(() => $descriptors.size) === 0) void loadDescriptors();
   });
+  // "This session" is the one on screen: another fleet's session when one
+  // covers this window's own (its row carries `fleet`, so the commands that
+  // route by fleet reach its hub), never the primary row hidden under it.
+  const paletteSelected = $derived($selectedFleetSession ? $selectedFleetSession.row : $selectedSession);
   // Work graph M5: the sidebar's org scope narrows ⌘K too (one
   // `rowMatches` for both, so they never disagree).
   const trackerOrg = $derived(new Map($trackers.map((t) => [t.id, t.org_id ?? null])));
@@ -310,7 +315,7 @@
         ...buildEntries($sessions, $projects, $hosts),
         ...assetEntries($catalog),
         ...commandEntries(),
-        ...commandRows(paletteCommands({ selected: $selectedSession, sessionView: $sessionView }), isMac),
+        ...commandRows(paletteCommands({ selected: paletteSelected, sessionView: $sessionView }), isMac),
         ...(settingChange ? [settingChange] : []),
         ...ticketRows,
         ...planningEntries($knownWorkFacets),
@@ -854,7 +859,7 @@
       void tick().then(() => requestAssetsView({ command }));
     } else if (e.kind === 'command' && e.action) {
       const id = e.action;
-      const ctx = { selected: $selectedSession, sessionView: $sessionView };
+      const ctx = { selected: paletteSelected, sessionView: $sessionView };
       hide();
       // After the switcher has unmounted, so a view it opens gets the focus.
       void tick().then(() => runCommand(id, ctx));

@@ -386,6 +386,12 @@ pub struct StartWorkArgs {
     /// The brief as a person edited it in the preview.
     #[serde(default)]
     pub brief: Option<String>,
+    /// Plan first: the paragraph the start puts after its brief.
+    #[serde(default)]
+    pub plan_first: Option<String>,
+    /// With `plan_first`: `brief` is the person's edit, not the preview.
+    #[serde(default)]
+    pub brief_edited: Option<bool>,
     /// The preview only: have a model draft the brief on the planned host
     /// (redesign 6.10). A start never drafts; it sends `brief`.
     #[serde(default)]
@@ -584,6 +590,8 @@ pub(crate) mod routed {
             host_alias: a.host_alias.clone(),
             with_brief: a.with_brief.then_some(true),
             brief: a.brief.clone(),
+            plan_first: a.plan_first.clone(),
+            brief_edited: a.brief_edited,
             name: a.name.clone(),
             worktree: a.worktree.clone(),
             force_cross_org: a.force_cross_org.then_some(true),
@@ -618,6 +626,8 @@ pub(crate) mod routed {
             host_alias: args.host_alias.clone(),
             with_brief: args.with_brief.then_some(true),
             brief: args.brief.clone(),
+            plan_first: args.plan_first.clone(),
+            brief_edited: args.brief_edited,
             name: args.name.clone(),
             worktree: args.worktree.clone(),
             force_cross_org: args.force_cross_org.then_some(true),

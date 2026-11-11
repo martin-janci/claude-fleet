@@ -1555,6 +1555,9 @@ describe('WorkTaskDetail', () => {
       await fireEvent.change(pick);
       await flush();
       expect(screen.getByTestId('work-task-status-error').textContent).toContain('not yours');
+      // The pick goes back to the status the task still has.
+      expect(pick.value).not.toBe('done');
+      expect(pick.value).toBe(screen.getByTestId('work-task-status-pick').className.match(/status-pick--(\w+)/)![1]);
     });
 
     it('a ticket has no inline status pick', async () => {

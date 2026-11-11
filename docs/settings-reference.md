@@ -166,8 +166,8 @@ Scope says where a value lives: *fleet* is one value for the whole fleet, kept o
 
 | Setting | Default | Range | Scope | What it does |
 |---|---|---|---|---|
-| `usage.enabled` | `true` | on / off | fleet | Sum each session's token usage from its Claude transcript and show an estimated cost. |
-| `usage.interval_secs` | `300` | seconds, `0` = off | fleet | Seconds between usage passes, one batched read per host. |
+| `usage.enabled` | `true` | on / off | fleet | Sum each session's token usage from its Claude transcript and show an estimated cost. The daily spend limits and the mission, routine and organisation budgets count this spend: while it is off, they do not move. |
+| `usage.interval_secs` | `300` | seconds, `0` = off | fleet | Seconds between usage passes, one batched read per host. Off, spend limits and budgets do not move. |
 | `usage.prices_json` | `{}` | JSON map: model → USD per million tokens | fleet | Per-model prices for the estimated cost, in USD per million tokens (input, output, cache_write, cache_read). {} uses the built-in prices only. |
 
 ## Search

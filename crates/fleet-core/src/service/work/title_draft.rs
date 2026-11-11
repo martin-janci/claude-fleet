@@ -197,7 +197,8 @@ pub async fn draft_title(
             org,
         )
     };
-    let script = super::brief_draft::draft_script(&model, &title_prompt(notes))
+    // No project yet: the host's own login, which no project forbids.
+    let script = super::brief_draft::draft_script(&model, &title_prompt(notes), None)
         .map_err(|e| IpcError::new(codes::E_INVALID, e))?;
     let out = crate::ssh::run_shell_bounded(exec, &host, &script, CONNECT, WALL_CLOCK).await?;
     let stdout = String::from_utf8_lossy(&out.stdout);

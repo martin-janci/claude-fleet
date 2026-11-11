@@ -25,7 +25,7 @@
 //!   host at a time.
 
 use super::planner::{self, PlannerOutput};
-use super::{changeable, host_sees_org, mission_id, planner_host, Deps};
+use super::{changeable, host_sees_org, mission_id, Deps};
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::service::claude_print;
 use crate::service::settings;
@@ -346,6 +346,8 @@ static BRIEFS: LazyLock<Mutex<HashMap<String, Brief>>> = LazyLock::new(Default::
 pub(super) struct Run<'a> {
     pub origin: &'static str,
     pub host: &'a str,
+    /// The login it runs under (`None` = the host's own).
+    pub profile: Option<&'a str>,
     pub model: &'a str,
     pub mission_id: Option<i64>,
     pub org_id: Option<i64>,
@@ -370,7 +372,8 @@ pub(super) async fn run_draft_costed(
     prompt: &str,
 ) -> Result<(String, bool, Option<i64>), IpcError> {
     let _slot = HostSlot::take(run.host)?;
-    let script = planner::planner_script(run.model, prompt);
+    let script = planner::planner_script_as(run.model, prompt, run.profile, None)
+        .map_err(|e| IpcError::new(codes::E_INVALID, e))?;
     let out = crate::ssh::run_shell_bounded(
         deps.ssh.as_ref(),
         run.host,
@@ -387,7 +390,7 @@ pub(super) async fn run_draft_costed(
             book(deps, run, usage.as_ref());
             cost = usage.as_ref().and_then(|u| u.cost_microusd);
             if claude_print::run_signed_out(usage.as_ref(), &answer, &out.stderr) {
-                return Err(claude_print::signed_out_error(run.host, None));
+                return Err(claude_print::signed_out_error(run.host, run.profile));
             }
             if usage.as_ref().is_some_and(|u| u.is_error) {
                 return Err(IpcError::new(
@@ -404,7 +407,7 @@ pub(super) async fn run_draft_costed(
             ))
         }
         PlannerOutput::Nothing if claude_print::run_signed_out(None, "", &out.stderr) => {
-            return Err(claude_print::signed_out_error(run.host, None))
+            return Err(claude_print::signed_out_error(run.host, run.profile))
         }
         PlannerOutput::Nothing => {
             return Err(IpcError::new(
@@ -488,7 +491,7 @@ pub async fn release_note(
     scope: &ViewScope,
 ) -> Result<Draft, IpcError> {
     let id = mission_id(args)?;
-    let (m, host, model, prompt, from) = {
+    let (m, login, model, prompt, from) = {
         let s = lock(&deps.store)?;
         // Scope first: another org's mission is E_NOTFOUND, whatever the
         // setting says.
@@ -503,14 +506,18 @@ pub async fn release_note(
                 ),
             ));
         }
-        let host = planner_host(&s, &m, None)?;
+        // The planner's chooser: never a login on an account the mission's
+        // projects forbid, nor a signed-out one (`limit::draft_login`).
+        let login = super::limit::draft_login(&s, &m, crate::store::now_unix())?;
         let model = settings::get_string_for(&s, settings::WORK_SUMMARY_MODEL, m.org_id);
         let (prompt, from) = release_note_prompt(&note_facts(&s, &m)?);
-        (m, host, model, prompt, from)
+        (m, login, model, prompt, from)
     };
+    let host = login.host;
     let run = Run {
         origin: crate::store::AUX_ORIGIN_RELEASE_NOTE,
         host: &host,
+        profile: login.profile.as_deref(),
         model: &model,
         mission_id: Some(m.id),
         org_id: m.org_id,
@@ -570,6 +577,7 @@ pub async fn brief(args: &WorkLinkArgs, deps: &Deps, scope: &ViewScope) -> Resul
     let run = Run {
         origin: crate::store::AUX_ORIGIN_MORNING_BRIEF,
         host: &host,
+        profile: None,
         model: &model,
         mission_id: None,
         org_id,
@@ -728,6 +736,7 @@ pub async fn dashboard_summary(
     let run = Run {
         origin: crate::store::AUX_ORIGIN_DASHBOARD_SUMMARY,
         host: &host,
+        profile: None,
         model: &model,
         mission_id: None,
         org_id,

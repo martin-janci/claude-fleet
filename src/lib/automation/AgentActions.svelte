@@ -14,6 +14,7 @@
   // them (`status.recent`, review w08-3).
   import InlineConfirm from '../forms/InlineConfirm.svelte';
   import { shortAge, exactTime } from '../session_status';
+  import { automationPaused } from '../automation';
   import { push, pushError } from '../toasts';
   import {
     actionBody,
@@ -57,7 +58,17 @@
     const r = await answerAgentAction(a.id, approve);
     setBusy([a.id], false);
     if (!r.ok) pushError(r.error, approve ? 'Approve failed' : 'Reject failed');
-    else push({ kind: 'success', message: approve ? 'Approved: it runs within a minute, and what it did shows here' : 'Rejected' });
+    else
+      push({
+        kind: 'success',
+        // Pause all holds approved actions until automation resumes
+        // (`service::agents::run_with`), so the note does not promise a minute.
+        message: !approve
+          ? 'Rejected'
+          : $automationPaused
+            ? 'Approved: it runs when automation resumes (Pause all is on)'
+            : 'Approved: it runs within a minute, and what it did shows here',
+      });
   }
 
   async function answerAll(g: ActionGroup, approve: boolean) {
@@ -69,7 +80,11 @@
     if (done > 0)
       push({
         kind: 'success',
-        message: approve ? `Approved ${done}: they run within a minute, and what they did shows here` : `Rejected ${done}`,
+        message: !approve
+          ? `Rejected ${done}`
+          : $automationPaused
+            ? `Approved ${done}: they run when automation resumes (Pause all is on)`
+            : `Approved ${done}: they run within a minute, and what they did shows here`,
       });
   }
 

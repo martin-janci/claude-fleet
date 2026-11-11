@@ -8972,7 +8972,43 @@ mod env_launch {
             .await
             .expect("spawn_review");
         assert_eq!(made.claude_profile.as_deref(), Some("work"), "{made:?}");
-        assert_eq!(h.panes().len(), 2);
+        let panes = h.panes();
+        assert_eq!(panes.len(), 2, "{panes:?}");
+        assert!(
+            panes[1].contains(".claude-profiles/\"'work'"),
+            "{}",
+            panes[1]
+        );
+    }
+
+    /// A review of a session on a profile runs under that profile, not
+    /// the host's own login.
+    #[tokio::test]
+    async fn a_review_runs_under_its_sources_login() {
+        let h = Harness::new();
+        let row = new_session(h.args("dev-review-login", None), &h.store, &h.ssh, &h.reg)
+            .await
+            .expect("create");
+        std::fs::write(h.dir.path().join("trust"), "").unwrap();
+        h.store
+            .lock()
+            .unwrap()
+            .set_session_profile(row.id, Some("max2"))
+            .unwrap();
+        let review = serde_json::from_value(serde_json::json!({
+            "source_session_id": row.id, "prompt": "review it"
+        }))
+        .unwrap();
+        let made = spawn_review(review, &h.store, &h.ssh)
+            .await
+            .expect("spawn_review");
+        assert_eq!(made.claude_profile.as_deref(), Some("max2"), "{made:?}");
+        let panes = h.panes();
+        assert!(
+            panes[1].contains(".claude-profiles/\"'max2'"),
+            "{}",
+            panes[1]
+        );
     }
 
     /// Accounts review finding 7: a lost Claude session is not brought back

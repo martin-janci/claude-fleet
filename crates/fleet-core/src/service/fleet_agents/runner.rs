@@ -2400,16 +2400,13 @@ impl FleetRunner {
         mcp: bindings::RunMcp,
     ) -> Result<PrintOutcome, RunOutcome> {
         let host = rule.host_alias.as_str();
-        // The run is `claude -p` on the host's own login: not on an account
-        // the rule's project forbids (`vehicle::forbidden_login`). Before
-        // the checkout, so a skipped job has touched nothing. A failed read
-        // skips too: never a run on an unchecked login.
-        match lock(&self.store).and_then(|s| {
-            vehicle::forbidden_login(&s, rule.project_id, host, crate::store::now_unix())
-        }) {
-            Ok(None) => {}
-            Ok(Some(reason)) => return Err(RunOutcome::Skipped { reason }),
-            Err(e) => return Err(failed(ErrorKind::Transient, e.message)),
+        // The run is `claude -p` on the rule host's own login: skipped on an
+        // account the rule's project forbids, and waits while that login
+        // may not take the work otherwise (`vehicle::login_hold`). Before
+        // the checkout, so a held job has touched nothing; a failed read
+        // holds too: never a run on an unchecked login.
+        if let Some(hold) = vehicle::login_hold_in(&self.store, rule.project_id, host) {
+            return Err(hold);
         }
         let base = self.host.base();
         let d = &inst.loaded().definition;

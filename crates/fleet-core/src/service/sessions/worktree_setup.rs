@@ -18,10 +18,10 @@ use tokio_util::sync::CancellationToken;
 
 /// How long the copy and the command may take together (`pnpm install` on
 /// a cold cache is minutes, not seconds). It must fit inside the start's
-/// own call: `new_session` and `work_link` are cut at 5 minutes
-/// (`Deadline::Lifecycle`), so the setup gets 4 and the worktree, tmux and
-/// the prompt the rest. Past it the start fails with "Setup failed", not a
-/// dropped call.
+/// own call: a start that may run it is cut at `Deadline::Start`
+/// (`START_CAP`: this plus room for the clone, the worktree add, tmux and
+/// the prompt). Past it the start fails with "Setup failed", not a dropped
+/// call.
 pub(crate) const SETUP_TIMEOUT: Duration = Duration::from_secs(240);
 
 /// The ssh connect budget: an unreachable host fails within it rather than
@@ -56,7 +56,9 @@ const NO_DIR: i32 = 96;
 /// match under `.worktrees/` or `.claude/worktrees/` is skipped, as is one
 /// with a `.`, `..` or empty component (`config/.*` matches `config/..`
 /// where bash has no `globskipdots`), and a matched `.claude` folder is
-/// copied without its `worktrees`.
+/// copied without its `worktrees`. Any other worktree `git worktree list`
+/// names is never copied from either: a match inside one is skipped, and so
+/// is a matched folder holding one.
 pub(crate) fn setup_script(base: &str, wt: &str, setup: &WorktreeSetup) -> String {
     let mut s = String::new();
     s.push_str(&format!("base={}\nwt={}\n", quote(base), quote(wt)));
@@ -66,6 +68,12 @@ pub(crate) fn setup_script(base: &str, wt: &str, setup: &WorktreeSetup) -> Strin
     if !setup.copy.is_empty() {
         s.push_str("(\nshopt -s nullglob dotglob\nshopt -s globstar 2>/dev/null\n");
         s.push_str("IFS=$'\\n'\n");
+        // Every worktree git lists (the checkout itself aside), wherever it
+        // sits: a match inside one, or a folder holding one, is not copied.
+        s.push_str(
+            "top=$(pwd -P)\n\
+             wts=$(git worktree list --porcelain 2>/dev/null | sed -n 's/^worktree //p')\n",
+        );
         let pats: Vec<String> = setup.copy.iter().map(|g| quote(g)).collect();
         s.push_str(&format!("for pat in {}; do\n", pats.join(" ")));
         s.push_str(&format!(
@@ -76,6 +84,13 @@ pub(crate) fn setup_script(base: &str, wt: &str, setup: &WorktreeSetup) -> Strin
              \x20   case \"/$f/\" in\n\
              \x20     */.git/*|/.worktrees/*|/.claude/worktrees/*|*/./*|*/../*|*//*) continue ;;\n\
              \x20   esac\n\
+             \x20   held=\n\
+             \x20   while IFS= read -r k; do\n\
+             \x20     case \"$k\" in ''|\"$top\") continue ;; esac\n\
+             \x20     case \"$top/$f/\" in \"$k\"/*) held=1; break ;; esac\n\
+             \x20     case \"$k/\" in \"$top\"/.claude/worktrees/*) ;; \"$top/$f\"/*) held=1; break ;; esac\n\
+             \x20   done <<< \"$wts\"\n\
+             \x20   if [ -n \"$held\" ]; then echo \"skip $f: another worktree\"; continue; fi\n\
              \x20   echo \"copy $f\"\n\
              \x20   if [ -d \"./$f\" ]; then\n\
              \x20     mkdir -p -- \"$wt/$f\" || exit {COPY_FAILED}\n\
@@ -307,6 +322,105 @@ mod tests {
             std::fs::read_to_string(wt.join("marker")).unwrap().trim(),
             "ran"
         );
+    }
+
+    /// New worktrees live inside the checkout: a `**` glob does not copy
+    /// the other worktrees' files, and a matched folder that holds them
+    /// (`.claude` around `.claude/worktrees/`) is copied around them, the
+    /// new worktree included, instead of into itself.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_copy_never_takes_from_a_worktree_inside_the_checkout() {
+        let d = tempfile::tempdir().unwrap();
+        let base = d.path().join("repo");
+        for dir in [
+            ".worktrees/a/app",
+            ".claude/worktrees/b",
+            ".claude/worktrees/new",
+            ".claude/commands",
+            "app",
+        ] {
+            std::fs::create_dir_all(base.join(dir)).unwrap();
+        }
+        std::fs::write(base.join(".env"), "TOP").unwrap();
+        std::fs::write(base.join("app/.env"), "APP").unwrap();
+        std::fs::write(base.join(".worktrees/a/.env"), "A").unwrap();
+        std::fs::write(base.join(".worktrees/a/app/.env"), "A-APP").unwrap();
+        std::fs::write(base.join(".worktrees/a/.git"), "gitdir: x").unwrap();
+        std::fs::write(base.join(".claude/settings.json"), "{}").unwrap();
+        std::fs::write(base.join(".claude/commands/go.md"), "go").unwrap();
+        std::fs::write(base.join(".claude/worktrees/b/.env"), "B").unwrap();
+        let wt = base.join(".claude/worktrees/new");
+        run_local(&base, &wt, &setup(&["**/.env", ".claude"], None))
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(wt.join(".env")).unwrap(), "TOP");
+        assert_eq!(std::fs::read_to_string(wt.join("app/.env")).unwrap(), "APP");
+        assert!(!wt.join(".worktrees").exists(), "no sibling's files");
+        assert!(wt.join(".claude/settings.json").exists());
+        assert!(wt.join(".claude/commands/go.md").exists());
+        assert!(
+            !wt.join(".claude/worktrees").exists(),
+            "the worktrees inside a copied folder stay out"
+        );
+    }
+
+    /// A worktree `git worktree list` names, wherever it sits in the
+    /// checkout, is not copied from either.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_worktree_git_lists_is_not_copied_from() {
+        let d = tempfile::tempdir().unwrap();
+        let base = d.path().join("repo");
+        std::fs::create_dir_all(&base).unwrap();
+        let git = |args: &[&str]| {
+            let ok = crate::proc::std_command("git")
+                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                .args(args)
+                .current_dir(&base)
+                .output()
+                .unwrap()
+                .status
+                .success();
+            assert!(ok, "git {args:?}");
+        };
+        git(&["init", "-q"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "i"]);
+        git(&["worktree", "add", "-q", "work/other", "-b", "other"]);
+        std::fs::write(base.join("work/other/.env"), "OTHER").unwrap();
+        std::fs::write(base.join(".env"), "TOP").unwrap();
+        let wt = d.path().join("new");
+        std::fs::create_dir_all(&wt).unwrap();
+        run_local(&base, &wt, &setup(&["**/.env", "work"], None))
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(wt.join(".env")).unwrap(), "TOP");
+        assert!(!wt.join("work/other").exists());
+    }
+
+    /// `.` and `..` are never a match: a `.` glob, or `.*` on a bash that
+    /// lets it match them (before 5.2), does not copy the checkout over the
+    /// new worktree.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_dot_glob_never_copies_the_checkout_itself() {
+        let d = tempfile::tempdir().unwrap();
+        let base = d.path().join("repo");
+        std::fs::create_dir_all(base.join("src")).unwrap();
+        std::fs::write(base.join("src/a.txt"), "uncommitted").unwrap();
+        std::fs::write(base.join(".env"), "TOP").unwrap();
+        let wt = base.join(".worktrees/new");
+        std::fs::create_dir_all(wt.join("src")).unwrap();
+        std::fs::write(wt.join("src/a.txt"), "branch").unwrap();
+        run_local(&base, &wt, &setup(&[".", "./.", ".*", "./.env"], None))
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(wt.join("src/a.txt")).unwrap(),
+            "branch"
+        );
+        assert_eq!(std::fs::read_to_string(wt.join(".env")).unwrap(), "TOP");
+        assert!(!wt.join(".worktrees").exists());
     }
 
     #[cfg(unix)]

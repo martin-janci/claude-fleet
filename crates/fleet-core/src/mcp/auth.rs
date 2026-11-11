@@ -338,8 +338,14 @@ impl Caller {
     /// (`client_tokens.trusted_at` set): its text is the operator's own, so
     /// the untrusted-content marker is left off. Never true for the master
     /// (which has `raw` for that) or a per-host token.
+    ///
+    /// Never true for the operator (`ux-agent`), whatever its person holds:
+    /// every writer gate keyed on trust (`token_minter`, `org_admin_writer`,
+    /// `owner_device_admin`, `peer_writer`, `agents_writer`, ...) and the
+    /// untrusted-content marker read this predicate, so excluding Control
+    /// here keeps the next such gate from forgetting it.
     pub fn is_trusted_client(&self) -> bool {
-        self.client.as_ref().is_some_and(|c| c.trusted)
+        !self.is_operator() && self.client.as_ref().is_some_and(|c| c.trusted)
     }
 
     /// The work graph's org scope for this caller (M5) — the ONE place a
@@ -669,9 +675,15 @@ pub fn apply_realm(caller: &mut Caller, realm: &RealmSets) {
     // devices only. A device bound to nobody — and a peer link or an
     // updater token, which never have a person — is never trusted, whatever
     // its row's `trusted_at` mirror says.
+    //
+    // Nor is the operator (`ux-agent`): it is bound to the owner so it sees
+    // the owner's sessions, but it is an agent, not one of the owner's
+    // devices. Inheriting the owner's trust let it mint tokens, pair devices,
+    // link peers and type unmarked text with no card.
     let full = caller.mode == TokenMode::Full;
+    let operator = caller.is_operator();
     if let Some(c) = caller.client.as_mut() {
-        c.trusted = full && c.person_id.is_some_and(|p| realm.trusted.contains(&p));
+        c.trusted = full && !operator && c.person_id.is_some_and(|p| realm.trusted.contains(&p));
     }
 }
 

@@ -509,6 +509,9 @@ fn start_for(
         // The login the grant names (redesign 8.7); else placement's pick
         // on the chosen host; none, the host's own.
         profile,
+        // An item with no project of its own may still land only in the
+        // mission's repos (orchestration §4.2).
+        allowed_projects: allowed,
         ..Default::default()
     })
 }
@@ -696,13 +699,16 @@ async fn apply_step_inner(
                 }
             }
             // F3: a review or a test, headless in the implementer's
-            // checkout, when the setting is on and the checkout allows.
+            // checkout, when the setting is on and the checkout allows. Its
+            // login is the grant's named one, else the implementer's, held
+            // to the account rules there (`checks::plan`); `start.profile`
+            // may be placement's pick on another host.
             if let Some(started) = checks::try_start(
                 deps,
                 m,
                 item_id,
                 role,
-                start.profile.as_deref(),
+                grant.as_ref().and_then(|g| g.profile.as_deref()),
                 grant.as_ref().and_then(|g| g.hosts.as_deref()),
                 view,
                 step.context.as_deref(),
@@ -1277,23 +1283,17 @@ fn planner_reads_project(s: &Store, m: &MissionRow) -> Result<Option<i64>, IpcEr
     Ok(root.or_else(|| m.repos.first().map(|r| r.project_id)))
 }
 
-/// The host the planner runs on: the policy's, the grant's first, else the
-/// host of the mission's latest worker that may see the mission's org.
+/// Every host the planner may run on, the first one first (TASK-291: the
+/// rest are where it goes when that one's logins are at their usage
+/// limit): the policy's host alone, else the grant's hosts of the
+/// mission's org, else the hosts of the mission's workers that see it, by
+/// item and task. Never empty.
 ///
 /// Every LLM run of a mission (the planner, its release note, its triage
 /// card) is sent the mission's text, so the host must be one of the
 /// mission's org (transition plan, risk "Org text leaves the org"): a policy
 /// or grant host that is not refuses with `E_FORBIDDEN`, and a worker on
-/// such a host is passed over.
-fn planner_host(s: &Store, m: &MissionRow, grant: Option<&GrantRow>) -> Result<String, IpcError> {
-    Ok(planner_hosts_up_to(s, m, grant, 1)?.swap_remove(0))
-}
-
-/// Every host the planner may run on, [`planner_host`]'s first (TASK-291:
-/// the rest are where it goes when that one's logins are at their usage
-/// limit): the policy's host alone, else the grant's hosts of the
-/// mission's org, else the hosts of the mission's workers that see it, by
-/// item and task. Never empty.
+/// such a host is passed over. Its login is `limit::choose_in`'s.
 fn planner_hosts(
     s: &Store,
     m: &MissionRow,
@@ -2262,10 +2262,24 @@ fn run_over_limit(
             }
         }
     };
+    // A review or test the loop will run headless runs in the
+    // implementer's checkout under the login `checks::plan` chose there:
+    // the hold looks at that login, not the session start's.
+    let role = step.role.as_deref().unwrap_or("implement");
+    let headless = checks::plan(
+        s,
+        item_id,
+        role,
+        grant.and_then(|g| g.profile.as_deref()),
+        grant.and_then(|g| g.hosts.as_deref()),
+    );
+    let (host, profile) = match headless {
+        Some(p) => (Some(p.at.host), p.profile),
+        None => (host, start.profile.or(placed_profile)),
+    };
     let Some(host) = host else {
         return Ok(None);
     };
-    let profile = start.profile.or(placed_profile);
     if let Some(over) =
         crate::service::account_limits::over_limit(s, &host, profile.as_deref(), now)?
     {
@@ -2357,6 +2371,19 @@ pub async fn tick_mission(deps: &Deps, id: i64, now: i64) -> Result<(), IpcError
         let Some(m) = s.get_mission(id)? else {
             return Ok(());
         };
+        // A disabled person's mission starts nothing more (review R6):
+        // `disable_person` revoked its grants, and the loop pauses it.
+        if m.state == "active" {
+            if let Some(owner) = m.owner_person_id {
+                if s.get_person(owner)?
+                    .is_some_and(|p| p.disabled_at.is_some())
+                {
+                    brake(&s, &m, "owner_disabled", "its owner was disabled".into())?;
+                    s.release_mission_lease(id, Some(now + IDLE_RECHECK_SECS), Some(now))?;
+                    return Ok(());
+                }
+            }
+        }
         let a = autonomy(&s, &m, now)?;
         let counts = s.mission_task_counts(id)?;
         if !a.enabled || m.state != "active" || !crate::store::mode_runs_loop(&m.mode) {

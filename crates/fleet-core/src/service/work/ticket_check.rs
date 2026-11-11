@@ -81,6 +81,9 @@ pub struct Target {
     pub base: Option<String>,
     /// The project of the worktree, whose switch applies.
     pub project_id: Option<i64>,
+    /// The login the work ran under (the worker row's `claude_profile`,
+    /// `None` = the host's own): where the check's login starts from.
+    pub profile: Option<String>,
 }
 
 /// The newest finished `implement` or `wrapup` task of `item_id`, when it
@@ -108,6 +111,7 @@ pub fn target_for(s: &Store, item_id: i64) -> Option<Target> {
             .or_else(|| ev.base.clone())
             .filter(|b| is_commit_id(b)),
         project_id: Some(wt.project_id),
+        profile: w.claude_profile,
     })
 }
 
@@ -297,6 +301,7 @@ pub fn check_prompt(label: &str, cmds: &[String], words: Option<&str>, lines: &[
 pub fn check_script(
     at: &Target,
     model: &str,
+    profile: Option<&str>,
     cmds: &[String],
     prompt: &str,
 ) -> Result<String, String> {
@@ -307,6 +312,15 @@ pub fn check_script(
         return Err("a test command is not a plain one".into());
     }
     let agent = headless::default_agent();
+    // The chosen login, as a mission's headless check exports it.
+    let env = match profile {
+        Some(_) => format!(
+            "{}{}",
+            agent.login_env(profile)?,
+            crate::tmux::PROFILE_API_KEY
+        ),
+        None => String::new(),
+    };
     let bash: Vec<&str> = cmds.iter().map(String::as_str).collect();
     let claude = agent.command(&HeadlessJob {
         model,
@@ -333,7 +347,7 @@ pub fn check_script(
          git worktree add --detach --quiet \"$snap\" {head} >/dev/null 2>&1 || {{ echo {TAG}nodir; exit 0; }}; \
          cd -- \"$snap\" || exit 0; fi; \
          {{ printf '%s\\n' {prompt};{extra} }} >\"$d\" 2>/dev/null || true; \
-         {run}",
+         {env}{run}",
         path = quote(&at.path),
         head = quote(&at.head),
         noclaude = agent.missing_check(TAG),
@@ -364,6 +378,8 @@ pub fn normalize_command(raw: Option<&str>) -> Result<Option<String>, IpcError> 
 /// A check cleared to start: what [`start_checked`] runs.
 struct Plan {
     at: Target,
+    /// The login the run takes (`run_login::choose`).
+    profile: Option<String>,
     model: String,
     cmds: Vec<String>,
     org_id: Option<i64>,
@@ -441,6 +457,21 @@ async fn start_checked(
                 format!("a check of {which} is already running"),
             ));
         }
+        // `claude -p` in the project's checkout: on the worker's login,
+        // stepped off a forbidden or spent one, and refused (forbidden,
+        // daily limit, signed out) before any task is recorded, so the
+        // sweep's retry wait applies and nothing reads as a failed check.
+        let profile = crate::service::run_login::choose(
+            &s,
+            at.project_id,
+            &at.host,
+            at.profile.as_deref(),
+            crate::store::now_unix(),
+        )
+        .map_err(|mut e| {
+            e.message = format!("{which} could not be checked: {}", e.message);
+            e
+        })?;
         let Some(_claim) = super::run::claim_start(store, item_id, ROLE) else {
             return Err(IpcError::new(
                 codes::E_INVALID_STATE,
@@ -461,6 +492,7 @@ async fn start_checked(
         let attempt = s.next_task_attempt(item_id, ROLE)?;
         let task = super::run::record_headless_run(&s, &prompt, item_id, attempt, ROLE)?;
         let plan = Plan {
+            profile,
             model: settings::get_string(&s, settings::ORCHESTRATOR_HEADLESS_MODEL),
             org_id: s.item_org(item_id)?,
             label: which,
@@ -487,7 +519,7 @@ async fn run(
     p: &Plan,
     prompt: &str,
 ) -> Result<String, IpcError> {
-    let script = check_script(&p.at, &p.model, &p.cmds, prompt)
+    let script = check_script(&p.at, &p.model, p.profile.as_deref(), &p.cmds, prompt)
         .map_err(|e| IpcError::new(codes::E_INVALID, e))?;
     let out = crate::ssh::run_shell_bounded(
         exec,
@@ -525,7 +557,10 @@ async fn run(
             ))
         }
         _ if claude_print::run_signed_out(None, "", &out.stderr) => {
-            return Err(claude_print::signed_out_error(&p.at.host, None))
+            return Err(claude_print::signed_out_error(
+                &p.at.host,
+                p.profile.as_deref(),
+            ))
         }
         _ => {
             return Err(IpcError::new(
@@ -540,7 +575,7 @@ async fn run(
         &out.stderr,
         RunAt {
             host: &p.at.host,
-            profile: None,
+            profile: p.profile.as_deref(),
             what: "the AI check",
         },
         |usage| book(store, p, usage),

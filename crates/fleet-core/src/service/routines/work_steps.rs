@@ -180,8 +180,7 @@ pub fn record_new(
 fn open_runs(s: &Store) -> Result<Vec<(i64, i64, SessionRow)>, IpcError> {
     let mut out = Vec::new();
     for run in s.running_routine_runs()? {
-        let Some(sid) = run.session_id else { continue };
-        if let Some(row) = s.get_session_by_id(sid)?.filter(|r| r.lost_at.is_none()) {
+        if let Some(row) = super::run_session(s, &run)?.filter(|r| r.lost_at.is_none()) {
             out.push((run.id, run.started_at, row));
         }
     }

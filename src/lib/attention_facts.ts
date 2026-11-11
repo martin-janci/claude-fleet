@@ -22,6 +22,23 @@ const WEEK_SECS = 7 * 86400;
  *  Keychain) says nothing about the login. */
 const LOGIN_GONE: ReadonlySet<UsageStatus> = new Set(['login_expired', 'token_rejected']);
 
+/** Whether every login on `account` that a reachable, shown host reports
+ *  (its own login, its profiles) is one fleet saw signed out there. A poll
+ *  whose every source failed is stored as its worst answer, so one gone
+ *  login among others whose access token merely lapsed reads
+ *  `login_expired` for the whole account: it counts as signed out only when
+ *  no login on it is left. With no host reporting a login on it, the poll's
+ *  word stands. Mirrors `every_login_signed_out` in attention.rs. */
+function everyLoginSignedOut(hostRows: readonly HostRow[], account: string): boolean {
+  return hostRows
+    .filter((h) => h.reachable && !h.hidden)
+    .flatMap((h) => [
+      ...(h.account_uuid === account ? [{ h, profile: null as string | null }] : []),
+      ...(h.claude_profiles ?? []).filter((p) => p.account_uuid === account).map((p) => ({ h, profile: p.name })),
+    ])
+    .every(({ h, profile }) => (h.signed_out_logins ?? []).some((l) => (l.profile ?? null) === profile));
+}
+
 export function attentionFactsFrom(
   hostRows: readonly HostRow[],
   usage: Readonly<Record<string, AccountUsageSnapshot>>,
@@ -34,7 +51,9 @@ export function attentionFactsFrom(
   const limited_accounts: Record<string, AttentionLimit> = {};
   const uncredentialed_accounts: string[] = [];
   for (const snap of Object.values(usage)) {
-    if (LOGIN_GONE.has(snap.status)) uncredentialed_accounts.push(snap.account_uuid);
+    if (LOGIN_GONE.has(snap.status) && everyLoginSignedOut(hostRows, snap.account_uuid)) {
+      uncredentialed_accounts.push(snap.account_uuid);
+    }
     const u = snap.usage;
     if (!u) continue;
     // A window with no reset time counts only while the reading is younger

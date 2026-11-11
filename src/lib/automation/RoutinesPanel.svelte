@@ -263,8 +263,12 @@
     open(draftOf({ ...routineInputOf(r), name: copy ? `${r.name} copy` : r.name }, copy ? undefined : r.id));
   }
 
-  /** The saved routine's switch, kept by an edit; a new one starts on. */
-  const enabledOf = (d: RoutineDraft) => (d.id !== undefined ? (list.find((x) => x.id === d.id)?.enabled ?? true) : true);
+  /** The saved routine's switch, kept by an edit; a new one starts on.
+   *  `fresh` is the routine as the hub has it now: the list may be older
+   *  than a pause made since (the phone, the run budget), and an edit must
+   *  not turn that back on (review R6). */
+  const enabledOf = (d: RoutineDraft, fresh?: RoutineRow) =>
+    d.id !== undefined ? (fresh?.enabled ?? list.find((x) => x.id === d.id)?.enabled ?? true) : true;
 
   /** Save the draft; answers the saved routine, or null on a refusal. */
   async function saveDraft(undoable = true): Promise<RoutineRow | null> {
@@ -272,7 +276,11 @@
     const d = draft;
     busy = true;
     saveError = null;
-    const r = await saveRoutine(draftInput(d, enabledOf(d), deviceZone()), d.id);
+    // Sent on every hub version (an older hub turns on an edit without
+    // `enabled`), so it is read fresh; a failed read falls back to the list.
+    const now = d.id !== undefined ? await getRoutine(d.id) : null;
+    const fresh = now?.ok ? now.value.routine : undefined;
+    const r = await saveRoutine(draftInput(d, enabledOf(d, fresh), deviceZone()), d.id);
     busy = false;
     if (!r.ok) {
       saveError = r.error;
@@ -284,7 +292,7 @@
     if (keepOpen) edit(r.value);
     else draft = null;
     selected = r.value.id;
-    const was = d.id !== undefined ? list.find((x) => x.id === d.id) : undefined;
+    const was = d.id !== undefined ? (fresh ?? list.find((x) => x.id === d.id)) : undefined;
     const saved = r.value;
     // Undo: an edit is saved back as it was; a new routine is deleted. Not
     // offered when Run once now saved it: a run is starting from it.
@@ -348,15 +356,22 @@
 
   const unsub = routinesRequest.subscribe((req) => {
     if (!req) return;
-    leaveDraft(() => {
-      if (req.template) openTemplate(req.template === 'blank' ? null : req.template);
-      if (req.select !== undefined) {
-        selected = req.select;
-        draft = null;
-        void loadDetail();
-      }
-      if (req.tab) tab = req.tab;
-    });
+    const apply = () =>
+      leaveDraft(() => {
+        if (req.template) openTemplate(req.template === 'blank' ? null : req.template);
+        if (req.select !== undefined) {
+          selected = req.select;
+          draft = null;
+          void loadDetail();
+        }
+        if (req.tab) tab = req.tab;
+      });
+    // A request that opens Automation reaches a panel that is only now
+    // mounting, with a stashed draft restored but no editor bound yet to ask
+    // "Discard changes?": wait for the editor rather than drop the draft.
+    if (draft && !editor) void tick().then(apply);
+    else apply();
+    // Cleared now, not after the wait, so it is not applied twice.
     routinesRequest.set(null);
   });
   onDestroy(unsub);

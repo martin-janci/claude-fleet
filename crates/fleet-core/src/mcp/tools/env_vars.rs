@@ -35,6 +35,17 @@ impl FleetTools {
                 p.name
             ),
         );
+        // The operator is bound to the owner, so `owner_for` makes it the
+        // owner here: a person-scope write by it would set the owner's
+        // `ANTHROPIC_BASE_URL` or `GH_TOKEN` for every later session. An
+        // agent proposes; a person sets an environment.
+        if p.action != "list" && caller.is_operator() {
+            return Err(mcp_err(
+                "E_FORBIDDEN",
+                "the agent does not change session environment variables; a person does",
+                None,
+            ));
+        }
         let personal = p.scope.as_deref() == Some("person");
         if p.action != "list" && !personal {
             super::fleet::owner_device_admin(&caller, "changing session environment variables")?;

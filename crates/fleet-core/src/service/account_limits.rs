@@ -225,7 +225,7 @@ impl OverLimit {
 
 /// "Oct 24 11:00 UTC": a server-side time in words that do not depend on
 /// where the reader is.
-fn utc_stamp(at: i64) -> String {
+pub(crate) fn utc_stamp(at: i64) -> String {
     let secs = at.rem_euclid(86_400);
     format!(
         "{} {:02}:{:02} UTC",
@@ -498,6 +498,13 @@ fn best_login(
     Ok(least(true).or_else(|| if any_reading { least(false) } else { None }))
 }
 
+/// Whether `account_uuid` has spent its daily limit today: a login on it is
+/// refused at the start whatever anyone says, so stepping off a forbidden or
+/// signed-out login never lands on it. A failed read counts as spent.
+fn daily_spent(s: &Store, account_uuid: &str, now: i64) -> bool {
+    !daily_limit_hit(s, account_uuid, now).is_ok_and(|h| h.is_none())
+}
+
 /// The login a start that nobody chose a login for runs under on
 /// `host_alias`: `profile` (`None` = the host's own), unless its account is
 /// at or past `accounts.pause_at` ([`over_limit`]) and another login on the
@@ -523,7 +530,19 @@ pub fn login_with_headroom_for(
         let account = login_account(s, host_alias, profile, now)?.map(|a| a.login.account_uuid);
         if account.is_some_and(|a| forbidden.contains(&a)) {
             return Ok(best_login(s, host_alias, now, true, |l| {
-                !forbidden.contains(&l.account_uuid)
+                !forbidden.contains(&l.account_uuid) && !daily_spent(s, &l.account_uuid, now)
+            })?
+            .map_or_else(|| profile.map(str::to_string), |l| l.profile));
+        }
+    }
+    // A login fleet knows is signed out would start at `/login`: it gives
+    // way to the signed-in, allowed login with the most headroom, under the
+    // line or not, as a forbidden one does. With none signed in it is kept,
+    // and the start reports it.
+    if let Some(host) = s.get_host_row(host_alias)? {
+        if crate::service::login_health::is_signed_out(&host, profile) {
+            return Ok(best_login(s, host_alias, now, true, |l| {
+                !forbidden.contains(&l.account_uuid) && !daily_spent(s, &l.account_uuid, now)
             })?
             .map_or_else(|| profile.map(str::to_string), |l| l.profile));
         }
@@ -828,6 +847,24 @@ pub(crate) fn seed_usage(
         source_host: None,
     })
     .unwrap();
+}
+
+/// Test seam: give account `uuid` a daily limit of `limit_usd` and book
+/// `spent_usd` of live spend on it today (UTC).
+#[cfg(test)]
+pub(crate) fn seed_daily_spend(s: &Store, uuid: &str, limit_usd: f64, spent_usd: f64, now: i64) {
+    crate::service::add_account::set_daily_limit(s, uuid, Some(limit_usd)).unwrap();
+    s.conn_for_test()
+        .execute(
+            "INSERT INTO usage_daily_account (day, account_uuid, model, backfill, cost_micros) \
+             VALUES (?1, ?2, 'm', 0, ?3)",
+            rusqlite::params![
+                now.div_euclid(86_400),
+                uuid,
+                (spent_usd * 1_000_000.0) as i64
+            ],
+        )
+        .unwrap();
 }
 
 #[cfg(test)]

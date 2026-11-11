@@ -470,3 +470,25 @@ describe('outboxBody', () => {
     expect(body).toBe(withAttachments('ctx\n\nhi', ['/r/a.txt']));
   });
 });
+
+// A paired desktop stages an attachment through this machine's tmux and disk,
+// which the hub's own-machine alias `local` would mean here.
+describe('uploadAttachments: the hub’s own machine', () => {
+  it('refuses `local` when paired, and uploads to it standalone', async () => {
+    vi.resetModules();
+    const invoke = vi.fn(async () => ['/remote/a.txt']);
+    vi.doMock('@tauri-apps/api/core', () => ({ invoke }));
+    const { uploadAttachments } = await import('./outbox');
+    const { hubStatus, STANDALONE } = await import('./hub');
+    hubStatus.set({ ...STANDALONE, remote: true, url: 'https://fleet.example.com' });
+    const r = await uploadAttachments('local', 'api', ['/tmp/a.txt']);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.message).toMatch(/hub’s own machine/);
+    expect(invoke).not.toHaveBeenCalled();
+    // Another host of the hub's: this machine's own copy over ssh, as before.
+    expect((await uploadAttachments('mac', 'api', ['/tmp/a.txt'])).ok).toBe(true);
+    hubStatus.set({ ...STANDALONE });
+    expect((await uploadAttachments('local', 'api', ['/tmp/a.txt'])).ok).toBe(true);
+    vi.doUnmock('@tauri-apps/api/core');
+  });
+});

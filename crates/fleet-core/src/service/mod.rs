@@ -110,6 +110,7 @@ pub mod repo_read;
 pub mod reports;
 pub mod rewind;
 pub mod routines;
+pub mod run_login;
 pub mod run_trace;
 pub mod runs;
 pub mod safe_kill;

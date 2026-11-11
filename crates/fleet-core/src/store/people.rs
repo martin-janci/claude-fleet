@@ -501,6 +501,19 @@ impl Store {
         // not that authority either — it narrows, it names no session, and it
         // is reached only by disabling the recipient.
         super::session_grants::revoke_live_grants_to_person(&tx, id, at)?;
+        // Their automation stops too (review R6): a routine of theirs would
+        // keep starting sessions owned by a disabled person, on the fleet's
+        // hosts and logins, that nobody else may see or stop. Each is
+        // paused with the reason, not deleted, and `enable_person` turns
+        // none back on. Every live grant on a mission they own goes, so its
+        // loop starts no run; the mission tick then pauses it.
+        let (routines, mission_grants) = disable_automation_in_tx(&tx, id, at)?;
+        tracing::info!(
+            person = id,
+            routines,
+            mission_grants,
+            "[people] disabled a person's routines and mission grants"
+        );
         // Realm (identity sub-project 1): every group membership and direct
         // role mapping ends, and with them every org membership, which
         // `org_members` projects. Refused (`E_FORBIDDEN`, the transaction
@@ -524,6 +537,19 @@ impl Store {
         tx.commit()?;
         super::session_grants::bump_grant_generation();
         self.get_person(id)?.ok_or_else(|| person_not_found(id))
+    }
+
+    /// What `disable_person` would stop of `person`'s automation: their
+    /// routines that are on, and the live grants on missions they own.
+    pub fn live_automation_of(&self, person: i64) -> Result<(i64, i64), IpcError> {
+        Ok(self.conn.query_row(
+            "SELECT (SELECT COUNT(*) FROM routines WHERE owner_person_id = ?1 AND enabled = 1), \
+                    (SELECT COUNT(*) FROM orchestration_grants WHERE revoked_at IS NULL \
+                       AND orchestration_project_id IN \
+                         (SELECT id FROM orchestration_projects WHERE owner_person_id = ?1))",
+            rusqlite::params![person],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?)
     }
 
     /// Lift a person's disable (identity sub-project 1): they may sign in
@@ -839,6 +865,28 @@ impl Store {
             .collect::<rusqlite::Result<_>>()?;
         Ok(ids)
     }
+}
+
+/// `disable_person`'s automation half, in its transaction: pause every
+/// routine `person` owns that is on, and revoke every live grant on a
+/// mission they own. Answers how many of each.
+fn disable_automation_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    person: i64,
+    at: i64,
+) -> Result<(usize, usize), IpcError> {
+    let routines = tx.execute(
+        "UPDATE routines SET enabled = 0, paused_reason = ?2, next_run_at = NULL, \
+           updated_at = ?3 WHERE owner_person_id = ?1 AND enabled = 1",
+        rusqlite::params![person, super::routines::PAUSED_OWNER_DISABLED, at],
+    )?;
+    let grants = tx.execute(
+        "UPDATE orchestration_grants SET revoked_at = ?2 WHERE revoked_at IS NULL \
+           AND orchestration_project_id IN \
+             (SELECT id FROM orchestration_projects WHERE owner_person_id = ?1)",
+        rusqlite::params![person, at],
+    )?;
+    Ok((routines, grants))
 }
 
 #[cfg(test)]

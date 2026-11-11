@@ -251,3 +251,63 @@ describe('session.new-terminal from a covered pane', () => {
     expect(get(sessionView)).toBe('terminal');
   });
 });
+
+// ⌘K over another fleet's session acts on that session, through its own hub,
+// and never on this window's session hidden under it.
+describe('another fleet’s session in the palette', () => {
+  beforeEach(async () => {
+    invoke.mockReset();
+    toasts.set([]);
+    const { _resetFleetsForTest, _setFleetsForTest, PRIMARY } = await import('./fleets');
+    const { fleetInfo } = await import('./fleets_fixture');
+    _resetFleetsForTest();
+    _setFleetsForTest([fleetInfo(PRIMARY), fleetInfo('company')]);
+  });
+  afterEach(async () => {
+    const { _resetFleetsForTest } = await import('./fleets');
+    _resetFleetsForTest();
+  });
+  const away = (over: Partial<SessionRow> = {}) => ({ ...asking(), fleet: 'company', ...over }) as SessionRow;
+
+  it('offers only Approve and Stop for it, both of which route by fleet', () => {
+    const ids = paletteCommands({ selected: away({ claude_status: 'working', pending_input: null }), sessionView: 'conversation' })
+      .map((c) => c.id)
+      .filter((id) => id.startsWith('session.'));
+    expect(ids).toEqual(['session.stop']);
+    const asked = paletteCommands({ selected: away(), sessionView: 'conversation' })
+      .map((c) => c.id)
+      .filter((id) => id.startsWith('session.'));
+    expect(asked).toEqual(['session.approve']);
+    // The app's own rows are still there.
+    expect(paletteCommands({ selected: away(), sessionView: 'conversation' }).map((c) => c.id)).toContain('app.settings');
+  });
+
+  it('Stop presses Escape on its own hub', async () => {
+    invoke.mockResolvedValue(null);
+    await runCommand('session.stop', { selected: away({ claude_status: 'working', pending_input: null }), sessionView: 'conversation' });
+    expect(invoke).toHaveBeenCalledWith('send_prompt', expect.objectContaining({ fleet: 'company' }));
+  });
+
+  it('Approve and Stop ask that fleet’s link, not this window’s hub', async () => {
+    const { _setFleetsForTest, PRIMARY } = await import('./fleets');
+    const { fleetInfo } = await import('./fleets_fixture');
+    _setFleetsForTest([fleetInfo(PRIMARY), fleetInfo('company', { connection: { state: 'offline' } } as never)]);
+    await runCommand('session.approve', { selected: away(), sessionView: 'conversation' });
+    await runCommand('session.stop', { selected: away({ claude_status: 'working', pending_input: null }), sessionView: 'conversation' });
+    expect(invoke).not.toHaveBeenCalled();
+    expect(get(toasts).at(-1)?.message).toMatch(/company is .*nothing can be sent there/);
+  });
+
+  it('a primary-only command picked for it does nothing', async () => {
+    const { settingsOpen } = await import('./app_views');
+    settingsOpen.set(true);
+    invoke.mockResolvedValue(null);
+    for (const id of ['session.push', 'session.open-in-editor', 'session.new-terminal', 'session.action.rename']) {
+      await runCommand(id, { selected: away(), sessionView: 'conversation' });
+    }
+    expect(invoke).not.toHaveBeenCalled();
+    // New terminal did not run: Settings stays open.
+    expect(get(settingsOpen)).toBe(true);
+    settingsOpen.set(false);
+  });
+});

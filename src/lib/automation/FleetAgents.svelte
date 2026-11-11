@@ -17,6 +17,7 @@
   import WizardDialog from '../forms/WizardDialog.svelte';
   import StatusDot from '../kit/StatusDot.svelte';
   import { errorText } from '../error_copy';
+  import { automationPaused } from '../automation';
   import type { Values } from '../forms/forms';
   import type { Wizard } from '../forms/wizards';
   import {
@@ -43,7 +44,7 @@
   let defs = $state<FleetDefinition[] | null>(null);
   let gallery = $state<GalleryEntry[]>([]);
   let loadError = $state<string | null>(null);
-  let open = $state<{ wizard: Wizard; definition: string } | null>(null);
+  let open = $state<{ wizard: Wizard; definition: string; id?: number } | null>(null);
   let busy = $state(false);
   let error = $state<string | null>(null);
   let note = $state<string | null>(null);
@@ -90,7 +91,7 @@
     error = null;
     note = null;
     const r = await fleetForm(definition, id);
-    if (r.ok) open = { wizard: fleetWizard(r.value), definition };
+    if (r.ok) open = { wizard: fleetWizard(r.value), definition, id };
     else note = r.error ? errorText(r.error) : 'Could not build the form';
   }
 
@@ -98,7 +99,7 @@
     if (!open) return;
     busy = true;
     error = null;
-    const r = await grantFleet(open.definition, values);
+    const r = await grantFleet(open.definition, values, open.id);
     busy = false;
     if (!r.ok) {
       error = r.error ? errorText(r.error) : 'The grant failed';
@@ -129,7 +130,9 @@
     queuing = true;
     const r = await runFleetAgent(running.id, running.request, running.scope);
     queuing = false;
-    note = r.ok ? 'Queued: it runs on the next pass.' : (r.error ? errorText(r.error) : 'Run failed');
+    // Pause all holds the run pass, so a queued run waits for Resume.
+    const queued = $automationPaused ? 'Queued: it runs once automation resumes (Pause all is on).' : 'Queued: it runs on the next pass.';
+    note = r.ok ? queued : (r.error ? errorText(r.error) : 'Run failed');
     if (r.ok) running = null;
     void loadAgents();
   }

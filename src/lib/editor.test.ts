@@ -37,6 +37,21 @@ describe('Open in VS Code (step 5.5)', () => {
     expect(editorBlockedReason(row, null)).not.toBeNull();
   });
 
+  it('a paired desktop does not open the hub’s own-machine `local` session here', async () => {
+    const { hubStatus, STANDALONE } = await import('./hub');
+    hubStatus.set({ ...STANDALONE, remote: true, url: 'https://fleet.example.com' });
+    try {
+      expect(editorBlockedReason({ ...row, host_alias: 'local' }, 'own')).toMatch(/hub’s own machine/);
+      expect(editorBlockedReason(row, 'own')).toBeNull();
+      invoke.mockResolvedValue(null);
+      expect(await openInEditorIfAllowed({ ...row, host_alias: 'local' }, 'own')).toBe(false);
+      expect(invoke).not.toHaveBeenCalled();
+    } finally {
+      hubStatus.set({ ...STANDALONE });
+    }
+    expect(editorBlockedReason({ ...row, host_alias: 'local' }, 'own')).toBeNull();
+  });
+
   it('the chord says why it cannot open instead of calling the backend', async () => {
     expect(await openInEditorIfAllowed({ ...row, kind: 'external' }, 'own')).toBe(false);
     expect(invoke).not.toHaveBeenCalled();

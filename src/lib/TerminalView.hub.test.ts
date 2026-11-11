@@ -148,6 +148,38 @@ describe('the terminal tab against a hub', () => {
     expect(screen.queryByTestId('terminal-no-attach')).toBeNull();
   });
 
+  // `local` is the hub's own machine; `pty_open` would resolve it on THIS
+  // one and attach this machine's tmux session of that name, typed into blind.
+  it('refuses the hub’s own-machine `local` row, saying why, with no PTY', async () => {
+    hubStatus.set(remote);
+    const hubLocal = makeSession({ id: 6, host_alias: 'local' });
+    sessions.set([hubLocal]);
+    render(TerminalView);
+    selectSession(hubLocal);
+    await settle();
+    expect(inv().mock.calls.some((c) => c[0] === 'pty_open')).toBe(false);
+    expect(screen.getByTestId('terminal-no-attach').textContent).toContain('hub’s own machine');
+  });
+
+  it('standalone, `local` is this machine and attaches', async () => {
+    const mine = makeSession({ id: 6, host_alias: 'local' });
+    sessions.set([mine]);
+    render(TerminalView);
+    selectSession(mine);
+    await settle();
+    expect(inv().mock.calls.some((c) => c[0] === 'pty_open')).toBe(true);
+  });
+
+  it('a `wsl-` hub host attaches over ssh from a desktop that is not Windows', async () => {
+    hubStatus.set(remote);
+    const wsl = makeSession({ id: 6, host_alias: 'wsl-ubuntu' });
+    sessions.set([wsl]);
+    render(TerminalView);
+    selectSession(wsl);
+    await settle();
+    expect(inv().mock.calls.some((c) => c[0] === 'pty_open')).toBe(true);
+  });
+
   it('attaches for a host whose row has not loaded, rather than refusing on a guess', async () => {
     hubStatus.set(remote);
     hosts.set([]);

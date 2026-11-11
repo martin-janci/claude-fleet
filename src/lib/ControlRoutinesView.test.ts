@@ -5,11 +5,12 @@ import { get } from 'svelte/store';
 
 const calls: { cmd: string; args: Record<string, unknown> }[] = [];
 let routines: unknown[] = [];
+let runAnswer: Record<string, unknown> = { state: 'running' };
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn(async (cmd: string, raw: { args: Record<string, unknown> }) => {
     calls.push({ cmd, args: raw?.args });
     if (cmd === 'routines' && raw.args.action === 'list') return routines;
-    if (cmd === 'routines' && raw.args.action === 'run_now') return { id: 1, routine_id: raw.args.routine_id, state: 'running' };
+    if (cmd === 'routines' && raw.args.action === 'run_now') return { id: 1, routine_id: raw.args.routine_id, ...runAnswer };
     if (cmd === 'list_runs')
       return { runs: [{ id: 1, kind: 'routine', routine_id: 2, outcome: 'failed', started_at: 10, cost_micros: 0 }], total: 1 };
     throw { code: 'E_TEST', message: `no ${cmd}` };
@@ -40,6 +41,7 @@ const routine = (id: number, name: string, over: Record<string, unknown> = {}) =
 beforeEach(() => {
   calls.length = 0;
   routines = [routine(1, 'Alpha sweep'), routine(2, 'Nightly deps')];
+  runAnswer = { state: 'running' };
 });
 
 describe('ControlRoutinesView (G3.10)', () => {
@@ -70,6 +72,17 @@ describe('ControlRoutinesView (G3.10)', () => {
     await fireEvent.click(getAllByTestId('control-routine-run')[1]);
     await waitFor(() => expect(getByTestId('control-routines-note').textContent).toBe('Alpha sweep started.'));
     expect(calls.find((c) => c.args?.action === 'run_now')?.args).toMatchObject({ routine_id: 1 });
+  });
+
+  // Review R6: the hub answers ok for a run it skipped; that is no start.
+  it('Run now that the hub skipped says why, not "started"', async () => {
+    runAnswer = { state: 'skipped', reason: 'its login is past the line' };
+    const { getAllByTestId, getByTestId } = render(ControlRoutinesView);
+    await waitFor(() => expect(getAllByTestId('control-routine-run')).toHaveLength(2));
+    await fireEvent.click(getAllByTestId('control-routine-run')[1]);
+    await waitFor(() =>
+      expect(getByTestId('control-routines-note').textContent).toBe('Alpha sweep did not run: its login is past the line.'),
+    );
   });
 
   it('with none, offers a template', async () => {
