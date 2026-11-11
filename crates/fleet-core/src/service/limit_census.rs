@@ -16,11 +16,14 @@
 //!   (`service::account_usage`), but only while something keeps the login's
 //!   access token fresh: a spare login nothing runs on goes unread after a
 //!   few hours (docs/accounts.md), and it is the login with room. So an
-//!   account some login uses now (`Store::usage_login_accounts`) keeps its
-//!   last reading however old it is.
+//!   account some `/login` uses now (`Store::usage_login_accounts`) keeps
+//!   its last reading however old it is.
 //! - An account no login uses any more left the fleet at a time the history
 //!   does not name: each of its readings stands for [`STANDS_FOR_SECS`] at
-//!   most, and after that it is left out, at its limit or not.
+//!   most, and after that it is left out, at its limit or not. So does an
+//!   account only setup-token profiles use now: a setup token cannot be
+//!   asked for usage, so the hub stopped reading the account while sessions
+//!   may well run on it, and nothing says how much they used.
 //! - A counted account is at a line when its 5-hour or weekly window read at
 //!   or past it and has not reset since ([`past_until`]): what a row's
 //!   "Paused · limit" goes by at 100% (`service::attention`), and a start's
@@ -35,7 +38,7 @@ use crate::service::account_usage::{
     AccountUsage, FIVE_HOUR_SECS, USAGE_BACKOFF_CAP_SECS, WEEK_SECS,
 };
 use crate::service::add_account::is_api_key_account;
-use crate::store::{Store, UsageAccount, UsageSnapshotRow, USAGE_HISTORY_KEEP_SECS};
+use crate::store::{Store, UsageAccount, UsageLogin, UsageSnapshotRow, USAGE_HISTORY_KEEP_SECS};
 use serde::Serialize;
 use std::collections::BTreeSet;
 
@@ -44,7 +47,7 @@ pub const DEFAULT_DAYS: u32 = 28;
 /// The longest window: what the history keeps.
 pub const MAX_DAYS: u32 = (USAGE_HISTORY_KEEP_SECS / 86_400) as u32;
 /// How long a reading stands, when no newer one follows it, for an account
-/// no login uses any more.
+/// no `/login` uses any more.
 pub const STANDS_FOR_SECS: i64 = 86_400;
 /// How long after a reading the hub counts as having been reading: two polls
 /// at their slowest. A longer silence from every account is a stretch the
@@ -62,9 +65,9 @@ const PRINTED_STRETCHES: usize = 10;
 
 /// What the history does not hold, so the census cannot count it.
 pub const NOT_COUNTED: &[&str] = &[
-    "a login without a usage reading: an API key has a daily spend limit and no usage windows, and an account signed in on macOS hosts only cannot be read (its token is in the Keychain)",
+    "a login without a usage reading: an API key has a daily spend limit and no usage windows, a setup token is for inference only and cannot be asked for usage, and an account signed in on macOS hosts only cannot be read (its token is in the Keychain)",
     "use the hub did not see: a login nothing runs on is not read after a few hours, so its last reading stands, at its limit until that window resets and with room after",
-    "an account no login uses any more, from a day after each of its readings: the history does not say when it left",
+    "an account no login uses any more, or only setup tokens do, from a day after each of its readings: the history does not say when it left, or what a setup token used",
     "a login that could not be used for another reason while its account had room (signed out, host down)",
     "the minutes between a limit being hit and the next reading (readings are 5 to 30 minutes apart)",
     "extra usage: an account with it on keeps working past its limit on pay-as-you-go money, and is counted at its limit all the same",
@@ -147,6 +150,9 @@ pub struct AccountCensus {
     /// A login uses it now. One that none does is counted for a day after
     /// each reading only.
     pub login: bool,
+    /// Setup tokens are its only logins now. They cannot be asked for
+    /// usage, so it too is counted for a day after each reading only.
+    pub setup_token_only: bool,
     /// Past its limit it spends pay-as-you-go money instead of stopping.
     pub has_extra_usage: bool,
     /// Readings taken in the window.
@@ -173,7 +179,8 @@ pub struct LimitCensusReport {
     pub all_at_once: Vec<AllAtOnce>,
     /// By name.
     pub accounts: Vec<AccountCensus>,
-    /// The accounts logins use now that have no reading, by name.
+    /// The accounts logins use now that no reading counts in the window,
+    /// by name: never read, or setup tokens only since before it.
     pub unread_accounts: Vec<String>,
     pub not_counted: Vec<&'static str>,
 }
@@ -218,9 +225,10 @@ struct Counted {
     past: Vec<Vec<Stretch>>,
 }
 
-/// One account's readings, oldest first, as stretches of `window`. `login`:
-/// a login uses the account now, so each reading stands until the next.
-fn counted(rows: &[UsageSnapshotRow], lines: &[f64], window: Stretch, login: bool) -> Counted {
+/// One account's readings, oldest first, as stretches of `window`.
+/// `read_now`: a `/login` uses the account now, so each reading stands until
+/// the next.
+fn counted(rows: &[UsageSnapshotRow], lines: &[f64], window: Stretch, read_now: bool) -> Counted {
     let mut c = Counted {
         counted: Vec::new(),
         past: vec![Vec::new(); lines.len()],
@@ -228,7 +236,7 @@ fn counted(rows: &[UsageSnapshotRow], lines: &[f64], window: Stretch, login: boo
     for (i, r) in rows.iter().enumerate() {
         let at = r.fetched_at;
         let next = rows.get(i + 1).map_or(i64::MAX, |n| n.fetched_at);
-        let stands_until = if login {
+        let stands_until = if read_now {
             next
         } else {
             next.min(at.saturating_add(STANDS_FOR_SECS))
@@ -296,13 +304,13 @@ fn utc_days(stretches: &[Stretch]) -> u64 {
 }
 
 /// Count `rows` (account by account, each oldest first) over `window`.
-/// `logins` are the accounts a login uses now. `pause_at` is the fleet's
-/// `accounts.pause_at`; at 100 it is the limit itself and is not counted a
-/// second time.
+/// `logins` are the accounts a login uses now, one entry each. `pause_at` is
+/// the fleet's `accounts.pause_at`; at 100 it is the limit itself and is not
+/// counted a second time.
 pub fn census_of(
     rows: &[UsageSnapshotRow],
     known: &[UsageAccount],
-    logins: &[String],
+    logins: &[UsageLogin],
     pause_at: f64,
     opts: &LimitCensusOptions,
     schema_version: i64,
@@ -313,6 +321,7 @@ pub fn census_of(
         lines.push((PAUSE_LINE, pause_at));
     }
     let at: Vec<f64> = lines.iter().map(|l| l.1).collect();
+    let login = |uuid: &str| logins.iter().find(|l| l.account_uuid == uuid);
 
     let per_account: Vec<(&str, u64, Counted)> = rows
         .chunk_by(|a, b| a.account_uuid == b.account_uuid)
@@ -322,8 +331,8 @@ pub fn census_of(
                 .filter(|r| r.fetched_at >= window.from && r.fetched_at < window.until)
                 .count() as u64;
             let uuid = rows[0].account_uuid.as_str();
-            let login = logins.iter().any(|l| l == uuid);
-            (uuid, readings, counted(rows, &at, window, login))
+            let read_now = login(uuid).is_some_and(|l| !l.setup_token_only);
+            (uuid, readings, counted(rows, &at, window, read_now))
         })
         .filter(|(_, _, c)| !c.counted.is_empty())
         .collect();
@@ -381,7 +390,8 @@ pub fn census_of(
         .map(|(uuid, readings, c)| AccountCensus {
             account_uuid: (*uuid).to_string(),
             name: name(uuid).map_or_else(|| (*uuid).to_string(), |k| k.name.clone()),
-            login: logins.iter().any(|l| l == uuid),
+            login: login(uuid).is_some(),
+            setup_token_only: login(uuid).is_some_and(|l| l.setup_token_only),
             has_extra_usage: name(uuid).is_some_and(|k| k.has_extra_usage),
             readings: *readings,
             counted_secs: c.counted.iter().map(Stretch::secs).sum(),
@@ -400,11 +410,18 @@ pub fn census_of(
 
     let mut unread_accounts: Vec<String> = logins
         .iter()
-        .filter(|l| !rows.iter().any(|r| r.account_uuid == **l))
+        .filter(|l| {
+            !per_account
+                .iter()
+                .any(|(uuid, _, _)| *uuid == l.account_uuid)
+        })
         .map(|l| {
-            let called = name(l).map_or(l.as_str(), |k| k.name.as_str());
-            if is_api_key_account(l) {
+            let uuid = l.account_uuid.as_str();
+            let called = name(uuid).map_or(uuid, |k| k.name.as_str());
+            if is_api_key_account(uuid) {
                 format!("{called} (API key)")
+            } else if l.setup_token_only {
+                format!("{called} (setup token)")
             } else {
                 called.to_string()
             }
@@ -579,10 +596,12 @@ impl LimitCensusReport {
                     } else {
                         ""
                     },
-                    if a.login {
-                        ""
-                    } else {
+                    if !a.login {
                         "; no login uses it now"
+                    } else if a.setup_token_only {
+                        "; only setup tokens use it now"
+                    } else {
+                        ""
                     }
                 ));
             }
@@ -607,7 +626,9 @@ impl LimitCensusReport {
 mod tests {
     use super::*;
     use crate::service::account_usage::{AccountUsageSnapshot, UsageOutcomeKind, Window};
-    use crate::service::add_account::API_KEY_ACCOUNT_PREFIX;
+    use crate::service::add_account::{
+        API_KEY_ACCOUNT_PREFIX, SETUP_TOKEN_ACCOUNT_PREFIX, SETUP_TOKEN_CREDENTIAL,
+    };
     use crate::service::attention::Facts;
     use crate::service::settings;
     use crate::store::HostProfileRow;
@@ -697,10 +718,26 @@ mod tests {
         rows
     }
 
+    /// An account a `/login` uses now.
+    fn login(uuid: &str) -> UsageLogin {
+        UsageLogin {
+            account_uuid: uuid.into(),
+            setup_token_only: false,
+        }
+    }
+
+    /// An account only setup-token profiles use now.
+    fn setup_token(uuid: &str) -> UsageLogin {
+        UsageLogin {
+            setup_token_only: true,
+            ..login(uuid)
+        }
+    }
+
     /// The census of `rows` over the last week, the pause line at 90%;
-    /// `logins` are the accounts a login uses now.
+    /// `logins` are the accounts a `/login` uses now.
     fn census_with(rows: Vec<UsageSnapshotRow>, logins: &[&str]) -> LimitCensusReport {
-        let logins: Vec<String> = logins.iter().map(|l| l.to_string()).collect();
+        let logins: Vec<UsageLogin> = logins.iter().map(|l| login(l)).collect();
         census_of(&sorted(rows), &[], &logins, 90.0, &opts(7), 225)
     }
 
@@ -865,7 +902,7 @@ mod tests {
                 quiet(at)
             }
         });
-        let at = |pause_at: f64| census_of(&rows, &[], &["a".to_string()], pause_at, &opts(7), 225);
+        let at = |pause_at: f64| census_of(&rows, &[], &[login("a")], pause_at, &opts(7), 225);
         let r = at(90.0);
         assert_eq!(limit(&r).stretches, vec![]);
         assert_eq!(pause_line(&r).stretches, vec![stretch(t, t + 2 * HOUR)]);
@@ -972,6 +1009,62 @@ mod tests {
         );
     }
 
+    /// A `/login` a setup token took the place of: sessions run on, and the
+    /// hub can no longer ask how much they use.
+    #[test]
+    fn an_account_only_setup_tokens_use_now_is_counted_like_one_no_login_uses() {
+        let t = NOW - 5 * DAY;
+        // a was read for a day, with room, and is a setup token since; b is
+        // read all along and used up twice: while a's last reading still
+        // stands, and after it no longer does.
+        let last_a = t + DAY - 30 * MIN;
+        let (standing, unread) = (last_a + 2 * HOUR, last_a + DAY + 2 * HOUR);
+        let a = every_half_hour("a", t, t + DAY, quiet);
+        let b = every_half_hour("b", t, NOW, |at| {
+            if at >= unread {
+                used_up(unread, unread + HOUR)(at)
+            } else {
+                used_up(standing, standing + HOUR)(at)
+            }
+        });
+        let rows = sorted([a, b].concat());
+        let census = |a: UsageLogin| census_of(&rows, &[], &[a, login("b")], 90.0, &opts(7), 225);
+
+        let r = census(setup_token("a"));
+        assert_eq!(
+            limit(&r).stretches,
+            vec![stretch(unread, unread + HOUR)],
+            "a day after its last reading nothing says a has room"
+        );
+        let a = account(&r, "a");
+        assert_eq!(
+            (a.counted_secs, a.login, a.setup_token_only),
+            (2 * DAY - 30 * MIN, true, true)
+        );
+        assert_eq!(r.unread_accounts, Vec::<String>::new(), "it is counted");
+        let lines = r.lines();
+        let line = lines.iter().find(|l| l.starts_with("  a: ")).unwrap();
+        assert_eq!(
+            line,
+            "  a: 48 readings; at its limit never; past the pause line never; only setup tokens use it now"
+        );
+
+        // With a `/login` it is the spare with room: b alone is never all.
+        let r = census(login("a"));
+        assert_eq!(limit(&r).stretches, vec![]);
+        let a = account(&r, "a");
+        assert_eq!(
+            (a.counted_secs, a.login, a.setup_token_only),
+            (5 * DAY, true, false)
+        );
+        let lines = r.lines();
+        let line = lines.iter().find(|l| l.starts_with("  a: ")).unwrap();
+        assert_eq!(
+            line,
+            "  a: 48 readings; at its limit never; past the pause line never"
+        );
+    }
+
     #[test]
     fn accounts_counted_one_after_the_other_are_never_two_at_once() {
         let t = NOW - 5 * DAY;
@@ -1053,6 +1146,55 @@ mod tests {
         let r = limit_census(&s, &opts(7)).unwrap();
         assert_eq!(limit(&r).stretches, vec![stretch(hit, hit + 2 * HOUR)]);
         assert_eq!(r.accounts.len(), 1, "{:?}", r.accounts);
+    }
+
+    /// Through the store: a profile signed in with a setup token is a login
+    /// the hub does not read.
+    #[test]
+    fn a_setup_token_profile_on_a_host_is_named_and_not_counted() {
+        let s = Store::open_in_memory().unwrap();
+        s.insert_host("h1", Some("h1")).unwrap();
+        s.upsert_account(&crate::store::AccountRow {
+            uuid: "main".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        s.set_host_account("h1", Some("main")).unwrap();
+        let profile = |account: &str, credential: Option<&str>| HostProfileRow {
+            name: account.into(),
+            account_uuid: Some(account.into()),
+            email: None,
+            credential: credential.map(Into::into),
+        };
+        let token = Some(SETUP_TOKEN_CREDENTIAL);
+        // "was" had a `/login`, last read ten days before the window at
+        // 30%; "never" came as a token.
+        s.set_host_profiles("h1", &[profile("was", token), profile("never", token)])
+            .unwrap();
+        s.insert_usage_snapshot(&read("was", NOW - 17 * DAY, 30.0, NOW - 17 * DAY + HOUR))
+            .unwrap();
+        let hit = NOW - 2 * DAY;
+        for r in every_half_hour("main", NOW - 7 * DAY, NOW, used_up(hit, hit + 2 * HOUR)) {
+            s.insert_usage_snapshot(&r).unwrap();
+        }
+        let r = limit_census(&s, &opts(7)).unwrap();
+        assert_eq!(
+            limit(&r).stretches,
+            vec![stretch(hit, hit + 2 * HOUR)],
+            "main is the one account the hub reads"
+        );
+        assert_eq!(r.accounts.len(), 1, "{:?}", r.accounts);
+        assert_eq!(
+            r.unread_accounts,
+            vec!["never (setup token)", "was (setup token)"]
+        );
+
+        // The same profile with its `/login`: the spare, with room.
+        s.set_host_profiles("h1", &[profile("was", None), profile("never", token)])
+            .unwrap();
+        let r = limit_census(&s, &opts(7)).unwrap();
+        assert_eq!(limit(&r).stretches, vec![]);
+        assert_eq!(r.unread_accounts, vec!["never (setup token)"]);
     }
 
     #[test]
@@ -1215,7 +1357,7 @@ mod tests {
         // a and b are logins now; no login uses c any more. a was read
         // before the window began, b first some hours into it.
         let names = ["a", "b", "c"];
-        let logins = ["a".to_string(), "b".to_string()];
+        let logins = ["a", "b"];
         let mut rows = Vec::new();
         for name in names {
             let mut at = match name {
@@ -1247,7 +1389,7 @@ mod tests {
                 }
             }
         }
-        let r = census_of(&rows, &[], &logins, 90.0, &opts(3), 225);
+        let r = census_of(&rows, &[], &logins.map(login), 90.0, &opts(3), 225);
 
         let of = |name: &str| -> Vec<&UsageSnapshotRow> {
             rows.iter().filter(|r| r.account_uuid == name).collect()
@@ -1264,7 +1406,7 @@ mod tests {
                     continue;
                 };
                 read |= t - reading.fetched_at < READ_FOR_SECS;
-                if !logins.iter().any(|l| l == name) && t - reading.fetched_at >= STANDS_FOR_SECS {
+                if !logins.contains(name) && t - reading.fetched_at >= STANDS_FOR_SECS {
                     lapsed = true;
                     continue;
                 }
@@ -1343,15 +1485,25 @@ mod tests {
             has_extra_usage,
         };
         let key = format!("{API_KEY_ACCOUNT_PREFIX}0123");
+        let made_up = format!("{SETUP_TOKEN_ACCOUNT_PREFIX}89ab");
         let known = [
             known("a", "work", true),
             known("b", "home", false),
             known("c", "old@x", false),
             known(&key, "ci", false),
+            known("t", "team", false),
         ];
         // "new" is signed in on a host and was never read; it has no
-        // account row either.
-        let logins = ["a", "b", "new", key.as_str()].map(String::from);
+        // account row either. "t" and the account fleet made up for a token
+        // nobody named are signed in with setup tokens only: never read.
+        let logins = [
+            login("a"),
+            login("b"),
+            login("new"),
+            login(&key),
+            setup_token("t"),
+            setup_token(&made_up),
+        ];
         let t = NOW - DAY;
         let mut rows = every_half_hour("a", t, NOW, quiet);
         rows.extend(every_half_hour("b", t, NOW, quiet));
@@ -1380,7 +1532,15 @@ mod tests {
                 ("z", "z", false, false)
             ]
         );
-        assert_eq!(r.unread_accounts, vec!["ci (API key)", "new"]);
+        assert_eq!(
+            r.unread_accounts,
+            vec![
+                "ci (API key)",
+                "new",
+                "setuptoken-89ab (setup token)",
+                "team (setup token)"
+            ]
+        );
         assert_eq!(r.not_counted, NOT_COUNTED);
     }
 
@@ -1515,7 +1675,7 @@ mod tests {
                 has_extra_usage: false,
             },
         ];
-        let logins = ["a".to_string(), "b".to_string(), key];
+        let logins = [login("a"), login("b"), login(&key)];
         census_of(&rows, &known, &logins, 90.0, &opts(7), 225)
     }
 
@@ -1706,6 +1866,7 @@ not counted:";
                 "account_uuid": "a",
                 "name": "work",
                 "login": true,
+                "setup_token_only": false,
                 "has_extra_usage": true,
                 "readings": 336,
                 "counted_secs": 7 * DAY,

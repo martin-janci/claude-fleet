@@ -52,6 +52,18 @@ fn row(r: &rusqlite::Row<'_>) -> Result<UsageSnapshotRow> {
     })
 }
 
+/// An account some login is signed in to now
+/// ([`Store::usage_login_accounts`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsageLogin {
+    pub account_uuid: String,
+    /// Every login of it is a profile signed in with a setup token
+    /// (`HostProfileRow::credential`). Usage is read with a `/login`'s
+    /// credentials and never with a setup token (docs/accounts.md, *Setup
+    /// token*), so the hub does not read such an account.
+    pub setup_token_only: bool,
+}
+
 /// What a usage report calls an account, and whether a limit stops it.
 ///
 /// Read from the columns `accounts` has held since migration 028, not as an
@@ -164,13 +176,17 @@ impl Store {
     }
 
     /// The accounts a login is signed in to now: each host's own and its
-    /// profiles', hidden hosts left out, by uuid. Read from columns `hosts`
-    /// has held since migration 114, for the reason [`UsageAccount`] gives.
-    pub fn usage_login_accounts(&self) -> Result<Vec<String>> {
+    /// profiles', hidden hosts left out, by uuid, each with whether setup
+    /// tokens are its only logins ([`UsageLogin::setup_token_only`]). Read
+    /// from columns `hosts` has held since migration 114, for the reason
+    /// [`UsageAccount`] gives; a profile stored before setup tokens names no
+    /// credential, which is a `/login`.
+    pub fn usage_login_accounts(&self) -> Result<Vec<UsageLogin>> {
         let mut st = self
             .conn
             .prepare_cached("SELECT account_uuid, claude_profiles FROM hosts WHERE hidden = 0")?;
-        let mut accounts = std::collections::BTreeSet::new();
+        // Account -> every login of it seen so far is a setup token.
+        let mut accounts = std::collections::BTreeMap::<String, bool>::new();
         let mut rows = st.query([])?;
         while let Some(r) = rows.next()? {
             let own: Option<String> = r.get(0)?;
@@ -178,10 +194,24 @@ impl Store {
             let profiles = profiles
                 .and_then(|t| serde_json::from_str::<Vec<super::HostProfileRow>>(&t).ok())
                 .unwrap_or_default();
-            accounts.extend(own);
-            accounts.extend(profiles.into_iter().filter_map(|p| p.account_uuid));
+            // A host's own login is always a `/login`.
+            let logins = own.map(|uuid| (uuid, false)).into_iter().chain(
+                profiles
+                    .into_iter()
+                    .filter_map(|p| Some((p.account_uuid?, p.credential.is_some()))),
+            );
+            for (uuid, setup_token) in logins {
+                let only = accounts.entry(uuid).or_insert(true);
+                *only = *only && setup_token;
+            }
         }
-        Ok(accounts.into_iter().collect())
+        Ok(accounts
+            .into_iter()
+            .map(|(account_uuid, setup_token_only)| UsageLogin {
+                account_uuid,
+                setup_token_only,
+            })
+            .collect())
     }
 
     /// Every known account by the name a report prints, by uuid.
@@ -360,12 +390,100 @@ mod tests {
         s.set_host_account("gone", Some("old")).unwrap();
         s.set_host_profiles("gone", &[profile("p", Some("older"))])
             .unwrap();
+        let logins = || -> Vec<String> {
+            let logins = s.usage_login_accounts().unwrap();
+            assert!(logins.iter().all(|l| !l.setup_token_only), "{logins:?}");
+            logins.into_iter().map(|l| l.account_uuid).collect()
+        };
+        assert_eq!(logins(), vec!["old", "older", "own", "spare"]);
+        s.set_host_hidden("gone", true).unwrap();
+        assert_eq!(logins(), vec!["own", "spare"]);
+    }
+
+    #[test]
+    fn an_account_is_setup_token_only_when_no_login_of_it_is_a_login() {
+        use crate::store::HostProfileRow;
+        let s = Store::open_in_memory().unwrap();
+        let profile = |name: &str, account: &str, setup_token: bool| HostProfileRow {
+            name: name.into(),
+            account_uuid: Some(account.into()),
+            email: None,
+            credential: setup_token.then(|| "setup_token".to_string()),
+        };
+        for host in ["h1", "h2", "gone"] {
+            s.insert_host(host, Some(host)).unwrap();
+        }
+        for uuid in ["own", "hidden"] {
+            s.upsert_account(&crate::store::AccountRow {
+                uuid: uuid.into(),
+                ..Default::default()
+            })
+            .unwrap();
+        }
+        s.set_host_account("h1", Some("own")).unwrap();
+        s.set_host_profiles(
+            "h1",
+            &[
+                profile("t1", "one-token", true),
+                profile("t2", "two-tokens", true),
+                // A token beside the host's own login of the same account.
+                profile("t3", "own", true),
+                // A token here, the `/login` on the other host; and the
+                // other way round.
+                profile("t4", "token-then-login", true),
+                profile("p1", "login-then-token", false),
+                profile("t5", "hidden", true),
+            ],
+        )
+        .unwrap();
+        s.set_host_profiles(
+            "h2",
+            &[
+                profile("t6", "two-tokens", true),
+                profile("p2", "token-then-login", false),
+                profile("t7", "login-then-token", true),
+            ],
+        )
+        .unwrap();
+        // The account's only `/login` is on a hidden host: nobody's.
+        s.set_host_account("gone", Some("hidden")).unwrap();
+        s.set_host_hidden("gone", true).unwrap();
+        let got: Vec<(String, bool)> = s
+            .usage_login_accounts()
+            .unwrap()
+            .into_iter()
+            .map(|l| (l.account_uuid, l.setup_token_only))
+            .collect();
+        let want = [
+            ("hidden", true),
+            ("login-then-token", false),
+            ("one-token", true),
+            ("own", false),
+            ("token-then-login", false),
+            ("two-tokens", true),
+        ];
+        assert_eq!(got, want.map(|(uuid, only)| (uuid.to_string(), only)));
+    }
+
+    /// What `set_host_profiles` wrote before setup tokens came: no
+    /// `credential` key at all.
+    #[test]
+    fn a_profile_stored_before_setup_tokens_is_a_login() {
+        let s = Store::open_in_memory().unwrap();
+        s.insert_host("h1", Some("h1")).unwrap();
+        s.conn
+            .execute(
+                "UPDATE hosts SET claude_profiles = ?1 WHERE alias = 'h1'",
+                [r#"[{"name":"work","account_uuid":"old","email":null}]"#],
+            )
+            .unwrap();
         assert_eq!(
             s.usage_login_accounts().unwrap(),
-            vec!["old", "older", "own", "spare"]
+            vec![UsageLogin {
+                account_uuid: "old".into(),
+                setup_token_only: false
+            }]
         );
-        s.set_host_hidden("gone", true).unwrap();
-        assert_eq!(s.usage_login_accounts().unwrap(), vec!["own", "spare"]);
     }
 
     #[test]

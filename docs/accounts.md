@@ -156,7 +156,9 @@ and `list_hosts` shows the profile with `credential: "setup_token"`.
 - **Never on an API-key profile**: refused (`E_EXISTS`).
 - **Usage**: a setup token is inference only, so its profile is never a
   usage source; the account's 5-hour and weekly readings come from a
-  `/login` of the same account elsewhere, if there is one. Nor is a token
+  `/login` of the same account elsewhere, if there is one. With none, the
+  account goes unread, and the limit census names it instead of counting
+  it ([`hub.md`](hub.md), *Limit census*). Nor is a token
   beside a `/login` of the same account a login conflict: it has no refresh
   token to revoke.
 - **Signed out** (the token expired or was revoked): the login card, the
