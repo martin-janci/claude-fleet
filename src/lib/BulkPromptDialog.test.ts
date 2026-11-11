@@ -75,4 +75,35 @@ describe('BulkPromptDialog', () => {
     expect(onClose).not.toHaveBeenCalled();
     expect(screen.getByTestId('form-discard-ask')).toBeTruthy();
   });
+
+  it('after a partial failure it retries only the failed session, with the same words', async () => {
+    let failB = true;
+    vi.mocked(invoke).mockImplementation(async (cmd: string, a?: unknown) => {
+      const id = (a as { args: { session_id: number } }).args.session_id;
+      if (cmd !== 'queue_prompt') return null;
+      if (id === 2 && failB) throw { code: 'E_SSH', message: 'host dropped' };
+      return { session_id: id, delivered: true };
+    });
+    const third = session('nas', 'dev-c', { id: 3, status: 'running', claude_status: 'working' });
+    sessions.set([idle, busy, third]);
+    vi.mocked(invoke).mockClear();
+    const onClose = vi.fn();
+    render(BulkPromptDialog, { props: { targets: [idle, busy, third], onClose } });
+    await settle();
+    const ta = screen.getByTestId('bulk-prompt-textarea') as HTMLTextAreaElement;
+    await fireEvent.input(ta, { target: { value: 'rebase' } });
+    await fireEvent.click(screen.getByTestId('bulk-prompt-send'));
+    await waitFor(() => expect(screen.getByTestId('bulk-err-2')).toBeTruthy());
+    expect(screen.getByTestId('bulk-prompt-send')).toHaveTextContent('Retry 1 failed');
+    // The words are fixed now: a retry cannot send others to some sessions.
+    expect(ta.disabled).toBe(true);
+    failB = false;
+    await fireEvent.click(screen.getByTestId('bulk-prompt-send'));
+    await waitFor(() => expect(screen.getByTestId('bulk-sent-2')).toBeTruthy());
+    const sent = vi.mocked(invoke).mock.calls.filter((c) => c[0] === 'queue_prompt').map((c) => (c[1] as { args: { session_id: number } }).args.session_id);
+    expect(sent.sort()).toEqual([1, 2, 2, 3]);
+    // The first marks stay.
+    expect(screen.getByTestId('bulk-sent-1')).toBeTruthy();
+    expect(screen.getByTestId('bulk-sent-3')).toBeTruthy();
+  });
 });
