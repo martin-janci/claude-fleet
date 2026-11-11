@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { attentionFacts } from './lib/attention_facts';
   import Icon from './lib/kit/Icon.svelte';
   import StatusBar from './lib/kit/StatusBar.svelte';
   import MoodLine from './lib/MoodLine.svelte';
@@ -154,6 +155,7 @@
       health,
       remote: $hubStatus.remote,
       hubUrl: $hubStatus.url,
+      downHosts: $attentionFacts.down_hosts,
     }),
   );
   const trackersLine = $derived(trackersSummary($trackersHealth));

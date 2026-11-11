@@ -110,3 +110,12 @@ describe('loadAppVersion', () => {
     expect(get(appVersion)).toBeNull();
   });
 });
+
+describe('the status bar never says "All systems OK" with a host down (HITL audit H-16)', () => {
+  const health = { version: '0.6.4', db_ready: true, schema_version: 230 };
+  it('names one down host, counts several, and is OK only with none', () => {
+    expect(versionLine({ app: '0.6.4', health, remote: true, hubUrl: 'h', downHosts: ['oci-arm'] }).text).toBe('oci-arm is offline');
+    expect(versionLine({ app: '0.6.4', health, remote: false, hubUrl: null, downHosts: ['a', 'b'] }).text).toBe('2 hosts offline');
+    expect(versionLine({ app: '0.6.4', health, remote: true, hubUrl: 'h', downHosts: [] }).text).toBe('All systems OK');
+  });
+});
