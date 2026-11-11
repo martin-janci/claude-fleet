@@ -263,14 +263,32 @@ pub fn parse_repo(out: &str) -> Option<String> {
     }
 }
 
+/// PURE: why a probe whose script prints `tag` on every line it answers
+/// got no answer: the call ended non-zero and printed none of its lines (an
+/// SSH connection that failed is exit 255 with empty stdout, not an `Err`).
+/// `None` when the script ran.
+fn no_answer(out: &std::process::Output, tag: &str) -> Option<String> {
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    if out.status.success() || stdout.lines().any(|l| l.starts_with(tag)) {
+        return None;
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let last = stderr
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("no output");
+    Some(text::no_answer(&last.chars().take(200).collect::<String>()))
+}
+
 /// Probe one (host, login) pair.
 async fn probe(
-    deps: &Deps,
+    ssh: &dyn crate::ssh::SshExec,
     host: &str,
     profile: Option<&str>,
     repos: &[(String, String)],
 ) -> TargetReport {
-    let ssh = deps.ssh.as_ref();
     let mut r = TargetReport {
         host: host.to_string(),
         profile: profile.map(str::to_string),
@@ -289,7 +307,7 @@ async fn probe(
             }
         };
         if !servers.is_empty() {
-            if let Ok(out) = crate::ssh::run_shell_bounded(
+            match crate::ssh::run_shell_bounded(
                 ssh,
                 host,
                 &sign_in_script(p, &servers),
@@ -298,17 +316,29 @@ async fn probe(
             )
             .await
             {
-                r.sign_in = parse_sign_in(&String::from_utf8_lossy(&out.stdout));
+                Ok(out) => match no_answer(&out, OAUTH_TAG) {
+                    Some(why) => r.errors.push(why),
+                    None => r.sign_in = parse_sign_in(&String::from_utf8_lossy(&out.stdout)),
+                },
+                Err(e) => r.errors.push(e.message),
             }
         }
     }
     for (name, path) in repos {
         match crate::ssh::run_shell_bounded(ssh, host, &repo_script(path), CONNECT, WALL).await {
-            Ok(out) => {
-                if let Some(why) = parse_repo(&String::from_utf8_lossy(&out.stdout)) {
-                    r.repos_failed.push(format!("{name} ({why})"));
+            // A host that does not answer is said once, not once per repo:
+            // each further try would cost another connect timeout.
+            Ok(out) => match no_answer(&out, REPO_TAG) {
+                Some(why) => {
+                    r.errors.push(why);
+                    break;
                 }
-            }
+                None => {
+                    if let Some(why) = parse_repo(&String::from_utf8_lossy(&out.stdout)) {
+                        r.repos_failed.push(format!("{name} ({why})"));
+                    }
+                }
+            },
             Err(e) => {
                 r.errors.push(e.message);
                 break;
@@ -370,7 +400,7 @@ pub async fn check_once(deps: &Deps, m: &MissionRow, grant: &GrantRow, now: i64)
     }
     let mut reports = Vec::new();
     for (host, profile) in &targets {
-        reports.push(probe(deps, host, profile.as_deref(), &repos).await);
+        reports.push(probe(deps.ssh.as_ref(), host, profile.as_deref(), &repos).await);
     }
     let mut problems: Vec<String> = orgs.clone();
     for r in &reports {
@@ -449,6 +479,10 @@ mod text {
             "{at}: git cannot reach {repo}; give the host access to that remote \
              (an SSH key or a token for it)."
         )
+    }
+
+    pub fn no_answer(why: &str) -> String {
+        format!("the host did not answer, so its access could not be checked: {why}")
     }
 
     pub fn share_failed(why: &str) -> String {

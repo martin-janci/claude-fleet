@@ -131,3 +131,33 @@ fn a_host_of_another_organisation_is_named_at_the_grant() {
     let plain = mission(&s);
     assert!(org_conflicts(&s, &plain, &hosts).unwrap().is_empty());
 }
+
+/// A host that does not answer is "could not check", not "all is well":
+/// ssh's exit 255 is an `Ok` with no output, which the repo and sign-in
+/// readers would otherwise read as a repo that answered.
+#[tokio::test]
+async fn a_host_that_does_not_answer_is_reported_once_and_not_as_passed() {
+    let fake = crate::ssh_fake::FakeSsh::new();
+    fake.unreachable("mercury");
+    let repos = vec![
+        ("pos".to_string(), "/srv/pos".to_string()),
+        ("web".to_string(), "/srv/web".to_string()),
+    ];
+    let r = probe(&fake, "mercury", None, &repos).await;
+    assert!(r.repos_failed.is_empty(), "{r:?}");
+    assert_eq!(r.errors.len(), 1, "{r:?}");
+    assert!(r.errors[0].starts_with("the host did not answer"), "{r:?}");
+    assert_eq!(
+        fake.calls_for("mercury").len(),
+        1,
+        "one connect, not one per repo"
+    );
+    assert_eq!(r.problems().len(), 1, "a person is asked");
+
+    // A host that answers is checked as before.
+    let ok = crate::ssh_fake::FakeSsh::new();
+    ok.set_default(crate::ssh_fake::Reply::ok("@@R ok\n"));
+    let r = probe(&ok, "venus", None, &repos).await;
+    assert!(r.errors.is_empty() && r.repos_failed.is_empty(), "{r:?}");
+    assert_eq!(ok.calls_for("venus").len(), 2);
+}

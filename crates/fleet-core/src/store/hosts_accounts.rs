@@ -249,6 +249,32 @@ impl Store {
         self.emit_host(alias, |bus, row| bus.host_probed(row))
     }
 
+    /// A probe of `alias` that did not answer: the row goes unreachable
+    /// with `error` (code, message), and keeps its versions — not answering
+    /// says nothing about what is installed there. The account link is
+    /// not touched either.
+    pub fn mark_host_probe_failed(
+        &self,
+        alias: &str,
+        last_pinged_at: i64,
+        error: (&str, &str),
+    ) -> Result<(), rusqlite::Error> {
+        let (claude, tmux) = match self.get_host_row(alias)? {
+            Some(h) => (h.claude_version, h.tmux_version),
+            None => (None, None),
+        };
+        super::reconcile::write_host_probe(
+            &self.conn,
+            alias,
+            false,
+            claude.as_deref(),
+            tmux.as_deref(),
+            last_pinged_at,
+            Some(error),
+        )?;
+        self.emit_host(alias, |bus, row| bus.host_probed(row))
+    }
+
     /// Stamp when the host's versions were last read from the host itself
     /// (migration 076). Written by the reconcile pass only on a pass whose
     /// probe carried a `versions` section, and by `probe_host`; the
