@@ -12,6 +12,24 @@ For the agent that picks this up. Read `README.md` first: findings H-01…H-40 w
 - Open owner decisions: README §8. Waves 0 and 1.2–1.9 do not depend on them;
   1.1 (the leash) depends on decision 1.
 
+## Progress (2026-11-11)
+
+Done on this branch, each with tests: H-25 (diff blank lines), H-57/H-58
+(a card never focuses Approve; Escape never denies), H-11/H-12 (row says
+why, dot is the state; phone rows too), H-15 (row keeps its name, risky
+hover actions in the ⋯ menu), H-08 review asks counted, H-07 in-window
+toast, H-13 card headline from the tool call and wrapping answers, H-17
+failed clean up is Failed (hub, desktop, phone), H-16 Inbox header adds
+up, H-02 confirm-card wording, H-22 Escape leaves select mode.
+
+Left in Wave 0: 0.10's phone card scrolling and `maxLines` (H-33, H-36),
+the session header title (H-15, `SessionTabs.svelte`), the status bar's
+"All systems OK" (H-16). Then Wave 1.
+
+Memory: the fleet-core test target needs most of the 16 GB box. Stop any
+Gradle daemon (`./gradlew --stop`) and run nothing beside
+`cargo test -p fleet-core --lib -j 1 -- <filter>`.
+
 ## Where to start
 
 Wave 0 (README §6), one PR per row, in this order: 0.1 (diff blank lines, H-25:
