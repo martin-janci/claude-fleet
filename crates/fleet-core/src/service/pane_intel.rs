@@ -486,17 +486,23 @@ pub(crate) fn detect_stuck(text: &str) -> Option<StuckKind> {
             || l.contains("trust the files in this folder")
             || l.contains("trust this folder")
     });
-    if trust_cue.is_some_and(|at| !lines[at + 1..].iter().any(|l| is_live_input_line(l))) {
+    let no_live_input_below = |at: usize| !lines[at + 1..].iter().any(|l| is_live_input_line(l));
+    if trust_cue.is_some_and(no_live_input_below) {
         return Some(StuckKind::TrustPrompt);
     }
 
-    // Auth/login selection menu.
-    if lower.contains("select login method")
-        || lower.contains("choose an account")
-        || lower.contains("select an account")
-        || lower.contains("log in to claude")
-        || (lower.contains("login") && lower.contains("subscription"))
-    {
+    // Auth/login selection menu. It takes the input box's place, so the same
+    // reading holds: with a live input line below them the words are a
+    // session's own text (the operator discussing a "subscription login").
+    let login_and_subscription = lower.contains("login") && lower.contains("subscription");
+    let auth_cue = lines.iter().rposition(|l| {
+        l.contains("select login method")
+            || l.contains("choose an account")
+            || l.contains("select an account")
+            || l.contains("log in to claude")
+            || (login_and_subscription && (l.contains("login") || l.contains("subscription")))
+    });
+    if auth_cue.is_some_and(no_live_input_below) {
         return Some(StuckKind::AuthMenu);
     }
 
@@ -2094,6 +2100,63 @@ Enter to select · ↑/↓ to navigate · Esc to cancel
         let intel = analyze(tail);
         assert_eq!(intel.stuck, None);
         assert_ne!(intel.derived_status, Some(ClaudeStatus::Blocked));
+    }
+
+    /// The operator's pane on 2026-11-11: it was discussing a "subscription
+    /// login" with the person, idle at an empty input box. Read as the login
+    /// menu, the hub held its queue and raised "needs you to sign in".
+    #[test]
+    fn a_reply_about_a_subscription_login_is_not_the_login_menu() {
+        let tail = "\
+● AI brain z chatu: chat na prode beží cez AGENT_BRAIN=bridge, teda claude-bridge na subscription logine.
+  - v Model Routeri pridať route bez fallbacku na BRIDGE (subscription);
+✻ Baked for 13s · done 7:51 AM
+────────────────────────────────────────
+❯
+────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle)
+";
+        let intel = analyze(tail);
+        assert_eq!(intel.stuck, None);
+        assert_ne!(intel.derived_status, Some(ClaudeStatus::Blocked));
+    }
+
+    #[test]
+    fn the_login_menu_with_a_focused_row_is_still_an_auth_menu() {
+        let intel = analyze(
+            "Claude Code can be used with your Claude subscription or billed based on API usage.\n\n\
+             Select login method:\n\n\
+             ❯ 1. Claude account with subscription · Pro, Max, Team, or Enterprise\n\n\
+             \x20 2. Anthropic Console account · API usage billing\n",
+        );
+        assert_eq!(intel.stuck, Some(StuckKind::AuthMenu));
+        assert_eq!(intel.derived_status, Some(ClaudeStatus::Blocked));
+    }
+
+    /// The dialog as Claude Code 2.1.322 drew it on the operator's host on
+    /// 2026-11-10: unnumbered rows, `No, exit` first and focused.
+    #[test]
+    fn the_unnumbered_trust_dialog_is_a_trust_prompt() {
+        let tail = "\
+────────────────────────────────────────
+ Accessing workspace:
+
+ /home/dev/.claude-fleet/operator
+
+ Quick safety check: Is this a project you created or one you trust? (Like your own code, a well-known open source project, or work from your team).
+
+ Claude Code'll be able to read, edit, and execute files here.
+
+ Security guide
+
+ ❯ No, exit
+   Yes, I trust this folder
+
+ Enter to confirm · Esc to cancel
+";
+        let intel = analyze(tail);
+        assert_eq!(intel.stuck, Some(StuckKind::TrustPrompt));
+        assert_eq!(intel.derived_status, Some(ClaudeStatus::Blocked));
     }
 
     #[test]
