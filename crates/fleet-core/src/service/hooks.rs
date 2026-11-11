@@ -688,15 +688,28 @@ pub fn take_pending_stop_delivery(
     ))
 }
 
-/// The worker guard's answer to a `PreToolUse(Bash)` hook (orchestration
-/// §7.2): why the command is a person's step, for a mission's worker only;
-/// `None` lets it run. Never an error: a guard that cannot read the store
-/// lets the command through, as a hub that does not answer would.
-pub fn pre_tool_use_denial(
+/// What the guard answers a `PreToolUse(Bash)` hook with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuardDecision {
+    /// A mission's worker: the step is refused (orchestration §7.2).
+    Deny,
+    /// Any other session fleet tracks, with
+    /// [`SESSIONS_ASK_BEFORE_PERSON_STEPS`](crate::service::settings::SESSIONS_ASK_BEFORE_PERSON_STEPS)
+    /// on: Claude Code's own permission prompt, which the session's answer
+    /// card shows (the leash, HITL audit H-01).
+    Ask,
+}
+
+/// The guard's answer to a `PreToolUse(Bash)` hook: for a person's step
+/// (`guard::deny_reason`), `Deny` in a mission's worker, `Ask` in any other
+/// session fleet tracks while the leash setting is on; `None` lets the
+/// command run. Never an error: a guard that cannot read the store lets the
+/// command through, as a hub that does not answer would.
+pub fn pre_tool_use_decision(
     store: &Arc<Mutex<Store>>,
     payload: &HookPayload,
     ctx: &HookContext,
-) -> Option<&'static str> {
+) -> Option<(GuardDecision, &'static str)> {
     if payload.tool_name.as_deref() != Some("Bash") {
         return None;
     }
@@ -706,13 +719,41 @@ pub fn pre_tool_use_denial(
     crate::service::work::orchestrate::guard::deny_reason(command, Some("main"))?;
     let s = lock(store).ok()?;
     let (row, _) = resolve_hook_row(&s, payload, ctx, false).ok()??;
-    if !s.is_mission_worker(row.id).ok()? {
+    let worker = s.is_mission_worker(row.id).ok()?;
+    if !worker
+        && !crate::service::settings::get_bool(
+            &s,
+            crate::service::settings::SESSIONS_ASK_BEFORE_PERSON_STEPS,
+        )
+    {
         return None;
     }
     let branch = s.session_branch(row.id).ok().flatten();
     let why = crate::service::work::orchestrate::guard::deny_reason(command, branch.as_deref())?;
-    tracing::info!(session = %row.tmux_name, why, "[hook] worker guard refused a command");
-    Some(why)
+    if worker {
+        tracing::info!(session = %row.tmux_name, why, "[hook] worker guard refused a command");
+        Some((GuardDecision::Deny, why))
+    } else {
+        tracing::info!(session = %row.tmux_name, why, "[hook] guard asked for a person's OK");
+        // Claude Code shows the reason in its prompt: no design reference there.
+        Some((
+            GuardDecision::Ask,
+            why.trim_end_matches(" (orchestration §7.3)"),
+        ))
+    }
+}
+
+/// The worker guard's refusal alone: [`pre_tool_use_decision`] when it
+/// denies. Kept for the callers and tests that ask only about workers.
+pub fn pre_tool_use_denial(
+    store: &Arc<Mutex<Store>>,
+    payload: &HookPayload,
+    ctx: &HookContext,
+) -> Option<&'static str> {
+    match pre_tool_use_decision(store, payload, ctx)? {
+        (GuardDecision::Deny, why) => Some(why),
+        (GuardDecision::Ask, _) => None,
+    }
 }
 
 /// Most characters of a SessionStart `additionalContext` (work graph M4.5).
@@ -4966,10 +5007,11 @@ mod tests {
         );
     }
 
-    /// The worker guard (orchestration §7.2): a mission's worker is refused
-    /// a person's step; the same command from any other session runs.
+    /// The guard (orchestration §7.2, the leash H-01): a mission's worker is
+    /// refused a person's step; any other session is asked, unless the
+    /// leash setting is off.
     #[test]
-    fn the_guard_refuses_a_missions_worker_and_nobody_else() {
+    fn the_guard_refuses_a_missions_worker_and_asks_everyone_else() {
         let store = make_store();
         let id = hooked(&store);
         let master = Caller::master();
@@ -4983,6 +5025,33 @@ mod tests {
             pre_tool_use_denial(&store, &bash("gh pr merge 3"), &c),
             None,
             "not a worker"
+        );
+        // The leash (HITL audit H-01): any other session is asked, by default.
+        assert_eq!(
+            pre_tool_use_decision(&store, &bash("gh pr merge 3"), &c),
+            Some((GuardDecision::Ask, "merging a PR is a person's step")),
+        );
+        assert!(matches!(
+            pre_tool_use_decision(&store, &bash("git push origin main"), &c),
+            Some((GuardDecision::Ask, _))
+        ));
+        assert_eq!(pre_tool_use_decision(&store, &bash("pnpm test"), &c), None);
+        assert_eq!(
+            pre_tool_use_decision(&store, &bash("git push -u origin feat"), &c),
+            None
+        );
+        // Off: the session runs it unasked, as before.
+        store
+            .lock()
+            .unwrap()
+            .set_setting(
+                crate::service::settings::SESSIONS_ASK_BEFORE_PERSON_STEPS,
+                "false",
+            )
+            .unwrap();
+        assert_eq!(
+            pre_tool_use_decision(&store, &bash("gh pr merge 3"), &c),
+            None
         );
         {
             let s = store.lock().unwrap();
@@ -5003,7 +5072,12 @@ mod tests {
             let t = s.insert_task(None, Some(id), "go", "n").unwrap();
             s.set_task_run(t.id, item, 1, "implement").unwrap();
         }
+        // A worker is refused whatever the leash setting says.
         assert!(pre_tool_use_denial(&store, &bash("gh pr merge 3"), &c).is_some());
+        assert!(matches!(
+            pre_tool_use_decision(&store, &bash("gh pr merge 3"), &c),
+            Some((GuardDecision::Deny, _))
+        ));
         assert!(pre_tool_use_denial(&store, &bash("git push origin main"), &c).is_some());
         assert_eq!(
             pre_tool_use_denial(&store, &bash("git push -u origin feat"), &c),

@@ -28,9 +28,21 @@ instead of "All systems OK" (H-16, `app_version.ts`), and the phone's
 question card prints the command once with answers that wrap, plus one-line
 bottom-bar labels (H-33, H-36; fleet-mobile `QuestionCard.kt`, `BottomBar.kt`).
 
-**Wave 0 is complete.** Next is Wave 1 (README §6). 1.1, the leash (ask before
-a step a person owns), waits on owner decision 1 in README §8; the audit
-recommends asking. 1.2–1.9 can start now.
+**Wave 0 is complete.**
+
+Owner decision 1 (2026-11-11): **ask by default.** Wave 1.1 landed: the hub's
+guard answers `ask` (Claude Code's own permission prompt, which the answer
+card shows) for a person's step in every session fleet tracks, `deny` in a
+mission's worker as before (`service::hooks::pre_tool_use_decision`, setting
+`sessions.ask_before_person_steps`, default on). The inspector and the Details
+tab say which leash a session is on (`src/lib/leash.ts`). Still to verify on a
+host: that Claude Code honours a hook's `ask` under `--dangerously-skip-permissions`
+on the version the hosts run (README H-01 step 2); the guard stays fail-open.
+
+Also: an agent action's Details show its arguments as readable fields, not
+escaped JSON (`actionDetails` in `src/lib/agents.ts`).
+
+Next: Wave 1.2–1.9 (README §6).
 
 Memory: the fleet-core test target needs most of the 16 GB box. Stop any
 Gradle daemon (`./gradlew --stop`) and run nothing beside

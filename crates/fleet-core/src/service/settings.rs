@@ -320,6 +320,14 @@ pub const RECONCILE_STALE_WORKING_TTL_SECS: &str = "reconcile.stale_working_ttl_
 /// through to `HostReconcile::lost_ttl_cutoff` / `ghost_and_clean_bg_sessions`
 /// by Task 6.
 pub const SESSIONS_LOST_TTL_SECS: &str = "sessions.lost_ttl_secs";
+/// The leash's first level (HITL audit H-01, owner decision 2026-11-11: ask
+/// by default). Fleet starts sessions with permission prompts skipped, so
+/// the worker guard's person's steps — merging or readying a PR, pushing to
+/// the default branch, writing to a tracker — raise Claude Code's own
+/// permission prompt in every session fleet tracks (`PreToolUse` answers
+/// `ask`). A mission's worker is refused them whatever this says. Off: they
+/// run unasked, as before. Read on every guarded command.
+pub const SESSIONS_ASK_BEFORE_PERSON_STEPS: &str = "sessions.ask_before_person_steps";
 /// How old `hosts.claude_version_at` may be for the desktop's "Claude older
 /// than the newest in the fleet" badge to trust the stored version. Older
 /// than this (or never stamped) shows no badge at all: a stale number was
@@ -957,6 +965,13 @@ pub const SPECS: &[Spec] = &[
     )
     .unit(Unit::Hours)
     .zero("removed on the next pass"),
+    Spec::new(
+        SESSIONS_ASK_BEFORE_PERSON_STEPS,
+        "true",
+        Kind::Bool,
+        "Ask before a person's step",
+        "In every session fleet started, merging or readying a pull request, pushing to main or master, and writing to Jira, Asana or Linear wait for your OK in the session's permission prompt. Mission workers are refused these whatever this says. Off: they run unasked.",
+    ),
     Spec::new(
         RESTORE_BATCH_SIZE,
         "4",

@@ -100,6 +100,8 @@
   import { goTo } from './destination';
   import { shortcutLabel } from './shortcuts';
   import { detectMac } from './terminal_keys';
+  import { leashFor } from './leash';
+  import { fleetSettings } from './fleet_settings';
 
   // Two layouts of one session (UX audit 2026-10-09, I1–I6 and D1–D3): the
   // inspector beside the conversation (Main board) is a quick read plus the
@@ -280,6 +282,8 @@
   const hostRow = $derived($hostByAlias.get(session.host_alias) ?? null);
   const accountUuid = $derived(sessionAccountUuid(session, hostRow?.account_uuid));
   const accountRow = $derived(accountUuid ? ($accountByUuid.get(accountUuid) ?? null) : null);
+  /** Which leash it is on (HITL audit H-01): what the hub's guard asks about. */
+  const leash = $derived(leashFor(session, $fleetSettings['sessions.ask_before_person_steps'] !== 'false'));
 
   const worktree = $derived(parentProject?.worktrees.find((w) => w.id === session.worktree_id) ?? null);
   const usageSnap = $derived(accountUuid ? ($accountUsage[accountUuid] ?? null) : null);
@@ -900,6 +904,13 @@
      the SessionDetails board: Facts tiles, Timeline, Related sessions and
      every action grouped Steer / Place / Share. Both run the same handlers
      and dialogs below, so nothing moves between them but the layout. -->
+{#snippet leashRow()}
+  {#if leash}
+    <dt>Asks you</dt>
+    <dd data-testid="session-leash" data-leash={leash.label} title={leash.caveat || undefined}>{leash.text}</dd>
+  {/if}
+{/snippet}
+
 {#snippet act(testid: string, label: string, run: () => void, blocked: string | null, title = '', cls = 'btn btn--quiet is-bounded')}
   <button class={cls} onclick={run} disabled={blocked !== null} title={blocked ?? title} data-testid={testid}>{label}</button>
 {/snippet}
@@ -1050,6 +1061,7 @@
       {/if}
       <dt>Account</dt>
       <dd data-testid="session-account">{accountRow ? accountLabel(accountRow) : '—'}</dd>
+      {@render leashRow()}
       {#if fiveHour || week}
         {@const c5 = compactWindow('5h', usageSnap, nowSec)}
         {@const cw = compactWindow('weekly', usageSnap, nowSec)}
@@ -1187,6 +1199,7 @@
         <dt>Label</dt>
         <dd data-testid="details-tags">{@render tagChips()}</dd>
       {/if}
+      {@render leashRow()}
       {#if canSwitchLogin}
         <dt>Login</dt>
         <dd class="login" data-testid="session-login">

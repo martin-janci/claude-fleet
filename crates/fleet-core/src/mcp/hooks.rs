@@ -223,18 +223,23 @@ pub async fn handle_hook(
                     _ => StatusCode::NO_CONTENT.into_response(),
                 };
             }
-            // The worker guard (orchestration §7.2): only a command the
-            // installed prefilter let through reaches here.
+            // The guard (orchestration §7.2; the leash, HITL audit H-01):
+            // only a command the installed prefilter let through reaches
+            // here. A worker is refused a person's step; any other session
+            // fleet tracks is asked through Claude Code's permission prompt.
             if event == "PreToolUse" {
-                return match crate::service::hooks::pre_tool_use_denial(
+                return match crate::service::hooks::pre_tool_use_decision(
                     &state.store,
                     &payload,
                     &ctx,
                 ) {
-                    Some(why) => axum::Json(serde_json::json!({
+                    Some((decision, why)) => axum::Json(serde_json::json!({
                         "hookSpecificOutput": {
                             "hookEventName": event,
-                            "permissionDecision": "deny",
+                            "permissionDecision": match decision {
+                                crate::service::hooks::GuardDecision::Deny => "deny",
+                                crate::service::hooks::GuardDecision::Ask => "ask",
+                            },
                             "permissionDecisionReason": why,
                         }
                     }))
