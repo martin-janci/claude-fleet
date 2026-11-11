@@ -1,14 +1,18 @@
-//! `fleet-hub census …` — local measurements for the Jev evaluation
-//! (`docs/superpowers/specs/2026-09-27-jev-language-census-design.md`).
+//! `fleet-hub census …` — local measurements: the language census for the
+//! Jev evaluation
+//! (`docs/superpowers/specs/2026-09-27-jev-language-census-design.md`), and
+//! the limit census (how often every Claude account was at its usage limit
+//! at once, `fleet_core::service::limit_census`).
 //!
 //! Reads `state.db` directly and read-only: no running hub, no network, no
-//! write. The census prints counts only; `--export-sample` is the one path
+//! write. A census prints counts only; `--export-sample` is the one path
 //! that writes text, to a new local file the operator asked for (D46).
 
 use crate::config::HubOptions;
 use crate::dbarg::{db_path, open_read_only};
 use crate::out;
 use clap::Subcommand;
+use fleet_core::service::limit_census;
 use fleet_core::service::nl::{self, census, Detector};
 use fleet_core::store::now_unix;
 use std::collections::HashMap;
@@ -52,6 +56,24 @@ pub enum CensusCmd {
         /// Where --export-sample writes (must not exist).
         #[arg(long, value_name = "FILE", requires = "export_sample")]
         out: Option<PathBuf>,
+    },
+    /// How often every Claude account was at its usage limit at the same
+    /// time, from the usage history the hub keeps: the times, how long they
+    /// lasted, and each account's own limits.
+    ///
+    /// Reads the database directly and never writes it; a running hub is not
+    /// needed.
+    Limits {
+        /// The window in days (1-35, what the history keeps). [default: 28]
+        #[arg(long)]
+        days: Option<u32>,
+        /// Read this database file instead of the hub's, e.g. a copy of
+        /// another hub's state.db.
+        #[arg(long, value_name = "FILE")]
+        db: Option<PathBuf>,
+        /// Print the answer as JSON instead of lines.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -128,6 +150,18 @@ pub fn run(
             )?;
             Ok(ExitCode::SUCCESS)
         }
+        CensusCmd::Limits { days, db, json } => {
+            let o =
+                limit_census::LimitCensusOptions::new(days, now_unix()).map_err(|e| e.message)?;
+            let store = open_read_only(&db_path(db.as_deref(), opts, env)?)?;
+            let report = limit_census::limit_census(&store, &o).map_err(|e| e.message)?;
+            print(
+                json,
+                || serde_json::to_string_pretty(&report),
+                report.lines(),
+            )?;
+            Ok(ExitCode::SUCCESS)
+        }
     }
 }
 
@@ -173,6 +207,94 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn limits_parses_on_the_command_line() {
+        let t = T::try_parse_from(["t", "limits"]).unwrap();
+        assert!(matches!(
+            t.cmd,
+            CensusCmd::Limits {
+                days: None,
+                db: None,
+                json: false
+            }
+        ));
+        let t =
+            T::try_parse_from(["t", "limits", "--days", "14", "--db", "x.db", "--json"]).unwrap();
+        let CensusCmd::Limits { days, db, json } = t.cmd else {
+            panic!("not limits");
+        };
+        assert_eq!(
+            (days, db, json),
+            (Some(14), Some(PathBuf::from("x.db")), true)
+        );
+        assert!(T::try_parse_from(["t", "limits", "--org", "2"]).is_err());
+    }
+
+    /// The whole path a person runs: a database file with a host, a login
+    /// and its readings, opened read-only and counted.
+    #[test]
+    fn limits_counts_a_database_file_and_refuses_days_the_history_does_not_keep() {
+        use fleet_core::service::account_usage::{AccountUsage, Window};
+        use fleet_core::store::{AccountRow, Store, UsageSnapshotRow};
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("state.db");
+        {
+            let s =
+                Store::open_with_bus(&db, std::sync::Arc::new(fleet_core::events::NoopEventBus))
+                    .unwrap();
+            s.insert_host("h1", Some("h1")).unwrap();
+            s.upsert_account(&AccountRow {
+                uuid: "main".into(),
+                ..Default::default()
+            })
+            .unwrap();
+            s.set_host_account("h1", Some("main")).unwrap();
+            let now = now_unix();
+            for at in [now - 86_400, now - 3_600] {
+                s.insert_usage_snapshot(&UsageSnapshotRow {
+                    account_uuid: "main".into(),
+                    fetched_at: at,
+                    usage: AccountUsage {
+                        five_hour: Some(Window {
+                            utilization: 100.0,
+                            resets_at: Some(at + 1_800),
+                        }),
+                        ..Default::default()
+                    },
+                    subscription: None,
+                    source_host: Some("h1".into()),
+                })
+                .unwrap();
+            }
+        }
+        let run_limits = |days, json| {
+            run(
+                CensusCmd::Limits {
+                    days,
+                    db: Some(db.clone()),
+                    json,
+                },
+                &HubOptions::default(),
+                &HashMap::new(),
+            )
+        };
+        assert_eq!(run_limits(None, false), Ok(ExitCode::SUCCESS));
+        assert_eq!(run_limits(Some(35), true), Ok(ExitCode::SUCCESS));
+        let e = run_limits(Some(36), false).unwrap_err();
+        assert!(e.contains("days must be 1-35"), "{e}");
+        let e = run(
+            CensusCmd::Limits {
+                days: None,
+                db: Some(dir.path().join("none.db")),
+                json: false,
+            },
+            &HubOptions::default(),
+            &HashMap::new(),
+        )
+        .unwrap_err();
+        assert!(e.contains("no database at"), "{e}");
     }
 
     #[test]

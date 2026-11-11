@@ -120,7 +120,7 @@ mod work_view;
 mod worktree_setup;
 
 pub use access_requests::{AccessRequestRow, ACCESS_REQUEST_COOLDOWN_SECS};
-pub use account_usage_snapshots::{UsageSnapshotRow, USAGE_HISTORY_KEEP_SECS};
+pub use account_usage_snapshots::{UsageAccount, UsageSnapshotRow, USAGE_HISTORY_KEEP_SECS};
 pub use admin_events::{AdminEvent, AdminEventQuery, AdminEventRow, ADMIN_EVENTS_MAX_LIMIT};
 pub use agent_records::{
     AgentRecordRow, NewAgentRecord, AGENT_RECORDS_MAX_LIMIT, AGENT_RECORD_KEY_MAX,

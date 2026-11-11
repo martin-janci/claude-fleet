@@ -167,8 +167,10 @@ enum Cmd {
         #[command(flatten)]
         opts: HubOptions,
     },
-    /// Local measurements for the Jev evaluation: counts only, read straight
-    /// from the database. No running hub needed; nothing is written or sent.
+    /// Local measurements, counts only, read straight from the database: the
+    /// languages a decision model would see (Jev evaluation), and how often
+    /// every Claude account was at its usage limit at once. No running hub
+    /// needed; nothing is written or sent.
     Census {
         #[command(subcommand)]
         cmd: census::CensusCmd,

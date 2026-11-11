@@ -142,6 +142,19 @@ fn pre_work_graph_schema(conn: &Connection) {
     }
 }
 
+/// A new database file at `path` holding the schema of `version`: the
+/// historical migrations 001..=`version`, foreign keys on. For a test of a
+/// reader that also runs on a database from an older release.
+pub(crate) fn db_file_at(path: &std::path::Path, version: i64) -> Connection {
+    let conn = Connection::open(path).unwrap();
+    conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+    for (v, sql) in super::schema::migrations_through(version) {
+        conn.execute_batch(sql)
+            .unwrap_or_else(|e| panic!("historical migration {v}: {e}"));
+    }
+    conn
+}
+
 /// An in-memory database at the v0.2.37 schema (044), filled per `shape`.
 pub(crate) fn pre_work_graph_db(seed: u64, shape: Shape) -> (Connection, Manifest) {
     let conn = Connection::open_in_memory().unwrap();

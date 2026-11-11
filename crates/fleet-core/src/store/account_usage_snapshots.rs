@@ -52,6 +52,22 @@ fn row(r: &rusqlite::Row<'_>) -> Result<UsageSnapshotRow> {
     })
 }
 
+/// What a usage report calls an account, and whether a limit stops it.
+///
+/// Read from the columns `accounts` has held since migration 028, not as an
+/// `AccountRow`: that joins tables of migrations 217 and 218, and a report
+/// over the history is also run on an older database (`--db`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct UsageAccount {
+    pub uuid: String,
+    /// The nickname a person gave it, else its email, else its display name,
+    /// else its uuid.
+    pub name: String,
+    /// Past its limit the account spends pay-as-you-go money instead of
+    /// stopping (`accounts.has_extra_usage`).
+    pub has_extra_usage: bool,
+}
+
 fn pct(w: &Option<Window>) -> Option<f64> {
     w.as_ref().map(|w| w.utilization)
 }
@@ -122,6 +138,74 @@ impl Store {
              ORDER BY fetched_at, id"
         ))?;
         let rows = st.query_map(rusqlite::params![account_uuid, since], row)?;
+        rows.collect()
+    }
+
+    /// Every account's snapshots fetched at or after `since`, and before
+    /// them each account's newest one from before `since` (what it read as
+    /// `since` began): account by account, each oldest first
+    /// (`service::limit_census`).
+    pub fn usage_history_all(&self, since: i64) -> Result<Vec<UsageSnapshotRow>> {
+        let mut st = self.conn.prepare_cached(&format!(
+            // The newest-before rows by one index seek per account, as in
+            // `latest_usage_snapshots`.
+            "SELECT {COLS} FROM account_usage_snapshots WHERE fetched_at >= ?1 \
+             UNION ALL \
+             SELECT {COLS} FROM account_usage_snapshots s \
+             WHERE s.id IN (SELECT (SELECT id FROM account_usage_snapshots \
+                                    WHERE account_uuid = a.account_uuid AND fetched_at < ?1 \
+                                    ORDER BY fetched_at DESC, id DESC LIMIT 1) \
+                            FROM (SELECT DISTINCT account_uuid \
+                                  FROM account_usage_snapshots) a) \
+             ORDER BY 1, 2"
+        ))?;
+        let rows = st.query_map(rusqlite::params![since], row)?;
+        rows.collect()
+    }
+
+    /// The accounts a login is signed in to now: each host's own and its
+    /// profiles', hidden hosts left out, by uuid. Read from columns `hosts`
+    /// has held since migration 114, for the reason [`UsageAccount`] gives.
+    pub fn usage_login_accounts(&self) -> Result<Vec<String>> {
+        let mut st = self
+            .conn
+            .prepare_cached("SELECT account_uuid, claude_profiles FROM hosts WHERE hidden = 0")?;
+        let mut accounts = std::collections::BTreeSet::new();
+        let mut rows = st.query([])?;
+        while let Some(r) = rows.next()? {
+            let own: Option<String> = r.get(0)?;
+            let profiles: Option<String> = r.get(1)?;
+            let profiles = profiles
+                .and_then(|t| serde_json::from_str::<Vec<super::HostProfileRow>>(&t).ok())
+                .unwrap_or_default();
+            accounts.extend(own);
+            accounts.extend(profiles.into_iter().filter_map(|p| p.account_uuid));
+        }
+        Ok(accounts.into_iter().collect())
+    }
+
+    /// Every known account by the name a report prints, by uuid.
+    pub fn usage_accounts(&self) -> Result<Vec<UsageAccount>> {
+        let mut st = self.conn.prepare_cached(
+            "SELECT uuid, nickname, email, display_name, has_extra_usage \
+             FROM accounts ORDER BY uuid",
+        )?;
+        let rows = st.query_map([], |r| {
+            let uuid: String = r.get(0)?;
+            let named = |i: usize| -> Result<Option<String>> {
+                let v: Option<String> = r.get(i)?;
+                Ok(v.filter(|v| !v.trim().is_empty()))
+            };
+            let name = match (named(1)?, named(2)?, named(3)?) {
+                (Some(n), _, _) | (None, Some(n), _) | (None, None, Some(n)) => n,
+                (None, None, None) => uuid.clone(),
+            };
+            Ok(UsageAccount {
+                uuid,
+                name,
+                has_extra_usage: r.get(4)?,
+            })
+        })?;
         rows.collect()
     }
 }
@@ -195,5 +279,127 @@ mod tests {
             1,
             "pruning is per account"
         );
+    }
+
+    #[test]
+    fn every_accounts_history_comes_account_by_account_with_what_it_read_as_it_began() {
+        let s = Store::open_in_memory().unwrap();
+        for (account, at) in [
+            ("b", 300),
+            ("a", 400),
+            ("b", 100),
+            ("a", 200),
+            ("a", 50),
+            ("a", 20),
+            ("c", 10),
+            ("d", 500),
+        ] {
+            s.insert_usage_snapshot(&snap(account, at, 1.0)).unwrap();
+        }
+        let history = |since: i64| -> Vec<(String, i64)> {
+            s.usage_history_all(since)
+                .unwrap()
+                .into_iter()
+                .map(|r| (r.account_uuid, r.fetched_at))
+                .collect()
+        };
+        let named = |want: &[(&str, i64)]| -> Vec<(String, i64)> {
+            want.iter().map(|(a, at)| (a.to_string(), *at)).collect()
+        };
+        assert_eq!(
+            history(100),
+            named(&[
+                ("a", 50),
+                ("a", 200),
+                ("a", 400),
+                ("b", 100),
+                ("b", 300),
+                ("c", 10),
+                ("d", 500)
+            ]),
+            "from `since` on, inclusive, and the one reading before it: a's of 50, not of 20"
+        );
+        assert_eq!(history(0).len(), 8, "nothing is before the first");
+        assert_eq!(
+            history(1_000),
+            named(&[("a", 400), ("b", 300), ("c", 10), ("d", 500)]),
+            "an account with nothing since is there with its last reading"
+        );
+    }
+
+    #[test]
+    fn the_accounts_logins_use_now_are_each_hosts_own_and_its_profiles() {
+        use crate::store::HostProfileRow;
+        let s = Store::open_in_memory().unwrap();
+        let profile = |name: &str, account: Option<&str>| HostProfileRow {
+            name: name.into(),
+            account_uuid: account.map(Into::into),
+            email: None,
+        };
+        for host in ["h1", "h2", "h3", "gone"] {
+            s.insert_host(host, Some(host)).unwrap();
+        }
+        for uuid in ["own", "old"] {
+            s.upsert_account(&crate::store::AccountRow {
+                uuid: uuid.into(),
+                ..Default::default()
+            })
+            .unwrap();
+        }
+        s.set_host_account("h1", Some("own")).unwrap();
+        s.set_host_profiles(
+            "h1",
+            &[profile("work", Some("spare")), profile("new", None)],
+        )
+        .unwrap();
+        // The same account on a second host, as a profile.
+        s.set_host_profiles("h2", &[profile("main", Some("own"))])
+            .unwrap();
+        // h3 has no login read yet; a hidden host's logins are nobody's.
+        s.set_host_account("gone", Some("old")).unwrap();
+        s.set_host_profiles("gone", &[profile("p", Some("older"))])
+            .unwrap();
+        assert_eq!(
+            s.usage_login_accounts().unwrap(),
+            vec!["old", "older", "own", "spare"]
+        );
+        s.set_host_hidden("gone", true).unwrap();
+        assert_eq!(s.usage_login_accounts().unwrap(), vec!["own", "spare"]);
+    }
+
+    #[test]
+    fn an_account_is_called_by_its_nickname_then_email_then_display_name_then_uuid() {
+        use crate::store::AccountRow;
+        let s = Store::open_in_memory().unwrap();
+        let account = |uuid: &str, email: Option<&str>, display: Option<&str>| AccountRow {
+            uuid: uuid.into(),
+            email: email.map(Into::into),
+            display_name: display.map(Into::into),
+            has_extra_usage: uuid == "b",
+            ..Default::default()
+        };
+        s.upsert_account(&account("a", Some("ada@x"), Some("Ada")))
+            .unwrap();
+        s.upsert_account(&account("b", Some("bob@x"), Some("Bob")))
+            .unwrap();
+        s.upsert_account(&account("c", None, Some("Cy"))).unwrap();
+        s.upsert_account(&account("d", None, None)).unwrap();
+        s.upsert_account(&account("e", Some(" "), Some("Eve")))
+            .unwrap();
+        s.set_account_nickname("a", Some("work")).unwrap();
+        let got: Vec<(String, String, bool)> = s
+            .usage_accounts()
+            .unwrap()
+            .into_iter()
+            .map(|a| (a.uuid, a.name, a.has_extra_usage))
+            .collect();
+        let want = [
+            ("a", "work", false),
+            ("b", "bob@x", true),
+            ("c", "Cy", false),
+            ("d", "d", false),
+            ("e", "Eve", false),
+        ];
+        assert_eq!(got, want.map(|(u, n, x)| (u.to_string(), n.to_string(), x)));
     }
 }
