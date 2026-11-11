@@ -281,6 +281,9 @@ fn rig(next: Behaviour, component: Component) -> Rig {
         reports: vec![],
     }));
     let mut cfg = BinaryConfig::new(component, BIN, &root, &link, &dir.path().join("state"));
+    // The fixture release is a linux x86_64 tarball: the updater takes it
+    // as that platform on any runner (a Mac's own refuses it since #1105).
+    cfg.platform = Platform::new("linux", "x86_64", "tarball");
     cfg.poll = Duration::from_millis(1);
     cfg.ready_timeout = Duration::from_millis(50);
     cfg.soak = Duration::from_millis(20);
