@@ -229,6 +229,14 @@ or `chat_blocks.rs`, `REGEN_FORM_DOCS=1 cargo fleet-test -- form_docs_are_curren
 copy the file unchanged to fleet-mobile's `docs/design/palette-golden.json`,
 where `OrbitPaletteTest` holds the phone's port to it.
 
+`src/lib/kit/of.generated.css` and `src/lib/loader-kit.generated.{ts,css}`
+are generated from the design manual (`docs/ux/2026-10-08-orbit-fleet-redesign/design-system/components/`):
+after editing its `bundle.css` or a component preview,
+`REGEN_KIT=1 pnpm exec vitest run src/lib/kit/kit.test.ts` and
+`REGEN_LOADERS=1 pnpm exec vitest run src/lib/loader-kit.test.ts`. Vitest
+reads `docs/ux/`, `docs/design/` and `public/` at run time, so an edit there
+runs the frontend suite in CI and in `scripts/verify.sh`.
+
 ## Architecture
 
 Read [`docs/architecture.md`](docs/architecture.md) before changing a subsystem you have not touched in this session — frontend stores and row events, the service/store/SSH layers, settings metadata and declarative pages, client access, hub client mode (adding a desktop command), extra fleets (a command another hub serves needs a `FLEET_SCOPED` entry in both `backend/fleets.rs` and `src/lib/fleets.ts`), the theme engine, autofix, the assets catalog, downloads, voice: it names the files, the invariants and the `REGEN_*` commands.
