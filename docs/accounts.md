@@ -338,7 +338,21 @@ No work in a forbidden project runs on a login on that account
   a routine on its host's own login does the same (and one that names a
   forbidden login skips its run and says why), the over-limit refusal and
   `check_account_headroom { project_id }` never suggest one, and the
-  automatic switch never moves a session onto one.
+  automatic switch never moves a session onto one;
+- Claude work that does not go through `new_session` holds to the same rule,
+  and to the daily limit and a known sign-out, through one guard
+  (`service::run_login`): a review session runs under the reviewed
+  session's login (stepped off a forbidden or spent one, and stored on the
+  review's row) or is refused; a background session (the host's own login)
+  is refused; a mission's headless review or test runs under the grant's
+  login, else the implementer's, moved to an allowed one, or takes the
+  session path, whose start refuses; the AI check on done and a brief draft
+  do the same or are refused before anything runs; the mission planner and
+  its release-note and triage drafts never pick such a login (with none
+  left the planner refuses and records no limit wait); and a PR-reviewer,
+  support or fleet-agent job waits (deferred, its attempt given back) while
+  the rule host's own login is forbidden, signed out or past
+  `accounts.pause_at`. `run_login_tests` lists every launch path.
 
 A profile that is not logged in yet has no account, so a start under it is
 not refused; once the host reports its account, the next start, resume or

@@ -322,7 +322,9 @@ pub struct Plan {
 
 /// Whether `role` on `item_id` runs headless, and how. `None`: the setting
 /// is off, the role is not a check, there is no checkout to run in, the
-/// grant's hosts leave its host out, or a test has no plain command.
+/// grant's hosts leave its host out, a test has no plain command, or no
+/// login on the checkout's host may take it ([`login_for`]). `profile` is
+/// the login the grant names, if any.
 pub fn plan(
     s: &Store,
     item_id: i64,
@@ -344,9 +346,10 @@ pub fn plan(
         _ => Vec::new(),
     };
     let item = s.get_work_item(item_id).ok()??;
+    let profile = login_for(s, item_id, item.project_id, &at.host, profile)?;
     Some(Plan {
         model: settings::get_string(s, settings::ORCHESTRATOR_HEADLESS_MODEL),
-        profile: profile.map(str::to_string),
+        profile,
         cmds,
         label: match &item.key {
             Some(k) => format!("{k} {}", item.title),
@@ -356,6 +359,41 @@ pub fn plan(
         org_id: s.item_org(item_id).ok().flatten(),
         at,
     })
+}
+
+/// The login a headless check of `item_id` runs under on `host`, the
+/// implementer's checkout host: the grant's named login (`named`), else the
+/// one the implementer ran under (its row's stored login), stepped off a
+/// forbidden or spent login by `run_login::choose`. `None` (outer) when no
+/// login there may take it, or the read failed: the step then takes the
+/// session path, whose start refuses or holds and says why. Never headless
+/// on an unchecked login.
+fn login_for(
+    s: &Store,
+    item_id: i64,
+    item_project: Option<i64>,
+    host: &str,
+    named: Option<&str>,
+) -> Option<Option<String>> {
+    let worker = s
+        .latest_item_task(item_id, "implement")
+        .ok()
+        .flatten()
+        .and_then(|t| t.worker_session_id)
+        .and_then(|id| s.get_session_by_id(id).ok().flatten());
+    let project = item_project.or_else(|| worker.as_ref().and_then(|w| w.project_id));
+    let profile = match named {
+        Some(p) => Some(p.to_string()),
+        None => worker.and_then(|w| w.claude_profile),
+    };
+    crate::service::run_login::choose(
+        s,
+        project,
+        host,
+        profile.as_deref(),
+        crate::store::now_unix(),
+    )
+    .ok()
 }
 
 /// Start `role` on `item_id` headless, when [`plan`] and the preflight

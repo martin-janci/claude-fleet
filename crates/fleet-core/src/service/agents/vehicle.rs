@@ -276,6 +276,56 @@ pub fn outcome_of(stdout: &str, stderr: &[u8]) -> PrintOutcome {
     }
 }
 
+/// How long a job waits on a login that waits on a person (a forbidden
+/// account, a signed-out login, a spent daily limit) before it is looked
+/// at again.
+pub const LOGIN_HOLD_SECS: i64 = 3600;
+
+/// Whether an agent's run for `project_id` (`None`: the rule names none, so
+/// no account is forbidden) may start on `host` now. A run is `claude -p` on
+/// the host's own login (the script names no profile), so it waits while
+/// that login may not take it (`service::run_login::unattended_hold`: the
+/// project forbids its account, its daily limit is spent, it is signed out,
+/// or it is past `accounts.pause_at`): the job is deferred, which gives its
+/// attempt back, until the line clears (or [`LOGIN_HOLD_SECS`]), rather
+/// than run or fail once per job. Asked before the workspace is prepared,
+/// so a held job has touched nothing. `None` when it may run.
+pub fn login_hold(
+    s: &crate::store::Store,
+    project_id: Option<i64>,
+    host: &str,
+    now: i64,
+) -> Result<Option<super::RunOutcome>, IpcError> {
+    Ok(
+        crate::service::run_login::unattended_hold(s, project_id, host, None, now)?.map(|h| {
+            super::RunOutcome::Deferred {
+                at: h
+                    .until
+                    .filter(|t| *t > now)
+                    .unwrap_or(now + LOGIN_HOLD_SECS),
+                reason: format!("held: {}", h.reason),
+            }
+        }),
+    )
+}
+
+/// [`login_hold`] under the store's lock, for a runner: a failed read
+/// holds too, never a run on an unchecked login.
+pub fn login_hold_in(
+    store: &std::sync::Mutex<crate::store::Store>,
+    project_id: Option<i64>,
+    host: &str,
+) -> Option<super::RunOutcome> {
+    let now = crate::store::now_unix();
+    match crate::ipc_error::lock(store).and_then(|s| login_hold(&s, project_id, host, now)) {
+        Ok(hold) => hold,
+        Err(e) => Some(super::RunOutcome::Deferred {
+            at: now + super::RETRY_BASE_SECS,
+            reason: format!("held: the login could not be checked: {}", e.message),
+        }),
+    }
+}
+
 /// Run `run` on `host` with `prompt`. The wall clock is the run's own
 /// timeout plus a minute for the connection and the copy.
 pub async fn run_print(
@@ -322,6 +372,59 @@ mod tests {
             max_turns: 15,
             timeout_secs: 600,
             output_cap: 1 << 20,
+        }
+    }
+
+    /// Accounts review: an agent's run bills the host's own login, so a
+    /// job waits (deferred, its attempt given back) while the rule's
+    /// project forbids that account, while it is past the pause line (until
+    /// it resets) or while it is signed out. A profile's account is not the
+    /// run's; with no project only the limit and the sign-in count.
+    #[test]
+    fn a_run_waits_while_the_hosts_own_login_may_not_take_it() {
+        use crate::service::account_limits::seed_usage;
+        use crate::service::agents::RunOutcome;
+        let s = crate::store::Store::open_in_memory().unwrap();
+        let now = 1_000;
+        seed_usage(&s, "mac", None, "acct-own", 20.0, now);
+        seed_usage(&s, "mac", Some("work"), "acct-work", 10.0, now);
+        let p = s.upsert_project("acme", "api", "/srv/acme/api").unwrap();
+        assert_eq!(login_hold(&s, Some(p), "mac", now).unwrap(), None);
+        s.set_account_forbidden_projects("acct-work", &[p]).unwrap();
+        assert_eq!(login_hold(&s, Some(p), "mac", now).unwrap(), None);
+        s.set_account_forbidden_projects("acct-own", &[p]).unwrap();
+        match login_hold(&s, Some(p), "mac", now).unwrap() {
+            Some(RunOutcome::Deferred { at, reason }) => {
+                assert_eq!(at, now + LOGIN_HOLD_SECS);
+                assert!(reason.contains("forbidden for acme/api"), "{reason}");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(login_hold(&s, None, "mac", now).unwrap(), None);
+        // Past the pause line: held, project or not.
+        seed_usage(&s, "mac", None, "acct-own", 97.0, now);
+        match login_hold(&s, None, "mac", now).unwrap() {
+            Some(RunOutcome::Deferred { reason, .. }) => {
+                assert!(reason.contains("pause line"), "{reason}")
+            }
+            other => panic!("{other:?}"),
+        }
+        // Signed out.
+        seed_usage(&s, "mac", None, "acct-own", 20.0, now);
+        s.set_host_signed_out_logins(
+            "mac",
+            &[crate::store::SignedOutLogin {
+                profile: None,
+                since: 1,
+                checked_at: 1,
+            }],
+        )
+        .unwrap();
+        match login_hold(&s, None, "mac", now).unwrap() {
+            Some(RunOutcome::Deferred { reason, .. }) => {
+                assert!(reason.contains("signed out"), "{reason}")
+            }
+            other => panic!("{other:?}"),
         }
     }
 

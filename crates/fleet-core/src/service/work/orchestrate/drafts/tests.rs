@@ -278,6 +278,7 @@ fn every_draft_is_booked_with_its_origin() {
         &Run {
             origin: crate::store::AUX_ORIGIN_RELEASE_NOTE,
             host: "mercury",
+            profile: None,
             model: "haiku",
             mission_id: Some(m.id),
             org_id: None,
@@ -289,6 +290,7 @@ fn every_draft_is_booked_with_its_origin() {
         &Run {
             origin: crate::store::AUX_ORIGIN_MORNING_BRIEF,
             host: "venus",
+            profile: None,
             model: "haiku",
             mission_id: None,
             org_id: None,

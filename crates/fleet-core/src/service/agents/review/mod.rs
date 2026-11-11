@@ -1141,6 +1141,11 @@ impl ReviewRunner {
                 format!("no project {repo} on this hub; grant the rule a project"),
             );
         };
+        // The run bills the rule host's own login: it waits while that
+        // login may not take the project's work (`vehicle::login_hold`).
+        if let Some(hold) = vehicle::login_hold_in(&self.store, Some(project_id), host) {
+            return hold;
+        }
         let root = match self.host.checkout(host, project_id).await {
             Ok(r) => r,
             Err(e) => return failed(ErrorKind::Transient, e.message),
@@ -1454,6 +1459,9 @@ impl ReviewRunner {
                 format!("no project {repo} on this hub; grant the rule a project"),
             );
         };
+        if let Some(hold) = vehicle::login_hold_in(&self.store, Some(project_id), host) {
+            return hold;
+        }
         let checkout = match self.host.checkout(host, project_id).await {
             Ok(r) => r,
             Err(e) => return failed(ErrorKind::Transient, e.message),

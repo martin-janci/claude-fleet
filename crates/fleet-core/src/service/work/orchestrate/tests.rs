@@ -1216,6 +1216,53 @@ fn a_run_goes_to_the_best_host_inside_its_grant() {
     assert_eq!(start.profile, None);
 }
 
+/// Accounts review: the planner reads the mission (and, with
+/// `planner_reads`, its repository), so it never runs on a login whose
+/// account the mission's project forbids; with no other login it refuses
+/// and names the forbid, and no limit wait is recorded. The release note
+/// and triage drafts take their login from the same chooser.
+#[test]
+fn the_planner_never_takes_a_login_the_missions_project_forbids() {
+    let fx = fixture();
+    let m = planned_on_mac(&fx);
+    let s = lock(&fx.deps.store).unwrap();
+    let now = now_unix();
+    crate::service::account_limits::seed_usage(&s, "mac", None, "own", 10.0, now);
+    crate::service::account_limits::seed_usage(&s, "mac", Some("work"), "work", 20.0, now);
+    let project = s.upsert_project("acme", "api", "/srv/acme/api").unwrap();
+    s.conn_ref()
+        .execute(
+            "UPDATE work_items SET project_id = ?1 WHERE id = ?2",
+            rusqlite::params![project, fx.root],
+        )
+        .unwrap();
+    let own = limit::Login {
+        host: "mac".into(),
+        profile: None,
+    };
+    let work = limit::Login {
+        host: "mac".into(),
+        profile: Some("work".into()),
+    };
+    assert_eq!(limit::choose(&s, &m, None, now).unwrap(), Ok(own.clone()));
+    assert_eq!(limit::draft_login(&s, &m, now).unwrap(), own);
+    s.set_account_forbidden_projects("own", &[project]).unwrap();
+    assert_eq!(limit::mission_forbidden(&s, &m).unwrap(), vec!["own"]);
+    assert_eq!(limit::candidates(&s, &m, None).unwrap(), vec![work.clone()]);
+    assert_eq!(limit::choose(&s, &m, None, now).unwrap(), Ok(work.clone()));
+    assert_eq!(limit::draft_login(&s, &m, now).unwrap(), work);
+    s.set_account_forbidden_projects("work", &[project])
+        .unwrap();
+    let e = limit::choose(&s, &m, None, now).unwrap_err();
+    assert_eq!(e.code, codes::E_ACCOUNT_FORBIDDEN, "{e:?}");
+    assert!(e.message.contains("mac's own login"), "{}", e.message);
+    assert_eq!(
+        limit::draft_login(&s, &m, now).unwrap_err().code,
+        codes::E_ACCOUNT_FORBIDDEN
+    );
+    assert!(!limit::waiting(&s, m.id).unwrap(), "no usage-limit wait");
+}
+
 /// The fixture's mission with its planner on `mac`.
 fn planned_on_mac(fx: &Fx) -> MissionRow {
     let mut m = fx.m.clone();

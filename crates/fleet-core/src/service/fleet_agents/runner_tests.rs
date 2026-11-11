@@ -2907,6 +2907,43 @@ diff --git a/docs/x.md b/docs/x.md\n--- a/docs/x.md\n+++ b/docs/x.md\n@@ -1 +1 @
     }
 }
 
+/// Accounts review: an agent's run is `claude -p` on the rule host's own
+/// login. When the rule's project forbids that account the job is
+/// deferred with the reason (its attempt given back), before any checkout,
+/// and nothing runs.
+#[tokio::test]
+async fn a_run_waits_on_a_login_the_rules_project_forbids() {
+    let f = head_fx();
+    *f.world.prs.lock().unwrap() = vec![pr(4, "abc", false)];
+    *f.world.diff.lock().unwrap() = "diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1 +1,2 @@\n fn a() {}\n+fn b() {}\n".into();
+    *f.world.base.answer.lock().unwrap() = Some(PrintOutcome::Answered {
+        text: r#"{"summary":"fine"}"#.into(),
+        cost_micros: 0,
+    });
+    let now = crate::store::now_unix();
+    let polled = f.poll_at(now).await;
+    let jobs = f.claim(&polled.jobs);
+    {
+        let s = f.store.lock().unwrap();
+        crate::service::account_limits::seed_usage(&s, "box", None, "acct-own", 20.0, now);
+        s.set_account_forbidden_projects("acct-own", &[f.rule.project_id.unwrap()])
+            .unwrap();
+    }
+    match f.runner().run(&jobs[0], Some(&f.rule)).await {
+        RunOutcome::Deferred { at, reason } => {
+            assert!(at > now, "{at}");
+            assert!(reason.contains("forbidden for o/r"), "{reason}")
+        }
+        other => panic!("{other:?}"),
+    }
+    let log = f.world.base.log.lock().unwrap().clone();
+    assert!(
+        !log.iter().any(|l| l.starts_with("prepare")),
+        "nothing was checked out: {log:?}"
+    );
+    assert!(f.world.base.last.lock().unwrap().is_none(), "no run");
+}
+
 #[tokio::test]
 async fn a_diff_github_will_not_serve_is_skipped_and_a_missing_pr_is_permanent() {
     let f = head_fx();

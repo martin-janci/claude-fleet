@@ -2360,6 +2360,12 @@ impl FleetRunner {
         mcp: bindings::RunMcp,
     ) -> Result<PrintOutcome, RunOutcome> {
         let host = rule.host_alias.as_str();
+        // The run is `claude -p` on the rule host's own login: it waits
+        // while that login may not take the work (`vehicle::login_hold`),
+        // before the checkout, so a held job has touched nothing.
+        if let Some(hold) = vehicle::login_hold_in(&self.store, rule.project_id, host) {
+            return Err(hold);
+        }
         let base = self.host.base();
         let d = &inst.loaded().definition;
         let (cwd, root) = match (d.run.workspace, rule.project_id) {

@@ -140,7 +140,7 @@ fn the_notes_go_in_their_own_untrusted_fence_after_the_ticket() {
 
 #[test]
 fn the_run_has_no_tools_no_mcp_no_hooks_and_no_transcript() {
-    let sc = draft_script("haiku", "write it").unwrap();
+    let sc = draft_script("haiku", "write it", None).unwrap();
     for flag in [
         "claude -p --model 'haiku' --output-format json",
         "--no-session-persistence",
@@ -152,7 +152,12 @@ fn the_run_has_no_tools_no_mcp_no_hooks_and_no_transcript() {
     ] {
         assert!(sc.contains(flag), "missing {flag:?} in {sc}");
     }
-    assert!(draft_script("gpt-5", "x").is_err());
+    assert!(draft_script("gpt-5", "x", None).is_err());
+    assert!(!sc.contains("CLAUDE_CONFIG_DIR"), "{sc}");
+    // Under a profile: its login, as every headless run exports it.
+    let work = draft_script("haiku", "write it", Some("work")).unwrap();
+    assert!(work.contains(".claude-profiles/\"'work'"), "{work}");
+    assert!(work.contains(crate::tmux::PROFILE_API_KEY), "{work}");
 }
 
 #[test]

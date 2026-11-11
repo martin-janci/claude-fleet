@@ -37,6 +37,10 @@ const WORD_KINDS: &[&str] = &[
 ];
 /// How [`choose_in`]'s signed-out refusal starts.
 const SIGNED_OUT_REFUSAL: &str = "no login the planner may use is signed in";
+/// How [`choose_in`]'s refusal starts when every login it could use is on
+/// an account the mission's projects forbid.
+const FORBIDDEN_REFUSAL: &str =
+    "no login the planner may use is on an account the mission's projects allow";
 /// Waits are at most this far ahead: Claude's weekly limit and a day.
 /// A reset further out (an answer the prompt's text steered, review r8) is
 /// not taken as known.
@@ -88,32 +92,93 @@ pub struct LimitWait {
 /// [`planner_hosts`], the grant's login when that host has it (else the
 /// host's own), then the host's own, then its other signed-in profiles. A
 /// login `login_health` holds signed out is left out, the grant's and the
-/// host's own as much as the rest (review r8).
+/// host's own as much as the rest (review r8), and so is a login on an
+/// account the mission's projects forbid ([`mission_forbidden`]): the
+/// planner reads the mission, and with `orchestrator.planner_reads` its
+/// repository.
 pub fn candidates(
     s: &Store,
     m: &MissionRow,
     grant: Option<&GrantRow>,
 ) -> Result<Vec<Login>, IpcError> {
-    Ok(logins(s, m, grant)?.0)
+    Ok(logins(s, m, grant)?.usable)
 }
 
-/// [`candidates`], and the logins left out of them as signed out, in the
-/// order they would have been tried.
-fn logins(
-    s: &Store,
-    m: &MissionRow,
-    grant: Option<&GrantRow>,
-) -> Result<(Vec<Login>, Vec<Login>), IpcError> {
+/// The accounts no login of the planner may be on for mission `m`
+/// (`service::project_accounts`): those its repositories' projects and its
+/// root item's project forbid (each with its org's blocks), and, for a
+/// mission with no repository, those forbidden for its org.
+pub fn mission_forbidden(s: &Store, m: &MissionRow) -> Result<Vec<String>, IpcError> {
+    let mut projects: Vec<i64> = m.repos.iter().map(|r| r.project_id).collect();
+    if let Some(p) = m
+        .root_item_id
+        .and_then(|i| s.get_work_item(i).ok().flatten())
+        .and_then(|i| i.project_id)
+    {
+        projects.push(p);
+    }
+    let mut out: Vec<String> = Vec::new();
+    for p in projects {
+        out.extend(s.project_forbidden_accounts(p)?);
+    }
+    if m.repos.is_empty() {
+        if let Some(org) = m.org_id {
+            out.extend(
+                s.list_accounts()?
+                    .into_iter()
+                    .filter(|a| a.forbidden_org_ids.contains(&org))
+                    .map(|a| a.uuid),
+            );
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
+    Ok(out)
+}
+
+/// What [`logins`] found, each list in the order it would be tried.
+struct Found {
+    /// [`candidates`].
+    usable: Vec<Login>,
+    /// Left out as signed out.
+    signed_out: Vec<Login>,
+    /// Left out as on a forbidden account ([`mission_forbidden`]).
+    forbidden: Vec<Login>,
+}
+
+/// [`candidates`], and the logins left out of them.
+fn logins(s: &Store, m: &MissionRow, grant: Option<&GrantRow>) -> Result<Found, IpcError> {
     let preferred = grant.and_then(|g| g.profile.clone());
-    let mut out: Vec<Login> = Vec::new();
-    let mut dropped: Vec<Login> = Vec::new();
-    let mut push = |l: Login, gone: bool| {
-        let list = if gone { &mut dropped } else { &mut out };
+    let banned = mission_forbidden(s, m)?;
+    let now = crate::store::now_unix();
+    let mut found = Found {
+        usable: Vec::new(),
+        signed_out: Vec::new(),
+        forbidden: Vec::new(),
+    };
+    let mut push = |l: Login, gone: bool, barred: bool| {
+        let list = if barred {
+            &mut found.forbidden
+        } else if gone {
+            &mut found.signed_out
+        } else {
+            &mut found.usable
+        };
         if !list.contains(&l) {
             list.push(l);
         }
     };
     for host in planner_hosts(s, m, grant)? {
+        let accounts = if banned.is_empty() {
+            Vec::new()
+        } else {
+            account_limits::login_accounts(s, &host, now)?
+        };
+        let barred = |p: Option<&str>| {
+            accounts
+                .iter()
+                .any(|a| a.login.profile.as_deref() == p && banned.contains(&a.login.account_uuid))
+        };
         let row = s.get_host_row(&host)?;
         let profiles: Vec<&crate::store::HostProfileRow> = row
             .iter()
@@ -131,16 +196,20 @@ fn logins(
             .as_ref()
             .filter(|p| profiles.iter().any(|x| &x.name == *p))
         {
-            push(at(Some(p)), signed_out(Some(p)));
+            push(at(Some(p)), signed_out(Some(p)), barred(Some(p)));
         }
-        push(at(None), signed_out(None));
+        push(at(None), signed_out(None), barred(None));
         for p in &profiles {
             if p.account_uuid.is_some() {
-                push(at(Some(&p.name)), signed_out(Some(&p.name)));
+                push(
+                    at(Some(&p.name)),
+                    signed_out(Some(&p.name)),
+                    barred(Some(&p.name)),
+                );
             }
         }
     }
-    Ok((out, dropped))
+    Ok(found)
 }
 
 /// The planner's words on a mission (its runs and waits, newest first),
@@ -234,7 +303,9 @@ pub fn choose(
 ///
 /// When no login is at a limit and the logins left were all left out as
 /// signed out, there is no reset to wait for: the refusal says which login
-/// to sign in again (review r9), and no wait is recorded.
+/// to sign in again (review r9), and no wait is recorded. Likewise when
+/// they were all left out as on an account the mission's projects forbid:
+/// `E_ACCOUNT_FORBIDDEN` names one, and no wait is recorded.
 pub fn choose_in(
     s: &Store,
     m: &MissionRow,
@@ -246,7 +317,11 @@ pub fn choose_in(
     let waits = words.open_waits(now);
     let mut resets: Vec<(i64, bool)> = Vec::new();
     let mut first_why: Option<String> = None;
-    let (usable, gone) = logins(s, m, grant)?;
+    let Found {
+        usable,
+        signed_out: gone,
+        forbidden,
+    } = logins(s, m, grant)?;
     for l in usable {
         if skip.contains(&l) {
             continue;
@@ -277,6 +352,16 @@ pub fn choose_in(
                 format!("{SIGNED_OUT_REFUSAL}: {why}"),
             ));
         }
+        if let Some(l) = forbidden.first() {
+            return Err(IpcError::new(
+                crate::ipc_error::codes::E_ACCOUNT_FORBIDDEN,
+                format!(
+                    "{FORBIDDEN_REFUSAL}: {} is on a forbidden account; allow it again on \
+                     the Accounts page, or give the planner a host with another login",
+                    l.words()
+                ),
+            ));
+        }
     }
     let (resets_at, reset_known) = resets
         .into_iter()
@@ -292,6 +377,21 @@ pub fn choose_in(
             first_why.unwrap_or_else(|| "no login".into())
         ),
     }))
+}
+
+/// The login a draft about mission `m` (its release note, its triage
+/// card) runs under: [`choose_in`]'s first, with no planner wait read and
+/// no grant; when every login it may use is past the pause line, the first
+/// of them anyway, as a person asked for it now. Never a signed-out login
+/// or one on an account the mission's projects forbid: those refuse.
+pub fn draft_login(s: &Store, m: &MissionRow, now: i64) -> Result<Login, IpcError> {
+    match choose_in(s, m, None, now, &Words(Vec::new()), &[])? {
+        Ok(l) => Ok(l),
+        Err(wait) => candidates(s, m, None)?
+            .into_iter()
+            .next()
+            .ok_or_else(|| IpcError::new(crate::ipc_error::codes::E_ACCOUNT_LIMIT, wait.why)),
+    }
 }
 
 /// Whether `e` is [`choose_in`]'s refusal for signed-out logins.

@@ -759,6 +759,11 @@ impl SupportRunner {
                 Err(e) => return failed(ErrorKind::Transient, e),
             },
         };
+        // The run bills the rule host's own login: it waits while that
+        // login may not take the work (`vehicle::login_hold`).
+        if let Some(hold) = vehicle::login_hold_in(&self.store, rule.project_id, host) {
+            return hold;
+        }
         // The workspace: the rule's project at its branch, else the home.
         let (cwd, root) = match rule.project_id {
             None => (home.clone(), None),

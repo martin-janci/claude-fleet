@@ -266,9 +266,13 @@ pub async fn new_bg_session_tracked(
     let launch_started = now_unix();
     // Redesign 8.7: a background session bills the host's own login; say so
     // when that account is past `accounts.pause_at`. A warning, not a
-    // refusal: a person or an agent asked for it now.
+    // refusal: a person or an agent asked for it now. An account the
+    // project forbids, a spent daily limit or a signed-out login is a
+    // refusal (`service::run_login`), as for any start: there is no other
+    // login a background session could take, and nothing has run yet.
     let over = {
         let s = lock(store)?;
+        crate::service::run_login::refuse(&s, args.project_id, &host_alias, None, launch_started)?;
         crate::service::account_limits::over_limit(&s, &host_alias, None, launch_started)?
     };
     args.validate()?;
@@ -1430,6 +1434,61 @@ mod tests {
         }
         let projects = store.lock().unwrap().list_projects().unwrap();
         assert!(projects.iter().any(|p| p.id == pid), "row must survive");
+    }
+
+    /// Accounts review: a Claude background session bills the host's own
+    /// login, so one in a project that forbids that account, or on a login
+    /// whose daily limit is spent, is refused before anything runs on the
+    /// host (the `ssh` here cannot run: reaching it would fail otherwise).
+    #[tokio::test]
+    async fn a_background_session_is_refused_on_an_account_its_project_forbids() {
+        let store = make_store();
+        let now = now_unix();
+        let pid = {
+            let s = store.lock().unwrap();
+            crate::service::account_limits::seed_usage(&s, "mac", None, "acct-own", 20.0, now);
+            let pid = s.upsert_project("acme", "api", "/srv/acme/api").unwrap();
+            s.set_account_forbidden_projects("acct-own", &[pid])
+                .unwrap();
+            pid
+        };
+        let ssh = Arc::new(SshClient::with_ssh_binary("/nonexistent/fleet-test-ssh"));
+        let reg = crate::cancel::CancellationRegistry::new();
+        let start = |project_id| {
+            new_bg_session_tracked(
+                NewBgSessionArgs {
+                    project_id,
+                    ..bg_args()
+                },
+                &store,
+                &ssh,
+                &reg,
+                None,
+            )
+        };
+        let err = start(Some(pid)).await.expect_err("refused");
+        assert_eq!(err.code, codes::E_ACCOUNT_FORBIDDEN, "{err:?}");
+        // Signed out: refused too, with or without a project.
+        store
+            .lock()
+            .unwrap()
+            .set_host_signed_out_logins(
+                "mac",
+                &[crate::store::SignedOutLogin {
+                    profile: None,
+                    since: 1,
+                    checked_at: 1,
+                }],
+            )
+            .unwrap();
+        let err = start(None).await.expect_err("refused");
+        assert_eq!(err.code, codes::E_CLAUDE_CLI, "{err:?}");
+        assert!(store
+            .lock()
+            .unwrap()
+            .list_sessions_for_host("mac")
+            .unwrap()
+            .is_empty());
     }
 
     fn in_project_args() -> NewBgSessionArgs {
