@@ -287,7 +287,10 @@ describe('SessionRowItem accessibility (7.2)', () => {
   it('says the status in words: the dot is a labelled image', async () => {
     render(SessionRowItem, { props: baseProps({ ...sampleSession, status: 'running' }) });
     await tick();
-    expect(screen.getByRole('img', { name: 'Status: running' })).toBeTruthy();
+    // HITL audit H-12: the dot says the row's state word, not tmux's.
+    expect(screen.getByTestId('row-state-dot').getAttribute('aria-label')).toMatch(
+      /^Status: (Needs you|Failed|Paused|Working|Done|Idle)$/,
+    );
   });
 });
 

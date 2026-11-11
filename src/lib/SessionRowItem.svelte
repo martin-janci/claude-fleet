@@ -20,7 +20,7 @@
   import { hintAnchor } from './hints';
   import { bucketState, rank } from './attention';
   import { attentionIdleMinutes } from './notify';
-  import { attentionFacts, blockedLine } from './attention_facts';
+  import { attentionFacts } from './attention_facts';
   import { slideIn, wash } from './motion_catalog';
   import { accountByUuid, accountLabel } from './accounts';
   import { pushError } from './toasts';
@@ -56,6 +56,8 @@
   import SessionStatusChip from './SessionStatusChip.svelte';
   import SessionRowDetails from './SessionRowDetails.svelte';
   import SessionRowMeta from './SessionRowMeta.svelte';
+  import { STATE_LABELS } from './row_groups';
+  import { rowReason } from './row_reason';
   import LimitActions from './LimitActions.svelte';
   import { uiDensity } from './prefs';
   import { localWorkspaces, linkFor, badgeFor } from './local_workspaces';
@@ -159,10 +161,6 @@
   // Redesign step 3.6: Compact is the two-line row (sans title, one meta
   // line, chips on hover); Comfortable is 0.5.4's row unchanged.
   const compact = $derived($uiDensity === 'compact');
-  // A Blocked row's reason (step 2.4), in either density.
-  const blockedReason = $derived(
-    blockedLine(triage.bucket, sess, $attentionFacts, (u) => accountLabel($accountByUuid.get(u))),
-  );
   const promptText = $derived(rowPrompt(sess));
   // The dialog this row is blocked on, straight from the row: the sidebar
   // does not probe (that would be one `capture-pane` per visible row, every
@@ -298,13 +296,15 @@
     hubActionBlocked('send_prompt', $hubStatus, $hubConnection) ??
       $sessionBlocked(sess, 'send_prompt'),
   );
-  // UX audit L2: a Compact row says what the question is ("Waiting for you:
-  // Allow Bash(…)?") and leaves the answer card to the conversation, the
-  // Inbox's open row and ⌘K Approve; Comfortable keeps the card in the row.
-  const waitingLine = $derived(
-    answerView && promptBlocked === null && (answerView.question || answerView.detail)
-      ? `Waiting for you: ${answerView.question || answerView.detail}`
-      : null,
+  /** Line two when the row needs a person (HITL audit H-11): the reason in
+   *  words, for every bucket, in place of the last prompt. */
+  const reason = $derived(
+    rowReason(triage.bucket, sess, $attentionFacts, (u) => accountLabel($accountByUuid.get(u)), answerView),
+  );
+  /** The dot's state: the reason's tone when it has one (a stuck row reads
+   *  Failed), else the attention state. */
+  const dotState = $derived(
+    reason?.tone === 'failed' ? 'failed' : reason?.tone === 'paused' ? 'paused' : bucketState(triage.bucket),
   );
   /**
    * The row's privacy badge (multi-user M1). Read straight off the row —
@@ -720,7 +720,17 @@
     {:else}
       <div class="sess-lines">
         <div class="sess-line1">
-          <span class="status-dot status-{sess.status}" title={sess.status} role="img" aria-label="Status: {sess.status}"></span>
+          <!-- The dot is the row's state (HITL audit H-12), as the phone and
+               the kit's SessionRow draw it; a live tmux session is no longer
+               a green dot on every row. Lifecycle stays visible on the
+               ghost and read-only rows above. -->
+          <span
+            class="status-dot state-{dotState}"
+            data-testid="row-state-dot"
+            title={STATE_LABELS[dotState]}
+            role="img"
+            aria-label="Status: {STATE_LABELS[dotState]}"
+          ></span>
           {#if relatedCount > 0}
             <span
               class="related-badge"
@@ -1021,12 +1031,12 @@
           </div>
         {:else}
           {#if compact}
-            <SessionRowMeta {sess} state={bucketState(triage.bucket)} {promptText} reason={blockedReason ?? waitingLine} />
-          {:else if blockedReason}
-            <!-- Comfortable has no meta line, but a Blocked row still says why
-                 (the SessionRow component's line two: "Paused · weekly limit
-                 on …") and offers its answers, in either density. -->
-            <div class="blocked-line" data-testid="row-blocked-reason">{blockedReason}</div>
+            <SessionRowMeta {sess} state={bucketState(triage.bucket)} {promptText} {reason} />
+          {:else if reason && !(triage.bucket === 'waiting' && answerView && promptBlocked === null)}
+            <!-- Comfortable has no meta line, but a row that needs a person
+                 still says why (the SessionRow component's line two). A
+                 dialog it can answer here says it with its card instead. -->
+            <div class="blocked-line" data-testid="row-blocked-reason">{reason.lead ? `${reason.lead} ` : ''}{reason.text}</div>
           {/if}
           {#if triage.bucket === 'account_limit'}
             <LimitActions
@@ -1221,6 +1231,16 @@
   .status-dot.status-frozen { background: transparent; box-shadow: inset 0 0 0 1.5px var(--status-working); }
   .status-dot.status-orphan { background: var(--status-failed); border-radius: var(--radius-xs); }
   .status-dot.status-ghost { background: transparent; border: 1.5px dashed var(--status-idle); box-sizing: border-box; opacity: 0.8; }
+  /* A live row's dot is its attention state: filled for a live state, a
+     ring for paused (shape backs the colour, 7.2). */
+  .status-dot.state-action_required,
+  .status-dot.state-blocked { background: var(--status-waiting); }
+  .status-dot.state-failed { background: var(--status-failed); }
+  .status-dot.state-working { background: var(--status-working); }
+  .status-dot.state-done { background: var(--status-done); }
+  .status-dot.state-idle,
+  .status-dot.state-proposed { background: var(--status-idle); }
+  .status-dot.state-paused { background: transparent; box-shadow: inset 0 0 0 1.5px var(--status-idle); }
   .lost-at {
     font-size: var(--text-2xs);
     opacity: 0.6;

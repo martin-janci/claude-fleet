@@ -155,7 +155,9 @@ describe('row density (redesign step 3.6)', () => {
     await tick();
     const meta = screen.getByTestId('sess-meta-line');
     expect(meta.dataset.state).toBe('action_required');
-    expect(meta.textContent).toContain('Needs you');
+    // HITL audit H-11: the line leads with what it waits on, never the
+    // last prompt; with no dialog parsed yet, that it waits in the terminal.
+    expect(meta.textContent).toBe('Waiting for you: an answer in the terminal');
   });
 
   it('20 Compact rows fit a 1080p window, measured from the CSS tokens', async () => {

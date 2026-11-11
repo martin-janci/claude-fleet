@@ -6,6 +6,7 @@
   import type { AttentionState } from './attention';
   import { sessionAgent, type SessionRow } from './sessions';
   import { AGENT_LABELS, STATE_LABELS } from './row_groups';
+  import type { RowReason } from './row_reason';
 
   let {
     sess,
@@ -16,8 +17,9 @@
     sess: SessionRow;
     state: AttentionState;
     promptText: string;
-    /** A Blocked row's reason line (step 2.4), shown in place of the state word. */
-    reason?: string | null;
+    /** Why the row needs a person (`row_reason.ts`), shown in place of the
+     *  state word, agent and host. Only its lead takes the state's colour. */
+    reason?: RowReason | null;
   } = $props();
 
   const agent = $derived(sessionAgent(sess));
@@ -28,7 +30,9 @@
   {#if reason}
     <!-- A reason ("Waiting for you: Allow Bash(…)?", "Paused · weekly limit")
          is the whole line, as the Sessions board draws it (UX audit L1). -->
-    <span class="state reason state-{state}" data-testid="meta-state" title={reason}>{reason}</span>
+    <span class="reason" data-testid="meta-state" title="{reason.lead} {reason.text}"
+      >{#if reason.lead}<span class="state tone-{reason.tone}">{reason.lead}</span>{' '}{/if}<span class="why">{reason.text}</span></span
+    >
   {:else}
     <span class="state state-{state}" data-testid="meta-state">{STATE_LABELS[state]}</span>
     <span class="sep" aria-hidden="true">·</span>
@@ -57,10 +61,14 @@
   .sess-meta-line > * { flex-shrink: 0; }
   .sep { opacity: 0.6; }
   .sess-meta-line > .reason { flex-shrink: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .why { color: var(--fg-2); }
   .detail { flex-shrink: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   .state-action_required,
   .state-blocked { color: var(--status-waiting); font-weight: 600; }
   .state-failed { color: var(--status-failed); font-weight: 600; }
   .state-working { color: var(--status-working); }
   .state-done { color: var(--status-done); }
+  .tone-waiting { color: var(--status-waiting); font-weight: 600; }
+  .tone-failed { color: var(--status-failed); font-weight: 600; }
+  .tone-paused { color: var(--status-waiting); font-weight: 600; }
 </style>
