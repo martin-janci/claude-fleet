@@ -170,6 +170,12 @@ pub struct PairingRequest {
     /// The person the client is bound to once paired (multi-user M1,
     /// `fleet-hub pair --person`), by name — see [`MintRequest::person`].
     pub person: Option<String>,
+    /// The live person that name was when the code was minted, if one
+    /// was: the redeem binds to this very row, and refuses when it has
+    /// been disabled (or removed) since, rather than creating a new person
+    /// of the same name (review R6). `None`: a new colleague, created at
+    /// the redeem.
+    pub person_id: Option<i64>,
     /// The person who minted the code, when one did (see [`Minter`]).
     pub minted_by_person: Option<i64>,
     /// The device they minted it through.
@@ -318,6 +324,7 @@ struct Pending {
     trusted: bool,
     org_id: Option<i64>,
     person: Option<String>,
+    person_id: Option<i64>,
     minter_person: Option<i64>,
     minter_device: Option<i64>,
     via: String,
@@ -351,6 +358,13 @@ impl PendingPairings {
     /// org, the person — so there is no window in which the new client is
     /// live but unbound.
     pub fn mint(&self, req: MintRequest<'_>) -> PairingRequest {
+        self.mint_for(req, None)
+    }
+
+    /// [`Self::mint`] for a code whose `person` names a live person: the
+    /// redeem binds to `person_id` and refuses once that person is
+    /// disabled ([`PairingRequest::person_id`]).
+    pub fn mint_for(&self, req: MintRequest<'_>, person_id: Option<i64>) -> PairingRequest {
         let now = Instant::now();
         self.sweep(now);
         let expires_at = now + req.ttl;
@@ -371,6 +385,7 @@ impl PendingPairings {
                 trusted: req.trusted,
                 org_id: req.org_id,
                 person: req.person.map(str::to_string),
+                person_id,
                 minter_person: req.minter.person,
                 minter_device: req.minter.device,
                 via: req.minter.via.to_string(),
@@ -385,6 +400,7 @@ impl PendingPairings {
             trusted: req.trusted,
             org_id: req.org_id,
             person: req.person.map(str::to_string),
+            person_id,
             minted_by_person: req.minter.person,
             minted_by_device: req.minter.device,
             minted_via: req.minter.via.to_string(),
@@ -422,6 +438,7 @@ impl PendingPairings {
             trusted: entry.trusted,
             org_id: entry.org_id,
             person: entry.person,
+            person_id: entry.person_id,
             minted_by_person: entry.minter_person,
             minted_by_device: entry.minter_device,
             minted_via: entry.via,
@@ -687,8 +704,22 @@ pub async fn handle_pair(
             // laptop" the same command. A `peer` link and an `updater`
             // token are nobody's device; `pair_client` refuses `person` for
             // both.
-            let row = match req.person.as_deref() {
-                Some(person) => {
+            let row = match (req.person.as_deref(), req.person_id) {
+                // A code minted for a live person binds to that row, and
+                // never to a new person of the same name: one disabled
+                // since the mint is refused (review R6).
+                (Some(_), Some(id)) => {
+                    let live = s.get_person(id)?.filter(|p| p.disabled_at.is_none());
+                    if live.is_none() {
+                        return Err(crate::ipc_error::IpcError::new(
+                            crate::ipc_error::codes::E_FORBIDDEN,
+                            "the person this code was minted for has been disabled; \
+                             mint a new code",
+                        ));
+                    }
+                    s.set_client_person(&row.name, Some(id))?
+                }
+                (Some(person), None) => {
                     let person_id = match s.get_person_by_name(person)? {
                         Some(p) => p.id,
                         None => {
@@ -705,7 +736,7 @@ pub async fn handle_pair(
                     };
                     s.set_client_person(&row.name, Some(person_id))?
                 }
-                None => row,
+                (None, _) => row,
             };
             event(
                 "pair",
@@ -804,9 +835,28 @@ pub async fn handle_pair(
                 .into_response()
         }
         Err(e) if e.code == crate::ipc_error::codes::E_FORBIDDEN => {
-            // The org fence refused the trust grant; the whole redemption
-            // rolled back, so no token was stored and none is in the answer.
-            tracing::warn!(error = %e.message, "[mcp] a pairing was refused by the org fence");
+            // The org fence refused the trust grant, or the code's person
+            // was disabled since the mint; the whole redemption rolled
+            // back, so no token was stored and none is in the answer. The
+            // attempt is an admin event, so the operator sees it.
+            tracing::warn!(error = %e.message, "[mcp] a pairing was refused");
+            if let Ok(s) = state.store.lock() {
+                s.record_admin_event_or_log(&crate::store::AdminEvent {
+                    actor_person: None,
+                    actor_device: None,
+                    action: "pair_refused",
+                    resource_type: "device",
+                    resource_id: &req.name,
+                    representation: serde_json::json!({
+                        "name": req.name,
+                        "person": req.person,
+                        "person_id": req.person_id,
+                        "minted_by_person": req.minted_by_person,
+                        "minted_via": req.minted_via,
+                        "reason": e.message,
+                    }),
+                });
+            }
             (
                 StatusCode::FORBIDDEN,
                 axum::Json(serde_json::json!({ "error": e.message })),

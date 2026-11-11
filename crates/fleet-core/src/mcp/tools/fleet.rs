@@ -775,7 +775,7 @@ impl FleetTools {
         );
         let ttl = pair_ttl(p.ttl_s);
         // Every read under one lock, released before the mint.
-        let (base, person) = {
+        let (base, person, person_id) = {
             let s = lock(&self.store).map_err(to_mcp_err)?;
             // A code minted for a name a live client already holds could only
             // ever fail at redemption (the partial unique index), wasting the
@@ -827,20 +827,31 @@ impl FleetTools {
                     )
                 })?),
             };
+            // The live person that name is now, so the redeem binds to
+            // them and refuses once they are disabled (review R6); a new
+            // name is created at the redeem.
+            let person_id = match person.as_deref() {
+                Some(n) => s.get_person_by_name(n).map_err(to_mcp_err)?.map(|p| p.id),
+                None => None,
+            };
             (
                 crate::service::hub::HubBase::read(&s).map_err(to_mcp_err)?,
                 person,
+                person_id,
             )
         };
-        let req = self.guards.pairings.mint(crate::mcp::pairing::MintRequest {
-            name: &name,
-            mode: &mode,
-            trusted: p.trusted,
-            org_id: p.org_id,
-            person: person.as_deref(),
-            ttl,
-            minter,
-        });
+        let req = self.guards.pairings.mint_for(
+            crate::mcp::pairing::MintRequest {
+                name: &name,
+                mode: &mode,
+                trusted: p.trusted,
+                org_id: p.org_id,
+                person: person.as_deref(),
+                ttl,
+                minter,
+            },
+            person_id,
+        );
         // A master mint is an administrative write. `pair_device` records its
         // own `pair_device` event (in `org_admin`), so only `pair_client`
         // records here: one row per write. Never the code or the token.

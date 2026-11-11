@@ -3820,6 +3820,35 @@ async fn linking_a_hub_needs_a_trusted_full_device_and_checks_before_dialing() {
     assert_eq!(err_code(&e), "E_NOTFOUND", "no such live link: {e:?}");
 }
 
+/// Review R6: a code for a live person carries their id, so the redeem
+/// can refuse it once they are disabled; a new name carries none and is
+/// created at the redeem.
+#[tokio::test]
+async fn pair_client_pins_a_live_person_by_id() {
+    let (tools, guards, store) = client_tools();
+    let bob = store.lock().unwrap().create_person("bob", None).unwrap().id;
+    let mint = |name: &str, person: &str| PairClientParams {
+        name: name.into(),
+        mode: None,
+        ttl_s: None,
+        trusted: false,
+        org_id: None,
+        person: Some(person.into()),
+    };
+    let r = tools
+        .pair_client(Parameters(mint("bob-laptop", "bob")))
+        .await
+        .expect("pair_client");
+    let code = result_json(&r)["code"].as_str().unwrap().to_string();
+    assert_eq!(guards.pairings.consume(&code).unwrap().person_id, Some(bob));
+    let r = tools
+        .pair_client(Parameters(mint("new-laptop", "newcomer")))
+        .await
+        .expect("pair_client");
+    let code = result_json(&r)["code"].as_str().unwrap().to_string();
+    assert_eq!(guards.pairings.consume(&code).unwrap().person_id, None);
+}
+
 #[tokio::test]
 async fn pair_client_mints_into_the_registry_the_pair_route_redeems_from() {
     let (tools, guards, _store) = client_tools();
