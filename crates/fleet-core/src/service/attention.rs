@@ -414,7 +414,10 @@ pub fn needs_attention_in(
     // it (or on a stale stamp) — a lost one reads `Lifecycle`.
     let live = row.status != "ghost" && row.lost_at.is_none();
     let working = row.claude_status.as_deref() == Some("working");
-    let account = row.account_uuid.as_deref();
+    // Only a Claude pane bills a Claude login: a Codex or Hermes row is
+    // never Blocked by Claude's limit or sign-in (a down host still is).
+    let claude = row.agent == crate::store::AGENT_CLAUDE;
+    let account = row.account_uuid.as_deref().filter(|_| claude);
     let idle = row
         .claude_status
         .as_deref()
@@ -433,6 +436,7 @@ pub fn needs_attention_in(
         Reason::AccountLimit
     } else if live
         && !working
+        && claude
         && (facts.login_signed_out(&row.host_alias, row.claude_profile.as_deref())
             || account.is_some_and(|a| facts.uncredentialed_accounts.contains(a)))
     {
@@ -1141,6 +1145,46 @@ mod tests {
             Reason::NoCredentials,
             "a turn that failed on a lost login reads as the login"
         );
+    }
+
+    /// A Codex or Hermes row bills no Claude login: Claude's limit or a
+    /// signed-out Claude login never blocks it, a down host still does.
+    #[test]
+    fn a_row_of_another_agent_is_not_blocked_by_claudes_login() {
+        let mut r = row();
+        r.agent = "hermes".into();
+        r.account_uuid = Some("acc".into());
+        r.claude_status = Some("idle".into());
+        r.idle_since = Some(70);
+        let blocked = |a: Option<Attention>| {
+            a.is_some_and(|a| matches!(a.reason, Reason::AccountLimit | Reason::NoCredentials))
+        };
+        assert!(!blocked(needs_attention_in(
+            &r,
+            DEFAULT_CONTEXT_RED_PCT,
+            &limited("acc")
+        )));
+        let mut gone = Facts::default();
+        gone.uncredentialed_accounts.insert("acc".into());
+        assert!(!blocked(needs_attention_in(
+            &r,
+            DEFAULT_CONTEXT_RED_PCT,
+            &gone
+        )));
+        let mut down = Facts::default();
+        down.down_hosts.insert("alpha".into());
+        assert_eq!(
+            needs_attention_in(&r, DEFAULT_CONTEXT_RED_PCT, &down)
+                .unwrap()
+                .reason,
+            Reason::HostDown
+        );
+        r.agent = crate::store::AGENT_CLAUDE.into();
+        assert!(blocked(needs_attention_in(
+            &r,
+            DEFAULT_CONTEXT_RED_PCT,
+            &limited("acc")
+        )));
     }
 
     #[test]

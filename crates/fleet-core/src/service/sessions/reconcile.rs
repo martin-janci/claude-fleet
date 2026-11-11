@@ -1021,7 +1021,15 @@ fn write_reachable_host(
         // credential profile bills that profile's login, never the host's:
         // it takes the profile's account when the host reported one, and
         // otherwise keeps what it has.
+        // Only a Claude pane bills a Claude account: a Codex or Hermes row
+        // takes none (the store clears one it took before).
         let account_uuid = match prior_row {
+            Some(p)
+                if p.agent != crate::store::AGENT_CLAUDE
+                    && p.agent != crate::store::AGENT_SHELL =>
+            {
+                None
+            }
             Some(p) if p.claude_profile.is_some() => p
                 .claude_profile
                 .as_ref()

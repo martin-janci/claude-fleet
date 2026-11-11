@@ -373,13 +373,16 @@ export function classify(s: SessionRow, opts: AttentionOptions): TriageBucket {
 }
 
 /** The Blocked bucket the fleet's facts put a live row in, if any: its host
- *  is down; or, while it is not working, its account is at a limit that has
- *  not reset yet ("Paused · limit"), or its login is signed out. */
+ *  is down; or, while a Claude row is not working, its account is at a limit
+ *  that has not reset yet ("Paused · limit"), or its login is signed out. */
 function blockedBy(s: SessionRow, opts: AttentionOptions): TriageBucket | null {
   const f = opts.facts;
   if (!f) return null;
   if (f.down_hosts?.includes(s.host_alias)) return 'host_down';
   if (s.claude_status === 'working') return null;
+  // Only a Claude pane bills a Claude login: a Codex or Hermes row is never
+  // held by Claude's limit or sign-in (the hub's `needs_attention_in` too).
+  if (s.agent && s.agent !== 'claude') return null;
   const limit = s.account_uuid ? f.limited_accounts?.[s.account_uuid] : undefined;
   if (limit && (limit.resets_at == null || limit.resets_at > opts.now)) return 'account_limit';
   if (loginSignedOut(f, s.host_alias, s.claude_profile)) return 'no_credentials';

@@ -912,9 +912,13 @@ impl Store {
     /// with. A shell row's agent follows its kind instead
     /// ([`Store::set_session_kind`]). The column's `CHECK` refuses a value
     /// outside [`crate::store::AGENTS`].
+    /// Only a Claude pane bills a Claude account, so a row of another
+    /// agent drops the account link it was first given.
     pub fn set_session_agent(&self, id: i64, agent: &str) -> Result<(), rusqlite::Error> {
         self.conn.execute(
-            "UPDATE sessions SET agent = ?1 WHERE id = ?2",
+            "UPDATE sessions SET agent = ?1, \
+               account_uuid = CASE WHEN ?1 IN ('claude', 'shell') THEN account_uuid ELSE NULL END \
+             WHERE id = ?2",
             rusqlite::params![agent, id],
         )?;
         self.emit_session(id)?;
@@ -2651,7 +2655,7 @@ impl Store {
         let mut st = self.conn.prepare_cached(
             "SELECT account_uuid, COUNT(*) FROM sessions \
              WHERE status = 'running' AND lost_at IS NULL \
-               AND account_uuid IS NOT NULL AND kind != 'shell' \
+               AND account_uuid IS NOT NULL AND kind != 'shell' AND agent = 'claude' \
              GROUP BY account_uuid",
         )?;
         let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, u32>(1)?)))?;
@@ -2669,7 +2673,7 @@ impl Store {
         let mut st = self.conn.prepare_cached(
             "SELECT host_alias, claude_profile, COUNT(*) FROM sessions \
              WHERE status = 'running' AND lost_at IS NULL \
-               AND account_uuid IS NULL AND kind != 'shell' \
+               AND account_uuid IS NULL AND kind != 'shell' AND agent = 'claude' \
              GROUP BY host_alias, claude_profile",
         )?;
         let rows = st.query_map([], |r| {
@@ -2702,6 +2706,55 @@ mod tests {
         s.upsert_host("local").unwrap();
         s.upsert_session(name, "local", None, None, 0, 0, "running", None)
             .unwrap()
+    }
+
+    /// Only a Claude pane bills a Claude account: a Codex or Hermes row
+    /// drops the account it was first given, and placement charges no
+    /// login for it.
+    #[test]
+    fn a_row_of_another_agent_takes_no_claude_account() {
+        let s = store();
+        s.upsert_account(&crate::store::AccountRow {
+            uuid: "acct".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        let claude = s
+            .upsert_session("c", "local", None, None, 0, 0, "running", Some("acct"))
+            .unwrap();
+        let hermes = s
+            .upsert_session("h", "local", None, None, 0, 0, "running", Some("acct"))
+            .unwrap();
+        s.upsert_session("x", "local", None, None, 0, 0, "running", None)
+            .unwrap();
+        let codex = s
+            .upsert_session("y", "local", None, None, 0, 0, "running", None)
+            .unwrap();
+        assert_eq!(s.live_sessions_per_account().unwrap()["acct"], 2);
+        assert_eq!(
+            s.live_unlinked_sessions_per_login().unwrap()[&("local".to_string(), None)],
+            2
+        );
+        s.set_session_agent(hermes, "hermes").unwrap();
+        s.set_session_agent(codex, "codex").unwrap();
+        assert_eq!(
+            s.get_session_by_id(hermes).unwrap().unwrap().account_uuid,
+            None
+        );
+        assert_eq!(
+            s.get_session_by_id(claude)
+                .unwrap()
+                .unwrap()
+                .account_uuid
+                .as_deref(),
+            Some("acct")
+        );
+        assert_eq!(s.live_sessions_per_account().unwrap()["acct"], 1);
+        assert_eq!(
+            s.live_unlinked_sessions_per_login().unwrap()[&("local".to_string(), None)],
+            1,
+            "the Codex row is not charged to the host's own login"
+        );
     }
 
     /// `find_sessions_by_tmux_name` is a direct `WHERE tmux_name=?` (plus an

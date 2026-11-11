@@ -604,7 +604,10 @@ impl Store {
                project_id=CASE WHEN excluded.project_id IS NULL AND started_at IS NOT NULL
                                THEN project_id ELSE excluded.project_id END,
                last_activity_at=excluded.last_activity_at,
-               account_uuid=COALESCE(excluded.account_uuid, account_uuid),
+               -- Only a Claude pane bills a Claude account: a Codex or
+               -- Hermes row keeps none, and one it took before is cleared.
+               account_uuid=CASE WHEN agent NOT IN ('claude', 'shell') THEN NULL
+                                 ELSE COALESCE(excluded.account_uuid, account_uuid) END,
                worktree_key=COALESCE(excluded.worktree_key, worktree_key),
                -- The resurrect. Reached only for a row this observation is
                -- allowed to touch at all (the `WHERE` below, #170).

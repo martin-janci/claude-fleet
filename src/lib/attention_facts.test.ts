@@ -113,6 +113,23 @@ describe('the Blocked buckets', () => {
     expect(classify(s, { idleSecs: 0, now: 2000, facts })).toBe('idle');
   });
 
+  it('never holds a Codex or Hermes row on Claude\'s limit or sign-in', () => {
+    const facts = {
+      limited_accounts: { acc: { window: 'weekly' as const, resets_at: 2000 } },
+      signed_out_logins: [{ host: 'mefistos', profile: null }],
+      down_hosts: [] as string[],
+    };
+    for (const agent of ['hermes', 'codex'] as const) {
+      const s = session('mefistos', 'a', { claude_status: 'idle', account_uuid: 'acc', agent });
+      expect(classify(s, { idleSecs: 0, now: 1000, facts })).toBe('idle');
+      expect(classify(s, { idleSecs: 0, now: 1000, facts: { ...facts, down_hosts: ['mefistos'] } })).toBe(
+        'host_down',
+      );
+    }
+    const claude = session('mefistos', 'a', { claude_status: 'idle', account_uuid: 'acc', agent: 'claude' });
+    expect(classify(claude, { idleSecs: 0, now: 1000, facts })).toBe('account_limit');
+  });
+
   it('words each reason line as the Main board does', () => {
     const s = { host_alias: 'mefistos', account_uuid: 'acc' };
     const name = () => 'tech.silvester';
