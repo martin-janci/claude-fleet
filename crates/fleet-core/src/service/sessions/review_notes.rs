@@ -159,10 +159,15 @@ pub async fn send(
             repeat: false,
         }),
         Err(e) => {
-            // Not typed and not kept: the send never happened, so a retry
-            // with the same id must be able to make it.
-            if let Ok(s) = lock(store) {
-                let _ = s.delete_review_note_batch(args.session_id, &args.client_msg_id);
+            // A timeout or a lost agent answer may have typed the notes
+            // (`queue_prompt` keeps such a row as "may have been typed, not
+            // sent again"): the batch stays, so a retry with the same id
+            // answers `repeat` and types nothing twice. Any other error
+            // typed nothing: the batch goes, and the same id may retry.
+            if !codes::may_have_run(&e.code) {
+                if let Ok(s) = lock(store) {
+                    let _ = s.delete_review_note_batch(args.session_id, &args.client_msg_id);
+                }
             }
             Err(e)
         }
@@ -357,5 +362,62 @@ mod tests {
         .unwrap();
         assert!(again.repeat && !again.delivered);
         assert_eq!(again.notes.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_send_that_may_have_typed_keeps_its_batch_and_a_retry_types_nothing() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let sid = {
+            let s = lock(&store).unwrap();
+            s.upsert_host("local").unwrap();
+            s.upsert_session("api-1", "local", None, None, 0, 0, "running", None)
+                .unwrap()
+        };
+        let ssh = Arc::new(SshClient::new());
+        let args = SendReviewNotesArgs {
+            session_id: sid,
+            client_msg_id: "rn-2".into(),
+            notes: vec![NewReviewNote {
+                path: "a.rs".into(),
+                line: Some(2),
+                side: "new".into(),
+                quote: None,
+                body: "x".into(),
+            }],
+        };
+        for code in [
+            codes::E_SSH_TIMEOUT,
+            codes::E_TIMEOUT,
+            codes::E_AGENT_PROTOCOL,
+        ] {
+            assert!(codes::may_have_run(code), "{code}");
+        }
+        let err = send(
+            args.clone(),
+            "Ada",
+            None,
+            |_| Err(IpcError::new(codes::E_SSH_TIMEOUT, "ssh timed out")),
+            &store,
+            &ssh,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, codes::E_SSH_TIMEOUT);
+        assert_eq!(
+            lock(&store).unwrap().review_notes(sid).unwrap().len(),
+            1,
+            "a send that may have typed stays listed on every device"
+        );
+        let again = send(
+            args,
+            "Ada",
+            None,
+            |_| panic!("a retry of a send that may have typed types nothing"),
+            &store,
+            &ssh,
+        )
+        .await
+        .unwrap();
+        assert!(again.repeat && !again.delivered);
     }
 }

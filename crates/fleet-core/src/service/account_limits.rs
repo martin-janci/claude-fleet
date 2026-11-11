@@ -225,7 +225,7 @@ impl OverLimit {
 
 /// "Oct 24 11:00 UTC": a server-side time in words that do not depend on
 /// where the reader is.
-fn utc_stamp(at: i64) -> String {
+pub(crate) fn utc_stamp(at: i64) -> String {
     let secs = at.rem_euclid(86_400);
     format!(
         "{} {:02}:{:02} UTC",
