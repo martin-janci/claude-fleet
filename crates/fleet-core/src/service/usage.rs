@@ -825,6 +825,29 @@ fn collection_hosts(
 /// One pass over every reachable host (and `local`), sequentially: each
 /// host is one bounded ssh call. Failures are logged and skipped.
 pub async fn collect_all(store: &Mutex<Store>, exec: &dyn SshExec, now: i64) -> usize {
+    collect_pass(store, exec, now).await.0
+}
+
+/// PURE: how a pass went for the loop's health: failed when it visited
+/// hosts and every one of them failed, since then no spend moved and every
+/// cap that reads it (the daily limit, mission, routine and org budgets)
+/// stands still. Some hosts failing is only logged.
+pub fn pass_outcome(tried: usize, failed: &[String]) -> Result<(), String> {
+    if tried == 0 || failed.len() < tried {
+        return Ok(());
+    }
+    Err(format!(
+        "usage could not be read on any host ({}); spend limits and budgets are not moving",
+        failed.join("; ")
+    ))
+}
+
+/// [`collect_all`], with how the pass went ([`pass_outcome`]).
+async fn collect_pass(
+    store: &Mutex<Store>,
+    exec: &dyn SshExec,
+    now: i64,
+) -> (usize, Result<(), String>) {
     let (hosts, overrides) = match store.lock() {
         Ok(s) => (
             collection_hosts(
@@ -840,21 +863,26 @@ pub async fn collect_all(store: &Mutex<Store>, exec: &dyn SshExec, now: i64) -> 
             ),
             price_overrides(&s),
         ),
-        Err(_) => return 0,
+        Err(_) => return (0, Err("the store could not be read".into())),
     };
     let mut changed = 0;
+    let tried = hosts.len();
+    let mut failed = Vec::new();
     for host in hosts {
         match collect_host(store, exec, &host, &overrides, now).await {
             Ok(n) => changed += n,
-            Err(e) => tracing::warn!(
-                host = %host,
-                code = %e.code,
-                error = %e.message,
-                "usage collection failed (retried next interval)"
-            ),
+            Err(e) => {
+                tracing::warn!(
+                    host = %host,
+                    code = %e.code,
+                    error = %e.message,
+                    "usage collection failed (retried next interval)"
+                );
+                failed.push(format!("{host}: {}", e.code));
+            }
         }
     }
-    changed
+    (changed, pass_outcome(tried, &failed))
 }
 
 /// Whether a collection pass is due. Pure (the caller supplies the time
@@ -919,8 +947,8 @@ pub async fn maybe_collect(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>) -> O
     }
     let next = Some(std::time::Duration::from_secs(interval));
     let exec: &dyn SshExec = ssh.as_ref();
-    let n = collect_all(store, exec, now_unix()).await;
-    crate::service::loops::report("usage", Ok::<_, String>(()), next);
+    let (n, outcome) = collect_pass(store, exec, now_unix()).await;
+    crate::service::loops::report("usage", outcome, next);
     Some(n)
 }
 
@@ -2848,5 +2876,20 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("E_SHELL"), "{text}");
+        // Every host it visited failed: the pass is a failure for health.
+        let (_, outcome) = collect_pass(&store, &fake, 1_000).await;
+        let why = outcome.unwrap_err();
+        assert!(why.contains("vps: E_SHELL"), "{why}");
+    }
+
+    /// Review R5: a pass whose every host failed moved no spend, so it
+    /// reports a failure; some hosts failing, or none visited, does not.
+    #[test]
+    fn a_pass_fails_only_when_every_host_it_visited_failed() {
+        assert_eq!(pass_outcome(0, &[]), Ok(()));
+        assert_eq!(pass_outcome(2, &["a: E_SSH".into()]), Ok(()));
+        let why = pass_outcome(2, &["a: E_SSH".into(), "b: E_SHELL".into()]).unwrap_err();
+        assert!(why.contains("a: E_SSH; b: E_SHELL"), "{why}");
+        assert!(why.contains("not moving"), "{why}");
     }
 }
