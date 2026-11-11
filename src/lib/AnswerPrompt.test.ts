@@ -82,6 +82,15 @@ describe('AnswerPrompt', () => {
     expect(opts[0].textContent).toContain('Yes');
   });
 
+  it('a generic permission headline names the action from the tool call (HITL audit H-13)', () => {
+    const push = { ...DIALOG, kind: 'permission' as const, question: 'Do you want to proceed?', detail: 'Bash(git push origin main)' };
+    render(AnswerPrompt, { session: session({ pending_input: push }), view: view(push) });
+    const card = screen.getByTestId('answer-card');
+    expect(card.querySelector('strong')?.textContent).toBe('Run git push origin main?');
+    // The call itself is still shown, exactly as the pane has it.
+    expect(screen.getByTestId('question-detail').textContent).toBe('Bash(git push origin main)');
+  });
+
   it('asks before a choice that saves a rule for every later session in the folder', async () => {
     // Claude Code keeps "don't ask again for: …" in the folder's settings,
     // so it answers sessions that do not exist yet. The first press only

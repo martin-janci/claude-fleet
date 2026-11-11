@@ -42,6 +42,7 @@
   import QuestionCard from './kit/QuestionCard.svelte';
   import type { Answer } from './kit/status';
   import { answerArm, persistentRule } from './answer_guard';
+  import { GENERIC_QUESTION, toolAsk } from './row_reason';
   import {
     answerFingerprint,
     isChatOption,
@@ -320,8 +321,14 @@
           onselect: () => choose(o),
         })),
   );
+  // HITL audit H-13: Claude Code's permission headline ("Do you want to
+  // proceed?") names no action, so the card says what is asked, from the
+  // tool call; the call itself stays in mono below, exactly as the pane has it.
+  const askedAction = $derived(view.kind === 'permission' ? toolAsk(view.detail) : null);
   const cardQuestion = $derived(
-    view.question ?? `Claude is waiting for one of these${view.kind === 'permission' ? ' (permission)' : ''}.`,
+    askedAction && (!view.question || GENERIC_QUESTION.test(view.question))
+      ? `${askedAction.charAt(0).toUpperCase()}${askedAction.slice(1)}?`
+      : (view.question ?? `Claude is waiting for one of these${view.kind === 'permission' ? ' (permission)' : ''}.`),
   );
   function confirmPersistent() {
     const o = confirming;

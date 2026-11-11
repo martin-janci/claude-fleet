@@ -10,6 +10,7 @@ const base = {
   context_pct: null,
   pr_url: null,
   pending_form: null,
+  safe_kill_state: null,
 };
 const name = (u: string) => (u === 'acc' ? 'acme' : u);
 const say = (r: { lead: string; text: string } | null) => (r ? `${r.lead} ${r.text}`.trim() : null);
@@ -62,6 +63,12 @@ describe('rowReason (HITL audit H-11)', () => {
   it('a failed turn says why in words', () => {
     const r = rowReason('stop_failed', { ...base, current_activity: 'API Error: 529 {"type":"ov' }, undefined, name, null);
     expect(say(r)).toBe('Failed: the API was overloaded (529)');
+  });
+
+  it('a failed clean up says its work was not saved', () => {
+    expect(say(rowReason('failed', { ...base, safe_kill_state: 'failed' }, undefined, name, null))).toBe(
+      'Failed: clean up could not commit or push its work',
+    );
   });
 
   it('failing CI names the pull request', () => {

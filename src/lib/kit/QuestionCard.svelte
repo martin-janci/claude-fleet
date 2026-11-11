@@ -103,6 +103,17 @@
 </section>
 
 <style>
+  /* An answer's whole text shows: "Yes, and don't ask again for git push
+     commands in /home/…/billing-api" was cut at the folder, the part that
+     says how far the rule reaches (HITL audit H-13). */
+  .acts :global(.of-btn) {
+    white-space: normal;
+    height: auto;
+    min-height: var(--control-h);
+    padding-block: 3px;
+    text-align: left;
+    overflow-wrap: anywhere;
+  }
   .compact {
     padding: var(--space-2) var(--space-3);
     gap: var(--control-gap);

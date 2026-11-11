@@ -25,7 +25,7 @@ export interface RowReason {
 
 /** Claude Code's generic permission headlines: they name no action, so the
  *  tool call says it instead. */
-const GENERIC_QUESTION = /^do you want to (proceed|make this edit|create|run|allow|continue)\b/i;
+export const GENERIC_QUESTION = /^do you want to (proceed|make this edit|create|run|allow|continue)\b/i;
 
 const TOOL_VERB: Record<string, string> = {
   Bash: 'run',
@@ -107,6 +107,7 @@ export function rowReason(
     | 'context_pct'
     | 'pr_url'
     | 'pending_form'
+    | 'safe_kill_state'
   >,
   facts: AttentionFacts | undefined,
   accountName: (uuid: string) => string,
@@ -124,6 +125,9 @@ export function rowReason(
       return { lead: 'Failed:', text: sess.stuck_kind ? STUCK_REASON[sess.stuck_kind] : 'stuck', tone: 'failed' };
     case 'stop_failed':
     case 'failed':
+      if (sess.safe_kill_state === 'failed') {
+        return { lead: 'Failed:', text: 'clean up could not commit or push its work', tone: 'failed' };
+      }
       return { lead: 'Failed:', text: failureWords(sess.current_activity), tone: 'failed' };
     case 'ci_failing': {
       const pr = prNumber(sess.pr_url);
