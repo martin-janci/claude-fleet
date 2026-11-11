@@ -2758,6 +2758,7 @@
                       <RichText
                         source={g.text}
                         sessionId={cardsAct ? session.id : null}
+                        fleet={sFleet ?? null}
                         answered={!isLast}
                         result={taskResult}
                         resultTitle={session.work?.title ?? ''}
