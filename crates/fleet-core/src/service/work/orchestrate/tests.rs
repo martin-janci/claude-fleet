@@ -1670,6 +1670,57 @@ fn a_far_reset_is_not_believed() {
     );
 }
 
+/// Review R6: disabling a mission's owner revokes its live grants in the
+/// same transaction, and the loop then pauses it instead of starting runs.
+#[tokio::test]
+async fn a_disabled_owners_mission_loses_its_grant_and_is_paused() {
+    let fx = fixture();
+    member(&fx, "a");
+    let now = now_unix();
+    let ana = {
+        let s = lock(&fx.deps.store).unwrap();
+        s.add_grant(
+            fx.m.id,
+            &crate::store::NewGrant {
+                level: 2,
+                granted_by: "ana",
+                hosts: None,
+                budget_micros: Some(40_000_000),
+                max_parallel: None,
+                profile: None,
+                expires_at: now + 3600,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            s.live_automation_of(fx.m.owner_person_id.unwrap())
+                .unwrap()
+                .1,
+            1
+        );
+        fx.m.owner_person_id.unwrap()
+    };
+    lock(&fx.deps.store).unwrap().disable_person(ana).unwrap();
+    {
+        let s = lock(&fx.deps.store).unwrap();
+        assert!(s.live_mission_grant(fx.m.id, now).unwrap().is_none());
+        assert_eq!(s.live_automation_of(ana).unwrap(), (0, 0));
+    }
+    tick_mission(&fx.deps, fx.m.id, now).await.unwrap();
+    assert_eq!(mission_now(&fx).state, "paused");
+    let braked: i64 = lock(&fx.deps.store)
+        .unwrap()
+        .conn_for_test()
+        .query_row(
+            "SELECT COUNT(*) FROM orchestration_events \
+             WHERE orchestration_project_id = ?1 AND kind = 'owner_disabled'",
+            [fx.m.id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(braked, 1);
+}
+
 /// Mission #6 (2026-10-20): a run stuck open for over an hour braked the
 /// mission, and every resume braked it again on the same stale run before
 /// the tick tried a step. A person's resume restarts the window.

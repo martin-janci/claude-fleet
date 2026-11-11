@@ -267,8 +267,10 @@ pub use routine_memory::{
 };
 pub use routine_seen::{RoutineSeenRow, SeenChange};
 pub use routines::{
-    NewRoutineRun, RoutineFields, RoutineRow, RoutineRunRow, ROUTINE_LEASE_SECS, ROUTINE_OVERLAPS,
-    ROUTINE_RUN_OUTCOMES, ROUTINE_RUN_OUTCOME_SOURCES, ROUTINE_RUN_STATES, ROUTINE_TRIGGERS,
+    NewRoutineRun, RoutineFields, RoutineRow, RoutineRunRow, PAUSED_HOST_REMOVED,
+    PAUSED_OWNER_DISABLED, PAUSED_PROJECT_REMOVED, ROUTINE_LEASE_SECS, ROUTINE_NO_PROJECT,
+    ROUTINE_OVERLAPS, ROUTINE_RUN_OUTCOMES, ROUTINE_RUN_OUTCOME_SOURCES, ROUTINE_RUN_STATES,
+    ROUTINE_TRIGGERS,
 };
 pub use rows::*;
 pub use run_trace::{

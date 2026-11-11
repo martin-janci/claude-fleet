@@ -1642,8 +1642,15 @@ writes nothing. With `--force` it says what it actually revoked, counted
 afterwards, so you can see both halves happened:
 
 ```
-disabled ada (person 3): 2 device(s) revoked, 1 grant(s) to them revoked
+disabled ada (person 3): 2 device(s) revoked, 1 grant(s) to them revoked, 1 routine(s) paused, 0 mission grant(s) revoked
 ```
+
+Their automation stops in the same transaction: every routine of theirs that
+is on is turned off with "paused: its owner was disabled", and every live grant
+on a mission they own is revoked, so the mission loop starts no run and pauses
+the mission ("its owner was disabled"). Nothing is deleted, and re-enabling
+the person turns none of it back on: each routine and mission is resumed on
+purpose.
 
 What it does **not** do, plainly: it does not re-attribute their sessions —
 those rows stay theirs and stay private, readable by nobody, and no command

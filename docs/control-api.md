@@ -1112,14 +1112,17 @@ Index by area (names only; see the reference for details):
   routine_id }` with its last runs; `runs { routine_id, limit? }`; `save {
   routine, routine_id? }` writes the whole routine (host, project,
   `profile` = the account it bills, prompt, `budget_run_micros`,
-  `budget_day_micros`, `overlap: skip | parallel`); `preview { routine,
+  `budget_day_micros`, `overlap: skip | parallel`; a change without
+  `enabled` keeps the routine's switch, and one that stays off keeps its
+  `paused_reason`); `preview { routine,
   routine_id? }` is the editor's dry run (gap plan G2.3): it writes
   nothing and answers `problem` (what `save` would refuse, absent when it
   would save), `next_runs` (the schedule's next five fires at
   `utc_offset_min`, which a daylight-saving change does not move), the
   `account` its login bills and the host's `logins` for the Account
   picker; `delete`; `set_enabled
-  { enabled }`; `skip_next { skip? }`; `run_now`; `set_run_outcome {
+  { enabled }` (refused, `E_INVALID_STATE`, for a routine whose project
+  was removed: it points at project 0 until a save picks one); `skip_next { skip? }`; `run_now`; `set_run_outcome {
   run_id, outcome }` (gap plan G7.9), a person's answer to what a finished
   run came to (`did_work`, `nothing` or `needs_person`; a failed run stays
   failed): it outranks Jev's reading and is stored as `rule`, and

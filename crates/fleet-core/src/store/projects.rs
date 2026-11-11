@@ -776,14 +776,18 @@ impl Store {
         )?;
         // A routine starts its sessions in this project: it can no longer
         // fire, so it stops with the reason, rather than failing each time
-        // its schedule comes round (review r02).
+        // its schedule comes round (review r02). Every one of them, an off
+        // one included, and it lets go of the id: the next project added
+        // takes this reused rowid, and Resume must not start the routine
+        // in that other repository (review R6).
         tx.execute(
             "UPDATE routines SET enabled = 0, paused_reason = ?2, next_run_at = NULL, \
-               updated_at = ?3 WHERE project_id = ?1 AND enabled = 1",
+               project_id = ?4, updated_at = ?3 WHERE project_id = ?1",
             rusqlite::params![
                 project_id,
                 super::routines::PAUSED_PROJECT_REMOVED,
-                now_unix()
+                now_unix(),
+                super::routines::ROUTINE_NO_PROJECT
             ],
         )?;
         // Its routines' project notebooks go with it (migration 204): a

@@ -8,7 +8,7 @@
   import { errorText } from './error_copy';
   import { onMount } from 'svelte';
   import StatusDot from './kit/StatusDot.svelte';
-  import { listRoutines, lastRunByRoutine, openRoutines, routineDot, routineLine, runRoutineNow, type RoutineRow } from './routines';
+  import { listRoutines, lastRunByRoutine, openRoutines, routineDot, routineLine, runNowNote, runRoutineNow, type RoutineRow } from './routines';
   import { listRuns, type RunRow } from './runs';
   import { readErrorText } from './work_view';
   import type { IpcError } from './result';
@@ -49,7 +49,7 @@
     busy = r.id;
     const res = await runRoutineNow(r.id);
     busy = null;
-    note = res.ok ? `${r.name} started.` : errorText(res.error);
+    note = res.ok ? runNowNote(r.name, res.value, `${r.name} started.`).message : errorText(res.error);
     if (res.ok) void load();
   }
 </script>

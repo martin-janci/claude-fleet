@@ -314,6 +314,29 @@ describe('the Inbox block', () => {
     expect(await screen.findByTestId('routine-definition')).toBeInTheDocument();
   });
 
+  // Review R6: a Retry the hub skipped ran nothing; it says so as a warning.
+  it('a Retry the hub skipped warns with its reason instead of "running again"', async () => {
+    const f = { routine: sweep, run: bad, may_change: true };
+    route([sweep], [ok, bad], [f]);
+    const base = inv.getMockImplementation() as (cmd: string, a: unknown) => Promise<unknown>;
+    inv.mockImplementation(async (cmd: string, a: { args: { action: string } }) =>
+      cmd === 'routines' && a.args.action === 'run_now'
+        ? { ...bad, id: 9, state: 'skipped', reason: 'its login is past the line' }
+        : base(cmd, a),
+    );
+    failing.set([f]);
+    clearToasts();
+    render(RoutineFailures);
+    await fireEvent.click(await screen.findByTestId('routine-failure-retry'));
+    await waitFor(() =>
+      expect(get(toasts).map((t) => [t.kind, t.message])).toContainEqual([
+        'warning',
+        'Morning PR sweep did not run: its login is past the line.',
+      ]),
+    );
+    expect(get(toasts).some((t) => t.message.includes('running again'))).toBe(false);
+  });
+
   it('shows nothing when no routine failed', () => {
     render(RoutineFailures);
     expect(screen.queryByTestId('routine-failures')).toBeNull();
@@ -486,6 +509,25 @@ describe('the routine editor (G2.3: schedule picker, next run, account, dry run,
       expect(screen.getByTestId('routine-dry-run').textContent).toContain('Dry run: on mac, in martin-janci/claude-fleet, as work@x.com, at most $2.00 a run.'),
     );
     expect(argsOf('preview').routine_id).toBe(3);
+  });
+
+  // Review R6: the list was read while the routine was on; it was paused
+  // since (the phone, the run budget). Saving an edit keeps it off.
+  it('saving an edit sends the switch as the hub has it now, not the stale list', async () => {
+    route([sweep]);
+    render(RoutinesPanel);
+    await screen.findByTestId('routine-title');
+    const base = inv.getMockImplementation() as (cmd: string, a: unknown) => Promise<unknown>;
+    inv.mockImplementation(async (cmd: string, a: { args: { action: string } }) =>
+      cmd === 'routines' && a.args.action === 'get'
+        ? { routine: { ...sweep, enabled: false, paused_reason: 'paused: a run went over its budget' }, runs: [], may_change: true }
+        : base(cmd, a),
+    );
+    await fireEvent.click(screen.getByTestId('routine-edit'));
+    await fireEvent.input(screen.getByTestId('routine-prompt'), { target: { value: 'Only CI.' } });
+    await fireEvent.click(screen.getByTestId('routine-save'));
+    await waitFor(() => expect(argsOf('save')).toBeDefined());
+    expect(argsOf('save').routine).toMatchObject({ prompt: 'Only CI.', enabled: false });
   });
 
   it('the dry run says what save would refuse, and Run once now waits for a routine that would save', async () => {

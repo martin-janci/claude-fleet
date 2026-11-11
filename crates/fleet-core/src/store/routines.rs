@@ -17,6 +17,15 @@ pub const ROUTINE_OVERLAPS: [&str; 2] = ["skip", "parallel"];
 /// `routines.paused_reason` when the routine's project was removed: it can
 /// no longer start a session there.
 pub const PAUSED_PROJECT_REMOVED: &str = "paused: its project was removed";
+/// `routines.project_id` of a routine whose project was removed: a project
+/// id is a reused rowid (no AUTOINCREMENT), and SQLite never hands out 0,
+/// so the next project added cannot inherit the routine. A save must pick
+/// a project again (review R6).
+pub const ROUTINE_NO_PROJECT: i64 = 0;
+/// `routines.paused_reason` when the routine's owner was disabled
+/// (`Store::disable_person`): nothing they own starts sessions any more,
+/// and enabling the person does not turn it back on (review R6).
+pub const PAUSED_OWNER_DISABLED: &str = "paused: its owner was disabled";
 /// `routines.paused_reason` when the routine's host was removed.
 pub const PAUSED_HOST_REMOVED: &str = "paused: its host was removed";
 /// `routine_runs.state` values; `running` is the only open one.
@@ -340,21 +349,23 @@ impl Store {
         Ok(self.get_routine(id)?.expect("the row just inserted"))
     }
 
-    /// Replace a routine's fields. A change clears `skip_next` and
-    /// `paused_reason`: the schedule and the reason it stopped start over.
+    /// Replace a routine's fields. A change clears `skip_next`: the
+    /// schedule starts over. `paused_reason` is the caller's: the reason a
+    /// routine that stays off stopped (`None` once it is on).
     pub fn update_routine(
         &self,
         id: i64,
         f: &RoutineFields,
         next_run_at: Option<i64>,
         event_cursor: i64,
+        paused_reason: Option<&str>,
     ) -> Result<Option<RoutineRow>, IpcError> {
         self.conn.execute(
             "UPDATE routines SET name = ?1, enabled = ?2, trigger = ?3, cron = ?4, \
                utc_offset_min = ?5, event = ?6, event_cursor = ?7, host_alias = ?8, \
                project_id = ?9, profile = ?10, prompt = ?11, budget_run_micros = ?12, \
                budget_day_micros = ?13, overlap = ?14, next_run_at = ?15, skip_next = 0, \
-               paused_reason = NULL, updated_at = ?16, event_repo = ?18, event_author = ?19, \
+               paused_reason = CASE WHEN ?2 = 0 THEN ?30 END, updated_at = ?16, event_repo = ?18, event_author = ?19, \
                event_rate_secs = ?20, time_zone = ?21, run_max_secs = ?22, fallback_host = ?23, \
                retry_once = ?24, autonomy = ?25, event_host = ?26, memory = ?27, \
                memory_auto = ?28, track_seen = ?29 \
@@ -388,7 +399,8 @@ impl Store {
                 f.event_host,
                 f.memory,
                 f.memory_auto as i64,
-                f.track_seen as i64
+                f.track_seen as i64,
+                paused_reason
             ],
         )?;
         self.get_routine(id)
@@ -692,6 +704,26 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// The routine's newest run that was not skipped: a skip did nothing,
+    /// so it neither resolves a failure nor is one (the Inbox, review R6).
+    pub fn latest_unskipped_routine_run(
+        &self,
+        routine_id: i64,
+    ) -> Result<Option<RoutineRunRow>, IpcError> {
+        Ok(self
+            .conn
+            .query_row(
+                &format!(
+                    "SELECT {RUN_COLS} FROM routine_runs WHERE routine_id = ?1 \
+                       AND state <> 'skipped' \
+                     ORDER BY started_at DESC, id DESC LIMIT 1"
+                ),
+                rusqlite::params![routine_id],
+                run,
+            )
+            .optional()?)
+    }
+
     /// Every open run, oldest first.
     pub fn running_routine_runs(&self) -> Result<Vec<RoutineRunRow>, IpcError> {
         let mut stmt = self.conn.prepare(&format!(
@@ -820,6 +852,9 @@ impl Store {
     /// for memory as it closes: there is nothing to read (migration 205's
     /// index holds the pending reads only). Nor is there for a failed run of
     /// one that only tracks seen items: only a done run's are recorded.
+    /// A routine whose prompt names `<dashboard-feed` is always left for
+    /// the pass, failed runs included: its reply carries the feed, and
+    /// [`Store::routine_runs_memory_unread`] selects only unread runs.
     pub fn finish_routine_run(
         &self,
         id: i64,
@@ -832,6 +867,7 @@ impl Store {
             "UPDATE routine_runs SET state = ?1, reason = ?2, cost_micros = ?3, finished_at = ?4, \
                memory_read_at = CASE WHEN (SELECT r.memory IS NULL \
                    AND (r.track_seen = 0 OR ?1 <> 'done') \
+                   AND instr(r.prompt, '<dashboard-feed') = 0 \
                  FROM routines r WHERE r.id = routine_runs.routine_id) THEN ?4 END \
              WHERE id = ?5 AND state = 'running'",
             rusqlite::params![state, reason, cost_micros, now, id],
@@ -1001,6 +1037,9 @@ mod orphan_tests {
         let on_host = routine_on(&s, "h2", p2);
         let merged = routine_on(&s, "old", p2);
         let bystander = routine_on(&s, "h1", p2);
+        let off_on_project = routine_on(&s, "h1", p1);
+        s.set_routine_enabled(off_on_project, false, None, None)
+            .unwrap();
 
         s.delete_project(p1, &Default::default()).unwrap();
         s.delete_host("h2").unwrap();
@@ -1008,6 +1047,11 @@ mod orphan_tests {
 
         let r = s.get_routine(on_project).unwrap().unwrap();
         assert!(!r.enabled && r.next_run_at.is_none());
+        assert_eq!(r.paused_reason.as_deref(), Some(PAUSED_PROJECT_REMOVED));
+        // Review R6: it lets go of the reused id, an off one included.
+        assert_eq!(r.project_id, ROUTINE_NO_PROJECT);
+        let r = s.get_routine(off_on_project).unwrap().unwrap();
+        assert_eq!(r.project_id, ROUTINE_NO_PROJECT);
         assert_eq!(r.paused_reason.as_deref(), Some(PAUSED_PROJECT_REMOVED));
         let r = s.get_routine(on_host).unwrap().unwrap();
         assert!(!r.enabled);

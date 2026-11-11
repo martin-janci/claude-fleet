@@ -506,6 +506,19 @@ pub(super) enum Plan {
 /// reach, with no fallback that can, is tried anyway: the probe may be
 /// stale, and a failed start says why.
 pub(super) fn plan(s: &Store, r: &RoutineRow, now: i64) -> Result<Plan, IpcError> {
+    // A disabled person's routine starts nothing (review R6):
+    // `disable_person` pauses it, and this holds for one turned on since.
+    if let Some(owner) = r.owner_person_id {
+        if s.get_person(owner)?
+            .is_some_and(|p| p.disabled_at.is_some())
+        {
+            return Ok(Plan::Skip(
+                crate::store::PAUSED_OWNER_DISABLED
+                    .trim_start_matches("paused: ")
+                    .into(),
+            ));
+        }
+    }
     if r.overlap == "skip" && s.routine_run_open(r.id)? {
         return Ok(Plan::Skip("its last run is still going".into()));
     }

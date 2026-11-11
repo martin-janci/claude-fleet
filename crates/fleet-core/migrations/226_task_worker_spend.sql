@@ -32,4 +32,16 @@ BEGIN
    WHERE worker_session_id = old.id;
 END;
 
+-- A removed project's routines let go of its id (review R6). A project
+-- id is a reused rowid: the next project added took it, and Resume started
+-- the routine in that other repository. Each routine stopped for its
+-- removed project, and each still naming a project that is gone, points at
+-- 0 (`ROUTINE_NO_PROJECT`, never a rowid), stays off with the reason, and
+-- needs a project picked again.
+UPDATE routines
+   SET project_id = 0, enabled = 0, next_run_at = NULL,
+       paused_reason = 'paused: its project was removed'
+ WHERE paused_reason = 'paused: its project was removed'
+    OR project_id NOT IN (SELECT id FROM projects);
+
 INSERT OR IGNORE INTO schema_version (version) VALUES (226);

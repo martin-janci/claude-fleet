@@ -2371,6 +2371,19 @@ pub async fn tick_mission(deps: &Deps, id: i64, now: i64) -> Result<(), IpcError
         let Some(m) = s.get_mission(id)? else {
             return Ok(());
         };
+        // A disabled person's mission starts nothing more (review R6):
+        // `disable_person` revoked its grants, and the loop pauses it.
+        if m.state == "active" {
+            if let Some(owner) = m.owner_person_id {
+                if s.get_person(owner)?
+                    .is_some_and(|p| p.disabled_at.is_some())
+                {
+                    brake(&s, &m, "owner_disabled", "its owner was disabled".into())?;
+                    s.release_mission_lease(id, Some(now + IDLE_RECHECK_SECS), Some(now))?;
+                    return Ok(());
+                }
+            }
+        }
         let a = autonomy(&s, &m, now)?;
         let counts = s.mission_task_counts(id)?;
         if !a.enabled || m.state != "active" || !crate::store::mode_runs_loop(&m.mode) {

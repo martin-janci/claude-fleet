@@ -443,6 +443,35 @@ async fn a_fire_missed_while_down_runs_once() {
     );
 }
 
+/// Review R6: disabling a routine's owner pauses it with the reason, and a
+/// due fire of one turned on again since (or racing the disable) records a
+/// skip and starts no session owned by the disabled person.
+#[tokio::test]
+async fn a_disabled_owners_routine_is_paused_and_starts_nothing() {
+    let f = fx();
+    let r = new_routine(&f, input(&f));
+    assert_eq!(r.owner_person_id, Some(f.ana));
+    lock(&f.store).unwrap().disable_person(f.ana).unwrap();
+    let off = routine(&f, r.id);
+    assert!(!off.enabled && off.next_run_at.is_none());
+    assert_eq!(
+        off.paused_reason.as_deref(),
+        Some(crate::store::PAUSED_OWNER_DISABLED)
+    );
+    // Turned on behind the disable's back: the fire is a skip.
+    let nine = OCT8 + 9 * H;
+    {
+        let s = lock(&f.store).unwrap();
+        s.set_routine_enabled(r.id, true, None, Some(nine)).unwrap();
+    }
+    tick_once(&f.deps, nine).await;
+    let runs = runs_of(&f, r.id);
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].state, "skipped");
+    assert_eq!(runs[0].reason.as_deref(), Some("its owner was disabled"));
+    assert!(f.fake.started.lock().unwrap().is_empty());
+}
+
 #[tokio::test]
 async fn skip_next_records_the_fire_as_skipped_once() {
     let f = fx();
@@ -1189,6 +1218,81 @@ fn turning_a_routine_back_on_restarts_its_schedule_and_cursor() {
     );
 }
 
+/// Review R6: an edit that does not name `enabled` keeps the switch, and a
+/// routine that stays off keeps why it stopped (a person's switch, the run
+/// budget), so a save from a stale list never turns it back on.
+#[test]
+fn an_edit_keeps_a_paused_routine_off_with_its_reason() {
+    let f = fx();
+    let r = new_routine(&f, input(&f));
+    let ana = person(&f.store, None, f.ana);
+    set_enabled(&f.store, &ana, r.id, false).unwrap();
+    let mut edited = input(&f);
+    edited.prompt = "Review my open PRs, oldest first.".into();
+    let saved = save(&f.store, &ana, Some(r.id), &edited).unwrap();
+    assert!(!saved.enabled && saved.next_run_at.is_none());
+    // The scheduler's budget pause keeps its reason through an edit.
+    let why = "paused: a run went over its budget";
+    lock(&f.store)
+        .unwrap()
+        .set_routine_enabled(r.id, false, Some(why), None)
+        .unwrap();
+    let saved = save(&f.store, &ana, Some(r.id), &edited).unwrap();
+    assert!(!saved.enabled);
+    assert_eq!(saved.paused_reason.as_deref(), Some(why));
+    // Turning it on in the save clears the reason.
+    edited.enabled = Some(true);
+    let on = save(&f.store, &ana, Some(r.id), &edited).unwrap();
+    assert!(on.enabled && on.next_run_at.is_some() && on.paused_reason.is_none());
+    // And an edit of an on routine without `enabled` keeps it on.
+    edited.enabled = None;
+    assert!(save(&f.store, &ana, Some(r.id), &edited).unwrap().enabled);
+}
+
+/// Review R6: a removed project's routines let go of its id, so the next
+/// project (which SQLite gives the same rowid) does not inherit them, and
+/// Resume refuses until a save picks a project again.
+#[test]
+fn a_removed_projects_routine_needs_a_project_picked_again() {
+    let f = fx();
+    let ana = person(&f.store, None, f.ana);
+    let mut i = input(&f);
+    let on = new_routine(&f, i.clone());
+    i.name = "Already off".into();
+    let off = new_routine(&f, i);
+    set_enabled(&f.store, &ana, off.id, false).unwrap();
+    let reused = {
+        let s = lock(&f.store).unwrap();
+        s.delete_project(f.project, &Default::default()).unwrap();
+        s.upsert_project("acme", "billing", "/src2").unwrap()
+    };
+    assert_eq!(reused, f.project, "SQLite hands the id out again");
+    for id in [on.id, off.id] {
+        let r = get(&f.store, &ana, id).unwrap().routine;
+        assert!(!r.enabled);
+        assert_eq!(r.project_id, crate::store::ROUTINE_NO_PROJECT);
+        assert_eq!(
+            r.paused_reason.as_deref(),
+            Some(crate::store::PAUSED_PROJECT_REMOVED)
+        );
+        assert_eq!(
+            set_enabled(&f.store, &ana, id, true).unwrap_err().code,
+            codes::E_INVALID_STATE
+        );
+    }
+    // A save that leaves the project unpicked is refused; one that picks
+    // a project clears the reason, and the routine may run again.
+    let mut keep = input(&f);
+    keep.project_id = crate::store::ROUTINE_NO_PROJECT;
+    assert_eq!(
+        save(&f.store, &ana, Some(on.id), &keep).unwrap_err().code,
+        codes::E_NOTFOUND
+    );
+    let picked = save(&f.store, &ana, Some(on.id), &input(&f)).unwrap();
+    assert!(!picked.enabled && picked.paused_reason.is_none());
+    assert!(set_enabled(&f.store, &ana, on.id, true).unwrap().enabled);
+}
+
 /// A fire that is due but not yet ticked survives an edit that keeps the
 /// schedule, and a "turn on" of a routine that is already on.
 #[test]
@@ -1425,6 +1529,30 @@ async fn a_failed_run_is_in_the_inbox_until_retried_or_paused() {
     assert_eq!(failing(&f.store, &ana).unwrap().len(), 1);
     set_enabled(&f.store, &ana, other.id, false).unwrap();
     assert!(failing(&f.store, &ana).unwrap().is_empty());
+}
+
+/// Review R6: a Retry the hub skips (here: today's budget is spent) ran
+/// nothing, so the failure stays in the Inbox.
+#[tokio::test]
+async fn a_skipped_retry_leaves_the_failure_in_the_inbox() {
+    let f = fx();
+    let mut i = input(&f);
+    i.budget_day_micros = Some(1_000_000);
+    let r = new_routine(&f, i);
+    let ana = person(&f.store, None, f.ana);
+    f.fake.fail.store(true, Ordering::SeqCst);
+    let failed = run_now(&f.deps, &ana, r.id, OCT8).await.unwrap();
+    assert_eq!(failed.state, "failed");
+    lock(&f.store)
+        .unwrap()
+        .set_routine_run_cost(failed.id, 2_000_000)
+        .unwrap();
+    f.fake.fail.store(false, Ordering::SeqCst);
+    let retry = run_now(&f.deps, &ana, r.id, OCT8 + 60).await.unwrap();
+    assert_eq!(retry.state, "skipped", "{:?}", retry.reason);
+    let inbox = failing(&f.store, &ana).unwrap();
+    assert_eq!(inbox.len(), 1);
+    assert_eq!(inbox[0].run.id, failed.id);
 }
 
 #[tokio::test]
@@ -4611,27 +4739,64 @@ async fn a_routine_that_writes_a_dashboard_feed_has_its_reply_read_for_it() {
     let r = new_routine(&f, i);
     assert!(r.memory.is_none() && !r.track_seen);
     let run = finished_run(&f, &r, OCT8).await;
+    assert_eq!(run.state, "done");
     let at = run.finished_at.unwrap() + 1;
+    {
+        let s = lock(&f.store).unwrap();
+        // Closing the run left it for the pass: the fixture runs none.
+        assert!(s.routine_run_memory_read_at(run.id).is_none());
+        let unread = s
+            .routine_runs_memory_unread(at - memory::READ_WITHIN_SECS, at, 10)
+            .unwrap();
+        assert_eq!(
+            unread.len(),
+            1,
+            "a feed's routine is read without a notebook"
+        );
+    }
+    let reader = replies(&[
+        "<dashboard-feed key=\"deploys\">2</dashboard-feed>",
+        "Done: <dashboard-feed key=\"deploys\">3</dashboard-feed>",
+    ]);
+    memory::read_finished(&f.store, &reader, at).await;
     let s = lock(&f.store).unwrap();
-    let unread = s
-        .routine_runs_memory_unread(at - memory::READ_WITHIN_SECS, at, 10)
-        .unwrap();
-    // The scheduler's own pass may already have read it (and found no
-    // reply in the fake): either way it was picked for reading.
-    assert!(
-        unread.len() == 1 || s.routine_run_memory_read_at(run.id).is_some(),
-        "a feed's routine is read without a notebook"
-    );
-    let reply = [
-        "<dashboard-feed key=\"deploys\">2</dashboard-feed>".to_string(),
-        "Done: <dashboard-feed key=\"deploys\">3</dashboard-feed>".to_string(),
-    ];
-    memory::apply(&s, &r, &run, Ok(&reply), at).unwrap();
+    assert!(s.routine_run_memory_read_at(run.id).is_some());
     let feeds = s.dashboard_feeds(r.owner_person_id).unwrap();
     assert_eq!(feeds.len(), 1);
     assert_eq!(feeds[0].value, "3", "the last block of a key wins");
     assert_eq!(feeds[0].by, "routine");
     assert_eq!(feeds[0].by_ref.as_deref(), Some(r.name.as_str()));
+}
+
+#[test]
+fn a_failed_run_of_a_feed_routine_is_left_for_the_pass() {
+    // The default setup (seen items on, no notebook): a failed run's seen
+    // items are never recorded, but a feed it printed before failing is.
+    let f = fx();
+    let mut i = input(&f);
+    i.prompt = "Count; answer with <dashboard-feed key=\"n\">N</dashboard-feed>.".into();
+    let r = new_routine(&f, i);
+    assert!(r.memory.is_none() && r.track_seen);
+    let s = lock(&f.store).unwrap();
+    let run = s
+        .insert_routine_run(&crate::store::NewRoutineRun {
+            routine_id: r.id,
+            trigger: "cron",
+            trigger_ref: None,
+            state: "running",
+            reason: None,
+            session_id: None,
+            scheduled_for: None,
+            at: OCT8,
+            error_code: None,
+            host_alias: None,
+        })
+        .unwrap();
+    s.finish_routine_run(run.id, "failed", Some("cut off"), 0, OCT8 + 60)
+        .unwrap();
+    assert!(s.routine_run_memory_read_at(run.id).is_none());
+    let unread = s.routine_runs_memory_unread(OCT8, OCT8 + 61, 10).unwrap();
+    assert_eq!(unread.len(), 1);
 }
 
 /// A usage pass on `session` at `at` that brings its cost to `cost`.
