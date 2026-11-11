@@ -650,6 +650,10 @@ pub struct StartArgs {
     pub with_brief: bool,
     /// The brief as a person edited it (implies `with_brief`).
     pub brief: Option<String>,
+    /// Plan first (docs/plan-first.md): a paragraph put after whatever
+    /// brief this start sends (built or edited), within the brief's budget,
+    /// and on its own when the org fence leaves no ticket text.
+    pub plan_first: Option<String>,
     /// The session's name as a person edited it (default `KEY title`).
     pub name: Option<String>,
     /// The worktree (branch) name as a person edited it (default
@@ -2032,6 +2036,7 @@ pub async fn start_work_unprompted(
         }
         (None, _) => None,
     };
+    let brief = with_plan_first(brief, args.plan_first.as_deref());
     let (row, queued) = start_with(store, &plan, brief, view, |a| {
         crate::service::sessions::new_session(a, store.as_ref(), ssh, reg)
     })
@@ -2718,6 +2723,32 @@ fn sibling_labels(store: &Mutex<Store>, plans: &[StartPlan]) -> Vec<String> {
         .collect()
 }
 
+/// PURE: `brief` with the Plan first paragraph after it. The brief is cut
+/// first, so the paragraph always fits the queued budget
+/// ([`BRIEF_MAX_CHARS`](crate::service::work::handover::BRIEF_MAX_CHARS));
+/// with no brief (none asked, or the org fence held the ticket back) the
+/// paragraph goes alone.
+pub fn with_plan_first(brief: Option<String>, plan: Option<&str>) -> Option<String> {
+    let Some(plan) = plan.map(str::trim).filter(|p| !p.is_empty()) else {
+        return brief;
+    };
+    let max = crate::service::work::handover::BRIEF_MAX_CHARS;
+    let plan: String = plan.chars().take(max).collect();
+    let room = max.saturating_sub(plan.chars().count() + 2);
+    let body: String = brief
+        .as_deref()
+        .unwrap_or_default()
+        .chars()
+        .take(room)
+        .collect();
+    let body = body.trim_end();
+    Some(if body.is_empty() {
+        plan
+    } else {
+        format!("{body}\n\n{plan}")
+    })
+}
+
 /// The brief one sibling queues: the person's own, or the ticket's (only
 /// when its org may reach the plan's host), with the siblings line.
 fn sibling_brief(
@@ -2816,7 +2847,7 @@ where
             .collect();
         let sib = siblings_line(&plan.key, &labels[i], &others, &plan.branch);
         let brief = match sibling_brief(store, args, plan, &sib, &tail) {
-            Ok(b) => b,
+            Ok(b) => with_plan_first(b, args.plan_first.as_deref()),
             Err(e) => {
                 out.failed.push(StartFailure::of(plan.project_id, &e));
                 continue;

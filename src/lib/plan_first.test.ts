@@ -10,6 +10,7 @@ import {
   planSaid,
   planSettled,
   settlePlan,
+  startBriefArgs,
   withPlanFirst,
 } from './plan_first';
 
@@ -112,6 +113,18 @@ describe('plan first', () => {
     expect(b).toContain('Stop.');
     expect(withPlanFirst('Fix PROJ-1\n', '2026-11-10')).toBe(`Fix PROJ-1\n\n${b}`);
     expect(withPlanFirst('  ', '2026-11-10')).toBe(b);
+    // A start sends the preview only for an older hub: the backend builds
+    // the ticket's own brief and puts the paragraph after it.
+    const base = { briefOn: true, edited: false, text: 'ABC-7 preview', today: '2026-11-10' };
+    expect(startBriefArgs({ ...base, planFirstOn: false })).toEqual({});
+    expect(startBriefArgs({ ...base, planFirstOn: false, edited: true })).toEqual({ brief: 'ABC-7 preview' });
+    expect(startBriefArgs({ ...base, planFirstOn: true })).toEqual({
+      brief: withPlanFirst('ABC-7 preview', '2026-11-10'),
+      plan_first: b,
+      brief_edited: false,
+    });
+    expect(startBriefArgs({ ...base, planFirstOn: true, edited: true }).brief_edited).toBe(true);
+    expect(startBriefArgs({ ...base, briefOn: false, planFirstOn: true })).toEqual({});
     expect(planApprovedPrompt('docs/plans/a.md')).toContain('docs/plans/a.md is approved');
     expect(planChangesPrefix('docs/plans/a.md')).toContain('say "Plan ready" again');
     expect(planDate(new Date(2026, 0, 5))).toBe('2026-01-05');

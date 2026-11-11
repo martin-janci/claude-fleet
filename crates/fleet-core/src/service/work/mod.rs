@@ -194,6 +194,16 @@ pub struct WorkLinkArgs {
     /// Edited brief.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub brief: Option<String>,
+    /// Start: the Plan first paragraph (docs/plan-first.md), put after the
+    /// brief the start builds, or after the edited one with `brief_edited`.
+    /// `brief` may then also end with it, for a hub older than this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_first: Option<String>,
+    /// Start with `plan_first`: whether `brief` is the person's edit (kept,
+    /// minus a trailing `plan_first`) or only the client's preview (dropped:
+    /// the start builds the ticket's own brief).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub brief_edited: Option<bool>,
     /// Start: a ticket URL.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
@@ -1044,8 +1054,11 @@ pub fn start_args_as(
         item_id: args.item_id,
         project_id: args.project_id,
         host_alias: args.host_alias.clone(),
-        with_brief: args.with_brief.unwrap_or(false) || args.brief.is_some(),
-        brief: args.brief.clone(),
+        with_brief: args.with_brief.unwrap_or(false)
+            || args.brief.is_some()
+            || args.plan_first.is_some(),
+        brief: start_brief(args),
+        plan_first: args.plan_first.clone().filter(|p| !p.trim().is_empty()),
         name: args.name.clone(),
         worktree: args.worktree.clone(),
         force_cross_org: args.force_cross_org.unwrap_or(false),
@@ -1058,6 +1071,24 @@ pub fn start_args_as(
         // A mission's own (its repos), never a tool parameter.
         allowed_projects: Vec::new(),
     }
+}
+
+/// PURE: a start's own brief. With Plan first, a `brief` the person did not
+/// edit is only the client's preview, sent for a hub that predates
+/// `plan_first`: the start builds the ticket's brief (its comments,
+/// attachments, parent and origin context, and the org fence) instead. An
+/// edited one is kept without the Plan first paragraph, which the start
+/// puts back with room kept for it.
+pub fn start_brief(args: &WorkLinkArgs) -> Option<String> {
+    let Some(plan) = args.plan_first.as_deref().filter(|p| !p.trim().is_empty()) else {
+        return args.brief.clone();
+    };
+    if args.brief_edited != Some(true) {
+        return None;
+    }
+    let b = args.brief.as_deref()?;
+    let own = b.strip_suffix(plan).map(str::trim_end).unwrap_or(b);
+    Some(own.to_string())
 }
 
 /// The resume half of [`WorkLinkArgs`].
@@ -2433,5 +2464,35 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err.code, codes::E_NOTFOUND);
+    }
+
+    /// Plan first: an untouched preview is not the brief (the start builds
+    /// the ticket's own), an edit is kept without the paragraph, and the
+    /// paragraph travels on its own; a client without the field is as before.
+    #[test]
+    fn a_plan_first_start_builds_its_own_brief_unless_it_was_edited() {
+        let plan = "Plan first. Stop.";
+        let wire = |brief: &str, edited: Option<bool>| WorkLinkArgs {
+            action: "start".into(),
+            key: Some("ABC-7".into()),
+            brief: Some(brief.into()),
+            plan_first: Some(plan.into()),
+            brief_edited: edited,
+            ..Default::default()
+        };
+        let a = start_args(&wire(&format!("ABC-7 preview\n\n{plan}"), Some(false)));
+        assert_eq!(a.brief, None, "the preview is not sent on");
+        assert!(a.with_brief);
+        assert_eq!(a.plan_first.as_deref(), Some(plan));
+        let a = start_args(&wire(&format!("My own words\n\n{plan}"), Some(true)));
+        assert_eq!(a.brief.as_deref(), Some("My own words"));
+        // An older client: no plan_first, the brief is what it sent.
+        let old = WorkLinkArgs {
+            plan_first: None,
+            brief_edited: None,
+            ..wire("Edited", None)
+        };
+        let a = start_args(&old);
+        assert_eq!((a.brief.as_deref(), a.plan_first), (Some("Edited"), None));
     }
 }

@@ -3460,3 +3460,24 @@ async fn a_missions_start_is_claude_whatever_agent_a_rule_names() {
         );
     }
 }
+
+/// Plan first goes after whatever brief the start sends, always whole: the
+/// brief is cut to make room, and with no ticket text (the org fence) the
+/// paragraph goes alone.
+#[test]
+fn the_plan_first_paragraph_follows_the_brief_and_always_fits() {
+    let max = crate::service::work::handover::BRIEF_MAX_CHARS;
+    let plan = "Plan first. Stop.";
+    assert_eq!(
+        with_plan_first(Some("b".into()), None).as_deref(),
+        Some("b")
+    );
+    assert_eq!(
+        with_plan_first(Some("Brief\n".into()), Some(plan)).as_deref(),
+        Some("Brief\n\nPlan first. Stop.")
+    );
+    assert_eq!(with_plan_first(None, Some(plan)).as_deref(), Some(plan));
+    let long = with_plan_first(Some("x".repeat(max)), Some(plan)).unwrap();
+    assert_eq!(long.chars().count(), max);
+    assert!(long.ends_with(plan));
+}

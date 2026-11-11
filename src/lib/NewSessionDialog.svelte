@@ -7,7 +7,7 @@
   import ResumeDialog from './ResumeDialog.svelte';
   import { selectSessionExplicitly } from './selection';
   import { newBgSession, newSessionAbortable, queuePrompt, sessions, type SessionRow } from './sessions';
-  import { planDate, planFirstBrief, withPlanFirst } from './plan_first';
+  import { planDate, planFirstBrief, startBriefArgs } from './plan_first';
   import { sessionBlocked } from './share';
   import { defaultHost, hosts, isPickableHost } from './hosts';
   import { readPref, writePref } from './prefs';
@@ -1376,7 +1376,7 @@
       with_brief: briefOn,
       // The brief and name as edited, the same as a single start: the
       // backend applies them to every sibling.
-      brief: briefOn && planFirstOn ? withPlanFirst(briefText, planDate()) : briefOn && briefEdited ? briefDraft : undefined,
+      ...startBriefArgs({ briefOn, planFirstOn, edited: briefEdited, text: briefText, today: planDate() }),
       ...(forceCrossOrg ? { force_cross_org: true } : {}),
       ...(parallel ? { parallel: true } : {}),
     };
@@ -1437,7 +1437,7 @@
       name: friendlyName.trim() || undefined,
       worktree: inNewMode ? newWorktreeName.trim() : (chosenWorktree?.name ?? undefined),
       with_brief: briefOn,
-      brief: briefOn && planFirstOn ? withPlanFirst(briefText, planDate()) : briefOn && briefEdited ? briefDraft : undefined,
+      ...startBriefArgs({ briefOn, planFirstOn, edited: briefEdited, text: briefText, today: planDate() }),
       // The person ticked "Start across organisations" (review w12-7).
       ...(forceCrossOrg ? { force_cross_org: true } : {}),
       // "Start another" beside the live session on this key (review w12-8).
