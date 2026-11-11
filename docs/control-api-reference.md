@@ -915,7 +915,7 @@ Review notes on a session's diff. list (default); send {client_msg_id, notes}: o
 
 Access: the master, a paired device or a per-host token · deadline 60 s.
 
-Parameters (* required): `action`, `client_msg_id`, `note_id`, `notes`, `resolved`, `session_id`*
+Parameters (* required): `action`, `client_msg_id`, `confirm_nonce`, `note_id`, `notes`, `resolved`, `session_id`*
 
 ### `review_request`
 
@@ -1003,7 +1003,7 @@ Send a peer-to-peer message (to_session_id or to_addr) to the recipient's inbox;
 
 Access: the master, a paired device or a per-host token · deadline 60 s.
 
-Parameters (* required): `body`*, `client_msg_id`, `deliver`, `from_session_id`*, `kind`, `raw`, `reply_to`, `submit`, `to_addr`, `to_session_id`*, `wake`
+Parameters (* required): `body`*, `client_msg_id`, `confirm_nonce`, `deliver`, `from_session_id`*, `kind`, `raw`, `reply_to`, `submit`, `to_addr`, `to_session_id`*, `wake`
 
 ### `send_prompt`
 

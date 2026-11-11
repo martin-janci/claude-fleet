@@ -20,14 +20,18 @@ export interface PersistentRule {
   folder: string | null;
 }
 
-const SESSION_ONLY = /\b(?:this|the) session\b|\bduring this\b/i;
-const DONT_ASK = /don['’]?t ask again/i;
+const SESSION_ONLY = /\b(?:this|the) session\b|\bduring this\b|\bthis conversation\b/i;
+// Fail closed (mirrors `is_folder_rule` in crates/fleet-core/src/mcp/tools/
+// messaging.rs): "don't ask again", "always" and "allow all" count unless the
+// label says it ends with this session or conversation; "persist" always does.
+const DONT_ASK = /don['’]?t ask again|\balways\b|\ballow all\b/i;
+const PERSIST = /persist/i;
 const SHAPE = /don['’]?t ask again\s+for:?\s*(.+?)\s+in\s+(\S.*?)\s*$/i;
 
 /** The rule a choice would save for every later session in a folder, or
  *  `null` when the choice ends with this session (or saves nothing). */
 export function persistentRule(label: string): PersistentRule | null {
-  if (!DONT_ASK.test(label) || SESSION_ONLY.test(label)) return null;
+  if (!PERSIST.test(label) && (!DONT_ASK.test(label) || SESSION_ONLY.test(label))) return null;
   const m = SHAPE.exec(label);
   return m ? { rule: m[1], folder: m[2] } : { rule: null, folder: null };
 }

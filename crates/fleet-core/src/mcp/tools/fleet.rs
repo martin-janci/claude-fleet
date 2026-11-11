@@ -278,9 +278,11 @@ impl FleetTools {
         or null clears). Returns the account row.")]
     pub(super) async fn set_account_nickname(
         &self,
+        Extension(caller): Extension<Caller>,
         Parameters(args): Parameters<hosts::SetAccountNicknameArgs>,
     ) -> Result<CallToolResult, McpError> {
         audit("set_account_nickname", &format!("uuid={}", args.uuid));
+        refuse_operator_account_write(&caller)?;
         ok_json(&hosts::set_account_nickname(args, &self.store).map_err(to_mcp_err)?)
     }
 
@@ -290,6 +292,7 @@ impl FleetTools {
         fails E_ACCOUNT_FORBIDDEN. Returns the account row.")]
     pub(super) async fn set_account_projects(
         &self,
+        Extension(caller): Extension<Caller>,
         Parameters(args): Parameters<crate::service::project_accounts::SetAccountProjectsArgs>,
     ) -> Result<CallToolResult, McpError> {
         audit(
@@ -301,10 +304,28 @@ impl FleetTools {
                 args.forbidden_org_ids.as_ref().map(Vec::len),
             ),
         );
-        ok_json(
-            &crate::service::project_accounts::set_account_projects(args, &self.store)
-                .map_err(to_mcp_err)?,
-        )
+        refuse_operator_account_write(&caller)?;
+        let representation = serde_json::json!({
+            "forbidden_project_ids": args.forbidden_project_ids,
+            "forbidden_org_ids": args.forbidden_org_ids,
+            "by": caller.label(),
+        });
+        let row = crate::service::project_accounts::set_account_projects(args, &self.store)
+            .map_err(to_mcp_err)?;
+        // A block is a person's rule over which login may run where: who
+        // changed it belongs in the admin log, as a device's trust does.
+        {
+            let s = lock(&self.store).map_err(to_mcp_err)?;
+            s.record_admin_event_or_log(&crate::store::AdminEvent {
+                actor_person: owner_for(&caller, &s),
+                actor_device: caller.client.as_ref().map(|c| c.id),
+                action: "set_account_projects",
+                resource_type: "account",
+                resource_id: &row.uuid,
+                representation,
+            });
+        }
+        ok_json(&row)
     }
 
     #[tool(description = "Each Claude account's latest plan usage: 5-hour \
@@ -1779,15 +1800,31 @@ pub(super) fn settings_actor(caller: &Caller) -> SettingsWho {
 /// proposal) is the master's, or a trusted device's (declarative pages P6):
 /// trust is the operator vouching that the device is a person's own
 /// (`fleet-hub client trust`). An agent's client proposes instead.
-/// The operator asks; a person answers. `Access::PersonDevice` already
-/// keeps the operator's token out (it has no person), and this says so
-/// where the rule matters, so a later access change cannot let the agent
-/// approve itself.
+/// The operator asks; a person answers. The operator's token is bound to
+/// the hub's owner (#932), so `Access::PersonDevice` admits it: this is the
+/// rule that keeps the agent from approving itself.
 fn refuse_operator_answer(caller: &Caller) -> Result<(), McpError> {
     if caller.is_operator() {
         return Err(mcp_err(
             "E_FORBIDDEN",
             "the agent asks for confirmation; a person answers it",
+            None,
+        ));
+    }
+    Ok(())
+}
+
+/// Naming an account or changing which projects it is forbidden for is a
+/// person's rule (docs/accounts.md: "Only the hub owner's devices change
+/// it"). `Access::Person` admits the operator, whose token is bound to the
+/// owner; this refuses it, as `settings_writer` refuses an agent, so Control
+/// cannot lift a ban it was refused by (E_ACCOUNT_FORBIDDEN).
+fn refuse_operator_account_write(caller: &Caller) -> Result<(), McpError> {
+    if caller.is_operator() {
+        return Err(mcp_err(
+            "E_FORBIDDEN",
+            "the agent does not change a Claude account's name or the projects it is \
+             forbidden for; ask the person to do it on the Accounts page",
             None,
         ));
     }

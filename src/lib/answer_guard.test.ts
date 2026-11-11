@@ -18,5 +18,16 @@ describe('persistentRule', () => {
     expect(persistentRule('Yes, allow all edits during this session')).toBeNull();
     expect(persistentRule('Yes')).toBeNull();
     expect(persistentRule('No, and tell Claude what to do differently')).toBeNull();
+    expect(
+      persistentRule("Yes, and always allow in this conversation for commands that start with 'python cli.py'"),
+    ).toBeNull();
+  });
+
+  it('fails closed on other wordings of a rule that outlives the session', () => {
+    expect(
+      persistentRule("Yes, and always allow for commands that start with 'python cli.py' (Persist to settings.json)"),
+    ).toEqual({ rule: null, folder: null });
+    expect(persistentRule('Yes, always allow git push')).toEqual({ rule: null, folder: null });
+    expect(persistentRule('Yes, allow all edits')).toEqual({ rule: null, folder: null });
   });
 });

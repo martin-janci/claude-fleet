@@ -1629,10 +1629,11 @@ impl ClientSummary {
     ) -> Self {
         let trusted = r.revoked_at.is_none() && r.trusted_by(trusted_people);
         // Mirrors `LIVE_GRANT_ELIGIBLE` in `store/clients.rs`: live, full,
-        // bound to no org.
+        // bound to no org, not the operator's token.
         let assets_admin = r.revoked_at.is_none()
             && r.mode == "full"
             && r.org_id.is_none()
+            && r.name != crate::service::operator::OPERATOR_CLIENT_NAME
             && r.person_id.is_some_and(|p| assets_admins.contains(&p));
         Self {
             id: r.id,

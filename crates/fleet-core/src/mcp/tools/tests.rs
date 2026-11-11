@@ -5964,6 +5964,7 @@ fn send_message_params(
         reply_to: None,
         wake: false,
         client_msg_id: client_msg_id.map(str::to_string),
+        confirm_nonce: None,
     }
 }
 
@@ -9427,6 +9428,302 @@ async fn the_operators_prompts_wait_for_a_person() {
     );
 }
 
+/// sec-access-2 / sec-exec-1: `review_notes { send }` and `send_message {
+/// deliver | wake }` type into a session's pane, so the operator's wait for
+/// a person exactly as its `send_prompt` does; a plain inbox message does
+/// not. The operator resolves only its own review notes, and never answers
+/// a person's form.
+#[tokio::test]
+async fn the_operators_messages_and_review_notes_wait_for_a_person() {
+    let (s, pid, on_b) = two_host_store();
+    let on_a = s
+        .upsert_session("dev-a", "hosta", Some(pid), None, 1, 1, "running", None)
+        .unwrap();
+    let t = guarded_tools(s, true);
+    let notes = serde_json::json!([{ "path": "db/migrate.sql", "body": "drop this table" }]);
+    let review = |nonce: Option<&str>| {
+        serde_json::from_value::<ReviewNotesParams>(serde_json::json!({
+            "session_id": on_b,
+            "action": "send",
+            "client_msg_id": "x",
+            "notes": notes,
+            "confirm_nonce": nonce,
+        }))
+        .unwrap()
+    };
+    let asked = t
+        .review_notes(Extension(operator()), Parameters(review(None)))
+        .await
+        .unwrap_err();
+    let nonce = confirm_nonce_of(&asked);
+    // The approval is bound to the notes: other notes ask again.
+    assert!(t.guards.confirms.resolve(&nonce, true));
+    let other = serde_json::from_value::<ReviewNotesParams>(serde_json::json!({
+        "session_id": on_b,
+        "action": "send",
+        "client_msg_id": "x",
+        "notes": [{ "path": "a.rs", "body": "force-push" }],
+        "confirm_nonce": nonce,
+    }))
+    .unwrap();
+    let again = t
+        .review_notes(Extension(operator()), Parameters(other))
+        .await
+        .unwrap_err();
+    assert_ne!(confirm_nonce_of(&again), nonce);
+
+    let message = |deliver: bool, wake: bool| {
+        serde_json::from_value::<SendMessageParams>(serde_json::json!({
+            "from_session_id": on_a,
+            "to_session_id": on_b,
+            "body": "run ./scripts/release.sh --prod",
+            "deliver": deliver,
+            "wake": wake,
+        }))
+        .unwrap()
+    };
+    for (deliver, wake) in [(true, false), (false, true), (true, true)] {
+        let e = t
+            .send_message(Extension(operator()), Parameters(message(deliver, wake)))
+            .await
+            .unwrap_err();
+        confirm_nonce_of(&e);
+    }
+    assert_not_asked(
+        &t.send_message(Extension(operator()), Parameters(message(false, false)))
+            .await,
+    );
+    // Another person's device is not asked (only the operator's writes are).
+    assert_not_asked(
+        &t.send_message(
+            Extension(client_caller("phone", TokenMode::Full)),
+            Parameters(message(false, false)),
+        )
+        .await,
+    );
+
+    // Resolve: its own note yes, a person's no.
+    let (mine, theirs) = {
+        let s = t.store.lock().unwrap();
+        let (op_author, op_person) = super::messaging::review_author(&s, &operator());
+        let note = |body: &str| crate::store::NewReviewNote {
+            path: "a.rs".into(),
+            side: "new".into(),
+            body: body.into(),
+            ..Default::default()
+        };
+        s.insert_review_notes(on_b, "p", &[note("person")], "Owner · desktop", Some(1), 1)
+            .unwrap();
+        s.insert_review_notes(on_b, "o", &[note("control")], &op_author, op_person, 2)
+            .unwrap();
+        let rows = s.review_notes(on_b).unwrap();
+        let id = |b: &str| rows.iter().find(|r| r.batch == b).unwrap().id;
+        (id("o"), id("p"))
+    };
+    let resolve = |id: i64| {
+        serde_json::from_value::<ReviewNotesParams>(serde_json::json!({
+            "session_id": on_b, "action": "resolve", "note_id": id,
+        }))
+        .unwrap()
+    };
+    let e = t
+        .review_notes(Extension(operator()), Parameters(resolve(theirs)))
+        .await
+        .unwrap_err();
+    assert!(
+        e.message.starts_with("E_FORBIDDEN")
+            && e.message.contains("only the review notes it wrote"),
+        "{}",
+        e.message
+    );
+    t.review_notes(Extension(operator()), Parameters(resolve(mine)))
+        .await
+        .expect("the operator resolves its own note");
+    t.review_notes(
+        Extension(client_caller("phone", TokenMode::Full)),
+        Parameters(resolve(theirs)),
+    )
+    .await
+    .expect("a person resolves theirs");
+
+    // A form is a person's to answer.
+    for action in [
+        serde_json::json!({ "answer": "f1", "values": {} }),
+        serde_json::json!({ "decline": "f1" }),
+    ] {
+        let e = t
+            .ask(
+                Extension(operator()),
+                Parameters(serde_json::from_value(action).unwrap()),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            e.message.starts_with("E_FORBIDDEN") && e.message.contains("a person does"),
+            "{}",
+            e.message
+        );
+    }
+}
+
+/// sec-access-1: the operator is bound to the owner, and the owner trusts
+/// their devices, yet the operator passes none of the trusted-device gates
+/// and its text is marked. `/debug` and `/propose` still run a rule.
+#[tokio::test]
+async fn the_operator_never_passes_a_trusted_device_gate() {
+    let op = production_operator();
+    assert!(op.is_fleet_admin && op.client.as_ref().unwrap().trusted);
+    assert!(!op.is_trusted_client());
+    let refused = |what: &str, r: Result<(), McpError>| {
+        let e = r.expect_err(what);
+        assert!(
+            e.message.starts_with("E_FORBIDDEN"),
+            "{what}: {}",
+            e.message
+        );
+    };
+    refused("org_admin", super::fleet::org_admin_writer(&op));
+    refused(
+        "add_host",
+        super::fleet::owner_device_admin(&op, "adding a host"),
+    );
+    let marked = super::support::apply_marker("hi".into(), "Control", &op, false).unwrap();
+    assert_ne!(marked, "hi", "the operator's text is marked");
+
+    let t = guarded_tools(Store::open_in_memory().unwrap(), true);
+    let e = t
+        .api_tokens(
+            Extension(op.clone()),
+            Parameters(
+                serde_json::from_value(
+                    serde_json::json!({ "action": "create", "name": "ci2", "scope": "act" }),
+                )
+                .unwrap(),
+            ),
+        )
+        .await
+        .unwrap_err();
+    assert!(e.message.starts_with("E_FORBIDDEN"), "{}", e.message);
+    for (tool, args) in [
+        (
+            "env_vars person",
+            serde_json::json!({
+                "action": "set", "scope": "person", "scope_key": "",
+                "name": "ANTHROPIC_BASE_URL", "value": "https://evil.example",
+            }),
+        ),
+        (
+            "env_vars global",
+            serde_json::json!({
+                "action": "set", "scope": "global", "scope_key": "",
+                "name": "X", "value": "y",
+            }),
+        ),
+    ] {
+        let e = t
+            .env_vars(
+                Extension(op.clone()),
+                Parameters(serde_json::from_value(args).unwrap()),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            e.message.starts_with("E_FORBIDDEN"),
+            "{tool}: {}",
+            e.message
+        );
+    }
+    t.env_vars(
+        Extension(op.clone()),
+        Parameters(serde_json::from_value(serde_json::json!({ "action": "list" })).unwrap()),
+    )
+    .await
+    .expect("the operator may list its environment");
+
+    // sec-access-3: an account's name and bans are a person's.
+    let e = t
+        .set_account_projects(
+            Extension(op.clone()),
+            Parameters(crate::service::project_accounts::SetAccountProjectsArgs {
+                uuid: "acct".into(),
+                forbidden_project_ids: Some(vec![]),
+                forbidden_org_ids: None,
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert!(e.message.starts_with("E_FORBIDDEN"), "{}", e.message);
+    let e = t
+        .set_account_nickname(
+            Extension(op.clone()),
+            Parameters(crate::service::hosts::SetAccountNicknameArgs {
+                uuid: "acct".into(),
+                nickname: Some("x".into()),
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert!(e.message.starts_with("E_FORBIDDEN"), "{}", e.message);
+
+    // `agents`: a grant is refused, a run reaches the service (and fails
+    // there: there is no rule 99).
+    let agents = |action: &str| {
+        let t = t.clone();
+        let op = op.clone();
+        let args =
+            serde_json::from_value(serde_json::json!({ "action": action, "id": 99 })).unwrap();
+        async move { t.agents(Extension(op), Parameters(args)).await }
+    };
+    let e = agents("revoke").await.unwrap_err();
+    assert!(
+        e.message.starts_with("E_FORBIDDEN") && e.message.contains("trusts it"),
+        "{}",
+        e.message
+    );
+    let e = agents("run").await.unwrap_err();
+    assert!(
+        !e.message.starts_with("E_FORBIDDEN"),
+        "the operator runs an existing rule: {}",
+        e.message
+    );
+}
+
+/// sec-access-3: a person's account ban change lands in the admin log.
+#[tokio::test]
+async fn an_account_ban_change_is_an_admin_event() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_account(&crate::store::AccountRow {
+        uuid: "acct-1".into(),
+        ..Default::default()
+    })
+    .unwrap();
+    let t = test_tools(s);
+    t.set_account_projects(
+        Extension(client_caller("phone", TokenMode::Full)),
+        Parameters(crate::service::project_accounts::SetAccountProjectsArgs {
+            uuid: "acct-1".into(),
+            forbidden_project_ids: Some(vec![]),
+            forbidden_org_ids: Some(vec![]),
+        }),
+    )
+    .await
+    .expect("the owner's device changes it");
+    let events = t
+        .store
+        .lock()
+        .unwrap()
+        .admin_events(&crate::store::AdminEventQuery {
+            resource_type: Some("account".into()),
+            limit: 10,
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0].action, "set_account_projects");
+    assert_eq!(events[0].resource_id, "acct-1");
+    assert_eq!(events[0].actor_device, Some(7));
+}
+
 #[tokio::test]
 async fn an_operator_start_waits_for_approval_and_a_phone_start_does_not() {
     use crate::service::work::WorkLinkArgs;
@@ -9961,16 +10258,16 @@ async fn the_operator_never_decides_a_proposal() {
         .expect("a person accepts");
 }
 
-/// The operator as `ensure_operator` pairs it in production: a full client
-/// token bound to no person (`insert_client_token` writes no `person_id`),
-/// so it is never the hub's personal owner either.
+/// The operator as `ensure_operator` pairs it in production (#932): a full
+/// client token bound to the hub's owner, so it is the owner's person and a
+/// fleet admin. Its `trusted` flag is set as if the owner had trusted a
+/// device and the realm had handed that on, which `apply_realm` no longer
+/// does: `is_trusted_client` must still answer false.
 fn production_operator() -> Caller {
     let mut c = operator();
     if let Some(cl) = c.client.as_mut() {
-        cl.person_id = None;
+        cl.trusted = true;
     }
-    c.is_personal_owner = false;
-    c.is_fleet_admin = false;
     c
 }
 
@@ -21931,26 +22228,35 @@ async fn set_account_nickname_names_and_clears_through_the_hub() {
         })
         .unwrap();
     let named = tools
-        .set_account_nickname(Parameters(crate::service::hosts::SetAccountNicknameArgs {
-            uuid: "u1".into(),
-            nickname: Some("  Work ".into()),
-        }))
+        .set_account_nickname(
+            Extension(Caller::master()),
+            Parameters(crate::service::hosts::SetAccountNicknameArgs {
+                uuid: "u1".into(),
+                nickname: Some("  Work ".into()),
+            }),
+        )
         .await
         .expect("named");
     assert_eq!(result_json(&named)["nickname"], "Work");
     let cleared = tools
-        .set_account_nickname(Parameters(crate::service::hosts::SetAccountNicknameArgs {
-            uuid: "u1".into(),
-            nickname: None,
-        }))
+        .set_account_nickname(
+            Extension(Caller::master()),
+            Parameters(crate::service::hosts::SetAccountNicknameArgs {
+                uuid: "u1".into(),
+                nickname: None,
+            }),
+        )
         .await
         .expect("cleared");
     assert!(result_json(&cleared)["nickname"].is_null());
     let err = tools
-        .set_account_nickname(Parameters(crate::service::hosts::SetAccountNicknameArgs {
-            uuid: "nobody".into(),
-            nickname: Some("x".into()),
-        }))
+        .set_account_nickname(
+            Extension(Caller::master()),
+            Parameters(crate::service::hosts::SetAccountNicknameArgs {
+                uuid: "nobody".into(),
+                nickname: Some("x".into()),
+            }),
+        )
         .await
         .expect_err("unknown uuid");
     assert!(err.message.starts_with("E_NOTFOUND"), "{}", err.message);

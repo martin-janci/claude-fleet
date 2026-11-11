@@ -46,7 +46,7 @@ impl FleetTools {
             ),
         );
         if !args.is_read() {
-            agents_writer(&caller)?;
+            agents_writer(&caller, &args.action)?;
         }
         let by = caller
             .client
@@ -90,8 +90,16 @@ impl FleetTools {
 
 /// A rule lets an agent read and write outside fleet on its own, and an
 /// approval sends a write: only a trusted full device does either.
-fn agents_writer(caller: &Caller) -> Result<(), McpError> {
+///
+/// The operator is never trusted (`Caller::is_trusted_client`), but Control's
+/// `/debug` and `/propose` commands run an existing rule: `run` queues a job
+/// for a rule a person already granted that is still active (`run_now` refuses
+/// any other), so the operator may do that one write and nothing else.
+fn agents_writer(caller: &Caller, action: &str) -> Result<(), McpError> {
     if caller.is_trusted_client() && caller.mode == TokenMode::Full {
+        return Ok(());
+    }
+    if caller.is_operator() && action == "run" {
         return Ok(());
     }
     Err(mcp_err(

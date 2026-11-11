@@ -1762,8 +1762,13 @@ impl ClientTokenRow {
     /// `fleet-trusted` (`Store::people_with_realm_role`). The rule
     /// `auth::apply_realm` decides a caller by; for lists and answers that
     /// show a device's trust. `trusted_at` is only its mirror.
+    ///
+    /// The operator's token (`ux-agent`) is never trusted: it is bound to
+    /// the owner, but it is an agent, not one of the owner's devices.
     pub fn trusted_by(&self, trusted_people: &[i64]) -> bool {
-        self.mode == "full" && self.person_id.is_some_and(|p| trusted_people.contains(&p))
+        self.mode == "full"
+            && self.name != crate::service::operator::OPERATOR_CLIENT_NAME
+            && self.person_id.is_some_and(|p| trusted_people.contains(&p))
     }
 }
 

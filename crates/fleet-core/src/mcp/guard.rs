@@ -1890,13 +1890,24 @@ pub const OPERATOR_CONFIRMS: &[&str] = &[
     "send_prompt",
     "run_prompt",
     "queue_prompt",
+    // Gated at the call site for the actions that type into a pane:
+    // `review_notes { send }` (a numbered prompt through the service's
+    // `queue_prompt`) and `send_message { deliver | wake }`.
+    "review_notes",
+    "send_message",
 ];
 
 /// The operator's calls that type its text into a session: pre-approved at
 /// "Within your brief" and "Autopilot" when the session is one of Control's
 /// open handoffs (review 2026-10-17, F2).
-pub const OPERATOR_PROMPT_TOOLS: &[&str] =
-    &["send_prompt", "queue_prompt", "run_prompt", "dispatch_task"];
+pub const OPERATOR_PROMPT_TOOLS: &[&str] = &[
+    "send_prompt",
+    "queue_prompt",
+    "run_prompt",
+    "dispatch_task",
+    "review_notes",
+    "send_message",
+];
 
 /// The operator's calls that start a Claude session: pre-approved at
 /// "Autopilot" inside a running mission's grant (F2). `dispatch_task` is here
@@ -2053,7 +2064,8 @@ pub fn caller_must_confirm_with(
 pub fn operator_confirm_reason(tool: &str) -> &'static str {
     match tool {
         // Review round 15, F21, narrowed by the 2026-10-17 review's F2.
-        "send_prompt" | "run_prompt" | "queue_prompt" | "dispatch_task" => {
+        "send_prompt" | "run_prompt" | "queue_prompt" | "dispatch_task" | "review_notes"
+        | "send_message" => {
             "what the operator writes reaches a session without a person only at \
              \"Within your brief\" or \"Autopilot\", and only into a session it \
              started or briefed, whatever mcp.confirm_destructive says"
@@ -3162,7 +3174,14 @@ mod tests {
     #[test]
     fn operator_pre_approval_truth_table() {
         use Position::{Ask, Autopilot, Brief, Custom};
-        let prompts = ["send_prompt", "queue_prompt", "run_prompt", "dispatch_task"];
+        let prompts = [
+            "send_prompt",
+            "queue_prompt",
+            "run_prompt",
+            "dispatch_task",
+            "review_notes",
+            "send_message",
+        ];
         let always = [
             "add_project",
             "new_shell_session",
@@ -3388,7 +3407,14 @@ mod tests {
     /// `mcp.confirm_destructive`, which cannot turn any of this off.
     #[test]
     fn the_operators_refusal_never_calls_a_prompt_a_start_or_a_kill() {
-        for t in ["send_prompt", "run_prompt", "queue_prompt", "dispatch_task"] {
+        for t in [
+            "send_prompt",
+            "run_prompt",
+            "queue_prompt",
+            "dispatch_task",
+            "review_notes",
+            "send_message",
+        ] {
             assert!(
                 caller_must_confirm(true, t, Position::Ask, false, false),
                 "{t} is gated for the operator"

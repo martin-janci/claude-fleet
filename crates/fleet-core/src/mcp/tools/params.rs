@@ -410,6 +410,9 @@ pub struct ReviewNotesParams {
     /// false reopens
     #[serde(default)]
     pub resolved: Option<bool>,
+    /// Operator only: the nonce a person approved.
+    #[serde(default)]
+    pub confirm_nonce: Option<String>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -574,6 +577,9 @@ pub struct SendMessageParams {
     /// twice (E_IN_FLIGHT meanwhile).
     #[serde(default)]
     pub client_msg_id: Option<String>,
+    /// Operator only: the nonce a person approved.
+    #[serde(default)]
+    pub confirm_nonce: Option<String>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
