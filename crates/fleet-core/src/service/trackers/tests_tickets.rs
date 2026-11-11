@@ -3371,3 +3371,92 @@ async fn a_base_branch_reaches_the_new_checkout() {
         Some((Some(plan.branch.clone()), Some("abc-1-earlier".into())))
     );
 }
+
+/// A mission's run lands only in the mission's repos (orchestration §4.2):
+/// a project the last same-prefix ticket used is refused with E_FORBIDDEN
+/// when the mission does not list it, and kept when it does.
+#[tokio::test]
+async fn a_missions_start_stays_inside_its_repos() {
+    let fx = Fx::new();
+    let old = fx.session_on("hostb", "old");
+    let (web, api) = {
+        let s = fx.store.lock().unwrap();
+        s.link_session_work(old, WorkTarget::Key("ABC-2"), "manual")
+            .unwrap();
+        (
+            s.upsert_project("acme", "web", "/p/acme/web").unwrap(),
+            s.upsert_project("acme", "api", "/p/acme/api").unwrap(),
+        )
+    };
+    let args = StartArgs {
+        reference: Some("ABC-1".into()),
+        allowed_projects: vec![web, api],
+        origin: Some(crate::store::SessionOrigin::mission(1)),
+        ..Default::default()
+    };
+    let e = plan_start(&fx.store, &args, &OrgScope::All, &fx.net())
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, codes::E_FORBIDDEN);
+    assert!(e.message.contains("acme/app"), "{}", e.message);
+    assert!(e.message.contains("acme/web, acme/api"), "{}", e.message);
+    let inside = StartArgs {
+        allowed_projects: vec![web, fx.pid],
+        ..args.clone()
+    };
+    let plan = plan_start(&fx.store, &inside, &OrgScope::All, &fx.net())
+        .await
+        .unwrap();
+    assert_eq!(plan.project_id, fx.pid);
+}
+
+/// A start rule may name Codex or Hermes, which run with their approvals
+/// off and without fleet's worker guard: a mission's run under it starts
+/// Claude; a person's start keeps the rule's agent.
+#[tokio::test]
+async fn a_missions_start_is_claude_whatever_agent_a_rule_names() {
+    let fx = Fx::new();
+    for agent in [crate::store::AGENT_CODEX, "hermes"] {
+        {
+            let s = fx.store.lock().unwrap();
+            s.conn_for_test()
+                .execute("DELETE FROM start_rules", [])
+                .unwrap();
+            let r = s
+                .insert_start_rule(None, None, "ABC-1", fx.pid, Some("hosta"), "active", 0, 1)
+                .unwrap();
+            s.update_start_rule(
+                r.id,
+                "ABC-1",
+                fx.pid,
+                Some("hosta"),
+                &crate::store::StartRuleLaunch {
+                    agent: Some(agent.into()),
+                    ..Default::default()
+                },
+                1,
+            )
+            .unwrap();
+        }
+        let person = StartArgs {
+            reference: Some("ABC-1".into()),
+            ..Default::default()
+        };
+        let plan = plan_start(&fx.store, &person, &OrgScope::All, &fx.net())
+            .await
+            .unwrap();
+        assert_eq!(plan.agent.as_deref(), Some(agent));
+        let mission = StartArgs {
+            origin: Some(crate::store::SessionOrigin::mission(1)),
+            ..person
+        };
+        let plan = plan_start(&fx.store, &mission, &OrgScope::All, &fx.net())
+            .await
+            .unwrap();
+        assert_eq!(plan.agent, None, "{agent}");
+        assert_eq!(
+            (plan.project_id, plan.host_alias.as_str()),
+            (fx.pid, "hosta")
+        );
+    }
+}

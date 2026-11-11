@@ -697,6 +697,11 @@ pub struct StartArgs {
     /// ([`crate::service::work::build_cache`]). Set by a run, never from a
     /// tool's own parameters.
     pub build_cache: bool,
+    /// A mission's repo allow-list (orchestration §4.2): the projects the
+    /// start may land in, however it picks one (the item's, its parent's, a
+    /// start rule's, the last same-prefix ticket's). Empty: any. Set by a
+    /// mission's run, never from a tool's own parameters.
+    pub allowed_projects: Vec<i64>,
 }
 
 /// Where a start lands and what it is called.
@@ -1138,6 +1143,31 @@ pub fn plan_resolved(
             .with_details(serde_json::json!({ "missing": "project", "candidates": candidates })));
         }
     };
+    // A mission's run stays inside its repos (orchestration §4.2), whatever
+    // picked the project: an item with none takes a start rule's or the
+    // last same-prefix ticket's, which no mission chose. E_FORBIDDEN, so the
+    // loop asks a person rather than starting it elsewhere.
+    if !args.allowed_projects.is_empty() && !args.allowed_projects.contains(&project_id) {
+        let repo = |pid: i64| -> Result<String, IpcError> {
+            Ok(s.get_project(pid)?
+                .map(|p| format!("{}/{}", p.owner, p.repo))
+                .unwrap_or_else(|| format!("project {pid}")))
+        };
+        let allowed = args
+            .allowed_projects
+            .iter()
+            .map(|p| repo(*p))
+            .collect::<Result<Vec<_>, _>>()?
+            .join(", ");
+        return Err(IpcError::new(
+            codes::E_FORBIDDEN,
+            format!(
+                "{key} would start in {}, outside the mission's repos ({allowed}): start it \
+                 by hand in one of them, or add the repo to the mission's repos",
+                repo(project_id)?
+            ),
+        ));
+    }
     // How the start runs (gap plan G7.1): the start rule's account, model,
     // effort and agent; with no start rule naming a host, the placement
     // rule's "its sessions start here" host and account.
@@ -1293,7 +1323,24 @@ pub fn plan_resolved(
         }
         None => start_name(&key, &title),
     };
-    let codex = rule.as_ref().and_then(|r| r.agent.as_deref()) == Some(crate::store::AGENT_CODEX);
+    // A mission's run is Claude whatever agent a start rule names: the
+    // worker guard is a Claude Code hook, and Codex and Hermes run with
+    // their approvals off (orchestration §7.2). Decided here, so Claude's
+    // login choice below applies.
+    let mission_run = args.origin.as_ref().is_some_and(|o| o.origin == "mission");
+    let agent = match rule.as_ref().and_then(|r| r.agent.clone()) {
+        Some(a) if mission_run && a != crate::store::AGENT_CLAUDE => {
+            tracing::info!(
+                key = %key,
+                agent = %a,
+                "[start] a mission's run starts Claude, not the start rule's agent: \
+                 the worker guard covers Claude Code only"
+            );
+            None
+        }
+        a => a,
+    };
+    let codex = agent.as_deref() == Some(crate::store::AGENT_CODEX);
     let named_profile = args
         .profile
         .clone()
@@ -1338,7 +1385,7 @@ pub fn plan_resolved(
         profile,
         model: rule.as_ref().and_then(|r| r.model.clone()),
         effort: rule.as_ref().and_then(|r| r.effort.clone()),
-        agent: rule.as_ref().and_then(|r| r.agent.clone()),
+        agent,
         fell_back_from,
         placement_rule_id: placement.as_ref().map(|w| w.id),
         rule_id: rule.map(|r| r.id),

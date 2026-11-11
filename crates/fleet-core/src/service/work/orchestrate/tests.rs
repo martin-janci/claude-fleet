@@ -991,6 +991,30 @@ fn the_hold_checks_the_host_a_start_rule_picks() {
     assert!(why.contains("mac's own login"), "{why}");
 }
 
+/// A mission with two repos and an item with no project of its own: the
+/// start carries the allow-list, so wherever the start picks a project
+/// (a start rule, the last same-prefix ticket) it stays inside it.
+#[test]
+fn a_start_without_a_project_carries_the_missions_repos() {
+    let fx = fixture();
+    let item = member(&fx, "a");
+    let s = lock(&fx.deps.store).unwrap();
+    let web = s.upsert_project("o", "web", "/web").unwrap();
+    let api = s.upsert_project("o", "api", "/api").unwrap();
+    s.set_mission_repo(fx.m.id, web, None, true, "fleet")
+        .unwrap();
+    let m = s
+        .set_mission_repo(fx.m.id, api, None, true, "fleet")
+        .unwrap();
+    let start = start_for(&s, &m, item, &Actor::Loop, None).unwrap();
+    assert_eq!(start.project_id, None);
+    let mut allowed = start.allowed_projects.clone();
+    allowed.sort();
+    assert_eq!(allowed, vec![web, api]);
+    let none = start_for(&s, &fx.m, item, &Actor::Loop, None).unwrap();
+    assert!(none.allowed_projects.is_empty(), "no repos: no list");
+}
+
 /// Review round 15, F19: what makes a mission due rests partly on agents'
 /// own reports, so completing it is a person's act at every level. The
 /// loop's step is not its own to take, the planner's card is not applied by

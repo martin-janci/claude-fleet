@@ -1142,10 +1142,19 @@ task changes); a task whose touches meet an open run's in the same
 repository waits (a task that names none is not held), and a lane starts
 beside another of its repository only when both name every task's touches
 and they do not meet. The task row says what a task changes. Lanes L6: Missions → Compare sets the missions that ran side by side with the median per mode (`src/lib/mission_compare.ts`), the measuring runbook is §7.1 of the lanes design, and `scripts/hub-e2e.sh` §11 runs a two-task lane over real tmux. The default stays `item` until the owner has measured. Mission improvements M1 (design 2026-10-26, migration 214, `store/task_cost.rs`): a lane task records its lead's spend when it is handed over (`tasks.cost_start_micros`), and the Work view splits a lead's spend by its tasks instead of counting it whole on each. M3 (migration 215, `store/mission_waits.rs`, `orchestrate/waits.rs`): the loop books why ready work waits (person, grant, limit, brake, slot, lane, touches) on every tick and state change; `work { mission }` carries `stats.waits`, shown in the room's stats line and as Compare's "Waited most". M2 (`service/work/dep_work.rs`): a task's first implementation starts from its done dependencies' branches whose pull request is not merged (the first as its base, the others merged into the new checkout before the prompt), and a lane merges what a task depends on in another lane before handing it over; a branch that does not merge cleanly is backed out of and left to the worker, and the task's `start_head` is read after the merges. M7: fleet installs a `SubagentStart` hook (hosts pick it up on re-provisioning) and journals `subagent_started` quietly on the timeline; a mission's task row and `stats.subagents` count the ones started during each attempt, and Compare shows subagents per task. M5: with `policy.lane_test_at = lane` ("Tests run: at the lane's end", only in lane execution) a task waiting for its test does not hold its lane, the lane runs one test once all its tasks are implemented, and a passing run that ran a task's command answers that task's `test:` line for every task of the lane; a failure retries only the tested task. M4 (migration 216, `orchestrate/lane_pr.rs`): with `policy.lane_pr = draft` ("Lane PR: fleet opens a draft", off by default) the loop pushes a lane's branch up to its newest done task's commit and opens or refreshes its draft pull request with `gh` (`mission_lanes.pr_url`, a "lane PR" link on the task row); ready and merge stay a person's. M6 (`service/work/build_cache.rs`): with `orchestrator.build_cache` (off, experimental) a mission run's session, and a new lane lead, gets `RUSTC_WRAPPER=sccache` in its environment when its host has `sccache` (probed once an hour); a host without it runs as before. A mission's worker is refused a person's
-step (`gh pr merge` / `ready`, a push to `main` / `master`, a tracker CLI)
-by fleet's `PreToolUse(Bash)` guard (`orchestrate/guard.rs`): a shell
-prefilter that asks the hub only about those commands and lets the command
-run when the hub does not answer. Hosts get it on re-provisioning
+step (`gh pr merge` / `ready` in any form — `gh -R`, `gh api` on a PR's
+merge, a `bash -c` wrapper —, a push to `main` / `master`, a bare `git push`
+after a `cd`, `git -C`, `checkout` or `switch`, a tracker CLI) by fleet's
+`PreToolUse(Bash)` guard (`orchestrate/guard.rs`), and a tracker's or
+GitHub's MCP write, or a PR's merge or ready through any MCP server, by its
+`PreToolUse(mcp__.*)` guard: shell prefilters that ask the hub only about
+those commands and MCP calls that are not plainly reads (fleet's own tools
+never), and let them run when the hub does not answer. A session a mission
+started stays its worker after the mission ends or drops its item, and a
+mission's run always starts Claude, whatever agent a start rule names (the
+guard is a Claude Code hook); a run of an item with no project lands only
+in the mission's repos (`E_FORBIDDEN` otherwise, which the loop asks a
+person about). Hosts get it on re-provisioning
 (`provision_stale`); branch protection on the remote stays the backstop.
 In the New layout, Jev K3 (off) proposes a stuck mission's outcome and next
 step, and Control shows a "Sent to a mission" receipt for what the operator

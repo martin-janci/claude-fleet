@@ -1055,6 +1055,8 @@ pub fn start_args_as(
         base_branch: None,
         // A run's own (M6), never a tool parameter.
         build_cache: false,
+        // A mission's own (its repos), never a tool parameter.
+        allowed_projects: Vec::new(),
     }
 }
 

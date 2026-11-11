@@ -509,6 +509,9 @@ fn start_for(
         // The login the grant names (redesign 8.7); else placement's pick
         // on the chosen host; none, the host's own.
         profile,
+        // An item with no project of its own may still land only in the
+        // mission's repos (orchestration §4.2).
+        allowed_projects: allowed,
         ..Default::default()
     })
 }
