@@ -2546,14 +2546,17 @@ logins with no usage reading: ci (API key)
 How it counts, at every moment of the window:
 
 - **Which accounts.** An account is counted from its first reading on, and
-  each reading stands until the next one. An account some login uses now
+  each reading stands until the next one. An account some `/login` uses now
   (a host's own login or one of its profiles, hidden hosts left out) keeps
   its last reading however old it is: a spare login nothing runs on is not
   read after a few hours (its access token goes stale, see
   [`accounts.md`](accounts.md)), and it is the login with room. An account
   no login uses any more is counted for a day after each reading and then
   left out, at its limit or not, because the history does not say when it
-  left. The line `no login uses it now` marks such an account.
+  left. The line `no login uses it now` marks such an account. An account
+  only setup tokens use now is counted the same way, and marked `only setup
+  tokens use it now`: a setup token cannot be asked for usage, so sessions
+  may run on the account with nothing saying how much they used.
 - **At its limit.** A counted account is at its limit when its 5-hour or
   weekly window read 100% and has not reset since, which is what a row's
   **Paused · limit** goes by. Past the reset it has room until a reading
@@ -2568,14 +2571,17 @@ nothing ran, and a limit that came and went in that time is not seen.
 
 The output ends with what the history cannot tell (`not counted`): a login
 without a usage reading (an API key, which has a daily spend limit and no
-usage windows; an account signed in on macOS hosts only, whose token is in
-the Keychain), use the hub did not see, a login that could not be used for
+usage windows; a setup token, which is for inference only; an account
+signed in on macOS hosts only, whose token is in the Keychain), use the hub
+did not see, a login that could not be used for
 another reason while its account had room (signed out, host down), the
 minutes between a limit and the next reading, extra usage (an account
 with it on keeps working past its limit and is counted at its limit all
 the same; its line says `extra usage is on`), and a weekly limit on one
 model only (Opus, Sonnet), which fleet does not pause a row for either.
-Logins that have no reading are named in `logins with no usage reading`.
+Logins that no reading counts in the window are named in `logins with no
+usage reading`, an API key and a setup token as such (`ci (API key)`,
+`team (setup token)`).
 
 `--db` reads any database from schema 122 on, so a backup of a hub that
 runs an older release can be counted with a newer `fleet-hub` without
