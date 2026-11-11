@@ -1032,6 +1032,7 @@ mod tests {
             name: "spare".into(),
             account_uuid: Some("spare".into()),
             email: None,
+            credential: None,
         };
         s.set_host_profiles("h1", &[spare]).unwrap();
         // The spare was last read ten days before the window, at 30%.
