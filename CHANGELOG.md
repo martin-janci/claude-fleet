@@ -8,6 +8,259 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Releases are cut with `scripts/release.sh` — see [docs/RELEASING.md](docs/RELEASING.md).
 Entries before 0.2.4 were plain version bumps and were not recorded individually.
 
+## [0.6.5] - 2026-11-12
+
+### Added
+- **login-conflicts:** flag one login copied onto two hosts
+- **login-health:** Sign in again for a signed-out login
+- **account-switch:** move a session off a signed-out login
+- **login-health:** read a signed-out login off a session's pane
+- **hub:** limit census, how often every Claude account was at its limit at once
+- **accounts:** add setup tokens as a third kind of account
+- **accounts:** sign a login profile in with a claude setup-token token
+- Plan first on New session, and a Plan ready card
+- **agent:** run fleet-agent on a Mac, through a proxy, and attach its own sessions locally
+- ask a colleague for review (share + Inbox)
+- show who sent each prompt in the conversation
+- review notes on a session's diff before a push
+- new worktree setup per project (copy globs + setup command)
+- **dashboards:** feeds, the fleet's own rows, and summaries that read them
+- **review:** honest permission buttons, PR feedback to Claude, two layout fixes
+- **conversation:** show the person's own words, with the app's heads as chips
+- **dashboards:** a summary widget a model writes from the widget's counts
+- **control:** fold the Session tab's sibling strip and Running missions (#1094)
+- **dashboards:** Control saves a requested change, the page offers Undo
+- **e2e:** federation scenarios against fake hubs, with screenshots
+- **accounts:** forbid an account for a whole org
+- **accounts:** forbid an account for chosen projects
+- **work:** a task's label opens Work on the tasks carrying it
+- **work:** filter the Work view by label
+- **work:** the task header says when a task is overdue
+- **work:** the subtask list flags urgent and overdue subtasks
+- **work:** the Work list row shows when a task is due
+- **work:** the Work list row flags an urgent or high priority
+- **work:** filter the Work view by priority
+- **work:** move a ticket at its tracker from the task page
+- **work:** sort the Work view by priority
+- **work:** the Board card shows a task's priority and estimate
+- **today:** approvals and failed routines wait on you in Today too
+- **palette:** ⌘K "Stop the turn" on a working session
+- **work:** say why a task of fleet's own has no Promote, and show the button off with it
+- **agents:** Hermes Agent sessions
+- **agents:** compare the built-in agents with their definitions
+- **missions:** M6 — a warm build through sccache, off by default
+- **agents:** show a fleet instance's day budget
+- **missions:** M4 — fleet opens a lane's draft pull request
+- **missions:** M5 — a lane's tests at its end
+- **control:** fold the cards above Control's composer into one row of counts
+- **control:** approval cards say what approving does
+- **missions:** M7 — the subagents a task's run used
+- **missions:** M2 — a task starts from its dependencies' work
+- **missions:** M3 — why a mission's ready work waits
+- **missions:** M1 — split a lane lead's spend by its tasks
+- **agents:** name a binding's secrets after its instance
+- **work:** AI check on done — a headless tester for finished tickets
+- **inspector:** every PR the session opened, a clickable ticket, times that keep moving
+- **routines:** remember what runs already handled; fold routine sessions
+- **missions:** lanes L6 — compare view, measuring runbook, lane e2e
+- **agents:** a daily budget per fleet agent instance
+- **missions:** tasks name what they change, and colliding work waits (lanes L5)
+- **agents:** restate the reviewer's state and ship it in the gallery
+- **agents:** restate the reviewer's answer in fleet agent definitions
+- **missions:** a lane task's review on a snapshot, the test gate, relay on a full context (lanes L4)
+- **fleet-agents:** the reviewer's inputs: PR head, diff, WIP and debounce
+- **missions:** a lane's tasks run in one lead session (lanes L3b)
+- **fleet-agents:** run.fingerprint and the support agent as a definition
+- **missions:** lane execution policy and a task's evidence from where it began (lanes L3a)
+- **missions:** lanes in the data — plan, planner and person put tasks in named lanes (lanes L2)
+- **sessions:** show Claude Code's next-prompt suggestion on every client
+- **missions:** workers use subagents, the planner may read the repo, shared files go in sequence (lanes L1)
+- **fleet-agents:** cooldown, branch, scan window and auto-approve
+- **tasks:** task_report tool, an explicit way for a worker to finish its task
+- **missions:** failing CI on a mission's PRs holds Complete until a person overrides
+- **missions:** the planner waits out a usage limit instead of refusing
+
+### Changed
+- docs/ux edits run vitest, and the headless runs cover every crate but the desktop's
+- **hub:** limit census tests for five seeded faults, and one more line under "not counted"
+- drop unused imports in the Plan first dialog test
+- **deny:** ignore RUSTSEC-2026-0462 until the rmcp 3 migration
+- **deps:** rusqlite 0.41 (bundled SQLite) for RUSTSEC-2026-0459
+- **mcp:** raise BYTES_PER_TOOL 880 -> 890 for review_notes beside dashboard feeds
+- run the worktree setup bash tests on unix only
+- **routines:** a feed routine's run may be read by the tick first
+- **routines:** the feed routine keeps no seen items
+- **e2e:** the remembered-filter scenario clears the filter from the Hosts note (#1090)
+- **work:** one isHotPriority for the row, the card and the header
+- **work:** the real-git lane dependency test runs on unix only; phone docs
+- **usage:** idle-1 stays blocked until its account's new reading lands
+- **usage:** the login's stamp re-announces every live session on its host
+- the add-host wizard lead names Hermes
+- **work:** run the bash-driven git and sccache tests on unix only
+- **placement:** a switch now links the login's account; cover the unlinked path explicitly
+- **deny:** ignore RUSTSEC-2026-0429 with the other zip 4.x advisories
+- **deny:** ignore RUSTSEC-2026-0429 with the other zip 4.x advisories
+- **add-project:** run the known_hosts script test on unix only
+- **deps:** vitest 4.1.12, un-yanked chacha20 and clipboard-win
+- **routines:** a dry run's prompt carries the seen-items block
+- **missions:** a finished run in the stats fixture reports done
+- **mcp:** hooks_silent oracle test uses a working session
+- **provision:** count the plugin's writes and tell its source from settings work
+- **contract:** pin prompt_suggestion in the hub contract golden
+- **decide:** the pane rules now read the Stop-hooks spinner screen
+- **relay:** check the dropped listener's tasks, not a reconnect to its port
+- **missions:** a host is up until a probe goes unanswered
+- one project lookup in fleets.ts, one failure path in New session
+- **mcp:** raise the tool-definition budget to 880 bytes a tool
+
+### Fixed
+- **deferred:** stop locking the store twice in deliver_due (hub freeze)
+- **hub:** the limit census no longer counts an account only setup tokens use
+- **ci:** the updater's tests take their linux fixture release as linux on a Mac runner
+- **ci:** main green on macOS, Windows and clippy
+- **hub:** limit census tests build again beside setup-token profiles
+- review of #1118 — account re-announce, step-off daily cap, review notes, ux-agent trust, mission spend, attach quoting, covered fleet card
+- **move:** a worktree size that cannot be read no longer blocks a move
+- **autofix:** a host wired to another fleet is a take-over a person decides, not an automatic rewrite
+- **runtime:** scheduled prompts wait out an unreachable host, and a new worktree's setup gets its 10 minutes
+- **start:** Plan first goes after the ticket's own brief instead of replacing it with the preview
+- **hosts:** a re-probe that gets no answer keeps the host's versions, and the access check reports a host that did not answer
+- **sessions:** a review-notes send that may have typed keeps its batch, asks show the share held, limit lines name the day
+- **agents:** fleet instances keep their name, owner definition and end time
+- **pairing:** a code minted for a person is refused once they are disabled
+- **routines:** edits keep a paused routine off, skips leave failures, removed projects and disabled owners stop automation
+- **accounts:** adding an API key again without a limit keeps its daily limit
+- **usage:** a pass that read no host reports a failure, and the setting names the caps
+- **missions:** a reaped worker's spend stays in its mission's budget
+- **routines:** a run's cost waits for the usage pass that reads its turn
+- **missions:** a mission's run starts Claude, inside the mission's repos
+- **missions:** the worker guard covers MCP writes, gh merge forms and ended missions
+- **worktrees:** setup's copy never takes from a worktree or the checkout itself
+- **accounts:** move, ticket start, resume and routines keep to allowed, signed-in logins
+- **accounts:** recreate, repair and restore honour the daily limit
+- **attention:** one gone login no longer marks its whole account signed out
+- **accounts:** every Claude start path honours the account rules
+- **accounts:** Codex and Hermes rows no longer take the host's Claude account
+- **control:** the operator's token no longer inherits the owner's trust
+- **automation:** approvals under Pause all say they wait, and a request keeps a stashed routine draft
+- **chat:** an extra fleet's setting and fix cards are read-only
+- **settings:** the desktop's fleet settings follow the hub, and the autonomy dial writes against fresh values
+- **hub:** a paired desktop does not reach the hub's own-machine sessions here
+- **review-notes:** drafts belong to their session, and a retry keeps newer notes
+- **work:** a hub without the priority sort falls back instead of refusing Work
+- **work:** a refused status move puts the task page's select back
+- **sessions:** bulk prompt retries only the sessions it failed for
+- **files:** a cached pick clears the spinner a superseded fetch left
+- **fleets:** keys and the palette act on the session on screen, not the hidden one
+- **fleets:** another fleet's session lists no Send later prompts of the primary
+- **pane-intel:** a reply about a subscription login is not the login menu
+- **accounts:** give the setup token's "Not listed" option a non-empty value
+- Plan first tells every session of a multi-repo start, and the card keeps to its rule
+- close review-round gaps in access, review notes, setup and dashboards
+- the Plan ready card goes by what the agent said last
+- **pane-intel:** a reply that quotes the trust dialog is not a trust prompt
+- **gc:** sweep fleet-agent actions that ended more than 180 days ago
+- gate resolving a review note where it is written; a list is a read
+- trim dashboards tool text under the served-definition budget
+- **mcp:** only a person on a full device presses a folder-wide "don't ask again"
+- **tests:** DashboardSummaryArgs carries context
+- **dashboards:** cost is assigned once, on the run that reported it
+- **ux:** confirms that stay put, an undo that undoes one; one inline confirm
+- **agents:** type the status rules for pending_about's lookup
+- **agents:** say what each waiting action does and stop repeat proposals
+- **hosts:** the fleet-filter note names the fleet and clears it
+- **accounts:** bring EventBus into scope for the forbidden-projects setter
+- **hosts:** own hosts stay in view beside another fleet
+- **work:** count a label's characters as the hub does
+- **a11y:** focus Keep when a Work delete confirm opens
+- **missions:** an inline confirm takes the keyboard with it
+- **ux:** Share sheet confirms keep keyboard focus on their safe choice
+- **sidebar:** the bulk bar's Send prompt and Kill say what they do
+- **missions:** the empty list carries the next step, and grey New and Retry say why
+- **ux:** Downloads asks before removing a copy nobody saved
+- **work:** a done task's due date is never overdue on the Board
+- **switcher:** a placeholder that fits the box
+- **sessions:** one name for Clean up, and the inspector says what Restart, Recreate and the two Renames do
+- **ux:** routine notebook Clear stages instead of wiping; revoke confirm focuses Keep
+- **ux:** no silent presses: next-needs-you, Copy buttons, Pause all with nothing running
+- **missions:** Edit and the grant form take focus when they open
+- **missions:** a grant to sign is a card in the centre; a hub-blocked button says why
+- **ux:** ask before discarding a typed prompt, say why a button is off, plain agent errors
+- **missions:** the room opens at the end of its log, and Start wave answers where it was pressed
+- **missions:** the room says what comes next, and a refusal lands beside the press
+- **ux:** Undo a cancelled scheduled prompt, ask before revoking an agent, exact times on hover
+- **missions:** ask before Pause all, refuse a bad grant budget, one level table
+- **attention:** a session is blocked on its own signed-out login, not its account's
+- **control:** one open routing question at a time, quoting its message
+- **missions:** lanes never stall on held tests, lane PRs retry; simplify
+- **accounts:** switch keeps the account link, new logins get MCP servers, a cancelled add leaves no profile
+- **accounts:** desktop account surfaces read the same and lead somewhere
+- **routines:** bind the run's login from the plan
+- **accounts:** idle spare logins stay switch targets, guarded profile writes, routines take a freer login
+- close the tracker-guard bypass, accept-anyway passes the gate; simplify
+- **answer:** multi-select questions can be moved on and submitted again
+- **trackers:** keep Jira's 400 reason and name the refused create's missing fields
+- **attention:** the Inbox stops counting merged PRs, paused rows and idle full contexts
+- **routines:** stop over-budget turns, hold only limit skips; simplify
+- **missions:** let a mission's runs reach Jira and company MCP servers
+- **control:** the activity count's highlight reads a motion token
+- **agents:** what a review of the migration found
+- **agents:** support rules read origin's default branch; name the missing ref
+- health disk reads off the store lock, seen-only failed runs, simplify
+- **agents:** a project workspace takes origin's default branch, and a missing branch fails for good
+- **add-project:** pin GitHub's SSH host keys before cloning or pushing
+- **work:** classify the AI check's person guard; fix its tests and the reference order
+- **details:** the Details tab scrolls when its page is taller than the window
+- **hardening:** daily hub backup, disk and backup warnings, routine run retention, last loop panic guards (#1034)
+- **hardening:** tracker sync and update loops survive a panic; health and loop rows stop reading broken as fine
+- **usage:** starts and resumes skip a spent login; a panicked usage fetch is polled again
+- **missions:** a glob's wildcard inside a name no longer hides a collision; simplify recent merges
+- **missions:** a run without its report is not a finished run (TASK-289)
+- **health:** hooks_silent counts only working sessions or recent turns
+- **fleet-agents:** skip a PR diff GitHub will not serve; simplify recent merges
+- **ui:** stop WatchView polling under a fleet-session overlay; guard dash-leading names in grant command
+- **fleet-agents:** keep retries, newest triggers and scan windows whole
+- **missions:** keep limit_wait absent from older hubs, say signed-out planner refusals, index the evidence retry
+- **sessions:** tie the prompt suggestion to its turn and harden its chip
+- **projects:** backfill github_origin from remote and clone reads, keep it on a failed git read
+- **ui:** quote the Toolkit grant command, drop contradictory empty state, stop hidden panel probing
+- **fleet-agents:** defer cooldown runs, check the scan window, disclose auto-approve
+- **fleet-agents:** keep a person-sent review's verdict and count cut findings
+- **missions:** say sign in again when every planner login is signed out, hold integration checks at the card cap
+- **work:** retry failed git evidence reads fleet-wide, bounded and outside the mission lease
+- **reconcile:** keep the Stop hook's idle while other Stop hooks still run
+- **fleets:** clone a project onto another fleet only from its real GitHub origin
+- **toolkit:** a stale catalog check no longer undoes 'unavailable'; simplify recent merges
+- **deps:** override zod and undici past two new high advisories
+- **hub-image:** copy the prompt-suggestion plugin into the build context
+- **terminal:** say "no SSH route" only when the attach failed reaching the host
+- **deps:** tokio 1.53.3 for RUSTSEC-2026-0386
+- **deps:** tokio 1.53.3 for RUSTSEC-2026-0386
+- **deps:** bump tokio to 1.54.1 for RUSTSEC-2026-0386
+- **deps:** tokio 1.53.3 for RUSTSEC-2026-0386
+- **deps:** tokio 1.53.3 for RUSTSEC-2026-0386
+- **sessions:** keep the Thinking/Working indicator on for the whole turn
+- **fleets:** keep another fleet's session from attaching to no-pane rows or driving the hidden primary
+- **missions:** keep per-mission room state with its mission, flag hubs that drop until_done, focus the evidence override form
+- **fleet-agents:** keep pr_review's marker and findings, never block unattended
+- **missions:** re-read task_report evidence at Stop, retry failed git reads, end until-done grants when a mission leaves finite mode
+- **missions:** merge-wave rule skips finished merges and loop integrations; integration card stays under the payload cap
+- **missions:** planner limit fallback skips signed-out logins, clears waits a later login answered, grant lifts the ask only while it holds
+- **missions:** a retry, review or test run starts from the implementer's branch; mission stats (lanes L0)
+- **toolkit:** say what a device can do with the catalog, and list host-only skills
+- **new-session:** offer every extra fleet's machines, cloning the repo there first
+- one-line hub pin refusal; drop a duplicate test suite and repeated test setup
+
+### Documentation
+- Plan first on the phone, in several repositories, and when a look fails
+- **control-api:** index set_account_projects
+- **status:** the phone filters and sorts by priority
+- **status:** the phone shows a task's result
+- **status:** the phone moves a ticket at its tracker
+- **status:** own tasks are already in the quick switcher
+- **missions:** design for the next mission improvements (M1–M7)
+- **agents:** a rollout guide for the restated agents
+- **missions:** design for lanes — one lead session per lane, subagents inside, roadmap L0–L6
 ## [0.6.4] - 2026-10-21
 
 ### Added
@@ -4034,6 +4287,7 @@ added by hand for that reason — see #152._
   index, and new Getting Started, Concepts, and Troubleshooting guides; refreshed
   and cross-linked the Control API guide.
 
+[0.6.5]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.6.5
 [0.6.4]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.6.4
 [0.6.2]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.6.2
 [0.6.1]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.6.1
