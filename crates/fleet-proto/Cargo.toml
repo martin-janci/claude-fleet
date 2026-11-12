@@ -1,6 +1,6 @@
 [package]
 name = "fleet-proto"
-version = "0.6.5"
+version = "0.6.5-dev.410.desktop.ge74223e"
 description = "The JSON frame protocol spoken between a claude-fleet hub and a fleet-agent"
 authors = ["martin-janci"]
 edition = "2021"
