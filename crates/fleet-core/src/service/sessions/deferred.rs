@@ -555,8 +555,15 @@ pub async fn deliver_due(
     // An agent host whose agent is not connected: the reconcile's redial
     // grace (`DownLog::Hold`) leaves its row reachable, so the row alone
     // does not say so.
-    let agent_down = |host: &str| {
-        ssh.routes_through_agent(host) && ssh.agent_registry().is_some_and(|r| !r.connected(host))
+    //
+    // It reads the store it is handed, which the caller holds locked, and
+    // never `ssh.routes_through_agent`: that asks the hub's `HostRouter`,
+    // which locks this same `Mutex<Store>` again, and a std mutex taken
+    // twice on one thread never wakes. On the hub that froze every worker
+    // the first time a due prompt met an idle session (2026-11-12).
+    let agent_down = |s: &Store, host: &str| {
+        ssh.agent_registry().is_some_and(|r| !r.connected(host))
+            && s.agent_host_alias(host).ok().flatten().is_some()
     };
     // The clock after the lane wait, as in `queue_prompt`.
     deliver_due_in_lane(store, session_id, now_unix(), agent_down, |row, body| {
@@ -591,7 +598,7 @@ where
     // The lane first, so a direct send that loses this moment waits for the
     // paste below.
     let _lane = typing_lane(store, session_id).await;
-    deliver_due_in_lane(store, session_id, now, |_| false, type_it).await
+    deliver_due_in_lane(store, session_id, now, |_, _| false, type_it).await
 }
 
 /// [`deliver_due`] with the session's typing lane held: read, decide and
@@ -600,7 +607,8 @@ async fn deliver_due_in_lane<F, Fut>(
     store: &Mutex<Store>,
     session_id: i64,
     now: i64,
-    agent_down: impl FnOnce(&str) -> bool,
+    // Called with the store guard held: it must not lock the store again.
+    agent_down: impl FnOnce(&Store, &str) -> bool,
     type_it: F,
 ) -> Result<Option<DeferredPromptRow>, IpcError>
 where
@@ -623,7 +631,7 @@ where
         // A host that does not answer keeps its last-known rows, so a
         // session last seen idle still reads idle: the prompt waits, with no
         // attempt counted, and goes out on the first pass after it is back.
-        if host_down(&s, &row.host_alias)? || agent_down(&row.host_alias) {
+        if host_down(&s, &row.host_alias)? || agent_down(&s, &row.host_alias) {
             return Ok(None);
         }
         let due = s.due_deferred_prompts(session_id, now)?;
@@ -1102,7 +1110,7 @@ mod tests {
             &store,
             id,
             now - 5,
-            |_| true,
+            |_, _| true,
             |_, _| async { panic!("an agent host whose agent is gone is not typed to") },
         )
         .await
@@ -1112,6 +1120,61 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(out.map(|r| r.body), Some("later".to_string()));
+    }
+
+    /// The hub's own client (`SshClient::with_agents`, whose router reads
+    /// the same `Mutex<Store>`): a due prompt for an idle session on an agent
+    /// host with no live agent waits, and the check does not lock the store
+    /// a second time under the guard `deliver_due_in_lane` holds. It did, on
+    /// 2026-11-12, and every worker of the hub froze. Run on its own thread
+    /// so a regression fails here instead of hanging the test binary.
+    #[test]
+    fn a_hub_client_checks_the_agent_without_locking_the_store_twice() {
+        let (store, id) = store_with("working");
+        let store = Arc::new(store);
+        let now = now_unix();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(queue_prompt_with(
+            args(id, "later"),
+            &store,
+            now - 20,
+            |_, _| async { panic!() },
+        ))
+        .unwrap();
+        set_idle_since(&store, id, now - 10);
+        {
+            let s = store.lock().unwrap();
+            s.update_host_probe("local", true, None, None, now).unwrap();
+            s.set_host_transport("local", "agent").unwrap();
+        }
+        let ssh = Arc::new(crate::ssh::SshClient::with_agents(
+            crate::agent::AgentRegistry::new(),
+            Arc::clone(&store),
+        ));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let st = Arc::clone(&store);
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let out = rt.block_on(deliver_due(&st, &ssh, id));
+            let _ = tx.send(out.map(|r| r.is_none()));
+        });
+        let waited = rx
+            .recv_timeout(std::time::Duration::from_secs(20))
+            .expect("deliver_due deadlocked on the store mutex");
+        assert!(waited.unwrap(), "the prompt waits for the agent");
+        let waiting = store
+            .lock()
+            .unwrap()
+            .next_deferred_prompt(id)
+            .unwrap()
+            .unwrap();
+        assert_eq!((waiting.attempts, waiting.failed_at), (0, None));
     }
 
     /// The UserPromptSubmit of the turn a delivery started was missed, so
