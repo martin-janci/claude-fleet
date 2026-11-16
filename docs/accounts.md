@@ -275,7 +275,9 @@ is the one used.
 
 Bounds: the pass runs on the reconcile tick at most once a minute, switches
 at most five sessions a run, leaves a session it switched or tried alone
-for 30 minutes, skips the fleet controller, Control (whose own failover
+for 30 minutes (twice as long after each failed try in a row, up to a day,
+so a failure only a person can clear is not retried every half hour),
+skips the fleet controller, Control (whose own failover
 moves it and tells it) and sessions on a hidden or unreachable host, stands still while Pause all is on, and runs only on the
 hub or a standalone desktop, never on a desktop paired to a hub. Every
 attempt leaves `account_switched` or `account_switch_failed` on the

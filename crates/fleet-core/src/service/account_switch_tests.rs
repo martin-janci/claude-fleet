@@ -217,6 +217,7 @@ fn a_dozen_sessions_on_a_spent_account_do_not_all_pile_onto_one_login() {
             .iter()
             .map(|p| (p.target.account_uuid.clone(), NOW))
             .collect(),
+        ..Default::default()
     };
     assert!(plan(&s, true, &recent, NOW + 60).unwrap().is_empty());
     // A fresh reading of spare (now counting the session it took) opens
@@ -397,6 +398,80 @@ async fn a_failed_switch_is_recorded_with_its_code() {
     let (kind, detail) = ev.last().unwrap();
     assert_eq!(kind, EVENT_SWITCH_FAILED);
     assert!(detail.contains(crate::ipc_error::codes::E_SSH), "{detail}");
+}
+
+/// A switch that keeps failing is tried less and less often: half an hour
+/// after the first failure, then an hour, two, and so on up to a day. It
+/// used to be every half hour for as long as the session stayed paused,
+/// which for a failure only a person can clear was 21 tries in ten hours.
+/// A switch that goes through starts the count over.
+#[tokio::test]
+async fn a_switch_that_keeps_failing_is_tried_less_often() {
+    let (s, id, _) = fleet();
+    let store = Arc::new(Mutex::new(s));
+    let failing = Fake {
+        fail: true,
+        ..Default::default()
+    };
+    let recent = Mutex::new(Recent::default());
+    // A run at `at`, on readings taken then (an old one is no target).
+    async fn run_at(
+        store: &Arc<Mutex<Store>>,
+        fake: &Fake,
+        recent: &Mutex<Recent>,
+        at: i64,
+    ) -> RunReport {
+        {
+            let s = store.lock().unwrap();
+            seed_usage(&s, "mac", None, "acct-out", 100.0, at);
+            seed_usage(&s, "mac", Some("work"), "acct-work", 40.0, at);
+            seed_usage(&s, "mac", Some("spare"), "acct-spare", 10.0, at);
+        }
+        run_with(store, fake, None, recent, true, at).await.unwrap()
+    }
+    let tried = |r: RunReport| r.switched + r.failed;
+    let half_hour = RETRY_AFTER_SECS;
+
+    // The first failure waits the plain half hour, as before.
+    let mut at = NOW;
+    assert_eq!(tried(run_at(&store, &failing, &recent, at).await), 1);
+    assert_eq!(
+        tried(run_at(&store, &failing, &recent, at + half_hour - 60).await),
+        0
+    );
+    at += half_hour;
+    assert_eq!(tried(run_at(&store, &failing, &recent, at).await), 1);
+    // The second in a row waits an hour: half an hour later nothing is tried.
+    assert_eq!(
+        tried(run_at(&store, &failing, &recent, at + half_hour).await),
+        0
+    );
+    at += 2 * half_hour;
+    assert_eq!(tried(run_at(&store, &failing, &recent, at).await), 1);
+    // The third waits two hours.
+    assert_eq!(
+        tried(run_at(&store, &failing, &recent, at + 2 * half_hour).await),
+        0
+    );
+    assert_eq!(failing.calls.lock().unwrap().len(), 3);
+    assert_eq!(recent.lock().unwrap().retry_after(id), 4 * half_hour);
+
+    // However often it fails, a day is the longest wait.
+    let many = Recent {
+        failures: HashMap::from([(id, 40)]),
+        ..Default::default()
+    };
+    assert_eq!(many.retry_after(id), MAX_RETRY_AFTER_SECS);
+    assert_eq!(Recent::default().retry_after(id), RETRY_AFTER_SECS);
+
+    // A switch that goes through starts over.
+    at += 4 * half_hour;
+    let working = Fake::default();
+    let r = run_at(&store, &working, &recent, at).await;
+    assert_eq!((r.switched, r.failed), (1, 0));
+    let r = recent.lock().unwrap();
+    assert!(r.failures.is_empty());
+    assert_eq!(r.retry_after(id), RETRY_AFTER_SECS);
 }
 
 #[tokio::test]

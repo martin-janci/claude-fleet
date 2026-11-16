@@ -26,7 +26,8 @@
 //! (`bg` / `external`) sessions, other agents, ghosts and lost rows, the
 //! registered controller, Control itself (`operator_account` fails it over
 //! and tells it), sessions on a hidden or unreachable host, and a
-//! session switched (or tried) in the last [`RETRY_AFTER_SECS`].
+//! session switched (or tried) in the last [`RETRY_AFTER_SECS`], longer
+//! while its switch keeps failing ([`Recent::retry_after`]).
 //!
 //! **Which login.** [`pick`] over [`candidates`]: another login on the same
 //! host, on another account (a second login on the same account shares its
@@ -83,6 +84,13 @@ pub const RUN_EVERY_SECS: u64 = 60;
 /// the row's account until the next pass reads the new one, and a login
 /// that refused once is not hammered.
 pub const RETRY_AFTER_SECS: i64 = 30 * 60;
+/// The longest a session whose switch keeps failing is left alone: the wait
+/// doubles with each failure in a row ([`Recent::retry_after`]) up to this.
+/// A failure only a person can clear (`E_REPAIR_REQUIRED`: the worktree's
+/// branch is gone) was otherwise tried every half hour for as long as the
+/// session stayed paused, each try a restart attempt on the host and a
+/// timeline event (2026-11-15: four sessions, 21 tries each in ten hours).
+pub const MAX_RETRY_AFTER_SECS: i64 = 24 * 3600;
 /// A login whose newest reading is older than this is no target: its poll
 /// has been failing (signed out, rate-limited, host gone) and the number
 /// it still shows may be hours behind.
@@ -371,7 +379,7 @@ pub fn plan(
             || recent
                 .sessions
                 .get(&row.id)
-                .is_some_and(|at| now - at < RETRY_AFTER_SECS)
+                .is_some_and(|at| now - at < recent.retry_after(row.id))
         {
             continue;
         }
@@ -498,12 +506,29 @@ pub struct RunReport {
 /// What earlier runs did, which the next plan must know.
 #[derive(Debug, Default, Clone)]
 pub struct Recent {
-    /// When each session was last tried, for [`RETRY_AFTER_SECS`].
+    /// When each session was last tried, for [`Recent::retry_after`].
     pub sessions: HashMap<i64, i64>,
+    /// How many tries in a row failed for each session; a switch that goes
+    /// through forgets it.
+    pub failures: HashMap<i64, u32>,
     /// When a session was last moved onto each account: until a reading
     /// fetched after that moment arrives, the account's number does not
     /// count the sessions just sent there, so it takes no more.
     pub targets: HashMap<String, i64>,
+}
+
+impl Recent {
+    /// How long session `id` is left alone after its last try:
+    /// [`RETRY_AFTER_SECS`], doubled for each failed try in a row after the
+    /// first, at most [`MAX_RETRY_AFTER_SECS`].
+    pub fn retry_after(&self, id: i64) -> i64 {
+        let doublings = self
+            .failures
+            .get(&id)
+            .map_or(0, |n| n.saturating_sub(1))
+            .min(16);
+        (RETRY_AFTER_SECS << doublings).min(MAX_RETRY_AFTER_SECS)
+    }
 }
 
 static RECENT: std::sync::LazyLock<Mutex<Recent>> =
@@ -567,6 +592,15 @@ pub async fn run_with(
                 (EVENT_SWITCH_FAILED, Some(e.code.as_str()))
             }
         };
+        {
+            let mut r = recent.lock().unwrap_or_else(|e| e.into_inner());
+            match &result {
+                Ok(()) => {
+                    r.failures.remove(&p.session_id);
+                }
+                Err(_) => *r.failures.entry(p.session_id).or_default() += 1,
+            }
+        }
         let d = detail(&p, code, jev_pick.as_deref());
         if let Ok(s) = store.lock() {
             if let Err(e) = s.insert_session_event(p.session_id, kind, Some(&d)) {
@@ -577,11 +611,26 @@ pub async fn run_with(
             }
         }
     }
-    // Forget tries the retry window no longer covers.
+    // Forget tries the retry window no longer covers. A session whose last
+    // try failed is remembered for the longest window, so its count of
+    // failures in a row outlives the wait it sets.
     {
         let mut r = recent.lock().unwrap_or_else(|e| e.into_inner());
-        r.sessions.retain(|_, at| now - *at < RETRY_AFTER_SECS);
-        r.targets.retain(|_, at| now - *at < STALE_TARGET_SECS);
+        let Recent {
+            sessions,
+            failures,
+            targets,
+        } = &mut *r;
+        sessions.retain(|id, at| {
+            let keep = if failures.contains_key(id) {
+                MAX_RETRY_AFTER_SECS
+            } else {
+                RETRY_AFTER_SECS
+            };
+            now - *at < keep
+        });
+        failures.retain(|id, _| sessions.contains_key(id));
+        targets.retain(|_, at| now - *at < STALE_TARGET_SECS);
     }
     Ok(report)
 }
