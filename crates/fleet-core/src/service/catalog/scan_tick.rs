@@ -41,7 +41,8 @@ pub fn hosts_due(
 /// reachable or `local`) and not already in `due` — a host whose previous
 /// scan failed or came back partial stays owed across passes regardless of
 /// staleness, so a transient failure during a catalog/sync-triggered sweep
-/// gets retried next tick rather than waiting out `max_age`.
+/// gets retried on the next pass rather than waiting out `max_age`. That
+/// pass comes ahead of the next tick ([`early_retry`]).
 pub fn with_owed(due: Vec<String>, owed: &BTreeSet<String>, hosts: &[HostDue]) -> Vec<String> {
     let mut out = due;
     for h in hosts {
@@ -131,15 +132,53 @@ pub fn spawn_catalog_scan_tick(
         // passes until it succeeds, independent of `hosts_due`'s staleness
         // check — see `with_owed`.
         let mut owed: BTreeSet<String> = BTreeSet::new();
+        // The wait before a pass ahead of the next tick, while a host is
+        // owed; see `early_retry`.
+        let mut early: Option<Duration> = None;
+        let mut backoff = OWED_RETRY;
         loop {
             tokio::select! {
                 biased;
                 _ = token.cancelled() => break,
                 _ = ticker.tick() => {}
+                _ = wait(early) => {}
             }
-            pass(&store, &ssh, period, &mut seen, &mut owed).await;
+            early = None;
+            if pass(&store, &ssh, period, &mut seen, &mut owed).await == Pass::Ran {
+                (early, backoff) = early_retry(!owed.is_empty(), backoff, period);
+            }
         }
     }))
+}
+
+/// The first wait before an owed host is tried again ahead of the next tick.
+/// Long enough for the hosts' agents to reconnect to a hub that just
+/// started: its first pass runs before any of them has, so every agent host
+/// fails it (2026-11-16: all four, one second after the listener came up).
+const OWED_RETRY: Duration = Duration::from_secs(120);
+
+/// After a pass: the wait before a pass ahead of the next tick (`None`:
+/// leave it to the tick), and the backoff to hand in after the next pass.
+/// While a host is owed the wait doubles from [`OWED_RETRY`] and stops once
+/// it would reach `period`, so a host that keeps failing costs a few extra
+/// scans and is then tried once per tick, as before. It starts over when
+/// nothing is owed.
+fn early_retry(owed: bool, backoff: Duration, period: Duration) -> (Option<Duration>, Duration) {
+    if !owed {
+        return (None, OWED_RETRY);
+    }
+    if backoff >= period {
+        return (None, backoff);
+    }
+    (Some(backoff), backoff.saturating_mul(2))
+}
+
+/// Sleep `d`, or forever without one.
+async fn wait(d: Option<Duration>) {
+    match d {
+        Some(d) => tokio::time::sleep(d).await,
+        None => std::future::pending().await,
+    }
 }
 
 /// What one [`pass`] did.
@@ -302,6 +341,50 @@ mod tests {
             "the request waits for an unpaused pass"
         );
         assert!(seen.is_none() && owed.is_empty());
+    }
+
+    /// A pass that leaves a host owed is followed by one ahead of the next
+    /// tick: after two minutes, then doubling, and no longer once the wait
+    /// would reach the tick's own period. An hourly tick used to be the only
+    /// retry, so a hub's first pass (which runs before its hosts' agents
+    /// have reconnected) left every agent host unscanned for an hour.
+    #[test]
+    fn an_owed_host_is_retried_ahead_of_the_next_tick() {
+        let period = Duration::from_secs(3600);
+        let mins = |m: u64| Duration::from_secs(m * 60);
+        let (mut waits, mut backoff) = (Vec::new(), OWED_RETRY);
+        for _ in 0..8 {
+            let (early, next) = early_retry(true, backoff, period);
+            waits.push(early);
+            backoff = next;
+        }
+        let want: Vec<Option<Duration>> = [2, 4, 8, 16, 32]
+            .into_iter()
+            .map(|m| Some(mins(m)))
+            .chain([None; 3])
+            .collect();
+        assert_eq!(
+            waits, want,
+            "a host that keeps failing goes back to once per tick"
+        );
+        // Nothing owed: no early pass, and the next failure starts over.
+        assert_eq!(early_retry(false, backoff, period), (None, OWED_RETRY));
+        // The shortest tick (five minutes) still gets its early passes.
+        let short = Duration::from_secs(300);
+        assert_eq!(early_retry(true, OWED_RETRY, short).0, Some(mins(2)));
+        assert_eq!(early_retry(true, mins(4), short).0, Some(mins(4)));
+        assert_eq!(early_retry(true, mins(8), short).0, None);
+    }
+
+    /// `wait` is what the tick selects on beside its ticker: it ends after
+    /// the wait it was given, and never without one.
+    #[tokio::test(start_paused = true)]
+    async fn the_early_wait_ends_only_when_one_is_set() {
+        let t0 = tokio::time::Instant::now();
+        wait(Some(OWED_RETRY)).await;
+        assert_eq!(t0.elapsed(), OWED_RETRY);
+        let never = tokio::time::timeout(Duration::from_secs(86_400), wait(None)).await;
+        assert!(never.is_err(), "no wait set: only the tick runs a pass");
     }
 
     #[test]
