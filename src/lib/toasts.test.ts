@@ -114,6 +114,22 @@ describe('toasts store', () => {
     expect((reported[0][1] as { args: { code: string; component: string } }).args).toMatchObject({ code: 'E_SSH', component: 'frontend' });
   });
 
+  it('pushError shows a refusal and does not report it as an error', () => {
+    const refusals = [
+      { code: 'E_FORBIDDEN', message: "kill_session refused: fleet-operator on mac is the UX agent's own session" },
+      { code: 'E_ACCOUNT_FORBIDDEN', message: "mac's own login is forbidden for acme/app" },
+      { code: 'E_ACCOUNT_LIMIT', message: 'the login is past its limit' },
+      { code: 'E_CONFIRM_REQUIRED', message: 'needs a confirmation' },
+      { code: 'E_PINNED', message: 'the session is pinned' },
+    ];
+    for (const e of refusals) pushError(e, 'Kill failed');
+    expect(get(toasts).map((t) => t.code)).toEqual(refusals.map((e) => e.code));
+    expect(inv().mock.calls.filter((c) => c[0] === 'report_client_error')).toHaveLength(0);
+    // A fault that happens to say "refused" is still reported.
+    pushError({ code: 'E_INVALID_STATE', message: 'session 1 points at worktree 2 of project 3' }, 'Switching the login failed');
+    expect(inv().mock.calls.filter((c) => c[0] === 'report_client_error')).toHaveLength(1);
+  });
+
   it('pushResultError is a no-op on Ok and surfaces Err', () => {
     expect(pushResultError({ ok: true, value: 1 })).toBeNull();
     expect(get(toasts)).toHaveLength(0);

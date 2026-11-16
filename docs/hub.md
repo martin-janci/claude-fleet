@@ -3074,7 +3074,12 @@ so an origin with spaces or punctuation (a client name, a host alias) filters
 correctly.
 
 **Who sends what.** Only `error`-level `tracing` events, never warnings
-(the reconcile tick warns per unreachable host per pass). Each sender keeps
+(the reconcile tick warns per unreachable host per pass). The desktop also
+sends each error toast it shows, except a refusal: an answer the backend
+gives by rule (`E_FORBIDDEN`, `E_ACCOUNT_FORBIDDEN`, `E_ACCOUNT_LIMIT`,
+`E_CONFIRM_REQUIRED`, `E_PINNED`) is shown to the person and is not a
+report. Nor is the browser's "ResizeObserver loop" notice, which is not an
+error. Each sender keeps
 a queue of 256 and drops the oldest, counted, when it is full; nothing ever
 waits on the hub. The desktop sends every 5 s (or at 20 queued) to
 `POST /report`, splitting a drain so a single POST body never crosses 64 KB;

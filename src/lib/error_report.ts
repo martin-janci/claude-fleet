@@ -20,6 +20,25 @@ let windowStart = 0;
 let sentThisWindow = 0;
 let pendingRepeats = 0;
 
+/** Codes with which the backend says no by rule: the caller may not do this,
+ *  the project forbids that login, the session is pinned, a person has to
+ *  confirm first. The toast tells the person; nothing failed, so it is not an
+ *  error report. (On 2026-11-16 the hub's report log held "Kill failed:
+ *  kill_session refused …" and "Recreate failed: … is forbidden for …" beside
+ *  a real fault.) Keep it to codes that are a refusal whatever raised them. */
+const REFUSALS: ReadonlySet<string> = new Set([
+  'E_FORBIDDEN',
+  'E_ACCOUNT_FORBIDDEN',
+  'E_ACCOUNT_LIMIT',
+  'E_CONFIRM_REQUIRED',
+  'E_PINNED',
+]);
+
+/** Whether `code` is the backend refusing by rule rather than failing. */
+export function isRefusal(code: string | null | undefined): boolean {
+  return code != null && REFUSALS.has(code);
+}
+
 export function resetErrorReportingForTests(): void {
   seen = new Map();
   windowStart = 0;
@@ -76,8 +95,16 @@ function describe(reason: unknown): string {
   }
 }
 
+/** The browser's notice that a ResizeObserver callback changed layout again
+ *  and the rest is delivered on the next frame ("ResizeObserver loop
+ *  completed with undelivered notifications.", or the older "… loop limit
+ *  exceeded"). It arrives as a window `error` event with no error object;
+ *  nothing threw and nothing is lost, so it is not a crash to report. */
+const RESIZE_OBSERVER_NOTICE = /^ResizeObserver loop (completed with undelivered notifications|limit exceeded)/;
+
 export function installErrorReporting(win: Window = window): void {
   win.addEventListener('error', (e) => {
+    if (!e.error && RESIZE_OBSERVER_NOTICE.test(e.message ?? '')) return;
     const stack = e.error instanceof Error && e.error.stack ? e.error.stack.slice(0, 2000) : undefined;
     reportError('frontend:unhandled', e.message || describe(e.error), null, {
       file: e.filename,

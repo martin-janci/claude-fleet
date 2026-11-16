@@ -74,4 +74,24 @@ describe('installErrorReporting', () => {
     ]);
     expect((calls()[1][1] as { args: { message: string } }).args.message).toContain('rejected');
   });
+
+  it("leaves the browser's ResizeObserver loop notice out, in both wordings", () => {
+    installErrorReporting(window);
+    for (const message of [
+      'ResizeObserver loop completed with undelivered notifications.',
+      'ResizeObserver loop limit exceeded',
+    ]) {
+      window.dispatchEvent(new ErrorEvent('error', { message }));
+    }
+    expect(calls()).toHaveLength(0);
+    // A real throw from a ResizeObserver callback carries an error object.
+    window.dispatchEvent(
+      new ErrorEvent('error', {
+        message: 'ResizeObserver loop completed with undelivered notifications.',
+        error: new TypeError('measure is undefined'),
+      }),
+    );
+    window.dispatchEvent(new ErrorEvent('error', { message: 'TypeError: ResizeObserver is not a constructor' }));
+    expect(calls()).toHaveLength(2);
+  });
 });
