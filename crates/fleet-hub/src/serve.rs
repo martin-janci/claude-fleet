@@ -1186,6 +1186,11 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
         ticks_cancel.clone(),
     );
 
+    // A deadlock on the store's lock is the one failure the select below
+    // cannot see (it parks the runtime's workers), so an OS thread watches
+    // for it and exits the process. Stood down once a stop is under way.
+    let stall_watch = spawn_store_stall_watchdog(Arc::clone(&store));
+
     // Stop on a signal, but also when the hub can no longer serve: the
     // control API task ended on its own (a listener that failed to start, a
     // server error, a panic), or the store's writer lock is poisoned (a panic
@@ -1214,6 +1219,7 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
             failure = Some(why);
         }
     }
+    stall_watch.store(true, std::sync::atomic::Ordering::Relaxed);
     // Cancel the ticks BEFORE tearing down the MCP server below: cancellation
     // is only observed between passes, so cancelling here is strictly safe
     // (it does not abort a pass already in flight) and it stops a new pass
@@ -1353,6 +1359,93 @@ async fn watch_store_poison<T>(store: &Mutex<T>, every: std::time::Duration) {
     }
 }
 
+/// How long the store's lock may go without once being found free before the
+/// hub gives up on it. No pass holds the lock for seconds, let alone minutes:
+/// a lock busy at every probe for this long is held by a task that will never
+/// release it.
+const STORE_STALL_LIMIT: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// How often the stall watchdog probes the store's lock.
+const STORE_STALL_CHECK: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Whether `lock` can be taken right now. A poisoned lock counts as free: it
+/// is not held, and [`watch_store_poison`] is the one that ends the hub then.
+fn lock_is_free<T>(lock: &Mutex<T>) -> bool {
+    !matches!(lock.try_lock(), Err(std::sync::TryLockError::WouldBlock))
+}
+
+/// Blocks until `lock` was busy at every probe for `limit` (probing every
+/// `every`), and answers `true`; or until `stop` is set, and answers `false`.
+fn wait_for_store_stall<T>(
+    lock: &Mutex<T>,
+    limit: std::time::Duration,
+    every: std::time::Duration,
+    stop: &std::sync::atomic::AtomicBool,
+) -> bool {
+    let needed = (limit.as_millis() / every.as_millis().max(1)).max(1);
+    wait_for_stall(|| lock_is_free(lock), needed, every, stop)
+}
+
+/// [`wait_for_store_stall`] over any probe: `true` once `is_free` said no
+/// `needed` times in a row, `false` once `stop` is set. It counts probes
+/// rather than reading a clock, so a suspended process or a clock that jumps
+/// is not mistaken for a stall, and one free probe starts the count over.
+fn wait_for_stall(
+    mut is_free: impl FnMut() -> bool,
+    needed: u128,
+    every: std::time::Duration,
+    stop: &std::sync::atomic::AtomicBool,
+) -> bool {
+    let mut busy: u128 = 0;
+    loop {
+        std::thread::sleep(every);
+        if stop.load(std::sync::atomic::Ordering::Relaxed) {
+            return false;
+        }
+        if is_free() {
+            busy = 0;
+            continue;
+        }
+        busy += 1;
+        if busy >= needed {
+            return true;
+        }
+    }
+}
+
+/// Exit the process when the store's lock is stuck: held by a task that never
+/// releases it (2026-11-12: a second `lock()` on the thread already holding
+/// it, a std mutex's deadlock). Every other task then parks on the same lock,
+/// the runtime's workers with them, and the hub answers nothing, logs nothing
+/// and never exits; that day it stayed so for ten hours, until a person
+/// restarted it. Nothing on the runtime can notice, [`watch_store_poison`]
+/// included, so this runs on a thread of its own and ends the process itself:
+/// there is no graceful stop to run on workers that are parked. Status 1, as
+/// for the other "can no longer serve" exits, so the restart policy starts a
+/// fresh hub. Set the returned flag to stand the watchdog down.
+fn spawn_store_stall_watchdog(store: Arc<Mutex<Store>>) -> Arc<std::sync::atomic::AtomicBool> {
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = Arc::clone(&stop);
+    let spawned = std::thread::Builder::new()
+        .name("store-stall-watchdog".into())
+        .spawn(move || {
+            if wait_for_store_stall(&store, STORE_STALL_LIMIT, STORE_STALL_CHECK, &flag) {
+                tracing::error!(
+                    limit_secs = STORE_STALL_LIMIT.as_secs(),
+                    "the store lock has not been free for {}s: a task is stuck holding it and \
+                     nothing can read or write; fleet-hub exiting so its supervisor starts a \
+                     working one",
+                    STORE_STALL_LIMIT.as_secs()
+                );
+                std::process::exit(1);
+            }
+        });
+    if let Err(e) = spawned {
+        tracing::warn!(error = %e, "could not start the store stall watchdog; a deadlocked store will not restart the hub");
+    }
+    stop
+}
+
 /// Waits for a stop signal and names it. SIGHUP is logged and ignored: a hub
 /// started from a terminal or a tmux pane used to die of it silently (the
 /// default action), and a daemon has no use for a hangup.
@@ -1409,6 +1502,68 @@ mod tests {
         )
         .await
         .expect("a poisoned store must trip the watchdog");
+    }
+
+    /// The stall watchdog answers once the lock was busy at every probe for
+    /// the limit: a guard that is never dropped, as in the deadlock of
+    /// 2026-11-12, where the async watchdog above could not run at all.
+    #[test]
+    fn the_stall_watchdog_fires_on_a_lock_that_is_never_released() {
+        use std::sync::atomic::AtomicBool;
+        let ms = std::time::Duration::from_millis;
+        let store = Arc::new(Mutex::new(()));
+        let stuck = store.lock().unwrap();
+        let stop = AtomicBool::new(false);
+        assert!(wait_for_store_stall(&store, ms(20), ms(1), &stop));
+        drop(stuck);
+    }
+
+    /// A lock that is busy now and then, however often, is not a stall: one
+    /// free probe starts the count over. And a hub that is stopping stands
+    /// the watchdog down.
+    #[test]
+    fn the_stall_watchdog_leaves_a_busy_store_alone() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let none = std::time::Duration::ZERO;
+        let stop = AtomicBool::new(false);
+        // Busy at 99 probes out of every 100, far more than a real store is,
+        // for 5000 probes; then the hub stops. The limit is 100 in a row.
+        let mut probes = 0u32;
+        let stalled = wait_for_stall(
+            || {
+                probes += 1;
+                if probes == 5000 {
+                    stop.store(true, Ordering::Relaxed);
+                }
+                probes.is_multiple_of(100)
+            },
+            100,
+            none,
+            &stop,
+        );
+        assert!(!stalled, "a lock that keeps coming free is not stuck");
+        assert_eq!(probes, 5000, "it watched until the hub stopped");
+        // The same watch with no free probe fires at exactly the limit.
+        let (stop, mut probes) = (AtomicBool::new(false), 0u32);
+        let stalled = wait_for_stall(
+            || {
+                probes += 1;
+                false
+            },
+            100,
+            none,
+            &stop,
+        );
+        assert!(stalled && probes == 100);
+        // A poisoned lock is not held: the poison watchdog's case, not this one.
+        let store = Arc::new(Mutex::new(()));
+        let s3 = Arc::clone(&store);
+        let _ = std::thread::spawn(move || {
+            let _g = s3.lock().unwrap();
+            panic!("poison the store");
+        })
+        .join();
+        assert!(store.is_poisoned() && lock_is_free(&store));
     }
 
     #[test]

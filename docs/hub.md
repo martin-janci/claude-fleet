@@ -195,6 +195,11 @@ or the server task ended or panicked), or when a panic leaves the store's lock
 poisoned so every write would fail, `serve` logs why, shuts down as it does on
 SIGTERM, and exits with status 1, so the restart policy (systemd
 `Restart=on-failure`, compose `restart: unless-stopped`) starts a fresh one.
+A deadlock on the store's lock is the case that shutdown cannot serve: every
+task waits on the lock, so the hub answers nothing and logs nothing. A
+watchdog thread probes the lock once a second, and when it has not been free
+for five minutes it logs why and exits with status 1 at once, without the
+SIGTERM drain.
 Panics are written to the file log and the error reports with their location
 and a backtrace, not only to stderr. SIGHUP is logged and ignored; stop the hub
 with SIGTERM (or Ctrl-C), and the stop line names the signal.
