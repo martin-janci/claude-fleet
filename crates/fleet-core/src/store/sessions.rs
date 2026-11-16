@@ -217,6 +217,13 @@ impl Store {
                      CASE WHEN ?6 IN ('idle','completed','stopped') THEN ?7 ELSE NULL END)
              ON CONFLICT(host_alias, tmux_name) DO UPDATE SET
                project_id=COALESCE(excluded.project_id, project_id),
+               -- A worktree of another project is not this row's worktree
+               -- (the same rule as the tmux upsert in `store/reconcile.rs`).
+               worktree_id=CASE WHEN worktree_id IS NOT NULL AND NOT EXISTS (
+                                  SELECT 1 FROM worktrees w
+                                   WHERE w.id = sessions.worktree_id
+                                     AND w.project_id IS COALESCE(excluded.project_id, project_id))
+                                THEN NULL ELSE worktree_id END,
                last_activity_at=excluded.last_activity_at,
                kind=excluded.kind,
                status='running',
@@ -3144,6 +3151,29 @@ mod tests {
                 .map(|r| r.id),
             Some(b)
         );
+    }
+
+    /// Moving a bg row to another project drops the old project's worktree
+    /// link, as the tmux upsert does; no observed project keeps both.
+    #[test]
+    fn upsert_bg_session_drops_a_worktree_of_another_project() {
+        let s = store();
+        let old = s.upsert_project("a", "app", "/p/a/app").unwrap();
+        let new = s.upsert_project("b", "app", "/p/b/app").unwrap();
+        let wt = s
+            .upsert_worktree(old, "feat", "/p/a/app/.worktrees/feat", None)
+            .unwrap();
+        let id = s
+            .upsert_bg_session("local", "bg:u1", Some(old), "u1", Some("idle"), 1, "bg", 1)
+            .unwrap();
+        s.link_session_worktree(id, wt).unwrap();
+        let wt_of = |s: &Store| s.get_session_by_id(id).unwrap().unwrap().worktree_id;
+        s.upsert_bg_session("local", "bg:u1", None, "u1", Some("idle"), 2, "bg", 2)
+            .unwrap();
+        assert_eq!(wt_of(&s), Some(wt), "no project observed: kept");
+        s.upsert_bg_session("local", "bg:u1", Some(new), "u1", Some("idle"), 3, "bg", 3)
+            .unwrap();
+        assert_eq!(wt_of(&s), None, "moved to another project: dropped");
     }
 
     #[test]

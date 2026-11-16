@@ -572,6 +572,13 @@ impl Store {
         // A hook/transcript context value younger than 120 s outranks the
         // pane footer (spec §1.5) — unless it belongs to the conversation
         // this pass moves the row away from.
+        // The post-write project_id (SET clauses read the OLD row). A pane
+        // whose directory is in no project keeps the project a fleet-run row
+        // already has: a person adopted it into one (Lost and found, step
+        // 4.12), or it cd'd out of its checkout.
+        const NEW_PROJECT: &str =
+            "CASE WHEN excluded.project_id IS NULL AND started_at IS NOT NULL \
+                                        THEN project_id ELSE excluded.project_id END";
         const FRESH_CONTEXT: &str = "context_source IN ('transcript','hook') \
                                      AND context_at >= ?19 - 120";
         let sql = format!(
@@ -601,8 +608,18 @@ impl Store {
                -- A pane whose directory is in no project keeps the project
                -- a fleet-run row already has: a person adopted it into one
                -- (Lost and found, step 4.12), or it cd'd out of its checkout.
-               project_id=CASE WHEN excluded.project_id IS NULL AND started_at IS NOT NULL
-                               THEN project_id ELSE excluded.project_id END,
+               project_id={new_project},
+               -- The worktree FK must name a worktree of the row's project.
+               -- When the pass moves the row to another project (its cwd now
+               -- maps elsewhere, e.g. the repo changed owner and refresh
+               -- registered it anew), the old project's worktree is not its
+               -- worktree: drop it, as `set_session_project` does. A link
+               -- that was already crossed is healed by the same check.
+               worktree_id=CASE WHEN worktree_id IS NOT NULL AND NOT EXISTS (
+                                  SELECT 1 FROM worktrees w
+                                   WHERE w.id = sessions.worktree_id
+                                     AND w.project_id IS ({new_project}))
+                                THEN NULL ELSE worktree_id END,
                last_activity_at=excluded.last_activity_at,
                -- Only a Claude pane bills a Claude account: a Codex or
                -- Hermes row keeps none, and one it took before is cleared.
@@ -710,6 +727,7 @@ impl Store {
             new_id = NEW_ID,
             fresh = FRESH_CONTEXT,
             not_stale = NOT_STALE,
+            new_project = NEW_PROJECT,
         );
         tx.execute(
             &sql,
@@ -2858,6 +2876,56 @@ mod tests {
         s.set_started_at(r.id, 5).unwrap();
         let r = reconcile_one(&mut s, "scratch", None, None, None);
         assert_eq!(r.project_id, Some(pid), "adopted into it: kept");
+    }
+
+    /// A repo that changed owner is registered as a second project; the pass
+    /// moves the row there by its cwd. The old project's worktree link goes
+    /// with the move (it made repair refuse "session N points at worktree W
+    /// of project A, but belongs to project B"), and a link that is already
+    /// crossed is healed by the next pass. A link inside the project stays.
+    #[test]
+    fn a_pass_that_moves_a_row_to_another_project_drops_its_old_worktree() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.upsert_host("local").unwrap();
+        let old = s
+            .upsert_project("frantisek", "app", "/p/frantisek/app")
+            .unwrap();
+        let new = s
+            .upsert_project("sales-twins", "app", "/p/sales-twins/app")
+            .unwrap();
+        let wt_old = s
+            .upsert_worktree(old, "feat", "/p/frantisek/app/.worktrees/feat", None)
+            .unwrap();
+        let wt_new = s
+            .upsert_worktree(new, "feat", "/p/sales-twins/app/.worktrees/feat", None)
+            .unwrap();
+        let pass = |s: &mut Store, pid: i64| {
+            s.apply_host_reconcile(HostReconcile {
+                sessions: &[live_session("dev", pid, 1)],
+                keep: &["dev".to_string()],
+                ..empty_probe("local", 1)
+            })
+            .unwrap();
+            s.get_session("dev", "local").unwrap().unwrap()
+        };
+        let r = pass(&mut s, old);
+        s.link_session_worktree(r.id, wt_old).unwrap();
+        assert_eq!(
+            pass(&mut s, old).worktree_id,
+            Some(wt_old),
+            "same project: kept"
+        );
+
+        let r = pass(&mut s, new);
+        assert_eq!(r.project_id, Some(new));
+        assert_eq!(r.worktree_id, None, "the old project's worktree is dropped");
+
+        s.link_session_worktree(r.id, wt_new).unwrap();
+        assert_eq!(pass(&mut s, new).worktree_id, Some(wt_new), "its own: kept");
+
+        // A row crossed before this fix (project moved, FK left) heals.
+        s.link_session_worktree(r.id, wt_old).unwrap();
+        assert_eq!(pass(&mut s, new).worktree_id, None, "a crossed link heals");
     }
 
     #[test]
