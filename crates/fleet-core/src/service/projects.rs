@@ -98,6 +98,28 @@ pub(crate) fn strip_root<'a>(path: &'a str, root: &str) -> Option<&'a str> {
     path.strip_prefix(root)?.strip_prefix('/')
 }
 
+#[derive(Serialize, Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars", rename = "MergeProjectParams")]
+pub struct MergeProjectArgs {
+    /// Id of the project to retire (its rows move).
+    pub from: i64,
+    /// Id of the project that keeps them.
+    pub into: i64,
+    /// Nonce from an approved `E_CONFIRM_REQUIRED`.
+    #[serde(default)]
+    pub confirm_nonce: Option<String>,
+}
+
+/// Fold project `from` into `into` (see `Store::merge_project`): for a
+/// repository that changed owner or name and was registered a second time.
+pub fn merge_project(
+    args: MergeProjectArgs,
+    store: &Mutex<Store>,
+) -> Result<crate::store::ProjectMergeReport, IpcError> {
+    let s = lock(store)?;
+    s.merge_project(args.from, args.into)
+}
+
 /// The configured `projects.layout`.
 pub fn layout(s: &Store) -> Layout {
     Layout::parse(&settings::get_string(s, settings::PROJECTS_LAYOUT))

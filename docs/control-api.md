@@ -75,7 +75,7 @@ outside the caller's reach entirely answers `E_NOTFOUND`, exactly as an id
 that does not exist.
 
 The fleet-admin tools — `provision_hosts`, `add_host`, `remove_host`,
-`merge_host`, `hide_host`, `forget_project` — are **master-token only** in either mode: a token lifted from
+`merge_host`, `hide_host`, `forget_project`, `merge_project` — are **master-token only** in either mode: a token lifted from
 one host must not be able to rotate, re-provision or remove the others.
 
 **Rotate** next to a host mints a fresh token and re-provisions that host with
@@ -404,6 +404,8 @@ Index by area (names only; see the reference for details):
   with `agent_installs`).
 - **Projects & worktrees** — `list_projects`, `refresh_projects`,
   `forget_project` (drop a row a local-less hub cannot rescan away),
+  `merge_project` (fold a repository registered twice, after it changed
+  owner or name, into one row),
   `add_project` (clone, adopt or create a repository on a host — `git` and
   `gh` run there; a per-host token acts on its own host only, and
   `create_remote` — publishing on GitHub — needs a person's approval from

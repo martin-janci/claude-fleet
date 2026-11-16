@@ -425,6 +425,7 @@ fn fleet_admin_tools_are_master_only() {
     for t in [
         "remove_host",
         "merge_host",
+        "merge_project",
         "forget_project",
         "hide_host",
         "apply_sync",

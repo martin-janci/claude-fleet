@@ -1534,7 +1534,9 @@ worktrees, sessions, usage, asset inventory, org rules and org move to the
 target); a provisioning records its content fingerprint, so an older one
 reads `provision_stale` (`fleet-hub provision --host <alias>
 --content-only` refreshes it); `forget_project` drops a project row, and
-`refresh_projects` drops rows that vanished.
+`refresh_projects` drops rows that vanished. `merge_project` /
+`fleet-hub project merge <from> <into>` folds a repository registered twice
+(it changed owner or name) into one project row.
 
 Conversation event tracking is landed end to end (migration 037
 `conversations` table; `SessionStart`/`PreCompact`/`PostCompact` hooks;

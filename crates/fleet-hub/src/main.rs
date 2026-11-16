@@ -20,6 +20,7 @@ mod out;
 mod pair;
 mod peer;
 mod person;
+mod project;
 mod provision;
 mod ready;
 mod realm;
@@ -261,6 +262,14 @@ enum Cmd {
     Host {
         #[command(subcommand)]
         cmd: host::HostCmd,
+        #[command(flatten)]
+        opts: HubOptions,
+    },
+    /// Project administration (merge a repository registered twice). Needs
+    /// a running hub.
+    Project {
+        #[command(subcommand)]
+        cmd: project::ProjectCmd,
         #[command(flatten)]
         opts: HubOptions,
     },
@@ -582,6 +591,7 @@ async fn main() -> ExitCode {
         Cmd::Tracker { cmd, opts } => tracker::run(cmd, &opts, &env).await,
         Cmd::Org { cmd, opts } => org::run(cmd, &opts, &env).await,
         Cmd::Host { cmd, opts } => host::run(cmd, &opts, &env).await,
+        Cmd::Project { cmd, opts } => project::run(cmd, &opts, &env).await,
         Cmd::Person { cmd, opts } => person::run(cmd, &opts, &env),
         Cmd::Realm { cmd, opts } => realm::run(cmd, &opts, &env),
         Cmd::Session { cmd, opts } => session::run(cmd, &opts, &env),
