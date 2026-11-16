@@ -103,6 +103,41 @@ describe('control threads', () => {
     expect([m.title, m.muted, m.unfollowed]).toEqual(['Old mission', true, null]);
   });
 
+  // 2026-11-16: Needs you 24, every row on mefistos, days-old quiet threads
+  // and a Working one among them, none saying why.
+  describe('Needs you holds what needs you now, and says why', () => {
+    const quietFor = (...ss: { id: number }[]) => new Map(ss.map((x) => [`s:${x.id}`, { state: 'quiet', muted: false }]));
+    const build = (rows: ReturnType<typeof session>[], extra: Partial<Parameters<typeof buildThreads>[0]> = {}) =>
+      buildThreads({ rows, handoffs: [], missions: [], operatorId: null, opts, since, ...extra });
+
+    it('a thread Control stopped following leaves Needs you for a failure or a block, not for a question', () => {
+      const failed = session('mefistos', 'pd-1859', { origin: 'operator', claude_status: 'failed', last_activity_at: now - 3 * 86_400 });
+      const limited = session('mefistos', 'task-480', { origin: 'operator', claude_status: 'idle', account_uuid: 'acc', last_activity_at: now - 4 * 86_400 });
+      const asking = session('mefistos', 'task-1', { origin: 'operator', claude_status: 'blocked', last_activity_at: now - 5 * 86_400 });
+      const facts = { limited_accounts: { acc: { window: 'weekly' as const, resets_at: now + 3600 } } };
+      const t = build([failed, limited, asking], { opts: { ...opts, facts }, follows: quietFor(failed, limited, asking) });
+      const g = Object.fromEntries(t.map((x) => [x.title, x.group]));
+      expect(g).toEqual({ 'pd-1859': 'earlier', 'task-480': 'earlier', 'task-1': 'needs' });
+      // Followed, the same failure and block still need you.
+      const followed = build([failed, limited], { opts: { ...opts, facts } });
+      expect(followed.map((x) => x.group)).toEqual(['needs', 'needs']);
+    });
+
+    it('a Needs you row says why it is there, not only its status', () => {
+      const facts = { down_hosts: ['mefistos'], limited_accounts: { acc: { window: 'weekly' as const, resets_at: now + 3600 } } };
+      const down = session('mefistos', 'task-573', { origin: 'operator', claude_status: 'working', last_activity_at: now - 5 });
+      const limited = session('htz', 'task-480', { origin: 'operator', claude_status: 'idle', account_uuid: 'acc', last_activity_at: now - 60 });
+      const failing = session('htz', 'ci', { origin: 'operator', claude_status: 'idle', ci_status: 'failing', last_activity_at: now - 90 });
+      const t = build([down, limited, failing], { opts: { ...opts, facts }, accountName: () => 'tech.silvester' });
+      const line = Object.fromEntries(t.map((x) => [x.title, x.line]));
+      expect(line).toEqual({
+        'task-573': 'Needs you · blocked on mefistos, which is down',
+        'task-480': 'Paused · weekly limit on tech.silvester',
+        ci: 'Failed · checks failing · htz',
+      });
+    });
+  });
+
   it('the chips filter and count: All, Needs you, Missions', () => {
     expect(threadCounts(threads)).toEqual({ all: 5, needs: 1, missions: 1 });
     expect(filterThreads(threads, 'needs').map((t) => t.title)).toEqual(['release']);

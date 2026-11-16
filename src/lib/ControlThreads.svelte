@@ -37,6 +37,7 @@
   import { leave } from './destination';
   import { sidebarView } from './work_view';
   import { mutedThreads, refreshMutes, setThreadMuted, threadFollows } from './control_journal';
+  import { accountByUuid, accountLabel } from './accounts';
 
   let { oncollapse }: { oncollapse: () => void } = $props();
 
@@ -87,6 +88,7 @@
       opts: $visibleFleet.opts,
       muted: $mutedThreads,
       follows: $threadFollows,
+      accountName: (u) => accountLabel($accountByUuid.get(u)),
     }),
   );
   const counts = $derived(threadCounts(threads));

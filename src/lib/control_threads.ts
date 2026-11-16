@@ -8,7 +8,17 @@
 // Pure: the column reads the live rows, the receipts and the missions list
 // and asks this module how to group and word them. Nothing here is inferred
 // from the transcript's text.
-import { attentionState, claudeStatusLabel, countsTowardBadge, displayName, type AttentionOptions } from './attention';
+import {
+  bucketState,
+  classify,
+  claudeStatusLabel,
+  countsTowardBadge,
+  displayName,
+  stuckKindLabel,
+  type AttentionOptions,
+  type TriageBucket,
+} from './attention';
+import { blockedLine } from './attention_facts';
 import { sessionState, workState, type ControlHandoff } from './handoffs';
 import { isFinal, WAIT_WORDS, type Mission } from './missions';
 import { missionRowLine } from './mission_room';
@@ -76,6 +86,9 @@ export interface ThreadInput {
    *  column's list (review w04-1), where `handoffs` (the chips' newest 20)
    *  only adds receipt times and names. `null` from an older hub. */
   follows?: ReadonlyMap<string, FollowMark> | null;
+  /** An account's name for a Blocked row's reason ("weekly limit on
+   *  tech.silvester"); the uuid when left out. */
+  accountName?: (uuid: string) => string;
 }
 
 /** Why a thread is no longer followed, by the journal's state. */
@@ -91,15 +104,51 @@ function unfollowedWhy(mark: FollowMark | undefined): string | null {
   return UNFOLLOWED_WORDS[mark.state] ?? mark.state;
 }
 
-function sessionGroup(s: SessionRow, opts: AttentionOptions, since: number): ThreadGroup {
-  const st = attentionState(s, opts);
-  if (countsTowardBadge(st)) return 'needs';
-  if (st === 'working') return 'working';
+/** A session's group. A reason that counts puts it in Needs you, unless
+ *  Control no longer follows the thread (it went quiet, its PR merged, it
+ *  ended): then only a session asking something right now (Action
+ *  required: a prompt, a stuck pane) stays there, and a failure or a block
+ *  on its host or account goes by what the session is doing (2026-11-16:
+ *  days-old quiet threads flooded Needs you). */
+function sessionGroup(s: SessionRow, bucket: TriageBucket, unfollowed: boolean, since: number): ThreadGroup {
+  const st = bucketState(bucket);
+  if (countsTowardBadge(st) && (!unfollowed || st === 'action_required')) return 'needs';
+  if (bucket === 'working' || s.claude_status === 'working') return 'working';
   if ((s.last_stop_at ?? 0) >= since || (s.claude_status === 'completed' && (s.last_activity_at ?? 0) >= since)) return 'done';
   return 'earlier';
 }
 
-function sessionLine(s: SessionRow): string {
+/** Why a counted bucket counts, in words: the row says what it needs, not
+ *  only its status ("Working · mefistos" under Needs you said nothing). */
+function reasonWords(s: SessionRow, bucket: TriageBucket): string | null {
+  switch (bucket) {
+    case 'waiting':
+      return 'Needs you · waiting for your answer';
+    case 'stuck': {
+      const why = stuckKindLabel(s.stuck_kind);
+      return why ? `Needs you · stuck on ${why}` : 'Needs you · stuck';
+    }
+    case 'stop_failed':
+    case 'failed':
+      return 'Failed · last turn failed';
+    case 'context_full':
+      return 'Needs you · context almost full';
+    case 'stale_working':
+      return 'Needs you · says working, no news';
+    case 'ci_failing':
+      return 'Failed · checks failing';
+    default:
+      return null;
+  }
+}
+
+function sessionLine(s: SessionRow, bucket: TriageBucket, input: ThreadInput): string {
+  if (countsTowardBadge(bucketState(bucket))) {
+    const blocked = blockedLine(bucket, s, input.opts.facts, input.accountName ?? ((u) => u));
+    if (blocked) return blocked;
+    const why = reasonWords(s, bucket);
+    if (why) return [why, s.host_alias].filter(Boolean).join(' · ');
+  }
   const status = claudeStatusLabel(s.claude_status);
   return [status, s.host_alias].filter(Boolean).join(' · ');
 }
@@ -177,18 +226,20 @@ export function buildThreads(input: ThreadInput): ControlThread[] {
     const row = byId.get(id)!;
     // A mission's worker belongs to the mission's thread, not its own.
     if (row.origin === 'mission' && row.origin_ref && missionIds.has(Number(row.origin_ref))) continue;
+    const bucket = classify(row, input.opts);
+    const unfollowed = unfollowedWhy(input.follows?.get(`s:${id}`));
     out.push({
       kind: 'session',
       key: `s:${id}`,
       id,
       row,
-      group: sessionGroup(row, input.opts, since),
+      group: sessionGroup(row, bucket, unfollowed !== null, since),
       state: sessionState(row),
       title: displayName(row, true),
-      line: sessionLine(row),
+      line: sessionLine(row, bucket, input),
       at: Math.max(row.last_activity_at ?? 0, handedAt.get(id) ?? 0, row.created_at ?? 0),
       muted: muted.has(`s:${id}`) || !!input.follows?.get(`s:${id}`)?.muted,
-      unfollowed: unfollowedWhy(input.follows?.get(`s:${id}`)),
+      unfollowed,
     });
   }
   for (const id of missionIds) {
