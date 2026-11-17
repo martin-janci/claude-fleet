@@ -250,6 +250,14 @@ one, and auto-restore), a recreate, a review and a move's start on the
 target host. An explicit workspace repair and the restart of a session with
 no project do not carry it: they relaunch the pane where and as it ran.
 
+When a session does wait at the dialog, the fix fleet offers (Needs you ›
+Problems & fixes) reads the pane first. It moves the cursor to "Yes, I trust
+this folder" when "No, exit" is the focused row, confirms with Enter only
+once the pane shows the cursor there, and sends nothing for a dialog it
+does not recognise or a session someone is attached to. It always waits for
+your approval: trusting a folder lets Claude Code read and run what is in
+it.
+
 ### Switch automatically
 
 Off by default. The owner turns it on for the fleet in Settings › Limits

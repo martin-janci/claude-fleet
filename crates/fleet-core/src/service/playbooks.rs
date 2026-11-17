@@ -271,6 +271,163 @@ pub async fn press_enter_on(
     Ok(PressEnterOutcome::Sent)
 }
 
+/// Script that prints the session's visible pane.
+pub fn capture_pane_script(tmux_name: &str) -> String {
+    format!(
+        "tmux capture-pane -p -t {}",
+        quote(&crate::tmux::exact_pane(tmux_name))
+    )
+}
+
+/// Where the row that says yes sits in a folder-trust dialog, seen from the
+/// focused row ([`trust_yes_move`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrustMove {
+    /// The focused row is the yes: Enter confirms it.
+    Stay,
+    /// The yes is the row below the focused one.
+    Down,
+    /// The yes is the row above the focused one.
+    Up,
+}
+
+/// PURE: read a captured pane as a folder-trust dialog and say how to reach
+/// its yes row. `None` for a layout this does not recognise, which sends no
+/// key at all.
+///
+/// The layouts it reads (fixtures in the tests and in `pane_intel`):
+/// Claude Code's numbered one with the yes first and focused, its current
+/// unnumbered one with `No, exit` first and focused (2.1.322 on), and
+/// Codex's `Trust and continue`. The rule is the same for all: exactly one
+/// focused row, exactly one row that says yes, and the two the same row or
+/// neighbours.
+pub fn trust_yes_move(pane: &str) -> Option<TrustMove> {
+    if !pane.to_lowercase().contains("trust") {
+        return None;
+    }
+    let rows: Vec<(bool, &str)> = pane
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(choice_row)
+        .collect();
+    let mut focused = rows.iter().enumerate().filter(|(_, r)| r.0).map(|(i, _)| i);
+    let (Some(at), None) = (focused.next(), focused.next()) else {
+        return None;
+    };
+    let mut yes = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| says_yes(r.1))
+        .map(|(i, _)| i);
+    let (Some(yes), None) = (yes.next(), yes.next()) else {
+        return None;
+    };
+    if yes == at {
+        Some(TrustMove::Stay)
+    } else if yes == at + 1 {
+        Some(TrustMove::Down)
+    } else if yes + 1 == at {
+        Some(TrustMove::Up)
+    } else {
+        None
+    }
+}
+
+/// The cursor a select dialog draws on its focused row: Claude Code's, and
+/// Codex's.
+const DIALOG_CURSORS: [char; 2] = ['❯', '›'];
+
+/// PURE: one pane row as a dialog choice: whether the cursor is on it, and
+/// its text without the cursor and the `1. ` numbering.
+fn choice_row(line: &str) -> (bool, &str) {
+    let text = line.trim();
+    let (focused, text) = match text.strip_prefix(DIALOG_CURSORS) {
+        Some(rest) => (true, rest.trim_start()),
+        None => (false, text),
+    };
+    let unnumbered = text.trim_start_matches(|c: char| c.is_ascii_digit());
+    let text = match unnumbered.strip_prefix('.') {
+        Some(rest) if unnumbered.len() < text.len() => rest.trim_start(),
+        _ => text,
+    };
+    (focused, text)
+}
+
+/// PURE: whether a choice's text is the one that trusts the folder.
+fn says_yes(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    ["yes", "trust and continue"].iter().any(|word| {
+        lower
+            .strip_prefix(word)
+            .is_some_and(|rest| !rest.starts_with(|c: char| c.is_alphanumeric()))
+    })
+}
+
+/// How long the dialog gets to redraw after an arrow key before the pane
+/// is read again.
+const TRUST_MOVE_SETTLE: std::time::Duration = std::time::Duration::from_millis(400);
+
+/// Answer the folder-trust dialog in a pane with its yes row.
+///
+/// Enter alone answers whichever row is focused, and since Claude Code
+/// 2.1.322 that row is `No, exit`: the Enter autofix used to press ended
+/// the session it was meant to free (2026-11-17). So the pane is read
+/// first ([`trust_yes_move`]); an arrow key moves the cursor when the yes
+/// is not the focused row, and Enter follows only once a second read shows
+/// the cursor on it. A layout it does not recognise gets no key at all
+/// (`E_INVALID`), and neither does a pane a person is attached to.
+pub async fn accept_trust_on(
+    ssh: &dyn crate::ssh::SshExec,
+    host_alias: &str,
+    tmux_name: &str,
+) -> Result<PressEnterOutcome, IpcError> {
+    use crate::tmux::NamedKey;
+    crate::validate::host_alias(host_alias)?;
+    crate::validate::tmux_name_addressable(tmux_name)?;
+    let timeout = std::time::Duration::from_secs(10);
+    let run = |script: String| async move {
+        let out = crate::ssh::run_shell(ssh, host_alias, &script, timeout).await?;
+        if !out.status.success() {
+            return Err(IpcError::new(
+                codes::E_TMUX,
+                String::from_utf8_lossy(&out.stderr).trim().to_string(),
+            ));
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    };
+    let attached =
+        crate::ssh::run_shell(ssh, host_alias, &attached_probe_script(tmux_name), timeout).await?;
+    if !attached.status.success() || pane_is_attached(&String::from_utf8_lossy(&attached.stdout)) {
+        return Ok(PressEnterOutcome::SkippedAttached);
+    }
+    let arrow = match trust_yes_move(&run(capture_pane_script(tmux_name)).await?) {
+        None => {
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                "fleet does not recognise the trust dialog that session shows, so nothing was \
+                 typed into it; answer it in the session",
+            ))
+        }
+        Some(TrustMove::Stay) => None,
+        Some(TrustMove::Down) => Some(NamedKey::Down),
+        Some(TrustMove::Up) => Some(NamedKey::Up),
+    };
+    if let Some(key) = arrow {
+        run(crate::tmux::send_named_key(tmux_name, key)).await?;
+        tokio::time::sleep(TRUST_MOVE_SETTLE).await;
+        let now = trust_yes_move(&run(capture_pane_script(tmux_name)).await?);
+        if now != Some(TrustMove::Stay) {
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                "the cursor did not reach the trust dialog's yes row, so nothing was confirmed; \
+                 answer it in the session",
+            ));
+        }
+    }
+    run(press_enter_script(tmux_name)).await?;
+    Ok(PressEnterOutcome::Sent)
+}
+
 #[async_trait::async_trait]
 impl PlaybookExec for RealPlaybookExec {
     async fn press_enter(
@@ -708,6 +865,180 @@ mod tests {
         let events = s.list_session_events(id, 10).unwrap();
         assert!(events.iter().any(|e| e.kind == "playbook_applied"
             && e.detail.as_deref() == Some("press_enter:press_enter:skipped:attached")));
+    }
+
+    /// Claude Code 2.1.326 (and 2.1.322, `pane_intel`'s fixture): unnumbered
+    /// rows, `No, exit` first and focused.
+    const TRUST_NO_FIRST: &str = "\
+ Accessing workspace:
+
+ /mnt/sda4/projects/papayapos-backend
+
+ Quick safety check: Is this a project you created or one you trust? (Like your own code, a well-known open source project, or work from your team).
+
+ Claude Code'll be able to read, edit, and execute files here.
+
+ Security guide
+
+ ❯ No, exit
+   Yes, I trust this folder
+
+ Enter to confirm · Esc to cancel
+";
+    /// The same dialog once Down moved the cursor.
+    const TRUST_NO_FIRST_ON_YES: &str = "\
+ Quick safety check: Is this a project you created or one you trust?
+
+   No, exit
+ ❯ Yes, I trust this folder
+
+ Enter to confirm · Esc to cancel
+";
+    /// The numbered layout, yes first and focused.
+    const TRUST_YES_FIRST: &str =
+        "Quick safety check: Is this a project you created or one you trust?\n\
+         ❯ 1. Yes, I trust this folder\n  2. No, exit\n\nEnter to confirm · Esc to cancel\n";
+    /// The oldest layout.
+    const TRUST_OLD: &str =
+        "Do you trust the files in this folder?\n ❯ 1. Yes, proceed\n   2. No\nEnter to select";
+    const TRUST_CODEX: &str = include_str!("../agent_adapter/testdata/codex/trust_folder.txt");
+
+    #[test]
+    fn the_yes_row_is_found_in_every_layout_fleet_knows() {
+        assert_eq!(trust_yes_move(TRUST_NO_FIRST), Some(TrustMove::Down));
+        assert_eq!(trust_yes_move(TRUST_NO_FIRST_ON_YES), Some(TrustMove::Stay));
+        assert_eq!(trust_yes_move(TRUST_YES_FIRST), Some(TrustMove::Stay));
+        assert_eq!(trust_yes_move(TRUST_OLD), Some(TrustMove::Stay));
+        assert_eq!(trust_yes_move(TRUST_CODEX), Some(TrustMove::Stay));
+        // A yes above the focused row.
+        assert_eq!(
+            trust_yes_move("Do you trust the files in this folder?\n   Yes, proceed\n ❯ No\n"),
+            Some(TrustMove::Up)
+        );
+        // Blank rows between the choices do not hide them.
+        assert_eq!(
+            trust_yes_move("one you trust?\n ❯ No, exit\n\n   Yes, I trust this folder\n"),
+            Some(TrustMove::Down)
+        );
+    }
+
+    #[test]
+    fn a_layout_fleet_does_not_recognise_gets_no_move() {
+        for (why, pane) in [
+            ("nothing", ""),
+            (
+                "no cursor",
+                "one you trust?\n   No, exit\n   Yes, I trust this folder\n",
+            ),
+            (
+                "two cursors",
+                "one you trust?\n ❯ No, exit\n ❯ Yes, I trust this folder\n",
+            ),
+            (
+                "no yes row",
+                "one you trust?\n ❯ No, exit\n   Maybe later\n",
+            ),
+            (
+                "two yes rows",
+                "one you trust?\n ❯ No, exit\n   Yes, I trust this folder\n   Yes, always\n",
+            ),
+            (
+                "the yes is not next to the cursor",
+                "one you trust?\n ❯ No, exit\n   Ask me later\n   Yes, I trust this folder\n",
+            ),
+            (
+                "not a trust dialog",
+                "Do you want to proceed?\n ❯ 1. Yes\n   2. No\n",
+            ),
+        ] {
+            assert_eq!(trust_yes_move(pane), None, "{why}");
+        }
+    }
+
+    /// A host whose `work-1` pane shows `first`, then `later` on every
+    /// capture after it; nobody attached.
+    fn trust_host(first: &str, later: &str) -> crate::ssh_fake::FakeSsh {
+        use crate::ssh_fake::{FakeSsh, Match, Reply};
+        let fake = FakeSsh::new();
+        fake.on(
+            Match::script(&attached_probe_script("work-1")),
+            Reply::ok("0\n"),
+        )
+        .on(
+            Match::script(&capture_pane_script("work-1")),
+            Reply::ok(later),
+        )
+        .on_host_once(
+            "h1",
+            Match::script(&capture_pane_script("work-1")),
+            Reply::ok(first),
+        );
+        fake
+    }
+
+    /// The keys sent to the pane, in order.
+    fn keys_sent(fake: &crate::ssh_fake::FakeSsh) -> Vec<String> {
+        fake.calls()
+            .iter()
+            .filter_map(|c| c.script())
+            .filter_map(|s| {
+                s.strip_prefix("tmux send-keys -t '=work-1:' ")
+                    .map(str::to_string)
+            })
+            .collect()
+    }
+
+    /// 2026-11-17: the fix pressed Enter in a dialog whose focused row was
+    /// `No, exit`, so approving it ended the session. The cursor goes to
+    /// the yes first, and Enter follows only once the pane shows it there.
+    #[tokio::test(start_paused = true)]
+    async fn a_dialog_with_no_focused_is_answered_yes_not_exited() {
+        let fake = trust_host(TRUST_NO_FIRST, TRUST_NO_FIRST_ON_YES);
+        let out = accept_trust_on(&fake, "h1", "work-1").await.unwrap();
+        assert_eq!(out, PressEnterOutcome::Sent);
+        assert_eq!(keys_sent(&fake), ["Down", "Enter"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_dialog_with_yes_focused_gets_enter_alone() {
+        for pane in [TRUST_YES_FIRST, TRUST_OLD] {
+            let fake = trust_host(pane, pane);
+            let out = accept_trust_on(&fake, "h1", "work-1").await.unwrap();
+            assert_eq!(out, PressEnterOutcome::Sent);
+            assert_eq!(keys_sent(&fake), ["Enter"]);
+        }
+    }
+
+    /// Enter is the key that can end the session, so it is never sent on a
+    /// guess: not when the cursor did not land on the yes, not for a layout
+    /// fleet cannot read, not into a pane someone is attached to.
+    #[tokio::test(start_paused = true)]
+    async fn enter_is_never_sent_unless_the_pane_shows_the_yes_focused() {
+        let stayed = trust_host(TRUST_NO_FIRST, TRUST_NO_FIRST);
+        let err = accept_trust_on(&stayed, "h1", "work-1").await.unwrap_err();
+        assert_eq!(err.code, codes::E_INVALID, "{err:?}");
+        assert_eq!(keys_sent(&stayed), ["Down"], "{}", err.message);
+
+        let gone = trust_host(TRUST_NO_FIRST, "❯ \n");
+        let err = accept_trust_on(&gone, "h1", "work-1").await.unwrap_err();
+        assert_eq!(err.code, codes::E_INVALID, "{err:?}");
+        assert_eq!(keys_sent(&gone), ["Down"]);
+
+        let odd = "one you trust?\n   No, exit\n   Yes, I trust this folder\n";
+        let unknown = trust_host(odd, odd);
+        let err = accept_trust_on(&unknown, "h1", "work-1").await.unwrap_err();
+        assert_eq!(err.code, codes::E_INVALID, "{err:?}");
+        assert!(err.message.contains("nothing was typed"), "{}", err.message);
+        assert!(keys_sent(&unknown).is_empty());
+
+        let attached = trust_host(TRUST_NO_FIRST, TRUST_NO_FIRST_ON_YES);
+        attached.on(
+            crate::ssh_fake::Match::script(&attached_probe_script("work-1")),
+            crate::ssh_fake::Reply::ok("1\n"),
+        );
+        let out = accept_trust_on(&attached, "h1", "work-1").await.unwrap();
+        assert_eq!(out, PressEnterOutcome::SkippedAttached);
+        assert!(keys_sent(&attached).is_empty());
     }
 
     #[test]

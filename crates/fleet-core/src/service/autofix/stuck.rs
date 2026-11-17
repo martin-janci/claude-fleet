@@ -5,12 +5,19 @@
 //! | kind          | fix                         | safety                                   |
 //! |---------------|-----------------------------|------------------------------------------|
 //! | reconnect     | press Enter                 | NeedsApproval                            |
-//! | trust_prompt  | press Enter (Yes, proceed)  | NeedsApproval                            |
+//! | trust_prompt  | choose the yes row          | NeedsApproval                            |
 //! | auth_menu     | none: a login on the host   | n/a                                      |
 //! | press_enter   | press Enter                 | Safe when `playbooks.press_enter` is on (the playbook runs it), else NeedsApproval |
 //! | oom           | recreate                    | Safe when `playbooks.oom_recreate` is on (the playbook runs it), else NeedsApproval |
 //!
 //! The controller is never sent keys: its findings carry no fix.
+//!
+//! `trust_prompt` is not an Enter: Enter answers the dialog's focused row,
+//! and since Claude Code 2.1.322 that row is `No, exit`, which ends the
+//! session. Its fix reads the pane and chooses the yes row, or sends
+//! nothing (`playbooks::accept_trust_on`). The plan stays `press_enter`
+//! with `stuck_kind: trust_prompt`, so a finding stored by an older build
+//! is applied the safe way too.
 //!
 //! `reconnect` is matched on a substring anywhere in the pane's tail (tool
 //! output that says "Reconnecting to db…" matches too), so its Enter is never
@@ -38,6 +45,29 @@ fn press(r: &SessionRow, kind: &str, safety: Safety, auto: bool, what: &str) -> 
         safety,
         reversible: false,
         auto,
+        plan: FixPlan::PressEnter {
+            session_id: r.id,
+            host: r.host_alias.clone(),
+            tmux_name: r.tmux_name.clone(),
+            stuck_kind: kind.to_string(),
+        },
+    }
+}
+
+/// The `trust_prompt` fix: the keys that choose the dialog's yes row.
+fn accept_trust(r: &SessionRow, kind: &str) -> Fix {
+    Fix {
+        summary: format!("Answer the trust dialog in {}", name(r)),
+        changes: vec![format!(
+            "Reads the session's pane on {}, moves the cursor to \"Yes, I trust this folder\" \
+             when \"No, exit\" is the focused row, and presses Enter only once the pane shows \
+             the cursor on the yes. It sends nothing when it does not recognise the dialog, or \
+             when someone is attached to the session.",
+            r.host_alias
+        )],
+        safety: Safety::NeedsApproval,
+        reversible: false,
+        auto: false,
         plan: FixPlan::PressEnter {
             session_id: r.id,
             host: r.host_alias.clone(),
@@ -102,17 +132,12 @@ pub fn scan(cx: &ScanCx) -> Vec<Finding> {
                 Severity::Blocking,
                 format!("{n} asks whether to trust its folder"),
                 "Claude Code will not work in a folder until someone says it trusts the files \
-                     there, so the session waits. The fix answers \"Yes, proceed\" (the \
-                     preselected choice) for you. That lets Claude Code read and run what is in \
-                     that folder, so it waits for you."
+                     there, so the session waits. The fix chooses \"Yes, I trust this folder\" \
+                     for you; Enter alone would not do, since the dialog's focused row is \
+                     \"No, exit\", which ends the session. Trusting lets Claude Code read and \
+                     run what is in that folder, so it waits for you."
                     .to_string(),
-                Some(press(
-                    r,
-                    kind,
-                    Safety::NeedsApproval,
-                    false,
-                    "it accepts the preselected \"Yes, proceed\".",
-                )),
+                Some(accept_trust(r, kind)),
                 None,
             ),
             "auth_menu" => (
@@ -289,6 +314,25 @@ mod tests {
         let fix = f.body.fix.unwrap();
         assert_eq!((fix.safety, fix.auto), (Safety::NeedsApproval, false));
         assert_eq!(fix.plan, press(&c.sessions[0], "trust_prompt"));
+        // 2026-11-17: the text promised a preselected "Yes, proceed" that
+        // Claude Code 2.1.326 no longer has (its focused row is `No, exit`,
+        // so the Enter it described ended the session). It says what the
+        // fix really does: choose the yes row, or send nothing.
+        let said = format!(
+            "{}\n{}\n{}",
+            f.body.explanation,
+            fix.summary,
+            fix.changes.join("\n")
+        );
+        assert!(!said.contains("preselected"), "{said}");
+        assert!(!fix.summary.contains("Press Enter"), "{}", fix.summary);
+        assert!(said.contains("Yes, I trust this folder"), "{said}");
+        assert!(said.contains("No, exit"), "{said}");
+        assert!(
+            said.contains("sends nothing"),
+            "says what happens with a dialog it cannot read: {said}"
+        );
+        assert!(said.contains("attached"), "{said}");
     }
 
     #[test]
