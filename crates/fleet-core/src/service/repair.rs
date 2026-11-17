@@ -2418,22 +2418,16 @@ fn seed_for_session(s: &Store, row: &SessionRow) -> Result<SpecSeed, IpcError> {
             .filter(|w| w.project_id == pid)
             .collect()
     };
-    // The FK wins; otherwise the portable key (set by reconcile).
+    // The FK wins; otherwise the portable key (set by reconcile). A FK naming
+    // a worktree of ANOTHER project is stale, not authoritative: reconcile
+    // moved the row to the project its cwd now maps to (a repo that changed
+    // owner is registered anew) before it learned to drop the link. It says
+    // nothing about this project's checkout, so it is ignored and the key
+    // decides; a write below relinks the row to this project's worktree.
     let wt_row = match row.worktree_id {
-        Some(wid) => s.get_worktree_row(wid)?,
+        Some(wid) => s.get_worktree_row(wid)?.filter(|wt| wt.project_id == pid),
         None => None,
     };
-    if let Some(ref wt) = wt_row {
-        if wt.project_id != pid {
-            return Err(IpcError::new(
-                codes::E_INVALID_STATE,
-                format!(
-                    "session {} points at worktree {} of project {}, but belongs to project {}",
-                    row.id, wt.id, wt.project_id, pid
-                ),
-            ));
-        }
-    }
     let name = wt_row
         .as_ref()
         .map(|w| w.name.clone())
@@ -3734,6 +3728,42 @@ mod tests {
         assert_eq!(root, "/srv/git/o/r");
     }
 
+    /// A worktree FK of ANOTHER project (left behind when reconcile moved the
+    /// row to the project its cwd now maps to) is stale: the seed ignores it
+    /// and the key decides, instead of refusing the restart / login switch.
+    #[test]
+    fn a_seed_ignores_a_worktree_link_of_another_project() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("vps").unwrap();
+        let old = s
+            .upsert_project("frantisek", "app", "/p/frantisek/app")
+            .unwrap();
+        let new = s
+            .upsert_project("sales-twins", "app", "/p/sales-twins/app")
+            .unwrap();
+        let wt = s
+            .upsert_worktree(
+                old,
+                "old-name",
+                "/p/frantisek/app/.worktrees/old-name",
+                None,
+            )
+            .unwrap();
+        let sid = s
+            .upsert_session("dev", "vps", Some(new), Some(wt), 1, 1, "running", None)
+            .unwrap();
+        s.set_worktree_key(sid, Some("feat")).unwrap();
+        let row = s.get_session_by_id(sid).unwrap().unwrap();
+        let seed = seed_for_session(&s, &row).unwrap();
+        assert_eq!(
+            (seed.owner.as_str(), seed.repo.as_str()),
+            ("sales-twins", "app")
+        );
+        let (name, path, _) = seed.worktree.expect("the key names a worktree");
+        assert_eq!(name, "feat", "the key decides, not the other project's row");
+        assert_eq!(path, None);
+    }
+
     /// Store with one project + worktree row + running session; returns
     /// `(store, session_id, project_id)`.
     fn seeded_store(wt_path: &str) -> (Mutex<Store>, i64, i64) {
@@ -4519,7 +4549,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn spec_for_session_refuses_orphans_bg_and_cross_project_rows() {
+    async fn spec_for_session_refuses_orphans_and_bg_and_ignores_a_cross_project_link() {
         let s = Store::open_in_memory().unwrap();
         s.upsert_host("local").unwrap();
         let orphan = s
@@ -4565,13 +4595,13 @@ mod tests {
             spec_for_session(&store, &ssh, ext).await.unwrap_err().code,
             codes::E_BG_SESSION
         );
-        assert_eq!(
-            spec_for_session(&store, &ssh, cross)
-                .await
-                .unwrap_err()
-                .code,
-            codes::E_INVALID_STATE
-        );
+        // A worktree link of another project is stale (reconcile moved the
+        // row), not a reason to refuse: the spec is the row's own project,
+        // and nothing of the other project's checkout leaks into it.
+        let (spec, _) = spec_for_session(&store, &ssh, cross).await.unwrap();
+        assert_eq!(spec.project_id, Some(pa));
+        assert_eq!(spec.project_root, "/a");
+        assert!(spec.worktree.is_none(), "no key, and b's row is not a's");
         assert_eq!(
             spec_for_session(&store, &ssh, 999).await.unwrap_err().code,
             codes::E_NOTFOUND
