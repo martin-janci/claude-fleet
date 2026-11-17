@@ -3461,6 +3461,20 @@ Code writes is refused (`E_PROVISION`) before anything is written — that
 refusal ends the birth with no token committed and no session started, and
 the next press retries.
 
+The dialog is decided per login. A session under a login profile runs with
+`CLAUDE_CONFIG_DIR` at `~/.claude-profiles/<name>` and reads that directory's
+own `.claude.json`, not the host's. So the birth records the same answer in
+the config of every profile the host has, and an account switch records it
+for the login it is about to restart Control under. A profile's file that
+cannot be merged is logged and skipped: only the host's own stops the birth.
+
+A birth mints a new token, which revokes the one a running Control holds.
+When the new session does not start and the running Control is on another
+host, it gets its token back: a failed move costs it nothing. A home that
+still has a session under Control's name (left there when that host stopped
+answering) has it relaunched on the new token; `new_session` would refuse the
+name with `E_EXISTS`.
+
 ## Asset catalog
 
 The asset catalog — skills, agents, hooks, MCP servers and plugin refs that

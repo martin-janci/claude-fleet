@@ -228,6 +228,57 @@ impl Store {
         })
     }
 
+    /// Undo a replacement of the live token named `name`: revoke the live
+    /// row (the replacement) and make `displaced` live again, in one
+    /// transaction. For a caller that replaced a token and could not put
+    /// the new one to use (`service::operator::ensure_operator_with`);
+    /// `displaced` is the row that caller's own
+    /// [`Self::revoke_client_token`] returned. `E_NOTFOUND` when `displaced`
+    /// is not a revoked row of that name, and then nothing changes.
+    ///
+    /// Both updates move `revoked_at`, so the auth epoch moves with them
+    /// (migration 060) and the next request sees the result.
+    pub(crate) fn reinstate_client_token(
+        &self,
+        name: &str,
+        displaced: i64,
+    ) -> Result<ClientTokenRow, crate::ipc_error::IpcError> {
+        let name = name.trim();
+        let tx = self.conn.unchecked_transaction()?;
+        let live: Option<i64> = tx
+            .query_row(
+                "SELECT id FROM client_tokens WHERE name = ?1 AND revoked_at IS NULL",
+                rusqlite::params![name],
+                |row| row.get(0),
+            )
+            .optional()?;
+        // `displaced` already live is refused before the revoke: revoking it
+        // would make it match the update below, so the call would pass and
+        // cost that client its update state for nothing.
+        if let Some(id) = live.filter(|id| *id != displaced) {
+            revoke_client_token_row(&tx, id, now_unix())?;
+        }
+        let n = tx.execute(
+            "UPDATE client_tokens SET revoked_at = NULL \
+             WHERE id = ?1 AND name = ?2 AND revoked_at IS NOT NULL",
+            rusqlite::params![displaced, name],
+        )?;
+        if n == 0 {
+            // Dropping `tx` rolls the revoke above back.
+            return Err(crate::ipc_error::IpcError::new(
+                codes::E_NOTFOUND,
+                format!("no revoked client token {displaced} named '{name}'"),
+            ));
+        }
+        tx.commit()?;
+        get_client_token_by_id(&self.conn, displaced)?.ok_or_else(|| {
+            crate::ipc_error::IpcError::new(
+                codes::E_INTERNAL,
+                format!("client token {displaced} vanished right after it was reinstated"),
+            )
+        })
+    }
+
     /// Update `last_seen_at` to `now`, but only when the stored value is
     /// unset or more than 60 seconds stale — avoids a write on every request.
     pub fn touch_client_token(&self, id: i64, now: i64) -> Result<(), crate::ipc_error::IpcError> {
@@ -1199,6 +1250,33 @@ mod tests {
         let s = store();
         let e = s.revoke_client_token("nope").unwrap_err();
         assert_eq!(e.code, crate::ipc_error::codes::E_NOTFOUND);
+    }
+
+    #[test]
+    fn a_replaced_token_is_reinstated_and_its_replacement_revoked() {
+        let s = store();
+        s.insert_client_token("ux-agent", "aa11", "full").unwrap();
+        let old = s.revoke_client_token("ux-agent").unwrap();
+        s.insert_client_token("ux-agent", "bb22", "full").unwrap();
+
+        let back = s.reinstate_client_token("ux-agent", old.id).unwrap();
+        assert_eq!(back.token_sha256, "aa11");
+        assert!(back.revoked_at.is_none());
+        let active = s.active_client_tokens().unwrap();
+        assert_eq!(active.len(), 1, "the replacement is revoked");
+        assert_eq!(active[0].id, old.id);
+
+        // Not a way to revive some other row: a live row, another name's
+        // row and an unknown id are refused, and the live token stays.
+        let e = s.reinstate_client_token("ux-agent", old.id).unwrap_err();
+        assert_eq!(e.code, crate::ipc_error::codes::E_NOTFOUND);
+        s.insert_client_token("phone", "cc33", "full").unwrap();
+        let phone = s.revoke_client_token("phone").unwrap();
+        let e = s.reinstate_client_token("ux-agent", phone.id).unwrap_err();
+        assert_eq!(e.code, crate::ipc_error::codes::E_NOTFOUND);
+        let active = s.active_client_tokens().unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].id, old.id, "a refused call revokes nothing");
     }
 
     #[test]
