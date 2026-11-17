@@ -43,6 +43,18 @@ ignore = [
   # RUSTSEC-2026-0429: extract() aborts on a symlink entry declaring a huge
   # size; same path and same signed-archive reasoning as above, fixed in zip 9.
   "RUSTSEC-2026-0429",
+  # RUSTSEC-2026-0545 (AES entries not authenticated when truncated) and
+  # RUSTSEC-2026-0548 (ZipStreamReader trusts local-header names): same zip 4.x,
+  # same sole path as above. The updater opens the archive with ZipArchive, never
+  # ZipStreamReader, and builds zip without `aes-crypto`; the archive is our own,
+  # minisign-verified. updater 2.14.1 takes zip 9 but drags in a tauri/wry bump,
+  # which is its own change: drop these four zip entries with it.
+  "RUSTSEC-2026-0545",
+  "RUSTSEC-2026-0548",
+  # RUSTSEC-2026-0543: chrono marked unmaintained (no fixed release, ever).
+  # Our only path is rmcp (and schemars 1 under it); fleet-core does not
+  # depend on chrono itself. Drop it when rmcp moves off chrono.
+  "RUSTSEC-2026-0543",
   # zbus_names / zvariant / zvariant_derive: marked unmaintained 2026-10, with
   # no replacement release. Our only path is zbus <- tauri-plugin-opener on
   # Linux (D-Bus to open URLs and files). Drop these when the opener moves off
