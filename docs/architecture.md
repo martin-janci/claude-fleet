@@ -473,7 +473,9 @@ bullet for the area you are about to change.
   bearer on the host, into an in-memory cache the scan reads; the fix is
   `provision::rewrite_mcp_entry` with the stored host token) and `stuck.*`
   (keystrokes through `playbooks::press_enter_on`, re-checked under the
-  guard; never the controller). `service/autofix/api.rs` is the one shape
+  guard; never the controller; the folder-trust dialog through
+  `playbooks::accept_trust_on`, which reads the pane and confirms only with
+  the cursor on the yes row). `service/autofix/api.rs` is the one shape
   the tool and the desktop commands (`autofix_findings`, `autofix_apply`,
   `autofix_dismiss`, routed to `autofix`) return. Surfaces: `FixCard.svelte`
   (Needs you's "Problems & fixes", the `fix` chat block via

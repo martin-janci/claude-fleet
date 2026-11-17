@@ -200,6 +200,14 @@ pub trait FixExec: Send + Sync {
     async fn rewrite_mcp_entry(&self, host: &str) -> Result<(), IpcError>;
     async fn press_enter(&self, host: &str, tmux_name: &str)
         -> Result<PressEnterOutcome, IpcError>;
+    /// Answer the folder-trust dialog in the pane with its yes row
+    /// (`playbooks::accept_trust_on`): never a bare Enter, which answers
+    /// whichever row is focused.
+    async fn accept_trust(
+        &self,
+        host: &str,
+        tmux_name: &str,
+    ) -> Result<PressEnterOutcome, IpcError>;
     async fn recreate(&self, session_id: i64) -> Result<(), IpcError>;
 }
 
@@ -304,6 +312,14 @@ impl FixExec for SshFixExec<'_> {
         tmux_name: &str,
     ) -> Result<PressEnterOutcome, IpcError> {
         crate::service::playbooks::press_enter_on(self.ssh.as_ref(), host, tmux_name).await
+    }
+
+    async fn accept_trust(
+        &self,
+        host: &str,
+        tmux_name: &str,
+    ) -> Result<PressEnterOutcome, IpcError> {
+        crate::service::playbooks::accept_trust_on(self.ssh.as_ref(), host, tmux_name).await
     }
 
     async fn recreate(&self, session_id: i64) -> Result<(), IpcError> {
@@ -441,7 +457,16 @@ async fn execute(store: &Mutex<Store>, exec: &dyn FixExec, plan: &FixPlan) -> Re
                     ),
                 ));
             }
-            match exec.press_enter(&row.host_alias, &row.tmux_name).await? {
+            // Enter alone answers the trust dialog's FOCUSED row, which is
+            // `No, exit` on a current Claude Code: that fix reads the pane
+            // and chooses the yes row (a plan stored before this build is
+            // the same `press_enter`, so it takes this path too).
+            let sent = if stuck_kind == "trust_prompt" {
+                exec.accept_trust(&row.host_alias, &row.tmux_name).await?
+            } else {
+                exec.press_enter(&row.host_alias, &row.tmux_name).await?
+            };
+            match sent {
                 PressEnterOutcome::Sent => Ok(()),
                 PressEnterOutcome::SkippedAttached => Err(IpcError::new(
                     codes::E_INVALID,
@@ -715,6 +740,7 @@ mod tests {
         updates: AtomicUsize,
         rewrites: AtomicUsize,
         presses: AtomicUsize,
+        trusts: AtomicUsize,
         recreates: AtomicUsize,
         attached: bool,
         fail: bool,
@@ -743,6 +769,18 @@ mod tests {
             _tmux: &str,
         ) -> Result<PressEnterOutcome, IpcError> {
             self.presses.fetch_add(1, Ordering::SeqCst);
+            Ok(if self.attached {
+                PressEnterOutcome::SkippedAttached
+            } else {
+                PressEnterOutcome::Sent
+            })
+        }
+        async fn accept_trust(
+            &self,
+            _host: &str,
+            _tmux: &str,
+        ) -> Result<PressEnterOutcome, IpcError> {
+            self.trusts.fetch_add(1, Ordering::SeqCst);
             Ok(if self.attached {
                 PressEnterOutcome::SkippedAttached
             } else {
@@ -978,8 +1016,13 @@ mod tests {
         assert_eq!(row.state, "cleared");
     }
 
+    /// 2026-11-17: Enter in the trust dialog answers its focused row, and
+    /// Claude Code 2.1.326 focuses `No, exit`. A trust fix (one stored
+    /// before this build too: its plan is the same `press_enter`) goes
+    /// through the executor that reads the pane, and never presses a bare
+    /// Enter.
     #[tokio::test]
-    async fn a_trust_prompt_still_showing_after_enter_stays_verifying() {
+    async fn a_trust_prompt_is_answered_through_the_pane_reader_never_a_bare_enter() {
         let (store, id, _) = stuck_seed("trust_prompt", press_plan("trust_prompt"));
         let exec = FakeExec::default();
         let row = apply_with(&store, &exec, id, &test_actor(), 20, false, &|_| {
@@ -987,7 +1030,9 @@ mod tests {
         })
         .await
         .unwrap();
-        assert_eq!(exec.presses.load(Ordering::SeqCst), 1);
+        assert_eq!(exec.presses.load(Ordering::SeqCst), 0, "no bare Enter");
+        assert_eq!(exec.trusts.load(Ordering::SeqCst), 1);
+        // Still showing after the answer: it stays `verifying`.
         assert_eq!(row.state, "verifying");
     }
 
@@ -1490,6 +1535,13 @@ mod tests {
             Ok(())
         }
         async fn press_enter(
+            &self,
+            _host: &str,
+            _tmux: &str,
+        ) -> Result<PressEnterOutcome, IpcError> {
+            Ok(PressEnterOutcome::Sent)
+        }
+        async fn accept_trust(
             &self,
             _host: &str,
             _tmux: &str,

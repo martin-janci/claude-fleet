@@ -1424,6 +1424,18 @@ pub(super) async fn new_session_inner(
     };
 
     progress.advance(StartStep::Tmux);
+    // The login this pane starts under may never have run in this folder:
+    // the trust the host already has for it goes along, or the session
+    // stops at Claude Code's trust dialog (`service::folder_trust`).
+    // Nothing is asked of the host for a start under its own login.
+    crate::service::folder_trust::carry_for_launch(
+        ssh.as_ref(),
+        &args.host_alias,
+        &path.to_string_lossy(),
+        None,
+        args.profile.as_deref(),
+    )
+    .await;
     let tmux = exec_for(&args.host_alias, ssh);
     // An ended session of this name may have left terminals running unseen
     // (review w27-8): close them, or this session's strip shows them.
@@ -2475,6 +2487,9 @@ pub async fn restart_session(
     // the controller under the same lock and refuse to restart ourselves
     // unless forced ([`restart_guard`], which exempts the operator).
     let was_killed;
+    // The login the pane runs under now: the config a switch leaves, which
+    // may hold the folder's trust (`service::folder_trust`).
+    let leaving: Option<String>;
     let (kind, agent, claude_id, session_id, project_id, launch, gone_cwd) = {
         let s = lock(store)?;
         restart_guard(&s, &args.host_alias, &args.name, args.force)?;
@@ -2524,6 +2539,7 @@ pub async fn restart_session(
                 // row naming a login the pane never ran under. A model or
                 // effort switch is stored the same way, after the relaunch.
                 let mut launch = stored_launch(&s, r.id)?;
+                leaving = launch.profile.clone();
                 if let Some(profile) = switch.as_ref() {
                     launch.profile = profile.clone();
                 }
@@ -2573,15 +2589,18 @@ pub async fn restart_session(
             // person; attributing the session to whoever pressed the button
             // would be a guess, and `unclaimed` is the defined answer for a
             // row nobody can speak for (spec §4.3).
-            None => (
-                "work".to_string(),
-                crate::store::AGENT_CLAUDE.to_string(),
-                None,
-                None,
-                None,
-                Default::default(),
-                gone_cwd,
-            ),
+            None => {
+                leaving = None;
+                (
+                    "work".to_string(),
+                    crate::store::AGENT_CLAUDE.to_string(),
+                    None,
+                    None,
+                    None,
+                    Default::default(),
+                    gone_cwd,
+                )
+            }
         }
     };
     // Control reads its CLAUDE.md, commands and skill as it starts: a
@@ -2661,6 +2680,23 @@ pub async fn restart_session(
             },
             None => None,
         };
+        // A login switch lands the session on a config that may never have
+        // seen this folder (2026-11-17: 24 sessions relaunched under a new
+        // profile, each stopped at the trust dialog for hours). The trust
+        // the login it leaves, or the host itself, already has goes with
+        // it, before the pane starts. A row with nothing to repair has no
+        // directory fleet knows, and is relaunched where it ran.
+        let runs_claude = agent == crate::store::AGENT_CLAUDE && kind != "shell";
+        if let Some(rep) = repaired.as_ref().filter(|_| runs_claude) {
+            crate::service::folder_trust::carry_for_launch(
+                ssh.as_ref(),
+                &args.host_alias,
+                &rep.cwd,
+                leaving.as_deref(),
+                launch.profile.as_deref(),
+            )
+            .await;
+        }
         match repaired {
             Some(rep) if !rep.tmux_alive => {
                 tmux.new_session(&args.name, std::path::Path::new(&rep.cwd), &pane_cmd)
@@ -3058,7 +3094,7 @@ pub async fn recreate_session(
     // inputs — all under one brief lock, before any tmux/ssh call. For remote
     // hosts the cwd is finalized off-lock (needs `ssh.remote_home`), because the
     // local DB path is meaningless on the other machine.
-    let (sess, cwd_src, pane_cmd) = {
+    let (sess, cwd_src, pane_cmd, login) = {
         let s = lock(store)?;
         let sess = s
             .get_session_by_id(args.session_id)?
@@ -3106,7 +3142,7 @@ pub async fn recreate_session(
             &sess.tmux_name,
             &launch,
         );
-        (sess, cwd_src, pane_cmd)
+        (sess, cwd_src, pane_cmd, launch.profile)
     };
     // Off the lock: `prepare` locks and awaits. Before any workspace or tmux
     // step, so an unresolved variable refuses with the session untouched.
@@ -3135,6 +3171,18 @@ pub async fn recreate_session(
         Err(e) => return Err(e),
     };
 
+    // As a start and a restart: the folder's trust goes with the pane to the
+    // login it is rebuilt under (`service::folder_trust`).
+    if sess.agent == crate::store::AGENT_CLAUDE && sess.kind != "shell" {
+        crate::service::folder_trust::carry_for_launch(
+            ssh.as_ref(),
+            &sess.host_alias,
+            &cwd,
+            None,
+            login.as_deref(),
+        )
+        .await;
+    }
     let tmux = exec_for(&sess.host_alias, ssh);
     // Tear down any live session first (frees the old process tree / wedged
     // session). A ghost has no live session, so tolerate "no such session":

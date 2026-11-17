@@ -3444,6 +3444,16 @@ left to take it answers `no_host` (the home is not in the fleet) or
 `host_down` with no fallback (it is there, and down), and `ensure_operator`
 refuses with `E_NOTFOUND` / `E_HOST_OFFLINE` before minting anything.
 
+Claude Code records a folder's trust per login: a session under a login
+profile reads `~/.claude-profiles/<name>/.claude.json`, not the host's
+`~/.claude.json`. For a work session fleet never gives that answer, it only
+carries one the host already has: before a pane starts under a login, the
+folder's trusted path (the folder or its nearest trusted parent) is copied
+from the config of the login the session leaves, or from the host's own,
+into the config of the login it is about to run under. A folder no config on
+the host trusts is left alone, and its dialog is the person's. See
+[accounts.md](accounts.md) → *Folder trust follows the login*.
+
 The birth also answers Claude Code's workspace trust dialog for the operator
 directory. On a fresh host Claude Code stops at "Is this a project you
 created or one you trust?" before it reads `CLAUDE.md`, and the fleet would

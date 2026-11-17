@@ -63,6 +63,9 @@ pub enum FixPlan {
     /// Press Enter in a stuck session's pane, through the playbook
     /// executor (which skips a pane a person is attached to). Refused for
     /// the controller, and when the session no longer shows `stuck_kind`.
+    /// For `trust_prompt` it is not a bare Enter (that answers the focused
+    /// row, `No, exit` on a current Claude Code): the pane is read and the
+    /// yes row chosen (`playbooks::accept_trust_on`).
     PressEnter {
         session_id: i64,
         host: String,

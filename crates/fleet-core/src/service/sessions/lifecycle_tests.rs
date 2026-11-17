@@ -480,6 +480,84 @@ fn every_path_that_creates_a_tmux_session_forgets_the_kill_first() {
     }
 }
 
+/// 2026-11-17, mefistos: an account switch relaunched 24 sessions under a
+/// login profile minutes old, whose own config trusted no folder, and each
+/// stopped at Claude Code's folder-trust dialog for hours although the host
+/// trusted the checkout. Every path that starts a Claude pane carries the
+/// folder's trust to the login the pane is about to run under
+/// (`service::folder_trust`), BEFORE tmux starts it: the dialog is drawn as
+/// `claude` starts, so trust written afterwards is too late. Pinned in the
+/// source for the reason above: these paths have no tmux seam.
+#[test]
+fn every_path_that_starts_a_claude_pane_carries_the_folders_trust_first() {
+    const LIFECYCLE: &str = include_str!("lifecycle.rs");
+    const REVIEW: &str = include_str!("review.rs");
+    const MOVE: &str = include_str!("../move_session/mod.rs");
+    const CARRY: &str = "folder_trust::carry_for_launch(";
+    // (what, source, signature, every tmux start that has a directory)
+    let sites: [(&str, &str, &str, &[&str]); 5] = [
+        (
+            "new_session_inner",
+            LIFECYCLE,
+            "pub(super) async fn new_session_inner(",
+            &["tmux.new_session(&args.name, &path, &pane_cmd)"],
+        ),
+        (
+            "restart_session",
+            LIFECYCLE,
+            "pub async fn restart_session(",
+            &[
+                "tmux.new_session(&args.name, std::path::Path::new(&rep.cwd)",
+                "tmux.respawn_pane_in(&args.name",
+            ],
+        ),
+        (
+            "recreate_session",
+            LIFECYCLE,
+            "pub async fn recreate_session(",
+            &["tmux.new_session(&sess.tmux_name"],
+        ),
+        (
+            "spawn_review",
+            REVIEW,
+            "pub async fn spawn_review(",
+            &["tmux.new_session("],
+        ),
+        (
+            "move_session_inner (the target host)",
+            MOVE,
+            "async fn move_session_inner(",
+            &[".start_target("],
+        ),
+    ];
+    for (what, source, signature, starts) in sites {
+        let body = item_source(source, signature);
+        let carry = body.find(CARRY).unwrap_or_else(|| {
+            panic!(
+                "{what} no longer calls {CARRY}…): a session it starts under another login \
+                 stops at the folder-trust dialog"
+            )
+        });
+        for marker in starts {
+            let start = body
+                .find(marker)
+                .unwrap_or_else(|| panic!("{what}: `{marker}` is gone — update this test"));
+            assert!(
+                carry < start,
+                "{what}: the trust is carried BEFORE `{marker}` — `claude` draws the dialog \
+                 as it starts"
+            );
+        }
+    }
+    // A restart is the path a login SWITCH takes, so it says which login
+    // the session is leaving: that config is asked for the trust too.
+    let restart = item_source(LIFECYCLE, "pub async fn restart_session(");
+    assert!(
+        restart.contains("leaving.as_deref()"),
+        "restart_session hands the login the session is leaving to the carry"
+    );
+}
+
 /// **An ordinary create still gets its owner** (multi-user M1, T5's review).
 ///
 /// With the name-keyed intent deleted, the reconcile upsert inserts
