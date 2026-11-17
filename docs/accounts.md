@@ -505,6 +505,13 @@ started on another host under the best login there (the host-down move: its
 conversation stays behind). It gets a `[fleet]` note either way, and the
 switch is on its timeline. Tried at most every 30 minutes.
 
+A start on another host mints a new token for Control, which revokes the one
+the running Control holds. When the session there does not start, the running
+Control gets its token back, so a failed move costs it nothing. A host that
+still has an earlier Control session (it was left there when its host stopped
+answering) relaunches that session on the new token, where `new_session` would
+refuse its name.
+
 ### Accounts and usage
 
 A session under a profile is attributed to its profile's account, never the

@@ -747,13 +747,112 @@ pub(crate) trait OperatorHost: Send + Sync {
         mcp_json: &str,
     ) -> Result<(), IpcError>;
 
-    /// Record `dir` as trusted in `host`'s `~/.claude.json` and pre-approve
-    /// the `.mcp.json` server in it — [`pre_trust_claude_json`] applied
-    /// read-merge-write to the file on the host, never truncating it.
+    /// Record `dir` as trusted on `host` and pre-approve the `.mcp.json`
+    /// server in it — [`pre_trust_claude_json`] applied read-merge-write,
+    /// never truncating a file — in the config of every login Control can
+    /// run under there ([`trust_files`]).
     async fn pre_trust(&self, host: &str, dir: &str) -> Result<(), IpcError>;
 
     /// Start the operator's session on `host` and return its row.
-    async fn start_session(&self, host: &str, project_id: i64) -> Result<SessionRow, IpcError>;
+    async fn start_session(
+        &self,
+        host: &str,
+        project_id: i64,
+        how: Start,
+    ) -> Result<SessionRow, IpcError>;
+}
+
+/// How a birth starts Control's session on its home.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Start {
+    /// No session of that name there: an ordinary `new_session`.
+    New,
+    /// The home still has a session under Control's name: one a start on
+    /// another host left behind when this host stopped answering.
+    /// `new_session` refuses its name (`E_EXISTS`), so it is relaunched on
+    /// the files the birth just wrote, and its conversation there resumes.
+    TakeOver,
+}
+
+/// PURE: the `(directory, file)` pairs of every Claude config that decides
+/// the workspace trust dialog for a session on a host with `profiles`: the
+/// host's own `~/.claude.json`, and each login profile's
+/// `~/.claude-profiles/<name>/.claude.json`. A session under a profile runs
+/// with `CLAUDE_CONFIG_DIR` at its directory (`tmux::PROFILE_LINKS`) and
+/// reads that file, not the host's: a birth that trusted only the host's
+/// own left Control at the dialog under every other login (2026-11-17,
+/// `stuck_kind: trust_prompt` on a Control started under a profile). A name
+/// that is not a profile name (`validate::claude_profile`) is left out: it
+/// never reaches a path.
+pub(crate) fn trust_files(profiles: &[String]) -> Vec<(String, String)> {
+    use crate::service::provision::{CLAUDE_DIR, CLAUDE_JSON};
+    let mut out = vec![(CLAUDE_DIR.to_string(), CLAUDE_JSON.to_string())];
+    for p in profiles {
+        if crate::validate::claude_profile(p).is_err() {
+            continue;
+        }
+        let dir = format!("~/.claude-profiles/{p}");
+        let file = format!("{dir}/.claude.json");
+        if !out.iter().any(|(_, f)| *f == file) {
+            out.push((dir, file));
+        }
+    }
+    out
+}
+
+/// Trust `dir` in one Claude config `file` on `host`: read, merge
+/// ([`pre_trust_claude_json`], which keeps everything else in it), back up,
+/// write. The parse error fires before any write, and the file carries a
+/// login (and, the host's own, its bearer token from provisioning), so it
+/// goes through the secret path: 0600, and renamed onto the target rather
+/// than truncated.
+async fn pre_trust_file(
+    ssh: &dyn crate::ssh::SshExec,
+    host: &str,
+    config_dir: &str,
+    file: &str,
+    dir: &str,
+) -> Result<(), IpcError> {
+    use crate::service::provision::{read_host_file, write_host_file_secret};
+    let existing = read_host_file(ssh, host, file).await?;
+    let merged = pre_trust_claude_json(&existing, dir)?;
+    if merged == existing {
+        return Ok(());
+    }
+    if !existing.trim().is_empty() {
+        write_host_file_secret(
+            ssh,
+            host,
+            config_dir,
+            &format!("{file}.fleet-bak"),
+            &existing,
+        )
+        .await?;
+    }
+    write_host_file_secret(ssh, host, config_dir, file, &merged).await
+}
+
+/// Trust Control's directory on `host` for the login `profile` before a
+/// restart puts it under that login (`operator_account`'s switch): a
+/// profile added since the birth has no entry yet. Best-effort, as
+/// [`refresh_if_operator`] is: a failed write leaves the dialog for
+/// fleet's playbook, and never stops the switch.
+pub async fn pre_trust_profile(ssh: &dyn crate::ssh::SshExec, host: &str, profile: &str) {
+    let files = trust_files(&[profile.to_string()]);
+    let Some((config_dir, file)) = files.get(1) else {
+        return;
+    };
+    let done = match operator_dir_on(host, ssh).await {
+        Ok(dir) => pre_trust_file(ssh, host, config_dir, file, &dir).await,
+        Err(e) => Err(e),
+    };
+    if let Err(e) = done {
+        tracing::warn!(
+            host,
+            profile,
+            "[operator] its directory was not trusted for this login: {e}"
+        );
+    }
 }
 
 /// The live host side: the provisioning helpers and the ordinary session
@@ -807,31 +906,51 @@ impl OperatorHost for LiveHost {
     }
 
     async fn pre_trust(&self, host: &str, dir: &str) -> Result<(), IpcError> {
-        use crate::service::provision::{
-            read_host_file, write_host_file_secret, CLAUDE_DIR, CLAUDE_JSON,
-        };
         // The same read → merge (preserve siblings) → back up → write that
-        // `provision_one` does on this file for `mcpServers`. The parse
-        // error fires before any write, and the file carries the host's
-        // own bearer token from provisioning, so it goes through the secret
-        // path: 0600, and renamed onto the target rather than truncated.
-        let ssh = self.ssh.as_ref();
-        let existing = read_host_file(ssh, host, CLAUDE_JSON).await?;
-        let merged = pre_trust_claude_json(&existing, dir)?;
-        if !existing.trim().is_empty() {
-            write_host_file_secret(
-                ssh,
-                host,
-                CLAUDE_DIR,
-                &format!("{CLAUDE_JSON}.fleet-bak"),
-                &existing,
-            )
-            .await?;
+        // `provision_one` does on `~/.claude.json` for `mcpServers`, once
+        // per login on the host: the session may start under any of them
+        // (`birth_profile`), and a later account switch restarts it under
+        // another.
+        let mut profiles: Vec<String> = {
+            let s = lock(&self.store)?;
+            s.get_host_row(host)
+                .map_err(|e| IpcError::new(codes::E_SQLITE, format!("operator's host: {e}")))?
+                .and_then(|h| h.claude_profiles)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|p| p.name)
+                .collect()
+        };
+        // And the one this birth was told to use, known to the host row or not.
+        if let Some(Some(p)) = &self.profile {
+            profiles.push(p.clone());
         }
-        write_host_file_secret(ssh, host, CLAUDE_DIR, CLAUDE_JSON, &merged).await
+        let ssh = self.ssh.as_ref();
+        for (i, (config_dir, file)) in trust_files(&profiles).iter().enumerate() {
+            let done = pre_trust_file(ssh, host, config_dir, file, dir).await;
+            // The host's own config is the birth's rule (a corrupt one stops
+            // it, with no token committed). A profile's is one more login
+            // the session might run under: a file fleet cannot merge there
+            // leaves that login the dialog, and stops nothing.
+            match done {
+                Err(e) if i == 0 => return Err(e),
+                Err(e) => tracing::warn!(
+                    host,
+                    file = %file,
+                    "[operator] its directory was not trusted for this login: {e}"
+                ),
+                Ok(()) => {}
+            }
+        }
+        Ok(())
     }
 
-    async fn start_session(&self, host: &str, project_id: i64) -> Result<SessionRow, IpcError> {
+    async fn start_session(
+        &self,
+        host: &str,
+        project_id: i64,
+        how: Start,
+    ) -> Result<SessionRow, IpcError> {
         // Not the host's default login unless it is the best one there: the
         // login it had on this host, else the signed-in one with the most
         // headroom (control review F7).
@@ -843,6 +962,30 @@ impl OperatorHost for LiveHost {
                 crate::store::now_unix(),
             ),
         };
+        if how == Start::TakeOver {
+            // A login is passed only when it is not the one the row is
+            // stored under: a restart that names one is a switch, which a
+            // killed row refuses.
+            let stored = {
+                let s = lock(&self.store)?;
+                s.get_session(OPERATOR_TMUX_NAME, host)?
+                    .and_then(|r| s.session_launch(r.id).ok())
+                    .and_then(|(_, _, p)| p)
+            };
+            return crate::service::sessions::restart_session(
+                crate::service::sessions::RestartSessionArgs {
+                    host_alias: host.to_string(),
+                    name: OPERATOR_TMUX_NAME.to_string(),
+                    force: false,
+                    profile: profile.filter(|p| Some(p) != stored.as_ref()),
+                    model: None,
+                    effort: None,
+                },
+                &self.store,
+                &self.ssh,
+            )
+            .await;
+        }
         // An ordinary work session, which is the whole point: transcript,
         // conversation view, restart and reboot survival all come for free.
         crate::service::sessions::new_session(
@@ -1249,6 +1392,9 @@ pub(crate) async fn ensure_operator_with(
     //    end it); step 5 revokes its token, and once its host is back it is
     //    an ordinary `fleet-operator` session the person can kill.
     let local_enabled = crate::service::hub::local_host_enabled();
+    // `held_on`: the host of the recorded session, whatever state it is in.
+    // Its `.mcp.json` is where the live token is (step 6 reads this).
+    let mut held_on = None;
     let stranded = {
         let s = lock(store)?;
         let mut stranded = None;
@@ -1257,6 +1403,7 @@ pub(crate) async fn ensure_operator_with(
                 .get_session(&r.tmux_name, &r.host_alias)
                 .map_err(|e| IpcError::new(codes::E_SQLITE, format!("find operator: {e}")))?
             {
+                held_on = Some(r.host_alias.clone());
                 let host_row = s
                     .get_host_row(&r.host_alias)
                     .map_err(|e| IpcError::new(codes::E_SQLITE, format!("operator's host: {e}")))?;
@@ -1395,15 +1542,17 @@ pub(crate) async fn ensure_operator_with(
     //    [`pre_trust_claude_json`].
     host.pre_trust(&home, &dir).await?;
 
-    // 5. Commit the token. (guard #4)
-    {
+    // 5. Commit the token. (guard #4) `displaced` is the live token this
+    //    revokes, when there was one: step 6 gives it back if it must.
+    let displaced = {
         let s = lock(store)?;
         let sha = crate::mcp::auth::sha256_hex(&token);
-        // A previous token by this name may still be live (a half-finished
-        // birth, or a session that was lost). Revoke it rather than colliding
-        // on the partial unique index over live `client_tokens(name)`.
-        // `E_NOTFOUND` here just means there was none.
-        let _ = s.revoke_client_token(OPERATOR_CLIENT_NAME);
+        // A previous token by this name may still be live (the running
+        // Control's on a move, a half-finished birth, or a session that was
+        // lost). Revoke it rather than colliding on the partial unique index
+        // over live `client_tokens(name)`. `E_NOTFOUND` here just means
+        // there was none.
+        let displaced = s.revoke_client_token(OPERATOR_CLIENT_NAME).ok();
         s.insert_client_token(OPERATOR_CLIENT_NAME, &sha, "full")?;
         // The token is the hub owner's, as the session started in step 6 is
         // (`hub_personal_owner`). A client with no person gets a REFUSING
@@ -1429,10 +1578,39 @@ pub(crate) async fn ensure_operator_with(
             .map_err(|e| {
                 IpcError::new(codes::E_SQLITE, format!("record the operator token: {e}"))
             })?;
-    }
+        displaced.map(|row| row.id)
+    };
 
-    // 6. The session itself.
-    let row = host.start_session(&home, project_id).await?;
+    // 6. The session itself. A session under Control's name already on the
+    //    home is taken over, not refused ([`Start::TakeOver`]).
+    //
+    //    When it does not start and the recorded session is on ANOTHER
+    //    host, that session still holds the token step 5 revoked, in a
+    //    `.mcp.json` this birth never touched, and it is still the recorded
+    //    one: the token goes back to it. Otherwise a move that fails takes
+    //    the running Control's token with it: every call it makes answers
+    //    401 while `operator_status` says `ready` (the hash it compares is
+    //    the new row's) and guard #1 stops every later press (2026-11-17,
+    //    nine failed moves in four hours). On the SAME host there is
+    //    nothing to give back: step 4 replaced that file, so the new token
+    //    is the one the host holds, and it stays.
+    let how = {
+        let s = lock(store)?;
+        match s.get_session(OPERATOR_TMUX_NAME, &home)? {
+            Some(_) => Start::TakeOver,
+            None => Start::New,
+        }
+    };
+    let row = match host.start_session(&home, project_id, how).await {
+        Ok(row) => row,
+        Err(e) => {
+            let elsewhere = held_on.as_deref().is_some_and(|h| h != home);
+            if let Some(id) = displaced.filter(|_| elsewhere) {
+                give_back_token(store, id);
+            }
+            return Err(e);
+        }
+    };
 
     // 7. Record where it lives, so the self-guard and the next press can
     //    find it. (guard #5)
@@ -1447,6 +1625,28 @@ pub(crate) async fn ensure_operator_with(
         )?;
     }
     Ok(row)
+}
+
+/// Make the token a birth revoked live again, and the one it committed
+/// revoked: the birth's session did not start
+/// ([`ensure_operator_with`], step 6). A failure is logged, not returned:
+/// the caller is already answering with the error that matters, and the
+/// state it leaves is the one a failed birth always left before this.
+fn give_back_token(store: &Mutex<Store>, displaced: i64) {
+    let done = lock(store).and_then(|s| {
+        let row = s.reinstate_client_token(OPERATOR_CLIENT_NAME, displaced)?;
+        s.set_setting(SETTING_OPERATOR_TOKEN_SHA, &row.token_sha256)
+            .map_err(|e| IpcError::new(codes::E_SQLITE, format!("record the operator token: {e}")))
+    });
+    match done {
+        Ok(()) => {
+            tracing::info!("[operator] its session did not start; the running one keeps its token")
+        }
+        Err(e) => tracing::warn!(
+            error = %e.message,
+            "[operator] its session did not start, and the running one's token was not given back"
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -1754,6 +1954,8 @@ mod tests {
         dir: String,
         files: std::sync::Mutex<Vec<(String, String)>>,
         starts: std::sync::atomic::AtomicUsize,
+        /// How many of those starts took over a session already there.
+        takeovers: std::sync::atomic::AtomicUsize,
         /// The host's `~/.claude.json` as it is on disk: what `pre_trust`
         /// reads, and what it leaves behind.
         claude_json: std::sync::Mutex<String>,
@@ -1766,6 +1968,7 @@ mod tests {
                 dir: "/tmp/fleet-operator-test".to_string(),
                 files: std::sync::Mutex::new(Vec::new()),
                 starts: std::sync::atomic::AtomicUsize::new(0),
+                takeovers: std::sync::atomic::AtomicUsize::new(0),
                 claude_json: std::sync::Mutex::new(String::new()),
             }
         }
@@ -1803,9 +2006,18 @@ mod tests {
                 .push((format!("{host}:~/.claude.json"), merged));
             Ok(())
         }
-        async fn start_session(&self, host: &str, project_id: i64) -> Result<SessionRow, IpcError> {
+        async fn start_session(
+            &self,
+            host: &str,
+            project_id: i64,
+            how: Start,
+        ) -> Result<SessionRow, IpcError> {
             self.starts
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if how == Start::TakeOver {
+                self.takeovers
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
             let s = lock(&self.store)?;
             s.upsert_session(
                 OPERATOR_TMUX_NAME,
@@ -2219,8 +2431,13 @@ mod tests {
                 "~/.claude.json is not valid JSON",
             ))
         }
-        async fn start_session(&self, h: &str, project_id: i64) -> Result<SessionRow, IpcError> {
-            self.inner.start_session(h, project_id).await
+        async fn start_session(
+            &self,
+            h: &str,
+            project_id: i64,
+            how: Start,
+        ) -> Result<SessionRow, IpcError> {
+            self.inner.start_session(h, project_id, how).await
         }
     }
 
@@ -2251,6 +2468,188 @@ mod tests {
             0,
             "no session was started"
         );
+    }
+
+    /// [`FakeHost`] whose session does not start: the files are written and
+    /// the directory trusted, then `new_session` refuses.
+    struct FailingStartHost {
+        inner: FakeHost,
+    }
+
+    #[async_trait::async_trait]
+    impl OperatorHost for FailingStartHost {
+        async fn resolve_dir(&self, h: &str) -> Result<String, IpcError> {
+            self.inner.resolve_dir(h).await
+        }
+        async fn write_files(
+            &self,
+            h: &str,
+            d: &str,
+            c: &[(&str, &str)],
+            m: &str,
+        ) -> Result<(), IpcError> {
+            self.inner.write_files(h, d, c, m).await
+        }
+        async fn pre_trust(&self, h: &str, d: &str) -> Result<(), IpcError> {
+            self.inner.pre_trust(h, d).await
+        }
+        async fn start_session(
+            &self,
+            _h: &str,
+            _project_id: i64,
+            _how: Start,
+        ) -> Result<SessionRow, IpcError> {
+            Err(IpcError::new(
+                codes::E_EXISTS,
+                "fleet-operator on htz already names a session; pick a different name",
+            ))
+        }
+    }
+
+    /// 2026-11-17: Control ran on one host and its account switch tried to
+    /// move it to another, where the session did not start (`E_EXISTS`).
+    /// Each try had already committed a new token, which revoked the one
+    /// the running Control held: every call it made answered 401 while
+    /// `operator_status` said `ready`. A move that does not start leaves
+    /// the running Control the token it has.
+    #[tokio::test]
+    async fn a_move_that_does_not_start_leaves_the_running_control_its_token() {
+        let store = store_with_an_operator_on("mefistos");
+        probed(&store.lock().unwrap(), "htz", true);
+        let host = FailingStartHost {
+            inner: FakeHost::new(&store),
+        };
+        let plan = BirthPlan {
+            prefer: Some("htz".into()),
+            leave: Some("mefistos".into()),
+        };
+        let err = ensure_operator_with(&store, &host, &plan)
+            .await
+            .expect_err("the session did not start");
+        assert_eq!(err.code, codes::E_EXISTS, "{}", err.message);
+        {
+            let files = host.inner.files.lock().unwrap();
+            assert!(
+                files.iter().all(|(p, _)| p.starts_with("htz:")),
+                "the move wrote to its target only: {files:?}"
+            );
+        }
+
+        let s = store.lock().unwrap();
+        let live = tokens_named_ux_agent(&s);
+        assert_eq!(live.len(), 1, "one live token");
+        assert_eq!(
+            live[0].token_sha256, "the-old-sha",
+            "the token the running Control holds is the live one"
+        );
+        assert_eq!(
+            s.get_setting(SETTING_OPERATOR_TOKEN_SHA)
+                .unwrap()
+                .as_deref(),
+            Some("the-old-sha")
+        );
+        assert_eq!(operator_ref(&s).unwrap().host_alias, "mefistos");
+        drop(s);
+        assert!(operator_status_with(&store, true).unwrap().ready);
+    }
+
+    /// The other half of that day: the move's target still had a session
+    /// under Control's name (left there when that host had stopped
+    /// answering), and `new_session` refused the name on every try. The
+    /// birth takes that session over instead.
+    #[tokio::test]
+    async fn a_birth_takes_over_the_session_control_left_on_that_host() {
+        let store = store_with_an_operator_on("mefistos");
+        {
+            let s = store.lock().unwrap();
+            probed(&s, "htz", true);
+            s.upsert_session(OPERATOR_TMUX_NAME, "htz", None, None, 1, 1, "running", None)
+                .unwrap();
+        }
+        let host = FakeHost::new(&store);
+        let plan = BirthPlan {
+            prefer: Some("htz".into()),
+            leave: Some("mefistos".into()),
+        };
+        let row = ensure_operator_with(&store, &host, &plan).await.unwrap();
+        assert_eq!(row.host_alias, "htz");
+        let count =
+            |n: &std::sync::atomic::AtomicUsize| n.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!((count(&host.starts), count(&host.takeovers)), (1, 1));
+        {
+            let s = store.lock().unwrap();
+            assert_eq!(operator_ref(&s).unwrap().host_alias, "htz");
+            assert_ne!(tokens_named_ux_agent(&s)[0].token_sha256, "the-old-sha");
+        }
+
+        // A home with no such session is an ordinary start.
+        let store = store_with_an_operator_on("mefistos");
+        probed(&store.lock().unwrap(), "htz", true);
+        let host = FakeHost::new(&store);
+        ensure_operator_with(&store, &host, &plan).await.unwrap();
+        assert_eq!((count(&host.starts), count(&host.takeovers)), (1, 0));
+    }
+
+    /// A start that fails on the host the recorded session is on has
+    /// nothing to give back: the birth replaced that host's `.mcp.json`, so
+    /// the token it committed is the one the host holds.
+    #[tokio::test]
+    async fn a_start_that_fails_on_the_same_host_keeps_the_token_it_wrote_there() {
+        let store = store_with_an_operator_on("mefistos");
+        store
+            .lock()
+            .unwrap()
+            .mark_host_sessions_lost("mefistos", "test_lost", &[], 100, 0)
+            .unwrap();
+        let host = FailingStartHost {
+            inner: FakeHost::new(&store),
+        };
+        ensure_operator_on(&store, &host)
+            .await
+            .expect_err("the session did not start");
+        let s = store.lock().unwrap();
+        let live = tokens_named_ux_agent(&s);
+        assert_eq!(live.len(), 1);
+        let written = written_mcp_json(&host.inner);
+        let bearer = written["mcpServers"]["claude-fleet"]["headers"]["Authorization"]
+            .as_str()
+            .and_then(|h| h.strip_prefix("Bearer "))
+            .expect("the header is a bearer token")
+            .to_string();
+        assert_eq!(
+            live[0].token_sha256,
+            crate::mcp::auth::sha256_hex(&bearer),
+            "the live token is the one in the file on that host"
+        );
+    }
+
+    /// The trust dialog is decided per login: the host's own config, and
+    /// each profile's own `.claude.json` under `~/.claude-profiles`.
+    #[test]
+    fn the_directory_is_trusted_in_every_logins_config() {
+        let files = trust_files(&[
+            "tech_silvester".to_string(),
+            "chuck".to_string(),
+            "tech_silvester".to_string(),
+            "../etc".to_string(),
+            String::new(),
+        ]);
+        assert_eq!(
+            files,
+            vec![
+                ("~/.claude".to_string(), "~/.claude.json".to_string()),
+                (
+                    "~/.claude-profiles/tech_silvester".to_string(),
+                    "~/.claude-profiles/tech_silvester/.claude.json".to_string()
+                ),
+                (
+                    "~/.claude-profiles/chuck".to_string(),
+                    "~/.claude-profiles/chuck/.claude.json".to_string()
+                ),
+            ],
+            "the host's own first, each profile once, no name that is not a profile"
+        );
+        assert_eq!(trust_files(&[]).len(), 1, "a host with no profiles");
     }
 
     fn tokens_named_ux_agent(s: &Store) -> Vec<crate::store::ClientTokenRow> {
@@ -2781,9 +3180,14 @@ mod tests {
             tokio::task::yield_now().await;
             self.inner.pre_trust(h, d).await
         }
-        async fn start_session(&self, h: &str, project_id: i64) -> Result<SessionRow, IpcError> {
+        async fn start_session(
+            &self,
+            h: &str,
+            project_id: i64,
+            how: Start,
+        ) -> Result<SessionRow, IpcError> {
             tokio::task::yield_now().await;
-            self.inner.start_session(h, project_id).await
+            self.inner.start_session(h, project_id, how).await
         }
     }
 
@@ -2810,8 +3214,13 @@ mod tests {
         async fn pre_trust(&self, h: &str, d: &str) -> Result<(), IpcError> {
             self.inner.pre_trust(h, d).await
         }
-        async fn start_session(&self, h: &str, project_id: i64) -> Result<SessionRow, IpcError> {
-            self.inner.start_session(h, project_id).await
+        async fn start_session(
+            &self,
+            h: &str,
+            project_id: i64,
+            how: Start,
+        ) -> Result<SessionRow, IpcError> {
+            self.inner.start_session(h, project_id, how).await
         }
     }
 

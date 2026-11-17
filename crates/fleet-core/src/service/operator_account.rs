@@ -283,6 +283,10 @@ pub struct RealSwitchExec {
 #[async_trait::async_trait]
 impl SwitchExec for RealSwitchExec {
     async fn restart(&self, host: &str, tmux: &str, profile: &str) -> Result<i64, IpcError> {
+        // The login it is about to run under reads its own `.claude.json`:
+        // without this a profile added since Control's birth starts it at
+        // the workspace trust dialog.
+        crate::service::operator::pre_trust_profile(self.ssh.as_ref(), host, profile).await;
         crate::service::sessions::restart_session(
             crate::service::sessions::RestartSessionArgs {
                 host_alias: host.to_string(),
