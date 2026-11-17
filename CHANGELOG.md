@@ -8,9 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Releases are cut with `scripts/release.sh` — see [docs/RELEASING.md](docs/RELEASING.md).
 Entries before 0.2.4 were plain version bumps and were not recorded individually.
 
-## [0.6.5] - 2026-11-12
+## [0.6.5] - 2026-11-17
 
 ### Added
+- **projects:** merge a repository registered twice into one project row
 - **login-conflicts:** flag one login copied onto two hosts
 - **login-health:** Sign in again for a signed-out login
 - **account-switch:** move a session off a signed-out login
@@ -114,6 +115,13 @@ Entries before 0.2.4 were plain version bumps and were not recorded individually
 - **mcp:** raise the tool-definition budget to 880 bytes a tool
 
 ### Fixed
+- **linux:** don't SIGTERM our own threads on start (#1132)
+- **accounts:** back off a session whose account switch keeps failing
+- **catalog:** retry an owed host ahead of the next hourly tick
+- **hub:** exit when the store lock is stuck, so the supervisor restarts the hub
+- **desktop:** keep refusals and the ResizeObserver notice out of the error channel
+- **sessions:** drop a worktree link that names another project
+- **control:** Needs you holds what needs you now, and says why
 - **deferred:** stop locking the store twice in deliver_due (hub freeze)
 - **hub:** the limit census no longer counts an account only setup tokens use
 - **ci:** the updater's tests take their linux fixture release as linux on a Mac runner
@@ -261,6 +269,7 @@ Entries before 0.2.4 were plain version bumps and were not recorded individually
 - **missions:** design for the next mission improvements (M1–M7)
 - **agents:** a rollout guide for the restated agents
 - **missions:** design for lanes — one lead session per lane, subagents inside, roadmap L0–L6
+
 ## [0.6.4] - 2026-10-21
 
 ### Added
