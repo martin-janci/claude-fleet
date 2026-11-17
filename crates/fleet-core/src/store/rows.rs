@@ -1544,6 +1544,25 @@ pub struct MergeReport {
     pub usage_days_merged: usize,
 }
 
+/// What [`crate::store::Store::merge_project`] did.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ProjectMergeReport {
+    pub from: i64,
+    pub into: i64,
+    /// `owner/repo` of the project that went.
+    pub from_name: String,
+    /// `owner/repo` of the project that keeps the rows.
+    pub into_name: String,
+    pub sessions_moved: usize,
+    pub worktrees_moved: usize,
+    /// `from` worktrees `into` already had under the same host and name:
+    /// dropped, the sessions on them now point at `into`'s row.
+    pub worktrees_folded: usize,
+    /// Rows moved in the other tables: pull requests, work items and links,
+    /// routines, rules.
+    pub other_rows_moved: usize,
+}
+
 /// The only values `hosts.transport` may hold (migration 034). The single
 /// definition `Store::set_host_transport` and `service::hosts::add_host`
 /// both validate against, so the allowed set can't drift between them.

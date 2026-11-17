@@ -12,6 +12,50 @@ fn session_ids_on_worktree(conn: &Connection, worktree_id: i64) -> rusqlite::Res
     rows.collect()
 }
 
+/// Every `<table>.<column>` that holds a project id: what
+/// [`Store::merge_project`] re-homes, and how. The test
+/// `a_project_merge_covers_every_project_column` holds this list to the
+/// schema, so a new table that names a project cannot be forgotten here.
+pub(crate) const PROJECT_ID_COLUMNS: &[(&str, &str, ProjectRef)] = &[
+    ("account_project_blocks", "project_id", ProjectRef::IntoWins),
+    ("agent_rules", "project_id", ProjectRef::Moves),
+    ("mission_lanes", "project_id", ProjectRef::Moves),
+    (
+        "orchestration_project_repos",
+        "project_id",
+        ProjectRef::IntoWins,
+    ),
+    ("pr_shepherd_merges", "project_id", ProjectRef::Moves),
+    ("pr_shepherd_rules", "project_id", ProjectRef::IntoWins),
+    ("pull_requests", "project_id", ProjectRef::Moves),
+    ("routines", "project_id", ProjectRef::Moves),
+    ("sessions", "project_id", ProjectRef::Moves),
+    ("start_rules", "project_id", ProjectRef::IntoWins),
+    ("work_items", "project_id", ProjectRef::Moves),
+    ("work_links", "snap_project_id", ProjectRef::Moves),
+    ("worktrees", "project_id", ProjectRef::Worktrees),
+];
+
+/// Every `<table>.<column>` that points at a worktree row: what a merge
+/// re-points at `into`'s row when it folds a twin worktree. Held to the
+/// schema by the same test.
+pub(crate) const WORKTREE_ID_COLUMNS: &[(&str, &str)] = &[
+    ("mission_lanes", "worktree_id"),
+    ("sessions", "worktree_id"),
+];
+
+/// How a project merge treats one project-id column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProjectRef {
+    /// Every row moves.
+    Moves,
+    /// The column is part of a key: a row `into` already has keeps
+    /// `into`'s and `from`'s goes; the rest move.
+    IntoWins,
+    /// Worktree rows, which sessions point at: see `merge_project`.
+    Worktrees,
+}
+
 impl Store {
     pub fn get_project(&self, id: i64) -> Result<Option<ProjectRow>, rusqlite::Error> {
         fetch_project(&self.conn, id)
@@ -846,6 +890,166 @@ impl Store {
         Ok(true)
     }
 
+    /// Fold project `from` into project `into` in ONE transaction, then
+    /// delete the `from` row. For a repository that changed owner or name
+    /// and was registered a second time: two projects over one checkout,
+    /// between which a session moved with whichever worktree row was newer
+    /// (2026-11-16, `find_project_id_for_path`).
+    ///
+    /// Rules. A worktree `into` already has under the same host and name
+    /// keeps `into`'s row, and the sessions on `from`'s twin point at it;
+    /// the other worktrees move. Sessions, pull requests, work items and
+    /// links, routines, agent rules, mission lanes and PR-shepherd merges
+    /// move. A start rule, PR-shepherd rule, mission repo, forbidden account
+    /// or project-scope environment variable `into` already has keeps
+    /// `into`'s; the rest move
+    /// ([`PROJECT_ID_COLUMNS`]). Rows that name the repository in words
+    /// (`org_rules`, `project_picks`, the review tables) are left as they
+    /// are. Emits `session:updated` per moved or re-pointed session,
+    /// `worktree:updated` / `worktree:removed` per worktree row, and
+    /// `project:updated` for `into`.
+    pub fn merge_project(
+        &self,
+        from: i64,
+        into: i64,
+    ) -> Result<ProjectMergeReport, crate::ipc_error::IpcError> {
+        use crate::ipc_error::{codes, IpcError};
+        if from == into {
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                "from and into are the same project",
+            ));
+        }
+        let mut names = Vec::with_capacity(2);
+        for id in [from, into] {
+            let Some(p) = fetch_project(&self.conn, id)? else {
+                return Err(IpcError::new(
+                    codes::E_NOTFOUND,
+                    format!("project {id} not found"),
+                ));
+            };
+            if p.system {
+                return Err(IpcError::new(
+                    codes::E_INVALID,
+                    format!("project {id} is a system project; it has no repository to merge"),
+                ));
+            }
+            names.push(format!("{}/{}", p.owner, p.repo));
+        }
+        let into_name = names.pop().unwrap_or_default();
+        let from_name = names.pop().unwrap_or_default();
+        let ids = |conn: &Connection, sql: &str, params: &[i64]| -> rusqlite::Result<Vec<i64>> {
+            let mut stmt = conn.prepare(sql)?;
+            let rows =
+                stmt.query_map(rusqlite::params_from_iter(params), |r| r.get::<_, i64>(0))?;
+            rows.collect()
+        };
+        let tx = self.conn.unchecked_transaction()?;
+        // Worktrees: move the ones `into` lacks; point sessions at the twin
+        // for the ones it has, then drop the leftovers.
+        const NO_TWIN: &str = "NOT EXISTS (
+               SELECT 1 FROM worktrees w2 WHERE w2.project_id = ?2
+                  AND w2.host_alias = worktrees.host_alias AND w2.name = worktrees.name)";
+        let wt_moved = ids(
+            &tx,
+            &format!("SELECT id FROM worktrees WHERE project_id = ?1 AND {NO_TWIN}"),
+            &[from, into],
+        )?;
+        let wt_folded = ids(
+            &tx,
+            &format!("SELECT id FROM worktrees WHERE project_id = ?1 AND NOT {NO_TWIN}"),
+            &[from, into],
+        )?;
+        // Every session the merge touches: `from`'s own, and any other on
+        // one of `from`'s worktree rows (a link that was already crossed).
+        let touched = ids(
+            &tx,
+            "SELECT id FROM sessions WHERE project_id = ?1
+                OR worktree_id IN (SELECT id FROM worktrees WHERE project_id = ?1)",
+            &[from],
+        )?;
+        let sessions_moved = ids(
+            &tx,
+            "SELECT id FROM sessions WHERE project_id = ?1",
+            &[from],
+        )?
+        .len();
+        tx.execute(
+            &format!("UPDATE worktrees SET project_id = ?2 WHERE project_id = ?1 AND {NO_TWIN}"),
+            rusqlite::params![from, into],
+        )?;
+        // What is left under `from` now are the twins.
+        for (table, column) in WORKTREE_ID_COLUMNS {
+            tx.execute(
+                &format!(
+                    "UPDATE {table} SET {column} = (
+                       SELECT w2.id FROM worktrees w1 JOIN worktrees w2
+                         ON w2.project_id = ?2 AND w2.host_alias = w1.host_alias
+                        AND w2.name = w1.name
+                       WHERE w1.id = {table}.{column})
+                     WHERE {column} IN (SELECT id FROM worktrees WHERE project_id = ?1)"
+                ),
+                rusqlite::params![from, into],
+            )?;
+        }
+        tx.execute("DELETE FROM worktrees WHERE project_id = ?1", [from])?;
+        let mut other_rows_moved = 0;
+        for (table, column, how) in PROJECT_ID_COLUMNS {
+            let n = match how {
+                ProjectRef::Worktrees => continue,
+                ProjectRef::Moves => tx.execute(
+                    &format!("UPDATE {table} SET {column} = ?2 WHERE {column} = ?1"),
+                    rusqlite::params![from, into],
+                )?,
+                ProjectRef::IntoWins => {
+                    let n = tx.execute(
+                        &format!("UPDATE OR IGNORE {table} SET {column} = ?2 WHERE {column} = ?1"),
+                        rusqlite::params![from, into],
+                    )?;
+                    tx.execute(&format!("DELETE FROM {table} WHERE {column} = ?1"), [from])?;
+                    n
+                }
+            };
+            if *table != "sessions" {
+                other_rows_moved += n;
+            }
+        }
+        // Project-scope environment (`owner/repo`): into's own entry wins on
+        // a name clash.
+        tx.execute(
+            "UPDATE OR IGNORE env_vars SET scope_key = ?2 WHERE scope = 'project' AND scope_key = ?1",
+            rusqlite::params![from_name, into_name],
+        )?;
+        tx.execute(
+            "DELETE FROM env_vars WHERE scope = 'project' AND scope_key = ?1",
+            [&from_name],
+        )?;
+        tx.execute("DELETE FROM projects WHERE id = ?1", [from])?;
+        tx.commit()?;
+        for id in &wt_folded {
+            self.bus.worktree_removed(*id);
+        }
+        for id in &wt_moved {
+            if let Some(row) = self.get_worktree_row(*id)? {
+                self.bus.worktree_updated(&row);
+            }
+        }
+        self.emit_sessions_updated(&touched);
+        if let Some(row) = fetch_project(&self.conn, into)? {
+            self.bus.project_updated(&row);
+        }
+        Ok(ProjectMergeReport {
+            from,
+            into,
+            from_name,
+            into_name,
+            sessions_moved,
+            worktrees_moved: wt_moved.len(),
+            worktrees_folded: wt_folded.len(),
+            other_rows_moved,
+        })
+    }
+
     /// Delete one worktree row unless any session row (alive, ghost or dead)
     /// references it. Emits `worktree:removed` when the row goes. Returns
     /// whether it went.
@@ -1098,6 +1302,264 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The merge's column list against the schema itself: every column that
+    /// is named as a project id or is a foreign key to `projects` must be
+    /// in [`PROJECT_ID_COLUMNS`], and nothing listed may be gone. A table
+    /// added later that names a project fails here until the merge is told
+    /// what to do with it.
+    #[test]
+    fn a_project_merge_covers_every_project_column() {
+        use std::collections::BTreeSet;
+        let s = Store::open_in_memory().unwrap();
+        let conn = s.conn_for_test();
+        let col = |sql: &str, idx: usize| -> Vec<String> {
+            let mut st = conn.prepare(sql).unwrap();
+            let rows = st.query_map([], |r| r.get::<_, String>(idx)).unwrap();
+            rows.collect::<Result<_, _>>().unwrap()
+        };
+        let tables = col(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+            0,
+        );
+        assert!(tables.len() > 50, "the migrated schema, not an empty one");
+        let mut found: BTreeSet<(String, String)> = BTreeSet::new();
+        for t in &tables {
+            for c in col(&format!("PRAGMA table_info(\"{t}\")"), 1) {
+                // `orchestration_project_id` names a mission, not a project.
+                let names_a_project = c == "project_id"
+                    || (c.ends_with("_project_id") && c != "orchestration_project_id");
+                if names_a_project {
+                    found.insert((t.clone(), c));
+                }
+            }
+            let mut st = conn
+                .prepare(&format!("PRAGMA foreign_key_list(\"{t}\")"))
+                .unwrap();
+            let fks: Vec<(String, String)> = st
+                .query_map([], |r| Ok((r.get(2)?, r.get(3)?)))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            for (target, from_col) in fks {
+                if target == "projects" {
+                    found.insert((t.clone(), from_col));
+                }
+            }
+        }
+        let listed: BTreeSet<(String, String)> = PROJECT_ID_COLUMNS
+            .iter()
+            .map(|(t, c, _)| (t.to_string(), c.to_string()))
+            .collect();
+        assert_eq!(
+            found, listed,
+            "PROJECT_ID_COLUMNS must name every project-id column, and only those"
+        );
+        // The same for what points at a worktree row, which a folded twin
+        // must hand over.
+        let mut found: BTreeSet<(String, String)> = BTreeSet::new();
+        for t in &tables {
+            for c in col(&format!("PRAGMA table_info(\"{t}\")"), 1) {
+                if c == "worktree_id" || c.ends_with("_worktree_id") {
+                    found.insert((t.clone(), c));
+                }
+            }
+            let mut st = conn
+                .prepare(&format!("PRAGMA foreign_key_list(\"{t}\")"))
+                .unwrap();
+            let fks: Vec<(String, String)> = st
+                .query_map([], |r| Ok((r.get(2)?, r.get(3)?)))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            for (target, from_col) in fks {
+                if target == "worktrees" {
+                    found.insert((t.clone(), from_col));
+                }
+            }
+        }
+        let listed: BTreeSet<(String, String)> = WORKTREE_ID_COLUMNS
+            .iter()
+            .map(|(t, c)| (t.to_string(), c.to_string()))
+            .collect();
+        assert_eq!(
+            found, listed,
+            "WORKTREE_ID_COLUMNS must name every worktree-id column, and only those"
+        );
+    }
+
+    /// A repository that changed owner, registered twice over one checkout:
+    /// the merge leaves one project holding every session and worktree, a
+    /// twin worktree folded into the survivor's row, and nothing pointing at
+    /// the project that went. The crossed link of 2026-11-16 (a session of
+    /// the new project on the old project's worktree row) ends on the
+    /// survivor's row too.
+    #[test]
+    fn a_merge_folds_one_project_into_the_other() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("mac").unwrap();
+        let old = s.upsert_project("frantisek", "app", "/p/old").unwrap();
+        let new = s.upsert_project("sales-twins", "app", "/p/new").unwrap();
+        let wt = |pid, name: &str| {
+            s.upsert_worktree_on("mac", pid, name, &format!("/co/.worktrees/{name}"), None)
+                .unwrap()
+        };
+        let (old_feat, old_only, new_feat) =
+            (wt(old, "feat"), wt(old, "only-old"), wt(new, "feat"));
+        let sess = |name: &str, pid, wid| {
+            s.upsert_session(name, "mac", Some(pid), Some(wid), 1, 1, "running", None)
+                .unwrap()
+        };
+        let on_twin = sess("on-twin", old, old_feat);
+        let on_own = sess("on-own", old, old_only);
+        let already_new = sess("already-new", new, new_feat);
+        let crossed = sess("crossed", new, old_feat);
+        // A start rule both have (the survivor's is kept) and one only the
+        // old project has (it moves); the same for a project-scope variable.
+        for (pid, pattern) in [(old, "APP-"), (new, "APP-"), (old, "OLD-")] {
+            s.insert_start_rule(None, None, pattern, pid, None, "active", 1, 1)
+                .unwrap();
+        }
+        let plain = |v: &str| crate::store::EnvValue::Plain(v.to_string());
+        s.set_env_var("project", "frantisek/app", "SHARED", &plain("old"))
+            .unwrap();
+        s.set_env_var("project", "sales-twins/app", "SHARED", &plain("new"))
+            .unwrap();
+        s.set_env_var("project", "frantisek/app", "ONLY_OLD", &plain("x"))
+            .unwrap();
+
+        // Forbidden accounts add up: one both forbid, one only the old did.
+        for (account, pid) in [("acct-a", old), ("acct-a", new), ("acct-b", old)] {
+            s.conn_for_test()
+                .execute(
+                    "INSERT INTO account_project_blocks (account_uuid, project_id, created_at) \
+                     VALUES (?1, ?2, 1)",
+                    rusqlite::params![account, pid],
+                )
+                .unwrap();
+        }
+
+        let rep = s.merge_project(old, new).unwrap();
+        assert_eq!(
+            rep,
+            ProjectMergeReport {
+                from: old,
+                into: new,
+                from_name: "frantisek/app".into(),
+                into_name: "sales-twins/app".into(),
+                sessions_moved: 2,
+                worktrees_moved: 1,
+                worktrees_folded: 1,
+                // The start rule and the forbidden account only the old had.
+                other_rows_moved: 2,
+            }
+        );
+        assert!(
+            s.get_project(old).unwrap().is_none(),
+            "the old project is gone"
+        );
+        let row = |id| {
+            let r: (Option<i64>, Option<i64>) = s
+                .conn_for_test()
+                .query_row(
+                    "SELECT project_id, worktree_id FROM sessions WHERE id = ?1",
+                    [id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            r
+        };
+        assert_eq!(row(on_twin), (Some(new), Some(new_feat)));
+        assert_eq!(row(on_own), (Some(new), Some(old_only)));
+        assert_eq!(row(already_new), (Some(new), Some(new_feat)));
+        assert_eq!(row(crossed), (Some(new), Some(new_feat)));
+        assert!(
+            s.get_worktree_row(old_feat).unwrap().is_none(),
+            "the twin is folded"
+        );
+        assert_eq!(
+            s.get_worktree_row(old_only).unwrap().unwrap().project_id,
+            new
+        );
+        // Nothing names the old project any more, in any listed table.
+        for (table, column, _) in PROJECT_ID_COLUMNS {
+            let n: i64 = s
+                .conn_for_test()
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE {column} = ?1"),
+                    [old],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 0, "{table}.{column} still names the merged project");
+        }
+        let rules: Vec<String> = {
+            let mut st = s
+                .conn_for_test()
+                .prepare("SELECT pattern FROM start_rules WHERE project_id = ?1 ORDER BY pattern")
+                .unwrap();
+            let v = st.query_map([new], |r| r.get(0)).unwrap();
+            v.collect::<Result<_, _>>().unwrap()
+        };
+        assert_eq!(
+            rules,
+            ["APP-", "OLD-"],
+            "the survivor's rule, plus the one it lacked"
+        );
+        let blocked: Vec<String> = {
+            let mut st = s
+                .conn_for_test()
+                .prepare(
+                    "SELECT account_uuid FROM account_project_blocks WHERE project_id = ?1 \
+                     ORDER BY account_uuid",
+                )
+                .unwrap();
+            let v = st.query_map([new], |r| r.get(0)).unwrap();
+            v.collect::<Result<_, _>>().unwrap()
+        };
+        assert_eq!(
+            blocked,
+            ["acct-a", "acct-b"],
+            "every account either forbade"
+        );
+        let vars: Vec<(String, String)> = {
+            let mut st = s
+                .conn_for_test()
+                .prepare(
+                    "SELECT name, value FROM env_vars WHERE scope = 'project' \
+                     ORDER BY scope_key, name",
+                )
+                .unwrap();
+            let v = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+            v.collect::<Result<_, _>>().unwrap()
+        };
+        assert_eq!(
+            vars,
+            [
+                ("ONLY_OLD".into(), "x".into()),
+                ("SHARED".into(), "new".into())
+            ],
+            "all under the survivor's name; its own value wins"
+        );
+    }
+
+    #[test]
+    fn a_merge_refuses_what_is_not_two_repositories() {
+        let s = Store::open_in_memory().unwrap();
+        let a = s.upsert_project("o", "a", "/p/a").unwrap();
+        let sys = s
+            .upsert_system_project("fleet", "operator", "/home/me/.claude-fleet/operator")
+            .unwrap();
+        assert_eq!(s.merge_project(a, a).unwrap_err().code, "E_INVALID");
+        assert_eq!(s.merge_project(a, 999).unwrap_err().code, "E_NOTFOUND");
+        assert_eq!(s.merge_project(999, a).unwrap_err().code, "E_NOTFOUND");
+        assert_eq!(s.merge_project(sys, a).unwrap_err().code, "E_INVALID");
+        assert_eq!(s.merge_project(a, sys).unwrap_err().code, "E_INVALID");
+        assert!(
+            s.get_project(a).unwrap().is_some(),
+            "a refusal changes nothing"
+        );
+    }
 
     /// data-sync F7: 12 duplicate worktree paths, linked worktrees scanned
     /// as repos, that a hub without a local host could never heal.

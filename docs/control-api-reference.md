@@ -521,6 +521,14 @@ Access: the master token only · confirm-gated (mcp.confirm_destructive) · dead
 
 Parameters (* required): `confirm_nonce`, `from`*, `into`*
 
+### `merge_project`
+
+Fold project `from` into project `into` in one transaction, then delete `from`: for a repository that changed owner or name and was registered twice. Sessions, pull requests, work items, routines and rules move; a worktree `into` already has under the same host and name keeps `into`'s row, and a start rule, PR-shepherd rule, mission repo, forbidden account or project-scope environment variable `into` already has keeps `into`'s. Returns what moved. Master only; may return E_CONFIRM_REQUIRED.
+
+Access: the master token only · confirm-gated (mcp.confirm_destructive) · deadline 660 s.
+
+Parameters (* required): `confirm_nonce`, `from`*, `into`*
+
 ### `move_session`
 
 Move a work session to another host, carrying its work as it is: the transcript, unpushed commits, staged/modified/untracked and small git-ignored files (.env), plus the session's Claude directory and the project's Claude memory (added without replacing anything; these two only warn). Nothing is pushed, committed or stashed and the source worktree is never modified; the target resumes the conversation and the source is killed only once the target runs. strict refuses instead of carrying. Errors: E_MOVE_MIDOP, E_MOVE_TARGET_DIRTY, E_MOVE_TOO_LARGE, E_MOVE_CARRY, E_MOVE_PARTIAL (target started, both sessions left), E_CONFIRM_REQUIRED, E_FORBIDDEN (cross-org; see force_cross_org). Needs a token allowed on BOTH hosts (in practice the master). Returns a moved report, a preview or a wait.

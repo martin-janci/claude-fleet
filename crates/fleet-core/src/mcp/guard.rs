@@ -464,6 +464,16 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: true,
         deadline: Deadline::Quick,
     },
+    // Folds one project into another and deletes it (a repository that
+    // changed owner, registered twice): fleet admin, and destructive enough
+    // to confirm, as `merge_host` is.
+    ToolPolicy {
+        name: "merge_project",
+        access: Access::Master,
+        readonly: false,
+        confirm: true,
+        deadline: Deadline::Quick,
+    },
     ToolPolicy {
         name: "hide_host",
         access: Access::Master,
@@ -3416,10 +3426,11 @@ mod tests {
             "work_admin",
             "work_link",
             "merge_host",
+            "merge_project",
         ] {
             assert!(needs_confirmation(t), "{t} must be confirm-gated");
         }
-        assert_eq!(CONFIRM_TOOLS.len(), 12);
+        assert_eq!(CONFIRM_TOOLS.len(), 13);
         assert!(!needs_confirmation("send_prompt"));
         assert!(!needs_confirmation("dispatch_task"));
     }
@@ -3870,6 +3881,7 @@ mod tests {
         for t in [
             "remove_host",
             "merge_host",
+            "merge_project",
             "hide_host",
             "apply_sync",
             "set_secret",

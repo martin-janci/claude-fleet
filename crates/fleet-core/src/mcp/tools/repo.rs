@@ -117,6 +117,32 @@ impl FleetTools {
         ok_json_compact(&project_picks::set(&self.store, &args).map_err(to_mcp_err)?)
     }
 
+    #[tool(description = "Fold project `from` into project `into` in one \
+        transaction, then delete `from`: for a repository that changed owner \
+        or name and was registered twice. Sessions, pull requests, work \
+        items, routines and rules move; a worktree `into` already has under \
+        the same host and name keeps `into`'s row, and a start rule, \
+        PR-shepherd rule, mission repo, forbidden account or project-scope \
+        environment variable `into` already has keeps `into`'s. Returns what moved. Master only; \
+        may return E_CONFIRM_REQUIRED.")]
+    pub(super) async fn merge_project(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(args): Parameters<crate::service::projects::MergeProjectArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "merge_project",
+            &format!("from={} into={}", args.from, args.into),
+        );
+        self.confirm_gate(
+            "merge_project",
+            args.confirm_nonce.as_deref(),
+            &format!("from={} into={}", args.from, args.into),
+            &caller,
+        )?;
+        ok_json(&crate::service::projects::merge_project(args, &self.store).map_err(to_mcp_err)?)
+    }
+
     #[tool(description = "Add a project on a host: clone a GitHub URL, adopt a \
         folder (the hub's local host only) or create a new repository \
         (create_remote is refused once with a confirm token to send back). \

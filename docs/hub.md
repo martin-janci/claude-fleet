@@ -3648,6 +3648,34 @@ What moves: `worktrees` (a name `mac` already has keeps `mac`'s),
 `local` session whose `claude_session_id` or `tmux_name` already exists
 under `mac`. What is deleted: the `local` host row and its token.
 
+### Merge a repository registered twice
+
+A repository that changes owner or name on GitHub is registered again under
+its new name, while the sessions, worktrees and work of the old name stay on
+the old project row. Both rows then cover one checkout, and a session can be
+moved from one to the other by whichever worktree row is newer. Fold the old
+row into the new one in one transaction:
+
+1. Back up first, as above.
+2. Find the two ids with `list_projects`, then, with the hub running:
+   `fleet-hub project merge <from> <into>` (or the
+   `merge_project {from, into}` tool with the master token). `from` is the
+   row that goes. `mcp.confirm_destructive` applies as it does to
+   `merge_host`.
+3. Verify: `list_projects` no longer lists `from`; `list_sessions
+   {project_id: <into>}` shows its sessions.
+
+What moves: sessions, `pull_requests`, `work_items` and `work_links`,
+`routines`, `agent_rules`, `mission_lanes`, `pr_shepherd_merges`, and the
+worktrees `into` lacks. What keeps `into`'s own: a worktree with the same
+host and name (the sessions and mission lanes on `from`'s row point at
+`into`'s), a start rule, a PR-shepherd rule, a mission repo, a forbidden
+account, and a project-scope environment variable. Forbidden accounts add
+up: after the merge the project forbids every account either row did. What is
+left alone: rows that name the repository in words (`org_rules`,
+`project_picks`, the review tables), and the checkouts on the hosts. What is
+deleted: the `from` project row. It cannot be undone except from the backup.
+
 The hub's default data dir is separate from the desktop's on every
 platform, so a hub and a desktop app on the same machine never share a
 database by accident; migration is always an explicit copy of `state.db`,
