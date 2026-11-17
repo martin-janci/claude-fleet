@@ -58,7 +58,7 @@ pub async fn spawn_review(
     let agent = reviewer_agent(args.agent.as_deref())?;
     // 1. Snapshot source + capture cwd-resolution inputs under a brief lock.
     //    For remote hosts the cwd is finalized off-lock via `ssh.remote_home`.
-    let (source, cwd_src, launch) = {
+    let (source, cwd_src, launch, source_login) = {
         let s = lock(store)?;
         let source = s
             .get_session_by_id(args.source_session_id)?
@@ -71,16 +71,20 @@ pub async fn spawn_review(
         // is refused (forbidden, daily limit, signed out) before anything is
         // created (`service::run_login::choose`). Codex keeps its own login.
         let mut launch = crate::tmux::ClaudeLaunch::default();
+        // The source's own login: where the review's folder is trusted when
+        // the review is stepped onto another (`service::folder_trust`).
+        let mut source_login = None;
         if agent.id() == crate::store::AGENT_CLAUDE {
+            source_login = stored_launch(&s, source.id)?.profile;
             launch.profile = crate::service::run_login::choose(
                 &s,
                 source.project_id,
                 &source.host_alias,
-                stored_launch(&s, source.id)?.profile.as_deref(),
+                source_login.as_deref(),
                 now_unix(),
             )?;
         }
-        (source, cwd_src, launch)
+        (source, cwd_src, launch, source_login)
     };
     // The review's pane command: its agent's plain one, as a "work" session
     // of that agent would run (Claude Code under a minted conversation id,
@@ -128,7 +132,16 @@ pub async fn spawn_review(
         Err(e) => return Err(e),
     };
 
-    // 2. Spawn the review tmux session (off-lock).
+    // 2. Spawn the review tmux session (off-lock). A review stepped onto
+    //    another login takes the source login's trust of the folder along.
+    crate::service::folder_trust::carry_for_launch(
+        ssh.as_ref(),
+        &source.host_alias,
+        &cwd,
+        source_login.as_deref(),
+        launch.profile.as_deref(),
+    )
+    .await;
     let tmux = exec_for(&source.host_alias, ssh);
     tmux.new_session(&review_name, std::path::Path::new(&cwd), &pane)
         .await?;

@@ -3416,6 +3416,17 @@ async fn move_session_inner(
     drop(bytes);
 
     // 4. Start the target. A failure here leaves nothing running on it.
+    //    The login it lands on there may never have run in this folder: the
+    //    trust the TARGET host's own config has for it goes along
+    //    (`service::folder_trust`; never the source host's answer).
+    crate::service::folder_trust::carry_for_launch(
+        ssh,
+        &target,
+        &cwd,
+        None,
+        snap.launch.profile.as_deref(),
+    )
+    .await;
     hooks
         .start_target(&target, &tmux_name, &cwd, &pane_cmd)
         .await

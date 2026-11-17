@@ -693,7 +693,7 @@ pub fn pre_trust_claude_json(existing: &str, dir: &str) -> Result<String, IpcErr
 /// `parent[key]`, created as `{}` when absent; `E_PROVISION` when present
 /// and not an object, so a file with a shape Claude Code never writes is
 /// refused rather than overwritten.
-fn json_object_entry<'a>(
+pub(crate) fn json_object_entry<'a>(
     parent: &'a mut serde_json::Value,
     key: &str,
 ) -> Result<&'a mut serde_json::Value, IpcError> {

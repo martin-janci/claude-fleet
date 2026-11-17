@@ -214,6 +214,42 @@ its project forbade later, whose account the target has a login on, is
 refused rather than moved onto another account. When fleet does not know the session's account,
 the profile name is kept as it was, held to the same refusals.
 
+### Folder trust follows the login
+
+Claude Code asks "Is this a project you created or one you trust?" once per
+folder, and records the answer in the config it runs under:
+`projects["<absolute dir>"].hasTrustDialogAccepted` in that config's
+`.claude.json`. A profile's `.claude.json` is its own (above), so a login
+that has never run in a folder does not know the host trusts it. A session
+switched to such a login used to stop at the dialog and wait there for a
+person (`stuck_kind: trust_prompt`).
+
+So before fleet starts a Claude pane in a folder under a login, it carries
+the answer the host already has (`service::folder_trust`). It looks in the
+config of the login the session is leaving, then in the host's own
+`~/.claude.json`, for the folder or its nearest trusted parent (trust of a
+checkout covers its worktrees), and records that same path as trusted in the
+config of the login the session is about to run under. A switch back to the
+host's own login is carried the same way, from the profile the session
+leaves.
+
+Only that one answer is copied: no allowed tools, no `.mcp.json` approvals.
+The write is a read-merge-write like provisioning's on the same file: every
+other key stays, a `.fleet-bak` copy is kept, the file is `0600` and renamed
+into place, and it is replaced only if it still holds what was read (a live
+session under that login rewrites it all the time).
+
+Fleet never answers the dialog for you. When no config on the host trusts
+the folder, nothing is written and the dialog is yours. The same holds when
+the folder is recorded under another spelling (a symlinked path), or a
+config cannot be read, parsed or written: the reason is in the log
+(`[trust]`), and the session starts anyway.
+
+This runs on a new session, a restart (so every switch: yours, the automatic
+one, and auto-restore), a recreate, a review and a move's start on the
+target host. An explicit workspace repair and the restart of a session with
+no project do not carry it: they relaunch the pane where and as it ran.
+
 ### Switch automatically
 
 Off by default. The owner turns it on for the fleet in Settings › Limits

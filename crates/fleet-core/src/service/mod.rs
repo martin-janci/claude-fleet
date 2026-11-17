@@ -52,6 +52,7 @@ pub mod env;
 pub mod evidence;
 pub mod fleet_agents;
 pub mod fleet_events;
+pub mod folder_trust;
 pub mod forms;
 pub mod fresh;
 pub mod gc;

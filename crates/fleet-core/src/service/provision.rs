@@ -608,6 +608,64 @@ pub async fn share_mcp_servers_into(
     Err(last.unwrap_or_else(|| IpcError::new(codes::E_CONFLICT, format!("{path} kept changing"))))
 }
 
+/// The `(directory, file)` of a login's Claude config on a host: a login
+/// profile's own `.claude.json`, or (`None`) the host's `~/.claude.json`.
+/// A session under a profile reads the profile's file and never the
+/// host's (`tmux::ClaudeLaunch`).
+pub(crate) fn login_config(profile: Option<&str>) -> (String, String) {
+    match profile {
+        Some(p) => {
+            let dir = format!("{PROFILES_DIR}/{p}");
+            let file = format!("{dir}/.claude.json");
+            (dir, file)
+        }
+        None => (CLAUDE_DIR.to_string(), CLAUDE_JSON.to_string()),
+    }
+}
+
+/// Read → `merge` → back up → guarded write of one login's `.claude.json`
+/// ([`login_config`]), the way [`share_mcp_servers_into`] writes a
+/// profile's: a `.fleet-bak` copy of the old file, both `0600`, renamed
+/// into place, and only while the file still holds what was read (a live
+/// session under that login rewrites it all the time), reading and merging
+/// again when it changed meanwhile. `merge` answers `None` for nothing to
+/// change, and its error stops before any write. Whether it wrote.
+pub(crate) async fn rewrite_login_config(
+    ssh: &dyn SshExec,
+    host: &str,
+    profile: Option<&str>,
+    merge: &(dyn Fn(&str) -> Result<Option<String>, IpcError> + Sync),
+) -> Result<bool, IpcError> {
+    if let Some(p) = profile {
+        crate::validate::claude_profile(p)?;
+    }
+    let (dir, path) = login_config(profile);
+    let backup = format!("{path}.fleet-bak");
+    let mut last = None;
+    for _ in 0..MCP_ENTRY_TRIES {
+        let existing = read_host_file(ssh, host, &path).await?;
+        let merged = merge(&existing)
+            .map_err(|e| IpcError::new(&e.code, format!("{path}: {}", e.message)))?;
+        let Some(merged) = merged else {
+            return Ok(false);
+        };
+        if !existing.trim().is_empty() {
+            write_host_file_secret(ssh, host, &dir, &backup, &existing).await?;
+        }
+        let unchanged = Unchanged {
+            expected: &existing,
+            backup: (!existing.trim().is_empty()).then_some(backup.as_str()),
+        };
+        match write_host_file_secret_guarded(ssh, host, &dir, &path, &merged, Some(unchanged)).await
+        {
+            Ok(()) => return Ok(true),
+            Err(e) if e.code == codes::E_CONFLICT => last = Some(e),
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last.unwrap_or_else(|| IpcError::new(codes::E_CONFLICT, format!("{path} kept changing"))))
+}
+
 /// Voice relay F1: install fleet's `arecord` stand-in at
 /// `~/.claude-fleet/voice/bin/arecord` (executable; the pane command puts
 /// that dir first on `claude`'s PATH, `tmux::VOICE_PATH_PREFIX`) and
@@ -2004,7 +2062,7 @@ pub(crate) fn remote_path(path: &str) -> String {
 }
 
 /// Remote `bash -lc` script body that reads `path` (missing file → empty stdout).
-fn remote_read_script(path: &str) -> String {
+pub(crate) fn remote_read_script(path: &str) -> String {
     format!(
         "printf '\\n%s\\n' {}; if [ -e {p} ]; then cat {p}; fi",
         crate::service::move_session::carry::OUT_MARKER,
