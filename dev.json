@@ -1,9 +1,9 @@
 {
   "schema": 1,
   "track": "dev",
-  "sequence": 302,
-  "generated_at": "2026-11-17T19:51:46Z",
-  "expires_at": "2026-12-01T19:51:46Z",
+  "sequence": 303,
+  "generated_at": "2026-11-17T20:13:24Z",
+  "expires_at": "2026-12-01T20:13:24Z",
   "current": "0.6.5-dev.428.desktop.g168abd3",
   "recommended": "0.6.5-dev.428.desktop.g168abd3",
   "minimum_supported": {},
@@ -14,7 +14,14 @@
     {
       "version": "0.6.5-dev.428.desktop.g168abd3",
       "manifest": "https://github.com/martin-janci/claude-fleet/releases/download/v0.6.5-dev.428.desktop.g168abd3/release-manifest.json",
-      "manifest_sha256": "eb506cfca818b788e959ee671f3aebb698c8a5a644e721fb002c7c95d738c7e0"
+      "manifest_sha256": "eb506cfca818b788e959ee671f3aebb698c8a5a644e721fb002c7c95d738c7e0",
+      "amendments": [
+        {
+          "component": "android",
+          "manifest": "https://raw.githubusercontent.com/martin-janci/claude-fleet/update-channels/amendments/0.6.5-dev.428.desktop.g168abd3/android.json",
+          "manifest_sha256": "bbd24aa8af713eca0d4b3ee63eb55ca9f74898da0cf8be8c0c928bda9d519492"
+        }
+      ]
     },
     {
       "version": "0.6.5-dev.420.desktop.ge32c034",
