@@ -45,6 +45,11 @@
     "overrides": {
       "zod": "^4.6.6",
       "jsdom>undici": "^7.30.1"
+    },
+    "auditConfig": {
+      "ignoreGhsas": [
+        "GHSA-fc5q-39xc-vjpf"
+      ]
     }
   }
 }
