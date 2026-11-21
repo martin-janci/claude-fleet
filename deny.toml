@@ -13,44 +13,14 @@ all-features = false
 # re-check whenever tauri is bumped and drop the entry once the tree no
 # longer contains it.
 ignore = [
-  # proc-macro-error: unmaintained; via tauri-macros / tauri-codegen (fix is upstream in tauri).
+  # proc-macro-error: unmaintained; via glib-macros <- gtk-rs 0.18 <- tauri on Linux.
   "RUSTSEC-2024-0370",
-  # unic-char-property: unmaintained rust-unic family; via urlpattern <- tauri-utils.
-  "RUSTSEC-2025-0081",
-  # unic-char-range: unmaintained rust-unic family; via urlpattern <- tauri-utils.
-  "RUSTSEC-2025-0075",
-  # unic-common: unmaintained rust-unic family; via urlpattern <- tauri-utils.
-  "RUSTSEC-2025-0080",
-  # unic-ucd-ident: unmaintained rust-unic family; via urlpattern <- tauri-utils.
-  "RUSTSEC-2025-0100",
-  # unic-ucd-version: unmaintained rust-unic family; via urlpattern <- tauri-utils.
-  "RUSTSEC-2025-0098",
   # unsafe-libyaml: unmaintained (archived 2024-03); via serde_yaml 0.9 <- fleet-core,
   # itself deprecated upstream. Issued 2026-10-12, with no patched version. Drop
   # this entry when fleet-core moves `asset.yaml` and friends to a maintained
   # YAML crate (serde-saphyr); that changes how the files are rendered, so it
   # is its own change, not a CI fix.
   "RUSTSEC-2024-0449",
-  # zip 4.x extraction (SUID bits kept, symlink targets and permissions not
-  # confined); issued 2026-10, fixed only in zip >= 9. Our sole path is
-  # tauri-plugin-updater, which builds zip on Windows only and extracts the
-  # update archive after its minisign signature checks out, so the archive is
-  # one we released. No updater release (2.14.0 included) takes zip 9 yet:
-  # drop these when one does and `cargo update -p tauri-plugin-updater` lands.
-  "RUSTSEC-2026-0367",
-  "RUSTSEC-2026-0368",
-  "RUSTSEC-2026-0369",
-  # RUSTSEC-2026-0429: extract() aborts on a symlink entry declaring a huge
-  # size; same path and same signed-archive reasoning as above, fixed in zip 9.
-  "RUSTSEC-2026-0429",
-  # RUSTSEC-2026-0545 (AES entries not authenticated when truncated) and
-  # RUSTSEC-2026-0548 (ZipStreamReader trusts local-header names): same zip 4.x,
-  # same sole path as above. The updater opens the archive with ZipArchive, never
-  # ZipStreamReader, and builds zip without `aes-crypto`; the archive is our own,
-  # minisign-verified. updater 2.14.1 takes zip 9 but drags in a tauri/wry bump,
-  # which is its own change: drop these four zip entries with it.
-  "RUSTSEC-2026-0545",
-  "RUSTSEC-2026-0548",
   # RUSTSEC-2026-0543: chrono marked unmaintained (no fixed release, ever).
   # Our only path is rmcp (and schemars 1 under it); fleet-core does not
   # depend on chrono itself. Drop it when rmcp moves off chrono.
