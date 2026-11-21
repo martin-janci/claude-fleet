@@ -175,7 +175,8 @@ fn the_timeline_puts_sessions_and_errors_on_one_clock() {
     // The session events are stamped with the wall clock when they are
     // written, which on a loaded box is already past `now`: read up to the
     // clock as it is after the writes, or `until` cuts them off.
-    let got = timeline(&s, &json!({ "minutes": 5 }), crate::store::now_unix()).unwrap();
+    let later = crate::store::now_unix();
+    let got = timeline(&s, &json!({ "minutes": 5 }), later).unwrap();
     let items = got["items"].as_array().unwrap();
     let kinds: Vec<(&str, &str)> = items
         .iter()
@@ -195,11 +196,11 @@ fn the_timeline_puts_sessions_and_errors_on_one_clock() {
     let only = timeline(
         &s,
         &json!({ "minutes": 5, "sources": ["sessions"], "host": "local" }),
-        now,
+        later,
     )
     .unwrap();
     assert_eq!(only["items"].as_array().unwrap().len(), 1);
-    let elsewhere = timeline(&s, &json!({ "minutes": 5, "host": "htz" }), now).unwrap();
+    let elsewhere = timeline(&s, &json!({ "minutes": 5, "host": "htz" }), later).unwrap();
     assert_eq!(elsewhere["items"].as_array().unwrap().len(), 0);
     assert!(timeline(&s, &json!({ "sources": ["logs"] }), now).is_err());
 }
