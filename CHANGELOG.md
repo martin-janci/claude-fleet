@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Releases are cut with `scripts/release.sh` — see [docs/RELEASING.md](docs/RELEASING.md).
 Entries before 0.2.4 were plain version bumps and were not recorded individually.
 
-## [0.6.5] - 2026-11-17
+## [0.6.5] - 2026-11-21
 
 ### Added
 - **projects:** merge a repository registered twice into one project row
@@ -82,6 +82,8 @@ Entries before 0.2.4 were plain version bumps and were not recorded individually
 - **missions:** the planner waits out a usage limit instead of refusing
 
 ### Changed
+- **deps:** take zip 9 through tauri-plugin-updater 2.14.1 (#1136)
+- **deps:** ignore picomatch ReDoS advisory with no patched release
 - docs/ux edits run vitest, and the headless runs cover every crate but the desktop's
 - **hub:** limit census tests for five seeded faults, and one more line under "not counted"
 - drop unused imports in the Plan first dialog test
@@ -115,6 +117,9 @@ Entries before 0.2.4 were plain version bumps and were not recorded individually
 - **mcp:** raise the tool-definition budget to 880 bytes a tool
 
 ### Fixed
+- **autofix:** the trust_prompt fix chooses the yes row, never a bare Enter
+- **sessions:** folder trust follows a session to another login
+- **operator:** a failed move leaves the running Control its token
 - **linux:** don't SIGTERM our own threads on start (#1132)
 - **accounts:** back off a session whose account switch keeps failing
 - **catalog:** retry an owed host ahead of the next hourly tick
