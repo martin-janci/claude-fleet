@@ -453,7 +453,8 @@ pub fn freer_login_for(
     not_account: &str,
     now: i64,
 ) -> Result<Option<HostLogin>, IpcError> {
-    let forbidden = crate::service::project_accounts::forbidden_accounts(s, project_id)?;
+    let forbidden =
+        crate::service::project_accounts::forbidden_accounts_on(s, project_id, host_alias)?;
     best_login(s, host_alias, now, false, |l| {
         l.account_uuid != not_account && !forbidden.contains(&l.account_uuid)
     })
@@ -525,7 +526,10 @@ pub fn login_with_headroom_for(
     now: i64,
 ) -> Result<Option<String>, IpcError> {
     let profile = profile.map(str::trim).filter(|p| !p.is_empty());
-    let forbidden = crate::service::project_accounts::forbidden_accounts(s, project_id)?;
+    // Host-aware (review w09-2 / w01-3): an org the host is filed under
+    // forbids like the project's own, as `refuse_forbidden` counts it.
+    let forbidden =
+        crate::service::project_accounts::forbidden_accounts_on(s, project_id, host_alias)?;
     if !forbidden.is_empty() {
         let account = login_account(s, host_alias, profile, now)?.map(|a| a.login.account_uuid);
         if account.is_some_and(|a| forbidden.contains(&a)) {
@@ -737,7 +741,11 @@ pub fn check_account_headroom(
             .map_err(|_| IpcError::new(codes::E_INTERNAL, "store lock poisoned"))?;
         (
             host_and_line(&s, args)?,
-            crate::service::project_accounts::forbidden_accounts(&s, args.project_id)?,
+            crate::service::project_accounts::forbidden_accounts_on(
+                &s,
+                args.project_id,
+                &args.host_alias,
+            )?,
         )
     };
     let usage: Vec<AccountUsageSnapshot> = {
@@ -762,7 +770,11 @@ pub fn served_check_account_headroom(
         .lock()
         .map_err(|_| IpcError::new(codes::E_INTERNAL, "store lock poisoned"))?;
     let (host, pause_at, _) = host_and_line(&s, args)?;
-    let forbidden = crate::service::project_accounts::forbidden_accounts(&s, args.project_id)?;
+    let forbidden = crate::service::project_accounts::forbidden_accounts_on(
+        &s,
+        args.project_id,
+        &args.host_alias,
+    )?;
     let usage = s.bus_account_usage();
     let h = headroom(&host, args.profile.as_deref(), &usage, pause_at, now);
     Ok(without_forbidden(h, &host, &forbidden))
@@ -1191,6 +1203,33 @@ mod tests {
         assert!(h.over);
         assert_eq!(h.suggestion.unwrap().profile.as_deref(), Some("work"));
         assert_eq!(h.logins.len(), 2);
+
+        // Review w10-4: an org the host is filed under (a host-qualified
+        // rule) that forbids `acct-work` takes it out of the suggestion,
+        // as Switch account would refuse it.
+        {
+            let s = store.lock().unwrap();
+            let p = s.upsert_project("acme", "api", "/srv/acme/api").unwrap();
+            let org = s.add_org("Client", None, false).unwrap().id;
+            s.add_org_rule(crate::store::OrgRuleRow {
+                id: 0,
+                org_id: org,
+                owner: None,
+                repo: None,
+                path_prefix: None,
+                host_alias: Some("mac".into()),
+            })
+            .unwrap();
+            s.set_account_blocks("acct-work", None, Some(&[org]))
+                .unwrap();
+            drop(s);
+            let in_project = CheckAccountHeadroomArgs {
+                project_id: Some(p),
+                ..args.clone()
+            };
+            let h = served_check_account_headroom(&in_project, &store, now).unwrap();
+            assert!(h.suggestion.is_none(), "{:?}", h.suggestion);
+        }
 
         let missing = CheckAccountHeadroomArgs {
             host_alias: "gone".into(),
