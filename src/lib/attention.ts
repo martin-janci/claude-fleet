@@ -139,10 +139,48 @@ export interface AttentionOptions {
   facts?: AttentionFacts;
 }
 
-/** A usage window at its limit. Mirrors `attention::Limit`. */
+/** A usage window at its limit. Mirrors `attention::Limit`. `weekly_opus`
+ *  / `weekly_sonnet` are a model's own weekly window (review w10-5). */
 export interface AttentionLimit {
-  window: 'five_hour' | 'weekly';
+  window: 'five_hour' | 'weekly' | 'weekly_opus' | 'weekly_sonnet';
   resets_at: number | null;
+}
+
+/** A model with a weekly window of its own. Mirrors `account_usage::ModelFamily`. */
+export type ModelFamily = 'opus' | 'sonnet';
+
+/** The model family a `claude --model` value (`launch_model`) bills: an
+ *  alias (`opus`, `sonnet[1m]`) or a full id, any case. `null` for no model
+ *  (the host's default), one with no window of its own (`haiku`), and one
+ *  that is not one model (`opusplan`, `default`, `best`). Mirrors
+ *  `account_usage::model_family`. */
+export function modelFamily(model: string | null | undefined): ModelFamily | null {
+  if (!model) return null;
+  const m = model.trim().toLowerCase().split('[')[0];
+  if (m.includes('opusplan')) return null;
+  if (m.includes('opus')) return 'opus';
+  if (m.includes('sonnet')) return 'sonnet';
+  return null;
+}
+
+/** The limit that holds a session (review w10-5): its account's 5-hour or
+ *  weekly window, and its launch model's own weekly window; both at their
+ *  limit, the one that frees last (no reset time holds longest). A session
+ *  on the default model ignores the model windows. Mirrors
+ *  `attention::Facts::limit_for`. */
+export function limitFor(
+  facts: AttentionFacts | undefined,
+  sess: { account_uuid?: string | null; launch_model?: string | null },
+): AttentionLimit | undefined {
+  const uuid = sess.account_uuid;
+  if (!facts || !uuid) return undefined;
+  const acct = facts.limited_accounts?.[uuid];
+  const fam = modelFamily(sess.launch_model);
+  const model = fam ? (facts.limited_models?.[uuid]?.[fam] ?? undefined) : undefined;
+  if (!acct) return model;
+  if (!model) return acct;
+  const frees = (l: AttentionLimit) => l.resets_at ?? Number.MAX_SAFE_INTEGER;
+  return frees(model) > frees(acct) ? model : acct;
 }
 
 /** Mirrors `attention::Facts` (step 2.4): which hosts are down and which
@@ -151,6 +189,10 @@ export interface AttentionLimit {
 export interface AttentionFacts {
   down_hosts?: readonly string[];
   limited_accounts?: Readonly<Record<string, AttentionLimit>>;
+  /** Accounts with a model's own weekly window at its limit, by uuid
+   *  (review w10-5): it holds only a session launched on that model
+   *  ({@link limitFor}). */
+  limited_models?: Readonly<Record<string, Readonly<Partial<Record<ModelFamily, AttentionLimit>>>>>;
   uncredentialed_accounts?: readonly string[];
   /** The logins fleet saw signed out, by host and profile (`null` = the
    *  host's own login): a session is blocked on its own login, not on its
@@ -383,7 +425,7 @@ function blockedBy(s: SessionRow, opts: AttentionOptions): TriageBucket | null {
   // Only a Claude pane bills a Claude login: a Codex or Hermes row is never
   // held by Claude's limit or sign-in (the hub's `needs_attention_in` too).
   if (s.agent && s.agent !== 'claude') return null;
-  const limit = s.account_uuid ? f.limited_accounts?.[s.account_uuid] : undefined;
+  const limit = limitFor(f, s);
   if (limit && (limit.resets_at == null || limit.resets_at > opts.now)) return 'account_limit';
   if (loginSignedOut(f, s.host_alias, s.claude_profile)) return 'no_credentials';
   if (s.account_uuid && f.uncredentialed_accounts?.includes(s.account_uuid)) return 'no_credentials';

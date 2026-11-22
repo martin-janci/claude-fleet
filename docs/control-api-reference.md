@@ -169,7 +169,7 @@ Whether starting or switching a session on host_alias under login `profile` (a p
 
 Access: the master, a paired device or a per-host token · readonly tokens too · deadline 60 s.
 
-Parameters (* required): `host_alias`*, `profile`, `project_id`
+Parameters (* required): `host_alias`*, `model`, `profile`, `project_id`
 
 ### `check_host`
 

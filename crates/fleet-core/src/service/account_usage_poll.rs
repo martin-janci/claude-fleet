@@ -114,16 +114,39 @@ fn reannounce_lapsed(
     cache: &Mutex<UsageCache>,
     store: Option<&Mutex<Store>>,
 ) {
-    let limit = bus.attention_facts().limited_accounts.get(account).copied();
-    let was_reset = {
-        let mut limits = poller.limits.lock().unwrap_or_else(PoisonError::into_inner);
-        match limit.and_then(|l| l.resets_at) {
-            Some(r) => limits.insert(account.to_string(), r),
-            None => limits.remove(account),
-        }
-    };
+    use crate::service::account_usage::ModelFamily;
+    let facts = bus.attention_facts();
+    let models = facts.limited_models.get(account);
+    // The account's own windows, then each model window (review w10-5),
+    // each under a key of its own: any one lapsing re-announces the
+    // account's sessions.
+    let held = [
+        (
+            account.to_string(),
+            facts.limited_accounts.get(account).copied(),
+        ),
+        (
+            format!("{account}#opus"),
+            models.and_then(|m| m.get(ModelFamily::Opus)),
+        ),
+        (
+            format!("{account}#sonnet"),
+            models.and_then(|m| m.get(ModelFamily::Sonnet)),
+        ),
+    ];
     let fetched_at = lock_cache(cache).snapshot(account).fetched_at;
-    if !limit_lapsed(was_reset, limit.is_some(), fetched_at) {
+    let mut lapsed = false;
+    {
+        let mut limits = poller.limits.lock().unwrap_or_else(PoisonError::into_inner);
+        for (key, limit) in held {
+            let was_reset = match limit.and_then(|l| l.resets_at) {
+                Some(r) => limits.insert(key, r),
+                None => limits.remove(&key),
+            };
+            lapsed |= limit_lapsed(was_reset, limit.is_some(), fetched_at);
+        }
+    }
+    if !lapsed {
         return;
     }
     let Some(store) = store else { return };
@@ -267,10 +290,15 @@ async fn recheck_logins(
 
 /// Whether `bus`'s facts hold `account` at a limit or without a login: the
 /// two account inputs of a session's `Blocked` reasons.
-fn account_blocked(bus: &dyn EventBus, account: &str) -> (bool, bool) {
+fn account_blocked(
+    bus: &dyn EventBus,
+    account: &str,
+) -> (bool, Option<crate::service::attention::ModelLimits>, bool) {
     let f = bus.attention_facts();
     (
         f.limited_accounts.contains_key(account),
+        // A model window (review w10-5) blocks the sessions on that model.
+        f.limited_models.get(account).cloned(),
         f.uncredentialed_accounts.contains(account),
     )
 }

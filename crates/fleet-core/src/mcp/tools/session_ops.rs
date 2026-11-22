@@ -460,11 +460,14 @@ impl FleetTools {
             )
             .map_err(to_mcp_err)?;
             if !over_limit_ok {
-                crate::service::account_limits::refuse_over_limit_for(
+                // Read for the model it starts on: that model's own weekly
+                // window counts too (review w10-5).
+                crate::service::account_limits::refuse_over_limit_on(
                     &s,
                     Some(p.project_id),
                     &p.host_alias,
                     p.profile.as_deref(),
+                    p.model.as_deref(),
                     crate::store::now_unix(),
                 )
                 .map_err(to_mcp_err)?;

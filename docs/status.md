@@ -303,7 +303,19 @@ true` on the login tools). Copied logins are detected (#1117, landed;
 docs/accounts.md → *Two copies of one login*): the health probe prints a
 short hash of each login's refresh token (`loginfp=`, migration 228,
 `service::login_conflicts`), and one login copied onto another host or
-profile is flagged in Hosts and `fleet_health`. Control's own account (F7, ON:
+profile is flagged in Hosts and `fleet_health`. Every login a conflict
+names now ranks last wherever fleet picks a login (review w09-9, landed:
+`best_login`, placement, auto-switch, a move's target login, the desktop's
+New session default and Switch suggestion), still used when nothing else is
+left, never refused. Per-model weekly windows (`seven_day_opus`,
+`seven_day_sonnet`) count for sessions launched on that model (review
+w10-5, landed; docs/accounts.md → *Accounts and usage*): the session row
+carries `launch_model` on the wire, the attention facts `limited_models`
+(hub and desktop), and "Paused · limit", auto-switch, the headroom check (`model`) and
+`new_session` / `restart_session`'s over-limit refusal read them on the
+hub and the desktop; routines, missions, resumes and ticket starts still
+read the account windows alone, and the phone mirrors it in its own
+change. Control's own account (F7, ON:
 `control.switch_at_limit`): `operator_status` reports its login, usage and
 "Paused · limit" / "signed out"; a birth takes the login it had on that host
 or the best one there, not the host's default; at its limit or signed out,

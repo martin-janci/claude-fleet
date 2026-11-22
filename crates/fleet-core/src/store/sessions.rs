@@ -1241,16 +1241,21 @@ impl Store {
     }
 
     /// Record the model a session launches with (`None` = the host's
-    /// default). Not client-visible, so no event.
+    /// default). `launch_model` is on the row (a model's weekly window
+    /// holds the session, review w10-5), so a change emits
+    /// `session_updated`.
     pub fn set_session_launch_model(
         &self,
         id: i64,
         model: Option<&str>,
     ) -> Result<(), rusqlite::Error> {
-        self.conn.execute(
-            "UPDATE sessions SET launch_model = ?1 WHERE id = ?2",
+        let n = self.conn.execute(
+            "UPDATE sessions SET launch_model = ?1 WHERE id = ?2 AND launch_model IS NOT ?1",
             rusqlite::params![model, id],
         )?;
+        if n > 0 {
+            self.emit_session(id)?;
+        }
         Ok(())
     }
 

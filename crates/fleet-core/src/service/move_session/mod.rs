@@ -1866,6 +1866,20 @@ pub(crate) fn target_login(
     None
 }
 
+/// PURE: [`target_login`] with the logins `conflicted` names (a login
+/// conflict, `service::login_conflicts::Flagged`) passed over first, and
+/// taken only when no other login fits (review w09-9).
+pub(crate) fn target_login_ranked(
+    target: &crate::store::HostRow,
+    profile: Option<&str>,
+    account: &str,
+    may: impl Fn(Option<&str>) -> bool,
+    conflicted: impl Fn(Option<&str>) -> bool,
+) -> Option<Option<String>> {
+    target_login(target, profile, account, |p| may(p) && !conflicted(p))
+        .or_else(|| target_login(target, profile, account, &may))
+}
+
 /// The login a session in `project_id` that runs under `profile` on
 /// `account` (when known) resumes under on `target`, held to the account
 /// rules (`service::run_login`): [`target_login`]'s chain with every login
@@ -1928,7 +1942,8 @@ pub(crate) fn target_login_in(
         allowed.push((login, ok));
     }
     let may = |p: Option<&str>| allowed.iter().any(|(l, ok)| *ok && l.as_deref() == p);
-    match target_login(&dst, profile, account, may) {
+    let flagged = crate::service::login_conflicts::Flagged::in_store(s);
+    match target_login_ranked(&dst, profile, account, may, |p| flagged.has(target, p)) {
         Some(login) => Ok(login),
         None => run_login::choose(s, Some(project_id), target, None, now),
     }
@@ -3806,6 +3821,17 @@ mod tests {
         assert_eq!(
             target_login(&htz(), Some("work"), "acct-a", |p| p != Some("ci")),
             Some(Some("work".into()))
+        );
+        // Review w09-9: a login a conflict names comes after every other
+        // that fits, and is still taken when it is the only one.
+        let ci = |p: Option<&str>| p == Some("ci");
+        assert_eq!(
+            target_login_ranked(&htz(), Some("work"), "acct-a", any, ci),
+            Some(Some("work".into()))
+        );
+        assert_eq!(
+            target_login_ranked(&htz(), Some("missing"), "acct-a", any, ci),
+            Some(Some("ci".into()))
         );
         // A signed-out login on the account is passed over.
         s.set_host_signed_out_logins(

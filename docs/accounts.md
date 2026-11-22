@@ -264,7 +264,8 @@ Off by default. The owner turns it on for the fleet in Settings › Limits
 (`accounts.auto_switch`); from then on, a session that shows **Paused ·
 limit** (a live Claude session, not working, not waiting on a dialog or a
 form and not stuck, whose account has its 5-hour or weekly window fully
-used) is resumed under the login on its host with the most headroom, without anyone pressing Switch account. It is the same
+used, or, for a session launched on Opus or Sonnet, that model's own weekly
+window: *Model windows* below) is resumed under the login on its host with the most headroom, without anyone pressing Switch account. It is the same
 restart Switch account makes (`restart_session { profile }`), so the
 conversation carries on and the row keeps the new login.
 
@@ -305,7 +306,9 @@ host has room, offering only Wait.
 Which login: another account on the same host (a second login on the same
 account shares its limit), not signed out, with a usage reading under
 `accounts.pause_at` taken in the last hour, not at a limit and not past its
-daily spend limit, the least used first. For an account no session in the
+daily spend limit, the least used first (use read for the session's own
+model), a login a login conflict names only when no other qualifies (*Two
+copies of one login*). For an account no session in the
 fleet runs on, a reading up to a day old counts: nothing under such a login
 refreshes its access token, so after a few idle hours the usage check reads
 "access token expired" and its number stops moving, as its use does. The
@@ -542,6 +545,21 @@ is not a conflict: it has no refresh token to revoke, nor is a setup token
 put on a profile (the dead `.credentials.json` under it no longer counts).
 A hidden host takes no part in the match.
 
+Fleet does not refuse a flagged login, but it never picks one for you while
+another would do (review w09-9): wherever fleet chooses the login, every
+login a conflict names (the host login of a Keychain-and-file host, each
+login of a shared account, each copy of a copied login) ranks after every
+other. That covers the login a start with no login named steps onto
+(`account_limits::login_with_headroom_for`, and the over-limit refusal's
+suggestion), placement (`suggest_placement` candidates, with the reason
+"ranked last: a login conflict names this login"), automatic switching's
+pick, a move's login on the target, and the New session dialog's default
+and Switch account's suggestion on the desktop (`check_account_headroom`
+marks such a login `conflicted: true`). Headroom still decides within each
+group, and a login under the pause line still beats one over it. When a
+flagged login is all that is left it is used: a session on it is better
+than no session, and the person can still pick it on purpose.
+
 ### Control's own login
 
 `operator_status` reports the login Control runs under, its account and
@@ -575,6 +593,28 @@ script runs with `CLAUDE_CONFIG_DIR` at the profile and reads that
 profile's `.credentials.json`. The source shows as `<host> (<profile>)`. A
 host's own login is asked before its profiles. On macOS, where Claude Code
 keeps the token in the Keychain, fleet cannot read it, as for a host login.
+
+**Model windows.** Besides the 5-hour and weekly windows, an account's
+reading can carry a weekly window per model (`seven_day_opus`,
+`seven_day_sonnet`; the Accounts card shows them as Opus and Sonnet). Such a
+window counts only for a session launched on that model: its row's
+`launch_model` (the `claude --model` it starts with, an alias such as
+`opus` / `sonnet[1m]` or a full id such as `claude-opus-4-5-20251101`)
+names the model. For those sessions it is part of **Paused · limit** (read
+"Paused · weekly Opus limit on …"), automatic switching (a session leaves
+when its model's window is spent, and goes only where that window has
+room), and the headroom a start or switch on that model reads
+(`check_account_headroom { model }`, the over-limit refusal of
+`new_session` and `restart_session`, placement for a start on a model). A
+session on the host's default model (no `launch_model`), or on a model with
+no window of its own (`haiku`, `opusplan`, `default`), ignores the model
+windows: Claude Code moves a default-model session off a model at its cap by
+itself, and a session on another model never touches the window. The hub
+sends `launch_model` on every session row (absent for the host's default),
+and the usage readings already carry the model windows, so the desktop
+(`attentionFactsFrom` → `limited_models`, `limitFor`) and the phone draw the
+same row as the hub's `attention::Facts::limit_for`. Routines, missions, resumes and ticket starts still read the
+two account windows alone.
 
 The readings are kept for 35 days. `fleet-hub census limits` counts from
 them how often every account was at its limit at the same time, the one

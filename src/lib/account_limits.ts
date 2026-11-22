@@ -20,6 +20,20 @@ export interface HostLogin {
    *  `/login`, whatever its last reading says. Absent = signed in (or an
    *  older backend). */
   signed_out?: boolean;
+  /** A login conflict names this login (a copied login, the macOS Keychain
+   *  and a file, two logins on one account): a pick ranks it after every
+   *  other, still used when nothing else is left (review w09-9). Absent =
+   *  none (or an older backend). */
+  conflicted?: boolean;
+}
+
+/** Of two candidates, whether `a` ranks before `b`: a conflicted login after
+ *  every other, then the least used (review w09-9; the hub's `min_pick`). */
+function ranksBefore(a: HostLogin, b: HostLogin): boolean {
+  const ca = !!a.conflicted;
+  const cb = !!b.conflicted;
+  if (ca !== cb) return cb;
+  return (a.used_pct as number) < (b.used_pct as number);
 }
 
 /** Mirrors `account_limits::Headroom`. */
@@ -33,15 +47,20 @@ export interface Headroom {
 
 /** `projectId`: the project the work is in, so the suggestion is never a
  *  login on an account it forbids (docs/accounts.md, *Keep an account off a
- *  project*). Sent only when known: an older hub ignores it either way. */
+ *  project*). `model`: the model the session runs or will run on
+ *  (`launch_model`), so that model's own weekly window counts toward each
+ *  login's use (review w10-5). Each sent only when known: an older hub
+ *  ignores them either way. */
 export function checkAccountHeadroom(
   hostAlias: string,
   profile: string | null,
   projectId?: number | null,
+  model?: string | null,
 ): Promise<Result<Headroom>> {
-  return invokeCmd<Headroom>('check_account_headroom', {
-    args: projectId == null ? { host_alias: hostAlias, profile } : { host_alias: hostAlias, profile, project_id: projectId },
-  });
+  const args: Record<string, unknown> = { host_alias: hostAlias, profile };
+  if (projectId != null) args.project_id = projectId;
+  if (model) args.model = model;
+  return invokeCmd<Headroom>('check_account_headroom', { args });
 }
 
 /** How a login reads in a choice: "work (m.janci@…)" or the account alone. */
@@ -118,6 +137,7 @@ type SwitchSession = {
   account_uuid?: string | null;
   project_id?: number | null;
   org_id?: number | null;
+  launch_model?: string | null;
 };
 
 /** Where a paused session would go: the login on its host with the most
@@ -135,7 +155,7 @@ export async function switchCheck(
   sess: SwitchSession,
   opts: { signedOut?: boolean } = {},
 ): Promise<Result<{ target: HostLogin | null; headroom: Headroom | null }>> {
-  const h = await checkAccountHeadroom(sess.host_alias, sess.claude_profile ?? null, sess.project_id);
+  const h = await checkAccountHeadroom(sess.host_alias, sess.claude_profile ?? null, sess.project_id, sess.launch_model);
   if (!h.ok) return h;
   // An empty answer (an older backend): nothing to propose.
   if (!h.value) return { ok: true, value: { target: null, headroom: null } };
@@ -207,7 +227,7 @@ export function headroomForAccount(
     for (const l of h.logins) {
       if (l.account_uuid === chosen.account_uuid || l.signed_out || l.used_pct == null || l.used_pct >= h.pause_at_pct) continue;
       if (forbidden.includes(l.account_uuid)) continue;
-      if (suggestion == null || l.used_pct < (suggestion.used_pct as number)) suggestion = l;
+      if (suggestion == null || ranksBefore(l, suggestion)) suggestion = l;
     }
   }
   return { ...h, chosen, over, suggestion };
@@ -224,12 +244,13 @@ export async function moveToHeadroom(
     account_uuid?: string | null;
     project_id?: number | null;
     org_id?: number | null;
+    launch_model?: string | null;
   }[],
   restart: (host: string, name: string, profile: string) => Promise<Result<unknown>>,
 ): Promise<{ moved: number; stayed: number; nowhere: number; failed: number }> {
   const out = { moved: 0, stayed: 0, nowhere: 0, failed: 0 };
   for (const s of rows) {
-    const r0 = await checkAccountHeadroom(s.host_alias, s.claude_profile ?? null, s.project_id);
+    const r0 = await checkAccountHeadroom(s.host_alias, s.claude_profile ?? null, s.project_id, s.launch_model);
     if (!r0.ok) {
       out.failed += 1;
       continue;
@@ -265,7 +286,7 @@ export async function moveToAccount(
   if (accountUuid === null) return moveToHeadroom(rows, restart);
   const out = { moved: 0, stayed: 0, nowhere: 0, failed: 0 };
   for (const s of rows) {
-    const r0 = await checkAccountHeadroom(s.host_alias, s.claude_profile ?? null, s.project_id);
+    const r0 = await checkAccountHeadroom(s.host_alias, s.claude_profile ?? null, s.project_id, s.launch_model);
     if (!r0.ok) {
       out.failed += 1;
       continue;
@@ -290,13 +311,13 @@ export async function moveToAccount(
 }
 
 /** The New session dialog's default (step 4.5): the login with the most
- *  headroom among the signed-in ones with a reading; `null` when none has
- *  one. */
+ *  headroom among the signed-in ones with a reading, a conflicted one only
+ *  when no other has one (review w09-9); `null` when none has one. */
 export function freestLogin(logins: readonly HostLogin[]): HostLogin | null {
   let best: HostLogin | null = null;
   for (const l of logins) {
     if (l.used_pct == null || l.signed_out) continue;
-    if (best == null || l.used_pct < (best.used_pct as number)) best = l;
+    if (best == null || ranksBefore(l, best)) best = l;
   }
   return best;
 }

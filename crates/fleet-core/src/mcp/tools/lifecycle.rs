@@ -300,6 +300,14 @@ impl FleetTools {
             Reach::Own,
             "the session to restart",
         )?;
+        // The model the restart runs on: the one it asks for ("" = the
+        // host's default), else the one the session launched with (review
+        // w10-5).
+        let launch_model = match p.model.as_deref().map(str::trim) {
+            Some("") => None,
+            Some(m) => Some(m.to_string()),
+            None => row.launch_model.clone(),
+        };
         let (host_alias, name) = (row.host_alias, row.tmux_name);
         // A switch onto another login (review w02-8) takes the checks a
         // start on it takes: not onto a login fleet knows is signed out
@@ -342,11 +350,12 @@ impl FleetTools {
                 if !person_chose {
                     // The login it names instead is one the session's
                     // project allows.
-                    crate::service::account_limits::refuse_over_limit_for(
+                    crate::service::account_limits::refuse_over_limit_on(
                         &s,
                         row.project_id,
                         &host_alias,
                         target,
+                        launch_model.as_deref(),
                         crate::store::now_unix(),
                     )
                     .map_err(to_mcp_err)?;

@@ -6611,6 +6611,9 @@ fn one_full_row() -> serde_json::Value {
     // each is skipped when absent (review wave 24, w24-1).
     row.pinned_at = Some(11);
     row.prompt_suggestion = Some("run the tests".into());
+    // A launch model, for the same reason (review w10-5: a model's weekly
+    // window holds the session).
+    row.launch_model = Some("opus".into());
     row.last_viewed_at = Some(12);
     row.origin = Some("operator".to_string());
     row.origin_ref = Some("9".to_string());
@@ -6653,6 +6656,7 @@ fn the_phone_view_is_exactly_the_columns_a_pager_reads() {
             "last_stop_at",
             "last_turn_at",
             "last_viewed_at",
+            "launch_model",
             "lost_at",
             "lost_reason",
             "needs_attention",

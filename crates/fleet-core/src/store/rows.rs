@@ -421,6 +421,15 @@ pub struct SessionRow {
     /// Absent when nothing is proposed, and from an older hub.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_suggestion: Option<String>,
+    /// The `claude --model` the session launches with
+    /// (`sessions.launch_model`, migration 075): an alias (`opus`,
+    /// `sonnet[1m]`) or a full model id; `None` = the host's default. A
+    /// model's own weekly window (`seven_day_opus` / `seven_day_sonnet`)
+    /// holds the session only when this names that model
+    /// (`account_usage::model_family`, review w10-5). Absent when unset,
+    /// and from an older hub.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_model: Option<String>,
     /// What a rule, Jev or an LLM proposes about this session, one per
     /// feature (step 2.8): read from `decision_runs`, never stored on the
     /// row. A person confirms or changes each; none ever acts. Empty, and
@@ -790,7 +799,7 @@ pub(super) const SESSION_COLUMNS: &str = concat!(
     " AS proposals, \
      (SELECT json_object('draft', d.draft, 'why', d.why, 'updated_at', d.updated_at) \
         FROM form_drafts d WHERE d.session_id = sessions.id) AS form_draft, \
-     pinned_at, prompt_suggestion"
+     pinned_at, prompt_suggestion, launch_model"
 );
 
 /// Decode `sessions.pr_evidence`. Malformed text (never written by us)
@@ -914,6 +923,7 @@ pub(super) fn map_session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Sessi
             .and_then(|j| serde_json::from_str(&j).ok()),
         pinned_at: row.get(75)?,
         prompt_suggestion: row.get(76)?,
+        launch_model: row.get(77)?,
     })
     .map(|mut r| {
         // A link's org is its tracker item's, else the session's (M5).
