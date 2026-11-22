@@ -185,10 +185,21 @@ export interface LoginAt {
 /** The fleet's copied logins: groups of two or more logins holding one refresh
  *  token, matched by fingerprint (one's newest among the other's). Mirrors
  *  `login_conflicts::copied`. */
-export function copiedLogins(hosts: readonly Pick<HostRow, 'alias' | 'login_fingerprints'>[]): LoginAt[][] {
-  const logins = hosts.flatMap((h) =>
-    (h.login_fingerprints ?? []).map((f) => ({ at: { host: h.alias, profile: f.profile ?? null }, seen: f.seen })),
-  );
+export function copiedLogins(
+  hosts: readonly (Pick<HostRow, 'alias' | 'login_fingerprints'> & Partial<Pick<HostRow, 'hidden' | 'claude_profiles'>>)[],
+): LoginAt[][] {
+  // A hidden host takes no part (its fingerprints are frozen, review w02-3),
+  // nor a setup-token profile, whose .credentials.json is a login it no
+  // longer uses (w11-5), as `login_conflicts::copied`.
+  const tokenProfile = (h: (typeof hosts)[number], profile: string | null | undefined) =>
+    profile != null && (h.claude_profiles ?? []).some((p) => p.name === profile && p.credential === 'setup_token');
+  const logins = hosts
+    .filter((h) => !h.hidden)
+    .flatMap((h) =>
+      (h.login_fingerprints ?? [])
+        .filter((f) => !tokenProfile(h, f.profile))
+        .map((f) => ({ at: { host: h.alias, profile: f.profile ?? null }, seen: f.seen })),
+    );
   const same = (a: string[], b: string[]) => (a.length > 0 && b.includes(a[0])) || (b.length > 0 && a.includes(b[0]));
   const taken = new Array<boolean>(logins.length).fill(false);
   const out: LoginAt[][] = [];
@@ -256,11 +267,14 @@ export function describeLoginConflict(alias: string, c: LoginConflict): string {
   if (c.kind === 'copied') {
     const self = c.profile === null ? 'the host login' : `profile ${c.profile}`;
     const others = c.copies.map((o) => (o.profile === null ? `the host login on ${o.host}` : `profile ${o.profile} on ${o.host}`));
+    // Review w02-5: a copy that is still signed in has no Sign in again
+    // button anywhere, so name the command that signs it in on its own.
+    const login = c.profile === null ? 'claude /login' : `CLAUDE_CONFIG_DIR=~/.claude-profiles/${c.profile} claude /login`;
     return (
       `${alias}: ${self} is a copy of one Claude login that is also ${others.join(' and ')}: they share one refresh ` +
       `token, so each refresh revokes the others' copy and they take turns hitting "Login expired". Sign each host in ` +
-      `on its own (Sign in again), and stop copying .credentials.json between hosts (a dotfiles or ~/.claude sync, a ` +
-      `copied profile dir).`
+      `on its own (ssh ${alias}, then run ${login}), and stop copying .credentials.json between hosts (a ` +
+      `dotfiles or ~/.claude sync, a copied profile dir).`
     );
   }
   const names = c.logins.map((l) => (l === null ? 'the host login' : `profile ${l}`));

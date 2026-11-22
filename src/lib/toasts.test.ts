@@ -116,7 +116,6 @@ describe('toasts store', () => {
 
   it('pushError shows a refusal and does not report it as an error', () => {
     const refusals = [
-      { code: 'E_FORBIDDEN', message: "kill_session refused: fleet-operator on mac is the UX agent's own session" },
       { code: 'E_ACCOUNT_FORBIDDEN', message: "mac's own login is forbidden for acme/app" },
       { code: 'E_ACCOUNT_LIMIT', message: 'the login is past its limit' },
       { code: 'E_CONFIRM_REQUIRED', message: 'needs a confirmation' },
@@ -128,6 +127,14 @@ describe('toasts store', () => {
     // A fault that happens to say "refused" is still reported.
     pushError({ code: 'E_INVALID_STATE', message: 'session 1 points at worktree 2 of project 3' }, 'Switching the login failed');
     expect(inv().mock.calls.filter((c) => c[0] === 'report_client_error')).toHaveLength(1);
+  });
+
+  it('pushError reports E_FORBIDDEN at warn, since faults surface as it too (review w07-3)', () => {
+    pushError({ code: 'E_FORBIDDEN', message: 'tool reprovision_host is not served' }, 'Reprovision failed');
+    expect(get(toasts).map((t) => t.code)).toEqual(['E_FORBIDDEN']);
+    const reported = inv().mock.calls.filter((c) => c[0] === 'report_client_error');
+    expect(reported).toHaveLength(1);
+    expect((reported[0][1] as { args: { code: string; level: string } }).args).toMatchObject({ code: 'E_FORBIDDEN', level: 'warn' });
   });
 
   it('pushResultError is a no-op on Ok and surfaces Err', () => {

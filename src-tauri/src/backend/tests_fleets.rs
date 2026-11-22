@@ -840,6 +840,81 @@ fn retry_rebuilds_a_fleet_whose_token_could_not_be_read() {
     assert_eq!(w.links.followed.lock().unwrap().len(), 1);
 }
 
+/// A `follow` that says it was entered and then waits to be let go: the
+/// window in which Retry's `connect` is still running.
+struct GatedLinks {
+    entered: Mutex<std::sync::mpsc::Sender<()>>,
+    release: Mutex<std::sync::mpsc::Receiver<()>>,
+    cancels: Mutex<Vec<CancellationToken>>,
+}
+
+impl FleetLinks for GatedLinks {
+    fn follow(
+        &self,
+        _fleet: &str,
+        _cfg: RemoteConfig,
+        _hub: Arc<HubBackend>,
+        _sink: Arc<dyn RemoteEventSink>,
+        _status: Arc<HubConnectionStatus>,
+        cancel: CancellationToken,
+    ) {
+        self.cancels.lock().unwrap().push(cancel);
+        self.entered.lock().unwrap().send(()).unwrap();
+        self.release.lock().unwrap().recv().unwrap();
+    }
+}
+
+/// Review w14-3: a Remove that lands while Retry is connecting wins; the
+/// fleet does not come back, and the bridge Retry started is stopped.
+#[test]
+fn a_remove_during_retry_keeps_the_fleet_removed() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open_with_bus(&dir.path().join("state.db"), Arc::new(NoopEventBus)).unwrap();
+    store
+        .set_setting(
+            FLEETS_KEY,
+            &serde_json::to_string(&[record("company", "https://fleet.papayapos.dev")]).unwrap(),
+        )
+        .unwrap();
+    let store = Arc::new(Mutex::new(store));
+    let tokens = Tokens::with(&[]);
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let links = Arc::new(GatedLinks {
+        entered: Mutex::new(entered_tx),
+        release: Mutex::new(release_rx),
+        cancels: Mutex::new(Vec::new()),
+    });
+    let fleets = Fleets::new(
+        Arc::clone(&store),
+        Arc::clone(&tokens) as Arc<dyn FleetTokens>,
+        Arc::new(Sink::default()) as Arc<dyn RemoteEventSink>,
+        Arc::clone(&links) as Arc<dyn FleetLinks>,
+        CancellationToken::new(),
+    );
+    fleets.load();
+    assert!(fleets.list(&standalone())[1].unavailable.is_some());
+    tokens.for_fleet("company").set("cl_late").unwrap();
+    std::thread::scope(|scope| {
+        let retry = scope.spawn(|| fleets.retry("company"));
+        entered_rx.recv().unwrap();
+        fleets.remove("company").unwrap();
+        release_tx.send(()).unwrap();
+        let err = retry.join().unwrap().unwrap_err();
+        assert_eq!(err.code, codes::E_NOTFOUND);
+    });
+    assert!(
+        fleets.list(&standalone()).iter().all(|f| f.id != "company"),
+        "the removed fleet came back"
+    );
+    let cancels = links.cancels.lock().unwrap();
+    assert_eq!(cancels.len(), 1);
+    assert!(
+        cancels[0].is_cancelled(),
+        "the bridge Retry started still runs"
+    );
+}
+
 // --- the source -------------------------------------------------------------
 
 /// The body of `#[tauri::command] … fn name(`, up to the next command.

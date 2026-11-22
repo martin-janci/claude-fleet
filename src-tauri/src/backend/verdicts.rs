@@ -168,6 +168,12 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         },
     ),
     (
+        "restart_app",
+        Verdict::SameInBoth {
+            why: "restarts this process, the way out of its own poisoned store",
+        },
+    ),
+    (
         "set_tray_state",
         Verdict::SameInBoth {
             why: "this window's own tray icon, which it has either way",

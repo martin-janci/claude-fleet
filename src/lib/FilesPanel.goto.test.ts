@@ -69,6 +69,13 @@ describe('FilesPanel Go to file', () => {
       expect(invoke.mock.calls.some((c) => c[0] === 'repo_file' && c[1].args.path === 'scripts/hub-e2e.sh')).toBe(true),
     );
   });
+
+  it('a covered panel takes no chord (review w17-1)', async () => {
+    render(FilesPanel, { props: { session: { id: 1 } as SessionRow, visible: false } });
+    await screen.findByText('README.md');
+    await chord();
+    expect(screen.queryByTestId('go-to-file')).toBeNull();
+  });
 });
 
 describe('FileViewer actions (new layout)', () => {

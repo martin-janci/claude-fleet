@@ -700,6 +700,12 @@ describe('inlineEventFor', () => {
       detail: 'E_SSH',
       tone: 'warn',
     });
+    // Review w06-5: a backed-off session says which try it was and when the next comes.
+    const next = new Date(2026, 10, 22, 14, 5).getTime() / 1000;
+    const again = JSON.stringify({ from_account: 'a', to_account: 'b', profile: 'w', used_pct: 1, error: 'E_SSH', failures: 3, next_try_at: next });
+    expect(inlineEventFor(e('account_switch_failed', again), { latestId: 1, blocked: false })?.detail).toBe(
+      'E_SSH · 3 tries in a row · next try at 14:05',
+    );
   });
 });
 

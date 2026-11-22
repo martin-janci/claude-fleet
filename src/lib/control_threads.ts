@@ -22,7 +22,7 @@ import { blockedLine } from './attention_facts';
 import { sessionState, workState, type ControlHandoff } from './handoffs';
 import { isFinal, WAIT_WORDS, type Mission } from './missions';
 import { missionRowLine } from './mission_room';
-import type { FollowMark } from './control_journal';
+import { stillFollowed, type FollowMark } from './control_journal';
 import type { SessionRow } from './sessions';
 import type { OfState } from './kit/status';
 import { localMidnight } from './today';
@@ -142,15 +142,39 @@ function reasonWords(s: SessionRow, bucket: TriageBucket): string | null {
   }
 }
 
-function sessionLine(s: SessionRow, bucket: TriageBucket, input: ThreadInput): string {
+/** A session's second line. Under Needs you it leads with why; a row whose
+ *  reason counts but which sits in another group (Control no longer follows
+ *  it) leads with its status and keeps the reason without the "Needs you ·"
+ *  head (review w04-4). */
+function sessionLine(s: SessionRow, bucket: TriageBucket, input: ThreadInput, group: ThreadGroup): string {
+  const status = claudeStatusLabel(s.claude_status);
   if (countsTowardBadge(bucketState(bucket))) {
     const blocked = blockedLine(bucket, s, input.opts.facts, input.accountName ?? ((u) => u));
-    if (blocked) return blocked;
     const why = reasonWords(s, bucket);
-    if (why) return [why, s.host_alias].filter(Boolean).join(' · ');
+    if (group === 'needs') {
+      if (blocked) return blocked;
+      if (why) return [why, s.host_alias].filter(Boolean).join(' · ');
+    } else if (blocked) {
+      return [status, blocked.replace(/^[^·]+· /, '')].filter(Boolean).join(' · ');
+    } else if (why) {
+      return [status, why.replace(/^[^·]+· /, ''), s.host_alias].filter(Boolean).join(' · ');
+    }
   }
-  const status = claudeStatusLabel(s.claude_status);
   return [status, s.host_alias].filter(Boolean).join(' · ');
+}
+
+/** A session's dot: under Needs you it says why the row is there (a block
+ *  waits on you, a failure failed), not only what Claude is doing. */
+function sessionDot(s: SessionRow, bucket: TriageBucket, group: ThreadGroup): OfState {
+  if (group !== 'needs') return sessionState(s);
+  switch (bucketState(bucket)) {
+    case 'failed':
+      return 'failed';
+    case 'blocked':
+      return 'waiting';
+    default:
+      return s.stuck_kind ? 'failed' : 'waiting';
+  }
 }
 
 /** Why a mission waits on a person, in words (`MissionWait.reason`). */
@@ -227,16 +251,20 @@ export function buildThreads(input: ThreadInput): ControlThread[] {
     // A mission's worker belongs to the mission's thread, not its own.
     if (row.origin === 'mission' && row.origin_ref && missionIds.has(Number(row.origin_ref))) continue;
     const bucket = classify(row, input.opts);
-    const unfollowed = unfollowedWhy(input.follows?.get(`s:${id}`));
+    const mark = input.follows?.get(`s:${id}`);
+    const unfollowed = unfollowedWhy(mark);
+    // A muted thread is not followed either (review w04-3); `unfollowed`
+    // stays the words, which a muted mark has none of.
+    const group = sessionGroup(row, bucket, !stillFollowed(mark), since);
     out.push({
       kind: 'session',
       key: `s:${id}`,
       id,
       row,
-      group: sessionGroup(row, bucket, unfollowed !== null, since),
-      state: sessionState(row),
+      group,
+      state: sessionDot(row, bucket, group),
       title: displayName(row, true),
-      line: sessionLine(row, bucket, input),
+      line: sessionLine(row, bucket, input, group),
       at: Math.max(row.last_activity_at ?? 0, handedAt.get(id) ?? 0, row.created_at ?? 0),
       muted: muted.has(`s:${id}`) || !!input.follows?.get(`s:${id}`)?.muted,
       unfollowed,

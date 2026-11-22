@@ -33,7 +33,9 @@
   import { pushError } from './toasts';
   import { fleetSettings, settingBool, SETTING_KEYS } from './fleet_settings';
 
-  let { session }: { session: SessionRow } = $props();
+  // `visible`: false while another fleet's session or Settings covers the
+  // panel, so its window chord stands aside (review w17-1).
+  let { session, visible = true }: { session: SessionRow; visible?: boolean } = $props();
 
   // None of the eleven git-write commands (checkout, branch create/delete
   // one or every merged one,
@@ -379,7 +381,7 @@
   const isMac = detectMac(typeof navigator === 'undefined' ? undefined : navigator);
   let goToOpen = $state(false);
   function onWindowKeydown(e: KeyboardEvent): void {
-    if (goToOpen || e.defaultPrevented || worktreeGone) return;
+    if (!visible || goToOpen || e.defaultPrevented || worktreeGone) return;
     if (matchShortcut('global', e, isMac) !== 'go-to-file') return;
     e.preventDefault();
     if (!treeLoaded) void loadTree();

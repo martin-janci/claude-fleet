@@ -823,20 +823,32 @@ impl Fleets {
     /// The fleet header's Retry: cut the bridge's backoff short, or — for a
     /// fleet that could not be used (a keychain locked at launch) — try to
     /// build it again.
+    ///
+    /// `connect` reads the keychain, which can wait on an unlock prompt, so a
+    /// Remove (or another Retry) can run meanwhile. The new handle goes in
+    /// only if the slot still holds the one this Retry started from, still
+    /// live; otherwise it is cancelled and a removed fleet stays removed
+    /// (review w14-3). `remove` cancels what it takes out, and a successful
+    /// Retry cancels what it replaces, so a cancelled token is that sign.
     pub fn retry(&self, id: &str) -> Result<(), IpcError> {
-        let record = {
+        let gone = || IpcError::new(codes::E_NOTFOUND, format!("no fleet {id:?} is configured"));
+        let (record, started_from) = {
             let handles = self.read();
-            let handle = handles.get(id).ok_or_else(|| {
-                IpcError::new(codes::E_NOTFOUND, format!("no fleet {id:?} is configured"))
-            })?;
+            let handle = handles.get(id).ok_or_else(gone)?;
             if let Some(status) = &handle.status {
                 status.retry_now();
                 return Ok(());
             }
-            handle.record.clone()
+            (handle.record.clone(), handle.cancel.clone())
         };
         let handle = self.connect(record);
-        if let Some(old) = self.write().insert(id.to_string(), handle) {
+        let mut handles = self.write();
+        if started_from.is_cancelled() || !handles.contains_key(id) {
+            drop(handles);
+            handle.cancel.cancel();
+            return Err(gone());
+        }
+        if let Some(old) = handles.insert(id.to_string(), handle) {
             old.cancel.cancel();
         }
         Ok(())
