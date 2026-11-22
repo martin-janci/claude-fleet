@@ -2809,6 +2809,7 @@ impl Store {
         self.backfill_session_owner()?;
         self.backfill_realm_uuids()?;
         self.reap_orphan_session_events()?;
+        self.scrub_audited_setup_tokens()?;
         Ok(())
     }
 
@@ -3168,6 +3169,60 @@ impl Store {
             [],
         )
     }
+
+    /// Review w11-1: before `setup_token` joined `guard::SKIP_KEYS`, an
+    /// `add_account` call's audit row (`mcp_call`) kept the pasted token in
+    /// clear text. Runs on every open (a data repair, no schema change), so
+    /// a row an older binary wrote is cleaned the next time this one starts.
+    fn scrub_audited_setup_tokens(&self) -> Result<usize> {
+        let rows: Vec<(i64, String)> = self
+            .conn
+            .prepare(
+                "SELECT id, detail FROM session_events \
+                 WHERE kind = 'mcp_call' AND detail LIKE '%setup_token=%'",
+            )?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<Result<_>>()?;
+        let mut n = 0;
+        for (id, detail) in rows {
+            let clean = strip_setup_token_arg(&detail);
+            if clean != detail {
+                n += self.conn.execute(
+                    "UPDATE session_events SET detail = ?1 WHERE id = ?2",
+                    rusqlite::params![clean, id],
+                )?;
+            }
+        }
+        Ok(n)
+    }
+}
+
+/// PURE: an audit summary without its `setup_token=<value>` pair(s). A
+/// token has no spaces, so the value runs to the next space or the end (a
+/// summary cut at its length cap ends mid-value).
+pub(super) fn strip_setup_token_arg(detail: &str) -> String {
+    const KEY: &str = "setup_token=";
+    let mut out = String::with_capacity(detail.len());
+    let mut rest = detail;
+    while let Some(at) = rest.find(KEY) {
+        // Only a whole key: `action=setup_token` has no `=` after it, but a
+        // longer key ending in the same letters (`xsetup_token=`) is kept.
+        let starts_key = at == 0 || rest.as_bytes()[at - 1] == b' ';
+        if !starts_key {
+            out.push_str(&rest[..at + KEY.len()]);
+            rest = &rest[at + KEY.len()..];
+            continue;
+        }
+        let head = rest[..at].strip_suffix(' ').unwrap_or(&rest[..at]);
+        out.push_str(head);
+        let tail = &rest[at + KEY.len()..];
+        rest = match tail.find(' ') {
+            Some(sp) => &tail[sp..],
+            None => "",
+        };
+    }
+    out.push_str(rest);
+    out
 }
 
 #[cfg(test)]
@@ -3531,6 +3586,62 @@ mod tests {
             .list_session_events(live + 1000, 10)
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn open_scrubs_a_setup_token_an_older_audit_row_kept() {
+        let store = Store::open_in_memory().unwrap();
+        store.upsert_host("alpha").unwrap();
+        let live = store
+            .upsert_session("live", "alpha", None, None, 1, 1, "running", None)
+            .unwrap();
+        store
+            .insert_session_event(
+                live,
+                "mcp_call",
+                Some(
+                    "add_account by desktop: action=setup_token host_alias=alpha \
+                     profile=work setup_token=sk-ant-oat01-secretsecretsecret",
+                ),
+            )
+            .unwrap();
+        store
+            .insert_session_event(live, "mcp_call", Some("list_sessions by desktop"))
+            .unwrap();
+
+        store.migrate().unwrap();
+
+        let details: Vec<String> = store
+            .list_session_events(live, 10)
+            .unwrap()
+            .into_iter()
+            .filter_map(|e| e.detail)
+            .collect();
+        assert!(details.iter().all(|d| !d.contains("sk-ant")), "{details:?}");
+        assert!(
+            details
+                .iter()
+                .any(|d| d
+                    == "add_account by desktop: action=setup_token host_alias=alpha profile=work"),
+            "{details:?}"
+        );
+        assert!(details.iter().any(|d| d == "list_sessions by desktop"));
+    }
+
+    #[test]
+    fn strip_setup_token_arg_drops_only_the_pair() {
+        assert_eq!(
+            strip_setup_token_arg("add_account by x: setup_token=sk-ant-oat01-abc profile=w"),
+            "add_account by x: profile=w"
+        );
+        assert_eq!(
+            strip_setup_token_arg("add_account by x: profile=w setup_token=sk-ant-oat01-ab…"),
+            "add_account by x: profile=w"
+        );
+        assert_eq!(
+            strip_setup_token_arg("add_account by x: action=setup_token profile=w"),
+            "add_account by x: action=setup_token profile=w"
+        );
     }
 
     #[test]
