@@ -2552,6 +2552,43 @@ async fn an_over_limit_refusal_never_names_a_forbidden_login() {
     assert!(switched.contains("profile \"work\""), "{switched}");
 }
 
+/// Review w09-8: a new worker on a login the project forbids is refused
+/// before the confirm card, with `E_ACCOUNT_FORBIDDEN`, even when the
+/// caller said the person chose a login past the line.
+#[tokio::test]
+async fn dispatch_refuses_a_forbidden_login_before_its_card() {
+    let s = crate::store::Store::open_in_memory().unwrap();
+    let now = crate::store::now_unix();
+    crate::service::account_limits::seed_usage(&s, "hosta", None, "acct-own", 10.0, now);
+    crate::service::account_limits::seed_usage(&s, "hosta", Some("work"), "acct-work", 10.0, now);
+    let p = s.upsert_project("acme", "api", "/srv/acme/api").unwrap();
+    s.set_account_blocks("acct-own", Some(&[p]), None).unwrap();
+    let t = test_tools(s);
+    let refused = t
+        .dispatch_task(
+            Extension(host_caller("hosta", TokenMode::Full)),
+            Parameters(DispatchTaskParams {
+                worker_session_id: None,
+                new_worker: Some(NewWorkerSpec {
+                    host_alias: "hosta".into(),
+                    project_id: p,
+                    name: None,
+                    profile: None,
+                    over_limit_ok: Some(true),
+                }),
+                prompt: "work".into(),
+                requester_session_id: None,
+                raw: false,
+                confirm_nonce: None,
+            }),
+        )
+        .await
+        .unwrap_err()
+        .message;
+    assert!(refused.starts_with("E_ACCOUNT_FORBIDDEN"), "{refused}");
+    assert!(refused.contains("profile \"work\""), "{refused}");
+}
+
 /// A restart onto another login is a start on it: past `accounts.pause_at`
 /// it is refused with `E_ACCOUNT_LIMIT` unless the person chose it. A plain
 /// restart (same login) is recovery and is never held.

@@ -708,6 +708,20 @@ impl FleetTools {
                     .map(str::trim)
                     .filter(|p| !p.is_empty())
                     .map(str::to_string);
+                {
+                    let s = lock(self.reader()).map_err(to_mcp_err)?;
+                    // Before any card (review w09-8): an account the project
+                    // forbids is no question to ask; `new_session` would
+                    // refuse it after the person approved.
+                    crate::service::project_accounts::refuse_forbidden(
+                        &s,
+                        Some(spec.project_id),
+                        &spec.host_alias,
+                        profile.as_deref(),
+                        crate::store::now_unix(),
+                    )
+                    .map_err(to_mcp_err)?;
+                }
                 if !spec.over_limit_ok.unwrap_or(false) {
                     let s = lock(self.reader()).map_err(to_mcp_err)?;
                     // The login it names instead is one the project allows.
