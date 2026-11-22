@@ -66,7 +66,10 @@ impl HostRouter {
     /// is what keeps a rotation from handing its new token to the connection
     /// it revokes.
     pub fn agent_alias(&self, host: &str) -> Option<String> {
-        let store = self.store.lock().ok()?;
+        // Through `ipc_error::lock`: a call made while this thread already
+        // holds the store is caught (review 20 w03-4) and falls back to SSH
+        // in a release build, like a poisoned store, rather than deadlocking.
+        let store = crate::ipc_error::lock(&self.store).ok()?;
         store.agent_host_alias(host).ok().flatten()
     }
 
@@ -85,7 +88,8 @@ impl HostRouter {
 /// store answers no: when in doubt, a connection that receives every command
 /// for a host is cut off.
 pub(crate) fn credential_is_current(store: &Mutex<Store>, alias: &str, credential: &str) -> bool {
-    let Ok(s) = store.lock() else {
+    // A poisoned store, or one this thread already holds, answers no.
+    let Ok(s) = crate::ipc_error::lock(store) else {
         return false;
     };
     // Moving the host back to SSH revokes its agent too.

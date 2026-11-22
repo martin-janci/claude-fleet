@@ -43,7 +43,7 @@ use crate::store::{ItemUpsertOutcome, Store, TrackerItemWrite, TrackerRow};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
@@ -210,7 +210,7 @@ pub(crate) fn metric_error(e: &str) -> String {
 /// The store guard, counting the frames emitted while it is held into the
 /// pass's counter when it drops.
 struct Counted<'a> {
-    guard: MutexGuard<'a, Store>,
+    guard: crate::ipc_error::LockGuard<'a, Store>,
     start: u64,
     sink: &'a AtomicU64,
 }

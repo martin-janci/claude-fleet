@@ -1188,8 +1188,10 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
 
     // A deadlock on the store's lock is the one failure the select below
     // cannot see (it parks the runtime's workers), so an OS thread watches
-    // for it and exits the process. Stood down once a stop is under way.
-    let stall_watch = spawn_store_stall_watchdog(Arc::clone(&store));
+    // for it and exits the process. Once a stop is under way it also ends a
+    // stop that overruns STOP_LIMIT.
+    report_last_stall(&r.data_dir);
+    let stall_watch = spawn_store_stall_watchdog(Arc::clone(&store), r.data_dir.clone());
 
     // Stop on a signal, but also when the hub can no longer serve: the
     // control API task ended on its own (a listener that failed to start, a
@@ -1219,6 +1221,9 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
             failure = Some(why);
         }
     }
+    // The watchdog keeps watching through the stop, and ends one that
+    // overruns STOP_LIMIT: a stuck worker can keep the drain's timers from
+    // ever firing.
     stall_watch.store(true, std::sync::atomic::Ordering::Relaxed);
     // Cancel the ticks BEFORE tearing down the MCP server below: cancellation
     // is only observed between passes, so cancelling here is strictly safe
@@ -1359,58 +1364,98 @@ async fn watch_store_poison<T>(store: &Mutex<T>, every: std::time::Duration) {
     }
 }
 
-/// How long the store's lock may go without once being found free before the
-/// hub gives up on it. No pass holds the lock for seconds, let alone minutes:
-/// a lock busy at every probe for this long is held by a task that will never
-/// release it.
+/// How long the store's lock may go without a single waiter getting through
+/// before the hub gives up on it. No pass holds the lock for seconds, let
+/// alone minutes: a lock nobody could take for this long is held by a task
+/// that will never release it.
 const STORE_STALL_LIMIT: std::time::Duration = std::time::Duration::from_secs(300);
 
-/// How often the stall watchdog probes the store's lock.
+/// How often the stall watchdog takes the store's lock, and checks that it
+/// got it.
 const STORE_STALL_CHECK: std::time::Duration = std::time::Duration::from_secs(1);
 
-/// Whether `lock` can be taken right now. A poisoned lock counts as free: it
-/// is not held, and [`watch_store_poison`] is the one that ends the hub then.
-fn lock_is_free<T>(lock: &Mutex<T>) -> bool {
-    !matches!(lock.try_lock(), Err(std::sync::TryLockError::WouldBlock))
+/// How long a stop may take, from the moment it begins, before the watchdog
+/// ends the process itself: the drain and the ticks' bounded waits, plus
+/// slack. Past that, a worker is stuck and the runtime's timers may never
+/// fire (review 20 w03-2).
+const STOP_LIMIT: std::time::Duration =
+    std::time::Duration::from_secs(DRAIN_TIMEOUT.as_secs() + TICK_SHUTDOWN_TIMEOUT.as_secs() + 15);
+
+/// The file a stall exit leaves in the data dir, for the next start to log
+/// (and so to reach the error reports, which the stuck store could not).
+const LAST_STALL_FILE: &str = "last-store-stall.json";
+
+/// Why the stall watchdog gave up on the process.
+#[derive(Debug, PartialEq, Eq)]
+enum Stall {
+    /// No waiter took the store's lock for the whole limit.
+    Stuck,
+    /// A stop began and the process is still alive past [`STOP_LIMIT`].
+    StopOverran,
 }
 
-/// Blocks until `lock` was busy at every probe for `limit` (probing every
-/// `every`), and answers `true`; or until `stop` is set, and answers `false`.
-fn wait_for_store_stall<T>(
-    lock: &Mutex<T>,
-    limit: std::time::Duration,
-    every: std::time::Duration,
-    stop: &std::sync::atomic::AtomicBool,
-) -> bool {
-    let needed = (limit.as_millis() / every.as_millis().max(1)).max(1);
-    wait_for_stall(|| lock_is_free(lock), needed, every, stop)
-}
-
-/// [`wait_for_store_stall`] over any probe: `true` once `is_free` said no
-/// `needed` times in a row, `false` once `stop` is set. It counts probes
-/// rather than reading a clock, so a suspended process or a clock that jumps
-/// is not mistaken for a stall, and one free probe starts the count over.
+/// Blocks until the counter `progress` reads has not moved for `needed`
+/// checks in a row (every `every`): [`Stall::Stuck`]; or until `stopping`
+/// has been set for `stop_needed` checks: [`Stall::StopOverran`]. It
+/// measures progress, not occupancy (review 20 w03-1): a lock busy at nearly
+/// every instant but still changing hands is not stuck, and only a lock no
+/// waiter gets for the whole limit is. It counts checks rather than reading
+/// a clock, so a suspended process or a clock that jumps is not mistaken
+/// for a stall.
 fn wait_for_stall(
-    mut is_free: impl FnMut() -> bool,
+    mut progress: impl FnMut() -> u64,
     needed: u128,
     every: std::time::Duration,
-    stop: &std::sync::atomic::AtomicBool,
-) -> bool {
-    let mut busy: u128 = 0;
+    stopping: &std::sync::atomic::AtomicBool,
+    stop_needed: u128,
+) -> Stall {
+    let (mut last, mut still, mut stopped_for) = (progress(), 0u128, 0u128);
     loop {
         std::thread::sleep(every);
-        if stop.load(std::sync::atomic::Ordering::Relaxed) {
-            return false;
+        if stopping.load(std::sync::atomic::Ordering::Relaxed) {
+            stopped_for += 1;
+            if stopped_for >= stop_needed {
+                return Stall::StopOverran;
+            }
         }
-        if is_free() {
-            busy = 0;
+        let now = progress();
+        if now != last {
+            (last, still) = (now, 0);
             continue;
         }
-        busy += 1;
-        if busy >= needed {
-            return true;
+        still += 1;
+        if still >= needed {
+            return Stall::Stuck;
         }
     }
+}
+
+/// Checks in `limit` at one per `every`, at least one.
+fn checks(limit: std::time::Duration, every: std::time::Duration) -> u128 {
+    (limit.as_millis() / every.as_millis().max(1)).max(1)
+}
+
+/// Starts a thread that takes and drops `lock` over and over, a pause of
+/// `every` between, counting each time it got it. A poisoned lock counts as
+/// got: it is not held, and [`watch_store_poison`] is the one that ends the
+/// hub then. The thread ends once the returned counter is dropped.
+fn spawn_lock_probe<T: Send + 'static>(
+    lock: Arc<Mutex<T>>,
+    every: std::time::Duration,
+) -> std::io::Result<Arc<std::sync::atomic::AtomicU64>> {
+    let got = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let count = Arc::clone(&got);
+    std::thread::Builder::new()
+        .name("store-stall-probe".into())
+        .spawn(move || {
+            // Ends once nobody reads the count any more.
+            while Arc::strong_count(&count) > 1 {
+                drop(lock.lock());
+                count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                std::thread::sleep(every);
+            }
+        })?;
+    Ok(got)
 }
 
 /// Exit the process when the store's lock is stuck: held by a task that never
@@ -1422,28 +1467,81 @@ fn wait_for_stall(
 /// included, so this runs on a thread of its own and ends the process itself:
 /// there is no graceful stop to run on workers that are parked. Status 1, as
 /// for the other "can no longer serve" exits, so the restart policy starts a
-/// fresh hub. Set the returned flag to stand the watchdog down.
-fn spawn_store_stall_watchdog(store: Arc<Mutex<Store>>) -> Arc<std::sync::atomic::AtomicBool> {
-    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let flag = Arc::clone(&stop);
+/// fresh hub. Set the returned flag when a stop begins: the watchdog keeps
+/// watching, and also ends a stop that overruns [`STOP_LIMIT`]. A stall exit
+/// writes [`LAST_STALL_FILE`] first, naming the lock's holder where
+/// `ipc_error::lock` knows it ([`report_last_stall`] logs it on the next
+/// start).
+fn spawn_store_stall_watchdog(
+    store: Arc<Mutex<Store>>,
+    data_dir: std::path::PathBuf,
+) -> Arc<std::sync::atomic::AtomicBool> {
+    let stopping = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = Arc::clone(&stopping);
+    let progress = match spawn_lock_probe(Arc::clone(&store), STORE_STALL_CHECK) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not start the store stall probe; a deadlocked store will not restart the hub");
+            return stopping;
+        }
+    };
     let spawned = std::thread::Builder::new()
         .name("store-stall-watchdog".into())
         .spawn(move || {
-            if wait_for_store_stall(&store, STORE_STALL_LIMIT, STORE_STALL_CHECK, &flag) {
-                tracing::error!(
-                    limit_secs = STORE_STALL_LIMIT.as_secs(),
-                    "the store lock has not been free for {}s: a task is stuck holding it and \
-                     nothing can read or write; fleet-hub exiting so its supervisor starts a \
-                     working one",
-                    STORE_STALL_LIMIT.as_secs()
-                );
-                std::process::exit(1);
+            let verdict = wait_for_stall(
+                || progress.load(std::sync::atomic::Ordering::Relaxed),
+                checks(STORE_STALL_LIMIT, STORE_STALL_CHECK),
+                STORE_STALL_CHECK,
+                &flag,
+                checks(STOP_LIMIT, STORE_STALL_CHECK),
+            );
+            match verdict {
+                Stall::Stuck => {
+                    let holder = fleet_core::ipc_error::lock_holder(&store);
+                    let holder_text = holder.as_deref().unwrap_or("unknown");
+                    tracing::error!(
+                        limit_secs = STORE_STALL_LIMIT.as_secs(),
+                        holder = holder_text,
+                        "the store lock has not been taken for {}s: a task is stuck holding it \
+                         ({holder_text}) and nothing can read or write; fleet-hub exiting so its \
+                         supervisor starts a working one",
+                        STORE_STALL_LIMIT.as_secs()
+                    );
+                    let note = serde_json::json!({
+                        "at": std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map_or(0, |d| d.as_secs()),
+                        "limit_secs": STORE_STALL_LIMIT.as_secs(),
+                        "holder": holder,
+                    });
+                    let _ = std::fs::write(data_dir.join(LAST_STALL_FILE), note.to_string());
+                }
+                Stall::StopOverran => tracing::error!(
+                    limit_secs = STOP_LIMIT.as_secs(),
+                    "fleet-hub has been stopping for {}s: a task is stuck; exiting now",
+                    STOP_LIMIT.as_secs()
+                ),
             }
+            std::process::exit(1);
         });
     if let Err(e) = spawned {
         tracing::warn!(error = %e, "could not start the store stall watchdog; a deadlocked store will not restart the hub");
     }
-    stop
+    stopping
+}
+
+/// Logs, at error, the note a stall exit of the last run left in `data_dir`
+/// (so it reaches the error reports this time), and removes it.
+fn report_last_stall(data_dir: &std::path::Path) {
+    let path = data_dir.join(LAST_STALL_FILE);
+    let Ok(note) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    tracing::error!(
+        note = %note.trim(),
+        "the last fleet-hub run exited because the store lock was stuck"
+    );
+    let _ = std::fs::remove_file(&path);
 }
 
 /// Waits for a stop signal and names it. SIGHUP is logged and ignored: a hub
@@ -1504,58 +1602,107 @@ mod tests {
         .expect("a poisoned store must trip the watchdog");
     }
 
-    /// The stall watchdog answers once the lock was busy at every probe for
-    /// the limit: a guard that is never dropped, as in the deadlock of
+    /// The stall watchdog answers once no waiter got the lock for the
+    /// limit: a guard that is never dropped, as in the deadlock of
     /// 2026-11-12, where the async watchdog above could not run at all.
     #[test]
     fn the_stall_watchdog_fires_on_a_lock_that_is_never_released() {
-        use std::sync::atomic::AtomicBool;
+        use std::sync::atomic::{AtomicBool, Ordering};
         let ms = std::time::Duration::from_millis;
         let store = Arc::new(Mutex::new(()));
         let stuck = store.lock().unwrap();
+        let got = spawn_lock_probe(Arc::clone(&store), ms(1)).unwrap();
         let stop = AtomicBool::new(false);
-        assert!(wait_for_store_stall(&store, ms(20), ms(1), &stop));
+        let verdict = wait_for_stall(|| got.load(Ordering::Relaxed), 20, ms(1), &stop, u128::MAX);
+        assert_eq!(verdict, Stall::Stuck);
         drop(stuck);
     }
 
-    /// A lock that is busy now and then, however often, is not a stall: one
-    /// free probe starts the count over. And a hub that is stopping stands
-    /// the watchdog down.
+    /// A lock that is busy nearly all the time but keeps changing hands is
+    /// not a stall (review 20 w03-1): here a holder keeps it for 4 of
+    /// every ~4.5 ms, and the limit is 100 checks without a waiter getting
+    /// it.
+    /// The watch runs until the hub stops, and then ends a stop that
+    /// overruns its limit.
     #[test]
-    fn the_stall_watchdog_leaves_a_busy_store_alone() {
+    fn the_stall_watchdog_leaves_a_saturated_lock_alone() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let ms = std::time::Duration::from_millis;
+        let store = Arc::new(Mutex::new(()));
+        let done = Arc::new(AtomicBool::new(false));
+        let (s2, d2) = (Arc::clone(&store), Arc::clone(&done));
+        let holder = std::thread::spawn(move || {
+            while !d2.load(Ordering::Relaxed) {
+                let g = s2.lock().unwrap();
+                std::thread::sleep(ms(4));
+                drop(g);
+                std::thread::sleep(std::time::Duration::from_micros(500));
+            }
+        });
+        let got = spawn_lock_probe(Arc::clone(&store), ms(1)).unwrap();
+        let stop = AtomicBool::new(false);
+        let mut checks_seen = 0u32;
+        let verdict = wait_for_stall(
+            || {
+                checks_seen += 1;
+                if checks_seen == 400 {
+                    stop.store(true, Ordering::Relaxed);
+                }
+                got.load(Ordering::Relaxed)
+            },
+            100,
+            ms(1),
+            &stop,
+            10,
+        );
+        done.store(true, Ordering::Relaxed);
+        holder.join().unwrap();
+        assert_eq!(
+            verdict,
+            Stall::StopOverran,
+            "a lock that changes hands is not stuck"
+        );
+        assert!(checks_seen >= 400, "it watched until the hub stopped");
+    }
+
+    /// The pure rule: a counter that moves now and then, however rarely
+    /// within the limit, is not a stall; one that stops moving fires at
+    /// exactly the limit; and a stop that overruns fires too.
+    #[test]
+    fn the_stall_rule_counts_checks_without_progress() {
         use std::sync::atomic::{AtomicBool, Ordering};
         let none = std::time::Duration::ZERO;
         let stop = AtomicBool::new(false);
-        // Busy at 99 probes out of every 100, far more than a real store is,
-        // for 5000 probes; then the hub stops. The limit is 100 in a row.
-        let mut probes = 0u32;
-        let stalled = wait_for_stall(
+        let mut n = 0u64;
+        let verdict = wait_for_stall(
             || {
-                probes += 1;
-                if probes == 5000 {
+                n += 1;
+                if n == 5000 {
                     stop.store(true, Ordering::Relaxed);
                 }
-                probes.is_multiple_of(100)
+                n / 99
             },
             100,
             none,
             &stop,
+            1,
         );
-        assert!(!stalled, "a lock that keeps coming free is not stuck");
-        assert_eq!(probes, 5000, "it watched until the hub stopped");
-        // The same watch with no free probe fires at exactly the limit.
-        let (stop, mut probes) = (AtomicBool::new(false), 0u32);
-        let stalled = wait_for_stall(
+        assert_eq!(verdict, Stall::StopOverran);
+        assert!(n >= 5000);
+        let (stop, mut n) = (AtomicBool::new(false), 0u32);
+        let verdict = wait_for_stall(
             || {
-                probes += 1;
-                false
+                n += 1;
+                7
             },
             100,
             none,
             &stop,
+            u128::MAX,
         );
-        assert!(stalled && probes == 100);
-        // A poisoned lock is not held: the poison watchdog's case, not this one.
+        // One read to start from, then 100 checks without a change.
+        assert!(verdict == Stall::Stuck && n == 101);
+        // A poisoned lock still counts as got: the poison watchdog's case.
         let store = Arc::new(Mutex::new(()));
         let s3 = Arc::clone(&store);
         let _ = std::thread::spawn(move || {
@@ -1563,7 +1710,28 @@ mod tests {
             panic!("poison the store");
         })
         .join();
-        assert!(store.is_poisoned() && lock_is_free(&store));
+        assert!(store.is_poisoned());
+        let got =
+            spawn_lock_probe(Arc::clone(&store), std::time::Duration::from_millis(1)).unwrap();
+        let stop = AtomicBool::new(true);
+        let verdict = wait_for_stall(
+            || got.load(Ordering::Relaxed),
+            20,
+            std::time::Duration::from_millis(1),
+            &stop,
+            100,
+        );
+        assert_eq!(verdict, Stall::StopOverran, "a poisoned lock is not stuck");
+    }
+
+    /// A stall exit's note is logged by the next start and removed.
+    #[test]
+    fn the_last_stall_note_is_read_once() {
+        let dir = tempfile::tempdir().unwrap();
+        report_last_stall(dir.path());
+        std::fs::write(dir.path().join(LAST_STALL_FILE), r#"{"holder":null}"#).unwrap();
+        report_last_stall(dir.path());
+        assert!(!dir.path().join(LAST_STALL_FILE).exists());
     }
 
     #[test]
