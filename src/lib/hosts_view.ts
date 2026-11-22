@@ -185,10 +185,21 @@ export interface LoginAt {
 /** The fleet's copied logins: groups of two or more logins holding one refresh
  *  token, matched by fingerprint (one's newest among the other's). Mirrors
  *  `login_conflicts::copied`. */
-export function copiedLogins(hosts: readonly Pick<HostRow, 'alias' | 'login_fingerprints'>[]): LoginAt[][] {
-  const logins = hosts.flatMap((h) =>
-    (h.login_fingerprints ?? []).map((f) => ({ at: { host: h.alias, profile: f.profile ?? null }, seen: f.seen })),
-  );
+export function copiedLogins(
+  hosts: readonly (Pick<HostRow, 'alias' | 'login_fingerprints'> & Partial<Pick<HostRow, 'hidden' | 'claude_profiles'>>)[],
+): LoginAt[][] {
+  // A hidden host takes no part (its fingerprints are frozen, review w02-3),
+  // nor a setup-token profile, whose .credentials.json is a login it no
+  // longer uses (w11-5), as `login_conflicts::copied`.
+  const tokenProfile = (h: (typeof hosts)[number], profile: string | null | undefined) =>
+    profile != null && (h.claude_profiles ?? []).some((p) => p.name === profile && p.credential === 'setup_token');
+  const logins = hosts
+    .filter((h) => !h.hidden)
+    .flatMap((h) =>
+      (h.login_fingerprints ?? [])
+        .filter((f) => !tokenProfile(h, f.profile))
+        .map((f) => ({ at: { host: h.alias, profile: f.profile ?? null }, seen: f.seen })),
+    );
   const same = (a: string[], b: string[]) => (a.length > 0 && b.includes(a[0])) || (b.length > 0 && a.includes(b[0]));
   const taken = new Array<boolean>(logins.length).fill(false);
   const out: LoginAt[][] = [];

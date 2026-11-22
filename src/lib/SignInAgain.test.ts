@@ -10,6 +10,7 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import SignInAgain from './SignInAgain.svelte';
 import { hosts } from './hosts';
+import { accounts } from './accounts';
 import { toasts } from './toasts';
 import { get } from 'svelte/store';
 
@@ -51,6 +52,23 @@ describe('SignInAgain', () => {
     await waitFor(() => expect(onclose).toHaveBeenCalled());
     expect(calls.at(-1)).toMatchObject({ action: 'end_login', profile: '', again: true });
     expect(get(toasts).some((t) => t.message.includes('the host login on htz is signed in again'))).toBe(true);
+  });
+
+  it('says which account the login was before when the sign-in picked another one', async () => {
+    hosts.set([{ alias: 'htz', hidden: false, account_uuid: 'u-old' } as never]);
+    accounts.set([{ uuid: 'u-old', email: 'old@x.com', nickname: null } as never]);
+    render(SignInAgain, { host: 'htz', profile: null, onclose: vi.fn(), pollMs: 20 });
+    await screen.findByTestId('add-account-login');
+    signedIn = true;
+    await waitFor(() => expect(screen.getByTestId('add-account-was').textContent).toContain('old@x.com'));
+    accounts.set([]);
+  });
+
+  it('closes the login pane when the dialog goes away without Done or Cancel', async () => {
+    const view = render(SignInAgain, { host: 'htz', profile: 'work', onclose: vi.fn(), pollMs: 60_000 });
+    await screen.findByTestId('add-account-login');
+    view.unmount();
+    await waitFor(() => expect(calls.at(-1)).toMatchObject({ action: 'end_login', profile: 'work', again: true }));
   });
 
   it('a refused start says why and closes', async () => {

@@ -7,7 +7,7 @@
   // host reports the login; Done and Cancel close the pane. "Run it there
   // instead" is the command for a terminal on the host, whatever the CLI's
   // flow becomes.
-  import { tick, untrack } from 'svelte';
+  import { onDestroy, tick, untrack } from 'svelte';
   import Modal from './Modal.svelte';
   import { copyAndSay } from './clipboard';
   import { openExternal } from './open_external';
@@ -15,6 +15,7 @@
   import { refreshAccountUsage } from './account_usage_store';
   import { requestNewSessionOnHost } from './app_views';
   import { hostByAlias } from './hosts';
+  import { accountByUuid } from './accounts';
   import {
     asksForCode,
     deviceCode,
@@ -137,7 +138,30 @@
     await copyAndSay(text, what);
   }
 
+  // Review 20 (batch A follow-up): a dialog closed any other way than
+  // Done or Cancel still closes its login pane on the host.
+  let ended = false;
+  onDestroy(() => {
+    if (!ended) void endLogin(login.host, login.profile, again);
+  });
+
+  // Signing in again reads the account live from the host (review w02-6):
+  // the browser may have picked another account than the one stored, so
+  // say which it was.
+  const storedUuid = untrack(() => {
+    const h = $hostByAlias.get(login.host);
+    if (!login.again || !h) return null;
+    return login.profile ? ((h.claude_profiles ?? []).find((p) => p.name === login.profile)?.account_uuid ?? null) : h.account_uuid;
+  });
+  const wasAccount = $derived.by(() => {
+    const uuid = status?.logged_in ? (status.account_uuid ?? null) : null;
+    if (!again || !uuid || !storedUuid || uuid === storedUuid) return null;
+    const a = $accountByUuid.get(storedUuid);
+    return a?.email ?? a?.nickname ?? storedUuid.slice(0, 8);
+  });
+
   async function finish() {
+    ended = true;
     await endLogin(login.host, login.profile, again);
     if (status?.logged_in) {
       push({
@@ -160,6 +184,11 @@
       <p class="done" role="status" data-testid="add-account-signed-in">
         Signed in{status.email ? ` as ${status.email}` : ''}. New sessions on {login.host} can bill it.
       </p>
+      {#if wasAccount}
+        <p class="err" role="alert" data-testid="add-account-was">
+          This login was {wasAccount} before; it bills the account above from now on.
+        </p>
+      {/if}
       {#if sameAs}
         <p class="err" role="alert" data-testid="add-account-same-as">
           This is the same account as {sameAs} on {login.host}, so the two share one usage limit. To add room, start over and

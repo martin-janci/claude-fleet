@@ -385,6 +385,19 @@ describe('host health helpers', () => {
     ).toEqual([]);
   });
 
+  it('copiedLogins leaves out hidden hosts and setup-token profiles (w02-3, w11-5)', () => {
+    const a = host('old-laptop', { login_fingerprints: [{ profile: null, seen: ['aaaaaaaaaaaa'] }] });
+    const b = host('new-box', { login_fingerprints: [{ profile: null, seen: ['aaaaaaaaaaaa'] }] });
+    expect(copiedLogins([a, b])).toHaveLength(1);
+    expect(copiedLogins([{ ...a, hidden: true }, b])).toEqual([]);
+    const ta = host('a', {
+      login_fingerprints: [{ profile: 'work', seen: ['bbbbbbbbbbbb'] }],
+      claude_profiles: [{ name: 'work', account_uuid: 'setuptoken-x', credential: 'setup_token' }],
+    });
+    const tb = host('b', { login_fingerprints: [{ profile: 'work', seen: ['bbbbbbbbbbbb'] }] });
+    expect(copiedLogins([ta, tb])).toEqual([]);
+  });
+
   it('disk_low outranks claude_old; agent_old fires when the agent is older than the hub version', () => {
     const base = {
       hasToken: true,
