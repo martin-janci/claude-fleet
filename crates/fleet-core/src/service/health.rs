@@ -1359,8 +1359,9 @@ pub fn health_check(store: &Mutex<Store>) -> Health {
 }
 
 /// The hub's storage health for `view`, read after the store's lock is
-/// released: it reads the disk, and a stalled mount (the hub's data on a
-/// NAS) must not hold every user of the store behind it. `None` for a view
+/// released. It answers the last background reading of the disk
+/// (`hub_storage::health`), so a stalled mount (the hub's data on a NAS)
+/// holds neither the store nor the caller. `None` for a view
 /// that does not read the hub's own health.
 pub fn storage_for(
     view: &HealthView,
