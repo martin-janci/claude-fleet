@@ -345,4 +345,21 @@
 //!   for review…" says so, and the Inbox shows no asks. A row's
 //!   `session_name` is additive: a client titles an ask without it from its
 //!   own session list, as before.
+//!   Forbidden accounts (migrations 217 and 218) are new without a bump: an
+//!   account row's `forbidden_project_ids` / `forbidden_org_ids` (additive,
+//!   always sent) and the `set_account_projects` tool (the desktop's
+//!   command of the same name). A hub without them sends no key, which
+//!   reads as no account forbidden, and answers the tool with
+//!   `E_HUB_PROTOCOL`. A hub that has them refuses a forbidden start
+//!   itself, so a client that predates them gets an error rather than a
+//!   wrong start (a desktop at 0.6.4 or older does not filter its login
+//!   picks).
+//!   Login fingerprints (migration 228) are new without a bump: a host
+//!   row's `login_fingerprints` (additive, absent when never sampled) and
+//!   the same field on the health ping. The ping always carries it, empty
+//!   too, so `applyPing` clears a stale list; a hub without it sends
+//!   neither, which reads as not sampled (no copied-login flag).
+//!   The agent link's `HubFrame::Welcome.host_alias` is new without an
+//!   agent-proto bump; `fleet_proto::identity` says how each end reads its
+//!   absence.
 pub const CONTRACT_REVISION: u32 = 18;
