@@ -276,7 +276,12 @@ account off a project*, migrations 217 and 218): every start, resume, switch, ro
 and mission run of such a project refuses or avoids its logins. A login profile can be
 signed in with a `claude setup-token` token (landed, docs/accounts.md →
 *Setup token*): written to the host only, exported as
-`CLAUDE_CODE_OAUTH_TOKEN`. Not built: a hub vault for setup-tokens and API
+`CLAUDE_CODE_OAUTH_TOKEN`. A login profile can be removed (landed, review
+w11-7; docs/accounts.md → *Remove a login*): `add_account { action: "remove" }`
+deletes fleet's token and key files and the profile dir, refused while a live
+session uses it, and sweeps the made-up `apikey-`/`setuptoken-` accounts no
+login uses; Remove host can also delete fleet's tokens and keys there (off by
+default, best effort). Not built: a hub vault for setup-tokens and API
 keys (fleet keeps no copy; each token lives on its host).
 
 Placement and login health (Control review F5/F6, landed, ON): one rule,
@@ -299,7 +304,8 @@ one line in Control's feed. **Sign in again** (#1116, landed; docs/accounts.md
 → *Signed-out logins*) fixes it from the app: the card, the session's row and
 the Accounts page open + Add account's sign-in step over that login, and its
 signed-out note clears when the pane says "Login successful" (MCP: `again:
-true` on the login tools). Copied logins are detected (#1117, landed;
+true` on the login tools). On a remote Mac the host's own login first gets a
+line recommending a login profile, with + Add account (review w02-7). Copied logins are detected (#1117, landed;
 docs/accounts.md → *Two copies of one login*): the health probe prints a
 short hash of each login's refresh token (`loginfp=`, migration 228,
 `service::login_conflicts`), and one login copied onto another host or

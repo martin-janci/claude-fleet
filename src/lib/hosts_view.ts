@@ -656,8 +656,9 @@ export function endpointOutage(
  * (src-tauri/src/store/hosts_accounts.rs): in one transaction it deletes the
  * host's session rows with their timeline events and the messages addressed
  * to them, its control-API token, worktree rows, parent fingerprints and
- * estimated-usage history. `remove_host` runs no SSH, so tmux on the host is
- * untouched. `local` is never removed.
+ * estimated-usage history. `remove_host` runs no SSH (unless the dialog's
+ * "also delete fleet's tokens and keys there" is ticked, which deletes only
+ * those files), so tmux on the host is untouched. `local` is never removed.
  */
 export function removeHostMessage(alias: string, sessionRows: number): string {
   const rows =

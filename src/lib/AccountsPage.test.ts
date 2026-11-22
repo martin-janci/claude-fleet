@@ -178,6 +178,39 @@ describe('AccountsPage', () => {
     expect(screen.queryByTestId('account-missing')).toBeNull();
   });
 
+  it('a login profile has Remove, which confirms, removes it and drops the account it swept (review w11-7)', async () => {
+    const token = { ...fleetAccounts()[0], uuid: 'setuptoken-00112233aabbccdd', email: null, nickname: null, display_name: 'Setup token · ci' };
+    accounts.set([...fleetAccounts(), token]);
+    hosts.set(
+      fleetHosts().map((h) =>
+        h.alias === 'mefistos' ? { ...h, claude_profiles: [{ name: 'ci', account_uuid: token.uuid, email: null, credential: 'setup_token' }] } : h,
+      ),
+    );
+    const base = inv.getMockImplementation() as (cmd: string, payload?: unknown) => Promise<unknown>;
+    inv.mockImplementation(async (cmd: string, payload?: unknown) =>
+      cmd === 'add_account' ? { host_alias: 'mefistos', profile: 'ci', accounts_removed: [token.uuid] } : base(cmd, payload),
+    );
+    accountsPageRequest.set(token.uuid);
+    render(AccountsPage, props);
+    await fireEvent.click(await screen.findByTestId('account-login-remove'));
+    const dialog = await screen.findByTestId('confirm-dialog');
+    expect(dialog.textContent).toContain('its setup token');
+    expect(dialog.textContent).toContain('~/.claude-profiles/ci');
+    expect(inv.mock.calls.some(([c]) => c === 'add_account')).toBe(false);
+    await fireEvent.click(within(dialog).getByTestId('confirm-remove-login'));
+    await waitFor(() =>
+      expect(inv).toHaveBeenCalledWith('add_account', { args: { action: 'remove', host_alias: 'mefistos', profile: 'ci' } }),
+    );
+    await waitFor(() => expect(get(accounts).some((a) => a.uuid === token.uuid)).toBe(false));
+  });
+
+  it("the host's own login has no Remove", async () => {
+    accountsPageRequest.set(ADMIN.uuid);
+    render(AccountsPage, props);
+    await screen.findAllByTestId('account-login-host');
+    expect(screen.queryByTestId('account-login-remove')).toBeNull();
+  });
+
   it('a signed-out login says so, with its sign-in command, and why usage is missing (review w03-1)', async () => {
     const aug9 = Date.UTC(2026, 7, 9, 12) / 1000;
     hosts.set(

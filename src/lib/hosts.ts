@@ -3,6 +3,7 @@ import { createRowStore } from './row_store';
 import { createListLoad } from './list_load';
 import { invokeCmd, type Result } from './result';
 import { readPref, writePref } from './prefs';
+import { dropAccounts } from './accounts';
 
 export interface HostRow {
   alias: string;
@@ -267,9 +268,24 @@ export async function probeHost(alias: string): Promise<Result<HostRow>> {
   return r;
 }
 
-export async function deleteHost(alias: string): Promise<Result<HostRow>> {
-  const r = await invokeCmd<HostRow>('remove_host', { args: { alias } });
-  if (r.ok) removeHost(r.value.alias);
+/** What `remove_host` returns: the removed row, plus what it did beyond it. */
+export type RemovedHost = HostRow & {
+  /** Present when fleet's tokens and keys there were asked to go. */
+  credentials?: { deleted: boolean; error?: string };
+  /** Made-up accounts no login uses any more, now deleted. */
+  accounts_removed?: string[];
+};
+
+/** Remove a host. `deleteCredentials`: also delete fleet's token and key
+ *  files from its login profiles first (best effort; `credentials` says). */
+export async function deleteHost(alias: string, opts: { deleteCredentials?: boolean } = {}): Promise<Result<RemovedHost>> {
+  const r = await invokeCmd<RemovedHost>('remove_host', {
+    args: opts.deleteCredentials ? { alias, delete_credentials: true } : { alias },
+  });
+  if (r.ok) {
+    removeHost(r.value.alias);
+    dropAccounts(r.value.accounts_removed);
+  }
   return r;
 }
 

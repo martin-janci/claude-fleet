@@ -45,6 +45,7 @@
   import { bulkTargets, sessionBlocked, sessionIdBlocked } from './share';
   import AccountNickname from './AccountNickname.svelte';
   import ConfirmDialog from './ConfirmDialog.svelte';
+  import RemoveLoginDialog from './RemoveLoginDialog.svelte';
   import { isRestorable } from './lost_fold';
   import type { HostTidyHint } from './hosts_table';
   import EmbedSlot from './pages/EmbedSlot.svelte';
@@ -190,6 +191,10 @@
   }
 
   let confirm = $state<'rotate' | 'remove' | 'restore' | null>(null);
+  /** Remove host's "also delete fleet's tokens and keys there" (review w11-7). */
+  let deleteCredentials = $state(false);
+  /** The login profile whose Remove is being confirmed (review w11-7). */
+  let removingProfile = $state<{ profile: string; kind: 'login' | 'setup_token' | 'api_key' } | null>(null);
   let busy = $state(false);
 
   const isLocal = $derived(host.alias === 'local');
@@ -590,11 +595,16 @@
   async function confirmRemove() {
     const alias = host.alias;
     busy = true;
-    const r = await deleteHost(alias);
+    const r = await deleteHost(alias, { deleteCredentials });
     busy = false;
     confirm = null;
-    if (r.ok) push({ kind: 'info', message: `${alias} removed.` });
-    else pushError(r.error, `Remove ${alias} failed`);
+    deleteCredentials = false;
+    if (r.ok) {
+      const c = r.value.credentials;
+      if (!c) push({ kind: 'info', message: `${alias} removed.` });
+      else if (c.deleted) push({ kind: 'info', message: `${alias} removed, and fleet's tokens and keys there deleted.` });
+      else push({ kind: 'warning', message: `${alias} removed, but fleet's tokens and keys there could not be deleted: ${c.error ?? 'no answer'}`, sticky: true });
+    } else pushError(r.error, `Remove ${alias} failed`);
   }
 
   async function onRestoreClick() {
@@ -859,7 +869,18 @@
           {#each host.claude_profiles as p, i (p.name)}{#if i > 0}, {/if}<span
               class="profile"
               title="~/.claude-profiles/{p.name}"
-            ><code>{p.name}</code> <span class="muted">{p.email ?? (p.account_uuid ? '' : 'not logged in')}{#if p.credential === 'setup_token'}<span data-testid="detail-profile-token"> · setup token</span>{/if}</span></span>{/each}
+            ><code>{p.name}</code> <span class="muted">{p.email ?? (p.account_uuid ? '' : 'not logged in')}{#if p.credential === 'setup_token'}<span data-testid="detail-profile-token"> · setup token</span>{/if}</span>
+              <button
+                type="button"
+                class="link"
+                data-testid="detail-profile-remove"
+                title={`Remove profile ${p.name}: its token or key and ~/.claude-profiles/${p.name}`}
+                onclick={() =>
+                  (removingProfile = {
+                    profile: p.name,
+                    kind: p.credential === 'setup_token' ? 'setup_token' : p.account_uuid?.startsWith('apikey-') ? 'api_key' : 'login',
+                  })}>Remove…</button
+              ></span>{/each}
         </span>
         <button
           type="button"
@@ -1246,6 +1267,9 @@
   </section>
 </section>
 
+{#if removingProfile}
+  <RemoveLoginDialog host={host.alias} profile={removingProfile.profile} kind={removingProfile.kind} onclose={() => (removingProfile = null)} />
+{/if}
 {#if confirm === 'rotate'}
   <ConfirmDialog
     title="Rotate the token for {host.alias}?"
@@ -1266,8 +1290,18 @@
     {busy}
     confirmTestId="confirm-remove"
     onconfirm={confirmRemove}
-    oncancel={() => (confirm = null)}
-  />
+    oncancel={() => {
+      confirm = null;
+      deleteCredentials = false;
+    }}
+  >
+    {#if host.alias !== 'local'}
+      <label class="remove-credentials">
+        <input type="checkbox" data-testid="confirm-remove-credentials" bind:checked={deleteCredentials} disabled={busy} />
+        Also delete fleet’s tokens and keys there (setup tokens and API keys fleet wrote into its login profiles; best effort, the host must answer)
+      </label>
+    {/if}
+  </ConfirmDialog>
 {:else if confirm === 'restore'}
   <ConfirmDialog
     title="Restore lost sessions on {host.alias}?"
@@ -1491,4 +1525,10 @@
   .checklist li[data-state='unknown'] .check-detail,
   .checklist li[data-state='na'] .check-detail { color: var(--fg-muted); }
   .action.advised { border-color: var(--usage-warn); }
+  .remove-credentials {
+    display: flex;
+    gap: 0.4rem;
+    align-items: flex-start;
+    margin-top: 0.5rem;
+  }
 </style>
