@@ -28,11 +28,13 @@ impl FleetTools {
         );
         // Where everyone's tasks start is a person's rule (transition plan,
         // "Where AI never decides"): the operator is an unbound client, so
-        // nothing below would stop it making or accepting one.
-        if caller.is_operator() && matches!(p.action.as_str(), "save" | "accept") {
+        // nothing below would stop it making or accepting one. An allow-list:
+        // deleting a person's rule changes where the next start lands as
+        // surely as saving one, and dismissing an offer hides it for good.
+        if caller.is_operator() && p.action != "list" {
             return Err(mcp_err(
                 codes::E_FORBIDDEN,
-                "a person makes and accepts start rules, from the desktop or the phone; \
+                "a person makes, accepts, dismisses and deletes start rules, from the desktop or the phone; \
                  the operator may only list them",
                 None,
             ));

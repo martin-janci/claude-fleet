@@ -6,6 +6,22 @@ use super::*;
 use crate::ipc_error::lock;
 use crate::service::routines;
 
+/// The `routines` actions the operator may call: the ones that write
+/// nothing. Every other action is a person's.
+const OPERATOR_ROUTINE_READS: &[&str] = &[
+    "list",
+    "get",
+    "failing",
+    "budget",
+    "runs",
+    "explain",
+    "decisions",
+    "dry_run",
+    "memory",
+    "seen",
+    "preview",
+];
+
 #[tool_router(router = routines_router, vis = "pub(super)")]
 impl FleetTools {
     #[tool(description = "Routines: a saved prompt that starts a session \
@@ -43,16 +59,14 @@ impl FleetTools {
         // A routine is a saved prompt that starts a session: what the
         // operator wrote in one would reach a session with no person in
         // between (transition plan, "Where AI never decides"). The operator
-        // is an unbound client, so nothing below would stop it.
-        if caller.is_operator()
-            && matches!(
-                p.action.as_str(),
-                "save" | "run_now" | "set_run_outcome" | "set_memory" | "forget_seen"
-            )
-        {
+        // is an unbound client, so nothing below would stop it. An allow-list
+        // of the actions that write nothing ([`OPERATOR_ROUTINE_READS`]):
+        // re-enabling a routine a person paused starts sessions on its cron
+        // as surely as saving one does.
+        if caller.is_operator() && !OPERATOR_ROUTINE_READS.contains(&p.action.as_str()) {
             return Err(mcp_err(
                 codes::E_FORBIDDEN,
-                "a person saves and runs routines, from the desktop or the phone; \
+                "a person saves, runs and changes routines, from the desktop or the phone; \
                  the operator may only read them",
                 None,
             ));
