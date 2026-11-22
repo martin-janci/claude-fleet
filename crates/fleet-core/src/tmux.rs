@@ -752,7 +752,8 @@ pub const AUTH_OVERRIDE_VARS: [&str; 7] = [
 /// available) of `hw.memsize`; `cpustat=` is the aggregate `cpu` line of
 /// `/proc/stat` (counters the store differences between samples);
 /// `cpups=` is the summed `ps` %CPU, asked only where `/proc/stat` is not
-/// readable (macOS); `mempsi=` is PSI's `some avg10` and `mempl=` the macOS
+/// readable (macOS), in the C locale: `ps` honours a forwarded
+/// `LC_NUMERIC` and prints `12,3`, which awk summed as 12 (review w15-4); `mempsi=` is PSI's `some avg10` and `mempl=` the macOS
 /// pressure level, asked only where `/proc/meminfo` is not readable. The
 /// script is the same text over SSH, on `local` and through an agent
 /// (`remote_sh`), so every transport gets the new lines with no protocol
@@ -762,7 +763,7 @@ printf 'dftmp=%s\\n' \"$(df -Pk \"${TMPDIR:-/tmp}\" 2>/dev/null | tail -n 1)\"; 
 printf 'load=%s\\n' \"$(cat /proc/loadavg 2>/dev/null || sysctl -n vm.loadavg 2>/dev/null)\"; \
 printf 'memkb=%s\\n' \"$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo 2>/dev/null || { l=$(sysctl -n kern.memorystatus_level 2>/dev/null); m=$(sysctl -n hw.memsize 2>/dev/null); [ -n \"$l\" ] && [ -n \"$m\" ] && echo $(( m / 1024 * l / 100 )); })\"; \
 printf 'cpustat=%s\\n' \"$(head -n 1 /proc/stat 2>/dev/null)\"; \
-printf 'cpups=%s\\n' \"$([ -r /proc/stat ] || ps -A -o %cpu= 2>/dev/null | awk '{s+=$1} END {if (NR) print s}')\"; \
+printf 'cpups=%s\\n' \"$([ -r /proc/stat ] || LC_ALL=C ps -A -o %cpu= 2>/dev/null | awk '{s+=$1} END {if (NR) print s}')\"; \
 printf 'mempsi=%s\\n' \"$(sed -n 's/^some avg10=\\([0-9.]*\\).*/\\1/p' /proc/pressure/memory 2>/dev/null)\"; \
 printf 'mempl=%s\\n' \"$([ -r /proc/meminfo ] || sysctl -n kern.memorystatus_vm_pressure_level 2>/dev/null)\"; \
 printf 'uptime=%s\\n' \"$(cut -d. -f1 /proc/uptime 2>/dev/null || { b=$(sysctl -n kern.boottime 2>/dev/null | sed -n 's/.*{ sec = \\([0-9]*\\),.*/\\1/p'); [ -n \"$b\" ] && echo $(( $(date +%s) - b )); })\"; \
@@ -1005,11 +1006,9 @@ impl TmuxExec for LocalTmux {
     }
     async fn run_script(&self, script: &str) -> Result<std::process::Output, IpcError> {
         local_allowed()?;
-        crate::proc::command("bash")
-            .args(["-c", script])
-            .output()
-            .await
-            .map_err(|e| IpcError::new(codes::E_TMUX, format!("spawn bash: {e}")))
+        let mut cmd = crate::proc::command("bash");
+        cmd.args(["-c", script]);
+        bounded_local_output(cmd, LOCAL_SCRIPT_WALL, "bash").await
     }
     async fn rename_session(&self, old: &str, new: &str) -> Result<(), IpcError> {
         local_allowed()?;
@@ -1065,9 +1064,9 @@ impl TmuxExec for LocalTmux {
     }
     async fn list_claude_agents(&self) -> Option<Vec<crate::claude_agents::ClaudeAgentRow>> {
         local_allowed().ok()?;
-        let output = crate::proc::command("claude")
-            .args(["agents", "--json"])
-            .output()
+        let mut cmd = crate::proc::command("claude");
+        cmd.args(["agents", "--json"]);
+        let output = bounded_local_output(cmd, LOCAL_SCRIPT_WALL, "claude")
             .await
             .ok()?;
         if !output.status.success() {
@@ -1086,20 +1085,18 @@ impl TmuxExec for LocalTmux {
             return Some(std::collections::HashMap::new());
         };
         // No login shell: the script needs only `$HOME`, which is inherited.
-        match crate::proc::command("bash")
-            .args(["-c", &script])
-            .output()
-            .await
-        {
+        let mut cmd = crate::proc::command("bash");
+        cmd.args(["-c", &script]);
+        match bounded_local_output(cmd, LOCAL_SCRIPT_WALL, "bash").await {
             Ok(o) if o.status.success() => Some(parse_mtimes(&String::from_utf8_lossy(&o.stdout))),
             _ => None,
         }
     }
     async fn host_identity(&self) -> Option<HostIdentity> {
         local_allowed().ok()?;
-        let out = crate::proc::command("bash")
-            .args(["-c", HOST_IDENTITY_SCRIPT])
-            .output()
+        let mut cmd = crate::proc::command("bash");
+        cmd.args(["-c", HOST_IDENTITY_SCRIPT]);
+        let out = bounded_local_output(cmd, LOCAL_SCRIPT_WALL, "bash")
             .await
             .ok()
             .filter(|o| o.status.success())?;
@@ -1107,9 +1104,9 @@ impl TmuxExec for LocalTmux {
     }
     async fn host_versions(&self) -> Option<HostVersions> {
         local_allowed().ok()?;
-        let out = crate::proc::command("bash")
-            .args(["-c", HOST_VERSIONS_SCRIPT])
-            .output()
+        let mut cmd = crate::proc::command("bash");
+        cmd.args(["-c", HOST_VERSIONS_SCRIPT]);
+        let out = bounded_local_output(cmd, LOCAL_SCRIPT_WALL, "bash")
             .await
             .ok()
             .filter(|o| o.status.success())?;
@@ -1117,9 +1114,9 @@ impl TmuxExec for LocalTmux {
     }
     async fn host_health(&self) -> Option<HostHealthSample> {
         local_allowed().ok()?;
-        let out = crate::proc::command("bash")
-            .args(["-c", HOST_HEALTH_SCRIPT])
-            .output()
+        let mut cmd = crate::proc::command("bash");
+        cmd.args(["-c", HOST_HEALTH_SCRIPT]);
+        let out = bounded_local_output(cmd, LOCAL_SCRIPT_WALL, "bash")
             .await
             .ok()
             .filter(|o| o.status.success())?;
@@ -1193,6 +1190,28 @@ impl<C: SshExec> RemoteTmux<C> {
                 TMUX_OUTPUT_CAP,
             )
             .await
+    }
+}
+
+/// The wall clock for a local probe or script ([`LocalTmux`]): the same
+/// 30 s `remote_sh` gives the remote ones (`default_wall_clock(10 s)`).
+const LOCAL_SCRIPT_WALL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// `cmd`'s output, killed at `wall` (`E_TIMEOUT`) and when the future is
+/// dropped. Review w15-7: without either, a wedged `claude agents` or tmux
+/// outlived reconcile's `probe_timeout` and each pass left one more orphan.
+async fn bounded_local_output(
+    mut cmd: tokio::process::Command,
+    wall: std::time::Duration,
+    what: &str,
+) -> Result<std::process::Output, IpcError> {
+    cmd.kill_on_drop(true);
+    match tokio::time::timeout(wall, cmd.output()).await {
+        Ok(out) => out.map_err(|e| IpcError::new(codes::E_TMUX, format!("spawn {what}: {e}"))),
+        Err(_) => Err(IpcError::new(
+            codes::E_TIMEOUT,
+            format!("local {what} did not answer within {}s", wall.as_secs()),
+        )),
     }
 }
 
@@ -2360,6 +2379,45 @@ pub(crate) mod fake_exec {
 mod tests {
     use super::*;
 
+    /// Review w15-7: a local probe that does not answer is ended at its
+    /// wall clock, reported as a timeout, and its child is killed.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_wedged_local_probe_is_killed_at_its_wall_clock() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("pid");
+        let mut cmd = crate::proc::command("bash");
+        cmd.args([
+            "-c",
+            &format!(
+                "echo $$ > {}; exec sleep 30",
+                quote(&pid_file.to_string_lossy())
+            ),
+        ]);
+        let started = std::time::Instant::now();
+        let err = bounded_local_output(cmd, std::time::Duration::from_millis(500), "bash")
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, codes::E_TIMEOUT);
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        // A loaded box may not have started bash yet: then nothing to check.
+        let pid = std::fs::read_to_string(&pid_file).unwrap_or_default();
+        let proc_dir = std::path::PathBuf::from(format!("/proc/{}", pid.trim()));
+        if !pid.trim().is_empty() && std::path::Path::new("/proc/self").exists() {
+            // Killed on drop; give the kernel a moment to reap it.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while proc_dir.exists() && std::time::Instant::now() < deadline {
+                let stat = std::fs::read_to_string(proc_dir.join("stat")).unwrap_or_default();
+                if stat.contains(") Z ") {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            let stat = std::fs::read_to_string(proc_dir.join("stat")).unwrap_or_default();
+            assert!(stat.is_empty() || stat.contains(") Z "), "{stat}");
+        }
+    }
+
     fn snapshot_text(
         sessions_rc: i32,
         sessions: &str,
@@ -3520,6 +3578,12 @@ mod tests {
             Some(100.0)
         );
         assert_eq!(parse_host_health("cpups=50\n").cpu_pct, None);
+        // Review w15-4: `ps` runs in the C locale, so a comma-decimal
+        // locale forwarded over SSH does not truncate every sample.
+        assert!(
+            HOST_HEALTH_SCRIPT.contains("|| LC_ALL=C ps -A -o %cpu="),
+            "{HOST_HEALTH_SCRIPT}"
+        );
         // An older script prints none of it: unknown, never zero.
         let old = parse_host_health("memkb=5\ncpus=2\n");
         assert_eq!(
