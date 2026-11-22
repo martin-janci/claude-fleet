@@ -120,11 +120,12 @@ impl FleetTools {
     #[tool(description = "Fold project `from` into project `into` in one \
         transaction, then delete `from`: for a repository that changed owner \
         or name and was registered twice. Sessions, pull requests, work \
-        items, routines and rules move; a worktree `into` already has under \
-        the same host and name keeps `into`'s row, and a start rule, \
-        PR-shepherd rule, mission repo, forbidden account or project-scope \
-        environment variable `into` already has keeps `into`'s. Returns what moved. Master only; \
-        may return E_CONFIRM_REQUIRED.")]
+        items, routines, rules, picks, local workspaces and agent project \
+        inputs move; what `into` already has (a twin worktree, start or \
+        PR-shepherd rule, mission repo, forbidden account, project-scope \
+        variable, pick, workspace) keeps `into`'s. Returns what moved; \
+        dry_run reports it and writes nothing. Master only; may return \
+        E_CONFIRM_REQUIRED.")]
     pub(super) async fn merge_project(
         &self,
         Extension(caller): Extension<Caller>,
@@ -132,14 +133,21 @@ impl FleetTools {
     ) -> Result<CallToolResult, McpError> {
         audit(
             "merge_project",
-            &format!("from={} into={}", args.from, args.into),
+            &format!(
+                "from={} into={} dry_run={}",
+                args.from, args.into, args.dry_run
+            ),
         );
-        self.confirm_gate(
-            "merge_project",
-            args.confirm_nonce.as_deref(),
-            &format!("from={} into={}", args.from, args.into),
-            &caller,
-        )?;
+        // A dry run writes nothing (its transaction is rolled back), so it
+        // needs no approval, as `move_session`'s does not.
+        if !args.dry_run {
+            self.confirm_gate(
+                "merge_project",
+                args.confirm_nonce.as_deref(),
+                &format!("from={} into={}", args.from, args.into),
+                &caller,
+            )?;
+        }
         ok_json(&crate::service::projects::merge_project(args, &self.store).map_err(to_mcp_err)?)
     }
 

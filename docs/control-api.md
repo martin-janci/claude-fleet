@@ -405,7 +405,9 @@ Index by area (names only; see the reference for details):
 - **Projects & worktrees** — `list_projects`, `refresh_projects`,
   `forget_project` (drop a row a local-less hub cannot rescan away),
   `merge_project` (fold a repository registered twice, after it changed
-  owner or name, into one row),
+  owner or name, into one row, with its picks, local workspaces and fleet
+  agent project inputs; `dry_run: true` reports what would move and writes
+  nothing),
   `add_project` (clone, adopt or create a repository on a host — `git` and
   `gh` run there; a per-host token acts on its own host only, and
   `create_remote` — publishing on GitHub — needs a person's approval from
@@ -2244,7 +2246,9 @@ automatically on app start.
   which lists the waiting calls with `mcp_confirms` (each with `nonce`,
   `tool`, `summary`, `caller`, `operator`, `asked_at`) and answers one with
   `answer_mcp_confirm` (`nonce`, `approved`; `false` when it was already
-  answered or expired). `control_route` (redesign step 9.9, Jev K2,
+  answered or expired). Approving runs the held call, so it needs a
+  trusted full device (or the master), as `decide_setting_proposals` does;
+  any of those devices may deny (`E_FORBIDDEN` for an untrusted approval). `control_route` (redesign step 9.9, Jev K2,
   `decide.jev.control_route`) tells a fleet admin's device where a message just
   sent in Control goes: `propose {text}` answers `{outcome: proposed | ask |
   none, target?, proposal?, targets, run_id?}` over the active missions and

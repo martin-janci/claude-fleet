@@ -77,7 +77,7 @@ Parameters (* required): `action`*, `agent`, `answers`, `bindings`, `config`, `d
 
 ### `answer_mcp_confirm`
 
-Approve or deny one waiting call by nonce; false if already answered or expired.
+Approve or deny one waiting call by nonce; false if already answered or expired. Approving needs a trusted device; any may deny.
 
 Access: a fleet admin's own device (not the master) · deadline 60 s.
 
@@ -523,11 +523,11 @@ Parameters (* required): `confirm_nonce`, `from`*, `into`*
 
 ### `merge_project`
 
-Fold project `from` into project `into` in one transaction, then delete `from`: for a repository that changed owner or name and was registered twice. Sessions, pull requests, work items, routines and rules move; a worktree `into` already has under the same host and name keeps `into`'s row, and a start rule, PR-shepherd rule, mission repo, forbidden account or project-scope environment variable `into` already has keeps `into`'s. Returns what moved. Master only; may return E_CONFIRM_REQUIRED.
+Fold project `from` into project `into` in one transaction, then delete `from`: for a repository that changed owner or name and was registered twice. Sessions, pull requests, work items, routines, rules, picks, local workspaces and agent project inputs move; what `into` already has (a twin worktree, start or PR-shepherd rule, mission repo, forbidden account, project-scope variable, pick, workspace) keeps `into`'s. Returns what moved; dry_run reports it and writes nothing. Master only; may return E_CONFIRM_REQUIRED.
 
 Access: the master token only · confirm-gated (mcp.confirm_destructive) · deadline 660 s.
 
-Parameters (* required): `confirm_nonce`, `from`*, `into`*
+Parameters (* required): `confirm_nonce`, `dry_run`, `from`*, `into`*
 
 ### `move_session`
 

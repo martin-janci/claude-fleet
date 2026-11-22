@@ -1557,8 +1557,10 @@ target); a provisioning records its content fingerprint, so an older one
 reads `provision_stale` (`fleet-hub provision --host <alias>
 --content-only` refreshes it); `forget_project` drops a project row, and
 `refresh_projects` drops rows that vanished. `merge_project` /
-`fleet-hub project merge <from> <into>` folds a repository registered twice
-(it changed owner or name) into one project row.
+`fleet-hub project merge <from> <into> [--dry-run]` folds a repository
+registered twice (it changed owner or name) into one project row, picks,
+local workspaces and fleet agent project inputs included; `--dry-run`
+previews it.
 
 Conversation event tracking is landed end to end (migration 037
 `conversations` table; `SessionStart`/`PreCompact`/`PostCompact` hooks;

@@ -1561,11 +1561,29 @@ pub struct ProjectMergeReport {
     /// Rows moved in the other tables: pull requests, work items and links,
     /// routines, rules.
     pub other_rows_moved: usize,
+    /// The person's pin, hide and group on `from` that became `into`'s
+    /// (`into`'s own kept).
+    #[serde(default)]
+    pub picks_moved: usize,
+    /// Local workspaces synced from `from` that now sync `into`.
+    #[serde(default)]
+    pub workspaces_moved: usize,
+    /// `from`'s local workspaces dropped for one `into` already had for the
+    /// same host and worktree.
+    #[serde(default)]
+    pub workspaces_dropped: usize,
+    /// Fleet agent rules whose project input named `from` and now names
+    /// `into`.
+    #[serde(default)]
+    pub agent_inputs_moved: usize,
     /// The prefix of `from`'s ticket space when `into` already had one of
     /// its own, so it was left as it is (its keys still resolve); `None`
     /// when it became `into`'s or there was none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ticket_space_left: Option<String>,
+    /// A preview: the merge ran and was rolled back, nothing was written.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub dry_run: bool,
 }
 
 /// The only values `hosts.transport` may hold (migration 034). The single
