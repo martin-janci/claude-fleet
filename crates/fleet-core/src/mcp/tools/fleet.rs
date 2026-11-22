@@ -1156,7 +1156,8 @@ impl FleetTools {
     }
 
     #[tool(description = "Approve or deny one waiting call by nonce; \
-        false if already answered or expired.")]
+        false if already answered or expired. Approving needs a trusted \
+        device; any may deny.")]
     pub(super) async fn answer_mcp_confirm(
         &self,
         Extension(caller): Extension<Caller>,
@@ -1164,6 +1165,9 @@ impl FleetTools {
     ) -> Result<CallToolResult, McpError> {
         audit("answer_mcp_confirm", &format!("approved={}", p.approved));
         refuse_operator_answer(&caller)?;
+        if p.approved {
+            confirm_approver(&caller)?;
+        }
         // `answer`, not `resolve`: an operator call waiting here runs on
         // approval and Control is told either way (review 2026-10-17, F1).
         let answered = self.guards.confirms.answer(&p.nonce, p.approved);
@@ -1943,6 +1947,30 @@ pub(super) fn owner_device_admin(caller: &Caller, what: &str) -> Result<(), McpE
         "E_FORBIDDEN",
         format!(
             "{what} from a device needs the hub's operator to trust it (a full device): \
+             fleet-hub client trust {}",
+            caller.client.as_ref().map_or("<name>", |c| c.name.as_str())
+        ),
+        None,
+    ))
+}
+
+/// Who may APPROVE a waiting call (review w18-8): an approval runs a held
+/// write, the class of `decide_setting_proposals`, so the master or a
+/// person's own unbound device that the hub's operator trusts and that is
+/// `full`, as [`settings_writer`] decides for a device. A deny is always
+/// safe and needs none of it.
+pub(super) fn confirm_approver(caller: &Caller) -> Result<(), McpError> {
+    if caller.is_master()
+        || (caller.is_person_device()
+            && caller.is_trusted_client()
+            && caller.mode == TokenMode::Full)
+    {
+        return Ok(());
+    }
+    Err(mcp_err(
+        "E_FORBIDDEN",
+        format!(
+            "approving a waiting call needs a trusted full device (this one may deny it): \
              fleet-hub client trust {}",
             caller.client.as_ref().map_or("<name>", |c| c.name.as_str())
         ),

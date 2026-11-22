@@ -3573,9 +3573,11 @@ async fn run_matrix(isolate: bool) {
             if readonly_refused(who, a) {
                 return;
             }
+            // Setting it is the fleet admin's (review w18-7): the fixture's
+            // full client is untrusted, so only the master reaches the row.
             match who {
-                Who::Master | Who::ClientFull => is_code(who, a, "E_NOTFOUND", "no such project"),
-                _ => is_code(who, a, "E_FORBIDDEN", "a person decides"),
+                Who::Master => is_code(who, a, "E_NOTFOUND", "no such project"),
+                _ => is_code(who, a, "E_FORBIDDEN", "the fleet admin's"),
             }
         },
     )
@@ -3588,9 +3590,11 @@ async fn run_matrix(isolate: bool) {
             if readonly_refused(who, a) {
                 return;
             }
+            // Setting it is the fleet admin's (review w18-7): the fixture's
+            // full client is untrusted, so only the master reaches the row.
             match who {
-                Who::Master | Who::ClientFull => is_code(who, a, "E_NOTFOUND", "no such project"),
-                _ => is_code(who, a, "E_FORBIDDEN", "a person decides"),
+                Who::Master => is_code(who, a, "E_NOTFOUND", "no such project"),
+                _ => is_code(who, a, "E_FORBIDDEN", "the fleet admin's"),
             }
         },
     )
