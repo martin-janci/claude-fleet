@@ -300,11 +300,12 @@ pub enum TrustMove {
 /// unnumbered one with `No, exit` first and focused (2.1.322 on), and
 /// Codex's `Trust and continue`. The rule is the same for all: exactly one
 /// focused row, exactly one row that says yes, and the two the same row or
-/// neighbours.
+/// neighbours. The dialog is recognised by its own question above the
+/// choices ([`TRUST_QUESTIONS`]), not by the word "trust" anywhere: a
+/// permission prompt for a command that says `--trust-server-cert` has a
+/// focused `Yes` too, and Enter there approves the command. The yes row is
+/// also one of the last rows of the pane, where a dialog draws its choices.
 pub fn trust_yes_move(pane: &str) -> Option<TrustMove> {
-    if !pane.to_lowercase().contains("trust") {
-        return None;
-    }
     let rows: Vec<(bool, &str)> = pane
         .lines()
         .filter(|l| !l.trim().is_empty())
@@ -322,6 +323,17 @@ pub fn trust_yes_move(pane: &str) -> Option<TrustMove> {
     let (Some(yes), None) = (yes.next(), yes.next()) else {
         return None;
     };
+    if yes + TRUST_TAIL_ROWS < rows.len() {
+        return None;
+    }
+    let asked = rows[..at.min(yes)]
+        .iter()
+        .map(|r| r.1.to_lowercase())
+        .collect::<Vec<_>>()
+        .join(" ");
+    if !TRUST_QUESTIONS.iter().any(|q| asked.contains(q)) {
+        return None;
+    }
     if yes == at {
         Some(TrustMove::Stay)
     } else if yes == at + 1 {
@@ -332,6 +344,15 @@ pub fn trust_yes_move(pane: &str) -> Option<TrustMove> {
         None
     }
 }
+
+/// Words only a folder-trust dialog's question uses: Claude Code's current
+/// ("one you trust"), its numbered ("trust this folder") and oldest ("trust
+/// the files") layouts, and Codex's ("Trust this folder?").
+const TRUST_QUESTIONS: [&str; 3] = ["one you trust", "trust this folder", "trust the files"];
+
+/// How many non-blank rows may follow the yes row: the other choice and the
+/// key hint line, with one to spare.
+const TRUST_TAIL_ROWS: usize = 4;
 
 /// The cursor a select dialog draws on its focused row: Claude Code's, and
 /// Codex's.
@@ -426,6 +447,46 @@ pub async fn accept_trust_on(
     }
     run(press_enter_script(tmux_name)).await?;
     Ok(PressEnterOutcome::Sent)
+}
+
+/// A person's Enter into a session stopped at the folder-trust dialog,
+/// answered with its yes row ([`accept_trust_on`]) instead of a bare Enter.
+///
+/// Every client offers Enter as the trust answer: the phone's "Trust this
+/// folder · Enter" (`send_prompt { keys: "Enter" }`), an empty prompt, and
+/// Control told to press it. Since Claude Code 2.1.322 the focused row is
+/// `No, exit`, so the bare key ended the session it was meant to free. Done
+/// here, on the hub, a phone that predates the fix is fixed too.
+///
+/// `None` when the row is not at `stuck_kind: trust_prompt`: the caller
+/// presses its Enter as before. A pane someone is attached to gets no key
+/// (`E_INVALID_STATE`); a dialog fleet cannot read gets none either
+/// (`E_INVALID`, from [`accept_trust_on`]).
+pub async fn enter_answers_trust(
+    store: &Mutex<Store>,
+    ssh: &dyn crate::ssh::SshExec,
+    host_alias: &str,
+    tmux_name: &str,
+) -> Option<Result<(), IpcError>> {
+    let at_trust = {
+        let s = store.lock().ok()?;
+        s.get_session(tmux_name, host_alias)
+            .ok()
+            .flatten()
+            .is_some_and(|r| r.stuck_kind.as_deref() == Some("trust_prompt"))
+    };
+    if !at_trust {
+        return None;
+    }
+    Some(match accept_trust_on(ssh, host_alias, tmux_name).await {
+        Ok(PressEnterOutcome::Sent) => Ok(()),
+        Ok(PressEnterOutcome::SkippedAttached) => Err(IpcError::new(
+            codes::E_INVALID_STATE,
+            "someone is attached to that session's terminal, so fleet typed nothing into its \
+             folder-trust dialog; answer it there",
+        )),
+        Err(e) => Err(e),
+    })
 }
 
 #[async_trait::async_trait]
@@ -950,6 +1011,20 @@ mod tests {
                 "not a trust dialog",
                 "Do you want to proceed?\n ❯ 1. Yes\n   2. No\n",
             ),
+            (
+                "a permission prompt for a command that mentions trust",
+                "Bash command\n  psql --trust-server-cert -c 'select 1'\n  Update the truststore\n\
+                 Do you want to proceed?\n ❯ 1. Yes\n   2. No, and tell Claude what to do differently\n\
+                 Esc to cancel\n",
+            ),
+            (
+                "the trust question only below the choices",
+                "Do you want to proceed?\n ❯ 1. Yes\n   2. No\n  (do you trust the files?)\n",
+            ),
+            (
+                "the yes row far above the end of the pane",
+                "one you trust?\n ❯ Yes, I trust this folder\n   No, exit\n a\n b\n c\n d\n",
+            ),
         ] {
             assert_eq!(trust_yes_move(pane), None, "{why}");
         }
@@ -1038,6 +1113,53 @@ mod tests {
         );
         let out = accept_trust_on(&attached, "h1", "work-1").await.unwrap();
         assert_eq!(out, PressEnterOutcome::SkippedAttached);
+        assert!(keys_sent(&attached).is_empty());
+    }
+
+    /// w06-1: the phone's "Trust this folder · Enter" (and any other bare
+    /// Enter) into a session at the trust dialog picks the yes row, not the
+    /// focused `No, exit`; a session at any other state is left to the
+    /// caller's own Enter.
+    #[tokio::test(start_paused = true)]
+    async fn an_enter_into_a_trust_prompt_answers_yes() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let id = {
+            let s = store.lock().unwrap();
+            s.upsert_host("h1").unwrap();
+            s.upsert_session("work-1", "h1", None, None, 0, 0, "running", None)
+                .unwrap()
+        };
+        let fake = trust_host(TRUST_NO_FIRST, TRUST_NO_FIRST_ON_YES);
+        assert!(enter_answers_trust(&store, &fake, "h1", "work-1")
+            .await
+            .is_none());
+        assert!(keys_sent(&fake).is_empty());
+
+        store
+            .lock()
+            .unwrap()
+            .conn_ref()
+            .execute(
+                "UPDATE sessions SET claude_status = 'blocked', stuck_kind = 'trust_prompt' WHERE id = ?1",
+                rusqlite::params![id],
+            )
+            .unwrap();
+        enter_answers_trust(&store, &fake, "h1", "work-1")
+            .await
+            .expect("routed")
+            .unwrap();
+        assert_eq!(keys_sent(&fake), ["Down", "Enter"]);
+
+        let attached = trust_host(TRUST_NO_FIRST, TRUST_NO_FIRST_ON_YES);
+        attached.on(
+            crate::ssh_fake::Match::script(&attached_probe_script("work-1")),
+            crate::ssh_fake::Reply::ok("1\n"),
+        );
+        let err = enter_answers_trust(&store, &attached, "h1", "work-1")
+            .await
+            .expect("routed")
+            .unwrap_err();
+        assert_eq!(err.code, codes::E_INVALID_STATE, "{err:?}");
         assert!(keys_sent(&attached).is_empty());
     }
 
