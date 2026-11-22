@@ -692,16 +692,34 @@ impl Store {
     /// §4.3 invariant 5), so a grantee never gets this far. There is
     /// deliberately no inverse: nothing in this module restores a revoked
     /// grant.
+    ///
+    /// The asks for review those shares came with close too, as
+    /// [`Store::revoke_session_grant_to`] closes one: under `keep_source` the
+    /// row lives on, so no cascade takes them, and each would sit in its
+    /// person's Inbox pointing at a session they can no longer open.
     pub fn revoke_all_grants_on_session(&self, session_id: i64) -> Result<usize, IpcError> {
-        let n = self.conn.execute(
-            "UPDATE session_grants SET revoked_at = ?2 \
-              WHERE session_id = ?1 AND revoked_at IS NULL",
-            rusqlite::params![session_id, now_unix()],
-        )?;
-        if n > 0 {
+        let now = now_unix();
+        let tx = self.conn.unchecked_transaction()?;
+        let people: Vec<Option<i64>> = {
+            let mut stmt = tx.prepare(
+                "UPDATE session_grants SET revoked_at = ?2 \
+                  WHERE session_id = ?1 AND revoked_at IS NULL RETURNING person_id",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![session_id, now], |r| r.get(0))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        for p in people.iter().flatten() {
+            tx.execute(
+                "UPDATE review_requests SET done_at = ?3 \
+                  WHERE session_id = ?1 AND to_person_id = ?2 AND done_at IS NULL",
+                rusqlite::params![session_id, p, now],
+            )?;
+        }
+        tx.commit()?;
+        if !people.is_empty() {
             bump_grant_generation();
         }
-        Ok(n)
+        Ok(people.len())
     }
 
     /// Announce a change to who may see a session (multi-user M1, T9).

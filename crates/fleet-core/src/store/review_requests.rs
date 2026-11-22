@@ -280,6 +280,30 @@ mod tests {
         assert!(s.review_requests_for(bo, false, 30).unwrap().is_empty());
     }
 
+    /// Review w16-4: a move's sweep of every share on its source (a
+    /// `keep_source` move leaves the row alive) closes their asks too.
+    #[test]
+    fn a_moves_sweep_of_the_shares_closes_their_asks() {
+        let (s, sid, ada, bo) = setup();
+        let cy = s.create_person("cy", None).unwrap().id;
+        s.conn
+            .execute(
+                "UPDATE sessions SET owner_person_id = ?2, visibility = 'private' WHERE id = ?1",
+                rusqlite::params![sid, ada],
+            )
+            .unwrap();
+        for p in [bo, cy] {
+            s.grant_session(sid, crate::store::GrantRecipient::Person(p), "drive", ada)
+                .unwrap();
+            s.ask_for_review(sid, ada, p, "drive", None, 10).unwrap();
+        }
+        assert_eq!(s.revoke_all_grants_on_session(sid).unwrap(), 2);
+        for p in [bo, cy] {
+            assert!(s.review_requests_for(p, false, 30).unwrap().is_empty());
+        }
+        assert_eq!(s.revoke_all_grants_on_session(sid).unwrap(), 0);
+    }
+
     #[test]
     fn only_a_viewer_everywhere_is_a_viewer() {
         let (s, _, ada, _) = setup();
