@@ -305,6 +305,23 @@ pub(crate) async fn caught<T>(
         .map_err(|_| panicked(what))
 }
 
+/// Spawn a single-flight pass the tick kicks off (review 20 w19-3). The
+/// pass reports its own outcome when it finishes; a panic in it is caught
+/// here and reported as `name`'s error (`next_in` the next look), so the
+/// loop's health does not keep its last "ok" while the pass dies on every
+/// tick. Must be called from inside the tokio runtime.
+pub(crate) fn kick(
+    name: &'static str,
+    next_in: Option<Duration>,
+    fut: impl std::future::Future<Output = ()> + Send + 'static,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        if let Err(e) = caught(&format!("the {name} pass"), fut).await {
+            report(name, Err::<(), _>(e), next_in);
+        }
+    })
+}
+
 /// [`caught`] for a synchronous pass.
 pub(crate) fn caught_sync<T>(what: &str, f: impl FnOnce() -> T) -> Result<T, String> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).map_err(|_| panicked(what))
@@ -354,6 +371,24 @@ mod tests {
         );
         let r = row(&rows, "reconcile");
         assert_eq!((r.last_run_at, r.result.as_ref()), (None, None));
+    }
+
+    /// A kicked pass that panics is reported as its loop's error rather
+    /// than leaving the last "ok" standing.
+    #[tokio::test]
+    async fn a_kicked_pass_that_panics_is_reported_as_an_error() {
+        let before = row(&registry().snapshot(), "worktree_prune").failures;
+        let h = kick("worktree_prune", Some(Duration::from_secs(60)), async {
+            panic!("a bad input");
+        });
+        h.await.expect("the panic is caught inside the task");
+        let rows = registry().snapshot();
+        let r = row(&rows, "worktree_prune");
+        assert!(r.failures > before);
+        assert_eq!(
+            r.last_error.as_deref(),
+            Some("the worktree_prune pass panicked")
+        );
     }
 
     #[test]

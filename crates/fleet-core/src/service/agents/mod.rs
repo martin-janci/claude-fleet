@@ -528,7 +528,7 @@ pub fn spawn_poll(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>, period: Durat
         return;
     };
     let (store, reg) = (Arc::clone(store), Registry::live(store, ssh));
-    tokio::spawn(async move {
+    crate::service::loops::kick("agents_poll", Some(period), async move {
         let _flight = flight;
         let n = poll_with(&store, &reg, crate::store::now_unix()).await;
         if n > 0 {
@@ -546,7 +546,7 @@ pub fn spawn_run(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>, period: Durati
         return;
     };
     let (store, reg) = (Arc::clone(store), Registry::live(store, ssh));
-    tokio::spawn(async move {
+    crate::service::loops::kick("agents_run", Some(period), async move {
         let _flight = flight;
         let n = run_with(&store, &reg, crate::store::now_unix()).await;
         if n > 0 {

@@ -915,7 +915,7 @@ fn begin_flight() -> Option<Flight> {
 /// called from inside the tokio runtime.
 pub fn spawn_collect(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>) {
     let (store, ssh) = (Arc::clone(store), Arc::clone(ssh));
-    tokio::spawn(async move {
+    crate::service::loops::kick("usage", None, async move {
         if let Some(n) = maybe_collect(&store, &ssh).await {
             if n > 0 {
                 tracing::debug!("usage: updated {n} session(s)");

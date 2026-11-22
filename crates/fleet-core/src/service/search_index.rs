@@ -397,7 +397,7 @@ pub fn spawn_index(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>) {
     }
     let flight = Flight;
     let (store, ssh) = (Arc::clone(store), Arc::clone(ssh));
-    tokio::spawn(async move {
+    crate::service::loops::kick("search_index", Some(INTERVAL), async move {
         let _flight = flight;
         let now = crate::store::now_unix();
         let hosts: Vec<String> = match store.lock() {

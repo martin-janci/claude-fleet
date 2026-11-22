@@ -897,9 +897,16 @@ pub fn spawn_reprovision_stale(
         loop {
             // Under Pause all a pass touches nothing and the next look is a
             // minute away, so the resume is not missed by a whole period.
-            let next = match reprovision_stale_pass(&store, &*ssh, &base, &mut book).await {
-                Some(_) => REPROVISION_EVERY,
-                None => PAUSED_RECHECK,
+            // A panic in a pass is caught and reported, so it cannot end
+            // the loop with `reprovision: ok` left showing (review 20 w19-2).
+            let pass = reprovision_stale_pass(&store, &*ssh, &base, &mut book);
+            let next = match crate::service::loops::caught("the host refresh pass", pass).await {
+                Ok(Some(_)) => REPROVISION_EVERY,
+                Ok(None) => PAUSED_RECHECK,
+                Err(e) => {
+                    crate::service::loops::report("reprovision", Err(e), Some(REPROVISION_EVERY));
+                    REPROVISION_EVERY
+                }
             };
             tokio::time::sleep(next).await;
         }
@@ -933,6 +940,8 @@ async fn reprovision_stale_pass(
         .collect(),
         Err(_) => return None,
     };
+    // The hosts not refreshed, and the first reason, for the loop's health.
+    let mut not_refreshed: Vec<String> = Vec::new();
     for host in &stale {
         // A host whose hooks post to another fleet (the hub a desktop
         // migrated to, or a desktop beside a hub) is that fleet's: an
@@ -955,6 +964,7 @@ async fn reprovision_stale_pass(
                 theirs,
                 "[provision] stale host reports to another fleet; left alone"
             );
+            not_refreshed.push(format!("{host}: its hooks report to another fleet"));
             continue;
         }
         match provision_content_only(store, ssh, host, base).await {
@@ -987,11 +997,28 @@ async fn reprovision_stale_pass(
                     error = %e.message,
                     "[provision] stale content not refreshed"
                 );
+                not_refreshed.push(format!("{host}: {}", e.message));
             }
         }
     }
-    crate::service::loops::report("reprovision", Ok::<_, String>(()), Some(REPROVISION_EVERY));
+    crate::service::loops::report(
+        "reprovision",
+        refresh_outcome(&not_refreshed, stale.len()),
+        Some(REPROVISION_EVERY),
+    );
     Some(stale)
+}
+
+/// A pass's outcome for the loop's health: an error naming how many of the
+/// `tried` hosts were not refreshed, and the first reason, when any was not.
+fn refresh_outcome(not_refreshed: &[String], tried: usize) -> Result<(), String> {
+    match not_refreshed.first() {
+        None => Ok(()),
+        Some(first) => Err(format!(
+            "{} of {tried} hosts not refreshed: {first}",
+            not_refreshed.len()
+        )),
+    }
 }
 
 const SETTINGS_JSON: &str = "~/.claude/settings.json";
@@ -3730,6 +3757,17 @@ mod tests {
         assert!(book.0.is_empty());
     }
 
+    /// A pass reports itself failed when any host was not refreshed, so the
+    /// Automation view does not show "Host refresh: ok" over failures.
+    #[test]
+    fn a_pass_with_hosts_not_refreshed_reports_an_error() {
+        assert_eq!(refresh_outcome(&[], 0), Ok(()));
+        assert_eq!(refresh_outcome(&[], 3), Ok(()));
+        let e =
+            refresh_outcome(&["h1: agent not connected".into(), "h2: x".into()], 3).unwrap_err();
+        assert_eq!(e, "2 of 3 hosts not refreshed: h1: agent not connected");
+    }
+
     /// A desktop beside a hub (or one the hub was migrated from): the
     /// host's hooks post to the hub, so the unattended refresh leaves the
     /// host alone and says why, instead of pointing its hooks here. Hooks
@@ -5186,6 +5224,7 @@ mod tests {
                 claude_max_behind: 1,
                 hooks_silent_secs: 3600,
                 mem_low_pct: 10.0,
+                version_max_age_secs: 86_400,
             },
             &[],
             "0.0.0",
