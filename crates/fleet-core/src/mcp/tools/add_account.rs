@@ -9,7 +9,9 @@ use crate::service::add_account::{self, AddAccountArgs};
 #[tool_router(router = add_account_router, vis = "pub(super)")]
 impl FleetTools {
     #[tool(description = "Add a Claude login profile on a host: a \
-        subscription login, a setup token or an API key.")]
+        subscription login, a setup token or an API key. action remove \
+        deletes one (its token or key files and ~/.claude-profiles/<name>); \
+        refused while a live session uses it.")]
     pub(super) async fn add_account(
         &self,
         Extension(caller): Extension<Caller>,

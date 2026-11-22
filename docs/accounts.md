@@ -183,6 +183,48 @@ the login alone. A session already running is not stopped, and spend is
 booked as transcripts are read, so the limit can be passed by what is
 running when it is reached.
 
+### Remove a login
+
+**Remove…** on a login profile (Accounts → an account → *Hosts and
+profiles*, or Host details → *Login profiles*) asks first, then takes the
+profile off its host (MCP: `add_account { action: "remove", host_alias,
+profile }`, review w11-7). Fleet:
+
+- refuses while a live session runs under the profile (`E_INVALID_STATE`,
+  naming them in the message and in `details.sessions`): end or switch them
+  first. A ghost or lost row does not count;
+- closes any login pane for it (`fleet-login--<name>`);
+- deletes its own files there (`.fleet-oauth-token`, `.fleet-api-key`,
+  `.fleet-account.json`), then the profile directory
+  `~/.claude-profiles/<name>`. The name is a profile name (letters, digits,
+  `_`, `-`; never `/` or `..`), quoted into the script; a profile that is a
+  symlink goes as a link only, and the links inside a profile go without
+  their targets, so the host's own `~/.claude` is never touched. The host's
+  own login cannot be removed this way. On macOS a profile's `/login` may
+  also have left a Keychain item, which stays;
+- drops the profile from the host row, with its signed-out note and its
+  login fingerprints;
+- deletes the accounts fleet made up for a key or a token (`apikey-…`,
+  `setuptoken-…`) that no login on any host lists any more, with their
+  daily limits, and names them in the reply (`accounts_removed`). One a
+  session row still names stays until a later sweep finds it unused. A
+  subscription account is never deleted.
+
+Same gate as the other `add_account` writes: the master or the hub owner's
+trusted full device; Control is refused. Paired, the desktop sends it to the
+hub like + Add account.
+
+**Remove host** (Host details → *Remove host…*) has a checkbox, off by
+default: *Also delete fleet's tokens and keys there* (MCP: `remove_host {
+alias, delete_credentials: true }`). Before the host is forgotten, fleet
+closes its login panes and deletes `.fleet-oauth-token`, `.fleet-api-key` and
+`.fleet-account.json` from every login profile there (not the profile
+directories, not `~/.claude`, not a symlinked profile). It is best effort:
+a host that does not answer is removed all the same, and the reply's
+`credentials: { deleted, error }` says what happened. Either way the made-up
+accounts the host's logins held are swept as above. Without the checkbox the
+host's files stay as they were: fleet only forgets the host.
+
 ### Switch a running session
 
 Desktop: session details → **Login**, pick the login, **Switch**, confirm.
@@ -483,7 +525,12 @@ profile, or with no `CLAUDE_CONFIG_DIR` for the host's own login (pane
 signed-out note then goes at once, so its card clears and placement takes
 it again. A setup-token profile's button is **New token…** (+ Add account
 preset to a new token for it); an API-key profile has no `/login` to renew
-and is refused. MCP: the login actions take `again: true` (`start_login`,
+and is refused. On a Mac fleet reaches over SSH (the health probe reports
+`login_split` there, true or false), Sign in again for the **host's own**
+login first says that signing in from fleet writes
+`~/.claude/.credentials.json` beside the Keychain copy, the split *Two
+copies of one login* asks to undo, and offers **+ Add account** for a login
+profile instead, with *Sign in here anyway* (review w02-7). MCP: the login actions take `again: true` (`start_login`,
 `login_status`, `login_key`, `login_code`, `end_login`), `profile: ""` for
 the host's own login. Signing in on one host does not fix a copy of the
 same login on another: each copy refreshes on its own (*Two copies of one

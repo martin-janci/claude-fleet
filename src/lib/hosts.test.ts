@@ -178,6 +178,19 @@ describe('hosts store', () => {
     expect(get(hosts)[0].alias).toBe('local');
   });
 
+  it('deleteHost may ask for fleet\'s tokens there and drops the accounts it swept (w11-7)', async () => {
+    const { accounts } = await import('./accounts');
+    const mefistos = { ...sampleLocal, alias: 'mefistos', ssh_alias: 'mefistos' };
+    hosts.set([sampleLocal, mefistos]);
+    const swept = { uuid: 'setuptoken-0011', email: null, display_name: null, organization_name: null, organization_uuid: null, seat_tier: null, last_seen_at: null, nickname: null, has_extra_usage: false };
+    accounts.set([swept, { ...swept, uuid: 'real' }]);
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ ...mefistos, credentials: { deleted: true }, accounts_removed: ['setuptoken-0011'] });
+    const r = await deleteHost('mefistos', { deleteCredentials: true });
+    expect(mockedInvoke).toHaveBeenLastCalledWith('remove_host', { args: { alias: 'mefistos', delete_credentials: true } });
+    expect(r.ok && r.value.credentials?.deleted).toBe(true);
+    expect(get(accounts).map((a) => a.uuid)).toEqual(['real']);
+  });
+
   it('hideHost passes the hidden flag and merges into store', async () => {
     const mefistos = { ...sampleLocal, alias: 'mefistos', ssh_alias: 'mefistos', hidden: false };
     const mefistosHidden = { ...mefistos, hidden: true };

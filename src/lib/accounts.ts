@@ -127,7 +127,12 @@ export function applyAccountEvents(rows_: readonly AccountRow[]): void {
   accounts.update((arr) => rows_.reduce(rows.mergeInto, arr));
 }
 
-// No removeAccount — backend never deletes accounts in iter 4a.
+/** Drop accounts the backend deleted (review w11-7: removing a login or a
+ *  host sweeps the made-up `apikey-` / `setuptoken-` accounts no login uses).
+ *  There is no row event for it; the reply names them. */
+export function dropAccounts(uuids: readonly string[] | null | undefined): void {
+  for (const u of uuids ?? []) rows.remove(u);
+}
 
 // Used by AddHostWizard to preview probe results without persisting.
 export interface ProbePreview {

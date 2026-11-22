@@ -124,6 +124,25 @@ describe('HostDetail', () => {
     expect(document.activeElement).toBe(within(dialog).getByTestId('confirm-cancel'));
   });
 
+  it('Remove host offers to delete fleet’s tokens and keys there, off by default (review w11-7)', async () => {
+    mount('claude-fleet-trn');
+    await fireEvent.click(screen.getByTestId('detail-remove'));
+    await tick();
+    const box = within(screen.getByTestId('confirm-dialog')).getByTestId('confirm-remove-credentials') as HTMLInputElement;
+    expect(box.checked).toBe(false);
+    expect(box.closest('label')?.textContent).toContain('tokens and keys');
+  });
+
+  it('each login profile has a Remove that confirms first (review w11-7)', async () => {
+    const h = { ...fleetHosts().find((x) => x.alias === 'claude-fleet-oci')! };
+    h.claude_profiles = [{ name: 'api', account_uuid: 'apikey-0011223344556677', email: null }];
+    mount('claude-fleet-oci', { host: h });
+    await fireEvent.click(screen.getByTestId('detail-profile-remove'));
+    const dialog = await screen.findByTestId('confirm-dialog');
+    expect(dialog.textContent).toContain('Remove profile api on claude-fleet-oci?');
+    expect(dialog.textContent).toContain('its API key');
+  });
+
   it('the re-probe button and the usage refresh call their props', async () => {
     const p = mount('mefistos');
     await fireEvent.click(screen.getByTestId('detail-reprobe'));

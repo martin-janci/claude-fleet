@@ -420,17 +420,92 @@ pub async fn probe_host(
     list_one(store, &args.alias)
 }
 
+#[derive(Serialize, Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars", rename = "RemoveHostParams")]
+pub struct RemoveHostArgs {
+    /// Host alias.
+    pub alias: String,
+    /// Also delete fleet's tokens and keys there, best effort.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub delete_credentials: bool,
+}
+
+/// What `remove_host` did: the removed row, and what it did beyond it.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RemovedHost {
+    #[serde(flatten)]
+    pub row: HostRow,
+    /// Present when `delete_credentials` was asked: whether fleet's token
+    /// and key files left the host's login profiles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credentials: Option<CredentialsCleanup>,
+    /// The accounts fleet made up for a key or a token on this host that no
+    /// login uses any more, now deleted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub accounts_removed: Vec<String>,
+}
+
+/// Remove host's "also delete fleet's tokens and keys there", reported.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CredentialsCleanup {
+    pub deleted: bool,
+    /// Why not, when not: the host did not answer, say. The host is
+    /// removed all the same.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 /// Remove a host, and stop its reverse tunnel: the supervisor otherwise
-/// re-dials `ssh -R` to the removed alias until the app restarts.
-pub fn remove_host(
-    args: HostAliasArgs,
+/// re-dials `ssh -R` to the removed alias until the app restarts. With
+/// `delete_credentials`, fleet's token and key files go from the host's
+/// login profiles first (best effort over SSH, reported, never blocking the
+/// removal). Then the made-up accounts no login uses any more go.
+pub async fn remove_host(
+    args: RemoveHostArgs,
     store: &Mutex<Store>,
     tunnels: &TunnelSupervisor,
-) -> Result<HostRow, IpcError> {
+    ssh: &Arc<crate::ssh::SshClient>,
+) -> Result<RemovedHost, IpcError> {
+    let tmux = crate::service::sessions::exec_for(&args.alias, ssh);
+    remove_host_with(args, store, tunnels, tmux.as_ref()).await
+}
+
+/// [`remove_host`], with `tmux` reaching the host.
+pub async fn remove_host_with(
+    args: RemoveHostArgs,
+    store: &Mutex<Store>,
+    tunnels: &TunnelSupervisor,
+    tmux: &dyn crate::tmux::TmuxExec,
+) -> Result<RemovedHost, IpcError> {
     let row = list_one(store, &args.alias)?;
-    lock(store)?.delete_host(&args.alias)?;
+    // `local` is never removed (`Store::delete_host`), so its files stay.
+    let credentials = if args.delete_credentials && args.alias != "local" {
+        Some(
+            match crate::service::add_account::delete_fleet_credentials(tmux).await {
+                Ok(()) => CredentialsCleanup {
+                    deleted: true,
+                    error: None,
+                },
+                Err(e) => CredentialsCleanup {
+                    deleted: false,
+                    error: Some(e.message),
+                },
+            },
+        )
+    } else {
+        None
+    };
+    let accounts_removed = {
+        let s = lock(store)?;
+        s.delete_host(&args.alias)?;
+        crate::service::add_account::sweep_unused_accounts(&s)?
+    };
     tunnels.stop(&args.alias);
-    Ok(row)
+    Ok(RemovedHost {
+        row,
+        credentials,
+        accounts_removed,
+    })
 }
 
 #[derive(Serialize, Deserialize, rmcp::schemars::JsonSchema)]
@@ -2206,10 +2281,23 @@ mod tests {
             store.lock().unwrap().upsert_host(h).unwrap();
             tunnels.ensure(h, 4180, 4180);
         }
-        let alias = |a: &str| HostAliasArgs {
-            alias: a.to_string(),
+        let ssh = Arc::new(crate::ssh_fake::FakeSsh::new());
+        let tmux = crate::tmux::RemoteTmux {
+            client: Arc::clone(&ssh),
+            host: "gone".into(),
         };
-        remove_host(alias("gone"), &store, &tunnels).unwrap();
+        remove_host_with(
+            RemoveHostArgs {
+                alias: "gone".into(),
+                delete_credentials: false,
+            },
+            &store,
+            &tunnels,
+            &tmux,
+        )
+        .await
+        .unwrap();
+        assert!(ssh.calls().is_empty(), "no SSH unless asked");
         merge_host(
             MergeHostArgs {
                 from: "old".into(),
@@ -2232,5 +2320,103 @@ mod tests {
         up.sort();
         assert_eq!(up, vec!["into".to_string(), "quiet".to_string()]);
         assert!(!tunnels.health().contains_key("gone"));
+    }
+
+    /// Review w11-7 (b): Remove host may also delete fleet's token and key
+    /// files there, best effort: a host that does not answer is removed all
+    /// the same and the result says so. The made-up accounts its logins
+    /// held go with it.
+    #[tokio::test]
+    async fn remove_host_may_delete_fleets_tokens_there_best_effort() {
+        use crate::ssh_fake::{FakeSsh, Match, Reply};
+        let tunnels = TunnelSupervisor::with_spawner(
+            Arc::new(|_argv| Box::pin(std::future::pending())),
+            Duration::from_secs(3600),
+        );
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        {
+            let s = store.lock().unwrap();
+            for h in ["mac", "down"] {
+                s.upsert_host(h).unwrap();
+            }
+            s.upsert_account(&crate::store::AccountRow {
+                uuid: "setuptoken-0123456789abcdef".into(),
+                email: None,
+                display_name: Some("Setup token · ci".into()),
+                organization_name: None,
+                organization_uuid: None,
+                seat_tier: None,
+                last_seen_at: Some(1),
+                nickname: None,
+                has_extra_usage: false,
+                forbidden_project_ids: Vec::new(),
+                forbidden_org_ids: Vec::new(),
+            })
+            .unwrap();
+            s.set_host_profiles(
+                "mac",
+                &[crate::store::HostProfileRow {
+                    name: "ci".into(),
+                    account_uuid: Some("setuptoken-0123456789abcdef".into()),
+                    email: None,
+                    credential: Some("setup_token".into()),
+                }],
+            )
+            .unwrap();
+        }
+        let ssh = Arc::new(FakeSsh::new());
+        ssh.on_host(
+            "mac",
+            Match::script_contains(".fleet-oauth-token"),
+            Reply::ok("__fleet_ok__\n"),
+        );
+        ssh.on_host(
+            "down",
+            Match::script_contains(".fleet-oauth-token"),
+            Reply::Unreachable,
+        );
+        let tmux = |h: &str| crate::tmux::RemoteTmux {
+            client: Arc::clone(&ssh),
+            host: h.into(),
+        };
+        let args = |a: &str| RemoveHostArgs {
+            alias: a.into(),
+            delete_credentials: true,
+        };
+        let out = remove_host_with(args("mac"), &store, &tunnels, &tmux("mac"))
+            .await
+            .unwrap();
+        assert_eq!(
+            out.credentials,
+            Some(CredentialsCleanup {
+                deleted: true,
+                error: None
+            })
+        );
+        assert_eq!(out.accounts_removed, vec!["setuptoken-0123456789abcdef"]);
+        let v = serde_json::to_value(&out).unwrap();
+        assert_eq!(v["alias"], "mac", "the row's fields stay at the top: {v}");
+        let script = ssh.calls_for("mac")[0].script().unwrap();
+        for f in [
+            ".fleet-oauth-token",
+            ".fleet-api-key",
+            ".fleet-account.json",
+        ] {
+            assert!(script.contains(f), "{script}");
+        }
+        assert!(!script.contains("rm -rf"), "only fleet's files: {script}");
+
+        let out = remove_host_with(args("down"), &store, &tunnels, &tmux("down"))
+            .await
+            .unwrap();
+        let c = out.credentials.unwrap();
+        assert!(!c.deleted && c.error.is_some(), "{c:?}");
+        let s = store.lock().unwrap();
+        assert!(s.get_host_row("down").unwrap().is_none(), "removed anyway");
+        assert!(s.get_host_row("mac").unwrap().is_none());
+        assert!(s
+            .get_account_by_uuid("setuptoken-0123456789abcdef")
+            .unwrap()
+            .is_none());
     }
 }

@@ -16,7 +16,7 @@ use fleet_core::service::agent_install::{AgentInstallsArgs, InstallAgentArgs};
 use fleet_core::service::host_setup::{self, HostSetupCheckArgs, SaveHostSetupArgs};
 use fleet_core::service::hosts::{
     self, AddHostArgs, HideHostArgs, HostAliasArgs, MergeHostArgs, ProbePreview, ProbeSshAliasArgs,
-    SetAccountNicknameArgs,
+    RemoveHostArgs, RemovedHost, SetAccountNicknameArgs,
 };
 use fleet_core::service::project_accounts::SetAccountProjectsArgs;
 use fleet_core::service::tunnel::TunnelSupervisor;
@@ -184,15 +184,17 @@ pub async fn run_host_setup_check(
     Ok(check)
 }
 
-#[tauri::command(async)]
-pub fn remove_host(
-    args: HostAliasArgs,
+/// Async: with `delete_credentials` it SSHes to the host first.
+#[tauri::command]
+pub async fn remove_host(
+    args: RemoveHostArgs,
     backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
     tunnels: State<'_, Arc<TunnelSupervisor>>,
-) -> Result<HostRow, IpcError> {
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<RemovedHost, IpcError> {
     backend.refuse_local_only("remove_host")?;
-    hosts::remove_host(args, &store, &tunnels)
+    hosts::remove_host(args, &store, &tunnels, &ssh).await
 }
 
 /// Host identity & health, task 5. LocalOnly like `remove_host`: the hub

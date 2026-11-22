@@ -71,6 +71,7 @@
   import { autoSwitchState, loadAutoSwitch, setAutoSwitch, type AutoSwitchPatch } from './account_switch';
   import AddAccountDialog from './AddAccountDialog.svelte';
   import SignInAgain from './SignInAgain.svelte';
+  import RemoveLoginDialog from './RemoveLoginDialog.svelte';
   import { untrack } from 'svelte';
   import { get } from 'svelte/store';
 
@@ -153,6 +154,8 @@
   let adding = $state(false);
   /** The signed-out login whose "Sign in again" is open. */
   let signingIn = $state<{ host: string; profile: string | null; token: boolean } | null>(null);
+  /** The login profile whose Remove is being confirmed (review w11-7). */
+  let removingLogin = $state<{ host: string; profile: string; kind: 'login' | 'setup_token' | 'api_key' } | null>(null);
   function showPaused(uuid: string) {
     picked = uuid;
     pausedOnly = uuid;
@@ -452,6 +455,10 @@
     {@const g = signingIn}
     <SignInAgain host={g.host} profile={g.profile} token={g.token} onclose={() => (signingIn = null)} />
   {/if}
+  {#if removingLogin}
+    {@const g = removingLogin}
+    <RemoveLoginDialog host={g.host} profile={g.profile} kind={g.kind} onclose={() => (removingLogin = null)} />
+  {/if}
 
   {#if list.length === 0}
     <ListGate load={$accountsLoad} what="accounts" onretry={() => void loadAccounts()} testid="accounts">
@@ -689,6 +696,21 @@
                       data-testid="account-login-sign-in-again"
                       onclick={() => (signingIn = { host: l.host, profile: l.profile, token: !!l.setupToken })}
                       >{l.setupToken ? 'New token…' : 'Sign in again'}</button
+                    >
+                  {/if}
+                  {#if l.profile}
+                    {@const profile = l.profile}
+                    <button
+                      type="button"
+                      class="link"
+                      data-testid="account-login-remove"
+                      title={`Remove profile ${profile} from ${l.host}: its token or key and ~/.claude-profiles/${profile}`}
+                      onclick={() =>
+                        (removingLogin = {
+                          host: l.host,
+                          profile,
+                          kind: l.setupToken ? 'setup_token' : a.uuid.startsWith('apikey-') ? 'api_key' : 'login',
+                        })}>Remove…</button
                     >
                   {/if}
                 </li>

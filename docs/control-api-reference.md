@@ -23,7 +23,7 @@ Access: the master, a paired device or a per-host token · readonly tokens too �
 
 ### `add_account`
 
-Add a Claude login profile on a host: a subscription login, a setup token or an API key.
+Add a Claude login profile on a host: a subscription login, a setup token or an API key. action remove deletes one (its token or key files and ~/.claude-profiles/<name>); refused while a live session uses it.
 
 Access: the master or a fleet admin's own device · deadline 300 s.
 
@@ -767,11 +767,11 @@ Parameters (* required): `id`*
 
 ### `remove_host`
 
-Remove a host; its sessions are orphaned. Returns the removed row.
+Remove a host; its sessions are orphaned. Returns the removed row. delete_credentials: also delete fleet's token and key files from its login profiles first (best effort, reported as `credentials`).
 
 Access: the master token only · deadline 60 s.
 
-Parameters (* required): `alias`*
+Parameters (* required): `alias`*, `delete_credentials`
 
 ### `rename_session`
 
