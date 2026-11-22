@@ -321,10 +321,34 @@ pub struct SshReviewHost {
 
 impl SshReviewHost {
     async fn sh(&self, host: &str, script: &str) -> Result<std::process::Output, String> {
-        crate::ssh::run_shell_bounded(&*self.ssh, host, script, CONNECT, GH_WALL_CLOCK)
-            .await
-            .map_err(|e| e.message)
+        crate::ssh::run_shell_bounded(
+            &*self.ssh,
+            host,
+            &behind_marker(script),
+            CONNECT,
+            GH_WALL_CLOCK,
+        )
+        .await
+        .map_err(|e| e.message)
     }
+}
+
+/// `cmd` behind an [`OUT_MARKER`](crate::service::move_session::carry::OUT_MARKER)
+/// line. The `gh` calls run under `bash -lc`, and a login profile that
+/// prints (a banner, an MOTD) lands ahead of their output: taken whole, the
+/// PR list never parsed and `MERGED` never matched (review w15-3). The exit
+/// status is `cmd`'s.
+fn behind_marker(cmd: &str) -> String {
+    format!(
+        "printf '\\n%s\\n' {}\n{cmd}",
+        quote(crate::service::move_session::carry::OUT_MARKER)
+    )
+}
+
+/// What [`behind_marker`]'s command printed after the marker line; a host
+/// that answered without one is taken whole.
+fn gh_stdout(stdout: &[u8]) -> std::borrow::Cow<'_, str> {
+    String::from_utf8_lossy(crate::service::move_session::carry::payload(stdout).unwrap_or(stdout))
 }
 
 /// PURE: a label as one URL path segment (percent-encoded but for unreserved bytes).
@@ -399,7 +423,7 @@ impl ReviewHost for SshReviewHost {
         if !out.status.success() {
             return Err(gh_error(&out));
         }
-        parse_pr_list(&String::from_utf8_lossy(&out.stdout))
+        parse_pr_list(&gh_stdout(&out.stdout))
     }
 
     async fn pr_state(&self, host: &str, repo: &str, number: i64) -> Result<String, String> {
@@ -415,7 +439,7 @@ impl ReviewHost for SshReviewHost {
         if !out.status.success() {
             return Err(gh_error(&out));
         }
-        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+        Ok(gh_stdout(&out.stdout).trim().to_string())
     }
 
     async fn diff(&self, host: &str, repo: &str, number: i64) -> Result<String, String> {
@@ -425,7 +449,7 @@ impl ReviewHost for SshReviewHost {
         if !out.status.success() {
             return Err(gh_error(&out));
         }
-        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+        Ok(gh_stdout(&out.stdout).into_owned())
     }
 
     async fn claude_ignore(&self, host: &str, repo: &str, base: &str) -> Option<String> {
@@ -444,7 +468,7 @@ impl ReviewHost for SshReviewHost {
         if !out.status.success() {
             return None;
         }
-        let b64: String = String::from_utf8_lossy(&out.stdout)
+        let b64: String = gh_stdout(&out.stdout)
             .chars()
             .filter(|c| !c.is_whitespace())
             .collect();
@@ -515,7 +539,7 @@ impl ReviewHost for SshReviewHost {
         if !out.status.success() {
             return Err(gh_error(&out));
         }
-        String::from_utf8_lossy(&out.stdout)
+        gh_stdout(&out.stdout)
             .trim()
             .parse()
             .map_err(|_| "GitHub answered no review id".to_string())
@@ -544,9 +568,7 @@ impl ReviewHost for SshReviewHost {
             }
             return Err(err);
         }
-        Ok(Some(
-            String::from_utf8_lossy(&out.stdout).trim().to_string(),
-        ))
+        Ok(Some(gh_stdout(&out.stdout).trim().to_string()))
     }
 
     async fn comments_since(
@@ -569,7 +591,7 @@ impl ReviewHost for SshReviewHost {
         if !out.status.success() {
             return Err(gh_error(&out));
         }
-        Ok(parse_comments(&String::from_utf8_lossy(&out.stdout)))
+        Ok(parse_comments(&gh_stdout(&out.stdout)))
     }
 
     async fn pr_meta(&self, host: &str, repo: &str, number: i64) -> Result<labels::PrMeta, String> {
@@ -586,7 +608,7 @@ impl ReviewHost for SshReviewHost {
         if !out.status.success() {
             return Err(gh_error(&out));
         }
-        labels::parse_meta(&String::from_utf8_lossy(&out.stdout))
+        labels::parse_meta(&gh_stdout(&out.stdout))
     }
 
     async fn set_labels(&self, req: &labels::LabelsRequest) -> Result<(), String> {
@@ -661,9 +683,7 @@ impl ReviewHost for SshReviewHost {
         if !out.status.success() {
             return Err(gh_error(&out));
         }
-        Ok(debate::parse_review_comments(&String::from_utf8_lossy(
-            &out.stdout,
-        )))
+        Ok(debate::parse_review_comments(&gh_stdout(&out.stdout)))
     }
 
     async fn pr_review_comments(
@@ -685,9 +705,7 @@ impl ReviewHost for SshReviewHost {
         if !out.status.success() {
             return Err(gh_error(&out));
         }
-        Ok(debate::parse_review_comments(&String::from_utf8_lossy(
-            &out.stdout,
-        )))
+        Ok(debate::parse_review_comments(&gh_stdout(&out.stdout)))
     }
 
     async fn reply_in_thread(&self, req: &debate::DebateReply) -> Result<(), String> {

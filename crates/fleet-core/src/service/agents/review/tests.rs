@@ -514,6 +514,34 @@ fn gh_pr_list_is_read_as_open_prs() {
     assert_eq!(diff_failure("the diff is too_large"), None);
 }
 
+/// Review w15-3: a login profile's banner ahead of `gh`'s answer does not
+/// break the PR list or hide `MERGED`.
+#[cfg(unix)]
+#[test]
+fn gh_output_is_read_after_a_login_banner() {
+    let run = |cmd: &str| {
+        std::process::Command::new("bash")
+            .args([
+                "-c",
+                &format!(
+                    "echo 'Welcome to box'\nprintf 'no newline'\n{}",
+                    behind_marker(cmd)
+                ),
+            ])
+            .output()
+            .unwrap()
+    };
+    let out = run(r#"printf '%s\n' '[{"number":4,"headRefOid":"abc"}]'"#);
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(parse_pr_list(&gh_stdout(&out.stdout)).unwrap().len(), 1);
+    let out = run("echo MERGED");
+    assert_eq!(gh_stdout(&out.stdout).trim(), "MERGED");
+    // The exit status is the command's.
+    assert_eq!(run("exit 3").status.code(), Some(3));
+    // A host that answered without the marker is read whole.
+    assert_eq!(gh_stdout(b"MERGED\n").trim(), "MERGED");
+}
+
 #[test]
 fn a_config_has_the_originals_defaults() {
     let c = ReviewConfig::parse("{}").unwrap();

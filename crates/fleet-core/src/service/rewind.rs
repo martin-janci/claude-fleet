@@ -472,7 +472,9 @@ impl ReplyOps for LiveOps<'_> {
             }
             return Err(IpcError::new(codes::E_GIT_SETUP, stderr.trim().to_string()));
         }
-        let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        // The last line: a login banner prints ahead of it, and taken
+        // whole it left a created worktree behind as "no path" (w15-3).
+        let path = crate::ssh::last_line(&out.stdout);
         if !path.starts_with('/') {
             return Err(IpcError::new(
                 codes::E_GIT_SETUP,
