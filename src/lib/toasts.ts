@@ -1,7 +1,7 @@
 import { get, writable } from 'svelte/store';
 import type { IpcError, Result } from './result';
 import { hubNextStep } from './hub';
-import { isRefusal, reportError } from './error_report';
+import { isRefusal, reportError, reportLevel } from './error_report';
 import { recordNotice } from './notifications';
 import { errorDetail, errorText } from './error_copy';
 
@@ -312,9 +312,11 @@ export function pushError(error: IpcError, context?: string, retry?: () => void,
   const base = context ? `${context}: ${text}` : text;
   const next = hubNextStep(error);
   // A refusal is the backend answering by rule, not a fault: the person is
-  // told here, and the error channel is not.
+  // told here, and the error channel is not. A code that is mostly a refusal
+  // but also how some faults surface goes there at `warn` (review w07-3).
   if (!isRefusal(error.code)) {
-    reportError('frontend', context ? `${context}: ${error.message}` : error.message, error.code ?? null);
+    const msg = context ? `${context}: ${error.message}` : error.message;
+    reportError('frontend', msg, error.code ?? null, {}, reportLevel(error.code));
   }
   const repair = error.code === 'E_REPAIR_REQUIRED' && opts.repair ? { label: 'Repair workspace…', run: opts.repair } : undefined;
   return push({

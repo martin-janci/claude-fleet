@@ -263,7 +263,14 @@ person can turn it off for their own sessions, migration 187, and ask for
 is recorded only, `decide.jev.limit_switch`); a session parked by a quota
 notification (`quota_auto_resume_*`, read as blocked) is switched too, one
 waiting on a dialog or a form is not; so is a session whose own login is
-signed out (onto any other login on its host, its own account's included). An account can be forbidden for
+signed out (onto any other login on its host, its own account's included).
+A session it switched or tried is left alone for 30 minutes, twice as long
+after each failed try in a row, up to a day (#1130; docs/accounts.md →
+*Switch automatically*). Folder trust follows the login (#1135, landed, ON;
+docs/accounts.md → *Folder trust follows the login*): before a switch, a move
+or a relaunch starts Claude under another login, fleet copies the host's
+trust answer for the folder into that login's config, so the session does
+not stop at the trust dialog. An account can be forbidden for
 projects or for a whole org (landed, nothing forbidden by default; docs/accounts.md → *Keep an
 account off a project*, migrations 217 and 218): every start, resume, switch, routine
 and mission run of such a project refuses or avoids its logins. A login profile can be
@@ -288,12 +295,23 @@ login and from session panes whose last turn ended in Claude Code's own
 "Please run /login" error (`pane_intel::detect_signed_out`), re-asked
 hourly; each is one amber card in Control's chat ("Claude
 login expired on <host> (since <day>) · ssh <host> then claude /login") and
-one line in Control's feed. Control's own account (F7, ON:
+one line in Control's feed. **Sign in again** (#1116, landed; docs/accounts.md
+→ *Signed-out logins*) fixes it from the app: the card, the session's row and
+the Accounts page open + Add account's sign-in step over that login, and its
+signed-out note clears when the pane says "Login successful" (MCP: `again:
+true` on the login tools). Copied logins are detected (#1117, landed;
+docs/accounts.md → *Two copies of one login*): the health probe prints a
+short hash of each login's refresh token (`loginfp=`, migration 228,
+`service::login_conflicts`), and one login copied onto another host or
+profile is flagged in Hosts and `fleet_health`. Control's own account (F7, ON:
 `control.switch_at_limit`): `operator_status` reports its login, usage and
 "Paused · limit" / "signed out"; a birth takes the login it had on that host
 or the best one there, not the host's default; at its limit or signed out,
 Control is resumed under another login on its host (same conversation), else
-moved to another host (a new conversation, as the host-down move). The feed
+moved to another host (a new conversation, as the host-down move); a move
+whose session does not start gives the running Control its token back, so a
+failed move costs it nothing (#1134; docs/accounts.md → *Control's own
+login*). The feed
 also reports an account hitting and leaving its limit and account switches
 done or failed.
 
@@ -1491,7 +1509,11 @@ first read booked as `backfill` apart from the day's live cost (migration
 071 re-keys `usage_daily` by `(day, host_alias, backfill)`), and
 `deploy/hub/backup.sh` / `upgrade.sh` and the `behind-proxy` compose; see
 `docs/hub.md` → *Backups* / *Upgrade with the script*, plan
-`docs/superpowers/plans/2026-09-27-hub-ops-accounting.md`.
+`docs/superpowers/plans/2026-09-27-hub-ops-accounting.md`. A hub whose
+store lock has not been free for five minutes (a deadlock: it answers and
+logs nothing) is ended by a watchdog thread with status 1, so the supervisor
+restarts it (#1128, landed, ON; docs/hub.md → *Setup with Docker*, the
+paragraph on a hub that can no longer serve).
 
 Org administration (spec
 `docs/superpowers/specs/2026-10-06-org-administration-design.md`) is landed

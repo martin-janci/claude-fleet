@@ -439,7 +439,8 @@ Each rung is more destructive than the last.
 
 | Symptom | Action |
 | --- | --- |
-| `stuck_kind: press_enter` / `trust_prompt` / `auth_menu` | `send_prompt` the right keystroke (Enter, `y`, a menu number) |
+| `stuck_kind: press_enter` / `auth_menu` | `send_prompt` the right keystroke (Enter, `y`, a menu number) |
+| `stuck_kind: trust_prompt` | `send_prompt {keys: "Enter"}` alone: fleet answers it with the dialog's yes row. Never an arrow or a digit: on Claude Code 2.1.322+ the focused row is `No, exit`, which ends the session. If fleet refuses (`E_INVALID` / `E_INVALID_STATE`), show the person its autofix finding with a `fix` card |
 | `stuck_kind: reconnect` | wait and re-check; `restart_session` if it persists |
 | `claude_status: idle` but you expected work | `send_prompt(session_id, "continue")` |
 | `context_pct` near 100 | `recreate_session` — fresh REPL, same Claude conversation |

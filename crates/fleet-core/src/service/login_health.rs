@@ -238,6 +238,11 @@ pub fn record(s: &Store, obs: &[Observation], now: i64) -> Result<Vec<Observatio
                 went_out.push(o.clone());
             }
         }
+        // A login seen signed in: panes whose last turn ended before now
+        // still show the old error, and must not note it again.
+        for o in mine.iter().filter(|o| !o.signed_out) {
+            mark_cleared(&o.host_alias, o.profile.as_deref(), now);
+        }
         s.set_host_signed_out_logins(alias, &next)?;
     }
     for o in &went_out {
@@ -291,6 +296,56 @@ pub fn note_signed_out(host_alias: &str, profile: Option<&str>) {
         }
         q.push(o);
     });
+}
+
+/// When each login was last seen signed in again after a signed-out note
+/// ([`record`]): `(host, profile, at)`. Process-wide in the app, per thread
+/// under test, like the note queue.
+type Cleared = Vec<(String, Option<String>, i64)>;
+
+#[cfg(not(test))]
+static CLEARED: Mutex<Cleared> = Mutex::new(Vec::new());
+
+fn with_cleared<R>(f: impl FnOnce(&mut Cleared) -> R) -> R {
+    #[cfg(not(test))]
+    {
+        f(&mut CLEARED.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+    #[cfg(test)]
+    {
+        thread_local! {
+            static CLEARED: Mutex<Cleared> = const { Mutex::new(Vec::new()) };
+        }
+        CLEARED.with(|q| f(&mut q.lock().unwrap_or_else(|e| e.into_inner())))
+    }
+}
+
+/// The login `profile` on `host_alias` was signed in again at `at` (Sign
+/// in again, a new token or key, a usage read): remember it, and drop the
+/// notes queued for it before then.
+fn mark_cleared(host_alias: &str, profile: Option<&str>, at: i64) {
+    with_cleared(|c| {
+        c.retain(|(h, p, _)| !(h == host_alias && p.as_deref() == profile));
+        c.push((host_alias.to_string(), profile.map(str::to_string), at));
+    });
+    with_noted(|q| q.retain(|o| !(o.host_alias == host_alias && o.profile.as_deref() == profile)));
+}
+
+/// A session's pane shows that its last turn failed for want of a login
+/// (`sessions::reconcile`). `turn_ended_at` is when that turn ended (its
+/// last Stop hook, else the pane's last output). A pane keeps its error
+/// line until its next turn, so after a person signed the login in again
+/// the old line would mark it signed out again on the next pass (review
+/// w11-2): a turn that ended before the login was last signed in again
+/// says nothing.
+pub fn note_signed_out_from_pane(host_alias: &str, profile: Option<&str>, turn_ended_at: i64) {
+    let stale = with_cleared(|c| {
+        c.iter()
+            .any(|(h, p, at)| h == host_alias && p.as_deref() == profile && turn_ended_at <= *at)
+    });
+    if !stale {
+        note_signed_out(host_alias, profile);
+    }
 }
 
 /// Record what [`note_signed_out`] queued.
@@ -466,6 +521,41 @@ mod tests {
         note_signed_out("nh", None);
         assert_eq!(with_noted(|q| q.len()), 2);
         with_noted(std::mem::take);
+    }
+
+    /// w11-2: after Sign in again, a pane still showing the old error does
+    /// not mark the login signed out again; a turn after it does.
+    #[test]
+    fn a_pane_from_before_the_sign_in_again_does_not_sign_the_login_out() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("nh").unwrap();
+        s.set_host_signed_out_logins(
+            "nh",
+            &[SignedOutLogin {
+                profile: Some("work".into()),
+                since: 100,
+                checked_at: 100,
+            }],
+        )
+        .unwrap();
+        // Queued before the person signed in again: dropped with the note.
+        note_signed_out_from_pane("nh", Some("work"), 90);
+        record(&s, &[obs("nh", Some("work"), false)], 1_000).unwrap();
+        assert_eq!(with_noted(|q| q.len()), 0);
+        // The old pane, the next pass: its turn ended at 90.
+        note_signed_out_from_pane("nh", Some("work"), 90);
+        drain_noted(&s, 1_010);
+        let row = s.get_host_row("nh").unwrap().unwrap();
+        assert!(!is_signed_out(&row, Some("work")));
+        // Another login on the host is not covered by the mark.
+        note_signed_out_from_pane("nh", None, 90);
+        assert_eq!(with_noted(|q| q.len()), 1);
+        with_noted(std::mem::take);
+        // A new turn that failed after the sign-in counts.
+        note_signed_out_from_pane("nh", Some("work"), 1_500);
+        drain_noted(&s, 1_510);
+        let row = s.get_host_row("nh").unwrap().unwrap();
+        assert!(is_signed_out(&row, Some("work")));
     }
 
     #[test]

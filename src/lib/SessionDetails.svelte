@@ -328,7 +328,8 @@
       ...o,
       current: o.value === current,
       signedOut: signedOut.has(o.value),
-      headroom: signedOut.has(o.value) ? 'signed out' : o.uuid ? loginHeadroomText($accountUsage[o.uuid] ?? null, nowSec) : null,
+      // The hub refuses a switch onto a signed-out login (review w12-5).
+      headroom: signedOut.has(o.value) ? 'signed out · sign in first' : o.uuid ? loginHeadroomText($accountUsage[o.uuid] ?? null, nowSec) : null,
     }));
   });
   function loginOptionText(o: (typeof loginOptions)[number]): string {
@@ -340,6 +341,10 @@
    *  limits choose by numbers (`ai_proposal.ts` NEVER_DECIDES). */
   let loginProposal = $state<string | null>(null);
   const loginTarget = $derived(loginPick ?? session.claude_profile ?? '');
+  /** The pick is a signed-out login, which the hub refuses to switch onto. */
+  const targetSignedOut = $derived(
+    loginTarget !== (session.claude_profile ?? '') && !!loginOptions.find((o) => o.value === loginTarget)?.signedOut,
+  );
   let confirmingSwitch = $state(false);
   /** Switch account…: the same switch as the Login row, from a dialog that
    *  proposes the login on this host with the most headroom. */
@@ -1201,7 +1206,7 @@
             title="The Claude login this session bills: the host's own, or a login profile (~/.claude-profiles/<name>)"
           >
             {#each loginOptions as o (o.value)}
-              <option value={o.value}>{loginOptionText(o)}</option>
+              <option value={o.value} disabled={o.signedOut && !o.current}>{loginOptionText(o)}</option>
             {/each}
           </select>
           {#if loginTarget !== (session.claude_profile ?? '')}
@@ -1209,8 +1214,8 @@
               class="btn btn--quiet is-bounded"
               data-testid="session-login-switch"
               onclick={() => (confirmingSwitch = true)}
-              disabled={restartBlocked !== null}
-              title={restartBlocked ?? ''}
+              disabled={restartBlocked !== null || targetSignedOut}
+              title={restartBlocked ?? (targetSignedOut ? 'That login is signed out: sign it in first.' : '')}
             >Switch…</button>
           {/if}
         </dd>
@@ -1490,8 +1495,13 @@
     lead="The agent restarts with the other account and keeps the conversation. Anything it is doing right now is lost."
     verb="Switch and restart"
     busyVerb="Switching…"
-    canConfirm={loginTarget !== (session.claude_profile ?? '') && switchAccountBlocked === null}
-    confirmTitle={switchAccountBlocked ?? (loginTarget === (session.claude_profile ?? '') ? 'Pick another login.' : null)}
+    canConfirm={loginTarget !== (session.claude_profile ?? '') && switchAccountBlocked === null && !targetSignedOut}
+    confirmTitle={switchAccountBlocked ??
+      (loginTarget === (session.claude_profile ?? '')
+        ? 'Pick another login.'
+        : targetSignedOut
+          ? 'That login is signed out: sign it in first.'
+          : null)}
     onconfirm={onSwitchLogin}
     onclose={() => {
       switchOpen = false;
@@ -1509,6 +1519,7 @@
             name="switch-login"
             value={o.value}
             checked={loginTarget === o.value}
+            disabled={o.signedOut && !o.current}
             onchange={() => (loginPick = o.value)}
           />
           <span class="login-name">{o.name}{#if o.email}<span class="muted"> · {o.email}</span>{:else if !o.loggedIn}<span class="muted"> · not logged in</span>{/if}</span>

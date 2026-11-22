@@ -4,6 +4,7 @@
 // answers from the usage it followed (hub contract 14).
 import { get, writable } from 'svelte/store';
 import { accounts, accountsForbiddenFor } from './accounts';
+import { hosts } from './hosts';
 import { orgs, projectOrgId } from './orgs';
 import { projects } from './projects';
 import { invokeCmd, type Result } from './result';
@@ -96,10 +97,19 @@ export function waitOut(sessionId: number, resetsAt: number): void {
 }
 
 /** The accounts the project forbids, itself or through its org, from the
- *  accounts, projects and orgs stores. */
-function forbiddenOf(projectId: number | null | undefined): string[] {
-  const p = projectId == null ? undefined : get(projects).find((t) => t.project.id === projectId)?.project;
-  return accountsForbiddenFor(projectId, get(accounts), p ? projectOrgId(p, get(orgs)) : null);
+ *  accounts, projects and orgs stores, plus those the org the session is
+ *  filed under on its host forbids (its `org_id`, else the host's): the
+ *  hub's `forbidden_accounts_on` counts that org too, so a switch the
+ *  project's own org allows can still be refused there (review w10-4). */
+export function forbiddenOf(s: { project_id?: number | null; host_alias?: string; org_id?: number | null }): string[] {
+  const projectId = s.project_id;
+  if (projectId == null) return [];
+  const list = get(accounts);
+  const p = get(projects).find((t) => t.project.id === projectId)?.project;
+  const own = accountsForbiddenFor(projectId, list, p ? projectOrgId(p, get(orgs)) : null);
+  const hostOrg = s.org_id ?? (s.host_alias ? (get(hosts).find((h) => h.alias === s.host_alias)?.org_id ?? null) : null);
+  if (hostOrg == null) return own;
+  return [...new Set([...own, ...accountsForbiddenFor(projectId, list, hostOrg)])];
 }
 
 type SwitchSession = {
@@ -107,6 +117,7 @@ type SwitchSession = {
   claude_profile?: string | null;
   account_uuid?: string | null;
   project_id?: number | null;
+  org_id?: number | null;
 };
 
 /** Where a paused session would go: the login on its host with the most
@@ -129,7 +140,7 @@ export async function switchCheck(
   // An empty answer (an older backend): nothing to propose.
   if (!h.value) return { ok: true, value: { target: null, headroom: null } };
   // Never a login on an account the session's project forbids.
-  const forbidden = forbiddenOf(sess.project_id);
+  const forbidden = forbiddenOf(sess);
   const headroom = headroomForAccount(h.value, sess.account_uuid, forbidden);
   if (opts.signedOut) {
     // A session whose login is signed out (review w03-3) goes to any other
@@ -212,6 +223,7 @@ export async function moveToHeadroom(
     claude_profile?: string | null;
     account_uuid?: string | null;
     project_id?: number | null;
+    org_id?: number | null;
   }[],
   restart: (host: string, name: string, profile: string) => Promise<Result<unknown>>,
 ): Promise<{ moved: number; stayed: number; nowhere: number; failed: number }> {
@@ -222,7 +234,7 @@ export async function moveToHeadroom(
       out.failed += 1;
       continue;
     }
-    const h = headroomForAccount(r0.value, s.account_uuid, forbiddenOf(s.project_id));
+    const h = headroomForAccount(r0.value, s.account_uuid, forbiddenOf(s));
     if (!h.over) {
       out.stayed += 1;
       continue;
@@ -263,7 +275,7 @@ export async function moveToAccount(
       out.stayed += 1;
       continue;
     }
-    const to = forbiddenOf(s.project_id).includes(accountUuid)
+    const to = forbiddenOf(s).includes(accountUuid)
       ? undefined
       : h.logins.find((l) => l.account_uuid === accountUuid && !l.signed_out);
     if (!to) {

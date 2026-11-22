@@ -360,6 +360,25 @@ fn a_pane_that_lost_its_login_notes_the_rows_login() {
     let out = host(&s).signed_out_logins;
     assert_eq!(out.len(), 1, "one note per login, however many passes");
     assert_eq!(out[0].profile.as_deref(), Some("work"));
+
+    // w11-2: the person signs `work` in again; the pane still shows the old
+    // error until its next turn, which must not sign the login out again.
+    crate::service::login_health::record(
+        &s,
+        &[crate::service::login_health::Observation {
+            host_alias: "vps".into(),
+            profile: Some("work".into()),
+            signed_out: false,
+        }],
+        now_unix(),
+    )
+    .unwrap();
+    reconcile_write_one_host(&mut s, &probe, &projects).unwrap();
+    crate::service::login_health::drain_noted(&s, now_unix() + 1);
+    assert!(
+        host(&s).signed_out_logins.is_empty(),
+        "an error from before the sign-in says nothing"
+    );
 }
 
 /// Stamp every row as observed by a reconcile pass at `at`: the stale sweep
@@ -9051,14 +9070,12 @@ mod env_launch {
         let launched = h.panes().len();
         // Live on the account it runs on: the rule itself lets it restart
         // (`a_relaunch_is_checked_unless_the_session_is_live_on_the_same_account`).
-        assert!(
-            crate::service::project_accounts::refuse_forbidden_relaunch_of(
-                &h.store.lock().unwrap(),
-                row.id,
-                now_unix()
-            )
-            .is_ok()
-        );
+        assert!(crate::service::run_login::refuse_relaunch_of(
+            &h.store.lock().unwrap(),
+            row.id,
+            now_unix()
+        )
+        .is_ok());
 
         set("lost_at = 5, lost_reason = 'host_reboot'");
         let recreate = serde_json::from_value(serde_json::json!({ "session_id": row.id })).unwrap();

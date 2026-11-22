@@ -211,8 +211,28 @@ pub fn needs_insecure(hub_url: &str) -> Result<bool, IpcError> {
 /// Homebrew as the user, else apt-get, dnf, yum, zypper or apk as root or
 /// through `sudo -n` (never a password prompt) — and says `tmux=installed`.
 /// When none can, it prints `error=<why, naming tmux>` and exits 4.
+///
+/// The step runs through a plain `bash -lc`, which reads neither
+/// `~/.zprofile` (where Homebrew's installer puts `/opt/homebrew/bin` on an
+/// Apple Silicon Mac) nor an interactive rc, so the script appends
+/// [`BREW_DIRS`] to PATH first (review w15-1): otherwise a Mac whose tmux
+/// came from Homebrew is told tmux is missing.
 pub fn tmux_script() -> String {
-    r#"if command -v tmux >/dev/null 2>&1; then printf 'tmux=present\n'; exit 0; fi
+    tmux_script_with(BREW_DIRS)
+}
+
+/// Where Homebrew installs on macOS: `/opt/homebrew/bin` on Apple Silicon,
+/// `/usr/local/bin` on Intel. The agent's own launchd plist puts the same
+/// directories on its PATH.
+const BREW_DIRS: &str = "/opt/homebrew/bin:/usr/local/bin";
+
+/// [`tmux_script`] with `extra` (a `:`-separated PATH suffix) in place of
+/// [`BREW_DIRS`], so a test can stand in a fake Homebrew directory.
+fn tmux_script_with(extra: &str) -> String {
+    format!("PATH=\"$PATH:\"{}\n{}", shq(extra), TMUX_SCRIPT_BODY)
+}
+
+const TMUX_SCRIPT_BODY: &str = r#"if command -v tmux >/dev/null 2>&1; then printf 'tmux=present\n'; exit 0; fi
 if [ "$(id -u)" = 0 ]; then S=''; elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then S='sudo -n'; else S=none; fi
 ok=1
 if command -v brew >/dev/null 2>&1; then brew install tmux </dev/null >/dev/null 2>&1 && ok=0
@@ -233,9 +253,7 @@ else
   printf 'error=tmux is not installed on this host, and no package manager here installed it: install tmux there, then run the install again\n'
 fi
 exit 4
-"#
-    .to_string()
-}
+"#;
 
 fn line_value<'a>(out: &'a str, key: &str) -> Option<&'a str> {
     out.lines()
@@ -477,6 +495,7 @@ async fn run(
             .unwrap_or("no answer");
         return Err(format!("could not reach the host over SSH: {}", why.trim()));
     }
+    // `target_for` already skips a chatty login profile's lines.
     let uname = String::from_utf8_lossy(&out.stdout).trim().to_string();
     let target = target_for(&uname).ok_or_else(|| {
         format!("no fleet-agent release for {uname:?}: releases are for x86_64 and aarch64 Linux and macOS")
@@ -669,9 +688,12 @@ mod tests {
             std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
             std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
         };
+        // A Homebrew directory that does not exist, so a tmux the test box
+        // keeps in /usr/local/bin does not answer for the fake host.
+        let no_brew = dir.path().join("no-brew");
         let run = || {
             crate::proc::std_command("/bin/bash")
-                .args(["-c", &tmux_script()])
+                .args(["-c", &tmux_script_with(&no_brew.to_string_lossy())])
                 .env("PATH", &bin)
                 .output()
                 .unwrap()
@@ -708,6 +730,40 @@ mod tests {
             line_value(&String::from_utf8_lossy(&out.stdout), "tmux"),
             Some("present")
         );
+    }
+
+    /// Review w15-1: on an Apple Silicon Mac, Homebrew's tmux lives in
+    /// /opt/homebrew/bin, which a `bash -lc` PATH lacks; the script looks
+    /// there too, so it says present instead of failing the install.
+    #[cfg(unix)]
+    #[test]
+    fn the_tmux_step_finds_a_homebrew_tmux_outside_the_login_path() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        let brew = dir.path().join("homebrew-bin");
+        std::fs::create_dir(&bin).unwrap();
+        std::fs::create_dir(&brew).unwrap();
+        for (d, name, body) in [
+            (&bin, "id", "echo 1000"),
+            (&brew, "tmux", ""),
+            (&brew, "brew", "exit 1"),
+        ] {
+            let p = d.join(name);
+            std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let out = crate::proc::std_command("/bin/bash")
+            .args(["-c", &tmux_script_with(&brew.to_string_lossy())])
+            .env("PATH", &bin)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        assert_eq!(
+            line_value(&String::from_utf8_lossy(&out.stdout), "tmux"),
+            Some("present")
+        );
+        assert!(tmux_script().starts_with("PATH=\"$PATH:\"'/opt/homebrew/bin:/usr/local/bin'\n"));
     }
 
     /// Review w14-9: a system unit left from a manual `sudo fleet-agent

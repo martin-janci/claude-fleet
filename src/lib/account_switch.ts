@@ -75,6 +75,11 @@ export interface SwitchDetail {
   error: string | null;
   /** "Continue where you left off." was queued after the switch. */
   continued: boolean;
+  /** A failed attempt: how many in a row so far, and when the next try
+   *  comes (unix seconds), so a backed-off session says so (review w06-5).
+   *  Absent from an older backend. */
+  failures?: number;
+  next_try_at?: number;
 }
 
 export function parseSwitchDetail(detail: string | null): SwitchDetail | null {
@@ -89,6 +94,8 @@ export function parseSwitchDetail(detail: string | null): SwitchDetail | null {
       used_pct: typeof d.used_pct === 'number' ? d.used_pct : null,
       error: typeof d.error === 'string' ? d.error : null,
       continued: (d as { continue?: unknown }).continue === true,
+      ...(typeof d.failures === 'number' ? { failures: d.failures } : {}),
+      ...(typeof d.next_try_at === 'number' ? { next_try_at: d.next_try_at } : {}),
     };
   } catch {
     return null;

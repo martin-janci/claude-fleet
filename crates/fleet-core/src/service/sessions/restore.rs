@@ -259,8 +259,9 @@ fn plan_all_lost(s: &Store, rows: &[SessionRow]) -> Result<Vec<RestorePlanEntry>
                 Some(OPERATOR_SKIP_REASON.to_string())
             } else {
                 // A login whose account spent its daily limit relaunches
-                // nothing until the reset: a skip with the reason, not a
-                // failure (`run_login::refuse_relaunch`).
+                // nothing until the reset, and one its project now forbids
+                // nothing until a person lifts the block: a skip with the
+                // reason, not a failure (`run_login::relaunch_held`).
                 crate::service::run_login::relaunch_held(s, r.id, crate::store::now_unix())
             };
             RestorePlanEntry {
@@ -918,6 +919,39 @@ mod tests {
         let one = plan_one_explicit(&s, "h", lost1).unwrap();
         assert_eq!(one.action, "skip");
         assert!(one.reason.unwrap().contains("daily limit"));
+    }
+
+    /// Review w09-4: a lost session whose project now forbids its login's
+    /// account is a skip with the reason too, not a restore that fails.
+    #[tokio::test]
+    async fn a_lost_session_on_a_forbidden_account_is_skipped_with_the_reason() {
+        let (s, (lost1, lost2, ..)) = seed_mixed_host("h");
+        let now = crate::store::now_unix();
+        crate::service::account_limits::seed_usage(&s, "h", None, "acct-api", 10.0, now);
+        let p = s
+            .get_session_by_id(lost1)
+            .unwrap()
+            .unwrap()
+            .project_id
+            .unwrap();
+        s.set_account_forbidden_projects("acct-api", &[p]).unwrap();
+        let rows = s.list_sessions_for_host("h").unwrap();
+        let plan = plan_all_lost(&s, &rows).unwrap();
+        let entry = |id| plan.iter().find(|e| e.session_id == id).unwrap();
+        assert_eq!(entry(lost1).action, "skip", "{:?}", entry(lost1));
+        assert!(
+            entry(lost1)
+                .reason
+                .as_deref()
+                .unwrap()
+                .contains("forbidden"),
+            "{:?}",
+            entry(lost1)
+        );
+        // lost2 has no project: nothing forbids it.
+        assert_eq!(entry(lost2).action, "restore");
+        let one = plan_one_explicit(&s, "h", lost1).unwrap();
+        assert_eq!(one.action, "skip");
     }
 
     #[tokio::test]

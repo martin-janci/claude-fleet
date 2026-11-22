@@ -196,6 +196,15 @@ pub fn build_manifest(i: &ManifestInput) -> Result<ReleaseManifest, String> {
             );
         }
     }
+    // A Linux tarball goes ahead of a macOS one for the same arch: a hub or
+    // agent at 0.6.4 or older matched a tarball by `{arch}-` prefix alone and
+    // took the first hit, so a macOS build listed first would be offered to
+    // every Linux agent (review 20, w13-1). The sort is stable.
+    for c in components.values_mut() {
+        c.artifacts.sort_by_key(
+            |a| matches!(a, Artifact::Tarball { target, .. } if !target.contains("-linux-")),
+        );
+    }
     if !components.contains_key("hub") {
         return Err(
             "no hub artifact among the assets (no image digest and no fleet-hub tarball)".into(),
@@ -604,6 +613,59 @@ mod tests {
             m.artifact_for(d, &Platform::new("linux", "x86_64", "deb")),
             Some(Artifact::Download { .. })
         ));
+    }
+
+    #[test]
+    fn a_linux_tarball_comes_before_a_macos_one_for_each_arch() {
+        // An old hub/agent matched a tarball by `{arch}-` prefix alone and
+        // took the first hit; fleet-release hands the assets sorted by name.
+        let ver = v("0.6.6");
+        let mut names: Vec<String> = ["fleet-agent", "fleet-hub"]
+            .iter()
+            .flat_map(|c| {
+                [
+                    "aarch64-apple-darwin",
+                    "aarch64-unknown-linux-gnu",
+                    "x86_64-apple-darwin",
+                    "x86_64-unknown-linux-gnu",
+                ]
+                .map(|t| format!("{c}-0.6.6-{t}.tar.gz"))
+            })
+            .collect();
+        names.sort();
+        let assets: Vec<Asset> = names.iter().map(|n| asset(n)).collect();
+        let m = build_manifest(&ManifestInput {
+            version: &ver,
+            commit: "c",
+            build_id: "b",
+            published_at: 0,
+            assets_base: "https://x/",
+            notes_url: "",
+            hub: &compat(),
+            desktop_accepts: Window::new(6, 6),
+            assets: &assets,
+            hub_image: None,
+            tauri_sigs: &BTreeMap::new(),
+        })
+        .unwrap();
+        for c in [crate::Component::Agent, crate::Component::Hub] {
+            let arts = &m.component(c).unwrap().artifacts;
+            assert_eq!(arts.len(), 4, "{c:?}");
+            for arch in ["x86_64", "aarch64"] {
+                let first = arts
+                    .iter()
+                    .find_map(|a| match a {
+                        Artifact::Tarball { target, .. }
+                            if target.starts_with(&format!("{arch}-")) =>
+                        {
+                            Some(target.as_str())
+                        }
+                        _ => None,
+                    })
+                    .unwrap();
+                assert!(first.contains("-linux-"), "{c:?} {arch}: {first}");
+            }
+        }
     }
 
     #[test]

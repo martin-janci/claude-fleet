@@ -470,6 +470,33 @@ impl Store {
         )?)
     }
 
+    /// Every session's events of one of `kinds` written at or after
+    /// `since`, by session, then newest first: the account switch's backoff
+    /// read back after a restart (`service::account_switch`).
+    pub fn session_events_of_kinds_since(
+        &self,
+        kinds: &[&str],
+        since: i64,
+    ) -> Result<Vec<SessionEvent>, crate::ipc_error::IpcError> {
+        let list = serde_json::to_string(kinds).unwrap_or_else(|_| "[]".into());
+        let mut stmt = self.conn.prepare(
+            "SELECT id, session_id, at, kind, detail, claude_session_id FROM session_events \
+             WHERE at >= ?1 AND kind IN (SELECT value FROM json_each(?2)) \
+             ORDER BY session_id, at DESC, id DESC",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![since, list], |row| {
+            Ok(SessionEvent {
+                id: row.get(0)?,
+                session_id: row.get(1)?,
+                at: row.get(2)?,
+                kind: row.get(3)?,
+                detail: row.get(4)?,
+                claude_session_id: row.get(5)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     /// The newest event of `session_id` whose kind is one of `kinds`.
     pub fn newest_session_event_of(
         &self,

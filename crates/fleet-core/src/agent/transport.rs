@@ -206,6 +206,45 @@ pub fn exit_status(exit_code: i32) -> ExitStatus {
     ExitStatus::from_raw(if exit_code >= 0 { exit_code as u32 } else { 1 })
 }
 
+/// The frames that upload `local` to `remote` for an agent speaking
+/// `peer`: blocking (a stat, a read and a base64 of the whole file), so
+/// [`AgentTransport::upload_file`] runs it on the blocking pool.
+fn upload_frames_of(
+    local: &Path,
+    remote: &str,
+    peer: u32,
+) -> Result<Vec<fleet_proto::HubFrame>, IpcError> {
+    // One stat, answering both questions, and answering the size one
+    // FIRST. One file is one frame, so a file past the payload limit can
+    // never be sent — and refusing it from its size means the bytes are
+    // never read, never base64'd and never encoded into a throwaway frame
+    // just to be measured. At this limit each of those is a ~200 MiB
+    // allocation the caller would pay to be told "no".
+    let md = std::fs::metadata(local)
+        .map_err(|e| IpcError::new(codes::E_UPLOAD, format!("stat {}: {e}", local.display())))?;
+    if md.len() > fleet_proto::MAX_PAYLOAD_BYTES as u64 {
+        return Err(IpcError::new(
+            codes::E_UPLOAD,
+            format!(
+                "{} is {} MiB: the agent transport carries at most {} MiB in one frame",
+                local.display(),
+                md.len() / (1024 * 1024),
+                fleet_proto::MAX_PAYLOAD_BYTES / (1024 * 1024),
+            ),
+        ));
+    }
+    // Read before dispatching: a local failure must never reach the wire.
+    let bytes = std::fs::read(local)
+        .map_err(|e| IpcError::new(codes::E_UPLOAD, format!("open {}: {e}", local.display())))?;
+    Ok(fleet_proto::upload_frames(
+        &uuid::Uuid::new_v4().to_string(),
+        remote,
+        upload_mode(&md),
+        &bytes,
+        peer,
+    ))
+}
+
 /// The mode to create an uploaded file with: the local file's, with group and
 /// other **write** cleared.
 ///
@@ -379,46 +418,19 @@ impl SshExec for AgentTransport {
         remote_path: &str,
         _timeout: Duration,
     ) -> Result<(), IpcError> {
-        // One stat, answering both questions, and answering the size one
-        // FIRST. One file is one frame, so a file past the payload limit can
-        // never be sent — and refusing it from its size means the bytes are
-        // never read, never base64'd and never encoded into a throwaway frame
-        // just to be measured. At this limit each of those is a ~200 MiB
-        // allocation the caller would pay to be told "no".
-        let md = std::fs::metadata(local_path).map_err(|e| {
-            IpcError::new(
-                codes::E_UPLOAD,
-                format!("stat {}: {e}", local_path.display()),
-            )
-        })?;
-        if md.len() > fleet_proto::MAX_PAYLOAD_BYTES as u64 {
-            return Err(IpcError::new(
-                codes::E_UPLOAD,
-                format!(
-                    "{} is {} MiB: the agent transport carries at most {} MiB in one frame",
-                    local_path.display(),
-                    md.len() / (1024 * 1024),
-                    fleet_proto::MAX_PAYLOAD_BYTES / (1024 * 1024),
-                ),
-            ));
-        }
-        // Read before dispatching: a local failure must never reach the wire.
-        let bytes = std::fs::read(local_path).map_err(|e| {
-            IpcError::new(
-                codes::E_UPLOAD,
-                format!("open {}: {e}", local_path.display()),
-            )
-        })?;
         // In 1 MiB chunks to an agent that speaks them (proto 2), so nothing
         // else on the link waits for the whole file; one frame to an older one.
         let peer = self.registry.negotiated_proto(host).unwrap_or(1);
-        let mut frames = fleet_proto::upload_frames(
-            &uuid::Uuid::new_v4().to_string(),
-            remote_path,
-            upload_mode(&md),
-            &bytes,
-            peer,
-        );
+        // The stat, the read and the base64 of up to 200 MiB run on the
+        // blocking pool, not on the runtime worker (review 20 w14-2).
+        let local = local_path.to_path_buf();
+        let remote = remote_path.to_string();
+        let mut frames =
+            tokio::task::spawn_blocking(move || upload_frames_of(&local, &remote, peer))
+                .await
+                .map_err(|e| {
+                    IpcError::new(codes::E_UPLOAD, format!("the upload read failed: {e}"))
+                })??;
         let frame = frames.pop().expect("upload_frames ends with the upload");
         match self
             .registry

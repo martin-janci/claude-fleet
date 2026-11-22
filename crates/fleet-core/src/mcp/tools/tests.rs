@@ -2552,6 +2552,43 @@ async fn an_over_limit_refusal_never_names_a_forbidden_login() {
     assert!(switched.contains("profile \"work\""), "{switched}");
 }
 
+/// Review w09-8: a new worker on a login the project forbids is refused
+/// before the confirm card, with `E_ACCOUNT_FORBIDDEN`, even when the
+/// caller said the person chose a login past the line.
+#[tokio::test]
+async fn dispatch_refuses_a_forbidden_login_before_its_card() {
+    let s = crate::store::Store::open_in_memory().unwrap();
+    let now = crate::store::now_unix();
+    crate::service::account_limits::seed_usage(&s, "hosta", None, "acct-own", 10.0, now);
+    crate::service::account_limits::seed_usage(&s, "hosta", Some("work"), "acct-work", 10.0, now);
+    let p = s.upsert_project("acme", "api", "/srv/acme/api").unwrap();
+    s.set_account_blocks("acct-own", Some(&[p]), None).unwrap();
+    let t = test_tools(s);
+    let refused = t
+        .dispatch_task(
+            Extension(host_caller("hosta", TokenMode::Full)),
+            Parameters(DispatchTaskParams {
+                worker_session_id: None,
+                new_worker: Some(NewWorkerSpec {
+                    host_alias: "hosta".into(),
+                    project_id: p,
+                    name: None,
+                    profile: None,
+                    over_limit_ok: Some(true),
+                }),
+                prompt: "work".into(),
+                requester_session_id: None,
+                raw: false,
+                confirm_nonce: None,
+            }),
+        )
+        .await
+        .unwrap_err()
+        .message;
+    assert!(refused.starts_with("E_ACCOUNT_FORBIDDEN"), "{refused}");
+    assert!(refused.contains("profile \"work\""), "{refused}");
+}
+
 /// A restart onto another login is a start on it: past `accounts.pause_at`
 /// it is refused with `E_ACCOUNT_LIMIT` unless the person chose it. A plain
 /// restart (same login) is recovery and is never held.
@@ -4810,8 +4847,11 @@ fn a_readonly_token_is_served_no_mutating_tools_and_a_client_no_admin_tools() {
         "a readonly token must be served fewer tools than the master"
     );
     for name in &readonly {
+        // A tool that mixes reads and writes is served for its read actions
+        // only (`guard::READ_ACTIONS`, enforced per action).
+        let reads_only = guard::READ_ACTIONS.iter().any(|(t, _)| t == name);
         assert!(
-            guard::is_readonly_tool(name),
+            guard::is_readonly_tool(name) || reads_only,
             "{name} mutates and must not be served to a readonly token"
         );
     }
@@ -10491,7 +10531,7 @@ async fn the_operator_never_accepts_many_undoes_an_accept_or_verifies() {
 #[tokio::test]
 async fn the_operator_never_makes_start_rules_or_routines() {
     let t = test_tools(Store::open_in_memory().unwrap());
-    for action in ["save", "accept"] {
+    for action in ["save", "accept", "dismiss", "delete"] {
         let e = t
             .start_rules(
                 Extension(production_operator()),
@@ -10508,7 +10548,19 @@ async fn the_operator_never_makes_start_rules_or_routines() {
             e.message
         );
     }
-    for action in ["save", "run_now"] {
+    // Every action that writes (w18-1): an allow-list of reads, so a
+    // paused routine is not re-enabled and a person's routine not deleted.
+    for action in [
+        "save",
+        "run_now",
+        "set_enabled",
+        "delete",
+        "skip_next",
+        "tune_prompt",
+        "set_memory",
+        "forget_seen",
+        "set_run_outcome",
+    ] {
         let e = t
             .routines(
                 Extension(production_operator()),
@@ -10539,6 +10591,43 @@ async fn the_operator_never_makes_start_rules_or_routines() {
     )
     .await
     .expect("the operator may list routines");
+}
+
+/// w18-3: Control's client is bound to the owner, so its write to
+/// `auto_switch_account` turned the OWNER's switching (and the typed
+/// "Continue where you left off.") on with no card. It may read it.
+#[tokio::test]
+async fn the_operator_reads_but_never_sets_automatic_account_switching() {
+    let t = test_tools(Store::open_in_memory().unwrap());
+    for args in [
+        serde_json::json!({ "enabled": true }),
+        serde_json::json!({ "continue_after": true }),
+        serde_json::json!({ "enabled": false, "continue_after": false }),
+    ] {
+        let e = t
+            .auto_switch_account(
+                Extension(production_operator()),
+                Parameters(serde_json::from_value(args.clone()).unwrap()),
+            )
+            .await
+            .expect_err("the operator does not set it");
+        assert!(
+            e.message.starts_with("E_FORBIDDEN") && e.message.contains("may only read"),
+            "{args}: {}",
+            e.message
+        );
+    }
+    // A read passes the operator gate (the test client may still answer
+    // that it speaks for no person, which is not this gate's refusal).
+    if let Err(e) = t
+        .auto_switch_account(
+            Extension(production_operator()),
+            Parameters(serde_json::from_value(serde_json::json!({})).unwrap()),
+        )
+        .await
+    {
+        assert!(!e.message.contains("may only read"), "{}", e.message);
+    }
 }
 
 /// The operator saves a mission for the hub's owner — created rooted at a

@@ -59,7 +59,8 @@ pub async fn session_folder(
             ),
         ));
     }
-    let folder = String::from_utf8_lossy(&out.stdout).trim_end().to_string();
+    // The last line: a login banner prints ahead of it (review w15-3).
+    let folder = crate::ssh::last_line(&out.stdout);
     crate::validate::remote_abs_path("the session's folder", &folder)?;
     Ok(folder)
 }

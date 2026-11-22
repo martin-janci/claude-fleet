@@ -422,8 +422,130 @@ impl IpcError {
 /// Lock an app-level mutex (the `Store` first of all), mapping a poisoned
 /// lock to `E_LOCK`. `let s = lock(store)?;` is the one idiom every
 /// service / command / MCP tool uses; MCP sites chain `.map_err(to_mcp_err)`.
-pub fn lock<T>(m: &std::sync::Mutex<T>) -> Result<std::sync::MutexGuard<'_, T>, IpcError> {
-    m.lock().map_err(|_| IpcError::lock())
+///
+/// A second `lock` of a mutex this thread already holds through `lock` is
+/// a std mutex's deadlock (the hub's of 2026-11-12, review 20 w03-4): it
+/// panics in a debug build, so the test that walks such a path fails
+/// loudly, and answers `E_LOCK` in a release build instead of parking the
+/// thread forever. The check is per thread, which is sound because no guard
+/// is held across an `.await`. The caller's location is kept while the
+/// guard lives, for [`lock_holder`] (the hub's stall watchdog names it).
+#[track_caller]
+pub fn lock<T>(m: &std::sync::Mutex<T>) -> Result<LockGuard<'_, T>, IpcError> {
+    let addr = std::ptr::from_ref(m) as *const () as usize;
+    if held::is_held(addr) {
+        let at = std::panic::Location::caller();
+        if cfg!(debug_assertions) {
+            panic!("a mutex locked again at {at} is already held by this thread: a deadlock");
+        }
+        return Err(IpcError::new(
+            codes::E_LOCK,
+            format!("store lock taken again at {at} by the thread that holds it"),
+        ));
+    }
+    let guard = m.lock().map_err(|_| IpcError::lock())?;
+    Ok(LockGuard {
+        guard,
+        _held: held::Held::new(addr, std::panic::Location::caller()),
+    })
+}
+
+/// Where the guard [`lock`] handed out for `m` was taken, and on which
+/// thread, while it is still held: `None` when nothing holds `m` through
+/// [`lock`] (it may still be held through a bare `.lock()`).
+pub fn lock_holder<T>(m: &std::sync::Mutex<T>) -> Option<String> {
+    held::holder(std::ptr::from_ref(m) as *const () as usize)
+}
+
+/// The guard [`lock`] hands out: a `MutexGuard` that also records, until it
+/// drops, that this thread holds the mutex. Derefs to the guarded value.
+pub struct LockGuard<'a, T> {
+    // Declared first, so the mutex is released before the record goes.
+    guard: std::sync::MutexGuard<'a, T>,
+    _held: held::Held,
+}
+
+impl<T> std::ops::Deref for LockGuard<'_, T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.guard
+    }
+}
+
+impl<T> std::ops::DerefMut for LockGuard<'_, T> {
+    fn deref_mut(&mut self) -> &mut T {
+        &mut self.guard
+    }
+}
+
+/// The book-keeping behind [`lock`]: which mutexes this thread holds (the
+/// re-entry check), and who holds each one (for [`lock_holder`]).
+mod held {
+    use std::cell::RefCell;
+    use std::panic::Location;
+    use std::sync::Mutex;
+
+    thread_local! {
+        static MINE: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+    }
+
+    struct Holder {
+        addr: usize,
+        at: &'static Location<'static>,
+        thread: std::thread::Thread,
+    }
+
+    static HOLDERS: Mutex<Vec<Holder>> = Mutex::new(Vec::new());
+
+    fn holders() -> std::sync::MutexGuard<'static, Vec<Holder>> {
+        HOLDERS.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub(super) fn is_held(addr: usize) -> bool {
+        MINE.with(|m| m.borrow().contains(&addr))
+    }
+
+    pub(super) fn holder(addr: usize) -> Option<String> {
+        holders().iter().find(|h| h.addr == addr).map(|h| {
+            format!(
+                "thread {} ({:?}) at {}",
+                h.thread.name().unwrap_or("unnamed"),
+                h.thread.id(),
+                h.at
+            )
+        })
+    }
+
+    pub(super) struct Held {
+        addr: usize,
+    }
+
+    impl Held {
+        pub(super) fn new(addr: usize, at: &'static Location<'static>) -> Self {
+            MINE.with(|m| m.borrow_mut().push(addr));
+            let mut hs = holders();
+            hs.retain(|h| h.addr != addr);
+            hs.push(Holder {
+                addr,
+                at,
+                thread: std::thread::current(),
+            });
+            Self { addr }
+        }
+    }
+
+    impl Drop for Held {
+        fn drop(&mut self) {
+            let _ = MINE.try_with(|m| {
+                let mut m = m.borrow_mut();
+                if let Some(i) = m.iter().rposition(|a| *a == self.addr) {
+                    m.swap_remove(i);
+                }
+            });
+            let me = std::thread::current().id();
+            holders().retain(|h| !(h.addr == self.addr && h.thread.id() == me));
+        }
+    }
 }
 
 impl fmt::Display for IpcError {
@@ -449,6 +571,34 @@ impl From<std::io::Error> for IpcError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A second `lock` on the thread that holds the mutex is caught (a
+    /// panic in a test build) instead of parking the thread for good; the
+    /// mutex stays usable once the outer guard drops, from any thread.
+    #[test]
+    fn locking_a_held_mutex_again_on_the_same_thread_is_caught() {
+        let m = std::sync::Arc::new(std::sync::Mutex::new(1));
+        assert_eq!(lock_holder(&*m), None);
+        let outer = lock(&*m).unwrap();
+        let held_at = lock_holder(&*m).unwrap();
+        assert!(held_at.contains("ipc_error.rs"), "{held_at}");
+        let again = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _inner = lock(&*m);
+        }));
+        assert!(again.is_err(), "the re-entry must not deadlock or pass");
+        drop(outer);
+        assert_eq!(lock_holder(&*m), None);
+        // Another thread may take it while this one holds it no more.
+        let m2 = std::sync::Arc::clone(&m);
+        std::thread::spawn(move || *lock(&*m2).unwrap() += 1)
+            .join()
+            .unwrap();
+        assert_eq!(*lock(&*m).unwrap(), 2);
+        // Two different mutexes on one thread are not a re-entry.
+        let other = std::sync::Mutex::new(0);
+        let _a = lock(&*m).unwrap();
+        let _b = lock(&other).unwrap();
+    }
 
     #[test]
     fn serializes_without_details() {

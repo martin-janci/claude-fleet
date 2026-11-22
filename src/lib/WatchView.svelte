@@ -126,9 +126,13 @@
   // them, so there is no interval to leak and no stale session's text left on
   // screen under a new header. `session.id` is read FIRST, before the early
   // return, so a selection change re-runs it even while the pane is covered.
+  // Review w17-4: keyed on the id itself, not the row object, which a row
+  // event replaces for the same session.
+  const sid = $derived(session.id);
+  const live = $derived(pollable && visible);
   $effect(() => {
-    const id = session.id;
-    if (!pollable || !visible) return;
+    const id = sid;
+    if (!live) return;
     // A different session (or a regained grant): start from nothing rather
     // than showing the previous pane while the first read is out.
     text = null;

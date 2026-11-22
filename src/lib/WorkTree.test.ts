@@ -12,7 +12,8 @@ import WorkTree from './WorkTree.svelte';
 import { newTaskOwnsChord } from './new_task';
 import { detectMac } from './terminal_keys';
 import { expectAccessible } from './a11y_check';
-import { workBoardOpen } from './app_views';
+import { settingsOpen, workBoardOpen } from './app_views';
+import { destination } from './destination';
 import { sessions } from './sessions';
 import { selectedSession, selectSession, clearSelection } from './selection';
 import { session } from './hosts_fixture';
@@ -941,6 +942,35 @@ describe('WorkTree: New task on ⌘N', () => {
     expect(screen.getByTestId('new-task-dialog')).toBeTruthy();
     unmount();
     expect(newTaskOwnsChord()).toBe(false);
+  });
+
+  it('stands aside while a fleet page or Settings covers the tree (review w17-2)', async () => {
+    const isMac = detectMac(navigator);
+    const { unmount } = render(WorkTree);
+    await flush();
+    const press = () =>
+      window.dispatchEvent(
+        new KeyboardEvent('keydown', isMac ? { key: 'n', metaKey: true } : { key: 'N', ctrlKey: true, shiftKey: true }),
+      );
+    try {
+      destination.set('control');
+      await flush();
+      expect(newTaskOwnsChord()).toBe(false);
+      press();
+      await flush();
+      expect(screen.queryByTestId('new-task-dialog')).toBeNull();
+      destination.set('session');
+      settingsOpen.set(true);
+      await flush();
+      expect(newTaskOwnsChord()).toBe(false);
+      settingsOpen.set(false);
+      await flush();
+      expect(newTaskOwnsChord()).toBe(true);
+    } finally {
+      destination.set('session');
+      settingsOpen.set(false);
+      unmount();
+    }
   });
 });
 

@@ -121,6 +121,27 @@ describe('control threads', () => {
       // Followed, the same failure and block still need you.
       const followed = build([failed, limited], { opts: { ...opts, facts } });
       expect(followed.map((x) => x.group)).toEqual(['needs', 'needs']);
+      // Review w04-4: out of Needs you, the line drops the "Needs you ·" head.
+      const line = Object.fromEntries(t.map((x) => [x.title, x.line]));
+      expect(line['pd-1859']).toBe('Failed · last turn failed · mefistos');
+      expect(line['task-480']).toBe('Idle · weekly limit on acc');
+    });
+
+    it('a muted thread is not followed either (review w04-3)', () => {
+      const failed = session('htz', 'pd-1859', { origin: 'operator', claude_status: 'failed', last_activity_at: now - 3 * 86_400 });
+      const muted = new Map([[`s:${failed.id}`, { state: 'following', muted: true }]]);
+      const [t] = build([failed], { follows: muted });
+      expect(t.group).toBe('earlier');
+      expect(t.muted).toBe(true);
+      expect(t.unfollowed).toBeNull();
+    });
+
+    it('an unfollowed down-host row outside Needs you keeps the reason without the head (review w04-4)', () => {
+      const facts = { down_hosts: ['mefistos'] };
+      const quiet = session('mefistos', 'task-9', { origin: 'operator', claude_status: 'idle', last_activity_at: now - 4 * 86_400 });
+      const [t] = build([quiet], { opts: { ...opts, facts }, follows: quietFor(quiet) });
+      expect(t.group).toBe('earlier');
+      expect(t.line).toBe('Idle · blocked on mefistos, which is down');
     });
 
     it('a Needs you row says why it is there, not only its status', () => {
@@ -135,6 +156,9 @@ describe('control threads', () => {
         'task-480': 'Paused · weekly limit on tech.silvester',
         ci: 'Failed · checks failing · htz',
       });
+      // In Needs you the dot says why: a block waits on you, a failure failed.
+      const dot = Object.fromEntries(t.map((x) => [x.title, x.state]));
+      expect(dot).toEqual({ 'task-573': 'waiting', 'task-480': 'waiting', ci: 'failed' });
     });
   });
 

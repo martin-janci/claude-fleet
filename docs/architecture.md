@@ -437,8 +437,8 @@ bullet for the area you are about to change.
   `run:changed`): one append-only row per step of a run, keyed by its runs
   id (`routine:418`, `agent:91`). Writers call `run_trace::record`, which
   logs and never fails the run: `routines/trace.rs` from the scheduler
-  (`tick::fire_with`, `record_skip`, `close_coded`, `outcome::record_with`,
-  Jev's read in `decide/routine_run_outcome.rs`) and `agents/trace.rs` from
+  (`tick::fire_with`, `record_skip`, `tick::close` → `trace::settle_step`,
+  `outcome::record_with`, `memory.rs`'s notebook steps, Jev's read in `decide/routine_run_outcome.rs`) and `agents/trace.rs` from
   `agents::run_with`; an open routine run's finished tools come from its
   session's transcript tail (`routines/work_steps.rs`, one pass at a time
   off the scheduler tick, deduplicated by `tool_use` id). The store caps a run at `RUN_TRACE_MAX_STEPS` (phase

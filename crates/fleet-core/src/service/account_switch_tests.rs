@@ -398,6 +398,76 @@ async fn a_failed_switch_is_recorded_with_its_code() {
     let (kind, detail) = ev.last().unwrap();
     assert_eq!(kind, EVENT_SWITCH_FAILED);
     assert!(detail.contains(crate::ipc_error::codes::E_SSH), "{detail}");
+    // w06-5: which try it was and when the next comes.
+    let d: serde_json::Value = serde_json::from_str(detail).unwrap();
+    assert_eq!(d["failures"], 1);
+    assert_eq!(d["next_try_at"], NOW + RETRY_AFTER_SECS);
+}
+
+/// Insert an event on `id` stamped `at` (the store stamps the real clock).
+fn event_at(s: &Store, id: i64, kind: &str, at: i64) {
+    s.insert_session_event(id, kind, None).unwrap();
+    s.conn_for_test()
+        .execute(
+            "UPDATE session_events SET at = ?2 WHERE id = (SELECT MAX(id) FROM session_events WHERE session_id = ?1)",
+            rusqlite::params![id, at],
+        )
+        .unwrap();
+}
+
+/// w06-4: a hub restart reads the backoff back from the timeline instead
+/// of retrying every backed-off session at once.
+#[test]
+fn the_backoff_is_read_back_from_the_timeline_once() {
+    let (s, id, _) = fleet();
+    event_at(&s, id, EVENT_SWITCH_FAILED, NOW - 2 * MAX_RETRY_AFTER_SECS);
+    event_at(&s, id, EVENT_SWITCHED, NOW - 10_000);
+    event_at(&s, id, EVENT_SWITCH_FAILED, NOW - 5_000);
+    event_at(&s, id, EVENT_SWITCH_FAILED, NOW - 1_000);
+    let mut r = Recent::default();
+    r.seed(&s, NOW).unwrap();
+    assert_eq!(r.sessions.get(&id), Some(&(NOW - 1_000)));
+    assert_eq!(
+        r.failures.get(&id),
+        Some(&2),
+        "two in a row since the last switch"
+    );
+    assert_eq!(r.retry_after(id), 2 * RETRY_AFTER_SECS);
+    assert!(plan(&s, true, &r, NOW).unwrap().is_empty());
+    // Once per process: a later event is this process's own to count.
+    event_at(&s, id, EVENT_SWITCH_FAILED, NOW - 500);
+    r.seed(&s, NOW).unwrap();
+    assert_eq!(r.failures.get(&id), Some(&2));
+}
+
+/// w06-3: a repaired workspace ends the backoff its failures set.
+#[tokio::test]
+async fn a_repair_after_failed_switches_ends_the_backoff() {
+    let (s, id, _) = fleet();
+    let store = Arc::new(Mutex::new(s));
+    let working = Fake::default();
+    let backed_off = Recent {
+        sessions: HashMap::from([(id, NOW - 3_600)]),
+        failures: HashMap::from([(id, 5)]),
+        seeded: true,
+        ..Default::default()
+    };
+    let recent = Mutex::new(backed_off.clone());
+    let r = run_with(&store, &working, None, &recent, true, NOW)
+        .await
+        .unwrap();
+    assert_eq!(r, RunReport::default(), "eight hours' wait, one gone");
+    event_at(
+        &store.lock().unwrap(),
+        id,
+        crate::service::repair::EVENT_REPAIRED,
+        NOW - 60,
+    );
+    let r = run_with(&store, &working, None, &recent, true, NOW)
+        .await
+        .unwrap();
+    assert_eq!(r.switched, 1);
+    assert!(recent.lock().unwrap().failures.is_empty());
 }
 
 /// A switch that keeps failing is tried less and less often: half an hour
@@ -726,6 +796,77 @@ fn off_a_signed_out_login_its_own_account_is_a_way_out() {
         .all(|l| l.account_uuid != "acct-work"));
 }
 
+/// w10-2 / w11-4: the setup token is never a usage source and the expired
+/// `/login` was the account's only one, so the account's newest reading is
+/// hours old. Its sessions still get out onto the token, every one of them
+/// (no new reading ever comes to open the next wave).
+#[test]
+fn off_a_signed_out_login_a_setup_token_of_its_account_needs_no_new_reading() {
+    let (s, id) = on_work_nothing_spent();
+    let owner = s.personal_owner_id().unwrap();
+    let second = session(&s, "s2", "acct-work", owner);
+    s.conn_for_test()
+        .execute(
+            "UPDATE sessions SET claude_profile = 'work', account_uuid = 'acct-work' WHERE id = ?1",
+            [second],
+        )
+        .unwrap();
+    s.conn_for_test()
+        .execute(
+            "DELETE FROM account_usage_snapshots WHERE account_uuid = 'acct-work'",
+            [],
+        )
+        .unwrap();
+    // The last reading, from the `/login`, eight hours before it expired.
+    seed_usage(&s, "mac", Some("work"), "acct-work", 30.0, NOW - 8 * 3600);
+    let mut profiles = s
+        .get_host_row("mac")
+        .unwrap()
+        .unwrap()
+        .claude_profiles
+        .unwrap();
+    profiles.push(crate::store::HostProfileRow {
+        name: "tok".into(),
+        account_uuid: Some("acct-work".into()),
+        email: None,
+        credential: Some(crate::service::add_account::SETUP_TOKEN_CREDENTIAL.into()),
+    });
+    s.set_host_profiles("mac", &profiles).unwrap();
+    // `spare` and the own login are spent, so only the token is a way out.
+    seed_usage(&s, "mac", Some("spare"), "acct-spare", 100.0, NOW);
+    seed_usage(&s, "mac", None, "acct-out", 100.0, NOW);
+    sign_out(&s, &["work"]);
+
+    let p = plan_now(&s);
+    assert_eq!(p.len(), 1, "one per account per run");
+    assert_eq!(p[0].session_id, id);
+    assert_eq!(p[0].target.profile.as_deref(), Some("tok"));
+    // The next run takes the other session, with no newer reading.
+    let recent = Recent {
+        sessions: HashMap::from([(id, NOW)]),
+        targets: HashMap::from([("acct-work".to_string(), NOW)]),
+        ..Default::default()
+    };
+    let p = plan(&s, true, &recent, NOW + 60).unwrap();
+    assert_eq!(p.len(), 1);
+    assert_eq!(p[0].session_id, second);
+    assert_eq!(p[0].target.profile.as_deref(), Some("tok"));
+
+    // A `tok` that is a `/login` of its own reads usage: the wave rule holds
+    // for it, and no reading newer than the last move has come.
+    let mut profiles = s
+        .get_host_row("mac")
+        .unwrap()
+        .unwrap()
+        .claude_profiles
+        .unwrap();
+    for p in profiles.iter_mut() {
+        p.credential = None;
+    }
+    s.set_host_profiles("mac", &profiles).unwrap();
+    assert!(plan(&s, true, &recent, NOW + 60).unwrap().is_empty());
+}
+
 #[test]
 fn a_working_session_on_a_signed_out_login_is_left_alone() {
     let (s, _) = on_work_nothing_spent();
@@ -747,4 +888,77 @@ fn an_auth_failure_is_what_cuts_a_turn_off_a_signed_out_login() {
     assert!(cut_off_by_sign_out("stop_failure", Some("auth (401)")));
     assert!(!cut_off_by_sign_out("stop_failure", Some("rate_limit")));
     assert!(!cut_off_by_sign_out("turn_done", Some("auth")));
+}
+
+/// A switcher that starts a turn in every other session on its first
+/// call, as a person typing into a paused row while the run works through
+/// its plan.
+struct StartsATurn {
+    store: Arc<Mutex<Store>>,
+    calls: Mutex<Vec<String>>,
+}
+
+#[async_trait::async_trait]
+impl Switcher for StartsATurn {
+    async fn switch(&self, _host: &str, name: &str, _profile: &str) -> Result<(), IpcError> {
+        let mut calls = self.calls.lock().unwrap();
+        if calls.is_empty() {
+            self.store
+                .lock()
+                .unwrap()
+                .conn_for_test()
+                .execute(
+                    "UPDATE sessions SET claude_status = 'working' WHERE tmux_name != ?1",
+                    [name],
+                )
+                .unwrap();
+        }
+        calls.push(name.into());
+        Ok(())
+    }
+}
+
+/// Review w10-3: a planned switch is checked again right before its
+/// restart, so a session that started working since the plan is left
+/// alone and nothing is recorded for it.
+#[tokio::test]
+async fn a_session_that_started_working_since_the_plan_is_not_switched() {
+    let (s, first, owner) = fleet();
+    let second = session(&s, "s2", "acct-out", Some(owner));
+    assert_eq!(plan_now(&s).len(), 2, "both planned");
+    let store = Arc::new(Mutex::new(s));
+    let switcher = StartsATurn {
+        store: store.clone(),
+        calls: Mutex::new(Vec::new()),
+    };
+    let recent = Mutex::new(Recent::default());
+    let r = run_with(&store, &switcher, None, &recent, true, NOW)
+        .await
+        .unwrap();
+    assert_eq!(
+        r,
+        RunReport {
+            switched: 1,
+            failed: 0
+        }
+    );
+    let calls = switcher.calls.lock().unwrap().clone();
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    let (moved, left) = if calls[0] == "s1" {
+        (first, second)
+    } else {
+        (second, first)
+    };
+    let s = store.lock().unwrap();
+    assert_eq!(events(&s, moved).last().unwrap().0, EVENT_SWITCHED);
+    assert!(
+        events(&s, left)
+            .iter()
+            .all(|(k, _)| k != EVENT_SWITCHED && k != EVENT_SWITCH_FAILED),
+        "nothing recorded for the session left alone"
+    );
+    assert!(
+        !recent.lock().unwrap().sessions.contains_key(&left),
+        "not counted as tried"
+    );
 }

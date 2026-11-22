@@ -575,10 +575,12 @@ impl Store {
         // The post-write project_id (SET clauses read the OLD row). A pane
         // whose directory is in no project keeps the project a fleet-run row
         // already has: a person adopted it into one (Lost and found, step
-        // 4.12), or it cd'd out of its checkout.
+        // 4.12), or it cd'd out of its checkout. Qualified: it is also read
+        // inside the `FROM worktrees w` subquery below, where a bare
+        // `project_id` is the worktree's (review w05-5).
         const NEW_PROJECT: &str =
-            "CASE WHEN excluded.project_id IS NULL AND started_at IS NOT NULL \
-                                        THEN project_id ELSE excluded.project_id END";
+            "CASE WHEN excluded.project_id IS NULL AND sessions.started_at IS NOT NULL \
+                                        THEN sessions.project_id ELSE excluded.project_id END";
         const FRESH_CONTEXT: &str = "context_source IN ('transcript','hook') \
                                      AND context_at >= ?19 - 120";
         let sql = format!(
@@ -615,11 +617,25 @@ impl Store {
                -- registered it anew), the old project's worktree is not its
                -- worktree: drop it, as `set_session_project` does. A link
                -- that was already crossed is healed by the same check.
-               worktree_id=CASE WHEN worktree_id IS NOT NULL AND NOT EXISTS (
-                                  SELECT 1 FROM worktrees w
-                                   WHERE w.id = sessions.worktree_id
-                                     AND w.project_id IS ({new_project}))
-                                THEN NULL ELSE worktree_id END,
+               -- Dropped, or the row changed project with none, it links
+               -- the new project's worktree of its `worktree_key` on this
+               -- host when there is one: a pane that cd'd into a nested
+               -- repository and back gets its checkout's row again, which
+               -- the worktree cleanup reads as in use (review w05-6). A row
+               -- that stays in its project with no link keeps none.
+               worktree_id=CASE
+                 WHEN worktree_id IS NOT NULL AND EXISTS (
+                        SELECT 1 FROM worktrees w
+                         WHERE w.id = sessions.worktree_id
+                           AND w.project_id IS ({new_project}))
+                   THEN worktree_id
+                 WHEN worktree_id IS NULL AND sessions.project_id IS ({new_project})
+                   THEN NULL
+                 ELSE (SELECT w.id FROM worktrees w
+                        WHERE w.project_id = ({new_project})
+                          AND w.host_alias = sessions.host_alias
+                          AND w.name = COALESCE(excluded.worktree_key, sessions.worktree_key))
+               END,
                last_activity_at=excluded.last_activity_at,
                -- Only a Claude pane bills a Claude account: a Codex or
                -- Hermes row keeps none, and one it took before is cleared.
@@ -2926,6 +2942,82 @@ mod tests {
         // A row crossed before this fix (project moved, FK left) heals.
         s.link_session_worktree(r.id, wt_old).unwrap();
         assert_eq!(pass(&mut s, new).worktree_id, None, "a crossed link heals");
+    }
+
+    /// Review w05-5: a fleet-run row keeps its project while its pane is in
+    /// none, and a crossed link still heals then: the check reads the
+    /// session's project, not the worktree's own.
+    #[test]
+    fn a_crossed_link_heals_while_the_pane_is_in_no_project() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.upsert_host("local").unwrap();
+        let one = s.upsert_project("o", "one", "/p/o/one").unwrap();
+        let two = s.upsert_project("o", "two", "/p/o/two").unwrap();
+        let wt_one = s
+            .upsert_worktree(one, "feat", "/p/o/one/.worktrees/feat", None)
+            .unwrap();
+        let pass = |s: &mut Store, pid: Option<i64>| {
+            s.apply_host_reconcile(HostReconcile {
+                sessions: &[ReconcileSession {
+                    project_id: pid,
+                    worktree_key: None,
+                    ..live_session("dev", 0, 1)
+                }],
+                keep: &["dev".to_string()],
+                ..empty_probe("local", 1)
+            })
+            .unwrap();
+            s.get_session("dev", "local").unwrap().unwrap()
+        };
+        let r = pass(&mut s, Some(two));
+        s.set_started_at(r.id, 5).unwrap();
+        s.link_session_worktree(r.id, wt_one).unwrap();
+        let r = pass(&mut s, None);
+        assert_eq!(
+            (r.project_id, r.worktree_id),
+            (Some(two), None),
+            "project kept, crossed link healed"
+        );
+    }
+
+    /// Review w05-6: a pane that cd's into a nested repository registered
+    /// as another project loses its worktree link, and gets it back by its
+    /// worktree key when it cd's back.
+    #[test]
+    fn a_pane_back_from_a_nested_repository_gets_its_worktree_again() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.upsert_host("local").unwrap();
+        let a = s.upsert_project("o", "a", "/p/o/a").unwrap();
+        let b = s.upsert_project("o", "b", "/p/o/a/vendor/b").unwrap();
+        let feat = s
+            .upsert_worktree(a, "feat", "/p/o/a/.worktrees/feat", None)
+            .unwrap();
+        let pass = |s: &mut Store, pid: i64, key: &str| {
+            s.apply_host_reconcile(HostReconcile {
+                sessions: &[ReconcileSession {
+                    worktree_key: Some(key.to_string()),
+                    ..live_session("dev", pid, 1)
+                }],
+                keep: &["dev".to_string()],
+                ..empty_probe("local", 1)
+            })
+            .unwrap();
+            s.get_session("dev", "local").unwrap().unwrap()
+        };
+        let r = pass(&mut s, a, "feat");
+        s.link_session_worktree(r.id, feat).unwrap();
+        let r = pass(&mut s, b, "main");
+        assert_eq!((r.project_id, r.worktree_id), (Some(b), None));
+        let r = pass(&mut s, a, "feat");
+        assert_eq!((r.project_id, r.worktree_id), (Some(a), Some(feat)));
+        // Staying in its project with no link, it is not linked.
+        s.conn_ref()
+            .execute(
+                "UPDATE sessions SET worktree_id = NULL WHERE id = ?1",
+                [r.id],
+            )
+            .unwrap();
+        assert_eq!(pass(&mut s, a, "feat").worktree_id, None);
     }
 
     #[test]

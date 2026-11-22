@@ -361,9 +361,11 @@ pub fn facts(
         None => None,
     };
     let unseen = with_repo.as_ref().is_some_and(Vec::is_empty);
-    let forbidden = crate::service::project_accounts::forbidden_accounts(s, project_id)?;
     let mut out = Vec::with_capacity(hosts.len());
     for h in &hosts {
+        // Per host: an org the host is filed under forbids too (w01-3).
+        let forbidden =
+            crate::service::project_accounts::forbidden_accounts_on(s, project_id, &h.alias)?;
         let mut logins = Vec::new();
         for l in account_limits::host_logins(h, &[], now) {
             let used = snaps

@@ -800,36 +800,34 @@ pub(crate) fn trust_files(profiles: &[String]) -> Vec<(String, String)> {
     out
 }
 
-/// Trust `dir` in one Claude config `file` on `host`: read, merge
-/// ([`pre_trust_claude_json`], which keeps everything else in it), back up,
-/// write. The parse error fires before any write, and the file carries a
-/// login (and, the host's own, its bearer token from provisioning), so it
-/// goes through the secret path: 0600, and renamed onto the target rather
-/// than truncated.
+/// PURE: the login whose config lives in `config_dir`, a directory from
+/// [`trust_files`]: `None` for the host's own, the profile name otherwise.
+fn login_of(config_dir: &str) -> Option<&str> {
+    config_dir.strip_prefix("~/.claude-profiles/")
+}
+
+/// Trust `dir` in one login's Claude config on `host` (a pair from
+/// [`trust_files`]): read, merge ([`pre_trust_claude_json`], which keeps
+/// everything else in it), back up, write, through
+/// [`rewrite_login_config`](crate::service::provision::rewrite_login_config).
+/// The parse error fires before any write; the file carries a login (and,
+/// the host's own, its bearer token from provisioning), so it is written
+/// 0600 and renamed onto the target. The rename happens only while the file
+/// still holds what was read: live sessions under that login rewrite it all
+/// the time, and an unguarded rename dropped whatever they wrote meanwhile
+/// (another folder's trust, a refreshed `oauthAccount`).
 async fn pre_trust_file(
     ssh: &dyn crate::ssh::SshExec,
     host: &str,
     config_dir: &str,
-    file: &str,
     dir: &str,
 ) -> Result<(), IpcError> {
-    use crate::service::provision::{read_host_file, write_host_file_secret};
-    let existing = read_host_file(ssh, host, file).await?;
-    let merged = pre_trust_claude_json(&existing, dir)?;
-    if merged == existing {
-        return Ok(());
-    }
-    if !existing.trim().is_empty() {
-        write_host_file_secret(
-            ssh,
-            host,
-            config_dir,
-            &format!("{file}.fleet-bak"),
-            &existing,
-        )
-        .await?;
-    }
-    write_host_file_secret(ssh, host, config_dir, file, &merged).await
+    crate::service::provision::rewrite_login_config(ssh, host, login_of(config_dir), &|existing| {
+        let merged = pre_trust_claude_json(existing, dir)?;
+        Ok((merged != existing).then_some(merged))
+    })
+    .await
+    .map(|_| ())
 }
 
 /// Trust Control's directory on `host` for the login `profile` before a
@@ -839,11 +837,11 @@ async fn pre_trust_file(
 /// fleet's playbook, and never stops the switch.
 pub async fn pre_trust_profile(ssh: &dyn crate::ssh::SshExec, host: &str, profile: &str) {
     let files = trust_files(&[profile.to_string()]);
-    let Some((config_dir, file)) = files.get(1) else {
+    let Some((config_dir, _)) = files.get(1) else {
         return;
     };
     let done = match operator_dir_on(host, ssh).await {
-        Ok(dir) => pre_trust_file(ssh, host, config_dir, file, &dir).await,
+        Ok(dir) => pre_trust_file(ssh, host, config_dir, &dir).await,
         Err(e) => Err(e),
     };
     if let Err(e) = done {
@@ -927,7 +925,7 @@ impl OperatorHost for LiveHost {
         }
         let ssh = self.ssh.as_ref();
         for (i, (config_dir, file)) in trust_files(&profiles).iter().enumerate() {
-            let done = pre_trust_file(ssh, host, config_dir, file, dir).await;
+            let done = pre_trust_file(ssh, host, config_dir, dir).await;
             // The host's own config is the birth's rule (a corrupt one stops
             // it, with no token committed). A profile's is one more login
             // the session might run under: a file fleet cannot merge there
@@ -1392,8 +1390,11 @@ pub(crate) async fn ensure_operator_with(
     //    end it); step 5 revokes its token, and once its host is back it is
     //    an ordinary `fleet-operator` session the person can kill.
     let local_enabled = crate::service::hub::local_host_enabled();
-    // `held_on`: the host of the recorded session, whatever state it is in.
-    // Its `.mcp.json` is where the live token is (step 6 reads this).
+    // `held_on`: the host of the recorded session while a process may still
+    // hold the token there: the session is live, or its host is stranded
+    // (it cannot be seen, so it may still run). Its `.mcp.json` is where the
+    // live token is (step 6 reads this). A lost session on a reachable host
+    // holds nothing, so a failed start gives it no token back.
     let mut held_on = None;
     let stranded = {
         let s = lock(store)?;
@@ -1403,13 +1404,14 @@ pub(crate) async fn ensure_operator_with(
                 .get_session(&r.tmux_name, &r.host_alias)
                 .map_err(|e| IpcError::new(codes::E_SQLITE, format!("find operator: {e}")))?
             {
-                held_on = Some(r.host_alias.clone());
                 let host_row = s
                     .get_host_row(&r.host_alias)
                     .map_err(|e| IpcError::new(codes::E_SQLITE, format!("operator's host: {e}")))?;
-                if !home_usable(host_row.as_ref(), &r.host_alias, local_enabled)
-                    || plan.leave.as_deref() == Some(r.host_alias.as_str())
-                {
+                let usable = home_usable(host_row.as_ref(), &r.host_alias, local_enabled);
+                if row.lost_at.is_none() || !usable {
+                    held_on = Some(r.host_alias.clone());
+                }
+                if !usable || plan.leave.as_deref() == Some(r.host_alias.as_str()) {
                     stranded = Some(r.host_alias);
                 } else if row.lost_at.is_none() {
                     return Ok(row);
@@ -1553,31 +1555,25 @@ pub(crate) async fn ensure_operator_with(
         // over live `client_tokens(name)`. `E_NOTFOUND` here just means
         // there was none.
         let displaced = s.revoke_client_token(OPERATOR_CLIENT_NAME).ok();
-        s.insert_client_token(OPERATOR_CLIENT_NAME, &sha, "full")?;
-        // The token is the hub owner's, as the session started in step 6 is
-        // (`hub_personal_owner`). A client with no person gets a REFUSING
-        // `view_scope` — the agent would see no session, its own included.
-        // A hub that cannot say whose it is leaves the token unbound, the
-        // same fail-closed rule that leaves the session `unclaimed`; the
-        // agent then sees nothing until the hub has an owner, which is what
-        // the master token sees on such a hub too. Migration 195 heals a
-        // token minted before this. The binding gives the owner's REACH,
-        // never the owner's trust or catalog role: `auth::apply_realm`,
-        // `Caller::is_trusted_client` and `LIVE_GRANT_ELIGIBLE` all leave
-        // this token out.
-        match s.personal_owner_id()? {
-            Some(owner) => {
-                s.set_client_person(OPERATOR_CLIENT_NAME, Some(owner))?;
+        // Everything after the revoke either lands or gives the revoked
+        // token back: a failure here (SQLite busy, locked) returned through
+        // `?` with the running Control's token revoked and nothing started
+        // to use the new one, the "401 while ready" state step 6 guards
+        // against. Nothing has started yet, so the token goes back
+        // whichever host the recorded session is on.
+        let committed = commit_operator_token(&s, &sha);
+        if let Err(e) = committed {
+            drop(s);
+            match &displaced {
+                Some(row) => give_back_token(store, row.id),
+                None => {
+                    if let Ok(s) = lock(store) {
+                        let _ = s.revoke_client_token(OPERATOR_CLIENT_NAME);
+                    }
+                }
             }
-            None => tracing::warn!(
-                "the hub has no personal owner; the operator's token is left \
-                 unbound and will see no sessions"
-            ),
+            return Err(e);
         }
-        s.set_setting(SETTING_OPERATOR_TOKEN_SHA, &sha)
-            .map_err(|e| {
-                IpcError::new(codes::E_SQLITE, format!("record the operator token: {e}"))
-            })?;
         displaced.map(|row| row.id)
     };
 
@@ -1601,30 +1597,65 @@ pub(crate) async fn ensure_operator_with(
             None => Start::New,
         }
     };
-    let row = match host.start_session(&home, project_id, how).await {
-        Ok(row) => row,
-        Err(e) => {
-            let elsewhere = held_on.as_deref().is_some_and(|h| h != home);
-            if let Some(id) = displaced.filter(|_| elsewhere) {
-                give_back_token(store, id);
-            }
-            return Err(e);
+    let elsewhere = held_on.as_deref().is_some_and(|h| h != home);
+    let give_back = |e: IpcError| {
+        if let Some(id) = displaced.filter(|_| elsewhere) {
+            give_back_token(store, id);
         }
+        e
     };
+    let row = host
+        .start_session(&home, project_id, how)
+        .await
+        .map_err(give_back)?;
 
     // 7. Record where it lives, so the self-guard and the next press can
-    //    find it. (guard #5)
-    {
-        let s = lock(store)?;
-        set_operator_ref(
-            &s,
-            &OperatorRef {
-                host_alias: row.host_alias.clone(),
-                tmux_name: row.tmux_name.clone(),
-            },
-        )?;
-    }
+    //    find it. (guard #5) A failure here leaves the reference on the
+    //    old session, which guard #1 then finds alive: so that one keeps
+    //    its token too, as on a start that failed, and the new session is
+    //    the orphan.
+    lock(store)
+        .and_then(|s| {
+            set_operator_ref(
+                &s,
+                &OperatorRef {
+                    host_alias: row.host_alias.clone(),
+                    tmux_name: row.tmux_name.clone(),
+                },
+            )
+        })
+        .map_err(give_back)?;
     Ok(row)
+}
+
+/// Step 5 of [`ensure_operator_with`] after the revoke: the new token's
+/// row, its binding to the hub's owner, and its recorded hash. The caller
+/// gives the revoked token back when this fails.
+fn commit_operator_token(s: &Store, sha: &str) -> Result<(), IpcError> {
+    s.insert_client_token(OPERATOR_CLIENT_NAME, sha, "full")?;
+    // The token is the hub owner's, as the session started in step 6 is
+    // (`hub_personal_owner`). A client with no person gets a REFUSING
+    // `view_scope` — the agent would see no session, its own included.
+    // A hub that cannot say whose it is leaves the token unbound, the
+    // same fail-closed rule that leaves the session `unclaimed`; the
+    // agent then sees nothing until the hub has an owner, which is what
+    // the master token sees on such a hub too. Migration 195 heals a
+    // token minted before this. The binding gives the owner's REACH,
+    // never the owner's trust or catalog role: `auth::apply_realm`,
+    // `Caller::is_trusted_client` and `LIVE_GRANT_ELIGIBLE` all leave
+    // this token out.
+    match s.personal_owner_id()? {
+        Some(owner) => {
+            s.set_client_person(OPERATOR_CLIENT_NAME, Some(owner))?;
+        }
+        None => tracing::warn!(
+            "the hub has no personal owner; the operator's token is left \
+             unbound and will see no sessions"
+        ),
+    }
+    s.set_setting(SETTING_OPERATOR_TOKEN_SHA, sha)
+        .map_err(|e| IpcError::new(codes::E_SQLITE, format!("record the operator token: {e}")))?;
+    Ok(())
 }
 
 /// Make the token a birth revoked live again, and the one it committed
@@ -2553,6 +2584,36 @@ mod tests {
         assert!(operator_status_with(&store, true).unwrap().ready);
     }
 
+    /// A LOST recorded session holds no token: no process runs it, so a
+    /// start elsewhere that fails gives it none back (w06-8). Reinstated,
+    /// the old full-scope token sat live in a `.mcp.json` nobody read.
+    #[tokio::test]
+    async fn a_failed_start_gives_a_lost_session_no_token_back() {
+        let store = store_with_an_operator_on("mefistos");
+        {
+            let s = store.lock().unwrap();
+            probed(&s, "htz", true);
+            s.mark_host_sessions_lost("mefistos", "test_lost", &[], 100, 0)
+                .unwrap();
+        }
+        let host = FailingStartHost {
+            inner: FakeHost::new(&store),
+        };
+        let plan = BirthPlan {
+            prefer: Some("htz".into()),
+            leave: None,
+        };
+        ensure_operator_with(&store, &host, &plan)
+            .await
+            .expect_err("the session did not start");
+        let s = store.lock().unwrap();
+        let live = tokens_named_ux_agent(&s);
+        assert!(
+            live.iter().all(|t| t.token_sha256 != "the-old-sha"),
+            "the lost session's token stays revoked: {live:?}"
+        );
+    }
+
     /// The other half of that day: the move's target still had a session
     /// under Control's name (left there when that host had stopped
     /// answering), and `new_session` refused the name on every try. The
@@ -2650,6 +2711,15 @@ mod tests {
             "the host's own first, each profile once, no name that is not a profile"
         );
         assert_eq!(trust_files(&[]).len(), 1, "a host with no profiles");
+        // Each pair is written through the guarded rewrite of its own login.
+        let logins: Vec<_> = files.iter().map(|(d, _)| login_of(d)).collect();
+        assert_eq!(logins, [None, Some("tech_silvester"), Some("chuck")]);
+        for ((dir, file), login) in files.iter().zip(&logins) {
+            assert_eq!(
+                crate::service::provision::login_config(*login),
+                (dir.clone(), file.clone())
+            );
+        }
     }
 
     fn tokens_named_ux_agent(s: &Store) -> Vec<crate::store::ClientTokenRow> {

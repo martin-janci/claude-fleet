@@ -597,7 +597,7 @@ fn begin_flight() -> Option<Flight> {
 /// called from inside the tokio runtime.
 pub fn spawn_sweep(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>) {
     let (store, ssh) = (Arc::clone(store), Arc::clone(ssh));
-    tokio::spawn(async move {
+    crate::service::loops::kick("gc", None, async move {
         let _ = maybe_sweep(&store, &ssh).await;
     });
 }

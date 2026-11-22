@@ -15,6 +15,7 @@
 use crate::store::backup::{backup_to, BackupInfo};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
@@ -42,6 +43,10 @@ static DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
 /// a second call keeps the first.
 pub fn init(data_dir: &Path) {
     let _ = DATA_DIR.set(data_dir.to_path_buf());
+    // The first reading, so the first `fleet_health` has one.
+    if let Some(dir) = DATA_DIR.get() {
+        refresh_in_background(dir);
+    }
 }
 
 /// `fleet_health.storage`: the hub's own disk and backups.
@@ -66,11 +71,16 @@ pub struct StorageHealth {
 }
 
 /// The hub's storage health at `now`; `None` where no data dir was named
-/// (the desktop).
+/// (the desktop), and until the first reading of it has landed.
+///
+/// It never touches the disk itself (review 20 w14-1): a hung mount would
+/// park the caller, a tokio worker serving `fleet_health`. It answers the
+/// last reading and, once that is older than [`DISK_CACHE`], starts one
+/// fresh reading on a thread of its own, at most one at a time.
 pub fn health(now: i64) -> Option<StorageHealth> {
     let dir = DATA_DIR.get()?;
-    let (free_bytes, total_bytes) = cached_disk_space(dir).unzip();
-    let last_backup_at = newest_backup(&backup_dirs(dir));
+    let (space, last_backup_at) = cached_reading(dir)?;
+    let (free_bytes, total_bytes) = space.unzip();
     Some(StorageHealth {
         free_bytes,
         total_bytes,
@@ -118,23 +128,75 @@ pub fn newest_backup(dirs: &[PathBuf]) -> Option<i64> {
 /// Free and total bytes, as `disk_space` returns them.
 type Space = Option<(u64, u64)>;
 
-fn cached_disk_space(dir: &Path) -> Space {
-    static CACHE: Mutex<Option<(Instant, Space)>> = Mutex::new(None);
-    let mut cache = CACHE.lock().unwrap_or_else(|p| p.into_inner());
-    if let Some((at, v)) = *cache {
-        if at.elapsed() < DISK_CACHE {
-            return v;
-        }
+/// One reading of the disk and the backups.
+type Reading = (Space, Option<i64>);
+
+/// The last reading and when it was taken.
+static READING: Mutex<Option<(Instant, Reading)>> = Mutex::new(None);
+/// Whether a reading is under way (claimed before its thread starts).
+static READING_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+
+/// The last reading of `dir`'s disk and backups, `None` before the first;
+/// starts a fresh one in the background when it is missing or stale. The
+/// lock is never held across the reading.
+fn cached_reading(dir: &Path) -> Option<Reading> {
+    let last = *READING.lock().unwrap_or_else(|p| p.into_inner());
+    if last.is_none_or(|(at, _)| at.elapsed() >= DISK_CACHE) {
+        refresh_in_background(dir);
     }
-    let v = disk_space(dir);
-    *cache = Some((Instant::now(), v));
-    v
+    last.map(|(_, r)| r)
+}
+
+/// Read `dir`'s disk and backups on a thread of its own, unless a reading
+/// is already under way.
+fn refresh_in_background(dir: &Path) {
+    if READING_IN_FLIGHT.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let dir = dir.to_path_buf();
+    let spawned = std::thread::Builder::new()
+        .name("hub-storage-reading".into())
+        .spawn(move || {
+            let reading = (disk_space(&dir), newest_backup(&backup_dirs(&dir)));
+            *READING.lock().unwrap_or_else(|p| p.into_inner()) = Some((Instant::now(), reading));
+            READING_IN_FLIGHT.store(false, Ordering::Release);
+        });
+    if spawned.is_err() {
+        READING_IN_FLIGHT.store(false, Ordering::Release);
+    }
+}
+
+/// Free and total bytes of the volume that holds `dir`: `statvfs` of the
+/// directory itself, so no other mount (one that hangs, say) is touched.
+#[cfg(unix)]
+pub fn disk_space(dir: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(dir.as_os_str().as_bytes()).ok()?;
+    // SAFETY: `c` is a valid NUL-terminated path and `st` a plain C struct
+    // that statvfs fills in; it is read only when the call succeeded.
+    let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statvfs(c.as_ptr(), &mut st) } != 0 {
+        return None;
+    }
+    #[allow(clippy::unnecessary_cast)]
+    let frsize = (st.f_frsize as u64).max(1);
+    #[allow(clippy::unnecessary_cast)]
+    Some((st.f_bavail as u64 * frsize, st.f_blocks as u64 * frsize))
 }
 
 /// Free and total bytes of the mounted volume that holds `dir`: the disk
 /// whose mount point is the longest prefix of its canonical path.
+#[cfg(not(unix))]
 pub fn disk_space(dir: &Path) -> Option<(u64, u64)> {
     let dir = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    // Windows canonicalizes to a verbatim `\\?\D:\…` path, which no
+    // mount point (`D:\`) prefixes: drop the verbatim marker first.
+    let plain = dir
+        .to_str()
+        .and_then(|s| s.strip_prefix(r"\\?\"))
+        .filter(|rest| !rest.starts_with("UNC\\"))
+        .map(std::path::PathBuf::from);
+    let dir = plain.unwrap_or(dir);
     let disks = sysinfo::Disks::new_with_refreshed_list();
     disks
         .list()
@@ -248,6 +310,25 @@ mod tests {
         assert!(backup_stale(None, 1_000));
         assert!(backup_stale(Some(0), BACKUP_STALE_SECS + 1));
         assert!(!backup_stale(Some(0), BACKUP_STALE_SECS));
+    }
+
+    /// The disk and backups are read off the caller's thread: the first
+    /// call answers nothing yet, and a later one the reading.
+    #[test]
+    fn storage_is_read_in_the_background() {
+        let dir = tempfile::tempdir().unwrap();
+        let (free, total) = disk_space(dir.path()).expect("a tempdir's volume");
+        assert!(total > 0 && free <= total);
+        let _ = cached_reading(dir.path());
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let reading = loop {
+            if let Some(r) = cached_reading(dir.path()) {
+                break r;
+            }
+            assert!(Instant::now() < deadline, "no reading landed");
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert!(reading.0.is_some());
     }
 
     /// A day's backup is taken once, named like `backup.sh`'s, and only the

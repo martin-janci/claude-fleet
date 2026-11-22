@@ -28,8 +28,10 @@
 
   let busy = $state(false);
   let error = $state<string | null>(null);
+  // Keyed on the id, not the row object a row event replaces (review w17-5).
+  const sid = $derived(session.id);
   $effect(() => {
-    void session.id;
+    void sid;
     error = null;
   });
 

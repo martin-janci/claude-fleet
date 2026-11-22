@@ -385,6 +385,19 @@ describe('host health helpers', () => {
     ).toEqual([]);
   });
 
+  it('copiedLogins leaves out hidden hosts and setup-token profiles (w02-3, w11-5)', () => {
+    const a = host('old-laptop', { login_fingerprints: [{ profile: null, seen: ['aaaaaaaaaaaa'] }] });
+    const b = host('new-box', { login_fingerprints: [{ profile: null, seen: ['aaaaaaaaaaaa'] }] });
+    expect(copiedLogins([a, b])).toHaveLength(1);
+    expect(copiedLogins([{ ...a, hidden: true }, b])).toEqual([]);
+    const ta = host('a', {
+      login_fingerprints: [{ profile: 'work', seen: ['bbbbbbbbbbbb'] }],
+      claude_profiles: [{ name: 'work', account_uuid: 'setuptoken-x', credential: 'setup_token' }],
+    });
+    const tb = host('b', { login_fingerprints: [{ profile: 'work', seen: ['bbbbbbbbbbbb'] }] });
+    expect(copiedLogins([ta, tb])).toEqual([]);
+  });
+
   it('disk_low outranks claude_old; agent_old fires when the agent is older than the hub version', () => {
     const base = {
       hasToken: true,
@@ -525,5 +538,19 @@ describe('confirm copy', () => {
     const m = rotateTokenMessage('mefistos');
     expect(m).toContain('The old token stops working.');
     expect(m).toContain('until they are restarted');
+  });
+});
+
+// Review w02-5: a copy that is still signed in has no Sign in again button,
+// so the advice names the command instead of pointing at one.
+describe('describeLoginConflict (copied)', () => {
+  it('names the sign-in command for the login, not a button', async () => {
+    const { describeLoginConflict } = await import('./hosts_view');
+    const text = describeLoginConflict('mac', { kind: 'copied', profile: 'work', copies: [{ host: 'htz', profile: 'work' }] });
+    expect(text).not.toContain('(Sign in again)');
+    expect(text).toContain('ssh mac, then run CLAUDE_CONFIG_DIR=~/.claude-profiles/work claude /login');
+    expect(describeLoginConflict('mac', { kind: 'copied', profile: null, copies: [{ host: 'htz', profile: null }] })).toContain(
+      'then run claude /login',
+    );
   });
 });

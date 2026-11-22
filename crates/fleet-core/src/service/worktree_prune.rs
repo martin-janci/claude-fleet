@@ -468,7 +468,7 @@ pub fn maybe_run(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>) -> bool {
     let guard = InFlight(&RUNNING);
     let store = Arc::clone(store);
     let ssh = Arc::clone(ssh);
-    tokio::spawn(async move {
+    crate::service::loops::kick("worktree_prune", next, async move {
         let _guard = guard;
         run_with(&store, ssh.as_ref()).await;
         crate::service::loops::report("worktree_prune", Ok::<_, String>(()), next);

@@ -2218,7 +2218,8 @@ fn planner_wanted(
 const RUN_STEPS: &[&str] = &["run", "retry", "review", "test", "integrate"];
 
 /// Why a loop run of `step` waits, when the login it would bill is at or
-/// past `accounts.pause_at` (redesign 8.7) or signed out (review w02-6): on
+/// past `accounts.pause_at` (redesign 8.7), on an account the project
+/// forbids (review w09-5) or signed out (review w02-6): on
 /// the grant's first host, else where the start would land
 /// (`tickets::seen_place` / `seen_host` / `placed_host`, the start's own
 /// choice: the key's history, the project's last host, placement's login
@@ -2237,6 +2238,7 @@ fn run_over_limit(
     let Ok(start) = start_for(s, m, item_id, &Actor::Loop, grant) else {
         return Ok(None);
     };
+    let mut project = start.project_id;
     let (host, placed_profile) = match start.host_alias {
         Some(h) => (Some(h), None),
         None => {
@@ -2252,6 +2254,7 @@ fn run_over_limit(
                 // host and its login, not only the host last seen (review
                 // w02-1), so the hold looks at what the start would bill.
                 Some(p) => {
+                    project = Some(p);
                     let seen = crate::service::trackers::tickets::seen_host(s, seen, p)?;
                     match crate::service::trackers::tickets::placed_host(s, p, seen) {
                         Some((h, profile)) => (Some(h), profile),
@@ -2273,6 +2276,11 @@ fn run_over_limit(
         grant.and_then(|g| g.profile.as_deref()),
         grant.and_then(|g| g.hosts.as_deref()),
     );
+    // Whether the run's login is the one it will bill as is: a headless
+    // check's (`checks::plan` chose it) or one the grant names (the start
+    // passes it by name). Otherwise the start steps off a forbidden or
+    // spent login (`tickets` → `login_with_headroom_for`).
+    let named = headless.is_some() || start.profile.is_some();
     let (host, profile) = match headless {
         Some(p) => (Some(p.at.host), p.profile),
         None => (host, start.profile.or(placed_profile)),
@@ -2284,6 +2292,29 @@ fn run_over_limit(
         crate::service::account_limits::over_limit(s, &host, profile.as_deref(), now)?
     {
         return Ok(Some(over.reason()));
+    }
+    // A login the project forbids (review w09-5): the start would refuse
+    // it on every pass, so the run waits with the reason, not a silent
+    // failure the brake later reads as "no progress".
+    let runs_under = if named {
+        profile.clone()
+    } else {
+        crate::service::account_limits::login_with_headroom_for(
+            s,
+            project,
+            &host,
+            profile.as_deref(),
+            now,
+        )?
+    };
+    if let Some(why) = crate::service::project_accounts::forbidden_reason(
+        s,
+        project,
+        &host,
+        runs_under.as_deref(),
+        now,
+    )? {
+        return Ok(Some(why));
     }
     // A login fleet knows is signed out answers a run with `/login` (review
     // w02-6): the run waits for it as for a spent one.

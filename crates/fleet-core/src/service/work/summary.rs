@@ -103,6 +103,9 @@ struct SummaryPlan {
     stored_path: Option<String>,
     model: String,
     org_id: Option<i64>,
+    /// The login the past session ran under (`None` = the host's own), the
+    /// account the fork bills (review w09-3).
+    profile: Option<String>,
 }
 
 /// PURE: the one command the summary runs on the host. Every value is
@@ -114,12 +117,24 @@ pub fn summary_script(
     claude_session_id: &str,
     model: &str,
 ) -> Result<String, String> {
+    summary_script_as(stored_path, claude_session_id, model, None)
+}
+
+/// [`summary_script`] under the login `profile` (`None` = the host's own):
+/// the past session's own, so the fork bills the account its work ran on.
+pub fn summary_script_as(
+    stored_path: Option<&str>,
+    claude_session_id: &str,
+    model: &str,
+    profile: Option<&str>,
+) -> Result<String, String> {
     use crate::service::claude_print;
     if !settings::SUMMARY_MODELS.contains(&model) {
         return Err(format!("refusing summary model {model:?}"));
     }
     let candidates = super::resume::transcript_candidates(stored_path, claude_session_id)?;
     let agent = crate::service::headless::default_agent();
+    let env = agent.login_env(profile)?;
     let claude = agent.command(&crate::service::headless::HeadlessJob {
         model,
         prompt: Some(SUMMARY_PROMPT),
@@ -135,7 +150,7 @@ pub fn summary_script(
          d=$(grep -o -m1 '\"cwd\":\"[^\"]*\"' \"$f\" | head -n1 | sed -e 's/^\"cwd\":\"//' -e 's/\"$//'); \
          if [ -z \"$d\" ] || ! cd -- \"$d\" 2>/dev/null; then echo {t}nodir; exit 0; fi; \
          {noclaude} \
-         {run}",
+         {env}{run}",
         cands = candidates.join(" "),
         noclaude = agent.missing_check(t),
         run = claude_print::run_capped(t, &claude, HOST_TIMEOUT_SECS, OUTPUT_CAP_BYTES, true),
@@ -334,6 +349,19 @@ fn plan(
             "a live session still holds that conversation; ask it for a handover instead",
         ));
     }
+    // The fork replays the whole conversation to an account: the past
+    // session's own login, held to the account rules like any other run
+    // (review w09-3): its project's forbidden accounts, a spent daily
+    // limit, a known sign-out.
+    let profile = super::resume::past_session_login(s, link_id, &host)?.flatten();
+    let project_id = s.get_work_link(link_id)?.and_then(|l| l.snap_project_id);
+    crate::service::run_login::refuse(
+        s,
+        project_id,
+        &host,
+        profile.as_deref(),
+        crate::store::now_unix(),
+    )?;
     let stored_path = s.conversation_transcript_path_on_host(&host, &claude_session_id)?;
     Ok(SummaryPlan {
         key,
@@ -345,6 +373,7 @@ fn plan(
         // pick its own model (its account pays).
         model: settings::get_string_for(s, settings::WORK_SUMMARY_MODEL, org_id),
         org_id,
+        profile,
     })
 }
 
@@ -372,6 +401,10 @@ fn book(
     }
 }
 
+/// How a `claude -p --output-format json` envelope starts. A const, so the
+/// launch-path guard test's brace counter does not read the `{` in the body.
+const ENVELOPE_START: &str = "{\"type\"";
+
 /// Summarise past work `link_id` of `key` (`work_link { action: summarize }`).
 /// The store is locked only to plan and to store; the run itself is off the
 /// lock.
@@ -386,8 +419,13 @@ pub async fn summarize(
         let s = lock(store)?;
         plan(&s, key, link_id, reader)?
     };
-    let script = summary_script(p.stored_path.as_deref(), &p.claude_session_id, &p.model)
-        .map_err(|e| IpcError::new(codes::E_INVALID, e))?;
+    let script = summary_script_as(
+        p.stored_path.as_deref(),
+        &p.claude_session_id,
+        &p.model,
+        p.profile.as_deref(),
+    )
+    .map_err(|e| IpcError::new(codes::E_INVALID, e))?;
     let _slot = HostSlot::take(&p.host)?;
     let out =
         crate::ssh::run_shell_bounded(exec, &p.host, &script, SUMMARY_CONNECT, SUMMARY_WALL_CLOCK)
@@ -429,7 +467,8 @@ pub async fn summarize(
             if crate::service::claude_print::run_signed_out(None, "", &out.stderr) =>
         {
             return Err(crate::service::claude_print::signed_out_error(
-                &p.host, None,
+                &p.host,
+                p.profile.as_deref(),
             ))
         }
         ScriptAnswer::Ran(_) | ScriptAnswer::Nothing => {
@@ -445,7 +484,8 @@ pub async fn summarize(
             book(store, &p, Some(&env));
             if crate::service::claude_print::run_signed_out(Some(&env), &env.result, &out.stderr) {
                 return Err(crate::service::claude_print::signed_out_error(
-                    &p.host, None,
+                    &p.host,
+                    p.profile.as_deref(),
                 ));
             }
             if env.is_error || env.result.trim().is_empty() {
@@ -457,7 +497,7 @@ pub async fn summarize(
             env.result
         }
         // An envelope the output cap cut: its text is JSON, not a summary.
-        None if text.trim_start().starts_with("{\"type\"") => {
+        None if text.trim_start().starts_with(ENVELOPE_START) => {
             book(store, &p, None);
             return Err(IpcError::new(
                 codes::E_CLAUDE_CLI,
@@ -469,7 +509,8 @@ pub async fn summarize(
             book(store, &p, None);
             if crate::service::claude_print::run_signed_out(None, &text, &out.stderr) {
                 return Err(crate::service::claude_print::signed_out_error(
-                    &p.host, None,
+                    &p.host,
+                    p.profile.as_deref(),
                 ));
             }
             text

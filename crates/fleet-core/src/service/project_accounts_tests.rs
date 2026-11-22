@@ -338,6 +338,57 @@ fn an_org_block_holds_for_an_org_that_is_a_host() {
     assert!(err.details.unwrap()["suggested_profile"].is_null());
 }
 
+/// Review w09-2 / w01-3 / w10-4: the login pickers read the host-aware
+/// list, so a block that comes through the host's org (a host-qualified
+/// rule here) moves a ticket start, a resume, a routine's step-off, the
+/// E_ACCOUNT_LIMIT suggestion and placement to the allowed login, as
+/// `refuse_forbidden` would refuse the forbidden one.
+#[test]
+fn the_login_pickers_count_an_org_that_is_the_host() {
+    let (s, p) = fleet();
+    ready_host(&s, "mac");
+    let org = s.add_org("Client", None, false).unwrap().id;
+    s.add_org_rule(crate::store::OrgRuleRow {
+        id: 0,
+        org_id: org,
+        owner: None,
+        repo: None,
+        path_prefix: None,
+        host_alias: Some("mac".into()),
+    })
+    .unwrap();
+    s.set_account_blocks("acct-own", None, Some(&[org]))
+        .unwrap();
+    s.set_account_blocks("acct-work", None, Some(&[org]))
+        .unwrap();
+    assert!(forbidden_accounts(&s, Some(p)).unwrap().is_empty());
+    // A ticket start / resume that names no login.
+    assert_eq!(
+        login_with_headroom_for(&s, Some(p), "mac", None, NOW).unwrap(),
+        Some("spare".into())
+    );
+    // A routine stepping off its own login, and the over-limit suggestion.
+    assert_eq!(
+        freer_login_for(&s, Some(p), "mac", "acct-own", NOW)
+            .unwrap()
+            .and_then(|l| l.profile),
+        Some("spare".into())
+    );
+    seed_usage(&s, "mac", None, "acct-own", 95.0, NOW + 1);
+    let err = refuse_over_limit_for(&s, Some(p), "mac", None, NOW).unwrap_err();
+    assert_eq!(err.code, codes::E_ACCOUNT_LIMIT);
+    assert_eq!(err.details.unwrap()["suggested_profile"], "spare");
+    // Placement leaves both forbidden logins out.
+    let placed = suggest_with(&s, Some(p), &Want::default(), false, NOW).unwrap();
+    assert!(
+        placed
+            .candidates
+            .iter()
+            .all(|c| c.account_uuid == "acct-spare"),
+        "{placed:?}"
+    );
+}
+
 /// Review finding 7: a relaunch is checked when the row is not live or its
 /// login is on another account than the row ran on; a live session on an
 /// unchanged account, a shell and a session outside any project are exempt.
@@ -359,7 +410,7 @@ fn a_relaunch_is_checked_unless_the_session_is_live_on_the_same_account() {
 
     // Live, on the account it already runs on: forbidding stops nothing.
     assert!(check(None).is_ok());
-    assert!(refuse_forbidden_relaunch_of(&s, id, NOW).is_ok());
+    assert!(crate::service::run_login::refuse_relaunch_of(&s, id, NOW).is_ok());
     // The same row under a login on another, allowed account is fine too.
     assert!(check(Some("work")).is_ok());
     // The row ran on another account than its login is on now.
@@ -371,7 +422,7 @@ fn a_relaunch_is_checked_unless_the_session_is_live_on_the_same_account() {
     // A lost or ghost row coming back is work going somewhere again.
     set("account_uuid = 'acct-own', lost_at = 5");
     assert!(check(None).is_err());
-    assert!(refuse_forbidden_relaunch_of(&s, id, NOW).is_err());
+    assert!(crate::service::run_login::refuse_relaunch_of(&s, id, NOW).is_err());
     set("lost_at = NULL, status = 'ghost'");
     assert!(check(None).is_err());
     // A shell bills no login; a session outside a project has no rule.
@@ -380,5 +431,5 @@ fn a_relaunch_is_checked_unless_the_session_is_live_on_the_same_account() {
     set("kind = 'work', project_id = NULL");
     assert!(check(None).is_ok());
     // A row that is gone refuses nothing.
-    assert!(refuse_forbidden_relaunch_of(&s, id + 99, NOW).is_ok());
+    assert!(crate::service::run_login::refuse_relaunch_of(&s, id + 99, NOW).is_ok());
 }

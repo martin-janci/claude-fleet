@@ -169,9 +169,10 @@ fn delivery(r: &rusqlite::Row<'_>) -> rusqlite::Result<(Option<&'static str>, Op
         return Ok((Some("uncertain"), error));
     }
     let Some(_) = r.get::<_, Option<i64>>(17)? else {
-        // The prompt row is gone (it stayed with a moved session's old row
-        // once it had gone out or been settled): nothing more is known.
-        return Ok((None, None));
+        // The prompt row is gone: nothing more is known, so the send may or
+        // may not have reached the session — never read it as sent. (A move
+        // takes the kept prompts along, `repoint_review_notes`.)
+        return Ok((Some("uncertain"), error));
     };
     let delivered: Option<i64> = r.get(18)?;
     let failed: Option<i64> = r.get(19)?;
@@ -317,10 +318,20 @@ impl Store {
     }
 
     /// Move `from`'s review notes to `to` (a moved session's new row, or
-    /// back on undo), beside [`Store::repoint_deferred_prompts`]. Answers
-    /// how many notes moved.
+    /// back on undo), beside [`Store::repoint_deferred_prompts`]. The
+    /// prompts their sends kept go too, settled ones included (which
+    /// `repoint_deferred_prompts` leaves behind): the source row's delete
+    /// would cascade them, and a note's delivery is read from its prompt.
+    /// Answers how many notes moved.
     pub fn repoint_review_notes(&self, from: i64, to: i64) -> Result<usize, IpcError> {
         let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "UPDATE deferred_prompts SET session_id = ?2 \
+              WHERE session_id = ?1 AND id IN \
+                    (SELECT deferred_prompt_id FROM review_note_queue \
+                      WHERE session_id = ?1 AND deferred_prompt_id IS NOT NULL)",
+            rusqlite::params![from, to],
+        )?;
         let n = tx.execute(
             "UPDATE review_notes SET session_id = ?2 WHERE session_id = ?1",
             rusqlite::params![from, to],
@@ -582,16 +593,39 @@ mod tests {
         let moved = s.review_notes(to).unwrap();
         assert_eq!(moved.len(), 2);
         assert_eq!(moved[0].delivery.as_deref(), Some("waiting"));
+        // A send whose kept prompt was taken back still reads so after the
+        // move, though `repoint_deferred_prompts` moves pending ones only.
+        s.insert_review_notes(from, "m2", &notes[..1], "Ada", None, 2)
+            .unwrap();
+        let cancelled = s.insert_deferred_prompt(from, "p2", 2).unwrap();
+        s.set_review_note_queue(from, "m2", Some(cancelled), None)
+            .unwrap();
+        assert!(s.cancel_deferred_prompt(cancelled, 3).unwrap());
+        assert_eq!(s.repoint_deferred_prompts(from, to).unwrap(), 0);
+        assert_eq!(s.repoint_review_notes(from, to).unwrap(), 1);
         // The old row's delete no longer takes them.
         s.conn
             .execute("DELETE FROM sessions WHERE id = ?1", [from])
             .unwrap();
-        assert_eq!(s.review_notes(to).unwrap().len(), 2);
+        assert_eq!(s.review_notes(to).unwrap().len(), 3);
+        let m2 = s.review_note_batch(to, "m2").unwrap().remove(0);
+        assert_eq!(m2.delivery.as_deref(), Some("not_delivered"));
+        // A kept prompt that is gone all the same is uncertain, not sent.
+        s.conn
+            .execute("DELETE FROM deferred_prompts WHERE id = ?1", [cancelled])
+            .unwrap();
+        let m2 = s.review_note_batch(to, "m2").unwrap().remove(0);
+        assert_eq!(m2.delivery.as_deref(), Some("uncertain"));
         // Undo moves them back.
         let back = s
             .upsert_session("api-1", "local", None, None, 0, 0, "running", None)
             .unwrap();
-        assert_eq!(s.repoint_review_notes(to, back).unwrap(), 2);
-        assert_eq!(s.review_notes(back).unwrap().len(), 2);
+        assert_eq!(s.repoint_review_notes(to, back).unwrap(), 3);
+        assert_eq!(s.review_notes(back).unwrap().len(), 3);
+        assert_eq!(
+            s.get_deferred_prompt(kept).unwrap().unwrap().session_id,
+            back,
+            "the kept prompt goes back with its notes"
+        );
     }
 }

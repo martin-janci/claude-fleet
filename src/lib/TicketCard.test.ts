@@ -154,6 +154,24 @@ describe('TicketCard', () => {
     expect(screen.getByTestId('ticket-card-finish').textContent).toContain('Finish task');
   });
 
+  it('a row event for the same session keeps the inline message and does not re-read the timeline (review w17-5)', async () => {
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === 'work_ticket_card') return card();
+      if (cmd === 'request_work_result') throw { code: 'E_EXISTS', message: 'A result request is already waiting' };
+      return null;
+    });
+    const view = render(TicketCard, { session: row({ claude_status: 'idle' }) });
+    await flush();
+    await fireEvent.click(screen.getByTestId('ticket-card-finish'));
+    await flush();
+    const reads = () => vi.mocked(invoke).mock.calls.filter((c) => c[0] === 'session_history').length;
+    const before = reads();
+    await view.rerender({ session: row({ claude_status: 'idle', current_activity: 'Reading' }) });
+    await flush();
+    expect(screen.getByTestId('ticket-card-finish-error').textContent).toContain('already waiting');
+    expect(reads()).toBe(before);
+  });
+
   it('reloads when the selected session’s key changes, and a late answer for the old key is dropped', async () => {
     const pending = new Map<string, (c: Card) => void>();
     vi.mocked(invoke).mockImplementation((cmd: string, a?: unknown) => {

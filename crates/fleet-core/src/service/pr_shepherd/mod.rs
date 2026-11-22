@@ -724,7 +724,7 @@ pub fn spawn_run(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>, period: std::t
     }
     let flight = Flight;
     let (store, ssh) = (Arc::clone(store), Arc::clone(ssh));
-    tokio::spawn(async move {
+    crate::service::loops::kick("pr_shepherd", Some(period), async move {
         let _flight = flight;
         let n = run(&store, &ssh).await;
         if n > 0 {

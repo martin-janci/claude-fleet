@@ -240,6 +240,51 @@ impl Store {
         Ok((worker, requester))
     }
 
+    /// The tasks `worker_session_id` still works on or worked on, whatever
+    /// their state: after [`Self::repoint_open_tasks`], the ones a move left
+    /// on the source.
+    pub fn worker_task_ids(
+        &self,
+        worker_session_id: i64,
+    ) -> Result<Vec<i64>, crate::ipc_error::IpcError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id FROM tasks WHERE worker_session_id = ?1 ORDER BY id")?;
+        let ids = stmt.query_map([worker_session_id], |r| r.get(0))?;
+        Ok(ids.collect::<rusqlite::Result<Vec<i64>>>()?)
+    }
+
+    /// After a move killed its source: the spend migration 227's trigger
+    /// wrote onto the source's `left` tasks (the ones not re-pointed) is
+    /// dropped for each mission that one of the `repointed` tasks is on,
+    /// since the whole of it was carried to the target row, which that task
+    /// names and the mission reads live. Left on, the mission would count
+    /// it twice (review w16-1). Tasks on no mission keep theirs. Answers
+    /// how many tasks were cleared.
+    pub fn drop_moved_worker_spend(
+        &self,
+        left: &[i64],
+        repointed: &[i64],
+    ) -> Result<usize, crate::ipc_error::IpcError> {
+        if left.is_empty() || repointed.is_empty() {
+            return Ok(0);
+        }
+        let ids = |v: &[i64]| serde_json::to_string(v).unwrap_or_else(|_| "[]".into());
+        Ok(self.conn.execute(
+            "UPDATE tasks SET worker_spent_micros = 0 \
+              WHERE id IN (SELECT value FROM json_each(?1)) \
+                AND worker_session_id IS NULL \
+                AND worker_spent_micros IS NOT NULL \
+                AND (SELECT i.orchestration_project_id FROM work_items i \
+                      WHERE i.id = tasks.work_item_id) IN \
+                    (SELECT i.orchestration_project_id FROM tasks t \
+                       JOIN work_items i ON i.id = t.work_item_id \
+                      WHERE t.id IN (SELECT value FROM json_each(?2)) \
+                        AND i.orchestration_project_id IS NOT NULL)",
+            rusqlite::params![ids(left), ids(repointed)],
+        )?)
+    }
+
     /// Undo [`Self::repoint_open_tasks`] for the given tasks, in one
     /// savepoint; emits `task_updated` for each.
     pub fn restore_task_sessions(

@@ -80,6 +80,15 @@ describe('the watcher’s pane view', () => {
     expect((call?.[1] as { args: { session_id: number } }).args.session_id).toBe(42);
   });
 
+  it('a row event for the same session neither recaptures nor blanks the pane (review w17-4)', async () => {
+    const { rerender } = render(WatchView, { props: { session: makeSession(), access: 'watch' } });
+    await screen.findByTestId('watch-pane');
+    expect(names().filter((n) => n === 'capture_session').length).toBe(1);
+    await rerender({ session: makeSession({ claude_status: 'working', turn_seq: 1 }), access: 'watch' });
+    expect(screen.getByTestId('watch-pane').textContent).toContain('working on the ticket');
+    expect(names().filter((n) => n === 'capture_session').length).toBe(1);
+  });
+
   // The rule this component exists to make keepable: a grant hands over no
   // PTY, because a PTY is this machine's own `ssh … tmux attach` and no revoke
   // on the hub can reach it.

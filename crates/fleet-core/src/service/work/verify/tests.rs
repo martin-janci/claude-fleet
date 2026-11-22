@@ -117,6 +117,30 @@ fn a_check_run_without_its_report_runs_again_then_waits_on_a_person() {
     }
 }
 
+/// Review w01-4: a review or test run a person cancelled is never started
+/// again on its own; the line waits on it (`by`), so the loop asks.
+#[test]
+fn a_cancelled_check_run_waits_on_a_person_and_is_not_rerun() {
+    for line in ["review", "test", "test:cargo test"] {
+        let role = if line == "review" { "review" } else { "test" };
+        let (st, me, item) = fixture();
+        set(&st, &me, item, &[line]);
+        run(&st, item, "implement", "done", &[]);
+        let id = {
+            let s = lock(&st).unwrap();
+            let t = s.insert_task(None, None, "go", "n-cancelled").unwrap();
+            s.set_task_run(t.id, item, 1, role).unwrap();
+            crate::service::tasks::cancel_task(&s, t.id, "cancelled by Ada · desktop").unwrap();
+            t.id
+        };
+        let v = now_check(&st, item, 0);
+        let c = check_of(&v, line);
+        assert_eq!(c.state, "pending", "{line}: {}", c.detail);
+        assert_eq!(c.by, Some(format!("task:{id}")), "{line}: not rerun");
+        assert!(c.detail.contains("cancelled"), "{}", c.detail);
+    }
+}
+
 #[test]
 fn lines_are_typed_by_prefix_and_free_text_is_a_persons() {
     assert_eq!(parse_cond("ci"), Cond::Ci(None));

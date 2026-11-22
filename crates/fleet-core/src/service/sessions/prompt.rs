@@ -332,8 +332,21 @@ pub async fn send_keys(
 ) -> Result<(), IpcError> {
     crate::validate::host_alias(host_alias)?;
     crate::validate::tmux_name_addressable(tmux_name)?;
-    let script = crate::tmux::send_named_key(tmux_name, key);
-    run_tmux_script(host_alias, ssh, &script).await?;
+    // Enter into the folder-trust dialog picks its yes row, never the
+    // focused `No, exit` (w06-1): the phone's trust card sends this key.
+    let routed = if key == crate::tmux::NamedKey::Enter {
+        crate::service::playbooks::enter_answers_trust(store, ssh.as_ref(), host_alias, tmux_name)
+            .await
+    } else {
+        None
+    };
+    match routed {
+        Some(answered) => answered?,
+        None => {
+            let script = crate::tmux::send_named_key(tmux_name, key);
+            run_tmux_script(host_alias, ssh, &script).await?;
+        }
+    }
     record_session_event(
         store,
         host_alias,
@@ -713,6 +726,30 @@ pub async fn send_prompt(
             super::check_expected_dialog(store, ssh, id, expect, key).await?;
         }
         return send_keys(&args.host_alias, &args.tmux_name, key, store, ssh).await;
+    }
+    // An empty prompt is a bare Enter, and into the folder-trust dialog it
+    // answers yes the way `keys: "Enter"` does ([`send_keys`]).
+    if args.prompt.is_empty() && args.submit {
+        crate::validate::host_alias(&args.host_alias)?;
+        crate::validate::tmux_name_addressable(&args.tmux_name)?;
+        if let Some(answered) = crate::service::playbooks::enter_answers_trust(
+            store,
+            ssh.as_ref(),
+            &args.host_alias,
+            &args.tmux_name,
+        )
+        .await
+        {
+            answered?;
+            record_session_event(
+                store,
+                &args.host_alias,
+                &args.tmux_name,
+                "keys_sent",
+                Some(crate::tmux::NamedKey::Enter.tmux_name().to_string()),
+            );
+            return Ok(());
+        }
     }
     send_prompt_inner(
         store,

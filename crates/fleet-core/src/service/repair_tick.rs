@@ -598,7 +598,8 @@ pub fn maybe_run(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>) -> bool {
     let guard = InFlight(&RUNNING);
     let store = Arc::clone(store);
     let ssh = Arc::clone(ssh);
-    tokio::spawn(async move {
+    let next = Some(cfg.period());
+    crate::service::loops::kick("repair", next, async move {
         let _guard = guard;
         let exec = RealRepairTickExec {
             store: Arc::clone(&store),

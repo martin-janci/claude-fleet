@@ -523,8 +523,9 @@ only starts the next round. Fleet flags such a host in Hosts (⚿) and in
   `hosts.login_fingerprints`). The store keeps each login's last three, and
   one login's newest fingerprint among another's marks both: the older ones
   keep the mark after the first copy refreshes, until the other is signed
-  in on its own. `local`'s own login is left out, for the same reason as
-  Keychain and file below; its profiles are not.
+  in on its own. On macOS `local`'s own login is left out, for the same
+  reason as Keychain and file below; its profiles are not. On Linux, with
+  no Keychain, its own login counts like any other.
 
 Fix it by keeping one copy per login on a host. For Keychain and file, run
 fleet's sessions on that host under a login profile, then delete
@@ -534,8 +535,12 @@ fleet's local tmux server starts in the login session and reads the
 Keychain. For a shared account, sign the duplicate profile into another
 account. For a copied login, sign each host in on its own (Sign in again)
 and stop the copying: leave `.credentials.json` out of whatever syncs
-`~/.claude` or the profiles. An API key under two profiles is not a
-conflict: it has no refresh token to revoke.
+`~/.claude` or the profiles. Sign in again forgets that login's old
+fingerprints, so the mark goes with it; a sign-in done outside fleet keeps
+the mark until the other copy next refreshes. An API key under two profiles
+is not a conflict: it has no refresh token to revoke, nor is a setup token
+put on a profile (the dead `.credentials.json` under it no longer counts).
+A hidden host takes no part in the match.
 
 ### Control's own login
 

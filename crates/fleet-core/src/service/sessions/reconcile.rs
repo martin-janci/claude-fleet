@@ -203,9 +203,10 @@ pub(super) const PR_PROBE_BATCH: usize = 12;
 
 /// How old a host's `claude_version_at` may be before the next pass asks
 /// the host for its versions again (`---FLEET:versions`, one `claude
-/// --version` node start per host per window). The desktop's `claude_old`
-/// badge trusts a stamp younger than `health.version_max_age_secs` (24 h),
-/// so a 6 h refresh keeps it honest with room to spare.
+/// --version` node start per host per window). The `claude_old` verdict
+/// (the desktop's badge and the hub's `hosts_health`) trusts a stamp younger
+/// than `health.version_max_age_secs` (24 h by default), so a 6 h refresh
+/// keeps it honest with room to spare.
 pub const VERSIONS_REFRESH_SECS: i64 = 6 * 3600;
 
 /// Whether this pass should ask the host for its versions.
@@ -1062,10 +1063,13 @@ fn write_reachable_host(
         // raises its card, marks its sessions `no_credentials` and leaves it
         // out of placement until a usage read sees it signed in again. A
         // first sighting has no stored profile to tell which login it is.
+        // The line stays until the next turn, so a turn that ended before
+        // the login was signed in again is not noted (review w11-2).
         if let Some(row) = prior_row.filter(|_| pane.is_some_and(|p| p.signed_out)) {
-            crate::service::login_health::note_signed_out(
+            crate::service::login_health::note_signed_out_from_pane(
                 &host.alias,
                 row.claude_profile.as_deref(),
+                row.last_stop_at.unwrap_or(sess.last_activity),
             );
         }
         // PR probe result for this pass (PROD-5). `pr_observed`

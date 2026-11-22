@@ -1545,6 +1545,20 @@ function humanError(detail: string | null): { head: string; rest: string | null 
   return { head, rest };
 }
 
+/** A failed switch's line: the error, then which try it was and when the
+ *  next one comes, when the backend says (review w06-5). */
+function switchFailedDetail(d: ReturnType<typeof parseSwitchDetail>): string | null {
+  if (!d) return null;
+  const parts: string[] = [];
+  if (d.error) parts.push(d.error);
+  if (d.failures != null && d.failures > 1) parts.push(`${d.failures} tries in a row`);
+  if (d.next_try_at != null) {
+    const t = new Date(d.next_try_at * 1000);
+    parts.push(`next try at ${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}`);
+  }
+  return parts.length ? parts.join(' · ') : null;
+}
+
 /** The inline row for a timeline event, or null for events the thread does
  *  not show (turn_done, status changes, prompts and compactions — the
  *  transcript already carries those). */
@@ -1592,7 +1606,7 @@ export function inlineEventFor(
             id: e.id,
             at: e.at,
             label: 'Account ran out: automatic switch failed',
-            detail: d?.error ?? null,
+            detail: switchFailedDetail(d),
             tone: 'warn',
           };
     }

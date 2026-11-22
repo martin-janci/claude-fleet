@@ -45,7 +45,7 @@
   } from './notify';
   import { fleetSettings } from './fleet_settings';
   import { attentionFacts, attentionFactsFrom } from './attention_facts';
-  import { fleetRows, fleets } from './fleets';
+  import { fleetRows, fleets, openFleetSession } from './fleets';
   import { failing } from './routines';
   import type { AttentionState } from './attention';
   import { push } from './toasts';
@@ -184,14 +184,21 @@
         const label = known.find((f) => f.id === fid)?.label ?? fid;
         for (const { row, state } of newlyNotifiable(before, list, opts)) {
           const name = friendly && row.friendly_name ? row.friendly_name : row.tmux_name;
-          chimed = notifyMatrix(state, `${name} ${TITLES[state]}`, `${label} · ${row.host_alias}`, `${state}-${fid}-${row.id}`, !chimed) || chimed;
+          const id = row.id;
+          // Review w17-6: a click opens the fleet's session, as the primary's does.
+          chimed =
+            notifyMatrix(state, `${name} ${TITLES[state]}`, `${label} · ${row.host_alias}`, `${state}-${fid}-${id}`, !chimed, () =>
+              openFleetSession(fid, id),
+            ) || chimed;
         }
         if (beforeStuck) {
           for (const row of newlyStuck(beforeStuck, list)) {
             const name = friendly && row.friendly_name ? row.friendly_name : row.tmux_name;
+            const id = row.id;
             chimed =
-              notifyMatrix('blocked', `${name} ${TITLES.blocked}`, `${label} · ${stuckMessage(row, friendly)}`, `stuck-${fid}-${row.id}`, !chimed) ||
-              chimed;
+              notifyMatrix('blocked', `${name} ${TITLES.blocked}`, `${label} · ${stuckMessage(row, friendly)}`, `stuck-${fid}-${id}`, !chimed, () =>
+                openFleetSession(fid, id),
+              ) || chimed;
           }
         }
       }

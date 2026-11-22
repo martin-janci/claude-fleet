@@ -646,25 +646,51 @@ const TARGET_DISK_HEADROOM_KB: i64 = 1_048_576;
 /// script, so it ends well before [`GIT_TIMEOUT`] and frees the host.
 const WORKTREE_SIZE_DU_SECS: u64 = 25;
 
-/// `du -sk` of the source worktree, without the [`carry::DENYLIST`]
-/// directories: the carry never recreates them, and a pnpm `node_modules`
-/// on a loaded disk took `du` past 200 s (mefistos, 2026-11-11), failing
-/// every move of that session before it started. GNU `du` takes
-/// `--exclude`, BSD `du` (macOS) `-I`; both match the last path component.
-/// The `du` is cut off after [`WORKTREE_SIZE_DU_SECS`] where `timeout`
-/// exists. Empty output (an unmatched fake, a missing `du`, a cut-off run)
-/// is "unknown" and skips the check.
+/// The size in kB of what the carry recreates from the source worktree:
+/// every file but the git-IGNORED entries [`carry::DENYLIST`] names, which
+/// are the only ones the carry leaves behind (`carry::select_ignored`). A
+/// pnpm `node_modules` on a loaded disk took a whole-tree `du` past 200 s
+/// (mefistos, 2026-11-11), failing every move of that session before it
+/// started; `find` prunes those entries without descending into them.
+///
+/// Review w07-2: the exclusion was by NAME (`du --exclude` / `-I`), so a
+/// tracked or untracked `build/`, `out/` or `dist/` — which the carry does
+/// recreate — went uncounted and a move the check should refuse filled the
+/// target's disk. Now only the exact paths `git ls-files -o -i
+/// --exclude-standard --directory` lists are pruned.
+///
+/// Review w07-4: the run is cut off after [`WORKTREE_SIZE_DU_SECS`] by a
+/// watchdog in the script itself, not by `timeout` (absent on macOS without
+/// coreutils, where the remote `du` outlived the move's own deadline and
+/// competed with the carry for the disk). `set -m` puts the measurement in
+/// its own process group, so the whole pipeline is killed. Empty output (an
+/// unmatched fake, a cut-off run) is "unknown" and skips the check.
 fn worktree_size_script(worktree: &str) -> String {
-    let deny = carry::DENYLIST.join(" ");
+    worktree_size_script_within(worktree, WORKTREE_SIZE_DU_SECS)
+}
+
+fn worktree_size_script_within(worktree: &str, secs: u64) -> String {
+    let deny = carry::DENYLIST.join("|");
     format!(
         "# cf-move:wtsize\n\
-         set -f\n\
-         if du --version >/dev/null 2>&1; then flag=--exclude=; else flag='-I '; fi\n\
-         ex=''\n\
-         for d in {deny}; do ex=\"$ex $flag$d\"; done\n\
-         t=''\n\
-         command -v timeout >/dev/null 2>&1 && t='timeout {WORKTREE_SIZE_DU_SECS}'\n\
-         $t du -sk $ex -- {wt} 2>/dev/null | cut -f1\n",
+         cd {wt} 2>/dev/null || exit 0\n\
+         set --\n\
+         while IFS= read -r -d '' p; do\n\
+           p=${{p%/}}\n\
+           case \"${{p##*/}}\" in {deny}) ;; *) continue ;; esac\n\
+           if [ $# -eq 0 ]; then set -- -path \"./$p\"; else set -- \"$@\" -o -path \"./$p\"; fi\n\
+         done < <(git ls-files -o -i --exclude-standard --directory -z 2>/dev/null)\n\
+         measure() {{\n\
+           if [ $# -eq 0 ]; then find . -type f -exec du -k {{}} +\n\
+           else find . \\( \"$@\" \\) -prune -o -type f -exec du -k {{}} +; fi 2>/dev/null \\\n\
+             | awk '{{s+=$1}} END {{print s+0}}'\n\
+         }}\n\
+         set -m\n\
+         measure \"$@\" & m=$!\n\
+         ( sleep {secs}; kill -TERM -- -$m ) >/dev/null 2>&1 </dev/null & w=$!\n\
+         wait $m 2>/dev/null\n\
+         kill -TERM -- -$w 2>/dev/null\n\
+         exit 0\n",
         wt = quote(worktree),
     )
 }
@@ -2650,9 +2676,9 @@ async fn gather(
         )
         .await
         {
-            // The first word: `cut -f1` leaves a bare number, a `du` without
-            // it (or a fake) leaves `<kb>\t<path>`; either way the size.
-            Ok(out) => String::from_utf8_lossy(&out.stdout)
+            // The first word of the last line: a login banner prints ahead
+            // of the bare number, and a fake may answer `<kb>\t<path>`.
+            Ok(out) => crate::ssh::last_line(&out.stdout)
                 .split_whitespace()
                 .next()
                 .and_then(|v| v.parse::<i64>().ok()),
@@ -4033,6 +4059,9 @@ mod tests {
         kill_fails: bool,
         /// `kill_tmux_session` kills, then fails in the reconcile after it.
         kill_then_reconcile_fails: bool,
+        /// `kill_tmux_session` deletes the source row, as the real kill's
+        /// reconcile prunes it.
+        delete_source_on_kill: bool,
         /// Starting the target makes the source transcript grow (a turn
         /// taken on the source after the copy).
         grow_source_on_start: bool,
@@ -4081,6 +4110,7 @@ mod tests {
                 target_status: "running",
                 kill_fails: false,
                 kill_then_reconcile_fails: false,
+                delete_source_on_kill: false,
                 grow_source_on_start: false,
                 grow_source_on_kill: false,
                 refresh_target_fails: false,
@@ -4235,6 +4265,12 @@ mod tests {
                 );
             }
             self.log.lock().unwrap().push(format!("kill {host} {name}"));
+            if self.delete_source_on_kill {
+                let s = store.lock().unwrap();
+                if let Some(id) = s.get_session(name, host).unwrap().map(|r| r.id) {
+                    s.delete_session(id).unwrap();
+                }
+            }
             if self.kill_then_reconcile_fails {
                 return Err(crate::service::sessions::after_the_kill(IpcError::new(
                     codes::E_SSH_TIMEOUT,
@@ -4951,12 +4987,13 @@ mod tests {
     }
 
     /// The size the check weighs leaves out what the carry never recreates
-    /// (`carry::DENYLIST`), on GNU and BSD `du` alike.
+    /// (git-ignored `carry::DENYLIST` entries), and only that: a tracked
+    /// `build/` is recreated by the carry, so it is counted (review w07-2).
     #[cfg(unix)]
     #[test]
-    fn the_worktree_size_script_leaves_out_the_denylisted_directories() {
-        use carry::tests::bash;
-        if !carry::tests::require(&["bash"]) {
+    fn the_worktree_size_script_leaves_out_only_the_ignored_denylisted_entries() {
+        use carry::tests::{bash, git};
+        if !carry::tests::require(&["bash", "git"]) {
             return;
         }
         let tmp = tempfile::tempdir().unwrap();
@@ -4964,24 +5001,71 @@ mod tests {
         std::fs::create_dir_all(&home).unwrap();
         let wt = tmp.path().join("wt with space");
         std::fs::create_dir_all(wt.join("src")).unwrap();
+        git(&wt, &["init", "-q"]);
+        std::fs::write(wt.join(".gitignore"), "node_modules/\n.next/\n").unwrap();
         std::fs::write(wt.join("src/a.txt"), vec![b'a'; 64 * 1024]).unwrap();
         let measure = || {
             let out = bash(&worktree_size_script(wt.to_str().unwrap()), &home);
             assert!(out.status.success(), "{out:?}");
-            String::from_utf8_lossy(&out.stdout)
-                .trim()
+            crate::ssh::last_line(&out.stdout)
                 .parse::<i64>()
                 .unwrap_or_else(|_| panic!("a size, got {out:?}"))
         };
         let without = measure();
-        for d in ["node_modules/.pnpm/pkg", ".next/cache"] {
+        // Random bytes, so git's compression does not shrink the tracked copy.
+        let blob = |n: usize| (0..n).map(|i| (i * 7919 % 251) as u8).collect::<Vec<u8>>();
+        for d in ["node_modules/.pnpm/pkg", ".next/cache", "pkg/node_modules"] {
             std::fs::create_dir_all(wt.join(d)).unwrap();
-            std::fs::write(wt.join(d).join("big.bin"), vec![b'x'; 4 * 1024 * 1024]).unwrap();
+            std::fs::write(wt.join(d).join("big.bin"), blob(4 * 1024 * 1024)).unwrap();
         }
         let with = measure();
         assert!(
             with < without + 1024,
-            "denylisted dirs counted: {without} KiB before, {with} KiB after"
+            "ignored denylisted dirs counted: {without} KiB before, {with} KiB after"
+        );
+        // A `build/` the repository tracks is recreated, so it counts.
+        std::fs::create_dir_all(wt.join("build")).unwrap();
+        std::fs::write(wt.join("build/assets.bin"), blob(4 * 1024 * 1024)).unwrap();
+        git(&wt, &["add", "build"]);
+        let tracked = measure();
+        assert!(
+            tracked >= with + 4000,
+            "a tracked build/ went uncounted: {with} KiB before, {tracked} KiB after"
+        );
+    }
+
+    /// Review w07-4: the measurement is cut off by the script's own
+    /// watchdog, `timeout` or not, and a cut-off run prints nothing
+    /// (unknown), promptly.
+    #[cfg(unix)]
+    #[test]
+    fn a_slow_worktree_size_is_cut_off_without_timeout() {
+        use std::os::unix::fs::PermissionsExt;
+        if !carry::tests::require(&["bash"]) {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let wt = tmp.path().join("wt");
+        std::fs::create_dir_all(&wt).unwrap();
+        std::fs::write(wt.join("f"), "x").unwrap();
+        let bin = tmp.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let du = bin.join("du");
+        std::fs::write(&du, "#!/bin/sh\nexec sleep 30\n").unwrap();
+        std::fs::set_permissions(&du, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let script = format!(
+            "PATH={}:\"$PATH\"\n{}",
+            quote(&bin.to_string_lossy()),
+            worktree_size_script_within(wt.to_str().unwrap(), 1)
+        );
+        let started = std::time::Instant::now();
+        let out = carry::tests::bash(&script, tmp.path());
+        assert!(out.status.success(), "{out:?}");
+        assert_eq!(crate::ssh::last_line(&out.stdout), "", "{out:?}");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(15),
+            "took {:?}",
+            started.elapsed()
         );
     }
 
@@ -5988,6 +6072,8 @@ mod tests {
             };
             s.insert_review_notes(f.source_id, "rn-1", &[note], "Ada", None, 1)
                 .unwrap();
+            s.record_prompt_author(f.source_id, "later", "Ada", None, 1)
+                .unwrap();
             let task = s.insert_task(None, Some(f.source_id), "w", "n1").unwrap();
             s.conn_for_test()
                 .execute_batch(
@@ -6011,10 +6097,80 @@ mod tests {
         );
         assert_eq!(s.review_notes(f.source_id).unwrap().len(), 1, "notes back");
         assert_eq!(
+            s.prompt_authors(f.source_id, 0).unwrap().len(),
+            1,
+            "authors back"
+        );
+        assert_eq!(
             s.get_task(task.id).unwrap().unwrap().worker_session_id,
             Some(f.source_id)
         );
         assert!(s.get_session_by_id(f.source_id).unwrap().is_some());
+    }
+
+    /// Review w16-2: who sent each prompt follows a move (and is copied to
+    /// a fork), so a colleague's prompts do not read as the reader's own;
+    /// review w16-1: a lead with a finished and an open task on one mission
+    /// is counted once by it after the move.
+    #[tokio::test]
+    async fn prompt_authors_and_mission_spend_follow_a_move() {
+        for keep_source in [false, true] {
+            let f = fixture();
+            let (m, done) = {
+                let s = f.store.lock().unwrap();
+                s.record_prompt_author(f.source_id, "fix it", "Ada · phone", Some(2), 10)
+                    .unwrap();
+                let m = s
+                    .create_mission(
+                        &crate::store::NewMission {
+                            name: "m",
+                            goal: "g",
+                            ..Default::default()
+                        },
+                        "fleet",
+                    )
+                    .unwrap()
+                    .id;
+                let mut tasks = Vec::new();
+                for t in ["a", "b"] {
+                    let item = s.create_local_work_item(None, t).unwrap().id;
+                    s.set_mission_item(m, item, true, "fleet").unwrap();
+                    let task = s.insert_task(None, Some(f.source_id), t, "n").unwrap();
+                    s.set_task_run(task.id, item, 1, "implement").unwrap();
+                    tasks.push(task.id);
+                }
+                s.conn_ref()
+                    .execute(
+                        "UPDATE tasks SET state = 'done', finished_at = 100 WHERE id = ?1",
+                        [tasks[0]],
+                    )
+                    .unwrap();
+                s.conn_ref()
+                    .execute(
+                        "UPDATE sessions SET usage_cost_micros = 40000000 WHERE id = ?1",
+                        [f.source_id],
+                    )
+                    .unwrap();
+                (m, tasks[0])
+            };
+            let mut hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+            hooks.delete_source_on_kill = true;
+            let rep = run(&f, &hooks, keep_source).await.expect("move");
+            let s = f.store.lock().unwrap();
+            let authors = s.prompt_authors(rep.target_session_id, 0).unwrap();
+            assert_eq!(authors.len(), 1, "{keep_source}");
+            assert_eq!(authors[0].author, "Ada · phone");
+            assert_eq!(
+                s.prompt_authors(f.source_id, 0).unwrap().len(),
+                usize::from(keep_source),
+                "{keep_source}"
+            );
+            if !keep_source {
+                assert!(s.get_session_by_id(f.source_id).unwrap().is_none());
+                assert_eq!(s.get_task(done).unwrap().unwrap().worker_session_id, None);
+                assert_eq!(s.mission_cost_micros(m).unwrap(), 40_000_000);
+            }
+        }
     }
 
     /// A pinned session whose move stops at a failed source kill keeps its

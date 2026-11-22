@@ -162,13 +162,23 @@ pub fn refuse_relaunch_of(s: &Store, session_id: i64, now: i64) -> Result<(), Ip
     )
 }
 
-/// Why a relaunch of session `session_id` waits (a spent daily limit:
-/// [`refuse_relaunch_of`]), for automation that defers or skips rather
-/// than fail. `None` when it may relaunch, or the check could not answer
-/// (the relaunch itself asks again).
+/// Why a relaunch of session `session_id` waits (a spent daily limit, or
+/// an account its project now forbids: [`refuse_relaunch_of`]), for
+/// automation that defers or skips rather than fail. `None` when it may
+/// relaunch, or the check could not answer (the relaunch itself asks
+/// again).
 pub fn relaunch_held(s: &Store, session_id: i64, now: i64) -> Option<String> {
+    relaunch_refusal(s, session_id, now).map(|e| e.message)
+}
+
+/// [`relaunch_held`] with its code: `E_ACCOUNT_LIMIT` for a spent daily
+/// limit (it clears at the reset), `E_ACCOUNT_FORBIDDEN` for a forbidden
+/// account (it waits on a person, review w09-4).
+pub fn relaunch_refusal(s: &Store, session_id: i64, now: i64) -> Option<IpcError> {
     match refuse_relaunch_of(s, session_id, now) {
-        Err(e) if e.code == codes::E_ACCOUNT_LIMIT => Some(e.message),
+        Err(e) if e.code == codes::E_ACCOUNT_LIMIT || e.code == codes::E_ACCOUNT_FORBIDDEN => {
+            Some(e)
+        }
         _ => None,
     }
 }
