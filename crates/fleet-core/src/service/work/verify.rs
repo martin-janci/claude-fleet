@@ -125,9 +125,23 @@ fn from_run(mut c: CondCheck, t: &TaskRow) -> CondCheck {
 /// report says nothing about the implementation, so it never retries it.
 const UNREPORTED_CHECK_RUNS: usize = 2;
 
-/// PURE: a run that finished, in any state, with no report block.
+/// PURE: a run that finished with no report block. A run a person
+/// cancelled is not one: it is never run again on its own
+/// ([`cancelled_run`]).
 fn ended_unreported(t: &TaskRow) -> bool {
-    t.report.is_none() && !matches!(t.state.as_str(), "queued" | "running")
+    t.report.is_none() && !matches!(t.state.as_str(), "queued" | "running" | "cancelled")
+}
+
+/// PURE: the line after check run `t` that a person cancelled with no
+/// report: pending on `t`, so the loop asks a person rather than starting
+/// the run they stopped again (review w01-4). `None` for any other run.
+fn cancelled_run(line: &str, kind: &str, who: &str, t: &TaskRow) -> Option<CondCheck> {
+    (t.state == "cancelled" && t.report.is_none()).then(|| {
+        from_run(
+            check(line, kind, "pending", format!("the {who} was cancelled")),
+            t,
+        )
+    })
 }
 
 /// PURE: the line after a check run `t` that ended without its report,
@@ -203,6 +217,9 @@ pub fn check_line(
                     "pending",
                     "the work changed since the review",
                 ));
+            }
+            if let Some(c) = cancelled_run(line, kind, "review", &t) {
+                return Ok(c);
             }
             let c = match (t.state.as_str(), t.report.as_ref()) {
                 ("queued" | "running", _) => check(line, kind, "pending", "the review is running"),
@@ -366,6 +383,7 @@ fn test_check(line: &str, command: Option<&str>, runs: &[&TaskRow]) -> CondCheck
         from_run(c, t)
     };
     let newest = runs[0];
+    let cancelled_newest = || cancelled_run(line, kind, "test run", newest);
     // The newest run stopped without its report: it says nothing of the
     // work, so the check runs again, then waits on a person.
     let unreported_newest = || {
@@ -373,6 +391,9 @@ fn test_check(line: &str, command: Option<&str>, runs: &[&TaskRow]) -> CondCheck
         unreported(line, kind, "test run", newest, n)
     };
     let Some(cmd) = command else {
+        if let Some(c) = cancelled_newest() {
+            return c;
+        }
         return if ended_unreported(newest) {
             unreported_newest()
         } else {
@@ -382,6 +403,9 @@ fn test_check(line: &str, command: Option<&str>, runs: &[&TaskRow]) -> CondCheck
     let reported = |t: &&&TaskRow| t.report.as_ref().is_some_and(|r| ran(r, cmd));
     if let Some(t) = runs.iter().find(reported) {
         return verdict(t);
+    }
+    if let Some(c) = cancelled_newest() {
+        return c;
     }
     if ended_unreported(newest) {
         return unreported_newest();

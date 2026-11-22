@@ -675,3 +675,62 @@ fn adding_a_repo_voids_the_grant_signed_for_the_old_plan() {
         "a grant signed for the new plan covers it again"
     );
 }
+
+/// Review w16-1: a moved lead with a finished and an open task on one
+/// mission. The open task follows it to the target row, which takes the
+/// source's whole spend; the source's delete writes that spend onto the
+/// finished task too. The move drops that copy for the mission the open
+/// task is on, so its spend is not doubled; a mission only the finished
+/// task served keeps its copy.
+#[test]
+fn a_moved_leads_spend_is_counted_once_by_its_mission() {
+    let s = Store::open_in_memory().unwrap();
+    let m = mission(&s);
+    let other = mission(&s);
+    s.upsert_host("h").unwrap();
+    let lead = s
+        .upsert_session("lead", "h", None, None, 1, 1, "running", None)
+        .unwrap();
+    let target = s
+        .upsert_session("lead-2", "h", None, None, 1, 1, "running", None)
+        .unwrap();
+    let [a, b, c] = ["a", "b", "c"].map(|t| s.create_local_work_item(None, t).unwrap().id);
+    s.set_mission_item(m, a, true, "fleet").unwrap();
+    s.set_mission_item(m, b, true, "fleet").unwrap();
+    s.set_mission_item(other, c, true, "fleet").unwrap();
+    let done_m = s.insert_task(None, Some(lead), "a", "n").unwrap();
+    s.set_task_run(done_m.id, a, 1, "implement").unwrap();
+    let done_other = s.insert_task(None, Some(lead), "c", "n").unwrap();
+    s.set_task_run(done_other.id, c, 1, "implement").unwrap();
+    let open = s.insert_task(None, Some(lead), "b", "n").unwrap();
+    s.set_task_run(open.id, b, 1, "implement").unwrap();
+    s.conn_ref()
+        .execute(
+            "UPDATE tasks SET state = 'done', finished_at = 100 WHERE id IN (?1, ?2)",
+            [done_m.id, done_other.id],
+        )
+        .unwrap();
+    s.conn_ref()
+        .execute(
+            "UPDATE sessions SET usage_cost_micros = 40000000 WHERE id = ?1",
+            [lead],
+        )
+        .unwrap();
+    assert_eq!(s.mission_cost_micros(m).unwrap(), 40_000_000);
+    // The move: re-point the open task, read what stays, kill, carry.
+    let (work, _) = s.repoint_open_tasks(lead, target).unwrap();
+    assert_eq!(work, vec![open.id]);
+    let left = s.worker_task_ids(lead).unwrap();
+    assert_eq!(left, vec![done_m.id, done_other.id]);
+    s.delete_session(lead).unwrap();
+    s.conn_ref()
+        .execute(
+            "UPDATE sessions SET usage_cost_micros = 40000000 WHERE id = ?1",
+            [target],
+        )
+        .unwrap();
+    assert_eq!(s.mission_cost_micros(m).unwrap(), 80_000_000, "doubled");
+    assert_eq!(s.drop_moved_worker_spend(&left, &work).unwrap(), 1);
+    assert_eq!(s.mission_cost_micros(m).unwrap(), 40_000_000);
+    assert_eq!(s.mission_cost_micros(other).unwrap(), 40_000_000);
+}

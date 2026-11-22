@@ -81,6 +81,30 @@ impl Store {
         Ok(n > 0)
     }
 
+    /// Move `from`'s author rows to `to` (a moved session's new row, or back
+    /// on undo), beside [`Store::repoint_review_notes`]: the conversation
+    /// goes on there, and the source row's delete would cascade them away,
+    /// so a colleague's earlier prompts would read as the reader's own.
+    /// Answers how many rows moved.
+    pub fn repoint_prompt_authors(&self, from: i64, to: i64) -> Result<usize, IpcError> {
+        Ok(self.conn.execute(
+            "UPDATE prompt_authors SET session_id = ?2 WHERE session_id = ?1",
+            rusqlite::params![from, to],
+        )?)
+    }
+
+    /// Copy `from`'s author rows to `to`: a `keep_source` move, where both
+    /// rows live on and each shows the copied conversation. Answers how many
+    /// rows were copied.
+    pub fn copy_prompt_authors(&self, from: i64, to: i64) -> Result<usize, IpcError> {
+        Ok(self.conn.execute(
+            "INSERT INTO prompt_authors (session_id, at, head, author, author_person_id) \
+             SELECT ?2, at, head, author, author_person_id FROM prompt_authors \
+              WHERE session_id = ?1 ORDER BY id",
+            rusqlite::params![from, to],
+        )?)
+    }
+
     /// A session's author rows sent at or after `since`, oldest first.
     pub fn prompt_authors(
         &self,
@@ -173,5 +197,40 @@ mod tests {
             vec![(5, "run the tests".into()), (101, "other".into())]
         );
         assert!(!s.forget_prompt_author(sid, "run the tests", 100).unwrap());
+    }
+
+    #[test]
+    fn authors_move_or_are_copied_with_their_session() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("local").unwrap();
+        let from = s
+            .upsert_session("api-1", "local", None, None, 0, 0, "running", None)
+            .unwrap();
+        let to = s
+            .upsert_session("api-2", "local", None, None, 0, 0, "running", None)
+            .unwrap();
+        let fork = s
+            .upsert_session("api-3", "local", None, None, 0, 0, "running", None)
+            .unwrap();
+        s.record_prompt_author(from, "fix it", "Ada · phone", Some(2), 10)
+            .unwrap();
+        s.record_prompt_author(from, "queued", "Ada · phone", Some(2), 100)
+            .unwrap();
+        // keep_source: both rows keep them.
+        assert_eq!(s.copy_prompt_authors(from, fork).unwrap(), 2);
+        assert_eq!(
+            s.prompt_authors(fork, 0).unwrap(),
+            s.prompt_authors(from, 0).unwrap()
+        );
+        // A move: they follow, and survive the old row's delete.
+        assert_eq!(s.repoint_prompt_authors(from, to).unwrap(), 2);
+        s.conn
+            .execute("DELETE FROM sessions WHERE id = ?1", [from])
+            .unwrap();
+        let moved = s.prompt_authors(to, 0).unwrap();
+        assert_eq!(moved.len(), 2);
+        assert_eq!(moved[0].author, "Ada · phone");
+        // A queued prompt cancelled after the move forgets its row there.
+        assert!(s.forget_prompt_author(to, "queued", 100).unwrap());
     }
 }

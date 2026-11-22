@@ -481,12 +481,17 @@ fn verify_steps(
                 } else {
                     "the test run"
                 };
+                let how = if t.state == "cancelled" {
+                    "was cancelled"
+                } else {
+                    "ended without its report"
+                };
                 out.push(
                     Step::new(
                         "ask",
                         Some(n.item_id),
                         None,
-                        format!("{what} of {title} ended without its report"),
+                        format!("{what} of {title} {how}"),
                     )
                     .with_context(failure_text(t)),
                 );

@@ -86,6 +86,13 @@ pub(super) async fn finalise_source(
             if let Err(e) = s.copy_work_links(a.source_row_id, a.target_row_id) {
                 warnings.push(format!("the work links were not copied ({})", e.message));
             }
+            // The copied conversation keeps who sent each prompt.
+            if let Err(e) = s.copy_prompt_authors(a.source_row_id, a.target_row_id) {
+                warnings.push(format!(
+                    "the prompt authors were not copied ({})",
+                    e.message
+                ));
+            }
         }
     }
     if !a.keep_source {
@@ -167,6 +174,15 @@ pub(super) async fn finalise_source(
                 return Err(tag_step("re-pointing the review notes", e));
             }
         }
+        // And who sent each of its prompts: the conversation goes on there,
+        // and without them a colleague's prompts read as the reader's own.
+        match lock(store).and_then(|s| s.repoint_prompt_authors(a.source_row_id, a.target_row_id)) {
+            Ok(n) => repointed.prompt_authors = n,
+            Err(e) => {
+                repointed.undo(store, a.source_row_id, a.target_row_id);
+                return Err(tag_step("re-pointing the prompt authors", e));
+            }
+        }
         // So do its open tasks: the conversation goes on there and prints
         // its done marker on the target, which must find them; left on the
         // source they fail as lost the moment it is killed.
@@ -180,6 +196,12 @@ pub(super) async fn finalise_source(
                 return Err(tag_step("re-pointing the open tasks", e));
             }
         }
+        // The tasks left on the source (finished ones): the kill's delete
+        // writes its spend onto them (migration 227), which the carry below
+        // also adds to the target. Read before the kill, which unlinks them.
+        let left_tasks: Vec<i64> = lock(store)
+            .and_then(|s| s.worker_task_ids(a.source_row_id))
+            .unwrap_or_default();
         // A pin follows the session: the target took it at the carry step,
         // so the source's is lifted, or its kill would refuse (E_PINNED).
         // Kept, to put back if the kill fails: the source then lives on, and
@@ -270,6 +292,19 @@ pub(super) async fn finalise_source(
                     );
                 }
             }
+            // A mission with a re-pointed task reads the carried spend live
+            // on the target: the copy the source's delete left on its
+            // finished tasks of that mission would count it twice. Only
+            // once the row is gone — a row the next reconcile pass reaps
+            // writes its spend then.
+            if matches!(s.get_session_by_id(a.source_row_id), Ok(None)) {
+                if let Err(e) = s.drop_moved_worker_spend(&left_tasks, &repointed.work) {
+                    tracing::warn!(
+                        "move_session: dropping the source's double-counted mission spend failed: {}",
+                        e.message
+                    );
+                }
+            }
             // A source usage pass between the inherit and the kill counted
             // lines the target's cursor still points before: catch up.
             if let Some(c) = source_cursor.as_ref() {
@@ -343,6 +378,7 @@ struct Repointed {
     participant: Option<i64>,
     prompts: usize,
     review_notes: usize,
+    prompt_authors: usize,
     work: Vec<i64>,
     waits: Vec<i64>,
 }
@@ -384,6 +420,15 @@ impl Repointed {
                     session_id = source,
                     error = %re.message,
                     "move_session: the move stopped and the review notes stay on the target"
+                );
+            }
+        }
+        if self.prompt_authors > 0 {
+            if let Err(re) = lock(store).and_then(|s| s.repoint_prompt_authors(target, source)) {
+                tracing::warn!(
+                    session_id = source,
+                    error = %re.message,
+                    "move_session: the move stopped and the prompt authors stay on the target"
                 );
             }
         }

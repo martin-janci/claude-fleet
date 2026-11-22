@@ -216,13 +216,16 @@ impl Store {
              VALUES (?1, ?2, ?3, NULL, ?4, ?4, 'running', ?8, ?5, ?6,
                      CASE WHEN ?6 IN ('idle','completed','stopped') THEN ?7 ELSE NULL END)
              ON CONFLICT(host_alias, tmux_name) DO UPDATE SET
-               project_id=COALESCE(excluded.project_id, project_id),
+               project_id=COALESCE(excluded.project_id, sessions.project_id),
                -- A worktree of another project is not this row's worktree
                -- (the same rule as the tmux upsert in `store/reconcile.rs`).
+               -- `sessions.` matters: inside the subquery a bare
+               -- `project_id` is the worktree's (review w05-5).
                worktree_id=CASE WHEN worktree_id IS NOT NULL AND NOT EXISTS (
                                   SELECT 1 FROM worktrees w
                                    WHERE w.id = sessions.worktree_id
-                                     AND w.project_id IS COALESCE(excluded.project_id, project_id))
+                                     AND w.project_id IS COALESCE(excluded.project_id,
+                                                                  sessions.project_id))
                                 THEN NULL ELSE worktree_id END,
                last_activity_at=excluded.last_activity_at,
                kind=excluded.kind,
