@@ -330,13 +330,7 @@ pub fn plan(
     // window it read has reset since (an idle account's often has).
     let target_used = |uuid: &str| used(uuid).or(Some(0.0));
     let pause_at = account_limits::pause_at_pct(s);
-    // Early (`accounts.auto_switch_early`): an idle session moves once its
-    // account passes `accounts.pause_at`, before its next turn stalls.
-    let line = if settings::get_bool(s, settings::ACCOUNTS_AUTO_SWITCH_EARLY) {
-        pause_at
-    } else {
-        100.0
-    };
+    let line = switch_line(s, pause_at);
     let due = |uuid: &str| used(uuid).is_some_and(|u| u >= line);
     let hosts: Vec<HostRow> =
         crate::service::hosts::active_hosts(s.list_hosts()?, local_host_enabled)
@@ -436,6 +430,78 @@ pub fn plan(
         }
     }
     Ok(out)
+}
+
+/// The use at which a session's account is due a switch. Early
+/// (`accounts.auto_switch_early`): an idle session moves once its account
+/// passes `accounts.pause_at`, before its next turn stalls; else at the
+/// limit.
+fn switch_line(s: &Store, pause_at: f64) -> f64 {
+    if settings::get_bool(s, settings::ACCOUNTS_AUTO_SWITCH_EARLY) {
+        pause_at
+    } else {
+        100.0
+    }
+}
+
+/// Whether planned switch `p` still holds right before its restart (review
+/// w10-3): a run plans up to [`MAX_SWITCHES_PER_RUN`] sessions under one
+/// lock and then works through them, each behind Jev's answer and an SSH
+/// restart, so by the last one the plan can be tens of seconds old. The row
+/// is read again and must still be [`switchable`] for the same reason, on
+/// the same account, with fresh readings, sign-outs and notifications, and
+/// its owner must still allow it; a session that started a turn or opened a
+/// dialog meanwhile is never restarted ("a working session is never
+/// moved").
+pub fn still_due(
+    s: &Store,
+    p: &Planned,
+    local_host_enabled: bool,
+    now: i64,
+) -> Result<bool, IpcError> {
+    if !fleet_enabled(s) {
+        return Ok(false);
+    }
+    let Some(row) = s.get_session_by_id(p.session_id)? else {
+        return Ok(false);
+    };
+    if row.host_alias != p.host_alias
+        || row.tmux_name != p.tmux_name
+        || row.account_uuid.clone().unwrap_or_default() != p.from_account
+    {
+        return Ok(false);
+    }
+    let Some(host) = crate::service::hosts::active_hosts(s.list_hosts()?, local_host_enabled)
+        .into_iter()
+        .find(|h| h.alias == row.host_alias && (h.reachable || h.alias == "local"))
+    else {
+        return Ok(false);
+    };
+    let snaps = s.latest_usage_snapshots()?;
+    let line = switch_line(s, account_limits::pause_at_pct(s));
+    let due = |uuid: &str| {
+        snaps
+            .iter()
+            .find(|r| r.account_uuid == uuid)
+            .and_then(|r| account_limits::used_pct_of(&r.usage, Some(r.fetched_at), now))
+            .is_some_and(|u| u >= line)
+    };
+    let parked = row.claude_status.as_deref() == Some("blocked")
+        && quota_parked(
+            s.newest_session_event_of(row.id, &["notification"])?
+                .and_then(|e| e.detail)
+                .as_deref(),
+        );
+    let login_out =
+        crate::service::login_health::is_signed_out(&host, row.claude_profile.as_deref());
+    if switchable(&row, due, login_out, parked) != Some(p.reason) {
+        return Ok(false);
+    }
+    Ok(owner_allows(
+        &row,
+        s.personal_owner_id()?,
+        &s.people_without_auto_switch()?,
+    ))
 }
 
 /// The timeline detail of one attempt: logins by profile, accounts by uuid.
@@ -551,13 +617,6 @@ pub async fn run_with(
     };
     let mut report = RunReport::default();
     for p in planned {
-        {
-            let mut r = recent.lock().unwrap_or_else(|e| e.into_inner());
-            r.sessions.insert(p.session_id, now);
-            // A failed try counts too: whether the restart got as far as
-            // the new login is not known.
-            r.targets.insert(p.target.account_uuid.clone(), now);
-        }
         let jev_pick = match jev {
             Some(ctx) => {
                 let org = lock(store)?.session_org(p.session_id).ok().flatten();
@@ -572,6 +631,28 @@ pub async fn run_with(
             }
             None => None,
         };
+        // Right before the restart: the plan may be stale by now (review
+        // w10-3). A session that no longer qualifies is skipped and
+        // nothing is recorded; the next run plans it afresh.
+        let due_now = {
+            let s = lock(store)?;
+            still_due(&s, &p, local_host_enabled, now)?
+        };
+        if !due_now {
+            tracing::debug!(
+                "[account-switch] {} on {} no longer due; left alone",
+                p.tmux_name,
+                p.host_alias
+            );
+            continue;
+        }
+        {
+            let mut r = recent.lock().unwrap_or_else(|e| e.into_inner());
+            r.sessions.insert(p.session_id, now);
+            // A failed try counts too: whether the restart got as far as
+            // the new login is not known.
+            r.targets.insert(p.target.account_uuid.clone(), now);
+        }
         let profile = p.target.profile.clone().unwrap_or_default();
         let result = switcher.switch(&p.host_alias, &p.tmux_name, &profile).await;
         let (kind, code) = match &result {

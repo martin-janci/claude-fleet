@@ -748,3 +748,76 @@ fn an_auth_failure_is_what_cuts_a_turn_off_a_signed_out_login() {
     assert!(!cut_off_by_sign_out("stop_failure", Some("rate_limit")));
     assert!(!cut_off_by_sign_out("turn_done", Some("auth")));
 }
+
+/// A switcher that starts a turn in every other session on its first
+/// call, as a person typing into a paused row while the run works through
+/// its plan.
+struct StartsATurn {
+    store: Arc<Mutex<Store>>,
+    calls: Mutex<Vec<String>>,
+}
+
+#[async_trait::async_trait]
+impl Switcher for StartsATurn {
+    async fn switch(&self, _host: &str, name: &str, _profile: &str) -> Result<(), IpcError> {
+        let mut calls = self.calls.lock().unwrap();
+        if calls.is_empty() {
+            self.store
+                .lock()
+                .unwrap()
+                .conn_for_test()
+                .execute(
+                    "UPDATE sessions SET claude_status = 'working' WHERE tmux_name != ?1",
+                    [name],
+                )
+                .unwrap();
+        }
+        calls.push(name.into());
+        Ok(())
+    }
+}
+
+/// Review w10-3: a planned switch is checked again right before its
+/// restart, so a session that started working since the plan is left
+/// alone and nothing is recorded for it.
+#[tokio::test]
+async fn a_session_that_started_working_since_the_plan_is_not_switched() {
+    let (s, first, owner) = fleet();
+    let second = session(&s, "s2", "acct-out", Some(owner));
+    assert_eq!(plan_now(&s).len(), 2, "both planned");
+    let store = Arc::new(Mutex::new(s));
+    let switcher = StartsATurn {
+        store: store.clone(),
+        calls: Mutex::new(Vec::new()),
+    };
+    let recent = Mutex::new(Recent::default());
+    let r = run_with(&store, &switcher, None, &recent, true, NOW)
+        .await
+        .unwrap();
+    assert_eq!(
+        r,
+        RunReport {
+            switched: 1,
+            failed: 0
+        }
+    );
+    let calls = switcher.calls.lock().unwrap().clone();
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    let (moved, left) = if calls[0] == "s1" {
+        (first, second)
+    } else {
+        (second, first)
+    };
+    let s = store.lock().unwrap();
+    assert_eq!(events(&s, moved).last().unwrap().0, EVENT_SWITCHED);
+    assert!(
+        events(&s, left)
+            .iter()
+            .all(|(k, _)| k != EVENT_SWITCHED && k != EVENT_SWITCH_FAILED),
+        "nothing recorded for the session left alone"
+    );
+    assert!(
+        !recent.lock().unwrap().sessions.contains_key(&left),
+        "not counted as tried"
+    );
+}
