@@ -4033,6 +4033,9 @@ mod tests {
         kill_fails: bool,
         /// `kill_tmux_session` kills, then fails in the reconcile after it.
         kill_then_reconcile_fails: bool,
+        /// `kill_tmux_session` deletes the source row, as the real kill's
+        /// reconcile prunes it.
+        delete_source_on_kill: bool,
         /// Starting the target makes the source transcript grow (a turn
         /// taken on the source after the copy).
         grow_source_on_start: bool,
@@ -4081,6 +4084,7 @@ mod tests {
                 target_status: "running",
                 kill_fails: false,
                 kill_then_reconcile_fails: false,
+                delete_source_on_kill: false,
                 grow_source_on_start: false,
                 grow_source_on_kill: false,
                 refresh_target_fails: false,
@@ -4235,6 +4239,12 @@ mod tests {
                 );
             }
             self.log.lock().unwrap().push(format!("kill {host} {name}"));
+            if self.delete_source_on_kill {
+                let s = store.lock().unwrap();
+                if let Some(id) = s.get_session(name, host).unwrap().map(|r| r.id) {
+                    s.delete_session(id).unwrap();
+                }
+            }
             if self.kill_then_reconcile_fails {
                 return Err(crate::service::sessions::after_the_kill(IpcError::new(
                     codes::E_SSH_TIMEOUT,
@@ -5988,6 +5998,8 @@ mod tests {
             };
             s.insert_review_notes(f.source_id, "rn-1", &[note], "Ada", None, 1)
                 .unwrap();
+            s.record_prompt_author(f.source_id, "later", "Ada", None, 1)
+                .unwrap();
             let task = s.insert_task(None, Some(f.source_id), "w", "n1").unwrap();
             s.conn_for_test()
                 .execute_batch(
@@ -6011,10 +6023,80 @@ mod tests {
         );
         assert_eq!(s.review_notes(f.source_id).unwrap().len(), 1, "notes back");
         assert_eq!(
+            s.prompt_authors(f.source_id, 0).unwrap().len(),
+            1,
+            "authors back"
+        );
+        assert_eq!(
             s.get_task(task.id).unwrap().unwrap().worker_session_id,
             Some(f.source_id)
         );
         assert!(s.get_session_by_id(f.source_id).unwrap().is_some());
+    }
+
+    /// Review w16-2: who sent each prompt follows a move (and is copied to
+    /// a fork), so a colleague's prompts do not read as the reader's own;
+    /// review w16-1: a lead with a finished and an open task on one mission
+    /// is counted once by it after the move.
+    #[tokio::test]
+    async fn prompt_authors_and_mission_spend_follow_a_move() {
+        for keep_source in [false, true] {
+            let f = fixture();
+            let (m, done) = {
+                let s = f.store.lock().unwrap();
+                s.record_prompt_author(f.source_id, "fix it", "Ada · phone", Some(2), 10)
+                    .unwrap();
+                let m = s
+                    .create_mission(
+                        &crate::store::NewMission {
+                            name: "m",
+                            goal: "g",
+                            ..Default::default()
+                        },
+                        "fleet",
+                    )
+                    .unwrap()
+                    .id;
+                let mut tasks = Vec::new();
+                for t in ["a", "b"] {
+                    let item = s.create_local_work_item(None, t).unwrap().id;
+                    s.set_mission_item(m, item, true, "fleet").unwrap();
+                    let task = s.insert_task(None, Some(f.source_id), t, "n").unwrap();
+                    s.set_task_run(task.id, item, 1, "implement").unwrap();
+                    tasks.push(task.id);
+                }
+                s.conn_ref()
+                    .execute(
+                        "UPDATE tasks SET state = 'done', finished_at = 100 WHERE id = ?1",
+                        [tasks[0]],
+                    )
+                    .unwrap();
+                s.conn_ref()
+                    .execute(
+                        "UPDATE sessions SET usage_cost_micros = 40000000 WHERE id = ?1",
+                        [f.source_id],
+                    )
+                    .unwrap();
+                (m, tasks[0])
+            };
+            let mut hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+            hooks.delete_source_on_kill = true;
+            let rep = run(&f, &hooks, keep_source).await.expect("move");
+            let s = f.store.lock().unwrap();
+            let authors = s.prompt_authors(rep.target_session_id, 0).unwrap();
+            assert_eq!(authors.len(), 1, "{keep_source}");
+            assert_eq!(authors[0].author, "Ada · phone");
+            assert_eq!(
+                s.prompt_authors(f.source_id, 0).unwrap().len(),
+                usize::from(keep_source),
+                "{keep_source}"
+            );
+            if !keep_source {
+                assert!(s.get_session_by_id(f.source_id).unwrap().is_none());
+                assert_eq!(s.get_task(done).unwrap().unwrap().worker_session_id, None);
+                assert_eq!(s.mission_cost_micros(m).unwrap(), 40_000_000);
+            }
+        }
     }
 
     /// A pinned session whose move stops at a failed source kill keeps its
