@@ -347,10 +347,25 @@ impl FleetTools {
         };
         match action {
             "list" => {
-                let rows = lock(&self.store)
-                    .map_err(to_mcp_err)?
-                    .review_notes(row.id)
-                    .map_err(to_mcp_err)?;
+                let s = lock(&self.store).map_err(to_mcp_err)?;
+                let mut rows = s.review_notes(row.id).map_err(to_mcp_err)?;
+                // The rule `session_conversation` keeps (`veil_authors`): the
+                // owner and the master read every author; anyone else the
+                // owner and themselves. A send still waiting is the owner's
+                // pending input, read at `drive` as `queued_prompts` is.
+                let me = caller_person(&s, &caller);
+                let owner = row.owner_person_id;
+                let sees_all = caller.is_master() || (me.is_some() && me == owner);
+                let drives = super::support::reaches_row(&s, &caller, &row, Reach::Drive)?;
+                let name_of = |id: Option<i64>| {
+                    id.and_then(|id| s.get_person(id).ok().flatten())
+                        .map(|p| p.display_name.unwrap_or(p.name))
+                };
+                let known: Vec<String> = [Some(author.clone()), name_of(me), name_of(owner)]
+                    .into_iter()
+                    .flatten()
+                    .collect();
+                veil_review_notes(&mut rows, me, owner, &known, sees_all, drives);
                 ok_json(&rows)
             }
             "send" => {
@@ -368,9 +383,14 @@ impl FleetTools {
                 };
                 let origin = marker_origin(&caller);
                 let mut typed: Option<String> = None;
+                let typed_author = {
+                    let s = lock(&self.store).map_err(to_mcp_err)?;
+                    review_typed_author(&s, &caller, &author)
+                };
                 let out = sessions::review_notes::send(
                     args,
                     &author,
+                    &typed_author,
                     person,
                     |prompt| {
                         let marked =
@@ -1220,6 +1240,45 @@ pub(super) fn veil_authors<'a>(
     }
 }
 
+/// PURE: [`veil_authors`]'s rule over `review_notes { list }`. Unless
+/// `sees_all` (the owner, the master), a note another person wrote reads
+/// "someone else" with no person id, and a `resolved_by` that is not one of
+/// the `known` names (the caller's own, the owner's: a name alone or
+/// "name · device") reads the same. The bodies stay. Without `drives`, a
+/// send still `waiting` is left out: it is what the session is about to be
+/// typed, which `queued_prompts` keeps from a watcher.
+pub(super) fn veil_review_notes(
+    rows: &mut Vec<crate::store::ReviewNoteRow>,
+    me: Option<i64>,
+    owner: Option<i64>,
+    known: &[String],
+    sees_all: bool,
+    drives: bool,
+) {
+    if !drives {
+        rows.retain(|r| r.delivery.as_deref() != Some("waiting"));
+    }
+    if sees_all {
+        return;
+    }
+    let named = |n: &str| {
+        known.iter().any(|k| {
+            n == k
+                || n.strip_prefix(k.as_str())
+                    .is_some_and(|t| t.starts_with(" · "))
+        })
+    };
+    for r in rows.iter_mut() {
+        if r.author_person_id.is_some() && r.author_person_id != me && r.author_person_id != owner {
+            r.author = "someone else".into();
+            r.author_person_id = None;
+        }
+        if r.resolved_by.as_deref().is_some_and(|b| !named(b)) {
+            r.resolved_by = Some("someone else".into());
+        }
+    }
+}
+
 /// PURE: refuse text forced into `dialog` when one of its options outlives
 /// the request ([`crate::service::pane_intel::PendingOption::persists`]): a
 /// typed character may be that option's digit. A multi-select only toggles
@@ -1457,6 +1516,63 @@ mod answer_key_tests {
         assert!(a[0].mine);
     }
 
+    #[test]
+    fn a_grantee_reads_review_notes_without_the_other_grantees() {
+        use crate::store::ReviewNoteRow;
+        let note =
+            |author: &str, person: Option<i64>, by: Option<&str>, waiting: bool| ReviewNoteRow {
+                body: format!("from {author}"),
+                author: author.into(),
+                author_person_id: person,
+                resolved_by: by.map(str::to_string),
+                delivery: waiting.then(|| "waiting".to_string()),
+                ..Default::default()
+            };
+        let rows = || {
+            vec![
+                note("Owner · laptop", Some(1), Some("Bo · tablet"), false),
+                note("Ada · pixel", Some(2), Some("Ada · pixel"), false),
+                note("Bo · phone", Some(3), Some("Owner · laptop"), false),
+                note("token ci", None, None, false),
+                note("Ada · pixel", Some(2), None, true),
+            ]
+        };
+        let known = ["Bo · phone".to_string(), "Bo".into(), "Owner".into()];
+        // Bo, a watcher: the owner and himself by name, Ada as someone else
+        // (the body stays), and no send still waiting.
+        let mut r = rows();
+        super::veil_review_notes(&mut r, Some(3), Some(1), &known, false, false);
+        let shown: Vec<(&str, Option<i64>, Option<&str>)> = r
+            .iter()
+            .map(|n| {
+                (
+                    n.author.as_str(),
+                    n.author_person_id,
+                    n.resolved_by.as_deref(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                ("Owner · laptop", Some(1), Some("Bo · tablet")),
+                ("someone else", None, Some("someone else")),
+                ("Bo · phone", Some(3), Some("Owner · laptop")),
+                ("token ci", None, None),
+            ]
+        );
+        assert_eq!(r[1].body, "from Ada · pixel");
+        // Bo with drive access sees the waiting send, still veiled.
+        let mut r = rows();
+        super::veil_review_notes(&mut r, Some(3), Some(1), &known, false, true);
+        assert_eq!(r.len(), 5);
+        assert_eq!(r[4].author, "someone else");
+        // The owner reads everything.
+        let mut r = rows();
+        super::veil_review_notes(&mut r, Some(1), Some(1), &[], true, true);
+        assert_eq!(r, rows());
+    }
+
     fn rule_dialog(cursor: u8) -> PendingInput {
         let mut d = dialog(3);
         d.options[1].label =
@@ -1670,6 +1786,24 @@ pub(super) fn note_prompt_author(
         s.record_prompt_author(session_id, head, &name, person, crate::store::now_unix())
     {
         tracing::warn!(session_id, code = %e.code, "prompt author not recorded");
+    }
+}
+
+/// The name a review-notes prompt opens with: a paired device's person
+/// alone, without the device ([`review_author`] stores "Ada · pixel"), so the
+/// typed turn tells a co-grantee no device; anyone else as `stored`.
+pub(super) fn review_typed_author(
+    s: &crate::store::Store,
+    caller: &Caller,
+    stored: &str,
+) -> String {
+    match (&caller.host_alias, &caller.client) {
+        (None, Some(c)) => c
+            .person_id
+            .and_then(|id| s.get_person(id).ok().flatten())
+            .map(|p| p.display_name.unwrap_or(p.name))
+            .unwrap_or_else(|| stored.to_string()),
+        _ => stored.to_string(),
     }
 }
 
